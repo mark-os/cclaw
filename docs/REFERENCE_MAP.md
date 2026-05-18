@@ -464,3 +464,97 @@ Telegram Update (getUpdates long-poll)
 9. **Exponential backoff:** On transient errors: `delay = min(initial * factor^attempt * (1 + jitter*random), max_delay)`.
 
 10. **Message chunking:** Telegram has 4096 char limit. Split long responses at paragraph/sentence boundaries.
+
+---
+
+## C Implementation Research (NotebookLM)
+
+Sources from the CClaw NotebookLM notebook — prior research on C architecture decisions.
+
+### Source: Architecting a Minimalist Cross-Platform C Event Loop for LLM Agents
+
+**Type:** Deep Research Report (32K chars)
+
+Key findings:
+- **Event loop:** Redis `ae.c` is the ideal model — single-threaded, abstracts epoll/kqueue/select, zero dependencies. Extract `ae.c`, `ae.h`, `ae_epoll.c`, `ae_select.c` from Redis source.
+- **HTTP client:** libcurl multi-socket interface (`curl_multi_socket_action`) integrates directly into the `ae` event loop via `CURLMOPT_SOCKETFUNCTION` and `CURLMOPT_TIMERFUNCTION` callbacks.
+- **JSON parsing:** cJSON (full AST) over jsmn (tokenizer-only). cJSON handles nested LLM tool call schemas without boilerplate.
+- **State machine:** `INIT → PREPARE_REQUEST → AWAIT_NETWORK → PROCESS_RESPONSE → EXECUTE_TOOLS → (loop back) → TERMINATED/ERROR`
+- **Data structures:** Doubly-linked list for conversation history (`AgentMessage`), linked list for tool registry (`AgentToolDef`), tagged enum for roles.
+- **Memory:** Arena allocator per turn, or ring buffer for constrained devices. Prune oldest messages (except system prompt) on context overflow.
+- **Self-correction:** On JSON parse failure, inject error as ROLE_TOOL message and let LLM retry.
+- **Tool concurrency:** Synchronous by default (blocks loop). For long tools, use background thread + pipe/eventfd notification back to event loop.
+
+Proposed struct layout:
+```c
+typedef enum { ROLE_SYSTEM, ROLE_USER, ROLE_ASSISTANT, ROLE_TOOL } AgentRole;
+typedef enum { AGENT_STATE_INIT, AGENT_STATE_PREPARE_REQUEST, AGENT_STATE_AWAIT_NETWORK,
+               AGENT_STATE_PROCESS_RESPONSE, AGENT_STATE_EXECUTE_TOOLS,
+               AGENT_STATE_TERMINATED, AGENT_STATE_ERROR } AgentState;
+
+typedef struct AgentToolCall { char *id; char *name; char *arguments_json; struct AgentToolCall *next; } AgentToolCall;
+typedef struct AgentMessage { AgentRole role; char *content; char *tool_call_id;
+                              AgentToolCall *tool_calls; struct AgentMessage *prev, *next; } AgentMessage;
+typedef char* (*AgentToolFunction)(cJSON *arguments, void *user_data);
+typedef struct AgentToolDef { char *name; char *description; cJSON *parameters_schema;
+                              AgentToolFunction callback; struct AgentToolDef *next; } AgentToolDef;
+typedef struct AgentContext { AgentState current_state; aeEventLoop *event_loop; CURLM *curl_multi;
+                              AgentMessage *history_head, *history_tail; AgentToolDef *tool_registry;
+                              char *provider_endpoint, *auth_token;
+                              char *response_buffer; size_t response_length, response_capacity;
+                              void *user_data; } AgentContext;
+```
+
+### Source: Building Lightweight Event-Driven C App
+
+**Type:** Gemini conversation (11K chars)
+
+Key points:
+- Redis `ae` for event loop — natively falls back to `select()` on old ARM kernels
+- SQLite must run on worker thread (blocking I/O stalls event loop)
+- Worker thread communicates back via `pipe()` or `eventfd` registered with `ae`
+- libcurl multi-interface integrates into `ae` via socket/timer callbacks
+
+### Source: C Agent Loop Project Scaffold
+
+**Type:** Gemini conversation + Deep Research (9.4K chars)
+
+Key points:
+- Mongoose for local server + libcurl for outbound LLM calls = effective pairing
+- Architecture decisions for low memory + high reliability:
+  1. Custom multiplexer (epoll/kqueue) based on Redis `ae.c`
+  2. curl_multi_socket_action for async HTTP
+  3. Ring buffers for bounded context history
+  4. JSON parse error → self-correction loop
+  5. Thread pool for blocking tools
+  6. Arena allocator per turn
+- 1M tokens ≈ 4-5MB raw text — feasible in memory
+- SQLite with WAL mode for persistence, BLOB storage for context
+
+### Source: Rewriting Agent Loop in C
+
+**Type:** Gemini conversation (7.6K chars)
+
+Key points:
+- Tagged unions for content blocks (text, thinking, tool_call)
+- Arena allocator tied to turn lifecycle
+- State machine: INIT → CALLING_LLM → EXECUTING_TOOLS → DONE
+- libcurl for HTTP, cJSON for parsing
+- Gemini's warning: "90% of time will be string manipulation and memory management" — mitigate with arena + cJSON
+
+### Source: Understanding Eclipse Mosquitto License
+
+**Type:** Gemini conversation (2.2K chars)
+
+Key finding: Mosquitto is dual-licensed EPL-2.0 OR BSD-3-Clause. **Choose BSD-3-Clause** to freely copy event loop/networking code into CClaw with only a copyright notice requirement.
+
+### Source: Writing C for Modern Networking
+
+**Type:** Gemini conversation (20K chars)
+
+Key points:
+- Use `<stdint.h>` types exclusively (uint32_t, etc.)
+- Network byte order: `htons()`/`htonl()` for wire payloads
+- OS-specific async: epoll (Linux), kqueue (macOS), IOCP (Windows)
+- TLS: OpenSSL or mbedTLS (lighter for embedded)
+- Build: CMake or Meson for cross-compilation toolchains

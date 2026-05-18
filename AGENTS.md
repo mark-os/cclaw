@@ -16,22 +16,6 @@ CClaw is a **minimal** AI agent in C. The goal is the smallest correct implement
 - Arena allocators for per-turn memory. No leak hunting.
 - Static linking for deployment. Single binary, scp to device, done.
 
-## Beads Workflow
-
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking.
-
-```bash
-br ready              # What's next (open, unblocked)
-br show <id>          # Full details + dependencies
-br list --status=open # All open work
-br create --title="..." --description="..." --type=task --priority=2
-br update <id> --status=in_progress
-br close <id> --reason="Done"
-br sync --flush-only  # Export to JSONL for git
-```
-
-**Workflow**: `br ready` → claim → implement (TDD) → `br close` → `br sync --flush-only` → commit
-
 ## Code Style
 
 - C11, `-Wall -Wextra -Werror`
@@ -55,17 +39,20 @@ build/         Build output (gitignored)
 docs/          Design docs
 ```
 
-## Session Protocol
+## Beads Workflow
+
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking.
 
 ```bash
-br ready                # Find work
-git status              # Check state
-# ... do work ...
-make test               # Verify
-br close <id>           # Close bead
-br sync --flush-only    # Export beads
-git add -A && git commit -m "..."
-git push
+br ready              # What's next (open, unblocked)
+br show <id>          # Full details + dependencies
+br list --status=open # All open work
+br create --title="..." --description="..." --type=task --priority=2
+br update <id> --status=in_progress
+br close <id> --reason="Done"
+br sync --flush-only  # Export to JSONL for git
 ```
+
+**Workflow**: `br ready` → claim → implement (TDD) → `br close` → `br sync --flush-only` → commit
 
 <!-- end-br-agent-instructions -->

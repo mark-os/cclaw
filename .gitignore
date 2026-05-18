@@ -1,8 +1,5 @@
-# Cloned reference repos (Pi, OpenClaw)
+# Cloned reference repos (Pi, OpenClaw, nullclaw)
 reference/
-
-# Cloned C libraries for imports/inspiration
-vendor/
 
 # Build artifacts
 build/
@@ -20,3 +17,6 @@ build/
 *.so
 *.dylib
 cclaw
+
+# OS
+.DS_Store

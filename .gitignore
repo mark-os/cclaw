@@ -1,0 +1,22 @@
+# Cloned reference repos (Pi, OpenClaw)
+reference/
+
+# Cloned C libraries for imports/inspiration
+vendor/
+
+# Build artifacts
+build/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Object files and binaries
+*.o
+*.a
+*.so
+*.dylib
+cclaw

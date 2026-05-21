@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <string.h>
-#include <signal.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include "cclaw.h"
@@ -19,13 +18,7 @@
 #include "tool_js.h"
 #include "tool_cron.h"
 #include "tool_subagent.h"
-
-static volatile int daemon_running = 1;
-
-static void sighandler(int sig) {
-    (void)sig;
-    daemon_running = 0;
-}
+#include "shutdown.h"
 
 /* Tool dispatch via registry (shared with sub-agent mode) */
 static char *dispatch_tools(const char *name, const char *arguments, void *user_data) {
@@ -152,6 +145,8 @@ int main(int argc, char *argv[]) {
     }
     if (debug_mode) cfg->debug = 1;
 
+    shutdown_init();
+
     if (sub_agent_mode) {
         if (sa_session_id < 0 || !sa_task) {
             fprintf(stderr, "error: --sub-agent requires --session-id=X --task=\"...\"\n");
@@ -211,10 +206,7 @@ int main(int argc, char *argv[]) {
         printf("cron scheduler started\n");
     }
 
-    signal(SIGINT, sighandler);
-    signal(SIGTERM, sighandler);
-
-    while (daemon_running) {
+    while (!shutdown_requested()) {
         sleep(1);
         subagent_reap(db);
     }

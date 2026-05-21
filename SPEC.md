@@ -93,7 +93,7 @@ T37|x|`spawn_agent` tool — fork+exec sub-agent process|V3,V13
 T38|x|`check_agent` tool — read result from DB|V13
 T39|x|sub-agent lifecycle (limits, cleanup, crash isolation)|V3
 T40|x|token estimation (chars/4 heuristic)|V7
-T41|.|graceful shutdown (SIGINT/SIGTERM)|§C
+T41|x|graceful shutdown (SIGINT/SIGTERM)|§C
 T42|.|systemd service file|§C
 T43|.|error handling — 429 retry, context overflow detect, JSON parse failure recovery|V2,V10
 

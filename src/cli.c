@@ -8,6 +8,7 @@
 #include "tool_js.h"
 #include "tool_cron.h"
 #include "tool_subagent.h"
+#include "shutdown.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -150,12 +151,13 @@ int cli_run(const Config *cfg) {
     size_t line_cap = 0;
     ssize_t line_len;
 
-    while (1) {
+    while (!shutdown_requested()) {
         printf("> ");
         fflush(stdout);
 
         line_len = getline(&line, &line_cap, stdin);
-        if (line_len < 0) break;  /* EOF */
+        if (line_len < 0) break;  /* EOF or signal */
+        if (shutdown_requested()) break;
 
         /* Strip trailing newline */
         if (line_len > 0 && line[line_len - 1] == '\n')

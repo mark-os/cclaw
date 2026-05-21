@@ -104,3 +104,55 @@ int tool_spawn_agent_register(ToolRegistry *reg, SubAgentCtx *ctx) {
                           "Fork a sub-agent process to handle a task asynchronously",
                           SPAWN_PARAMS_JSON, tool_spawn_agent_handler, ctx);
 }
+
+/* --- check_agent tool (V13) --- */
+
+static const char *CHECK_PARAMS_JSON =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"agent_id\":{\"type\":\"integer\",\"description\":\"ID of the sub-agent to check\"}"
+    "},\"required\":[\"agent_id\"]}";
+
+char *tool_check_agent_handler(const char *arguments, void *user_data) {
+    SubAgentCtx *ctx = (SubAgentCtx *)user_data;
+    if (!ctx || !ctx->db) {
+        return strdup("error: check_agent not configured");
+    }
+
+    cJSON *json = cJSON_Parse(arguments);
+    if (!json) {
+        return strdup("error: invalid JSON arguments");
+    }
+
+    cJSON *id_item = cJSON_GetObjectItemCaseSensitive(json, "agent_id");
+    if (!cJSON_IsNumber(id_item)) {
+        cJSON_Delete(json);
+        return strdup("error: missing or invalid 'agent_id' field");
+    }
+    int64_t agent_id = (int64_t)id_item->valuedouble;
+    cJSON_Delete(json);
+
+    SubAgentInfo *info = subagent_get(ctx->db, agent_id);
+    if (!info) {
+        return strdup("error: sub-agent not found");
+    }
+
+    /* Build response */
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddNumberToObject(resp, "agent_id", (double)info->id);
+    cJSON_AddStringToObject(resp, "status", info->status);
+    cJSON_AddStringToObject(resp, "task", info->task);
+    if (info->result) {
+        cJSON_AddStringToObject(resp, "result", info->result);
+    }
+
+    char *out = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    subagent_info_free(info);
+    return out ? out : strdup("error: OOM");
+}
+
+int tool_check_agent_register(ToolRegistry *reg, SubAgentCtx *ctx) {
+    return tools_register(reg, "check_agent",
+                          "Read the status and result of a sub-agent (V13: only way to get result)",
+                          CHECK_PARAMS_JSON, tool_check_agent_handler, ctx);
+}

@@ -69,6 +69,7 @@ static int run_sub_agent(const Config *cfg, int64_t session_id, const char *task
     SubAgentCtx sa_ctx = {.db = db, .session_id = session_id,
                           .depth = depth, .self_path = self_path};
     tool_spawn_agent_register(&reg, &sa_ctx);
+    tool_check_agent_register(&reg, &sa_ctx);
 
     size_t tool_count = 0;
     const ToolSchema *schemas = tools_schemas(&reg, &tool_count);

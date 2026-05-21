@@ -145,8 +145,73 @@ static void test_register(void) {
     ToolEntry *e = tools_lookup(&reg, "spawn_agent");
     assert(e != NULL);
     assert(e->handler == tool_spawn_agent_handler);
+    rc = tool_check_agent_register(&reg, &ctx);
+    assert(rc == 0);
+    e = tools_lookup(&reg, "check_agent");
+    assert(e != NULL);
+    assert(e->handler == tool_check_agent_handler);
     tools_free(&reg);
     printf("  PASS test_register\n");
+}
+
+/* --- check_agent tests (V13) --- */
+
+static void test_check_agent_invalid_json(void) {
+    SubAgentCtx ctx = {.db = NULL, .session_id = 1, .depth = 0, .self_path = "/bin/true"};
+    char *r = tool_check_agent_handler("bad", &ctx);
+    assert(strstr(r, "error") != NULL);
+    free(r);
+    printf("  PASS test_check_agent_invalid_json\n");
+}
+
+static void test_check_agent_not_found(void) {
+    sqlite3 *db = setup_db();
+    SubAgentCtx ctx = {.db = db, .session_id = 1, .depth = 0, .self_path = "/bin/true"};
+    char *r = tool_check_agent_handler("{\"agent_id\":9999}", &ctx);
+    assert(strstr(r, "not found") != NULL);
+    free(r);
+    db_close(db);
+    printf("  PASS test_check_agent_not_found\n");
+}
+
+static void test_check_agent_running(void) {
+    sqlite3 *db = setup_db();
+    int64_t psid = session_create(db, "p");
+    int64_t csid = session_create(db, "c");
+    int64_t aid = subagent_create(db, psid, csid, 1234, 1, "my task");
+    assert(aid > 0);
+
+    char args[64];
+    snprintf(args, sizeof(args), "{\"agent_id\":%lld}", (long long)aid);
+
+    SubAgentCtx ctx = {.db = db, .session_id = psid, .depth = 0, .self_path = "/bin/true"};
+    char *r = tool_check_agent_handler(args, &ctx);
+    assert(strstr(r, "running") != NULL);
+    assert(strstr(r, "my task") != NULL);
+    free(r);
+    db_close(db);
+    printf("  PASS test_check_agent_running\n");
+}
+
+static void test_check_agent_done(void) {
+    sqlite3 *db = setup_db();
+    int64_t psid = session_create(db, "p");
+    int64_t csid = session_create(db, "c");
+    int64_t aid = subagent_create(db, psid, csid, 1234, 1, "do stuff");
+    assert(aid > 0);
+    subagent_finish(db, aid, "done", "the answer is 42");
+
+    char args[64];
+    snprintf(args, sizeof(args), "{\"agent_id\":%lld}", (long long)aid);
+
+    SubAgentCtx ctx = {.db = db, .session_id = psid, .depth = 0, .self_path = "/bin/true"};
+    char *r = tool_check_agent_handler(args, &ctx);
+    assert(strstr(r, "done") != NULL);
+    assert(strstr(r, "the answer is 42") != NULL);
+    assert(strstr(r, "do stuff") != NULL);
+    free(r);
+    db_close(db);
+    printf("  PASS test_check_agent_done\n");
 }
 
 int main(void) {
@@ -159,6 +224,10 @@ int main(void) {
     test_spawn_success();
     test_subagent_finish();
     test_register();
-    printf("All spawn_agent tool tests passed.\n");
+    test_check_agent_invalid_json();
+    test_check_agent_not_found();
+    test_check_agent_running();
+    test_check_agent_done();
+    printf("All sub-agent tool tests passed.\n");
     return 0;
 }

@@ -34,8 +34,10 @@ $(BUILD):
 test: $(TEST_BIN)
 	@for t in $(TEST_BIN); do echo "--- $$t ---"; ./$$t || exit 1; done
 
-$(BUILD)/test_%: test/test_%.c $(VENDOR_OBJ) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $< $(VENDOR_OBJ) $(LDFLAGS)
+LIB_OBJ := $(filter-out $(BUILD)/main.o,$(OBJ))
+
+$(BUILD)/test_%: test/test_%.c $(LIB_OBJ) $(VENDOR_OBJ) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(VENDOR_OBJ) $(LDFLAGS)
 
 clean:
 	rm -rf $(BUILD)

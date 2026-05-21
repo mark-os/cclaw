@@ -70,6 +70,7 @@ typedef struct {
     char *telegram_token;
     int web_port;
     int max_iterations;     /* agent loop iteration cap */
+    int max_history_tokens; /* V7: token budget for context (0 = 60% of context_window) */
     int heartbeat_interval; /* seconds between heartbeat system msgs (0=disabled) */
     int debug;              /* --debug: dump raw LLM req/resp JSON to stderr */
 } Config;

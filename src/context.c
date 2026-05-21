@@ -83,8 +83,10 @@ int context_build(const Entry *entries, int count, const Config *cfg,
     if (!entries || count <= 0 || !cfg || !out_msgs || !out_count)
         return -1;
 
-    /* V7: budget = 60% of context window */
-    int budget = (cfg->provider.context_window * 60) / 100;
+    /* V7: budget = max_history_tokens if set, else 60% of context window */
+    int budget = cfg->max_history_tokens > 0
+        ? cfg->max_history_tokens
+        : (cfg->provider.context_window * 60) / 100;
     if (budget <= 0) budget = 8000; /* fallback */
 
     int cut = find_cut_point(entries, count, budget);

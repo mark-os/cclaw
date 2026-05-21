@@ -130,6 +130,37 @@ static void test_estimate_tokens(void) {
     PASS();
 }
 
+static void test_max_history_tokens_override(void) {
+    TEST(max_history_tokens_override);
+    /* Set max_history_tokens explicitly — should override 60% default */
+    Config cfg = {0};
+    cfg.provider.context_window = 128000; /* 60% = 76800 */
+    cfg.max_history_tokens = 20; /* tiny budget forces truncation */
+
+    char big[200];
+    memset(big, 'X', 199);
+    big[199] = '\0';
+
+    Entry entries[3] = {
+        make_entry(1, ROLE_USER, big),       /* ~54 tokens — exceeds budget of 20 */
+        make_entry(2, ROLE_ASSISTANT, "ok"),
+        make_entry(3, ROLE_USER, "hi"),
+    };
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 3, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+    /* Budget is 20 tokens — should truncate the big message */
+    if (msgs[0].role != ROLE_SYSTEM || strstr(msgs[0].content, "truncated") == NULL) {
+        FAIL("expected truncation with small max_history_tokens");
+        context_free(msgs, count);
+        return;
+    }
+    context_free(msgs, count);
+    PASS();
+}
+
 static void test_empty_input(void) {
     TEST(empty_input);
     Config cfg = {0};
@@ -147,6 +178,7 @@ int main(void) {
     test_truncation_with_cutoff();
     test_v8_no_mid_tool_call_cut();
     test_estimate_tokens();
+    test_max_history_tokens_override();
     test_empty_input();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

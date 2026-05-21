@@ -107,7 +107,7 @@ T49|x|test: context window cuts at valid turn boundary, never mid-tool-call|V7,V
 T50|x|test: per-agent workspace isolation (file tools reject paths outside workspace)|V1,V12
 T51|x|test: external content wrapping — boundary markers, homoglyph sanitization|V15
 T52|x|integration test: live OpenRouter call → parse response, verify tool_calls round-trip|§I.api
-T53|.|integration test: agent loop end-to-end (prompt → tool call → tool result → final answer)|V10,§I.api
+T53|x|integration test: agent loop end-to-end (prompt → tool call → tool result → final answer)|V10,§I.api
 T54|.|integration test: provider fallback (kill primary, verify fallback fires)|T45
 
 ## §B BUGS

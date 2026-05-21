@@ -4,5 +4,5 @@ A minimal autonomous AI agent in C. Telegram, WhatsApp, CLI, and web dashboard. 
 
 **Status:** Planning complete, implementation not started.
 
-See [PLAN.md](PLAN.md) for architecture and build order.  
+See [SPEC.md](SPEC.md) for specification and build order.  
 See [AGENTS.md](AGENTS.md) for project ethos and coding conventions.

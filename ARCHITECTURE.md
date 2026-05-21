@@ -1,4 +1,4 @@
-# CClaw — Build Plan
+# CClaw — Architecture
 
 ## Overview
 
@@ -196,81 +196,6 @@ Only the active branch is loaded into memory. SQLite holds everything else.
 - Crash isolation: sub-agent crash doesn't affect parent
 - Limits: max 3 concurrent per parent, max 10 system-wide, max depth 2
 
-## Build Order
-
-Each step produces testable, working code. Tests written alongside implementation.
-
-### 1. Foundation
-- [ ] Makefile (minimal, grows as modules are added)
-- [ ] Arena allocator (`arena.c`) — create, alloc, destroy
-- [ ] Core types (`types.c`) — Message, Session, Entry structs + lifecycle
-- [ ] Config (`config.c`) — parse JSON file + env var overrides
-
-### 2. SQLite Layer
-- [ ] DB init (`db.c`) — open, create tables, WAL mode, pragmas
-- [ ] Session CRUD — create, list, get_branch, set_leaf
-- [ ] Entry append + delete_from_end
-- [ ] FTS5 setup + search function
-
-### 3. LLM Client
-- [ ] HTTP wrapper (`http.c`) — POST with headers, response buffer
-- [ ] LLM request builder (`llm.c`) — messages + tools → JSON
-- [ ] LLM response parser — extract content, tool_calls, usage
-- [ ] End-to-end test: call OpenRouter, get response
-
-### 4. Agent Loop
-- [ ] Turn logic (`agent.c`) — call LLM, check for tool_calls, dispatch, repeat
-- [ ] Tool registry — register/lookup tools by name
-- [ ] Max iterations guard
-- [ ] Session integration — load branch, append entries, flush to DB
-
-### 5. Built-in Tools
-- [ ] `shell_exec` — popen, capture stdout+stderr, timeout
-- [ ] `file_read` — read file, workspace path restriction
-- [ ] `file_write` — write file, workspace path restriction
-
-### 6. CLI Channel
-- [ ] Simple REPL (`cli.c`) — read line, send to agent, print response
-- [ ] Debug mode — print raw request/response JSON
-- [ ] Session selection (create new / resume existing)
-
-### 7. Telegram Channel
-- [ ] Telegram poller (`telegram.c`) — getUpdates loop in thread
-- [ ] Send message + typing indicator
-- [ ] Offset persistence in DB
-- [ ] chat_id → session routing
-
-### 8. Web Server + WhatsApp
-- [ ] civetweb integration — start server, register routes
-- [ ] WhatsApp webhook endpoint (receive + verify)
-- [ ] WhatsApp send (Graph API via curl)
-- [ ] Dashboard page — session list, status, recent activity
-
-### 9. MicroQuickJS
-- [ ] Vendor mquickjs, integrate into build
-- [ ] `js_eval` tool — execute code, return result
-- [ ] `js_define_tool` — register JS function as callable tool
-- [ ] Session-persistent context (replay tool definitions on load)
-
-### 10. Autonomy
-- [ ] Heartbeat timer thread + injection
-- [ ] Cron table + scheduler thread + `cron_set`/`cron_list`/`cron_remove` tools
-- [ ] `spawn_agent` tool — fork+exec sub-agent process
-- [ ] `check_agent` tool — read sub-agent result from DB
-- [ ] Sub-agent lifecycle management (limits, cleanup)
-
-### 11. Compaction + Branching
-- [ ] Token estimation (chars/4 approximation)
-- [ ] Compaction: summarize old messages via LLM, replace entries
-- [ ] Fork/navigate operations exposed as tools or commands
-- [ ] Branch listing
-
-### 12. Polish + Deploy
-- [ ] Graceful shutdown (SIGINT/SIGTERM handling)
-- [ ] Systemd service file
-- [ ] Cross-compile for Pogoplug (musl ARMv5TE) — when ready
-- [ ] README update
-
 ## Implementation Notes (from Pi/OpenClaw reference)
 
 ### Agent Loop Pattern (Pi)
@@ -326,12 +251,3 @@ Batch: if LLM returns multiple tool_calls, execute all, append all results, then
 - Never send `"tools": []` — omit the field entirely if no tools
 - Tool call arguments arrive as a JSON string — parse with cJSON on use
 - Usage: `input_tokens = prompt_tokens - cached_tokens`
-
-## Open Decisions (Resolve During Implementation)
-
-1. Typing indicator cadence — send every 4s while agent works? Or just once at start of turn?
-2. Workspace directory — per-session or global?
-3. Compaction model — same model as conversation, or cheaper one?
-4. Sub-agent result delivery — inject into parent session automatically, or only on `check_agent`?
-5. Web dashboard auth — none (localhost only)? Basic auth? Token?
-6. Should branching be a tool (agent branches itself) or a user command?

@@ -2,7 +2,7 @@
 reference/
 
 # Build artifacts
-build/
+/build/
 
 # Editor/IDE
 .vscode/

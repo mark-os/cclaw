@@ -6,7 +6,7 @@ CClaw is a **minimal** autonomous AI agent in C. Every line of code must earn it
 
 **Inspiration**
 
-CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and session tree model, and from *OpenClaw* (`reference/openclaw`) for autonomy features, security patterns, and multi-channel integration. It also learns from *nullclaw* (`~/nullclaw`), a Zig clone of OpenClaw. CClaw does not try to be everything to everyone — it serves its creator Mark Ostroth. It will borrow C libraries, link dynamically to system curl, vendor what makes sense, and do whatever it takes to produce a simple, usable, excellent autonomous agent.
+CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and session tree model, and from *OpenClaw* (`reference/openclaw`) for autonomy features, security patterns, and multi-channel integration. It also learns from *nullclaw* (`reference/nullclaw`), a Zig clone of OpenClaw. CClaw does not try to be everything to everyone — it serves its creator Mark Ostroth. It will borrow C libraries, link dynamically to system curl, vendor what makes sense, and do whatever it takes to produce a simple, usable, excellent autonomous agent.
 
 **Principles:**
 - Simple over clever. Blocking I/O. Threads over callbacks. No event loops.
@@ -90,6 +90,3 @@ Default: OpenRouter → DeepSeek V4 Flash (`deepseek/deepseek-v4-flash`).
 
 All providers use the OpenAI-compatible chat completions format. Switch provider by changing `base_url` and `api_key` in config. Env var `OPENROUTER_API_KEY` is all you need to start.
 
-## Plan Tracking
-
-The build plan lives in `PLAN.md`. Agents mark items `[x]` as they complete them. No external task tracker.

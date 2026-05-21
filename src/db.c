@@ -192,6 +192,57 @@ void session_list_free(Session *sessions, int count) {
     free(sessions);
 }
 
+/* V14: insert entry with given parent_id, update session leaf */
+int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, const Message *msg) {
+    const char *sql =
+        "INSERT INTO entries (parent_id, session_id, role, content, tool_calls_json, tool_result_json)"
+        " VALUES (?,?,?,?,?,?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, parent_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    sqlite3_bind_int(stmt, 3, (int)msg->role);
+    if (msg->content)
+        sqlite3_bind_text(stmt, 4, msg->content, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 4);
+    /* tool_calls_json and tool_result_json — NULL for now (T10/T11 will populate) */
+    sqlite3_bind_null(stmt, 5);
+    sqlite3_bind_null(stmt, 6);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    int64_t entry_id = sqlite3_last_insert_rowid(db);
+    sqlite3_finalize(stmt);
+
+    if (session_set_leaf(db, session_id, entry_id) != 0)
+        return -1;
+
+    return entry_id;
+}
+
+/* V14: append as child of current leaf (linear continuation) */
+int64_t entry_append(sqlite3 *db, int64_t session_id, const Message *msg) {
+    /* Get current leaf_id */
+    const char *sql = "SELECT leaf_id FROM sessions WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    int64_t parent_id = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+
+    /* leaf_id == -1 means no entries yet → parent_id stays -1 (root) */
+    return entry_append_at(db, session_id, parent_id, msg);
+}
+
 void entry_branch_free(Entry *entries, int count) {
     if (!entries) return;
     for (int i = 0; i < count; i++)

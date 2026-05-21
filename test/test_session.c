@@ -149,6 +149,82 @@ static void test_session_get_branch_empty(void) {
     printf("  PASS test_session_get_branch_empty\n");
 }
 
+/* T7: entry_append — linear chain via current leaf */
+static void test_entry_append(void) {
+    sqlite3 *db = setup();
+    int64_t sid = session_create(db, "append");
+
+    Message m1 = { .role = ROLE_USER, .content = "hello" };
+    int64_t e1 = entry_append(db, sid, &m1);
+    assert(e1 > 0);
+
+    Message m2 = { .role = ROLE_ASSISTANT, .content = "hi" };
+    int64_t e2 = entry_append(db, sid, &m2);
+    assert(e2 > e1);
+
+    Message m3 = { .role = ROLE_USER, .content = "bye" };
+    int64_t e3 = entry_append(db, sid, &m3);
+    assert(e3 > e2);
+
+    /* Verify branch is correct chain */
+    int count = 0;
+    Entry *branch = session_get_branch(db, sid, &count);
+    assert(count == 3);
+    assert(branch[0].id == e1);
+    assert(branch[0].parent_id == -1);
+    assert(branch[1].id == e2);
+    assert(branch[1].parent_id == e1);
+    assert(branch[2].id == e3);
+    assert(branch[2].parent_id == e2);
+
+    entry_branch_free(branch, count);
+    teardown(db);
+    printf("  PASS test_entry_append\n");
+}
+
+/* T7/V14: branching — entry_append_at forks from non-leaf */
+static void test_entry_append_at_branch(void) {
+    sqlite3 *db = setup();
+    int64_t sid = session_create(db, "branching");
+
+    Message m1 = { .role = ROLE_USER, .content = "root" };
+    int64_t e1 = entry_append(db, sid, &m1);
+
+    Message m2 = { .role = ROLE_ASSISTANT, .content = "branch-a" };
+    int64_t e2 = entry_append(db, sid, &m2);
+    (void)e2;
+
+    /* Fork from e1 (not current leaf e2) */
+    Message m3 = { .role = ROLE_ASSISTANT, .content = "branch-b" };
+    int64_t e3 = entry_append_at(db, sid, e1, &m3);
+    assert(e3 > 0);
+
+    /* Leaf should now be e3 */
+    int count = 0;
+    Entry *branch = session_get_branch(db, sid, &count);
+    assert(count == 2);
+    assert(branch[0].id == e1);
+    assert(branch[0].parent_id == -1);
+    assert(branch[1].id == e3);
+    assert(branch[1].parent_id == e1);
+    assert(strcmp(branch[1].message.content, "branch-b") == 0);
+
+    entry_branch_free(branch, count);
+    teardown(db);
+    printf("  PASS test_entry_append_at_branch\n");
+}
+
+/* T7: entry_append on invalid session */
+static void test_entry_append_invalid_session(void) {
+    sqlite3 *db = setup();
+    Message m = { .role = ROLE_USER, .content = "nope" };
+    int64_t id = entry_append(db, 9999, &m);
+    assert(id == -1);
+
+    teardown(db);
+    printf("  PASS test_entry_append_invalid_session\n");
+}
+
 int main(void) {
     printf("test_session:\n");
     test_session_create();
@@ -158,6 +234,9 @@ int main(void) {
     test_session_set_leaf_invalid();
     test_session_get_branch();
     test_session_get_branch_empty();
+    test_entry_append();
+    test_entry_append_at_branch();
+    test_entry_append_invalid_session();
     printf("All session tests passed.\n");
     return 0;
 }

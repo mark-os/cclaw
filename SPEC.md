@@ -59,7 +59,7 @@ T3|x|core types (`types.h`) — Message, Session, Entry, Config structs|V14
 T4|x|config (`config.c`) — parse JSON + env var overrides|§I.file,§I.env
 T5|x|DB init (`db.c`) — open, create tables, WAL mode, pragmas|V4
 T6|x|session CRUD — create, list, get_branch (leaf→root), set_leaf|V14
-T7|.|entry append + tree ops (parent_id linking)|V14
+T7|x|entry append + tree ops (parent_id linking)|V14
 T8|.|FTS5 setup + search fn over message content|V7
 T9|.|HTTP wrapper (`http.c`) — POST w/ headers, response buffer via libcurl|§C
 T10|.|LLM request builder (`llm.c`) — messages + tools → JSON|V9

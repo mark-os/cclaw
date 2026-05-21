@@ -27,6 +27,15 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count);
 /* Set leaf_id for session. Returns 0 on success, -1 on error. */
 int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id);
 
+/* V14: Append entry as child of current leaf, update session leaf_id.
+ * If session has no entries (leaf_id == -1), entry becomes root (parent_id = -1).
+ * Returns new entry id (>0) or -1 on error. */
+int64_t entry_append(sqlite3 *db, int64_t session_id, const Message *msg);
+
+/* V14: Append entry as child of a specific parent (for branching).
+ * Updates session leaf_id to new entry. Returns new entry id or -1. */
+int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, const Message *msg);
+
 /* Free a Session array returned by session_list. */
 void session_list_free(Session *sessions, int count);
 

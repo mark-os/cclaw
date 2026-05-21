@@ -191,8 +191,10 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
         if (session_id < 0) return;
         db_tg_set_session(g_db, chat_id, session_id);
         /* Append system message */
-        Message sys_msg = {.role = ROLE_SYSTEM, .content = "You are CClaw, a helpful AI assistant."};
+        char *prompt = config_render_system_prompt(g_cfg, session_id);
+        Message sys_msg = {.role = ROLE_SYSTEM, .content = prompt};
         entry_append(g_db, session_id, &sys_msg);
+        free(prompt);
     }
 
     /* Build per-session registry (includes session-persistent JS tools) */

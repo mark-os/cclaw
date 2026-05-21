@@ -100,7 +100,7 @@ T42|x|systemd unit file (`cclaw.service`) — restart on failure, env file, jour
 T43|x|SysVinit init script — network wait, respawn loop, PID mgmt, stale PID detect (no test)|§C
 T44|x|error handling — 429 retry, context overflow detect, JSON parse failure recovery|V2,V10
 T45|x|provider fallback chain — config array, try next on 5xx/timeout (test: Gemini `gemma-4-31b-it` via `GEMINI_API_KEY`)|V2
-T46|.|system prompt — load from config per agent, template vars `{session_id}`, `{date}`|§I.file
+T46|x|system prompt — load from config per agent, template vars `{session_id}`, `{date}`|§I.file
 T47|.|`shell_exec` timeout — SIGKILL child after configurable N seconds (default 30)|V10
 T48|.|`web_fetch` tool — HTTP GET, extract text from HTML, wrap output in external input protection|V15
 T49|.|test: context window cuts at valid turn boundary, never mid-tool-call|V7,V8

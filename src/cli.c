@@ -140,8 +140,10 @@ int cli_run(const Config *cfg) {
     int branch_count = 0;
     Entry *branch = session_get_branch(db, session_id, &branch_count);
     if (branch_count == 0) {
-        Message sys_msg = {.role = ROLE_SYSTEM, .content = "You are CClaw, a helpful AI assistant."};
+        char *prompt = config_render_system_prompt(cfg, session_id);
+        Message sys_msg = {.role = ROLE_SYSTEM, .content = prompt};
         entry_append(db, session_id, &sys_msg);
+        free(prompt);
     }
     entry_branch_free(branch, branch_count);
 

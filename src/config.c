@@ -1,8 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
 #include "config.h"
 #include "cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 
 static char *str_dup(const char *s) {
     if (!s) return NULL;
@@ -109,6 +111,8 @@ Config *config_load(const char *path) {
         if (s) { free(cfg->workspace); cfg->workspace = s; }
         s = json_str(root, "telegram_token");
         if (s) { free(cfg->telegram_token); cfg->telegram_token = s; }
+        s = json_str(root, "system_prompt");
+        if (s) { free(cfg->system_prompt); cfg->system_prompt = s; }
         cfg->web_port = json_int(root, "web_port", cfg->web_port);
         cfg->max_iterations = json_int(root, "max_iterations", cfg->max_iterations);
         cfg->max_history_tokens = json_int(root, "max_history_tokens", cfg->max_history_tokens);
@@ -123,12 +127,63 @@ Config *config_load(const char *path) {
     env_override_str(&cfg->provider.model, "CCLAW_MODEL");
     env_override_str(&cfg->telegram_token, "CCLAW_TELEGRAM_TOKEN");
     env_override_str(&cfg->db_path, "CCLAW_DB_PATH");
+    env_override_str(&cfg->system_prompt, "CCLAW_SYSTEM_PROMPT");
     env_override_int(&cfg->web_port, "CCLAW_WEB_PORT");
     env_override_int(&cfg->max_iterations, "CCLAW_MAX_ITERATIONS");
     env_override_int(&cfg->max_history_tokens, "CCLAW_MAX_HISTORY_TOKENS");
     env_override_int(&cfg->heartbeat_interval, "CCLAW_HEARTBEAT_INTERVAL");
 
     return cfg;
+}
+
+/* T46: render system prompt with template vars */
+char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
+    const char *tmpl = cfg->system_prompt
+        ? cfg->system_prompt
+        : "You are CClaw, a helpful AI assistant.";
+
+    /* Build date string */
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    char date_buf[11]; /* YYYY-MM-DD */
+    strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm);
+
+    /* Build session_id string */
+    char sid_buf[21];
+    snprintf(sid_buf, sizeof(sid_buf), "%lld", (long long)session_id);
+
+    /* Replace {session_id} and {date} */
+    size_t tmpl_len = strlen(tmpl);
+    size_t out_cap = tmpl_len + 64;
+    char *out = malloc(out_cap);
+    if (!out) return str_dup(tmpl);
+
+    size_t oi = 0;
+    for (size_t i = 0; i < tmpl_len; ) {
+        if (tmpl[i] == '{') {
+            if (strncmp(tmpl + i, "{session_id}", 12) == 0) {
+                size_t slen = strlen(sid_buf);
+                while (oi + slen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                memcpy(out + oi, sid_buf, slen);
+                oi += slen;
+                i += 12;
+                continue;
+            }
+            if (strncmp(tmpl + i, "{date}", 6) == 0) {
+                size_t dlen = strlen(date_buf);
+                while (oi + dlen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                memcpy(out + oi, date_buf, dlen);
+                oi += dlen;
+                i += 6;
+                continue;
+            }
+        }
+        if (oi + 1 >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        out[oi++] = tmpl[i++];
+    }
+    out[oi] = '\0';
+    return out;
 }
 
 void config_free(Config *cfg) {
@@ -145,5 +200,6 @@ void config_free(Config *cfg) {
     free(cfg->db_path);
     free(cfg->workspace);
     free(cfg->telegram_token);
+    free(cfg->system_prompt);
     free(cfg);
 }

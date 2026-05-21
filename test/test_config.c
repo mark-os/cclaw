@@ -136,6 +136,61 @@ static void test_fallback_providers(void) {
     printf("  PASS: test_fallback_providers\n");
 }
 
+static void test_system_prompt(void) {
+    unsetenv("OPENROUTER_API_KEY");
+    unsetenv("CCLAW_SYSTEM_PROMPT");
+
+    /* Test default (no system_prompt in config) */
+    setenv("OPENROUTER_API_KEY", "sk-test", 1);
+    Config *cfg = config_load(NULL);
+    assert(cfg != NULL);
+    assert(cfg->system_prompt == NULL);
+    char *rendered = config_render_system_prompt(cfg, 42);
+    assert(rendered != NULL);
+    assert(strcmp(rendered, "You are CClaw, a helpful AI assistant.") == 0);
+    free(rendered);
+    config_free(cfg);
+
+    /* Test with template vars */
+    const char *json =
+        "{"
+        "  \"provider\": {\"api_key\": \"k\"},"
+        "  \"system_prompt\": \"Agent session={session_id} date={date}\""
+        "}";
+    FILE *f = fopen("/tmp/cclaw_test_sysprompt.json", "w");
+    assert(f);
+    fputs(json, f);
+    fclose(f);
+
+    cfg = config_load("/tmp/cclaw_test_sysprompt.json");
+    assert(cfg != NULL);
+    assert(cfg->system_prompt != NULL);
+    rendered = config_render_system_prompt(cfg, 99);
+    assert(rendered != NULL);
+    /* Check session_id was substituted */
+    assert(strstr(rendered, "session=99") != NULL);
+    /* Check date was substituted (YYYY-MM-DD format, 10 chars) */
+    assert(strstr(rendered, "date=") != NULL);
+    char *dp = strstr(rendered, "date=") + 5;
+    assert(dp[4] == '-' && dp[7] == '-'); /* YYYY-MM-DD */
+    free(rendered);
+    config_free(cfg);
+
+    /* Test env override */
+    setenv("CCLAW_SYSTEM_PROMPT", "env prompt {session_id}", 1);
+    cfg = config_load(NULL);
+    assert(cfg != NULL);
+    rendered = config_render_system_prompt(cfg, 7);
+    assert(strstr(rendered, "env prompt 7") != NULL);
+    free(rendered);
+    config_free(cfg);
+
+    unsetenv("OPENROUTER_API_KEY");
+    unsetenv("CCLAW_SYSTEM_PROMPT");
+    remove("/tmp/cclaw_test_sysprompt.json");
+    printf("  PASS: test_system_prompt\n");
+}
+
 int main(void) {
     printf("test_config:\n");
     test_env_only();
@@ -143,6 +198,7 @@ int main(void) {
     test_env_overrides_json();
     test_bad_file();
     test_fallback_providers();
+    test_system_prompt();
     printf("All config tests passed.\n");
     return 0;
 }

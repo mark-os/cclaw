@@ -282,6 +282,47 @@ static void test_context_overflow_return_code(void) {
     PASS();
 }
 
+static void test_t45_fallback_chain(void) {
+    TEST(t45_fallback_chain);
+    /* T45: with unreachable primary and unreachable fallback, agent fails gracefully */
+    sqlite3 *db = db_open(":memory:");
+    if (!db) { FAIL("db_open failed"); return; }
+    int64_t sid = session_create(db, "test");
+    if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
+
+    ProviderConfig fallbacks[2] = {
+        {.base_url = "http://127.0.0.1:2/v1", .api_key = "fb1", .model = "fb-model-1",
+         .max_tokens = 4096, .context_window = 128000},
+        {.base_url = "http://127.0.0.1:3/v1", .api_key = "fb2", .model = "fb-model-2",
+         .max_tokens = 4096, .context_window = 128000},
+    };
+
+    Config cfg = {0};
+    cfg.provider.base_url = "http://127.0.0.1:1/v1";
+    cfg.provider.api_key = "fake";
+    cfg.provider.model = "test";
+    cfg.provider.context_window = 128000;
+    cfg.max_iterations = 1;
+    cfg.fallback_providers = fallbacks;
+    cfg.fallback_count = 2;
+
+    Message user_msg = {.role = ROLE_USER, .content = "hello"};
+    entry_append(db, sid, &user_msg);
+
+    AgentContext ctx = {0};
+    ctx.db = db;
+    ctx.session_id = sid;
+    ctx.cfg = &cfg;
+    ctx.dispatch = mock_tool_ok;
+
+    /* All providers unreachable → -1, no crash */
+    int rc = agent_run(&ctx);
+    if (rc != -1) { FAIL("expected -1 for all unreachable"); db_close(db); return; }
+
+    db_close(db);
+    PASS();
+}
+
 int main(void) {
     printf("test_agent:\n");
     test_agent_context_init();
@@ -297,6 +338,7 @@ int main(void) {
     test_v2_retry_after_field();
     test_v10_json_parse_failure_recovery();
     test_context_overflow_return_code();
+    test_t45_fallback_chain();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

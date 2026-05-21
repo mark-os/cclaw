@@ -82,6 +82,26 @@ Config *config_load(const char *path) {
             cfg->provider.context_window = json_int(prov, "context_window", cfg->provider.context_window);
         }
 
+        /* T45: parse fallback providers array */
+        cJSON *providers = cJSON_GetObjectItemCaseSensitive(root, "providers");
+        if (providers && cJSON_IsArray(providers)) {
+            int count = cJSON_GetArraySize(providers);
+            if (count > 0) {
+                cfg->fallback_providers = calloc((size_t)count, sizeof(ProviderConfig));
+                if (cfg->fallback_providers) {
+                    cfg->fallback_count = (size_t)count;
+                    for (int i = 0; i < count; i++) {
+                        cJSON *p = cJSON_GetArrayItem(providers, i);
+                        cfg->fallback_providers[i].base_url = json_str(p, "base_url");
+                        cfg->fallback_providers[i].api_key = json_str(p, "api_key");
+                        cfg->fallback_providers[i].model = json_str(p, "model");
+                        cfg->fallback_providers[i].max_tokens = json_int(p, "max_tokens", cfg->provider.max_tokens);
+                        cfg->fallback_providers[i].context_window = json_int(p, "context_window", cfg->provider.context_window);
+                    }
+                }
+            }
+        }
+
         char *s;
         s = json_str(root, "db_path");
         if (s) { free(cfg->db_path); cfg->db_path = s; }
@@ -116,6 +136,12 @@ void config_free(Config *cfg) {
     free(cfg->provider.base_url);
     free(cfg->provider.api_key);
     free(cfg->provider.model);
+    for (size_t i = 0; i < cfg->fallback_count; i++) {
+        free(cfg->fallback_providers[i].base_url);
+        free(cfg->fallback_providers[i].api_key);
+        free(cfg->fallback_providers[i].model);
+    }
+    free(cfg->fallback_providers);
     free(cfg->db_path);
     free(cfg->workspace);
     free(cfg->telegram_token);

@@ -69,6 +69,67 @@ static int llm_call_with_retry(const char *url, const char **headers,
     return -1;
 }
 
+/* T45: try primary provider, then fallback chain on 5xx/timeout (-1) */
+static int llm_call_with_fallback(Arena *a, const Config *cfg, const Message *msgs,
+                                  size_t msg_count, const ToolSchema *tools,
+                                  size_t tool_count, HttpResponse *resp, int debug) {
+    /* Try primary */
+    char *url = build_url(a, cfg);
+    if (!url) return -1;
+
+    char *req_json = llm_build_request(a, cfg, msgs, msg_count, tools, tool_count);
+    if (!req_json) return -1;
+
+    if (debug) fprintf(stderr, "[DEBUG REQ] %s\n", req_json);
+
+    char auth_hdr[512];
+    snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", cfg->provider.api_key);
+    const char *headers[] = { "Content-Type: application/json", auth_hdr, NULL };
+
+    int status = llm_call_with_retry(url, headers, req_json, resp, debug);
+
+    /* If primary succeeded, return immediately */
+    if (status != -1)
+        return status;
+
+    /* T45: try fallback providers (primary exhausted retries) */
+    for (size_t i = 0; i < cfg->fallback_count; i++) {
+        if (debug)
+            fprintf(stderr, "[DEBUG] primary failed, trying fallback %zu\n", i);
+
+        const ProviderConfig *fb = &cfg->fallback_providers[i];
+        if (!fb->base_url || !fb->api_key || !fb->model) continue;
+
+        /* Build URL for fallback */
+        size_t blen = strlen(fb->base_url);
+        if (blen > 0 && fb->base_url[blen - 1] == '/') blen--;
+        const char *path = "/chat/completions";
+        size_t plen = strlen(path);
+        char *fb_url = arena_alloc(a, blen + plen + 1);
+        if (!fb_url) continue;
+        memcpy(fb_url, fb->base_url, blen);
+        memcpy(fb_url + blen, path, plen + 1);
+
+        /* Build request with fallback model */
+        Config fb_cfg = *cfg;
+        fb_cfg.provider = *fb;
+        char *fb_req = llm_build_request(a, &fb_cfg, msgs, msg_count, tools, tool_count);
+        if (!fb_req) continue;
+
+        if (debug) fprintf(stderr, "[DEBUG REQ fallback %zu] %s\n", i, fb_req);
+
+        char fb_auth[512];
+        snprintf(fb_auth, sizeof(fb_auth), "Authorization: Bearer %s", fb->api_key);
+        const char *fb_headers[] = { "Content-Type: application/json", fb_auth, NULL };
+
+        status = llm_call_with_retry(fb_url, fb_headers, fb_req, resp, debug);
+        if (status != -1)
+            return status;
+    }
+
+    return status;
+}
+
 /* Detect context overflow from error response body */
 static int is_context_overflow(const char *body) {
     if (!body) return 0;
@@ -104,34 +165,11 @@ int agent_run(AgentContext *ctx) {
             return -1;
         }
 
-        /* Build LLM request */
-        char *req_json = llm_build_request(a, ctx->cfg, msgs, (size_t)msg_count,
-                                           ctx->tools, ctx->tool_count);
+        /* T45: call LLM with fallback chain */
+        HttpResponse resp = {0};
+        int status = llm_call_with_fallback(a, ctx->cfg, msgs, (size_t)msg_count,
+                                            ctx->tools, ctx->tool_count, &resp, ctx->debug);
         context_free(msgs, msg_count);
-        if (!req_json) {
-            arena_destroy(a);
-            return -1;
-        }
-
-        /* Call LLM */
-        char *url = build_url(a, ctx->cfg);
-        if (!url) { arena_destroy(a); return -1; }
-
-        if (ctx->debug)
-            fprintf(stderr, "[DEBUG REQ] %s\n", req_json);
-
-        char auth_hdr[512];
-        snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s",
-                 ctx->cfg->provider.api_key);
-        const char *headers[] = {
-            "Content-Type: application/json",
-            auth_hdr,
-            NULL
-        };
-
-        HttpResponse resp;
-        /* V2: retry on 429/5xx with exponential backoff */
-        int status = llm_call_with_retry(url, headers, req_json, &resp, ctx->debug);
 
         if (ctx->debug && resp.data)
             fprintf(stderr, "[DEBUG RESP] status=%d %s\n", status, resp.data);

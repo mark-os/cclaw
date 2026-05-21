@@ -98,12 +98,51 @@ static void test_bad_file(void) {
     printf("  PASS: test_bad_file\n");
 }
 
+static void test_fallback_providers(void) {
+    unsetenv("OPENROUTER_API_KEY");
+    unsetenv("CCLAW_PROVIDER");
+    unsetenv("CCLAW_MODEL");
+
+    const char *json =
+        "{"
+        "  \"provider\": {"
+        "    \"api_key\": \"primary-key\","
+        "    \"model\": \"gpt-4\""
+        "  },"
+        "  \"providers\": ["
+        "    {\"base_url\": \"https://gemini.example.com/v1\", \"api_key\": \"gem-key\", \"model\": \"gemma-4-31b-it\", \"max_tokens\": 1024},"
+        "    {\"base_url\": \"https://backup.example.com/v1\", \"api_key\": \"bak-key\", \"model\": \"backup-model\"}"
+        "  ]"
+        "}";
+    FILE *f = fopen("/tmp/cclaw_test_fallback.json", "w");
+    assert(f);
+    fputs(json, f);
+    fclose(f);
+
+    Config *cfg = config_load("/tmp/cclaw_test_fallback.json");
+    assert(cfg != NULL);
+    assert(cfg->fallback_count == 2);
+    assert(strcmp(cfg->fallback_providers[0].base_url, "https://gemini.example.com/v1") == 0);
+    assert(strcmp(cfg->fallback_providers[0].api_key, "gem-key") == 0);
+    assert(strcmp(cfg->fallback_providers[0].model, "gemma-4-31b-it") == 0);
+    assert(cfg->fallback_providers[0].max_tokens == 1024);
+    assert(strcmp(cfg->fallback_providers[1].base_url, "https://backup.example.com/v1") == 0);
+    assert(strcmp(cfg->fallback_providers[1].api_key, "bak-key") == 0);
+    assert(strcmp(cfg->fallback_providers[1].model, "backup-model") == 0);
+    /* Inherits primary max_tokens as default */
+    assert(cfg->fallback_providers[1].max_tokens == 4096);
+    config_free(cfg);
+    remove("/tmp/cclaw_test_fallback.json");
+    printf("  PASS: test_fallback_providers\n");
+}
+
 int main(void) {
     printf("test_config:\n");
     test_env_only();
     test_json_parse();
     test_env_overrides_json();
     test_bad_file();
+    test_fallback_providers();
     printf("All config tests passed.\n");
     return 0;
 }

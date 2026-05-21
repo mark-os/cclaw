@@ -65,6 +65,8 @@ typedef struct {
 /* Top-level config */
 typedef struct {
     ProviderConfig provider;
+    ProviderConfig *fallback_providers; /* T45: fallback chain (heap array) */
+    size_t fallback_count;
     char *db_path;
     char *workspace;
     char *telegram_token;

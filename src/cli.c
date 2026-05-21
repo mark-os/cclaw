@@ -6,6 +6,7 @@
 #include "tool_shell.h"
 #include "tool_file.h"
 #include "tool_js.h"
+#include "tool_cron.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -110,6 +111,9 @@ int cli_run(const Config *cfg) {
 
     JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = NULL};
     tool_js_define_register(&reg, &js_ctx);
+
+    ToolCronCtx cron_ctx = {.db = db, .session_id = session_id};
+    tool_cron_register(&reg, &cron_ctx);
 
     /* Create persistent JS runtime and replay session tools */
     JsSessionRuntime *js_rt = js_runtime_create();

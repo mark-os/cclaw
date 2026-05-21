@@ -7,6 +7,7 @@
 #include "tool_shell.h"
 #include "tool_file.h"
 #include "tool_js.h"
+#include "tool_cron.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -203,6 +204,9 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     JsDefineCtx js_ctx = {.db = g_db, .session_id = session_id, .reg = &reg, .rt = js_rt};
     tool_js_define_register(&reg, &js_ctx);
     tool_js_load_session(g_db, session_id, &reg, js_rt);
+
+    ToolCronCtx cron_ctx = {.db = g_db, .session_id = session_id};
+    tool_cron_register(&reg, &cron_ctx);
 
     size_t local_tool_count = 0;
     const ToolSchema *local_schemas = tools_schemas(&reg, &local_tool_count);

@@ -7,6 +7,7 @@
 #include "tool_shell.h"
 #include "tool_file.h"
 #include "tool_js.h"
+#include "tool_cron.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -217,6 +218,9 @@ static void execute_job(int64_t session_id, const char *task) {
     tool_file_read_register(&reg, cron_cfg->workspace);
     tool_file_write_register(&reg, cron_cfg->workspace);
     tool_js_eval_register(&reg);
+
+    ToolCronCtx cron_ctx = {.db = cron_db, .session_id = session_id};
+    tool_cron_register(&reg, &cron_ctx);
 
     /* Inject user message */
     Message msg = {.role = ROLE_USER, .content = (char *)task};

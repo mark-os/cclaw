@@ -1,7 +1,9 @@
 #include "web.h"
 #include "cclaw.h"
 #include "civetweb.h"
+#include "cJSON.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -14,21 +16,33 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
     time_t now = time(NULL);
     long uptime = (long)(now - s_start_time);
 
-    /* Count active sessions */
-    int sessions = 0;
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "version", CCLAW_VERSION);
+    cJSON_AddNumberToObject(root, "uptime_seconds", (double)uptime);
+
+    /* Active sessions with details */
+    cJSON *sessions = cJSON_AddArrayToObject(root, "sessions");
     if (s_db) {
         sqlite3_stmt *stmt;
-        if (sqlite3_prepare_v2(s_db, "SELECT COUNT(*) FROM sessions", -1, &stmt, NULL) == SQLITE_OK) {
-            if (sqlite3_step(stmt) == SQLITE_ROW)
-                sessions = sqlite3_column_int(stmt, 0);
+        const char *sql = "SELECT id, name, updated_at FROM sessions ORDER BY updated_at DESC;";
+        if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                cJSON *s = cJSON_CreateObject();
+                cJSON_AddNumberToObject(s, "id", (double)sqlite3_column_int64(stmt, 0));
+                const char *name = (const char *)sqlite3_column_text(stmt, 1);
+                cJSON_AddStringToObject(s, "name", name ? name : "");
+                cJSON_AddNumberToObject(s, "updated_at", (double)sqlite3_column_int64(stmt, 2));
+                cJSON_AddItemToArray(sessions, s);
+            }
             sqlite3_finalize(stmt);
         }
     }
 
-    char body[512];
-    int len = snprintf(body, sizeof(body),
-        "{\"version\":\"%s\",\"uptime_seconds\":%ld,\"sessions\":%d}",
-        CCLAW_VERSION, uptime, sessions);
+    /* Sub-agent status placeholder (T37-T39 not yet implemented) */
+    cJSON_AddArrayToObject(root, "sub_agents");
+
+    char *body = cJSON_PrintUnformatted(root);
+    int len = (int)strlen(body);
 
     mg_printf(conn,
         "HTTP/1.1 200 OK\r\n"
@@ -36,6 +50,9 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
         "Content-Length: %d\r\n"
         "\r\n"
         "%s", len, body);
+
+    free(body);
+    cJSON_Delete(root);
     return 200;
 }
 

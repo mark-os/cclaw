@@ -81,7 +81,7 @@ T25|x|Telegram offset persistence in DB (survives restart)|§I.api
 T26|x|Telegram chat_id → session routing|§I.api
 T27|x|Telegram exponential backoff on transient errors|V2
 T28|x|civetweb integration — start server, register routes|§I.web
-T29|.|status page — active sessions, uptime, sub-agent status|§I.web
+T29|x|status page — active sessions, uptime, sub-agent status|§I.web
 T30|.|vendor mquickjs, integrate into build|§C
 T31|.|`js_eval` tool — execute code, return result|V5
 T32|.|`js_define_tool` — register JS fn as tool (session-persistent)|§I.tool

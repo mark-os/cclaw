@@ -7,6 +7,7 @@
 #include <curl/curl.h>
 #include "web.h"
 #include "db.h"
+#include "cJSON.h"
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
@@ -19,7 +20,7 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     return total;
 }
 
-static void test_web_start_stop(void) {
+static void test_status_page(void) {
     Config cfg = {0};
     cfg.web_port = 19876;
     cfg.db_path = "test_web.db";
@@ -27,9 +28,11 @@ static void test_web_start_stop(void) {
     sqlite3 *db = db_open(cfg.db_path);
     assert(db);
 
-    assert(web_start(&cfg, db) == 0);
+    /* Create a session so status page has data */
+    int64_t sid = session_create(db, "test-session");
+    assert(sid > 0);
 
-    /* Give server a moment to bind */
+    assert(web_start(&cfg, db) == 0);
     usleep(50000);
 
     /* HTTP GET / */
@@ -44,19 +47,37 @@ static void test_web_start_stop(void) {
     assert(res == CURLE_OK);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     assert(http_code == 200);
-    assert(strstr(response, "\"version\"") != NULL);
-    assert(strstr(response, "\"uptime_seconds\"") != NULL);
-    assert(strstr(response, "\"sessions\"") != NULL);
+
+    /* Parse and verify JSON structure */
+    cJSON *root = cJSON_Parse(response);
+    assert(root);
+    assert(cJSON_GetObjectItem(root, "version"));
+    assert(cJSON_GetObjectItem(root, "uptime_seconds"));
+
+    /* sessions is an array with details */
+    cJSON *sessions = cJSON_GetObjectItem(root, "sessions");
+    assert(cJSON_IsArray(sessions));
+    assert(cJSON_GetArraySize(sessions) >= 1);
+    cJSON *s0 = cJSON_GetArrayItem(sessions, 0);
+    assert(cJSON_GetObjectItem(s0, "id"));
+    assert(cJSON_GetObjectItem(s0, "name"));
+    assert(cJSON_GetObjectItem(s0, "updated_at"));
+
+    /* sub_agents placeholder array */
+    cJSON *agents = cJSON_GetObjectItem(root, "sub_agents");
+    assert(cJSON_IsArray(agents));
+
+    cJSON_Delete(root);
     curl_easy_cleanup(curl);
 
     web_stop();
     db_close(db);
     remove("test_web.db");
-    printf("PASS: test_web_start_stop\n");
+    printf("PASS: test_status_page\n");
 }
 
 int main(void) {
-    test_web_start_stop();
+    test_status_page();
     printf("All web tests passed.\n");
     return 0;
 }

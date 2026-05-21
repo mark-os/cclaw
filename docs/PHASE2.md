@@ -141,8 +141,61 @@ Limits:
 - Spawn: integration test — spawn agent with mock LLM, verify session created and result stored
 - End-to-end: pipe messages through the system with a mock Telegram server
 
+### 7. SQLite Optimizations
+
+**JSON functions:** The payload column stores JSON. SQLite's built-in JSON functions (`json_extract`, `json_each`) allow querying into payloads without deserializing in C:
+
+```sql
+-- Find all tool calls in a session
+SELECT id, json_extract(payload, '$.tool_calls') FROM entries
+WHERE session_id = ? AND type = 'message'
+AND json_extract(payload, '$.role') = 'assistant'
+AND json_extract(payload, '$.tool_calls') IS NOT NULL;
+```
+
+This avoids loading and parsing every entry in C just to filter.
+
+**FTS5 full-text search:** Add a virtual table for searching conversation content with BM25 ranking:
+
+```sql
+CREATE VIRTUAL TABLE entries_fts USING fts5(
+    content,
+    content='entries',
+    content_rowid='rowid',
+    tokenize='porter unicode61'
+);
+
+-- Triggers to keep FTS in sync
+CREATE TRIGGER entries_ai AFTER INSERT ON entries BEGIN
+    INSERT INTO entries_fts(rowid, content)
+    VALUES (new.rowid, json_extract(new.payload, '$.content'));
+END;
+```
+
+Query with ranking:
+```sql
+SELECT e.id, e.session_id, snippet(entries_fts, 0, '<b>', '</b>', '...', 32)
+FROM entries_fts f
+JOIN entries e ON e.rowid = f.rowid
+WHERE entries_fts MATCH ?
+ORDER BY rank;
+```
+
+This enables the agent to search its own history ("what did we discuss about X?") as a tool.
+
+**Lazy loading:** Don't load the full branch into memory on session start. Load only the last N entries (e.g., 50). If compaction summary exists, load from there forward. Query older entries on demand from SQLite.
+
+**Pragmas:**
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;  -- faster writes, safe with WAL
+PRAGMA busy_timeout = 5000;
+PRAGMA cache_size = -2000;    -- 2MB cache (helps on Pogoplug)
+```
+
 ## Open Questions for Implementation
 
 1. Should sub-agent results be injected back into the parent session automatically, or only on explicit `check_agent` call?
 2. Typing indicator cadence — send every 4s while agent is working? (OpenClaw does this)
 3. Should the workspace directory be per-session or global?
+4. Should FTS index all message content, or only user/assistant messages (skip tool results)?

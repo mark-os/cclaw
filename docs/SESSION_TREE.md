@@ -79,6 +79,35 @@ CREATE INDEX idx_entries_parent ON entries(parent_id);
 }
 ```
 
+## Data Flow
+
+The in-memory message array is the source of truth during a live session. JSON only exists at boundaries:
+
+```
+                    ┌─────────────────────────────┐
+                    │  In-Memory: Message structs  │
+                    │  (C arrays, no JSON)         │
+                    └──────┬──────────────┬───────┘
+                           │              │
+              serialize    │              │  serialize
+              (cJSON)      │              │  (cJSON)
+                           ▼              ▼
+                    ┌────────────┐  ┌───────────┐
+                    │ LLM API    │  │  SQLite   │
+                    │ (JSON over │  │  (JSON in │
+                    │  HTTP)     │  │  payload) │
+                    └────────────┘  └───────────┘
+```
+
+- **User message arrives** → append C struct to array (no JSON involved)
+- **Call LLM** → walk array, build cJSON request, serialize, POST
+- **Parse response** → cJSON parse, extract into C struct, append to array, free cJSON
+- **Tool execution** → read args from struct, execute, append result struct
+- **Persist** → serialize struct to JSON string, INSERT into SQLite
+- **Load session** → SELECT from SQLite, parse JSON payloads into C structs, populate array
+
+No deserialization during a conversation. No double representation. JSON is transient at I/O boundaries only.
+
 ## Phase 1 Operations
 
 Phase 1 treats the session as a stack. Only these operations are supported:

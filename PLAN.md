@@ -69,6 +69,14 @@ See docs/PHASE3.md for full spec.
 - **Repos on machine**: cclaw (working), reference/pi, reference/openclaw, reference/nullclaw
 - **LLM API**: OpenRouter (`$OPENROUTER_API_KEY`), model: `deepseek/deepseek-v4-flash`. Alt: NVIDIA NIM (`$NVIDIA_API_KEY`)
 
+## Future (Not Planned Yet)
+
+- HTTP API via civetweb (MIT, fork of old Mongoose) — remote control, web UI, webhooks, health endpoint
+- Workspaces and path sandboxing (Linux Landlock)
+- SSE streaming for faster perceived response
+- Multiple LLM provider support / fallback
+- Memory / RAG
+
 ## Design Docs
 
 - `docs/SESSION_TREE.md` — Session tree schema and operations

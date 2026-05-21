@@ -20,3 +20,5 @@ cclaw
 
 # OS
 .DS_Store
+vendor/curl/
+vendor/libcurl*

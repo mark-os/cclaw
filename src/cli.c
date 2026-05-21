@@ -5,6 +5,7 @@
 #include "tools.h"
 #include "tool_shell.h"
 #include "tool_file.h"
+#include "tool_js.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,6 +106,7 @@ int cli_run(const Config *cfg) {
     tool_shell_register(&reg);
     tool_file_read_register(&reg, cfg->workspace);
     tool_file_write_register(&reg, cfg->workspace);
+    tool_js_eval_register(&reg);
 
     size_t tool_count = 0;
     const ToolSchema *schemas = tools_schemas(&reg, &tool_count);

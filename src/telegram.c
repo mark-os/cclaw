@@ -6,6 +6,7 @@
 #include "tools.h"
 #include "tool_shell.h"
 #include "tool_file.h"
+#include "tool_js.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -253,6 +254,7 @@ static void *poll_loop(void *arg) {
     tool_shell_register(&reg);
     tool_file_read_register(&reg, g_cfg->workspace);
     tool_file_write_register(&reg, g_cfg->workspace);
+    tool_js_eval_register(&reg);
 
     size_t tool_count = 0;
     const ToolSchema *schemas = tools_schemas(&reg, &tool_count);

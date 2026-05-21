@@ -6,8 +6,12 @@ BUILD   := build
 SRC     := $(wildcard src/*.c)
 OBJ     := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 
-VENDOR_SRC := vendor/cJSON/cJSON.c vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c
-VENDOR_OBJ := $(BUILD)/cJSON.o $(BUILD)/sqlite3.o $(BUILD)/civetweb.o
+VENDOR_SRC := vendor/cJSON/cJSON.c vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
+              vendor/mquickjs/mquickjs.c vendor/mquickjs/cutils.c vendor/mquickjs/dtoa.c \
+              vendor/mquickjs/libm.c vendor/mquickjs/mquickjs_stdlib.c
+VENDOR_OBJ := $(BUILD)/cJSON.o $(BUILD)/sqlite3.o $(BUILD)/civetweb.o \
+              $(BUILD)/mquickjs.o $(BUILD)/mqjs_cutils.o $(BUILD)/mqjs_dtoa.o \
+              $(BUILD)/mqjs_libm.o $(BUILD)/mqjs_stdlib.o
 
 TEST_SRC := $(wildcard test/test_*.c)
 TEST_BIN := $(patsubst test/%.c,$(BUILD)/%,$(TEST_SRC))
@@ -30,6 +34,32 @@ $(BUILD)/sqlite3.o: vendor/sqlite3/sqlite3.c | $(BUILD)
 
 $(BUILD)/civetweb.o: vendor/civetweb/civetweb.c | $(BUILD)
 	$(CC) -std=c11 -O2 -DNO_SSL -DNO_CGI -DUSE_IPV6 -DNO_CACHING -Ivendor/civetweb -Wno-unused-parameter -c -o $@ $<
+
+MQJS_CFLAGS := -std=c11 -O2 -Ivendor/mquickjs -Wno-unused-parameter -Wno-sign-compare -Wno-unused-variable -Wno-unused-but-set-variable
+
+$(BUILD)/mquickjs.o: vendor/mquickjs/mquickjs.c vendor/mquickjs/mquickjs_atom.h | $(BUILD)
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILD)/mqjs_cutils.o: vendor/mquickjs/cutils.c | $(BUILD)
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILD)/mqjs_dtoa.o: vendor/mquickjs/dtoa.c | $(BUILD)
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILD)/mqjs_libm.o: vendor/mquickjs/libm.c | $(BUILD)
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILD)/mqjs_stdlib.o: vendor/mquickjs/mquickjs_stdlib.c | $(BUILD)
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+vendor/mquickjs/mquickjs_atom.h: vendor/mquickjs/gen_atoms.c | $(BUILD)
+	$(CC) -o $(BUILD)/gen_atoms $<
+	./$(BUILD)/gen_atoms > $@
+
+vendor/mquickjs/mquickjs_stdlib.c: vendor/mquickjs/gen_stdlib.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c | $(BUILD)
+	$(CC) -Ivendor/mquickjs -o $(BUILD)/gen_stdlib $^ -lm
+	printf '#include <stdlib.h>\n#include <string.h>\n#include <math.h>\n' > $@
+	./$(BUILD)/gen_stdlib -m64 >> $@
 
 $(BUILD):
 	mkdir -p $(BUILD)

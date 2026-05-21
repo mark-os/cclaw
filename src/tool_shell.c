@@ -31,7 +31,11 @@ static size_t read_all(int fd, char *buf, size_t cap) {
 }
 
 char *tool_shell_handler(const char *arguments, void *user_data) {
-    (void)user_data;
+    int default_timeout = TOOL_SHELL_DEFAULT_TIMEOUT;
+    if (user_data) {
+        int val = *(int *)user_data;
+        if (val > 0) default_timeout = val;
+    }
 
     cJSON *json = cJSON_Parse(arguments);
     if (!json) {
@@ -45,7 +49,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     }
     const char *command = cmd_item->valuestring;
 
-    int timeout = TOOL_SHELL_DEFAULT_TIMEOUT;
+    int timeout = default_timeout;
     cJSON *timeout_item = cJSON_GetObjectItemCaseSensitive(json, "timeout");
     if (cJSON_IsNumber(timeout_item) && timeout_item->valueint > 0) {
         timeout = timeout_item->valueint;
@@ -67,7 +71,8 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     }
 
     if (pid == 0) {
-        /* Child: redirect stdout+stderr to pipe write end */
+        /* Child: new process group so we can kill entire tree */
+        setpgid(0, 0);
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
@@ -76,14 +81,15 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         _exit(127);
     }
 
-    /* Parent */
+    /* Parent: ensure child is in its own process group */
+    setpgid(pid, pid);
     close(pipefd[1]);
     cJSON_Delete(json);
 
     char *output = malloc(SHELL_MAX_OUTPUT + 1);
     if (!output) {
         close(pipefd[0]);
-        kill(pid, SIGKILL);
+        kill(-pid, SIGKILL);
         waitpid(pid, NULL, 0);
         return strdup("error: out of memory");
     }
@@ -97,7 +103,6 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     int timed_out = 0;
     int status = 0;
 
-    /* Non-blocking read loop with timeout check */
     while (1) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -138,10 +143,10 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     close(pipefd[0]);
 
     if (timed_out) {
-        kill(pid, SIGKILL);
+        /* SIGKILL entire process group */
+        kill(-pid, SIGKILL);
         waitpid(pid, NULL, 0);
         output[out_len] = '\0';
-        /* Format timeout result */
         size_t needed = out_len + 128;
         char *result = malloc(needed);
         if (!result) { free(output); return strdup("error: timeout + OOM"); }
@@ -158,7 +163,6 @@ format_result:
 
     int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
-    /* Format: exit_code + output */
     size_t needed = out_len + 64;
     char *result = malloc(needed);
     if (!result) { free(output); return strdup("error: OOM"); }
@@ -167,8 +171,18 @@ format_result:
     return result;
 }
 
-int tool_shell_register(ToolRegistry *reg) {
-    return tools_register(reg, "shell_exec",
-                          "Execute a shell command and return stdout+stderr",
-                          SHELL_PARAMS_JSON, tool_shell_handler, NULL);
+int tool_shell_register(ToolRegistry *reg, int default_timeout) {
+    int *timeout_ptr = malloc(sizeof(int));
+    if (!timeout_ptr) return -1;
+    *timeout_ptr = (default_timeout > 0) ? default_timeout : TOOL_SHELL_DEFAULT_TIMEOUT;
+    int rc = tools_register(reg, "shell_exec",
+                            "Execute a shell command and return stdout+stderr",
+                            SHELL_PARAMS_JSON, tool_shell_handler, timeout_ptr);
+    if (rc == 0) {
+        ToolEntry *e = tools_lookup(reg, "shell_exec");
+        if (e) e->free_fn = free;
+    } else {
+        free(timeout_ptr);
+    }
+    return rc;
 }

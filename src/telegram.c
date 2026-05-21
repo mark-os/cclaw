@@ -200,7 +200,7 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     /* Build per-session registry (includes session-persistent JS tools) */
     ToolRegistry reg;
     tools_init(&reg);
-    tool_shell_register(&reg);
+    tool_shell_register(&reg, g_cfg->shell_timeout);
     tool_file_read_register(&reg, g_cfg->workspace);
     tool_file_write_register(&reg, g_cfg->workspace);
     tool_js_eval_register(&reg);
@@ -288,7 +288,7 @@ static void *poll_loop(void *arg) {
     /* Register tools */
     ToolRegistry reg;
     tools_init(&reg);
-    tool_shell_register(&reg);
+    tool_shell_register(&reg, g_cfg->shell_timeout);
     tool_file_read_register(&reg, g_cfg->workspace);
     tool_file_write_register(&reg, g_cfg->workspace);
     tool_js_eval_register(&reg);

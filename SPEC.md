@@ -53,7 +53,7 @@ V15: ∀ tool result → optionally wrap in `<tool_result name="X">...</tool_res
 
 ## §T TASKS
 id|status|task|cites
-T1|.|Makefile — minimal, grows w/ modules|§C
+T1|x|Makefile — minimal, grows w/ modules|§C
 T2|.|arena allocator (`arena.c`) — create, alloc, destroy|V6
 T3|.|core types (`types.h`) — Message, Session, Entry, Config structs|V14
 T4|.|config (`config.c`) — parse JSON + env var overrides|§I.file,§I.env

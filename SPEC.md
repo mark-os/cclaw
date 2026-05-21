@@ -102,7 +102,7 @@ T44|x|error handling — 429 retry, context overflow detect, JSON parse failure 
 T45|x|provider fallback chain — config array, try next on 5xx/timeout (test: Gemini `gemma-4-31b-it` via `GEMINI_API_KEY`)|V2
 T46|x|system prompt — load from config per agent, template vars `{session_id}`, `{date}`|§I.file
 T47|x|`shell_exec` timeout — SIGKILL child after configurable N seconds (default 30)|V10
-T48|.|`web_fetch` tool — HTTP GET, extract text from HTML, wrap output in external input protection|V15
+T48|x|`web_fetch` tool — HTTP GET, extract text from HTML, wrap output in external input protection|V15
 T49|.|test: context window cuts at valid turn boundary, never mid-tool-call|V7,V8
 T50|.|test: per-agent workspace isolation (file tools reject paths outside workspace)|V1,V12
 T51|.|test: external content wrapping — boundary markers, homoglyph sanitization|V15

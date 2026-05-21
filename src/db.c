@@ -38,7 +38,11 @@ static const char *SCHEMA_SQL =
     "CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN"
     "  INSERT INTO entries_fts(entries_fts, rowid, content) VALUES('delete', old.id, old.content);"
     "  INSERT INTO entries_fts(rowid, content) VALUES (new.id, new.content);"
-    "END;";
+    "END;"
+    "CREATE TABLE IF NOT EXISTS kv ("
+    "  key TEXT PRIMARY KEY,"
+    "  value TEXT NOT NULL"
+    ");";
 
 sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
@@ -400,4 +404,32 @@ Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *cou
     sqlite3_finalize(stmt);
     if (*count == 0) { free(entries); return NULL; }
     return entries;
+}
+
+/* Key-value store for persistent settings (e.g. Telegram offset) */
+char *db_kv_get(sqlite3 *db, const char *key) {
+    const char *sql = "SELECT value FROM kv WHERE key=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+    char *val = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(stmt, 0);
+        if (v) val = strdup(v);
+    }
+    sqlite3_finalize(stmt);
+    return val;
+}
+
+int db_kv_set(sqlite3 *db, const char *key, const char *value) {
+    const char *sql = "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, value, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
 }

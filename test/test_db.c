@@ -1,5 +1,6 @@
 #include "db.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
@@ -161,6 +162,45 @@ static void test_fts5_search(void) {
     printf("  PASS test_fts5_search\n");
 }
 
+static void test_kv(void) {
+    const char *path = "/tmp/test_cclaw_kv.sqlite";
+    unlink(path);
+
+    sqlite3 *db = db_open(path);
+    assert(db != NULL);
+
+    /* Get missing key returns NULL */
+    char *val = db_kv_get(db, "nope");
+    assert(val == NULL);
+
+    /* Set and get */
+    assert(db_kv_set(db, "tg_offset", "12345") == 0);
+    val = db_kv_get(db, "tg_offset");
+    assert(val != NULL);
+    assert(strcmp(val, "12345") == 0);
+    free(val);
+
+    /* Overwrite */
+    assert(db_kv_set(db, "tg_offset", "99999") == 0);
+    val = db_kv_get(db, "tg_offset");
+    assert(val != NULL);
+    assert(strcmp(val, "99999") == 0);
+    free(val);
+
+    /* Survives reopen */
+    db_close(db);
+    db = db_open(path);
+    assert(db != NULL);
+    val = db_kv_get(db, "tg_offset");
+    assert(val != NULL);
+    assert(strcmp(val, "99999") == 0);
+    free(val);
+
+    db_close(db);
+    unlink(path);
+    printf("  PASS test_kv\n");
+}
+
 int main(void) {
     printf("test_db:\n");
     test_open_close();
@@ -169,6 +209,7 @@ int main(void) {
     test_tables_created();
     test_reopen_idempotent();
     test_fts5_search();
+    test_kv();
     printf("All db tests passed.\n");
     return 0;
 }

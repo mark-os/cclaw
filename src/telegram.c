@@ -236,6 +236,13 @@ static void *poll_loop(void *arg) {
     (void)arg;
     int64_t offset = 0;
 
+    /* T25: Load persisted offset from DB */
+    char *saved = db_kv_get(g_db, "tg_offset");
+    if (saved) {
+        offset = strtoll(saved, NULL, 10);
+        free(saved);
+    }
+
     /* Register tools */
     ToolRegistry reg;
     tools_init(&reg);
@@ -280,6 +287,13 @@ static void *poll_loop(void *arg) {
 
             cJSON *msg = cJSON_GetObjectItemCaseSensitive(update, "message");
             if (msg) process_message(msg, &reg, schemas, tool_count);
+        }
+
+        /* T25: Persist offset so we don't re-process on restart */
+        if (offset > 0) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%lld", (long long)offset);
+            db_kv_set(g_db, "tg_offset", buf);
         }
 
         cJSON_Delete(resp);

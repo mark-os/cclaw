@@ -46,4 +46,8 @@ void entry_branch_free(Entry *entries, int count);
  * Returns matching entries ranked by relevance (max 50). Caller frees with entry_branch_free. */
 Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *count);
 
+/* Key-value store. db_kv_get returns malloc'd string or NULL. Caller frees. */
+char *db_kv_get(sqlite3 *db, const char *key);
+int db_kv_set(sqlite3 *db, const char *key, const char *value);
+
 #endif

@@ -160,26 +160,14 @@ static void process_message(cJSON *msg, ToolRegistry *reg, const ToolSchema *sch
     if (!chat_id_json || !cJSON_IsNumber(chat_id_json)) return;
     int64_t chat_id = (int64_t)chat_id_json->valuedouble;
 
-    /* Route chat_id to session (T26 will refine — for now use chat_id as session name) */
-    char session_name[64];
-    snprintf(session_name, sizeof(session_name), "tg_%lld", (long long)chat_id);
-
-    /* Find or create session for this chat */
-    int count = 0;
-    Session *sessions = session_list(g_db, &count);
-    int64_t session_id = -1;
-    if (sessions) {
-        for (int i = 0; i < count; i++) {
-            if (sessions[i].name && strcmp(sessions[i].name, session_name) == 0) {
-                session_id = sessions[i].id;
-                break;
-            }
-        }
-        session_list_free(sessions, count);
-    }
+    /* T26: Route chat_id to session via dedicated mapping table */
+    int64_t session_id = db_tg_get_session(g_db, chat_id);
     if (session_id < 0) {
+        char session_name[64];
+        snprintf(session_name, sizeof(session_name), "tg_%lld", (long long)chat_id);
         session_id = session_create(g_db, session_name);
         if (session_id < 0) return;
+        db_tg_set_session(g_db, chat_id, session_id);
         /* Append system message */
         Message sys_msg = {.role = ROLE_SYSTEM, .content = "You are CClaw, a helpful AI assistant."};
         entry_append(g_db, session_id, &sys_msg);

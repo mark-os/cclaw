@@ -42,6 +42,10 @@ static const char *SCHEMA_SQL =
     "CREATE TABLE IF NOT EXISTS kv ("
     "  key TEXT PRIMARY KEY,"
     "  value TEXT NOT NULL"
+    ");"
+    "CREATE TABLE IF NOT EXISTS tg_chat_sessions ("
+    "  chat_id INTEGER PRIMARY KEY,"
+    "  session_id INTEGER NOT NULL REFERENCES sessions(id)"
     ");";
 
 sqlite3 *db_open(const char *path) {
@@ -429,6 +433,31 @@ int db_kv_set(sqlite3 *db, const char *key, const char *value) {
         return -1;
     sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, value, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int64_t db_tg_get_session(sqlite3 *db, int64_t chat_id) {
+    const char *sql = "SELECT session_id FROM tg_chat_sessions WHERE chat_id = ?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, chat_id);
+    int64_t session_id = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        session_id = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return session_id;
+}
+
+int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id) {
+    const char *sql = "INSERT OR REPLACE INTO tg_chat_sessions (chat_id, session_id) VALUES (?, ?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, chat_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? 0 : -1;

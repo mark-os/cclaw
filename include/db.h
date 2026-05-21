@@ -50,4 +50,10 @@ Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *cou
 char *db_kv_get(sqlite3 *db, const char *key);
 int db_kv_set(sqlite3 *db, const char *key, const char *value);
 
+/* T26: Telegram chat_id → session routing.
+ * db_tg_get_session returns session_id or -1 if not mapped.
+ * db_tg_set_session returns 0 on success, -1 on error. */
+int64_t db_tg_get_session(sqlite3 *db, int64_t chat_id);
+int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id);
+
 #endif

@@ -104,6 +104,87 @@ static void test_register(void) {
     printf("  PASS test_register\n");
 }
 
+/* file_write tests */
+
+static void test_write_new_file(void) {
+    char args[512];
+    snprintf(args, sizeof(args), "{\"path\":\"newfile.txt\",\"content\":\"hello write\"}");
+    char *r = tool_file_write_handler(args, (void *)tmpdir);
+    assert(r != NULL);
+    assert(strstr(r, "wrote") != NULL);
+    free(r);
+
+    /* Verify content via read */
+    r = tool_file_read_handler("{\"path\":\"newfile.txt\"}", (void *)tmpdir);
+    assert(strcmp(r, "hello write") == 0);
+    free(r);
+    printf("  PASS test_write_new_file\n");
+}
+
+static void test_write_overwrite(void) {
+    char *r = tool_file_write_handler("{\"path\":\"hello.txt\",\"content\":\"overwritten\"}", (void *)tmpdir);
+    assert(r != NULL);
+    assert(strstr(r, "wrote") != NULL);
+    free(r);
+
+    r = tool_file_read_handler("{\"path\":\"hello.txt\"}", (void *)tmpdir);
+    assert(strcmp(r, "overwritten") == 0);
+    free(r);
+    printf("  PASS test_write_overwrite\n");
+}
+
+static void test_write_nested(void) {
+    char args[512];
+    snprintf(args, sizeof(args), "{\"path\":\"sub/written.txt\",\"content\":\"nested write\"}");
+    char *r = tool_file_write_handler(args, (void *)tmpdir);
+    assert(r != NULL);
+    assert(strstr(r, "wrote") != NULL);
+    free(r);
+
+    r = tool_file_read_handler("{\"path\":\"sub/written.txt\"}", (void *)tmpdir);
+    assert(strcmp(r, "nested write") == 0);
+    free(r);
+    printf("  PASS test_write_nested\n");
+}
+
+static void test_write_traversal_blocked(void) {
+    /* V1: path escape via ../ */
+    char *r = tool_file_write_handler("{\"path\":\"../../evil.txt\",\"content\":\"bad\"}", (void *)tmpdir);
+    assert(r != NULL);
+    assert(strstr(r, "error") != NULL);
+    free(r);
+    printf("  PASS test_write_traversal_blocked\n");
+}
+
+static void test_write_absolute_outside(void) {
+    /* V1: absolute path outside workspace */
+    char *r = tool_file_write_handler("{\"path\":\"/tmp/evil.txt\",\"content\":\"bad\"}", (void *)tmpdir);
+    assert(r != NULL);
+    assert(strstr(r, "error") != NULL);
+    free(r);
+    printf("  PASS test_write_absolute_outside\n");
+}
+
+static void test_write_missing_content(void) {
+    char *r = tool_file_write_handler("{\"path\":\"foo.txt\"}", (void *)tmpdir);
+    assert(r != NULL);
+    assert(strstr(r, "error") != NULL);
+    free(r);
+    printf("  PASS test_write_missing_content\n");
+}
+
+static void test_write_register(void) {
+    ToolRegistry reg;
+    tools_init(&reg);
+    int rc = tool_file_write_register(&reg, tmpdir);
+    assert(rc == 0);
+    ToolEntry *e = tools_lookup(&reg, "file_write");
+    assert(e != NULL);
+    assert(e->handler == tool_file_write_handler);
+    tools_free(&reg);
+    printf("  PASS test_write_register\n");
+}
+
 int main(void) {
     printf("test_tool_file:\n");
     setup();
@@ -114,7 +195,14 @@ int main(void) {
     test_missing_file();
     test_invalid_json();
     test_register();
+    test_write_new_file();
+    test_write_overwrite();
+    test_write_nested();
+    test_write_traversal_blocked();
+    test_write_absolute_outside();
+    test_write_missing_content();
+    test_write_register();
     cleanup();
-    printf("All file_read tool tests passed.\n");
+    printf("All file tool tests passed.\n");
     return 0;
 }

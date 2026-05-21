@@ -50,6 +50,7 @@ Config *config_load(const char *path) {
     cfg->db_path = str_dup("cclaw.db");
     cfg->workspace = str_dup("./workspace");
     cfg->web_port = 8080;
+    cfg->max_iterations = 25;
 
     /* Parse JSON file if provided */
     if (path) {
@@ -89,6 +90,7 @@ Config *config_load(const char *path) {
         s = json_str(root, "telegram_token");
         if (s) { free(cfg->telegram_token); cfg->telegram_token = s; }
         cfg->web_port = json_int(root, "web_port", cfg->web_port);
+        cfg->max_iterations = json_int(root, "max_iterations", cfg->max_iterations);
 
         cJSON_Delete(root);
     }
@@ -100,6 +102,7 @@ Config *config_load(const char *path) {
     env_override_str(&cfg->telegram_token, "CCLAW_TELEGRAM_TOKEN");
     env_override_str(&cfg->db_path, "CCLAW_DB_PATH");
     env_override_int(&cfg->web_port, "CCLAW_WEB_PORT");
+    env_override_int(&cfg->max_iterations, "CCLAW_MAX_ITERATIONS");
 
     return cfg;
 }

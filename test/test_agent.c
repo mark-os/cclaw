@@ -119,6 +119,70 @@ static void test_agent_run_empty_session(void) {
     PASS();
 }
 
+static void test_max_iterations_configurable(void) {
+    TEST(max_iterations_configurable);
+    /* Verify config max_iterations is used by agent */
+    Config cfg = {0};
+    cfg.provider.base_url = "http://127.0.0.1:1/v1";
+    cfg.provider.api_key = "fake";
+    cfg.provider.model = "test";
+    cfg.provider.context_window = 128000;
+    cfg.max_iterations = 1;
+
+    sqlite3 *db = db_open(":memory:");
+    if (!db) { FAIL("db_open failed"); return; }
+    int64_t sid = session_create(db, "test");
+    if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
+
+    Message user_msg = {.role = ROLE_USER, .content = "hello"};
+    entry_append(db, sid, &user_msg);
+
+    AgentContext ctx = {0};
+    ctx.db = db;
+    ctx.session_id = sid;
+    ctx.cfg = &cfg;
+    ctx.dispatch = mock_tool_ok;
+
+    /* With max_iterations=1 and unreachable LLM, should fail after 1 attempt */
+    int rc = agent_run(&ctx);
+    if (rc != -1) { FAIL("expected -1"); db_close(db); return; }
+
+    db_close(db);
+    PASS();
+}
+
+static void test_max_iterations_default(void) {
+    TEST(max_iterations_default);
+    /* max_iterations=0 should fall back to AGENT_DEFAULT_MAX_ITERATIONS */
+    Config cfg = {0};
+    cfg.max_iterations = 0;
+    cfg.provider.base_url = "http://127.0.0.1:1/v1";
+    cfg.provider.api_key = "fake";
+    cfg.provider.model = "test";
+    cfg.provider.context_window = 128000;
+
+    sqlite3 *db = db_open(":memory:");
+    if (!db) { FAIL("db_open failed"); return; }
+    int64_t sid = session_create(db, "test");
+    if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
+
+    Message user_msg = {.role = ROLE_USER, .content = "hello"};
+    entry_append(db, sid, &user_msg);
+
+    AgentContext ctx = {0};
+    ctx.db = db;
+    ctx.session_id = sid;
+    ctx.cfg = &cfg;
+    ctx.dispatch = mock_tool_ok;
+
+    /* Should use default (25), fail at HTTP — just verify it doesn't crash */
+    int rc = agent_run(&ctx);
+    if (rc != -1) { FAIL("expected -1 for unreachable LLM"); db_close(db); return; }
+
+    db_close(db);
+    PASS();
+}
+
 int main(void) {
     printf("test_agent:\n");
     test_agent_context_init();
@@ -128,6 +192,8 @@ int main(void) {
     test_v10_dispatch_returns_error_on_null();
     test_v10_dispatch_ok();
     test_agent_run_empty_session();
+    test_max_iterations_configurable();
+    test_max_iterations_default();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

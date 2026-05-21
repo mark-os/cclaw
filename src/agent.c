@@ -40,7 +40,8 @@ static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
 int agent_run(AgentContext *ctx) {
     if (!ctx || !ctx->db || !ctx->cfg) return -1;
 
-    for (int iter = 0; iter < AGENT_MAX_ITERATIONS; iter++) {
+    int max_iter = ctx->cfg->max_iterations > 0 ? ctx->cfg->max_iterations : AGENT_DEFAULT_MAX_ITERATIONS;
+    for (int iter = 0; iter < max_iter; iter++) {
         Arena *a = arena_create(ARENA_DEFAULT_SIZE);
         if (!a) return -1;
 

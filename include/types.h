@@ -69,6 +69,7 @@ typedef struct {
     char *workspace;
     char *telegram_token;
     int web_port;
+    int max_iterations;     /* agent loop iteration cap */
 } Config;
 
 #endif

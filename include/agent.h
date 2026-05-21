@@ -7,7 +7,7 @@
 #include "llm.h"
 #include "db.h"
 
-#define AGENT_MAX_ITERATIONS 25
+#define AGENT_DEFAULT_MAX_ITERATIONS 25
 
 /* V10: Tool dispatch function. Returns heap-allocated result string.
  * On failure, must still return an error string (never NULL). */

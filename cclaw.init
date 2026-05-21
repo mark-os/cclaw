@@ -1,0 +1,112 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          cclaw
+# Required-Start:    $network $remote_fs
+# Required-Stop:     $network $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: CClaw autonomous AI agent
+### END INIT INFO
+
+DAEMON=/usr/local/bin/cclaw
+PIDFILE=/var/run/cclaw.pid
+ENVFILE=/etc/cclaw/env
+RESPAWN_DELAY=5
+RESPAWN_MAX=10
+NAME=cclaw
+
+[ -f "$ENVFILE" ] && . "$ENVFILE"
+export OPENROUTER_API_KEY CCLAW_PROVIDER CCLAW_MODEL CCLAW_TELEGRAM_TOKEN CCLAW_DB_PATH CCLAW_WEB_PORT
+
+check_pid() {
+    if [ -f "$PIDFILE" ]; then
+        pid=$(cat "$PIDFILE")
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            # Verify it's actually cclaw, not a recycled PID
+            if [ -d "/proc/$pid" ] && grep -q "$NAME" "/proc/$pid/comm" 2>/dev/null; then
+                return 0
+            fi
+        fi
+        # Stale PID file
+        rm -f "$PIDFILE"
+    fi
+    return 1
+}
+
+wait_network() {
+    tries=0
+    while [ $tries -lt 30 ]; do
+        if ip route | grep -q default; then
+            return 0
+        fi
+        sleep 1
+        tries=$((tries + 1))
+    done
+    echo "Network not available after 30s"
+    return 1
+}
+
+respawn_loop() {
+    count=0
+    while [ $count -lt $RESPAWN_MAX ]; do
+        $DAEMON &
+        pid=$!
+        echo "$pid" > "$PIDFILE"
+        wait "$pid"
+        rc=$?
+        [ $rc -eq 0 ] && break
+        count=$((count + 1))
+        echo "$NAME exited with $rc, respawn $count/$RESPAWN_MAX in ${RESPAWN_DELAY}s"
+        sleep $RESPAWN_DELAY
+    done
+    rm -f "$PIDFILE"
+}
+
+start() {
+    if check_pid; then
+        echo "$NAME already running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    wait_network || return 1
+    echo "Starting $NAME..."
+    respawn_loop &
+    return 0
+}
+
+stop() {
+    if check_pid; then
+        pid=$(cat "$PIDFILE")
+        echo "Stopping $NAME (pid $pid)..."
+        kill "$pid"
+        # Wait up to 10s for graceful shutdown
+        i=0
+        while [ $i -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
+            sleep 1
+            i=$((i + 1))
+        done
+        # Force kill if still alive
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid"
+        fi
+        rm -f "$PIDFILE"
+    else
+        echo "$NAME not running"
+    fi
+}
+
+status() {
+    if check_pid; then
+        echo "$NAME running (pid $(cat "$PIDFILE"))"
+    else
+        echo "$NAME not running"
+        return 1
+    fi
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; start ;;
+    status)  status ;;
+    *)       echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

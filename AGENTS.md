@@ -46,6 +46,7 @@ src/           C source files
 include/       C headers (public API for each module)
 vendor/        Vendored libs (cJSON, sqlite3, civetweb, mquickjs)
 test/          Test files (test_*.c)
+notes/         Research & scoping notes (kept during development)
 reference/     Pi, OpenClaw clones (gitignored)
 build/         Build output (gitignored)
 ```

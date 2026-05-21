@@ -12,6 +12,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - single user (Mark) — no multi-tenant auth
 - OpenAI-compatible chat completions format ∀ providers
 - default provider: OpenRouter → DeepSeek V4 Flash (`deepseek/deepseek-v4-flash`)
+- no streaming — full response only (simplifies agent loop, tool parsing)
 
 ## §I INTERFACES
 - cmd: `./build/cclaw --cli` → stdin/stdout REPL, creates/resumes session in shared DB
@@ -32,6 +33,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - tool: `js_define_tool` — register JS fn as callable tool (session-persistent)
 - tool: `spawn_agent` — fork sub-agent process
 - tool: `check_agent` — read sub-agent result from DB
+- tool: `web_fetch` — HTTP GET URL, extract text from HTML, external input protection wrapper
 - db: `cclaw.db` — SQLite 3.53, WAL, FTS5, JSON functions
 
 ## §V INVARIANTS
@@ -94,8 +96,19 @@ T38|x|`check_agent` tool — read result from DB|V13
 T39|x|sub-agent lifecycle (limits, cleanup, crash isolation)|V3
 T40|x|token estimation (chars/4 heuristic)|V7
 T41|x|graceful shutdown (SIGINT/SIGTERM)|§C
-T42|.|systemd service file|§C
-T43|.|error handling — 429 retry, context overflow detect, JSON parse failure recovery|V2,V10
+T42|.|systemd unit file (`cclaw.service`) — restart on failure, env file, journal logging (no test)|§C
+T43|.|SysVinit init script — network wait, respawn loop, PID mgmt, stale PID detect (no test)|§C
+T44|.|error handling — 429 retry, context overflow detect, JSON parse failure recovery|V2,V10
+T45|.|provider fallback chain — config array, try next on 5xx/timeout (test: Gemini `gemma-4-31b-it` via `GEMINI_API_KEY`)|V2
+T46|.|system prompt — load from config per agent, template vars `{session_id}`, `{date}`|§I.file
+T47|.|`shell_exec` timeout — SIGKILL child after configurable N seconds (default 30)|V10
+T48|.|`web_fetch` tool — HTTP GET, extract text from HTML, wrap output in external input protection|V15
+T49|.|test: context window cuts at valid turn boundary, never mid-tool-call|V7,V8
+T50|.|test: per-agent workspace isolation (file tools reject paths outside workspace)|V1,V12
+T51|.|test: external content wrapping — boundary markers, homoglyph sanitization|V15
+T52|.|integration test: live OpenRouter call → parse response, verify tool_calls round-trip|§I.api
+T53|.|integration test: agent loop end-to-end (prompt → tool call → tool result → final answer)|V10,§I.api
+T54|.|integration test: provider fallback (kill primary, verify fallback fires)|T45
 
 ## §B BUGS
 id|date|cause|fix

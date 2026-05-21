@@ -199,9 +199,10 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     tool_file_read_register(&reg, g_cfg->workspace);
     tool_file_write_register(&reg, g_cfg->workspace);
     tool_js_eval_register(&reg);
-    JsDefineCtx js_ctx = {.db = g_db, .session_id = session_id, .reg = &reg};
+    JsSessionRuntime *js_rt = js_runtime_create();
+    JsDefineCtx js_ctx = {.db = g_db, .session_id = session_id, .reg = &reg, .rt = js_rt};
     tool_js_define_register(&reg, &js_ctx);
-    tool_js_load_session(g_db, session_id, &reg);
+    tool_js_load_session(g_db, session_id, &reg, js_rt);
 
     size_t local_tool_count = 0;
     const ToolSchema *local_schemas = tools_schemas(&reg, &local_tool_count);
@@ -251,6 +252,7 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     /* V11: Send reply chunked at 4096 chars */
     tg_send_chunked(g_cfg->telegram_token, chat_id, reply_text);
     free(reply_text);
+    js_runtime_destroy(js_rt);
     tools_free(&reg);
 }
 

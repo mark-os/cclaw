@@ -51,6 +51,8 @@ void tools_free(ToolRegistry *reg) {
         free(reg->entries[i].name);
         free(reg->entries[i].description);
         free(reg->entries[i].parameters_json);
+        if (reg->entries[i].free_fn)
+            reg->entries[i].free_fn(reg->entries[i].user_data);
     }
     reg->count = 0;
 }

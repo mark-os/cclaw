@@ -9,6 +9,9 @@
 /* Tool handler function. Returns heap-allocated result string (never NULL). */
 typedef char *(*ToolHandlerFn)(const char *arguments, void *user_data);
 
+/* Optional destructor for user_data */
+typedef void (*ToolFreeFn)(void *user_data);
+
 /* Single tool entry in the registry */
 typedef struct {
     char *name;
@@ -16,6 +19,7 @@ typedef struct {
     char *parameters_json;
     ToolHandlerFn handler;
     void *user_data;
+    ToolFreeFn free_fn;
 } ToolEntry;
 
 /* Tool registry */

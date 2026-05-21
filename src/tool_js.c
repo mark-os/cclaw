@@ -69,6 +69,41 @@ static char *js_eval_code(const char *code) {
     return result;
 }
 
+/* Eval JS code in a persistent session runtime. Returns heap-allocated result. */
+static char *js_eval_in_runtime(JsSessionRuntime *rt, const char *code) {
+    if (!rt || !rt->ctx) return js_eval_code(code);
+
+    JSContext *ctx = (JSContext *)rt->ctx;
+    size_t code_len = strlen(code);
+
+    JSValue val = JS_Eval(ctx, code, code_len, "<tool>", JS_EVAL_RETVAL);
+
+    char *result;
+    if (JS_IsException(val)) {
+        JSValue exc = JS_GetException(ctx);
+        JSCStringBuf buf;
+        const char *msg = JS_ToCString(ctx, exc, &buf);
+        if (msg) {
+            size_t len = strlen(msg) + 16;
+            result = malloc(len);
+            if (result) snprintf(result, len, "error: %s", msg);
+            else result = strdup("error: OOM");
+        } else {
+            result = strdup("error: exception (no message)");
+        }
+    } else if (JS_IsUndefined(val)) {
+        result = strdup("undefined");
+    } else if (JS_IsNull(val)) {
+        result = strdup("null");
+    } else {
+        JSCStringBuf buf;
+        const char *str = JS_ToCString(ctx, val, &buf);
+        result = str ? strdup(str) : strdup("error: cannot convert result to string");
+    }
+
+    return result;
+}
+
 static const char *JSEVAL_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"code\":{\"type\":\"string\",\"description\":\"JavaScript code to execute\"}"
@@ -107,10 +142,16 @@ static const char *JSDEFINE_PARAMS_JSON =
     "\"code\":{\"type\":\"string\",\"description\":\"JS function body. Receives 'args' object, must return a string.\"}"
     "},\"required\":[\"name\",\"code\"]}";
 
-/* Handler for JS-defined tools. user_data points to heap-allocated code string. */
+/* User data for JS-defined tool handler: code + runtime pointer */
+typedef struct {
+    char *code;
+    JsSessionRuntime *rt;
+} JsToolData;
+
+/* Handler for JS-defined tools. user_data points to JsToolData. */
 static char *js_defined_tool_handler(const char *arguments, void *user_data) {
-    const char *code = (const char *)user_data;
-    if (!code) return strdup("error: no code for this tool");
+    JsToolData *td = (JsToolData *)user_data;
+    if (!td || !td->code) return strdup("error: no code for this tool");
 
     /* Wrap: (function(args){<code>})(JSON.parse('<escaped_args>')) */
     cJSON *args_json = cJSON_Parse(arguments);
@@ -132,13 +173,13 @@ static char *js_defined_tool_handler(const char *arguments, void *user_data) {
     escaped[j] = '\0';
     free(args_str);
 
-    size_t wrap_len = strlen(code) + j + 64;
+    size_t wrap_len = strlen(td->code) + j + 64;
     char *wrapped = malloc(wrap_len);
     if (!wrapped) { free(escaped); return strdup("error: OOM"); }
-    snprintf(wrapped, wrap_len, "(function(args){%s})(JSON.parse('%s'))", code, escaped);
+    snprintf(wrapped, wrap_len, "(function(args){%s})(JSON.parse('%s'))", td->code, escaped);
     free(escaped);
 
-    char *result = js_eval_code(wrapped);
+    char *result = js_eval_in_runtime(td->rt, wrapped);
     free(wrapped);
     return result;
 }
@@ -163,27 +204,57 @@ static int js_tool_persist(sqlite3 *db, int64_t session_id, const char *name,
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* Register a single JS-defined tool into the registry. Code is strdup'd for user_data. */
+/* Free function for JsToolData */
+static void js_tool_data_free(void *user_data) {
+    JsToolData *td = (JsToolData *)user_data;
+    if (td) { free(td->code); free(td); }
+}
+
+/* Register a single JS-defined tool into the registry with shared runtime. */
 static int js_tool_register_one(ToolRegistry *reg, const char *name,
                                 const char *description, const char *parameters_json,
-                                const char *code) {
+                                const char *code, JsSessionRuntime *rt) {
     /* Check if already registered (re-define overwrites) */
     ToolEntry *existing = tools_lookup(reg, name);
     if (existing) {
-        /* Update in place */
+        JsToolData *td = (JsToolData *)existing->user_data;
+        free(td->code);
+        td->code = strdup(code);
+        td->rt = rt;
         free(existing->description);
         free(existing->parameters_json);
-        free(existing->user_data);
         existing->description = description ? strdup(description) : NULL;
         existing->parameters_json = parameters_json ? strdup(parameters_json) : NULL;
-        existing->user_data = strdup(code);
         existing->handler = js_defined_tool_handler;
         return 0;
     }
-    char *code_copy = strdup(code);
-    if (!code_copy) return -1;
-    return tools_register(reg, name, description, parameters_json,
-                          js_defined_tool_handler, code_copy);
+    JsToolData *td = malloc(sizeof(JsToolData));
+    if (!td) return -1;
+    td->code = strdup(code);
+    td->rt = rt;
+    if (!td->code) { free(td); return -1; }
+    int rc = tools_register(reg, name, description, parameters_json,
+                            js_defined_tool_handler, td);
+    if (rc == 0) {
+        ToolEntry *e = tools_lookup(reg, name);
+        if (e) e->free_fn = js_tool_data_free;
+    }
+    return rc;
+}
+
+/* Replay a tool definition into the persistent runtime.
+ * Registers as global function AND executes once to restore side effects. */
+static void js_runtime_replay_tool(JsSessionRuntime *rt, const char *name, const char *code) {
+    if (!rt || !rt->ctx) return;
+    /* Register and call: globalThis.<name> = function(args){<code>}; <name>({}) */
+    size_t wrap_len = strlen(name) * 2 + strlen(code) + 80;
+    char *wrapped = malloc(wrap_len);
+    if (!wrapped) return;
+    snprintf(wrapped, wrap_len,
+             "globalThis.%s = function(args){%s}; %s({})", name, code, name);
+    JSContext *ctx = (JSContext *)rt->ctx;
+    JS_Eval(ctx, wrapped, strlen(wrapped), "<replay>", 0);
+    free(wrapped);
 }
 
 char *tool_js_define_handler(const char *arguments, void *user_data) {
@@ -217,10 +288,13 @@ char *tool_js_define_handler(const char *arguments, void *user_data) {
     }
 
     /* Register in live registry */
-    if (js_tool_register_one(ctx->reg, name, description, parameters, code) != 0) {
+    if (js_tool_register_one(ctx->reg, name, description, parameters, code, ctx->rt) != 0) {
         cJSON_Delete(json);
         return strdup("error: failed to register tool");
     }
+
+    /* Replay into shared runtime so other tools can reference it */
+    js_runtime_replay_tool(ctx->rt, name, code);
 
     cJSON_Delete(json);
 
@@ -237,7 +311,27 @@ int tool_js_define_register(ToolRegistry *reg, JsDefineCtx *ctx) {
                           JSDEFINE_PARAMS_JSON, tool_js_define_handler, ctx);
 }
 
-int tool_js_load_session(sqlite3 *db, int64_t session_id, ToolRegistry *reg) {
+/* --- Session runtime --- */
+
+JsSessionRuntime *js_runtime_create(void) {
+    JsSessionRuntime *rt = malloc(sizeof(JsSessionRuntime));
+    if (!rt) return NULL;
+    rt->heap = malloc(JS_HEAP_SIZE);
+    if (!rt->heap) { free(rt); return NULL; }
+    rt->ctx = JS_NewContext(rt->heap, JS_HEAP_SIZE, &js_std_library);
+    if (!rt->ctx) { free(rt->heap); free(rt); return NULL; }
+    return rt;
+}
+
+void js_runtime_destroy(JsSessionRuntime *rt) {
+    if (!rt) return;
+    if (rt->ctx) JS_FreeContext((JSContext *)rt->ctx);
+    free(rt->heap);
+    free(rt);
+}
+
+int tool_js_load_session(sqlite3 *db, int64_t session_id, ToolRegistry *reg,
+                         JsSessionRuntime *rt) {
     const char *sql = "SELECT name, description, parameters_json, code FROM js_tools WHERE session_id=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -251,8 +345,11 @@ int tool_js_load_session(sqlite3 *db, int64_t session_id, ToolRegistry *reg) {
         const char *params = (const char *)sqlite3_column_text(stmt, 2);
         const char *code = (const char *)sqlite3_column_text(stmt, 3);
         if (name && code) {
-            if (js_tool_register_one(reg, name, desc, params, code) == 0)
+            if (js_tool_register_one(reg, name, desc, params, code, rt) == 0) {
+                /* Replay into shared runtime */
+                js_runtime_replay_tool(rt, name, code);
                 loaded++;
+            }
         }
     }
     sqlite3_finalize(stmt);

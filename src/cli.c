@@ -108,11 +108,13 @@ int cli_run(const Config *cfg) {
     tool_file_write_register(&reg, cfg->workspace);
     tool_js_eval_register(&reg);
 
-    JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg};
+    JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = NULL};
     tool_js_define_register(&reg, &js_ctx);
 
-    /* Load session-persistent JS tools from DB */
-    tool_js_load_session(db, session_id, &reg);
+    /* Create persistent JS runtime and replay session tools */
+    JsSessionRuntime *js_rt = js_runtime_create();
+    js_ctx.rt = js_rt;
+    tool_js_load_session(db, session_id, &reg, js_rt);
 
     size_t tool_count = 0;
     const ToolSchema *schemas = tools_schemas(&reg, &tool_count);
@@ -170,6 +172,7 @@ int cli_run(const Config *cfg) {
     }
 
     free(line);
+    js_runtime_destroy(js_rt);
     tools_free(&reg);
     db_close(db);
     return 0;

@@ -42,4 +42,8 @@ void session_list_free(Session *sessions, int count);
 /* Free an Entry array returned by session_get_branch. */
 void entry_branch_free(Entry *entries, int count);
 
+/* V7: FTS5 full-text search over message content within a session.
+ * Returns matching entries ranked by relevance (max 50). Caller frees with entry_branch_free. */
+Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *count);
+
 #endif

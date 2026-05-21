@@ -120,6 +120,47 @@ static void test_reopen_idempotent(void) {
     printf("  PASS test_reopen_idempotent\n");
 }
 
+static void test_fts5_search(void) {
+    const char *path = "/tmp/test_cclaw_fts5.sqlite";
+    unlink(path);
+
+    sqlite3 *db = db_open(path);
+    assert(db != NULL);
+
+    int64_t sid = session_create(db, "fts_test");
+    assert(sid > 0);
+
+    Message m1 = {.role = ROLE_USER, .content = "hello world from the user"};
+    Message m2 = {.role = ROLE_ASSISTANT, .content = "goodbye cruel world"};
+    Message m3 = {.role = ROLE_USER, .content = "unrelated message about cats"};
+    assert(entry_append(db, sid, &m1) > 0);
+    assert(entry_append(db, sid, &m2) > 0);
+    assert(entry_append(db, sid, &m3) > 0);
+
+    /* Search for "world" — should find 2 entries */
+    int count = 0;
+    Entry *results = entry_search(db, "world", sid, &count);
+    assert(count == 2);
+    assert(results != NULL);
+    entry_branch_free(results, count);
+
+    /* Search for "cats" — should find 1 */
+    results = entry_search(db, "cats", sid, &count);
+    assert(count == 1);
+    assert(results != NULL);
+    assert(strcmp(results[0].message.content, "unrelated message about cats") == 0);
+    entry_branch_free(results, count);
+
+    /* Search for "nonexistent" — should find 0 */
+    results = entry_search(db, "nonexistent", sid, &count);
+    assert(count == 0);
+    assert(results == NULL);
+
+    db_close(db);
+    unlink(path);
+    printf("  PASS test_fts5_search\n");
+}
+
 int main(void) {
     printf("test_db:\n");
     test_open_close();
@@ -127,6 +168,7 @@ int main(void) {
     test_busy_timeout();
     test_tables_created();
     test_reopen_idempotent();
+    test_fts5_search();
     printf("All db tests passed.\n");
     return 0;
 }

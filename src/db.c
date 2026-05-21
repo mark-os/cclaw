@@ -23,7 +23,21 @@ static const char *SCHEMA_SQL =
     "  tool_result_json TEXT"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_entries_session ON entries(session_id);"
-    "CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_id);";
+    "CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_id);"
+    /* V7: FTS5 index over message content */
+    "CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5("
+    "  content, content=entries, content_rowid=id"
+    ");"
+    "CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN"
+    "  INSERT INTO entries_fts(rowid, content) VALUES (new.id, new.content);"
+    "END;"
+    "CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN"
+    "  INSERT INTO entries_fts(entries_fts, rowid, content) VALUES('delete', old.id, old.content);"
+    "END;"
+    "CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN"
+    "  INSERT INTO entries_fts(entries_fts, rowid, content) VALUES('delete', old.id, old.content);"
+    "  INSERT INTO entries_fts(rowid, content) VALUES (new.id, new.content);"
+    "END;";
 
 sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
@@ -248,4 +262,47 @@ void entry_branch_free(Entry *entries, int count) {
     for (int i = 0; i < count; i++)
         free(entries[i].message.content);
     free(entries);
+}
+
+/* V7: FTS5 search over message content */
+Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *count) {
+    *count = 0;
+    const char *sql =
+        "SELECT e.id, e.parent_id, e.session_id, e.created_at, e.role, e.content"
+        " FROM entries_fts f JOIN entries e ON e.id = f.rowid"
+        " WHERE entries_fts MATCH ? AND e.session_id = ?"
+        " ORDER BY rank LIMIT 50;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(stmt, 1, query, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, session_id);
+
+    int cap = 8;
+    Entry *entries = malloc((size_t)cap * sizeof(Entry));
+    if (!entries) { sqlite3_finalize(stmt); return NULL; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (*count >= cap) {
+            cap *= 2;
+            Entry *tmp = realloc(entries, (size_t)cap * sizeof(Entry));
+            if (!tmp) break;
+            entries = tmp;
+        }
+        Entry *e = &entries[*count];
+        e->id = sqlite3_column_int64(stmt, 0);
+        e->parent_id = sqlite3_column_int64(stmt, 1);
+        e->session_id = sqlite3_column_int64(stmt, 2);
+        e->created_at = (time_t)sqlite3_column_int64(stmt, 3);
+        e->message.role = (Role)sqlite3_column_int(stmt, 4);
+        const char *c = (const char *)sqlite3_column_text(stmt, 5);
+        e->message.content = c ? strdup(c) : NULL;
+        e->message.tool_calls = NULL;
+        e->message.tool_call_count = 0;
+        e->message.tool_result = NULL;
+        (*count)++;
+    }
+    sqlite3_finalize(stmt);
+    if (*count == 0) { free(entries); return NULL; }
+    return entries;
 }

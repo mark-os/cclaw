@@ -75,7 +75,7 @@ T19|x|`file_write` tool — workspace path restriction|V1
 T20|x|CLI REPL (`cli.c`) — read line, send to agent, print response|§I.cmd
 T21|x|CLI debug mode — raw req/resp JSON to stderr|§I.cmd
 T22|x|CLI session selection (create new / resume existing)|§I.cmd
-T23|.|Telegram poller (`telegram.c`) — getUpdates loop in thread|§I.api
+T23|x|Telegram poller (`telegram.c`) — getUpdates loop in thread|§I.api
 T24|.|Telegram send + typing indicator (every 4s while working)|V11
 T25|.|Telegram offset persistence in DB (survives restart)|§I.api
 T26|.|Telegram chat_id → session routing|§I.api

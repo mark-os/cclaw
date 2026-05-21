@@ -68,7 +68,7 @@ T12|x|context window manager — select turns ≤ budget, cutoff notice, valid b
 T13|x|agent loop (`agent.c`) — call LLM, dispatch tools, repeat until done|V10
 T14|x|tool registry — register/lookup by name, schema storage|§I.tool
 T15|x|max iterations guard|§I.file
-T16|.|session integration — load branch, append entries, flush to DB|V14,T6
+T16|x|session integration — load branch, append entries, flush to DB|V14,T6
 T17|.|`shell_exec` tool — popen, capture stdout+stderr, timeout|§I.tool
 T18|.|`file_read` tool — workspace path restriction|V1
 T19|.|`file_write` tool — workspace path restriction|V1

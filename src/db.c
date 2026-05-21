@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,6 +125,72 @@ Session *session_list(sqlite3 *db, int *count) {
     return list;
 }
 
+/* Serialize tool_calls array to JSON string. Caller must free. Returns NULL if none. */
+static char *serialize_tool_calls(const ToolCall *calls, size_t count) {
+    if (!calls || count == 0) return NULL;
+    cJSON *arr = cJSON_CreateArray();
+    for (size_t i = 0; i < count; i++) {
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "id", calls[i].id ? calls[i].id : "");
+        cJSON_AddStringToObject(obj, "name", calls[i].name ? calls[i].name : "");
+        cJSON_AddStringToObject(obj, "arguments", calls[i].arguments ? calls[i].arguments : "");
+        cJSON_AddItemToArray(arr, obj);
+    }
+    char *json = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    return json;
+}
+
+/* Serialize tool_result to JSON string. Caller must free. Returns NULL if none. */
+static char *serialize_tool_result(const ToolResult *tr) {
+    if (!tr) return NULL;
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "tool_call_id", tr->tool_call_id ? tr->tool_call_id : "");
+    cJSON_AddStringToObject(obj, "content", tr->content ? tr->content : "");
+    char *json = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+    return json;
+}
+
+/* Deserialize tool_calls JSON into heap-allocated array. Sets *count. */
+static ToolCall *deserialize_tool_calls(const char *json, size_t *count) {
+    *count = 0;
+    if (!json) return NULL;
+    cJSON *arr = cJSON_Parse(json);
+    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return NULL; }
+    int n = cJSON_GetArraySize(arr);
+    if (n <= 0) { cJSON_Delete(arr); return NULL; }
+    ToolCall *calls = malloc((size_t)n * sizeof(ToolCall));
+    if (!calls) { cJSON_Delete(arr); return NULL; }
+    for (int i = 0; i < n; i++) {
+        cJSON *obj = cJSON_GetArrayItem(arr, i);
+        cJSON *id = cJSON_GetObjectItem(obj, "id");
+        cJSON *name = cJSON_GetObjectItem(obj, "name");
+        cJSON *args = cJSON_GetObjectItem(obj, "arguments");
+        calls[i].id = (id && id->valuestring) ? strdup(id->valuestring) : NULL;
+        calls[i].name = (name && name->valuestring) ? strdup(name->valuestring) : NULL;
+        calls[i].arguments = (args && args->valuestring) ? strdup(args->valuestring) : NULL;
+    }
+    *count = (size_t)n;
+    cJSON_Delete(arr);
+    return calls;
+}
+
+/* Deserialize tool_result JSON into heap-allocated struct. */
+static ToolResult *deserialize_tool_result(const char *json) {
+    if (!json) return NULL;
+    cJSON *obj = cJSON_Parse(json);
+    if (!obj || !cJSON_IsObject(obj)) { cJSON_Delete(obj); return NULL; }
+    ToolResult *tr = malloc(sizeof(ToolResult));
+    if (!tr) { cJSON_Delete(obj); return NULL; }
+    cJSON *tcid = cJSON_GetObjectItem(obj, "tool_call_id");
+    cJSON *content = cJSON_GetObjectItem(obj, "content");
+    tr->tool_call_id = (tcid && tcid->valuestring) ? strdup(tcid->valuestring) : NULL;
+    tr->content = (content && content->valuestring) ? strdup(content->valuestring) : NULL;
+    cJSON_Delete(obj);
+    return tr;
+}
+
 /* V14: walk parent_id chain from leaf→root, return in root→leaf order */
 Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
     *count = 0;
@@ -151,7 +218,7 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
         "  UNION ALL"
         "  SELECT e.id, e.parent_id, e.session_id, e.created_at, e.role, e.content, e.tool_calls_json, e.tool_result_json"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
-        ") SELECT id, parent_id, session_id, created_at, role, content FROM branch ORDER BY id;";
+        ") SELECT id, parent_id, session_id, created_at, role, content, tool_calls_json, tool_result_json FROM branch ORDER BY id;";
 
     if (sqlite3_prepare_v2(db, branch_sql, -1, &stmt, NULL) != SQLITE_OK)
         return NULL;
@@ -177,9 +244,10 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
         e->message.role = (Role)sqlite3_column_int(stmt, 4);
         const char *c = (const char *)sqlite3_column_text(stmt, 5);
         e->message.content = c ? strdup(c) : NULL;
-        e->message.tool_calls = NULL;
-        e->message.tool_call_count = 0;
-        e->message.tool_result = NULL;
+        const char *tc = (const char *)sqlite3_column_text(stmt, 6);
+        e->message.tool_calls = deserialize_tool_calls(tc, &e->message.tool_call_count);
+        const char *tr = (const char *)sqlite3_column_text(stmt, 7);
+        e->message.tool_result = deserialize_tool_result(tr);
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -221,16 +289,29 @@ int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, cons
         sqlite3_bind_text(stmt, 4, msg->content, -1, SQLITE_STATIC);
     else
         sqlite3_bind_null(stmt, 4);
-    /* tool_calls_json and tool_result_json — NULL for now (T10/T11 will populate) */
-    sqlite3_bind_null(stmt, 5);
-    sqlite3_bind_null(stmt, 6);
 
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
-        sqlite3_finalize(stmt);
-        return -1;
-    }
-    int64_t entry_id = sqlite3_last_insert_rowid(db);
+    /* Serialize tool_calls and tool_result */
+    char *tc_json = serialize_tool_calls(msg->tool_calls, msg->tool_call_count);
+    char *tr_json = serialize_tool_result(msg->tool_result);
+
+    if (tc_json)
+        sqlite3_bind_text(stmt, 5, tc_json, -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(stmt, 5);
+    if (tr_json)
+        sqlite3_bind_text(stmt, 6, tr_json, -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_null(stmt, 6);
+
+    int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+    free(tc_json);
+    free(tr_json);
+
+    if (rc != SQLITE_DONE)
+        return -1;
+
+    int64_t entry_id = sqlite3_last_insert_rowid(db);
 
     if (session_set_leaf(db, session_id, entry_id) != 0)
         return -1;
@@ -259,8 +340,22 @@ int64_t entry_append(sqlite3 *db, int64_t session_id, const Message *msg) {
 
 void entry_branch_free(Entry *entries, int count) {
     if (!entries) return;
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < count; i++) {
         free(entries[i].message.content);
+        if (entries[i].message.tool_calls) {
+            for (size_t t = 0; t < entries[i].message.tool_call_count; t++) {
+                free(entries[i].message.tool_calls[t].id);
+                free(entries[i].message.tool_calls[t].name);
+                free(entries[i].message.tool_calls[t].arguments);
+            }
+            free(entries[i].message.tool_calls);
+        }
+        if (entries[i].message.tool_result) {
+            free(entries[i].message.tool_result->tool_call_id);
+            free(entries[i].message.tool_result->content);
+            free(entries[i].message.tool_result);
+        }
+    }
     free(entries);
 }
 

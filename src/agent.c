@@ -5,12 +5,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+/* V2: max retries for 429/5xx */
+#define MAX_RETRIES 5
+#define INITIAL_BACKOFF_MS 1000
 
 /* Build URL for chat completions endpoint */
 static char *build_url(Arena *a, const Config *cfg) {
     const char *base = cfg->provider.base_url;
     size_t blen = strlen(base);
-    /* Strip trailing slash */
     if (blen > 0 && base[blen - 1] == '/') blen--;
     const char *path = "/chat/completions";
     size_t plen = strlen(path);
@@ -30,11 +34,49 @@ static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
     }
     char *result = ctx->dispatch(tc->name, tc->arguments, ctx->dispatch_data);
     if (!result) {
-        /* V10: never return NULL — produce error result */
         result = malloc(64);
         if (result) snprintf(result, 64, "error: tool '%s' returned null", tc->name);
     }
     return result;
+}
+
+/* V2: call LLM with retry on 429 and 5xx. Returns status code, -1 on curl error. */
+static int llm_call_with_retry(const char *url, const char **headers,
+                               const char *body, HttpResponse *resp, int debug) {
+    int backoff_ms = INITIAL_BACKOFF_MS;
+
+    for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        int status = http_post(url, headers, body, resp);
+
+        if (status == 429 || (status >= 500 && status < 600)) {
+            if (debug)
+                fprintf(stderr, "[DEBUG] HTTP %d, retry %d/%d\n", status, attempt + 1, MAX_RETRIES);
+
+            /* V2: respect Retry-After header */
+            int wait_sec = resp->retry_after > 0 ? resp->retry_after : (backoff_ms / 1000);
+            if (wait_sec < 1) wait_sec = 1;
+            sleep((unsigned)wait_sec);
+
+            http_response_free(resp);
+            backoff_ms *= 2;
+            continue;
+        }
+
+        return status;
+    }
+
+    /* All retries exhausted */
+    return -1;
+}
+
+/* Detect context overflow from error response body */
+static int is_context_overflow(const char *body) {
+    if (!body) return 0;
+    /* Common patterns from OpenAI-compatible APIs */
+    return (strstr(body, "context_length_exceeded") != NULL ||
+            strstr(body, "maximum context length") != NULL ||
+            strstr(body, "too many tokens") != NULL ||
+            strstr(body, "context window") != NULL);
 }
 
 int agent_run(AgentContext *ctx) {
@@ -88,30 +130,45 @@ int agent_run(AgentContext *ctx) {
         };
 
         HttpResponse resp;
-        int status = http_post(url, headers, req_json, &resp);
+        /* V2: retry on 429/5xx with exponential backoff */
+        int status = llm_call_with_retry(url, headers, req_json, &resp, ctx->debug);
+
+        if (ctx->debug && resp.data)
+            fprintf(stderr, "[DEBUG RESP] status=%d %s\n", status, resp.data);
+
+        /* Context overflow detection — return error so caller can trim */
+        if (status == 400 && is_context_overflow(resp.data)) {
+            if (ctx->debug)
+                fprintf(stderr, "[DEBUG] context overflow detected\n");
+            http_response_free(&resp);
+            arena_destroy(a);
+            return -2; /* distinct code for context overflow */
+        }
+
         if (status < 200 || status >= 300 || !resp.data) {
-            if (ctx->debug && resp.data)
-                fprintf(stderr, "[DEBUG RESP] status=%d %s\n", status, resp.data);
             http_response_free(&resp);
             arena_destroy(a);
             return -1;
         }
 
-        if (ctx->debug)
-            fprintf(stderr, "[DEBUG RESP] %s\n", resp.data);
-
-        /* Parse response */
+        /* V10: JSON parse failure recovery — don't crash loop */
         LlmResponse llm_resp;
         rc = llm_parse_response(a, resp.data, &llm_resp);
         http_response_free(&resp);
         if (rc != 0) {
+            if (ctx->debug)
+                fprintf(stderr, "[DEBUG] JSON parse failure, skipping turn\n");
             arena_destroy(a);
+            /* Recoverable: append error as assistant message, stop loop */
+            Message asst = {.role = ROLE_ASSISTANT,
+                            .content = strdup("error: failed to parse LLM response")};
+            entry_append(ctx->db, ctx->session_id, &asst);
+            free(asst.content);
             return -1;
         }
 
         /* If no tool calls — final response */
         if (llm_resp.tool_call_count == 0) {
-            /* Append assistant message to session */
             Message asst = {.role = ROLE_ASSISTANT, .content = llm_resp.content ? strdup(llm_resp.content) : strdup("")};
             entry_append(ctx->db, ctx->session_id, &asst);
             free(asst.content);
@@ -155,7 +212,6 @@ int agent_run(AgentContext *ctx) {
         free(asst.tool_calls);
         free(asst.content);
         arena_destroy(a);
-        /* Loop continues — next iteration will see tool results */
     }
 
     /* Max iterations reached */

@@ -2,6 +2,7 @@
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t bytes = size * nmemb;
@@ -20,6 +21,28 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     memcpy(resp->data + resp->len, ptr, bytes);
     resp->len += bytes;
     resp->data[resp->len] = '\0';
+    return bytes;
+}
+
+/* V2: capture Retry-After header */
+static size_t header_cb(char *buf, size_t size, size_t nmemb, void *userdata) {
+    size_t bytes = size * nmemb;
+    HttpResponse *resp = userdata;
+    const char *prefix = "retry-after:";
+    size_t plen = 12;
+    if (bytes > plen) {
+        /* Case-insensitive check */
+        int match = 1;
+        for (size_t i = 0; i < plen; i++) {
+            if (tolower((unsigned char)buf[i]) != prefix[i]) { match = 0; break; }
+        }
+        if (match) {
+            const char *val = buf + plen;
+            while (*val == ' ') val++;
+            resp->retry_after = atoi(val);
+            if (resp->retry_after < 1) resp->retry_after = 1;
+        }
+    }
     return bytes;
 }
 
@@ -42,6 +65,8 @@ int http_post(const char *url, const char **headers, const char *body,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hlist);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 
     CURLcode rc = curl_easy_perform(curl);

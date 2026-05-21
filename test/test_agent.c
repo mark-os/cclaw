@@ -4,6 +4,8 @@
 #include "agent.h"
 #include "db.h"
 #include "config.h"
+#include "llm.h"
+#include "http.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -216,6 +218,70 @@ static void test_debug_flag_stderr(void) {
     PASS();
 }
 
+static void test_v2_retry_after_field(void) {
+    TEST(v2_retry_after_field);
+    /* HttpResponse retry_after field should default to 0 */
+    HttpResponse resp = {0};
+    if (resp.retry_after != 0) { FAIL("expected 0 default"); return; }
+    PASS();
+}
+
+static void test_v10_json_parse_failure_recovery(void) {
+    TEST(v10_json_parse_failure_recovery);
+    /* Verify llm_parse_response returns -1 on garbage JSON */
+    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
+    if (!a) { FAIL("arena_create failed"); return; }
+
+    LlmResponse llm_resp;
+    int rc = llm_parse_response(a, "not json at all {{{", &llm_resp);
+    if (rc != -1) { FAIL("expected -1 for garbage JSON"); arena_destroy(a); return; }
+
+    /* Also test empty string */
+    rc = llm_parse_response(a, "", &llm_resp);
+    if (rc != -1) { FAIL("expected -1 for empty string"); arena_destroy(a); return; }
+
+    /* Also test valid JSON but missing choices */
+    rc = llm_parse_response(a, "{\"id\":\"x\"}", &llm_resp);
+    if (rc != -1) { FAIL("expected -1 for missing choices"); arena_destroy(a); return; }
+
+    arena_destroy(a);
+    PASS();
+}
+
+static void test_context_overflow_return_code(void) {
+    TEST(context_overflow_return_code);
+    /* agent_run returns -2 on context overflow, but we can't easily simulate
+     * a 400 response here. Verify the return code contract: -1 for unreachable
+     * (which is what we get with a bogus URL) */
+    sqlite3 *db = db_open(":memory:");
+    if (!db) { FAIL("db_open failed"); return; }
+    int64_t sid = session_create(db, "test");
+    if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
+
+    Config cfg = {0};
+    cfg.provider.base_url = "http://127.0.0.1:1/v1";
+    cfg.provider.api_key = "fake";
+    cfg.provider.model = "test";
+    cfg.provider.context_window = 128000;
+    cfg.max_iterations = 1;
+
+    Message user_msg = {.role = ROLE_USER, .content = "hello"};
+    entry_append(db, sid, &user_msg);
+
+    AgentContext ctx = {0};
+    ctx.db = db;
+    ctx.session_id = sid;
+    ctx.cfg = &cfg;
+    ctx.dispatch = mock_tool_ok;
+
+    /* Unreachable → -1 (not -2, since it's not a 400 context overflow) */
+    int rc = agent_run(&ctx);
+    if (rc != -1) { FAIL("expected -1"); db_close(db); return; }
+
+    db_close(db);
+    PASS();
+}
+
 int main(void) {
     printf("test_agent:\n");
     test_agent_context_init();
@@ -228,6 +294,9 @@ int main(void) {
     test_max_iterations_configurable();
     test_max_iterations_default();
     test_debug_flag_stderr();
+    test_v2_retry_after_field();
+    test_v10_json_parse_failure_recovery();
+    test_context_overflow_return_code();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

@@ -8,6 +8,7 @@ typedef struct {
     char *data;
     size_t len;
     size_t cap;
+    int retry_after;    /* Retry-After header value in seconds, 0 if absent */
 } HttpResponse;
 
 /* POST JSON body to url with given headers (NULL-terminated array of "Key: Value" strings).

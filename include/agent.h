@@ -28,7 +28,8 @@ typedef struct {
 /* Run agent loop: call LLM, dispatch tool_calls, repeat until assistant
  * produces final content (no tool_calls) or max iterations reached.
  * The user message should already be appended to the session before calling.
- * Returns 0 on success, -1 on fatal error (LLM unreachable, OOM). */
+ * Returns 0 on success, -1 on fatal error (LLM unreachable, OOM),
+ * -2 on context overflow (caller should trim history and retry). */
 int agent_run(AgentContext *ctx);
 
 #endif

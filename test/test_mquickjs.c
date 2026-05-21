@@ -88,6 +88,22 @@ static void test_eval_json(void) {
     PASS();
 }
 
+static void test_date_now(void) {
+    TEST("date_now");
+    void *heap = malloc(HEAP_SIZE);
+    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library);
+    const char *code = "Date.now()";
+    JSValue val = JS_Eval(ctx, code, strlen(code), "<test>", JS_EVAL_RETVAL);
+    if (JS_IsException(val)) { FAIL("exception"); JS_FreeContext(ctx); free(heap); return; }
+    double result;
+    if (JS_ToNumber(ctx, &result, val) != 0) { FAIL("ToNumber failed"); JS_FreeContext(ctx); free(heap); return; }
+    /* Should be a reasonable timestamp (after 2020) */
+    if (result < 1577836800000.0) { FAIL("timestamp too small"); JS_FreeContext(ctx); free(heap); return; }
+    JS_FreeContext(ctx);
+    free(heap);
+    PASS();
+}
+
 int main(void) {
     printf("test_mquickjs:\n");
     test_context_create();
@@ -95,6 +111,7 @@ int main(void) {
     test_eval_string();
     test_eval_math();
     test_eval_json();
+    test_date_now();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

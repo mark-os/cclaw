@@ -167,7 +167,10 @@ static char *tg_dispatch(const char *name, const char *arguments, void *user_dat
 }
 
 /* Process a single Telegram message: route to session, run agent, reply */
-static void process_message(cJSON *msg, ToolRegistry *reg, const ToolSchema *schemas, size_t tool_count) {
+static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema *schemas, size_t tool_count) {
+    (void)base_reg;
+    (void)schemas;
+    (void)tool_count;
     cJSON *chat = cJSON_GetObjectItemCaseSensitive(msg, "chat");
     cJSON *text = cJSON_GetObjectItemCaseSensitive(msg, "text");
     if (!chat || !text || !cJSON_IsString(text)) return;
@@ -189,6 +192,20 @@ static void process_message(cJSON *msg, ToolRegistry *reg, const ToolSchema *sch
         entry_append(g_db, session_id, &sys_msg);
     }
 
+    /* Build per-session registry (includes session-persistent JS tools) */
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_shell_register(&reg);
+    tool_file_read_register(&reg, g_cfg->workspace);
+    tool_file_write_register(&reg, g_cfg->workspace);
+    tool_js_eval_register(&reg);
+    JsDefineCtx js_ctx = {.db = g_db, .session_id = session_id, .reg = &reg};
+    tool_js_define_register(&reg, &js_ctx);
+    tool_js_load_session(g_db, session_id, &reg);
+
+    size_t local_tool_count = 0;
+    const ToolSchema *local_schemas = tools_schemas(&reg, &local_tool_count);
+
     /* Append user message */
     Message user_msg = {.role = ROLE_USER, .content = text->valuestring};
     entry_append(g_db, session_id, &user_msg);
@@ -204,9 +221,9 @@ static void process_message(cJSON *msg, ToolRegistry *reg, const ToolSchema *sch
     ctx.session_id = session_id;
     ctx.cfg = g_cfg;
     ctx.dispatch = tg_dispatch;
-    ctx.dispatch_data = reg;
-    ctx.tools = schemas;
-    ctx.tool_count = tool_count;
+    ctx.dispatch_data = &reg;
+    ctx.tools = local_schemas;
+    ctx.tool_count = local_tool_count;
 
     int rc = agent_run(&ctx);
 
@@ -234,6 +251,7 @@ static void process_message(cJSON *msg, ToolRegistry *reg, const ToolSchema *sch
     /* V11: Send reply chunked at 4096 chars */
     tg_send_chunked(g_cfg->telegram_token, chat_id, reply_text);
     free(reply_text);
+    tools_free(&reg);
 }
 
 static void *poll_loop(void *arg) {

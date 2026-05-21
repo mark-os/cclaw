@@ -46,6 +46,15 @@ static const char *SCHEMA_SQL =
     "CREATE TABLE IF NOT EXISTS tg_chat_sessions ("
     "  chat_id INTEGER PRIMARY KEY,"
     "  session_id INTEGER NOT NULL REFERENCES sessions(id)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS js_tools ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  name TEXT NOT NULL,"
+    "  description TEXT,"
+    "  parameters_json TEXT,"
+    "  code TEXT NOT NULL,"
+    "  UNIQUE(session_id, name)"
     ");";
 
 sqlite3 *db_open(const char *path) {

@@ -23,30 +23,15 @@ static int interrupt_handler(JSContext *ctx, void *opaque) {
     return state->count > JS_MAX_INSTRUCTIONS;
 }
 
-static const char *JSEVAL_PARAMS_JSON =
-    "{\"type\":\"object\",\"properties\":{"
-    "\"code\":{\"type\":\"string\",\"description\":\"JavaScript code to execute\"}"
-    "},\"required\":[\"code\"]}";
-
-char *tool_js_eval_handler(const char *arguments, void *user_data) {
-    (void)user_data;
-
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON arguments");
-
-    cJSON *code_item = cJSON_GetObjectItemCaseSensitive(json, "code");
-    if (!cJSON_IsString(code_item) || !code_item->valuestring[0]) {
-        cJSON_Delete(json);
-        return strdup("error: missing or empty 'code' field");
-    }
-    const char *code = code_item->valuestring;
+/* Eval JS code in a fresh sandboxed context. Returns heap-allocated result. */
+static char *js_eval_code(const char *code) {
     size_t code_len = strlen(code);
 
     void *heap = malloc(JS_HEAP_SIZE);
-    if (!heap) { cJSON_Delete(json); return strdup("error: out of memory"); }
+    if (!heap) return strdup("error: out of memory");
 
     JSContext *ctx = JS_NewContext(heap, JS_HEAP_SIZE, &js_std_library);
-    if (!ctx) { free(heap); cJSON_Delete(json); return strdup("error: JS context creation failed"); }
+    if (!ctx) { free(heap); return strdup("error: JS context creation failed"); }
 
     InterruptState istate = {0};
     JS_SetInterruptHandler(ctx, interrupt_handler);
@@ -81,6 +66,27 @@ char *tool_js_eval_handler(const char *arguments, void *user_data) {
 
     JS_FreeContext(ctx);
     free(heap);
+    return result;
+}
+
+static const char *JSEVAL_PARAMS_JSON =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"code\":{\"type\":\"string\",\"description\":\"JavaScript code to execute\"}"
+    "},\"required\":[\"code\"]}";
+
+char *tool_js_eval_handler(const char *arguments, void *user_data) {
+    (void)user_data;
+
+    cJSON *json = cJSON_Parse(arguments);
+    if (!json) return strdup("error: invalid JSON arguments");
+
+    cJSON *code_item = cJSON_GetObjectItemCaseSensitive(json, "code");
+    if (!cJSON_IsString(code_item) || !code_item->valuestring[0]) {
+        cJSON_Delete(json);
+        return strdup("error: missing or empty 'code' field");
+    }
+
+    char *result = js_eval_code(code_item->valuestring);
     cJSON_Delete(json);
     return result;
 }
@@ -89,4 +95,166 @@ int tool_js_eval_register(ToolRegistry *reg) {
     return tools_register(reg, "js_eval",
                           "Execute JavaScript code in a sandboxed environment and return the result",
                           JSEVAL_PARAMS_JSON, tool_js_eval_handler, NULL);
+}
+
+/* --- js_define_tool --- */
+
+static const char *JSDEFINE_PARAMS_JSON =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"name\":{\"type\":\"string\",\"description\":\"Tool name (snake_case)\"},"
+    "\"description\":{\"type\":\"string\",\"description\":\"What the tool does\"},"
+    "\"parameters\":{\"type\":\"string\",\"description\":\"JSON Schema for tool parameters\"},"
+    "\"code\":{\"type\":\"string\",\"description\":\"JS function body. Receives 'args' object, must return a string.\"}"
+    "},\"required\":[\"name\",\"code\"]}";
+
+/* Handler for JS-defined tools. user_data points to heap-allocated code string. */
+static char *js_defined_tool_handler(const char *arguments, void *user_data) {
+    const char *code = (const char *)user_data;
+    if (!code) return strdup("error: no code for this tool");
+
+    /* Wrap: (function(args){<code>})(JSON.parse('<escaped_args>')) */
+    cJSON *args_json = cJSON_Parse(arguments);
+    char *args_str = args_json ? cJSON_PrintUnformatted(args_json) : strdup("{}");
+    cJSON_Delete(args_json);
+
+    /* Escape single quotes in args for embedding in JS string literal */
+    size_t args_len = strlen(args_str);
+    size_t escaped_cap = args_len * 2 + 1;
+    char *escaped = malloc(escaped_cap);
+    if (!escaped) { free(args_str); return strdup("error: OOM"); }
+    size_t j = 0;
+    for (size_t i = 0; i < args_len; i++) {
+        if (args_str[i] == '\'' || args_str[i] == '\\') {
+            escaped[j++] = '\\';
+        }
+        escaped[j++] = args_str[i];
+    }
+    escaped[j] = '\0';
+    free(args_str);
+
+    size_t wrap_len = strlen(code) + j + 64;
+    char *wrapped = malloc(wrap_len);
+    if (!wrapped) { free(escaped); return strdup("error: OOM"); }
+    snprintf(wrapped, wrap_len, "(function(args){%s})(JSON.parse('%s'))", code, escaped);
+    free(escaped);
+
+    char *result = js_eval_code(wrapped);
+    free(wrapped);
+    return result;
+}
+
+/* Persist a JS tool definition to DB */
+static int js_tool_persist(sqlite3 *db, int64_t session_id, const char *name,
+                           const char *description, const char *parameters_json,
+                           const char *code) {
+    const char *sql =
+        "INSERT OR REPLACE INTO js_tools (session_id, name, description, parameters_json, code)"
+        " VALUES (?, ?, ?, ?, ?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, description ? description : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, parameters_json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, code, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/* Register a single JS-defined tool into the registry. Code is strdup'd for user_data. */
+static int js_tool_register_one(ToolRegistry *reg, const char *name,
+                                const char *description, const char *parameters_json,
+                                const char *code) {
+    /* Check if already registered (re-define overwrites) */
+    ToolEntry *existing = tools_lookup(reg, name);
+    if (existing) {
+        /* Update in place */
+        free(existing->description);
+        free(existing->parameters_json);
+        free(existing->user_data);
+        existing->description = description ? strdup(description) : NULL;
+        existing->parameters_json = parameters_json ? strdup(parameters_json) : NULL;
+        existing->user_data = strdup(code);
+        existing->handler = js_defined_tool_handler;
+        return 0;
+    }
+    char *code_copy = strdup(code);
+    if (!code_copy) return -1;
+    return tools_register(reg, name, description, parameters_json,
+                          js_defined_tool_handler, code_copy);
+}
+
+char *tool_js_define_handler(const char *arguments, void *user_data) {
+    JsDefineCtx *ctx = (JsDefineCtx *)user_data;
+    if (!ctx || !ctx->db || !ctx->reg) return strdup("error: js_define_tool not configured");
+
+    cJSON *json = cJSON_Parse(arguments);
+    if (!json) return strdup("error: invalid JSON arguments");
+
+    cJSON *name_item = cJSON_GetObjectItemCaseSensitive(json, "name");
+    cJSON *code_item = cJSON_GetObjectItemCaseSensitive(json, "code");
+    if (!cJSON_IsString(name_item) || !name_item->valuestring[0] ||
+        !cJSON_IsString(code_item) || !code_item->valuestring[0]) {
+        cJSON_Delete(json);
+        return strdup("error: 'name' and 'code' are required non-empty strings");
+    }
+
+    const char *name = name_item->valuestring;
+    const char *code = code_item->valuestring;
+
+    cJSON *desc_item = cJSON_GetObjectItemCaseSensitive(json, "description");
+    const char *description = cJSON_IsString(desc_item) ? desc_item->valuestring : NULL;
+
+    cJSON *params_item = cJSON_GetObjectItemCaseSensitive(json, "parameters");
+    const char *parameters = cJSON_IsString(params_item) ? params_item->valuestring : "{}";
+
+    /* Persist to DB */
+    if (js_tool_persist(ctx->db, ctx->session_id, name, description, parameters, code) != 0) {
+        cJSON_Delete(json);
+        return strdup("error: failed to persist tool definition");
+    }
+
+    /* Register in live registry */
+    if (js_tool_register_one(ctx->reg, name, description, parameters, code) != 0) {
+        cJSON_Delete(json);
+        return strdup("error: failed to register tool");
+    }
+
+    cJSON_Delete(json);
+
+    size_t rlen = strlen(name) + 32;
+    char *result = malloc(rlen);
+    if (result) snprintf(result, rlen, "tool '%s' defined", name);
+    else result = strdup("ok");
+    return result;
+}
+
+int tool_js_define_register(ToolRegistry *reg, JsDefineCtx *ctx) {
+    return tools_register(reg, "js_define_tool",
+                          "Define a new tool from JavaScript code. The code receives an 'args' object and must return a string.",
+                          JSDEFINE_PARAMS_JSON, tool_js_define_handler, ctx);
+}
+
+int tool_js_load_session(sqlite3 *db, int64_t session_id, ToolRegistry *reg) {
+    const char *sql = "SELECT name, description, parameters_json, code FROM js_tools WHERE session_id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+
+    int loaded = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(stmt, 0);
+        const char *desc = (const char *)sqlite3_column_text(stmt, 1);
+        const char *params = (const char *)sqlite3_column_text(stmt, 2);
+        const char *code = (const char *)sqlite3_column_text(stmt, 3);
+        if (name && code) {
+            if (js_tool_register_one(reg, name, desc, params, code) == 0)
+                loaded++;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return loaded;
 }

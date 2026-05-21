@@ -108,6 +108,12 @@ int cli_run(const Config *cfg) {
     tool_file_write_register(&reg, cfg->workspace);
     tool_js_eval_register(&reg);
 
+    JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg};
+    tool_js_define_register(&reg, &js_ctx);
+
+    /* Load session-persistent JS tools from DB */
+    tool_js_load_session(db, session_id, &reg);
+
     size_t tool_count = 0;
     const ToolSchema *schemas = tools_schemas(&reg, &tool_count);
 

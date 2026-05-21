@@ -105,7 +105,7 @@ T47|x|`shell_exec` timeout — SIGKILL child after configurable N seconds (defau
 T48|x|`web_fetch` tool — HTTP GET, extract text from HTML, wrap output in external input protection|V15
 T49|x|test: context window cuts at valid turn boundary, never mid-tool-call|V7,V8
 T50|x|test: per-agent workspace isolation (file tools reject paths outside workspace)|V1,V12
-T51|.|test: external content wrapping — boundary markers, homoglyph sanitization|V15
+T51|x|test: external content wrapping — boundary markers, homoglyph sanitization|V15
 T52|.|integration test: live OpenRouter call → parse response, verify tool_calls round-trip|§I.api
 T53|.|integration test: agent loop end-to-end (prompt → tool call → tool result → final answer)|V10,§I.api
 T54|.|integration test: provider fallback (kill primary, verify fallback fires)|T45

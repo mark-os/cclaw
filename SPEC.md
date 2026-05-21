@@ -72,7 +72,7 @@ T16|x|session integration — load branch, append entries, flush to DB|V14,T6
 T17|x|`shell_exec` tool — popen, capture stdout+stderr, timeout|§I.tool
 T18|x|`file_read` tool — workspace path restriction|V1
 T19|x|`file_write` tool — workspace path restriction|V1
-T20|.|CLI REPL (`cli.c`) — read line, send to agent, print response|§I.cmd
+T20|x|CLI REPL (`cli.c`) — read line, send to agent, print response|§I.cmd
 T21|.|CLI debug mode — raw req/resp JSON to stderr|§I.cmd
 T22|.|CLI session selection (create new / resume existing)|§I.cmd
 T23|.|Telegram poller (`telegram.c`) — getUpdates loop in thread|§I.api

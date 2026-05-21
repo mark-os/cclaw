@@ -37,6 +37,48 @@ static void print_response(sqlite3 *db, int64_t session_id) {
     entry_branch_free(entries, count);
 }
 
+/* Prompt user to select or create a session. Returns session id or -1. */
+static int64_t cli_select_session(sqlite3 *db) {
+    int count = 0;
+    Session *sessions = session_list(db, &count);
+
+    if (!sessions || count == 0) {
+        session_list_free(sessions, count);
+        return session_create(db, "cli");
+    }
+
+    printf("sessions:\n");
+    for (int i = 0; i < count; i++) {
+        printf("  %d) [%lld] %s\n", i + 1, (long long)sessions[i].id,
+               sessions[i].name ? sessions[i].name : "(unnamed)");
+    }
+    printf("  n) new session\n");
+    printf("select: ");
+    fflush(stdout);
+
+    char buf[32];
+    if (!fgets(buf, sizeof(buf), stdin)) {
+        session_list_free(sessions, count);
+        return -1;
+    }
+
+    int64_t result;
+    if (buf[0] == 'n' || buf[0] == 'N') {
+        result = session_create(db, "cli");
+    } else {
+        int choice = atoi(buf);
+        if (choice >= 1 && choice <= count) {
+            result = sessions[choice - 1].id;
+        } else {
+            fprintf(stderr, "invalid choice\n");
+            result = -1;
+        }
+    }
+
+    session_list_free(sessions, count);
+    return result;
+}
+
 int cli_run(const Config *cfg) {
     if (!cfg) return -1;
     if (!cfg->provider.api_key) {
@@ -50,9 +92,9 @@ int cli_run(const Config *cfg) {
         return -1;
     }
 
-    int64_t session_id = session_create(db, "cli");
+    int64_t session_id = cli_select_session(db);
     if (session_id < 0) {
-        fprintf(stderr, "error: cannot create session\n");
+        fprintf(stderr, "error: cannot select session\n");
         db_close(db);
         return -1;
     }
@@ -67,9 +109,14 @@ int cli_run(const Config *cfg) {
     size_t tool_count = 0;
     const ToolSchema *schemas = tools_schemas(&reg, &tool_count);
 
-    /* Append system message */
-    Message sys_msg = {.role = ROLE_SYSTEM, .content = "You are CClaw, a helpful AI assistant."};
-    entry_append(db, session_id, &sys_msg);
+    /* Append system message only for fresh sessions */
+    int branch_count = 0;
+    Entry *branch = session_get_branch(db, session_id, &branch_count);
+    if (branch_count == 0) {
+        Message sys_msg = {.role = ROLE_SYSTEM, .content = "You are CClaw, a helpful AI assistant."};
+        entry_append(db, session_id, &sys_msg);
+    }
+    entry_branch_free(branch, branch_count);
 
     printf("cclaw cli (type 'exit' or Ctrl-D to quit)\n");
 

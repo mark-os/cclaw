@@ -183,6 +183,39 @@ static void test_max_iterations_default(void) {
     PASS();
 }
 
+static void test_debug_flag_stderr(void) {
+    TEST(debug_flag_stderr);
+    /* With debug=1 and unreachable LLM, agent should still fail gracefully
+     * (debug output goes to stderr, doesn't affect return code) */
+    sqlite3 *db = db_open(":memory:");
+    if (!db) { FAIL("db_open failed"); return; }
+    int64_t sid = session_create(db, "test");
+    if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
+
+    Config cfg = {0};
+    cfg.provider.base_url = "http://127.0.0.1:1/v1";
+    cfg.provider.api_key = "fake";
+    cfg.provider.model = "test";
+    cfg.provider.context_window = 128000;
+    cfg.debug = 1;
+
+    Message user_msg = {.role = ROLE_USER, .content = "hello"};
+    entry_append(db, sid, &user_msg);
+
+    AgentContext ctx = {0};
+    ctx.db = db;
+    ctx.session_id = sid;
+    ctx.cfg = &cfg;
+    ctx.dispatch = mock_tool_ok;
+    ctx.debug = 1;
+
+    int rc = agent_run(&ctx);
+    if (rc != -1) { FAIL("expected -1 for unreachable LLM"); db_close(db); return; }
+
+    db_close(db);
+    PASS();
+}
+
 int main(void) {
     printf("test_agent:\n");
     test_agent_context_init();
@@ -194,6 +227,7 @@ int main(void) {
     test_agent_run_empty_session();
     test_max_iterations_configurable();
     test_max_iterations_default();
+    test_debug_flag_stderr();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

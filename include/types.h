@@ -70,6 +70,7 @@ typedef struct {
     char *telegram_token;
     int web_port;
     int max_iterations;     /* agent loop iteration cap */
+    int debug;              /* --debug: dump raw LLM req/resp JSON to stderr */
 } Config;
 
 #endif

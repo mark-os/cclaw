@@ -75,6 +75,9 @@ int agent_run(AgentContext *ctx) {
         char *url = build_url(a, ctx->cfg);
         if (!url) { arena_destroy(a); return -1; }
 
+        if (ctx->debug)
+            fprintf(stderr, "[DEBUG REQ] %s\n", req_json);
+
         char auth_hdr[512];
         snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s",
                  ctx->cfg->provider.api_key);
@@ -87,10 +90,15 @@ int agent_run(AgentContext *ctx) {
         HttpResponse resp;
         int status = http_post(url, headers, req_json, &resp);
         if (status < 200 || status >= 300 || !resp.data) {
+            if (ctx->debug && resp.data)
+                fprintf(stderr, "[DEBUG RESP] status=%d %s\n", status, resp.data);
             http_response_free(&resp);
             arena_destroy(a);
             return -1;
         }
+
+        if (ctx->debug)
+            fprintf(stderr, "[DEBUG RESP] %s\n", resp.data);
 
         /* Parse response */
         LlmResponse llm_resp;

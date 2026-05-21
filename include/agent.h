@@ -22,6 +22,7 @@ typedef struct {
     void *dispatch_data;
     const ToolSchema *tools;
     size_t tool_count;
+    int debug;              /* dump raw LLM req/resp JSON to stderr */
 } AgentContext;
 
 /* Run agent loop: call LLM, dispatch tool_calls, repeat until assistant

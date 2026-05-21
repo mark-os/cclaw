@@ -104,6 +104,7 @@ int cli_run(const Config *cfg) {
         ctx.dispatch_data = &reg;
         ctx.tools = schemas;
         ctx.tool_count = tool_count;
+        ctx.debug = cfg->debug;
 
         int rc = agent_run(&ctx);
         if (rc != 0) {

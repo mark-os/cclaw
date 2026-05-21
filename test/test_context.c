@@ -172,6 +172,174 @@ static void test_empty_input(void) {
     PASS();
 }
 
+/* T49/V8: Cut never separates assistant+tool_calls from its tool results */
+static void test_v8_multi_tool_calls_kept_together(void) {
+    TEST(v8_multi_tool_calls_kept_together);
+    /* Scenario: assistant makes 2 tool calls, followed by 2 tool results,
+     * then a user msg. Budget only fits the user msg + maybe one group.
+     * The assistant+tools group must stay together or be dropped entirely. */
+    Config cfg = {0};
+    cfg.max_history_tokens = 40; /* very tight budget */
+
+    char big_args[200];
+    memset(big_args, 'Z', 199);
+    big_args[199] = '\0';
+
+    ToolCall tcs[2] = {
+        { .id = "c1", .name = "file_read", .arguments = big_args },
+        { .id = "c2", .name = "shell_exec", .arguments = big_args },
+    };
+    ToolResult tr1 = { .tool_call_id = "c1", .content = "content1" };
+    ToolResult tr2 = { .tool_call_id = "c2", .content = "content2" };
+
+    Entry entries[5] = {
+        make_entry(1, ROLE_USER, "do stuff"),
+        make_entry(2, ROLE_ASSISTANT, NULL),
+        make_entry(3, ROLE_TOOL, NULL),
+        make_entry(4, ROLE_TOOL, NULL),
+        make_entry(5, ROLE_USER, "ok"),
+    };
+    entries[1].message.tool_calls = tcs;
+    entries[1].message.tool_call_count = 2;
+    entries[2].message.tool_result = &tr1;
+    entries[3].message.tool_result = &tr2;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 5, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+
+    /* Verify: no tool result appears without its preceding assistant */
+    for (int i = 0; i < count; i++) {
+        if (msgs[i].role == ROLE_TOOL) {
+            if (i == 0 || (msgs[i-1].role != ROLE_ASSISTANT && msgs[i-1].role != ROLE_TOOL)) {
+                FAIL("orphaned tool result — V8 violated");
+                context_free(msgs, count);
+                return;
+            }
+        }
+    }
+    context_free(msgs, count);
+    PASS();
+}
+
+/* T49/V8: Cut lands before a user message, not mid-conversation */
+static void test_v8_cut_at_user_boundary(void) {
+    TEST(v8_cut_at_user_boundary);
+    /* Budget fits last 2 messages but not all 5.
+     * Cut must land before a user msg (or system msg). */
+    Config cfg = {0};
+    cfg.max_history_tokens = 30;
+
+    Entry entries[5] = {
+        make_entry(1, ROLE_USER, "first question with some extra text padding here"),
+        make_entry(2, ROLE_ASSISTANT, "first answer with some extra text padding here"),
+        make_entry(3, ROLE_USER, "second question"),
+        make_entry(4, ROLE_ASSISTANT, "second answer"),
+        make_entry(5, ROLE_USER, "third"),
+    };
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 5, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+
+    /* First real message after cutoff notice must be user or system */
+    int start = 0;
+    if (count > 0 && msgs[0].role == ROLE_SYSTEM && strstr(msgs[0].content, "truncated"))
+        start = 1;
+
+    if (start < count && msgs[start].role != ROLE_USER && msgs[start].role != ROLE_SYSTEM) {
+        FAIL("cut did not land at user/system boundary");
+        context_free(msgs, count);
+        return;
+    }
+    context_free(msgs, count);
+    PASS();
+}
+
+/* T49/V8: When tool group is at the boundary, it's dropped entirely rather than split */
+static void test_v8_tool_group_at_boundary_dropped(void) {
+    TEST(v8_tool_group_at_boundary_dropped);
+    /* Budget fits user msg at end but not the preceding tool group.
+     * The tool group must be dropped entirely — no partial inclusion. */
+    Config cfg = {0};
+    cfg.max_history_tokens = 20; /* only fits ~80 chars */
+
+    ToolCall tc = { .id = "c1", .name = "shell_exec", .arguments = "{\"cmd\":\"echo hi\"}" };
+    ToolResult tr = { .tool_call_id = "c1", .content = "hi" };
+
+    char big[300];
+    memset(big, 'W', 299);
+    big[299] = '\0';
+
+    Entry entries[4] = {
+        make_entry(1, ROLE_ASSISTANT, NULL),
+        make_entry(2, ROLE_TOOL, NULL),
+        make_entry(3, ROLE_USER, big),  /* big user msg that barely fits */
+        make_entry(4, ROLE_USER, "end"),
+    };
+    entries[0].message.tool_calls = &tc;
+    entries[0].message.tool_call_count = 1;
+    entries[1].message.tool_result = &tr;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 4, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+
+    /* No assistant-with-tool-calls should appear without its tool results */
+    for (int i = 0; i < count; i++) {
+        if (msgs[i].role == ROLE_ASSISTANT && msgs[i].tool_calls) {
+            /* Next msg must be tool */
+            if (i + 1 >= count || msgs[i + 1].role != ROLE_TOOL) {
+                FAIL("assistant with tool_calls but no following tool result");
+                context_free(msgs, count);
+                return;
+            }
+        }
+    }
+    context_free(msgs, count);
+    PASS();
+}
+
+/* T49/V7: Included messages fit within token budget */
+static void test_v7_result_within_budget(void) {
+    TEST(v7_result_within_budget);
+    Config cfg = {0};
+    cfg.max_history_tokens = 50;
+
+    Entry entries[6] = {
+        make_entry(1, ROLE_USER, "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj"),
+        make_entry(2, ROLE_ASSISTANT, "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj"),
+        make_entry(3, ROLE_USER, "kkkk llll mmmm nnnn oooo pppp qqqq rrrr ssss tttt"),
+        make_entry(4, ROLE_ASSISTANT, "short"),
+        make_entry(5, ROLE_USER, "hi"),
+        make_entry(6, ROLE_ASSISTANT, "hey"),
+    };
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 6, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+
+    /* Sum tokens of included messages (skip cutoff notice) */
+    int total = 0;
+    int start = 0;
+    if (count > 0 && msgs[0].role == ROLE_SYSTEM && strstr(msgs[0].content, "truncated"))
+        start = 1;
+    for (int i = start; i < count; i++)
+        total += context_estimate_tokens(&msgs[i]);
+
+    if (total > 50) {
+        FAIL("included messages exceed budget");
+        context_free(msgs, count);
+        return;
+    }
+    context_free(msgs, count);
+    PASS();
+}
+
 int main(void) {
     printf("--- test_context ---\n");
     test_all_fits();
@@ -180,6 +348,10 @@ int main(void) {
     test_estimate_tokens();
     test_max_history_tokens_override();
     test_empty_input();
+    test_v8_multi_tool_calls_kept_together();
+    test_v8_cut_at_user_boundary();
+    test_v8_tool_group_at_boundary_dropped();
+    test_v7_result_within_budget();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

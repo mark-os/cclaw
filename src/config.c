@@ -91,6 +91,7 @@ Config *config_load(const char *path) {
         if (s) { free(cfg->telegram_token); cfg->telegram_token = s; }
         cfg->web_port = json_int(root, "web_port", cfg->web_port);
         cfg->max_iterations = json_int(root, "max_iterations", cfg->max_iterations);
+        cfg->heartbeat_interval = json_int(root, "heartbeat_interval", cfg->heartbeat_interval);
 
         cJSON_Delete(root);
     }
@@ -103,6 +104,7 @@ Config *config_load(const char *path) {
     env_override_str(&cfg->db_path, "CCLAW_DB_PATH");
     env_override_int(&cfg->web_port, "CCLAW_WEB_PORT");
     env_override_int(&cfg->max_iterations, "CCLAW_MAX_ITERATIONS");
+    env_override_int(&cfg->heartbeat_interval, "CCLAW_HEARTBEAT_INTERVAL");
 
     return cfg;
 }

@@ -7,6 +7,7 @@
 #include "cli.h"
 #include "telegram.h"
 #include "web.h"
+#include "heartbeat.h"
 #include "db.h"
 
 static volatile int daemon_running = 1;
@@ -74,6 +75,12 @@ int main(int argc, char *argv[]) {
         printf("web server started on port %d\n", cfg->web_port);
     }
 
+    if (heartbeat_start(cfg, db) != 0) {
+        fprintf(stderr, "warning: failed to start heartbeat timer\n");
+    } else if (cfg->heartbeat_interval > 0) {
+        printf("heartbeat started (%ds interval)\n", cfg->heartbeat_interval);
+    }
+
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);
 
@@ -82,6 +89,7 @@ int main(int argc, char *argv[]) {
     }
 
     printf("\nshutting down...\n");
+    heartbeat_stop();
     web_stop();
     telegram_stop();
     db_close(db);

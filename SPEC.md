@@ -86,7 +86,7 @@ T30|x|vendor mquickjs, integrate into build|§C
 T31|x|`js_eval` tool — execute code, return result|V5
 T32|x|`js_define_tool` — register JS fn as tool (session-persistent)|§I.tool
 T33|x|JS context replay on session reload|T32
-T34|.|heartbeat timer thread + system msg injection|§C
+T34|x|heartbeat timer thread + system msg injection|§C
 T35|.|cron table + scheduler thread|§I.db
 T36|.|`cron_set`/`cron_list`/`cron_remove` tools|T35
 T37|.|`spawn_agent` tool — fork+exec sub-agent process|V3,V13

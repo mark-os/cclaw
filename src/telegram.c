@@ -31,15 +31,18 @@ static char *tg_url(const char *token, const char *method) {
     return url;
 }
 
-/* POST JSON to Telegram API, return parsed cJSON response or NULL */
-static cJSON *tg_call(const char *token, const char *method, const char *body) {
+/* POST JSON to Telegram API, return parsed cJSON response or NULL.
+ * If out_status is non-NULL, writes HTTP status code (or -1 on curl error). */
+static cJSON *tg_call_ex(const char *token, const char *method, const char *body, int *out_status) {
     char *url = tg_url(token, method);
-    if (!url) return NULL;
+    if (!url) { if (out_status) *out_status = -1; return NULL; }
 
     const char *headers[] = {"Content-Type: application/json", NULL};
     HttpResponse resp;
     int status = http_post(url, headers, body, &resp);
     free(url);
+
+    if (out_status) *out_status = status;
 
     if (status < 200 || status >= 300 || !resp.data) {
         http_response_free(&resp);
@@ -49,6 +52,18 @@ static cJSON *tg_call(const char *token, const char *method, const char *body) {
     cJSON *json = cJSON_Parse(resp.data);
     http_response_free(&resp);
     return json;
+}
+
+static cJSON *tg_call(const char *token, const char *method, const char *body) {
+    return tg_call_ex(token, method, body, NULL);
+}
+
+/* V2: Compute backoff sleep in seconds. Doubles each failure, capped at 60s. */
+int tg_backoff_delay(int consecutive_failures) {
+    int delay = 1;
+    for (int i = 0; i < consecutive_failures - 1 && delay < 60; i++)
+        delay *= 2;
+    return delay < 60 ? delay : 60;
 }
 
 /* V11: Find split point within text[0..max_len-1].
@@ -223,6 +238,7 @@ static void process_message(cJSON *msg, ToolRegistry *reg, const ToolSchema *sch
 static void *poll_loop(void *arg) {
     (void)arg;
     int64_t offset = 0;
+    int failures = 0; /* V2: consecutive failure count for backoff */
 
     /* T25: Load persisted offset from DB */
     char *saved = db_kv_get(g_db, "tg_offset");
@@ -250,18 +266,35 @@ static void *poll_loop(void *arg) {
         cJSON_Delete(req);
         if (!body) { sleep(1); continue; }
 
-        cJSON *resp = tg_call(g_cfg->telegram_token, "getUpdates", body);
+        int http_status = 0;
+        cJSON *resp = tg_call_ex(g_cfg->telegram_token, "getUpdates", body, &http_status);
         free(body);
 
-        if (!resp) { sleep(5); continue; }
+        if (!resp) {
+            /* V2: Exponential backoff on transient errors */
+            failures++;
+            int delay = tg_backoff_delay(failures);
+            /* Respect Retry-After for 429 — we don't have the header here,
+             * but backoff naturally covers it with increasing delays */
+            for (int i = 0; i < delay && running; i++)
+                sleep(1);
+            continue;
+        }
 
         cJSON *ok = cJSON_GetObjectItemCaseSensitive(resp, "ok");
         cJSON *result = cJSON_GetObjectItemCaseSensitive(resp, "result");
         if (!cJSON_IsTrue(ok) || !cJSON_IsArray(result)) {
             cJSON_Delete(resp);
-            sleep(5);
+            /* V2: Treat API-level error as transient */
+            failures++;
+            int delay = tg_backoff_delay(failures);
+            for (int i = 0; i < delay && running; i++)
+                sleep(1);
             continue;
         }
+
+        /* Success — reset backoff */
+        failures = 0;
 
         cJSON *update;
         cJSON_ArrayForEach(update, result) {

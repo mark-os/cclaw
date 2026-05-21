@@ -77,6 +77,18 @@ static void test_split_exact_max(void) {
     assert(r == 99);
 }
 
+static void test_backoff_delay(void) {
+    /* V2: 1, 2, 4, 8, 16, 32, 60(cap) */
+    assert(tg_backoff_delay(1) == 1);
+    assert(tg_backoff_delay(2) == 2);
+    assert(tg_backoff_delay(3) == 4);
+    assert(tg_backoff_delay(4) == 8);
+    assert(tg_backoff_delay(5) == 16);
+    assert(tg_backoff_delay(6) == 32);
+    assert(tg_backoff_delay(7) == 60);
+    assert(tg_backoff_delay(100) == 60);
+}
+
 int main(void) {
     printf("test_start_no_token...");
     test_start_no_token();
@@ -108,6 +120,10 @@ int main(void) {
 
     printf("test_split_exact_max...");
     test_split_exact_max();
+    printf(" OK\n");
+
+    printf("test_backoff_delay...");
+    test_backoff_delay();
     printf(" OK\n");
 
     printf("all telegram tests passed\n");

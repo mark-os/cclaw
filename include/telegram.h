@@ -18,4 +18,8 @@ void telegram_stop(void);
  * Exposed for testing. */
 size_t tg_find_split(const char *text, size_t len, size_t max_len);
 
+/* V2: Compute backoff delay in seconds given consecutive failure count.
+ * Doubles each failure (1, 2, 4, 8, ...), capped at 60s. Exposed for testing. */
+int tg_backoff_delay(int consecutive_failures);
+
 #endif

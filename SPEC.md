@@ -96,7 +96,7 @@ T38|x|`check_agent` tool — read result from DB|V13
 T39|x|sub-agent lifecycle (limits, cleanup, crash isolation)|V3
 T40|x|token estimation (chars/4 heuristic)|V7
 T41|x|graceful shutdown (SIGINT/SIGTERM)|§C
-T42|.|systemd unit file (`cclaw.service`) — restart on failure, env file, journal logging (no test)|§C
+T42|x|systemd unit file (`cclaw.service`) — restart on failure, env file, journal logging (no test)|§C
 T43|.|SysVinit init script — network wait, respawn loop, PID mgmt, stale PID detect (no test)|§C
 T44|.|error handling — 429 retry, context overflow detect, JSON parse failure recovery|V2,V10
 T45|.|provider fallback chain — config array, try next on 5xx/timeout (test: Gemini `gemma-4-31b-it` via `GEMINI_API_KEY`)|V2

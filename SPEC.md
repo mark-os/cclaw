@@ -65,7 +65,7 @@ T9|x|HTTP wrapper (`http.c`) — POST w/ headers, response buffer via libcurl|§
 T10|x|LLM request builder (`llm.c`) — messages + tools → JSON|V9
 T11|x|LLM response parser — extract content, tool_calls, usage|§I.api
 T12|x|context window manager — select turns ≤ budget, cutoff notice, valid boundaries|V7,V8
-T13|.|agent loop (`agent.c`) — call LLM, dispatch tools, repeat until done|V10
+T13|x|agent loop (`agent.c`) — call LLM, dispatch tools, repeat until done|V10
 T14|.|tool registry — register/lookup by name, schema storage|§I.tool
 T15|.|max iterations guard|§I.file
 T16|.|session integration — load branch, append entries, flush to DB|V14,T6

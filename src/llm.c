@@ -3,6 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Arena-duplicate a string. Returns NULL if src is NULL. */
+static char *arena_strdup(Arena *a, const char *src) {
+    if (!src) return NULL;
+    size_t len = strlen(src);
+    char *dst = arena_alloc(a, len + 1);
+    if (dst) memcpy(dst, src, len + 1);
+    return dst;
+}
+
 static const char *role_str(Role r) {
     switch (r) {
         case ROLE_SYSTEM:    return "system";
@@ -97,4 +106,75 @@ char *llm_build_request(Arena *a, const Config *cfg, const Message *msgs,
     free(printed);
 
     return result;
+}
+
+int llm_parse_response(Arena *a, const char *json, LlmResponse *out) {
+    if (!json || !out) return -1;
+    memset(out, 0, sizeof(*out));
+
+    cJSON *root = cJSON_Parse(json);
+    if (!root) return -1;
+
+    /* Extract choices[0].message */
+    cJSON *choices = cJSON_GetObjectItem(root, "choices");
+    if (!choices || cJSON_GetArraySize(choices) == 0) {
+        cJSON_Delete(root);
+        return -1;
+    }
+
+    cJSON *choice0 = cJSON_GetArrayItem(choices, 0);
+    cJSON *message = cJSON_GetObjectItem(choice0, "message");
+    if (!message) { cJSON_Delete(root); return -1; }
+
+    /* finish_reason */
+    cJSON *fr = cJSON_GetObjectItem(choice0, "finish_reason");
+    if (fr && cJSON_IsString(fr))
+        out->finish_reason = arena_strdup(a, fr->valuestring);
+
+    /* content */
+    cJSON *content = cJSON_GetObjectItem(message, "content");
+    if (content && cJSON_IsString(content))
+        out->content = arena_strdup(a, content->valuestring);
+
+    /* tool_calls */
+    cJSON *tool_calls = cJSON_GetObjectItem(message, "tool_calls");
+    if (tool_calls && cJSON_IsArray(tool_calls)) {
+        int count = cJSON_GetArraySize(tool_calls);
+        if (count > 0) {
+            out->tool_calls = arena_alloc(a, (size_t)count * sizeof(ToolCall));
+            if (!out->tool_calls) { cJSON_Delete(root); return -1; }
+            out->tool_call_count = (size_t)count;
+
+            for (int i = 0; i < count; i++) {
+                cJSON *tc = cJSON_GetArrayItem(tool_calls, i);
+                cJSON *id = cJSON_GetObjectItem(tc, "id");
+                cJSON *fn = cJSON_GetObjectItem(tc, "function");
+
+                out->tool_calls[i].id = arena_strdup(a, id && cJSON_IsString(id) ? id->valuestring : "");
+                if (fn) {
+                    cJSON *name = cJSON_GetObjectItem(fn, "name");
+                    cJSON *args = cJSON_GetObjectItem(fn, "arguments");
+                    out->tool_calls[i].name = arena_strdup(a, name && cJSON_IsString(name) ? name->valuestring : "");
+                    out->tool_calls[i].arguments = arena_strdup(a, args && cJSON_IsString(args) ? args->valuestring : "");
+                } else {
+                    out->tool_calls[i].name = arena_strdup(a, "");
+                    out->tool_calls[i].arguments = arena_strdup(a, "");
+                }
+            }
+        }
+    }
+
+    /* usage */
+    cJSON *usage = cJSON_GetObjectItem(root, "usage");
+    if (usage) {
+        cJSON *pt = cJSON_GetObjectItem(usage, "prompt_tokens");
+        cJSON *ct = cJSON_GetObjectItem(usage, "completion_tokens");
+        cJSON *tt = cJSON_GetObjectItem(usage, "total_tokens");
+        if (pt && cJSON_IsNumber(pt)) out->usage.prompt_tokens = pt->valueint;
+        if (ct && cJSON_IsNumber(ct)) out->usage.completion_tokens = ct->valueint;
+        if (tt && cJSON_IsNumber(tt)) out->usage.total_tokens = tt->valueint;
+    }
+
+    cJSON_Delete(root);
+    return 0;
 }

@@ -63,7 +63,7 @@ T7|x|entry append + tree ops (parent_id linking)|V14
 T8|x|FTS5 setup + search fn over message content|V7
 T9|x|HTTP wrapper (`http.c`) — POST w/ headers, response buffer via libcurl|§C
 T10|x|LLM request builder (`llm.c`) — messages + tools → JSON|V9
-T11|.|LLM response parser — extract content, tool_calls, usage|§I.api
+T11|x|LLM response parser — extract content, tool_calls, usage|§I.api
 T12|.|context window manager — select turns ≤ budget, cutoff notice, valid boundaries|V7,V8
 T13|.|agent loop (`agent.c`) — call LLM, dispatch tools, repeat until done|V10
 T14|.|tool registry — register/lookup by name, schema storage|§I.tool

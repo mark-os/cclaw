@@ -175,6 +175,78 @@ static void test_tool_result_message(void) {
     PASS();
 }
 
+static void test_parse_content_response(void) {
+    TEST(parse_content_response);
+    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
+
+    const char *json =
+        "{\"choices\":[{\"message\":{\"content\":\"Hello world\",\"role\":\"assistant\"},"
+        "\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}";
+
+    LlmResponse resp;
+    int rc = llm_parse_response(a, json, &resp);
+    if (rc != 0) { FAIL("parse failed"); arena_destroy(a); return; }
+    if (!resp.content || strcmp(resp.content, "Hello world") != 0) {
+        FAIL("wrong content"); arena_destroy(a); return;
+    }
+    if (resp.tool_call_count != 0) { FAIL("unexpected tool_calls"); arena_destroy(a); return; }
+    if (resp.usage.prompt_tokens != 10 || resp.usage.completion_tokens != 5 || resp.usage.total_tokens != 15) {
+        FAIL("wrong usage"); arena_destroy(a); return;
+    }
+    if (!resp.finish_reason || strcmp(resp.finish_reason, "stop") != 0) {
+        FAIL("wrong finish_reason"); arena_destroy(a); return;
+    }
+
+    arena_destroy(a);
+    PASS();
+}
+
+static void test_parse_tool_calls_response(void) {
+    TEST(parse_tool_calls_response);
+    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
+
+    const char *json =
+        "{\"choices\":[{\"message\":{\"content\":null,\"role\":\"assistant\","
+        "\"tool_calls\":[{\"id\":\"call_abc\",\"type\":\"function\","
+        "\"function\":{\"name\":\"shell_exec\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}]},"
+        "\"finish_reason\":\"tool_calls\"}],"
+        "\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":10,\"total_tokens\":30}}";
+
+    LlmResponse resp;
+    int rc = llm_parse_response(a, json, &resp);
+    if (rc != 0) { FAIL("parse failed"); arena_destroy(a); return; }
+    if (resp.content != NULL) { FAIL("content should be NULL"); arena_destroy(a); return; }
+    if (resp.tool_call_count != 1) { FAIL("wrong tool_call_count"); arena_destroy(a); return; }
+    if (strcmp(resp.tool_calls[0].id, "call_abc") != 0) { FAIL("wrong tc id"); arena_destroy(a); return; }
+    if (strcmp(resp.tool_calls[0].name, "shell_exec") != 0) { FAIL("wrong tc name"); arena_destroy(a); return; }
+    if (strcmp(resp.tool_calls[0].arguments, "{\"cmd\":\"ls\"}") != 0) { FAIL("wrong tc args"); arena_destroy(a); return; }
+    if (!resp.finish_reason || strcmp(resp.finish_reason, "tool_calls") != 0) {
+        FAIL("wrong finish_reason"); arena_destroy(a); return;
+    }
+
+    arena_destroy(a);
+    PASS();
+}
+
+static void test_parse_invalid_json(void) {
+    TEST(parse_invalid_json);
+    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
+
+    LlmResponse resp;
+    int rc = llm_parse_response(a, "not json", &resp);
+    if (rc != -1) { FAIL("should fail on invalid JSON"); arena_destroy(a); return; }
+
+    rc = llm_parse_response(a, NULL, &resp);
+    if (rc != -1) { FAIL("should fail on NULL"); arena_destroy(a); return; }
+
+    rc = llm_parse_response(a, "{\"choices\":[]}", &resp);
+    if (rc != -1) { FAIL("should fail on empty choices"); arena_destroy(a); return; }
+
+    arena_destroy(a);
+    PASS();
+}
+
 int main(void) {
     printf("--- test_llm ---\n");
     test_basic_request();
@@ -182,6 +254,9 @@ int main(void) {
     test_with_tools();
     test_tool_calls_message();
     test_tool_result_message();
+    test_parse_content_response();
+    test_parse_tool_calls_response();
+    test_parse_invalid_json();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

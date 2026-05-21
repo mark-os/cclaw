@@ -55,6 +55,17 @@ static const char *SCHEMA_SQL =
     "  parameters_json TEXT,"
     "  code TEXT NOT NULL,"
     "  UNIQUE(session_id, name)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS cron_jobs ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  name TEXT NOT NULL,"
+    "  cron_expr TEXT NOT NULL,"
+    "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  task TEXT NOT NULL,"
+    "  enabled INTEGER NOT NULL DEFAULT 1,"
+    "  next_run_at INTEGER NOT NULL DEFAULT 0,"
+    "  last_run_at INTEGER,"
+    "  created_at INTEGER NOT NULL DEFAULT (unixepoch())"
     ");";
 
 sqlite3 *db_open(const char *path) {

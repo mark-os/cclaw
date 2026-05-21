@@ -8,6 +8,7 @@
 #include "telegram.h"
 #include "web.h"
 #include "heartbeat.h"
+#include "cron.h"
 #include "db.h"
 
 static volatile int daemon_running = 1;
@@ -81,6 +82,12 @@ int main(int argc, char *argv[]) {
         printf("heartbeat started (%ds interval)\n", cfg->heartbeat_interval);
     }
 
+    if (cron_start(cfg, db) != 0) {
+        fprintf(stderr, "warning: failed to start cron scheduler\n");
+    } else {
+        printf("cron scheduler started\n");
+    }
+
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);
 
@@ -89,6 +96,7 @@ int main(int argc, char *argv[]) {
     }
 
     printf("\nshutting down...\n");
+    cron_stop();
     heartbeat_stop();
     web_stop();
     telegram_stop();

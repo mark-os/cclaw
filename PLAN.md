@@ -1,87 +1,337 @@
-# CClaw — Plan
+# CClaw — Build Plan
 
-## What This Is
+## Overview
 
-A minimal AI agent in C. Telegram bot + CLI → agent loop → OpenAI-compatible LLM → tool execution. Targets ARMv5TE (Pogoplug V4) but develops on ARM64 (EC2 t4g.small).
+Minimal autonomous AI agent in C. Channels: Telegram, WhatsApp Business API, CLI, web dashboard. Runs on EC2 ARM64. SQLite for all persistence. MicroQuickJS for runtime tool creation. Sub-agents as separate processes sharing the same DB.
 
-## Architecture Decisions (Settled)
+## Architecture
 
-- **Language**: C11, compiled with GCC
-- **Concurrency**: Thread-per-conversation, blocking I/O within each thread. No event loop.
-- **HTTP**: libcurl (blocking `curl_easy_perform`), one handle per thread
-- **JSON**: cJSON (vendored, single file)
-- **Persistence**: SQLite amalgamation (vendored), tree-ready schema (entries with id/parent_id)
-- **Session model**: Unidirectional in Phase 1 (append, delete-from-end, summarize-and-trim). Tree-ready schema supports future branching without migration. See docs/SESSION_TREE.md.
-- **Atomics on ARMv5**: GCC `__atomic` builtins + `-latomic` (no custom shim needed)
-- **Build**: Makefile. Cross-compile for ARMv5 with musl toolchain later.
-- **Streaming**: Not for v1. Full response, then parse.
-- **First channel**: CLI (stdin/stdout). Telegram second.
-- **First tool**: `shell_exec` — proves the full agent loop end-to-end.
-- **Scripting**: MicroQuickJS (Bellard, 10KB RAM, ARM Thumb-2). See docs/SCRIPTING.md.
-- **Test provider**: OpenRouter (OpenAI-compatible). Primary model: `deepseek/deepseek-v4-flash`. Alt: NVIDIA NIM. See docs/MODELS.md.
-- **Config (Phase 1)**: Env vars only (`OPENROUTER_API_KEY`, optional `CCLAW_BASE_URL`, `CCLAW_MODEL`). Config file in Phase 2.
-- **Shell restriction**: Hardcoded allowlist in Phase 1 (testing safety). Will be replaced with workspace-based sandboxing later.
+```
+                    ┌─────────────────────────────────────┐
+                    │           civetweb (HTTP)            │
+                    │  WhatsApp webhooks · Dashboard · API │
+                    └──────────────┬──────────────────────┘
+                                   │
+┌──────────┐   ┌──────────────┐   │   ┌──────────────┐
+│ CLI mode │   │ Telegram poll│   │   │  Sub-agents  │
+│ (stdin/  │   │   (thread)   │   │   │ (fork+exec)  │
+│  stdout) │   └──────┬───────┘   │   └──────┬───────┘
+└────┬─────┘          │           │           │
+     │                ▼           ▼           │
+     │         ┌─────────────────────────┐    │
+     └────────►│     Agent Loop          │◄───┘
+               │  LLM call → tool exec   │
+               │  → repeat until done    │
+               └────────────┬────────────┘
+                            │
+                    ┌───────▼───────┐
+                    │    SQLite     │
+                    │  WAL mode     │
+                    │  sessions     │
+                    │  FTS5 search  │
+                    │  cron jobs    │
+                    └───────────────┘
+```
 
-## Development Approach
+### Thread Model
 
-- **TDD**: Write tests first, implement until they pass.
-- **CLI-first**: Interactive terminal chat is the first milestone. Telegram comes after.
-- **Dev on ARM64 EC2** (t4g.small), deploy to ARMv5 Pogoplug when ready.
-- **Reference projects**: Pi (agent loop, session tree, branching), OpenClaw (Telegram integration, sub-agents, cron), nullclaw (Zig implementation, deployment scripts).
-- **Small steps**: Each bead is a meaningful, testable unit. `br ready` shows what's next.
+- **Daemon mode** (default when telegram_token or web port configured):
+  - Main thread: starts civetweb, Telegram poller thread, then waits for shutdown signal
+  - Telegram thread: long-polls getUpdates, dispatches to worker threads
+  - Civetweb: manages its own thread pool for HTTP requests (webhooks, dashboard)
+  - Worker threads: one per active conversation, runs agent loop, blocks on LLM calls
+- **CLI mode** (`cclaw --cli` or no channels configured):
+  - Single process, main thread runs agent loop on stdin/stdout
+  - Can coexist with a running daemon — both share the SQLite DB via WAL mode
+- **Sub-agents**: `fork()`+`exec("./cclaw", "--sub-agent", ...)` — separate process, own session, same DB
 
-## Phases
+### SQLite as Backbone
 
-### Phase 1 — Working CLI agent with shell tool (P1 beads)
-Vendor deps → Makefile → arena allocator → core types → HTTP client → LLM client (build/parse/call) → CLI channel → agent loop (text only) → agent loop (tool calls) → shell_exec tool → wired main()
+Everything lives in SQLite:
+- Session tree (entries with parent_id, branching, leaf tracking)
+- Message history (JSON payloads in entry rows)
+- Full-text search (FTS5 over message content)
+- Cron/scheduled tasks
+- Sub-agent status and results
+- Config overrides (per-session model, system prompt)
 
-Config via env vars. In-memory message history (flat array, but using entry structs compatible with tree schema).
+WAL mode + busy_timeout=5000ms allows multiple processes (daemon, CLI, sub-agents) to share one DB safely. Readers never block writers. Writers serialize briefly on commit.
 
-**Milestone**: `./cclaw` starts, you type a message, it calls an LLM, the LLM can run shell commands, you see the result.
+### Memory Model
 
-### Phase 2 — Persistence + Telegram + sub-agents (P2 beads)
-Config file → SQLite persistence (tree-ready schema) → file_read/file_write tools → Telegram polling + send → multi-channel dispatcher with worker threads → minimal sub-agent spawn
+- **Session in memory**: only the active branch (loaded from SQLite on demand)
+- **Per-turn arena**: 512KB scratch, created/destroyed each turn
+- **Config**: 4KB arena, process lifetime, read-only after load
 
-See docs/PHASE2.md for full spec.
+## Config
 
-**Milestone**: Bot runs as a daemon, responds on Telegram, remembers conversation history across restarts, can spawn background sub-agents.
+Config file (`config.json`) + env var overrides. Minimal defaults — just an API key gets you running.
 
-### Phase 3 — Autonomy + Pogoplug deployment (P3 beads)
-Heartbeats → cron/scheduled tasks → full sub-agents (depth, roles, cancellation) → session branching → compaction → MicroQuickJS scripting → cross-compile with musl for ARMv5TE → deploy script → service management
+```json
+{
+  "provider": "openrouter",
+  "providers": {
+    "openrouter": {
+      "api_key": "$OPENROUTER_API_KEY",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "deepseek/deepseek-v4-flash"
+    }
+  },
+  "system_prompt": "You are CClaw, a minimal autonomous AI agent.",
+  "max_history": 50,
+  "max_tool_iterations": 10,
+  "telegram_token": "",
+  "whatsapp_verify_token": "",
+  "whatsapp_access_token": "",
+  "web_port": 8080,
+  "db_path": "cclaw.db",
+  "workspace": "./workspace"
+}
+```
 
-See docs/PHASE3.md for full spec.
+Env vars: `OPENROUTER_API_KEY`, `CCLAW_PROVIDER`, `CCLAW_MODEL`, `CCLAW_TELEGRAM_TOKEN`, `CCLAW_DB_PATH`, `CCLAW_WEB_PORT`.
 
-**Milestone**: Proactive agent that wakes itself, manages tasks, branches conversations, runs JS tools, deployed as a static binary on Pogoplug.
+## Tools
 
-## Dependencies
+### Built-in (C)
 
-| Dep | Source | License | Vendored? |
-|-----|--------|---------|-----------|
-| cJSON | github.com/DaveGamble/cJSON | MIT | Yes |
-| SQLite | sqlite.org | Public domain | Yes |
-| libcurl | system / static build | MIT-like | Linked |
-| MicroQuickJS | github.com/bellard/mquickjs | MIT | Yes (Phase 3) |
+| Tool | Description |
+|------|-------------|
+| `shell_exec` | Run a shell command, return stdout/stderr |
+| `file_read` | Read file contents (workspace-restricted) |
+| `file_write` | Write/overwrite file (workspace-restricted) |
+| `js_eval` | Execute JavaScript in sandboxed MicroQuickJS |
+| `js_define_tool` | Define a new tool via JS function (persists for session) |
+| `spawn_agent` | Fork a sub-agent process for a background task |
+| `check_agent` | Check sub-agent status/result |
 
-## Dev Environment
+### Runtime-defined (JS via MicroQuickJS)
 
-- **Machine**: EC2 t4g.small (ARM64, Amazon Linux 2023)
-- **Tools**: gcc, make, git, libcurl-devel, valgrind, br (beads_rust)
-- **Repos on machine**: cclaw (working), reference/pi, reference/openclaw, reference/nullclaw
-- **LLM API**: OpenRouter (`$OPENROUTER_API_KEY`), model: `deepseek/deepseek-v4-flash`. Alt: NVIDIA NIM (`$NVIDIA_API_KEY`)
+Agent can create new tools at runtime via `js_define_tool`. These are:
+- Sandboxed (no filesystem, no network — use shell_exec/file_read for that)
+- Session-persistent (replayed from history on session reload)
+- Available to the agent on subsequent turns
 
-## Future (Not Planned Yet)
+MicroQuickJS constraints: 1MB heap cap, 10M instruction limit per eval, ES2020 subset (no async/await, no generators).
 
-- HTTP API via civetweb (MIT, fork of old Mongoose) — remote control, web UI, webhooks, health endpoint
-- Workspaces and path sandboxing (Linux Landlock)
-- SSE streaming for faster perceived response
-- Multiple LLM provider support / fallback
-- Memory / RAG
+## Session Tree
 
-## Design Docs
+Entries stored as a tree (id + parent_id). Current conversation = walk from leaf to root.
 
-- `docs/SESSION_TREE.md` — Session tree schema and operations
-- `docs/PHASE2.md` — Phase 2 detailed spec
-- `docs/PHASE3.md` — Phase 3 detailed spec
-- `docs/SCRIPTING.md` — MicroQuickJS integration plan
-- `docs/MODELS.md` — Model selection and provider config
-- `docs/REFERENCE_MAP.md` — Detailed map of Pi and OpenClaw internals
+```sql
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    parent_session_id TEXT REFERENCES sessions(id),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE entries (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    parent_id TEXT REFERENCES entries(id),
+    type TEXT NOT NULL,  -- 'message', 'compaction', 'model_change'
+    timestamp TEXT NOT NULL,
+    payload TEXT NOT NULL  -- JSON
+);
+
+CREATE TABLE session_state (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+    leaf_id TEXT REFERENCES entries(id)
+);
+```
+
+Operations:
+- **append**: add entry, update leaf
+- **get_branch**: walk leaf→root, reverse for chronological order
+- **fork**: set leaf to an earlier entry, future appends branch off
+- **navigate**: switch to a different branch
+- **compact**: summarize old entries, replace with compaction entry
+
+Only the active branch is loaded into memory. SQLite holds everything else.
+
+## Channels
+
+### Telegram
+- Long-poll `getUpdates` in dedicated thread
+- `sendMessage` + `sendChatAction("typing")` from worker threads
+- Offset persisted to DB (survives restart)
+- chat_id → session_id mapping
+
+### WhatsApp Business API
+- Webhook endpoint via civetweb: `POST /webhook/whatsapp`
+- Verify endpoint: `GET /webhook/whatsapp?hub.verify_token=...`
+- Send via Graph API (`POST https://graph.facebook.com/v21.0/{phone_id}/messages`)
+- phone_number → session_id mapping
+
+### CLI
+- Separate process (`cclaw --cli`), stdin/stdout
+- Creates/resumes a session in the shared SQLite DB
+- No web server, no Telegram — just the agent loop
+- Debug mode (`cclaw --cli --debug`) prints raw LLM requests/responses
+
+### Web Dashboard
+- Served by civetweb on configurable port
+- Shows: active sessions, sub-agent status, recent messages, cron jobs
+- Simple HTML — no JS framework, server-rendered or minimal vanilla JS
+- Future: web-based chat interface
+
+## Autonomy Features
+
+### Heartbeats
+- Timer thread wakes agent on configurable cadence (default: 30min)
+- Injects system message: check tasks, report updates
+- Agent can choose to act or skip
+
+### Cron / Scheduled Tasks
+- `cron_set(task, schedule, one_shot)` tool
+- SQLite table tracks jobs + next_run_at
+- Scheduler thread checks every 60s, injects task into appropriate session
+
+### Sub-Agents
+- Spawned as separate processes: `./cclaw --sub-agent --session-id=X --task="..."`
+- Own session in SQLite (parent_session_id links to spawner)
+- Max iterations limit (default: 30)
+- Result written to DB; parent checks via `check_agent` tool
+- Crash isolation: sub-agent crash doesn't affect parent
+- Limits: max 3 concurrent per parent, max 10 system-wide, max depth 2
+
+## Build Order
+
+Each step produces testable, working code. Tests written alongside implementation.
+
+### 1. Foundation
+- [ ] Makefile (minimal, grows as modules are added)
+- [ ] Arena allocator (`arena.c`) — create, alloc, destroy
+- [ ] Core types (`types.c`) — Message, Session, Entry structs + lifecycle
+- [ ] Config (`config.c`) — parse JSON file + env var overrides
+
+### 2. SQLite Layer
+- [ ] DB init (`db.c`) — open, create tables, WAL mode, pragmas
+- [ ] Session CRUD — create, list, get_branch, set_leaf
+- [ ] Entry append + delete_from_end
+- [ ] FTS5 setup + search function
+
+### 3. LLM Client
+- [ ] HTTP wrapper (`http.c`) — POST with headers, response buffer
+- [ ] LLM request builder (`llm.c`) — messages + tools → JSON
+- [ ] LLM response parser — extract content, tool_calls, usage
+- [ ] End-to-end test: call OpenRouter, get response
+
+### 4. Agent Loop
+- [ ] Turn logic (`agent.c`) — call LLM, check for tool_calls, dispatch, repeat
+- [ ] Tool registry — register/lookup tools by name
+- [ ] Max iterations guard
+- [ ] Session integration — load branch, append entries, flush to DB
+
+### 5. Built-in Tools
+- [ ] `shell_exec` — popen, capture stdout+stderr, timeout
+- [ ] `file_read` — read file, workspace path restriction
+- [ ] `file_write` — write file, workspace path restriction
+
+### 6. CLI Channel
+- [ ] Simple REPL (`cli.c`) — read line, send to agent, print response
+- [ ] Debug mode — print raw request/response JSON
+- [ ] Session selection (create new / resume existing)
+
+### 7. Telegram Channel
+- [ ] Telegram poller (`telegram.c`) — getUpdates loop in thread
+- [ ] Send message + typing indicator
+- [ ] Offset persistence in DB
+- [ ] chat_id → session routing
+
+### 8. Web Server + WhatsApp
+- [ ] civetweb integration — start server, register routes
+- [ ] WhatsApp webhook endpoint (receive + verify)
+- [ ] WhatsApp send (Graph API via curl)
+- [ ] Dashboard page — session list, status, recent activity
+
+### 9. MicroQuickJS
+- [ ] Vendor mquickjs, integrate into build
+- [ ] `js_eval` tool — execute code, return result
+- [ ] `js_define_tool` — register JS function as callable tool
+- [ ] Session-persistent context (replay tool definitions on load)
+
+### 10. Autonomy
+- [ ] Heartbeat timer thread + injection
+- [ ] Cron table + scheduler thread + `cron_set`/`cron_list`/`cron_remove` tools
+- [ ] `spawn_agent` tool — fork+exec sub-agent process
+- [ ] `check_agent` tool — read sub-agent result from DB
+- [ ] Sub-agent lifecycle management (limits, cleanup)
+
+### 11. Compaction + Branching
+- [ ] Token estimation (chars/4 approximation)
+- [ ] Compaction: summarize old messages via LLM, replace entries
+- [ ] Fork/navigate operations exposed as tools or commands
+- [ ] Branch listing
+
+### 12. Polish + Deploy
+- [ ] Graceful shutdown (SIGINT/SIGTERM handling)
+- [ ] Systemd service file
+- [ ] Cross-compile for Pogoplug (musl ARMv5TE) — when ready
+- [ ] README update
+
+## Implementation Notes (from Pi/OpenClaw reference)
+
+### Agent Loop Pattern (Pi)
+
+Two nested loops:
+- **Outer loop**: handles follow-up messages (agent finished but new input arrived)
+- **Inner loop**: call LLM → if tool_calls, execute them, loop back. Exit when response has no tool_calls.
+
+```
+while (follow_up || steering_message):
+    while (has_tool_calls || pending_messages):
+        inject pending messages into context
+        call LLM → get response
+        if error/abort: return
+        extract tool_calls from response
+        if tool_calls: execute all → append results → continue
+        else: break
+    check for follow-up messages → if any, continue outer
+    else: done
+```
+
+### Tool Execution Pipeline
+
+1. Find tool by name (registry lookup) → not found = error result
+2. Validate arguments against schema (optional in Phase 1)
+3. Execute tool function → capture output
+4. On exception/timeout → error result (never crash the loop)
+5. Append tool result message to context
+
+Batch: if LLM returns multiple tool_calls, execute all, append all results, then call LLM again. Terminate only when ALL results say terminate.
+
+### Telegram Patterns (OpenClaw)
+
+- **Offset persistence**: store `last_update_id + 1` in DB. Read on startup.
+- **Message chunking**: 4096 char limit. Split at paragraph boundaries, fall back to sentence boundaries.
+- **Typing indicator**: send `sendChatAction("typing")` every 4 seconds while agent is working.
+- **Exponential backoff**: on transient errors: `delay = min(2s * 1.8^attempt * (1 + 0.25*random), 30s)`
+- **Serial per session**: mutex per chat_id. Queue messages if agent is mid-turn.
+
+### Error Handling
+
+- **Rate limit (429)**: respect `Retry-After` header, retry with backoff
+- **Context overflow**: detect via error message pattern matching, trigger compaction, retry
+- **Abort**: set flag, close curl handle, set stop_reason = "aborted"
+- **JSON parse failure from LLM**: inject error as tool result, let LLM self-correct
+- **Tool crash**: catch (in C: check return code), produce error result, continue loop
+- **Missing finish_reason**: treat as error
+
+### Key C Patterns
+
+- Content is always an array of tagged-union blocks (text, tool_call, thinking)
+- Strip errored/aborted assistant messages when building next LLM request
+- Never send `"tools": []` — omit the field entirely if no tools
+- Tool call arguments arrive as a JSON string — parse with cJSON on use
+- Usage: `input_tokens = prompt_tokens - cached_tokens`
+
+## Open Decisions (Resolve During Implementation)
+
+1. Typing indicator cadence — send every 4s while agent works? Or just once at start of turn?
+2. Workspace directory — per-session or global?
+3. Compaction model — same model as conversation, or cheaper one?
+4. Sub-agent result delivery — inject into parent session automatically, or only on `check_agent`?
+5. Web dashboard auth — none (localhost only)? Basic auth? Token?
+6. Should branching be a tool (agent branches itself) or a user command?

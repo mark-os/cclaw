@@ -2,26 +2,30 @@
 
 ## Project Ethos
 
-CClaw is a **minimal** AI agent in C. The goal is the smallest correct implementation that works on constrained hardware (ARMv5TE Pogoplug with 128MB RAM). Every line of code must earn its place.
+CClaw is a **minimal** autonomous AI agent in C. Every line of code must earn its place.
 
 **Inspiration**
 
-CClaw draws inspiration and shamelessly steals ideas from *Pi agent*, cloned in `reference/pi-mono`, and the autonomous agent *OpenClaw*, in `reference/openclaw`, that was based on pi agent. Pi was intended from the start to be extremely minimal, functional, and easily self-modifying. CClaw attempts to be as adaptable to different tasks as OpenClaw, through a plugin system based on MicroQuickJS by Fabrice Bellard. With that said, CClaw does not try to be everything to everyone. It does not have all the connectors to different communication channels for instance, as it is intended to serve the needs of its creator Mark Ostroth. Finally it draws lessons from *nullclaw*, cloned in ~/nullclaw, a standalone Zig program that is also a clone of OpenClaw. However, CClaw does not intend to have a "pure Zig, cross compilation everywhere" attitude and will borrow C libraries or even link dynamically to system curl, whatever it takes to produce a simple, usable, excellent autonomous agent.
+CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and session tree model, and from *OpenClaw* (`reference/openclaw`) for autonomy features, security patterns, and multi-channel integration. It also learns from *nullclaw* (`~/nullclaw`), a Zig clone of OpenClaw. CClaw does not try to be everything to everyone — it serves its creator Mark Ostroth. It will borrow C libraries, link dynamically to system curl, vendor what makes sense, and do whatever it takes to produce a simple, usable, excellent autonomous agent.
 
 **Principles:**
-- Simple over clever. Blocking I/O over event loops. Threads over callbacks.
-- Reference Pi for agent loop patterns (clean, battle-tested TypeScript).
-- Reference OpenClaw for integration patterns, security measures, usability features, and permission/authorization patterns.
-- One tool at a time. `shell_exec` first, prove the loop works, then add more.
-- Session/messages on heap (individually owned). Arena for per-turn scratch only.
+- Simple over clever. Blocking I/O. Threads over callbacks. No event loops.
+- SQLite is the backbone — sessions, history, search, sub-agent coordination.
+- Self-modifying via MicroQuickJS — agent can define new tools at runtime.
+- One tool at a time during development. Prove each layer works before adding the next.
+- Reference Pi for agent loop patterns. Reference OpenClaw for integration and autonomy.
+
+## Target Platforms
+
+- **Primary dev**: EC2 t4g.small (ARM64, Amazon Linux 2023)
+- **Secondary dev**: Chromebook (Linux container, ARM64 or x86_64)
+- **Eventual deploy target**: Pogoplug V4 (ARMv5TE, 128MB RAM, Debian Bookworm armel) — cross-compile when ready
 
 ## Memory Model
 
-See `docs/ARCHITECTURE.md` for full details. Summary:
-
-- **Session** (`session_create/destroy`): heap-owned growable message array. Each message owns its strings via `malloc`. Lives for conversation duration.
-- **Per-turn Arena** (`arena_create/destroy`): 512KB scratch for LLM request/response JSON, tool output, telegram parsing. Created fresh each turn, destroyed after.
-- **Config Arena**: small (4KB), lives for process lifetime. Read-only after load.
+- **Session**: heap-owned growable message array. Each message owns its strings via `malloc`. Only the active session branch is in memory — SQLite holds everything else.
+- **Per-turn Arena**: 512KB scratch for LLM request/response JSON, tool output, parsing. Created fresh each turn, destroyed after.
+- **Config Arena**: small (4KB), process lifetime, read-only after load.
 - **AgentContext**: per-turn struct referencing `{session, arena, config}`. Passed to agent/llm functions.
 
 ## Code Style
@@ -40,46 +44,52 @@ See `docs/ARCHITECTURE.md` for full details. Summary:
 ```
 src/           C source files
 include/       C headers (public API for each module)
-vendor/        Vendored libs (cJSON, sqlite3)
+vendor/        Vendored libs (cJSON, sqlite3, civetweb, mquickjs)
 test/          Test files (test_*.c)
-reference/     Pi, OpenClaw, nullclaw clones (gitignored)
+reference/     Pi, OpenClaw clones (gitignored)
 build/         Build output (gitignored)
-docs/          Design docs
 ```
 
 ## Building
 
 ```bash
-make              # native build (x86_64)
-make test         # run all 18 tests
+make              # native build (ARM64 or x86_64)
+make test         # run tests
 make clean        # remove build/
 ```
 
-### Cross-compile for Pogoplug (ARMv5TE)
-
-Requires `gcc-arm-linux-gnueabi` and curl headers from the device:
+## Running
 
 ```bash
-# One-time setup: copy curl headers from device
-ssh pogoplug 'apt-get install -y libcurl4-openssl-dev'
-scp -r pogoplug:/usr/include/arm-linux-gnueabi/curl vendor/curl
+# Minimal — just needs an API key (defaults to OpenRouter + DeepSeek V4 Flash)
+export OPENROUTER_API_KEY="sk-or-v1-..."
+./build/cclaw
 
-# Copy libcurl.so for linking
-scp pogoplug:/usr/lib/arm-linux-gnueabi/libcurl.so.4.8.0 vendor/
-ln -sf libcurl.so.4.8.0 vendor/libcurl.so
+# With config file
+./build/cclaw config.json
 
-# Build
-arm-linux-gnueabi-gcc -std=c11 -Wall -Wextra -Werror -O2 \
-    -march=armv5te -marm \
-    -Iinclude -Ivendor/cJSON -Ivendor/sqlite3 -Ivendor \
-    src/*.c vendor/cJSON/cJSON.c vendor/sqlite3/sqlite3.c \
-    -Lvendor -lcurl -lpthread -ldl -lm \
-    -Wl,--allow-shlib-undefined \
-    -o build/cclaw-arm
+# CLI mode (no daemon, stdin/stdout)
+./build/cclaw --cli
 
-# Deploy
-scp build/cclaw-arm pogoplug:/usr/local/bin/cclaw
+# Multiple instances can share the same SQLite DB (WAL mode)
 ```
 
-The device runs Debian Bookworm (armel) with libcurl and all its deps installed via apt. We link dynamically against curl (duct tape: `--allow-shlib-undefined` skips transitive deps at link time, resolved at runtime on device).
+## Dependencies
 
+| Dep | Purpose | Vendored? |
+|-----|---------|-----------|
+| cJSON | JSON parsing | Yes |
+| SQLite 3.53 | Persistence, FTS5, JSON functions | Yes |
+| libcurl | HTTP client (LLM API, Telegram, WhatsApp) | System (dynamic link) |
+| civetweb | Embedded HTTP server (webhooks, dashboard) | Yes |
+| MicroQuickJS | JS scripting engine (runtime tool creation) | Yes |
+
+## LLM Provider
+
+Default: OpenRouter → DeepSeek V4 Flash (`deepseek/deepseek-v4-flash`).
+
+All providers use the OpenAI-compatible chat completions format. Switch provider by changing `base_url` and `api_key` in config. Env var `OPENROUTER_API_KEY` is all you need to start.
+
+## Plan Tracking
+
+The build plan lives in `PLAN.md`. Agents mark items `[x]` as they complete them. No external task tracker.

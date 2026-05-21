@@ -6,8 +6,8 @@ BUILD   := build
 SRC     := $(wildcard src/*.c)
 OBJ     := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 
-VENDOR_SRC := vendor/cJSON/cJSON.c vendor/sqlite3/sqlite3.c
-VENDOR_OBJ := $(BUILD)/cJSON.o $(BUILD)/sqlite3.o
+VENDOR_SRC := vendor/cJSON/cJSON.c vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c
+VENDOR_OBJ := $(BUILD)/cJSON.o $(BUILD)/sqlite3.o $(BUILD)/civetweb.o
 
 TEST_SRC := $(wildcard test/test_*.c)
 TEST_BIN := $(patsubst test/%.c,$(BUILD)/%,$(TEST_SRC))
@@ -27,6 +27,9 @@ $(BUILD)/cJSON.o: vendor/cJSON/cJSON.c | $(BUILD)
 
 $(BUILD)/sqlite3.o: vendor/sqlite3/sqlite3.c | $(BUILD)
 	$(CC) -std=c11 -O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -c -o $@ $<
+
+$(BUILD)/civetweb.o: vendor/civetweb/civetweb.c | $(BUILD)
+	$(CC) -std=c11 -O2 -DNO_SSL -DNO_CGI -DUSE_IPV6 -DNO_CACHING -Ivendor/civetweb -Wno-unused-parameter -c -o $@ $<
 
 $(BUILD):
 	mkdir -p $(BUILD)

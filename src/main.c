@@ -6,6 +6,7 @@
 #include "config.h"
 #include "cli.h"
 #include "telegram.h"
+#include "web.h"
 #include "db.h"
 
 static volatile int daemon_running = 1;
@@ -67,6 +68,12 @@ int main(int argc, char *argv[]) {
     }
     printf("telegram poller started\n");
 
+    if (web_start(cfg, db) != 0) {
+        fprintf(stderr, "warning: failed to start web server on port %d\n", cfg->web_port);
+    } else {
+        printf("web server started on port %d\n", cfg->web_port);
+    }
+
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);
 
@@ -75,6 +82,7 @@ int main(int argc, char *argv[]) {
     }
 
     printf("\nshutting down...\n");
+    web_stop();
     telegram_stop();
     db_close(db);
     config_free(cfg);

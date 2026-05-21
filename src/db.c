@@ -66,6 +66,18 @@ static const char *SCHEMA_SQL =
     "  next_run_at INTEGER NOT NULL DEFAULT 0,"
     "  last_run_at INTEGER,"
     "  created_at INTEGER NOT NULL DEFAULT (unixepoch())"
+    ");"
+    "CREATE TABLE IF NOT EXISTS sub_agents ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  parent_session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  pid INTEGER NOT NULL DEFAULT 0,"
+    "  depth INTEGER NOT NULL DEFAULT 1,"
+    "  status TEXT NOT NULL DEFAULT 'running',"
+    "  task TEXT NOT NULL,"
+    "  result TEXT,"
+    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "  finished_at INTEGER"
     ");";
 
 sqlite3 *db_open(const char *path) {
@@ -481,4 +493,105 @@ int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id) {
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/* V3: sub-agent tracking */
+
+int64_t subagent_create(sqlite3 *db, int64_t parent_session_id, int64_t session_id,
+                        pid_t pid, int depth, const char *task) {
+    const char *sql =
+        "INSERT INTO sub_agents (parent_session_id, session_id, pid, depth, status, task)"
+        " VALUES (?,?,?,?,'running',?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, parent_session_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    sqlite3_bind_int64(stmt, 3, (int64_t)pid);
+    sqlite3_bind_int(stmt, 4, depth);
+    sqlite3_bind_text(stmt, 5, task, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    return sqlite3_last_insert_rowid(db);
+}
+
+int subagent_count_by_parent(sqlite3 *db, int64_t parent_session_id) {
+    const char *sql =
+        "SELECT COUNT(*) FROM sub_agents WHERE parent_session_id=? AND status='running';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, parent_session_id);
+    int count = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+int subagent_count_total(sqlite3 *db) {
+    const char *sql = "SELECT COUNT(*) FROM sub_agents WHERE status='running';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    int count = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+int subagent_finish(sqlite3 *db, int64_t agent_id, const char *status, const char *result) {
+    const char *sql =
+        "UPDATE sub_agents SET status=?, result=?, finished_at=unixepoch() WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(stmt, 1, status, -1, SQLITE_STATIC);
+    if (result)
+        sqlite3_bind_text(stmt, 2, result, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 2);
+    sqlite3_bind_int64(stmt, 3, agent_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+SubAgentInfo *subagent_get(sqlite3 *db, int64_t agent_id) {
+    const char *sql =
+        "SELECT id, parent_session_id, session_id, pid, depth, status, task, result"
+        " FROM sub_agents WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(stmt, 1, agent_id);
+    SubAgentInfo *info = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        info = malloc(sizeof(SubAgentInfo));
+        if (info) {
+            info->id = sqlite3_column_int64(stmt, 0);
+            info->parent_session_id = sqlite3_column_int64(stmt, 1);
+            info->session_id = sqlite3_column_int64(stmt, 2);
+            info->pid = (pid_t)sqlite3_column_int64(stmt, 3);
+            info->depth = sqlite3_column_int(stmt, 4);
+            const char *s = (const char *)sqlite3_column_text(stmt, 5);
+            info->status = s ? strdup(s) : strdup("unknown");
+            const char *t = (const char *)sqlite3_column_text(stmt, 6);
+            info->task = t ? strdup(t) : NULL;
+            const char *r = (const char *)sqlite3_column_text(stmt, 7);
+            info->result = r ? strdup(r) : NULL;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return info;
+}
+
+void subagent_info_free(SubAgentInfo *info) {
+    if (!info) return;
+    free(info->status);
+    free(info->task);
+    free(info->result);
+    free(info);
 }

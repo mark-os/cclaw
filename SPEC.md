@@ -89,7 +89,7 @@ T33|x|JS context replay on session reload|T32
 T34|x|heartbeat timer thread + system msg injection|§C
 T35|x|cron table + scheduler thread|§I.db
 T36|x|`cron_set`/`cron_list`/`cron_remove` tools|T35
-T37|.|`spawn_agent` tool — fork+exec sub-agent process|V3,V13
+T37|x|`spawn_agent` tool — fork+exec sub-agent process|V3,V13
 T38|.|`check_agent` tool — read result from DB|V13
 T39|.|sub-agent lifecycle (limits, cleanup, crash isolation)|V3
 T40|.|token estimation (chars/4 heuristic)|V7

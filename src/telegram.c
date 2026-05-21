@@ -8,11 +8,13 @@
 #include "tool_file.h"
 #include "tool_js.h"
 #include "tool_cron.h"
+#include "tool_subagent.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <unistd.h>
 #include <unistd.h>
 #include <time.h>
 
@@ -207,6 +209,15 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
 
     ToolCronCtx cron_ctx = {.db = g_db, .session_id = session_id};
     tool_cron_register(&reg, &cron_ctx);
+
+    char tg_self_path[4096];
+    ssize_t tg_self_len = readlink("/proc/self/exe", tg_self_path, sizeof(tg_self_path) - 1);
+    if (tg_self_len > 0) tg_self_path[tg_self_len] = '\0';
+    else strcpy(tg_self_path, "./build/cclaw");
+
+    SubAgentCtx sa_ctx = {.db = g_db, .session_id = session_id,
+                          .depth = 0, .self_path = tg_self_path};
+    tool_spawn_agent_register(&reg, &sa_ctx);
 
     size_t local_tool_count = 0;
     const ToolSchema *local_schemas = tools_schemas(&reg, &local_tool_count);

@@ -7,9 +7,11 @@
 #include "tool_file.h"
 #include "tool_js.h"
 #include "tool_cron.h"
+#include "tool_subagent.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Tool dispatch via registry */
 static char *cli_dispatch(const char *name, const char *arguments, void *user_data) {
@@ -114,6 +116,16 @@ int cli_run(const Config *cfg) {
 
     ToolCronCtx cron_ctx = {.db = db, .session_id = session_id};
     tool_cron_register(&reg, &cron_ctx);
+
+    /* Resolve self path for sub-agent spawning */
+    char self_path[4096];
+    ssize_t self_len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+    if (self_len > 0) self_path[self_len] = '\0';
+    else strcpy(self_path, "./build/cclaw");
+
+    SubAgentCtx sa_ctx = {.db = db, .session_id = session_id,
+                          .depth = 0, .self_path = self_path};
+    tool_spawn_agent_register(&reg, &sa_ctx);
 
     /* Create persistent JS runtime and replay session tools */
     JsSessionRuntime *js_rt = js_runtime_create();

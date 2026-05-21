@@ -3,6 +3,19 @@
 
 #include "sqlite3.h"
 #include "types.h"
+#include <sys/types.h>
+
+/* Sub-agent info struct */
+typedef struct {
+    int64_t id;
+    int64_t parent_session_id;
+    int64_t session_id;
+    pid_t pid;
+    int depth;
+    char *status;
+    char *task;
+    char *result;
+} SubAgentInfo;
 
 /* Open DB at path, set WAL mode + pragmas, create tables.
  * Returns NULL on failure. */
@@ -55,5 +68,14 @@ int db_kv_set(sqlite3 *db, const char *key, const char *value);
  * db_tg_set_session returns 0 on success, -1 on error. */
 int64_t db_tg_get_session(sqlite3 *db, int64_t chat_id);
 int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id);
+
+/* V3: Sub-agent tracking */
+int64_t subagent_create(sqlite3 *db, int64_t parent_session_id, int64_t session_id,
+                        pid_t pid, int depth, const char *task);
+int subagent_count_by_parent(sqlite3 *db, int64_t parent_session_id);
+int subagent_count_total(sqlite3 *db);
+int subagent_finish(sqlite3 *db, int64_t agent_id, const char *status, const char *result);
+SubAgentInfo *subagent_get(sqlite3 *db, int64_t agent_id);
+void subagent_info_free(SubAgentInfo *info);
 
 #endif

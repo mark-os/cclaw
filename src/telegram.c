@@ -12,6 +12,9 @@
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <time.h>
+
+#define TG_MAX_MSG_LEN 4096
 
 static pthread_t poll_thread;
 static volatile int running;
@@ -46,6 +49,93 @@ static cJSON *tg_call(const char *token, const char *method, const char *body) {
     cJSON *json = cJSON_Parse(resp.data);
     http_response_free(&resp);
     return json;
+}
+
+/* V11: Find split point within text[0..max_len-1].
+ * Priority: paragraph (\n\n), then newline, then sentence (. ! ?), then max_len. */
+size_t tg_find_split(const char *text, size_t len, size_t max_len) {
+    if (len <= max_len) return len;
+
+    /* Search backwards from max_len for paragraph break */
+    for (size_t i = max_len; i > 0; i--) {
+        if (text[i] == '\n' && i > 0 && text[i - 1] == '\n')
+            return i + 1;
+    }
+    /* Search backwards for single newline */
+    for (size_t i = max_len; i > 0; i--) {
+        if (text[i] == '\n')
+            return i + 1;
+    }
+    /* Search backwards for sentence end (. ! ? followed by space or end) */
+    for (size_t i = max_len; i > 0; i--) {
+        if ((text[i - 1] == '.' || text[i - 1] == '!' || text[i - 1] == '?') &&
+            (i == len || text[i] == ' ' || text[i] == '\n'))
+            return i;
+    }
+    /* Hard cut at max_len */
+    return max_len;
+}
+
+/* V11: Send text chunked at TG_MAX_MSG_LEN, split at paragraph/sentence boundaries */
+static void tg_send_chunked(const char *token, int64_t chat_id, const char *text) {
+    size_t total = strlen(text);
+    size_t offset = 0;
+
+    while (offset < total) {
+        size_t remaining = total - offset;
+        size_t chunk_len = tg_find_split(text + offset, remaining, TG_MAX_MSG_LEN);
+
+        /* Build sendMessage body with this chunk */
+        cJSON *body = cJSON_CreateObject();
+        cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
+
+        char *chunk = malloc(chunk_len + 1);
+        if (!chunk) break;
+        memcpy(chunk, text + offset, chunk_len);
+        chunk[chunk_len] = '\0';
+        cJSON_AddStringToObject(body, "text", chunk);
+        free(chunk);
+
+        char *json = cJSON_PrintUnformatted(body);
+        cJSON_Delete(body);
+        if (json) {
+            cJSON *resp = tg_call(token, "sendMessage", json);
+            cJSON_Delete(resp);
+            free(json);
+        }
+
+        offset += chunk_len;
+    }
+}
+
+/* Typing indicator context */
+typedef struct {
+    const char *token;
+    int64_t chat_id;
+    volatile int active;
+} TypingCtx;
+
+/* Send typing indicator every 4s until ctx->active is cleared */
+static void *typing_loop(void *arg) {
+    TypingCtx *ctx = (TypingCtx *)arg;
+    while (ctx->active) {
+        cJSON *body = cJSON_CreateObject();
+        cJSON_AddNumberToObject(body, "chat_id", (double)ctx->chat_id);
+        cJSON_AddStringToObject(body, "action", "typing");
+        char *json = cJSON_PrintUnformatted(body);
+        cJSON_Delete(body);
+        if (json) {
+            cJSON *resp = tg_call(ctx->token, "sendChatAction", json);
+            cJSON_Delete(resp);
+            free(json);
+        }
+        /* Sleep 4s in 200ms increments so we can exit quickly */
+        for (int i = 0; i < 20 && ctx->active; i++) {
+            struct timespec ts = {0, 200000000}; /* 200ms */
+            nanosleep(&ts, NULL);
+        }
+    }
+    return NULL;
 }
 
 /* Tool dispatch via registry */
@@ -99,6 +189,11 @@ static void process_message(cJSON *msg, ToolRegistry *reg, const ToolSchema *sch
     Message user_msg = {.role = ROLE_USER, .content = text->valuestring};
     entry_append(g_db, session_id, &user_msg);
 
+    /* Start typing indicator thread */
+    TypingCtx typing_ctx = {.token = g_cfg->telegram_token, .chat_id = chat_id, .active = 1};
+    pthread_t typing_thread;
+    pthread_create(&typing_thread, NULL, typing_loop, &typing_ctx);
+
     /* Run agent */
     AgentContext ctx = {0};
     ctx.db = g_db;
@@ -110,6 +205,10 @@ static void process_message(cJSON *msg, ToolRegistry *reg, const ToolSchema *sch
     ctx.tool_count = tool_count;
 
     int rc = agent_run(&ctx);
+
+    /* Stop typing indicator */
+    typing_ctx.active = 0;
+    pthread_join(typing_thread, NULL);
 
     /* Get response text */
     char *reply_text = NULL;
@@ -128,19 +227,9 @@ static void process_message(cJSON *msg, ToolRegistry *reg, const ToolSchema *sch
     }
     if (!reply_text) reply_text = strdup("error: agent failed");
 
-    /* Send reply */
-    cJSON *send_body = cJSON_CreateObject();
-    cJSON_AddNumberToObject(send_body, "chat_id", (double)chat_id);
-    cJSON_AddStringToObject(send_body, "text", reply_text);
-    char *body_str = cJSON_PrintUnformatted(send_body);
-    cJSON_Delete(send_body);
+    /* V11: Send reply chunked at 4096 chars */
+    tg_send_chunked(g_cfg->telegram_token, chat_id, reply_text);
     free(reply_text);
-
-    if (body_str) {
-        cJSON *resp = tg_call(g_cfg->telegram_token, "sendMessage", body_str);
-        cJSON_Delete(resp);
-        free(body_str);
-    }
 }
 
 static void *poll_loop(void *arg) {

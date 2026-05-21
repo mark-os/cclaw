@@ -29,4 +29,8 @@ int tool_check_agent_register(ToolRegistry *reg, SubAgentCtx *ctx);
 /* Handler: read sub-agent result from DB (V13) */
 char *tool_check_agent_handler(const char *arguments, void *user_data);
 
+/* V3/T39: Reap finished/crashed sub-agent processes. Updates DB status.
+ * Call periodically from daemon loop or opportunistically. Returns count reaped. */
+int subagent_reap(sqlite3 *db);
+
 #endif

@@ -156,3 +156,46 @@ int tool_check_agent_register(ToolRegistry *reg, SubAgentCtx *ctx) {
                           "Read the status and result of a sub-agent (V13: only way to get result)",
                           CHECK_PARAMS_JSON, tool_check_agent_handler, ctx);
 }
+
+/* V3/T39: Reap zombie sub-agent processes, mark crashed ones in DB */
+#include <sys/wait.h>
+
+int subagent_reap(sqlite3 *db) {
+    int count = 0;
+    int running = 0;
+    SubAgentInfo *list = subagent_list_running(db, &running);
+    if (!list) return 0;
+
+    for (int i = 0; i < running; i++) {
+        int status = 0;
+        pid_t result = waitpid(list[i].pid, &status, WNOHANG);
+        if (result > 0) {
+            /* Process exited */
+            const char *final_status;
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                final_status = "done";
+            } else {
+                final_status = "crashed";
+            }
+            /* Only update if subagent_finish hasn't already been called by the child */
+            SubAgentInfo *info = subagent_get(db, list[i].id);
+            if (info && strcmp(info->status, "running") == 0) {
+                subagent_finish(db, list[i].id, final_status,
+                               final_status[0] == 'c' ? "process exited abnormally" : NULL);
+                count++;
+            }
+            subagent_info_free(info);
+        } else if (result == 0) {
+            /* Still running — nothing to do */
+        } else {
+            /* waitpid error (ECHILD) — process doesn't exist, mark crashed */
+            subagent_finish(db, list[i].id, "crashed", "process not found");
+            count++;
+        }
+        free(list[i].status);
+        free(list[i].task);
+        free(list[i].result);
+    }
+    free(list);
+    return count;
+}

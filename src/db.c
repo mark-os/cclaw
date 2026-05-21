@@ -595,3 +595,41 @@ void subagent_info_free(SubAgentInfo *info) {
     free(info->result);
     free(info);
 }
+
+SubAgentInfo *subagent_list_running(sqlite3 *db, int *count) {
+    *count = 0;
+    const char *sql =
+        "SELECT id, parent_session_id, session_id, pid, depth, status, task, result"
+        " FROM sub_agents WHERE status='running';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+
+    int cap = 16;
+    SubAgentInfo *list = malloc((size_t)cap * sizeof(SubAgentInfo));
+    if (!list) { sqlite3_finalize(stmt); return NULL; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (*count >= cap) {
+            cap *= 2;
+            SubAgentInfo *tmp = realloc(list, (size_t)cap * sizeof(SubAgentInfo));
+            if (!tmp) break;
+            list = tmp;
+        }
+        SubAgentInfo *info = &list[*count];
+        info->id = sqlite3_column_int64(stmt, 0);
+        info->parent_session_id = sqlite3_column_int64(stmt, 1);
+        info->session_id = sqlite3_column_int64(stmt, 2);
+        info->pid = (pid_t)sqlite3_column_int64(stmt, 3);
+        info->depth = sqlite3_column_int(stmt, 4);
+        const char *s = (const char *)sqlite3_column_text(stmt, 5);
+        info->status = s ? strdup(s) : strdup("unknown");
+        const char *t = (const char *)sqlite3_column_text(stmt, 6);
+        info->task = t ? strdup(t) : NULL;
+        info->result = NULL;
+        (*count)++;
+    }
+    sqlite3_finalize(stmt);
+    if (*count == 0) { free(list); return NULL; }
+    return list;
+}

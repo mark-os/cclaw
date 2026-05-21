@@ -78,4 +78,7 @@ int subagent_finish(sqlite3 *db, int64_t agent_id, const char *status, const cha
 SubAgentInfo *subagent_get(sqlite3 *db, int64_t agent_id);
 void subagent_info_free(SubAgentInfo *info);
 
+/* List all running sub-agents. Caller must free array and each element's fields via subagent_info_free logic. */
+SubAgentInfo *subagent_list_running(sqlite3 *db, int *count);
+
 #endif

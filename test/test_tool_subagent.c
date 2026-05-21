@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 #include "tool_subagent.h"
 #include "db.h"
 #include <assert.h>
@@ -6,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 static sqlite3 *setup_db(void) {
     sqlite3 *db = db_open(":memory:");
@@ -214,6 +217,120 @@ static void test_check_agent_done(void) {
     printf("  PASS test_check_agent_done\n");
 }
 
+/* --- T39: sub-agent lifecycle tests --- */
+
+static void test_reap_crashed(void) {
+    sqlite3 *db = setup_db();
+    int64_t psid = session_create(db, "p");
+    int64_t csid = session_create(db, "c");
+    /* Use PID 1 which we can't waitpid on (ECHILD) — simulates gone process */
+    int64_t aid = subagent_create(db, psid, csid, 99999, 1, "crash task");
+    assert(aid > 0);
+    assert(subagent_count_total(db) == 1);
+
+    /* Reap should detect the process is gone and mark crashed */
+    int reaped = subagent_reap(db);
+    assert(reaped == 1);
+
+    /* Verify status updated */
+    SubAgentInfo *info = subagent_get(db, aid);
+    assert(info != NULL);
+    assert(strcmp(info->status, "crashed") == 0);
+    assert(info->result != NULL);
+    subagent_info_free(info);
+
+    /* No longer counts as running */
+    assert(subagent_count_total(db) == 0);
+
+    db_close(db);
+    printf("  PASS test_reap_crashed\n");
+}
+
+static void test_reap_exited_ok(void) {
+    sqlite3 *db = setup_db();
+    int64_t psid = session_create(db, "p");
+    int64_t csid = session_create(db, "c");
+
+    /* Fork a child that exits immediately with 0 */
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) _exit(0);
+
+    /* Small delay to let child exit */
+    usleep(50000);
+
+    int64_t aid = subagent_create(db, psid, csid, pid, 1, "ok task");
+    assert(aid > 0);
+
+    int reaped = subagent_reap(db);
+    assert(reaped == 1);
+
+    SubAgentInfo *info = subagent_get(db, aid);
+    assert(info != NULL);
+    assert(strcmp(info->status, "done") == 0);
+    subagent_info_free(info);
+
+    db_close(db);
+    printf("  PASS test_reap_exited_ok\n");
+}
+
+static void test_reap_exited_error(void) {
+    sqlite3 *db = setup_db();
+    int64_t psid = session_create(db, "p");
+    int64_t csid = session_create(db, "c");
+
+    /* Fork a child that exits with non-zero */
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) _exit(1);
+
+    usleep(50000);
+
+    int64_t aid = subagent_create(db, psid, csid, pid, 1, "fail task");
+    assert(aid > 0);
+
+    int reaped = subagent_reap(db);
+    assert(reaped == 1);
+
+    SubAgentInfo *info = subagent_get(db, aid);
+    assert(info != NULL);
+    assert(strcmp(info->status, "crashed") == 0);
+    subagent_info_free(info);
+
+    db_close(db);
+    printf("  PASS test_reap_exited_error\n");
+}
+
+static void test_reap_still_running(void) {
+    sqlite3 *db = setup_db();
+    int64_t psid = session_create(db, "p");
+    int64_t csid = session_create(db, "c");
+
+    /* Fork a child that sleeps */
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) { sleep(60); _exit(0); }
+
+    int64_t aid = subagent_create(db, psid, csid, pid, 1, "long task");
+    assert(aid > 0);
+
+    /* Reap should not touch it */
+    int reaped = subagent_reap(db);
+    assert(reaped == 0);
+    assert(subagent_count_total(db) == 1);
+
+    SubAgentInfo *info = subagent_get(db, aid);
+    assert(info != NULL);
+    assert(strcmp(info->status, "running") == 0);
+    subagent_info_free(info);
+
+    /* Cleanup */
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    db_close(db);
+    printf("  PASS test_reap_still_running\n");
+}
+
 int main(void) {
     printf("test_tool_subagent:\n");
     test_invalid_json();
@@ -228,6 +345,10 @@ int main(void) {
     test_check_agent_not_found();
     test_check_agent_running();
     test_check_agent_done();
+    test_reap_crashed();
+    test_reap_exited_ok();
+    test_reap_exited_error();
+    test_reap_still_running();
     printf("All sub-agent tool tests passed.\n");
     return 0;
 }

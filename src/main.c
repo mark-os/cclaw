@@ -216,6 +216,7 @@ int main(int argc, char *argv[]) {
 
     while (daemon_running) {
         sleep(1);
+        subagent_reap(db);
     }
 
     printf("\nshutting down...\n");

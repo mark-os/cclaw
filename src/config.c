@@ -49,7 +49,7 @@ Config *config_load(const char *path) {
     cfg->provider.model = str_dup("deepseek/deepseek-v4-flash");
     cfg->provider.max_tokens = 4096;
     cfg->provider.context_window = 65536;
-    cfg->db_path = str_dup("cclaw.db");
+    cfg->db_path = str_dup("build/cclaw.db");
     cfg->workspace = str_dup("./workspace");
     cfg->web_port = 8080;
     cfg->max_iterations = 25;

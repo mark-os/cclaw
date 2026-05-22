@@ -3,6 +3,9 @@ reference/
 
 # Build artifacts
 /build/
+*.db
+*.db-wal
+*.db-shm
 
 # Editor/IDE
 .vscode/

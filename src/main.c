@@ -21,6 +21,7 @@
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
 #include "shutdown.h"
+#include "janitor.h"
 
 /* Tool dispatch via registry (shared with sub-agent mode) */
 static char *dispatch_tools(const char *name, const char *arguments, void *user_data) {
@@ -213,6 +214,7 @@ int main(int argc, char *argv[]) {
     while (!shutdown_requested()) {
         sleep(1);
         subagent_reap(db);
+        janitor_sweep(db, 300);
     }
 
     printf("\nshutting down...\n");

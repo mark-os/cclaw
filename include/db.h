@@ -81,4 +81,10 @@ void subagent_info_free(SubAgentInfo *info);
 /* List all running sub-agents. Caller must free array and each element's fields via subagent_info_free logic. */
 SubAgentInfo *subagent_list_running(sqlite3 *db, int *count);
 
+/* V16,V19: CAS session locking.
+ * session_try_acquire: atomic idle→running transition. Returns 0 on success, -1 if not acquired.
+ * session_release: atomic running→idle transition. Returns 0 on success, -1 if not held. */
+int session_try_acquire(sqlite3 *db, int64_t session_id, const char *lock_holder);
+int session_release(sqlite3 *db, int64_t session_id, const char *lock_holder);
+
 #endif

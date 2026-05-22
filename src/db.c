@@ -670,6 +670,36 @@ void subagent_info_free(SubAgentInfo *info) {
     free(info);
 }
 
+/* V16,V19: Atomic CAS acquire — idle→running with lock_holder */
+int session_try_acquire(sqlite3 *db, int64_t session_id, const char *lock_holder) {
+    const char *sql =
+        "UPDATE sessions SET state='running', lock_holder=?, lock_acquired_at=unixepoch(), updated_at=unixepoch()"
+        " WHERE id=? AND state='idle' AND lock_holder IS NULL;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(stmt, 1, lock_holder, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+}
+
+/* V16,V19: Atomic CAS release — running→idle, only if lock_holder matches */
+int session_release(sqlite3 *db, int64_t session_id, const char *lock_holder) {
+    const char *sql =
+        "UPDATE sessions SET state='idle', lock_holder=NULL, lock_acquired_at=NULL, updated_at=unixepoch()"
+        " WHERE id=? AND state='running' AND lock_holder=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, lock_holder, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+}
+
 SubAgentInfo *subagent_list_running(sqlite3 *db, int *count) {
     *count = 0;
     const char *sql =

@@ -148,6 +148,9 @@ int agent_run(AgentContext *ctx) {
         Arena *a = arena_create(ARENA_DEFAULT_SIZE);
         if (!a) return -1;
 
+        /* V17: all entries in this iteration share a turn_id */
+        int64_t turn_id = db_next_turn_id(ctx->db, ctx->session_id);
+
         /* Load branch and build context */
         int entry_count = 0;
         Entry *entries = session_get_branch(ctx->db, ctx->session_id, &entry_count);
@@ -200,7 +203,7 @@ int agent_run(AgentContext *ctx) {
             /* Recoverable: append error as assistant message, stop loop */
             Message asst = {.role = ROLE_ASSISTANT,
                             .content = strdup("error: failed to parse LLM response")};
-            entry_append(ctx->db, ctx->session_id, &asst);
+            entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
             free(asst.content);
             return -1;
         }
@@ -208,7 +211,7 @@ int agent_run(AgentContext *ctx) {
         /* If no tool calls — final response */
         if (llm_resp.tool_call_count == 0) {
             Message asst = {.role = ROLE_ASSISTANT, .content = llm_resp.content ? strdup(llm_resp.content) : strdup("")};
-            entry_append(ctx->db, ctx->session_id, &asst);
+            entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
             free(asst.content);
             arena_destroy(a);
             return 0;
@@ -230,14 +233,14 @@ int agent_run(AgentContext *ctx) {
             asst.tool_calls[i].name = strdup(llm_resp.tool_calls[i].name);
             asst.tool_calls[i].arguments = strdup(llm_resp.tool_calls[i].arguments);
         }
-        entry_append(ctx->db, ctx->session_id, &asst);
+        entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
 
         /* Dispatch each tool call and append results (V10) */
         for (size_t i = 0; i < asst.tool_call_count; i++) {
             char *result = dispatch_tool(ctx, &asst.tool_calls[i]);
             ToolResult tr = {.tool_call_id = asst.tool_calls[i].id, .content = result};
             Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr};
-            entry_append(ctx->db, ctx->session_id, &tool_msg);
+            entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
             free(result);
         }
 

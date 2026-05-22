@@ -81,6 +81,12 @@ void subagent_info_free(SubAgentInfo *info);
 /* List all running sub-agents. Caller must free array and each element's fields via subagent_info_free logic. */
 SubAgentInfo *subagent_list_running(sqlite3 *db, int *count);
 
+/* V17: Get next turn_id for a session (MAX(turn_id)+1, or 1 if none). */
+int64_t db_next_turn_id(sqlite3 *db, int64_t session_id);
+
+/* V17: Append entry with explicit turn_id. Like entry_append but tags the entry. */
+int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *msg, int64_t turn_id);
+
 /* V16,V19: CAS session locking.
  * session_try_acquire: atomic idle→running transition. Returns 0 on success, -1 if not acquired.
  * session_release: atomic running→idle transition. Returns 0 on success, -1 if not held. */

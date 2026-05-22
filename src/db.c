@@ -670,6 +670,58 @@ void subagent_info_free(SubAgentInfo *info) {
     free(info);
 }
 
+/* V17: next turn_id for a session */
+int64_t db_next_turn_id(sqlite3 *db, int64_t session_id) {
+    const char *sql = "SELECT COALESCE(MAX(turn_id), 0) + 1 FROM entries WHERE session_id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    int64_t tid = 1;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        tid = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return tid;
+}
+
+/* V17: append entry with explicit turn_id */
+int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *msg, int64_t turn_id) {
+    /* Get current leaf_id */
+    const char *sql = "SELECT leaf_id FROM sessions WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    int64_t parent_id = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+
+    const char *ins_sql =
+        "INSERT INTO entries (parent_id, session_id, turn_id, data) VALUES (?,?,?,?);";
+    if (sqlite3_prepare_v2(db, ins_sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, parent_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    sqlite3_bind_int64(stmt, 3, turn_id);
+
+    char *data = serialize_entry_data(msg);
+    if (!data) { sqlite3_finalize(stmt); return -1; }
+    sqlite3_bind_text(stmt, 4, data, -1, SQLITE_TRANSIENT);
+    free(data);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+
+    int64_t entry_id = sqlite3_last_insert_rowid(db);
+    if (session_set_leaf(db, session_id, entry_id) != 0)
+        return -1;
+    return entry_id;
+}
+
 /* V16,V19: Atomic CAS acquire — idle→running with lock_holder */
 int session_try_acquire(sqlite3 *db, int64_t session_id, const char *lock_holder) {
     const char *sql =

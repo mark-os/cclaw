@@ -140,7 +140,7 @@ T53|x|integration test: agent loop end-to-end (prompt → tool call → tool res
 T54|x|integration test: provider fallback (kill primary, verify fallback fires)|T45
 T55|x|DB Schema: sessions CAS columns (state, lock_holder, lock_acquired_at, error_count) + inbox table|V16,V18
 T56|x|CAS Acquire/Release (`session_try_acquire`)|V16,V19
-T57|.|agent.c Turn Tagging (assign `turn_id` via index query)|V17
+T57|x|agent.c Turn Tagging (assign `turn_id` via index query)|V17
 T58|.|context.c Incomplete Turn Interception (synthetic failure + notice)|V17
 T59|.|Janitor Sweep Logic (stale locks, orphan pending recovery)|V16,V19
 T60|.|Anti-Crash Loop Limit (`error_count` tracking, quarantine ≥ 3)|V19

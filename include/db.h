@@ -93,4 +93,23 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
 int session_try_acquire(sqlite3 *db, int64_t session_id, const char *lock_holder);
 int session_release(sqlite3 *db, int64_t session_id, const char *lock_holder);
 
+/* V18: Inbox primitives */
+typedef struct {
+    int64_t id;
+    int64_t session_id;
+    char *source;
+    char *payload;
+    int64_t created_at;
+} InboxItem;
+
+/* Insert a message into the inbox. Returns row id (>0) or -1 on error. */
+int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const char *payload);
+
+/* Peek at unconsumed inbox items for a session (oldest first, max `limit`).
+ * Caller must free with inbox_items_free. Sets *count. Returns NULL on error/empty. */
+InboxItem *inbox_peek(sqlite3 *db, int64_t session_id, int limit, int *count);
+
+/* Free an InboxItem array returned by inbox_peek. */
+void inbox_items_free(InboxItem *items, int count);
+
 #endif

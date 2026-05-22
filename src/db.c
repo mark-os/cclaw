@@ -789,3 +789,56 @@ SubAgentInfo *subagent_list_running(sqlite3 *db, int *count) {
     if (*count == 0) { free(list); return NULL; }
     return list;
 }
+
+/* V18: Inbox primitives */
+
+int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const char *payload) {
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db,
+        "INSERT INTO inbox (session_id, source, payload) VALUES (?, ?, ?)", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, source, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, payload, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    return sqlite3_last_insert_rowid(db);
+}
+
+InboxItem *inbox_peek(sqlite3 *db, int64_t session_id, int limit, int *count) {
+    *count = 0;
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT id, session_id, source, payload, created_at FROM inbox "
+        "WHERE session_id = ? AND consumed = 0 ORDER BY id ASC LIMIT ?",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return NULL;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_int(stmt, 2, limit);
+
+    int cap = limit < 16 ? 16 : limit;
+    InboxItem *items = malloc(cap * sizeof(InboxItem));
+    if (!items) { sqlite3_finalize(stmt); return NULL; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        InboxItem *it = &items[*count];
+        it->id = sqlite3_column_int64(stmt, 0);
+        it->session_id = sqlite3_column_int64(stmt, 1);
+        it->source = strdup((const char *)sqlite3_column_text(stmt, 2));
+        it->payload = strdup((const char *)sqlite3_column_text(stmt, 3));
+        it->created_at = sqlite3_column_int64(stmt, 4);
+        (*count)++;
+    }
+    sqlite3_finalize(stmt);
+    if (*count == 0) { free(items); return NULL; }
+    return items;
+}
+
+void inbox_items_free(InboxItem *items, int count) {
+    for (int i = 0; i < count; i++) {
+        free(items[i].source);
+        free(items[i].payload);
+    }
+    free(items);
+}

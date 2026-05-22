@@ -842,3 +842,123 @@ void inbox_items_free(InboxItem *items, int count) {
     }
     free(items);
 }
+
+/* V18: Atomically consume inbox items into session entries */
+int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
+    if (sqlite3_exec(db, "BEGIN EXCLUSIVE", NULL, NULL, NULL) != SQLITE_OK)
+        return -1;
+
+    /* Peek unconsumed items */
+    sqlite3_stmt *sel;
+    if (sqlite3_prepare_v2(db,
+        "SELECT id, payload FROM inbox WHERE session_id = ? AND consumed = 0 ORDER BY id ASC LIMIT ?",
+        -1, &sel, NULL) != SQLITE_OK) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+    sqlite3_bind_int64(sel, 1, session_id);
+    sqlite3_bind_int(sel, 2, limit);
+
+    /* Get current leaf */
+    sqlite3_stmt *leaf_stmt;
+    if (sqlite3_prepare_v2(db, "SELECT leaf_id FROM sessions WHERE id=?", -1, &leaf_stmt, NULL) != SQLITE_OK) {
+        sqlite3_finalize(sel);
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+    sqlite3_bind_int64(leaf_stmt, 1, session_id);
+    if (sqlite3_step(leaf_stmt) != SQLITE_ROW) {
+        sqlite3_finalize(leaf_stmt);
+        sqlite3_finalize(sel);
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+    int64_t parent_id = sqlite3_column_int64(leaf_stmt, 0);
+    sqlite3_finalize(leaf_stmt);
+
+    int consumed = 0;
+    while (sqlite3_step(sel) == SQLITE_ROW) {
+        int64_t inbox_id = sqlite3_column_int64(sel, 0);
+        const char *payload = (const char *)sqlite3_column_text(sel, 1);
+
+        /* Build user message JSON: {"type":"message","role":"user","content":"<payload>"} */
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "type", "message");
+        cJSON_AddStringToObject(obj, "role", "user");
+        cJSON_AddStringToObject(obj, "content", payload ? payload : "");
+        char *data = cJSON_PrintUnformatted(obj);
+        cJSON_Delete(obj);
+        if (!data) {
+            sqlite3_finalize(sel);
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            return -1;
+        }
+
+        /* Insert entry */
+        sqlite3_stmt *ins;
+        if (sqlite3_prepare_v2(db,
+            "INSERT INTO entries (parent_id, session_id, data) VALUES (?,?,?)",
+            -1, &ins, NULL) != SQLITE_OK) {
+            free(data);
+            sqlite3_finalize(sel);
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            return -1;
+        }
+        sqlite3_bind_int64(ins, 1, parent_id);
+        sqlite3_bind_int64(ins, 2, session_id);
+        sqlite3_bind_text(ins, 3, data, -1, SQLITE_TRANSIENT);
+        free(data);
+        int rc = sqlite3_step(ins);
+        sqlite3_finalize(ins);
+        if (rc != SQLITE_DONE) {
+            sqlite3_finalize(sel);
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            return -1;
+        }
+        parent_id = sqlite3_last_insert_rowid(db);
+
+        /* Mark consumed */
+        sqlite3_stmt *upd;
+        if (sqlite3_prepare_v2(db,
+            "UPDATE inbox SET consumed = 1 WHERE id = ?", -1, &upd, NULL) != SQLITE_OK) {
+            sqlite3_finalize(sel);
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            return -1;
+        }
+        sqlite3_bind_int64(upd, 1, inbox_id);
+        rc = sqlite3_step(upd);
+        sqlite3_finalize(upd);
+        if (rc != SQLITE_DONE) {
+            sqlite3_finalize(sel);
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            return -1;
+        }
+        consumed++;
+    }
+    sqlite3_finalize(sel);
+
+    /* Update session leaf_id to last inserted entry */
+    if (consumed > 0) {
+        sqlite3_stmt *lf;
+        if (sqlite3_prepare_v2(db,
+            "UPDATE sessions SET leaf_id=?, updated_at=unixepoch() WHERE id=?",
+            -1, &lf, NULL) != SQLITE_OK) {
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            return -1;
+        }
+        sqlite3_bind_int64(lf, 1, parent_id);
+        sqlite3_bind_int64(lf, 2, session_id);
+        int rc = sqlite3_step(lf);
+        sqlite3_finalize(lf);
+        if (rc != SQLITE_DONE) {
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            return -1;
+        }
+    }
+
+    if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
+    return consumed;
+}

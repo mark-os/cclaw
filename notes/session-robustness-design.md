@@ -4,7 +4,7 @@
 
 ## 1. System Architecture Overview
 
-The CClaw concurrency and fault-tolerance model shifts from non-isolated, ad-hoc execution to a **decentralized, state-machine-driven transactional system** powered by SQLite primitives.
+The CClaw concurrency and fault-tolerance model is a **decentralized, state-machine-driven transactional system** powered by SQLite primitives. No central runner thread — any thread/process that needs to run a session acquires it via CAS.
 
 ```
    [Telegram Thread]      [Cron Thread]     [Sub-Agent Process]
@@ -15,7 +15,7 @@ The CClaw concurrency and fault-tolerance model shifts from non-isolated, ad-hoc
           └──────────────┬──────┴─────────────────────┘
                          ▼
                 ┌────────────────┐
-                │  SQLite INBOX  │ ◄─── Durable Queue
+                │  SQLite INBOX  │ ◄─── Durable Queue (passive, no wake triggers)
                 └───────┬────────┘
                         │
                         ▼  [session_try_acquire]
@@ -40,68 +40,78 @@ The CClaw concurrency and fault-tolerance model shifts from non-isolated, ad-hoc
 
 ---
 
-## 2. Storage Engine Schema Migrations
+## 2. Schema
 
 ```sql
--- Migration Script: V14_Robustness_And_Inbox.sql
-BEGIN TRANSACTION;
-
--- Session State Machine Extensions
-ALTER TABLE sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'idle';
-ALTER TABLE sessions ADD COLUMN locked_by TEXT;
-ALTER TABLE sessions ADD COLUMN locked_at INTEGER;
-ALTER TABLE sessions ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0;
-
--- Turn Identification Extensions
-ALTER TABLE entries ADD COLUMN turn_id INTEGER;
-
--- Composite Index for O(1) Max Turn ID Lookups via Index-Only Scans
-CREATE INDEX IF NOT EXISTS idx_entries_session_turn 
-  ON entries(session_id, turn_id);
-
--- Durable Transactional Inbox Queue
-CREATE TABLE IF NOT EXISTS inbox (
+-- Sessions with CAS lock fields
+CREATE TABLE sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    source TEXT NOT NULL,
-    content TEXT NOT NULL,
-    priority INTEGER NOT NULL DEFAULT 0,
+    name TEXT,
+    leaf_id INTEGER DEFAULT -1,
+    agent_name TEXT,
+    state TEXT NOT NULL DEFAULT 'idle',
+    lock_holder TEXT,
+    lock_acquired_at INTEGER,
+    error_count INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    consumed_at INTEGER DEFAULT NULL
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
--- Partial Index for Active Inbox Scanning
-CREATE INDEX IF NOT EXISTS idx_inbox_pending
-  ON inbox(session_id) WHERE consumed_at IS NULL;
+-- Entries: JSON data column with generated columns for indexing
+CREATE TABLE entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    parent_id INTEGER NOT NULL DEFAULT -1,
+    turn_id INTEGER,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    data TEXT NOT NULL,
+    type TEXT GENERATED ALWAYS AS (json_extract(data, '$.type')) STORED,
+    role TEXT GENERATED ALWAYS AS (json_extract(data, '$.role')) STORED
+);
 
--- Sub-Agent Delivery Directives
-ALTER TABLE sub_agents ADD COLUMN on_complete TEXT NOT NULL DEFAULT 'inbox';
+CREATE INDEX idx_entries_session ON entries(session_id, id);
+CREATE INDEX idx_entries_parent ON entries(parent_id);
+CREATE INDEX idx_entries_session_type ON entries(session_id, type);
+CREATE INDEX idx_entries_session_role ON entries(session_id, role);
+CREATE INDEX idx_entries_turn ON entries(session_id, turn_id);
 
-COMMIT;
+-- Durable Transactional Inbox Queue
+CREATE TABLE inbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id),
+    source TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    consumed INTEGER NOT NULL DEFAULT 0
+);
 
+CREATE INDEX idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0;
 ```
 
 ---
 
 ## 3. Session State Machine & CAS Primitives
 
-Sessions transition through four operational states:
+Sessions transition through these states:
 
 ```
-        ┌─────────────────── inbox_insert() ──────────────────┐
-        ▼                                                     │
-    ┌───────┐             ┌─────────┐  runner picks up  ┌─────────┐
-    │ idle  │ ──────────► │ pending │ ────────────────► │ running │
-    └───────┘             └─────────┘                   └────┬────┘
-        │                      ▲                             │
-        │  direct agent_run()  │                             │ crash / stale lock
-        └──────────────────────┼─────────────────────────────┼────────┐
-                               │                             ▼        ▼
-                               └───────── janitor ────── ┌───────┐ ┌───────┐
-                                          error_count <3 │ error │ │ fatal │
-                                                         └───────┘ └───────┘
-
+    ┌───────┐             ┌─────────┐
+    │ idle  │ ──────────► │ running │
+    └───────┘  acquire    └────┬────┘
+        ▲                      │
+        │  release (clean)     │ crash / stale lock
+        │                      ▼
+        │                 ┌─────────┐  error_count >= 3  ┌────────────┐
+        └──── janitor ─── │  error  │ ─────────────────► │ quarantine │
+              (retry)     └─────────┘                    └────────────┘
 ```
+
+States:
+- **idle** — no work pending, no lock held
+- **pending** — inbox has items but no thread is running the session (set by release loop when max_turns hit)
+- **running** — lock held, agent executing
+- **error** — crashed mid-turn, janitor detected stale lock
+- **quarantine** — error_count >= 3, requires manual intervention
 
 ### Atomic CAS Acquisition
 
@@ -109,177 +119,134 @@ Sessions transition through four operational states:
 int session_try_acquire(sqlite3 *db, int64_t session_id, const char *owner) {
     const char *sql =
         "UPDATE sessions "
-        "SET state='running', locked_by=?, locked_at=unixepoch() "
+        "SET state='running', lock_holder=?, lock_acquired_at=unixepoch() "
         "WHERE id=? AND state IN ('idle', 'pending');";
-        
+
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) return 0;
-    
+
     sqlite3_bind_text(stmt, 1, owner, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt, 2, session_id);
-    
+
     rc = sqlite3_step(stmt);
     int changes = sqlite3_changes(db);
     sqlite3_finalize(stmt);
-    
+
     return (rc == SQLITE_DONE && changes == 1);
 }
-
 ```
 
 ---
 
-## 4. The Keep-Alive Release Architecture
+## 4. The Keep-Alive Release Loop
 
-To eliminate edge-case timing windows where a message hits the inbox during the wrap-up of a turn, the processing thread executes a structural release phase. It leverages a strict `BEGIN IMMEDIATE` boundary to block incoming concurrent modifiers until the state resolution settles.
+After agent_run completes a turn, the thread checks if new inbox items arrived during execution. If so, it drains them and runs another turn — up to a max. This avoids releasing the lock only to immediately re-acquire it.
 
 ```c
-#define MAX_CONSECUTIVE_TURNS_DEFAULT 3
+#define MAX_CONSECUTIVE_TURNS 3
 
-void session_release_loop(sqlite3 *db, int64_t session_id, const char *caller_id, int max_turns, AgentContext *ctx) {
+void session_run_loop(sqlite3 *db, int64_t session_id, const char *owner, AgentContext *ctx) {
     int turns_executed = 0;
-    
+
     while (1) {
-        // Derive next monotonic turn ID
         int64_t turn_id = db_get_next_turn_id(db, session_id);
-        
-        // 1. Consume current inbox payload into active session entries
+
+        // Consume inbox into entries
         int consumed = inbox_consume_into_entries(db, session_id, turn_id);
-        
-        // 2. Run the LLM Loop iteration if entries exist or if initialized directly
+
+        // Run agent if there's work
         if (consumed > 0 || turns_executed == 0) {
             agent_run(ctx, turn_id);
             turns_executed++;
         }
-        
-        // 3. Enter Critical Section for State Determination
+
+        // Critical section: decide whether to release or continue
         sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL);
-        
-        int pending_msgs = db_get_unconsumed_inbox_count(db, session_id);
-        
-        if (pending_msgs == 0 || turns_executed >= max_turns) {
-            const char *target_state = (pending_msgs > 0) ? "pending" : "idle";
-            
+
+        int pending = db_get_unconsumed_inbox_count(db, session_id);
+
+        if (pending == 0 || turns_executed >= MAX_CONSECUTIVE_TURNS) {
+            const char *target_state = (pending > 0) ? "pending" : "idle";
+
             sqlite3_stmt *stmt;
-            const char *sql = "UPDATE sessions SET state=?, locked_by=NULL, locked_at=NULL, error_count=0 "
-                              "WHERE id=? AND state='running';";
-            
+            const char *sql =
+                "UPDATE sessions SET state=?, lock_holder=NULL, lock_acquired_at=NULL, error_count=0 "
+                "WHERE id=? AND state='running';";
+
             sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
             sqlite3_bind_text(stmt, 1, target_state, -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(stmt, 2, session_id);
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
-            
+
             sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
-            break; 
+            break;
         } else {
-            // New items accumulated during agent_run. Retain lock, commit transaction, loop back.
+            // More items arrived during agent_run — loop back
             sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
             continue;
         }
     }
 }
-
 ```
 
 ---
 
-## 5. Fault Detection & Fault Isolation (The Janitor Daemon)
+## 5. Fault Detection & Isolation (Janitor)
 
-The background main loop intercepts orphan states via two mechanics: **Stale Lock Mitigation** and a hard **Quarantine Boundary** for deterministic execution crashes.
-
-### The Janitor Sweep
+The janitor runs in the daemon's main loop on a periodic cadence (e.g., every 30s). It detects crashed sessions via stale locks and either retries or quarantines them.
 
 ```c
 void janitor_sweep(sqlite3 *db, int lock_timeout_seconds) {
-    // Phase 1: Catch crashed running sessions and flag errors
-    const char *stale_sql = 
-        "UPDATE sessions SET state='error', locked_by=NULL, locked_at=NULL, error_count = error_count + 1 "
-        "WHERE state='running' AND locked_at < (unixepoch() - ?);";
-        
-    sqlite3_stmt *stmt1;
-    sqlite3_prepare_v2(db, stale_sql, -1, &stmt1, NULL);
-    sqlite3_bind_int(stmt1, 1, lock_timeout_seconds);
-    sqlite3_step(stmt1);
-    sqlite3_finalize(stmt1);
+    // Phase 1: Detect stale locks → mark as error
+    const char *stale_sql =
+        "UPDATE sessions SET state='error', lock_holder=NULL, lock_acquired_at=NULL, "
+        "error_count = error_count + 1 "
+        "WHERE state='running' AND lock_acquired_at < (unixepoch() - ?);";
 
-    // Phase 2: Auto-recover unblocked sessions under error thresholds
-    // If pending work exists and error_count < 3, flag to 'pending' for retry
-    const char *recover_pending = 
-        "UPDATE sessions SET state='pending', error_count = error_count + 1 "
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(db, stale_sql, -1, &stmt, NULL);
+    sqlite3_bind_int(stmt, 1, lock_timeout_seconds);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    // Phase 2: Recover error sessions with pending inbox (under threshold)
+    const char *recover_sql =
+        "UPDATE sessions SET state='pending' "
         "WHERE state='error' AND error_count < 3 "
-        "AND EXISTS (SELECT 1 FROM inbox WHERE session_id = sessions.id AND consumed_at IS NULL);";
-    sqlite3_exec(db, recover_pending, NULL, NULL, NULL);
+        "AND EXISTS (SELECT 1 FROM inbox WHERE session_id = sessions.id AND consumed = 0);";
+    sqlite3_exec(db, recover_sql, NULL, NULL, NULL);
 
-    // Phase 3: Move error states with no pending entries cleanly back to idle
-    const char *recover_idle = 
+    // Phase 3: Error sessions with no pending work → idle
+    const char *idle_sql =
         "UPDATE sessions SET state='idle' "
         "WHERE state='error' AND error_count < 3 "
-        "AND NOT EXISTS (SELECT 1 FROM inbox WHERE session_id = sessions.id AND consumed_at IS NULL);";
-    sqlite3_exec(db, recover_idle, NULL, NULL, NULL);
+        "AND NOT EXISTS (SELECT 1 FROM inbox WHERE session_id = sessions.id AND consumed = 0);";
+    sqlite3_exec(db, idle_sql, NULL, NULL, NULL);
 }
-
 ```
-
-### Structural Incomplete Turn Interception
-
-When `context_build()` evaluates the historical entries table, it scans the tail turn sequence.
-
-If an assistant role entry declares a `tool_calls` payload, but the matching execution elements are missing due to a crash, the engine **must not skip the turn** (which causes severe side-effect blindspots and breaks vendor schema validation APIs).
-
-The builder instead builds virtual structural objects:
-
-1. Synthesizes synthetic `tool` response entries containing generic failure strings (`{"error": "Process terminated during execution"}`) to satisfy schema structural balance rules.
-2. Injects a system explicit notice turn immediately following:
-> `[Previous turn was interrupted. Tool call results may be missing. You may retry the operation if needed.]`
-
-
 
 ---
 
-## 6. Implementation Specification Tasks (§T)
+## 6. Incomplete Turn Interception
 
-```
-        PHASE A: ROBUSTNESS CORE          PHASE B: INBOX PIPELINES
-        ├── T55: DB Schema Migrations     ├── T62: inbox Core Primitives
-        ├── T56: CAS Acquire/Release      ├── T63: Atomic Move Transaction
-        ├── T57: agent.c Turn Tagging     ├── T64: Subagent Wake Injection
-        ├── T58: context.c Incomplete     ├── T65: spawn_agent API Updates
-        ├── T59: Janitor Sweep Logic      └── T66: Verification Tests
-        ├── T60: Anti-Crash Loop Limit
-        └── T61: Phase A Integration
+When `context_build()` loads the branch, it checks the tail turn for structural completeness.
 
-```
+If an assistant entry has tool_calls in its `data.content` array but the corresponding `tool_result` entries are missing (crash mid-execution), the builder:
 
-### Phase A: Session Robustness Core
+1. Synthesizes tool_result entries with error content: `{"type":"message","role":"tool_result","tool_call_id":"...","name":"...","content":"error: process terminated during execution","is_error":true}`
+2. Injects a system notice: `[Previous turn was interrupted. Tool results may be incomplete. Retry if needed.]`
 
-* **T55:** Execute schema modifications adding state flags, lock definitions, and error analytics structures to `sessions` and `entries`.
-* **T56:** Implement `session_try_acquire` and the structural state verification queries within `src/db.c`.
-* **T57:** Refactor `src/agent.c` processing chains to compute next sequential increments for `turn_id` utilizing index-optimized queries.
-* **T58:** Implement validation passes within `src/context.c` to look for asymmetric tool outputs, outputting synthetic validation frames and system notifications.
-* **T59:** Add `janitor_sweep()` to the main daemon execution block (`src/main.c`) to query stale locks on a 1-second cadence.
-* **T60:** Construct state constraints within janitor loops isolating systems matching or exceeding `MAX_AUTO_RECOVERY` criteria.
-* **T61:** Establish verification matrices proving execution rejection patterns across overlapping workers.
+This satisfies the LLM's schema requirements (every tool_call must have a matching tool_result) without skipping the turn or losing context about what was attempted.
 
-### Phase B: Transactional Inbox Pipelines
+---
 
-* **T62:** Build out `inbox` table management utilities (`inbox_insert`, `inbox_peek`) within storage files.
-* **T63:** Implement `inbox_consume_into_entries()` wrapped explicitly in an isolated transactional block (`BEGIN EXCLUSIVE`).
-* **T64:** Patch sub-agent lifecycle terminations in `src/tool_subagent.c` to feed outcomes directly into parent inbox descriptors rather than relying on manual poll iterations.
-* **T65:** Extend the `spawn_agent` tool specification parameters to recognize and route configuration keys (`inbox`, `silent`, `spawn`).
-* **T66:** Author test components measuring atomic rollbacks during simulated operational failures mid-consumption step.
+## 7. Sub-Agent Result Delivery
 
-### Phase C: Decentralized Integration
+Sub-agents use two modes (decided at spawn time by the parent):
 
-* **T67:** Upgrade `src/cli.c` workspace triggers to conform to the safe acquire/release keep-alive framework.
-* **T68:** Transition `src/telegram.c` intake handlers to write text bodies to the durable inbox queue and instantly trigger local lock attempts.
-* **T69:** Update `src/cron.c` process actions to execute within standard transactional inbox wrappers.
-* **T70:** Verify that parallel high-throughput telemetry streams stay ordered across overlapping network workloads.
+- **Blocking** (default): Parent thread waits on child process. Result returned directly as the `spawn_agent` tool output. No inbox involved.
+- **Background**: Parent continues its turn. Sub-agent runs independently. On completion, sub-agent posts its name+id to the parent's inbox. Parent sees it on next wake and can use `db_query` to read the sub-agent's session entries.
 
-### Phase D: Polish & Observability
-
-* **T71:** Expose state metrics, lock holders, and backlog queue depths on the web monitoring console (`src/web.c`).
-* **T72:** Enhance CLI terminal resumption paths to cleanly echo unread inbox counts when opening interactive prompt tracking sessions.
-* **T73:** Add the `inbox_list` runtime introspection tool to the core system registry.
-* **T74:** Bind internal parameters (such as `stale_lock_timeout`) directly to unified runtime config configuration nodes.
+The inbox is **passive storage** — producers never trigger wakes. A session only runs when an external event (user message, Telegram, cron) acquires its lock. Inbox is drained at the start of each run via `inbox_consume_into_entries()`.

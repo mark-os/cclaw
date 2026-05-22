@@ -143,7 +143,7 @@ T56|x|CAS Acquire/Release (`session_try_acquire`)|V16,V19
 T57|x|agent.c Turn Tagging (assign `turn_id` via index query)|V17
 T58|x|context.c Incomplete Turn Interception (synthetic failure + notice)|V17
 T59|x|Janitor Sweep Logic (stale locks, orphan pending recovery)|V16,V19
-T60|.|Anti-Crash Loop Limit (`error_count` tracking, quarantine ≥ 3)|V19
+T60|x|Anti-Crash Loop Limit (`error_count` tracking, quarantine ≥ 3)|V19
 T61|.|Phase A Integration (verification matrices for overlap rejection)|V16
 T62|.|inbox Core Primitives (`inbox_insert`, `inbox_peek`)|V18
 T63|.|Atomic Move Transaction (`inbox_consume_into_entries`)|V18

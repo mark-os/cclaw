@@ -737,10 +737,10 @@ int session_try_acquire(sqlite3 *db, int64_t session_id, const char *lock_holder
     return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
 }
 
-/* V16,V19: Atomic CAS release — running→idle, only if lock_holder matches */
+/* V16,V19: Atomic CAS release — running→idle, only if lock_holder matches. Resets error_count on clean release. */
 int session_release(sqlite3 *db, int64_t session_id, const char *lock_holder) {
     const char *sql =
-        "UPDATE sessions SET state='idle', lock_holder=NULL, lock_acquired_at=NULL, updated_at=unixepoch()"
+        "UPDATE sessions SET state='idle', lock_holder=NULL, lock_acquired_at=NULL, error_count=0, updated_at=unixepoch()"
         " WHERE id=? AND state='running' AND lock_holder=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)

@@ -1,6 +1,7 @@
 #include "db.h"
 #include "janitor.h"
 #include <stdio.h>
+#include <string.h>
 #include <assert.h>
 #include <unistd.h>
 
@@ -22,7 +23,7 @@ static void test_stale_lock_recovery(void) {
     assert(sqlite3_step(stmt) == SQLITE_DONE);
     sqlite3_finalize(stmt);
 
-    /* Sweep with 300s timeout should recover it */
+    /* Sweep with 300s timeout should detect stale lock → error → recover to idle */
     int recovered = janitor_sweep(db, 300);
     assert(recovered == 1);
 
@@ -91,6 +92,78 @@ static void test_invalid_args(void) {
     printf("  PASS test_invalid_args\n");
 }
 
+static void test_quarantine_after_3_crashes(void) {
+    sqlite3 *db = db_open(DB_PATH);
+    assert(db);
+    int64_t sid = session_create(db, "crash_test");
+    assert(sid > 0);
+
+    sqlite3_stmt *stmt;
+    const char *sql;
+
+    /* Simulate 3 crash cycles: acquire, backdate, sweep */
+    for (int i = 0; i < 3; i++) {
+        assert(session_try_acquire(db, sid, "worker") == 0);
+        sql = "UPDATE sessions SET lock_acquired_at = unixepoch() - 600 WHERE id = ?;";
+        assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
+        sqlite3_bind_int64(stmt, 1, sid);
+        assert(sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        janitor_sweep(db, 300);
+    }
+
+    /* Session should be quarantined — not acquirable */
+    assert(session_try_acquire(db, sid, "worker") == -1);
+
+    /* Verify state is 'quarantine' */
+    sql = "SELECT state FROM sessions WHERE id = ?;";
+    assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(stmt, 1, sid);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    const char *state = (const char *)sqlite3_column_text(stmt, 0);
+    assert(strcmp(state, "quarantine") == 0);
+    sqlite3_finalize(stmt);
+
+    db_close(db);
+    printf("  PASS test_quarantine_after_3_crashes\n");
+}
+
+static void test_error_count_resets_on_clean_release(void) {
+    sqlite3 *db = db_open(DB_PATH);
+    assert(db);
+    int64_t sid = session_create(db, "reset_test");
+    assert(sid > 0);
+
+    sqlite3_stmt *stmt;
+    const char *sql;
+
+    /* Simulate 2 crashes (below quarantine threshold) */
+    for (int i = 0; i < 2; i++) {
+        assert(session_try_acquire(db, sid, "worker") == 0);
+        sql = "UPDATE sessions SET lock_acquired_at = unixepoch() - 600 WHERE id = ?;";
+        assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
+        sqlite3_bind_int64(stmt, 1, sid);
+        assert(sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        janitor_sweep(db, 300);
+    }
+
+    /* Now do a clean acquire + release — should reset error_count */
+    assert(session_try_acquire(db, sid, "worker") == 0);
+    assert(session_release(db, sid, "worker") == 0);
+
+    /* Verify error_count is 0 */
+    sql = "SELECT error_count FROM sessions WHERE id = ?;";
+    assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(stmt, 1, sid);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_column_int(stmt, 0) == 0);
+    sqlite3_finalize(stmt);
+
+    db_close(db);
+    printf("  PASS test_error_count_resets_on_clean_release\n");
+}
+
 int main(void) {
     unlink(DB_PATH);
     printf("test_janitor:\n");
@@ -98,6 +171,8 @@ int main(void) {
     test_fresh_lock_not_recovered();
     test_orphan_pending_recovery();
     test_invalid_args();
+    test_quarantine_after_3_crashes();
+    test_error_count_resets_on_clean_release();
     unlink(DB_PATH);
     printf("All janitor tests passed.\n");
     return 0;

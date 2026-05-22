@@ -169,7 +169,26 @@ static char *tg_dispatch(const char *name, const char *arguments, void *user_dat
     return e->handler(arguments, e->user_data);
 }
 
-/* Process a single Telegram message: route to session, run agent, reply */
+/* V16: Keep-alive thread for Telegram sessions */
+typedef struct {
+    sqlite3 *db;
+    int64_t session_id;
+    const char *lock_holder;
+    volatile int stop;
+} TgKeepAliveCtx;
+
+static void *tg_keepalive_thread(void *arg) {
+    TgKeepAliveCtx *ctx = (TgKeepAliveCtx *)arg;
+    while (!ctx->stop) {
+        for (int i = 0; i < 60 && !ctx->stop; i++)
+            sleep(1);
+        if (!ctx->stop)
+            session_refresh_lock(ctx->db, ctx->session_id, ctx->lock_holder);
+    }
+    return NULL;
+}
+
+/* T68: Process a single Telegram message via inbox + CAS lock pattern */
 static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema *schemas, size_t tool_count) {
     (void)base_reg;
     (void)schemas;
@@ -196,6 +215,21 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
         entry_append(g_db, session_id, &sys_msg);
         free(prompt);
     }
+
+    /* V18: Insert message into inbox (decoupled from agent execution) */
+    inbox_insert(g_db, session_id, "telegram", text->valuestring);
+
+    /* V16: Try to acquire session lock via CAS */
+    char lock_holder[64];
+    snprintf(lock_holder, sizeof(lock_holder), "tg-%d-%lld", (int)getpid(), (long long)chat_id);
+
+    if (session_try_acquire(g_db, session_id, lock_holder) != 0) {
+        /* Session already locked — message stays in inbox for active handler */
+        return;
+    }
+
+    /* V18: Consume inbox items into session entries */
+    inbox_consume_into_entries(g_db, session_id, 100);
 
     /* Build per-session registry (includes session-persistent JS tools) */
     ToolRegistry reg;
@@ -224,14 +258,16 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     size_t local_tool_count = 0;
     const ToolSchema *local_schemas = tools_schemas(&reg, &local_tool_count);
 
-    /* Append user message */
-    Message user_msg = {.role = ROLE_USER, .content = text->valuestring};
-    entry_append(g_db, session_id, &user_msg);
-
     /* Start typing indicator thread */
     TypingCtx typing_ctx = {.token = g_cfg->telegram_token, .chat_id = chat_id, .active = 1};
     pthread_t typing_thread;
     pthread_create(&typing_thread, NULL, typing_loop, &typing_ctx);
+
+    /* V16: Start keep-alive thread */
+    TgKeepAliveCtx ka_ctx = {.db = g_db, .session_id = session_id,
+                             .lock_holder = lock_holder, .stop = 0};
+    pthread_t ka_thread;
+    pthread_create(&ka_thread, NULL, tg_keepalive_thread, &ka_ctx);
 
     /* Run agent */
     AgentContext ctx = {0};
@@ -248,6 +284,10 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     /* Stop typing indicator */
     typing_ctx.active = 0;
     pthread_join(typing_thread, NULL);
+
+    /* Stop keep-alive */
+    ka_ctx.stop = 1;
+    pthread_join(ka_thread, NULL);
 
     /* Get response text */
     char *reply_text = NULL;
@@ -271,6 +311,9 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     free(reply_text);
     js_runtime_destroy(js_rt);
     tools_free(&reg);
+
+    /* V16: Release session lock */
+    session_release(g_db, session_id, lock_holder);
 }
 
 static void *poll_loop(void *arg) {

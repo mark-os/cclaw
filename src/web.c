@@ -20,25 +20,50 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
     cJSON_AddStringToObject(root, "version", CCLAW_VERSION);
     cJSON_AddNumberToObject(root, "uptime_seconds", (double)uptime);
 
-    /* Active sessions with details */
+    /* Active sessions with state, lock holders, inbox depths */
     cJSON *sessions = cJSON_AddArrayToObject(root, "sessions");
     if (s_db) {
         sqlite3_stmt *stmt;
-        const char *sql = "SELECT id, name, updated_at FROM sessions ORDER BY updated_at DESC;";
+        const char *sql =
+            "SELECT s.id, s.name, s.state, s.lock_holder, s.error_count, s.updated_at,"
+            " (SELECT COUNT(*) FROM inbox i WHERE i.session_id=s.id AND i.consumed=0)"
+            " FROM sessions s ORDER BY s.updated_at DESC;";
         if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
             while (sqlite3_step(stmt) == SQLITE_ROW) {
                 cJSON *s = cJSON_CreateObject();
                 cJSON_AddNumberToObject(s, "id", (double)sqlite3_column_int64(stmt, 0));
                 const char *name = (const char *)sqlite3_column_text(stmt, 1);
                 cJSON_AddStringToObject(s, "name", name ? name : "");
-                cJSON_AddNumberToObject(s, "updated_at", (double)sqlite3_column_int64(stmt, 2));
+                const char *state = (const char *)sqlite3_column_text(stmt, 2);
+                cJSON_AddStringToObject(s, "state", state ? state : "idle");
+                const char *holder = (const char *)sqlite3_column_text(stmt, 3);
+                if (holder)
+                    cJSON_AddStringToObject(s, "lock_holder", holder);
+                else
+                    cJSON_AddNullToObject(s, "lock_holder");
+                cJSON_AddNumberToObject(s, "error_count", (double)sqlite3_column_int(stmt, 4));
+                cJSON_AddNumberToObject(s, "updated_at", (double)sqlite3_column_int64(stmt, 5));
+                cJSON_AddNumberToObject(s, "inbox_depth", (double)sqlite3_column_int(stmt, 6));
                 cJSON_AddItemToArray(sessions, s);
             }
             sqlite3_finalize(stmt);
         }
+
+        /* Aggregate state metrics */
+        cJSON *metrics = cJSON_AddObjectToObject(root, "state_metrics");
+        sqlite3_stmt *mstmt;
+        const char *msql = "SELECT state, COUNT(*) FROM sessions GROUP BY state;";
+        if (sqlite3_prepare_v2(s_db, msql, -1, &mstmt, NULL) == SQLITE_OK) {
+            while (sqlite3_step(mstmt) == SQLITE_ROW) {
+                const char *st = (const char *)sqlite3_column_text(mstmt, 0);
+                int cnt = sqlite3_column_int(mstmt, 1);
+                if (st) cJSON_AddNumberToObject(metrics, st, (double)cnt);
+            }
+            sqlite3_finalize(mstmt);
+        }
     }
 
-    /* Sub-agent status placeholder (T37-T39 not yet implemented) */
+    /* Sub-agent status */
     cJSON_AddArrayToObject(root, "sub_agents");
 
     char *body = cJSON_PrintUnformatted(root);

@@ -32,6 +32,12 @@ static void test_status_page(void) {
     int64_t sid = session_create(db, "test-session");
     assert(sid > 0);
 
+    /* Acquire lock to test lock_holder display */
+    assert(session_try_acquire(db, sid, "test-holder") == 0);
+
+    /* Insert inbox message to test inbox_depth */
+    assert(inbox_insert(db, sid, "test", "hello") > 0);
+
     assert(web_start(&cfg, db) == 0);
     usleep(50000);
 
@@ -54,7 +60,7 @@ static void test_status_page(void) {
     assert(cJSON_GetObjectItem(root, "version"));
     assert(cJSON_GetObjectItem(root, "uptime_seconds"));
 
-    /* sessions is an array with details */
+    /* sessions array with state, lock_holder, inbox_depth */
     cJSON *sessions = cJSON_GetObjectItem(root, "sessions");
     assert(cJSON_IsArray(sessions));
     assert(cJSON_GetArraySize(sessions) >= 1);
@@ -62,6 +68,25 @@ static void test_status_page(void) {
     assert(cJSON_GetObjectItem(s0, "id"));
     assert(cJSON_GetObjectItem(s0, "name"));
     assert(cJSON_GetObjectItem(s0, "updated_at"));
+    /* T71: state metrics, lock holders, backlog depths */
+    cJSON *state = cJSON_GetObjectItem(s0, "state");
+    assert(cJSON_IsString(state));
+    assert(strcmp(state->valuestring, "running") == 0);
+    cJSON *holder = cJSON_GetObjectItem(s0, "lock_holder");
+    assert(cJSON_IsString(holder));
+    assert(strcmp(holder->valuestring, "test-holder") == 0);
+    cJSON *depth = cJSON_GetObjectItem(s0, "inbox_depth");
+    assert(cJSON_IsNumber(depth));
+    assert(depth->valueint == 1);
+    cJSON *errcnt = cJSON_GetObjectItem(s0, "error_count");
+    assert(cJSON_IsNumber(errcnt));
+
+    /* state_metrics aggregate */
+    cJSON *metrics = cJSON_GetObjectItem(root, "state_metrics");
+    assert(cJSON_IsObject(metrics));
+    cJSON *running_count = cJSON_GetObjectItem(metrics, "running");
+    assert(cJSON_IsNumber(running_count));
+    assert(running_count->valueint >= 1);
 
     /* sub_agents placeholder array */
     cJSON *agents = cJSON_GetObjectItem(root, "sub_agents");

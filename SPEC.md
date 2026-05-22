@@ -154,7 +154,7 @@ T67|x|CLI workspace triggers (acquire/release keep-alive framework)|V16
 T68|x|Telegram intake handlers (inbox_insert + trigger local lock)|V16
 T69|x|Cron process actions (transactional inbox wrappers)|V16
 T70|x|Integration Test: parallel high-throughput network payloads|V16,V18
-T71|.|Web console updates (state metrics, lock holders, backlog depths)|§I.web
+T71|x|Web console updates (state metrics, lock holders, backlog depths)|§I.web
 T72|.|CLI terminal resume paths (echo unread inbox counts)|§I.cmd
 T74|.|Bind runtime parameters (`stale_lock_timeout`) to config|§I.file
 T75|.|agent discovery — scan `agents/` dir, list available agents by name|V20

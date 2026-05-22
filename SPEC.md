@@ -121,7 +121,7 @@ T34|x|heartbeat timer thread + system msg injection|§C
 T35|x|cron table + scheduler thread|§I.db
 T36|x|`cron_set`/`cron_list`/`cron_remove` tools|T35
 T37|x|`spawn_agent` tool — fork+exec sub-agent process|V3,V13
-T38|.|`db_query` tool — read-only SQL (SELECT only, reject mutations)|§I.tool
+T38|x|`db_query` tool — read-only SQL (SELECT only, reject mutations)|§I.tool
 T39|x|sub-agent lifecycle (limits, cleanup, crash isolation)|V3
 T40|x|token estimation (chars/4 heuristic)|V7
 T41|x|graceful shutdown (SIGINT/SIGTERM)|§C

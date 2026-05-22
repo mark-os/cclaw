@@ -9,6 +9,7 @@
 #include "tool_cron.h"
 #include "tool_subagent.h"
 #include "tool_web_fetch.h"
+#include "tool_db_query.h"
 #include "shutdown.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -113,6 +114,7 @@ int cli_run(const Config *cfg) {
     tool_file_write_register(&reg, cfg->workspace);
     tool_js_eval_register(&reg);
     tool_web_fetch_register(&reg);
+    tool_db_query_register(&reg, db);
 
     JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = NULL};
     tool_js_define_register(&reg, &js_ctx);

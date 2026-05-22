@@ -19,6 +19,7 @@
 #include "tool_cron.h"
 #include "tool_subagent.h"
 #include "tool_web_fetch.h"
+#include "tool_db_query.h"
 #include "shutdown.h"
 
 /* Tool dispatch via registry (shared with sub-agent mode) */
@@ -54,6 +55,7 @@ static int run_sub_agent(const Config *cfg, int64_t session_id, const char *task
     tool_file_write_register(&reg, cfg->workspace);
     tool_js_eval_register(&reg);
     tool_web_fetch_register(&reg);
+    tool_db_query_register(&reg, db);
 
     /* Sub-agents can spawn further sub-agents (up to V3 depth limit) */
     char self_path[4096];

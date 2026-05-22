@@ -97,15 +97,23 @@ static int run_sub_agent(const Config *cfg, int64_t session_id, const char *task
         }
     }
 
-    /* Find our sub_agent row and mark finished */
-    const char *sql = "SELECT id FROM sub_agents WHERE session_id=? AND status='running';";
+    /* Find our sub_agent row and mark finished, then notify parent inbox (V13,V18) */
+    const char *sql = "SELECT id, parent_session_id FROM sub_agents WHERE session_id=? AND status='running';";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, session_id);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             int64_t agent_id = sqlite3_column_int64(stmt, 0);
+            int64_t parent_session_id = sqlite3_column_int64(stmt, 1);
             subagent_finish(db, agent_id, rc == 0 ? "done" : "error",
                            result ? result : "no response");
+            /* V13: post completion notification to parent inbox */
+            char payload[256];
+            snprintf(payload, sizeof(payload),
+                     "{\"event\":\"sub_agent_done\",\"agent_id\":%lld,\"session_id\":%lld,\"status\":\"%s\"}",
+                     (long long)agent_id, (long long)session_id,
+                     rc == 0 ? "done" : "error");
+            inbox_insert(db, parent_session_id, "sub_agent", payload);
         }
         sqlite3_finalize(stmt);
     }

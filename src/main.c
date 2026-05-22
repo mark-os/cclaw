@@ -222,7 +222,7 @@ int main(int argc, char *argv[]) {
     while (!shutdown_requested()) {
         sleep(1);
         subagent_reap(db);
-        janitor_sweep(db, 300);
+        janitor_sweep(db, cfg->stale_lock_timeout ? cfg->stale_lock_timeout : 300);
     }
 
     printf("\nshutting down...\n");

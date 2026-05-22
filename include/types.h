@@ -76,6 +76,7 @@ typedef struct {
     int max_history_tokens; /* V7: token budget for context (0 = 60% of context_window) */
     int heartbeat_interval; /* seconds between heartbeat system msgs (0=disabled) */
     int shell_timeout;      /* default shell_exec timeout in seconds (0 = 30) */
+    int stale_lock_timeout; /* janitor stale lock threshold in seconds (0 = 300) */
     int debug;              /* --debug: dump raw LLM req/resp JSON to stderr */
 } Config;
 

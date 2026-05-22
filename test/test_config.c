@@ -136,6 +136,39 @@ static void test_fallback_providers(void) {
     printf("  PASS: test_fallback_providers\n");
 }
 
+static void test_stale_lock_timeout(void) {
+    unsetenv("OPENROUTER_API_KEY");
+    unsetenv("CCLAW_STALE_LOCK_TIMEOUT");
+
+    const char *json =
+        "{"
+        "  \"provider\": {\"api_key\": \"k\"},"
+        "  \"stale_lock_timeout\": 120"
+        "}";
+    FILE *f = fopen("/tmp/cclaw_test_slt.json", "w");
+    assert(f);
+    fputs(json, f);
+    fclose(f);
+
+    Config *cfg = config_load("/tmp/cclaw_test_slt.json");
+    assert(cfg != NULL);
+    assert(cfg->stale_lock_timeout == 120);
+    config_free(cfg);
+
+    /* Env override */
+    setenv("OPENROUTER_API_KEY", "sk-test", 1);
+    setenv("CCLAW_STALE_LOCK_TIMEOUT", "60", 1);
+    cfg = config_load(NULL);
+    assert(cfg != NULL);
+    assert(cfg->stale_lock_timeout == 60);
+    config_free(cfg);
+
+    unsetenv("OPENROUTER_API_KEY");
+    unsetenv("CCLAW_STALE_LOCK_TIMEOUT");
+    remove("/tmp/cclaw_test_slt.json");
+    printf("  PASS: test_stale_lock_timeout\n");
+}
+
 static void test_system_prompt(void) {
     unsetenv("OPENROUTER_API_KEY");
     unsetenv("CCLAW_SYSTEM_PROMPT");
@@ -198,6 +231,7 @@ int main(void) {
     test_env_overrides_json();
     test_bad_file();
     test_fallback_providers();
+    test_stale_lock_timeout();
     test_system_prompt();
     printf("All config tests passed.\n");
     return 0;

@@ -858,6 +858,20 @@ void inbox_items_free(InboxItem *items, int count) {
     free(items);
 }
 
+int inbox_count(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM inbox WHERE session_id = ? AND consumed = 0",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    int count = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return count;
+}
+
 /* V18: Atomically consume inbox items into session entries */
 int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
     if (sqlite3_exec(db, "BEGIN EXCLUSIVE", NULL, NULL, NULL) != SQLITE_OK)

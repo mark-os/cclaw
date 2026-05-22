@@ -127,6 +127,11 @@ int cli_run(const Config *cfg) {
         return -1;
     }
 
+    /* T72: Echo unread inbox count on session resume */
+    int unread = inbox_count(db, session_id);
+    if (unread > 0)
+        printf("[%d unread inbox message%s]\n", unread, unread == 1 ? "" : "s");
+
     /* Register tools */
     ToolRegistry reg;
     tools_init(&reg);

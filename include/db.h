@@ -113,6 +113,9 @@ InboxItem *inbox_peek(sqlite3 *db, int64_t session_id, int limit, int *count);
 /* Free an InboxItem array returned by inbox_peek. */
 void inbox_items_free(InboxItem *items, int count);
 
+/* Count unconsumed inbox items for a session. Returns count or -1 on error. */
+int inbox_count(sqlite3 *db, int64_t session_id);
+
 /* V18: Atomically consume unconsumed inbox items into session entries.
  * Within BEGIN EXCLUSIVE: marks items consumed, inserts as user messages, updates leaf.
  * Returns number of items consumed (≥0) or -1 on error (transaction rolled back). */

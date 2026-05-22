@@ -184,6 +184,27 @@ static void test_inbox_consume_respects_limit(void) {
     printf("  PASS test_inbox_consume_respects_limit\n");
 }
 
+static void test_inbox_count(void) {
+    sqlite3 *db = db_open(DB_PATH);
+    assert(db);
+    int64_t sid = session_create(db, "inbox_count");
+    assert(sid > 0);
+
+    /* Empty session → 0 */
+    assert(inbox_count(db, sid) == 0);
+
+    inbox_insert(db, sid, "telegram", "a");
+    inbox_insert(db, sid, "cron", "b");
+    assert(inbox_count(db, sid) == 2);
+
+    /* Consume one, count drops */
+    inbox_consume_into_entries(db, sid, 1);
+    assert(inbox_count(db, sid) == 1);
+
+    db_close(db);
+    printf("  PASS test_inbox_count\n");
+}
+
 int main(void) {
     unlink(DB_PATH);
     printf("test_inbox:\n");
@@ -195,6 +216,7 @@ int main(void) {
     test_inbox_consume_into_entries();
     test_inbox_consume_empty();
     test_inbox_consume_respects_limit();
+    test_inbox_count();
     unlink(DB_PATH);
     printf("All inbox tests passed.\n");
     return 0;

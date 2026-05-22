@@ -86,14 +86,28 @@ static void test_session_set_leaf_invalid(void) {
 
 /* Helper: insert entry directly for branch testing */
 static int64_t insert_entry(sqlite3 *db, int64_t session_id, int64_t parent_id, int role, const char *content) {
-    const char *sql = "INSERT INTO entries (parent_id, session_id, role, content) VALUES (?,?,?,?);";
+    const char *role_str = "user";
+    if (role == ROLE_SYSTEM) role_str = "system";
+    else if (role == ROLE_ASSISTANT) role_str = "assistant";
+    else if (role == ROLE_TOOL) role_str = "tool_result";
+
+    char data[1024];
+    if (role == ROLE_ASSISTANT)
+        snprintf(data, sizeof(data),
+            "{\"type\":\"message\",\"role\":\"%s\",\"content\":[{\"type\":\"text\",\"text\":\"%s\"}]}",
+            role_str, content);
+    else
+        snprintf(data, sizeof(data),
+            "{\"type\":\"message\",\"role\":\"%s\",\"content\":\"%s\"}",
+            role_str, content);
+
+    const char *sql = "INSERT INTO entries (parent_id, session_id, data) VALUES (?,?,?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_int64(stmt, 1, parent_id);
     sqlite3_bind_int64(stmt, 2, session_id);
-    sqlite3_bind_int(stmt, 3, role);
-    sqlite3_bind_text(stmt, 4, content, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, data, -1, SQLITE_STATIC);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
         return -1;

@@ -137,7 +137,7 @@ T50|x|test: per-agent workspace isolation (file tools reject paths outside works
 T51|x|test: external content wrapping — boundary markers, homoglyph sanitization|V15
 T52|x|integration test: live OpenRouter call → parse response, verify tool_calls round-trip|§I.api
 T53|x|integration test: agent loop end-to-end (prompt → tool call → tool result → final answer)|V10,§I.api
-T54|.|integration test: provider fallback (kill primary, verify fallback fires)|T45
+T54|x|integration test: provider fallback (kill primary, verify fallback fires)|T45
 T55|x|DB Schema: sessions CAS columns (state, lock_holder, lock_acquired_at, error_count) + inbox table|V16,V18
 T56|.|CAS Acquire/Release (`session_try_acquire`)|V16,V19
 T57|.|agent.c Turn Tagging (assign `turn_id` via index query)|V17

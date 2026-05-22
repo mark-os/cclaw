@@ -19,7 +19,7 @@ static void test_env_only(void) {
     assert(strcmp(cfg->provider.api_key, "sk-test-123") == 0);
     assert(strcmp(cfg->provider.base_url, "https://openrouter.ai/api/v1") == 0);
     assert(strcmp(cfg->provider.model, "deepseek/deepseek-v4-flash") == 0);
-    assert(strcmp(cfg->db_path, "cclaw.db") == 0);
+    assert(strcmp(cfg->db_path, "build/cclaw.db") == 0);
     assert(cfg->web_port == 8080);
     config_free(cfg);
     printf("  PASS: test_env_only\n");

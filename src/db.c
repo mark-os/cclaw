@@ -195,69 +195,138 @@ Session *session_list(sqlite3 *db, int *count) {
 }
 
 /* Serialize tool_calls array to JSON string. Caller must free. Returns NULL if none. */
-static char *serialize_tool_calls(const ToolCall *calls, size_t count) {
-    if (!calls || count == 0) return NULL;
-    cJSON *arr = cJSON_CreateArray();
-    for (size_t i = 0; i < count; i++) {
-        cJSON *obj = cJSON_CreateObject();
-        cJSON_AddStringToObject(obj, "id", calls[i].id ? calls[i].id : "");
-        cJSON_AddStringToObject(obj, "name", calls[i].name ? calls[i].name : "");
-        cJSON_AddStringToObject(obj, "arguments", calls[i].arguments ? calls[i].arguments : "");
-        cJSON_AddItemToArray(arr, obj);
+static const char *role_to_str(Role r) {
+    switch (r) {
+        case ROLE_SYSTEM: return "system";
+        case ROLE_USER: return "user";
+        case ROLE_ASSISTANT: return "assistant";
+        case ROLE_TOOL: return "tool_result";
     }
-    char *json = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
-    return json;
+    return "user";
 }
 
-/* Serialize tool_result to JSON string. Caller must free. Returns NULL if none. */
-static char *serialize_tool_result(const ToolResult *tr) {
-    if (!tr) return NULL;
+static Role str_to_role(const char *s) {
+    if (!s) return ROLE_USER;
+    if (strcmp(s, "system") == 0) return ROLE_SYSTEM;
+    if (strcmp(s, "assistant") == 0) return ROLE_ASSISTANT;
+    if (strcmp(s, "tool_result") == 0) return ROLE_TOOL;
+    return ROLE_USER;
+}
+
+/* Serialize Message to §D JSON data format. Caller must free. */
+static char *serialize_entry_data(const Message *msg) {
     cJSON *obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(obj, "tool_call_id", tr->tool_call_id ? tr->tool_call_id : "");
-    cJSON_AddStringToObject(obj, "content", tr->content ? tr->content : "");
+    cJSON_AddStringToObject(obj, "type", "message");
+    cJSON_AddStringToObject(obj, "role", role_to_str(msg->role));
+
+    if (msg->role == ROLE_ASSISTANT) {
+        /* §D: assistant content is always an array of content blocks */
+        cJSON *content_arr = cJSON_CreateArray();
+        if (msg->content) {
+            cJSON *text_block = cJSON_CreateObject();
+            cJSON_AddStringToObject(text_block, "type", "text");
+            cJSON_AddStringToObject(text_block, "text", msg->content);
+            cJSON_AddItemToArray(content_arr, text_block);
+        }
+        if (msg->tool_calls) {
+            for (size_t i = 0; i < msg->tool_call_count; i++) {
+                cJSON *tc = cJSON_CreateObject();
+                cJSON_AddStringToObject(tc, "type", "tool_call");
+                cJSON_AddStringToObject(tc, "id", msg->tool_calls[i].id ? msg->tool_calls[i].id : "");
+                cJSON_AddStringToObject(tc, "name", msg->tool_calls[i].name ? msg->tool_calls[i].name : "");
+                cJSON *args = cJSON_Parse(msg->tool_calls[i].arguments);
+                if (args)
+                    cJSON_AddItemToObject(tc, "arguments", args);
+                else
+                    cJSON_AddStringToObject(tc, "arguments", msg->tool_calls[i].arguments ? msg->tool_calls[i].arguments : "{}");
+                cJSON_AddItemToArray(content_arr, tc);
+            }
+        }
+        cJSON_AddItemToObject(obj, "content", content_arr);
+    } else if (msg->role == ROLE_TOOL && msg->tool_result) {
+        /* Tool result */
+        cJSON_AddStringToObject(obj, "tool_call_id", msg->tool_result->tool_call_id ? msg->tool_result->tool_call_id : "");
+        cJSON_AddStringToObject(obj, "content", msg->tool_result->content ? msg->tool_result->content : "");
+    } else {
+        /* User, system, or assistant without tool_calls */
+        cJSON_AddStringToObject(obj, "content", msg->content ? msg->content : "");
+    }
+
     char *json = cJSON_PrintUnformatted(obj);
     cJSON_Delete(obj);
     return json;
 }
 
-/* Deserialize tool_calls JSON into heap-allocated array. Sets *count. */
-static ToolCall *deserialize_tool_calls(const char *json, size_t *count) {
-    *count = 0;
-    if (!json) return NULL;
-    cJSON *arr = cJSON_Parse(json);
-    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return NULL; }
-    int n = cJSON_GetArraySize(arr);
-    if (n <= 0) { cJSON_Delete(arr); return NULL; }
-    ToolCall *calls = malloc((size_t)n * sizeof(ToolCall));
-    if (!calls) { cJSON_Delete(arr); return NULL; }
-    for (int i = 0; i < n; i++) {
-        cJSON *obj = cJSON_GetArrayItem(arr, i);
-        cJSON *id = cJSON_GetObjectItem(obj, "id");
-        cJSON *name = cJSON_GetObjectItem(obj, "name");
-        cJSON *args = cJSON_GetObjectItem(obj, "arguments");
-        calls[i].id = (id && id->valuestring) ? strdup(id->valuestring) : NULL;
-        calls[i].name = (name && name->valuestring) ? strdup(name->valuestring) : NULL;
-        calls[i].arguments = (args && args->valuestring) ? strdup(args->valuestring) : NULL;
-    }
-    *count = (size_t)n;
-    cJSON_Delete(arr);
-    return calls;
-}
+/* Parse §D JSON data into Message. Caller owns returned strings. */
+static void deserialize_entry_data(const char *json, Message *msg) {
+    memset(msg, 0, sizeof(*msg));
+    if (!json) return;
 
-/* Deserialize tool_result JSON into heap-allocated struct. */
-static ToolResult *deserialize_tool_result(const char *json) {
-    if (!json) return NULL;
     cJSON *obj = cJSON_Parse(json);
-    if (!obj || !cJSON_IsObject(obj)) { cJSON_Delete(obj); return NULL; }
-    ToolResult *tr = malloc(sizeof(ToolResult));
-    if (!tr) { cJSON_Delete(obj); return NULL; }
-    cJSON *tcid = cJSON_GetObjectItem(obj, "tool_call_id");
-    cJSON *content = cJSON_GetObjectItem(obj, "content");
-    tr->tool_call_id = (tcid && tcid->valuestring) ? strdup(tcid->valuestring) : NULL;
-    tr->content = (content && content->valuestring) ? strdup(content->valuestring) : NULL;
+    if (!obj) return;
+
+    cJSON *role = cJSON_GetObjectItem(obj, "role");
+    msg->role = str_to_role(role ? role->valuestring : NULL);
+
+    if (msg->role == ROLE_TOOL) {
+        /* Tool result format */
+        cJSON *tc_id = cJSON_GetObjectItem(obj, "tool_call_id");
+        cJSON *content = cJSON_GetObjectItem(obj, "content");
+        msg->tool_result = malloc(sizeof(ToolResult));
+        msg->tool_result->tool_call_id = (tc_id && tc_id->valuestring) ? strdup(tc_id->valuestring) : NULL;
+        msg->tool_result->content = (content && content->valuestring) ? strdup(content->valuestring) : NULL;
+    } else if (msg->role == ROLE_ASSISTANT) {
+        cJSON *content = cJSON_GetObjectItem(obj, "content");
+        if (cJSON_IsArray(content)) {
+            /* Array content: text blocks + tool_calls */
+            int n = cJSON_GetArraySize(content);
+            /* Count tool_calls */
+            size_t tc_count = 0;
+            for (int i = 0; i < n; i++) {
+                cJSON *item = cJSON_GetArrayItem(content, i);
+                cJSON *type = cJSON_GetObjectItem(item, "type");
+                if (type && type->valuestring && strcmp(type->valuestring, "tool_call") == 0)
+                    tc_count++;
+            }
+            if (tc_count > 0) {
+                msg->tool_calls = malloc(tc_count * sizeof(ToolCall));
+                msg->tool_call_count = tc_count;
+            }
+            size_t tc_idx = 0;
+            for (int i = 0; i < n; i++) {
+                cJSON *item = cJSON_GetArrayItem(content, i);
+                cJSON *type = cJSON_GetObjectItem(item, "type");
+                if (!type || !type->valuestring) continue;
+                if (strcmp(type->valuestring, "text") == 0) {
+                    cJSON *text = cJSON_GetObjectItem(item, "text");
+                    if (text && text->valuestring)
+                        msg->content = strdup(text->valuestring);
+                } else if (strcmp(type->valuestring, "tool_call") == 0 && tc_idx < tc_count) {
+                    cJSON *id = cJSON_GetObjectItem(item, "id");
+                    cJSON *name = cJSON_GetObjectItem(item, "name");
+                    cJSON *args = cJSON_GetObjectItem(item, "arguments");
+                    msg->tool_calls[tc_idx].id = (id && id->valuestring) ? strdup(id->valuestring) : NULL;
+                    msg->tool_calls[tc_idx].name = (name && name->valuestring) ? strdup(name->valuestring) : NULL;
+                    if (args) {
+                        char *args_str = cJSON_PrintUnformatted(args);
+                        msg->tool_calls[tc_idx].arguments = args_str;
+                    } else {
+                        msg->tool_calls[tc_idx].arguments = NULL;
+                    }
+                    tc_idx++;
+                }
+            }
+        } else if (cJSON_IsString(content)) {
+            msg->content = strdup(content->valuestring);
+        }
+    } else {
+        /* User or system: content is string */
+        cJSON *content = cJSON_GetObjectItem(obj, "content");
+        if (content && content->valuestring)
+            msg->content = strdup(content->valuestring);
+    }
+
     cJSON_Delete(obj);
-    return tr;
 }
 
 /* V14: walk parent_id chain from leaf→root, return in root→leaf order */
@@ -281,13 +350,13 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
 
     /* Walk chain using recursive CTE */
     const char *branch_sql =
-        "WITH RECURSIVE branch(id, parent_id, session_id, created_at, role, content, tool_calls_json, tool_result_json) AS ("
-        "  SELECT id, parent_id, session_id, created_at, role, content, tool_calls_json, tool_result_json"
+        "WITH RECURSIVE branch(id, parent_id, session_id, created_at, data) AS ("
+        "  SELECT id, parent_id, session_id, created_at, data"
         "    FROM entries WHERE id=? AND session_id=?"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.session_id, e.created_at, e.role, e.content, e.tool_calls_json, e.tool_result_json"
+        "  SELECT e.id, e.parent_id, e.session_id, e.created_at, e.data"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
-        ") SELECT id, parent_id, session_id, created_at, role, content, tool_calls_json, tool_result_json FROM branch ORDER BY id;";
+        ") SELECT id, parent_id, session_id, created_at, data FROM branch ORDER BY id;";
 
     if (sqlite3_prepare_v2(db, branch_sql, -1, &stmt, NULL) != SQLITE_OK)
         return NULL;
@@ -310,13 +379,8 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
         e->parent_id = sqlite3_column_int64(stmt, 1);
         e->session_id = sqlite3_column_int64(stmt, 2);
         e->created_at = (time_t)sqlite3_column_int64(stmt, 3);
-        e->message.role = (Role)sqlite3_column_int(stmt, 4);
-        const char *c = (const char *)sqlite3_column_text(stmt, 5);
-        e->message.content = c ? strdup(c) : NULL;
-        const char *tc = (const char *)sqlite3_column_text(stmt, 6);
-        e->message.tool_calls = deserialize_tool_calls(tc, &e->message.tool_call_count);
-        const char *tr = (const char *)sqlite3_column_text(stmt, 7);
-        e->message.tool_result = deserialize_tool_result(tr);
+        const char *data = (const char *)sqlite3_column_text(stmt, 4);
+        deserialize_entry_data(data, &e->message);
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -346,36 +410,21 @@ void session_list_free(Session *sessions, int count) {
 /* V14: insert entry with given parent_id, update session leaf */
 int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, const Message *msg) {
     const char *sql =
-        "INSERT INTO entries (parent_id, session_id, role, content, tool_calls_json, tool_result_json)"
-        " VALUES (?,?,?,?,?,?);";
+        "INSERT INTO entries (parent_id, session_id, data)"
+        " VALUES (?,?,?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_int64(stmt, 1, parent_id);
     sqlite3_bind_int64(stmt, 2, session_id);
-    sqlite3_bind_int(stmt, 3, (int)msg->role);
-    if (msg->content)
-        sqlite3_bind_text(stmt, 4, msg->content, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 4);
 
-    /* Serialize tool_calls and tool_result */
-    char *tc_json = serialize_tool_calls(msg->tool_calls, msg->tool_call_count);
-    char *tr_json = serialize_tool_result(msg->tool_result);
-
-    if (tc_json)
-        sqlite3_bind_text(stmt, 5, tc_json, -1, SQLITE_TRANSIENT);
-    else
-        sqlite3_bind_null(stmt, 5);
-    if (tr_json)
-        sqlite3_bind_text(stmt, 6, tr_json, -1, SQLITE_TRANSIENT);
-    else
-        sqlite3_bind_null(stmt, 6);
+    char *data = serialize_entry_data(msg);
+    if (!data) { sqlite3_finalize(stmt); return -1; }
+    sqlite3_bind_text(stmt, 3, data, -1, SQLITE_TRANSIENT);
+    free(data);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
-    free(tc_json);
-    free(tr_json);
 
     if (rc != SQLITE_DONE)
         return -1;
@@ -432,7 +481,7 @@ void entry_branch_free(Entry *entries, int count) {
 Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *count) {
     *count = 0;
     const char *sql =
-        "SELECT e.id, e.parent_id, e.session_id, e.created_at, e.role, e.content"
+        "SELECT e.id, e.parent_id, e.session_id, e.created_at, e.data"
         " FROM entries_fts f JOIN entries e ON e.id = f.rowid"
         " WHERE entries_fts MATCH ? AND e.session_id = ?"
         " ORDER BY rank LIMIT 50;";
@@ -458,12 +507,8 @@ Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *cou
         e->parent_id = sqlite3_column_int64(stmt, 1);
         e->session_id = sqlite3_column_int64(stmt, 2);
         e->created_at = (time_t)sqlite3_column_int64(stmt, 3);
-        e->message.role = (Role)sqlite3_column_int(stmt, 4);
-        const char *c = (const char *)sqlite3_column_text(stmt, 5);
-        e->message.content = c ? strdup(c) : NULL;
-        e->message.tool_calls = NULL;
-        e->message.tool_call_count = 0;
-        e->message.tool_result = NULL;
+        const char *data = (const char *)sqlite3_column_text(stmt, 4);
+        deserialize_entry_data(data, &e->message);
         (*count)++;
     }
     sqlite3_finalize(stmt);

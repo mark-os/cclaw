@@ -94,9 +94,9 @@ static void test_spawn_success(void) {
     int64_t parent_sid = session_create(db, "parent");
     assert(parent_sid > 0);
 
-    /* Use /bin/true as self_path — it will exec and exit immediately */
+    /* Use /bin/true as self_path — background mode returns immediately */
     SubAgentCtx ctx = {.db = db, .session_id = parent_sid, .depth = 0, .self_path = "/bin/true"};
-    char *r = tool_spawn_agent_handler("{\"task\":\"test task\"}", &ctx);
+    char *r = tool_spawn_agent_handler("{\"task\":\"test task\",\"background\":true}", &ctx);
     assert(r != NULL);
     assert(strstr(r, "spawned sub-agent") != NULL);
     assert(strstr(r, "id=") != NULL);
@@ -111,6 +111,24 @@ static void test_spawn_success(void) {
     free(r);
     db_close(db);
     printf("  PASS test_spawn_success\n");
+}
+
+static void test_spawn_blocking(void) {
+    sqlite3 *db = setup_db();
+    int64_t parent_sid = session_create(db, "parent");
+    assert(parent_sid > 0);
+
+    /* /bin/true exits 0 but won't call subagent_finish — tests the "no output" path */
+    SubAgentCtx ctx = {.db = db, .session_id = parent_sid, .depth = 0, .self_path = "/bin/true"};
+    char *r = tool_spawn_agent_handler("{\"task\":\"blocking task\"}", &ctx);
+    assert(r != NULL);
+    /* Should NOT contain "spawned sub-agent" (that's background mode) */
+    assert(strstr(r, "spawned sub-agent") == NULL);
+    /* /bin/true exits 0 but doesn't write result, so we get the fallback */
+    assert(strstr(r, "sub-agent") != NULL);
+    free(r);
+    db_close(db);
+    printf("  PASS test_spawn_blocking\n");
 }
 
 static void test_subagent_finish(void) {
@@ -339,6 +357,7 @@ int main(void) {
     test_per_parent_limit();
     test_system_wide_limit();
     test_spawn_success();
+    test_spawn_blocking();
     test_subagent_finish();
     test_register();
     test_check_agent_invalid_json();

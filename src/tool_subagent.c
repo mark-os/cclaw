@@ -5,10 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 static const char *SPAWN_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"task\":{\"type\":\"string\",\"description\":\"Task description for the sub-agent\"}"
+    "\"task\":{\"type\":\"string\",\"description\":\"Task description for the sub-agent\"},"
+    "\"background\":{\"type\":\"boolean\",\"description\":\"If true, run in background (default: false, blocking)\"}"
     "},\"required\":[\"task\"]}";
 
 char *tool_spawn_agent_handler(const char *arguments, void *user_data) {
@@ -28,6 +30,10 @@ char *tool_spawn_agent_handler(const char *arguments, void *user_data) {
         return strdup("error: missing or empty 'task' field");
     }
     const char *task = task_item->valuestring;
+
+    /* V13: blocking by default, background if explicitly requested */
+    cJSON *bg_item = cJSON_GetObjectItemCaseSensitive(json, "background");
+    int background = cJSON_IsTrue(bg_item);
 
     /* V3: check depth limit */
     if (ctx->depth >= SUBAGENT_MAX_DEPTH) {
@@ -91,12 +97,35 @@ char *tool_spawn_agent_handler(const char *arguments, void *user_data) {
         return strdup("error: failed to record sub-agent in DB");
     }
 
-    /* V13: return agent_id only — result delivered via check_agent */
-    char *result = malloc(128);
-    if (!result) return strdup("error: OOM");
-    snprintf(result, 128, "spawned sub-agent id=%lld (session=%lld, pid=%d)",
-             (long long)agent_id, (long long)child_session_id, (int)pid);
-    return result;
+    if (background) {
+        /* V13 background: return immediately */
+        char *result = malloc(128);
+        if (!result) return strdup("error: OOM");
+        snprintf(result, 128, "spawned sub-agent id=%lld (session=%lld, pid=%d)",
+                 (long long)agent_id, (long long)child_session_id, (int)pid);
+        return result;
+    }
+
+    /* V13 blocking (default): wait for child, return result */
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    /* Read result from DB (child calls subagent_finish before exit) */
+    SubAgentInfo *info = subagent_get(ctx->db, agent_id);
+    if (!info) {
+        return strdup("error: sub-agent finished but no record found");
+    }
+
+    char *result;
+    if (info->result && info->result[0]) {
+        result = strdup(info->result);
+    } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        result = strdup("sub-agent completed with no output");
+    } else {
+        result = strdup("error: sub-agent exited abnormally");
+    }
+    subagent_info_free(info);
+    return result ? result : strdup("error: OOM");
 }
 
 int tool_spawn_agent_register(ToolRegistry *reg, SubAgentCtx *ctx) {
@@ -158,7 +187,6 @@ int tool_check_agent_register(ToolRegistry *reg, SubAgentCtx *ctx) {
 }
 
 /* V3/T39: Reap zombie sub-agent processes, mark crashed ones in DB */
-#include <sys/wait.h>
 
 int subagent_reap(sqlite3 *db) {
     int count = 0;

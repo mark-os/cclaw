@@ -15,6 +15,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
+
+/* V16: Keep-alive thread context */
+typedef struct {
+    sqlite3 *db;
+    int64_t session_id;
+    const char *lock_holder;
+    volatile int stop;
+} KeepAliveCtx;
+
+/* Refresh lock every 60s to prevent janitor reclaim (stale timeout = 300s) */
+static void *keepalive_thread(void *arg) {
+    KeepAliveCtx *ctx = (KeepAliveCtx *)arg;
+    while (!ctx->stop) {
+        for (int i = 0; i < 60 && !ctx->stop; i++)
+            sleep(1);
+        if (!ctx->stop)
+            session_refresh_lock(ctx->db, ctx->session_id, ctx->lock_holder);
+    }
+    return NULL;
+}
 
 /* Tool dispatch via registry */
 static char *cli_dispatch(const char *name, const char *arguments, void *user_data) {
@@ -151,6 +172,10 @@ int cli_run(const Config *cfg) {
     }
     entry_branch_free(branch, branch_count);
 
+    /* V16: Build lock holder identity */
+    char lock_holder[64];
+    snprintf(lock_holder, sizeof(lock_holder), "cli-%d", (int)getpid());
+
     printf("cclaw cli (type 'exit' or Ctrl-D to quit)\n");
 
     char *line = NULL;
@@ -171,6 +196,18 @@ int cli_run(const Config *cfg) {
 
         if (line[0] == '\0') continue;
         if (strcmp(line, "exit") == 0 || strcmp(line, "quit") == 0) break;
+
+        /* V16: Acquire session lock before running agent */
+        if (session_try_acquire(db, session_id, lock_holder) != 0) {
+            fprintf(stderr, "error: cannot acquire session lock (in use)\n");
+            continue;
+        }
+
+        /* Start keep-alive thread */
+        KeepAliveCtx ka_ctx = {.db = db, .session_id = session_id,
+                               .lock_holder = lock_holder, .stop = 0};
+        pthread_t ka_thread;
+        pthread_create(&ka_thread, NULL, keepalive_thread, &ka_ctx);
 
         /* Append user message */
         Message user_msg = {.role = ROLE_USER, .content = line};
@@ -193,6 +230,11 @@ int cli_run(const Config *cfg) {
         } else {
             print_response(db, session_id);
         }
+
+        /* Stop keep-alive and release lock */
+        ka_ctx.stop = 1;
+        pthread_join(ka_thread, NULL);
+        session_release(db, session_id, lock_holder);
     }
 
     free(line);

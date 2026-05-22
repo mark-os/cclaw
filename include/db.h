@@ -92,6 +92,7 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
  * session_release: atomic running→idle transition. Returns 0 on success, -1 if not held. */
 int session_try_acquire(sqlite3 *db, int64_t session_id, const char *lock_holder);
 int session_release(sqlite3 *db, int64_t session_id, const char *lock_holder);
+int session_refresh_lock(sqlite3 *db, int64_t session_id, const char *lock_holder);
 
 /* V18: Inbox primitives */
 typedef struct {

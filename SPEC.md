@@ -150,7 +150,7 @@ T63|x|Atomic Move Transaction (`inbox_consume_into_entries`)|V18
 T64|x|Background sub-agent completion (post result to parent inbox)|V13,V18
 T65|x|`spawn_agent` blocking mode (wait on child, return result as tool output)|V13,V3
 T66|x|Verification Tests (atomic rollbacks mid-consumption)|V18
-T67|.|CLI workspace triggers (acquire/release keep-alive framework)|V16
+T67|x|CLI workspace triggers (acquire/release keep-alive framework)|V16
 T68|.|Telegram intake handlers (inbox_insert + trigger local lock)|V16
 T69|.|Cron process actions (transactional inbox wrappers)|V16
 T70|.|Integration Test: parallel high-throughput network payloads|V16,V18

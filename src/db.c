@@ -752,6 +752,21 @@ int session_release(sqlite3 *db, int64_t session_id, const char *lock_holder) {
     return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
 }
 
+/* V16: Refresh lock_acquired_at to prevent janitor from reclaiming. Returns 0 on success. */
+int session_refresh_lock(sqlite3 *db, int64_t session_id, const char *lock_holder) {
+    const char *sql =
+        "UPDATE sessions SET lock_acquired_at=unixepoch(), updated_at=unixepoch()"
+        " WHERE id=? AND state='running' AND lock_holder=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, lock_holder, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+}
+
 SubAgentInfo *subagent_list_running(sqlite3 *db, int *count) {
     *count = 0;
     const char *sql =

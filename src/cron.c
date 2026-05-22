@@ -209,8 +209,23 @@ static char *cron_dispatch(const char *name, const char *arguments, void *user_d
     return e->handler(arguments, e->user_data);
 }
 
-/* Execute a single due cron job */
+/* T69/V16: Execute a single due cron job via transactional inbox + CAS lock */
 static void execute_job(int64_t session_id, const char *task) {
+    /* V18: Insert task into inbox (decoupled from agent execution) */
+    inbox_insert(cron_db, session_id, "cron", task);
+
+    /* V16: Try to acquire session lock via CAS */
+    char lock_holder[64];
+    snprintf(lock_holder, sizeof(lock_holder), "cron-%d", (int)getpid());
+
+    if (session_try_acquire(cron_db, session_id, lock_holder) != 0) {
+        /* Session already locked — message stays in inbox for active handler */
+        return;
+    }
+
+    /* V18: Consume inbox items into session entries */
+    inbox_consume_into_entries(cron_db, session_id, 100);
+
     /* Set up tool registry */
     ToolRegistry reg;
     tools_init(&reg);
@@ -221,10 +236,6 @@ static void execute_job(int64_t session_id, const char *task) {
 
     ToolCronCtx cron_ctx = {.db = cron_db, .session_id = session_id};
     tool_cron_register(&reg, &cron_ctx);
-
-    /* Inject user message */
-    Message msg = {.role = ROLE_USER, .content = (char *)task};
-    entry_append(cron_db, session_id, &msg);
 
     size_t tool_count = 0;
     const ToolSchema *schemas = tools_schemas(&reg, &tool_count);
@@ -241,6 +252,9 @@ static void execute_job(int64_t session_id, const char *task) {
     };
     agent_run(&ctx);
     tools_free(&reg);
+
+    /* V16: Release session lock */
+    session_release(cron_db, session_id, lock_holder);
 }
 
 /* Check and execute due cron jobs */

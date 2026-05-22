@@ -340,6 +340,148 @@ static void test_v7_result_within_budget(void) {
     PASS();
 }
 
+/* T58/V17: Incomplete turn — assistant with tool_calls but missing tool_results */
+static void test_v17_incomplete_turn_synthesized(void) {
+    TEST(v17_incomplete_turn_synthesized);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    ToolCall tcs[2] = {
+        { .id = "c1", .name = "shell_exec", .arguments = "{\"cmd\":\"ls\"}" },
+        { .id = "c2", .name = "file_read", .arguments = "{\"path\":\"x\"}" },
+    };
+
+    /* Assistant made 2 tool_calls but only 1 result exists (crash mid-execution) */
+    ToolResult tr1 = { .tool_call_id = "c1", .content = "file.txt" };
+
+    Entry entries[3] = {
+        make_entry(1, ROLE_USER, "do stuff"),
+        make_entry(2, ROLE_ASSISTANT, NULL),
+        make_entry(3, ROLE_TOOL, NULL),
+    };
+    entries[1].message.tool_calls = tcs;
+    entries[1].message.tool_call_count = 2;
+    entries[2].message.tool_result = &tr1;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 3, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); context_free(msgs, count); return; }
+
+    /* Expect: user + assistant + tool_result(existing) + tool_result(synthetic) + system notice = 5 */
+    if (count != 5) { printf("FAIL: expected 5, got %d\n", count); context_free(msgs, count); return; }
+
+    /* Synthetic tool_result should reference c2 */
+    if (msgs[3].role != ROLE_TOOL || !msgs[3].tool_result) {
+        FAIL("expected synthetic tool_result at index 3");
+        context_free(msgs, count);
+        return;
+    }
+    if (!msgs[3].tool_result->tool_call_id || strcmp(msgs[3].tool_result->tool_call_id, "c2") != 0) {
+        FAIL("synthetic result should reference c2");
+        context_free(msgs, count);
+        return;
+    }
+    if (!strstr(msgs[3].tool_result->content, "terminated")) {
+        FAIL("synthetic result should mention termination");
+        context_free(msgs, count);
+        return;
+    }
+
+    /* System notice at end */
+    if (msgs[4].role != ROLE_SYSTEM || !strstr(msgs[4].content, "interrupted")) {
+        FAIL("expected interruption notice at end");
+        context_free(msgs, count);
+        return;
+    }
+
+    context_free(msgs, count);
+    PASS();
+}
+
+/* T58/V17: Complete turn — no synthesis needed */
+static void test_v17_complete_turn_no_synthesis(void) {
+    TEST(v17_complete_turn_no_synthesis);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    ToolCall tc = { .id = "c1", .name = "shell_exec", .arguments = "{\"cmd\":\"ls\"}" };
+    ToolResult tr = { .tool_call_id = "c1", .content = "file.txt" };
+
+    Entry entries[3] = {
+        make_entry(1, ROLE_USER, "do stuff"),
+        make_entry(2, ROLE_ASSISTANT, NULL),
+        make_entry(3, ROLE_TOOL, NULL),
+    };
+    entries[1].message.tool_calls = &tc;
+    entries[1].message.tool_call_count = 1;
+    entries[2].message.tool_result = &tr;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 3, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); context_free(msgs, count); return; }
+
+    /* No synthesis — just the 3 original messages */
+    if (count != 3) { printf("FAIL: expected 3, got %d\n", count); context_free(msgs, count); return; }
+
+    /* No system notice about interruption */
+    for (int i = 0; i < count; i++) {
+        if (msgs[i].role == ROLE_SYSTEM && msgs[i].content && strstr(msgs[i].content, "interrupted")) {
+            FAIL("should not have interruption notice for complete turn");
+            context_free(msgs, count);
+            return;
+        }
+    }
+
+    context_free(msgs, count);
+    PASS();
+}
+
+/* T58/V17: All tool_results missing (crash right after assistant response) */
+static void test_v17_all_results_missing(void) {
+    TEST(v17_all_results_missing);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    ToolCall tcs[2] = {
+        { .id = "c1", .name = "shell_exec", .arguments = "{\"cmd\":\"ls\"}" },
+        { .id = "c2", .name = "file_read", .arguments = "{\"path\":\"x\"}" },
+    };
+
+    Entry entries[2] = {
+        make_entry(1, ROLE_USER, "do stuff"),
+        make_entry(2, ROLE_ASSISTANT, NULL),
+    };
+    entries[1].message.tool_calls = tcs;
+    entries[1].message.tool_call_count = 2;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 2, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); context_free(msgs, count); return; }
+
+    /* Expect: user + assistant + 2 synthetic results + system notice = 5 */
+    if (count != 5) { printf("FAIL: expected 5, got %d\n", count); context_free(msgs, count); return; }
+
+    /* Both synthetic results */
+    if (msgs[2].role != ROLE_TOOL || !msgs[2].tool_result ||
+        strcmp(msgs[2].tool_result->tool_call_id, "c1") != 0) {
+        FAIL("first synthetic should reference c1");
+        context_free(msgs, count);
+        return;
+    }
+    if (msgs[3].role != ROLE_TOOL || !msgs[3].tool_result ||
+        strcmp(msgs[3].tool_result->tool_call_id, "c2") != 0) {
+        FAIL("second synthetic should reference c2");
+        context_free(msgs, count);
+        return;
+    }
+
+    context_free(msgs, count);
+    PASS();
+}
+
 int main(void) {
     printf("--- test_context ---\n");
     test_all_fits();
@@ -352,6 +494,9 @@ int main(void) {
     test_v8_cut_at_user_boundary();
     test_v8_tool_group_at_boundary_dropped();
     test_v7_result_within_budget();
+    test_v17_incomplete_turn_synthesized();
+    test_v17_complete_turn_no_synthesis();
+    test_v17_all_results_missing();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

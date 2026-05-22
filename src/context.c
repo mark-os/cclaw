@@ -7,6 +7,13 @@ static const char *CUTOFF_NOTICE =
     "[Earlier conversation history was truncated to fit context window. "
     "Use search to find older messages.]";
 
+/* V17: notice injected when an incomplete turn is detected */
+static const char *INCOMPLETE_TURN_NOTICE =
+    "[Previous turn was interrupted. Tool results may be incomplete. Retry if needed.]";
+
+static const char *INCOMPLETE_TOOL_CONTENT =
+    "error: process terminated during execution";
+
 int context_estimate_tokens(const Message *msg) {
     int tokens = 4; /* per-message overhead */
     if (msg->content)
@@ -78,6 +85,40 @@ static int find_cut_point(const Entry *entries, int count, int budget) {
     return cut;
 }
 
+/* V17: Count how many tool_results are missing at the tail of the entry list.
+ * Returns the number of synthetic results needed, and sets *asst_idx to the
+ * index of the incomplete assistant message. Returns 0 if tail is complete. */
+static int count_missing_tool_results(const Entry *entries, int count, int *asst_idx) {
+    if (count <= 0) return 0;
+
+    /* Walk backwards from end to find the last assistant with tool_calls */
+    int last_asst = -1;
+    for (int i = count - 1; i >= 0; i--) {
+        if (entries[i].message.role == ROLE_ASSISTANT && entries[i].message.tool_calls) {
+            last_asst = i;
+            break;
+        }
+        /* Stop if we hit a user message — turn boundary */
+        if (entries[i].message.role == ROLE_USER) break;
+    }
+    if (last_asst < 0) return 0;
+
+    /* Count tool_results that follow this assistant */
+    int results_found = 0;
+    for (int i = last_asst + 1; i < count; i++) {
+        if (entries[i].message.role == ROLE_TOOL)
+            results_found++;
+        else
+            break;
+    }
+
+    int expected = (int)entries[last_asst].message.tool_call_count;
+    if (results_found >= expected) return 0;
+
+    *asst_idx = last_asst;
+    return expected - results_found;
+}
+
 int context_build(const Entry *entries, int count, const Config *cfg,
                   Message **out_msgs, int *out_count) {
     if (!entries || count <= 0 || !cfg || !out_msgs || !out_count)
@@ -93,7 +134,13 @@ int context_build(const Entry *entries, int count, const Config *cfg,
     int included = count - cut;
     int truncated = (cut > 0);
 
-    int result_count = included + (truncated ? 1 : 0);
+    /* V17: detect incomplete turn in the included tail */
+    int asst_idx = 0;
+    int missing = count_missing_tool_results(entries + cut, included, &asst_idx);
+    /* asst_idx is relative to entries+cut */
+
+    int extra = missing > 0 ? missing + 1 : 0; /* synthetic results + notice */
+    int result_count = included + (truncated ? 1 : 0) + extra;
     Message *msgs = calloc((size_t)result_count, sizeof(Message));
     if (!msgs) return -1;
 
@@ -106,10 +153,9 @@ int context_build(const Entry *entries, int count, const Config *cfg,
         idx++;
     }
 
-    /* Copy included messages (shallow copy — caller must not free entry strings) */
+    /* Copy included messages (deep copy strings so context_free works independently) */
     for (int i = cut; i < count; i++) {
         msgs[idx] = entries[i].message;
-        /* Deep copy strings so context_free works independently */
         if (entries[i].message.content)
             msgs[idx].content = strdup(entries[i].message.content);
         if (entries[i].message.tool_calls && entries[i].message.tool_call_count > 0) {
@@ -130,6 +176,29 @@ int context_build(const Entry *entries, int count, const Config *cfg,
             msgs[idx].tool_result->content = entries[i].message.tool_result->content
                 ? strdup(entries[i].message.tool_result->content) : NULL;
         }
+        idx++;
+    }
+
+    /* V17: synthesize missing tool_results + system notice */
+    if (missing > 0) {
+        const Entry *asst_entry = &entries[cut + asst_idx];
+        int existing_results = (int)asst_entry->message.tool_call_count - missing;
+        for (int m = 0; m < missing; m++) {
+            int tc_idx = existing_results + m;
+            msgs[idx].role = ROLE_TOOL;
+            msgs[idx].content = NULL;
+            msgs[idx].tool_calls = NULL;
+            msgs[idx].tool_call_count = 0;
+            msgs[idx].tool_result = malloc(sizeof(ToolResult));
+            msgs[idx].tool_result->tool_call_id =
+                asst_entry->message.tool_calls[tc_idx].id
+                    ? strdup(asst_entry->message.tool_calls[tc_idx].id) : NULL;
+            msgs[idx].tool_result->content = strdup(INCOMPLETE_TOOL_CONTENT);
+            idx++;
+        }
+        /* System notice about interruption */
+        msgs[idx].role = ROLE_SYSTEM;
+        msgs[idx].content = strdup(INCOMPLETE_TURN_NOTICE);
         idx++;
     }
 

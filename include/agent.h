@@ -13,6 +13,19 @@
  * On failure, must still return an error string (never NULL). */
 typedef char *(*ToolDispatchFn)(const char *name, const char *arguments, void *user_data);
 
+/* T115: Progress event types for mid-turn streaming */
+typedef enum {
+    PROGRESS_ASSISTANT_TEXT,  /* intermediate assistant text (thinking/content) */
+    PROGRESS_TOOL_START,     /* tool call beginning (name + args) */
+    PROGRESS_TOOL_RESULT     /* tool result (truncated for display) */
+} ProgressEvent;
+
+/* T115: Progress callback — called during agent loop for live display.
+ * event: type of progress. name: tool name (TOOL_START/TOOL_RESULT) or NULL.
+ * data: text content or truncated result. */
+typedef void (*ProgressFn)(ProgressEvent event, const char *name,
+                           const char *data, void *user_data);
+
 /* Agent context for a single run */
 typedef struct {
     sqlite3 *db;
@@ -23,6 +36,8 @@ typedef struct {
     const ToolSchema *tools;
     size_t tool_count;
     int debug;              /* dump raw LLM req/resp JSON to stderr */
+    ProgressFn progress;    /* T115: mid-turn progress callback (NULL = silent) */
+    void *progress_data;
 } AgentContext;
 
 /* Run agent loop: call LLM, dispatch tool_calls, repeat until assistant

@@ -38,6 +38,54 @@ static void *keepalive_thread(void *arg) {
     return NULL;
 }
 
+/* T115: display truncation limits (aggressive — shorter than V40 LLM limit) */
+#define CLI_DISPLAY_MAX_BYTES 1024
+#define CLI_DISPLAY_MAX_LINES 20
+
+/* T115: progress callback for mid-turn streaming to terminal */
+static void cli_progress(ProgressEvent event, const char *name,
+                         const char *data, void *user_data) {
+    (void)user_data;
+    switch (event) {
+    case PROGRESS_ASSISTANT_TEXT:
+        printf("\033[2m%s\033[0m\n", data);
+        break;
+    case PROGRESS_TOOL_START:
+        printf("\033[33m→ %s\033[0m", name);
+        if (data && data[0]) {
+            size_t len = strlen(data);
+            if (len <= 80)
+                printf("(%s)", data);
+            else
+                printf("(%.77s...)", data);
+        }
+        printf("\n");
+        break;
+    case PROGRESS_TOOL_RESULT:
+        if (!data || !data[0]) break;
+        {
+            size_t len = strlen(data);
+            int lines = 0;
+            size_t cut = 0;
+            for (size_t i = 0; i < len && i < CLI_DISPLAY_MAX_BYTES; i++) {
+                if (data[i] == '\n') {
+                    lines++;
+                    if (lines >= CLI_DISPLAY_MAX_LINES) { cut = i; break; }
+                }
+            }
+            if (cut == 0 && len > CLI_DISPLAY_MAX_BYTES) cut = CLI_DISPLAY_MAX_BYTES;
+            if (cut > 0) {
+                printf("\033[2m  %.*s\n  [... %zu bytes truncated]\033[0m\n",
+                       (int)cut, data, len - cut);
+            } else {
+                printf("\033[2m  %s\033[0m\n", data);
+            }
+        }
+        break;
+    }
+    fflush(stdout);
+}
+
 /* Tool dispatch via registry */
 static char *cli_dispatch(const char *name, const char *arguments, void *user_data) {
     ToolRegistry *reg = (ToolRegistry *)user_data;
@@ -244,6 +292,8 @@ int cli_run(const Config *cfg) {
         ctx.tools = schemas;
         ctx.tool_count = tool_count;
         ctx.debug = cfg->debug;
+        ctx.progress = cli_progress;
+        ctx.progress_data = NULL;
 
         int rc = agent_run(&ctx);
         if (rc != 0) {

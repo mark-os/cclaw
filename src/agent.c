@@ -100,6 +100,10 @@ static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
         if (err) snprintf(err, 64, "error: no tool dispatcher registered");
         return err;
     }
+    /* T115: notify progress — tool starting */
+    if (ctx->progress)
+        ctx->progress(PROGRESS_TOOL_START, tc->name, tc->arguments, ctx->progress_data);
+
     char *result = ctx->dispatch(tc->name, tc->arguments, ctx->dispatch_data);
     if (!result) {
         result = malloc(64);
@@ -376,6 +380,10 @@ int agent_run(AgentContext *ctx) {
         asst.content = llm_resp.content ? strdup(llm_resp.content) : NULL;
         asst.stop_reason = map_stop_reason(llm_resp.finish_reason);
         asst.tool_call_count = llm_resp.tool_call_count;
+
+        /* T115: notify progress — intermediate assistant text */
+        if (ctx->progress && asst.content && asst.content[0])
+            ctx->progress(PROGRESS_ASSISTANT_TEXT, NULL, asst.content, ctx->progress_data);
         asst.tool_calls = malloc(asst.tool_call_count * sizeof(ToolCall));
         if (!asst.tool_calls) {
             free(asst.content);
@@ -440,6 +448,11 @@ int agent_run(AgentContext *ctx) {
             }
 
             char *result = dispatch_tool(ctx, &asst.tool_calls[i]);
+
+            /* T115: notify progress — tool result (truncated for display) */
+            if (ctx->progress)
+                ctx->progress(PROGRESS_TOOL_RESULT, asst.tool_calls[i].name,
+                              result, ctx->progress_data);
 
             /* V43: ≥5 same → inject warning into result */
             if (streak >= TOOL_LOOP_WARN_THRESHOLD) {

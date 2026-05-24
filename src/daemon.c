@@ -340,6 +340,12 @@ static void deliver_response(const Config *cfg, sqlite3 *db, int64_t session_id)
         return;
     }
 
+    /* V42/T110: Suppress HEARTBEAT_OK sentinel — never deliver to channel */
+    if (strcmp(reply, "HEARTBEAT_OK") == 0) {
+        entry_branch_free(entries, count);
+        return;
+    }
+
     char *route = session_get_last_route(db, session_id);
     if (route && strncmp(route, "telegram", 8) == 0) {
         /* Route format: "telegram" — need chat_id from tg_chat_sessions */

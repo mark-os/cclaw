@@ -482,6 +482,149 @@ static void test_v17_all_results_missing(void) {
     PASS();
 }
 
+/* T101/V36: Errored assistant removed mid-conversation creates orphaned tool_calls;
+ * context_build synthesizes error tool_results for the orphans */
+static void test_v36_mid_conversation_orphan_synthesis(void) {
+    TEST(v36_mid_conversation_orphan_synthesis);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    /* Scenario: valid assistant made 2 tool_calls, got 1 result, then an errored
+     * assistant follows (no tool_results of its own). After V28 removes the errored
+     * assistant, the valid one has only 1/2 results mid-conversation → synthesize. */
+    ToolCall tcs[2] = {
+        { .id = "c1", .name = "shell_exec", .arguments = "{\"cmd\":\"ls\"}" },
+        { .id = "c2", .name = "file_read", .arguments = "{\"path\":\"x\"}" },
+    };
+    ToolResult tr1 = { .tool_call_id = "c1", .content = "file.txt" };
+
+    Entry entries[5] = {
+        make_entry(1, ROLE_USER, "do stuff"),
+        make_entry(2, ROLE_ASSISTANT, NULL),       /* valid, 2 tool_calls */
+        make_entry(3, ROLE_TOOL, NULL),            /* result for c1 only */
+        make_entry(4, ROLE_ASSISTANT, "oops"),     /* errored — removed by V28 */
+        make_entry(5, ROLE_USER, "try again"),
+    };
+    entries[1].message.tool_calls = tcs;
+    entries[1].message.tool_call_count = 2;
+    entries[1].message.stop_reason = STOP_REASON_TOOL_USE;
+    entries[2].message.tool_result = &tr1;
+    entries[3].message.stop_reason = STOP_REASON_ERROR;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 5, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+
+    /* After V28: user, assistant(c1,c2), tool(c1), user → orphan c2 mid-conv.
+     * V36 synthesizes tool_result for c2.
+     * Result: user + assistant + tool(c1) + synth_tool(c2) + user = 5 */
+    if (count != 5) { printf("FAIL: expected 5, got %d\n", count); context_free(msgs, count); return; }
+    if (msgs[0].role != ROLE_USER) { FAIL("expected user at 0"); context_free(msgs, count); return; }
+    if (msgs[1].role != ROLE_ASSISTANT) { FAIL("expected assistant at 1"); context_free(msgs, count); return; }
+    if (msgs[2].role != ROLE_TOOL) { FAIL("expected tool at 2"); context_free(msgs, count); return; }
+    /* Synthetic tool_result for c2 */
+    if (msgs[3].role != ROLE_TOOL || !msgs[3].tool_result) {
+        FAIL("expected synthetic tool_result at 3"); context_free(msgs, count); return;
+    }
+    if (!msgs[3].tool_result->tool_call_id || strcmp(msgs[3].tool_result->tool_call_id, "c2") != 0) {
+        FAIL("synthetic should reference c2"); context_free(msgs, count); return;
+    }
+    if (!strstr(msgs[3].tool_result->content, "terminated")) {
+        FAIL("synthetic should mention termination"); context_free(msgs, count); return;
+    }
+    if (msgs[4].role != ROLE_USER) { FAIL("expected user at 4"); context_free(msgs, count); return; }
+    context_free(msgs, count);
+    PASS();
+}
+
+/* T101/V36: Multiple errored assistants removed, each with tool_results that get stripped */
+static void test_v36_multiple_errored_stripped(void) {
+    TEST(v36_multiple_errored_stripped);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    ToolCall tc_err = { .id = "e1", .name = "shell_exec", .arguments = "{}" };
+    ToolResult tr_err = { .tool_call_id = "e1", .content = "partial" };
+
+    Entry entries[6] = {
+        make_entry(1, ROLE_USER, "hello"),
+        make_entry(2, ROLE_ASSISTANT, NULL),       /* errored w/ tool_call + result */
+        make_entry(3, ROLE_TOOL, NULL),
+        make_entry(4, ROLE_ASSISTANT, "also bad"), /* errored, no tool_calls */
+        make_entry(5, ROLE_USER, "retry"),
+        make_entry(6, ROLE_ASSISTANT, "success"),
+    };
+    entries[1].message.tool_calls = &tc_err;
+    entries[1].message.tool_call_count = 1;
+    entries[1].message.stop_reason = STOP_REASON_ERROR;
+    entries[2].message.tool_result = &tr_err;
+    entries[3].message.stop_reason = STOP_REASON_ABORTED;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 6, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+
+    /* V28 removes entries 2+3 (errored assistant + tool_result) and entry 4 (aborted).
+     * Remaining: user, user, assistant = 3 messages, no orphans */
+    if (count != 3) { printf("FAIL: expected 3, got %d\n", count); context_free(msgs, count); return; }
+    if (msgs[0].role != ROLE_USER) { FAIL("expected user at 0"); context_free(msgs, count); return; }
+    if (msgs[1].role != ROLE_USER) { FAIL("expected user at 1"); context_free(msgs, count); return; }
+    if (msgs[2].role != ROLE_ASSISTANT) { FAIL("expected assistant at 2"); context_free(msgs, count); return; }
+    if (strcmp(msgs[2].content, "success") != 0) { FAIL("wrong content"); context_free(msgs, count); return; }
+    context_free(msgs, count);
+    PASS();
+}
+
+/* T101/V36: Errored entry at tail — V17 handles tail orphans, not V36 synthesis */
+static void test_v36_errored_at_tail_uses_v17(void) {
+    TEST(v36_errored_at_tail_uses_v17);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    /* Valid assistant with tool_calls at tail after V28 removes errored entry */
+    ToolCall tcs[2] = {
+        { .id = "c1", .name = "shell_exec", .arguments = "{}" },
+        { .id = "c2", .name = "file_read", .arguments = "{}" },
+    };
+    ToolResult tr1 = { .tool_call_id = "c1", .content = "ok" };
+
+    Entry entries[4] = {
+        make_entry(1, ROLE_USER, "go"),
+        make_entry(2, ROLE_ASSISTANT, NULL),   /* valid, 2 tool_calls */
+        make_entry(3, ROLE_TOOL, NULL),        /* result for c1 */
+        make_entry(4, ROLE_ASSISTANT, "err"),  /* errored — removed, now tail is after tool(c1) */
+    };
+    entries[1].message.tool_calls = tcs;
+    entries[1].message.tool_call_count = 2;
+    entries[1].message.stop_reason = STOP_REASON_TOOL_USE;
+    entries[2].message.tool_result = &tr1;
+    entries[3].message.stop_reason = STOP_REASON_ERROR;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 4, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+
+    /* After V28: user, assistant(c1,c2), tool(c1) — tail orphan.
+     * V17 handles tail: synthesize tool_result for c2 + system notice.
+     * Result: user + assistant + tool(c1) + synth_tool(c2) + system_notice = 5 */
+    if (count != 5) { printf("FAIL: expected 5, got %d\n", count); context_free(msgs, count); return; }
+    if (msgs[3].role != ROLE_TOOL || !msgs[3].tool_result) {
+        FAIL("expected synthetic tool at 3"); context_free(msgs, count); return;
+    }
+    if (strcmp(msgs[3].tool_result->tool_call_id, "c2") != 0) {
+        FAIL("synthetic should reference c2"); context_free(msgs, count); return;
+    }
+    /* V17 adds system notice */
+    if (msgs[4].role != ROLE_SYSTEM || !strstr(msgs[4].content, "interrupted")) {
+        FAIL("expected V17 interruption notice"); context_free(msgs, count); return;
+    }
+    context_free(msgs, count);
+    PASS();
+}
+
 /* T90/V28: Errored assistant entries and their tool_results are skipped */
 static void test_v28_skip_errored_assistant(void) {
     TEST(v28_skip_errored_assistant);
@@ -585,6 +728,9 @@ int main(void) {
     test_v28_skip_errored_assistant();
     test_v28_skip_aborted_with_tool_calls();
     test_v28_normal_entries_kept();
+    test_v36_mid_conversation_orphan_synthesis();
+    test_v36_multiple_errored_stripped();
+    test_v36_errored_at_tail_uses_v17();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

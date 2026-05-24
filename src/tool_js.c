@@ -12,15 +12,11 @@
 
 extern const JSSTDLibraryDef js_std_library;
 
-typedef struct {
-    int count;
-} InterruptState;
-
 static int interrupt_handler(JSContext *ctx, void *opaque) {
     (void)ctx;
-    InterruptState *state = (InterruptState *)opaque;
-    state->count++;
-    return state->count > JS_MAX_INSTRUCTIONS;
+    JsHostCtx *hctx = (JsHostCtx *)opaque;
+    hctx->instruction_count++;
+    return hctx->instruction_count > hctx->instruction_limit;
 }
 
 /* Eval JS code in a fresh sandboxed context. Returns heap-allocated result. */
@@ -33,9 +29,10 @@ static char *js_eval_code(const char *code) {
     JSContext *ctx = JS_NewContext(heap, JS_HEAP_SIZE, &js_std_library);
     if (!ctx) { free(heap); return strdup("error: JS context creation failed"); }
 
-    InterruptState istate = {0};
+    JsHostCtx hctx = {.instruction_count = 0, .instruction_limit = JS_MAX_INSTRUCTIONS,
+                       .allowed_hosts = NULL, .allowed_hosts_count = 0};
     JS_SetInterruptHandler(ctx, interrupt_handler);
-    JS_SetContextOpaque(ctx, &istate);
+    JS_SetContextOpaque(ctx, &hctx);
 
     JSValue val = JS_Eval(ctx, code, code_len, "<eval>", JS_EVAL_RETVAL);
 
@@ -52,7 +49,7 @@ static char *js_eval_code(const char *code) {
         } else {
             result = strdup("error: exception (no message)");
         }
-    } else if (istate.count > JS_MAX_INSTRUCTIONS) {
+    } else if (hctx.instruction_count > JS_MAX_INSTRUCTIONS) {
         result = strdup("error: instruction limit exceeded (10M)");
     } else if (JS_IsUndefined(val)) {
         result = strdup("undefined");
@@ -325,9 +322,27 @@ JsSessionRuntime *js_runtime_create(void) {
 
 void js_runtime_destroy(JsSessionRuntime *rt) {
     if (!rt) return;
-    if (rt->ctx) JS_FreeContext((JSContext *)rt->ctx);
+    if (rt->ctx) {
+        /* Free the JsHostCtx if set */
+        void *opaque = JS_GetContextOpaque((JSContext *)rt->ctx);
+        free(opaque);
+        JS_FreeContext((JSContext *)rt->ctx);
+    }
     free(rt->heap);
     free(rt);
+}
+
+void js_runtime_set_hosts(JsSessionRuntime *rt, char **hosts, size_t count) {
+    if (!rt || !rt->ctx) return;
+    JSContext *ctx = (JSContext *)rt->ctx;
+    JsHostCtx *hctx = (JsHostCtx *)JS_GetContextOpaque(ctx);
+    if (!hctx) {
+        hctx = calloc(1, sizeof(JsHostCtx));
+        if (!hctx) return;
+        JS_SetContextOpaque(ctx, hctx);
+    }
+    hctx->allowed_hosts = hosts;
+    hctx->allowed_hosts_count = count;
 }
 
 int tool_js_load_session(sqlite3 *db, int64_t session_id, ToolRegistry *reg,

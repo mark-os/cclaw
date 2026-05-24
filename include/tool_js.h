@@ -11,6 +11,18 @@ typedef struct {
     void *ctx;  /* JSContext* */
 } JsSessionRuntime;
 
+/* V38: Host context set as JSContext opaque — provides allowed_hosts to http_fetch binding */
+typedef struct {
+    int instruction_count;
+    int instruction_limit;
+    char **allowed_hosts;
+    size_t allowed_hosts_count;
+} JsHostCtx;
+
+/* Set allowed_hosts on a persistent JS runtime (V38).
+ * Does NOT take ownership — caller must keep hosts alive for runtime lifetime. */
+void js_runtime_set_hosts(JsSessionRuntime *rt, char **hosts, size_t count);
+
 /* Register js_eval tool into registry. Returns 0 on success. */
 int tool_js_eval_register(ToolRegistry *reg);
 

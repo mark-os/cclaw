@@ -186,6 +186,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    workspace_init(cfg);
+
     printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
 
     if (cfg->telegram_token && cfg->telegram_token[0] != '\0') {

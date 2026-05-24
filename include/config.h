@@ -11,6 +11,10 @@ Config *config_load(const char *path);
  * Returns heap-allocated string. Caller must free. */
 char *config_render_system_prompt(const Config *cfg, int64_t session_id);
 
+/* Ensure workspace directory exists and populate SOUL.md/MEMORY.md on first use.
+ * Returns 0 on success, -1 on error. */
+int workspace_init(const Config *cfg);
+
 /* Free config and all owned strings. */
 void config_free(Config *cfg);
 

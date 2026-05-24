@@ -120,6 +120,8 @@ int cli_run(const Config *cfg) {
         return -1;
     }
 
+    workspace_init(cfg);
+
     int64_t session_id = cli_select_session(db);
     if (session_id < 0) {
         fprintf(stderr, "error: cannot select session\n");

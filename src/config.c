@@ -5,6 +5,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
+#include <libgen.h>
 
 static char *str_dup(const char *s) {
     if (!s) return NULL;
@@ -49,7 +51,21 @@ Config *config_load(const char *path) {
     cfg->provider.model = str_dup("deepseek/deepseek-v4-flash");
     cfg->provider.max_tokens = 4096;
     cfg->provider.context_window = 65536;
-    cfg->db_path = str_dup("build/cclaw.db");
+    cfg->db_path = NULL;
+    {
+        char exe[4096];
+        ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (len > 0) {
+            exe[len] = '\0';
+            char *dir = dirname(exe);
+            size_t dlen = strlen(dir);
+            cfg->db_path = malloc(dlen + sizeof("/cclaw.db"));
+            if (cfg->db_path)
+                sprintf(cfg->db_path, "%s/cclaw.db", dir);
+        }
+        if (!cfg->db_path)
+            cfg->db_path = str_dup("cclaw.db");
+    }
     cfg->workspace = str_dup("./workspace");
     cfg->web_port = 8080;
     cfg->max_iterations = 25;
@@ -140,28 +156,105 @@ Config *config_load(const char *path) {
     return cfg;
 }
 
-/* T46: render system prompt with template vars */
+/* Read file into malloc'd string. Returns NULL if file doesn't exist or on error. */
+static char *read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    if (len <= 0) { fclose(f); return NULL; }
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t n = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    buf[n] = '\0';
+    return buf;
+}
+
+/* Write string to file only if file does not exist. */
+static void write_file_if_missing(const char *path, const char *content) {
+    FILE *f = fopen(path, "r");
+    if (f) { fclose(f); return; }
+    f = fopen(path, "w");
+    if (!f) return;
+    fputs(content, f);
+    fclose(f);
+}
+
+static const char *DEFAULT_SOUL =
+    "# SOUL\n"
+    "You are CClaw, a personal AI assistant.\n"
+    "Be direct, concise, and helpful. Act rather than explain.\n";
+
+static const char *DEFAULT_MEMORY =
+    "# MEMORY\n"
+    "Durable user preferences and facts go here.\n"
+    "Update this file when you learn something worth remembering across sessions.\n";
+
+static const char *DEFAULT_SYSTEM_PROMPT =
+    "You are CClaw, an autonomous AI assistant capable of great things.\n"
+    "\n"
+    "## Tool Call Style\n"
+    "Routine low-risk calls: no narration.\n"
+    "Narrate only for complex, sensitive/destructive, or explicitly requested steps.\n"
+    "\n"
+    "## Execution Bias\n"
+    "Act in this turn. Continue until done or genuinely blocked.\n"
+    "Do not finish with a plan when tools can move it forward.\n"
+    "\n"
+    "## Workspace Context\n"
+    "Working directory: {workspace}\n"
+    "SOUL.md defines your persona. MEMORY.md stores durable facts.\n"
+    "You can read and write these files to evolve your behavior.\n";
+
+int workspace_init(const Config *cfg) {
+    if (!cfg || !cfg->workspace) return -1;
+    /* mkdir -p workspace */
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "mkdir -p %s", cfg->workspace);
+    if (system(cmd) != 0) return -1;
+    /* Populate default files */
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/SOUL.md", cfg->workspace);
+    write_file_if_missing(path, DEFAULT_SOUL);
+    snprintf(path, sizeof(path), "%s/MEMORY.md", cfg->workspace);
+    write_file_if_missing(path, DEFAULT_MEMORY);
+    return 0;
+}
+
+/* T46: render system prompt with template vars and workspace context */
 char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
-    const char *tmpl = cfg->system_prompt
-        ? cfg->system_prompt
-        : "You are CClaw, a helpful AI assistant.";
+    const char *tmpl = cfg->system_prompt ? cfg->system_prompt : DEFAULT_SYSTEM_PROMPT;
 
     /* Build date string */
     time_t now = time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
-    char date_buf[11]; /* YYYY-MM-DD */
+    char date_buf[11];
     strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm);
 
     /* Build session_id string */
     char sid_buf[21];
     snprintf(sid_buf, sizeof(sid_buf), "%lld", (long long)session_id);
 
-    /* Replace {session_id} and {date} */
+    /* Read workspace context files */
+    char soul_path[4096], mem_path[4096];
+    char *soul = NULL, *memory = NULL;
+    if (cfg->workspace) {
+        snprintf(soul_path, sizeof(soul_path), "%s/SOUL.md", cfg->workspace);
+        snprintf(mem_path, sizeof(mem_path), "%s/MEMORY.md", cfg->workspace);
+        soul = read_file(soul_path);
+        memory = read_file(mem_path);
+    }
+
+    /* Build output with template expansion + context files appended */
     size_t tmpl_len = strlen(tmpl);
-    size_t out_cap = tmpl_len + 64;
+    size_t soul_len = soul ? strlen(soul) : 0;
+    size_t mem_len = memory ? strlen(memory) : 0;
+    size_t out_cap = tmpl_len + soul_len + mem_len + 256;
     char *out = malloc(out_cap);
-    if (!out) return str_dup(tmpl);
+    if (!out) { free(soul); free(memory); return str_dup(tmpl); }
 
     size_t oi = 0;
     for (size_t i = 0; i < tmpl_len; ) {
@@ -182,11 +275,41 @@ char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
                 i += 6;
                 continue;
             }
+            if (strncmp(tmpl + i, "{workspace}", 11) == 0) {
+                const char *ws = cfg->workspace ? cfg->workspace : ".";
+                size_t wlen = strlen(ws);
+                while (oi + wlen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                memcpy(out + oi, ws, wlen);
+                oi += wlen;
+                i += 11;
+                continue;
+            }
         }
         if (oi + 1 >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
         out[oi++] = tmpl[i++];
     }
+
+    /* Append SOUL.md content */
+    if (soul && soul_len > 0) {
+        const char *hdr = "\n\n## SOUL.md\n";
+        size_t hlen = strlen(hdr);
+        while (oi + hlen + soul_len >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        memcpy(out + oi, hdr, hlen); oi += hlen;
+        memcpy(out + oi, soul, soul_len); oi += soul_len;
+    }
+
+    /* Append MEMORY.md content */
+    if (memory && mem_len > 0) {
+        const char *hdr = "\n\n## MEMORY.md\n";
+        size_t hlen = strlen(hdr);
+        while (oi + hlen + mem_len >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        memcpy(out + oi, hdr, hlen); oi += hlen;
+        memcpy(out + oi, memory, mem_len); oi += mem_len;
+    }
+
     out[oi] = '\0';
+    free(soul);
+    free(memory);
     return out;
 }
 

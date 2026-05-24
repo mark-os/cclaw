@@ -115,6 +115,10 @@ V38: ∀ JS runtime (`js_eval`, `js_define_tool`) → C-provided `http_fetch(url
 V39: ∀ `spawn_agent` in CLI mode → fork+exec+waitpid in-process (blocking) or fork+continue (background); CLI has no daemon — ⊥ use "exit into waiting state" pattern; tool_subagent must detect execution mode and branch accordingly
 V40: ∀ context_build → tool_result content truncated to 50KB / 2000 lines (whichever first) when building LLM messages; full result preserved in DB entry (searchable via FTS5); truncated results get suffix `[truncated — {N} bytes / {M} lines omitted, use search to find full output]`
 V41: ∀ LLM request → built via `CURLOPT_READFUNCTION` streaming from SQLite cursor; ⊥ load full session into memory; two-pass: (1) plan entry IDs + cut point, (2) stream JSON from cursor; per-agent memory footprint ≤ arena + curl buffers (~2-5MB), not session-proportional
+V42: ∀ heartbeat → daemon triggers agent run w/ heartbeat prompt; agent reads `HEARTBEAT.md` if present, acts on tasks; response `HEARTBEAT_OK` = sentinel (suppressed, ⊥ delivered to channel); any other response → deliver to channel via `last_route`
+V43: ∀ tool dispatch → track last N calls (name + args hash + result hash); if same call repeated ≥ 5× w/ no progress → inject warning into tool_result; ≥ 10× → force-stop agent loop w/ error ("tool loop detected")
+V44: ∀ Telegram group msg → if agent response contains `[NO_REPLY]` → suppress delivery (⊥ send to chat); agent decides relevance per system prompt guidance
+V45: ∀ agent response → if `stop_reason == stop` & no tool_calls & response is plan-only (bullet list + "I'll do X" promise, no tool action taken) → re-prompt once: "Do not restate the plan. Act now: take the first concrete tool action. If blocked, state the blocker in one sentence."
 
 ## §T TASKS
 id|status|task|cites
@@ -225,11 +229,19 @@ T105|.|tool result truncation in `context_build` — shared `truncate_result(buf
 T106|.|streaming request planner — `context_plan()` returns ordered entry ID list + cut point + token budget from SQLite (pass 1, no content loaded)|V41,V7,V8
 T107|.|`RequestStreamer` state machine — phases: preamble → entries (cursor step + reshape per-entry JSON) → tools → close; implements `CURLOPT_READFUNCTION` callback|V41
 T108|.|integrate streaming request into `agent.c` — replace `llm_build_request` (full-buffer) with `RequestStreamer`; verify retry resets cursor|V41,V2
+T109|.|heartbeat agent trigger — daemon injects heartbeat user msg into session inbox, forks agent; heartbeat prompt: "Read HEARTBEAT.md if present. Follow it. If nothing needs attention, reply HEARTBEAT_OK."|V42,T34
+T110|.|`HEARTBEAT_OK` sentinel suppression — daemon checks final assistant response; if content == `HEARTBEAT_OK` → suppress delivery (⊥ send to channel); else deliver normally|V42,V26
+T111|.|`HEARTBEAT.md` workspace file — optional; defines proactive tasks (reminders, checks, maintenance); agent reads via `file_read` during heartbeat turn|V42
+T112|.|tool loop detection — hash(name+args) history ring buffer (last 30 calls per session); on dispatch, check streak; ≥ 5 same → inject warning in result; ≥ 10 → return error + break loop|V43
+T113|.|`[NO_REPLY]` suppression — Telegram group delivery checks response for marker; if present, skip `sendMessage`; system prompt instructs agent when to use it|V44
+T114|.|planning-only retry — after final assistant response w/ no tool_calls, detect plan-only pattern (bullets + promise verbs, no action); re-prompt once w/ act-now instruction; max 1 retry|V45
+T115|.|CLI mid-turn progress — always-on: stream intermediate assistant text + tool call names/args as they execute; tool results truncated aggressively for display (shorter than V40 LLM limit); `--debug` adds raw JSON req/resp on top|§I.cmd
 
 ## §B BUGS
 id|date|cause|fix
 
 ## §F FUTURE
+- Web chat: civetweb serves chat UI (SSE streaming for partial responses, session select/create, message history); block streaming to browser as assistant generates; replaces status-only page
 - Intra-turn steering: agent checks inbox between tool executions, injects new messages into context mid-loop (Pi model: steering = interrupt, follow-up = queue until stop); complicates V18 atomic consumption — design carefully
 - Session curation: mid-session compaction (summarize arbitrary entry ranges, re-parent tail), prune failed tool-call loops, automated "curation agent" that cleans up long-running sessions
 - Session recreation: compose new sessions from cherry-picked existing entries (join table `curated_branches(session_id, entry_id, position)`) — avoids copying, entries stay immutable, new summary entries fill gaps

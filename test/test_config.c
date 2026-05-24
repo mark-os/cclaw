@@ -19,7 +19,9 @@ static void test_env_only(void) {
     assert(strcmp(cfg->provider.api_key, "sk-test-123") == 0);
     assert(strcmp(cfg->provider.base_url, "https://openrouter.ai/api/v1") == 0);
     assert(strcmp(cfg->provider.model, "deepseek/deepseek-v4-flash") == 0);
-    assert(strcmp(cfg->db_path, "build/cclaw.db") == 0);
+    assert(strcmp(cfg->db_path, "cclaw.db") == 0 ||
+           (strlen(cfg->db_path) > 9 &&
+            strcmp(cfg->db_path + strlen(cfg->db_path) - 9, "/cclaw.db") == 0));
     assert(cfg->web_port == 8080);
     config_free(cfg);
     printf("  PASS: test_env_only\n");
@@ -180,7 +182,10 @@ static void test_system_prompt(void) {
     assert(cfg->system_prompt == NULL);
     char *rendered = config_render_system_prompt(cfg, 42);
     assert(rendered != NULL);
-    assert(strcmp(rendered, "You are CClaw, a helpful AI assistant.") == 0);
+    /* Default prompt should contain key sections */
+    assert(strstr(rendered, "CClaw") != NULL);
+    assert(strstr(rendered, "Tool Call Style") != NULL);
+    assert(strstr(rendered, "Execution Bias") != NULL);
     free(rendered);
     config_free(cfg);
 

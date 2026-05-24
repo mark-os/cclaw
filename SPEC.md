@@ -193,7 +193,7 @@ T72|x|CLI terminal resume paths (echo unread inbox counts)|§I.cmd
 T74|x|~~Bind runtime parameters (`stale_lock_timeout`) to config~~ superseded by daemon model (V16)|§I.file
 T75|x|agent discovery — scan `agents/` dir, list available agents by name|V20
 T76|x|agent config loader — read `agents/<name>/agent.json`, merge w/ global config|V20,V12
-T77|.|system prompt loader — read `agents/<name>/system.md`, template vars `{session_id}`, `{date}`, `{agent_name}`|V20,T46
+T77|x|system prompt loader — read `agents/<name>/system.md`, template vars `{session_id}`, `{date}`, `{agent_name}`|V20,T46
 T78|.|per-agent tool whitelist — filter tool registry by agent config|V20,§I.tool
 T79|.|session↔agent binding — session_create accepts agent_name, load config from disk at agent_run|V20
 T80|.|skill loader — scan `agents/<name>/skills/*.md`, inject into system prompt|V20

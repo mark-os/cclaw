@@ -38,4 +38,10 @@ void agent_config_free(AgentConfig *ac);
  * Caller must config_free() the result. ac may be NULL (returns copy of global). */
 Config *agent_config_merge(const Config *global, const AgentConfig *ac);
 
+/* T77: Load system prompt from agents/<name>/system.md, render template vars
+ * {session_id}, {date}, {agent_name}. Returns heap-allocated string.
+ * Returns NULL if file missing (caller should fall back to global system_prompt). */
+char *agent_load_system_prompt(const char *agents_dir, const char *name,
+                               int64_t session_id);
+
 #endif

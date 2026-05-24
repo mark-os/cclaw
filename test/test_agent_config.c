@@ -187,6 +187,44 @@ static void test_agent_config_merge_null(void) {
     printf("  PASS: agent config merge NULL (global copy)\n");
 }
 
+/* T77 tests */
+
+static void test_agent_load_system_prompt(void) {
+    system("rm -rf /tmp/test_ac_sysprompt");
+    make_dir("/tmp/test_ac_sysprompt");
+    make_dir("/tmp/test_ac_sysprompt/coder");
+
+    write_file("/tmp/test_ac_sysprompt/coder/system.md",
+        "You are {agent_name}. Session: {session_id}. Date: {date}.");
+
+    char *prompt = agent_load_system_prompt("/tmp/test_ac_sysprompt", "coder", 42);
+    assert(prompt != NULL);
+    /* Check agent_name replaced */
+    assert(strstr(prompt, "You are coder.") != NULL);
+    /* Check session_id replaced */
+    assert(strstr(prompt, "Session: 42.") != NULL);
+    /* Check {date} replaced (should be YYYY-MM-DD format) */
+    assert(strstr(prompt, "{date}") == NULL);
+    assert(strstr(prompt, "Date: 20") != NULL); /* starts with 20xx */
+    free(prompt);
+
+    system("rm -rf /tmp/test_ac_sysprompt");
+    printf("  PASS: agent load system prompt (T77)\n");
+}
+
+static void test_agent_load_system_prompt_missing(void) {
+    /* No system.md → returns NULL */
+    system("rm -rf /tmp/test_ac_sysprompt2");
+    make_dir("/tmp/test_ac_sysprompt2");
+    make_dir("/tmp/test_ac_sysprompt2/ghost");
+
+    char *prompt = agent_load_system_prompt("/tmp/test_ac_sysprompt2", "ghost", 1);
+    assert(prompt == NULL);
+
+    system("rm -rf /tmp/test_ac_sysprompt2");
+    printf("  PASS: agent load system prompt missing file\n");
+}
+
 int main(void) {
     printf("test_agent_config:\n");
     test_discover_agents();
@@ -197,6 +235,8 @@ int main(void) {
     test_agent_config_missing_file();
     test_agent_config_merge();
     test_agent_config_merge_null();
+    test_agent_load_system_prompt();
+    test_agent_load_system_prompt_missing();
     printf("All tests passed.\n");
     return 0;
 }

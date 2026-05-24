@@ -191,7 +191,7 @@ T70|x|Integration Test: parallel high-throughput network payloads|V16,V18
 T71|x|Web console updates (state metrics, lock holders, backlog depths)|§I.web
 T72|x|CLI terminal resume paths (echo unread inbox counts)|§I.cmd
 T74|x|~~Bind runtime parameters (`stale_lock_timeout`) to config~~ superseded by daemon model (V16)|§I.file
-T75|.|agent discovery — scan `agents/` dir, list available agents by name|V20
+T75|x|agent discovery — scan `agents/` dir, list available agents by name|V20
 T76|.|agent config loader — read `agents/<name>/agent.json`, merge w/ global config|V20,V12
 T77|.|system prompt loader — read `agents/<name>/system.md`, template vars `{session_id}`, `{date}`, `{agent_name}`|V20,T46
 T78|.|per-agent tool whitelist — filter tool registry by agent config|V20,§I.tool

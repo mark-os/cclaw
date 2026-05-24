@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include "tool_shell.h"
 #include <assert.h>
 #include <signal.h>
@@ -44,7 +44,6 @@ static void test_timeout(void) {
 }
 
 static void test_timeout_kills_process_group(void) {
-    /* Spawn a child that itself spawns a grandchild writing to a pidfile */
     char pidfile[] = "/tmp/cclaw_test_pgkill_XXXXXX";
     int fd = mkstemp(pidfile);
     assert(fd >= 0);
@@ -59,14 +58,12 @@ static void test_timeout_kills_process_group(void) {
     assert(strstr(r, "[timeout after 1s]") != NULL);
     free(r);
 
-    /* Read the PID that was written and verify it's dead */
-    struct timespec ts = {0, 100000000}; /* 100ms */
+    struct timespec ts = {0, 100000000};
     nanosleep(&ts, NULL);
     FILE *f = fopen(pidfile, "r");
     if (f) {
         int child_pid = 0;
         if (fscanf(f, "%d", &child_pid) == 1 && child_pid > 0) {
-            /* kill(pid, 0) returns -1 if process doesn't exist */
             assert(kill(child_pid, 0) != 0);
         }
         fclose(f);
@@ -76,9 +73,8 @@ static void test_timeout_kills_process_group(void) {
 }
 
 static void test_configurable_default_timeout(void) {
-    /* Pass a 1-second default via user_data */
-    int timeout_val = 1;
-    char *r = tool_shell_handler("{\"command\":\"sleep 10\"}", &timeout_val);
+    ShellConfig sc = {.timeout = 1, .workspace = NULL, .shell_network = 0};
+    char *r = tool_shell_handler("{\"command\":\"sleep 10\"}", &sc);
     assert(r != NULL);
     assert(strstr(r, "[timeout after 1s]") != NULL);
     free(r);
@@ -104,13 +100,35 @@ static void test_missing_command(void) {
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    int rc = tool_shell_register(&reg, 0);
+    int rc = tool_shell_register(&reg, 0, NULL, 0);
     assert(rc == 0);
     ToolEntry *e = tools_lookup(&reg, "shell_exec");
     assert(e != NULL);
     assert(e->handler == tool_shell_handler);
     tools_free(&reg);
     printf("  PASS test_register\n");
+}
+
+/* V37: Test that namespace sandbox applies gracefully (fallback on EPERM) */
+static void test_namespace_sandbox_fallback(void) {
+    /* Run with workspace set — unshare may fail without CAP_SYS_ADMIN,
+     * but command should still execute (graceful fallback) */
+    ShellConfig sc = {.timeout = 5, .workspace = "/tmp", .shell_network = 0};
+    char *r = tool_shell_handler("{\"command\":\"echo sandboxed\"}", &sc);
+    assert(r != NULL);
+    assert(strstr(r, "sandboxed") != NULL);
+    free(r);
+    printf("  PASS test_namespace_sandbox_fallback\n");
+}
+
+/* V37: Test shell_network flag doesn't break execution */
+static void test_shell_network_flag(void) {
+    ShellConfig sc = {.timeout = 5, .workspace = "/tmp", .shell_network = 1};
+    char *r = tool_shell_handler("{\"command\":\"echo netok\"}", &sc);
+    assert(r != NULL);
+    assert(strstr(r, "netok") != NULL);
+    free(r);
+    printf("  PASS test_shell_network_flag\n");
 }
 
 int main(void) {
@@ -124,6 +142,8 @@ int main(void) {
     test_invalid_json();
     test_missing_command();
     test_register();
+    test_namespace_sandbox_fallback();
+    test_shell_network_flag();
     printf("All shell_exec tool tests passed.\n");
     return 0;
 }

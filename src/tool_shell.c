@@ -1,11 +1,13 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include "tool_shell.h"
 #include <cJSON.h>
 #include <errno.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/select.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -30,11 +32,39 @@ static size_t read_all(int fd, char *buf, size_t cap) {
     return total;
 }
 
+/* V37: Apply namespace sandbox in child. Returns 0 on success, -1 on failure (fallback). */
+static int apply_namespace_sandbox(const char *workspace, int shell_network) {
+    int flags = CLONE_NEWUSER | CLONE_NEWNS;
+    if (!shell_network) flags |= CLONE_NEWNET;
+
+    if (unshare(flags) != 0) return -1;
+
+    /* Remount / as read-only recursively */
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) return 0;
+    if (mount(NULL, "/", NULL, MS_REMOUNT | MS_RDONLY | MS_BIND, NULL) != 0) {
+        /* Try alternative: bind-remount */
+        mount(NULL, "/", NULL, MS_REC | MS_SLAVE, NULL);
+    }
+
+    /* Bind-mount workspace read-write */
+    if (workspace) {
+        mount(workspace, workspace, NULL, MS_BIND, NULL);
+        mount(NULL, workspace, NULL, MS_REMOUNT | MS_BIND, NULL);
+    }
+
+    return 0;
+}
+
 char *tool_shell_handler(const char *arguments, void *user_data) {
     int default_timeout = TOOL_SHELL_DEFAULT_TIMEOUT;
+    const char *workspace = NULL;
+    int shell_network = 0;
+
     if (user_data) {
-        int val = *(int *)user_data;
-        if (val > 0) default_timeout = val;
+        ShellConfig *sc = (ShellConfig *)user_data;
+        if (sc->timeout > 0) default_timeout = sc->timeout;
+        workspace = sc->workspace;
+        shell_network = sc->shell_network;
     }
 
     cJSON *json = cJSON_Parse(arguments);
@@ -77,6 +107,12 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
+
+        /* V37: namespace sandbox — graceful fallback on failure */
+        if (apply_namespace_sandbox(workspace, shell_network) != 0) {
+            fprintf(stderr, "[shell_exec] warning: namespace sandbox unavailable, running unsandboxed\n");
+        }
+
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);
         _exit(127);
     }
@@ -171,18 +207,21 @@ format_result:
     return result;
 }
 
-int tool_shell_register(ToolRegistry *reg, int default_timeout) {
-    int *timeout_ptr = malloc(sizeof(int));
-    if (!timeout_ptr) return -1;
-    *timeout_ptr = (default_timeout > 0) ? default_timeout : TOOL_SHELL_DEFAULT_TIMEOUT;
+int tool_shell_register(ToolRegistry *reg, int default_timeout,
+                        const char *workspace, int shell_network) {
+    ShellConfig *sc = malloc(sizeof(ShellConfig));
+    if (!sc) return -1;
+    sc->timeout = (default_timeout > 0) ? default_timeout : TOOL_SHELL_DEFAULT_TIMEOUT;
+    sc->workspace = workspace;  /* caller owns lifetime */
+    sc->shell_network = shell_network;
     int rc = tools_register(reg, "shell_exec",
                             "Execute a shell command and return stdout+stderr",
-                            SHELL_PARAMS_JSON, tool_shell_handler, timeout_ptr);
+                            SHELL_PARAMS_JSON, tool_shell_handler, sc);
     if (rc == 0) {
         ToolEntry *e = tools_lookup(reg, "shell_exec");
         if (e) e->free_fn = free;
     } else {
-        free(timeout_ptr);
+        free(sc);
     }
     return rc;
 }

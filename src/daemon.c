@@ -228,7 +228,8 @@ static void agent_process_entry(const Config *cfg, int64_t session_id) {
     /* Register tools */
     ToolRegistry reg;
     tools_init(&reg);
-    tool_shell_register(&reg, effective_cfg->shell_timeout);
+    tool_shell_register(&reg, effective_cfg->shell_timeout,
+                        effective_cfg->workspace, ac ? ac->shell_network : 0);
     tool_file_read_register(&reg, effective_cfg->workspace);
     tool_file_write_register(&reg, effective_cfg->workspace);
     tool_js_eval_register(&reg);

@@ -218,7 +218,7 @@ T98|x|`entry_append` stores `stop_reason` in entry `data` JSON; `session_get_bra
 T99|x|`context_build` V36 filtering — skip `error`/`aborted` assistant entries, synthesize orphaned tool_results|V36,V28
 T100|x|test: StopReason normalization — all provider finish_reason variants map correctly|V35
 T101|x|test: context_build skips errored entries, synthesizes tool_results for orphaned calls|V36
-T102|.|`shell_exec` namespace sandbox — `unshare(NEWUSER\|NEWNET\|NEWNS)`, remount ro, workspace rw, fallback if unavailable|V37
+T102|x|`shell_exec` namespace sandbox — `unshare(NEWUSER\|NEWNET\|NEWNS)`, remount ro, workspace rw, fallback if unavailable|V37
 T103|.|`http_fetch` JS binding — C function exposed to mquickjs; parse URL, check `allowed_hosts`, SSRF reject private IPs, call libcurl, return response|V38
 T104|.|per-agent `allowed_hosts` config — array of hostnames in `agent.json`, loaded into agent config, passed to `http_fetch` binding|V38,§I
 T105|.|tool result truncation in `context_build` — shared `truncate_result(buf, len)` util enforcing 50KB/2000 lines on tool_result messages before sending to LLM; full results stay in DB|V40

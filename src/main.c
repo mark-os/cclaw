@@ -52,7 +52,7 @@ static int run_sub_agent(const Config *cfg, int64_t session_id, const char *task
     /* Register tools */
     ToolRegistry reg;
     tools_init(&reg);
-    tool_shell_register(&reg, cfg->shell_timeout);
+    tool_shell_register(&reg, cfg->shell_timeout, cfg->workspace, 0);
     tool_file_read_register(&reg, cfg->workspace);
     tool_file_write_register(&reg, cfg->workspace);
     tool_js_eval_register(&reg);

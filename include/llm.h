@@ -39,4 +39,8 @@ char *llm_build_request(Arena *a, const Config *cfg, const Message *msgs,
  * Returns 0 on success, -1 on parse failure. */
 int llm_parse_response(Arena *a, const char *json, LlmResponse *out);
 
+/* V35: normalize provider finish_reason string → StopReason enum.
+ * Sole normalization point. NULL input → STOP_REASON_STOP. */
+StopReason map_stop_reason(const char *finish_reason);
+
 #endif

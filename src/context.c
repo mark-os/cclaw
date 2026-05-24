@@ -341,3 +341,163 @@ void context_free(Message *msgs, int count) {
     }
     free(msgs);
 }
+
+/* V41: helpers for context_plan */
+static Role plan_str_to_role(const char *s) {
+    if (!s) return ROLE_USER;
+    if (strcmp(s, "system") == 0) return ROLE_SYSTEM;
+    if (strcmp(s, "assistant") == 0) return ROLE_ASSISTANT;
+    if (strcmp(s, "tool_result") == 0) return ROLE_TOOL;
+    return ROLE_USER;
+}
+
+static StopReason plan_str_to_stop_reason(const char *s) {
+    if (!s) return STOP_REASON_NONE;
+    if (strcmp(s, "stop") == 0)     return STOP_REASON_STOP;
+    if (strcmp(s, "length") == 0)   return STOP_REASON_LENGTH;
+    if (strcmp(s, "tool_use") == 0) return STOP_REASON_TOOL_USE;
+    if (strcmp(s, "error") == 0)    return STOP_REASON_ERROR;
+    if (strcmp(s, "aborted") == 0)  return STOP_REASON_ABORTED;
+    return STOP_REASON_NONE;
+}
+
+/* V41,V8: Find cut point in PlanEntry array — same logic as find_cut_point but on PlanEntry. */
+static int plan_find_cut(const PlanEntry *entries, int count, int budget) {
+    int total = 0;
+    int cut = 0;
+    int i = count - 1;
+    while (i >= 0) {
+        int group_start = i;
+        int group_tokens = 0;
+
+        if (entries[i].role == ROLE_TOOL) {
+            /* Walk backwards past tool results to find owning assistant */
+            while (group_start > 0 && entries[group_start - 1].role == ROLE_TOOL)
+                group_start--;
+            if (group_start > 0 && entries[group_start - 1].role == ROLE_ASSISTANT
+                && entries[group_start - 1].tool_call_count > 0)
+                group_start--;
+            for (int j = group_start; j <= i; j++)
+                group_tokens += entries[j].token_estimate;
+        } else {
+            group_tokens = entries[i].token_estimate;
+        }
+
+        if (total + group_tokens > budget) {
+            cut = i + 1;
+            break;
+        }
+        total += group_tokens;
+        i = group_start - 1;
+    }
+
+    /* V8: ensure cut is at valid boundary — before user/system msg */
+    while (cut < count && entries[cut].role != ROLE_USER
+           && entries[cut].role != ROLE_SYSTEM)
+        cut++;
+
+    return cut;
+}
+
+int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan *out) {
+    if (!db || !cfg || !out) return -1;
+    memset(out, 0, sizeof(*out));
+
+    /* Get leaf_id */
+    const char *leaf_sql = "SELECT leaf_id FROM sessions WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, leaf_sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    if (sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    int64_t leaf_id = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    if (leaf_id < 0) return -1;
+
+    /* Query branch metadata — no content loaded, just id/role/stop_reason/length/tool_call_count */
+    const char *plan_sql =
+        "WITH RECURSIVE branch(id, parent_id) AS ("
+        "  SELECT id, parent_id FROM entries WHERE id=? AND session_id=?"
+        "  UNION ALL"
+        "  SELECT e.id, e.parent_id FROM entries e JOIN branch b ON e.id=b.parent_id"
+        ") SELECT e.id, e.role,"
+        "  json_extract(e.data, '$.stop_reason'),"
+        "  length(e.data),"
+        "  CASE WHEN e.role='assistant' THEN"
+        "    (SELECT count(*) FROM json_each(json_extract(e.data,'$.content'))"
+        "     WHERE json_extract(value,'$.type')='tool_call')"
+        "  ELSE 0 END"
+        " FROM branch b JOIN entries e ON e.id=b.id ORDER BY e.id;";
+
+    if (sqlite3_prepare_v2(db, plan_sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, leaf_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
+
+    int cap = 32;
+    PlanEntry *raw = malloc((size_t)cap * sizeof(PlanEntry));
+    if (!raw) { sqlite3_finalize(stmt); return -1; }
+    int raw_count = 0;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (raw_count >= cap) {
+            cap *= 2;
+            PlanEntry *tmp = realloc(raw, (size_t)cap * sizeof(PlanEntry));
+            if (!tmp) break;
+            raw = tmp;
+        }
+        PlanEntry *pe = &raw[raw_count];
+        pe->id = sqlite3_column_int64(stmt, 0);
+        pe->role = plan_str_to_role((const char *)sqlite3_column_text(stmt, 1));
+        pe->stop_reason = plan_str_to_stop_reason((const char *)sqlite3_column_text(stmt, 2));
+        int data_len = sqlite3_column_int(stmt, 3);
+        pe->token_estimate = (data_len / 4) + 4; /* chars/4 + per-message overhead */
+        pe->tool_call_count = sqlite3_column_int(stmt, 4);
+        raw_count++;
+    }
+    sqlite3_finalize(stmt);
+
+    if (raw_count == 0) { free(raw); return -1; }
+
+    /* V28: filter out error/aborted assistant entries + their following tool_results */
+    PlanEntry *filtered = malloc((size_t)raw_count * sizeof(PlanEntry));
+    if (!filtered) { free(raw); return -1; }
+    int fcount = 0;
+    for (int i = 0; i < raw_count; i++) {
+        if (raw[i].role == ROLE_ASSISTANT &&
+            (raw[i].stop_reason == STOP_REASON_ERROR ||
+             raw[i].stop_reason == STOP_REASON_ABORTED)) {
+            /* Skip this + following tool_results */
+            int j = i + 1;
+            while (j < raw_count && raw[j].role == ROLE_TOOL) j++;
+            i = j - 1;
+            continue;
+        }
+        filtered[fcount++] = raw[i];
+    }
+    free(raw);
+
+    /* V7: compute budget */
+    int budget = cfg->max_history_tokens > 0
+        ? cfg->max_history_tokens
+        : (cfg->provider.context_window * 60) / 100;
+    if (budget <= 0) budget = 8000;
+
+    int cut = plan_find_cut(filtered, fcount, budget);
+
+    out->entries = filtered;
+    out->count = fcount;
+    out->cut = cut;
+    out->budget = budget;
+    return 0;
+}
+
+void context_plan_free(ContextPlan *plan) {
+    if (!plan) return;
+    free(plan->entries);
+    plan->entries = NULL;
+    plan->count = 0;
+}

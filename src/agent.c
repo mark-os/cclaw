@@ -13,8 +13,49 @@
 #define MAX_RETRIES 5
 #define INITIAL_BACKOFF_MS 1000
 
+/* V43: tool loop detection */
+#define TOOL_LOOP_RING_SIZE 30
+#define TOOL_LOOP_WARN_THRESHOLD 5
+#define TOOL_LOOP_BREAK_THRESHOLD 10
+
 /* V32: max LLM error retries per turn (parse failure, missing finish_reason) */
 #define MAX_LLM_RETRIES 3
+
+/* V43: tool loop ring buffer */
+typedef struct {
+    uint32_t hashes[TOOL_LOOP_RING_SIZE];
+    int count;  /* total calls recorded (may exceed RING_SIZE) */
+} ToolLoopRing;
+
+static uint32_t tool_call_hash(const char *name, const char *args) {
+    /* FNV-1a 32-bit */
+    uint32_t h = 2166136261u;
+    for (const char *p = name; *p; p++) {
+        h ^= (uint8_t)*p;
+        h *= 16777619u;
+    }
+    if (args) {
+        for (const char *p = args; *p; p++) {
+            h ^= (uint8_t)*p;
+            h *= 16777619u;
+        }
+    }
+    return h;
+}
+
+/* Count consecutive occurrences of hash at tail of ring buffer */
+static int tool_loop_streak(const ToolLoopRing *ring, uint32_t hash) {
+    int n = ring->count < TOOL_LOOP_RING_SIZE ? ring->count : TOOL_LOOP_RING_SIZE;
+    int tail = (ring->count - 1) % TOOL_LOOP_RING_SIZE;
+    int streak = 0;
+    for (int i = 0; i < n; i++) {
+        int idx = tail - i;
+        if (idx < 0) idx += TOOL_LOOP_RING_SIZE;
+        if (ring->hashes[idx] == hash) streak++;
+        else break;
+    }
+    return streak;
+}
 
 /* Build URL for chat completions endpoint */
 static char *build_url(Arena *a, const Config *cfg) {
@@ -182,6 +223,9 @@ static int is_context_overflow(const char *body) {
 int agent_run(AgentContext *ctx) {
     if (!ctx || !ctx->db || !ctx->cfg) return -1;
 
+    /* V43: tool loop detection ring buffer (persists across iterations) */
+    ToolLoopRing loop_ring = {.count = 0};
+
     int max_iter = ctx->cfg->max_iterations > 0 ? ctx->cfg->max_iterations : AGENT_DEFAULT_MAX_ITERATIONS;
     for (int iter = 0; iter < max_iter; iter++) {
         /* V31: check for graceful shutdown signal */
@@ -307,7 +351,8 @@ int agent_run(AgentContext *ctx) {
         }
         entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
 
-        /* Dispatch each tool call and append results (V10) */
+        /* Dispatch each tool call and append results (V10, V43) */
+        int loop_break = 0;
         for (size_t i = 0; i < asst.tool_call_count; i++) {
             /* V31: abort remaining tools on shutdown */
             if (shutdown_requested()) {
@@ -331,7 +376,49 @@ int agent_run(AgentContext *ctx) {
                 arena_destroy(a);
                 return -1;
             }
+
+            /* V43: tool loop detection */
+            uint32_t h = tool_call_hash(asst.tool_calls[i].name, asst.tool_calls[i].arguments);
+            int streak = tool_loop_streak(&loop_ring, h) + 1; /* +1 for this call */
+
+            if (streak >= TOOL_LOOP_BREAK_THRESHOLD) {
+                /* ≥10: force-stop agent loop */
+                char *err = strdup("error: tool loop detected — same call repeated 10+ times with no progress");
+                ToolResult tr = {.tool_call_id = asst.tool_calls[i].id, .content = err};
+                Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr};
+                entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
+                free(err);
+                /* Write error results for remaining tool calls */
+                for (size_t j = i + 1; j < asst.tool_call_count; j++) {
+                    ToolResult skip_tr = {.tool_call_id = asst.tool_calls[j].id,
+                                          .content = "error: tool loop detected"};
+                    Message skip_msg = {.role = ROLE_TOOL, .tool_result = &skip_tr};
+                    entry_append_with_turn(ctx->db, ctx->session_id, &skip_msg, turn_id);
+                }
+                loop_ring.hashes[loop_ring.count % TOOL_LOOP_RING_SIZE] = h;
+                loop_ring.count++;
+                loop_break = 1;
+                break;
+            }
+
             char *result = dispatch_tool(ctx, &asst.tool_calls[i]);
+
+            /* V43: ≥5 same → inject warning into result */
+            if (streak >= TOOL_LOOP_WARN_THRESHOLD) {
+                const char *warn = "\n\n[WARNING: You have called this tool with identical arguments "
+                                   "multiple times. Try a different approach or stop.]";
+                size_t rlen = strlen(result);
+                size_t wlen = strlen(warn);
+                char *augmented = realloc(result, rlen + wlen + 1);
+                if (augmented) {
+                    memcpy(augmented + rlen, warn, wlen + 1);
+                    result = augmented;
+                }
+            }
+
+            loop_ring.hashes[loop_ring.count % TOOL_LOOP_RING_SIZE] = h;
+            loop_ring.count++;
+
             ToolResult tr = {.tool_call_id = asst.tool_calls[i].id, .content = result};
             Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr};
             entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
@@ -347,6 +434,9 @@ int agent_run(AgentContext *ctx) {
         free(asst.tool_calls);
         free(asst.content);
         arena_destroy(a);
+
+        /* V43: break agent loop on tool loop detection */
+        if (loop_break) return -1;
     }
 
     /* Max iterations reached */

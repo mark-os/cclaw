@@ -15,6 +15,8 @@ typedef struct {
     int64_t session_id;
     int depth;              /* current agent depth (0 = top-level) */
     const char *self_path;  /* path to cclaw binary */
+    int daemon_mode;        /* T88: if true, post to spawn_queue instead of fork */
+    const char *tool_call_id; /* T88: current tool_call_id for blocking spawn */
 } SubAgentCtx;
 
 /* Register spawn_agent tool. Returns 0 on success. */

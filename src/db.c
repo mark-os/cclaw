@@ -109,7 +109,19 @@ static const char *SCHEMA_SQL =
     "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
     "  consumed INTEGER NOT NULL DEFAULT 0"
     ");"
-    "CREATE INDEX IF NOT EXISTS idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0;";
+    "CREATE INDEX IF NOT EXISTS idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0;"
+    "CREATE TABLE IF NOT EXISTS spawn_queue ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  parent_session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  task TEXT NOT NULL,"
+    "  background INTEGER NOT NULL DEFAULT 0,"
+    "  depth INTEGER NOT NULL DEFAULT 1,"
+    "  tool_call_id TEXT,"
+    "  status TEXT NOT NULL DEFAULT 'pending',"
+    "  child_session_id INTEGER,"
+    "  created_at INTEGER NOT NULL DEFAULT (unixepoch())"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_spawn_queue_pending ON spawn_queue(status) WHERE status='pending';";
 
 sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
@@ -1014,4 +1026,86 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
         return -1;
     }
     return consumed;
+}
+
+/* T88: Spawn queue — agent processes post requests, daemon picks up + forks */
+
+int64_t spawn_queue_insert(sqlite3 *db, int64_t parent_session_id, const char *task,
+                           int background, int depth, const char *tool_call_id) {
+    const char *sql =
+        "INSERT INTO spawn_queue (parent_session_id, task, background, depth, tool_call_id)"
+        " VALUES (?,?,?,?,?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, parent_session_id);
+    sqlite3_bind_text(stmt, 2, task, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, background);
+    sqlite3_bind_int(stmt, 4, depth);
+    if (tool_call_id)
+        sqlite3_bind_text(stmt, 5, tool_call_id, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 5);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    return sqlite3_last_insert_rowid(db);
+}
+
+SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count) {
+    *count = 0;
+    const char *sql =
+        "SELECT id, parent_session_id, task, background, depth, tool_call_id"
+        " FROM spawn_queue WHERE status='pending' ORDER BY id ASC;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+
+    int cap = 8;
+    SpawnRequest *list = malloc((size_t)cap * sizeof(SpawnRequest));
+    if (!list) { sqlite3_finalize(stmt); return NULL; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (*count >= cap) {
+            cap *= 2;
+            SpawnRequest *tmp = realloc(list, (size_t)cap * sizeof(SpawnRequest));
+            if (!tmp) break;
+            list = tmp;
+        }
+        SpawnRequest *r = &list[*count];
+        r->id = sqlite3_column_int64(stmt, 0);
+        r->parent_session_id = sqlite3_column_int64(stmt, 1);
+        const char *t = (const char *)sqlite3_column_text(stmt, 2);
+        r->task = t ? strdup(t) : NULL;
+        r->background = sqlite3_column_int(stmt, 3);
+        r->depth = sqlite3_column_int(stmt, 4);
+        const char *tc = (const char *)sqlite3_column_text(stmt, 5);
+        r->tool_call_id = tc ? strdup(tc) : NULL;
+        (*count)++;
+    }
+    sqlite3_finalize(stmt);
+    if (*count == 0) { free(list); return NULL; }
+    return list;
+}
+
+int spawn_queue_mark(sqlite3 *db, int64_t id, const char *status, int64_t child_session_id) {
+    const char *sql =
+        "UPDATE spawn_queue SET status=?, child_session_id=? WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, status, -1, SQLITE_STATIC);
+    if (child_session_id > 0)
+        sqlite3_bind_int64(stmt, 2, child_session_id);
+    else
+        sqlite3_bind_null(stmt, 2);
+    sqlite3_bind_int64(stmt, 3, id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+void spawn_request_free(SpawnRequest *list, int count) {
+    for (int i = 0; i < count; i++) {
+        free(list[i].task);
+        free(list[i].tool_call_id);
+    }
+    free(list);
 }

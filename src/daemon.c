@@ -238,7 +238,8 @@ static void agent_process_entry(const Config *cfg, int64_t session_id) {
     else strcpy(self_path, "./build/cclaw");
 
     SubAgentCtx sa_ctx = {.db = db, .session_id = session_id,
-                          .depth = 0, .self_path = self_path};
+                          .depth = 0, .self_path = self_path,
+                          .daemon_mode = 1, .tool_call_id = NULL};
     tool_spawn_agent_register(&reg, &sa_ctx);
     tool_check_agent_register(&reg, &sa_ctx);
 
@@ -342,6 +343,8 @@ static void deliver_response(const Config *cfg, sqlite3 *db, int64_t session_id)
 
 /* ── Reap children ──────────────────────────────────────────────── */
 
+static void process_spawn_queue(const Config *cfg, sqlite3 *db);
+
 static void reap_children(const Config *cfg, sqlite3 *db) {
     int status;
     pid_t pid;
@@ -354,7 +357,69 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
         snprintf(holder, sizeof(holder), "daemon-%d", (int)getpid());
         session_release(db, session_id, holder);
 
-        /* V26: deliver response */
+        /* T88: Check if this was a sub-agent from spawn_queue (blocking) */
+        const char *sq_sql =
+            "SELECT sq.id, sq.parent_session_id, sq.tool_call_id, sq.background"
+            " FROM spawn_queue sq WHERE sq.child_session_id=? AND sq.status='forked';";
+        sqlite3_stmt *sq_stmt;
+        if (sqlite3_prepare_v2(db, sq_sql, -1, &sq_stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(sq_stmt, 1, session_id);
+            if (sqlite3_step(sq_stmt) == SQLITE_ROW) {
+                int64_t sq_id = sqlite3_column_int64(sq_stmt, 0);
+                int64_t parent_sid = sqlite3_column_int64(sq_stmt, 1);
+                const char *tcid = (const char *)sqlite3_column_text(sq_stmt, 2);
+                int bg = sqlite3_column_int(sq_stmt, 3);
+
+                /* Get sub-agent result from last assistant entry in child session */
+                int bcount = 0;
+                Entry *branch = session_get_branch(db, session_id, &bcount);
+                const char *result_text = NULL;
+                if (branch) {
+                    for (int i = bcount - 1; i >= 0; i--) {
+                        if (branch[i].message.role == ROLE_ASSISTANT && branch[i].message.content) {
+                            result_text = branch[i].message.content;
+                            break;
+                        }
+                    }
+                }
+                if (!result_text) result_text = "sub-agent completed with no output";
+
+                spawn_queue_mark(db, sq_id, "done", session_id);
+
+                if (!bg) {
+                    /* V13 blocking: post tool_result to parent inbox, wake parent */
+                    char *payload = malloc(strlen(result_text) + 128);
+                    if (payload) {
+                        if (tcid) {
+                            snprintf(payload, strlen(result_text) + 128,
+                                     "{\"tool_call_id\":\"%s\",\"result\":\"%s\"}", tcid, "see_content");
+                        }
+                        /* Post plain result as inbox message */
+                        inbox_insert(db, parent_sid, "sub-agent", result_text);
+                        free(payload);
+                    } else {
+                        inbox_insert(db, parent_sid, "sub-agent", result_text);
+                    }
+                    /* Transition parent waiting→idle */
+                    const char *wake_sql =
+                        "UPDATE sessions SET state='idle', lock_holder=NULL WHERE id=? AND state='waiting';";
+                    sqlite3_stmt *ws;
+                    if (sqlite3_prepare_v2(db, wake_sql, -1, &ws, NULL) == SQLITE_OK) {
+                        sqlite3_bind_int64(ws, 1, parent_sid);
+                        sqlite3_step(ws);
+                        sqlite3_finalize(ws);
+                    }
+                    /* Signal daemon to re-fork parent */
+                    daemon_signal_session(parent_sid);
+                }
+                entry_branch_free(branch, bcount);
+                sqlite3_finalize(sq_stmt);
+                continue; /* Skip normal deliver_response for sub-agents */
+            }
+            sqlite3_finalize(sq_stmt);
+        }
+
+        /* V26: deliver response (normal agent, not sub-agent) */
         deliver_response(cfg, db, session_id);
 
         /* Check if more inbox items arrived while agent was running */
@@ -363,6 +428,94 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
             daemon_signal_session(session_id);
         }
     }
+}
+
+/* ── T88: Process spawn queue ───────────────────────────────────── */
+
+static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
+    int count = 0;
+    SpawnRequest *reqs = spawn_queue_peek_pending(db, &count);
+    if (!reqs) return;
+
+    char self_path[4096];
+    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+    if (len > 0) self_path[len] = '\0';
+    else strcpy(self_path, "./build/cclaw");
+
+    for (int i = 0; i < count; i++) {
+        SpawnRequest *r = &reqs[i];
+
+        /* V3: re-check limits before forking */
+        if (subagent_count_total(db) >= SUBAGENT_MAX_TOTAL) {
+            spawn_queue_mark(db, r->id, "rejected", 0);
+            continue;
+        }
+        if (subagent_count_by_parent(db, r->parent_session_id) >= SUBAGENT_MAX_PER_PARENT) {
+            spawn_queue_mark(db, r->id, "rejected", 0);
+            continue;
+        }
+
+        /* Create child session */
+        char name_buf[128];
+        snprintf(name_buf, sizeof(name_buf), "sub-agent:%lld", (long long)r->parent_session_id);
+        int64_t child_sid = session_create(db, name_buf, NULL);
+        if (child_sid < 0) {
+            spawn_queue_mark(db, r->id, "error", 0);
+            continue;
+        }
+
+        /* Insert task as user message in child session inbox */
+        inbox_insert(db, child_sid, "spawn", r->task);
+
+        /* Fork sub-agent process */
+        char session_arg[64];
+        snprintf(session_arg, sizeof(session_arg), "--session-id=%lld", (long long)child_sid);
+        char task_arg[4096];
+        snprintf(task_arg, sizeof(task_arg), "--task=%s", r->task);
+        char depth_arg[32];
+        snprintf(depth_arg, sizeof(depth_arg), "--depth=%d", r->depth);
+
+        /* Acquire child session lock */
+        char holder[32];
+        snprintf(holder, sizeof(holder), "daemon-%d", (int)getpid());
+        if (session_try_acquire(db, child_sid, holder) != 0) {
+            spawn_queue_mark(db, r->id, "error", 0);
+            continue;
+        }
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            session_release(db, child_sid, holder);
+            spawn_queue_mark(db, r->id, "error", 0);
+            continue;
+        }
+        if (pid == 0) {
+            close(g_signal_pipe[0]);
+            close(g_signal_pipe[1]);
+            close(g_chld_pipe[0]);
+            close(g_chld_pipe[1]);
+            agent_process_entry(cfg, child_sid);
+            _exit(1);
+        }
+
+        /* Track child + record in sub_agents table */
+        child_add(pid, child_sid);
+        subagent_create(db, r->parent_session_id, child_sid, pid, r->depth, r->task);
+        spawn_queue_mark(db, r->id, "forked", child_sid);
+
+        /* V13 blocking: transition parent to "waiting" state.
+         * The parent agent process should have already exited after posting the request. */
+        if (!r->background) {
+            const char *sql = "UPDATE sessions SET state='waiting' WHERE id=? AND state IN ('running','idle');";
+            sqlite3_stmt *stmt;
+            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, r->parent_session_id);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+        }
+    }
+    spawn_request_free(reqs, count);
 }
 
 /* ── Daemon main loop (T81) ─────────────────────────────────────── */
@@ -418,6 +571,8 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
                         fork_agent(cfg, db, sid);
                     }
                 }
+                /* T88: Process any pending spawn requests */
+                process_spawn_queue(cfg, db);
             }
         }
 

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_subagent.h"
+#include "daemon.h"
 #include <cJSON.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +56,30 @@ char *tool_spawn_agent_handler(const char *arguments, void *user_data) {
         return strdup("error: max system-wide sub-agents reached (limit 10)");
     }
 
+    /* T88/V21: In daemon mode, post to spawn_queue and let daemon fork */
+    if (ctx->daemon_mode) {
+        int64_t qid = spawn_queue_insert(ctx->db, ctx->session_id, task,
+                                         background, ctx->depth + 1, ctx->tool_call_id);
+        cJSON_Delete(json);
+        if (qid < 0) return strdup("error: failed to enqueue spawn request");
+
+        /* Signal daemon to process the queue */
+        daemon_signal_session(ctx->session_id);
+
+        if (background) {
+            char *result = malloc(128);
+            if (!result) return strdup("error: OOM");
+            snprintf(result, 128, "spawn request queued (id=%lld, background)", (long long)qid);
+            return result;
+        }
+        /* Blocking: return sentinel — agent loop must detect and exit (V13) */
+        char *result = malloc(128);
+        if (!result) return strdup("error: OOM");
+        snprintf(result, 128, "SPAWN_BLOCKING:%lld", (long long)qid);
+        return result;
+    }
+
+    /* V39: CLI mode — fork+exec directly */
     /* Create a session for the sub-agent */
     char name_buf[128];
     snprintf(name_buf, sizeof(name_buf), "sub-agent:%lld", (long long)ctx->session_id);
@@ -106,7 +131,7 @@ char *tool_spawn_agent_handler(const char *arguments, void *user_data) {
         return result;
     }
 
-    /* V13 blocking (default): wait for child, return result */
+    /* V13/V39 blocking: wait for child, return result */
     int status = 0;
     waitpid(pid, &status, 0);
 

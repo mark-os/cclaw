@@ -17,6 +17,16 @@ typedef struct {
     char *result;
 } SubAgentInfo;
 
+/* T88: Spawn queue request */
+typedef struct {
+    int64_t id;
+    int64_t parent_session_id;
+    char *task;
+    int background;
+    int depth;
+    char *tool_call_id;
+} SpawnRequest;
+
 /* Open DB at path, set WAL mode + pragmas, create tables.
  * Returns NULL on failure. */
 sqlite3 *db_open(const char *path);
@@ -123,5 +133,12 @@ int inbox_count(sqlite3 *db, int64_t session_id);
  * Within BEGIN EXCLUSIVE: marks items consumed, inserts as user messages, updates leaf.
  * Returns number of items consumed (≥0) or -1 on error (transaction rolled back). */
 int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit);
+
+/* T88: Spawn queue — agent processes post requests, daemon picks up + forks */
+int64_t spawn_queue_insert(sqlite3 *db, int64_t parent_session_id, const char *task,
+                           int background, int depth, const char *tool_call_id);
+SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count);
+int spawn_queue_mark(sqlite3 *db, int64_t id, const char *status, int64_t child_session_id);
+void spawn_request_free(SpawnRequest *list, int count);
 
 #endif

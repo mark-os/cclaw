@@ -204,7 +204,7 @@ T84|x|landlock setup — per-agent workspace write, system read-only, deny netwo
 T85|x|response delivery — daemon reads `last_route`, dispatches to correct channel|V26
 T86|x|`last_route` tracking — agent updates on inbox consumption from newest source|V27,§D
 T87|x|daemon child tracking — map pid→session_id, enforce V24 (no dup fork)|V24
-T88|.|daemon spawn queue — sub-agent spawn requests from agent processes, daemon picks up + forks|V21,T37
+T88|x|daemon spawn queue — sub-agent spawn requests from agent processes, daemon picks up + forks|V21,T37
 T89|x|test: daemon forks agent on inbox signal, reaps on exit, delivers response|V21,V26
 T90|.|context_build: skip errored/aborted assistant entries + their orphaned tool_calls|V28
 T91|.|LLM error retry loop — max 3 retries, re-send clean context (V28 stripped), write final error entry on exhaust|V29,V32

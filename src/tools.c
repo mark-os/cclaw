@@ -56,3 +56,35 @@ void tools_free(ToolRegistry *reg) {
     }
     reg->count = 0;
 }
+
+int tools_is_whitelisted(const char *name, const char **whitelist, size_t whitelist_count) {
+    if (!whitelist || whitelist_count == 0) return 1;
+    if (!name) return 0;
+    for (size_t i = 0; i < whitelist_count; i++) {
+        if (whitelist[i] && strcmp(name, whitelist[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+const ToolSchema *tools_schemas_filtered(ToolRegistry *reg, const char **whitelist,
+                                         size_t whitelist_count, size_t *out_count) {
+    static ToolSchema schemas[TOOLS_MAX];
+    if (!reg || !out_count) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+    if (!whitelist || whitelist_count == 0)
+        return tools_schemas(reg, out_count);
+
+    size_t n = 0;
+    for (size_t i = 0; i < reg->count; i++) {
+        if (tools_is_whitelisted(reg->entries[i].name, whitelist, whitelist_count)) {
+            schemas[n].name = reg->entries[i].name;
+            schemas[n].description = reg->entries[i].description;
+            schemas[n].parameters_json = reg->entries[i].parameters_json;
+            n++;
+        }
+    }
+    *out_count = n;
+    return schemas;
+}

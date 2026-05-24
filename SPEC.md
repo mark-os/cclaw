@@ -200,7 +200,7 @@ T80|x|skill loader — scan `agents/<name>/skills/*.md`, inject into system prom
 T81|x|daemon main loop — epoll on signal_pipe + SIGCHLD self-pipe, fork/reap agents|V21,V24,V26
 T82|x|signal pipe — create at daemon start, inserters write session_id to wake daemon|V25
 T83|x|agent process entry — fork, landlock, setrlimit, drain inbox, run agent loop, exit|V21,V22,V23
-T84|.|landlock setup — per-agent workspace write, system read-only, deny network (curl via inherited fd?)|V22
+T84|x|landlock setup — per-agent workspace write, system read-only, deny network (curl via inherited fd?)|V22
 T85|x|response delivery — daemon reads `last_route`, dispatches to correct channel|V26
 T86|x|`last_route` tracking — agent updates on inbox consumption from newest source|V27,§D
 T87|x|daemon child tracking — map pid→session_id, enforce V24 (no dup fork)|V24

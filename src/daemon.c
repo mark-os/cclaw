@@ -14,6 +14,7 @@
 #include "tool_db_query.h"
 #include "tool_subagent.h"
 #include "tool_cron.h"
+#include "landlock.h"
 #include "config.h"
 
 #include <errno.h>
@@ -202,6 +203,12 @@ static void agent_process_entry(const Config *cfg, int64_t session_id) {
         ac = agent_config_load("agents", agent_name);
         merged_cfg = agent_config_merge(cfg, ac);
         if (merged_cfg) effective_cfg = merged_cfg;
+    }
+
+    /* V22: Landlock — restrict filesystem after config loaded */
+    if (landlock_apply(effective_cfg->workspace, cfg->db_path) < 0) {
+        fprintf(stderr, "[agent %lld] landlock unavailable, continuing without\n",
+                (long long)session_id);
     }
 
     /* V27: Update last_route from newest inbox source before consuming */

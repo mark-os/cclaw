@@ -178,6 +178,115 @@ static void test_daemon_fork_reap(void) {
     printf("  PASS test_daemon_fork_reap\n");
 }
 
+/* ── T94: Daemon startup recovery ────────────────────────────────── */
+
+static void test_startup_recovery_running(void) {
+    /* "running" sessions reset to "idle" */
+    unlink(DB_PATH);
+    sqlite3 *db = db_open(DB_PATH);
+    assert(db);
+
+    int64_t sid = session_create(db, "recovery_run", NULL);
+    assert(sid > 0);
+
+    /* Force state to "running" (simulates daemon crash mid-agent) */
+    sqlite3_exec(db,
+        "UPDATE sessions SET state='running', lock_holder='old-daemon' WHERE id=1;",
+        NULL, NULL, NULL);
+
+    daemon_startup_recovery(db);
+
+    /* Should be idle now */
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(db, "SELECT state, lock_holder FROM sessions WHERE id=?;", -1, &stmt, NULL);
+    sqlite3_bind_int64(stmt, 1, sid);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "idle") == 0);
+    assert(sqlite3_column_type(stmt, 1) == SQLITE_NULL);
+    sqlite3_finalize(stmt);
+
+    db_close(db);
+    unlink(DB_PATH);
+    printf("  PASS test_startup_recovery_running\n");
+}
+
+static void test_startup_recovery_waiting_with_inbox(void) {
+    /* "waiting" session with inbox item → "idle" (no error injected) */
+    unlink(DB_PATH);
+    sqlite3 *db = db_open(DB_PATH);
+    assert(db);
+
+    int64_t sid = session_create(db, "recovery_wait_inbox", NULL);
+    assert(sid > 0);
+
+    /* Force state to "waiting" */
+    sqlite3_exec(db,
+        "UPDATE sessions SET state='waiting' WHERE id=1;",
+        NULL, NULL, NULL);
+
+    /* Sub-agent result already in inbox */
+    inbox_insert(db, sid, "sub-agent", "result from child");
+
+    daemon_startup_recovery(db);
+
+    /* Should be idle, inbox still has the item (daemon loop will fork) */
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
+    sqlite3_bind_int64(stmt, 1, sid);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "idle") == 0);
+    sqlite3_finalize(stmt);
+
+    /* Inbox count should be 1 (original item, no error added) */
+    assert(inbox_count(db, sid) == 1);
+
+    db_close(db);
+    unlink(DB_PATH);
+    printf("  PASS test_startup_recovery_waiting_with_inbox\n");
+}
+
+static void test_startup_recovery_waiting_no_inbox(void) {
+    /* "waiting" session with empty inbox → error injected + "idle" */
+    unlink(DB_PATH);
+    sqlite3 *db = db_open(DB_PATH);
+    assert(db);
+
+    int64_t sid = session_create(db, "recovery_wait_empty", NULL);
+    assert(sid > 0);
+
+    /* Force state to "waiting" */
+    sqlite3_exec(db,
+        "UPDATE sessions SET state='waiting' WHERE id=1;",
+        NULL, NULL, NULL);
+
+    /* No inbox items — sub-agent was lost */
+    assert(inbox_count(db, sid) == 0);
+
+    daemon_startup_recovery(db);
+
+    /* Should be idle */
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
+    sqlite3_bind_int64(stmt, 1, sid);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "idle") == 0);
+    sqlite3_finalize(stmt);
+
+    /* Error message should have been injected into inbox */
+    assert(inbox_count(db, sid) == 1);
+
+    int count = 0;
+    InboxItem *items = inbox_peek(db, sid, 1, &count);
+    assert(count == 1);
+    assert(strstr(items[0].payload, "lost during daemon restart") != NULL);
+    assert(strcmp(items[0].source, "recovery") == 0);
+    inbox_items_free(items, count);
+
+    db_close(db);
+    unlink(DB_PATH);
+    printf("  PASS test_startup_recovery_waiting_no_inbox\n");
+}
+
 int main(void) {
     printf("test_daemon:\n");
     test_signal_pipe_init_and_write();
@@ -185,6 +294,9 @@ int main(void) {
     test_child_tracking();
     test_last_route();
     test_daemon_fork_reap();
+    test_startup_recovery_running();
+    test_startup_recovery_waiting_with_inbox();
+    test_startup_recovery_waiting_no_inbox();
     printf("All daemon tests passed.\n");
     return 0;
 }

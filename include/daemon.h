@@ -36,4 +36,7 @@ char *session_get_last_route(sqlite3 *db, int64_t session_id);
 /* T87: Get session_id for a tracked child pid. Returns -1 if not found. */
 int64_t daemon_child_session(pid_t pid);
 
+/* T94/V34: Startup recovery — reset non-idle sessions, handle orphans. */
+void daemon_startup_recovery(sqlite3 *db);
+
 #endif

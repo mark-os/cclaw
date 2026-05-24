@@ -521,6 +521,47 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
     spawn_request_free(reqs, count);
 }
 
+/* ── T94/V34: Daemon startup recovery ───────────────────────────── */
+
+void daemon_startup_recovery(sqlite3 *db) {
+    /* (1) Reset all "running" → "idle" (children already dead) */
+    sqlite3_exec(db,
+        "UPDATE sessions SET state='idle', lock_holder=NULL"
+        " WHERE state='running';", NULL, NULL, NULL);
+
+    /* (2) "waiting" sessions: check inbox for result */
+    sqlite3_stmt *stmt;
+    const char *sql = "SELECT id FROM sessions WHERE state='waiting';";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+
+    /* Collect IDs first (avoid modifying while iterating) */
+    int64_t waiting_ids[128];
+    int nwaiting = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && nwaiting < 128) {
+        waiting_ids[nwaiting++] = sqlite3_column_int64(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+
+    for (int i = 0; i < nwaiting; i++) {
+        int64_t sid = waiting_ids[i];
+        int pending = inbox_count(db, sid);
+        if (pending <= 0) {
+            /* No result — write error tool_result to inbox */
+            inbox_insert(db, sid, "recovery",
+                "error: sub-agent process lost during daemon restart");
+        }
+        /* Transition to idle (daemon loop will fork if inbox has items) */
+        const char *upd = "UPDATE sessions SET state='idle', lock_holder=NULL"
+            " WHERE id=? AND state='waiting';";
+        sqlite3_stmt *us;
+        if (sqlite3_prepare_v2(db, upd, -1, &us, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(us, 1, sid);
+            sqlite3_step(us);
+            sqlite3_finalize(us);
+        }
+    }
+}
+
 /* ── Daemon main loop (T81) ─────────────────────────────────────── */
 
 int daemon_run(const Config *cfg, sqlite3 *db) {
@@ -545,11 +586,8 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     ev.data.fd = g_chld_pipe[0];
     epoll_ctl(epfd, EPOLL_CTL_ADD, g_chld_pipe[0], &ev);
 
-    /* V34: Startup recovery — reset any stale "running" sessions */
-    {
-        const char *sql = "UPDATE sessions SET state='idle', lock_holder=NULL WHERE state='running';";
-        sqlite3_exec(db, sql, NULL, NULL, NULL);
-    }
+    /* T94/V34: Startup recovery — children already dead after daemon restart */
+    daemon_startup_recovery(db);
 
     struct epoll_event events[8];
     while (!shutdown_requested()) {

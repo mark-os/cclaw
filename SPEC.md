@@ -208,7 +208,7 @@ T88|x|daemon spawn queue — sub-agent spawn requests from agent processes, daem
 T89|x|test: daemon forks agent on inbox signal, reaps on exit, delivers response|V21,V26
 T90|x|context_build: skip errored/aborted assistant entries + their orphaned tool_calls|V28
 T91|x|LLM error retry loop — max 3 retries, re-send clean context (V28 stripped), write final error entry on exhaust|V29,V32
-T92|.|graceful child shutdown — daemon SIGTERM → forward to children, children attempt error entry before exit|V31
+T92|x|graceful child shutdown — daemon SIGTERM → forward to children, children attempt error entry before exit|V31
 T93|.|test: agent crash (simulated SIGKILL) → next fork recovers via V17 incomplete turn notice|V30
 T94|.|daemon startup recovery — scan non-idle sessions, kill orphans, evaluate state, re-track or reset|V34
 T95|.|`StopReason` enum in `types.h` — `STOP_REASON_STOP`, `LENGTH`, `TOOL_USE`, `ERROR`, `ABORTED`|V35

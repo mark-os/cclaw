@@ -2,6 +2,7 @@
 #include "agent.h"
 #include "context.h"
 #include "http.h"
+#include "shutdown.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -148,6 +149,17 @@ int agent_run(AgentContext *ctx) {
 
     int max_iter = ctx->cfg->max_iterations > 0 ? ctx->cfg->max_iterations : AGENT_DEFAULT_MAX_ITERATIONS;
     for (int iter = 0; iter < max_iter; iter++) {
+        /* V31: check for graceful shutdown signal */
+        if (shutdown_requested()) {
+            int64_t tid = db_next_turn_id(ctx->db, ctx->session_id);
+            Message abort_msg = {.role = ROLE_ASSISTANT,
+                                 .content = strdup("error: agent terminated by shutdown signal"),
+                                 .stop_reason = STOP_REASON_ABORTED};
+            entry_append_with_turn(ctx->db, ctx->session_id, &abort_msg, tid);
+            free(abort_msg.content);
+            return -1;
+        }
+
         Arena *a = arena_create(ARENA_DEFAULT_SIZE);
         if (!a) return -1;
 
@@ -266,6 +278,28 @@ int agent_run(AgentContext *ctx) {
 
         /* Dispatch each tool call and append results (V10) */
         for (size_t i = 0; i < asst.tool_call_count; i++) {
+            /* V31: abort remaining tools on shutdown */
+            if (shutdown_requested()) {
+                ToolResult tr = {.tool_call_id = asst.tool_calls[i].id,
+                                 .content = "error: agent terminated by shutdown signal"};
+                Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr};
+                entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
+                for (size_t j = i + 1; j < asst.tool_call_count; j++) {
+                    ToolResult skip_tr = {.tool_call_id = asst.tool_calls[j].id,
+                                          .content = "error: agent terminated by shutdown signal"};
+                    Message skip_msg = {.role = ROLE_TOOL, .tool_result = &skip_tr};
+                    entry_append_with_turn(ctx->db, ctx->session_id, &skip_msg, turn_id);
+                }
+                for (size_t j = 0; j < asst.tool_call_count; j++) {
+                    free(asst.tool_calls[j].id);
+                    free(asst.tool_calls[j].name);
+                    free(asst.tool_calls[j].arguments);
+                }
+                free(asst.tool_calls);
+                free(asst.content);
+                arena_destroy(a);
+                return -1;
+            }
             char *result = dispatch_tool(ctx, &asst.tool_calls[i]);
             ToolResult tr = {.tool_call_id = asst.tool_calls[i].id, .content = result};
             Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr};

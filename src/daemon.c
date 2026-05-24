@@ -178,6 +178,9 @@ static void agent_process_entry(const Config *cfg, int64_t session_id) {
     /* V34: die if daemon dies */
     prctl(PR_SET_PDEATHSIG, SIGTERM);
 
+    /* V31: re-init signal handlers in child (inherited but be explicit) */
+    shutdown_init();
+
     /* V23: resource limits */
     struct rlimit rl;
     rl.rlim_cur = 256 * 1024 * 1024;

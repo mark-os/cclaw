@@ -482,6 +482,91 @@ static void test_v17_all_results_missing(void) {
     PASS();
 }
 
+/* T90/V28: Errored assistant entries and their tool_results are skipped */
+static void test_v28_skip_errored_assistant(void) {
+    TEST(v28_skip_errored_assistant);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    Entry entries[4] = {
+        make_entry(1, ROLE_USER, "do stuff"),
+        make_entry(2, ROLE_ASSISTANT, "partial response"),
+        make_entry(3, ROLE_USER, "try again"),
+        make_entry(4, ROLE_ASSISTANT, "success"),
+    };
+    entries[1].message.stop_reason = STOP_REASON_ERROR;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 4, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+    /* Errored assistant (entry 2) should be skipped → 3 messages remain */
+    if (count != 3) { printf("FAIL: expected 3, got %d\n", count); context_free(msgs, count); return; }
+    /* Should be: user, user, assistant */
+    if (msgs[0].role != ROLE_USER) { FAIL("expected user at 0"); context_free(msgs, count); return; }
+    if (msgs[1].role != ROLE_USER) { FAIL("expected user at 1"); context_free(msgs, count); return; }
+    if (msgs[2].role != ROLE_ASSISTANT) { FAIL("expected assistant at 2"); context_free(msgs, count); return; }
+    if (strcmp(msgs[2].content, "success") != 0) { FAIL("wrong assistant content"); context_free(msgs, count); return; }
+    context_free(msgs, count);
+    PASS();
+}
+
+/* T90/V28: Aborted assistant with tool_calls — skip entry + following tool_results */
+static void test_v28_skip_aborted_with_tool_calls(void) {
+    TEST(v28_skip_aborted_with_tool_calls);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    ToolCall tc = { .id = "c1", .name = "shell_exec", .arguments = "{}" };
+    ToolResult tr = { .tool_call_id = "c1", .content = "output" };
+
+    Entry entries[5] = {
+        make_entry(1, ROLE_USER, "run something"),
+        make_entry(2, ROLE_ASSISTANT, NULL),
+        make_entry(3, ROLE_TOOL, NULL),
+        make_entry(4, ROLE_USER, "ok try again"),
+        make_entry(5, ROLE_ASSISTANT, "done"),
+    };
+    entries[1].message.tool_calls = &tc;
+    entries[1].message.tool_call_count = 1;
+    entries[1].message.stop_reason = STOP_REASON_ABORTED;
+    entries[2].message.tool_result = &tr;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 5, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+    /* Aborted assistant + its tool_result skipped → 3 messages */
+    if (count != 3) { printf("FAIL: expected 3, got %d\n", count); context_free(msgs, count); return; }
+    if (msgs[0].role != ROLE_USER) { FAIL("expected user at 0"); context_free(msgs, count); return; }
+    if (msgs[1].role != ROLE_USER) { FAIL("expected user at 1"); context_free(msgs, count); return; }
+    if (msgs[2].role != ROLE_ASSISTANT) { FAIL("expected assistant at 2"); context_free(msgs, count); return; }
+    context_free(msgs, count);
+    PASS();
+}
+
+/* T90/V28: Normal stop_reason entries are NOT skipped */
+static void test_v28_normal_entries_kept(void) {
+    TEST(v28_normal_entries_kept);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    Entry entries[3] = {
+        make_entry(1, ROLE_USER, "hello"),
+        make_entry(2, ROLE_ASSISTANT, "hi"),
+        make_entry(3, ROLE_USER, "bye"),
+    };
+    entries[1].message.stop_reason = STOP_REASON_STOP;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 3, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+    if (count != 3) { printf("FAIL: expected 3, got %d\n", count); context_free(msgs, count); return; }
+    context_free(msgs, count);
+    PASS();
+}
+
 int main(void) {
     printf("--- test_context ---\n");
     test_all_fits();
@@ -497,6 +582,9 @@ int main(void) {
     test_v17_incomplete_turn_synthesized();
     test_v17_complete_turn_no_synthesis();
     test_v17_all_results_missing();
+    test_v28_skip_errored_assistant();
+    test_v28_skip_aborted_with_tool_calls();
+    test_v28_normal_entries_kept();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

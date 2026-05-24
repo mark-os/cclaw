@@ -206,7 +206,7 @@ T86|x|`last_route` tracking — agent updates on inbox consumption from newest s
 T87|x|daemon child tracking — map pid→session_id, enforce V24 (no dup fork)|V24
 T88|x|daemon spawn queue — sub-agent spawn requests from agent processes, daemon picks up + forks|V21,T37
 T89|x|test: daemon forks agent on inbox signal, reaps on exit, delivers response|V21,V26
-T90|.|context_build: skip errored/aborted assistant entries + their orphaned tool_calls|V28
+T90|x|context_build: skip errored/aborted assistant entries + their orphaned tool_calls|V28
 T91|.|LLM error retry loop — max 3 retries, re-send clean context (V28 stripped), write final error entry on exhaust|V29,V32
 T92|.|graceful child shutdown — daemon SIGTERM → forward to children, children attempt error entry before exit|V31
 T93|.|test: agent crash (simulated SIGKILL) → next fork recovers via V17 incomplete turn notice|V30

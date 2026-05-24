@@ -13,6 +13,16 @@ typedef enum {
     ROLE_TOOL
 } Role;
 
+/* V35: normalized stop reason (provider-agnostic) */
+typedef enum {
+    STOP_REASON_NONE = 0,   /* not set / not applicable */
+    STOP_REASON_STOP,       /* normal completion */
+    STOP_REASON_LENGTH,     /* hit max tokens */
+    STOP_REASON_TOOL_USE,   /* wants tool calls */
+    STOP_REASON_ERROR,      /* provider error, content_filter, parse failure */
+    STOP_REASON_ABORTED     /* client-side abort (SIGTERM, timeout) */
+} StopReason;
+
 /* Tool call within an assistant message */
 typedef struct {
     char *id;
@@ -33,6 +43,7 @@ typedef struct {
     ToolCall *tool_calls;   /* array (assistant msgs only, NULL otherwise) */
     size_t tool_call_count;
     ToolResult *tool_result; /* tool role msgs only, NULL otherwise */
+    StopReason stop_reason; /* V35: assistant msgs only, STOP_REASON_NONE otherwise */
 } Message;
 
 /* V14: session tree entry — id + parent_id for branching structure */

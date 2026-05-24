@@ -124,25 +124,42 @@ int context_build(const Entry *entries, int count, const Config *cfg,
     if (!entries || count <= 0 || !cfg || !out_msgs || !out_count)
         return -1;
 
+    /* V28: filter out errored/aborted assistant entries + their tool_results */
+    Entry *filtered = malloc((size_t)count * sizeof(Entry));
+    if (!filtered) return -1;
+    int fcount = 0;
+    for (int i = 0; i < count; i++) {
+        if (entries[i].message.role == ROLE_ASSISTANT &&
+            (entries[i].message.stop_reason == STOP_REASON_ERROR ||
+             entries[i].message.stop_reason == STOP_REASON_ABORTED)) {
+            /* Skip this assistant entry and all following tool_results */
+            int j = i + 1;
+            while (j < count && entries[j].message.role == ROLE_TOOL)
+                j++;
+            i = j - 1; /* loop will increment */
+            continue;
+        }
+        filtered[fcount++] = entries[i];
+    }
+
     /* V7: budget = max_history_tokens if set, else 60% of context window */
     int budget = cfg->max_history_tokens > 0
         ? cfg->max_history_tokens
         : (cfg->provider.context_window * 60) / 100;
     if (budget <= 0) budget = 8000; /* fallback */
 
-    int cut = find_cut_point(entries, count, budget);
-    int included = count - cut;
+    int cut = find_cut_point(filtered, fcount, budget);
+    int included = fcount - cut;
     int truncated = (cut > 0);
 
     /* V17: detect incomplete turn in the included tail */
     int asst_idx = 0;
-    int missing = count_missing_tool_results(entries + cut, included, &asst_idx);
-    /* asst_idx is relative to entries+cut */
+    int missing = count_missing_tool_results(filtered + cut, included, &asst_idx);
 
     int extra = missing > 0 ? missing + 1 : 0; /* synthetic results + notice */
     int result_count = included + (truncated ? 1 : 0) + extra;
     Message *msgs = calloc((size_t)result_count, sizeof(Message));
-    if (!msgs) return -1;
+    if (!msgs) { free(filtered); return -1; }
 
     int idx = 0;
 
@@ -154,34 +171,34 @@ int context_build(const Entry *entries, int count, const Config *cfg,
     }
 
     /* Copy included messages (deep copy strings so context_free works independently) */
-    for (int i = cut; i < count; i++) {
-        msgs[idx] = entries[i].message;
-        if (entries[i].message.content)
-            msgs[idx].content = strdup(entries[i].message.content);
-        if (entries[i].message.tool_calls && entries[i].message.tool_call_count > 0) {
-            msgs[idx].tool_calls = malloc(entries[i].message.tool_call_count * sizeof(ToolCall));
-            for (size_t t = 0; t < entries[i].message.tool_call_count; t++) {
-                msgs[idx].tool_calls[t].id = entries[i].message.tool_calls[t].id
-                    ? strdup(entries[i].message.tool_calls[t].id) : NULL;
-                msgs[idx].tool_calls[t].name = entries[i].message.tool_calls[t].name
-                    ? strdup(entries[i].message.tool_calls[t].name) : NULL;
-                msgs[idx].tool_calls[t].arguments = entries[i].message.tool_calls[t].arguments
-                    ? strdup(entries[i].message.tool_calls[t].arguments) : NULL;
+    for (int i = cut; i < fcount; i++) {
+        msgs[idx] = filtered[i].message;
+        if (filtered[i].message.content)
+            msgs[idx].content = strdup(filtered[i].message.content);
+        if (filtered[i].message.tool_calls && filtered[i].message.tool_call_count > 0) {
+            msgs[idx].tool_calls = malloc(filtered[i].message.tool_call_count * sizeof(ToolCall));
+            for (size_t t = 0; t < filtered[i].message.tool_call_count; t++) {
+                msgs[idx].tool_calls[t].id = filtered[i].message.tool_calls[t].id
+                    ? strdup(filtered[i].message.tool_calls[t].id) : NULL;
+                msgs[idx].tool_calls[t].name = filtered[i].message.tool_calls[t].name
+                    ? strdup(filtered[i].message.tool_calls[t].name) : NULL;
+                msgs[idx].tool_calls[t].arguments = filtered[i].message.tool_calls[t].arguments
+                    ? strdup(filtered[i].message.tool_calls[t].arguments) : NULL;
             }
         }
-        if (entries[i].message.tool_result) {
+        if (filtered[i].message.tool_result) {
             msgs[idx].tool_result = malloc(sizeof(ToolResult));
-            msgs[idx].tool_result->tool_call_id = entries[i].message.tool_result->tool_call_id
-                ? strdup(entries[i].message.tool_result->tool_call_id) : NULL;
-            msgs[idx].tool_result->content = entries[i].message.tool_result->content
-                ? strdup(entries[i].message.tool_result->content) : NULL;
+            msgs[idx].tool_result->tool_call_id = filtered[i].message.tool_result->tool_call_id
+                ? strdup(filtered[i].message.tool_result->tool_call_id) : NULL;
+            msgs[idx].tool_result->content = filtered[i].message.tool_result->content
+                ? strdup(filtered[i].message.tool_result->content) : NULL;
         }
         idx++;
     }
 
     /* V17: synthesize missing tool_results + system notice */
     if (missing > 0) {
-        const Entry *asst_entry = &entries[cut + asst_idx];
+        const Entry *asst_entry = &filtered[cut + asst_idx];
         int existing_results = (int)asst_entry->message.tool_call_count - missing;
         for (int m = 0; m < missing; m++) {
             int tc_idx = existing_results + m;
@@ -202,6 +219,7 @@ int context_build(const Entry *entries, int count, const Config *cfg,
         idx++;
     }
 
+    free(filtered);
     *out_msgs = msgs;
     *out_count = result_count;
     return 0;

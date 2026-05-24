@@ -9,6 +9,9 @@
 #include <string.h>
 #include <unistd.h>
 
+/* V45: plan-only re-prompt */
+#define PLAN_RETRY_PROMPT "Do not restate the plan. Act now: take the first concrete tool action. If blocked, state the blocker in one sentence."
+
 /* V2: max retries for 429/5xx */
 #define MAX_RETRIES 5
 #define INITIAL_BACKOFF_MS 1000
@@ -55,6 +58,25 @@ static int tool_loop_streak(const ToolLoopRing *ring, uint32_t hash) {
         else break;
     }
     return streak;
+}
+
+/* V45: detect plan-only response (bullets + promise verbs, no concrete action) */
+static int is_plan_only(const char *content) {
+    if (!content || !*content) return 0;
+    /* Must have bullet points or numbered list */
+    int has_bullets = (strstr(content, "\n- ") || strstr(content, "\n* ") ||
+                       strstr(content, "\n1.") || strstr(content, "\n1)"));
+    if (!has_bullets) return 0;
+    /* Must have promise verbs indicating intent without action */
+    static const char *promises[] = {
+        "I'll ", "I will ", "Let me ", "I'm going to ",
+        "Here's my plan", "Here is my plan", "I can ",
+        "I'll:", "I will:", "Let me:", NULL
+    };
+    for (int i = 0; promises[i]; i++) {
+        if (strstr(content, promises[i])) return 1;
+    }
+    return 0;
 }
 
 /* Build URL for chat completions endpoint */
@@ -226,6 +248,9 @@ int agent_run(AgentContext *ctx) {
     /* V43: tool loop detection ring buffer (persists across iterations) */
     ToolLoopRing loop_ring = {.count = 0};
 
+    /* V45: plan-only retry (max 1) */
+    int plan_retried = 0;
+
     int max_iter = ctx->cfg->max_iterations > 0 ? ctx->cfg->max_iterations : AGENT_DEFAULT_MAX_ITERATIONS;
     for (int iter = 0; iter < max_iter; iter++) {
         /* V31: check for graceful shutdown signal */
@@ -323,10 +348,23 @@ int agent_run(AgentContext *ctx) {
 
         /* If no tool calls — final response */
         if (llm_resp.tool_call_count == 0) {
+            StopReason sr = map_stop_reason(llm_resp.finish_reason);
             Message asst = {.role = ROLE_ASSISTANT,
                             .content = llm_resp.content ? strdup(llm_resp.content) : strdup(""),
-                            .stop_reason = map_stop_reason(llm_resp.finish_reason)};
+                            .stop_reason = sr};
             entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
+
+            /* V45: plan-only retry — re-prompt once if response is just a plan */
+            if (!plan_retried && sr == STOP_REASON_STOP && is_plan_only(asst.content)) {
+                plan_retried = 1;
+                Message reprompt = {.role = ROLE_USER,
+                                    .content = (char *)PLAN_RETRY_PROMPT};
+                entry_append_with_turn(ctx->db, ctx->session_id, &reprompt, turn_id);
+                free(asst.content);
+                arena_destroy(a);
+                continue;
+            }
+
             free(asst.content);
             arena_destroy(a);
             return 0;

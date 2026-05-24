@@ -225,6 +225,49 @@ static void test_agent_load_system_prompt_missing(void) {
     printf("  PASS: agent load system prompt missing file\n");
 }
 
+/* T80 tests */
+
+static void test_agent_load_skills(void) {
+    system("rm -rf /tmp/test_ac_skills");
+    make_dir("/tmp/test_ac_skills");
+    make_dir("/tmp/test_ac_skills/coder");
+    make_dir("/tmp/test_ac_skills/coder/skills");
+
+    write_file("/tmp/test_ac_skills/coder/skills/coding.md", "You write clean code.");
+    write_file("/tmp/test_ac_skills/coder/skills/review.md", "You review PRs carefully.");
+    /* Non-.md file should be ignored */
+    write_file("/tmp/test_ac_skills/coder/skills/notes.txt", "IGNORED");
+
+    char *skills = agent_load_skills("/tmp/test_ac_skills", "coder");
+    assert(skills != NULL);
+    assert(strstr(skills, "You write clean code.") != NULL);
+    assert(strstr(skills, "You review PRs carefully.") != NULL);
+    assert(strstr(skills, "IGNORED") == NULL);
+    free(skills);
+
+    system("rm -rf /tmp/test_ac_skills");
+    printf("  PASS: agent load skills (T80)\n");
+}
+
+static void test_agent_load_skills_missing_dir(void) {
+    char *skills = agent_load_skills("/tmp/nonexistent_xyz", "ghost");
+    assert(skills == NULL);
+    printf("  PASS: agent load skills missing dir\n");
+}
+
+static void test_agent_load_skills_empty(void) {
+    system("rm -rf /tmp/test_ac_skills_empty");
+    make_dir("/tmp/test_ac_skills_empty");
+    make_dir("/tmp/test_ac_skills_empty/bot");
+    make_dir("/tmp/test_ac_skills_empty/bot/skills");
+
+    char *skills = agent_load_skills("/tmp/test_ac_skills_empty", "bot");
+    assert(skills == NULL);
+
+    system("rm -rf /tmp/test_ac_skills_empty");
+    printf("  PASS: agent load skills empty dir\n");
+}
+
 int main(void) {
     printf("test_agent_config:\n");
     test_discover_agents();
@@ -237,6 +280,9 @@ int main(void) {
     test_agent_config_merge_null();
     test_agent_load_system_prompt();
     test_agent_load_system_prompt_missing();
+    test_agent_load_skills();
+    test_agent_load_skills_missing_dir();
+    test_agent_load_skills_empty();
     printf("All tests passed.\n");
     return 0;
 }

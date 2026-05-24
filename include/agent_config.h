@@ -44,4 +44,9 @@ Config *agent_config_merge(const Config *global, const AgentConfig *ac);
 char *agent_load_system_prompt(const char *agents_dir, const char *name,
                                int64_t session_id);
 
+/* T80: Load all skills from agents/<name>/skills/ (.md files), concatenate content.
+ * Returns heap-allocated string (newline-separated skill contents).
+ * Returns NULL if no skills dir or no .md files found. */
+char *agent_load_skills(const char *agents_dir, const char *name);
+
 #endif

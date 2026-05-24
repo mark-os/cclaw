@@ -9,6 +9,13 @@
 #include <stdio.h>
 #include <time.h>
 
+static int str_ends_with(const char *s, const char *suffix) {
+    size_t slen = strlen(s);
+    size_t suflen = strlen(suffix);
+    if (suflen > slen) return 0;
+    return strcmp(s + slen - suflen, suffix) == 0;
+}
+
 char **agent_discover(const char *agents_dir, size_t *count) {
     *count = 0;
     DIR *d = opendir(agents_dir);
@@ -266,5 +273,57 @@ char *agent_load_system_prompt(const char *agents_dir, const char *name,
     }
     out[oi] = '\0';
     free(tmpl);
+    return out;
+}
+
+/* T80: scan agents/<name>/skills/ for .md files, concatenate into single string */
+char *agent_load_skills(const char *agents_dir, const char *name) {
+    if (!agents_dir || !name) return NULL;
+
+    char dir_path[1024];
+    int n = snprintf(dir_path, sizeof(dir_path), "%s/%s/skills", agents_dir, name);
+    if (n < 0 || (size_t)n >= sizeof(dir_path)) return NULL;
+
+    DIR *d = opendir(dir_path);
+    if (!d) return NULL;
+
+    size_t out_cap = 4096;
+    size_t out_len = 0;
+    char *out = malloc(out_cap);
+    if (!out) { closedir(d); return NULL; }
+    out[0] = '\0';
+
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (!str_ends_with(ent->d_name, ".md")) continue;
+
+        char fpath[1024];
+        int pn = snprintf(fpath, sizeof(fpath), "%s/%s", dir_path, ent->d_name);
+        if (pn < 0 || (size_t)pn >= sizeof(fpath)) continue;
+
+        FILE *f = fopen(fpath, "rb");
+        if (!f) continue;
+
+        fseek(f, 0, SEEK_END);
+        long flen = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (flen <= 0) { fclose(f); continue; }
+
+        /* Grow buffer: existing + newline separator + file content */
+        size_t need = out_len + (out_len > 0 ? 1 : 0) + (size_t)flen;
+        while (need >= out_cap) { out_cap *= 2; }
+        char *tmp = realloc(out, out_cap);
+        if (!tmp) { fclose(f); break; }
+        out = tmp;
+
+        if (out_len > 0) out[out_len++] = '\n';
+        fread(out + out_len, 1, (size_t)flen, f);
+        out_len += (size_t)flen;
+        out[out_len] = '\0';
+        fclose(f);
+    }
+    closedir(d);
+
+    if (out_len == 0) { free(out); return NULL; }
     return out;
 }

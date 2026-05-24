@@ -13,10 +13,12 @@ VENDOR_OBJ := $(BUILD)/cJSON.o $(BUILD)/sqlite3.o $(BUILD)/civetweb.o \
               $(BUILD)/mquickjs.o $(BUILD)/mqjs_cutils.o $(BUILD)/mqjs_dtoa.o \
               $(BUILD)/mqjs_libm.o $(BUILD)/mqjs_stdlib.o
 
-TEST_SRC := $(wildcard test/test_*.c)
-TEST_BIN := $(patsubst test/%.c,$(BUILD)/%,$(TEST_SRC))
+INTEG_SRC := $(wildcard test/test_integration_*.c)
+TEST_SRC  := $(filter-out $(INTEG_SRC),$(wildcard test/test_*.c))
+TEST_BIN  := $(patsubst test/%.c,$(BUILD)/%,$(TEST_SRC))
+INTEG_BIN := $(patsubst test/%.c,$(BUILD)/%,$(INTEG_SRC))
 
-.PHONY: all clean test
+.PHONY: all clean test test-integration
 
 all: $(BUILD)/cclaw
 
@@ -68,10 +70,17 @@ $(BUILD):
 test: $(TEST_BIN)
 	@for t in $(TEST_BIN); do echo "--- $$t ---"; ./$$t || exit 1; done
 
-LIB_OBJ := $(filter-out $(BUILD)/main.o,$(OBJ))
+test-integration: $(INTEG_BIN)
+	@for t in $(INTEG_BIN); do echo "--- $$t ---"; ./$$t || exit 1; done
 
-$(BUILD)/test_%: test/test_%.c $(LIB_OBJ) $(VENDOR_OBJ) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB_OBJ) $(VENDOR_OBJ) $(LDFLAGS)
+test-all: test test-integration
+
+LIB_OBJ := $(filter-out $(BUILD)/main.o,$(OBJ))
+$(BUILD)/libcclaw.a: $(LIB_OBJ) $(VENDOR_OBJ) | $(BUILD)
+	$(AR) rcs $@ $^
+
+$(BUILD)/test_%: test/test_%.c $(BUILD)/libcclaw.a | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILD)/libcclaw.a $(LDFLAGS)
 
 clean:
 	rm -rf $(BUILD)

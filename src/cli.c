@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "cli.h"
 #include "agent.h"
+#include "agent_config.h"
 #include "db.h"
 #include "tools.h"
 #include "tool_shell.h"
@@ -134,13 +135,24 @@ int cli_run(const Config *cfg) {
     if (unread > 0)
         printf("[%d unread inbox message%s]\n", unread, unread == 1 ? "" : "s");
 
+    /* T104: Load per-agent config for allowed_hosts */
+    char *agent_name = session_get_agent_name(db, session_id);
+    AgentConfig *ac = agent_name ? agent_config_load("agents", agent_name) : NULL;
+
     /* Register tools */
     ToolRegistry reg;
     tools_init(&reg);
-    tool_shell_register(&reg, cfg->shell_timeout, cfg->workspace, 0);
+    tool_shell_register(&reg, cfg->shell_timeout, cfg->workspace,
+                        ac ? ac->shell_network : 0);
     tool_file_read_register(&reg, cfg->workspace);
     tool_file_write_register(&reg, cfg->workspace);
-    tool_js_eval_register(&reg);
+
+    /* T104: pass per-agent allowed_hosts to js_eval */
+    JsEvalCtx js_eval_ctx = {
+        .allowed_hosts = ac ? ac->allowed_hosts : NULL,
+        .allowed_hosts_count = ac ? ac->allowed_hosts_count : 0
+    };
+    tool_js_eval_register(&reg, &js_eval_ctx);
     tool_web_fetch_register(&reg);
     tool_db_query_register(&reg, db);
 
@@ -162,6 +174,8 @@ int cli_run(const Config *cfg) {
 
     /* Create persistent JS runtime and replay session tools */
     JsSessionRuntime *js_rt = js_runtime_create();
+    if (js_rt && ac && ac->allowed_hosts_count > 0)
+        js_runtime_set_hosts(js_rt, ac->allowed_hosts, ac->allowed_hosts_count);
     js_ctx.rt = js_rt;
     tool_js_load_session(db, session_id, &reg, js_rt);
 
@@ -247,6 +261,8 @@ int cli_run(const Config *cfg) {
     free(line);
     js_runtime_destroy(js_rt);
     tools_free(&reg);
+    agent_config_free(ac);
+    free(agent_name);
     db_close(db);
     return 0;
 }

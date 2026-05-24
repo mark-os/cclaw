@@ -19,12 +19,18 @@ typedef struct {
     size_t allowed_hosts_count;
 } JsHostCtx;
 
+/* T104: Context for js_eval tool — carries per-agent allowed_hosts */
+typedef struct {
+    char **allowed_hosts;
+    size_t allowed_hosts_count;
+} JsEvalCtx;
+
 /* Set allowed_hosts on a persistent JS runtime (V38).
  * Does NOT take ownership — caller must keep hosts alive for runtime lifetime. */
 void js_runtime_set_hosts(JsSessionRuntime *rt, char **hosts, size_t count);
 
-/* Register js_eval tool into registry. Returns 0 on success. */
-int tool_js_eval_register(ToolRegistry *reg);
+/* Register js_eval tool into registry. ctx may be NULL (no hosts). */
+int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx);
 
 /* Handler: parse JSON args {"code":"..."}, eval in sandboxed mquickjs.
  * V5: 1MB heap cap, 10M instruction limit.

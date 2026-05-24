@@ -78,7 +78,7 @@ static void test_register(void) {
     TEST("register");
     ToolRegistry reg;
     tools_init(&reg);
-    int rc = tool_js_eval_register(&reg);
+    int rc = tool_js_eval_register(&reg, NULL);
     if (rc != 0) { FAIL("register failed"); tools_free(&reg); return; }
     ToolEntry *e = tools_lookup(&reg, "js_eval");
     if (!e) { FAIL("lookup failed"); tools_free(&reg); return; }

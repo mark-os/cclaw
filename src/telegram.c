@@ -237,7 +237,7 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     tool_shell_register(&reg, g_cfg->shell_timeout, g_cfg->workspace, 0);
     tool_file_read_register(&reg, g_cfg->workspace);
     tool_file_write_register(&reg, g_cfg->workspace);
-    tool_js_eval_register(&reg);
+    tool_js_eval_register(&reg, NULL);
     JsSessionRuntime *js_rt = js_runtime_create();
     JsDefineCtx js_ctx = {.db = g_db, .session_id = session_id, .reg = &reg, .rt = js_rt};
     tool_js_define_register(&reg, &js_ctx);
@@ -334,7 +334,7 @@ static void *poll_loop(void *arg) {
     tool_shell_register(&reg, g_cfg->shell_timeout, g_cfg->workspace, 0);
     tool_file_read_register(&reg, g_cfg->workspace);
     tool_file_write_register(&reg, g_cfg->workspace);
-    tool_js_eval_register(&reg);
+    tool_js_eval_register(&reg, NULL);
 
     size_t tool_count = 0;
     const ToolSchema *schemas = tools_schemas(&reg, &tool_count);

@@ -3,6 +3,7 @@
 #include <string.h>
 #include "js_http_fetch.h"
 #include "tool_js.h"
+#include "tools.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -121,6 +122,38 @@ static void test_js_eval_no_hosts(void) {
     PASS();
 }
 
+/* T104: js_eval with allowed_hosts configured passes hosts to http_fetch */
+static void test_js_eval_with_hosts(void) {
+    TEST("js_eval_with_hosts");
+    /* Register js_eval with allowed_hosts context */
+    JsEvalCtx ectx = {.allowed_hosts = (char *[]){"example.com"}, .allowed_hosts_count = 1};
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_js_eval_register(&reg, &ectx);
+
+    ToolEntry *e = tools_lookup(&reg, "js_eval");
+    if (!e) { FAIL("lookup failed"); tools_free(&reg); return; }
+
+    /* Call http_fetch for a disallowed host — should get "not in allowed_hosts" */
+    char *r = e->handler("{\"code\":\"http_fetch('https://evil.com/')\"}", e->user_data);
+    if (!r) { FAIL("NULL result"); tools_free(&reg); return; }
+    if (!strstr(r, "not in allowed_hosts")) {
+        FAIL(r); free(r); tools_free(&reg); return;
+    }
+    free(r);
+
+    /* Call http_fetch for allowed host — should NOT get "no allowed_hosts" error */
+    r = e->handler("{\"code\":\"http_fetch('https://example.com/')\"}", e->user_data);
+    if (!r) { FAIL("NULL result"); tools_free(&reg); return; }
+    if (strstr(r, "no allowed_hosts")) {
+        FAIL("hosts not passed through"); free(r); tools_free(&reg); return;
+    }
+    free(r);
+
+    tools_free(&reg);
+    PASS();
+}
+
 int main(void) {
     printf("test_js_http_fetch:\n");
     test_no_hosts_rejects();
@@ -131,6 +164,7 @@ int main(void) {
     test_allowed_host_passes_validation();
     test_runtime_set_hosts();
     test_js_eval_no_hosts();
+    test_js_eval_with_hosts();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

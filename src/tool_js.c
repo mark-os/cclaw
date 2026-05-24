@@ -20,7 +20,7 @@ static int interrupt_handler(JSContext *ctx, void *opaque) {
 }
 
 /* Eval JS code in a fresh sandboxed context. Returns heap-allocated result. */
-static char *js_eval_code(const char *code) {
+static char *js_eval_code_with_hosts(const char *code, char **hosts, size_t hosts_count) {
     size_t code_len = strlen(code);
 
     void *heap = malloc(JS_HEAP_SIZE);
@@ -30,7 +30,7 @@ static char *js_eval_code(const char *code) {
     if (!ctx) { free(heap); return strdup("error: JS context creation failed"); }
 
     JsHostCtx hctx = {.instruction_count = 0, .instruction_limit = JS_MAX_INSTRUCTIONS,
-                       .allowed_hosts = NULL, .allowed_hosts_count = 0};
+                       .allowed_hosts = hosts, .allowed_hosts_count = hosts_count};
     JS_SetInterruptHandler(ctx, interrupt_handler);
     JS_SetContextOpaque(ctx, &hctx);
 
@@ -68,7 +68,7 @@ static char *js_eval_code(const char *code) {
 
 /* Eval JS code in a persistent session runtime. Returns heap-allocated result. */
 static char *js_eval_in_runtime(JsSessionRuntime *rt, const char *code) {
-    if (!rt || !rt->ctx) return js_eval_code(code);
+    if (!rt || !rt->ctx) return js_eval_code_with_hosts(code, NULL, 0);
 
     JSContext *ctx = (JSContext *)rt->ctx;
     size_t code_len = strlen(code);
@@ -107,7 +107,7 @@ static const char *JSEVAL_PARAMS_JSON =
     "},\"required\":[\"code\"]}";
 
 char *tool_js_eval_handler(const char *arguments, void *user_data) {
-    (void)user_data;
+    JsEvalCtx *ectx = (JsEvalCtx *)user_data;
 
     cJSON *json = cJSON_Parse(arguments);
     if (!json) return strdup("error: invalid JSON arguments");
@@ -118,15 +118,17 @@ char *tool_js_eval_handler(const char *arguments, void *user_data) {
         return strdup("error: missing or empty 'code' field");
     }
 
-    char *result = js_eval_code(code_item->valuestring);
+    char **hosts = ectx ? ectx->allowed_hosts : NULL;
+    size_t hosts_count = ectx ? ectx->allowed_hosts_count : 0;
+    char *result = js_eval_code_with_hosts(code_item->valuestring, hosts, hosts_count);
     cJSON_Delete(json);
     return result;
 }
 
-int tool_js_eval_register(ToolRegistry *reg) {
+int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
     return tools_register(reg, "js_eval",
                           "Execute JavaScript code in a sandboxed environment and return the result",
-                          JSEVAL_PARAMS_JSON, tool_js_eval_handler, NULL);
+                          JSEVAL_PARAMS_JSON, tool_js_eval_handler, ctx);
 }
 
 /* --- js_define_tool --- */

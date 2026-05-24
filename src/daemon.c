@@ -232,9 +232,24 @@ static void agent_process_entry(const Config *cfg, int64_t session_id) {
                         effective_cfg->workspace, ac ? ac->shell_network : 0);
     tool_file_read_register(&reg, effective_cfg->workspace);
     tool_file_write_register(&reg, effective_cfg->workspace);
-    tool_js_eval_register(&reg);
+
+    /* T104: pass per-agent allowed_hosts to js_eval */
+    JsEvalCtx js_eval_ctx = {
+        .allowed_hosts = ac ? ac->allowed_hosts : NULL,
+        .allowed_hosts_count = ac ? ac->allowed_hosts_count : 0
+    };
+    tool_js_eval_register(&reg, &js_eval_ctx);
     tool_web_fetch_register(&reg);
     tool_db_query_register(&reg, db);
+
+    /* T104: persistent JS runtime with allowed_hosts for js_define_tool */
+    JsSessionRuntime *js_rt = js_runtime_create();
+    if (js_rt && ac && ac->allowed_hosts_count > 0)
+        js_runtime_set_hosts(js_rt, ac->allowed_hosts, ac->allowed_hosts_count);
+
+    JsDefineCtx js_def_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = js_rt};
+    tool_js_define_register(&reg, &js_def_ctx);
+    tool_js_load_session(db, session_id, &reg, js_rt);
 
     char self_path[4096];
     ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
@@ -266,6 +281,7 @@ static void agent_process_entry(const Config *cfg, int64_t session_id) {
     int rc = agent_run(&ctx);
 
     tools_free(&reg);
+    js_runtime_destroy(js_rt);
     agent_config_free(ac);
     if (merged_cfg) config_free(merged_cfg);
     free(agent_name);

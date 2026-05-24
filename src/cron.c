@@ -232,7 +232,7 @@ static void execute_job(int64_t session_id, const char *task) {
     tool_shell_register(&reg, cron_cfg->shell_timeout, cron_cfg->workspace, 0);
     tool_file_read_register(&reg, cron_cfg->workspace);
     tool_file_write_register(&reg, cron_cfg->workspace);
-    tool_js_eval_register(&reg);
+    tool_js_eval_register(&reg, NULL);
 
     ToolCronCtx cron_ctx = {.db = cron_db, .session_id = session_id};
     tool_cron_register(&reg, &cron_ctx);

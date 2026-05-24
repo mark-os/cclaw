@@ -323,6 +323,61 @@ static void test_t45_fallback_chain(void) {
     PASS();
 }
 
+static void test_v32_error_retry_writes_error_entry(void) {
+    TEST(v32_error_retry_writes_error_entry);
+    /* V32: after MAX_LLM_RETRIES exhausted, agent writes error entry to DB */
+    sqlite3 *db = db_open(":memory:");
+    if (!db) { FAIL("db_open failed"); return; }
+    int64_t sid = session_create(db, "test", NULL);
+    if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
+
+    Config cfg = {0};
+    cfg.provider.base_url = "http://127.0.0.1:1/v1";
+    cfg.provider.api_key = "fake";
+    cfg.provider.model = "test";
+    cfg.provider.context_window = 128000;
+    cfg.max_iterations = 1;
+
+    Message user_msg = {.role = ROLE_USER, .content = "hello"};
+    entry_append(db, sid, &user_msg);
+
+    AgentContext ctx = {0};
+    ctx.db = db;
+    ctx.session_id = sid;
+    ctx.cfg = &cfg;
+    ctx.dispatch = mock_tool_ok;
+
+    int rc = agent_run(&ctx);
+    if (rc != -1) { FAIL("expected -1"); db_close(db); return; }
+
+    /* Verify error entry was written */
+    int entry_count = 0;
+    Entry *entries = session_get_branch(db, sid, &entry_count);
+    if (!entries || entry_count < 2) {
+        FAIL("expected at least 2 entries (user + error)");
+        entry_branch_free(entries, entry_count);
+        db_close(db);
+        return;
+    }
+    /* Last entry should be the error assistant message */
+    Entry *last = &entries[entry_count - 1];
+    if (last->message.role != ROLE_ASSISTANT) {
+        FAIL("last entry not assistant");
+        entry_branch_free(entries, entry_count);
+        db_close(db);
+        return;
+    }
+    if (!last->message.content || strstr(last->message.content, "error") == NULL) {
+        FAIL("error entry missing error content");
+        entry_branch_free(entries, entry_count);
+        db_close(db);
+        return;
+    }
+    entry_branch_free(entries, entry_count);
+    db_close(db);
+    PASS();
+}
+
 int main(void) {
     printf("test_agent:\n");
     test_agent_context_init();
@@ -339,6 +394,7 @@ int main(void) {
     test_v10_json_parse_failure_recovery();
     test_context_overflow_return_code();
     test_t45_fallback_chain();
+    test_v32_error_retry_writes_error_entry();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

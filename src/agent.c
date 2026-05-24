@@ -11,6 +11,9 @@
 #define MAX_RETRIES 5
 #define INITIAL_BACKOFF_MS 1000
 
+/* V32: max LLM error retries per turn (parse failure, missing finish_reason) */
+#define MAX_LLM_RETRIES 3
+
 /* Build URL for chat completions endpoint */
 static char *build_url(Arena *a, const Config *cfg) {
     const char *base = cfg->provider.base_url;
@@ -151,60 +154,86 @@ int agent_run(AgentContext *ctx) {
         /* V17: all entries in this iteration share a turn_id */
         int64_t turn_id = db_next_turn_id(ctx->db, ctx->session_id);
 
-        /* Load branch and build context */
-        int entry_count = 0;
-        Entry *entries = session_get_branch(ctx->db, ctx->session_id, &entry_count);
-        if (!entries && entry_count < 0) {
-            arena_destroy(a);
-            return -1;
-        }
-
-        Message *msgs = NULL;
-        int msg_count = 0;
-        int rc = context_build(entries, entry_count, ctx->cfg, &msgs, &msg_count);
-        entry_branch_free(entries, entry_count);
-        if (rc != 0 || msg_count == 0) {
-            arena_destroy(a);
-            return -1;
-        }
-
-        /* T45: call LLM with fallback chain */
-        HttpResponse resp = {0};
-        int status = llm_call_with_fallback(a, ctx->cfg, msgs, (size_t)msg_count,
-                                            ctx->tools, ctx->tool_count, &resp, ctx->debug);
-        context_free(msgs, msg_count);
-
-        if (ctx->debug && resp.data)
-            fprintf(stderr, "[DEBUG RESP] status=%d %s\n", status, resp.data);
-
-        /* Context overflow detection — return error so caller can trim */
-        if (status == 400 && is_context_overflow(resp.data)) {
-            if (ctx->debug)
-                fprintf(stderr, "[DEBUG] context overflow detected\n");
-            http_response_free(&resp);
-            arena_destroy(a);
-            return -2; /* distinct code for context overflow */
-        }
-
-        if (status < 200 || status >= 300 || !resp.data) {
-            http_response_free(&resp);
-            arena_destroy(a);
-            return -1;
-        }
-
-        /* V10: JSON parse failure recovery — don't crash loop */
+        /* V32: per-turn LLM error retry loop */
+        int llm_ok = 0;
         LlmResponse llm_resp;
-        rc = llm_parse_response(a, resp.data, &llm_resp);
-        http_response_free(&resp);
-        if (rc != 0) {
-            if (ctx->debug)
-                fprintf(stderr, "[DEBUG] JSON parse failure, skipping turn\n");
+        memset(&llm_resp, 0, sizeof(llm_resp));
+
+        for (int retry = 0; retry < MAX_LLM_RETRIES; retry++) {
+            /* Load branch and build context (re-load each retry for clean V28 state) */
+            int entry_count = 0;
+            Entry *entries = session_get_branch(ctx->db, ctx->session_id, &entry_count);
+            if (!entries && entry_count < 0) {
+                arena_destroy(a);
+                return -1;
+            }
+
+            Message *msgs = NULL;
+            int msg_count = 0;
+            int rc = context_build(entries, entry_count, ctx->cfg, &msgs, &msg_count);
+            entry_branch_free(entries, entry_count);
+            if (rc != 0 || msg_count == 0) {
+                arena_destroy(a);
+                return -1;
+            }
+
+            /* T45: call LLM with fallback chain */
+            HttpResponse resp = {0};
+            int status = llm_call_with_fallback(a, ctx->cfg, msgs, (size_t)msg_count,
+                                                ctx->tools, ctx->tool_count, &resp, ctx->debug);
+            context_free(msgs, msg_count);
+
+            if (ctx->debug && resp.data)
+                fprintf(stderr, "[DEBUG RESP] status=%d %s\n", status, resp.data);
+
+            /* Context overflow detection — return error so caller can trim */
+            if (status == 400 && is_context_overflow(resp.data)) {
+                if (ctx->debug)
+                    fprintf(stderr, "[DEBUG] context overflow detected\n");
+                http_response_free(&resp);
+                arena_destroy(a);
+                return -2;
+            }
+
+            /* V29/V32: HTTP failure → retry */
+            if (status < 200 || status >= 300 || !resp.data) {
+                if (ctx->debug)
+                    fprintf(stderr, "[DEBUG] LLM error (status=%d), retry %d/%d\n",
+                            status, retry + 1, MAX_LLM_RETRIES);
+                http_response_free(&resp);
+                continue;
+            }
+
+            /* V10/V29: JSON parse failure → retry */
+            rc = llm_parse_response(a, resp.data, &llm_resp);
+            http_response_free(&resp);
+            if (rc != 0) {
+                if (ctx->debug)
+                    fprintf(stderr, "[DEBUG] JSON parse failure, retry %d/%d\n",
+                            retry + 1, MAX_LLM_RETRIES);
+                continue;
+            }
+
+            /* V29: missing finish_reason → treat as error, retry */
+            if (!llm_resp.finish_reason) {
+                if (ctx->debug)
+                    fprintf(stderr, "[DEBUG] missing finish_reason, retry %d/%d\n",
+                            retry + 1, MAX_LLM_RETRIES);
+                continue;
+            }
+
+            llm_ok = 1;
+            break;
+        }
+
+        /* V32: all retries exhausted → write final error entry + exit */
+        if (!llm_ok) {
+            Message err_msg = {.role = ROLE_ASSISTANT,
+                               .content = strdup("error: LLM request failed after retries"),
+                               .stop_reason = STOP_REASON_ERROR};
+            entry_append_with_turn(ctx->db, ctx->session_id, &err_msg, turn_id);
+            free(err_msg.content);
             arena_destroy(a);
-            /* Recoverable: append error as assistant message, stop loop */
-            Message asst = {.role = ROLE_ASSISTANT,
-                            .content = strdup("error: failed to parse LLM response")};
-            entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
-            free(asst.content);
             return -1;
         }
 

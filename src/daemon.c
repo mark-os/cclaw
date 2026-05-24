@@ -346,6 +346,12 @@ static void deliver_response(const Config *cfg, sqlite3 *db, int64_t session_id)
         return;
     }
 
+    /* V44/T113: Suppress [NO_REPLY] — agent decided not to respond (e.g. group irrelevance) */
+    if (strstr(reply, "[NO_REPLY]") != NULL) {
+        entry_branch_free(entries, count);
+        return;
+    }
+
     char *route = session_get_last_route(db, session_id);
     if (route && strncmp(route, "telegram", 8) == 0) {
         /* Route format: "telegram" — need chat_id from tg_chat_sessions */

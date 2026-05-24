@@ -332,6 +332,24 @@ static void test_heartbeat_ok_suppression(void) {
     printf("  PASS test_heartbeat_ok_suppression\n");
 }
 
+/* ── T113: [NO_REPLY] suppression ────────────────────────────────── */
+
+static void test_no_reply_suppression(void) {
+    /* V44: response containing [NO_REPLY] → suppress delivery */
+    const char *cases[] = {
+        "[NO_REPLY]",
+        "This is not relevant [NO_REPLY]",
+        "[NO_REPLY] some trailing text",
+    };
+    for (int i = 0; i < 3; i++) {
+        assert(strstr(cases[i], "[NO_REPLY]") != NULL);
+    }
+    /* Negative cases — should NOT suppress */
+    assert(strstr("Hello world", "[NO_REPLY]") == NULL);
+    assert(strstr("NO_REPLY without brackets", "[NO_REPLY]") == NULL);
+    printf("  PASS test_no_reply_suppression\n");
+}
+
 int main(void) {
     printf("test_daemon:\n");
     test_signal_pipe_init_and_write();
@@ -343,6 +361,7 @@ int main(void) {
     test_startup_recovery_waiting_with_inbox();
     test_startup_recovery_waiting_no_inbox();
     test_heartbeat_ok_suppression();
+    test_no_reply_suppression();
     printf("All daemon tests passed.\n");
     return 0;
 }

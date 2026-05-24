@@ -306,9 +306,14 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     }
     if (!reply_text) reply_text = strdup("error: agent failed");
 
-    /* V11: Send reply chunked at 4096 chars */
-    tg_send_chunked(g_cfg->telegram_token, chat_id, reply_text);
-    free(reply_text);
+    /* V44/T113: Suppress [NO_REPLY] — agent decided not to respond */
+    if (strstr(reply_text, "[NO_REPLY]") != NULL) {
+        free(reply_text);
+    } else {
+        /* V11: Send reply chunked at 4096 chars */
+        tg_send_chunked(g_cfg->telegram_token, chat_id, reply_text);
+        free(reply_text);
+    }
     js_runtime_destroy(js_rt);
     tools_free(&reg);
 

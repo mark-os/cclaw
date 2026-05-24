@@ -124,10 +124,10 @@ int context_build(const Entry *entries, int count, const Config *cfg,
     if (!entries || count <= 0 || !cfg || !out_msgs || !out_count)
         return -1;
 
-    /* V28: filter out errored/aborted assistant entries + their tool_results */
-    Entry *filtered = malloc((size_t)count * sizeof(Entry));
-    if (!filtered) return -1;
-    int fcount = 0;
+    /* V28/V36: filter out errored/aborted assistant entries + their tool_results */
+    Entry *v28 = malloc((size_t)count * sizeof(Entry));
+    if (!v28) return -1;
+    int v28count = 0;
     for (int i = 0; i < count; i++) {
         if (entries[i].message.role == ROLE_ASSISTANT &&
             (entries[i].message.stop_reason == STOP_REASON_ERROR ||
@@ -139,8 +139,64 @@ int context_build(const Entry *entries, int count, const Config *cfg,
             i = j - 1; /* loop will increment */
             continue;
         }
-        filtered[fcount++] = entries[i];
+        v28[v28count++] = entries[i];
     }
+
+    /* V36: synthesize error tool_results for mid-conversation orphaned tool_calls.
+     * Tail orphans are handled by V17 below (which also adds system notice).
+     * Pass 1: count synthetics needed. Pass 2: build array with synthetics inserted. */
+    int synth_needed = 0;
+    for (int i = 0; i < v28count; i++) {
+        if (v28[i].message.role == ROLE_ASSISTANT && v28[i].message.tool_calls &&
+            v28[i].message.tool_call_count > 0) {
+            int results = 0;
+            for (int j = i + 1; j < v28count && v28[j].message.role == ROLE_TOOL; j++)
+                results++;
+            int missing = (int)v28[i].message.tool_call_count - results;
+            /* Only count mid-conversation orphans (not tail — V17 handles tail) */
+            if (missing > 0 && i + 1 + results < v28count)
+                synth_needed += missing;
+        }
+    }
+
+    /* Allocate synthetic ToolResult structs (process-lifetime, single-threaded) */
+    static ToolResult synth_results[32];
+    int synth_idx = 0;
+
+    Entry *filtered = malloc((size_t)(v28count + synth_needed) * sizeof(Entry));
+    if (!filtered) { free(v28); return -1; }
+    int fcount = 0;
+
+    for (int i = 0; i < v28count; i++) {
+        filtered[fcount++] = v28[i];
+        if (v28[i].message.role == ROLE_ASSISTANT && v28[i].message.tool_calls &&
+            v28[i].message.tool_call_count > 0) {
+            /* Copy existing tool_results that follow */
+            int results = 0;
+            while (i + 1 + results < v28count &&
+                   v28[i + 1 + results].message.role == ROLE_TOOL)
+                results++;
+            for (int j = 0; j < results; j++)
+                filtered[fcount++] = v28[i + 1 + j];
+            /* Synthesize missing results only for mid-conversation orphans */
+            int missing = (int)v28[i].message.tool_call_count - results;
+            int is_tail = (i + 1 + results >= v28count);
+            if (missing > 0 && !is_tail) {
+                for (int m = 0; m < missing && synth_idx < 32; m++) {
+                    synth_results[synth_idx].tool_call_id =
+                        v28[i].message.tool_calls[results + m].id;
+                    synth_results[synth_idx].content = (char *)INCOMPLETE_TOOL_CONTENT;
+                    Entry synth = {0};
+                    synth.message.role = ROLE_TOOL;
+                    synth.message.tool_result = &synth_results[synth_idx];
+                    filtered[fcount++] = synth;
+                    synth_idx++;
+                }
+            }
+            i += results; /* skip results already copied */
+        }
+    }
+    free(v28);
 
     /* V7: budget = max_history_tokens if set, else 60% of context window */
     int budget = cfg->max_history_tokens > 0

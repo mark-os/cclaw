@@ -233,6 +233,29 @@ static Role str_to_role(const char *s) {
     return ROLE_USER;
 }
 
+/* V35: StopReason → string for JSON storage */
+static const char *stop_reason_to_str(StopReason sr) {
+    switch (sr) {
+        case STOP_REASON_STOP:     return "stop";
+        case STOP_REASON_LENGTH:   return "length";
+        case STOP_REASON_TOOL_USE: return "tool_use";
+        case STOP_REASON_ERROR:    return "error";
+        case STOP_REASON_ABORTED:  return "aborted";
+        default:                   return NULL;
+    }
+}
+
+/* V35: string → StopReason from JSON storage */
+static StopReason str_to_stop_reason(const char *s) {
+    if (!s) return STOP_REASON_NONE;
+    if (strcmp(s, "stop") == 0)     return STOP_REASON_STOP;
+    if (strcmp(s, "length") == 0)   return STOP_REASON_LENGTH;
+    if (strcmp(s, "tool_use") == 0) return STOP_REASON_TOOL_USE;
+    if (strcmp(s, "error") == 0)    return STOP_REASON_ERROR;
+    if (strcmp(s, "aborted") == 0)  return STOP_REASON_ABORTED;
+    return STOP_REASON_NONE;
+}
+
 /* Serialize Message to §D JSON data format. Caller must free. */
 static char *serialize_entry_data(const Message *msg) {
     cJSON *obj = cJSON_CreateObject();
@@ -270,6 +293,12 @@ static char *serialize_entry_data(const Message *msg) {
     } else {
         /* User, system, or assistant without tool_calls */
         cJSON_AddStringToObject(obj, "content", msg->content ? msg->content : "");
+    }
+
+    /* V35: store stop_reason for assistant messages */
+    if (msg->role == ROLE_ASSISTANT && msg->stop_reason != STOP_REASON_NONE) {
+        const char *sr = stop_reason_to_str(msg->stop_reason);
+        if (sr) cJSON_AddStringToObject(obj, "stop_reason", sr);
     }
 
     char *json = cJSON_PrintUnformatted(obj);
@@ -344,6 +373,13 @@ static void deserialize_entry_data(const char *json, Message *msg) {
         cJSON *content = cJSON_GetObjectItem(obj, "content");
         if (content && content->valuestring)
             msg->content = strdup(content->valuestring);
+    }
+
+    /* V35: read stop_reason for assistant messages */
+    if (msg->role == ROLE_ASSISTANT) {
+        cJSON *sr = cJSON_GetObjectItem(obj, "stop_reason");
+        if (sr && sr->valuestring)
+            msg->stop_reason = str_to_stop_reason(sr->valuestring);
     }
 
     cJSON_Delete(obj);

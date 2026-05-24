@@ -251,7 +251,9 @@ int agent_run(AgentContext *ctx) {
 
         /* If no tool calls — final response */
         if (llm_resp.tool_call_count == 0) {
-            Message asst = {.role = ROLE_ASSISTANT, .content = llm_resp.content ? strdup(llm_resp.content) : strdup("")};
+            Message asst = {.role = ROLE_ASSISTANT,
+                            .content = llm_resp.content ? strdup(llm_resp.content) : strdup(""),
+                            .stop_reason = map_stop_reason(llm_resp.finish_reason)};
             entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
             free(asst.content);
             arena_destroy(a);
@@ -262,6 +264,7 @@ int agent_run(AgentContext *ctx) {
         Message asst = {0};
         asst.role = ROLE_ASSISTANT;
         asst.content = llm_resp.content ? strdup(llm_resp.content) : NULL;
+        asst.stop_reason = map_stop_reason(llm_resp.finish_reason);
         asst.tool_call_count = llm_resp.tool_call_count;
         asst.tool_calls = malloc(asst.tool_call_count * sizeof(ToolCall));
         if (!asst.tool_calls) {

@@ -1,7 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include "context.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define TRUNCATE_MAX_BYTES  (50 * 1024)
+#define TRUNCATE_MAX_LINES  2000
 
 static const char *CUTOFF_NOTICE =
     "[Earlier conversation history was truncated to fit context window. "
@@ -31,6 +35,42 @@ int context_estimate_tokens(const Message *msg) {
             tokens += (int)strlen(msg->tool_result->content) / 4;
     }
     return tokens;
+}
+
+/* V40: Truncate tool result to 50KB / 2000 lines (whichever first). */
+char *truncate_result(const char *src, size_t len) {
+    if (!src) return NULL;
+    if (len == 0) len = strlen(src);
+
+    /* Find cut point: min(50KB, 2000 lines) */
+    size_t cut = len;
+    int lines = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (src[i] == '\n') {
+            lines++;
+            if (lines >= TRUNCATE_MAX_LINES) { cut = i + 1; break; }
+        }
+        if (i + 1 >= TRUNCATE_MAX_BYTES && cut == len) { cut = TRUNCATE_MAX_BYTES; break; }
+    }
+    if (cut >= len) return strndup(src, len);
+
+    /* Build truncated string with suffix */
+    size_t omitted_bytes = len - cut;
+    int omitted_lines = 0;
+    for (size_t i = cut; i < len; i++)
+        if (src[i] == '\n') omitted_lines++;
+
+    char suffix[128];
+    snprintf(suffix, sizeof(suffix),
+             "\n[truncated — %zu bytes / %d lines omitted, use search to find full output]",
+             omitted_bytes, omitted_lines);
+
+    size_t result_len = cut + strlen(suffix);
+    char *result = malloc(result_len + 1);
+    if (!result) return strndup(src, len);
+    memcpy(result, src, cut);
+    memcpy(result + cut, suffix, strlen(suffix) + 1);
+    return result;
 }
 
 /* V8: Find valid cut point — never cut mid-tool-call.
@@ -247,7 +287,7 @@ int context_build(const Entry *entries, int count, const Config *cfg,
             msgs[idx].tool_result->tool_call_id = filtered[i].message.tool_result->tool_call_id
                 ? strdup(filtered[i].message.tool_result->tool_call_id) : NULL;
             msgs[idx].tool_result->content = filtered[i].message.tool_result->content
-                ? strdup(filtered[i].message.tool_result->content) : NULL;
+                ? truncate_result(filtered[i].message.tool_result->content, 0) : NULL;
         }
         idx++;
     }

@@ -26,4 +26,9 @@ void context_free(Message *msgs, int count);
 /* Estimate token count for a message (chars/4 heuristic). */
 int context_estimate_tokens(const Message *msg);
 
+/* V40: Truncate tool result content to 50KB / 2000 lines (whichever first).
+ * Returns malloc'd truncated string with suffix, or strdup(src) if within limits.
+ * Caller frees. */
+char *truncate_result(const char *src, size_t len);
+
 #endif

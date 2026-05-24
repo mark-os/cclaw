@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "context.h"
 
@@ -710,6 +711,133 @@ static void test_v28_normal_entries_kept(void) {
     PASS();
 }
 
+/* T105/V40: Tool result truncated at 50KB in context_build output */
+static void test_v40_tool_result_truncation_bytes(void) {
+    TEST(v40_tool_result_truncation_bytes);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    /* Create a tool result > 50KB */
+    size_t big_size = 60 * 1024;
+    char *big = malloc(big_size + 1);
+    memset(big, 'X', big_size);
+    big[big_size] = '\0';
+
+    ToolCall tc = { .id = "c1", .name = "shell_exec", .arguments = "{}" };
+    ToolResult tr = { .tool_call_id = "c1", .content = big };
+
+    Entry entries[3] = {
+        make_entry(1, ROLE_USER, "run it"),
+        make_entry(2, ROLE_ASSISTANT, NULL),
+        make_entry(3, ROLE_TOOL, NULL),
+    };
+    entries[1].message.tool_calls = &tc;
+    entries[1].message.tool_call_count = 1;
+    entries[2].message.tool_result = &tr;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 3, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); free(big); return; }
+
+    /* Tool result should be truncated */
+    if (!msgs[2].tool_result || !msgs[2].tool_result->content) {
+        FAIL("missing tool_result content"); context_free(msgs, count); free(big); return;
+    }
+    size_t result_len = strlen(msgs[2].tool_result->content);
+    if (result_len >= big_size) {
+        FAIL("tool_result not truncated"); context_free(msgs, count); free(big); return;
+    }
+    if (!strstr(msgs[2].tool_result->content, "[truncated")) {
+        FAIL("missing truncation suffix"); context_free(msgs, count); free(big); return;
+    }
+    context_free(msgs, count);
+    free(big);
+    PASS();
+}
+
+/* T105/V40: Tool result truncated at 2000 lines */
+static void test_v40_tool_result_truncation_lines(void) {
+    TEST(v40_tool_result_truncation_lines);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    /* Create a tool result with 3000 short lines (well under 50KB) */
+    size_t line_len = 10; /* "line NNNN\n" */
+    size_t total = 3000 * line_len;
+    char *big = malloc(total + 1);
+    char *p = big;
+    for (int i = 0; i < 3000; i++)
+        p += sprintf(p, "line %04d\n", i);
+
+    ToolCall tc = { .id = "c1", .name = "file_read", .arguments = "{}" };
+    ToolResult tr = { .tool_call_id = "c1", .content = big };
+
+    Entry entries[3] = {
+        make_entry(1, ROLE_USER, "read it"),
+        make_entry(2, ROLE_ASSISTANT, NULL),
+        make_entry(3, ROLE_TOOL, NULL),
+    };
+    entries[1].message.tool_calls = &tc;
+    entries[1].message.tool_call_count = 1;
+    entries[2].message.tool_result = &tr;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 3, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); free(big); return; }
+
+    if (!msgs[2].tool_result || !msgs[2].tool_result->content) {
+        FAIL("missing tool_result content"); context_free(msgs, count); free(big); return;
+    }
+    if (!strstr(msgs[2].tool_result->content, "[truncated")) {
+        FAIL("missing truncation suffix"); context_free(msgs, count); free(big); return;
+    }
+    /* Count lines in result — should be ~2000 */
+    int lines = 0;
+    for (const char *c = msgs[2].tool_result->content; *c; c++)
+        if (*c == '\n') lines++;
+    if (lines > 2005) { /* allow small margin for suffix */
+        FAIL("too many lines after truncation"); context_free(msgs, count); free(big); return;
+    }
+    context_free(msgs, count);
+    free(big);
+    PASS();
+}
+
+/* T105/V40: Small tool results are NOT truncated */
+static void test_v40_small_result_not_truncated(void) {
+    TEST(v40_small_result_not_truncated);
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+
+    ToolCall tc = { .id = "c1", .name = "shell_exec", .arguments = "{}" };
+    ToolResult tr = { .tool_call_id = "c1", .content = "small output" };
+
+    Entry entries[3] = {
+        make_entry(1, ROLE_USER, "run"),
+        make_entry(2, ROLE_ASSISTANT, NULL),
+        make_entry(3, ROLE_TOOL, NULL),
+    };
+    entries[1].message.tool_calls = &tc;
+    entries[1].message.tool_call_count = 1;
+    entries[2].message.tool_result = &tr;
+
+    Message *msgs = NULL;
+    int count = 0;
+    int rc = context_build(entries, 3, &cfg, &msgs, &count);
+    if (rc != 0) { FAIL("returned error"); return; }
+
+    if (!msgs[2].tool_result || !msgs[2].tool_result->content) {
+        FAIL("missing tool_result content"); context_free(msgs, count); return;
+    }
+    if (strcmp(msgs[2].tool_result->content, "small output") != 0) {
+        FAIL("small result was modified"); context_free(msgs, count); return;
+    }
+    context_free(msgs, count);
+    PASS();
+}
+
 int main(void) {
     printf("--- test_context ---\n");
     test_all_fits();
@@ -731,6 +859,9 @@ int main(void) {
     test_v36_mid_conversation_orphan_synthesis();
     test_v36_multiple_errored_stripped();
     test_v36_errored_at_tail_uses_v17();
+    test_v40_tool_result_truncation_bytes();
+    test_v40_tool_result_truncation_lines();
+    test_v40_small_result_not_truncated();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

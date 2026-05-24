@@ -48,6 +48,7 @@ typedef struct {
 typedef struct {
     int64_t id;
     char *name;
+    char *agent_name;       /* V20: bound agent (NULL = global config) */
     int64_t leaf_id;        /* current leaf entry id for branch traversal */
     time_t created_at;
     time_t updated_at;

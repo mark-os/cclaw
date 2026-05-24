@@ -12,9 +12,9 @@ static void test_subagent_completion_posts_to_parent_inbox(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t parent_sid = session_create(db, "parent");
+    int64_t parent_sid = session_create(db, "parent", NULL);
     assert(parent_sid > 0);
-    int64_t child_sid = session_create(db, "sub-agent:1");
+    int64_t child_sid = session_create(db, "sub-agent:1", NULL);
     assert(child_sid > 0);
 
     /* Simulate spawn: create sub-agent record */
@@ -51,9 +51,9 @@ static void test_subagent_error_posts_to_parent_inbox(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t parent_sid = session_create(db, "parent2");
+    int64_t parent_sid = session_create(db, "parent2", NULL);
     assert(parent_sid > 0);
-    int64_t child_sid = session_create(db, "sub-agent:2");
+    int64_t child_sid = session_create(db, "sub-agent:2", NULL);
     assert(child_sid > 0);
 
     int64_t agent_id = subagent_create(db, parent_sid, child_sid, 99999, 1, "failing task");

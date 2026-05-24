@@ -206,7 +206,7 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     if (session_id < 0) {
         char session_name[64];
         snprintf(session_name, sizeof(session_name), "tg_%lld", (long long)chat_id);
-        session_id = session_create(g_db, session_name);
+        session_id = session_create(g_db, session_name, NULL);
         if (session_id < 0) return;
         db_tg_set_session(g_db, chat_id, session_id);
         /* Append system message */

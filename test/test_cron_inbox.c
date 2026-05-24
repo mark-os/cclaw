@@ -10,7 +10,7 @@ static const char *DB_PATH = "/tmp/test_cclaw_cron_inbox.sqlite";
 static void test_cron_inbox_insert_and_consume(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "cron_inbox");
+    int64_t sid = session_create(db, "cron_inbox", NULL);
     assert(sid > 0);
 
     /* Cron fires → insert task into inbox with source "cron" */
@@ -50,7 +50,7 @@ static void test_cron_inbox_insert_and_consume(void) {
 static void test_cron_inbox_lock_contention(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "cron_contention");
+    int64_t sid = session_create(db, "cron_contention", NULL);
     assert(sid > 0);
 
     /* Another handler holds the lock */
@@ -80,7 +80,7 @@ static void test_cron_inbox_lock_contention(void) {
 static void test_cron_inbox_batch(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "cron_batch");
+    int64_t sid = session_create(db, "cron_batch", NULL);
     assert(sid > 0);
 
     /* Multiple cron jobs fire while session was locked */

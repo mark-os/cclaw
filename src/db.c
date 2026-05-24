@@ -149,12 +149,16 @@ void db_close(sqlite3 *db) {
     if (db) sqlite3_close(db);
 }
 
-int64_t session_create(sqlite3 *db, const char *name) {
-    const char *sql = "INSERT INTO sessions (name) VALUES (?);";
+int64_t session_create(sqlite3 *db, const char *name, const char *agent_name) {
+    const char *sql = "INSERT INTO sessions (name, agent_name) VALUES (?, ?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    if (agent_name)
+        sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 2);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
         return -1;
@@ -166,7 +170,7 @@ int64_t session_create(sqlite3 *db, const char *name) {
 
 Session *session_list(sqlite3 *db, int *count) {
     *count = 0;
-    const char *sql = "SELECT id, name, leaf_id, created_at, updated_at FROM sessions ORDER BY id;";
+    const char *sql = "SELECT id, name, leaf_id, agent_name, created_at, updated_at FROM sessions ORDER BY id;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return NULL;
@@ -187,8 +191,10 @@ Session *session_list(sqlite3 *db, int *count) {
         const char *n = (const char *)sqlite3_column_text(stmt, 1);
         s->name = n ? strdup(n) : NULL;
         s->leaf_id = sqlite3_column_int64(stmt, 2);
-        s->created_at = (time_t)sqlite3_column_int64(stmt, 3);
-        s->updated_at = (time_t)sqlite3_column_int64(stmt, 4);
+        const char *an = (const char *)sqlite3_column_text(stmt, 3);
+        s->agent_name = an ? strdup(an) : NULL;
+        s->created_at = (time_t)sqlite3_column_int64(stmt, 4);
+        s->updated_at = (time_t)sqlite3_column_int64(stmt, 5);
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -390,6 +396,20 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
     return entries;
 }
 
+char *session_get_agent_name(sqlite3 *db, int64_t session_id) {
+    const char *sql = "SELECT agent_name FROM sessions WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    char *result = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (val) result = strdup(val);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id) {
     const char *sql = "UPDATE sessions SET leaf_id=?, updated_at=unixepoch() WHERE id=?;";
     sqlite3_stmt *stmt;
@@ -404,8 +424,10 @@ int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id) {
 
 void session_list_free(Session *sessions, int count) {
     if (!sessions) return;
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < count; i++) {
         free(sessions[i].name);
+        free(sessions[i].agent_name);
+    }
     free(sessions);
 }
 

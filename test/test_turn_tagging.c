@@ -30,7 +30,7 @@ static int64_t get_entry_turn_id(sqlite3 *db, int64_t entry_id) {
 static void test_next_turn_id_empty_session(void) {
     TEST(next_turn_id_empty_session);
     sqlite3 *db = db_open(":memory:");
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
     int64_t tid = db_next_turn_id(db, sid);
     if (tid != 1) { FAIL("expected 1 for empty session"); db_close(db); return; }
     db_close(db);
@@ -40,7 +40,7 @@ static void test_next_turn_id_empty_session(void) {
 static void test_next_turn_id_increments(void) {
     TEST(next_turn_id_increments);
     sqlite3 *db = db_open(":memory:");
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
 
     Message msg = {.role = ROLE_USER, .content = "hello"};
     entry_append_with_turn(db, sid, &msg, 1);
@@ -59,7 +59,7 @@ static void test_next_turn_id_increments(void) {
 static void test_append_with_turn_tags_entry(void) {
     TEST(append_with_turn_tags_entry);
     sqlite3 *db = db_open(":memory:");
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
 
     Message msg = {.role = ROLE_USER, .content = "hi"};
     int64_t eid = entry_append_with_turn(db, sid, &msg, 42);
@@ -75,7 +75,7 @@ static void test_append_with_turn_tags_entry(void) {
 static void test_multiple_entries_same_turn(void) {
     TEST(multiple_entries_same_turn);
     sqlite3 *db = db_open(":memory:");
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
 
     /* Simulate a turn: assistant + tool_result share turn_id=1 */
     Message asst = {.role = ROLE_ASSISTANT, .content = "calling tool"};
@@ -99,7 +99,7 @@ static void test_multiple_entries_same_turn(void) {
 static void test_entries_without_turn_id_ignored(void) {
     TEST(entries_without_turn_id_ignored);
     sqlite3 *db = db_open(":memory:");
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
 
     /* entry_append (no turn_id) leaves turn_id NULL */
     Message msg = {.role = ROLE_USER, .content = "hi"};

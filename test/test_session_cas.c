@@ -8,7 +8,7 @@ static const char *DB_PATH = "/tmp/test_cclaw_cas.sqlite";
 static void test_acquire_release(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "cas_test");
+    int64_t sid = session_create(db, "cas_test", NULL);
     assert(sid > 0);
 
     /* Acquire succeeds on idle session */
@@ -24,7 +24,7 @@ static void test_acquire_release(void) {
 static void test_double_acquire_rejected(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "cas_double");
+    int64_t sid = session_create(db, "cas_double", NULL);
     assert(sid > 0);
 
     assert(session_try_acquire(db, sid, "worker-1") == 0);
@@ -41,7 +41,7 @@ static void test_double_acquire_rejected(void) {
 static void test_release_wrong_holder(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "cas_wrong");
+    int64_t sid = session_create(db, "cas_wrong", NULL);
     assert(sid > 0);
 
     assert(session_try_acquire(db, sid, "worker-1") == 0);
@@ -57,7 +57,7 @@ static void test_release_wrong_holder(void) {
 static void test_reacquire_after_release(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "cas_reacquire");
+    int64_t sid = session_create(db, "cas_reacquire", NULL);
     assert(sid > 0);
 
     assert(session_try_acquire(db, sid, "w1") == 0);

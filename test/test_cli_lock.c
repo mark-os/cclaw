@@ -8,7 +8,7 @@ int main(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
 
-    int64_t sid = session_create(db, "cli-test");
+    int64_t sid = session_create(db, "cli-test", NULL);
     assert(sid > 0);
 
     /* Acquire succeeds */

@@ -26,8 +26,8 @@ void db_close(sqlite3 *db);
 
 /* Session CRUD (V14) */
 
-/* Create session, returns id (>0) or -1 on error. */
-int64_t session_create(sqlite3 *db, const char *name);
+/* Create session, returns id (>0) or -1 on error. agent_name may be NULL. */
+int64_t session_create(sqlite3 *db, const char *name, const char *agent_name);
 
 /* List all sessions. Caller must free returned array and each session's name.
  * Sets *count. Returns NULL on error or empty. */
@@ -36,6 +36,9 @@ Session *session_list(sqlite3 *db, int *count);
 /* Get branch from leaf→root for session. Returns entries in root→leaf order.
  * Caller must free returned array and entry string fields. Sets *count. */
 Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count);
+
+/* V20: Get agent_name for session. Returns heap-allocated string or NULL. */
+char *session_get_agent_name(sqlite3 *db, int64_t session_id);
 
 /* Set leaf_id for session. Returns 0 on success, -1 on error. */
 int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id);

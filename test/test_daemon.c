@@ -65,7 +65,7 @@ static void test_last_route(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t sid = session_create(db, "route_test");
+    int64_t sid = session_create(db, "route_test", NULL);
     assert(sid > 0);
 
     /* Initially NULL */
@@ -105,7 +105,7 @@ static void test_daemon_fork_reap(void) {
     assert(db);
 
     /* Create a session with inbox item */
-    int64_t sid = session_create(db, "daemon_test");
+    int64_t sid = session_create(db, "daemon_test", NULL);
     assert(sid > 0);
 
     /* Insert a system prompt so agent has context */

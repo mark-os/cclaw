@@ -58,7 +58,7 @@ char *tool_spawn_agent_handler(const char *arguments, void *user_data) {
     /* Create a session for the sub-agent */
     char name_buf[128];
     snprintf(name_buf, sizeof(name_buf), "sub-agent:%lld", (long long)ctx->session_id);
-    int64_t child_session_id = session_create(ctx->db, name_buf);
+    int64_t child_session_id = session_create(ctx->db, name_buf, NULL);
     if (child_session_id < 0) {
         cJSON_Delete(json);
         return strdup("error: failed to create sub-agent session");

@@ -27,7 +27,7 @@ static void *thread_acquire(void *arg) {
 static void test_race_only_one_wins(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "race_test");
+    int64_t sid = session_create(db, "race_test", NULL);
     assert(sid > 0);
 
     AcquireArg a1 = {.db = db, .session_id = sid, .holder = "worker-A"};
@@ -55,7 +55,7 @@ static void test_race_only_one_wins(void) {
 static void test_running_rejects_all(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "overlap_test");
+    int64_t sid = session_create(db, "overlap_test", NULL);
     assert(sid > 0);
 
     assert(session_try_acquire(db, sid, "cli-worker") == 0);
@@ -74,7 +74,7 @@ static void test_running_rejects_all(void) {
 static void test_janitor_respects_active_locks(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "janitor_safe");
+    int64_t sid = session_create(db, "janitor_safe", NULL);
     assert(sid > 0);
 
     assert(session_try_acquire(db, sid, "active-worker") == 0);
@@ -95,9 +95,9 @@ static void test_janitor_respects_active_locks(void) {
 static void test_independent_sessions_no_interference(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t s1 = session_create(db, "session-A");
-    int64_t s2 = session_create(db, "session-B");
-    int64_t s3 = session_create(db, "session-C");
+    int64_t s1 = session_create(db, "session-A", NULL);
+    int64_t s2 = session_create(db, "session-B", NULL);
+    int64_t s3 = session_create(db, "session-C", NULL);
     assert(s1 > 0 && s2 > 0 && s3 > 0);
 
     /* All three can be acquired simultaneously by different workers */
@@ -121,7 +121,7 @@ static void test_independent_sessions_no_interference(void) {
 static void test_handoff_between_workers(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "handoff");
+    int64_t sid = session_create(db, "handoff", NULL);
     assert(sid > 0);
 
     /* CLI acquires, processes, releases */
@@ -144,7 +144,7 @@ static void test_handoff_between_workers(void) {
 static void test_many_threads_one_winner(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "many_race");
+    int64_t sid = session_create(db, "many_race", NULL);
     assert(sid > 0);
 
     #define N_THREADS 8

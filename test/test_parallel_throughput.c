@@ -75,7 +75,7 @@ static void *consumer_thread(void *arg) {
 static void test_parallel_produce_consume(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "throughput");
+    int64_t sid = session_create(db, "throughput", NULL);
     assert(sid > 0);
     db_close(db);
 
@@ -128,7 +128,7 @@ static void test_interleaved_produce_consume(void) {
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "interleaved");
+    int64_t sid = session_create(db, "interleaved", NULL);
     assert(sid > 0);
     db_close(db);
 
@@ -191,7 +191,7 @@ static void test_cas_no_overlap_under_load(void) {
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "cas_load");
+    int64_t sid = session_create(db, "cas_load", NULL);
     assert(sid > 0);
 
     /* Pre-fill inbox */

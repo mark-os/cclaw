@@ -72,7 +72,7 @@ static int64_t cli_select_session(sqlite3 *db) {
 
     if (!sessions || count == 0) {
         session_list_free(sessions, count);
-        return session_create(db, "cli");
+        return session_create(db, "cli", NULL);
     }
 
     printf("sessions:\n");
@@ -92,7 +92,7 @@ static int64_t cli_select_session(sqlite3 *db) {
 
     int64_t result;
     if (buf[0] == 'n' || buf[0] == 'N') {
-        result = session_create(db, "cli");
+        result = session_create(db, "cli", NULL);
     } else {
         int choice = atoi(buf);
         if (choice >= 1 && choice <= count) {

@@ -15,7 +15,7 @@ static void test_get_unmapped(void) {
 static void test_set_and_get(void) {
     sqlite3 *db = db_open(TEST_DB);
     assert(db);
-    int64_t sid = session_create(db, "tg_99");
+    int64_t sid = session_create(db, "tg_99", NULL);
     assert(sid > 0);
     assert(db_tg_set_session(db, 99, sid) == 0);
     assert(db_tg_get_session(db, 99) == sid);
@@ -25,8 +25,8 @@ static void test_set_and_get(void) {
 static void test_overwrite(void) {
     sqlite3 *db = db_open(TEST_DB);
     assert(db);
-    int64_t s1 = session_create(db, "tg_a");
-    int64_t s2 = session_create(db, "tg_b");
+    int64_t s1 = session_create(db, "tg_a", NULL);
+    int64_t s2 = session_create(db, "tg_b", NULL);
     assert(s1 > 0 && s2 > 0);
     assert(db_tg_set_session(db, 200, s1) == 0);
     assert(db_tg_get_session(db, 200) == s1);
@@ -38,8 +38,8 @@ static void test_overwrite(void) {
 static void test_multiple_chats(void) {
     sqlite3 *db = db_open(TEST_DB);
     assert(db);
-    int64_t s1 = session_create(db, "tg_c1");
-    int64_t s2 = session_create(db, "tg_c2");
+    int64_t s1 = session_create(db, "tg_c1", NULL);
+    int64_t s2 = session_create(db, "tg_c2", NULL);
     assert(db_tg_set_session(db, 1001, s1) == 0);
     assert(db_tg_set_session(db, 1002, s2) == 0);
     assert(db_tg_get_session(db, 1001) == s1);

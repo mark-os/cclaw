@@ -54,7 +54,7 @@ static void test_cron_crud(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
 
-    int64_t sid = session_create(db, "cron_test");
+    int64_t sid = session_create(db, "cron_test", NULL);
     assert(sid > 0);
 
     int64_t jid = cron_add(db, "test_job", "0 * * * *", sid, "hello");

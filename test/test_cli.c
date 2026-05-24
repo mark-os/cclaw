@@ -40,8 +40,8 @@ static void test_cli_session_resume(void) {
     sqlite3 *db = db_open(dbpath);
     if (!db) { FAIL("db_open"); return; }
 
-    int64_t s1 = session_create(db, "first");
-    int64_t s2 = session_create(db, "second");
+    int64_t s1 = session_create(db, "first", NULL);
+    int64_t s2 = session_create(db, "second", NULL);
     if (s1 < 0 || s2 < 0) { FAIL("session_create"); db_close(db); unlink(dbpath); return; }
 
     int count = 0;

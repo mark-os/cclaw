@@ -49,12 +49,12 @@ static void test_depth_limit(void) {
 
 static void test_per_parent_limit(void) {
     sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent");
+    int64_t parent_sid = session_create(db, "parent", NULL);
     assert(parent_sid > 0);
 
     /* Create 3 running sub-agents for this parent */
     for (int i = 0; i < SUBAGENT_MAX_PER_PARENT; i++) {
-        int64_t child_sid = session_create(db, "child");
+        int64_t child_sid = session_create(db, "child", NULL);
         int64_t aid = subagent_create(db, parent_sid, child_sid, 9999 + i, 1, "task");
         assert(aid > 0);
     }
@@ -73,13 +73,13 @@ static void test_system_wide_limit(void) {
 
     /* Create 10 running sub-agents across different parents */
     for (int i = 0; i < SUBAGENT_MAX_TOTAL; i++) {
-        int64_t psid = session_create(db, "p");
-        int64_t csid = session_create(db, "c");
+        int64_t psid = session_create(db, "p", NULL);
+        int64_t csid = session_create(db, "c", NULL);
         int64_t aid = subagent_create(db, psid, csid, 8000 + i, 1, "task");
         assert(aid > 0);
     }
 
-    int64_t my_sid = session_create(db, "me");
+    int64_t my_sid = session_create(db, "me", NULL);
     SubAgentCtx ctx = {.db = db, .session_id = my_sid, .depth = 0, .self_path = "/bin/true"};
     char *r = tool_spawn_agent_handler("{\"task\":\"overflow\"}", &ctx);
     assert(r != NULL);
@@ -91,7 +91,7 @@ static void test_system_wide_limit(void) {
 
 static void test_spawn_success(void) {
     sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent");
+    int64_t parent_sid = session_create(db, "parent", NULL);
     assert(parent_sid > 0);
 
     /* Use /bin/true as self_path — background mode returns immediately */
@@ -115,7 +115,7 @@ static void test_spawn_success(void) {
 
 static void test_spawn_blocking(void) {
     sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent");
+    int64_t parent_sid = session_create(db, "parent", NULL);
     assert(parent_sid > 0);
 
     /* /bin/true exits 0 but won't call subagent_finish — tests the "no output" path */
@@ -133,8 +133,8 @@ static void test_spawn_blocking(void) {
 
 static void test_subagent_finish(void) {
     sqlite3 *db = setup_db();
-    int64_t psid = session_create(db, "p");
-    int64_t csid = session_create(db, "c");
+    int64_t psid = session_create(db, "p", NULL);
+    int64_t csid = session_create(db, "c", NULL);
     int64_t aid = subagent_create(db, psid, csid, 1234, 1, "do stuff");
     assert(aid > 0);
 
@@ -197,8 +197,8 @@ static void test_check_agent_not_found(void) {
 
 static void test_check_agent_running(void) {
     sqlite3 *db = setup_db();
-    int64_t psid = session_create(db, "p");
-    int64_t csid = session_create(db, "c");
+    int64_t psid = session_create(db, "p", NULL);
+    int64_t csid = session_create(db, "c", NULL);
     int64_t aid = subagent_create(db, psid, csid, 1234, 1, "my task");
     assert(aid > 0);
 
@@ -216,8 +216,8 @@ static void test_check_agent_running(void) {
 
 static void test_check_agent_done(void) {
     sqlite3 *db = setup_db();
-    int64_t psid = session_create(db, "p");
-    int64_t csid = session_create(db, "c");
+    int64_t psid = session_create(db, "p", NULL);
+    int64_t csid = session_create(db, "c", NULL);
     int64_t aid = subagent_create(db, psid, csid, 1234, 1, "do stuff");
     assert(aid > 0);
     subagent_finish(db, aid, "done", "the answer is 42");
@@ -239,8 +239,8 @@ static void test_check_agent_done(void) {
 
 static void test_reap_crashed(void) {
     sqlite3 *db = setup_db();
-    int64_t psid = session_create(db, "p");
-    int64_t csid = session_create(db, "c");
+    int64_t psid = session_create(db, "p", NULL);
+    int64_t csid = session_create(db, "c", NULL);
     /* Use PID 1 which we can't waitpid on (ECHILD) — simulates gone process */
     int64_t aid = subagent_create(db, psid, csid, 99999, 1, "crash task");
     assert(aid > 0);
@@ -266,8 +266,8 @@ static void test_reap_crashed(void) {
 
 static void test_reap_exited_ok(void) {
     sqlite3 *db = setup_db();
-    int64_t psid = session_create(db, "p");
-    int64_t csid = session_create(db, "c");
+    int64_t psid = session_create(db, "p", NULL);
+    int64_t csid = session_create(db, "c", NULL);
 
     /* Fork a child that exits immediately with 0 */
     pid_t pid = fork();
@@ -294,8 +294,8 @@ static void test_reap_exited_ok(void) {
 
 static void test_reap_exited_error(void) {
     sqlite3 *db = setup_db();
-    int64_t psid = session_create(db, "p");
-    int64_t csid = session_create(db, "c");
+    int64_t psid = session_create(db, "p", NULL);
+    int64_t csid = session_create(db, "c", NULL);
 
     /* Fork a child that exits with non-zero */
     pid_t pid = fork();
@@ -321,8 +321,8 @@ static void test_reap_exited_error(void) {
 
 static void test_reap_still_running(void) {
     sqlite3 *db = setup_db();
-    int64_t psid = session_create(db, "p");
-    int64_t csid = session_create(db, "c");
+    int64_t psid = session_create(db, "p", NULL);
+    int64_t csid = session_create(db, "c", NULL);
 
     /* Fork a child that sleeps */
     pid_t pid = fork();

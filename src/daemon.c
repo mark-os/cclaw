@@ -4,6 +4,7 @@
 #include "db.h"
 #include "shutdown.h"
 #include "agent.h"
+#include "agent_config.h"
 #include "telegram.h"
 #include "tools.h"
 #include "tool_shell.h"
@@ -192,6 +193,17 @@ static void agent_process_entry(const Config *cfg, int64_t session_id) {
     sqlite3 *db = db_open(cfg->db_path);
     if (!db) _exit(1);
 
+    /* V20: Load per-agent config from disk if session has agent_name */
+    char *agent_name = session_get_agent_name(db, session_id);
+    const Config *effective_cfg = cfg;
+    Config *merged_cfg = NULL;
+    AgentConfig *ac = NULL;
+    if (agent_name) {
+        ac = agent_config_load("agents", agent_name);
+        merged_cfg = agent_config_merge(cfg, ac);
+        if (merged_cfg) effective_cfg = merged_cfg;
+    }
+
     /* V27: Update last_route from newest inbox source before consuming */
     int peek_count = 0;
     InboxItem *items = inbox_peek(db, session_id, 100, &peek_count);
@@ -206,9 +218,9 @@ static void agent_process_entry(const Config *cfg, int64_t session_id) {
     /* Register tools */
     ToolRegistry reg;
     tools_init(&reg);
-    tool_shell_register(&reg, cfg->shell_timeout);
-    tool_file_read_register(&reg, cfg->workspace);
-    tool_file_write_register(&reg, cfg->workspace);
+    tool_shell_register(&reg, effective_cfg->shell_timeout);
+    tool_file_read_register(&reg, effective_cfg->workspace);
+    tool_file_write_register(&reg, effective_cfg->workspace);
     tool_js_eval_register(&reg);
     tool_web_fetch_register(&reg);
     tool_db_query_register(&reg, db);
@@ -232,16 +244,19 @@ static void agent_process_entry(const Config *cfg, int64_t session_id) {
     AgentContext ctx = {0};
     ctx.db = db;
     ctx.session_id = session_id;
-    ctx.cfg = cfg;
+    ctx.cfg = effective_cfg;
     ctx.dispatch = dispatch_tools_daemon;
     ctx.dispatch_data = &reg;
     ctx.tools = schemas;
     ctx.tool_count = tool_count;
-    ctx.debug = cfg->debug;
+    ctx.debug = effective_cfg->debug;
 
     int rc = agent_run(&ctx);
 
     tools_free(&reg);
+    agent_config_free(ac);
+    if (merged_cfg) config_free(merged_cfg);
+    free(agent_name);
     db_close(db);
     _exit(rc == 0 ? 0 : 1);
 }

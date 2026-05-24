@@ -10,7 +10,7 @@
 static void test_cron_set_valid(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
     assert(sid > 0);
 
     ToolCronCtx ctx = {.db = db, .session_id = sid};
@@ -28,7 +28,7 @@ static void test_cron_set_valid(void) {
 static void test_cron_set_invalid_expr(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
 
     ToolCronCtx ctx = {.db = db, .session_id = sid};
     char *result = tool_cron_set_handler(
@@ -43,7 +43,7 @@ static void test_cron_set_invalid_expr(void) {
 static void test_cron_set_missing_fields(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
 
     ToolCronCtx ctx = {.db = db, .session_id = sid};
     char *result = tool_cron_set_handler("{\"name\":\"x\"}", &ctx);
@@ -57,7 +57,7 @@ static void test_cron_set_missing_fields(void) {
 static void test_cron_list_empty(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
 
     ToolCronCtx ctx = {.db = db, .session_id = sid};
     char *result = tool_cron_list_handler("{}", &ctx);
@@ -71,7 +71,7 @@ static void test_cron_list_empty(void) {
 static void test_cron_list_with_jobs(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
 
     cron_add(db, "j1", "0 * * * *", sid, "task1");
     cron_add(db, "j2", "30 2 * * *", sid, "task2");
@@ -90,7 +90,7 @@ static void test_cron_list_with_jobs(void) {
 static void test_cron_remove_valid(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
 
     int64_t jid = cron_add(db, "rm_me", "0 * * * *", sid, "bye");
     assert(jid > 0);
@@ -115,7 +115,7 @@ static void test_cron_remove_valid(void) {
 static void test_cron_remove_nonexistent(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
-    int64_t sid = session_create(db, "test");
+    int64_t sid = session_create(db, "test", NULL);
 
     ToolCronCtx ctx = {.db = db, .session_id = sid};
     char *result = tool_cron_remove_handler("{\"id\":999}", &ctx);

@@ -21,7 +21,7 @@ static void test_heartbeat_injects(void) {
     assert(db);
 
     /* Create a session and mark it active */
-    int64_t sid = session_create(db, "test_hb");
+    int64_t sid = session_create(db, "test_hb", NULL);
     assert(sid > 0);
     Message user_msg = {.role = ROLE_USER, .content = "hello"};
     entry_append(db, sid, &user_msg);

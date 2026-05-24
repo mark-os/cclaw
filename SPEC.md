@@ -197,15 +197,15 @@ T77|.|system prompt loader — read `agents/<name>/system.md`, template vars `{s
 T78|.|per-agent tool whitelist — filter tool registry by agent config|V20,§I.tool
 T79|.|session↔agent binding — session_create accepts agent_name, load config from disk at agent_run|V20
 T80|.|skill loader — scan `agents/<name>/skills/*.md`, inject into system prompt|V20
-T81|.|daemon main loop — epoll on signal_pipe + SIGCHLD self-pipe, fork/reap agents|V21,V24,V26
-T82|.|signal pipe — create at daemon start, inserters write session_id to wake daemon|V25
-T83|.|agent process entry — fork, landlock, setrlimit, drain inbox, run agent loop, exit|V21,V22,V23
+T81|x|daemon main loop — epoll on signal_pipe + SIGCHLD self-pipe, fork/reap agents|V21,V24,V26
+T82|x|signal pipe — create at daemon start, inserters write session_id to wake daemon|V25
+T83|x|agent process entry — fork, landlock, setrlimit, drain inbox, run agent loop, exit|V21,V22,V23
 T84|.|landlock setup — per-agent workspace write, system read-only, deny network (curl via inherited fd?)|V22
-T85|.|response delivery — daemon reads `last_route`, dispatches to correct channel|V26
-T86|.|`last_route` tracking — agent updates on inbox consumption from newest source|V27,§D
-T87|.|daemon child tracking — map pid→session_id, enforce V24 (no dup fork)|V24
+T85|x|response delivery — daemon reads `last_route`, dispatches to correct channel|V26
+T86|x|`last_route` tracking — agent updates on inbox consumption from newest source|V27,§D
+T87|x|daemon child tracking — map pid→session_id, enforce V24 (no dup fork)|V24
 T88|.|daemon spawn queue — sub-agent spawn requests from agent processes, daemon picks up + forks|V21,T37
-T89|.|test: daemon forks agent on inbox signal, reaps on exit, delivers response|V21,V26
+T89|x|test: daemon forks agent on inbox signal, reaps on exit, delivers response|V21,V26
 T90|.|context_build: skip errored/aborted assistant entries + their orphaned tool_calls|V28
 T91|.|LLM error retry loop — max 3 retries, re-send clean context (V28 stripped), write final error entry on exhaust|V29,V32
 T92|.|graceful child shutdown — daemon SIGTERM → forward to children, children attempt error entry before exit|V31

@@ -22,6 +22,7 @@
 #include "tool_db_query.h"
 #include "shutdown.h"
 #include "janitor.h"
+#include "daemon.h"
 
 /* Tool dispatch via registry (shared with sub-agent mode) */
 static char *dispatch_tools(const char *name, const char *arguments, void *user_data) {
@@ -177,13 +178,7 @@ int main(int argc, char *argv[]) {
         return rc == 0 ? 0 : 1;
     }
 
-    /* Daemon mode: start Telegram poller */
-    if (!cfg->telegram_token || cfg->telegram_token[0] == '\0') {
-        fprintf(stderr, "error: CCLAW_TELEGRAM_TOKEN not set (required for daemon mode)\n");
-        config_free(cfg);
-        return 1;
-    }
-
+    /* Daemon mode: epoll loop, fork agents on inbox signal, reap on exit */
     sqlite3 *db = db_open(cfg->db_path);
     if (!db) {
         fprintf(stderr, "error: cannot open database '%s'\n", cfg->db_path);
@@ -193,13 +188,13 @@ int main(int argc, char *argv[]) {
 
     printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
 
-    if (telegram_start(cfg, db) != 0) {
-        fprintf(stderr, "error: failed to start telegram poller\n");
-        db_close(db);
-        config_free(cfg);
-        return 1;
+    if (cfg->telegram_token && cfg->telegram_token[0] != '\0') {
+        if (telegram_start(cfg, db) != 0) {
+            fprintf(stderr, "warning: failed to start telegram poller\n");
+        } else {
+            printf("telegram poller started\n");
+        }
     }
-    printf("telegram poller started\n");
 
     if (web_start(cfg, db) != 0) {
         fprintf(stderr, "warning: failed to start web server on port %d\n", cfg->web_port);
@@ -219,11 +214,8 @@ int main(int argc, char *argv[]) {
         printf("cron scheduler started\n");
     }
 
-    while (!shutdown_requested()) {
-        sleep(1);
-        subagent_reap(db);
-        janitor_sweep(db, cfg->stale_lock_timeout ? cfg->stale_lock_timeout : 300);
-    }
+    /* T81: daemon main loop — blocks until shutdown */
+    daemon_run(cfg, db);
 
     printf("\nshutting down...\n");
     cron_stop();

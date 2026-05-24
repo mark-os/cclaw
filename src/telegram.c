@@ -424,3 +424,9 @@ void telegram_stop(void) {
     running = 0;
     pthread_join(poll_thread, NULL);
 }
+
+/* T85: Public send API for daemon response delivery */
+void telegram_send_message(const char *token, int64_t chat_id, const char *text) {
+    if (!token || !text) return;
+    tg_send_chunked(token, chat_id, text);
+}

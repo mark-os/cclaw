@@ -13,6 +13,10 @@ int telegram_start(const Config *cfg, sqlite3 *db);
 /* Signal poller thread to stop and join. */
 void telegram_stop(void);
 
+/* V11: Send message to chat_id (chunked at 4096 chars).
+ * Used by daemon for response delivery (T85). */
+void telegram_send_message(const char *token, int64_t chat_id, const char *text);
+
 /* V11: Find split point within text[0..len-1], respecting max_len.
  * Splits at paragraph, then newline, then sentence, then hard cut.
  * Exposed for testing. */

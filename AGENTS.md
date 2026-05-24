@@ -19,7 +19,7 @@ CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and sessio
 
 - **Primary dev**: EC2 t4g.small (ARM64, Amazon Linux 2023)
 - **Secondary dev**: Chromebook (Linux container, ARM64 or x86_64)
-- **Eventual deploy target**: Pogoplug V4 (ARMv5TE, 128MB RAM, Debian Bookworm armel) — cross-compile when ready
+- **Eventual deploy target**: Pogoplug V4 (ARMv5TE, 128MB RAM, Debian Bookworm armel, kernel 6.19.9-kirkwood-tld-1, landlock NOT compiled in — recompile kernel to enable) — cross-compile when ready
 
 ## Memory Model
 

@@ -11,39 +11,67 @@ Minimal autonomous AI agent in C. Channels: Telegram, WhatsApp Business API, CLI
                     │           civetweb (HTTP)            │
                     │  WhatsApp webhooks · Dashboard · API │
                     └──────────────┬──────────────────────┘
-                                   │
+                                   │ inbox_insert + signal
 ┌──────────┐   ┌──────────────┐   │   ┌──────────────┐
-│ CLI mode │   │ Telegram poll│   │   │  Sub-agents  │
-│ (stdin/  │   │   (thread)   │   │   │ (fork+exec)  │
-│  stdout) │   └──────┬───────┘   │   └──────┬───────┘
-└────┬─────┘          │           │           │
-     │                ▼           ▼           │
-     │         ┌─────────────────────────┐    │
-     └────────►│     Agent Loop          │◄───┘
-               │  LLM call → tool exec   │
-               │  → repeat until done    │
-               └────────────┬────────────┘
-                            │
-                    ┌───────▼───────┐
-                    │    SQLite     │
-                    │  WAL mode     │
-                    │  sessions     │
-                    │  FTS5 search  │
-                    │  cron jobs    │
-                    └───────────────┘
+│ CLI mode │   │ Telegram poll│   │   │  Cron thread │
+│ (in-proc │   │   (thread)   │   │   │  (thread)    │
+│  no dmn) │   └──────┬───────┘   │   └──────┬───────┘
+└──────────┘          │           │           │
+                      ▼           ▼           ▼
+               ┌─────────────────────────────────┐
+               │         Signal Pipe             │
+               │  (session_id wakeup channel)    │
+               └──────────────┬──────────────────┘
+                              │
+               ┌──────────────▼──────────────────┐
+               │           DAEMON                │
+               │  epoll: signal_pipe + SIGCHLD   │
+               │  fork agent │ reap child │      │
+               │  deliver response to channel    │
+               └──────┬────────────┬─────────────┘
+                      │            │
+            ┌─────────▼──┐  ┌─────▼──────────┐
+            │ Agent Proc │  │ Agent Proc     │
+            │ (forked)   │  │ (forked)       │
+            │ landlock   │  │ landlock       │
+            │ setrlimit  │  │ setrlimit      │
+            │ drain inbox│  │ drain inbox    │
+            │ LLM loop   │  │ LLM loop      │
+            │ write resp │  │ write resp     │
+            │ exit       │  │ exit           │
+            └─────┬──────┘  └──────┬─────────┘
+                  │                │
+                  ▼                ▼
+           ┌─────────────────────────────┐
+           │          SQLite             │
+           │  WAL mode · inbox · entries │
+           │  sessions · FTS5 · cron     │
+           └─────────────────────────────┘
 ```
 
-### Thread Model
+### Daemon + Fork Model
 
-- **Daemon mode** (default when telegram_token or web port configured):
-  - Main thread: starts civetweb, Telegram poller thread, then waits for shutdown signal
-  - Telegram thread: long-polls getUpdates, dispatches to worker threads
-  - Civetweb: manages its own thread pool for HTTP requests (webhooks, dashboard)
-  - Worker threads: one per active conversation, runs agent loop, blocks on LLM calls
+- **Daemon process** (default when telegram_token or web port configured):
+  - Main thread: epoll loop on signal_pipe fd + SIGCHLD self-pipe
+  - On signal_pipe read: check if session idle → fork agent process
+  - On SIGCHLD: `waitpid(WNOHANG)` → reap child → deliver response → check inbox → maybe re-fork
+  - Telegram thread: long-polls getUpdates, does `inbox_insert` + writes session_id to signal pipe
+  - Cron thread: fires scheduled tasks via `inbox_insert` + signal pipe
+  - Civetweb: manages own thread pool for HTTP webhooks + dashboard (inserters signal pipe)
+  - Daemon ⊥ executes LLM logic, tool dispatch, or agent loop code
+- **Agent process** (forked by daemon per session turn):
+  - Applies landlock (workspace write, system read-only)
+  - Applies setrlimit (memory, CPU, file descriptors)
+  - Acquires session lock (CAS safety net)
+  - Drains inbox → appends as entries → updates `last_route`
+  - Runs agent loop: LLM call → tool exec → repeat until `stop_reason == "stop"`
+  - Writes final response to entries table
+  - Releases lock, exits
 - **CLI mode** (`cclaw --cli` or no channels configured):
-  - Single process, main thread runs agent loop on stdin/stdout
-  - Can coexist with a running daemon — both share the SQLite DB via WAL mode
-- **Sub-agents**: `fork()`+`exec("./cclaw", "--sub-agent", ...)` — separate process, own session, same DB
+  - Single process, no daemon, runs agent loop in-process on stdin/stdout
+  - Does `inbox_insert` before lock acquire (message not lost on contention)
+  - If lock fails: "queued — session is busy" (daemon-managed session)
+- **Sub-agents**: agent calls `spawn_agent` → tool posts spawn request to dispatch queue → daemon forks sub-agent process → sub-agent writes result to parent inbox → daemon reaps → parent re-forks on next turn
 
 ### SQLite as Backbone
 
@@ -118,28 +146,9 @@ MicroQuickJS constraints: 1MB heap cap, 10M instruction limit per eval, ES2020 s
 
 Entries stored as a tree (id + parent_id). Current conversation = walk from leaf to root.
 
-```sql
-CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,
-    name TEXT,
-    parent_session_id TEXT REFERENCES sessions(id),
-    created_at TEXT NOT NULL
-);
+See [`notes/SCHEMA.md`](notes/SCHEMA.md) for full DB schema (current + planned).
 
-CREATE TABLE entries (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES sessions(id),
-    parent_id TEXT REFERENCES entries(id),
-    type TEXT NOT NULL,  -- 'message', 'compaction', 'model_change'
-    timestamp TEXT NOT NULL,
-    payload TEXT NOT NULL  -- JSON
-);
-
-CREATE TABLE session_state (
-    session_id TEXT PRIMARY KEY REFERENCES sessions(id),
-    leaf_id TEXT REFERENCES entries(id)
-);
-```
+Key tables: `sessions` (state machine, leaf tracking), `entries` (JSON payloads, tree structure, FTS5), `inbox` (durable message queue), `sub_agents`, `cron_jobs`, `js_tools`.
 
 Operations:
 - **append**: add entry, update leaf
@@ -189,11 +198,12 @@ Only the active branch is loaded into memory. SQLite holds everything else.
 - Scheduler thread checks every 60s, injects task into appropriate session
 
 ### Sub-Agents
-- Spawned as separate processes: `./cclaw --sub-agent --session-id=X --task="..."`
-- Own session in SQLite (parent_session_id links to spawner)
-- Max iterations limit (default: 30)
-- Result written to DB; parent checks via `check_agent` tool
-- Crash isolation: sub-agent crash doesn't affect parent
+- Agent calls `spawn_agent` tool → tool writes spawn request to dispatch queue (SQLite table)
+- Daemon picks up spawn request, forks sub-agent process, tracks parent↔child relationship
+- Sub-agent: own session, landlock'd, runs until stop, writes result to parent inbox
+- When sub-agent exits: daemon reaps, sees parent inbox has items, parent is idle → forks parent
+- Blocking mode: parent process suspends (waits on eventfd); daemon writes to eventfd when sub-agent completes
+- Background mode: parent continues; sub-agent posts result to parent inbox on completion
 - Limits: max 3 concurrent per parent, max 10 system-wide, max depth 2
 
 ## Implementation Notes (from Pi/OpenClaw reference)
@@ -244,10 +254,26 @@ Batch: if LLM returns multiple tool_calls, execute all, append all results, then
 - **Tool crash**: catch (in C: check return code), produce error result, continue loop
 - **Missing finish_reason**: treat as error
 
+### StopReason Normalization (Pi model)
+
+Every LLM response is normalized to a `StopReason` enum before storage:
+
+```
+stop      — normal completion (provider: "stop", "end", "end_turn", null)
+length    — hit max tokens (provider: "length", "max_tokens")
+tool_use  — wants to call tools (provider: "tool_calls", "function_call", "tool_use")
+error     — provider error, content_filter, parse failure, missing finish_reason
+aborted   — client-side abort (SIGTERM, user cancel, RLIMIT_CPU)
+```
+
+`map_stop_reason()` in `llm.c` is the sole normalization point. Stored in entry `data` JSON as `"stop_reason"` field.
+
+**Context filtering (V36)**: `context_build` skips assistant entries with `stop_reason ∈ {error, aborted}`. Their orphaned tool_calls get synthetic error results. This prevents replaying broken turns to the LLM (which can cause API errors with some providers).
+
 ### Key C Patterns
 
 - Content is always an array of tagged-union blocks (text, tool_call, thinking)
-- Strip errored/aborted assistant messages when building next LLM request
+- Strip assistant messages with `stop_reason ∈ {error, aborted}` when building LLM request (V36)
 - Never send `"tools": []` — omit the field entirely if no tools
 - Tool call arguments arrive as a JSON string — parse with cJSON on use
 - Usage: `input_tokens = prompt_tokens - cached_tokens`

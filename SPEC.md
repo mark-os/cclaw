@@ -13,18 +13,21 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - OpenAI-compatible chat completions format ∀ providers
 - default provider: OpenRouter → DeepSeek V4 Flash (`deepseek/deepseek-v4-flash`)
 - no streaming — full response only (simplifies agent loop, tool parsing)
-- decentralized execution with CAS session locking (no central runner thread)
+- daemon+fork model: daemon schedules, forks agent processes, reaps; never executes LLM logic
+- agent process = one session turn (drain inbox → LLM loop until stop → write response → exit)
+- IPC: SQLite sole message store; pipe/eventfd wakeup signal only (no message broker)
+- landlock per-agent process (restrict fs to workspace + read-only system paths)
 
 ## §I INTERFACES
 - cmd: `./build/cclaw --cli` → stdin/stdout REPL, creates/resumes session in shared DB
 - cmd: `./build/cclaw --cli --debug` → raw LLM req/resp JSON to stderr
-- cmd: `./build/cclaw` → daemon mode (Telegram poller + civetweb status page + janitor sweep)
+- cmd: `./build/cclaw` → daemon mode (epoll loop: reap children, wake on signal pipe, fork agents; Telegram poller thread + civetweb status page run in-process)
 - cmd: `./build/cclaw config.json` → explicit config file
 - cmd: `./build/cclaw --sub-agent --session-id=X --task="..."` → sub-agent process
 - env: `OPENROUTER_API_KEY` required (minimum to run)
 - env: `CCLAW_PROVIDER`, `CCLAW_MODEL`, `CCLAW_TELEGRAM_TOKEN`, `CCLAW_DB_PATH`, `CCLAW_WEB_PORT`
-- file: `config.json` — provider, model, tokens, channels, workspace, db_path, stale_lock_timeout
-- file: `agents/<name>/agent.json` — per-agent: model, workspace, tools, max_iterations
+- file: `config.json` — provider, model, tokens, channels, workspace, db_path
+- file: `agents/<name>/agent.json` — per-agent: model, workspace, tools, max_iterations, allowed_hosts
 - file: `agents/<name>/system.md` — system prompt template
 - file: `agents/<name>/skills/*.md` — skill instructions injected into system prompt
 - api: Telegram Bot API (long-poll `getUpdates`, `sendMessage`, `sendChatAction`)
@@ -35,6 +38,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - tool: `file_write` — write file (workspace-restricted)
 - tool: `js_eval` — execute JS in sandboxed mquickjs
 - tool: `js_define_tool` — register JS fn as callable tool (session-persistent)
+- js binding: `http_fetch(url, {method, headers, body})` — C-provided, enforces agent `allowed_hosts` + SSRF protection; sole network path from JS runtime
 - tool: `spawn_agent` — fork sub-agent process (accepts `background` param, default blocking)
 - tool: `db_query` — execute read-only SQL against cclaw.db (SELECT only, no mutations)
 - tool: `web_fetch` — HTTP GET URL, extract text from HTML, external input protection wrapper
@@ -45,14 +49,23 @@ entries table: `id`, `session_id`, `parent_id`, `turn_id`, `created_at`, `data T
 
 Entry `data` format (discriminated by `$.type`):
 - `{"type":"message","role":"user","content":"..."}`
-- `{"type":"message","role":"assistant","content":[{"type":"text","text":"..."},{"type":"tool_call","id":"...","name":"...","arguments":{...}}],"model":"...","usage":{"input":N,"output":N},"stop_reason":"stop|tool_use|length|error"}`
+- `{"type":"message","role":"assistant","content":[{"type":"text","text":"..."},{"type":"tool_call","id":"...","name":"...","arguments":{...}}],"model":"...","usage":{"input":N,"output":N},"stop_reason":"<StopReason>"}`
+
+StopReason enum (normalized, provider-agnostic — Pi model):
+| Value | Meaning | Provider `finish_reason` sources |
+|-------|---------|----------------------------------|
+| `stop` | normal completion | `"stop"`, `"end"`, `"end_turn"`, `null` |
+| `length` | hit max tokens | `"length"`, `"max_tokens"` |
+| `tool_use` | wants tool calls | `"tool_calls"`, `"function_call"`, `"tool_use"` |
+| `error` | provider error, content_filter, parse failure, missing finish_reason | `"content_filter"`, `"network_error"`, unknown, missing |
+| `aborted` | client-side abort (SIGTERM, user cancel, timeout) | (internal — not from provider) |
 - `{"type":"message","role":"tool_result","tool_call_id":"...","name":"...","content":"...","is_error":false}`
 - `{"type":"message","role":"system","content":"..."}`
 - `{"type":"compaction","summary":"...","first_kept_id":N}`
 
 inbox table: `id`, `session_id`, `source TEXT`, `payload TEXT`, `created_at`, `consumed INTEGER DEFAULT 0`
 
-sessions table: `id`, `name`, `leaf_id`, `agent_name TEXT`, `state`, `lock_holder`, `lock_acquired_at`, `error_count`, `created_at`, `updated_at`
+sessions table: `id`, `name`, `leaf_id`, `agent_name TEXT`, `state` (idle|running|waiting), `error_count`, `last_route TEXT`, `created_at`, `updated_at`
 
 Agent config on disk (`agents/<name>/`):
 - `agent.json` — model override, tool whitelist, max_iterations, workspace path
@@ -71,16 +84,37 @@ V7: ∀ context build → load ≤ `max_history_tokens` (default 60% of model co
 V8: ∀ context build → never cut mid-tool-call; cut at valid turn boundary (before user msg | after complete assistant response)
 V9: ∀ LLM request → omit `"tools"` field entirely when no tools registered (never send `"tools": []`)
 V10: ∀ tool crash/timeout → produce error result, continue agent loop (never crash loop)
-V11: ∀ Telegram msg → chunk at 4096 chars, split at paragraph then sentence boundaries
+V11: ∀ Telegram msg → chunk at 4096 chars, split at paragraph then sentence boundaries; sleep ≥ 3s between chunks to same chat_id (proactive rate limit — Telegram allows 20 msg/min/chat); backoff (T27) is fallback, not primary flow control
 V12: workspace ! per-agent (config `workspace` field per agent, fallback to `./workspace/{agent_name}`)
-V13: sub-agent spawn → blocking (default): parent waits, result returned as tool output; background: parent continues, sub-agent posts name+id to parent inbox on completion (parent queries details via `db_query`)
+V13: sub-agent spawn → blocking: parent writes assistant entry (w/ tool_call) + spawn request, exits (state→"waiting"); sub-agent result arrives in parent inbox as tool_result; daemon forks parent on completion. background: parent continues, sub-agent posts to parent inbox on completion. Exception: CLI mode uses fork+waitpid in-process (V39)
 V14: session tree structure → entries w/ `id` + `parent_id` (Pi model); branching structure in DB even if branching UI deferred
 V15: ∀ tool result → optionally wrap in `<tool_result name="X">...</tool_result>` tags to sanitize external data (configurable per tool)
-V16: ∀ agent_run → session must be in 'running' state, acquired via atomic CAS lock matching thread/process ID
-V17: ∀ turn → entries share a `turn_id`; incomplete turns intercepted, structure synthesized, and system notice injected via `context_build`
+V16: ∀ agent_run → session state machine (idle|running|waiting) is the lock; daemon is sole fork-parent → no concurrent agents per session possible → CAS unnecessary; `lock_holder`/`lock_acquired_at` columns removed
+V17: ∀ turn → entries share a `turn_id`; incomplete turns intercepted: if session.state == "waiting" & last tool_call is `spawn_agent` → resume (not failure); else synthesize failure notice via `context_build`
 V18: ∀ inbox message → consumed exactly once into session entries via single atomic SQLite transaction (`BEGIN EXCLUSIVE`)
 V19: ∀ session state transition → executed via strict atomic UPDATE with WHERE clauses targeting expected states to prevent TOCTOU
 V20: ∀ session → `agent_name` identifies agent; config loaded from `agents/<name>/` on disk; fallback to global config when NULL
+V21: ∀ agent execution → daemon forks dedicated process; daemon ⊥ executes LLM logic
+V22: ∀ agent process → landlock applied at fork: write restricted to agent workspace; read-only `/usr`, `/etc`, curl CA bundle; graceful fallback if landlock unavailable (Pogoplug kernel 6.19.9 has `CONFIG_SECURITY_LANDLOCK=n` — log warning, continue without)
+V23: ∀ agent process → `setrlimit` at fork: RLIMIT_AS (256MB default), RLIMIT_CPU (300s default), RLIMIT_NOFILE (64)
+V24: ∀ session → at most 1 active agent process; daemon forks only when state == "idle"; "running" and "waiting" block new forks
+V25: ∀ channel inserter (Telegram, cron, sub-agent) → inbox_insert + write session_id to signal pipe; ⊥ run agent logic
+V26: ∀ agent process exit → daemon reaps via `waitpid`, reads `last_route` from session, delivers response to channel
+V27: ∀ inbox consumption → agent updates `last_route` from newest item's `source` field
+V28: ∀ context_build → skip assistant entries w/ `stop_reason` ∈ {"error","aborted"} (per V36); their tool_calls excluded from pending tracking (no synthetic tool_results for dead calls)
+V29: ∀ LLM response → missing `finish_reason` (truncated stream, socket broken) → treat as error, write entry w/ `stop_reason: "error"` + partial content preserved, retry per V2
+V30: ∀ agent process crash (SIGKILL, OOM, RLIMIT_CPU) → no entry written; daemon reaps; next fork for session → V17 detects incomplete turn, synthesizes failure notice
+V31: ∀ daemon shutdown (SIGTERM) → forward signal to active children; children write error entry if possible; unfinished turns recovered via V17 on next startup
+V32: ∀ LLM error retry → `continue` semantics: re-send last valid context state (after V28 stripping); max 3 retries per turn before writing final error entry + exiting
+V33: ∀ blocking sub-agent completion → sub-agent writes tool_result to parent inbox (keyed by `tool_call_id`) → daemon transitions parent state "waiting"→"idle" → daemon forks parent
+V34: ∀ agent process → `prctl(PR_SET_PDEATHSIG, SIGTERM)` after fork; daemon death auto-kills children; daemon startup recovery: reset all "running"→"idle" (children already dead); "waiting" w/ result in inbox → "idle"; "waiting" w/o result → write error tool_result to inbox, "idle"
+V35: ∀ LLM response → normalize provider `finish_reason` → `StopReason` enum (`stop|length|tool_use|error|aborted`) before storing entry; `map_stop_reason()` in `llm.c` is sole normalization point
+V36: ∀ context_build → skip assistant entries w/ `stop_reason ∈ {error, aborted}`; synthesize error tool_results for their orphaned tool_calls (`"error: process terminated during execution"`); never send errored/aborted turns to LLM
+V37: ∀ `shell_exec` child → `unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS)` before exec; remount `/` read-only, bind-mount workspace read-write; no network by default; per-agent `"shell_network": true` skips `CLONE_NEWNET`; graceful fallback if `unshare()` fails (log warning, run unsandboxed)
+V38: ∀ JS runtime (`js_eval`, `js_define_tool`) → C-provided `http_fetch(url, opts)` binding is sole network path; binding enforces per-agent `allowed_hosts` allowlist + SSRF protection (reject private IPs) before calling libcurl; no allowlist = no network from JS
+V39: ∀ `spawn_agent` in CLI mode → fork+exec+waitpid in-process (blocking) or fork+continue (background); CLI has no daemon — ⊥ use "exit into waiting state" pattern; tool_subagent must detect execution mode and branch accordingly
+V40: ∀ context_build → tool_result content truncated to 50KB / 2000 lines (whichever first) when building LLM messages; full result preserved in DB entry (searchable via FTS5); truncated results get suffix `[truncated — {N} bytes / {M} lines omitted, use search to find full output]`
+V41: ∀ LLM request → built via `CURLOPT_READFUNCTION` streaming from SQLite cursor; ⊥ load full session into memory; two-pass: (1) plan entry IDs + cut point, (2) stream JSON from cursor; per-agent memory footprint ≤ arena + curl buffers (~2-5MB), not session-proportional
 
 ## §T TASKS
 id|status|task|cites
@@ -106,7 +140,7 @@ T19|x|`file_write` tool — workspace path restriction|V1
 T20|x|CLI REPL (`cli.c`) — read line, send to agent, print response|§I.cmd
 T21|x|CLI debug mode — raw req/resp JSON to stderr|§I.cmd
 T22|x|CLI session selection (create new / resume existing)|§I.cmd
-T23|x|Telegram poller (`telegram.c`) — getUpdates loop in thread|§I.api
+T23|x|Telegram poller (`telegram.c`) — getUpdates loop in thread, inbox_insert + signal daemon pipe|§I.api,V25
 T24|x|Telegram send + typing indicator (every 4s while working)|V11
 T25|x|Telegram offset persistence in DB (survives restart)|§I.api
 T26|x|Telegram chat_id → session routing|§I.api
@@ -120,7 +154,7 @@ T33|x|JS context replay on session reload|T32
 T34|x|heartbeat timer thread + system msg injection|§C
 T35|x|cron table + scheduler thread|§I.db
 T36|x|`cron_set`/`cron_list`/`cron_remove` tools|T35
-T37|x|`spawn_agent` tool — fork+exec sub-agent process|V3,V13
+T37|x|`spawn_agent` tool — post spawn request to dispatch queue; daemon forks sub-agent|V3,V13,V21
 T38|x|`db_query` tool — read-only SQL (SELECT only, reject mutations)|§I.tool
 T39|x|sub-agent lifecycle (limits, cleanup, crash isolation)|V3
 T40|x|token estimation (chars/4 heuristic)|V7
@@ -156,19 +190,50 @@ T69|x|Cron process actions (transactional inbox wrappers)|V16
 T70|x|Integration Test: parallel high-throughput network payloads|V16,V18
 T71|x|Web console updates (state metrics, lock holders, backlog depths)|§I.web
 T72|x|CLI terminal resume paths (echo unread inbox counts)|§I.cmd
-T74|x|Bind runtime parameters (`stale_lock_timeout`) to config|§I.file
+T74|x|~~Bind runtime parameters (`stale_lock_timeout`) to config~~ superseded by daemon model (V16)|§I.file
 T75|.|agent discovery — scan `agents/` dir, list available agents by name|V20
 T76|.|agent config loader — read `agents/<name>/agent.json`, merge w/ global config|V20,V12
 T77|.|system prompt loader — read `agents/<name>/system.md`, template vars `{session_id}`, `{date}`, `{agent_name}`|V20,T46
 T78|.|per-agent tool whitelist — filter tool registry by agent config|V20,§I.tool
 T79|.|session↔agent binding — session_create accepts agent_name, load config from disk at agent_run|V20
 T80|.|skill loader — scan `agents/<name>/skills/*.md`, inject into system prompt|V20
+T81|.|daemon main loop — epoll on signal_pipe + SIGCHLD self-pipe, fork/reap agents|V21,V24,V26
+T82|.|signal pipe — create at daemon start, inserters write session_id to wake daemon|V25
+T83|.|agent process entry — fork, landlock, setrlimit, drain inbox, run agent loop, exit|V21,V22,V23
+T84|.|landlock setup — per-agent workspace write, system read-only, deny network (curl via inherited fd?)|V22
+T85|.|response delivery — daemon reads `last_route`, dispatches to correct channel|V26
+T86|.|`last_route` tracking — agent updates on inbox consumption from newest source|V27,§D
+T87|.|daemon child tracking — map pid→session_id, enforce V24 (no dup fork)|V24
+T88|.|daemon spawn queue — sub-agent spawn requests from agent processes, daemon picks up + forks|V21,T37
+T89|.|test: daemon forks agent on inbox signal, reaps on exit, delivers response|V21,V26
+T90|.|context_build: skip errored/aborted assistant entries + their orphaned tool_calls|V28
+T91|.|LLM error retry loop — max 3 retries, re-send clean context (V28 stripped), write final error entry on exhaust|V29,V32
+T92|.|graceful child shutdown — daemon SIGTERM → forward to children, children attempt error entry before exit|V31
+T93|.|test: agent crash (simulated SIGKILL) → next fork recovers via V17 incomplete turn notice|V30
+T94|.|daemon startup recovery — scan non-idle sessions, kill orphans, evaluate state, re-track or reset|V34
+T95|.|`StopReason` enum in `types.h` — `STOP_REASON_STOP`, `LENGTH`, `TOOL_USE`, `ERROR`, `ABORTED`|V35
+T96|.|`map_stop_reason()` in `llm.c` — normalize provider `finish_reason` string → `StopReason` enum|V35
+T97|.|`Message.stop_reason` field — add to struct, populate from `LlmResponse.finish_reason` via T96|V35,§D
+T98|.|`entry_append` stores `stop_reason` in entry `data` JSON; `session_get_branch` reads it back|V35,§D
+T99|.|`context_build` V36 filtering — skip `error`/`aborted` assistant entries, synthesize orphaned tool_results|V36,V28
+T100|.|test: StopReason normalization — all provider finish_reason variants map correctly|V35
+T101|.|test: context_build skips errored entries, synthesizes tool_results for orphaned calls|V36
+T102|.|`shell_exec` namespace sandbox — `unshare(NEWUSER\|NEWNET\|NEWNS)`, remount ro, workspace rw, fallback if unavailable|V37
+T103|.|`http_fetch` JS binding — C function exposed to mquickjs; parse URL, check `allowed_hosts`, SSRF reject private IPs, call libcurl, return response|V38
+T104|.|per-agent `allowed_hosts` config — array of hostnames in `agent.json`, loaded into agent config, passed to `http_fetch` binding|V38,§I
+T105|.|tool result truncation in `context_build` — shared `truncate_result(buf, len)` util enforcing 50KB/2000 lines on tool_result messages before sending to LLM; full results stay in DB|V40
+T106|.|streaming request planner — `context_plan()` returns ordered entry ID list + cut point + token budget from SQLite (pass 1, no content loaded)|V41,V7,V8
+T107|.|`RequestStreamer` state machine — phases: preamble → entries (cursor step + reshape per-entry JSON) → tools → close; implements `CURLOPT_READFUNCTION` callback|V41
+T108|.|integrate streaming request into `agent.c` — replace `llm_build_request` (full-buffer) with `RequestStreamer`; verify retry resets cursor|V41,V2
 
 ## §B BUGS
 id|date|cause|fix
 
 ## §F FUTURE
+- Intra-turn steering: agent checks inbox between tool executions, injects new messages into context mid-loop (Pi model: steering = interrupt, follow-up = queue until stop); complicates V18 atomic consumption — design carefully
 - Session curation: mid-session compaction (summarize arbitrary entry ranges, re-parent tail), prune failed tool-call loops, automated "curation agent" that cleans up long-running sessions
 - Session recreation: compose new sessions from cherry-picked existing entries (join table `curated_branches(session_id, entry_id, position)`) — avoids copying, entries stay immutable, new summary entries fill gaps
 - Curation agent: background sub-agent that operates on another session's branch — identifies noise (repeated failures, dead-end tool calls), summarizes or removes them, produces a cleaner branch for continued work
 - Telegram/non-CLI sessions can't easily branch interactively — curation agent fills that gap
+- Seccomp-bpf: defense-in-depth syscall filtering for agent processes (block fork/execve/ptrace/mount — force all execution through shell_exec tool); both platforms have `CONFIG_SECCOMP_FILTER=y`; needs per-arch filter defs (ARM64 vs ARMv5) or `libseccomp`; add once daemon model stable and syscall needs empirically known
+- Filtered shell network: if `shell_exec` ever needs network (e.g. `git clone`), use `CLONE_NEWNET` + userns iptables with IP whitelist (resolved from `allowed_hosts`); currently unnecessary — JS `http_fetch` binding covers network needs without shell access

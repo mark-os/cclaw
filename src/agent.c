@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "agent.h"
 #include "context.h"
+#include "request_stream.h"
 #include "http.h"
 #include "shutdown.h"
 #include <stdio.h>
@@ -44,24 +45,24 @@ static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
     return result;
 }
 
-/* V2: call LLM with retry on 429 and 5xx. Returns status code, -1 on curl error. */
-static int llm_call_with_retry(const char *url, const char **headers,
-                               const char *body, HttpResponse *resp, int debug) {
+/* V41,V2: call LLM with streaming upload + retry on 429/5xx. Resets streamer on retry. */
+static int llm_call_with_retry_stream(const char *url, const char **headers,
+                                      RequestStreamer *rs, HttpResponse *resp, int debug) {
     int backoff_ms = INITIAL_BACKOFF_MS;
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        int status = http_post(url, headers, body, resp);
+        int status = http_post_stream(url, headers, rs_read_cb, rs, resp);
 
         if (status == 429 || (status >= 500 && status < 600)) {
             if (debug)
                 fprintf(stderr, "[DEBUG] HTTP %d, retry %d/%d\n", status, attempt + 1, MAX_RETRIES);
 
-            /* V2: respect Retry-After header */
             int wait_sec = resp->retry_after > 0 ? resp->retry_after : (backoff_ms / 1000);
             if (wait_sec < 1) wait_sec = 1;
             sleep((unsigned)wait_sec);
 
             http_response_free(resp);
+            rs_reset(rs);
             backoff_ms *= 2;
             continue;
         }
@@ -69,34 +70,51 @@ static int llm_call_with_retry(const char *url, const char **headers,
         return status;
     }
 
-    /* All retries exhausted */
     return -1;
 }
 
-/* T45: try primary provider, then fallback chain on 5xx/timeout (-1) */
-static int llm_call_with_fallback(Arena *a, const Config *cfg, const Message *msgs,
-                                  size_t msg_count, const ToolSchema *tools,
-                                  size_t tool_count, HttpResponse *resp, int debug) {
-    /* Try primary */
+/* T45,V41: try primary provider with streaming, then fallback chain on 5xx/timeout (-1) */
+static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
+                                         sqlite3 *db, int64_t session_id,
+                                         const ContextPlan *plan,
+                                         const ToolSchema *tools, size_t tool_count,
+                                         HttpResponse *resp, int debug) {
     char *url = build_url(a, cfg);
     if (!url) return -1;
 
-    char *req_json = llm_build_request(a, cfg, msgs, msg_count, tools, tool_count);
-    if (!req_json) return -1;
+    RequestStreamer rs;
+    if (rs_init(&rs, db, session_id, cfg, plan, tools, tool_count) != 0)
+        return -1;
 
-    if (debug) fprintf(stderr, "[DEBUG REQ] %s\n", req_json);
+    if (debug) {
+        /* For debug: stream entire request to stderr */
+        RequestStreamer dbg_rs;
+        rs_init(&dbg_rs, db, session_id, cfg, plan, tools, tool_count);
+        size_t cap = 4096, len = 0;
+        char *dbuf = malloc(cap);
+        if (dbuf) {
+            while (1) {
+                if (len + 1024 > cap) { cap *= 2; dbuf = realloc(dbuf, cap); if (!dbuf) break; }
+                size_t n = rs_read_cb(dbuf + len, 1, 1024, &dbg_rs);
+                if (n == 0) break;
+                len += n;
+            }
+            if (dbuf) { dbuf[len] = '\0'; fprintf(stderr, "[DEBUG REQ] %s\n", dbuf); free(dbuf); }
+        }
+        rs_cleanup(&dbg_rs);
+    }
 
     char auth_hdr[512];
     snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", cfg->provider.api_key);
     const char *headers[] = { "Content-Type: application/json", auth_hdr, NULL };
 
-    int status = llm_call_with_retry(url, headers, req_json, resp, debug);
+    int status = llm_call_with_retry_stream(url, headers, &rs, resp, debug);
+    rs_cleanup(&rs);
 
-    /* If primary succeeded, return immediately */
     if (status != -1)
         return status;
 
-    /* T45: try fallback providers (primary exhausted retries) */
+    /* T45: try fallback providers */
     for (size_t i = 0; i < cfg->fallback_count; i++) {
         if (debug)
             fprintf(stderr, "[DEBUG] primary failed, trying fallback %zu\n", i);
@@ -104,7 +122,6 @@ static int llm_call_with_fallback(Arena *a, const Config *cfg, const Message *ms
         const ProviderConfig *fb = &cfg->fallback_providers[i];
         if (!fb->base_url || !fb->api_key || !fb->model) continue;
 
-        /* Build URL for fallback */
         size_t blen = strlen(fb->base_url);
         if (blen > 0 && fb->base_url[blen - 1] == '/') blen--;
         const char *path = "/chat/completions";
@@ -114,19 +131,37 @@ static int llm_call_with_fallback(Arena *a, const Config *cfg, const Message *ms
         memcpy(fb_url, fb->base_url, blen);
         memcpy(fb_url + blen, path, plen + 1);
 
-        /* Build request with fallback model */
+        /* Build streamer with fallback config */
         Config fb_cfg = *cfg;
         fb_cfg.provider = *fb;
-        char *fb_req = llm_build_request(a, &fb_cfg, msgs, msg_count, tools, tool_count);
-        if (!fb_req) continue;
 
-        if (debug) fprintf(stderr, "[DEBUG REQ fallback %zu] %s\n", i, fb_req);
+        RequestStreamer fb_rs;
+        if (rs_init(&fb_rs, db, session_id, &fb_cfg, plan, tools, tool_count) != 0)
+            continue;
+
+        if (debug) {
+            RequestStreamer dbg_rs;
+            rs_init(&dbg_rs, db, session_id, &fb_cfg, plan, tools, tool_count);
+            size_t cap = 4096, len = 0;
+            char *dbuf = malloc(cap);
+            if (dbuf) {
+                while (1) {
+                    if (len + 1024 > cap) { cap *= 2; dbuf = realloc(dbuf, cap); if (!dbuf) break; }
+                    size_t n = rs_read_cb(dbuf + len, 1, 1024, &dbg_rs);
+                    if (n == 0) break;
+                    len += n;
+                }
+                if (dbuf) { dbuf[len] = '\0'; fprintf(stderr, "[DEBUG REQ fallback %zu] %s\n", i, dbuf); free(dbuf); }
+            }
+            rs_cleanup(&dbg_rs);
+        }
 
         char fb_auth[512];
         snprintf(fb_auth, sizeof(fb_auth), "Authorization: Bearer %s", fb->api_key);
         const char *fb_headers[] = { "Content-Type: application/json", fb_auth, NULL };
 
-        status = llm_call_with_retry(fb_url, fb_headers, fb_req, resp, debug);
+        status = llm_call_with_retry_stream(fb_url, fb_headers, &fb_rs, resp, debug);
+        rs_cleanup(&fb_rs);
         if (status != -1)
             return status;
     }
@@ -172,28 +207,21 @@ int agent_run(AgentContext *ctx) {
         memset(&llm_resp, 0, sizeof(llm_resp));
 
         for (int retry = 0; retry < MAX_LLM_RETRIES; retry++) {
-            /* Load branch and build context (re-load each retry for clean V28 state) */
-            int entry_count = 0;
-            Entry *entries = session_get_branch(ctx->db, ctx->session_id, &entry_count);
-            if (!entries && entry_count < 0) {
+            /* V41: plan entry IDs + cut point from SQLite (pass 1, no content loaded) */
+            ContextPlan plan;
+            int rc = context_plan(ctx->db, ctx->session_id, ctx->cfg, &plan);
+            if (rc != 0) {
                 arena_destroy(a);
                 return -1;
             }
 
-            Message *msgs = NULL;
-            int msg_count = 0;
-            int rc = context_build(entries, entry_count, ctx->cfg, &msgs, &msg_count);
-            entry_branch_free(entries, entry_count);
-            if (rc != 0 || msg_count == 0) {
-                arena_destroy(a);
-                return -1;
-            }
-
-            /* T45: call LLM with fallback chain */
+            /* T45,V41: call LLM with streaming request + fallback chain */
             HttpResponse resp = {0};
-            int status = llm_call_with_fallback(a, ctx->cfg, msgs, (size_t)msg_count,
-                                                ctx->tools, ctx->tool_count, &resp, ctx->debug);
-            context_free(msgs, msg_count);
+            int status = llm_call_with_fallback_stream(a, ctx->cfg, ctx->db,
+                                                       ctx->session_id, &plan,
+                                                       ctx->tools, ctx->tool_count,
+                                                       &resp, ctx->debug);
+            context_plan_free(&plan);
 
             if (ctx->debug && resp.data)
                 fprintf(stderr, "[DEBUG RESP] status=%d %s\n", status, resp.data);

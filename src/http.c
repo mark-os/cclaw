@@ -87,3 +87,42 @@ void http_response_free(HttpResponse *resp) {
     resp->len = 0;
     resp->cap = 0;
 }
+
+int http_post_stream(const char *url, const char **headers,
+                     HttpReadFn read_cb, void *read_data,
+                     HttpResponse *resp) {
+    memset(resp, 0, sizeof(*resp));
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return -1;
+
+    struct curl_slist *hlist = NULL;
+    if (headers) {
+        for (const char **h = headers; *h; h++)
+            hlist = curl_slist_append(hlist, *h);
+    }
+    /* Chunked transfer since content-length unknown */
+    hlist = curl_slist_append(hlist, "Transfer-Encoding: chunked");
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_cb);
+    curl_easy_setopt(curl, CURLOPT_READDATA, read_data);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hlist);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+
+    CURLcode rc = curl_easy_perform(curl);
+
+    long status = -1;
+    if (rc == CURLE_OK)
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+
+    curl_slist_free_all(hlist);
+    curl_easy_cleanup(curl);
+
+    return (rc == CURLE_OK) ? (int)status : -1;
+}

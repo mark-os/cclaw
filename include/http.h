@@ -17,6 +17,14 @@ typedef struct {
 int http_post(const char *url, const char **headers, const char *body,
               HttpResponse *resp);
 
+/* V41: POST with streaming upload via CURLOPT_READFUNCTION.
+ * read_cb/read_data provide the request body on demand (chunked transfer).
+ * Returns HTTP status code, or -1 on curl error. */
+typedef size_t (*HttpReadFn)(char *dest, size_t size, size_t nmemb, void *userdata);
+int http_post_stream(const char *url, const char **headers,
+                     HttpReadFn read_cb, void *read_data,
+                     HttpResponse *resp);
+
 /* Free response buffer. */
 void http_response_free(HttpResponse *resp);
 

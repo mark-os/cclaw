@@ -4,6 +4,7 @@
 #include "request_stream.h"
 #include "http.h"
 #include "shutdown.h"
+#include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -266,6 +267,43 @@ static int is_context_overflow(const char *body) {
             strstr(body, "context window") != NULL);
 }
 
+/* Build metadata JSON from LLM response based on config flags. Returns heap string or NULL. */
+static char *build_metadata(const Config *cfg, const LlmResponse *resp) {
+    if (!cfg || (!cfg->save_reasoning && !cfg->save_usage && !cfg->save_logprobs))
+        return NULL;
+
+    cJSON *meta = cJSON_CreateObject();
+
+    if (cfg->save_reasoning && resp->reasoning)
+        cJSON_AddStringToObject(meta, "reasoning", resp->reasoning);
+
+    if (cfg->save_usage && resp->usage.total_tokens > 0) {
+        cJSON *u = cJSON_CreateObject();
+        cJSON_AddNumberToObject(u, "prompt_tokens", resp->usage.prompt_tokens);
+        cJSON_AddNumberToObject(u, "completion_tokens", resp->usage.completion_tokens);
+        cJSON_AddNumberToObject(u, "total_tokens", resp->usage.total_tokens);
+        if (resp->usage.cache_read_tokens)
+            cJSON_AddNumberToObject(u, "cache_read_tokens", resp->usage.cache_read_tokens);
+        if (resp->usage.cache_write_tokens)
+            cJSON_AddNumberToObject(u, "cache_write_tokens", resp->usage.cache_write_tokens);
+        if (resp->usage.reasoning_tokens)
+            cJSON_AddNumberToObject(u, "reasoning_tokens", resp->usage.reasoning_tokens);
+        cJSON_AddItemToObject(meta, "usage", u);
+    }
+
+    if (cfg->save_logprobs && resp->logprobs_json) {
+        cJSON *lp = cJSON_Parse(resp->logprobs_json);
+        if (lp) cJSON_AddItemToObject(meta, "logprobs", lp);
+    }
+
+    /* Don't store empty metadata */
+    if (!meta->child) { cJSON_Delete(meta); return NULL; }
+
+    char *json = cJSON_PrintUnformatted(meta);
+    cJSON_Delete(meta);
+    return json;
+}
+
 int agent_run(AgentContext *ctx) {
     if (!ctx || !ctx->db || !ctx->cfg) return -1;
 
@@ -373,9 +411,11 @@ int agent_run(AgentContext *ctx) {
         /* If no tool calls — final response */
         if (llm_resp.tool_call_count == 0) {
             StopReason sr = map_stop_reason(llm_resp.finish_reason);
+            char *meta = build_metadata(ctx->cfg, &llm_resp);
             Message asst = {.role = ROLE_ASSISTANT,
                             .content = llm_resp.content ? strdup(llm_resp.content) : strdup(""),
-                            .stop_reason = sr};
+                            .stop_reason = sr,
+                            .metadata_json = meta};
             entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
 
             /* V45: plan-only retry — re-prompt once if response is just a plan */
@@ -385,11 +425,13 @@ int agent_run(AgentContext *ctx) {
                                     .content = (char *)PLAN_RETRY_PROMPT};
                 entry_append_with_turn(ctx->db, ctx->session_id, &reprompt, turn_id);
                 free(asst.content);
+                free(meta);
                 arena_destroy(a);
                 continue;
             }
 
             free(asst.content);
+            free(meta);
             arena_destroy(a);
             return 0;
         }
@@ -400,6 +442,7 @@ int agent_run(AgentContext *ctx) {
         asst.content = llm_resp.content ? strdup(llm_resp.content) : NULL;
         asst.stop_reason = map_stop_reason(llm_resp.finish_reason);
         asst.tool_call_count = llm_resp.tool_call_count;
+        asst.metadata_json = build_metadata(ctx->cfg, &llm_resp);
 
         /* T115: notify progress — intermediate assistant text */
         if (ctx->progress && asst.content && asst.content[0])
@@ -407,6 +450,7 @@ int agent_run(AgentContext *ctx) {
         asst.tool_calls = malloc(asst.tool_call_count * sizeof(ToolCall));
         if (!asst.tool_calls) {
             free(asst.content);
+            free(asst.metadata_json);
             arena_destroy(a);
             return -1;
         }
@@ -439,6 +483,7 @@ int agent_run(AgentContext *ctx) {
                 }
                 free(asst.tool_calls);
                 free(asst.content);
+                free(asst.metadata_json);
                 arena_destroy(a);
                 return -1;
             }
@@ -504,6 +549,7 @@ int agent_run(AgentContext *ctx) {
         }
         free(asst.tool_calls);
         free(asst.content);
+        free(asst.metadata_json);
         arena_destroy(a);
 
         /* V43: break agent loop on tool loop detection */

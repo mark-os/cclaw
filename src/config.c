@@ -135,6 +135,9 @@ Config *config_load(const char *path) {
         cfg->heartbeat_interval = json_int(root, "heartbeat_interval", cfg->heartbeat_interval);
         cfg->shell_timeout = json_int(root, "shell_timeout", cfg->shell_timeout);
         cfg->stale_lock_timeout = json_int(root, "stale_lock_timeout", cfg->stale_lock_timeout);
+        cfg->save_reasoning = json_int(root, "save_reasoning", cfg->save_reasoning);
+        cfg->save_usage = json_int(root, "save_usage", cfg->save_usage);
+        cfg->save_logprobs = json_int(root, "save_logprobs", cfg->save_logprobs);
 
         cJSON_Delete(root);
     }
@@ -152,6 +155,9 @@ Config *config_load(const char *path) {
     env_override_int(&cfg->heartbeat_interval, "CCLAW_HEARTBEAT_INTERVAL");
     env_override_int(&cfg->shell_timeout, "CCLAW_SHELL_TIMEOUT");
     env_override_int(&cfg->stale_lock_timeout, "CCLAW_STALE_LOCK_TIMEOUT");
+    env_override_int(&cfg->save_reasoning, "CCLAW_SAVE_REASONING");
+    env_override_int(&cfg->save_usage, "CCLAW_SAVE_USAGE");
+    env_override_int(&cfg->save_logprobs, "CCLAW_SAVE_LOGPROBS");
 
     return cfg;
 }

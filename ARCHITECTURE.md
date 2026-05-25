@@ -121,6 +121,40 @@ Env vars: `OPENROUTER_API_KEY`, `CCLAW_PROVIDER`, `CCLAW_MODEL`, `CCLAW_TELEGRAM
 
 ## Tools
 
+### Network Policy (V46)
+
+All outbound HTTP goes through libcurl. An `HttpPolicy` layer validates requests before connecting:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    HttpPolicy                           │
+│                                                         │
+│  1. blocked_hosts[] → deny (explicit blacklist)         │
+│  2. allowed_hosts[] → allow only these (whitelist)      │
+│     - empty = unrestricted (LLM, telegram)              │
+│     - empty = deny all (agent tools, when enforced)     │
+│  3. block_private → reject RFC1918, loopback,           │
+│     link-local, IPv6 ULA (SSRF protection)              │
+│                                                         │
+│  Applied per-caller:                                    │
+│  ┌─────────────────┬──────────────────────────────┐    │
+│  │ Caller          │ Policy                        │    │
+│  ├─────────────────┼──────────────────────────────┤    │
+│  │ LLM (http_post) │ NULL (unrestricted)           │    │
+│  │ Telegram        │ NULL (unrestricted)           │    │
+│  │ web_fetch tool  │ agent allowed_hosts + SSRF    │    │
+│  │ JS http_fetch   │ agent allowed_hosts + SSRF    │    │
+│  └─────────────────┴──────────────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Sanitization** (reusable across tools):
+- `html_strip_tags()` — remove HTML, collapse whitespace
+- `sanitize_homoglyphs()` — neutralize boundary-marker injection
+- Boundary wrapping — `<tool_result>...</tool_result>` tags
+
+`web_fetch` always sanitizes. JS `http_fetch` accepts `{sanitize: true}` option for the same treatment (default: raw response). Not ECMAScript, but essential for safe external content handling.
+
 ### Built-in (C)
 
 | Tool | Description |

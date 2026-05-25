@@ -19,7 +19,10 @@ CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and sessio
 
 - **Primary dev**: EC2 t4g.small (ARM64, Amazon Linux 2023)
 - **Secondary dev**: Chromebook (Linux container, ARM64 or x86_64)
-- **Eventual deploy target**: Pogoplug V4 (ARMv5TE, 128MB RAM, Debian Bookworm armel, kernel 6.19.9-kirkwood-tld-1, landlock NOT compiled in — recompile kernel to enable) — cross-compile when ready
+- **Production deploy**: any Linux box — small EC2 instances, embedded SoCs, old and new architectures (ARM64, ARMv7, ARMv5TE, x86_64, RISC-V)
+- **Known target**: Pogoplug V4 (ARMv5TE, 128MB RAM, Debian Bookworm armel, kernel 6.19.9-kirkwood-tld-1, landlock NOT compiled in — recompile kernel to enable)
+
+**Build/release considerations**: CClaw vendors everything except libcurl (dynamic link to system `libcurl.so`). Multi-arch releases need per-platform builds with the target's cross-compiler + matching libcurl. Plan: static binary where possible, or minimal `.deb`/`.tar.gz` per arch with curl as the sole runtime dependency.
 
 ## Memory Model
 

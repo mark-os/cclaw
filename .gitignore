@@ -1,5 +1,7 @@
-# Cloned reference repos (Pi, OpenClaw, nullclaw)
-reference/
+# Cloned reference repos (keep README and .md notes)
+reference/*/
+!reference/README.md
+!reference/*.md
 
 # Build artifacts
 /build/

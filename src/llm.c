@@ -121,6 +121,11 @@ char *llm_build_request(Arena *a, const Config *cfg, const Message *msgs,
     if (cfg->provider.max_tokens > 0)
         cJSON_AddNumberToObject(root, "max_tokens", cfg->provider.max_tokens);
 
+    if (cfg->save_logprobs) {
+        cJSON_AddBoolToObject(root, "logprobs", 1);
+        cJSON_AddNumberToObject(root, "top_logprobs", 3);
+    }
+
     /* Print to arena */
     char *printed = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -200,6 +205,44 @@ int llm_parse_response(Arena *a, const char *json, LlmResponse *out) {
         if (pt && cJSON_IsNumber(pt)) out->usage.prompt_tokens = pt->valueint;
         if (ct && cJSON_IsNumber(ct)) out->usage.completion_tokens = ct->valueint;
         if (tt && cJSON_IsNumber(tt)) out->usage.total_tokens = tt->valueint;
+
+        /* Cache tokens — multiple field locations across providers */
+        cJSON *ptd = cJSON_GetObjectItem(usage, "prompt_tokens_details");
+        if (ptd) {
+            cJSON *cr = cJSON_GetObjectItem(ptd, "cached_tokens");
+            cJSON *cw = cJSON_GetObjectItem(ptd, "cache_write_tokens");
+            if (cr && cJSON_IsNumber(cr)) out->usage.cache_read_tokens = cr->valueint;
+            if (cw && cJSON_IsNumber(cw)) out->usage.cache_write_tokens = cw->valueint;
+        }
+        /* DeepSeek direct uses top-level field */
+        cJSON *pch = cJSON_GetObjectItem(usage, "prompt_cache_hit_tokens");
+        if (pch && cJSON_IsNumber(pch)) out->usage.cache_read_tokens = pch->valueint;
+
+        /* Reasoning tokens (subset of completion) */
+        cJSON *ctd = cJSON_GetObjectItem(usage, "completion_tokens_details");
+        if (ctd) {
+            cJSON *rt = cJSON_GetObjectItem(ctd, "reasoning_tokens");
+            if (rt && cJSON_IsNumber(rt)) out->usage.reasoning_tokens = rt->valueint;
+        }
+    }
+
+    /* reasoning/thinking — try all known field names */
+    cJSON *reasoning = cJSON_GetObjectItem(message, "reasoning");
+    if (!reasoning || !cJSON_IsString(reasoning))
+        reasoning = cJSON_GetObjectItem(message, "reasoning_content");
+    if (!reasoning || !cJSON_IsString(reasoning))
+        reasoning = cJSON_GetObjectItem(message, "reasoning_text");
+    if (reasoning && cJSON_IsString(reasoning))
+        out->reasoning = arena_strdup(a, reasoning->valuestring);
+
+    /* logprobs */
+    cJSON *logprobs = cJSON_GetObjectItem(choice0, "logprobs");
+    if (logprobs && !cJSON_IsNull(logprobs)) {
+        char *lp_str = cJSON_PrintUnformatted(logprobs);
+        if (lp_str) {
+            out->logprobs_json = arena_strdup(a, lp_str);
+            free(lp_str);
+        }
     }
 
     cJSON_Delete(root);

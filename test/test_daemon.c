@@ -224,18 +224,17 @@ static void test_startup_recovery_running(void) {
 
     /* Force state to "running" (simulates daemon crash mid-agent) */
     sqlite3_exec(db,
-        "UPDATE sessions SET state='running', lock_holder='old-daemon' WHERE id=1;",
+        "UPDATE sessions SET state='running' WHERE id=1;",
         NULL, NULL, NULL);
 
     daemon_startup_recovery(db);
 
     /* Should be idle now */
     sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, "SELECT state, lock_holder FROM sessions WHERE id=?;", -1, &stmt, NULL);
+    sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, sid);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "idle") == 0);
-    assert(sqlite3_column_type(stmt, 1) == SQLITE_NULL);
     sqlite3_finalize(stmt);
 
     db_close(db);

@@ -85,12 +85,8 @@ int64_t db_next_turn_id(sqlite3 *db, int64_t session_id);
 /* V17: Append entry with explicit turn_id. Like entry_append but tags the entry. */
 int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *msg, int64_t turn_id);
 
-/* V16,V19: CAS session locking.
- * session_try_acquire: atomic idle→running transition. Returns 0 on success, -1 if not acquired.
- * session_release: atomic running→idle transition. Returns 0 on success, -1 if not held. */
-int session_try_acquire(sqlite3 *db, int64_t session_id, const char *lock_holder);
-int session_release(sqlite3 *db, int64_t session_id, const char *lock_holder);
-int session_refresh_lock(sqlite3 *db, int64_t session_id, const char *lock_holder);
+/* Set session state (idle, running, waiting, error). Returns 0 on success. */
+int session_set_state(sqlite3 *db, int64_t session_id, const char *state);
 
 /* V18: Inbox primitives */
 typedef struct {

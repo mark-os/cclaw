@@ -25,7 +25,7 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
     if (s_db) {
         sqlite3_stmt *stmt;
         const char *sql =
-            "SELECT s.id, s.name, s.state, s.lock_holder, s.error_count, s.updated_at,"
+            "SELECT s.id, s.name, s.state, s.updated_at,"
             " (SELECT COUNT(*) FROM inbox i WHERE i.session_id=s.id AND i.consumed=0)"
             " FROM sessions s ORDER BY s.updated_at DESC;";
         if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
@@ -36,14 +36,8 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
                 cJSON_AddStringToObject(s, "name", name ? name : "");
                 const char *state = (const char *)sqlite3_column_text(stmt, 2);
                 cJSON_AddStringToObject(s, "state", state ? state : "idle");
-                const char *holder = (const char *)sqlite3_column_text(stmt, 3);
-                if (holder)
-                    cJSON_AddStringToObject(s, "lock_holder", holder);
-                else
-                    cJSON_AddNullToObject(s, "lock_holder");
-                cJSON_AddNumberToObject(s, "error_count", (double)sqlite3_column_int(stmt, 4));
-                cJSON_AddNumberToObject(s, "updated_at", (double)sqlite3_column_int64(stmt, 5));
-                cJSON_AddNumberToObject(s, "inbox_depth", (double)sqlite3_column_int(stmt, 6));
+                cJSON_AddNumberToObject(s, "updated_at", (double)sqlite3_column_int64(stmt, 3));
+                cJSON_AddNumberToObject(s, "inbox_depth", (double)sqlite3_column_int(stmt, 4));
                 cJSON_AddItemToArray(sessions, s);
             }
             sqlite3_finalize(stmt);

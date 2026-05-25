@@ -193,27 +193,59 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
     return rc == 0 ? 0 : 1;
 }
 
+static void print_usage(void) {
+    printf("usage: cclaw [options] [config.json]\n"
+           "\n"
+           "modes (default: --cli):\n"
+           "  --cli              interactive CLI (stdin/stdout)\n"
+           "  --daemon           run as daemon (telegram, web, cron)\n"
+           "  --agent            run one agent turn (internal, used by daemon)\n"
+           "\n"
+           "options:\n"
+           "  -p <prompt>        single-turn: send prompt, print response, exit\n"
+           "  -s <id>            session id (short for --session-id=N)\n"
+           "  --new              create a new session\n"
+           "  --debug            enable debug output\n"
+           "  --help             show this help\n");
+}
+
 int main(int argc, char *argv[]) {
-    int cli_mode = 0;
+    int daemon_mode = 0;
     int agent_mode = 0;
     int debug_mode = 0;
     int new_session = 0;
     int64_t sa_session_id = -1;
     const char *config_path = NULL;
+    const char *prompt = NULL;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--cli") == 0) {
-            cli_mode = 1;
+        if (strcmp(argv[i], "--help") == 0) {
+            print_usage();
+            return 0;
+        } else if (strcmp(argv[i], "--cli") == 0) {
+            /* accepted for explicitness, cli is the default */
+        } else if (strcmp(argv[i], "--daemon") == 0) {
+            daemon_mode = 1;
         } else if (strcmp(argv[i], "--agent") == 0) {
             agent_mode = 1;
         } else if (strcmp(argv[i], "--debug") == 0) {
             debug_mode = 1;
         } else if (strcmp(argv[i], "--new") == 0) {
             new_session = 1;
+        } else if (strcmp(argv[i], "-p") == 0) {
+            if (++i >= argc) { fprintf(stderr, "error: -p requires an argument\n"); return 1; }
+            prompt = argv[i];
+        } else if (strcmp(argv[i], "-s") == 0) {
+            if (++i >= argc) { fprintf(stderr, "error: -s requires an argument\n"); return 1; }
+            sa_session_id = atoll(argv[i]);
         } else if (strncmp(argv[i], "--session-id=", 13) == 0) {
             sa_session_id = atoll(argv[i] + 13);
         } else if (argv[i][0] != '-') {
             config_path = argv[i];
+        } else {
+            fprintf(stderr, "error: unknown option '%s'\n", argv[i]);
+            print_usage();
+            return 1;
         }
     }
 
@@ -226,20 +258,10 @@ int main(int argc, char *argv[]) {
 
     shutdown_init();
 
-    if (agent_mode) {
-        if (sa_session_id < 0) {
-            fprintf(stderr, "error: --agent requires --session-id=N\n");
-            config_free(cfg);
-            return 1;
-        }
-        int rc = run_agent_turn(cfg, sa_session_id);
-        config_free(cfg);
-        return rc;
-    }
-
-    if (cli_mode) {
+    if (!daemon_mode && !agent_mode) {
         CliOpts opts = {0};
         opts.config_path = config_path;
+        opts.prompt = prompt;
         if (new_session)
             opts.session_id = 0;
         else if (sa_session_id > 0)
@@ -249,6 +271,17 @@ int main(int argc, char *argv[]) {
         int rc = cli_run(cfg, &opts);
         config_free(cfg);
         return rc == 0 ? 0 : 1;
+    }
+
+    if (agent_mode) {
+        if (sa_session_id < 0) {
+            fprintf(stderr, "error: --agent requires --session-id=N\n");
+            config_free(cfg);
+            return 1;
+        }
+        int rc = run_agent_turn(cfg, sa_session_id);
+        config_free(cfg);
+        return rc;
     }
 
     /* Daemon mode: epoll loop, fork agents on inbox signal, reap on exit */

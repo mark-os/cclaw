@@ -62,6 +62,18 @@ int daemon_signal_session(int64_t session_id) {
     return (n == sizeof(session_id)) ? 0 : -1;
 }
 
+/* Signal daemon from external process via named FIFO. */
+int daemon_signal_external(const char *db_path, int64_t session_id) {
+    char *path = daemon_pipe_path(db_path);
+    if (!path) return -1;
+    int fd = open(path, O_WRONLY | O_NONBLOCK);
+    free(path);
+    if (fd < 0) return -1;
+    ssize_t n = write(fd, &session_id, sizeof(session_id));
+    close(fd);
+    return (n == sizeof(session_id)) ? 0 : -1;
+}
+
 void daemon_signal_close(void) {
     if (g_signal_pipe[0] >= 0) { close(g_signal_pipe[0]); g_signal_pipe[0] = -1; }
     if (g_signal_pipe[1] >= 0) { close(g_signal_pipe[1]); g_signal_pipe[1] = -1; }
@@ -69,6 +81,56 @@ void daemon_signal_close(void) {
 
 int daemon_signal_fd(void) {
     return g_signal_pipe[0];
+}
+
+/* ── Named FIFO for daemon detection ────────────────────────────── */
+
+#include <sys/stat.h>
+
+char *daemon_pipe_path(const char *db_path) {
+    if (!db_path) return NULL;
+    size_t len = strlen(db_path);
+    char *path = malloc(len + 6); /* .pipe\0 */
+    if (!path) return NULL;
+    memcpy(path, db_path, len);
+    /* Replace .db suffix or append .pipe */
+    if (len > 3 && strcmp(db_path + len - 3, ".db") == 0)
+        strcpy(path + len - 3, ".pipe");
+    else
+        strcpy(path + len, ".pipe");
+    return path;
+}
+
+int daemon_is_running(const char *db_path) {
+    char *path = daemon_pipe_path(db_path);
+    if (!path) return -1;
+    int fd = open(path, O_WRONLY | O_NONBLOCK);
+    free(path);
+    if (fd >= 0) {
+        close(fd);
+        return 1;
+    }
+    return 0; /* ENXIO = no reader, ENOENT = no fifo */
+}
+
+int daemon_fifo_open(const char *db_path) {
+    char *path = daemon_pipe_path(db_path);
+    if (!path) return -1;
+    unlink(path); /* remove stale */
+    if (mkfifo(path, 0600) != 0 && errno != EEXIST) {
+        free(path);
+        return -1;
+    }
+    /* Open read end non-blocking (won't block waiting for writer) */
+    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    free(path);
+    return fd;
+}
+
+void daemon_fifo_close(int fd, const char *db_path) {
+    if (fd >= 0) close(fd);
+    char *path = daemon_pipe_path(db_path);
+    if (path) { unlink(path); free(path); }
 }
 
 /* ── SIGCHLD self-pipe ──────────────────────────────────────────── */
@@ -178,14 +240,12 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
     (void)cfg;
     if (child_has_session(session_id)) return -1;
 
-    /* Acquire session lock (idle→running) */
-    char holder[32];
-    snprintf(holder, sizeof(holder), "daemon-%d", (int)getpid());
-    if (session_try_acquire(db, session_id, holder) != 0) return -1;
+    /* Mark session running */
+    if (session_set_state(db, session_id, "running") != 0) return -1;
 
     pid_t pid = fork();
     if (pid < 0) {
-        session_release(db, session_id, holder);
+        session_set_state(db, session_id, "idle");
         return -1;
     }
     if (pid == 0) {
@@ -268,10 +328,8 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
         int64_t session_id;
         if (child_remove(pid, &session_id) != 0) continue;
 
-        /* Release session lock */
-        char holder[32];
-        snprintf(holder, sizeof(holder), "daemon-%d", (int)getpid());
-        session_release(db, session_id, holder);
+        /* Mark session idle */
+        session_set_state(db, session_id, "idle");
 
         /* T88: Check if this was a sub-agent from spawn_queue (blocking) */
         const char *sq_sql =
@@ -318,7 +376,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                     }
                     /* Transition parent waiting→idle */
                     const char *wake_sql =
-                        "UPDATE sessions SET state='idle', lock_holder=NULL WHERE id=? AND state='waiting';";
+                        "UPDATE sessions SET state='idle' WHERE id=? AND state='waiting';";
                     sqlite3_stmt *ws;
                     if (sqlite3_prepare_v2(db, wake_sql, -1, &ws, NULL) == SQLITE_OK) {
                         sqlite3_bind_int64(ws, 1, parent_sid);
@@ -389,17 +447,15 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
         char depth_arg[32];
         snprintf(depth_arg, sizeof(depth_arg), "--depth=%d", r->depth);
 
-        /* Acquire child session lock */
-        char holder[32];
-        snprintf(holder, sizeof(holder), "daemon-%d", (int)getpid());
-        if (session_try_acquire(db, child_sid, holder) != 0) {
+        /* Mark child session running */
+        if (session_set_state(db, child_sid, "running") != 0) {
             spawn_queue_mark(db, r->id, "error", 0);
             continue;
         }
 
         pid_t pid = fork();
         if (pid < 0) {
-            session_release(db, child_sid, holder);
+            session_set_state(db, child_sid, "idle");
             spawn_queue_mark(db, r->id, "error", 0);
             continue;
         }
@@ -447,7 +503,7 @@ void daemon_startup_recovery(sqlite3 *db) {
         sqlite3_finalize(run_stmt);
 
         sqlite3_exec(db,
-            "UPDATE sessions SET state='idle', lock_holder=NULL"
+            "UPDATE sessions SET state='idle'"
             " WHERE state='running';", NULL, NULL, NULL);
 
         for (int i = 0; i < nrunning; i++)
@@ -476,7 +532,7 @@ void daemon_startup_recovery(sqlite3 *db) {
                 "error: sub-agent process lost during daemon restart");
         }
         /* Transition to idle (daemon loop will fork if inbox has items) */
-        const char *upd = "UPDATE sessions SET state='idle', lock_holder=NULL"
+        const char *upd = "UPDATE sessions SET state='idle'"
             " WHERE id=? AND state='waiting';";
         sqlite3_stmt *us;
         if (sqlite3_prepare_v2(db, upd, -1, &us, NULL) == SQLITE_OK) {
@@ -503,10 +559,13 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
         return -1;
     }
 
+    int fifo_fd = daemon_fifo_open(cfg->db_path);
+
     int epfd = epoll_create1(0);
     if (epfd < 0) {
         daemon_signal_close();
         sigchld_pipe_close();
+        if (fifo_fd >= 0) daemon_fifo_close(fifo_fd, cfg->db_path);
         return -1;
     }
 
@@ -517,6 +576,11 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
 
     ev.data.fd = g_chld_pipe[0];
     epoll_ctl(epfd, EPOLL_CTL_ADD, g_chld_pipe[0], &ev);
+
+    if (fifo_fd >= 0) {
+        ev.data.fd = fifo_fd;
+        epoll_ctl(epfd, EPOLL_CTL_ADD, fifo_fd, &ev);
+    }
 
     /* T94/V34: Startup recovery — children already dead after daemon restart */
     daemon_startup_recovery(db);
@@ -535,10 +599,12 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
                 char buf[64];
                 while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
                 reap_children(cfg, db);
-            } else if (events[i].data.fd == g_signal_pipe[0]) {
-                /* Read session_ids from signal pipe */
+            } else if (events[i].data.fd == g_signal_pipe[0] ||
+                       events[i].data.fd == fifo_fd) {
+                /* Read session_ids from signal pipe or external FIFO */
+                int rfd = events[i].data.fd;
                 int64_t sid;
-                while (read(g_signal_pipe[0], &sid, sizeof(sid)) == sizeof(sid)) {
+                while (read(rfd, &sid, sizeof(sid)) == sizeof(sid)) {
                     /* Check inbox has pending items before forking */
                     if (inbox_count(db, sid) > 0) {
                         fork_agent(cfg, db, sid);
@@ -568,6 +634,7 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     close(epfd);
     sigchld_pipe_close();
     daemon_signal_close();
+    daemon_fifo_close(fifo_fd, cfg->db_path);
     g_child_count = 0;
     return 0;
 }

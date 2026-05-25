@@ -177,6 +177,9 @@ Config *agent_config_merge(const Config *global, const AgentConfig *ac) {
     cfg->shell_timeout = global->shell_timeout;
     cfg->stale_lock_timeout = global->stale_lock_timeout;
     cfg->debug = global->debug;
+    cfg->save_reasoning = global->save_reasoning;
+    cfg->save_usage = global->save_usage;
+    cfg->save_logprobs = global->save_logprobs;
 
     /* Copy fallback providers */
     if (global->fallback_count > 0 && global->fallback_providers) {

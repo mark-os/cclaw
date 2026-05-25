@@ -38,10 +38,12 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - tool: `file_write` — write file (workspace-restricted)
 - tool: `js_eval` — execute JS in sandboxed mquickjs
 - tool: `js_define_tool` — register JS fn as callable tool (session-persistent)
-- js binding: `http_fetch(url, {method, headers, body})` — C-provided, enforces agent `allowed_hosts` + SSRF protection; sole network path from JS runtime
+- js binding: `http_fetch(url, {method, headers, body, sanitize})` — C-provided, enforces agent `allowed_hosts` + SSRF protection; `sanitize: true` strips HTML + homoglyphs + boundary wraps (same as web_fetch); sole network path from JS runtime
 - tool: `spawn_agent` — fork sub-agent process (accepts `background` param, default blocking)
 - tool: `db_query` — execute read-only SQL against cclaw.db (SELECT only, no mutations)
 - tool: `web_fetch` — HTTP GET URL, extract text from HTML, external input protection wrapper
+- tool: `soul_edit` — replace agent's soul text (persona/tone); takes effect next turn
+- tool: `memory_set` — update agent's memory text (durable facts); takes effect next turn
 - db: `cclaw.db` — SQLite 3.53, WAL, FTS5, JSON functions
 
 ## §D DATA
@@ -68,10 +70,21 @@ inbox table: `id`, `session_id`, `source TEXT`, `payload TEXT`, `created_at`, `c
 sessions table: `id`, `name`, `leaf_id`, `agent_name TEXT`, `state` (idle|running|waiting), `error_count`, `last_route TEXT`, `created_at`, `updated_at`
 
 Agent config on disk (`agents/<name>/`):
-- `agent.json` — model override, tool whitelist, max_iterations, workspace path
-- `system.md` — system prompt template (supports `{session_id}`, `{date}`, `{agent_name}`)
+- `agent.json` — model override, tool whitelist, max_iterations, workspace path, allowed_hosts
 - `skills/` — per-agent skill files (markdown, injected into system prompt)
-- `notes/` — persistent knowledge files agent can `file_read`
+
+Agent state in DB (replaces filesystem-based MEMORY.md, SOUL.md, system.md, HEARTBEAT.md):
+
+agents table: `id`, `name TEXT UNIQUE`, `config TEXT` (JSON — model, tools, limits, allowed_hosts), `system_prompt TEXT` (template, supports `{session_id}`, `{date}`, `{agent_name}`), `soul TEXT` (persona/tone — agent-editable, injected into system prompt), `memory TEXT` (durable facts — agent-editable, injected into system prompt), `heartbeat TEXT` (proactive task instructions, read on heartbeat turns), `created_at`, `updated_at`
+
+Design:
+- Agent identity (soul, memory, prompts) lives in SQLite → portable by copying DB, no filesystem sync
+- Agent can self-modify `soul` and `memory` via tools (`soul_edit`, `memory_set`) — just DB writes
+- System prompt assembled at turn start: `system_prompt` template + `soul` + `memory` + skills
+- `agents/<name>/agent.json` on disk is the bootstrap/import path — loaded once to seed the DB row; DB is authoritative after that
+- Workspace is just a working directory for file tools — no magic filenames, no special semantics
+- `/tmp/cclaw-<session_id>/` — ephemeral per-session scratch (tool output overflow)
+- Writable paths under landlock/namespace: workspace + `/tmp/cclaw-<session_id>/` + DB file
 
 ## §V INVARIANTS
 V1: ∀ tool exec (`file_read`, `file_write`) → path ! ∈ workspace dir for that agent
@@ -95,7 +108,7 @@ V18: ∀ inbox message → consumed exactly once into session entries via single
 V19: ∀ session state transition → executed via strict atomic UPDATE with WHERE clauses targeting expected states to prevent TOCTOU
 V20: ∀ session → `agent_name` identifies agent; config loaded from `agents/<name>/` on disk; fallback to global config when NULL
 V21: ∀ agent execution → daemon forks dedicated process; daemon ⊥ executes LLM logic
-V22: ∀ agent process → landlock applied at fork: write restricted to agent workspace; read-only `/usr`, `/etc`, curl CA bundle; graceful fallback if landlock unavailable (Pogoplug kernel 6.19.9 has `CONFIG_SECURITY_LANDLOCK=n` — log warning, continue without)
+V22: ∀ agent process → landlock applied at fork: write restricted to agent workspace + `/tmp/cclaw-<session_id>/`; read-only `/usr`, `/etc`, curl CA bundle; graceful fallback if landlock unavailable (Pogoplug kernel 6.19.9 has `CONFIG_SECURITY_LANDLOCK=n` — log warning, continue without)
 V23: ∀ agent process → `setrlimit` at fork: RLIMIT_AS (256MB default), RLIMIT_CPU (300s default), RLIMIT_NOFILE (64)
 V24: ∀ session → at most 1 active agent process; daemon forks only when state == "idle"; "running" and "waiting" block new forks
 V25: ∀ channel inserter (Telegram, cron, sub-agent) → inbox_insert + write session_id to signal pipe; ⊥ run agent logic
@@ -113,12 +126,13 @@ V36: ∀ context_build → skip assistant entries w/ `stop_reason ∈ {error, ab
 V37: ∀ `shell_exec` child → `unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS)` before exec; remount `/` read-only, bind-mount workspace read-write; no network by default; per-agent `"shell_network": true` skips `CLONE_NEWNET`; graceful fallback if `unshare()` fails (log warning, run unsandboxed)
 V38: ∀ JS runtime (`js_eval`, `js_define_tool`) → C-provided `http_fetch(url, opts)` binding is sole network path; binding enforces per-agent `allowed_hosts` allowlist + SSRF protection (reject private IPs) before calling libcurl; no allowlist = no network from JS
 V39: ∀ `spawn_agent` in CLI mode → fork+exec+waitpid in-process (blocking) or fork+continue (background); CLI has no daemon — ⊥ use "exit into waiting state" pattern; tool_subagent must detect execution mode and branch accordingly
-V40: ∀ context_build → tool_result content truncated to 50KB / 2000 lines (whichever first) when building LLM messages; full result preserved in DB entry (searchable via FTS5); truncated results get suffix `[truncated — {N} bytes / {M} lines omitted, use search to find full output]`
+V40: ∀ tool_result content > 50KB or 2000 lines → truncate before storing in DB entry; full output written to `/tmp/cclaw-<session_id>/<tool_call_id>.out`; truncated result gets suffix `[truncated — showing last {N} lines of {M}. Full output: /tmp/cclaw-<session_id>/<tool_call_id>.out]`; agent can `file_read` the full output path if needed; temp dir cleaned on session idle timeout or daemon restart
 V41: ∀ LLM request → built via `CURLOPT_READFUNCTION` streaming from SQLite cursor; ⊥ load full session into memory; two-pass: (1) plan entry IDs + cut point, (2) stream JSON from cursor; per-agent memory footprint ≤ arena + curl buffers (~2-5MB), not session-proportional
 V42: ∀ heartbeat → daemon triggers agent run w/ heartbeat prompt; agent reads `HEARTBEAT.md` if present, acts on tasks; response `HEARTBEAT_OK` = sentinel (suppressed, ⊥ delivered to channel); any other response → deliver to channel via `last_route`
 V43: ∀ tool dispatch → track last N calls (name + args hash + result hash); if same call repeated ≥ 5× w/ no progress → inject warning into tool_result; ≥ 10× → force-stop agent loop w/ error ("tool loop detected")
 V44: ∀ Telegram group msg → if agent response contains `[NO_REPLY]` → suppress delivery (⊥ send to chat); agent decides relevance per system prompt guidance
 V45: ∀ agent response → if `stop_reason == stop` & no tool_calls & response is plan-only (bullet list + "I'll do X" promise, no tool action taken) → re-prompt once: "Do not restate the plan. Act now: take the first concrete tool action. If blocked, state the blocker in one sentence."
+V46: ∀ outbound HTTP (libcurl) → `http_policy` layer validates hostname before connect: (1) check deny list (blocked_hosts[]), (2) check allow list (allowed_hosts[] — empty = allow all for LLM/telegram, deny all for agent tools), (3) block RFC1918/loopback/link-local IPs (SSRF); policy configured per-caller: LLM+telegram = unrestricted (trusted endpoints), web_fetch+js_http_fetch = agent's allowed_hosts + SSRF block; `web_fetch` always sanitizes (strip HTML + homoglyph + boundary wrap); JS `http_fetch` accepts `{sanitize: true}` option for same treatment
 
 ## §T TASKS
 id|status|task|cites
@@ -236,6 +250,15 @@ T112|x|tool loop detection — hash(name+args) history ring buffer (last 30 call
 T113|x|`[NO_REPLY]` suppression — Telegram group delivery checks response for marker; if present, skip `sendMessage`; system prompt instructs agent when to use it|V44
 T114|x|planning-only retry — after final assistant response w/ no tool_calls, detect plan-only pattern (bullets + promise verbs, no action); re-prompt once w/ act-now instruction; max 1 retry|V45
 T115|x|CLI mid-turn progress — always-on: stream intermediate assistant text + tool call names/args as they execute; tool results truncated aggressively for display (shorter than V40 LLM limit); `--debug` adds raw JSON req/resp on top|§I.cmd
+T116| |`HttpPolicy` layer — struct w/ allowed_hosts[], blocked_hosts[], block_private flag; `http_check_policy(url, policy)` validates before curl; integrate into `http_get` (web_fetch), JS `http_fetch` binding; LLM/telegram calls pass NULL policy (unrestricted)|V46
+T117| |JS `http_fetch` sanitize option — `http_fetch(url, {sanitize: true})` applies html_strip_tags + sanitize_homoglyphs + boundary wrap (reuse web_fetch logic); default false (raw response)|V46,V38
+T118| |tool result write-time truncation — truncate at append time (not context_build); full output to `/tmp/cclaw-<session_id>/<tool_call_id>.out`; reference path in truncation notice; agent can `file_read` the path; update landlock to allow `/tmp/cclaw-*` write; clean temp dir on session idle or daemon restart|V40,V22
+T119| |`agents` table — schema: id, name, config(JSON), system_prompt, soul, memory, heartbeat, created_at, updated_at; seed from `agents/<name>/agent.json` + `system.md` on first reference; DB authoritative after seed|§D
+T120| |`soul_edit` tool — UPDATE agents SET soul=? WHERE name=?; agent can modify its own persona; injected into system prompt next turn|§I
+T121| |`memory_set` tool — UPDATE agents SET memory=? WHERE name=?; agent can store durable facts; injected into system prompt next turn|§I
+T122| |system prompt assembly — at turn start: render template (system_prompt) + inject soul + inject memory + inject skills; replace current file-based `config_render_system_prompt`|§D,§I
+T123| |prompt cache hints — send provider-appropriate cache markers in LLM requests: Anthropic `cache_control` on system/last-tool/last-user; OpenAI `prompt_cache_key` + `prompt_cache_retention`; DeepSeek prefix caching (automatic but benefits from stable message ordering); configurable per-provider in config|§C
+T124| |entry stats columns — store `token_estimate INTEGER` (chars/4) on each entry at insert time; allows `context_plan` to sum tokens via index scan without loading JSON data; also store `content_bytes INTEGER` for quick size checks; avoids full-row reads during preflight planning pass (V41)|V41,§D
 
 ## §B BUGS
 id|date|cause|fix
@@ -249,3 +272,10 @@ id|date|cause|fix
 - Telegram/non-CLI sessions can't easily branch interactively — curation agent fills that gap
 - Seccomp-bpf: defense-in-depth syscall filtering for agent processes (block fork/execve/ptrace/mount — force all execution through shell_exec tool); both platforms have `CONFIG_SECCOMP_FILTER=y`; needs per-arch filter defs (ARM64 vs ARMv5) or `libseccomp`; add once daemon model stable and syscall needs empirically known
 - Filtered shell network: if `shell_exec` ever needs network (e.g. `git clone`), use `CLONE_NEWNET` + userns iptables with IP whitelist (resolved from `allowed_hosts`); currently unnecessary — JS `http_fetch` binding covers network needs without shell access
+- Multi-arch releases: GitHub Actions matrix with Docker containers (arm64, armhf, amd64) producing tarballs; binary + "install libcurl" README; not Zig-style cross-compile — native build per target with system libcurl; ARMv5TE (Pogoplug) likely needs dedicated Debian armel container
+- Cost tracking: save OpenRouter `cost` field when present; for direct providers, compute from per-model rate table (input/output/cache_read/cache_write $/M tokens); store per-entry in metadata; aggregate per-session and per-agent; expose via web dashboard and `db_query`
+- Extension system via MicroQuickJS: extensions are JS modules loaded at session/agent start; can register tools, hook events (before/after tool call, before LLM request), modify system prompt; loaded from `agents/<name>/extensions/*.js` or global `extensions/`; extensions have access to `http_fetch` (with policy) and filesystem (workspace-scoped); replaces need for native C plugin system
+- MCP extension: reference JS extension that speaks Model Context Protocol over stdio/HTTP; discovers remote tools, registers them via the extension API; ships as a built-in example extension
+- OpenAI Device Code auth: OAuth 2.0 Device Authorization Grant (RFC 8628) for ChatGPT/Codex subscription access without API key; show URL + code → user approves on phone/laptop → poll for token; works headless (no browser callback); store access+refresh tokens in DB; auto-refresh on expiry; identify as `cclaw/<version>` User-Agent
+- System prompt in DB: move system prompts from `agents/<name>/system.md` to a `prompts` table (id, name, template TEXT, created_at); template vars `{session_id}`, `{date}`, `{agent_name}`; agents reference prompt by name/id in config; allows runtime editing without filesystem access; keep file-based loading as fallback/import path
+- Workspace model refinement: each agent owns `./workspace/<agent_name>/`; agents can share workspace via config (`"workspace": "other_agent_name"`); no global "default" workspace; `MEMORY.md` lives in workspace (agent reads/writes); `SOUL.md` optional persona file; `/tmp/cclaw-<session_id>/` always writable (tool overflow, scratch); workspace + tmp dir are the only writable paths under landlock/namespace

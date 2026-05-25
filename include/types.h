@@ -44,6 +44,7 @@ typedef struct {
     size_t tool_call_count;
     ToolResult *tool_result; /* tool role msgs only, NULL otherwise */
     StopReason stop_reason; /* V35: assistant msgs only, STOP_REASON_NONE otherwise */
+    char *metadata_json;    /* optional: reasoning, usage, logprobs (raw JSON object) */
 } Message;
 
 /* V14: session tree entry — id + parent_id for branching structure */
@@ -90,6 +91,9 @@ typedef struct {
     int shell_timeout;      /* default shell_exec timeout in seconds (0 = 30) */
     int stale_lock_timeout; /* janitor stale lock threshold in seconds (0 = 300) */
     int debug;              /* --debug: dump raw LLM req/resp JSON to stderr */
+    int save_reasoning;     /* store reasoning/thinking tokens in entry metadata */
+    int save_usage;         /* store token usage in entry metadata */
+    int save_logprobs;      /* store logprobs in entry metadata */
 } Config;
 
 #endif

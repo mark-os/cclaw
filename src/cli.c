@@ -12,31 +12,11 @@
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
 #include "shutdown.h"
+#include "daemon.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <pthread.h>
-
-/* V16: Keep-alive thread context */
-typedef struct {
-    sqlite3 *db;
-    int64_t session_id;
-    const char *lock_holder;
-    volatile int stop;
-} KeepAliveCtx;
-
-/* Refresh lock every 60s to prevent janitor reclaim (stale timeout = 300s) */
-static void *keepalive_thread(void *arg) {
-    KeepAliveCtx *ctx = (KeepAliveCtx *)arg;
-    while (!ctx->stop) {
-        for (int i = 0; i < 60 && !ctx->stop; i++)
-            sleep(1);
-        if (!ctx->stop)
-            session_refresh_lock(ctx->db, ctx->session_id, ctx->lock_holder);
-    }
-    return NULL;
-}
 
 /* T115: display truncation limits (aggressive — shorter than V40 LLM limit) */
 #define CLI_DISPLAY_MAX_BYTES 1024
@@ -206,6 +186,9 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
         return -1;
     }
 
+    /* Mark session as running — CLI owns it */
+    session_set_state(db, session_id, "running");
+
     /* T72: Echo unread inbox count on session resume */
     int unread = inbox_count(db, session_id);
     if (unread > 0)
@@ -244,9 +227,11 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
     if (cli_sp_len > 0) cli_self_path[cli_sp_len] = '\0';
     else strcpy(cli_self_path, "./build/cclaw");
 
+    int has_daemon = daemon_is_running(cfg->db_path);
     AgentLaunchCtx sa_ctx = {.db = db, .session_id = session_id,
                              .self_path = cli_self_path,
-                             .config_path = opts->config_path};
+                             .config_path = opts->config_path,
+                             .daemon_mode = has_daemon > 0};
     tool_launch_agent_register(&reg, &sa_ctx);
 
     /* Create persistent JS runtime and replay session tools */
@@ -270,9 +255,38 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
     }
     entry_branch_free(branch, branch_count);
 
-    /* V16: Build lock holder identity */
-    char lock_holder[64];
-    snprintf(lock_holder, sizeof(lock_holder), "cli-%d", (int)getpid());
+    /* Single-turn mode: -p <prompt> */
+    if (opts->prompt) {
+        Message user_msg = {.role = ROLE_USER, .content = (char *)opts->prompt};
+        entry_append(db, session_id, &user_msg);
+
+        AgentContext ctx = {0};
+        ctx.db = db;
+        ctx.session_id = session_id;
+        ctx.cfg = cfg;
+        ctx.dispatch = cli_dispatch;
+        ctx.dispatch_data = &reg;
+        ctx.tools = schemas;
+        ctx.tool_count = tool_count;
+        ctx.debug = cfg->debug;
+        ctx.progress = cli_progress;
+
+        int rc = agent_run(&ctx);
+        if (rc != 0)
+            fprintf(stderr, "error: agent failed\n");
+        else
+            print_response(db, session_id);
+
+        session_set_state(db, session_id, "idle");
+        if (has_daemon > 0)
+            daemon_signal_external(cfg->db_path, session_id);
+        tools_free(&reg);
+        js_runtime_destroy(js_rt);
+        agent_config_free(ac);
+        free(agent_name);
+        db_close(db);
+        return rc == 0 ? 0 : -1;
+    }
 
     printf("cclaw cli (type 'exit' or Ctrl-D to quit)\n");
 
@@ -294,18 +308,6 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
 
         if (line[0] == '\0') continue;
         if (strcmp(line, "exit") == 0 || strcmp(line, "quit") == 0) break;
-
-        /* V16: Acquire session lock before running agent */
-        if (session_try_acquire(db, session_id, lock_holder) != 0) {
-            fprintf(stderr, "error: cannot acquire session lock (in use)\n");
-            continue;
-        }
-
-        /* Start keep-alive thread */
-        KeepAliveCtx ka_ctx = {.db = db, .session_id = session_id,
-                               .lock_holder = lock_holder, .stop = 0};
-        pthread_t ka_thread;
-        pthread_create(&ka_thread, NULL, keepalive_thread, &ka_ctx);
 
         /* Append user message */
         Message user_msg = {.role = ROLE_USER, .content = line};
@@ -330,14 +332,12 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
         } else {
             print_response(db, session_id);
         }
-
-        /* Stop keep-alive and release lock */
-        ka_ctx.stop = 1;
-        pthread_join(ka_thread, NULL);
-        session_release(db, session_id, lock_holder);
     }
 
     free(line);
+    session_set_state(db, session_id, "idle");
+    if (has_daemon > 0)
+        daemon_signal_external(cfg->db_path, session_id);
     js_runtime_destroy(js_rt);
     tools_free(&reg);
     agent_config_free(ac);

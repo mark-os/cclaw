@@ -16,6 +16,9 @@ typedef struct {
     int prompt_tokens;
     int completion_tokens;
     int total_tokens;
+    int cache_read_tokens;   /* prompt cache hits (OpenAI/Anthropic/DeepSeek) */
+    int cache_write_tokens;  /* prompt cache writes */
+    int reasoning_tokens;    /* thinking/reasoning tokens (subset of completion) */
 } LlmUsage;
 
 /* Parsed LLM response */
@@ -25,6 +28,8 @@ typedef struct {
     size_t tool_call_count;
     LlmUsage usage;
     char *finish_reason;    /* arena-allocated */
+    char *reasoning;        /* arena-allocated thinking/reasoning text, NULL if absent */
+    char *logprobs_json;    /* arena-allocated raw logprobs JSON, NULL if absent */
 } LlmResponse;
 
 /* Build OpenAI-compatible chat completions request JSON.

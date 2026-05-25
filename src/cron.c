@@ -2,12 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "cron.h"
 #include "db.h"
-#include "agent.h"
-#include "tools.h"
-#include "tool_shell.h"
-#include "tool_file.h"
-#include "tool_js.h"
-#include "tool_cron.h"
+#include "daemon.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -197,64 +192,10 @@ void cron_list_free(CronJob *jobs, int count) {
     free(jobs);
 }
 
-/* Tool dispatch via registry (same pattern as cli.c) */
-static char *cron_dispatch(const char *name, const char *arguments, void *user_data) {
-    ToolRegistry *reg = (ToolRegistry *)user_data;
-    ToolEntry *e = tools_lookup(reg, name);
-    if (!e) {
-        char *err = malloc(128);
-        if (err) snprintf(err, 128, "error: unknown tool '%s'", name);
-        return err;
-    }
-    return e->handler(arguments, e->user_data);
-}
-
-/* T69/V16: Execute a single due cron job via transactional inbox + CAS lock */
+/* Insert cron task into inbox and signal daemon to process */
 static void execute_job(int64_t session_id, const char *task) {
-    /* V18: Insert task into inbox (decoupled from agent execution) */
     inbox_insert(cron_db, session_id, "cron", task);
-
-    /* V16: Try to acquire session lock via CAS */
-    char lock_holder[64];
-    snprintf(lock_holder, sizeof(lock_holder), "cron-%d", (int)getpid());
-
-    if (session_try_acquire(cron_db, session_id, lock_holder) != 0) {
-        /* Session already locked — message stays in inbox for active handler */
-        return;
-    }
-
-    /* V18: Consume inbox items into session entries */
-    inbox_consume_into_entries(cron_db, session_id, 100);
-
-    /* Set up tool registry */
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_shell_register(&reg, cron_cfg->shell_timeout, cron_cfg->workspace, 0);
-    tool_file_read_register(&reg, cron_cfg->workspace);
-    tool_file_write_register(&reg, cron_cfg->workspace);
-    tool_js_eval_register(&reg, NULL);
-
-    ToolCronCtx cron_ctx = {.db = cron_db, .session_id = session_id};
-    tool_cron_register(&reg, &cron_ctx);
-
-    size_t tool_count = 0;
-    const ToolSchema *schemas = tools_schemas(&reg, &tool_count);
-
-    AgentContext ctx = {
-        .db = cron_db,
-        .session_id = session_id,
-        .cfg = cron_cfg,
-        .dispatch = cron_dispatch,
-        .dispatch_data = &reg,
-        .tools = schemas,
-        .tool_count = tool_count,
-        .debug = cron_cfg->debug,
-    };
-    agent_run(&ctx);
-    tools_free(&reg);
-
-    /* V16: Release session lock */
-    session_release(cron_db, session_id, lock_holder);
+    daemon_signal_session(session_id);
 }
 
 /* Check and execute due cron jobs */

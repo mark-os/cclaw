@@ -14,9 +14,6 @@ static const char *SCHEMA_SQL =
     "  parent_session_id INTEGER DEFAULT -1,"
     "  depth INTEGER NOT NULL DEFAULT 0,"
     "  state TEXT NOT NULL DEFAULT 'idle',"
-    "  lock_holder TEXT,"
-    "  lock_acquired_at INTEGER,"
-    "  error_count INTEGER NOT NULL DEFAULT 0,"
     "  last_route TEXT,"
     "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
     "  updated_at INTEGER NOT NULL DEFAULT (unixepoch())"
@@ -295,6 +292,12 @@ static char *serialize_entry_data(const Message *msg) {
     if (msg->role == ROLE_ASSISTANT && msg->stop_reason != STOP_REASON_NONE) {
         const char *sr = stop_reason_to_str(msg->stop_reason);
         if (sr) cJSON_AddStringToObject(obj, "stop_reason", sr);
+    }
+
+    /* Store metadata (reasoning, usage, logprobs) if present */
+    if (msg->metadata_json) {
+        cJSON *meta = cJSON_Parse(msg->metadata_json);
+        if (meta) cJSON_AddItemToObject(obj, "metadata", meta);
     }
 
     char *json = cJSON_PrintUnformatted(obj);
@@ -730,46 +733,24 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
     return entry_id;
 }
 
-/* V16,V19: Atomic CAS acquire — idle→running with lock_holder */
-int session_try_acquire(sqlite3 *db, int64_t session_id, const char *lock_holder) {
+/* State transition with concurrency guard. Only valid transitions succeed:
+ * idle → running, running → idle|waiting|error, waiting → idle, error → idle */
+int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     const char *sql =
-        "UPDATE sessions SET state='running', lock_holder=?, lock_acquired_at=unixepoch(), updated_at=unixepoch()"
-        " WHERE id=? AND state='idle' AND lock_holder IS NULL;";
+        "UPDATE sessions SET state=?, updated_at=unixepoch()"
+        " WHERE id=? AND ("
+        "  (? = 'running' AND state = 'idle') OR"
+        "  (? IN ('idle','waiting','error') AND state = 'running') OR"
+        "  (? = 'idle' AND state IN ('waiting','error'))"
+        ");";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
-    sqlite3_bind_text(stmt, 1, lock_holder, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, state, -1, SQLITE_STATIC);
     sqlite3_bind_int64(stmt, 2, session_id);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
-}
-
-/* V16,V19: Atomic CAS release — running→idle, only if lock_holder matches. Resets error_count on clean release. */
-int session_release(sqlite3 *db, int64_t session_id, const char *lock_holder) {
-    const char *sql =
-        "UPDATE sessions SET state='idle', lock_holder=NULL, lock_acquired_at=NULL, error_count=0, updated_at=unixepoch()"
-        " WHERE id=? AND state='running' AND lock_holder=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    sqlite3_bind_text(stmt, 2, lock_holder, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
-}
-
-/* V16: Refresh lock_acquired_at to prevent janitor from reclaiming. Returns 0 on success. */
-int session_refresh_lock(sqlite3 *db, int64_t session_id, const char *lock_holder) {
-    const char *sql =
-        "UPDATE sessions SET lock_acquired_at=unixepoch(), updated_at=unixepoch()"
-        " WHERE id=? AND state='running' AND lock_holder=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    sqlite3_bind_text(stmt, 2, lock_holder, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, state, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, state, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, state, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;

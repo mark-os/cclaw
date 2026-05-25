@@ -60,9 +60,7 @@ static void test_per_parent_limit(void) {
         int64_t child_sid = session_create(db, "child", NULL, parent_sid, 1);
         assert(child_sid > 0);
         /* Mark as running */
-        char holder[32];
-        snprintf(holder, sizeof(holder), "test-%d", i);
-        session_try_acquire(db, child_sid, holder);
+        session_set_state(db, child_sid, "running");
     }
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid, .self_path = "/bin/true", .daemon_mode = 0};
@@ -81,9 +79,7 @@ static void test_system_wide_limit(void) {
     for (int i = 0; i < AGENT_MAX_TOTAL; i++) {
         int64_t psid = session_create(db, "p", NULL, -1, 0);
         int64_t csid = session_create(db, "c", NULL, psid, 1);
-        char holder[32];
-        snprintf(holder, sizeof(holder), "test-%d", i);
-        session_try_acquire(db, csid, holder);
+        session_set_state(db, csid, "running");
     }
 
     int64_t my_sid = session_create(db, "me", NULL, -1, 0);
@@ -185,16 +181,16 @@ static void test_session_count_children(void) {
 
     /* Create child, mark running */
     int64_t c1 = session_create(db, "c1", NULL, parent_sid, 1);
-    session_try_acquire(db, c1, "test");
+    session_set_state(db, c1, "running");
     assert(session_count_children(db, parent_sid) == 1);
 
     /* Create another, mark running */
     int64_t c2 = session_create(db, "c2", NULL, parent_sid, 1);
-    session_try_acquire(db, c2, "test2");
+    session_set_state(db, c2, "running");
     assert(session_count_children(db, parent_sid) == 2);
 
     /* Release one — should drop count */
-    session_release(db, c1, "test");
+    session_set_state(db, c1, "idle");
     assert(session_count_children(db, parent_sid) == 1);
 
     db_close(db);

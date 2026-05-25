@@ -16,6 +16,9 @@ int daemon_signal_init(void);
 /* Write session_id to signal pipe (non-blocking, safe from any thread). */
 int daemon_signal_session(int64_t session_id);
 
+/* Signal daemon from external process via named FIFO. Returns 0 on success. */
+int daemon_signal_external(const char *db_path, int64_t session_id);
+
 /* Close signal pipe (cleanup). */
 void daemon_signal_close(void);
 
@@ -44,5 +47,18 @@ void daemon_set_self_path(const char *path);
 
 /* Set config path passed to exec'd children. */
 void daemon_set_config_path(const char *path);
+
+/* Derive FIFO path from db_path (caller frees). */
+char *daemon_pipe_path(const char *db_path);
+
+/* Check if daemon is running by probing the named FIFO.
+ * Returns 1 if daemon alive, 0 if not, -1 on error. */
+int daemon_is_running(const char *db_path);
+
+/* Create named FIFO and open read end. Returns fd or -1. */
+int daemon_fifo_open(const char *db_path);
+
+/* Clean up named FIFO on daemon exit. */
+void daemon_fifo_close(int fd, const char *db_path);
 
 #endif

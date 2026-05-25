@@ -20,13 +20,13 @@ static volatile int running;
 static const Config *g_cfg;
 static sqlite3 *g_db;
 
-/* Build Telegram API URL: https://api.telegram.org/bot<token>/<method> */
+/* Build Telegram API URL: <base>/bot<token>/<method> */
 static char *tg_url(const char *token, const char *method) {
-    const char *prefix = "https://api.telegram.org/bot";
-    size_t len = strlen(prefix) + strlen(token) + 1 + strlen(method) + 1;
+    const char *base = g_cfg && g_cfg->telegram_base_url ? g_cfg->telegram_base_url : "https://api.telegram.org";
+    size_t len = strlen(base) + 4 + strlen(token) + 1 + strlen(method) + 1;
     char *url = malloc(len);
     if (!url) return NULL;
-    snprintf(url, len, "%s%s/%s", prefix, token, method);
+    snprintf(url, len, "%s/bot%s/%s", base, token, method);
     return url;
 }
 

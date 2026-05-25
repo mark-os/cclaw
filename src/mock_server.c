@@ -21,6 +21,14 @@ static pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int s_request_count;
 static char *s_last_body;
 
+/* T129: Telegram mock state */
+static MockResponse *s_tg_updates_head;
+static MockResponse *s_tg_updates_tail;
+static MockResponse *s_tg_send_head;
+static MockResponse *s_tg_send_tail;
+static int s_tg_send_count;
+static char *s_tg_last_send_body;
+
 void mock_server_enqueue(int http_status, const char *body) {
     mock_server_enqueue_with_headers(http_status, body, NULL);
 }
@@ -154,6 +162,26 @@ void mock_server_stop(void) {
     s_request_count = 0;
     free(s_last_body);
     s_last_body = NULL;
+
+    /* Clean Telegram queues */
+    while (s_tg_updates_head) {
+        MockResponse *r = s_tg_updates_head;
+        s_tg_updates_head = r->next;
+        free(r->body);
+        free(r);
+    }
+    s_tg_updates_tail = NULL;
+    while (s_tg_send_head) {
+        MockResponse *r = s_tg_send_head;
+        s_tg_send_head = r->next;
+        free(r->body);
+        free(r);
+    }
+    s_tg_send_tail = NULL;
+    s_tg_send_count = 0;
+    free(s_tg_last_send_body);
+    s_tg_last_send_body = NULL;
+
     pthread_mutex_unlock(&s_mutex);
 }
 
@@ -166,4 +194,120 @@ int mock_server_request_count(void) {
 
 const char *mock_server_last_request_body(void) {
     return s_last_body;
+}
+
+/* ── T129: Telegram mock implementation ────────────────────────── */
+
+void mock_tg_enqueue_updates(const char *body) {
+    MockResponse *r = calloc(1, sizeof(MockResponse));
+    r->http_status = 200;
+    r->body = strdup(body);
+    pthread_mutex_lock(&s_mutex);
+    if (s_tg_updates_tail) s_tg_updates_tail->next = r;
+    else s_tg_updates_head = r;
+    s_tg_updates_tail = r;
+    pthread_mutex_unlock(&s_mutex);
+}
+
+void mock_tg_enqueue_send(const char *body) {
+    MockResponse *r = calloc(1, sizeof(MockResponse));
+    r->http_status = 200;
+    r->body = strdup(body);
+    pthread_mutex_lock(&s_mutex);
+    if (s_tg_send_tail) s_tg_send_tail->next = r;
+    else s_tg_send_head = r;
+    s_tg_send_tail = r;
+    pthread_mutex_unlock(&s_mutex);
+}
+
+int mock_tg_send_count(void) {
+    pthread_mutex_lock(&s_mutex);
+    int c = s_tg_send_count;
+    pthread_mutex_unlock(&s_mutex);
+    return c;
+}
+
+const char *mock_tg_last_send_body(void) {
+    return s_tg_last_send_body;
+}
+
+static int handle_tg_get_updates(struct mg_connection *conn, void *cbdata) {
+    (void)cbdata;
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    /* Read and discard request body */
+    if (ri->content_length > 0) {
+        char tmp[4096];
+        mg_read(conn, tmp, sizeof(tmp));
+    }
+
+    pthread_mutex_lock(&s_mutex);
+    MockResponse *r = s_tg_updates_head;
+    if (r) {
+        s_tg_updates_head = r->next;
+        if (!s_tg_updates_head) s_tg_updates_tail = NULL;
+    }
+    pthread_mutex_unlock(&s_mutex);
+
+    const char *body;
+    char empty[] = "{\"ok\":true,\"result\":[]}";
+    if (r) {
+        body = r->body;
+    } else {
+        body = empty;
+    }
+
+    int len = (int)strlen(body);
+    mg_printf(conn,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n\r\n%s", len, body);
+
+    if (r) { free(r->body); free(r); }
+    return 200;
+}
+
+static int handle_tg_send_message(struct mg_connection *conn, void *cbdata) {
+    (void)cbdata;
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    char *req_body = NULL;
+    int content_len = (int)(ri->content_length > 0 ? ri->content_length : 0);
+    if (content_len > 0) {
+        req_body = malloc((size_t)content_len + 1);
+        int nread = mg_read(conn, req_body, (size_t)content_len);
+        req_body[nread > 0 ? nread : 0] = '\0';
+    }
+
+    pthread_mutex_lock(&s_mutex);
+    s_tg_send_count++;
+    free(s_tg_last_send_body);
+    s_tg_last_send_body = req_body;
+
+    MockResponse *r = s_tg_send_head;
+    if (r) {
+        s_tg_send_head = r->next;
+        if (!s_tg_send_head) s_tg_send_tail = NULL;
+    }
+    pthread_mutex_unlock(&s_mutex);
+
+    const char *body;
+    char ok[] = "{\"ok\":true,\"result\":{\"message_id\":1}}";
+    if (r) { body = r->body; } else { body = ok; }
+
+    int len = (int)strlen(body);
+    mg_printf(conn,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n\r\n%s", len, body);
+
+    if (r) { free(r->body); free(r); }
+    return 200;
+}
+
+void mock_tg_enable(const char *token) {
+    if (!s_ctx) return;
+    char route[128];
+    snprintf(route, sizeof(route), "/bot%s/getUpdates", token);
+    mg_set_request_handler(s_ctx, route, handle_tg_get_updates, NULL);
+    snprintf(route, sizeof(route), "/bot%s/sendMessage", token);
+    mg_set_request_handler(s_ctx, route, handle_tg_send_message, NULL);
 }

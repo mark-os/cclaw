@@ -1,0 +1,166 @@
+/* Test: mjs standalone binary (V48, V49, V51) */
+#define _POSIX_C_SOURCE 200809L
+#include <assert.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+
+#define MJS_PATH "./build/mjs"
+
+static char *run_mjs(const char *args)
+{
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "%s %s 2>&1", MJS_PATH, args);
+    FILE *f = popen(cmd, "r");
+    if (!f) return NULL;
+    char *buf = (char *)malloc(4096);
+    size_t n = fread(buf, 1, 4095, f);
+    buf[n] = '\0';
+    pclose(f);
+    return buf;
+}
+
+static void test_basic_eval(void)
+{
+    char *r = run_mjs("-e '1 + 2'");
+    assert(r && strstr(r, "3"));
+    free(r);
+    printf("  PASS test_basic_eval\n");
+}
+
+static void test_string_eval(void)
+{
+    char *r = run_mjs("-e '\"hello\"'");
+    assert(r && strstr(r, "hello"));
+    free(r);
+    printf("  PASS test_string_eval\n");
+}
+
+static void test_file_eval(void)
+{
+    FILE *f = fopen("/tmp/mjs_test.js", "w");
+    fprintf(f, "var a = [1,2,3]; a.length");
+    fclose(f);
+    char *r = run_mjs("/tmp/mjs_test.js");
+    assert(r && strstr(r, "3"));
+    free(r);
+    unlink("/tmp/mjs_test.js");
+    printf("  PASS test_file_eval\n");
+}
+
+static void test_no_args_shows_usage(void)
+{
+    char *r = run_mjs("");
+    assert(r && strstr(r, "Usage:"));
+    free(r);
+    printf("  PASS test_no_args_shows_usage\n");
+}
+
+static void test_fetch_no_fd_errors(void)
+{
+    char *r = run_mjs("-e 'http_fetch(\"http://x.com\")'");
+    assert(r && strstr(r, "no proxy fd available"));
+    free(r);
+    printf("  PASS test_fetch_no_fd_errors\n");
+}
+
+static void test_fetch_via_fd(void)
+{
+    /* V49/V50: create socketpair, fork child with MJS_FETCH_FD set,
+     * parent acts as fetch proxy returning canned response */
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(rc == 0);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+
+    if (pid == 0) {
+        /* Child: run mjs with fetch fd */
+        close(sv[0]);
+        /* Clear CLOEXEC so fd survives exec */
+        int flags = fcntl(sv[1], F_GETFD);
+        fcntl(sv[1], F_SETFD, flags & ~FD_CLOEXEC);
+        char fd_str[16];
+        snprintf(fd_str, sizeof(fd_str), "%d", sv[1]);
+        setenv("MJS_FETCH_FD", fd_str, 1);
+        /* Exec mjs: fetch and print body */
+        execlp(MJS_PATH, "mjs", "-e",
+               "var r = http_fetch('http://test.local/data'); r.body",
+               (char *)NULL);
+        _exit(127);
+    }
+
+    /* Parent: proxy */
+    close(sv[1]);
+
+    /* Read request: 4B len + JSON */
+    uint32_t req_len_net;
+    ssize_t n = read(sv[0], &req_len_net, 4);
+    assert(n == 4);
+    uint32_t req_len = ntohl(req_len_net);
+    assert(req_len > 0 && req_len < 8192);
+
+    char req_buf[8192];
+    size_t total = 0;
+    while (total < req_len) {
+        ssize_t r = read(sv[0], req_buf + total, req_len - total);
+        assert(r > 0);
+        total += (size_t)r;
+    }
+    req_buf[req_len] = '\0';
+
+    /* Verify request contains the URL */
+    assert(strstr(req_buf, "http://test.local/data"));
+
+    /* Send canned response */
+    const char *resp = "{\"status\":200,\"headers\":{},\"body\":\"proxy_works\",\"error\":null}";
+    uint32_t resp_len = (uint32_t)strlen(resp);
+    uint32_t resp_len_net = htonl(resp_len);
+    write(sv[0], &resp_len_net, 4);
+    write(sv[0], resp, resp_len);
+    close(sv[0]);
+
+    /* Wait for child */
+    int status;
+    waitpid(pid, &status, 0);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    printf("  PASS test_fetch_via_fd\n");
+}
+
+static void test_pipe_composability(void)
+{
+    /* V51: mjs output flows through pipes normally */
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "%s -e '\"line1\\nline2\\nline3\"' | grep line2", MJS_PATH);
+    FILE *f = popen(cmd, "r");
+    assert(f);
+    char buf[256];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    int rc = pclose(f);
+    assert(rc == 0);
+    assert(strstr(buf, "line2"));
+    assert(!strstr(buf, "line1"));
+    printf("  PASS test_pipe_composability\n");
+}
+
+int main(void)
+{
+    printf("test_mjs:\n");
+    test_basic_eval();
+    test_string_eval();
+    test_file_eval();
+    test_no_args_shows_usage();
+    test_fetch_no_fd_errors();
+    test_fetch_via_fd();
+    test_pipe_composability();
+    printf("All mjs tests passed.\n");
+    return 0;
+}

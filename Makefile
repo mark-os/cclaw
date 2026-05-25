@@ -3,7 +3,7 @@ CFLAGS  := -std=c11 -Wall -Wextra -Werror -Iinclude -Ivendor/cJSON -Ivendor/sqli
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
-SRC      := $(wildcard src/*.c)
+SRC      := $(filter-out src/mjs_main.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 DEP      := $(OBJ:.o=.d)
 
@@ -19,9 +19,13 @@ TEST_SRC  := $(filter-out $(INTEG_SRC),$(wildcard test/test_*.c))
 TEST_BIN  := $(patsubst test/%.c,$(BUILDDIR)/%,$(TEST_SRC))
 INTEG_BIN := $(patsubst test/%.c,$(BUILDDIR)/%,$(INTEG_SRC))
 
-.PHONY: all build clean test test-integration test-all
+# mjs standalone binary objects
+MJS_VENDOR_OBJ := $(BUILDDIR)/mjs_mquickjs.o $(BUILDDIR)/mjs_cutils.o $(BUILDDIR)/mjs_dtoa.o \
+                  $(BUILDDIR)/mjs_libm.o $(BUILDDIR)/mjs_stdlib.o
 
-all: $(BUILDDIR)/cclaw
+.PHONY: all build clean test test-integration test-all install
+
+all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs
 build: all
 
 $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
@@ -60,11 +64,44 @@ vendor/mquickjs/mquickjs_atom.h: vendor/mquickjs/gen_atoms.c | $(BUILDDIR)/
 	$(CC) -o $(BUILDDIR)/gen_atoms $<
 	./$(BUILDDIR)/gen_atoms > $@
 
-vendor/mquickjs/mquickjs_stdlib.c: vendor/mquickjs/gen_stdlib.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c vendor/mquickjs/mqjs_host.c | $(BUILDDIR)/
-	$(CC) -Ivendor/mquickjs -o $(BUILDDIR)/gen_stdlib vendor/mquickjs/gen_stdlib.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c -lm
+vendor/mquickjs/mquickjs_stdlib.c: vendor/mquickjs/gen_stdlib.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c vendor/mquickjs/mqjs_host.c $(BUILDDIR)/gen_stdlib | $(BUILDDIR)/
 	printf '#define _POSIX_C_SOURCE 199309L\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <math.h>\n#include <time.h>\n#include "mquickjs_priv.h"\n\n' > $@
 	cat vendor/mquickjs/mqjs_host.c >> $@
 	./$(BUILDDIR)/gen_stdlib -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
+
+$(BUILDDIR)/gen_stdlib: vendor/mquickjs/gen_stdlib.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c | $(BUILDDIR)/
+	$(CC) -Ivendor/mquickjs -o $@ vendor/mquickjs/gen_stdlib.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c -lm
+
+# mjs standalone stdlib (uses mqjs_host_mjs.c instead of mqjs_host.c)
+$(BUILDDIR)/mquickjs_stdlib_mjs.c: vendor/mquickjs/mqjs_host_mjs.c $(BUILDDIR)/gen_stdlib | $(BUILDDIR)/
+	printf '#define _POSIX_C_SOURCE 199309L\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <math.h>\n#include <time.h>\n#include <unistd.h>\n#include "mquickjs_priv.h"\n\n' > $@
+	cat vendor/mquickjs/mqjs_host_mjs.c >> $@
+	./$(BUILDDIR)/gen_stdlib -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
+
+$(BUILDDIR)/mjs_stdlib.o: $(BUILDDIR)/mquickjs_stdlib_mjs.c | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/mjs_mquickjs.o: vendor/mquickjs/mquickjs.c vendor/mquickjs/mquickjs_atom.h | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/mjs_cutils.o: vendor/mquickjs/cutils.c | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/mjs_dtoa.o: vendor/mquickjs/dtoa.c | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/mjs_libm.o: vendor/mquickjs/libm.c | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/mjs_main.o: src/mjs_main.c | $(BUILDDIR)/
+	$(CC) -std=c11 -Wall -Wextra -Werror -Ivendor/mquickjs -c -o $@ $<
+
+$(BUILDDIR)/mjs: $(BUILDDIR)/mjs_main.o $(MJS_VENDOR_OBJ) | $(BUILDDIR)/
+	$(CC) -std=c11 -o $@ $^ -lm
+
+install: $(BUILDDIR)/mjs
+	install -d /usr/local/lib/cclaw
+	install -m 755 $(BUILDDIR)/mjs /usr/local/lib/cclaw/mjs
 
 $(BUILDDIR)/:
 	mkdir -p $(BUILDDIR)

@@ -295,7 +295,7 @@ T132|x|`mjs` standalone binary — build mquickjs evaluator (`vendor/mquickjs/`)
 T133|x|`mjs` fetch fd protocol — implement request/response serialization (4B len + JSON) in mjs binary; `fetch()` returns Promise that blocks on fd read; handle timeout/error JSON gracefully|V50
 T134|x|agent-side fetch proxy — in `shell_exec` fork path: create `socketpair(AF_UNIX, SOCK_STREAM)` before fork; pass child end as `MJS_FETCH_FD`; parent monitors fd via select alongside child stdout pipe; on request: parse JSON, check allowed_hosts (V46), curl, write response; close on child exit|V49,V50,V46
 T135|x|test: mjs fetch proxy end-to-end — agent spawns `shell_exec("mjs -e 'await fetch(...)'")`; mock HTTP server; verify request goes through proxy, response arrives in mjs stdout; verify denied host returns 403|V49,V50,V47
-T136| |test: mjs pipeline composability — `shell_exec("mjs -e '...' \| grep ...")` works; fetch fd ⊥ interfere w/ stdout piping|V51
+T136|x|test: mjs pipeline composability — `shell_exec("mjs -e '...' \| grep ...")` works; fetch fd ⊥ interfere w/ stdout piping|V51
 T137| |Makefile: `mjs` binary target — compile mquickjs evaluator, install to `build/mjs`; `make install` copies to `/usr/local/lib/cclaw/mjs`|V48
 T138| |template embedding — `templates/` dir w/ `.md`, `.txt`, `.sql` files; build-time script converts to C byte arrays in `build/templates.h`; replace inline `static const char*` strings in config.c, context.c, db.c w/ `#include "templates.h"` refs; Makefile rule: `build/templates.h` depends on `templates/*`|§C
 T139| |Telegram admin auth — `admin_chat_ids[]` in config; `telegram_is_admin(chat_id)` check; non-admin messages route to agent normally; admin commands intercepted before inbox_insert|V53,§I

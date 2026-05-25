@@ -151,6 +151,91 @@ static void test_pipe_composability(void)
     printf("  PASS test_pipe_composability\n");
 }
 
+static void test_fetch_with_pipeline(void)
+{
+    /* T136/V51: fetch fd (side-channel) does NOT interfere with stdout piping.
+     * mjs does a fetch AND prints to stdout, piped through grep. */
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(rc == 0);
+
+    /* Use pipe to capture final output after grep */
+    int outpipe[2];
+    rc = pipe(outpipe);
+    assert(rc == 0);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+
+    if (pid == 0) {
+        close(sv[0]);
+        close(outpipe[0]);
+        int flags = fcntl(sv[1], F_GETFD);
+        fcntl(sv[1], F_SETFD, flags & ~FD_CLOEXEC);
+        char fd_str[16];
+        snprintf(fd_str, sizeof(fd_str), "%d", sv[1]);
+        setenv("MJS_FETCH_FD", fd_str, 1);
+        /* Redirect stdout to outpipe for capture */
+        dup2(outpipe[1], STDOUT_FILENO);
+        close(outpipe[1]);
+        /* mjs fetches, then prints multiple lines; pipe through grep */
+        execlp("/bin/sh", "sh", "-c",
+               MJS_PATH " -e '"
+               "var r = http_fetch(\"http://pipe.test/data\"); "
+               "\"BEFORE\\n\" + r.body + \"\\nAFTER\""
+               "' | grep fetched",
+               (char *)NULL);
+        _exit(127);
+    }
+
+    close(sv[1]);
+    close(outpipe[1]);
+
+    /* Parent: act as fetch proxy */
+    uint32_t req_len_net;
+    ssize_t n = read(sv[0], &req_len_net, 4);
+    assert(n == 4);
+    uint32_t req_len = ntohl(req_len_net);
+    char req_buf[8192];
+    size_t total = 0;
+    while (total < req_len) {
+        ssize_t r = read(sv[0], req_buf + total, req_len - total);
+        assert(r > 0);
+        total += (size_t)r;
+    }
+    assert(strstr(req_buf, "http://pipe.test/data"));
+
+    /* Respond with body containing "fetched" */
+    const char *resp = "{\"status\":200,\"headers\":{},\"body\":\"data_fetched_ok\",\"error\":null}";
+    uint32_t resp_len = (uint32_t)strlen(resp);
+    uint32_t resp_len_net = htonl(resp_len);
+    write(sv[0], &resp_len_net, 4);
+    write(sv[0], resp, resp_len);
+    close(sv[0]);
+
+    /* Read grep output */
+    char buf[4096];
+    size_t out_total = 0;
+    while (out_total < sizeof(buf) - 1) {
+        ssize_t r = read(outpipe[0], buf + out_total, sizeof(buf) - 1 - out_total);
+        if (r <= 0) break;
+        out_total += (size_t)r;
+    }
+    buf[out_total] = '\0';
+    close(outpipe[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    /* grep should have matched the line containing "fetched" */
+    assert(strstr(buf, "fetched"));
+    /* "BEFORE" and "AFTER" should NOT appear (grep filtered them) */
+    assert(!strstr(buf, "BEFORE"));
+    assert(!strstr(buf, "AFTER"));
+
+    printf("  PASS test_fetch_with_pipeline\n");
+}
+
 static void test_fetch_alias(void)
 {
     /* T133: fetch() is an alias for http_fetch() */
@@ -312,6 +397,7 @@ int main(void)
     test_fetch_no_fd_errors();
     test_fetch_via_fd();
     test_pipe_composability();
+    test_fetch_with_pipeline();
     test_fetch_alias();
     test_fetch_error_response();
     test_fetch_timeout();

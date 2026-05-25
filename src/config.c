@@ -42,6 +42,19 @@ static void env_override_int(int *field, const char *env_name) {
     if (val) *field = atoi(val);
 }
 
+/* T123: parse cache_hints from JSON string or int */
+static CacheHints parse_cache_hints(cJSON *obj, const char *key) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (!v) return CACHE_HINTS_AUTO;
+    if (cJSON_IsString(v) && v->valuestring) {
+        if (strcmp(v->valuestring, "on") == 0) return CACHE_HINTS_ON;
+        if (strcmp(v->valuestring, "off") == 0) return CACHE_HINTS_OFF;
+    }
+    if (cJSON_IsTrue(v)) return CACHE_HINTS_ON;
+    if (cJSON_IsFalse(v)) return CACHE_HINTS_OFF;
+    return CACHE_HINTS_AUTO;
+}
+
 Config *config_load(const char *path) {
     Config *cfg = calloc(1, sizeof(Config));
     if (!cfg) return NULL;
@@ -98,6 +111,7 @@ Config *config_load(const char *path) {
             if (s) { free(cfg->provider.model); cfg->provider.model = s; }
             cfg->provider.max_tokens = json_int(prov, "max_tokens", cfg->provider.max_tokens);
             cfg->provider.context_window = json_int(prov, "context_window", cfg->provider.context_window);
+            cfg->provider.cache_hints = parse_cache_hints(prov, "cache_hints");
         }
 
         /* T45: parse fallback providers array */
@@ -115,6 +129,7 @@ Config *config_load(const char *path) {
                         cfg->fallback_providers[i].model = json_str(p, "model");
                         cfg->fallback_providers[i].max_tokens = json_int(p, "max_tokens", cfg->provider.max_tokens);
                         cfg->fallback_providers[i].context_window = json_int(p, "context_window", cfg->provider.context_window);
+                        cfg->fallback_providers[i].cache_hints = parse_cache_hints(p, "cache_hints");
                     }
                 }
             }

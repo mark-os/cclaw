@@ -5,6 +5,17 @@
 #include <string.h>
 #include <stdio.h>
 
+/* T123: detect if model needs explicit cache_control markers */
+static int needs_cache_control(const Config *cfg) {
+    CacheHints h = cfg->provider.cache_hints;
+    if (h == CACHE_HINTS_OFF) return 0;
+    if (h == CACHE_HINTS_ON) return 1;
+    /* AUTO: detect from model name */
+    const char *m = cfg->provider.model;
+    if (!m) return 0;
+    return (strstr(m, "anthropic") || strstr(m, "claude"));
+}
+
 /* Internal buffer management */
 static int buf_ensure(RequestStreamer *rs, size_t need) {
     if (rs->buf_cap >= need) return 0;
@@ -201,17 +212,29 @@ static int rs_advance(RequestStreamer *rs) {
     switch (rs->phase) {
     case RS_PHASE_PREAMBLE: {
         /* Build: {"model":"...","messages":[ */
+        /* T123: optionally add "cache_control":{"type":"ephemeral"} for Anthropic */
         /* Also prepend cutoff notice as system message if truncated */
         const char *model = rs->cfg->provider.model ? rs->cfg->provider.model : "unknown";
         int has_cutoff = rs->plan->cut > 0;
+        int cache = needs_cache_control(rs->cfg);
 
         /* Estimate size */
-        size_t need = 32 + strlen(model) + 16;
+        size_t need = 64 + strlen(model) + 64;
         if (has_cutoff) need += 128;
         if (buf_ensure(rs, need) != 0) return 1;
 
         int written;
-        if (has_cutoff) {
+        if (cache && has_cutoff) {
+            written = snprintf(rs->buf, rs->buf_cap,
+                "{\"model\":\"%s\",\"cache_control\":{\"type\":\"ephemeral\"},\"messages\":["
+                "{\"role\":\"system\",\"content\":"
+                "\"[Earlier messages truncated. Use search for full history.]\"},",
+                model);
+        } else if (cache) {
+            written = snprintf(rs->buf, rs->buf_cap,
+                "{\"model\":\"%s\",\"cache_control\":{\"type\":\"ephemeral\"},\"messages\":[",
+                model);
+        } else if (has_cutoff) {
             written = snprintf(rs->buf, rs->buf_cap,
                 "{\"model\":\"%s\",\"messages\":["
                 "{\"role\":\"system\",\"content\":"

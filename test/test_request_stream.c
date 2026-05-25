@@ -333,6 +333,134 @@ static void test_small_reads(void) {
     printf(" OK\n");
 }
 
+/* T123: Test cache_control emitted for Anthropic models */
+static void test_cache_hints_anthropic(void) {
+    printf("  test_cache_hints_anthropic...");
+
+    sqlite3 *db = test_db_open();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    assert(sid > 0);
+
+    Message msg = {.role = ROLE_USER, .content = "hi"};
+    entry_append(db, sid, &msg);
+
+    /* Model name contains "claude" → auto-detect cache hints */
+    Config cfg = {0};
+    cfg.provider.model = "anthropic/claude-sonnet-4";
+    cfg.provider.context_window = 100000;
+    cfg.provider.cache_hints = CACHE_HINTS_AUTO;
+
+    ContextPlan plan;
+    assert(context_plan(db, sid, &cfg, &plan) == 0);
+
+    RequestStreamer rs;
+    assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
+
+    char *json = stream_all(&rs);
+    cJSON *root = cJSON_Parse(json);
+    assert(root);
+
+    cJSON *cc = cJSON_GetObjectItem(root, "cache_control");
+    assert(cc);
+    assert(strcmp(cJSON_GetObjectItem(cc, "type")->valuestring, "ephemeral") == 0);
+
+    cJSON_Delete(root);
+    free(json);
+    rs_cleanup(&rs);
+    context_plan_free(&plan);
+    sqlite3_close(db);
+    printf(" OK\n");
+}
+
+/* T123: Test cache_control NOT emitted for DeepSeek (auto) */
+static void test_cache_hints_deepseek_auto(void) {
+    printf("  test_cache_hints_deepseek_auto...");
+
+    sqlite3 *db = test_db_open();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    assert(sid > 0);
+
+    Message msg = {.role = ROLE_USER, .content = "hi"};
+    entry_append(db, sid, &msg);
+
+    Config cfg = {0};
+    cfg.provider.model = "deepseek/deepseek-v4-flash";
+    cfg.provider.context_window = 100000;
+    cfg.provider.cache_hints = CACHE_HINTS_AUTO;
+
+    ContextPlan plan;
+    assert(context_plan(db, sid, &cfg, &plan) == 0);
+
+    RequestStreamer rs;
+    assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
+
+    char *json = stream_all(&rs);
+    cJSON *root = cJSON_Parse(json);
+    assert(root);
+
+    /* No cache_control for DeepSeek */
+    assert(!cJSON_GetObjectItem(root, "cache_control"));
+
+    cJSON_Delete(root);
+    free(json);
+    rs_cleanup(&rs);
+    context_plan_free(&plan);
+    sqlite3_close(db);
+    printf(" OK\n");
+}
+
+/* T123: Test cache_hints forced on/off via config */
+static void test_cache_hints_forced(void) {
+    printf("  test_cache_hints_forced...");
+
+    sqlite3 *db = test_db_open();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    assert(sid > 0);
+
+    Message msg = {.role = ROLE_USER, .content = "hi"};
+    entry_append(db, sid, &msg);
+
+    /* Force ON for non-Anthropic model */
+    Config cfg = {0};
+    cfg.provider.model = "deepseek/deepseek-v4-flash";
+    cfg.provider.context_window = 100000;
+    cfg.provider.cache_hints = CACHE_HINTS_ON;
+
+    ContextPlan plan;
+    assert(context_plan(db, sid, &cfg, &plan) == 0);
+
+    RequestStreamer rs;
+    assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
+
+    char *json = stream_all(&rs);
+    cJSON *root = cJSON_Parse(json);
+    assert(root);
+    assert(cJSON_GetObjectItem(root, "cache_control"));
+    cJSON_Delete(root);
+    free(json);
+    rs_cleanup(&rs);
+    context_plan_free(&plan);
+
+    /* Force OFF for Anthropic model */
+    cfg.provider.model = "anthropic/claude-sonnet-4";
+    cfg.provider.cache_hints = CACHE_HINTS_OFF;
+
+    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
+
+    json = stream_all(&rs);
+    root = cJSON_Parse(json);
+    assert(root);
+    assert(!cJSON_GetObjectItem(root, "cache_control"));
+    cJSON_Delete(root);
+    free(json);
+    rs_cleanup(&rs);
+    context_plan_free(&plan);
+
+    sqlite3_close(db);
+    printf(" OK\n");
+}
+
 int main(void) {
     printf("test_request_stream:\n");
     test_basic_user_message();
@@ -341,6 +469,9 @@ int main(void) {
     test_reset();
     test_cutoff_notice();
     test_small_reads();
+    test_cache_hints_anthropic();
+    test_cache_hints_deepseek_auto();
+    test_cache_hints_forced();
     printf("All request_stream tests passed.\n");
     return 0;
 }

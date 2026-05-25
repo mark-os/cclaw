@@ -66,6 +66,13 @@ typedef struct {
     time_t updated_at;
 } Session;
 
+/* T123: cache hint strategy */
+typedef enum {
+    CACHE_HINTS_AUTO = 0,   /* detect from model name */
+    CACHE_HINTS_ON,         /* force cache markers */
+    CACHE_HINTS_OFF         /* disable cache markers */
+} CacheHints;
+
 /* Provider/model config */
 typedef struct {
     char *base_url;
@@ -73,6 +80,7 @@ typedef struct {
     char *model;
     int max_tokens;         /* max response tokens */
     int context_window;     /* model context window size */
+    CacheHints cache_hints; /* T123: prompt cache control */
 } ProviderConfig;
 
 /* Top-level config */

@@ -32,7 +32,12 @@ extern JsHttpResult js_http_fetch_exec(const char *url, const char *method,
                                        char **allowed_hosts, size_t hosts_count);
 extern void js_http_result_free(JsHttpResult *r);
 
+/* V46: sanitize helpers (defined in tool_web_fetch.c) */
+extern size_t html_strip_tags(const char *src, char *dst, size_t dst_cap);
+extern void sanitize_homoglyphs(char *text);
+
 /* V38: http_fetch(url, opts) — sole network path from JS runtime.
+ * opts.sanitize: true → strip HTML + homoglyphs + boundary wrap (V46).
  * Returns {status, body} object or throws on error. */
 JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
                       int argc, JSValue *argv)
@@ -59,6 +64,7 @@ JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
     /* Parse opts */
     const char *method = NULL;
     const char *body = NULL;
+    int sanitize = 0;
     JSCStringBuf method_buf, body_buf;
 
     if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
@@ -68,6 +74,9 @@ JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
         JSValue b = JS_GetPropertyStr(ctx, argv[1], "body");
         if (!JS_IsUndefined(b) && !JS_IsNull(b))
             body = JS_ToCString(ctx, b, &body_buf);
+        JSValue s = JS_GetPropertyStr(ctx, argv[1], "sanitize");
+        if (s == JS_TRUE)
+            sanitize = 1;
     }
 
     JsHttpResult r = js_http_fetch_exec(url, method, body, hosts, hosts_count);
@@ -81,11 +90,45 @@ JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
 
     JSValue result = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, result, "status", JS_NewInt32(ctx, (int32_t)r.status));
-    if (r.body)
+
+    if (r.body && sanitize) {
+        /* V46: html_strip_tags + sanitize_homoglyphs + boundary wrap */
+        size_t cap = r.body_len + 1;
+        char *text = (char *)malloc(cap);
+        if (text) {
+            size_t tlen = html_strip_tags(r.body, text, cap);
+            sanitize_homoglyphs(text);
+            const char *open = "<tool_result name=\"http_fetch\">";
+            const char *close = "</tool_result>";
+            size_t olen = strlen(open), clen = strlen(close);
+            size_t total = olen + 1 + tlen + 1 + clen;
+            char *wrapped = (char *)malloc(total + 1);
+            if (wrapped) {
+                memcpy(wrapped, open, olen);
+                wrapped[olen] = '\n';
+                memcpy(wrapped + olen + 1, text, tlen);
+                wrapped[olen + 1 + tlen] = '\n';
+                memcpy(wrapped + olen + 1 + tlen + 1, close, clen);
+                wrapped[total] = '\0';
+                JS_SetPropertyStr(ctx, result, "body",
+                                  JS_NewStringLen(ctx, wrapped, total));
+                free(wrapped);
+            } else {
+                JS_SetPropertyStr(ctx, result, "body",
+                                  JS_NewStringLen(ctx, text, tlen));
+            }
+            free(text);
+        } else {
+            JS_SetPropertyStr(ctx, result, "body",
+                              JS_NewStringLen(ctx, r.body, r.body_len));
+        }
+    } else if (r.body) {
         JS_SetPropertyStr(ctx, result, "body",
                           JS_NewStringLen(ctx, r.body, r.body_len));
-    else
+    } else {
         JS_SetPropertyStr(ctx, result, "body", JS_NewString(ctx, ""));
+    }
+
     js_http_result_free(&r);
     return result;
 }

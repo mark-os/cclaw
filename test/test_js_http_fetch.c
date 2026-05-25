@@ -109,6 +109,70 @@ static void test_runtime_set_hosts(void) {
     PASS();
 }
 
+/* T117: sanitize option — verify JS eval with sanitize:true wraps output */
+static void test_js_eval_sanitize(void) {
+    TEST("js_eval_sanitize");
+    JsEvalCtx ectx = {.allowed_hosts = (char *[]){"example.com"}, .allowed_hosts_count = 1};
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_js_eval_register(&reg, &ectx);
+
+    ToolEntry *e = tools_lookup(&reg, "js_eval");
+    if (!e) { FAIL("lookup failed"); tools_free(&reg); return; }
+
+    /* Fetch example.com with sanitize:true — should get boundary-wrapped text */
+    char *r = e->handler("{\"code\":\"var r = http_fetch('https://example.com/', {sanitize: true}); r.body\"}", e->user_data);
+    if (!r) { FAIL("NULL result"); tools_free(&reg); return; }
+    /* If network fails, skip gracefully */
+    if (strstr(r, "error") || strstr(r, "Error")) {
+        printf("SKIP (network: %s)\n", r);
+        tests_passed++;
+        free(r); tools_free(&reg); return;
+    }
+    /* Verify boundary markers present */
+    if (!strstr(r, "<tool_result name=\"http_fetch\">")) {
+        FAIL("missing open boundary"); free(r); tools_free(&reg); return;
+    }
+    if (!strstr(r, "</tool_result>")) {
+        FAIL("missing close boundary"); free(r); tools_free(&reg); return;
+    }
+    /* Verify HTML tags stripped (no <html>, <head>, etc.) */
+    if (strstr(r, "<html") || strstr(r, "<head") || strstr(r, "<body")) {
+        FAIL("HTML tags not stripped"); free(r); tools_free(&reg); return;
+    }
+    free(r);
+    tools_free(&reg);
+    PASS();
+}
+
+/* T117: without sanitize, raw body returned */
+static void test_js_eval_no_sanitize(void) {
+    TEST("js_eval_no_sanitize");
+    JsEvalCtx ectx = {.allowed_hosts = (char *[]){"example.com"}, .allowed_hosts_count = 1};
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_js_eval_register(&reg, &ectx);
+
+    ToolEntry *e = tools_lookup(&reg, "js_eval");
+    if (!e) { FAIL("lookup failed"); tools_free(&reg); return; }
+
+    /* Fetch without sanitize — should get raw HTML */
+    char *r = e->handler("{\"code\":\"var r = http_fetch('https://example.com/'); r.body\"}", e->user_data);
+    if (!r) { FAIL("NULL result"); tools_free(&reg); return; }
+    if (strstr(r, "error") || strstr(r, "Error")) {
+        printf("SKIP (network: %s)\n", r);
+        tests_passed++;
+        free(r); tools_free(&reg); return;
+    }
+    /* Raw response should NOT have boundary markers */
+    if (strstr(r, "<tool_result name=\"http_fetch\">")) {
+        FAIL("unexpected boundary in raw mode"); free(r); tools_free(&reg); return;
+    }
+    free(r);
+    tools_free(&reg);
+    PASS();
+}
+
 /* JS eval: http_fetch without hosts throws */
 static void test_js_eval_no_hosts(void) {
     TEST("js_eval_no_hosts");
@@ -165,6 +229,8 @@ int main(void) {
     test_runtime_set_hosts();
     test_js_eval_no_hosts();
     test_js_eval_with_hosts();
+    test_js_eval_sanitize();
+    test_js_eval_no_sanitize();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

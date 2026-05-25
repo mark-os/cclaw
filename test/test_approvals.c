@@ -141,6 +141,103 @@ static void test_list_unnotified(void) {
     printf("  PASS test_list_unnotified\n");
 }
 
+/* T149: approval resolve posts result to agent inbox + transitions session state */
+static void test_approval_posts_to_inbox(void) {
+    sqlite3 *db = setup();
+
+    /* Create a session in "waiting" state */
+    int64_t sid = session_create(db, NULL, NULL, -1, 0);
+    assert(sid > 0);
+    assert(session_set_state(db, sid, "running") == 0);
+    assert(session_set_state(db, sid, "waiting") == 0);
+
+    /* Insert approval tied to that session */
+    int64_t aid = approval_insert(db, sid, "coder", "whitelist_host",
+                                  "{\"host\":\"api.example.com\"}");
+    assert(aid > 0);
+
+    /* Resolve it (simulating what handle_approval_callback does) */
+    int rc = approval_resolve(db, aid, "approved", 12345);
+    assert(rc == 0);
+
+    /* Post to inbox (same as handle_approval_callback) */
+    int64_t iid = inbox_insert(db, sid, "approval", "Approval #1 approved: whitelist_host");
+    assert(iid > 0);
+
+    /* Transition waiting→idle */
+    const char *wake_sql =
+        "UPDATE sessions SET state='idle' WHERE id=? AND state='waiting';";
+    sqlite3_stmt *stmt;
+    assert(sqlite3_prepare_v2(db, wake_sql, -1, &stmt, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(stmt, 1, sid);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    /* Verify inbox has the message */
+    int count = 0;
+    InboxItem *items = inbox_peek(db, sid, 10, &count);
+    assert(count == 1);
+    assert(strstr(items[0].payload, "approved") != NULL);
+    assert(strcmp(items[0].source, "approval") == 0);
+    inbox_items_free(items, count);
+
+    /* Verify session is now idle */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?;", -1, &s, NULL);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "idle") == 0);
+    sqlite3_finalize(s);
+
+    teardown(db);
+    printf("  PASS test_approval_posts_to_inbox\n");
+}
+
+/* T149: denied approval posts denial to inbox */
+static void test_approval_deny_posts_to_inbox(void) {
+    sqlite3 *db = setup();
+
+    int64_t sid = session_create(db, NULL, NULL, -1, 0);
+    assert(sid > 0);
+    assert(session_set_state(db, sid, "running") == 0);
+    assert(session_set_state(db, sid, "waiting") == 0);
+
+    int64_t aid = approval_insert(db, sid, "coder", "model_change",
+                                  "{\"model\":\"gpt-5\"}");
+    assert(aid > 0);
+
+    int rc = approval_resolve(db, aid, "denied", 99);
+    assert(rc == 0);
+
+    inbox_insert(db, sid, "approval", "Approval denied: model_change");
+
+    /* Transition waiting→idle */
+    const char *wake_sql =
+        "UPDATE sessions SET state='idle' WHERE id=? AND state='waiting';";
+    sqlite3_stmt *stmt;
+    assert(sqlite3_prepare_v2(db, wake_sql, -1, &stmt, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(stmt, 1, sid);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    int count = 0;
+    InboxItem *items = inbox_peek(db, sid, 10, &count);
+    assert(count == 1);
+    assert(strstr(items[0].payload, "denied") != NULL);
+    inbox_items_free(items, count);
+
+    /* Verify session is now idle */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?;", -1, &s, NULL);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "idle") == 0);
+    sqlite3_finalize(s);
+
+    teardown(db);
+    printf("  PASS test_approval_deny_posts_to_inbox\n");
+}
+
 int main(void) {
     printf("test_approvals:\n");
     test_insert_and_get();
@@ -149,6 +246,8 @@ int main(void) {
     test_resolve_deny();
     test_resolve_already_resolved();
     test_list_unnotified();
+    test_approval_posts_to_inbox();
+    test_approval_deny_posts_to_inbox();
     printf("All approvals tests passed.\n");
     return 0;
 }

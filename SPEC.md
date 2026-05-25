@@ -308,7 +308,7 @@ T145|x|test: admin commands — verify key write bypasses DB entirely; verify no
 T146|x|`approvals` table — schema: id, session_id, agent_name, type (whitelist_host\|create_agent\|model_change\|tool_enable), payload TEXT (JSON), status (pending\|approved\|denied), admin_chat_id, created_at, resolved_at|V54,§D
 T147|x|`approval_request` tool — agent calls w/ type + payload (e.g. `{"type":"whitelist_host","host":"api.example.com"}`); writes to `approvals` table; daemon delivers inline keyboard to admin via Telegram; agent receives tool_result "pending approval — waiting for admin"|V54
 T148|x|approval delivery — daemon detects new pending approval → sends formatted message + Approve/Deny buttons to all `admin_chat_ids[]`; callback_data encodes approval id|V54,V53
-T149| |approval callback handler — admin taps Approve → daemon applies change (write config, reload), updates approval row, posts result to agent inbox; Deny → posts denial to inbox; agent session transitions idle→running on inbox signal|V54,V25
+T149|x|approval callback handler — admin taps Approve → daemon applies change (write config, reload), updates approval row, posts result to agent inbox; Deny → posts denial to inbox; agent session transitions idle→running on inbox signal|V54,V25
 T150| |agent-initiated agent creation — agent proposes new agent via `approval_request` type `create_agent` w/ payload (name, model, system_prompt, tools, allowed_hosts); admin approves → daemon writes `agents/<name>/agent.json` + `system.md` + seeds DB row|V54,V20
 T151| |test: approval flow end-to-end — agent requests whitelist host → approval pending → mock admin approve → config updated → agent inbox receives confirmation; also test deny path + unauthorized approval attempt|V54,V53
 

@@ -304,7 +304,7 @@ T141|x|`/key` dialog — inline keyboard: select provider (OpenRouter, Gemini, c
 T142|x|`/config model` dialog — inline keyboard: list configured providers → select → ForceReply for model name → update `config.json` provider entry → confirm + reload config in daemon|§I
 T143|x|`/config endpoint` dialog — ForceReply for base_url + provider name → validate URL format → write to config.json → reload|§I
 T144|x|`/whitelist` dialog — inline keyboard: list agents → select → show current `allowed_hosts[]` → ForceReply for new host → append to agent config → reload; also support `/whitelist remove`|V46,§I
-T145| |test: admin commands — verify key write bypasses DB entirely; verify non-admin chat_id rejected; verify config reload picks up changes|V52,V53
+T145|x|test: admin commands — verify key write bypasses DB entirely; verify non-admin chat_id rejected; verify config reload picks up changes|V52,V53
 T146| |`approvals` table — schema: id, session_id, agent_name, type (whitelist_host\|create_agent\|model_change\|tool_enable), payload TEXT (JSON), status (pending\|approved\|denied), admin_chat_id, created_at, resolved_at|V54,§D
 T147| |`approval_request` tool — agent calls w/ type + payload (e.g. `{"type":"whitelist_host","host":"api.example.com"}`); writes to `approvals` table; daemon delivers inline keyboard to admin via Telegram; agent receives tool_result "pending approval — waiting for admin"|V54
 T148| |approval delivery — daemon detects new pending approval → sends formatted message + Approve/Deny buttons to all `admin_chat_ids[]`; callback_data encodes approval id|V54,V53

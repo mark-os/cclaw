@@ -259,6 +259,17 @@ T121| |`memory_set` tool — UPDATE agents SET memory=? WHERE name=?; agent can 
 T122| |system prompt assembly — at turn start: render template (system_prompt) + inject soul + inject memory + inject skills; replace current file-based `config_render_system_prompt`|§D,§I
 T123| |prompt cache hints — send provider-appropriate cache markers in LLM requests: Anthropic `cache_control` on system/last-tool/last-user; OpenAI `prompt_cache_key` + `prompt_cache_retention`; DeepSeek prefix caching (automatic but benefits from stable message ordering); configurable per-provider in config|§C
 T124| |entry stats columns — store `token_estimate INTEGER` (chars/4) on each entry at insert time; allows `context_plan` to sum tokens via index scan without loading JSON data; also store `content_bytes INTEGER` for quick size checks; avoids full-row reads during preflight planning pass (V41)|V41,§D
+T125| |mock LLM server test harness — civetweb on port 0 in-process; register `/v1/chat/completions` handler; configurable canned responses per test; helper: `mock_server_start()` → returns port, `mock_server_stop()`|§C
+T126| |integration test: agent loop with mock LLM — multi-turn tool call sequence (mock returns tool_call → agent dispatches → mock returns final); verify entries in DB match expected flow|V10,T125
+T127| |integration test: retry + backoff with mock — mock returns 429 with Retry-After, then 200; verify agent retries correctly and respects delay|V2,T125
+T128| |integration test: context overflow recovery — mock returns 400 with "context window" error; verify agent detects overflow|T125
+T129| |integration test: mock Telegram API — mock getUpdates + sendMessage endpoints; verify poll→inbox→agent→deliver cycle end-to-end|T125,V25
+T130| |integration test: daemon fork+reap with mock LLM — daemon forks agent, agent hits mock, writes response, daemon reaps and delivers|T125,V21
+
+Test tiers (Makefile targets):
+- `make test` — unit tests (no network, no LLM, fast, always run)
+- `make test-integration` — mock-server tests (civetweb in-process, no external deps, ~seconds)
+- `make test-e2e` — live LLM tests (require API key, hit real endpoints, skip if key missing)
 
 ## §B BUGS
 id|date|cause|fix

@@ -277,6 +277,7 @@ T134| |agent-side fetch proxy — in `shell_exec` fork path: create `socketpair(
 T135| |test: mjs fetch proxy end-to-end — agent spawns `shell_exec("mjs -e 'await fetch(...)'")`; mock HTTP server; verify request goes through proxy, response arrives in mjs stdout; verify denied host returns 403|V49,V50,V47
 T136| |test: mjs pipeline composability — `shell_exec("mjs -e '...' \| grep ...")` works; fetch fd ⊥ interfere w/ stdout piping|V51
 T137| |Makefile: `mjs` binary target — compile mquickjs evaluator, install to `build/mjs`; `make install` copies to `/usr/local/lib/cclaw/mjs`|V48
+T138| |template embedding — `templates/` dir w/ `.md`, `.txt`, `.sql` files; build-time script converts to C byte arrays in `build/templates.h`; replace inline `static const char*` strings in config.c, context.c, db.c w/ `#include "templates.h"` refs; Makefile rule: `build/templates.h` depends on `templates/*`|§C
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)

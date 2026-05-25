@@ -27,7 +27,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - env: `OPENROUTER_API_KEY` required (minimum to run)
 - env: `CCLAW_PROVIDER`, `CCLAW_MODEL`, `CCLAW_TELEGRAM_TOKEN`, `CCLAW_DB_PATH`, `CCLAW_WEB_PORT`
 - file: `config.json` — provider, model, tokens, channels, workspace, db_path, admin_chat_ids[]
-- file: `agents/<name>/agent.json` — per-agent: model, workspace, tools, max_iterations, allowed_hosts
+- file: `agents/<name>/agent.json` — per-agent: model, workspace, tools, max_iterations, allowed_hosts, memory_blocks[]
 - file: `agents/<name>/system.md` — system prompt template
 - file: `agents/<name>/skills/*.md` — skill instructions injected into system prompt
 - api: Telegram Bot API (long-poll `getUpdates`, `sendMessage`, `sendChatAction`)
@@ -80,10 +80,22 @@ agents table: `id`, `name TEXT UNIQUE`, `config TEXT` (JSON — model, tools, li
 
 approvals table: `id`, `session_id`, `agent_name TEXT`, `type TEXT` (whitelist_host|create_agent|model_change|tool_enable), `payload TEXT` (JSON — request details), `status TEXT DEFAULT 'pending'` (pending|approved|denied), `admin_chat_id`, `created_at`, `resolved_at`
 
+memory_blocks table: `id`, `agent_name TEXT NOT NULL`, `label TEXT NOT NULL`, `value TEXT DEFAULT ''`, `description TEXT` (tells agent what block is for), `char_limit INTEGER DEFAULT 5000`, `read_only INTEGER DEFAULT 0`, `created_at`, `updated_at`; UNIQUE(agent_name, label); seeded from `agent.json` `memory_blocks[]` array on first reference
+
+Agent config `memory_blocks` field (in `agent.json`):
+```json
+"memory_blocks": [
+  {"label": "persona", "description": "Agent identity and tone", "value": "I am...", "char_limit": 5000, "read_only": false},
+  {"label": "human", "description": "Known facts about the user", "char_limit": 5000, "read_only": false},
+  {"label": "instructions", "description": "Standing orders", "value": "Always...", "read_only": true}
+]
+```
+`read_only: true` → block visible in context but agent memory tools reject edits; `read_only: false` (default) → agent can append/replace via tools
+
 Design:
 - Agent identity (soul, memory, prompts) lives in SQLite → portable by copying DB, no filesystem sync
-- Agent can self-modify `soul` and `memory` via tools (`soul_edit`, `memory_set`) — just DB writes
-- System prompt assembled at turn start: `system_prompt` template + `soul` + `memory` + skills
+- Agent can self-modify memory blocks via tools (`core_memory_append`, `core_memory_replace`) — just DB writes; `description` field guides agent on block purpose (visible in context, not editable by agent)
+- System prompt assembled at turn start: `system_prompt` template + memory blocks (rendered w/ label, description, metadata, value) + skills
 - `agents/<name>/agent.json` on disk is the bootstrap/import path — loaded once to seed the DB row; DB is authoritative after that
 - Workspace is just a working directory for file tools — no magic filenames, no special semantics
 - `/tmp/cclaw-<session_id>/` — ephemeral per-session scratch (tool output overflow)
@@ -144,6 +156,7 @@ V51: ∀ `mjs` invocation via shell → composable w/ unix pipes; stdout/stderr 
 V52: ∀ API key entered via Telegram admin dialog → written directly to config file on disk; ⊥ stored in session entries, inbox, or any DB field; ⊥ appears in LLM context; Telegram poller handles key input before inbox_insert (bypasses agent entirely)
 V53: ∀ Telegram admin command (config, key, whitelist) → restricted to `admin_chat_ids[]` in config; unauthorized chat_id → silent ignore (⊥ error msg, ⊥ inbox_insert)
 V54: ∀ config/permission mutation → requires admin approval; agent may propose changes via `approval_request` tool (writes to `approvals` table); daemon delivers proposal to admin as inline keyboard; admin approve → daemon applies change + posts confirmation to agent inbox; admin deny → posts denial to agent inbox; agent ⊥ mutates config/permissions directly
+V55: ∀ memory block edit → agent tools modify `value` only; `label`, `description`, `char_limit`, `read_only` immutable from agent; `value` length ! ≤ `char_limit`; blocks persist across sessions (agent-scoped, not session-scoped)
 
 ## §T TASKS
 id|status|task|cites
@@ -297,6 +310,11 @@ T148| |approval delivery — daemon detects new pending approval → sends forma
 T149| |approval callback handler — admin taps Approve → daemon applies change (write config, reload), updates approval row, posts result to agent inbox; Deny → posts denial to inbox; agent session transitions idle→running on inbox signal|V54,V25
 T150| |agent-initiated agent creation — agent proposes new agent via `approval_request` type `create_agent` w/ payload (name, model, system_prompt, tools, allowed_hosts); admin approves → daemon writes `agents/<name>/agent.json` + `system.md` + seeds DB row|V54,V20
 T151| |test: approval flow end-to-end — agent requests whitelist host → approval pending → mock admin approve → config updated → agent inbox receives confirmation; also test deny path + unauthorized approval attempt|V54,V53
+
+T152| |memory blocks table — `memory_blocks(id, agent_name, label, value TEXT, description TEXT, char_limit INT DEFAULT 5000, read_only INT DEFAULT 0, created_at, updated_at)`; seeded from `agent.json` `memory_blocks[]` on first reference; config declares which blocks each agent gets, their descriptions, limits, and editability; DB authoritative after seed|§D,V55
+T153| |memory block tools — `core_memory_append(label, content)`, `core_memory_replace(label, old, new)`; operate on block `value` only; respect `read_only` flag; persist to DB immediately|§I,T152
+T154| |system prompt memory injection — at context build, render blocks into prompt as labeled sections w/ metadata (label, description, chars_used/limit); agent sees structure, knows what each block is for|T152,T122
+T155| |`memory_set` → block migration — deprecate flat `memory` column; migrate existing content to `human` block on first access; `memory_set` becomes alias for `core_memory_replace` on `human` block|T152,T121
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)

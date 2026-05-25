@@ -6,7 +6,7 @@ CClaw is a **minimal** autonomous AI agent in C. Every line of code must earn it
 
 **Inspiration**
 
-CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and session tree model, and from *OpenClaw* (`reference/openclaw`) for autonomy features, security patterns, and multi-channel integration. It also learns from *nullclaw* (`reference/nullclaw`), a Zig clone of OpenClaw. CClaw does not try to be everything to everyone — it serves its creator Mark Ostroth. It will borrow C libraries, link dynamically to system curl, vendor what makes sense, and do whatever it takes to produce a simple, usable, excellent autonomous agent.
+CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and session tree model, and from *OpenClaw* (`reference/openclaw`) for autonomy features, security patterns, and multi-channel integration. It also learns from *nullclaw* (`reference/nullclaw`), a Zig clone of OpenClaw, and from *Letta* (`reference/letta`) for stateful agent design and persistent memory patterns. CClaw does not try to be everything to everyone — it serves its creator Mark Ostroth. It will borrow C libraries, link dynamically to system curl, vendor what makes sense, and do whatever it takes to produce a simple, usable, excellent autonomous agent.
 
 **Principles:**
 - Simple over clever. Blocking I/O. Threads over callbacks. No event loops.
@@ -50,7 +50,7 @@ include/       C headers (public API for each module)
 vendor/        Vendored libs (cJSON, sqlite3, civetweb, mquickjs)
 test/          Test files (test_*.c)
 notes/         Research & scoping notes (kept during development)
-reference/     Pi, OpenClaw clones (gitignored)
+reference/     Pi, OpenClaw, nullclaw, Letta clones (gitignored)
 build/         Build output (gitignored)
 ```
 

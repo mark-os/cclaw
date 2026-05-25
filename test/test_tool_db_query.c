@@ -95,7 +95,7 @@ static void test_query_sessions_table(void) {
     assert(db);
 
     /* Create a session so there's data */
-    session_create(db, "test-session", NULL);
+    session_create(db, "test-session", NULL, -1, 0);
 
     char *r = tool_db_query_handler("{\"sql\":\"SELECT id, name FROM sessions\"}", db);
     assert(r);

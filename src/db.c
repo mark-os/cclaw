@@ -11,6 +11,8 @@ static const char *SCHEMA_SQL =
     "  name TEXT,"
     "  leaf_id INTEGER DEFAULT -1,"
     "  agent_name TEXT,"
+    "  parent_session_id INTEGER DEFAULT -1,"
+    "  depth INTEGER NOT NULL DEFAULT 0,"
     "  state TEXT NOT NULL DEFAULT 'idle',"
     "  lock_holder TEXT,"
     "  lock_acquired_at INTEGER,"
@@ -21,7 +23,7 @@ static const char *SCHEMA_SQL =
     ");"
     "CREATE TABLE IF NOT EXISTS entries ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  session_id INTEGER NOT NULL,"
     "  parent_id INTEGER NOT NULL DEFAULT -1,"
     "  turn_id INTEGER,"
     "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
@@ -67,11 +69,11 @@ static const char *SCHEMA_SQL =
     ");"
     "CREATE TABLE IF NOT EXISTS tg_chat_sessions ("
     "  chat_id INTEGER PRIMARY KEY,"
-    "  session_id INTEGER NOT NULL REFERENCES sessions(id)"
+    "  session_id INTEGER NOT NULL"
     ");"
     "CREATE TABLE IF NOT EXISTS js_tools ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  session_id INTEGER NOT NULL,"
     "  name TEXT NOT NULL,"
     "  description TEXT,"
     "  parameters_json TEXT,"
@@ -82,28 +84,16 @@ static const char *SCHEMA_SQL =
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  name TEXT NOT NULL,"
     "  cron_expr TEXT NOT NULL,"
-    "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  session_id INTEGER NOT NULL,"
     "  task TEXT NOT NULL,"
     "  enabled INTEGER NOT NULL DEFAULT 1,"
     "  next_run_at INTEGER NOT NULL DEFAULT 0,"
     "  last_run_at INTEGER,"
     "  created_at INTEGER NOT NULL DEFAULT (unixepoch())"
     ");"
-    "CREATE TABLE IF NOT EXISTS sub_agents ("
-    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  parent_session_id INTEGER NOT NULL REFERENCES sessions(id),"
-    "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
-    "  pid INTEGER NOT NULL DEFAULT 0,"
-    "  depth INTEGER NOT NULL DEFAULT 1,"
-    "  status TEXT NOT NULL DEFAULT 'running',"
-    "  task TEXT NOT NULL,"
-    "  result TEXT,"
-    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
-    "  finished_at INTEGER"
-    ");"
     "CREATE TABLE IF NOT EXISTS inbox ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  session_id INTEGER NOT NULL,"
     "  source TEXT NOT NULL,"
     "  payload TEXT NOT NULL,"
     "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
@@ -112,7 +102,7 @@ static const char *SCHEMA_SQL =
     "CREATE INDEX IF NOT EXISTS idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0;"
     "CREATE TABLE IF NOT EXISTS spawn_queue ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-    "  parent_session_id INTEGER NOT NULL REFERENCES sessions(id),"
+    "  parent_session_id INTEGER NOT NULL,"
     "  task TEXT NOT NULL,"
     "  background INTEGER NOT NULL DEFAULT 0,"
     "  depth INTEGER NOT NULL DEFAULT 1,"
@@ -142,7 +132,7 @@ sqlite3 *db_open(const char *path) {
     if (err) { sqlite3_free(err); err = NULL; }
 
     /* Foreign keys */
-    sqlite3_exec(db, "PRAGMA foreign_keys=ON;", NULL, NULL, &err);
+    sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, &err);
     if (err) { sqlite3_free(err); err = NULL; }
 
     /* Create tables */
@@ -161,8 +151,9 @@ void db_close(sqlite3 *db) {
     if (db) sqlite3_close(db);
 }
 
-int64_t session_create(sqlite3 *db, const char *name, const char *agent_name) {
-    const char *sql = "INSERT INTO sessions (name, agent_name) VALUES (?, ?);";
+int64_t session_create(sqlite3 *db, const char *name, const char *agent_name,
+                       int64_t parent_session_id, int depth) {
+    const char *sql = "INSERT INTO sessions (name, agent_name, parent_session_id, depth) VALUES (?, ?, ?, ?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -171,6 +162,11 @@ int64_t session_create(sqlite3 *db, const char *name, const char *agent_name) {
         sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC);
     else
         sqlite3_bind_null(stmt, 2);
+    if (parent_session_id > 0)
+        sqlite3_bind_int64(stmt, 3, parent_session_id);
+    else
+        sqlite3_bind_int64(stmt, 3, -1);
+    sqlite3_bind_int(stmt, 4, depth);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
         return -1;
@@ -458,6 +454,18 @@ char *session_get_agent_name(sqlite3 *db, int64_t session_id) {
     return result;
 }
 
+int session_get_depth(sqlite3 *db, int64_t session_id) {
+    const char *sql = "SELECT depth FROM sessions WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    int depth = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        depth = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return depth;
+}
+
 int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id) {
     const char *sql = "UPDATE sessions SET leaf_id=?, updated_at=unixepoch() WHERE id=?;";
     sqlite3_stmt *stmt;
@@ -641,30 +649,11 @@ int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* V3: sub-agent tracking */
+/* V3: sub-agent limits — count active child sessions */
 
-int64_t subagent_create(sqlite3 *db, int64_t parent_session_id, int64_t session_id,
-                        pid_t pid, int depth, const char *task) {
+int session_count_children(sqlite3 *db, int64_t parent_session_id) {
     const char *sql =
-        "INSERT INTO sub_agents (parent_session_id, session_id, pid, depth, status, task)"
-        " VALUES (?,?,?,?,'running',?);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, parent_session_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    sqlite3_bind_int64(stmt, 3, (int64_t)pid);
-    sqlite3_bind_int(stmt, 4, depth);
-    sqlite3_bind_text(stmt, 5, task, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) return -1;
-    return sqlite3_last_insert_rowid(db);
-}
-
-int subagent_count_by_parent(sqlite3 *db, int64_t parent_session_id) {
-    const char *sql =
-        "SELECT COUNT(*) FROM sub_agents WHERE parent_session_id=? AND status='running';";
+        "SELECT COUNT(*) FROM sessions WHERE parent_session_id=? AND state IN ('running','waiting');";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -676,8 +665,9 @@ int subagent_count_by_parent(sqlite3 *db, int64_t parent_session_id) {
     return count;
 }
 
-int subagent_count_total(sqlite3 *db) {
-    const char *sql = "SELECT COUNT(*) FROM sub_agents WHERE status='running';";
+int session_count_active_agents(sqlite3 *db) {
+    const char *sql =
+        "SELECT COUNT(*) FROM sessions WHERE parent_session_id > 0 AND state IN ('running','waiting');";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -686,60 +676,6 @@ int subagent_count_total(sqlite3 *db) {
         count = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
     return count;
-}
-
-int subagent_finish(sqlite3 *db, int64_t agent_id, const char *status, const char *result) {
-    const char *sql =
-        "UPDATE sub_agents SET status=?, result=?, finished_at=unixepoch() WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_text(stmt, 1, status, -1, SQLITE_STATIC);
-    if (result)
-        sqlite3_bind_text(stmt, 2, result, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 2);
-    sqlite3_bind_int64(stmt, 3, agent_id);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
-}
-
-SubAgentInfo *subagent_get(sqlite3 *db, int64_t agent_id) {
-    const char *sql =
-        "SELECT id, parent_session_id, session_id, pid, depth, status, task, result"
-        " FROM sub_agents WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
-    sqlite3_bind_int64(stmt, 1, agent_id);
-    SubAgentInfo *info = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        info = malloc(sizeof(SubAgentInfo));
-        if (info) {
-            info->id = sqlite3_column_int64(stmt, 0);
-            info->parent_session_id = sqlite3_column_int64(stmt, 1);
-            info->session_id = sqlite3_column_int64(stmt, 2);
-            info->pid = (pid_t)sqlite3_column_int64(stmt, 3);
-            info->depth = sqlite3_column_int(stmt, 4);
-            const char *s = (const char *)sqlite3_column_text(stmt, 5);
-            info->status = s ? strdup(s) : strdup("unknown");
-            const char *t = (const char *)sqlite3_column_text(stmt, 6);
-            info->task = t ? strdup(t) : NULL;
-            const char *r = (const char *)sqlite3_column_text(stmt, 7);
-            info->result = r ? strdup(r) : NULL;
-        }
-    }
-    sqlite3_finalize(stmt);
-    return info;
-}
-
-void subagent_info_free(SubAgentInfo *info) {
-    if (!info) return;
-    free(info->status);
-    free(info->task);
-    free(info->result);
-    free(info);
 }
 
 /* V17: next turn_id for a session */
@@ -839,44 +775,6 @@ int session_refresh_lock(sqlite3 *db, int64_t session_id, const char *lock_holde
     return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
 }
 
-SubAgentInfo *subagent_list_running(sqlite3 *db, int *count) {
-    *count = 0;
-    const char *sql =
-        "SELECT id, parent_session_id, session_id, pid, depth, status, task, result"
-        " FROM sub_agents WHERE status='running';";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
-
-    int cap = 16;
-    SubAgentInfo *list = malloc((size_t)cap * sizeof(SubAgentInfo));
-    if (!list) { sqlite3_finalize(stmt); return NULL; }
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (*count >= cap) {
-            cap *= 2;
-            SubAgentInfo *tmp = realloc(list, (size_t)cap * sizeof(SubAgentInfo));
-            if (!tmp) break;
-            list = tmp;
-        }
-        SubAgentInfo *info = &list[*count];
-        info->id = sqlite3_column_int64(stmt, 0);
-        info->parent_session_id = sqlite3_column_int64(stmt, 1);
-        info->session_id = sqlite3_column_int64(stmt, 2);
-        info->pid = (pid_t)sqlite3_column_int64(stmt, 3);
-        info->depth = sqlite3_column_int(stmt, 4);
-        const char *s = (const char *)sqlite3_column_text(stmt, 5);
-        info->status = s ? strdup(s) : strdup("unknown");
-        const char *t = (const char *)sqlite3_column_text(stmt, 6);
-        info->task = t ? strdup(t) : NULL;
-        info->result = NULL;
-        (*count)++;
-    }
-    sqlite3_finalize(stmt);
-    if (*count == 0) { free(list); return NULL; }
-    return list;
-}
-
 /* V18: Inbox primitives */
 
 int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const char *payload) {
@@ -946,7 +844,7 @@ int inbox_count(sqlite3 *db, int64_t session_id) {
 
 /* V18: Atomically consume inbox items into session entries */
 int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
-    if (sqlite3_exec(db, "BEGIN EXCLUSIVE", NULL, NULL, NULL) != SQLITE_OK)
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
         return -1;
 
     /* Peek unconsumed items */

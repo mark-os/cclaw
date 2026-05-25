@@ -128,7 +128,7 @@ static void test_fts5_search(void) {
     sqlite3 *db = db_open(path);
     assert(db != NULL);
 
-    int64_t sid = session_create(db, "fts_test", NULL);
+    int64_t sid = session_create(db, "fts_test", NULL, -1, 0);
     assert(sid > 0);
 
     Message m1 = {.role = ROLE_USER, .content = "hello world from the user"};

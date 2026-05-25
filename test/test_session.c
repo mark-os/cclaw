@@ -18,10 +18,10 @@ static void teardown(sqlite3 *db) {
 
 static void test_session_create(void) {
     sqlite3 *db = setup();
-    int64_t id = session_create(db, "test session", NULL);
+    int64_t id = session_create(db, "test session", NULL, -1, 0);
     assert(id > 0);
 
-    int64_t id2 = session_create(db, "another", NULL);
+    int64_t id2 = session_create(db, "another", NULL, -1, 0);
     assert(id2 > id);
 
     teardown(db);
@@ -30,8 +30,8 @@ static void test_session_create(void) {
 
 static void test_session_list(void) {
     sqlite3 *db = setup();
-    session_create(db, "alpha", NULL);
-    session_create(db, "beta", NULL);
+    session_create(db, "alpha", NULL, -1, 0);
+    session_create(db, "beta", NULL, -1, 0);
 
     int count = 0;
     Session *list = session_list(db, &count);
@@ -58,7 +58,7 @@ static void test_session_list_empty(void) {
 
 static void test_session_set_leaf(void) {
     sqlite3 *db = setup();
-    int64_t sid = session_create(db, "leaftest", NULL);
+    int64_t sid = session_create(db, "leaftest", NULL, -1, 0);
 
     int rc = session_set_leaf(db, sid, 42);
     assert(rc == 0);
@@ -119,7 +119,7 @@ static int64_t insert_entry(sqlite3 *db, int64_t session_id, int64_t parent_id, 
 
 static void test_session_get_branch(void) {
     sqlite3 *db = setup();
-    int64_t sid = session_create(db, "branch", NULL);
+    int64_t sid = session_create(db, "branch", NULL, -1, 0);
 
     /* Build chain: e1 → e2 → e3 (V14: parent_id linking) */
     int64_t e1 = insert_entry(db, sid, -1, ROLE_USER, "hello");
@@ -152,7 +152,7 @@ static void test_session_get_branch(void) {
 
 static void test_session_get_branch_empty(void) {
     sqlite3 *db = setup();
-    int64_t sid = session_create(db, "empty", NULL);
+    int64_t sid = session_create(db, "empty", NULL, -1, 0);
     /* leaf_id is -1 by default → no branch */
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
@@ -166,7 +166,7 @@ static void test_session_get_branch_empty(void) {
 /* T7: entry_append — linear chain via current leaf */
 static void test_entry_append(void) {
     sqlite3 *db = setup();
-    int64_t sid = session_create(db, "append", NULL);
+    int64_t sid = session_create(db, "append", NULL, -1, 0);
 
     Message m1 = { .role = ROLE_USER, .content = "hello" };
     int64_t e1 = entry_append(db, sid, &m1);
@@ -199,7 +199,7 @@ static void test_entry_append(void) {
 /* T7/V14: branching — entry_append_at forks from non-leaf */
 static void test_entry_append_at_branch(void) {
     sqlite3 *db = setup();
-    int64_t sid = session_create(db, "branching", NULL);
+    int64_t sid = session_create(db, "branching", NULL, -1, 0);
 
     Message m1 = { .role = ROLE_USER, .content = "root" };
     int64_t e1 = entry_append(db, sid, &m1);
@@ -242,7 +242,7 @@ static void test_entry_append_invalid_session(void) {
 /* T16: round-trip tool_calls and tool_result through DB */
 static void test_entry_tool_calls_roundtrip(void) {
     sqlite3 *db = setup();
-    int64_t sid = session_create(db, "tools", NULL);
+    int64_t sid = session_create(db, "tools", NULL, -1, 0);
 
     /* Append user message */
     Message m1 = { .role = ROLE_USER, .content = "do something" };

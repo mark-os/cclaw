@@ -25,7 +25,7 @@ static void test_heartbeat_injects_inbox(void) {
     assert(daemon_signal_init() == 0);
 
     /* Create a session, mark idle (default state) */
-    int64_t sid = session_create(db, "test_hb", NULL);
+    int64_t sid = session_create(db, "test_hb", NULL, -1, 0);
     assert(sid > 0);
     /* Touch updated_at so session is "recently active" */
     Message user_msg = {.role = ROLE_USER, .content = "hello"};
@@ -74,7 +74,7 @@ static void test_heartbeat_skips_non_idle(void) {
     assert(daemon_signal_init() == 0);
 
     /* Create session and set state to running */
-    int64_t sid = session_create(db, "test_hb_running", NULL);
+    int64_t sid = session_create(db, "test_hb_running", NULL, -1, 0);
     assert(sid > 0);
     Message user_msg = {.role = ROLE_USER, .content = "hello"};
     entry_append(db, sid, &user_msg);

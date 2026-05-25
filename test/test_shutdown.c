@@ -51,7 +51,7 @@ static void test_agent_aborted_on_shutdown(void) {
     ASSERT(db != NULL, "db open");
     if (!db) return;
 
-    int64_t sid = session_create(db, "shutdown_test", NULL);
+    int64_t sid = session_create(db, "shutdown_test", NULL, -1, 0);
     ASSERT(sid > 0, "session created");
 
     /* Append a user message so agent has something to process */

@@ -10,7 +10,7 @@ static const char *DB_PATH = "/tmp/test_cclaw_janitor.sqlite";
 static void test_stale_lock_recovery(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "stale_test", NULL);
+    int64_t sid = session_create(db, "stale_test", NULL, -1, 0);
     assert(sid > 0);
 
     /* Acquire lock, then backdate lock_acquired_at to simulate staleness */
@@ -38,7 +38,7 @@ static void test_stale_lock_recovery(void) {
 static void test_fresh_lock_not_recovered(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "fresh_test", NULL);
+    int64_t sid = session_create(db, "fresh_test", NULL, -1, 0);
     assert(sid > 0);
 
     assert(session_try_acquire(db, sid, "active-worker") == 0);
@@ -58,7 +58,7 @@ static void test_fresh_lock_not_recovered(void) {
 static void test_orphan_pending_recovery(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "pending_test", NULL);
+    int64_t sid = session_create(db, "pending_test", NULL, -1, 0);
     assert(sid > 0);
 
     /* Manually set state to 'pending' to simulate orphan */
@@ -95,7 +95,7 @@ static void test_invalid_args(void) {
 static void test_quarantine_after_3_crashes(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "crash_test", NULL);
+    int64_t sid = session_create(db, "crash_test", NULL, -1, 0);
     assert(sid > 0);
 
     sqlite3_stmt *stmt;
@@ -131,7 +131,7 @@ static void test_quarantine_after_3_crashes(void) {
 static void test_error_count_resets_on_clean_release(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "reset_test", NULL);
+    int64_t sid = session_create(db, "reset_test", NULL, -1, 0);
     assert(sid > 0);
 
     sqlite3_stmt *stmt;

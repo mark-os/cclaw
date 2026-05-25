@@ -10,7 +10,7 @@ static const char *DB_PATH = "/tmp/test_cclaw_inbox_rollback.sqlite";
 static void test_rollback_missing_session(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "rollback_miss", NULL);
+    int64_t sid = session_create(db, "rollback_miss", NULL, -1, 0);
     assert(sid > 0);
 
     inbox_insert(db, sid, "src", "msg1");
@@ -48,7 +48,7 @@ static int progress_abort(void *data) {
 static void test_rollback_mid_consumption(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "rollback_mid", NULL);
+    int64_t sid = session_create(db, "rollback_mid", NULL, -1, 0);
     assert(sid > 0);
 
     /* Insert 5 inbox items */
@@ -82,7 +82,7 @@ static void test_rollback_mid_consumption(void) {
             db_close(db);
             unlink(DB_PATH);
             db = db_open(DB_PATH);
-            sid = session_create(db, "rollback_mid", NULL);
+            sid = session_create(db, "rollback_mid", NULL, -1, 0);
             for (int i = 0; i < 5; i++) {
                 char buf[32];
                 snprintf(buf, sizeof(buf), "item_%d", i);
@@ -112,7 +112,7 @@ static void test_rollback_mid_consumption(void) {
 static void test_no_double_consume_after_success(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "no_double", NULL);
+    int64_t sid = session_create(db, "no_double", NULL, -1, 0);
     assert(sid > 0);
 
     inbox_insert(db, sid, "src", "once");

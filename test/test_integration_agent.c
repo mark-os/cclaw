@@ -42,7 +42,7 @@ static void test_agent_loop_end_to_end(void) {
     sqlite3 *db = db_open(":memory:");
     if (!db) FAIL("db_open failed");
 
-    int64_t sid = session_create(db, "integration_test", NULL);
+    int64_t sid = session_create(db, "integration_test", NULL, -1, 0);
     if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     Config cfg = {0};
@@ -140,7 +140,7 @@ static void test_agent_loop_tool_error_recovery(void) {
     sqlite3 *db = db_open(":memory:");
     if (!db) FAIL("db_open failed");
 
-    int64_t sid = session_create(db, "error_test", NULL);
+    int64_t sid = session_create(db, "error_test", NULL, -1, 0);
     if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     Config cfg = {0};

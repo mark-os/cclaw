@@ -29,7 +29,7 @@ static void test_status_page(void) {
     assert(db);
 
     /* Create a session so status page has data */
-    int64_t sid = session_create(db, "test-session", NULL);
+    int64_t sid = session_create(db, "test-session", NULL, -1, 0);
     assert(sid > 0);
 
     /* Acquire lock to test lock_holder display */

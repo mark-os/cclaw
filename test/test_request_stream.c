@@ -42,7 +42,7 @@ static void test_basic_user_message(void) {
     sqlite3 *db;
     db = test_db_open();
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
     /* Append a user message */
@@ -93,7 +93,7 @@ static void test_assistant_tool_calls(void) {
     sqlite3 *db;
     db = test_db_open();
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
     /* User message */
@@ -161,7 +161,7 @@ static void test_tools_included(void) {
     sqlite3 *db;
     db = test_db_open();
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
     Message msg = {.role = ROLE_USER, .content = "hi"};
@@ -206,7 +206,7 @@ static void test_reset(void) {
     sqlite3 *db;
     db = test_db_open();
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
     Message msg = {.role = ROLE_USER, .content = "test reset"};
@@ -243,7 +243,7 @@ static void test_cutoff_notice(void) {
     sqlite3 *db;
     db = test_db_open();
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
     /* Add many messages to force truncation */
@@ -294,7 +294,7 @@ static void test_small_reads(void) {
     sqlite3 *db;
     db = test_db_open();
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
     Message msg = {.role = ROLE_USER, .content = "small read test"};

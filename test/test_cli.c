@@ -14,7 +14,8 @@ static int tests_passed = 0;
 
 static void test_cli_null_config(void) {
     TEST(cli_null_config);
-    int rc = cli_run(NULL);
+    CliOpts opts = {.session_id = -1};
+    int rc = cli_run(NULL, &opts);
     if (rc != -1) { FAIL("expected -1 for NULL config"); return; }
     PASS();
 }
@@ -27,7 +28,8 @@ static void test_cli_no_api_key(void) {
     cfg.provider.base_url = "http://localhost:9999";
     cfg.provider.model = "test";
     cfg.provider.api_key = NULL;
-    int rc = cli_run(&cfg);
+    CliOpts opts = {.session_id = -1};
+    int rc = cli_run(&cfg, &opts);
     if (rc != -1) { FAIL("expected -1 without api_key"); return; }
     PASS();
 }
@@ -40,8 +42,8 @@ static void test_cli_session_resume(void) {
     sqlite3 *db = db_open(dbpath);
     if (!db) { FAIL("db_open"); return; }
 
-    int64_t s1 = session_create(db, "first", NULL);
-    int64_t s2 = session_create(db, "second", NULL);
+    int64_t s1 = session_create(db, "first", NULL, -1, 0);
+    int64_t s2 = session_create(db, "second", NULL, -1, 0);
     if (s1 < 0 || s2 < 0) { FAIL("session_create"); db_close(db); unlink(dbpath); return; }
 
     int count = 0;

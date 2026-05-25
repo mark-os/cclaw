@@ -31,7 +31,7 @@ static void test_provider_fallback_live(void) {
     sqlite3 *db = db_open(":memory:");
     if (!db) FAIL("db_open failed");
 
-    int64_t sid = session_create(db, "fallback_test", NULL);
+    int64_t sid = session_create(db, "fallback_test", NULL, -1, 0);
     if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     /* Primary: unreachable (connection refused → -1 after retries) */

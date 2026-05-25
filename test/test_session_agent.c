@@ -25,7 +25,7 @@ static void teardown(sqlite3 *db) {
 /* T79: session_create stores agent_name, session_get_agent_name retrieves it */
 static void test_create_with_agent_name(void) {
     sqlite3 *db = setup();
-    int64_t sid = session_create(db, "test", "coder");
+    int64_t sid = session_create(db, "test", "coder", -1, 0);
     assert(sid > 0);
 
     char *name = session_get_agent_name(db, sid);
@@ -40,7 +40,7 @@ static void test_create_with_agent_name(void) {
 /* T79: NULL agent_name → session_get_agent_name returns NULL */
 static void test_create_without_agent_name(void) {
     sqlite3 *db = setup();
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
     char *name = session_get_agent_name(db, sid);
@@ -53,8 +53,8 @@ static void test_create_without_agent_name(void) {
 /* T79: session_list includes agent_name */
 static void test_list_includes_agent_name(void) {
     sqlite3 *db = setup();
-    session_create(db, "s1", "writer");
-    session_create(db, "s2", NULL);
+    session_create(db, "s1", "writer", -1, 0);
+    session_create(db, "s2", NULL, -1, 0);
 
     int count = 0;
     Session *list = session_list(db, &count);

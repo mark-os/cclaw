@@ -10,7 +10,7 @@ static const char *DB_PATH = "/tmp/test_cclaw_tg_intake.sqlite";
 static void test_tg_intake_inserts_to_inbox(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "tg_intake", NULL);
+    int64_t sid = session_create(db, "tg_intake", NULL, -1, 0);
     assert(sid > 0);
 
     /* Simulate Telegram message arriving → inbox_insert */
@@ -33,7 +33,7 @@ static void test_tg_intake_inserts_to_inbox(void) {
 static void test_tg_intake_acquire_and_consume(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "tg_acquire", NULL);
+    int64_t sid = session_create(db, "tg_acquire", NULL, -1, 0);
     assert(sid > 0);
 
     /* Insert message to inbox */
@@ -66,7 +66,7 @@ static void test_tg_intake_acquire_and_consume(void) {
 static void test_tg_intake_lock_contention(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "tg_contention", NULL);
+    int64_t sid = session_create(db, "tg_contention", NULL, -1, 0);
     assert(sid > 0);
 
     /* First handler acquires lock */
@@ -98,7 +98,7 @@ static void test_tg_intake_lock_contention(void) {
 static void test_tg_intake_batch_consume(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
-    int64_t sid = session_create(db, "tg_batch", NULL);
+    int64_t sid = session_create(db, "tg_batch", NULL, -1, 0);
     assert(sid > 0);
 
     /* Multiple messages arrive */

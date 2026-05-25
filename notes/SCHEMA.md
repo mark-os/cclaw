@@ -9,6 +9,8 @@ CREATE TABLE sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
     agent_name TEXT,                          -- V20: identifies agent config (agents/<name>/)
+    parent_session_id INTEGER DEFAULT -1,     -- sub-agent parent (-1 = top-level)
+    depth INTEGER NOT NULL DEFAULT 0,         -- sub-agent depth (0 = top-level)
     leaf_id INTEGER DEFAULT -1,
     state TEXT NOT NULL DEFAULT 'idle',       -- idle|running|waiting
     lock_holder TEXT,                         -- "cli-PID" (CLI CAS); daemon uses fork-exclusivity
@@ -50,19 +52,6 @@ CREATE TABLE spawn_queue (
     tool_call_id TEXT,                        -- for blocking: match result to parent's tool_call
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     consumed INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE sub_agents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    parent_session_id INTEGER NOT NULL REFERENCES sessions(id),
-    session_id INTEGER NOT NULL REFERENCES sessions(id),
-    pid INTEGER NOT NULL DEFAULT 0,
-    depth INTEGER NOT NULL DEFAULT 1,
-    status TEXT NOT NULL DEFAULT 'running',   -- running|done|error|crashed
-    task TEXT NOT NULL,
-    result TEXT,
-    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    finished_at INTEGER
 );
 
 CREATE TABLE cron_jobs (
@@ -137,3 +126,4 @@ compaction:          {"type":"compaction","summary":"...","first_kept_id":N}
 5. **WAL mode** — multiple readers never block. Writers serialize briefly on commit.
 6. **`stop_reason` generated column** — enables V36 filtering without JSON parsing at query time.
 7. **`spawn_queue`** — daemon reads on signal pipe wake, forks sub-agent, marks consumed. Decouples agent process from fork logic (V21).
+8. **Sub-agents are sessions** — no separate tracking table. `parent_session_id` + `depth` on sessions table. V3 limits enforced via `SELECT COUNT(*) FROM sessions WHERE parent_session_id=? AND state IN ('running','waiting')`. Result read from child session's entries.

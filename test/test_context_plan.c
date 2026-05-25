@@ -35,7 +35,7 @@ static void test_basic_plan(void) {
     sqlite3 *db = db_open(":memory:");
     if (!db) FAIL("db_open");
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     append_msg(db, sid, ROLE_SYSTEM, "You are helpful.", STOP_REASON_NONE, NULL, 0);
     append_msg(db, sid, ROLE_USER, "Hello", STOP_REASON_NONE, NULL, 0);
     append_msg(db, sid, ROLE_ASSISTANT, "Hi!", STOP_REASON_STOP, NULL, 0);
@@ -61,7 +61,7 @@ static void test_v28_filtering(void) {
     sqlite3 *db = db_open(":memory:");
     if (!db) FAIL("db_open");
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     append_msg(db, sid, ROLE_USER, "Hello", STOP_REASON_NONE, NULL, 0);
     /* Errored assistant + its tool result should be filtered */
     ToolCall tc = { .id = "tc1", .name = "shell_exec", .arguments = "{}" };
@@ -96,7 +96,7 @@ static void test_cut_point(void) {
     sqlite3 *db = db_open(":memory:");
     if (!db) FAIL("db_open");
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     /* Insert many messages to exceed a tiny budget */
     for (int i = 0; i < 20; i++) {
         char buf[256];
@@ -127,7 +127,7 @@ static void test_v8_tool_call_group(void) {
     sqlite3 *db = db_open(":memory:");
     if (!db) FAIL("db_open");
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     append_msg(db, sid, ROLE_USER, "old message with lots of text padding", STOP_REASON_NONE, NULL, 0);
     append_msg(db, sid, ROLE_ASSISTANT, "old response", STOP_REASON_STOP, NULL, 0);
     append_msg(db, sid, ROLE_USER, "do something", STOP_REASON_NONE, NULL, 0);

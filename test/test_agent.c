@@ -94,7 +94,7 @@ static void test_agent_run_empty_session(void) {
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); return; }
 
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
 
     Config cfg = {0};
@@ -133,7 +133,7 @@ static void test_max_iterations_configurable(void) {
 
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); return; }
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
 
     Message user_msg = {.role = ROLE_USER, .content = "hello"};
@@ -165,7 +165,7 @@ static void test_max_iterations_default(void) {
 
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); return; }
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
 
     Message user_msg = {.role = ROLE_USER, .content = "hello"};
@@ -191,7 +191,7 @@ static void test_debug_flag_stderr(void) {
      * (debug output goes to stderr, doesn't affect return code) */
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); return; }
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
 
     Config cfg = {0};
@@ -255,7 +255,7 @@ static void test_context_overflow_return_code(void) {
      * (which is what we get with a bogus URL) */
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); return; }
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
 
     Config cfg = {0};
@@ -287,7 +287,7 @@ static void test_t45_fallback_chain(void) {
     /* T45: with unreachable primary and unreachable fallback, agent fails gracefully */
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); return; }
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
 
     ProviderConfig fallbacks[2] = {
@@ -328,7 +328,7 @@ static void test_v32_error_retry_writes_error_entry(void) {
     /* V32: after MAX_LLM_RETRIES exhausted, agent writes error entry to DB */
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); return; }
-    int64_t sid = session_create(db, "test", NULL);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
     if (sid < 0) { FAIL("session_create failed"); db_close(db); return; }
 
     Config cfg = {0};

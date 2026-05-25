@@ -5,18 +5,6 @@
 #include "types.h"
 #include <sys/types.h>
 
-/* Sub-agent info struct */
-typedef struct {
-    int64_t id;
-    int64_t parent_session_id;
-    int64_t session_id;
-    pid_t pid;
-    int depth;
-    char *status;
-    char *task;
-    char *result;
-} SubAgentInfo;
-
 /* T88: Spawn queue request */
 typedef struct {
     int64_t id;
@@ -36,8 +24,10 @@ void db_close(sqlite3 *db);
 
 /* Session CRUD (V14) */
 
-/* Create session, returns id (>0) or -1 on error. agent_name may be NULL. */
-int64_t session_create(sqlite3 *db, const char *name, const char *agent_name);
+/* Create session, returns id (>0) or -1 on error. agent_name may be NULL.
+ * parent_session_id = -1 for top-level sessions. depth = 0 for top-level. */
+int64_t session_create(sqlite3 *db, const char *name, const char *agent_name,
+                       int64_t parent_session_id, int depth);
 
 /* List all sessions. Caller must free returned array and each session's name.
  * Sets *count. Returns NULL on error or empty. */
@@ -49,6 +39,9 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count);
 
 /* V20: Get agent_name for session. Returns heap-allocated string or NULL. */
 char *session_get_agent_name(sqlite3 *db, int64_t session_id);
+
+/* Get depth for session. Returns depth (0 = top-level) or 0 on error. */
+int session_get_depth(sqlite3 *db, int64_t session_id);
 
 /* Set leaf_id for session. Returns 0 on success, -1 on error. */
 int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id);
@@ -82,17 +75,9 @@ int db_kv_set(sqlite3 *db, const char *key, const char *value);
 int64_t db_tg_get_session(sqlite3 *db, int64_t chat_id);
 int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id);
 
-/* V3: Sub-agent tracking */
-int64_t subagent_create(sqlite3 *db, int64_t parent_session_id, int64_t session_id,
-                        pid_t pid, int depth, const char *task);
-int subagent_count_by_parent(sqlite3 *db, int64_t parent_session_id);
-int subagent_count_total(sqlite3 *db);
-int subagent_finish(sqlite3 *db, int64_t agent_id, const char *status, const char *result);
-SubAgentInfo *subagent_get(sqlite3 *db, int64_t agent_id);
-void subagent_info_free(SubAgentInfo *info);
-
-/* List all running sub-agents. Caller must free array and each element's fields via subagent_info_free logic. */
-SubAgentInfo *subagent_list_running(sqlite3 *db, int *count);
+/* V3: Sub-agent limits — count active child sessions */
+int session_count_children(sqlite3 *db, int64_t parent_session_id);
+int session_count_active_agents(sqlite3 *db);
 
 /* V17: Get next turn_id for a session (MAX(turn_id)+1, or 1 if none). */
 int64_t db_next_turn_id(sqlite3 *db, int64_t session_id);

@@ -25,7 +25,7 @@ static void test_stop_reason_roundtrip(void) {
     sqlite3 *db = db_open(path);
     if (!db) { unlink(path); FAIL("db_open"); }
 
-    int64_t sid = session_create(db, "test_sr", NULL);
+    int64_t sid = session_create(db, "test_sr", NULL, -1, 0);
     if (sid < 0) { db_close(db); unlink(path); FAIL("session_create"); }
 
     /* Append assistant message with stop_reason = STOP_REASON_TOOL_USE */
@@ -65,7 +65,7 @@ static void test_stop_reason_none_not_stored(void) {
     sqlite3 *db = db_open(path);
     if (!db) { unlink(path); FAIL("db_open"); }
 
-    int64_t sid = session_create(db, "test_sr2", NULL);
+    int64_t sid = session_create(db, "test_sr2", NULL, -1, 0);
     if (sid < 0) { db_close(db); unlink(path); FAIL("session_create"); }
 
     /* Append user message (no stop_reason) */
@@ -101,7 +101,7 @@ static void test_all_stop_reasons(void) {
     sqlite3 *db = db_open(path);
     if (!db) { unlink(path); FAIL("db_open"); }
 
-    int64_t sid = session_create(db, "test_sr3", NULL);
+    int64_t sid = session_create(db, "test_sr3", NULL, -1, 0);
     if (sid < 0) { db_close(db); unlink(path); FAIL("session_create"); }
 
     StopReason reasons[] = {STOP_REASON_STOP, STOP_REASON_LENGTH,

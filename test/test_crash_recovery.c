@@ -21,7 +21,7 @@ static void test_crash_recovery_synthesizes_notice(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t sid = session_create(db, "crash_test", NULL);
+    int64_t sid = session_create(db, "crash_test", NULL, -1, 0);
     assert(sid > 0);
 
     /* User message */
@@ -112,7 +112,7 @@ static void test_crash_recovery_partial_results(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t sid = session_create(db, "partial_crash", NULL);
+    int64_t sid = session_create(db, "partial_crash", NULL, -1, 0);
     assert(sid > 0);
 
     Message user_msg = {.role = ROLE_USER, .content = "do two things"};
@@ -194,7 +194,7 @@ static void test_no_crash_no_recovery(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t sid = session_create(db, "no_crash", NULL);
+    int64_t sid = session_create(db, "no_crash", NULL, -1, 0);
     int64_t uid = entry_append(db, sid, &(Message){.role = ROLE_USER, .content = "hi"});
 
     /* Assistant with 1 tool_call */

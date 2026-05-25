@@ -113,6 +113,31 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
             fprintf(stderr, "[shell_exec] warning: namespace sandbox unavailable, running unsandboxed\n");
         }
 
+        /* V47: PATH restriction + env hardening */
+        setenv("PATH", "/bin:/usr/bin", 1);
+        unsetenv("OPENROUTER_API_KEY");
+        unsetenv("GEMINI_API_KEY");
+        unsetenv("HOME");
+        /* Unset all CCLAW_* env vars */
+        extern char **environ;
+        for (int i = 0; environ[i]; ) {
+            if (strncmp(environ[i], "CCLAW_", 6) == 0) {
+                /* unsetenv shifts environ, don't increment */
+                char *eq = strchr(environ[i], '=');
+                if (eq) {
+                    size_t klen = (size_t)(eq - environ[i]);
+                    char key[klen + 1];
+                    memcpy(key, environ[i], klen);
+                    key[klen] = '\0';
+                    unsetenv(key);
+                } else {
+                    i++;
+                }
+            } else {
+                i++;
+            }
+        }
+
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);
         _exit(127);
     }

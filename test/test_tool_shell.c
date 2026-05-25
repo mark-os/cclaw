@@ -131,6 +131,46 @@ static void test_shell_network_flag(void) {
     printf("  PASS test_shell_network_flag\n");
 }
 
+/* V47: Verify PATH is restricted and env is clean */
+static void test_env_hardened(void) {
+    /* Set vars that should be stripped */
+    setenv("OPENROUTER_API_KEY", "secret123", 1);
+    setenv("GEMINI_API_KEY", "secret456", 1);
+    setenv("CCLAW_DB_PATH", "/tmp/test.db", 1);
+    setenv("CCLAW_WEB_PORT", "8080", 1);
+
+    char *r = tool_shell_handler("{\"command\":\"env\"}", NULL);
+    assert(r != NULL);
+    assert(strstr(r, "[exit 0]") != NULL);
+    /* API keys must not appear */
+    assert(strstr(r, "OPENROUTER_API_KEY") == NULL);
+    assert(strstr(r, "GEMINI_API_KEY") == NULL);
+    assert(strstr(r, "CCLAW_DB_PATH") == NULL);
+    assert(strstr(r, "CCLAW_WEB_PORT") == NULL);
+    /* HOME must not appear */
+    assert(strstr(r, "\nHOME=") == NULL);
+    /* PATH must be restricted */
+    assert(strstr(r, "PATH=/bin:/usr/bin") != NULL);
+    free(r);
+
+    /* Clean up parent env */
+    unsetenv("OPENROUTER_API_KEY");
+    unsetenv("GEMINI_API_KEY");
+    unsetenv("CCLAW_DB_PATH");
+    unsetenv("CCLAW_WEB_PORT");
+    printf("  PASS test_env_hardened\n");
+}
+
+/* V47: Verify cclaw binary is unreachable via PATH */
+static void test_cclaw_unreachable(void) {
+    char *r = tool_shell_handler("{\"command\":\"which cclaw 2>/dev/null; echo rc=$?\"}", NULL);
+    assert(r != NULL);
+    /* which should fail (rc=1) since cclaw is in build/ not /bin or /usr/bin */
+    assert(strstr(r, "rc=1") != NULL);
+    free(r);
+    printf("  PASS test_cclaw_unreachable\n");
+}
+
 int main(void) {
     printf("test_tool_shell:\n");
     test_basic_command();
@@ -144,6 +184,8 @@ int main(void) {
     test_register();
     test_namespace_sandbox_fallback();
     test_shell_network_flag();
+    test_env_hardened();
+    test_cclaw_unreachable();
     printf("All shell_exec tool tests passed.\n");
     return 0;
 }

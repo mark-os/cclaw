@@ -289,7 +289,7 @@ T127|x|integration test: retry + backoff with mock — mock returns 429 with Ret
 T128|x|integration test: context overflow recovery — mock returns 400 with "context window" error; verify agent detects overflow|T125
 T129|x|integration test: mock Telegram API — mock getUpdates + sendMessage endpoints; verify poll→inbox→agent→deliver cycle end-to-end|T125,V25
 T130|x|integration test: daemon fork+reap with mock LLM — daemon forks agent, agent hits mock, writes response, daemon reaps and delivers|T125,V21
-T131| |`shell_exec` PATH + env hardening — set `PATH=/bin:/usr/bin` in child; unset API keys, HOME, CCLAW_* before exec; test: verify `env` output clean, verify cclaw binary unreachable|V47
+T131|x|`shell_exec` PATH + env hardening — set `PATH=/bin:/usr/bin` in child; unset API keys, HOME, CCLAW_* before exec; test: verify `env` output clean, verify cclaw binary unreachable|V47
 T132| |`mjs` standalone binary — build mquickjs evaluator (`vendor/mquickjs/`) as separate binary; accepts `-e 'code'` or filename arg; links no libcurl; `fetch()` binding reads/writes on fd from `MJS_FETCH_FD` env var; install to `/usr/local/lib/cclaw/mjs`|V48,V49,V51
 T133| |`mjs` fetch fd protocol — implement request/response serialization (4B len + JSON) in mjs binary; `fetch()` returns Promise that blocks on fd read; handle timeout/error JSON gracefully|V50
 T134| |agent-side fetch proxy — in `shell_exec` fork path: create `socketpair(AF_UNIX, SOCK_STREAM)` before fork; pass child end as `MJS_FETCH_FD`; parent monitors fd via select alongside child stdout pipe; on request: parse JSON, check allowed_hosts (V46), curl, write response; close on child exit|V49,V50,V46

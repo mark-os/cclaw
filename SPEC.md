@@ -26,7 +26,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - cmd: `./build/cclaw --sub-agent --session-id=X --task="..."` → sub-agent process
 - env: `OPENROUTER_API_KEY` required (minimum to run)
 - env: `CCLAW_PROVIDER`, `CCLAW_MODEL`, `CCLAW_TELEGRAM_TOKEN`, `CCLAW_DB_PATH`, `CCLAW_WEB_PORT`
-- file: `config.json` — provider, model, tokens, channels, workspace, db_path
+- file: `config.json` — provider, model, tokens, channels, workspace, db_path, admin_chat_ids[]
 - file: `agents/<name>/agent.json` — per-agent: model, workspace, tools, max_iterations, allowed_hosts
 - file: `agents/<name>/system.md` — system prompt template
 - file: `agents/<name>/skills/*.md` — skill instructions injected into system prompt
@@ -44,6 +44,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - tool: `web_fetch` — HTTP GET URL, extract text from HTML, external input protection wrapper
 - tool: `soul_edit` — replace agent's soul text (persona/tone); takes effect next turn
 - tool: `memory_set` — update agent's memory text (durable facts); takes effect next turn
+- tool: `approval_request` — propose config/permission change for admin approval; types: whitelist_host, create_agent, model_change, tool_enable; agent blocks until admin responds
 - db: `cclaw.db` — SQLite 3.53, WAL, FTS5, JSON functions
 
 ## §D DATA
@@ -76,6 +77,8 @@ Agent config on disk (`agents/<name>/`):
 Agent state in DB (replaces filesystem-based MEMORY.md, SOUL.md, system.md, HEARTBEAT.md):
 
 agents table: `id`, `name TEXT UNIQUE`, `config TEXT` (JSON — model, tools, limits, allowed_hosts), `system_prompt TEXT` (template, supports `{session_id}`, `{date}`, `{agent_name}`), `soul TEXT` (persona/tone — agent-editable, injected into system prompt), `memory TEXT` (durable facts — agent-editable, injected into system prompt), `heartbeat TEXT` (proactive task instructions, read on heartbeat turns), `created_at`, `updated_at`
+
+approvals table: `id`, `session_id`, `agent_name TEXT`, `type TEXT` (whitelist_host|create_agent|model_change|tool_enable), `payload TEXT` (JSON — request details), `status TEXT DEFAULT 'pending'` (pending|approved|denied), `admin_chat_id`, `created_at`, `resolved_at`
 
 Design:
 - Agent identity (soul, memory, prompts) lives in SQLite → portable by copying DB, no filesystem sync
@@ -138,6 +141,9 @@ V48: ∀ `shell_exec` child → `mjs` binary available at fixed path (e.g. `/usr
 V49: ∀ `mjs` process (spawned via shell_exec) → inherits socketpair fd from agent process (pre-fork); `fetch()` binding serializes request over inherited fd → agent reads, checks `allowed_hosts` allowlist + SSRF policy (V46), performs libcurl call, writes response back; mjs has zero direct network capability; fd number passed via env var `MJS_FETCH_FD`
 V50: ∀ `mjs` fetch proxy protocol → request: `<4B len big-endian><JSON: {"url","method","headers","body"}>`, response: `<4B len big-endian><JSON: {"status","headers","body","error"}>` over inherited fd; agent-side enforces timeout (30s default) per fetch call; on policy deny → respond w/ `{"status":403,"error":"host not in allowed_hosts"}`
 V51: ∀ `mjs` invocation via shell → composable w/ unix pipes; stdout/stderr flow through shell pipeline normally; fetch fd is side-channel (⊥ interfere w/ stdio); agent can: `mjs -e 'await fetch(...)' | jq .items[] | grep error`
+V52: ∀ API key entered via Telegram admin dialog → written directly to config file on disk; ⊥ stored in session entries, inbox, or any DB field; ⊥ appears in LLM context; Telegram poller handles key input before inbox_insert (bypasses agent entirely)
+V53: ∀ Telegram admin command (config, key, whitelist) → restricted to `admin_chat_ids[]` in config; unauthorized chat_id → silent ignore (⊥ error msg, ⊥ inbox_insert)
+V54: ∀ config/permission mutation → requires admin approval; agent may propose changes via `approval_request` tool (writes to `approvals` table); daemon delivers proposal to admin as inline keyboard; admin approve → daemon applies change + posts confirmation to agent inbox; admin deny → posts denial to agent inbox; agent ⊥ mutates config/permissions directly
 
 ## §T TASKS
 id|status|task|cites
@@ -278,6 +284,19 @@ T135| |test: mjs fetch proxy end-to-end — agent spawns `shell_exec("mjs -e 'aw
 T136| |test: mjs pipeline composability — `shell_exec("mjs -e '...' \| grep ...")` works; fetch fd ⊥ interfere w/ stdout piping|V51
 T137| |Makefile: `mjs` binary target — compile mquickjs evaluator, install to `build/mjs`; `make install` copies to `/usr/local/lib/cclaw/mjs`|V48
 T138| |template embedding — `templates/` dir w/ `.md`, `.txt`, `.sql` files; build-time script converts to C byte arrays in `build/templates.h`; replace inline `static const char*` strings in config.c, context.c, db.c w/ `#include "templates.h"` refs; Makefile rule: `build/templates.h` depends on `templates/*`|§C
+T139| |Telegram admin auth — `admin_chat_ids[]` in config; `telegram_is_admin(chat_id)` check; non-admin messages route to agent normally; admin commands intercepted before inbox_insert|V53,§I
+T140| |Telegram admin command parser — `/config`, `/key`, `/whitelist` prefix detection in poller thread; dispatch to admin handlers; non-command messages pass through to agent|V53
+T141| |`/key` dialog — inline keyboard: select provider (OpenRouter, Gemini, custom) → ForceReply prompt for key → write to env file (`/etc/cclaw/env` or config-specified path) → confirm; key value ⊥ logged, ⊥ stored in DB, ⊥ enters inbox|V52
+T142| |`/config model` dialog — inline keyboard: list configured providers → select → ForceReply for model name → update `config.json` provider entry → confirm + reload config in daemon|§I
+T143| |`/config endpoint` dialog — ForceReply for base_url + provider name → validate URL format → write to config.json → reload|§I
+T144| |`/whitelist` dialog — inline keyboard: list agents → select → show current `allowed_hosts[]` → ForceReply for new host → append to agent config → reload; also support `/whitelist remove`|V46,§I
+T145| |test: admin commands — verify key write bypasses DB entirely; verify non-admin chat_id rejected; verify config reload picks up changes|V52,V53
+T146| |`approvals` table — schema: id, session_id, agent_name, type (whitelist_host\|create_agent\|model_change\|tool_enable), payload TEXT (JSON), status (pending\|approved\|denied), admin_chat_id, created_at, resolved_at|V54,§D
+T147| |`approval_request` tool — agent calls w/ type + payload (e.g. `{"type":"whitelist_host","host":"api.example.com"}`); writes to `approvals` table; daemon delivers inline keyboard to admin via Telegram; agent receives tool_result "pending approval — waiting for admin"|V54
+T148| |approval delivery — daemon detects new pending approval → sends formatted message + Approve/Deny buttons to all `admin_chat_ids[]`; callback_data encodes approval id|V54,V53
+T149| |approval callback handler — admin taps Approve → daemon applies change (write config, reload), updates approval row, posts result to agent inbox; Deny → posts denial to inbox; agent session transitions idle→running on inbox signal|V54,V25
+T150| |agent-initiated agent creation — agent proposes new agent via `approval_request` type `create_agent` w/ payload (name, model, system_prompt, tools, allowed_hosts); admin approves → daemon writes `agents/<name>/agent.json` + `system.md` + seeds DB row|V54,V20
+T151| |test: approval flow end-to-end — agent requests whitelist host → approval pending → mock admin approve → config updated → agent inbox receives confirmation; also test deny path + unauthorized approval attempt|V54,V53
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)

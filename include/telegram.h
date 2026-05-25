@@ -20,6 +20,10 @@ void telegram_send_message(const char *token, int64_t chat_id, const char *text)
 /* V53: Check if chat_id is in admin_chat_ids[]. */
 int telegram_is_admin(const Config *cfg, int64_t chat_id);
 
+/* T140: Parse admin command text. Returns command type (1=key, 2=config, 3=whitelist, 0=unknown).
+ * If args_out is non-NULL, sets it to the argument string after the command (or NULL if none). */
+int telegram_parse_admin_command(const char *text, const char **args_out);
+
 /* V11: Find split point within text[0..len-1], respecting max_len.
  * Splits at paragraph, then newline, then sentence, then hard cut.
  * Exposed for testing. */

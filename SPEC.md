@@ -299,7 +299,7 @@ T136|x|test: mjs pipeline composability — `shell_exec("mjs -e '...' \| grep ..
 T137|x|Makefile: `mjs` binary target — compile mquickjs evaluator, install to `build/mjs`; `make install` copies to `/usr/local/lib/cclaw/mjs`|V48
 T138|x|template embedding — `templates/` dir w/ `.md`, `.txt`, `.sql` files; build-time script converts to C byte arrays in `build/templates.h`; replace inline `static const char*` strings in config.c, context.c, db.c w/ `#include "templates.h"` refs; Makefile rule: `build/templates.h` depends on `templates/*`|§C
 T139|x|Telegram admin auth — `admin_chat_ids[]` in config; `telegram_is_admin(chat_id)` check; non-admin messages route to agent normally; admin commands intercepted before inbox_insert|V53,§I
-T140| |Telegram admin command parser — `/config`, `/key`, `/whitelist` prefix detection in poller thread; dispatch to admin handlers; non-command messages pass through to agent|V53
+T140|x|Telegram admin command parser — `/config`, `/key`, `/whitelist` prefix detection in poller thread; dispatch to admin handlers; non-command messages pass through to agent|V53
 T141| |`/key` dialog — inline keyboard: select provider (OpenRouter, Gemini, custom) → ForceReply prompt for key → write to env file (`/etc/cclaw/env` or config-specified path) → confirm; key value ⊥ logged, ⊥ stored in DB, ⊥ enters inbox|V52
 T142| |`/config model` dialog — inline keyboard: list configured providers → select → ForceReply for model name → update `config.json` provider entry → confirm + reload config in daemon|§I
 T143| |`/config endpoint` dialog — ForceReply for base_url + provider name → validate URL format → write to config.json → reload|§I

@@ -114,6 +114,37 @@ static void test_is_admin_empty(void) {
     assert(telegram_is_admin(NULL, 111) == 0);
 }
 
+/* T140: telegram_parse_admin_command tests */
+static void test_parse_admin_key(void) {
+    const char *args = NULL;
+    assert(telegram_parse_admin_command("/key", &args) == 1);
+    assert(args == NULL);
+    assert(telegram_parse_admin_command("/key openrouter", &args) == 1);
+    assert(args != NULL && strcmp(args, "openrouter") == 0);
+}
+
+static void test_parse_admin_config(void) {
+    const char *args = NULL;
+    assert(telegram_parse_admin_command("/config", &args) == 2);
+    assert(args == NULL);
+    assert(telegram_parse_admin_command("/config model gpt-4", &args) == 2);
+    assert(args != NULL && strcmp(args, "model gpt-4") == 0);
+}
+
+static void test_parse_admin_whitelist(void) {
+    const char *args = NULL;
+    assert(telegram_parse_admin_command("/whitelist", &args) == 3);
+    assert(args == NULL);
+    assert(telegram_parse_admin_command("/whitelist add api.example.com", &args) == 3);
+    assert(args != NULL && strcmp(args, "add api.example.com") == 0);
+}
+
+static void test_parse_admin_unknown(void) {
+    const char *args = NULL;
+    assert(telegram_parse_admin_command("/help", &args) == 0);
+    assert(telegram_parse_admin_command("hello", &args) == 0);
+}
+
 int main(void) {
     printf("test_start_no_token...");
     test_start_no_token();
@@ -161,6 +192,22 @@ int main(void) {
 
     printf("test_is_admin_empty...");
     test_is_admin_empty();
+    printf(" OK\n");
+
+    printf("test_parse_admin_key...");
+    test_parse_admin_key();
+    printf(" OK\n");
+
+    printf("test_parse_admin_config...");
+    test_parse_admin_config();
+    printf(" OK\n");
+
+    printf("test_parse_admin_whitelist...");
+    test_parse_admin_whitelist();
+    printf(" OK\n");
+
+    printf("test_parse_admin_unknown...");
+    test_parse_admin_unknown();
     printf(" OK\n");
 
     printf("all telegram tests passed\n");

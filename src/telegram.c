@@ -131,6 +131,49 @@ static int is_admin_command(const char *text) {
             strncmp(text, "/whitelist", 10) == 0);
 }
 
+/* T140: Parse admin command and return command type.
+ * Returns: 1=key, 2=config, 3=whitelist, 0=unknown */
+int telegram_parse_admin_command(const char *text, const char **args_out) {
+    if (strncmp(text, "/key", 4) == 0) {
+        if (args_out) *args_out = text[4] == ' ' ? text + 5 : NULL;
+        return 1;
+    }
+    if (strncmp(text, "/config", 7) == 0) {
+        if (args_out) *args_out = text[7] == ' ' ? text + 8 : NULL;
+        return 2;
+    }
+    if (strncmp(text, "/whitelist", 10) == 0) {
+        if (args_out) *args_out = text[10] == ' ' ? text + 11 : NULL;
+        return 3;
+    }
+    return 0;
+}
+
+/* T140: Dispatch admin command to handler. */
+static void dispatch_admin_command(const char *text, int64_t chat_id) {
+    const char *args = NULL;
+    int cmd = telegram_parse_admin_command(text, &args);
+
+    switch (cmd) {
+    case 1: /* /key — T141 */
+        telegram_send_message(g_cfg->telegram_token, chat_id,
+            "/key: not yet implemented (T141)");
+        break;
+    case 2: /* /config — T142/T143 */
+        telegram_send_message(g_cfg->telegram_token, chat_id,
+            "/config: not yet implemented (T142)");
+        break;
+    case 3: /* /whitelist — T144 */
+        telegram_send_message(g_cfg->telegram_token, chat_id,
+            "/whitelist: not yet implemented (T144)");
+        break;
+    default:
+        telegram_send_message(g_cfg->telegram_token, chat_id,
+            "Unknown admin command.");
+        break;
+    }
+}
+
 /* Process a single Telegram message: route to session, inbox, signal daemon */
 static void process_message(cJSON *msg) {
     cJSON *chat = cJSON_GetObjectItemCaseSensitive(msg, "chat");
@@ -144,7 +187,7 @@ static void process_message(cJSON *msg) {
     /* V53: intercept admin commands before inbox_insert */
     if (is_admin_command(text->valuestring)) {
         if (!telegram_is_admin(g_cfg, chat_id)) return; /* silent ignore */
-        /* TODO T140: dispatch to admin command handlers */
+        dispatch_admin_command(text->valuestring, chat_id);
         return;
     }
 

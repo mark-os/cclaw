@@ -7,87 +7,94 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* T153: memory tools supersede old memory_set (T121) */
+
 static sqlite3 *setup(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
     return db;
 }
 
-/* T121: memory_set updates agent memory in DB */
-static void test_memory_set_basic(void) {
+static void test_create_and_append(void) {
     sqlite3 *db = setup();
-    int rc = db_agent_upsert(db, "testbot", NULL, NULL, NULL, NULL, NULL);
-    assert(rc == 0);
-
     ToolRegistry reg;
     tools_init(&reg);
-    ToolMemoryCtx ctx = {.db = db, .agent_name = "testbot"};
+    ToolMemoryCtx ctx = {.db = db, .agent_name = "bot"};
     tool_memory_register(&reg, &ctx);
 
-    ToolEntry *e = tools_lookup(&reg, "memory_set");
+    ToolEntry *e = tools_lookup(&reg, "memory_create");
     assert(e);
-    char *result = e->handler("{\"memory\":\"User prefers concise answers.\"}", e->user_data);
-    assert(result);
-    assert(strstr(result, "ok") != NULL);
-    free(result);
+    char *r = e->handler("{\"label\":\"facts\",\"description\":\"user facts\"}", e->user_data);
+    assert(strstr(r, "ok"));
+    free(r);
 
-    /* Verify DB updated */
-    AgentRow *row = db_agent_get(db, "testbot");
-    assert(row);
-    assert(row->memory);
-    assert(strcmp(row->memory, "User prefers concise answers.") == 0);
-    agent_row_free(row);
+    e = tools_lookup(&reg, "memory_append");
+    assert(e);
+    r = e->handler("{\"label\":\"facts\",\"content\":\"likes coffee\"}", e->user_data);
+    assert(strstr(r, "ok"));
+    free(r);
+
+    MemoryBlock *mb = memory_block_get(db, "bot", "facts");
+    assert(mb && strcmp(mb->value, "likes coffee") == 0);
+    memory_block_free(mb);
 
     tools_free(&reg);
     db_close(db);
-    printf("PASS: test_memory_set_basic\n");
+    printf("PASS: test_create_and_append\n");
 }
 
-/* T121: memory_set fails for nonexistent agent */
-static void test_memory_set_no_agent(void) {
+static void test_replace(void) {
     sqlite3 *db = setup();
-
     ToolRegistry reg;
     tools_init(&reg);
-    ToolMemoryCtx ctx = {.db = db, .agent_name = "ghost"};
+    ToolMemoryCtx ctx = {.db = db, .agent_name = "bot"};
     tool_memory_register(&reg, &ctx);
 
-    ToolEntry *e = tools_lookup(&reg, "memory_set");
-    assert(e);
-    char *result = e->handler("{\"memory\":\"test\"}", e->user_data);
-    assert(result);
-    assert(strstr(result, "error") != NULL);
-    free(result);
+    ToolEntry *create = tools_lookup(&reg, "memory_create");
+    char *r = create->handler("{\"label\":\"bio\",\"description\":\"about\",\"value\":\"age 30\"}", create->user_data);
+    assert(strstr(r, "ok"));
+    free(r);
+
+    ToolEntry *replace = tools_lookup(&reg, "memory_replace");
+    r = replace->handler("{\"label\":\"bio\",\"old\":\"30\",\"new\":\"31\"}", replace->user_data);
+    assert(strstr(r, "ok"));
+    free(r);
+
+    MemoryBlock *mb = memory_block_get(db, "bot", "bio");
+    assert(mb && strcmp(mb->value, "age 31") == 0);
+    memory_block_free(mb);
 
     tools_free(&reg);
     db_close(db);
-    printf("PASS: test_memory_set_no_agent\n");
+    printf("PASS: test_replace\n");
 }
 
-/* T121: memory_set with missing field */
-static void test_memory_set_missing_field(void) {
+static void test_missing_fields(void) {
     sqlite3 *db = setup();
-
     ToolRegistry reg;
     tools_init(&reg);
-    ToolMemoryCtx ctx = {.db = db, .agent_name = "testbot"};
+    ToolMemoryCtx ctx = {.db = db, .agent_name = "bot"};
     tool_memory_register(&reg, &ctx);
 
-    ToolEntry *e = tools_lookup(&reg, "memory_set");
-    char *result = e->handler("{}", e->user_data);
-    assert(result);
-    assert(strstr(result, "error") != NULL);
-    free(result);
+    ToolEntry *e = tools_lookup(&reg, "memory_create");
+    char *r = e->handler("{}", e->user_data);
+    assert(strstr(r, "error"));
+    free(r);
+
+    e = tools_lookup(&reg, "memory_append");
+    r = e->handler("{\"label\":\"x\"}", e->user_data);
+    assert(strstr(r, "error"));
+    free(r);
 
     tools_free(&reg);
     db_close(db);
-    printf("PASS: test_memory_set_missing_field\n");
+    printf("PASS: test_missing_fields\n");
 }
 
 int main(void) {
-    test_memory_set_basic();
-    test_memory_set_no_agent();
-    test_memory_set_missing_field();
-    printf("All memory_set tests passed.\n");
+    test_create_and_append();
+    test_replace();
+    test_missing_fields();
+    printf("All memory tool tests passed.\n");
     return 0;
 }

@@ -149,7 +149,7 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
     ToolSoulCtx soul_ctx = {.db = db, .agent_name = agent_name};
     tool_soul_register(&reg, &soul_ctx);
 
-    /* T121: memory_set tool */
+    /* T153: memory block tools */
     ToolMemoryCtx mem_ctx = {.db = db, .agent_name = agent_name};
     tool_memory_register(&reg, &mem_ctx);
 

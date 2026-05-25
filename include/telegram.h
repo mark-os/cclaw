@@ -33,4 +33,11 @@ size_t tg_find_split(const char *text, size_t len, size_t max_len);
  * Doubles each failure (1, 2, 4, 8, ...), capped at 60s. Exposed for testing. */
 int tg_backoff_delay(int consecutive_failures);
 
+/* T141: Map provider name to env var name. Returns NULL for unknown. */
+const char *telegram_key_env_name(const char *provider);
+
+/* T141: Write key to env file (replace or append). V52: key ⊥ logged/DB/inbox.
+ * Returns 0 on success, -1 on failure. */
+int telegram_write_env_key(const char *env_file, const char *var_name, const char *value);
+
 #endif

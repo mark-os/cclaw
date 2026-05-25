@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static void test_start_no_token(void) {
     Config cfg = {0};
@@ -145,6 +146,72 @@ static void test_parse_admin_unknown(void) {
     assert(telegram_parse_admin_command("hello", &args) == 0);
 }
 
+/* T141: telegram_key_env_name tests */
+static void test_key_env_name(void) {
+    assert(strcmp(telegram_key_env_name("openrouter"), "OPENROUTER_API_KEY") == 0);
+    assert(strcmp(telegram_key_env_name("gemini"), "GEMINI_API_KEY") == 0);
+    assert(telegram_key_env_name("unknown") == NULL);
+}
+
+/* T141: telegram_write_env_key tests */
+static void test_write_env_key_new(void) {
+    const char *path = "/tmp/cclaw_test_env_key";
+    unlink(path);
+    assert(telegram_write_env_key(path, "MY_KEY", "sk-123") == 0);
+
+    FILE *f = fopen(path, "r");
+    assert(f);
+    char buf[256];
+    assert(fgets(buf, sizeof(buf), f));
+    assert(strcmp(buf, "MY_KEY=sk-123\n") == 0);
+    fclose(f);
+    unlink(path);
+}
+
+static void test_write_env_key_replace(void) {
+    const char *path = "/tmp/cclaw_test_env_key2";
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fprintf(f, "OTHER=abc\nMY_KEY=old-value\nANOTHER=xyz\n");
+    fclose(f);
+
+    assert(telegram_write_env_key(path, "MY_KEY", "new-value") == 0);
+
+    f = fopen(path, "r");
+    assert(f);
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+
+    assert(strstr(buf, "MY_KEY=new-value\n") != NULL);
+    assert(strstr(buf, "OTHER=abc\n") != NULL);
+    assert(strstr(buf, "ANOTHER=xyz\n") != NULL);
+    assert(strstr(buf, "old-value") == NULL);
+    unlink(path);
+}
+
+static void test_write_env_key_append(void) {
+    const char *path = "/tmp/cclaw_test_env_key3";
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fprintf(f, "EXISTING=val\n");
+    fclose(f);
+
+    assert(telegram_write_env_key(path, "NEW_KEY", "new-val") == 0);
+
+    f = fopen(path, "r");
+    assert(f);
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+
+    assert(strstr(buf, "EXISTING=val\n") != NULL);
+    assert(strstr(buf, "NEW_KEY=new-val\n") != NULL);
+    unlink(path);
+}
+
 int main(void) {
     printf("test_start_no_token...");
     test_start_no_token();
@@ -208,6 +275,22 @@ int main(void) {
 
     printf("test_parse_admin_unknown...");
     test_parse_admin_unknown();
+    printf(" OK\n");
+
+    printf("test_key_env_name...");
+    test_key_env_name();
+    printf(" OK\n");
+
+    printf("test_write_env_key_new...");
+    test_write_env_key_new();
+    printf(" OK\n");
+
+    printf("test_write_env_key_replace...");
+    test_write_env_key_replace();
+    printf(" OK\n");
+
+    printf("test_write_env_key_append...");
+    test_write_env_key_append();
     printf(" OK\n");
 
     printf("all telegram tests passed\n");

@@ -163,6 +163,8 @@ Config *config_load(const char *path) {
 
         s = json_str(root, "system_prompt");
         if (s) { free(cfg->system_prompt); cfg->system_prompt = s; }
+        s = json_str(root, "env_file");
+        if (s) { free(cfg->env_file); cfg->env_file = s; }
         cfg->web_port = json_int(root, "web_port", cfg->web_port);
         cfg->max_iterations = json_int(root, "max_iterations", cfg->max_iterations);
         cfg->max_history_tokens = json_int(root, "max_history_tokens", cfg->max_history_tokens);
@@ -349,5 +351,6 @@ void config_free(Config *cfg) {
     free(cfg->telegram_token);
     free(cfg->admin_chat_ids);
     free(cfg->system_prompt);
+    free(cfg->env_file);
     free(cfg);
 }

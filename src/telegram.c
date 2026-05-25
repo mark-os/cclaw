@@ -149,6 +149,230 @@ int telegram_parse_admin_command(const char *text, const char **args_out) {
     return 0;
 }
 
+/* T141: Pending /key dialog state (one per admin at a time) */
+#define KEY_DIALOG_MAX 4
+typedef struct {
+    int64_t chat_id;
+    char provider[32]; /* selected provider name */
+} KeyDialog;
+static KeyDialog key_dialogs[KEY_DIALOG_MAX];
+static int key_dialog_count;
+
+static KeyDialog *key_dialog_find(int64_t chat_id) {
+    for (int i = 0; i < key_dialog_count; i++)
+        if (key_dialogs[i].chat_id == chat_id) return &key_dialogs[i];
+    return NULL;
+}
+
+static void key_dialog_remove(int64_t chat_id) {
+    for (int i = 0; i < key_dialog_count; i++) {
+        if (key_dialogs[i].chat_id == chat_id) {
+            key_dialogs[i] = key_dialogs[--key_dialog_count];
+            return;
+        }
+    }
+}
+
+/* T141: Get env file path from config or default */
+static const char *get_env_file_path(void) {
+    if (g_cfg && g_cfg->env_file && g_cfg->env_file[0])
+        return g_cfg->env_file;
+    return "/etc/cclaw/env";
+}
+
+/* T141: Map provider selection to env var name */
+const char *telegram_key_env_name(const char *provider) {
+    if (strcmp(provider, "openrouter") == 0) return "OPENROUTER_API_KEY";
+    if (strcmp(provider, "gemini") == 0) return "GEMINI_API_KEY";
+    return NULL; /* custom: user provides VAR=value */
+}
+
+/* T141: Write key to env file. Returns 0 on success. V52: key ⊥ logged/DB/inbox */
+int telegram_write_env_key(const char *env_file, const char *var_name, const char *value) {
+    /* Read existing content */
+    char *existing = NULL;
+    size_t existing_len = 0;
+    FILE *f = fopen(env_file, "r");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        if (len > 0) {
+            fseek(f, 0, SEEK_SET);
+            existing = malloc((size_t)len + 1);
+            if (existing) {
+                existing_len = fread(existing, 1, (size_t)len, f);
+                existing[existing_len] = '\0';
+            }
+        }
+        fclose(f);
+    }
+
+    /* Build new content: replace existing line or append */
+    f = fopen(env_file, "w");
+    if (!f) { free(existing); return -1; }
+
+    size_t var_len = strlen(var_name);
+    int replaced = 0;
+    if (existing) {
+        char *line = existing;
+        while (*line) {
+            char *eol = strchr(line, '\n');
+            size_t line_len = eol ? (size_t)(eol - line) : strlen(line);
+            if (line_len > var_len && line[var_len] == '=' &&
+                strncmp(line, var_name, var_len) == 0) {
+                fprintf(f, "%s=%s\n", var_name, value);
+                replaced = 1;
+            } else if (line_len > 0) {
+                fwrite(line, 1, line_len, f);
+                fputc('\n', f);
+            }
+            line += line_len + (eol ? 1 : 0);
+            if (!eol) break;
+        }
+        free(existing);
+    }
+    if (!replaced) fprintf(f, "%s=%s\n", var_name, value);
+    fclose(f);
+    return 0;
+}
+
+/* T141: Send inline keyboard for provider selection */
+static void key_send_provider_keyboard(const char *token, int64_t chat_id) {
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
+    cJSON_AddStringToObject(body, "text", "Select provider for API key:");
+
+    cJSON *markup = cJSON_CreateObject();
+    cJSON *rows = cJSON_CreateArray();
+    cJSON *row = cJSON_CreateArray();
+
+    cJSON *btn1 = cJSON_CreateObject();
+    cJSON_AddStringToObject(btn1, "text", "OpenRouter");
+    cJSON_AddStringToObject(btn1, "callback_data", "key:openrouter");
+    cJSON_AddItemToArray(row, btn1);
+
+    cJSON *btn2 = cJSON_CreateObject();
+    cJSON_AddStringToObject(btn2, "text", "Gemini");
+    cJSON_AddStringToObject(btn2, "callback_data", "key:gemini");
+    cJSON_AddItemToArray(row, btn2);
+
+    cJSON *btn3 = cJSON_CreateObject();
+    cJSON_AddStringToObject(btn3, "text", "Custom");
+    cJSON_AddStringToObject(btn3, "callback_data", "key:custom");
+    cJSON_AddItemToArray(row, btn3);
+
+    cJSON_AddItemToArray(rows, row);
+    cJSON_AddItemToObject(markup, "inline_keyboard", rows);
+    cJSON_AddItemToObject(body, "reply_markup", markup);
+
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (json) {
+        cJSON *resp = tg_call(token, "sendMessage", json);
+        cJSON_Delete(resp);
+        free(json);
+    }
+}
+
+/* T141: Send ForceReply prompt for key input */
+static void key_send_force_reply(const char *token, int64_t chat_id, const char *provider) {
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
+
+    char prompt[128];
+    if (strcmp(provider, "custom") == 0)
+        snprintf(prompt, sizeof(prompt), "Send the key as VAR_NAME=value (e.g. MY_KEY=sk-...):");
+    else
+        snprintf(prompt, sizeof(prompt), "Send the API key for %s:", provider);
+    cJSON_AddStringToObject(body, "text", prompt);
+
+    cJSON *markup = cJSON_CreateObject();
+    cJSON_AddTrueToObject(markup, "force_reply");
+    cJSON_AddTrueToObject(markup, "selective");
+    cJSON_AddItemToObject(body, "reply_markup", markup);
+
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (json) {
+        cJSON *resp = tg_call(token, "sendMessage", json);
+        cJSON_Delete(resp);
+        free(json);
+    }
+}
+
+/* T141: Handle callback_query for /key provider selection */
+static void handle_key_callback(const char *data, int64_t chat_id, const char *callback_id) {
+    /* Answer callback to dismiss loading indicator */
+    if (callback_id) {
+        cJSON *ans = cJSON_CreateObject();
+        cJSON_AddStringToObject(ans, "callback_query_id", callback_id);
+        char *json = cJSON_PrintUnformatted(ans);
+        cJSON_Delete(ans);
+        if (json) {
+            cJSON *resp = tg_call(g_cfg->telegram_token, "answerCallbackQuery", json);
+            cJSON_Delete(resp);
+            free(json);
+        }
+    }
+
+    /* Extract provider from "key:<provider>" */
+    const char *provider = data + 4; /* skip "key:" */
+
+    /* Register pending dialog */
+    key_dialog_remove(chat_id);
+    if (key_dialog_count < KEY_DIALOG_MAX) {
+        KeyDialog *d = &key_dialogs[key_dialog_count++];
+        d->chat_id = chat_id;
+        snprintf(d->provider, sizeof(d->provider), "%s", provider);
+    }
+
+    key_send_force_reply(g_cfg->telegram_token, chat_id, provider);
+}
+
+/* T141: Handle key text reply from admin. Returns 1 if consumed, 0 if not a key dialog. */
+static int handle_key_reply(int64_t chat_id, const char *text) {
+    KeyDialog *d = key_dialog_find(chat_id);
+    if (!d) return 0;
+
+    char provider[32];
+    snprintf(provider, sizeof(provider), "%s", d->provider);
+    key_dialog_remove(chat_id);
+
+    const char *env_file = get_env_file_path();
+    int rc;
+
+    if (strcmp(provider, "custom") == 0) {
+        /* Expect VAR_NAME=value format */
+        const char *eq = strchr(text, '=');
+        if (!eq || eq == text) {
+            telegram_send_message(g_cfg->telegram_token, chat_id,
+                "Invalid format. Expected VAR_NAME=value");
+            return 1;
+        }
+        size_t name_len = (size_t)(eq - text);
+        char *var_name = malloc(name_len + 1);
+        if (!var_name) return 1;
+        memcpy(var_name, text, name_len);
+        var_name[name_len] = '\0';
+        rc = telegram_write_env_key(env_file, var_name, eq + 1);
+        free(var_name);
+    } else {
+        const char *var_name = telegram_key_env_name(provider);
+        if (!var_name) {
+            telegram_send_message(g_cfg->telegram_token, chat_id, "Unknown provider.");
+            return 1;
+        }
+        rc = telegram_write_env_key(env_file, var_name, text);
+    }
+
+    if (rc == 0)
+        telegram_send_message(g_cfg->telegram_token, chat_id, "Key saved.");
+    else
+        telegram_send_message(g_cfg->telegram_token, chat_id,
+            "Failed to write env file. Check permissions.");
+    return 1;
+}
+
 /* T140: Dispatch admin command to handler. */
 static void dispatch_admin_command(const char *text, int64_t chat_id) {
     const char *args = NULL;
@@ -156,8 +380,7 @@ static void dispatch_admin_command(const char *text, int64_t chat_id) {
 
     switch (cmd) {
     case 1: /* /key — T141 */
-        telegram_send_message(g_cfg->telegram_token, chat_id,
-            "/key: not yet implemented (T141)");
+        key_send_provider_keyboard(g_cfg->telegram_token, chat_id);
         break;
     case 2: /* /config — T142/T143 */
         telegram_send_message(g_cfg->telegram_token, chat_id,
@@ -190,6 +413,10 @@ static void process_message(cJSON *msg) {
         dispatch_admin_command(text->valuestring, chat_id);
         return;
     }
+
+    /* T141/V52: intercept key reply from admin (pending dialog) */
+    if (telegram_is_admin(g_cfg, chat_id) && handle_key_reply(chat_id, text->valuestring))
+        return;
 
     /* Route chat_id to session */
     int64_t session_id = db_tg_get_session(g_db, chat_id);
@@ -269,6 +496,25 @@ static void *poll_loop(void *arg) {
 
             cJSON *msg = cJSON_GetObjectItemCaseSensitive(update, "message");
             if (msg) process_message(msg);
+
+            /* T141: handle callback_query (inline keyboard responses) */
+            cJSON *cbq = cJSON_GetObjectItemCaseSensitive(update, "callback_query");
+            if (cbq) {
+                cJSON *cb_data = cJSON_GetObjectItemCaseSensitive(cbq, "data");
+                cJSON *cb_from = cJSON_GetObjectItemCaseSensitive(cbq, "from");
+                cJSON *cb_id = cJSON_GetObjectItemCaseSensitive(cbq, "id");
+                if (cb_data && cJSON_IsString(cb_data) && cb_from) {
+                    cJSON *from_id = cJSON_GetObjectItemCaseSensitive(cb_from, "id");
+                    if (from_id && cJSON_IsNumber(from_id)) {
+                        int64_t from_chat_id = (int64_t)from_id->valuedouble;
+                        if (telegram_is_admin(g_cfg, from_chat_id) &&
+                            strncmp(cb_data->valuestring, "key:", 4) == 0) {
+                            const char *cb_id_str = (cb_id && cJSON_IsString(cb_id)) ? cb_id->valuestring : NULL;
+                            handle_key_callback(cb_data->valuestring, from_chat_id, cb_id_str);
+                        }
+                    }
+                }
+            }
         }
 
         if (offset > 0) {

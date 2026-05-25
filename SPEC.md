@@ -278,7 +278,7 @@ T116|x|`HttpPolicy` layer — struct w/ allowed_hosts[], blocked_hosts[], block_
 T117|x|JS `http_fetch` sanitize option — `http_fetch(url, {sanitize: true})` applies html_strip_tags + sanitize_homoglyphs + boundary wrap (reuse web_fetch logic); default false (raw response)|V46,V38
 T118|x|tool result write-time truncation — truncate at append time (not context_build); full output to `/tmp/cclaw-<session_id>/<tool_call_id>.out`; reference path in truncation notice; agent can `file_read` the path; update landlock to allow `/tmp/cclaw-*` write; clean temp dir on session idle or daemon restart|V40,V22
 T119|x|`agents` table — schema: id, name, config(JSON), system_prompt, soul, memory, heartbeat, created_at, updated_at; seed from `agents/<name>/agent.json` + `system.md` on first reference; DB authoritative after seed|§D
-T120| |`soul_edit` tool — UPDATE agents SET soul=? WHERE name=?; agent can modify its own persona; injected into system prompt next turn|§I
+T120|x|`soul_edit` tool — UPDATE agents SET soul=? WHERE name=?; agent can modify its own persona; injected into system prompt next turn|§I
 T121| |`memory_set` tool — UPDATE agents SET memory=? WHERE name=?; agent can store durable facts; injected into system prompt next turn|§I
 T122| |system prompt assembly — at turn start: render template (system_prompt) + inject soul + inject memory + inject skills; replace current file-based `config_render_system_prompt`|§D,§I
 T123| |prompt cache hints — send provider-appropriate cache markers in LLM requests: Anthropic `cache_control` on system/last-tool/last-user; OpenAI `prompt_cache_key` + `prompt_cache_retention`; DeepSeek prefix caching (automatic but benefits from stable message ordering); configurable per-provider in config|§C

@@ -11,6 +11,7 @@
 #include "tool_agent.h"
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
+#include "tool_soul.h"
 #include "shutdown.h"
 #include "daemon.h"
 #include "context.h"
@@ -221,6 +222,10 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
     tool_js_eval_register(&reg, &js_eval_ctx);
     tool_web_fetch_register(&reg, NULL);
     tool_db_query_register(&reg, db);
+
+    /* T120: soul_edit tool */
+    ToolSoulCtx soul_ctx = {.db = db, .agent_name = agent_name};
+    tool_soul_register(&reg, &soul_ctx);
 
     JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = NULL};
     tool_js_define_register(&reg, &js_ctx);

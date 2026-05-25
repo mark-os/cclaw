@@ -1138,6 +1138,20 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
     return db_agent_get(db, name);
 }
 
+/* T120: Update agent soul text */
+int db_agent_set_soul(sqlite3 *db, const char *name, const char *soul) {
+    if (!db || !name) return -1;
+    const char *sql = "UPDATE agents SET soul = ?, updated_at = unixepoch() WHERE name = ?";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, soul, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    return sqlite3_changes(db) > 0 ? 0 : -1;
+}
+
 void agent_row_free(AgentRow *row) {
     if (!row) return;
     free(row->name);

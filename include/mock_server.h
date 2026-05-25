@@ -10,6 +10,9 @@
  * body is the raw JSON response body (caller owns, copied internally). */
 void mock_server_enqueue(int http_status, const char *body);
 
+/* Queue a canned response with extra headers (NULL-terminated "Key: Value" array, or NULL). */
+void mock_server_enqueue_with_headers(int http_status, const char *body, const char **headers);
+
 /* Start mock server. Returns the assigned port, or -1 on failure. */
 int mock_server_start(void);
 

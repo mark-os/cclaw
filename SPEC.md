@@ -133,6 +133,11 @@ V43: ∀ tool dispatch → track last N calls (name + args hash + result hash); 
 V44: ∀ Telegram group msg → if agent response contains `[NO_REPLY]` → suppress delivery (⊥ send to chat); agent decides relevance per system prompt guidance
 V45: ∀ agent response → if `stop_reason == stop` & no tool_calls & response is plan-only (bullet list + "I'll do X" promise, no tool action taken) → re-prompt once: "Do not restate the plan. Act now: take the first concrete tool action. If blocked, state the blocker in one sentence."
 V46: ∀ outbound HTTP (libcurl) → `http_policy` layer validates hostname before connect: (1) check deny list (blocked_hosts[]), (2) check allow list (allowed_hosts[] — empty = allow all for LLM/telegram, deny all for agent tools), (3) block RFC1918/loopback/link-local IPs (SSRF); policy configured per-caller: LLM+telegram = unrestricted (trusted endpoints), web_fetch+js_http_fetch = agent's allowed_hosts + SSRF block; `web_fetch` always sanitizes (strip HTML + homoglyph + boundary wrap); JS `http_fetch` accepts `{sanitize: true}` option for same treatment
+V47: ∀ `shell_exec` child → PATH restricted to `/bin:/usr/bin`; unset `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `HOME`, and all `CCLAW_*` env vars before exec; prevents agent from invoking cclaw binary or leaking credentials via shell
+V48: ∀ `shell_exec` child → `mjs` binary available at fixed path (e.g. `/usr/local/lib/cclaw/mjs`); PATH ! include its directory — agent invokes via absolute path; `mjs` = standalone mquickjs evaluator w/ `fetch()` binding only
+V49: ∀ `mjs` process (spawned via shell_exec) → inherits socketpair fd from agent process (pre-fork); `fetch()` binding serializes request over inherited fd → agent reads, checks `allowed_hosts` allowlist + SSRF policy (V46), performs libcurl call, writes response back; mjs has zero direct network capability; fd number passed via env var `MJS_FETCH_FD`
+V50: ∀ `mjs` fetch proxy protocol → request: `<4B len big-endian><JSON: {"url","method","headers","body"}>`, response: `<4B len big-endian><JSON: {"status","headers","body","error"}>` over inherited fd; agent-side enforces timeout (30s default) per fetch call; on policy deny → respond w/ `{"status":403,"error":"host not in allowed_hosts"}`
+V51: ∀ `mjs` invocation via shell → composable w/ unix pipes; stdout/stderr flow through shell pipeline normally; fetch fd is side-channel (⊥ interfere w/ stdio); agent can: `mjs -e 'await fetch(...)' | jq .items[] | grep error`
 
 ## §T TASKS
 id|status|task|cites
@@ -265,6 +270,13 @@ T127| |integration test: retry + backoff with mock — mock returns 429 with Ret
 T128| |integration test: context overflow recovery — mock returns 400 with "context window" error; verify agent detects overflow|T125
 T129| |integration test: mock Telegram API — mock getUpdates + sendMessage endpoints; verify poll→inbox→agent→deliver cycle end-to-end|T125,V25
 T130| |integration test: daemon fork+reap with mock LLM — daemon forks agent, agent hits mock, writes response, daemon reaps and delivers|T125,V21
+T131| |`shell_exec` PATH + env hardening — set `PATH=/bin:/usr/bin` in child; unset API keys, HOME, CCLAW_* before exec; test: verify `env` output clean, verify cclaw binary unreachable|V47
+T132| |`mjs` standalone binary — build mquickjs evaluator (`vendor/mquickjs/`) as separate binary; accepts `-e 'code'` or filename arg; links no libcurl; `fetch()` binding reads/writes on fd from `MJS_FETCH_FD` env var; install to `/usr/local/lib/cclaw/mjs`|V48,V49,V51
+T133| |`mjs` fetch fd protocol — implement request/response serialization (4B len + JSON) in mjs binary; `fetch()` returns Promise that blocks on fd read; handle timeout/error JSON gracefully|V50
+T134| |agent-side fetch proxy — in `shell_exec` fork path: create `socketpair(AF_UNIX, SOCK_STREAM)` before fork; pass child end as `MJS_FETCH_FD`; parent monitors fd via select alongside child stdout pipe; on request: parse JSON, check allowed_hosts (V46), curl, write response; close on child exit|V49,V50,V46
+T135| |test: mjs fetch proxy end-to-end — agent spawns `shell_exec("mjs -e 'await fetch(...)'")`; mock HTTP server; verify request goes through proxy, response arrives in mjs stdout; verify denied host returns 403|V49,V50,V47
+T136| |test: mjs pipeline composability — `shell_exec("mjs -e '...' \| grep ...")` works; fetch fd ⊥ interfere w/ stdout piping|V51
+T137| |Makefile: `mjs` binary target — compile mquickjs evaluator, install to `build/mjs`; `make install` copies to `/usr/local/lib/cclaw/mjs`|V48
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)
@@ -282,7 +294,7 @@ id|date|cause|fix
 - Curation agent: background sub-agent that operates on another session's branch — identifies noise (repeated failures, dead-end tool calls), summarizes or removes them, produces a cleaner branch for continued work
 - Telegram/non-CLI sessions can't easily branch interactively — curation agent fills that gap
 - Seccomp-bpf: defense-in-depth syscall filtering for agent processes (block fork/execve/ptrace/mount — force all execution through shell_exec tool); both platforms have `CONFIG_SECCOMP_FILTER=y`; needs per-arch filter defs (ARM64 vs ARMv5) or `libseccomp`; add once daemon model stable and syscall needs empirically known
-- Filtered shell network: if `shell_exec` ever needs network (e.g. `git clone`), use `CLONE_NEWNET` + userns iptables with IP whitelist (resolved from `allowed_hosts`); currently unnecessary — JS `http_fetch` binding covers network needs without shell access
+- Filtered shell network: `CLONE_NEWNET` stays on; network from shell only via `mjs` fetch proxy (V49-V50); if raw socket needed (e.g. `git clone`), future option: userns iptables w/ IP whitelist — but mjs fetch covers most cases
 - Multi-arch releases: GitHub Actions matrix with Docker containers (arm64, armhf, amd64) producing tarballs; binary + "install libcurl" README; not Zig-style cross-compile — native build per target with system libcurl; ARMv5TE (Pogoplug) likely needs dedicated Debian armel container
 - Cost tracking: save OpenRouter `cost` field when present; for direct providers, compute from per-model rate table (input/output/cache_read/cache_write $/M tokens); store per-entry in metadata; aggregate per-session and per-agent; expose via web dashboard and `db_query`
 - Extension system via MicroQuickJS: extensions are JS modules loaded at session/agent start; can register tools, hook events (before/after tool call, before LLM request), modify system prompt; loaded from `agents/<name>/extensions/*.js` or global `extensions/`; extensions have access to `http_fetch` (with policy) and filesystem (workspace-scoped); replaces need for native C plugin system

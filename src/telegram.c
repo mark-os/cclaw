@@ -173,6 +173,30 @@ static void key_dialog_remove(int64_t chat_id) {
     }
 }
 
+/* T142: Pending /config model dialog state */
+#define CFG_DIALOG_MAX 4
+typedef struct {
+    int64_t chat_id;
+    int provider_index; /* 0=primary, 1+=fallback */
+} CfgDialog;
+static CfgDialog cfg_dialogs[CFG_DIALOG_MAX];
+static int cfg_dialog_count;
+
+static CfgDialog *cfg_dialog_find(int64_t chat_id) {
+    for (int i = 0; i < cfg_dialog_count; i++)
+        if (cfg_dialogs[i].chat_id == chat_id) return &cfg_dialogs[i];
+    return NULL;
+}
+
+static void cfg_dialog_remove(int64_t chat_id) {
+    for (int i = 0; i < cfg_dialog_count; i++) {
+        if (cfg_dialogs[i].chat_id == chat_id) {
+            cfg_dialogs[i] = cfg_dialogs[--cfg_dialog_count];
+            return;
+        }
+    }
+}
+
 /* T141: Get env file path from config or default */
 static const char *get_env_file_path(void) {
     if (g_cfg && g_cfg->env_file && g_cfg->env_file[0])
@@ -373,6 +397,145 @@ static int handle_key_reply(int64_t chat_id, const char *text) {
     return 1;
 }
 
+/* T142: Send inline keyboard listing configured providers for model change */
+static void config_send_provider_keyboard(const char *token, int64_t chat_id) {
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
+    cJSON_AddStringToObject(body, "text", "Select provider to change model:");
+
+    cJSON *markup = cJSON_CreateObject();
+    cJSON *rows = cJSON_CreateArray();
+    cJSON *row = cJSON_CreateArray();
+
+    /* Primary provider (index 0) */
+    char label[128];
+    snprintf(label, sizeof(label), "Primary: %s",
+             g_cfg->provider.model ? g_cfg->provider.model : "(none)");
+    cJSON *btn = cJSON_CreateObject();
+    cJSON_AddStringToObject(btn, "text", label);
+    cJSON_AddStringToObject(btn, "callback_data", "cfg_model:0");
+    cJSON_AddItemToArray(row, btn);
+    cJSON_AddItemToArray(rows, row);
+
+    /* Fallback providers */
+    for (size_t i = 0; i < g_cfg->fallback_count; i++) {
+        row = cJSON_CreateArray();
+        snprintf(label, sizeof(label), "Fallback %zu: %s", i + 1,
+                 g_cfg->fallback_providers[i].model ? g_cfg->fallback_providers[i].model : "(none)");
+        char cb_data[32];
+        snprintf(cb_data, sizeof(cb_data), "cfg_model:%zu", i + 1);
+        btn = cJSON_CreateObject();
+        cJSON_AddStringToObject(btn, "text", label);
+        cJSON_AddStringToObject(btn, "callback_data", cb_data);
+        cJSON_AddItemToArray(row, btn);
+        cJSON_AddItemToArray(rows, row);
+    }
+
+    cJSON_AddItemToObject(markup, "inline_keyboard", rows);
+    cJSON_AddItemToObject(body, "reply_markup", markup);
+
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (json) {
+        cJSON *resp = tg_call(token, "sendMessage", json);
+        cJSON_Delete(resp);
+        free(json);
+    }
+}
+
+/* T142: Handle callback_query for /config model provider selection */
+static void handle_config_model_callback(const char *data, int64_t chat_id, const char *callback_id) {
+    /* Answer callback to dismiss loading indicator */
+    if (callback_id) {
+        cJSON *ans = cJSON_CreateObject();
+        cJSON_AddStringToObject(ans, "callback_query_id", callback_id);
+        char *json = cJSON_PrintUnformatted(ans);
+        cJSON_Delete(ans);
+        if (json) {
+            cJSON *resp = tg_call(g_cfg->telegram_token, "answerCallbackQuery", json);
+            cJSON_Delete(resp);
+            free(json);
+        }
+    }
+
+    /* Extract provider index from "cfg_model:<index>" */
+    int idx = atoi(data + 10); /* skip "cfg_model:" */
+
+    /* Register pending dialog */
+    cfg_dialog_remove(chat_id);
+    if (cfg_dialog_count < CFG_DIALOG_MAX) {
+        CfgDialog *d = &cfg_dialogs[cfg_dialog_count++];
+        d->chat_id = chat_id;
+        d->provider_index = idx;
+    }
+
+    /* Send ForceReply for model name */
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
+
+    const char *current = NULL;
+    if (idx == 0)
+        current = g_cfg->provider.model;
+    else if ((size_t)(idx - 1) < g_cfg->fallback_count)
+        current = g_cfg->fallback_providers[idx - 1].model;
+
+    char prompt[256];
+    snprintf(prompt, sizeof(prompt), "Enter new model name%s%s%s:",
+             current ? " (current: " : "", current ? current : "", current ? ")" : "");
+    cJSON_AddStringToObject(body, "text", prompt);
+
+    cJSON *markup = cJSON_CreateObject();
+    cJSON_AddTrueToObject(markup, "force_reply");
+    cJSON_AddTrueToObject(markup, "selective");
+    cJSON_AddItemToObject(body, "reply_markup", markup);
+
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (json) {
+        cJSON *resp = tg_call(g_cfg->telegram_token, "sendMessage", json);
+        cJSON_Delete(resp);
+        free(json);
+    }
+}
+
+/* T142: Handle model name reply from admin. Returns 1 if consumed, 0 if not a config dialog. */
+static int handle_config_reply(int64_t chat_id, const char *text) {
+    CfgDialog *d = cfg_dialog_find(chat_id);
+    if (!d) return 0;
+
+    int idx = d->provider_index;
+    cfg_dialog_remove(chat_id);
+
+    const char *config_path = daemon_get_config_path();
+    if (!config_path || !config_path[0]) {
+        telegram_send_message(g_cfg->telegram_token, chat_id,
+            "No config file path set. Cannot update model.");
+        return 1;
+    }
+
+    if (config_update_model(config_path, idx, text) != 0) {
+        telegram_send_message(g_cfg->telegram_token, chat_id,
+            "Failed to update config file.");
+        return 1;
+    }
+
+    /* Update model string in-place (daemon forks re-read config from disk) */
+    char **model_ptr = NULL;
+    if (idx == 0)
+        model_ptr = (char **)&g_cfg->provider.model;
+    else if ((size_t)(idx - 1) < g_cfg->fallback_count)
+        model_ptr = (char **)&g_cfg->fallback_providers[idx - 1].model;
+    if (model_ptr) {
+        free(*model_ptr);
+        *model_ptr = strdup(text);
+    }
+
+    char msg[256];
+    snprintf(msg, sizeof(msg), "Model updated to: %s", text);
+    telegram_send_message(g_cfg->telegram_token, chat_id, msg);
+    return 1;
+}
+
 /* T140: Dispatch admin command to handler. */
 static void dispatch_admin_command(const char *text, int64_t chat_id) {
     const char *args = NULL;
@@ -383,8 +546,11 @@ static void dispatch_admin_command(const char *text, int64_t chat_id) {
         key_send_provider_keyboard(g_cfg->telegram_token, chat_id);
         break;
     case 2: /* /config — T142/T143 */
-        telegram_send_message(g_cfg->telegram_token, chat_id,
-            "/config: not yet implemented (T142)");
+        if (args && strncmp(args, "model", 5) == 0)
+            config_send_provider_keyboard(g_cfg->telegram_token, chat_id);
+        else
+            telegram_send_message(g_cfg->telegram_token, chat_id,
+                "Usage: /config model");
         break;
     case 3: /* /whitelist — T144 */
         telegram_send_message(g_cfg->telegram_token, chat_id,
@@ -416,6 +582,10 @@ static void process_message(cJSON *msg) {
 
     /* T141/V52: intercept key reply from admin (pending dialog) */
     if (telegram_is_admin(g_cfg, chat_id) && handle_key_reply(chat_id, text->valuestring))
+        return;
+
+    /* T142: intercept config model reply from admin */
+    if (telegram_is_admin(g_cfg, chat_id) && handle_config_reply(chat_id, text->valuestring))
         return;
 
     /* Route chat_id to session */
@@ -507,10 +677,12 @@ static void *poll_loop(void *arg) {
                     cJSON *from_id = cJSON_GetObjectItemCaseSensitive(cb_from, "id");
                     if (from_id && cJSON_IsNumber(from_id)) {
                         int64_t from_chat_id = (int64_t)from_id->valuedouble;
-                        if (telegram_is_admin(g_cfg, from_chat_id) &&
-                            strncmp(cb_data->valuestring, "key:", 4) == 0) {
+                        if (telegram_is_admin(g_cfg, from_chat_id)) {
                             const char *cb_id_str = (cb_id && cJSON_IsString(cb_id)) ? cb_id->valuestring : NULL;
-                            handle_key_callback(cb_data->valuestring, from_chat_id, cb_id_str);
+                            if (strncmp(cb_data->valuestring, "key:", 4) == 0)
+                                handle_key_callback(cb_data->valuestring, from_chat_id, cb_id_str);
+                            else if (strncmp(cb_data->valuestring, "cfg_model:", 10) == 0)
+                                handle_config_model_callback(cb_data->valuestring, from_chat_id, cb_id_str);
                         }
                     }
                 }

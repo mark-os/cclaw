@@ -18,4 +18,9 @@ int workspace_init(const Config *cfg);
 /* Free config and all owned strings. */
 void config_free(Config *cfg);
 
+/* T142: Update model name for provider at index in config JSON file.
+ * index 0 = primary provider, 1+ = fallback providers[index-1].
+ * Returns 0 on success, -1 on failure. */
+int config_update_model(const char *config_path, int provider_index, const char *model);
+
 #endif

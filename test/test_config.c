@@ -262,6 +262,49 @@ static void test_admin_chat_ids(void) {
     printf("  PASS: test_admin_chat_ids\n");
 }
 
+/* T142: config_update_model tests */
+static void test_update_model(void) {
+    const char *path = "/tmp/cclaw_test_update_model.json";
+    const char *json =
+        "{\n"
+        "  \"provider\": {\"base_url\": \"https://openrouter.ai/api/v1\", \"model\": \"old-model\"},\n"
+        "  \"providers\": [{\"base_url\": \"https://gemini.api\", \"model\": \"gemini-old\"}]\n"
+        "}";
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fputs(json, f);
+    fclose(f);
+
+    /* Update primary provider model */
+    setenv("OPENROUTER_API_KEY", "sk-test", 1);
+    assert(config_update_model(path, 0, "new-model") == 0);
+    Config *cfg = config_load(path);
+    assert(cfg != NULL);
+    assert(strcmp(cfg->provider.model, "new-model") == 0);
+    /* Fallback unchanged */
+    assert(cfg->fallback_count == 1);
+    assert(strcmp(cfg->fallback_providers[0].model, "gemini-old") == 0);
+    config_free(cfg);
+
+    /* Update fallback provider model */
+    assert(config_update_model(path, 1, "gemini-new") == 0);
+    cfg = config_load(path);
+    assert(cfg != NULL);
+    assert(strcmp(cfg->provider.model, "new-model") == 0);
+    assert(strcmp(cfg->fallback_providers[0].model, "gemini-new") == 0);
+    config_free(cfg);
+
+    /* Invalid index fails */
+    assert(config_update_model(path, 5, "bad") == -1);
+
+    /* NULL path fails */
+    assert(config_update_model(NULL, 0, "x") == -1);
+
+    unsetenv("OPENROUTER_API_KEY");
+    remove(path);
+    printf("  PASS: test_update_model\n");
+}
+
 int main(void) {
     printf("test_config:\n");
     test_env_only();
@@ -272,6 +315,7 @@ int main(void) {
     test_stale_lock_timeout();
     test_system_prompt();
     test_admin_chat_ids();
+    test_update_model();
     printf("All config tests passed.\n");
     return 0;
 }

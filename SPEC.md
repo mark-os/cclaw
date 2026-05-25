@@ -301,7 +301,7 @@ T138|x|template embedding — `templates/` dir w/ `.md`, `.txt`, `.sql` files; b
 T139|x|Telegram admin auth — `admin_chat_ids[]` in config; `telegram_is_admin(chat_id)` check; non-admin messages route to agent normally; admin commands intercepted before inbox_insert|V53,§I
 T140|x|Telegram admin command parser — `/config`, `/key`, `/whitelist` prefix detection in poller thread; dispatch to admin handlers; non-command messages pass through to agent|V53
 T141|x|`/key` dialog — inline keyboard: select provider (OpenRouter, Gemini, custom) → ForceReply prompt for key → write to env file (`/etc/cclaw/env` or config-specified path) → confirm; key value ⊥ logged, ⊥ stored in DB, ⊥ enters inbox|V52
-T142| |`/config model` dialog — inline keyboard: list configured providers → select → ForceReply for model name → update `config.json` provider entry → confirm + reload config in daemon|§I
+T142|x|`/config model` dialog — inline keyboard: list configured providers → select → ForceReply for model name → update `config.json` provider entry → confirm + reload config in daemon|§I
 T143| |`/config endpoint` dialog — ForceReply for base_url + provider name → validate URL format → write to config.json → reload|§I
 T144| |`/whitelist` dialog — inline keyboard: list agents → select → show current `allowed_hosts[]` → ForceReply for new host → append to agent config → reload; also support `/whitelist remove`|V46,§I
 T145| |test: admin commands — verify key write bypasses DB entirely; verify non-admin chat_id rejected; verify config reload picks up changes|V52,V53

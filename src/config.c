@@ -354,3 +354,55 @@ void config_free(Config *cfg) {
     free(cfg->env_file);
     free(cfg);
 }
+
+/* T142: Update model in config.json for provider at index (0=primary, 1+=fallback). */
+int config_update_model(const char *config_path, int provider_index, const char *model) {
+    if (!config_path || !model) return -1;
+
+    FILE *f = fopen(config_path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return -1; }
+    fread(buf, 1, (size_t)len, f);
+    buf[len] = '\0';
+    fclose(f);
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) return -1;
+
+    cJSON *target = NULL;
+    if (provider_index == 0) {
+        target = cJSON_GetObjectItemCaseSensitive(root, "provider");
+        if (!target) {
+            target = cJSON_CreateObject();
+            cJSON_AddItemToObject(root, "provider", target);
+        }
+    } else {
+        cJSON *providers = cJSON_GetObjectItemCaseSensitive(root, "providers");
+        if (providers && cJSON_IsArray(providers))
+            target = cJSON_GetArrayItem(providers, provider_index - 1);
+    }
+
+    if (!target) { cJSON_Delete(root); return -1; }
+
+    cJSON *existing = cJSON_GetObjectItemCaseSensitive(target, "model");
+    if (existing)
+        cJSON_SetValuestring(existing, model);
+    else
+        cJSON_AddStringToObject(target, "model", model);
+
+    char *json = cJSON_Print(root);
+    cJSON_Delete(root);
+    if (!json) return -1;
+
+    f = fopen(config_path, "w");
+    if (!f) { free(json); return -1; }
+    fputs(json, f);
+    fclose(f);
+    free(json);
+    return 0;
+}

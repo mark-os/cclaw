@@ -44,6 +44,10 @@ void daemon_set_config_path(const char *path) {
     snprintf(g_config_path, sizeof(g_config_path), "%s", path);
 }
 
+const char *daemon_get_config_path(void) {
+    return g_config_path;
+}
+
 static void set_nonblock(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);

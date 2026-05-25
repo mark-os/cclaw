@@ -461,3 +461,108 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     agent_row_free(row);
     return out;
 }
+
+/* T144: helper — read agent.json into cJSON, return root + file path */
+static cJSON *agent_json_load(const char *agents_dir, const char *name, char *path_buf, size_t path_cap) {
+    if (!agents_dir || !name) return NULL;
+    int n = snprintf(path_buf, path_cap, "%s/%s/agent.json", agents_dir, name);
+    if (n < 0 || (size_t)n >= path_cap) return NULL;
+
+    FILE *f = fopen(path_buf, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0) { fclose(f); return NULL; }
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return NULL; }
+    fread(buf, 1, (size_t)len, f);
+    buf[len] = '\0';
+    fclose(f);
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    return root;
+}
+
+static int agent_json_save(const char *path, cJSON *root) {
+    char *json = cJSON_Print(root);
+    if (!json) return -1;
+    FILE *f = fopen(path, "w");
+    if (!f) { free(json); return -1; }
+    fputs(json, f);
+    fclose(f);
+    free(json);
+    return 0;
+}
+
+int agent_config_add_host(const char *agents_dir, const char *name, const char *host) {
+    if (!host || !host[0]) return -1;
+    char path[1024];
+    cJSON *root = agent_json_load(agents_dir, name, path, sizeof(path));
+    if (!root) return -1;
+
+    cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "allowed_hosts");
+    if (!arr) {
+        arr = cJSON_CreateArray();
+        cJSON_AddItemToObject(root, "allowed_hosts", arr);
+    }
+    /* Check for duplicate */
+    cJSON *item;
+    cJSON_ArrayForEach(item, arr) {
+        if (cJSON_IsString(item) && strcmp(item->valuestring, host) == 0) {
+            cJSON_Delete(root);
+            return 0; /* already present */
+        }
+    }
+    cJSON_AddItemToArray(arr, cJSON_CreateString(host));
+    int rc = agent_json_save(path, root);
+    cJSON_Delete(root);
+    return rc;
+}
+
+int agent_config_remove_host(const char *agents_dir, const char *name, const char *host) {
+    if (!host || !host[0]) return -1;
+    char path[1024];
+    cJSON *root = agent_json_load(agents_dir, name, path, sizeof(path));
+    if (!root) return -1;
+
+    cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "allowed_hosts");
+    if (arr && cJSON_IsArray(arr)) {
+        int sz = cJSON_GetArraySize(arr);
+        for (int i = 0; i < sz; i++) {
+            cJSON *item = cJSON_GetArrayItem(arr, i);
+            if (cJSON_IsString(item) && strcmp(item->valuestring, host) == 0) {
+                cJSON_DeleteItemFromArray(arr, i);
+                break;
+            }
+        }
+    }
+    int rc = agent_json_save(path, root);
+    cJSON_Delete(root);
+    return rc;
+}
+
+char **agent_config_get_hosts(const char *agents_dir, const char *name, size_t *count) {
+    *count = 0;
+    char path[1024];
+    cJSON *root = agent_json_load(agents_dir, name, path, sizeof(path));
+    if (!root) return NULL;
+
+    cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "allowed_hosts");
+    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(root); return NULL; }
+
+    int sz = cJSON_GetArraySize(arr);
+    if (sz <= 0) { cJSON_Delete(root); return NULL; }
+
+    char **hosts = malloc((size_t)sz * sizeof(char *));
+    if (!hosts) { cJSON_Delete(root); return NULL; }
+
+    for (int i = 0; i < sz; i++) {
+        cJSON *item = cJSON_GetArrayItem(arr, i);
+        if (cJSON_IsString(item) && item->valuestring)
+            hosts[(*count)++] = strdup(item->valuestring);
+    }
+    cJSON_Delete(root);
+    return hosts;
+}

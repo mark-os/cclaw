@@ -323,6 +323,57 @@ static void test_build_system_prompt(void) {
     printf("  PASS: agent build system prompt\n");
 }
 
+static void test_whitelist_add_remove(void) {
+    const char *base = "/tmp/test_agent_wl";
+    system("rm -rf /tmp/test_agent_wl");
+    make_dir(base);
+    make_dir("/tmp/test_agent_wl/bot");
+
+    /* Create minimal agent.json */
+    FILE *f = fopen("/tmp/test_agent_wl/bot/agent.json", "w");
+    fprintf(f, "{\"model\":\"test\"}");
+    fclose(f);
+
+    /* Add host */
+    assert(agent_config_add_host(base, "bot", "api.example.com") == 0);
+
+    /* Verify */
+    size_t count = 0;
+    char **hosts = agent_config_get_hosts(base, "bot", &count);
+    assert(count == 1);
+    assert(strcmp(hosts[0], "api.example.com") == 0);
+    free(hosts[0]); free(hosts);
+
+    /* Add duplicate — should be no-op */
+    assert(agent_config_add_host(base, "bot", "api.example.com") == 0);
+    hosts = agent_config_get_hosts(base, "bot", &count);
+    assert(count == 1);
+    free(hosts[0]); free(hosts);
+
+    /* Add second host */
+    assert(agent_config_add_host(base, "bot", "api.github.com") == 0);
+    hosts = agent_config_get_hosts(base, "bot", &count);
+    assert(count == 2);
+    free(hosts[0]); free(hosts[1]); free(hosts);
+
+    /* Remove first host */
+    assert(agent_config_remove_host(base, "bot", "api.example.com") == 0);
+    hosts = agent_config_get_hosts(base, "bot", &count);
+    assert(count == 1);
+    assert(strcmp(hosts[0], "api.github.com") == 0);
+    free(hosts[0]); free(hosts);
+
+    /* Remove non-existent — should succeed */
+    assert(agent_config_remove_host(base, "bot", "nope.com") == 0);
+
+    /* Invalid args */
+    assert(agent_config_add_host(base, "bot", "") == -1);
+    assert(agent_config_add_host(base, "nonexistent", "x.com") == -1);
+
+    system("rm -rf /tmp/test_agent_wl");
+    printf("  PASS test_whitelist_add_remove\n");
+}
+
 int main(void) {
     printf("test_agent_config:\n");
     test_discover_agents();
@@ -339,6 +390,7 @@ int main(void) {
     test_agent_load_skills_missing_dir();
     test_agent_load_skills_empty();
     test_build_system_prompt();
+    test_whitelist_add_remove();
     printf("All tests passed.\n");
     return 0;
 }

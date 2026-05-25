@@ -221,6 +221,31 @@ static void ep_dialog_remove(int64_t chat_id) {
     }
 }
 
+/* T144: Pending /whitelist dialog state */
+#define WL_DIALOG_MAX 4
+typedef struct {
+    int64_t chat_id;
+    char agent_name[64];
+    int removing; /* 1 = remove mode, 0 = add mode */
+} WlDialog;
+static WlDialog wl_dialogs[WL_DIALOG_MAX];
+static int wl_dialog_count;
+
+static WlDialog *wl_dialog_find(int64_t chat_id) {
+    for (int i = 0; i < wl_dialog_count; i++)
+        if (wl_dialogs[i].chat_id == chat_id) return &wl_dialogs[i];
+    return NULL;
+}
+
+static void wl_dialog_remove(int64_t chat_id) {
+    for (int i = 0; i < wl_dialog_count; i++) {
+        if (wl_dialogs[i].chat_id == chat_id) {
+            wl_dialogs[i] = wl_dialogs[--wl_dialog_count];
+            return;
+        }
+    }
+}
+
 /* T141: Get env file path from config or default */
 static const char *get_env_file_path(void) {
     if (g_cfg && g_cfg->env_file && g_cfg->env_file[0])
@@ -693,6 +718,148 @@ static int handle_endpoint_reply(int64_t chat_id, const char *text) {
     return 1;
 }
 
+/* T144: Send inline keyboard listing agents for /whitelist */
+static void wl_send_agent_keyboard(const char *token, int64_t chat_id, int removing) {
+    size_t count = 0;
+    char **names = agent_discover("agents", &count);
+    if (!names || count == 0) {
+        telegram_send_message(token, chat_id, "No agents found in agents/ directory.");
+        agent_discover_free(names, count);
+        return;
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
+    cJSON_AddStringToObject(body, "text",
+        removing ? "Select agent to remove host from:" : "Select agent to add host to:");
+
+    cJSON *markup = cJSON_CreateObject();
+    cJSON *rows = cJSON_CreateArray();
+    for (size_t i = 0; i < count && i < 10; i++) {
+        cJSON *row = cJSON_CreateArray();
+        cJSON *btn = cJSON_CreateObject();
+        cJSON_AddStringToObject(btn, "text", names[i]);
+        char cb[96];
+        snprintf(cb, sizeof(cb), "wl:%s:%d", names[i], removing);
+        cJSON_AddStringToObject(btn, "callback_data", cb);
+        cJSON_AddItemToArray(row, btn);
+        cJSON_AddItemToArray(rows, row);
+    }
+    cJSON_AddItemToObject(markup, "inline_keyboard", rows);
+    cJSON_AddItemToObject(body, "reply_markup", markup);
+
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    agent_discover_free(names, count);
+    if (json) {
+        cJSON *resp = tg_call(token, "sendMessage", json);
+        cJSON_Delete(resp);
+        free(json);
+    }
+}
+
+/* T144: Handle callback_query for /whitelist agent selection */
+static void handle_wl_callback(const char *data, int64_t chat_id, const char *callback_id) {
+    if (callback_id) {
+        cJSON *ans = cJSON_CreateObject();
+        cJSON_AddStringToObject(ans, "callback_query_id", callback_id);
+        char *json = cJSON_PrintUnformatted(ans);
+        cJSON_Delete(ans);
+        if (json) {
+            cJSON *resp = tg_call(g_cfg->telegram_token, "answerCallbackQuery", json);
+            cJSON_Delete(resp);
+            free(json);
+        }
+    }
+
+    /* Parse "wl:<agent_name>:<removing>" */
+    const char *p = data + 3; /* skip "wl:" */
+    const char *colon = strrchr(p, ':');
+    if (!colon) return;
+
+    size_t name_len = (size_t)(colon - p);
+    if (name_len == 0 || name_len >= 64) return;
+
+    int removing = atoi(colon + 1);
+
+    /* Show current hosts */
+    char agent_name[64];
+    memcpy(agent_name, p, name_len);
+    agent_name[name_len] = '\0';
+
+    size_t host_count = 0;
+    char **hosts = agent_config_get_hosts("agents", agent_name, &host_count);
+
+    char msg[2048];
+    int off = snprintf(msg, sizeof(msg), "Agent: %s\nCurrent allowed_hosts: ", agent_name);
+    if (host_count == 0) {
+        off += snprintf(msg + off, sizeof(msg) - (size_t)off, "(none)");
+    } else {
+        for (size_t i = 0; i < host_count && (size_t)off < sizeof(msg) - 64; i++)
+            off += snprintf(msg + off, sizeof(msg) - (size_t)off, "%s%s",
+                            i > 0 ? ", " : "", hosts[i]);
+    }
+    if (hosts) {
+        for (size_t i = 0; i < host_count; i++) free(hosts[i]);
+        free(hosts);
+    }
+
+    snprintf(msg + off, sizeof(msg) - (size_t)off, "\n\nEnter hostname to %s:",
+             removing ? "remove" : "add");
+
+    /* Register pending dialog */
+    wl_dialog_remove(chat_id);
+    if (wl_dialog_count < WL_DIALOG_MAX) {
+        WlDialog *d = &wl_dialogs[wl_dialog_count++];
+        d->chat_id = chat_id;
+        snprintf(d->agent_name, sizeof(d->agent_name), "%s", agent_name);
+        d->removing = removing;
+    }
+
+    /* Send ForceReply */
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
+    cJSON_AddStringToObject(body, "text", msg);
+    cJSON *mk = cJSON_CreateObject();
+    cJSON_AddTrueToObject(mk, "force_reply");
+    cJSON_AddTrueToObject(mk, "selective");
+    cJSON_AddItemToObject(body, "reply_markup", mk);
+
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (json) {
+        cJSON *resp = tg_call(g_cfg->telegram_token, "sendMessage", json);
+        cJSON_Delete(resp);
+        free(json);
+    }
+}
+
+/* T144: Handle whitelist host reply from admin. Returns 1 if consumed, 0 if not. */
+static int handle_whitelist_reply(int64_t chat_id, const char *text) {
+    WlDialog *d = wl_dialog_find(chat_id);
+    if (!d) return 0;
+
+    char agent_name[64];
+    snprintf(agent_name, sizeof(agent_name), "%s", d->agent_name);
+    int removing = d->removing;
+    wl_dialog_remove(chat_id);
+
+    int rc;
+    if (removing)
+        rc = agent_config_remove_host("agents", agent_name, text);
+    else
+        rc = agent_config_add_host("agents", agent_name, text);
+
+    char msg[256];
+    if (rc == 0)
+        snprintf(msg, sizeof(msg), "Host \"%s\" %s for agent \"%s\".",
+                 text, removing ? "removed" : "added", agent_name);
+    else
+        snprintf(msg, sizeof(msg), "Failed to update allowed_hosts for agent \"%s\".", agent_name);
+    telegram_send_message(g_cfg->telegram_token, chat_id, msg);
+    return 1;
+}
+
 /* T140: Dispatch admin command to handler. */
 static void dispatch_admin_command(const char *text, int64_t chat_id) {
     const char *args = NULL;
@@ -712,8 +879,10 @@ static void dispatch_admin_command(const char *text, int64_t chat_id) {
                 "Usage: /config model | /config endpoint");
         break;
     case 3: /* /whitelist — T144 */
-        telegram_send_message(g_cfg->telegram_token, chat_id,
-            "/whitelist: not yet implemented (T144)");
+        if (args && strncmp(args, "remove", 6) == 0)
+            wl_send_agent_keyboard(g_cfg->telegram_token, chat_id, 1);
+        else
+            wl_send_agent_keyboard(g_cfg->telegram_token, chat_id, 0);
         break;
     default:
         telegram_send_message(g_cfg->telegram_token, chat_id,
@@ -749,6 +918,10 @@ static void process_message(cJSON *msg) {
 
     /* T143: intercept config endpoint reply from admin */
     if (telegram_is_admin(g_cfg, chat_id) && handle_endpoint_reply(chat_id, text->valuestring))
+        return;
+
+    /* T144: intercept whitelist reply from admin */
+    if (telegram_is_admin(g_cfg, chat_id) && handle_whitelist_reply(chat_id, text->valuestring))
         return;
 
     /* Route chat_id to session */
@@ -848,6 +1021,8 @@ static void *poll_loop(void *arg) {
                                 handle_config_model_callback(cb_data->valuestring, from_chat_id, cb_id_str);
                             else if (strncmp(cb_data->valuestring, "cfg_ep:", 7) == 0)
                                 handle_config_endpoint_callback(cb_data->valuestring, from_chat_id, cb_id_str);
+                            else if (strncmp(cb_data->valuestring, "wl:", 3) == 0)
+                                handle_wl_callback(cb_data->valuestring, from_chat_id, cb_id_str);
                         }
                     }
                 }

@@ -59,4 +59,16 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
                                 int64_t session_id, const char *agents_dir,
                                 const Config *fallback_cfg);
 
+/* T144: Add host to agent's allowed_hosts in agents_dir/name/agent.json.
+ * Returns 0 on success, -1 on failure. */
+int agent_config_add_host(const char *agents_dir, const char *name, const char *host);
+
+/* T144: Remove host from agent's allowed_hosts in agents_dir/name/agent.json.
+ * Returns 0 on success (including host not found), -1 on failure. */
+int agent_config_remove_host(const char *agents_dir, const char *name, const char *host);
+
+/* T144: Get current allowed_hosts for agent. Returns heap-allocated array.
+ * Caller must free each string and the array. Sets *count. */
+char **agent_config_get_hosts(const char *agents_dir, const char *name, size_t *count);
+
 #endif

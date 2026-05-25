@@ -1152,6 +1152,20 @@ int db_agent_set_soul(sqlite3 *db, const char *name, const char *soul) {
     return sqlite3_changes(db) > 0 ? 0 : -1;
 }
 
+/* T121: Update agent memory text */
+int db_agent_set_memory(sqlite3 *db, const char *name, const char *memory) {
+    if (!db || !name) return -1;
+    const char *sql = "UPDATE agents SET memory = ?, updated_at = unixepoch() WHERE name = ?";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, memory, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    return sqlite3_changes(db) > 0 ? 0 : -1;
+}
+
 void agent_row_free(AgentRow *row) {
     if (!row) return;
     free(row->name);

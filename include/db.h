@@ -150,6 +150,9 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name);
 /* T120: Update agent soul text. Returns 0 on success, -1 on error. */
 int db_agent_set_soul(sqlite3 *db, const char *name, const char *soul);
 
+/* T121: Update agent memory text. Returns 0 on success, -1 on error. */
+int db_agent_set_memory(sqlite3 *db, const char *name, const char *memory);
+
 /* Free AgentRow. */
 void agent_row_free(AgentRow *row);
 

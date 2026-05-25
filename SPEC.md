@@ -42,8 +42,9 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - tool: `spawn_agent` — fork sub-agent process (accepts `background` param, default blocking)
 - tool: `db_query` — execute read-only SQL against cclaw.db (SELECT only, no mutations)
 - tool: `web_fetch` — HTTP GET URL, extract text from HTML, external input protection wrapper
-- tool: `soul_edit` — replace agent's soul text (persona/tone); takes effect next turn
-- tool: `memory_set` — update agent's memory text (durable facts); takes effect next turn
+- tool: `memory_create` — create a new memory block (label, description, value?); agent-initiated; default char_limit 5000
+- tool: `memory_append` — append text to a memory block by label; respects char_limit + read_only
+- tool: `memory_replace` — find-and-replace within a memory block by label; respects char_limit + read_only
 - tool: `approval_request` — propose config/permission change for admin approval; types: whitelist_host, create_agent, model_change, tool_enable; agent blocks until admin responds
 - db: `cclaw.db` — SQLite 3.53, WAL, FTS5, JSON functions
 
@@ -76,11 +77,11 @@ Agent config on disk (`agents/<name>/`):
 
 Agent state in DB (replaces filesystem-based MEMORY.md, SOUL.md, system.md, HEARTBEAT.md):
 
-agents table: `id`, `name TEXT UNIQUE`, `config TEXT` (JSON — model, tools, limits, allowed_hosts), `system_prompt TEXT` (template, supports `{session_id}`, `{date}`, `{agent_name}`), `soul TEXT` (persona/tone — agent-editable, injected into system prompt), `memory TEXT` (durable facts — agent-editable, injected into system prompt), `heartbeat TEXT` (proactive task instructions, read on heartbeat turns), `created_at`, `updated_at`
+agents table: `id`, `name TEXT UNIQUE`, `config TEXT` (JSON — model, tools, limits, allowed_hosts), `system_prompt TEXT` (template, supports `{session_id}`, `{date}`, `{agent_name}`), `heartbeat TEXT` (proactive task instructions, read on heartbeat turns), `created_at`, `updated_at`
 
 approvals table: `id`, `session_id`, `agent_name TEXT`, `type TEXT` (whitelist_host|create_agent|model_change|tool_enable), `payload TEXT` (JSON — request details), `status TEXT DEFAULT 'pending'` (pending|approved|denied), `admin_chat_id`, `created_at`, `resolved_at`
 
-memory_blocks table: `id`, `agent_name TEXT NOT NULL`, `label TEXT NOT NULL`, `value TEXT DEFAULT ''`, `description TEXT` (tells agent what block is for), `char_limit INTEGER DEFAULT 5000`, `read_only INTEGER DEFAULT 0`, `created_at`, `updated_at`; UNIQUE(agent_name, label); seeded from `agent.json` `memory_blocks[]` array on first reference
+memory_blocks table: `id`, `agent_name TEXT NOT NULL`, `label TEXT NOT NULL`, `value TEXT DEFAULT ''`, `description TEXT` (tells agent what block is for), `char_limit INTEGER DEFAULT 5000`, `read_only INTEGER DEFAULT 0`, `created_at`, `updated_at`; UNIQUE(agent_name, label); default: zero blocks — agent creates its own via `memory_create`; optionally pre-seeded from `agent.json` `memory_blocks[]` on first reference
 
 Agent config `memory_blocks` field (in `agent.json`):
 ```json
@@ -93,8 +94,8 @@ Agent config `memory_blocks` field (in `agent.json`):
 `read_only: true` → block visible in context but agent memory tools reject edits; `read_only: false` (default) → agent can append/replace via tools
 
 Design:
-- Agent identity (soul, memory, prompts) lives in SQLite → portable by copying DB, no filesystem sync
-- Agent can self-modify memory blocks via tools (`core_memory_append`, `core_memory_replace`) — just DB writes; `description` field guides agent on block purpose (visible in context, not editable by agent)
+- Agent identity (prompts, memory blocks) lives in SQLite → portable by copying DB, no filesystem sync
+- Agent can self-modify memory blocks via tools (`memory_append`, `memory_replace`) — just DB writes; `description` field guides agent on block purpose (visible in context, not editable by agent)
 - System prompt assembled at turn start: `system_prompt` template + memory blocks (rendered w/ label, description, metadata, value) + skills
 - `agents/<name>/agent.json` on disk is the bootstrap/import path — loaded once to seed the DB row; DB is authoritative after that
 - Workspace is just a working directory for file tools — no magic filenames, no special semantics
@@ -278,8 +279,8 @@ T116|x|`HttpPolicy` layer — struct w/ allowed_hosts[], blocked_hosts[], block_
 T117|x|JS `http_fetch` sanitize option — `http_fetch(url, {sanitize: true})` applies html_strip_tags + sanitize_homoglyphs + boundary wrap (reuse web_fetch logic); default false (raw response)|V46,V38
 T118|x|tool result write-time truncation — truncate at append time (not context_build); full output to `/tmp/cclaw-<session_id>/<tool_call_id>.out`; reference path in truncation notice; agent can `file_read` the path; update landlock to allow `/tmp/cclaw-*` write; clean temp dir on session idle or daemon restart|V40,V22
 T119|x|`agents` table — schema: id, name, config(JSON), system_prompt, soul, memory, heartbeat, created_at, updated_at; seed from `agents/<name>/agent.json` + `system.md` on first reference; DB authoritative after seed|§D
-T120|x|`soul_edit` tool — UPDATE agents SET soul=? WHERE name=?; agent can modify its own persona; injected into system prompt next turn|§I
-T121|x|`memory_set` tool — UPDATE agents SET memory=? WHERE name=?; agent can store durable facts; injected into system prompt next turn|§I
+T120|x|~~`soul_edit` tool~~ superseded by `memory_replace` on `persona` block|§I
+T121|x|~~`memory_set` tool~~ superseded by `memory_append`/`memory_replace` on `human` block|§I
 T122|x|system prompt assembly — at turn start: render template (system_prompt) + inject soul + inject memory + inject skills; replace current file-based `config_render_system_prompt`|§D,§I
 T123|x|prompt cache hints — send provider-appropriate cache markers in LLM requests: Anthropic `cache_control` on system/last-tool/last-user; OpenAI `prompt_cache_key` + `prompt_cache_retention`; DeepSeek prefix caching (automatic but benefits from stable message ordering); configurable per-provider in config|§C
 T124|x|entry stats columns — store `token_estimate INTEGER` (chars/4) on each entry at insert time; allows `context_plan` to sum tokens via index scan without loading JSON data; also store `content_bytes INTEGER` for quick size checks; avoids full-row reads during preflight planning pass (V41)|V41,§D
@@ -311,10 +312,10 @@ T149| |approval callback handler — admin taps Approve → daemon applies chang
 T150| |agent-initiated agent creation — agent proposes new agent via `approval_request` type `create_agent` w/ payload (name, model, system_prompt, tools, allowed_hosts); admin approves → daemon writes `agents/<name>/agent.json` + `system.md` + seeds DB row|V54,V20
 T151| |test: approval flow end-to-end — agent requests whitelist host → approval pending → mock admin approve → config updated → agent inbox receives confirmation; also test deny path + unauthorized approval attempt|V54,V53
 
-T152| |memory blocks table — `memory_blocks(id, agent_name, label, value TEXT, description TEXT, char_limit INT DEFAULT 5000, read_only INT DEFAULT 0, created_at, updated_at)`; seeded from `agent.json` `memory_blocks[]` on first reference; config declares which blocks each agent gets, their descriptions, limits, and editability; DB authoritative after seed|§D,V55
-T153| |memory block tools — `core_memory_append(label, content)`, `core_memory_replace(label, old, new)`; operate on block `value` only; respect `read_only` flag; persist to DB immediately|§I,T152
+T152| |memory blocks table — `memory_blocks(id, agent_name, label, value TEXT, description TEXT, char_limit INT DEFAULT 5000, read_only INT DEFAULT 0, created_at, updated_at)`; default: zero blocks — agent creates via `memory_create`; optionally pre-seeded from `agent.json` `memory_blocks[]`; DB authoritative after seed|§D,V55
+T153| |memory tools — `memory_create(label, description, value?)`, `memory_append(label, content)`, `memory_replace(label, old, new)`; operate on block `value` only; respect `read_only` flag; persist to DB immediately|§I,T152
 T154| |system prompt memory injection — at context build, render blocks into prompt as labeled sections w/ metadata (label, description, chars_used/limit); agent sees structure, knows what each block is for|T152,T122
-T155| |`memory_set` → block migration — deprecate flat `memory` column; migrate existing content to `human` block on first access; `memory_set` becomes alias for `core_memory_replace` on `human` block|T152,T121
+T155| |drop flat `soul`/`memory` columns from agents table — migrate existing content to `persona`/`human` blocks on first access|T152
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)
@@ -339,4 +340,6 @@ id|date|cause|fix
 - MCP extension: reference JS extension that speaks Model Context Protocol over stdio/HTTP; discovers remote tools, registers them via the extension API; ships as a built-in example extension
 - OpenAI Device Code auth: OAuth 2.0 Device Authorization Grant (RFC 8628) for ChatGPT/Codex subscription access without API key; show URL + code → user approves on phone/laptop → poll for token; works headless (no browser callback); store access+refresh tokens in DB; auto-refresh on expiry; identify as `cclaw/<version>` User-Agent
 - System prompt in DB: move system prompts from `agents/<name>/system.md` to a `prompts` table (id, name, template TEXT, created_at); template vars `{session_id}`, `{date}`, `{agent_name}`; agents reference prompt by name/id in config; allows runtime editing without filesystem access; keep file-based loading as fallback/import path
-- Workspace model refinement: each agent owns `./workspace/<agent_name>/`; agents can share workspace via config (`"workspace": "other_agent_name"`); no global "default" workspace; `MEMORY.md` lives in workspace (agent reads/writes); `SOUL.md` optional persona file; `/tmp/cclaw-<session_id>/` always writable (tool overflow, scratch); workspace + tmp dir are the only writable paths under landlock/namespace
+- Workspace model refinement: each agent owns `./workspace/<agent_name>/`; agents can share workspace via config (`"workspace": "other_agent_name"`); no global "default" workspace; `/tmp/cclaw-<session_id>/` always writable (tool overflow, scratch); workspace + tmp dir are the only writable paths under landlock/namespace
+- Auto-recall (FTS5): at context build, extract keywords from current user message → FTS5 search over entries + memory_blocks → inject top-N relevant hits as `<recalled_context>` section in system prompt; zero agent effort, system-level; configurable threshold + max tokens budget
+- Vector recall (NEXT): embedding-based semantic search over entries + memory_blocks + workspace files; hybrid w/ FTS5 (RRF merge); requires embedding model (local or API); `passages` table (text, embedding BLOB, source_type, source_id); agent tool `memory_search(query)` for explicit recall; auto-recall injects top hits same as FTS5 path

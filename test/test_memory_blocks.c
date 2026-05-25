@@ -1,4 +1,6 @@
 #include "db.h"
+#include "agent_config.h"
+#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -162,6 +164,41 @@ static void test_seed(void) {
     printf("  PASS test_seed\n");
 }
 
+static void test_prompt_injection(void) {
+    sqlite3 *db = db_open(TEST_DB);
+    assert(db);
+
+    /* Seed agent with system prompt */
+    db_agent_upsert(db, "testagent", "{}", "You are a test agent.", NULL, NULL, NULL);
+
+    /* Create memory blocks */
+    memory_block_create(db, "testagent", "persona", "Agent identity", "I am helpful", 5000);
+    memory_block_create(db, "testagent", "human", "User facts", "Likes cats", 3000);
+
+    /* Build system prompt — no agents_dir needed, agent already in DB */
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+    char *prompt = agent_build_system_prompt(db, "testagent", 1, NULL, &cfg);
+    assert(prompt);
+
+    /* Verify memory blocks section present */
+    assert(strstr(prompt, "## Memory Blocks"));
+    assert(strstr(prompt, "### persona"));
+    assert(strstr(prompt, "description: Agent identity"));
+    assert(strstr(prompt, "usage: 12/5000 chars"));
+    assert(strstr(prompt, "I am helpful"));
+    assert(strstr(prompt, "### human"));
+    assert(strstr(prompt, "description: User facts"));
+    assert(strstr(prompt, "usage: 10/3000 chars"));
+    assert(strstr(prompt, "Likes cats"));
+    assert(strstr(prompt, "read-write"));
+
+    free(prompt);
+    db_close(db);
+    unlink(TEST_DB);
+    printf("  PASS test_prompt_injection\n");
+}
+
 int main(void) {
     printf("test_memory_blocks:\n");
     test_create_and_get();
@@ -169,6 +206,7 @@ int main(void) {
     test_set_value();
     test_read_only();
     test_seed();
+    test_prompt_injection();
     printf("All memory_blocks tests passed.\n");
     return 0;
 }

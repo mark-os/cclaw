@@ -414,17 +414,56 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     /* Load skills from disk (skills stay on filesystem per §D) */
     char *skills = agents_dir ? agent_load_skills(agents_dir, agent_name) : NULL;
 
+    /* T154: Load memory blocks from DB */
+    int mb_count = 0;
+    MemoryBlock *blocks = memory_block_list(db, agent_name, &mb_count);
+
+    /* Render memory blocks section */
+    char *mb_section = NULL;
+    size_t mb_len = 0;
+    if (blocks && mb_count > 0) {
+        /* Estimate size: header + per-block metadata + value */
+        size_t est = 64;
+        for (int i = 0; i < mb_count; i++) {
+            est += 128; /* metadata line overhead */
+            est += blocks[i].label ? strlen(blocks[i].label) : 0;
+            est += blocks[i].description ? strlen(blocks[i].description) : 0;
+            est += blocks[i].value ? strlen(blocks[i].value) : 0;
+        }
+        mb_section = malloc(est);
+        if (mb_section) {
+            size_t pos = 0;
+            pos += (size_t)snprintf(mb_section + pos, est - pos, "\n\n## Memory Blocks\n");
+            for (int i = 0; i < mb_count; i++) {
+                int val_len = blocks[i].value ? (int)strlen(blocks[i].value) : 0;
+                pos += (size_t)snprintf(mb_section + pos, est - pos,
+                    "\n### %s\n"
+                    "description: %s\n"
+                    "usage: %d/%d chars | %s\n"
+                    "---\n%s\n",
+                    blocks[i].label ? blocks[i].label : "",
+                    blocks[i].description ? blocks[i].description : "",
+                    val_len, blocks[i].char_limit,
+                    blocks[i].read_only ? "read-only" : "read-write",
+                    blocks[i].value ? blocks[i].value : "");
+            }
+            mb_len = pos;
+        }
+        memory_block_list_free(blocks, mb_count);
+    }
+
     /* Calculate total size */
     size_t rlen = rendered ? strlen(rendered) : 0;
     size_t soul_len = (row->soul && row->soul[0]) ? strlen(row->soul) : 0;
     size_t mem_len = (row->memory && row->memory[0]) ? strlen(row->memory) : 0;
     size_t skills_len = skills ? strlen(skills) : 0;
-    size_t total = rlen + soul_len + mem_len + skills_len + 128;
+    size_t total = rlen + soul_len + mem_len + skills_len + mb_len + 128;
 
     char *out = malloc(total);
     if (!out) {
         free(rendered);
         free(skills);
+        free(mb_section);
         agent_row_free(row);
         return NULL;
     }
@@ -449,6 +488,10 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
         memcpy(out + oi, row->memory, mem_len); oi += mem_len;
     }
 
+    if (mb_len > 0) {
+        memcpy(out + oi, mb_section, mb_len); oi += mb_len;
+    }
+
     if (skills_len > 0) {
         const char *hdr = "\n\n## Skills\n";
         size_t hlen = strlen(hdr);
@@ -459,6 +502,7 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     out[oi] = '\0';
     free(rendered);
     free(skills);
+    free(mb_section);
     agent_row_free(row);
     return out;
 }

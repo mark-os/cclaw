@@ -25,3 +25,9 @@ cclaw
 .DS_Store
 vendor/curl/
 vendor/libcurl*
+
+# Generated files
+src/src-map.txt
+
+# Runtime workspace (agent-created)
+workspace/

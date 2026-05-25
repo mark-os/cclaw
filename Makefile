@@ -5,6 +5,7 @@ LDFLAGS := -lcurl -lm -lpthread -ldl
 BUILDDIR := build
 SRC      := $(wildcard src/*.c)
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
+DEP      := $(OBJ:.o=.d)
 
 VENDOR_SRC := vendor/cJSON/cJSON.c vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
               vendor/mquickjs/mquickjs.c vendor/mquickjs/cutils.c vendor/mquickjs/dtoa.c \
@@ -27,7 +28,7 @@ $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILDDIR)/%.o: src/%.c | $(BUILDDIR)/
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 $(BUILDDIR)/cJSON.o: vendor/cJSON/cJSON.c | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -Wno-unused-parameter -c -o $@ $<
@@ -85,3 +86,5 @@ $(BUILDDIR)/test_%: test/test_%.c $(BUILDDIR)/libcclaw.a | $(BUILDDIR)/
 
 clean:
 	rm -rf $(BUILDDIR)
+
+-include $(DEP)

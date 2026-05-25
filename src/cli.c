@@ -212,7 +212,7 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
         .allowed_hosts_count = ac ? ac->allowed_hosts_count : 0
     };
     tool_js_eval_register(&reg, &js_eval_ctx);
-    tool_web_fetch_register(&reg);
+    tool_web_fetch_register(&reg, NULL);
     tool_db_query_register(&reg, db);
 
     JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = NULL};

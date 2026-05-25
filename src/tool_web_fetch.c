@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_web_fetch.h"
 #include "http.h"
+#include "http_policy.h"
 #include <cJSON.h>
 #include <curl/curl.h>
 #include <stdlib.h>
@@ -129,7 +130,7 @@ void sanitize_homoglyphs(char *text) {
 }
 
 char *tool_web_fetch_handler(const char *arguments, void *user_data) {
-    (void)user_data;
+    HttpPolicy *policy = (HttpPolicy *)user_data;
 
     cJSON *json = cJSON_Parse(arguments);
     if (!json) return strdup("error: invalid JSON arguments");
@@ -141,7 +142,16 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     }
     const char *url = url_item->valuestring;
 
-    /* Basic URL validation */
+    /* V46: check policy before connecting */
+    char err[256];
+    if (http_check_policy(url, policy, err, sizeof(err)) != 0) {
+        cJSON_Delete(json);
+        char *msg = malloc(strlen(err) + 8);
+        if (msg) { sprintf(msg, "error: %s", err); return msg; }
+        return strdup("error: policy denied");
+    }
+
+    /* Basic URL validation (fallback if no policy) */
     if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
         cJSON_Delete(json);
         return strdup("error: url must start with http:// or https://");
@@ -199,8 +209,8 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     return result;
 }
 
-int tool_web_fetch_register(ToolRegistry *reg) {
+int tool_web_fetch_register(ToolRegistry *reg, HttpPolicy *policy) {
     return tools_register(reg, "web_fetch",
                           "Fetch a URL via HTTP GET, extract text from HTML",
-                          WEB_FETCH_PARAMS_JSON, tool_web_fetch_handler, NULL);
+                          WEB_FETCH_PARAMS_JSON, tool_web_fetch_handler, policy);
 }

@@ -115,7 +115,7 @@ static void test_handler_bad_json(void) {
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    int rc = tool_web_fetch_register(&reg);
+    int rc = tool_web_fetch_register(&reg, NULL);
     assert(rc == 0);
     ToolEntry *e = tools_lookup(&reg, "web_fetch");
     assert(e != NULL);

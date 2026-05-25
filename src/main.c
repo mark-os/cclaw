@@ -129,7 +129,7 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
         .allowed_hosts_count = ac ? ac->allowed_hosts_count : 0
     };
     tool_js_eval_register(&reg, &js_eval_ctx);
-    tool_web_fetch_register(&reg);
+    tool_web_fetch_register(&reg, NULL);
     tool_db_query_register(&reg, db);
 
     /* JS persistent runtime + define tool */

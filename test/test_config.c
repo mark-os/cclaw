@@ -305,6 +305,51 @@ static void test_update_model(void) {
     printf("  PASS: test_update_model\n");
 }
 
+/* T143: config_update_endpoint tests */
+static void test_update_endpoint(void) {
+    const char *path = "/tmp/cclaw_test_update_endpoint.json";
+    const char *json =
+        "{\n"
+        "  \"provider\": {\"base_url\": \"https://openrouter.ai/api/v1\", \"model\": \"m\"},\n"
+        "  \"providers\": [{\"base_url\": \"https://old.api/v1\", \"model\": \"g\"}]\n"
+        "}";
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fputs(json, f);
+    fclose(f);
+
+    setenv("OPENROUTER_API_KEY", "sk-test", 1);
+
+    /* Update primary endpoint */
+    assert(config_update_endpoint(path, 0, "https://new.api/v1") == 0);
+    Config *cfg = config_load(path);
+    assert(cfg != NULL);
+    assert(strcmp(cfg->provider.base_url, "https://new.api/v1") == 0);
+    config_free(cfg);
+
+    /* Update fallback endpoint */
+    assert(config_update_endpoint(path, 1, "http://localhost:8080/v1") == 0);
+    cfg = config_load(path);
+    assert(cfg != NULL);
+    assert(strcmp(cfg->fallback_providers[0].base_url, "http://localhost:8080/v1") == 0);
+    config_free(cfg);
+
+    /* Invalid URL (no http/https) fails */
+    assert(config_update_endpoint(path, 0, "ftp://bad.url") == -1);
+    assert(config_update_endpoint(path, 0, "not-a-url") == -1);
+
+    /* Invalid index fails */
+    assert(config_update_endpoint(path, 5, "https://x.com") == -1);
+
+    /* NULL args fail */
+    assert(config_update_endpoint(NULL, 0, "https://x.com") == -1);
+    assert(config_update_endpoint(path, 0, NULL) == -1);
+
+    unsetenv("OPENROUTER_API_KEY");
+    remove(path);
+    printf("  PASS: test_update_endpoint\n");
+}
+
 int main(void) {
     printf("test_config:\n");
     test_env_only();
@@ -316,6 +361,7 @@ int main(void) {
     test_system_prompt();
     test_admin_chat_ids();
     test_update_model();
+    test_update_endpoint();
     printf("All config tests passed.\n");
     return 0;
 }

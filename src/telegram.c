@@ -197,6 +197,30 @@ static void cfg_dialog_remove(int64_t chat_id) {
     }
 }
 
+/* T143: Pending /config endpoint dialog state */
+#define EP_DIALOG_MAX 4
+typedef struct {
+    int64_t chat_id;
+    int provider_index;
+} EpDialog;
+static EpDialog ep_dialogs[EP_DIALOG_MAX];
+static int ep_dialog_count;
+
+static EpDialog *ep_dialog_find(int64_t chat_id) {
+    for (int i = 0; i < ep_dialog_count; i++)
+        if (ep_dialogs[i].chat_id == chat_id) return &ep_dialogs[i];
+    return NULL;
+}
+
+static void ep_dialog_remove(int64_t chat_id) {
+    for (int i = 0; i < ep_dialog_count; i++) {
+        if (ep_dialogs[i].chat_id == chat_id) {
+            ep_dialogs[i] = ep_dialogs[--ep_dialog_count];
+            return;
+        }
+    }
+}
+
 /* T141: Get env file path from config or default */
 static const char *get_env_file_path(void) {
     if (g_cfg && g_cfg->env_file && g_cfg->env_file[0])
@@ -536,6 +560,139 @@ static int handle_config_reply(int64_t chat_id, const char *text) {
     return 1;
 }
 
+/* T143: Send inline keyboard listing providers for endpoint change */
+static void config_send_endpoint_keyboard(const char *token, int64_t chat_id) {
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
+    cJSON_AddStringToObject(body, "text", "Select provider to change endpoint:");
+
+    cJSON *markup = cJSON_CreateObject();
+    cJSON *rows = cJSON_CreateArray();
+    cJSON *row = cJSON_CreateArray();
+
+    char label[256];
+    snprintf(label, sizeof(label), "Primary: %s",
+             g_cfg->provider.base_url ? g_cfg->provider.base_url : "(none)");
+    cJSON *btn = cJSON_CreateObject();
+    cJSON_AddStringToObject(btn, "text", label);
+    cJSON_AddStringToObject(btn, "callback_data", "cfg_ep:0");
+    cJSON_AddItemToArray(row, btn);
+    cJSON_AddItemToArray(rows, row);
+
+    for (size_t i = 0; i < g_cfg->fallback_count; i++) {
+        row = cJSON_CreateArray();
+        snprintf(label, sizeof(label), "Fallback %zu: %s", i + 1,
+                 g_cfg->fallback_providers[i].base_url ? g_cfg->fallback_providers[i].base_url : "(none)");
+        char cb_data[32];
+        snprintf(cb_data, sizeof(cb_data), "cfg_ep:%zu", i + 1);
+        btn = cJSON_CreateObject();
+        cJSON_AddStringToObject(btn, "text", label);
+        cJSON_AddStringToObject(btn, "callback_data", cb_data);
+        cJSON_AddItemToArray(row, btn);
+        cJSON_AddItemToArray(rows, row);
+    }
+
+    cJSON_AddItemToObject(markup, "inline_keyboard", rows);
+    cJSON_AddItemToObject(body, "reply_markup", markup);
+
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (json) {
+        cJSON *resp = tg_call(token, "sendMessage", json);
+        cJSON_Delete(resp);
+        free(json);
+    }
+}
+
+/* T143: Handle callback_query for /config endpoint provider selection */
+static void handle_config_endpoint_callback(const char *data, int64_t chat_id, const char *callback_id) {
+    if (callback_id) {
+        cJSON *ans = cJSON_CreateObject();
+        cJSON_AddStringToObject(ans, "callback_query_id", callback_id);
+        char *json = cJSON_PrintUnformatted(ans);
+        cJSON_Delete(ans);
+        if (json) {
+            cJSON *resp = tg_call(g_cfg->telegram_token, "answerCallbackQuery", json);
+            cJSON_Delete(resp);
+            free(json);
+        }
+    }
+
+    int idx = atoi(data + 6); /* skip "cfg_ep:" */
+
+    ep_dialog_remove(chat_id);
+    if (ep_dialog_count < EP_DIALOG_MAX) {
+        EpDialog *d = &ep_dialogs[ep_dialog_count++];
+        d->chat_id = chat_id;
+        d->provider_index = idx;
+    }
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
+
+    const char *current = NULL;
+    if (idx == 0)
+        current = g_cfg->provider.base_url;
+    else if ((size_t)(idx - 1) < g_cfg->fallback_count)
+        current = g_cfg->fallback_providers[idx - 1].base_url;
+
+    char prompt[512];
+    snprintf(prompt, sizeof(prompt), "Enter new base URL (must start with http:// or https://)%s%s%s:",
+             current ? "\n(current: " : "", current ? current : "", current ? ")" : "");
+    cJSON_AddStringToObject(body, "text", prompt);
+
+    cJSON *mk = cJSON_CreateObject();
+    cJSON_AddTrueToObject(mk, "force_reply");
+    cJSON_AddTrueToObject(mk, "selective");
+    cJSON_AddItemToObject(body, "reply_markup", mk);
+
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (json) {
+        cJSON *resp = tg_call(g_cfg->telegram_token, "sendMessage", json);
+        cJSON_Delete(resp);
+        free(json);
+    }
+}
+
+/* T143: Handle endpoint URL reply from admin. Returns 1 if consumed, 0 if not. */
+static int handle_endpoint_reply(int64_t chat_id, const char *text) {
+    EpDialog *d = ep_dialog_find(chat_id);
+    if (!d) return 0;
+
+    int idx = d->provider_index;
+    ep_dialog_remove(chat_id);
+
+    const char *config_path = daemon_get_config_path();
+    if (!config_path || !config_path[0]) {
+        telegram_send_message(g_cfg->telegram_token, chat_id,
+            "No config file path set. Cannot update endpoint.");
+        return 1;
+    }
+
+    if (config_update_endpoint(config_path, idx, text) != 0) {
+        telegram_send_message(g_cfg->telegram_token, chat_id,
+            "Failed to update endpoint. Ensure URL starts with http:// or https://");
+        return 1;
+    }
+
+    /* Update base_url in-place */
+    char **url_ptr = NULL;
+    if (idx == 0)
+        url_ptr = (char **)&g_cfg->provider.base_url;
+    else if ((size_t)(idx - 1) < g_cfg->fallback_count)
+        url_ptr = (char **)&g_cfg->fallback_providers[idx - 1].base_url;
+    if (url_ptr) {
+        free(*url_ptr);
+        *url_ptr = strdup(text);
+    }
+
+    char msg[512];
+    snprintf(msg, sizeof(msg), "Endpoint updated to: %s", text);
+    telegram_send_message(g_cfg->telegram_token, chat_id, msg);
+    return 1;
+}
+
 /* T140: Dispatch admin command to handler. */
 static void dispatch_admin_command(const char *text, int64_t chat_id) {
     const char *args = NULL;
@@ -548,9 +705,11 @@ static void dispatch_admin_command(const char *text, int64_t chat_id) {
     case 2: /* /config — T142/T143 */
         if (args && strncmp(args, "model", 5) == 0)
             config_send_provider_keyboard(g_cfg->telegram_token, chat_id);
+        else if (args && strncmp(args, "endpoint", 8) == 0)
+            config_send_endpoint_keyboard(g_cfg->telegram_token, chat_id);
         else
             telegram_send_message(g_cfg->telegram_token, chat_id,
-                "Usage: /config model");
+                "Usage: /config model | /config endpoint");
         break;
     case 3: /* /whitelist — T144 */
         telegram_send_message(g_cfg->telegram_token, chat_id,
@@ -586,6 +745,10 @@ static void process_message(cJSON *msg) {
 
     /* T142: intercept config model reply from admin */
     if (telegram_is_admin(g_cfg, chat_id) && handle_config_reply(chat_id, text->valuestring))
+        return;
+
+    /* T143: intercept config endpoint reply from admin */
+    if (telegram_is_admin(g_cfg, chat_id) && handle_endpoint_reply(chat_id, text->valuestring))
         return;
 
     /* Route chat_id to session */
@@ -683,6 +846,8 @@ static void *poll_loop(void *arg) {
                                 handle_key_callback(cb_data->valuestring, from_chat_id, cb_id_str);
                             else if (strncmp(cb_data->valuestring, "cfg_model:", 10) == 0)
                                 handle_config_model_callback(cb_data->valuestring, from_chat_id, cb_id_str);
+                            else if (strncmp(cb_data->valuestring, "cfg_ep:", 7) == 0)
+                                handle_config_endpoint_callback(cb_data->valuestring, from_chat_id, cb_id_str);
                         }
                     }
                 }

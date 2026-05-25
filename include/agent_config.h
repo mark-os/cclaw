@@ -2,6 +2,7 @@
 #define CCLAW_AGENT_CONFIG_H
 
 #include <stddef.h>
+#include <sqlite3.h>
 #include "types.h"
 
 /* T75: agent discovery — scan agents/ dir, list available agents by name.
@@ -49,5 +50,13 @@ char *agent_load_system_prompt(const char *agents_dir, const char *name,
  * Returns heap-allocated string (newline-separated skill contents).
  * Returns NULL if no skills dir or no .md files found. */
 char *agent_load_skills(const char *agents_dir, const char *name);
+
+/* T122: Assemble system prompt from DB agent row (template + soul + memory + skills).
+ * Seeds agent from disk if not in DB. Renders template vars {session_id}, {date}, {agent_name}.
+ * Falls back to config_render_system_prompt if agent_name is NULL.
+ * Returns heap-allocated string. Caller must free. */
+char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
+                                int64_t session_id, const char *agents_dir,
+                                const Config *fallback_cfg);
 
 #endif

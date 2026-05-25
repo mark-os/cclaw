@@ -111,7 +111,8 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
         }
     }
     if (branch_count == 0) {
-        char *prompt = config_render_system_prompt(effective_cfg, session_id);
+        char *prompt = agent_build_system_prompt(db, agent_name, session_id,
+                                                "agents", effective_cfg);
         Message sys_msg = {.role = ROLE_SYSTEM, .content = prompt};
         entry_append(db, session_id, &sys_msg);
         free(prompt);

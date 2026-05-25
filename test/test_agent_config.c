@@ -1,5 +1,7 @@
+#define _POSIX_C_SOURCE 200809L
 #include "agent_config.h"
 #include "config.h"
+#include "db.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -268,6 +270,59 @@ static void test_agent_load_skills_empty(void) {
     printf("  PASS: agent load skills empty dir\n");
 }
 
+static void test_build_system_prompt(void) {
+    /* Setup: agents dir with system.md and skills */
+    system("rm -rf /tmp/test_ac_build");
+    make_dir("/tmp/test_ac_build");
+    make_dir("/tmp/test_ac_build/mybot");
+    make_dir("/tmp/test_ac_build/mybot/skills");
+
+    FILE *f = fopen("/tmp/test_ac_build/mybot/system.md", "w");
+    fprintf(f, "You are {agent_name}. Session {session_id}. Date {date}.");
+    fclose(f);
+
+    f = fopen("/tmp/test_ac_build/mybot/skills/coding.md", "w");
+    fprintf(f, "You can write code.");
+    fclose(f);
+
+    /* Open DB, seed agent, set soul+memory */
+    unlink("/tmp/test_ac_build.db");
+    sqlite3 *db = db_open("/tmp/test_ac_build.db");
+    assert(db != NULL);
+
+    AgentRow *row = db_agent_seed(db, "/tmp/test_ac_build", "mybot");
+    assert(row != NULL);
+    agent_row_free(row);
+
+    db_agent_set_soul(db, "mybot", "I am friendly.");
+    db_agent_set_memory(db, "mybot", "User likes C.");
+
+    /* Build prompt */
+    Config cfg = {0};
+    char *prompt = agent_build_system_prompt(db, "mybot", 7,
+                                            "/tmp/test_ac_build", &cfg);
+    assert(prompt != NULL);
+    assert(strstr(prompt, "You are mybot.") != NULL);
+    assert(strstr(prompt, "Session 7.") != NULL);
+    assert(strstr(prompt, "## Soul\nI am friendly.") != NULL);
+    assert(strstr(prompt, "## Memory\nUser likes C.") != NULL);
+    assert(strstr(prompt, "## Skills\nYou can write code.") != NULL);
+    free(prompt);
+
+    /* NULL agent_name falls back to config_render_system_prompt */
+    cfg.system_prompt = strdup("fallback {session_id}");
+    char *fb = agent_build_system_prompt(db, NULL, 5, "/tmp/test_ac_build", &cfg);
+    assert(fb != NULL);
+    assert(strstr(fb, "fallback 5") != NULL);
+    free(fb);
+    free(cfg.system_prompt);
+
+    db_close(db);
+    unlink("/tmp/test_ac_build.db");
+    system("rm -rf /tmp/test_ac_build");
+    printf("  PASS: agent build system prompt\n");
+}
+
 int main(void) {
     printf("test_agent_config:\n");
     test_discover_agents();
@@ -283,6 +338,7 @@ int main(void) {
     test_agent_load_skills();
     test_agent_load_skills_missing_dir();
     test_agent_load_skills_empty();
+    test_build_system_prompt();
     printf("All tests passed.\n");
     return 0;
 }

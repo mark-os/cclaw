@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "agent_config.h"
 #include "config.h"
+#include "db.h"
 #include "cJSON.h"
 #include <dirent.h>
 #include <stdlib.h>
@@ -331,5 +332,132 @@ char *agent_load_skills(const char *agents_dir, const char *name) {
     closedir(d);
 
     if (out_len == 0) { free(out); return NULL; }
+    return out;
+}
+
+/* T122: helper — render template vars in a string */
+static char *render_template(const char *tmpl, int64_t session_id,
+                             const char *agent_name) {
+    if (!tmpl) return NULL;
+    size_t tmpl_len = strlen(tmpl);
+
+    char sid_buf[21];
+    snprintf(sid_buf, sizeof(sid_buf), "%lld", (long long)session_id);
+
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    char date_buf[11];
+    strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm);
+
+    const char *aname = agent_name ? agent_name : "default";
+
+    size_t out_cap = tmpl_len + 128;
+    char *out = malloc(out_cap);
+    if (!out) return NULL;
+
+    size_t oi = 0;
+    for (size_t i = 0; i < tmpl_len; ) {
+        if (tmpl[i] == '{') {
+            const char *rep = NULL;
+            size_t skip = 0;
+            if (strncmp(tmpl + i, "{session_id}", 12) == 0) {
+                rep = sid_buf; skip = 12;
+            } else if (strncmp(tmpl + i, "{date}", 6) == 0) {
+                rep = date_buf; skip = 6;
+            } else if (strncmp(tmpl + i, "{agent_name}", 12) == 0) {
+                rep = aname; skip = 12;
+            }
+            if (rep) {
+                size_t rlen = strlen(rep);
+                while (oi + rlen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                memcpy(out + oi, rep, rlen);
+                oi += rlen;
+                i += skip;
+                continue;
+            }
+        }
+        if (oi + 1 >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        out[oi++] = tmpl[i++];
+    }
+    out[oi] = '\0';
+    return out;
+}
+
+/* T122: Assemble system prompt from DB agent row */
+char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
+                                int64_t session_id, const char *agents_dir,
+                                const Config *fallback_cfg) {
+    /* No agent → fall back to file-based config_render_system_prompt */
+    if (!agent_name || !db) {
+        return config_render_system_prompt(fallback_cfg, session_id);
+    }
+
+    /* Seed from disk if not in DB, then load */
+    AgentRow *row = db_agent_seed(db, agents_dir, agent_name);
+    if (!row) {
+        return config_render_system_prompt(fallback_cfg, session_id);
+    }
+
+    /* Render template from DB system_prompt (or fallback to global) */
+    const char *tmpl = row->system_prompt;
+    char *rendered = NULL;
+    if (tmpl && tmpl[0]) {
+        rendered = render_template(tmpl, session_id, agent_name);
+    } else {
+        rendered = config_render_system_prompt(fallback_cfg, session_id);
+        agent_row_free(row);
+        return rendered;
+    }
+
+    /* Load skills from disk (skills stay on filesystem per §D) */
+    char *skills = agents_dir ? agent_load_skills(agents_dir, agent_name) : NULL;
+
+    /* Calculate total size */
+    size_t rlen = rendered ? strlen(rendered) : 0;
+    size_t soul_len = (row->soul && row->soul[0]) ? strlen(row->soul) : 0;
+    size_t mem_len = (row->memory && row->memory[0]) ? strlen(row->memory) : 0;
+    size_t skills_len = skills ? strlen(skills) : 0;
+    size_t total = rlen + soul_len + mem_len + skills_len + 128;
+
+    char *out = malloc(total);
+    if (!out) {
+        free(rendered);
+        free(skills);
+        agent_row_free(row);
+        return NULL;
+    }
+
+    size_t oi = 0;
+    if (rendered) {
+        memcpy(out, rendered, rlen);
+        oi = rlen;
+    }
+
+    if (soul_len > 0) {
+        const char *hdr = "\n\n## Soul\n";
+        size_t hlen = strlen(hdr);
+        memcpy(out + oi, hdr, hlen); oi += hlen;
+        memcpy(out + oi, row->soul, soul_len); oi += soul_len;
+    }
+
+    if (mem_len > 0) {
+        const char *hdr = "\n\n## Memory\n";
+        size_t hlen = strlen(hdr);
+        memcpy(out + oi, hdr, hlen); oi += hlen;
+        memcpy(out + oi, row->memory, mem_len); oi += mem_len;
+    }
+
+    if (skills_len > 0) {
+        const char *hdr = "\n\n## Skills\n";
+        size_t hlen = strlen(hdr);
+        memcpy(out + oi, hdr, hlen); oi += hlen;
+        memcpy(out + oi, skills, skills_len); oi += skills_len;
+    }
+
+    out[oi] = '\0';
+    free(rendered);
+    free(skills);
+    agent_row_free(row);
     return out;
 }

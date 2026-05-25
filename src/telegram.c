@@ -4,6 +4,7 @@
 #include "db.h"
 #include "daemon.h"
 #include "http.h"
+#include "agent_config.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -133,7 +134,8 @@ static void process_message(cJSON *msg) {
         if (session_id < 0) return;
         db_tg_set_session(g_db, chat_id, session_id);
         /* Append system message for new session */
-        char *prompt = config_render_system_prompt(g_cfg, session_id);
+        char *prompt = agent_build_system_prompt(g_db, NULL, session_id,
+                                                "agents", g_cfg);
         Message sys_msg = {.role = ROLE_SYSTEM, .content = prompt};
         entry_append(g_db, session_id, &sys_msg);
         free(prompt);

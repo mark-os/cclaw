@@ -39,4 +39,10 @@ int64_t daemon_child_session(pid_t pid);
 /* T94/V34: Startup recovery — reset non-idle sessions, handle orphans. */
 void daemon_startup_recovery(sqlite3 *db);
 
+/* Override exec path for fork+exec (testing). */
+void daemon_set_self_path(const char *path);
+
+/* Set config path passed to exec'd children. */
+void daemon_set_config_path(const char *path);
+
 #endif

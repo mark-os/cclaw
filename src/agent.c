@@ -146,6 +146,26 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
                                          const ContextPlan *plan,
                                          const ToolSchema *tools, size_t tool_count,
                                          HttpResponse *resp, int debug) {
+    /* Mock mode: read canned response from file, skip HTTP entirely */
+    const char *mock_path = getenv("CCLAW_LLM_MOCK");
+    if (mock_path) {
+        FILE *f = fopen(mock_path, "r");
+        if (!f) return -1;
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        resp->data = malloc((size_t)len + 1);
+        if (resp->data) {
+            fread(resp->data, 1, (size_t)len, f);
+            resp->data[len] = '\0';
+            resp->len = (size_t)len;
+        }
+        fclose(f);
+        (void)a; (void)cfg; (void)db; (void)session_id;
+        (void)plan; (void)tools; (void)tool_count; (void)debug;
+        return resp->data ? 200 : -1;
+    }
+
     char *url = build_url(a, cfg);
     if (!url) return -1;
 

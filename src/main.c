@@ -3,6 +3,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <signal.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include "cclaw.h"
 #include "config.h"
 #include "cli.h"
@@ -12,19 +15,20 @@
 #include "cron.h"
 #include "db.h"
 #include "agent.h"
+#include "agent_config.h"
+#include "landlock.h"
 #include "tools.h"
 #include "tool_shell.h"
 #include "tool_file.h"
 #include "tool_js.h"
 #include "tool_cron.h"
-#include "tool_subagent.h"
+#include "tool_agent.h"
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
 #include "shutdown.h"
-#include "janitor.h"
 #include "daemon.h"
 
-/* Tool dispatch via registry (shared with sub-agent mode) */
+/* Tool dispatch via registry */
 static char *dispatch_tools(const char *name, const char *arguments, void *user_data) {
     ToolRegistry *reg = (ToolRegistry *)user_data;
     ToolEntry *e = tools_lookup(reg, name);
@@ -36,39 +40,116 @@ static char *dispatch_tools(const char *name, const char *arguments, void *user_
     return e->handler(arguments, e->user_data);
 }
 
-/* Run as sub-agent: execute task, store result in DB, exit */
-static int run_sub_agent(const Config *cfg, int64_t session_id, const char *task, int depth) {
+/* --agent mode: run one turn on a session, then exit.
+ * Daemon fork+exec target. Loads agent config from session's agent_name. */
+static int run_agent_turn(const Config *cfg, int64_t session_id) {
+    /* V34: die if parent dies */
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+
+    /* V23: resource limits */
+    struct rlimit rl;
+    rl.rlim_cur = 256 * 1024 * 1024;
+    rl.rlim_max = 256 * 1024 * 1024;
+    setrlimit(RLIMIT_AS, &rl);
+    rl.rlim_cur = 300;
+    rl.rlim_max = 300;
+    setrlimit(RLIMIT_CPU, &rl);
+    rl.rlim_cur = 64;
+    rl.rlim_max = 64;
+    setrlimit(RLIMIT_NOFILE, &rl);
+
+    shutdown_init();
+
     sqlite3 *db = db_open(cfg->db_path);
     if (!db) return 1;
 
-    /* Append system + user messages */
-    Message sys_msg = {.role = ROLE_SYSTEM,
-        .content = "You are a CClaw sub-agent. Complete the assigned task concisely."};
-    entry_append(db, session_id, &sys_msg);
+    /* V20: Load per-agent config, merge with global */
+    char *agent_name = session_get_agent_name(db, session_id);
+    AgentConfig *ac = agent_name ? agent_config_load("agents", agent_name) : NULL;
+    const Config *effective_cfg = cfg;
+    Config *merged_cfg = NULL;
+    if (ac) {
+        merged_cfg = agent_config_merge(cfg, ac);
+        if (merged_cfg) effective_cfg = merged_cfg;
+    }
 
-    Message user_msg = {.role = ROLE_USER, .content = (char *)task};
-    entry_append(db, session_id, &user_msg);
+    /* V22: Landlock — restrict filesystem after config loaded */
+    if (landlock_apply(effective_cfg->workspace, cfg->db_path) < 0) {
+        fprintf(stderr, "[agent %lld] landlock unavailable, continuing without\n",
+                (long long)session_id);
+    }
+
+    /* V27: Update last_route from newest inbox source before consuming */
+    int peek_count = 0;
+    InboxItem *items = inbox_peek(db, session_id, 100, &peek_count);
+    if (items && peek_count > 0) {
+        session_set_last_route(db, session_id, items[peek_count - 1].source);
+        inbox_items_free(items, peek_count);
+    }
+
+    /* V18: Drain inbox into session entries */
+    inbox_consume_into_entries(db, session_id, 100);
+
+    /* Read branch — check if session is already complete */
+    int branch_count = 0;
+    Entry *branch = session_get_branch(db, session_id, &branch_count);
+    if (branch_count > 0) {
+        Entry *last = &branch[branch_count - 1];
+        if (last->message.role == ROLE_ASSISTANT &&
+            (last->message.stop_reason == STOP_REASON_STOP ||
+             last->message.stop_reason == STOP_REASON_ERROR ||
+             last->message.stop_reason == STOP_REASON_ABORTED)) {
+            entry_branch_free(branch, branch_count);
+            agent_config_free(ac);
+            if (merged_cfg) config_free(merged_cfg);
+            free(agent_name);
+            db_close(db);
+            return 0;
+        }
+    }
+    if (branch_count == 0) {
+        char *prompt = config_render_system_prompt(effective_cfg, session_id);
+        Message sys_msg = {.role = ROLE_SYSTEM, .content = prompt};
+        entry_append(db, session_id, &sys_msg);
+        free(prompt);
+    }
+    entry_branch_free(branch, branch_count);
 
     /* Register tools */
     ToolRegistry reg;
     tools_init(&reg);
-    tool_shell_register(&reg, cfg->shell_timeout, cfg->workspace, 0);
-    tool_file_read_register(&reg, cfg->workspace);
-    tool_file_write_register(&reg, cfg->workspace);
-    tool_js_eval_register(&reg, NULL);
+    tool_shell_register(&reg, effective_cfg->shell_timeout,
+                        effective_cfg->workspace, ac ? ac->shell_network : 0);
+    tool_file_read_register(&reg, effective_cfg->workspace);
+    tool_file_write_register(&reg, effective_cfg->workspace);
+
+    /* T104: JS eval with per-agent allowed_hosts */
+    JsEvalCtx js_eval_ctx = {
+        .allowed_hosts = ac ? ac->allowed_hosts : NULL,
+        .allowed_hosts_count = ac ? ac->allowed_hosts_count : 0
+    };
+    tool_js_eval_register(&reg, &js_eval_ctx);
     tool_web_fetch_register(&reg);
     tool_db_query_register(&reg, db);
 
-    /* Sub-agents can spawn further sub-agents (up to V3 depth limit) */
-    char self_path[4096];
-    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
-    if (len > 0) self_path[len] = '\0';
-    else strcpy(self_path, "./build/cclaw");
+    /* JS persistent runtime + define tool */
+    JsSessionRuntime *js_rt = js_runtime_create();
+    if (js_rt && ac && ac->allowed_hosts_count > 0)
+        js_runtime_set_hosts(js_rt, ac->allowed_hosts, ac->allowed_hosts_count);
+    JsDefineCtx js_def_ctx = {.db = db, .session_id = session_id,
+                               .reg = &reg, .rt = js_rt};
+    tool_js_define_register(&reg, &js_def_ctx);
+    tool_js_load_session(db, session_id, &reg, js_rt);
 
-    SubAgentCtx sa_ctx = {.db = db, .session_id = session_id,
-                          .depth = depth, .self_path = self_path};
-    tool_spawn_agent_register(&reg, &sa_ctx);
-    tool_check_agent_register(&reg, &sa_ctx);
+    /* Cron tool */
+    ToolCronCtx cron_ctx = {.db = db, .session_id = session_id};
+    tool_cron_register(&reg, &cron_ctx);
+
+    /* Agent launch tool */
+    AgentLaunchCtx la_ctx = {.db = db, .session_id = session_id,
+                             .daemon_mode = 1};
+    tool_launch_agent_register(&reg, &la_ctx);
+    tool_check_agent_register(&reg, &la_ctx);
 
     size_t tool_count = 0;
     const ToolSchema *schemas = tools_schemas(&reg, &tool_count);
@@ -76,77 +157,61 @@ static int run_sub_agent(const Config *cfg, int64_t session_id, const char *task
     AgentContext ctx = {0};
     ctx.db = db;
     ctx.session_id = session_id;
-    ctx.cfg = cfg;
+    ctx.cfg = effective_cfg;
     ctx.dispatch = dispatch_tools;
     ctx.dispatch_data = &reg;
     ctx.tools = schemas;
     ctx.tool_count = tool_count;
-    ctx.debug = cfg->debug;
+    ctx.debug = effective_cfg->debug;
 
     int rc = agent_run(&ctx);
 
-    /* Store final assistant response as sub-agent result */
-    int count = 0;
-    Entry *entries = session_get_branch(db, session_id, &count);
-    const char *result = NULL;
-    if (entries) {
-        for (int i = count - 1; i >= 0; i--) {
-            if (entries[i].message.role == ROLE_ASSISTANT && entries[i].message.content) {
-                result = entries[i].message.content;
-                break;
-            }
-        }
-    }
-
-    /* Find our sub_agent row and mark finished, then notify parent inbox (V13,V18) */
-    const char *sql = "SELECT id, parent_session_id FROM sub_agents WHERE session_id=? AND status='running';";
+    /* Notify parent inbox if this is a child session */
+    const char *sql = "SELECT parent_session_id FROM sessions WHERE id=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, session_id);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
-            int64_t agent_id = sqlite3_column_int64(stmt, 0);
-            int64_t parent_session_id = sqlite3_column_int64(stmt, 1);
-            subagent_finish(db, agent_id, rc == 0 ? "done" : "error",
-                           result ? result : "no response");
-            /* V13: post completion notification to parent inbox */
-            char payload[256];
-            snprintf(payload, sizeof(payload),
-                     "{\"event\":\"sub_agent_done\",\"agent_id\":%lld,\"session_id\":%lld,\"status\":\"%s\"}",
-                     (long long)agent_id, (long long)session_id,
-                     rc == 0 ? "done" : "error");
-            inbox_insert(db, parent_session_id, "sub_agent", payload);
+            int64_t parent_sid = sqlite3_column_int64(stmt, 0);
+            if (parent_sid > 0) {
+                char payload[256];
+                snprintf(payload, sizeof(payload),
+                         "{\"event\":\"agent_done\",\"session_id\":%lld,\"status\":\"%s\"}",
+                         (long long)session_id, rc == 0 ? "done" : "error");
+                inbox_insert(db, parent_sid, "agent", payload);
+            }
         }
         sqlite3_finalize(stmt);
     }
 
-    entry_branch_free(entries, count);
     tools_free(&reg);
+    js_runtime_destroy(js_rt);
+    agent_config_free(ac);
+    if (merged_cfg) config_free(merged_cfg);
+    free(agent_name);
     db_close(db);
     return rc == 0 ? 0 : 1;
 }
 
 int main(int argc, char *argv[]) {
     int cli_mode = 0;
+    int agent_mode = 0;
     int debug_mode = 0;
-    int sub_agent_mode = 0;
+    int new_session = 0;
     int64_t sa_session_id = -1;
-    const char *sa_task = NULL;
-    int sa_depth = 1;
     const char *config_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--cli") == 0) {
             cli_mode = 1;
+        } else if (strcmp(argv[i], "--agent") == 0) {
+            agent_mode = 1;
         } else if (strcmp(argv[i], "--debug") == 0) {
             debug_mode = 1;
-        } else if (strcmp(argv[i], "--sub-agent") == 0) {
-            sub_agent_mode = 1;
+        } else if (strcmp(argv[i], "--new") == 0) {
+            new_session = 1;
         } else if (strncmp(argv[i], "--session-id=", 13) == 0) {
             sa_session_id = atoll(argv[i] + 13);
-        } else if (strncmp(argv[i], "--task=", 7) == 0) {
-            sa_task = argv[i] + 7;
-        } else if (strncmp(argv[i], "--depth=", 8) == 0) {
-            sa_depth = atoi(argv[i] + 8);
         } else if (argv[i][0] != '-') {
             config_path = argv[i];
         }
@@ -161,19 +226,27 @@ int main(int argc, char *argv[]) {
 
     shutdown_init();
 
-    if (sub_agent_mode) {
-        if (sa_session_id < 0 || !sa_task) {
-            fprintf(stderr, "error: --sub-agent requires --session-id=X --task=\"...\"\n");
+    if (agent_mode) {
+        if (sa_session_id < 0) {
+            fprintf(stderr, "error: --agent requires --session-id=N\n");
             config_free(cfg);
             return 1;
         }
-        int rc = run_sub_agent(cfg, sa_session_id, sa_task, sa_depth);
+        int rc = run_agent_turn(cfg, sa_session_id);
         config_free(cfg);
         return rc;
     }
 
     if (cli_mode) {
-        int rc = cli_run(cfg);
+        CliOpts opts = {0};
+        opts.config_path = config_path;
+        if (new_session)
+            opts.session_id = 0;
+        else if (sa_session_id > 0)
+            opts.session_id = sa_session_id;
+        else
+            opts.session_id = -1;
+        int rc = cli_run(cfg, &opts);
         config_free(cfg);
         return rc == 0 ? 0 : 1;
     }
@@ -217,6 +290,7 @@ int main(int argc, char *argv[]) {
     }
 
     /* T81: daemon main loop — blocks until shutdown */
+    if (config_path) daemon_set_config_path(config_path);
     daemon_run(cfg, db);
 
     printf("\nshutting down...\n");

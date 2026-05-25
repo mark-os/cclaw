@@ -8,7 +8,7 @@
 #include "tool_file.h"
 #include "tool_js.h"
 #include "tool_cron.h"
-#include "tool_subagent.h"
+#include "tool_agent.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -206,7 +206,7 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     if (session_id < 0) {
         char session_name[64];
         snprintf(session_name, sizeof(session_name), "tg_%lld", (long long)chat_id);
-        session_id = session_create(g_db, session_name, NULL);
+        session_id = session_create(g_db, session_name, NULL, -1, 0);
         if (session_id < 0) return;
         db_tg_set_session(g_db, chat_id, session_id);
         /* Append system message */
@@ -246,14 +246,10 @@ static void process_message(cJSON *msg, ToolRegistry *base_reg, const ToolSchema
     ToolCronCtx cron_ctx = {.db = g_db, .session_id = session_id};
     tool_cron_register(&reg, &cron_ctx);
 
-    char tg_self_path[4096];
-    ssize_t tg_self_len = readlink("/proc/self/exe", tg_self_path, sizeof(tg_self_path) - 1);
-    if (tg_self_len > 0) tg_self_path[tg_self_len] = '\0';
-    else strcpy(tg_self_path, "./build/cclaw");
 
-    SubAgentCtx sa_ctx = {.db = g_db, .session_id = session_id,
-                          .depth = 0, .self_path = tg_self_path};
-    tool_spawn_agent_register(&reg, &sa_ctx);
+    AgentLaunchCtx sa_ctx = {.db = g_db, .session_id = session_id,
+                             .daemon_mode = 1};
+    tool_launch_agent_register(&reg, &sa_ctx);
 
     size_t local_tool_count = 0;
     const ToolSchema *local_schemas = tools_schemas(&reg, &local_tool_count);

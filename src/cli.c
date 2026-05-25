@@ -8,7 +8,7 @@
 #include "tool_file.h"
 #include "tool_js.h"
 #include "tool_cron.h"
-#include "tool_subagent.h"
+#include "tool_agent.h"
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
 #include "shutdown.h"
@@ -115,13 +115,42 @@ static void print_response(sqlite3 *db, int64_t session_id) {
 }
 
 /* Prompt user to select or create a session. Returns session id or -1. */
-static int64_t cli_select_session(sqlite3 *db) {
+static int64_t cli_select_session(sqlite3 *db, const CliOpts *opts) {
+    /* --new: force create */
+    if (opts && opts->session_id == 0)
+        return session_create(db, "cli", NULL, -1, 0);
+
+    /* --session-id=N: use specific session */
+    if (opts && opts->session_id > 0)
+        return opts->session_id;
+
+    /* Non-interactive: list sessions and exit */
+    if (!isatty(STDIN_FILENO)) {
+        int count = 0;
+        Session *sessions = session_list(db, &count);
+        if (!sessions || count == 0) {
+            fprintf(stderr, "no sessions. use --new to create one.\n");
+        } else {
+            int show = count < 10 ? count : 10;
+            for (int i = 0; i < show; i++) {
+                fprintf(stderr, "%lld\t%s\n", (long long)sessions[i].id,
+                        sessions[i].name ? sessions[i].name : "(unnamed)");
+            }
+            if (count > 10)
+                fprintf(stderr, "... and %d more\n", count - 10);
+            fprintf(stderr, "use --session-id=N or --new\n");
+        }
+        session_list_free(sessions, count);
+        return -1;
+    }
+
+    /* Interactive: prompt */
     int count = 0;
     Session *sessions = session_list(db, &count);
 
     if (!sessions || count == 0) {
         session_list_free(sessions, count);
-        return session_create(db, "cli", NULL);
+        return session_create(db, "cli", NULL, -1, 0);
     }
 
     printf("sessions:\n");
@@ -141,7 +170,7 @@ static int64_t cli_select_session(sqlite3 *db) {
 
     int64_t result;
     if (buf[0] == 'n' || buf[0] == 'N') {
-        result = session_create(db, "cli", NULL);
+        result = session_create(db, "cli", NULL, -1, 0);
     } else {
         int choice = atoi(buf);
         if (choice >= 1 && choice <= count) {
@@ -156,7 +185,7 @@ static int64_t cli_select_session(sqlite3 *db) {
     return result;
 }
 
-int cli_run(const Config *cfg) {
+int cli_run(const Config *cfg, const CliOpts *opts) {
     if (!cfg) return -1;
     if (!cfg->provider.api_key) {
         fprintf(stderr, "error: OPENROUTER_API_KEY not set\n");
@@ -171,9 +200,8 @@ int cli_run(const Config *cfg) {
 
     workspace_init(cfg);
 
-    int64_t session_id = cli_select_session(db);
+    int64_t session_id = cli_select_session(db, opts);
     if (session_id < 0) {
-        fprintf(stderr, "error: cannot select session\n");
         db_close(db);
         return -1;
     }
@@ -211,14 +239,15 @@ int cli_run(const Config *cfg) {
     tool_cron_register(&reg, &cron_ctx);
 
     /* Resolve self path for sub-agent spawning */
-    char self_path[4096];
-    ssize_t self_len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
-    if (self_len > 0) self_path[self_len] = '\0';
-    else strcpy(self_path, "./build/cclaw");
+    char cli_self_path[4096];
+    ssize_t cli_sp_len = readlink("/proc/self/exe", cli_self_path, sizeof(cli_self_path) - 1);
+    if (cli_sp_len > 0) cli_self_path[cli_sp_len] = '\0';
+    else strcpy(cli_self_path, "./build/cclaw");
 
-    SubAgentCtx sa_ctx = {.db = db, .session_id = session_id,
-                          .depth = 0, .self_path = self_path};
-    tool_spawn_agent_register(&reg, &sa_ctx);
+    AgentLaunchCtx sa_ctx = {.db = db, .session_id = session_id,
+                             .self_path = cli_self_path,
+                             .config_path = opts->config_path};
+    tool_launch_agent_register(&reg, &sa_ctx);
 
     /* Create persistent JS runtime and replay session tools */
     JsSessionRuntime *js_rt = js_runtime_create();

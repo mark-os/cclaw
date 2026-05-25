@@ -12,7 +12,7 @@
 #include "tool_js.h"
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
-#include "tool_subagent.h"
+#include "tool_agent.h"
 #include "tool_cron.h"
 #include "landlock.h"
 #include "config.h"
@@ -32,6 +32,16 @@
 /* ── Signal pipe (T82, V25) ─────────────────────────────────────── */
 
 static int g_signal_pipe[2] = {-1, -1};
+static char g_self_path[4096] = "";
+static char g_config_path[4096] = "";
+
+void daemon_set_self_path(const char *path) {
+    snprintf(g_self_path, sizeof(g_self_path), "%s", path);
+}
+
+void daemon_set_config_path(const char *path) {
+    snprintf(g_config_path, sizeof(g_config_path), "%s", path);
+}
 
 static void set_nonblock(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -163,136 +173,9 @@ char *session_get_last_route(sqlite3 *db, int64_t session_id) {
 
 /* ── Agent process entry (T83, V21, V23, V34) ──────────────────── */
 
-static char *dispatch_tools_daemon(const char *name, const char *arguments, void *user_data) {
-    ToolRegistry *reg = (ToolRegistry *)user_data;
-    ToolEntry *e = tools_lookup(reg, name);
-    if (!e) {
-        char *err = malloc(128);
-        if (err) snprintf(err, 128, "error: unknown tool '%s'", name);
-        return err;
-    }
-    return e->handler(arguments, e->user_data);
-}
-
-static void agent_process_entry(const Config *cfg, int64_t session_id) {
-    /* V34: die if daemon dies */
-    prctl(PR_SET_PDEATHSIG, SIGTERM);
-
-    /* V31: re-init signal handlers in child (inherited but be explicit) */
-    shutdown_init();
-
-    /* V23: resource limits */
-    struct rlimit rl;
-    rl.rlim_cur = 256 * 1024 * 1024;
-    rl.rlim_max = 256 * 1024 * 1024;
-    setrlimit(RLIMIT_AS, &rl);
-    rl.rlim_cur = 300;
-    rl.rlim_max = 300;
-    setrlimit(RLIMIT_CPU, &rl);
-    rl.rlim_cur = 64;
-    rl.rlim_max = 64;
-    setrlimit(RLIMIT_NOFILE, &rl);
-
-    /* Open own DB connection (fork-safe) */
-    sqlite3 *db = db_open(cfg->db_path);
-    if (!db) _exit(1);
-
-    /* V20: Load per-agent config from disk if session has agent_name */
-    char *agent_name = session_get_agent_name(db, session_id);
-    const Config *effective_cfg = cfg;
-    Config *merged_cfg = NULL;
-    AgentConfig *ac = NULL;
-    if (agent_name) {
-        ac = agent_config_load("agents", agent_name);
-        merged_cfg = agent_config_merge(cfg, ac);
-        if (merged_cfg) effective_cfg = merged_cfg;
-    }
-
-    /* V22: Landlock — restrict filesystem after config loaded */
-    if (landlock_apply(effective_cfg->workspace, cfg->db_path) < 0) {
-        fprintf(stderr, "[agent %lld] landlock unavailable, continuing without\n",
-                (long long)session_id);
-    }
-
-    /* V27: Update last_route from newest inbox source before consuming */
-    int peek_count = 0;
-    InboxItem *items = inbox_peek(db, session_id, 100, &peek_count);
-    if (items && peek_count > 0) {
-        session_set_last_route(db, session_id, items[peek_count - 1].source);
-        inbox_items_free(items, peek_count);
-    }
-
-    /* V18: Drain inbox into session entries */
-    inbox_consume_into_entries(db, session_id, 100);
-
-    /* Register tools */
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_shell_register(&reg, effective_cfg->shell_timeout,
-                        effective_cfg->workspace, ac ? ac->shell_network : 0);
-    tool_file_read_register(&reg, effective_cfg->workspace);
-    tool_file_write_register(&reg, effective_cfg->workspace);
-
-    /* T104: pass per-agent allowed_hosts to js_eval */
-    JsEvalCtx js_eval_ctx = {
-        .allowed_hosts = ac ? ac->allowed_hosts : NULL,
-        .allowed_hosts_count = ac ? ac->allowed_hosts_count : 0
-    };
-    tool_js_eval_register(&reg, &js_eval_ctx);
-    tool_web_fetch_register(&reg);
-    tool_db_query_register(&reg, db);
-
-    /* T104: persistent JS runtime with allowed_hosts for js_define_tool */
-    JsSessionRuntime *js_rt = js_runtime_create();
-    if (js_rt && ac && ac->allowed_hosts_count > 0)
-        js_runtime_set_hosts(js_rt, ac->allowed_hosts, ac->allowed_hosts_count);
-
-    JsDefineCtx js_def_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = js_rt};
-    tool_js_define_register(&reg, &js_def_ctx);
-    tool_js_load_session(db, session_id, &reg, js_rt);
-
-    char self_path[4096];
-    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
-    if (len > 0) self_path[len] = '\0';
-    else strcpy(self_path, "./build/cclaw");
-
-    SubAgentCtx sa_ctx = {.db = db, .session_id = session_id,
-                          .depth = 0, .self_path = self_path,
-                          .daemon_mode = 1, .tool_call_id = NULL};
-    tool_spawn_agent_register(&reg, &sa_ctx);
-    tool_check_agent_register(&reg, &sa_ctx);
-
-    ToolCronCtx cron_ctx = {.db = db, .session_id = session_id};
-    tool_cron_register(&reg, &cron_ctx);
-
-    size_t tool_count = 0;
-    const ToolSchema *schemas = tools_schemas(&reg, &tool_count);
-
-    AgentContext ctx = {0};
-    ctx.db = db;
-    ctx.session_id = session_id;
-    ctx.cfg = effective_cfg;
-    ctx.dispatch = dispatch_tools_daemon;
-    ctx.dispatch_data = &reg;
-    ctx.tools = schemas;
-    ctx.tool_count = tool_count;
-    ctx.debug = effective_cfg->debug;
-
-    int rc = agent_run(&ctx);
-
-    tools_free(&reg);
-    js_runtime_destroy(js_rt);
-    agent_config_free(ac);
-    if (merged_cfg) config_free(merged_cfg);
-    free(agent_name);
-    db_close(db);
-    _exit(rc == 0 ? 0 : 1);
-}
-
-/* ── Fork agent (V21, V24) ─────────────────────────────────────── */
-
 static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
     /* V24: only fork if state == idle */
+    (void)cfg;
     if (child_has_session(session_id)) return -1;
 
     /* Acquire session lock (idle→running) */
@@ -306,13 +189,14 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
         return -1;
     }
     if (pid == 0) {
-        /* Child: close daemon fds, run agent */
-        close(g_signal_pipe[0]);
-        close(g_signal_pipe[1]);
-        close(g_chld_pipe[0]);
-        close(g_chld_pipe[1]);
-        agent_process_entry(cfg, session_id);
-        _exit(1); /* unreachable */
+        /* Child: exec agent process */
+        char sid_arg[64];
+        snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)session_id);
+        if (g_config_path[0])
+            execl(g_self_path, g_self_path, "--agent", sid_arg, g_config_path, (char *)NULL);
+        else
+            execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);
+        _exit(127);
     }
 
     /* Parent: track child */
@@ -466,23 +350,20 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
 
 static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
     int count = 0;
+    (void)cfg;
     SpawnRequest *reqs = spawn_queue_peek_pending(db, &count);
     if (!reqs) return;
 
-    char self_path[4096];
-    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
-    if (len > 0) self_path[len] = '\0';
-    else strcpy(self_path, "./build/cclaw");
 
     for (int i = 0; i < count; i++) {
         SpawnRequest *r = &reqs[i];
 
         /* V3: re-check limits before forking */
-        if (subagent_count_total(db) >= SUBAGENT_MAX_TOTAL) {
+        if (session_count_active_agents(db) >= AGENT_MAX_TOTAL) {
             spawn_queue_mark(db, r->id, "rejected", 0);
             continue;
         }
-        if (subagent_count_by_parent(db, r->parent_session_id) >= SUBAGENT_MAX_PER_PARENT) {
+        if (session_count_children(db, r->parent_session_id) >= AGENT_MAX_PER_PARENT) {
             spawn_queue_mark(db, r->id, "rejected", 0);
             continue;
         }
@@ -490,7 +371,8 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
         /* Create child session */
         char name_buf[128];
         snprintf(name_buf, sizeof(name_buf), "sub-agent:%lld", (long long)r->parent_session_id);
-        int64_t child_sid = session_create(db, name_buf, NULL);
+        int64_t child_sid = session_create(db, name_buf, NULL,
+                                           r->parent_session_id, r->depth);
         if (child_sid < 0) {
             spawn_queue_mark(db, r->id, "error", 0);
             continue;
@@ -522,17 +404,17 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
             continue;
         }
         if (pid == 0) {
-            close(g_signal_pipe[0]);
-            close(g_signal_pipe[1]);
-            close(g_chld_pipe[0]);
-            close(g_chld_pipe[1]);
-            agent_process_entry(cfg, child_sid);
-            _exit(1);
+            char sid_arg[64];
+            snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)child_sid);
+            if (g_config_path[0])
+                execl(g_self_path, g_self_path, "--agent", sid_arg, g_config_path, (char *)NULL);
+            else
+                execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);
+            _exit(127);
         }
 
-        /* Track child + record in sub_agents table */
+        /* Track child */
         child_add(pid, child_sid);
-        subagent_create(db, r->parent_session_id, child_sid, pid, r->depth, r->task);
         spawn_queue_mark(db, r->id, "forked", child_sid);
 
         /* V13 blocking: transition parent to "waiting" state.
@@ -553,10 +435,24 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
 /* ── T94/V34: Daemon startup recovery ───────────────────────────── */
 
 void daemon_startup_recovery(sqlite3 *db) {
-    /* (1) Reset all "running" → "idle" (children already dead) */
-    sqlite3_exec(db,
-        "UPDATE sessions SET state='idle', lock_holder=NULL"
-        " WHERE state='running';", NULL, NULL, NULL);
+    /* (1) "running" sessions: process died, re-fork to continue.
+     * run_agent_turn will exit immediately if session is already complete. */
+    sqlite3_stmt *run_stmt;
+    const char *run_sql = "SELECT id FROM sessions WHERE state='running';";
+    if (sqlite3_prepare_v2(db, run_sql, -1, &run_stmt, NULL) == SQLITE_OK) {
+        int64_t running_ids[128];
+        int nrunning = 0;
+        while (sqlite3_step(run_stmt) == SQLITE_ROW && nrunning < 128)
+            running_ids[nrunning++] = sqlite3_column_int64(run_stmt, 0);
+        sqlite3_finalize(run_stmt);
+
+        sqlite3_exec(db,
+            "UPDATE sessions SET state='idle', lock_holder=NULL"
+            " WHERE state='running';", NULL, NULL, NULL);
+
+        for (int i = 0; i < nrunning; i++)
+            daemon_signal_session(running_ids[i]);
+    }
 
     /* (2) "waiting" sessions: check inbox for result */
     sqlite3_stmt *stmt;
@@ -594,6 +490,13 @@ void daemon_startup_recovery(sqlite3 *db) {
 /* ── Daemon main loop (T81) ─────────────────────────────────────── */
 
 int daemon_run(const Config *cfg, sqlite3 *db) {
+    /* Resolve self path for fork+exec (skip if already set via daemon_set_self_path) */
+    if (!g_self_path[0]) {
+        ssize_t sp_len = readlink("/proc/self/exe", g_self_path, sizeof(g_self_path) - 1);
+        if (sp_len > 0) g_self_path[sp_len] = '\0';
+        else strcpy(g_self_path, "./build/cclaw");
+    }
+
     if (daemon_signal_init() != 0) return -1;
     if (sigchld_pipe_init() != 0) {
         daemon_signal_close();

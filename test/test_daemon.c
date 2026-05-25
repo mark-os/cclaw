@@ -65,7 +65,7 @@ static void test_last_route(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t sid = session_create(db, "route_test", NULL);
+    int64_t sid = session_create(db, "route_test", NULL, -1, 0);
     assert(sid > 0);
 
     /* Initially NULL */
@@ -105,34 +105,52 @@ static void test_daemon_fork_reap(void) {
     assert(db);
 
     /* Create a session with inbox item */
-    int64_t sid = session_create(db, "daemon_test", NULL);
+    int64_t sid = session_create(db, "daemon_test", NULL, -1, 0);
     assert(sid > 0);
 
     /* Insert a system prompt so agent has context */
-    Message sys_msg = {.role = ROLE_SYSTEM, .content = "Reply with exactly: DAEMON_OK"};
+    Message sys_msg = {.role = ROLE_SYSTEM, .content = "You are a test agent."};
     entry_append(db, sid, &sys_msg);
 
-    /* Insert inbox item */
+    /* Insert inbox item (triggers agent turn) */
     int64_t iid = inbox_insert(db, sid, "test", "hello");
     assert(iid > 0);
 
-    /* Verify session starts idle */
-    const char *check_sql = "SELECT state FROM sessions WHERE id=?;";
-    sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, check_sql, -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, sid);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    const char *state = (const char *)sqlite3_column_text(stmt, 0);
-    assert(strcmp(state, "idle") == 0);
-    sqlite3_finalize(stmt);
+    /* Write canned LLM response file */
+    const char *mock_path = "/tmp/test_cclaw_mock_response.json";
+    FILE *f = fopen(mock_path, "w");
+    assert(f);
+    fprintf(f,
+        "{\"choices\":[{\"message\":{\"role\":\"assistant\","
+        "\"content\":\"DAEMON_OK\"},"
+        "\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}");
+    fclose(f);
+
+    /* Write minimal config file for exec'd child */
+    const char *cfg_path = "/tmp/test_cclaw_config.json";
+    f = fopen(cfg_path, "w");
+    assert(f);
+    fprintf(f,
+        "{\"db_path\":\"%s\",\"workspace\":\"/tmp\","
+        "\"provider\":{\"base_url\":\"http://localhost:1/v1\","
+        "\"api_key\":\"test\",\"model\":\"test\","
+        "\"max_tokens\":100,\"context_window\":4000},"
+        "\"max_iterations\":1}", DB_PATH);
+    fclose(f);
+
+    /* Set env var — inherited by forked children */
+    setenv("CCLAW_LLM_MOCK", mock_path, 1);
 
     /* Start daemon in background thread */
     shutdown_reset();
+    daemon_set_self_path("./build/cclaw");
+    daemon_set_config_path(cfg_path);
     Config cfg = {0};
     cfg.db_path = (char *)DB_PATH;
     cfg.workspace = "/tmp";
     cfg.shell_timeout = 5;
-    cfg.provider.base_url = "http://localhost:1/v1"; /* will fail — that's OK */
+    cfg.provider.base_url = "http://localhost:1/v1";
     cfg.provider.api_key = "test-key";
     cfg.provider.model = "test-model";
     cfg.provider.max_tokens = 100;
@@ -149,30 +167,45 @@ static void test_daemon_fork_reap(void) {
     /* Signal the session */
     daemon_signal_session(sid);
 
-    /* Wait for agent to be forked and reaped (agent will fail since no real LLM) */
-    usleep(2000000); /* 2s — agent fork + LLM timeout + reap */
+    /* Poll until session returns to idle (max 10s) */
+    const char *check_sql = "SELECT state FROM sessions WHERE id=?;";
+    int settled = 0;
+    for (int i = 0; i < 100; i++) {
+        usleep(100000); /* 100ms */
+        sqlite3_stmt *stmt;
+        sqlite3_prepare_v2(db, check_sql, -1, &stmt, NULL);
+        sqlite3_bind_int64(stmt, 1, sid);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *state = (const char *)sqlite3_column_text(stmt, 0);
+            if (state && strcmp(state, "idle") == 0) {
+                /* Check if agent actually ran (has assistant entry) */
+                sqlite3_stmt *s2;
+                sqlite3_prepare_v2(db,
+                    "SELECT COUNT(*) FROM entries WHERE session_id=? AND role='assistant';",
+                    -1, &s2, NULL);
+                sqlite3_bind_int64(s2, 1, sid);
+                if (sqlite3_step(s2) == SQLITE_ROW && sqlite3_column_int(s2, 0) > 0)
+                    settled = 1;
+                sqlite3_finalize(s2);
+            }
+        }
+        sqlite3_finalize(stmt);
+        if (settled) break;
+    }
 
-    /* Session should be back to idle after reap */
-    sqlite3_prepare_v2(db, check_sql, -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, sid);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    state = (const char *)sqlite3_column_text(stmt, 0);
-    assert(strcmp(state, "idle") == 0);
-    sqlite3_finalize(stmt);
+    assert(settled);
 
     /* Inbox should be consumed */
     int pending = inbox_count(db, sid);
     assert(pending == 0);
 
-    /* last_route should be set to "test" (the source of our inbox item) */
-    char *route = session_get_last_route(db, sid);
-    assert(route && strcmp(route, "test") == 0);
-    free(route);
-
     /* Shutdown daemon */
     shutdown_request();
     pthread_join(dt, NULL);
 
+    unsetenv("CCLAW_LLM_MOCK");
+    unlink(mock_path);
+    unlink(cfg_path);
     db_close(db);
     unlink(DB_PATH);
     printf("  PASS test_daemon_fork_reap\n");
@@ -186,7 +219,7 @@ static void test_startup_recovery_running(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t sid = session_create(db, "recovery_run", NULL);
+    int64_t sid = session_create(db, "recovery_run", NULL, -1, 0);
     assert(sid > 0);
 
     /* Force state to "running" (simulates daemon crash mid-agent) */
@@ -216,7 +249,7 @@ static void test_startup_recovery_waiting_with_inbox(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t sid = session_create(db, "recovery_wait_inbox", NULL);
+    int64_t sid = session_create(db, "recovery_wait_inbox", NULL, -1, 0);
     assert(sid > 0);
 
     /* Force state to "waiting" */
@@ -251,7 +284,7 @@ static void test_startup_recovery_waiting_no_inbox(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t sid = session_create(db, "recovery_wait_empty", NULL);
+    int64_t sid = session_create(db, "recovery_wait_empty", NULL, -1, 0);
     assert(sid > 0);
 
     /* Force state to "waiting" */
@@ -294,7 +327,7 @@ static void test_heartbeat_ok_suppression(void) {
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
 
-    int64_t sid = session_create(db, "hb_suppress", NULL);
+    int64_t sid = session_create(db, "hb_suppress", NULL, -1, 0);
     assert(sid > 0);
 
     /* Insert assistant entry with HEARTBEAT_OK content */

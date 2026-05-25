@@ -110,3 +110,15 @@ CREATE TABLE IF NOT EXISTS agents (
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+CREATE TABLE IF NOT EXISTS approvals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  agent_name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  admin_chat_id INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(status) WHERE status='pending';

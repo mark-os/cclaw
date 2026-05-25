@@ -156,4 +156,36 @@ int db_agent_set_memory(sqlite3 *db, const char *name, const char *memory);
 /* Free AgentRow. */
 void agent_row_free(AgentRow *row);
 
+/* T146: approvals table — admin approval flow (V54) */
+typedef struct {
+    int64_t id;
+    int64_t session_id;
+    char *agent_name;
+    char *type;       /* whitelist_host|create_agent|model_change|tool_enable */
+    char *payload;    /* JSON */
+    char *status;     /* pending|approved|denied */
+    int64_t admin_chat_id;
+    int64_t created_at;
+    int64_t resolved_at; /* 0 if unresolved */
+} Approval;
+
+/* Insert approval request. Returns row id (>0) or -1 on error. */
+int64_t approval_insert(sqlite3 *db, int64_t session_id, const char *agent_name,
+                        const char *type, const char *payload);
+
+/* Get pending approvals. Caller frees with approval_list_free. Sets *count. */
+Approval *approval_list_pending(sqlite3 *db, int *count);
+
+/* Get approval by id. Returns NULL if not found. Caller frees with approval_free. */
+Approval *approval_get(sqlite3 *db, int64_t id);
+
+/* Resolve approval (approve or deny). Sets status + resolved_at + admin_chat_id. Returns 0 on success. */
+int approval_resolve(sqlite3 *db, int64_t id, const char *status, int64_t admin_chat_id);
+
+/* Free single Approval. */
+void approval_free(Approval *a);
+
+/* Free Approval array. */
+void approval_list_free(Approval *list, int count);
+
 #endif

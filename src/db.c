@@ -108,7 +108,18 @@ static const char *SCHEMA_SQL =
     "  child_session_id INTEGER,"
     "  created_at INTEGER NOT NULL DEFAULT (unixepoch())"
     ");"
-    "CREATE INDEX IF NOT EXISTS idx_spawn_queue_pending ON spawn_queue(status) WHERE status='pending';";
+    "CREATE INDEX IF NOT EXISTS idx_spawn_queue_pending ON spawn_queue(status) WHERE status='pending';"
+    "CREATE TABLE IF NOT EXISTS agents ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  name TEXT NOT NULL UNIQUE,"
+    "  config TEXT,"
+    "  system_prompt TEXT,"
+    "  soul TEXT,"
+    "  memory TEXT,"
+    "  heartbeat TEXT,"
+    "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "  updated_at INTEGER NOT NULL DEFAULT (unixepoch())"
+    ");";
 
 sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
@@ -1023,4 +1034,117 @@ void spawn_request_free(SpawnRequest *list, int count) {
         free(list[i].tool_call_id);
     }
     free(list);
+}
+
+/* T119: agents table operations */
+
+AgentRow *db_agent_get(sqlite3 *db, const char *name) {
+    if (!db || !name) return NULL;
+    const char *sql = "SELECT id, name, config, system_prompt, soul, memory, heartbeat, "
+                      "created_at, updated_at FROM agents WHERE name = ?";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+
+    AgentRow *row = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        row = calloc(1, sizeof(AgentRow));
+        if (row) {
+            row->id = sqlite3_column_int64(stmt, 0);
+            const char *v = (const char *)sqlite3_column_text(stmt, 1);
+            row->name = v ? strdup(v) : NULL;
+            v = (const char *)sqlite3_column_text(stmt, 2);
+            row->config = v ? strdup(v) : NULL;
+            v = (const char *)sqlite3_column_text(stmt, 3);
+            row->system_prompt = v ? strdup(v) : NULL;
+            v = (const char *)sqlite3_column_text(stmt, 4);
+            row->soul = v ? strdup(v) : NULL;
+            v = (const char *)sqlite3_column_text(stmt, 5);
+            row->memory = v ? strdup(v) : NULL;
+            v = (const char *)sqlite3_column_text(stmt, 6);
+            row->heartbeat = v ? strdup(v) : NULL;
+            row->created_at = sqlite3_column_int64(stmt, 7);
+            row->updated_at = sqlite3_column_int64(stmt, 8);
+        }
+    }
+    sqlite3_finalize(stmt);
+    return row;
+}
+
+int db_agent_upsert(sqlite3 *db, const char *name, const char *config,
+                    const char *system_prompt, const char *soul,
+                    const char *memory, const char *heartbeat) {
+    if (!db || !name) return -1;
+    const char *sql =
+        "INSERT INTO agents (name, config, system_prompt, soul, memory, heartbeat) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(name) DO UPDATE SET "
+        "config=excluded.config, system_prompt=excluded.system_prompt, "
+        "soul=excluded.soul, memory=excluded.memory, heartbeat=excluded.heartbeat, "
+        "updated_at=unixepoch()";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, config, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, system_prompt, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, soul, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, memory, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, heartbeat, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/* Read file contents, return heap-allocated string or NULL */
+static char *read_file_str(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0) { fclose(f); return NULL; }
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return NULL; }
+    fread(buf, 1, (size_t)len, f);
+    buf[len] = '\0';
+    fclose(f);
+    return buf;
+}
+
+AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
+    if (!db || !name) return NULL;
+
+    /* Check DB first — authoritative after seed */
+    AgentRow *existing = db_agent_get(db, name);
+    if (existing) return existing;
+
+    /* Not in DB — seed from disk */
+    char path[1024];
+    char *config_json = NULL;
+    char *sys_prompt = NULL;
+
+    if (agents_dir) {
+        snprintf(path, sizeof(path), "%s/%s/agent.json", agents_dir, name);
+        config_json = read_file_str(path);
+
+        snprintf(path, sizeof(path), "%s/%s/system.md", agents_dir, name);
+        sys_prompt = read_file_str(path);
+    }
+
+    db_agent_upsert(db, name, config_json, sys_prompt, NULL, NULL, NULL);
+    free(config_json);
+    free(sys_prompt);
+
+    return db_agent_get(db, name);
+}
+
+void agent_row_free(AgentRow *row) {
+    if (!row) return;
+    free(row->name);
+    free(row->config);
+    free(row->system_prompt);
+    free(row->soul);
+    free(row->memory);
+    free(row->heartbeat);
+    free(row);
 }

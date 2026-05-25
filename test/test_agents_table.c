@@ -1,0 +1,134 @@
+#define _POSIX_C_SOURCE 200809L
+#include "db.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+#define TEST_DB "/tmp/test_agents_table.sqlite"
+#define AGENTS_DIR "/tmp/test_agents_t119"
+
+static sqlite3 *setup(void) {
+    unlink(TEST_DB);
+    return db_open(TEST_DB);
+}
+
+static void teardown(sqlite3 *db) {
+    db_close(db);
+    unlink(TEST_DB);
+}
+
+/* T119: agents table exists and basic CRUD works */
+static void test_upsert_and_get(void) {
+    sqlite3 *db = setup();
+
+    int rc = db_agent_upsert(db, "coder", "{\"model\":\"gpt-4\"}", "You are a coder.",
+                             "friendly", "user likes C", NULL);
+    assert(rc == 0);
+
+    AgentRow *row = db_agent_get(db, "coder");
+    assert(row != NULL);
+    assert(strcmp(row->name, "coder") == 0);
+    assert(strcmp(row->config, "{\"model\":\"gpt-4\"}") == 0);
+    assert(strcmp(row->system_prompt, "You are a coder.") == 0);
+    assert(strcmp(row->soul, "friendly") == 0);
+    assert(strcmp(row->memory, "user likes C") == 0);
+    assert(row->heartbeat == NULL);
+    assert(row->id > 0);
+    agent_row_free(row);
+
+    /* Update existing */
+    rc = db_agent_upsert(db, "coder", "{\"model\":\"gpt-5\"}", "Updated prompt.",
+                         "serious", "new facts", "check logs");
+    assert(rc == 0);
+
+    row = db_agent_get(db, "coder");
+    assert(row != NULL);
+    assert(strcmp(row->config, "{\"model\":\"gpt-5\"}") == 0);
+    assert(strcmp(row->system_prompt, "Updated prompt.") == 0);
+    assert(strcmp(row->soul, "serious") == 0);
+    assert(strcmp(row->heartbeat, "check logs") == 0);
+    agent_row_free(row);
+
+    teardown(db);
+    printf("  PASS test_upsert_and_get\n");
+}
+
+/* T119: get returns NULL for nonexistent agent */
+static void test_get_missing(void) {
+    sqlite3 *db = setup();
+    AgentRow *row = db_agent_get(db, "nonexistent");
+    assert(row == NULL);
+    teardown(db);
+    printf("  PASS test_get_missing\n");
+}
+
+/* T119: seed from disk on first reference, DB authoritative after */
+static void test_seed_from_disk(void) {
+    /* Create agent dir with files */
+    mkdir(AGENTS_DIR, 0755);
+    mkdir(AGENTS_DIR "/mybot", 0755);
+
+    FILE *f = fopen(AGENTS_DIR "/mybot/agent.json", "w");
+    fprintf(f, "{\"model\":\"deepseek\",\"max_iterations\":10}");
+    fclose(f);
+
+    f = fopen(AGENTS_DIR "/mybot/system.md", "w");
+    fprintf(f, "You are mybot.");
+    fclose(f);
+
+    sqlite3 *db = setup();
+
+    /* First call seeds from disk */
+    AgentRow *row = db_agent_seed(db, AGENTS_DIR, "mybot");
+    assert(row != NULL);
+    assert(strcmp(row->name, "mybot") == 0);
+    assert(strstr(row->config, "deepseek") != NULL);
+    assert(strcmp(row->system_prompt, "You are mybot.") == 0);
+    assert(row->soul == NULL);
+    agent_row_free(row);
+
+    /* Modify DB directly — DB is authoritative */
+    db_agent_upsert(db, "mybot", "{\"model\":\"changed\"}", "DB prompt.",
+                    "soul text", NULL, NULL);
+
+    /* Second call returns DB version, not disk */
+    row = db_agent_seed(db, AGENTS_DIR, "mybot");
+    assert(row != NULL);
+    assert(strcmp(row->config, "{\"model\":\"changed\"}") == 0);
+    assert(strcmp(row->system_prompt, "DB prompt.") == 0);
+    assert(strcmp(row->soul, "soul text") == 0);
+    agent_row_free(row);
+
+    teardown(db);
+    unlink(AGENTS_DIR "/mybot/agent.json");
+    unlink(AGENTS_DIR "/mybot/system.md");
+    rmdir(AGENTS_DIR "/mybot");
+    rmdir(AGENTS_DIR);
+    printf("  PASS test_seed_from_disk\n");
+}
+
+/* T119: seed with no agents_dir still creates row */
+static void test_seed_no_dir(void) {
+    sqlite3 *db = setup();
+    AgentRow *row = db_agent_seed(db, "/nonexistent/path", "ghost");
+    assert(row != NULL);
+    assert(strcmp(row->name, "ghost") == 0);
+    assert(row->config == NULL);
+    assert(row->system_prompt == NULL);
+    agent_row_free(row);
+    teardown(db);
+    printf("  PASS test_seed_no_dir\n");
+}
+
+int main(void) {
+    printf("test_agents_table:\n");
+    test_upsert_and_get();
+    test_get_missing();
+    test_seed_from_disk();
+    test_seed_no_dir();
+    printf("All agents table tests passed.\n");
+    return 0;
+}

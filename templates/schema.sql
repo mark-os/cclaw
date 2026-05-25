@@ -123,3 +123,15 @@ CREATE TABLE IF NOT EXISTS approvals (
   resolved_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(status) WHERE status='pending';
+CREATE TABLE IF NOT EXISTS memory_blocks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_name TEXT NOT NULL,
+  label TEXT NOT NULL,
+  value TEXT NOT NULL DEFAULT '',
+  description TEXT,
+  char_limit INTEGER NOT NULL DEFAULT 5000,
+  read_only INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  UNIQUE(agent_name, label)
+);

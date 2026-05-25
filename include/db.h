@@ -194,4 +194,41 @@ void approval_free(Approval *a);
 /* Free Approval array. */
 void approval_list_free(Approval *list, int count);
 
+/* T152: memory_blocks table (V55) */
+typedef struct {
+    int64_t id;
+    char *agent_name;
+    char *label;
+    char *value;
+    char *description;
+    int char_limit;
+    int read_only;
+    int64_t created_at;
+    int64_t updated_at;
+} MemoryBlock;
+
+/* Create a memory block. Returns row id (>0) or -1 on error.
+ * Fails if UNIQUE(agent_name, label) violated. */
+int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
+                            const char *description, const char *value, int char_limit);
+
+/* Get a memory block by agent_name + label. Returns NULL if not found. Caller frees. */
+MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *label);
+
+/* List all memory blocks for an agent. Caller frees with memory_block_list_free. Sets *count. */
+MemoryBlock *memory_block_list(sqlite3 *db, const char *agent_name, int *count);
+
+/* Update block value. Enforces char_limit (V55). Returns 0 on success, -1 on error. */
+int memory_block_set_value(sqlite3 *db, const char *agent_name, const char *label, const char *value);
+
+/* Free a single MemoryBlock. */
+void memory_block_free(MemoryBlock *mb);
+
+/* Free a MemoryBlock array. */
+void memory_block_list_free(MemoryBlock *list, int count);
+
+/* Seed memory blocks from agent.json memory_blocks[] array (cJSON).
+ * Only inserts blocks that don't already exist (DB authoritative). */
+void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str);
+
 #endif

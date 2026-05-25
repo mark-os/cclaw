@@ -1014,7 +1014,12 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
 
     /* Check DB first — authoritative after seed */
     AgentRow *existing = db_agent_get(db, name);
-    if (existing) return existing;
+    if (existing) {
+        /* T152: seed memory blocks even if agent row exists (blocks may be new) */
+        if (existing->config)
+            memory_blocks_seed(db, name, existing->config);
+        return existing;
+    }
 
     /* Not in DB — seed from disk */
     char path[1024];
@@ -1030,6 +1035,11 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
     }
 
     db_agent_upsert(db, name, config_json, sys_prompt, NULL, NULL, NULL);
+
+    /* T152: seed memory blocks from agent.json */
+    if (config_json)
+        memory_blocks_seed(db, name, config_json);
+
     free(config_json);
     free(sys_prompt);
 
@@ -1239,4 +1249,149 @@ int approval_mark_notified(sqlite3 *db, int64_t id) {
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE ? 0 : -1;
+}
+
+/* T152: memory_blocks CRUD (V55) */
+
+void memory_block_free(MemoryBlock *mb) {
+    if (!mb) return;
+    free(mb->agent_name);
+    free(mb->label);
+    free(mb->value);
+    free(mb->description);
+    free(mb);
+}
+
+void memory_block_list_free(MemoryBlock *list, int count) {
+    if (!list) return;
+    for (int i = 0; i < count; i++) {
+        free(list[i].agent_name);
+        free(list[i].label);
+        free(list[i].value);
+        free(list[i].description);
+    }
+    free(list);
+}
+
+int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
+                            const char *description, const char *value, int char_limit) {
+    const char *sql = "INSERT INTO memory_blocks(agent_name, label, description, value, char_limit)"
+                      " VALUES(?,?,?,?,?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, label, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, description ? description : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, value ? value : "", -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, char_limit > 0 ? char_limit : 5000);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE ? sqlite3_last_insert_rowid(db) : -1;
+}
+
+MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *label) {
+    const char *sql = "SELECT id, agent_name, label, value, description, char_limit, read_only,"
+                      " created_at, updated_at FROM memory_blocks WHERE agent_name=? AND label=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, label, -1, SQLITE_STATIC);
+    if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); return NULL; }
+    MemoryBlock *mb = calloc(1, sizeof(MemoryBlock));
+    mb->id = sqlite3_column_int64(stmt, 0);
+    const char *s;
+    s = (const char *)sqlite3_column_text(stmt, 1); mb->agent_name = s ? strdup(s) : strdup("");
+    s = (const char *)sqlite3_column_text(stmt, 2); mb->label = s ? strdup(s) : strdup("");
+    s = (const char *)sqlite3_column_text(stmt, 3); mb->value = s ? strdup(s) : strdup("");
+    s = (const char *)sqlite3_column_text(stmt, 4); mb->description = s ? strdup(s) : strdup("");
+    mb->char_limit = sqlite3_column_int(stmt, 5);
+    mb->read_only = sqlite3_column_int(stmt, 6);
+    mb->created_at = sqlite3_column_int64(stmt, 7);
+    mb->updated_at = sqlite3_column_int64(stmt, 8);
+    sqlite3_finalize(stmt);
+    return mb;
+}
+
+MemoryBlock *memory_block_list(sqlite3 *db, const char *agent_name, int *count) {
+    *count = 0;
+    const char *sql = "SELECT id, agent_name, label, value, description, char_limit, read_only,"
+                      " created_at, updated_at FROM memory_blocks WHERE agent_name=? ORDER BY id;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+    int cap = 8;
+    MemoryBlock *list = calloc((size_t)cap, sizeof(MemoryBlock));
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (*count >= cap) { cap *= 2; list = realloc(list, (size_t)cap * sizeof(MemoryBlock)); }
+        MemoryBlock *mb = &list[*count];
+        mb->id = sqlite3_column_int64(stmt, 0);
+        const char *s;
+        s = (const char *)sqlite3_column_text(stmt, 1); mb->agent_name = s ? strdup(s) : strdup("");
+        s = (const char *)sqlite3_column_text(stmt, 2); mb->label = s ? strdup(s) : strdup("");
+        s = (const char *)sqlite3_column_text(stmt, 3); mb->value = s ? strdup(s) : strdup("");
+        s = (const char *)sqlite3_column_text(stmt, 4); mb->description = s ? strdup(s) : strdup("");
+        mb->char_limit = sqlite3_column_int(stmt, 5);
+        mb->read_only = sqlite3_column_int(stmt, 6);
+        mb->created_at = sqlite3_column_int64(stmt, 7);
+        mb->updated_at = sqlite3_column_int64(stmt, 8);
+        (*count)++;
+    }
+    sqlite3_finalize(stmt);
+    if (*count == 0) { free(list); return NULL; }
+    return list;
+}
+
+int memory_block_set_value(sqlite3 *db, const char *agent_name, const char *label, const char *value) {
+    /* V55: check read_only + char_limit */
+    MemoryBlock *mb = memory_block_get(db, agent_name, label);
+    if (!mb) return -1;
+    if (mb->read_only) { memory_block_free(mb); return -1; }
+    if (value && (int)strlen(value) > mb->char_limit) { memory_block_free(mb); return -1; }
+    memory_block_free(mb);
+
+    const char *sql = "UPDATE memory_blocks SET value=?, updated_at=unixepoch()"
+                      " WHERE agent_name=? AND label=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, value ? value : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, label, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+}
+
+void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str) {
+    if (!agent_json_str || !agent_name) return;
+    cJSON *root = cJSON_Parse(agent_json_str);
+    if (!root) return;
+    cJSON *blocks = cJSON_GetObjectItemCaseSensitive(root, "memory_blocks");
+    if (!cJSON_IsArray(blocks)) { cJSON_Delete(root); return; }
+    cJSON *item;
+    cJSON_ArrayForEach(item, blocks) {
+        cJSON *lbl = cJSON_GetObjectItemCaseSensitive(item, "label");
+        if (!cJSON_IsString(lbl)) continue;
+        /* Only seed if not already in DB (DB authoritative) */
+        MemoryBlock *existing = memory_block_get(db, agent_name, lbl->valuestring);
+        if (existing) { memory_block_free(existing); continue; }
+        cJSON *desc = cJSON_GetObjectItemCaseSensitive(item, "description");
+        cJSON *val = cJSON_GetObjectItemCaseSensitive(item, "value");
+        cJSON *limit = cJSON_GetObjectItemCaseSensitive(item, "char_limit");
+        cJSON *ro = cJSON_GetObjectItemCaseSensitive(item, "read_only");
+        int cl = cJSON_IsNumber(limit) ? (int)limit->valuedouble : 5000;
+        int64_t id = memory_block_create(db, agent_name, lbl->valuestring,
+                                         cJSON_IsString(desc) ? desc->valuestring : NULL,
+                                         cJSON_IsString(val) ? val->valuestring : NULL, cl);
+        if (id > 0 && cJSON_IsTrue(ro)) {
+            /* Set read_only flag directly (not exposed via normal API) */
+            const char *sql = "UPDATE memory_blocks SET read_only=1 WHERE id=?;";
+            sqlite3_stmt *stmt;
+            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, id);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+        }
+    }
+    cJSON_Delete(root);
 }

@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <stdio.h>
 #include <time.h>
+#include <errno.h>
 
 static int str_ends_with(const char *s, const char *suffix) {
     size_t slen = strlen(s);
@@ -460,6 +461,85 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     free(skills);
     agent_row_free(row);
     return out;
+}
+
+/* T150: Create a new agent on disk + seed DB */
+int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json) {
+    if (!agents_dir || !payload_json) return -1;
+
+    cJSON *payload = cJSON_Parse(payload_json);
+    if (!payload) return -1;
+
+    cJSON *name_item = cJSON_GetObjectItemCaseSensitive(payload, "name");
+    if (!cJSON_IsString(name_item) || !name_item->valuestring[0]) {
+        cJSON_Delete(payload);
+        return -1;
+    }
+    const char *name = name_item->valuestring;
+
+    /* Reject names with path separators */
+    if (strchr(name, '/') || strchr(name, '\\') || strcmp(name, "..") == 0) {
+        cJSON_Delete(payload);
+        return -1;
+    }
+
+    /* Create agents/<name>/ directory */
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/%s", agents_dir, name);
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        cJSON_Delete(payload);
+        return -1;
+    }
+
+    /* Build agent.json from payload fields */
+    cJSON *config = cJSON_CreateObject();
+    cJSON *model = cJSON_GetObjectItemCaseSensitive(payload, "model");
+    if (cJSON_IsString(model))
+        cJSON_AddStringToObject(config, "model", model->valuestring);
+
+    cJSON *tools = cJSON_GetObjectItemCaseSensitive(payload, "tools");
+    if (cJSON_IsArray(tools))
+        cJSON_AddItemToObject(config, "tools", cJSON_Duplicate(tools, 1));
+
+    cJSON *hosts = cJSON_GetObjectItemCaseSensitive(payload, "allowed_hosts");
+    if (cJSON_IsArray(hosts))
+        cJSON_AddItemToObject(config, "allowed_hosts", cJSON_Duplicate(hosts, 1));
+
+    /* Write agent.json */
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/agent.json", dir);
+    char *json_str = cJSON_Print(config);
+    cJSON_Delete(config);
+    if (!json_str) { cJSON_Delete(payload); return -1; }
+
+    FILE *f = fopen(path, "w");
+    if (!f) { free(json_str); cJSON_Delete(payload); return -1; }
+    fputs(json_str, f);
+    fclose(f);
+    free(json_str);
+
+    /* Write system.md if provided */
+    cJSON *sys_prompt = cJSON_GetObjectItemCaseSensitive(payload, "system_prompt");
+    if (cJSON_IsString(sys_prompt) && sys_prompt->valuestring[0]) {
+        snprintf(path, sizeof(path), "%s/system.md", dir);
+        f = fopen(path, "w");
+        if (f) {
+            fputs(sys_prompt->valuestring, f);
+            fclose(f);
+        }
+    }
+
+    cJSON_Delete(payload);
+
+    /* Seed DB row from newly written files (dir contains agents_dir/name) */
+    if (db) {
+        const char *seeded_name = strrchr(dir, '/');
+        seeded_name = seeded_name ? seeded_name + 1 : dir;
+        AgentRow *row = db_agent_seed(db, agents_dir, seeded_name);
+        agent_row_free(row);
+    }
+
+    return 0;
 }
 
 /* T144: helper — read agent.json into cJSON, return root + file path */

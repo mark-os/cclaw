@@ -59,6 +59,12 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
                                 int64_t session_id, const char *agents_dir,
                                 const Config *fallback_cfg);
 
+/* T150: Create a new agent on disk from approval payload.
+ * Creates agents_dir/name/ directory, writes agent.json + system.md, seeds DB.
+ * payload is a cJSON object with: name, model, system_prompt, tools[], allowed_hosts[].
+ * Returns 0 on success, -1 on failure. */
+int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json);
+
 /* T144: Add host to agent's allowed_hosts in agents_dir/name/agent.json.
  * Returns 0 on success, -1 on failure. */
 int agent_config_add_host(const char *agents_dir, const char *name, const char *host);

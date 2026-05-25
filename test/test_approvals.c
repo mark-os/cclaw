@@ -1,10 +1,12 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "agent_config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #define TEST_DB "/tmp/test_approvals.sqlite"
 
@@ -238,6 +240,79 @@ static void test_approval_deny_posts_to_inbox(void) {
     printf("  PASS test_approval_deny_posts_to_inbox\n");
 }
 
+/* T150: create_agent approval creates agent on disk + seeds DB */
+static void test_create_agent_approval(void) {
+    sqlite3 *db = setup();
+    const char *agents_dir = "/tmp/test_create_agent_dir";
+    system("rm -rf /tmp/test_create_agent_dir");
+    mkdir(agents_dir, 0755);
+
+    const char *payload = "{\"name\":\"helper\",\"model\":\"gpt-4\","
+        "\"system_prompt\":\"You are a helper agent.\","
+        "\"tools\":[\"file_read\",\"shell_exec\"],"
+        "\"allowed_hosts\":[\"api.example.com\"]}";
+
+    int rc = agent_config_create(agents_dir, db, payload);
+    assert(rc == 0);
+
+    /* Verify agent.json was written */
+    char path[256];
+    snprintf(path, sizeof(path), "%s/helper/agent.json", agents_dir);
+    FILE *f = fopen(path, "r");
+    assert(f != NULL);
+    char buf[2048];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    assert(strstr(buf, "gpt-4") != NULL);
+    assert(strstr(buf, "file_read") != NULL);
+    assert(strstr(buf, "api.example.com") != NULL);
+
+    /* Verify system.md was written */
+    snprintf(path, sizeof(path), "%s/helper/system.md", agents_dir);
+    f = fopen(path, "r");
+    assert(f != NULL);
+    n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    assert(strcmp(buf, "You are a helper agent.") == 0);
+
+    /* Verify DB was seeded */
+    AgentRow *row = db_agent_get(db, "helper");
+    assert(row != NULL);
+    assert(strcmp(row->name, "helper") == 0);
+    assert(row->config != NULL);
+    assert(strstr(row->config, "gpt-4") != NULL);
+    assert(row->system_prompt != NULL);
+    assert(strstr(row->system_prompt, "helper agent") != NULL);
+    agent_row_free(row);
+
+    system("rm -rf /tmp/test_create_agent_dir");
+    teardown(db);
+    printf("  PASS test_create_agent_approval\n");
+}
+
+/* T150: create_agent rejects invalid names */
+static void test_create_agent_invalid_name(void) {
+    sqlite3 *db = setup();
+    const char *agents_dir = "/tmp/test_create_agent_dir2";
+    system("rm -rf /tmp/test_create_agent_dir2");
+    mkdir(agents_dir, 0755);
+
+    /* Path traversal */
+    assert(agent_config_create(agents_dir, db, "{\"name\":\"../evil\"}") == -1);
+    /* Slash in name */
+    assert(agent_config_create(agents_dir, db, "{\"name\":\"a/b\"}") == -1);
+    /* Empty name */
+    assert(agent_config_create(agents_dir, db, "{\"name\":\"\"}") == -1);
+    /* Missing name */
+    assert(agent_config_create(agents_dir, db, "{\"model\":\"x\"}") == -1);
+
+    system("rm -rf /tmp/test_create_agent_dir2");
+    teardown(db);
+    printf("  PASS test_create_agent_invalid_name\n");
+}
+
 int main(void) {
     printf("test_approvals:\n");
     test_insert_and_get();
@@ -248,6 +323,8 @@ int main(void) {
     test_list_unnotified();
     test_approval_posts_to_inbox();
     test_approval_deny_posts_to_inbox();
+    test_create_agent_approval();
+    test_create_agent_invalid_name();
     printf("All approvals tests passed.\n");
     return 0;
 }

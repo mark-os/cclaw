@@ -948,8 +948,8 @@ static int apply_approval(const Approval *a) {
         /* Tool enable is a config-level change — accepted but no-op for now */
         rc = 0;
     } else if (strcmp(a->type, "create_agent") == 0) {
-        /* T150 scope — stub acceptance */
-        rc = 0;
+        /* T150: create agent on disk + seed DB */
+        rc = agent_config_create("agents", g_db, a->payload);
     }
 
     cJSON_Delete(payload);

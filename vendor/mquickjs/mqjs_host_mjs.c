@@ -8,6 +8,10 @@
 #include <unistd.h>
 #include <errno.h>
 #include <arpa/inet.h>
+#include <poll.h>
+
+#define FETCH_TIMEOUT_MS 30000  /* V50: 30s default timeout per fetch call */
+#define FETCH_MAX_RESPONSE (10 * 1024 * 1024)  /* 10MB sanity limit */
 
 typedef struct {
     int instruction_count;
@@ -42,11 +46,18 @@ static int write_all(int fd, const void *buf, size_t n)
     return 0;
 }
 
-/* Read exactly n bytes from fd. Returns 0 on success, -1 on error/EOF. */
-static int read_all(int fd, void *buf, size_t n)
+/* Read exactly n bytes from fd with timeout. Returns 0 on success, -1 on error/timeout. */
+static int read_all_timeout(int fd, void *buf, size_t n, int timeout_ms)
 {
     char *p = (char *)buf;
     while (n > 0) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (pr == 0) return -1; /* timeout */
         ssize_t r = read(fd, p, n);
         if (r <= 0) {
             if (r < 0 && errno == EINTR) continue;
@@ -59,7 +70,8 @@ static int read_all(int fd, void *buf, size_t n)
 }
 
 /* V50: fetch(url, opts) — serialize request over fd, read response.
- * Returns {status, headers, body, error} object. */
+ * Returns {status, headers, body, error} object.
+ * On timeout/fd error, returns {status:0, error:"..."} instead of throwing. */
 JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
                       int argc, JSValue *argv)
 {
@@ -106,34 +118,56 @@ JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
 
     /* V50: send <4B len big-endian><JSON> */
     uint32_t net_len = htonl((uint32_t)req_len);
-    if (write_all(hctx->fetch_fd, &net_len, 4) < 0)
-        return JS_ThrowTypeError(ctx, "fetch: write to proxy fd failed");
-    if (write_all(hctx->fetch_fd, req, (size_t)req_len) < 0)
-        return JS_ThrowTypeError(ctx, "fetch: write to proxy fd failed");
+    if (write_all(hctx->fetch_fd, &net_len, 4) < 0) {
+        /* Return error object instead of throwing — graceful handling */
+        JSValue err_obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, err_obj, "status", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, err_obj, "error",
+                          JS_NewString(ctx, "fetch: write to proxy fd failed"));
+        return err_obj;
+    }
+    if (write_all(hctx->fetch_fd, req, (size_t)req_len) < 0) {
+        JSValue err_obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, err_obj, "status", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, err_obj, "error",
+                          JS_NewString(ctx, "fetch: write to proxy fd failed"));
+        return err_obj;
+    }
 
-    /* Read response: <4B len big-endian><JSON> */
+    /* Read response: <4B len big-endian><JSON> with timeout */
     uint32_t resp_net_len;
-    if (read_all(hctx->fetch_fd, &resp_net_len, 4) < 0)
-        return JS_ThrowTypeError(ctx, "fetch: read from proxy fd failed");
+    if (read_all_timeout(hctx->fetch_fd, &resp_net_len, 4, FETCH_TIMEOUT_MS) < 0) {
+        JSValue err_obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, err_obj, "status", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, err_obj, "error",
+                          JS_NewString(ctx, "fetch: timeout or read error from proxy"));
+        return err_obj;
+    }
 
     uint32_t resp_len = ntohl(resp_net_len);
-    if (resp_len > 10 * 1024 * 1024) /* 10MB sanity limit */
-        return JS_ThrowTypeError(ctx, "fetch: response too large");
+    if (resp_len > FETCH_MAX_RESPONSE) {
+        JSValue err_obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, err_obj, "status", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, err_obj, "error",
+                          JS_NewString(ctx, "fetch: response too large"));
+        return err_obj;
+    }
 
     char *resp = (char *)malloc(resp_len + 1);
     if (!resp)
         return JS_ThrowTypeError(ctx, "fetch: out of memory");
 
-    if (read_all(hctx->fetch_fd, resp, resp_len) < 0) {
+    if (read_all_timeout(hctx->fetch_fd, resp, resp_len, FETCH_TIMEOUT_MS) < 0) {
         free(resp);
-        return JS_ThrowTypeError(ctx, "fetch: read from proxy fd failed");
+        JSValue err_obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, err_obj, "status", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, err_obj, "error",
+                          JS_NewString(ctx, "fetch: timeout or read error from proxy"));
+        return err_obj;
     }
     resp[resp_len] = '\0';
 
-    /* Parse response JSON and return as JS object.
-     * Use JSON.parse via JS_Eval since JS_EVAL_JSON may not work
-     * with all flag combinations. */
-    /* Build: JSON.parse('...escaped...') */
+    /* Parse response JSON via JS_Eval(JSON.parse(...)) */
     size_t escaped_cap = resp_len * 2 + 32;
     char *eval_buf = (char *)malloc(escaped_cap);
     if (!eval_buf) {
@@ -145,6 +179,14 @@ JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
     for (uint32_t i = 0; i < resp_len; i++) {
         if (resp[i] == '\'' || resp[i] == '\\') {
             eval_buf[pos++] = '\\';
+        } else if (resp[i] == '\n') {
+            eval_buf[pos++] = '\\';
+            eval_buf[pos++] = 'n';
+            continue;
+        } else if (resp[i] == '\r') {
+            eval_buf[pos++] = '\\';
+            eval_buf[pos++] = 'r';
+            continue;
         }
         eval_buf[pos++] = resp[i];
     }
@@ -155,8 +197,15 @@ JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
     JSValue resp_obj = JS_Eval(ctx, eval_buf, pos, "<fetch_resp>", JS_EVAL_RETVAL);
     free(eval_buf);
 
-    if (JS_IsException(resp_obj))
-        return JS_ThrowTypeError(ctx, "fetch: failed to parse proxy response");
+    if (JS_IsException(resp_obj)) {
+        /* Clear exception, return error object */
+        JS_GetException(ctx);
+        JSValue err_obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, err_obj, "status", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, err_obj, "error",
+                          JS_NewString(ctx, "fetch: failed to parse proxy response"));
+        return err_obj;
+    }
 
     return resp_obj;
 }

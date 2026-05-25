@@ -151,6 +151,157 @@ static void test_pipe_composability(void)
     printf("  PASS test_pipe_composability\n");
 }
 
+static void test_fetch_alias(void)
+{
+    /* T133: fetch() is an alias for http_fetch() */
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(rc == 0);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+
+    if (pid == 0) {
+        close(sv[0]);
+        int flags = fcntl(sv[1], F_GETFD);
+        fcntl(sv[1], F_SETFD, flags & ~FD_CLOEXEC);
+        char fd_str[16];
+        snprintf(fd_str, sizeof(fd_str), "%d", sv[1]);
+        setenv("MJS_FETCH_FD", fd_str, 1);
+        execlp(MJS_PATH, "mjs", "-e",
+               "var r = fetch('http://alias.test/ok'); r.body",
+               (char *)NULL);
+        _exit(127);
+    }
+
+    close(sv[1]);
+
+    /* Read request */
+    uint32_t req_len_net;
+    assert(read(sv[0], &req_len_net, 4) == 4);
+    uint32_t req_len = ntohl(req_len_net);
+    char req_buf[8192];
+    size_t total = 0;
+    while (total < req_len) {
+        ssize_t r = read(sv[0], req_buf + total, req_len - total);
+        assert(r > 0);
+        total += (size_t)r;
+    }
+    req_buf[req_len] = '\0';
+    assert(strstr(req_buf, "http://alias.test/ok"));
+
+    /* Send response */
+    const char *resp = "{\"status\":200,\"headers\":{},\"body\":\"alias_ok\",\"error\":null}";
+    uint32_t resp_len = (uint32_t)strlen(resp);
+    uint32_t resp_len_net = htonl(resp_len);
+    write(sv[0], &resp_len_net, 4);
+    write(sv[0], resp, resp_len);
+    close(sv[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    printf("  PASS test_fetch_alias\n");
+}
+
+static void test_fetch_error_response(void)
+{
+    /* T133: proxy returns error JSON — fetch returns it gracefully */
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(rc == 0);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+
+    if (pid == 0) {
+        close(sv[0]);
+        int flags = fcntl(sv[1], F_GETFD);
+        fcntl(sv[1], F_SETFD, flags & ~FD_CLOEXEC);
+        char fd_str[16];
+        snprintf(fd_str, sizeof(fd_str), "%d", sv[1]);
+        setenv("MJS_FETCH_FD", fd_str, 1);
+        /* fetch returns error object — check .error field */
+        execlp(MJS_PATH, "mjs", "-e",
+               "var r = fetch('http://denied.host/x'); r.error",
+               (char *)NULL);
+        _exit(127);
+    }
+
+    close(sv[1]);
+
+    /* Read request */
+    uint32_t req_len_net;
+    assert(read(sv[0], &req_len_net, 4) == 4);
+    uint32_t req_len = ntohl(req_len_net);
+    char req_buf[8192];
+    size_t total = 0;
+    while (total < req_len) {
+        ssize_t r = read(sv[0], req_buf + total, req_len - total);
+        assert(r > 0);
+        total += (size_t)r;
+    }
+
+    /* V50: respond with 403 error */
+    const char *resp = "{\"status\":403,\"headers\":{},\"body\":null,\"error\":\"host not in allowed_hosts\"}";
+    uint32_t resp_len = (uint32_t)strlen(resp);
+    uint32_t resp_len_net = htonl(resp_len);
+    write(sv[0], &resp_len_net, 4);
+    write(sv[0], resp, resp_len);
+    close(sv[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    printf("  PASS test_fetch_error_response\n");
+}
+
+static void test_fetch_timeout(void)
+{
+    /* T133: fd never responds — fetch returns error after timeout.
+     * Use a short test: close fd immediately to simulate broken proxy. */
+    int sv[2];
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(rc == 0);
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+
+    if (pid == 0) {
+        close(sv[0]);
+        int flags = fcntl(sv[1], F_GETFD);
+        fcntl(sv[1], F_SETFD, flags & ~FD_CLOEXEC);
+        char fd_str[16];
+        snprintf(fd_str, sizeof(fd_str), "%d", sv[1]);
+        setenv("MJS_FETCH_FD", fd_str, 1);
+        /* fetch should return error object (not crash) when proxy dies */
+        execlp(MJS_PATH, "mjs", "-e",
+               "var r = fetch('http://x.com/t'); r.error",
+               (char *)NULL);
+        _exit(127);
+    }
+
+    close(sv[1]);
+    /* Read request then close fd — simulates proxy crash */
+    uint32_t req_len_net;
+    read(sv[0], &req_len_net, 4);
+    uint32_t req_len = ntohl(req_len_net);
+    char discard[8192];
+    size_t total = 0;
+    while (total < req_len) {
+        ssize_t r = read(sv[0], discard + total, req_len - total);
+        if (r <= 0) break;
+        total += (size_t)r;
+    }
+    close(sv[0]); /* Close without responding */
+
+    int status;
+    waitpid(pid, &status, 0);
+    /* mjs should exit cleanly (0) — error is in the returned object, not a crash */
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    printf("  PASS test_fetch_timeout\n");
+}
+
 int main(void)
 {
     printf("test_mjs:\n");
@@ -161,6 +312,9 @@ int main(void)
     test_fetch_no_fd_errors();
     test_fetch_via_fd();
     test_pipe_composability();
+    test_fetch_alias();
+    test_fetch_error_response();
+    test_fetch_timeout();
     printf("All mjs tests passed.\n");
     return 0;
 }

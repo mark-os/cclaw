@@ -100,7 +100,7 @@ static void test_missing_command(void) {
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    int rc = tool_shell_register(&reg, 0, NULL, 0);
+    int rc = tool_shell_register(&reg, 0, NULL, 0, NULL, 0);
     assert(rc == 0);
     ToolEntry *e = tools_lookup(&reg, "shell_exec");
     assert(e != NULL);
@@ -171,6 +171,73 @@ static void test_cclaw_unreachable(void) {
     printf("  PASS test_cclaw_unreachable\n");
 }
 
+/* V49: Test that MJS_FETCH_FD is set in child environment */
+static void test_fetch_fd_set(void) {
+    ShellConfig sc = {.timeout = 5, .workspace = NULL, .shell_network = 0,
+                      .allowed_hosts = NULL, .allowed_hosts_count = 0};
+    char *r = tool_shell_handler("{\"command\":\"echo MJS_FETCH_FD=$MJS_FETCH_FD\"}", &sc);
+    assert(r != NULL);
+    assert(strstr(r, "[exit 0]") != NULL);
+    /* MJS_FETCH_FD should be set to a valid fd number */
+    assert(strstr(r, "MJS_FETCH_FD=") != NULL);
+    /* Should NOT be empty */
+    assert(strstr(r, "MJS_FETCH_FD=\n") == NULL);
+    free(r);
+    printf("  PASS test_fetch_fd_set\n");
+}
+
+/* V49/V50: Test fetch proxy end-to-end with mjs binary.
+ * mjs sends fetch request over fd, parent proxies it.
+ * Since no real HTTP server, we test the denied-host path. */
+static void test_fetch_proxy_denied(void) {
+    /* No allowed_hosts → all fetches denied */
+    ShellConfig sc = {.timeout = 5, .workspace = NULL, .shell_network = 0,
+                      .allowed_hosts = NULL, .allowed_hosts_count = 0};
+    char *r = tool_shell_handler(
+        "{\"command\":\"./build/mjs -e 'var r = http_fetch(\\\"http://example.com/x\\\"); r.error'\"}",
+        &sc);
+    assert(r != NULL);
+    assert(strstr(r, "[exit 0]") != NULL);
+    assert(strstr(r, "no allowed_hosts") != NULL);
+    free(r);
+    printf("  PASS test_fetch_proxy_denied\n");
+}
+
+/* V49: Test fetch proxy with allowed host (will fail to connect but passes policy) */
+static void test_fetch_proxy_allowed_host(void) {
+    char *hosts[] = {"httpbin.org"};
+    ShellConfig sc = {.timeout = 5, .workspace = NULL, .shell_network = 0,
+                      .allowed_hosts = hosts, .allowed_hosts_count = 1};
+    /* Host is allowed but network is blocked (CLONE_NEWNET) or unreachable.
+     * The key test: policy check passes (no "not in allowed_hosts" error).
+     * We'll get a curl error instead. */
+    char *r = tool_shell_handler(
+        "{\"command\":\"./build/mjs -e 'var r = http_fetch(\\\"http://httpbin.org/get\\\"); r.error || r.status'\"}",
+        &sc);
+    assert(r != NULL);
+    assert(strstr(r, "[exit 0]") != NULL);
+    /* Should NOT get "not in allowed_hosts" — policy passed */
+    assert(strstr(r, "not in allowed_hosts") == NULL);
+    assert(strstr(r, "no allowed_hosts") == NULL);
+    free(r);
+    printf("  PASS test_fetch_proxy_allowed_host\n");
+}
+
+/* V49: Test fetch proxy rejects host not in allowlist */
+static void test_fetch_proxy_host_rejected(void) {
+    char *hosts[] = {"api.github.com"};
+    ShellConfig sc = {.timeout = 5, .workspace = NULL, .shell_network = 0,
+                      .allowed_hosts = hosts, .allowed_hosts_count = 1};
+    char *r = tool_shell_handler(
+        "{\"command\":\"./build/mjs -e 'var r = http_fetch(\\\"http://evil.com/x\\\"); r.error'\"}",
+        &sc);
+    assert(r != NULL);
+    assert(strstr(r, "[exit 0]") != NULL);
+    assert(strstr(r, "not in allowed_hosts") != NULL);
+    free(r);
+    printf("  PASS test_fetch_proxy_host_rejected\n");
+}
+
 int main(void) {
     printf("test_tool_shell:\n");
     test_basic_command();
@@ -186,6 +253,10 @@ int main(void) {
     test_shell_network_flag();
     test_env_hardened();
     test_cclaw_unreachable();
+    test_fetch_fd_set();
+    test_fetch_proxy_denied();
+    test_fetch_proxy_allowed_host();
+    test_fetch_proxy_host_rejected();
     printf("All shell_exec tool tests passed.\n");
     return 0;
 }

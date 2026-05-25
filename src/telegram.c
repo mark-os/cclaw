@@ -115,6 +115,22 @@ static void tg_send_chunked(const char *token, int64_t chat_id, const char *text
     }
 }
 
+/* V53: Check if chat_id is in admin_chat_ids[]. */
+int telegram_is_admin(const Config *cfg, int64_t chat_id) {
+    if (!cfg || !cfg->admin_chat_ids) return 0;
+    for (size_t i = 0; i < cfg->admin_chat_id_count; i++) {
+        if (cfg->admin_chat_ids[i] == chat_id) return 1;
+    }
+    return 0;
+}
+
+/* V53: Check if text is an admin command (starts with /key, /config, /whitelist) */
+static int is_admin_command(const char *text) {
+    return (strncmp(text, "/key", 4) == 0 ||
+            strncmp(text, "/config", 7) == 0 ||
+            strncmp(text, "/whitelist", 10) == 0);
+}
+
 /* Process a single Telegram message: route to session, inbox, signal daemon */
 static void process_message(cJSON *msg) {
     cJSON *chat = cJSON_GetObjectItemCaseSensitive(msg, "chat");
@@ -124,6 +140,13 @@ static void process_message(cJSON *msg) {
     cJSON *chat_id_json = cJSON_GetObjectItemCaseSensitive(chat, "id");
     if (!chat_id_json || !cJSON_IsNumber(chat_id_json)) return;
     int64_t chat_id = (int64_t)chat_id_json->valuedouble;
+
+    /* V53: intercept admin commands before inbox_insert */
+    if (is_admin_command(text->valuestring)) {
+        if (!telegram_is_admin(g_cfg, chat_id)) return; /* silent ignore */
+        /* TODO T140: dispatch to admin command handlers */
+        return;
+    }
 
     /* Route chat_id to session */
     int64_t session_id = db_tg_get_session(g_db, chat_id);

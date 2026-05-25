@@ -143,6 +143,24 @@ Config *config_load(const char *path) {
         if (s) { free(cfg->workspace); cfg->workspace = s; }
         s = json_str(root, "telegram_token");
         if (s) { free(cfg->telegram_token); cfg->telegram_token = s; }
+
+        /* V53: parse admin_chat_ids array */
+        cJSON *admins = cJSON_GetObjectItemCaseSensitive(root, "admin_chat_ids");
+        if (admins && cJSON_IsArray(admins)) {
+            int n = cJSON_GetArraySize(admins);
+            if (n > 0) {
+                cfg->admin_chat_ids = calloc((size_t)n, sizeof(int64_t));
+                if (cfg->admin_chat_ids) {
+                    cfg->admin_chat_id_count = (size_t)n;
+                    for (int i = 0; i < n; i++) {
+                        cJSON *item = cJSON_GetArrayItem(admins, i);
+                        if (cJSON_IsNumber(item))
+                            cfg->admin_chat_ids[i] = (int64_t)item->valuedouble;
+                    }
+                }
+            }
+        }
+
         s = json_str(root, "system_prompt");
         if (s) { free(cfg->system_prompt); cfg->system_prompt = s; }
         cfg->web_port = json_int(root, "web_port", cfg->web_port);
@@ -329,6 +347,7 @@ void config_free(Config *cfg) {
     free(cfg->db_path);
     free(cfg->workspace);
     free(cfg->telegram_token);
+    free(cfg->admin_chat_ids);
     free(cfg->system_prompt);
     free(cfg);
 }

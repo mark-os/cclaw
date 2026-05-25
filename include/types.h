@@ -92,6 +92,8 @@ typedef struct {
     char *workspace;
     char *telegram_token;
     char *telegram_base_url; /* override for testing (default: https://api.telegram.org) */
+    int64_t *admin_chat_ids; /* V53: Telegram admin chat IDs (heap array) */
+    size_t admin_chat_id_count;
     char *system_prompt;    /* T46: per-agent system prompt, supports {session_id} {date} */
     int web_port;
     int max_iterations;     /* agent loop iteration cap */

@@ -89,6 +89,31 @@ static void test_backoff_delay(void) {
     assert(tg_backoff_delay(100) == 60);
 }
 
+/* V53: telegram_is_admin tests */
+static void test_is_admin_match(void) {
+    int64_t ids[] = {111, 222, 333};
+    Config cfg = {0};
+    cfg.admin_chat_ids = ids;
+    cfg.admin_chat_id_count = 3;
+    assert(telegram_is_admin(&cfg, 111) == 1);
+    assert(telegram_is_admin(&cfg, 222) == 1);
+    assert(telegram_is_admin(&cfg, 333) == 1);
+}
+
+static void test_is_admin_no_match(void) {
+    int64_t ids[] = {111, 222};
+    Config cfg = {0};
+    cfg.admin_chat_ids = ids;
+    cfg.admin_chat_id_count = 2;
+    assert(telegram_is_admin(&cfg, 999) == 0);
+}
+
+static void test_is_admin_empty(void) {
+    Config cfg = {0};
+    assert(telegram_is_admin(&cfg, 111) == 0);
+    assert(telegram_is_admin(NULL, 111) == 0);
+}
+
 int main(void) {
     printf("test_start_no_token...");
     test_start_no_token();
@@ -124,6 +149,18 @@ int main(void) {
 
     printf("test_backoff_delay...");
     test_backoff_delay();
+    printf(" OK\n");
+
+    printf("test_is_admin_match...");
+    test_is_admin_match();
+    printf(" OK\n");
+
+    printf("test_is_admin_no_match...");
+    test_is_admin_no_match();
+    printf(" OK\n");
+
+    printf("test_is_admin_empty...");
+    test_is_admin_empty();
     printf(" OK\n");
 
     printf("all telegram tests passed\n");

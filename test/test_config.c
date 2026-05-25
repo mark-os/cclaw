@@ -229,6 +229,39 @@ static void test_system_prompt(void) {
     printf("  PASS: test_system_prompt\n");
 }
 
+static void test_admin_chat_ids(void) {
+    unsetenv("OPENROUTER_API_KEY");
+
+    const char *json =
+        "{"
+        "  \"provider\": {\"api_key\": \"k\"},"
+        "  \"admin_chat_ids\": [111222333, 444555666]"
+        "}";
+    FILE *f = fopen("/tmp/cclaw_test_admin.json", "w");
+    assert(f);
+    fputs(json, f);
+    fclose(f);
+
+    Config *cfg = config_load("/tmp/cclaw_test_admin.json");
+    assert(cfg != NULL);
+    assert(cfg->admin_chat_id_count == 2);
+    assert(cfg->admin_chat_ids[0] == 111222333);
+    assert(cfg->admin_chat_ids[1] == 444555666);
+    config_free(cfg);
+
+    /* No admin_chat_ids → count 0, pointer NULL */
+    setenv("OPENROUTER_API_KEY", "sk-test", 1);
+    cfg = config_load(NULL);
+    assert(cfg != NULL);
+    assert(cfg->admin_chat_id_count == 0);
+    assert(cfg->admin_chat_ids == NULL);
+    config_free(cfg);
+
+    unsetenv("OPENROUTER_API_KEY");
+    remove("/tmp/cclaw_test_admin.json");
+    printf("  PASS: test_admin_chat_ids\n");
+}
+
 int main(void) {
     printf("test_config:\n");
     test_env_only();
@@ -238,6 +271,7 @@ int main(void) {
     test_fallback_providers();
     test_stale_lock_timeout();
     test_system_prompt();
+    test_admin_chat_ids();
     printf("All config tests passed.\n");
     return 0;
 }

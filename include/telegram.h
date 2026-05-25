@@ -17,6 +17,9 @@ void telegram_stop(void);
  * Used by daemon for response delivery (T85). */
 void telegram_send_message(const char *token, int64_t chat_id, const char *text);
 
+/* V53: Check if chat_id is in admin_chat_ids[]. */
+int telegram_is_admin(const Config *cfg, int64_t chat_id);
+
 /* V11: Find split point within text[0..len-1], respecting max_len.
  * Splits at paragraph, then newline, then sentence, then hard cut.
  * Exposed for testing. */

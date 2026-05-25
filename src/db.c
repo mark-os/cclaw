@@ -25,6 +25,8 @@ static const char *SCHEMA_SQL =
     "  turn_id INTEGER,"
     "  created_at INTEGER NOT NULL DEFAULT (unixepoch()),"
     "  data TEXT NOT NULL,"
+    "  token_estimate INTEGER,"
+    "  content_bytes INTEGER,"
     /* Generated columns — relational indexes without JSON parsing at query time */
     "  type TEXT GENERATED ALWAYS AS (json_extract(data, '$.type')) STORED,"
     "  role TEXT GENERATED ALWAYS AS (json_extract(data, '$.role')) STORED"
@@ -504,8 +506,8 @@ void session_list_free(Session *sessions, int count) {
 /* V14: insert entry with given parent_id, update session leaf */
 int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, const Message *msg) {
     const char *sql =
-        "INSERT INTO entries (parent_id, session_id, data)"
-        " VALUES (?,?,?);";
+        "INSERT INTO entries (parent_id, session_id, data, token_estimate, content_bytes)"
+        " VALUES (?,?,?,?,?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -514,7 +516,10 @@ int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, cons
 
     char *data = serialize_entry_data(msg);
     if (!data) { sqlite3_finalize(stmt); return -1; }
-    sqlite3_bind_text(stmt, 3, data, -1, SQLITE_TRANSIENT);
+    int data_len = (int)strlen(data);
+    sqlite3_bind_text(stmt, 3, data, data_len, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, (data_len / 4) + 4);
+    sqlite3_bind_int(stmt, 5, data_len);
     free(data);
 
     int rc = sqlite3_step(stmt);
@@ -722,7 +727,8 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
     sqlite3_finalize(stmt);
 
     const char *ins_sql =
-        "INSERT INTO entries (parent_id, session_id, turn_id, data) VALUES (?,?,?,?);";
+        "INSERT INTO entries (parent_id, session_id, turn_id, data, token_estimate, content_bytes)"
+        " VALUES (?,?,?,?,?,?);";
     if (sqlite3_prepare_v2(db, ins_sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_int64(stmt, 1, parent_id);
@@ -731,7 +737,10 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
 
     char *data = serialize_entry_data(msg);
     if (!data) { sqlite3_finalize(stmt); return -1; }
-    sqlite3_bind_text(stmt, 4, data, -1, SQLITE_TRANSIENT);
+    int data_len = (int)strlen(data);
+    sqlite3_bind_text(stmt, 4, data, data_len, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 5, (data_len / 4) + 4);
+    sqlite3_bind_int(stmt, 6, data_len);
     free(data);
 
     int rc = sqlite3_step(stmt);
@@ -888,16 +897,20 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
         /* Insert entry */
         sqlite3_stmt *ins;
         if (sqlite3_prepare_v2(db,
-            "INSERT INTO entries (parent_id, session_id, data) VALUES (?,?,?)",
+            "INSERT INTO entries (parent_id, session_id, data, token_estimate, content_bytes)"
+            " VALUES (?,?,?,?,?)",
             -1, &ins, NULL) != SQLITE_OK) {
             free(data);
             sqlite3_finalize(sel);
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             return -1;
         }
+        int data_len = (int)strlen(data);
         sqlite3_bind_int64(ins, 1, parent_id);
         sqlite3_bind_int64(ins, 2, session_id);
-        sqlite3_bind_text(ins, 3, data, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(ins, 3, data, data_len, SQLITE_TRANSIENT);
+        sqlite3_bind_int(ins, 4, (data_len / 4) + 4);
+        sqlite3_bind_int(ins, 5, data_len);
         free(data);
         int rc = sqlite3_step(ins);
         sqlite3_finalize(ins);

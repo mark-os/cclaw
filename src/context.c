@@ -418,7 +418,7 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan
     sqlite3_finalize(stmt);
     if (leaf_id < 0) return -1;
 
-    /* Query branch metadata — no content loaded, just id/role/stop_reason/length/tool_call_count */
+    /* Query branch metadata — no content loaded, just id/role/stop_reason/token_estimate/tool_call_count */
     const char *plan_sql =
         "WITH RECURSIVE branch(id, parent_id) AS ("
         "  SELECT id, parent_id FROM entries WHERE id=? AND session_id=?"
@@ -426,7 +426,7 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan
         "  SELECT e.id, e.parent_id FROM entries e JOIN branch b ON e.id=b.parent_id"
         ") SELECT e.id, e.role,"
         "  json_extract(e.data, '$.stop_reason'),"
-        "  length(e.data),"
+        "  e.token_estimate,"
         "  CASE WHEN e.role='assistant' THEN"
         "    (SELECT count(*) FROM json_each(json_extract(e.data,'$.content'))"
         "     WHERE json_extract(value,'$.type')='tool_call')"
@@ -454,8 +454,11 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan
         pe->id = sqlite3_column_int64(stmt, 0);
         pe->role = plan_str_to_role((const char *)sqlite3_column_text(stmt, 1));
         pe->stop_reason = plan_str_to_stop_reason((const char *)sqlite3_column_text(stmt, 2));
-        int data_len = sqlite3_column_int(stmt, 3);
-        pe->token_estimate = (data_len / 4) + 4; /* chars/4 + per-message overhead */
+        pe->token_estimate = sqlite3_column_int(stmt, 3);
+        if (pe->token_estimate <= 0) {
+            /* Fallback for entries inserted before T124 migration */
+            pe->token_estimate = 4;
+        }
         pe->tool_call_count = sqlite3_column_int(stmt, 4);
         raw_count++;
     }

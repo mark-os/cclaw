@@ -27,6 +27,7 @@
 #include "tool_db_query.h"
 #include "shutdown.h"
 #include "daemon.h"
+#include "context.h"
 
 /* Tool dispatch via registry */
 static char *dispatch_tools(const char *name, const char *arguments, void *user_data) {
@@ -74,7 +75,7 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
     }
 
     /* V22: Landlock — restrict filesystem after config loaded */
-    if (landlock_apply(effective_cfg->workspace, cfg->db_path) < 0) {
+    if (landlock_apply(effective_cfg->workspace, cfg->db_path, session_id) < 0) {
         fprintf(stderr, "[agent %lld] landlock unavailable, continuing without\n",
                 (long long)session_id);
     }
@@ -120,7 +121,13 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
     tools_init(&reg);
     tool_shell_register(&reg, effective_cfg->shell_timeout,
                         effective_cfg->workspace, ac ? ac->shell_network : 0);
-    tool_file_read_register(&reg, effective_cfg->workspace);
+
+    /* T118: file_read allows workspace + session temp dir */
+    char tmp_dir[64];
+    session_tmp_dir(session_id, tmp_dir, sizeof(tmp_dir));
+    FileReadCtx file_read_ctx = {.workspace = effective_cfg->workspace,
+                                  .extra_read_path = tmp_dir};
+    tool_file_read_register(&reg, &file_read_ctx);
     tool_file_write_register(&reg, effective_cfg->workspace);
 
     /* T104: JS eval with per-agent allowed_hosts */

@@ -11,12 +11,18 @@
 
 static char ws_a[256];
 static char ws_b[256];
+static FileReadCtx ctx_a;
+static FileReadCtx ctx_b;
 
 static void setup(void) {
     snprintf(ws_a, sizeof(ws_a), "/tmp/cclaw_ws_a_XXXXXX");
     snprintf(ws_b, sizeof(ws_b), "/tmp/cclaw_ws_b_XXXXXX");
     assert(mkdtemp(ws_a) != NULL);
     assert(mkdtemp(ws_b) != NULL);
+    ctx_a.workspace = ws_a;
+    ctx_a.extra_read_path = NULL;
+    ctx_b.workspace = ws_b;
+    ctx_b.extra_read_path = NULL;
 
     /* Agent A's file */
     char path[512];
@@ -44,7 +50,7 @@ static void cleanup(void) {
 static void test_read_cross_workspace_absolute(void) {
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"%s/secret_b.txt\"}", ws_b);
-    char *r = tool_file_read_handler(args, (void *)ws_a);
+    char *r = tool_file_read_handler(args, (void *)&ctx_a);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -55,7 +61,7 @@ static void test_read_cross_workspace_absolute(void) {
 static void test_read_cross_workspace_reverse(void) {
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"%s/secret_a.txt\"}", ws_a);
-    char *r = tool_file_read_handler(args, (void *)ws_b);
+    char *r = tool_file_read_handler(args, (void *)&ctx_b);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -81,7 +87,7 @@ static void test_read_traversal_to_other_workspace(void) {
     assert(b_name != NULL);
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"..%s/secret_b.txt\"}", b_name);
-    char *r = tool_file_read_handler(args, (void *)ws_a);
+    char *r = tool_file_read_handler(args, (void *)&ctx_a);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -103,12 +109,12 @@ static void test_write_traversal_to_other_workspace(void) {
 
 /* V1: each agent CAN access its own workspace (positive case) */
 static void test_read_own_workspace(void) {
-    char *r = tool_file_read_handler("{\"path\":\"secret_a.txt\"}", (void *)ws_a);
+    char *r = tool_file_read_handler("{\"path\":\"secret_a.txt\"}", (void *)&ctx_a);
     assert(r != NULL);
     assert(strcmp(r, "agent_a_data") == 0);
     free(r);
 
-    r = tool_file_read_handler("{\"path\":\"secret_b.txt\"}", (void *)ws_b);
+    r = tool_file_read_handler("{\"path\":\"secret_b.txt\"}", (void *)&ctx_b);
     assert(r != NULL);
     assert(strcmp(r, "agent_b_data") == 0);
     free(r);
@@ -137,13 +143,14 @@ static void test_workspace_fallback_path(void) {
     fclose(f);
 
     /* Agent 1 can read its own file */
-    char *r = tool_file_read_handler("{\"path\":\"data.txt\"}", (void *)agent_ws);
+    FileReadCtx fb_ctx = {.workspace = agent_ws, .extra_read_path = NULL};
+    char *r = tool_file_read_handler("{\"path\":\"data.txt\"}", (void *)&fb_ctx);
     assert(r != NULL);
     assert(strcmp(r, "agent1_only") == 0);
     free(r);
 
     /* Agent 1 cannot escape to parent */
-    r = tool_file_read_handler("{\"path\":\"../../etc/passwd\"}", (void *)agent_ws);
+    r = tool_file_read_handler("{\"path\":\"../../etc/passwd\"}", (void *)&fb_ctx);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);

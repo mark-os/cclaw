@@ -60,4 +60,17 @@ int context_estimate_tokens(const Message *msg);
  * Caller frees. */
 char *truncate_result(const char *src, size_t len);
 
+/* T118: Truncate tool result at write time. If content exceeds limits, writes
+ * full output to /tmp/cclaw-<session_id>/<tool_call_id>.out and returns
+ * truncated content with file path reference. Returns malloc'd string (caller frees).
+ * If no truncation needed, returns strdup(src). */
+char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_call_id);
+
+/* T118: Build session temp dir path: /tmp/cclaw-<session_id>
+ * Writes into buf (must be >= 64 bytes). */
+void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz);
+
+/* T118: Remove session temp dir recursively. */
+void session_tmp_cleanup(int64_t session_id);
+
 #endif

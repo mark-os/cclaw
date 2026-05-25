@@ -3,12 +3,18 @@
 
 #include "tools.h"
 
+/* T118: Context for file_read — workspace + optional extra read path */
+typedef struct {
+    const char *workspace;
+    const char *extra_read_path;  /* e.g. /tmp/cclaw-<session_id> */
+} FileReadCtx;
+
 /* Register file_read tool into registry. Returns 0 on success.
- * user_data must point to a null-terminated workspace path string. */
-int tool_file_read_register(ToolRegistry *reg, const char *workspace);
+ * ctx must remain valid for tool lifetime. */
+int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx);
 
 /* Handler: parse JSON args {"path":"..."}, read file within workspace.
- * user_data is the workspace path (char*). Returns heap-allocated result. */
+ * user_data is FileReadCtx*. Returns heap-allocated result. */
 char *tool_file_read_handler(const char *arguments, void *user_data);
 
 /* Register file_write tool into registry. Returns 0 on success. */

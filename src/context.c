@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define TRUNCATE_MAX_BYTES  (50 * 1024)
 #define TRUNCATE_MAX_LINES  2000
@@ -287,7 +288,7 @@ int context_build(const Entry *entries, int count, const Config *cfg,
             msgs[idx].tool_result->tool_call_id = filtered[i].message.tool_result->tool_call_id
                 ? strdup(filtered[i].message.tool_result->tool_call_id) : NULL;
             msgs[idx].tool_result->content = filtered[i].message.tool_result->content
-                ? truncate_result(filtered[i].message.tool_result->content, 0) : NULL;
+                ? strdup(filtered[i].message.tool_result->content) : NULL;
         }
         idx++;
     }
@@ -500,4 +501,68 @@ void context_plan_free(ContextPlan *plan) {
     free(plan->entries);
     plan->entries = NULL;
     plan->count = 0;
+}
+
+/* ── T118: Write-time truncation with spill to temp file ─────────── */
+
+void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz) {
+    snprintf(buf, bufsz, "/tmp/cclaw-%lld", (long long)session_id);
+}
+
+char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_call_id) {
+    if (!src) return NULL;
+    size_t len = strlen(src);
+
+    /* Check if truncation needed */
+    size_t cut = len;
+    int lines = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (src[i] == '\n') {
+            lines++;
+            if (lines >= TRUNCATE_MAX_LINES) { cut = i + 1; break; }
+        }
+        if (i + 1 >= TRUNCATE_MAX_BYTES && cut == len) { cut = TRUNCATE_MAX_BYTES; break; }
+    }
+    if (cut >= len) return strdup(src);
+
+    /* Write full output to temp file */
+    char dir[64];
+    session_tmp_dir(session_id, dir, sizeof(dir));
+    mkdir(dir, 0700);  /* ignore error if exists */
+
+    char path[128];
+    snprintf(path, sizeof(path), "%s/%s.out", dir, tool_call_id ? tool_call_id : "unknown");
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fwrite(src, 1, len, f);
+        fclose(f);
+    }
+
+    /* Count total lines */
+    int total_lines = 0;
+    for (size_t i = 0; i < len; i++)
+        if (src[i] == '\n') total_lines++;
+
+    /* Build suffix with file path reference */
+    char suffix[256];
+    snprintf(suffix, sizeof(suffix),
+             "\n[truncated — showing first %d lines of %d. Full output: %s]",
+             lines < TRUNCATE_MAX_LINES ? lines : TRUNCATE_MAX_LINES,
+             total_lines > 0 ? total_lines : 1, path);
+
+    size_t result_len = cut + strlen(suffix);
+    char *result = malloc(result_len + 1);
+    if (!result) return strdup(src);
+    memcpy(result, src, cut);
+    memcpy(result + cut, suffix, strlen(suffix) + 1);
+    return result;
+}
+
+void session_tmp_cleanup(int64_t session_id) {
+    char dir[64];
+    session_tmp_dir(session_id, dir, sizeof(dir));
+    /* Simple recursive delete: list files and remove */
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+    (void)system(cmd);
 }

@@ -32,7 +32,7 @@ static void test_landlock_apply_succeeds(void) {
     if (pid == 0) {
         /* Child: apply landlock with /tmp as workspace */
         mkdir("/tmp/test_ll_ws", 0755);
-        int rc = landlock_apply("/tmp/test_ll_ws", "/tmp/test_ll.db");
+        int rc = landlock_apply("/tmp/test_ll_ws", "/tmp/test_ll.db", 0);
         _exit(rc == 0 ? 0 : 1);
     }
 
@@ -55,7 +55,7 @@ static void test_landlock_blocks_outside_write(void) {
 
     if (pid == 0) {
         mkdir("/tmp/test_ll_ws2", 0755);
-        int rc = landlock_apply("/tmp/test_ll_ws2", NULL);
+        int rc = landlock_apply("/tmp/test_ll_ws2", NULL, 0);
         if (rc != 0) _exit(2);
 
         /* Writing inside workspace should succeed */
@@ -98,7 +98,7 @@ static void test_landlock_allows_system_read(void) {
 
     if (pid == 0) {
         mkdir("/tmp/test_ll_ws3", 0755);
-        int rc = landlock_apply("/tmp/test_ll_ws3", NULL);
+        int rc = landlock_apply("/tmp/test_ll_ws3", NULL, 0);
         if (rc != 0) _exit(2);
 
         /* Reading /etc/hostname or /etc/resolv.conf should work */

@@ -8,10 +8,13 @@
 #include <unistd.h>
 
 static char tmpdir[256];
+static FileReadCtx file_ctx;
 
 static void setup(void) {
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cclaw_test_file_XXXXXX");
     assert(mkdtemp(tmpdir) != NULL);
+    file_ctx.workspace = tmpdir;
+    file_ctx.extra_read_path = NULL;
 
     /* Create a test file */
     char path[512];
@@ -41,7 +44,7 @@ static void cleanup(void) {
 static void test_basic_read(void) {
     char args[256];
     snprintf(args, sizeof(args), "{\"path\":\"hello.txt\"}");
-    char *r = tool_file_read_handler(args, (void *)tmpdir);
+    char *r = tool_file_read_handler(args, (void *)&file_ctx);
     assert(r != NULL);
     assert(strcmp(r, "hello world") == 0);
     free(r);
@@ -51,7 +54,7 @@ static void test_basic_read(void) {
 static void test_nested_read(void) {
     char args[256];
     snprintf(args, sizeof(args), "{\"path\":\"sub/nested.txt\"}");
-    char *r = tool_file_read_handler(args, (void *)tmpdir);
+    char *r = tool_file_read_handler(args, (void *)&file_ctx);
     assert(r != NULL);
     assert(strcmp(r, "nested content") == 0);
     free(r);
@@ -60,7 +63,7 @@ static void test_nested_read(void) {
 
 static void test_path_traversal_blocked(void) {
     /* V1: attempt to escape workspace via ../ */
-    char *r = tool_file_read_handler("{\"path\":\"../../../etc/passwd\"}", (void *)tmpdir);
+    char *r = tool_file_read_handler("{\"path\":\"../../../etc/passwd\"}", (void *)&file_ctx);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -69,7 +72,7 @@ static void test_path_traversal_blocked(void) {
 
 static void test_absolute_path_outside(void) {
     /* V1: absolute path outside workspace */
-    char *r = tool_file_read_handler("{\"path\":\"/etc/hostname\"}", (void *)tmpdir);
+    char *r = tool_file_read_handler("{\"path\":\"/etc/hostname\"}", (void *)&file_ctx);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -77,7 +80,7 @@ static void test_absolute_path_outside(void) {
 }
 
 static void test_missing_file(void) {
-    char *r = tool_file_read_handler("{\"path\":\"nonexistent.txt\"}", (void *)tmpdir);
+    char *r = tool_file_read_handler("{\"path\":\"nonexistent.txt\"}", (void *)&file_ctx);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -85,7 +88,7 @@ static void test_missing_file(void) {
 }
 
 static void test_invalid_json(void) {
-    char *r = tool_file_read_handler("not json", (void *)tmpdir);
+    char *r = tool_file_read_handler("not json", (void *)&file_ctx);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -95,7 +98,7 @@ static void test_invalid_json(void) {
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    int rc = tool_file_read_register(&reg, tmpdir);
+    int rc = tool_file_read_register(&reg, &file_ctx);
     assert(rc == 0);
     ToolEntry *e = tools_lookup(&reg, "file_read");
     assert(e != NULL);
@@ -115,7 +118,7 @@ static void test_write_new_file(void) {
     free(r);
 
     /* Verify content via read */
-    r = tool_file_read_handler("{\"path\":\"newfile.txt\"}", (void *)tmpdir);
+    r = tool_file_read_handler("{\"path\":\"newfile.txt\"}", (void *)&file_ctx);
     assert(strcmp(r, "hello write") == 0);
     free(r);
     printf("  PASS test_write_new_file\n");
@@ -127,7 +130,7 @@ static void test_write_overwrite(void) {
     assert(strstr(r, "wrote") != NULL);
     free(r);
 
-    r = tool_file_read_handler("{\"path\":\"hello.txt\"}", (void *)tmpdir);
+    r = tool_file_read_handler("{\"path\":\"hello.txt\"}", (void *)&file_ctx);
     assert(strcmp(r, "overwritten") == 0);
     free(r);
     printf("  PASS test_write_overwrite\n");
@@ -141,7 +144,7 @@ static void test_write_nested(void) {
     assert(strstr(r, "wrote") != NULL);
     free(r);
 
-    r = tool_file_read_handler("{\"path\":\"sub/written.txt\"}", (void *)tmpdir);
+    r = tool_file_read_handler("{\"path\":\"sub/written.txt\"}", (void *)&file_ctx);
     assert(strcmp(r, "nested write") == 0);
     free(r);
     printf("  PASS test_write_nested\n");

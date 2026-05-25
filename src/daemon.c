@@ -16,6 +16,7 @@
 #include "tool_cron.h"
 #include "landlock.h"
 #include "config.h"
+#include "context.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -541,6 +542,9 @@ void daemon_startup_recovery(sqlite3 *db) {
             sqlite3_finalize(us);
         }
     }
+
+    /* T118: Clean up stale session temp dirs */
+    (void)system("rm -rf /tmp/cclaw-*");
 }
 
 /* ── Daemon main loop (T81) ─────────────────────────────────────── */

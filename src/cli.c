@@ -13,6 +13,7 @@
 #include "tool_db_query.h"
 #include "shutdown.h"
 #include "daemon.h"
+#include "context.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -203,7 +204,13 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
     tools_init(&reg);
     tool_shell_register(&reg, cfg->shell_timeout, cfg->workspace,
                         ac ? ac->shell_network : 0);
-    tool_file_read_register(&reg, cfg->workspace);
+
+    /* T118: file_read allows workspace + session temp dir */
+    char tmp_dir[64];
+    session_tmp_dir(session_id, tmp_dir, sizeof(tmp_dir));
+    FileReadCtx file_read_ctx = {.workspace = cfg->workspace,
+                                  .extra_read_path = tmp_dir};
+    tool_file_read_register(&reg, &file_read_ctx);
     tool_file_write_register(&reg, cfg->workspace);
 
     /* T104: pass per-agent allowed_hosts to js_eval */

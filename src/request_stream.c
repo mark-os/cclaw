@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include "request_stream.h"
-#include "context.h"
 #include "cJSON.h"
 #include <stdlib.h>
 #include <string.h>
@@ -39,13 +38,6 @@ static int buf_empty(const RequestStreamer *rs) {
     return rs->buf_pos >= rs->buf_len;
 }
 
-/* V40: truncate tool result content for LLM context */
-static char *truncate_for_stream(const char *src) {
-    if (!src) return NULL;
-    size_t len = strlen(src);
-    return truncate_result(src, len);
-}
-
 /* Reshape a single entry's DB JSON into OpenAI message JSON.
  * Returns heap-allocated string (caller frees). */
 static char *reshape_entry(const char *data_json) {
@@ -67,10 +59,8 @@ static char *reshape_entry(const char *data_json) {
                                 tc_id && tc_id->valuestring ? tc_id->valuestring : "");
         cJSON *content = cJSON_GetObjectItem(obj, "content");
         const char *raw = content && content->valuestring ? content->valuestring : "";
-        /* V40: truncate */
-        char *trunc = truncate_for_stream(raw);
-        cJSON_AddStringToObject(out, "content", trunc ? trunc : raw);
-        free(trunc);
+        /* T118: data already truncated at write time */
+        cJSON_AddStringToObject(out, "content", raw);
     } else if (strcmp(role, "assistant") == 0) {
         cJSON_AddStringToObject(out, "role", "assistant");
         cJSON *content = cJSON_GetObjectItem(obj, "content");

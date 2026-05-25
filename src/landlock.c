@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <linux/landlock.h>
@@ -56,7 +57,7 @@ static int add_path_rule(int ruleset_fd, const char *path, __u64 access) {
     return rc;
 }
 
-int landlock_apply(const char *workspace_path, const char *db_path) {
+int landlock_apply(const char *workspace_path, const char *db_path, int64_t session_id) {
     /* Check if landlock is supported */
     int abi = ll_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
     if (abi < 0) {
@@ -81,6 +82,17 @@ int landlock_apply(const char *workspace_path, const char *db_path) {
     if (db_path && add_path_rule(ruleset_fd, db_path, LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE) < 0) {
         fprintf(stderr, "[landlock] warning: cannot add db rule for %s: %s\n",
                 db_path, strerror(errno));
+    }
+
+    /* T118: Session temp dir: read-write for tool result spill files */
+    if (session_id > 0) {
+        char tmp_dir[64];
+        snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cclaw-%lld", (long long)session_id);
+        mkdir(tmp_dir, 0700);
+        if (add_path_rule(ruleset_fd, tmp_dir, ACCESS_RW) < 0) {
+            fprintf(stderr, "[landlock] warning: cannot add tmp rule for %s: %s\n",
+                    tmp_dir, strerror(errno));
+        }
     }
 
     /* System read-only paths */

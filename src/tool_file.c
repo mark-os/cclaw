@@ -30,7 +30,8 @@ static int path_in_workspace(const char *filepath, const char *workspace, char *
 }
 
 char *tool_file_read_handler(const char *arguments, void *user_data) {
-    const char *workspace = (const char *)user_data;
+    FileReadCtx *ctx = (FileReadCtx *)user_data;
+    const char *workspace = ctx ? ctx->workspace : NULL;
     if (!workspace) return strdup("error: no workspace configured");
 
     cJSON *json = cJSON_Parse(arguments);
@@ -52,10 +53,14 @@ char *tool_file_read_handler(const char *arguments, void *user_data) {
     }
     cJSON_Delete(json);
 
-    /* V1: verify path is within workspace */
+    /* V1: verify path is within workspace or extra_read_path (T118) */
     char resolved[PATH_MAX];
     if (!path_in_workspace(fullpath, workspace, resolved, sizeof(resolved))) {
-        return strdup("error: path outside workspace");
+        /* T118: check extra read path */
+        if (!ctx->extra_read_path ||
+            !path_in_workspace(fullpath, ctx->extra_read_path, resolved, sizeof(resolved))) {
+            return strdup("error: path outside workspace");
+        }
     }
 
     FILE *f = fopen(resolved, "rb");
@@ -70,11 +75,11 @@ char *tool_file_read_handler(const char *arguments, void *user_data) {
     return buf;
 }
 
-int tool_file_read_register(ToolRegistry *reg, const char *workspace) {
+int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx) {
     return tools_register(reg, "file_read",
                           "Read a file within the workspace directory",
                           FILE_READ_PARAMS_JSON, tool_file_read_handler,
-                          (void *)workspace);
+                          (void *)ctx);
 }
 
 static const char *FILE_WRITE_PARAMS_JSON =

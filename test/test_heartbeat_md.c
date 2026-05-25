@@ -10,10 +10,13 @@
 /* V42/T111: HEARTBEAT.md is optional workspace file read by agent during heartbeat */
 
 static char tmpdir[256];
+static FileReadCtx file_ctx;
 
 static void setup_workspace(void) {
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cclaw_hb_test_XXXXXX");
     assert(mkdtemp(tmpdir) != NULL);
+    file_ctx.workspace = tmpdir;
+    file_ctx.extra_read_path = NULL;
 }
 
 static void cleanup_workspace(void) {
@@ -32,7 +35,7 @@ static void test_heartbeat_md_readable(void) {
     fclose(f);
 
     /* Read via file_read handler (same path agent uses) */
-    char *result = tool_file_read_handler("{\"path\":\"HEARTBEAT.md\"}", (void *)tmpdir);
+    char *result = tool_file_read_handler("{\"path\":\"HEARTBEAT.md\"}", (void *)&file_ctx);
     assert(result);
     assert(strstr(result, "# Heartbeat Tasks"));
     assert(strstr(result, "Check disk usage"));
@@ -42,7 +45,7 @@ static void test_heartbeat_md_readable(void) {
 
 static void test_heartbeat_md_missing_graceful(void) {
     /* No HEARTBEAT.md — file_read returns error, agent handles gracefully */
-    char *result = tool_file_read_handler("{\"path\":\"HEARTBEAT.md\"}", (void *)tmpdir);
+    char *result = tool_file_read_handler("{\"path\":\"HEARTBEAT.md\"}", (void *)&file_ctx);
     assert(result);
     assert(strstr(result, "error:"));
     free(result);

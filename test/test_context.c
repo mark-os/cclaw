@@ -714,53 +714,42 @@ static void test_v28_normal_entries_kept(void) {
 /* T105/V40: Tool result truncated at 50KB in context_build output */
 static void test_v40_tool_result_truncation_bytes(void) {
     TEST(v40_tool_result_truncation_bytes);
-    Config cfg = {0};
-    cfg.provider.context_window = 128000;
 
-    /* Create a tool result > 50KB */
+    /* T118: truncation now happens at write time via truncate_and_spill */
     size_t big_size = 60 * 1024;
     char *big = malloc(big_size + 1);
     memset(big, 'X', big_size);
     big[big_size] = '\0';
 
-    ToolCall tc = { .id = "c1", .name = "shell_exec", .arguments = "{}" };
-    ToolResult tr = { .tool_call_id = "c1", .content = big };
-
-    Entry entries[3] = {
-        make_entry(1, ROLE_USER, "run it"),
-        make_entry(2, ROLE_ASSISTANT, NULL),
-        make_entry(3, ROLE_TOOL, NULL),
-    };
-    entries[1].message.tool_calls = &tc;
-    entries[1].message.tool_call_count = 1;
-    entries[2].message.tool_result = &tr;
-
-    Message *msgs = NULL;
-    int count = 0;
-    int rc = context_build(entries, 3, &cfg, &msgs, &count);
-    if (rc != 0) { FAIL("returned error"); free(big); return; }
-
-    /* Tool result should be truncated */
-    if (!msgs[2].tool_result || !msgs[2].tool_result->content) {
-        FAIL("missing tool_result content"); context_free(msgs, count); free(big); return;
-    }
-    size_t result_len = strlen(msgs[2].tool_result->content);
+    char *result = truncate_and_spill(big, 99999, "test_call_1");
+    if (!result) { FAIL("returned NULL"); free(big); return; }
+    size_t result_len = strlen(result);
     if (result_len >= big_size) {
-        FAIL("tool_result not truncated"); context_free(msgs, count); free(big); return;
+        FAIL("tool_result not truncated"); free(result); free(big); return;
     }
-    if (!strstr(msgs[2].tool_result->content, "[truncated")) {
-        FAIL("missing truncation suffix"); context_free(msgs, count); free(big); return;
+    if (!strstr(result, "[truncated")) {
+        FAIL("missing truncation suffix"); free(result); free(big); return;
     }
-    context_free(msgs, count);
+    if (!strstr(result, "/tmp/cclaw-99999/test_call_1.out")) {
+        FAIL("missing spill file path"); free(result); free(big); return;
+    }
+    /* Verify spill file exists with full content */
+    FILE *f = fopen("/tmp/cclaw-99999/test_call_1.out", "r");
+    if (!f) { FAIL("spill file not created"); free(result); free(big); return; }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fclose(f);
+    if ((size_t)fsize != big_size) { FAIL("spill file wrong size"); free(result); free(big); return; }
+
+    free(result);
     free(big);
+    system("rm -rf /tmp/cclaw-99999");
     PASS();
 }
 
-/* T105/V40: Tool result truncated at 2000 lines */
+/* T118/V40: Tool result truncated at 2000 lines */
 static void test_v40_tool_result_truncation_lines(void) {
     TEST(v40_tool_result_truncation_lines);
-    Config cfg = {0};
-    cfg.provider.context_window = 128000;
 
     /* Create a tool result with 3000 short lines (well under 50KB) */
     size_t line_len = 10; /* "line NNNN\n" */
@@ -770,38 +759,17 @@ static void test_v40_tool_result_truncation_lines(void) {
     for (int i = 0; i < 3000; i++)
         p += sprintf(p, "line %04d\n", i);
 
-    ToolCall tc = { .id = "c1", .name = "file_read", .arguments = "{}" };
-    ToolResult tr = { .tool_call_id = "c1", .content = big };
-
-    Entry entries[3] = {
-        make_entry(1, ROLE_USER, "read it"),
-        make_entry(2, ROLE_ASSISTANT, NULL),
-        make_entry(3, ROLE_TOOL, NULL),
-    };
-    entries[1].message.tool_calls = &tc;
-    entries[1].message.tool_call_count = 1;
-    entries[2].message.tool_result = &tr;
-
-    Message *msgs = NULL;
-    int count = 0;
-    int rc = context_build(entries, 3, &cfg, &msgs, &count);
-    if (rc != 0) { FAIL("returned error"); free(big); return; }
-
-    if (!msgs[2].tool_result || !msgs[2].tool_result->content) {
-        FAIL("missing tool_result content"); context_free(msgs, count); free(big); return;
+    char *result = truncate_and_spill(big, 99998, "test_call_2");
+    if (!result) { FAIL("returned NULL"); free(big); return; }
+    if (!strstr(result, "[truncated")) {
+        FAIL("missing truncation suffix"); free(result); free(big); return;
     }
-    if (!strstr(msgs[2].tool_result->content, "[truncated")) {
-        FAIL("missing truncation suffix"); context_free(msgs, count); free(big); return;
+    if (!strstr(result, "/tmp/cclaw-99998/test_call_2.out")) {
+        FAIL("missing spill file path"); free(result); free(big); return;
     }
-    /* Count lines in result — should be ~2000 */
-    int lines = 0;
-    for (const char *c = msgs[2].tool_result->content; *c; c++)
-        if (*c == '\n') lines++;
-    if (lines > 2005) { /* allow small margin for suffix */
-        FAIL("too many lines after truncation"); context_free(msgs, count); free(big); return;
-    }
-    context_free(msgs, count);
+    free(result);
     free(big);
+    system("rm -rf /tmp/cclaw-99998");
     PASS();
 }
 

@@ -535,9 +535,14 @@ int agent_run(AgentContext *ctx) {
             loop_ring.hashes[loop_ring.count % TOOL_LOOP_RING_SIZE] = h;
             loop_ring.count++;
 
-            ToolResult tr = {.tool_call_id = asst.tool_calls[i].id, .content = result};
+            /* T118: truncate at write time, spill full output to temp file */
+            char *stored = truncate_and_spill(result, ctx->session_id,
+                                             asst.tool_calls[i].id);
+            ToolResult tr = {.tool_call_id = asst.tool_calls[i].id,
+                             .content = stored ? stored : result};
             Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr};
             entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
+            free(stored);
             free(result);
         }
 

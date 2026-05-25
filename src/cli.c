@@ -11,7 +11,6 @@
 #include "tool_agent.h"
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
-#include "tool_soul.h"
 #include "tool_memory.h"
 #include "tool_approval.h"
 #include "shutdown.h"
@@ -226,10 +225,6 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
     tool_js_eval_register(&reg, &js_eval_ctx);
     tool_web_fetch_register(&reg, NULL);
     tool_db_query_register(&reg, db);
-
-    /* T120: soul_edit tool */
-    ToolSoulCtx soul_ctx = {.db = db, .agent_name = agent_name};
-    tool_soul_register(&reg, &soul_ctx);
 
     /* T153: memory block tools */
     ToolMemoryCtx mem_ctx = {.db = db, .agent_name = agent_name};

@@ -104,8 +104,6 @@ CREATE TABLE IF NOT EXISTS agents (
   name TEXT NOT NULL UNIQUE,
   config TEXT,
   system_prompt TEXT,
-  soul TEXT,
-  memory TEXT,
   heartbeat TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())

@@ -315,7 +315,7 @@ T151|x|test: approval flow end-to-end — agent requests whitelist host → appr
 T152|x|memory blocks table — `memory_blocks(id, agent_name, label, value TEXT, description TEXT, char_limit INT DEFAULT 5000, read_only INT DEFAULT 0, created_at, updated_at)`; default: zero blocks — agent creates via `memory_create`; optionally pre-seeded from `agent.json` `memory_blocks[]`; DB authoritative after seed|§D,V55
 T153|x|memory tools — `memory_create(label, description, value?)`, `memory_append(label, content)`, `memory_replace(label, old, new)`; operate on block `value` only; respect `read_only` flag; persist to DB immediately|§I,T152
 T154|x|system prompt memory injection — at context build, render blocks into prompt as labeled sections w/ metadata (label, description, chars_used/limit); agent sees structure, knows what each block is for|T152,T122
-T155| |drop flat `soul`/`memory` columns from agents table — migrate existing content to `persona`/`human` blocks on first access|T152
+T155|x|drop flat `soul`/`memory` columns from agents table — migrate existing content to `persona`/`human` blocks on first access|T152
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)

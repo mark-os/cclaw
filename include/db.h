@@ -128,8 +128,6 @@ typedef struct {
     char *name;
     char *config;         /* JSON string */
     char *system_prompt;
-    char *soul;
-    char *memory;
     char *heartbeat;
     int64_t created_at;
     int64_t updated_at;
@@ -140,18 +138,11 @@ AgentRow *db_agent_get(sqlite3 *db, const char *name);
 
 /* Insert or update agent row. Returns 0 on success, -1 on error. */
 int db_agent_upsert(sqlite3 *db, const char *name, const char *config,
-                    const char *system_prompt, const char *soul,
-                    const char *memory, const char *heartbeat);
+                    const char *system_prompt, const char *heartbeat);
 
 /* Seed agent from disk if not in DB. Loads agent.json + system.md from agents_dir.
  * Returns agent row (from DB after potential seed). Caller frees with agent_row_free. */
 AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name);
-
-/* T120: Update agent soul text. Returns 0 on success, -1 on error. */
-int db_agent_set_soul(sqlite3 *db, const char *name, const char *soul);
-
-/* T121: Update agent memory text. Returns 0 on success, -1 on error. */
-int db_agent_set_memory(sqlite3 *db, const char *name, const char *memory);
 
 /* Free AgentRow. */
 void agent_row_free(AgentRow *row);

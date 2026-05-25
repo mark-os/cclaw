@@ -454,10 +454,8 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
 
     /* Calculate total size */
     size_t rlen = rendered ? strlen(rendered) : 0;
-    size_t soul_len = (row->soul && row->soul[0]) ? strlen(row->soul) : 0;
-    size_t mem_len = (row->memory && row->memory[0]) ? strlen(row->memory) : 0;
     size_t skills_len = skills ? strlen(skills) : 0;
-    size_t total = rlen + soul_len + mem_len + skills_len + mb_len + 128;
+    size_t total = rlen + skills_len + mb_len + 128;
 
     char *out = malloc(total);
     if (!out) {
@@ -472,20 +470,6 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     if (rendered) {
         memcpy(out, rendered, rlen);
         oi = rlen;
-    }
-
-    if (soul_len > 0) {
-        const char *hdr = "\n\n## Soul\n";
-        size_t hlen = strlen(hdr);
-        memcpy(out + oi, hdr, hlen); oi += hlen;
-        memcpy(out + oi, row->soul, soul_len); oi += soul_len;
-    }
-
-    if (mem_len > 0) {
-        const char *hdr = "\n\n## Memory\n";
-        size_t hlen = strlen(hdr);
-        memcpy(out + oi, hdr, hlen); oi += hlen;
-        memcpy(out + oi, row->memory, mem_len); oi += mem_len;
     }
 
     if (mb_len > 0) {

@@ -24,8 +24,7 @@ static void teardown(sqlite3 *db) {
 static void test_upsert_and_get(void) {
     sqlite3 *db = setup();
 
-    int rc = db_agent_upsert(db, "coder", "{\"model\":\"gpt-4\"}", "You are a coder.",
-                             "friendly", "user likes C", NULL);
+    int rc = db_agent_upsert(db, "coder", "{\"model\":\"gpt-4\"}", "You are a coder.", NULL);
     assert(rc == 0);
 
     AgentRow *row = db_agent_get(db, "coder");
@@ -33,22 +32,18 @@ static void test_upsert_and_get(void) {
     assert(strcmp(row->name, "coder") == 0);
     assert(strcmp(row->config, "{\"model\":\"gpt-4\"}") == 0);
     assert(strcmp(row->system_prompt, "You are a coder.") == 0);
-    assert(strcmp(row->soul, "friendly") == 0);
-    assert(strcmp(row->memory, "user likes C") == 0);
     assert(row->heartbeat == NULL);
     assert(row->id > 0);
     agent_row_free(row);
 
     /* Update existing */
-    rc = db_agent_upsert(db, "coder", "{\"model\":\"gpt-5\"}", "Updated prompt.",
-                         "serious", "new facts", "check logs");
+    rc = db_agent_upsert(db, "coder", "{\"model\":\"gpt-5\"}", "Updated prompt.", "check logs");
     assert(rc == 0);
 
     row = db_agent_get(db, "coder");
     assert(row != NULL);
     assert(strcmp(row->config, "{\"model\":\"gpt-5\"}") == 0);
     assert(strcmp(row->system_prompt, "Updated prompt.") == 0);
-    assert(strcmp(row->soul, "serious") == 0);
     assert(strcmp(row->heartbeat, "check logs") == 0);
     agent_row_free(row);
 
@@ -87,19 +82,16 @@ static void test_seed_from_disk(void) {
     assert(strcmp(row->name, "mybot") == 0);
     assert(strstr(row->config, "deepseek") != NULL);
     assert(strcmp(row->system_prompt, "You are mybot.") == 0);
-    assert(row->soul == NULL);
     agent_row_free(row);
 
     /* Modify DB directly — DB is authoritative */
-    db_agent_upsert(db, "mybot", "{\"model\":\"changed\"}", "DB prompt.",
-                    "soul text", NULL, NULL);
+    db_agent_upsert(db, "mybot", "{\"model\":\"changed\"}", "DB prompt.", NULL);
 
     /* Second call returns DB version, not disk */
     row = db_agent_seed(db, AGENTS_DIR, "mybot");
     assert(row != NULL);
     assert(strcmp(row->config, "{\"model\":\"changed\"}") == 0);
     assert(strcmp(row->system_prompt, "DB prompt.") == 0);
-    assert(strcmp(row->soul, "soul text") == 0);
     agent_row_free(row);
 
     teardown(db);

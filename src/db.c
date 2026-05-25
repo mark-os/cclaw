@@ -39,6 +39,42 @@ sqlite3 *db_open(const char *path) {
         return NULL;
     }
 
+    /* T155: migrate soul/memory columns to memory_blocks, then drop columns */
+    {
+        sqlite3_stmt *chk;
+        if (sqlite3_prepare_v2(db, "SELECT soul, memory FROM agents LIMIT 0", -1, &chk, NULL) == SQLITE_OK) {
+            sqlite3_finalize(chk);
+            /* Columns exist — migrate non-NULL content */
+            sqlite3_stmt *scan;
+            if (sqlite3_prepare_v2(db, "SELECT name, soul, memory FROM agents WHERE soul IS NOT NULL OR memory IS NOT NULL", -1, &scan, NULL) == SQLITE_OK) {
+                while (sqlite3_step(scan) == SQLITE_ROW) {
+                    const char *aname = (const char *)sqlite3_column_text(scan, 0);
+                    const char *soul = (const char *)sqlite3_column_text(scan, 1);
+                    const char *mem = (const char *)sqlite3_column_text(scan, 2);
+                    if (aname && soul && soul[0]) {
+                        /* Create persona block if not exists */
+                        MemoryBlock *existing = memory_block_get(db, aname, "persona");
+                        if (!existing)
+                            memory_block_create(db, aname, "persona", "Agent identity and tone", soul, 5000);
+                        else
+                            memory_block_free(existing);
+                    }
+                    if (aname && mem && mem[0]) {
+                        MemoryBlock *existing = memory_block_get(db, aname, "human");
+                        if (!existing)
+                            memory_block_create(db, aname, "human", "Known facts about the user", mem, 5000);
+                        else
+                            memory_block_free(existing);
+                    }
+                }
+                sqlite3_finalize(scan);
+            }
+            /* Drop columns */
+            sqlite3_exec(db, "ALTER TABLE agents DROP COLUMN soul;", NULL, NULL, NULL);
+            sqlite3_exec(db, "ALTER TABLE agents DROP COLUMN memory;", NULL, NULL, NULL);
+        }
+    }
+
     return db;
 }
 
@@ -938,7 +974,7 @@ void spawn_request_free(SpawnRequest *list, int count) {
 
 AgentRow *db_agent_get(sqlite3 *db, const char *name) {
     if (!db || !name) return NULL;
-    const char *sql = "SELECT id, name, config, system_prompt, soul, memory, heartbeat, "
+    const char *sql = "SELECT id, name, config, system_prompt, heartbeat, "
                       "created_at, updated_at FROM agents WHERE name = ?";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
@@ -956,13 +992,9 @@ AgentRow *db_agent_get(sqlite3 *db, const char *name) {
             v = (const char *)sqlite3_column_text(stmt, 3);
             row->system_prompt = v ? strdup(v) : NULL;
             v = (const char *)sqlite3_column_text(stmt, 4);
-            row->soul = v ? strdup(v) : NULL;
-            v = (const char *)sqlite3_column_text(stmt, 5);
-            row->memory = v ? strdup(v) : NULL;
-            v = (const char *)sqlite3_column_text(stmt, 6);
             row->heartbeat = v ? strdup(v) : NULL;
-            row->created_at = sqlite3_column_int64(stmt, 7);
-            row->updated_at = sqlite3_column_int64(stmt, 8);
+            row->created_at = sqlite3_column_int64(stmt, 5);
+            row->updated_at = sqlite3_column_int64(stmt, 6);
         }
     }
     sqlite3_finalize(stmt);
@@ -970,24 +1002,21 @@ AgentRow *db_agent_get(sqlite3 *db, const char *name) {
 }
 
 int db_agent_upsert(sqlite3 *db, const char *name, const char *config,
-                    const char *system_prompt, const char *soul,
-                    const char *memory, const char *heartbeat) {
+                    const char *system_prompt, const char *heartbeat) {
     if (!db || !name) return -1;
     const char *sql =
-        "INSERT INTO agents (name, config, system_prompt, soul, memory, heartbeat) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
+        "INSERT INTO agents (name, config, system_prompt, heartbeat) "
+        "VALUES (?, ?, ?, ?) "
         "ON CONFLICT(name) DO UPDATE SET "
         "config=excluded.config, system_prompt=excluded.system_prompt, "
-        "soul=excluded.soul, memory=excluded.memory, heartbeat=excluded.heartbeat, "
+        "heartbeat=excluded.heartbeat, "
         "updated_at=unixepoch()";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, config, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, system_prompt, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, soul, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 5, memory, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 6, heartbeat, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, heartbeat, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? 0 : -1;
@@ -1034,7 +1063,7 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
         sys_prompt = read_file_str(path);
     }
 
-    db_agent_upsert(db, name, config_json, sys_prompt, NULL, NULL, NULL);
+    db_agent_upsert(db, name, config_json, sys_prompt, NULL);
 
     /* T152: seed memory blocks from agent.json */
     if (config_json)
@@ -1046,41 +1075,11 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
     return db_agent_get(db, name);
 }
 
-/* T120: Update agent soul text */
-int db_agent_set_soul(sqlite3 *db, const char *name, const char *soul) {
-    if (!db || !name) return -1;
-    const char *sql = "UPDATE agents SET soul = ?, updated_at = unixepoch() WHERE name = ?";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, soul, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) return -1;
-    return sqlite3_changes(db) > 0 ? 0 : -1;
-}
-
-/* T121: Update agent memory text */
-int db_agent_set_memory(sqlite3 *db, const char *name, const char *memory) {
-    if (!db || !name) return -1;
-    const char *sql = "UPDATE agents SET memory = ?, updated_at = unixepoch() WHERE name = ?";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, memory, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) return -1;
-    return sqlite3_changes(db) > 0 ? 0 : -1;
-}
-
 void agent_row_free(AgentRow *row) {
     if (!row) return;
     free(row->name);
     free(row->config);
     free(row->system_prompt);
-    free(row->soul);
-    free(row->memory);
     free(row->heartbeat);
     free(row);
 }

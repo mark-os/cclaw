@@ -294,8 +294,9 @@ static void test_build_system_prompt(void) {
     assert(row != NULL);
     agent_row_free(row);
 
-    db_agent_set_soul(db, "mybot", "I am friendly.");
-    db_agent_set_memory(db, "mybot", "User likes C.");
+    /* Create memory blocks to replace old soul/memory columns */
+    memory_block_create(db, "mybot", "persona", "Agent identity and tone", "I am friendly.", 5000);
+    memory_block_create(db, "mybot", "human", "Known facts about the user", "User likes C.", 5000);
 
     /* Build prompt */
     Config cfg = {0};
@@ -304,8 +305,8 @@ static void test_build_system_prompt(void) {
     assert(prompt != NULL);
     assert(strstr(prompt, "You are mybot.") != NULL);
     assert(strstr(prompt, "Session 7.") != NULL);
-    assert(strstr(prompt, "## Soul\nI am friendly.") != NULL);
-    assert(strstr(prompt, "## Memory\nUser likes C.") != NULL);
+    assert(strstr(prompt, "I am friendly.") != NULL);
+    assert(strstr(prompt, "User likes C.") != NULL);
     assert(strstr(prompt, "## Skills\nYou can write code.") != NULL);
     free(prompt);
 

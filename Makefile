@@ -3,6 +3,7 @@ CFLAGS  := -std=c11 -Wall -Wextra -Werror -Iinclude -Ivendor/cJSON -Ivendor/sqli
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
+TEMPLATES := $(wildcard templates/*)
 SRC      := $(filter-out src/mjs_main.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 DEP      := $(OBJ:.o=.d)
@@ -31,8 +32,11 @@ build: all
 $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(BUILDDIR)/%.o: src/%.c | $(BUILDDIR)/
-	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+$(BUILDDIR)/templates.h: $(TEMPLATES) scripts/gen_templates.sh | $(BUILDDIR)/
+	./scripts/gen_templates.sh $@ templates
+
+$(BUILDDIR)/%.o: src/%.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
+	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -c -o $@ $<
 
 $(BUILDDIR)/cJSON.o: vendor/cJSON/cJSON.c | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -Wno-unused-parameter -c -o $@ $<
@@ -119,7 +123,7 @@ $(BUILDDIR)/libcclaw.a: $(LIB_OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	$(AR) rcs $@ $^
 
 $(BUILDDIR)/test_%: test/test_%.c $(BUILDDIR)/libcclaw.a | $(BUILDDIR)/
-	$(CC) $(CFLAGS) -o $@ $< $(BUILDDIR)/libcclaw.a $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(BUILDDIR) -o $@ $< $(BUILDDIR)/libcclaw.a $(LDFLAGS)
 
 clean:
 	rm -rf $(BUILDDIR)

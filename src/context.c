@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "context.h"
+#include "templates.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,16 +9,12 @@
 #define TRUNCATE_MAX_BYTES  (50 * 1024)
 #define TRUNCATE_MAX_LINES  2000
 
-static const char *CUTOFF_NOTICE =
-    "[Earlier conversation history was truncated to fit context window. "
-    "Use search to find older messages.]";
+static const char *CUTOFF_NOTICE = TPL_CUTOFF_NOTICE_TXT;
 
 /* V17: notice injected when an incomplete turn is detected */
-static const char *INCOMPLETE_TURN_NOTICE =
-    "[Previous turn was interrupted. Tool results may be incomplete. Retry if needed.]";
+static const char *INCOMPLETE_TURN_NOTICE = TPL_INCOMPLETE_TURN_NOTICE_TXT;
 
-static const char *INCOMPLETE_TOOL_CONTENT =
-    "error: process terminated during execution";
+static const char *INCOMPLETE_TOOL_CONTENT = TPL_INCOMPLETE_TOOL_CONTENT_TXT;
 
 int context_estimate_tokens(const Message *msg) {
     int tokens = 4; /* per-message overhead */

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config.h"
 #include "cJSON.h"
+#include "templates.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -203,31 +204,11 @@ static void write_file_if_missing(const char *path, const char *content) {
     fclose(f);
 }
 
-static const char *DEFAULT_SOUL =
-    "# SOUL\n"
-    "You are CClaw, a personal AI assistant.\n"
-    "Be direct, concise, and helpful. Act rather than explain.\n";
+static const char *DEFAULT_SOUL = TPL_DEFAULT_SOUL_MD;
 
-static const char *DEFAULT_MEMORY =
-    "# MEMORY\n"
-    "Durable user preferences and facts go here.\n"
-    "Update this file when you learn something worth remembering across sessions.\n";
+static const char *DEFAULT_MEMORY = TPL_DEFAULT_MEMORY_MD;
 
-static const char *DEFAULT_SYSTEM_PROMPT =
-    "You are CClaw, an autonomous AI assistant capable of great things.\n"
-    "\n"
-    "## Tool Call Style\n"
-    "Routine low-risk calls: no narration.\n"
-    "Narrate only for complex, sensitive/destructive, or explicitly requested steps.\n"
-    "\n"
-    "## Execution Bias\n"
-    "Act in this turn. Continue until done or genuinely blocked.\n"
-    "Do not finish with a plan when tools can move it forward.\n"
-    "\n"
-    "## Workspace Context\n"
-    "Working directory: {workspace}\n"
-    "SOUL.md defines your persona. MEMORY.md stores durable facts.\n"
-    "You can read and write these files to evolve your behavior.\n";
+static const char *DEFAULT_SYSTEM_PROMPT = TPL_DEFAULT_SYSTEM_PROMPT_MD;
 
 int workspace_init(const Config *cfg) {
     if (!cfg || !cfg->workspace) return -1;

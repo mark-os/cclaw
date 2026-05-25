@@ -107,6 +107,40 @@ static void test_resolve_already_resolved(void) {
     printf("  PASS test_resolve_already_resolved\n");
 }
 
+/* T148: test unnotified listing and mark_notified */
+static void test_list_unnotified(void) {
+    sqlite3 *db = setup();
+    int64_t id1 = approval_insert(db, 1, "bot", "whitelist_host", "{\"host\":\"a.com\"}");
+    int64_t id2 = approval_insert(db, 2, "bot", "model_change", "{\"model\":\"x\"}");
+
+    /* Both should be unnotified initially */
+    int count = 0;
+    Approval *list = approval_list_unnotified(db, &count);
+    assert(count == 2);
+    assert(list[0].id == id1);
+    assert(list[1].id == id2);
+    approval_list_free(list, count);
+
+    /* Mark first as notified */
+    int rc = approval_mark_notified(db, id1);
+    assert(rc == 0);
+
+    /* Only second should remain unnotified */
+    list = approval_list_unnotified(db, &count);
+    assert(count == 1);
+    assert(list[0].id == id2);
+    approval_list_free(list, count);
+
+    /* Mark second as notified */
+    approval_mark_notified(db, id2);
+    list = approval_list_unnotified(db, &count);
+    assert(count == 0);
+    assert(list == NULL);
+
+    teardown(db);
+    printf("  PASS test_list_unnotified\n");
+}
+
 int main(void) {
     printf("test_approvals:\n");
     test_insert_and_get();
@@ -114,6 +148,7 @@ int main(void) {
     test_resolve_approve();
     test_resolve_deny();
     test_resolve_already_resolved();
+    test_list_unnotified();
     printf("All approvals tests passed.\n");
     return 0;
 }

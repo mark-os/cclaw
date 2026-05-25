@@ -1192,3 +1192,51 @@ void approval_list_free(Approval *list, int count) {
     }
     free(list);
 }
+
+/* T148: get pending approvals not yet notified to admins */
+Approval *approval_list_unnotified(sqlite3 *db, int *count) {
+    *count = 0;
+    const char *sql = "SELECT id, session_id, agent_name, type, payload, status, admin_chat_id, created_at, resolved_at "
+                      "FROM approvals WHERE status='pending' AND notified=0 ORDER BY id;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    int cap = 4;
+    Approval *list = malloc((size_t)cap * sizeof(Approval));
+    if (!list) { sqlite3_finalize(stmt); return NULL; }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (*count >= cap) {
+            cap *= 2;
+            Approval *tmp = realloc(list, (size_t)cap * sizeof(Approval));
+            if (!tmp) break;
+            list = tmp;
+        }
+        Approval *a = &list[*count];
+        a->id = sqlite3_column_int64(stmt, 0);
+        a->session_id = sqlite3_column_int64(stmt, 1);
+        const char *s = (const char *)sqlite3_column_text(stmt, 2);
+        a->agent_name = s ? strdup(s) : NULL;
+        s = (const char *)sqlite3_column_text(stmt, 3);
+        a->type = s ? strdup(s) : NULL;
+        s = (const char *)sqlite3_column_text(stmt, 4);
+        a->payload = s ? strdup(s) : NULL;
+        s = (const char *)sqlite3_column_text(stmt, 5);
+        a->status = s ? strdup(s) : NULL;
+        a->admin_chat_id = sqlite3_column_int64(stmt, 6);
+        a->created_at = sqlite3_column_int64(stmt, 7);
+        a->resolved_at = sqlite3_column_int64(stmt, 8);
+        (*count)++;
+    }
+    sqlite3_finalize(stmt);
+    if (*count == 0) { free(list); return NULL; }
+    return list;
+}
+
+int approval_mark_notified(sqlite3 *db, int64_t id) {
+    const char *sql = "UPDATE approvals SET notified=1 WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE ? 0 : -1;
+}

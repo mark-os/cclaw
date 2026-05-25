@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   payload TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   admin_chat_id INTEGER,
+  notified INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   resolved_at INTEGER
 );

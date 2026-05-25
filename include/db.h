@@ -182,6 +182,12 @@ Approval *approval_get(sqlite3 *db, int64_t id);
 /* Resolve approval (approve or deny). Sets status + resolved_at + admin_chat_id. Returns 0 on success. */
 int approval_resolve(sqlite3 *db, int64_t id, const char *status, int64_t admin_chat_id);
 
+/* T148: Get pending approvals not yet notified to admins. Caller frees with approval_list_free. */
+Approval *approval_list_unnotified(sqlite3 *db, int *count);
+
+/* T148: Mark approval as notified (sent to admins). Returns 0 on success. */
+int approval_mark_notified(sqlite3 *db, int64_t id);
+
 /* Free single Approval. */
 void approval_free(Approval *a);
 

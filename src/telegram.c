@@ -860,6 +860,100 @@ static int handle_whitelist_reply(int64_t chat_id, const char *text) {
     return 1;
 }
 
+/* T148: Send approval request to a single admin chat with Approve/Deny buttons */
+static void approval_send_to_admin(const char *token, int64_t chat_id, const Approval *a) {
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
+
+    char text_buf[512];
+    snprintf(text_buf, sizeof(text_buf),
+             "\xf0\x9f\x94\x91 Approval Request #%lld\n"
+             "Agent: %s\nType: %s\nPayload: %s",
+             (long long)a->id,
+             a->agent_name ? a->agent_name : "unknown",
+             a->type ? a->type : "unknown",
+             a->payload ? a->payload : "{}");
+    cJSON_AddStringToObject(body, "text", text_buf);
+
+    cJSON *markup = cJSON_CreateObject();
+    cJSON *rows = cJSON_CreateArray();
+    cJSON *row = cJSON_CreateArray();
+
+    char approve_data[32], deny_data[32];
+    snprintf(approve_data, sizeof(approve_data), "approve:%lld", (long long)a->id);
+    snprintf(deny_data, sizeof(deny_data), "deny:%lld", (long long)a->id);
+
+    cJSON *btn_approve = cJSON_CreateObject();
+    cJSON_AddStringToObject(btn_approve, "text", "\xe2\x9c\x85 Approve");
+    cJSON_AddStringToObject(btn_approve, "callback_data", approve_data);
+    cJSON_AddItemToArray(row, btn_approve);
+
+    cJSON *btn_deny = cJSON_CreateObject();
+    cJSON_AddStringToObject(btn_deny, "text", "\xe2\x9d\x8c Deny");
+    cJSON_AddStringToObject(btn_deny, "callback_data", deny_data);
+    cJSON_AddItemToArray(row, btn_deny);
+
+    cJSON_AddItemToArray(rows, row);
+    cJSON_AddItemToObject(markup, "inline_keyboard", rows);
+    cJSON_AddItemToObject(body, "reply_markup", markup);
+
+    char *json = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+    if (json) {
+        cJSON *resp = tg_call(token, "sendMessage", json);
+        cJSON_Delete(resp);
+        free(json);
+    }
+}
+
+/* T148: Check for unnotified pending approvals and deliver to all admins */
+static void telegram_check_approvals(void) {
+    if (!g_cfg || !g_cfg->telegram_token || !g_db) return;
+    if (g_cfg->admin_chat_id_count == 0) return;
+
+    int count = 0;
+    Approval *list = approval_list_unnotified(g_db, &count);
+    if (!list) return;
+
+    for (int i = 0; i < count; i++) {
+        for (size_t j = 0; j < g_cfg->admin_chat_id_count; j++) {
+            approval_send_to_admin(g_cfg->telegram_token,
+                                   g_cfg->admin_chat_ids[j], &list[i]);
+        }
+        approval_mark_notified(g_db, list[i].id);
+    }
+    approval_list_free(list, count);
+}
+
+/* T148: Handle approve/deny callback from admin inline keyboard */
+static void handle_approval_callback(const char *data, int64_t chat_id, const char *callback_id) {
+    int approving = (strncmp(data, "approve:", 8) == 0);
+    const char *id_str = data + (approving ? 8 : 5); /* "approve:" or "deny:" */
+    int64_t approval_id = strtoll(id_str, NULL, 10);
+    if (approval_id <= 0) return;
+
+    const char *status = approving ? "approved" : "denied";
+    int rc = approval_resolve(g_db, approval_id, status, chat_id);
+
+    /* Answer callback query */
+    if (callback_id) {
+        char ans[128];
+        snprintf(ans, sizeof(ans),
+                 "{\"callback_query_id\":\"%s\",\"text\":\"Approval #%lld %s\"}",
+                 callback_id, (long long)approval_id, status);
+        cJSON *r = tg_call(g_cfg->telegram_token, "answerCallbackQuery", ans);
+        cJSON_Delete(r);
+    }
+
+    /* Notify admin of result */
+    char msg[128];
+    if (rc == 0)
+        snprintf(msg, sizeof(msg), "Approval #%lld %s.", (long long)approval_id, status);
+    else
+        snprintf(msg, sizeof(msg), "Failed to resolve approval #%lld (already resolved?).", (long long)approval_id);
+    telegram_send_message(g_cfg->telegram_token, chat_id, msg);
+}
+
 /* T140: Dispatch admin command to handler. */
 static void dispatch_admin_command(const char *text, int64_t chat_id) {
     const char *args = NULL;
@@ -1023,6 +1117,9 @@ static void *poll_loop(void *arg) {
                                 handle_config_endpoint_callback(cb_data->valuestring, from_chat_id, cb_id_str);
                             else if (strncmp(cb_data->valuestring, "wl:", 3) == 0)
                                 handle_wl_callback(cb_data->valuestring, from_chat_id, cb_id_str);
+                            else if (strncmp(cb_data->valuestring, "approve:", 8) == 0 ||
+                                     strncmp(cb_data->valuestring, "deny:", 5) == 0)
+                                handle_approval_callback(cb_data->valuestring, from_chat_id, cb_id_str);
                         }
                     }
                 }
@@ -1036,6 +1133,9 @@ static void *poll_loop(void *arg) {
         }
 
         cJSON_Delete(resp);
+
+        /* T148: deliver any unnotified pending approvals to admins */
+        telegram_check_approvals();
     }
 
     return NULL;

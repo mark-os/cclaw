@@ -45,6 +45,7 @@ static const char *role_str(Role r) {
         case ROLE_USER:      return "user";
         case ROLE_ASSISTANT: return "assistant";
         case ROLE_TOOL:      return "tool";
+        case ROLE_COMPACTION: return "user"; /* V58: summary shown as user msg */
     }
     return "user";
 }

@@ -58,6 +58,13 @@ int64_t entry_append(sqlite3 *db, int64_t session_id, const Message *msg);
  * Updates session leaf_id to new entry. Returns new entry id or -1. */
 int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, const Message *msg);
 
+/* V58,V59: Insert compaction summary and reparent.
+ * Inserts ROLE_COMPACTION entry as child of last_kept_id.
+ * Reparents first_after_id to point to the new summary node.
+ * Returns compaction entry id (>0) or -1 on error. Does NOT update session leaf_id. */
+int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
+                      int64_t first_after_id, const char *summary);
+
 /* Free a Session array returned by session_list. */
 void session_list_free(Session *sessions, int count);
 

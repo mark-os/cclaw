@@ -431,6 +431,7 @@ static int role_to_int(Role r) {
         case ROLE_USER:      return 1;
         case ROLE_ASSISTANT: return 2;
         case ROLE_TOOL:      return 3;
+        case ROLE_COMPACTION: return 4;
     }
     return 1;
 }
@@ -441,6 +442,7 @@ static Role int_to_role(int i) {
         case 1: return ROLE_USER;
         case 2: return ROLE_ASSISTANT;
         case 3: return ROLE_TOOL;
+        case 4: return ROLE_COMPACTION;
     }
     return ROLE_USER;
 }
@@ -565,15 +567,17 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
 
     if (leaf_id < 0) return NULL; /* no entries yet */
 
-    /* Walk chain using recursive CTE — read split columns */
+    /* Walk chain using recursive CTE — read split columns.
+     * V58: use level counter for ordering (not ORDER BY id) since compaction
+     * entries may have higher ids than entries they precede in the path. */
     const char *branch_sql =
-        "WITH RECURSIVE branch(id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason) AS ("
-        "  SELECT id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason"
+        "WITH RECURSIVE branch(id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason, lvl) AS ("
+        "  SELECT id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason, 0"
         "    FROM entries WHERE id=? AND session_id=?"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.original_parent_id, e.session_id, e.created_at, e.role, e.content, e.tool_calls, e.tool_call_id, e.stop_reason"
+        "  SELECT e.id, e.parent_id, e.original_parent_id, e.session_id, e.created_at, e.role, e.content, e.tool_calls, e.tool_call_id, e.stop_reason, b.lvl+1"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
-        ") SELECT id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason FROM branch ORDER BY id;";
+        ") SELECT id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason FROM branch ORDER BY lvl DESC;";
 
     if (sqlite3_prepare_v2(db, branch_sql, -1, &stmt, NULL) != SQLITE_OK)
         return NULL;
@@ -735,6 +739,53 @@ int64_t entry_append(sqlite3 *db, int64_t session_id, const Message *msg) {
 
     /* leaf_id == -1 means no entries yet → parent_id stays -1 (root) */
     return entry_append_at(db, session_id, parent_id, msg);
+}
+
+/* V58,V59: Insert compaction summary entry and reparent.
+ * - Inserts role=COMPACTION entry with parent_id = last_kept_id
+ * - Reparents first_after_id to point to the new summary node
+ * - Sets original_parent_id on reparented entry
+ * Returns new compaction entry id (>0) or -1 on error. */
+int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
+                      int64_t first_after_id, const char *summary) {
+    if (!db || !summary) return -1;
+
+    /* Insert compaction entry as child of last_kept_id */
+    const char *ins_sql =
+        "INSERT INTO entries (parent_id, session_id, role, content, stop_reason,"
+        " token_estimate, content_bytes, tool_call_count)"
+        " VALUES (?,?,4,?,0,?,?,0);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, ins_sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, last_kept_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    sqlite3_bind_text(stmt, 3, summary, -1, SQLITE_TRANSIENT);
+    int len = (int)strlen(summary);
+    sqlite3_bind_int(stmt, 4, (len / 4) + 4);
+    sqlite3_bind_int(stmt, 5, len);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+
+    int64_t compact_id = sqlite3_last_insert_rowid(db);
+
+    /* Reparent first_after_id → compact_id, save original_parent_id (V59) */
+    const char *reparent_sql =
+        "UPDATE entries SET original_parent_id = parent_id, parent_id = ?"
+        " WHERE id = ? AND session_id = ?;";
+    if (sqlite3_prepare_v2(db, reparent_sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, compact_id);
+    sqlite3_bind_int64(stmt, 2, first_after_id);
+    sqlite3_bind_int64(stmt, 3, session_id);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+
+    return compact_id;
 }
 
 void entry_branch_free(Entry *entries, int count) {

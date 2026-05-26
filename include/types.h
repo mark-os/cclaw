@@ -10,7 +10,8 @@ typedef enum {
     ROLE_SYSTEM,
     ROLE_USER,
     ROLE_ASSISTANT,
-    ROLE_TOOL
+    ROLE_TOOL,
+    ROLE_COMPACTION   /* V58: summary node — CTE stops here */
 } Role;
 
 /* V35: normalized stop reason (provider-agnostic) */

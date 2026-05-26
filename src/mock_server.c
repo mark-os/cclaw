@@ -63,13 +63,25 @@ static int handle_completions(struct mg_connection *conn, void *cbdata) {
     (void)cbdata;
     const struct mg_request_info *ri = mg_get_request_info(conn);
 
-    /* Read request body */
-    int content_len = (int)(ri->content_length > 0 ? ri->content_length : 0);
+    /* Read request body (supports both Content-Length and chunked) */
     char *req_body = NULL;
-    if (content_len > 0) {
-        req_body = malloc((size_t)content_len + 1);
-        int nread = mg_read(conn, req_body, (size_t)content_len);
+    if (ri->content_length > 0) {
+        size_t content_len = (size_t)ri->content_length;
+        req_body = malloc(content_len + 1);
+        int nread = mg_read(conn, req_body, content_len);
         req_body[nread > 0 ? nread : 0] = '\0';
+    } else {
+        /* Chunked or unknown length — read until EOF */
+        size_t cap = 4096, len = 0;
+        req_body = malloc(cap);
+        while (1) {
+            if (len + 1024 > cap) { cap *= 2; req_body = realloc(req_body, cap); }
+            int n = mg_read(conn, req_body + len, 1024);
+            if (n <= 0) break;
+            len += (size_t)n;
+        }
+        req_body[len] = '\0';
+        if (len == 0) { free(req_body); req_body = NULL; }
     }
 
     pthread_mutex_lock(&s_mutex);

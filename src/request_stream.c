@@ -49,73 +49,39 @@ static int buf_empty(const RequestStreamer *rs) {
     return rs->buf_pos >= rs->buf_len;
 }
 
-/* Reshape a single entry's DB JSON into OpenAI message JSON.
+/* Reshape split columns into OpenAI message JSON.
  * Returns heap-allocated string (caller frees). */
-static char *reshape_entry(const char *data_json) {
-    if (!data_json) return NULL;
-
-    cJSON *obj = cJSON_Parse(data_json);
-    if (!obj) return NULL;
-
-    cJSON *role_j = cJSON_GetObjectItem(obj, "role");
-    const char *role = role_j ? role_j->valuestring : "user";
-
+static char *reshape_entry_from_columns(int role, const char *content,
+                                        const char *tool_calls, const char *tool_call_id) {
     cJSON *out = cJSON_CreateObject();
 
-    if (strcmp(role, "tool_result") == 0) {
-        /* Tool result → {"role":"tool","tool_call_id":"...","content":"..."} */
+    if (role == 3) { /* tool_result */
         cJSON_AddStringToObject(out, "role", "tool");
-        cJSON *tc_id = cJSON_GetObjectItem(obj, "tool_call_id");
-        cJSON_AddStringToObject(out, "tool_call_id",
-                                tc_id && tc_id->valuestring ? tc_id->valuestring : "");
-        cJSON *content = cJSON_GetObjectItem(obj, "content");
-        const char *raw = content && content->valuestring ? content->valuestring : "";
-        /* T118: data already truncated at write time */
-        cJSON_AddStringToObject(out, "content", raw);
-    } else if (strcmp(role, "assistant") == 0) {
+        cJSON_AddStringToObject(out, "tool_call_id", tool_call_id ? tool_call_id : "");
+        cJSON_AddStringToObject(out, "content", content ? content : "");
+    } else if (role == 2) { /* assistant */
         cJSON_AddStringToObject(out, "role", "assistant");
-        cJSON *content = cJSON_GetObjectItem(obj, "content");
+        if (content)
+            cJSON_AddStringToObject(out, "content", content);
+        else
+            cJSON_AddNullToObject(out, "content");
 
-        if (cJSON_IsArray(content)) {
-            /* Parse content array: text blocks + tool_calls */
-            const char *text = NULL;
-            int n = cJSON_GetArraySize(content);
-            int tc_count = 0;
-            for (int i = 0; i < n; i++) {
-                cJSON *item = cJSON_GetArrayItem(content, i);
-                cJSON *type = cJSON_GetObjectItem(item, "type");
-                if (type && type->valuestring) {
-                    if (strcmp(type->valuestring, "tool_call") == 0) tc_count++;
-                    else if (strcmp(type->valuestring, "text") == 0) {
-                        cJSON *t = cJSON_GetObjectItem(item, "text");
-                        if (t && t->valuestring) text = t->valuestring;
-                    }
-                }
-            }
-
-            if (text)
-                cJSON_AddStringToObject(out, "content", text);
-            else
-                cJSON_AddNullToObject(out, "content");
-
-            if (tc_count > 0) {
-                cJSON *tc_arr = cJSON_AddArrayToObject(out, "tool_calls");
+        if (tool_calls) {
+            /* Parse provider-neutral format, emit OpenAI format */
+            cJSON *tc_arr = cJSON_Parse(tool_calls);
+            if (tc_arr && cJSON_IsArray(tc_arr)) {
+                cJSON *out_arr = cJSON_AddArrayToObject(out, "tool_calls");
+                int n = cJSON_GetArraySize(tc_arr);
                 for (int i = 0; i < n; i++) {
-                    cJSON *item = cJSON_GetArrayItem(content, i);
-                    cJSON *type = cJSON_GetObjectItem(item, "type");
-                    if (!type || !type->valuestring ||
-                        strcmp(type->valuestring, "tool_call") != 0) continue;
-
+                    cJSON *item = cJSON_GetArrayItem(tc_arr, i);
                     cJSON *tc = cJSON_CreateObject();
                     cJSON *id = cJSON_GetObjectItem(item, "id");
-                    cJSON_AddStringToObject(tc, "id",
-                                            id && id->valuestring ? id->valuestring : "");
+                    cJSON_AddStringToObject(tc, "id", id && id->valuestring ? id->valuestring : "");
                     cJSON_AddStringToObject(tc, "type", "function");
                     cJSON *fn = cJSON_CreateObject();
                     cJSON *name = cJSON_GetObjectItem(item, "name");
-                    cJSON_AddStringToObject(fn, "name",
-                                            name && name->valuestring ? name->valuestring : "");
-                    cJSON *args = cJSON_GetObjectItem(item, "arguments");
+                    cJSON_AddStringToObject(fn, "name", name && name->valuestring ? name->valuestring : "");
+                    cJSON *args = cJSON_GetObjectItem(item, "args");
                     if (args) {
                         char *args_str = cJSON_PrintUnformatted(args);
                         if (args_str) {
@@ -126,25 +92,19 @@ static char *reshape_entry(const char *data_json) {
                         cJSON_AddStringToObject(fn, "arguments", "{}");
                     }
                     cJSON_AddItemToObject(tc, "function", fn);
-                    cJSON_AddItemToArray(tc_arr, tc);
+                    cJSON_AddItemToArray(out_arr, tc);
                 }
             }
-        } else if (cJSON_IsString(content)) {
-            cJSON_AddStringToObject(out, "content", content->valuestring);
-        } else {
-            cJSON_AddStringToObject(out, "content", "");
+            cJSON_Delete(tc_arr);
         }
     } else {
-        /* user / system */
-        cJSON_AddStringToObject(out, "role", role);
-        cJSON *content = cJSON_GetObjectItem(obj, "content");
-        cJSON_AddStringToObject(out, "content",
-                                content && content->valuestring ? content->valuestring : "");
+        /* user (1) / system (0) */
+        cJSON_AddStringToObject(out, "role", role == 0 ? "system" : "user");
+        cJSON_AddStringToObject(out, "content", content ? content : "");
     }
 
     char *result = cJSON_PrintUnformatted(out);
     cJSON_Delete(out);
-    cJSON_Delete(obj);
     return result;
 }
 
@@ -200,10 +160,10 @@ int rs_init(RequestStreamer *rs, sqlite3 *db, int64_t session_id,
     return 0;
 }
 
-/* Prepare cursor for entry data lookup by ID */
+/* Prepare cursor for entry split-column lookup by ID */
 static int prepare_cursor(RequestStreamer *rs) {
     if (rs->cursor) return 0;
-    const char *sql = "SELECT data FROM entries WHERE id=? AND session_id=?;";
+    const char *sql = "SELECT role, content, tool_calls, tool_call_id FROM entries WHERE id=? AND session_id=?;";
     return sqlite3_prepare_v2(rs->db, sql, -1, &rs->cursor, NULL) == SQLITE_OK ? 0 : -1;
 }
 
@@ -272,8 +232,13 @@ static int rs_advance(RequestStreamer *rs) {
             return rs_advance(rs);
         }
 
-        const char *data = (const char *)sqlite3_column_text(rs->cursor, 0);
-        char *msg_json = reshape_entry(data);
+        /* Read split columns: 0=role, 1=content, 2=tool_calls, 3=tool_call_id */
+        int role = sqlite3_column_int(rs->cursor, 0);
+        const char *content = (const char *)sqlite3_column_text(rs->cursor, 1);
+        const char *tool_calls = (const char *)sqlite3_column_text(rs->cursor, 2);
+        const char *tool_call_id = (const char *)sqlite3_column_text(rs->cursor, 3);
+
+        char *msg_json = reshape_entry_from_columns(role, content, tool_calls, tool_call_id);
         if (!msg_json) {
             rs->entry_idx++;
             return rs_advance(rs);

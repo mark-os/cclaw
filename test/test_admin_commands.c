@@ -35,7 +35,7 @@ static void test_key_bypasses_db(void) {
 
     /* Verify DB has no trace of the key value */
     sqlite3_stmt *stmt;
-    const char *sql = "SELECT COUNT(*) FROM entries WHERE data LIKE '%sk-secret-123%';";
+    const char *sql = "SELECT COUNT(*) FROM entries WHERE content LIKE '%sk-secret-123%';";
     assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
     assert(sqlite3_column_int(stmt, 0) == 0);

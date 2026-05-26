@@ -61,7 +61,7 @@ static int wait_for_completion(sqlite3 *db, int64_t sid) {
                 sqlite3_finalize(stmt);
                 /* Check for assistant entry */
                 sqlite3_prepare_v2(db,
-                    "SELECT COUNT(*) FROM entries WHERE session_id=? AND role='assistant';",
+                    "SELECT COUNT(*) FROM entries WHERE session_id=? AND role=2;",
                     -1, &stmt, NULL);
                 sqlite3_bind_int64(stmt, 1, sid);
                 if (sqlite3_step(stmt) == SQLITE_ROW &&

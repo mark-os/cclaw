@@ -14,39 +14,41 @@ CREATE TABLE IF NOT EXISTS entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,
   parent_id INTEGER NOT NULL DEFAULT -1,
+  original_parent_id INTEGER,
   turn_id INTEGER,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  data TEXT NOT NULL,
+  role INTEGER NOT NULL DEFAULT 1,
+  content TEXT,
+  tool_calls TEXT,
+  tool_call_id TEXT,
+  tool_name TEXT,
+  is_error INTEGER NOT NULL DEFAULT 0,
+  stop_reason INTEGER NOT NULL DEFAULT 0,
+  model TEXT,
+  usage_in INTEGER,
+  usage_out INTEGER,
   token_estimate INTEGER,
   content_bytes INTEGER,
-  type TEXT GENERATED ALWAYS AS (json_extract(data, '$.type')) STORED,
-  role TEXT GENERATED ALWAYS AS (json_extract(data, '$.role')) STORED
+  tool_call_count INTEGER NOT NULL DEFAULT 0,
+  data TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_entries_session ON entries(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_id);
-CREATE INDEX IF NOT EXISTS idx_entries_session_type ON entries(session_id, type);
 CREATE INDEX IF NOT EXISTS idx_entries_session_role ON entries(session_id, role);
 CREATE INDEX IF NOT EXISTS idx_entries_turn ON entries(session_id, turn_id);
+CREATE INDEX IF NOT EXISTS idx_entries_stop_reason ON entries(session_id, stop_reason) WHERE stop_reason != 0;
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
   content, content=entries, content_rowid=id
 );
 CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
   INSERT INTO entries_fts(rowid, content) VALUES (
     new.id,
-    CASE json_extract(new.data, '$.role')
-      WHEN 'user' THEN json_extract(new.data, '$.content')
-      WHEN 'system' THEN json_extract(new.data, '$.content')
-      WHEN 'tool_result' THEN COALESCE(json_extract(new.data, '$.name'),'') || ' ' || COALESCE(json_extract(new.data, '$.content'),'')
-      WHEN 'assistant' THEN (
-        SELECT group_concat(txt, ' ') FROM (
-          SELECT CASE json_extract(j.value, '$.type')
-            WHEN 'text' THEN json_extract(j.value, '$.text')
-            WHEN 'tool_call' THEN json_extract(j.value, '$.name') || ' ' || json_extract(j.value, '$.arguments')
-          END AS txt
-          FROM json_each(json_extract(new.data, '$.content')) j
-        )
-      )
-      ELSE COALESCE(json_extract(new.data, '$.summary'),'')
+    CASE new.role
+      WHEN 1 THEN new.content
+      WHEN 0 THEN new.content
+      WHEN 3 THEN COALESCE(new.tool_name,'') || ' ' || COALESCE(new.content,'')
+      WHEN 2 THEN COALESCE(new.content,'') || ' ' || COALESCE(new.tool_calls,'')
+      ELSE COALESCE(new.content,'')
     END
   );
 END;

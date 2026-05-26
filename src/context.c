@@ -340,22 +340,25 @@ void context_free(Message *msgs, int count) {
     free(msgs);
 }
 
-/* V41: helpers for context_plan */
-static Role plan_str_to_role(const char *s) {
-    if (!s) return ROLE_USER;
-    if (strcmp(s, "system") == 0) return ROLE_SYSTEM;
-    if (strcmp(s, "assistant") == 0) return ROLE_ASSISTANT;
-    if (strcmp(s, "tool_result") == 0) return ROLE_TOOL;
+/* V41: helpers for context_plan — integer column mapping */
+static Role plan_int_to_role(int i) {
+    switch (i) {
+        case 0: return ROLE_SYSTEM;
+        case 1: return ROLE_USER;
+        case 2: return ROLE_ASSISTANT;
+        case 3: return ROLE_TOOL;
+    }
     return ROLE_USER;
 }
 
-static StopReason plan_str_to_stop_reason(const char *s) {
-    if (!s) return STOP_REASON_NONE;
-    if (strcmp(s, "stop") == 0)     return STOP_REASON_STOP;
-    if (strcmp(s, "length") == 0)   return STOP_REASON_LENGTH;
-    if (strcmp(s, "tool_use") == 0) return STOP_REASON_TOOL_USE;
-    if (strcmp(s, "error") == 0)    return STOP_REASON_ERROR;
-    if (strcmp(s, "aborted") == 0)  return STOP_REASON_ABORTED;
+static StopReason plan_int_to_stop_reason(int i) {
+    switch (i) {
+        case 1: return STOP_REASON_STOP;
+        case 2: return STOP_REASON_LENGTH;
+        case 3: return STOP_REASON_TOOL_USE;
+        case 4: return STOP_REASON_ERROR;
+        case 5: return STOP_REASON_ABORTED;
+    }
     return STOP_REASON_NONE;
 }
 
@@ -415,19 +418,13 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan
     sqlite3_finalize(stmt);
     if (leaf_id < 0) return -1;
 
-    /* Query branch metadata — no content loaded, just id/role/stop_reason/token_estimate/tool_call_count */
+    /* V56: Query branch metadata — integer columns only, no content loaded */
     const char *plan_sql =
         "WITH RECURSIVE branch(id, parent_id) AS ("
         "  SELECT id, parent_id FROM entries WHERE id=? AND session_id=?"
         "  UNION ALL"
         "  SELECT e.id, e.parent_id FROM entries e JOIN branch b ON e.id=b.parent_id"
-        ") SELECT e.id, e.role,"
-        "  json_extract(e.data, '$.stop_reason'),"
-        "  e.token_estimate,"
-        "  CASE WHEN e.role='assistant' THEN"
-        "    (SELECT count(*) FROM json_each(json_extract(e.data,'$.content'))"
-        "     WHERE json_extract(value,'$.type')='tool_call')"
-        "  ELSE 0 END"
+        ") SELECT e.id, e.role, e.stop_reason, e.token_estimate, e.tool_call_count"
         " FROM branch b JOIN entries e ON e.id=b.id ORDER BY e.id;";
 
     if (sqlite3_prepare_v2(db, plan_sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -449,11 +446,10 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan
         }
         PlanEntry *pe = &raw[raw_count];
         pe->id = sqlite3_column_int64(stmt, 0);
-        pe->role = plan_str_to_role((const char *)sqlite3_column_text(stmt, 1));
-        pe->stop_reason = plan_str_to_stop_reason((const char *)sqlite3_column_text(stmt, 2));
+        pe->role = plan_int_to_role(sqlite3_column_int(stmt, 1));
+        pe->stop_reason = plan_int_to_stop_reason(sqlite3_column_int(stmt, 2));
         pe->token_estimate = sqlite3_column_int(stmt, 3);
         if (pe->token_estimate <= 0) {
-            /* Fallback for entries inserted before T124 migration */
             pe->token_estimate = 4;
         }
         pe->tool_call_count = sqlite3_column_int(stmt, 4);

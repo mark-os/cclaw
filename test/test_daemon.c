@@ -181,7 +181,7 @@ static void test_daemon_fork_reap(void) {
                 /* Check if agent actually ran (has assistant entry) */
                 sqlite3_stmt *s2;
                 sqlite3_prepare_v2(db,
-                    "SELECT COUNT(*) FROM entries WHERE session_id=? AND role='assistant';",
+                    "SELECT COUNT(*) FROM entries WHERE session_id=? AND role=2;",
                     -1, &s2, NULL);
                 sqlite3_bind_int64(s2, 1, sid);
                 if (sqlite3_step(s2) == SQLITE_ROW && sqlite3_column_int(s2, 0) > 0)

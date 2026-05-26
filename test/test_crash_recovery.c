@@ -13,9 +13,51 @@
 
 static const char *DB_PATH = "/tmp/test_cclaw_crash_recovery.sqlite";
 
-/* Simulate crash: write user msg + assistant with tool_calls, but NO tool_results.
- * This is exactly what V30 describes — agent got SIGKILL after writing the
- * assistant entry but before any tool execution completed. */
+/* Helper: insert assistant entry with tool_calls using split columns */
+static int64_t insert_assistant_with_tools(sqlite3 *db, int64_t session_id,
+                                           int64_t parent_id, int64_t turn_id,
+                                           const char *tool_calls_json, int tc_count) {
+    const char *sql =
+        "INSERT INTO entries(session_id, parent_id, turn_id, role, tool_calls, tool_call_count,"
+        " stop_reason, token_estimate, content_bytes)"
+        " VALUES(?,?,?,2,?,?,3,10,0);";
+    sqlite3_stmt *stmt;
+    assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_int64(stmt, 2, parent_id);
+    sqlite3_bind_int64(stmt, 3, turn_id);
+    sqlite3_bind_text(stmt, 4, tool_calls_json, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 5, tc_count);
+    assert(sqlite3_step(stmt) == SQLITE_DONE);
+    int64_t id = sqlite3_last_insert_rowid(db);
+    sqlite3_finalize(stmt);
+    return id;
+}
+
+/* Helper: insert tool_result entry using split columns */
+static int64_t insert_tool_result(sqlite3 *db, int64_t session_id,
+                                  int64_t parent_id, int64_t turn_id,
+                                  const char *tool_call_id, const char *content) {
+    const char *sql =
+        "INSERT INTO entries(session_id, parent_id, turn_id, role, content, tool_call_id,"
+        " token_estimate, content_bytes)"
+        " VALUES(?,?,?,3,?,?,?,?);";
+    sqlite3_stmt *stmt;
+    assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_int64(stmt, 2, parent_id);
+    sqlite3_bind_int64(stmt, 3, turn_id);
+    sqlite3_bind_text(stmt, 4, content, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, tool_call_id, -1, SQLITE_STATIC);
+    int clen = content ? (int)strlen(content) : 0;
+    sqlite3_bind_int(stmt, 6, (clen / 4) + 4);
+    sqlite3_bind_int(stmt, 7, clen);
+    assert(sqlite3_step(stmt) == SQLITE_DONE);
+    int64_t id = sqlite3_last_insert_rowid(db);
+    sqlite3_finalize(stmt);
+    return id;
+}
+
 static void test_crash_recovery_synthesizes_notice(void) {
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
@@ -29,30 +71,13 @@ static void test_crash_recovery_synthesizes_notice(void) {
     int64_t uid = entry_append(db, sid, &user_msg);
     assert(uid > 0);
 
-    /* Assistant with tool_calls — simulates the entry written before crash.
-     * We need to write raw JSON to DB since entry_append doesn't handle tool_calls
-     * in the simplified Message struct for writes. Insert directly. */
-    const char *asst_json =
-        "{\"type\":\"message\",\"role\":\"assistant\","
-        "\"content\":[{\"type\":\"tool_call\",\"id\":\"call_1\","
-        "\"name\":\"shell_exec\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"},"
-        "{\"type\":\"tool_call\",\"id\":\"call_2\","
-        "\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}]}";
+    /* Assistant with tool_calls — simulates the entry written before crash */
+    const char *tc_json =
+        "[{\"id\":\"call_1\",\"name\":\"shell_exec\",\"args\":{\"cmd\":\"ls\"}},"
+        "{\"id\":\"call_2\",\"name\":\"file_read\",\"args\":{\"path\":\"README.md\"}}]";
 
     int64_t turn_id = db_next_turn_id(db, sid);
-    const char *sql =
-        "INSERT INTO entries(session_id, parent_id, turn_id, data) VALUES(?,?,?,?);";
-    sqlite3_stmt *stmt;
-    assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
-    sqlite3_bind_int64(stmt, 1, sid);
-    sqlite3_bind_int64(stmt, 2, uid);
-    sqlite3_bind_int64(stmt, 3, turn_id);
-    sqlite3_bind_text(stmt, 4, asst_json, -1, SQLITE_STATIC);
-    assert(sqlite3_step(stmt) == SQLITE_DONE);
-    int64_t asst_id = sqlite3_last_insert_rowid(db);
-    sqlite3_finalize(stmt);
-
-    /* Update session leaf to point to assistant entry */
+    int64_t asst_id = insert_assistant_with_tools(db, sid, uid, turn_id, tc_json, 2);
     session_set_leaf(db, sid, asst_id);
 
     /* --- Crash happened here: no tool_results written --- */
@@ -80,11 +105,9 @@ static void test_crash_recovery_synthesizes_notice(void) {
     /* Expected: user + assistant + 2 synthetic tool_results + system notice = 5 */
     assert(msg_count == 5);
 
-    /* Messages 0,1 = user, assistant */
     assert(msgs[0].role == ROLE_USER);
     assert(msgs[1].role == ROLE_ASSISTANT);
 
-    /* Messages 2,3 = synthetic tool_results for call_1 and call_2 */
     assert(msgs[2].role == ROLE_TOOL);
     assert(msgs[2].tool_result != NULL);
     assert(strcmp(msgs[2].tool_result->tool_call_id, "call_1") == 0);
@@ -95,7 +118,6 @@ static void test_crash_recovery_synthesizes_notice(void) {
     assert(strcmp(msgs[3].tool_result->tool_call_id, "call_2") == 0);
     assert(strstr(msgs[3].tool_result->content, "terminated") != NULL);
 
-    /* Message 4 = system notice about interruption */
     assert(msgs[4].role == ROLE_SYSTEM);
     assert(strstr(msgs[4].content, "interrupted") != NULL);
 
@@ -106,7 +128,6 @@ static void test_crash_recovery_synthesizes_notice(void) {
     printf("  PASS test_crash_recovery_synthesizes_notice\n");
 }
 
-/* Verify that a partial crash (1 of 2 tool_results written) also recovers */
 static void test_crash_recovery_partial_results(void) {
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
@@ -119,39 +140,15 @@ static void test_crash_recovery_partial_results(void) {
     int64_t uid = entry_append(db, sid, &user_msg);
 
     /* Assistant with 2 tool_calls */
-    const char *asst_json =
-        "{\"type\":\"message\",\"role\":\"assistant\","
-        "\"content\":[{\"type\":\"tool_call\",\"id\":\"tc_a\","
-        "\"name\":\"shell_exec\",\"arguments\":\"{\\\"cmd\\\":\\\"echo hi\\\"}\"},"
-        "{\"type\":\"tool_call\",\"id\":\"tc_b\","
-        "\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\":\\\"x\\\"}\"}]}";
+    const char *tc_json =
+        "[{\"id\":\"tc_a\",\"name\":\"shell_exec\",\"args\":{\"cmd\":\"echo hi\"}},"
+        "{\"id\":\"tc_b\",\"name\":\"file_read\",\"args\":{\"path\":\"x\"}}]";
 
     int64_t turn_id = db_next_turn_id(db, sid);
-    const char *sql =
-        "INSERT INTO entries(session_id, parent_id, turn_id, data) VALUES(?,?,?,?);";
-    sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, sid);
-    sqlite3_bind_int64(stmt, 2, uid);
-    sqlite3_bind_int64(stmt, 3, turn_id);
-    sqlite3_bind_text(stmt, 4, asst_json, -1, SQLITE_STATIC);
-    sqlite3_step(stmt);
-    int64_t asst_id = sqlite3_last_insert_rowid(db);
-    sqlite3_finalize(stmt);
+    int64_t asst_id = insert_assistant_with_tools(db, sid, uid, turn_id, tc_json, 2);
 
     /* One tool_result was written before crash */
-    const char *tr_json =
-        "{\"type\":\"message\",\"role\":\"tool_result\","
-        "\"tool_call_id\":\"tc_a\",\"name\":\"shell_exec\",\"content\":\"hi\"}";
-    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, sid);
-    sqlite3_bind_int64(stmt, 2, asst_id);
-    sqlite3_bind_int64(stmt, 3, turn_id);
-    sqlite3_bind_text(stmt, 4, tr_json, -1, SQLITE_STATIC);
-    sqlite3_step(stmt);
-    int64_t tr_id = sqlite3_last_insert_rowid(db);
-    sqlite3_finalize(stmt);
-
+    int64_t tr_id = insert_tool_result(db, sid, asst_id, turn_id, "tc_a", "hi");
     session_set_leaf(db, sid, tr_id);
 
     /* Load branch and run context_build */
@@ -173,7 +170,6 @@ static void test_crash_recovery_partial_results(void) {
     assert(msgs[2].role == ROLE_TOOL);
     assert(msgs[2].tool_result && strcmp(msgs[2].tool_result->tool_call_id, "tc_a") == 0);
 
-    /* Synthetic for tc_b */
     assert(msgs[3].role == ROLE_TOOL);
     assert(msgs[3].tool_result && strcmp(msgs[3].tool_result->tool_call_id, "tc_b") == 0);
     assert(strstr(msgs[3].tool_result->content, "terminated") != NULL);
@@ -188,7 +184,6 @@ static void test_crash_recovery_partial_results(void) {
     printf("  PASS test_crash_recovery_partial_results\n");
 }
 
-/* Verify that a complete turn (no crash) does NOT trigger recovery */
 static void test_no_crash_no_recovery(void) {
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
@@ -198,37 +193,14 @@ static void test_no_crash_no_recovery(void) {
     int64_t uid = entry_append(db, sid, &(Message){.role = ROLE_USER, .content = "hi"});
 
     /* Assistant with 1 tool_call */
-    const char *asst_json =
-        "{\"type\":\"message\",\"role\":\"assistant\","
-        "\"content\":[{\"type\":\"tool_call\",\"id\":\"tc_x\","
-        "\"name\":\"shell_exec\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}]}";
+    const char *tc_json =
+        "[{\"id\":\"tc_x\",\"name\":\"shell_exec\",\"args\":{\"cmd\":\"pwd\"}}]";
 
     int64_t turn_id = db_next_turn_id(db, sid);
-    const char *sql =
-        "INSERT INTO entries(session_id, parent_id, turn_id, data) VALUES(?,?,?,?);";
-    sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, sid);
-    sqlite3_bind_int64(stmt, 2, uid);
-    sqlite3_bind_int64(stmt, 3, turn_id);
-    sqlite3_bind_text(stmt, 4, asst_json, -1, SQLITE_STATIC);
-    sqlite3_step(stmt);
-    int64_t asst_id = sqlite3_last_insert_rowid(db);
-    sqlite3_finalize(stmt);
+    int64_t asst_id = insert_assistant_with_tools(db, sid, uid, turn_id, tc_json, 1);
 
     /* Tool result present — no crash */
-    const char *tr_json =
-        "{\"type\":\"message\",\"role\":\"tool_result\","
-        "\"tool_call_id\":\"tc_x\",\"name\":\"shell_exec\",\"content\":\"/home\"}";
-    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, sid);
-    sqlite3_bind_int64(stmt, 2, asst_id);
-    sqlite3_bind_int64(stmt, 3, turn_id);
-    sqlite3_bind_text(stmt, 4, tr_json, -1, SQLITE_STATIC);
-    sqlite3_step(stmt);
-    int64_t tr_id = sqlite3_last_insert_rowid(db);
-    sqlite3_finalize(stmt);
-
+    int64_t tr_id = insert_tool_result(db, sid, asst_id, turn_id, "tc_x", "/home");
     session_set_leaf(db, sid, tr_id);
 
     int count = 0;

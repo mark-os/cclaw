@@ -87,6 +87,55 @@ static void test_compaction_original_parent(void) {
     printf("  PASS test_compaction_original_parent\n");
 }
 
+/* V58: old entries reachable via forward walk from branch point */
+static void test_compaction_forward_walk(void) {
+    sqlite3 *db = setup();
+    int64_t sid = session_create(db, "compact_fwd", NULL, -1, 0);
+
+    /* Build chain: e1 → e2 → e3 → e4 → e5 */
+    Message m = {.role = ROLE_USER, .content = "first"};
+    int64_t e1 = entry_append(db, sid, &m);
+    m.content = "second";
+    int64_t e2 = entry_append(db, sid, &m);
+    m.content = "third";
+    int64_t e3 = entry_append(db, sid, &m);
+    m.content = "fourth";
+    int64_t e4 = entry_append(db, sid, &m);
+    m.content = "fifth";
+    entry_append(db, sid, &m); /* e5 */
+
+    /* Compact: keep e1, summarize e2+e3, reparent e4 to summary */
+    entry_compact(db, sid, e1, e4, "Summary of 2+3");
+
+    /* Forward walk from e1: find all entries with parent_id = e1.
+     * Should include both the compaction node AND the old e2. */
+    const char *sql = "WITH RECURSIVE fwd(id, content, parent_id) AS ("
+        "  SELECT id, content, parent_id FROM entries WHERE parent_id=? AND session_id=?"
+        "  UNION ALL"
+        "  SELECT e.id, e.content, e.parent_id FROM entries e JOIN fwd f ON e.parent_id=f.id"
+        ") SELECT id, content FROM fwd ORDER BY id;";
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    sqlite3_bind_int64(stmt, 1, e1);
+    sqlite3_bind_int64(stmt, 2, sid);
+
+    int found_e2 = 0, found_e3 = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int64_t id = sqlite3_column_int64(stmt, 0);
+        if (id == e2) found_e2 = 1;
+        if (id == e3) found_e3 = 1;
+    }
+    sqlite3_finalize(stmt);
+
+    /* Old entries e2, e3 still reachable via forward walk */
+    assert(found_e2);
+    assert(found_e3);
+
+    teardown(db);
+    printf("  PASS test_compaction_forward_walk\n");
+}
+
 /* V58: old entries still reachable via FTS5 */
 static void test_compaction_fts_indexes_old(void) {
     sqlite3 *db = setup();
@@ -122,6 +171,7 @@ static void test_compaction_fts_indexes_old(void) {
 int main(void) {
     printf("test_compaction:\n");
     test_compaction_cte_stops();
+    test_compaction_forward_walk();
     test_compaction_original_parent();
     test_compaction_fts_indexes_old();
     printf("All compaction tests passed.\n");

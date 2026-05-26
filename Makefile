@@ -1,5 +1,5 @@
 CC      ?= cc
-CFLAGS  := -std=c11 -Wall -Wextra -Werror -Iinclude -Ivendor/cJSON -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/mquickjs
+CFLAGS  := -std=c11 -Wall -Wextra -Werror -Iinclude -Ivendor/cJSON -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/mquickjs -Ivendor/monocypher
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
@@ -10,10 +10,11 @@ DEP      := $(OBJ:.o=.d)
 
 VENDOR_SRC := vendor/cJSON/cJSON.c vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
               vendor/mquickjs/mquickjs.c vendor/mquickjs/cutils.c vendor/mquickjs/dtoa.c \
-              vendor/mquickjs/libm.c vendor/mquickjs/mquickjs_stdlib.c
+              vendor/mquickjs/libm.c vendor/mquickjs/mquickjs_stdlib.c \
+              vendor/monocypher/monocypher.c
 VENDOR_OBJ := $(BUILDDIR)/cJSON.o $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
               $(BUILDDIR)/mquickjs.o $(BUILDDIR)/mqjs_cutils.o $(BUILDDIR)/mqjs_dtoa.o \
-              $(BUILDDIR)/mqjs_libm.o $(BUILDDIR)/mqjs_stdlib.o
+              $(BUILDDIR)/mqjs_libm.o $(BUILDDIR)/mqjs_stdlib.o $(BUILDDIR)/monocypher.o
 
 INTEG_SRC := $(wildcard test/test_integration_*.c)
 TEST_SRC  := $(filter-out $(INTEG_SRC),$(wildcard test/test_*.c))
@@ -46,6 +47,9 @@ $(BUILDDIR)/sqlite3.o: vendor/sqlite3/sqlite3.c | $(BUILDDIR)/
 
 $(BUILDDIR)/civetweb.o: vendor/civetweb/civetweb.c | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -DNO_SSL -DNO_CGI -DUSE_IPV6 -DNO_CACHING -Ivendor/civetweb -Wno-unused-parameter -c -o $@ $<
+
+$(BUILDDIR)/monocypher.o: vendor/monocypher/monocypher.c | $(BUILDDIR)/
+	$(CC) -std=c11 -O2 -c -o $@ $<
 
 MQJS_CFLAGS := -std=c11 -O2 -Ivendor/mquickjs -Wno-unused-parameter -Wno-sign-compare -Wno-unused-variable -Wno-unused-but-set-variable
 

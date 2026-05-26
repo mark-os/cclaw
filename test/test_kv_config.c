@@ -5,6 +5,7 @@
 #include <assert.h>
 #include "db.h"
 #include "config.h"
+#include "secret.h"
 
 #define FAIL(msg) do { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } while(0)
 
@@ -140,7 +141,7 @@ static void test_config_admin_chat_ids(void) {
 }
 
 static void test_kv_secret_passthrough(void) {
-    /* Until T171, secret functions are plaintext passthrough */
+    /* Without secret key loaded, secret functions are plaintext passthrough */
     sqlite3 *db = db_open(":memory:");
     if (!db) FAIL("db_open");
 
@@ -150,7 +151,32 @@ static void test_kv_secret_passthrough(void) {
     free(v);
 
     db_close(db);
-    printf("  PASS: kv secret passthrough\n");
+    printf("  PASS: kv secret passthrough (no key)\n");
+}
+
+static void test_kv_secret_encrypted(void) {
+    /* With secret key loaded, values are encrypted */
+    static const uint8_t key[32] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,
+                                    17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32};
+    db_set_secret_key(key);
+
+    sqlite3 *db = db_open(":memory:");
+    if (!db) FAIL("db_open");
+
+    assert(db_kv_set_secret(db, "test.secret", "encrypted-value") == 0);
+
+    /* Raw value should be enc: prefixed */
+    char *raw = db_kv_get(db, "test.secret");
+    assert(raw && strncmp(raw, "enc:", 4) == 0);
+    free(raw);
+
+    /* Secret getter decrypts */
+    char *v = db_kv_get_secret(db, "test.secret");
+    assert(v && strcmp(v, "encrypted-value") == 0);
+    free(v);
+
+    db_close(db);
+    printf("  PASS: kv secret encrypted\n");
 }
 
 int main(void) {
@@ -162,6 +188,7 @@ int main(void) {
     test_config_fallback_providers();
     test_config_admin_chat_ids();
     test_kv_secret_passthrough();
+    test_kv_secret_encrypted();
     printf("All kv_config tests passed.\n");
     return 0;
 }

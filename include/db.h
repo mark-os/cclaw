@@ -80,9 +80,13 @@ char *db_kv_get(sqlite3 *db, const char *key);
 int db_kv_set(sqlite3 *db, const char *key, const char *value);
 
 /* V61,T170: Secret-aware kv access. kv_get_secret decrypts enc: prefix values.
- * kv_set_secret encrypts before storing. Until T171 (crypto), these are plaintext passthrough. */
+ * kv_set_secret encrypts before storing. */
 char *db_kv_get_secret(sqlite3 *db, const char *key);
 int db_kv_set_secret(sqlite3 *db, const char *key, const char *value);
+
+/* V52,T171: Set the 32-byte encryption key for secret kv operations.
+ * Must be called before db_kv_get_secret/db_kv_set_secret. */
+void db_set_secret_key(const uint8_t key[32]);
 
 /* T26: Telegram chat_id → session routing.
  * db_tg_get_session returns session_id or -1 if not mapped.

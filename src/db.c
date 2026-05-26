@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "secret.h"
 #include "cJSON.h"
 #include "templates.h"
 #include <stdio.h>
@@ -930,18 +931,33 @@ int db_kv_set(sqlite3 *db, const char *key, const char *value) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* V61,T170: Secret-aware kv access.
- * Until T171 adds ChaCha20-Poly1305, these are plaintext passthrough.
- * kv_get_secret: if value has enc: prefix, would decrypt (currently returns raw).
- * kv_set_secret: would encrypt before storing (currently stores plaintext). */
+/* V52,T171: Secret key for kv encryption. Set via db_set_secret_key(). */
+static uint8_t s_secret_key[32];
+static int s_secret_key_loaded = 0;
+
+void db_set_secret_key(const uint8_t key[32]) {
+    memcpy(s_secret_key, key, 32);
+    s_secret_key_loaded = 1;
+}
+
+/* V52,T171: Secret-aware kv access with ChaCha20-Poly1305 AEAD. */
 char *db_kv_get_secret(sqlite3 *db, const char *key) {
-    /* T171 will add decryption of enc: prefix values here */
-    return db_kv_get(db, key);
+    char *raw = db_kv_get(db, key);
+    if (!raw) return NULL;
+    if (strncmp(raw, "enc:", 4) != 0) return raw; /* plaintext legacy value */
+    if (!s_secret_key_loaded) { free(raw); return NULL; }
+    char *plaintext = secret_decrypt(s_secret_key, raw);
+    free(raw);
+    return plaintext;
 }
 
 int db_kv_set_secret(sqlite3 *db, const char *key, const char *value) {
-    /* T171 will add encryption (enc: prefix) here */
-    return db_kv_set(db, key, value);
+    if (!s_secret_key_loaded) return db_kv_set(db, key, value); /* fallback */
+    char *encrypted = secret_encrypt(s_secret_key, value);
+    if (!encrypted) return -1;
+    int rc = db_kv_set(db, key, encrypted);
+    free(encrypted);
+    return rc;
 }
 
 int64_t db_tg_get_session(sqlite3 *db, int64_t chat_id) {

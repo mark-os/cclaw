@@ -22,11 +22,12 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - cmd: `./build/cclaw --cli` → stdin/stdout REPL, creates/resumes session in shared DB
 - cmd: `./build/cclaw --cli --debug` → raw LLM req/resp JSON to stderr
 - cmd: `./build/cclaw` → daemon mode (epoll loop: reap children, wake on signal pipe, fork agents; Telegram poller thread + civetweb status page run in-process)
-- cmd: `./build/cclaw config.json` → explicit config file
 - cmd: `./build/cclaw --sub-agent --session-id=X --task="..."` → sub-agent process
-- env: `OPENROUTER_API_KEY` required (minimum to run)
-- env: `CCLAW_PROVIDER`, `CCLAW_MODEL`, `CCLAW_TELEGRAM_TOKEN`, `CCLAW_DB_PATH`, `CCLAW_WEB_PORT`
-- file: `config.json` — provider, model, tokens, channels, workspace, db_path, admin_chat_ids[]
+- env: `OPENROUTER_API_KEY` → seed `provider.api_key` in kv on first run (minimum to start)
+- env: `CCLAW_DB_PATH` → override DB location (default: `./cclaw.db` next to binary)
+- env: any `CCLAW_*` env var overrides matching kv key at startup (e.g. `CCLAW_PROVIDER_MODEL` → `provider.model`)
+- db: `kv` table — all config lives here; seeded w/ defaults on DB creation; env vars override at process start
+- db: `kv` secrets — values w/ `enc:` prefix are ChaCha20-Poly1305 encrypted; key file `<db_dir>/.cclaw_key`
 - file: `agents/<name>/agent.json` — per-agent: model, workspace, tools, max_iterations, allowed_hosts, memory_blocks[]
 - file: `agents/<name>/system.md` — system prompt template
 - file: `agents/<name>/skills/*.md` — skill instructions injected into system prompt
@@ -40,7 +41,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - tool: `js_define_tool` — register JS fn as callable tool (session-persistent)
 - js binding: `http_fetch(url, {method, headers, body, sanitize})` — C-provided, enforces agent `allowed_hosts` + SSRF protection; `sanitize: true` strips HTML + homoglyphs + boundary wraps (same as web_fetch); sole network path from JS runtime
 - tool: `spawn_agent` — fork sub-agent process (accepts `background` param, default blocking)
-- tool: `db_query` — execute read-only SQL against cclaw.db (SELECT only, no mutations)
+- tool: `db_query` — execute read-only SQL against cclaw.db (SELECT only, no mutations); ⊥ return kv rows where value starts with `enc:`
 - tool: `web_fetch` — HTTP GET URL, extract text from HTML, external input protection wrapper
 - tool: `memory_create` — create a new memory block (label, description, value?); agent-initiated; default char_limit 5000
 - tool: `memory_append` — append text to a memory block by label; respects char_limit + read_only
@@ -107,22 +108,23 @@ V48: ∀ `shell_exec` child → `mjs` binary available at fixed path (e.g. `/usr
 V49: ∀ `mjs` process (spawned via shell_exec) → inherits socketpair fd from agent process (pre-fork); `fetch()` binding serializes request over inherited fd → agent reads, checks `allowed_hosts` allowlist + SSRF policy (V46), performs libcurl call, writes response back; mjs has zero direct network capability; fd number passed via env var `MJS_FETCH_FD`
 V50: ∀ `mjs` fetch proxy protocol → request: `<4B len big-endian><JSON: {"url","method","headers","body"}>`, response: `<4B len big-endian><JSON: {"status","headers","body","error"}>` over inherited fd; agent-side enforces timeout (30s default) per fetch call; on policy deny → respond w/ `{"status":403,"error":"host not in allowed_hosts"}`
 V51: ∀ `mjs` invocation via shell → composable w/ unix pipes; stdout/stderr flow through shell pipeline normally; fetch fd is side-channel (⊥ interfere w/ stdio); agent can: `mjs -e 'await fetch(...)' | jq .items[] | grep error`
-V52: ∀ API key entered via Telegram admin dialog → written directly to config file on disk; ⊥ stored in session entries, inbox, or any DB field; ⊥ appears in LLM context; Telegram poller handles key input before inbox_insert (bypasses agent entirely)
-V53: ∀ Telegram admin command (config, key, whitelist) → restricted to `admin_chat_ids[]` in config; unauthorized chat_id → silent ignore (⊥ error msg, ⊥ inbox_insert)
-V54: ∀ config/permission mutation → requires admin approval; agent may propose changes via `approval_request` tool (writes to `approvals` table); daemon delivers proposal to admin as inline keyboard; admin approve → daemon applies change + posts confirmation to agent inbox; admin deny → posts denial to agent inbox; agent ⊥ mutates config/permissions directly
+V52: ∀ secret (API keys, tokens) → stored in `kv` table w/ `enc:` prefix (ChaCha20-Poly1305 AEAD); key file `<db_dir>/.cclaw_key` (32 bytes, mode 0600, created on first secret write via `getrandom()`); key file outside all agent workspaces → agents ⊥ read via file_read or shell_exec (landlock blocks); `db_query` tool filters out `enc:` rows; secrets ⊥ appear in session entries, inbox, or LLM context
+V53: ∀ Telegram admin command (config, key, whitelist) → restricted to `admin_chat_ids` in kv table; unauthorized chat_id → silent ignore (⊥ error msg, ⊥ inbox_insert)
+V54: ∀ config/permission mutation → requires admin approval; agent may propose changes via `approval_request` tool (writes to `approvals` table); daemon delivers proposal to admin as inline keyboard; admin approve → daemon writes to `kv` table + reloads in-process config; admin deny → posts denial to agent inbox; agent ⊥ mutates config directly
 V55: ∀ memory block edit → agent tools modify `value` only; `label`, `description`, `char_limit`, `read_only` immutable from agent; `value` length ! ≤ `char_limit`; blocks persist across sessions (agent-scoped, not session-scoped)
 V56: ∀ `context_plan` query → ⊥ read `content` or `tool_calls` columns; use `role`, `stop_reason`, `tool_call_count`, `token_estimate` (all integer/small columns on main B-tree page); avoids overflow page loads during plan pass
 V57: ∀ SQLite open (agent process) → `PRAGMA mmap_size` ≥ 64MB; eliminates double-buffering (SQLite userspace cache + kernel page cache); kernel page cache shared across daemon + forked agents; `PRAGMA cache_size = -512` (reduce userspace cache when mmap active)
 V58: ∀ session compaction → reparent: append summary entry w/ `parent_id` = last kept entry; `UPDATE entries SET parent_id = <summary_id> WHERE id = <first_compacted_tail_entry>`; old entries remain in DB (searchable via FTS5, reachable via forward walk from branch point); CTE from leaf stops at summary node → ⊥ walk compacted prefix
 V59: ∀ reparented entry → store `original_parent_id` (nullable); enables undo of compaction surgery; NULL = never reparented
 V60: ∀ entry wire emission → ⊥ cJSON parse; `content` emitted via `json_escape_into()` (linear pass, no alloc); `tool_calls` emitted via per-provider formatter that walks stored JSON array w/ minimal parse (extract `id`, `name`, `args` substring offsets) — ⊥ full DOM build; `args` object emitted verbatim for Anthropic/Google, stringified (escaped) for OpenAI
+V61: ∀ config → lives in `kv` table; priority: env var override > kv value > hardcoded default; no config.json; DB created w/ default kv rows on first run; `kv_get(key)` / `kv_set(key, val)` for plaintext; `kv_get_secret(key)` / `kv_set_secret(key, val)` for encrypted values; daemon reloads in-process config struct from kv on admin command or approval
 
 ## §T TASKS
 id|status|task|cites
 T1|x|Makefile — minimal, grows w/ modules|§C
 T2|x|arena allocator (`arena.c`) — create, alloc, destroy|V6
 T3|x|core types (`types.h`) — Message, Session, Entry, Config structs|V14
-T4|x|config (`config.c`) — parse JSON + env var overrides|§I.file,§I.env
+T4|x|config (`config.c`) — load from kv table + env var overrides; seed defaults on DB creation|§I.db
 T5|x|DB init (`db.c`) — open, create tables, WAL mode, pragmas|V4
 T6|x|session CRUD — create, list, get_branch (leaf→root), set_leaf|V14
 T7|x|entry append + tree ops (parent_id linking)|V14
@@ -258,15 +260,15 @@ T137|x|Makefile: `mjs` binary target — compile mquickjs evaluator, install to 
 T138|x|template embedding — `templates/` dir w/ `.md`, `.txt`, `.sql` files; build-time script converts to C byte arrays in `build/templates.h`; replace inline `static const char*` strings in config.c, context.c, db.c w/ `#include "templates.h"` refs; Makefile rule: `build/templates.h` depends on `templates/*`|§C
 T139|x|Telegram admin auth — `admin_chat_ids[]` in config; `telegram_is_admin(chat_id)` check; non-admin messages route to agent normally; admin commands intercepted before inbox_insert|V53,§I
 T140|x|Telegram admin command parser — `/config`, `/key`, `/whitelist` prefix detection in poller thread; dispatch to admin handlers; non-command messages pass through to agent|V53
-T141|x|`/key` dialog — inline keyboard: select provider (OpenRouter, Gemini, custom) → ForceReply prompt for key → write to env file (`/etc/cclaw/env` or config-specified path) → confirm; key value ⊥ logged, ⊥ stored in DB, ⊥ enters inbox|V52
-T142|x|`/config model` dialog — inline keyboard: list configured providers → select → ForceReply for model name → update `config.json` provider entry → confirm + reload config in daemon|§I
-T143|x|`/config endpoint` dialog — ForceReply for base_url + provider name → validate URL format → write to config.json → reload|§I
+T141|x|`/key` dialog — inline keyboard: select provider (OpenRouter, Gemini, custom) → ForceReply prompt for key → `kv_set_secret("provider.api_key", val)` → confirm; key value ⊥ logged, ⊥ enters inbox|V52
+T142|x|`/config model` dialog — inline keyboard: list configured providers → select → ForceReply for model name → `kv_set("provider.model", val)` → reload config in daemon|§I
+T143|x|`/config endpoint` dialog — ForceReply for base_url + provider name → validate URL format → `kv_set("provider.base_url", val)` → reload|§I
 T144|x|`/whitelist` dialog — inline keyboard: list agents → select → show current `allowed_hosts[]` → ForceReply for new host → append to agent config → reload; also support `/whitelist remove`|V46,§I
 T145|x|test: admin commands — verify key write bypasses DB entirely; verify non-admin chat_id rejected; verify config reload picks up changes|V52,V53
 T146|x|`approvals` table — schema: id, session_id, agent_name, type (whitelist_host\|create_agent\|model_change\|tool_enable), payload TEXT (JSON), status (pending\|approved\|denied), admin_chat_id, created_at, resolved_at|V54,§D
 T147|x|`approval_request` tool — agent calls w/ type + payload (e.g. `{"type":"whitelist_host","host":"api.example.com"}`); writes to `approvals` table; daemon delivers inline keyboard to admin via Telegram; agent receives tool_result "pending approval — waiting for admin"|V54
 T148|x|approval delivery — daemon detects new pending approval → sends formatted message + Approve/Deny buttons to all `admin_chat_ids[]`; callback_data encodes approval id|V54,V53
-T149|x|approval callback handler — admin taps Approve → daemon applies change (write config, reload), updates approval row, posts result to agent inbox; Deny → posts denial to inbox; agent session transitions idle→running on inbox signal|V54,V25
+T149|x|approval callback handler — admin taps Approve → daemon writes to kv table, reloads config, updates approval row, posts result to agent inbox; Deny → posts denial to inbox; agent session transitions idle→running on inbox signal|V54,V25
 T150|x|agent-initiated agent creation — agent proposes new agent via `approval_request` type `create_agent` w/ payload (name, model, system_prompt, tools, allowed_hosts); admin approves → daemon writes `agents/<name>/agent.json` + `system.md` + seeds DB row|V54,V20
 T151|x|test: approval flow end-to-end — agent requests whitelist host → approval pending → mock admin approve → config updated → agent inbox receives confirmation; also test deny path + unauthorized approval attempt|V54,V53
 
@@ -287,6 +289,12 @@ T165|.|`entry_append` rewrite — write split columns directly at insert time; c
 T166|.|`RequestStreamer` rewrite — `RS_PHASE_ENTRIES` reads `role`, `content`, `tool_calls`, `tool_call_id` columns; emits wire JSON via `json_escape_into` + snprintf; per-provider emit fn (OpenAI default); drop `reshape_entry()`|V60,V41
 T167|.|`json_escape_into(dest, cap, src)` utility — linear pass, write escaped JSON string directly into caller buffer; handle `"`, `\\`, `\n`, `\r`, `\t`, control chars (`\u00XX`); return bytes written; zero-alloc|V60
 T168|.|tool_calls minimal parser — extract `id`, `name`, `args` from stored JSON array w/o full DOM; walk array w/ simple state machine (find key offsets, copy substrings); for OpenAI: escape `args` object as string; for others: emit verbatim|V60
+T169|.|`kv` config seeding — on DB creation, INSERT default rows: `provider.base_url`, `provider.model`, `provider.max_tokens`, `provider.context_window`, `web_port`, `max_iterations`, `workspace`, etc.; env var `OPENROUTER_API_KEY` → `kv_set_secret("provider.api_key", val)` on first run|V61
+T170|.|`kv_get` / `kv_set` — simple key-value read/write; `kv_get_secret` / `kv_set_secret` — decrypt/encrypt transparently; `config_load_from_kv(db)` builds Config struct from kv table + env overrides|V61
+T171|.|ChaCha20-Poly1305 implementation — vendor monocypher (or minimal standalone ~200 LOC); `secret_encrypt(key, plaintext)` → `enc:<hex(nonce\|\|ct\|\|tag)>`; `secret_decrypt(key, enc_str)` → plaintext; key loaded from `<db_dir>/.cclaw_key`|V52
+T172|.|key file management — `secret_key_load_or_create(db_path)` → reads `.cclaw_key` next to DB; creates w/ `getrandom()` + mode 0600 if missing; returns 32-byte key; called once at startup, held in memory for process lifetime|V52
+T173|.|`db_query` secret filtering — WHERE clause or post-filter strips kv rows where value LIKE 'enc:%' from results returned to agent|V52
+T174|.|delete `config.c` JSON parsing — remove cJSON config file loader, `config.json` CLI arg handling; `config_load(path)` → `config_load_from_db(db)`; env override logic stays (reads `CCLAW_*` env vars into Config struct after kv load)|V61
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)

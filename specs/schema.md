@@ -222,10 +222,38 @@ agents/<name>/
 
 ## kv
 
+All config lives here. No config.json.
+
 | Column | Type | Notes |
 |--------|------|-------|
-| `key` | TEXT PRIMARY KEY | |
-| `value` | TEXT NOT NULL | |
+| `key` | TEXT PRIMARY KEY | dotted namespace: `provider.model`, `provider.api_key`, `web_port` |
+| `value` | TEXT NOT NULL | plaintext or `enc:<hex(nonce\|\|ciphertext\|\|tag)>` for secrets |
+
+**Secret values**: prefixed with `enc:` — ChaCha20-Poly1305 AEAD encrypted. Key file: `<db_dir>/.cclaw_key` (32 bytes, mode 0600, outside all agent workspaces).
+
+**Default keys seeded on DB creation:**
+
+| Key | Default | Secret? |
+|-----|---------|---------|
+| `provider.base_url` | `https://openrouter.ai/api/v1` | no |
+| `provider.api_key` | (from `OPENROUTER_API_KEY` env) | yes |
+| `provider.model` | `deepseek/deepseek-v4-flash` | no |
+| `provider.max_tokens` | `4096` | no |
+| `provider.context_window` | `65536` | no |
+| `provider.cache_hints` | `auto` | no |
+| `fallback_providers` | `[]` (JSON array) | no (but api_keys within are encrypted) |
+| `telegram_token` | (empty) | yes |
+| `admin_chat_ids` | `[]` (JSON array) | no |
+| `web_port` | `8080` | no |
+| `workspace` | `./workspace` | no |
+| `max_iterations` | `25` | no |
+| `max_history_tokens` | `0` (= 60% of context_window) | no |
+| `heartbeat_interval` | `0` (disabled) | no |
+| `shell_timeout` | `30` | no |
+
+**Priority**: env var override (`CCLAW_*`) > kv value > hardcoded default.
+
+**Access from agent**: `db_query` tool filters out rows where value starts with `enc:` — agent sees config but not secrets.
 
 ---
 

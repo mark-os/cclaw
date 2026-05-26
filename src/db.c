@@ -323,6 +323,40 @@ sqlite3 *db_open(const char *path) {
         return NULL;
     }
 
+    /* T169: seed kv defaults on first run (table empty) */
+    {
+        sqlite3_stmt *cnt;
+        if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM kv", -1, &cnt, NULL) == SQLITE_OK) {
+            if (sqlite3_step(cnt) == SQLITE_ROW && sqlite3_column_int(cnt, 0) == 0) {
+                static const char *defaults[][2] = {
+                    {"provider.base_url",    "https://openrouter.ai/api/v1"},
+                    {"provider.model",       "deepseek/deepseek-v4-flash"},
+                    {"provider.max_tokens",  "4096"},
+                    {"provider.context_window", "65536"},
+                    {"provider.cache_hints", "auto"},
+                    {"fallback_providers",   "[]"},
+                    {"telegram_token",       ""},
+                    {"admin_chat_ids",       "[]"},
+                    {"web_port",             "8080"},
+                    {"workspace",            "./workspace"},
+                    {"max_iterations",       "25"},
+                    {"max_history_tokens",   "0"},
+                    {"heartbeat_interval",   "0"},
+                    {"shell_timeout",        "30"},
+                };
+                size_t n = sizeof(defaults) / sizeof(defaults[0]);
+                for (size_t i = 0; i < n; i++)
+                    db_kv_set(db, defaults[i][0], defaults[i][1]);
+
+                /* Seed API key from env var (plaintext until T171 adds encryption) */
+                const char *api_key = getenv("OPENROUTER_API_KEY");
+                if (api_key && api_key[0])
+                    db_kv_set(db, "provider.api_key", api_key);
+            }
+            sqlite3_finalize(cnt);
+        }
+    }
+
     /* T155: migrate soul/memory columns to memory_blocks, then drop columns */
     {
         sqlite3_stmt *chk;

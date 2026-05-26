@@ -201,6 +201,32 @@ static void test_kv(void) {
     printf("  PASS test_kv\n");
 }
 
+static void test_agent_pragmas(void) {
+    const char *path = "/tmp/test_cclaw_agent_pragmas.db";
+    unlink(path);
+    sqlite3 *db = db_open(path);
+    assert(db != NULL);
+
+    db_set_agent_pragmas(db);
+
+    /* After: mmap_size=67108864, cache_size=-512 */
+    sqlite3_int64 mmap_after = 0;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "PRAGMA mmap_size;", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            mmap_after = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+    assert(mmap_after == 67108864);
+
+    int cache = get_pragma_int(db, "cache_size");
+    assert(cache == -512);
+
+    db_close(db);
+    unlink(path);
+    printf("  PASS test_agent_pragmas\n");
+}
+
 int main(void) {
     printf("test_db:\n");
     test_open_close();
@@ -210,6 +236,7 @@ int main(void) {
     test_reopen_idempotent();
     test_fts5_search();
     test_kv();
+    test_agent_pragmas();
     printf("All db tests passed.\n");
     return 0;
 }

@@ -262,6 +262,12 @@ static int migrate_entries_split_columns(sqlite3 *db) {
     return 0;
 }
 
+/* V57: mmap + reduced cache for agent processes (not daemon) */
+void db_set_agent_pragmas(sqlite3 *db) {
+    sqlite3_exec(db, "PRAGMA mmap_size=67108864;", NULL, NULL, NULL);
+    sqlite3_exec(db, "PRAGMA cache_size=-512;", NULL, NULL, NULL);
+}
+
 sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(path, &db);

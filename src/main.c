@@ -66,6 +66,9 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
     sqlite3 *db = db_open(cfg->db_path);
     if (!db) return 1;
 
+    /* V57: mmap + reduced cache for agent processes */
+    db_set_agent_pragmas(db);
+
     /* V20: Load per-agent config, merge with global */
     char *agent_name = session_get_agent_name(db, session_id);
     AgentConfig *ac = agent_name ? agent_config_load("agents", agent_name) : NULL;

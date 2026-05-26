@@ -19,6 +19,9 @@ typedef struct {
  * Returns NULL on failure. */
 sqlite3 *db_open(const char *path);
 
+/* V57: Set mmap + reduced cache pragmas for agent processes. */
+void db_set_agent_pragmas(sqlite3 *db);
+
 /* Close DB handle. */
 void db_close(sqlite3 *db);
 

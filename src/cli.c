@@ -181,6 +181,9 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
         return -1;
     }
 
+    /* V57: mmap + reduced cache for agent processes */
+    db_set_agent_pragmas(db);
+
     workspace_init(cfg);
 
     int64_t session_id = cli_select_session(db, opts);

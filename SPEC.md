@@ -299,7 +299,7 @@ T175|x|integration test: kv config — empty DB → defaults seeded; env var ove
 T176|x|integration test: secrets round-trip — `kv_set_secret` stores `enc:` prefix; `kv_get_secret` returns plaintext; delete key file → decrypt fails gracefully; no network|V52,T171
 T177|x|integration test: wire emission — insert entries via split columns, run RequestStreamer against mock server, capture request body, verify valid OpenAI JSON (tool_calls format, escaped content w/ newlines/quotes/unicode)|V60,T166
 T178|x|integration test: large session memory — insert 500+ entries, run agent loop w/ mock server, verify RSS stays bounded (check `/proc/self/status`); verify context_plan truncates correctly|V41,V56
-T179|.|integration test: db_query secret filtering — seed kv w/ `enc:` values, run `db_query("SELECT * FROM kv")` tool, verify no `enc:` rows in result; no network|V52,T173
+T179|x|integration test: db_query secret filtering — seed kv w/ `enc:` values, run `db_query("SELECT * FROM kv")` tool, verify no `enc:` rows in result; no network|V52,T173
 T180|.|integration test: landlock blocks key file — fork child w/ landlock (workspace only), child attempts read of `.cclaw_key` path, verify EACCES; no network|V52,V22
 T181|.|integration test: empty response — mock returns `finish_reason:"stop"` + `content:null`; verify agent writes error entry w/ `stop_reason=error`; verify prior tool-call content in same turn survives in DB|V29,V36
 T182|.|integration test: plan-only retry — mock returns bullet-list plan w/ no tool calls; verify agent re-prompts once w/ act-now instruction; second mock response has tool call; verify normal flow resumes|V45

@@ -4,10 +4,6 @@
 #include "types.h"
 #include "sqlite3.h"
 
-/* Load config from JSON file (NULL = env-only). Env vars override JSON fields.
- * Returns heap-allocated Config, or NULL on failure. */
-Config *config_load(const char *path);
-
 /* V61,T170: Load config from kv table + env var overrides.
  * Priority: env var > kv value > hardcoded default.
  * Returns heap-allocated Config, or NULL on failure. */
@@ -23,15 +19,5 @@ int workspace_init(const Config *cfg);
 
 /* Free config and all owned strings. */
 void config_free(Config *cfg);
-
-/* T142: Update model name for provider at index in config JSON file.
- * index 0 = primary provider, 1+ = fallback providers[index-1].
- * Returns 0 on success, -1 on failure. */
-int config_update_model(const char *config_path, int provider_index, const char *model);
-
-/* T143: Update base_url for provider at index in config JSON file.
- * index 0 = primary provider, 1+ = fallback providers[index-1].
- * Returns 0 on success, -1 on failure. */
-int config_update_endpoint(const char *config_path, int provider_index, const char *base_url);
 
 #endif

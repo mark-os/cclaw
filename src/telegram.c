@@ -555,20 +555,40 @@ static int handle_config_reply(int64_t chat_id, const char *text) {
     int idx = d->provider_index;
     cfg_dialog_remove(chat_id);
 
-    const char *config_path = daemon_get_config_path();
-    if (!config_path || !config_path[0]) {
-        telegram_send_message(g_cfg->telegram_token, chat_id,
-            "No config file path set. Cannot update model.");
-        return 1;
+    /* V61: Write model to kv table */
+    if (idx == 0) {
+        if (db_kv_set(g_db, "provider.model", text) != 0) {
+            telegram_send_message(g_cfg->telegram_token, chat_id,
+                "Failed to update model in database.");
+            return 1;
+        }
+    } else {
+        /* Update fallback provider model in JSON array */
+        char *fp = db_kv_get(g_db, "fallback_providers");
+        cJSON *arr = fp ? cJSON_Parse(fp) : NULL;
+        free(fp);
+        if (!arr || !cJSON_IsArray(arr) || cJSON_GetArraySize(arr) < idx) {
+            cJSON_Delete(arr);
+            telegram_send_message(g_cfg->telegram_token, chat_id,
+                "Failed to update model: invalid provider index.");
+            return 1;
+        }
+        cJSON *p = cJSON_GetArrayItem(arr, idx - 1);
+        cJSON *existing = cJSON_GetObjectItemCaseSensitive(p, "model");
+        if (existing) cJSON_SetValuestring(existing, text);
+        else cJSON_AddStringToObject(p, "model", text);
+        char *json = cJSON_PrintUnformatted(arr);
+        cJSON_Delete(arr);
+        if (!json || db_kv_set(g_db, "fallback_providers", json) != 0) {
+            free(json);
+            telegram_send_message(g_cfg->telegram_token, chat_id,
+                "Failed to update fallback model in database.");
+            return 1;
+        }
+        free(json);
     }
 
-    if (config_update_model(config_path, idx, text) != 0) {
-        telegram_send_message(g_cfg->telegram_token, chat_id,
-            "Failed to update config file.");
-        return 1;
-    }
-
-    /* Update model string in-place (daemon forks re-read config from disk) */
+    /* Update model string in-place */
     char **model_ptr = NULL;
     if (idx == 0)
         model_ptr = (char **)&g_cfg->provider.model;
@@ -688,17 +708,44 @@ static int handle_endpoint_reply(int64_t chat_id, const char *text) {
     int idx = d->provider_index;
     ep_dialog_remove(chat_id);
 
-    const char *config_path = daemon_get_config_path();
-    if (!config_path || !config_path[0]) {
-        telegram_send_message(g_cfg->telegram_token, chat_id,
-            "No config file path set. Cannot update endpoint.");
-        return 1;
-    }
-
-    if (config_update_endpoint(config_path, idx, text) != 0) {
+    /* Validate URL format */
+    if (strncmp(text, "http://", 7) != 0 && strncmp(text, "https://", 8) != 0) {
         telegram_send_message(g_cfg->telegram_token, chat_id,
             "Failed to update endpoint. Ensure URL starts with http:// or https://");
         return 1;
+    }
+
+    /* V61: Write endpoint to kv table */
+    if (idx == 0) {
+        if (db_kv_set(g_db, "provider.base_url", text) != 0) {
+            telegram_send_message(g_cfg->telegram_token, chat_id,
+                "Failed to update endpoint in database.");
+            return 1;
+        }
+    } else {
+        /* Update fallback provider base_url in JSON array */
+        char *fp = db_kv_get(g_db, "fallback_providers");
+        cJSON *arr = fp ? cJSON_Parse(fp) : NULL;
+        free(fp);
+        if (!arr || !cJSON_IsArray(arr) || cJSON_GetArraySize(arr) < idx) {
+            cJSON_Delete(arr);
+            telegram_send_message(g_cfg->telegram_token, chat_id,
+                "Failed to update endpoint: invalid provider index.");
+            return 1;
+        }
+        cJSON *p = cJSON_GetArrayItem(arr, idx - 1);
+        cJSON *existing = cJSON_GetObjectItemCaseSensitive(p, "base_url");
+        if (existing) cJSON_SetValuestring(existing, text);
+        else cJSON_AddStringToObject(p, "base_url", text);
+        char *json = cJSON_PrintUnformatted(arr);
+        cJSON_Delete(arr);
+        if (!json || db_kv_set(g_db, "fallback_providers", json) != 0) {
+            free(json);
+            telegram_send_message(g_cfg->telegram_token, chat_id,
+                "Failed to update fallback endpoint in database.");
+            return 1;
+        }
+        free(json);
     }
 
     /* Update base_url in-place */
@@ -941,9 +988,24 @@ static int apply_approval(const Approval *a) {
         cJSON *model = cJSON_GetObjectItemCaseSensitive(payload, "model");
         cJSON *pidx = cJSON_GetObjectItemCaseSensitive(payload, "provider_index");
         int idx = (pidx && cJSON_IsNumber(pidx)) ? pidx->valueint : 0;
-        const char *config_path = daemon_get_config_path();
-        if (cJSON_IsString(model) && config_path && config_path[0])
-            rc = config_update_model(config_path, idx, model->valuestring);
+        if (cJSON_IsString(model)) {
+            if (idx == 0) {
+                rc = db_kv_set(g_db, "provider.model", model->valuestring);
+            } else {
+                char *fp = db_kv_get(g_db, "fallback_providers");
+                cJSON *arr = fp ? cJSON_Parse(fp) : NULL;
+                free(fp);
+                if (arr && cJSON_IsArray(arr) && cJSON_GetArraySize(arr) >= idx) {
+                    cJSON *p = cJSON_GetArrayItem(arr, idx - 1);
+                    cJSON *existing = cJSON_GetObjectItemCaseSensitive(p, "model");
+                    if (existing) cJSON_SetValuestring(existing, model->valuestring);
+                    else cJSON_AddStringToObject(p, "model", model->valuestring);
+                    char *json = cJSON_PrintUnformatted(arr);
+                    if (json) { rc = db_kv_set(g_db, "fallback_providers", json); free(json); }
+                }
+                cJSON_Delete(arr);
+            }
+        }
     } else if (strcmp(a->type, "tool_enable") == 0) {
         /* Tool enable is a config-level change — accepted but no-op for now */
         rc = 0;

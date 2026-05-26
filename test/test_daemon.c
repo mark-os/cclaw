@@ -127,17 +127,14 @@ static void test_daemon_fork_reap(void) {
         "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}");
     fclose(f);
 
-    /* Write minimal config file for exec'd child */
-    const char *cfg_path = "/tmp/test_cclaw_config.json";
-    f = fopen(cfg_path, "w");
-    assert(f);
-    fprintf(f,
-        "{\"db_path\":\"%s\",\"workspace\":\"/tmp\","
-        "\"provider\":{\"base_url\":\"http://localhost:1/v1\","
-        "\"api_key\":\"test\",\"model\":\"test\","
-        "\"max_tokens\":100,\"context_window\":4000},"
-        "\"max_iterations\":1}", DB_PATH);
-    fclose(f);
+    /* V61: Seed config in kv table for exec'd child */
+    db_kv_set(db, "provider.base_url", "http://localhost:1/v1");
+    db_kv_set(db, "provider.api_key", "test");
+    db_kv_set(db, "provider.model", "test");
+    db_kv_set(db, "provider.max_tokens", "100");
+    db_kv_set(db, "provider.context_window", "4000");
+    db_kv_set(db, "workspace", "/tmp");
+    db_kv_set(db, "max_iterations", "1");
 
     /* Set env var — inherited by forked children */
     setenv("CCLAW_LLM_MOCK", mock_path, 1);
@@ -145,7 +142,6 @@ static void test_daemon_fork_reap(void) {
     /* Start daemon in background thread */
     shutdown_reset();
     daemon_set_self_path("./build/cclaw");
-    daemon_set_config_path(cfg_path);
     Config cfg = {0};
     cfg.db_path = (char *)DB_PATH;
     cfg.workspace = "/tmp";
@@ -205,7 +201,6 @@ static void test_daemon_fork_reap(void) {
 
     unsetenv("CCLAW_LLM_MOCK");
     unlink(mock_path);
-    unlink(cfg_path);
     db_close(db);
     unlink(DB_PATH);
     printf("  PASS test_daemon_fork_reap\n");

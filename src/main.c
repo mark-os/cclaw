@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <libgen.h>
 #include "cclaw.h"
 #include "config.h"
 #include "cli.h"
@@ -47,7 +48,7 @@ static char *dispatch_tools(const char *name, const char *arguments, void *user_
 
 /* --agent mode: run one turn on a session, then exit.
  * Daemon fork+exec target. Loads agent config from session's agent_name. */
-static int run_agent_turn(const Config *cfg, int64_t session_id) {
+static int run_agent_turn(int64_t session_id) {
     /* V34: die if parent dies */
     prctl(PR_SET_PDEATHSIG, SIGTERM);
 
@@ -65,13 +66,36 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
 
     shutdown_init();
 
-    sqlite3 *db = db_open(cfg->db_path);
-    if (!db) return 1;
+    /* V61: Determine DB path from env or default (next to binary) */
+    const char *db_path_env = getenv("CCLAW_DB_PATH");
+    char *db_path = NULL;
+    if (db_path_env) {
+        db_path = strdup(db_path_env);
+    } else {
+        char exe[4096];
+        ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (len > 0) {
+            exe[len] = '\0';
+            char *dir = dirname(exe);
+            size_t dlen = strlen(dir);
+            db_path = malloc(dlen + sizeof("/cclaw.db"));
+            if (db_path) sprintf(db_path, "%s/cclaw.db", dir);
+        }
+        if (!db_path) db_path = strdup("cclaw.db");
+    }
+
+    sqlite3 *db = db_open(db_path);
+    if (!db) { free(db_path); return 1; }
 
     /* V52,T172: Load/create secret key for kv encryption */
     uint8_t secret_key[32];
-    if (secret_key_load_or_create(cfg->db_path, secret_key) == 0)
+    if (secret_key_load_or_create(db_path, secret_key) == 0)
         db_set_secret_key(secret_key);
+    free(db_path);
+
+    /* V61: Load config from kv table */
+    Config *cfg = config_load_from_kv(db);
+    if (!cfg) { db_close(db); return 1; }
 
     /* V57: mmap + reduced cache for agent processes */
     db_set_agent_pragmas(db);
@@ -115,6 +139,7 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
             entry_branch_free(branch, branch_count);
             agent_config_free(ac);
             if (merged_cfg) config_free(merged_cfg);
+            config_free(cfg);
             free(agent_name);
             db_close(db);
             return 0;
@@ -223,13 +248,30 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
     js_runtime_destroy(js_rt);
     agent_config_free(ac);
     if (merged_cfg) config_free(merged_cfg);
+    config_free(cfg);
     free(agent_name);
     db_close(db);
     return rc == 0 ? 0 : 1;
 }
 
+/* Resolve DB path: env override or default next to binary */
+static char *resolve_db_path(void) {
+    const char *env = getenv("CCLAW_DB_PATH");
+    if (env) return strdup(env);
+    char exe[4096];
+    ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (len > 0) {
+        exe[len] = '\0';
+        char *dir = dirname(exe);
+        size_t dlen = strlen(dir);
+        char *p = malloc(dlen + sizeof("/cclaw.db"));
+        if (p) { sprintf(p, "%s/cclaw.db", dir); return p; }
+    }
+    return strdup("cclaw.db");
+}
+
 static void print_usage(void) {
-    printf("usage: cclaw [options] [config.json]\n"
+    printf("usage: cclaw [options]\n"
            "\n"
            "modes (default: --cli):\n"
            "  --cli              interactive CLI (stdin/stdout)\n"
@@ -250,7 +292,6 @@ int main(int argc, char *argv[]) {
     int debug_mode = 0;
     int new_session = 0;
     int64_t sa_session_id = -1;
-    const char *config_path = NULL;
     const char *prompt = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -275,8 +316,6 @@ int main(int argc, char *argv[]) {
             sa_session_id = atoll(argv[i]);
         } else if (strncmp(argv[i], "--session-id=", 13) == 0) {
             sa_session_id = atoll(argv[i] + 13);
-        } else if (argv[i][0] != '-') {
-            config_path = argv[i];
         } else {
             fprintf(stderr, "error: unknown option '%s'\n", argv[i]);
             print_usage();
@@ -284,18 +323,45 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    Config *cfg = config_load(config_path);
+    /* Agent mode: self-contained, opens DB and loads config from kv */
+    if (agent_mode) {
+        if (sa_session_id < 0) {
+            fprintf(stderr, "error: --agent requires --session-id=N\n");
+            return 1;
+        }
+        return run_agent_turn(sa_session_id);
+    }
+
+    /* V61: Open DB, load config from kv table */
+    char *db_path = resolve_db_path();
+    sqlite3 *db = db_open(db_path);
+    if (!db) {
+        fprintf(stderr, "error: cannot open database '%s'\n", db_path);
+        free(db_path);
+        return 1;
+    }
+
+    /* V52,T172: Load/create secret key for kv encryption */
+    {
+        uint8_t secret_key[32];
+        if (secret_key_load_or_create(db_path, secret_key) == 0)
+            db_set_secret_key(secret_key);
+    }
+    free(db_path);
+
+    Config *cfg = config_load_from_kv(db);
     if (!cfg) {
-        fprintf(stderr, "error: failed to load config\n");
+        fprintf(stderr, "error: failed to load config from database\n");
+        db_close(db);
         return 1;
     }
     if (debug_mode) cfg->debug = 1;
 
     shutdown_init();
 
-    if (!daemon_mode && !agent_mode) {
+    if (!daemon_mode) {
+        db_close(db);
         CliOpts opts = {0};
-        opts.config_path = config_path;
         opts.prompt = prompt;
         if (new_session)
             opts.session_id = 0;
@@ -308,32 +374,7 @@ int main(int argc, char *argv[]) {
         return rc == 0 ? 0 : 1;
     }
 
-    if (agent_mode) {
-        if (sa_session_id < 0) {
-            fprintf(stderr, "error: --agent requires --session-id=N\n");
-            config_free(cfg);
-            return 1;
-        }
-        int rc = run_agent_turn(cfg, sa_session_id);
-        config_free(cfg);
-        return rc;
-    }
-
     /* Daemon mode: epoll loop, fork agents on inbox signal, reap on exit */
-    sqlite3 *db = db_open(cfg->db_path);
-    if (!db) {
-        fprintf(stderr, "error: cannot open database '%s'\n", cfg->db_path);
-        config_free(cfg);
-        return 1;
-    }
-
-    /* V52,T172: Load/create secret key for kv encryption */
-    {
-        uint8_t secret_key[32];
-        if (secret_key_load_or_create(cfg->db_path, secret_key) == 0)
-            db_set_secret_key(secret_key);
-    }
-
     workspace_init(cfg);
 
     printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
@@ -365,7 +406,6 @@ int main(int argc, char *argv[]) {
     }
 
     /* T81: daemon main loop — blocks until shutdown */
-    if (config_path) daemon_set_config_path(config_path);
     daemon_run(cfg, db);
 
     printf("\nshutting down...\n");

@@ -16,7 +16,6 @@
 #include "mock_server.h"
 
 static const char *DB_PATH = "/tmp/test_integ_daemon.sqlite";
-static const char *CFG_PATH = "/tmp/test_integ_daemon_config.json";
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -33,17 +32,17 @@ static void *daemon_thread(void *arg) {
     return NULL;
 }
 
-static void write_config(int port) {
-    FILE *f = fopen(CFG_PATH, "w");
-    assert(f);
-    fprintf(f,
-        "{\"db_path\":\"%s\",\"workspace\":\"/tmp\","
-        "\"provider\":{\"base_url\":\"http://127.0.0.1:%d/v1\","
-        "\"api_key\":\"mock-key\",\"model\":\"mock-model\","
-        "\"max_tokens\":256,\"context_window\":128000},"
-        "\"max_iterations\":5}",
-        DB_PATH, port);
-    fclose(f);
+/* Seed kv table with config pointing to mock server */
+static void seed_kv_config(sqlite3 *db, int port) {
+    char base_url[64];
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    db_kv_set(db, "provider.base_url", base_url);
+    db_kv_set(db, "provider.model", "mock-model");
+    db_kv_set(db, "provider.max_tokens", "256");
+    db_kv_set(db, "provider.context_window", "128000");
+    db_kv_set(db, "workspace", "/tmp");
+    db_kv_set(db, "max_iterations", "5");
+    db_kv_set(db, "shell_timeout", "5");
 }
 
 /* Wait for session to return to idle with an assistant entry (max 15s) */
@@ -88,11 +87,14 @@ static void test_daemon_fork_reap_mock(void) {
         "\"content\":\"Hello from mock LLM\"},\"finish_reason\":\"stop\"}],"
         "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}");
 
-    write_config(port);
-
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
     if (!db) { mock_server_stop(); FAIL("db_open"); }
+
+    /* V61: Seed config in kv table (agent process reads from DB) */
+    seed_kv_config(db, port);
+    /* Agent needs an API key to proceed */
+    db_kv_set(db, "provider.api_key", "mock-key");
 
     int64_t sid = session_create(db, "integ_daemon", NULL, -1, 0);
     if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create"); }
@@ -103,7 +105,6 @@ static void test_daemon_fork_reap_mock(void) {
     /* Configure daemon */
     shutdown_reset();
     daemon_set_self_path("./build/cclaw");
-    daemon_set_config_path(CFG_PATH);
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
@@ -176,7 +177,6 @@ static void test_daemon_fork_reap_mock(void) {
     db_close(db);
     mock_server_stop();
     unlink(DB_PATH);
-    unlink(CFG_PATH);
     PASS();
 }
 
@@ -200,8 +200,6 @@ static void test_daemon_fork_reap_tool_call(void) {
         "\"content\":\"File contents received.\"},\"finish_reason\":\"stop\"}],"
         "\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5}}");
 
-    write_config(port);
-
     /* Create the file the agent will try to read */
     FILE *tf = fopen("/tmp/test_integ_daemon_file.txt", "w");
     if (tf) { fprintf(tf, "test data"); fclose(tf); }
@@ -210,6 +208,10 @@ static void test_daemon_fork_reap_tool_call(void) {
     sqlite3 *db = db_open(DB_PATH);
     if (!db) { mock_server_stop(); FAIL("db_open"); }
 
+    /* V61: Seed config in kv table */
+    seed_kv_config(db, port);
+    db_kv_set(db, "provider.api_key", "mock-key");
+
     int64_t sid = session_create(db, "integ_daemon_tool", NULL, -1, 0);
     if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create"); }
 
@@ -217,7 +219,6 @@ static void test_daemon_fork_reap_tool_call(void) {
 
     shutdown_reset();
     daemon_set_self_path("./build/cclaw");
-    daemon_set_config_path(CFG_PATH);
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
@@ -285,7 +286,6 @@ static void test_daemon_fork_reap_tool_call(void) {
     db_close(db);
     mock_server_stop();
     unlink(DB_PATH);
-    unlink(CFG_PATH);
     unlink("/tmp/test_integ_daemon_file.txt");
     PASS();
 }

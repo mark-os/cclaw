@@ -259,7 +259,6 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
     int has_daemon = daemon_is_running(cfg->db_path);
     AgentLaunchCtx sa_ctx = {.db = db, .session_id = session_id,
                              .self_path = cli_self_path,
-                             .config_path = opts->config_path,
                              .daemon_mode = has_daemon > 0};
     tool_launch_agent_register(&reg, &sa_ctx);
 

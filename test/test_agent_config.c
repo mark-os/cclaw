@@ -142,7 +142,12 @@ static void test_agent_config_missing_file(void) {
 
 static void test_agent_config_merge(void) {
     /* V20: merge agent overrides into global config */
-    Config *global = config_load(NULL);
+    unlink("/tmp/test_ac_merge.db");
+    sqlite3 *db = db_open("/tmp/test_ac_merge.db");
+    assert(db);
+    setenv("OPENROUTER_API_KEY", "sk-test", 1);
+    Config *global = config_load_from_kv(db);
+    db_close(db);
     assert(global != NULL);
 
     system("rm -rf /tmp/test_ac_merge");
@@ -170,12 +175,18 @@ static void test_agent_config_merge(void) {
     agent_config_free(ac);
     config_free(global);
     system("rm -rf /tmp/test_ac_merge");
+    unlink("/tmp/test_ac_merge.db");
     printf("  PASS: agent config merge (V20)\n");
 }
 
 static void test_agent_config_merge_null(void) {
     /* NULL agent config → returns copy of global */
-    Config *global = config_load(NULL);
+    unlink("/tmp/test_ac_merge_null.db");
+    sqlite3 *db = db_open("/tmp/test_ac_merge_null.db");
+    assert(db);
+    setenv("OPENROUTER_API_KEY", "sk-test", 1);
+    Config *global = config_load_from_kv(db);
+    db_close(db);
     assert(global != NULL);
 
     Config *merged = agent_config_merge(global, NULL);
@@ -186,6 +197,7 @@ static void test_agent_config_merge_null(void) {
 
     config_free(merged);
     config_free(global);
+    unlink("/tmp/test_ac_merge_null.db");
     printf("  PASS: agent config merge NULL (global copy)\n");
 }
 

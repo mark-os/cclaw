@@ -14,7 +14,6 @@ typedef struct {
     sqlite3 *db;
     int64_t session_id;
     const char *self_path;  /* path to cclaw binary (CLI fork+exec) */
-    const char *config_path; /* config file path (passed to exec'd child) */
     int daemon_mode;        /* if true, post to spawn_queue instead of fork */
     const char *tool_call_id; /* current tool_call_id for blocking launch */
 } AgentLaunchCtx;

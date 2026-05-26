@@ -109,10 +109,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         setsid();
         char sid_arg[64];
         snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)child_session_id);
-        if (ctx->config_path)
-            execl(ctx->self_path, ctx->self_path, "--agent", sid_arg, ctx->config_path, (char *)NULL);
-        else
-            execl(ctx->self_path, ctx->self_path, "--agent", sid_arg, (char *)NULL);
+        execl(ctx->self_path, ctx->self_path, "--agent", sid_arg, (char *)NULL);
         _exit(127);
     }
 

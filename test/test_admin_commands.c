@@ -76,48 +76,46 @@ static void test_non_admin_rejected(void) {
     assert(telegram_is_admin(NULL, 111) == 0);
 }
 
-/* Config reload picks up changes after config_update_model */
+/* Config reload picks up changes from kv table */
 static void test_config_reload(void) {
-    const char *path = "/tmp/cclaw_test_admin_cfg.json";
-    const char *json =
-        "{\n"
-        "  \"provider\": {\"base_url\": \"https://openrouter.ai/api/v1\", \"model\": \"old-model\"},\n"
-        "  \"providers\": [{\"base_url\": \"https://gemini.api\", \"model\": \"gemini-old\"}]\n"
-        "}";
-    FILE *f = fopen(path, "w");
-    assert(f);
-    fputs(json, f);
-    fclose(f);
+    const char *db_path = "/tmp/cclaw_test_admin_reload.db";
+    unlink(db_path);
 
     setenv("OPENROUTER_API_KEY", "sk-test", 1);
+    unsetenv("CCLAW_MODEL");
+    unsetenv("CCLAW_PROVIDER");
+
+    sqlite3 *db = db_open(db_path);
+    assert(db);
+
+    /* Set initial model */
+    db_kv_set(db, "provider.model", "old-model");
 
     /* Load initial config */
-    Config *cfg = config_load(path);
+    Config *cfg = config_load_from_kv(db);
     assert(cfg);
     assert(strcmp(cfg->provider.model, "old-model") == 0);
     config_free(cfg);
 
-    /* Update model via admin command path */
-    assert(config_update_model(path, 0, "new-model-v2") == 0);
+    /* Update model via kv (simulates admin command path) */
+    db_kv_set(db, "provider.model", "new-model-v2");
 
     /* Reload config — picks up change */
-    cfg = config_load(path);
+    cfg = config_load_from_kv(db);
     assert(cfg);
     assert(strcmp(cfg->provider.model, "new-model-v2") == 0);
-    /* Fallback unchanged */
-    assert(cfg->fallback_count == 1);
-    assert(strcmp(cfg->fallback_providers[0].model, "gemini-old") == 0);
     config_free(cfg);
 
     /* Update endpoint */
-    assert(config_update_endpoint(path, 0, "https://new-endpoint.ai/v1") == 0);
-    cfg = config_load(path);
+    db_kv_set(db, "provider.base_url", "https://new-endpoint.ai/v1");
+    cfg = config_load_from_kv(db);
     assert(cfg);
     assert(strcmp(cfg->provider.base_url, "https://new-endpoint.ai/v1") == 0);
     config_free(cfg);
 
     unsetenv("OPENROUTER_API_KEY");
-    remove(path);
+    db_close(db);
+    unlink(db_path);
 }
 
 int main(void) {

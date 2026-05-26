@@ -294,7 +294,7 @@ T170|x|`kv_get` / `kv_set` — simple key-value read/write; `kv_get_secret` / `k
 T171|x|ChaCha20-Poly1305 implementation — vendor monocypher (or minimal standalone ~200 LOC); `secret_encrypt(key, plaintext)` → `enc:<hex(nonce\|\|ct\|\|tag)>`; `secret_decrypt(key, enc_str)` → plaintext; key loaded from `<db_dir>/.cclaw_key`|V52
 T172|x|key file management — `secret_key_load_or_create(db_path)` → reads `.cclaw_key` next to DB; creates w/ `getrandom()` + mode 0600 if missing; returns 32-byte key; called once at startup, held in memory for process lifetime|V52
 T173|x|`db_query` secret filtering — WHERE clause or post-filter strips kv rows where value LIKE 'enc:%' from results returned to agent|V52
-T174|.|delete `config.c` JSON parsing — remove cJSON config file loader, `config.json` CLI arg handling; `config_load(path)` → `config_load_from_db(db)`; env override logic stays (reads `CCLAW_*` env vars into Config struct after kv load)|V61
+T174|x|delete `config.c` JSON parsing — remove cJSON config file loader, `config.json` CLI arg handling; `config_load(path)` → `config_load_from_db(db)`; env override logic stays (reads `CCLAW_*` env vars into Config struct after kv load)|V61
 T175|.|integration test: kv config — empty DB → defaults seeded; env var overrides win; `config_load_from_db` produces correct Config struct; no network|V61,T169
 T176|.|integration test: secrets round-trip — `kv_set_secret` stores `enc:` prefix; `kv_get_secret` returns plaintext; delete key file → decrypt fails gracefully; no network|V52,T171
 T177|.|integration test: wire emission — insert entries via split columns, run RequestStreamer against mock server, capture request body, verify valid OpenAI JSON (tool_calls format, escaped content w/ newlines/quotes/unicode)|V60,T166

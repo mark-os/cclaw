@@ -45,12 +45,6 @@ void daemon_startup_recovery(sqlite3 *db);
 /* Override exec path for fork+exec (testing). */
 void daemon_set_self_path(const char *path);
 
-/* Set config path passed to exec'd children. */
-void daemon_set_config_path(const char *path);
-
-/* Get config path (for admin config writes). Returns "" if unset. */
-const char *daemon_get_config_path(void);
-
 /* Derive FIFO path from db_path (caller frees). */
 char *daemon_pipe_path(const char *db_path);
 

@@ -34,18 +34,9 @@
 
 static int g_signal_pipe[2] = {-1, -1};
 static char g_self_path[4096] = "";
-static char g_config_path[4096] = "";
 
 void daemon_set_self_path(const char *path) {
     snprintf(g_self_path, sizeof(g_self_path), "%s", path);
-}
-
-void daemon_set_config_path(const char *path) {
-    snprintf(g_config_path, sizeof(g_config_path), "%s", path);
-}
-
-const char *daemon_get_config_path(void) {
-    return g_config_path;
 }
 
 static void set_nonblock(int fd) {
@@ -257,10 +248,7 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
         /* Child: exec agent process */
         char sid_arg[64];
         snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)session_id);
-        if (g_config_path[0])
-            execl(g_self_path, g_self_path, "--agent", sid_arg, g_config_path, (char *)NULL);
-        else
-            execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);
+        execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);
         _exit(127);
     }
 
@@ -467,10 +455,7 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
         if (pid == 0) {
             char sid_arg[64];
             snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)child_sid);
-            if (g_config_path[0])
-                execl(g_self_path, g_self_path, "--agent", sid_arg, g_config_path, (char *)NULL);
-            else
-                execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);
+            execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);
             _exit(127);
         }
 
@@ -554,6 +539,10 @@ void daemon_startup_recovery(sqlite3 *db) {
 /* ── Daemon main loop (T81) ─────────────────────────────────────── */
 
 int daemon_run(const Config *cfg, sqlite3 *db) {
+    /* V61: Set CCLAW_DB_PATH so forked agent children find the DB */
+    if (cfg->db_path)
+        setenv("CCLAW_DB_PATH", cfg->db_path, 1);
+
     /* Resolve self path for fork+exec (skip if already set via daemon_set_self_path) */
     if (!g_self_path[0]) {
         ssize_t sp_len = readlink("/proc/self/exe", g_self_path, sizeof(g_self_path) - 1);

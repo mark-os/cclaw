@@ -2,10 +2,16 @@
 #define CCLAW_CONFIG_H
 
 #include "types.h"
+#include "sqlite3.h"
 
 /* Load config from JSON file (NULL = env-only). Env vars override JSON fields.
  * Returns heap-allocated Config, or NULL on failure. */
 Config *config_load(const char *path);
+
+/* V61,T170: Load config from kv table + env var overrides.
+ * Priority: env var > kv value > hardcoded default.
+ * Returns heap-allocated Config, or NULL on failure. */
+Config *config_load_from_kv(sqlite3 *db);
 
 /* T46: Render system prompt with template vars {session_id}, {date}.
  * Returns heap-allocated string. Caller must free. */

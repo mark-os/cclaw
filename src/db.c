@@ -930,6 +930,20 @@ int db_kv_set(sqlite3 *db, const char *key, const char *value) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+/* V61,T170: Secret-aware kv access.
+ * Until T171 adds ChaCha20-Poly1305, these are plaintext passthrough.
+ * kv_get_secret: if value has enc: prefix, would decrypt (currently returns raw).
+ * kv_set_secret: would encrypt before storing (currently stores plaintext). */
+char *db_kv_get_secret(sqlite3 *db, const char *key) {
+    /* T171 will add decryption of enc: prefix values here */
+    return db_kv_get(db, key);
+}
+
+int db_kv_set_secret(sqlite3 *db, const char *key, const char *value) {
+    /* T171 will add encryption (enc: prefix) here */
+    return db_kv_set(db, key, value);
+}
+
 int64_t db_tg_get_session(sqlite3 *db, int64_t chat_id) {
     const char *sql = "SELECT session_id FROM tg_chat_sessions WHERE chat_id = ?;";
     sqlite3_stmt *stmt;

@@ -105,6 +105,27 @@ static void test_query_sessions_table(void) {
     printf("  PASS: query sessions table\n");
 }
 
+static void test_secret_filtering(void) {
+    sqlite3 *db = db_open(":memory:");
+    assert(db);
+
+    /* Insert plaintext and encrypted kv rows */
+    sqlite3_exec(db, "INSERT OR REPLACE INTO kv(key,value) VALUES('test.plain','visible')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT OR REPLACE INTO kv(key,value) VALUES('test.secret','enc:abcdef1234567890')", NULL, NULL, NULL);
+
+    char *r = tool_db_query_handler("{\"sql\":\"SELECT key, value FROM kv WHERE key LIKE 'test.%'\"}", db);
+    assert(r);
+    /* Plaintext row visible */
+    assert(strstr(r, "test.plain"));
+    assert(strstr(r, "visible"));
+    /* Encrypted row filtered out */
+    assert(!strstr(r, "test.secret"));
+    assert(!strstr(r, "enc:"));
+    free(r);
+    db_close(db);
+    printf("  PASS: secret filtering\n");
+}
+
 static void test_register(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
@@ -133,6 +154,7 @@ int main(void) {
     test_invalid_sql();
     test_missing_sql_field();
     test_query_sessions_table();
+    test_secret_filtering();
     test_register();
     printf("all tests passed\n");
     return 0;

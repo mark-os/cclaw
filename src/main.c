@@ -31,6 +31,7 @@
 #include "context.h"
 #include "daemon.h"
 #include "context.h"
+#include "secret.h"
 
 /* Tool dispatch via registry */
 static char *dispatch_tools(const char *name, const char *arguments, void *user_data) {
@@ -66,6 +67,11 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
 
     sqlite3 *db = db_open(cfg->db_path);
     if (!db) return 1;
+
+    /* V52,T172: Load/create secret key for kv encryption */
+    uint8_t secret_key[32];
+    if (secret_key_load_or_create(cfg->db_path, secret_key) == 0)
+        db_set_secret_key(secret_key);
 
     /* V57: mmap + reduced cache for agent processes */
     db_set_agent_pragmas(db);
@@ -319,6 +325,13 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "error: cannot open database '%s'\n", cfg->db_path);
         config_free(cfg);
         return 1;
+    }
+
+    /* V52,T172: Load/create secret key for kv encryption */
+    {
+        uint8_t secret_key[32];
+        if (secret_key_load_or_create(cfg->db_path, secret_key) == 0)
+            db_set_secret_key(secret_key);
     }
 
     workspace_init(cfg);

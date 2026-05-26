@@ -16,6 +16,7 @@
 #include "shutdown.h"
 #include "daemon.h"
 #include "context.h"
+#include "secret.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -180,6 +181,11 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
         fprintf(stderr, "error: cannot open database '%s'\n", cfg->db_path);
         return -1;
     }
+
+    /* V52,T172: Load/create secret key for kv encryption */
+    uint8_t secret_key[32];
+    if (secret_key_load_or_create(cfg->db_path, secret_key) == 0)
+        db_set_secret_key(secret_key);
 
     /* V57: mmap + reduced cache for agent processes */
     db_set_agent_pragmas(db);

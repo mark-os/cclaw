@@ -147,6 +147,62 @@ static void test_key_file_create_and_load(void) {
     printf("  PASS: key file create and load\n");
 }
 
+/* T172: Verify startup integration — load_or_create + set_key → secrets work */
+static void test_startup_integration(void) {
+    char tmpdir[] = "/tmp/cclaw_t172_XXXXXX";
+    assert(mkdtemp(tmpdir) != NULL);
+
+    char db_path[256];
+    snprintf(db_path, sizeof(db_path), "%s/test.db", tmpdir);
+
+    /* Simulate startup: open DB, load key, set key */
+    sqlite3 *db = db_open(db_path);
+    assert(db != NULL);
+
+    uint8_t key[32];
+    assert(secret_key_load_or_create(db_path, key) == 0);
+    db_set_secret_key(key);
+
+    /* Store and retrieve a secret */
+    assert(db_kv_set_secret(db, "provider.api_key", "sk-test-123") == 0);
+    char *val = db_kv_get_secret(db, "provider.api_key");
+    assert(val != NULL);
+    assert(strcmp(val, "sk-test-123") == 0);
+    free(val);
+
+    db_close(db);
+
+    /* Simulate restart: reopen DB, reload same key, verify secret persists */
+    db = db_open(db_path);
+    assert(db != NULL);
+
+    uint8_t key2[32];
+    assert(secret_key_load_or_create(db_path, key2) == 0);
+    assert(memcmp(key, key2, 32) == 0);
+    db_set_secret_key(key2);
+
+    char *val2 = db_kv_get_secret(db, "provider.api_key");
+    assert(val2 != NULL);
+    assert(strcmp(val2, "sk-test-123") == 0);
+    free(val2);
+
+    db_close(db);
+
+    /* Cleanup */
+    char key_path[256];
+    snprintf(key_path, sizeof(key_path), "%s/.cclaw_key", tmpdir);
+    unlink(key_path);
+    unlink(db_path);
+    /* Remove WAL/SHM if present */
+    char wal_path[280], shm_path[280];
+    snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
+    snprintf(shm_path, sizeof(shm_path), "%s-shm", db_path);
+    unlink(wal_path);
+    unlink(shm_path);
+    rmdir(tmpdir);
+    printf("  PASS: startup integration (load_or_create + set_key + persist)\n");
+}
+
 int main(void) {
     printf("test_secret:\n");
     test_encrypt_decrypt_roundtrip();
@@ -157,6 +213,7 @@ int main(void) {
     test_different_encryptions_differ();
     test_db_kv_secret_roundtrip();
     test_key_file_create_and_load();
+    test_startup_integration();
     printf("All secret tests passed.\n");
     return 0;
 }

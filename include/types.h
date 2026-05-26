@@ -46,6 +46,12 @@ typedef struct {
     ToolResult *tool_result; /* tool role msgs only, NULL otherwise */
     StopReason stop_reason; /* V35: assistant msgs only, STOP_REASON_NONE otherwise */
     char *metadata_json;    /* optional: reasoning, usage, logprobs (raw JSON object) */
+    /* V60: split-column fields written directly at insert time */
+    const char *model;      /* assistant msgs: which model produced this */
+    const char *tool_name;  /* tool msgs: which tool produced this result */
+    int is_error;           /* tool msgs: whether result is an error */
+    int usage_in;           /* assistant msgs: input tokens */
+    int usage_out;          /* assistant msgs: output tokens */
 } Message;
 
 /* V14: session tree entry — id + parent_id for branching structure */

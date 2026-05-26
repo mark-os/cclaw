@@ -320,7 +320,8 @@ int agent_run(AgentContext *ctx) {
             int64_t tid = db_next_turn_id(ctx->db, ctx->session_id);
             Message abort_msg = {.role = ROLE_ASSISTANT,
                                  .content = strdup("error: agent terminated by shutdown signal"),
-                                 .stop_reason = STOP_REASON_ABORTED};
+                                 .stop_reason = STOP_REASON_ABORTED,
+                                 .model = ctx->cfg->provider.model};
             entry_append_with_turn(ctx->db, ctx->session_id, &abort_msg, tid);
             free(abort_msg.content);
             return -1;
@@ -401,7 +402,8 @@ int agent_run(AgentContext *ctx) {
         if (!llm_ok) {
             Message err_msg = {.role = ROLE_ASSISTANT,
                                .content = strdup("error: LLM request failed after retries"),
-                               .stop_reason = STOP_REASON_ERROR};
+                               .stop_reason = STOP_REASON_ERROR,
+                               .model = ctx->cfg->provider.model};
             entry_append_with_turn(ctx->db, ctx->session_id, &err_msg, turn_id);
             free(err_msg.content);
             arena_destroy(a);
@@ -415,7 +417,10 @@ int agent_run(AgentContext *ctx) {
             Message asst = {.role = ROLE_ASSISTANT,
                             .content = llm_resp.content ? strdup(llm_resp.content) : strdup(""),
                             .stop_reason = sr,
-                            .metadata_json = meta};
+                            .metadata_json = meta,
+                            .model = ctx->cfg->provider.model,
+                            .usage_in = llm_resp.usage.prompt_tokens,
+                            .usage_out = llm_resp.usage.completion_tokens};
             entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
 
             /* V45: plan-only retry — re-prompt once if response is just a plan */
@@ -443,6 +448,9 @@ int agent_run(AgentContext *ctx) {
         asst.stop_reason = map_stop_reason(llm_resp.finish_reason);
         asst.tool_call_count = llm_resp.tool_call_count;
         asst.metadata_json = build_metadata(ctx->cfg, &llm_resp);
+        asst.model = ctx->cfg->provider.model;
+        asst.usage_in = llm_resp.usage.prompt_tokens;
+        asst.usage_out = llm_resp.usage.completion_tokens;
 
         /* T115: notify progress — intermediate assistant text */
         if (ctx->progress && asst.content && asst.content[0])
@@ -468,12 +476,14 @@ int agent_run(AgentContext *ctx) {
             if (shutdown_requested()) {
                 ToolResult tr = {.tool_call_id = asst.tool_calls[i].id,
                                  .content = "error: agent terminated by shutdown signal"};
-                Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr};
+                Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                                    .tool_name = asst.tool_calls[i].name, .is_error = 1};
                 entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
                 for (size_t j = i + 1; j < asst.tool_call_count; j++) {
                     ToolResult skip_tr = {.tool_call_id = asst.tool_calls[j].id,
                                           .content = "error: agent terminated by shutdown signal"};
-                    Message skip_msg = {.role = ROLE_TOOL, .tool_result = &skip_tr};
+                    Message skip_msg = {.role = ROLE_TOOL, .tool_result = &skip_tr,
+                                        .tool_name = asst.tool_calls[j].name, .is_error = 1};
                     entry_append_with_turn(ctx->db, ctx->session_id, &skip_msg, turn_id);
                 }
                 for (size_t j = 0; j < asst.tool_call_count; j++) {
@@ -496,14 +506,16 @@ int agent_run(AgentContext *ctx) {
                 /* ≥10: force-stop agent loop */
                 char *err = strdup("error: tool loop detected — same call repeated 10+ times with no progress");
                 ToolResult tr = {.tool_call_id = asst.tool_calls[i].id, .content = err};
-                Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr};
+                Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                                    .tool_name = asst.tool_calls[i].name, .is_error = 1};
                 entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
                 free(err);
                 /* Write error results for remaining tool calls */
                 for (size_t j = i + 1; j < asst.tool_call_count; j++) {
                     ToolResult skip_tr = {.tool_call_id = asst.tool_calls[j].id,
                                           .content = "error: tool loop detected"};
-                    Message skip_msg = {.role = ROLE_TOOL, .tool_result = &skip_tr};
+                    Message skip_msg = {.role = ROLE_TOOL, .tool_result = &skip_tr,
+                                        .tool_name = asst.tool_calls[j].name, .is_error = 1};
                     entry_append_with_turn(ctx->db, ctx->session_id, &skip_msg, turn_id);
                 }
                 loop_ring.hashes[loop_ring.count % TOOL_LOOP_RING_SIZE] = h;
@@ -540,7 +552,9 @@ int agent_run(AgentContext *ctx) {
                                              asst.tool_calls[i].id);
             ToolResult tr = {.tool_call_id = asst.tool_calls[i].id,
                              .content = stored ? stored : result};
-            Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr};
+            int err = (result[0] == 'e' && strncmp(result, "error:", 6) == 0);
+            Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                                .tool_name = asst.tool_calls[i].name, .is_error = err};
             entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
             free(stored);
             free(result);

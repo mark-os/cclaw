@@ -661,8 +661,9 @@ void session_list_free(Session *sessions, int count) {
 int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, const Message *msg) {
     const char *sql =
         "INSERT INTO entries (parent_id, session_id, role, content, tool_calls,"
-        " tool_call_id, stop_reason, token_estimate, content_bytes, tool_call_count)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?);";
+        " tool_call_id, tool_name, is_error, stop_reason, model,"
+        " usage_in, usage_out, token_estimate, content_bytes, tool_call_count)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -695,16 +696,33 @@ int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, cons
     else
         sqlite3_bind_null(stmt, 6);
 
+    /* tool_name */
+    if (msg->tool_name) sqlite3_bind_text(stmt, 7, msg->tool_name, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, 7);
+
+    /* is_error */
+    sqlite3_bind_int(stmt, 8, msg->is_error);
+
     /* stop_reason */
-    sqlite3_bind_int(stmt, 7, stop_reason_to_int(msg->stop_reason));
+    sqlite3_bind_int(stmt, 9, stop_reason_to_int(msg->stop_reason));
+
+    /* model */
+    if (msg->model) sqlite3_bind_text(stmt, 10, msg->model, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, 10);
+
+    /* usage */
+    if (msg->usage_in > 0) sqlite3_bind_int(stmt, 11, msg->usage_in);
+    else sqlite3_bind_null(stmt, 11);
+    if (msg->usage_out > 0) sqlite3_bind_int(stmt, 12, msg->usage_out);
+    else sqlite3_bind_null(stmt, 12);
 
     /* token_estimate + content_bytes */
     int content_len = content_val ? (int)strlen(content_val) : 0;
     int tc_len = tc_json ? (int)strlen(tc_json) : 0;
     int total_bytes = content_len + tc_len;
-    sqlite3_bind_int(stmt, 8, (total_bytes / 4) + 4);
-    sqlite3_bind_int(stmt, 9, total_bytes);
-    sqlite3_bind_int(stmt, 10, tc_count);
+    sqlite3_bind_int(stmt, 13, (total_bytes / 4) + 4);
+    sqlite3_bind_int(stmt, 14, total_bytes);
+    sqlite3_bind_int(stmt, 15, tc_count);
 
     free(tc_json);
 
@@ -963,8 +981,9 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
 
     const char *ins_sql =
         "INSERT INTO entries (parent_id, session_id, turn_id, role, content, tool_calls,"
-        " tool_call_id, stop_reason, token_estimate, content_bytes, tool_call_count)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?);";
+        " tool_call_id, tool_name, is_error, stop_reason, model,"
+        " usage_in, usage_out, token_estimate, content_bytes, tool_call_count)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
     if (sqlite3_prepare_v2(db, ins_sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_int64(stmt, 1, parent_id);
@@ -994,14 +1013,33 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
     else
         sqlite3_bind_null(stmt, 7);
 
-    sqlite3_bind_int(stmt, 8, stop_reason_to_int(msg->stop_reason));
+    /* tool_name */
+    if (msg->tool_name) sqlite3_bind_text(stmt, 8, msg->tool_name, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, 8);
 
+    /* is_error */
+    sqlite3_bind_int(stmt, 9, msg->is_error);
+
+    /* stop_reason */
+    sqlite3_bind_int(stmt, 10, stop_reason_to_int(msg->stop_reason));
+
+    /* model */
+    if (msg->model) sqlite3_bind_text(stmt, 11, msg->model, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, 11);
+
+    /* usage */
+    if (msg->usage_in > 0) sqlite3_bind_int(stmt, 12, msg->usage_in);
+    else sqlite3_bind_null(stmt, 12);
+    if (msg->usage_out > 0) sqlite3_bind_int(stmt, 13, msg->usage_out);
+    else sqlite3_bind_null(stmt, 13);
+
+    /* token_estimate + content_bytes */
     int content_len = content_val ? (int)strlen(content_val) : 0;
     int tc_len = tc_json ? (int)strlen(tc_json) : 0;
     int total_bytes = content_len + tc_len;
-    sqlite3_bind_int(stmt, 9, (total_bytes / 4) + 4);
-    sqlite3_bind_int(stmt, 10, total_bytes);
-    sqlite3_bind_int(stmt, 11, tc_count);
+    sqlite3_bind_int(stmt, 14, (total_bytes / 4) + 4);
+    sqlite3_bind_int(stmt, 15, total_bytes);
+    sqlite3_bind_int(stmt, 16, tc_count);
     free(tc_json);
 
     int rc = sqlite3_step(stmt);

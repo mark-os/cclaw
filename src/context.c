@@ -1,6 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "context.h"
+#include "arena.h"
 #include "db.h"
+#include "http.h"
+#include "llm.h"
+#include "cJSON.h"
 #include "templates.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -610,15 +614,115 @@ int64_t session_try_compact(sqlite3 *db, int64_t session_id, const Config *cfg) 
 
     int64_t last_kept_id = plan.entries[0].id;
     int64_t first_after_id = plan.entries[plan.cut].id;
+    int compact_count = plan.cut - 1;
 
-    /* T162 will replace this with an LLM-generated summary.
-     * For now, produce a placeholder summary with entry count. */
-    char summary[256];
-    snprintf(summary, sizeof(summary),
-             "[Compacted %d entries. Context continues below.]", plan.cut - 1);
+    /* T162: Build text of compacted entries for LLM summarization */
+    char *summary = NULL;
+    if (cfg->provider.api_key && cfg->provider.base_url && cfg->provider.model) {
+        /* Load content of entries to compact (IDs plan.entries[1..cut-1]) */
+        size_t text_cap = 4096, text_len = 0;
+        char *text = malloc(text_cap);
+        if (text) {
+            text[0] = '\0';
+            for (int i = 1; i < plan.cut && text_len < 100000; i++) {
+                const char *sql = "SELECT role, content FROM entries WHERE id=? AND session_id=?;";
+                sqlite3_stmt *stmt;
+                if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) continue;
+                sqlite3_bind_int64(stmt, 1, plan.entries[i].id);
+                sqlite3_bind_int64(stmt, 2, session_id);
+                if (sqlite3_step(stmt) == SQLITE_ROW) {
+                    int role = sqlite3_column_int(stmt, 0);
+                    const char *content = (const char *)sqlite3_column_text(stmt, 1);
+                    const char *rname = role == 2 ? "assistant" : role == 1 ? "user" : role == 3 ? "tool" : "system";
+                    if (content) {
+                        size_t clen = strlen(content);
+                        size_t need = text_len + strlen(rname) + clen + 8;
+                        if (need > text_cap) {
+                            while (need > text_cap) text_cap *= 2;
+                            char *tmp = realloc(text, text_cap);
+                            if (!tmp) { sqlite3_finalize(stmt); break; }
+                            text = tmp;
+                        }
+                        text_len += (size_t)snprintf(text + text_len, text_cap - text_len,
+                                                     "[%s] %s\n", rname, content);
+                    }
+                }
+                sqlite3_finalize(stmt);
+            }
+
+            /* Call LLM for summary */
+            if (text_len > 0) {
+                const char *sys_prompt =
+                    "Summarize the following conversation excerpt into a structured summary. "
+                    "Include: goal, progress, key decisions, and next steps. "
+                    "Be concise (under 500 words). Output plain text only.";
+
+                cJSON *root = cJSON_CreateObject();
+                if (root) {
+                    cJSON_AddStringToObject(root, "model", cfg->provider.model);
+                    if (cfg->provider.max_tokens > 0)
+                        cJSON_AddNumberToObject(root, "max_tokens",
+                            cfg->provider.max_tokens < 1024 ? cfg->provider.max_tokens : 1024);
+                    else
+                        cJSON_AddNumberToObject(root, "max_tokens", 1024);
+                    cJSON *msgs = cJSON_AddArrayToObject(root, "messages");
+                    cJSON *sys = cJSON_CreateObject();
+                    cJSON_AddStringToObject(sys, "role", "system");
+                    cJSON_AddStringToObject(sys, "content", sys_prompt);
+                    cJSON_AddItemToArray(msgs, sys);
+                    cJSON *usr = cJSON_CreateObject();
+                    cJSON_AddStringToObject(usr, "role", "user");
+                    cJSON_AddStringToObject(usr, "content", text);
+                    cJSON_AddItemToArray(msgs, usr);
+
+                    char *body = cJSON_PrintUnformatted(root);
+                    cJSON_Delete(root);
+
+                    if (body) {
+                        /* Build URL */
+                        size_t blen = strlen(cfg->provider.base_url);
+                        while (blen > 0 && cfg->provider.base_url[blen - 1] == '/') blen--;
+                        char *url = malloc(blen + 32);
+                        if (url) {
+                            memcpy(url, cfg->provider.base_url, blen);
+                            memcpy(url + blen, "/chat/completions", 18);
+
+                            char auth[512];
+                            snprintf(auth, sizeof(auth), "Authorization: Bearer %s", cfg->provider.api_key);
+                            const char *headers[] = { "Content-Type: application/json", auth, NULL };
+
+                            HttpResponse resp = {0};
+                            int status = http_post(url, headers, body, &resp);
+                            if (status == 200 && resp.data) {
+                                Arena *a = arena_create(resp.len + 256);
+                                LlmResponse llm = {0};
+                                if (a && llm_parse_response(a, resp.data, &llm) == 0 && llm.content) {
+                                    summary = strdup(llm.content);
+                                }
+                                arena_destroy(a);
+                            }
+                            http_response_free(&resp);
+                            free(url);
+                        }
+                        free(body);
+                    }
+                }
+            }
+            free(text);
+        }
+    }
+
+    /* Fallback: placeholder if LLM call failed */
+    char fallback[256];
+    if (!summary) {
+        snprintf(fallback, sizeof(fallback),
+                 "[Compacted %d entries. Context continues below.]", compact_count);
+        summary = fallback;
+    }
 
     context_plan_free(&plan);
 
-    /* Atomic reparent via entry_compact (V58,V59) */
-    return entry_compact(db, session_id, last_kept_id, first_after_id, summary);
+    int64_t result = entry_compact(db, session_id, last_kept_id, first_after_id, summary);
+    if (summary != fallback) free(summary);
+    return result;
 }

@@ -296,7 +296,7 @@ T172|x|key file management — `secret_key_load_or_create(db_path)` → reads `.
 T173|x|`db_query` secret filtering — WHERE clause or post-filter strips kv rows where value LIKE 'enc:%' from results returned to agent|V52
 T174|x|delete `config.c` JSON parsing — remove cJSON config file loader, `config.json` CLI arg handling; `config_load(path)` → `config_load_from_db(db)`; env override logic stays (reads `CCLAW_*` env vars into Config struct after kv load)|V61
 T175|x|integration test: kv config — empty DB → defaults seeded; env var overrides win; `config_load_from_db` produces correct Config struct; no network|V61,T169
-T176|.|integration test: secrets round-trip — `kv_set_secret` stores `enc:` prefix; `kv_get_secret` returns plaintext; delete key file → decrypt fails gracefully; no network|V52,T171
+T176|x|integration test: secrets round-trip — `kv_set_secret` stores `enc:` prefix; `kv_get_secret` returns plaintext; delete key file → decrypt fails gracefully; no network|V52,T171
 T177|.|integration test: wire emission — insert entries via split columns, run RequestStreamer against mock server, capture request body, verify valid OpenAI JSON (tool_calls format, escaped content w/ newlines/quotes/unicode)|V60,T166
 T178|.|integration test: large session memory — insert 500+ entries, run agent loop w/ mock server, verify RSS stays bounded (check `/proc/self/status`); verify context_plan truncates correctly|V41,V56
 T179|.|integration test: db_query secret filtering — seed kv w/ `enc:` values, run `db_query("SELECT * FROM kv")` tool, verify no `enc:` rows in result; no network|V52,T173

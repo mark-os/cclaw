@@ -279,6 +279,41 @@ static void test_entry_tool_calls_roundtrip(void) {
     printf("  PASS test_entry_tool_calls_roundtrip\n");
 }
 
+/* T159/V59: original_parent_id — NULL in DB maps to -1, set on reparent */
+static void test_original_parent_id(void) {
+    sqlite3 *db = setup();
+    int64_t sid = session_create(db, "reparent", NULL, -1, 0);
+
+    int64_t e1 = insert_entry(db, sid, -1, ROLE_USER, "first");
+    int64_t e2 = insert_entry(db, sid, e1, ROLE_ASSISTANT, "second");
+    session_set_leaf(db, sid, e2);
+
+    /* Default: original_parent_id is NULL → -1 in struct */
+    int count = 0;
+    Entry *branch = session_get_branch(db, sid, &count);
+    assert(count == 2);
+    assert(branch[0].original_parent_id == -1);
+    assert(branch[1].original_parent_id == -1);
+    entry_branch_free(branch, count);
+
+    /* Simulate reparent: set original_parent_id on e2 */
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(db, "UPDATE entries SET original_parent_id=? WHERE id=?", -1, &stmt, NULL);
+    sqlite3_bind_int64(stmt, 1, e1);
+    sqlite3_bind_int64(stmt, 2, e2);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    branch = session_get_branch(db, sid, &count);
+    assert(count == 2);
+    assert(branch[0].original_parent_id == -1); /* never reparented */
+    assert(branch[1].original_parent_id == e1); /* reparented */
+    entry_branch_free(branch, count);
+
+    teardown(db);
+    printf("  PASS test_original_parent_id\n");
+}
+
 int main(void) {
     printf("test_session:\n");
     test_session_create();
@@ -292,6 +327,7 @@ int main(void) {
     test_entry_append_at_branch();
     test_entry_append_invalid_session();
     test_entry_tool_calls_roundtrip();
+    test_original_parent_id();
     printf("All session tests passed.\n");
     return 0;
 }

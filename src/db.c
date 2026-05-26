@@ -299,6 +299,21 @@ sqlite3 *db_open(const char *path) {
         }
     }
 
+    /* T159: add original_parent_id if entries table exists without it */
+    {
+        sqlite3_stmt *chk;
+        if (sqlite3_prepare_v2(db, "SELECT original_parent_id FROM entries LIMIT 0", -1, &chk, NULL) != SQLITE_OK) {
+            /* Column missing — table exists but lacks column */
+            sqlite3_stmt *tbl;
+            if (sqlite3_prepare_v2(db, "SELECT 1 FROM entries LIMIT 0", -1, &tbl, NULL) == SQLITE_OK) {
+                sqlite3_finalize(tbl);
+                sqlite3_exec(db, "ALTER TABLE entries ADD COLUMN original_parent_id INTEGER;", NULL, NULL, NULL);
+            }
+        } else {
+            sqlite3_finalize(chk);
+        }
+    }
+
     /* Create tables */
     rc = sqlite3_exec(db, SCHEMA_SQL, NULL, NULL, &err);
     if (rc != SQLITE_OK) {
@@ -552,13 +567,13 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
 
     /* Walk chain using recursive CTE — read split columns */
     const char *branch_sql =
-        "WITH RECURSIVE branch(id, parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason) AS ("
-        "  SELECT id, parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason"
+        "WITH RECURSIVE branch(id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason) AS ("
+        "  SELECT id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason"
         "    FROM entries WHERE id=? AND session_id=?"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.session_id, e.created_at, e.role, e.content, e.tool_calls, e.tool_call_id, e.stop_reason"
+        "  SELECT e.id, e.parent_id, e.original_parent_id, e.session_id, e.created_at, e.role, e.content, e.tool_calls, e.tool_call_id, e.stop_reason"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
-        ") SELECT id, parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason FROM branch ORDER BY id;";
+        ") SELECT id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason FROM branch ORDER BY id;";
 
     if (sqlite3_prepare_v2(db, branch_sql, -1, &stmt, NULL) != SQLITE_OK)
         return NULL;
@@ -579,10 +594,11 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
         Entry *e = &entries[*count];
         e->id = sqlite3_column_int64(stmt, 0);
         e->parent_id = sqlite3_column_int64(stmt, 1);
-        e->session_id = sqlite3_column_int64(stmt, 2);
-        e->created_at = (time_t)sqlite3_column_int64(stmt, 3);
-        /* cols: 4=role, 5=content, 6=tool_calls, 7=tool_call_id, 8=stop_reason */
-        read_entry_from_columns(stmt, 4, 5, 6, 7, 8, &e->message);
+        e->original_parent_id = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? -1 : sqlite3_column_int64(stmt, 2);
+        e->session_id = sqlite3_column_int64(stmt, 3);
+        e->created_at = (time_t)sqlite3_column_int64(stmt, 4);
+        /* cols: 5=role, 6=content, 7=tool_calls, 8=tool_call_id, 9=stop_reason */
+        read_entry_from_columns(stmt, 5, 6, 7, 8, 9, &e->message);
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -771,6 +787,7 @@ Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *cou
         Entry *e = &entries[*count];
         e->id = sqlite3_column_int64(stmt, 0);
         e->parent_id = sqlite3_column_int64(stmt, 1);
+        e->original_parent_id = -1; /* not loaded in search results */
         e->session_id = sqlite3_column_int64(stmt, 2);
         e->created_at = (time_t)sqlite3_column_int64(stmt, 3);
         /* cols: 4=role, 5=content, 6=tool_calls, 7=tool_call_id, 8=stop_reason */

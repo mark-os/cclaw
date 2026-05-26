@@ -51,6 +51,7 @@ typedef struct {
 typedef struct {
     int64_t id;
     int64_t parent_id;      /* -1 = root (no parent) */
+    int64_t original_parent_id; /* V59: set on reparent, -1 = never reparented */
     int64_t session_id;
     time_t created_at;
     Message message;

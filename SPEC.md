@@ -279,7 +279,7 @@ T155|x|drop flat `soul`/`memory` columns from agents table — migrate existing 
 T156|x|~~stored generated columns~~ superseded by split-column schema (V60); migration: recreate entries table w/ new columns, copy old `data` JSON into split columns via `json_extract` INSERT-SELECT|V56,V60
 T157|x|`context_plan` query rewrite — use `role`, `stop_reason`, `tool_call_count` integer columns directly (⊥ json_extract); verify plan pass ⊥ touch `content`/`tool_calls` (no overflow page loads)|V56
 T158|x|mmap pragma — set `PRAGMA mmap_size=67108864` + `PRAGMA cache_size=-512` in `db_init()` for agent processes; daemon keeps defaults (lightweight queries); conditional on process role|V57
-T159|.|`original_parent_id` column — add nullable `INTEGER` to entries table; populated only on reparent operations; migration: `ALTER TABLE entries ADD COLUMN original_parent_id INTEGER`|V59
+T159|x|`original_parent_id` column — add nullable `INTEGER` to entries table; populated only on reparent operations; migration: `ALTER TABLE entries ADD COLUMN original_parent_id INTEGER`|V59
 T160|.|compaction entry type — role=4 (compaction), `content` = summary text, `tool_calls` = NULL; append as entry w/ `parent_id` = last-kept-entry-before-compacted-range; reparent first-entry-after-range to summary node|V58,V59
 T161|.|compaction trigger — detect when CTE branch length exceeds threshold (configurable, default 200 entries beyond budget); invoke summarization; perform atomic reparent in single transaction|V58
 T162|.|compaction summarization — LLM call w/ compacted entries as context; produce structured summary (goal, progress, decisions, next steps); store as compaction entry content|V58,T160

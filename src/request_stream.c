@@ -1,46 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "request_stream.h"
+#include "json_escape.h"
 #include "cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-
-/* V60/T166: json_escape_into — linear pass, write escaped JSON string into caller buffer.
- * Does NOT write surrounding quotes. Returns bytes written (excluding NUL).
- * If cap is insufficient, returns required size (caller must retry with larger buffer). */
-static size_t json_escape_into(char *dest, size_t cap, const char *src) {
-    if (!src) { if (cap > 0) dest[0] = '\0'; return 0; }
-    size_t w = 0;
-    for (const char *p = src; *p; p++) {
-        unsigned char c = (unsigned char)*p;
-        const char *esc = NULL;
-        char ubuf[7];
-        size_t elen = 0;
-        switch (c) {
-        case '"':  esc = "\\\""; elen = 2; break;
-        case '\\': esc = "\\\\"; elen = 2; break;
-        case '\n': esc = "\\n";  elen = 2; break;
-        case '\r': esc = "\\r";  elen = 2; break;
-        case '\t': esc = "\\t";  elen = 2; break;
-        default:
-            if (c < 0x20) {
-                snprintf(ubuf, sizeof(ubuf), "\\u%04x", c);
-                esc = ubuf; elen = 6;
-            } else {
-                if (w < cap) dest[w] = (char)c;
-                w++;
-                continue;
-            }
-        }
-        for (size_t i = 0; i < elen; i++) {
-            if (w < cap) dest[w] = esc[i];
-            w++;
-        }
-    }
-    if (w < cap) dest[w] = '\0';
-    else if (cap > 0) dest[cap - 1] = '\0';
-    return w;
-}
 
 /* V60/T168: Minimal tool_calls parser — extract id, name, args substrings from stored JSON
  * without full DOM build. Walks the array looking for key offsets.

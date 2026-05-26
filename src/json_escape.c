@@ -1,11 +1,11 @@
 #include "json_escape.h"
 #include <stdio.h>
 
-size_t json_escape_into(char *dest, size_t cap, const char *src) {
-    if (!src) { if (cap > 0) dest[0] = '\0'; return 0; }
+/* Shared escape logic — processes src_len bytes from src */
+static size_t escape_core(char *dest, size_t cap, const char *src, size_t src_len) {
     size_t w = 0;
-    for (const char *p = src; *p; p++) {
-        unsigned char c = (unsigned char)*p;
+    for (size_t i = 0; i < src_len; i++) {
+        unsigned char c = (unsigned char)src[i];
         const char *esc = NULL;
         char ubuf[7];
         size_t elen = 0;
@@ -25,12 +25,24 @@ size_t json_escape_into(char *dest, size_t cap, const char *src) {
                 continue;
             }
         }
-        for (size_t i = 0; i < elen; i++) {
-            if (w < cap) dest[w] = esc[i];
+        for (size_t j = 0; j < elen; j++) {
+            if (w < cap) dest[w] = esc[j];
             w++;
         }
     }
     if (w < cap) dest[w] = '\0';
     else if (cap > 0) dest[cap - 1] = '\0';
     return w;
+}
+
+size_t json_escape_into(char *dest, size_t cap, const char *src) {
+    if (!src) { if (cap > 0 && dest) dest[0] = '\0'; return 0; }
+    size_t len = 0;
+    while (src[len]) len++;
+    return escape_core(dest, cap, src, len);
+}
+
+size_t json_escape_into_n(char *dest, size_t cap, const char *src, size_t src_len) {
+    if (!src || src_len == 0) { if (cap > 0 && dest) dest[0] = '\0'; return 0; }
+    return escape_core(dest, cap, src, src_len);
 }

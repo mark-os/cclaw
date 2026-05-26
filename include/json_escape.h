@@ -8,4 +8,7 @@
  * Handles: " \\ \n \r \t and control chars < 0x20 as \u00XX. Zero-alloc. */
 size_t json_escape_into(char *dest, size_t cap, const char *src);
 
+/* T168: Same as json_escape_into but reads exactly src_len bytes (no NUL terminator needed). */
+size_t json_escape_into_n(char *dest, size_t cap, const char *src, size_t src_len);
+
 #endif

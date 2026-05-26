@@ -6,20 +6,61 @@
 #include <string.h>
 #include <stdio.h>
 
-/* V60/T168: Minimal tool_calls parser — extract id, name, args substrings from stored JSON
- * without full DOM build. Walks the array looking for key offsets.
+/* V60/T168: Minimal tool_calls parser — zero-alloc state machine.
+ * Walks stored JSON array [{"id":"...","name":"...","args":{...}},...]
+ * extracting id, name, args substring offsets without full DOM build.
  * Emits OpenAI wire format directly into buffer.
  * Returns bytes written (may exceed cap if buffer too small). */
-static size_t emit_tool_calls_openai(char *dest, size_t cap, const char *tc_json) {
-    /* For correctness and simplicity in this first pass, we use cJSON to parse
-     * the stored tool_calls array but emit directly via snprintf+json_escape_into
-     * instead of cJSON_Print. This avoids cJSON on the OUTPUT side (no PrintUnformatted
-     * for the full message). T168 will replace this with a zero-alloc state machine. */
-    if (!tc_json) return 0;
 
-    /* Use cJSON just to walk the stored array structure */
-    cJSON *arr = cJSON_Parse(tc_json);
-    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return 0; }
+/* Skip a JSON string starting at src[pos] (pos points to opening quote).
+ * Returns index after closing quote, or 0 on error. */
+static size_t skip_json_string(const char *src, size_t pos) {
+    pos++; /* skip opening " */
+    while (src[pos]) {
+        if (src[pos] == '\\') { pos += 2; continue; }
+        if (src[pos] == '"') return pos + 1;
+        pos++;
+    }
+    return 0;
+}
+
+/* Skip a JSON value starting at src[pos]. Handles strings, objects, arrays, primitives.
+ * Returns index after the value, or 0 on error. */
+static size_t skip_json_value(const char *src, size_t pos) {
+    while (src[pos] == ' ' || src[pos] == '\t' || src[pos] == '\n' || src[pos] == '\r') pos++;
+    if (src[pos] == '"') return skip_json_string(src, pos);
+    if (src[pos] == '{' || src[pos] == '[') {
+        char open = src[pos], close = (open == '{') ? '}' : ']';
+        int depth = 1;
+        pos++;
+        while (src[pos] && depth > 0) {
+            if (src[pos] == '"') {
+                pos = skip_json_string(src, pos);
+                if (pos == 0) return 0;
+                continue;
+            }
+            if (src[pos] == open) depth++;
+            else if (src[pos] == close) depth--;
+            pos++;
+        }
+        return pos;
+    }
+    /* number, true, false, null */
+    while (src[pos] && src[pos] != ',' && src[pos] != '}' && src[pos] != ']'
+           && src[pos] != ' ' && src[pos] != '\t' && src[pos] != '\n' && src[pos] != '\r')
+        pos++;
+    return pos;
+}
+
+/* Match a key name at src[pos] (pos points to opening quote of key).
+ * Returns 1 if key matches target, 0 otherwise. */
+static int match_key(const char *src, size_t pos, const char *target, size_t tlen) {
+    if (src[pos] != '"') return 0;
+    return (memcmp(src + pos + 1, target, tlen) == 0 && src[pos + 1 + tlen] == '"');
+}
+
+static size_t emit_tool_calls_openai(char *dest, size_t cap, const char *tc_json) {
+    if (!tc_json) return 0;
 
     size_t w = 0;
     #define EMIT(s, l) do { \
@@ -30,48 +71,93 @@ static size_t emit_tool_calls_openai(char *dest, size_t cap, const char *tc_json
     } while(0)
     #define EMITS(s) EMIT(s, strlen(s))
 
+    size_t p = 0;
+    /* Skip whitespace, find opening [ */
+    while (tc_json[p] && tc_json[p] != '[') p++;
+    if (!tc_json[p]) return 0;
+    p++; /* skip [ */
+
     EMITS(",\"tool_calls\":[");
 
-    int n = cJSON_GetArraySize(arr);
-    for (int i = 0; i < n; i++) {
-        if (i > 0) { EMIT(",", 1); }
-        cJSON *item = cJSON_GetArrayItem(arr, i);
-        cJSON *id_j = cJSON_GetObjectItem(item, "id");
-        cJSON *name_j = cJSON_GetObjectItem(item, "name");
-        cJSON *args_j = cJSON_GetObjectItem(item, "args");
+    int item_idx = 0;
+    while (tc_json[p]) {
+        /* Skip whitespace */
+        while (tc_json[p] == ' ' || tc_json[p] == '\t' || tc_json[p] == '\n' || tc_json[p] == '\r') p++;
+        if (tc_json[p] == ']') break;
+        if (tc_json[p] == ',') { p++; continue; }
+        if (tc_json[p] != '{') break;
+        p++; /* skip { */
 
-        const char *id = (id_j && id_j->valuestring) ? id_j->valuestring : "";
-        const char *name = (name_j && name_j->valuestring) ? name_j->valuestring : "";
+        /* Parse object: find "id", "name", "args" */
+        const char *id_start = NULL; size_t id_len = 0;
+        const char *name_start = NULL; size_t name_len = 0;
+        const char *args_start = NULL; size_t args_len = 0;
 
-        /* Get args as raw JSON string */
-        char *args_raw = NULL;
-        if (args_j) {
-            args_raw = cJSON_PrintUnformatted(args_j);
+        while (tc_json[p] && tc_json[p] != '}') {
+            while (tc_json[p] == ' ' || tc_json[p] == '\t' || tc_json[p] == '\n' || tc_json[p] == '\r' || tc_json[p] == ',') p++;
+            if (tc_json[p] == '}') break;
+            if (tc_json[p] != '"') break;
+
+            /* Key */
+            size_t key_pos = p;
+            p = skip_json_string(tc_json, p);
+            if (p == 0) goto done;
+
+            /* Skip colon + whitespace */
+            while (tc_json[p] == ' ' || tc_json[p] == ':' || tc_json[p] == '\t') p++;
+
+            /* Value */
+            size_t val_start = p;
+            size_t val_end = skip_json_value(tc_json, p);
+            if (val_end == 0) goto done;
+
+            if (match_key(tc_json, key_pos, "id", 2)) {
+                /* String value — extract content between quotes */
+                if (tc_json[val_start] == '"') {
+                    id_start = tc_json + val_start + 1;
+                    id_len = val_end - val_start - 2;
+                }
+            } else if (match_key(tc_json, key_pos, "name", 4)) {
+                if (tc_json[val_start] == '"') {
+                    name_start = tc_json + val_start + 1;
+                    name_len = val_end - val_start - 2;
+                }
+            } else if (match_key(tc_json, key_pos, "args", 4)) {
+                args_start = tc_json + val_start;
+                args_len = val_end - val_start;
+            }
+            p = val_end;
         }
-        const char *args_str = args_raw ? args_raw : "{}";
+        if (tc_json[p] == '}') p++; /* skip closing } */
 
-        /* Emit: {"id":"...","type":"function","function":{"name":"...","arguments":"..."}} */
+        /* Emit OpenAI format */
+        if (item_idx > 0) { EMIT(",", 1); }
+        item_idx++;
+
         EMITS("{\"id\":\"");
-        size_t elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0, id);
-        w += elen;
+        if (id_start) EMIT(id_start, id_len);
         EMITS("\",\"type\":\"function\",\"function\":{\"name\":\"");
-        elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0, name);
-        w += elen;
+        if (name_start) EMIT(name_start, name_len);
         EMITS("\",\"arguments\":\"");
-        /* OpenAI: arguments is a JSON string (escaped JSON object) */
-        elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0, args_str);
-        w += elen;
+        /* OpenAI: args is a JSON string (escaped JSON object) */
+        if (args_start && args_len > 0) {
+            size_t elen = json_escape_into_n(dest + (w < cap ? w : 0),
+                                             w < cap ? cap - w : 0,
+                                             args_start, args_len);
+            w += elen;
+        } else {
+            size_t elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0, "{}");
+            w += elen;
+        }
         EMITS("\"}}");
-
-        free(args_raw);
     }
 
+done:
     EMITS("]");
     if (w < cap) dest[w] = '\0';
 
     #undef EMIT
     #undef EMITS
-    cJSON_Delete(arr);
     return w;
 }
 

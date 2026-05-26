@@ -502,6 +502,84 @@ static void test_cache_hints_forced(void) {
     printf(" OK\n");
 }
 
+/* T168: Test zero-alloc tool_calls parser with multiple calls + complex args */
+static void test_multiple_tool_calls_complex_args(void) {
+    printf("  test_multiple_tool_calls_complex_args...");
+
+    sqlite3 *db = test_db_open();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    assert(sid > 0);
+
+    Message user_msg = {.role = ROLE_USER, .content = "do stuff"};
+    entry_append(db, sid, &user_msg);
+
+    /* Two tool calls with nested JSON args */
+    ToolCall tcs[2] = {
+        {.id = "call_abc", .name = "file_write",
+         .arguments = "{\"path\":\"/tmp/test.txt\",\"content\":\"line1\\nline2\"}"},
+        {.id = "call_def", .name = "shell_exec",
+         .arguments = "{\"cmd\":\"echo \\\"hello world\\\"\"}"}
+    };
+    Message asst = {.role = ROLE_ASSISTANT, .content = "I'll help",
+                    .tool_calls = tcs, .tool_call_count = 2,
+                    .stop_reason = STOP_REASON_TOOL_USE};
+    entry_append(db, sid, &asst);
+
+    Config cfg = {0};
+    cfg.provider.model = "m";
+    cfg.provider.context_window = 100000;
+
+    ContextPlan plan;
+    assert(context_plan(db, sid, &cfg, &plan) == 0);
+
+    RequestStreamer rs;
+    assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
+
+    char *json = stream_all(&rs);
+    cJSON *root = cJSON_Parse(json);
+    assert(root);
+
+    cJSON *messages = cJSON_GetObjectItem(root, "messages");
+    cJSON *m1 = cJSON_GetArrayItem(messages, 1);
+    assert(strcmp(cJSON_GetObjectItem(m1, "role")->valuestring, "assistant") == 0);
+    assert(strcmp(cJSON_GetObjectItem(m1, "content")->valuestring, "I'll help") == 0);
+
+    cJSON *tc_arr = cJSON_GetObjectItem(m1, "tool_calls");
+    assert(tc_arr && cJSON_GetArraySize(tc_arr) == 2);
+
+    /* First tool call */
+    cJSON *tc0 = cJSON_GetArrayItem(tc_arr, 0);
+    assert(strcmp(cJSON_GetObjectItem(tc0, "id")->valuestring, "call_abc") == 0);
+    assert(strcmp(cJSON_GetObjectItem(tc0, "type")->valuestring, "function") == 0);
+    cJSON *fn0 = cJSON_GetObjectItem(tc0, "function");
+    assert(strcmp(cJSON_GetObjectItem(fn0, "name")->valuestring, "file_write") == 0);
+    /* arguments is a JSON string — parse it to verify */
+    const char *args0_str = cJSON_GetObjectItem(fn0, "arguments")->valuestring;
+    cJSON *args0 = cJSON_Parse(args0_str);
+    assert(args0);
+    assert(strcmp(cJSON_GetObjectItem(args0, "path")->valuestring, "/tmp/test.txt") == 0);
+    assert(strcmp(cJSON_GetObjectItem(args0, "content")->valuestring, "line1\nline2") == 0);
+    cJSON_Delete(args0);
+
+    /* Second tool call */
+    cJSON *tc1 = cJSON_GetArrayItem(tc_arr, 1);
+    assert(strcmp(cJSON_GetObjectItem(tc1, "id")->valuestring, "call_def") == 0);
+    cJSON *fn1 = cJSON_GetObjectItem(tc1, "function");
+    assert(strcmp(cJSON_GetObjectItem(fn1, "name")->valuestring, "shell_exec") == 0);
+    const char *args1_str = cJSON_GetObjectItem(fn1, "arguments")->valuestring;
+    cJSON *args1 = cJSON_Parse(args1_str);
+    assert(args1);
+    assert(strcmp(cJSON_GetObjectItem(args1, "cmd")->valuestring, "echo \"hello world\"") == 0);
+    cJSON_Delete(args1);
+
+    cJSON_Delete(root);
+    free(json);
+    rs_cleanup(&rs);
+    context_plan_free(&plan);
+    sqlite3_close(db);
+    printf(" OK\n");
+}
+
 int main(void) {
     printf("test_request_stream:\n");
     test_basic_user_message();
@@ -514,6 +592,7 @@ int main(void) {
     test_cache_hints_anthropic();
     test_cache_hints_deepseek_auto();
     test_cache_hints_forced();
+    test_multiple_tool_calls_complex_args();
     printf("All request_stream tests passed.\n");
     return 0;
 }

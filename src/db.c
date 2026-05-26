@@ -238,6 +238,7 @@ static int migrate_entries_split_columns(sqlite3 *db) {
     sqlite3_exec(db, "CREATE INDEX idx_entries_session_role ON entries(session_id, role);", NULL, NULL, NULL);
     sqlite3_exec(db, "CREATE INDEX idx_entries_turn ON entries(session_id, turn_id);", NULL, NULL, NULL);
     sqlite3_exec(db, "CREATE INDEX idx_entries_stop_reason ON entries(session_id, stop_reason) WHERE stop_reason != 0;", NULL, NULL, NULL);
+    sqlite3_exec(db, "CREATE INDEX idx_entries_plan ON entries(parent_id, session_id, id, role, stop_reason, token_estimate, tool_call_count);", NULL, NULL, NULL);
     sqlite3_exec(db,
         "CREATE VIRTUAL TABLE entries_fts USING fts5(content, content=entries, content_rowid=id);",
         NULL, NULL, NULL);

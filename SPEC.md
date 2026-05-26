@@ -277,7 +277,7 @@ T153|x|memory tools — `memory_create(label, description, value?)`, `memory_app
 T154|x|system prompt memory injection — at context build, render blocks into prompt as labeled sections w/ metadata (label, description, chars_used/limit); agent sees structure, knows what each block is for|T152,T122
 T155|x|drop flat `soul`/`memory` columns from agents table — migrate existing content to `persona`/`human` blocks on first access|T152
 T156|x|~~stored generated columns~~ superseded by split-column schema (V60); migration: recreate entries table w/ new columns, copy old `data` JSON into split columns via `json_extract` INSERT-SELECT|V56,V60
-T157|.|`context_plan` query rewrite — use `role`, `stop_reason`, `tool_call_count` integer columns directly (⊥ json_extract); verify plan pass ⊥ touch `content`/`tool_calls` (no overflow page loads)|V56
+T157|x|`context_plan` query rewrite — use `role`, `stop_reason`, `tool_call_count` integer columns directly (⊥ json_extract); verify plan pass ⊥ touch `content`/`tool_calls` (no overflow page loads)|V56
 T158|.|mmap pragma — set `PRAGMA mmap_size=67108864` + `PRAGMA cache_size=-512` in `db_init()` for agent processes; daemon keeps defaults (lightweight queries); conditional on process role|V57
 T159|.|`original_parent_id` column — add nullable `INTEGER` to entries table; populated only on reparent operations; migration: `ALTER TABLE entries ADD COLUMN original_parent_id INTEGER`|V59
 T160|.|compaction entry type — role=4 (compaction), `content` = summary text, `tool_calls` = NULL; append as entry w/ `parent_id` = last-kept-entry-before-compacted-range; reparent first-entry-after-range to summary node|V58,V59

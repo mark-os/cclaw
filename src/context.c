@@ -418,14 +418,18 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan
     sqlite3_finalize(stmt);
     if (leaf_id < 0) return -1;
 
-    /* V56: Query branch metadata — integer columns only, no content loaded */
+    /* V56: Query branch metadata — covering index only, no main table access.
+     * CTE walks leaf→root via parent_id; selects all plan columns inline
+     * so the final SELECT needs no JOIN back to entries. */
     const char *plan_sql =
-        "WITH RECURSIVE branch(id, parent_id) AS ("
-        "  SELECT id, parent_id FROM entries WHERE id=? AND session_id=?"
+        "WITH RECURSIVE branch(id, parent_id, role, stop_reason, token_estimate, tool_call_count) AS ("
+        "  SELECT id, parent_id, role, stop_reason, token_estimate, tool_call_count"
+        "    FROM entries WHERE id=? AND session_id=?"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id FROM entries e JOIN branch b ON e.id=b.parent_id"
-        ") SELECT e.id, e.role, e.stop_reason, e.token_estimate, e.tool_call_count"
-        " FROM branch b JOIN entries e ON e.id=b.id ORDER BY e.id;";
+        "  SELECT e.id, e.parent_id, e.role, e.stop_reason, e.token_estimate, e.tool_call_count"
+        "    FROM entries e JOIN branch b ON e.id=b.parent_id"
+        ") SELECT id, role, stop_reason, token_estimate, tool_call_count"
+        " FROM branch ORDER BY id;";
 
     if (sqlite3_prepare_v2(db, plan_sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;

@@ -287,6 +287,47 @@ static void test_cutoff_notice(void) {
     printf(" OK\n");
 }
 
+/* T166: Test json_escape_into via content with special chars */
+static void test_special_chars_in_content(void) {
+    printf("  test_special_chars_in_content...");
+
+    sqlite3 *db = test_db_open();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    assert(sid > 0);
+
+    /* Content with quotes, newlines, tabs, backslashes */
+    Message msg = {.role = ROLE_USER, .content = "line1\nline2\t\"quoted\"\r\\end"};
+    entry_append(db, sid, &msg);
+
+    Config cfg = {0};
+    cfg.provider.model = "m";
+    cfg.provider.context_window = 100000;
+
+    ContextPlan plan;
+    assert(context_plan(db, sid, &cfg, &plan) == 0);
+
+    RequestStreamer rs;
+    assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
+
+    char *json = stream_all(&rs);
+    /* Must be valid JSON */
+    cJSON *root = cJSON_Parse(json);
+    assert(root);
+
+    cJSON *messages = cJSON_GetObjectItem(root, "messages");
+    cJSON *m0 = cJSON_GetArrayItem(messages, 0);
+    const char *c = cJSON_GetObjectItem(m0, "content")->valuestring;
+    /* cJSON unescapes — verify round-trip */
+    assert(strcmp(c, "line1\nline2\t\"quoted\"\r\\end") == 0);
+
+    cJSON_Delete(root);
+    free(json);
+    rs_cleanup(&rs);
+    context_plan_free(&plan);
+    sqlite3_close(db);
+    printf(" OK\n");
+}
+
 /* Test: small read sizes (simulates curl calling with small buffers) */
 static void test_small_reads(void) {
     printf("  test_small_reads...");
@@ -468,6 +509,7 @@ int main(void) {
     test_tools_included();
     test_reset();
     test_cutoff_notice();
+    test_special_chars_in_content();
     test_small_reads();
     test_cache_hints_anthropic();
     test_cache_hints_deepseek_auto();

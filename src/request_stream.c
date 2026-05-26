@@ -5,6 +5,172 @@
 #include <string.h>
 #include <stdio.h>
 
+/* V60/T166: json_escape_into — linear pass, write escaped JSON string into caller buffer.
+ * Does NOT write surrounding quotes. Returns bytes written (excluding NUL).
+ * If cap is insufficient, returns required size (caller must retry with larger buffer). */
+static size_t json_escape_into(char *dest, size_t cap, const char *src) {
+    if (!src) { if (cap > 0) dest[0] = '\0'; return 0; }
+    size_t w = 0;
+    for (const char *p = src; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        const char *esc = NULL;
+        char ubuf[7];
+        size_t elen = 0;
+        switch (c) {
+        case '"':  esc = "\\\""; elen = 2; break;
+        case '\\': esc = "\\\\"; elen = 2; break;
+        case '\n': esc = "\\n";  elen = 2; break;
+        case '\r': esc = "\\r";  elen = 2; break;
+        case '\t': esc = "\\t";  elen = 2; break;
+        default:
+            if (c < 0x20) {
+                snprintf(ubuf, sizeof(ubuf), "\\u%04x", c);
+                esc = ubuf; elen = 6;
+            } else {
+                if (w < cap) dest[w] = (char)c;
+                w++;
+                continue;
+            }
+        }
+        for (size_t i = 0; i < elen; i++) {
+            if (w < cap) dest[w] = esc[i];
+            w++;
+        }
+    }
+    if (w < cap) dest[w] = '\0';
+    else if (cap > 0) dest[cap - 1] = '\0';
+    return w;
+}
+
+/* V60/T168: Minimal tool_calls parser — extract id, name, args substrings from stored JSON
+ * without full DOM build. Walks the array looking for key offsets.
+ * Emits OpenAI wire format directly into buffer.
+ * Returns bytes written (may exceed cap if buffer too small). */
+static size_t emit_tool_calls_openai(char *dest, size_t cap, const char *tc_json) {
+    /* For correctness and simplicity in this first pass, we use cJSON to parse
+     * the stored tool_calls array but emit directly via snprintf+json_escape_into
+     * instead of cJSON_Print. This avoids cJSON on the OUTPUT side (no PrintUnformatted
+     * for the full message). T168 will replace this with a zero-alloc state machine. */
+    if (!tc_json) return 0;
+
+    /* Use cJSON just to walk the stored array structure */
+    cJSON *arr = cJSON_Parse(tc_json);
+    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return 0; }
+
+    size_t w = 0;
+    #define EMIT(s, l) do { \
+        for (size_t _i = 0; _i < (l); _i++) { \
+            if (w < cap) dest[w] = (s)[_i]; \
+            w++; \
+        } \
+    } while(0)
+    #define EMITS(s) EMIT(s, strlen(s))
+
+    EMITS(",\"tool_calls\":[");
+
+    int n = cJSON_GetArraySize(arr);
+    for (int i = 0; i < n; i++) {
+        if (i > 0) { EMIT(",", 1); }
+        cJSON *item = cJSON_GetArrayItem(arr, i);
+        cJSON *id_j = cJSON_GetObjectItem(item, "id");
+        cJSON *name_j = cJSON_GetObjectItem(item, "name");
+        cJSON *args_j = cJSON_GetObjectItem(item, "args");
+
+        const char *id = (id_j && id_j->valuestring) ? id_j->valuestring : "";
+        const char *name = (name_j && name_j->valuestring) ? name_j->valuestring : "";
+
+        /* Get args as raw JSON string */
+        char *args_raw = NULL;
+        if (args_j) {
+            args_raw = cJSON_PrintUnformatted(args_j);
+        }
+        const char *args_str = args_raw ? args_raw : "{}";
+
+        /* Emit: {"id":"...","type":"function","function":{"name":"...","arguments":"..."}} */
+        EMITS("{\"id\":\"");
+        size_t elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0, id);
+        w += elen;
+        EMITS("\",\"type\":\"function\",\"function\":{\"name\":\"");
+        elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0, name);
+        w += elen;
+        EMITS("\",\"arguments\":\"");
+        /* OpenAI: arguments is a JSON string (escaped JSON object) */
+        elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0, args_str);
+        w += elen;
+        EMITS("\"}}");
+
+        free(args_raw);
+    }
+
+    EMITS("]");
+    if (w < cap) dest[w] = '\0';
+
+    #undef EMIT
+    #undef EMITS
+    cJSON_Delete(arr);
+    return w;
+}
+
+/* V60/T166: Emit a single entry as OpenAI wire JSON directly into buffer.
+ * No cJSON on output path. Returns bytes written (may exceed cap). */
+static size_t emit_entry_openai(char *dest, size_t cap, int role,
+                                const char *content, const char *tool_calls,
+                                const char *tool_call_id) {
+    size_t w = 0;
+    #define EMIT(s, l) do { \
+        for (size_t _i = 0; _i < (l); _i++) { \
+            if (w < cap) dest[w] = (s)[_i]; \
+            w++; \
+        } \
+    } while(0)
+    #define EMITS(s) EMIT(s, strlen(s))
+
+    if (role == 3) {
+        /* tool result → {"role":"tool","tool_call_id":"...","content":"..."} */
+        EMITS("{\"role\":\"tool\",\"tool_call_id\":\"");
+        size_t elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0,
+                                       tool_call_id ? tool_call_id : "");
+        w += elen;
+        EMITS("\",\"content\":\"");
+        elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0,
+                                content ? content : "");
+        w += elen;
+        EMITS("\"}");
+    } else if (role == 2) {
+        /* assistant → {"role":"assistant","content":"..." or null, + optional tool_calls} */
+        EMITS("{\"role\":\"assistant\"");
+        if (content) {
+            EMITS(",\"content\":\"");
+            size_t elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0, content);
+            w += elen;
+            EMITS("\"");
+        } else {
+            EMITS(",\"content\":null");
+        }
+        if (tool_calls) {
+            size_t tc_len = emit_tool_calls_openai(dest + (w < cap ? w : 0),
+                                                   w < cap ? cap - w : 0, tool_calls);
+            w += tc_len;
+        }
+        EMITS("}");
+    } else {
+        /* user (1) / system (0) → {"role":"...","content":"..."} */
+        const char *role_str = (role == 0) ? "system" : "user";
+        EMITS("{\"role\":\"");
+        EMITS(role_str);
+        EMITS("\",\"content\":\"");
+        size_t elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0,
+                                       content ? content : "");
+        w += elen;
+        EMITS("\"}");
+    }
+
+    if (w < cap) dest[w] = '\0';
+    #undef EMIT
+    #undef EMITS
+    return w;
+}
+
 /* T123: detect if model needs explicit cache_control markers */
 static int needs_cache_control(const Config *cfg) {
     CacheHints h = cfg->provider.cache_hints;
@@ -47,65 +213,6 @@ static size_t buf_drain(RequestStreamer *rs, char *dest, size_t max) {
 
 static int buf_empty(const RequestStreamer *rs) {
     return rs->buf_pos >= rs->buf_len;
-}
-
-/* Reshape split columns into OpenAI message JSON.
- * Returns heap-allocated string (caller frees). */
-static char *reshape_entry_from_columns(int role, const char *content,
-                                        const char *tool_calls, const char *tool_call_id) {
-    cJSON *out = cJSON_CreateObject();
-
-    if (role == 3) { /* tool_result */
-        cJSON_AddStringToObject(out, "role", "tool");
-        cJSON_AddStringToObject(out, "tool_call_id", tool_call_id ? tool_call_id : "");
-        cJSON_AddStringToObject(out, "content", content ? content : "");
-    } else if (role == 2) { /* assistant */
-        cJSON_AddStringToObject(out, "role", "assistant");
-        if (content)
-            cJSON_AddStringToObject(out, "content", content);
-        else
-            cJSON_AddNullToObject(out, "content");
-
-        if (tool_calls) {
-            /* Parse provider-neutral format, emit OpenAI format */
-            cJSON *tc_arr = cJSON_Parse(tool_calls);
-            if (tc_arr && cJSON_IsArray(tc_arr)) {
-                cJSON *out_arr = cJSON_AddArrayToObject(out, "tool_calls");
-                int n = cJSON_GetArraySize(tc_arr);
-                for (int i = 0; i < n; i++) {
-                    cJSON *item = cJSON_GetArrayItem(tc_arr, i);
-                    cJSON *tc = cJSON_CreateObject();
-                    cJSON *id = cJSON_GetObjectItem(item, "id");
-                    cJSON_AddStringToObject(tc, "id", id && id->valuestring ? id->valuestring : "");
-                    cJSON_AddStringToObject(tc, "type", "function");
-                    cJSON *fn = cJSON_CreateObject();
-                    cJSON *name = cJSON_GetObjectItem(item, "name");
-                    cJSON_AddStringToObject(fn, "name", name && name->valuestring ? name->valuestring : "");
-                    cJSON *args = cJSON_GetObjectItem(item, "args");
-                    if (args) {
-                        char *args_str = cJSON_PrintUnformatted(args);
-                        if (args_str) {
-                            cJSON_AddRawToObject(fn, "arguments", args_str);
-                            free(args_str);
-                        }
-                    } else {
-                        cJSON_AddStringToObject(fn, "arguments", "{}");
-                    }
-                    cJSON_AddItemToObject(tc, "function", fn);
-                    cJSON_AddItemToArray(out_arr, tc);
-                }
-            }
-            cJSON_Delete(tc_arr);
-        }
-    } else {
-        /* user (1) / system (0) */
-        cJSON_AddStringToObject(out, "role", role == 0 ? "system" : "user");
-        cJSON_AddStringToObject(out, "content", content ? content : "");
-    }
-
-    char *result = cJSON_PrintUnformatted(out);
-    cJSON_Delete(out);
-    return result;
 }
 
 /* Build tools JSON fragment: ,"tools":[...] or empty if no tools */
@@ -238,27 +345,22 @@ static int rs_advance(RequestStreamer *rs) {
         const char *tool_calls = (const char *)sqlite3_column_text(rs->cursor, 2);
         const char *tool_call_id = (const char *)sqlite3_column_text(rs->cursor, 3);
 
-        char *msg_json = reshape_entry_from_columns(role, content, tool_calls, tool_call_id);
-        if (!msg_json) {
-            rs->entry_idx++;
-            return rs_advance(rs);
-        }
-
-        size_t mlen = strlen(msg_json);
-        size_t need = mlen + 2; /* comma + json */
-        if (buf_ensure(rs, need) != 0) { free(msg_json); return 1; }
+        /* V60: emit directly via json_escape_into + snprintf — no cJSON on output */
+        /* First pass: measure required size */
+        size_t need = emit_entry_openai(NULL, 0, role, content, tool_calls, tool_call_id);
+        need += 2; /* leading comma + NUL */
+        if (buf_ensure(rs, need) != 0) { rs->entry_idx++; return rs_advance(rs); }
 
         if (rs->first_entry) {
-            memcpy(rs->buf, msg_json, mlen);
-            rs->buf_len = mlen;
+            size_t written = emit_entry_openai(rs->buf, rs->buf_cap, role, content, tool_calls, tool_call_id);
+            rs->buf_len = written;
             rs->first_entry = 0;
         } else {
             rs->buf[0] = ',';
-            memcpy(rs->buf + 1, msg_json, mlen);
-            rs->buf_len = mlen + 1;
+            size_t written = emit_entry_openai(rs->buf + 1, rs->buf_cap - 1, role, content, tool_calls, tool_call_id);
+            rs->buf_len = written + 1;
         }
         rs->buf_pos = 0;
-        free(msg_json);
         rs->entry_idx++;
         return 0;
     }

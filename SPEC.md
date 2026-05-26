@@ -49,58 +49,11 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - db: `cclaw.db` — SQLite 3.53, WAL, FTS5, JSON functions
 
 ## §D DATA
-entries table: `id`, `session_id`, `parent_id`, `turn_id`, `created_at`, `data TEXT NOT NULL` (JSON), generated columns: `type`, `role`
-
-Entry `data` format (discriminated by `$.type`):
-- `{"type":"message","role":"user","content":"..."}`
-- `{"type":"message","role":"assistant","content":[{"type":"text","text":"..."},{"type":"tool_call","id":"...","name":"...","arguments":{...}}],"model":"...","usage":{"input":N,"output":N},"stop_reason":"<StopReason>"}`
-
-StopReason enum (normalized, provider-agnostic — Pi model):
-| Value | Meaning | Provider `finish_reason` sources |
-|-------|---------|----------------------------------|
-| `stop` | normal completion | `"stop"`, `"end"`, `"end_turn"`, `null` |
-| `length` | hit max tokens | `"length"`, `"max_tokens"` |
-| `tool_use` | wants tool calls | `"tool_calls"`, `"function_call"`, `"tool_use"` |
-| `error` | provider error, content_filter, parse failure, missing finish_reason | `"content_filter"`, `"network_error"`, unknown, missing |
-| `aborted` | client-side abort (SIGTERM, user cancel, timeout) | (internal — not from provider) |
-- `{"type":"message","role":"tool_result","tool_call_id":"...","name":"...","content":"...","is_error":false}`
-- `{"type":"message","role":"system","content":"..."}`
-- `{"type":"compaction","summary":"...","first_kept_id":N}`
-
-inbox table: `id`, `session_id`, `source TEXT`, `payload TEXT`, `created_at`, `consumed INTEGER DEFAULT 0`
-
-sessions table: `id`, `name`, `leaf_id`, `agent_name TEXT`, `state` (idle|running|waiting), `error_count`, `last_route TEXT`, `created_at`, `updated_at`
-
-Agent config on disk (`agents/<name>/`):
-- `agent.json` — model override, tool whitelist, max_iterations, workspace path, allowed_hosts
-- `skills/` — per-agent skill files (markdown, injected into system prompt)
-
-Agent state in DB (replaces filesystem-based MEMORY.md, SOUL.md, system.md, HEARTBEAT.md):
-
-agents table: `id`, `name TEXT UNIQUE`, `config TEXT` (JSON — model, tools, limits, allowed_hosts), `system_prompt TEXT` (template, supports `{session_id}`, `{date}`, `{agent_name}`), `heartbeat TEXT` (proactive task instructions, read on heartbeat turns), `created_at`, `updated_at`
-
-approvals table: `id`, `session_id`, `agent_name TEXT`, `type TEXT` (whitelist_host|create_agent|model_change|tool_enable), `payload TEXT` (JSON — request details), `status TEXT DEFAULT 'pending'` (pending|approved|denied), `admin_chat_id`, `created_at`, `resolved_at`
-
-memory_blocks table: `id`, `agent_name TEXT NOT NULL`, `label TEXT NOT NULL`, `value TEXT DEFAULT ''`, `description TEXT` (tells agent what block is for), `char_limit INTEGER DEFAULT 5000`, `read_only INTEGER DEFAULT 0`, `created_at`, `updated_at`; UNIQUE(agent_name, label); default: zero blocks — agent creates its own via `memory_create`; optionally pre-seeded from `agent.json` `memory_blocks[]` on first reference
-
-Agent config `memory_blocks` field (in `agent.json`):
-```json
-"memory_blocks": [
-  {"label": "persona", "description": "Agent identity and tone", "value": "I am...", "char_limit": 5000, "read_only": false},
-  {"label": "human", "description": "Known facts about the user", "char_limit": 5000, "read_only": false},
-  {"label": "instructions", "description": "Standing orders", "value": "Always...", "read_only": true}
-]
-```
-`read_only: true` → block visible in context but agent memory tools reject edits; `read_only: false` (default) → agent can append/replace via tools
-
-Design:
-- Agent identity (prompts, memory blocks) lives in SQLite → portable by copying DB, no filesystem sync
-- Agent can self-modify memory blocks via tools (`memory_append`, `memory_replace`) — just DB writes; `description` field guides agent on block purpose (visible in context, not editable by agent)
-- System prompt assembled at turn start: `system_prompt` template + memory blocks (rendered w/ label, description, metadata, value) + skills
-- `agents/<name>/agent.json` on disk is the bootstrap/import path — loaded once to seed the DB row; DB is authoritative after that
-- Workspace is just a working directory for file tools — no magic filenames, no special semantics
-- `/tmp/cclaw-<session_id>/` — ephemeral per-session scratch (tool output overflow)
-- Writable paths under landlock/namespace: workspace + `/tmp/cclaw-<session_id>/` + DB file
+→ [specs/](specs/) — detailed reference docs:
+- [schema.md](specs/schema.md) — DB tables, wire emission, design notes
+- [daemon.md](specs/daemon.md) — fork architecture, turn lifecycle, sub-agents
+- [memory.md](specs/memory.md) — memory model, tiers, Letta reference
+- [providers.md](specs/providers.md) — auth patterns, wire format differences
 
 ## §V INVARIANTS
 V1: ∀ tool exec (`file_read`, `file_write`) → path ! ∈ workspace dir for that agent
@@ -143,7 +96,7 @@ V37: ∀ `shell_exec` child → `unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NE
 V38: ∀ JS runtime (`js_eval`, `js_define_tool`) → C-provided `http_fetch(url, opts)` binding is sole network path; binding enforces per-agent `allowed_hosts` allowlist + SSRF protection (reject private IPs) before calling libcurl; no allowlist = no network from JS
 V39: ∀ `spawn_agent` in CLI mode → fork+exec+waitpid in-process (blocking) or fork+continue (background); CLI has no daemon — ⊥ use "exit into waiting state" pattern; tool_subagent must detect execution mode and branch accordingly
 V40: ∀ tool_result content > 50KB or 2000 lines → truncate before storing in DB entry; full output written to `/tmp/cclaw-<session_id>/<tool_call_id>.out`; truncated result gets suffix `[truncated — showing last {N} lines of {M}. Full output: /tmp/cclaw-<session_id>/<tool_call_id>.out]`; agent can `file_read` the full output path if needed; temp dir cleaned on session idle timeout or daemon restart
-V41: ∀ LLM request → built via `CURLOPT_READFUNCTION` streaming from SQLite cursor; ⊥ load full session into memory; two-pass: (1) plan entry IDs + cut point, (2) stream JSON from cursor; per-agent memory footprint ≤ arena + curl buffers (~2-5MB), not session-proportional
+V41: ∀ LLM request → built via `CURLOPT_READFUNCTION` streaming from SQLite cursor; ⊥ load full session into memory; two-pass: (1) plan entry IDs + cut point (uses integer columns only — ⊥ touch content/tool_calls), (2) stream wire JSON from cursor via `json_escape_into` + snprintf (⊥ cJSON parse on hot path); per-agent memory footprint ≤ arena + curl buffers (~2-5MB), not session-proportional
 V42: ∀ heartbeat → daemon triggers agent run w/ heartbeat prompt; agent reads `HEARTBEAT.md` if present, acts on tasks; response `HEARTBEAT_OK` = sentinel (suppressed, ⊥ delivered to channel); any other response → deliver to channel via `last_route`
 V43: ∀ tool dispatch → track last N calls (name + args hash + result hash); if same call repeated ≥ 5× w/ no progress → inject warning into tool_result; ≥ 10× → force-stop agent loop w/ error ("tool loop detected")
 V44: ∀ Telegram group msg → if agent response contains `[NO_REPLY]` → suppress delivery (⊥ send to chat); agent decides relevance per system prompt guidance
@@ -158,6 +111,11 @@ V52: ∀ API key entered via Telegram admin dialog → written directly to confi
 V53: ∀ Telegram admin command (config, key, whitelist) → restricted to `admin_chat_ids[]` in config; unauthorized chat_id → silent ignore (⊥ error msg, ⊥ inbox_insert)
 V54: ∀ config/permission mutation → requires admin approval; agent may propose changes via `approval_request` tool (writes to `approvals` table); daemon delivers proposal to admin as inline keyboard; admin approve → daemon applies change + posts confirmation to agent inbox; admin deny → posts denial to agent inbox; agent ⊥ mutates config/permissions directly
 V55: ∀ memory block edit → agent tools modify `value` only; `label`, `description`, `char_limit`, `read_only` immutable from agent; `value` length ! ≤ `char_limit`; blocks persist across sessions (agent-scoped, not session-scoped)
+V56: ∀ `context_plan` query → ⊥ read `content` or `tool_calls` columns; use `role`, `stop_reason`, `tool_call_count`, `token_estimate` (all integer/small columns on main B-tree page); avoids overflow page loads during plan pass
+V57: ∀ SQLite open (agent process) → `PRAGMA mmap_size` ≥ 64MB; eliminates double-buffering (SQLite userspace cache + kernel page cache); kernel page cache shared across daemon + forked agents; `PRAGMA cache_size = -512` (reduce userspace cache when mmap active)
+V58: ∀ session compaction → reparent: append summary entry w/ `parent_id` = last kept entry; `UPDATE entries SET parent_id = <summary_id> WHERE id = <first_compacted_tail_entry>`; old entries remain in DB (searchable via FTS5, reachable via forward walk from branch point); CTE from leaf stops at summary node → ⊥ walk compacted prefix
+V59: ∀ reparented entry → store `original_parent_id` (nullable); enables undo of compaction surgery; NULL = never reparented
+V60: ∀ entry wire emission → ⊥ cJSON parse; `content` emitted via `json_escape_into()` (linear pass, no alloc); `tool_calls` emitted via per-provider formatter that walks stored JSON array w/ minimal parse (extract `id`, `name`, `args` substring offsets) — ⊥ full DOM build; `args` object emitted verbatim for Anthropic/Google, stringified (escaped) for OpenAI
 
 ## §T TASKS
 id|status|task|cites
@@ -316,6 +274,19 @@ T152|x|memory blocks table — `memory_blocks(id, agent_name, label, value TEXT,
 T153|x|memory tools — `memory_create(label, description, value?)`, `memory_append(label, content)`, `memory_replace(label, old, new)`; operate on block `value` only; respect `read_only` flag; persist to DB immediately|§I,T152
 T154|x|system prompt memory injection — at context build, render blocks into prompt as labeled sections w/ metadata (label, description, chars_used/limit); agent sees structure, knows what each block is for|T152,T122
 T155|x|drop flat `soul`/`memory` columns from agents table — migrate existing content to `persona`/`human` blocks on first access|T152
+T156|.|~~stored generated columns~~ superseded by split-column schema (V60); migration: recreate entries table w/ new columns, copy old `data` JSON into split columns via `json_extract` INSERT-SELECT|V56,V60
+T157|.|`context_plan` query rewrite — use `role`, `stop_reason`, `tool_call_count` integer columns directly (⊥ json_extract); verify plan pass ⊥ touch `content`/`tool_calls` (no overflow page loads)|V56
+T158|.|mmap pragma — set `PRAGMA mmap_size=67108864` + `PRAGMA cache_size=-512` in `db_init()` for agent processes; daemon keeps defaults (lightweight queries); conditional on process role|V57
+T159|.|`original_parent_id` column — add nullable `INTEGER` to entries table; populated only on reparent operations; migration: `ALTER TABLE entries ADD COLUMN original_parent_id INTEGER`|V59
+T160|.|compaction entry type — role=4 (compaction), `content` = summary text, `tool_calls` = NULL; append as entry w/ `parent_id` = last-kept-entry-before-compacted-range; reparent first-entry-after-range to summary node|V58,V59
+T161|.|compaction trigger — detect when CTE branch length exceeds threshold (configurable, default 200 entries beyond budget); invoke summarization; perform atomic reparent in single transaction|V58
+T162|.|compaction summarization — LLM call w/ compacted entries as context; produce structured summary (goal, progress, decisions, next steps); store as compaction entry content|V58,T160
+T163|.|test: compaction — verify CTE from leaf stops at summary node; verify old entries reachable via forward walk; verify `original_parent_id` populated; verify FTS5 still indexes compacted entries|V58,V59
+T164|.|split-column schema migration — recreate entries table; INSERT-SELECT from old table extracting `json_extract(data,'$.role')` → role int, `json_extract(data,'$.content')` → content text, tool_calls array, etc.; retain `data` column as nullable for rollback; FTS5 rebuild on `content`|V60,§D
+T165|.|`entry_append` rewrite — write split columns directly at insert time; compute `token_estimate` from content+tool_calls lengths; compute `tool_call_count` from array; ⊥ build monolithic `data` JSON|V60
+T166|.|`RequestStreamer` rewrite — `RS_PHASE_ENTRIES` reads `role`, `content`, `tool_calls`, `tool_call_id` columns; emits wire JSON via `json_escape_into` + snprintf; per-provider emit fn (OpenAI default); drop `reshape_entry()`|V60,V41
+T167|.|`json_escape_into(dest, cap, src)` utility — linear pass, write escaped JSON string directly into caller buffer; handle `"`, `\\`, `\n`, `\r`, `\t`, control chars (`\u00XX`); return bytes written; zero-alloc|V60
+T168|.|tool_calls minimal parser — extract `id`, `name`, `args` from stored JSON array w/o full DOM; walk array w/ simple state machine (find key offsets, copy substrings); for OpenAI: escape `args` object as string; for others: emit verbatim|V60
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)
@@ -328,7 +299,7 @@ id|date|cause|fix
 ## §F FUTURE
 - Web chat: civetweb serves chat UI (SSE streaming for partial responses, session select/create, message history); block streaming to browser as assistant generates; replaces status-only page
 - Intra-turn steering: agent checks inbox between tool executions, injects new messages into context mid-loop (Pi model: steering = interrupt, follow-up = queue until stop); complicates V18 atomic consumption — design carefully
-- Session curation: mid-session compaction (summarize arbitrary entry ranges, re-parent tail), prune failed tool-call loops, automated "curation agent" that cleans up long-running sessions
+- Session curation: ~~mid-session compaction~~ (now §T T160-T163); prune failed tool-call loops, automated "curation agent" that cleans up long-running sessions
 - Session recreation: compose new sessions from cherry-picked existing entries (join table `curated_branches(session_id, entry_id, position)`) — avoids copying, entries stay immutable, new summary entries fill gaps
 - Curation agent: background sub-agent that operates on another session's branch — identifies noise (repeated failures, dead-end tool calls), summarizes or removes them, produces a cleaner branch for continued work
 - Telegram/non-CLI sessions can't easily branch interactively — curation agent fills that gap
@@ -343,3 +314,4 @@ id|date|cause|fix
 - Workspace model refinement: each agent owns `./workspace/<agent_name>/`; agents can share workspace via config (`"workspace": "other_agent_name"`); no global "default" workspace; `/tmp/cclaw-<session_id>/` always writable (tool overflow, scratch); workspace + tmp dir are the only writable paths under landlock/namespace
 - Auto-recall (FTS5): at context build, extract keywords from current user message → FTS5 search over entries + memory_blocks → inject top-N relevant hits as `<recalled_context>` section in system prompt; zero agent effort, system-level; configurable threshold + max tokens budget
 - Vector recall (NEXT): embedding-based semantic search over entries + memory_blocks + workspace files; hybrid w/ FTS5 (RRF merge); requires embedding model (local or API); `passages` table (text, embedding BLOB, source_type, source_id); agent tool `memory_search(query)` for explicit recall; auto-recall injects top hits same as FTS5 path
+- Input logprobs pruning: use prompt token logprobs to intelligently prune history — low-probability tokens = surprising/informative (keep), high-probability = redundant (safe to drop); requires local model inference (vLLM `--return-prompt-logprobs` or llama.cpp); not available via hosted APIs

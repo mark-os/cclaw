@@ -76,5 +76,5 @@ make
 ## Documentation
 
 - [SPEC.md](SPEC.md) — full specification, invariants, and task list
-- [ARCHITECTURE.md](ARCHITECTURE.md) — detailed design and patterns
+- [specs/](specs/) — detailed reference docs (schema, daemon, memory, providers)
 - [AGENTS.md](AGENTS.md) — project ethos, coding conventions, build instructions

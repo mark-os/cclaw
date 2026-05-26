@@ -298,8 +298,11 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
         int rc = agent_run(&ctx);
         if (rc != 0)
             fprintf(stderr, "error: agent failed\n");
-        else
+        else {
             print_response(db, session_id);
+            /* V58,T161: compact if branch too long */
+            session_try_compact(db, session_id, cfg);
+        }
 
         session_set_state(db, session_id, "idle");
         if (has_daemon > 0)
@@ -355,6 +358,7 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
             fprintf(stderr, "error: agent failed\n");
         } else {
             print_response(db, session_id);
+            session_try_compact(db, session_id, cfg);
         }
     }
 

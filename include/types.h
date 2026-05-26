@@ -104,6 +104,7 @@ typedef struct {
     int heartbeat_interval; /* seconds between heartbeat system msgs (0=disabled) */
     int shell_timeout;      /* default shell_exec timeout in seconds (0 = 30) */
     int stale_lock_timeout; /* janitor stale lock threshold in seconds (0 = 300) */
+    int compaction_threshold; /* V58: compact when entries beyond budget exceed this (0=200) */
     int debug;              /* --debug: dump raw LLM req/resp JSON to stderr */
     int save_reasoning;     /* store reasoning/thinking tokens in entry metadata */
     int save_usage;         /* store token usage in entry metadata */

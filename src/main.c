@@ -28,6 +28,7 @@
 #include "tool_memory.h"
 #include "tool_approval.h"
 #include "shutdown.h"
+#include "context.h"
 #include "daemon.h"
 #include "context.h"
 
@@ -189,6 +190,10 @@ static int run_agent_turn(const Config *cfg, int64_t session_id) {
     ctx.debug = effective_cfg->debug;
 
     int rc = agent_run(&ctx);
+
+    /* V58,T161: trigger compaction if branch exceeds threshold */
+    if (rc == 0)
+        session_try_compact(db, session_id, effective_cfg);
 
     /* Notify parent inbox if this is a child session */
     const char *sql = "SELECT parent_session_id FROM sessions WHERE id=?;";

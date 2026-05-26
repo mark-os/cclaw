@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "context.h"
+#include "db.h"
 #include "templates.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -567,4 +568,57 @@ void session_tmp_cleanup(int64_t session_id) {
     char cmd[128];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     (void)system(cmd);
+}
+
+/* ── V58,T161: Compaction trigger ─────────────────────────────────── */
+
+#define DEFAULT_COMPACTION_THRESHOLD 200
+
+int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg) {
+    if (!db || !cfg) return 0;
+    ContextPlan plan;
+    if (context_plan(db, session_id, cfg, &plan) != 0) return 0;
+    int threshold = cfg->compaction_threshold > 0
+        ? cfg->compaction_threshold : DEFAULT_COMPACTION_THRESHOLD;
+    int beyond_budget = plan.cut; /* entries before cut = excluded from context */
+    context_plan_free(&plan);
+    return beyond_budget > threshold;
+}
+
+int64_t session_try_compact(sqlite3 *db, int64_t session_id, const Config *cfg) {
+    if (!db || !cfg) return -1;
+
+    ContextPlan plan;
+    if (context_plan(db, session_id, cfg, &plan) != 0) return -1;
+
+    int threshold = cfg->compaction_threshold > 0
+        ? cfg->compaction_threshold : DEFAULT_COMPACTION_THRESHOLD;
+    if (plan.cut <= threshold) {
+        context_plan_free(&plan);
+        return 0; /* no compaction needed */
+    }
+
+    /* Determine reparent points:
+     * last_kept_id = entry just before the compacted range (plan.entries[0] = root)
+     * We compact entries [1..plan.cut-1] (skip root), keeping entries[0] as anchor.
+     * last_kept_id = entries[0].id (the root/first entry)
+     * first_after_id = entries[plan.cut].id (first entry that stays in context) */
+    if (plan.count < 2 || plan.cut >= plan.count) {
+        context_plan_free(&plan);
+        return 0;
+    }
+
+    int64_t last_kept_id = plan.entries[0].id;
+    int64_t first_after_id = plan.entries[plan.cut].id;
+
+    /* T162 will replace this with an LLM-generated summary.
+     * For now, produce a placeholder summary with entry count. */
+    char summary[256];
+    snprintf(summary, sizeof(summary),
+             "[Compacted %d entries. Context continues below.]", plan.cut - 1);
+
+    context_plan_free(&plan);
+
+    /* Atomic reparent via entry_compact (V58,V59) */
+    return entry_compact(db, session_id, last_kept_id, first_after_id, summary);
 }

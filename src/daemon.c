@@ -231,6 +231,21 @@ char *session_get_last_route(sqlite3 *db, int64_t session_id) {
 
 /* ── Agent process entry (T83, V21, V23, V34) ──────────────────── */
 
+/* V67/T188: Decrypt secrets from DB and inject as env vars before exec.
+ * Daemon is sole holder of .cclaw_key — agents read injected env vars. */
+static void inject_secrets_for_child(sqlite3 *db) {
+    char *api_key = db_kv_get_secret(db, "provider.api_key");
+    if (api_key) {
+        setenv("CCLAW_INJECTED_API_KEY", api_key, 1);
+        free(api_key);
+    }
+    char *tg_token = db_kv_get_secret(db, "telegram_token");
+    if (tg_token) {
+        setenv("CCLAW_INJECTED_TELEGRAM_TOKEN", tg_token, 1);
+        free(tg_token);
+    }
+}
+
 static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
     /* V24: only fork if state == idle */
     (void)cfg;
@@ -245,6 +260,8 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
         return -1;
     }
     if (pid == 0) {
+        /* V67/T188: inject decrypted secrets as env vars for child */
+        inject_secrets_for_child(db);
         /* Child: exec agent process */
         char sid_arg[64];
         snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)session_id);
@@ -453,6 +470,8 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
             continue;
         }
         if (pid == 0) {
+            /* V67/T188: inject decrypted secrets as env vars for child */
+            inject_secrets_for_child(db);
             char sid_arg[64];
             snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)child_sid);
             execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);

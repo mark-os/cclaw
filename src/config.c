@@ -152,8 +152,14 @@ Config *config_load_from_kv(sqlite3 *db) {
     KV_STR("provider.model", "deepseek/deepseek-v4-flash");
     cfg->provider.model = cfg_val;
 
-    /* api_key uses secret-aware getter */
-    cfg->provider.api_key = db_kv_get_secret(db, "provider.api_key");
+    /* api_key: V67/T188 — prefer daemon-injected env var over DB decryption */
+    {
+        const char *injected = getenv("CCLAW_INJECTED_API_KEY");
+        if (injected && injected[0])
+            cfg->provider.api_key = str_dup(injected);
+        else
+            cfg->provider.api_key = db_kv_get_secret(db, "provider.api_key");
+    }
 
     KV_INT("provider.max_tokens", 4096);
     cfg->provider.max_tokens = int_val;
@@ -219,8 +225,16 @@ Config *config_load_from_kv(sqlite3 *db) {
     KV_STR("workspace", "./workspace");
     cfg->workspace = cfg_val;
 
-    KV_STR("telegram_token", "");
-    cfg->telegram_token = cfg_val;
+    /* telegram_token: V67/T188 — prefer daemon-injected env var over DB */
+    {
+        const char *injected = getenv("CCLAW_INJECTED_TELEGRAM_TOKEN");
+        if (injected && injected[0])
+            cfg->telegram_token = str_dup(injected);
+        else {
+            char *v = db_kv_get_secret(db, "telegram_token");
+            cfg->telegram_token = v ? v : str_dup("");
+        }
+    }
 
     /* admin_chat_ids (JSON array in kv) */
     {

@@ -87,10 +87,14 @@ static int run_agent_turn(int64_t session_id) {
     sqlite3 *db = db_open(db_path);
     if (!db) { free(db_path); return 1; }
 
-    /* V52,T172: Load/create secret key for kv encryption */
-    uint8_t secret_key[32];
-    if (secret_key_load_or_create(db_path, secret_key) == 0)
-        db_set_secret_key(secret_key);
+    /* V67/T188: Agent processes do NOT load .cclaw_key — daemon injects
+     * decrypted secrets via env vars (CCLAW_INJECTED_API_KEY, etc.).
+     * Only load key if not running under daemon (e.g. CLI direct mode). */
+    if (!getenv("CCLAW_INJECTED_API_KEY")) {
+        uint8_t secret_key[32];
+        if (secret_key_load_or_create(db_path, secret_key) == 0)
+            db_set_secret_key(secret_key);
+    }
     free(db_path);
 
     /* V61: Load config from kv table */

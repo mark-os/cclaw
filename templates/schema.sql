@@ -124,6 +124,14 @@ CREATE TABLE IF NOT EXISTS approvals (
   resolved_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(status) WHERE status='pending';
+CREATE TABLE IF NOT EXISTS channel_bindings (
+  channel_type TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  agent_name TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (channel_type, channel_id)
+);
 CREATE TABLE IF NOT EXISTS memory_blocks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_name TEXT NOT NULL,

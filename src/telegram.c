@@ -1159,17 +1159,25 @@ static void process_message(cJSON *msg) {
     /* Route chat_id to session */
     int64_t session_id = db_tg_get_session(g_db, chat_id);
     if (session_id < 0) {
+        /* T193/V69: Look up channel binding for this chat_id */
+        char chat_str[32];
+        snprintf(chat_str, sizeof(chat_str), "%lld", (long long)chat_id);
+        char *bound_agent = db_channel_binding_get(g_db, "telegram", chat_str);
+
         char session_name[64];
         snprintf(session_name, sizeof(session_name), "tg_%lld", (long long)chat_id);
-        session_id = session_create(g_db, session_name, NULL, -1, 0);
+        session_id = session_create(g_db, session_name, bound_agent, -1, 0);
+        free(bound_agent);
         if (session_id < 0) return;
         db_tg_set_session(g_db, chat_id, session_id);
         /* Append system message for new session */
-        char *prompt = agent_build_system_prompt(g_db, NULL, session_id,
+        char *agent_name = session_get_agent_name(g_db, session_id);
+        char *prompt = agent_build_system_prompt(g_db, agent_name, session_id,
                                                 "agents", g_cfg);
         Message sys_msg = {.role = ROLE_SYSTEM, .content = prompt};
         entry_append(g_db, session_id, &sys_msg);
         free(prompt);
+        free(agent_name);
     }
 
     /* Write to inbox and signal daemon */

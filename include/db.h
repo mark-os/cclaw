@@ -241,4 +241,10 @@ void memory_block_list_free(MemoryBlock *list, int count);
  * Only inserts blocks that don't already exist (DB authoritative). */
 void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str);
 
+/* T193/V69: Channel→agent binding.
+ * db_channel_binding_get returns heap-allocated agent_name or NULL if unbound.
+ * db_channel_binding_set upserts binding. Returns 0 on success, -1 on error. */
+char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *channel_id);
+int db_channel_binding_set(sqlite3 *db, const char *channel_type, const char *channel_id, const char *agent_name);
+
 #endif

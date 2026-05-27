@@ -674,6 +674,37 @@ int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+/* T193/V69: Channel→agent binding */
+
+char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *channel_id) {
+    const char *sql = "SELECT agent_name FROM channel_bindings WHERE channel_type=? AND channel_id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(stmt, 1, channel_type, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, channel_id, -1, SQLITE_STATIC);
+    char *result = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (val) result = strdup(val);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+int db_channel_binding_set(sqlite3 *db, const char *channel_type, const char *channel_id, const char *agent_name) {
+    const char *sql =
+        "INSERT OR REPLACE INTO channel_bindings (channel_type, channel_id, agent_name, updated_at)"
+        " VALUES (?, ?, ?, unixepoch());";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, channel_type, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, channel_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, agent_name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
 /* V3: sub-agent limits — count active child sessions */
 
 int session_count_children(sqlite3 *db, int64_t parent_session_id) {

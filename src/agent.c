@@ -313,9 +313,6 @@ int agent_run(AgentContext *ctx) {
     /* V45: plan-only retry (max 1) */
     int plan_retried = 0;
 
-    /* Track whether prior assistant content exists in this turn (for empty response handling) */
-    int has_prior_content = 0;
-
     int max_iter = ctx->cfg->max_iterations > 0 ? ctx->cfg->max_iterations : AGENT_DEFAULT_MAX_ITERATIONS;
     for (int iter = 0; iter < max_iter; iter++) {
         /* V31: check for graceful shutdown signal */
@@ -416,26 +413,6 @@ int agent_run(AgentContext *ctx) {
         /* If no tool calls — final response */
         if (llm_resp.tool_call_count == 0) {
             StopReason sr = map_stop_reason(llm_resp.finish_reason);
-
-            /* V29: stop + null/empty content with no prior assistant content = error */
-            if (sr == STOP_REASON_STOP &&
-                (!llm_resp.content || llm_resp.content[0] == '\0') &&
-                !has_prior_content) {
-                char *meta = build_metadata(ctx->cfg, &llm_resp);
-                Message err_msg = {.role = ROLE_ASSISTANT,
-                                   .content = strdup("error: empty response from LLM"),
-                                   .stop_reason = STOP_REASON_ERROR,
-                                   .metadata_json = meta,
-                                   .model = ctx->cfg->provider.model,
-                                   .usage_in = llm_resp.usage.prompt_tokens,
-                                   .usage_out = llm_resp.usage.completion_tokens};
-                entry_append_with_turn(ctx->db, ctx->session_id, &err_msg, turn_id);
-                free(err_msg.content);
-                free(meta);
-                arena_destroy(a);
-                return -1;
-            }
-
             char *meta = build_metadata(ctx->cfg, &llm_resp);
             Message asst = {.role = ROLE_ASSISTANT,
                             .content = llm_resp.content ? strdup(llm_resp.content) : strdup(""),
@@ -465,7 +442,6 @@ int agent_run(AgentContext *ctx) {
         }
 
         /* Has tool calls — append assistant message with tool_calls */
-        has_prior_content = 1;
         Message asst = {0};
         asst.role = ROLE_ASSISTANT;
         asst.content = llm_resp.content ? strdup(llm_resp.content) : NULL;

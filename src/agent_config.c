@@ -129,6 +129,22 @@ AgentConfig *agent_config_load(const char *agents_dir, const char *name) {
         }
     }
 
+    /* V66: Read access array */
+    v = cJSON_GetObjectItemCaseSensitive(root, "read_access");
+    if (v && cJSON_IsArray(v)) {
+        int cnt = cJSON_GetArraySize(v);
+        if (cnt > 0) {
+            ac->read_access = malloc((size_t)cnt * sizeof(char *));
+            if (ac->read_access) {
+                for (int i = 0; i < cnt; i++) {
+                    cJSON *item = cJSON_GetArrayItem(v, i);
+                    if (cJSON_IsString(item) && item->valuestring)
+                        ac->read_access[ac->read_access_count++] = strdup(item->valuestring);
+                }
+            }
+        }
+    }
+
     cJSON_Delete(root);
 
     /* V12: workspace fallback to ./workspace/{name} */
@@ -150,6 +166,8 @@ void agent_config_free(AgentConfig *ac) {
     free(ac->tools);
     for (size_t i = 0; i < ac->allowed_hosts_count; i++) free(ac->allowed_hosts[i]);
     free(ac->allowed_hosts);
+    for (size_t i = 0; i < ac->read_access_count; i++) free(ac->read_access[i]);
+    free(ac->read_access);
     free(ac);
 }
 

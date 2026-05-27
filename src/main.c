@@ -111,7 +111,9 @@ static int run_agent_turn(int64_t session_id) {
     }
 
     /* V22: Landlock — restrict filesystem after config loaded */
-    if (landlock_apply(effective_cfg->workspace, cfg->db_path, session_id) < 0) {
+    if (landlock_apply(effective_cfg->workspace, cfg->db_path, session_id,
+                       ac ? (const char **)ac->read_access : NULL,
+                       ac ? ac->read_access_count : 0) < 0) {
         fprintf(stderr, "[agent %lld] landlock unavailable, continuing without\n",
                 (long long)session_id);
     }

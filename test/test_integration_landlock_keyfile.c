@@ -66,7 +66,7 @@ int main(void) {
 
     if (pid == 0) {
         /* Child: apply landlock with workspace only (no db_path, no session tmp) */
-        int rc = landlock_apply(workspace, NULL, 0);
+        int rc = landlock_apply(workspace, NULL, 0, NULL, 0);
         if (rc < 0) {
             /* Landlock not available — exit with special code to skip test */
             _exit(77);

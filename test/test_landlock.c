@@ -32,7 +32,7 @@ static void test_landlock_apply_succeeds(void) {
     if (pid == 0) {
         /* Child: apply landlock with /tmp as workspace */
         mkdir("/tmp/test_ll_ws", 0755);
-        int rc = landlock_apply("/tmp/test_ll_ws", "/tmp/test_ll.db", 0);
+        int rc = landlock_apply("/tmp/test_ll_ws", "/tmp/test_ll.db", 0, NULL, 0);
         _exit(rc == 0 ? 0 : 1);
     }
 
@@ -55,7 +55,7 @@ static void test_landlock_blocks_outside_write(void) {
 
     if (pid == 0) {
         mkdir("/tmp/test_ll_ws2", 0755);
-        int rc = landlock_apply("/tmp/test_ll_ws2", NULL, 0);
+        int rc = landlock_apply("/tmp/test_ll_ws2", NULL, 0, NULL, 0);
         if (rc != 0) _exit(2);
 
         /* Writing inside workspace should succeed */
@@ -98,7 +98,7 @@ static void test_landlock_allows_system_read(void) {
 
     if (pid == 0) {
         mkdir("/tmp/test_ll_ws3", 0755);
-        int rc = landlock_apply("/tmp/test_ll_ws3", NULL, 0);
+        int rc = landlock_apply("/tmp/test_ll_ws3", NULL, 0, NULL, 0);
         if (rc != 0) _exit(2);
 
         /* Reading /etc/hostname or /etc/resolv.conf should work */
@@ -125,6 +125,53 @@ static void test_landlock_reports_abi(void) {
     printf("  PASS\n");
 }
 
+/* Test: V66 read_access grants read-only to extra dirs */
+static void test_landlock_read_access(void) {
+    if (!landlock_supported()) {
+        printf("  SKIP (landlock not supported)\n");
+        return;
+    }
+
+    pid_t pid = fork();
+    assert(pid >= 0);
+
+    if (pid == 0) {
+        mkdir("/tmp/test_ll_ws4", 0755);
+        mkdir("/tmp/test_ll_ro", 0755);
+        /* Create a file in the read-only dir */
+        int fd = open("/tmp/test_ll_ro/data.txt", O_WRONLY | O_CREAT, 0644);
+        if (fd >= 0) { write(fd, "hello", 5); close(fd); }
+
+        const char *ro_paths[] = { "/tmp/test_ll_ro" };
+        int rc = landlock_apply("/tmp/test_ll_ws4", NULL, 0, ro_paths, 1);
+        if (rc != 0) _exit(2);
+
+        /* Reading from read_access dir should succeed */
+        fd = open("/tmp/test_ll_ro/data.txt", O_RDONLY);
+        if (fd < 0) _exit(3);
+        close(fd);
+
+        /* Writing to read_access dir should fail */
+        fd = open("/tmp/test_ll_ro/write.txt", O_WRONLY | O_CREAT, 0644);
+        if (fd >= 0) { close(fd); _exit(4); }
+
+        _exit(0);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    /* Clean up */
+    unlink("/tmp/test_ll_ro/data.txt");
+    rmdir("/tmp/test_ll_ro");
+    rmdir("/tmp/test_ll_ws4");
+    assert(WIFEXITED(status));
+    if (WEXITSTATUS(status) != 0) {
+        printf("  FAIL (exit code %d)\n", WEXITSTATUS(status));
+        assert(0);
+    }
+    printf("  PASS\n");
+}
+
 int main(void) {
     printf("test_landlock:\n");
 
@@ -139,6 +186,9 @@ int main(void) {
 
     printf("  test_landlock_allows_system_read...\n");
     test_landlock_allows_system_read();
+
+    printf("  test_landlock_read_access...\n");
+    test_landlock_read_access();
 
     printf("ALL PASSED\n");
     return 0;

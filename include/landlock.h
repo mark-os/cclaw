@@ -2,12 +2,16 @@
 #define CCLAW_LANDLOCK_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* V22: Apply landlock filesystem restrictions to current process.
  * workspace_path: writable directory for agent.
  * db_path: SQLite DB file (needs read+write for WAL).
  * session_id: if > 0, /tmp/cclaw-<session_id>/ is writable (T118).
+ * read_access: array of paths granted read-only (V66), may be NULL.
+ * read_access_count: number of entries in read_access.
  * Returns 0 on success, -1 on failure (logged, non-fatal). */
-int landlock_apply(const char *workspace_path, const char *db_path, int64_t session_id);
+int landlock_apply(const char *workspace_path, const char *db_path, int64_t session_id,
+                   const char **read_access, size_t read_access_count);
 
 #endif

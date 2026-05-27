@@ -83,7 +83,8 @@ static int add_net_port_rule(int ruleset_fd, __u16 port) {
     return ll_add_rule(ruleset_fd, (enum landlock_rule_type)LANDLOCK_RULE_NET_PORT, &attr, 0);
 }
 
-int landlock_apply(const char *workspace_path, const char *db_path, int64_t session_id) {
+int landlock_apply(const char *workspace_path, const char *db_path, int64_t session_id,
+                   const char **read_access, size_t read_access_count) {
     /* Allow tests to disable landlock (mock servers use random ports) */
     if (getenv("CCLAW_NO_LANDLOCK")) return -1;
 
@@ -133,6 +134,14 @@ int landlock_apply(const char *workspace_path, const char *db_path, int64_t sess
         if (add_path_rule(ruleset_fd, tmp_dir, ACCESS_RW) < 0) {
             fprintf(stderr, "[landlock] warning: cannot add tmp rule for %s: %s\n",
                     tmp_dir, strerror(errno));
+        }
+    }
+
+    /* V66: Extra read-only paths from agent config */
+    for (size_t i = 0; i < read_access_count; i++) {
+        if (read_access[i] && add_path_rule(ruleset_fd, read_access[i], ACCESS_READ) < 0) {
+            fprintf(stderr, "[landlock] warning: cannot add read_access rule for %s: %s\n",
+                    read_access[i], strerror(errno));
         }
     }
 

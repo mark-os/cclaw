@@ -413,6 +413,25 @@ int agent_run(AgentContext *ctx) {
         /* If no tool calls — final response */
         if (llm_resp.tool_call_count == 0) {
             StopReason sr = map_stop_reason(llm_resp.finish_reason);
+
+            /* V29: stop + null/empty content = broken response → error */
+            if (sr == STOP_REASON_STOP &&
+                (!llm_resp.content || llm_resp.content[0] == '\0')) {
+                char *meta = build_metadata(ctx->cfg, &llm_resp);
+                Message err_msg = {.role = ROLE_ASSISTANT,
+                                   .content = strdup("error: empty response from LLM"),
+                                   .stop_reason = STOP_REASON_ERROR,
+                                   .metadata_json = meta,
+                                   .model = ctx->cfg->provider.model,
+                                   .usage_in = llm_resp.usage.prompt_tokens,
+                                   .usage_out = llm_resp.usage.completion_tokens};
+                entry_append_with_turn(ctx->db, ctx->session_id, &err_msg, turn_id);
+                free(err_msg.content);
+                free(meta);
+                arena_destroy(a);
+                return -1;
+            }
+
             char *meta = build_metadata(ctx->cfg, &llm_resp);
             Message asst = {.role = ROLE_ASSISTANT,
                             .content = llm_resp.content ? strdup(llm_resp.content) : strdup(""),

@@ -193,9 +193,10 @@ static int run_agent_turn(int64_t session_id) {
                                     .agent_name = agent_name};
     tool_approval_register(&reg, &approval_ctx);
 
-    /* T190: bootstrap tools */
+    /* T190/T191: bootstrap tools */
     ToolBootstrapCtx bootstrap_ctx = {.db = db};
     tool_configure_provider_register(&reg, &bootstrap_ctx);
+    tool_configure_channel_register(&reg, &bootstrap_ctx);
 
     /* JS persistent runtime + define tool */
     JsSessionRuntime *js_rt = js_runtime_create();

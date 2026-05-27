@@ -100,3 +100,61 @@ int tool_configure_provider_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
                           CONFIGURE_PROVIDER_PARAMS,
                           tool_configure_provider_handler, ctx);
 }
+
+/* ── T191: configure_channel ─────────────────────────────────────── */
+
+static const char *CONFIGURE_CHANNEL_PARAMS =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"channel_type\":{\"type\":\"string\",\"description\":\"Channel type: telegram or cli\"},"
+    "\"bot_token\":{\"type\":\"string\",\"description\":\"Bot token (required for telegram, omit for cli)\"}"
+    "},\"required\":[\"channel_type\"]}";
+
+static char *tool_configure_channel_handler(const char *arguments, void *user_data) {
+    ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
+    if (!ctx || !ctx->db)
+        return strdup("error: configure_channel unavailable");
+
+    cJSON *json = cJSON_Parse(arguments);
+    if (!json) return strdup("error: invalid JSON arguments");
+
+    cJSON *channel_type = cJSON_GetObjectItemCaseSensitive(json, "channel_type");
+    cJSON *bot_token = cJSON_GetObjectItemCaseSensitive(json, "bot_token");
+
+    if (!cJSON_IsString(channel_type) || !channel_type->valuestring[0]) {
+        cJSON_Delete(json);
+        return strdup("error: 'channel_type' is required (telegram or cli)");
+    }
+
+    const char *ctype = channel_type->valuestring;
+
+    if (strcmp(ctype, "telegram") == 0) {
+        if (!cJSON_IsString(bot_token) || !bot_token->valuestring[0]) {
+            cJSON_Delete(json);
+            return strdup("error: 'bot_token' is required for telegram channel");
+        }
+        /* V67: Store bot token encrypted */
+        if (db_kv_set_secret(ctx->db, "telegram_token", bot_token->valuestring) != 0) {
+            cJSON_Delete(json);
+            return strdup("error: failed to store bot token");
+        }
+        cJSON_Delete(json);
+        return strdup("Channel configured: telegram. Bot token stored securely. "
+                      "Telegram poller will start on next daemon restart.");
+    } else if (strcmp(ctype, "cli") == 0) {
+        /* CLI needs no credentials — just acknowledge */
+        cJSON_Delete(json);
+        return strdup("Channel configured: cli. No credentials needed. "
+                      "CLI is always available.");
+    } else {
+        cJSON_Delete(json);
+        return strdup("error: unknown channel_type — use 'telegram' or 'cli'");
+    }
+}
+
+int tool_configure_channel_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
+    return tools_register(reg, "configure_channel",
+                          "Set up a communication channel. "
+                          "Supported: telegram (requires bot_token), cli (no credentials).",
+                          CONFIGURE_CHANNEL_PARAMS,
+                          tool_configure_channel_handler, ctx);
+}

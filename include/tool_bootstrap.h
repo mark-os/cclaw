@@ -12,4 +12,7 @@ typedef struct {
 /* T190: Register configure_provider tool. */
 int tool_configure_provider_register(ToolRegistry *reg, ToolBootstrapCtx *ctx);
 
+/* T191: Register configure_channel tool. */
+int tool_configure_channel_register(ToolRegistry *reg, ToolBootstrapCtx *ctx);
+
 #endif

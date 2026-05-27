@@ -154,12 +154,120 @@ static int test_configure_missing_key(void) {
     return 0;
 }
 
+/* T191: configure_channel telegram stores token encrypted */
+static int test_configure_channel_telegram(void) {
+    sqlite3 *db = setup_db();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolBootstrapCtx ctx = {.db = db};
+    assert(tool_configure_channel_register(&reg, &ctx) == 0);
+
+    ToolEntry *e = tools_lookup(&reg, "configure_channel");
+    assert(e != NULL);
+
+    char *result = e->handler(
+        "{\"channel_type\":\"telegram\",\"bot_token\":\"123456:ABC-DEF\"}",
+        e->user_data);
+    assert(result != NULL);
+    assert(strstr(result, "telegram") != NULL);
+    assert(strstr(result, "stored securely") != NULL);
+    free(result);
+
+    /* Verify token stored encrypted */
+    char *raw = db_kv_get(db, "telegram_token");
+    assert(raw != NULL);
+    assert(strncmp(raw, "enc:", 4) == 0);
+    free(raw);
+
+    /* Verify decrypted value matches */
+    char *decrypted = db_kv_get_secret(db, "telegram_token");
+    assert(decrypted != NULL);
+    assert(strcmp(decrypted, "123456:ABC-DEF") == 0);
+    free(decrypted);
+
+    tools_free(&reg);
+    db_close(db);
+    cleanup();
+    printf("  PASS: test_configure_channel_telegram\n");
+    return 0;
+}
+
+/* T191: configure_channel telegram requires bot_token */
+static int test_configure_channel_telegram_no_token(void) {
+    sqlite3 *db = setup_db();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolBootstrapCtx ctx = {.db = db};
+    tool_configure_channel_register(&reg, &ctx);
+
+    ToolEntry *e = tools_lookup(&reg, "configure_channel");
+    char *result = e->handler("{\"channel_type\":\"telegram\"}", e->user_data);
+    assert(result != NULL);
+    assert(strstr(result, "error") != NULL);
+    assert(strstr(result, "bot_token") != NULL);
+    free(result);
+
+    tools_free(&reg);
+    db_close(db);
+    cleanup();
+    printf("  PASS: test_configure_channel_telegram_no_token\n");
+    return 0;
+}
+
+/* T191: configure_channel cli needs no credentials */
+static int test_configure_channel_cli(void) {
+    sqlite3 *db = setup_db();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolBootstrapCtx ctx = {.db = db};
+    tool_configure_channel_register(&reg, &ctx);
+
+    ToolEntry *e = tools_lookup(&reg, "configure_channel");
+    char *result = e->handler("{\"channel_type\":\"cli\"}", e->user_data);
+    assert(result != NULL);
+    assert(strstr(result, "cli") != NULL);
+    assert(strstr(result, "No credentials") != NULL);
+    free(result);
+
+    tools_free(&reg);
+    db_close(db);
+    cleanup();
+    printf("  PASS: test_configure_channel_cli\n");
+    return 0;
+}
+
+/* T191: configure_channel unknown type returns error */
+static int test_configure_channel_unknown(void) {
+    sqlite3 *db = setup_db();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolBootstrapCtx ctx = {.db = db};
+    tool_configure_channel_register(&reg, &ctx);
+
+    ToolEntry *e = tools_lookup(&reg, "configure_channel");
+    char *result = e->handler("{\"channel_type\":\"whatsapp\"}", e->user_data);
+    assert(result != NULL);
+    assert(strstr(result, "error") != NULL);
+    assert(strstr(result, "unknown") != NULL);
+    free(result);
+
+    tools_free(&reg);
+    db_close(db);
+    cleanup();
+    printf("  PASS: test_configure_channel_unknown\n");
+    return 0;
+}
+
 int main(void) {
-    printf("test_tool_bootstrap (T190):\n");
+    printf("test_tool_bootstrap (T190, T191):\n");
     int rc = 0;
     rc |= test_configure_openrouter();
     rc |= test_configure_custom_requires_base_url();
     rc |= test_configure_custom_with_url();
     rc |= test_configure_missing_key();
+    rc |= test_configure_channel_telegram();
+    rc |= test_configure_channel_telegram_no_token();
+    rc |= test_configure_channel_cli();
+    rc |= test_configure_channel_unknown();
     return rc;
 }

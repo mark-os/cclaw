@@ -242,9 +242,10 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
                                     .agent_name = agent_name};
     tool_approval_register(&reg, &approval_ctx);
 
-    /* T190: bootstrap tools */
+    /* T190/T191: bootstrap tools */
     ToolBootstrapCtx bootstrap_ctx = {.db = db};
     tool_configure_provider_register(&reg, &bootstrap_ctx);
+    tool_configure_channel_register(&reg, &bootstrap_ctx);
 
     JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = NULL};
     tool_js_define_register(&reg, &js_ctx);

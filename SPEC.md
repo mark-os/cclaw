@@ -319,7 +319,7 @@ T181|x|integration test: empty response — mock returns `finish_reason:"stop"` 
 T182|x|integration test: plan-only retry — mock returns bullet-list plan w/ no tool calls; verify agent re-prompts once w/ act-now instruction; second mock response has tool call; verify normal flow resumes|V45
 T183|x|integration test: tool loop detection — mock returns same tool_call 12×; verify warning injected at rep 5; verify agent stops at rep 10 w/ error|V43
 T184|x|integration test: blocking sub-agent lifecycle — mock LLM for parent + child; parent calls spawn_agent(blocking); verify state="waiting" + spawn_queue row; simulate sub-agent completion; verify parent re-forks w/ tool_result|V13,V33
-T185|.|integration test: compaction context — insert 300 entries, trigger compaction, run agent loop w/ mock server post-compaction; verify CTE returns summary + recent only; verify FTS5 still indexes old entries|V58,T163
+T185|x|integration test: compaction context — insert 300 entries, trigger compaction, run agent loop w/ mock server post-compaction; verify CTE returns summary + recent only; verify FTS5 still indexes old entries|V58,T163
 T186|.|ephemeral agent creation — daemon creates `.cclaw/agents/ephemeral-<uuid>/` w/ agent.db + workspace; minimal config (model from daemon global, basic tools); same landlock as named agents|V65,V62
 T187|.|agent permission model — `read_access[]` config field; daemon builds landlock ruleset at fork: own dir RW + each read_access dir RO; creator gets child dir added to own landlock|V66
 T188|.|top-level secrets in daemon DB — provider API keys + channel tokens stored in `.cclaw/cclaw.db` kv (encrypted); daemon decrypts at fork, injects into agent memory; agents reference by name (e.g. `provider.api_key`), ⊥ store copies|V67

@@ -73,7 +73,7 @@ static void test_timeout_kills_process_group(void) {
 }
 
 static void test_configurable_default_timeout(void) {
-    ShellConfig sc = {.timeout = 1, .workspace = NULL, .shell_network = 0};
+    ShellConfig sc = {.timeout = 1, .workspace = NULL};
     char *r = tool_shell_handler("{\"command\":\"sleep 10\"}", &sc);
     assert(r != NULL);
     assert(strstr(r, "[timeout after 1s]") != NULL);
@@ -100,7 +100,7 @@ static void test_missing_command(void) {
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    int rc = tool_shell_register(&reg, 0, NULL, 0, NULL, 0);
+    int rc = tool_shell_register(&reg, 0, NULL);
     assert(rc == 0);
     ToolEntry *e = tools_lookup(&reg, "shell_exec");
     assert(e != NULL);
@@ -109,31 +109,8 @@ static void test_register(void) {
     printf("  PASS test_register\n");
 }
 
-/* V37: Test that namespace sandbox applies gracefully (fallback on EPERM) */
-static void test_namespace_sandbox_fallback(void) {
-    /* Run with workspace set — unshare may fail without CAP_SYS_ADMIN,
-     * but command should still execute (graceful fallback) */
-    ShellConfig sc = {.timeout = 5, .workspace = "/tmp", .shell_network = 0};
-    char *r = tool_shell_handler("{\"command\":\"echo sandboxed\"}", &sc);
-    assert(r != NULL);
-    assert(strstr(r, "sandboxed") != NULL);
-    free(r);
-    printf("  PASS test_namespace_sandbox_fallback\n");
-}
-
-/* V37: Test shell_network flag doesn't break execution */
-static void test_shell_network_flag(void) {
-    ShellConfig sc = {.timeout = 5, .workspace = "/tmp", .shell_network = 1};
-    char *r = tool_shell_handler("{\"command\":\"echo netok\"}", &sc);
-    assert(r != NULL);
-    assert(strstr(r, "netok") != NULL);
-    free(r);
-    printf("  PASS test_shell_network_flag\n");
-}
-
 /* V47: Verify PATH is restricted and env is clean */
 static void test_env_hardened(void) {
-    /* Set vars that should be stripped */
     setenv("OPENROUTER_API_KEY", "secret123", 1);
     setenv("GEMINI_API_KEY", "secret456", 1);
     setenv("CCLAW_DB_PATH", "/tmp/test.db", 1);
@@ -142,18 +119,14 @@ static void test_env_hardened(void) {
     char *r = tool_shell_handler("{\"command\":\"env\"}", NULL);
     assert(r != NULL);
     assert(strstr(r, "[exit 0]") != NULL);
-    /* API keys must not appear */
     assert(strstr(r, "OPENROUTER_API_KEY") == NULL);
     assert(strstr(r, "GEMINI_API_KEY") == NULL);
     assert(strstr(r, "CCLAW_DB_PATH") == NULL);
     assert(strstr(r, "CCLAW_WEB_PORT") == NULL);
-    /* HOME must not appear */
     assert(strstr(r, "\nHOME=") == NULL);
-    /* PATH must be restricted */
     assert(strstr(r, "PATH=/bin:/usr/bin") != NULL);
     free(r);
 
-    /* Clean up parent env */
     unsetenv("OPENROUTER_API_KEY");
     unsetenv("GEMINI_API_KEY");
     unsetenv("CCLAW_DB_PATH");
@@ -165,77 +138,9 @@ static void test_env_hardened(void) {
 static void test_cclaw_unreachable(void) {
     char *r = tool_shell_handler("{\"command\":\"which cclaw 2>/dev/null; echo rc=$?\"}", NULL);
     assert(r != NULL);
-    /* which should fail (rc=1) since cclaw is in build/ not /bin or /usr/bin */
     assert(strstr(r, "rc=1") != NULL);
     free(r);
     printf("  PASS test_cclaw_unreachable\n");
-}
-
-/* V49: Test that MJS_FETCH_FD is set in child environment */
-static void test_fetch_fd_set(void) {
-    ShellConfig sc = {.timeout = 5, .workspace = NULL, .shell_network = 0,
-                      .allowed_hosts = NULL, .allowed_hosts_count = 0};
-    char *r = tool_shell_handler("{\"command\":\"echo MJS_FETCH_FD=$MJS_FETCH_FD\"}", &sc);
-    assert(r != NULL);
-    assert(strstr(r, "[exit 0]") != NULL);
-    /* MJS_FETCH_FD should be set to a valid fd number */
-    assert(strstr(r, "MJS_FETCH_FD=") != NULL);
-    /* Should NOT be empty */
-    assert(strstr(r, "MJS_FETCH_FD=\n") == NULL);
-    free(r);
-    printf("  PASS test_fetch_fd_set\n");
-}
-
-/* V49/V50: Test fetch proxy end-to-end with mjs binary.
- * mjs sends fetch request over fd, parent proxies it.
- * Since no real HTTP server, we test the denied-host path. */
-static void test_fetch_proxy_denied(void) {
-    /* No allowed_hosts → all fetches denied */
-    ShellConfig sc = {.timeout = 5, .workspace = NULL, .shell_network = 0,
-                      .allowed_hosts = NULL, .allowed_hosts_count = 0};
-    char *r = tool_shell_handler(
-        "{\"command\":\"./build/mjs -e 'var r = http_fetch(\\\"http://example.com/x\\\"); r.error'\"}",
-        &sc);
-    assert(r != NULL);
-    assert(strstr(r, "[exit 0]") != NULL);
-    assert(strstr(r, "no allowed_hosts") != NULL);
-    free(r);
-    printf("  PASS test_fetch_proxy_denied\n");
-}
-
-/* V49: Test fetch proxy with allowed host (will fail to connect but passes policy) */
-static void test_fetch_proxy_allowed_host(void) {
-    char *hosts[] = {"httpbin.org"};
-    ShellConfig sc = {.timeout = 5, .workspace = NULL, .shell_network = 0,
-                      .allowed_hosts = hosts, .allowed_hosts_count = 1};
-    /* Host is allowed but network is blocked (CLONE_NEWNET) or unreachable.
-     * The key test: policy check passes (no "not in allowed_hosts" error).
-     * We'll get a curl error instead. */
-    char *r = tool_shell_handler(
-        "{\"command\":\"./build/mjs -e 'var r = http_fetch(\\\"http://httpbin.org/get\\\"); r.error || r.status'\"}",
-        &sc);
-    assert(r != NULL);
-    assert(strstr(r, "[exit 0]") != NULL);
-    /* Should NOT get "not in allowed_hosts" — policy passed */
-    assert(strstr(r, "not in allowed_hosts") == NULL);
-    assert(strstr(r, "no allowed_hosts") == NULL);
-    free(r);
-    printf("  PASS test_fetch_proxy_allowed_host\n");
-}
-
-/* V49: Test fetch proxy rejects host not in allowlist */
-static void test_fetch_proxy_host_rejected(void) {
-    char *hosts[] = {"api.github.com"};
-    ShellConfig sc = {.timeout = 5, .workspace = NULL, .shell_network = 0,
-                      .allowed_hosts = hosts, .allowed_hosts_count = 1};
-    char *r = tool_shell_handler(
-        "{\"command\":\"./build/mjs -e 'var r = http_fetch(\\\"http://evil.com/x\\\"); r.error'\"}",
-        &sc);
-    assert(r != NULL);
-    assert(strstr(r, "[exit 0]") != NULL);
-    assert(strstr(r, "not in allowed_hosts") != NULL);
-    free(r);
-    printf("  PASS test_fetch_proxy_host_rejected\n");
 }
 
 int main(void) {
@@ -249,14 +154,8 @@ int main(void) {
     test_invalid_json();
     test_missing_command();
     test_register();
-    test_namespace_sandbox_fallback();
-    test_shell_network_flag();
     test_env_hardened();
     test_cclaw_unreachable();
-    test_fetch_fd_set();
-    test_fetch_proxy_denied();
-    test_fetch_proxy_allowed_host();
-    test_fetch_proxy_host_rejected();
     printf("All shell_exec tool tests passed.\n");
     return 0;
 }

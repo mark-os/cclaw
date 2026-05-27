@@ -158,9 +158,7 @@ static int run_agent_turn(int64_t session_id) {
     ToolRegistry reg;
     tools_init(&reg);
     tool_shell_register(&reg, effective_cfg->shell_timeout,
-                        effective_cfg->workspace, ac ? ac->shell_network : 0,
-                        ac ? ac->allowed_hosts : NULL,
-                        ac ? ac->allowed_hosts_count : 0);
+                        effective_cfg->workspace);
 
     /* T118: file_read allows workspace + session temp dir */
     char tmp_dir[64];

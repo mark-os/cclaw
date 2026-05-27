@@ -33,35 +33,6 @@ static void env_override_int(int *field, const char *env_name) {
 }
 
 /* Read file into malloc'd string. Returns NULL if file doesn't exist or on error. */
-static char *read_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    if (len <= 0) { fclose(f); return NULL; }
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return NULL; }
-    size_t n = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[n] = '\0';
-    return buf;
-}
-
-/* Write string to file only if file does not exist. */
-static void write_file_if_missing(const char *path, const char *content) {
-    FILE *f = fopen(path, "r");
-    if (f) { fclose(f); return; }
-    f = fopen(path, "w");
-    if (!f) return;
-    fputs(content, f);
-    fclose(f);
-}
-
-static const char *DEFAULT_SOUL = TPL_DEFAULT_SOUL_MD;
-
-static const char *DEFAULT_MEMORY = TPL_DEFAULT_MEMORY_MD;
-
 static const char *DEFAULT_SYSTEM_PROMPT = TPL_DEFAULT_SYSTEM_PROMPT_MD;
 
 int workspace_init(const Config *cfg) {
@@ -70,12 +41,6 @@ int workspace_init(const Config *cfg) {
     char cmd[4096];
     snprintf(cmd, sizeof(cmd), "mkdir -p %s", cfg->workspace);
     if (system(cmd) != 0) return -1;
-    /* Populate default files */
-    char path[4096];
-    snprintf(path, sizeof(path), "%s/SOUL.md", cfg->workspace);
-    write_file_if_missing(path, DEFAULT_SOUL);
-    snprintf(path, sizeof(path), "%s/MEMORY.md", cfg->workspace);
-    write_file_if_missing(path, DEFAULT_MEMORY);
     return 0;
 }
 
@@ -94,23 +59,11 @@ char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
     char sid_buf[21];
     snprintf(sid_buf, sizeof(sid_buf), "%lld", (long long)session_id);
 
-    /* Read workspace context files */
-    char soul_path[4096], mem_path[4096];
-    char *soul = NULL, *memory = NULL;
-    if (cfg->workspace) {
-        snprintf(soul_path, sizeof(soul_path), "%s/SOUL.md", cfg->workspace);
-        snprintf(mem_path, sizeof(mem_path), "%s/MEMORY.md", cfg->workspace);
-        soul = read_file(soul_path);
-        memory = read_file(mem_path);
-    }
-
-    /* Build output with template expansion + context files appended */
+    /* Build output with template expansion */
     size_t tmpl_len = strlen(tmpl);
-    size_t soul_len = soul ? strlen(soul) : 0;
-    size_t mem_len = memory ? strlen(memory) : 0;
-    size_t out_cap = tmpl_len + soul_len + mem_len + 256;
+    size_t out_cap = tmpl_len + 256;
     char *out = malloc(out_cap);
-    if (!out) { free(soul); free(memory); return str_dup(tmpl); }
+    if (!out) return str_dup(tmpl);
 
     size_t oi = 0;
     for (size_t i = 0; i < tmpl_len; ) {
@@ -145,27 +98,7 @@ char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
         out[oi++] = tmpl[i++];
     }
 
-    /* Append SOUL.md content */
-    if (soul && soul_len > 0) {
-        const char *hdr = "\n\n## SOUL.md\n";
-        size_t hlen = strlen(hdr);
-        while (oi + hlen + soul_len >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
-        memcpy(out + oi, hdr, hlen); oi += hlen;
-        memcpy(out + oi, soul, soul_len); oi += soul_len;
-    }
-
-    /* Append MEMORY.md content */
-    if (memory && mem_len > 0) {
-        const char *hdr = "\n\n## MEMORY.md\n";
-        size_t hlen = strlen(hdr);
-        while (oi + hlen + mem_len >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
-        memcpy(out + oi, hdr, hlen); oi += hlen;
-        memcpy(out + oi, memory, mem_len); oi += mem_len;
-    }
-
     out[oi] = '\0';
-    free(soul);
-    free(memory);
     return out;
 }
 

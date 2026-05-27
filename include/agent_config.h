@@ -24,7 +24,6 @@ typedef struct {
     char **allowed_hosts;   /* V38: hostnames for http_fetch */
     size_t allowed_hosts_count;
     int max_iterations;     /* 0 = use global */
-    int shell_network;      /* V37: if true, skip CLONE_NEWNET for shell_exec */
 } AgentConfig;
 
 /* Load agent config from agents_dir/name/agent.json.

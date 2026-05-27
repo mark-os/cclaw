@@ -5,26 +5,20 @@
 
 #define TOOL_SHELL_DEFAULT_TIMEOUT 30
 
-/* V37: config passed as user_data to shell handler */
+/* Config passed as user_data to shell handler */
 typedef struct {
     int timeout;
-    const char *workspace;  /* NULL = no sandbox mount */
-    int shell_network;      /* if true, skip CLONE_NEWNET */
-    char **allowed_hosts;   /* V49: for mjs fetch proxy (NULL = deny all) */
-    size_t allowed_hosts_count;
+    const char *workspace;  /* agent workspace (for reference; landlock enforces access) */
 } ShellConfig;
 
 /* Register shell_exec tool into registry.
- * workspace: agent workspace path (NULL = no namespace sandbox mounts).
- * shell_network: per-agent flag to allow network in shell (V37).
- * allowed_hosts/count: V49 fetch proxy allowlist for mjs (NULL = deny all). */
-int tool_shell_register(ToolRegistry *reg, int default_timeout,
-                        const char *workspace, int shell_network,
-                        char **allowed_hosts, size_t allowed_hosts_count);
+ * workspace: agent workspace path (informational — landlock restricts fs).
+ * Child inherits agent's landlock rules (V22): filesystem + network. */
+int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *workspace);
 
 /* Handler: parse JSON args {"command":"...", "timeout":N}, run command,
  * capture stdout+stderr, enforce timeout via process group SIGKILL.
- * V37: child unshares namespaces, remounts / ro, workspace rw.
+ * Child inherits landlock sandbox from agent process.
  * Returns heap-allocated result. */
 char *tool_shell_handler(const char *arguments, void *user_data);
 

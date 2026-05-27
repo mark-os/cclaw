@@ -11,6 +11,23 @@
 #include <unistd.h>
 #include <linux/landlock.h>
 
+/* Network support (ABI v4+, kernel 6.7+) — define if headers are old */
+#ifndef LANDLOCK_ACCESS_NET_BIND_TCP
+#define LANDLOCK_ACCESS_NET_BIND_TCP (1ULL << 0)
+#endif
+#ifndef LANDLOCK_ACCESS_NET_CONNECT_TCP
+#define LANDLOCK_ACCESS_NET_CONNECT_TCP (1ULL << 1)
+#endif
+#ifndef LANDLOCK_RULE_NET_PORT
+#define LANDLOCK_RULE_NET_PORT 2
+#endif
+
+/* Struct for network port rules (may not be in system headers) */
+struct landlock_net_port_attr {
+    __u64 allowed_access;
+    __u64 port;
+};
+
 /* Syscall wrappers — glibc doesn't provide them yet */
 static int ll_create_ruleset(struct landlock_ruleset_attr *attr, size_t size, __u32 flags) {
     return (int)syscall(__NR_landlock_create_ruleset, attr, size, flags);
@@ -57,6 +74,14 @@ static int add_path_rule(int ruleset_fd, const char *path, __u64 access) {
     return rc;
 }
 
+static int add_net_port_rule(int ruleset_fd, __u16 port) {
+    struct landlock_net_port_attr attr = {
+        .allowed_access = LANDLOCK_ACCESS_NET_CONNECT_TCP,
+        .port = port,
+    };
+    return ll_add_rule(ruleset_fd, (enum landlock_rule_type)LANDLOCK_RULE_NET_PORT, &attr, 0);
+}
+
 int landlock_apply(const char *workspace_path, const char *db_path, int64_t session_id) {
     /* Check if landlock is supported */
     int abi = ll_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
@@ -65,8 +90,20 @@ int landlock_apply(const char *workspace_path, const char *db_path, int64_t sess
         return -1;
     }
 
+    /* Build ruleset attr — always handle filesystem, add network if ABI >= 4 */
     struct landlock_ruleset_attr attr = { .handled_access_fs = ACCESS_ALL };
-    int ruleset_fd = ll_create_ruleset(&attr, sizeof(attr), 0);
+
+    int net_supported = (abi >= 4);
+    if (net_supported) {
+        /* handled_access_net is the second __u64 field in the struct.
+         * Since system headers may not have it, write it directly. */
+        __u64 *handled_net = (__u64 *)((char *)&attr + sizeof(__u64));
+        *handled_net = LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP;
+    }
+
+    /* Size includes handled_access_net if we're using it */
+    size_t attr_size = net_supported ? sizeof(__u64) * 2 : sizeof(__u64);
+    int ruleset_fd = ll_create_ruleset(&attr, attr_size, 0);
     if (ruleset_fd < 0) {
         fprintf(stderr, "[landlock] create_ruleset failed: %s\n", strerror(errno));
         return -1;
@@ -97,19 +134,21 @@ int landlock_apply(const char *workspace_path, const char *db_path, int64_t sess
 
     /* System read-only paths */
     static const char *readonly_paths[] = {
-        "/usr",
-        "/etc",
-        "/lib",
-        "/lib64",
-        "/run",
-        "/proc",
-        "/dev/null",
-        "/dev/urandom",
-        "/tmp",
+        "/usr", "/etc", "/lib", "/lib64", "/run",
+        "/proc", "/dev/null", "/dev/urandom", "/tmp",
         NULL
     };
     for (int i = 0; readonly_paths[i]; i++) {
         add_path_rule(ruleset_fd, readonly_paths[i], ACCESS_READ);
+    }
+
+    /* Network: allow HTTPS (443) and HTTP (80) for LLM API + configured hosts.
+     * All other outbound TCP is denied. */
+    if (net_supported) {
+        add_net_port_rule(ruleset_fd, 443);
+        add_net_port_rule(ruleset_fd, 80);
+    } else {
+        fprintf(stderr, "[landlock] ABI v%d < 4: network restriction unavailable\n", abi);
     }
 
     /* Enforce — requires no_new_privs */

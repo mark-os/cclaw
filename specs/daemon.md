@@ -95,10 +95,12 @@ void fork_agent(int64_t session_id) {
 ```
 Writable:  agent workspace + /tmp/cclaw-<session_id>/
 Readable:  /usr/lib, /usr/share, /etc/ssl, /etc/resolv.conf, cclaw.db
-Denied:    everything else
+Network:   TCP connect to ports 80, 443 only (ABI v4+, kernel 6.7+)
+Denied:    everything else (filesystem + network)
 ```
 
 Fallback: if kernel lacks landlock (Pogoplug), log warning, continue without (V22).
+If ABI < 4: filesystem enforced, network restriction unavailable (log warning).
 
 ## Resource Limits
 

@@ -10,5 +10,4 @@ Do not finish with a plan when tools can move it forward.
 
 ## Workspace Context
 Working directory: {workspace}
-SOUL.md defines your persona. MEMORY.md stores durable facts.
-You can read and write these files to evolve your behavior.
+Your memory blocks (AGENT, USER, etc.) are injected below. Use memory tools to update them.

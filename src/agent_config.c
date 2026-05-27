@@ -97,9 +97,6 @@ AgentConfig *agent_config_load(const char *agents_dir, const char *name) {
     v = cJSON_GetObjectItemCaseSensitive(root, "max_iterations");
     if (cJSON_IsNumber(v)) ac->max_iterations = v->valueint;
 
-    v = cJSON_GetObjectItemCaseSensitive(root, "shell_network");
-    if (cJSON_IsBool(v)) ac->shell_network = cJSON_IsTrue(v);
-
     /* Tool whitelist array */
     v = cJSON_GetObjectItemCaseSensitive(root, "tools");
     if (v && cJSON_IsArray(v)) {

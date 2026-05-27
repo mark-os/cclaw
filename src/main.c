@@ -409,6 +409,13 @@ int main(int argc, char *argv[]) {
         printf("cron scheduler started\n");
     }
 
+    /* T189/V68: Bootstrap — spawn ephemeral if no named agents */
+    int64_t bootstrap_sid = daemon_bootstrap(db);
+    if (bootstrap_sid > 0) {
+        printf("bootstrap agent created (session %lld)\n", (long long)bootstrap_sid);
+        daemon_signal_session(bootstrap_sid);
+    }
+
     /* T81: daemon main loop — blocks until shutdown */
     daemon_run(cfg, db);
 

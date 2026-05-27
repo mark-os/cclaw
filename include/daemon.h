@@ -45,6 +45,10 @@ void daemon_startup_recovery(sqlite3 *db);
 /* Override exec path for fork+exec (testing). */
 void daemon_set_self_path(const char *path);
 
+/* T189/V68: Bootstrap — if no named agents exist, create ephemeral bootstrap agent.
+ * Returns session_id of bootstrap session (>0) or 0 if no bootstrap needed, -1 on error. */
+int64_t daemon_bootstrap(sqlite3 *db);
+
 /* Derive FIFO path from db_path (caller frees). */
 char *daemon_pipe_path(const char *db_path);
 

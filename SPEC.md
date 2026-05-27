@@ -323,7 +323,7 @@ T185|x|integration test: compaction context — insert 300 entries, trigger comp
 T186|x|ephemeral agent creation — daemon creates `.cclaw/agents/ephemeral-<uuid>/` w/ agent.db + workspace; minimal config (model from daemon global, basic tools); same landlock as named agents|V65,V62
 T187|x|agent permission model — `read_access[]` config field; daemon builds landlock ruleset at fork: own dir RW + each read_access dir RO; creator gets child dir added to own landlock|V66
 T188|x|top-level secrets in daemon DB — provider API keys + channel tokens stored in `.cclaw/cclaw.db` kv (encrypted); daemon decrypts at fork, injects into agent memory; agents reference by name (e.g. `provider.api_key`), ⊥ store copies|V67
-T189|.|bootstrap ephemeral agent — on first run (no named agents), daemon spawns ephemeral w/ tools: `configure_provider`, `configure_channel`, `create_agent`; system prompt guides onboarding flow|V68
+T189|x|bootstrap ephemeral agent — on first run (no named agents), daemon spawns ephemeral w/ tools: `configure_provider`, `configure_channel`, `create_agent`; system prompt guides onboarding flow|V68
 T190|.|`configure_provider` tool — prompts user for provider type + API key; posts key to daemon IPC; daemon encrypts + stores in daemon DB; returns confirmation|V68,V67
 T191|.|`configure_channel` tool — prompts user for channel type (Telegram, CLI) + credentials (bot token); posts to daemon; daemon stores + starts channel listener|V68,V69
 T192|.|`create_agent` tool (bootstrap) — proposes named agent (name, model, persona, tools, allowed_hosts); requires user approval; on approve → daemon creates agent dir, seeds DB, binds to channel|V68,V54

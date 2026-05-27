@@ -555,6 +555,62 @@ void daemon_startup_recovery(sqlite3 *db) {
     (void)system("rm -rf /tmp/cclaw-*");
 }
 
+/* ── Bootstrap (T189, V68) ──────────────────────────────────────── */
+
+#include "templates.h"
+
+int64_t daemon_bootstrap(sqlite3 *db) {
+    if (!db) return -1;
+
+    /* Check if any named (non-ephemeral) agents exist */
+    size_t count = 0;
+    char **names = agent_discover("agents", &count);
+    int has_named = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (strncmp(names[i], "ephemeral-", 10) != 0)
+            has_named = 1;
+    }
+    agent_discover_free(names, count);
+    if (has_named) return 0;
+
+    /* No named agents — create bootstrap ephemeral */
+    char *agent_name = agent_create_ephemeral("agents", db);
+    if (!agent_name) return -1;
+
+    /* Write bootstrap agent.json with limited tool whitelist */
+    char path[1024];
+    snprintf(path, sizeof(path), "agents/%s/agent.json", agent_name);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fputs("{\"tools\":[\"configure_provider\",\"configure_channel\",\"create_agent\"]}", f);
+        fclose(f);
+    }
+
+    /* Write bootstrap system prompt */
+    snprintf(path, sizeof(path), "agents/%s/system.md", agent_name);
+    f = fopen(path, "w");
+    if (f) {
+        fputs(TPL_BOOTSTRAP_SYSTEM_PROMPT_MD, f);
+        fclose(f);
+    }
+
+    /* Re-seed DB row with updated config */
+    AgentRow *row = db_agent_seed(db, "agents", agent_name);
+    agent_row_free(row);
+
+    /* Create session + inbox message to trigger first turn */
+    int64_t sid = session_create(db, "bootstrap", agent_name, -1, 0);
+    if (sid < 0) { free(agent_name); return -1; }
+
+    inbox_insert(db, sid, "system",
+                 "Welcome! Let's set up your first CClaw agent. "
+                 "What LLM provider would you like to use? "
+                 "(OpenRouter is recommended — just need an API key)");
+
+    free(agent_name);
+    return sid;
+}
+
 /* ── Daemon main loop (T81) ─────────────────────────────────────── */
 
 int daemon_run(const Config *cfg, sqlite3 *db) {

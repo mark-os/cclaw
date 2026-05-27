@@ -28,6 +28,7 @@
 #include "tool_db_query.h"
 #include "tool_memory.h"
 #include "tool_approval.h"
+#include "tool_bootstrap.h"
 #include "shutdown.h"
 #include "context.h"
 #include "daemon.h"
@@ -191,6 +192,10 @@ static int run_agent_turn(int64_t session_id) {
     ToolApprovalCtx approval_ctx = {.db = db, .session_id = session_id,
                                     .agent_name = agent_name};
     tool_approval_register(&reg, &approval_ctx);
+
+    /* T190: bootstrap tools */
+    ToolBootstrapCtx bootstrap_ctx = {.db = db};
+    tool_configure_provider_register(&reg, &bootstrap_ctx);
 
     /* JS persistent runtime + define tool */
     JsSessionRuntime *js_rt = js_runtime_create();

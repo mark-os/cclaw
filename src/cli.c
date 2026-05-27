@@ -13,6 +13,7 @@
 #include "tool_db_query.h"
 #include "tool_memory.h"
 #include "tool_approval.h"
+#include "tool_bootstrap.h"
 #include "shutdown.h"
 #include "daemon.h"
 #include "context.h"
@@ -240,6 +241,10 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
     ToolApprovalCtx approval_ctx = {.db = db, .session_id = session_id,
                                     .agent_name = agent_name};
     tool_approval_register(&reg, &approval_ctx);
+
+    /* T190: bootstrap tools */
+    ToolBootstrapCtx bootstrap_ctx = {.db = db};
+    tool_configure_provider_register(&reg, &bootstrap_ctx);
 
     JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = NULL};
     tool_js_define_register(&reg, &js_ctx);

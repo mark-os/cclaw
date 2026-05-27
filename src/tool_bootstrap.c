@@ -1,0 +1,102 @@
+#define _POSIX_C_SOURCE 200809L
+#include "tool_bootstrap.h"
+#include "db.h"
+#include <cJSON.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+/* T190: Known provider defaults */
+static const struct {
+    const char *name;
+    const char *base_url;
+    const char *model;
+} PROVIDERS[] = {
+    {"openrouter", "https://openrouter.ai/api/v1", "deepseek/deepseek-v4-flash"},
+    {"gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"},
+    {"anthropic",  "https://api.anthropic.com/v1", "claude-sonnet-4-20250514"},
+};
+#define PROVIDER_COUNT (sizeof(PROVIDERS) / sizeof(PROVIDERS[0]))
+
+static const char *CONFIGURE_PROVIDER_PARAMS =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"provider\":{\"type\":\"string\",\"description\":\"Provider name: openrouter, gemini, anthropic, or custom\"},"
+    "\"api_key\":{\"type\":\"string\",\"description\":\"API key for the provider\"},"
+    "\"base_url\":{\"type\":\"string\",\"description\":\"Base URL (required for custom, optional otherwise)\"},"
+    "\"model\":{\"type\":\"string\",\"description\":\"Model name (optional, uses provider default if omitted)\"}"
+    "},\"required\":[\"provider\",\"api_key\"]}";
+
+static char *tool_configure_provider_handler(const char *arguments, void *user_data) {
+    ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
+    if (!ctx || !ctx->db)
+        return strdup("error: configure_provider unavailable");
+
+    cJSON *json = cJSON_Parse(arguments);
+    if (!json) return strdup("error: invalid JSON arguments");
+
+    cJSON *provider = cJSON_GetObjectItemCaseSensitive(json, "provider");
+    cJSON *api_key = cJSON_GetObjectItemCaseSensitive(json, "api_key");
+    cJSON *base_url = cJSON_GetObjectItemCaseSensitive(json, "base_url");
+    cJSON *model = cJSON_GetObjectItemCaseSensitive(json, "model");
+
+    if (!cJSON_IsString(provider) || !cJSON_IsString(api_key) ||
+        !api_key->valuestring[0]) {
+        cJSON_Delete(json);
+        return strdup("error: 'provider' and 'api_key' are required");
+    }
+
+    const char *pname = provider->valuestring;
+    const char *key = api_key->valuestring;
+
+    /* Determine base_url and model */
+    const char *url = NULL;
+    const char *mdl = NULL;
+
+    for (size_t i = 0; i < PROVIDER_COUNT; i++) {
+        if (strcmp(pname, PROVIDERS[i].name) == 0) {
+            url = PROVIDERS[i].base_url;
+            mdl = PROVIDERS[i].model;
+            break;
+        }
+    }
+
+    /* Custom provider requires base_url */
+    if (!url && (!cJSON_IsString(base_url) || !base_url->valuestring[0])) {
+        cJSON_Delete(json);
+        return strdup("error: 'base_url' is required for custom providers");
+    }
+
+    /* Overrides from arguments */
+    if (cJSON_IsString(base_url) && base_url->valuestring[0])
+        url = base_url->valuestring;
+    if (cJSON_IsString(model) && model->valuestring[0])
+        mdl = model->valuestring;
+
+    /* V67: Store API key encrypted in DB */
+    if (db_kv_set_secret(ctx->db, "provider.api_key", key) != 0) {
+        cJSON_Delete(json);
+        return strdup("error: failed to store API key");
+    }
+
+    /* Set base_url and model */
+    if (url) db_kv_set(ctx->db, "provider.base_url", url);
+    if (mdl) db_kv_set(ctx->db, "provider.model", mdl);
+
+    cJSON_Delete(json);
+
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "Provider configured: %s (base_url: %s, model: %s). "
+             "API key stored securely.",
+             pname, url ? url : "(unchanged)", mdl ? mdl : "(unchanged)");
+    return strdup(buf);
+}
+
+int tool_configure_provider_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
+    return tools_register(reg, "configure_provider",
+                          "Set up LLM provider. Stores API key encrypted. "
+                          "Known providers: openrouter, gemini, anthropic. "
+                          "Use 'custom' with base_url for others.",
+                          CONFIGURE_PROVIDER_PARAMS,
+                          tool_configure_provider_handler, ctx);
+}

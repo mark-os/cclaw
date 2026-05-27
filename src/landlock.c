@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -83,6 +84,9 @@ static int add_net_port_rule(int ruleset_fd, __u16 port) {
 }
 
 int landlock_apply(const char *workspace_path, const char *db_path, int64_t session_id) {
+    /* Allow tests to disable landlock (mock servers use random ports) */
+    if (getenv("CCLAW_NO_LANDLOCK")) return -1;
+
     /* Check if landlock is supported */
     int abi = ll_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
     if (abi < 0) {

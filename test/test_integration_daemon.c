@@ -292,6 +292,8 @@ static void test_daemon_fork_reap_tool_call(void) {
 
 int main(void) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    /* Disable landlock for agent children (mock server uses random port) */
+    setenv("CCLAW_NO_LANDLOCK", "1", 1);
     printf("--- test_integration_daemon (T130) ---\n");
     test_daemon_fork_reap_mock();
     test_daemon_fork_reap_tool_call();

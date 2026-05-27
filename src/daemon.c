@@ -596,6 +596,8 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
                 char buf[64];
                 while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
                 reap_children(cfg, db);
+                /* T184/V13: process spawn queue after reap (parent may have queued blocking spawn) */
+                process_spawn_queue(cfg, db);
             } else if (events[i].data.fd == g_signal_pipe[0] ||
                        events[i].data.fd == fifo_fd) {
                 /* Read session_ids from signal pipe or external FIFO */

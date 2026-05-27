@@ -671,3 +671,60 @@ char **agent_config_get_hosts(const char *agents_dir, const char *name, size_t *
     cJSON_Delete(root);
     return hosts;
 }
+
+/* T186: Create ephemeral agent (V65, V62) */
+#include <sys/random.h>
+#include <limits.h>
+
+char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db) {
+    if (!agents_dir) return NULL;
+
+    /* Generate UUID v4 */
+    uint8_t bytes[16];
+    if (getrandom(bytes, 16, 0) != 16) return NULL;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; /* version 4 */
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; /* variant 1 */
+
+    char uuid[37];
+    snprintf(uuid, sizeof(uuid),
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15]);
+
+    /* Name: ephemeral-<uuid> */
+    char name[64];
+    snprintf(name, sizeof(name), "ephemeral-%s", uuid);
+
+    /* Create directory structure */
+    char buf[PATH_MAX];
+    int n = snprintf(buf, sizeof(buf), "%s/%s", agents_dir, name);
+    if (n < 0 || (size_t)n >= sizeof(buf)) return NULL;
+    if (mkdir(buf, 0755) != 0) return NULL;
+
+    snprintf(buf + n, sizeof(buf) - (size_t)n, "/workspace");
+    mkdir(buf, 0755);
+
+    /* Write minimal agent.json (no model = inherit global) */
+    buf[n] = '\0';
+    snprintf(buf + n, sizeof(buf) - (size_t)n, "/agent.json");
+    FILE *f = fopen(buf, "w");
+    if (!f) return NULL;
+    fputs("{}", f);
+    fclose(f);
+
+    /* Create agent.db */
+    buf[n] = '\0';
+    snprintf(buf + n, sizeof(buf) - (size_t)n, "/agent.db");
+    sqlite3 *agent_db = db_open(buf);
+    if (agent_db) db_close(agent_db);
+
+    /* Seed into daemon DB if provided */
+    if (db) {
+        AgentRow *row = db_agent_seed(db, agents_dir, name);
+        agent_row_free(row);
+    }
+
+    return strdup(name);
+}

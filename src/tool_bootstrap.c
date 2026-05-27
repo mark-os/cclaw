@@ -158,3 +158,63 @@ int tool_configure_channel_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
                           CONFIGURE_CHANNEL_PARAMS,
                           tool_configure_channel_handler, ctx);
 }
+
+/* ── T192: create_agent ──────────────────────────────────────────── */
+
+static const char *CREATE_AGENT_PARAMS =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"name\":{\"type\":\"string\",\"description\":\"Agent name (alphanumeric + hyphens)\"},"
+    "\"model\":{\"type\":\"string\",\"description\":\"LLM model identifier\"},"
+    "\"system_prompt\":{\"type\":\"string\",\"description\":\"Agent persona/system prompt\"},"
+    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Tool whitelist\"},"
+    "\"allowed_hosts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Allowed network hosts\"}"
+    "},\"required\":[\"name\"]}";
+
+static char *tool_create_agent_handler(const char *arguments, void *user_data) {
+    ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
+    if (!ctx || !ctx->db)
+        return strdup("error: create_agent unavailable");
+
+    cJSON *json = cJSON_Parse(arguments);
+    if (!json) return strdup("error: invalid JSON arguments");
+
+    cJSON *name = cJSON_GetObjectItemCaseSensitive(json, "name");
+    if (!cJSON_IsString(name) || !name->valuestring[0]) {
+        cJSON_Delete(json);
+        return strdup("error: 'name' is required");
+    }
+
+    /* Reject invalid names */
+    const char *n = name->valuestring;
+    if (strchr(n, '/') || strchr(n, '\\') || strcmp(n, "..") == 0) {
+        cJSON_Delete(json);
+        return strdup("error: invalid agent name (no path separators)");
+    }
+
+    /* Build payload for approval */
+    char *payload = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    if (!payload) return strdup("error: failed to serialize payload");
+
+    int64_t id = approval_insert(ctx->db, ctx->session_id,
+                                 ctx->agent_name ? ctx->agent_name : "bootstrap",
+                                 "create_agent", payload);
+    free(payload);
+
+    if (id < 0)
+        return strdup("error: failed to submit agent creation request");
+
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "Agent creation proposed (approval #%lld). Waiting for admin approval.",
+             (long long)id);
+    return strdup(buf);
+}
+
+int tool_create_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
+    return tools_register(reg, "create_agent",
+                          "Propose creation of a named agent. Requires admin approval. "
+                          "On approval, daemon creates agent directory, seeds DB, and binds to channel.",
+                          CREATE_AGENT_PARAMS,
+                          tool_create_agent_handler, ctx);
+}

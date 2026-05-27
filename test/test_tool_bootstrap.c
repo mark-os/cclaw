@@ -258,8 +258,93 @@ static int test_configure_channel_unknown(void) {
     return 0;
 }
 
+/* T192: create_agent submits approval request */
+static int test_create_agent_basic(void) {
+    sqlite3 *db = setup_db();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "bootstrap"};
+    assert(tool_create_agent_register(&reg, &ctx) == 0);
+
+    ToolEntry *e = tools_lookup(&reg, "create_agent");
+    assert(e != NULL);
+
+    char *result = e->handler(
+        "{\"name\":\"helper\",\"model\":\"deepseek/deepseek-v4-flash\","
+        "\"system_prompt\":\"You are a helpful assistant.\","
+        "\"tools\":[\"shell_exec\",\"file_read\",\"file_write\"],"
+        "\"allowed_hosts\":[\"api.example.com\"]}",
+        e->user_data);
+    assert(result != NULL);
+    assert(strstr(result, "approval") != NULL);
+    assert(strstr(result, "Waiting") != NULL);
+    free(result);
+
+    /* Verify approval row exists */
+    int count = 0;
+    Approval *list = approval_list_pending(db, &count);
+    assert(count == 1);
+    assert(strcmp(list[0].type, "create_agent") == 0);
+    assert(strstr(list[0].payload, "helper") != NULL);
+    approval_list_free(list, count);
+
+    tools_free(&reg);
+    db_close(db);
+    cleanup();
+    printf("  PASS: test_create_agent_basic\n");
+    return 0;
+}
+
+/* T192: create_agent rejects path separators in name */
+static int test_create_agent_invalid_name(void) {
+    sqlite3 *db = setup_db();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "bootstrap"};
+    tool_create_agent_register(&reg, &ctx);
+
+    ToolEntry *e = tools_lookup(&reg, "create_agent");
+    char *result = e->handler("{\"name\":\"../evil\"}", e->user_data);
+    assert(result != NULL);
+    assert(strstr(result, "error") != NULL);
+    free(result);
+
+    result = e->handler("{\"name\":\"a/b\"}", e->user_data);
+    assert(result != NULL);
+    assert(strstr(result, "error") != NULL);
+    free(result);
+
+    tools_free(&reg);
+    db_close(db);
+    cleanup();
+    printf("  PASS: test_create_agent_invalid_name\n");
+    return 0;
+}
+
+/* T192: create_agent requires name field */
+static int test_create_agent_missing_name(void) {
+    sqlite3 *db = setup_db();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "bootstrap"};
+    tool_create_agent_register(&reg, &ctx);
+
+    ToolEntry *e = tools_lookup(&reg, "create_agent");
+    char *result = e->handler("{\"model\":\"gpt-4\"}", e->user_data);
+    assert(result != NULL);
+    assert(strstr(result, "error") != NULL);
+    assert(strstr(result, "name") != NULL);
+    free(result);
+
+    tools_free(&reg);
+    db_close(db);
+    cleanup();
+    printf("  PASS: test_create_agent_missing_name\n");
+    return 0;
+}
+
 int main(void) {
-    printf("test_tool_bootstrap (T190, T191):\n");
+    printf("test_tool_bootstrap (T190, T191, T192):\n");
     int rc = 0;
     rc |= test_configure_openrouter();
     rc |= test_configure_custom_requires_base_url();
@@ -269,5 +354,8 @@ int main(void) {
     rc |= test_configure_channel_telegram_no_token();
     rc |= test_configure_channel_cli();
     rc |= test_configure_channel_unknown();
+    rc |= test_create_agent_basic();
+    rc |= test_create_agent_invalid_name();
+    rc |= test_create_agent_missing_name();
     return rc;
 }

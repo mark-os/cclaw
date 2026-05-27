@@ -316,7 +316,7 @@ T178|x|integration test: large session memory — insert 500+ entries, run agent
 T179|x|integration test: db_query secret filtering — seed kv w/ `enc:` values, run `db_query("SELECT * FROM kv")` tool, verify no `enc:` rows in result; no network|V52,T173
 T180|x|integration test: landlock blocks key file — fork child w/ landlock (workspace only), child attempts read of `.cclaw_key` path, verify EACCES; no network|V52,V22
 T181|x|integration test: empty response — mock returns `finish_reason:"stop"` + `content:null`; verify agent writes error entry w/ `stop_reason=error`; verify prior tool-call content in same turn survives in DB|V29,V36
-T182|.|integration test: plan-only retry — mock returns bullet-list plan w/ no tool calls; verify agent re-prompts once w/ act-now instruction; second mock response has tool call; verify normal flow resumes|V45
+T182|x|integration test: plan-only retry — mock returns bullet-list plan w/ no tool calls; verify agent re-prompts once w/ act-now instruction; second mock response has tool call; verify normal flow resumes|V45
 T183|.|integration test: tool loop detection — mock returns same tool_call 12×; verify warning injected at rep 5; verify agent stops at rep 10 w/ error|V43
 T184|.|integration test: blocking sub-agent lifecycle — mock LLM for parent + child; parent calls spawn_agent(blocking); verify state="waiting" + spawn_queue row; simulate sub-agent completion; verify parent re-forks w/ tool_result|V13,V33
 T185|.|integration test: compaction context — insert 300 entries, trigger compaction, run agent loop w/ mock server post-compaction; verify CTE returns summary + recent only; verify FTS5 still indexes old entries|V58,T163

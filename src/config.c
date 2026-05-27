@@ -278,6 +278,9 @@ Config *config_load_from_kv(sqlite3 *db) {
     KV_INT("stale_lock_timeout", 300);
     cfg->stale_lock_timeout = int_val;
 
+    KV_INT("token_rate_limit", 1000000);
+    cfg->token_rate_limit = int_val;
+
     #undef KV_STR
     #undef KV_INT
 
@@ -297,6 +300,7 @@ Config *config_load_from_kv(sqlite3 *db) {
     env_override_int(&cfg->save_reasoning, "CCLAW_SAVE_REASONING");
     env_override_int(&cfg->save_usage, "CCLAW_SAVE_USAGE");
     env_override_int(&cfg->save_logprobs, "CCLAW_SAVE_LOGPROBS");
+    env_override_int(&cfg->token_rate_limit, "CCLAW_TOKEN_RATE_LIMIT");
 
     return cfg;
 }

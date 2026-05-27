@@ -62,4 +62,9 @@ int daemon_fifo_open(const char *db_path);
 /* Clean up named FIFO on daemon exit. */
 void daemon_fifo_close(int fd, const char *db_path);
 
+/* V71/T194: Token rate limiting — rolling 1h window, in-memory only. */
+void daemon_token_usage_add(int tokens);
+int daemon_token_usage_hourly(void);
+void daemon_token_usage_reset(void);
+
 #endif

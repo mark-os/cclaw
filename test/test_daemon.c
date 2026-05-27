@@ -377,6 +377,36 @@ static void test_no_reply_suppression(void) {
     printf("  PASS test_no_reply_suppression\n");
 }
 
+/* ── V71/T194: Token rate limit ──────────────────────────────────── */
+
+static void test_token_rate_limit(void) {
+    /* Reset state from prior tests */
+    daemon_token_usage_reset();
+
+    /* Initially zero usage */
+    assert(daemon_token_usage_hourly() == 0);
+
+    /* Add some usage */
+    daemon_token_usage_add(500000);
+    assert(daemon_token_usage_hourly() == 500000);
+
+    /* Add more — should accumulate */
+    daemon_token_usage_add(300000);
+    assert(daemon_token_usage_hourly() == 800000);
+
+    /* Add to exceed 1M */
+    daemon_token_usage_add(250000);
+    assert(daemon_token_usage_hourly() >= 1000000);
+
+    /* Zero/negative adds are no-ops */
+    int before = daemon_token_usage_hourly();
+    daemon_token_usage_add(0);
+    daemon_token_usage_add(-100);
+    assert(daemon_token_usage_hourly() == before);
+
+    printf("  PASS test_token_rate_limit\n");
+}
+
 int main(void) {
     printf("test_daemon:\n");
     test_signal_pipe_init_and_write();
@@ -389,6 +419,7 @@ int main(void) {
     test_startup_recovery_waiting_no_inbox();
     test_heartbeat_ok_suppression();
     test_no_reply_suppression();
+    test_token_rate_limit();
     printf("All daemon tests passed.\n");
     return 0;
 }

@@ -157,6 +157,41 @@ static void sigchld_pipe_close(void) {
     if (g_chld_pipe[1] >= 0) { close(g_chld_pipe[1]); g_chld_pipe[1] = -1; }
 }
 
+/* ── V71/T194: Token rate limiting (rolling 1h window, in-memory) ── */
+
+#include <time.h>
+
+#define TOKEN_BUCKET_COUNT 128
+
+static struct {
+    time_t timestamp;
+    int tokens;
+} g_token_buckets[TOKEN_BUCKET_COUNT];
+static int g_token_bucket_head = 0;
+
+void daemon_token_usage_add(int tokens) {
+    if (tokens <= 0) return;
+    time_t now = time(NULL);
+    g_token_buckets[g_token_bucket_head].timestamp = now;
+    g_token_buckets[g_token_bucket_head].tokens = tokens;
+    g_token_bucket_head = (g_token_bucket_head + 1) % TOKEN_BUCKET_COUNT;
+}
+
+int daemon_token_usage_hourly(void) {
+    time_t cutoff = time(NULL) - 3600;
+    int total = 0;
+    for (int i = 0; i < TOKEN_BUCKET_COUNT; i++) {
+        if (g_token_buckets[i].timestamp >= cutoff)
+            total += g_token_buckets[i].tokens;
+    }
+    return total;
+}
+
+void daemon_token_usage_reset(void) {
+    memset(g_token_buckets, 0, sizeof(g_token_buckets));
+    g_token_bucket_head = 0;
+}
+
 /* ── Child tracking (T87, V24) ──────────────────────────────────── */
 
 typedef struct {
@@ -248,8 +283,13 @@ static void inject_secrets_for_child(sqlite3 *db) {
 
 static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
     /* V24: only fork if state == idle */
-    (void)cfg;
     if (child_has_session(session_id)) return -1;
+
+    /* V71/T194: reject fork if token rate limit exceeded */
+    if (cfg->token_rate_limit > 0 && daemon_token_usage_hourly() >= cfg->token_rate_limit) {
+        inbox_insert(db, session_id, "system", "error: token rate limit exceeded");
+        return -1;
+    }
 
     /* Mark session running */
     if (session_set_state(db, session_id, "running") != 0) return -1;
@@ -341,6 +381,21 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
         /* Mark session idle */
         session_set_state(db, session_id, "idle");
 
+        /* V71/T194: Accumulate token usage from this agent run */
+        {
+            const char *uq = "SELECT COALESCE(SUM(usage_in + usage_out), 0)"
+                             " FROM entries WHERE session_id=? AND turn_id="
+                             "(SELECT MAX(turn_id) FROM entries WHERE session_id=?);";
+            sqlite3_stmt *us;
+            if (sqlite3_prepare_v2(db, uq, -1, &us, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(us, 1, session_id);
+                sqlite3_bind_int64(us, 2, session_id);
+                if (sqlite3_step(us) == SQLITE_ROW)
+                    daemon_token_usage_add(sqlite3_column_int(us, 0));
+                sqlite3_finalize(us);
+            }
+        }
+
         /* T88: Check if this was a sub-agent from spawn_queue (blocking) */
         const char *sq_sql =
             "SELECT sq.id, sq.parent_session_id, sq.tool_call_id, sq.background"
@@ -418,13 +473,18 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
 
 static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
     int count = 0;
-    (void)cfg;
     SpawnRequest *reqs = spawn_queue_peek_pending(db, &count);
     if (!reqs) return;
 
 
     for (int i = 0; i < count; i++) {
         SpawnRequest *r = &reqs[i];
+
+        /* V71/T194: reject if token rate limit exceeded */
+        if (cfg->token_rate_limit > 0 && daemon_token_usage_hourly() >= cfg->token_rate_limit) {
+            spawn_queue_mark(db, r->id, "rejected", 0);
+            continue;
+        }
 
         /* V3: re-check limits before forking */
         if (session_count_active_agents(db) >= AGENT_MAX_TOTAL) {

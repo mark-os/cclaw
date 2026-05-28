@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS inbox (
 CREATE INDEX IF NOT EXISTS idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0;
 CREATE TABLE IF NOT EXISTS spawn_queue (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_agent TEXT NOT NULL DEFAULT '',
   parent_session_id INTEGER NOT NULL,
   task TEXT NOT NULL,
   background INTEGER NOT NULL DEFAULT 0,

@@ -17,6 +17,7 @@
 #include "landlock.h"
 #include "config.h"
 #include "context.h"
+#include "agent_exit.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -30,7 +31,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* ── Signal pipe (T82, V25) ─────────────────────────────────────── */
+/* ── Signal pipe (T82, T200, V25) ───────────────────────────────── */
 
 static int g_signal_pipe[2] = {-1, -1};
 static char g_self_path[4096] = "";
@@ -44,6 +45,12 @@ static void set_nonblock(int fd) {
     if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+/* T200: Signal message carries session_id + agent_name */
+typedef struct {
+    int64_t session_id;
+    char agent_name[64];
+} SignalMsg;
+
 int daemon_signal_init(void) {
     if (pipe(g_signal_pipe) != 0) return -1;
     set_nonblock(g_signal_pipe[0]);
@@ -53,9 +60,24 @@ int daemon_signal_init(void) {
 
 int daemon_signal_session(int64_t session_id) {
     if (g_signal_pipe[1] < 0) return -1;
-    /* Write session_id as 8 bytes; non-blocking, drop if pipe full */
-    ssize_t n = write(g_signal_pipe[1], &session_id, sizeof(session_id));
-    return (n == sizeof(session_id)) ? 0 : -1;
+    /* Legacy: write just session_id for backward compat with callers that
+     * don't know agent_name. Daemon will resolve from tg_chat_sessions or
+     * agents table. */
+    SignalMsg msg = {0};
+    msg.session_id = session_id;
+    ssize_t n = write(g_signal_pipe[1], &msg, sizeof(msg));
+    return (n == (ssize_t)sizeof(msg)) ? 0 : -1;
+}
+
+/* T200: Signal with agent_name (preferred — avoids DB lookup in daemon loop) */
+int daemon_signal_session_agent(int64_t session_id, const char *agent_name) {
+    if (g_signal_pipe[1] < 0) return -1;
+    SignalMsg msg = {0};
+    msg.session_id = session_id;
+    if (agent_name)
+        snprintf(msg.agent_name, sizeof(msg.agent_name), "%s", agent_name);
+    ssize_t n = write(g_signal_pipe[1], &msg, sizeof(msg));
+    return (n == (ssize_t)sizeof(msg)) ? 0 : -1;
 }
 
 /* Signal daemon from external process via named FIFO. */
@@ -65,9 +87,11 @@ int daemon_signal_external(const char *db_path, int64_t session_id) {
     int fd = open(path, O_WRONLY | O_NONBLOCK);
     free(path);
     if (fd < 0) return -1;
-    ssize_t n = write(fd, &session_id, sizeof(session_id));
+    SignalMsg msg = {0};
+    msg.session_id = session_id;
+    ssize_t n = write(fd, &msg, sizeof(msg));
     close(fd);
-    return (n == sizeof(session_id)) ? 0 : -1;
+    return (n == (ssize_t)sizeof(msg)) ? 0 : -1;
 }
 
 void daemon_signal_close(void) {
@@ -224,28 +248,35 @@ int daemon_inbox_count(const char *agent_name, int64_t session_id) {
     return count;
 }
 
-/* ── Child tracking (T87, V24) ──────────────────────────────────── */
+/* ── Child tracking (T87, T200, V24) ────────────────────────────── */
 
 typedef struct {
     pid_t pid;
     int64_t session_id;
+    char agent_name[64];
 } ChildSlot;
 
 static ChildSlot g_children[DAEMON_MAX_CHILDREN];
 static int g_child_count = 0;
 
-static int child_add(pid_t pid, int64_t session_id) {
+static int child_add(pid_t pid, int64_t session_id, const char *agent_name) {
     if (g_child_count >= DAEMON_MAX_CHILDREN) return -1;
     g_children[g_child_count].pid = pid;
     g_children[g_child_count].session_id = session_id;
+    if (agent_name)
+        snprintf(g_children[g_child_count].agent_name, 64, "%s", agent_name);
+    else
+        g_children[g_child_count].agent_name[0] = '\0';
     g_child_count++;
     return 0;
 }
 
-static int child_remove(pid_t pid, int64_t *out_session_id) {
+static int child_remove(pid_t pid, int64_t *out_session_id, char *out_agent_name) {
     for (int i = 0; i < g_child_count; i++) {
         if (g_children[i].pid == pid) {
             *out_session_id = g_children[i].session_id;
+            if (out_agent_name)
+                snprintf(out_agent_name, 64, "%s", g_children[i].agent_name);
             g_children[i] = g_children[g_child_count - 1];
             g_child_count--;
             return 0;
@@ -267,6 +298,69 @@ int64_t daemon_child_session(pid_t pid) {
         if (g_children[i].pid == pid) return g_children[i].session_id;
     }
     return -1;
+}
+
+/* T200/V73: Count active children for a parent session (in-memory) */
+static int child_count_for_parent(sqlite3 *db, int64_t parent_session_id) {
+    (void)db;
+    int count = 0;
+    for (int i = 0; i < g_child_count; i++) {
+        /* Check if child's session has this parent */
+        if (g_children[i].agent_name[0]) {
+            char *path = agent_db_path(g_children[i].agent_name);
+            if (!path) continue;
+            sqlite3 *adb = db_open_agent(path);
+            free(path);
+            if (!adb) continue;
+            const char *sql = "SELECT parent_session_id FROM sessions WHERE id=?;";
+            sqlite3_stmt *stmt;
+            if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(stmt, 1, g_children[i].session_id);
+                if (sqlite3_step(stmt) == SQLITE_ROW &&
+                    sqlite3_column_int64(stmt, 0) == parent_session_id)
+                    count++;
+                sqlite3_finalize(stmt);
+            }
+            db_close(adb);
+        }
+    }
+    return count;
+}
+
+/* T200/V73: Open agent DB, set session state. Returns 0 on success. */
+static int daemon_agent_set_state(const char *agent_name, int64_t session_id, const char *state) {
+    if (!agent_name || !agent_name[0]) return -1;
+    char *path = agent_db_path(agent_name);
+    if (!path) return -1;
+    sqlite3 *adb = db_open_agent(path);
+    free(path);
+    if (!adb) return -1;
+    int rc = session_set_state(adb, session_id, state);
+    db_close(adb);
+    return rc;
+}
+
+/* T200/V73: Open agent DB, get session state. Caller frees. */
+static char *daemon_agent_get_state(const char *agent_name, int64_t session_id) {
+    if (!agent_name || !agent_name[0]) return NULL;
+    char *path = agent_db_path(agent_name);
+    if (!path) return NULL;
+    sqlite3 *adb = db_open_agent(path);
+    free(path);
+    if (!adb) return NULL;
+    const char *sql = "SELECT state FROM sessions WHERE id=?;";
+    sqlite3_stmt *stmt;
+    char *result = NULL;
+    if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, session_id);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *val = (const char *)sqlite3_column_text(stmt, 0);
+            if (val) result = strdup(val);
+        }
+        sqlite3_finalize(stmt);
+    }
+    db_close(adb);
+    return result;
 }
 
 /* ── DB helpers (T86) ───────────────────────────────────────────── */
@@ -313,26 +407,48 @@ static void inject_secrets_for_child(sqlite3 *db) {
     }
 }
 
-static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
-    /* V24: only fork if state == idle */
+static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
+                     const char *agent_name) {
+    /* V24: only fork if session already has active child */
     if (child_has_session(session_id)) return -1;
 
-    /* V71/T194: reject fork if token rate limit exceeded */
-    if (cfg->token_rate_limit > 0 && daemon_token_usage_hourly() >= cfg->token_rate_limit) {
-        char *aname = session_get_agent_name(db, session_id);
-        if (aname) {
-            daemon_inbox_insert(aname, session_id, "system", "error: token rate limit exceeded");
-            free(aname);
-        }
+    /* Resolve agent_name if not provided */
+    char *resolved_name = NULL;
+    if (!agent_name || !agent_name[0]) {
+        resolved_name = session_get_agent_name(db, session_id);
+        agent_name = resolved_name;
+    }
+    if (!agent_name || !agent_name[0]) {
+        free(resolved_name);
         return -1;
     }
 
-    /* Mark session running */
-    if (session_set_state(db, session_id, "running") != 0) return -1;
+    /* V71/T194: reject fork if token rate limit exceeded */
+    if (cfg->token_rate_limit > 0 && daemon_token_usage_hourly() >= cfg->token_rate_limit) {
+        daemon_inbox_insert(agent_name, session_id, "system", "error: token rate limit exceeded");
+        free(resolved_name);
+        return -1;
+    }
+
+    /* T200/V73: Read state from agent DB — only fork if idle */
+    char *state = daemon_agent_get_state(agent_name, session_id);
+    if (state && strcmp(state, "idle") != 0) {
+        free(state);
+        free(resolved_name);
+        return -1;
+    }
+    free(state);
+
+    /* T200: Mark session running in agent DB */
+    if (daemon_agent_set_state(agent_name, session_id, "running") != 0) {
+        free(resolved_name);
+        return -1;
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
-        session_set_state(db, session_id, "idle");
+        daemon_agent_set_state(agent_name, session_id, "idle");
+        free(resolved_name);
         return -1;
     }
     if (pid == 0) {
@@ -340,13 +456,13 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
         inject_secrets_for_child(db);
 
         /* V73/V74,T198: inject agent identity + DB path + config as env vars */
-        char *agent_name = session_get_agent_name(db, session_id);
+        /* agent_name already known from caller */
         if (agent_name) {
             setenv("CCLAW_AGENT_NAME", agent_name, 1);
 
-            /* Build agent DB path: .cclaw/agents/<name>/agent.db */
+            /* Build agent DB path: agents/<name>/agent.db */
             char agent_db[1024];
-            snprintf(agent_db, sizeof(agent_db), ".cclaw/agents/%s/agent.db", agent_name);
+            snprintf(agent_db, sizeof(agent_db), "agents/%s/agent.db", agent_name);
             setenv("CCLAW_AGENT_DB", agent_db, 1);
 
             /* Load per-agent config from daemon.db, inject as env vars */
@@ -356,7 +472,7 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
                     setenv("CCLAW_WORKSPACE", ac->workspace, 1);
                 else {
                     char ws[1024];
-                    snprintf(ws, sizeof(ws), ".cclaw/agents/%s/workspace", agent_name);
+                    snprintf(ws, sizeof(ws), "agents/%s/workspace", agent_name);
                     setenv("CCLAW_WORKSPACE", ws, 1);
                 }
                 if (ac->model)
@@ -386,17 +502,9 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
             } else {
                 /* No per-agent config — use defaults */
                 char ws[1024];
-                snprintf(ws, sizeof(ws), ".cclaw/agents/%s/workspace", agent_name);
+                snprintf(ws, sizeof(ws), "agents/%s/workspace", agent_name);
                 setenv("CCLAW_WORKSPACE", ws, 1);
             }
-            free(agent_name);
-        } else {
-            /* No agent_name on session — use daemon DB as agent DB (transition) */
-            const char *db_filename = sqlite3_db_filename(db, "main");
-            if (db_filename)
-                setenv("CCLAW_AGENT_DB", db_filename, 1);
-            if (cfg->workspace)
-                setenv("CCLAW_WORKSPACE", cfg->workspace, 1);
         }
 
         /* Always inject global config as baseline (per-agent overrides above win) */
@@ -427,17 +535,30 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
         _exit(127);
     }
 
-    /* Parent: track child */
-    child_add(pid, session_id);
+    /* Parent: track child (T200: includes agent_name) */
+    child_add(pid, session_id, agent_name);
+    free(resolved_name);
     return 0;
 }
 
 /* ── Response delivery (T85, V26) ──────────────────────────────── */
 
-static void deliver_response(const Config *cfg, sqlite3 *db, int64_t session_id) {
+/* T200/V73: deliver_response reads from agent DB */
+static void deliver_response(const Config *cfg, sqlite3 *db,
+                             const char *agent_name, int64_t session_id) {
+    /* Open agent DB to read response */
+    char *path = agent_db_path(agent_name);
+    if (!path) return;
+    sqlite3 *adb = db_open_agent(path);
+    free(path);
+    if (!adb) return;
+
     /* Get last assistant message from session branch */
     int count = 0;
-    Entry *entries = session_get_branch(db, session_id, &count);
+    Entry *entries = session_get_branch(adb, session_id, &count);
+    char *route = session_get_last_route(adb, session_id);
+    db_close(adb);
+
     const char *reply = NULL;
     if (entries) {
         for (int i = count - 1; i >= 0; i--) {
@@ -449,25 +570,26 @@ static void deliver_response(const Config *cfg, sqlite3 *db, int64_t session_id)
     }
     if (!reply) {
         entry_branch_free(entries, count);
+        free(route);
         return;
     }
 
     /* V42/T110: Suppress HEARTBEAT_OK sentinel — never deliver to channel */
     if (strcmp(reply, "HEARTBEAT_OK") == 0) {
         entry_branch_free(entries, count);
+        free(route);
         return;
     }
 
     /* V44/T113: Suppress [NO_REPLY] — agent decided not to respond (e.g. group irrelevance) */
     if (strstr(reply, "[NO_REPLY]") != NULL) {
         entry_branch_free(entries, count);
+        free(route);
         return;
     }
 
-    char *route = session_get_last_route(db, session_id);
     if (route && strncmp(route, "telegram", 8) == 0) {
-        /* Route format: "telegram" — need chat_id from tg_chat_sessions */
-        /* Look up chat_id for this session */
+        /* Route format: "telegram" — need chat_id from tg_chat_sessions (daemon.db) */
         const char *sql = "SELECT chat_id FROM tg_chat_sessions WHERE session_id=?;";
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
@@ -494,29 +616,92 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
     pid_t pid;
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         int64_t session_id;
-        if (child_remove(pid, &session_id) != 0) continue;
+        char agent_name[64] = "";
+        if (child_remove(pid, &session_id, agent_name) != 0) continue;
 
-        /* Mark session idle */
-        session_set_state(db, session_id, "idle");
+        /* T200: Agent sets own state before exit. Daemon only forces idle
+         * for normal completion (exit 0/1) or abnormal termination (signal).
+         * Exit codes 2/3/4 mean agent set "waiting" — daemon respects that. */
+        int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+        if (exit_code == AGENT_EXIT_DONE || exit_code == AGENT_EXIT_ERROR ||
+            !WIFEXITED(status)) {
+            daemon_agent_set_state(agent_name, session_id, "idle");
+        }
 
         /* V71/T194: Accumulate token usage from this agent run */
         {
-            const char *uq = "SELECT COALESCE(SUM(usage_in + usage_out), 0)"
-                             " FROM entries WHERE session_id=? AND turn_id="
-                             "(SELECT MAX(turn_id) FROM entries WHERE session_id=?);";
-            sqlite3_stmt *us;
-            if (sqlite3_prepare_v2(db, uq, -1, &us, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(us, 1, session_id);
-                sqlite3_bind_int64(us, 2, session_id);
-                if (sqlite3_step(us) == SQLITE_ROW)
-                    daemon_token_usage_add(sqlite3_column_int(us, 0));
-                sqlite3_finalize(us);
+            char *path = agent_db_path(agent_name);
+            if (path) {
+                sqlite3 *adb = db_open_agent(path);
+                free(path);
+                if (adb) {
+                    const char *uq = "SELECT COALESCE(SUM(usage_in + usage_out), 0)"
+                                     " FROM entries WHERE session_id=? AND turn_id="
+                                     "(SELECT MAX(turn_id) FROM entries WHERE session_id=?);";
+                    sqlite3_stmt *us;
+                    if (sqlite3_prepare_v2(adb, uq, -1, &us, NULL) == SQLITE_OK) {
+                        sqlite3_bind_int64(us, 1, session_id);
+                        sqlite3_bind_int64(us, 2, session_id);
+                        if (sqlite3_step(us) == SQLITE_ROW)
+                            daemon_token_usage_add(sqlite3_column_int(us, 0));
+                        sqlite3_finalize(us);
+                    }
+                    db_close(adb);
+                }
+            }
+        }
+
+        /* T200: Exit code 2 = spawn request. Copy from agent DB spawn_queue to daemon DB. */
+        if (exit_code == AGENT_EXIT_SPAWN) {
+            char *path = agent_db_path(agent_name);
+            if (path) {
+                sqlite3 *adb = db_open_agent(path);
+                free(path);
+                if (adb) {
+                    const char *sq = "SELECT id, parent_session_id, task, background, depth, tool_call_id"
+                                     " FROM spawn_queue WHERE status='pending' ORDER BY id;";
+                    sqlite3_stmt *st;
+                    if (sqlite3_prepare_v2(adb, sq, -1, &st, NULL) == SQLITE_OK) {
+                        while (sqlite3_step(st) == SQLITE_ROW) {
+                            int64_t aq_id = sqlite3_column_int64(st, 0);
+                            int64_t psid = sqlite3_column_int64(st, 1);
+                            const char *task = (const char *)sqlite3_column_text(st, 2);
+                            int bg = sqlite3_column_int(st, 3);
+                            int dep = sqlite3_column_int(st, 4);
+                            const char *tcid = (const char *)sqlite3_column_text(st, 5);
+                            /* Insert into daemon.db spawn_queue */
+                            const char *ins = "INSERT INTO spawn_queue"
+                                " (parent_agent, parent_session_id, task, background, depth, tool_call_id)"
+                                " VALUES (?,?,?,?,?,?);";
+                            sqlite3_stmt *is;
+                            if (sqlite3_prepare_v2(db, ins, -1, &is, NULL) == SQLITE_OK) {
+                                sqlite3_bind_text(is, 1, agent_name, -1, SQLITE_STATIC);
+                                sqlite3_bind_int64(is, 2, psid);
+                                sqlite3_bind_text(is, 3, task, -1, SQLITE_STATIC);
+                                sqlite3_bind_int(is, 4, bg);
+                                sqlite3_bind_int(is, 5, dep);
+                                if (tcid) sqlite3_bind_text(is, 6, tcid, -1, SQLITE_STATIC);
+                                else sqlite3_bind_null(is, 6);
+                                sqlite3_step(is);
+                                sqlite3_finalize(is);
+                            }
+                            /* Mark as transferred in agent DB */
+                            char upd[128];
+                            snprintf(upd, sizeof(upd),
+                                "UPDATE spawn_queue SET status='transferred' WHERE id=%lld;",
+                                (long long)aq_id);
+                            sqlite3_exec(adb, upd, NULL, NULL, NULL);
+                        }
+                        sqlite3_finalize(st);
+                    }
+                    db_close(adb);
+                }
             }
         }
 
         /* T88: Check if this was a sub-agent from spawn_queue (blocking) */
         const char *sq_sql =
-            "SELECT sq.id, sq.parent_session_id, sq.tool_call_id, sq.background"
+            "SELECT sq.id, sq.parent_session_id, sq.tool_call_id, sq.background, sq.parent_agent"
             " FROM spawn_queue sq WHERE sq.child_session_id=? AND sq.status='forked';";
         sqlite3_stmt *sq_stmt;
         if (sqlite3_prepare_v2(db, sq_sql, -1, &sq_stmt, NULL) == SQLITE_OK) {
@@ -526,45 +711,47 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                 int64_t parent_sid = sqlite3_column_int64(sq_stmt, 1);
                 (void)sqlite3_column_text(sq_stmt, 2); /* tool_call_id — used by T201 */
                 int bg = sqlite3_column_int(sq_stmt, 3);
+                const char *parent_agent = (const char *)sqlite3_column_text(sq_stmt, 4);
 
-                /* Get sub-agent result from last assistant entry in child session */
-                int bcount = 0;
-                Entry *branch = session_get_branch(db, session_id, &bcount);
-                const char *result_text = NULL;
-                if (branch) {
-                    for (int i = bcount - 1; i >= 0; i--) {
-                        if (branch[i].message.role == ROLE_ASSISTANT && branch[i].message.content) {
-                            result_text = branch[i].message.content;
-                            break;
+                /* Get sub-agent result from last assistant entry in child session (agent DB) */
+                const char *result_text = "sub-agent completed with no output";
+                char *result_buf = NULL;
+                {
+                    char *cpath = agent_db_path(agent_name);
+                    if (cpath) {
+                        sqlite3 *cadb = db_open_agent(cpath);
+                        free(cpath);
+                        if (cadb) {
+                            int bcount = 0;
+                            Entry *branch = session_get_branch(cadb, session_id, &bcount);
+                            if (branch) {
+                                for (int i = bcount - 1; i >= 0; i--) {
+                                    if (branch[i].message.role == ROLE_ASSISTANT && branch[i].message.content) {
+                                        result_buf = strdup(branch[i].message.content);
+                                        result_text = result_buf;
+                                        break;
+                                    }
+                                }
+                                entry_branch_free(branch, bcount);
+                            }
+                            db_close(cadb);
                         }
                     }
                 }
-                if (!result_text) result_text = "sub-agent completed with no output";
 
                 spawn_queue_mark(db, sq_id, "done", session_id);
 
                 if (!bg) {
                     /* V13 blocking: post tool_result to parent inbox, wake parent */
-                    char *parent_agent = session_get_agent_name(db, parent_sid);
-                    if (parent_agent) {
+                    if (parent_agent && parent_agent[0]) {
                         daemon_inbox_insert(parent_agent, parent_sid, "sub-agent", result_text);
-                        free(parent_agent);
-                    } else {
-                        inbox_insert(db, parent_sid, "sub-agent", result_text);
+                        /* Transition parent waiting→idle in agent DB */
+                        daemon_agent_set_state(parent_agent, parent_sid, "idle");
+                        /* Signal daemon to re-fork parent */
+                        daemon_signal_session_agent(parent_sid, parent_agent);
                     }
-                    /* Transition parent waiting→idle */
-                    const char *wake_sql =
-                        "UPDATE sessions SET state='idle' WHERE id=? AND state='waiting';";
-                    sqlite3_stmt *ws;
-                    if (sqlite3_prepare_v2(db, wake_sql, -1, &ws, NULL) == SQLITE_OK) {
-                        sqlite3_bind_int64(ws, 1, parent_sid);
-                        sqlite3_step(ws);
-                        sqlite3_finalize(ws);
-                    }
-                    /* Signal daemon to re-fork parent */
-                    daemon_signal_session(parent_sid);
                 }
-                entry_branch_free(branch, bcount);
+                free(result_buf);
                 sqlite3_finalize(sq_stmt);
                 continue; /* Skip normal deliver_response for sub-agents */
             }
@@ -572,14 +759,11 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
         }
 
         /* V26: deliver response (normal agent, not sub-agent) */
-        deliver_response(cfg, db, session_id);
+        deliver_response(cfg, db, agent_name, session_id);
 
         /* Check if more inbox items arrived while agent was running */
         {
-            char *aname = session_get_agent_name(db, session_id);
-            int pending = aname ? daemon_inbox_count(aname, session_id)
-                                : inbox_count(db, session_id);
-            free(aname);
+            int pending = daemon_inbox_count(agent_name, session_id);
             if (pending > 0) {
                 daemon_signal_session(session_id);
             }
@@ -604,145 +788,155 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
             continue;
         }
 
-        /* V3: re-check limits before forking */
-        if (session_count_active_agents(db) >= AGENT_MAX_TOTAL) {
+        /* V3: re-check limits before forking (in-memory child count) */
+        if (g_child_count >= AGENT_MAX_TOTAL) {
             spawn_queue_mark(db, r->id, "rejected", 0);
             continue;
         }
-        if (session_count_children(db, r->parent_session_id) >= AGENT_MAX_PER_PARENT) {
+        if (child_count_for_parent(db, r->parent_session_id) >= AGENT_MAX_PER_PARENT) {
             spawn_queue_mark(db, r->id, "rejected", 0);
             continue;
         }
 
-        /* Create child session */
+        /* Resolve parent agent name from spawn_queue */
+        const char *parent_agent_name = NULL;
+        char pa_buf[64] = "";
+        {
+            const char *pa_sql = "SELECT parent_agent FROM spawn_queue WHERE id=?;";
+            sqlite3_stmt *pa_stmt;
+            if (sqlite3_prepare_v2(db, pa_sql, -1, &pa_stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(pa_stmt, 1, r->id);
+                if (sqlite3_step(pa_stmt) == SQLITE_ROW) {
+                    const char *v = (const char *)sqlite3_column_text(pa_stmt, 0);
+                    if (v && v[0]) snprintf(pa_buf, sizeof(pa_buf), "%s", v);
+                }
+                sqlite3_finalize(pa_stmt);
+            }
+            parent_agent_name = pa_buf[0] ? pa_buf : NULL;
+        }
+        if (!parent_agent_name) {
+            spawn_queue_mark(db, r->id, "error", 0);
+            continue;
+        }
+
+        /* Create child session in parent's agent DB (sub-agents share parent's DB) */
+        char *apath = agent_db_path(parent_agent_name);
+        if (!apath) { spawn_queue_mark(db, r->id, "error", 0); continue; }
+        sqlite3 *adb = db_open_agent(apath);
+        free(apath);
+        if (!adb) { spawn_queue_mark(db, r->id, "error", 0); continue; }
+
         char name_buf[128];
         snprintf(name_buf, sizeof(name_buf), "sub-agent:%lld", (long long)r->parent_session_id);
-        char *parent_agent = session_get_agent_name(db, r->parent_session_id);
-        int64_t child_sid = session_create(db, name_buf, parent_agent,
+        int64_t child_sid = session_create(adb, name_buf, parent_agent_name,
                                            r->parent_session_id, r->depth);
         if (child_sid < 0) {
-            free(parent_agent);
+            db_close(adb);
             spawn_queue_mark(db, r->id, "error", 0);
             continue;
         }
 
         /* Insert task as user message in child session inbox */
-        if (parent_agent) {
-            daemon_inbox_insert(parent_agent, child_sid, "spawn", r->task);
-            free(parent_agent);
-        } else {
-            inbox_insert(db, child_sid, "spawn", r->task);
-        }
+        inbox_insert(adb, child_sid, "spawn", r->task);
 
-        /* Fork sub-agent process */
-        char session_arg[64];
-        snprintf(session_arg, sizeof(session_arg), "--session-id=%lld", (long long)child_sid);
-        char task_arg[4096];
-        snprintf(task_arg, sizeof(task_arg), "--task=%s", r->task);
-        char depth_arg[32];
-        snprintf(depth_arg, sizeof(depth_arg), "--depth=%d", r->depth);
-
-        /* Mark child session running */
-        if (session_set_state(db, child_sid, "running") != 0) {
-            spawn_queue_mark(db, r->id, "error", 0);
-            continue;
-        }
+        /* T200: Mark child session running in agent DB */
+        session_set_state(adb, child_sid, "running");
+        db_close(adb);
 
         pid_t pid = fork();
         if (pid < 0) {
-            session_set_state(db, child_sid, "idle");
+            daemon_agent_set_state(parent_agent_name, child_sid, "idle");
             spawn_queue_mark(db, r->id, "error", 0);
             continue;
         }
         if (pid == 0) {
             /* V67/T188: inject decrypted secrets as env vars for child */
             inject_secrets_for_child(db);
+            setenv("CCLAW_AGENT_NAME", parent_agent_name, 1);
+            char agent_db_buf[1024];
+            snprintf(agent_db_buf, sizeof(agent_db_buf), "agents/%s/agent.db", parent_agent_name);
+            setenv("CCLAW_AGENT_DB", agent_db_buf, 1);
             char sid_arg[64];
             snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)child_sid);
             execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);
             _exit(127);
         }
 
-        /* Track child */
-        child_add(pid, child_sid);
+        /* Track child (T200: includes agent_name) */
+        child_add(pid, child_sid, parent_agent_name);
         spawn_queue_mark(db, r->id, "forked", child_sid);
 
-        /* V13 blocking: transition parent to "waiting" state.
-         * The parent agent process should have already exited after posting the request. */
+        /* V13 blocking: transition parent to "waiting" state in agent DB */
         if (!r->background) {
-            const char *sql = "UPDATE sessions SET state='waiting' WHERE id=? AND state IN ('running','idle');";
-            sqlite3_stmt *stmt;
-            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(stmt, 1, r->parent_session_id);
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
-            }
+            daemon_agent_set_state(parent_agent_name, r->parent_session_id, "waiting");
         }
     }
     spawn_request_free(reqs, count);
 }
 
-/* ── T94/V34: Daemon startup recovery ───────────────────────────── */
+/* ── T94/T200/V34: Daemon startup recovery — scan all agent DBs ── */
 
 void daemon_startup_recovery(sqlite3 *db) {
-    /* (1) "running" sessions: process died, re-fork to continue.
-     * run_agent_turn will exit immediately if session is already complete. */
-    sqlite3_stmt *run_stmt;
-    const char *run_sql = "SELECT id FROM sessions WHERE state='running';";
-    if (sqlite3_prepare_v2(db, run_sql, -1, &run_stmt, NULL) == SQLITE_OK) {
-        int64_t running_ids[128];
-        int nrunning = 0;
-        while (sqlite3_step(run_stmt) == SQLITE_ROW && nrunning < 128)
-            running_ids[nrunning++] = sqlite3_column_int64(run_stmt, 0);
-        sqlite3_finalize(run_stmt);
+    (void)db; /* daemon.db not used for session state anymore */
 
-        sqlite3_exec(db,
-            "UPDATE sessions SET state='idle'"
-            " WHERE state='running';", NULL, NULL, NULL);
+    /* T200: Scan all agent DBs for non-idle sessions */
+    size_t agent_count = 0;
+    char **names = agent_discover("agents", &agent_count);
+    if (!names) goto cleanup;
 
-        for (int i = 0; i < nrunning; i++)
-            daemon_signal_session(running_ids[i]);
-    }
+    for (size_t a = 0; a < agent_count; a++) {
+        char *path = agent_db_path(names[a]);
+        if (!path) continue;
+        sqlite3 *adb = db_open_agent(path);
+        free(path);
+        if (!adb) continue;
 
-    /* (2) "waiting" sessions: check inbox for result */
-    sqlite3_stmt *stmt;
-    const char *sql = "SELECT id FROM sessions WHERE state='waiting';";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+        /* (1) "running" sessions: process died, reset to idle + signal re-fork */
+        {
+            const char *sql = "SELECT id FROM sessions WHERE state='running';";
+            sqlite3_stmt *stmt;
+            if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) == SQLITE_OK) {
+                int64_t ids[128];
+                int n = 0;
+                while (sqlite3_step(stmt) == SQLITE_ROW && n < 128)
+                    ids[n++] = sqlite3_column_int64(stmt, 0);
+                sqlite3_finalize(stmt);
 
-    /* Collect IDs first (avoid modifying while iterating) */
-    int64_t waiting_ids[128];
-    int nwaiting = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW && nwaiting < 128) {
-        waiting_ids[nwaiting++] = sqlite3_column_int64(stmt, 0);
-    }
-    sqlite3_finalize(stmt);
+                sqlite3_exec(adb, "UPDATE sessions SET state='idle' WHERE state='running';",
+                             NULL, NULL, NULL);
 
-    for (int i = 0; i < nwaiting; i++) {
-        int64_t sid = waiting_ids[i];
-        char *aname = session_get_agent_name(db, sid);
-        int pending = aname ? daemon_inbox_count(aname, sid)
-                            : inbox_count(db, sid);
-        if (pending <= 0) {
-            /* No result — write error tool_result to inbox */
-            if (aname)
-                daemon_inbox_insert(aname, sid, "recovery",
-                    "error: sub-agent process lost during daemon restart");
-            else
-                inbox_insert(db, sid, "recovery",
-                    "error: sub-agent process lost during daemon restart");
+                for (int i = 0; i < n; i++)
+                    daemon_signal_session(ids[i]);
+            }
         }
-        free(aname);
-        /* Transition to idle (daemon loop will fork if inbox has items) */
-        const char *upd = "UPDATE sessions SET state='idle'"
-            " WHERE id=? AND state='waiting';";
-        sqlite3_stmt *us;
-        if (sqlite3_prepare_v2(db, upd, -1, &us, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(us, 1, sid);
-            sqlite3_step(us);
-            sqlite3_finalize(us);
-        }
-    }
 
+        /* (2) "waiting" sessions: check inbox for result */
+        {
+            const char *sql = "SELECT id FROM sessions WHERE state='waiting';";
+            sqlite3_stmt *stmt;
+            if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) == SQLITE_OK) {
+                int64_t ids[128];
+                int n = 0;
+                while (sqlite3_step(stmt) == SQLITE_ROW && n < 128)
+                    ids[n++] = sqlite3_column_int64(stmt, 0);
+                sqlite3_finalize(stmt);
+
+                for (int i = 0; i < n; i++) {
+                    int pending = inbox_count(adb, ids[i]);
+                    if (pending <= 0) {
+                        inbox_insert(adb, ids[i], "recovery",
+                            "error: sub-agent process lost during daemon restart");
+                    }
+                    session_set_state(adb, ids[i], "idle");
+                }
+            }
+        }
+
+        db_close(adb);
+    }
+    agent_discover_free(names, agent_count);
+
+cleanup:
     /* T118: Clean up stale session temp dirs */
     (void)system("rm -rf /tmp/cclaw-*");
 }
@@ -801,8 +995,15 @@ int64_t daemon_bootstrap(sqlite3 *db) {
     AgentRow *row = db_agent_seed(db, "agents", agent_name);
     agent_row_free(row);
 
-    /* Create session + inbox message to trigger first turn */
-    int64_t sid = session_create(db, "bootstrap", agent_name, -1, 0);
+    /* T200: Create session in agent DB (not daemon.db) */
+    char *apath = agent_db_path(agent_name);
+    if (!apath) { free(agent_name); return -1; }
+    sqlite3 *adb = db_open_agent(apath);
+    free(apath);
+    if (!adb) { free(agent_name); return -1; }
+
+    int64_t sid = session_create(adb, "bootstrap", agent_name, -1, 0);
+    db_close(adb);
     if (sid < 0) { free(agent_name); return -1; }
 
     daemon_inbox_insert(agent_name, sid, "system",
@@ -810,6 +1011,8 @@ int64_t daemon_bootstrap(sqlite3 *db) {
                  "What LLM provider would you like to use? "
                  "(OpenRouter is recommended — just need an API key)");
 
+    /* Signal with agent_name so daemon can fork */
+    daemon_signal_session_agent(sid, agent_name);
     free(agent_name);
     return sid;
 }
@@ -879,17 +1082,33 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
                 process_spawn_queue(cfg, db);
             } else if (events[i].data.fd == g_signal_pipe[0] ||
                        events[i].data.fd == fifo_fd) {
-                /* Read session_ids from signal pipe or external FIFO */
+                /* T200: Read SignalMsg from signal pipe or external FIFO */
                 int rfd = events[i].data.fd;
-                int64_t sid;
-                while (read(rfd, &sid, sizeof(sid)) == sizeof(sid)) {
+                SignalMsg msg;
+                while (read(rfd, &msg, sizeof(msg)) == sizeof(msg)) {
+                    /* Resolve agent_name if not in signal */
+                    const char *aname = msg.agent_name[0] ? msg.agent_name : NULL;
+                    if (!aname) {
+                        /* Fallback: look up from tg_chat_sessions in daemon.db */
+                        const char *lsql = "SELECT agent_name FROM tg_chat_sessions WHERE session_id=?;";
+                        sqlite3_stmt *ls;
+                        if (sqlite3_prepare_v2(db, lsql, -1, &ls, NULL) == SQLITE_OK) {
+                            sqlite3_bind_int64(ls, 1, msg.session_id);
+                            if (sqlite3_step(ls) == SQLITE_ROW) {
+                                const char *v = (const char *)sqlite3_column_text(ls, 0);
+                                if (v && v[0])
+                                    snprintf(msg.agent_name, sizeof(msg.agent_name), "%s", v);
+                            }
+                            sqlite3_finalize(ls);
+                        }
+                        aname = msg.agent_name[0] ? msg.agent_name : NULL;
+                    }
+                    if (!aname) continue; /* Cannot resolve — skip */
+
                     /* Check inbox has pending items before forking */
-                    char *aname = session_get_agent_name(db, sid);
-                    int has_inbox = aname ? daemon_inbox_count(aname, sid) > 0
-                                         : inbox_count(db, sid) > 0;
-                    free(aname);
+                    int has_inbox = daemon_inbox_count(aname, msg.session_id) > 0;
                     if (has_inbox) {
-                        fork_agent(cfg, db, sid);
+                        fork_agent(cfg, db, msg.session_id, aname);
                     }
                 }
                 /* T88: Process any pending spawn requests */

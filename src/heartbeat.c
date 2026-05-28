@@ -32,11 +32,12 @@ static void inject_heartbeat(void) {
         char *aname = session_get_agent_name(hb_db, sid);
         if (aname) {
             daemon_inbox_insert(aname, sid, "heartbeat", HEARTBEAT_PROMPT);
+            daemon_signal_session_agent(sid, aname);
             free(aname);
         } else {
             inbox_insert(hb_db, sid, "heartbeat", HEARTBEAT_PROMPT);
+            daemon_signal_session(sid);
         }
-        daemon_signal_session(sid);
     }
     sqlite3_finalize(stmt);
 }

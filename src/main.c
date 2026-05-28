@@ -262,6 +262,12 @@ static int run_agent_turn(int64_t session_id) {
     js_runtime_destroy(js_rt);
 
 cleanup:
+    /* T200/V73: Agent sets own state in its DB before exit */
+    if (rc == AGENT_EXIT_SPAWN || rc == AGENT_EXIT_APPROVAL || rc == AGENT_EXIT_CONFIG)
+        session_set_state(db, session_id, "waiting");
+    else
+        session_set_state(db, session_id, "idle");
+
     for (size_t i = 0; i < allowed_hosts_count; i++) free(allowed_hosts[i]);
     free(allowed_hosts);
     free(agent_name);
@@ -429,7 +435,6 @@ int main(int argc, char *argv[]) {
     int64_t bootstrap_sid = daemon_bootstrap(db);
     if (bootstrap_sid > 0) {
         printf("bootstrap agent created (session %lld)\n", (long long)bootstrap_sid);
-        daemon_signal_session(bootstrap_sid);
     }
 
     /* T81: daemon main loop — blocks until shutdown */

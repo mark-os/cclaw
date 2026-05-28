@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "daemon.h"
 #include "agent_config.h"
 #include "db.h"
@@ -51,8 +52,19 @@ static int test_bootstrap_creates_ephemeral(void) {
     int64_t sid = daemon_bootstrap(db);
     if (sid <= 0) { db_close(db); chdir(orig_cwd); FAIL("daemon_bootstrap should create session"); }
 
-    /* Verify inbox has a message (in agent DB, not daemon DB — T199) */
-    char *agent_name = session_get_agent_name(db, sid);
+    /* T200: Session is now in agent DB, not daemon DB.
+     * Find the ephemeral agent that was created. */
+    size_t agent_count = 0;
+    char **agents = agent_discover("agents", &agent_count);
+    assert(agents != NULL && agent_count > 0);
+    char *agent_name = NULL;
+    for (size_t i = 0; i < agent_count; i++) {
+        if (strncmp(agents[i], "ephemeral-", 10) == 0) {
+            agent_name = strdup(agents[i]);
+            break;
+        }
+    }
+    agent_discover_free(agents, agent_count);
     assert(agent_name != NULL);
     assert(strncmp(agent_name, "ephemeral-", 10) == 0);
 

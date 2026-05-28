@@ -1070,20 +1070,28 @@ static void handle_approval_callback(const char *data, int64_t chat_id, const ch
 
     /* Post result to agent inbox (V25) */
     if (a->session_id > 0) {
-        if (a->agent_name)
+        if (a->agent_name) {
             daemon_inbox_insert(a->agent_name, a->session_id, "approval", inbox_msg);
-        else
+            /* T200: Transition waiting→idle in agent DB */
+            char *apath = NULL;
+            {
+                char buf[1024];
+                snprintf(buf, sizeof(buf), "agents/%s/agent.db", a->agent_name);
+                apath = strdup(buf);
+            }
+            if (apath) {
+                sqlite3 *adb = db_open_agent(apath);
+                free(apath);
+                if (adb) {
+                    session_set_state(adb, a->session_id, "idle");
+                    db_close(adb);
+                }
+            }
+            daemon_signal_session_agent(a->session_id, a->agent_name);
+        } else {
             inbox_insert(g_db, a->session_id, "approval", inbox_msg);
-        /* Transition waiting→idle and signal daemon to wake agent */
-        const char *wake_sql =
-            "UPDATE sessions SET state='idle' WHERE id=? AND state='waiting';";
-        sqlite3_stmt *stmt;
-        if (sqlite3_prepare_v2(g_db, wake_sql, -1, &stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(stmt, 1, a->session_id);
-            sqlite3_step(stmt);
-            sqlite3_finalize(stmt);
+            daemon_signal_session(a->session_id);
         }
-        daemon_signal_session(a->session_id);
     }
 
     /* Notify admin */
@@ -1188,12 +1196,13 @@ static void process_message(cJSON *msg) {
         char *aname = session_get_agent_name(g_db, session_id);
         if (aname) {
             daemon_inbox_insert(aname, session_id, "telegram", text->valuestring);
+            daemon_signal_session_agent(session_id, aname);
             free(aname);
         } else {
             inbox_insert(g_db, session_id, "telegram", text->valuestring);
+            daemon_signal_session(session_id);
         }
     }
-    daemon_signal_session(session_id);
 }
 
 static void *poll_loop(void *arg) {

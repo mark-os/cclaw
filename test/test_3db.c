@@ -83,7 +83,8 @@ static void test_agent_db(void) {
     /* Does NOT have daemon tables */
     assert(!table_exists(db, "agents"));
     assert(!table_exists(db, "agent_config"));
-    assert(!table_exists(db, "spawn_queue"));
+    /* spawn_queue is in agent DB (transitional, T200 — will move to daemon-only in T201) */
+    assert(table_exists(db, "spawn_queue"));
     assert(!table_exists(db, "approvals"));
 
     /* Does NOT have journal tables */

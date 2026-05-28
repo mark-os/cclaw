@@ -1,51 +1,61 @@
 # Provider Auth & Access
 
-## Current: API Keys Only
+## Provider Config in daemon.db
 
-CClaw uses env vars or config.json for all provider auth. No OAuth flows.
+All provider configuration lives in `daemon.db`:
+- `providers` table: name, base_url, model, context_window
+- `kv` table: encrypted API keys (`enc:` prefix), fallback config
 
-| Provider | Env Var | Notes |
-|----------|---------|-------|
+Agents ⊥ store provider keys. Daemon decrypts at fork, injects via `CCLAW_INJECTED_API_KEY` env var.
+
+## Supported Providers
+
+| Provider | Env Var (bootstrap) | Notes |
+|----------|---------------------|-------|
 | OpenRouter | `OPENROUTER_API_KEY` | Default. Routes to any model. Normalizes to OpenAI format. |
 | Gemini | `GEMINI_API_KEY` | Direct. Sent as `x-goog-api-key` header. |
-| DeepSeek | `DEEPSEEK_API_KEY` | Direct. Cheapest for DeepSeek models (no OR markup). China-based. |
+| DeepSeek | `DEEPSEEK_API_KEY` | Direct. Cheapest for DeepSeek models. |
 | OpenAI | `OPENAI_API_KEY` | Direct. |
 | Anthropic | `ANTHROPIC_API_KEY` | Direct. Different wire format (content blocks). |
 
+Bootstrap: env var seeds `kv` in daemon.db on first run. After that, daemon.db is authoritative.
+
 ## Provider Fallback Chain (T45)
 
-Config array of providers. On 5xx/timeout from primary, try next:
+Stored in daemon.db `kv` as `fallback_providers` (JSON array). On 5xx/timeout from primary, try next:
 ```json
-"fallback_providers": [
-  {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "api_key": "$GEMINI_API_KEY", "model": "gemma-4-31b-it"}
-]
+[{"name": "gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "model": "gemma-4-31b-it"}]
 ```
+
+API keys for fallback providers also in daemon.db `kv` (encrypted).
 
 ## Wire Format Differences
 
-CClaw currently speaks only OpenAI Completions format. OpenRouter normalizes everything.
+CClaw speaks OpenAI Completions format. OpenRouter normalizes everything.
 
 | Provider | Format | Tool Call Style | Tool Result Style |
 |----------|--------|----------------|-------------------|
 | OpenAI/OR | `choices[0].message` | `tool_calls[].function.arguments` (stringified) | `role: "tool"` |
 | Anthropic | Content blocks | `type: "tool_use", input: {}` (object) | Wrapped in user message |
 | Google | `Content[].parts` | `functionCall.args: {}` (object) | `functionResponse` in user |
-| Bedrock | SDK events | `toolUse.input: {}` (object) | `toolResult` in user |
 
 Key: OpenAI is the odd one out — `arguments` is a string. Everyone else uses objects.
 CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI emitter stringifies at wire time.
+
+## Security Model
+
+- Provider API keys stored encrypted in daemon.db `kv` (ChaCha20-Poly1305 AEAD)
+- Decryption key: `.cclaw/.cclaw_key` (32 bytes, mode 0600, daemon-only)
+- Daemon decrypts at fork → injects as `CCLAW_INJECTED_API_KEY` env var
+- Agent uses key for LLM calls, key lives only in process memory
+- `shell_exec` children have `CCLAW_INJECTED_API_KEY` unset before exec (V47)
+- Agent ⊥ has access to `.cclaw_key` file (landlock blocks)
+- `configure_provider` tool (bootstrap): agent exits w/ code 4, daemon stores encrypted key
 
 ## Future: OAuth (Device Code)
 
 If CClaw needs subscription-based access (ChatGPT Plus, Claude Pro):
 - OAuth 2.0 Device Authorization Grant (RFC 8628)
 - Works headless: show URL + code, user approves on phone/laptop
-- No browser callback needed
-- OpenAI explicitly supports this (Codex product)
+- Tokens stored encrypted in daemon.db `kv`
 - Google bans accounts for third-party OAuth — use API key only
-
-## Security Notes
-
-- Keys entered via Telegram admin dialog → written to config file, ⊥ stored in DB/session/LLM context (V52)
-- `shell_exec` children have API key env vars unset (V47)
-- Keys in config.json are plaintext (no encryption layer — honest approach)

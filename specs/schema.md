@@ -1,263 +1,271 @@
-# Schema & Data Model
+# Schema & Data Model — 3-DB Architecture
 
-## entries
+Three SQLite files (all WAL mode, `busy_timeout` ≥ 5000ms):
 
-Split-column format — no JSON parsing on LLM request hot path.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PRIMARY KEY | |
-| `session_id` | INTEGER NOT NULL | |
-| `parent_id` | INTEGER | tree structure (Pi model) |
-| `original_parent_id` | INTEGER | nullable, set on reparent |
-| `turn_id` | INTEGER | groups entries within a turn |
-| `role` | INTEGER NOT NULL | 0=system, 1=user, 2=assistant, 3=tool, 4=compaction |
-| `content` | TEXT | raw text — user/system/assistant text; compaction summary |
-| `tool_calls` | TEXT | JSON array, NULL if none; provider-neutral format |
-| `tool_call_id` | TEXT | for role=tool only |
-| `tool_name` | TEXT | for role=tool only — which tool produced this result |
-| `is_error` | INTEGER DEFAULT 0 | for role=tool — whether result is error |
-| `stop_reason` | INTEGER DEFAULT 0 | 0=none, 1=stop, 2=length, 3=tool_use, 4=error, 5=aborted |
-| `model` | TEXT | for role=assistant — which model produced this |
-| `usage_in` | INTEGER | input tokens |
-| `usage_out` | INTEGER | output tokens |
-| `token_estimate` | INTEGER | chars/4 heuristic of full wire representation |
-| `content_bytes` | INTEGER | byte length of content + tool_calls combined |
-| `tool_call_count` | INTEGER DEFAULT 0 | count of items in tool_calls array; denormalized for plan pass |
-| `created_at` | TEXT | DEFAULT (datetime('now')) |
-
-### StopReason enum
-
-Normalized, provider-agnostic (Pi model):
-
-| Value | Int | Provider `finish_reason` sources |
-|-------|-----|----------------------------------|
-| `stop` | 1 | `"stop"`, `"end"`, `"end_turn"`, `null` |
-| `length` | 2 | `"length"`, `"max_tokens"` |
-| `tool_use` | 3 | `"tool_calls"`, `"function_call"`, `"tool_use"` |
-| `error` | 4 | `"content_filter"`, `"network_error"`, unknown, missing |
-| `aborted` | 5 | (internal — SIGTERM, user cancel, timeout) |
-
-### tool_calls format
-
-Provider-neutral, `args` stored as object (not stringified):
-
-```json
-[{"id":"tc_1","name":"shell_exec","args":{"cmd":"ls"}},{"id":"tc_2","name":"file_read","args":{"path":"foo.c"}}]
-```
-
-### Wire emission
-
-Per-provider, computed at stream time from columns (V60):
-
-- **OpenAI**: `content` → `"content":"..."`, `tool_calls` → stringify each `args` object into `"arguments":"..."` + wrap in `{"type":"function","function":{...}}`
-- **Anthropic** (future): `content` → text block, `tool_calls` → `{"type":"tool_use","id":"...","name":"...","input":{...}}`
-- **Google** (future): `content` → `{text:"..."}`, `tool_calls` → `{"functionCall":{"name":"...","args":{...}}}`
-
-### FTS5
-
-Indexes `content` column directly (no json_extract needed).
-
-### Migration
-
-Legacy `data TEXT` column retained during migration (populated for old entries, NULL for new); `reshape_entry()` fallback reads `data` when split columns empty; drop `data` column after all active sessions contain only new-format entries.
+| DB | Path | Owner | Contents |
+|----|------|-------|----------|
+| daemon.db | `.cclaw/daemon.db` | daemon (sole writer) | agents registry, agent_config, providers, kv (secrets), channel_bindings, tg_chat_sessions, spawn_queue, cron_jobs, approvals |
+| agent.db | `agents/<name>/agent.db` | agent process (RW); daemon (inbox writes only) | sessions, entries, inbox, js_tools, memory_blocks, kv (agent-local) |
+| journal.db | `.cclaw/journal.db` | log collector (sole writer) | log table (all stdout/stderr from daemon + agents) |
 
 ---
 
-## inbox
+## daemon.db
+
+### agents
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | INTEGER PRIMARY KEY | |
-| `session_id` | INTEGER NOT NULL | |
-| `source` | TEXT | channel origin (telegram, cli, cron, sub-agent) |
-| `payload` | TEXT | message content |
-| `created_at` | TEXT | |
-| `consumed` | INTEGER DEFAULT 0 | |
-
----
-
-## sessions
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PRIMARY KEY | |
-| `name` | TEXT | |
-| `leaf_id` | INTEGER | current branch tip entry |
-| `agent_name` | TEXT | |
-| `parent_session_id` | INTEGER DEFAULT -1 | sub-agent parent (-1 = top-level) |
-| `depth` | INTEGER DEFAULT 0 | sub-agent depth (0 = top-level) |
-| `state` | TEXT DEFAULT 'idle' | idle\|running\|waiting |
-| `error_count` | INTEGER DEFAULT 0 | |
-| `last_route` | TEXT | delivery target: "telegram:\<chat_id\>", "cli", "cron:\<job\>", "subagent:\<sid\>" |
+| `name` | TEXT PRIMARY KEY | |
+| `status` | TEXT NOT NULL DEFAULT 'active' | active\|disabled |
 | `created_at` | INTEGER DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER DEFAULT (unixepoch()) | |
 
----
+### agent_config
 
-## agents
-
-Replaces filesystem-based MEMORY.md, SOUL.md, system.md, HEARTBEAT.md.
+Replaces `agent.json` files. Daemon reads at fork, injects as `CCLAW_*` env vars.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | INTEGER PRIMARY KEY | |
-| `name` | TEXT UNIQUE | |
-| `config` | TEXT | JSON — model, tools, limits, allowed_hosts |
-| `system_prompt` | TEXT | template, supports `{session_id}`, `{date}`, `{agent_name}` |
-| `heartbeat` | TEXT | proactive task instructions, read on heartbeat turns |
-| `created_at` | TEXT | |
-| `updated_at` | TEXT | |
-
----
-
-## approvals
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PRIMARY KEY | |
-| `session_id` | INTEGER | |
-| `agent_name` | TEXT | |
-| `type` | TEXT | whitelist_host\|create_agent\|model_change\|tool_enable |
-| `payload` | TEXT | JSON — request details |
-| `status` | TEXT DEFAULT 'pending' | pending\|approved\|denied |
-| `admin_chat_id` | INTEGER | |
-| `created_at` | TEXT | |
-| `resolved_at` | TEXT | |
-
----
-
-## memory_blocks
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PRIMARY KEY | |
 | `agent_name` | TEXT NOT NULL | |
-| `label` | TEXT NOT NULL | UNIQUE(agent_name, label) |
-| `value` | TEXT DEFAULT '' | |
-| `description` | TEXT | tells agent what block is for |
-| `char_limit` | INTEGER DEFAULT 5000 | |
-| `read_only` | INTEGER DEFAULT 0 | |
-| `created_at` | TEXT | |
-| `updated_at` | TEXT | |
+| `key` | TEXT NOT NULL | |
+| `value` | TEXT NOT NULL | |
+| PRIMARY KEY | (agent_name, key) | |
 
-Default: zero blocks — agent creates via `memory_create`; optionally pre-seeded from `agent.json` `memory_blocks[]` on first reference.
+Keys: `model`, `workspace`, `tools` (JSON array), `allowed_hosts` (JSON array), `read_access` (JSON array), `max_iterations`, `shell_timeout`, `landlock_net_ports` (JSON array), `daemon_db_read` (0\|1).
 
-### memory_blocks config (in `agent.json`)
-
-```json
-"memory_blocks": [
-  {"label": "persona", "description": "Agent identity and tone", "value": "I am...", "char_limit": 5000, "read_only": false},
-  {"label": "human", "description": "Known facts about the user", "char_limit": 5000, "read_only": false},
-  {"label": "instructions", "description": "Standing orders", "value": "Always...", "read_only": true}
-]
-```
-
-`read_only: true` → visible in context, agent memory tools reject edits.
-
----
-
-## Agent config on disk
-
-```
-agents/<name>/
-  agent.json    — model override, tool whitelist, max_iterations, workspace path, allowed_hosts
-  skills/       — per-agent skill files (markdown, injected into system prompt)
-```
-
----
-
-## spawn_queue
+### providers
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | INTEGER PRIMARY KEY | |
-| `parent_session_id` | INTEGER NOT NULL | REFERENCES sessions(id) |
+| `name` | TEXT PRIMARY KEY | |
+| `base_url` | TEXT NOT NULL | |
+| `model` | TEXT NOT NULL | |
+| `context_window` | INTEGER DEFAULT 128000 | |
+
+### kv
+
+Global config + encrypted secrets. Daemon-only access.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `key` | TEXT PRIMARY KEY | dotted namespace: `provider.api_key`, `telegram_token`, etc. |
+| `value` | TEXT NOT NULL | plaintext or `enc:<hex(nonce\|\|ct\|\|tag)>` for secrets |
+
+### channel_bindings
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `channel_type` | TEXT NOT NULL | telegram, cli, webhook |
+| `channel_id` | TEXT NOT NULL | |
 | `agent_name` | TEXT NOT NULL | |
-| `task` | TEXT NOT NULL | |
-| `mode` | TEXT DEFAULT 'blocking' | blocking\|background |
-| `tool_call_id` | TEXT | for blocking: match result to parent's tool_call |
 | `created_at` | INTEGER DEFAULT (unixepoch()) | |
-| `consumed` | INTEGER DEFAULT 0 | |
+| PRIMARY KEY | (channel_type, channel_id) | |
 
----
-
-## cron_jobs
+### tg_chat_sessions
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | INTEGER PRIMARY KEY | |
+| `chat_id` | INTEGER PRIMARY KEY | |
+| `session_id` | INTEGER NOT NULL | |
+| `agent_name` | TEXT NOT NULL | |
+
+### spawn_queue
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `parent_agent` | TEXT NOT NULL | |
+| `parent_session_id` | INTEGER NOT NULL | |
+| `tool_call_id` | TEXT | for blocking: match result to parent's tool_call |
+| `child_agent` | TEXT | NULL until assigned |
+| `child_session_id` | INTEGER | NULL until forked |
+| `task` | TEXT NOT NULL | |
+| `background` | INTEGER DEFAULT 0 | |
+| `depth` | INTEGER DEFAULT 1 | |
+| `status` | TEXT DEFAULT 'pending' | pending\|running\|done\|failed |
+| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+
+Index: `idx_spawn_pending ON spawn_queue(status) WHERE status='pending'`
+
+### cron_jobs
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `agent_name` | TEXT NOT NULL | |
 | `name` | TEXT NOT NULL | |
 | `cron_expr` | TEXT NOT NULL | |
-| `session_id` | INTEGER NOT NULL | REFERENCES sessions(id) |
+| `session_id` | INTEGER NOT NULL | |
 | `task` | TEXT NOT NULL | |
 | `enabled` | INTEGER DEFAULT 1 | |
 | `next_run_at` | INTEGER DEFAULT 0 | |
 | `last_run_at` | INTEGER | |
 | `created_at` | INTEGER DEFAULT (unixepoch()) | |
 
----
-
-## js_tools
+### approvals
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | INTEGER PRIMARY KEY | |
-| `session_id` | INTEGER NOT NULL | REFERENCES sessions(id) |
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `agent_name` | TEXT NOT NULL | |
+| `session_id` | INTEGER NOT NULL | |
+| `type` | TEXT NOT NULL | whitelist_host\|create_agent\|model_change\|tool_enable |
+| `payload` | TEXT NOT NULL | JSON |
+| `status` | TEXT DEFAULT 'pending' | pending\|approved\|denied |
+| `admin_chat_id` | INTEGER | |
+| `notified` | INTEGER DEFAULT 0 | |
+| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+| `resolved_at` | INTEGER | |
+
+Index: `idx_approvals_pending ON approvals(status) WHERE status='pending'`
+
+---
+
+## agents/\<name\>/agent.db
+
+### sessions
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `name` | TEXT | |
+| `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
+| `parent_session_id` | INTEGER DEFAULT -1 | sub-agent parent (-1 = top-level) |
+| `depth` | INTEGER DEFAULT 0 | sub-agent depth |
+| `state` | TEXT DEFAULT 'idle' | idle\|running\|waiting |
+| `last_route` | TEXT | delivery target |
+| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+| `updated_at` | INTEGER DEFAULT (unixepoch()) | |
+
+### entries
+
+Split-column format — no JSON parsing on LLM request hot path.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | |
+| `parent_id` | INTEGER DEFAULT -1 | tree structure (Pi model) |
+| `original_parent_id` | INTEGER | nullable, set on reparent |
+| `turn_id` | INTEGER | groups entries within a turn |
+| `role` | INTEGER DEFAULT 1 | 0=system, 1=user, 2=assistant, 3=tool, 4=compaction |
+| `content` | TEXT | raw text |
+| `tool_calls` | TEXT | JSON array, NULL if none |
+| `tool_call_id` | TEXT | for role=tool only |
+| `tool_name` | TEXT | for role=tool only |
+| `is_error` | INTEGER DEFAULT 0 | for role=tool |
+| `stop_reason` | INTEGER DEFAULT 0 | 0=none, 1=stop, 2=length, 3=tool_use, 4=error, 5=aborted |
+| `model` | TEXT | which model produced this |
+| `usage_in` | INTEGER | input tokens |
+| `usage_out` | INTEGER | output tokens |
+| `token_estimate` | INTEGER | chars/4 heuristic |
+| `content_bytes` | INTEGER | byte length of content + tool_calls |
+| `tool_call_count` | INTEGER DEFAULT 0 | denormalized for plan pass |
+| `data` | TEXT | legacy/debug (nullable) |
+| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+
+### StopReason enum
+
+| Value | Int | Provider sources |
+|-------|-----|------------------|
+| stop | 1 | `"stop"`, `"end"`, `"end_turn"`, `null` |
+| length | 2 | `"length"`, `"max_tokens"` |
+| tool_use | 3 | `"tool_calls"`, `"function_call"`, `"tool_use"` |
+| error | 4 | `"content_filter"`, `"network_error"`, unknown, missing |
+| aborted | 5 | (internal — SIGTERM, user cancel, timeout) |
+
+### tool_calls format
+
+Provider-neutral, `args` stored as object (not stringified):
+
+```json
+[{"id":"tc_1","name":"shell_exec","args":{"cmd":"ls"}}]
+```
+
+Wire emission per-provider at stream time (V60):
+- **OpenAI**: stringify `args` → `"arguments":"..."`
+- **Anthropic**: `args` as `input` object
+- **Google**: `args` as `functionCall.args` object
+
+### FTS5
+
+```sql
+CREATE VIRTUAL TABLE entries_fts USING fts5(content, content=entries, content_rowid=id);
+-- AFTER INSERT trigger copies content → entries_fts (role-aware)
+```
+
+### inbox
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | |
+| `source` | TEXT NOT NULL | channel origin |
+| `payload` | TEXT NOT NULL | message content |
+| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+| `consumed` | INTEGER DEFAULT 0 | |
+
+Index: `idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0`
+
+### js_tools
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | |
 | `name` | TEXT NOT NULL | UNIQUE(session_id, name) |
 | `description` | TEXT | |
 | `parameters_json` | TEXT | |
 | `code` | TEXT NOT NULL | |
 
----
-
-## tg_chat_sessions
+### memory_blocks
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `chat_id` | INTEGER PRIMARY KEY | |
-| `session_id` | INTEGER NOT NULL | REFERENCES sessions(id) |
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `label` | TEXT NOT NULL UNIQUE | |
+| `value` | TEXT DEFAULT '' | |
+| `description` | TEXT | tells agent what block is for |
+| `char_limit` | INTEGER DEFAULT 5000 | |
+| `read_only` | INTEGER DEFAULT 0 | |
+| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+| `updated_at` | INTEGER DEFAULT (unixepoch()) | |
 
----
+### kv (agent-local)
 
-## kv
-
-All config lives here. No config.json.
+Agent-local preferences only (no secrets — secrets live in daemon.db).
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `key` | TEXT PRIMARY KEY | dotted namespace: `provider.model`, `provider.api_key`, `web_port` |
-| `value` | TEXT NOT NULL | plaintext or `enc:<hex(nonce\|\|ciphertext\|\|tag)>` for secrets |
-
-**Secret values**: prefixed with `enc:` — ChaCha20-Poly1305 AEAD encrypted. Key file: `<db_dir>/.cclaw_key` (32 bytes, mode 0600, outside all agent workspaces).
-
-**Default keys seeded on DB creation:**
-
-| Key | Default | Secret? |
-|-----|---------|---------|
-| `provider.base_url` | `https://openrouter.ai/api/v1` | no |
-| `provider.api_key` | (from `OPENROUTER_API_KEY` env) | yes |
-| `provider.model` | `deepseek/deepseek-v4-flash` | no |
-| `provider.max_tokens` | `4096` | no |
-| `provider.context_window` | `65536` | no |
-| `provider.cache_hints` | `auto` | no |
-| `fallback_providers` | `[]` (JSON array) | no (but api_keys within are encrypted) |
-| `telegram_token` | (empty) | yes |
-| `admin_chat_ids` | `[]` (JSON array) | no |
-| `web_port` | `8080` | no |
-| `workspace` | `./workspace` | no |
-| `max_iterations` | `25` | no |
-| `max_history_tokens` | `0` (= 60% of context_window) | no |
-| `heartbeat_interval` | `0` (disabled) | no |
-| `shell_timeout` | `30` | no |
-
-**Priority**: env var override (`CCLAW_*`) > kv value > hardcoded default.
-
-**Access from agent**: `db_query` tool filters out rows where value starts with `enc:` — agent sees config but not secrets.
+| `key` | TEXT PRIMARY KEY | |
+| `value` | TEXT NOT NULL | |
 
 ---
 
-## Indexes
+## journal.db
+
+### log
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `source` | TEXT NOT NULL | "daemon", agent name, "collector" |
+| `pid` | INTEGER | |
+| `session_id` | INTEGER | |
+| `stream` | INTEGER DEFAULT 1 | 1=stdout, 2=stderr |
+| `line` | TEXT NOT NULL | |
+| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+
+Indexes:
+```sql
+CREATE INDEX idx_log_source ON log(source, created_at);
+CREATE INDEX idx_log_time ON log(created_at);
+```
+
+---
+
+## Indexes (agent.db)
 
 ```sql
 CREATE INDEX idx_entries_session ON entries(session_id, id);
@@ -265,40 +273,20 @@ CREATE INDEX idx_entries_parent ON entries(parent_id);
 CREATE INDEX idx_entries_session_role ON entries(session_id, role);
 CREATE INDEX idx_entries_turn ON entries(session_id, turn_id);
 CREATE INDEX idx_entries_stop_reason ON entries(session_id, stop_reason) WHERE stop_reason != 0;
-CREATE INDEX idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0;
-CREATE INDEX idx_spawn_queue_pending ON spawn_queue(consumed) WHERE consumed = 0;
-```
-
----
-
-## FTS5
-
-```sql
-CREATE VIRTUAL TABLE entries_fts USING fts5(content, content=entries, content_rowid=id);
--- AFTER INSERT trigger copies entries.content → entries_fts
+CREATE INDEX idx_entries_plan ON entries(parent_id, session_id, id, role, stop_reason, token_estimate, tool_call_count);
 ```
 
 ---
 
 ## Design decisions
 
-1. **Split columns over JSON `data`** — zero cJSON parsing on LLM request hot path (V60); metadata columns enable plan pass without overflow page loads (V56)
-2. **INTEGER ids** — faster joins, smaller indexes, natural ordering; no UUIDs (single-writer per session)
-3. **parent_id tree** — supports branching (Pi model); walk leaf→root for current branch via recursive CTE
-4. **Inbox as table** — durable queue; survives crashes; atomic consumption via `BEGIN EXCLUSIVE`
-5. **WAL mode** — multiple readers never block; writers serialize briefly on commit
-6. **`spawn_queue`** — daemon reads on signal pipe wake, forks sub-agent, marks consumed; decouples agent process from fork logic (V21)
-7. **Sub-agents are sessions** — no separate tracking table; `parent_session_id` + `depth` on sessions table; V3 limits enforced via count query
-8. **`tool_calls` as JSON array** — provider-neutral format; `args` stored as object (not stringified); per-provider wire formatting at emit time only
-
----
-
-## Design notes
-
-- Agent identity (prompts, memory blocks) lives in SQLite → portable by copying DB, no filesystem sync
-- Agent can self-modify memory blocks via tools (`memory_append`, `memory_replace`) — just DB writes; `description` field guides agent on block purpose (visible in context, not editable by agent)
-- System prompt assembled at turn start: `system_prompt` template + memory blocks (rendered w/ label, description, metadata, value) + skills
-- `agents/<name>/agent.json` on disk is bootstrap/import path — loaded once to seed DB row; DB authoritative after that
-- Workspace = working directory for file tools — no magic filenames, no special semantics
-- `/tmp/cclaw-<session_id>/` — ephemeral per-session scratch (tool output overflow)
-- Writable paths under landlock/namespace: workspace + `/tmp/cclaw-<session_id>/` + DB file
+1. **3-DB split** — daemon.db for coordination (daemon sole writer), agent.db for session data (agent RW, daemon inbox-only), journal.db for logs (collector sole writer); eliminates cross-concern locking
+2. **Exit code IPC** — agents signal intent via exit code; daemon reads details from agent DB post-reap; no shared-memory IPC, no pipes for structured data
+3. **agent_config in daemon.db** — replaces agent.json; daemon reads at fork, injects as env vars; single source of truth for policy
+4. **Split columns over JSON** — zero cJSON parsing on LLM request hot path (V60); metadata columns enable plan pass without overflow page loads (V56)
+5. **INTEGER ids** — faster joins, smaller indexes, natural ordering
+6. **parent_id tree** — supports branching (Pi model); walk leaf→root via recursive CTE
+7. **Inbox as table** — durable queue; survives crashes; atomic consumption via `BEGIN EXCLUSIVE`
+8. **WAL mode** — multiple readers never block; writers serialize briefly on commit
+9. **Log collector** — single writer to journal.db; receives fds via SCM_RIGHTS; agents don't need journal.db access
+10. **CLI standalone** — opens agent.db directly; no daemon.db needed; config from env vars or defaults

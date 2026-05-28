@@ -17,22 +17,12 @@
 #include "db.h"
 #include "agent.h"
 #include "agent_config.h"
+#include "agent_setup.h"
 #include "landlock.h"
-#include "tools.h"
-#include "tool_shell.h"
-#include "tool_file.h"
-#include "tool_js.h"
-#include "tool_agent.h"
-#include "tool_web_fetch.h"
-#include "tool_db_query.h"
-#include "tool_memory.h"
-#include "tool_approval.h"
-#include "tool_bootstrap.h"
 #include "agent_exit.h"
 #include "shutdown.h"
 #include "context.h"
 #include "daemon.h"
-#include "context.h"
 #include "secret.h"
 
 /* Tool dispatch via registry */
@@ -93,7 +83,6 @@ static int run_agent_turn(int64_t session_id) {
     {
         const char *hosts_env = getenv("CCLAW_ALLOWED_HOSTS");
         if (hosts_env && hosts_env[0]) {
-            /* Count commas to size array */
             size_t cap = 1;
             for (const char *p = hosts_env; *p; p++) if (*p == ',') cap++;
             allowed_hosts = malloc(cap * sizeof(char *));
@@ -111,8 +100,6 @@ static int run_agent_turn(int64_t session_id) {
     }
 
     /* V22: Landlock — restrict filesystem after config loaded */
-    const char **ra = (const char **)allowed_hosts; /* reuse for read_access placeholder */
-    (void)ra;
     if (landlock_apply(cfg->workspace, cfg->db_path, session_id,
                        NULL, 0) < 0) {
         fprintf(stderr, "[agent %lld] landlock unavailable, continuing without\n",
@@ -154,79 +141,20 @@ static int run_agent_turn(int64_t session_id) {
     }
     entry_branch_free(branch, branch_count);
 
-    /* Register tools */
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_shell_register(&reg, cfg->shell_timeout, cfg->workspace);
-
-    /* T118: file_read allows workspace + session temp dir */
-    char tmp_dir[64];
-    session_tmp_dir(session_id, tmp_dir, sizeof(tmp_dir));
-    FileReadCtx file_read_ctx = {.workspace = cfg->workspace,
-                                  .extra_read_path = tmp_dir};
-    tool_file_read_register(&reg, &file_read_ctx);
-    tool_file_write_register(&reg, cfg->workspace);
-
-    /* T104: JS eval with per-agent allowed_hosts */
-    JsEvalCtx js_eval_ctx = {
-        .allowed_hosts = allowed_hosts,
-        .allowed_hosts_count = allowed_hosts_count
-    };
-    tool_js_eval_register(&reg, &js_eval_ctx);
-
-    /* V46: web_fetch uses same policy as JS fetch */
-    HttpPolicy web_policy = {
-        .allowed_hosts = allowed_hosts,
-        .allowed_count = allowed_hosts_count,
-        .blocked_hosts = NULL,
-        .blocked_count = 0,
-        .block_private = 1
-    };
-    tool_web_fetch_register(&reg, (allowed_hosts_count > 0) ? &web_policy : NULL);
-    tool_db_query_register(&reg, db);
-
-    /* T153: memory block tools */
-    ToolMemoryCtx mem_ctx = {.db = db, .agent_name = agent_name};
-    tool_memory_register(&reg, &mem_ctx);
-
-    /* T147: approval_request tool */
-    ToolApprovalCtx approval_ctx = {.db = db, .session_id = session_id,
-                                    .agent_name = agent_name};
-    tool_approval_register(&reg, &approval_ctx);
-
-    /* T190/T191/T192: bootstrap tools */
-    ToolBootstrapCtx bootstrap_ctx = {.db = db, .session_id = session_id,
-                                      .agent_name = agent_name};
-    tool_configure_provider_register(&reg, &bootstrap_ctx);
-    tool_configure_channel_register(&reg, &bootstrap_ctx);
-    tool_create_agent_register(&reg, &bootstrap_ctx);
-
-    /* JS persistent runtime + define tool */
-    JsSessionRuntime *js_rt = js_runtime_create();
-    if (js_rt && allowed_hosts_count > 0)
-        js_runtime_set_hosts(js_rt, allowed_hosts, allowed_hosts_count);
-    JsDefineCtx js_def_ctx = {.db = db, .session_id = session_id,
-                               .reg = &reg, .rt = js_rt};
-    tool_js_define_register(&reg, &js_def_ctx);
-    tool_js_load_session(db, session_id, &reg, js_rt);
-
-    /* T204: cron tools removed from agent — admin-only for v1 */
-
-    /* Agent launch tool */
-    AgentLaunchCtx la_ctx = {.db = db, .session_id = session_id,
-                             .daemon_mode = 1};
-    tool_launch_agent_register(&reg, &la_ctx);
-    tool_check_agent_register(&reg, &la_ctx);
+    /* T206: Use shared agent_setup for tool registration (daemon mode) */
+    AgentSetup setup;
+    agent_setup_init(&setup, db, session_id, cfg, agent_name,
+                     allowed_hosts, allowed_hosts_count, AGENT_SETUP_DAEMON);
 
     size_t tool_count = 0;
-    const ToolSchema *schemas = tools_schemas(&reg, &tool_count);
+    const ToolSchema *schemas = agent_setup_schemas(&setup, &tool_count);
 
     AgentContext ctx = {0};
     ctx.db = db;
     ctx.session_id = session_id;
     ctx.cfg = cfg;
     ctx.dispatch = dispatch_tools;
-    ctx.dispatch_data = &reg;
+    ctx.dispatch_data = &setup.reg;
     ctx.tools = schemas;
     ctx.tool_count = tool_count;
     ctx.debug = cfg->debug;
@@ -255,8 +183,7 @@ static int run_agent_turn(int64_t session_id) {
         sqlite3_finalize(stmt);
     }
 
-    tools_free(&reg);
-    js_runtime_destroy(js_rt);
+    agent_setup_destroy(&setup);
 
 cleanup:
     /* T200/V73: Agent sets own state in its DB before exit */
@@ -346,7 +273,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Agent mode: self-contained, opens DB and loads config from kv */
+    /* Agent mode: self-contained, opens DB and loads config from env */
     if (agent_mode) {
         if (sa_session_id < 0) {
             fprintf(stderr, "error: --agent requires --session-id=N\n");
@@ -355,7 +282,31 @@ int main(int argc, char *argv[]) {
         return run_agent_turn(sa_session_id);
     }
 
-    /* V61: Open DB, load config from kv table */
+    shutdown_init();
+
+    /* T206/V81: CLI mode — config from env vars, no daemon.db needed */
+    if (!daemon_mode) {
+        Config *cfg = config_load_from_env();
+        if (!cfg) {
+            fprintf(stderr, "error: failed to load config\n");
+            return 1;
+        }
+        if (debug_mode) cfg->debug = 1;
+
+        CliOpts opts = {0};
+        opts.prompt = prompt;
+        if (new_session)
+            opts.session_id = 0;
+        else if (sa_session_id > 0)
+            opts.session_id = sa_session_id;
+        else
+            opts.session_id = -1;
+        int rc = cli_run(cfg, &opts);
+        config_free(cfg);
+        return rc == 0 ? 0 : 1;
+    }
+
+    /* Daemon mode: needs daemon.db for kv config, channels, etc. */
     char *db_path = resolve_db_path();
     sqlite3 *db = db_open(db_path);
     if (!db) {
@@ -379,23 +330,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     if (debug_mode) cfg->debug = 1;
-
-    shutdown_init();
-
-    if (!daemon_mode) {
-        db_close(db);
-        CliOpts opts = {0};
-        opts.prompt = prompt;
-        if (new_session)
-            opts.session_id = 0;
-        else if (sa_session_id > 0)
-            opts.session_id = sa_session_id;
-        else
-            opts.session_id = -1;
-        int rc = cli_run(cfg, &opts);
-        config_free(cfg);
-        return rc == 0 ? 0 : 1;
-    }
 
     /* Daemon mode: epoll loop, fork agents on inbox signal, reap on exit */
     workspace_init(cfg);

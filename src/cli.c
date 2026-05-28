@@ -2,26 +2,17 @@
 #include "cli.h"
 #include "agent.h"
 #include "agent_config.h"
+#include "agent_setup.h"
 #include "db.h"
 #include "tools.h"
-#include "tool_shell.h"
-#include "tool_file.h"
-#include "tool_js.h"
-#include "tool_cron.h"
-#include "tool_agent.h"
-#include "tool_web_fetch.h"
-#include "tool_db_query.h"
-#include "tool_memory.h"
-#include "tool_approval.h"
-#include "tool_bootstrap.h"
 #include "shutdown.h"
-#include "daemon.h"
 #include "context.h"
 #include "secret.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 /* T115: display truncation limits (aggressive — shorter than V40 LLM limit) */
 #define CLI_DISPLAY_MAX_BYTES 1024
@@ -170,23 +161,51 @@ static int64_t cli_select_session(sqlite3 *db, const CliOpts *opts) {
     return result;
 }
 
+/* T206/V81: Resolve agent DB path for standalone CLI.
+ * Priority: CCLAW_AGENT_DB env > .cclaw/agents/default/agent.db */
+static char *cli_resolve_agent_db(void) {
+    const char *env = getenv("CCLAW_AGENT_DB");
+    if (env && env[0]) return strdup(env);
+    return strdup(".cclaw/agents/default/agent.db");
+}
+
+/* T206: Ensure directory for path exists (mkdir -p on parent dir) */
+static void ensure_parent_dir(const char *path) {
+    char *dup = strdup(path);
+    if (!dup) return;
+    /* Walk backwards to find last '/' */
+    char *slash = strrchr(dup, '/');
+    if (slash) {
+        *slash = '\0';
+        char cmd[4096];
+        snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dup);
+        (void)system(cmd);
+    }
+    free(dup);
+}
+
 int cli_run(const Config *cfg, const CliOpts *opts) {
     if (!cfg) return -1;
-    if (!cfg->provider.api_key) {
+    if (!cfg->provider.api_key || !cfg->provider.api_key[0]) {
         fprintf(stderr, "error: OPENROUTER_API_KEY not set\n");
         return -1;
     }
 
-    sqlite3 *db = db_open(cfg->db_path);
+    /* T206/V81: CLI opens agent DB directly — no daemon.db */
+    char *agent_db_path = cli_resolve_agent_db();
+    ensure_parent_dir(agent_db_path);
+    sqlite3 *db = db_open_agent(agent_db_path);
     if (!db) {
-        fprintf(stderr, "error: cannot open database '%s'\n", cfg->db_path);
+        fprintf(stderr, "error: cannot open agent database '%s'\n", agent_db_path);
+        free(agent_db_path);
         return -1;
     }
 
     /* V52,T172: Load/create secret key for kv encryption */
     uint8_t secret_key[32];
-    if (secret_key_load_or_create(cfg->db_path, secret_key) == 0)
+    if (secret_key_load_or_create(agent_db_path, secret_key) == 0)
         db_set_secret_key(secret_key);
+    free(agent_db_path);
 
     /* V57: mmap + reduced cache for agent processes */
     db_set_agent_pragmas(db);
@@ -207,85 +226,17 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
     if (unread > 0)
         printf("[%d unread inbox message%s]\n", unread, unread == 1 ? "" : "s");
 
-    /* T104/T196: Load per-agent config from daemon.db */
-    char *agent_name = session_get_agent_name(db, session_id);
-    AgentConfig *ac = agent_name ? agent_config_load_db(db, agent_name) : NULL;
+    /* Agent name from env or default */
+    const char *agent_name_env = getenv("CCLAW_AGENT_NAME");
+    char *agent_name = agent_name_env ? strdup(agent_name_env) : strdup("default");
 
-    /* Register tools */
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_shell_register(&reg, cfg->shell_timeout, cfg->workspace);
-
-    /* T118: file_read allows workspace + session temp dir */
-    char tmp_dir[64];
-    session_tmp_dir(session_id, tmp_dir, sizeof(tmp_dir));
-    FileReadCtx file_read_ctx = {.workspace = cfg->workspace,
-                                  .extra_read_path = tmp_dir};
-    tool_file_read_register(&reg, &file_read_ctx);
-    tool_file_write_register(&reg, cfg->workspace);
-
-    /* T104: pass per-agent allowed_hosts to js_eval */
-    JsEvalCtx js_eval_ctx = {
-        .allowed_hosts = ac ? ac->allowed_hosts : NULL,
-        .allowed_hosts_count = ac ? ac->allowed_hosts_count : 0
-    };
-    tool_js_eval_register(&reg, &js_eval_ctx);
-
-    /* V46: web_fetch uses same policy as JS fetch — DRY */
-    HttpPolicy web_policy = {
-        .allowed_hosts = ac ? ac->allowed_hosts : NULL,
-        .allowed_count = ac ? ac->allowed_hosts_count : 0,
-        .blocked_hosts = NULL,
-        .blocked_count = 0,
-        .block_private = 1
-    };
-    tool_web_fetch_register(&reg, (ac && ac->allowed_hosts_count > 0) ? &web_policy : NULL);
-    tool_db_query_register(&reg, db);
-
-    /* T153: memory block tools */
-    ToolMemoryCtx mem_ctx = {.db = db, .agent_name = agent_name};
-    tool_memory_register(&reg, &mem_ctx);
-
-    /* T147: approval_request tool */
-    ToolApprovalCtx approval_ctx = {.db = db, .session_id = session_id,
-                                    .agent_name = agent_name};
-    tool_approval_register(&reg, &approval_ctx);
-
-    /* T190/T191: bootstrap tools */
-    ToolBootstrapCtx bootstrap_ctx = {.db = db, .session_id = session_id,
-                                      .agent_name = agent_name};
-    tool_configure_provider_register(&reg, &bootstrap_ctx);
-    tool_configure_channel_register(&reg, &bootstrap_ctx);
-    tool_create_agent_register(&reg, &bootstrap_ctx);
-
-    JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = NULL};
-    tool_js_define_register(&reg, &js_ctx);
-
-    ToolCronCtx cron_ctx = {.db = db, .session_id = session_id,
-                            .agent_name = agent_name};
-    tool_cron_register(&reg, &cron_ctx);
-
-    /* Resolve self path for sub-agent spawning */
-    char cli_self_path[4096];
-    ssize_t cli_sp_len = readlink("/proc/self/exe", cli_self_path, sizeof(cli_self_path) - 1);
-    if (cli_sp_len > 0) cli_self_path[cli_sp_len] = '\0';
-    else strcpy(cli_self_path, "./build/cclaw");
-
-    int has_daemon = daemon_is_running(cfg->db_path);
-    AgentLaunchCtx sa_ctx = {.db = db, .session_id = session_id,
-                             .self_path = cli_self_path,
-                             .daemon_mode = has_daemon > 0};
-    tool_launch_agent_register(&reg, &sa_ctx);
-
-    /* Create persistent JS runtime and replay session tools */
-    JsSessionRuntime *js_rt = js_runtime_create();
-    if (js_rt && ac && ac->allowed_hosts_count > 0)
-        js_runtime_set_hosts(js_rt, ac->allowed_hosts, ac->allowed_hosts_count);
-    js_ctx.rt = js_rt;
-    tool_js_load_session(db, session_id, &reg, js_rt);
+    /* T206/V81: Setup tools — CLI mode (no spawn_agent/cron/approval) */
+    AgentSetup setup;
+    agent_setup_init(&setup, db, session_id, cfg, agent_name,
+                     NULL, 0, AGENT_SETUP_CLI);
 
     size_t tool_count = 0;
-    const ToolSchema *schemas = tools_schemas(&reg, &tool_count);
+    const ToolSchema *schemas = agent_setup_schemas(&setup, &tool_count);
 
     /* Append system message only for fresh sessions */
     int branch_count = 0;
@@ -309,7 +260,7 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
         ctx.session_id = session_id;
         ctx.cfg = cfg;
         ctx.dispatch = cli_dispatch;
-        ctx.dispatch_data = &reg;
+        ctx.dispatch_data = &setup.reg;
         ctx.tools = schemas;
         ctx.tool_count = tool_count;
         ctx.debug = cfg->debug;
@@ -320,16 +271,11 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
             fprintf(stderr, "error: agent failed\n");
         else {
             print_response(db, session_id);
-            /* V58,T161: compact if branch too long */
             session_try_compact(db, session_id, cfg);
         }
 
         session_set_state(db, session_id, "idle");
-        if (has_daemon > 0)
-            daemon_signal_external(cfg->db_path, session_id);
-        tools_free(&reg);
-        js_runtime_destroy(js_rt);
-        agent_config_free(ac);
+        agent_setup_destroy(&setup);
         free(agent_name);
         db_close(db);
         return rc == 0 ? 0 : -1;
@@ -366,7 +312,7 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
         ctx.session_id = session_id;
         ctx.cfg = cfg;
         ctx.dispatch = cli_dispatch;
-        ctx.dispatch_data = &reg;
+        ctx.dispatch_data = &setup.reg;
         ctx.tools = schemas;
         ctx.tool_count = tool_count;
         ctx.debug = cfg->debug;
@@ -384,11 +330,7 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
 
     free(line);
     session_set_state(db, session_id, "idle");
-    if (has_daemon > 0)
-        daemon_signal_external(cfg->db_path, session_id);
-    js_runtime_destroy(js_rt);
-    tools_free(&reg);
-    agent_config_free(ac);
+    agent_setup_destroy(&setup);
     free(agent_name);
     db_close(db);
     return 0;

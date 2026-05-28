@@ -37,3 +37,4 @@ src/src-map.txt
 workspace/
 .kiro/settings/
 compile_commands.json
+.cclaw/

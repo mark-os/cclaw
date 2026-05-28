@@ -371,7 +371,7 @@ T202|x|spawn_queue in daemon.db w/ exit-code flow — after reap exit 2: find PE
 T203|x|approvals in daemon.db w/ exit-code flow — after reap exit 3: read tool_call, insert daemon.db approvals; agent state=waiting; admin resolves → result to agent inbox → state idle → signal|V78,V54
 T204|x|cron in daemon.db — cron_jobs table w/ `agent_name`; scheduler reads daemon.db; on fire: write task to agent inbox (in agent DB); admin-only management for v1|V76
 T205|x|bootstrap + agent creation w/ 3-DB — `daemon_bootstrap()` creates ephemeral agent dir + agent.db + daemon.db rows; `create_agent` exit 4 → daemon creates new agent; `configure_provider`/`configure_channel` exit 4 → daemon writes daemon.db|V79,V68
-T206|.|CLI as standalone agent runner — extract `agent_setup()` shared code; CLI opens agent DB directly; config from env/defaults; lacks spawn_agent/cron/approval; keeps shell/file/js/web_fetch/db_query/memory|V81
+T206|x|CLI as standalone agent runner — extract `agent_setup()` shared code; CLI opens agent DB directly; config from env/defaults; lacks spawn_agent/cron/approval; keeps shell/file/js/web_fetch/db_query/memory|V81
 T207|.|integration tests — e2e tests for cross-DB flows (daemon↔agent DB), restart recovery, CLI standalone; delete old unified `schema.sql` + dead migration code|V73
 T208|.|daemon startup namespace check — read max_user_namespaces, test unshare, enforce agent limit ≤ max_ns/6, warn if constrained; graceful degrade if unavailable|V85
 T209|.|namespace sandbox for shell_exec — `unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWNET)` in shell child; remount / ro, workspace rw; uid/gid maps; graceful fallback if unavailable|V82,V37

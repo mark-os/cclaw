@@ -16,12 +16,38 @@ static sqlite3 *setup_db(void) {
     return db;
 }
 
-static void test_spawn_queue_insert_and_peek(void) {
-    sqlite3 *db = setup_db();
-    int64_t sid = session_create(db, "parent", NULL, -1, 0);
-    assert(sid > 0);
+/* T202: spawn_queue lives in daemon.db only */
+static sqlite3 *setup_daemon_db(void) {
+    sqlite3 *db = db_open_daemon(":memory:");
+    assert(db != NULL);
+    return db;
+}
 
-    int64_t qid = spawn_queue_insert(db, sid, "do something", 0, 1, "call_123");
+/* Helper: insert into spawn_queue directly (daemon does this inline) */
+static int64_t sq_insert(sqlite3 *db, const char *agent, int64_t parent_sid,
+                         const char *task, int bg, int depth, const char *tc_id) {
+    const char *sql =
+        "INSERT INTO spawn_queue (parent_agent, parent_session_id, task, background, depth, tool_call_id)"
+        " VALUES (?,?,?,?,?,?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, parent_sid);
+    sqlite3_bind_text(stmt, 3, task, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, bg);
+    sqlite3_bind_int(stmt, 5, depth);
+    if (tc_id) sqlite3_bind_text(stmt, 6, tc_id, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(stmt, 6);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    return sqlite3_last_insert_rowid(db);
+}
+
+static void test_spawn_queue_insert_and_peek(void) {
+    sqlite3 *db = setup_daemon_db();
+
+    int64_t qid = sq_insert(db, "test_agent", 1, "do something", 0, 1, "call_123");
     assert(qid > 0);
 
     int count = 0;
@@ -29,7 +55,7 @@ static void test_spawn_queue_insert_and_peek(void) {
     assert(reqs != NULL);
     assert(count == 1);
     assert(reqs[0].id == qid);
-    assert(reqs[0].parent_session_id == sid);
+    assert(reqs[0].parent_session_id == 1);
     assert(strcmp(reqs[0].task, "do something") == 0);
     assert(reqs[0].background == 0);
     assert(reqs[0].depth == 1);
@@ -41,9 +67,9 @@ static void test_spawn_queue_insert_and_peek(void) {
 }
 
 static void test_spawn_queue_mark(void) {
-    sqlite3 *db = setup_db();
-    int64_t sid = session_create(db, "parent", NULL, -1, 0);
-    int64_t qid = spawn_queue_insert(db, sid, "task", 1, 1, NULL);
+    sqlite3 *db = setup_daemon_db();
+
+    int64_t qid = sq_insert(db, "test_agent", 1, "task", 1, 1, NULL);
     assert(qid > 0);
 
     /* Mark as forked */

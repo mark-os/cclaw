@@ -1081,35 +1081,7 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
     return consumed;
 }
 
-/* T88: Spawn queue — agent processes post requests, daemon picks up + forks */
-
-int64_t spawn_queue_insert(sqlite3 *db, int64_t parent_session_id, const char *task,
-                           int background, int depth, const char *tool_call_id) {
-    /* T200: Include parent_agent (from session's agent_name) */
-    char *agent_name = session_get_agent_name(db, parent_session_id);
-    const char *sql =
-        "INSERT INTO spawn_queue (parent_agent, parent_session_id, task, background, depth, tool_call_id)"
-        " VALUES (?,?,?,?,?,?);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        free(agent_name);
-        return -1;
-    }
-    sqlite3_bind_text(stmt, 1, agent_name ? agent_name : "", -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 2, parent_session_id);
-    sqlite3_bind_text(stmt, 3, task, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 4, background);
-    sqlite3_bind_int(stmt, 5, depth);
-    if (tool_call_id)
-        sqlite3_bind_text(stmt, 6, tool_call_id, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 6);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    free(agent_name);
-    if (rc != SQLITE_DONE) return -1;
-    return sqlite3_last_insert_rowid(db);
-}
+/* T88/T202: Spawn queue — daemon.db only (V73). Daemon inserts inline in reap_children. */
 
 SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count) {
     *count = 0;

@@ -3,16 +3,122 @@
 #include <cJSON.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/select.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <time.h>
 
 #define SHELL_MAX_OUTPUT (256 * 1024)
+
+/* V82/V37: Apply namespace sandbox in shell child.
+ * unshare(USER|MNT|NET), write uid/gid maps, pivot_root into minimal fs.
+ * System dirs mounted ro, workspace rw.
+ * Returns 0 on success, -1 on failure (caller should log + continue). */
+static int shell_apply_namespace(const char *workspace) {
+    uid_t uid = getuid();
+    gid_t gid = getgid();
+
+    if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET) != 0)
+        return -1;
+
+    /* Write uid_map: map ns root (0) to our real uid */
+    int fd = open("/proc/self/uid_map", O_WRONLY);
+    if (fd < 0) return -1;
+    char map[64];
+    int len = snprintf(map, sizeof(map), "0 %u 1\n", uid);
+    int ok = (write(fd, map, (size_t)len) == len);
+    close(fd);
+    if (!ok) return -1;
+
+    /* Deny setgroups (required before writing gid_map on unprivileged) */
+    fd = open("/proc/self/setgroups", O_WRONLY);
+    if (fd >= 0) {
+        ok = (write(fd, "deny\n", 5) == 5);
+        close(fd);
+        if (!ok) return -1;
+    }
+
+    /* Write gid_map */
+    fd = open("/proc/self/gid_map", O_WRONLY);
+    if (fd < 0) return -1;
+    len = snprintf(map, sizeof(map), "0 %u 1\n", gid);
+    ok = (write(fd, map, (size_t)len) == len);
+    close(fd);
+    if (!ok) return -1;
+
+    /* Make entire mount tree private so changes don't propagate */
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
+        return -1;
+
+    /* Create tmpfs as new root */
+    char newroot[] = "/tmp/.cclaw_ns_XXXXXX";
+    if (!mkdtemp(newroot))
+        return -1;
+    if (mount("none", newroot, "tmpfs", MS_NOSUID | MS_NODEV, "size=1m") != 0)
+        return -1;
+
+    /* Bind-mount system dirs read-only */
+    static const char *sys_dirs[] = {
+        "/bin", "/usr", "/lib", "/lib64", "/etc", "/proc", "/dev", "/sbin", NULL
+    };
+    for (int i = 0; sys_dirs[i]; i++) {
+        struct stat st;
+        if (stat(sys_dirs[i], &st) != 0) continue;
+        char dst[256];
+        snprintf(dst, sizeof(dst), "%s%s", newroot, sys_dirs[i]);
+        mkdir(dst, 0755);
+        if (mount(sys_dirs[i], dst, NULL, MS_BIND | MS_REC, NULL) == 0) {
+            mount(NULL, dst, NULL,
+                  MS_REMOUNT | MS_BIND | MS_REC | MS_RDONLY | MS_NOSUID, NULL);
+        }
+    }
+
+    /* Create /tmp in new root (ephemeral tmpfs, writable for shell scratch) */
+    char tmp_path[256];
+    snprintf(tmp_path, sizeof(tmp_path), "%s/tmp", newroot);
+    mkdir(tmp_path, 01777);
+
+    /* Bind-mount workspace rw */
+    if (workspace && workspace[0]) {
+        struct stat st;
+        if (stat(workspace, &st) == 0 && S_ISDIR(st.st_mode)) {
+            char ws_dst[512];
+            snprintf(ws_dst, sizeof(ws_dst), "%s%s", newroot, workspace);
+            /* Create parent dirs for workspace path */
+            char *p = ws_dst + strlen(newroot) + 1;
+            for (char *slash = p; *slash; slash++) {
+                if (*slash == '/') {
+                    *slash = '\0';
+                    mkdir(ws_dst, 0755);
+                    *slash = '/';
+                }
+            }
+            mkdir(ws_dst, 0755);
+            mount(workspace, ws_dst, NULL, MS_BIND, NULL);
+        }
+    }
+
+    /* pivot_root into new root */
+    char put_old[256];
+    snprintf(put_old, sizeof(put_old), "%s/.oldroot", newroot);
+    mkdir(put_old, 0755);
+    if (syscall(SYS_pivot_root, newroot, put_old) != 0)
+        return -1;
+
+    chdir("/");
+    umount2("/.oldroot", MNT_DETACH);
+    rmdir("/.oldroot");
+
+    return 0;
+}
 
 static const char *SHELL_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
@@ -68,6 +174,14 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
+
+        /* V82/V37: namespace sandbox — graceful fallback if unavailable */
+        const char *ws = user_data ? ((ShellConfig *)user_data)->workspace : NULL;
+        if (shell_apply_namespace(ws) != 0) {
+            /* Fallback: continue unsandboxed (log to stderr = captured in output) */
+            fprintf(stderr, "[cclaw] warning: namespace sandbox unavailable, "
+                    "continuing without (errno=%d)\n", errno);
+        }
 
         /* V47: PATH restriction + env hardening */
         setenv("PATH", "/bin:/usr/bin", 1);

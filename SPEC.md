@@ -374,7 +374,7 @@ T205|x|bootstrap + agent creation w/ 3-DB — `daemon_bootstrap()` creates ephem
 T206|x|CLI as standalone agent runner — extract `agent_setup()` shared code; CLI opens agent DB directly; config from env/defaults; lacks spawn_agent/cron/approval; keeps shell/file/js/web_fetch/db_query/memory|V81
 T207|x|integration tests — e2e tests for cross-DB flows (daemon↔agent DB), restart recovery, CLI standalone; delete old unified `schema.sql` + dead migration code|V73
 T208|x|daemon startup namespace check — read max_user_namespaces, test unshare, enforce agent limit ≤ max_ns/6, warn if constrained; graceful degrade if unavailable|V85
-T209|.|namespace sandbox for shell_exec — `unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWNET)` in shell child; remount / ro, workspace rw; uid/gid maps; graceful fallback if unavailable|V82,V37
+T209|x|namespace sandbox for shell_exec — `unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWNET)` in shell child; remount / ro, workspace rw; uid/gid maps; graceful fallback if unavailable|V82,V37
 T210|.|iptables REDIRECT in child netns — after unshare(NEWNET), set up loopback + veth pair to host proxy; redirect all TCP to proxy port|V82,V83
 T211|.|DNS interception in child netns — redirect UDP 53 to proxy; proxy resolves via system resolver, caches domain→IP; TCP handler recovers domain from cache for allowlist check; blocks hardcoded IPs by default|V86
 T212|.|credential proxy thread — raw sockets in agent process; allowlist check via `allowed_hosts`; `SO_ORIGINAL_DST` for transparent mode; injects credentials by host+path matching|V83

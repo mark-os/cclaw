@@ -106,8 +106,8 @@ static void test_spawn_sentinel(void) {
     printf("  PASS: launch_agent blocking returns SENTINEL_SPAWN\n");
 }
 
-/* T197: launch_agent background does NOT return sentinel */
-static void test_spawn_background_no_sentinel(void) {
+/* T201: launch_agent background also returns SENTINEL_SPAWN (V13) */
+static void test_spawn_background_sentinel(void) {
     sqlite3 *db = setup();
     ToolRegistry reg;
     tools_init(&reg);
@@ -118,12 +118,12 @@ static void test_spawn_background_no_sentinel(void) {
     assert(e);
     char *result = e->handler("{\"task\":\"bg task\",\"background\":true}", e->user_data);
     assert(result);
-    assert(strncmp(result, SENTINEL_SPAWN, strlen(SENTINEL_SPAWN)) != 0);
+    assert(strncmp(result, SENTINEL_SPAWN, strlen(SENTINEL_SPAWN)) == 0);
     assert(strstr(result, "background") != NULL);
     free(result);
     tools_free(&reg);
     db_close(db);
-    printf("  PASS: launch_agent background does not return sentinel\n");
+    printf("  PASS: launch_agent background returns SENTINEL_SPAWN (V13)\n");
 }
 
 int main(void) {
@@ -133,7 +133,7 @@ int main(void) {
     test_configure_provider_sentinel();
     test_configure_channel_sentinel();
     test_spawn_sentinel();
-    test_spawn_background_no_sentinel();
+    test_spawn_background_sentinel();
     printf("ALL PASSED\n");
     return 0;
 }

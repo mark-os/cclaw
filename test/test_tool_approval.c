@@ -13,7 +13,7 @@ static sqlite3 *setup(void) {
     return db;
 }
 
-/* T147: approval_request inserts into approvals table */
+/* T201: approval_request returns sentinel (daemon inserts approval after reap) */
 static void test_approval_basic(void) {
     sqlite3 *db = setup();
 
@@ -31,14 +31,11 @@ static void test_approval_basic(void) {
     assert(strncmp(result, "AGENT_EXIT_APPROVAL:", 20) == 0);
     free(result);
 
-    /* Verify row in DB */
+    /* T201: tool no longer inserts — daemon does after reap */
     int count = 0;
     Approval *list = approval_list_pending(db, &count);
-    assert(count == 1);
-    assert(strcmp(list[0].agent_name, "coder") == 0);
-    assert(strcmp(list[0].type, "whitelist_host") == 0);
-    assert(strstr(list[0].payload, "api.example.com") != NULL);
-    approval_list_free(list, count);
+    assert(count == 0);
+    assert(list == NULL);
 
     tools_free(&reg);
     db_close(db);

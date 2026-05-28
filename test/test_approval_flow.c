@@ -59,11 +59,15 @@ static void test_approve_flow(void) {
     assert(strncmp(result, "AGENT_EXIT_APPROVAL:", 20) == 0);
     free(result);
 
+    /* T201: Simulate daemon's role — insert approval from tool_call args */
+    int64_t aid = approval_insert(db, sid, "coder",
+                                  "whitelist_host", "{\"host\":\"api.newsite.com\"}");
+    assert(aid > 0);
+
     /* Verify approval is pending in DB */
     int count = 0;
     Approval *list = approval_list_pending(db, &count);
     assert(count == 1);
-    int64_t aid = list[0].id;
     assert(strcmp(list[0].type, "whitelist_host") == 0);
     assert(strstr(list[0].payload, "api.newsite.com") != NULL);
     approval_list_free(list, count);
@@ -138,10 +142,14 @@ static void test_deny_flow(void) {
     assert(strncmp(result, "AGENT_EXIT_APPROVAL:", 20) == 0);
     free(result);
 
+    /* T201: Simulate daemon's role — insert approval from tool_call args */
+    int64_t aid = approval_insert(db, sid, "coder",
+                                  "whitelist_host", "{\"host\":\"evil.com\"}");
+    assert(aid > 0);
+
     int count = 0;
     Approval *list = approval_list_pending(db, &count);
     assert(count == 1);
-    int64_t aid = list[0].id;
     approval_list_free(list, count);
 
     /* Agent waits */

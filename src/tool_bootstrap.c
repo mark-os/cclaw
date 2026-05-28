@@ -189,22 +189,10 @@ static char *tool_create_agent_handler(const char *arguments, void *user_data) {
         return strdup("error: invalid agent name (no path separators)");
     }
 
-    /* Build payload for approval */
-    char *payload = cJSON_PrintUnformatted(json);
     cJSON_Delete(json);
-    if (!payload) return strdup("error: failed to serialize payload");
 
-    int64_t id = approval_insert(ctx->db, ctx->session_id,
-                                 ctx->agent_name ? ctx->agent_name : "bootstrap",
-                                 "create_agent", payload);
-    free(payload);
-
-    if (id < 0)
-        return strdup("error: failed to submit agent creation request");
-
-    char buf[128];
-    snprintf(buf, sizeof(buf), SENTINEL_CONFIG "create_agent approval #%lld", (long long)id);
-    return strdup(buf);
+    /* T201/V79: Return sentinel — daemon reads args from tool_call entry */
+    return strdup(SENTINEL_CONFIG "create_agent");
 }
 
 int tool_create_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {

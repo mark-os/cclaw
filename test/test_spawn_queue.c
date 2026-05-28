@@ -70,17 +70,16 @@ static void test_daemon_mode_background(void) {
     AgentLaunchCtx ctx = {.db = db, .session_id = sid,                        .daemon_mode = 1, .tool_call_id = NULL};
     char *r = tool_launch_agent_handler("{\"task\":\"bg task\",\"background\":true}", &ctx);
     assert(r != NULL);
-    assert(strstr(r, "spawn request queued") != NULL);
+    /* T201: background now returns sentinel (daemon reads args from tool_call) */
+    assert(strncmp(r, "AGENT_EXIT_SPAWN:", 17) == 0);
     assert(strstr(r, "background") != NULL);
     free(r);
 
-    /* Verify it's in the queue */
+    /* T201: tool no longer writes to spawn_queue — daemon does after reap */
     int count = 0;
     SpawnRequest *reqs = spawn_queue_peek_pending(db, &count);
-    assert(count == 1);
-    assert(reqs[0].background == 1);
-    assert(strcmp(reqs[0].task, "bg task") == 0);
-    spawn_request_free(reqs, count);
+    assert(count == 0);
+    assert(reqs == NULL);
 
     daemon_signal_close();
     db_close(db);
@@ -101,13 +100,11 @@ static void test_daemon_mode_blocking(void) {
     assert(strncmp(r, "AGENT_EXIT_SPAWN:", 17) == 0);
     free(r);
 
-    /* Verify queue entry */
+    /* T201: tool no longer writes to spawn_queue — daemon does after reap */
     int count = 0;
     SpawnRequest *reqs = spawn_queue_peek_pending(db, &count);
-    assert(count == 1);
-    assert(reqs[0].background == 0);
-    assert(strcmp(reqs[0].tool_call_id, "tc_001") == 0);
-    spawn_request_free(reqs, count);
+    assert(count == 0);
+    assert(reqs == NULL);
 
     daemon_signal_close();
     db_close(db);

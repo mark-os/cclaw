@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_approval.h"
 #include "agent_exit.h"
-#include "db.h"
 #include <cJSON.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,14 +15,13 @@ static const char *APPROVAL_PARAMS_JSON =
 
 static char *tool_approval_handler(const char *arguments, void *user_data) {
     ToolApprovalCtx *ctx = (ToolApprovalCtx *)user_data;
-    if (!ctx || !ctx->db || !ctx->agent_name)
+    if (!ctx || !ctx->agent_name)
         return strdup("error: approval_request unavailable (no agent context)");
 
     cJSON *json = cJSON_Parse(arguments);
     if (!json) return strdup("error: invalid JSON arguments");
 
     cJSON *type_item = cJSON_GetObjectItemCaseSensitive(json, "type");
-    cJSON *payload_item = cJSON_GetObjectItemCaseSensitive(json, "payload");
 
     if (!cJSON_IsString(type_item)) {
         cJSON_Delete(json);
@@ -40,24 +38,10 @@ static char *tool_approval_handler(const char *arguments, void *user_data) {
         return strdup("error: type must be one of: whitelist_host, create_agent, model_change, tool_enable");
     }
 
-    /* Serialize payload to string */
-    char *payload_str = NULL;
-    if (cJSON_IsObject(payload_item))
-        payload_str = cJSON_PrintUnformatted(payload_item);
-    else
-        payload_str = strdup("{}");
-
-    int64_t id = approval_insert(ctx->db, ctx->session_id, ctx->agent_name,
-                                 type, payload_str);
-    free(payload_str);
     cJSON_Delete(json);
 
-    if (id < 0)
-        return strdup("error: failed to insert approval request");
-
-    char buf[128];
-    snprintf(buf, sizeof(buf), SENTINEL_APPROVAL "%lld", (long long)id);
-    return strdup(buf);
+    /* T201/V78: Return sentinel — daemon reads args from tool_call entry */
+    return strdup(SENTINEL_APPROVAL "pending");
 }
 
 int tool_approval_register(ToolRegistry *reg, ToolApprovalCtx *ctx) {

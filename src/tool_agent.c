@@ -71,25 +71,15 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         return strdup("error: max system-wide sub-agents reached (limit 10)");
     }
 
-    /* T88/V21: In daemon mode, post to spawn_queue and let daemon fork */
+    /* T88/V21/T201: In daemon mode, return sentinel — daemon reads args from tool_call */
     if (ctx->daemon_mode) {
-        int64_t qid = spawn_queue_insert(ctx->db, ctx->session_id, task,
-                                         background, depth + 1, ctx->tool_call_id);
         cJSON_Delete(json);
-        if (qid < 0) return strdup("error: failed to enqueue spawn request");
-
-        daemon_signal_session(ctx->session_id);
 
         if (background) {
-            char *result = malloc(128);
-            if (!result) return strdup("error: OOM");
-            snprintf(result, 128, "spawn request queued (id=%lld, background)", (long long)qid);
-            return result;
+            /* Background: still return sentinel so daemon handles it */
+            return strdup(SENTINEL_SPAWN "background");
         }
-        char *result = malloc(128);
-        if (!result) return strdup("error: OOM");
-        snprintf(result, 128, SENTINEL_SPAWN "%lld", (long long)qid);
-        return result;
+        return strdup(SENTINEL_SPAWN "blocking");
     }
 
     /* V39: CLI mode — fork+exec the agent binary */

@@ -258,7 +258,7 @@ static int test_configure_channel_unknown(void) {
     return 0;
 }
 
-/* T192: create_agent submits approval request */
+/* T192/T201: create_agent returns sentinel (daemon handles approval after reap) */
 static int test_create_agent_basic(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -280,13 +280,11 @@ static int test_create_agent_basic(void) {
     assert(strstr(result, "create_agent") != NULL);
     free(result);
 
-    /* Verify approval row exists */
+    /* T201: tool no longer inserts approval — daemon does after reap */
     int count = 0;
     Approval *list = approval_list_pending(db, &count);
-    assert(count == 1);
-    assert(strcmp(list[0].type, "create_agent") == 0);
-    assert(strstr(list[0].payload, "helper") != NULL);
-    approval_list_free(list, count);
+    assert(count == 0);
+    assert(list == NULL);
 
     tools_free(&reg);
     db_close(db);

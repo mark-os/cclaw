@@ -470,20 +470,15 @@ int agent_run(AgentContext *ctx) {
                 ctx->progress(PROGRESS_TOOL_RESULT, asst.tool_calls[i].name,
                               result, ctx->progress_data);
 
-            /* T118: truncate at write time, spill full output to temp file */
-            char *stored = truncate_and_spill(result, ctx->session_id,
-                                             asst.tool_calls[i].id);
-            ToolResult tr = {.tool_call_id = asst.tool_calls[i].id,
-                             .content = stored ? stored : result};
-            int err = (result[0] == 'e' && strncmp(result, "error:", 6) == 0);
-            Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
-                                .tool_name = asst.tool_calls[i].name, .is_error = err};
-            entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
-            free(stored);
-            free(result);
-
-            /* V72: sentinel detected — store result, exit with code */
+            /* V72/V13/T201: sentinel → store "PENDING" as content, exit */
             if (sentinel_exit >= 0) {
+                ToolResult tr = {.tool_call_id = asst.tool_calls[i].id,
+                                 .content = "PENDING"};
+                Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                                    .tool_name = asst.tool_calls[i].name};
+                entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
+                free(result);
+
                 for (size_t j = 0; j < asst.tool_call_count; j++) {
                     free(asst.tool_calls[j].id);
                     free(asst.tool_calls[j].name);
@@ -495,6 +490,18 @@ int agent_run(AgentContext *ctx) {
                 arena_destroy(a);
                 return sentinel_exit;
             }
+
+            /* T118: truncate at write time, spill full output to temp file */
+            char *stored = truncate_and_spill(result, ctx->session_id,
+                                             asst.tool_calls[i].id);
+            ToolResult tr = {.tool_call_id = asst.tool_calls[i].id,
+                             .content = stored ? stored : result};
+            int err = (result[0] == 'e' && strncmp(result, "error:", 6) == 0);
+            Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                                .tool_name = asst.tool_calls[i].name, .is_error = err};
+            entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
+            free(stored);
+            free(result);
         }
 
         /* Cleanup heap copies */

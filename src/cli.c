@@ -207,9 +207,9 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
     if (unread > 0)
         printf("[%d unread inbox message%s]\n", unread, unread == 1 ? "" : "s");
 
-    /* T104: Load per-agent config for allowed_hosts */
+    /* T104/T196: Load per-agent config from daemon.db */
     char *agent_name = session_get_agent_name(db, session_id);
-    AgentConfig *ac = agent_name ? agent_config_load("agents", agent_name) : NULL;
+    AgentConfig *ac = agent_name ? agent_config_load_db(db, agent_name) : NULL;
 
     /* Register tools */
     ToolRegistry reg;

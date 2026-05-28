@@ -337,54 +337,126 @@ static void test_build_system_prompt(void) {
 }
 
 static void test_whitelist_add_remove(void) {
-    const char *base = "/tmp/test_agent_wl";
-    system("rm -rf /tmp/test_agent_wl");
-    make_dir(base);
-    make_dir("/tmp/test_agent_wl/bot");
-
-    /* Create minimal agent.json */
-    FILE *f = fopen("/tmp/test_agent_wl/bot/agent.json", "w");
-    fprintf(f, "{\"model\":\"test\"}");
-    fclose(f);
+    /* T196: host management now uses daemon.db agent_config table */
+    unlink("/tmp/test_agent_wl.db");
+    sqlite3 *db = db_open_daemon("/tmp/test_agent_wl.db");
+    assert(db != NULL);
 
     /* Add host */
-    assert(agent_config_add_host(base, "bot", "api.example.com") == 0);
+    assert(agent_config_add_host(db, "bot", "api.example.com") == 0);
 
     /* Verify */
     size_t count = 0;
-    char **hosts = agent_config_get_hosts(base, "bot", &count);
+    char **hosts = agent_config_get_hosts(db, "bot", &count);
     assert(count == 1);
     assert(strcmp(hosts[0], "api.example.com") == 0);
     free(hosts[0]); free(hosts);
 
     /* Add duplicate — should be no-op */
-    assert(agent_config_add_host(base, "bot", "api.example.com") == 0);
-    hosts = agent_config_get_hosts(base, "bot", &count);
+    assert(agent_config_add_host(db, "bot", "api.example.com") == 0);
+    hosts = agent_config_get_hosts(db, "bot", &count);
     assert(count == 1);
     free(hosts[0]); free(hosts);
 
     /* Add second host */
-    assert(agent_config_add_host(base, "bot", "api.github.com") == 0);
-    hosts = agent_config_get_hosts(base, "bot", &count);
+    assert(agent_config_add_host(db, "bot", "api.github.com") == 0);
+    hosts = agent_config_get_hosts(db, "bot", &count);
     assert(count == 2);
     free(hosts[0]); free(hosts[1]); free(hosts);
 
     /* Remove first host */
-    assert(agent_config_remove_host(base, "bot", "api.example.com") == 0);
-    hosts = agent_config_get_hosts(base, "bot", &count);
+    assert(agent_config_remove_host(db, "bot", "api.example.com") == 0);
+    hosts = agent_config_get_hosts(db, "bot", &count);
     assert(count == 1);
     assert(strcmp(hosts[0], "api.github.com") == 0);
     free(hosts[0]); free(hosts);
 
     /* Remove non-existent — should succeed */
-    assert(agent_config_remove_host(base, "bot", "nope.com") == 0);
+    assert(agent_config_remove_host(db, "bot", "nope.com") == 0);
 
     /* Invalid args */
-    assert(agent_config_add_host(base, "bot", "") == -1);
-    assert(agent_config_add_host(base, "nonexistent", "x.com") == -1);
+    assert(agent_config_add_host(db, "bot", "") == -1);
 
-    system("rm -rf /tmp/test_agent_wl");
+    db_close(db);
+    unlink("/tmp/test_agent_wl.db");
     printf("  PASS test_whitelist_add_remove\n");
+}
+
+static void test_agent_config_db_roundtrip(void) {
+    /* T196: save to DB, load from DB, verify fields match */
+    unlink("/tmp/test_ac_db.db");
+    sqlite3 *db = db_open_daemon("/tmp/test_ac_db.db");
+    assert(db != NULL);
+
+    AgentConfig ac = {0};
+    ac.name = "coder";
+    ac.model = "anthropic/claude-sonnet";
+    ac.workspace = "/home/coder/work";
+    ac.max_iterations = 50;
+    char *tools[] = {"shell_exec", "file_read", "file_write"};
+    ac.tools = tools;
+    ac.tool_count = 3;
+    char *hosts[] = {"api.github.com", "example.com"};
+    ac.allowed_hosts = hosts;
+    ac.allowed_hosts_count = 2;
+
+    assert(agent_config_save_db(db, &ac) == 0);
+
+    AgentConfig *loaded = agent_config_load_db(db, "coder");
+    assert(loaded != NULL);
+    assert(strcmp(loaded->name, "coder") == 0);
+    assert(strcmp(loaded->model, "anthropic/claude-sonnet") == 0);
+    assert(strcmp(loaded->workspace, "/home/coder/work") == 0);
+    assert(loaded->max_iterations == 50);
+    assert(loaded->tool_count == 3);
+    assert(strcmp(loaded->tools[0], "shell_exec") == 0);
+    assert(loaded->allowed_hosts_count == 2);
+    assert(strcmp(loaded->allowed_hosts[0], "api.github.com") == 0);
+    agent_config_free(loaded);
+
+    /* Non-existent agent returns NULL */
+    assert(agent_config_load_db(db, "ghost") == NULL);
+
+    db_close(db);
+    unlink("/tmp/test_ac_db.db");
+    printf("  PASS: agent config DB roundtrip (T196)\n");
+}
+
+static void test_agent_config_migrate(void) {
+    /* T196: migrate agent.json → daemon.db, verify file deleted */
+    system("rm -rf /tmp/test_ac_migrate");
+    make_dir("/tmp/test_ac_migrate");
+    make_dir("/tmp/test_ac_migrate/coder");
+    write_file("/tmp/test_ac_migrate/coder/agent.json",
+        "{\"model\":\"openai/gpt-4o\",\"max_iterations\":30,"
+        "\"allowed_hosts\":[\"api.github.com\"]}");
+
+    unlink("/tmp/test_ac_migrate.db");
+    sqlite3 *db = db_open_daemon("/tmp/test_ac_migrate.db");
+    assert(db != NULL);
+
+    assert(agent_config_migrate_json(db, "/tmp/test_ac_migrate", "coder") == 0);
+
+    /* Verify config in DB */
+    AgentConfig *loaded = agent_config_load_db(db, "coder");
+    assert(loaded != NULL);
+    assert(strcmp(loaded->model, "openai/gpt-4o") == 0);
+    assert(loaded->max_iterations == 30);
+    assert(loaded->allowed_hosts_count == 1);
+    assert(strcmp(loaded->allowed_hosts[0], "api.github.com") == 0);
+    agent_config_free(loaded);
+
+    /* Verify agent.json deleted */
+    FILE *f = fopen("/tmp/test_ac_migrate/coder/agent.json", "r");
+    assert(f == NULL);
+
+    /* Migrate non-existent file — should succeed (no-op) */
+    assert(agent_config_migrate_json(db, "/tmp/test_ac_migrate", "ghost") == 0);
+
+    db_close(db);
+    unlink("/tmp/test_ac_migrate.db");
+    system("rm -rf /tmp/test_ac_migrate");
+    printf("  PASS: agent config migrate JSON (T196)\n");
 }
 
 int main(void) {
@@ -404,6 +476,8 @@ int main(void) {
     test_agent_load_skills_empty();
     test_build_system_prompt();
     test_whitelist_add_remove();
+    test_agent_config_db_roundtrip();
+    test_agent_config_migrate();
     printf("All tests passed.\n");
     return 0;
 }

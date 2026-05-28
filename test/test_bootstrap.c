@@ -60,22 +60,26 @@ static int test_bootstrap_creates_ephemeral(void) {
     assert(agent_name != NULL);
     assert(strncmp(agent_name, "ephemeral-", 10) == 0);
 
-    /* Verify agent.json has limited tools */
-    char path[512];
-    snprintf(path, sizeof(path), "agents/%s/agent.json", agent_name);
-    FILE *f = fopen(path, "r");
-    assert(f != NULL);
-    char buf[512];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    buf[n] = '\0';
-    fclose(f);
-    assert(strstr(buf, "configure_provider") != NULL);
-    assert(strstr(buf, "configure_channel") != NULL);
-    assert(strstr(buf, "create_agent") != NULL);
-    /* Should NOT have shell_exec etc */
-    assert(strstr(buf, "shell_exec") == NULL);
+    /* T196: Verify config in daemon.db agent_config table (no agent.json) */
+    AgentConfig *ac = agent_config_load_db(db, agent_name);
+    assert(ac != NULL);
+    assert(ac->tool_count == 3);
+    int has_configure_provider = 0, has_configure_channel = 0, has_create_agent = 0;
+    int has_shell_exec = 0;
+    for (size_t i = 0; i < ac->tool_count; i++) {
+        if (strcmp(ac->tools[i], "configure_provider") == 0) has_configure_provider = 1;
+        if (strcmp(ac->tools[i], "configure_channel") == 0) has_configure_channel = 1;
+        if (strcmp(ac->tools[i], "create_agent") == 0) has_create_agent = 1;
+        if (strcmp(ac->tools[i], "shell_exec") == 0) has_shell_exec = 1;
+    }
+    assert(has_configure_provider);
+    assert(has_configure_channel);
+    assert(has_create_agent);
+    assert(!has_shell_exec);
+    agent_config_free(ac);
 
     /* Verify system.md exists */
+    char path[512];
     snprintf(path, sizeof(path), "agents/%s/system.md", agent_name);
     struct stat st;
     assert(stat(path, &st) == 0 && st.st_size > 0);

@@ -28,10 +28,23 @@ typedef struct {
     int max_iterations;     /* 0 = use global */
 } AgentConfig;
 
-/* Load agent config from agents_dir/name/agent.json.
+/* Load agent config from agents_dir/name/agent.json (legacy, for migration).
  * Returns NULL on missing file (caller should use global defaults).
  * Applies V12 workspace fallback if workspace not specified. */
 AgentConfig *agent_config_load(const char *agents_dir, const char *name);
+
+/* T196/V80: Load agent config from daemon.db agent_config table.
+ * Returns NULL if no config rows exist for this agent.
+ * Applies V12 workspace fallback if workspace not specified. */
+AgentConfig *agent_config_load_db(sqlite3 *db, const char *name);
+
+/* T196/V80: Save agent config to daemon.db agent_config table.
+ * Upserts all non-NULL fields as key-value rows. Returns 0 on success. */
+int agent_config_save_db(sqlite3 *db, const AgentConfig *ac);
+
+/* T196: Import agent.json into daemon.db agent_config table, delete file after.
+ * Called during daemon startup migration. Returns 0 on success, -1 on error. */
+int agent_config_migrate_json(sqlite3 *db, const char *agents_dir, const char *name);
 
 /* Free AgentConfig returned by agent_config_load. */
 void agent_config_free(AgentConfig *ac);
@@ -60,8 +73,9 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
                                 int64_t session_id, const char *agents_dir,
                                 const Config *fallback_cfg);
 
-/* T150: Create a new agent on disk from approval payload.
- * Creates agents_dir/name/ directory, writes agent.json + system.md, seeds DB.
+/* T150/T196: Create a new agent from approval payload.
+ * Creates agents_dir/name/ directory + workspace, writes config to daemon.db agent_config,
+ * seeds agents table + system.md on disk.
  * payload is a cJSON object with: name, model, system_prompt, tools[], allowed_hosts[].
  * Returns 0 on success, -1 on failure. */
 int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json);
@@ -72,16 +86,16 @@ int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload
  * Returns heap-allocated agent name on success (caller frees), NULL on failure. */
 char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db);
 
-/* T144: Add host to agent's allowed_hosts in agents_dir/name/agent.json.
+/* T144/T196: Add host to agent's allowed_hosts in daemon.db agent_config.
  * Returns 0 on success, -1 on failure. */
-int agent_config_add_host(const char *agents_dir, const char *name, const char *host);
+int agent_config_add_host(sqlite3 *db, const char *name, const char *host);
 
-/* T144: Remove host from agent's allowed_hosts in agents_dir/name/agent.json.
+/* T144/T196: Remove host from agent's allowed_hosts in daemon.db agent_config.
  * Returns 0 on success (including host not found), -1 on failure. */
-int agent_config_remove_host(const char *agents_dir, const char *name, const char *host);
+int agent_config_remove_host(sqlite3 *db, const char *name, const char *host);
 
-/* T144: Get current allowed_hosts for agent. Returns heap-allocated array.
+/* T144/T196: Get current allowed_hosts for agent from daemon.db. Returns heap-allocated array.
  * Caller must free each string and the array. Sets *count. */
-char **agent_config_get_hosts(const char *agents_dir, const char *name, size_t *count);
+char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count);
 
 #endif

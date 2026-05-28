@@ -619,6 +619,17 @@ void daemon_startup_recovery(sqlite3 *db) {
 
 #include "templates.h"
 
+/* T196: Migrate agent.json files to daemon.db agent_config table */
+static void migrate_agent_json_files(sqlite3 *db) {
+    size_t count = 0;
+    char **names = agent_discover("agents", &count);
+    if (!names) return;
+    for (size_t i = 0; i < count; i++) {
+        agent_config_migrate_json(db, "agents", names[i]);
+    }
+    agent_discover_free(names, count);
+}
+
 int64_t daemon_bootstrap(sqlite3 *db) {
     if (!db) return -1;
 
@@ -637,18 +648,18 @@ int64_t daemon_bootstrap(sqlite3 *db) {
     char *agent_name = agent_create_ephemeral("agents", db);
     if (!agent_name) return -1;
 
-    /* Write bootstrap agent.json with limited tool whitelist */
-    char path[1024];
-    snprintf(path, sizeof(path), "agents/%s/agent.json", agent_name);
-    FILE *f = fopen(path, "w");
-    if (f) {
-        fputs("{\"tools\":[\"configure_provider\",\"configure_channel\",\"create_agent\"]}", f);
-        fclose(f);
-    }
+    /* T196: Write bootstrap config to daemon.db agent_config table */
+    AgentConfig boot_ac = {0};
+    boot_ac.name = agent_name;
+    char *boot_tools[] = {"configure_provider", "configure_channel", "create_agent"};
+    boot_ac.tools = boot_tools;
+    boot_ac.tool_count = 3;
+    agent_config_save_db(db, &boot_ac);
 
     /* Write bootstrap system prompt */
+    char path[1024];
     snprintf(path, sizeof(path), "agents/%s/system.md", agent_name);
-    f = fopen(path, "w");
+    FILE *f = fopen(path, "w");
     if (f) {
         fputs(TPL_BOOTSTRAP_SYSTEM_PROMPT_MD, f);
         fclose(f);
@@ -715,6 +726,7 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     }
 
     /* T94/V34: Startup recovery — children already dead after daemon restart */
+    migrate_agent_json_files(db);
     daemon_startup_recovery(db);
 
     struct epoll_event events[8];

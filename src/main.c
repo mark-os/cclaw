@@ -105,9 +105,9 @@ static int run_agent_turn(int64_t session_id) {
     /* V57: mmap + reduced cache for agent processes */
     db_set_agent_pragmas(db);
 
-    /* V20: Load per-agent config, merge with global */
+    /* V20/T196: Load per-agent config from daemon.db agent_config table */
     char *agent_name = session_get_agent_name(db, session_id);
-    AgentConfig *ac = agent_name ? agent_config_load("agents", agent_name) : NULL;
+    AgentConfig *ac = agent_name ? agent_config_load_db(db, agent_name) : NULL;
     const Config *effective_cfg = cfg;
     Config *merged_cfg = NULL;
     if (ac) {

@@ -20,14 +20,12 @@
 static sqlite3 *setup(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
-    /* Create agent dir with agent.json */
+    /* T196: Seed agent config in DB instead of agent.json */
     system("rm -rf " TEST_AGENTS_DIR);
     mkdir(TEST_AGENTS_DIR, 0755);
     mkdir(TEST_AGENTS_DIR "/coder", 0755);
-    FILE *f = fopen(TEST_AGENTS_DIR "/coder/agent.json", "w");
-    assert(f);
-    fputs("{\"allowed_hosts\":[\"existing.com\"]}", f);
-    fclose(f);
+    /* Seed allowed_hosts in DB */
+    agent_config_add_host(db, "coder", "existing.com");
     return db;
 }
 
@@ -77,10 +75,10 @@ static void test_approve_flow(void) {
     int rc = approval_resolve(db, aid, "approved", 12345);
     assert(rc == 0);
 
-    /* Apply the approval — whitelist_host adds to agent config */
+    /* Apply the approval — whitelist_host adds to agent config in DB */
     Approval *a = approval_get(db, aid);
     assert(a);
-    rc = agent_config_add_host(TEST_AGENTS_DIR, a->agent_name, "api.newsite.com");
+    rc = agent_config_add_host(db, a->agent_name, "api.newsite.com");
     assert(rc == 0);
 
     /* Post confirmation to inbox */
@@ -95,9 +93,9 @@ static void test_approve_flow(void) {
     assert(sqlite3_changes(db) == 1);
     sqlite3_finalize(stmt);
 
-    /* Verify config was updated on disk */
+    /* Verify config was updated in DB */
     size_t host_count = 0;
-    char **hosts = agent_config_get_hosts(TEST_AGENTS_DIR, "coder", &host_count);
+    char **hosts = agent_config_get_hosts(db, "coder", &host_count);
     assert(host_count == 2);
     int found = 0;
     for (size_t i = 0; i < host_count; i++) {
@@ -166,7 +164,7 @@ static void test_deny_flow(void) {
 
     /* Verify config NOT updated — evil.com not in allowed_hosts */
     size_t host_count = 0;
-    char **hosts = agent_config_get_hosts(TEST_AGENTS_DIR, "coder", &host_count);
+    char **hosts = agent_config_get_hosts(db, "coder", &host_count);
     assert(host_count == 1);
     assert(strcmp(hosts[0], "existing.com") == 0);
     free(hosts[0]);

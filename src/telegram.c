@@ -835,7 +835,7 @@ static void handle_wl_callback(const char *data, int64_t chat_id, const char *ca
     agent_name[name_len] = '\0';
 
     size_t host_count = 0;
-    char **hosts = agent_config_get_hosts("agents", agent_name, &host_count);
+    char **hosts = agent_config_get_hosts(g_db, agent_name, &host_count);
 
     char msg[2048];
     int off = snprintf(msg, sizeof(msg), "Agent: %s\nCurrent allowed_hosts: ", agent_name);
@@ -893,9 +893,9 @@ static int handle_whitelist_reply(int64_t chat_id, const char *text) {
 
     int rc;
     if (removing)
-        rc = agent_config_remove_host("agents", agent_name, text);
+        rc = agent_config_remove_host(g_db, agent_name, text);
     else
-        rc = agent_config_add_host("agents", agent_name, text);
+        rc = agent_config_add_host(g_db, agent_name, text);
 
     char msg[256];
     if (rc == 0)
@@ -983,7 +983,7 @@ static int apply_approval(const Approval *a) {
     if (strcmp(a->type, "whitelist_host") == 0) {
         cJSON *host = cJSON_GetObjectItemCaseSensitive(payload, "host");
         if (cJSON_IsString(host) && a->agent_name)
-            rc = agent_config_add_host("agents", a->agent_name, host->valuestring);
+            rc = agent_config_add_host(g_db, a->agent_name, host->valuestring);
     } else if (strcmp(a->type, "model_change") == 0) {
         cJSON *model = cJSON_GetObjectItemCaseSensitive(payload, "model");
         cJSON *pidx = cJSON_GetObjectItemCaseSensitive(payload, "provider_index");

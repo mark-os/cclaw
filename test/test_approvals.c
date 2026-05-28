@@ -255,34 +255,31 @@ static void test_create_agent_approval(void) {
     int rc = agent_config_create(agents_dir, db, payload);
     assert(rc == 0);
 
-    /* Verify agent.json was written */
+    /* T196: Verify config was written to daemon.db agent_config table */
+    AgentConfig *ac = agent_config_load_db(db, "helper");
+    assert(ac != NULL);
+    assert(strcmp(ac->model, "gpt-4") == 0);
+    assert(ac->tool_count == 2);
+    assert(strcmp(ac->tools[0], "file_read") == 0);
+    assert(ac->allowed_hosts_count == 1);
+    assert(strcmp(ac->allowed_hosts[0], "api.example.com") == 0);
+    agent_config_free(ac);
+
+    /* Verify system.md was written */
     char path[256];
-    snprintf(path, sizeof(path), "%s/helper/agent.json", agents_dir);
+    snprintf(path, sizeof(path), "%s/helper/system.md", agents_dir);
     FILE *f = fopen(path, "r");
     assert(f != NULL);
     char buf[2048];
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     buf[n] = '\0';
     fclose(f);
-    assert(strstr(buf, "gpt-4") != NULL);
-    assert(strstr(buf, "file_read") != NULL);
-    assert(strstr(buf, "api.example.com") != NULL);
-
-    /* Verify system.md was written */
-    snprintf(path, sizeof(path), "%s/helper/system.md", agents_dir);
-    f = fopen(path, "r");
-    assert(f != NULL);
-    n = fread(buf, 1, sizeof(buf) - 1, f);
-    buf[n] = '\0';
-    fclose(f);
     assert(strcmp(buf, "You are a helper agent.") == 0);
 
-    /* Verify DB was seeded */
+    /* Verify DB agents table was seeded */
     AgentRow *row = db_agent_get(db, "helper");
     assert(row != NULL);
     assert(strcmp(row->name, "helper") == 0);
-    assert(row->config != NULL);
-    assert(strstr(row->config, "gpt-4") != NULL);
     assert(row->system_prompt != NULL);
     assert(strstr(row->system_prompt, "helper agent") != NULL);
     agent_row_free(row);

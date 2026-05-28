@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <errno.h>
+#include <unistd.h>
 
 static int str_ends_with(const char *s, const char *suffix) {
     size_t slen = strlen(s);
@@ -506,9 +507,9 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     return out;
 }
 
-/* T150: Create a new agent on disk + seed DB */
+/* T150/T196: Create a new agent — dir + workspace + daemon.db config + system.md */
 int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json) {
-    if (!agents_dir || !payload_json) return -1;
+    if (!agents_dir || !db || !payload_json) return -1;
 
     cJSON *payload = cJSON_Parse(payload_json);
     if (!payload) return -1;
@@ -534,163 +535,370 @@ int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload
         return -1;
     }
 
-    /* Build agent.json from payload fields */
-    cJSON *config = cJSON_CreateObject();
+    /* Create workspace subdir */
+    char ws[1024];
+    snprintf(ws, sizeof(ws), "%s/workspace", dir);
+    mkdir(ws, 0755);
+
+    /* Build AgentConfig and save to daemon.db */
+    AgentConfig ac = {0};
+    ac.name = (char *)name;
+
     cJSON *model = cJSON_GetObjectItemCaseSensitive(payload, "model");
-    if (cJSON_IsString(model))
-        cJSON_AddStringToObject(config, "model", model->valuestring);
+    if (cJSON_IsString(model)) ac.model = model->valuestring;
 
     cJSON *tools = cJSON_GetObjectItemCaseSensitive(payload, "tools");
-    if (cJSON_IsArray(tools))
-        cJSON_AddItemToObject(config, "tools", cJSON_Duplicate(tools, 1));
+    if (cJSON_IsArray(tools)) {
+        int cnt = cJSON_GetArraySize(tools);
+        char **tool_arr = malloc((size_t)cnt * sizeof(char *));
+        if (tool_arr) {
+            for (int i = 0; i < cnt; i++) {
+                cJSON *item = cJSON_GetArrayItem(tools, i);
+                if (cJSON_IsString(item)) tool_arr[ac.tool_count++] = item->valuestring;
+            }
+            ac.tools = tool_arr;
+        }
+    }
 
     cJSON *hosts = cJSON_GetObjectItemCaseSensitive(payload, "allowed_hosts");
-    if (cJSON_IsArray(hosts))
-        cJSON_AddItemToObject(config, "allowed_hosts", cJSON_Duplicate(hosts, 1));
+    if (cJSON_IsArray(hosts)) {
+        int cnt = cJSON_GetArraySize(hosts);
+        char **host_arr = malloc((size_t)cnt * sizeof(char *));
+        if (host_arr) {
+            for (int i = 0; i < cnt; i++) {
+                cJSON *item = cJSON_GetArrayItem(hosts, i);
+                if (cJSON_IsString(item)) host_arr[ac.allowed_hosts_count++] = item->valuestring;
+            }
+            ac.allowed_hosts = host_arr;
+        }
+    }
 
-    /* Write agent.json */
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/agent.json", dir);
-    char *json_str = cJSON_Print(config);
-    cJSON_Delete(config);
-    if (!json_str) { cJSON_Delete(payload); return -1; }
-
-    FILE *f = fopen(path, "w");
-    if (!f) { free(json_str); cJSON_Delete(payload); return -1; }
-    fputs(json_str, f);
-    fclose(f);
-    free(json_str);
+    agent_config_save_db(db, &ac);
+    free(ac.tools);
+    free(ac.allowed_hosts);
 
     /* Write system.md if provided */
     cJSON *sys_prompt = cJSON_GetObjectItemCaseSensitive(payload, "system_prompt");
     if (cJSON_IsString(sys_prompt) && sys_prompt->valuestring[0]) {
+        char path[1024];
         snprintf(path, sizeof(path), "%s/system.md", dir);
-        f = fopen(path, "w");
+        FILE *f = fopen(path, "w");
         if (f) {
             fputs(sys_prompt->valuestring, f);
             fclose(f);
         }
     }
 
+    /* Seed DB agents table row (before freeing payload — name points into it) */
+    char name_copy[256];
+    snprintf(name_copy, sizeof(name_copy), "%s", name);
     cJSON_Delete(payload);
 
-    /* Seed DB row from newly written files (dir contains agents_dir/name) */
-    if (db) {
-        const char *seeded_name = strrchr(dir, '/');
-        seeded_name = seeded_name ? seeded_name + 1 : dir;
-        AgentRow *row = db_agent_seed(db, agents_dir, seeded_name);
-        agent_row_free(row);
+    AgentRow *row = db_agent_seed(db, agents_dir, name_copy);
+    agent_row_free(row);
+
+    return 0;
+}
+
+/* T196/V80: Load agent config from daemon.db agent_config table */
+AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
+    if (!db || !name) return NULL;
+
+    const char *sql = "SELECT key, value FROM agent_config WHERE agent_name=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+
+    AgentConfig *ac = NULL;
+    int found = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (!ac) {
+            ac = calloc(1, sizeof(AgentConfig));
+            if (!ac) break;
+            ac->name = strdup(name);
+        }
+        found = 1;
+        const char *key = (const char *)sqlite3_column_text(stmt, 0);
+        const char *val = (const char *)sqlite3_column_text(stmt, 1);
+        if (!key || !val) continue;
+
+        if (strcmp(key, "model") == 0) {
+            ac->model = strdup(val);
+        } else if (strcmp(key, "workspace") == 0) {
+            ac->workspace = strdup(val);
+        } else if (strcmp(key, "max_iterations") == 0) {
+            ac->max_iterations = atoi(val);
+        } else if (strcmp(key, "tools") == 0) {
+            /* JSON array string */
+            cJSON *arr = cJSON_Parse(val);
+            if (arr && cJSON_IsArray(arr)) {
+                int cnt = cJSON_GetArraySize(arr);
+                if (cnt > 0) {
+                    ac->tools = malloc((size_t)cnt * sizeof(char *));
+                    if (ac->tools) {
+                        for (int i = 0; i < cnt; i++) {
+                            cJSON *item = cJSON_GetArrayItem(arr, i);
+                            if (cJSON_IsString(item) && item->valuestring)
+                                ac->tools[ac->tool_count++] = strdup(item->valuestring);
+                        }
+                    }
+                }
+            }
+            cJSON_Delete(arr);
+        } else if (strcmp(key, "allowed_hosts") == 0) {
+            cJSON *arr = cJSON_Parse(val);
+            if (arr && cJSON_IsArray(arr)) {
+                int cnt = cJSON_GetArraySize(arr);
+                if (cnt > 0) {
+                    ac->allowed_hosts = malloc((size_t)cnt * sizeof(char *));
+                    if (ac->allowed_hosts) {
+                        for (int i = 0; i < cnt; i++) {
+                            cJSON *item = cJSON_GetArrayItem(arr, i);
+                            if (cJSON_IsString(item) && item->valuestring)
+                                ac->allowed_hosts[ac->allowed_hosts_count++] = strdup(item->valuestring);
+                        }
+                    }
+                }
+            }
+            cJSON_Delete(arr);
+        } else if (strcmp(key, "read_access") == 0) {
+            cJSON *arr = cJSON_Parse(val);
+            if (arr && cJSON_IsArray(arr)) {
+                int cnt = cJSON_GetArraySize(arr);
+                if (cnt > 0) {
+                    ac->read_access = malloc((size_t)cnt * sizeof(char *));
+                    if (ac->read_access) {
+                        for (int i = 0; i < cnt; i++) {
+                            cJSON *item = cJSON_GetArrayItem(arr, i);
+                            if (cJSON_IsString(item) && item->valuestring)
+                                ac->read_access[ac->read_access_count++] = strdup(item->valuestring);
+                        }
+                    }
+                }
+            }
+            cJSON_Delete(arr);
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    if (!found) return NULL;
+
+    /* V12: workspace fallback */
+    if (ac && !ac->workspace) {
+        char ws[1024];
+        snprintf(ws, sizeof(ws), "./workspace/%s", name);
+        ac->workspace = strdup(ws);
+    }
+    return ac;
+}
+
+/* T196/V80: Save agent config to daemon.db agent_config table */
+int agent_config_save_db(sqlite3 *db, const AgentConfig *ac) {
+    if (!db || !ac || !ac->name) return -1;
+
+    const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,?,?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    #define SAVE_STR(k, v) do { \
+        if (v) { \
+            sqlite3_reset(stmt); \
+            sqlite3_bind_text(stmt, 1, ac->name, -1, SQLITE_STATIC); \
+            sqlite3_bind_text(stmt, 2, k, -1, SQLITE_STATIC); \
+            sqlite3_bind_text(stmt, 3, v, -1, SQLITE_STATIC); \
+            sqlite3_step(stmt); \
+        } \
+    } while(0)
+
+    SAVE_STR("model", ac->model);
+    SAVE_STR("workspace", ac->workspace);
+
+    if (ac->max_iterations > 0) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", ac->max_iterations);
+        sqlite3_reset(stmt);
+        sqlite3_bind_text(stmt, 1, ac->name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, "max_iterations", -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, buf, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
     }
 
+    /* tools as JSON array */
+    if (ac->tools && ac->tool_count > 0) {
+        cJSON *arr = cJSON_CreateArray();
+        for (size_t i = 0; i < ac->tool_count; i++)
+            cJSON_AddItemToArray(arr, cJSON_CreateString(ac->tools[i]));
+        char *json = cJSON_PrintUnformatted(arr);
+        SAVE_STR("tools", json);
+        free(json);
+        cJSON_Delete(arr);
+    }
+
+    /* allowed_hosts as JSON array */
+    if (ac->allowed_hosts && ac->allowed_hosts_count > 0) {
+        cJSON *arr = cJSON_CreateArray();
+        for (size_t i = 0; i < ac->allowed_hosts_count; i++)
+            cJSON_AddItemToArray(arr, cJSON_CreateString(ac->allowed_hosts[i]));
+        char *json = cJSON_PrintUnformatted(arr);
+        SAVE_STR("allowed_hosts", json);
+        free(json);
+        cJSON_Delete(arr);
+    } else {
+        SAVE_STR("allowed_hosts", "[]");
+    }
+
+    /* read_access as JSON array */
+    if (ac->read_access && ac->read_access_count > 0) {
+        cJSON *arr = cJSON_CreateArray();
+        for (size_t i = 0; i < ac->read_access_count; i++)
+            cJSON_AddItemToArray(arr, cJSON_CreateString(ac->read_access[i]));
+        char *json = cJSON_PrintUnformatted(arr);
+        SAVE_STR("read_access", json);
+        free(json);
+        cJSON_Delete(arr);
+    }
+
+    #undef SAVE_STR
+    sqlite3_finalize(stmt);
     return 0;
 }
 
-/* T144: helper — read agent.json into cJSON, return root + file path */
-static cJSON *agent_json_load(const char *agents_dir, const char *name, char *path_buf, size_t path_cap) {
-    if (!agents_dir || !name) return NULL;
-    int n = snprintf(path_buf, path_cap, "%s/%s/agent.json", agents_dir, name);
-    if (n < 0 || (size_t)n >= path_cap) return NULL;
+/* T196: Migrate agent.json → daemon.db agent_config, delete file after */
+int agent_config_migrate_json(sqlite3 *db, const char *agents_dir, const char *name) {
+    if (!db || !agents_dir || !name) return -1;
 
-    FILE *f = fopen(path_buf, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (len <= 0) { fclose(f); return NULL; }
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return NULL; }
-    fread(buf, 1, (size_t)len, f);
-    buf[len] = '\0';
-    fclose(f);
+    AgentConfig *ac = agent_config_load(agents_dir, name);
+    if (!ac) return 0; /* No file to migrate — not an error */
 
-    cJSON *root = cJSON_Parse(buf);
-    free(buf);
-    return root;
-}
+    int rc = agent_config_save_db(db, ac);
+    agent_config_free(ac);
+    if (rc != 0) return -1;
 
-static int agent_json_save(const char *path, cJSON *root) {
-    char *json = cJSON_Print(root);
-    if (!json) return -1;
-    FILE *f = fopen(path, "w");
-    if (!f) { free(json); return -1; }
-    fputs(json, f);
-    fclose(f);
-    free(json);
-    return 0;
-}
-
-int agent_config_add_host(const char *agents_dir, const char *name, const char *host) {
-    if (!host || !host[0]) return -1;
+    /* Delete agent.json */
     char path[1024];
-    cJSON *root = agent_json_load(agents_dir, name, path, sizeof(path));
-    if (!root) return -1;
+    snprintf(path, sizeof(path), "%s/%s/agent.json", agents_dir, name);
+    unlink(path);
+    return 0;
+}
 
-    cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "allowed_hosts");
-    if (!arr) {
-        arr = cJSON_CreateArray();
-        cJSON_AddItemToObject(root, "allowed_hosts", arr);
+/* T144/T196: host management via daemon.db agent_config table */
+
+int agent_config_add_host(sqlite3 *db, const char *name, const char *host) {
+    if (!db || !name || !host || !host[0]) return -1;
+
+    /* Read current allowed_hosts */
+    const char *sql = "SELECT value FROM agent_config WHERE agent_name=? AND key='allowed_hosts';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+
+    cJSON *arr = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (val) arr = cJSON_Parse(val);
     }
-    /* Check for duplicate */
+    sqlite3_finalize(stmt);
+
+    if (!arr) arr = cJSON_CreateArray();
+
+    /* Check duplicate */
     cJSON *item;
     cJSON_ArrayForEach(item, arr) {
         if (cJSON_IsString(item) && strcmp(item->valuestring, host) == 0) {
-            cJSON_Delete(root);
-            return 0; /* already present */
+            cJSON_Delete(arr);
+            return 0;
         }
     }
+
     cJSON_AddItemToArray(arr, cJSON_CreateString(host));
-    int rc = agent_json_save(path, root);
-    cJSON_Delete(root);
+    char *json = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+
+    /* Upsert */
+    const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,'allowed_hosts',?);";
+    if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) != SQLITE_OK) { free(json); return -1; }
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, json, -1, SQLITE_STATIC);
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    free(json);
     return rc;
 }
 
-int agent_config_remove_host(const char *agents_dir, const char *name, const char *host) {
-    if (!host || !host[0]) return -1;
-    char path[1024];
-    cJSON *root = agent_json_load(agents_dir, name, path, sizeof(path));
-    if (!root) return -1;
+int agent_config_remove_host(sqlite3 *db, const char *name, const char *host) {
+    if (!db || !name || !host || !host[0]) return -1;
 
-    cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "allowed_hosts");
-    if (arr && cJSON_IsArray(arr)) {
-        int sz = cJSON_GetArraySize(arr);
-        for (int i = 0; i < sz; i++) {
-            cJSON *item = cJSON_GetArrayItem(arr, i);
-            if (cJSON_IsString(item) && strcmp(item->valuestring, host) == 0) {
-                cJSON_DeleteItemFromArray(arr, i);
-                break;
-            }
-        }
+    const char *sql = "SELECT value FROM agent_config WHERE agent_name=? AND key='allowed_hosts';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+
+    cJSON *arr = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (val) arr = cJSON_Parse(val);
     }
-    int rc = agent_json_save(path, root);
-    cJSON_Delete(root);
-    return rc;
-}
+    sqlite3_finalize(stmt);
 
-char **agent_config_get_hosts(const char *agents_dir, const char *name, size_t *count) {
-    *count = 0;
-    char path[1024];
-    cJSON *root = agent_json_load(agents_dir, name, path, sizeof(path));
-    if (!root) return NULL;
-
-    cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "allowed_hosts");
-    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(root); return NULL; }
+    if (!arr) return 0; /* Nothing to remove from */
 
     int sz = cJSON_GetArraySize(arr);
-    if (sz <= 0) { cJSON_Delete(root); return NULL; }
-
-    char **hosts = malloc((size_t)sz * sizeof(char *));
-    if (!hosts) { cJSON_Delete(root); return NULL; }
-
     for (int i = 0; i < sz; i++) {
         cJSON *item = cJSON_GetArrayItem(arr, i);
-        if (cJSON_IsString(item) && item->valuestring)
-            hosts[(*count)++] = strdup(item->valuestring);
+        if (cJSON_IsString(item) && strcmp(item->valuestring, host) == 0) {
+            cJSON_DeleteItemFromArray(arr, i);
+            break;
+        }
     }
-    cJSON_Delete(root);
+
+    char *json = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+
+    const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,'allowed_hosts',?);";
+    if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) != SQLITE_OK) { free(json); return -1; }
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, json, -1, SQLITE_STATIC);
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    free(json);
+    return rc;
+}
+
+char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count) {
+    *count = 0;
+    if (!db || !name) return NULL;
+
+    const char *sql = "SELECT value FROM agent_config WHERE agent_name=? AND key='allowed_hosts';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+
+    char **hosts = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (val) {
+            cJSON *arr = cJSON_Parse(val);
+            if (arr && cJSON_IsArray(arr)) {
+                int sz = cJSON_GetArraySize(arr);
+                if (sz > 0) {
+                    hosts = malloc((size_t)sz * sizeof(char *));
+                    if (hosts) {
+                        for (int i = 0; i < sz; i++) {
+                            cJSON *item = cJSON_GetArrayItem(arr, i);
+                            if (cJSON_IsString(item) && item->valuestring)
+                                hosts[(*count)++] = strdup(item->valuestring);
+                        }
+                    }
+                }
+            }
+            cJSON_Delete(arr);
+        }
+    }
+    sqlite3_finalize(stmt);
     return hosts;
 }
 
-/* T186: Create ephemeral agent (V65, V62) */
+/* T186/T196: Create ephemeral agent (V65, V62) — config in daemon.db */
 #include <sys/random.h>
 #include <limits.h>
 
@@ -723,14 +931,6 @@ char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db) {
 
     snprintf(buf + n, sizeof(buf) - (size_t)n, "/workspace");
     mkdir(buf, 0755);
-
-    /* Write minimal agent.json (no model = inherit global) */
-    buf[n] = '\0';
-    snprintf(buf + n, sizeof(buf) - (size_t)n, "/agent.json");
-    FILE *f = fopen(buf, "w");
-    if (!f) return NULL;
-    fputs("{}", f);
-    fclose(f);
 
     /* Create agent.db */
     buf[n] = '\0';

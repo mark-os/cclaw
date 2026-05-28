@@ -181,7 +181,16 @@ static int run_agent_turn(int64_t session_id) {
         .allowed_hosts_count = ac ? ac->allowed_hosts_count : 0
     };
     tool_js_eval_register(&reg, &js_eval_ctx);
-    tool_web_fetch_register(&reg, NULL);
+
+    /* V46: web_fetch uses same policy as JS fetch — DRY */
+    HttpPolicy web_policy = {
+        .allowed_hosts = ac ? ac->allowed_hosts : NULL,
+        .allowed_count = ac ? ac->allowed_hosts_count : 0,
+        .blocked_hosts = NULL,
+        .blocked_count = 0,
+        .block_private = 1
+    };
+    tool_web_fetch_register(&reg, (ac && ac->allowed_hosts_count > 0) ? &web_policy : NULL);
     tool_db_query_register(&reg, db);
 
     /* T153: memory block tools */

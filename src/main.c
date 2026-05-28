@@ -49,7 +49,7 @@ static char *dispatch_tools(const char *name, const char *arguments, void *user_
 }
 
 /* --agent mode: run one turn on a session, then exit.
- * Daemon fork+exec target. Loads agent config from session's agent_name. */
+ * Daemon fork+exec target. V73/V74: opens only own agent.db, config from env. */
 static int run_agent_turn(int64_t session_id) {
     /* V34: die if parent dies */
     prctl(PR_SET_PDEATHSIG, SIGTERM);
@@ -68,58 +68,54 @@ static int run_agent_turn(int64_t session_id) {
 
     shutdown_init();
 
-    /* V61: Determine DB path from env or default (next to binary) */
-    const char *db_path_env = getenv("CCLAW_DB_PATH");
-    char *db_path = NULL;
-    if (db_path_env) {
-        db_path = strdup(db_path_env);
-    } else {
-        char exe[4096];
-        ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-        if (len > 0) {
-            exe[len] = '\0';
-            char *dir = dirname(exe);
-            size_t dlen = strlen(dir);
-            db_path = malloc(dlen + sizeof("/cclaw.db"));
-            if (db_path) sprintf(db_path, "%s/cclaw.db", dir);
-        }
-        if (!db_path) db_path = strdup("cclaw.db");
+    /* V74,T198: Config purely from env vars — no DB reads for config */
+    Config *cfg = config_load_from_env();
+    if (!cfg) return 1;
+
+    /* V73,T198: Open agent's own DB only */
+    const char *agent_db_path = getenv("CCLAW_AGENT_DB");
+    if (!agent_db_path || !agent_db_path[0]) {
+        /* Fallback for direct invocation (testing/CLI-spawned sub-agents) */
+        agent_db_path = cfg->db_path;
     }
-
-    sqlite3 *db = db_open(db_path);
-    if (!db) { free(db_path); return 1; }
-
-    /* V67/T188: Agent processes do NOT load .cclaw_key — daemon injects
-     * decrypted secrets via env vars (CCLAW_INJECTED_API_KEY, etc.).
-     * Only load key if not running under daemon (e.g. CLI direct mode). */
-    if (!getenv("CCLAW_INJECTED_API_KEY")) {
-        uint8_t secret_key[32];
-        if (secret_key_load_or_create(db_path, secret_key) == 0)
-            db_set_secret_key(secret_key);
-    }
-    free(db_path);
-
-    /* V61: Load config from kv table */
-    Config *cfg = config_load_from_kv(db);
-    if (!cfg) { db_close(db); return 1; }
+    sqlite3 *db = db_open_agent(agent_db_path);
+    if (!db) { config_free(cfg); return 1; }
 
     /* V57: mmap + reduced cache for agent processes */
     db_set_agent_pragmas(db);
 
-    /* V20/T196: Load per-agent config from daemon.db agent_config table */
-    char *agent_name = session_get_agent_name(db, session_id);
-    AgentConfig *ac = agent_name ? agent_config_load_db(db, agent_name) : NULL;
-    const Config *effective_cfg = cfg;
-    Config *merged_cfg = NULL;
-    if (ac) {
-        merged_cfg = agent_config_merge(cfg, ac);
-        if (merged_cfg) effective_cfg = merged_cfg;
+    /* V74: agent_name from env (daemon injects at fork) */
+    const char *agent_name_env = getenv("CCLAW_AGENT_NAME");
+    char *agent_name = agent_name_env ? strdup(agent_name_env) : session_get_agent_name(db, session_id);
+
+    /* V74: Parse allowed_hosts from env (comma-separated) */
+    char **allowed_hosts = NULL;
+    size_t allowed_hosts_count = 0;
+    {
+        const char *hosts_env = getenv("CCLAW_ALLOWED_HOSTS");
+        if (hosts_env && hosts_env[0]) {
+            /* Count commas to size array */
+            size_t cap = 1;
+            for (const char *p = hosts_env; *p; p++) if (*p == ',') cap++;
+            allowed_hosts = malloc(cap * sizeof(char *));
+            if (allowed_hosts) {
+                char *dup = strdup(hosts_env);
+                char *tok = strtok(dup, ",");
+                while (tok) {
+                    while (*tok == ' ') tok++;
+                    if (*tok) allowed_hosts[allowed_hosts_count++] = strdup(tok);
+                    tok = strtok(NULL, ",");
+                }
+                free(dup);
+            }
+        }
     }
 
     /* V22: Landlock — restrict filesystem after config loaded */
-    if (landlock_apply(effective_cfg->workspace, cfg->db_path, session_id,
-                       ac ? (const char **)ac->read_access : NULL,
-                       ac ? ac->read_access_count : 0) < 0) {
+    const char **ra = (const char **)allowed_hosts; /* reuse for read_access placeholder */
+    (void)ra;
+    if (landlock_apply(cfg->workspace, cfg->db_path, session_id,
+                       NULL, 0) < 0) {
         fprintf(stderr, "[agent %lld] landlock unavailable, continuing without\n",
                 (long long)session_id);
     }
@@ -135,6 +131,8 @@ static int run_agent_turn(int64_t session_id) {
     /* V18: Drain inbox into session entries */
     inbox_consume_into_entries(db, session_id, 100);
 
+    int rc = AGENT_EXIT_DONE;
+
     /* Read branch — check if session is already complete */
     int branch_count = 0;
     Entry *branch = session_get_branch(db, session_id, &branch_count);
@@ -145,17 +143,12 @@ static int run_agent_turn(int64_t session_id) {
              last->message.stop_reason == STOP_REASON_ERROR ||
              last->message.stop_reason == STOP_REASON_ABORTED)) {
             entry_branch_free(branch, branch_count);
-            agent_config_free(ac);
-            if (merged_cfg) config_free(merged_cfg);
-            config_free(cfg);
-            free(agent_name);
-            db_close(db);
-            return 0;
+            goto cleanup;
         }
     }
     if (branch_count == 0) {
         char *prompt = agent_build_system_prompt(db, agent_name, session_id,
-                                                "agents", effective_cfg);
+                                                "agents", cfg);
         Message sys_msg = {.role = ROLE_SYSTEM, .content = prompt};
         entry_append(db, session_id, &sys_msg);
         free(prompt);
@@ -165,33 +158,32 @@ static int run_agent_turn(int64_t session_id) {
     /* Register tools */
     ToolRegistry reg;
     tools_init(&reg);
-    tool_shell_register(&reg, effective_cfg->shell_timeout,
-                        effective_cfg->workspace);
+    tool_shell_register(&reg, cfg->shell_timeout, cfg->workspace);
 
     /* T118: file_read allows workspace + session temp dir */
     char tmp_dir[64];
     session_tmp_dir(session_id, tmp_dir, sizeof(tmp_dir));
-    FileReadCtx file_read_ctx = {.workspace = effective_cfg->workspace,
+    FileReadCtx file_read_ctx = {.workspace = cfg->workspace,
                                   .extra_read_path = tmp_dir};
     tool_file_read_register(&reg, &file_read_ctx);
-    tool_file_write_register(&reg, effective_cfg->workspace);
+    tool_file_write_register(&reg, cfg->workspace);
 
     /* T104: JS eval with per-agent allowed_hosts */
     JsEvalCtx js_eval_ctx = {
-        .allowed_hosts = ac ? ac->allowed_hosts : NULL,
-        .allowed_hosts_count = ac ? ac->allowed_hosts_count : 0
+        .allowed_hosts = allowed_hosts,
+        .allowed_hosts_count = allowed_hosts_count
     };
     tool_js_eval_register(&reg, &js_eval_ctx);
 
-    /* V46: web_fetch uses same policy as JS fetch — DRY */
+    /* V46: web_fetch uses same policy as JS fetch */
     HttpPolicy web_policy = {
-        .allowed_hosts = ac ? ac->allowed_hosts : NULL,
-        .allowed_count = ac ? ac->allowed_hosts_count : 0,
+        .allowed_hosts = allowed_hosts,
+        .allowed_count = allowed_hosts_count,
         .blocked_hosts = NULL,
         .blocked_count = 0,
         .block_private = 1
     };
-    tool_web_fetch_register(&reg, (ac && ac->allowed_hosts_count > 0) ? &web_policy : NULL);
+    tool_web_fetch_register(&reg, (allowed_hosts_count > 0) ? &web_policy : NULL);
     tool_db_query_register(&reg, db);
 
     /* T153: memory block tools */
@@ -212,8 +204,8 @@ static int run_agent_turn(int64_t session_id) {
 
     /* JS persistent runtime + define tool */
     JsSessionRuntime *js_rt = js_runtime_create();
-    if (js_rt && ac && ac->allowed_hosts_count > 0)
-        js_runtime_set_hosts(js_rt, ac->allowed_hosts, ac->allowed_hosts_count);
+    if (js_rt && allowed_hosts_count > 0)
+        js_runtime_set_hosts(js_rt, allowed_hosts, allowed_hosts_count);
     JsDefineCtx js_def_ctx = {.db = db, .session_id = session_id,
                                .reg = &reg, .rt = js_rt};
     tool_js_define_register(&reg, &js_def_ctx);
@@ -235,18 +227,18 @@ static int run_agent_turn(int64_t session_id) {
     AgentContext ctx = {0};
     ctx.db = db;
     ctx.session_id = session_id;
-    ctx.cfg = effective_cfg;
+    ctx.cfg = cfg;
     ctx.dispatch = dispatch_tools;
     ctx.dispatch_data = &reg;
     ctx.tools = schemas;
     ctx.tool_count = tool_count;
-    ctx.debug = effective_cfg->debug;
+    ctx.debug = cfg->debug;
 
-    int rc = agent_run(&ctx);
+    rc = agent_run(&ctx);
 
     /* V58,T161: trigger compaction if branch exceeds threshold */
     if (rc == 0)
-        session_try_compact(db, session_id, effective_cfg);
+        session_try_compact(db, session_id, cfg);
 
     /* Notify parent inbox if this is a child session */
     const char *sql = "SELECT parent_session_id FROM sessions WHERE id=?;";
@@ -268,10 +260,12 @@ static int run_agent_turn(int64_t session_id) {
 
     tools_free(&reg);
     js_runtime_destroy(js_rt);
-    agent_config_free(ac);
-    if (merged_cfg) config_free(merged_cfg);
-    config_free(cfg);
+
+cleanup:
+    for (size_t i = 0; i < allowed_hosts_count; i++) free(allowed_hosts[i]);
+    free(allowed_hosts);
     free(agent_name);
+    config_free(cfg);
     db_close(db);
 
     /* V72/T197: propagate exit codes 0-4 to process exit */

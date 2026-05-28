@@ -302,6 +302,88 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
     if (pid == 0) {
         /* V67/T188: inject decrypted secrets as env vars for child */
         inject_secrets_for_child(db);
+
+        /* V73/V74,T198: inject agent identity + DB path + config as env vars */
+        char *agent_name = session_get_agent_name(db, session_id);
+        if (agent_name) {
+            setenv("CCLAW_AGENT_NAME", agent_name, 1);
+
+            /* Build agent DB path: .cclaw/agents/<name>/agent.db */
+            char agent_db[1024];
+            snprintf(agent_db, sizeof(agent_db), ".cclaw/agents/%s/agent.db", agent_name);
+            setenv("CCLAW_AGENT_DB", agent_db, 1);
+
+            /* Load per-agent config from daemon.db, inject as env vars */
+            AgentConfig *ac = agent_config_load_db(db, agent_name);
+            if (ac) {
+                if (ac->workspace)
+                    setenv("CCLAW_WORKSPACE", ac->workspace, 1);
+                else {
+                    char ws[1024];
+                    snprintf(ws, sizeof(ws), ".cclaw/agents/%s/workspace", agent_name);
+                    setenv("CCLAW_WORKSPACE", ws, 1);
+                }
+                if (ac->model)
+                    setenv("CCLAW_MODEL", ac->model, 1);
+                if (ac->max_iterations > 0) {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%d", ac->max_iterations);
+                    setenv("CCLAW_MAX_ITERATIONS", buf, 1);
+                }
+                if (ac->allowed_hosts_count > 0) {
+                    /* Comma-separated list */
+                    size_t len = 0;
+                    for (size_t i = 0; i < ac->allowed_hosts_count; i++)
+                        len += strlen(ac->allowed_hosts[i]) + 1;
+                    char *hosts = malloc(len);
+                    if (hosts) {
+                        hosts[0] = '\0';
+                        for (size_t i = 0; i < ac->allowed_hosts_count; i++) {
+                            if (i > 0) strcat(hosts, ",");
+                            strcat(hosts, ac->allowed_hosts[i]);
+                        }
+                        setenv("CCLAW_ALLOWED_HOSTS", hosts, 1);
+                        free(hosts);
+                    }
+                }
+                agent_config_free(ac);
+            } else {
+                /* No per-agent config — use defaults */
+                char ws[1024];
+                snprintf(ws, sizeof(ws), ".cclaw/agents/%s/workspace", agent_name);
+                setenv("CCLAW_WORKSPACE", ws, 1);
+            }
+            free(agent_name);
+        } else {
+            /* No agent_name on session — use daemon DB as agent DB (transition) */
+            const char *db_filename = sqlite3_db_filename(db, "main");
+            if (db_filename)
+                setenv("CCLAW_AGENT_DB", db_filename, 1);
+            if (cfg->workspace)
+                setenv("CCLAW_WORKSPACE", cfg->workspace, 1);
+        }
+
+        /* Always inject global config as baseline (per-agent overrides above win) */
+        {
+            char buf[32];
+            if (cfg->provider.base_url && !getenv("CCLAW_PROVIDER"))
+                setenv("CCLAW_PROVIDER", cfg->provider.base_url, 0);
+            if (cfg->provider.model && !getenv("CCLAW_MODEL"))
+                setenv("CCLAW_MODEL", cfg->provider.model, 0);
+            snprintf(buf, sizeof(buf), "%d", cfg->provider.max_tokens);
+            setenv("CCLAW_MAX_TOKENS", buf, 0);
+            snprintf(buf, sizeof(buf), "%d", cfg->provider.context_window);
+            setenv("CCLAW_CONTEXT_WINDOW", buf, 0);
+            if (cfg->max_iterations > 0) {
+                snprintf(buf, sizeof(buf), "%d", cfg->max_iterations);
+                setenv("CCLAW_MAX_ITERATIONS", buf, 0);
+            }
+            if (cfg->shell_timeout > 0) {
+                snprintf(buf, sizeof(buf), "%d", cfg->shell_timeout);
+                setenv("CCLAW_SHELL_TIMEOUT", buf, 0);
+            }
+        }
+
         /* Child: exec agent process */
         char sid_arg[64];
         snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)session_id);

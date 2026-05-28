@@ -9,6 +9,11 @@
  * Returns heap-allocated Config, or NULL on failure. */
 Config *config_load_from_kv(sqlite3 *db);
 
+/* V74,T198: Load config purely from CCLAW_* env vars (agent process path).
+ * No DB reads for config — daemon injects everything at fork.
+ * Returns heap-allocated Config, or NULL on failure. */
+Config *config_load_from_env(void);
+
 /* T46: Render system prompt with template vars {session_id}, {date}.
  * Returns heap-allocated string. Caller must free. */
 char *config_render_system_prompt(const Config *cfg, int64_t session_id);

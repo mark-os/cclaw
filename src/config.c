@@ -122,6 +122,67 @@ void config_free(Config *cfg) {
     free(cfg);
 }
 
+/* V74,T198: Build Config purely from CCLAW_* env vars.
+ * Agent process path — daemon injects all config at fork. */
+Config *config_load_from_env(void) {
+    Config *cfg = calloc(1, sizeof(Config));
+    if (!cfg) return NULL;
+
+    const char *v;
+
+    /* Provider */
+    v = getenv("CCLAW_INJECTED_API_KEY");
+    if (!v || !v[0]) v = getenv("OPENROUTER_API_KEY");
+    cfg->provider.api_key = str_dup(v ? v : "");
+
+    v = getenv("CCLAW_PROVIDER");
+    cfg->provider.base_url = str_dup(v ? v : "https://openrouter.ai/api/v1");
+
+    v = getenv("CCLAW_MODEL");
+    cfg->provider.model = str_dup(v ? v : "deepseek/deepseek-v4-flash");
+
+    v = getenv("CCLAW_MAX_TOKENS");
+    cfg->provider.max_tokens = v ? atoi(v) : 4096;
+
+    v = getenv("CCLAW_CONTEXT_WINDOW");
+    cfg->provider.context_window = v ? atoi(v) : 65536;
+
+    /* Workspace */
+    v = getenv("CCLAW_WORKSPACE");
+    cfg->workspace = str_dup(v ? v : "./workspace");
+
+    /* Agent DB path */
+    v = getenv("CCLAW_AGENT_DB");
+    cfg->db_path = str_dup(v ? v : "agent.db");
+
+    /* Scalars */
+    v = getenv("CCLAW_MAX_ITERATIONS");
+    cfg->max_iterations = v ? atoi(v) : 25;
+
+    v = getenv("CCLAW_MAX_HISTORY_TOKENS");
+    cfg->max_history_tokens = v ? atoi(v) : 0;
+
+    v = getenv("CCLAW_SHELL_TIMEOUT");
+    cfg->shell_timeout = v ? atoi(v) : 30;
+
+    v = getenv("CCLAW_TOKEN_RATE_LIMIT");
+    cfg->token_rate_limit = v ? atoi(v) : 1000000;
+
+    v = getenv("CCLAW_SAVE_REASONING");
+    cfg->save_reasoning = v ? atoi(v) : 0;
+
+    v = getenv("CCLAW_SAVE_USAGE");
+    cfg->save_usage = v ? atoi(v) : 0;
+
+    v = getenv("CCLAW_SAVE_LOGPROBS");
+    cfg->save_logprobs = v ? atoi(v) : 0;
+
+    v = getenv("CCLAW_DEBUG");
+    cfg->debug = v ? atoi(v) : 0;
+
+    return cfg;
+}
+
 /* V61,T170: Build Config struct from kv table + env var overrides.
  * Priority: env var > kv value > hardcoded default. */
 Config *config_load_from_kv(sqlite3 *db) {

@@ -129,6 +129,16 @@ $(BUILDDIR)/libcclaw.a: $(LIB_OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 $(BUILDDIR)/test_%: test/test_%.c $(BUILDDIR)/libcclaw.a | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -o $@ $< $(BUILDDIR)/libcclaw.a $(LDFLAGS)
 
+compile_commands.json: $(BUILDDIR)/templates.h
+	@echo "[" > $@
+	@first=1; for f in $(SRC); do \
+		[ $$first -eq 0 ] && printf ",\n" >> $@; first=0; \
+		printf '  {"directory":"%s","file":"%s","command":"%s %s -I%s -c %s"}' \
+			"$(CURDIR)" "$$f" "$(CC)" "$(CFLAGS)" "$(BUILDDIR)" "$$f" >> $@; \
+	done
+	@printf "\n]\n" >> $@
+	@echo "Generated $@ ($(words $(SRC)) entries)"
+
 clean:
 	rm -rf $(BUILDDIR)
 

@@ -33,4 +33,5 @@ src/src-map.txt
 
 # Runtime workspace (agent-created)
 workspace/
-.kiro/settings/
+.kiro/settings/.cache/
+compile_commands.json

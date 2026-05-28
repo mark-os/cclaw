@@ -16,8 +16,13 @@ typedef struct {
 } SpawnRequest;
 
 /* Open DB at path, set WAL mode + pragmas, create tables.
- * Returns NULL on failure. */
+ * Returns NULL on failure. (Legacy: creates all tables — agent schema + extras) */
 sqlite3 *db_open(const char *path);
+
+/* T195/V73: 3-DB openers — each creates only its own schema */
+sqlite3 *db_open_daemon(const char *path);
+sqlite3 *db_open_agent(const char *path);
+sqlite3 *db_open_journal(const char *path);
 
 /* V57: Set mmap + reduced cache pragmas for agent processes. */
 void db_set_agent_pragmas(sqlite3 *db);

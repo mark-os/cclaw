@@ -15,6 +15,8 @@ reference/*/
 *.swp
 *.swo
 *~
+.clangd
+.cache/
 
 # Object files and binaries
 *.o
@@ -33,5 +35,5 @@ src/src-map.txt
 
 # Runtime workspace (agent-created)
 workspace/
-.kiro/settings/.cache/
+.kiro/settings/
 compile_commands.json

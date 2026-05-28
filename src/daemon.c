@@ -1,5 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
-#define _DEFAULT_SOURCE
+#define _GNU_SOURCE
 #include "daemon.h"
 #include "db.h"
 #include "shutdown.h"
@@ -297,6 +296,63 @@ int daemon_resolve_approval(const char *agent_name, int64_t session_id,
     return rc;
 }
 
+/* ── Namespace check (T208, V85) ────────────────────────────────── */
+
+#include <sched.h>
+
+static int g_max_agents = DAEMON_MAX_CHILDREN;
+
+/* V85: Read max_user_namespaces, test unshare, enforce agent limit ≤ max_ns/6 */
+static void daemon_check_namespaces(void) {
+    /* Read kernel limit */
+    FILE *f = fopen("/proc/sys/user/max_user_namespaces", "r");
+    if (!f) {
+        fprintf(stderr, "[daemon] warning: cannot read /proc/sys/user/max_user_namespaces — "
+                "namespace sandbox unavailable, continuing without\n");
+        return;
+    }
+    int max_ns = 0;
+    if (fscanf(f, "%d", &max_ns) != 1) max_ns = 0;
+    fclose(f);
+
+    if (max_ns <= 0) {
+        fprintf(stderr, "[daemon] warning: max_user_namespaces=%d — "
+                "namespace sandbox unavailable, continuing without\n", max_ns);
+        return;
+    }
+
+    /* Test unshare in a forked child */
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[daemon] warning: fork failed for namespace test — "
+                "continuing without namespace check\n");
+        return;
+    }
+    if (pid == 0) {
+        /* Child: test unshare and exit with result */
+        _exit(unshare(CLONE_NEWUSER) == 0 ? 0 : 1);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "[daemon] warning: unshare(CLONE_NEWUSER) failed — "
+                "namespace sandbox unavailable, continuing without\n");
+        return;
+    }
+
+    /* Enforce: max concurrent agents ≤ max_ns / 6 */
+    int ns_limit = max_ns / 6;
+    if (ns_limit < g_max_agents) {
+        g_max_agents = ns_limit > 0 ? ns_limit : 1;
+        fprintf(stderr, "[daemon] warning: max_user_namespaces=%d constrains "
+                "max concurrent agents to %d (V3 wants 10)\n", max_ns, g_max_agents);
+    }
+}
+
+int daemon_get_max_agents(void) {
+    return g_max_agents;
+}
+
 /* ── Child tracking (T87, T200, V24) ────────────────────────────── */
 
 typedef struct {
@@ -309,7 +365,7 @@ static ChildSlot g_children[DAEMON_MAX_CHILDREN];
 static int g_child_count = 0;
 
 static int child_add(pid_t pid, int64_t session_id, const char *agent_name) {
-    if (g_child_count >= DAEMON_MAX_CHILDREN) return -1;
+    if (g_child_count >= g_max_agents) return -1;
     g_children[g_child_count].pid = pid;
     g_children[g_child_count].session_id = session_id;
     if (agent_name)
@@ -1411,6 +1467,9 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     /* T94/V34: Startup recovery — children already dead after daemon restart */
     migrate_agent_json_files(db);
     daemon_startup_recovery(db);
+
+    /* T208/V85: Check namespace support, clamp max agents */
+    daemon_check_namespaces();
 
     struct epoll_event events[8];
     while (!shutdown_requested()) {

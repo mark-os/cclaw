@@ -9,6 +9,9 @@
 /* Max concurrent agent processes system-wide */
 #define DAEMON_MAX_CHILDREN 32
 
+/* T208/V85: Effective max agents (may be clamped by namespace limit). */
+int daemon_get_max_agents(void);
+
 /* T82/V25: Signal pipe — inserters write session_id to wake daemon.
  * Returns 0 on success, -1 on error. */
 int daemon_signal_init(void);

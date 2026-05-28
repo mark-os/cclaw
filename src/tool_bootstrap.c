@@ -29,7 +29,7 @@ static const char *CONFIGURE_PROVIDER_PARAMS =
 
 static char *tool_configure_provider_handler(const char *arguments, void *user_data) {
     ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
-    if (!ctx || !ctx->db)
+    if (!ctx)
         return strdup("error: configure_provider unavailable");
 
     cJSON *json = cJSON_Parse(arguments);
@@ -38,7 +38,6 @@ static char *tool_configure_provider_handler(const char *arguments, void *user_d
     cJSON *provider = cJSON_GetObjectItemCaseSensitive(json, "provider");
     cJSON *api_key = cJSON_GetObjectItemCaseSensitive(json, "api_key");
     cJSON *base_url = cJSON_GetObjectItemCaseSensitive(json, "base_url");
-    cJSON *model = cJSON_GetObjectItemCaseSensitive(json, "model");
 
     if (!cJSON_IsString(provider) || !cJSON_IsString(api_key) ||
         !api_key->valuestring[0]) {
@@ -47,49 +46,21 @@ static char *tool_configure_provider_handler(const char *arguments, void *user_d
     }
 
     const char *pname = provider->valuestring;
-    const char *key = api_key->valuestring;
 
-    /* Determine base_url and model */
-    const char *url = NULL;
-    const char *mdl = NULL;
-
+    /* Validate known provider or custom with base_url */
+    int known = 0;
     for (size_t i = 0; i < PROVIDER_COUNT; i++) {
-        if (strcmp(pname, PROVIDERS[i].name) == 0) {
-            url = PROVIDERS[i].base_url;
-            mdl = PROVIDERS[i].model;
-            break;
-        }
+        if (strcmp(pname, PROVIDERS[i].name) == 0) { known = 1; break; }
     }
-
-    /* Custom provider requires base_url */
-    if (!url && (!cJSON_IsString(base_url) || !base_url->valuestring[0])) {
+    if (!known && (!cJSON_IsString(base_url) || !base_url->valuestring[0])) {
         cJSON_Delete(json);
         return strdup("error: 'base_url' is required for custom providers");
     }
 
-    /* Overrides from arguments */
-    if (cJSON_IsString(base_url) && base_url->valuestring[0])
-        url = base_url->valuestring;
-    if (cJSON_IsString(model) && model->valuestring[0])
-        mdl = model->valuestring;
-
-    /* V67: Store API key encrypted in DB */
-    if (db_kv_set_secret(ctx->db, "provider.api_key", key) != 0) {
-        cJSON_Delete(json);
-        return strdup("error: failed to store API key");
-    }
-
-    /* Set base_url and model */
-    if (url) db_kv_set(ctx->db, "provider.base_url", url);
-    if (mdl) db_kv_set(ctx->db, "provider.model", mdl);
-
     cJSON_Delete(json);
 
-    char buf[256];
-    snprintf(buf, sizeof(buf),
-             SENTINEL_CONFIG "provider configured: %s (base_url: %s, model: %s)",
-             pname, url ? url : "(unchanged)", mdl ? mdl : "(unchanged)");
-    return strdup(buf);
+    /* V76/V79: Don't write daemon.db — return sentinel, daemon applies on reap */
+    return strdup(SENTINEL_CONFIG "configure_provider");
 }
 
 int tool_configure_provider_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
@@ -111,7 +82,7 @@ static const char *CONFIGURE_CHANNEL_PARAMS =
 
 static char *tool_configure_channel_handler(const char *arguments, void *user_data) {
     ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
-    if (!ctx || !ctx->db)
+    if (!ctx)
         return strdup("error: configure_channel unavailable");
 
     cJSON *json = cJSON_Parse(arguments);
@@ -132,21 +103,15 @@ static char *tool_configure_channel_handler(const char *arguments, void *user_da
             cJSON_Delete(json);
             return strdup("error: 'bot_token' is required for telegram channel");
         }
-        /* V67: Store bot token encrypted */
-        if (db_kv_set_secret(ctx->db, "telegram_token", bot_token->valuestring) != 0) {
-            cJSON_Delete(json);
-            return strdup("error: failed to store bot token");
-        }
-        cJSON_Delete(json);
-        return strdup(SENTINEL_CONFIG "channel configured: telegram");
-    } else if (strcmp(ctype, "cli") == 0) {
-        /* CLI needs no credentials — just acknowledge */
-        cJSON_Delete(json);
-        return strdup(SENTINEL_CONFIG "channel configured: cli");
-    } else {
+    } else if (strcmp(ctype, "cli") != 0) {
         cJSON_Delete(json);
         return strdup("error: unknown channel_type — use 'telegram' or 'cli'");
     }
+
+    cJSON_Delete(json);
+
+    /* V76/V79: Don't write daemon.db — return sentinel, daemon applies on reap */
+    return strdup(SENTINEL_CONFIG "configure_channel");
 }
 
 int tool_configure_channel_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {

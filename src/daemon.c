@@ -734,6 +734,120 @@ static int update_pending_entry(sqlite3 *adb, int64_t entry_id, const char *resu
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+/* ── T205/V79: Apply config changes from agent exit code 4 ──────── */
+
+static const struct {
+    const char *name;
+    const char *base_url;
+    const char *model;
+} KNOWN_PROVIDERS[] = {
+    {"openrouter", "https://openrouter.ai/api/v1", "deepseek/deepseek-v4-flash"},
+    {"gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"},
+    {"anthropic",  "https://api.anthropic.com/v1", "claude-sonnet-4-20250514"},
+};
+#define KNOWN_PROVIDER_COUNT (sizeof(KNOWN_PROVIDERS) / sizeof(KNOWN_PROVIDERS[0]))
+
+char *daemon_apply_config(const Config *cfg, sqlite3 *db,
+                                 const char *agent_name,
+                                 const char *tool_name, const char *args_json) {
+    (void)cfg;
+    if (!tool_name || !args_json) return NULL;
+
+    cJSON *args = cJSON_Parse(args_json);
+    if (!args) return strdup("error: invalid JSON in tool_call args");
+
+    char *result = NULL;
+
+    if (strcmp(tool_name, "configure_provider") == 0) {
+        /* V67: Store provider config in daemon.db */
+        cJSON *provider = cJSON_GetObjectItemCaseSensitive(args, "provider");
+        cJSON *api_key = cJSON_GetObjectItemCaseSensitive(args, "api_key");
+        cJSON *base_url = cJSON_GetObjectItemCaseSensitive(args, "base_url");
+        cJSON *model = cJSON_GetObjectItemCaseSensitive(args, "model");
+
+        if (!cJSON_IsString(provider) || !cJSON_IsString(api_key)) {
+            cJSON_Delete(args);
+            return strdup("error: provider and api_key required");
+        }
+
+        const char *pname = provider->valuestring;
+        const char *url = NULL;
+        const char *mdl = NULL;
+
+        for (size_t i = 0; i < KNOWN_PROVIDER_COUNT; i++) {
+            if (strcmp(pname, KNOWN_PROVIDERS[i].name) == 0) {
+                url = KNOWN_PROVIDERS[i].base_url;
+                mdl = KNOWN_PROVIDERS[i].model;
+                break;
+            }
+        }
+
+        if (cJSON_IsString(base_url) && base_url->valuestring[0])
+            url = base_url->valuestring;
+        if (cJSON_IsString(model) && model->valuestring[0])
+            mdl = model->valuestring;
+
+        db_kv_set_secret(db, "provider.api_key", api_key->valuestring);
+        if (url) db_kv_set(db, "provider.base_url", url);
+        if (mdl) db_kv_set(db, "provider.model", mdl);
+
+        char buf[256];
+        snprintf(buf, sizeof(buf), "provider configured: %s (model: %s)",
+                 pname, mdl ? mdl : "(default)");
+        result = strdup(buf);
+
+    } else if (strcmp(tool_name, "configure_channel") == 0) {
+        /* V67: Store channel credentials in daemon.db */
+        cJSON *channel_type = cJSON_GetObjectItemCaseSensitive(args, "channel_type");
+        cJSON *bot_token = cJSON_GetObjectItemCaseSensitive(args, "bot_token");
+
+        if (!cJSON_IsString(channel_type)) {
+            cJSON_Delete(args);
+            return strdup("error: channel_type required");
+        }
+
+        const char *ctype = channel_type->valuestring;
+        if (strcmp(ctype, "telegram") == 0) {
+            if (cJSON_IsString(bot_token) && bot_token->valuestring[0])
+                db_kv_set_secret(db, "telegram_token", bot_token->valuestring);
+            /* V69: Bind channel to requesting agent */
+            db_channel_binding_set(db, "telegram", "default", agent_name);
+            result = strdup("channel configured: telegram");
+        } else if (strcmp(ctype, "cli") == 0) {
+            db_channel_binding_set(db, "cli", "default", agent_name);
+            result = strdup("channel configured: cli");
+        } else {
+            result = strdup("error: unknown channel_type");
+        }
+
+    } else if (strcmp(tool_name, "create_agent") == 0) {
+        /* V79/V68: Create new agent dir + agent.db + daemon.db rows */
+        char *args_str = cJSON_PrintUnformatted(args);
+        if (args_str) {
+            int rc = agent_config_create("agents", db, args_str);
+            if (rc == 0) {
+                cJSON *name = cJSON_GetObjectItemCaseSensitive(args, "name");
+                char buf[256];
+                snprintf(buf, sizeof(buf), "agent created: %s",
+                         cJSON_IsString(name) ? name->valuestring : "unknown");
+                result = strdup(buf);
+            } else {
+                result = strdup("error: failed to create agent");
+            }
+            free(args_str);
+        } else {
+            result = strdup("error: failed to serialize args");
+        }
+    } else {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "error: unknown config tool: %s", tool_name);
+        result = strdup(buf);
+    }
+
+    cJSON_Delete(args);
+    return result;
+}
+
 /* ── Reap children ──────────────────────────────────────────────── */
 
 static void process_spawn_queue(const Config *cfg, sqlite3 *db);
@@ -896,12 +1010,12 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                         char *tname = NULL;
                         char *args = read_tool_call_args(adb, session_id, tc_id, &tname);
                         if (args) {
-                            /* Config tools already wrote to daemon.db in-process.
-                             * Resolve PENDING with confirmation, re-fork. */
-                            char result[256];
-                            snprintf(result, sizeof(result),
-                                     "config applied: %s", tname ? tname : "unknown");
-                            update_pending_entry(adb, pending_eid, result);
+                            /* T205/V79: Daemon applies config to daemon.db */
+                            char *result = daemon_apply_config(cfg, db, agent_name,
+                                                              tname, args);
+                            update_pending_entry(adb, pending_eid,
+                                                result ? result : "error: config apply failed");
+                            free(result);
                             daemon_agent_set_state(agent_name, session_id, "idle");
                             daemon_signal_session_agent(session_id, agent_name);
                             free(args);

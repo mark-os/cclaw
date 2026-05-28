@@ -85,4 +85,11 @@ int daemon_inbox_count(const char *agent_name, int64_t session_id);
 int daemon_resolve_approval(const char *agent_name, int64_t session_id,
                             const char *tool_call_id, const char *result);
 
+/* T205/V79: Apply config change from agent exit code 4.
+ * Daemon reads tool_call args, dispatches to appropriate handler.
+ * Returns result string (caller frees) or NULL on error. */
+char *daemon_apply_config(const Config *cfg, sqlite3 *db,
+                          const char *agent_name,
+                          const char *tool_name, const char *args_json);
+
 #endif

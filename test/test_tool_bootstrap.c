@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "tool_bootstrap.h"
 #include "db.h"
 #include "secret.h"
@@ -18,6 +19,8 @@ static void cleanup(void) {
 
 static sqlite3 *setup_db(void) {
     cleanup();
+    /* Prevent env var from seeding provider.api_key during db_open */
+    unsetenv("OPENROUTER_API_KEY");
     sqlite3 *db = db_open(DB_PATH);
     assert(db != NULL);
     /* Load secret key so encryption works */
@@ -27,7 +30,7 @@ static sqlite3 *setup_db(void) {
     return db;
 }
 
-/* T190: configure_provider with known provider (openrouter) */
+/* T190: configure_provider returns sentinel (V76: no DB write from agent) */
 static int test_configure_openrouter(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -43,31 +46,12 @@ static int test_configure_openrouter(void) {
         e->user_data);
     assert(result != NULL);
     assert(strncmp(result, "AGENT_EXIT_CONFIG:", 18) == 0);
-    assert(strstr(result, "openrouter") != NULL);
+    assert(strstr(result, "configure_provider") != NULL);
     free(result);
 
-    /* Verify key stored encrypted */
+    /* V76: Tool does NOT write to DB — daemon applies on reap */
     char *raw = db_kv_get(db, "provider.api_key");
-    assert(raw != NULL);
-    assert(strncmp(raw, "enc:", 4) == 0);
-    free(raw);
-
-    /* Verify decrypted value matches */
-    char *decrypted = db_kv_get_secret(db, "provider.api_key");
-    assert(decrypted != NULL);
-    assert(strcmp(decrypted, "sk-or-test-key-123") == 0);
-    free(decrypted);
-
-    /* Verify base_url and model set */
-    char *url = db_kv_get(db, "provider.base_url");
-    assert(url != NULL);
-    assert(strcmp(url, "https://openrouter.ai/api/v1") == 0);
-    free(url);
-
-    char *model = db_kv_get(db, "provider.model");
-    assert(model != NULL);
-    assert(strcmp(model, "deepseek/deepseek-v4-flash") == 0);
-    free(model);
+    assert(raw == NULL);
 
     tools_free(&reg);
     db_close(db);
@@ -100,7 +84,7 @@ static int test_configure_custom_requires_base_url(void) {
     return 0;
 }
 
-/* T190: configure_provider with custom provider + base_url works */
+/* T190: configure_provider with custom provider + base_url returns sentinel */
 static int test_configure_custom_with_url(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -118,13 +102,11 @@ static int test_configure_custom_with_url(void) {
     assert(strncmp(result, "AGENT_EXIT_CONFIG:", 18) == 0);
     free(result);
 
+    /* V76: Tool does NOT write custom values — base_url still has default */
     char *url = db_kv_get(db, "provider.base_url");
-    assert(strcmp(url, "https://my-llm.example.com/v1") == 0);
+    assert(url != NULL);
+    assert(strcmp(url, "https://openrouter.ai/api/v1") == 0); /* unchanged default */
     free(url);
-
-    char *model = db_kv_get(db, "provider.model");
-    assert(strcmp(model, "my-model-7b") == 0);
-    free(model);
 
     tools_free(&reg);
     db_close(db);
@@ -154,7 +136,7 @@ static int test_configure_missing_key(void) {
     return 0;
 }
 
-/* T191: configure_channel telegram stores token encrypted */
+/* T191: configure_channel telegram returns sentinel */
 static int test_configure_channel_telegram(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -170,20 +152,14 @@ static int test_configure_channel_telegram(void) {
         e->user_data);
     assert(result != NULL);
     assert(strncmp(result, "AGENT_EXIT_CONFIG:", 18) == 0);
-    assert(strstr(result, "telegram") != NULL);
+    assert(strstr(result, "configure_channel") != NULL);
     free(result);
 
-    /* Verify token stored encrypted */
+    /* V76: Tool does NOT write token — value still empty default */
     char *raw = db_kv_get(db, "telegram_token");
     assert(raw != NULL);
-    assert(strncmp(raw, "enc:", 4) == 0);
+    assert(strcmp(raw, "") == 0); /* unchanged from seed */
     free(raw);
-
-    /* Verify decrypted value matches */
-    char *decrypted = db_kv_get_secret(db, "telegram_token");
-    assert(decrypted != NULL);
-    assert(strcmp(decrypted, "123456:ABC-DEF") == 0);
-    free(decrypted);
 
     tools_free(&reg);
     db_close(db);
@@ -214,7 +190,7 @@ static int test_configure_channel_telegram_no_token(void) {
     return 0;
 }
 
-/* T191: configure_channel cli needs no credentials */
+/* T191: configure_channel cli returns sentinel */
 static int test_configure_channel_cli(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -226,7 +202,7 @@ static int test_configure_channel_cli(void) {
     char *result = e->handler("{\"channel_type\":\"cli\"}", e->user_data);
     assert(result != NULL);
     assert(strncmp(result, "AGENT_EXIT_CONFIG:", 18) == 0);
-    assert(strstr(result, "cli") != NULL);
+    assert(strstr(result, "configure_channel") != NULL);
     free(result);
 
     tools_free(&reg);
@@ -258,7 +234,7 @@ static int test_configure_channel_unknown(void) {
     return 0;
 }
 
-/* T192/T201: create_agent returns sentinel (daemon handles approval after reap) */
+/* T192/T201: create_agent returns sentinel (daemon handles after reap) */
 static int test_create_agent_basic(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -279,12 +255,6 @@ static int test_create_agent_basic(void) {
     assert(strncmp(result, "AGENT_EXIT_CONFIG:", 18) == 0);
     assert(strstr(result, "create_agent") != NULL);
     free(result);
-
-    /* T201: tool no longer inserts approval — daemon does after reap */
-    int count = 0;
-    Approval *list = approval_list_pending(db, &count);
-    assert(count == 0);
-    assert(list == NULL);
 
     tools_free(&reg);
     db_close(db);
@@ -342,7 +312,7 @@ static int test_create_agent_missing_name(void) {
 }
 
 int main(void) {
-    printf("test_tool_bootstrap (T190, T191, T192):\n");
+    printf("test_tool_bootstrap (T190, T191, T192, T205):\n");
     int rc = 0;
     rc |= test_configure_openrouter();
     rc |= test_configure_custom_requires_base_url();

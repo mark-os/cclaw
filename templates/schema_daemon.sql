@@ -1,7 +1,9 @@
 CREATE TABLE IF NOT EXISTS agents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
-  status TEXT NOT NULL DEFAULT 'active',
+  config TEXT,
+  system_prompt TEXT,
+  heartbeat TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );

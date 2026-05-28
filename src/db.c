@@ -7,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char *SCHEMA_SQL = TPL_SCHEMA_SQL;
 static const char *SCHEMA_DAEMON_SQL = TPL_SCHEMA_DAEMON_SQL;
 static const char *SCHEMA_AGENT_SQL = TPL_SCHEMA_AGENT_SQL;
 static const char *SCHEMA_JOURNAL_SQL = TPL_SCHEMA_JOURNAL_SQL;
@@ -89,11 +88,40 @@ sqlite3 *db_open_journal(const char *path) {
     return db_open_with_schema(path, SCHEMA_JOURNAL_SQL, "db_open_journal");
 }
 
+/* T207: Legacy unified opener — runs daemon + agent schemas into one DB.
+ * Used by tests for convenience. Production code uses db_open_daemon/db_open_agent. */
 sqlite3 *db_open(const char *path) {
-    sqlite3 *db = db_open_with_schema(path, SCHEMA_SQL, "db_open");
-    if (!db) return NULL;
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(path, &db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_open: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return NULL;
+    }
+    char *err = NULL;
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, &err);
+    if (err) { sqlite3_free(err); err = NULL; }
+    sqlite3_exec(db, "PRAGMA busy_timeout=5000;", NULL, NULL, &err);
+    if (err) { sqlite3_free(err); err = NULL; }
+    sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, &err);
+    if (err) { sqlite3_free(err); err = NULL; }
+    /* Apply both daemon + agent schemas for test convenience */
+    rc = sqlite3_exec(db, SCHEMA_DAEMON_SQL, NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_open daemon schema: %s\n", err);
+        sqlite3_free(err);
+        sqlite3_close(db);
+        return NULL;
+    }
+    rc = sqlite3_exec(db, SCHEMA_AGENT_SQL, NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_open agent schema: %s\n", err);
+        sqlite3_free(err);
+        sqlite3_close(db);
+        return NULL;
+    }
 
-    /* T169: seed kv defaults on first run (table empty) */
+    /* Seed kv defaults on first run (table empty) */
     {
         sqlite3_stmt *cnt;
         if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM kv", -1, &cnt, NULL) == SQLITE_OK) {
@@ -118,7 +146,6 @@ sqlite3 *db_open(const char *path) {
                 for (size_t i = 0; i < n; i++)
                     db_kv_set(db, defaults[i][0], defaults[i][1]);
 
-                /* Seed API key from env var (plaintext until T171 adds encryption) */
                 const char *api_key = getenv("OPENROUTER_API_KEY");
                 if (api_key && api_key[0])
                     db_kv_set(db, "provider.api_key", api_key);

@@ -7,11 +7,13 @@
 int main(void) {
     printf("test_templates:\n");
 
-    /* Schema SQL contains expected table creation */
-    assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS sessions"));
-    assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS entries"));
-    assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS agents"));
-    printf("  schema_sql_content... PASS\n");
+    /* T207: 3-DB schema templates contain expected tables */
+    assert(strstr(TPL_SCHEMA_DAEMON_SQL, "CREATE TABLE IF NOT EXISTS agents"));
+    assert(strstr(TPL_SCHEMA_DAEMON_SQL, "CREATE TABLE IF NOT EXISTS kv"));
+    assert(strstr(TPL_SCHEMA_AGENT_SQL, "CREATE TABLE IF NOT EXISTS sessions"));
+    assert(strstr(TPL_SCHEMA_AGENT_SQL, "CREATE TABLE IF NOT EXISTS entries"));
+    assert(strstr(TPL_SCHEMA_JOURNAL_SQL, "CREATE TABLE IF NOT EXISTS log"));
+    printf("  schema_3db_content... PASS\n");
 
     /* Default system prompt has template vars */
     assert(strstr(TPL_DEFAULT_SYSTEM_PROMPT_MD, "{workspace}"));

@@ -23,10 +23,10 @@ int cron_start(const Config *cfg, sqlite3 *db);
 /* Stop scheduler thread. Safe to call even if not started. */
 void cron_stop(void);
 
-/* CRUD — used by cron_set/cron_list/cron_remove tools (T36) */
-int64_t cron_add(sqlite3 *db, const char *name, const char *cron_expr,
-                 int64_t session_id, const char *task);
-CronJob *cron_list(sqlite3 *db, int64_t session_id, int *count);
+/* CRUD — daemon-only management (T204, V76) */
+int64_t cron_add(sqlite3 *db, const char *agent_name, const char *name,
+                 const char *cron_expr, int64_t session_id, const char *task);
+CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count);
 int cron_remove(sqlite3 *db, int64_t job_id);
 void cron_list_free(CronJob *jobs, int count);
 

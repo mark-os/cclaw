@@ -108,38 +108,39 @@ int64_t cron_next_run(const char *cron_expr, int64_t after) {
     return -1;
 }
 
-int64_t cron_add(sqlite3 *db, const char *name, const char *cron_expr,
-                 int64_t session_id, const char *task) {
+int64_t cron_add(sqlite3 *db, const char *agent_name, const char *name,
+                 const char *cron_expr, int64_t session_id, const char *task) {
     int64_t now = (int64_t)time(NULL);
     int64_t next = cron_next_run(cron_expr, now);
     if (next < 0) return -1;
 
     const char *sql =
-        "INSERT INTO cron_jobs (name, cron_expr, session_id, task, next_run_at)"
-        " VALUES (?,?,?,?,?);";
+        "INSERT INTO cron_jobs (agent_name, name, cron_expr, session_id, task, next_run_at)"
+        " VALUES (?,?,?,?,?,?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, cron_expr, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 3, session_id);
-    sqlite3_bind_text(stmt, 4, task, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 5, next);
+    sqlite3_bind_text(stmt, 1, agent_name ? agent_name : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, cron_expr, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 4, session_id);
+    sqlite3_bind_text(stmt, 5, task, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 6, next);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
     return sqlite3_last_insert_rowid(db);
 }
 
-CronJob *cron_list(sqlite3 *db, int64_t session_id, int *count) {
+CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count) {
     *count = 0;
     const char *sql =
         "SELECT id, name, cron_expr, session_id, task, enabled, next_run_at, last_run_at"
-        " FROM cron_jobs WHERE session_id=? ORDER BY id;";
+        " FROM cron_jobs WHERE agent_name=? ORDER BY id;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return NULL;
-    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 1, agent_name ? agent_name : "", -1, SQLITE_STATIC);
 
     int cap = 8;
     CronJob *jobs = malloc((size_t)cap * sizeof(CronJob));
@@ -193,12 +194,10 @@ void cron_list_free(CronJob *jobs, int count) {
 }
 
 /* Insert cron task into inbox and signal daemon to process */
-static void execute_job(int64_t session_id, const char *task) {
-    char *aname = session_get_agent_name(cron_db, session_id);
-    if (aname) {
-        daemon_inbox_insert(aname, session_id, "cron", task);
-        daemon_signal_session_agent(session_id, aname);
-        free(aname);
+static void execute_job(const char *agent_name, int64_t session_id, const char *task) {
+    if (agent_name && agent_name[0]) {
+        daemon_inbox_insert(agent_name, session_id, "cron", task);
+        daemon_signal_session_agent(session_id, agent_name);
     } else {
         inbox_insert(cron_db, session_id, "cron", task);
         daemon_signal_session(session_id);
@@ -209,15 +208,15 @@ static void execute_job(int64_t session_id, const char *task) {
 static void run_due_jobs(void) {
     int64_t now = (int64_t)time(NULL);
     const char *sql =
-        "SELECT id, cron_expr, session_id, task FROM cron_jobs"
+        "SELECT id, cron_expr, session_id, task, agent_name FROM cron_jobs"
         " WHERE enabled=1 AND next_run_at <= ?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(cron_db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return;
     sqlite3_bind_int64(stmt, 1, now);
 
-    /* Collect due jobs first (avoid holding stmt open during agent_run) */
-    typedef struct { int64_t id; char *expr; int64_t session_id; char *task; } DueJob;
+    /* Collect due jobs first (avoid holding stmt open during inbox_insert) */
+    typedef struct { int64_t id; char *expr; int64_t session_id; char *task; char *agent_name; } DueJob;
     int cap = 4, count = 0;
     DueJob *due = malloc((size_t)cap * sizeof(DueJob));
     if (!due) { sqlite3_finalize(stmt); return; }
@@ -235,6 +234,8 @@ static void run_due_jobs(void) {
         due[count].session_id = sqlite3_column_int64(stmt, 2);
         const char *t = (const char *)sqlite3_column_text(stmt, 3);
         due[count].task = t ? strdup(t) : NULL;
+        const char *a = (const char *)sqlite3_column_text(stmt, 4);
+        due[count].agent_name = a ? strdup(a) : NULL;
         count++;
     }
     sqlite3_finalize(stmt);
@@ -242,7 +243,7 @@ static void run_due_jobs(void) {
     /* Execute each due job */
     for (int i = 0; i < count; i++) {
         if (due[i].task)
-            execute_job(due[i].session_id, due[i].task);
+            execute_job(due[i].agent_name, due[i].session_id, due[i].task);
 
         /* Update last_run_at and next_run_at */
         int64_t next = cron_next_run(due[i].expr, now);
@@ -258,6 +259,7 @@ static void run_due_jobs(void) {
         }
         free(due[i].expr);
         free(due[i].task);
+        free(due[i].agent_name);
     }
     free(due);
 }

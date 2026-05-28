@@ -13,7 +13,7 @@ static void test_cron_set_valid(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
-    ToolCronCtx ctx = {.db = db, .session_id = sid};
+    ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
     char *result = tool_cron_set_handler(
         "{\"name\":\"daily\",\"cron_expr\":\"0 9 * * *\",\"task\":\"good morning\"}",
         &ctx);
@@ -30,7 +30,7 @@ static void test_cron_set_invalid_expr(void) {
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
-    ToolCronCtx ctx = {.db = db, .session_id = sid};
+    ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
     char *result = tool_cron_set_handler(
         "{\"name\":\"bad\",\"cron_expr\":\"invalid\",\"task\":\"x\"}", &ctx);
     assert(result);
@@ -45,7 +45,7 @@ static void test_cron_set_missing_fields(void) {
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
-    ToolCronCtx ctx = {.db = db, .session_id = sid};
+    ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
     char *result = tool_cron_set_handler("{\"name\":\"x\"}", &ctx);
     assert(result);
     assert(strstr(result, "error"));
@@ -59,7 +59,7 @@ static void test_cron_list_empty(void) {
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
-    ToolCronCtx ctx = {.db = db, .session_id = sid};
+    ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
     char *result = tool_cron_list_handler("{}", &ctx);
     assert(result);
     assert(strcmp(result, "no cron jobs") == 0);
@@ -73,10 +73,10 @@ static void test_cron_list_with_jobs(void) {
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
-    cron_add(db, "j1", "0 * * * *", sid, "task1");
-    cron_add(db, "j2", "30 2 * * *", sid, "task2");
+    cron_add(db, "test_agent", "j1", "0 * * * *", sid, "task1");
+    cron_add(db, "test_agent", "j2", "30 2 * * *", sid, "task2");
 
-    ToolCronCtx ctx = {.db = db, .session_id = sid};
+    ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
     char *result = tool_cron_list_handler("{}", &ctx);
     assert(result);
     assert(strstr(result, "j1"));
@@ -92,10 +92,10 @@ static void test_cron_remove_valid(void) {
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
-    int64_t jid = cron_add(db, "rm_me", "0 * * * *", sid, "bye");
+    int64_t jid = cron_add(db, "test_agent", "rm_me", "0 * * * *", sid, "bye");
     assert(jid > 0);
 
-    ToolCronCtx ctx = {.db = db, .session_id = sid};
+    ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"id\":%lld}", (long long)jid);
     char *result = tool_cron_remove_handler(buf, &ctx);
@@ -105,7 +105,7 @@ static void test_cron_remove_valid(void) {
 
     /* Verify it's gone */
     int count = 0;
-    CronJob *jobs = cron_list(db, sid, &count);
+    CronJob *jobs = cron_list(db, "test_agent", &count);
     assert(count == 0 && jobs == NULL);
 
     db_close(db);
@@ -117,7 +117,7 @@ static void test_cron_remove_nonexistent(void) {
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
-    ToolCronCtx ctx = {.db = db, .session_id = sid};
+    ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
     char *result = tool_cron_remove_handler("{\"id\":999}", &ctx);
     assert(result);
     assert(strstr(result, "error"));
@@ -132,7 +132,7 @@ static void test_cron_register(void) {
 
     ToolRegistry reg;
     tools_init(&reg);
-    ToolCronCtx ctx = {.db = db, .session_id = 1};
+    ToolCronCtx ctx = {.db = db, .session_id = 1, .agent_name = "test"};
     assert(tool_cron_register(&reg, &ctx) == 0);
     assert(tools_lookup(&reg, "cron_set") != NULL);
     assert(tools_lookup(&reg, "cron_list") != NULL);

@@ -9,6 +9,7 @@
 typedef struct {
     sqlite3 *db;
     int64_t session_id;
+    const char *agent_name;
 } ToolCronCtx;
 
 /* Register cron_set, cron_list, cron_remove tools. */

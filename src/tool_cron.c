@@ -35,8 +35,8 @@ char *tool_cron_set_handler(const char *arguments, void *user_data) {
         return strdup("error: missing required fields (name, cron_expr, task)");
     }
 
-    int64_t id = cron_add(ctx->db, name->valuestring, expr->valuestring,
-                          ctx->session_id, task->valuestring);
+    int64_t id = cron_add(ctx->db, ctx->agent_name, name->valuestring,
+                          expr->valuestring, ctx->session_id, task->valuestring);
 
     char *result = malloc(128);
     if (!result) { cJSON_Delete(json); return strdup("error: OOM"); }
@@ -58,7 +58,7 @@ char *tool_cron_list_handler(const char *arguments, void *user_data) {
     ToolCronCtx *ctx = (ToolCronCtx *)user_data;
 
     int count = 0;
-    CronJob *jobs = cron_list(ctx->db, ctx->session_id, &count);
+    CronJob *jobs = cron_list(ctx->db, ctx->agent_name, &count);
     if (count == 0) return strdup("no cron jobs");
 
     /* Build JSON array output */

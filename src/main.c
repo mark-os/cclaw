@@ -22,7 +22,6 @@
 #include "tool_shell.h"
 #include "tool_file.h"
 #include "tool_js.h"
-#include "tool_cron.h"
 #include "tool_agent.h"
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
@@ -211,9 +210,7 @@ static int run_agent_turn(int64_t session_id) {
     tool_js_define_register(&reg, &js_def_ctx);
     tool_js_load_session(db, session_id, &reg, js_rt);
 
-    /* Cron tool */
-    ToolCronCtx cron_ctx = {.db = db, .session_id = session_id};
-    tool_cron_register(&reg, &cron_ctx);
+    /* T204: cron tools removed from agent — admin-only for v1 */
 
     /* Agent launch tool */
     AgentLaunchCtx la_ctx = {.db = db, .session_id = session_id,

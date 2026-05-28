@@ -57,11 +57,11 @@ static void test_cron_crud(void) {
     int64_t sid = session_create(db, "cron_test", NULL, -1, 0);
     assert(sid > 0);
 
-    int64_t jid = cron_add(db, "test_job", "0 * * * *", sid, "hello");
+    int64_t jid = cron_add(db, "test_agent", "test_job", "0 * * * *", sid, "hello");
     assert(jid > 0);
 
     int count = 0;
-    CronJob *jobs = cron_list(db, sid, &count);
+    CronJob *jobs = cron_list(db, "test_agent", &count);
     assert(count == 1);
     assert(strcmp(jobs[0].name, "test_job") == 0);
     assert(strcmp(jobs[0].cron_expr, "0 * * * *") == 0);
@@ -71,11 +71,11 @@ static void test_cron_crud(void) {
     cron_list_free(jobs, count);
 
     assert(cron_remove(db, jid) == 0);
-    jobs = cron_list(db, sid, &count);
+    jobs = cron_list(db, "test_agent", &count);
     assert(count == 0 && jobs == NULL);
 
     assert(cron_remove(db, 999) == -1);
-    assert(cron_add(db, "bad", "invalid", sid, "x") == -1);
+    assert(cron_add(db, "test_agent", "bad", "invalid", sid, "x") == -1);
 
     db_close(db);
     printf("  PASS: CRUD operations\n");
@@ -97,6 +97,32 @@ static void test_cron_table_created(void) {
     printf("  PASS: table exists\n");
 }
 
+static void test_cron_agent_isolation(void) {
+    sqlite3 *db = db_open(":memory:");
+    assert(db);
+
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    cron_add(db, "agent_a", "job_a", "0 * * * *", sid, "task_a");
+    cron_add(db, "agent_b", "job_b", "0 * * * *", sid, "task_b");
+
+    int count = 0;
+    CronJob *jobs = cron_list(db, "agent_a", &count);
+    assert(count == 1);
+    assert(strcmp(jobs[0].name, "job_a") == 0);
+    cron_list_free(jobs, count);
+
+    jobs = cron_list(db, "agent_b", &count);
+    assert(count == 1);
+    assert(strcmp(jobs[0].name, "job_b") == 0);
+    cron_list_free(jobs, count);
+
+    jobs = cron_list(db, "nonexistent", &count);
+    assert(count == 0 && jobs == NULL);
+
+    db_close(db);
+    printf("  PASS: agent isolation\n");
+}
+
 int main(void) {
     printf("test_cron:\n");
     test_cron_table_created();
@@ -105,6 +131,7 @@ int main(void) {
     test_cron_next_run_invalid();
     test_cron_next_run_step();
     test_cron_crud();
+    test_cron_agent_isolation();
     printf("ALL PASSED\n");
     return 0;
 }

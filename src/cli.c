@@ -261,7 +261,8 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
     JsDefineCtx js_ctx = {.db = db, .session_id = session_id, .reg = &reg, .rt = NULL};
     tool_js_define_register(&reg, &js_ctx);
 
-    ToolCronCtx cron_ctx = {.db = db, .session_id = session_id};
+    ToolCronCtx cron_ctx = {.db = db, .session_id = session_id,
+                            .agent_name = agent_name};
     tool_cron_register(&reg, &cron_ctx);
 
     /* Resolve self path for sub-agent spawning */

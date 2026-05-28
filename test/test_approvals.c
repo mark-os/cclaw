@@ -22,7 +22,7 @@ static void teardown(sqlite3 *db) {
 
 static void test_insert_and_get(void) {
     sqlite3 *db = setup();
-    int64_t id = approval_insert(db, 1, "coder", "whitelist_host",
+    int64_t id = approval_insert(db, 1, "coder", NULL, "whitelist_host",
                                  "{\"host\":\"api.example.com\"}");
     assert(id > 0);
 
@@ -44,8 +44,8 @@ static void test_insert_and_get(void) {
 
 static void test_list_pending(void) {
     sqlite3 *db = setup();
-    approval_insert(db, 1, "bot", "create_agent", "{\"name\":\"helper\"}");
-    approval_insert(db, 2, "bot", "model_change", "{\"model\":\"gpt-5\"}");
+    approval_insert(db, 1, "bot", NULL, "create_agent", "{\"name\":\"helper\"}");
+    approval_insert(db, 2, "bot", NULL, "model_change", "{\"model\":\"gpt-5\"}");
 
     int count = 0;
     Approval *list = approval_list_pending(db, &count);
@@ -60,7 +60,7 @@ static void test_list_pending(void) {
 
 static void test_resolve_approve(void) {
     sqlite3 *db = setup();
-    int64_t id = approval_insert(db, 1, "coder", "tool_enable", "{\"tool\":\"shell\"}");
+    int64_t id = approval_insert(db, 1, "coder", NULL, "tool_enable", "{\"tool\":\"shell\"}");
 
     int rc = approval_resolve(db, id, "approved", 12345);
     assert(rc == 0);
@@ -83,7 +83,7 @@ static void test_resolve_approve(void) {
 
 static void test_resolve_deny(void) {
     sqlite3 *db = setup();
-    int64_t id = approval_insert(db, 1, "coder", "whitelist_host", "{\"host\":\"evil.com\"}");
+    int64_t id = approval_insert(db, 1, "coder", NULL, "whitelist_host", "{\"host\":\"evil.com\"}");
 
     int rc = approval_resolve(db, id, "denied", 99);
     assert(rc == 0);
@@ -98,7 +98,7 @@ static void test_resolve_deny(void) {
 
 static void test_resolve_already_resolved(void) {
     sqlite3 *db = setup();
-    int64_t id = approval_insert(db, 1, "coder", "whitelist_host", "{}");
+    int64_t id = approval_insert(db, 1, "coder", NULL, "whitelist_host", "{}");
     approval_resolve(db, id, "approved", 1);
 
     /* Second resolve fails (WHERE status='pending') */
@@ -112,8 +112,8 @@ static void test_resolve_already_resolved(void) {
 /* T148: test unnotified listing and mark_notified */
 static void test_list_unnotified(void) {
     sqlite3 *db = setup();
-    int64_t id1 = approval_insert(db, 1, "bot", "whitelist_host", "{\"host\":\"a.com\"}");
-    int64_t id2 = approval_insert(db, 2, "bot", "model_change", "{\"model\":\"x\"}");
+    int64_t id1 = approval_insert(db, 1, "bot", NULL, "whitelist_host", "{\"host\":\"a.com\"}");
+    int64_t id2 = approval_insert(db, 2, "bot", NULL, "model_change", "{\"model\":\"x\"}");
 
     /* Both should be unnotified initially */
     int count = 0;
@@ -154,7 +154,7 @@ static void test_approval_posts_to_inbox(void) {
     assert(session_set_state(db, sid, "waiting") == 0);
 
     /* Insert approval tied to that session */
-    int64_t aid = approval_insert(db, sid, "coder", "whitelist_host",
+    int64_t aid = approval_insert(db, sid, "coder", NULL, "whitelist_host",
                                   "{\"host\":\"api.example.com\"}");
     assert(aid > 0);
 
@@ -204,7 +204,7 @@ static void test_approval_deny_posts_to_inbox(void) {
     assert(session_set_state(db, sid, "running") == 0);
     assert(session_set_state(db, sid, "waiting") == 0);
 
-    int64_t aid = approval_insert(db, sid, "coder", "model_change",
+    int64_t aid = approval_insert(db, sid, "coder", NULL, "model_change",
                                   "{\"model\":\"gpt-5\"}");
     assert(aid > 0);
 

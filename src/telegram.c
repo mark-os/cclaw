@@ -1068,11 +1068,14 @@ static void handle_approval_callback(const char *data, int64_t chat_id, const ch
                  (long long)approval_id, a->type);
     }
 
-    /* Post result to agent inbox (V25) */
-    if (a->session_id > 0) {
+    /* T203/V78: UPDATE PENDING entry with result, transition state, re-fork */
+    if (a->session_id > 0 && a->agent_name && a->tool_call_id) {
+        daemon_resolve_approval(a->agent_name, a->session_id,
+                                a->tool_call_id, inbox_msg);
+    } else if (a->session_id > 0) {
+        /* Fallback: no tool_call_id (legacy) — post to inbox */
         if (a->agent_name) {
             daemon_inbox_insert(a->agent_name, a->session_id, "approval", inbox_msg);
-            /* T200: Transition waiting→idle in agent DB */
             char *apath = NULL;
             {
                 char buf[1024];

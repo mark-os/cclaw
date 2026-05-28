@@ -1259,14 +1259,15 @@ void agent_row_free(AgentRow *row) {
 /* T146: approvals CRUD (V54) */
 
 int64_t approval_insert(sqlite3 *db, int64_t session_id, const char *agent_name,
-                        const char *type, const char *payload) {
-    const char *sql = "INSERT INTO approvals (session_id, agent_name, type, payload) VALUES (?, ?, ?, ?);";
+                        const char *tool_call_id, const char *type, const char *payload) {
+    const char *sql = "INSERT INTO approvals (session_id, agent_name, tool_call_id, type, payload) VALUES (?, ?, ?, ?, ?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_int64(stmt, 1, session_id);
     sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, type, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, payload, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, tool_call_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, type, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, payload, -1, SQLITE_STATIC);
     if (sqlite3_step(stmt) != SQLITE_DONE) { sqlite3_finalize(stmt); return -1; }
     int64_t id = sqlite3_last_insert_rowid(db);
     sqlite3_finalize(stmt);
@@ -1281,20 +1282,22 @@ static Approval *approval_from_stmt(sqlite3_stmt *stmt) {
     const char *s = (const char *)sqlite3_column_text(stmt, 2);
     a->agent_name = s ? strdup(s) : NULL;
     s = (const char *)sqlite3_column_text(stmt, 3);
-    a->type = s ? strdup(s) : NULL;
+    a->tool_call_id = s ? strdup(s) : NULL;
     s = (const char *)sqlite3_column_text(stmt, 4);
-    a->payload = s ? strdup(s) : NULL;
+    a->type = s ? strdup(s) : NULL;
     s = (const char *)sqlite3_column_text(stmt, 5);
+    a->payload = s ? strdup(s) : NULL;
+    s = (const char *)sqlite3_column_text(stmt, 6);
     a->status = s ? strdup(s) : NULL;
-    a->admin_chat_id = sqlite3_column_int64(stmt, 6);
-    a->created_at = sqlite3_column_int64(stmt, 7);
-    a->resolved_at = sqlite3_column_int64(stmt, 8);
+    a->admin_chat_id = sqlite3_column_int64(stmt, 7);
+    a->created_at = sqlite3_column_int64(stmt, 8);
+    a->resolved_at = sqlite3_column_int64(stmt, 9);
     return a;
 }
 
 Approval *approval_list_pending(sqlite3 *db, int *count) {
     *count = 0;
-    const char *sql = "SELECT id, session_id, agent_name, type, payload, status, admin_chat_id, created_at, resolved_at "
+    const char *sql = "SELECT id, session_id, agent_name, tool_call_id, type, payload, status, admin_chat_id, created_at, resolved_at "
                       "FROM approvals WHERE status='pending' ORDER BY id;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
@@ -1314,14 +1317,16 @@ Approval *approval_list_pending(sqlite3 *db, int *count) {
         const char *s = (const char *)sqlite3_column_text(stmt, 2);
         a->agent_name = s ? strdup(s) : NULL;
         s = (const char *)sqlite3_column_text(stmt, 3);
-        a->type = s ? strdup(s) : NULL;
+        a->tool_call_id = s ? strdup(s) : NULL;
         s = (const char *)sqlite3_column_text(stmt, 4);
-        a->payload = s ? strdup(s) : NULL;
+        a->type = s ? strdup(s) : NULL;
         s = (const char *)sqlite3_column_text(stmt, 5);
+        a->payload = s ? strdup(s) : NULL;
+        s = (const char *)sqlite3_column_text(stmt, 6);
         a->status = s ? strdup(s) : NULL;
-        a->admin_chat_id = sqlite3_column_int64(stmt, 6);
-        a->created_at = sqlite3_column_int64(stmt, 7);
-        a->resolved_at = sqlite3_column_int64(stmt, 8);
+        a->admin_chat_id = sqlite3_column_int64(stmt, 7);
+        a->created_at = sqlite3_column_int64(stmt, 8);
+        a->resolved_at = sqlite3_column_int64(stmt, 9);
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -1330,7 +1335,7 @@ Approval *approval_list_pending(sqlite3 *db, int *count) {
 }
 
 Approval *approval_get(sqlite3 *db, int64_t id) {
-    const char *sql = "SELECT id, session_id, agent_name, type, payload, status, admin_chat_id, created_at, resolved_at "
+    const char *sql = "SELECT id, session_id, agent_name, tool_call_id, type, payload, status, admin_chat_id, created_at, resolved_at "
                       "FROM approvals WHERE id=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
@@ -1357,6 +1362,7 @@ int approval_resolve(sqlite3 *db, int64_t id, const char *status, int64_t admin_
 void approval_free(Approval *a) {
     if (!a) return;
     free(a->agent_name);
+    free(a->tool_call_id);
     free(a->type);
     free(a->payload);
     free(a->status);
@@ -1367,6 +1373,7 @@ void approval_list_free(Approval *list, int count) {
     if (!list) return;
     for (int i = 0; i < count; i++) {
         free(list[i].agent_name);
+        free(list[i].tool_call_id);
         free(list[i].type);
         free(list[i].payload);
         free(list[i].status);
@@ -1377,7 +1384,7 @@ void approval_list_free(Approval *list, int count) {
 /* T148: get pending approvals not yet notified to admins */
 Approval *approval_list_unnotified(sqlite3 *db, int *count) {
     *count = 0;
-    const char *sql = "SELECT id, session_id, agent_name, type, payload, status, admin_chat_id, created_at, resolved_at "
+    const char *sql = "SELECT id, session_id, agent_name, tool_call_id, type, payload, status, admin_chat_id, created_at, resolved_at "
                       "FROM approvals WHERE status='pending' AND notified=0 ORDER BY id;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
@@ -1397,14 +1404,16 @@ Approval *approval_list_unnotified(sqlite3 *db, int *count) {
         const char *s = (const char *)sqlite3_column_text(stmt, 2);
         a->agent_name = s ? strdup(s) : NULL;
         s = (const char *)sqlite3_column_text(stmt, 3);
-        a->type = s ? strdup(s) : NULL;
+        a->tool_call_id = s ? strdup(s) : NULL;
         s = (const char *)sqlite3_column_text(stmt, 4);
-        a->payload = s ? strdup(s) : NULL;
+        a->type = s ? strdup(s) : NULL;
         s = (const char *)sqlite3_column_text(stmt, 5);
+        a->payload = s ? strdup(s) : NULL;
+        s = (const char *)sqlite3_column_text(stmt, 6);
         a->status = s ? strdup(s) : NULL;
-        a->admin_chat_id = sqlite3_column_int64(stmt, 6);
-        a->created_at = sqlite3_column_int64(stmt, 7);
-        a->resolved_at = sqlite3_column_int64(stmt, 8);
+        a->admin_chat_id = sqlite3_column_int64(stmt, 7);
+        a->created_at = sqlite3_column_int64(stmt, 8);
+        a->resolved_at = sqlite3_column_int64(stmt, 9);
         (*count)++;
     }
     sqlite3_finalize(stmt);

@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,
   agent_name TEXT NOT NULL,
+  tool_call_id TEXT,
   type TEXT NOT NULL,
   payload TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',

@@ -3,6 +3,7 @@
  * V53: unauthorized approval attempt rejected */
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "daemon.h"
 #include "tool_approval.h"
 #include "tools.h"
 #include "agent_config.h"
@@ -60,7 +61,7 @@ static void test_approve_flow(void) {
     free(result);
 
     /* T201: Simulate daemon's role — insert approval from tool_call args */
-    int64_t aid = approval_insert(db, sid, "coder",
+    int64_t aid = approval_insert(db, sid, "coder", NULL,
                                   "whitelist_host", "{\"host\":\"api.newsite.com\"}");
     assert(aid > 0);
 
@@ -143,7 +144,7 @@ static void test_deny_flow(void) {
     free(result);
 
     /* T201: Simulate daemon's role — insert approval from tool_call args */
-    int64_t aid = approval_insert(db, sid, "coder",
+    int64_t aid = approval_insert(db, sid, "coder", NULL,
                                   "whitelist_host", "{\"host\":\"evil.com\"}");
     assert(aid > 0);
 
@@ -210,7 +211,7 @@ static void test_unauthorized_attempt(void) {
      * approval_resolve itself doesn't enforce auth (that's the telegram layer's job).
      * But a resolved approval can't be re-resolved. */
     sqlite3 *db = db_open(":memory:");
-    int64_t aid = approval_insert(db, 1, "coder", "whitelist_host", "{\"host\":\"x.com\"}");
+    int64_t aid = approval_insert(db, 1, "coder", NULL, "whitelist_host", "{\"host\":\"x.com\"}");
     assert(aid > 0);
 
     /* First resolve succeeds (admin) */
@@ -223,11 +224,72 @@ static void test_unauthorized_attempt(void) {
     printf("  PASS test_unauthorized_attempt\n");
 }
 
+/* T203/V78: daemon_resolve_approval updates PENDING entry + transitions state */
+static void test_resolve_approval_updates_pending(void) {
+    /* daemon_resolve_approval uses relative path "agents/<name>/agent.db" */
+    system("rm -rf /tmp/test_t203 && mkdir -p /tmp/test_t203/agents/coder");
+    assert(chdir("/tmp/test_t203") == 0);
+
+    sqlite3 *adb = db_open_agent("agents/coder/agent.db");
+    assert(adb);
+
+    /* Create session in waiting state */
+    int64_t sid = session_create(adb, NULL, "coder", -1, 0);
+    assert(sid > 0);
+    assert(session_set_state(adb, sid, "running") == 0);
+    assert(session_set_state(adb, sid, "waiting") == 0);
+
+    /* Insert a PENDING tool_result entry (simulating what agent wrote before exit 3) */
+    const char *ins = "INSERT INTO entries (session_id, role, content, tool_call_id, turn_id)"
+                      " VALUES (?, 3, 'PENDING', 'tc_approval_123', 1);";
+    sqlite3_stmt *stmt;
+    assert(sqlite3_prepare_v2(adb, ins, -1, &stmt, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(stmt, 1, sid);
+    assert(sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+
+    db_close(adb);
+
+    /* Call daemon_resolve_approval — opens agent DB by constructed path */
+    int rc = daemon_resolve_approval("coder", sid, "tc_approval_123",
+                                     "Approval #1 approved: whitelist_host");
+    assert(rc == 0);
+
+    /* Verify: reopen DB and check entry was updated */
+    adb = db_open_agent("agents/coder/agent.db");
+    assert(adb);
+
+    const char *qsql = "SELECT content FROM entries WHERE session_id=? AND tool_call_id='tc_approval_123';";
+    sqlite3_stmt *qs;
+    assert(sqlite3_prepare_v2(adb, qsql, -1, &qs, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(qs, 1, sid);
+    assert(sqlite3_step(qs) == SQLITE_ROW);
+    const char *content = (const char *)sqlite3_column_text(qs, 0);
+    assert(content != NULL);
+    assert(strstr(content, "approved") != NULL);
+    assert(strcmp(content, "PENDING") != 0);
+    sqlite3_finalize(qs);
+
+    /* Verify session transitioned to idle */
+    const char *ssql = "SELECT state FROM sessions WHERE id=?;";
+    sqlite3_stmt *ss;
+    assert(sqlite3_prepare_v2(adb, ssql, -1, &ss, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(ss, 1, sid);
+    assert(sqlite3_step(ss) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(ss, 0), "idle") == 0);
+    sqlite3_finalize(ss);
+
+    db_close(adb);
+    system("rm -rf /tmp/test_t203");
+    printf("  PASS test_resolve_approval_updates_pending\n");
+}
+
 int main(void) {
     printf("test_approval_flow:\n");
     test_approve_flow();
     test_deny_flow();
     test_unauthorized_attempt();
+    test_resolve_approval_updates_pending();
     printf("All approval flow tests passed.\n");
     return 0;
 }

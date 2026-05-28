@@ -174,6 +174,7 @@ typedef struct {
     int64_t id;
     int64_t session_id;
     char *agent_name;
+    char *tool_call_id;
     char *type;       /* whitelist_host|create_agent|model_change|tool_enable */
     char *payload;    /* JSON */
     char *status;     /* pending|approved|denied */
@@ -184,7 +185,7 @@ typedef struct {
 
 /* Insert approval request. Returns row id (>0) or -1 on error. */
 int64_t approval_insert(sqlite3 *db, int64_t session_id, const char *agent_name,
-                        const char *type, const char *payload);
+                        const char *tool_call_id, const char *type, const char *payload);
 
 /* Get pending approvals. Caller frees with approval_list_free. Sets *count. */
 Approval *approval_list_pending(sqlite3 *db, int *count);

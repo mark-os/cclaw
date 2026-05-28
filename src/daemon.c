@@ -249,6 +249,54 @@ int daemon_inbox_count(const char *agent_name, int64_t session_id) {
     return count;
 }
 
+/* T203/V78: Resolve approval — UPDATE PENDING entry, transition state, signal. */
+int daemon_resolve_approval(const char *agent_name, int64_t session_id,
+                            const char *tool_call_id, const char *result) {
+    if (!agent_name || !tool_call_id || !result) return -1;
+    char *path = agent_db_path(agent_name);
+    if (!path) return -1;
+    sqlite3 *adb = db_open_agent(path);
+    free(path);
+    if (!adb) return -1;
+
+    /* Find PENDING entry by tool_call_id */
+    const char *sql = "SELECT id FROM entries WHERE session_id=?"
+                      " AND tool_call_id=? AND content='PENDING' LIMIT 1;";
+    sqlite3_stmt *stmt;
+    int rc = -1;
+    if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, session_id);
+        sqlite3_bind_text(stmt, 2, tool_call_id, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            int64_t eid = sqlite3_column_int64(stmt, 0);
+            sqlite3_finalize(stmt);
+            /* UPDATE content */
+            const char *usql = "UPDATE entries SET content=? WHERE id=? AND content='PENDING';";
+            sqlite3_stmt *us;
+            if (sqlite3_prepare_v2(adb, usql, -1, &us, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(us, 1, result, -1, SQLITE_STATIC);
+                sqlite3_bind_int64(us, 2, eid);
+                if (sqlite3_step(us) == SQLITE_DONE) rc = 0;
+                sqlite3_finalize(us);
+            }
+        } else {
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    /* Transition waiting→idle */
+    if (rc == 0)
+        session_set_state(adb, session_id, "idle");
+
+    db_close(adb);
+
+    /* Signal daemon to re-fork */
+    if (rc == 0)
+        daemon_signal_session_agent(session_id, agent_name);
+
+    return rc;
+}
+
 /* ── Child tracking (T87, T200, V24) ────────────────────────────── */
 
 typedef struct {
@@ -820,9 +868,9 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                                 if (p) payload_str = cJSON_PrintUnformatted(p);
                             }
                             if (!payload_str) payload_str = strdup("{}");
-                            /* Insert into daemon.db approvals */
+                            /* T203: Insert into daemon.db approvals w/ tool_call_id */
                             approval_insert(db, session_id, agent_name,
-                                            type, payload_str);
+                                            tc_id, type, payload_str);
                             free(payload_str);
                             cJSON_Delete(j);
                             free(args);

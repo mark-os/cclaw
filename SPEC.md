@@ -359,7 +359,7 @@ T193|x|channel→agent binding — daemon `channel_bindings` table (channel_type
 T194|x|token rate limit — daemon tracks rolling hourly token usage (input+output from agent exit reports); reject fork if over limit; default 1M/hr; configurable via kv `token_rate_limit` + env `CCLAW_TOKEN_RATE_LIMIT`|V71
 T195|x|3-DB schema files + init fns — `db_open_daemon()`, `db_open_agent()`, `db_open_journal()`; WAL + busy_timeout; migrate existing `schema.sql` into 3 files|V73,V4
 T196|x|agent_config table + eliminate agent.json — `agent_config(agent_name, key, value)` in daemon.db; migration: import existing agent.json on startup, delete after; remove JSON config loader|V80,V74
-T197|.|exit code protocol in agent — `agent_exit.h` defines codes 0-4; `spawn_agent` → exit 2, `approval_request` → exit 3, config tools → exit 4; agent_run detects sentinels, propagates exit|V72
+T197|x|exit code protocol in agent — `agent_exit.h` defines codes 0-4; `spawn_agent` → exit 2, `approval_request` → exit 3, config tools → exit 4; agent_run detects sentinels, propagates exit|V72
 T198|.|daemon reap dispatch — `reap_children()` handles exit codes: 0→deliver, 2→spawn, 3→approval, 4→config; opens agent DB RO post-reap; closes immediately|V77,V78,V79
 T199|.|agent opens only own DB — reads `CCLAW_AGENT_DB` env, opens that; config from env vars; remove `config_load_from_kv()` from agent; memory_blocks + js_tools in agent.db|V73,V74
 T200|.|daemon writes inbox to agent DB — `daemon_inbox_insert(agent_name, session_id, source, payload)` opens agent DB, inserts, closes; Telegram/cron/sub-agent completion all use this path|V76

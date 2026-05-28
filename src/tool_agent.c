@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_agent.h"
+#include "agent_exit.h"
 #include "daemon.h"
 #include <cJSON.h>
 #include <stdio.h>
@@ -87,7 +88,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         }
         char *result = malloc(128);
         if (!result) return strdup("error: OOM");
-        snprintf(result, 128, "SPAWN_BLOCKING:%lld", (long long)qid);
+        snprintf(result, 128, SENTINEL_SPAWN "%lld", (long long)qid);
         return result;
     }
 

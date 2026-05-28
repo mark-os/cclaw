@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_bootstrap.h"
+#include "agent_exit.h"
 #include "db.h"
 #include <cJSON.h>
 #include <stdlib.h>
@@ -86,8 +87,7 @@ static char *tool_configure_provider_handler(const char *arguments, void *user_d
 
     char buf[256];
     snprintf(buf, sizeof(buf),
-             "Provider configured: %s (base_url: %s, model: %s). "
-             "API key stored securely.",
+             SENTINEL_CONFIG "provider configured: %s (base_url: %s, model: %s)",
              pname, url ? url : "(unchanged)", mdl ? mdl : "(unchanged)");
     return strdup(buf);
 }
@@ -138,13 +138,11 @@ static char *tool_configure_channel_handler(const char *arguments, void *user_da
             return strdup("error: failed to store bot token");
         }
         cJSON_Delete(json);
-        return strdup("Channel configured: telegram. Bot token stored securely. "
-                      "Telegram poller will start on next daemon restart.");
+        return strdup(SENTINEL_CONFIG "channel configured: telegram");
     } else if (strcmp(ctype, "cli") == 0) {
         /* CLI needs no credentials — just acknowledge */
         cJSON_Delete(json);
-        return strdup("Channel configured: cli. No credentials needed. "
-                      "CLI is always available.");
+        return strdup(SENTINEL_CONFIG "channel configured: cli");
     } else {
         cJSON_Delete(json);
         return strdup("error: unknown channel_type — use 'telegram' or 'cli'");
@@ -205,9 +203,7 @@ static char *tool_create_agent_handler(const char *arguments, void *user_data) {
         return strdup("error: failed to submit agent creation request");
 
     char buf[128];
-    snprintf(buf, sizeof(buf),
-             "Agent creation proposed (approval #%lld). Waiting for admin approval.",
-             (long long)id);
+    snprintf(buf, sizeof(buf), SENTINEL_CONFIG "create_agent approval #%lld", (long long)id);
     return strdup(buf);
 }
 

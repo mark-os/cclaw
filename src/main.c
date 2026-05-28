@@ -29,6 +29,7 @@
 #include "tool_memory.h"
 #include "tool_approval.h"
 #include "tool_bootstrap.h"
+#include "agent_exit.h"
 #include "shutdown.h"
 #include "context.h"
 #include "daemon.h"
@@ -272,7 +273,11 @@ static int run_agent_turn(int64_t session_id) {
     config_free(cfg);
     free(agent_name);
     db_close(db);
-    return rc == 0 ? 0 : 1;
+
+    /* V72/T197: propagate exit codes 0-4 to process exit */
+    if (rc >= AGENT_EXIT_DONE && rc <= AGENT_EXIT_CONFIG)
+        return rc;
+    return AGENT_EXIT_ERROR;
 }
 
 /* Resolve DB path: env override or default next to binary */

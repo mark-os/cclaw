@@ -56,7 +56,7 @@ static void test_approve_flow(void) {
         "{\"type\":\"whitelist_host\",\"payload\":{\"host\":\"api.newsite.com\"}}",
         e->user_data);
     assert(result);
-    assert(strstr(result, "pending") != NULL);
+    assert(strncmp(result, "AGENT_EXIT_APPROVAL:", 20) == 0);
     free(result);
 
     /* Verify approval is pending in DB */
@@ -135,7 +135,7 @@ static void test_deny_flow(void) {
     char *result = e->handler(
         "{\"type\":\"whitelist_host\",\"payload\":{\"host\":\"evil.com\"}}",
         e->user_data);
-    assert(strstr(result, "pending") != NULL);
+    assert(strncmp(result, "AGENT_EXIT_APPROVAL:", 20) == 0);
     free(result);
 
     int count = 0;

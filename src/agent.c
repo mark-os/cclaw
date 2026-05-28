@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "agent.h"
+#include "agent_exit.h"
 #include "context.h"
 #include "request_stream.h"
 #include "http.h"
@@ -455,6 +456,15 @@ int agent_run(AgentContext *ctx) {
 
             char *result = dispatch_tool(ctx, &asst.tool_calls[i]);
 
+            /* V72/T197: detect exit-code sentinels from tool results */
+            int sentinel_exit = -1;
+            if (strncmp(result, SENTINEL_SPAWN, strlen(SENTINEL_SPAWN)) == 0)
+                sentinel_exit = AGENT_EXIT_SPAWN;
+            else if (strncmp(result, SENTINEL_APPROVAL, strlen(SENTINEL_APPROVAL)) == 0)
+                sentinel_exit = AGENT_EXIT_APPROVAL;
+            else if (strncmp(result, SENTINEL_CONFIG, strlen(SENTINEL_CONFIG)) == 0)
+                sentinel_exit = AGENT_EXIT_CONFIG;
+
             /* T115: notify progress — tool result (truncated for display) */
             if (ctx->progress)
                 ctx->progress(PROGRESS_TOOL_RESULT, asst.tool_calls[i].name,
@@ -471,6 +481,20 @@ int agent_run(AgentContext *ctx) {
             entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
             free(stored);
             free(result);
+
+            /* V72: sentinel detected — store result, exit with code */
+            if (sentinel_exit >= 0) {
+                for (size_t j = 0; j < asst.tool_call_count; j++) {
+                    free(asst.tool_calls[j].id);
+                    free(asst.tool_calls[j].name);
+                    free(asst.tool_calls[j].arguments);
+                }
+                free(asst.tool_calls);
+                free(asst.content);
+                free(asst.metadata_json);
+                arena_destroy(a);
+                return sentinel_exit;
+            }
         }
 
         /* Cleanup heap copies */

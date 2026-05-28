@@ -98,7 +98,7 @@ static void test_daemon_mode_blocking(void) {
     char *r = tool_launch_agent_handler("{\"task\":\"blocking task\"}", &ctx);
     assert(r != NULL);
     /* Blocking mode returns sentinel */
-    assert(strstr(r, "SPAWN_BLOCKING:") != NULL);
+    assert(strncmp(r, "AGENT_EXIT_SPAWN:", 17) == 0);
     free(r);
 
     /* Verify queue entry */

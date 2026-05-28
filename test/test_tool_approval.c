@@ -28,8 +28,7 @@ static void test_approval_basic(void) {
         "{\"type\":\"whitelist_host\",\"payload\":{\"host\":\"api.example.com\"}}",
         e->user_data);
     assert(result);
-    assert(strstr(result, "pending approval") != NULL);
-    assert(strstr(result, "id=") != NULL);
+    assert(strncmp(result, "AGENT_EXIT_APPROVAL:", 20) == 0);
     free(result);
 
     /* Verify row in DB */

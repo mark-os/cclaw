@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_approval.h"
+#include "agent_exit.h"
 #include "db.h"
 #include <cJSON.h>
 #include <stdlib.h>
@@ -55,9 +56,7 @@ static char *tool_approval_handler(const char *arguments, void *user_data) {
         return strdup("error: failed to insert approval request");
 
     char buf[128];
-    snprintf(buf, sizeof(buf),
-             "pending approval (id=%lld) — waiting for admin",
-             (long long)id);
+    snprintf(buf, sizeof(buf), SENTINEL_APPROVAL "%lld", (long long)id);
     return strdup(buf);
 }
 

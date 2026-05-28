@@ -1,6 +1,14 @@
 # CClaw
 
-A minimal autonomous AI agent in C. Telegram, CLI, and web dashboard. SQLite for persistence. MicroQuickJS for runtime tool creation.
+A minimal, composable autonomous AI agent framework, inspired by Unix principles and written in C. Adaptable via plugins powered by MicroQuickJS. Configuration and session persistence via SQLite.
+
+## Design Philosophy
+
+- **Daemon as init** — schedules, forks, reaps. Never executes LLM logic.
+- **Agents as users** — each gets a home directory, own DB, own workspace.
+- **Processes are disposable** — one turn, then exit. Memory fully reclaimed.
+- **Exit codes as IPC** — agents signal intent, daemon reads details from DB.
+- **Config via environment** — injected at fork, immutable for process lifetime.
 
 ## Architecture
 

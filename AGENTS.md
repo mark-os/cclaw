@@ -4,32 +4,67 @@
 
 CClaw is a **minimal** autonomous AI agent in C. Every line of code must earn its place.
 
+**Unix Principles**
+
+CClaw is designed around Unix philosophy:
+- Daemon as init system — schedules, forks, reaps. Never executes LLM logic.
+- Agents as isolated users — each has a home directory (`agents/<name>/`), own DB, own workspace.
+- Processes are cheap and disposable — one turn, then exit. Memory fully reclaimed.
+- Communication via exit codes — agents signal intent (0=done, 2=spawn, 3=approval, 4=config), daemon reads details from agent DB post-reap.
+- Config via environment — daemon injects `CCLAW_*` env vars at fork. No config files in agent processes.
+- Pipes for logging — stdout/stderr piped to log collector, written to journal.db.
+- Trust the binary, sandbox the children — agent process is trusted C code; shell/mjs children are untrusted (namespace-sandboxed).
+
 **Inspiration**
 
 CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and session tree model, and from *OpenClaw* (`reference/openclaw`) for autonomy features, security patterns, and multi-channel integration. It also learns from *nullclaw* (`reference/nullclaw`), a Zig clone of OpenClaw, and from *Letta* (`reference/letta`) for stateful agent design and persistent memory patterns. CClaw does not try to be everything to everyone — it serves its creator Mark Ostroth. It will borrow C libraries, link dynamically to system curl, vendor what makes sense, and do whatever it takes to produce a simple, usable, excellent autonomous agent.
 
 **Principles:**
-- Simple over clever. Blocking I/O. Threads over callbacks. No event loops.
-- SQLite is the backbone — sessions, history, search, sub-agent coordination.
-- Self-modifying via MicroQuickJS — agent can define new tools at runtime.
+- Simple over clever. Blocking I/O. Threads over callbacks.
+- 3-DB SQLite backbone — daemon.db (policy), agent.db (sessions/state), journal.db (logs).
+- Self-augmenting via MicroQuickJS plugin system — agents load JS extensions from workspace at startup.
 - One tool at a time during development. Prove each layer works before adding the next.
-- Reference Pi for agent loop patterns. Reference OpenClaw for integration and autonomy.
+- No backward compatibility. No migrations. No users yet — move fast, break things.
+
+## Architecture (3-DB Split)
+
+```
+daemon.db (daemon-owned)          Per-agent agent.db              journal.db (collector-owned)
+├── agents registry               ├── sessions                    └── log (all stdout/stderr)
+├── agent_config (policy)         ├── entries (split-column)
+├── providers                     ├── inbox
+├── kv (encrypted secrets)        ├── js_tools
+├── channel_bindings              ├── memory_blocks
+├── spawn_queue                   └── kv (local prefs only)
+├── cron_jobs
+└── approvals
+```
+
+See [REFACTOR.md](REFACTOR.md) for architecture diagram and [specs/schema.md](specs/schema.md) for full DDL.
 
 ## Target Platforms
 
 - **Primary dev**: EC2 t4g.small (ARM64, Amazon Linux 2023)
 - **Secondary dev**: Chromebook (Linux container, ARM64 or x86_64)
 - **Production deploy**: any Linux box — small EC2 instances, embedded SoCs, old and new architectures (ARM64, ARMv7, ARMv5TE, x86_64, RISC-V)
-- **Known target**: Pogoplug V4 (ARMv5TE, 128MB RAM, Debian Bookworm armel, kernel 6.19.9-kirkwood-tld-1, landlock NOT compiled in — recompile kernel to enable)
+- **Known target**: Pogoplug V4 (ARMv5TE, 128MB RAM, Debian Bookworm armel)
 
-**Build/release considerations**: CClaw vendors everything except libcurl (dynamic link to system `libcurl.so`). Multi-arch releases need per-platform builds with the target's cross-compiler + matching libcurl. Plan: static binary where possible, or minimal `.deb`/`.tar.gz` per arch with curl as the sole runtime dependency.
+**Build/release considerations**: CClaw vendors everything except libcurl (dynamic link to system `libcurl.so`). Multi-arch releases need per-platform builds with the target's cross-compiler + matching libcurl.
 
 ## Memory Model
 
 - **Session**: heap-owned growable message array. Each message owns its strings via `malloc`. Only the active session branch is in memory — SQLite holds everything else.
 - **Per-turn Arena**: 512KB scratch for LLM request/response JSON, tool output, parsing. Created fresh each turn, destroyed after.
-- **Config Arena**: small (4KB), process lifetime, read-only after load.
+- **Config**: loaded once from env vars at process start. Immutable for process lifetime.
 - **AgentContext**: per-turn struct referencing `{session, arena, config}`. Passed to agent/llm functions.
+
+## Security Model
+
+See [specs/security.md](specs/security.md) for full details.
+
+- **Agent process**: trusted binary. `setrlimit` (kernel-enforced) + `http_check_policy()` (app-level). Optional landlock as defense-in-depth.
+- **Shell children**: untrusted. Namespace sandbox + transparent credential proxy. See [specs/shell-networking.md](specs/shell-networking.md).
+- **Secrets**: encrypted in daemon.db (ChaCha20-Poly1305). Decrypted by daemon, injected to agent at fork, cleared from env immediately.
 
 ## Code Style
 
@@ -48,8 +83,9 @@ CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and sessio
 src/           C source files
 include/       C headers (public API for each module)
 vendor/        Vendored libs (cJSON, sqlite3, civetweb, mquickjs)
+templates/     Schema SQL, system prompts, embedded text (build-time → templates.h)
 test/          Test files (test_*.c)
-specs/         Detailed reference docs (schema, daemon, memory, providers)
+specs/         Detailed reference docs (schema, daemon, memory, providers, security, shell-networking)
 reference/     Pi, OpenClaw, nullclaw, Letta clones (gitignored)
 build/         Build output (gitignored)
 ```
@@ -58,7 +94,9 @@ build/         Build output (gitignored)
 
 ```bash
 make              # native build (ARM64 or x86_64)
-make test         # run tests
+make test         # unit tests (fast, no network)
+make test-integration  # mock-server tests
+make test-e2e     # live LLM tests (needs API key)
 make clean        # remove build/
 ```
 
@@ -67,15 +105,9 @@ make clean        # remove build/
 ```bash
 # Minimal — just needs an API key (defaults to OpenRouter + DeepSeek V4 Flash)
 export OPENROUTER_API_KEY="sk-or-v1-..."
-./build/cclaw
-
-# With config file
-./build/cclaw config.json
-
-# CLI mode (no daemon, stdin/stdout)
-./build/cclaw --cli
-
-# Multiple instances can share the same SQLite DB (WAL mode)
+./build/cclaw              # daemon mode (Telegram, web, cron, forks agents)
+./build/cclaw --cli        # standalone CLI (opens agent DB directly, no daemon)
+./build/cclaw --cli --debug  # raw LLM req/resp JSON to stderr
 ```
 
 ## Dependencies
@@ -84,13 +116,12 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 |-----|---------|-----------|
 | cJSON | JSON parsing | Yes |
 | SQLite 3.53 | Persistence, FTS5, JSON functions | Yes |
-| libcurl | HTTP client (LLM API, Telegram, WhatsApp) | System (dynamic link) |
+| libcurl | HTTP client (LLM API, Telegram) | System (dynamic link) |
 | civetweb | Embedded HTTP server (webhooks, dashboard) | Yes |
-| MicroQuickJS | JS scripting engine (runtime tool creation) | Yes |
+| MicroQuickJS | JS plugin engine (runtime tool creation, extensions) | Yes |
 
 ## LLM Provider
 
 Default: OpenRouter → DeepSeek V4 Flash (`deepseek/deepseek-v4-flash`).
 
-All providers use the OpenAI-compatible chat completions format. Switch provider by changing `base_url` and `api_key` in config. Env var `OPENROUTER_API_KEY` is all you need to start.
-
+All providers use the OpenAI-compatible chat completions format. Switch provider by setting `provider.base_url` and `provider.api_key` in daemon.db kv. Env var `OPENROUTER_API_KEY` is all you need to start.

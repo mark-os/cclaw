@@ -51,14 +51,13 @@ static int test_bootstrap_creates_ephemeral(void) {
     int64_t sid = daemon_bootstrap(db);
     if (sid <= 0) { db_close(db); chdir(orig_cwd); FAIL("daemon_bootstrap should create session"); }
 
-    /* Verify inbox has a message */
-    int count = inbox_count(db, sid);
-    assert(count == 1);
-
-    /* Verify session has agent_name starting with "ephemeral-" */
+    /* Verify inbox has a message (in agent DB, not daemon DB — T199) */
     char *agent_name = session_get_agent_name(db, sid);
     assert(agent_name != NULL);
     assert(strncmp(agent_name, "ephemeral-", 10) == 0);
+
+    int count = daemon_inbox_count(agent_name, sid);
+    assert(count == 1);
 
     /* T196: Verify config in daemon.db agent_config table (no agent.json) */
     AgentConfig *ac = agent_config_load_db(db, agent_name);

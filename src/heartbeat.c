@@ -4,6 +4,7 @@
 #include "daemon.h"
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 static pthread_t hb_thread;
@@ -28,7 +29,13 @@ static void inject_heartbeat(void) {
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         int64_t sid = sqlite3_column_int64(stmt, 0);
-        inbox_insert(hb_db, sid, "heartbeat", HEARTBEAT_PROMPT);
+        char *aname = session_get_agent_name(hb_db, sid);
+        if (aname) {
+            daemon_inbox_insert(aname, sid, "heartbeat", HEARTBEAT_PROMPT);
+            free(aname);
+        } else {
+            inbox_insert(hb_db, sid, "heartbeat", HEARTBEAT_PROMPT);
+        }
         daemon_signal_session(sid);
     }
     sqlite3_finalize(stmt);

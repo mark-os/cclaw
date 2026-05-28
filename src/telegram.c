@@ -1070,7 +1070,10 @@ static void handle_approval_callback(const char *data, int64_t chat_id, const ch
 
     /* Post result to agent inbox (V25) */
     if (a->session_id > 0) {
-        inbox_insert(g_db, a->session_id, "approval", inbox_msg);
+        if (a->agent_name)
+            daemon_inbox_insert(a->agent_name, a->session_id, "approval", inbox_msg);
+        else
+            inbox_insert(g_db, a->session_id, "approval", inbox_msg);
         /* Transition waiting→idle and signal daemon to wake agent */
         const char *wake_sql =
             "UPDATE sessions SET state='idle' WHERE id=? AND state='waiting';";
@@ -1181,7 +1184,15 @@ static void process_message(cJSON *msg) {
     }
 
     /* Write to inbox and signal daemon */
-    inbox_insert(g_db, session_id, "telegram", text->valuestring);
+    {
+        char *aname = session_get_agent_name(g_db, session_id);
+        if (aname) {
+            daemon_inbox_insert(aname, session_id, "telegram", text->valuestring);
+            free(aname);
+        } else {
+            inbox_insert(g_db, session_id, "telegram", text->valuestring);
+        }
+    }
     daemon_signal_session(session_id);
 }
 

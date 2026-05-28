@@ -67,4 +67,13 @@ void daemon_token_usage_add(int tokens);
 int daemon_token_usage_hourly(void);
 void daemon_token_usage_reset(void);
 
+/* T199/V76: Daemon writes inbox to agent DB.
+ * Opens .cclaw/agents/<agent_name>/agent.db, inserts into inbox, closes.
+ * Returns inbox row id (>0) or -1 on error. */
+int64_t daemon_inbox_insert(const char *agent_name, int64_t session_id,
+                            const char *source, const char *payload);
+
+/* T199: Read inbox count from agent DB. Returns count or -1 on error. */
+int daemon_inbox_count(const char *agent_name, int64_t session_id);
+
 #endif

@@ -192,6 +192,38 @@ void daemon_token_usage_reset(void) {
     g_token_bucket_head = 0;
 }
 
+/* ── T199/V76: Daemon writes inbox to agent DB ─────────────────── */
+
+static char *agent_db_path(const char *agent_name) {
+    if (!agent_name) return NULL;
+    char buf[1024];
+    snprintf(buf, sizeof(buf), "agents/%s/agent.db", agent_name);
+    return strdup(buf);
+}
+
+int64_t daemon_inbox_insert(const char *agent_name, int64_t session_id,
+                            const char *source, const char *payload) {
+    char *path = agent_db_path(agent_name);
+    if (!path) return -1;
+    sqlite3 *adb = db_open_agent(path);
+    free(path);
+    if (!adb) return -1;
+    int64_t id = inbox_insert(adb, session_id, source, payload);
+    db_close(adb);
+    return id;
+}
+
+int daemon_inbox_count(const char *agent_name, int64_t session_id) {
+    char *path = agent_db_path(agent_name);
+    if (!path) return -1;
+    sqlite3 *adb = db_open_agent(path);
+    free(path);
+    if (!adb) return -1;
+    int count = inbox_count(adb, session_id);
+    db_close(adb);
+    return count;
+}
+
 /* ── Child tracking (T87, V24) ──────────────────────────────────── */
 
 typedef struct {
@@ -287,7 +319,11 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id) {
 
     /* V71/T194: reject fork if token rate limit exceeded */
     if (cfg->token_rate_limit > 0 && daemon_token_usage_hourly() >= cfg->token_rate_limit) {
-        inbox_insert(db, session_id, "system", "error: token rate limit exceeded");
+        char *aname = session_get_agent_name(db, session_id);
+        if (aname) {
+            daemon_inbox_insert(aname, session_id, "system", "error: token rate limit exceeded");
+            free(aname);
+        }
         return -1;
     }
 
@@ -488,7 +524,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
             if (sqlite3_step(sq_stmt) == SQLITE_ROW) {
                 int64_t sq_id = sqlite3_column_int64(sq_stmt, 0);
                 int64_t parent_sid = sqlite3_column_int64(sq_stmt, 1);
-                const char *tcid = (const char *)sqlite3_column_text(sq_stmt, 2);
+                (void)sqlite3_column_text(sq_stmt, 2); /* tool_call_id — used by T201 */
                 int bg = sqlite3_column_int(sq_stmt, 3);
 
                 /* Get sub-agent result from last assistant entry in child session */
@@ -509,15 +545,10 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
 
                 if (!bg) {
                     /* V13 blocking: post tool_result to parent inbox, wake parent */
-                    char *payload = malloc(strlen(result_text) + 128);
-                    if (payload) {
-                        if (tcid) {
-                            snprintf(payload, strlen(result_text) + 128,
-                                     "{\"tool_call_id\":\"%s\",\"result\":\"%s\"}", tcid, "see_content");
-                        }
-                        /* Post plain result as inbox message */
-                        inbox_insert(db, parent_sid, "sub-agent", result_text);
-                        free(payload);
+                    char *parent_agent = session_get_agent_name(db, parent_sid);
+                    if (parent_agent) {
+                        daemon_inbox_insert(parent_agent, parent_sid, "sub-agent", result_text);
+                        free(parent_agent);
                     } else {
                         inbox_insert(db, parent_sid, "sub-agent", result_text);
                     }
@@ -544,9 +575,14 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
         deliver_response(cfg, db, session_id);
 
         /* Check if more inbox items arrived while agent was running */
-        int pending = inbox_count(db, session_id);
-        if (pending > 0) {
-            daemon_signal_session(session_id);
+        {
+            char *aname = session_get_agent_name(db, session_id);
+            int pending = aname ? daemon_inbox_count(aname, session_id)
+                                : inbox_count(db, session_id);
+            free(aname);
+            if (pending > 0) {
+                daemon_signal_session(session_id);
+            }
         }
     }
 }
@@ -581,15 +617,22 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
         /* Create child session */
         char name_buf[128];
         snprintf(name_buf, sizeof(name_buf), "sub-agent:%lld", (long long)r->parent_session_id);
-        int64_t child_sid = session_create(db, name_buf, NULL,
+        char *parent_agent = session_get_agent_name(db, r->parent_session_id);
+        int64_t child_sid = session_create(db, name_buf, parent_agent,
                                            r->parent_session_id, r->depth);
         if (child_sid < 0) {
+            free(parent_agent);
             spawn_queue_mark(db, r->id, "error", 0);
             continue;
         }
 
         /* Insert task as user message in child session inbox */
-        inbox_insert(db, child_sid, "spawn", r->task);
+        if (parent_agent) {
+            daemon_inbox_insert(parent_agent, child_sid, "spawn", r->task);
+            free(parent_agent);
+        } else {
+            inbox_insert(db, child_sid, "spawn", r->task);
+        }
 
         /* Fork sub-agent process */
         char session_arg[64];
@@ -676,12 +719,19 @@ void daemon_startup_recovery(sqlite3 *db) {
 
     for (int i = 0; i < nwaiting; i++) {
         int64_t sid = waiting_ids[i];
-        int pending = inbox_count(db, sid);
+        char *aname = session_get_agent_name(db, sid);
+        int pending = aname ? daemon_inbox_count(aname, sid)
+                            : inbox_count(db, sid);
         if (pending <= 0) {
             /* No result — write error tool_result to inbox */
-            inbox_insert(db, sid, "recovery",
-                "error: sub-agent process lost during daemon restart");
+            if (aname)
+                daemon_inbox_insert(aname, sid, "recovery",
+                    "error: sub-agent process lost during daemon restart");
+            else
+                inbox_insert(db, sid, "recovery",
+                    "error: sub-agent process lost during daemon restart");
         }
+        free(aname);
         /* Transition to idle (daemon loop will fork if inbox has items) */
         const char *upd = "UPDATE sessions SET state='idle'"
             " WHERE id=? AND state='waiting';";
@@ -755,7 +805,7 @@ int64_t daemon_bootstrap(sqlite3 *db) {
     int64_t sid = session_create(db, "bootstrap", agent_name, -1, 0);
     if (sid < 0) { free(agent_name); return -1; }
 
-    inbox_insert(db, sid, "system",
+    daemon_inbox_insert(agent_name, sid, "system",
                  "Welcome! Let's set up your first CClaw agent. "
                  "What LLM provider would you like to use? "
                  "(OpenRouter is recommended — just need an API key)");
@@ -834,7 +884,11 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
                 int64_t sid;
                 while (read(rfd, &sid, sizeof(sid)) == sizeof(sid)) {
                     /* Check inbox has pending items before forking */
-                    if (inbox_count(db, sid) > 0) {
+                    char *aname = session_get_agent_name(db, sid);
+                    int has_inbox = aname ? daemon_inbox_count(aname, sid) > 0
+                                         : inbox_count(db, sid) > 0;
+                    free(aname);
+                    if (has_inbox) {
                         fork_agent(cfg, db, sid);
                     }
                 }

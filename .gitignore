@@ -33,3 +33,4 @@ src/src-map.txt
 
 # Runtime workspace (agent-created)
 workspace/
+.kiro/settings/

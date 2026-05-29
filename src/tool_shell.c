@@ -211,6 +211,16 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         /* V83: set proxy socket path for LD_PRELOAD lib (after CCLAW_* cleanup) */
         if (psock) setenv("CCLAW_PROXY_SOCK", psock, 1);
 
+        /* V88: inject secrets into shell child env */
+        if (user_data) {
+            ShellConfig *sc2 = (ShellConfig *)user_data;
+            for (size_t i = 0; i < sc2->secret_count; i++) {
+                char envname[256];
+                snprintf(envname, sizeof(envname), "CCLAW_SECRET_%s", sc2->secrets[i].name);
+                setenv(envname, sc2->secrets[i].value, 1);
+            }
+        }
+
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);
         _exit(127);
     }
@@ -286,6 +296,11 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         kill(-pid, SIGKILL);
         waitpid(pid, NULL, 0);
         output[out_len] = '\0';
+        /* V88: mask secrets in timeout output */
+        if (user_data) {
+            ShellConfig *sc3 = (ShellConfig *)user_data;
+            shell_mask_secrets(output, &out_len, SHELL_MAX_OUTPUT, sc3->secrets, sc3->secret_count);
+        }
         size_t needed = out_len + 128;
         char *result = malloc(needed);
         if (!result) { free(output); return strdup("error: timeout + OOM"); }
@@ -298,6 +313,12 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
 
 format_result:
     output[out_len] = '\0';
+
+    /* V88: mask secret values in output before returning */
+    if (user_data) {
+        ShellConfig *sc3 = (ShellConfig *)user_data;
+        shell_mask_secrets(output, &out_len, SHELL_MAX_OUTPUT, sc3->secrets, sc3->secret_count);
+    }
 
     int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
@@ -314,6 +335,9 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     if (!sc) return -1;
     sc->timeout = (default_timeout > 0) ? default_timeout : TOOL_SHELL_DEFAULT_TIMEOUT;
     sc->workspace = workspace;
+    sc->proxy_sock = NULL;
+    sc->secrets = NULL;
+    sc->secret_count = 0;
     int rc = tools_register(reg, "shell_exec",
                             "Execute a shell command and return stdout+stderr",
                             SHELL_PARAMS_JSON, tool_shell_handler, sc);
@@ -324,4 +348,103 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
         free(sc);
     }
     return rc;
+}
+
+/* V88: Collect CCLAW_SECRET_* env vars, clear from environment */
+ShellSecret *shell_secrets_collect(size_t *count) {
+    extern char **environ;
+    *count = 0;
+
+    /* Count matching vars */
+    size_t n = 0;
+    for (int i = 0; environ[i]; i++) {
+        if (strncmp(environ[i], "CCLAW_SECRET_", 13) == 0)
+            n++;
+    }
+    if (n == 0) return NULL;
+
+    ShellSecret *secrets = calloc(n, sizeof(ShellSecret));
+    if (!secrets) return NULL;
+
+    size_t idx = 0;
+    for (int i = 0; environ[i] && idx < n; ) {
+        if (strncmp(environ[i], "CCLAW_SECRET_", 13) == 0) {
+            char *eq = strchr(environ[i], '=');
+            if (eq) {
+                size_t namelen = (size_t)(eq - environ[i]) - 13;
+                secrets[idx].name = strndup(environ[i] + 13, namelen);
+                secrets[idx].value = strdup(eq + 1);
+                idx++;
+                /* Unset from env (modifies environ, don't increment i) */
+                char key[256];
+                size_t klen = (size_t)(eq - environ[i]);
+                if (klen < sizeof(key)) {
+                    memcpy(key, environ[i], klen);
+                    key[klen] = '\0';
+                    unsetenv(key);
+                } else {
+                    i++;
+                }
+            } else {
+                i++;
+            }
+        } else {
+            i++;
+        }
+    }
+    *count = idx;
+    return secrets;
+}
+
+void shell_secrets_free(ShellSecret *secrets, size_t count) {
+    if (!secrets) return;
+    for (size_t i = 0; i < count; i++) {
+        free(secrets[i].name);
+        free(secrets[i].value);
+    }
+    free(secrets);
+}
+
+/* V88: Replace secret values in output with [REDACTED:<name>] */
+void shell_mask_secrets(char *output, size_t *len, size_t cap,
+                        const ShellSecret *secrets, size_t secret_count) {
+    if (!secrets || secret_count == 0 || !output) return;
+
+    for (size_t s = 0; s < secret_count; s++) {
+        const char *val = secrets[s].value;
+        size_t vlen = strlen(val);
+        if (vlen == 0) continue;
+
+        /* Build replacement tag */
+        char tag[280];
+        int tlen = snprintf(tag, sizeof(tag), "[REDACTED:%s]", secrets[s].name);
+        if (tlen < 0 || (size_t)tlen >= sizeof(tag)) continue;
+        size_t taglen = (size_t)tlen;
+
+        /* Scan and replace in-place */
+        char *p = output;
+        while ((p = memmem(p, *len - (size_t)(p - output), val, vlen)) != NULL) {
+            size_t offset = (size_t)(p - output);
+            size_t tail = *len - offset - vlen;
+
+            if (taglen <= vlen) {
+                /* Replacement fits or shrinks */
+                memcpy(p, tag, taglen);
+                memmove(p + taglen, p + vlen, tail + 1);
+                *len = *len - vlen + taglen;
+            } else if (*len - vlen + taglen < cap) {
+                /* Replacement grows but fits in buffer */
+                memmove(p + taglen, p + vlen, tail + 1);
+                memcpy(p, tag, taglen);
+                *len = *len - vlen + taglen;
+            } else {
+                /* No room — truncate at this point */
+                memcpy(p, tag, taglen);
+                *len = offset + taglen;
+                output[*len] = '\0';
+                break;
+            }
+            p = output + offset + taglen;
+        }
+    }
 }

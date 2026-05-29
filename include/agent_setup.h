@@ -4,6 +4,7 @@
 #include "tools.h"
 #include "tool_js.h"
 #include "tool_file.h"
+#include "tool_shell.h"
 #include "tool_memory.h"
 #include "tool_approval.h"
 #include "tool_bootstrap.h"
@@ -30,6 +31,9 @@ typedef struct {
     AgentLaunchCtx launch_ctx;
     /* V83: credential proxy for shell children */
     ProxyContext proxy_ctx;
+    /* V88: secrets for shell injection + masking */
+    ShellSecret *secrets;
+    size_t secret_count;
 } AgentSetup;
 
 /* Mode flags for agent_setup_init */

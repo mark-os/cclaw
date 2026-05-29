@@ -19,13 +19,18 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     if (cfg->workspace)
         proxy_start(&setup->proxy_ctx, cfg->workspace, allowed_hosts, allowed_hosts_count);
 
+    /* V88: Collect secrets from env, clear from process env */
+    setup->secrets = shell_secrets_collect(&setup->secret_count);
+
     /* Shell — pass proxy socket path */
     tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace);
-    /* Inject proxy sock path into shell config */
+    /* Inject proxy sock path + secrets into shell config */
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
         sc->proxy_sock = proxy_sock_path(&setup->proxy_ctx);
+        sc->secrets = setup->secrets;
+        sc->secret_count = setup->secret_count;
     }
 
     /* File read/write — T118: allow workspace + session temp dir */
@@ -102,5 +107,6 @@ const ToolSchema *agent_setup_schemas(AgentSetup *setup, size_t *count) {
 void agent_setup_destroy(AgentSetup *setup) {
     proxy_stop(&setup->proxy_ctx);
     js_runtime_destroy(setup->js_rt);
+    shell_secrets_free(setup->secrets, setup->secret_count);
     tools_free(&setup->reg);
 }

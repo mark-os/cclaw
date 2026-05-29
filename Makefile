@@ -4,7 +4,7 @@ LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
 TEMPLATES := $(wildcard templates/*)
-SRC      := $(filter-out src/mjs_main.c,$(wildcard src/*.c))
+SRC      := $(filter-out src/mjs_main.c src/preload_net.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 DEP      := $(OBJ:.o=.d)
 
@@ -27,7 +27,7 @@ MJS_VENDOR_OBJ := $(BUILDDIR)/mjs_mquickjs.o $(BUILDDIR)/mjs_cutils.o $(BUILDDIR
 
 .PHONY: all build clean test test-integration test-all install
 
-all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs
+all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/libcclaw_net.so
 build: all
 
 $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
@@ -106,6 +106,9 @@ $(BUILDDIR)/mjs_main.o: src/mjs_main.c | $(BUILDDIR)/
 
 $(BUILDDIR)/mjs: $(BUILDDIR)/mjs_main.o $(MJS_VENDOR_OBJ) | $(BUILDDIR)/
 	$(CC) -std=c11 -o $@ $^ -lm
+
+$(BUILDDIR)/libcclaw_net.so: src/preload_net.c | $(BUILDDIR)/
+	$(CC) -std=c11 -Wall -Wextra -Werror -shared -fPIC -o $@ $< -ldl
 
 install: $(BUILDDIR)/mjs
 	install -d /usr/local/lib/cclaw

@@ -147,13 +147,13 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_CONTEXT_WINDOW");
     cfg->provider.context_window = v ? atoi(v) : 65536;
 
-    /* Workspace */
+    /* T223: Workspace — default under .cclaw/agents/default/ for zero-config CLI */
     v = getenv("CCLAW_WORKSPACE");
-    cfg->workspace = str_dup(v ? v : "./workspace");
+    cfg->workspace = str_dup(v ? v : ".cclaw/agents/default/workspace");
 
-    /* Agent DB path */
+    /* T223: Agent DB path — default under .cclaw/agents/default/ */
     v = getenv("CCLAW_AGENT_DB");
-    cfg->db_path = str_dup(v ? v : "agent.db");
+    cfg->db_path = str_dup(v ? v : ".cclaw/agents/default/agent.db");
 
     /* Scalars */
     v = getenv("CCLAW_MAX_ITERATIONS");

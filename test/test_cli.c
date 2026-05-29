@@ -1,6 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <stdlib.h>
 #include "cli.h"
 #include "config.h"
 #include "db.h"
@@ -67,11 +71,65 @@ static void test_cli_session_resume(void) {
     PASS();
 }
 
+/* T223: Verify CLI zero-config creates dirs + DB from scratch */
+static void test_cli_zero_config_startup(void) {
+    TEST(cli_zero_config_startup);
+
+    /* Clean slate */
+    system("rm -rf .cclaw_test_zc");
+
+    /* Simulate zero-config: chdir to temp dir, verify defaults create structure */
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof(cwd))) { FAIL("getcwd"); return; }
+    if (mkdir(".cclaw_test_zc", 0755) != 0) { FAIL("mkdir"); return; }
+    if (chdir(".cclaw_test_zc") != 0) { FAIL("chdir"); return; }
+
+    /* config_load_from_env with no env vars → defaults */
+    unsetenv("CCLAW_WORKSPACE");
+    unsetenv("CCLAW_AGENT_DB");
+    Config *cfg = config_load_from_env();
+    if (!cfg) { chdir(cwd); system("rm -rf .cclaw_test_zc"); FAIL("config_load_from_env"); return; }
+
+    /* Verify defaults match T223 spec */
+    if (strcmp(cfg->workspace, ".cclaw/agents/default/workspace") != 0) {
+        chdir(cwd); system("rm -rf .cclaw_test_zc"); config_free(cfg);
+        FAIL("workspace default wrong"); return;
+    }
+    if (strcmp(cfg->db_path, ".cclaw/agents/default/agent.db") != 0) {
+        chdir(cwd); system("rm -rf .cclaw_test_zc"); config_free(cfg);
+        FAIL("db_path default wrong"); return;
+    }
+
+    /* Verify workspace_init creates the directory */
+    workspace_init(cfg);
+    struct stat st;
+    if (stat(".cclaw/agents/default/workspace", &st) != 0 || !S_ISDIR(st.st_mode)) {
+        chdir(cwd); system("rm -rf .cclaw_test_zc"); config_free(cfg);
+        FAIL("workspace dir not created"); return;
+    }
+
+    /* Verify DB can be opened (ensure_parent_dir + db_open_agent) */
+    system("mkdir -p .cclaw/agents/default");
+    sqlite3 *db = db_open_agent(".cclaw/agents/default/agent.db");
+    if (!db) {
+        chdir(cwd); system("rm -rf .cclaw_test_zc"); config_free(cfg);
+        FAIL("db_open_agent failed"); return;
+    }
+    db_close(db);
+
+    config_free(cfg);
+    chdir(cwd);
+    system("rm -rf .cclaw_test_zc");
+    PASS();
+}
+
 int main(void) {
+    alarm(10);
     printf("test_cli:\n");
     test_cli_null_config();
     test_cli_no_api_key();
     test_cli_session_resume();
+    test_cli_zero_config_startup();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

@@ -35,8 +35,8 @@ static void test_env_defaults(void) {
     assert(strcmp(cfg->provider.model, "deepseek/deepseek-v4-flash") == 0);
     assert(cfg->provider.max_tokens == 4096);
     assert(cfg->provider.context_window == 65536);
-    assert(strcmp(cfg->workspace, "./workspace") == 0);
-    assert(strcmp(cfg->db_path, "agent.db") == 0);
+    assert(strcmp(cfg->workspace, ".cclaw/agents/default/workspace") == 0);
+    assert(strcmp(cfg->db_path, ".cclaw/agents/default/agent.db") == 0);
     assert(cfg->max_iterations == 25);
     assert(cfg->shell_timeout == 30);
     assert(cfg->token_rate_limit == 1000000);
@@ -118,7 +118,7 @@ static void test_render_workspace_var(void) {
     cfg->system_prompt = strdup("ws={workspace} sid={session_id} d={date}");
     char *rendered = config_render_system_prompt(cfg, 99);
     assert(rendered != NULL);
-    assert(strstr(rendered, "ws=./workspace") != NULL);
+    assert(strstr(rendered, "ws=.cclaw/agents/default/workspace") != NULL);
     assert(strstr(rendered, "sid=99") != NULL);
     /* date is dynamic but should be YYYY-MM-DD format */
     assert(strstr(rendered, "d=20") != NULL);

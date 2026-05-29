@@ -15,8 +15,18 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     memset(setup, 0, sizeof(*setup));
     tools_init(&setup->reg);
 
-    /* Shell */
+    /* V83: Start credential proxy thread for shell children */
+    if (cfg->workspace)
+        proxy_start(&setup->proxy_ctx, cfg->workspace, allowed_hosts, allowed_hosts_count);
+
+    /* Shell — pass proxy socket path */
     tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace);
+    /* Inject proxy sock path into shell config */
+    ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
+    if (shell_entry && shell_entry->user_data) {
+        ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
+        sc->proxy_sock = proxy_sock_path(&setup->proxy_ctx);
+    }
 
     /* File read/write — T118: allow workspace + session temp dir */
     char tmp_dir[64];
@@ -90,6 +100,7 @@ const ToolSchema *agent_setup_schemas(AgentSetup *setup, size_t *count) {
 }
 
 void agent_setup_destroy(AgentSetup *setup) {
+    proxy_stop(&setup->proxy_ctx);
     js_runtime_destroy(setup->js_rt);
     tools_free(&setup->reg);
 }

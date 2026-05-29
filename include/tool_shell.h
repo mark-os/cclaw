@@ -9,6 +9,7 @@
 typedef struct {
     int timeout;
     const char *workspace;  /* agent workspace (for reference; landlock enforces access) */
+    const char *proxy_sock; /* V83: path to .proxy.sock (NULL if proxy not started) */
 } ShellConfig;
 
 /* Register shell_exec tool into registry.

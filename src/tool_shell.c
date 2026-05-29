@@ -177,6 +177,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
 
         /* V82/V37: namespace sandbox — graceful fallback if unavailable */
         const char *ws = user_data ? ((ShellConfig *)user_data)->workspace : NULL;
+        const char *psock = user_data ? ((ShellConfig *)user_data)->proxy_sock : NULL;
         if (shell_apply_namespace(ws) != 0) {
             /* Fallback: continue unsandboxed (log to stderr = captured in output) */
             fprintf(stderr, "[cclaw] warning: namespace sandbox unavailable, "
@@ -206,6 +207,9 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
                 i++;
             }
         }
+
+        /* V83: set proxy socket path for LD_PRELOAD lib (after CCLAW_* cleanup) */
+        if (psock) setenv("CCLAW_PROXY_SOCK", psock, 1);
 
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);
         _exit(127);

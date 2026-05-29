@@ -9,6 +9,7 @@
 #include "tool_bootstrap.h"
 #include "tool_agent.h"
 #include "http_policy.h"
+#include "proxy.h"
 #include "config.h"
 #include "db.h"
 
@@ -27,6 +28,8 @@ typedef struct {
     ToolApprovalCtx approval_ctx;
     ToolBootstrapCtx bootstrap_ctx;
     AgentLaunchCtx launch_ctx;
+    /* V83: credential proxy for shell children */
+    ProxyContext proxy_ctx;
 } AgentSetup;
 
 /* Mode flags for agent_setup_init */

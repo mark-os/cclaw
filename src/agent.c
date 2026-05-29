@@ -264,8 +264,148 @@ static char *build_metadata(const Config *cfg, const LlmResponse *resp) {
     return json;
 }
 
+/* V87/T224: Partial-turn resume — execute remaining tool_calls from an
+ * incomplete batch (daemon resolved PENDING, agent re-forked with remaining
+ * calls unexecuted). Returns: 0 = nothing to resume, positive = sentinel exit,
+ * -1 = error, -2 = resumed successfully (continue to LLM loop). */
+static int partial_turn_resume(AgentContext *ctx) {
+    int branch_count = 0;
+    Entry *branch = session_get_branch(ctx->db, ctx->session_id, &branch_count);
+    if (!branch || branch_count == 0) {
+        entry_branch_free(branch, branch_count);
+        return 0;
+    }
+
+    /* Find last assistant entry with tool_calls at the tail */
+    int last_asst = -1;
+    for (int i = branch_count - 1; i >= 0; i--) {
+        if (branch[i].message.role == ROLE_ASSISTANT && branch[i].message.tool_calls) {
+            last_asst = i;
+            break;
+        }
+        if (branch[i].message.role == ROLE_USER) break;
+    }
+    if (last_asst < 0) {
+        entry_branch_free(branch, branch_count);
+        return 0;
+    }
+
+    /* Collect existing tool_results after this assistant */
+    int results_found = 0;
+    int has_pending = 0;
+    for (int i = last_asst + 1; i < branch_count; i++) {
+        if (branch[i].message.role != ROLE_TOOL) break;
+        results_found++;
+        if (branch[i].message.tool_result && branch[i].message.tool_result->content &&
+            strcmp(branch[i].message.tool_result->content, "PENDING") == 0)
+            has_pending = 1;
+    }
+
+    int expected = (int)branch[last_asst].message.tool_call_count;
+    if (results_found >= expected && !has_pending) {
+        /* All results present, no PENDING — nothing to resume */
+        entry_branch_free(branch, branch_count);
+        return 0;
+    }
+
+    /* V17 case 1: PENDING entry with no resolution → replace with error */
+    if (has_pending) {
+        const char *upd_sql =
+            "UPDATE entries SET content='error: daemon did not deliver result'"
+            " WHERE session_id=? AND content='PENDING' AND role=3;";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(ctx->db, upd_sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(stmt, 1, ctx->session_id);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+        entry_branch_free(branch, branch_count);
+        return -2; /* resumed — continue to LLM loop */
+    }
+
+    /* V87: results missing (no PENDING) → execute remaining tool_calls */
+    /* Build set of tool_call_ids that already have results */
+    const ToolCall *tool_calls = branch[last_asst].message.tool_calls;
+
+    /* Collect IDs of existing results */
+    char **resolved_ids = NULL;
+    if (results_found > 0) {
+        resolved_ids = malloc((size_t)results_found * sizeof(char *));
+        int ri = 0;
+        for (int i = last_asst + 1; i < branch_count && ri < results_found; i++) {
+            if (branch[i].message.role != ROLE_TOOL) break;
+            if (branch[i].message.tool_result && branch[i].message.tool_result->tool_call_id)
+                resolved_ids[ri] = branch[i].message.tool_result->tool_call_id;
+            else
+                resolved_ids[ri] = NULL;
+            ri++;
+        }
+    }
+
+    int64_t turn_id = db_next_turn_id(ctx->db, ctx->session_id);
+    int sentinel_exit = -1;
+
+    for (int i = 0; i < expected; i++) {
+        /* Skip if this tool_call already has a result */
+        int already_resolved = 0;
+        for (int r = 0; r < results_found; r++) {
+            if (resolved_ids && resolved_ids[r] && tool_calls[i].id &&
+                strcmp(resolved_ids[r], tool_calls[i].id) == 0) {
+                already_resolved = 1;
+                break;
+            }
+        }
+        if (already_resolved) continue;
+
+        /* Dispatch this tool_call */
+        char *result = dispatch_tool(ctx, &tool_calls[i]);
+
+        /* Check for sentinel exit codes */
+        if (strncmp(result, SENTINEL_SPAWN, strlen(SENTINEL_SPAWN)) == 0)
+            sentinel_exit = AGENT_EXIT_SPAWN;
+        else if (strncmp(result, SENTINEL_APPROVAL, strlen(SENTINEL_APPROVAL)) == 0)
+            sentinel_exit = AGENT_EXIT_APPROVAL;
+        else if (strncmp(result, SENTINEL_CONFIG, strlen(SENTINEL_CONFIG)) == 0)
+            sentinel_exit = AGENT_EXIT_CONFIG;
+
+        if (ctx->progress)
+            ctx->progress(PROGRESS_TOOL_RESULT, tool_calls[i].name, result, ctx->progress_data);
+
+        if (sentinel_exit >= 0) {
+            ToolResult tr = {.tool_call_id = tool_calls[i].id, .content = "PENDING"};
+            Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                                .tool_name = tool_calls[i].name};
+            entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
+            free(result);
+            free(resolved_ids);
+            entry_branch_free(branch, branch_count);
+            return sentinel_exit;
+        }
+
+        char *stored = truncate_and_spill(result, ctx->session_id, tool_calls[i].id);
+        ToolResult tr = {.tool_call_id = tool_calls[i].id,
+                         .content = stored ? stored : result};
+        int err = (result[0] == 'e' && strncmp(result, "error:", 6) == 0);
+        Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                            .tool_name = tool_calls[i].name, .is_error = err};
+        entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);
+        free(stored);
+        free(result);
+    }
+
+    free(resolved_ids);
+    entry_branch_free(branch, branch_count);
+    return -2; /* resumed — continue to LLM loop */
+}
+
 int agent_run(AgentContext *ctx) {
     if (!ctx || !ctx->db || !ctx->cfg) return -1;
+
+    /* V87/T224: Check for incomplete tool_call batch and resume */
+    int resume_rc = partial_turn_resume(ctx);
+    if (resume_rc > 0) return resume_rc; /* sentinel exit (spawn/approval/config) */
+    if (resume_rc == -1) return -1;      /* error */
+    /* resume_rc == 0 or -2: proceed to LLM loop */
 
     /* V45: plan-only retry (max 1) */
     int plan_retried = 0;

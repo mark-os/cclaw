@@ -90,6 +90,16 @@ reference/     Pi, OpenClaw, nullclaw, Letta clones (gitignored)
 build/         Build output (gitignored)
 ```
 
+## Testing Guidelines
+
+Tests must never hang. Follow these rules:
+
+- **`alarm(N)`** — every test binary's `main()` must call `alarm(10)` (or similar) as a hard kill if stuck.
+- **No real network** — unit tests (`make test`) must not connect to real hosts. Use UDS-based mocks or loopback.
+- **Timeout on `accept()`** — any mock server thread must set `SO_RCVTIMEO` on the listening socket so it doesn't block forever if the client crashes before connecting.
+- **No backward-compatible code** — there are no users yet. No migrations, no deprecation shims, no version checks. Delete old code, don't wrap it.
+- **Subprocess tests** — if forking a child that execs something (python, sh), set `alarm()` in the child too, and use `waitpid` with awareness that the child may die.
+
 ## Building
 
 ```bash

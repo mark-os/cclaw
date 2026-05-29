@@ -71,3 +71,4 @@ Task `x` only if:
 - No sub-agents. No parallel workers. Main thread only.
 - No progress dashboards. `cat SPEC.md | grep §T` is the dashboard.
 - No speculative work beyond chosen task scope.
+- No backward-compatible code. There are no users yet. No migrations, no deprecation shims, no version checks. Delete old code, don't wrap it.

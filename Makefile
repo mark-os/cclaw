@@ -17,15 +17,17 @@ VENDOR_OBJ := $(BUILDDIR)/cJSON.o $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
               $(BUILDDIR)/mqjs_libm.o $(BUILDDIR)/mqjs_stdlib.o $(BUILDDIR)/monocypher.o
 
 INTEG_SRC := $(wildcard test/test_integration_*.c)
-TEST_SRC  := $(filter-out $(INTEG_SRC),$(wildcard test/test_*.c))
+E2E_SRC   := $(wildcard test/test_e2e_*.c)
+TEST_SRC  := $(filter-out $(INTEG_SRC) $(E2E_SRC),$(wildcard test/test_*.c))
 TEST_BIN  := $(patsubst test/%.c,$(BUILDDIR)/%,$(TEST_SRC))
 INTEG_BIN := $(patsubst test/%.c,$(BUILDDIR)/%,$(INTEG_SRC))
+E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
 
 # mjs standalone binary objects
 MJS_VENDOR_OBJ := $(BUILDDIR)/mjs_mquickjs.o $(BUILDDIR)/mjs_cutils.o $(BUILDDIR)/mjs_dtoa.o \
                   $(BUILDDIR)/mjs_libm.o $(BUILDDIR)/mjs_stdlib.o
 
-.PHONY: all build clean test test-integration test-all install
+.PHONY: all build clean test test-integration test-e2e test-all install
 
 all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/libcclaw_net.so
 build: all
@@ -122,6 +124,9 @@ test: $(TEST_BIN)
 
 test-integration: $(INTEG_BIN)
 	@for t in $(INTEG_BIN); do echo "--- $$t ---"; ./$$t || exit 1; done
+
+test-e2e: $(E2E_BIN)
+	@for t in $(E2E_BIN); do echo "--- $$t ---"; ./$$t || exit 1; done
 
 test-all: test test-integration
 

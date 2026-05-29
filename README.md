@@ -1,9 +1,10 @@
 # CClaw
 
-A minimal, composable autonomous AI agent framework, inspired by Unix principles and written in C. Adaptable via plugins powered by MicroQuickJS. Configuration and session persistence via SQLite.
+A minimal autonomous AI agent runtime in C. Turn-based execution, SQLite persistence, Unix process model. Adaptable via MicroQuickJS plugins.
 
 ## Design Philosophy
 
+- **Agent runtime first** — excellent at running agent loops across providers.
 - **Daemon as init** — schedules, forks, reaps. Never executes LLM logic.
 - **Agents as users** — each gets a home directory, own DB, own workspace.
 - **Processes are disposable** — one turn, then exit. Memory fully reclaimed.
@@ -15,44 +16,43 @@ A minimal, composable autonomous AI agent framework, inspired by Unix principles
 ```
 ┌──────────┐  ┌──────────────┐  ┌──────────┐  ┌──────────────┐
 │   CLI    │  │ Telegram poll│  │ Civetweb │  │  Cron thread │
-│(separate │  │   (thread)   │  │(webhooks)│  │   (thread)   │
+│(standalone│  │   (thread)   │  │(webhooks)│  │   (thread)   │
 │ process) │  └──────┬───────┘  └────┬─────┘  └──────┬───────┘
 └────┬─────┘         │               │               │
      │               ▼               ▼               ▼
      │        ┌─────────────────────────────────────────┐
-     │        │  inbox_insert(session_id) + signal pipe │
+     │        │         inbox_insert + signal pipe      │
      │        └──────────────────┬──────────────────────┘
      │                           │
      │        ┌──────────────────▼──────────────────────┐
      │        │              DAEMON                      │
      │        │  epoll: signal pipe + SIGCHLD self-pipe  │
      │        │  fork agent on inbox signal              │
-     │        │  reap children, deliver responses        │
+     │        │  reap children, dispatch on exit code    │
      │        └──────┬─────────────────┬────────────────┘
      │               │                 │
      │     ┌─────────▼───┐   ┌────────▼────────┐
      │     │ Agent proc  │   │  Agent proc     │
      │     │ (forked)    │   │  (forked)       │
-     │     │ landlock    │   │  landlock       │
      │     │ setrlimit   │   │  setrlimit      │
      │     │ drain inbox │   │  drain inbox    │
      │     │ LLM loop    │   │  LLM loop       │
-     │     │ exit        │   │  exit           │
+     │     │ exit(code)  │   │  exit(code)     │
      │     └─────────────┘   └─────────────────┘
      │
-     │  (no daemon? CLI runs agent loop directly)
+     │  (CLI runs agent loop directly — no daemon needed)
      ▼
 ┌─────────────────────────────────────────────────────────┐
-│                     SQLite (WAL)                         │
-│  sessions · entries · inbox · cron · FTS5               │
+│                  3-DB SQLite (WAL)                       │
+│  cclaw.db (registry/config) · agent.db · journal.db     │
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Daemon mode** (`--daemon`): epoll loop forks isolated agent processes per session turn. The daemon never executes LLM logic — it only schedules, forks, and reaps.
+**Daemon mode** (`--daemon`): epoll loop forks isolated agent processes per session turn. Dispatches on exit code (0=deliver, 2=spawn, 3=approval, 4=config).
 
-**CLI mode** (default): single process, runs the agent loop directly. Detects if a daemon is running via named FIFO — if so, delegates sub-agent spawning to the daemon.
+**CLI mode** (default): single process, runs the agent loop directly against `~/.cclaw/agents/default/agent.db`.
 
-**Agent processes**: sandboxed with landlock (workspace-only writes) and setrlimit (memory/CPU caps). Drain inbox → LLM loop → write response → exit.
+**Agent processes**: sandboxed with setrlimit (memory/CPU caps). Drain inbox → LLM loop → write response → exit with intent code.
 
 ## Requirements
 
@@ -68,21 +68,44 @@ make
 ./build/cclaw
 ```
 
+That's it. First run creates `~/.cclaw/` with everything needed.
+
+## Configuration
+
+Config resolution (highest priority first):
+
+1. `CCLAW_*` env vars (works everywhere: Lambda, Workers, daemon fork)
+2. `~/.cclaw/cclaw.db` kv table (persistent, encrypted secrets)
+3. `OPENROUTER_API_KEY` env var (system-level fallback)
+4. `~/.cclaw/config.json` (optional convenience file)
+
+```
+~/.cclaw/
+├── cclaw.db           ← system registry + config
+├── .cclaw_key         ← encryption key (mode 0600)
+├── journal.db         ← all logs
+├── config.json        ← optional fallback
+└── agents/
+    └── default/
+        ├── agent.db   ← sessions, entries, memory
+        └── workspace/ ← agent-created files
+```
+
 ## Usage
 
 ```bash
-./build/cclaw                    # interactive CLI (default)
+./build/cclaw                    # interactive CLI (default agent)
 ./build/cclaw -p "hello"         # single-turn: print response and exit
 ./build/cclaw -s 3               # resume session 3
 ./build/cclaw --new              # force new session
 ./build/cclaw --daemon           # run as daemon (telegram, web, cron)
 ./build/cclaw --debug            # show raw LLM request/response JSON
-./build/cclaw config.json        # explicit config file
 ./build/cclaw --help             # show all options
 ```
 
 ## Documentation
 
 - [SPEC.md](SPEC.md) — full specification, invariants, and task list
-- [specs/](specs/) — detailed reference docs (schema, daemon, memory, providers)
+- [REFACTOR.md](REFACTOR.md) — architecture decisions, DB split, exit code protocol
+- [specs/](specs/) — detailed reference docs (schema, daemon, memory, providers, security)
 - [AGENTS.md](AGENTS.md) — project ethos, coding conventions, build instructions

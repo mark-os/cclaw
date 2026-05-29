@@ -43,9 +43,9 @@ void db_set_agent_pragmas(sqlite3 *db) {
     sqlite3_exec(db, "PRAGMA cache_size=-512;", NULL, NULL, NULL);
 }
 
-/* T195/V73: Open daemon.db — agents registry, config, providers, channels, approvals */
-sqlite3 *db_open_daemon(const char *path) {
-    sqlite3 *db = db_open_with_schema(path, SCHEMA_DAEMON_SQL, "db_open_daemon");
+/* T195/V73: Open cclaw.db — agents registry, config, providers, channels, approvals */
+sqlite3 *db_open_cclaw(const char *path) {
+    sqlite3 *db = db_open_with_schema(path, SCHEMA_DAEMON_SQL, "db_open_cclaw");
     if (!db) return NULL;
     /* Seed kv defaults on first run */
     sqlite3_stmt *cnt;
@@ -89,7 +89,7 @@ sqlite3 *db_open_journal(const char *path) {
 }
 
 /* T207: Legacy unified opener — runs daemon + agent schemas into one DB.
- * Used by tests for convenience. Production code uses db_open_daemon/db_open_agent. */
+ * Used by tests for convenience. Production code uses db_open_cclaw/db_open_agent. */
 sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(path, &db);
@@ -1108,7 +1108,7 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
     return consumed;
 }
 
-/* T88/T202: Spawn queue — daemon.db only (V73). Daemon inserts inline in reap_children. */
+/* T88/T202: Spawn queue — cclaw.db only (V73). Daemon inserts inline in reap_children. */
 
 SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count) {
     *count = 0;

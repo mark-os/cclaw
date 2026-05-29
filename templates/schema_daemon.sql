@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS agent_config (
 CREATE TABLE IF NOT EXISTS providers (
   name TEXT PRIMARY KEY,
   base_url TEXT NOT NULL,
-  model TEXT NOT NULL,
+  endpoint_type TEXT NOT NULL DEFAULT 'openai',
+  api_key_env TEXT NOT NULL DEFAULT '',
+  default_model_id TEXT,
   context_window INTEGER DEFAULT 128000
 );
 CREATE TABLE IF NOT EXISTS kv (

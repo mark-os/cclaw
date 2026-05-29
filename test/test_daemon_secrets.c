@@ -40,13 +40,13 @@ static void teardown(void) {
     rmdir(tmpdir);
 }
 
-/* V67: injected env var overrides DB value for api_key */
+/* V67: provider API key env var overrides DB value for api_key */
 static void test_injected_api_key(void) {
     TEST(injected_api_key);
 
     /* Clear any existing env */
     unsetenv("OPENROUTER_API_KEY");
-    unsetenv("CCLAW_INJECTED_API_KEY");
+    unsetenv("CCLAW_PROVIDER_API_KEY_ENV");
 
     sqlite3 *db = db_open(db_path);
     if (!db) FAIL("db_open");
@@ -54,8 +54,9 @@ static void test_injected_api_key(void) {
     /* DB has a plaintext api_key from seeding */
     db_kv_set(db, "provider.api_key", "db-key-value");
 
-    /* Set injected env var (simulating daemon injection) */
-    setenv("CCLAW_INJECTED_API_KEY", "daemon-injected-key", 1);
+    /* Set provider API key env var (simulating daemon injection) */
+    setenv("CCLAW_PROVIDER_API_KEY_ENV", "OPENROUTER_API_KEY", 1);
+    setenv("OPENROUTER_API_KEY", "daemon-injected-key", 1);
 
     Config *cfg = config_load_from_kv(db);
     if (!cfg) { db_close(db); FAIL("config_load_from_kv"); }
@@ -68,7 +69,8 @@ static void test_injected_api_key(void) {
 
     config_free(cfg);
     db_close(db);
-    unsetenv("CCLAW_INJECTED_API_KEY");
+    unsetenv("CCLAW_PROVIDER_API_KEY_ENV");
+    unsetenv("OPENROUTER_API_KEY");
     PASS();
 }
 
@@ -106,7 +108,7 @@ static void test_fallback_to_db(void) {
     TEST(fallback_to_db);
 
     unsetenv("OPENROUTER_API_KEY");
-    unsetenv("CCLAW_INJECTED_API_KEY");
+    unsetenv("CCLAW_PROVIDER_API_KEY_ENV");
     unsetenv("CCLAW_INJECTED_TELEGRAM_TOKEN");
     unsetenv("CCLAW_TELEGRAM_TOKEN");
 

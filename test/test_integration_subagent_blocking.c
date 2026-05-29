@@ -164,8 +164,8 @@ static void test_blocking_subagent_lifecycle(void) {
 
     /* Create daemon DB */
     unlink(DB_PATH);
-    sqlite3 *db = db_open_daemon(DB_PATH);
-    if (!db) { mock_server_stop(); chdir(orig_cwd); FAIL("db_open_daemon"); }
+    sqlite3 *db = db_open_cclaw(DB_PATH);
+    if (!db) { mock_server_stop(); chdir(orig_cwd); FAIL("db_open_cclaw"); }
     seed_kv_config(db, port);
 
     /* Start daemon */

@@ -6,7 +6,7 @@
 ┌─────────────────────────────────────────────────────────┐
 │  TRUSTED                                                │
 │  Daemon process — unsandboxed, holds all secrets,       │
-│  sole writer to daemon.db, forks agents                 │
+│  sole writer to cclaw.db, forks agents                 │
 ├─────────────────────────────────────────────────────────┤
 │  TRUSTED (config-constrained)                           │
 │  Agent process — your compiled C binary, runs LLM loop  │
@@ -45,7 +45,7 @@ The agent process is **your compiled code** — not a container running arbitrar
 | Bug in policy enforcement | Agent reaches blocked host | Code review; integration tests (T116); landlock as backup |
 | Agent ignores config limit | Infinite loop, resource exhaustion | `setrlimit` is kernel-enforced (can't be bypassed from userspace) |
 | Memory corruption | Arbitrary behavior | `-Wall -Wextra -Werror`, ASAN in dev, arena allocator limits scope |
-| Agent leaks secret to LLM context | Key visible in session history | Never include `CCLAW_INJECTED_API_KEY` in any message/tool_result; grep for leaks in tests |
+| Agent leaks secret to LLM context | Key visible in session history | Never include provider-native env var (e.g. `OPENROUTER_API_KEY`) in any message/tool_result; grep for leaks in tests |
 | Agent writes to wrong DB | Cross-agent data corruption | Landlock (defense-in-depth); agent only opens `CCLAW_AGENT_DB` path |
 
 ### Why This Is Acceptable
@@ -62,7 +62,7 @@ Daemon injects config at fork time. Agent reads once at startup, builds internal
 
 ### Principles
 
-1. **Env vars are the sole config source** — agent never reads config files, never opens daemon.db for config
+1. **Env vars are the sole config source** — agent never reads config files, never opens cclaw.db for config
 2. **Parse once, validate early** — `agent_config_from_env()` runs at startup, validates all values, fails fast on malformed input
 3. **Immutable after load** — config struct is read-only for process lifetime; no runtime config reload
 4. **Fail closed** — missing required var (e.g. `CCLAW_AGENT_DB`) → `_exit(AGENT_EXIT_ERROR)` immediately
@@ -80,7 +80,7 @@ Daemon injects config at fork time. Agent reads once at startup, builds internal
 | `CCLAW_ALLOWED_HOSTS` | Medium | Defines network perimeter — must not be tampered with |
 | `CCLAW_TOOLS` | Medium | Tool whitelist — controls agent capabilities |
 | `CCLAW_SHELL_TIMEOUT` | Low | Integer |
-| `CCLAW_INJECTED_API_KEY` | **High** | Decrypted secret — cleared from env after read |
+| provider-native env var (e.g. `OPENROUTER_API_KEY`) | **High** | Decrypted secret — cleared from env after read |
 | `CCLAW_DAEMON_DB` | Low | Path (only if read access granted) |
 | `CCLAW_TOKEN_RATE_LIMIT` | Low | Integer |
 
@@ -88,9 +88,9 @@ Daemon injects config at fork time. Agent reads once at startup, builds internal
 
 1. **Clear secrets from env immediately after reading**
    ```c
-   const char *key = getenv("CCLAW_INJECTED_API_KEY");
+   const char *key = getenv(cfg->provider.api_key_env);
    char *api_key = strdup(key);  // copy to heap
-   unsetenv("CCLAW_INJECTED_API_KEY");  // remove from environ
+   unsetenv(cfg->provider.api_key_env);  // remove from environ
    ```
    Why: `shell_exec` children inherit env. V47 strips CCLAW_* before exec, but defense-in-depth says don't keep secrets in env longer than necessary.
 
@@ -162,7 +162,7 @@ Mitigations:
 - V47: all CCLAW_* and API key vars unset before shell exec
 - `file_read` restricted to workspace (V1)
 - `/proc/self/environ` blocked by namespace (/ is read-only, /proc remounted minimal)
-- Agent clears `CCLAW_INJECTED_API_KEY` from own env after startup read
+- Agent clears provider-native env var (e.g. `OPENROUTER_API_KEY`) from own env after startup read
 
 ### Agent code bug → writes wrong DB
 
@@ -171,17 +171,17 @@ Agent has path traversal in `db_open()` and opens another agent's DB.
 Mitigations:
 - Landlock (if available) restricts writes to own agent dir
 - Agent only receives own DB path via `CCLAW_AGENT_DB`
-- No mechanism to discover other agent paths (no daemon.db access by default)
+- No mechanism to discover other agent paths (no cclaw.db access by default)
 
-### Malicious config in daemon.db
+### Malicious config in cclaw.db
 
-Attacker compromises daemon.db, sets `allowed_hosts: ["evil.com"]`.
+Attacker compromises cclaw.db, sets `allowed_hosts: ["evil.com"]`.
 
 Mitigations:
-- daemon.db is mode 0600, owned by daemon user
+- cclaw.db is mode 0600, owned by daemon user
 - Agent config changes require admin approval (V54)
 - Daemon validates config sanity before fork (V64)
-- This is a "game over" scenario — if daemon.db is compromised, attacker has full control regardless
+- This is a "game over" scenario — if cclaw.db is compromised, attacker has full control regardless
 
 ## Single-User Assumptions
 

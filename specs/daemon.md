@@ -5,7 +5,7 @@
 | Component | Responsibility | ⊥ Does |
 |-----------|---------------|--------|
 | Daemon | fork agents, reap children, dispatch on exit code, deliver responses, enforce limits, write agent inboxes, spawn log collector | LLM calls, tool exec, context build |
-| Agent process | drain inbox, run LLM loop, write entries to own DB, exit w/ code | fork other agents, deliver to channels, write daemon.db |
+| Agent process | drain inbox, run LLM loop, write entries to own DB, exit w/ code | fork other agents, deliver to channels, write cclaw.db |
 | Log collector | receive stdout/stderr from all processes via fd passing, write journal.db | anything else |
 | Channel threads | inbox_insert (to agent DB) + signal daemon | run agent logic, write entries directly |
 | CLI | in-process agent (no daemon), opens agent DB directly | multi-session concurrency, spawn_agent, approvals |
@@ -94,7 +94,7 @@ while (!shutdown) {
 
 ```c
 void fork_agent(const char *agent_name, int64_t session_id) {
-    // Read config from daemon.db agent_config table
+    // Read config from cclaw.db agent_config table
     AgentConfig cfg = agent_config_load(daemon_db, agent_name);
 
     // Create pipe for log collector
@@ -113,7 +113,7 @@ void fork_agent(const char *agent_name, int64_t session_id) {
         setenv("CCLAW_ALLOWED_HOSTS", cfg.allowed_hosts_csv, 1);
         setenv("CCLAW_TOOLS", cfg.tools_csv, 1);
         setenv("CCLAW_SHELL_TIMEOUT", cfg.shell_timeout_str, 1);
-        setenv("CCLAW_INJECTED_API_KEY", decrypted_key, 1);
+        setenv(cfg.provider.api_key_env, decrypted_key, 1);  // e.g. OPENROUTER_API_KEY
         if (cfg.daemon_db_read)
             setenv("CCLAW_DAEMON_DB", daemon_db_path, 1);
 
@@ -157,7 +157,7 @@ Daemon ←──socketpair──→ Log Collector
 
 ## Env-Var Config Injection
 
-Daemon reads `agent_config` table from daemon.db at fork time. Injects as env vars:
+Daemon reads `agent_config` table from cclaw.db at fork time. Injects as env vars:
 
 | Env Var | Source | Notes |
 |---------|--------|-------|
@@ -169,10 +169,10 @@ Daemon reads `agent_config` table from daemon.db at fork time. Injects as env va
 | `CCLAW_ALLOWED_HOSTS` | agent_config.allowed_hosts | comma-separated |
 | `CCLAW_TOOLS` | agent_config.tools | comma-separated |
 | `CCLAW_SHELL_TIMEOUT` | agent_config.shell_timeout | seconds |
-| `CCLAW_INJECTED_API_KEY` | daemon.db kv (decrypted) | provider API key |
-| `CCLAW_DAEMON_DB` | daemon.db path | only if daemon_db_read=1 |
+| Provider API key (e.g. `OPENROUTER_API_KEY`) | cclaw.db kv (decrypted) | injected as native env var per provider config |
+| `CCLAW_DAEMON_DB` | cclaw.db path | only if daemon_db_read=1 |
 
-Agent reads env vars at startup. ⊥ opens config files. ⊥ opens daemon.db for config.
+Agent reads env vars at startup. ⊥ opens config files. ⊥ opens cclaw.db for config.
 
 ## Landlock Policy
 
@@ -182,7 +182,7 @@ Agent reads env, calls `landlock_apply()`.
 
 ```
 Writable:  agents/<name>/ (DB + workspace) + /tmp/cclaw-<session_id>/
-Readable:  /usr/lib, /usr/share, /etc/ssl, /etc/resolv.conf, daemon.db (if granted)
+Readable:  /usr/lib, /usr/share, /etc/ssl, /etc/resolv.conf, cclaw.db (if granted)
 Network:   TCP connect to configured ports (ABI v4+, kernel 6.7+)
 Denied:    everything else
 ```
@@ -203,7 +203,7 @@ Fallback: if kernel lacks landlock, log warning, continue without (V22).
 2. Parent writes assistant entry (with tool_call) to own DB
 3. Parent sets session state → "waiting", exits with code 2
 4. Daemon reaps, reads tool_call from parent's agent DB
-5. Daemon inserts spawn_queue row in daemon.db
+5. Daemon inserts spawn_queue row in cclaw.db
 6. Daemon forks sub-agent (own session, own agent DB, own sandbox)
 7. Sub-agent completes → exits 0
 8. Daemon reaps sub-agent, reads result from sub-agent's DB
@@ -224,7 +224,7 @@ idle ──[fork]──→ running ──[exit 0]──→ idle
 
 1. Agent calls `approval_request(type, payload)`
 2. Agent writes tool_call to own DB, sets state → "waiting", exits with code 3
-3. Daemon reaps, reads tool_call, inserts into daemon.db approvals table
+3. Daemon reaps, reads tool_call, inserts into cclaw.db approvals table
 4. Daemon sends inline keyboard to admin via Telegram
 5. Admin approves/denies → daemon writes result to agent inbox → state idle → signal
 6. Agent re-forks, drains inbox, receives approval result as tool_result

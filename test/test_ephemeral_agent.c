@@ -44,7 +44,7 @@ static int test_create_ephemeral(void) {
     snprintf(path, sizeof(path), "%s/%s/workspace", AGENTS_DIR, name);
     assert(stat(path, &st) == 0 && S_ISDIR(st.st_mode));
 
-    /* T196: agent.json no longer written — config in daemon.db */
+    /* T196: agent.json no longer written — config in cclaw.db */
 
     /* Verify agent.db created */
     snprintf(path, sizeof(path), "%s/%s/agent.db", AGENTS_DIR, name);

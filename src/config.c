@@ -131,11 +131,17 @@ Config *config_load_from_env(void) {
     const char *v;
 
     /* Provider */
-    v = getenv("CCLAW_INJECTED_API_KEY");
-    if (!v || !v[0]) v = getenv("OPENROUTER_API_KEY");
-    cfg->provider.api_key = str_dup(v ? v : "");
+    v = getenv("CCLAW_PROVIDER_API_KEY_ENV");
+    if (v && v[0]) {
+        const char *key = getenv(v);
+        cfg->provider.api_key = str_dup(key ? key : "");
+    } else {
+        v = getenv("OPENROUTER_API_KEY");
+        cfg->provider.api_key = str_dup(v ? v : "");
+    }
 
-    v = getenv("CCLAW_PROVIDER");
+    v = getenv("CCLAW_PROVIDER_BASE_URL");
+    if (!v || !v[0]) v = getenv("CCLAW_PROVIDER");
     cfg->provider.base_url = str_dup(v ? v : "https://openrouter.ai/api/v1");
 
     v = getenv("CCLAW_MODEL");
@@ -213,9 +219,10 @@ Config *config_load_from_kv(sqlite3 *db) {
     KV_STR("provider.model", "deepseek/deepseek-v4-flash");
     cfg->provider.model = cfg_val;
 
-    /* api_key: V67/T188 — prefer daemon-injected env var over DB decryption */
+    /* api_key: V67/T188 — prefer env var (from provider's api_key_env) over DB decryption */
     {
-        const char *injected = getenv("CCLAW_INJECTED_API_KEY");
+        const char *key_env = getenv("CCLAW_PROVIDER_API_KEY_ENV");
+        const char *injected = key_env && key_env[0] ? getenv(key_env) : NULL;
         if (injected && injected[0])
             cfg->provider.api_key = str_dup(injected);
         else
@@ -347,6 +354,7 @@ Config *config_load_from_kv(sqlite3 *db) {
 
     /* Env var overrides (highest priority per V61) */
     env_override_str(&cfg->provider.api_key, "OPENROUTER_API_KEY");
+    env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER_BASE_URL");
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER");
     env_override_str(&cfg->provider.model, "CCLAW_MODEL");
     env_override_str(&cfg->telegram_token, "CCLAW_TELEGRAM_TOKEN");
@@ -364,4 +372,72 @@ Config *config_load_from_kv(sqlite3 *db) {
     env_override_int(&cfg->token_rate_limit, "CCLAW_TOKEN_RATE_LIMIT");
 
     return cfg;
+}
+
+/* Lowest-priority fallback: read ~/.cclaw/config.json for keys not already set. */
+void config_load_json_fallback(Config *cfg) {
+    if (!cfg) return;
+    const char *home = getenv("HOME");
+    if (!home) return;
+
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/.cclaw/config.json", home);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    if (len <= 0 || len > 65536) { fclose(f); return; }
+    fseek(f, 0, SEEK_SET);
+
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return; }
+    size_t rd = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    buf[rd] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) return;
+
+    /* Only fill values not already set */
+    cJSON *v;
+    if ((!cfg->provider.api_key || !cfg->provider.api_key[0])) {
+        v = cJSON_GetObjectItemCaseSensitive(root, "openrouter_api_key");
+        if (cJSON_IsString(v) && v->valuestring[0]) {
+            free(cfg->provider.api_key);
+            cfg->provider.api_key = str_dup(v->valuestring);
+        }
+    }
+    if ((!cfg->provider.api_key || !cfg->provider.api_key[0])) {
+        v = cJSON_GetObjectItemCaseSensitive(root, "gemini_api_key");
+        if (cJSON_IsString(v) && v->valuestring[0]) {
+            free(cfg->provider.api_key);
+            cfg->provider.api_key = str_dup(v->valuestring);
+        }
+    }
+    if ((!cfg->provider.api_key || !cfg->provider.api_key[0])) {
+        v = cJSON_GetObjectItemCaseSensitive(root, "anthropic_api_key");
+        if (cJSON_IsString(v) && v->valuestring[0]) {
+            free(cfg->provider.api_key);
+            cfg->provider.api_key = str_dup(v->valuestring);
+        }
+    }
+    v = cJSON_GetObjectItemCaseSensitive(root, "model");
+    if (cJSON_IsString(v) && v->valuestring[0]) {
+        if (!cfg->provider.model || strcmp(cfg->provider.model, "deepseek/deepseek-v4-flash") == 0) {
+            free(cfg->provider.model);
+            cfg->provider.model = str_dup(v->valuestring);
+        }
+    }
+    if (!cfg->telegram_token || !cfg->telegram_token[0]) {
+        v = cJSON_GetObjectItemCaseSensitive(root, "telegram_token");
+        if (cJSON_IsString(v) && v->valuestring[0]) {
+            free(cfg->telegram_token);
+            cfg->telegram_token = str_dup(v->valuestring);
+        }
+    }
+
+    cJSON_Delete(root);
 }

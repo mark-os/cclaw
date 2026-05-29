@@ -101,7 +101,7 @@ Install: alongside agent binary or in workspace.
 ## Secret Injection Model
 
 ```
-daemon.db (encrypted)
+cclaw.db (encrypted)
   │ decrypt at fork
   ▼
 agent env: CCLAW_SECRET_GITHUB_TOKEN=ghp_abc123

@@ -1,13 +1,14 @@
 # SPEC
 
 ## §G GOAL
-minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (CLI, Telegram), 3-DB SQLite backbone (daemon.db, per-agent agent.db, journal.db), MicroQuickJS runtime tools, sub-agents, exit-code IPC
+minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (CLI, Telegram), 3-DB SQLite backbone (cclaw.db, per-agent agent.db, journal.db), MicroQuickJS runtime tools, sub-agents, exit-code IPC
 
 ## §C CONSTRAINTS
 - C11, `-Wall -Wextra -Werror`
 - blocking I/O, threads over callbacks, no event loops
-- 3-DB split (all WAL mode): `daemon.db` (registry, permissions, cron, spawn_queue, channels, providers), per-agent `agents/<name>/agent.db` (sessions, entries, inbox, js_tools, memory_blocks, kv), `journal.db` (all logs)
-- ⊥ JSON config files — all config in SQLite (daemon.db for policy, agent env vars for runtime)
+- 3-DB split (all WAL mode): `cclaw.db` (registry, permissions, cron, spawn_queue, channels, providers), per-agent `agents/<name>/agent.db` (sessions, entries, inbox, js_tools, memory_blocks, kv), `journal.db` (all logs)
+- ⊥ JSON config files — all config in SQLite (cclaw.db for policy, agent env vars for runtime)
+- config resolution: `CCLAW_*` env vars > cclaw.db > provider-native env vars (e.g. `OPENROUTER_API_KEY`) > `~/.cclaw/config.json` (optional fallback)
 - agents write only own DB; communicate intent via exit codes (0=done, 1=error, 2=spawn, 3=approval, 4=config)
 - daemon reads agent DB after reap to discover requests; writes agent DB only for inbox delivery
 - log collector process — receives stdout/stderr via pipes (`SCM_RIGHTS` fd passing), writes journal.db
@@ -29,7 +30,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - cmd: `./build/cclaw --cli --debug` → raw LLM req/resp JSON to stderr
 - cmd: `./build/cclaw` → daemon mode (epoll loop: reap children, wake on signal pipe, fork agents; Telegram poller thread + civetweb status page run in-process; spawns log collector at startup)
 - cmd: `./build/cclaw --sub-agent --session-id=X --task="..."` → sub-agent process
-- env: `OPENROUTER_API_KEY` → seed `provider.api_key` in daemon.db kv on first run (minimum to start)
+- env: `OPENROUTER_API_KEY` → seed `provider.api_key` in cclaw.db kv on first run (minimum to start)
 - env: `CCLAW_AGENT_NAME` → agent identity (injected by daemon at fork)
 - env: `CCLAW_AGENT_DB` → path to own agent.db (injected by daemon at fork)
 - env: `CCLAW_WORKSPACE` → writable workspace path (injected by daemon at fork)
@@ -38,11 +39,11 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - env: `CCLAW_ALLOWED_HOSTS` → comma-separated hostnames (injected by daemon at fork)
 - env: `CCLAW_TOOLS` → comma-separated tool whitelist (injected by daemon at fork)
 - env: `CCLAW_SHELL_TIMEOUT` → seconds (injected by daemon at fork)
-- env: `CCLAW_INJECTED_API_KEY` → decrypted provider API key (injected by daemon at fork)
+- env: provider API key injected as native env var (e.g. `OPENROUTER_API_KEY`, `GEMINI_API_KEY`) — daemon decrypts from cclaw.db kv, injects at fork; agent reads via `cfg->provider.api_key_env`
 - env: `CCLAW_SECRET_<NAME>` → decrypted agent secrets (injected by daemon at fork; agent passes selectively to shell children; cleared from agent env after read)
-- env: `CCLAW_DAEMON_DB` → path to daemon.db (if read access granted)
+- env: `CCLAW_DAEMON_DB` → path to cclaw.db (if read access granted)
 - env: `CCLAW_TOKEN_RATE_LIMIT` → override hourly token limit
-- db: `daemon.db` — agents registry, agent_config, providers, kv (encrypted secrets), channel_bindings, tg_chat_sessions, spawn_queue, cron_jobs, approvals
+- db: `cclaw.db` — agents registry, agent_config, providers (name, base_url, endpoint_type, api_key_env, default_model_id), kv (encrypted secrets), channel_bindings, tg_chat_sessions, spawn_queue, cron_jobs, approvals
 - db: per-agent `agents/<name>/agent.db` — sessions, entries, inbox, js_tools, memory_blocks, kv (agent-local prefs only)
 - db: `journal.db` — all logs (daemon + agents), source-attributed, timestamped
 - db: decryption key `.cclaw/.cclaw_key` — daemon-only, 32 bytes, mode 0600
@@ -63,16 +64,16 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - tool: `memory_append` — append text to a memory block by label; respects char_limit + read_only
 - tool: `memory_replace` — find-and-replace within a memory block by label; respects char_limit + read_only
 - tool: `approval_request` — agent exits w/ code 3; daemon reads proposal from agent DB, notifies admin
-- tool: `configure_provider` — agent exits w/ code 4; daemon stores encrypted key in daemon.db
+- tool: `configure_provider` — agent exits w/ code 4; daemon stores encrypted key in cclaw.db
 - tool: `configure_channel` — agent exits w/ code 4; daemon stores + starts listener
 - tool: `create_agent` — agent exits w/ code 4; daemon creates agent dir + seeds DB; requires admin approval (V54)
 
 ## §D DATA
 → [specs/](specs/) — detailed reference docs:
-- [schema.md](specs/schema.md) — 3-DB schema (daemon.db, agent.db, journal.db), wire emission, design notes
+- [schema.md](specs/schema.md) — 3-DB schema (cclaw.db, agent.db, journal.db), wire emission, design notes
 - [daemon.md](specs/daemon.md) — fork architecture, exit code protocol, log collector, env-var injection, turn lifecycle
 - [memory.md](specs/memory.md) — memory model, tiers, Letta reference
-- [providers.md](specs/providers.md) — auth patterns, daemon.db storage, wire format differences
+- [providers.md](specs/providers.md) — auth patterns, cclaw.db storage, wire format differences
 - [security.md](specs/security.md) — trust model, config injection best practices, defense-in-depth layers, attack scenarios
 - [shell-networking.md](specs/shell-networking.md) — namespace sandbox for shell children, credential proxy, DNS interception
 
@@ -98,7 +99,7 @@ V18: ∀ inbox message → consumed exactly once into session entries via single
 V19: ∀ session state transition → executed via strict atomic UPDATE with WHERE clauses targeting expected states to prevent TOCTOU
 V20: ∀ session → `agent_name` identifies agent; config loaded from `agents/<name>/` on disk; fallback to global config when NULL
 V21: ∀ agent execution → daemon forks dedicated process; daemon ⊥ executes LLM logic
-V22: ∀ agent process → trusted binary; primary isolation: `setrlimit` (V23) + application-level network policy (V46); optional defense-in-depth: landlock filesystem restriction (workspace rw, system ro) applied if kernel supports it; graceful skip if unavailable (log warning, continue without); agent process is NOT namespace-sandboxed (needs libcurl, own DB, daemon.db read)
+V22: ∀ agent process → trusted binary; primary isolation: `setrlimit` (V23) + application-level network policy (V46); optional defense-in-depth: landlock filesystem restriction (workspace rw, system ro) applied if kernel supports it; graceful skip if unavailable (log warning, continue without); agent process is NOT namespace-sandboxed (needs libcurl, own DB, cclaw.db read)
 V22a: ∀ `shell_exec` child → full namespace sandbox: `unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWNET)` — `/` ro, workspace rw; network via `LD_PRELOAD=libcclaw_net.so` routing through UDS to agent proxy thread; proxy enforces allowed_hosts + secrets injected via env vars
 V23: ∀ agent process → `setrlimit` at fork: RLIMIT_AS (256MB default), RLIMIT_CPU (300s default), RLIMIT_NOFILE (64)
 V24: ∀ session → at most 1 active agent process; daemon forks only when state == "idle"; "running" and "waiting" block new forks
@@ -128,43 +129,45 @@ V48: ∀ `shell_exec` child → `mjs` binary available at fixed path (e.g. `/usr
 V49: ∀ `mjs` process (spawned via shell_exec) → inherits shell child's namespace sandbox (V82); network goes through credential proxy like any other shell process; `fetch()` binding calls libcurl in-process; composable with unix pipes (V51)
 V50: [removed — fetch proxy protocol replaced by landlock network + in-process whitelist]
 V51: ∀ `mjs` invocation via shell → composable w/ unix pipes; stdout/stderr flow through shell pipeline normally; no side-channel fd needed
-V52: ∀ secret → all secrets stored in daemon.db `kv` table (encrypted, ChaCha20-Poly1305 AEAD); two tiers: (1) provider/channel secrets (API keys, bot tokens) — daemon-managed; (2) agent-specific secrets (tool credentials, user tokens) — agent requests via exit code 4, daemon encrypts + stores after admin approval; decryption key `.cclaw/.cclaw_key` (32 bytes, mode 0600) held by daemon only; at fork, daemon decrypts needed secrets + injects into child env; agent clears from env immediately after read; shell_exec children ⊥ access (env stripped before exec)
+V52: ∀ secret → all secrets stored in cclaw.db `kv` table (encrypted, ChaCha20-Poly1305 AEAD); two tiers: (1) provider/channel secrets (API keys, bot tokens) — daemon-managed; (2) agent-specific secrets (tool credentials, user tokens) — agent requests via exit code 4, daemon encrypts + stores after admin approval; decryption key `.cclaw/.cclaw_key` (32 bytes, mode 0600) held by daemon only; at fork, daemon decrypts needed secrets + injects into child env; agent clears from env immediately after read; shell_exec children ⊥ access (env stripped before exec)
 V53: ∀ Telegram admin command (config, key, whitelist) → restricted to `admin_chat_ids` in kv table; unauthorized chat_id → silent ignore (⊥ error msg, ⊥ inbox_insert)
-V54: ∀ config/permission mutation → requires admin approval; agent proposes via `approval_request` tool (exit code 3); daemon reads proposal, delivers to admin (inline keyboard); admin approve → daemon writes config to daemon.db agent_config; admin deny → posts denial to agent inbox; config changes take effect on next fork (daemon re-reads agent_config)
+V54: ∀ config/permission mutation → requires admin approval; agent proposes via `approval_request` tool (exit code 3); daemon reads proposal, delivers to admin (inline keyboard); admin approve → daemon writes config to cclaw.db agent_config; admin deny → posts denial to agent inbox; config changes take effect on next fork (daemon re-reads agent_config)
 V55: ∀ memory block edit → agent tools modify `value` only; `label`, `description`, `char_limit`, `read_only` immutable from agent; `value` length ! ≤ `char_limit`; blocks persist across sessions (agent-scoped, not session-scoped); default blocks on agent creation: `AGENT` (identity/tone) + `USER` (facts about user); deletable, editable by agent by default
 V56: ∀ `context_plan` query → ⊥ read `content` or `tool_calls` columns; use `role`, `stop_reason`, `tool_call_count`, `token_estimate` (all integer/small columns on main B-tree page); avoids overflow page loads during plan pass
 V57: ∀ SQLite open (agent process) → `PRAGMA mmap_size` ≥ 64MB; eliminates double-buffering (SQLite userspace cache + kernel page cache); kernel page cache shared across daemon + forked agents; `PRAGMA cache_size = -512` (reduce userspace cache when mmap active)
 V58: ∀ session compaction → reparent: append summary entry w/ `parent_id` = last kept entry; `UPDATE entries SET parent_id = <summary_id> WHERE id = <first_compacted_tail_entry>`; old entries remain in DB (searchable via FTS5, reachable via forward walk from branch point); CTE from leaf stops at summary node → ⊥ walk compacted prefix
 V59: ∀ reparented entry → store `original_parent_id` (nullable); enables undo of compaction surgery; NULL = never reparented
 V60: ∀ entry wire emission → ⊥ cJSON parse; `content` emitted via `json_escape_into()` (linear pass, no alloc); `tool_calls` emitted via per-provider formatter that walks stored JSON array w/ minimal parse (extract `id`, `name`, `args` substring offsets) — ⊥ full DOM build; `args` object emitted verbatim for Anthropic/Google, stringified (escaped) for OpenAI
-V61: ∀ agent kv table → agent-local preferences only (display settings, tool state, scratch data); ⊥ policy config (that's daemon.db agent_config per V80); `kv_get(key)` / `kv_set(key, val)` for agent's own use; no `enc:` values in agent kv (secrets live in daemon.db only per V67)
+V61: ∀ agent kv table → agent-local preferences only (display settings, tool state, scratch data); ⊥ policy config (that's cclaw.db agent_config per V80); `kv_get(key)` / `kv_set(key, val)` for agent's own use; no `enc:` values in agent kv (secrets live in cclaw.db only per V67)
 V62: ∀ agent → owns dedicated SQLite file at `.cclaw/agents/<name>/agent.db`; contains: sessions, entries, inbox, kv, memory_blocks, js_tools — all scoped to that agent; agent has full RW; daemon has full RW to all agent DBs (V70); child agents ⊥ access parent DB (namespace sandbox blocks shell children; agent binary only opens own `CCLAW_AGENT_DB`); workspace at `.cclaw/agents/<name>/workspace/`
 V63: ∀ parent→child agent visibility → parent can read child's DB (daemon facilitates via ATTACH or direct read); child ⊥ read parent DB; enforced by: agent binary only opens `CCLAW_AGENT_DB` (trusted code); shell children namespace-sandboxed to own workspace
-V64: ∀ agent config (model, allowed_hosts, tools, max_iterations) → stored in daemon.db `agent_config` table (V80); daemon reads at fork, injects as env vars; daemon validates config sanity before fork (e.g. allowed_hosts ⊥ include private IPs); config changes require admin approval (V54)
+V64: ∀ agent config (model, allowed_hosts, tools, max_iterations) → stored in cclaw.db `agent_config` table (V80); daemon reads at fork, injects as env vars; daemon validates config sanity before fork (e.g. allowed_hosts ⊥ include private IPs); config changes require admin approval (V54)
 V65: ∀ agent (named | ephemeral) → same dir structure (`.cclaw/agents/<name>/agent.db` + `workspace/`); ephemeral naming: `ephemeral-<uuid>`; ⊥ deleted — audit trail preserved; all agents are siblings (flat hierarchy under `.cclaw/agents/`)
 V66: ∀ agent permissions → agent process opens only own DB + workspace (trusted binary behavior); shell children namespace-sandboxed to workspace only; `read_access` config field: daemon can grant RO access to other agent dirs (passed via env, agent binary honors it); creator→child: daemon grants RW by default; child→creator: nothing; sibling→sibling: nothing
-V67: ∀ secrets + provider config → top-level (daemon-owned); stored in daemon DB (`.cclaw/cclaw.db`) `kv` table encrypted; agents reference by key name; daemon decrypts + injects at fork; agents ⊥ store provider keys in own DB — only daemon holds them
+V67: ∀ secrets + provider config → top-level (daemon-owned); stored in cclaw.db `kv` table encrypted (lowercase keys, e.g. `openrouter_api_key`); daemon decrypts + injects as provider-native env var at fork (e.g. `OPENROUTER_API_KEY`); agents read via `getenv(cfg->provider.api_key_env)`; agents ⊥ store provider keys in own DB — only daemon holds them
 V68: ∀ bootstrap (first run, no named agents) → daemon spawns ephemeral agent w/ onboarding-focused system prompt; same tools as named agents (`configure_provider`, `configure_channel`, `create_agent`, etc.); ephemeral walks user through: provider setup (API key → daemon stores encrypted), channel setup (Telegram token etc.), agent creation (name, model, persona); agent creation requires admin approval
 V69: ∀ channel→agent binding → daemon routes channel messages to bound agent; on agent creation, creator can bind new agent to a channel (replaces previous binding); next message on that channel wakes the new agent; old binding (e.g. ephemeral) becomes inactive (sessions preserved, agent ⊥ deleted)
 V70: ∀ daemon → unsandboxed; full RW to all agent DBs; writes: inbox_insert (message delivery), session state transitions, approval resolution + config writes on approve, agent creation seeding; reads: agent config at fork, approval proposals, session state; daemon is sole process w/ cross-agent write access
 V71: ∀ LLM request → daemon tracks rolling token usage (input+output) per hour; if hourly total exceeds `token_rate_limit` (default 1000000, configurable via kv + env `CCLAW_TOKEN_RATE_LIMIT`) → reject agent fork w/ error "token rate limit exceeded"; resets on rolling 1h window; tracked in daemon memory (not persisted — resets on daemon restart)
 V72: ∀ agent process → exit code is sole IPC channel for intent: 0=turn complete (deliver), 1=error, 2=spawn sub-agent, 3=approval requested, 4=config change requested, 127=exec failed, 128+N=killed by signal N; daemon dispatches on code after `waitpid`; exit codes 2/3/4 imply partial turn — agent executed tool_calls in order up to the daemon-requiring call, wrote PENDING entry for it, remaining calls deferred to next fork
-V73: ∀ DB access → 3-file split: `daemon.db` (registry, permissions, cron, spawn_queue, channels, providers), per-agent `agents/<name>/agent.db` (sessions, entries, inbox, js_tools, memory_blocks, kv), `journal.db` (all logs); agent process opens only own agent.db (+ optional RO daemon.db if granted)
-V74: ∀ agent process → config from `CCLAW_*` env vars injected by daemon at fork; ⊥ read config files; ⊥ open daemon.db for config (unless `daemon_db_read=1` in agent_config)
+V73: ∀ DB access → 3-file split: `cclaw.db` (registry, permissions, cron, spawn_queue, channels, providers), per-agent `agents/<name>/agent.db` (sessions, entries, inbox, js_tools, memory_blocks, kv), `journal.db` (all logs); agent process opens only own agent.db (+ optional RO cclaw.db if granted)
+V74: ∀ agent process → config from `CCLAW_*` env vars injected by daemon at fork; ⊥ read config files; ⊥ open cclaw.db for config (unless `daemon_db_read=1` in agent_config)
 V75: ∀ log output (daemon + agents) → piped to log collector process; collector receives fds via `SCM_RIGHTS` over unix socketpair; writes to journal.db (source, pid, session_id, stream, line, timestamp); flush every 100ms or 64 lines
-V76: ∀ daemon.db write → daemon process only; agents ⊥ write daemon.db; daemon writes agent DB only for inbox delivery
-V77: ∀ daemon reap (exit code 2) → open agent DB, find tool_result entry with `content = 'PENDING'`, read matching tool_call from last assistant entry (by tool_call_id), parse spawn_agent args, insert spawn_queue in daemon.db, fork sub-agent; on sub-agent completion UPDATE the PENDING entry with result
-V78: ∀ daemon reap (exit code 3) → open agent DB, find tool_result entry with `content = 'PENDING'`, read matching tool_call (by tool_call_id), parse approval args, insert approvals in daemon.db, notify admin; on admin resolution UPDATE the PENDING entry with result ("approved"/"denied: reason"), transition state→"idle", re-fork
-V79: ∀ daemon reap (exit code 4) → open agent DB, find PENDING tool_result entry, read matching tool_call, validate config change, apply to daemon.db (provider/channel/agent creation); UPDATE PENDING entry with result ("configured"/"error: ..."), transition state→"idle", re-fork
-V80: ∀ agent_config → stored in daemon.db `agent_config(agent_name, key, value)` table; ⊥ agent.json files; daemon reads at fork, injects as env vars; keys: model, workspace, tools, allowed_hosts, read_access, max_iterations, shell_timeout, daemon_db_read
+V76: ∀ cclaw.db write → daemon process only; agents ⊥ write cclaw.db; daemon writes agent DB only for inbox delivery
+V77: ∀ daemon reap (exit code 2) → open agent DB, find tool_result entry with `content = 'PENDING'`, read matching tool_call from last assistant entry (by tool_call_id), parse spawn_agent args, insert spawn_queue in cclaw.db, fork sub-agent; on sub-agent completion UPDATE the PENDING entry with result
+V78: ∀ daemon reap (exit code 3) → open agent DB, find tool_result entry with `content = 'PENDING'`, read matching tool_call (by tool_call_id), parse approval args, insert approvals in cclaw.db, notify admin; on admin resolution UPDATE the PENDING entry with result ("approved"/"denied: reason"), transition state→"idle", re-fork
+V79: ∀ daemon reap (exit code 4) → open agent DB, find PENDING tool_result entry, read matching tool_call, validate config change, apply to cclaw.db (provider/channel/agent creation); UPDATE PENDING entry with result ("configured"/"error: ..."), transition state→"idle", re-fork
+V80: ∀ agent_config → stored in cclaw.db `agent_config(agent_name, key, value)` table; ⊥ agent.json files; daemon reads at fork, injects as env vars; keys: model, workspace, tools, allowed_hosts, read_access, max_iterations, shell_timeout, daemon_db_read
 V81: ∀ CLI mode → opens agent DB directly, loads config from env vars or defaults; lacks spawn_agent/cron/approval_request (no daemon to handle exit codes); keeps shell, file, js, web_fetch, db_query, memory tools
 V82: ∀ `shell_exec` child → transparent credential proxy: `LD_PRELOAD=libcclaw_net.so` intercepts `connect()`/`getaddrinfo()`, routes through UDS to agent proxy thread; `CLONE_NEWNET` as hard backstop (static binaries / raw syscalls get zero network); secrets injected via `CCLAW_SECRET_*` env vars (never in command string); output masked before DB write; graceful fallback if namespaces unavailable
 V83: ∀ credential proxy → thread in agent process; listens on UDS (`<workspace>/.proxy.sock`); reads preamble (dest host:port) from `libcclaw_net.so` connect; checks `allowed_hosts` allowlist; resolves DNS on behalf of child; opens real TCP connection + relays bidirectionally; denies unlisted hosts; dies with agent process
-V84: ∀ credential mapping → stored in daemon.db `credential_mappings(agent_name, secret_name, host_pattern, path_pattern, location)`; requires admin approval (V54); agent references secrets by name only; proxy resolves + injects at network boundary
+V84: ∀ credential mapping → stored in cclaw.db `credential_mappings(agent_name, secret_name, host_pattern, path_pattern, location)`; requires admin approval (V54); agent references secrets by name only; proxy resolves + injects at network boundary
 V85: ∀ daemon startup → verify user namespaces: `/proc/sys/user/max_user_namespaces` > 0, test `unshare(CLONE_NEWUSER)` succeeds; enforce max concurrent agents ≤ `max_user_namespaces / 6`; warn if kernel constrains below V3 limit
 V86: ∀ `shell_exec` child → DNS intercepted via `libcclaw_net.so` (`getaddrinfo()` override); proxy resolves on behalf, caches domain→IP mapping; on TCP connect, proxy uses preamble host for allowlist check; hardcoded IPs (no DNS, no preload intercept) blocked by `CLONE_NEWNET` (no real network path exists)
 V87: ∀ partial turn resume → agent on startup checks last assistant entry's tool_calls against existing tool_result entries; if all results present (none PENDING) → normal LLM loop; if PENDING entry found → replace with error (V17 case 1); if results missing (no PENDING, no error) → execute missing tool_calls in order by matching tool_call_id, store results, then continue LLM loop; agent never re-executes a tool_call that already has a result entry
 V88: ∀ secret injection to shell → daemon decrypts secrets at fork, injects as `CCLAW_SECRET_<NAME>` env vars into agent process; agent selectively passes needed secrets into shell child env; LLM references as `$CCLAW_SECRET_<NAME>` in commands (value ⊥ in command string, ⊥ in entries, ⊥ in LLM context); shell output scanned for known secret values → replaced w/ `[REDACTED:<name>]` before DB write; LLM told secret names only (never values)
+V89: ∀ provider → configured in cclaw.db `providers` table (name, base_url, endpoint_type, api_key_env, default_model_id); multiple providers coexist; agent config specifies `provider` name + optional `model_id`; if model_id omitted → use provider's `default_model_id`; daemon injects ALL configured provider API keys at fork (agent may use multiple providers within a single turn — fallback, sub-calls, etc.); daemon resolves primary provider row at fork, injects base_url/endpoint_type/model as `CCLAW_*` env vars
+V90: ∀ config resolution → priority: (1) `CCLAW_*` env vars, (2) cclaw.db kv/agent_config tables, (3) provider-native env vars (e.g. `OPENROUTER_API_KEY`), (4) `~/.cclaw/config.json` (optional fallback); agent process reads only env vars — resolution happens in CLI entrypoint or daemon before fork
 
 ## §T TASKS
 id|status|task|cites
@@ -363,16 +366,16 @@ T192|x|`create_agent` tool (bootstrap) — proposes named agent (name, model, pe
 T193|x|channel→agent binding — daemon `channel_bindings` table (channel_type, channel_id, agent_name); route incoming messages to bound agent; `bind_channel` updates binding; old agent stays but stops receiving|V69
 T194|x|token rate limit — daemon tracks rolling hourly token usage (input+output from agent exit reports); reject fork if over limit; default 1M/hr; configurable via kv `token_rate_limit` + env `CCLAW_TOKEN_RATE_LIMIT`|V71
 T195|x|3-DB schema files + init fns — `db_open_daemon()`, `db_open_agent()`, `db_open_journal()`; WAL + busy_timeout; migrate existing `schema.sql` into 3 files|V73,V4
-T196|x|agent_config table + eliminate agent.json — `agent_config(agent_name, key, value)` in daemon.db; daemon reads at fork, injects as env vars; remove JSON config loader|V80,V74
+T196|x|agent_config table + eliminate agent.json — `agent_config(agent_name, key, value)` in cclaw.db; daemon reads at fork, injects as env vars; remove JSON config loader|V80,V74
 T197|x|exit code protocol in agent — `agent_exit.h` defines codes 0-4; `spawn_agent` → exit 2, `approval_request` → exit 3, config tools → exit 4; agent_run detects sentinels, propagates exit|V72
 T198|x|agent opens only own DB — reads `CCLAW_AGENT_DB` env, opens that; config from env vars only; remove `config_load_from_kv()` from agent path; memory_blocks + js_tools + sessions + entries in agent.db|V73,V74
 T199|x|daemon writes inbox to agent DB — `daemon_inbox_insert(agent_name, session_id, source, payload)` opens agent DB, inserts, closes; Telegram/cron/sub-agent completion all use this path|V76
 T200|x|session state in agent DB — agent sets own state (running/idle/waiting); daemon reads before fork; startup recovery scans all agent DBs; daemon tracks `{pid→agent_name, session_id}` in memory|V73,V24
 T201|x|daemon reap dispatch — `reap_children()` handles exit codes: 0→deliver, 2→spawn, 3→approval, 4→config; finds PENDING tool_result entry in agent DB, reads matching tool_call args; on completion UPDATEs PENDING content with real result, re-forks agent|V77,V78,V79,V87
-T202|x|spawn_queue in daemon.db w/ exit-code flow — after reap exit 2: find PENDING entry, read spawn_agent args from matching tool_call, insert daemon.db spawn_queue; blocking: state=waiting, UPDATE PENDING on child completion; background: UPDATE PENDING immediately with "background agent spawned", re-fork|V77,V13,V87
-T203|x|approvals in daemon.db w/ exit-code flow — after reap exit 3: read tool_call, insert daemon.db approvals; agent state=waiting; admin resolves → result to agent inbox → state idle → signal|V78,V54
-T204|x|cron in daemon.db — cron_jobs table w/ `agent_name`; scheduler reads daemon.db; on fire: write task to agent inbox (in agent DB); admin-only management for v1|V76
-T205|x|bootstrap + agent creation w/ 3-DB — `daemon_bootstrap()` creates ephemeral agent dir + agent.db + daemon.db rows; `create_agent` exit 4 → daemon creates new agent; `configure_provider`/`configure_channel` exit 4 → daemon writes daemon.db|V79,V68
+T202|x|spawn_queue in cclaw.db w/ exit-code flow — after reap exit 2: find PENDING entry, read spawn_agent args from matching tool_call, insert cclaw.db spawn_queue; blocking: state=waiting, UPDATE PENDING on child completion; background: UPDATE PENDING immediately with "background agent spawned", re-fork|V77,V13,V87
+T203|x|approvals in cclaw.db w/ exit-code flow — after reap exit 3: read tool_call, insert cclaw.db approvals; agent state=waiting; admin resolves → result to agent inbox → state idle → signal|V78,V54
+T204|x|cron in cclaw.db — cron_jobs table w/ `agent_name`; scheduler reads cclaw.db; on fire: write task to agent inbox (in agent DB); admin-only management for v1|V76
+T205|x|bootstrap + agent creation w/ 3-DB — `daemon_bootstrap()` creates ephemeral agent dir + agent.db + cclaw.db rows; `create_agent` exit 4 → daemon creates new agent; `configure_provider`/`configure_channel` exit 4 → daemon writes cclaw.db|V79,V68
 T206|x|CLI as standalone agent runner — extract `agent_setup()` shared code; CLI opens agent DB directly; config from env/defaults; lacks spawn_agent/cron/approval; keeps shell/file/js/web_fetch/db_query/memory|V81
 T207|x|integration tests — e2e tests for cross-DB flows (daemon↔agent DB), restart recovery, CLI standalone; delete old unified `schema.sql` + dead migration code|V73
 T208|x|daemon startup namespace check — read max_user_namespaces, test unshare, enforce agent limit ≤ max_ns/6, warn if constrained; graceful degrade if unavailable|V85
@@ -384,13 +387,13 @@ T213|x|[removed — per-process CA unnecessary; secrets injected via env vars, n
 T214|x|shell output secret masking — before writing tool_result to entries table, scan output for all known secret values (exact match + common encodings: base64, URL-encoded); replace w/ `[REDACTED:<name>]`; masking applied in `tool_shell_handler` before return|V52,V82
 T215|x|test: shell curl through proxy — mock TCP server on allowed host, verify shell child (via LD_PRELOAD + UDS) can reach it; verify response relayed correctly|V82,V83
 T216|x|test: shell cannot reach unlisted host — shell child attempts connect to non-allowlisted host via LD_PRELOAD lib, verify proxy denies (connection refused)|V83
-T217|x|test: shell cannot read filesystem outside workspace — verify /etc/shadow, agent.db, daemon.db all inaccessible from shell child (existing namespace sandbox)|V82
+T217|x|test: shell cannot read filesystem outside workspace — verify /etc/shadow, agent.db, cclaw.db all inaccessible from shell child (existing namespace sandbox)|V82
 T218|x|log collector process — `src/log_collector.c`; unix socketpair + `SCM_RIGHTS` fd passing; epoll on received fds; batch insert to journal.db; daemon stdout/stderr also piped (low priority)|V75
 T219|x|optional landlock for agent process — best-effort filesystem restriction if kernel supports; defense-in-depth only (not required for security model); skip silently if unavailable|V22
 T220|x|unit test audit — review all src/*.c for untested code paths; add missing unit tests (no network, no LLM, fast); focus on edge cases in config parsing, context_build, tool dispatch, entry append, session state transitions|§C
 T221|x|integration test audit — review mock-server test coverage; add missing integration tests for: multi-turn tool sequences, retry/backoff paths, context overflow, daemon fork+reap, inbox consumption, sub-agent lifecycle|§C
 T222|x|e2e test audit — review live LLM test coverage; add missing e2e tests for: real provider round-trips, tool_calls parsing across providers, fallback chain, Telegram delivery, full agent turn with workspace side-effects|§C
-T223|x|CLI zero-config startup — CLI works with just `OPENROUTER_API_KEY` in env; defaults: agent_name=`default`, agent_db=`.cclaw/agents/default/agent.db`, workspace=`.cclaw/agents/default/workspace/`, model=`deepseek/deepseek-v4-flash`; creates dirs + DB on first run; no prompts, no daemon, no daemon.db|V81,V74
+T223|x|CLI zero-config startup — CLI works with just `OPENROUTER_API_KEY` in env; defaults: agent_name=`default`, agent_db=`.cclaw/agents/default/agent.db`, workspace=`.cclaw/agents/default/workspace/`, model=`deepseek/deepseek-v4-flash`; creates dirs + DB on first run; no prompts, no daemon, no cclaw.db|V81,V74
 T224|x|partial-turn resume — on agent startup, detect incomplete tool_call batch (assistant entry with more tool_calls than tool_result entries); if PENDING entry found with no resolution → replace with error; if results missing (daemon resolved PENDING, remaining calls unexecuted) → dispatch remaining tool_calls in order, skip already-resolved ones; never re-execute a call that has a result|V87,V17,V13
 
 Test tiers (Makefile targets):

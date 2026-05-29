@@ -21,7 +21,7 @@ CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and sessio
 
 **Principles:**
 - Simple over clever. Blocking I/O. Threads over callbacks.
-- 3-DB SQLite backbone — daemon.db (policy), agent.db (sessions/state), journal.db (logs).
+- 3-DB SQLite backbone — cclaw.db (policy/registry), agent.db (sessions/state), journal.db (logs).
 - Self-augmenting via MicroQuickJS plugin system — agents load JS extensions from workspace at startup.
 - One tool at a time during development. Prove each layer works before adding the next.
 - No backward compatibility. No migrations. No users yet — move fast, break things.
@@ -29,7 +29,7 @@ CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and sessio
 ## Architecture (3-DB Split)
 
 ```
-daemon.db (daemon-owned)          Per-agent agent.db              journal.db (collector-owned)
+cclaw.db (daemon-owned)           Per-agent agent.db              journal.db (collector-owned)
 ├── agents registry               ├── sessions                    └── log (all stdout/stderr)
 ├── agent_config (policy)         ├── entries (split-column)
 ├── providers                     ├── inbox
@@ -64,7 +64,7 @@ See [specs/security.md](specs/security.md) for full details.
 
 - **Agent process**: trusted binary. `setrlimit` (kernel-enforced) + `http_check_policy()` (app-level). Optional landlock as defense-in-depth.
 - **Shell children**: untrusted. Namespace sandbox + transparent credential proxy. See [specs/shell-networking.md](specs/shell-networking.md).
-- **Secrets**: encrypted in daemon.db (ChaCha20-Poly1305). Decrypted by daemon, injected to agent at fork, cleared from env immediately.
+- **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted by daemon, injected to agent at fork, cleared from env immediately.
 
 ## Code Style
 
@@ -115,10 +115,12 @@ make clean        # remove build/
 ```bash
 # Minimal — just needs an API key (defaults to OpenRouter + DeepSeek V4 Flash)
 export OPENROUTER_API_KEY="sk-or-v1-..."
-./build/cclaw              # daemon mode (Telegram, web, cron, forks agents)
-./build/cclaw --cli        # standalone CLI (opens agent DB directly, no daemon)
-./build/cclaw --cli --debug  # raw LLM req/resp JSON to stderr
+./build/cclaw              # interactive CLI (default)
+./build/cclaw --daemon     # daemon mode (Telegram, web, cron, forks agents)
+./build/cclaw --debug      # raw LLM req/resp JSON to stderr
 ```
+
+Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env > `~/.cclaw/config.json`.
 
 ## Dependencies
 
@@ -134,4 +136,4 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 
 Default: OpenRouter → DeepSeek V4 Flash (`deepseek/deepseek-v4-flash`).
 
-All providers use the OpenAI-compatible chat completions format. Switch provider by setting `provider.base_url` and `provider.api_key` in daemon.db kv. Env var `OPENROUTER_API_KEY` is all you need to start.
+All providers use the OpenAI-compatible chat completions format. Switch provider by setting `provider.base_url` and `provider.api_key` in cclaw.db kv. Env var `OPENROUTER_API_KEY` is all you need to start.

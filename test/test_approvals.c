@@ -255,7 +255,7 @@ static void test_create_agent_approval(void) {
     int rc = agent_config_create(agents_dir, db, payload);
     assert(rc == 0);
 
-    /* T196: Verify config was written to daemon.db agent_config table */
+    /* T196: Verify config was written to cclaw.db agent_config table */
     AgentConfig *ac = agent_config_load_db(db, "helper");
     assert(ac != NULL);
     assert(strcmp(ac->model, "gpt-4") == 0);

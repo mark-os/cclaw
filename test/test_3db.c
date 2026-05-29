@@ -27,7 +27,7 @@ static int pragma_int(sqlite3 *db, const char *pragma) {
 
 static void test_daemon_db(void) {
     unlink("/tmp/test_3db_daemon.db");
-    sqlite3 *db = db_open_daemon("/tmp/test_3db_daemon.db");
+    sqlite3 *db = db_open_cclaw("/tmp/test_3db_daemon.db");
     assert(db);
 
     /* V4: WAL + busy_timeout */
@@ -83,7 +83,7 @@ static void test_agent_db(void) {
     /* Does NOT have daemon tables */
     assert(!table_exists(db, "agents"));
     assert(!table_exists(db, "agent_config"));
-    /* T202/V73: spawn_queue is daemon.db only */
+    /* T202/V73: spawn_queue is cclaw.db only */
     assert(!table_exists(db, "spawn_queue"));
     assert(!table_exists(db, "approvals"));
 

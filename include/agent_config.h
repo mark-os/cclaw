@@ -33,16 +33,16 @@ typedef struct {
  * Applies V12 workspace fallback if workspace not specified. */
 AgentConfig *agent_config_load(const char *agents_dir, const char *name);
 
-/* T196/V80: Load agent config from daemon.db agent_config table.
+/* T196/V80: Load agent config from cclaw.db agent_config table.
  * Returns NULL if no config rows exist for this agent.
  * Applies V12 workspace fallback if workspace not specified. */
 AgentConfig *agent_config_load_db(sqlite3 *db, const char *name);
 
-/* T196/V80: Save agent config to daemon.db agent_config table.
+/* T196/V80: Save agent config to cclaw.db agent_config table.
  * Upserts all non-NULL fields as key-value rows. Returns 0 on success. */
 int agent_config_save_db(sqlite3 *db, const AgentConfig *ac);
 
-/* T196: Import agent.json into daemon.db agent_config table, delete file after.
+/* T196: Import agent.json into cclaw.db agent_config table, delete file after.
  * Called during daemon startup migration. Returns 0 on success, -1 on error. */
 int agent_config_migrate_json(sqlite3 *db, const char *agents_dir, const char *name);
 
@@ -74,7 +74,7 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
                                 const Config *fallback_cfg);
 
 /* T150/T196: Create a new agent from approval payload.
- * Creates agents_dir/name/ directory + workspace, writes config to daemon.db agent_config,
+ * Creates agents_dir/name/ directory + workspace, writes config to cclaw.db agent_config,
  * seeds agents table + system.md on disk.
  * payload is a cJSON object with: name, model, system_prompt, tools[], allowed_hosts[].
  * Returns 0 on success, -1 on failure. */
@@ -86,15 +86,15 @@ int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload
  * Returns heap-allocated agent name on success (caller frees), NULL on failure. */
 char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db);
 
-/* T144/T196: Add host to agent's allowed_hosts in daemon.db agent_config.
+/* T144/T196: Add host to agent's allowed_hosts in cclaw.db agent_config.
  * Returns 0 on success, -1 on failure. */
 int agent_config_add_host(sqlite3 *db, const char *name, const char *host);
 
-/* T144/T196: Remove host from agent's allowed_hosts in daemon.db agent_config.
+/* T144/T196: Remove host from agent's allowed_hosts in cclaw.db agent_config.
  * Returns 0 on success (including host not found), -1 on failure. */
 int agent_config_remove_host(sqlite3 *db, const char *name, const char *host);
 
-/* T144/T196: Get current allowed_hosts for agent from daemon.db. Returns heap-allocated array.
+/* T144/T196: Get current allowed_hosts for agent from cclaw.db. Returns heap-allocated array.
  * Caller must free each string and the array. Sets *count. */
 char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count);
 

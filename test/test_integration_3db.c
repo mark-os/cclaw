@@ -92,15 +92,15 @@ static void test_cross_db_inbox_write(void) {
     PASS();
 }
 
-/* T207/V73: daemon.db and agent.db have separate schemas — no cross-contamination */
+/* T207/V73: cclaw.db and agent.db have separate schemas — no cross-contamination */
 static void test_schema_isolation(void) {
     TEST(schema_isolation);
     unlink(DAEMON_DB);
 
-    sqlite3 *ddb = db_open_daemon(DAEMON_DB);
-    if (!ddb) FAIL("db_open_daemon");
+    sqlite3 *ddb = db_open_cclaw(DAEMON_DB);
+    if (!ddb) FAIL("db_open_cclaw");
 
-    /* daemon.db should NOT have sessions/entries tables */
+    /* cclaw.db should NOT have sessions/entries tables */
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(ddb,
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions';",
@@ -111,7 +111,7 @@ static void test_schema_isolation(void) {
     db_close(ddb);
     unlink(DAEMON_DB);
 
-    if (has_sessions) FAIL("daemon.db should not have sessions table");
+    if (has_sessions) FAIL("cclaw.db should not have sessions table");
 
     /* agent.db should NOT have agents/agent_config tables */
     const char *agent_path = "/tmp/test_integ_3db_agent_iso.db";
@@ -153,12 +153,12 @@ static void test_restart_recovery(void) {
 
     /* Create daemon DB */
     unlink(DAEMON_DB);
-    sqlite3 *ddb = db_open_daemon(DAEMON_DB);
-    if (!ddb) { chdir(orig_cwd); FAIL("db_open_daemon"); }
+    sqlite3 *ddb = db_open_cclaw(DAEMON_DB);
+    if (!ddb) { chdir(orig_cwd); FAIL("db_open_cclaw"); }
     db_close(ddb);
 
     /* Run startup recovery */
-    ddb = db_open_daemon(DAEMON_DB);
+    ddb = db_open_cclaw(DAEMON_DB);
     daemon_startup_recovery(ddb);
     db_close(ddb);
 
@@ -180,7 +180,7 @@ static void test_restart_recovery(void) {
     PASS();
 }
 
-/* T207/V81: CLI standalone opens agent DB directly, no daemon.db needed */
+/* T207/V81: CLI standalone opens agent DB directly, no cclaw.db needed */
 static void test_cli_standalone_no_daemon_db(void) {
     TEST(cli_standalone_no_daemon_db);
     const char *agent = "cli_agent";
@@ -196,7 +196,7 @@ static void test_cli_standalone_no_daemon_db(void) {
     sqlite3 *adb = db_open_agent(adb_path);
     if (!adb) { chdir(orig_cwd); FAIL("db_open_agent"); }
 
-    /* Can create session + append entries without daemon.db */
+    /* Can create session + append entries without cclaw.db */
     int64_t sid = session_create(adb, "cli_test", agent, -1, 0);
     if (sid < 0) { db_close(adb); chdir(orig_cwd); FAIL("session_create"); }
 
@@ -304,7 +304,7 @@ static void test_restart_recovery_waiting(void) {
 
     /* Run startup recovery */
     unlink(DAEMON_DB);
-    sqlite3 *ddb = db_open_daemon(DAEMON_DB);
+    sqlite3 *ddb = db_open_cclaw(DAEMON_DB);
     daemon_startup_recovery(ddb);
     db_close(ddb);
 

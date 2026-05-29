@@ -4,13 +4,13 @@ Three SQLite files (all WAL mode, `busy_timeout` ≥ 5000ms):
 
 | DB | Path | Owner | Contents |
 |----|------|-------|----------|
-| daemon.db | `.cclaw/daemon.db` | daemon (sole writer) | agents registry, agent_config, providers, kv (secrets), channel_bindings, tg_chat_sessions, spawn_queue, cron_jobs, approvals |
+| cclaw.db | `.cclaw/cclaw.db` | daemon (sole writer) | agents registry, agent_config, providers, kv (secrets), channel_bindings, tg_chat_sessions, spawn_queue, cron_jobs, approvals |
 | agent.db | `agents/<name>/agent.db` | agent process (RW); daemon (inbox writes only) | sessions, entries, inbox, js_tools, memory_blocks, kv (agent-local) |
 | journal.db | `.cclaw/journal.db` | log collector (sole writer) | log table (all stdout/stderr from daemon + agents) |
 
 ---
 
-## daemon.db
+## cclaw.db
 
 ### agents
 
@@ -234,7 +234,7 @@ Index: `idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0`
 
 ### kv (agent-local)
 
-Agent-local preferences only (no secrets — secrets live in daemon.db).
+Agent-local preferences only (no secrets — secrets live in cclaw.db).
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -280,13 +280,13 @@ CREATE INDEX idx_entries_plan ON entries(parent_id, session_id, id, role, stop_r
 
 ## Design decisions
 
-1. **3-DB split** — daemon.db for coordination (daemon sole writer), agent.db for session data (agent RW, daemon inbox-only), journal.db for logs (collector sole writer); eliminates cross-concern locking
+1. **3-DB split** — cclaw.db for coordination (daemon sole writer), agent.db for session data (agent RW, daemon inbox-only), journal.db for logs (collector sole writer); eliminates cross-concern locking
 2. **Exit code IPC** — agents signal intent via exit code; daemon reads details from agent DB post-reap; no shared-memory IPC, no pipes for structured data
-3. **agent_config in daemon.db** — replaces agent.json; daemon reads at fork, injects as env vars; single source of truth for policy
+3. **agent_config in cclaw.db** — replaces agent.json; daemon reads at fork, injects as env vars; single source of truth for policy
 4. **Split columns over JSON** — zero cJSON parsing on LLM request hot path (V60); metadata columns enable plan pass without overflow page loads (V56)
 5. **INTEGER ids** — faster joins, smaller indexes, natural ordering
 6. **parent_id tree** — supports branching (Pi model); walk leaf→root via recursive CTE
 7. **Inbox as table** — durable queue; survives crashes; atomic consumption via `BEGIN EXCLUSIVE`
 8. **WAL mode** — multiple readers never block; writers serialize briefly on commit
 9. **Log collector** — single writer to journal.db; receives fds via SCM_RIGHTS; agents don't need journal.db access
-10. **CLI standalone** — opens agent.db directly; no daemon.db needed; config from env vars or defaults
+10. **CLI standalone** — opens agent.db directly; no cclaw.db needed; config from env vars or defaults

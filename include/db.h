@@ -20,7 +20,7 @@ typedef struct {
 sqlite3 *db_open(const char *path);
 
 /* T195/V73: 3-DB openers — each creates only its own schema */
-sqlite3 *db_open_daemon(const char *path);
+sqlite3 *db_open_cclaw(const char *path);
 sqlite3 *db_open_agent(const char *path);
 sqlite3 *db_open_journal(const char *path);
 
@@ -139,7 +139,7 @@ int inbox_count(sqlite3 *db, int64_t session_id);
  * Returns number of items consumed (≥0) or -1 on error (transaction rolled back). */
 int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit);
 
-/* T88/T202: Spawn queue — daemon.db only (V73). peek/mark used by daemon. */
+/* T88/T202: Spawn queue — cclaw.db only (V73). peek/mark used by daemon. */
 SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count);
 int spawn_queue_mark(sqlite3 *db, int64_t id, const char *status, int64_t child_session_id);
 void spawn_request_free(SpawnRequest *list, int count);

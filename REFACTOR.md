@@ -6,24 +6,36 @@ CClaw currently uses a single shared SQLite DB for all state (daemon coordinatio
 
 ## Requirements
 
-1. Three DB files: `daemon.db` (registry, permissions, cron, spawn_queue, channels, provider config), `journal.db` (all logs from daemon + agents), per-agent `agents/<name>/agent.db` (sessions, entries, inbox, js_tools, memory_blocks)
-2. No JSON config files — all config in SQLite (daemon.db for permissions/policy, agent env vars for runtime)
+1. Three DB files: `cclaw.db` (registry, permissions, cron, spawn_queue, channels, provider config), `journal.db` (all logs from daemon + agents), per-agent `agents/<name>/agent.db` (sessions, entries, inbox, js_tools, memory_blocks)
+2. Config in SQLite (`cclaw.db`) with optional `config.json` fallback for convenience
 3. Strict process separation — agents write only to their own DB, communicate intent via exit codes
 4. Daemon reads agent DB after reap to discover requests (spawn, approval, config change)
 5. Daemon writes to agent DBs only for inbox delivery
 6. Log collector process — receives all stdout/stderr via pipes, writes to journal.db
 7. Config injected to agents via `CCLAW_*` env vars at fork time
-8. Agents can optionally have read-only access to daemon.db (landlock-granted)
+8. Agents can optionally have read-only access to cclaw.db (landlock-granted)
 9. CLI remains standalone (opens agent DB directly, no daemon needed)
 10. No backward compatibility — no migrations, no legacy support
 
 ## Architecture
 
 ```
+~/.cclaw/
+├── cclaw.db           ← system registry + config (all modes read this)
+├── .cclaw_key         ← 32-byte encryption key (mode 0600)
+├── journal.db         ← all logs (daemon + agents)
+├── config.json        ← optional convenience fallback
+└── agents/
+    └── <name>/
+        ├── agent.db   ← sessions, entries, inbox, memory, js_tools
+        └── workspace/ ← agent-created files
+```
+
+```
 ┌─────────────────────────────────────────────────────────────┐
 │                        DAEMON                                │
-│  daemon.db (registry, permissions, cron, spawn_queue,        │
-│             channel_bindings, provider config)                │
+│  cclaw.db (registry, permissions, cron, spawn_queue,         │
+│            channel_bindings, provider config)                 │
 │  Threads: Telegram poller, civetweb, cron scheduler,         │
 │           heartbeat                                          │
 │  Epoll: signal pipe + SIGCHLD                                │
@@ -51,6 +63,50 @@ CClaw currently uses a single shared SQLite DB for all state (daemon coordinatio
 └──────────────┘
 ```
 
+## Config Resolution
+
+The agent process only ever reads env vars. Config resolution happens *before* the agent loop starts (in CLI entrypoint or daemon fork):
+
+### API Key Resolution (per provider)
+
+1. `CCLAW_OPENROUTER_API_KEY` env var (explicit CClaw-namespaced, highest priority)
+2. `cclaw.db` kv table: `openrouter_api_key` → `enc:<ciphertext>` (decrypted on read)
+3. `OPENROUTER_API_KEY` env var (system-level fallback — respects existing user setup)
+4. `~/.cclaw/config.json` field `"openrouter_api_key"` (convenience fallback)
+
+Same pattern for `gemini_api_key`, `anthropic_api_key`, `telegram_token`, etc.
+
+Once resolved, injected to agent as the provider-native env var (e.g. `OPENROUTER_API_KEY`). Agent reads via `getenv(cfg->provider.api_key_env)`.
+
+### General Config Resolution
+
+1. `CCLAW_*` env vars (highest priority — Lambda, Workers, daemon fork all use this)
+2. `cclaw.db` `agent_config` table (per-agent) and `kv` table (global)
+3. `~/.cclaw/config.json` (optional fallback for users who prefer a file)
+
+### First-Run Flow
+
+1. User runs `cclaw` — no `~/.cclaw/` exists
+2. Create `~/.cclaw/`, generate `.cclaw_key` (32 random bytes, mode 0600)
+3. Create `cclaw.db` with default schema
+4. If `OPENROUTER_API_KEY` in env: encrypt, store in cclaw.db kv as `openrouter_api_key: enc:...`
+5. Create `agents/default/agent.db` + `workspace/`
+6. Enter agent loop — user is chatting immediately
+
+### config.json Format
+
+Optional file at `~/.cclaw/config.json`. Simple flat key-value:
+
+```json
+{
+  "openrouter_api_key": "sk-or-v1-...",
+  "model": "deepseek/deepseek-v4-flash",
+  "telegram_token": "123456:ABC..."
+}
+```
+
+Read by CLI/daemon at startup as lowest-priority fallback. Never read by agent processes.
+
 ## Exit Code Protocol
 
 | Code | Meaning | Daemon Action |
@@ -65,7 +121,7 @@ CClaw currently uses a single shared SQLite DB for all state (daemon coordinatio
 
 ## Env-Var Config Injection
 
-Daemon reads `agent_config` table from daemon.db at fork time. Injects as env vars:
+Daemon reads `agent_config` table from cclaw.db at fork time. Injects as env vars:
 
 | Env Var | Source | Notes |
 |---------|--------|-------|
@@ -77,10 +133,10 @@ Daemon reads `agent_config` table from daemon.db at fork time. Injects as env va
 | `CCLAW_ALLOWED_HOSTS` | agent_config.allowed_hosts | comma-separated |
 | `CCLAW_TOOLS` | agent_config.tools | comma-separated |
 | `CCLAW_SHELL_TIMEOUT` | agent_config.shell_timeout | seconds |
-| `CCLAW_INJECTED_API_KEY` | daemon.db kv (decrypted) | provider API key — cleared after read |
-| `CCLAW_DAEMON_DB` | daemon.db path | only if daemon_db_read=1 |
+| Provider API key | cclaw.db kv (decrypted) | injected as native env var (e.g. `OPENROUTER_API_KEY`) |
+| `CCLAW_DAEMON_DB` | cclaw.db path | only if daemon_db_read=1 |
 
-Agent reads env vars at startup. ⊥ opens config files. ⊥ opens daemon.db for config.
+Agent reads env vars at startup. ⊥ opens config files. ⊥ opens cclaw.db for config.
 
 ## Trust Model
 
@@ -93,7 +149,7 @@ See [specs/security.md](specs/security.md) for full details.
 
 All implementation tasks live in [SPEC.md §T](SPEC.md). Current phases:
 
-- **Phase 1** (T198-T201): Core DB split — agent isolation, daemon inbox writes, session state, reap dispatch
+- **Phase 1** (T195-T201): Core DB split — agent isolation, daemon inbox writes, session state, reap dispatch
 - **Phase 2** (T202-T205): Daemon coordination — spawn_queue, approvals, cron, bootstrap
 - **Phase 3** (T206-T207): CLI standalone + integration tests
 - **Phase 4** (T208-T217): Shell namespace sandbox + credential proxy

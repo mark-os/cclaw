@@ -59,7 +59,7 @@ static char *tool_configure_provider_handler(const char *arguments, void *user_d
 
     cJSON_Delete(json);
 
-    /* V76/V79: Don't write daemon.db — return sentinel, daemon applies on reap */
+    /* V76/V79: Don't write cclaw.db — return sentinel, daemon applies on reap */
     return strdup(SENTINEL_CONFIG "configure_provider");
 }
 
@@ -110,7 +110,7 @@ static char *tool_configure_channel_handler(const char *arguments, void *user_da
 
     cJSON_Delete(json);
 
-    /* V76/V79: Don't write daemon.db — return sentinel, daemon applies on reap */
+    /* V76/V79: Don't write cclaw.db — return sentinel, daemon applies on reap */
     return strdup(SENTINEL_CONFIG "configure_channel");
 }
 

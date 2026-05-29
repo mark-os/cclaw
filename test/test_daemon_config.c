@@ -25,7 +25,7 @@ static void cleanup(void) {
 static sqlite3 *setup_db(void) {
     cleanup();
     mkdir(AGENTS_DIR, 0755);
-    sqlite3 *db = db_open_daemon(DB_PATH);
+    sqlite3 *db = db_open_cclaw(DB_PATH);
     assert(db != NULL);
     uint8_t key[32];
     if (secret_key_load_or_create(DB_PATH, key) == 0)
@@ -189,7 +189,7 @@ static int test_apply_create_agent(void) {
     /* Verify system.md written */
     assert(stat("agents/helper/system.md", &st) == 0);
 
-    /* Verify agent_config in daemon.db */
+    /* Verify agent_config in cclaw.db */
     AgentConfig *ac = agent_config_load_db(db, "helper");
     assert(ac != NULL);
     assert(ac->model != NULL);

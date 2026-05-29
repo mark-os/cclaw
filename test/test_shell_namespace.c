@@ -146,7 +146,7 @@ static void test_agent_db_path_blocked(void) {
     printf("  PASS test_agent_db_path_blocked\n");
 }
 
-/* T217: Verify daemon.db path inaccessible from shell child */
+/* T217: Verify cclaw.db path inaccessible from shell child */
 static void test_daemon_db_path_blocked(void) {
     if (!ns_available) { printf("  SKIP test_daemon_db_path_blocked\n"); return; }
     ShellConfig sc = {.timeout = 5, .workspace = workspace};

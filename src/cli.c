@@ -191,7 +191,7 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
         return -1;
     }
 
-    /* T206/V81: CLI opens agent DB directly — no daemon.db */
+    /* T206/V81: CLI opens agent DB directly — no cclaw.db */
     char *agent_db_path = cli_resolve_agent_db();
     ensure_parent_dir(agent_db_path);
     sqlite3 *db = db_open_agent(agent_db_path);

@@ -499,13 +499,60 @@ char *session_get_last_route(sqlite3 *db, int64_t session_id) {
 /* ── Agent process entry (T83, V21, V23, V34) ──────────────────── */
 
 /* V67/T188: Decrypt secrets from DB and inject as env vars before exec.
- * Daemon is sole holder of .cclaw_key — agents read injected env vars. */
+ * Daemon is sole holder of .cclaw_key — agents read injected env vars.
+ * Injects all provider API keys + primary provider config. */
 static void inject_secrets_for_child(sqlite3 *db) {
-    char *api_key = db_kv_get_secret(db, "provider.api_key");
-    if (api_key) {
-        setenv("CCLAW_INJECTED_API_KEY", api_key, 1);
-        free(api_key);
+    /* Inject all provider API keys from providers table */
+    sqlite3_stmt *stmt;
+    const char *sql = "SELECT api_key_env FROM providers WHERE api_key_env != '';";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *env_name = (const char *)sqlite3_column_text(stmt, 0);
+            if (!env_name || !env_name[0]) continue;
+            /* kv key is lowercase version of env var name */
+            size_t len = strlen(env_name);
+            char *kv_key = malloc(len + 1);
+            if (!kv_key) continue;
+            for (size_t i = 0; i < len; i++)
+                kv_key[i] = (env_name[i] >= 'A' && env_name[i] <= 'Z')
+                    ? (char)(env_name[i] + 32) : env_name[i];
+            kv_key[len] = '\0';
+            char *val = db_kv_get_secret(db, kv_key);
+            if (val && val[0]) setenv(env_name, val, 1);
+            free(val);
+            free(kv_key);
+        }
+        sqlite3_finalize(stmt);
     }
+
+    /* Inject primary provider config */
+    char *base_url = db_kv_get(db, "provider.base_url");
+    if (base_url) { setenv("CCLAW_PROVIDER_BASE_URL", base_url, 1); free(base_url); }
+
+    char *model = db_kv_get(db, "provider.model");
+    if (model) { setenv("CCLAW_MODEL", model, 1); free(model); }
+
+    /* Determine endpoint_type from providers table for primary */
+    const char *etype_sql = "SELECT endpoint_type FROM providers LIMIT 1;";
+    if (sqlite3_prepare_v2(db, etype_sql, -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *et = (const char *)sqlite3_column_text(stmt, 0);
+            if (et && et[0]) setenv("CCLAW_PROVIDER_ENDPOINT_TYPE", et, 1);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    /* Determine which env var holds the primary API key */
+    const char *keyenv_sql = "SELECT api_key_env FROM providers LIMIT 1;";
+    if (sqlite3_prepare_v2(db, keyenv_sql, -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *env = (const char *)sqlite3_column_text(stmt, 0);
+            if (env && env[0]) setenv("CCLAW_PROVIDER_API_KEY_ENV", env, 1);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    /* Telegram token */
     char *tg_token = db_kv_get_secret(db, "telegram_token");
     if (tg_token) {
         setenv("CCLAW_INJECTED_TELEGRAM_TOKEN", tg_token, 1);
@@ -585,7 +632,7 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
             snprintf(agent_db, sizeof(agent_db), "agents/%s/agent.db", agent_name);
             setenv("CCLAW_AGENT_DB", agent_db, 1);
 
-            /* Load per-agent config from daemon.db, inject as env vars */
+            /* Load per-agent config from cclaw.db, inject as env vars */
             AgentConfig *ac = agent_config_load_db(db, agent_name);
             if (ac) {
                 if (ac->workspace)
@@ -733,7 +780,7 @@ static void deliver_response(const Config *cfg, sqlite3 *db,
     }
 
     if (route && strncmp(route, "telegram", 8) == 0) {
-        /* Route format: "telegram" — need chat_id from tg_chat_sessions (daemon.db) */
+        /* Route format: "telegram" — need chat_id from tg_chat_sessions (cclaw.db) */
         const char *sql = "SELECT chat_id FROM tg_chat_sessions WHERE session_id=?;";
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
@@ -854,7 +901,7 @@ char *daemon_apply_config(const Config *cfg, sqlite3 *db,
     char *result = NULL;
 
     if (strcmp(tool_name, "configure_provider") == 0) {
-        /* V67: Store provider config in daemon.db */
+        /* V67: Store provider config in cclaw.db */
         cJSON *provider = cJSON_GetObjectItemCaseSensitive(args, "provider");
         cJSON *api_key = cJSON_GetObjectItemCaseSensitive(args, "api_key");
         cJSON *base_url = cJSON_GetObjectItemCaseSensitive(args, "base_url");
@@ -892,7 +939,7 @@ char *daemon_apply_config(const Config *cfg, sqlite3 *db,
         result = strdup(buf);
 
     } else if (strcmp(tool_name, "configure_channel") == 0) {
-        /* V67: Store channel credentials in daemon.db */
+        /* V67: Store channel credentials in cclaw.db */
         cJSON *channel_type = cJSON_GetObjectItemCaseSensitive(args, "channel_type");
         cJSON *bot_token = cJSON_GetObjectItemCaseSensitive(args, "bot_token");
 
@@ -916,7 +963,7 @@ char *daemon_apply_config(const Config *cfg, sqlite3 *db,
         }
 
     } else if (strcmp(tool_name, "create_agent") == 0) {
-        /* V79/V68: Create new agent dir + agent.db + daemon.db rows */
+        /* V79/V68: Create new agent dir + agent.db + cclaw.db rows */
         char *args_str = cJSON_PrintUnformatted(args);
         if (args_str) {
             int rc = agent_config_create("agents", db, args_str);
@@ -1020,7 +1067,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                                     depth = sqlite3_column_int(ds, 0);
                                 sqlite3_finalize(ds);
                             }
-                            /* Insert into daemon.db spawn_queue */
+                            /* Insert into cclaw.db spawn_queue */
                             const char *ins = "INSERT INTO spawn_queue"
                                 " (parent_agent, parent_session_id, task, background, depth, tool_call_id)"
                                 " VALUES (?,?,?,?,?,?);";
@@ -1077,7 +1124,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                                 if (p) payload_str = cJSON_PrintUnformatted(p);
                             }
                             if (!payload_str) payload_str = strdup("{}");
-                            /* T203: Insert into daemon.db approvals w/ tool_call_id */
+                            /* T203: Insert into cclaw.db approvals w/ tool_call_id */
                             approval_insert(db, session_id, agent_name,
                                             tc_id, type, payload_str);
                             free(payload_str);
@@ -1105,7 +1152,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                         char *tname = NULL;
                         char *args = read_tool_call_args(adb, session_id, tc_id, &tname);
                         if (args) {
-                            /* T205/V79: Daemon applies config to daemon.db */
+                            /* T205/V79: Daemon applies config to cclaw.db */
                             char *result = daemon_apply_config(cfg, db, agent_name,
                                                               tname, args);
                             update_pending_entry(adb, pending_eid,
@@ -1337,7 +1384,7 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
 /* ── T94/T200/V34: Daemon startup recovery — scan all agent DBs ── */
 
 void daemon_startup_recovery(sqlite3 *db) {
-    (void)db; /* daemon.db not used for session state anymore */
+    (void)db; /* cclaw.db not used for session state anymore */
 
     /* T200: Scan all agent DBs for non-idle sessions */
     size_t agent_count = 0;
@@ -1405,7 +1452,7 @@ cleanup:
 
 #include "templates.h"
 
-/* T196: Migrate agent.json files to daemon.db agent_config table */
+/* T196: Migrate agent.json files to cclaw.db agent_config table */
 static void migrate_agent_json_files(sqlite3 *db) {
     size_t count = 0;
     char **names = agent_discover("agents", &count);
@@ -1434,7 +1481,7 @@ int64_t daemon_bootstrap(sqlite3 *db) {
     char *agent_name = agent_create_ephemeral("agents", db);
     if (!agent_name) return -1;
 
-    /* T196: Write bootstrap config to daemon.db agent_config table */
+    /* T196: Write bootstrap config to cclaw.db agent_config table */
     AgentConfig boot_ac = {0};
     boot_ac.name = agent_name;
     char *boot_tools[] = {"configure_provider", "configure_channel", "create_agent"};

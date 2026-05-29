@@ -8,8 +8,9 @@
 #include <unistd.h>
 
 static void clear_env(void) {
-    unsetenv("CCLAW_INJECTED_API_KEY");
+    unsetenv("CCLAW_PROVIDER_API_KEY_ENV");
     unsetenv("OPENROUTER_API_KEY");
+    unsetenv("CCLAW_PROVIDER_BASE_URL");
     unsetenv("CCLAW_PROVIDER");
     unsetenv("CCLAW_MODEL");
     unsetenv("CCLAW_MAX_TOKENS");
@@ -47,11 +48,11 @@ static void test_env_defaults(void) {
 
 static void test_env_injected_key_priority(void) {
     clear_env();
-    setenv("CCLAW_INJECTED_API_KEY", "injected-key", 1);
-    setenv("OPENROUTER_API_KEY", "openrouter-key", 1);
+    setenv("CCLAW_PROVIDER_API_KEY_ENV", "OPENROUTER_API_KEY", 1);
+    setenv("OPENROUTER_API_KEY", "injected-key", 1);
     Config *cfg = config_load_from_env();
     assert(cfg != NULL);
-    /* CCLAW_INJECTED_API_KEY takes priority */
+    /* CCLAW_PROVIDER_API_KEY_ENV indirection takes priority */
     assert(strcmp(cfg->provider.api_key, "injected-key") == 0);
     config_free(cfg);
     clear_env();
@@ -71,8 +72,9 @@ static void test_env_openrouter_fallback(void) {
 
 static void test_env_all_overrides(void) {
     clear_env();
-    setenv("CCLAW_INJECTED_API_KEY", "key1", 1);
-    setenv("CCLAW_PROVIDER", "http://local:8000/v1", 1);
+    setenv("CCLAW_PROVIDER_API_KEY_ENV", "OPENROUTER_API_KEY", 1);
+    setenv("OPENROUTER_API_KEY", "key1", 1);
+    setenv("CCLAW_PROVIDER_BASE_URL", "http://local:8000/v1", 1);
     setenv("CCLAW_MODEL", "gpt-5", 1);
     setenv("CCLAW_MAX_TOKENS", "8192", 1);
     setenv("CCLAW_CONTEXT_WINDOW", "200000", 1);
@@ -111,7 +113,7 @@ static void test_env_all_overrides(void) {
 
 static void test_render_workspace_var(void) {
     clear_env();
-    setenv("CCLAW_INJECTED_API_KEY", "k", 1);
+    setenv("OPENROUTER_API_KEY", "k", 1);
     Config *cfg = config_load_from_env();
     assert(cfg != NULL);
     free(cfg->system_prompt);

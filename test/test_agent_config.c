@@ -337,9 +337,9 @@ static void test_build_system_prompt(void) {
 }
 
 static void test_whitelist_add_remove(void) {
-    /* T196: host management now uses daemon.db agent_config table */
+    /* T196: host management now uses cclaw.db agent_config table */
     unlink("/tmp/test_agent_wl.db");
-    sqlite3 *db = db_open_daemon("/tmp/test_agent_wl.db");
+    sqlite3 *db = db_open_cclaw("/tmp/test_agent_wl.db");
     assert(db != NULL);
 
     /* Add host */
@@ -385,7 +385,7 @@ static void test_whitelist_add_remove(void) {
 static void test_agent_config_db_roundtrip(void) {
     /* T196: save to DB, load from DB, verify fields match */
     unlink("/tmp/test_ac_db.db");
-    sqlite3 *db = db_open_daemon("/tmp/test_ac_db.db");
+    sqlite3 *db = db_open_cclaw("/tmp/test_ac_db.db");
     assert(db != NULL);
 
     AgentConfig ac = {0};
@@ -423,7 +423,7 @@ static void test_agent_config_db_roundtrip(void) {
 }
 
 static void test_agent_config_migrate(void) {
-    /* T196: migrate agent.json → daemon.db, verify file deleted */
+    /* T196: migrate agent.json → cclaw.db, verify file deleted */
     system("rm -rf /tmp/test_ac_migrate");
     make_dir("/tmp/test_ac_migrate");
     make_dir("/tmp/test_ac_migrate/coder");
@@ -432,7 +432,7 @@ static void test_agent_config_migrate(void) {
         "\"allowed_hosts\":[\"api.github.com\"]}");
 
     unlink("/tmp/test_ac_migrate.db");
-    sqlite3 *db = db_open_daemon("/tmp/test_ac_migrate.db");
+    sqlite3 *db = db_open_cclaw("/tmp/test_ac_migrate.db");
     assert(db != NULL);
 
     assert(agent_config_migrate_json(db, "/tmp/test_ac_migrate", "coder") == 0);

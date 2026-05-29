@@ -1,12 +1,12 @@
 # Provider Auth & Access
 
-## Provider Config in daemon.db
+## Provider Config in cclaw.db
 
-All provider configuration lives in `daemon.db`:
+All provider configuration lives in `cclaw.db`:
 - `providers` table: name, base_url, model, context_window
 - `kv` table: encrypted API keys (`enc:` prefix), fallback config
 
-Agents ⊥ store provider keys. Daemon decrypts at fork, injects via `CCLAW_INJECTED_API_KEY` env var.
+Agents ⊥ store provider keys. Daemon decrypts at fork, injects via `provider-native env var (e.g. OPENROUTER_API_KEY)` env var.
 
 ## Supported Providers
 
@@ -18,16 +18,16 @@ Agents ⊥ store provider keys. Daemon decrypts at fork, injects via `CCLAW_INJE
 | OpenAI | `OPENAI_API_KEY` | Direct. |
 | Anthropic | `ANTHROPIC_API_KEY` | Direct. Different wire format (content blocks). |
 
-Bootstrap: env var seeds `kv` in daemon.db on first run. After that, daemon.db is authoritative.
+Bootstrap: env var seeds `kv` in cclaw.db on first run. After that, cclaw.db is authoritative.
 
 ## Provider Fallback Chain (T45)
 
-Stored in daemon.db `kv` as `fallback_providers` (JSON array). On 5xx/timeout from primary, try next:
+Stored in cclaw.db `kv` as `fallback_providers` (JSON array). On 5xx/timeout from primary, try next:
 ```json
 [{"name": "gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "model": "gemma-4-31b-it"}]
 ```
 
-API keys for fallback providers also in daemon.db `kv` (encrypted).
+API keys for fallback providers also in cclaw.db `kv` (encrypted).
 
 ## Wire Format Differences
 
@@ -44,11 +44,11 @@ CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI 
 
 ## Security Model
 
-- Provider API keys stored encrypted in daemon.db `kv` (ChaCha20-Poly1305 AEAD)
+- Provider API keys stored encrypted in cclaw.db `kv` (ChaCha20-Poly1305 AEAD)
 - Decryption key: `.cclaw/.cclaw_key` (32 bytes, mode 0600, daemon-only)
-- Daemon decrypts at fork → injects as `CCLAW_INJECTED_API_KEY` env var
+- Daemon decrypts at fork → injects as `provider-native env var (e.g. OPENROUTER_API_KEY)` env var
 - Agent uses key for LLM calls, key lives only in process memory
-- `shell_exec` children have `CCLAW_INJECTED_API_KEY` unset before exec (V47)
+- `shell_exec` children have `provider-native env var (e.g. OPENROUTER_API_KEY)` unset before exec (V47)
 - Agent ⊥ has access to `.cclaw_key` file (landlock blocks)
 - `configure_provider` tool (bootstrap): agent exits w/ code 4, daemon stores encrypted key
 
@@ -57,5 +57,5 @@ CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI 
 If CClaw needs subscription-based access (ChatGPT Plus, Claude Pro):
 - OAuth 2.0 Device Authorization Grant (RFC 8628)
 - Works headless: show URL + code, user approves on phone/laptop
-- Tokens stored encrypted in daemon.db `kv`
+- Tokens stored encrypted in cclaw.db `kv`
 - Google bans accounts for third-party OAuth — use API key only

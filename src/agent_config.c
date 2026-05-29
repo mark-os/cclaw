@@ -507,7 +507,7 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     return out;
 }
 
-/* T150/T196: Create a new agent — dir + workspace + daemon.db config + system.md */
+/* T150/T196: Create a new agent — dir + workspace + cclaw.db config + system.md */
 int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json) {
     if (!agents_dir || !db || !payload_json) return -1;
 
@@ -540,7 +540,7 @@ int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload
     snprintf(ws, sizeof(ws), "%s/workspace", dir);
     mkdir(ws, 0755);
 
-    /* Build AgentConfig and save to daemon.db */
+    /* Build AgentConfig and save to cclaw.db */
     AgentConfig ac = {0};
     ac.name = (char *)name;
 
@@ -600,7 +600,7 @@ int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload
     return 0;
 }
 
-/* T196/V80: Load agent config from daemon.db agent_config table */
+/* T196/V80: Load agent config from cclaw.db agent_config table */
 AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
     if (!db || !name) return NULL;
 
@@ -692,7 +692,7 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
     return ac;
 }
 
-/* T196/V80: Save agent config to daemon.db agent_config table */
+/* T196/V80: Save agent config to cclaw.db agent_config table */
 int agent_config_save_db(sqlite3 *db, const AgentConfig *ac) {
     if (!db || !ac || !ac->name) return -1;
 
@@ -763,7 +763,7 @@ int agent_config_save_db(sqlite3 *db, const AgentConfig *ac) {
     return 0;
 }
 
-/* T196: Migrate agent.json → daemon.db agent_config, delete file after */
+/* T196: Migrate agent.json → cclaw.db agent_config, delete file after */
 int agent_config_migrate_json(sqlite3 *db, const char *agents_dir, const char *name) {
     if (!db || !agents_dir || !name) return -1;
 
@@ -781,7 +781,7 @@ int agent_config_migrate_json(sqlite3 *db, const char *agents_dir, const char *n
     return 0;
 }
 
-/* T144/T196: host management via daemon.db agent_config table */
+/* T144/T196: host management via cclaw.db agent_config table */
 
 int agent_config_add_host(sqlite3 *db, const char *name, const char *host) {
     if (!db || !name || !host || !host[0]) return -1;
@@ -898,7 +898,7 @@ char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count) {
     return hosts;
 }
 
-/* T186/T196: Create ephemeral agent (V65, V62) — config in daemon.db */
+/* T186/T196: Create ephemeral agent (V65, V62) — config in cclaw.db */
 #include <sys/random.h>
 #include <limits.h>
 

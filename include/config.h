@@ -25,4 +25,8 @@ int workspace_init(const Config *cfg);
 /* Free config and all owned strings. */
 void config_free(Config *cfg);
 
+/* Lowest-priority fallback: read ~/.cclaw/config.json for keys not already set.
+ * Call after loading from env/kv but before entering main loop. */
+void config_load_json_fallback(Config *cfg);
+
 #endif

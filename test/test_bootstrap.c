@@ -71,7 +71,7 @@ static int test_bootstrap_creates_ephemeral(void) {
     int count = daemon_inbox_count(agent_name, sid);
     assert(count == 1);
 
-    /* T196: Verify config in daemon.db agent_config table (no agent.json) */
+    /* T196: Verify config in cclaw.db agent_config table (no agent.json) */
     AgentConfig *ac = agent_config_load_db(db, agent_name);
     assert(ac != NULL);
     assert(ac->tool_count == 3);

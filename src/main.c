@@ -304,13 +304,14 @@ int main(int argc, char *argv[]) {
 
     shutdown_init();
 
-    /* T206/V81: CLI mode — config from env vars, no daemon.db needed */
+    /* T206/V81: CLI mode — config from env vars, no cclaw.db needed */
     if (!daemon_mode) {
         Config *cfg = config_load_from_env();
         if (!cfg) {
             fprintf(stderr, "error: failed to load config\n");
             return 1;
         }
+        config_load_json_fallback(cfg);
         if (debug_mode) cfg->debug = 1;
 
         CliOpts opts = {0};
@@ -326,9 +327,9 @@ int main(int argc, char *argv[]) {
         return rc == 0 ? 0 : 1;
     }
 
-    /* Daemon mode: needs daemon.db for kv config, channels, etc. */
+    /* Daemon mode: needs cclaw.db for kv config, channels, etc. */
     char *db_path = resolve_db_path();
-    sqlite3 *db = db_open_daemon(db_path);
+    sqlite3 *db = db_open_cclaw(db_path);
     if (!db) {
         fprintf(stderr, "error: cannot open database '%s'\n", db_path);
         free(db_path);
@@ -349,6 +350,7 @@ int main(int argc, char *argv[]) {
         db_close(db);
         return 1;
     }
+    config_load_json_fallback(cfg);
     if (debug_mode) cfg->debug = 1;
 
     /* Daemon mode: epoll loop, fork agents on inbox signal, reap on exit */

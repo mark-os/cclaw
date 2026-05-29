@@ -62,6 +62,46 @@ static void test_mask_null_secrets(void) {
     assert(strcmp(buf, "safe") == 0);
 }
 
+static void test_mask_base64_encoded(void) {
+    /* "secret123" base64 = "c2VjcmV0MTIz" */
+    ShellSecret secrets[] = {{"TOK", "secret123"}};
+    char buf[256];
+    strcpy(buf, "encoded: c2VjcmV0MTIz end");
+    size_t len = strlen(buf);
+    shell_mask_secrets(buf, &len, sizeof(buf), secrets, 1);
+    assert(strstr(buf, "c2VjcmV0MTIz") == NULL);
+    assert(strstr(buf, "[REDACTED:TOK]") != NULL);
+}
+
+static void test_mask_url_encoded(void) {
+    /* "key=val&x" url-encoded = "key%3Dval%26x" */
+    ShellSecret secrets[] = {{"API", "key=val&x"}};
+    char buf[256];
+    strcpy(buf, "param: key%3Dval%26x done");
+    size_t len = strlen(buf);
+    shell_mask_secrets(buf, &len, sizeof(buf), secrets, 1);
+    assert(strstr(buf, "key%3Dval%26x") == NULL);
+    assert(strstr(buf, "[REDACTED:API]") != NULL);
+}
+
+static void test_mask_all_variants(void) {
+    /* Test that exact + base64 + url-encoded all get masked */
+    ShellSecret secrets[] = {{"S", "a+b"}};
+    /* "a+b" base64 = "YSti", url-encoded = "a%2Bb" */
+    char buf[256];
+    strcpy(buf, "raw:a+b b64:YSti url:a%2Bb");
+    size_t len = strlen(buf);
+    shell_mask_secrets(buf, &len, sizeof(buf), secrets, 1);
+    assert(strstr(buf, "a+b") == NULL);
+    assert(strstr(buf, "YSti") == NULL);
+    assert(strstr(buf, "a%2Bb") == NULL);
+    /* Should have 3 redaction markers */
+    int count = 0;
+    char *p = buf;
+    while ((p = strstr(p, "[REDACTED:S]")) != NULL) { count++; p++; }
+    assert(count == 3);
+}
+
 static void test_collect_and_free(void) {
     /* Set some test secrets */
     setenv("CCLAW_SECRET_TEST1", "val1", 1);
@@ -120,6 +160,9 @@ int main(void) {
     test_mask_no_match();
     test_mask_empty_value_skipped();
     test_mask_null_secrets();
+    test_mask_base64_encoded();
+    test_mask_url_encoded();
+    test_mask_all_variants();
     test_collect_and_free();
     test_shell_injects_secrets();
     printf("test_shell_secrets: all tests passed\n");

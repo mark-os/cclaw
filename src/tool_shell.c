@@ -405,7 +405,75 @@ void shell_secrets_free(ShellSecret *secrets, size_t count) {
     free(secrets);
 }
 
-/* V88: Replace secret values in output with [REDACTED:<name>] */
+/* Replace all occurrences of needle in output with tag (in-place) */
+static void mask_replace(char *output, size_t *len, size_t cap,
+                         const char *needle, size_t nlen,
+                         const char *tag, size_t taglen) {
+    char *p = output;
+    while ((p = memmem(p, *len - (size_t)(p - output), needle, nlen)) != NULL) {
+        size_t offset = (size_t)(p - output);
+        size_t tail = *len - offset - nlen;
+
+        if (taglen <= nlen) {
+            memcpy(p, tag, taglen);
+            memmove(p + taglen, p + nlen, tail + 1);
+            *len = *len - nlen + taglen;
+        } else if (*len - nlen + taglen < cap) {
+            memmove(p + taglen, p + nlen, tail + 1);
+            memcpy(p, tag, taglen);
+            *len = *len - nlen + taglen;
+        } else {
+            memcpy(p, tag, taglen);
+            *len = offset + taglen;
+            output[*len] = '\0';
+            break;
+        }
+        p = output + offset + taglen;
+    }
+}
+
+/* Base64 encode src into dst. Returns bytes written (no NUL). */
+static size_t b64_encode(char *dst, size_t dst_cap, const char *src, size_t src_len) {
+    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t needed = ((src_len + 2) / 3) * 4;
+    if (needed > dst_cap) return 0;
+    size_t o = 0;
+    for (size_t i = 0; i < src_len; i += 3) {
+        unsigned char a = (unsigned char)src[i];
+        unsigned char b = (i + 1 < src_len) ? (unsigned char)src[i + 1] : 0;
+        unsigned char c = (i + 2 < src_len) ? (unsigned char)src[i + 2] : 0;
+        dst[o++] = t[a >> 2];
+        dst[o++] = t[((a & 3) << 4) | (b >> 4)];
+        dst[o++] = (i + 1 < src_len) ? t[((b & 0xf) << 2) | (c >> 6)] : '=';
+        dst[o++] = (i + 2 < src_len) ? t[c & 0x3f] : '=';
+    }
+    return o;
+}
+
+/* URL-encode src into dst. Returns bytes written (no NUL). */
+static size_t url_encode(char *dst, size_t dst_cap, const char *src, size_t src_len) {
+    static const char hex[] = "0123456789ABCDEF";
+    size_t o = 0;
+    for (size_t i = 0; i < src_len; i++) {
+        unsigned char ch = (unsigned char)src[i];
+        int safe = ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                    (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
+                    ch == '.' || ch == '~');
+        if (safe) {
+            if (o + 1 > dst_cap) return 0;
+            dst[o++] = (char)ch;
+        } else {
+            if (o + 3 > dst_cap) return 0;
+            dst[o++] = '%';
+            dst[o++] = hex[ch >> 4];
+            dst[o++] = hex[ch & 0xf];
+        }
+    }
+    return o;
+}
+
+/* V88: Replace secret values in output with [REDACTED:<name>].
+ * Scans for exact match + base64 + URL-encoded variants. */
 void shell_mask_secrets(char *output, size_t *len, size_t cap,
                         const ShellSecret *secrets, size_t secret_count) {
     if (!secrets || secret_count == 0 || !output) return;
@@ -415,36 +483,24 @@ void shell_mask_secrets(char *output, size_t *len, size_t cap,
         size_t vlen = strlen(val);
         if (vlen == 0) continue;
 
-        /* Build replacement tag */
         char tag[280];
         int tlen = snprintf(tag, sizeof(tag), "[REDACTED:%s]", secrets[s].name);
         if (tlen < 0 || (size_t)tlen >= sizeof(tag)) continue;
         size_t taglen = (size_t)tlen;
 
-        /* Scan and replace in-place */
-        char *p = output;
-        while ((p = memmem(p, *len - (size_t)(p - output), val, vlen)) != NULL) {
-            size_t offset = (size_t)(p - output);
-            size_t tail = *len - offset - vlen;
+        /* Exact match */
+        mask_replace(output, len, cap, val, vlen, tag, taglen);
 
-            if (taglen <= vlen) {
-                /* Replacement fits or shrinks */
-                memcpy(p, tag, taglen);
-                memmove(p + taglen, p + vlen, tail + 1);
-                *len = *len - vlen + taglen;
-            } else if (*len - vlen + taglen < cap) {
-                /* Replacement grows but fits in buffer */
-                memmove(p + taglen, p + vlen, tail + 1);
-                memcpy(p, tag, taglen);
-                *len = *len - vlen + taglen;
-            } else {
-                /* No room — truncate at this point */
-                memcpy(p, tag, taglen);
-                *len = offset + taglen;
-                output[*len] = '\0';
-                break;
-            }
-            p = output + offset + taglen;
-        }
+        /* Base64-encoded variant */
+        char b64[1024];
+        size_t b64len = b64_encode(b64, sizeof(b64), val, vlen);
+        if (b64len > 0 && b64len != vlen) /* skip if same as raw (unlikely) */
+            mask_replace(output, len, cap, b64, b64len, tag, taglen);
+
+        /* URL-encoded variant (only if it differs from raw) */
+        char urlenc[2048];
+        size_t urllen = url_encode(urlenc, sizeof(urlenc), val, vlen);
+        if (urllen > 0 && urllen != vlen)
+            mask_replace(output, len, cap, urlenc, urllen, tag, taglen);
     }
 }

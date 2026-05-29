@@ -385,7 +385,7 @@ T214|x|shell output secret masking — before writing tool_result to entries tab
 T215|x|test: shell curl through proxy — mock TCP server on allowed host, verify shell child (via LD_PRELOAD + UDS) can reach it; verify response relayed correctly|V82,V83
 T216|x|test: shell cannot reach unlisted host — shell child attempts connect to non-allowlisted host via LD_PRELOAD lib, verify proxy denies (connection refused)|V83
 T217|x|test: shell cannot read filesystem outside workspace — verify /etc/shadow, agent.db, daemon.db all inaccessible from shell child (existing namespace sandbox)|V82
-T218|.|log collector process — `src/log_collector.c`; unix socketpair + `SCM_RIGHTS` fd passing; epoll on received fds; batch insert to journal.db; daemon stdout/stderr also piped (low priority)|V75
+T218|x|log collector process — `src/log_collector.c`; unix socketpair + `SCM_RIGHTS` fd passing; epoll on received fds; batch insert to journal.db; daemon stdout/stderr also piped (low priority)|V75
 T219|.|optional landlock for agent process — best-effort filesystem restriction if kernel supports; defense-in-depth only (not required for security model); skip silently if unavailable|V22
 T220|.|unit test audit — review all src/*.c for untested code paths; add missing unit tests (no network, no LLM, fast); focus on edge cases in config parsing, context_build, tool dispatch, entry append, session state transitions|§C
 T221|.|integration test audit — review mock-server test coverage; add missing integration tests for: multi-turn tool sequences, retry/backoff paths, context overflow, daemon fork+reap, inbox consumption, sub-agent lifecycle|§C

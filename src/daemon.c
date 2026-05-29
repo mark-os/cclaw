@@ -17,6 +17,7 @@
 #include "config.h"
 #include "context.h"
 #include "agent_exit.h"
+#include "log_collector.h"
 #include <cJSON.h>
 
 #include <errno.h>
@@ -550,13 +551,27 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
         return -1;
     }
 
+    /* T218/V75: Create pipes for child stdout/stderr → log collector */
+    int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1};
+    (void)pipe(out_pipe);
+    (void)pipe(err_pipe);
+
     pid_t pid = fork();
     if (pid < 0) {
         daemon_agent_set_state(agent_name, session_id, "idle");
+        close(out_pipe[0]); close(out_pipe[1]);
+        close(err_pipe[0]); close(err_pipe[1]);
         free(resolved_name);
         return -1;
     }
     if (pid == 0) {
+        /* Child: redirect stdout/stderr to pipe write ends */
+        close(out_pipe[0]);
+        close(err_pipe[0]);
+        dup2(out_pipe[1], STDOUT_FILENO);
+        dup2(err_pipe[1], STDERR_FILENO);
+        close(out_pipe[1]);
+        close(err_pipe[1]);
         /* V67/T188: inject decrypted secrets as env vars for child */
         inject_secrets_for_child(db);
 
@@ -639,6 +654,14 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
         execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);
         _exit(127);
     }
+
+    /* Parent: close write ends, send read ends to log collector */
+    close(out_pipe[1]);
+    close(err_pipe[1]);
+    log_collector_send_fd(out_pipe[0], agent_name, pid, session_id, 1);
+    log_collector_send_fd(err_pipe[0], agent_name, pid, session_id, 2);
+    close(out_pipe[0]);
+    close(err_pipe[0]);
 
     /* Parent: track child (T200: includes agent_name) */
     child_add(pid, session_id, agent_name);
@@ -1247,13 +1270,24 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
         session_set_state(adb, child_sid, "running");
         db_close(adb);
 
+        /* T218/V75: pipes for sub-agent stdout/stderr */
+        int sa_out[2] = {-1,-1}, sa_err[2] = {-1,-1};
+        (void)pipe(sa_out);
+        (void)pipe(sa_err);
+
         pid_t pid = fork();
         if (pid < 0) {
+            close(sa_out[0]); close(sa_out[1]);
+            close(sa_err[0]); close(sa_err[1]);
             daemon_agent_set_state(parent_agent_name, child_sid, "idle");
             spawn_queue_mark(db, r->id, "error", 0);
             continue;
         }
         if (pid == 0) {
+            close(sa_out[0]); close(sa_err[0]);
+            dup2(sa_out[1], STDOUT_FILENO);
+            dup2(sa_err[1], STDERR_FILENO);
+            close(sa_out[1]); close(sa_err[1]);
             /* V67/T188: inject decrypted secrets as env vars for child */
             inject_secrets_for_child(db);
             setenv("CCLAW_AGENT_NAME", parent_agent_name, 1);
@@ -1265,6 +1299,12 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
             execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);
             _exit(127);
         }
+
+        /* Parent: send pipe read ends to log collector */
+        close(sa_out[1]); close(sa_err[1]);
+        log_collector_send_fd(sa_out[0], parent_agent_name, pid, child_sid, 1);
+        log_collector_send_fd(sa_err[0], parent_agent_name, pid, child_sid, 2);
+        close(sa_out[0]); close(sa_err[0]);
 
         /* Track child (T200: includes agent_name) */
         child_add(pid, child_sid, parent_agent_name);
@@ -1468,6 +1508,23 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     migrate_agent_json_files(db);
     daemon_startup_recovery(db);
 
+    /* T218/V75: Start log collector process */
+    {
+        char journal_path[1024];
+        const char *dbp = cfg->db_path ? cfg->db_path : ".cclaw/daemon.db";
+        /* journal.db lives next to daemon.db */
+        const char *slash = strrchr(dbp, '/');
+        if (slash) {
+            int dirlen = (int)(slash - dbp);
+            snprintf(journal_path, sizeof(journal_path), "%.*s/journal.db", dirlen, dbp);
+        } else {
+            snprintf(journal_path, sizeof(journal_path), "journal.db");
+        }
+        if (log_collector_start(journal_path) != 0) {
+            fprintf(stderr, "daemon: warning: log collector failed to start\n");
+        }
+    }
+
     /* T208/V85: Check namespace support, clamp max agents */
     daemon_check_namespaces();
 
@@ -1543,6 +1600,7 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     sigchld_pipe_close();
     daemon_signal_close();
     daemon_fifo_close(fifo_fd, cfg->db_path);
+    log_collector_stop(); /* T218/V75 */
     g_child_count = 0;
     return 0;
 }

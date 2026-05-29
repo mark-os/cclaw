@@ -99,12 +99,32 @@ static int run_agent_turn(int64_t session_id) {
         }
     }
 
-    /* V22: Landlock — restrict filesystem after config loaded */
-    if (landlock_apply(cfg->workspace, cfg->db_path, session_id,
-                       NULL, 0) < 0) {
+    /* V22/T219: Landlock — restrict filesystem after config loaded */
+    const char *ra_env = getenv("CCLAW_READ_ACCESS");
+    const char **ra_paths = NULL;
+    size_t ra_count = 0;
+    char *ra_dup = NULL;
+    if (ra_env && ra_env[0]) {
+        ra_dup = strdup(ra_env);
+        /* Count colons */
+        size_t cap = 1;
+        for (const char *p = ra_env; *p; p++) if (*p == ':') cap++;
+        ra_paths = malloc(cap * sizeof(char *));
+        if (ra_paths && ra_dup) {
+            char *tok = strtok(ra_dup, ":");
+            while (tok) {
+                if (*tok) ra_paths[ra_count++] = tok;
+                tok = strtok(NULL, ":");
+            }
+        }
+    }
+    if (landlock_apply(cfg->workspace, agent_db_path, session_id,
+                       ra_paths, ra_count) < 0) {
         fprintf(stderr, "[agent %lld] landlock unavailable, continuing without\n",
                 (long long)session_id);
     }
+    free((void *)ra_paths);
+    free(ra_dup);
 
     /* V27: Update last_route from newest inbox source before consuming */
     int peek_count = 0;

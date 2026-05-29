@@ -618,6 +618,22 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
                         free(hosts);
                     }
                 }
+                /* V66/T219: Colon-separated read_access paths for landlock */
+                if (ac->read_access_count > 0) {
+                    size_t len = 0;
+                    for (size_t i = 0; i < ac->read_access_count; i++)
+                        len += strlen(ac->read_access[i]) + 1;
+                    char *ra = malloc(len);
+                    if (ra) {
+                        ra[0] = '\0';
+                        for (size_t i = 0; i < ac->read_access_count; i++) {
+                            if (i > 0) strcat(ra, ":");
+                            strcat(ra, ac->read_access[i]);
+                        }
+                        setenv("CCLAW_READ_ACCESS", ra, 1);
+                        free(ra);
+                    }
+                }
                 agent_config_free(ac);
             } else {
                 /* No per-agent config — use defaults */

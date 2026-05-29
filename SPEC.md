@@ -383,7 +383,7 @@ T212|x|secret env-var injection for shell children — agent selectively passes 
 T213|.|[removed — per-process CA unnecessary; secrets injected via env vars, not MITM proxy]|-
 T214|x|shell output secret masking — before writing tool_result to entries table, scan output for all known secret values (exact match + common encodings: base64, URL-encoded); replace w/ `[REDACTED:<name>]`; masking applied in `tool_shell_handler` before return|V52,V82
 T215|x|test: shell curl through proxy — mock TCP server on allowed host, verify shell child (via LD_PRELOAD + UDS) can reach it; verify response relayed correctly|V82,V83
-T216|.|test: shell cannot reach unlisted host — shell child attempts connect to non-allowlisted host via LD_PRELOAD lib, verify proxy denies (connection refused)|V83
+T216|x|test: shell cannot reach unlisted host — shell child attempts connect to non-allowlisted host via LD_PRELOAD lib, verify proxy denies (connection refused)|V83
 T217|.|test: shell cannot read filesystem outside workspace — verify /etc/shadow, agent.db, daemon.db all inaccessible from shell child (existing namespace sandbox)|V82
 T218|.|log collector process — `src/log_collector.c`; unix socketpair + `SCM_RIGHTS` fd passing; epoll on received fds; batch insert to journal.db; daemon stdout/stderr also piped (low priority)|V75
 T219|.|optional landlock for agent process — best-effort filesystem restriction if kernel supports; defense-in-depth only (not required for security model); skip silently if unavailable|V22

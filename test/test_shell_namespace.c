@@ -119,8 +119,47 @@ static void test_agent_db_inaccessible(void) {
     printf("  PASS test_agent_db_inaccessible\n");
 }
 
+/* T217: Verify /etc/shadow inaccessible from shell child */
+static void test_etc_shadow_inaccessible(void) {
+    if (!ns_available) { printf("  SKIP test_etc_shadow_inaccessible\n"); return; }
+    ShellConfig sc = {.timeout = 5, .workspace = workspace};
+    char *r = tool_shell_handler(
+        "{\"command\":\"cat /etc/shadow 2>&1; echo rc=$?\"}", &sc);
+    assert(r != NULL);
+    /* /etc is ro bind-mount; shadow should be permission-denied or not exist */
+    assert(strstr(r, "rc=1") != NULL || strstr(r, "Permission denied") != NULL
+           || strstr(r, "No such file") != NULL);
+    free(r);
+    printf("  PASS test_etc_shadow_inaccessible\n");
+}
+
+/* T217: Verify agent.db path inaccessible from shell child */
+static void test_agent_db_path_blocked(void) {
+    if (!ns_available) { printf("  SKIP test_agent_db_path_blocked\n"); return; }
+    ShellConfig sc = {.timeout = 5, .workspace = workspace};
+    /* Typical agent.db path — outside workspace, not bind-mounted */
+    char *r = tool_shell_handler(
+        "{\"command\":\"cat .cclaw/agents/default/agent.db 2>&1; echo rc=$?\"}", &sc);
+    assert(r != NULL);
+    assert(strstr(r, "rc=1") != NULL || strstr(r, "No such file") != NULL);
+    free(r);
+    printf("  PASS test_agent_db_path_blocked\n");
+}
+
+/* T217: Verify daemon.db path inaccessible from shell child */
+static void test_daemon_db_path_blocked(void) {
+    if (!ns_available) { printf("  SKIP test_daemon_db_path_blocked\n"); return; }
+    ShellConfig sc = {.timeout = 5, .workspace = workspace};
+    char *r = tool_shell_handler(
+        "{\"command\":\"cat .cclaw/cclaw.db 2>&1; echo rc=$?\"}", &sc);
+    assert(r != NULL);
+    assert(strstr(r, "rc=1") != NULL || strstr(r, "No such file") != NULL);
+    free(r);
+    printf("  PASS test_daemon_db_path_blocked\n");
+}
+
 int main(void) {
-    printf("test_shell_namespace (T209):\n");
+    printf("test_shell_namespace (T209/T217):\n");
     setup_workspace();
     test_namespace_active();
     test_write_inside_workspace();
@@ -129,6 +168,9 @@ int main(void) {
     test_network_isolated();
     test_graceful_fallback();
     test_agent_db_inaccessible();
+    test_etc_shadow_inaccessible();
+    test_agent_db_path_blocked();
+    test_daemon_db_path_blocked();
     cleanup_workspace();
     printf("All namespace sandbox tests passed.\n");
     return 0;

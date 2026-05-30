@@ -25,16 +25,8 @@ Move to §T when ready to implement.
 - Summarizes old branches, prunes dead ends
 - Runs as sub-agent on schedule (cron)
 
-## LLM-based Compaction
-- When context window fills, summarize old messages via LLM call
-- Pi pattern: `shouldCompact()` when `contextTokens > contextWindow - reserveTokens`
-- Keep ~20k recent tokens, summarize the rest
-- Iterative: update previous summary rather than re-summarize everything
-- Cut at valid turn boundaries (never mid-tool-call)
-- Store as `compaction` entry in session tree
-
-## Cross-compile for Pogoplug
-- Target: Pogoplug V4 (ARMv5TE, 128MB RAM, Debian Bookworm armel)
+## Cross-compile for Legacy Embedded Targets
+- Target: ARMv5TE and similar (128MB RAM)
 - musl static link or armel dynamic
 - Reduced feature set (no mquickjs? smaller arena?)
 
@@ -42,41 +34,80 @@ Move to §T when ready to implement.
 - Different models for different tasks (cheap for compaction, expensive for reasoning)
 - Per-session model override stored in DB
 
-## FTS5 Search Tool
-- Expose message search as agent tool (`search_history`)
-- Agent can search its own past conversations
+## Search & Long-term Memory
+
+### search_history tool
+- Dedicated tool wrapping FTS5 search over agent's own sessions
+- Higher-level than raw `db_query` — returns formatted results with context
+- Search across all sessions, not just current
+
+### Cross-agent search
+- Agent can search other agents' sessions (with permission)
+- Use case: coordinator agent reviewing sub-agent work
+- Requires read access to other agent DBs (daemon-mediated or namespace bind-mount)
+
+### Long-term memory ideas
+- Semantic search over past conversations (embedding-based, not just keyword FTS5)
+- Auto-summarization of old sessions into memory blocks
+- "What do I know about X?" tool that searches memory + history
+- Memory consolidation agent (background, merges/prunes memory blocks over time)
+- Episodic memory: key events/decisions tagged and retrievable by topic
+
+### Shared memory blocks
+- Problem: each agent's memory_blocks live in its own agent.db — no cross-agent visibility
+- Approach: `shared_memory_blocks` table in cclaw.db (daemon-owned)
+- Read: agents get read-only access via `shared_memory_read` tool (or bind-mount cclaw.db ro)
+- Write: mediated by daemon — agent requests write via exit code 4 or a dedicated tool that posts to inbox
+- Use cases: shared knowledge base, project context, team conventions, coordination state
+- Scoping: optional namespace/tag per block so agents can subscribe to relevant shared memory only
 
 ## JS Extension System
 
-### Tool Authoring via mquickjs
+MicroQuickJS is the extension language for CClaw. Current foundation: `js_define_tool` (runtime tool creation) and `js_eval` (one-shot execution). The full extension system will cover:
 
-The agent can define new tools at runtime via `js_define_tool`. These persist per-session (replayed on reload via T33). Questions:
+### Planned Extension Points
 
-- Should JS tools be able to call other tools? (tool composition)
-- If yes, inject a `callTool(name, args)` global that dispatches through the tool registry
-- A JS-defined tool that calls `fetch`, transforms, then calls `file_write` = mini-agent in JS
-- Schema: agent provides JSON schema when defining the tool, or infer from function signature?
+| Extension type | What it does | Example |
+|---------------|--------------|---------|
+| Tools | Register new tools callable by the agent | Custom API wrappers, data transforms |
+| Channel extensions | New input/output channels beyond Telegram/CLI | Discord, Slack, email, webhooks |
+| Agent loop hooks | Before/after LLM call, before/after tool dispatch | Logging, cost tracking, guardrails |
+| Skills | Prompt fragments loaded into system prompt | Domain knowledge, persona, instructions |
+| Prompt management | Dynamic system prompt composition | Context-aware prompt assembly |
 
-### Workspace Scripts as Tools
+### Extension Loading
 
-Drop a script in `workspace/tools/`, auto-discover or explicit register. Any language. Input via stdin/env, output via stdout. Zero ceremony.
+Extensions are JS modules loaded at agent startup from `agents/<name>/workspace/extensions/`. Each declares what it hooks into. Loaded fresh each turn (no persistent state beyond what's in DB).
 
-- Discovery: scan `tools/` dir on session start, register each executable as a tool
-- Convention: `tools/my_tool.sh --schema` prints JSON schema, `tools/my_tool.sh` runs with args on stdin
-- Or: `tools/my_tool.json` sidecar with name/description/schema, points to executable
+### Reference: Pi Extension Model
 
-### Both Coexist
+See `reference/pi-extensions.md` for Pi's approach:
+- Extensions declare lifecycle hooks (onMessage, onToolCall, beforeRequest, afterResponse)
+- Extensions can modify the message array before LLM call
+- Extensions can register tools dynamically
+- Extensions have scoped permissions
 
-| Mechanism | Good for | Limitations |
-|-----------|----------|-------------|
-| `js_define_tool` | Data transformation, logic, composing other tools | No system access (unless we inject it) |
-| Workspace scripts | System access, external binaries, pip/npm packages | Subprocess overhead, no in-process state |
+CClaw adaptation: same concepts, implemented in MicroQuickJS instead of TypeScript, with SQLite for state instead of in-memory.
+
+### Tool Authoring via mquickjs (foundation ✓)
+
+`js_define_tool` lets agents create tools at runtime. Persists per-session. Remaining work:
+- Tool composition: JS tools calling other tools via `callTool(name, args)`
+- Schema inference vs explicit declaration
+- Workspace script auto-discovery (`workspace/tools/*.sh`)
+
+### fetch() (foundation ✓)
+
+Synchronous fetch via UDS proxy. Respects allowed_hosts. Remaining work:
+- Response size caps (heap bounded)
+- Configurable timeout per request
+- Streaming for large responses
 
 ## JS Runtime Capabilities
 
-### fetch()
+### fetch() ✓ (implemented)
 
-Synchronous (mquickjs is blocking). Wraps libcurl. Respects V2 (retry/backoff).
+Synchronous (mquickjs is blocking). Wraps libcurl via UDS proxy. Respects allowed_hosts.
 
 - URL allowlist? Or inherit agent's permissions?
 - Response size cap (heap is bounded)
@@ -97,7 +128,7 @@ Same workspace restriction as `file_read`/`file_write` tools (V1). Injected as g
 - HTTP response + parsed JSON + processing = easily 2-4MB
 - Make heap configurable per-agent in config.json
 - Default 1MB for `js_eval`, 4-8MB for tools with I/O
-- Pogoplug target (128MB RAM): keep it tight, maybe 2MB max
+- Legacy ARM targets (128MB RAM): keep it tight, maybe 2MB max
 
 ## Self-Reflection / Introspection
 

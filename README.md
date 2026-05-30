@@ -13,39 +13,27 @@ A minimal autonomous AI agent runtime in C. Turn-based execution, SQLite persist
 
 ## Architecture
 
-```
-┌──────────┐  ┌──────────────┐  ┌──────────┐  ┌──────────────┐
-│   CLI    │  │ Telegram poll│  │ Civetweb │  │  Cron thread │
-│(standalone│  │   (thread)   │  │(webhooks)│  │   (thread)   │
-│ process) │  └──────┬───────┘  └────┬─────┘  └──────┬───────┘
-└────┬─────┘         │               │               │
-     │               ▼               ▼               ▼
-     │        ┌─────────────────────────────────────────┐
-     │        │         inbox_insert + signal pipe      │
-     │        └──────────────────┬──────────────────────┘
-     │                           │
-     │        ┌──────────────────▼──────────────────────┐
-     │        │              DAEMON                      │
-     │        │  epoll: signal pipe + SIGCHLD self-pipe  │
-     │        │  fork agent on inbox signal              │
-     │        │  reap children, dispatch on exit code    │
-     │        └──────┬─────────────────┬────────────────┘
-     │               │                 │
-     │     ┌─────────▼───┐   ┌────────▼────────┐
-     │     │ Agent proc  │   │  Agent proc     │
-     │     │ (forked)    │   │  (forked)       │
-     │     │ setrlimit   │   │  setrlimit      │
-     │     │ drain inbox │   │  drain inbox    │
-     │     │ LLM loop    │   │  LLM loop       │
-     │     │ exit(code)  │   │  exit(code)     │
-     │     └─────────────┘   └─────────────────┘
-     │
-     │  (CLI runs agent loop directly — no daemon needed)
-     ▼
-┌─────────────────────────────────────────────────────────┐
-│                  3-DB SQLite (WAL)                       │
-│  cclaw.db (registry/config) · agent.db · journal.db     │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    CLI[CLI<br/>standalone process]
+    TG[Telegram poller<br/>thread]
+    WEB[Civetweb<br/>webhooks]
+    CRON[Cron thread]
+
+    TG --> INBOX[inbox_insert + signal pipe]
+    WEB --> INBOX
+    CRON --> INBOX
+
+    INBOX --> DAEMON[DAEMON<br/>epoll: signal pipe + SIGCHLD<br/>fork agent on inbox signal<br/>reap children, dispatch on exit code]
+
+    DAEMON --> A1[Agent process<br/>setrlimit · drain inbox<br/>LLM loop · exit code]
+    DAEMON --> A2[Agent process<br/>setrlimit · drain inbox<br/>LLM loop · exit code]
+
+    CLI --> DB
+    A1 --> DB
+    A2 --> DB
+
+    DB[(3-DB SQLite WAL<br/>cclaw.db · agent.db · journal.db)]
 ```
 
 **Daemon mode** (`--daemon`): epoll loop forks isolated agent processes per session turn. Dispatches on exit code (0=deliver, 2=spawn, 3=approval, 4=config).

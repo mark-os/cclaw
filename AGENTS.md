@@ -17,7 +17,15 @@ CClaw is designed around Unix philosophy:
 
 **Inspiration**
 
-CClaw draws from *Pi agent* (`reference/pi`) for its clean agent loop and session tree model, and from *OpenClaw* (`reference/openclaw`) for autonomy features, security patterns, and multi-channel integration. It also learns from *nullclaw* (`reference/nullclaw`), a Zig clone of OpenClaw, and from *Letta* (`reference/letta`) for stateful agent design and persistent memory patterns. CClaw does not try to be everything to everyone — it serves its creator Mark Ostroth. It will borrow C libraries, link dynamically to system curl, vendor what makes sense, and do whatever it takes to produce a simple, usable, excellent autonomous agent.
+CClaw shamelessly borrows ideas from these projects:
+
+| Project | Path | Keep | Leave Out |
+|---------|------|------|-----------|
+| Pi agent | `reference/pi` | Clean agent loop, session tree model (`ai` and `agent` packages are canonical references) | TypeScript |
+| OpenClaw | `reference/openclaw` | Autonomy features, security patterns, multi-channel integration (battle-tested guards for the wild) | Over-engineering, complexity |
+| Letta | `reference/letta` | Innovative memory system, stateful agent design | REST API, Postgres, Python |
+| nullclaw | `reference/nullclaw` | Zig clone of OpenClaw (architecture reference) | Pure-Zig everything for cross-compat (we link system curl) |
+| IronClaw | `reference/ironclaw` | Secure execution model (secret injection, sandboxing) | Rust |
 
 **Principles:**
 - Simple over clever. Blocking I/O. Threads over callbacks.
@@ -62,7 +70,7 @@ See [REFACTOR.md](REFACTOR.md) for architecture diagram and [specs/schema.md](sp
 
 See [specs/security.md](specs/security.md) for full details.
 
-- **Agent process**: trusted binary. `setrlimit` (kernel-enforced) + `http_check_policy()` (app-level). Optional landlock as defense-in-depth.
+- **Agent process**: trusted binary. `setrlimit` (kernel-enforced) + `http_check_policy()` (app-level).
 - **Shell children**: untrusted. Namespace sandbox + transparent credential proxy. See [specs/shell-networking.md](specs/shell-networking.md).
 - **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted by daemon, injected to agent at fork, cleared from env immediately.
 

@@ -17,6 +17,7 @@
 #include "db.h"
 #include "shutdown.h"
 #include "mock_server.h"
+static int s_port;
 
 static const char *DB_PATH = "/tmp/test_integ_subagent_blocking.sqlite";
 static const char *WORK_DIR = "/tmp/test_integ_subagent_work";
@@ -37,9 +38,9 @@ static void *daemon_thread(void *arg) {
     return NULL;
 }
 
-static void seed_kv_config(sqlite3 *db, int port) {
+static void seed_kv_config(sqlite3 *db) {
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
     db_kv_set(db, "provider.base_url", base_url);
     db_kv_set(db, "provider.model", "mock-model");
     db_kv_set(db, "provider.max_tokens", "256");
@@ -104,37 +105,9 @@ static int wait_for_idle_agent(const char *adb_path, int64_t sid, int min_assist
 static void test_blocking_subagent_lifecycle(void) {
     TEST(blocking_subagent_lifecycle);
 
-    setenv("CCLAW_NO_LANDLOCK", "1", 1);
+    mock_server_reset();
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
-
-    /* Response 1: Parent gets tool_call for launch_agent (blocking) */
-    mock_server_enqueue(200,
-        "{\"id\":\"r1\",\"choices\":[{\"message\":{\"role\":\"assistant\","
-        "\"content\":null,\"tool_calls\":[{\"id\":\"call_spawn1\",\"type\":\"function\","
-        "\"function\":{\"name\":\"launch_agent\","
-        "\"arguments\":\"{\\\"task\\\":\\\"do child work\\\"}\"}}]},"
-        "\"finish_reason\":\"tool_calls\"}],"
-        "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}");
-
-    /* Response 2: Parent's second LLM call (after SPAWN_BLOCKING tool result) → stop */
-    mock_server_enqueue(200,
-        "{\"id\":\"r2\",\"choices\":[{\"message\":{\"role\":\"assistant\","
-        "\"content\":\"Waiting for sub-agent.\"},\"finish_reason\":\"stop\"}],"
-        "\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5}}");
-
-    /* Response 3: Child agent's LLM call → final response */
-    mock_server_enqueue(200,
-        "{\"id\":\"r3\",\"choices\":[{\"message\":{\"role\":\"assistant\","
-        "\"content\":\"child completed successfully\"},\"finish_reason\":\"stop\"}],"
-        "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}");
-
-    /* Response 4: Parent re-fork LLM call (after sub-agent result in inbox) → final */
-    mock_server_enqueue(200,
-        "{\"id\":\"r4\",\"choices\":[{\"message\":{\"role\":\"assistant\","
-        "\"content\":\"parent done after child\"},\"finish_reason\":\"stop\"}],"
-        "\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":5}}");
+    mock_server_load("test/fixtures/subagent_blocking.json");
 
     char orig_cwd[1024];
     getcwd(orig_cwd, sizeof(orig_cwd));
@@ -156,17 +129,17 @@ static void test_blocking_subagent_lifecycle(void) {
     char adb_path[256];
     snprintf(adb_path, sizeof(adb_path), "agents/%s/agent.db", AGENT_NAME);
     sqlite3 *adb = db_open_agent(adb_path);
-    if (!adb) { mock_server_stop(); chdir(orig_cwd); FAIL("db_open_agent"); }
+    if (!adb) { chdir(orig_cwd); FAIL("db_open_agent"); }
     int64_t parent_sid = session_create(adb, "parent_agent", AGENT_NAME, -1, 0);
-    if (parent_sid < 0) { db_close(adb); mock_server_stop(); chdir(orig_cwd); FAIL("session_create"); }
+    if (parent_sid < 0) { db_close(adb); chdir(orig_cwd); FAIL("session_create"); }
     inbox_insert(adb, parent_sid, "test", "please spawn a child agent");
     db_close(adb);
 
     /* Create daemon DB */
     unlink(DB_PATH);
     sqlite3 *db = db_open_cclaw(DB_PATH);
-    if (!db) { mock_server_stop(); chdir(orig_cwd); FAIL("db_open_cclaw"); }
-    seed_kv_config(db, port);
+    if (!db) { chdir(orig_cwd); FAIL("db_open_cclaw"); }
+    seed_kv_config(db);
 
     /* Start daemon */
     shutdown_reset();
@@ -175,7 +148,7 @@ static void test_blocking_subagent_lifecycle(void) {
     daemon_set_self_path(self_path);
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
     Config cfg = {0};
     cfg.db_path = (char *)DB_PATH;
     cfg.workspace = "/tmp";
@@ -201,7 +174,7 @@ static void test_blocking_subagent_lifecycle(void) {
             if (wait_for_spawn_status(db, parent_sid, "done", 5000) != 0) {
                 shutdown_request();
                 pthread_join(dt, NULL);
-                db_close(db); mock_server_stop(); chdir(orig_cwd);
+                db_close(db); chdir(orig_cwd);
                 FAIL("spawn_queue entry never appeared");
             }
         }
@@ -211,7 +184,7 @@ static void test_blocking_subagent_lifecycle(void) {
     if (wait_for_spawn_status(db, parent_sid, "done", 20000) != 0) {
         shutdown_request();
         pthread_join(dt, NULL);
-        db_close(db); mock_server_stop(); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         FAIL("spawn_queue never reached 'done' status");
     }
 
@@ -219,7 +192,7 @@ static void test_blocking_subagent_lifecycle(void) {
     if (wait_for_idle_agent(adb_path, parent_sid, 2, 20000) != 0) {
         shutdown_request();
         pthread_join(dt, NULL);
-        db_close(db); mock_server_stop(); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         FAIL("parent did not return to idle after re-fork");
     }
 
@@ -230,14 +203,13 @@ static void test_blocking_subagent_lifecycle(void) {
         snprintf(msg, sizeof(msg), "expected >=3 mock requests, got %d", req_count);
         shutdown_request();
         pthread_join(dt, NULL);
-        db_close(db); mock_server_stop(); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         FAIL(msg);
     }
 
     shutdown_request();
     pthread_join(dt, NULL);
     db_close(db);
-    mock_server_stop();
     unlink(DB_PATH);
     chdir(orig_cwd);
     snprintf(cmd, sizeof(cmd), "rm -rf %s", WORK_DIR);
@@ -247,6 +219,7 @@ static void test_blocking_subagent_lifecycle(void) {
 
 int main(void) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    s_port = mock_server_start();
     printf("--- test_integration_subagent_blocking (T184) ---\n");
     /* T200: This test exercises the full spawn lifecycle which spans T200+T201.
      * The exit-code-based spawn flow (T201) is not yet implemented.
@@ -256,6 +229,7 @@ int main(void) {
     tests_run = 1;
     tests_passed = 1;
     printf("%d/%d passed\n", tests_passed, tests_run);
+    mock_server_stop();
     curl_global_cleanup();
     return 0;
 }

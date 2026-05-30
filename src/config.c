@@ -186,6 +186,15 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_DEBUG");
     cfg->debug = v ? atoi(v) : 0;
 
+    v = getenv("CCLAW_CONTEXT_THRESHOLD");
+    cfg->context_threshold = v ? (float)atof(v) : 0.6f;
+
+    v = getenv("CCLAW_COMPACTION_TARGET");
+    cfg->compaction_target = v ? (float)atof(v) : 0.3f;
+
+    v = getenv("CCLAW_COMPACTION");
+    cfg->compaction = v ? atoi(v) : 1;
+
     return cfg;
 }
 
@@ -349,6 +358,19 @@ Config *config_load_from_kv(sqlite3 *db) {
     KV_INT("token_rate_limit", 1000000);
     cfg->token_rate_limit = int_val;
 
+    /* V91: compaction configs */
+    {
+        char *v = db_kv_get(db, "context_threshold");
+        cfg->context_threshold = v ? (float)atof(v) : 0.6f;
+        free(v);
+        v = db_kv_get(db, "compaction_target");
+        cfg->compaction_target = v ? (float)atof(v) : 0.3f;
+        free(v);
+        v = db_kv_get(db, "compaction");
+        cfg->compaction = v ? atoi(v) : 1;
+        free(v);
+    }
+
     #undef KV_STR
     #undef KV_INT
 
@@ -370,6 +392,16 @@ Config *config_load_from_kv(sqlite3 *db) {
     env_override_int(&cfg->save_usage, "CCLAW_SAVE_USAGE");
     env_override_int(&cfg->save_logprobs, "CCLAW_SAVE_LOGPROBS");
     env_override_int(&cfg->token_rate_limit, "CCLAW_TOKEN_RATE_LIMIT");
+
+    /* V91: compaction env overrides */
+    {
+        const char *v = getenv("CCLAW_CONTEXT_THRESHOLD");
+        if (v) cfg->context_threshold = (float)atof(v);
+        v = getenv("CCLAW_COMPACTION_TARGET");
+        if (v) cfg->compaction_target = (float)atof(v);
+        v = getenv("CCLAW_COMPACTION");
+        if (v) cfg->compaction = atoi(v);
+    }
 
     return cfg;
 }

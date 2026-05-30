@@ -118,10 +118,56 @@ static void test_multiple_responses(void) {
     printf("PASS: test_multiple_responses\n");
 }
 
+static void test_load_template(void) {
+    int port = mock_server_start();
+    assert(port > 0);
+
+    int loaded = mock_server_load("test/fixtures/mock_responses.json");
+    assert(loaded == 3);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1/chat/completions", port);
+
+    CURL *curl = curl_easy_init();
+    char response[8192];
+    long code;
+
+    /* First: 200 with JSON body */
+    memset(response, 0, sizeof(response));
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "{}");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    assert(curl_easy_perform(curl) == CURLE_OK);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    assert(code == 200);
+    assert(strstr(response, "hello from template") != NULL);
+
+    /* Second: 429 */
+    memset(response, 0, sizeof(response));
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    assert(curl_easy_perform(curl) == CURLE_OK);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    assert(code == 429);
+
+    /* Third: 200 with string body */
+    memset(response, 0, sizeof(response));
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    assert(curl_easy_perform(curl) == CURLE_OK);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    assert(code == 200);
+    assert(strstr(response, "raw string body") != NULL);
+
+    curl_easy_cleanup(curl);
+    mock_server_stop();
+    printf("PASS: test_load_template\n");
+}
+
 int main(void) {
     test_start_stop();
     test_enqueue_and_fetch();
     test_multiple_responses();
+    test_load_template();
     printf("All mock_server tests passed.\n");
     return 0;
 }

@@ -13,6 +13,7 @@
 #include "db.h"
 #include "config.h"
 #include "daemon.h"
+static int s_port;
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -29,6 +30,7 @@ static int wait_for(int (*check)(void *), void *arg, int timeout_ms) {
         if (check(arg)) return 1;
         usleep(10000);
     }
+    mock_server_stop();
     return 0;
 }
 
@@ -47,8 +49,7 @@ static int inbox_has_items(void *arg) {
 static void test_poll_to_inbox(void) {
     TEST(poll_to_inbox);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
     mock_tg_enable(TOKEN);
 
     /* Enqueue a getUpdates response with one message */
@@ -58,13 +59,13 @@ static void test_poll_to_inbox(void) {
         "\"text\":\"Hello from Telegram\"}}]}");
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     /* Init signal pipe (needed by process_message → daemon_signal_session) */
     daemon_signal_init();
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", s_port);
 
     Config cfg = {0};
     cfg.telegram_token = TOKEN;
@@ -73,11 +74,11 @@ static void test_poll_to_inbox(void) {
     cfg.workspace = "./workspace";
 
     int rc = telegram_start(&cfg, db);
-    if (rc != 0) { db_close(db); mock_server_stop(); daemon_signal_close(); FAIL("telegram_start failed"); }
+    if (rc != 0) { db_close(db); daemon_signal_close(); FAIL("telegram_start failed"); }
 
     /* Wait for inbox to be populated */
     if (!wait_for(inbox_has_items, db, 3000)) {
-        telegram_stop(); db_close(db); mock_server_stop(); daemon_signal_close();
+        telegram_stop(); db_close(db); daemon_signal_close();
         FAIL("inbox not populated within timeout");
     }
 
@@ -85,7 +86,7 @@ static void test_poll_to_inbox(void) {
     sqlite3_stmt *stmt;
     const char *sql = "SELECT payload, source FROM inbox WHERE consumed=0;";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        telegram_stop(); db_close(db); mock_server_stop(); daemon_signal_close();
+        telegram_stop(); db_close(db); daemon_signal_close();
         FAIL("query failed");
     }
     int found = 0;
@@ -101,10 +102,9 @@ static void test_poll_to_inbox(void) {
 
     telegram_stop();
 
-    if (!found) { db_close(db); mock_server_stop(); daemon_signal_close(); FAIL("inbox payload mismatch"); }
+    if (!found) { db_close(db); daemon_signal_close(); FAIL("inbox payload mismatch"); }
 
     db_close(db);
-    mock_server_stop();
     daemon_signal_close();
     PASS();
 }
@@ -121,8 +121,7 @@ static int offset_persisted(void *arg) {
 static void test_offset_persistence(void) {
     TEST(offset_persistence);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
     mock_tg_enable(TOKEN);
 
     /* Enqueue update with update_id=200 */
@@ -132,11 +131,11 @@ static void test_offset_persistence(void) {
         "\"text\":\"test offset\"}}]}");
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
     daemon_signal_init();
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", s_port);
 
     Config cfg = {0};
     cfg.telegram_token = TOKEN;
@@ -147,7 +146,7 @@ static void test_offset_persistence(void) {
     telegram_start(&cfg, db);
 
     if (!wait_for(offset_persisted, db, 3000)) {
-        telegram_stop(); db_close(db); mock_server_stop(); daemon_signal_close();
+        telegram_stop(); db_close(db); daemon_signal_close();
         FAIL("offset not persisted within timeout");
     }
 
@@ -158,7 +157,6 @@ static void test_offset_persistence(void) {
 
     telegram_stop();
     db_close(db);
-    mock_server_stop();
     daemon_signal_close();
 
     if (!ok) FAIL("offset should be 201");
@@ -169,16 +167,15 @@ static void test_offset_persistence(void) {
 static void test_send_message_delivery(void) {
     TEST(send_message_delivery);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
     mock_tg_enable(TOKEN);
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
     daemon_signal_init();
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", s_port);
 
     /* Need to start telegram so g_cfg is set (tg_url uses it) */
     Config cfg = {0};
@@ -196,23 +193,22 @@ static void test_send_message_delivery(void) {
     usleep(100000);
 
     if (mock_tg_send_count() < 1) {
-        telegram_stop(); db_close(db); mock_server_stop(); daemon_signal_close();
+        telegram_stop(); db_close(db); daemon_signal_close();
         FAIL("sendMessage not called");
     }
 
     const char *body = mock_tg_last_send_body();
     if (!body || !strstr(body, "Agent response text")) {
-        telegram_stop(); db_close(db); mock_server_stop(); daemon_signal_close();
+        telegram_stop(); db_close(db); daemon_signal_close();
         FAIL("sendMessage body mismatch");
     }
     if (!strstr(body, "12345")) {
-        telegram_stop(); db_close(db); mock_server_stop(); daemon_signal_close();
+        telegram_stop(); db_close(db); daemon_signal_close();
         FAIL("sendMessage chat_id mismatch");
     }
 
     telegram_stop();
     db_close(db);
-    mock_server_stop();
     daemon_signal_close();
     PASS();
 }
@@ -221,8 +217,7 @@ static void test_send_message_delivery(void) {
 static void test_chat_session_routing(void) {
     TEST(chat_session_routing);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
     mock_tg_enable(TOKEN);
 
     /* Two messages from same chat_id */
@@ -233,11 +228,11 @@ static void test_chat_session_routing(void) {
         "]}");
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
     daemon_signal_init();
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", s_port);
 
     Config cfg = {0};
     cfg.telegram_token = TOKEN;
@@ -270,7 +265,6 @@ static void test_chat_session_routing(void) {
     }
 
     db_close(db);
-    mock_server_stop();
     daemon_signal_close();
 
     if (session_count != 1) FAIL("expected both messages in same session");
@@ -279,6 +273,7 @@ static void test_chat_session_routing(void) {
 
 int main(void) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    s_port = mock_server_start();
     printf("--- test_integration_telegram (T129) ---\n");
     test_poll_to_inbox();
     test_offset_persistence();

@@ -24,16 +24,6 @@ git clone --depth 1 https://github.com/zeroclaw-labs/zeroclaw.git reference/zero
 git clone --depth 1 https://github.com/nextlevelbuilder/goclaw.git reference/goclaw
 ```
 
-## C Libraries (reference only, not cloned)
-
-```bash
-# Redis — C data structures, event loop, networking patterns
-# https://github.com/redis/redis
-
-# NNG (nanomsg next gen) — lightweight brokerless messaging in C
-# https://github.com/nanomsg/nng
-```
-
 ## Notes
 
 - `pi-ai.md` — LLM wire formats, caching, streaming, provider normalization

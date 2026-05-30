@@ -16,8 +16,17 @@ void mock_server_enqueue_with_headers(int http_status, const char *body, const c
 /* Start mock server. Returns the assigned port, or -1 on failure. */
 int mock_server_start(void);
 
+/* Load responses from a JSON template file. Format: array of objects:
+ * [{"status": 200, "body": {...}}, {"status": 429, "body": {...}}]
+ * Each object is enqueued in order. "body" is re-serialized as JSON string.
+ * Returns number of responses loaded, or -1 on error. */
+int mock_server_load(const char *path);
+
 /* Stop mock server and free all queued responses. */
 void mock_server_stop(void);
+
+/* Reset state without stopping server — clear queue, zero request count. */
+void mock_server_reset(void);
 
 /* Return number of requests received since start (or last reset). */
 int mock_server_request_count(void);

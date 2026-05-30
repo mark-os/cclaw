@@ -1,0 +1,5 @@
+[
+  {"status": 200, "body": {"id": "c1", "choices": [{"message": {"role": "assistant", "content": "Here's my plan:\n- Read the file\n- Fix the bug\n- Run tests"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}}},
+  {"status": 200, "body": {"id": "c2", "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "file_read", "arguments": "{\"path\":\"bug.c\"}"}}]}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40}}},
+  {"status": 200, "body": {"id": "c3", "choices": [{"message": {"role": "assistant", "content": "Fixed the bug."}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 40, "completion_tokens": 5, "total_tokens": 45}}}
+]

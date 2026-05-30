@@ -1,6 +1,7 @@
 #define _DEFAULT_SOURCE
 #include "mock_server.h"
 #include "civetweb.h"
+#include "cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -197,6 +198,39 @@ void mock_server_stop(void) {
     pthread_mutex_unlock(&s_mutex);
 }
 
+void mock_server_reset(void) {
+    pthread_mutex_lock(&s_mutex);
+    while (s_queue_head) {
+        MockResponse *r = s_queue_head;
+        s_queue_head = r->next;
+        free(r->body);
+        free(r->extra_headers);
+        free(r);
+    }
+    s_queue_tail = NULL;
+    s_request_count = 0;
+    free(s_last_body);
+    s_last_body = NULL;
+    while (s_tg_updates_head) {
+        MockResponse *r = s_tg_updates_head;
+        s_tg_updates_head = r->next;
+        free(r->body);
+        free(r);
+    }
+    s_tg_updates_tail = NULL;
+    while (s_tg_send_head) {
+        MockResponse *r = s_tg_send_head;
+        s_tg_send_head = r->next;
+        free(r->body);
+        free(r);
+    }
+    s_tg_send_tail = NULL;
+    s_tg_send_count = 0;
+    free(s_tg_last_send_body);
+    s_tg_last_send_body = NULL;
+    pthread_mutex_unlock(&s_mutex);
+}
+
 int mock_server_request_count(void) {
     pthread_mutex_lock(&s_mutex);
     int c = s_request_count;
@@ -322,4 +356,50 @@ void mock_tg_enable(const char *token) {
     mg_set_request_handler(s_ctx, route, handle_tg_get_updates, NULL);
     snprintf(route, sizeof(route), "/bot%s/sendMessage", token);
     mg_set_request_handler(s_ctx, route, handle_tg_send_message, NULL);
+}
+
+int mock_server_load(const char *path) {
+    if (!path) return -1;
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *data = malloc((size_t)len + 1);
+    if (!data) { fclose(f); return -1; }
+    size_t nread = fread(data, 1, (size_t)len, f);
+    data[nread] = '\0';
+    fclose(f);
+
+    cJSON *arr = cJSON_Parse(data);
+    free(data);
+    if (!arr || !cJSON_IsArray(arr)) {
+        cJSON_Delete(arr);
+        return -1;
+    }
+
+    int count = 0;
+    cJSON *item;
+    cJSON_ArrayForEach(item, arr) {
+        cJSON *status_j = cJSON_GetObjectItemCaseSensitive(item, "status");
+        cJSON *body_j = cJSON_GetObjectItemCaseSensitive(item, "body");
+        int status = cJSON_IsNumber(status_j) ? status_j->valueint : 200;
+        char *body;
+        if (cJSON_IsString(body_j))
+            body = body_j->valuestring;
+        else if (body_j) {
+            body = cJSON_PrintUnformatted(body_j);
+            mock_server_enqueue(status, body);
+            free(body);
+            count++;
+            continue;
+        } else {
+            body = "{}";
+        }
+        mock_server_enqueue(status, body);
+        count++;
+    }
+    cJSON_Delete(arr);
+    return count;
 }

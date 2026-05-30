@@ -331,7 +331,6 @@ static void test_restart_recovery_waiting(void) {
 
 int main(void) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    setenv("CCLAW_NO_LANDLOCK", "1", 1);
     printf("--- test_integration_3db (T207/V73) ---\n");
     test_cross_db_inbox_write();
     test_schema_isolation();

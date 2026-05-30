@@ -32,7 +32,7 @@ Replaces `agent.json` files. Daemon reads at fork, injects as `CCLAW_*` env vars
 | `value` | TEXT NOT NULL | |
 | PRIMARY KEY | (agent_name, key) | |
 
-Keys: `model`, `workspace`, `tools` (JSON array), `allowed_hosts` (JSON array), `read_access` (JSON array), `max_iterations`, `shell_timeout`, `landlock_net_ports` (JSON array), `daemon_db_read` (0\|1).
+Keys: `model`, `workspace`, `tools` (JSON array), `allowed_hosts` (JSON array), `read_access` (JSON array), `max_iterations`, `shell_timeout`, `daemon_db_read` (0\|1).
 
 ### providers
 

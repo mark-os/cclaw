@@ -13,6 +13,7 @@
 #include "context.h"
 #include "db.h"
 #include "mock_server.h"
+static int s_port;
 
 #define TEST_DB "/tmp/test_cclaw_integ_compact_ctx.sqlite"
 
@@ -31,17 +32,6 @@ static char *mock_dispatch(const char *name, const char *arguments, void *user_d
     return strdup("ok");
 }
 
-static const char *MOCK_SUMMARY =
-    "{\"id\":\"c\",\"choices\":[{\"message\":{\"role\":\"assistant\","
-    "\"content\":\"Goal: Testing. Progress: 300 messages exchanged. "
-    "Decisions: None. Next: Continue.\"},\"finish_reason\":\"stop\"}],"
-    "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120}}";
-
-static const char *MOCK_FINAL =
-    "{\"id\":\"c2\",\"choices\":[{\"message\":{\"role\":\"assistant\","
-    "\"content\":\"Done after compaction.\"},\"finish_reason\":\"stop\"}],"
-    "\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":5,\"total_tokens\":55}}";
-
 /* Insert N alternating user/assistant entries */
 static void seed_entries(sqlite3 *db, int64_t sid, int n) {
     char buf[128];
@@ -59,8 +49,7 @@ static void seed_entries(sqlite3 *db, int64_t sid, int n) {
 /* Test: compaction + agent loop post-compaction */
 static void test_compaction_then_agent(void) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    int port = mock_server_start();
-    assert(port > 0);
+    mock_server_reset();
 
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "compact_integ", NULL, -1, 0);
@@ -71,11 +60,11 @@ static void test_compaction_then_agent(void) {
 
     /* Config: small budget to force compaction */
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.max_history_tokens = 200;       /* tiny — forces most entries out */
-    cfg.compaction_threshold = 5;
+    cfg.context_threshold = 0.1f; cfg.compaction_target = 0.05f; cfg.compaction = 1;
     cfg.provider.context_window = 4096;
     cfg.provider.base_url = base_url;
     cfg.provider.api_key = "test-key";
@@ -87,8 +76,8 @@ static void test_compaction_then_agent(void) {
     /* Verify compaction is needed */
     assert(session_needs_compaction(db, sid, &cfg) == 1);
 
-    /* Enqueue mock response for compaction LLM call */
-    mock_server_enqueue(200, MOCK_SUMMARY);
+    /* Enqueue both mock responses (compaction + agent loop) from fixture */
+    mock_server_load("test/fixtures/compaction_context.json");
 
     /* Trigger compaction */
     int64_t cid = session_try_compact(db, sid, &cfg);
@@ -117,8 +106,7 @@ static void test_compaction_then_agent(void) {
     Message user_msg = {.role = ROLE_USER, .content = "Continue after compaction"};
     entry_append(db, sid, &user_msg);
 
-    /* Enqueue mock final response for agent loop */
-    mock_server_enqueue(200, MOCK_FINAL);
+    /* (mock response already enqueued from fixture above) */
 
     AgentContext ctx = {0};
     ctx.db = db;
@@ -154,7 +142,6 @@ static void test_compaction_then_agent(void) {
     assert(mock_server_request_count() == 2);
 
     teardown(db);
-    mock_server_stop();
     curl_global_cleanup();
     printf("  PASS test_compaction_then_agent\n");
 }
@@ -169,7 +156,7 @@ static void test_fts5_after_compaction(void) {
 
     Config cfg = {0};
     cfg.max_history_tokens = 200;
-    cfg.compaction_threshold = 5;
+    cfg.context_threshold = 0.1f; cfg.compaction_target = 0.05f; cfg.compaction = 1;
     cfg.provider.context_window = 4096;
     /* No provider — uses placeholder summary */
 
@@ -191,9 +178,12 @@ static void test_fts5_after_compaction(void) {
 }
 
 int main(void) {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    s_port = mock_server_start();
     printf("--- test_integration_compaction_context (T185) ---\n");
     test_compaction_then_agent();
     test_fts5_after_compaction();
     printf("All compaction context integration tests passed.\n");
+    mock_server_stop();
     return 0;
 }

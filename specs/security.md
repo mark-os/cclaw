@@ -42,19 +42,19 @@ The agent process is **your compiled code** — not a container running arbitrar
 
 | Failure mode | Impact | Mitigation |
 |--------------|--------|-----------|
-| Bug in policy enforcement | Agent reaches blocked host | Code review; integration tests (T116); landlock as backup |
+| Bug in policy enforcement | Agent reaches blocked host | Code review; integration tests (T116) |
 | Agent ignores config limit | Infinite loop, resource exhaustion | `setrlimit` is kernel-enforced (can't be bypassed from userspace) |
 | Memory corruption | Arbitrary behavior | `-Wall -Wextra -Werror`, ASAN in dev, arena allocator limits scope |
 | Agent leaks secret to LLM context | Key visible in session history | Never include provider-native env var (e.g. `OPENROUTER_API_KEY`) in any message/tool_result; grep for leaks in tests |
-| Agent writes to wrong DB | Cross-agent data corruption | Landlock (defense-in-depth); agent only opens `CCLAW_AGENT_DB` path |
+| Agent writes to wrong DB | Cross-agent data corruption | Agent only opens `CCLAW_AGENT_DB` path; namespace sandbox hides other paths |
 
 ### Why This Is Acceptable
 
-- Single user (Mark) — no multi-tenant isolation requirement
+- Single user — no multi-tenant isolation requirement
 - Binary is compiled from audited source — not downloaded/executed dynamically
 - Ephemeral process (one turn) — no long-lived state accumulation
 - `setrlimit` provides hard kernel caps regardless of bugs
-- Landlock (when available) provides filesystem guardrails even if code has path-traversal bugs
+- Namespace sandbox for shell children provides filesystem isolation even if code has path-traversal bugs
 
 ## Config Injection via Environment Variables
 
@@ -73,7 +73,7 @@ Daemon injects config at fork time. Agent reads once at startup, builds internal
 | Var | Sensitivity | Notes |
 |-----|-------------|-------|
 | `CCLAW_AGENT_NAME` | Low | Identity string |
-| `CCLAW_AGENT_DB` | Low | Path (landlock restricts actual access) |
+| `CCLAW_AGENT_DB` | Low | Path |
 | `CCLAW_WORKSPACE` | Low | Path |
 | `CCLAW_MODEL` | Low | Model name string |
 | `CCLAW_MAX_ITERATIONS` | Low | Integer cap |
@@ -109,7 +109,7 @@ Daemon injects config at fork time. Agent reads once at startup, builds internal
 4. **Don't expose config values to LLM**
    - System prompt should not contain `allowed_hosts` list (tells attacker what's reachable)
    - Don't include workspace path in error messages sent to LLM
-   - Tool errors: generic "permission denied", not "landlock blocked /etc/shadow"
+   - Tool errors: generic "permission denied", not internal details
 
 5. **Log config at startup (debug level), never log secrets**
    ```c
@@ -135,8 +135,7 @@ Ordered from most to least critical:
 | 3 | Credential proxy | Shell children network | Yes (iptables) | No (separate netns) |
 | 4 | `http_check_policy()` | Agent outbound HTTP | No (app-level) | Only via code bug |
 | 5 | Env stripping (V47) | Shell children | No (app-level) | Only via code bug |
-| 6 | Landlock (optional) | Agent filesystem | Yes | No |
-| 7 | `prctl(PR_SET_PDEATHSIG)` | Orphan cleanup | Yes | No |
+| 6 | `prctl(PR_SET_PDEATHSIG)` | Orphan cleanup | Yes | No |
 
 Layers 1–3 are hard boundaries (kernel-enforced, separate address space).
 Layers 4–5 are soft boundaries (correct code required).
@@ -169,7 +168,6 @@ Mitigations:
 Agent has path traversal in `db_open()` and opens another agent's DB.
 
 Mitigations:
-- Landlock (if available) restricts writes to own agent dir
 - Agent only receives own DB path via `CCLAW_AGENT_DB`
 - No mechanism to discover other agent paths (no cclaw.db access by default)
 
@@ -185,11 +183,11 @@ Mitigations:
 
 ## Single-User Assumptions
 
-CClaw is designed for one user (Mark). This simplifies the security model:
+CClaw is designed for one user. This simplifies the security model:
 
 - No need for inter-user isolation (all agents serve one person)
-- Admin approval = Mark approving via Telegram (not a separate security principal)
-- "Trusted binary" assumption holds because Mark compiles it himself
+- Admin approval = the operator approving via Telegram (not a separate security principal)
+- "Trusted binary" assumption holds because the operator compiles it himself
 - Secrets encrypted at rest protect against disk theft, not against the running system
 - Rate limiting (V71) protects against runaway costs, not against malicious users
 

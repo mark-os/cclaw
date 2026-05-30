@@ -488,10 +488,11 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan
     }
     free(raw);
 
-    /* V7: compute budget */
+    /* V7,V91: compute budget from context_threshold */
     int budget = cfg->max_history_tokens > 0
         ? cfg->max_history_tokens
-        : (cfg->provider.context_window * 60) / 100;
+        : (int)((cfg->context_threshold > 0 ? cfg->context_threshold : 0.6f)
+                * (float)cfg->provider.context_window);
     if (budget <= 0) budget = 8000;
 
     int cut = plan_find_cut(filtered, fcount, budget);
@@ -576,55 +577,75 @@ void session_tmp_cleanup(int64_t session_id) {
 
 /* ── V58,T161: Compaction trigger ─────────────────────────────────── */
 
-#define DEFAULT_COMPACTION_THRESHOLD 200
-
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg) {
-    if (!db || !cfg) return 0;
-    ContextPlan plan;
-    if (context_plan(db, session_id, cfg, &plan) != 0) return 0;
-    int threshold = cfg->compaction_threshold > 0
-        ? cfg->compaction_threshold : DEFAULT_COMPACTION_THRESHOLD;
-    int beyond_budget = plan.cut; /* entries before cut = excluded from context */
-    context_plan_free(&plan);
-    return beyond_budget > threshold;
+    if (!db || !cfg || !cfg->compaction) return 0;
+    float threshold = cfg->context_threshold > 0 ? cfg->context_threshold : 0.6f;
+    int token_limit = (int)(threshold * (float)cfg->provider.context_window);
+    if (token_limit <= 0) token_limit = 8000;
+
+    /* Sum token_estimate for entire branch */
+    const char *sql =
+        "WITH RECURSIVE branch(id, parent_id, token_estimate) AS ("
+        "  SELECT id, parent_id, token_estimate FROM entries"
+        "    WHERE id=(SELECT leaf_id FROM sessions WHERE id=?) AND session_id=?"
+        "  UNION ALL"
+        "  SELECT e.id, e.parent_id, e.token_estimate"
+        "    FROM entries e JOIN branch b ON e.id=b.parent_id"
+        ") SELECT COALESCE(SUM(token_estimate),0) FROM branch;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    int total_tokens = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        total_tokens = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+
+    return total_tokens > token_limit;
 }
 
 int64_t session_try_compact(sqlite3 *db, int64_t session_id, const Config *cfg) {
-    if (!db || !cfg) return -1;
+    if (!db || !cfg || !cfg->compaction) return -1;
 
+    /* V91: compute target — keep entries from tail that fit in target × context_window */
+    float target_ratio = cfg->compaction_target > 0 ? cfg->compaction_target : 0.3f;
+    int target_tokens = (int)(target_ratio * (float)cfg->provider.context_window);
+    if (target_tokens <= 0) target_tokens = 4000;
+
+    /* Walk branch leaf→root, accumulate tokens until we exceed target */
     ContextPlan plan;
     if (context_plan(db, session_id, cfg, &plan) != 0) return -1;
 
-    int threshold = cfg->compaction_threshold > 0
-        ? cfg->compaction_threshold : DEFAULT_COMPACTION_THRESHOLD;
-    if (plan.cut <= threshold) {
-        context_plan_free(&plan);
-        return 0; /* no compaction needed */
+    /* Find cut point: walk from tail (plan.count-1) backward, summing tokens.
+     * Stop when cumulative > target_tokens. Everything before that gets compacted. */
+    int keep_from = 0; /* default: keep everything (no compaction needed) */
+    int cumulative = 0;
+    for (int i = plan.count - 1; i >= 0; i--) {
+        cumulative += plan.entries[i].token_estimate;
+        if (cumulative > target_tokens) {
+            keep_from = i + 1;
+            break;
+        }
     }
-
-    /* Determine reparent points:
-     * last_kept_id = entry just before the compacted range (plan.entries[0] = root)
-     * We compact entries [1..plan.cut-1] (skip root), keeping entries[0] as anchor.
-     * last_kept_id = entries[0].id (the root/first entry)
-     * first_after_id = entries[plan.cut].id (first entry that stays in context) */
-    if (plan.count < 2 || plan.cut >= plan.count) {
+    if (keep_from <= 1) {
+        /* Nothing to compact (everything fits in target) */
         context_plan_free(&plan);
         return 0;
     }
 
     int64_t last_kept_id = plan.entries[0].id;
-    int64_t first_after_id = plan.entries[plan.cut].id;
-    int compact_count = plan.cut - 1;
+    int64_t first_after_id = plan.entries[keep_from].id;
+    int compact_count = keep_from - 1;
 
     /* T162: Build text of compacted entries for LLM summarization */
     char *summary = NULL;
     if (cfg->provider.api_key && cfg->provider.base_url && cfg->provider.model) {
-        /* Load content of entries to compact (IDs plan.entries[1..cut-1]) */
+        /* Load content of entries to compact (IDs plan.entries[1..keep_from-1]) */
         size_t text_cap = 4096, text_len = 0;
         char *text = malloc(text_cap);
         if (text) {
             text[0] = '\0';
-            for (int i = 1; i < plan.cut && text_len < 100000; i++) {
+            for (int i = 1; i < keep_from && text_len < 100000; i++) {
                 const char *sql = "SELECT role, content FROM entries WHERE id=? AND session_id=?;";
                 sqlite3_stmt *stmt;
                 if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) continue;

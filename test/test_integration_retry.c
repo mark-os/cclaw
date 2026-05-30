@@ -12,6 +12,8 @@
 #include "db.h"
 #include "config.h"
 #include "mock_server.h"
+#include <unistd.h>
+static int s_port;
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -35,8 +37,7 @@ static const char *success_response(void) {
 static void test_retry_429_with_retry_after(void) {
     TEST(retry_429_with_retry_after);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* First request: 429 with Retry-After: 1 */
     const char *hdrs[] = {"Retry-After: 1", NULL};
@@ -45,13 +46,13 @@ static void test_retry_429_with_retry_after(void) {
     mock_server_enqueue(200, success_response());
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "retry_test", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -78,13 +79,13 @@ static void test_retry_429_with_retry_after(void) {
     int rc = agent_run(&ctx);
     clock_gettime(CLOCK_MONOTONIC, &t1);
 
-    if (rc != 0) { db_close(db); mock_server_stop(); FAIL("agent_run should succeed after retry"); }
+    if (rc != 0) { db_close(db); FAIL("agent_run should succeed after retry"); }
 
     /* Verify mock received exactly 2 requests (429 + 200) */
     if (mock_server_request_count() != 2) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 2 requests, got %d", mock_server_request_count());
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* Verify delay was respected (≥1s due to Retry-After: 1) */
@@ -92,24 +93,23 @@ static void test_retry_429_with_retry_after(void) {
     if (elapsed < 0.9) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected >=1s delay, got %.2fs", elapsed);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* Verify final response in DB */
     int count = 0;
     Entry *entries = session_get_branch(db, sid, &count);
     if (!entries || count != 2) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("expected 2 entries (user + assistant)");
     }
     if (!entries[1].message.content || !strstr(entries[1].message.content, "Success after retry")) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("assistant response should contain success text");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -117,8 +117,7 @@ static void test_retry_429_with_retry_after(void) {
 static void test_retry_multiple_429(void) {
     TEST(retry_multiple_429);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* Two 429s with Retry-After: 1, then success */
     const char *hdrs[] = {"Retry-After: 1", NULL};
@@ -127,13 +126,13 @@ static void test_retry_multiple_429(void) {
     mock_server_enqueue(200, success_response());
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "retry_multi", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -156,17 +155,16 @@ static void test_retry_multiple_429(void) {
     ctx.tool_count = 0;
 
     int rc = agent_run(&ctx);
-    if (rc != 0) { db_close(db); mock_server_stop(); FAIL("agent_run should succeed after retries"); }
+    if (rc != 0) { db_close(db); FAIL("agent_run should succeed after retries"); }
 
     /* 3 requests total: 429, 429, 200 */
     if (mock_server_request_count() != 3) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 3 requests, got %d", mock_server_request_count());
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -174,21 +172,20 @@ static void test_retry_multiple_429(void) {
 static void test_retry_500(void) {
     TEST(retry_500);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* 500 then success */
     mock_server_enqueue(500, "{\"error\":\"internal server error\"}");
     mock_server_enqueue(200, success_response());
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "retry_500", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -211,16 +208,15 @@ static void test_retry_500(void) {
     ctx.tool_count = 0;
 
     int rc = agent_run(&ctx);
-    if (rc != 0) { db_close(db); mock_server_stop(); FAIL("agent_run should succeed after 500 retry"); }
+    if (rc != 0) { db_close(db); FAIL("agent_run should succeed after 500 retry"); }
 
     if (mock_server_request_count() != 2) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 2 requests, got %d", mock_server_request_count());
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -228,8 +224,7 @@ static void test_retry_500(void) {
 static void test_retry_exhausted(void) {
     TEST(retry_exhausted);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* Enqueue enough 429s to exhaust all retries (MAX_RETRIES=5 per attempt × MAX_LLM_RETRIES=3) */
     const char *hdrs[] = {"Retry-After: 1", NULL};
@@ -237,13 +232,13 @@ static void test_retry_exhausted(void) {
         mock_server_enqueue_with_headers(429, "{\"error\":\"rate limited\"}", hdrs);
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "retry_exhaust", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -267,36 +262,38 @@ static void test_retry_exhausted(void) {
 
     int rc = agent_run(&ctx);
     /* Should fail — all retries exhausted */
-    if (rc == 0) { db_close(db); mock_server_stop(); FAIL("agent_run should fail when retries exhausted"); }
+    if (rc == 0) { db_close(db); FAIL("agent_run should fail when retries exhausted"); }
 
     /* Verify error entry written to DB */
     int count = 0;
     Entry *entries = session_get_branch(db, sid, &count);
     if (!entries || count < 2) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("expected at least 2 entries (user + error)");
     }
     /* Last entry should be error assistant message */
     Entry *last = &entries[count - 1];
     if (last->message.role != ROLE_ASSISTANT || last->message.stop_reason != STOP_REASON_ERROR) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("last entry should be assistant with stop_reason=error");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
 int main(void) {
+    alarm(60);
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    s_port = mock_server_start();
     printf("--- test_integration_retry (T127) ---\n");
     test_retry_429_with_retry_after();
     test_retry_multiple_429();
     test_retry_500();
     test_retry_exhausted();
     printf("%d/%d passed\n", tests_passed, tests_run);
+    mock_server_stop();
     curl_global_cleanup();
     return tests_passed == tests_run ? 0 : 1;
 }

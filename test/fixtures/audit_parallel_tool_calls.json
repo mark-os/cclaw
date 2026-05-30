@@ -1,0 +1,4 @@
+[
+  {"status": 200, "body": {"id": "c1", "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{"id": "call_a", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Tokyo\"}"}}, {"id": "call_b", "type": "function", "function": {"name": "get_time", "arguments": "{}"}}]}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}},
+  {"status": 200, "body": {"id": "c2", "choices": [{"message": {"role": "assistant", "content": "Tokyo is 22C at 12:00 UTC."}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 20, "completion_tokens": 10}}}
+]

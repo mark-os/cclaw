@@ -27,10 +27,9 @@ E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
 MJS_VENDOR_OBJ := $(BUILDDIR)/mjs_mquickjs.o $(BUILDDIR)/mjs_cutils.o $(BUILDDIR)/mjs_dtoa.o \
                   $(BUILDDIR)/mjs_libm.o $(BUILDDIR)/mjs_stdlib.o
 
-.PHONY: all build clean test test-integration test-e2e test-all install
+.PHONY: all clean test test-integration test-e2e test-all install
 
 all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/libcclaw_net.so
-build: all
 
 $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -134,8 +133,14 @@ LIB_OBJ := $(filter-out $(BUILDDIR)/main.o,$(OBJ))
 $(BUILDDIR)/libcclaw.a: $(LIB_OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	$(AR) rcs $@ $^
 
-$(BUILDDIR)/test_%: test/test_%.c $(BUILDDIR)/libcclaw.a | $(BUILDDIR)/
-	$(CC) $(CFLAGS) -I$(BUILDDIR) -o $@ $< $(BUILDDIR)/libcclaw.a $(LDFLAGS)
+$(BUILDDIR)/mock_server.o: test/mock_server.c | $(BUILDDIR)/
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/libtest.a: $(BUILDDIR)/mock_server.o
+	$(AR) rcs $@ $^
+
+$(BUILDDIR)/test_%: test/test_%.c $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libtest.a | $(BUILDDIR)/
+	$(CC) $(CFLAGS) -I$(BUILDDIR) -o $@ $< $(BUILDDIR)/libtest.a $(BUILDDIR)/libcclaw.a $(LDFLAGS)
 
 compile_commands.json: $(BUILDDIR)/templates.h
 	@echo "[" > $@

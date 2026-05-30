@@ -13,7 +13,7 @@ CClaw currently uses a single shared SQLite DB for all state (daemon coordinatio
 5. Daemon writes to agent DBs only for inbox delivery
 6. Log collector process — receives all stdout/stderr via pipes, writes to journal.db
 7. Config injected to agents via `CCLAW_*` env vars at fork time
-8. Agents can optionally have read-only access to cclaw.db (landlock-granted)
+8. Agents can optionally have read-only access to cclaw.db (namespace bind-mount)
 9. CLI remains standalone (opens agent DB directly, no daemon needed)
 10. No backward compatibility — no migrations, no legacy support
 
@@ -142,7 +142,7 @@ Agent reads env vars at startup. ⊥ opens config files. ⊥ opens cclaw.db for 
 
 See [specs/security.md](specs/security.md) for full details.
 
-- **Agent process**: trusted binary, config-constrained. Primary isolation: `setrlimit` + application-level `http_check_policy()`. Optional landlock as defense-in-depth.
+- **Agent process**: trusted binary, config-constrained. Primary isolation: `setrlimit` + application-level `http_check_policy()`.
 - **Shell children**: untrusted. Namespace sandbox (`CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWNET`) + transparent credential proxy. See [specs/shell-networking.md](specs/shell-networking.md).
 
 ## Task Tracking
@@ -153,4 +153,4 @@ All implementation tasks live in [SPEC.md §T](SPEC.md). Current phases:
 - **Phase 2** (T202-T205): Daemon coordination — spawn_queue, approvals, cron, bootstrap
 - **Phase 3** (T206-T207): CLI standalone + integration tests
 - **Phase 4** (T208-T217): Shell namespace sandbox + credential proxy
-- **Phase 5** (T218-T219): Optional hardening (log collector, landlock)
+- **Phase 5** (T218-T219): Optional hardening (log collector)

@@ -14,20 +14,19 @@ typedef struct {
 /* Config passed as user_data to shell handler */
 typedef struct {
     int timeout;
-    const char *workspace;  /* agent workspace (for reference; landlock enforces access) */
+    const char *workspace;  /* agent workspace (namespace sandbox restricts access) */
     const char *proxy_sock; /* V83: path to .proxy.sock (NULL if proxy not started) */
     ShellSecret *secrets;   /* V88: array of secrets to inject + mask */
     size_t secret_count;
 } ShellConfig;
 
 /* Register shell_exec tool into registry.
- * workspace: agent workspace path (informational — landlock restricts fs).
- * Child inherits agent's landlock rules (V22): filesystem + network. */
+ * workspace: agent workspace path (namespace sandbox restricts fs). */
 int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *workspace);
 
 /* Handler: parse JSON args {"command":"...", "timeout":N}, run command,
  * capture stdout+stderr, enforce timeout via process group SIGKILL.
- * Child inherits landlock sandbox from agent process.
+ * Child runs in namespace sandbox (isolated fs + network).
  * Returns heap-allocated result. */
 char *tool_shell_handler(const char *arguments, void *user_data);
 

@@ -49,7 +49,7 @@ CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI 
 - Daemon decrypts at fork → injects as `provider-native env var (e.g. OPENROUTER_API_KEY)` env var
 - Agent uses key for LLM calls, key lives only in process memory
 - `shell_exec` children have `provider-native env var (e.g. OPENROUTER_API_KEY)` unset before exec (V47)
-- Agent ⊥ has access to `.cclaw_key` file (landlock blocks)
+- Agent ⊥ has access to `.cclaw_key` file (daemon-only, not exposed to agents)
 - `configure_provider` tool (bootstrap): agent exits w/ code 4, daemon stores encrypted key
 
 ## Future: OAuth (Device Code)

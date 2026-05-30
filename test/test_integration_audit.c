@@ -16,6 +16,7 @@
 #include "config.h"
 #include "shutdown.h"
 #include "mock_server.h"
+static int s_port;
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -41,30 +42,16 @@ static char *mock_dispatch(const char *name, const char *arguments, void *user_d
 static void test_parallel_tool_calls(void) {
     TEST(parallel_tool_calls);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
-    /* LLM returns 2 tool_calls in one message */
-    mock_server_enqueue(200,
-        "{\"id\":\"c1\",\"choices\":[{\"message\":{\"role\":\"assistant\","
-        "\"content\":null,\"tool_calls\":["
-        "{\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}},"
-        "{\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"{}\"}}"
-        "]},\"finish_reason\":\"tool_calls\"}],"
-        "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}");
-
-    /* After both tool results, LLM produces final */
-    mock_server_enqueue(200,
-        "{\"id\":\"c2\",\"choices\":[{\"message\":{\"role\":\"assistant\","
-        "\"content\":\"Tokyo is 22C at 12:00 UTC.\"},\"finish_reason\":\"stop\"}],"
-        "\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":10}}");
+    mock_server_load("test/fixtures/audit_parallel_tool_calls.json");
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open"); }
+    if (!db) { FAIL("db_open"); }
     int64_t sid = session_create(db, "parallel", NULL, -1, 0);
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
     Config cfg = {0};
     cfg.provider.base_url = base_url;
     cfg.provider.api_key = "mock-key";
@@ -93,7 +80,7 @@ static void test_parallel_tool_calls(void) {
     ctx.tool_count = 2;
 
     int rc = agent_run(&ctx);
-    if (rc != 0) { db_close(db); mock_server_stop(); FAIL("agent_run failed"); }
+    if (rc != 0) { db_close(db); FAIL("agent_run failed"); }
 
     /* Expected: user → assistant(2 tool_calls) → tool_result → tool_result → assistant(final) = 5 entries */
     int count = 0;
@@ -101,35 +88,34 @@ static void test_parallel_tool_calls(void) {
     if (!entries || count != 5) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 5 entries, got %d", count);
-        entry_branch_free(entries, count); db_close(db); mock_server_stop(); FAIL(msg);
+        entry_branch_free(entries, count); db_close(db); FAIL(msg);
     }
 
     /* Entry 1: assistant with 2 tool_calls */
     if (entries[1].message.tool_call_count != 2) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("expected 2 tool_calls in assistant entry");
     }
 
     /* Entries 2,3: tool results */
     if (entries[2].message.role != ROLE_TOOL || entries[3].message.role != ROLE_TOOL) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entries 2,3 should be tool results");
     }
 
     /* Entry 4: final assistant */
     if (entries[4].message.role != ROLE_ASSISTANT || entries[4].message.tool_call_count != 0) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry 4 should be final assistant");
     }
 
     if (mock_server_request_count() != 2) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("expected 2 LLM requests");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -137,8 +123,7 @@ static void test_parallel_tool_calls(void) {
 static void test_mid_loop_retry(void) {
     TEST(mid_loop_retry);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* First LLM call: tool_call */
     mock_server_enqueue(200,
@@ -159,11 +144,11 @@ static void test_mid_loop_retry(void) {
         "\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5}}");
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open"); }
+    if (!db) { FAIL("db_open"); }
     int64_t sid = session_create(db, "midretry", NULL, -1, 0);
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
     Config cfg = {0};
     cfg.provider.base_url = base_url;
     cfg.provider.api_key = "mock-key";
@@ -190,13 +175,13 @@ static void test_mid_loop_retry(void) {
     ctx.tool_count = 1;
 
     int rc = agent_run(&ctx);
-    if (rc != 0) { db_close(db); mock_server_stop(); FAIL("agent_run should succeed after mid-loop retry"); }
+    if (rc != 0) { db_close(db); FAIL("agent_run should succeed after mid-loop retry"); }
 
     /* 3 requests: tool_call, 429, final */
     if (mock_server_request_count() != 3) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 3 requests, got %d", mock_server_request_count());
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* Verify final entry */
@@ -205,13 +190,12 @@ static void test_mid_loop_retry(void) {
     Entry *last = &entries[count - 1];
     if (last->message.role != ROLE_ASSISTANT || !last->message.content ||
         !strstr(last->message.content, "12:00")) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("final response should contain time");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -219,8 +203,7 @@ static void test_mid_loop_retry(void) {
 static void test_max_iterations_exhausted(void) {
     TEST(max_iterations_exhausted);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* Enqueue enough tool_call responses to exceed max_iterations=3 */
     for (int i = 0; i < 5; i++) {
@@ -235,11 +218,11 @@ static void test_max_iterations_exhausted(void) {
     }
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open"); }
+    if (!db) { FAIL("db_open"); }
     int64_t sid = session_create(db, "maxiter", NULL, -1, 0);
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
     Config cfg = {0};
     cfg.provider.base_url = base_url;
     cfg.provider.api_key = "mock-key";
@@ -267,17 +250,16 @@ static void test_max_iterations_exhausted(void) {
 
     int rc = agent_run(&ctx);
     /* Should fail — max iterations exhausted */
-    if (rc == 0) { db_close(db); mock_server_stop(); FAIL("should fail on max iterations"); }
+    if (rc == 0) { db_close(db); FAIL("should fail on max iterations"); }
 
     /* Verify we made exactly max_iterations LLM requests */
     if (mock_server_request_count() > 4) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected <=4 requests, got %d", mock_server_request_count());
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -285,8 +267,7 @@ static void test_max_iterations_exhausted(void) {
 static void test_inbox_multi_message_flow(void) {
     TEST(inbox_multi_message_flow);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* LLM responds to the consumed messages */
     mock_server_enqueue(200,
@@ -295,7 +276,7 @@ static void test_inbox_multi_message_flow(void) {
         "\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5}}");
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open"); }
+    if (!db) { FAIL("db_open"); }
     int64_t sid = session_create(db, "inbox_multi", NULL, -1, 0);
 
     /* Insert multiple inbox items */
@@ -304,10 +285,10 @@ static void test_inbox_multi_message_flow(void) {
 
     /* Consume inbox into entries (simulates what agent does at startup) */
     int consumed = inbox_consume_into_entries(db, sid, 10);
-    if (consumed != 2) { db_close(db); mock_server_stop(); FAIL("expected 2 consumed"); }
+    if (consumed != 2) { db_close(db); FAIL("expected 2 consumed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
     Config cfg = {0};
     cfg.provider.base_url = base_url;
     cfg.provider.api_key = "mock-key";
@@ -326,7 +307,7 @@ static void test_inbox_multi_message_flow(void) {
     ctx.tool_count = 0;
 
     int rc = agent_run(&ctx);
-    if (rc != 0) { db_close(db); mock_server_stop(); FAIL("agent_run failed"); }
+    if (rc != 0) { db_close(db); FAIL("agent_run failed"); }
 
     /* Verify: 2 user entries + 1 assistant = 3 total */
     int count = 0;
@@ -334,30 +315,29 @@ static void test_inbox_multi_message_flow(void) {
     if (!entries || count != 3) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 3 entries, got %d", count);
-        entry_branch_free(entries, count); db_close(db); mock_server_stop(); FAIL(msg);
+        entry_branch_free(entries, count); db_close(db); FAIL(msg);
     }
 
     /* First two should be user messages from inbox */
     if (entries[0].message.role != ROLE_USER || entries[1].message.role != ROLE_USER) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("first 2 entries should be user");
     }
 
     /* Verify inbox is empty */
     if (inbox_count(db, sid) != 0) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("inbox should be empty after consumption");
     }
 
     /* Last entry: assistant */
     if (entries[2].message.role != ROLE_ASSISTANT) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("last entry should be assistant");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -374,8 +354,7 @@ static void *daemon_thread_fn(void *arg) {
 static void test_daemon_agent_error_exit(void) {
     TEST(daemon_agent_error_exit);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* Enqueue 400 errors (non-overflow) — causes fast failure without retry sleep */
     for (int i = 0; i < 10; i++)
@@ -402,7 +381,7 @@ static void test_daemon_agent_error_exit(void) {
     char adb_path[256];
     snprintf(adb_path, sizeof(adb_path), "agents/%s/agent.db", agent_name);
     sqlite3 *adb = db_open_agent(adb_path);
-    if (!adb) { mock_server_stop(); chdir(orig_cwd); FAIL("db_open_agent"); }
+    if (!adb) { chdir(orig_cwd); FAIL("db_open_agent"); }
     int64_t sid = session_create(adb, "error_test", agent_name, -1, 0);
     inbox_insert(adb, sid, "test", "trigger error");
     db_close(adb);
@@ -411,10 +390,10 @@ static void test_daemon_agent_error_exit(void) {
     const char *ddb_path = "/tmp/test_integ_audit_daemon.db";
     unlink(ddb_path);
     sqlite3 *ddb = db_open(ddb_path);
-    if (!ddb) { mock_server_stop(); chdir(orig_cwd); FAIL("db_open"); }
+    if (!ddb) { chdir(orig_cwd); FAIL("db_open"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
     db_kv_set(ddb, "provider.base_url", base_url);
     db_kv_set(ddb, "provider.model", "mock-model");
     db_kv_set(ddb, "provider.max_tokens", "256");
@@ -469,7 +448,7 @@ static void test_daemon_agent_error_exit(void) {
     pthread_join(dt, NULL);
 
     if (!settled) {
-        db_close(ddb); mock_server_stop(); chdir(orig_cwd);
+        db_close(ddb); chdir(orig_cwd);
         snprintf(cmd, sizeof(cmd), "rm -rf %s", work_dir);
         system(cmd); unlink(ddb_path);
         FAIL("session did not return to idle after agent error exit");
@@ -490,7 +469,6 @@ static void test_daemon_agent_error_exit(void) {
     }
     db_close(adb);
     db_close(ddb);
-    mock_server_stop();
     chdir(orig_cwd);
     snprintf(cmd, sizeof(cmd), "rm -rf %s", work_dir);
     system(cmd);
@@ -503,7 +481,7 @@ static void test_daemon_agent_error_exit(void) {
 int main(void) {
     alarm(120);
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    setenv("CCLAW_NO_LANDLOCK", "1", 1);
+    s_port = mock_server_start();
     printf("--- test_integration_audit (T221) ---\n");
 
     test_parallel_tool_calls();
@@ -514,5 +492,6 @@ int main(void) {
 
     printf("%d/%d passed\n", tests_passed, tests_run);
     curl_global_cleanup();
+    mock_server_stop();
     return tests_passed == tests_run ? 0 : 1;
 }

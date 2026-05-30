@@ -22,11 +22,12 @@ static void test_trigger_fires(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "trigger_test", NULL, -1, 0);
 
-    /* Config: tiny budget (100 tokens) + threshold 5 entries */
+    /* Config: small context window so 20 entries (~200 tokens) exceed threshold */
     Config cfg = {0};
-    cfg.max_history_tokens = 100;
-    cfg.compaction_threshold = 5;
-    cfg.provider.context_window = 4096;
+    cfg.context_threshold = 0.1f; cfg.compaction_target = 0.05f; cfg.compaction = 1;
+    cfg.provider.context_window = 500; /* 0.1 × 500 = 50 token trigger */
+    cfg.provider.model = "test";
+    cfg.provider.max_tokens = 100;
 
     /* Insert 20 entries — each ~10 tokens (40 chars) */
     char buf[64];
@@ -74,9 +75,8 @@ static void test_no_trigger_below_threshold(void) {
     int64_t sid = session_create(db, "no_trigger", NULL, -1, 0);
 
     Config cfg = {0};
-    cfg.max_history_tokens = 100000; /* huge budget — everything fits */
-    cfg.compaction_threshold = 200;
-    cfg.provider.context_window = 128000;
+    cfg.context_threshold = 0.9f; cfg.compaction_target = 0.5f; cfg.compaction = 1;
+    cfg.provider.context_window = 1000000; /* huge — 10 short entries won't exceed 900k */
 
     /* Insert 10 entries — well within budget */
     for (int i = 0; i < 10; i++) {
@@ -98,9 +98,10 @@ static void test_trigger_cte_correct(void) {
     int64_t sid = session_create(db, "cte_test", NULL, -1, 0);
 
     Config cfg = {0};
-    cfg.max_history_tokens = 50; /* very small budget */
-    cfg.compaction_threshold = 3;
-    cfg.provider.context_window = 4096;
+    cfg.context_threshold = 0.1f; cfg.compaction_target = 0.05f; cfg.compaction = 1;
+    cfg.provider.context_window = 300; /* 0.1 × 300 = 30 token trigger */
+    cfg.provider.model = "test";
+    cfg.provider.max_tokens = 100;
 
     /* Insert 15 entries */
     char buf[64];

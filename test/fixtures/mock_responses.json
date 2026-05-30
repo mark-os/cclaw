@@ -1,0 +1,5 @@
+[
+  {"status": 200, "body": {"id": "chatcmpl-tpl1", "choices": [{"message": {"role": "assistant", "content": "hello from template"}, "finish_reason": "stop"}]}},
+  {"status": 429, "body": {"error": "rate limited"}},
+  {"status": 200, "body": "raw string body"}
+]

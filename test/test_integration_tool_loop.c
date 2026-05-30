@@ -10,6 +10,7 @@
 #include "db.h"
 #include "config.h"
 #include "mock_server.h"
+static int s_port;
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -41,21 +42,20 @@ static void enqueue_tool_call(void) {
 static void test_tool_loop_stops_at_10(void) {
     TEST(tool_loop_stops_at_10);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* Enqueue 12 identical tool_call responses (agent should stop at 10) */
     for (int i = 0; i < 12; i++)
         enqueue_tool_call();
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "loop_test", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -90,14 +90,14 @@ static void test_tool_loop_stops_at_10(void) {
     if (rc != -1) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected rc=-1, got %d", rc);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* Tool dispatched 9 times (reps 1-4 normal, 5-9 with warning, rep 10 = break before dispatch) */
     if (dispatch_count != 9) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 9 dispatches, got %d", dispatch_count);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* Verify entries: check that warning text appears in tool results for reps 5-9 */
@@ -105,7 +105,7 @@ static void test_tool_loop_stops_at_10(void) {
     Entry *entries = session_get_branch(db, sid, &count);
     if (!entries || count < 2) {
         entry_branch_free(entries, count);
-        db_close(db); mock_server_stop(); FAIL("too few entries");
+        db_close(db); FAIL("too few entries");
     }
 
     /* Find tool result entries and check for warning text */
@@ -123,12 +123,12 @@ static void test_tool_loop_stops_at_10(void) {
 
     if (warned < 1) {
         entry_branch_free(entries, count);
-        db_close(db); mock_server_stop(); FAIL("no warning found in tool results");
+        db_close(db); FAIL("no warning found in tool results");
     }
 
     if (!loop_error) {
         entry_branch_free(entries, count);
-        db_close(db); mock_server_stop(); FAIL("no 'tool loop detected' error found");
+        db_close(db); FAIL("no 'tool loop detected' error found");
     }
 
     /* Verify LLM was called exactly 10 times (not 12 — stopped early) */
@@ -136,12 +136,11 @@ static void test_tool_loop_stops_at_10(void) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 10 LLM requests, got %d", mock_server_request_count());
         entry_branch_free(entries, count);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -149,8 +148,7 @@ static void test_tool_loop_stops_at_10(void) {
 static void test_warning_at_rep_5(void) {
     TEST(warning_at_rep_5);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* Enqueue 5 identical tool_call responses, then a final stop response */
     for (int i = 0; i < 5; i++)
@@ -162,13 +160,13 @@ static void test_warning_at_rep_5(void) {
         "\"completion_tokens\":3,\"total_tokens\":13}}");
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "warn_test", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -203,20 +201,20 @@ static void test_warning_at_rep_5(void) {
     if (rc != 0) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected rc=0, got %d", rc);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* All 5 tool calls dispatched */
     if (dispatch_count != 5) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 5 dispatches, got %d", dispatch_count);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* Check that the 5th tool result has the warning */
     int count = 0;
     Entry *entries = session_get_branch(db, sid, &count);
-    if (!entries) { db_close(db); mock_server_stop(); FAIL("no entries"); }
+    if (!entries) { db_close(db); FAIL("no entries"); }
 
     int tool_results_seen = 0;
     int fifth_has_warning = 0;
@@ -234,17 +232,16 @@ static void test_warning_at_rep_5(void) {
 
     if (!fourth_no_warning) {
         entry_branch_free(entries, count);
-        db_close(db); mock_server_stop(); FAIL("4th result should NOT have warning");
+        db_close(db); FAIL("4th result should NOT have warning");
     }
 
     if (!fifth_has_warning) {
         entry_branch_free(entries, count);
-        db_close(db); mock_server_stop(); FAIL("5th result should have warning");
+        db_close(db); FAIL("5th result should have warning");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -252,8 +249,7 @@ static void test_warning_at_rep_5(void) {
 static void test_no_false_positive(void) {
     TEST(no_false_positive_different_calls);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* 6 tool calls with different arguments each time */
     for (int i = 0; i < 6; i++) {
@@ -274,13 +270,13 @@ static void test_no_false_positive(void) {
         "\"completion_tokens\":3,\"total_tokens\":13}}");
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "no_fp_test", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -314,14 +310,14 @@ static void test_no_false_positive(void) {
     if (rc != 0) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected rc=0, got %d", rc);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* All 6 dispatched, no warnings */
     if (dispatch_count != 6) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 6 dispatches, got %d", dispatch_count);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* Verify no WARNING in any tool result */
@@ -331,7 +327,7 @@ static void test_no_false_positive(void) {
         if (entries[i].message.role == ROLE_TOOL && entries[i].message.tool_result) {
             if (strstr(entries[i].message.tool_result->content, "WARNING")) {
                 entry_branch_free(entries, count);
-                db_close(db); mock_server_stop();
+                db_close(db);
                 FAIL("unexpected WARNING in tool result");
             }
         }
@@ -339,17 +335,18 @@ static void test_no_false_positive(void) {
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
 int main(void) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    s_port = mock_server_start();
     printf("--- test_integration_tool_loop (T183) ---\n");
     test_tool_loop_stops_at_10();
     test_warning_at_rep_5();
     test_no_false_positive();
     printf("%d/%d passed\n", tests_passed, tests_run);
     curl_global_cleanup();
+    mock_server_stop();
     return tests_passed == tests_run ? 0 : 1;
 }

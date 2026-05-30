@@ -11,6 +11,7 @@
 #include "db.h"
 #include "config.h"
 #include "mock_server.h"
+static int s_port;
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -62,21 +63,20 @@ static const char *mock_final_response(const char *text) {
 static void test_mock_agent_single_tool(void) {
     TEST(mock_agent_single_tool);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* Enqueue: first call returns tool_call, second returns final text */
     mock_server_enqueue(200, mock_tool_call_response("get_weather", "{\\\"city\\\":\\\"Tokyo\\\"}"));
     mock_server_enqueue(200, mock_final_response("The weather in Tokyo is 22C and sunny."));
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "mock_test", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -106,7 +106,7 @@ static void test_mock_agent_single_tool(void) {
     ctx.tool_count = 1;
 
     int rc = agent_run(&ctx);
-    if (rc != 0) { db_close(db); mock_server_stop(); FAIL("agent_run failed"); }
+    if (rc != 0) { db_close(db); FAIL("agent_run failed"); }
 
     /* Verify entries: user → assistant(tool_call) → tool_result → assistant(final) */
     int count = 0;
@@ -115,55 +115,54 @@ static void test_mock_agent_single_tool(void) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 4 entries, got %d", count);
         entry_branch_free(entries, count);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* Entry 0: user */
     if (entries[0].message.role != ROLE_USER) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[0] should be user");
     }
 
     /* Entry 1: assistant with tool_calls */
     if (entries[1].message.role != ROLE_ASSISTANT || entries[1].message.tool_call_count != 1) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[1] should be assistant with 1 tool_call");
     }
     if (strcmp(entries[1].message.tool_calls[0].name, "get_weather") != 0) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("tool_call name should be get_weather");
     }
 
     /* Entry 2: tool result */
     if (entries[2].message.role != ROLE_TOOL) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[2] should be tool_result");
     }
     if (!entries[2].message.tool_result ||
         !strstr(entries[2].message.tool_result->content, "sunny")) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("tool_result should contain weather data");
     }
 
     /* Entry 3: final assistant */
     if (entries[3].message.role != ROLE_ASSISTANT || entries[3].message.tool_call_count != 0) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[3] should be final assistant with no tool_calls");
     }
     if (!entries[3].message.content || !strstr(entries[3].message.content, "22C")) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("final response should contain temperature");
     }
 
     /* Verify mock received exactly 2 requests */
     if (mock_server_request_count() != 2) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("expected 2 LLM requests");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -171,8 +170,7 @@ static void test_mock_agent_single_tool(void) {
 static void test_mock_agent_multi_tool(void) {
     TEST(mock_agent_multi_tool);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* Turn 1: LLM requests get_weather */
     mock_server_enqueue(200, mock_tool_call_response("get_weather", "{\\\"city\\\":\\\"Tokyo\\\"}"));
@@ -182,13 +180,13 @@ static void test_mock_agent_multi_tool(void) {
     mock_server_enqueue(200, mock_final_response("Tokyo is 22C at 12:00 UTC."));
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "multi_tool_test", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -218,7 +216,7 @@ static void test_mock_agent_multi_tool(void) {
     ctx.tool_count = 2;
 
     int rc = agent_run(&ctx);
-    if (rc != 0) { db_close(db); mock_server_stop(); FAIL("agent_run failed"); }
+    if (rc != 0) { db_close(db); FAIL("agent_run failed"); }
 
     /* Expected: user → asst(tool) → tool_result → asst(tool) → tool_result → asst(final) = 6 entries */
     int count = 0;
@@ -227,48 +225,47 @@ static void test_mock_agent_multi_tool(void) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected 6 entries, got %d", count);
         entry_branch_free(entries, count);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
 
     /* Verify structure */
     if (entries[0].message.role != ROLE_USER) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[0] should be user");
     }
     if (entries[1].message.role != ROLE_ASSISTANT || entries[1].message.tool_call_count == 0) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[1] should be assistant with tool_call");
     }
     if (entries[2].message.role != ROLE_TOOL) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[2] should be tool_result");
     }
     if (entries[3].message.role != ROLE_ASSISTANT || entries[3].message.tool_call_count == 0) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[3] should be assistant with tool_call");
     }
     if (entries[4].message.role != ROLE_TOOL) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[4] should be tool_result");
     }
     if (entries[5].message.role != ROLE_ASSISTANT || entries[5].message.tool_call_count != 0) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[5] should be final assistant");
     }
     if (!entries[5].message.content || !strstr(entries[5].message.content, "12:00")) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("final response should contain time");
     }
 
     /* Verify 3 LLM requests total */
     if (mock_server_request_count() != 3) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("expected 3 LLM requests");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -276,21 +273,20 @@ static void test_mock_agent_multi_tool(void) {
 static void test_mock_agent_tool_error(void) {
     TEST(mock_agent_tool_error);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* LLM calls unknown_tool, dispatch returns error, LLM produces final */
     mock_server_enqueue(200, mock_tool_call_response("unknown_tool", "{}"));
     mock_server_enqueue(200, mock_final_response("Sorry, I could not complete that."));
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "error_test", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -318,40 +314,41 @@ static void test_mock_agent_tool_error(void) {
     ctx.tool_count = 1;
 
     int rc = agent_run(&ctx);
-    if (rc != 0) { db_close(db); mock_server_stop(); FAIL("agent_run should succeed despite tool error"); }
+    if (rc != 0) { db_close(db); FAIL("agent_run should succeed despite tool error"); }
 
     /* Verify tool_result contains error */
     int count = 0;
     Entry *entries = session_get_branch(db, sid, &count);
     if (!entries || count < 4) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("expected at least 4 entries");
     }
 
     /* Entry 2 should be tool_result with error */
     if (entries[2].message.role != ROLE_TOOL) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("entry[2] should be tool_result");
     }
     if (!entries[2].message.tool_result ||
         !strstr(entries[2].message.tool_result->content, "error")) {
-        entry_branch_free(entries, count); db_close(db); mock_server_stop();
+        entry_branch_free(entries, count); db_close(db);
         FAIL("tool_result should contain error");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
 int main(void) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    s_port = mock_server_start();
     printf("--- test_integration_mock_agent (T126) ---\n");
     test_mock_agent_single_tool();
     test_mock_agent_multi_tool();
     test_mock_agent_tool_error();
     printf("%d/%d passed\n", tests_passed, tests_run);
     curl_global_cleanup();
+    mock_server_stop();
     return tests_passed == tests_run ? 0 : 1;
 }

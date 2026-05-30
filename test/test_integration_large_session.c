@@ -13,6 +13,7 @@
 #include "config.h"
 #include "context.h"
 #include "mock_server.h"
+static int s_port;
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -118,8 +119,7 @@ static void test_context_plan_truncation(void) {
 static void test_large_session_rss(void) {
     TEST(large_session_rss_bounded);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     /* Mock returns a simple final response */
     mock_server_enqueue(200,
@@ -128,10 +128,10 @@ static void test_large_session_rss(void) {
         "\"completion_tokens\":5,\"total_tokens\":105}}");
 
     sqlite3 *db = db_open(":memory:");
-    if (!db) { mock_server_stop(); FAIL("db_open failed"); }
+    if (!db) { FAIL("db_open failed"); }
 
     int64_t sid = session_create(db, "rss_test", NULL, -1, 0);
-    if (sid < 0) { db_close(db); mock_server_stop(); FAIL("session_create failed"); }
+    if (sid < 0) { db_close(db); FAIL("session_create failed"); }
 
     /* Seed 500 pairs = 1000 entries */
     seed_entries(db, sid, 500);
@@ -143,7 +143,7 @@ static void test_large_session_rss(void) {
     long rss_before = get_rss_kb();
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
 
     Config cfg = {0};
     cfg.provider.base_url = base_url;
@@ -163,7 +163,7 @@ static void test_large_session_rss(void) {
     ctx.tool_count = 0;
 
     int rc = agent_run(&ctx);
-    if (rc != 0) { db_close(db); mock_server_stop(); FAIL("agent_run failed"); }
+    if (rc != 0) { db_close(db); FAIL("agent_run failed"); }
 
     long rss_after = get_rss_kb();
 
@@ -177,7 +177,7 @@ static void test_large_session_rss(void) {
         snprintf(msg, sizeof(msg), "RSS grew %ld KB (before=%ld, after=%ld) — exceeds 50MB cap",
                  rss_growth, rss_before, rss_after);
         db_close(db);
-        mock_server_stop();
+       
         FAIL(msg);
     }
 
@@ -188,17 +188,16 @@ static void test_large_session_rss(void) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected >=1002 entries, got %d", count);
         entry_branch_free(entries, count);
-        db_close(db); mock_server_stop(); FAIL(msg);
+        db_close(db); FAIL(msg);
     }
     /* Last entry should be assistant final */
     if (entries[count - 1].message.role != ROLE_ASSISTANT) {
         entry_branch_free(entries, count);
-        db_close(db); mock_server_stop(); FAIL("last entry should be assistant");
+        db_close(db); FAIL("last entry should be assistant");
     }
     entry_branch_free(entries, count);
 
     db_close(db);
-    mock_server_stop();
     PASS();
 }
 
@@ -265,11 +264,13 @@ static void test_context_plan_no_content_load(void) {
 
 int main(void) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    s_port = mock_server_start();
     printf("--- test_integration_large_session (T178) ---\n");
     test_context_plan_truncation();
     test_large_session_rss();
     test_context_plan_no_content_load();
     printf("%d/%d passed\n", tests_passed, tests_run);
+    mock_server_stop();
     curl_global_cleanup();
     return tests_passed == tests_run ? 0 : 1;
 }

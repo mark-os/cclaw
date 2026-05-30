@@ -74,7 +74,7 @@ void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz);
 void session_tmp_cleanup(int64_t session_id);
 
 /* V58,T161: Check if session branch needs compaction.
- * Returns 1 if entries beyond budget exceed compaction_threshold, 0 otherwise. */
+ * Returns 1 if session tokens exceed context_threshold × context_window, 0 otherwise. */
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg);
 
 /* V58,T161: Trigger compaction on session if needed.

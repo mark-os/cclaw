@@ -54,6 +54,12 @@ A minimal autonomous AI agent runtime in C. Turn-based execution, SQLite persist
 
 **Agent processes**: sandboxed with setrlimit (memory/CPU caps). Drain inbox → LLM loop → write response → exit with intent code.
 
+## Security
+
+- **Agent process**: `setrlimit` (memory/CPU caps). Trusted compiled code; tools enforce policy (workspace-scoped file ops, host allowlist on HTTP).
+- **Shell children**: namespace-isolated (CLONE_NEWUSER, CLONE_NEWNET, CLONE_NEWNS). Filesystem restricted to workspace (rw) + system dirs (ro). Network access proxied back to the agent via UDS — agent enforces host allowlist.
+- **Secrets**: encrypted at rest in cclaw.db (ChaCha20-Poly1305). Decrypted by daemon, injected via env at fork.
+
 ## Requirements
 
 - Linux (any arch: ARM64, ARMv7, ARMv5TE, x86_64, RISC-V)

@@ -1,0 +1,4 @@
+[
+  {"status": 200, "body": {"id": "c", "choices": [{"message": {"role": "assistant", "content": "Goal: Testing. Progress: 300 messages exchanged. Decisions: None. Next: Continue."}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}}},
+  {"status": 200, "body": {"id": "c2", "choices": [{"message": {"role": "assistant", "content": "Done after compaction."}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55}}}
+]

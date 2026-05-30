@@ -18,7 +18,6 @@
 #include "agent.h"
 #include "agent_config.h"
 #include "agent_setup.h"
-#include "landlock.h"
 #include "agent_exit.h"
 #include "shutdown.h"
 #include "context.h"
@@ -99,33 +98,6 @@ static int run_agent_turn(int64_t session_id) {
         }
     }
 
-    /* V22/T219: Landlock — restrict filesystem after config loaded */
-    const char *ra_env = getenv("CCLAW_READ_ACCESS");
-    const char **ra_paths = NULL;
-    size_t ra_count = 0;
-    char *ra_dup = NULL;
-    if (ra_env && ra_env[0]) {
-        ra_dup = strdup(ra_env);
-        /* Count colons */
-        size_t cap = 1;
-        for (const char *p = ra_env; *p; p++) if (*p == ':') cap++;
-        ra_paths = malloc(cap * sizeof(char *));
-        if (ra_paths && ra_dup) {
-            char *tok = strtok(ra_dup, ":");
-            while (tok) {
-                if (*tok) ra_paths[ra_count++] = tok;
-                tok = strtok(NULL, ":");
-            }
-        }
-    }
-    if (landlock_apply(cfg->workspace, agent_db_path, session_id,
-                       ra_paths, ra_count) < 0) {
-        fprintf(stderr, "[agent %lld] landlock unavailable, continuing without\n",
-                (long long)session_id);
-    }
-    free((void *)ra_paths);
-    free(ra_dup);
-
     /* V27: Update last_route from newest inbox source before consuming */
     int peek_count = 0;
     InboxItem *items = inbox_peek(db, session_id, 100, &peek_count);
@@ -167,7 +139,26 @@ static int run_agent_turn(int64_t session_id) {
                      allowed_hosts, allowed_hosts_count, AGENT_SETUP_DAEMON);
 
     size_t tool_count = 0;
-    const ToolSchema *schemas = agent_setup_schemas(&setup, &tool_count);
+    const char *tools_env = getenv("CCLAW_TOOLS");
+    const char **tool_whitelist = NULL;
+    size_t tool_wl_count = 0;
+    char *tools_dup = NULL;
+    if (tools_env && tools_env[0]) {
+        tools_dup = strdup(tools_env);
+        size_t cap = 1;
+        for (const char *p = tools_env; *p; p++) if (*p == ',') cap++;
+        tool_whitelist = malloc(cap * sizeof(char *));
+        if (tool_whitelist && tools_dup) {
+            char *tok = strtok(tools_dup, ",");
+            while (tok) {
+                while (*tok == ' ') tok++;
+                if (*tok) tool_whitelist[tool_wl_count++] = tok;
+                tok = strtok(NULL, ",");
+            }
+        }
+    }
+    const ToolSchema *schemas = tools_schemas_filtered(&setup.reg, tool_whitelist,
+                                                       tool_wl_count, &tool_count);
 
     AgentContext ctx = {0};
     ctx.db = db;
@@ -181,8 +172,8 @@ static int run_agent_turn(int64_t session_id) {
 
     rc = agent_run(&ctx);
 
-    /* V58,T161: trigger compaction if branch exceeds threshold */
-    if (rc == 0)
+    /* V91: trigger compaction if enabled and session exceeds threshold */
+    if (rc == 0 && cfg->compaction && session_needs_compaction(db, session_id, cfg))
         session_try_compact(db, session_id, cfg);
 
     /* Notify parent inbox if this is a child session */
@@ -204,6 +195,8 @@ static int run_agent_turn(int64_t session_id) {
     }
 
     agent_setup_destroy(&setup);
+    free((void *)tool_whitelist);
+    free(tools_dup);
 
 cleanup:
     /* T200/V73: Agent sets own state in its DB before exit */

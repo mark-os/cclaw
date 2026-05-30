@@ -15,6 +15,7 @@
 #include "db.h"
 #include "shutdown.h"
 #include "mock_server.h"
+static int s_port;
 
 static const char *DB_PATH = "/tmp/test_integ_daemon.sqlite";
 static const char *WORK_DIR = "/tmp/test_integ_daemon_work";
@@ -36,9 +37,9 @@ static void *daemon_thread(void *arg) {
 }
 
 /* Seed kv table with config pointing to mock server */
-static void seed_kv_config(sqlite3 *db, int port) {
+static void seed_kv_config(sqlite3 *db) {
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
     db_kv_set(db, "provider.base_url", base_url);
     db_kv_set(db, "provider.model", "mock-model");
     db_kv_set(db, "provider.max_tokens", "256");
@@ -97,8 +98,7 @@ static int wait_for_completion(const char *agent_db_path, int64_t sid) {
 static void test_daemon_fork_reap_mock(void) {
     TEST(daemon_fork_reap_mock);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
     mock_server_enqueue(200,
         "{\"id\":\"chatcmpl-d1\",\"choices\":[{\"message\":{\"role\":\"assistant\","
@@ -114,17 +114,17 @@ static void test_daemon_fork_reap_mock(void) {
     char adb_path[256];
     snprintf(adb_path, sizeof(adb_path), "agents/%s/agent.db", AGENT_NAME);
     sqlite3 *adb = db_open_agent(adb_path);
-    if (!adb) { mock_server_stop(); chdir(orig_cwd); FAIL("db_open_agent"); }
+    if (!adb) { chdir(orig_cwd); FAIL("db_open_agent"); }
     int64_t sid = session_create(adb, "integ_daemon", AGENT_NAME, -1, 0);
-    if (sid < 0) { db_close(adb); mock_server_stop(); chdir(orig_cwd); FAIL("session_create"); }
+    if (sid < 0) { db_close(adb); chdir(orig_cwd); FAIL("session_create"); }
     inbox_insert(adb, sid, "test", "hi there");
     db_close(adb);
 
     /* Create daemon DB */
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
-    if (!db) { mock_server_stop(); chdir(orig_cwd); FAIL("db_open"); }
-    seed_kv_config(db, port);
+    if (!db) { chdir(orig_cwd); FAIL("db_open"); }
+    seed_kv_config(db);
     db_kv_set(db, "provider.api_key", "mock-key");
 
     shutdown_reset();
@@ -133,7 +133,7 @@ static void test_daemon_fork_reap_mock(void) {
     daemon_set_self_path(self_path);
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
     Config cfg = {0};
     cfg.db_path = (char *)DB_PATH;
     cfg.workspace = "/tmp";
@@ -155,14 +155,14 @@ static void test_daemon_fork_reap_mock(void) {
     if (wait_for_completion(adb_path, sid) != 0) {
         shutdown_request();
         pthread_join(dt, NULL);
-        db_close(db); mock_server_stop(); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         FAIL("agent did not complete within timeout");
     }
 
     if (mock_server_request_count() < 1) {
         shutdown_request();
         pthread_join(dt, NULL);
-        db_close(db); mock_server_stop(); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         FAIL("mock server received no requests");
     }
 
@@ -170,7 +170,7 @@ static void test_daemon_fork_reap_mock(void) {
     adb = db_open_agent(adb_path);
     if (inbox_count(adb, sid) != 0) {
         db_close(adb); shutdown_request(); pthread_join(dt, NULL);
-        db_close(db); mock_server_stop(); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         FAIL("inbox not consumed");
     }
     int count = 0;
@@ -189,14 +189,13 @@ static void test_daemon_fork_reap_mock(void) {
 
     if (!found_assistant) {
         shutdown_request(); pthread_join(dt, NULL);
-        db_close(db); mock_server_stop(); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         FAIL("assistant entry not found in DB");
     }
 
     shutdown_request();
     pthread_join(dt, NULL);
     db_close(db);
-    mock_server_stop();
     unlink(DB_PATH);
     chdir(orig_cwd);
     PASS();
@@ -206,19 +205,9 @@ static void test_daemon_fork_reap_mock(void) {
 static void test_daemon_fork_reap_tool_call(void) {
     TEST(daemon_fork_reap_tool_call);
 
-    int port = mock_server_start();
-    if (port < 0) FAIL("mock_server_start failed");
+    mock_server_reset();
 
-    mock_server_enqueue(200,
-        "{\"id\":\"chatcmpl-d2\",\"choices\":[{\"message\":{\"role\":\"assistant\","
-        "\"content\":null,\"tool_calls\":[{\"id\":\"call_d1\",\"type\":\"function\","
-        "\"function\":{\"name\":\"file_read\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/test_integ_daemon_file.txt\\\"}\"}}]},"
-        "\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}");
-
-    mock_server_enqueue(200,
-        "{\"id\":\"chatcmpl-d3\",\"choices\":[{\"message\":{\"role\":\"assistant\","
-        "\"content\":\"File contents received.\"},\"finish_reason\":\"stop\"}],"
-        "\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":5}}");
+    mock_server_load("test/fixtures/daemon_fork_reap_tool_call.json");
 
     FILE *tf = fopen("/tmp/test_integ_daemon_file.txt", "w");
     if (tf) { fprintf(tf, "test data"); fclose(tf); }
@@ -231,16 +220,16 @@ static void test_daemon_fork_reap_tool_call(void) {
     char adb_path[256];
     snprintf(adb_path, sizeof(adb_path), "agents/%s/agent.db", AGENT_NAME);
     sqlite3 *adb = db_open_agent(adb_path);
-    if (!adb) { mock_server_stop(); chdir(orig_cwd); FAIL("db_open_agent"); }
+    if (!adb) { chdir(orig_cwd); FAIL("db_open_agent"); }
     int64_t sid = session_create(adb, "integ_daemon_tool", AGENT_NAME, -1, 0);
-    if (sid < 0) { db_close(adb); mock_server_stop(); chdir(orig_cwd); FAIL("session_create"); }
+    if (sid < 0) { db_close(adb); chdir(orig_cwd); FAIL("session_create"); }
     inbox_insert(adb, sid, "test", "read the file");
     db_close(adb);
 
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
-    if (!db) { mock_server_stop(); chdir(orig_cwd); FAIL("db_open"); }
-    seed_kv_config(db, port);
+    if (!db) { chdir(orig_cwd); FAIL("db_open"); }
+    seed_kv_config(db);
     db_kv_set(db, "provider.api_key", "mock-key");
 
     shutdown_reset();
@@ -249,7 +238,7 @@ static void test_daemon_fork_reap_tool_call(void) {
     daemon_set_self_path(self_path);
 
     char base_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
     Config cfg = {0};
     cfg.db_path = (char *)DB_PATH;
     cfg.workspace = "/tmp";
@@ -271,7 +260,7 @@ static void test_daemon_fork_reap_tool_call(void) {
     if (wait_for_completion(adb_path, sid) != 0) {
         shutdown_request();
         pthread_join(dt, NULL);
-        db_close(db); mock_server_stop(); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         FAIL("agent did not complete within timeout");
     }
 
@@ -280,7 +269,7 @@ static void test_daemon_fork_reap_tool_call(void) {
         snprintf(msg, sizeof(msg), "expected >=2 requests, got %d",
                  mock_server_request_count());
         shutdown_request(); pthread_join(dt, NULL);
-        db_close(db); mock_server_stop(); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         FAIL(msg);
     }
 
@@ -301,14 +290,13 @@ static void test_daemon_fork_reap_tool_call(void) {
 
     if (!found) {
         shutdown_request(); pthread_join(dt, NULL);
-        db_close(db); mock_server_stop(); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         FAIL("final assistant entry not found");
     }
 
     shutdown_request();
     pthread_join(dt, NULL);
     db_close(db);
-    mock_server_stop();
     unlink(DB_PATH);
     unlink("/tmp/test_integ_daemon_file.txt");
     chdir(orig_cwd);
@@ -317,12 +305,12 @@ static void test_daemon_fork_reap_tool_call(void) {
 
 int main(void) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    /* Disable landlock for agent children (mock server uses random port) */
-    setenv("CCLAW_NO_LANDLOCK", "1", 1);
+    s_port = mock_server_start();
     printf("--- test_integration_daemon (T130) ---\n");
     test_daemon_fork_reap_mock();
     test_daemon_fork_reap_tool_call();
     printf("%d/%d passed\n", tests_passed, tests_run);
     curl_global_cleanup();
+    mock_server_stop();
     return tests_passed == tests_run ? 0 : 1;
 }

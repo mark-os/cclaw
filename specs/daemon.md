@@ -39,8 +39,7 @@ Agent sets own session state before exit:
 7. Agent process:
    a. Read CCLAW_* env vars (config from daemon)
    b. Open CCLAW_AGENT_DB
-   c. landlock_apply() from env-parsed policy
-   d. setrlimit(RLIMIT_AS, RLIMIT_CPU, RLIMIT_NOFILE)
+   c. setrlimit(RLIMIT_AS, RLIMIT_CPU, RLIMIT_NOFILE)
    e. session state → "running"
    f. inbox_consume_into_entries(session_id) — atomic, sets last_route
    g. context_build(session_id)
@@ -126,7 +125,6 @@ void fork_agent(const char *agent_name, int64_t session_id) {
         prctl(PR_SET_PDEATHSIG, SIGTERM);  // V34
 
         // Agent reads config from env, opens own DB
-        apply_landlock_from_env();
         apply_rlimits();
         run_agent_turn(session_id);
         // run_agent_turn calls _exit(code)
@@ -173,21 +171,6 @@ Daemon reads `agent_config` table from cclaw.db at fork time. Injects as env var
 | `CCLAW_DAEMON_DB` | cclaw.db path | only if daemon_db_read=1 |
 
 Agent reads env vars at startup. ⊥ opens config files. ⊥ opens cclaw.db for config.
-
-## Landlock Policy
-
-Daemon reads from agent_config: workspace, read_access, landlock_net_ports.
-Passes via env: `CCLAW_WORKSPACE`, `CCLAW_READ_ACCESS` (colon-separated), `CCLAW_NET_PORTS`.
-Agent reads env, calls `landlock_apply()`.
-
-```
-Writable:  agents/<name>/ (DB + workspace) + /tmp/cclaw-<session_id>/
-Readable:  /usr/lib, /usr/share, /etc/ssl, /etc/resolv.conf, cclaw.db (if granted)
-Network:   TCP connect to configured ports (ABI v4+, kernel 6.7+)
-Denied:    everything else
-```
-
-Fallback: if kernel lacks landlock, log warning, continue without (V22).
 
 ## Resource Limits
 

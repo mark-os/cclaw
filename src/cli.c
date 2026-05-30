@@ -271,7 +271,8 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
             fprintf(stderr, "error: agent failed\n");
         else {
             print_response(db, session_id);
-            session_try_compact(db, session_id, cfg);
+            if (cfg->compaction && session_needs_compaction(db, session_id, cfg))
+                session_try_compact(db, session_id, cfg);
         }
 
         session_set_state(db, session_id, "idle");
@@ -324,7 +325,8 @@ int cli_run(const Config *cfg, const CliOpts *opts) {
             fprintf(stderr, "error: agent failed\n");
         } else {
             print_response(db, session_id);
-            session_try_compact(db, session_id, cfg);
+            if (cfg->compaction && session_needs_compaction(db, session_id, cfg))
+                session_try_compact(db, session_id, cfg);
         }
     }
 

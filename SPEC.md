@@ -15,14 +15,13 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - config injected to agents via `CCLAW_*` env vars at fork time (⊥ config file reads in agent)
 - system libcurl (dynamic link); vendor cJSON, sqlite3, civetweb, mquickjs
 - primary target: EC2 t4g.small ARM64 AL2023
-- single user (Mark) — no multi-tenant auth
+- single user — no multi-tenant auth
 - OpenAI-compatible chat completions format ∀ providers
 - default provider: OpenRouter → DeepSeek V4 Flash (`deepseek/deepseek-v4-flash`)
 - no streaming — full response only (simplifies agent loop, tool parsing)
 - daemon+fork model: daemon schedules, forks agent processes, reaps; never executes LLM logic
 - agent process = one session turn (drain inbox → LLM loop until stop → write response → exit)
 - IPC: exit codes + DB reads (daemon reads agent DB post-reap); signal pipe for wakeup only (no message broker)
-- landlock per-agent process (restrict fs to `agents/<name>/`; shell children restricted to `workspace/` subdir only)
 - CLI standalone: opens agent DB directly, no daemon needed
 
 ## §I INTERFACES
@@ -84,7 +83,7 @@ V3: ∀ sub-agent → max depth 2, max 3 concurrent/parent, max 10 system-wide
 V4: ∀ DB access → WAL mode, `busy_timeout` ≥ 5000ms
 V5: ∀ `js_eval` → 1MB heap cap, 10M instruction limit
 V6: ∀ agent turn → per-turn arena (512KB scratch), destroyed after turn
-V7: ∀ context build → load ≤ `max_history_tokens` (default 60% of model context window) most recent turns; prepend cutoff notice; older messages searchable via FTS5
+V7: ∀ context build → load ≤ `context_threshold` × context_window tokens (V91) of most recent turns; if compaction disabled (V93) → prepend truncation notice; older messages remain in DB (searchable via FTS5)
 V8: ∀ context build → never cut mid-tool-call; cut at valid turn boundary (before user msg | after complete assistant response)
 V9: ∀ LLM request → omit `"tools"` field entirely when no tools registered (never send `"tools": []`)
 V10: ∀ tool crash/timeout → produce error result, continue agent loop (never crash loop)
@@ -99,7 +98,7 @@ V18: ∀ inbox message → consumed exactly once into session entries via single
 V19: ∀ session state transition → executed via strict atomic UPDATE with WHERE clauses targeting expected states to prevent TOCTOU
 V20: ∀ session → `agent_name` identifies agent; config loaded from `agents/<name>/` on disk; fallback to global config when NULL
 V21: ∀ agent execution → daemon forks dedicated process; daemon ⊥ executes LLM logic
-V22: ∀ agent process → trusted binary; primary isolation: `setrlimit` (V23) + application-level network policy (V46); optional defense-in-depth: landlock filesystem restriction (workspace rw, system ro) applied if kernel supports it; graceful skip if unavailable (log warning, continue without); agent process is NOT namespace-sandboxed (needs libcurl, own DB, cclaw.db read)
+V22: ∀ agent process → trusted binary; primary isolation: `setrlimit` (V23) + application-level network policy (V46); agent process is NOT namespace-sandboxed (needs libcurl, own DB, cclaw.db read)
 V22a: ∀ `shell_exec` child → full namespace sandbox: `unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWNET)` — `/` ro, workspace rw; network via `LD_PRELOAD=libcclaw_net.so` routing through UDS to agent proxy thread; proxy enforces allowed_hosts + secrets injected via env vars
 V23: ∀ agent process → `setrlimit` at fork: RLIMIT_AS (256MB default), RLIMIT_CPU (300s default), RLIMIT_NOFILE (64)
 V24: ∀ session → at most 1 active agent process; daemon forks only when state == "idle"; "running" and "waiting" block new forks
@@ -123,11 +122,11 @@ V41: ∀ LLM request → built via `CURLOPT_READFUNCTION` streaming from SQLite 
 V42: ∀ heartbeat → daemon triggers agent run w/ heartbeat prompt; agent reads `HEARTBEAT.md` if present, acts on tasks; response `HEARTBEAT_OK` = sentinel (suppressed, ⊥ delivered to channel); any other response → deliver to channel via `last_route`
 V44: ∀ Telegram group msg → if agent response contains `[NO_REPLY]` → suppress delivery (⊥ send to chat); agent decides relevance per system prompt guidance
 V45: ∀ agent response → if `stop_reason == stop` & no tool_calls & response is plan-only (bullet list + "I'll do X" promise, no tool action taken) → re-prompt once: "Do not restate the plan. Act now: take the first concrete tool action. If blocked, state the blocker in one sentence."
-V46: ∀ outbound HTTP (libcurl) → single `http_policy` layer validates before connect; two modes: (1) default-deny: `allowed_hosts[]` non-empty → only listed hosts reachable, (2) default-allow: `allowed_hosts[]` empty → all hosts reachable except `blocked_hosts[]`; `block_private` configurable per-agent (default true — blocks RFC1918/loopback/link-local + cloud metadata 169.254.169.254); `blocked_hosts` loadable from plain text file (one domain/line, compatible w/ abuse.ch/Pi-hole domain-only format); loaded into hash set at startup; all callers share one code path: LLM calls pass trusted policy (provider endpoints only), web_fetch/JS fetch pass agent's policy; optional landlock v4 hardening: if available, restrict agent process TCP to configured ports as defense-in-depth (not required)
+V46: ∀ outbound HTTP (libcurl) → single `http_policy` layer validates before connect; two modes: (1) default-deny: `allowed_hosts[]` non-empty → only listed hosts reachable, (2) default-allow: `allowed_hosts[]` empty → all hosts reachable except `blocked_hosts[]`; `block_private` configurable per-agent (default true — blocks RFC1918/loopback/link-local + cloud metadata 169.254.169.254); `blocked_hosts` loadable from plain text file (one domain/line, compatible w/ abuse.ch/Pi-hole domain-only format); loaded into hash set at startup; all callers share one code path: LLM calls pass trusted policy (provider endpoints only), web_fetch/JS fetch pass agent's policy
 V47: ∀ `shell_exec` child → PATH restricted to `/bin:/usr/bin`; unset `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `HOME`, and all `CCLAW_*` env vars before exec; prevents agent from invoking cclaw binary or leaking credentials via shell
 V48: ∀ `shell_exec` child → `mjs` binary available at fixed path (e.g. `/usr/local/lib/cclaw/mjs`); PATH ! include its directory — agent invokes via absolute path; `mjs` = standalone mquickjs evaluator w/ `fetch()` binding; convenience for shell pipelines (not a security boundary — shell children get full networking via namespace+proxy)
 V49: ∀ `mjs` process (spawned via shell_exec) → inherits shell child's namespace sandbox (V82); network goes through credential proxy like any other shell process; `fetch()` binding calls libcurl in-process; composable with unix pipes (V51)
-V50: [removed — fetch proxy protocol replaced by landlock network + in-process whitelist]
+V50: [removed — fetch proxy protocol replaced by in-process whitelist]
 V51: ∀ `mjs` invocation via shell → composable w/ unix pipes; stdout/stderr flow through shell pipeline normally; no side-channel fd needed
 V52: ∀ secret → all secrets stored in cclaw.db `kv` table (encrypted, ChaCha20-Poly1305 AEAD); two tiers: (1) provider/channel secrets (API keys, bot tokens) — daemon-managed; (2) agent-specific secrets (tool credentials, user tokens) — agent requests via exit code 4, daemon encrypts + stores after admin approval; decryption key `.cclaw/.cclaw_key` (32 bytes, mode 0600) held by daemon only; at fork, daemon decrypts needed secrets + injects into child env; agent clears from env immediately after read; shell_exec children ⊥ access (env stripped before exec)
 V53: ∀ Telegram admin command (config, key, whitelist) → restricted to `admin_chat_ids` in kv table; unauthorized chat_id → silent ignore (⊥ error msg, ⊥ inbox_insert)
@@ -168,6 +167,9 @@ V87: ∀ partial turn resume → agent on startup checks last assistant entry's 
 V88: ∀ secret injection to shell → daemon decrypts secrets at fork, injects as `CCLAW_SECRET_<NAME>` env vars into agent process; agent selectively passes needed secrets into shell child env; LLM references as `$CCLAW_SECRET_<NAME>` in commands (value ⊥ in command string, ⊥ in entries, ⊥ in LLM context); shell output scanned for known secret values → replaced w/ `[REDACTED:<name>]` before DB write; LLM told secret names only (never values)
 V89: ∀ provider → configured in cclaw.db `providers` table (name, base_url, endpoint_type, api_key_env, default_model_id); multiple providers coexist; agent config specifies `provider` name + optional `model_id`; if model_id omitted → use provider's `default_model_id`; daemon injects ALL configured provider API keys at fork (agent may use multiple providers within a single turn — fallback, sub-calls, etc.); daemon resolves primary provider row at fork, injects base_url/endpoint_type/model as `CCLAW_*` env vars
 V90: ∀ config resolution → priority: (1) `CCLAW_*` env vars, (2) cclaw.db kv/agent_config tables, (3) provider-native env vars (e.g. `OPENROUTER_API_KEY`), (4) `~/.cclaw/config.json` (optional fallback); agent process reads only env vars — resolution happens in CLI entrypoint or daemon before fork
+V91: ∀ session context management → three configs: `context_threshold` (float 0–1, default 0.6) triggers action when tokens exceed threshold × context_window; `compaction_target` (float 0–1, default 0.3) = how much to keep after compaction (summarize from start until remaining ≤ target × context_window); `compaction` (bool, default true) controls mode
+V92: ∀ compaction (enabled) → read entries from session start through compaction_target cut point (entries whose cumulative tokens from tail exceed target × context_window); send to LLM for summarization; replace w/ single ROLE_COMPACTION entry; reparent per V58; fallback to placeholder on LLM failure
+V93: ∀ truncation (compaction disabled) → context_build loads most recent entries up to threshold; inserts notice "[conversation history truncated — N earlier entries omitted]" at cut point; no DB mutation — entries remain, just excluded from context sent to LLM
 
 ## §T TASKS
 id|status|task|cites
@@ -252,8 +254,8 @@ T79|x|session↔agent binding — session_create accepts agent_name, load config
 T80|x|skill loader — scan `agents/<name>/skills/*.md`, inject into system prompt|V20
 T81|x|daemon main loop — epoll on signal_pipe + SIGCHLD self-pipe, fork/reap agents|V21,V24,V26
 T82|x|signal pipe — create at daemon start, inserters write session_id to wake daemon|V25
-T83|x|agent process entry — fork, landlock, setrlimit, drain inbox, run agent loop, exit|V21,V22,V23
-T84|x|landlock setup — per-agent workspace write, system read-only, deny network (curl via inherited fd?)|V22
+T83|x|agent process entry — fork, setrlimit, drain inbox, run agent loop, exit|V21,V22,V23
+T84|x|[removed — landlock removed in favor of app-level policy]|V22
 T85|x|response delivery — daemon reads `last_route`, dispatches to correct channel|V26
 T86|x|`last_route` tracking — agent updates on inbox consumption from newest source|V27,§D
 T87|x|daemon child tracking — map pid→session_id, enforce V24 (no dup fork)|V24
@@ -271,7 +273,7 @@ T98|x|`entry_append` stores `stop_reason` in entry `data` JSON; `session_get_bra
 T99|x|`context_build` V36 filtering — skip `error`/`aborted` assistant entries, synthesize orphaned tool_results|V36,V28
 T100|x|test: StopReason normalization — all provider finish_reason variants map correctly|V35
 T101|x|test: context_build skips errored entries, synthesizes tool_results for orphaned calls|V36
-T102|x|`shell_exec` sandbox — child inherits agent's landlock (V22); no unshare/namespace; network via landlock v4+ port rules|V37
+T102|x|`shell_exec` sandbox — child runs in namespace sandbox (CLONE_NEWUSER/NEWNS/NEWNET); workspace rw, system ro, no network except via UDS proxy|V37
 T103|x|`http_fetch` JS binding — C function exposed to mquickjs; parse URL, check `allowed_hosts`, SSRF reject private IPs, call libcurl, return response|V38
 T104|x|per-agent `allowed_hosts` config — array of hostnames in `agent.json`, loaded into agent config, passed to `http_fetch` binding|V38,§I
 T105|x|tool result truncation in `context_build` — shared `truncate_result(buf, len)` util enforcing 50KB/2000 lines on tool_result messages before sending to LLM; full results stay in DB|V40
@@ -287,7 +289,7 @@ T114|x|planning-only retry — after final assistant response w/ no tool_calls, 
 T115|x|CLI mid-turn progress — always-on: stream intermediate assistant text + tool call names/args as they execute; tool results truncated aggressively for display (shorter than V40 LLM limit); `--debug` adds raw JSON req/resp on top|§I.cmd
 T116|x|`HttpPolicy` layer — struct w/ allowed_hosts[], blocked_hosts[], block_private flag; `http_check_policy(url, policy)` validates before curl; integrate into `http_get` (web_fetch), JS `http_fetch` binding; LLM/telegram calls pass NULL policy (unrestricted)|V46
 T117|x|JS `http_fetch` sanitize option — `http_fetch(url, {sanitize: true})` applies html_strip_tags + sanitize_homoglyphs + boundary wrap (reuse web_fetch logic); default false (raw response)|V46,V38
-T118|x|tool result write-time truncation — truncate at append time (not context_build); full output to `/tmp/cclaw-<session_id>/<tool_call_id>.out`; reference path in truncation notice; agent can `file_read` the path; update landlock to allow `/tmp/cclaw-*` write; clean temp dir on session idle or daemon restart|V40,V22
+T118|x|tool result write-time truncation — truncate at append time (not context_build); full output to `/tmp/cclaw-<session_id>/<tool_call_id>.out`; reference path in truncation notice; agent can `file_read` the path; clean temp dir on session idle or daemon restart|V40
 T119|x|`agents` table — schema: id, name, config(JSON), system_prompt, heartbeat, created_at, updated_at; seed from `agents/<name>/agent.json` + `system.md` on first reference; DB authoritative after seed|§D
 T120|x|[removed — superseded by memory_replace]|-
 T121|x|[removed — superseded by memory_append]|-
@@ -302,8 +304,8 @@ T129|x|integration test: mock Telegram API — mock getUpdates + sendMessage end
 T130|x|integration test: daemon fork+reap with mock LLM — daemon forks agent, agent hits mock, writes response, daemon reaps and delivers|T125,V21
 T131|x|`shell_exec` PATH + env hardening — set `PATH=/bin:/usr/bin` in child; unset API keys, HOME, CCLAW_* before exec; test: verify `env` output clean, verify cclaw binary unreachable|V47
 T132|x|`mjs` standalone binary — build mquickjs evaluator (`vendor/mquickjs/`) as separate binary; accepts `-e 'code'` or filename arg; links libcurl; `fetch()` binding calls curl in-process w/ allowed_hosts whitelist; install to `/usr/local/lib/cclaw/mjs`|V48,V49,V51
-T133|x|[removed — fetch proxy protocol replaced by landlock network + in-process whitelist]|V50
-T134|x|[removed — fetch proxy replaced by landlock + in-process whitelist]|-
+T133|x|[removed — fetch proxy protocol replaced by in-process whitelist]|V50
+T134|x|[removed — fetch proxy replaced by in-process whitelist]|-
 T135|x|[removed — fetch proxy tests deleted]|-
 T136|x|[removed — fetch proxy tests deleted]|-
 T137|x|Makefile: `mjs` binary target — compile mquickjs evaluator, install to `build/mjs`; `make install` copies to `/usr/local/lib/cclaw/mjs`|V48
@@ -350,14 +352,14 @@ T176|x|integration test: secrets round-trip — `kv_set_secret` stores `enc:` pr
 T177|x|integration test: wire emission — insert entries via split columns, run RequestStreamer against mock server, capture request body, verify valid OpenAI JSON (tool_calls format, escaped content w/ newlines/quotes/unicode)|V60,T166
 T178|x|integration test: large session memory — insert 500+ entries, run agent loop w/ mock server, verify RSS stays bounded (check `/proc/self/status`); verify context_plan truncates correctly|V41,V56
 T179|x|integration test: db_query secret filtering — seed kv w/ `enc:` values, run `db_query("SELECT * FROM kv")` tool, verify no `enc:` rows in result; no network|V52,T173
-T180|x|integration test: landlock blocks key file — fork child w/ landlock (workspace only), child attempts read of `.cclaw_key` path, verify EACCES; no network|V52,V22
+T180|x|[removed — landlock removed]|-
 T181|x|integration test: empty response — mock returns `finish_reason:"stop"` + `content:null`; verify agent treats as valid end-of-turn (content is optional); verify prior tool-call entries survive in DB|V29,V36
 T182|x|integration test: plan-only retry — mock returns bullet-list plan w/ no tool calls; verify agent re-prompts once w/ act-now instruction; second mock response has tool call; verify normal flow resumes|V45
 T183|x|integration test: tool loop detection — mock returns same tool_call 12×; verify warning injected at rep 5; verify agent stops at rep 10 w/ error|V43
 T184|x|integration test: blocking sub-agent lifecycle — mock LLM for parent + child; parent calls spawn_agent(blocking); verify state="waiting" + spawn_queue row; simulate sub-agent completion; verify parent re-forks w/ tool_result|V13,V33
 T185|x|integration test: compaction context — insert 300 entries, trigger compaction, run agent loop w/ mock server post-compaction; verify CTE returns summary + recent only; verify FTS5 still indexes old entries|V58,T163
-T186|x|ephemeral agent creation — daemon creates `.cclaw/agents/ephemeral-<uuid>/` w/ agent.db + workspace; minimal config (model from daemon global, basic tools); same landlock as named agents|V65,V62
-T187|x|agent permission model — `read_access[]` config field; daemon builds landlock ruleset at fork: own dir RW + each read_access dir RO; creator gets child dir added to own landlock|V66
+T186|x|ephemeral agent creation — daemon creates `.cclaw/agents/ephemeral-<uuid>/` w/ agent.db + workspace; minimal config (model from daemon global, basic tools)|V65,V62
+T187|x|agent permission model — `read_access[]` config field; daemon passes to agent via env; namespace sandbox grants read-only bind-mounts for listed dirs|V66
 T188|x|top-level secrets in daemon DB — provider API keys + channel tokens stored in `.cclaw/cclaw.db` kv (encrypted); daemon decrypts at fork, injects into agent memory; agents reference by name (e.g. `provider.api_key`), ⊥ store copies|V67
 T189|x|bootstrap ephemeral agent — on first run (no named agents), daemon spawns ephemeral w/ tools: `configure_provider`, `configure_channel`, `create_agent`; system prompt guides onboarding flow|V68
 T190|x|`configure_provider` tool — prompts user for provider type + API key; posts key to daemon IPC; daemon encrypts + stores in daemon DB; returns confirmation|V68,V67
@@ -389,12 +391,16 @@ T215|x|test: shell curl through proxy — mock TCP server on allowed host, verif
 T216|x|test: shell cannot reach unlisted host — shell child attempts connect to non-allowlisted host via LD_PRELOAD lib, verify proxy denies (connection refused)|V83
 T217|x|test: shell cannot read filesystem outside workspace — verify /etc/shadow, agent.db, cclaw.db all inaccessible from shell child (existing namespace sandbox)|V82
 T218|x|log collector process — `src/log_collector.c`; unix socketpair + `SCM_RIGHTS` fd passing; epoll on received fds; batch insert to journal.db; daemon stdout/stderr also piped (low priority)|V75
-T219|x|optional landlock for agent process — best-effort filesystem restriction if kernel supports; defense-in-depth only (not required for security model); skip silently if unavailable|V22
+T219|x|[removed — landlock removed in favor of app-level policy + namespace sandbox]|V22
 T220|x|unit test audit — review all src/*.c for untested code paths; add missing unit tests (no network, no LLM, fast); focus on edge cases in config parsing, context_build, tool dispatch, entry append, session state transitions|§C
 T221|x|integration test audit — review mock-server test coverage; add missing integration tests for: multi-turn tool sequences, retry/backoff paths, context overflow, daemon fork+reap, inbox consumption, sub-agent lifecycle|§C
 T222|x|e2e test audit — review live LLM test coverage; add missing e2e tests for: real provider round-trips, tool_calls parsing across providers, fallback chain, Telegram delivery, full agent turn with workspace side-effects|§C
 T223|x|CLI zero-config startup — CLI works with just `OPENROUTER_API_KEY` in env; defaults: agent_name=`default`, agent_db=`.cclaw/agents/default/agent.db`, workspace=`.cclaw/agents/default/workspace/`, model=`deepseek/deepseek-v4-flash`; creates dirs + DB on first run; no prompts, no daemon, no cclaw.db|V81,V74
 T224|x|partial-turn resume — on agent startup, detect incomplete tool_call batch (assistant entry with more tool_calls than tool_result entries); if PENDING entry found with no resolution → replace with error; if results missing (daemon resolved PENDING, remaining calls unexecuted) → dispatch remaining tool_calls in order, skip already-resolved ones; never re-execute a call that has a result|V87,V17,V13
+
+T225|x|refactor compaction — replace 200-entry threshold w/ token-based trigger (V91); add `context_threshold` (float), `compaction_target` (float), `compaction` (bool) configs; env vars `CCLAW_CONTEXT_THRESHOLD`, `CCLAW_COMPACTION_TARGET`, `CCLAW_COMPACTION`; when disabled, context_build inserts truncation notice per V93; remove `compaction_threshold` int config|V91,V92,V93
+T226|x|mock server JSON templates — `mock_server_load(path)` reads JSON array of `{status, body}` objects; serves in order; integration tests use template files instead of inline C strings; template path passed via env or function arg|V91
+T227|x|move test_mock_server + test_compaction_summary → integration tier (rename to `test_integration_*`); both use mock HTTP server = integration tests by definition|-
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)
@@ -412,14 +418,14 @@ id|date|cause|fix
 - Curation agent: background sub-agent that operates on another session's branch — identifies noise (repeated failures, dead-end tool calls), summarizes or removes them, produces a cleaner branch for continued work
 - Telegram/non-CLI sessions can't easily branch interactively — curation agent fills that gap
 - Seccomp-bpf: defense-in-depth syscall filtering for agent processes (block fork/execve/ptrace/mount — force all execution through shell_exec tool); both platforms have `CONFIG_SECCOMP_FILTER=y`; needs per-arch filter defs (ARM64 vs ARMv5) or `libseccomp`; add once daemon model stable and syscall needs empirically known
-- ~~Filtered shell network~~: replaced by landlock v4+ network rules (V37); shell children inherit port restrictions; no unshare/proxy needed
+- ~~Filtered shell network~~: replaced by namespace sandbox (V82) + UDS proxy; shell children have no direct network; proxy enforces host allowlist
 - Multi-arch releases: GitHub Actions matrix with Docker containers (arm64, armhf, amd64) producing tarballs; binary + "install libcurl" README; not Zig-style cross-compile — native build per target with system libcurl; ARMv5TE (Pogoplug) likely needs dedicated Debian armel container
 - Cost tracking: save OpenRouter `cost` field when present; for direct providers, compute from per-model rate table (input/output/cache_read/cache_write $/M tokens); store per-entry in metadata; aggregate per-session and per-agent; expose via web dashboard and `db_query`
 - Extension system via MicroQuickJS (NEXT): extensions are JS modules loaded at agent startup from `agents/<name>/workspace/`; can register tools, hook events (before/after tool call, before LLM request), modify system prompt; loaded from workspace JS files; extensions have access to `http_fetch` (with policy) and filesystem (workspace-scoped); this is how agents augment themselves — the plugin system replaces the need for native C additions per-agent
 - MCP extension: reference JS extension that speaks Model Context Protocol over stdio/HTTP; discovers remote tools, registers them via the extension API; ships as a built-in example extension
 - OpenAI Device Code auth: OAuth 2.0 Device Authorization Grant (RFC 8628) for ChatGPT/Codex subscription access without API key; show URL + code → user approves on phone/laptop → poll for token; works headless (no browser callback); store access+refresh tokens in DB; auto-refresh on expiry; identify as `cclaw/<version>` User-Agent
 - System prompt in DB: move system prompts from `agents/<name>/system.md` to a `prompts` table (id, name, template TEXT, created_at); template vars `{session_id}`, `{date}`, `{agent_name}`; agents reference prompt by name/id in config; allows runtime editing without filesystem access; keep file-based loading as fallback/import path
-- ~~Workspace model refinement~~: implemented — `.cclaw/agents/<name>/workspace/` per agent; `.cclaw/agents/<name>/agent.db` per agent; shell children landlock-restricted to workspace only (V22a, V62)
+- ~~Workspace model refinement~~: implemented — `.cclaw/agents/<name>/workspace/` per agent; `.cclaw/agents/<name>/agent.db` per agent; shell children namespace-restricted to workspace only (V82, V62)
 - Auto-recall (FTS5): at context build, extract keywords from current user message → FTS5 search over entries + memory_blocks → inject top-N relevant hits as `<recalled_context>` section in system prompt; zero agent effort, system-level; configurable threshold + max tokens budget
 - Vector recall (NEXT): embedding-based semantic search over entries + memory_blocks + workspace files; hybrid w/ FTS5 (RRF merge); requires embedding model (local or API); `passages` table (text, embedding BLOB, source_type, source_id); agent tool `memory_search(query)` for explicit recall; auto-recall injects top hits same as FTS5 path
 - Input logprobs pruning: use prompt token logprobs to intelligently prune history — low-probability tokens = surprising/informative (keep), high-probability = redundant (safe to drop); requires local model inference (vLLM `--return-prompt-logprobs` or llama.cpp); not available via hosted APIs

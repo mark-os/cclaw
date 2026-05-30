@@ -46,12 +46,6 @@ Move to §T when ready to implement.
 - Expose message search as agent tool (`search_history`)
 - Agent can search its own past conversations
 
-## Landlock Shell Restriction ✓ (implemented)
-- Landlock LSM restricts `shell_exec` filesystem + network access
-- Child inherits agent's landlock: workspace writable, system paths read-only
-- Network: TCP 80/443 only (ABI v4+, kernel 6.7+)
-- No unshare/namespace needed — landlock is sole sandbox mechanism
-
 ## JS Extension System
 
 ### Tool Authoring via mquickjs

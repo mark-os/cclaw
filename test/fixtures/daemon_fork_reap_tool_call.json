@@ -1,0 +1,4 @@
+[
+  {"status": 200, "body": {"id": "chatcmpl-d2", "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{"id": "call_d1", "type": "function", "function": {"name": "file_read", "arguments": "{\"path\":\"/tmp/test_integ_daemon_file.txt\"}"}}]}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}},
+  {"status": 200, "body": {"id": "chatcmpl-d3", "choices": [{"message": {"role": "assistant", "content": "File contents received."}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 20, "completion_tokens": 5}}}
+]

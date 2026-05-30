@@ -83,11 +83,12 @@ static void test_read_system_files(void) {
 static void test_network_isolated(void) {
     if (!ns_available) { printf("  SKIP test_network_isolated\n"); return; }
     ShellConfig sc = {.timeout = 5, .workspace = workspace};
-    /* In a new network namespace, only lo exists and it's down */
+    /* In a new network namespace, only lo exists and it's down.
+     * Some kernels also create sit0 (IPv6-over-IPv4 tunnel) in new netns. */
     char *r = tool_shell_handler(
-        "{\"command\":\"cat /proc/net/dev | grep -v lo | grep -c ':' || true\"}", &sc);
+        "{\"command\":\"cat /proc/net/dev | grep ':' | grep -v 'lo' | grep -v 'sit0' | wc -l\"}", &sc);
     assert(r != NULL);
-    /* Should have 0 non-lo interfaces */
+    /* Should have 0 non-lo, non-sit0 interfaces */
     if (strstr(r, "[exit 0]")) {
         assert(strstr(r, "\n0\n") != NULL);
     }
@@ -111,7 +112,7 @@ static void test_agent_db_inaccessible(void) {
     ShellConfig sc = {.timeout = 5, .workspace = workspace};
     /* Try to read a path outside the sandbox — should not exist in new root */
     char *r = tool_shell_handler(
-        "{\"command\":\"cat /home/ec2-user/cclaw/SPEC.md 2>&1; echo rc=$?\"}", &sc);
+        "{\"command\":\"cat /root/.bashrc 2>&1; echo rc=$?\"}", &sc);
     assert(r != NULL);
     /* Path shouldn't exist in sandboxed filesystem */
     assert(strstr(r, "rc=1") != NULL || strstr(r, "No such file") != NULL);

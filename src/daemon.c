@@ -13,7 +13,6 @@
 #include "tool_db_query.h"
 #include "tool_agent.h"
 #include "tool_cron.h"
-#include "landlock.h"
 #include "config.h"
 #include "context.h"
 #include "agent_exit.h"
@@ -665,20 +664,19 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
                         free(hosts);
                     }
                 }
-                /* V66/T219: Colon-separated read_access paths for landlock */
-                if (ac->read_access_count > 0) {
+                if (ac->tool_count > 0) {
                     size_t len = 0;
-                    for (size_t i = 0; i < ac->read_access_count; i++)
-                        len += strlen(ac->read_access[i]) + 1;
-                    char *ra = malloc(len);
-                    if (ra) {
-                        ra[0] = '\0';
-                        for (size_t i = 0; i < ac->read_access_count; i++) {
-                            if (i > 0) strcat(ra, ":");
-                            strcat(ra, ac->read_access[i]);
+                    for (size_t i = 0; i < ac->tool_count; i++)
+                        len += strlen(ac->tools[i]) + 1;
+                    char *tools = malloc(len);
+                    if (tools) {
+                        tools[0] = '\0';
+                        for (size_t i = 0; i < ac->tool_count; i++) {
+                            if (i > 0) strcat(tools, ",");
+                            strcat(tools, ac->tools[i]);
                         }
-                        setenv("CCLAW_READ_ACCESS", ra, 1);
-                        free(ra);
+                        setenv("CCLAW_TOOLS", tools, 1);
+                        free(tools);
                     }
                 }
                 agent_config_free(ac);

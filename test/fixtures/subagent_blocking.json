@@ -1,0 +1,6 @@
+[
+  {"status": 200, "body": {"id": "r1", "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{"id": "call_spawn1", "type": "function", "function": {"name": "launch_agent", "arguments": "{\"task\":\"do child work\"}"}}]}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}},
+  {"status": 200, "body": {"id": "r2", "choices": [{"message": {"role": "assistant", "content": "Waiting for sub-agent."}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 20, "completion_tokens": 5}}},
+  {"status": 200, "body": {"id": "r3", "choices": [{"message": {"role": "assistant", "content": "child completed successfully"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}},
+  {"status": 200, "body": {"id": "r4", "choices": [{"message": {"role": "assistant", "content": "parent done after child"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 30, "completion_tokens": 5}}}
+]

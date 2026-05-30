@@ -23,7 +23,7 @@ typedef struct {
     size_t tool_count;
     char **allowed_hosts;   /* V38: hostnames for http_fetch */
     size_t allowed_hosts_count;
-    char **read_access;     /* V66: dirs granted read-only in landlock */
+    char **read_access;     /* V66: extra dirs granted read-only in namespace sandbox */
     size_t read_access_count;
     int max_iterations;     /* 0 = use global */
 } AgentConfig;

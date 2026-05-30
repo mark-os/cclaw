@@ -48,7 +48,7 @@ cclaw.db (daemon-owned)           Per-agent agent.db              journal.db (co
 └── approvals
 ```
 
-See [REFACTOR.md](REFACTOR.md) for architecture diagram and [specs/schema.md](specs/schema.md) for full DDL.
+See [specs/schema.md](specs/schema.md) for full DDL.
 
 ## Target Platforms
 

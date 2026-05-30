@@ -66,6 +66,16 @@ A minimal autonomous AI agent runtime in C. Turn-based execution, SQLite persist
 - libcurl (system, dynamic link — sole runtime dependency)
 - An OpenAI-compatible API key (default: OpenRouter)
 
+## Building
+
+```bash
+make              # build ./build/cclaw
+make test         # unit tests (fast, no network)
+make clean        # remove build/
+```
+
+System requirement: a C11 compiler and `libcurl` development headers (`libcurl-dev` / `libcurl-devel`). Everything else is vendored.
+
 ## Quick Start
 
 ```bash
@@ -100,13 +110,13 @@ Config resolution (highest priority first):
 ## Usage
 
 ```bash
-./build/cclaw                    # interactive CLI (default agent)
-./build/cclaw -p "hello"         # single-turn: print response and exit
-./build/cclaw -s 3               # resume session 3
-./build/cclaw --new              # force new session
-./build/cclaw --daemon           # run as daemon (telegram, web, cron)
-./build/cclaw --debug            # show raw LLM request/response JSON
-./build/cclaw --help             # show all options
+cclaw                    # interactive CLI (default agent)
+cclaw -p "hello"         # single-turn: print response and exit
+cclaw -s 3               # resume session 3
+cclaw --new              # force new session
+cclaw --daemon           # run as daemon (telegram, web, cron)
+cclaw --debug            # show raw LLM request/response JSON
+cclaw --help             # show all options
 ```
 
 ## Benchmarks
@@ -132,7 +142,6 @@ LLM generation: 1073 ms (model-dependent)
 ## Documentation
 
 - [SPEC.md](SPEC.md) — full specification, invariants, and task list
-- [REFACTOR.md](REFACTOR.md) — architecture decisions, DB split, exit code protocol
 - [specs/](specs/) — detailed reference docs (schema, daemon, memory, providers, security)
 - [AGENTS.md](AGENTS.md) — project ethos, coding conventions, build instructions
 

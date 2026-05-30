@@ -37,8 +37,9 @@ static sqlite3 *db_open_with_schema(const char *path, const char *schema, const 
     return db;
 }
 
-/* V57: mmap + reduced cache for agent processes (not daemon) */
+/* V57: mmap + reduced cache + relaxed sync for agent processes (not daemon) */
 void db_set_agent_pragmas(sqlite3 *db) {
+    sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA mmap_size=67108864;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA cache_size=-512;", NULL, NULL, NULL);
 }

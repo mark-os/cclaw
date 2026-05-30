@@ -109,6 +109,26 @@ Config resolution (highest priority first):
 ./build/cclaw --help             # show all options
 ```
 
+## Benchmarks
+
+Measured on Acer Chromebook Plus 514 (Intel i3-N305, 8GB RAM, Linux container). Still optimizing memory usage.
+
+```
+Binary size:     2.1 MB (1.5 MB is SQLite)
+Startup:         10 ms (--help)
+DB open:         1 ms (existing DB), 165 ms (first run with schema creation)
+Agent overhead:  ~13 ms (DB + context build + setup, before network)
+Peak RSS:        9.7 MB (single turn — includes curl + SQLite + arena)
+```
+
+TTFB breakdown against OpenRouter (DeepSeek V4 Flash):
+
+```
+CClaw overhead:   13 ms
+DNS + TCP + TLS: 113 ms
+LLM generation: 1073 ms (model-dependent)
+```
+
 ## Documentation
 
 - [SPEC.md](SPEC.md) — full specification, invariants, and task list

@@ -29,3 +29,9 @@
 - **Custom modifications:**
   - `mqjs_host.c` — CClaw host functions (http_fetch with allowed_hosts + SSRF protection)
   - stdlib upgraded with `Date.now` support
+
+## Monocypher 4.0.2
+
+- Source: https://monocypher.org
+- Files: `monocypher.c`, `monocypher.h`
+- License: BSD-2-Clause OR CC0-1.0

@@ -115,3 +115,29 @@ Config resolution (highest priority first):
 - [REFACTOR.md](REFACTOR.md) — architecture decisions, DB split, exit code protocol
 - [specs/](specs/) — detailed reference docs (schema, daemon, memory, providers, security)
 - [AGENTS.md](AGENTS.md) — project ethos, coding conventions, build instructions
+
+## Acknowledgements
+
+### Vendored Libraries
+
+| Library | License |
+|---------|---------|
+| [cJSON 1.7.19](https://github.com/DaveGamble/cJSON) | MIT |
+| [SQLite 3.53.1](https://sqlite.org) | Public Domain |
+| [civetweb 1.16](https://github.com/civetweb/civetweb) | MIT |
+| [MicroQuickJS](https://github.com/nicholasgasior/mquickjs) | MIT |
+| [Monocypher 4.0.2](https://monocypher.org) | BSD-2-Clause / CC0-1.0 |
+
+### Inspiration
+
+These projects informed CClaw's design. No code was taken from them.
+
+| Project | What we learned |
+|---------|-----------------|
+| Pi agent | Clean agent loop, session tree model |
+| OpenClaw | Autonomy features, security patterns, multi-channel integration |
+| nullclaw | Architecture reference (Zig clone of OpenClaw) |
+| Letta | Stateful agent design, persistent memory patterns |
+| IronClaw | Secure execution model, secret injection |
+
+Special thanks to Mario Zechner and Peter Steinberger for starting the Claw movement, Igor Somov for showing what's possible in less than 1MB with NullClaw, and Rhett Creighton for insisting that I vibe code in C.

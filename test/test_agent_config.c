@@ -146,7 +146,7 @@ static void test_agent_config_merge(void) {
     sqlite3 *db = db_open("/tmp/test_ac_merge.db");
     assert(db);
     setenv("OPENROUTER_API_KEY", "sk-test", 1);
-    Config *global = config_load_from_kv(db);
+    Config *global = config_load(db);
     db_close(db);
     assert(global != NULL);
 
@@ -185,7 +185,7 @@ static void test_agent_config_merge_null(void) {
     sqlite3 *db = db_open("/tmp/test_ac_merge_null.db");
     assert(db);
     setenv("OPENROUTER_API_KEY", "sk-test", 1);
-    Config *global = config_load_from_kv(db);
+    Config *global = config_load(db);
     db_close(db);
     assert(global != NULL);
 

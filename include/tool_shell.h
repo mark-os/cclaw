@@ -18,6 +18,7 @@ typedef struct {
     const char *proxy_sock; /* V83: path to .proxy.sock (NULL if proxy not started) */
     ShellSecret *secrets;   /* V88: array of secrets to inject + mask */
     size_t secret_count;
+    int yolo;               /* T229: skip sandbox + env hardening */
 } ShellConfig;
 
 /* Register shell_exec tool into registry.

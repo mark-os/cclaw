@@ -3,10 +3,11 @@
 
 #include "tools.h"
 
-/* T118: Context for file_read — workspace + optional extra read path */
+/* T118/T228: Context for file_read — workspace + optional extra paths */
 typedef struct {
     const char *workspace;
     const char *extra_read_path;  /* e.g. /tmp/cclaw-<session_id> */
+    const char *cclaw_path;       /* T228: CWD read-only path (CCLAW_PATH env) */
 } FileReadCtx;
 
 /* Register file_read tool into registry. Returns 0 on success.

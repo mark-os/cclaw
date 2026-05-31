@@ -178,13 +178,15 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         /* V82/V37: namespace sandbox — graceful fallback if unavailable */
         const char *ws = user_data ? ((ShellConfig *)user_data)->workspace : NULL;
         const char *psock = user_data ? ((ShellConfig *)user_data)->proxy_sock : NULL;
-        if (shell_apply_namespace(ws) != 0) {
+        int yolo = user_data ? ((ShellConfig *)user_data)->yolo : 0;
+        if (!yolo && shell_apply_namespace(ws) != 0) {
             /* Fallback: continue unsandboxed (log to stderr = captured in output) */
             fprintf(stderr, "[cclaw] warning: namespace sandbox unavailable, "
                     "continuing without (errno=%d)\n", errno);
         }
 
-        /* V47: PATH restriction + env hardening */
+        /* V47: PATH restriction + env hardening (skip in yolo mode) */
+        if (!yolo) {
         setenv("PATH", "/bin:/usr/bin", 1);
         unsetenv("OPENROUTER_API_KEY");
         unsetenv("GEMINI_API_KEY");
@@ -206,6 +208,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
             } else {
                 i++;
             }
+        }
         }
 
         /* V83: set proxy socket path for LD_PRELOAD lib (after CCLAW_* cleanup) */

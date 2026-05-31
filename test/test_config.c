@@ -25,7 +25,7 @@ static void test_defaults(void) {
 
     sqlite3 *db = fresh_db();
     assert(db);
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(strcmp(cfg->provider.api_key, "sk-test-123") == 0);
     assert(strcmp(cfg->provider.base_url, "https://openrouter.ai/api/v1") == 0);
@@ -52,7 +52,7 @@ static void test_kv_values(void) {
     db_kv_set(db, "provider.max_tokens", "2048");
     db_kv_set(db, "web_port", "9090");
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(strcmp(cfg->provider.base_url, "http://localhost:8000/v1") == 0);
     assert(strcmp(cfg->provider.model, "gpt-4") == 0);
@@ -71,7 +71,7 @@ static void test_env_overrides_kv(void) {
     setenv("OPENROUTER_API_KEY", "env-key", 1);
     setenv("CCLAW_MODEL", "claude-4", 1);
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
     /* Env overrides kv */
     assert(strcmp(cfg->provider.api_key, "env-key") == 0);
@@ -97,7 +97,7 @@ static void test_fallback_providers(void) {
         "{\"base_url\":\"https://backup.example.com/v1\",\"api_key\":\"bak-key\","
         "\"model\":\"backup-model\"}]");
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(cfg->fallback_count == 2);
     assert(strcmp(cfg->fallback_providers[0].base_url, "https://gemini.example.com/v1") == 0);
@@ -122,7 +122,7 @@ static void test_stale_lock_timeout(void) {
     assert(db);
     db_kv_set(db, "stale_lock_timeout", "120");
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(cfg->stale_lock_timeout == 120);
     config_free(cfg);
@@ -131,7 +131,7 @@ static void test_stale_lock_timeout(void) {
     /* Env override */
     setenv("CCLAW_STALE_LOCK_TIMEOUT", "60", 1);
     db = fresh_db();
-    Config *cfg2 = config_load_from_kv(db);
+    Config *cfg2 = config_load(db);
     assert(cfg2 != NULL);
     assert(cfg2->stale_lock_timeout == 60);
     config_free(cfg2);
@@ -148,7 +148,7 @@ static void test_system_prompt(void) {
     /* Test default (no system_prompt in kv) */
     setenv("OPENROUTER_API_KEY", "sk-test", 1);
     sqlite3 *db = fresh_db();
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(cfg->system_prompt == NULL);
     char *rendered = config_render_system_prompt(cfg, 42);
@@ -163,7 +163,7 @@ static void test_system_prompt(void) {
     /* Test env override */
     setenv("CCLAW_SYSTEM_PROMPT", "env prompt {session_id}", 1);
     db = fresh_db();
-    cfg = config_load_from_kv(db);
+    cfg = config_load(db);
     assert(cfg != NULL);
     rendered = config_render_system_prompt(cfg, 7);
     assert(strstr(rendered, "env prompt 7") != NULL);
@@ -183,7 +183,7 @@ static void test_admin_chat_ids(void) {
     assert(db);
     db_kv_set(db, "admin_chat_ids", "[111222333, 444555666]");
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(cfg->admin_chat_id_count == 2);
     assert(cfg->admin_chat_ids[0] == 111222333);
@@ -194,7 +194,7 @@ static void test_admin_chat_ids(void) {
     /* No admin_chat_ids → count 0, pointer NULL */
     setenv("OPENROUTER_API_KEY", "sk-test", 1);
     db = fresh_db();
-    cfg = config_load_from_kv(db);
+    cfg = config_load(db);
     assert(cfg != NULL);
     assert(cfg->admin_chat_id_count == 0);
     assert(cfg->admin_chat_ids == NULL);

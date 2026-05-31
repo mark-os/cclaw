@@ -53,15 +53,21 @@ char *tool_file_read_handler(const char *arguments, void *user_data) {
     }
     cJSON_Delete(json);
 
-    /* V1: verify path is within workspace or extra_read_path (T118) */
+    /* V1: verify path is within workspace, extra_read_path, or cclaw_path (T228) */
     char resolved[PATH_MAX];
     if (!path_in_workspace(fullpath, workspace, resolved, sizeof(resolved))) {
         /* T118: check extra read path */
-        if (!ctx->extra_read_path ||
-            !path_in_workspace(fullpath, ctx->extra_read_path, resolved, sizeof(resolved))) {
-            return strdup("error: path outside workspace");
-        }
+        if (ctx->extra_read_path &&
+            path_in_workspace(fullpath, ctx->extra_read_path, resolved, sizeof(resolved)))
+            goto read_file;
+        /* T228: check CCLAW_PATH (CWD, read-only) */
+        if (ctx->cclaw_path &&
+            path_in_workspace(fullpath, ctx->cclaw_path, resolved, sizeof(resolved)))
+            goto read_file;
+        return strdup("error: path outside workspace");
     }
+
+read_file:;
 
     FILE *f = fopen(resolved, "rb");
     if (!f) return strdup("error: cannot open file");

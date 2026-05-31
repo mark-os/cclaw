@@ -92,7 +92,7 @@ static void test_config_reload(void) {
     db_kv_set(db, "provider.model", "old-model");
 
     /* Load initial config */
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg);
     assert(strcmp(cfg->provider.model, "old-model") == 0);
     config_free(cfg);
@@ -101,14 +101,14 @@ static void test_config_reload(void) {
     db_kv_set(db, "provider.model", "new-model-v2");
 
     /* Reload config — picks up change */
-    cfg = config_load_from_kv(db);
+    cfg = config_load(db);
     assert(cfg);
     assert(strcmp(cfg->provider.model, "new-model-v2") == 0);
     config_free(cfg);
 
     /* Update endpoint */
     db_kv_set(db, "provider.base_url", "https://new-endpoint.ai/v1");
-    cfg = config_load_from_kv(db);
+    cfg = config_load(db);
     assert(cfg);
     assert(strcmp(cfg->provider.base_url, "https://new-endpoint.ai/v1") == 0);
     config_free(cfg);

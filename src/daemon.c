@@ -21,6 +21,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +29,7 @@
 #include <sys/epoll.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -800,7 +802,8 @@ static void deliver_response(const Config *cfg, sqlite3 *db,
 
 /* Find tool_result entry with content='PENDING' in agent DB for given session.
  * Returns tool_call_id (caller frees) or NULL. Sets *entry_id. */
-static char *find_pending_entry(sqlite3 *adb, int64_t session_id, int64_t *entry_id) {
+/* Find PENDING tool_result entry. Returns tool_call_id (caller frees), sets *entry_id. */
+char *find_pending_entry(sqlite3 *adb, int64_t session_id, int64_t *entry_id) {
     const char *sql =
         "SELECT id, tool_call_id FROM entries"
         " WHERE session_id=? AND role=3 AND content='PENDING'"
@@ -821,7 +824,7 @@ static char *find_pending_entry(sqlite3 *adb, int64_t session_id, int64_t *entry
 
 /* Read tool_call arguments from last assistant entry matching tool_call_id.
  * Returns JSON args string (caller frees) and sets *tool_name. */
-static char *read_tool_call_args(sqlite3 *adb, int64_t session_id,
+char *read_tool_call_args(sqlite3 *adb, int64_t session_id,
                                  const char *tool_call_id, char **tool_name) {
     *tool_name = NULL;
     /* Find last assistant entry with tool_calls containing this id */
@@ -862,7 +865,7 @@ static char *read_tool_call_args(sqlite3 *adb, int64_t session_id,
 }
 
 /* UPDATE PENDING entry content with real result */
-static int update_pending_entry(sqlite3 *adb, int64_t entry_id, const char *result) {
+int update_pending_entry(sqlite3 *adb, int64_t entry_id, const char *result) {
     const char *sql = "UPDATE entries SET content=? WHERE id=? AND content='PENDING';";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -978,6 +981,72 @@ char *daemon_apply_config(const Config *cfg, sqlite3 *db,
         } else {
             result = strdup("error: failed to serialize args");
         }
+
+    } else if (strcmp(tool_name, "rename_agent") == 0) {
+        /* T230: Rename agent directory + update registry */
+        cJSON *new_name = cJSON_GetObjectItemCaseSensitive(args, "name");
+        if (!cJSON_IsString(new_name) || !new_name->valuestring[0]) {
+            cJSON_Delete(args);
+            return strdup("error: 'name' required");
+        }
+        const char *nn = new_name->valuestring;
+
+        /* Validate name (alphanumeric + dash + underscore) */
+        for (const char *p = nn; *p; p++) {
+            if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
+                  *p == '-' || *p == '_')) {
+                cJSON_Delete(args);
+                return strdup("error: name must be [a-z0-9_-]");
+            }
+        }
+
+        /* Build paths */
+        const char *home = getenv("HOME");
+        if (!home) home = ".";
+        char old_path[PATH_MAX], new_path[PATH_MAX];
+        snprintf(old_path, sizeof(old_path), "%s/.cclaw/agents/%s", home, agent_name);
+        snprintf(new_path, sizeof(new_path), "%s/.cclaw/agents/%s", home, nn);
+
+        /* Check target doesn't exist */
+        struct stat st;
+        if (stat(new_path, &st) == 0) {
+            cJSON_Delete(args);
+            return strdup("error: agent name already taken");
+        }
+
+        /* Rename directory */
+        if (rename(old_path, new_path) != 0) {
+            cJSON_Delete(args);
+            char buf[256];
+            snprintf(buf, sizeof(buf), "error: rename failed (errno=%d)", errno);
+            return strdup(buf);
+        }
+
+        /* Update cclaw.db agents registry */
+        const char *upd = "UPDATE agents SET name=? WHERE name=?;";
+        sqlite3_stmt *us;
+        if (sqlite3_prepare_v2(db, upd, -1, &us, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(us, 1, nn, -1, SQLITE_STATIC);
+            sqlite3_bind_text(us, 2, agent_name, -1, SQLITE_STATIC);
+            sqlite3_step(us);
+            sqlite3_finalize(us);
+        }
+
+        /* Update agent_config rows */
+        const char *ucfg = "UPDATE agent_config SET agent_name=? WHERE agent_name=?;";
+        if (sqlite3_prepare_v2(db, ucfg, -1, &us, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(us, 1, nn, -1, SQLITE_STATIC);
+            sqlite3_bind_text(us, 2, agent_name, -1, SQLITE_STATIC);
+            sqlite3_step(us);
+            sqlite3_finalize(us);
+        }
+
+        /* Update CLI binding */
+        db_kv_set(db, "cli.agent", nn);
+
+        char buf[256];
+        snprintf(buf, sizeof(buf), "agent renamed: %s → %s", agent_name, nn);
+        result = strdup(buf);
     } else {
         char buf[128];
         snprintf(buf, sizeof(buf), "error: unknown config tool: %s", tool_name);

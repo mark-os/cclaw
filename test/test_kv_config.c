@@ -9,12 +9,12 @@
 
 #define FAIL(msg) do { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } while(0)
 
-static void test_config_load_from_kv_defaults(void) {
-    /* Fresh DB with seeded defaults → config_load_from_kv returns correct values */
+static void test_config_load_defaults(void) {
+    /* Fresh DB with seeded defaults → config_load returns correct values */
     sqlite3 *db = db_open(":memory:");
     if (!db) FAIL("db_open");
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
 
     assert(cfg->provider.base_url && strcmp(cfg->provider.base_url, "https://openrouter.ai/api/v1") == 0);
@@ -33,10 +33,10 @@ static void test_config_load_from_kv_defaults(void) {
 
     config_free(cfg);
     db_close(db);
-    printf("  PASS: config_load_from_kv defaults\n");
+    printf("  PASS: config_load defaults\n");
 }
 
-static void test_config_load_from_kv_custom(void) {
+static void test_config_load_custom(void) {
     /* Modify kv values → config reflects changes */
     sqlite3 *db = db_open(":memory:");
     if (!db) FAIL("db_open");
@@ -47,7 +47,7 @@ static void test_config_load_from_kv_custom(void) {
     db_kv_set(db, "max_iterations", "50");
     db_kv_set(db, "workspace", "/tmp/test-ws");
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
 
     assert(strcmp(cfg->provider.model, "anthropic/claude-3.5-sonnet") == 0);
@@ -58,7 +58,7 @@ static void test_config_load_from_kv_custom(void) {
 
     config_free(cfg);
     db_close(db);
-    printf("  PASS: config_load_from_kv custom values\n");
+    printf("  PASS: config_load custom values\n");
 }
 
 static void test_config_env_overrides_kv(void) {
@@ -70,7 +70,7 @@ static void test_config_env_overrides_kv(void) {
     setenv("CCLAW_MODEL", "env-model", 1);
     setenv("CCLAW_MAX_ITERATIONS", "99", 1);
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
 
     assert(strcmp(cfg->provider.model, "env-model") == 0);
@@ -91,7 +91,7 @@ static void test_config_api_key_from_kv(void) {
 
     db_kv_set(db, "provider.api_key", "sk-test-secret");
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(cfg->provider.api_key && strcmp(cfg->provider.api_key, "sk-test-secret") == 0);
 
@@ -108,7 +108,7 @@ static void test_config_fallback_providers(void) {
     db_kv_set(db, "fallback_providers",
         "[{\"base_url\":\"https://api.google.com/v1\",\"model\":\"gemini-pro\",\"max_tokens\":2048}]");
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(cfg->fallback_count == 1);
     assert(cfg->fallback_providers[0].base_url &&
@@ -129,7 +129,7 @@ static void test_config_admin_chat_ids(void) {
 
     db_kv_set(db, "admin_chat_ids", "[123456789, 987654321]");
 
-    Config *cfg = config_load_from_kv(db);
+    Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(cfg->admin_chat_id_count == 2);
     assert(cfg->admin_chat_ids[0] == 123456789);
@@ -181,8 +181,8 @@ static void test_kv_secret_encrypted(void) {
 
 int main(void) {
     printf("test_kv_config:\n");
-    test_config_load_from_kv_defaults();
-    test_config_load_from_kv_custom();
+    test_config_load_defaults();
+    test_config_load_custom();
     test_config_env_overrides_kv();
     test_config_api_key_from_kv();
     test_config_fallback_providers();

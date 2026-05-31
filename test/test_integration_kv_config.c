@@ -1,6 +1,6 @@
 /* T175: integration test — kv config lifecycle.
  * Empty DB → defaults seeded; env var overrides win;
- * config_load_from_kv produces correct Config struct; no network.
+ * config_load produces correct Config struct; no network.
  * Cites V61, T169. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -47,8 +47,8 @@ static void test_fresh_db_defaults(void) {
     free(v);
 
     /* Load config struct */
-    Config *cfg = config_load_from_kv(db);
-    if (!cfg) { db_close(db); FAIL("config_load_from_kv"); }
+    Config *cfg = config_load(db);
+    if (!cfg) { db_close(db); FAIL("config_load"); }
 
     assert(strcmp(cfg->provider.base_url, "https://openrouter.ai/api/v1") == 0);
     assert(strcmp(cfg->provider.model, "deepseek/deepseek-v4-flash") == 0);
@@ -81,8 +81,8 @@ static void test_persistence_across_reopen(void) {
     db = db_open(DB_PATH);
     if (!db) FAIL("db_open 2");
 
-    Config *cfg = config_load_from_kv(db);
-    if (!cfg) { db_close(db); FAIL("config_load_from_kv"); }
+    Config *cfg = config_load(db);
+    if (!cfg) { db_close(db); FAIL("config_load"); }
 
     assert(strcmp(cfg->provider.model, "custom/model-v2") == 0);
     assert(cfg->max_iterations == 42);
@@ -112,8 +112,8 @@ static void test_env_overrides_kv(void) {
     setenv("CCLAW_MODEL", "env-model", 1);
     setenv("CCLAW_MAX_ITERATIONS", "77", 1);
 
-    Config *cfg = config_load_from_kv(db);
-    if (!cfg) { db_close(db); FAIL("config_load_from_kv"); }
+    Config *cfg = config_load(db);
+    if (!cfg) { db_close(db); FAIL("config_load"); }
 
     /* Env wins */
     assert(strcmp(cfg->provider.model, "env-model") == 0);
@@ -138,8 +138,8 @@ static void test_api_key_env_seed(void) {
     sqlite3 *db = db_open(DB_PATH);
     if (!db) { unsetenv("OPENROUTER_API_KEY"); FAIL("db_open"); }
 
-    Config *cfg = config_load_from_kv(db);
-    if (!cfg) { db_close(db); unsetenv("OPENROUTER_API_KEY"); FAIL("config_load_from_kv"); }
+    Config *cfg = config_load(db);
+    if (!cfg) { db_close(db); unsetenv("OPENROUTER_API_KEY"); FAIL("config_load"); }
 
     assert(cfg->provider.api_key && strcmp(cfg->provider.api_key, "sk-or-v1-test123") == 0);
 
@@ -160,8 +160,8 @@ static void test_no_api_key(void) {
     sqlite3 *db = db_open(DB_PATH);
     if (!db) FAIL("db_open");
 
-    Config *cfg = config_load_from_kv(db);
-    if (!cfg) { db_close(db); FAIL("config_load_from_kv"); }
+    Config *cfg = config_load(db);
+    if (!cfg) { db_close(db); FAIL("config_load"); }
 
     assert(cfg->provider.api_key == NULL);
 

@@ -198,9 +198,9 @@ Config *config_load_from_env(void) {
     return cfg;
 }
 
-/* V61,T170: Build Config struct from kv table + env var overrides.
+/* Build Config for parent processes (CLI/daemon).
  * Priority: env var > kv value > hardcoded default. */
-Config *config_load_from_kv(sqlite3 *db) {
+Config *config_load(sqlite3 *db) {
     if (!db) return NULL;
 
     Config *cfg = calloc(1, sizeof(Config));
@@ -406,70 +406,4 @@ Config *config_load_from_kv(sqlite3 *db) {
     return cfg;
 }
 
-/* Lowest-priority fallback: read ~/.cclaw/config.json for keys not already set. */
-void config_load_json_fallback(Config *cfg) {
-    if (!cfg) return;
-    const char *home = getenv("HOME");
-    if (!home) return;
 
-    char path[4096];
-    snprintf(path, sizeof(path), "%s/.cclaw/config.json", home);
-
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    if (len <= 0 || len > 65536) { fclose(f); return; }
-    fseek(f, 0, SEEK_SET);
-
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return; }
-    size_t rd = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[rd] = '\0';
-
-    cJSON *root = cJSON_Parse(buf);
-    free(buf);
-    if (!root) return;
-
-    /* Only fill values not already set */
-    cJSON *v;
-    if ((!cfg->provider.api_key || !cfg->provider.api_key[0])) {
-        v = cJSON_GetObjectItemCaseSensitive(root, "openrouter_api_key");
-        if (cJSON_IsString(v) && v->valuestring[0]) {
-            free(cfg->provider.api_key);
-            cfg->provider.api_key = str_dup(v->valuestring);
-        }
-    }
-    if ((!cfg->provider.api_key || !cfg->provider.api_key[0])) {
-        v = cJSON_GetObjectItemCaseSensitive(root, "gemini_api_key");
-        if (cJSON_IsString(v) && v->valuestring[0]) {
-            free(cfg->provider.api_key);
-            cfg->provider.api_key = str_dup(v->valuestring);
-        }
-    }
-    if ((!cfg->provider.api_key || !cfg->provider.api_key[0])) {
-        v = cJSON_GetObjectItemCaseSensitive(root, "anthropic_api_key");
-        if (cJSON_IsString(v) && v->valuestring[0]) {
-            free(cfg->provider.api_key);
-            cfg->provider.api_key = str_dup(v->valuestring);
-        }
-    }
-    v = cJSON_GetObjectItemCaseSensitive(root, "model");
-    if (cJSON_IsString(v) && v->valuestring[0]) {
-        if (!cfg->provider.model || strcmp(cfg->provider.model, "deepseek/deepseek-v4-flash") == 0) {
-            free(cfg->provider.model);
-            cfg->provider.model = str_dup(v->valuestring);
-        }
-    }
-    if (!cfg->telegram_token || !cfg->telegram_token[0]) {
-        v = cJSON_GetObjectItemCaseSensitive(root, "telegram_token");
-        if (cJSON_IsString(v) && v->valuestring[0]) {
-            free(cfg->telegram_token);
-            cfg->telegram_token = str_dup(v->valuestring);
-        }
-    }
-
-    cJSON_Delete(root);
-}

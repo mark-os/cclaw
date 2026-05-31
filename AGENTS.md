@@ -128,7 +128,7 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 ./build/cclaw --debug      # raw LLM req/resp JSON to stderr
 ```
 
-Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env > `~/.cclaw/config.json`.
+Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 
 ## Dependencies
 

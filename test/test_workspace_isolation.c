@@ -14,6 +14,13 @@ static char ws_b[256];
 static FileReadCtx ctx_a;
 static FileReadCtx ctx_b;
 
+/* Helper: build {"path":"<p>"} JSON string (static buffer) */
+static const char *path_json(const char *p) {
+    static char buf[1024];
+    snprintf(buf, sizeof(buf), "{\"path\":\"%s\"}", p);
+    return buf;
+}
+
 static void setup(void) {
     snprintf(ws_a, sizeof(ws_a), "/tmp/cclaw_ws_a_XXXXXX");
     snprintf(ws_b, sizeof(ws_b), "/tmp/cclaw_ws_b_XXXXXX");
@@ -160,6 +167,44 @@ static void test_workspace_fallback_path(void) {
     printf("  PASS test_workspace_fallback_path\n");
 }
 
+/* T228: CCLAW_PATH allows read-only access */
+static void test_cclaw_path_read_only(void) {
+    /* Create a file outside workspace in a "project" dir */
+    char proj[256];
+    snprintf(proj, sizeof(proj), "/tmp/cclaw_proj_XXXXXX");
+    assert(mkdtemp(proj) != NULL);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/readme.md", proj);
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fprintf(f, "project readme");
+    fclose(f);
+
+    /* file_read with cclaw_path set can read it */
+    FileReadCtx ctx = {.workspace = ws_a, .extra_read_path = NULL, .cclaw_path = proj};
+    char *r = tool_file_read_handler("{\"path\":\"readme.md\"}", (void *)&ctx);
+    /* Path is relative — resolves against workspace first, not cclaw_path.
+     * Use absolute path to test cclaw_path. */
+    free(r);
+    r = tool_file_read_handler(path_json(path), (void *)&ctx);
+    assert(r != NULL);
+    assert(strcmp(r, "project readme") == 0);
+    free(r);
+
+    /* file_read without cclaw_path cannot read it */
+    FileReadCtx ctx2 = {.workspace = ws_a, .extra_read_path = NULL, .cclaw_path = NULL};
+    r = tool_file_read_handler(path_json(path), (void *)&ctx2);
+    assert(r != NULL);
+    assert(strstr(r, "error") != NULL);
+    free(r);
+
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", proj);
+    system(cmd);
+    printf("  PASS test_cclaw_path_read_only\n");
+}
+
 int main(void) {
     printf("test_workspace_isolation:\n");
     setup();
@@ -170,6 +215,7 @@ int main(void) {
     test_write_traversal_to_other_workspace();
     test_read_own_workspace();
     test_workspace_fallback_path();
+    test_cclaw_path_read_only();
     cleanup();
     printf("All workspace isolation tests passed.\n");
     return 0;

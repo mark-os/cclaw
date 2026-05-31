@@ -1,5 +1,5 @@
 /* T188: test — daemon secret injection via env vars.
- * Verifies config_load_from_kv prefers CCLAW_INJECTED_* env vars over DB.
+ * Verifies config_load prefers CCLAW_INJECTED_* env vars over DB.
  * Cites V67. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -58,8 +58,8 @@ static void test_injected_api_key(void) {
     setenv("CCLAW_PROVIDER_API_KEY_ENV", "OPENROUTER_API_KEY", 1);
     setenv("OPENROUTER_API_KEY", "daemon-injected-key", 1);
 
-    Config *cfg = config_load_from_kv(db);
-    if (!cfg) { db_close(db); FAIL("config_load_from_kv"); }
+    Config *cfg = config_load(db);
+    if (!cfg) { db_close(db); FAIL("config_load"); }
 
     if (!cfg->provider.api_key || strcmp(cfg->provider.api_key, "daemon-injected-key") != 0) {
         config_free(cfg);
@@ -88,8 +88,8 @@ static void test_injected_telegram_token(void) {
 
     setenv("CCLAW_INJECTED_TELEGRAM_TOKEN", "daemon-injected-token", 1);
 
-    Config *cfg = config_load_from_kv(db);
-    if (!cfg) { db_close(db); FAIL("config_load_from_kv"); }
+    Config *cfg = config_load(db);
+    if (!cfg) { db_close(db); FAIL("config_load"); }
 
     if (!cfg->telegram_token || strcmp(cfg->telegram_token, "daemon-injected-token") != 0) {
         config_free(cfg);
@@ -118,8 +118,8 @@ static void test_fallback_to_db(void) {
     db_kv_set(db, "provider.api_key", "plain-db-key");
     db_kv_set(db, "telegram_token", "plain-db-token");
 
-    Config *cfg = config_load_from_kv(db);
-    if (!cfg) { db_close(db); FAIL("config_load_from_kv"); }
+    Config *cfg = config_load(db);
+    if (!cfg) { db_close(db); FAIL("config_load"); }
 
     if (!cfg->provider.api_key || strcmp(cfg->provider.api_key, "plain-db-key") != 0) {
         config_free(cfg);

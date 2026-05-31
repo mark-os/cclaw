@@ -81,14 +81,12 @@ Config resolution (highest priority first):
 1. `CCLAW_*` env vars (works everywhere: Lambda, Workers, daemon fork)
 2. `~/.cclaw/cclaw.db` kv table (persistent, encrypted secrets)
 3. `OPENROUTER_API_KEY` env var (system-level fallback)
-4. `~/.cclaw/config.json` (optional convenience file)
 
 ```
 ~/.cclaw/
 ├── cclaw.db           ← system registry + config
 ├── .cclaw_key         ← encryption key (mode 0600)
 ├── journal.db         ← all logs
-├── config.json        ← optional fallback
 └── agents/
     └── default/
         ├── agent.db   ← sessions, entries, memory

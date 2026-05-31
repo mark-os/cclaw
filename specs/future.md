@@ -185,3 +185,28 @@ Enables JS tools that behave differently based on context (e.g., a tool that's m
 - Shell scripts are the escape hatch (replaces "any language" flexibility)
 - SQLite is the coordination layer (replaces message queues / IPC)
 - No hot-reload needed — JS tools are eval'd fresh each call (or replayed from DB)
+
+## HTTP Transport Abstraction
+
+Extract curl out of the agent process behind a swappable `HttpTransport` interface:
+
+```c
+typedef struct {
+    int (*request)(const char *url, const char *method,
+                   const char *headers, const char *body,
+                   char **response, void *ctx);
+    void *ctx;
+} HttpTransport;
+```
+
+Implementations:
+- `http_transport_curl()` — direct libcurl (current, for standalone/testing/beefy hardware)
+- `http_transport_uds(fd)` — parent holds warm TLS connections, child talks plaintext over UDS
+- `http_transport_wasm()` — calls Workers `fetch()` host import for Cloudflare WASM target
+
+Benefits:
+- Pogoplug: eliminates per-turn TLS handshake (~800ms on ARMv5TE) — parent keeps connection warm
+- Cloudflare Workers: agent compiles to WASM without libcurl dependency
+- Same agent binary, different transport selected at startup via `CCLAW_HTTP_TRANSPORT` env
+
+Pattern mirrors existing shell networking proxy (shell→agent UDS) but one level up (agent→parent UDS).

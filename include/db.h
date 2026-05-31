@@ -251,4 +251,10 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
 char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *channel_id);
 int db_channel_binding_set(sqlite3 *db, const char *channel_type, const char *channel_id, const char *agent_name);
 
+/* Pending entry helpers (used by daemon and CLI for exit code dispatch) */
+char *find_pending_entry(sqlite3 *adb, int64_t session_id, int64_t *entry_id);
+char *read_tool_call_args(sqlite3 *adb, int64_t session_id,
+                          const char *tool_call_id, char **tool_name);
+int update_pending_entry(sqlite3 *adb, int64_t entry_id, const char *result);
+
 #endif

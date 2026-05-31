@@ -4,29 +4,24 @@
 #include "types.h"
 #include "sqlite3.h"
 
-/* V61,T170: Load config from kv table + env var overrides.
- * Priority: env var > kv value > hardcoded default.
+/* Load config for parent processes (CLI/daemon).
+ * Priority: CCLAW_* env vars > cclaw.db kv > hardcoded defaults.
  * Returns heap-allocated Config, or NULL on failure. */
-Config *config_load_from_kv(sqlite3 *db);
+Config *config_load(sqlite3 *cclaw_db);
 
-/* V74,T198: Load config purely from CCLAW_* env vars (agent process path).
- * No DB reads for config — daemon injects everything at fork.
- * Returns heap-allocated Config, or NULL on failure. */
+/* Load config for agent processes (forked children).
+ * Reads only CCLAW_* env vars + hardcoded defaults.
+ * No DB reads — parent injects everything at fork. */
 Config *config_load_from_env(void);
 
-/* T46: Render system prompt with template vars {session_id}, {date}.
+/* Render system prompt with template vars {session_id}, {date}, {workspace}.
  * Returns heap-allocated string. Caller must free. */
 char *config_render_system_prompt(const Config *cfg, int64_t session_id);
 
-/* Ensure workspace directory exists and populate SOUL.md/MEMORY.md on first use.
- * Returns 0 on success, -1 on error. */
+/* Ensure workspace directory exists. Returns 0 on success, -1 on error. */
 int workspace_init(const Config *cfg);
 
 /* Free config and all owned strings. */
 void config_free(Config *cfg);
-
-/* Lowest-priority fallback: read ~/.cclaw/config.json for keys not already set.
- * Call after loading from env/kv but before entering main loop. */
-void config_load_json_fallback(Config *cfg);
 
 #endif

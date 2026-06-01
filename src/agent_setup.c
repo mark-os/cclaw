@@ -1,10 +1,12 @@
 #define _POSIX_C_SOURCE 200809L
 #include "agent_setup.h"
+#include "extension.h"
 #include "tool_shell.h"
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
 #include "tool_cron.h"
 #include "context.h"
+#include "log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -76,6 +78,16 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->js_def_ctx.rt = setup->js_rt;
     tool_js_define_register(&setup->reg, &setup->js_def_ctx);
     tool_js_load_session(db, session_id, &setup->reg, setup->js_rt);
+
+    /* T254/T255: Load extensions from workspace/extensions/ */
+    if (cfg->workspace) {
+        size_t ext_count = 0;
+        char **ext_paths = extension_discover(cfg->workspace, &ext_count);
+        if (ext_paths && ext_count > 0) {
+            extension_load(ext_paths, ext_count, setup->js_rt, &setup->reg, cfg);
+            extension_list_free(ext_paths, ext_count);
+        }
+    }
 
     /* Daemon-mode only tools */
     if (mode == AGENT_SETUP_DAEMON) {

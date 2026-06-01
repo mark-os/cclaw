@@ -768,7 +768,22 @@ static void deliver_response(const Config *cfg, sqlite3 *db,
             sqlite3_finalize(stmt);
         }
     }
-    /* For other routes (cli, etc.) — response stays in DB, client polls */
+
+    /* T246/V101: Insert channel_outbox row for channel processes to deliver.
+     * Skip "cli" — CLI polls agent DB directly, not via outbox. */
+    if (route && strcmp(route, "cli") != 0) {
+        const char *osql =
+            "INSERT INTO channel_outbox (channel_name, session_id, payload)"
+            " VALUES (?,?,?);";
+        sqlite3_stmt *ostmt;
+        if (sqlite3_prepare_v2(db, osql, -1, &ostmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(ostmt, 1, route, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(ostmt, 2, session_id);
+            sqlite3_bind_text(ostmt, 3, reply, -1, SQLITE_STATIC);
+            sqlite3_step(ostmt);
+            sqlite3_finalize(ostmt);
+        }
+    }
 
     free(reply);
     free(route);

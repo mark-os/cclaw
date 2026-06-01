@@ -193,6 +193,39 @@ static void test_daemon_fork_reap_mock(void) {
         FAIL("assistant entry not found in DB");
     }
 
+    /* T246: Verify channel_outbox row written (last_route="test", not "cli") */
+    {
+        sqlite3_stmt *ostmt;
+        int rc = sqlite3_prepare_v2(db,
+            "SELECT channel_name, payload FROM channel_outbox"
+            " WHERE session_id=? AND status='pending';", -1, &ostmt, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_int64(ostmt, 1, sid);
+            if (sqlite3_step(ostmt) == SQLITE_ROW) {
+                const char *ch = (const char *)sqlite3_column_text(ostmt, 0);
+                const char *pl = (const char *)sqlite3_column_text(ostmt, 1);
+                if (!ch || strcmp(ch, "test") != 0) {
+                    sqlite3_finalize(ostmt);
+                    shutdown_request(); pthread_join(dt, NULL);
+                    db_close(db); chdir(orig_cwd);
+                    FAIL("channel_outbox channel_name != 'test'");
+                }
+                if (!pl || !strstr(pl, "Hello from mock LLM")) {
+                    sqlite3_finalize(ostmt);
+                    shutdown_request(); pthread_join(dt, NULL);
+                    db_close(db); chdir(orig_cwd);
+                    FAIL("channel_outbox payload missing response");
+                }
+            } else {
+                sqlite3_finalize(ostmt);
+                shutdown_request(); pthread_join(dt, NULL);
+                db_close(db); chdir(orig_cwd);
+                FAIL("no channel_outbox row found");
+            }
+            sqlite3_finalize(ostmt);
+        }
+    }
+
     shutdown_request();
     pthread_join(dt, NULL);
     db_close(db);

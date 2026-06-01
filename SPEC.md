@@ -42,7 +42,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - env: `CCLAW_SECRET_<NAME>` → decrypted agent secrets (injected by daemon at fork; agent passes selectively to shell children; cleared from agent env after read)
 - env: `CCLAW_DAEMON_DB` → path to cclaw.db (if read access granted)
 - env: `CCLAW_TOKEN_RATE_LIMIT` → override hourly token limit
-- db: `cclaw.db` — agents registry, agent_config, providers (name, base_url, endpoint_type, api_key_env, default_model_id), kv (encrypted secrets), channel_bindings, tg_chat_sessions, spawn_queue, cron_jobs, approvals
+- db: `cclaw.db` — agents registry, agent_config, providers (name, base_url, endpoint_type, api_key_env, default_model_id), kv (encrypted secrets), channel_bindings, tg_chat_sessions, spawn_queue, cron_jobs, approvals, channels, channel_events, channel_outbox, channel_state
 - db: per-agent `agents/<name>/agent.db` — sessions, entries, inbox, js_tools, memory_blocks, kv (agent-local prefs only)
 - db: `journal.db` — all logs (daemon + agents), source-attributed, timestamped
 - db: decryption key `.cclaw/.cclaw_key` — daemon-only, 32 bytes, mode 0600
@@ -76,6 +76,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - [security.md](specs/security.md) — trust model, config injection best practices, defense-in-depth layers, attack scenarios
 - [shell-networking.md](specs/shell-networking.md) — namespace sandbox for shell children, credential proxy, DNS interception
 - [error-handling.md](specs/error-handling.md) — LLM API failure classification, retry/fallback logic, response resolution, log levels
+- [extensions.md](specs/extensions.md) — extension system (agent-side tools+hooks, channel processes, package layout, API reference)
 
 ## §V INVARIANTS
 V1: ∀ tool exec (`file_read`, `file_write`) → path ! ∈ workspace dir for that agent
@@ -175,6 +176,25 @@ V94: ∀ LLM response w/ HTTP 200 + `usage.total_tokens == 0` + content null/emp
 V95: ∀ response delivery → `get_response_text(db, session_id)` is sole resolution fn; walks branch backward from leaf, returns first non-empty assistant content, stops at user boundary; all channels (CLI, Telegram, sub-agent result) use this fn; ⊥ inline branch-walking
 V96: ∀ agent child process (CLI & daemon) → stderr piped to journal.db; CLI additionally tees to terminal; daemon pipes via log_collector (existing); unified: both paths persist to journal
 V97: ∀ agent process → `CCLAW_LOG_LEVEL` env var (info|debug|trace); info=errors+warnings+turn boundaries; debug=+tool dispatch+timing+retry decisions; trace=+full req/resp JSON; stored in cclaw.db kv `log_level`, injected at fork
+V98: ∀ channel → separate process; crash ⊥ affect daemon; daemon launches configured channels on startup, monitors via SIGCHLD, restarts on unexpected exit (max 3 retries w/ backoff)
+V99: ∀ channel process → limited cclaw.db access via channel API only: `channel_emit(ctx, payload)`, `channel_get_config(ctx, key)`, `channel_next_outbox(ctx)`, `channel_ack_outbox(ctx, id)`, `channel_fail_outbox(ctx, id, error)`; ⊥ arbitrary SQL
+V100: ∀ channel→daemon signaling → `channel_emit` inserts `channel_events` row in cclaw.db + calls `daemon_wake()` (writes to named FIFO at `<db_path>.pipe`); daemon epoll wakes, reads `channel_events`, routes to agent inbox
+V101: ∀ daemon→channel delivery → after agent reap, daemon inserts `channel_outbox` row (channel_name, session_id, payload); channel process polls via `channel_next_outbox(ctx)` → delivers → `channel_ack_outbox(ctx, id)` or `channel_fail_outbox(ctx, id, error)`
+V102: ∀ channel process → receives config via `channel_get_config(ctx, key)` reading from `channel_state` kv table in cclaw.db (scoped to channel_name); daemon seeds config on channel creation (e.g. bot_token, webhook_url)
+V103: ∀ built-in channel (Telegram) → same process model as extension channels; `src/channel_telegram.c` compiled as channel binary; daemon launches same as user-created channels; no special in-process thread
+V104: ∀ channel registration → `channels` table in cclaw.db: (name TEXT PK, type TEXT, binary_path TEXT, status TEXT DEFAULT 'active', pid INTEGER); daemon reads on startup, forks each active channel
+V105: ∀ `daemon_wake()` → write 1 byte to named FIFO (`<db_path>.pipe`); replaces `daemon_signal_external`; internal signal_pipe remains for in-process use (cron, spawn_queue); FIFO is sole external→daemon wake path
+V106: ∀ channel_events → table in cclaw.db: (id INTEGER PK, channel_name TEXT, event_type TEXT, payload TEXT, created_at INTEGER DEFAULT unixepoch()); daemon consumes in order, routes based on event_type + channel_bindings
+V107: ∀ channel_outbox → table in cclaw.db: (id INTEGER PK, channel_name TEXT, session_id INTEGER, payload TEXT, status TEXT DEFAULT 'pending', created_at INTEGER, acked_at INTEGER); channel process reads pending rows for own name
+V108: ∀ channel_state → kv table in cclaw.db: (channel_name TEXT, key TEXT, value TEXT, PRIMARY KEY(channel_name, key)); channel-private persistent state (offsets, cursors, tokens)
+V109: ∀ extension → JS module in `workspace/extensions/` (file `*.js` or subdir w/ `index.js`); loaded fresh each turn; factory fn receives `cclaw` API object; failure (throw) → skip + log warning, continue turn
+V110: ∀ extension loading → discovery order: `workspace/extensions/*.js` then `workspace/extensions/*/index.js`; all discovered extensions loaded into shared QuickJS context (same runtime as `js_define_tool`); load order = alphabetical by filename
+V111: ∀ extension API → `cclaw.registerTool({name, description, parameters, handler})`, `cclaw.registerHook(event, fn)`, `cclaw.callTool(name, args)` (synchronous, re-entrant); hooks: `beforeRequest`, `afterResponse`, `beforeToolCall`, `afterToolCall`, `turnStart`, `turnEnd`
+V112: ∀ `beforeRequest` hook → receives messages array (mutable copy); can modify/add/remove messages before LLM call; return modified array or void (no change); multiple hooks chain in load order
+V113: ∀ `beforeToolCall` hook → receives `{name, args}`; can return `{block: true, reason}` to prevent execution, or mutate `args` in place; first block wins
+V114: ∀ `afterToolCall` hook → receives `{name, args, result}`; can return replacement `{result}` or void; chains in load order (each sees previous result)
+V115: ∀ extension permissions → inherit agent's permissions (allowed_hosts, workspace fs); ⊥ per-extension restrictions; extensions share agent's QuickJS heap (V5 limits apply to total)
+V116: ∀ extension `callTool(name, args)` → synchronous dispatch into C tool registry; returns result string; re-entrancy allowed (JS → C tool → JS); depth limit 8 to prevent infinite recursion
 
 ## §T TASKS
 id|status|task|cites
@@ -416,6 +436,36 @@ T234|x|log level system — `CCLAW_LOG_LEVEL` env var; `cclaw.db` kv `log_level`
 T235|x|trace logging — at trace level, `llm_call_with_fallback_stream` writes full req/resp JSON to stderr (existing debug code, gated on trace); at debug level, write timing + retry decisions + context plan stats|V97
 T236|x|error classification in agent_run — implement detection for E1-E12 per `specs/error-handling.md`; each writes appropriate `stop_reason` + user-facing content on exhaust|V94,V32
 T237|x|fix `request_stream.c` JSON closing — `build_tools_fragment` ! ⊥ close the root object; separate concerns: messages close `]`, then optional `max_tokens`, then optional `tools`, then final `}`; review all RS_PHASE transitions for correctness; ensure trace log shows exact bytes sent|V41,B2
+T238|.|`channels` table — schema: (name TEXT PK, type TEXT, binary_path TEXT, status TEXT DEFAULT 'active', pid INTEGER, created_at INTEGER DEFAULT unixepoch()); add to cclaw.db init|V104,§D
+T239|.|`channel_events` table — schema: (id INTEGER PK, channel_name TEXT, event_type TEXT, payload TEXT, created_at INTEGER DEFAULT unixepoch()); daemon consumes in FIFO order|V106,§D
+T240|.|`channel_outbox` table — schema: (id INTEGER PK, channel_name TEXT, session_id INTEGER, payload TEXT, status TEXT DEFAULT 'pending', created_at INTEGER DEFAULT unixepoch(), acked_at INTEGER); index on (channel_name, status)|V107,§D
+T241|.|`channel_state` table — schema: (channel_name TEXT, key TEXT, value TEXT, PRIMARY KEY(channel_name, key)); channel-private kv|V108,§D
+T242|.|`daemon_wake()` — rename `daemon_signal_external` → `daemon_wake`; write 1 byte (not SignalMsg) to FIFO; daemon epoll handler drains FIFO bytes, then scans `channel_events` table for unprocessed rows|V105
+T243|.|channel API library (`src/channel_api.c`) — `ChannelCtx` struct (db handle, channel_name); `channel_emit(ctx, payload)` inserts channel_events + calls `daemon_wake()`; `channel_get_config(ctx, key)` reads channel_state; `channel_next_outbox(ctx)` returns oldest pending row; `channel_ack_outbox(ctx, id)` marks delivered; `channel_fail_outbox(ctx, id, error)` marks failed|V99,V100,V101
+T244|.|daemon channel launcher — on startup read `channels` table, fork each active channel binary; track pid in `channels.pid`; on SIGCHLD reap channel processes, restart w/ backoff (max 3)|V98,V104
+T245|.|daemon channel_events consumer — after FIFO wake, `SELECT * FROM channel_events WHERE id > last_seen ORDER BY id`; parse event_type: "message" → resolve agent via channel_bindings → `daemon_inbox_insert` + fork agent; delete consumed rows|V100,V106
+T246|.|daemon outbox writer — after agent reap + deliver_response, also INSERT `channel_outbox` row for the channel that originated the message (read from `last_route`)|V101,V107
+T247|.|refactor Telegram → channel process — extract `telegram.c` into standalone `channel_telegram` binary; uses channel API (`channel_emit` for incoming, `channel_next_outbox` for delivery); remove Telegram thread from daemon; daemon launches as channel process|V103,V98
+T248|.|channel_telegram: getUpdates loop — poll Telegram, on message: build payload JSON `{chat_id, text, from}`, call `channel_emit(ctx, payload)`; persist offset in `channel_state`|V103,V108
+T249|.|channel_telegram: outbox delivery — loop: `channel_next_outbox(ctx)` → `sendMessage` to chat_id (from payload) → `channel_ack_outbox` or `channel_fail_outbox`; V11 chunking + rate limiting preserved|V103,V101,V11
+T250|.|channel process graceful shutdown — channel binary handles SIGTERM; flushes pending outbox deliveries; exits cleanly; daemon sends SIGTERM on daemon shutdown|V98,V31
+T251|.|`configure_channel` tool update — agent proposes channel config (type, binary_path, config kv pairs); exit code 4 → daemon inserts `channels` row + seeds `channel_state` + launches process|V104,V79
+T252|.|test: channel process crash → daemon restarts w/ backoff; verify max 3 retries then status='failed'|V98
+T253|.|test: channel_emit → daemon_wake → agent fork → outbox delivery cycle end-to-end w/ mock channel binary|V100,V101
+T254|.|extension discovery — at agent startup, scan `workspace/extensions/*.js` + `workspace/extensions/*/index.js`; return sorted file list|V109,V110
+T255|.|extension loader — for each discovered file: read source, eval in shared QuickJS context as `(function(cclaw){ <source> })(cclaw_api)`; on throw → log warning + skip|V109,V110
+T256|.|`cclaw` API object — C-backed JS object injected into QuickJS context; methods: `registerTool(def)`, `registerHook(event, fn)`, `callTool(name, args)`; `registerTool` delegates to existing `js_tool_register_one`|V111
+T257|.|`cclaw.registerHook` — store hook fns in per-event arrays (C-side linked list or array); events: `beforeRequest`, `afterResponse`, `beforeToolCall`, `afterToolCall`, `turnStart`, `turnEnd`|V111,V112
+T258|.|hook dispatch: `beforeRequest` — in `agent.c` before LLM call, serialize messages to JS array, call each registered hook in order, deserialize modified array back; skip on throw|V112
+T259|.|hook dispatch: `beforeToolCall` / `afterToolCall` — in tool dispatch loop, call hooks before/after execution; `beforeToolCall` can block (return `{block:true}`); `afterToolCall` can replace result|V113,V114
+T260|.|hook dispatch: `turnStart` / `turnEnd` — call at agent_run entry and before exit; informational (no return value used)|V111
+T261|.|hook dispatch: `afterResponse` — after LLM response parsed, call hooks w/ response object (read-only inspect); skip on throw|V111
+T262|.|`cclaw.callTool(name, args)` — synchronous C callback; lookup tool in registry, call handler, return result string to JS; depth counter prevents infinite recursion (limit 8)|V116
+T263|.|extension integration into agent startup — after `tool_js_load_session` (existing js_define_tool replay), run extension discovery + loader; extensions see previously defined JS tools; extensions can define new tools that persist via `js_define_tool` DB path|V109,V110
+T264|.|test: extension registers tool → agent can call it via LLM tool_call; verify tool appears in registry|V109,V111
+T265|.|test: `beforeToolCall` hook blocks execution → LLM receives error result|V113
+T266|.|test: extension throws during load → skipped, other extensions still load, agent turn continues|V109
+T267|.|test: `callTool` re-entrancy — JS extension calls C tool that triggers JS → verify depth limit enforced|V116
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)
@@ -439,8 +489,7 @@ B2|2026-06-01|`build_tools_fragment` closes JSON object w/ `}` — `max_tokens` 
 - ~~Filtered shell network~~: replaced by namespace sandbox (V82) + UDS proxy; shell children have no direct network; proxy enforces host allowlist
 - Multi-arch releases: GitHub Actions matrix with Docker containers (arm64, armhf, amd64) producing tarballs; binary + "install libcurl" README; not Zig-style cross-compile — native build per target with system libcurl; ARMv5TE (Pogoplug) likely needs dedicated Debian armel container
 - Cost tracking: save OpenRouter `cost` field when present; for direct providers, compute from per-model rate table (input/output/cache_read/cache_write $/M tokens); store per-entry in metadata; aggregate per-session and per-agent; expose via web dashboard and `db_query`
-- Extension system via MicroQuickJS (NEXT): extensions are JS modules loaded at agent startup from `agents/<name>/workspace/`; can register tools, hook events (before/after tool call, before LLM request), modify system prompt; loaded from workspace JS files; extensions have access to `http_fetch` (with policy) and filesystem (workspace-scoped); this is how agents augment themselves — the plugin system replaces the need for native C additions per-agent
-- MCP extension: reference JS extension that speaks Model Context Protocol over stdio/HTTP; discovers remote tools, registers them via the extension API; ships as a built-in example extension
+- MCP extension: reference JS extension that speaks Model Context Protocol over stdio/HTTP; discovers remote tools, registers them via the extension API; ships as a built-in example extension (depends on T254-T263)
 - OpenAI Device Code auth: OAuth 2.0 Device Authorization Grant (RFC 8628) for ChatGPT/Codex subscription access without API key; show URL + code → user approves on phone/laptop → poll for token; works headless (no browser callback); store access+refresh tokens in DB; auto-refresh on expiry; identify as `cclaw/<version>` User-Agent
 - System prompt in DB: move system prompts from `agents/<name>/system.md` to a `prompts` table (id, name, template TEXT, created_at); template vars `{session_id}`, `{date}`, `{agent_name}`; agents reference prompt by name/id in config; allows runtime editing without filesystem access; keep file-based loading as fallback/import path
 - ~~Workspace model refinement~~: implemented — `.cclaw/agents/<name>/workspace/` per agent; `.cclaw/agents/<name>/agent.db` per agent; shell children namespace-restricted to workspace only (V82, V62)

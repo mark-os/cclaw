@@ -4,6 +4,18 @@
 #include <string.h>
 #include <ctype.h>
 
+/* Strip leading whitespace (provider keep-alive newlines) from response in-place */
+static void resp_strip_leading_ws(HttpResponse *resp) {
+    if (!resp->data || resp->len == 0) return;
+    size_t skip = 0;
+    while (skip < resp->len && (resp->data[skip] == '\n' || resp->data[skip] == '\r'
+                                || resp->data[skip] == ' ' || resp->data[skip] == '\t'))
+        skip++;
+    if (skip == 0) return;
+    resp->len -= skip;
+    memmove(resp->data, resp->data + skip, resp->len + 1);
+}
+
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t bytes = size * nmemb;
     HttpResponse *resp = userdata;
@@ -67,7 +79,9 @@ int http_post(const char *url, const char **headers, const char *body,
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 10L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 90L);
 
     CURLcode rc = curl_easy_perform(curl);
 
@@ -80,6 +94,7 @@ int http_post(const char *url, const char **headers, const char *body,
     curl_slist_free_all(hlist);
     curl_easy_cleanup(curl);
 
+    resp_strip_leading_ws(resp);
     return (int)status;
 }
 
@@ -115,7 +130,9 @@ int http_post_stream(const char *url, const char **headers,
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 10L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 90L);
 
     CURLcode rc = curl_easy_perform(curl);
 
@@ -128,5 +145,6 @@ int http_post_stream(const char *url, const char **headers,
     curl_slist_free_all(hlist);
     curl_easy_cleanup(curl);
 
+    resp_strip_leading_ws(resp);
     return (int)status;
 }

@@ -1557,6 +1557,275 @@ int64_t daemon_bootstrap(sqlite3 *db) {
     return sid;
 }
 
+/* ── T244/V98/V104: Channel process launcher ───────────────────── */
+
+#define CHANNEL_MAX 16
+#define CHANNEL_MAX_RESTARTS 3
+
+typedef struct {
+    char name[64];
+    char binary_path[512];
+    pid_t pid;
+    int restart_count;
+    time_t last_restart;
+} ChannelSlot;
+
+static ChannelSlot g_channels[CHANNEL_MAX];
+static int g_channel_count = 0;
+
+/* Fork a channel binary. Returns pid or -1. */
+static pid_t channel_fork(const char *binary_path, const char *db_path, const char *name) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        /* Child: exec channel binary with db_path + channel_name as args */
+        execl(binary_path, binary_path, db_path, name, (char *)NULL);
+        _exit(127);
+    }
+    return pid;
+}
+
+/* Update channels.pid in cclaw.db */
+static void channel_update_pid(sqlite3 *db, const char *name, pid_t pid) {
+    const char *sql = "UPDATE channels SET pid=? WHERE name=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, (int)pid);
+        sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+}
+
+static void channel_set_status(sqlite3 *db, const char *name, const char *status) {
+    const char *sql = "UPDATE channels SET status=? WHERE name=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, status, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+}
+
+/* Launch all active channels from DB */
+static void daemon_launch_channels(const Config *cfg, sqlite3 *db) {
+    (void)cfg;
+    const char *sql = "SELECT name, binary_path FROM channels WHERE status='active';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+    while (sqlite3_step(stmt) == SQLITE_ROW && g_channel_count < CHANNEL_MAX) {
+        const char *name = (const char *)sqlite3_column_text(stmt, 0);
+        const char *bpath = (const char *)sqlite3_column_text(stmt, 1);
+        if (!name || !bpath) continue;
+
+        pid_t pid = channel_fork(bpath, cfg->db_path, name);
+        if (pid > 0) {
+            ChannelSlot *s = &g_channels[g_channel_count++];
+            snprintf(s->name, sizeof(s->name), "%s", name);
+            snprintf(s->binary_path, sizeof(s->binary_path), "%s", bpath);
+            s->pid = pid;
+            s->restart_count = 0;
+            s->last_restart = 0;
+            channel_update_pid(db, name, pid);
+            fprintf(stderr, "[daemon] launched channel '%s' (pid %d)\n", name, (int)pid);
+        } else {
+            fprintf(stderr, "[daemon] failed to launch channel '%s'\n", name);
+        }
+    }
+    sqlite3_finalize(stmt);
+}
+
+/* Reap channel processes — called alongside reap_children on SIGCHLD */
+static void reap_channel_processes(const Config *cfg, sqlite3 *db) {
+    for (int i = 0; i < g_channel_count; i++) {
+        if (g_channels[i].pid <= 0) continue;
+        int status;
+        pid_t p = waitpid(g_channels[i].pid, &status, WNOHANG);
+        if (p <= 0) continue;
+
+        fprintf(stderr, "[daemon] channel '%s' (pid %d) exited (status %d)\n",
+                g_channels[i].name, (int)p,
+                WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        g_channels[i].pid = 0;
+
+        /* V98: restart with backoff, max 3 retries */
+        if (g_channels[i].restart_count >= CHANNEL_MAX_RESTARTS) {
+            fprintf(stderr, "[daemon] channel '%s' exceeded max restarts, marking failed\n",
+                    g_channels[i].name);
+            channel_set_status(db, g_channels[i].name, "failed");
+            channel_update_pid(db, g_channels[i].name, 0);
+            continue;
+        }
+
+        /* Backoff: 1s, 2s, 4s */
+        time_t now = time(NULL);
+        int backoff = 1 << g_channels[i].restart_count;
+        if (g_channels[i].last_restart > 0 &&
+            (now - g_channels[i].last_restart) < backoff) {
+            /* Too soon — will retry on next reap cycle */
+            continue;
+        }
+
+        g_channels[i].restart_count++;
+        g_channels[i].last_restart = now;
+        pid_t new_pid = channel_fork(g_channels[i].binary_path, cfg->db_path, g_channels[i].name);
+        if (new_pid > 0) {
+            g_channels[i].pid = new_pid;
+            channel_update_pid(db, g_channels[i].name, new_pid);
+            fprintf(stderr, "[daemon] restarted channel '%s' (pid %d, attempt %d)\n",
+                    g_channels[i].name, (int)new_pid, g_channels[i].restart_count);
+        } else {
+            fprintf(stderr, "[daemon] failed to restart channel '%s'\n", g_channels[i].name);
+        }
+    }
+}
+
+/* Stop all channel processes (daemon shutdown) */
+static void daemon_stop_channels(void) {
+    for (int i = 0; i < g_channel_count; i++) {
+        if (g_channels[i].pid > 0) {
+            kill(g_channels[i].pid, SIGTERM);
+        }
+    }
+    /* Brief wait for graceful exit */
+    for (int attempt = 0; attempt < 5; attempt++) {
+        int alive = 0;
+        for (int i = 0; i < g_channel_count; i++) {
+            if (g_channels[i].pid > 0) {
+                int status;
+                pid_t p = waitpid(g_channels[i].pid, &status, WNOHANG);
+                if (p > 0) g_channels[i].pid = 0;
+                else alive++;
+            }
+        }
+        if (!alive) break;
+        usleep(100000);
+    }
+    g_channel_count = 0;
+}
+
+/* ── T245/V100/V106: Channel events consumer ──────────────────── */
+
+static void consume_channel_events(const Config *cfg, sqlite3 *db) {
+    const char *sql =
+        "SELECT id, channel_name, event_type, payload"
+        " FROM channel_events ORDER BY id ASC;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int64_t eid = sqlite3_column_int64(stmt, 0);
+        const char *ch_name = (const char *)sqlite3_column_text(stmt, 1);
+        const char *etype = (const char *)sqlite3_column_text(stmt, 2);
+        const char *payload = (const char *)sqlite3_column_text(stmt, 3);
+
+        if (!ch_name || !payload) goto delete_event;
+
+        /* Only handle "message" events for now */
+        if (!etype || strcmp(etype, "message") != 0) goto delete_event;
+
+        /* Resolve agent via channel_bindings.
+         * Payload is JSON: {"channel_id":"...", "text":"...", ...}
+         * channel_id used for binding lookup + session routing. */
+        {
+            cJSON *pj = cJSON_Parse(payload);
+            const char *channel_id = NULL;
+            const char *text = NULL;
+            if (pj) {
+                cJSON *cid = cJSON_GetObjectItem(pj, "channel_id");
+                cJSON *txt = cJSON_GetObjectItem(pj, "text");
+                if (cJSON_IsString(cid)) channel_id = cid->valuestring;
+                if (cJSON_IsString(txt)) text = txt->valuestring;
+            }
+            if (!channel_id || !text) { cJSON_Delete(pj); goto delete_event; }
+
+            /* Look up agent binding for this channel_type + channel_id */
+            char *agent_name = db_channel_binding_get(db, ch_name, channel_id);
+            if (!agent_name) {
+                /* Fallback: try "default" binding for this channel type */
+                agent_name = db_channel_binding_get(db, ch_name, "default");
+            }
+            if (!agent_name) { cJSON_Delete(pj); goto delete_event; }
+
+            /* Find or create session for this channel+channel_id.
+             * Use tg_chat_sessions pattern: channel_type:channel_id → session_id.
+             * Store in channel_state as "session:<channel_id>" key. */
+            int64_t session_id = -1;
+            {
+                char sess_key[128];
+                snprintf(sess_key, sizeof(sess_key), "session:%s", channel_id);
+                /* Read from channel_state */
+                const char *ssql =
+                    "SELECT value FROM channel_state WHERE channel_name=? AND key=?;";
+                sqlite3_stmt *ss;
+                if (sqlite3_prepare_v2(db, ssql, -1, &ss, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(ss, 1, ch_name, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(ss, 2, sess_key, -1, SQLITE_STATIC);
+                    if (sqlite3_step(ss) == SQLITE_ROW) {
+                        const char *v = (const char *)sqlite3_column_text(ss, 0);
+                        if (v) session_id = strtoll(v, NULL, 10);
+                    }
+                    sqlite3_finalize(ss);
+                }
+
+                if (session_id < 0) {
+                    /* Create new session in agent DB */
+                    char *apath = agent_db_path(agent_name);
+                    if (apath) {
+                        sqlite3 *adb = db_open_agent(apath);
+                        free(apath);
+                        if (adb) {
+                            char sname[128];
+                            snprintf(sname, sizeof(sname), "%s_%s", ch_name, channel_id);
+                            session_id = session_create(adb, sname, agent_name, -1, 0);
+                            db_close(adb);
+                        }
+                    }
+                    if (session_id > 0) {
+                        /* Store mapping */
+                        char sid_str[32];
+                        snprintf(sid_str, sizeof(sid_str), "%lld", (long long)session_id);
+                        const char *isql =
+                            "INSERT OR REPLACE INTO channel_state(channel_name, key, value)"
+                            " VALUES(?,?,?);";
+                        sqlite3_stmt *is;
+                        if (sqlite3_prepare_v2(db, isql, -1, &is, NULL) == SQLITE_OK) {
+                            sqlite3_bind_text(is, 1, ch_name, -1, SQLITE_STATIC);
+                            sqlite3_bind_text(is, 2, sess_key, -1, SQLITE_STATIC);
+                            sqlite3_bind_text(is, 3, sid_str, -1, SQLITE_STATIC);
+                            sqlite3_step(is);
+                            sqlite3_finalize(is);
+                        }
+                    }
+                }
+            }
+
+            if (session_id > 0) {
+                daemon_inbox_insert(agent_name, session_id, ch_name, text);
+                daemon_signal_session_agent(session_id, agent_name);
+            }
+
+            free(agent_name);
+            cJSON_Delete(pj);
+        }
+
+delete_event:
+        /* Delete consumed event */
+        {
+            const char *dsql = "DELETE FROM channel_events WHERE id=?;";
+            sqlite3_stmt *ds;
+            if (sqlite3_prepare_v2(db, dsql, -1, &ds, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(ds, 1, eid);
+                sqlite3_step(ds);
+                sqlite3_finalize(ds);
+            }
+        }
+    }
+    sqlite3_finalize(stmt);
+    (void)cfg;
+}
+
 /* ── Daemon main loop (T81) ─────────────────────────────────────── */
 
 int daemon_run(const Config *cfg, sqlite3 *db) {
@@ -1624,6 +1893,9 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     /* T208/V85: Check namespace support, clamp max agents */
     daemon_check_namespaces();
 
+    /* T244/V98/V104: Launch configured channel processes */
+    daemon_launch_channels(cfg, db);
+
     struct epoll_event events[8];
     while (!shutdown_requested()) {
         int nfds = epoll_wait(epfd, events, 8, 1000);
@@ -1638,6 +1910,7 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
                 char buf[64];
                 while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
                 reap_children(cfg, db);
+                reap_channel_processes(cfg, db);
                 /* T184/V13: process spawn queue after reap (parent may have queued blocking spawn) */
                 process_spawn_queue(cfg, db);
             } else if (events[i].data.fd == g_signal_pipe[0]) {
@@ -1672,55 +1945,10 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
                 /* T88: Process any pending spawn requests */
                 process_spawn_queue(cfg, db);
             } else if (events[i].data.fd == fifo_fd) {
-                /* T242/V105: External FIFO wake — drain bytes, scan channel_events */
+                /* T244/T245/V105: External FIFO wake — drain bytes, consume channel_events */
                 char drain[64];
                 while (read(fifo_fd, drain, sizeof(drain)) > 0) {}
-                /* Scan channel_events for unprocessed rows */
-                {
-                    const char *esql =
-                        "SELECT id, channel_name, event_type, payload"
-                        " FROM channel_events ORDER BY id ASC;";
-                    sqlite3_stmt *es;
-                    if (sqlite3_prepare_v2(db, esql, -1, &es, NULL) == SQLITE_OK) {
-                        while (sqlite3_step(es) == SQLITE_ROW) {
-                            int64_t eid = sqlite3_column_int64(es, 0);
-                            const char *ch_name = (const char *)sqlite3_column_text(es, 1);
-                            const char *etype = (const char *)sqlite3_column_text(es, 2);
-                            const char *payload = (const char *)sqlite3_column_text(es, 3);
-                            (void)etype; /* future: dispatch on event_type */
-
-                            /* Route: resolve agent via channel_bindings */
-                            if (ch_name && payload) {
-                                const char *bsql =
-                                    "SELECT agent_name FROM channel_bindings"
-                                    " WHERE channel_type=? LIMIT 1;";
-                                sqlite3_stmt *bs;
-                                if (sqlite3_prepare_v2(db, bsql, -1, &bs, NULL) == SQLITE_OK) {
-                                    sqlite3_bind_text(bs, 1, ch_name, -1, SQLITE_STATIC);
-                                    if (sqlite3_step(bs) == SQLITE_ROW) {
-                                        const char *agent = (const char *)sqlite3_column_text(bs, 0);
-                                        if (agent && agent[0]) {
-                                            /* Find or create session, insert inbox */
-                                            /* For now: use session_id=0 placeholder — T245 will refine routing */
-                                            (void)agent;
-                                            (void)payload;
-                                        }
-                                    }
-                                    sqlite3_finalize(bs);
-                                }
-                            }
-                            /* Delete consumed event */
-                            const char *dsql = "DELETE FROM channel_events WHERE id=?;";
-                            sqlite3_stmt *ds;
-                            if (sqlite3_prepare_v2(db, dsql, -1, &ds, NULL) == SQLITE_OK) {
-                                sqlite3_bind_int64(ds, 1, eid);
-                                sqlite3_step(ds);
-                                sqlite3_finalize(ds);
-                            }
-                        }
-                        sqlite3_finalize(es);
-                    }
-                }
+                consume_channel_events(cfg, db);
                 process_spawn_queue(cfg, db);
             }
         }
@@ -1740,6 +1968,9 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
         reap_children(cfg, db);
         if (g_child_count > 0) usleep(100000);
     }
+
+    /* T244/V98: Stop channel processes */
+    daemon_stop_channels();
 
     close(epfd);
     sigchld_pipe_close();

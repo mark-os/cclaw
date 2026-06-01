@@ -78,3 +78,34 @@ CREATE TABLE IF NOT EXISTS approvals (
   resolved_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(status) WHERE status='pending';
+CREATE TABLE IF NOT EXISTS channels (
+  name TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  binary_path TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  pid INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS channel_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_name TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS channel_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_name TEXT NOT NULL,
+  session_id INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  acked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_channel_outbox_pending ON channel_outbox(channel_name, status) WHERE status='pending';
+CREATE TABLE IF NOT EXISTS channel_state (
+  channel_name TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY (channel_name, key)
+);

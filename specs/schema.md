@@ -4,7 +4,7 @@ Three SQLite files (all WAL mode, `busy_timeout` ≥ 5000ms):
 
 | DB | Path | Owner | Contents |
 |----|------|-------|----------|
-| cclaw.db | `.cclaw/cclaw.db` | daemon (sole writer) | agents registry, agent_config, providers, kv (secrets), channel_bindings, tg_chat_sessions, spawn_queue, cron_jobs, approvals |
+| cclaw.db | `.cclaw/cclaw.db` | daemon (sole writer) | agents registry, agent_config, providers, kv (secrets), channel_bindings, tg_chat_sessions, spawn_queue, cron_jobs, approvals, channels, channel_events, channel_outbox, channel_state |
 | agent.db | `agents/<name>/agent.db` | agent process (RW); daemon (inbox writes only) | sessions, entries, inbox, js_tools, memory_blocks, kv (agent-local) |
 | journal.db | `.cclaw/journal.db` | log collector (sole writer) | log table (all stdout/stderr from daemon + agents) |
 
@@ -119,6 +119,56 @@ Index: `idx_spawn_pending ON spawn_queue(status) WHERE status='pending'`
 | `resolved_at` | INTEGER | |
 
 Index: `idx_approvals_pending ON approvals(status) WHERE status='pending'`
+
+### channels
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `name` | TEXT PRIMARY KEY | |
+| `type` | TEXT NOT NULL | telegram, webhook, custom |
+| `binary_path` | TEXT NOT NULL | path to channel process binary |
+| `status` | TEXT NOT NULL DEFAULT 'active' | active\|failed |
+| `pid` | INTEGER | daemon tracks running process |
+| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+
+### channel_events
+
+Inbound events from channel processes → daemon. Consumed in FIFO order.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `channel_name` | TEXT NOT NULL | |
+| `event_type` | TEXT NOT NULL | message, callback, etc. |
+| `payload` | TEXT NOT NULL | JSON |
+| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+
+### channel_outbox
+
+Daemon → channel process delivery queue.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `channel_name` | TEXT NOT NULL | |
+| `session_id` | INTEGER NOT NULL | |
+| `payload` | TEXT NOT NULL | JSON |
+| `status` | TEXT NOT NULL DEFAULT 'pending' | pending\|delivered\|failed |
+| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+| `acked_at` | INTEGER | |
+
+Index: `idx_channel_outbox_pending ON channel_outbox(channel_name, status) WHERE status='pending'`
+
+### channel_state
+
+Channel-private persistent kv (offsets, cursors, tokens).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `channel_name` | TEXT NOT NULL | |
+| `key` | TEXT NOT NULL | |
+| `value` | TEXT NOT NULL | |
+| PRIMARY KEY | (channel_name, key) | |
 
 ---
 

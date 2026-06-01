@@ -451,7 +451,7 @@ T249|x|channel_telegram: outbox delivery — loop: `channel_next_outbox(ctx)` �
 T250|x|channel process graceful shutdown — channel binary handles SIGTERM; flushes pending outbox deliveries; exits cleanly; daemon sends SIGTERM on daemon shutdown|V98,V31
 T251|x|`configure_channel` tool update — agent proposes channel config (type, binary_path, config kv pairs); exit code 4 → daemon inserts `channels` row + seeds `channel_state` + launches process|V104,V79
 T252|x|test: channel process crash → daemon restarts w/ backoff; verify max 3 retries then status='failed'|V98
-T253|.|test: channel_emit → daemon_wake → agent fork → outbox delivery cycle end-to-end w/ mock channel binary|V100,V101
+T253|x|test: channel_emit → daemon_wake → agent fork → outbox delivery cycle end-to-end w/ mock channel binary|V100,V101
 T254|.|extension discovery — at agent startup, scan `workspace/extensions/*.js` + `workspace/extensions/*/index.js`; return sorted file list|V109,V110
 T255|.|extension loader — for each discovered file: read source, eval in shared QuickJS context as `(function(cclaw){ <source> })(cclaw_api)`; on throw → log warning + skip|V109,V110
 T256|.|`cclaw` API object — C-backed JS object injected into QuickJS context; methods: `registerTool(def)`, `registerHook(event, fn)`, `callTool(name, args)`; `registerTool` delegates to existing `js_tool_register_one`|V111

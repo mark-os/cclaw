@@ -411,7 +411,7 @@ T229|x|yolo mode (`-y`) — CLI parses `-y`, sets `CCLAW_YOLO=1` in own env (inh
 T230|x|agent self-rename — config change tool accepts `{"action":"rename","name":"<new>"}` payload; parent (CLI/daemon) handles: `mv ~/.cclaw/agents/<old> ~/.cclaw/agents/<new>`, update cclaw.db agents registry, update CLI agent binding in cclaw.db kv; next fork uses new path|V79,V62
 T231|x|zero-usage retry in agent_run — detect E1 (200 + 0 tokens + empty + stop) in inner retry loop; ⊥ write entry; retry 2x primary via `continue` (re-plan, re-stream); then 1x fallback; on exhaust write error entry|V94,V32
 T232|x|`get_response_text` shared fn — walk branch backward, return first non-empty assistant content, stop at user boundary; replace inline logic in CLI `print_response`, daemon `deliver_response`, `tool_agent`, spawn result|V95
-T233|.|CLI journal parity — `cli_fork_turn` creates pipe pair, dup2 in child, parent drains pipe → journal.db + tee to terminal; reuse `db_open_journal` + batch insert|V96,V75
+T233|.|CLI journal parity — `cli_fork_turn` pipes child stderr → parent drains → journal.db + optionally tee to terminal (controlled by `--verbose`/log level); stdout inherited (future: streaming tokens); reuse `db_open_journal`|V96,V75
 T234|x|log level system — `CCLAW_LOG_LEVEL` env var; `cclaw.db` kv `log_level` default `info`; `config_load` reads + injects at fork; agent_turn reads env → `cfg->log_level` enum; replace `cfg->debug` bool w/ level check|V97
 T235|x|trace logging — at trace level, `llm_call_with_fallback_stream` writes full req/resp JSON to stderr (existing debug code, gated on trace); at debug level, write timing + retry decisions + context plan stats|V97
 T236|.|error classification in agent_run — implement detection for E1-E12 per `specs/error-handling.md`; each writes appropriate `stop_reason` + user-facing content on exhaust|V94,V32
@@ -428,6 +428,7 @@ B1|2026-05-31|GMICloud returns HTTP 200 w/ 0 tokens + null content + `finish_rea
 B2|2026-06-01|`build_tools_fragment` closes JSON object w/ `}` — `max_tokens` field ⊥ included when tools present; every agentic request sent without output limit|T237
 
 ## §F FUTURE
+- CLI streaming response: add `"stream":true` to LLM request in CLI mode only; parse SSE `data:` chunks; write tokens to stdout as they arrive; agent process stdout = user-facing content stream; daemon mode ⊥ stream (delivers complete response via channel post-exit); configurable per-agent (`stream_cli` bool, default true once implemented); stdout currently unused by agent — reserved for this
 - Web chat: civetweb serves chat UI (SSE streaming for partial responses, session select/create, message history); block streaming to browser as assistant generates; replaces status-only page
 - Intra-turn steering: agent checks inbox between tool executions, injects new messages into context mid-loop (Pi model: steering = interrupt, follow-up = queue until stop); complicates V18 atomic consumption — design carefully
 - Session curation: ~~mid-session compaction~~ (now §T T160-T163); prune failed tool-call loops, automated "curation agent" that cleans up long-running sessions

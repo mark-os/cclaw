@@ -153,6 +153,29 @@ Daemon ←──socketpair──→ Log Collector
 - Collector crash ⊥ kill agents (pipe write gets EPIPE, agent ignores)
 - Collector is unsandboxed (needs journal.db write access)
 
+## Process I/O Model (stdout vs stderr)
+
+Agent processes use two distinct output channels:
+
+| fd | Purpose | Content | Destination (daemon) | Destination (CLI) |
+|----|---------|---------|---------------------|-------------------|
+| stdout | User-facing content | Future: streamed LLM tokens (SSE parse → token write). Currently unused. | /dev/null (daemon delivers via channel post-exit) | Inherited — displays directly to terminal |
+| stderr | Structured logs | `LOG_*` macro output: `HH:MM:SS.mmm [LEVEL] message` | pipe → log collector → journal.db | pipe → parent drains → journal.db + optional tee to terminal |
+
+**Key design points:**
+- Agent code writes logs exclusively via `LOG_*` macros (stderr). Never `printf` to stdout.
+- Daemon mode: both stdout+stderr piped to log collector. stdout lines tagged stream=1, stderr stream=2.
+- CLI mode: stderr piped (parent tees to terminal if `--verbose` or log_level ≥ debug). stdout inherited (goes directly to terminal for future streaming display).
+- Log level controls what agent writes to stderr. Display level (CLI `--verbose`) controls what parent echoes to terminal from the pipe.
+- journal.db stores everything from the pipe regardless of display preference — full audit trail.
+
+**Future streaming (CLI only):**
+- Agent sends `"stream":true` in LLM request
+- Parses SSE `data:` chunks from curl write callback
+- Writes tokens to stdout as they arrive: `write(STDOUT_FILENO, token, len)`
+- Parent displays stdout directly (no pipe, no journal for token stream)
+- Daemon mode: stdout piped to /dev/null (response delivered from DB post-exit)
+
 ## Env-Var Config Injection
 
 Daemon reads `agent_config` table from cclaw.db at fork time. Injects as env vars:

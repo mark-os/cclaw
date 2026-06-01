@@ -82,22 +82,28 @@ Exception: zero-usage retry happens WITHIN the agent process (no exit/re-fork). 
 
 ## Log Levels & Observability
 
-| level | what's logged | destination |
-|-------|---------------|-------------|
-| info (default) | turn start/end, errors, warnings | stderr → journal.db |
-| debug | + tool dispatch, LLM timing, context plan stats, retry decisions | stderr → journal.db |
-| trace | + full req/resp JSON (current `--debug` behavior) | stderr → journal.db |
+Implemented via `LOG_*` macros in `include/log.h`. All output → stderr → pipe → journal.db.
 
-`CCLAW_LOG_LEVEL` env var, stored in cclaw.db kv as `log_level`, injected at fork. Both CLI and daemon pipe child stderr to journal.db (CLI also tees to terminal).
+| level | env value | what's logged | destination |
+|-------|-----------|---------------|-------------|
+| error | `error` | errors only | stderr → journal.db |
+| info (default) | `info` | + turn start/end, warnings | stderr → journal.db |
+| debug | `debug` | + tool dispatch, LLM timing, context plan stats, retry decisions, response shapes | stderr → journal.db |
+| trace | `trace` | + full req/resp JSON (--debug flag) | stderr → journal.db |
+
+`CCLAW_LOG_LEVEL` env var, stored in cclaw.db kv as `log_level`, injected at fork.
+CLI `--debug` flag sets trace level. CLI `--verbose` tees stderr pipe to terminal.
+
+Format: `HH:MM:SS.mmm [LEVEL] message\n` — parseable by journal.db collector and grep.
 
 ## CLI/Daemon Logging Parity
 
-Current state:
-- Daemon: pipe(stdout/stderr) → log_collector → journal.db
-- CLI: child inherits terminal (no journal)
+**Daemon mode (implemented):**
+- `pipe(stderr)` → log_collector → journal.db
+- `pipe(stdout)` → log_collector → journal.db (currently unused by agent)
 
-Target state:
-- Both: pipe(stderr) → parent reads → journal.db + (CLI: echo to terminal)
-- stdout: same treatment (tee for CLI, pipe-only for daemon)
+**CLI mode (T233):**
+- `pipe(stderr)` → parent drains → journal.db + tee to terminal (if `--verbose`)
+- stdout: inherited by child (goes directly to terminal; future: streaming tokens)
 
-Implementation: CLI `cli_fork_turn` creates pipes like daemon does. Parent thread/loop drains pipe, writes to journal.db, echoes to terminal. `waitpid` after pipe EOF.
+**Design principle:** stderr = structured logs (always persisted). stdout = user content (display only, not persisted to journal).

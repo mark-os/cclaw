@@ -344,45 +344,65 @@ int daemon_get_max_agents(void) {
 
 /* ── Child tracking (T87, T200, V24) ────────────────────────────── */
 
+#define CHILD_MAX (DAEMON_MAX_CHILDREN + 16) /* agents + channels */
+#define CHANNEL_MAX_RESTARTS 3
+
+typedef enum { CHILD_AGENT, CHILD_CHANNEL } ChildType;
+
 typedef struct {
     pid_t pid;
+    ChildType type;
+    /* Agent fields */
     int64_t session_id;
     char agent_name[64];
-} ChildSlot;
+    /* Channel fields */
+    char channel_name[64];
+    char binary_path[512];
+    int restart_count;
+} ChildProcess;
 
-static ChildSlot g_children[DAEMON_MAX_CHILDREN];
+static ChildProcess g_children[CHILD_MAX];
 static int g_child_count = 0;
 
-static int child_add(pid_t pid, int64_t session_id, const char *agent_name) {
+static ChildProcess *child_find(pid_t pid) {
+    for (int i = 0; i < g_child_count; i++)
+        if (g_children[i].pid == pid) return &g_children[i];
+    return NULL;
+}
+
+static int child_add_agent(pid_t pid, int64_t session_id, const char *agent_name) {
     if (g_child_count >= g_max_agents) return -1;
-    g_children[g_child_count].pid = pid;
-    g_children[g_child_count].session_id = session_id;
-    if (agent_name)
-        snprintf(g_children[g_child_count].agent_name, 64, "%s", agent_name);
-    else
-        g_children[g_child_count].agent_name[0] = '\0';
-    g_child_count++;
+    ChildProcess *c = &g_children[g_child_count++];
+    memset(c, 0, sizeof(*c));
+    c->pid = pid;
+    c->type = CHILD_AGENT;
+    c->session_id = session_id;
+    if (agent_name) snprintf(c->agent_name, 64, "%s", agent_name);
     return 0;
 }
 
-static int child_remove(pid_t pid, int64_t *out_session_id, char *out_agent_name) {
-    for (int i = 0; i < g_child_count; i++) {
-        if (g_children[i].pid == pid) {
-            *out_session_id = g_children[i].session_id;
-            if (out_agent_name)
-                snprintf(out_agent_name, 64, "%s", g_children[i].agent_name);
-            g_children[i] = g_children[g_child_count - 1];
-            g_child_count--;
-            return 0;
-        }
-    }
-    return -1;
+static int child_add_channel(pid_t pid, const char *name, const char *binary_path) {
+    if (g_child_count >= CHILD_MAX) return -1;
+    ChildProcess *c = &g_children[g_child_count++];
+    memset(c, 0, sizeof(*c));
+    c->pid = pid;
+    c->type = CHILD_CHANNEL;
+    if (name) snprintf(c->channel_name, 64, "%s", name);
+    if (binary_path) snprintf(c->binary_path, 512, "%s", binary_path);
+    return 0;
+}
+
+static void child_remove(ChildProcess *c) {
+    int idx = (int)(c - g_children);
+    g_children[idx] = g_children[g_child_count - 1];
+    g_child_count--;
 }
 
 /* V24: Check if session already has an active child */
 static int child_has_session(int64_t session_id) {
     for (int i = 0; i < g_child_count; i++) {
-        if (g_children[i].session_id == session_id) return 1;
+        if (g_children[i].type == CHILD_AGENT && g_children[i].session_id == session_id)
+            return 1;
     }
     return 0;
 }
@@ -393,6 +413,10 @@ int64_t daemon_child_session(pid_t pid) {
     }
     return -1;
 }
+
+/* Forward declarations for channel/reap functions defined later */
+static void daemon_launch_channel(const Config *cfg, sqlite3 *db, const char *name);
+static void reap_one_channel(const Config *cfg, sqlite3 *db, ChildProcess *c, int status);
 
 /* T200/V73: Count active children for a parent session (in-memory) */
 static int child_count_for_parent(sqlite3 *db, int64_t parent_session_id) {
@@ -714,7 +738,7 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
     close(err_pipe[0]);
 
     /* Parent: track child (T200: includes agent_name) */
-    child_add(pid, session_id, agent_name);
+    child_add_agent(pid, session_id, agent_name);
     free(resolved_name);
     return 0;
 }
@@ -950,9 +974,11 @@ char *daemon_apply_config(const Config *cfg, sqlite3 *db,
         result = strdup(buf);
 
     } else if (strcmp(tool_name, "configure_channel") == 0) {
-        /* V67: Store channel credentials in cclaw.db */
+        /* T251/V104/V79: Insert channels row + seed channel_state + launch */
         cJSON *channel_type = cJSON_GetObjectItemCaseSensitive(args, "channel_type");
         cJSON *bot_token = cJSON_GetObjectItemCaseSensitive(args, "bot_token");
+        cJSON *binary_path = cJSON_GetObjectItemCaseSensitive(args, "binary_path");
+        cJSON *config_obj = cJSON_GetObjectItemCaseSensitive(args, "config");
 
         if (!cJSON_IsString(channel_type)) {
             cJSON_Delete(args);
@@ -961,16 +987,66 @@ char *daemon_apply_config(const Config *cfg, sqlite3 *db,
 
         const char *ctype = channel_type->valuestring;
         if (strcmp(ctype, "telegram") == 0) {
-            if (cJSON_IsString(bot_token) && bot_token->valuestring[0])
-                db_kv_set_secret(db, "telegram_token", bot_token->valuestring);
+            const char *token = (cJSON_IsString(bot_token) && bot_token->valuestring[0])
+                                ? bot_token->valuestring : NULL;
+            if (!token) {
+                cJSON_Delete(args);
+                return strdup("error: bot_token required for telegram");
+            }
+            /* Registers channels row + seeds channel_state + sets active */
+            daemon_register_telegram_channel(db, token);
             /* V69: Bind channel to requesting agent */
             db_channel_binding_set(db, "telegram", "default", agent_name);
-            result = strdup("channel configured: telegram");
+            /* Launch the channel process */
+            daemon_launch_channel(cfg, db, "telegram");
+            result = strdup("channel configured and launched: telegram");
         } else if (strcmp(ctype, "cli") == 0) {
             db_channel_binding_set(db, "cli", "default", agent_name);
             result = strdup("channel configured: cli");
         } else {
-            result = strdup("error: unknown channel_type");
+            /* Custom channel — requires binary_path */
+            if (!cJSON_IsString(binary_path) || !binary_path->valuestring[0]) {
+                cJSON_Delete(args);
+                return strdup("error: binary_path required for custom channel");
+            }
+            /* Insert channels row */
+            const char *isql =
+                "INSERT OR REPLACE INTO channels(name, type, binary_path, status)"
+                " VALUES(?, ?, ?, 'active');";
+            sqlite3_stmt *cstmt;
+            if (sqlite3_prepare_v2(db, isql, -1, &cstmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(cstmt, 1, ctype, -1, SQLITE_STATIC);
+                sqlite3_bind_text(cstmt, 2, ctype, -1, SQLITE_STATIC);
+                sqlite3_bind_text(cstmt, 3, binary_path->valuestring, -1, SQLITE_STATIC);
+                sqlite3_step(cstmt);
+                sqlite3_finalize(cstmt);
+            }
+            /* Seed channel_state from config object */
+            if (cJSON_IsObject(config_obj)) {
+                cJSON *kv = NULL;
+                cJSON_ArrayForEach(kv, config_obj) {
+                    if (cJSON_IsString(kv) && kv->string) {
+                        const char *ksql =
+                            "INSERT OR REPLACE INTO channel_state(channel_name, key, value)"
+                            " VALUES(?, ?, ?);";
+                        sqlite3_stmt *ks;
+                        if (sqlite3_prepare_v2(db, ksql, -1, &ks, NULL) == SQLITE_OK) {
+                            sqlite3_bind_text(ks, 1, ctype, -1, SQLITE_STATIC);
+                            sqlite3_bind_text(ks, 2, kv->string, -1, SQLITE_STATIC);
+                            sqlite3_bind_text(ks, 3, kv->valuestring, -1, SQLITE_STATIC);
+                            sqlite3_step(ks);
+                            sqlite3_finalize(ks);
+                        }
+                    }
+                }
+            }
+            /* V69: Bind channel to requesting agent */
+            db_channel_binding_set(db, ctype, "default", agent_name);
+            /* Launch the channel process */
+            daemon_launch_channel(cfg, db, ctype);
+            char buf[256];
+            snprintf(buf, sizeof(buf), "channel configured and launched: %s", ctype);
+            result = strdup(buf);
         }
 
     } else if (strcmp(tool_name, "create_agent") == 0) {
@@ -1075,9 +1151,19 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
     int status;
     pid_t pid;
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        int64_t session_id;
-        char agent_name[64] = "";
-        if (child_remove(pid, &session_id, agent_name) != 0) continue;
+        ChildProcess *c = child_find(pid);
+        if (!c) continue; /* Unknown child — ignore */
+
+        if (c->type == CHILD_CHANNEL) {
+            reap_one_channel(cfg, db, c, status);
+            continue;
+        }
+
+        /* Agent process */
+        int64_t session_id = c->session_id;
+        char agent_name[64];
+        snprintf(agent_name, 64, "%s", c->agent_name);
+        child_remove(c);
 
         /* T200: Agent sets own state before exit. Daemon only forces idle
          * for normal completion (exit 0/1) or abnormal termination (signal).
@@ -1437,7 +1523,7 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
         close(sa_out[0]); close(sa_err[0]);
 
         /* Track child (T200: includes agent_name) */
-        child_add(pid, child_sid, parent_agent_name);
+        child_add_agent(pid, child_sid, parent_agent_name);
         spawn_queue_mark(db, r->id, "forked", child_sid);
 
         /* V13 blocking: transition parent to "waiting" state in agent DB */
@@ -1634,26 +1720,45 @@ void daemon_register_telegram_channel(sqlite3 *db, const char *token) {
 
 /* ── T244/V98/V104: Channel process launcher ───────────────────── */
 
-#define CHANNEL_MAX 16
-#define CHANNEL_MAX_RESTARTS 3
+/* Forward declarations */
+static pid_t channel_fork(const char *binary_path, const char *db_path, const char *name);
+static void channel_update_pid(sqlite3 *db, const char *name, pid_t pid);
 
-typedef struct {
-    char name[64];
-    char binary_path[512];
-    pid_t pid;
-    int restart_count;
-    time_t last_restart;
-} ChannelSlot;
+/* T251: Launch a single channel by name (reads from channels table) */
+static void daemon_launch_channel(const Config *cfg, sqlite3 *db, const char *name) {
+    if (!cfg || !cfg->db_path || !cfg->db_path[0]) return;
+    /* Check if already running */
+    for (int i = 0; i < g_child_count; i++) {
+        if (g_children[i].type == CHILD_CHANNEL &&
+            strcmp(g_children[i].channel_name, name) == 0)
+            return; /* Already tracked */
+    }
 
-static ChannelSlot g_channels[CHANNEL_MAX];
-static int g_channel_count = 0;
+    const char *sql = "SELECT binary_path FROM channels WHERE name=? AND status='active';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); return; }
+    const char *bpath = (const char *)sqlite3_column_text(stmt, 0);
+    if (!bpath) { sqlite3_finalize(stmt); return; }
+
+    char bin_path[512];
+    snprintf(bin_path, sizeof(bin_path), "%s", bpath);
+    sqlite3_finalize(stmt);
+
+    pid_t pid = channel_fork(bin_path, cfg->db_path, name);
+    if (pid <= 0) return;
+
+    child_add_channel(pid, name, bin_path);
+    channel_update_pid(db, name, pid);
+    fprintf(stderr, "[daemon] launched channel '%s' (pid %d)\n", name, (int)pid);
+}
 
 /* Fork a channel binary. Returns pid or -1. */
 static pid_t channel_fork(const char *binary_path, const char *db_path, const char *name) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        /* Child: exec channel binary with db_path + channel_name as args */
         execl(binary_path, binary_path, db_path, name, (char *)NULL);
         _exit(127);
     }
@@ -1685,23 +1790,17 @@ static void channel_set_status(sqlite3 *db, const char *name, const char *status
 
 /* Launch all active channels from DB */
 static void daemon_launch_channels(const Config *cfg, sqlite3 *db) {
-    (void)cfg;
     const char *sql = "SELECT name, binary_path FROM channels WHERE status='active';";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
-    while (sqlite3_step(stmt) == SQLITE_ROW && g_channel_count < CHANNEL_MAX) {
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *name = (const char *)sqlite3_column_text(stmt, 0);
         const char *bpath = (const char *)sqlite3_column_text(stmt, 1);
         if (!name || !bpath) continue;
 
         pid_t pid = channel_fork(bpath, cfg->db_path, name);
         if (pid > 0) {
-            ChannelSlot *s = &g_channels[g_channel_count++];
-            snprintf(s->name, sizeof(s->name), "%s", name);
-            snprintf(s->binary_path, sizeof(s->binary_path), "%s", bpath);
-            s->pid = pid;
-            s->restart_count = 0;
-            s->last_restart = 0;
+            child_add_channel(pid, name, bpath);
             channel_update_pid(db, name, pid);
             fprintf(stderr, "[daemon] launched channel '%s' (pid %d)\n", name, (int)pid);
         } else {
@@ -1711,73 +1810,33 @@ static void daemon_launch_channels(const Config *cfg, sqlite3 *db) {
     sqlite3_finalize(stmt);
 }
 
-/* Reap channel processes — called alongside reap_children on SIGCHLD */
-static void reap_channel_processes(const Config *cfg, sqlite3 *db) {
-    for (int i = 0; i < g_channel_count; i++) {
-        if (g_channels[i].pid <= 0) continue;
-        int status;
-        pid_t p = waitpid(g_channels[i].pid, &status, WNOHANG);
-        if (p <= 0) continue;
+/* Handle death of a channel process */
+static void reap_one_channel(const Config *cfg, sqlite3 *db, ChildProcess *c, int status) {
+    fprintf(stderr, "[daemon] channel '%s' (pid %d) exited (status %d)\n",
+            c->channel_name, (int)c->pid,
+            WIFEXITED(status) ? WEXITSTATUS(status) : -1);
 
-        fprintf(stderr, "[daemon] channel '%s' (pid %d) exited (status %d)\n",
-                g_channels[i].name, (int)p,
-                WIFEXITED(status) ? WEXITSTATUS(status) : -1);
-        g_channels[i].pid = 0;
-
-        /* V98: restart with backoff, max 3 retries */
-        if (g_channels[i].restart_count >= CHANNEL_MAX_RESTARTS) {
-            fprintf(stderr, "[daemon] channel '%s' exceeded max restarts, marking failed\n",
-                    g_channels[i].name);
-            channel_set_status(db, g_channels[i].name, "failed");
-            channel_update_pid(db, g_channels[i].name, 0);
-            continue;
-        }
-
-        /* Backoff: 1s, 2s, 4s */
-        time_t now = time(NULL);
-        int backoff = 1 << g_channels[i].restart_count;
-        if (g_channels[i].last_restart > 0 &&
-            (now - g_channels[i].last_restart) < backoff) {
-            /* Too soon — will retry on next reap cycle */
-            continue;
-        }
-
-        g_channels[i].restart_count++;
-        g_channels[i].last_restart = now;
-        pid_t new_pid = channel_fork(g_channels[i].binary_path, cfg->db_path, g_channels[i].name);
-        if (new_pid > 0) {
-            g_channels[i].pid = new_pid;
-            channel_update_pid(db, g_channels[i].name, new_pid);
-            fprintf(stderr, "[daemon] restarted channel '%s' (pid %d, attempt %d)\n",
-                    g_channels[i].name, (int)new_pid, g_channels[i].restart_count);
-        } else {
-            fprintf(stderr, "[daemon] failed to restart channel '%s'\n", g_channels[i].name);
-        }
+    /* V98: restart immediately, count attempts, mark failed at max */
+    if (c->restart_count >= CHANNEL_MAX_RESTARTS) {
+        fprintf(stderr, "[daemon] channel '%s' exceeded max restarts, marking failed\n",
+                c->channel_name);
+        channel_set_status(db, c->channel_name, "failed");
+        channel_update_pid(db, c->channel_name, 0);
+        child_remove(c);
+        return;
     }
-}
 
-/* Stop all channel processes (daemon shutdown) */
-static void daemon_stop_channels(void) {
-    for (int i = 0; i < g_channel_count; i++) {
-        if (g_channels[i].pid > 0) {
-            kill(g_channels[i].pid, SIGTERM);
-        }
+    c->restart_count++;
+    pid_t new_pid = channel_fork(c->binary_path, cfg->db_path, c->channel_name);
+    if (new_pid > 0) {
+        c->pid = new_pid;
+        channel_update_pid(db, c->channel_name, new_pid);
+        fprintf(stderr, "[daemon] restarted channel '%s' (pid %d, attempt %d)\n",
+                c->channel_name, (int)new_pid, c->restart_count);
+    } else {
+        fprintf(stderr, "[daemon] failed to restart channel '%s'\n", c->channel_name);
+        child_remove(c);
     }
-    /* Brief wait for graceful exit */
-    for (int attempt = 0; attempt < 5; attempt++) {
-        int alive = 0;
-        for (int i = 0; i < g_channel_count; i++) {
-            if (g_channels[i].pid > 0) {
-                int status;
-                pid_t p = waitpid(g_channels[i].pid, &status, WNOHANG);
-                if (p > 0) g_channels[i].pid = 0;
-                else alive++;
-            }
-        }
-        if (!alive) break;
-        usleep(100000);
-    }
-    g_channel_count = 0;
 }
 
 /* ── T245/V100/V106: Channel events consumer ──────────────────── */
@@ -1985,7 +2044,6 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
                 char buf[64];
                 while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
                 reap_children(cfg, db);
-                reap_channel_processes(cfg, db);
                 /* T184/V13: process spawn queue after reap (parent may have queued blocking spawn) */
                 process_spawn_queue(cfg, db);
             } else if (events[i].data.fd == g_signal_pipe[0]) {
@@ -2035,17 +2093,16 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     }
 
     /* V31: Forward SIGTERM to children */
+    /* V31: Forward SIGTERM to all children (agents + channels) */
     for (int i = 0; i < g_child_count; i++) {
-        kill(g_children[i].pid, SIGTERM);
+        if (g_children[i].pid > 0)
+            kill(g_children[i].pid, SIGTERM);
     }
     /* Wait for children to exit (brief grace period) */
     for (int i = 0; i < 10 && g_child_count > 0; i++) {
         reap_children(cfg, db);
         if (g_child_count > 0) usleep(100000);
     }
-
-    /* T244/V98: Stop channel processes */
-    daemon_stop_channels();
 
     close(epfd);
     sigchld_pipe_close();

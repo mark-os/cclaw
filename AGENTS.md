@@ -104,11 +104,28 @@ build/         Build output (gitignored)
 
 Tests must never hang. Follow these rules:
 
-- **`alarm(N)`** — every test binary's `main()` must call `alarm(10)` (or similar) as a hard kill if stuck.
 - **No real network** — unit tests (`make test`) must not connect to real hosts. Use UDS-based mocks or loopback.
 - **Timeout on `accept()`** — any mock server thread must set `SO_RCVTIMEO` on the listening socket so it doesn't block forever if the client crashes before connecting.
 - **No backward-compatible code** — there are no users yet. No migrations, no deprecation shims, no version checks. Delete old code, don't wrap it.
-- **Subprocess tests** — if forking a child that execs something (python, sh), set `alarm()` in the child too, and use `waitpid` with awareness that the child may die.
+- **Subprocess tests** — if forking a child that execs something (python, sh), use `waitpid` with awareness that the child may die.
+- **Makefile enforces timeouts** — `make test-integration` wraps each binary in `timeout 20`. A hung test is killed after 20s. Output goes to `/tmp/cclaw_<testname>.txt`. `alarm()` only needed in tests with intentional sleeps (retry backoff) — set below 20s. Most integration tests need no alarm.
+
+**Agent workflow for running tests** (prevents shell hangs):
+
+```bash
+# Unit tests — fast, safe to run directly
+make test
+
+# Integration tests — each binary gets timeout 20s, output captured to file
+make test-integration
+
+# Single integration test — redirect to file, read after
+./build/test_integration_foo > /tmp/t.txt 2>&1; echo $?
+cat /tmp/t.txt            # or: tail -20 /tmp/t.txt
+
+# NEVER pipe a test binary through head/tail/grep directly — it breaks
+# timeouts via SIGPIPE. Always redirect to file first, then read the file.
+```
 
 ## Building
 

@@ -104,7 +104,7 @@ static int test_apply_configure_provider_custom(void) {
     return 0;
 }
 
-/* T205/V79: configure_channel telegram — stores token + binds channel */
+/* T251/V104/V79: configure_channel telegram — inserts channels row + seeds channel_state + binds */
 static int test_apply_configure_channel_telegram(void) {
     sqlite3 *db = setup_db();
     Config cfg = {0};
@@ -114,13 +114,27 @@ static int test_apply_configure_channel_telegram(void) {
         "{\"channel_type\":\"telegram\",\"bot_token\":\"123:ABC\"}");
     assert(result != NULL);
     assert(strstr(result, "telegram") != NULL);
+    assert(strstr(result, "launched") != NULL || strstr(result, "configured") != NULL);
     free(result);
 
-    /* Verify token stored encrypted */
-    char *decrypted = db_kv_get_secret(db, "telegram_token");
-    assert(decrypted != NULL);
-    assert(strcmp(decrypted, "123:ABC") == 0);
-    free(decrypted);
+    /* Verify channels row exists */
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT type, status FROM channels WHERE name='telegram';", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "telegram") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 1), "active") == 0);
+    sqlite3_finalize(stmt);
+
+    /* Verify bot_token in channel_state */
+    rc = sqlite3_prepare_v2(db,
+        "SELECT value FROM channel_state WHERE channel_name='telegram' AND key='bot_token';",
+        -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "123:ABC") == 0);
+    sqlite3_finalize(stmt);
 
     /* V69: Verify channel binding */
     char *bound = db_channel_binding_get(db, "telegram", "default");
@@ -154,6 +168,60 @@ static int test_apply_configure_channel_cli(void) {
     db_close(db);
     cleanup();
     printf("  PASS: test_apply_configure_channel_cli\n");
+    return 0;
+}
+
+/* T251/V104/V79: configure_channel custom — inserts channels row + seeds config + binds */
+static int test_apply_configure_channel_custom(void) {
+    sqlite3 *db = setup_db();
+    Config cfg = {0};
+
+    char *result = daemon_apply_config(&cfg, db, "my-agent",
+        "configure_channel",
+        "{\"channel_type\":\"slack\",\"binary_path\":\"/opt/cclaw/channel_slack\","
+        "\"config\":{\"webhook_url\":\"https://hooks.slack.com/x\",\"channel_id\":\"C123\"}}");
+    assert(result != NULL);
+    assert(strstr(result, "slack") != NULL);
+    free(result);
+
+    /* Verify channels row */
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT type, binary_path, status FROM channels WHERE name='slack';",
+        -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "slack") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 1), "/opt/cclaw/channel_slack") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 2), "active") == 0);
+    sqlite3_finalize(stmt);
+
+    /* Verify channel_state seeded from config object */
+    rc = sqlite3_prepare_v2(db,
+        "SELECT value FROM channel_state WHERE channel_name='slack' AND key='webhook_url';",
+        -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "https://hooks.slack.com/x") == 0);
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db,
+        "SELECT value FROM channel_state WHERE channel_name='slack' AND key='channel_id';",
+        -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "C123") == 0);
+    sqlite3_finalize(stmt);
+
+    /* V69: Verify channel binding */
+    char *bound = db_channel_binding_get(db, "slack", "default");
+    assert(bound != NULL);
+    assert(strcmp(bound, "my-agent") == 0);
+    free(bound);
+
+    db_close(db);
+    cleanup();
+    printf("  PASS: test_apply_configure_channel_custom\n");
     return 0;
 }
 
@@ -247,6 +315,7 @@ int main(void) {
     rc |= test_apply_configure_provider_custom();
     rc |= test_apply_configure_channel_telegram();
     rc |= test_apply_configure_channel_cli();
+    rc |= test_apply_configure_channel_custom();
     rc |= test_apply_create_agent();
     rc |= test_apply_unknown_tool();
     rc |= test_apply_invalid_json();

@@ -195,9 +195,10 @@ static void test_e2_rate_limit_exhausted(void) {
     sqlite3 *db = setup_db(&sid);
     if (!db) FAIL("db_open");
 
-    /* Enqueue enough 429s to exhaust retries (MAX_RETRIES=5 in retry_stream × MAX_LLM_RETRIES=3) */
+    /* Enqueue enough 429s to exhaust retries (MAX_RETRIES=5) with short Retry-After */
+    const char *hdrs[] = {"Retry-After: 1", NULL};
     for (int i = 0; i < 20; i++)
-        mock_server_enqueue(429, "{\"error\":{\"message\":\"rate limited\"}}");
+        mock_server_enqueue_with_headers(429, "{\"error\":{\"message\":\"rate limited\"}}", hdrs);
 
     char url[128];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", s_port);
@@ -224,7 +225,6 @@ static void test_e2_rate_limit_exhausted(void) {
 }
 
 int main(void) {
-    alarm(120);
     s_port = mock_server_start();
     printf("test_integration_error_classification (T236):\n");
     test_e11_auth_failure();

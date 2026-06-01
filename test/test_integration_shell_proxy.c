@@ -221,7 +221,6 @@ static void test_proxy_relay_integrity(void) {
 }
 
 int main(void) {
-    alarm(30);
     printf("test_integration_shell_proxy (T215):\n");
 
     setup_workspace();

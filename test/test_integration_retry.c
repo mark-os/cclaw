@@ -284,9 +284,9 @@ static void test_retry_exhausted(void) {
 }
 
 int main(void) {
-    alarm(60);
     curl_global_init(CURL_GLOBAL_DEFAULT);
     s_port = mock_server_start();
+    alarm(45);
     printf("--- test_integration_retry (T127) ---\n");
     test_retry_429_with_retry_after();
     test_retry_multiple_429();

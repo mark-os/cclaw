@@ -479,7 +479,6 @@ static void test_daemon_agent_error_exit(void) {
 }
 
 int main(void) {
-    alarm(120);
     curl_global_init(CURL_GLOBAL_DEFAULT);
     s_port = mock_server_start();
     printf("--- test_integration_audit (T221) ---\n");

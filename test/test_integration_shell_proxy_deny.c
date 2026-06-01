@@ -162,7 +162,6 @@ static void test_shell_allowed_vs_denied(void) {
 }
 
 int main(void) {
-    alarm(30);
     printf("test_integration_shell_proxy_deny (T216):\n");
 
     setup_workspace();

@@ -129,7 +129,14 @@ test: $(TEST_BIN)
 	@for t in $(TEST_BIN); do echo "--- $$t ---"; ./$$t || exit 1; done
 
 test-integration: $(INTEG_BIN)
-	@for t in $(INTEG_BIN); do echo "--- $$t ---"; ./$$t || exit 1; done
+	@fail=0; for t in $(INTEG_BIN); do \
+		out="/tmp/cclaw_$$(basename $$t).txt"; \
+		timeout 45 ./$$t > $$out 2>&1; rc=$$?; \
+		lines=$$(wc -l < $$out); \
+		if [ $$rc -eq 0 ]; then echo "PASS $$t ($$lines lines → $$out)"; \
+		elif [ $$rc -eq 124 ]; then echo "TIMEOUT $$t (killed after 45s, $$lines lines → $$out)"; fail=1; \
+		else echo "FAIL $$t (exit $$rc, $$lines lines → $$out)"; fail=1; fi; \
+	done; exit $$fail
 
 test-e2e: $(E2E_BIN)
 	@for t in $(E2E_BIN); do echo "--- $$t ---"; ./$$t || exit 1; done

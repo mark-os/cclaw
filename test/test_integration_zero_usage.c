@@ -162,7 +162,6 @@ static void test_e1_fallback_success(void) {
 }
 
 int main(void) {
-    alarm(30);
     s_port = mock_server_start();
     printf("test_integration_zero_usage (T231/V94):\n");
     test_e1_retry_then_success();

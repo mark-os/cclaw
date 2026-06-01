@@ -97,10 +97,10 @@ static int llm_call_with_retry_stream(const char *url, const char **headers,
 
         /* E2/E3: 429/5xx — retry with backoff */
         if (status == 429 || (status >= 500 && status < 600)) {
-            LOG_DEBUG(cfg, "HTTP %d, retry %d/%d", status, attempt + 1, MAX_RETRIES);
-
             int wait_sec = resp->retry_after > 0 ? resp->retry_after : (backoff_ms / 1000);
             if (wait_sec < 1) wait_sec = 1;
+            LOG_DEBUG(cfg, "HTTP %d, retry %d/%d (wait %ds)",
+                      status, attempt + 1, MAX_RETRIES, wait_sec);
             sleep((unsigned)wait_sec);
 
             http_response_free(resp);
@@ -533,10 +533,15 @@ int agent_run(AgentContext *ctx) {
                 http_response_free(&resp);
                 break;
             }
+            if (status == 429) {
+                LOG_DEBUG(ctx->cfg, "E2: rate limit exhausted after retries");
+                http_response_free(&resp);
+                break;
+            }
 
-            /* E2/E3/other HTTP errors — retry */
+            /* E3/other HTTP errors — retry */
             if (status < 200 || status >= 300 || !resp.data) {
-                LOG_DEBUG(ctx->cfg, "E2/E3: HTTP %d, retry %d/%d",
+                LOG_DEBUG(ctx->cfg, "E3: HTTP %d, retry %d/%d",
                           status, retry + 1, MAX_LLM_RETRIES);
                 http_response_free(&resp);
                 continue;

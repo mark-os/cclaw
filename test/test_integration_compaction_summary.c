@@ -135,7 +135,6 @@ static void test_fallback_on_failure(void) {
 }
 
 int main(void) {
-    alarm(30);
     curl_global_init(CURL_GLOBAL_DEFAULT);
     s_port = mock_server_start();
     assert(s_port > 0);

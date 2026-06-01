@@ -220,11 +220,18 @@ static int test_configure_channel_unknown(void) {
     ToolBootstrapCtx ctx = {.db = db};
     tool_configure_channel_register(&reg, &ctx);
 
+    /* Custom type without binary_path → error */
     ToolEntry *e = tools_lookup(&reg, "configure_channel");
     char *result = e->handler("{\"channel_type\":\"whatsapp\"}", e->user_data);
     assert(result != NULL);
     assert(strstr(result, "error") != NULL);
-    assert(strstr(result, "unknown") != NULL);
+    assert(strstr(result, "binary_path") != NULL);
+    free(result);
+
+    /* Custom type with binary_path → sentinel (success) */
+    result = e->handler("{\"channel_type\":\"whatsapp\",\"binary_path\":\"/usr/bin/wa\"}", e->user_data);
+    assert(result != NULL);
+    assert(strstr(result, "AGENT_EXIT_CONFIG:") != NULL);
     free(result);
 
     tools_free(&reg);

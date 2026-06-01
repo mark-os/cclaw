@@ -72,12 +72,14 @@ int tool_configure_provider_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
                           tool_configure_provider_handler, ctx);
 }
 
-/* ── T191: configure_channel ─────────────────────────────────────── */
+/* ── T251: configure_channel ─────────────────────────────────────── */
 
 static const char *CONFIGURE_CHANNEL_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
-    "\"channel_type\":{\"type\":\"string\",\"description\":\"Channel type: telegram or cli\"},"
-    "\"bot_token\":{\"type\":\"string\",\"description\":\"Bot token (required for telegram, omit for cli)\"}"
+    "\"channel_type\":{\"type\":\"string\",\"description\":\"Channel type: telegram, cli, or custom\"},"
+    "\"bot_token\":{\"type\":\"string\",\"description\":\"Bot token (required for telegram)\"},"
+    "\"binary_path\":{\"type\":\"string\",\"description\":\"Path to channel binary (required for custom)\"},"
+    "\"config\":{\"type\":\"object\",\"description\":\"Key-value config pairs seeded into channel_state\"}"
     "},\"required\":[\"channel_type\"]}";
 
 static char *tool_configure_channel_handler(const char *arguments, void *user_data) {
@@ -90,10 +92,11 @@ static char *tool_configure_channel_handler(const char *arguments, void *user_da
 
     cJSON *channel_type = cJSON_GetObjectItemCaseSensitive(json, "channel_type");
     cJSON *bot_token = cJSON_GetObjectItemCaseSensitive(json, "bot_token");
+    cJSON *binary_path = cJSON_GetObjectItemCaseSensitive(json, "binary_path");
 
     if (!cJSON_IsString(channel_type) || !channel_type->valuestring[0]) {
         cJSON_Delete(json);
-        return strdup("error: 'channel_type' is required (telegram or cli)");
+        return strdup("error: 'channel_type' is required");
     }
 
     const char *ctype = channel_type->valuestring;
@@ -103,9 +106,14 @@ static char *tool_configure_channel_handler(const char *arguments, void *user_da
             cJSON_Delete(json);
             return strdup("error: 'bot_token' is required for telegram channel");
         }
-    } else if (strcmp(ctype, "cli") != 0) {
-        cJSON_Delete(json);
-        return strdup("error: unknown channel_type — use 'telegram' or 'cli'");
+    } else if (strcmp(ctype, "cli") == 0) {
+        /* cli needs no credentials */
+    } else {
+        /* Custom channel — needs binary_path */
+        if (!cJSON_IsString(binary_path) || !binary_path->valuestring[0]) {
+            cJSON_Delete(json);
+            return strdup("error: 'binary_path' required for custom channel type");
+        }
     }
 
     cJSON_Delete(json);
@@ -117,7 +125,8 @@ static char *tool_configure_channel_handler(const char *arguments, void *user_da
 int tool_configure_channel_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
     return tools_register(reg, "configure_channel",
                           "Set up a communication channel. "
-                          "Supported: telegram (requires bot_token), cli (no credentials).",
+                          "Supported: telegram (requires bot_token), cli, or custom (requires binary_path). "
+                          "Optional config object seeds channel_state kv pairs.",
                           CONFIGURE_CHANNEL_PARAMS,
                           tool_configure_channel_handler, ctx);
 }

@@ -132,23 +132,77 @@ static void print_usage(void) {
            "  -s <id>            session id (short for --session-id=N)\n"
            "  -y                 yolo mode: no sandbox, all hosts allowed\n"
            "  --new              create a new session\n"
-           "  --debug            enable debug output\n"
+           "  --log-level=LEVEL  set log level (error|info|debug|trace)\n"
            "  --help             show this help\n");
 }
 
-/* Fork agent_turn_run as child, wait for it, return exit code.
- * Child inherits terminal for streaming output. */
+/* V96/T233: journal.db handle for CLI log persistence */
+static sqlite3 *g_journal_db;
+static const Config *g_cli_cfg;
+
+/* Fork agent_turn_run as child, pipe stderr → journal.db + tee to terminal.
+ * stdout inherited (future: streaming tokens). */
 static int cli_fork_turn(int64_t session_id) {
+    int err_pipe[2];
+    if (pipe(err_pipe) != 0) {
+        perror("pipe");
+        return AGENT_EXIT_ERROR;
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         perror("fork");
+        close(err_pipe[0]); close(err_pipe[1]);
         return AGENT_EXIT_ERROR;
     }
     if (pid == 0) {
-        /* Child: run agent turn, exit with its code */
+        /* Child: stderr → pipe, stdout inherited */
+        close(err_pipe[0]);
+        dup2(err_pipe[1], STDERR_FILENO);
+        close(err_pipe[1]);
         _exit(agent_turn_run(session_id));
     }
-    /* Parent: wait */
+
+    /* Parent: drain stderr pipe → journal.db + optional tee */
+    close(err_pipe[1]);
+
+    int tee = g_cli_cfg && g_cli_cfg->log_level >= LOG_LEVEL_DEBUG;
+    const char *agent_name = getenv("CCLAW_AGENT_NAME");
+    if (!agent_name) agent_name = "default";
+
+    /* Prepare journal insert if DB available */
+    sqlite3_stmt *stmt = NULL;
+    if (g_journal_db) {
+        sqlite3_prepare_v2(g_journal_db,
+            "INSERT INTO log(source, pid, session_id, stream, line) VALUES(?,?,?,2,?)",
+            -1, &stmt, NULL);
+    }
+
+    FILE *fp = fdopen(err_pipe[0], "r");
+    if (fp) {
+        char buf[4096];
+        while (fgets(buf, sizeof(buf), fp)) {
+            /* Strip trailing newline for DB storage */
+            size_t len = strlen(buf);
+            if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
+
+            if (stmt) {
+                sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+                sqlite3_bind_int(stmt, 2, pid);
+                sqlite3_bind_int64(stmt, 3, session_id);
+                sqlite3_bind_text(stmt, 4, buf, -1, SQLITE_STATIC);
+                sqlite3_step(stmt);
+                sqlite3_reset(stmt);
+            }
+            if (tee) fprintf(stderr, "%s\n", buf);
+        }
+        fclose(fp);
+    } else {
+        close(err_pipe[0]);
+    }
+
+    if (stmt) sqlite3_finalize(stmt);
+
     int status;
     waitpid(pid, &status, 0);
     if (WIFEXITED(status))
@@ -257,7 +311,8 @@ static int cli_run_turn(sqlite3 *adb, sqlite3 *cclaw_db, const Config *cfg,
 int main(int argc, char *argv[]) {
     int daemon_mode = 0;
     int agent_mode = 0;
-    int debug_mode = 0;
+    LogLevel log_level_override = LOG_LEVEL_INFO;
+    int log_level_set = 0;
     int new_session = 0;
     int yolo_mode = 0;
     int64_t session_id = -1;
@@ -271,8 +326,9 @@ int main(int argc, char *argv[]) {
             daemon_mode = 1;
         } else if (strcmp(argv[i], "--agent") == 0) {
             agent_mode = 1;
-        } else if (strcmp(argv[i], "--debug") == 0) {
-            debug_mode = 1;
+        } else if (strncmp(argv[i], "--log-level=", 12) == 0) {
+            log_level_override = log_level_parse(argv[i] + 12);
+            log_level_set = 1;
         } else if (strcmp(argv[i], "--new") == 0) {
             new_session = 1;
         } else if (strcmp(argv[i], "-y") == 0) {
@@ -324,7 +380,7 @@ int main(int argc, char *argv[]) {
             db_close(db);
             return 1;
         }
-        if (debug_mode) cfg->log_level = LOG_LEVEL_TRACE;
+        if (log_level_set) cfg->log_level = log_level_override;
 
         workspace_init(cfg);
         printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
@@ -391,7 +447,7 @@ int main(int argc, char *argv[]) {
         db_close(cclaw_db);
         return 1;
     }
-    if (debug_mode) cfg->log_level = LOG_LEVEL_TRACE;
+    if (log_level_set) cfg->log_level = log_level_override;
 
     if (!cfg->provider.api_key || !cfg->provider.api_key[0]) {
         fprintf(stderr, "error: no API key configured (set OPENROUTER_API_KEY or add to cclaw.db)\n");
@@ -428,8 +484,17 @@ int main(int argc, char *argv[]) {
     const char *agent_name = agent_name_env ? agent_name_env : "default";
     setenv("CCLAW_AGENT_NAME", agent_name, 0);
 
-    if (debug_mode) setenv("CCLAW_DEBUG", "1", 1);
     if (yolo_mode) setenv("CCLAW_YOLO", "1", 1);
+
+    /* Inject log level for child agent processes */
+    const char *level_str = cfg->log_level == LOG_LEVEL_TRACE ? "trace" :
+                            cfg->log_level == LOG_LEVEL_DEBUG ? "debug" :
+                            cfg->log_level == LOG_LEVEL_ERROR ? "error" : "info";
+    setenv("CCLAW_LOG_LEVEL", level_str, 1);
+
+    /* V96/T233: open journal.db for CLI log persistence */
+    g_journal_db = db_open_journal(".cclaw/journal.db");
+    g_cli_cfg = cfg;
 
     /* T228: CWD as read-only path for agent file_read */
     {
@@ -492,6 +557,7 @@ int main(int argc, char *argv[]) {
 done:
     session_set_state(adb, session_id, "idle");
     db_close(adb);
+    if (g_journal_db) db_close(g_journal_db);
     config_free(cfg);
     db_close(cclaw_db);
     return rc == 0 ? 0 : 1;

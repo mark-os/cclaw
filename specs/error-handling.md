@@ -89,10 +89,11 @@ Implemented via `LOG_*` macros in `include/log.h`. All output → stderr → pip
 | error | `error` | errors only | stderr → journal.db |
 | info (default) | `info` | + turn start/end, warnings | stderr → journal.db |
 | debug | `debug` | + tool dispatch, LLM timing, context plan stats, retry decisions, response shapes | stderr → journal.db |
-| trace | `trace` | + full req/resp JSON (--debug flag) | stderr → journal.db |
+| trace | `trace` | + full req/resp JSON | stderr → journal.db |
 
 `CCLAW_LOG_LEVEL` env var, stored in cclaw.db kv as `log_level`, injected at fork.
-CLI `--debug` flag sets trace level. CLI `--verbose` tees stderr pipe to terminal.
+`CCLAW_LOG_LEVEL` env var, stored in cclaw.db kv as `log_level`, injected at fork.
+CLI `--log-level=trace` enables full req/resp JSON. CLI `--verbose` tees stderr pipe to terminal.
 
 Format: `HH:MM:SS.mmm [LEVEL] message\n` — parseable by journal.db collector and grep.
 

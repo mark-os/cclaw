@@ -26,7 +26,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 
 ## §I INTERFACES
 - cmd: `./build/cclaw --cli` → stdin/stdout REPL, opens agent DB directly (standalone, no daemon)
-- cmd: `./build/cclaw --cli --debug` → raw LLM req/resp JSON to stderr
+- cmd: `./build/cclaw --log-level=trace` → raw LLM req/resp JSON to stderr
 - cmd: `./build/cclaw` → daemon mode (epoll loop: reap children, wake on signal pipe, fork agents; Telegram poller thread + civetweb status page run in-process; spawns log collector at startup)
 - cmd: `./build/cclaw --sub-agent --session-id=X --task="..."` → sub-agent process
 - env: `OPENROUTER_API_KEY` → seed `provider.api_key` in cclaw.db kv on first run (minimum to start)
@@ -291,7 +291,7 @@ T111|x|`HEARTBEAT.md` workspace file — optional; defines proactive tasks (remi
 T112|-|~~tool loop detection~~ (removed — max_iterations is sufficient guard; V43 deleted)|—
 T113|x|`[NO_REPLY]` suppression — Telegram group delivery checks response for marker; if present, skip `sendMessage`; system prompt instructs agent when to use it|V44
 T114|x|planning-only retry — after final assistant response w/ no tool_calls, detect plan-only pattern (bullets + promise verbs, no action); re-prompt once w/ act-now instruction; max 1 retry|V45
-T115|x|CLI mid-turn progress — always-on: stream intermediate assistant text + tool call names/args as they execute; tool results truncated aggressively for display (shorter than V40 LLM limit); `--debug` adds raw JSON req/resp on top|§I.cmd
+T115|x|CLI mid-turn progress — always-on: stream intermediate assistant text + tool call names/args as they execute; tool results truncated aggressively for display (shorter than V40 LLM limit); `--log-level=trace` adds raw JSON req/resp on top|§I.cmd
 T116|x|`HttpPolicy` layer — struct w/ allowed_hosts[], blocked_hosts[], block_private flag; `http_check_policy(url, policy)` validates before curl; integrate into `http_get` (web_fetch), JS `http_fetch` binding; LLM/telegram calls pass NULL policy (unrestricted)|V46
 T117|x|JS `http_fetch` sanitize option — `http_fetch(url, {sanitize: true})` applies html_strip_tags + sanitize_homoglyphs + boundary wrap (reuse web_fetch logic); default false (raw response)|V46,V38
 T118|x|tool result write-time truncation — truncate at append time (not context_build); full output to `/tmp/cclaw-<session_id>/<tool_call_id>.out`; reference path in truncation notice; agent can `file_read` the path; clean temp dir on session idle or daemon restart|V40
@@ -411,7 +411,7 @@ T229|x|yolo mode (`-y`) — CLI parses `-y`, sets `CCLAW_YOLO=1` in own env (inh
 T230|x|agent self-rename — config change tool accepts `{"action":"rename","name":"<new>"}` payload; parent (CLI/daemon) handles: `mv ~/.cclaw/agents/<old> ~/.cclaw/agents/<new>`, update cclaw.db agents registry, update CLI agent binding in cclaw.db kv; next fork uses new path|V79,V62
 T231|x|zero-usage retry in agent_run — detect E1 (200 + 0 tokens + empty + stop) in inner retry loop; ⊥ write entry; retry 2x primary via `continue` (re-plan, re-stream); then 1x fallback; on exhaust write error entry|V94,V32
 T232|x|`get_response_text` shared fn — walk branch backward, return first non-empty assistant content, stop at user boundary; replace inline logic in CLI `print_response`, daemon `deliver_response`, `tool_agent`, spawn result|V95
-T233|.|CLI journal parity — `cli_fork_turn` pipes child stderr → parent drains → journal.db + optionally tee to terminal (controlled by `--verbose`/log level); stdout inherited (future: streaming tokens); reuse `db_open_journal`|V96,V75
+T233|x|CLI journal parity — `cli_fork_turn` pipes child stderr → parent drains → journal.db + optionally tee to terminal (controlled by `--verbose`/log level); stdout inherited (future: streaming tokens); reuse `db_open_journal`|V96,V75
 T234|x|log level system — `CCLAW_LOG_LEVEL` env var; `cclaw.db` kv `log_level` default `info`; `config_load` reads + injects at fork; agent_turn reads env → `cfg->log_level` enum; replace `cfg->debug` bool w/ level check|V97
 T235|x|trace logging — at trace level, `llm_call_with_fallback_stream` writes full req/resp JSON to stderr (existing debug code, gated on trace); at debug level, write timing + retry decisions + context plan stats|V97
 T236|.|error classification in agent_run — implement detection for E1-E12 per `specs/error-handling.md`; each writes appropriate `stop_reason` + user-facing content on exhaust|V94,V32

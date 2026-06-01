@@ -44,10 +44,10 @@ FROM log WHERE session_id=N ORDER BY id DESC LIMIT 50;
 
 Stream: 1=stdout, 2=stderr. Note: CLI mode currently does NOT pipe to journal (T233 pending).
 
-### 4. Reproduce with --debug
+### 4. Reproduce with --log-level=trace
 
 ```bash
-echo "your prompt" | ./build/cclaw --debug --new 2>debug.txt
+echo "your prompt" | ./build/cclaw --log-level=trace --new 2>debug.txt
 ```
 
 `debug.txt` contains `[DEBUG REQ]` (full request JSON) and `[DEBUG RESP]` (status + response JSON). Check:
@@ -90,7 +90,7 @@ SELECT id, name, leaf_id, state FROM sessions WHERE id=N;
 |---------|-------------|-------|
 | blank response | zero-usage provider glitch (E1) | step 2 |
 | blank response | empty content stored as `""` | entries table, content column |
-| "error: LLM request failed after retries" | HTTP 429/5xx exhausted retries | journal stderr, --debug |
+| "error: LLM request failed after retries" | HTTP 429/5xx exhausted retries | journal stderr, --log-level=trace |
 | no response at all | agent crashed (SIGKILL/OOM) | session state=running, no final entry |
 | partial response | `finish_reason=length` (E8) | stop_reason=2 in entries |
 | wrong response shown | stale leaf_id (WAL visibility) | compare leaf_id vs max entry id |

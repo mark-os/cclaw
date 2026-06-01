@@ -127,7 +127,7 @@ make clean        # remove build/
 export OPENROUTER_API_KEY="sk-or-v1-..."
 ./build/cclaw              # interactive CLI (default)
 ./build/cclaw --daemon     # daemon mode (Telegram, web, cron, forks agents)
-./build/cclaw --debug      # raw LLM req/resp JSON to stderr
+./build/cclaw --log-level=trace  # full LLM req/resp JSON to stderr
 ```
 
 Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.

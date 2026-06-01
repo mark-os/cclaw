@@ -190,6 +190,7 @@ Daemon reads `agent_config` table from cclaw.db at fork time. Injects as env var
 | `CCLAW_ALLOWED_HOSTS` | agent_config.allowed_hosts | comma-separated |
 | `CCLAW_TOOLS` | agent_config.tools | comma-separated |
 | `CCLAW_SHELL_TIMEOUT` | agent_config.shell_timeout | seconds |
+| `CCLAW_LOG_LEVEL` | cclaw.db kv `log_level` | trace\|debug\|info\|error |
 | Provider API key (e.g. `OPENROUTER_API_KEY`) | cclaw.db kv (decrypted) | injected as native env var per provider config |
 | `CCLAW_DAEMON_DB` | cclaw.db path | only if daemon_db_read=1 |
 

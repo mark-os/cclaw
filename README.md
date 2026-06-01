@@ -42,6 +42,16 @@ graph TD
 
 **Agent processes**: sandboxed with setrlimit (memory/CPU caps). Drain inbox → LLM loop → write response → exit with intent code.
 
+## Deployment Models
+
+Agent processes are stateless — one turn, then exit, memory fully reclaimed. All persistent state lives in SQLite (3-DB model). This means any environment that can provide env vars + SQLite can run agent turns:
+
+- **CLI** (default) — single process, no daemon. Proves the agent loop is self-contained.
+- **Linux daemon** — orchestrator that forks/reaps agent processes, handles channels, cron, approvals. Not required for agent execution.
+- **Lambda / Workers / embedded** — set `CCLAW_*` env vars, point at an agent.db, run one turn. No daemon, no long-lived process.
+
+The daemon adds multi-agent coordination, Telegram/webhook channels, and sub-agent spawning. The core agent loop needs nothing beyond env config and a writable SQLite file.
+
 ## Security
 
 - **Agent process**: `setrlimit` (memory/CPU caps). Trusted compiled code; tools enforce policy (workspace-scoped file ops, host allowlist on HTTP).
@@ -101,7 +111,7 @@ cclaw -p "hello"         # single-turn: print response and exit
 cclaw -s 3               # resume session 3
 cclaw --new              # force new session
 cclaw --daemon           # run as daemon (telegram, web, cron)
-cclaw --debug            # show raw LLM request/response JSON
+cclaw --log-level=trace  # full LLM request/response JSON to stderr
 cclaw --help             # show all options
 ```
 

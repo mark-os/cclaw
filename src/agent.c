@@ -2,6 +2,7 @@
 #include "agent.h"
 #include "agent_exit.h"
 #include "context.h"
+#include "hook_dispatch.h"
 #include "log.h"
 #include "request_stream.h"
 #include "http.h"
@@ -62,6 +63,11 @@ static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
         if (err) snprintf(err, 64, "error: no tool dispatcher registered");
         return err;
     }
+
+    /* V113/T259: beforeToolCall hook — can block execution */
+    char *blocked = hook_dispatch_before_tool_call(ctx->ext_ctx, tc->name, tc->arguments);
+    if (blocked) return blocked;
+
     /* T115: notify progress — tool starting */
     if (ctx->progress)
         ctx->progress(PROGRESS_TOOL_START, tc->name, tc->arguments, ctx->progress_data);
@@ -71,6 +77,14 @@ static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
         result = malloc(64);
         if (result) snprintf(result, 64, "error: tool '%s' returned null", tc->name);
     }
+
+    /* V114/T259: afterToolCall hook — can replace result */
+    char *replaced = hook_dispatch_after_tool_call(ctx->ext_ctx, tc->name, tc->arguments, result);
+    if (replaced) {
+        free(result);
+        return replaced;
+    }
+
     return result;
 }
 
@@ -120,6 +134,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
                                          sqlite3 *db, int64_t session_id,
                                          const ContextPlan *plan,
                                          const ToolSchema *tools, size_t tool_count,
+                                         const char *body_override,
                                          HttpResponse *resp) {
     /* Mock mode: read canned response from file, skip HTTP entirely */
     const char *mock_path = getenv("CCLAW_LLM_MOCK");
@@ -137,12 +152,56 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
         }
         fclose(f);
         (void)a; (void)cfg; (void)db; (void)session_id;
-        (void)plan; (void)tools; (void)tool_count;
+        (void)plan; (void)tools; (void)tool_count; (void)body_override;
         return resp->data ? 200 : -1;
     }
 
     char *url = build_url(a, cfg);
     if (!url) return -1;
+
+    char auth_hdr[512];
+    snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", cfg->provider.api_key);
+    const char *headers[] = { "Content-Type: application/json", auth_hdr, NULL };
+
+    /* T258: if body_override provided (from beforeRequest hook), use http_post */
+    if (body_override) {
+        if (cfg->log_level >= LOG_LEVEL_TRACE)
+            LOG_TRACE(cfg, "REQ (hook-modified) %s", body_override);
+
+        int status = http_post(url, headers, body_override, resp);
+
+        /* Success — return as-is */
+        if (status >= 200 && status < 300)
+            return status;
+
+        /* Try fallbacks on failure */
+        if (status >= 300 && status < 500 && status != 401 && status != 403 && status != 404 && status != 429)
+            return status;
+
+        for (size_t i = 0; i < cfg->fallback_count; i++) {
+            LOG_DEBUG(cfg, "primary failed, trying fallback %zu", i);
+            const ProviderConfig *fb = &cfg->fallback_providers[i];
+            if (!fb->base_url || !fb->api_key || !fb->model) continue;
+
+            size_t blen = strlen(fb->base_url);
+            if (blen > 0 && fb->base_url[blen - 1] == '/') blen--;
+            const char *path = "/chat/completions";
+            size_t plen = strlen(path);
+            char *fb_url = arena_alloc(a, blen + plen + 1);
+            if (!fb_url) continue;
+            memcpy(fb_url, fb->base_url, blen);
+            memcpy(fb_url + blen, path, plen + 1);
+
+            char fb_auth[512];
+            snprintf(fb_auth, sizeof(fb_auth), "Authorization: Bearer %s", fb->api_key);
+            const char *fb_headers[] = { "Content-Type: application/json", fb_auth, NULL };
+
+            status = http_post(fb_url, fb_headers, body_override, resp);
+            if (status != -1)
+                return status;
+        }
+        return status;
+    }
 
     RequestStreamer rs;
     if (rs_init(&rs, db, session_id, cfg, plan, tools, tool_count) != 0)
@@ -165,10 +224,6 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
         }
         rs_cleanup(&dbg_rs);
     }
-
-    char auth_hdr[512];
-    snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", cfg->provider.api_key);
-    const char *headers[] = { "Content-Type: application/json", auth_hdr, NULL };
 
     int status = llm_call_with_retry_stream(url, headers, &rs, resp, cfg);
     rs_cleanup(&rs);
@@ -485,13 +540,20 @@ int agent_run(AgentContext *ctx) {
             }
 
             /* T45,V41: call LLM with streaming request + fallback chain */
+            /* T258/V112: beforeRequest hook — may provide modified request body */
+            char *body_override = hook_dispatch_before_request(
+                ctx->ext_ctx, ctx->db, ctx->session_id, call_cfg,
+                &plan, ctx->tools, ctx->tool_count);
+
             HttpResponse resp = {0};
             struct timespec t_start;
             clock_gettime(CLOCK_MONOTONIC, &t_start);
             int status = llm_call_with_fallback_stream(a, call_cfg, ctx->db,
                                                        ctx->session_id, &plan,
                                                        ctx->tools, ctx->tool_count,
+                                                       body_override,
                                                        &resp);
+            free(body_override);
             struct timespec t_end;
             clock_gettime(CLOCK_MONOTONIC, &t_end);
             long elapsed_ms = (t_end.tv_sec - t_start.tv_sec) * 1000 +

@@ -6,6 +6,7 @@
 #include "config.h"
 #include "llm.h"
 #include "db.h"
+#include "extension.h"
 
 #define AGENT_DEFAULT_MAX_ITERATIONS 25
 
@@ -37,6 +38,7 @@ typedef struct {
     size_t tool_count;
     ProgressFn progress;    /* T115: mid-turn progress callback (NULL = silent) */
     void *progress_data;
+    ExtensionCtx *ext_ctx;  /* T258: extension hooks (NULL = no hooks) */
 } AgentContext;
 
 /* Run agent loop: call LLM, dispatch tool_calls, repeat until assistant

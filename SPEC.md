@@ -456,8 +456,8 @@ T254|x|extension discovery — at agent startup, scan `workspace/extensions/*.js
 T255|x|extension loader — for each discovered file: read source, eval in shared QuickJS context as `(function(cclaw){ <source> })(cclaw_api)`; on throw → log warning + skip|V109,V110
 T256|x|`cclaw` API object — C-backed JS object injected into QuickJS context; methods: `registerTool(def)`, `registerHook(event, fn)`, `callTool(name, args)`; `registerTool` delegates to existing `js_tool_register_one`|V111
 T257|x|`cclaw.registerHook` — store hook fns in per-event arrays (C-side linked list or array); events: `beforeRequest`, `afterResponse`, `beforeToolCall`, `afterToolCall`, `turnStart`, `turnEnd`|V111,V112
-T258|.|hook dispatch: `beforeRequest` — in `agent.c` before LLM call, serialize messages to JS array, call each registered hook in order, deserialize modified array back; skip on throw|V112
-T259|.|hook dispatch: `beforeToolCall` / `afterToolCall` — in tool dispatch loop, call hooks before/after execution; `beforeToolCall` can block (return `{block:true}`); `afterToolCall` can replace result|V113,V114
+T258|x|hook dispatch: `beforeRequest` — in `agent.c` before LLM call, serialize messages to JS array, call each registered hook in order, deserialize modified array back; skip on throw|V112
+T259|x|hook dispatch: `beforeToolCall` / `afterToolCall` — in tool dispatch loop, call hooks before/after execution; `beforeToolCall` can block (return `{block:true}`); `afterToolCall` can replace result|V113,V114
 T260|.|hook dispatch: `turnStart` / `turnEnd` — call at agent_run entry and before exit; informational (no return value used)|V111
 T261|.|hook dispatch: `afterResponse` — after LLM response parsed, call hooks w/ response object (read-only inspect); skip on throw|V111
 T262|.|`cclaw.callTool(name, args)` — synchronous C callback; lookup tool in registry, call handler, return result string to JS; depth counter prevents infinite recursion (limit 8)|V116

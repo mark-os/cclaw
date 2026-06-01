@@ -160,6 +160,7 @@ int agent_turn_run(int64_t session_id) {
     ctx.dispatch_data = &setup.reg;
     ctx.tools = schemas;
     ctx.tool_count = tool_count;
+    ctx.ext_ctx = &setup.ext_ctx;
 
     rc = agent_run(&ctx);
 

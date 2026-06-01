@@ -406,7 +406,7 @@ static int plan_find_cut(const PlanEntry *entries, int count, int budget) {
     return cut;
 }
 
-int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan *out) {
+int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhead, ContextPlan *out) {
     if (!db || !cfg || !out) return -1;
     memset(out, 0, sizeof(*out));
 
@@ -495,7 +495,11 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan
                 * (float)cfg->provider.context_window);
     if (budget <= 0) budget = 8000;
 
-    int cut = plan_find_cut(filtered, fcount, budget);
+    /* Subtract fixed overhead (tool definitions, max_tokens reply reservation) */
+    int effective = budget - overhead;
+    if (effective < 256) effective = 256;
+
+    int cut = plan_find_cut(filtered, fcount, effective);
 
     out->entries = filtered;
     out->count = fcount;
@@ -614,7 +618,7 @@ int64_t session_try_compact(sqlite3 *db, int64_t session_id, const Config *cfg) 
 
     /* Walk branch leaf→root, accumulate tokens until we exceed target */
     ContextPlan plan;
-    if (context_plan(db, session_id, cfg, &plan) != 0) return -1;
+    if (context_plan(db, session_id, cfg, 0, &plan) != 0) return -1;
 
     /* Find cut point: walk from tail (plan.count-1) backward, summing tokens.
      * Stop when cumulative > target_tokens. Everything before that gets compacted. */

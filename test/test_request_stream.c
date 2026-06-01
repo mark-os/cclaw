@@ -55,7 +55,7 @@ static void test_basic_user_message(void) {
     cfg.provider.context_window = 100000;
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
     assert(plan.count == 1);
     assert(plan.cut == 0); /* all entries included */
 
@@ -117,7 +117,7 @@ static void test_assistant_tool_calls(void) {
     cfg.provider.context_window = 100000;
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
     assert(plan.count == 3);
 
     RequestStreamer rs;
@@ -175,7 +175,7 @@ static void test_tools_included(void) {
                            .parameters_json = "{\"type\":\"object\",\"properties\":{}}"}};
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     RequestStreamer rs;
     assert(rs_init(&rs, db, sid, &cfg, &plan, tools, 1) == 0);
@@ -217,7 +217,7 @@ static void test_reset(void) {
     cfg.provider.context_window = 100000;
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     RequestStreamer rs;
     assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
@@ -260,7 +260,7 @@ static void test_cutoff_notice(void) {
     cfg.provider.context_window = 200; /* tiny window to force cut */
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     if (plan.cut > 0) {
         /* Truncation occurred — verify cutoff notice */
@@ -304,7 +304,7 @@ static void test_special_chars_in_content(void) {
     cfg.provider.context_window = 100000;
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     RequestStreamer rs;
     assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
@@ -346,7 +346,7 @@ static void test_small_reads(void) {
     cfg.provider.context_window = 100000;
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     RequestStreamer rs;
     assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
@@ -392,7 +392,7 @@ static void test_cache_hints_anthropic(void) {
     cfg.provider.cache_hints = CACHE_HINTS_AUTO;
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     RequestStreamer rs;
     assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
@@ -430,7 +430,7 @@ static void test_cache_hints_deepseek_auto(void) {
     cfg.provider.cache_hints = CACHE_HINTS_AUTO;
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     RequestStreamer rs;
     assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
@@ -468,7 +468,7 @@ static void test_cache_hints_forced(void) {
     cfg.provider.cache_hints = CACHE_HINTS_ON;
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     RequestStreamer rs;
     assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
@@ -486,7 +486,7 @@ static void test_cache_hints_forced(void) {
     cfg.provider.model = "anthropic/claude-sonnet-4";
     cfg.provider.cache_hints = CACHE_HINTS_OFF;
 
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
     assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
 
     json = stream_all(&rs);
@@ -530,7 +530,7 @@ static void test_multiple_tool_calls_complex_args(void) {
     cfg.provider.context_window = 100000;
 
     ContextPlan plan;
-    assert(context_plan(db, sid, &cfg, &plan) == 0);
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     RequestStreamer rs;
     assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);

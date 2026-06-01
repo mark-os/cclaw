@@ -27,8 +27,10 @@ typedef struct {
 /* V41,V7,V8: Plan which entries to include in LLM request (pass 1).
  * Queries SQLite for branch metadata without loading content.
  * Applies V28 filtering and V8 cut logic.
+ * overhead: estimated tokens consumed by tool definitions + other fixed request
+ *           content not stored as entries (subtracted from budget before cut).
  * Returns 0 on success, -1 on error. Caller frees with context_plan_free(). */
-int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, ContextPlan *out);
+int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhead, ContextPlan *out);
 
 /* Free a ContextPlan. */
 void context_plan_free(ContextPlan *plan);

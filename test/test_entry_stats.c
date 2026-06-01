@@ -66,7 +66,7 @@ static void test_context_plan_uses_stored_stats(void) {
     Config cfg = {0};
     cfg.provider.context_window = 128000;
     ContextPlan plan = {0};
-    int rc = context_plan(db, sid, &cfg, &plan);
+    int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan failed");
     if (plan.count != 2) FAIL("wrong count");
     if (plan.entries[0].token_estimate <= 0) FAIL("entry 0 token_estimate <= 0");

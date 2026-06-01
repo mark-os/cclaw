@@ -43,7 +43,7 @@ static void test_basic_plan(void) {
     Config cfg = {0};
     cfg.provider.context_window = 128000;
     ContextPlan plan = {0};
-    int rc = context_plan(db, sid, &cfg, &plan);
+    int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan returned error");
     if (plan.count != 3) FAIL("wrong count");
     if (plan.cut != 0) FAIL("should include all (cut=0)");
@@ -74,7 +74,7 @@ static void test_v28_filtering(void) {
     Config cfg = {0};
     cfg.provider.context_window = 128000;
     ContextPlan plan = {0};
-    int rc = context_plan(db, sid, &cfg, &plan);
+    int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan returned error");
     /* Should have: user, user, assistant (3 entries — errored assistant + tool_result filtered) */
     if (plan.count != 3) {
@@ -108,7 +108,7 @@ static void test_cut_point(void) {
     Config cfg = {0};
     cfg.provider.context_window = 200; /* tiny: 120 token budget */
     ContextPlan plan = {0};
-    int rc = context_plan(db, sid, &cfg, &plan);
+    int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan returned error");
     if (plan.count != 20) FAIL("wrong total count");
     if (plan.cut <= 0) FAIL("should have truncated (cut > 0)");
@@ -141,7 +141,7 @@ static void test_v8_tool_call_group(void) {
     Config cfg = {0};
     cfg.max_history_tokens = 80;
     ContextPlan plan = {0};
-    int rc = context_plan(db, sid, &cfg, &plan);
+    int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan returned error");
 
     /* If cut lands in the middle, it should NOT split the tool_call group */
@@ -174,7 +174,7 @@ static void test_plan_no_content_access(void) {
     Config cfg = {0};
     cfg.provider.context_window = 128000;
     ContextPlan plan = {0};
-    int rc = context_plan(db, sid, &cfg, &plan);
+    int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan returned error");
     if (plan.count != 2) FAIL("wrong count");
     /* Verify token_estimate reflects the large content (not zero/default) */

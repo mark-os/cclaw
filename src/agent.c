@@ -458,13 +458,21 @@ int agent_run(AgentContext *ctx) {
         for (int retry = 0; retry < MAX_LLM_RETRIES; retry++) {
             /* V41: plan entry IDs + cut point from SQLite (pass 1, no content loaded) */
             ContextPlan plan;
-            int rc = context_plan(ctx->db, ctx->session_id, ctx->cfg, &plan);
+            /* Estimate tokens consumed by tool definitions (not stored as entries) */
+            int tool_overhead = 0;
+            for (size_t ti = 0; ti < ctx->tool_count; ti++) {
+                tool_overhead += 4; /* per-tool framing */
+                if (ctx->tools[ti].name) tool_overhead += (int)strlen(ctx->tools[ti].name) / 4;
+                if (ctx->tools[ti].description) tool_overhead += (int)strlen(ctx->tools[ti].description) / 4;
+                if (ctx->tools[ti].parameters_json) tool_overhead += (int)strlen(ctx->tools[ti].parameters_json) / 4;
+            }
+            int rc = context_plan(ctx->db, ctx->session_id, ctx->cfg, tool_overhead, &plan);
             if (rc != 0) {
                 arena_destroy(a);
                 return -1;
             }
-            LOG_DEBUG(ctx->cfg, "context_plan: %d entries, cut=%d, budget=%d",
-                      plan.count, plan.cut, plan.budget);
+            LOG_DEBUG(ctx->cfg, "context_plan: %d entries, cut=%d, budget=%d (overhead=%d)",
+                      plan.count, plan.cut, plan.budget, tool_overhead);
 
             /* V94: after 2 E1 retries on primary, try fallback if available */
             const Config *call_cfg = ctx->cfg;
@@ -551,7 +559,7 @@ int agent_run(AgentContext *ctx) {
             }
 
             /* T235: log response shape at debug level */
-            LOG_DEBUG(ctx->cfg, "response: finish=%s tokens=%d/%d/%d tools=%zu content=%s",
+            LOG_DEBUG(ctx->cfg, "response: finish=%s prompt=%d completion=%d total=%d tools=%zu content=%s",
                       llm_resp.finish_reason,
                       llm_resp.usage.prompt_tokens,
                       llm_resp.usage.completion_tokens,

@@ -20,7 +20,7 @@ static int tests_run = 0, tests_passed = 0;
 static char *stream_to_buf(sqlite3 *db, int64_t sid, Config *cfg,
                            ToolSchema *tools, size_t tool_count) {
     ContextPlan plan;
-    if (context_plan(db, sid, cfg, &plan) != 0) return NULL;
+    if (context_plan(db, sid, cfg, 0, &plan) != 0) return NULL;
 
     RequestStreamer rs;
     if (rs_init(&rs, db, sid, cfg, &plan, tools, tool_count) != 0) {

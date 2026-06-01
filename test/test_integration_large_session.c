@@ -76,7 +76,7 @@ static void test_context_plan_truncation(void) {
     cfg.max_history_tokens = 0; /* use default 60% */
 
     ContextPlan plan;
-    int rc = context_plan(db, sid, &cfg, &plan);
+    int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) { db_close(db); FAIL("context_plan failed"); }
 
     /* Verify truncation happened: cut > 0 means some entries excluded */
@@ -229,7 +229,7 @@ static void test_context_plan_no_content_load(void) {
     cfg.provider.context_window = 16000;
 
     ContextPlan plan;
-    int rc = context_plan(db, sid, &cfg, &plan);
+    int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) { db_close(db); FAIL("context_plan failed"); }
 
     long rss_after = get_rss_kb();

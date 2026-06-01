@@ -414,7 +414,7 @@ T232|x|`get_response_text` shared fn — walk branch backward, return first non-
 T233|x|CLI journal parity — `cli_fork_turn` pipes child stderr → parent drains → journal.db + optionally tee to terminal (controlled by `--verbose`/log level); stdout inherited (future: streaming tokens); reuse `db_open_journal`|V96,V75
 T234|x|log level system — `CCLAW_LOG_LEVEL` env var; `cclaw.db` kv `log_level` default `info`; `config_load` reads + injects at fork; agent_turn reads env → `cfg->log_level` enum; replace `cfg->debug` bool w/ level check|V97
 T235|x|trace logging — at trace level, `llm_call_with_fallback_stream` writes full req/resp JSON to stderr (existing debug code, gated on trace); at debug level, write timing + retry decisions + context plan stats|V97
-T236|.|error classification in agent_run — implement detection for E1-E12 per `specs/error-handling.md`; each writes appropriate `stop_reason` + user-facing content on exhaust|V94,V32
+T236|x|error classification in agent_run — implement detection for E1-E12 per `specs/error-handling.md`; each writes appropriate `stop_reason` + user-facing content on exhaust|V94,V32
 T237|x|fix `request_stream.c` JSON closing — `build_tools_fragment` ! ⊥ close the root object; separate concerns: messages close `]`, then optional `max_tokens`, then optional `tools`, then final `}`; review all RS_PHASE transitions for correctness; ensure trace log shows exact bytes sent|V41,B2
 
 Test tiers (Makefile targets):

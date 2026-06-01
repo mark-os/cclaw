@@ -74,15 +74,28 @@ static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
     return result;
 }
 
-/* V41,V2: call LLM with streaming upload + retry on 429/5xx. Resets streamer on retry. */
+/* V41,V2: call LLM with streaming upload + retry on 429/5xx. Resets streamer on retry.
+ * Returns: HTTP status on success, -1 network error, -2 timeout.
+ * 401/403/404 returned immediately (no retry — caller handles fallback). */
 static int llm_call_with_retry_stream(const char *url, const char **headers,
                                       RequestStreamer *rs, HttpResponse *resp,
                                       const Config *cfg) {
     int backoff_ms = INITIAL_BACKOFF_MS;
+    int last_status = -1;
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
         int status = http_post_stream(url, headers, rs_read_cb, rs, resp);
+        last_status = status;
 
+        /* E10: timeout, E4: network — no retry, return for fallback */
+        if (status == -1 || status == -2)
+            return status;
+
+        /* E11/E12: auth/not-found — no retry, return for fallback */
+        if (status == 401 || status == 403 || status == 404)
+            return status;
+
+        /* E2/E3: 429/5xx — retry with backoff */
         if (status == 429 || (status >= 500 && status < 600)) {
             LOG_DEBUG(cfg, "HTTP %d, retry %d/%d", status, attempt + 1, MAX_RETRIES);
 
@@ -99,7 +112,7 @@ static int llm_call_with_retry_stream(const char *url, const char **headers,
         return status;
     }
 
-    return -1;
+    return last_status;
 }
 
 /* T45,V41: try primary provider with streaming, then fallback chain on 5xx/timeout (-1) */
@@ -160,10 +173,15 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
     int status = llm_call_with_retry_stream(url, headers, &rs, resp, cfg);
     rs_cleanup(&rs);
 
-    if (status != -1)
+    /* Success — return as-is */
+    if (status >= 200 && status < 300)
         return status;
 
-    /* T45: try fallback providers */
+    /* Non-fallbackable client errors (except auth/not-found) — return as-is */
+    if (status >= 300 && status < 500 && status != 401 && status != 403 && status != 404 && status != 429)
+        return status;
+
+    /* E2/E3/E4/E10/E11/E12: try fallback providers */
     for (size_t i = 0; i < cfg->fallback_count; i++) {
         LOG_DEBUG(cfg, "primary failed, trying fallback %zu", i);
 
@@ -435,6 +453,7 @@ int agent_run(AgentContext *ctx) {
         LlmResponse llm_resp;
         memset(&llm_resp, 0, sizeof(llm_resp));
         int e1_retries = 0; /* V94: zero-usage retry counter */
+        int last_status = 0; /* T236: track last HTTP status for error message */
 
         for (int retry = 0; retry < MAX_LLM_RETRIES; retry++) {
             /* V41: plan entry IDs + cut point from SQLite (pass 1, no content loaded) */
@@ -472,21 +491,44 @@ int agent_run(AgentContext *ctx) {
             context_plan_free(&plan);
 
             LOG_DEBUG(ctx->cfg, "LLM call: %ldms, status=%d", elapsed_ms, status);
+            last_status = status;
 
             if (ctx->cfg->log_level >= LOG_LEVEL_TRACE && resp.data)
                 LOG_TRACE(ctx->cfg, "RESP status=%d %s", status, resp.data);
 
-            /* Context overflow detection — return error so caller can trim */
+            /* Context overflow detection (E5) — return error so caller can trim */
             if (status == 400 && is_context_overflow(resp.data)) {
-                LOG_DEBUG(ctx->cfg, "context overflow detected");
+                LOG_DEBUG(ctx->cfg, "E5: context overflow detected");
                 http_response_free(&resp);
                 arena_destroy(a);
                 return -2;
             }
 
-            /* V29/V32: HTTP failure → retry */
+            /* T236: Error classification — non-retryable failures break immediately */
+            if (status == -2) {
+                LOG_DEBUG(ctx->cfg, "E10: request timed out");
+                http_response_free(&resp);
+                break;
+            }
+            if (status == -1) {
+                LOG_DEBUG(ctx->cfg, "E4: network error");
+                http_response_free(&resp);
+                break;
+            }
+            if (status == 401 || status == 403) {
+                LOG_DEBUG(ctx->cfg, "E11: auth failure (%d)", status);
+                http_response_free(&resp);
+                break;
+            }
+            if (status == 404) {
+                LOG_DEBUG(ctx->cfg, "E12: model not found");
+                http_response_free(&resp);
+                break;
+            }
+
+            /* E2/E3/other HTTP errors — retry */
             if (status < 200 || status >= 300 || !resp.data) {
-                LOG_DEBUG(ctx->cfg, "LLM error (status=%d), retry %d/%d",
+                LOG_DEBUG(ctx->cfg, "E2/E3: HTTP %d, retry %d/%d",
                           status, retry + 1, MAX_LLM_RETRIES);
                 http_response_free(&resp);
                 continue;
@@ -517,6 +559,37 @@ int agent_run(AgentContext *ctx) {
                       llm_resp.tool_call_count,
                       llm_resp.content ? "yes" : "null");
 
+            /* E9: content filter — non-retryable, write error entry */
+            if (strcmp(llm_resp.finish_reason, "content_filter") == 0) {
+                LOG_DEBUG(ctx->cfg, "E9: content filter triggered");
+                Message err_msg = {.role = ROLE_ASSISTANT,
+                                   .content = strdup("error: response filtered by provider safety policy"),
+                                   .stop_reason = STOP_REASON_ERROR,
+                                   .model = ctx->cfg->provider.model};
+                entry_append_with_turn(ctx->db, ctx->session_id, &err_msg, turn_id);
+                free(err_msg.content);
+                arena_destroy(a);
+                return -1;
+            }
+
+            /* E8: token limit exhaustion — store partial content as-is */
+            if (strcmp(llm_resp.finish_reason, "length") == 0) {
+                LOG_DEBUG(ctx->cfg, "E8: finish_reason=length, storing partial");
+                char *meta = build_metadata(ctx->cfg, &llm_resp);
+                Message asst = {.role = ROLE_ASSISTANT,
+                                .content = llm_resp.content ? strdup(llm_resp.content) : strdup(""),
+                                .stop_reason = STOP_REASON_LENGTH,
+                                .metadata_json = meta,
+                                .model = ctx->cfg->provider.model,
+                                .usage_in = llm_resp.usage.prompt_tokens,
+                                .usage_out = llm_resp.usage.completion_tokens};
+                entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
+                free(asst.content);
+                free(meta);
+                arena_destroy(a);
+                return 0;
+            }
+
             /* V94/T231: zero-usage empty stop (E1) — provider glitch, retry */
             if (llm_resp.usage.total_tokens == 0 &&
                 (!llm_resp.content || !llm_resp.content[0]) &&
@@ -535,9 +608,23 @@ int agent_run(AgentContext *ctx) {
 
         /* V32: all retries exhausted → write final error entry + exit */
         if (!llm_ok) {
-            const char *err_text = e1_retries > 0
-                ? "error: model returned empty response — provider glitch, try again"
-                : "error: LLM request failed after retries";
+            const char *err_text;
+            if (e1_retries > 0)
+                err_text = "error: model returned empty response — provider glitch, try again";
+            else if (last_status == -2)
+                err_text = "error: request timed out";
+            else if (last_status == -1)
+                err_text = "error: network error — could not reach provider";
+            else if (last_status == 401 || last_status == 403)
+                err_text = "error: authentication failed — check API key";
+            else if (last_status == 404)
+                err_text = "error: model not available";
+            else if (last_status == 429)
+                err_text = "error: rate limited by provider";
+            else if (last_status >= 500)
+                err_text = "error: provider server error";
+            else
+                err_text = "error: LLM request failed after retries";
             Message err_msg = {.role = ROLE_ASSISTANT,
                                .content = strdup(err_text),
                                .stop_reason = STOP_REASON_ERROR,

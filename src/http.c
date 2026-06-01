@@ -74,11 +74,13 @@ int http_post(const char *url, const char **headers, const char *body,
     long status = -1;
     if (rc == CURLE_OK)
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    else if (rc == CURLE_OPERATION_TIMEDOUT)
+        status = -2;
 
     curl_slist_free_all(hlist);
     curl_easy_cleanup(curl);
 
-    return (rc == CURLE_OK) ? (int)status : -1;
+    return (int)status;
 }
 
 void http_response_free(HttpResponse *resp) {
@@ -120,9 +122,11 @@ int http_post_stream(const char *url, const char **headers,
     long status = -1;
     if (rc == CURLE_OK)
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    else if (rc == CURLE_OPERATION_TIMEDOUT)
+        status = -2;
 
     curl_slist_free_all(hlist);
     curl_easy_cleanup(curl);
 
-    return (rc == CURLE_OK) ? (int)status : -1;
+    return (int)status;
 }

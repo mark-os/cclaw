@@ -151,7 +151,6 @@ static void test_agent_workspace_side_effects(void) {
     ctx.dispatch_data = &reg;
     ctx.tools = schemas;
     ctx.tool_count = tool_count;
-    ctx.debug = 0;
 
     int rc = agent_run(&ctx);
     if (rc != 0) {

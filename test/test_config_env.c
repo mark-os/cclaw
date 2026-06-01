@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config.h"
+#include "log.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,7 +25,7 @@ static void clear_env(void) {
     unsetenv("CCLAW_SAVE_REASONING");
     unsetenv("CCLAW_SAVE_USAGE");
     unsetenv("CCLAW_SAVE_LOGPROBS");
-    unsetenv("CCLAW_DEBUG");
+    unsetenv("CCLAW_LOG_LEVEL");
 }
 
 static void test_env_defaults(void) {
@@ -41,7 +42,7 @@ static void test_env_defaults(void) {
     assert(cfg->max_iterations == 25);
     assert(cfg->shell_timeout == 30);
     assert(cfg->token_rate_limit == 1000000);
-    assert(cfg->debug == 0);
+    assert(cfg->log_level == LOG_LEVEL_INFO);
     config_free(cfg);
     printf("  PASS test_env_defaults\n");
 }
@@ -87,7 +88,7 @@ static void test_env_all_overrides(void) {
     setenv("CCLAW_SAVE_REASONING", "1", 1);
     setenv("CCLAW_SAVE_USAGE", "1", 1);
     setenv("CCLAW_SAVE_LOGPROBS", "1", 1);
-    setenv("CCLAW_DEBUG", "1", 1);
+    setenv("CCLAW_LOG_LEVEL", "trace", 1);
 
     Config *cfg = config_load_from_env();
     assert(cfg != NULL);
@@ -105,7 +106,7 @@ static void test_env_all_overrides(void) {
     assert(cfg->save_reasoning == 1);
     assert(cfg->save_usage == 1);
     assert(cfg->save_logprobs == 1);
-    assert(cfg->debug == 1);
+    assert(cfg->log_level == LOG_LEVEL_TRACE);
     config_free(cfg);
     clear_env();
     printf("  PASS test_env_all_overrides\n");

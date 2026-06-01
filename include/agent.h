@@ -35,7 +35,6 @@ typedef struct {
     void *dispatch_data;
     const ToolSchema *tools;
     size_t tool_count;
-    int debug;              /* dump raw LLM req/resp JSON to stderr */
     ProgressFn progress;    /* T115: mid-turn progress callback (NULL = silent) */
     void *progress_data;
 } AgentContext;

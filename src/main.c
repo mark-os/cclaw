@@ -9,6 +9,7 @@
 #include <libgen.h>
 #include "cclaw.h"
 #include "config.h"
+#include "log.h"
 #include "agent_config.h"
 #include "agent_exit.h"
 #include "agent_turn.h"
@@ -323,7 +324,7 @@ int main(int argc, char *argv[]) {
             db_close(db);
             return 1;
         }
-        if (debug_mode) cfg->debug = 1;
+        if (debug_mode) cfg->log_level = LOG_LEVEL_TRACE;
 
         workspace_init(cfg);
         printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
@@ -390,7 +391,7 @@ int main(int argc, char *argv[]) {
         db_close(cclaw_db);
         return 1;
     }
-    if (debug_mode) cfg->debug = 1;
+    if (debug_mode) cfg->log_level = LOG_LEVEL_TRACE;
 
     if (!cfg->provider.api_key || !cfg->provider.api_key[0]) {
         fprintf(stderr, "error: no API key configured (set OPENROUTER_API_KEY or add to cclaw.db)\n");

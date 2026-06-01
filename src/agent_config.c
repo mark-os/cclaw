@@ -194,7 +194,7 @@ Config *agent_config_merge(const Config *global, const AgentConfig *ac) {
     cfg->heartbeat_interval = global->heartbeat_interval;
     cfg->shell_timeout = global->shell_timeout;
     cfg->stale_lock_timeout = global->stale_lock_timeout;
-    cfg->debug = global->debug;
+    cfg->log_level = global->log_level;
     cfg->save_reasoning = global->save_reasoning;
     cfg->save_usage = global->save_usage;
     cfg->save_logprobs = global->save_logprobs;

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config.h"
 #include "db.h"
+#include "log.h"
 #include "cJSON.h"
 #include "templates.h"
 #include <stdlib.h>
@@ -183,8 +184,8 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_SAVE_LOGPROBS");
     cfg->save_logprobs = v ? atoi(v) : 0;
 
-    v = getenv("CCLAW_DEBUG");
-    cfg->debug = v ? atoi(v) : 0;
+    v = getenv("CCLAW_LOG_LEVEL");
+    cfg->log_level = log_level_parse(v);
 
     v = getenv("CCLAW_CONTEXT_THRESHOLD");
     cfg->context_threshold = v ? (float)atof(v) : 0.6f;

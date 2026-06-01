@@ -62,7 +62,6 @@ static void test_provider_fallback_live(void) {
     ctx.session_id = sid;
     ctx.cfg = &cfg;
     ctx.dispatch = mock_dispatch;
-    ctx.debug = 1;
 
     int rc = agent_run(&ctx);
     if (rc != 0) { db_close(db); FAIL("agent_run failed — fallback did not fire"); }

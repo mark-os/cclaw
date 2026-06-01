@@ -4,6 +4,7 @@
 #include "agent.h"
 #include "db.h"
 #include "config.h"
+#include "log.h"
 #include "llm.h"
 #include "http.h"
 
@@ -199,7 +200,7 @@ static void test_debug_flag_stderr(void) {
     cfg.provider.api_key = "fake";
     cfg.provider.model = "test";
     cfg.provider.context_window = 128000;
-    cfg.debug = 1;
+    cfg.log_level = LOG_LEVEL_TRACE;
 
     Message user_msg = {.role = ROLE_USER, .content = "hello"};
     entry_append(db, sid, &user_msg);
@@ -209,7 +210,6 @@ static void test_debug_flag_stderr(void) {
     ctx.session_id = sid;
     ctx.cfg = &cfg;
     ctx.dispatch = mock_tool_ok;
-    ctx.debug = 1;
 
     int rc = agent_run(&ctx);
     if (rc != -1) { FAIL("expected -1 for unreachable LLM"); db_close(db); return; }

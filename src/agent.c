@@ -2,6 +2,7 @@
 #include "agent.h"
 #include "agent_exit.h"
 #include "context.h"
+#include "log.h"
 #include "request_stream.h"
 #include "http.h"
 #include "shutdown.h"
@@ -75,15 +76,15 @@ static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
 
 /* V41,V2: call LLM with streaming upload + retry on 429/5xx. Resets streamer on retry. */
 static int llm_call_with_retry_stream(const char *url, const char **headers,
-                                      RequestStreamer *rs, HttpResponse *resp, int debug) {
+                                      RequestStreamer *rs, HttpResponse *resp,
+                                      const Config *cfg) {
     int backoff_ms = INITIAL_BACKOFF_MS;
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
         int status = http_post_stream(url, headers, rs_read_cb, rs, resp);
 
         if (status == 429 || (status >= 500 && status < 600)) {
-            if (debug)
-                fprintf(stderr, "[DEBUG] HTTP %d, retry %d/%d\n", status, attempt + 1, MAX_RETRIES);
+            LOG_DEBUG(cfg, "HTTP %d, retry %d/%d", status, attempt + 1, MAX_RETRIES);
 
             int wait_sec = resp->retry_after > 0 ? resp->retry_after : (backoff_ms / 1000);
             if (wait_sec < 1) wait_sec = 1;
@@ -106,7 +107,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
                                          sqlite3 *db, int64_t session_id,
                                          const ContextPlan *plan,
                                          const ToolSchema *tools, size_t tool_count,
-                                         HttpResponse *resp, int debug) {
+                                         HttpResponse *resp) {
     /* Mock mode: read canned response from file, skip HTTP entirely */
     const char *mock_path = getenv("CCLAW_LLM_MOCK");
     if (mock_path) {
@@ -123,7 +124,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
         }
         fclose(f);
         (void)a; (void)cfg; (void)db; (void)session_id;
-        (void)plan; (void)tools; (void)tool_count; (void)debug;
+        (void)plan; (void)tools; (void)tool_count;
         return resp->data ? 200 : -1;
     }
 
@@ -134,8 +135,8 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
     if (rs_init(&rs, db, session_id, cfg, plan, tools, tool_count) != 0)
         return -1;
 
-    if (debug) {
-        /* For debug: stream entire request to stderr */
+    if (cfg->log_level >= LOG_LEVEL_TRACE) {
+        /* Trace: stream entire request to stderr */
         RequestStreamer dbg_rs;
         rs_init(&dbg_rs, db, session_id, cfg, plan, tools, tool_count);
         size_t cap = 4096, len = 0;
@@ -147,7 +148,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
                 if (n == 0) break;
                 len += n;
             }
-            if (dbuf) { dbuf[len] = '\0'; fprintf(stderr, "[DEBUG REQ] %s\n", dbuf); free(dbuf); }
+            if (dbuf) { dbuf[len] = '\0'; LOG_TRACE(cfg, "REQ %s", dbuf); free(dbuf); }
         }
         rs_cleanup(&dbg_rs);
     }
@@ -156,7 +157,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
     snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", cfg->provider.api_key);
     const char *headers[] = { "Content-Type: application/json", auth_hdr, NULL };
 
-    int status = llm_call_with_retry_stream(url, headers, &rs, resp, debug);
+    int status = llm_call_with_retry_stream(url, headers, &rs, resp, cfg);
     rs_cleanup(&rs);
 
     if (status != -1)
@@ -164,8 +165,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
 
     /* T45: try fallback providers */
     for (size_t i = 0; i < cfg->fallback_count; i++) {
-        if (debug)
-            fprintf(stderr, "[DEBUG] primary failed, trying fallback %zu\n", i);
+        LOG_DEBUG(cfg, "primary failed, trying fallback %zu", i);
 
         const ProviderConfig *fb = &cfg->fallback_providers[i];
         if (!fb->base_url || !fb->api_key || !fb->model) continue;
@@ -187,7 +187,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
         if (rs_init(&fb_rs, db, session_id, &fb_cfg, plan, tools, tool_count) != 0)
             continue;
 
-        if (debug) {
+        if (cfg->log_level >= LOG_LEVEL_TRACE) {
             RequestStreamer dbg_rs;
             rs_init(&dbg_rs, db, session_id, &fb_cfg, plan, tools, tool_count);
             size_t cap = 4096, len = 0;
@@ -199,7 +199,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
                     if (n == 0) break;
                     len += n;
                 }
-                if (dbuf) { dbuf[len] = '\0'; fprintf(stderr, "[DEBUG REQ fallback %zu] %s\n", i, dbuf); free(dbuf); }
+                if (dbuf) { dbuf[len] = '\0'; LOG_TRACE(cfg, "REQ fallback %zu: %s", i, dbuf); free(dbuf); }
             }
             rs_cleanup(&dbg_rs);
         }
@@ -208,7 +208,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
         snprintf(fb_auth, sizeof(fb_auth), "Authorization: Bearer %s", fb->api_key);
         const char *fb_headers[] = { "Content-Type: application/json", fb_auth, NULL };
 
-        status = llm_call_with_retry_stream(fb_url, fb_headers, &fb_rs, resp, debug);
+        status = llm_call_with_retry_stream(fb_url, fb_headers, &fb_rs, resp, cfg);
         rs_cleanup(&fb_rs);
         if (status != -1)
             return status;
@@ -444,6 +444,8 @@ int agent_run(AgentContext *ctx) {
                 arena_destroy(a);
                 return -1;
             }
+            LOG_DEBUG(ctx->cfg, "context_plan: %d entries, cut=%d, budget=%d",
+                      plan.count, plan.cut, plan.budget);
 
             /* V94: after 2 E1 retries on primary, try fallback if available */
             const Config *call_cfg = ctx->cfg;
@@ -452,25 +454,31 @@ int agent_run(AgentContext *ctx) {
                 fb_cfg = *ctx->cfg;
                 fb_cfg.provider = ctx->cfg->fallback_providers[0];
                 call_cfg = &fb_cfg;
-                if (ctx->debug)
-                    fprintf(stderr, "[DEBUG] E1 zero-usage: trying fallback model\n");
+                LOG_DEBUG(ctx->cfg, "E1 zero-usage: trying fallback model");
             }
 
             /* T45,V41: call LLM with streaming request + fallback chain */
             HttpResponse resp = {0};
+            struct timespec t_start;
+            clock_gettime(CLOCK_MONOTONIC, &t_start);
             int status = llm_call_with_fallback_stream(a, call_cfg, ctx->db,
                                                        ctx->session_id, &plan,
                                                        ctx->tools, ctx->tool_count,
-                                                       &resp, ctx->debug);
+                                                       &resp);
+            struct timespec t_end;
+            clock_gettime(CLOCK_MONOTONIC, &t_end);
+            long elapsed_ms = (t_end.tv_sec - t_start.tv_sec) * 1000 +
+                              (t_end.tv_nsec - t_start.tv_nsec) / 1000000;
             context_plan_free(&plan);
 
-            if (ctx->debug && resp.data)
-                fprintf(stderr, "[DEBUG RESP] status=%d %s\n", status, resp.data);
+            LOG_DEBUG(ctx->cfg, "LLM call: %ldms, status=%d", elapsed_ms, status);
+
+            if (ctx->cfg->log_level >= LOG_LEVEL_TRACE && resp.data)
+                LOG_TRACE(ctx->cfg, "RESP status=%d %s", status, resp.data);
 
             /* Context overflow detection — return error so caller can trim */
             if (status == 400 && is_context_overflow(resp.data)) {
-                if (ctx->debug)
-                    fprintf(stderr, "[DEBUG] context overflow detected\n");
+                LOG_DEBUG(ctx->cfg, "context overflow detected");
                 http_response_free(&resp);
                 arena_destroy(a);
                 return -2;
@@ -478,9 +486,8 @@ int agent_run(AgentContext *ctx) {
 
             /* V29/V32: HTTP failure → retry */
             if (status < 200 || status >= 300 || !resp.data) {
-                if (ctx->debug)
-                    fprintf(stderr, "[DEBUG] LLM error (status=%d), retry %d/%d\n",
-                            status, retry + 1, MAX_LLM_RETRIES);
+                LOG_DEBUG(ctx->cfg, "LLM error (status=%d), retry %d/%d",
+                          status, retry + 1, MAX_LLM_RETRIES);
                 http_response_free(&resp);
                 continue;
             }
@@ -489,28 +496,33 @@ int agent_run(AgentContext *ctx) {
             rc = llm_parse_response(a, resp.data, &llm_resp);
             http_response_free(&resp);
             if (rc != 0) {
-                if (ctx->debug)
-                    fprintf(stderr, "[DEBUG] JSON parse failure, retry %d/%d\n",
-                            retry + 1, MAX_LLM_RETRIES);
+                LOG_DEBUG(ctx->cfg, "JSON parse failure, retry %d/%d",
+                          retry + 1, MAX_LLM_RETRIES);
                 continue;
             }
 
             /* V29: missing finish_reason → treat as error, retry */
             if (!llm_resp.finish_reason) {
-                if (ctx->debug)
-                    fprintf(stderr, "[DEBUG] missing finish_reason, retry %d/%d\n",
-                            retry + 1, MAX_LLM_RETRIES);
+                LOG_DEBUG(ctx->cfg, "missing finish_reason, retry %d/%d",
+                          retry + 1, MAX_LLM_RETRIES);
                 continue;
             }
+
+            /* T235: log response shape at debug level */
+            LOG_DEBUG(ctx->cfg, "response: finish=%s tokens=%d/%d/%d tools=%zu content=%s",
+                      llm_resp.finish_reason,
+                      llm_resp.usage.prompt_tokens,
+                      llm_resp.usage.completion_tokens,
+                      llm_resp.usage.total_tokens,
+                      llm_resp.tool_call_count,
+                      llm_resp.content ? "yes" : "null");
 
             /* V94/T231: zero-usage empty stop (E1) — provider glitch, retry */
             if (llm_resp.usage.total_tokens == 0 &&
                 (!llm_resp.content || !llm_resp.content[0]) &&
                 strcmp(llm_resp.finish_reason, "stop") == 0) {
                 e1_retries++;
-                if (ctx->debug)
-                    fprintf(stderr, "[DEBUG] E1 zero-usage empty stop, e1_retry %d\n",
-                            e1_retries);
+                LOG_DEBUG(ctx->cfg, "E1 zero-usage empty stop, e1_retry %d", e1_retries);
                 if (e1_retries <= 2 || (e1_retries == 3 && ctx->cfg->fallback_count > 0))
                     continue;
                 /* Exhausted — fall through to write error entry below */

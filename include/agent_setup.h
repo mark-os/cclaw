@@ -11,6 +11,7 @@
 #include "tool_agent.h"
 #include "http_policy.h"
 #include "proxy.h"
+#include "extension.h"
 #include "config.h"
 #include "db.h"
 
@@ -34,6 +35,8 @@ typedef struct {
     /* V88: secrets for shell injection + masking */
     ShellSecret *secrets;
     size_t secret_count;
+    /* T256: extension hooks context */
+    ExtensionCtx ext_ctx;
 } AgentSetup;
 
 /* Mode flags for agent_setup_init */

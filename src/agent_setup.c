@@ -79,12 +79,14 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     tool_js_define_register(&setup->reg, &setup->js_def_ctx);
     tool_js_load_session(db, session_id, &setup->reg, setup->js_rt);
 
-    /* T254/T255: Load extensions from workspace/extensions/ */
+    /* T254/T255/T256: Load extensions from workspace/extensions/ */
+    extension_ctx_init(&setup->ext_ctx, setup->js_rt);
     if (cfg->workspace) {
         size_t ext_count = 0;
         char **ext_paths = extension_discover(cfg->workspace, &ext_count);
         if (ext_paths && ext_count > 0) {
-            extension_load(ext_paths, ext_count, setup->js_rt, &setup->reg, cfg);
+            extension_load(ext_paths, ext_count, setup->js_rt, &setup->reg, cfg,
+                           &setup->ext_ctx);
             extension_list_free(ext_paths, ext_count);
         }
     }
@@ -122,6 +124,7 @@ const ToolSchema *agent_setup_schemas(AgentSetup *setup, size_t *count) {
 
 void agent_setup_destroy(AgentSetup *setup) {
     proxy_stop(&setup->proxy_ctx);
+    extension_ctx_destroy(&setup->ext_ctx);
     js_runtime_destroy(setup->js_rt);
     shell_secrets_free(setup->secrets, setup->secret_count);
     tools_free(&setup->reg);

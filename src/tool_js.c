@@ -209,8 +209,9 @@ static void js_tool_data_free(void *user_data) {
     if (td) { free(td->code); free(td); }
 }
 
-/* Register a single JS-defined tool into the registry with shared runtime. */
-static int js_tool_register_one(ToolRegistry *reg, const char *name,
+/* Register a single JS-defined tool into the registry with shared runtime.
+ * Exported for use by extension.c (T256). */
+int js_tool_register_ext(ToolRegistry *reg, const char *name,
                                 const char *description, const char *parameters_json,
                                 const char *code, JsSessionRuntime *rt) {
     /* Check if already registered (re-define overwrites) */
@@ -287,7 +288,7 @@ char *tool_js_define_handler(const char *arguments, void *user_data) {
     }
 
     /* Register in live registry */
-    if (js_tool_register_one(ctx->reg, name, description, parameters, code, ctx->rt) != 0) {
+    if (js_tool_register_ext(ctx->reg, name, description, parameters, code, ctx->rt) != 0) {
         cJSON_Delete(json);
         return strdup("error: failed to register tool");
     }
@@ -362,7 +363,7 @@ int tool_js_load_session(sqlite3 *db, int64_t session_id, ToolRegistry *reg,
         const char *params = (const char *)sqlite3_column_text(stmt, 2);
         const char *code = (const char *)sqlite3_column_text(stmt, 3);
         if (name && code) {
-            if (js_tool_register_one(reg, name, desc, params, code, rt) == 0) {
+            if (js_tool_register_ext(reg, name, desc, params, code, rt) == 0) {
                 /* Replay into shared runtime */
                 js_runtime_replay_tool(rt, name, code);
                 loaded++;

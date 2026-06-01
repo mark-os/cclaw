@@ -64,4 +64,10 @@ void js_runtime_destroy(JsSessionRuntime *rt);
 int tool_js_load_session(sqlite3 *db, int64_t session_id, ToolRegistry *reg,
                          JsSessionRuntime *rt);
 
+/* T256: Register a JS tool from extension — same as internal js_define_tool
+ * but callable from extension.c. code is the JS function body receiving 'args'. */
+int js_tool_register_ext(ToolRegistry *reg, const char *name,
+                         const char *description, const char *parameters_json,
+                         const char *code, JsSessionRuntime *rt);
+
 #endif

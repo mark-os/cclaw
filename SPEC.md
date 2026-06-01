@@ -454,8 +454,8 @@ T252|x|test: channel process crash → daemon restarts w/ backoff; verify max 3 
 T253|x|test: channel_emit → daemon_wake → agent fork → outbox delivery cycle end-to-end w/ mock channel binary|V100,V101
 T254|x|extension discovery — at agent startup, scan `workspace/extensions/*.js` + `workspace/extensions/*/index.js`; return sorted file list|V109,V110
 T255|x|extension loader — for each discovered file: read source, eval in shared QuickJS context as `(function(cclaw){ <source> })(cclaw_api)`; on throw → log warning + skip|V109,V110
-T256|.|`cclaw` API object — C-backed JS object injected into QuickJS context; methods: `registerTool(def)`, `registerHook(event, fn)`, `callTool(name, args)`; `registerTool` delegates to existing `js_tool_register_one`|V111
-T257|.|`cclaw.registerHook` — store hook fns in per-event arrays (C-side linked list or array); events: `beforeRequest`, `afterResponse`, `beforeToolCall`, `afterToolCall`, `turnStart`, `turnEnd`|V111,V112
+T256|x|`cclaw` API object — C-backed JS object injected into QuickJS context; methods: `registerTool(def)`, `registerHook(event, fn)`, `callTool(name, args)`; `registerTool` delegates to existing `js_tool_register_one`|V111
+T257|x|`cclaw.registerHook` — store hook fns in per-event arrays (C-side linked list or array); events: `beforeRequest`, `afterResponse`, `beforeToolCall`, `afterToolCall`, `turnStart`, `turnEnd`|V111,V112
 T258|.|hook dispatch: `beforeRequest` — in `agent.c` before LLM call, serialize messages to JS array, call each registered hook in order, deserialize modified array back; skip on throw|V112
 T259|.|hook dispatch: `beforeToolCall` / `afterToolCall` — in tool dispatch loop, call hooks before/after execution; `beforeToolCall` can block (return `{block:true}`); `afterToolCall` can replace result|V113,V114
 T260|.|hook dispatch: `turnStart` / `turnEnd` — call at agent_run entry and before exit; informational (no return value used)|V111

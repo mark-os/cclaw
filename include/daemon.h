@@ -22,8 +22,9 @@ int daemon_signal_session(int64_t session_id);
 /* T200: Signal with agent_name (preferred — avoids DB lookup in daemon loop). */
 int daemon_signal_session_agent(int64_t session_id, const char *agent_name);
 
-/* Signal daemon from external process via named FIFO. Returns 0 on success. */
-int daemon_signal_external(const char *db_path, int64_t session_id);
+/* T242/V105: Wake daemon from external process via named FIFO (1 byte).
+ * Returns 0 on success. Also declared in channel_api.h. */
+int daemon_wake(const char *db_path);
 
 /* Close signal pipe (cleanup). */
 void daemon_signal_close(void);

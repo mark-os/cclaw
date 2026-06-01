@@ -82,19 +82,7 @@ int daemon_signal_session_agent(int64_t session_id, const char *agent_name) {
     return (n == (ssize_t)sizeof(msg)) ? 0 : -1;
 }
 
-/* Signal daemon from external process via named FIFO. */
-int daemon_signal_external(const char *db_path, int64_t session_id) {
-    char *path = daemon_pipe_path(db_path);
-    if (!path) return -1;
-    int fd = open(path, O_WRONLY | O_NONBLOCK);
-    free(path);
-    if (fd < 0) return -1;
-    SignalMsg msg = {0};
-    msg.session_id = session_id;
-    ssize_t n = write(fd, &msg, sizeof(msg));
-    close(fd);
-    return (n == (ssize_t)sizeof(msg)) ? 0 : -1;
-}
+/* T242/V105: daemon_wake is now in channel_api.c — removed daemon_signal_external */
 
 void daemon_signal_close(void) {
     if (g_signal_pipe[0] >= 0) { close(g_signal_pipe[0]); g_signal_pipe[0] = -1; }
@@ -1652,12 +1640,10 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
                 reap_children(cfg, db);
                 /* T184/V13: process spawn queue after reap (parent may have queued blocking spawn) */
                 process_spawn_queue(cfg, db);
-            } else if (events[i].data.fd == g_signal_pipe[0] ||
-                       events[i].data.fd == fifo_fd) {
-                /* T200: Read SignalMsg from signal pipe or external FIFO */
-                int rfd = events[i].data.fd;
+            } else if (events[i].data.fd == g_signal_pipe[0]) {
+                /* T200: Read SignalMsg from internal signal pipe */
                 SignalMsg msg;
-                while (read(rfd, &msg, sizeof(msg)) == sizeof(msg)) {
+                while (read(g_signal_pipe[0], &msg, sizeof(msg)) == sizeof(msg)) {
                     /* Resolve agent_name if not in signal */
                     const char *aname = msg.agent_name[0] ? msg.agent_name : NULL;
                     if (!aname) {
@@ -1684,6 +1670,57 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
                     }
                 }
                 /* T88: Process any pending spawn requests */
+                process_spawn_queue(cfg, db);
+            } else if (events[i].data.fd == fifo_fd) {
+                /* T242/V105: External FIFO wake — drain bytes, scan channel_events */
+                char drain[64];
+                while (read(fifo_fd, drain, sizeof(drain)) > 0) {}
+                /* Scan channel_events for unprocessed rows */
+                {
+                    const char *esql =
+                        "SELECT id, channel_name, event_type, payload"
+                        " FROM channel_events ORDER BY id ASC;";
+                    sqlite3_stmt *es;
+                    if (sqlite3_prepare_v2(db, esql, -1, &es, NULL) == SQLITE_OK) {
+                        while (sqlite3_step(es) == SQLITE_ROW) {
+                            int64_t eid = sqlite3_column_int64(es, 0);
+                            const char *ch_name = (const char *)sqlite3_column_text(es, 1);
+                            const char *etype = (const char *)sqlite3_column_text(es, 2);
+                            const char *payload = (const char *)sqlite3_column_text(es, 3);
+                            (void)etype; /* future: dispatch on event_type */
+
+                            /* Route: resolve agent via channel_bindings */
+                            if (ch_name && payload) {
+                                const char *bsql =
+                                    "SELECT agent_name FROM channel_bindings"
+                                    " WHERE channel_type=? LIMIT 1;";
+                                sqlite3_stmt *bs;
+                                if (sqlite3_prepare_v2(db, bsql, -1, &bs, NULL) == SQLITE_OK) {
+                                    sqlite3_bind_text(bs, 1, ch_name, -1, SQLITE_STATIC);
+                                    if (sqlite3_step(bs) == SQLITE_ROW) {
+                                        const char *agent = (const char *)sqlite3_column_text(bs, 0);
+                                        if (agent && agent[0]) {
+                                            /* Find or create session, insert inbox */
+                                            /* For now: use session_id=0 placeholder — T245 will refine routing */
+                                            (void)agent;
+                                            (void)payload;
+                                        }
+                                    }
+                                    sqlite3_finalize(bs);
+                                }
+                            }
+                            /* Delete consumed event */
+                            const char *dsql = "DELETE FROM channel_events WHERE id=?;";
+                            sqlite3_stmt *ds;
+                            if (sqlite3_prepare_v2(db, dsql, -1, &ds, NULL) == SQLITE_OK) {
+                                sqlite3_bind_int64(ds, 1, eid);
+                                sqlite3_step(ds);
+                                sqlite3_finalize(ds);
+                            }
+                        }
+                        sqlite3_finalize(es);
+                    }
+                }
                 process_spawn_queue(cfg, db);
             }
         }

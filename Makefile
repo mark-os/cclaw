@@ -4,7 +4,7 @@ LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
 TEMPLATES := $(wildcard templates/*)
-SRC      := $(filter-out src/mjs_main.c src/preload_net.c,$(wildcard src/*.c))
+SRC      := $(filter-out src/mjs_main.c src/preload_net.c src/channel_telegram_main.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 DEP      := $(OBJ:.o=.d)
 
@@ -29,7 +29,7 @@ MJS_VENDOR_OBJ := $(BUILDDIR)/mjs_mquickjs.o $(BUILDDIR)/mjs_cutils.o $(BUILDDIR
 
 .PHONY: all clean test test-integration test-e2e test-all install
 
-all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/libcclaw_net.so
+all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/channel_telegram
 
 $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -110,6 +110,13 @@ $(BUILDDIR)/mjs: $(BUILDDIR)/mjs_main.o $(MJS_VENDOR_OBJ) | $(BUILDDIR)/
 
 $(BUILDDIR)/libcclaw_net.so: src/preload_net.c | $(BUILDDIR)/
 	$(CC) -std=c11 -Wall -Wextra -Werror -shared -fPIC -o $@ $< -ldl
+
+# T247: channel_telegram standalone binary
+$(BUILDDIR)/channel_telegram_main.o: src/channel_telegram_main.c | $(BUILDDIR)/
+	$(CC) $(CFLAGS) -I$(BUILDDIR) -c -o $@ $<
+
+$(BUILDDIR)/channel_telegram: $(BUILDDIR)/channel_telegram_main.o $(BUILDDIR)/libcclaw.a | $(BUILDDIR)/
+	$(CC) $(CFLAGS) -o $@ $< $(BUILDDIR)/libcclaw.a $(LDFLAGS)
 
 install: $(BUILDDIR)/mjs
 	install -d /usr/local/lib/cclaw

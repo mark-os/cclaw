@@ -96,4 +96,8 @@ char *daemon_apply_config(const Config *cfg, sqlite3 *db,
                           const char *agent_name,
                           const char *tool_name, const char *args_json);
 
+/* T247/V103: Register telegram as channel process in channels table.
+ * Seeds bot_token into channel_state. Called at daemon startup if token configured. */
+void daemon_register_telegram_channel(sqlite3 *db, const char *token);
+
 #endif

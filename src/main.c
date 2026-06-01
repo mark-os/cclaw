@@ -13,7 +13,6 @@
 #include "agent_config.h"
 #include "agent_exit.h"
 #include "agent_turn.h"
-#include "telegram.h"
 #include "web.h"
 #include "heartbeat.h"
 #include "cron.h"
@@ -385,11 +384,10 @@ int main(int argc, char *argv[]) {
         workspace_init(cfg);
         printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
 
+        /* T247/V103: Register telegram as channel process if token configured */
         if (cfg->telegram_token && cfg->telegram_token[0] != '\0') {
-            if (telegram_start(cfg, db) != 0)
-                fprintf(stderr, "warning: failed to start telegram poller\n");
-            else
-                printf("telegram poller started\n");
+            daemon_register_telegram_channel(db, cfg->telegram_token);
+            printf("telegram channel registered\n");
         }
 
         if (web_start(cfg, db) != 0)
@@ -417,7 +415,6 @@ int main(int argc, char *argv[]) {
         cron_stop();
         heartbeat_stop();
         web_stop();
-        telegram_stop();
         db_close(db);
         config_free(cfg);
         return 0;

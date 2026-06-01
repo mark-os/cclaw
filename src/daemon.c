@@ -4,7 +4,6 @@
 #include "shutdown.h"
 #include "agent.h"
 #include "agent_config.h"
-#include "telegram.h"
 #include "tools.h"
 #include "tool_shell.h"
 #include "tool_file.h"
@@ -725,6 +724,7 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
 /* T200/V73: deliver_response reads from agent DB */
 static void deliver_response(const Config *cfg, sqlite3 *db,
                              const char *agent_name, int64_t session_id) {
+    (void)cfg;
     /* Open agent DB to read response */
     char *path = agent_db_path(agent_name);
     if (!path) return;
@@ -756,22 +756,41 @@ static void deliver_response(const Config *cfg, sqlite3 *db,
     }
 
     if (route && strncmp(route, "telegram", 8) == 0) {
-        /* Route format: "telegram" — need chat_id from tg_chat_sessions (cclaw.db) */
+        /* T247: Telegram delivery now via channel_outbox (channel process picks up).
+         * Resolve chat_id and build outbox payload with chat_id for channel process. */
         const char *sql = "SELECT chat_id FROM tg_chat_sessions WHERE session_id=?;";
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(stmt, 1, session_id);
             if (sqlite3_step(stmt) == SQLITE_ROW) {
                 int64_t chat_id = sqlite3_column_int64(stmt, 0);
-                telegram_send_message(cfg->telegram_token, chat_id, reply);
+                /* Build JSON payload for channel_telegram outbox */
+                cJSON *opj = cJSON_CreateObject();
+                cJSON_AddNumberToObject(opj, "chat_id", (double)chat_id);
+                cJSON_AddStringToObject(opj, "text", reply);
+                char *opayload = cJSON_PrintUnformatted(opj);
+                cJSON_Delete(opj);
+                if (opayload) {
+                    const char *osql =
+                        "INSERT INTO channel_outbox (channel_name, session_id, payload)"
+                        " VALUES ('telegram',?,?);";
+                    sqlite3_stmt *ostmt;
+                    if (sqlite3_prepare_v2(db, osql, -1, &ostmt, NULL) == SQLITE_OK) {
+                        sqlite3_bind_int64(ostmt, 1, session_id);
+                        sqlite3_bind_text(ostmt, 2, opayload, -1, SQLITE_STATIC);
+                        sqlite3_step(ostmt);
+                        sqlite3_finalize(ostmt);
+                    }
+                    free(opayload);
+                }
             }
             sqlite3_finalize(stmt);
         }
     }
 
-    /* T246/V101: Insert channel_outbox row for channel processes to deliver.
-     * Skip "cli" — CLI polls agent DB directly, not via outbox. */
-    if (route && strcmp(route, "cli") != 0) {
+    /* T246/V101: Insert channel_outbox row for non-telegram channel processes.
+     * Skip "cli" (polls agent DB directly) and "telegram" (handled above with chat_id). */
+    if (route && strcmp(route, "cli") != 0 && strcmp(route, "telegram") != 0) {
         const char *osql =
             "INSERT INTO channel_outbox (channel_name, session_id, payload)"
             " VALUES (?,?,?);";
@@ -1570,6 +1589,47 @@ int64_t daemon_bootstrap(sqlite3 *db) {
     daemon_signal_session_agent(sid, agent_name);
     free(agent_name);
     return sid;
+}
+
+/* T247/V103: Register telegram channel in channels table + seed config.
+ * Ensures channel_telegram binary is launched by daemon_launch_channels. */
+void daemon_register_telegram_channel(sqlite3 *db, const char *token) {
+    /* Resolve binary path relative to self */
+    char self_path[256] = {0};
+    ssize_t n = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+    if (n <= 0) return;
+    self_path[n] = '\0';
+    /* Replace last component with channel_telegram */
+    char *slash = strrchr(self_path, '/');
+    if (!slash) return;
+    slash[1] = '\0';
+    char bin_path[512];
+    snprintf(bin_path, sizeof(bin_path), "%s%s", self_path, "channel_telegram");
+
+    /* INSERT OR IGNORE — don't overwrite if already registered */
+    const char *sql =
+        "INSERT OR IGNORE INTO channels(name, type, binary_path)"
+        " VALUES('telegram', 'telegram', ?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, bin_path, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    /* Ensure status is active */
+    const char *usql = "UPDATE channels SET status='active' WHERE name='telegram';";
+    sqlite3_exec(db, usql, NULL, NULL, NULL);
+
+    /* Seed bot_token into channel_state */
+    const char *ksql =
+        "INSERT OR REPLACE INTO channel_state(channel_name, key, value)"
+        " VALUES('telegram', 'bot_token', ?);";
+    if (sqlite3_prepare_v2(db, ksql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, token, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
 }
 
 /* ── T244/V98/V104: Channel process launcher ───────────────────── */

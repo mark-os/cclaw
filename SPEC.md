@@ -75,6 +75,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - [providers.md](specs/providers.md) — auth patterns, cclaw.db storage, wire format differences
 - [security.md](specs/security.md) — trust model, config injection best practices, defense-in-depth layers, attack scenarios
 - [shell-networking.md](specs/shell-networking.md) — namespace sandbox for shell children, credential proxy, DNS interception
+- [error-handling.md](specs/error-handling.md) — LLM API failure classification, retry/fallback logic, response resolution, log levels
 
 ## §V INVARIANTS
 V1: ∀ tool exec (`file_read`, `file_write`) → path ! ∈ workspace dir for that agent
@@ -170,6 +171,10 @@ V90: ∀ config resolution → priority: (1) `CCLAW_*` env vars, (2) cclaw.db kv
 V91: ∀ session context management → three configs: `context_threshold` (float 0–1, default 0.6) triggers action when tokens exceed threshold × context_window; `compaction_target` (float 0–1, default 0.3) = how much to keep after compaction (summarize from start until remaining ≤ target × context_window); `compaction` (bool, default true) controls mode
 V92: ∀ compaction (enabled) → read entries from session start through compaction_target cut point (entries whose cumulative tokens from tail exceed target × context_window); send to LLM for summarization; replace w/ single ROLE_COMPACTION entry; reparent per V58; fallback to placeholder on LLM failure
 V93: ∀ truncation (compaction disabled) → context_build loads most recent entries up to threshold; inserts notice "[conversation history truncated — N earlier entries omitted]" at cut point; no DB mutation — entries remain, just excluded from context sent to LLM
+V94: ∀ LLM response w/ HTTP 200 + `usage.total_tokens == 0` + content null/empty + `finish_reason == "stop"` → zero-usage provider glitch; retry 2x primary (same request, no state mutation), then 1x fallback model if configured; on exhaust write error entry w/ `stop_reason=error`; ⊥ store empty response in session
+V95: ∀ response delivery → `get_response_text(db, session_id)` is sole resolution fn; walks branch backward from leaf, returns first non-empty assistant content, stops at user boundary; all channels (CLI, Telegram, sub-agent result) use this fn; ⊥ inline branch-walking
+V96: ∀ agent child process (CLI & daemon) → stderr piped to journal.db; CLI additionally tees to terminal; daemon pipes via log_collector (existing); unified: both paths persist to journal
+V97: ∀ agent process → `CCLAW_LOG_LEVEL` env var (info|debug|trace); info=errors+warnings+turn boundaries; debug=+tool dispatch+timing+retry decisions; trace=+full req/resp JSON; stored in cclaw.db kv `log_level`, injected at fork
 
 ## §T TASKS
 id|status|task|cites
@@ -404,6 +409,13 @@ T227|x|move test_mock_server + test_compaction_summary → integration tier (ren
 T228|x|CWD as read-only path — CLI sets `CCLAW_PATH=$(pwd)` in child env before fork; `tool_file.c` allows reads from `CCLAW_PATH` (ro) in addition to workspace (rw); daemon ⊥ set CCLAW_PATH; agent_turn reads env if present|V1,V81
 T229|x|yolo mode (`-y`) — CLI parses `-y`, sets `CCLAW_YOLO=1` in own env (inherited by all forked children); agent_turn respects: disable shell sandbox, add shell_exec tool if missing, allowed_hosts=`*`, allowed_paths=`*`; session-lifetime (not persisted)|V82,V46
 T230|x|agent self-rename — config change tool accepts `{"action":"rename","name":"<new>"}` payload; parent (CLI/daemon) handles: `mv ~/.cclaw/agents/<old> ~/.cclaw/agents/<new>`, update cclaw.db agents registry, update CLI agent binding in cclaw.db kv; next fork uses new path|V79,V62
+T231|x|zero-usage retry in agent_run — detect E1 (200 + 0 tokens + empty + stop) in inner retry loop; ⊥ write entry; retry 2x primary via `continue` (re-plan, re-stream); then 1x fallback; on exhaust write error entry|V94,V32
+T232|x|`get_response_text` shared fn — walk branch backward, return first non-empty assistant content, stop at user boundary; replace inline logic in CLI `print_response`, daemon `deliver_response`, `tool_agent`, spawn result|V95
+T233|.|CLI journal parity — `cli_fork_turn` creates pipe pair, dup2 in child, parent drains pipe → journal.db + tee to terminal; reuse `db_open_journal` + batch insert|V96,V75
+T234|.|log level system — `CCLAW_LOG_LEVEL` env var; `cclaw.db` kv `log_level` default `info`; `config_load` reads + injects at fork; agent_turn reads env → `cfg->log_level` enum; replace `cfg->debug` bool w/ level check|V97
+T235|.|trace logging — at trace level, `llm_call_with_fallback_stream` writes full req/resp JSON to stderr (existing debug code, gated on trace); at debug level, write timing + retry decisions + context plan stats|V97
+T236|.|error classification in agent_run — implement detection for E1-E12 per `specs/error-handling.md`; each writes appropriate `stop_reason` + user-facing content on exhaust|V94,V32
+T237|x|fix `request_stream.c` JSON closing — `build_tools_fragment` ! ⊥ close the root object; separate concerns: messages close `]`, then optional `max_tokens`, then optional `tools`, then final `}`; review all RS_PHASE transitions for correctness; ensure trace log shows exact bytes sent|V41,B2
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)
@@ -412,6 +424,8 @@ Test tiers (Makefile targets):
 
 ## §B BUGS
 id|date|cause|fix
+B1|2026-05-31|GMICloud returns HTTP 200 w/ 0 tokens + null content + `finish_reason:"stop"` after tool-result follow-up; agent stored empty string as final response; `print_response` printed blank line|V94,V95 — `get_response_text` skips empty; T231 adds retry
+B2|2026-06-01|`build_tools_fragment` closes JSON object w/ `}` — `max_tokens` field ⊥ included when tools present; every agentic request sent without output limit|T237
 
 ## §F FUTURE
 - Web chat: civetweb serves chat UI (SSE streaming for partial responses, session select/create, message history); block streaming to browser as assistant generates; replaces status-only page

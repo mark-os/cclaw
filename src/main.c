@@ -24,17 +24,11 @@
 
 /* Print last assistant response from session branch */
 static void print_response(sqlite3 *db, int64_t session_id) {
-    int count = 0;
-    Entry *entries = session_get_branch(db, session_id, &count);
-    if (!entries || count == 0) return;
-
-    for (int i = count - 1; i >= 0; i--) {
-        if (entries[i].message.role == ROLE_ASSISTANT && entries[i].message.content) {
-            printf("%s\n", entries[i].message.content);
-            break;
-        }
+    char *text = get_response_text(db, session_id);
+    if (text) {
+        printf("%s\n", text);
+        free(text);
     }
-    entry_branch_free(entries, count);
 }
 
 /* Prompt user to select or create a session. Returns session id or -1. */

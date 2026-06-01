@@ -17,18 +17,7 @@ static const char *SPAWN_PARAMS_JSON =
 
 /* Read last assistant message content from a session's branch */
 static char *get_session_result(sqlite3 *db, int64_t session_id) {
-    int count = 0;
-    Entry *entries = session_get_branch(db, session_id, &count);
-    if (!entries) return NULL;
-    char *result = NULL;
-    for (int i = count - 1; i >= 0; i--) {
-        if (entries[i].message.role == ROLE_ASSISTANT && entries[i].message.content) {
-            result = strdup(entries[i].message.content);
-            break;
-        }
-    }
-    entry_branch_free(entries, count);
-    return result;
+    return get_response_text(db, session_id);
 }
 
 char *tool_launch_agent_handler(const char *arguments, void *user_data) {

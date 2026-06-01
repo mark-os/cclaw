@@ -407,6 +407,31 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
     return entries;
 }
 
+/* Resolve deliverable response text from session branch.
+ * Walks backward from leaf: returns first non-empty assistant content found.
+ * Skips empty/null final entries (provider glitch) to reach intermediate texts.
+ * Note: OpenClaw concatenates ALL non-empty assistant texts from the turn as
+ * fallback; we only return the last non-empty one. Revisit if needed.
+ * Returns heap-allocated string or NULL if no deliverable content. */
+char *get_response_text(sqlite3 *db, int64_t session_id) {
+    int count = 0;
+    Entry *entries = session_get_branch(db, session_id, &count);
+    if (!entries || count == 0) return NULL;
+
+    char *result = NULL;
+    for (int i = count - 1; i >= 0; i--) {
+        if (entries[i].message.role == ROLE_ASSISTANT &&
+            entries[i].message.content && entries[i].message.content[0]) {
+            result = strdup(entries[i].message.content);
+            break;
+        }
+        /* Stop at user boundary — don't leak previous turn's response */
+        if (entries[i].message.role == ROLE_USER) break;
+    }
+    entry_branch_free(entries, count);
+    return result;
+}
+
 char *session_get_agent_name(sqlite3 *db, int64_t session_id) {
     const char *sql = "SELECT agent_name FROM sessions WHERE id=?;";
     sqlite3_stmt *stmt;

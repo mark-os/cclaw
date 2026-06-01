@@ -434,6 +434,7 @@ int agent_run(AgentContext *ctx) {
         int llm_ok = 0;
         LlmResponse llm_resp;
         memset(&llm_resp, 0, sizeof(llm_resp));
+        int e1_retries = 0; /* V94: zero-usage retry counter */
 
         for (int retry = 0; retry < MAX_LLM_RETRIES; retry++) {
             /* V41: plan entry IDs + cut point from SQLite (pass 1, no content loaded) */
@@ -444,9 +445,20 @@ int agent_run(AgentContext *ctx) {
                 return -1;
             }
 
+            /* V94: after 2 E1 retries on primary, try fallback if available */
+            const Config *call_cfg = ctx->cfg;
+            Config fb_cfg;
+            if (e1_retries >= 2 && ctx->cfg->fallback_count > 0) {
+                fb_cfg = *ctx->cfg;
+                fb_cfg.provider = ctx->cfg->fallback_providers[0];
+                call_cfg = &fb_cfg;
+                if (ctx->debug)
+                    fprintf(stderr, "[DEBUG] E1 zero-usage: trying fallback model\n");
+            }
+
             /* T45,V41: call LLM with streaming request + fallback chain */
             HttpResponse resp = {0};
-            int status = llm_call_with_fallback_stream(a, ctx->cfg, ctx->db,
+            int status = llm_call_with_fallback_stream(a, call_cfg, ctx->db,
                                                        ctx->session_id, &plan,
                                                        ctx->tools, ctx->tool_count,
                                                        &resp, ctx->debug);
@@ -491,14 +503,31 @@ int agent_run(AgentContext *ctx) {
                 continue;
             }
 
+            /* V94/T231: zero-usage empty stop (E1) — provider glitch, retry */
+            if (llm_resp.usage.total_tokens == 0 &&
+                (!llm_resp.content || !llm_resp.content[0]) &&
+                strcmp(llm_resp.finish_reason, "stop") == 0) {
+                e1_retries++;
+                if (ctx->debug)
+                    fprintf(stderr, "[DEBUG] E1 zero-usage empty stop, e1_retry %d\n",
+                            e1_retries);
+                if (e1_retries <= 2 || (e1_retries == 3 && ctx->cfg->fallback_count > 0))
+                    continue;
+                /* Exhausted — fall through to write error entry below */
+                break;
+            }
+
             llm_ok = 1;
             break;
         }
 
         /* V32: all retries exhausted → write final error entry + exit */
         if (!llm_ok) {
+            const char *err_text = e1_retries > 0
+                ? "error: model returned empty response — provider glitch, try again"
+                : "error: LLM request failed after retries";
             Message err_msg = {.role = ROLE_ASSISTANT,
-                               .content = strdup("error: LLM request failed after retries"),
+                               .content = strdup(err_text),
                                .stop_reason = STOP_REASON_ERROR,
                                .model = ctx->cfg->provider.model};
             entry_append_with_turn(ctx->db, ctx->session_id, &err_msg, turn_id);

@@ -45,6 +45,11 @@ Session *session_list(sqlite3 *db, int *count);
  * Caller must free returned array and entry string fields. Sets *count. */
 Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count);
 
+/* Resolve deliverable response text from session branch.
+ * Returns last non-empty assistant content, or NULL if none.
+ * Caller frees returned string. */
+char *get_response_text(sqlite3 *db, int64_t session_id);
+
 /* V20: Get agent_name for session. Returns heap-allocated string or NULL. */
 char *session_get_agent_name(sqlite3 *db, int64_t session_id);
 

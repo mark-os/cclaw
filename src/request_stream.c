@@ -290,12 +290,12 @@ static char *build_tools_fragment(const ToolSchema *tools, size_t count) {
     cJSON_Delete(arr);
     if (!arr_str) return NULL;
 
-    /* Wrap: ],"tools":ARR} */
+    /* Return only ,"tools":ARR — caller handles ] and } */
     size_t alen = strlen(arr_str);
-    size_t flen = 10 + alen + 1; /* ],"tools": + arr + } */
+    size_t flen = 9 + alen; /* ,"tools": + arr */
     char *frag = malloc(flen + 1);
     if (!frag) { free(arr_str); return NULL; }
-    snprintf(frag, flen + 1, "],\"tools\":%s}", arr_str);
+    snprintf(frag, flen + 1, ",\"tools\":%s", arr_str);
     free(arr_str);
     return frag;
 }
@@ -416,30 +416,37 @@ static int rs_advance(RequestStreamer *rs) {
     }
 
     case RS_PHASE_TOOLS: {
-        /* V9: only include tools when count > 0 */
-        if (rs->tools && rs->tool_count > 0) {
-            char *frag = build_tools_fragment(rs->tools, rs->tool_count);
-            if (frag) {
-                buf_set(rs, frag, strlen(frag));
-                free(frag);
-                rs->phase = RS_PHASE_DONE;
-                return 0;
-            }
+        /* Close messages array, optionally append tools fragment */
+        char *frag = NULL;
+        if (rs->tools && rs->tool_count > 0)
+            frag = build_tools_fragment(rs->tools, rs->tool_count);
+
+        if (frag) {
+            /* ] + tools fragment */
+            size_t flen = strlen(frag);
+            if (buf_ensure(rs, 1 + flen) != 0) { free(frag); rs->phase = RS_PHASE_DONE; return 1; }
+            rs->buf[0] = ']';
+            memcpy(rs->buf + 1, frag, flen);
+            rs->buf_len = 1 + flen;
+            rs->buf_pos = 0;
+            free(frag);
+        } else {
+            /* Just close messages array */
+            buf_set(rs, "]", 1);
         }
-        /* No tools — close: ]} or ]} with max_tokens */
         rs->phase = RS_PHASE_CLOSE;
-        return rs_advance(rs);
+        return 0;
     }
 
     case RS_PHASE_CLOSE: {
-        /* Close messages array + optional max_tokens + close object */
+        /* Optional max_tokens + close root object */
         if (rs->cfg->provider.max_tokens > 0) {
             char close_buf[64];
             int n = snprintf(close_buf, sizeof(close_buf),
-                             "],\"max_tokens\":%d}", rs->cfg->provider.max_tokens);
+                             ",\"max_tokens\":%d}", rs->cfg->provider.max_tokens);
             buf_set(rs, close_buf, (size_t)n);
         } else {
-            buf_set(rs, "]}", 2);
+            buf_set(rs, "}", 1);
         }
         rs->phase = RS_PHASE_DONE;
         return 0;

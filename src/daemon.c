@@ -744,37 +744,25 @@ static void deliver_response(const Config *cfg, sqlite3 *db,
     free(path);
     if (!adb) return;
 
-    /* Get last assistant message from session branch */
-    int count = 0;
-    Entry *entries = session_get_branch(adb, session_id, &count);
+    char *reply = get_response_text(adb, session_id);
     char *route = session_get_last_route(adb, session_id);
     db_close(adb);
 
-    const char *reply = NULL;
-    if (entries) {
-        for (int i = count - 1; i >= 0; i--) {
-            if (entries[i].message.role == ROLE_ASSISTANT && entries[i].message.content) {
-                reply = entries[i].message.content;
-                break;
-            }
-        }
-    }
     if (!reply) {
-        entry_branch_free(entries, count);
         free(route);
         return;
     }
 
     /* V42/T110: Suppress HEARTBEAT_OK sentinel — never deliver to channel */
     if (strcmp(reply, "HEARTBEAT_OK") == 0) {
-        entry_branch_free(entries, count);
+        free(reply);
         free(route);
         return;
     }
 
     /* V44/T113: Suppress [NO_REPLY] — agent decided not to respond (e.g. group irrelevance) */
     if (strstr(reply, "[NO_REPLY]") != NULL) {
-        entry_branch_free(entries, count);
+        free(reply);
         free(route);
         return;
     }
@@ -794,8 +782,8 @@ static void deliver_response(const Config *cfg, sqlite3 *db,
     }
     /* For other routes (cli, etc.) — response stays in DB, client polls */
 
+    free(reply);
     free(route);
-    entry_branch_free(entries, count);
 }
 
 /* ── T201: PENDING entry helpers (V77/V78/V79) ─────────────────── */
@@ -1261,18 +1249,8 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                         sqlite3 *cadb = db_open_agent(cpath);
                         free(cpath);
                         if (cadb) {
-                            int bcount = 0;
-                            Entry *branch = session_get_branch(cadb, session_id, &bcount);
-                            if (branch) {
-                                for (int i = bcount - 1; i >= 0; i--) {
-                                    if (branch[i].message.role == ROLE_ASSISTANT && branch[i].message.content) {
-                                        result_buf = strdup(branch[i].message.content);
-                                        result_text = result_buf;
-                                        break;
-                                    }
-                                }
-                                entry_branch_free(branch, bcount);
-                            }
+                            result_buf = get_response_text(cadb, session_id);
+                            result_text = result_buf;
                             db_close(cadb);
                         }
                     }

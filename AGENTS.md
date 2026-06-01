@@ -4,6 +4,8 @@
 
 CClaw is a **minimal** autonomous AI agent in C. Every line of code must earn its place.
 
+> *Perfection is achieved, not when there is nothing more to add, but when there is nothing left to take away.* — Antoine de Saint-Exupéry
+
 **Unix Principles**
 
 CClaw is designed around Unix philosophy:

@@ -135,6 +135,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
                                          const ContextPlan *plan,
                                          const ToolSchema *tools, size_t tool_count,
                                          const char *body_override,
+                                         const char *recall_text,
                                          HttpResponse *resp) {
     /* Mock mode: read canned response from file, skip HTTP entirely */
     const char *mock_path = getenv("CCLAW_LLM_MOCK");
@@ -206,11 +207,13 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
     RequestStreamer rs;
     if (rs_init(&rs, db, session_id, cfg, plan, tools, tool_count) != 0)
         return -1;
+    rs.recall_text = recall_text;
 
     if (cfg->log_level >= LOG_LEVEL_TRACE) {
         /* Trace: stream entire request to stderr */
         RequestStreamer dbg_rs;
         rs_init(&dbg_rs, db, session_id, cfg, plan, tools, tool_count);
+        dbg_rs.recall_text = recall_text;
         size_t cap = 4096, len = 0;
         char *dbuf = malloc(cap);
         if (dbuf) {
@@ -259,10 +262,12 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
         RequestStreamer fb_rs;
         if (rs_init(&fb_rs, db, session_id, &fb_cfg, plan, tools, tool_count) != 0)
             continue;
+        fb_rs.recall_text = recall_text;
 
         if (cfg->log_level >= LOG_LEVEL_TRACE) {
             RequestStreamer dbg_rs;
             rs_init(&dbg_rs, db, session_id, &fb_cfg, plan, tools, tool_count);
+            dbg_rs.recall_text = recall_text;
             size_t cap = 4096, len = 0;
             char *dbuf = malloc(cap);
             if (dbuf) {
@@ -543,6 +548,25 @@ int agent_run(AgentContext *ctx) {
             }
 
             /* T45,V41: call LLM with streaming request + fallback chain */
+            /* T269: auto-recall — compute recalled context from FTS5 */
+            char *recall_text = NULL;
+            if (ctx->cfg->auto_recall && iter == 0) {
+                /* Get last user message content for recall query */
+                const char *uq = "SELECT content FROM entries WHERE session_id=? AND role=1"
+                                 " ORDER BY id DESC LIMIT 1;";
+                sqlite3_stmt *ust;
+                if (sqlite3_prepare_v2(ctx->db, uq, -1, &ust, NULL) == SQLITE_OK) {
+                    sqlite3_bind_int64(ust, 1, ctx->session_id);
+                    if (sqlite3_step(ust) == SQLITE_ROW) {
+                        const char *umsg = (const char *)sqlite3_column_text(ust, 0);
+                        if (umsg)
+                            recall_text = context_auto_recall(ctx->db, ctx->session_id,
+                                                             umsg, ctx->cfg->recall_max_tokens);
+                    }
+                    sqlite3_finalize(ust);
+                }
+            }
+
             /* T258/V112: beforeRequest hook — may provide modified request body */
             char *body_override = hook_dispatch_before_request(
                 ctx->ext_ctx, ctx->db, ctx->session_id, call_cfg,
@@ -555,8 +579,10 @@ int agent_run(AgentContext *ctx) {
                                                        ctx->session_id, &plan,
                                                        ctx->tools, ctx->tool_count,
                                                        body_override,
+                                                       recall_text,
                                                        &resp);
             free(body_override);
+            free(recall_text);
             struct timespec t_end;
             clock_gettime(CLOCK_MONOTONIC, &t_end);
             long elapsed_ms = (t_end.tv_sec - t_start.tv_sec) * 1000 +
@@ -660,7 +686,8 @@ int agent_run(AgentContext *ctx) {
                                 .metadata_json = meta,
                                 .model = ctx->cfg->provider.model,
                                 .usage_in = llm_resp.usage.prompt_tokens,
-                                .usage_out = llm_resp.usage.completion_tokens};
+                                .usage_out = llm_resp.usage.completion_tokens,
+                                .cost_nano = llm_resp.usage.cost_nano};
                 entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
                 free(asst.content);
                 free(meta);
@@ -728,7 +755,8 @@ int agent_run(AgentContext *ctx) {
                             .metadata_json = meta,
                             .model = ctx->cfg->provider.model,
                             .usage_in = llm_resp.usage.prompt_tokens,
-                            .usage_out = llm_resp.usage.completion_tokens};
+                            .usage_out = llm_resp.usage.completion_tokens,
+                            .cost_nano = llm_resp.usage.cost_nano};
             entry_append_with_turn(ctx->db, ctx->session_id, &asst, turn_id);
 
             /* V45: plan-only retry — re-prompt once if response is just a plan */
@@ -760,6 +788,7 @@ int agent_run(AgentContext *ctx) {
         asst.model = ctx->cfg->provider.model;
         asst.usage_in = llm_resp.usage.prompt_tokens;
         asst.usage_out = llm_resp.usage.completion_tokens;
+        asst.cost_nano = llm_resp.usage.cost_nano;
 
         /* T115: notify progress — intermediate assistant text */
         if (ctx->progress && asst.content && asst.content[0])

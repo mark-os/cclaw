@@ -484,8 +484,8 @@ int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, cons
     const char *sql =
         "INSERT INTO entries (parent_id, session_id, role, content, tool_calls,"
         " tool_call_id, tool_name, is_error, stop_reason, model,"
-        " usage_in, usage_out, token_estimate, content_bytes, tool_call_count)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+        " usage_in, usage_out, cost_nano, token_estimate, content_bytes, tool_call_count)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -538,13 +538,17 @@ int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, cons
     if (msg->usage_out > 0) sqlite3_bind_int(stmt, 12, msg->usage_out);
     else sqlite3_bind_null(stmt, 12);
 
+    /* cost */
+    if (msg->cost_nano > 0) sqlite3_bind_int64(stmt, 13, msg->cost_nano);
+    else sqlite3_bind_null(stmt, 13);
+
     /* token_estimate + content_bytes */
     int content_len = content_val ? (int)strlen(content_val) : 0;
     int tc_len = tc_json ? (int)strlen(tc_json) : 0;
     int total_bytes = content_len + tc_len;
-    sqlite3_bind_int(stmt, 13, (total_bytes / 4) + 4);
-    sqlite3_bind_int(stmt, 14, total_bytes);
-    sqlite3_bind_int(stmt, 15, tc_count);
+    sqlite3_bind_int(stmt, 14, (total_bytes / 4) + 4);
+    sqlite3_bind_int(stmt, 15, total_bytes);
+    sqlite3_bind_int(stmt, 16, tc_count);
 
     free(tc_json);
 
@@ -688,6 +692,20 @@ Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *cou
     sqlite3_finalize(stmt);
     if (*count == 0) { free(entries); return NULL; }
     return entries;
+}
+
+/* T268: Sum cost_nano for all entries in a session */
+int64_t session_cost(sqlite3 *db, int64_t session_id) {
+    const char *sql = "SELECT COALESCE(SUM(cost_nano),0) FROM entries WHERE session_id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    int64_t total = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        total = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return total;
 }
 
 /* Key-value store for persistent settings (e.g. Telegram offset) */
@@ -864,8 +882,8 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
     const char *ins_sql =
         "INSERT INTO entries (parent_id, session_id, turn_id, role, content, tool_calls,"
         " tool_call_id, tool_name, is_error, stop_reason, model,"
-        " usage_in, usage_out, token_estimate, content_bytes, tool_call_count)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+        " usage_in, usage_out, cost_nano, token_estimate, content_bytes, tool_call_count)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
     if (sqlite3_prepare_v2(db, ins_sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_int64(stmt, 1, parent_id);
@@ -915,13 +933,17 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
     if (msg->usage_out > 0) sqlite3_bind_int(stmt, 13, msg->usage_out);
     else sqlite3_bind_null(stmt, 13);
 
+    /* cost */
+    if (msg->cost_nano > 0) sqlite3_bind_int64(stmt, 14, msg->cost_nano);
+    else sqlite3_bind_null(stmt, 14);
+
     /* token_estimate + content_bytes */
     int content_len = content_val ? (int)strlen(content_val) : 0;
     int tc_len = tc_json ? (int)strlen(tc_json) : 0;
     int total_bytes = content_len + tc_len;
-    sqlite3_bind_int(stmt, 14, (total_bytes / 4) + 4);
-    sqlite3_bind_int(stmt, 15, total_bytes);
-    sqlite3_bind_int(stmt, 16, tc_count);
+    sqlite3_bind_int(stmt, 15, (total_bytes / 4) + 4);
+    sqlite3_bind_int(stmt, 16, total_bytes);
+    sqlite3_bind_int(stmt, 17, tc_count);
     free(tc_json);
 
     int rc = sqlite3_step(stmt);

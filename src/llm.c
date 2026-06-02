@@ -225,6 +225,11 @@ int llm_parse_response(Arena *a, const char *json, LlmResponse *out) {
             cJSON *rt = cJSON_GetObjectItem(ctd, "reasoning_tokens");
             if (rt && cJSON_IsNumber(rt)) out->usage.reasoning_tokens = rt->valueint;
         }
+
+        /* Cost — OpenRouter reports as total_cost (dollars) in usage */
+        cJSON *tc = cJSON_GetObjectItem(usage, "total_cost");
+        if (tc && cJSON_IsNumber(tc))
+            out->usage.cost_nano = (int64_t)(tc->valuedouble * 1e9 + 0.5);
     }
 
     /* reasoning/thinking — try all known field names */

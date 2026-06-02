@@ -19,6 +19,7 @@ typedef struct {
     int cache_read_tokens;   /* prompt cache hits (OpenAI/Anthropic/DeepSeek) */
     int cache_write_tokens;  /* prompt cache writes */
     int reasoning_tokens;    /* thinking/reasoning tokens (subset of completion) */
+    int64_t cost_nano;       /* cost in nanodollars (10^-9 USD), 0 if not reported */
 } LlmUsage;
 
 /* Parsed LLM response */

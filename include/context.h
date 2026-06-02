@@ -79,6 +79,12 @@ void session_tmp_cleanup(int64_t session_id);
  * Returns 1 if session tokens exceed context_threshold × context_window, 0 otherwise. */
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg);
 
+/* T269: Auto-recall — extract keywords from user message, FTS5 search across
+ * all sessions for relevant entries. Returns heap-allocated text (caller frees)
+ * or NULL if nothing recalled. max_tokens limits output size (chars/4). */
+char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
+                          int max_tokens);
+
 /* V58,T161: Trigger compaction on session if needed.
  * Detects excess entries, generates summary (T162), performs atomic reparent.
  * Returns compaction entry id (>0) if compacted, 0 if not needed, -1 on error. */

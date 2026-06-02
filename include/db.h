@@ -262,4 +262,7 @@ char *read_tool_call_args(sqlite3 *adb, int64_t session_id,
                           const char *tool_call_id, char **tool_name);
 int update_pending_entry(sqlite3 *adb, int64_t entry_id, const char *result);
 
+/* T268: Sum cost_nano for all entries in a session. Returns total nanodollars. */
+int64_t session_cost(sqlite3 *db, int64_t session_id);
+
 #endif

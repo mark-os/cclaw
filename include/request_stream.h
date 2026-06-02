@@ -39,6 +39,9 @@ typedef struct {
     size_t buf_len;
     size_t buf_pos;
     size_t buf_cap;
+
+    /* T269: auto-recall text (system message injected after preamble) */
+    const char *recall_text;    /* NULL = no recall; caller-owned, must outlive streamer */
 } RequestStreamer;
 
 /* Initialize streamer. Does NOT prepare cursor yet (deferred to first read).

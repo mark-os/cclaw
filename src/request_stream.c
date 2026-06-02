@@ -338,6 +338,7 @@ static int rs_advance(RequestStreamer *rs) {
         /* Estimate size */
         size_t need = 64 + strlen(model) + 64;
         if (has_cutoff) need += 128;
+        if (rs->recall_text) need += strlen(rs->recall_text) * 2 + 64;
         if (buf_ensure(rs, need) != 0) return 1;
 
         int written;
@@ -363,6 +364,23 @@ static int rs_advance(RequestStreamer *rs) {
         }
         rs->buf_len = (size_t)written;
         rs->buf_pos = 0;
+
+        /* T269: auto-recall — inject as system message after preamble */
+        if (rs->recall_text && rs->recall_text[0]) {
+            size_t rl = strlen(rs->recall_text);
+            size_t extra = rl * 2 + 64;
+            if (buf_ensure(rs, rs->buf_len + extra) != 0) return 1;
+            int w2 = snprintf(rs->buf + rs->buf_len, rs->buf_cap - rs->buf_len,
+                "{\"role\":\"system\",\"content\":\"");
+            rs->buf_len += (size_t)w2;
+            size_t esc = json_escape_into(rs->buf + rs->buf_len,
+                                          rs->buf_cap - rs->buf_len,
+                                          rs->recall_text);
+            rs->buf_len += esc;
+            int w3 = snprintf(rs->buf + rs->buf_len, rs->buf_cap - rs->buf_len, "\"},");
+            rs->buf_len += (size_t)w3;
+        }
+
         rs->phase = RS_PHASE_ENTRIES;
         return 0;
     }

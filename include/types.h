@@ -60,6 +60,7 @@ typedef struct {
     int is_error;           /* tool msgs: whether result is an error */
     int usage_in;           /* assistant msgs: input tokens */
     int usage_out;          /* assistant msgs: output tokens */
+    int64_t cost_nano;      /* assistant msgs: cost in nanodollars */
 } Message;
 
 /* V14: session tree entry — id + parent_id for branching structure */
@@ -126,6 +127,8 @@ typedef struct {
     int save_reasoning;     /* store reasoning/thinking tokens in entry metadata */
     int save_usage;         /* store token usage in entry metadata */
     int save_logprobs;      /* store logprobs in entry metadata */
+    int auto_recall;        /* T269: FTS5 auto-recall (default 1) */
+    int recall_max_tokens;  /* T269: max tokens for recalled context (default 500) */
 } Config;
 
 #endif

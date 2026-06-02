@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS entries (
   model TEXT,
   usage_in INTEGER,
   usage_out INTEGER,
+  cost_nano INTEGER,
   token_estimate INTEGER,
   content_bytes INTEGER,
   tool_call_count INTEGER NOT NULL DEFAULT 0,

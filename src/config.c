@@ -196,6 +196,12 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_COMPACTION");
     cfg->compaction = v ? atoi(v) : 1;
 
+    v = getenv("CCLAW_AUTO_RECALL");
+    cfg->auto_recall = v ? atoi(v) : 1;
+
+    v = getenv("CCLAW_RECALL_MAX_TOKENS");
+    cfg->recall_max_tokens = v ? atoi(v) : 500;
+
     return cfg;
 }
 
@@ -403,6 +409,12 @@ Config *config_load(sqlite3 *db) {
         v = getenv("CCLAW_COMPACTION");
         if (v) cfg->compaction = atoi(v);
     }
+
+    /* T269: auto-recall defaults + env overrides */
+    if (cfg->auto_recall == 0) cfg->auto_recall = 1;
+    if (cfg->recall_max_tokens == 0) cfg->recall_max_tokens = 500;
+    env_override_int(&cfg->auto_recall, "CCLAW_AUTO_RECALL");
+    env_override_int(&cfg->recall_max_tokens, "CCLAW_RECALL_MAX_TOKENS");
 
     return cfg;
 }

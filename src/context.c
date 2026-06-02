@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 #define TRUNCATE_MAX_BYTES  (50 * 1024)
@@ -750,4 +751,77 @@ int64_t session_try_compact(sqlite3 *db, int64_t session_id, const Config *cfg) 
     int64_t result = entry_compact(db, session_id, last_kept_id, first_after_id, summary);
     if (summary != fallback) free(summary);
     return result;
+}
+
+/* T269: Auto-recall — FTS5 search across sessions for relevant context.
+ * Extracts keywords from user_msg, queries entries_fts, returns formatted text. */
+char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
+                          int max_tokens) {
+    if (!db || !user_msg || !user_msg[0]) return NULL;
+
+    /* Extract keywords: words ≥ 4 chars, skip duplicates, max 8 keywords.
+     * Build FTS5 query: word1 OR word2 OR ... */
+    char query[512] = {0};
+    int qlen = 0;
+    char *dup = strdup(user_msg);
+    if (!dup) return NULL;
+
+    char *words[8];
+    int nwords = 0;
+    char *tok = strtok(dup, " \t\n\r.,;:!?\"'()[]{}");
+    while (tok && nwords < 8) {
+        if (strlen(tok) < 4) { tok = strtok(NULL, " \t\n\r.,;:!?\"'()[]{}"); continue; }
+        /* skip duplicates */
+        int found = 0;
+        for (int i = 0; i < nwords; i++)
+            if (strcasecmp(words[i], tok) == 0) { found = 1; break; }
+        if (!found) words[nwords++] = tok;
+        tok = strtok(NULL, " \t\n\r.,;:!?\"'()[]{}");
+    }
+
+    if (nwords == 0) { free(dup); return NULL; }
+
+    for (int i = 0; i < nwords; i++) {
+        if (i > 0) qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen, " OR ");
+        qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen, "%s", words[i]);
+    }
+    free(dup);
+
+    /* FTS5 search — skip entries from current session */
+    const char *sql =
+        "SELECT e.content, e.session_id FROM entries_fts f"
+        " JOIN entries e ON e.id = f.rowid"
+        " WHERE entries_fts MATCH ? AND e.session_id != ? AND e.role IN (1,2)"
+        " ORDER BY rank LIMIT 5;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(stmt, 1, query, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, session_id);
+
+    /* Build output */
+    int max_chars = max_tokens * 4;
+    size_t cap = (size_t)max_chars + 128;
+    char *out = malloc(cap);
+    if (!out) { sqlite3_finalize(stmt); return NULL; }
+    int olen = snprintf(out, cap, "<recalled_context>\n");
+
+    int hits = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *content = (const char *)sqlite3_column_text(stmt, 0);
+        if (!content || !content[0]) continue;
+        /* Truncate individual entries to ~100 tokens */
+        int entry_max = 400;
+        int clen = (int)strlen(content);
+        if (clen > entry_max) clen = entry_max;
+        if (olen + clen + 10 > max_chars) break;
+        olen += snprintf(out + olen, cap - (size_t)olen, "- %.*s\n", clen, content);
+        hits++;
+    }
+    sqlite3_finalize(stmt);
+
+    if (hits == 0) { free(out); return NULL; }
+
+    snprintf(out + olen, cap - (size_t)olen, "</recalled_context>");
+    return out;
 }

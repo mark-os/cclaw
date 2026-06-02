@@ -198,6 +198,8 @@ Config *agent_config_merge(const Config *global, const AgentConfig *ac) {
     cfg->save_reasoning = global->save_reasoning;
     cfg->save_usage = global->save_usage;
     cfg->save_logprobs = global->save_logprobs;
+    cfg->auto_recall = global->auto_recall;
+    cfg->recall_max_tokens = global->recall_max_tokens;
 
     /* Copy fallback providers */
     if (global->fallback_count > 0 && global->fallback_providers) {

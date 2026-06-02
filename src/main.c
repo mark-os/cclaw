@@ -552,6 +552,15 @@ int main(int argc, char *argv[]) {
     free(line);
 
 done:
+    /* T268: print session cost on exit */
+    {
+        int64_t cost = session_cost(adb, session_id);
+        if (cost > 0) {
+            double dollars = (double)cost / 1e9;
+            fprintf(stderr, "\n[session cost: $%.6f]\n", dollars);
+        }
+    }
+
     session_set_state(adb, session_id, "idle");
     db_close(adb);
     if (g_journal_db) db_close(g_journal_db);

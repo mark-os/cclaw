@@ -247,6 +247,29 @@ static void test_parse_invalid_json(void) {
     PASS();
 }
 
+static void test_parse_cost_field(void) {
+    TEST(parse_cost_field);
+    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
+
+    /* OpenRouter uses "cost" in usage (not "total_cost") */
+    const char *json =
+        "{\"choices\":[{\"message\":{\"content\":\"hi\",\"role\":\"assistant\"},"
+        "\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"total_tokens\":105,"
+        "\"cost\":0.000072112}}";
+
+    LlmResponse resp;
+    int rc = llm_parse_response(a, json, &resp);
+    if (rc != 0) { FAIL("parse failed"); arena_destroy(a); return; }
+    /* 0.000072112 * 1e9 = 72112 nanodollars */
+    if (resp.usage.cost_nano != 72112) {
+        char buf[64]; snprintf(buf, sizeof(buf), "expected 72112, got %lld", (long long)resp.usage.cost_nano);
+        FAIL(buf); arena_destroy(a); return;
+    }
+    arena_destroy(a);
+    PASS();
+}
+
 int main(void) {
     printf("--- test_llm ---\n");
     test_basic_request();
@@ -257,6 +280,7 @@ int main(void) {
     test_parse_content_response();
     test_parse_tool_calls_response();
     test_parse_invalid_json();
+    test_parse_cost_field();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

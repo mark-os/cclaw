@@ -81,7 +81,11 @@ sqlite3 *db_open_cclaw(const char *path) {
 
 /* T195/V73: Open agent.db — sessions, entries, inbox, js_tools, memory, kv */
 sqlite3 *db_open_agent(const char *path) {
-    return db_open_with_schema(path, SCHEMA_AGENT_SQL, "db_open_agent");
+    sqlite3 *db = db_open_with_schema(path, SCHEMA_AGENT_SQL, "db_open_agent");
+    if (!db) return NULL;
+    /* T268 fixup: add cost_nano if missing (pre-existing DBs) — ignore error */
+    sqlite3_exec(db, "ALTER TABLE entries ADD COLUMN cost_nano INTEGER;", NULL, NULL, NULL);
+    return db;
 }
 
 /* T195/V73: Open journal.db — log table */

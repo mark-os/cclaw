@@ -478,6 +478,7 @@ Test tiers (Makefile targets):
 id|date|cause|fix
 B1|2026-05-31|GMICloud returns HTTP 200 w/ 0 tokens + null content + `finish_reason:"stop"` after tool-result follow-up; agent stored empty string as final response; `print_response` printed blank line|V94,V95 — `get_response_text` skips empty; T231 adds retry
 B2|2026-06-01|`build_tools_fragment` closes JSON object w/ `}` — `max_tokens` field ⊥ included when tools present; every agentic request sent without output limit|T237
+B3|2026-06-02|T268 added `cost_nano` column to INSERT SQL + schema template but pre-existing agent.db lacked column; `entry_append_with_turn` failed silently (prepare error → -1); agent returned 0 (success) w/ no response written; also: cost parser looked for `usage.total_cost` but OpenRouter sends `usage.cost`|fix: `db_open_agent` runs `ALTER TABLE entries ADD COLUMN cost_nano INTEGER` (idempotent); parser checks `cost` then `total_cost`; moved `test_integration_cli` → e2e tier (requires live LLM)
 
 ## §F FUTURE
 - CLI streaming response: add `"stream":true` to LLM request in CLI mode only; parse SSE `data:` chunks; write tokens to stdout as they arrive; agent process stdout = user-facing content stream; daemon mode ⊥ stream (delivers complete response via channel post-exit); configurable per-agent (`stream_cli` bool, default true once implemented); stdout currently unused by agent — reserved for this

@@ -464,8 +464,8 @@ T262|x|`cclaw.callTool(name, args)` — synchronous C callback; lookup tool in r
 T263|x|extension integration into agent startup — after `tool_js_load_session` (existing js_define_tool replay), run extension discovery + loader; extensions see previously defined JS tools; extensions can define new tools that persist via `js_define_tool` DB path|V109,V110
 T264|x|test: extension registers tool → agent can call it via LLM tool_call; verify tool appears in registry|V109,V111
 T265|x|test: `beforeToolCall` hook blocks execution → LLM receives error result|V113
-T266|.|test: extension throws during load → skipped, other extensions still load, agent turn continues|V109
-T267|.|test: `callTool` re-entrancy — JS extension calls C tool that triggers JS → verify depth limit enforced|V116
+T266|x|test: extension throws during load → skipped, other extensions still load, agent turn continues|V109
+T267|x|test: `callTool` re-entrancy — JS extension calls C tool that triggers JS → verify depth limit enforced|V116
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)

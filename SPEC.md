@@ -468,6 +468,7 @@ T266|x|test: extension throws during load → skipped, other extensions still lo
 T267|x|test: `callTool` re-entrancy — JS extension calls C tool that triggers JS → verify depth limit enforced|V116
 T268|x|cost tracking — parse `cost` field from OpenRouter response (generation.total_cost); store `cost_nano INTEGER` (nanodollars, 10^-9 USD) per entry in entries table; `session_cost(db, session_id)` sums session; CLI prints session cost on exit|§D
 T269|x|auto-recall (FTS5) — at context_build, extract keywords from newest user message → FTS5 search over entries (cross-session) + memory_blocks → inject top-N relevant hits as `<recalled_context>` section after system prompt; configurable: `CCLAW_AUTO_RECALL` (bool, default 1), `CCLAW_RECALL_MAX_TOKENS` (int, default 500); skip if query yields 0 results|V7
+T270|x|CLI streaming response — add `"stream":true` to LLM request in CLI mode; parse SSE `data:` chunks via curl write callback; write content tokens to stdout as they arrive (agent child stdout = terminal); reconstruct non-streaming JSON for `llm_parse_response`; suppress `print_response` in parent (child already wrote); `CCLAW_STREAM=1` env var (CLI sets by default); daemon mode leaves 0|§F,§C
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)
@@ -481,7 +482,7 @@ B2|2026-06-01|`build_tools_fragment` closes JSON object w/ `}` — `max_tokens` 
 B3|2026-06-02|T268 added `cost_nano` column to INSERT SQL + schema template but pre-existing agent.db lacked column; `entry_append_with_turn` failed silently (prepare error → -1); agent returned 0 (success) w/ no response written; also: cost parser looked for `usage.total_cost` but OpenRouter sends `usage.cost`|fix: `db_open_agent` runs `ALTER TABLE entries ADD COLUMN cost_nano INTEGER` (idempotent); parser checks `cost` then `total_cost`; moved `test_integration_cli` → e2e tier (requires live LLM)
 
 ## §F FUTURE
-- CLI streaming response: add `"stream":true` to LLM request in CLI mode only; parse SSE `data:` chunks; write tokens to stdout as they arrive; agent process stdout = user-facing content stream; daemon mode ⊥ stream (delivers complete response via channel post-exit); configurable per-agent (`stream_cli` bool, default true once implemented); stdout currently unused by agent — reserved for this
+- ~~CLI streaming response~~: implemented (T270) — `"stream":true` in CLI mode, SSE parsing, real-time token output to stdout; configurable via `CCLAW_STREAM` env var; daemon mode remains non-streaming
 - Web chat: civetweb serves chat UI (SSE streaming for partial responses, session select/create, message history); block streaming to browser as assistant generates; replaces status-only page
 - Intra-turn steering: agent checks inbox between tool executions, injects new messages into context mid-loop (Pi model: steering = interrupt, follow-up = queue until stop); complicates V18 atomic consumption — design carefully
 - Session curation: ~~mid-session compaction~~ (now §T T160-T163); prune failed tool-call loops, automated "curation agent" that cleans up long-running sessions

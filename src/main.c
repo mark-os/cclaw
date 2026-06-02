@@ -489,6 +489,10 @@ int main(int argc, char *argv[]) {
                             cfg->log_level == LOG_LEVEL_ERROR ? "error" : "info";
     setenv("CCLAW_LOG_LEVEL", level_str, 1);
 
+    /* CLI mode: enable SSE streaming for real-time token output */
+    setenv("CCLAW_STREAM", "1", 1);
+    cfg->stream = 1;
+
     /* V96/T233: open journal.db for CLI log persistence */
     g_journal_db = db_open_journal(".cclaw/journal.db");
     g_cli_cfg = cfg;
@@ -520,7 +524,14 @@ int main(int argc, char *argv[]) {
     if (prompt) {
         inbox_insert(adb, session_id, "cli", prompt);
         rc = cli_run_turn(adb, cclaw_db, cfg, session_id, agent_name);
-        if (rc == 0) print_response(adb, session_id);
+        if (rc == 0) {
+            /* Streaming: child wrote tokens to stdout; just add trailing newline.
+             * Non-streaming: print full response from DB. */
+            if (cfg->stream)
+                printf("\n");
+            else
+                print_response(adb, session_id);
+        }
         goto done;
     }
 
@@ -546,7 +557,12 @@ int main(int argc, char *argv[]) {
 
         inbox_insert(adb, session_id, "cli", line);
         rc = cli_run_turn(adb, cclaw_db, cfg, session_id, agent_name);
-        if (rc == 0) print_response(adb, session_id);
+        if (rc == 0) {
+            if (cfg->stream)
+                printf("\n");
+            else
+                print_response(adb, session_id);
+        }
     }
 
     free(line);

@@ -106,7 +106,7 @@ Config resolution (highest priority first):
 ## Usage
 
 ```bash
-cclaw                    # interactive CLI (default agent)
+cclaw                    # interactive CLI (default agent, streaming output)
 cclaw -p "hello"         # single-turn: print response and exit
 cclaw -s 3               # resume session 3
 cclaw --new              # force new session

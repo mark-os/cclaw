@@ -202,6 +202,9 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_RECALL_MAX_TOKENS");
     cfg->recall_max_tokens = v ? atoi(v) : 500;
 
+    v = getenv("CCLAW_STREAM");
+    cfg->stream = v ? atoi(v) : 0;
+
     return cfg;
 }
 

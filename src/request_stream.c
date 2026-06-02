@@ -457,15 +457,20 @@ static int rs_advance(RequestStreamer *rs) {
     }
 
     case RS_PHASE_CLOSE: {
-        /* Optional max_tokens + close root object */
-        if (rs->cfg->provider.max_tokens > 0) {
-            char close_buf[64];
-            int n = snprintf(close_buf, sizeof(close_buf),
-                             ",\"max_tokens\":%d}", rs->cfg->provider.max_tokens);
-            buf_set(rs, close_buf, (size_t)n);
-        } else {
-            buf_set(rs, "}", 1);
-        }
+        /* Optional stream + max_tokens + close root object */
+        char close_buf[96];
+        int n = 0;
+        if (rs->cfg->stream && rs->cfg->provider.max_tokens > 0)
+            n = snprintf(close_buf, sizeof(close_buf),
+                         ",\"stream\":true,\"max_tokens\":%d}", rs->cfg->provider.max_tokens);
+        else if (rs->cfg->stream)
+            n = snprintf(close_buf, sizeof(close_buf), ",\"stream\":true}");
+        else if (rs->cfg->provider.max_tokens > 0)
+            n = snprintf(close_buf, sizeof(close_buf),
+                         ",\"max_tokens\":%d}", rs->cfg->provider.max_tokens);
+        else
+            n = snprintf(close_buf, sizeof(close_buf), "}");
+        buf_set(rs, close_buf, (size_t)n);
         rs->phase = RS_PHASE_DONE;
         return 0;
     }

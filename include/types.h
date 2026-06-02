@@ -129,6 +129,7 @@ typedef struct {
     int save_logprobs;      /* store logprobs in entry metadata */
     int auto_recall;        /* T269: FTS5 auto-recall (default 1) */
     int recall_max_tokens;  /* T269: max tokens for recalled context (default 500) */
+    int stream;             /* SSE streaming (CLI sets 1; daemon leaves 0) */
 } Config;
 
 #endif

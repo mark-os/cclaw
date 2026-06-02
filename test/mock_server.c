@@ -111,15 +111,19 @@ static int handle_completions(struct mg_connection *conn, void *cbdata) {
         body = fallback;
     }
 
+    /* SSE response: if body starts with "data:" serve as event-stream */
+    int is_sse = (body && strncmp(body, "data:", 5) == 0);
+
     int len = (int)strlen(body);
     mg_printf(conn,
         "HTTP/1.1 %d %s\r\n"
-        "Content-Type: application/json\r\n"
+        "Content-Type: %s\r\n"
         "%s"
         "Content-Length: %d\r\n"
         "\r\n"
         "%s",
         status, status == 200 ? "OK" : "Error",
+        is_sse ? "text/event-stream" : "application/json",
         extra_hdrs ? extra_hdrs : "",
         len, body);
 

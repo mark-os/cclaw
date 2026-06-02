@@ -25,6 +25,19 @@ int http_post_stream(const char *url, const char **headers,
                      HttpReadFn read_cb, void *read_data,
                      HttpResponse *resp);
 
+/* SSE streaming: called with each content delta token.
+ * Return 0 to continue, non-zero to abort. */
+typedef int (*HttpSseFn)(const char *token, size_t len, void *userdata);
+
+/* POST with streaming upload (READFUNCTION) + SSE response parsing.
+ * On each SSE "data:" line, parses JSON delta and invokes sse_cb with content.
+ * Full accumulated response stored in resp->data for final parsing.
+ * Returns HTTP status code, or -1 on curl error. */
+int http_post_stream_sse(const char *url, const char **headers,
+                         HttpReadFn read_cb, void *read_data,
+                         HttpSseFn sse_cb, void *sse_data,
+                         HttpResponse *resp);
+
 /* Free response buffer. */
 void http_response_free(HttpResponse *resp);
 

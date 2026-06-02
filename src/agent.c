@@ -88,6 +88,15 @@ static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
     return result;
 }
 
+/* SSE streaming callback: write content tokens to stdout in real-time */
+static int sse_token_cb(const char *token, size_t len, void *userdata) {
+    (void)userdata;
+    if (token && len > 0)
+        fwrite(token, 1, len, stdout);
+    fflush(stdout);
+    return 0;
+}
+
 /* V41,V2: call LLM with streaming upload + retry on 429/5xx. Resets streamer on retry.
  * Returns: HTTP status on success, -1 network error, -2 timeout.
  * 401/403/404 returned immediately (no retry — caller handles fallback). */
@@ -98,7 +107,12 @@ static int llm_call_with_retry_stream(const char *url, const char **headers,
     int last_status = -1;
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        int status = http_post_stream(url, headers, rs_read_cb, rs, resp);
+        int status;
+        if (cfg->stream)
+            status = http_post_stream_sse(url, headers, rs_read_cb, rs,
+                                          sse_token_cb, NULL, resp);
+        else
+            status = http_post_stream(url, headers, rs_read_cb, rs, resp);
         last_status = status;
 
         /* E10: timeout, E4: network — no retry, return for fallback */

@@ -17,7 +17,17 @@ typedef struct {
     int instruction_count;
     int instruction_limit;
     int fetch_fd;
+    void *tool_registry;  /* unused in mjs — padding for struct compat */
+    int call_depth;       /* unused in mjs */
 } JsHostCtx;
+
+/* V116: callTool stub — not available in standalone mjs */
+JSValue js_call_tool(JSContext *ctx, JSValue *this_val,
+                     int argc, JSValue *argv)
+{
+    (void)this_val; (void)argc; (void)argv;
+    return JS_ThrowTypeError(ctx, "callTool not available in standalone mjs");
+}
 
 /* Date.now() — milliseconds since epoch */
 JSValue js_date_now(JSContext *ctx, JSValue *this_val,

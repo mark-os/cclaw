@@ -17,6 +17,8 @@ typedef struct {
     int instruction_count;
     int instruction_limit;
     int fetch_fd;
+    void *tool_registry;  /* unused — struct padding for ABI compat */
+    int call_depth;       /* unused */
 } JsHostCtx;
 
 static int interrupt_handler(JSContext *ctx, void *opaque)

@@ -348,6 +348,18 @@ void js_runtime_set_hosts(JsSessionRuntime *rt, char **hosts, size_t count) {
     hctx->allowed_hosts_count = count;
 }
 
+void js_runtime_set_registry(JsSessionRuntime *rt, ToolRegistry *reg) {
+    if (!rt || !rt->ctx) return;
+    JSContext *ctx = (JSContext *)rt->ctx;
+    JsHostCtx *hctx = (JsHostCtx *)JS_GetContextOpaque(ctx);
+    if (!hctx) {
+        hctx = calloc(1, sizeof(JsHostCtx));
+        if (!hctx) return;
+        JS_SetContextOpaque(ctx, hctx);
+    }
+    hctx->tool_registry = reg;
+}
+
 int tool_js_load_session(sqlite3 *db, int64_t session_id, ToolRegistry *reg,
                          JsSessionRuntime *rt) {
     const char *sql = "SELECT name, description, parameters_json, code FROM js_tools WHERE session_id=?;";

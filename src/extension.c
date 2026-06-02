@@ -128,7 +128,7 @@ static const char CCLAW_API_INIT[] =
     "    globalThis.__cclaw_hooks[event].push(fn);\n"
     "  },\n"
     "  callTool: function(name, args) {\n"
-    "    throw new Error('callTool not available during extension loading');\n"
+    "    return __cclaw_call_tool(name, args);\n"
     "  }\n"
     "};\n";
 

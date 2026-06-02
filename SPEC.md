@@ -460,8 +460,8 @@ T258|x|hook dispatch: `beforeRequest` — in `agent.c` before LLM call, serializ
 T259|x|hook dispatch: `beforeToolCall` / `afterToolCall` — in tool dispatch loop, call hooks before/after execution; `beforeToolCall` can block (return `{block:true}`); `afterToolCall` can replace result|V113,V114
 T260|x|hook dispatch: `turnStart` / `turnEnd` — call at agent_run entry and before exit; informational (no return value used)|V111
 T261|x|hook dispatch: `afterResponse` — after LLM response parsed, call hooks w/ response object (read-only inspect); skip on throw|V111
-T262|.|`cclaw.callTool(name, args)` — synchronous C callback; lookup tool in registry, call handler, return result string to JS; depth counter prevents infinite recursion (limit 8)|V116
-T263|.|extension integration into agent startup — after `tool_js_load_session` (existing js_define_tool replay), run extension discovery + loader; extensions see previously defined JS tools; extensions can define new tools that persist via `js_define_tool` DB path|V109,V110
+T262|x|`cclaw.callTool(name, args)` — synchronous C callback; lookup tool in registry, call handler, return result string to JS; depth counter prevents infinite recursion (limit 8)|V116
+T263|x|extension integration into agent startup — after `tool_js_load_session` (existing js_define_tool replay), run extension discovery + loader; extensions see previously defined JS tools; extensions can define new tools that persist via `js_define_tool` DB path|V109,V110
 T264|.|test: extension registers tool → agent can call it via LLM tool_call; verify tool appears in registry|V109,V111
 T265|.|test: `beforeToolCall` hook blocks execution → LLM receives error result|V113
 T266|.|test: extension throws during load → skipped, other extensions still load, agent turn continues|V109

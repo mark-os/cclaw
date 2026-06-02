@@ -480,6 +480,9 @@ int agent_run(AgentContext *ctx) {
     if (resume_rc == -1) return -1;      /* error */
     /* resume_rc == 0 or -2: proceed to LLM loop */
 
+    /* T260/V111: turnStart hook — informational */
+    hook_dispatch_turn_start(ctx->ext_ctx);
+
     /* V45: plan-only retry (max 1) */
     int plan_retried = 0;
 
@@ -681,6 +684,11 @@ int agent_run(AgentContext *ctx) {
             break;
         }
 
+        /* T261/V111: afterResponse hook — read-only inspect */
+        hook_dispatch_after_response(ctx->ext_ctx, llm_resp.content,
+                                     llm_resp.finish_reason,
+                                     (int)llm_resp.tool_call_count);
+
         /* V32: all retries exhausted → write final error entry + exit */
         if (!llm_ok) {
             const char *err_text;
@@ -738,6 +746,7 @@ int agent_run(AgentContext *ctx) {
             free(asst.content);
             free(meta);
             arena_destroy(a);
+            hook_dispatch_turn_end(ctx->ext_ctx);
             return 0;
         }
 
@@ -860,5 +869,6 @@ int agent_run(AgentContext *ctx) {
     }
 
     /* Max iterations reached */
+    hook_dispatch_turn_end(ctx->ext_ctx);
     return -1;
 }

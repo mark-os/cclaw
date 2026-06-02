@@ -347,3 +347,75 @@ char *hook_dispatch_after_tool_call(ExtensionCtx *ext_ctx, const char *name,
     }
     return replacement;
 }
+
+/* V111/T260: turnStart/turnEnd — informational, no return value. */
+static void dispatch_simple_hook(ExtensionCtx *ext_ctx, HookEvent event) {
+    if (!ext_ctx || !ext_ctx->rt || !ext_ctx->rt->ctx) return;
+    HookList *hl = &ext_ctx->hooks[event];
+    if (hl->count == 0) return;
+
+    JSContext *ctx = (JSContext *)ext_ctx->rt->ctx;
+    for (size_t i = 0; i < hl->count; i++) {
+        size_t cl = strlen(hl->fns[i]) + 64;
+        char *code = malloc(cl);
+        if (!code) continue;
+        snprintf(code, cl, "(function(){var __fn=%s;__fn();})()", hl->fns[i]);
+        JSValue v = JS_Eval(ctx, code, strlen(code), "<hook>", 0);
+        free(code);
+        if (JS_IsException(v)) {
+            JSValue exc = JS_GetException(ctx);
+            (void)exc;
+        }
+    }
+}
+
+void hook_dispatch_turn_start(ExtensionCtx *ext_ctx) {
+    dispatch_simple_hook(ext_ctx, HOOK_TURN_START);
+}
+
+void hook_dispatch_turn_end(ExtensionCtx *ext_ctx) {
+    dispatch_simple_hook(ext_ctx, HOOK_TURN_END);
+}
+
+/* V111/T261: afterResponse — read-only inspect of LLM response. */
+void hook_dispatch_after_response(ExtensionCtx *ext_ctx, const char *content,
+                                  const char *finish_reason, int tool_call_count) {
+    if (!ext_ctx || !ext_ctx->rt || !ext_ctx->rt->ctx) return;
+    HookList *hl = &ext_ctx->hooks[HOOK_AFTER_RESPONSE];
+    if (hl->count == 0) return;
+
+    JSContext *ctx = (JSContext *)ext_ctx->rt->ctx;
+
+    /* Build response object as JSON */
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "content", content ? content : "");
+    cJSON_AddStringToObject(obj, "finish_reason", finish_reason ? finish_reason : "");
+    cJSON_AddNumberToObject(obj, "tool_call_count", tool_call_count);
+    char *json_str = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+    if (!json_str) return;
+
+    size_t setup_len = strlen(json_str) + 64;
+    char *setup = malloc(setup_len);
+    if (!setup) { free(json_str); return; }
+    snprintf(setup, setup_len, "globalThis.__hook_resp = %s;", json_str);
+    free(json_str);
+    JSValue sv = JS_Eval(ctx, setup, strlen(setup), "<hook>", 0);
+    free(setup);
+    if (JS_IsException(sv)) return;
+
+    for (size_t i = 0; i < hl->count; i++) {
+        size_t cl = strlen(hl->fns[i]) + 96;
+        char *code = malloc(cl);
+        if (!code) continue;
+        snprintf(code, cl,
+                 "(function(){var __fn=%s;__fn(globalThis.__hook_resp);})()",
+                 hl->fns[i]);
+        JSValue v = JS_Eval(ctx, code, strlen(code), "<hook>", 0);
+        free(code);
+        if (JS_IsException(v)) {
+            JSValue exc = JS_GetException(ctx);
+            (void)exc;
+        }
+    }
+}

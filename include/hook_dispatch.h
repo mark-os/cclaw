@@ -32,4 +32,12 @@ char *hook_dispatch_before_tool_call(ExtensionCtx *ext_ctx, const char *name,
 char *hook_dispatch_after_tool_call(ExtensionCtx *ext_ctx, const char *name,
                                     const char *args, const char *result);
 
+/* V111/T260: Dispatch turnStart/turnEnd hooks. Informational — no return value. */
+void hook_dispatch_turn_start(ExtensionCtx *ext_ctx);
+void hook_dispatch_turn_end(ExtensionCtx *ext_ctx);
+
+/* V111/T261: Dispatch afterResponse hook with LLM response (read-only inspect). */
+void hook_dispatch_after_response(ExtensionCtx *ext_ctx, const char *content,
+                                  const char *finish_reason, int tool_call_count);
+
 #endif

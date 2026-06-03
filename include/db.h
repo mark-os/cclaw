@@ -164,6 +164,11 @@ typedef struct {
 /* Get agent row by name. Returns NULL if not found. Caller frees with agent_row_free. */
 AgentRow *db_agent_get(sqlite3 *db, const char *name);
 
+/* T271: List all agent names from cclaw.db agents table.
+ * Returns heap-allocated array of names (each heap-allocated). Sets *count.
+ * Caller must free each name and the array. */
+char **db_agent_list(sqlite3 *db, int *count);
+
 /* Insert or update agent row. Returns 0 on success, -1 on error. */
 int db_agent_upsert(sqlite3 *db, const char *name, const char *config,
                     const char *system_prompt, const char *heartbeat);

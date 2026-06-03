@@ -436,11 +436,20 @@ int main(int argc, char *argv[]) {
         if (secret_key_load_or_create(db_path, sk) == 0)
             db_set_secret_key(sk);
     }
+
+    /* Derive base_dir from db_path (directory containing cclaw.db) */
+    char *base_dir = strdup(db_path);
+    {
+        char *slash = strrchr(base_dir, '/');
+        if (slash) *slash = '\0';
+        else { free(base_dir); base_dir = strdup("."); }
+    }
     free(db_path);
 
     Config *cfg = config_load(cclaw_db);
     if (!cfg) {
         fprintf(stderr, "error: failed to load config\n");
+        free(base_dir);
         db_close(cclaw_db);
         return 1;
     }
@@ -448,20 +457,115 @@ int main(int argc, char *argv[]) {
 
     if (!cfg->provider.api_key || !cfg->provider.api_key[0]) {
         fprintf(stderr, "error: no API key configured (set OPENROUTER_API_KEY or add to cclaw.db)\n");
+        free(base_dir);
         config_free(cfg);
         db_close(cclaw_db);
         return 1;
     }
 
-    /* Open agent DB */
+    /* T271/V117: Ensure "default" agent exists on first run */
+    {
+        int agent_count = 0;
+        char **agents = db_agent_list(cclaw_db, &agent_count);
+        if (!agents || agent_count == 0) {
+            /* First run: create "default" agent + workspace dir */
+            char ws_path[PATH_MAX];
+            snprintf(ws_path, sizeof(ws_path), "%s/agents/default/workspace/.keep", base_dir);
+            ensure_parent_dir(ws_path);
+            db_agent_upsert(cclaw_db, "default", NULL, NULL, NULL);
+            db_kv_set(cclaw_db, "default_agent", "default");
+        }
+        if (agents) {
+            for (int i = 0; i < agent_count; i++) free(agents[i]);
+            free(agents);
+        }
+    }
+
+    /* T271/V118: Agent selection — -p uses default_agent; interactive shows picker */
     const char *agent_db_env = getenv("CCLAW_AGENT_DB");
-    char *agent_db_path = agent_db_env && agent_db_env[0]
-        ? strdup(agent_db_env) : strdup(".cclaw/agents/default/agent.db");
+    char *agent_name_sel = NULL;
+
+    if (agent_db_env && agent_db_env[0]) {
+        /* Explicit env override — skip picker */
+        const char *env_name = getenv("CCLAW_AGENT_NAME");
+        agent_name_sel = strdup(env_name ? env_name : "default");
+    } else if (prompt || !isatty(STDIN_FILENO)) {
+        /* Non-interactive / -p: use kv default_agent */
+        char *def = db_kv_get(cclaw_db, "default_agent");
+        agent_name_sel = def ? def : strdup("default");
+    } else {
+        /* Interactive: show agent picker */
+        int agent_count = 0;
+        char **agents = db_agent_list(cclaw_db, &agent_count);
+        char *default_agent = db_kv_get(cclaw_db, "default_agent");
+
+        if (agent_count == 1) {
+            /* Single agent — auto-select */
+            agent_name_sel = strdup(agents[0]);
+        } else {
+            printf("agents:\n");
+            for (int i = 0; i < agent_count; i++) {
+                int is_default = default_agent && strcmp(agents[i], default_agent) == 0;
+                printf("  %d) %s%s\n", i + 1, agents[i], is_default ? " *" : "");
+            }
+            printf("  n) new agent...\n");
+            printf("select: ");
+            fflush(stdout);
+
+            char buf[128];
+            if (fgets(buf, sizeof(buf), stdin)) {
+                if (buf[0] == 'n' || buf[0] == 'N') {
+                    printf("agent name: ");
+                    fflush(stdout);
+                    if (fgets(buf, sizeof(buf), stdin)) {
+                        size_t len = strlen(buf);
+                        if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
+                        if (buf[0]) {
+                            char ws_path[PATH_MAX];
+                            snprintf(ws_path, sizeof(ws_path),
+                                     "%s/agents/%s/workspace/.keep", base_dir, buf);
+                            ensure_parent_dir(ws_path);
+                            db_agent_upsert(cclaw_db, buf, NULL, NULL, NULL);
+                            agent_name_sel = strdup(buf);
+                        }
+                    }
+                } else {
+                    int choice = atoi(buf);
+                    if (choice >= 1 && choice <= agent_count)
+                        agent_name_sel = strdup(agents[choice - 1]);
+                }
+            }
+        }
+        free(default_agent);
+        if (agents) {
+            for (int i = 0; i < agent_count; i++) free(agents[i]);
+            free(agents);
+        }
+    }
+
+    if (!agent_name_sel) {
+        fprintf(stderr, "error: no agent selected\n");
+        free(base_dir);
+        config_free(cfg);
+        db_close(cclaw_db);
+        return 1;
+    }
+
+    /* Resolve agent DB path */
+    char *agent_db_path;
+    if (agent_db_env && agent_db_env[0]) {
+        agent_db_path = strdup(agent_db_env);
+    } else {
+        agent_db_path = malloc(strlen(base_dir) + strlen(agent_name_sel) + 32);
+        sprintf(agent_db_path, "%s/agents/%s/agent.db", base_dir, agent_name_sel);
+    }
     ensure_parent_dir(agent_db_path);
     sqlite3 *adb = db_open_agent(agent_db_path);
     if (!adb) {
         fprintf(stderr, "error: cannot open agent database '%s'\n", agent_db_path);
         free(agent_db_path);
+        free(agent_name_sel);
+        free(base_dir);
         config_free(cfg);
         db_close(cclaw_db);
         return 1;
@@ -477,9 +581,8 @@ int main(int argc, char *argv[]) {
     setenv("CCLAW_AGENT_DB", agent_db_path, 1);
     free(agent_db_path);
 
-    const char *agent_name_env = getenv("CCLAW_AGENT_NAME");
-    const char *agent_name = agent_name_env ? agent_name_env : "default";
-    setenv("CCLAW_AGENT_NAME", agent_name, 0);
+    const char *agent_name = agent_name_sel;
+    setenv("CCLAW_AGENT_NAME", agent_name, 1);
 
     if (yolo_mode) setenv("CCLAW_YOLO", "1", 1);
 
@@ -510,6 +613,8 @@ int main(int argc, char *argv[]) {
     session_id = cli_select_session(adb, session_id, new_session);
     if (session_id < 0) {
         db_close(adb);
+        free(agent_name_sel);
+        free(base_dir);
         config_free(cfg);
         db_close(cclaw_db);
         return 1;
@@ -589,6 +694,8 @@ done:
     session_set_state(adb, session_id, "idle");
     db_close(adb);
     if (g_journal_db) db_close(g_journal_db);
+    free(agent_name_sel);
+    free(base_dir);
     config_free(cfg);
     db_close(cclaw_db);
     return rc == 0 ? 0 : 1;

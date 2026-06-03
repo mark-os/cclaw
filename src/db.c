@@ -1266,6 +1266,33 @@ AgentRow *db_agent_get(sqlite3 *db, const char *name) {
     return row;
 }
 
+/* T271: List all agent names from agents table */
+char **db_agent_list(sqlite3 *db, int *count) {
+    *count = 0;
+    if (!db) return NULL;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT name FROM agents ORDER BY name", -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    int cap = 8;
+    char **names = malloc((size_t)cap * sizeof(char *));
+    if (!names) { sqlite3_finalize(stmt); return NULL; }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *n = (const char *)sqlite3_column_text(stmt, 0);
+        if (!n) continue;
+        if (*count >= cap) {
+            cap *= 2;
+            char **tmp = realloc(names, (size_t)cap * sizeof(char *));
+            if (!tmp) break;
+            names = tmp;
+        }
+        names[*count] = strdup(n);
+        (*count)++;
+    }
+    sqlite3_finalize(stmt);
+    if (*count == 0) { free(names); return NULL; }
+    return names;
+}
+
 int db_agent_upsert(sqlite3 *db, const char *name, const char *config,
                     const char *system_prompt, const char *heartbeat) {
     if (!db || !name) return -1;

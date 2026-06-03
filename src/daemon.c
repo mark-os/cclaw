@@ -572,6 +572,90 @@ static void inject_secrets_for_child(sqlite3 *db) {
     }
 }
 
+/* T279/V123: Inject agent config as env vars into child process.
+ * If parent_ac is non-NULL, enforce ceiling: tools ⊆ parent, hosts ⊆ parent,
+ * max_iterations ≤ parent. For unnamed spawn (same agent), pass NULL. */
+static void inject_agent_config_env(sqlite3 *db, const char *agent_name,
+                                    const AgentConfig *parent_ac) {
+    AgentConfig *ac = agent_config_load_db(db, agent_name);
+
+    /* V123: intersect with parent ceiling if provided */
+    if (parent_ac && ac)
+        agent_config_intersect(ac, parent_ac);
+
+    /* Determine effective values */
+    char **eff_tools = ac ? ac->tools : NULL;
+    size_t eff_tool_count = ac ? ac->tool_count : 0;
+    char **eff_hosts = ac ? ac->allowed_hosts : NULL;
+    size_t eff_host_count = ac ? ac->allowed_hosts_count : 0;
+    int eff_max_iter = ac ? ac->max_iterations : 0;
+
+    /* If no agent config but parent ceiling given, use parent values directly */
+    if (!ac && parent_ac) {
+        eff_tools = parent_ac->tools;
+        eff_tool_count = parent_ac->tool_count;
+        eff_hosts = parent_ac->allowed_hosts;
+        eff_host_count = parent_ac->allowed_hosts_count;
+        eff_max_iter = parent_ac->max_iterations;
+    }
+
+    /* Inject workspace */
+    if (ac && ac->workspace) {
+        setenv("CCLAW_WORKSPACE", ac->workspace, 1);
+    } else {
+        char ws[1024];
+        snprintf(ws, sizeof(ws), "agents/%s/workspace", agent_name);
+        setenv("CCLAW_WORKSPACE", ws, 1);
+    }
+
+    /* Inject model */
+    if (ac && ac->model)
+        setenv("CCLAW_MODEL", ac->model, 1);
+
+    /* Inject max_iterations */
+    if (eff_max_iter > 0) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", eff_max_iter);
+        setenv("CCLAW_MAX_ITERATIONS", buf, 1);
+    }
+
+    /* Inject allowed_hosts (comma-separated) */
+    if (eff_host_count > 0) {
+        size_t len = 0;
+        for (size_t i = 0; i < eff_host_count; i++)
+            len += strlen(eff_hosts[i]) + 1;
+        char *hosts = malloc(len);
+        if (hosts) {
+            hosts[0] = '\0';
+            for (size_t i = 0; i < eff_host_count; i++) {
+                if (i > 0) strcat(hosts, ",");
+                strcat(hosts, eff_hosts[i]);
+            }
+            setenv("CCLAW_ALLOWED_HOSTS", hosts, 1);
+            free(hosts);
+        }
+    }
+
+    /* Inject tools (comma-separated) */
+    if (eff_tool_count > 0) {
+        size_t len = 0;
+        for (size_t i = 0; i < eff_tool_count; i++)
+            len += strlen(eff_tools[i]) + 1;
+        char *tools = malloc(len);
+        if (tools) {
+            tools[0] = '\0';
+            for (size_t i = 0; i < eff_tool_count; i++) {
+                if (i > 0) strcat(tools, ",");
+                strcat(tools, eff_tools[i]);
+            }
+            setenv("CCLAW_TOOLS", tools, 1);
+            free(tools);
+        }
+    }
+
+    if (ac) agent_config_free(ac);
+}
+
 static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
                      const char *agent_name) {
     /* V24: only fork if session already has active child */
@@ -635,70 +719,13 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
         inject_secrets_for_child(db);
 
         /* V73/V74,T198: inject agent identity + DB path + config as env vars */
-        /* agent_name already known from caller */
         if (agent_name) {
             setenv("CCLAW_AGENT_NAME", agent_name, 1);
-
-            /* Build agent DB path: agents/<name>/agent.db */
             char agent_db[1024];
             snprintf(agent_db, sizeof(agent_db), "agents/%s/agent.db", agent_name);
             setenv("CCLAW_AGENT_DB", agent_db, 1);
-
-            /* Load per-agent config from cclaw.db, inject as env vars */
-            AgentConfig *ac = agent_config_load_db(db, agent_name);
-            if (ac) {
-                if (ac->workspace)
-                    setenv("CCLAW_WORKSPACE", ac->workspace, 1);
-                else {
-                    char ws[1024];
-                    snprintf(ws, sizeof(ws), "agents/%s/workspace", agent_name);
-                    setenv("CCLAW_WORKSPACE", ws, 1);
-                }
-                if (ac->model)
-                    setenv("CCLAW_MODEL", ac->model, 1);
-                if (ac->max_iterations > 0) {
-                    char buf[16];
-                    snprintf(buf, sizeof(buf), "%d", ac->max_iterations);
-                    setenv("CCLAW_MAX_ITERATIONS", buf, 1);
-                }
-                if (ac->allowed_hosts_count > 0) {
-                    /* Comma-separated list */
-                    size_t len = 0;
-                    for (size_t i = 0; i < ac->allowed_hosts_count; i++)
-                        len += strlen(ac->allowed_hosts[i]) + 1;
-                    char *hosts = malloc(len);
-                    if (hosts) {
-                        hosts[0] = '\0';
-                        for (size_t i = 0; i < ac->allowed_hosts_count; i++) {
-                            if (i > 0) strcat(hosts, ",");
-                            strcat(hosts, ac->allowed_hosts[i]);
-                        }
-                        setenv("CCLAW_ALLOWED_HOSTS", hosts, 1);
-                        free(hosts);
-                    }
-                }
-                if (ac->tool_count > 0) {
-                    size_t len = 0;
-                    for (size_t i = 0; i < ac->tool_count; i++)
-                        len += strlen(ac->tools[i]) + 1;
-                    char *tools = malloc(len);
-                    if (tools) {
-                        tools[0] = '\0';
-                        for (size_t i = 0; i < ac->tool_count; i++) {
-                            if (i > 0) strcat(tools, ",");
-                            strcat(tools, ac->tools[i]);
-                        }
-                        setenv("CCLAW_TOOLS", tools, 1);
-                        free(tools);
-                    }
-                }
-                agent_config_free(ac);
-            } else {
-                /* No per-agent config — use defaults */
-                char ws[1024];
-                snprintf(ws, sizeof(ws), "agents/%s/workspace", agent_name);
-                setenv("CCLAW_WORKSPACE", ws, 1);
-            }
+            /* T279: inject config (no ceiling for direct fork) */
+            inject_agent_config_env(db, agent_name, NULL);
         }
 
         /* Always inject global config as baseline (per-agent overrides above win) */
@@ -1479,21 +1506,26 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
             continue;
         }
 
-        /* Resolve parent agent name from spawn_queue */
+        /* Resolve parent agent name + child_agent from spawn_queue */
         const char *parent_agent_name = NULL;
+        const char *child_agent_name = NULL;
         char pa_buf[64] = "";
+        char ca_buf[64] = "";
         {
-            const char *pa_sql = "SELECT parent_agent FROM spawn_queue WHERE id=?;";
+            const char *pa_sql = "SELECT parent_agent, child_agent FROM spawn_queue WHERE id=?;";
             sqlite3_stmt *pa_stmt;
             if (sqlite3_prepare_v2(db, pa_sql, -1, &pa_stmt, NULL) == SQLITE_OK) {
                 sqlite3_bind_int64(pa_stmt, 1, r->id);
                 if (sqlite3_step(pa_stmt) == SQLITE_ROW) {
                     const char *v = (const char *)sqlite3_column_text(pa_stmt, 0);
                     if (v && v[0]) snprintf(pa_buf, sizeof(pa_buf), "%s", v);
+                    const char *c = (const char *)sqlite3_column_text(pa_stmt, 1);
+                    if (c && c[0]) snprintf(ca_buf, sizeof(ca_buf), "%s", c);
                 }
                 sqlite3_finalize(pa_stmt);
             }
             parent_agent_name = pa_buf[0] ? pa_buf : NULL;
+            child_agent_name = ca_buf[0] ? ca_buf : NULL;
         }
         if (!parent_agent_name) {
             spawn_queue_mark(db, r->id, "error", 0);
@@ -1544,10 +1576,39 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
             close(sa_out[1]); close(sa_err[1]);
             /* V67/T188: inject decrypted secrets as env vars for child */
             inject_secrets_for_child(db);
-            setenv("CCLAW_AGENT_NAME", parent_agent_name, 1);
+
+            /* T279/V123: load parent config as privilege ceiling */
+            AgentConfig *parent_ac = agent_config_load_db(db, parent_agent_name);
+
+            /* Determine effective agent identity for sub-agent */
+            const char *eff_agent = child_agent_name ? child_agent_name : parent_agent_name;
+            setenv("CCLAW_AGENT_NAME", eff_agent, 1);
             char agent_db_buf[1024];
-            snprintf(agent_db_buf, sizeof(agent_db_buf), "agents/%s/agent.db", parent_agent_name);
+            snprintf(agent_db_buf, sizeof(agent_db_buf), "agents/%s/agent.db", eff_agent);
             setenv("CCLAW_AGENT_DB", agent_db_buf, 1);
+
+            /* T279: inject config with parent ceiling enforcement */
+            inject_agent_config_env(db, eff_agent, parent_ac);
+
+            if (parent_ac) agent_config_free(parent_ac);
+
+            /* Inject global config baseline */
+            {
+                char buf[32];
+                if (cfg->provider.base_url && !getenv("CCLAW_PROVIDER"))
+                    setenv("CCLAW_PROVIDER", cfg->provider.base_url, 0);
+                if (cfg->provider.model && !getenv("CCLAW_MODEL"))
+                    setenv("CCLAW_MODEL", cfg->provider.model, 0);
+                snprintf(buf, sizeof(buf), "%d", cfg->provider.max_tokens);
+                setenv("CCLAW_MAX_TOKENS", buf, 0);
+                snprintf(buf, sizeof(buf), "%d", cfg->provider.context_window);
+                setenv("CCLAW_CONTEXT_WINDOW", buf, 0);
+                if (cfg->shell_timeout > 0) {
+                    snprintf(buf, sizeof(buf), "%d", cfg->shell_timeout);
+                    setenv("CCLAW_SHELL_TIMEOUT", buf, 0);
+                }
+            }
+
             char sid_arg[64];
             snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)child_sid);
             execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);

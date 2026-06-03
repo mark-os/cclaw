@@ -1032,3 +1032,71 @@ char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db) {
 
     return strdup(name);
 }
+
+/* T279/V123: Intersect child config with parent ceiling in-place. */
+void agent_config_intersect(AgentConfig *child, const AgentConfig *parent) {
+    if (!child || !parent) return;
+
+    /* Tools: keep only those present in parent */
+    if (parent->tool_count > 0 && child->tool_count > 0) {
+        size_t keep = 0;
+        for (size_t i = 0; i < child->tool_count; i++) {
+            int found = 0;
+            for (size_t j = 0; j < parent->tool_count; j++) {
+                if (strcmp(child->tools[i], parent->tools[j]) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (found) {
+                child->tools[keep++] = child->tools[i];
+            } else {
+                free(child->tools[i]);
+            }
+        }
+        child->tool_count = keep;
+    } else if (parent->tool_count > 0 && child->tool_count == 0) {
+        /* Child has no explicit tools → adopt parent's set as ceiling */
+        child->tools = malloc(parent->tool_count * sizeof(char *));
+        if (child->tools) {
+            for (size_t i = 0; i < parent->tool_count; i++)
+                child->tools[i] = strdup(parent->tools[i]);
+            child->tool_count = parent->tool_count;
+        }
+    }
+
+    /* Hosts: keep only those present in parent */
+    if (parent->allowed_hosts_count > 0 && child->allowed_hosts_count > 0) {
+        size_t keep = 0;
+        for (size_t i = 0; i < child->allowed_hosts_count; i++) {
+            int found = 0;
+            for (size_t j = 0; j < parent->allowed_hosts_count; j++) {
+                if (strcmp(child->allowed_hosts[i], parent->allowed_hosts[j]) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (found) {
+                child->allowed_hosts[keep++] = child->allowed_hosts[i];
+            } else {
+                free(child->allowed_hosts[i]);
+            }
+        }
+        child->allowed_hosts_count = keep;
+    } else if (parent->allowed_hosts_count > 0 && child->allowed_hosts_count == 0) {
+        /* Child has no explicit hosts → adopt parent's */
+        child->allowed_hosts = malloc(parent->allowed_hosts_count * sizeof(char *));
+        if (child->allowed_hosts) {
+            for (size_t i = 0; i < parent->allowed_hosts_count; i++)
+                child->allowed_hosts[i] = strdup(parent->allowed_hosts[i]);
+            child->allowed_hosts_count = parent->allowed_hosts_count;
+        }
+    }
+    /* If parent has empty hosts → child keeps whatever it has (possibly empty = no network) */
+
+    /* Max iterations: min(child, parent) */
+    if (parent->max_iterations > 0) {
+        if (child->max_iterations <= 0 || child->max_iterations > parent->max_iterations)
+            child->max_iterations = parent->max_iterations;
+    }
+}

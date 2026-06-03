@@ -114,4 +114,9 @@ char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count);
  * Returns 0 on success (including already present), -1 on failure. */
 int agent_config_add_tool(sqlite3 *db, const char *name, const char *tool);
 
+/* T279/V123: Intersect child config with parent ceiling. Modifies child in-place.
+ * tools = child ∩ parent, hosts = child ∩ parent, iterations = min(child, parent).
+ * If child field is empty/zero, inherits parent's value (ceiling becomes effective). */
+void agent_config_intersect(AgentConfig *child, const AgentConfig *parent);
+
 #endif

@@ -482,8 +482,8 @@ T269|x|auto-recall (FTS5) — at context_build, extract keywords from newest use
 T270|x|CLI streaming response — add `"stream":true` to LLM request in CLI mode; parse SSE `data:` chunks via curl write callback; write content tokens to stdout as they arrive (agent child stdout = terminal); reconstruct non-streaming JSON for `llm_parse_response`; suppress `print_response` in parent (child already wrote); `CCLAW_STREAM=1` env var (CLI sets by default); daemon mode leaves 0|§F,§C
 T271|x|CLI agent picker — list agents from cclaw.db, offer "new agent..." option; first run auto-creates "default" + sets kv `default_agent`; highlight default agent|V117,V118
 T272|x|CLI session picker — query agent's agent.db; display (id, first_prompt[:50], last_prompt[:50], created_at formatted); offer "new session"|V118
-T273|-|kv `default_agent` — seeded on first run; `-p` flag uses this agent; agent picker highlights it|V117
-T274|-|`request_config` tool (CLI) — replaces `approval_request` for CLI inline use; prompt approve/deny; persist to agent_config; immediate effect (in-process config reload)|V120
+T273|x|kv `default_agent` — seeded on first run; `-p` flag uses this agent; agent picker highlights it|V117
+T274|x|`request_config` tool (CLI) — replaces `approval_request` for CLI inline use; prompt approve/deny; persist to agent_config; immediate effect (in-process config reload)|V120
 T275|-|initial tool set enforcement — `CCLAW_TOOLS` env from agent_config `tools` key; default agent starts w/ [file_read, file_write, js_eval, memory_create, memory_append, memory_replace, request_config]; system prompt lists requestable tools|V119
 T276|-|CWD rw bind-mount in CLI shell namespace — `shell_apply_namespace` accepts `cwd_path` param; CLI mode: bind-mount CWD rw alongside workspace; daemon mode passes NULL (workspace rw only)|V22a
 T277|-|agent template system — `extensions/agents/*.json` files; schema: `{name, system_prompt, tools[], allowed_hosts[], memory_blocks[], ephemeral?}`; CLI "new agent..." offers installed templates + blank|§F

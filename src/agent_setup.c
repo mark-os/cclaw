@@ -5,6 +5,7 @@
 #include "tool_web_fetch.h"
 #include "tool_db_query.h"
 #include "tool_cron.h"
+#include "tool_request_config.h"
 #include "context.h"
 #include "log.h"
 #include <stdlib.h>
@@ -94,6 +95,9 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* V116: Set tool registry on JS runtime for callTool dispatch */
     if (setup->js_rt)
         js_runtime_set_registry(setup->js_rt, &setup->reg);
+
+    /* T274/V120: request_config — CLI inline tool/host grant */
+    tool_request_config_register(&setup->reg);
 
     /* Daemon-mode only tools */
     if (mode == AGENT_SETUP_DAEMON) {

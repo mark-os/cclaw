@@ -98,4 +98,8 @@ int agent_config_remove_host(sqlite3 *db, const char *name, const char *host);
  * Caller must free each string and the array. Sets *count. */
 char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count);
 
+/* T274/V120: Add tool to agent's tools whitelist in cclaw.db agent_config.
+ * Returns 0 on success (including already present), -1 on failure. */
+int agent_config_add_tool(sqlite3 *db, const char *name, const char *tool);
+
 #endif

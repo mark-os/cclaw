@@ -294,6 +294,20 @@ static int cli_handle_config(const Config *cfg, sqlite3 *cclaw_db,
     char *args = read_tool_call_args(adb, session_id, tc_id, &tname);
     if (!args) { free(tc_id); return -1; }
 
+    /* T274/V120: request_config requires user approval before applying */
+    if (tname && strcmp(tname, "request_config") == 0) {
+        printf("\033[33m⚠ config request:\033[0m %s\n", args);
+        printf("allow? [y/n]: ");
+        fflush(stdout);
+        char buf[16];
+        if (!fgets(buf, sizeof(buf), stdin) || (buf[0] != 'y' && buf[0] != 'Y')) {
+            update_pending_entry(adb, pending_eid, "denied by user");
+            printf("\033[31mdenied\033[0m\n");
+            free(args); free(tname); free(tc_id);
+            return 0;
+        }
+    }
+
     char *result = daemon_apply_config(cfg, cclaw_db, agent_name, tname, args);
     update_pending_entry(adb, pending_eid, result ? result : "error: config apply failed");
 

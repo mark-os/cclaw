@@ -900,6 +900,47 @@ char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count) {
     return hosts;
 }
 
+/* T274/V120: Add tool to agent's tools whitelist in cclaw.db agent_config */
+int agent_config_add_tool(sqlite3 *db, const char *name, const char *tool) {
+    if (!db || !name || !tool || !tool[0]) return -1;
+
+    const char *sql = "SELECT value FROM agent_config WHERE agent_name=? AND key='tools';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+
+    cJSON *arr = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (val) arr = cJSON_Parse(val);
+    }
+    sqlite3_finalize(stmt);
+
+    if (!arr) arr = cJSON_CreateArray();
+
+    /* Check duplicate */
+    cJSON *item;
+    cJSON_ArrayForEach(item, arr) {
+        if (cJSON_IsString(item) && strcmp(item->valuestring, tool) == 0) {
+            cJSON_Delete(arr);
+            return 0;
+        }
+    }
+
+    cJSON_AddItemToArray(arr, cJSON_CreateString(tool));
+    char *json = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+
+    const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,'tools',?);";
+    if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) != SQLITE_OK) { free(json); return -1; }
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, json, -1, SQLITE_STATIC);
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    free(json);
+    return rc;
+}
+
 /* T186/T196: Create ephemeral agent (V65, V62) — config in cclaw.db */
 #include <sys/random.h>
 #include <limits.h>

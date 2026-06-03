@@ -1133,6 +1133,44 @@ char *daemon_apply_config(const Config *cfg, sqlite3 *db,
         char buf[256];
         snprintf(buf, sizeof(buf), "agent renamed: %s → %s", agent_name, nn);
         result = strdup(buf);
+
+    } else if (strcmp(tool_name, "request_config") == 0) {
+        /* T274/V120: grant_tool or grant_host */
+        cJSON *action = cJSON_GetObjectItemCaseSensitive(args, "action");
+        if (!cJSON_IsString(action)) {
+            cJSON_Delete(args);
+            return strdup("error: 'action' required");
+        }
+        if (strcmp(action->valuestring, "grant_tool") == 0) {
+            cJSON *tool = cJSON_GetObjectItemCaseSensitive(args, "tool");
+            if (!cJSON_IsString(tool) || !tool->valuestring[0]) {
+                cJSON_Delete(args);
+                return strdup("error: 'tool' required");
+            }
+            if (agent_config_add_tool(db, agent_name, tool->valuestring) == 0) {
+                char buf2[128];
+                snprintf(buf2, sizeof(buf2), "granted tool: %s", tool->valuestring);
+                result = strdup(buf2);
+            } else {
+                result = strdup("error: failed to grant tool");
+            }
+        } else if (strcmp(action->valuestring, "grant_host") == 0) {
+            cJSON *host = cJSON_GetObjectItemCaseSensitive(args, "host");
+            if (!cJSON_IsString(host) || !host->valuestring[0]) {
+                cJSON_Delete(args);
+                return strdup("error: 'host' required");
+            }
+            if (agent_config_add_host(db, agent_name, host->valuestring) == 0) {
+                char buf2[128];
+                snprintf(buf2, sizeof(buf2), "granted host: %s", host->valuestring);
+                result = strdup(buf2);
+            } else {
+                result = strdup("error: failed to grant host");
+            }
+        } else {
+            result = strdup("error: action must be grant_tool or grant_host");
+        }
+
     } else {
         char buf[128];
         snprintf(buf, sizeof(buf), "error: unknown config tool: %s", tool_name);

@@ -12,6 +12,7 @@
 static const char *SPAWN_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"task\":{\"type\":\"string\",\"description\":\"Task description for the sub-agent\"},"
+    "\"name\":{\"type\":\"string\",\"description\":\"Name of existing agent to launch (omit for anonymous sub-agent)\"},"
     "\"background\":{\"type\":\"boolean\",\"description\":\"If true, run in background (default: false, blocking)\"}"
     "},\"required\":[\"task\"]}";
 

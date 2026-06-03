@@ -1183,7 +1183,7 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
 SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count) {
     *count = 0;
     const char *sql =
-        "SELECT id, parent_session_id, task, background, depth, tool_call_id"
+        "SELECT id, parent_session_id, task, background, depth, tool_call_id, child_agent"
         " FROM spawn_queue WHERE status='pending' ORDER BY id ASC;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
@@ -1208,6 +1208,8 @@ SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count) {
         r->depth = sqlite3_column_int(stmt, 4);
         const char *tc = (const char *)sqlite3_column_text(stmt, 5);
         r->tool_call_id = tc ? strdup(tc) : NULL;
+        const char *ca = (const char *)sqlite3_column_text(stmt, 6);
+        r->child_agent = ca ? strdup(ca) : NULL;
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -1235,6 +1237,7 @@ void spawn_request_free(SpawnRequest *list, int count) {
     for (int i = 0; i < count; i++) {
         free(list[i].task);
         free(list[i].tool_call_id);
+        free(list[i].child_agent);
     }
     free(list);
 }

@@ -1294,9 +1294,10 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                         char *tname = NULL;
                         char *args = read_tool_call_args(adb, session_id, tc_id, &tname);
                         if (args) {
-                            /* Parse spawn_agent args: task, background */
+                            /* Parse spawn_agent args: task, background, name */
                             cJSON *j = cJSON_Parse(args);
                             const char *task = "";
+                            const char *child_agent = NULL;
                             int bg = 0;
                             int depth = 0;
                             if (j) {
@@ -1304,6 +1305,9 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                                 if (t && t->valuestring) task = t->valuestring;
                                 cJSON *b = cJSON_GetObjectItem(j, "background");
                                 if (cJSON_IsTrue(b)) bg = 1;
+                                cJSON *n = cJSON_GetObjectItem(j, "name");
+                                if (n && cJSON_IsString(n) && n->valuestring[0])
+                                    child_agent = n->valuestring;
                             }
                             /* Get depth from session */
                             const char *dsql = "SELECT depth FROM sessions WHERE id=?;";
@@ -1316,8 +1320,8 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                             }
                             /* Insert into cclaw.db spawn_queue */
                             const char *ins = "INSERT INTO spawn_queue"
-                                " (parent_agent, parent_session_id, task, background, depth, tool_call_id)"
-                                " VALUES (?,?,?,?,?,?);";
+                                " (parent_agent, parent_session_id, task, background, depth, tool_call_id, child_agent)"
+                                " VALUES (?,?,?,?,?,?,?);";
                             sqlite3_stmt *is;
                             if (sqlite3_prepare_v2(db, ins, -1, &is, NULL) == SQLITE_OK) {
                                 sqlite3_bind_text(is, 1, agent_name, -1, SQLITE_STATIC);
@@ -1326,6 +1330,10 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                                 sqlite3_bind_int(is, 4, bg);
                                 sqlite3_bind_int(is, 5, depth + 1);
                                 sqlite3_bind_text(is, 6, tc_id, -1, SQLITE_STATIC);
+                                if (child_agent)
+                                    sqlite3_bind_text(is, 7, child_agent, -1, SQLITE_STATIC);
+                                else
+                                    sqlite3_bind_null(is, 7);
                                 sqlite3_step(is);
                                 sqlite3_finalize(is);
                             }
@@ -1527,32 +1535,71 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
 
         /* Resolve parent agent name + child_agent from spawn_queue */
         const char *parent_agent_name = NULL;
-        const char *child_agent_name = NULL;
+        const char *child_agent_name = r->child_agent;
         char pa_buf[64] = "";
-        char ca_buf[64] = "";
         {
-            const char *pa_sql = "SELECT parent_agent, child_agent FROM spawn_queue WHERE id=?;";
+            const char *pa_sql = "SELECT parent_agent FROM spawn_queue WHERE id=?;";
             sqlite3_stmt *pa_stmt;
             if (sqlite3_prepare_v2(db, pa_sql, -1, &pa_stmt, NULL) == SQLITE_OK) {
                 sqlite3_bind_int64(pa_stmt, 1, r->id);
                 if (sqlite3_step(pa_stmt) == SQLITE_ROW) {
                     const char *v = (const char *)sqlite3_column_text(pa_stmt, 0);
                     if (v && v[0]) snprintf(pa_buf, sizeof(pa_buf), "%s", v);
-                    const char *c = (const char *)sqlite3_column_text(pa_stmt, 1);
-                    if (c && c[0]) snprintf(ca_buf, sizeof(ca_buf), "%s", c);
                 }
                 sqlite3_finalize(pa_stmt);
             }
             parent_agent_name = pa_buf[0] ? pa_buf : NULL;
-            child_agent_name = ca_buf[0] ? ca_buf : NULL;
         }
         if (!parent_agent_name) {
             spawn_queue_mark(db, r->id, "error", 0);
             continue;
         }
 
-        /* Create child session in parent's agent DB (sub-agents share parent's DB) */
-        char *apath = agent_db_path(parent_agent_name);
+        /* T282/V123: named spawn — validate agent exists */
+        if (child_agent_name) {
+            char *cpath = agent_db_path(child_agent_name);
+            if (!cpath) { spawn_queue_mark(db, r->id, "error", 0); continue; }
+            /* Check agent DB is openable (agent exists) */
+            sqlite3 *test_db = db_open_agent(cpath);
+            free(cpath);
+            if (!test_db) {
+                /* Named agent doesn't exist — error back to parent */
+                char *ppath = agent_db_path(parent_agent_name);
+                if (ppath) {
+                    sqlite3 *padb = db_open_agent(ppath);
+                    free(ppath);
+                    if (padb) {
+                        const char *fsql =
+                            "SELECT id FROM entries WHERE session_id=?"
+                            " AND tool_call_id=? AND content='PENDING' LIMIT 1;";
+                        sqlite3_stmt *fs;
+                        if (sqlite3_prepare_v2(padb, fsql, -1, &fs, NULL) == SQLITE_OK) {
+                            sqlite3_bind_int64(fs, 1, r->parent_session_id);
+                            sqlite3_bind_text(fs, 2, r->tool_call_id, -1, SQLITE_STATIC);
+                            if (sqlite3_step(fs) == SQLITE_ROW) {
+                                int64_t peid = sqlite3_column_int64(fs, 0);
+                                char errbuf[256];
+                                snprintf(errbuf, sizeof(errbuf),
+                                    "error: agent '%s' does not exist", child_agent_name);
+                                update_pending_entry(padb, peid, errbuf);
+                            }
+                            sqlite3_finalize(fs);
+                        }
+                        session_set_state(padb, r->parent_session_id, "idle");
+                        db_close(padb);
+                        daemon_signal_session_agent(r->parent_session_id, parent_agent_name);
+                    }
+                }
+                spawn_queue_mark(db, r->id, "error", 0);
+                continue;
+            }
+            db_close(test_db);
+        }
+
+        /* T282/V123: Determine which agent DB hosts the child session.
+         * Named spawn: child agent's own DB. Unnamed: parent's DB. */
+        const char *session_agent = child_agent_name ? child_agent_name : parent_agent_name;
+        char *apath = agent_db_path(session_agent);
         if (!apath) { spawn_queue_mark(db, r->id, "error", 0); continue; }
         sqlite3 *adb = db_open_agent(apath);
         free(apath);
@@ -1560,7 +1607,7 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
 
         char name_buf[128];
         snprintf(name_buf, sizeof(name_buf), "sub-agent:%lld", (long long)r->parent_session_id);
-        int64_t child_sid = session_create(adb, name_buf, parent_agent_name,
+        int64_t child_sid = session_create(adb, name_buf, session_agent,
                                            r->parent_session_id, r->depth);
         if (child_sid < 0) {
             db_close(adb);
@@ -1584,7 +1631,7 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
         if (pid < 0) {
             close(sa_out[0]); close(sa_out[1]);
             close(sa_err[0]); close(sa_err[1]);
-            daemon_agent_set_state(parent_agent_name, child_sid, "idle");
+            daemon_agent_set_state(session_agent, child_sid, "idle");
             spawn_queue_mark(db, r->id, "error", 0);
             continue;
         }
@@ -1636,12 +1683,12 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
 
         /* Parent: send pipe read ends to log collector */
         close(sa_out[1]); close(sa_err[1]);
-        log_collector_send_fd(sa_out[0], parent_agent_name, pid, child_sid, 1);
-        log_collector_send_fd(sa_err[0], parent_agent_name, pid, child_sid, 2);
+        log_collector_send_fd(sa_out[0], session_agent, pid, child_sid, 1);
+        log_collector_send_fd(sa_err[0], session_agent, pid, child_sid, 2);
         close(sa_out[0]); close(sa_err[0]);
 
         /* Track child (T200: includes agent_name) */
-        child_add_agent(pid, child_sid, parent_agent_name);
+        child_add_agent(pid, child_sid, session_agent);
         spawn_queue_mark(db, r->id, "forked", child_sid);
 
         /* V13 blocking: transition parent to "waiting" state in agent DB */

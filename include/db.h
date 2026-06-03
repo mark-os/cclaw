@@ -13,6 +13,7 @@ typedef struct {
     int background;
     int depth;
     char *tool_call_id;
+    char *child_agent;  /* T282: named agent to spawn (NULL = unnamed, use parent) */
 } SpawnRequest;
 
 /* Open DB at path, set WAL mode + pragmas, create tables.

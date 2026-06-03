@@ -176,6 +176,60 @@ static void test_depth_limit_daemon_mode(void) {
     printf("  PASS test_depth_limit_daemon_mode\n");
 }
 
+/* T282: named spawn — child_agent field populated in spawn_queue */
+static void test_spawn_queue_named_agent(void) {
+    sqlite3 *db = setup_daemon_db();
+
+    /* Insert with child_agent */
+    const char *sql =
+        "INSERT INTO spawn_queue (parent_agent, parent_session_id, task, background, depth, tool_call_id, child_agent)"
+        " VALUES ('parent','1','do task',0,1,'tc_1','helper');";
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+
+    int count = 0;
+    SpawnRequest *reqs = spawn_queue_peek_pending(db, &count);
+    assert(reqs != NULL);
+    assert(count == 1);
+    assert(reqs[0].child_agent != NULL);
+    assert(strcmp(reqs[0].child_agent, "helper") == 0);
+
+    /* Mark it so next peek skips it */
+    spawn_queue_mark(db, reqs[0].id, "forked", 10);
+    spawn_request_free(reqs, count);
+
+    /* Insert without child_agent — should be NULL */
+    int64_t qid = sq_insert(db, "parent", 2, "anon task", 0, 1, "tc_2");
+    assert(qid > 0);
+    reqs = spawn_queue_peek_pending(db, &count);
+    assert(count == 1);
+    assert(reqs[0].child_agent == NULL);
+    spawn_request_free(reqs, count);
+
+    db_close(db);
+    printf("  PASS test_spawn_queue_named_agent\n");
+}
+
+/* T282: tool accepts name parameter */
+static void test_spawn_tool_name_param(void) {
+    sqlite3 *db = setup_db();
+    int64_t sid = session_create(db, "parent", NULL, -1, 0);
+    assert(sid > 0);
+    assert(daemon_signal_init() == 0);
+
+    AgentLaunchCtx ctx = {.db = db, .session_id = sid,
+                          .daemon_mode = 1, .tool_call_id = "tc_n"};
+    char *r = tool_launch_agent_handler(
+        "{\"task\":\"run helper\",\"name\":\"helper_agent\"}", &ctx);
+    assert(r != NULL);
+    /* Should return sentinel (daemon handles spawn) */
+    assert(strncmp(r, "AGENT_EXIT_SPAWN:", 17) == 0);
+    free(r);
+
+    daemon_signal_close();
+    db_close(db);
+    printf("  PASS test_spawn_tool_name_param\n");
+}
+
 int main(void) {
     printf("test_spawn_queue:\n");
     test_spawn_queue_insert_and_peek();
@@ -184,6 +238,8 @@ int main(void) {
     test_daemon_mode_blocking();
     test_cli_mode_launch();
     test_depth_limit_daemon_mode();
+    test_spawn_queue_named_agent();
+    test_spawn_tool_name_param();
     printf("All spawn queue tests passed.\n");
     return 0;
 }

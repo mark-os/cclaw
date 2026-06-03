@@ -1,18 +1,15 @@
 /* T275/V119: default tool set enforcement when CCLAW_TOOLS absent */
 #define _POSIX_C_SOURCE 200809L
 #include "tools.h"
+#include "agent_config.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* V119 default tools — must match agent_turn.c DEFAULT_TOOLS */
-static const char *EXPECTED_DEFAULTS[] = {
-    "file_read", "file_write", "js_eval",
-    "memory_create", "memory_append", "memory_replace",
-    "request_config"
-};
-static const size_t EXPECTED_COUNT = sizeof(EXPECTED_DEFAULTS) / sizeof(EXPECTED_DEFAULTS[0]);
+/* V119/V124: default tools from agent_config.h */
+static const char *EXPECTED_DEFAULTS[] = { AGENT_DEFAULT_TOOLS };
+static const size_t EXPECTED_COUNT = AGENT_DEFAULT_TOOLS_COUNT;
 
 static char *dummy_handler(const char *args, void *ud) {
     (void)args; (void)ud;

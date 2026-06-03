@@ -5,6 +5,18 @@
 #include <sqlite3.h>
 #include "types.h"
 
+/* V124: system defaults — single source of truth for agent creation,
+ * CLI zero-config, and absent-key resolution in daemon fork */
+#define AGENT_DEFAULT_MAX_ITERATIONS 25
+#define AGENT_DEFAULT_SHELL_TIMEOUT  30
+
+/* V119: default tool whitelist */
+#define AGENT_DEFAULT_TOOLS \
+    "file_read", "file_write", "js_eval", \
+    "memory_create", "memory_append", "memory_replace", \
+    "request_config"
+#define AGENT_DEFAULT_TOOLS_COUNT 7
+
 /* T75: agent discovery — scan agents/ dir, list available agents by name.
  * Returns heap-allocated array of agent names (each heap-allocated).
  * Caller must free each name and the array. Sets *count. */

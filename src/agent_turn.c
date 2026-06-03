@@ -17,13 +17,9 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 
-/* V119/V124: default tool whitelist when CCLAW_TOOLS absent */
-static const char *DEFAULT_TOOLS[] = {
-    "file_read", "file_write", "js_eval",
-    "memory_create", "memory_append", "memory_replace",
-    "request_config"
-};
-static const size_t DEFAULT_TOOLS_COUNT = sizeof(DEFAULT_TOOLS) / sizeof(DEFAULT_TOOLS[0]);
+/* V119/V124: default tool whitelist from agent_config.h */
+static const char *DEFAULT_TOOLS[] = { AGENT_DEFAULT_TOOLS };
+static const size_t DEFAULT_TOOLS_COUNT = AGENT_DEFAULT_TOOLS_COUNT;
 
 static char *dispatch_tools(const char *name, const char *arguments, void *user_data) {
     ToolRegistry *reg = (ToolRegistry *)user_data;

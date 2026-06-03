@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config.h"
+#include "agent_config.h"
 #include "db.h"
 #include "log.h"
 #include "cJSON.h"
@@ -164,13 +165,13 @@ Config *config_load_from_env(void) {
 
     /* Scalars */
     v = getenv("CCLAW_MAX_ITERATIONS");
-    cfg->max_iterations = v ? atoi(v) : 25;
+    cfg->max_iterations = v ? atoi(v) : AGENT_DEFAULT_MAX_ITERATIONS;
 
     v = getenv("CCLAW_MAX_HISTORY_TOKENS");
     cfg->max_history_tokens = v ? atoi(v) : 0;
 
     v = getenv("CCLAW_SHELL_TIMEOUT");
-    cfg->shell_timeout = v ? atoi(v) : 30;
+    cfg->shell_timeout = v ? atoi(v) : AGENT_DEFAULT_SHELL_TIMEOUT;
 
     v = getenv("CCLAW_TOKEN_RATE_LIMIT");
     cfg->token_rate_limit = v ? atoi(v) : 1000000;
@@ -350,7 +351,7 @@ Config *config_load(sqlite3 *db) {
     KV_INT("web_port", 8080);
     cfg->web_port = int_val;
 
-    KV_INT("max_iterations", 25);
+    KV_INT("max_iterations", AGENT_DEFAULT_MAX_ITERATIONS);
     cfg->max_iterations = int_val;
 
     KV_INT("max_history_tokens", 0);
@@ -359,7 +360,7 @@ Config *config_load(sqlite3 *db) {
     KV_INT("heartbeat_interval", 0);
     cfg->heartbeat_interval = int_val;
 
-    KV_INT("shell_timeout", 30);
+    KV_INT("shell_timeout", AGENT_DEFAULT_SHELL_TIMEOUT);
     cfg->shell_timeout = int_val;
 
     KV_INT("stale_lock_timeout", 300);

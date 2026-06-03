@@ -510,18 +510,11 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
 }
 
 /* T150/T196: Create a new agent — dir + workspace + cclaw.db config + system.md */
-/* V119/V122: default tool set for new agents */
-static const char *AGENT_CREATE_DEFAULT_TOOLS[] = {
-    "file_read", "file_write", "js_eval",
-    "memory_create", "memory_append", "memory_replace",
-    "request_config"
-};
-static const size_t AGENT_CREATE_DEFAULT_TOOLS_COUNT =
-    sizeof(AGENT_CREATE_DEFAULT_TOOLS) / sizeof(AGENT_CREATE_DEFAULT_TOOLS[0]);
+/* V119/V122/V124: default tool set from agent_config.h */
+static const char *AGENT_CREATE_DEFAULT_TOOLS[] = { AGENT_DEFAULT_TOOLS };
+static const size_t AGENT_CREATE_DEFAULT_TOOLS_COUNT = AGENT_DEFAULT_TOOLS_COUNT;
 
-/* V122: default config values */
-#define AGENT_CREATE_DEFAULT_MAX_ITERATIONS 25
-#define AGENT_CREATE_DEFAULT_SHELL_TIMEOUT  30
+/* V124: default config values from agent_config.h */
 
 int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json) {
     if (!agents_dir || !db || !payload_json) return -1;
@@ -606,18 +599,20 @@ int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload
             }
         }
 
-        /* V122: default max_iterations + shell_timeout */
-        ac.max_iterations = AGENT_CREATE_DEFAULT_MAX_ITERATIONS;
+        /* V122/V124: default max_iterations + shell_timeout */
+        ac.max_iterations = AGENT_DEFAULT_MAX_ITERATIONS;
 
         agent_config_save_db(db, &ac);
 
         /* Save shell_timeout separately (not in AgentConfig struct) */
+        char st_buf[16];
+        snprintf(st_buf, sizeof(st_buf), "%d", AGENT_DEFAULT_SHELL_TIMEOUT);
         const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,?,?);";
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 2, "shell_timeout", -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 3, "30", -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 3, st_buf, -1, SQLITE_STATIC);
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         }

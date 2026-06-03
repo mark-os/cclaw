@@ -1,11 +1,15 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "agent_config.h"
 #include "secret.h"
 #include "cJSON.h"
 #include "templates.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define STR_HELPER(x) #x
+#define STR(x) STR_HELPER(x)
 
 static const char *SCHEMA_DAEMON_SQL = TPL_SCHEMA_DAEMON_SQL;
 static const char *SCHEMA_AGENT_SQL = TPL_SCHEMA_AGENT_SQL;
@@ -62,9 +66,9 @@ sqlite3 *db_open_cclaw(const char *path) {
                 {"telegram_token",       ""},
                 {"admin_chat_ids",       "[]"},
                 {"web_port",             "8080"},
-                {"max_iterations",       "25"},
+                {"max_iterations",       STR(AGENT_DEFAULT_MAX_ITERATIONS)},
                 {"heartbeat_interval",   "0"},
-                {"shell_timeout",        "30"},
+                {"shell_timeout",        STR(AGENT_DEFAULT_SHELL_TIMEOUT)},
                 {"token_rate_limit",     "1000000"},
             };
             size_t n = sizeof(defaults) / sizeof(defaults[0]);
@@ -142,10 +146,10 @@ sqlite3 *db_open(const char *path) {
                     {"admin_chat_ids",       "[]"},
                     {"web_port",             "8080"},
                     {"workspace",            "./workspace"},
-                    {"max_iterations",       "25"},
+                    {"max_iterations",       STR(AGENT_DEFAULT_MAX_ITERATIONS)},
                     {"max_history_tokens",   "0"},
                     {"heartbeat_interval",   "0"},
-                    {"shell_timeout",        "30"},
+                    {"shell_timeout",        STR(AGENT_DEFAULT_SHELL_TIMEOUT)},
                 };
                 size_t n = sizeof(defaults) / sizeof(defaults[0]);
                 for (size_t i = 0; i < n; i++)

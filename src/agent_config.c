@@ -510,6 +510,19 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
 }
 
 /* T150/T196: Create a new agent — dir + workspace + cclaw.db config + system.md */
+/* V119/V122: default tool set for new agents */
+static const char *AGENT_CREATE_DEFAULT_TOOLS[] = {
+    "file_read", "file_write", "js_eval",
+    "memory_create", "memory_append", "memory_replace",
+    "request_config"
+};
+static const size_t AGENT_CREATE_DEFAULT_TOOLS_COUNT =
+    sizeof(AGENT_CREATE_DEFAULT_TOOLS) / sizeof(AGENT_CREATE_DEFAULT_TOOLS[0]);
+
+/* V122: default config values */
+#define AGENT_CREATE_DEFAULT_MAX_ITERATIONS 25
+#define AGENT_CREATE_DEFAULT_SHELL_TIMEOUT  30
+
 int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json) {
     if (!agents_dir || !db || !payload_json) return -1;
 
@@ -542,42 +555,77 @@ int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload
     snprintf(ws, sizeof(ws), "%s/workspace", dir);
     mkdir(ws, 0755);
 
-    /* Build AgentConfig and save to cclaw.db */
-    AgentConfig ac = {0};
-    ac.name = (char *)name;
-
-    cJSON *model = cJSON_GetObjectItemCaseSensitive(payload, "model");
-    if (cJSON_IsString(model)) ac.model = model->valuestring;
-
-    cJSON *tools = cJSON_GetObjectItemCaseSensitive(payload, "tools");
-    if (cJSON_IsArray(tools)) {
-        int cnt = cJSON_GetArraySize(tools);
-        char **tool_arr = malloc((size_t)cnt * sizeof(char *));
-        if (tool_arr) {
-            for (int i = 0; i < cnt; i++) {
-                cJSON *item = cJSON_GetArrayItem(tools, i);
-                if (cJSON_IsString(item)) tool_arr[ac.tool_count++] = item->valuestring;
-            }
-            ac.tools = tool_arr;
+    /* V122: clone mode — copy all agent_config rows from source agent */
+    cJSON *clone_from = cJSON_GetObjectItemCaseSensitive(payload, "clone_from");
+    if (cJSON_IsString(clone_from) && clone_from->valuestring[0]) {
+        const char *src = clone_from->valuestring;
+        const char *sql = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) "
+                          "SELECT ?, key, value FROM agent_config WHERE agent_name=?;";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, src, -1, SQLITE_STATIC);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
         }
-    }
+    } else {
+        /* Build AgentConfig from payload or defaults */
+        AgentConfig ac = {0};
+        ac.name = (char *)name;
 
-    cJSON *hosts = cJSON_GetObjectItemCaseSensitive(payload, "allowed_hosts");
-    if (cJSON_IsArray(hosts)) {
-        int cnt = cJSON_GetArraySize(hosts);
-        char **host_arr = malloc((size_t)cnt * sizeof(char *));
-        if (host_arr) {
-            for (int i = 0; i < cnt; i++) {
-                cJSON *item = cJSON_GetArrayItem(hosts, i);
-                if (cJSON_IsString(item)) host_arr[ac.allowed_hosts_count++] = item->valuestring;
+        cJSON *model = cJSON_GetObjectItemCaseSensitive(payload, "model");
+        if (cJSON_IsString(model)) ac.model = model->valuestring;
+
+        cJSON *tools = cJSON_GetObjectItemCaseSensitive(payload, "tools");
+        if (cJSON_IsArray(tools)) {
+            int cnt = cJSON_GetArraySize(tools);
+            char **tool_arr = malloc((size_t)cnt * sizeof(char *));
+            if (tool_arr) {
+                for (int i = 0; i < cnt; i++) {
+                    cJSON *item = cJSON_GetArrayItem(tools, i);
+                    if (cJSON_IsString(item)) tool_arr[ac.tool_count++] = item->valuestring;
+                }
+                ac.tools = tool_arr;
             }
-            ac.allowed_hosts = host_arr;
+        } else {
+            /* V119/V122: seed default tools when not specified */
+            ac.tools = (char **)AGENT_CREATE_DEFAULT_TOOLS;
+            ac.tool_count = AGENT_CREATE_DEFAULT_TOOLS_COUNT;
         }
-    }
 
-    agent_config_save_db(db, &ac);
-    free(ac.tools);
-    free(ac.allowed_hosts);
+        cJSON *hosts = cJSON_GetObjectItemCaseSensitive(payload, "allowed_hosts");
+        if (cJSON_IsArray(hosts)) {
+            int cnt = cJSON_GetArraySize(hosts);
+            char **host_arr = malloc((size_t)cnt * sizeof(char *));
+            if (host_arr) {
+                for (int i = 0; i < cnt; i++) {
+                    cJSON *item = cJSON_GetArrayItem(hosts, i);
+                    if (cJSON_IsString(item)) host_arr[ac.allowed_hosts_count++] = item->valuestring;
+                }
+                ac.allowed_hosts = host_arr;
+            }
+        }
+
+        /* V122: default max_iterations + shell_timeout */
+        ac.max_iterations = AGENT_CREATE_DEFAULT_MAX_ITERATIONS;
+
+        agent_config_save_db(db, &ac);
+
+        /* Save shell_timeout separately (not in AgentConfig struct) */
+        const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,?,?);";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, "shell_timeout", -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 3, "30", -1, SQLITE_STATIC);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+
+        /* Free only if we allocated (not default array) */
+        if (cJSON_IsArray(tools)) free(ac.tools);
+        free(ac.allowed_hosts);
+    }
 
     /* Write system.md if provided */
     cJSON *sys_prompt = cJSON_GetObjectItemCaseSensitive(payload, "system_prompt");

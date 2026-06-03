@@ -138,8 +138,9 @@ static const char *CREATE_AGENT_PARAMS =
     "\"name\":{\"type\":\"string\",\"description\":\"Agent name (alphanumeric + hyphens)\"},"
     "\"model\":{\"type\":\"string\",\"description\":\"LLM model identifier\"},"
     "\"system_prompt\":{\"type\":\"string\",\"description\":\"Agent persona/system prompt\"},"
-    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Tool whitelist\"},"
-    "\"allowed_hosts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Allowed network hosts\"}"
+    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Tool whitelist (omit for defaults)\"},"
+    "\"allowed_hosts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Allowed network hosts\"},"
+    "\"clone_from\":{\"type\":\"string\",\"description\":\"Clone config from existing agent name\"}"
     "},\"required\":[\"name\"]}";
 
 static char *tool_create_agent_handler(const char *arguments, void *user_data) {

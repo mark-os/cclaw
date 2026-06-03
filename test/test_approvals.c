@@ -310,6 +310,93 @@ static void test_create_agent_invalid_name(void) {
     printf("  PASS test_create_agent_invalid_name\n");
 }
 
+/* T278: create_agent seeds default tools (V119) when tools not specified */
+static void test_create_agent_default_tools(void) {
+    sqlite3 *db = setup();
+    const char *agents_dir = "/tmp/test_create_agent_defaults";
+    system("rm -rf /tmp/test_create_agent_defaults");
+    mkdir(agents_dir, 0755);
+
+    /* No tools, no allowed_hosts in payload */
+    const char *payload = "{\"name\":\"minimal\",\"model\":\"test-model\"}";
+    int rc = agent_config_create(agents_dir, db, payload);
+    assert(rc == 0);
+
+    AgentConfig *ac = agent_config_load_db(db, "minimal");
+    assert(ac != NULL);
+    assert(strcmp(ac->model, "test-model") == 0);
+    /* V119: default tools seeded */
+    assert(ac->tool_count == 7);
+    assert(strcmp(ac->tools[0], "file_read") == 0);
+    assert(strcmp(ac->tools[1], "file_write") == 0);
+    assert(strcmp(ac->tools[2], "js_eval") == 0);
+    assert(strcmp(ac->tools[3], "memory_create") == 0);
+    assert(strcmp(ac->tools[4], "memory_append") == 0);
+    assert(strcmp(ac->tools[5], "memory_replace") == 0);
+    assert(strcmp(ac->tools[6], "request_config") == 0);
+    /* V122: max_iterations seeded */
+    assert(ac->max_iterations == 25);
+    /* V122: allowed_hosts defaults to empty */
+    assert(ac->allowed_hosts_count == 0);
+    agent_config_free(ac);
+
+    /* Verify shell_timeout was seeded */
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(db,
+        "SELECT value FROM agent_config WHERE agent_name='minimal' AND key='shell_timeout'",
+        -1, &stmt, NULL);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "30") == 0);
+    sqlite3_finalize(stmt);
+
+    system("rm -rf /tmp/test_create_agent_defaults");
+    teardown(db);
+    printf("  PASS test_create_agent_default_tools\n");
+}
+
+/* T278/V122: clone_from copies all agent_config rows from source */
+static void test_create_agent_clone(void) {
+    sqlite3 *db = setup();
+    const char *agents_dir = "/tmp/test_create_agent_clone";
+    system("rm -rf /tmp/test_create_agent_clone");
+    mkdir(agents_dir, 0755);
+
+    /* Create source agent with custom config */
+    const char *src_payload = "{\"name\":\"source\",\"model\":\"custom-model\","
+        "\"tools\":[\"shell_exec\",\"web_fetch\",\"file_read\"],"
+        "\"allowed_hosts\":[\"api.example.com\",\"cdn.example.com\"]}";
+    int rc = agent_config_create(agents_dir, db, src_payload);
+    assert(rc == 0);
+
+    /* Clone into new agent */
+    const char *clone_payload = "{\"name\":\"cloned\",\"clone_from\":\"source\"}";
+    rc = agent_config_create(agents_dir, db, clone_payload);
+    assert(rc == 0);
+
+    /* Verify cloned agent has source's config */
+    AgentConfig *ac = agent_config_load_db(db, "cloned");
+    assert(ac != NULL);
+    assert(strcmp(ac->model, "custom-model") == 0);
+    assert(ac->tool_count == 3);
+    assert(strcmp(ac->tools[0], "shell_exec") == 0);
+    assert(strcmp(ac->tools[1], "web_fetch") == 0);
+    assert(strcmp(ac->tools[2], "file_read") == 0);
+    assert(ac->allowed_hosts_count == 2);
+    assert(strcmp(ac->allowed_hosts[0], "api.example.com") == 0);
+    assert(strcmp(ac->allowed_hosts[1], "cdn.example.com") == 0);
+    agent_config_free(ac);
+
+    /* Verify workspace dir created */
+    char ws[256];
+    snprintf(ws, sizeof(ws), "%s/cloned/workspace", agents_dir);
+    struct stat st;
+    assert(stat(ws, &st) == 0 && S_ISDIR(st.st_mode));
+
+    system("rm -rf /tmp/test_create_agent_clone");
+    teardown(db);
+    printf("  PASS test_create_agent_clone\n");
+}
+
 int main(void) {
     printf("test_approvals:\n");
     test_insert_and_get();
@@ -322,6 +409,8 @@ int main(void) {
     test_approval_deny_posts_to_inbox();
     test_create_agent_approval();
     test_create_agent_invalid_name();
+    test_create_agent_default_tools();
+    test_create_agent_clone();
     printf("All approvals tests passed.\n");
     return 0;
 }

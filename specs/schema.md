@@ -34,6 +34,59 @@ Replaces `agent.json` files. Daemon reads at fork, injects as `CCLAW_*` env vars
 
 Keys: `model`, `workspace`, `tools` (JSON array), `allowed_hosts` (JSON array), `read_access` (JSON array), `max_iterations`, `shell_timeout`, `daemon_db_read` (0\|1).
 
+**Absent-key semantics** (V124): missing key = conservative system default, NOT unlimited.
+
+| Key | Absent default | Notes |
+|-----|----------------|-------|
+| `model` | global provider model | from cclaw.db kv `provider.model` |
+| `workspace` | `agents/<name>/workspace` | auto-derived from agent name |
+| `tools` | `["file_read","file_write","js_eval","memory_create","memory_append","memory_replace","request_config"]` | V119 minimum set |
+| `allowed_hosts` | `[]` (empty — no network) | must be explicitly granted |
+| `read_access` | `[]` (none) | |
+| `max_iterations` | 25 | |
+| `shell_timeout` | 30 | seconds |
+| `memory_limit` | 268435456 (256MB) | bytes; 0 = unlimited; skipped on Android (`__ANDROID__`) |
+| `cpu_limit` | 300 | seconds; 0 = unlimited |
+| `daemon_db_read` | 0 | |
+
+**Sub-agent inheritance** (V123): when daemon forks a sub-agent, child config = intersection(child's own agent_config, parent's agent_config). Child ⊥ exceed parent: tools ⊆ parent.tools, allowed_hosts ⊆ parent.allowed_hosts, max_iterations ≤ parent.max_iterations.
+
+**Agent creation**: new agent seeded with default config (above table). "Clone agent" copies all source agent_config rows verbatim.
+
+### Full config env var reference
+
+All injected at fork by daemon/CLI. Agent reads via `config_load_from_env()`.
+
+| Env var | Source | Default | Notes |
+|---------|--------|---------|-------|
+| `CCLAW_AGENT_NAME` | daemon derives | "default" | agent identity |
+| `CCLAW_AGENT_DB` | daemon derives | `.cclaw/agents/<name>/agent.db` | path to own DB |
+| `CCLAW_WORKSPACE` | agent_config `workspace` | `agents/<name>/workspace` | rw directory |
+| `CCLAW_MODEL` | agent_config `model` | global provider model | LLM model name |
+| `CCLAW_TOOLS` | agent_config `tools` | V119 default set | comma-separated whitelist |
+| `CCLAW_ALLOWED_HOSTS` | agent_config `allowed_hosts` | (empty) | comma-separated hostnames |
+| `CCLAW_MAX_ITERATIONS` | agent_config `max_iterations` | 25 | tool loop cap |
+| `CCLAW_SHELL_TIMEOUT` | agent_config `shell_timeout` | 30 | seconds |
+| `CCLAW_MEMORY_LIMIT` | agent_config `memory_limit` | 268435456 | bytes; 0=unlimited; skipped on Android |
+| `CCLAW_CPU_LIMIT` | agent_config `cpu_limit` | 300 | seconds; 0=unlimited |
+| `CCLAW_PROVIDER_BASE_URL` | cclaw.db kv / provider | `https://openrouter.ai/api/v1` | |
+| `CCLAW_MAX_TOKENS` | cclaw.db kv | 4096 | max output tokens |
+| `CCLAW_CONTEXT_WINDOW` | cclaw.db kv | 65536 | model context size |
+| `CCLAW_CONTEXT_THRESHOLD` | cclaw.db kv | 0.6 | triggers compaction/truncation |
+| `CCLAW_COMPACTION_TARGET` | cclaw.db kv | 0.3 | post-compaction target |
+| `CCLAW_COMPACTION` | cclaw.db kv | 1 | bool: enable compaction |
+| `CCLAW_AUTO_RECALL` | cclaw.db kv | 1 | bool: FTS5 auto-recall |
+| `CCLAW_RECALL_MAX_TOKENS` | cclaw.db kv | 500 | max recalled context |
+| `CCLAW_STREAM` | CLI sets | 0 | bool: SSE streaming |
+| `CCLAW_MODE` | parent sets | (none) | `cli` or `daemon` |
+| `CCLAW_LOG_LEVEL` | cclaw.db kv | info | error\|info\|debug\|trace |
+| `CCLAW_TOKEN_RATE_LIMIT` | cclaw.db kv | 1000000 | hourly token cap |
+| `CCLAW_SAVE_REASONING` | cclaw.db kv | 0 | bool: persist reasoning |
+| `CCLAW_SAVE_USAGE` | cclaw.db kv | 0 | bool: persist usage stats |
+| `CCLAW_PATH` | CLI sets | (none) | CWD for ro file_read |
+| `CCLAW_YOLO` | CLI `-y` flag | (none) | disables sandbox |
+| `CCLAW_SECRET_<NAME>` | cclaw.db kv (encrypted) | — | decrypted at fork, cleared after read |
+
 ### providers
 
 | Column | Type | Notes |

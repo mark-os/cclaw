@@ -3,6 +3,7 @@
 #include <cJSON.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -25,6 +26,14 @@
 static int shell_apply_namespace(const char *workspace) {
     uid_t uid = getuid();
     gid_t gid = getgid();
+
+    /* Resolve workspace to absolute path before pivot_root changes the root */
+    char ws_abs[PATH_MAX];
+    const char *ws_resolved = NULL;
+    if (workspace && workspace[0]) {
+        if (realpath(workspace, ws_abs))
+            ws_resolved = ws_abs;
+    }
 
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET) != 0)
         return -1;
@@ -87,11 +96,11 @@ static int shell_apply_namespace(const char *workspace) {
     mkdir(tmp_path, 01777);
 
     /* Bind-mount workspace rw */
-    if (workspace && workspace[0]) {
+    if (ws_resolved) {
         struct stat st;
-        if (stat(workspace, &st) == 0 && S_ISDIR(st.st_mode)) {
-            char ws_dst[512];
-            snprintf(ws_dst, sizeof(ws_dst), "%s%s", newroot, workspace);
+        if (stat(ws_resolved, &st) == 0 && S_ISDIR(st.st_mode)) {
+            char ws_dst[PATH_MAX + 64];
+            snprintf(ws_dst, sizeof(ws_dst), "%s%s", newroot, ws_resolved);
             /* Create parent dirs for workspace path */
             char *p = ws_dst + strlen(newroot) + 1;
             for (char *slash = p; *slash; slash++) {
@@ -102,7 +111,7 @@ static int shell_apply_namespace(const char *workspace) {
                 }
             }
             mkdir(ws_dst, 0755);
-            mount(workspace, ws_dst, NULL, MS_BIND, NULL);
+            mount(ws_resolved, ws_dst, NULL, MS_BIND, NULL);
         }
     }
 
@@ -116,6 +125,10 @@ static int shell_apply_namespace(const char *workspace) {
     chdir("/");
     umount2("/.oldroot", MNT_DETACH);
     rmdir("/.oldroot");
+
+    /* CWD into workspace so shell commands start there */
+    if (ws_resolved && chdir(ws_resolved) != 0)
+        chdir("/tmp");
 
     return 0;
 }

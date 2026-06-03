@@ -133,6 +133,28 @@ Ordered from most to least critical:
 | 1 | `setrlimit` | Agent + children | Yes | No |
 | 2 | Namespace sandbox | Shell/mjs children | Yes | No (separate process) |
 | 3 | Credential proxy | Shell children network | Yes (iptables) | No (separate netns) |
+
+## Sub-Agent Privilege Reduction (V123)
+
+When an agent spawns a sub-agent, privileges can only decrease:
+
+```
+Parent: tools=[file_read,file_write,shell_exec,web_fetch], hosts=[api.github.com,pypi.org]
+                        │
+                        ▼ spawn_agent(task="check release")
+Child:  tools=[file_read,web_fetch], hosts=[api.github.com]
+```
+
+**Mechanism**: daemon reads parent's effective config (agent_config + env inheritance); child's own agent_config is intersected with parent's at fork time. Injection:
+- `CCLAW_TOOLS` = intersection(child.tools, parent.tools)
+- `CCLAW_ALLOWED_HOSTS` = intersection(child.allowed_hosts, parent.allowed_hosts)
+- `CCLAW_MAX_ITERATIONS` = min(child.max_iterations, parent.max_iterations)
+
+**Why intersection, not union**: prevents privilege escalation via sub-agent. A restricted agent cannot grant itself more permissions by spawning a child with a broader config.
+
+**Unnamed spawn** (no name arg): child session in parent's agent.db, same agent, same config. Process isolation only (own fork, setrlimit). No privilege boundary — it's the same agent doing parallel work.
+
+**Named spawn** (launch existing agent): runs in target agent's own DB with target's own config, but daemon enforces parent ceiling. Target agent's config is a *request*, parent's config is the *ceiling*. Agent must already exist (⊥ created at spawn time).
 | 4 | `http_check_policy()` | Agent outbound HTTP | No (app-level) | Only via code bug |
 | 5 | Env stripping (V47) | Shell children | No (app-level) | Only via code bug |
 | 6 | `prctl(PR_SET_PDEATHSIG)` | Orphan cleanup | Yes | No |

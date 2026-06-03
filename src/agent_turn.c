@@ -28,15 +28,40 @@ static char *dispatch_tools(const char *name, const char *arguments, void *user_
     return e->handler(arguments, e->user_data);
 }
 
+/* T115: CLI progress callback — writes tool activity to stdout */
+static void cli_progress(ProgressEvent event, const char *name,
+                         const char *data, void *user_data) {
+    (void)user_data;
+    switch (event) {
+    case PROGRESS_TOOL_START:
+        fprintf(stdout, "\n\033[2m[tool: %s]\033[0m ", name ? name : "?");
+        fflush(stdout);
+        break;
+    case PROGRESS_TOOL_RESULT: {
+        size_t len = data ? strlen(data) : 0;
+        if (len <= 80)
+            fprintf(stdout, "\033[2m→ %s\033[0m\n", data ? data : "(empty)");
+        else
+            fprintf(stdout, "\033[2m→ %.77s...\033[0m\n", data);
+        fflush(stdout);
+        break;
+    }
+    case PROGRESS_ASSISTANT_TEXT:
+        break;
+    }
+}
+
 int agent_turn_run(int64_t session_id) {
     /* V34: die if parent dies */
     prctl(PR_SET_PDEATHSIG, SIGTERM);
 
     /* V23: resource limits */
     struct rlimit rl;
+#ifndef __ANDROID__
     rl.rlim_cur = 256 * 1024 * 1024;
     rl.rlim_max = 256 * 1024 * 1024;
     setrlimit(RLIMIT_AS, &rl);
+#endif
     rl.rlim_cur = 300;
     rl.rlim_max = 300;
     setrlimit(RLIMIT_CPU, &rl);
@@ -125,10 +150,13 @@ int agent_turn_run(int64_t session_id) {
     }
     entry_branch_free(branch, branch_count);
 
-    /* T206: Tool registration (daemon mode) */
+    /* T206: Tool registration (mode from env) */
+    const char *mode_env = getenv("CCLAW_MODE");
+    int setup_mode = (mode_env && strcmp(mode_env, "cli") == 0)
+                     ? AGENT_SETUP_CLI : AGENT_SETUP_DAEMON;
     AgentSetup setup;
     agent_setup_init(&setup, db, session_id, cfg, agent_name,
-                     allowed_hosts, allowed_hosts_count, AGENT_SETUP_DAEMON);
+                     allowed_hosts, allowed_hosts_count, setup_mode);
 
     size_t tool_count = 0;
     const char *tools_env = getenv("CCLAW_TOOLS");
@@ -161,6 +189,8 @@ int agent_turn_run(int64_t session_id) {
     ctx.tools = schemas;
     ctx.tool_count = tool_count;
     ctx.ext_ctx = &setup.ext_ctx;
+    if (setup_mode == AGENT_SETUP_CLI)
+        ctx.progress = cli_progress;
 
     rc = agent_run(&ctx);
 

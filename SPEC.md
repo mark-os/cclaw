@@ -23,25 +23,22 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - agent process = one session turn (drain inbox → LLM loop until stop → write response → exit)
 - IPC: exit codes + DB reads (daemon reads agent DB post-reap); signal pipe for wakeup only (no message broker)
 - CLI standalone: opens agent DB directly, no daemon needed
+- CLI startup: agent picker → session picker; first run creates "default" agent automatically; cclaw.db kv `default_agent` configurable; `-p` uses default agent, creates new session (persisted, ⊥ discarded)
+- CLI mode: CWD bind-mounted rw in shell namespace (user watching); daemon mode: workspace rw only
+- minimum privilege: default agent starts w/ minimal tools; escalates via `request_config` w/ user approval
 
 ## §I INTERFACES
-- cmd: `./build/cclaw --cli` → stdin/stdout REPL, opens agent DB directly (standalone, no daemon)
+- cmd: `./build/cclaw --cli` → agent picker → session picker → stdin/stdout REPL; opens cclaw.db + agent DB (standalone, no daemon)
+- cmd: `./build/cclaw -p "prompt"` → uses kv `default_agent`, new session, print response, exit (session persisted)
+- cmd: `./build/cclaw -p "prompt" -s 3` → uses kv `default_agent`, existing session 3, print response, exit
 - cmd: `./build/cclaw --log-level=trace` → raw LLM req/resp JSON to stderr
 - cmd: `./build/cclaw` → daemon mode (epoll loop: reap children, wake on signal pipe, fork agents; Telegram poller thread + civetweb status page run in-process; spawns log collector at startup)
 - cmd: `./build/cclaw --sub-agent --session-id=X --task="..."` → sub-agent process
 - env: `OPENROUTER_API_KEY` → seed `provider.api_key` in cclaw.db kv on first run (minimum to start)
-- env: `CCLAW_AGENT_NAME` → agent identity (injected by daemon at fork)
-- env: `CCLAW_AGENT_DB` → path to own agent.db (injected by daemon at fork)
-- env: `CCLAW_WORKSPACE` → writable workspace path (injected by daemon at fork)
-- env: `CCLAW_MODEL` → LLM model name (injected by daemon at fork)
-- env: `CCLAW_MAX_ITERATIONS` → max tool loop iterations (injected by daemon at fork)
-- env: `CCLAW_ALLOWED_HOSTS` → comma-separated hostnames (injected by daemon at fork)
-- env: `CCLAW_TOOLS` → comma-separated tool whitelist (injected by daemon at fork)
-- env: `CCLAW_SHELL_TIMEOUT` → seconds (injected by daemon at fork)
-- env: provider API key injected as native env var (e.g. `OPENROUTER_API_KEY`, `GEMINI_API_KEY`) — daemon decrypts from cclaw.db kv, injects at fork; agent reads via `cfg->provider.api_key_env`
-- env: `CCLAW_SECRET_<NAME>` → decrypted agent secrets (injected by daemon at fork; agent passes selectively to shell children; cleared from agent env after read)
-- env: `CCLAW_DAEMON_DB` → path to cclaw.db (if read access granted)
-- env: `CCLAW_TOKEN_RATE_LIMIT` → override hourly token limit
+- env: `CCLAW_*` → all agent config injected by daemon/CLI at fork as env vars; agent reads via `config_load_from_env()`; pattern: agent_config key `foo_bar` → env `CCLAW_FOO_BAR`; see [specs/schema.md](specs/schema.md) for full key list + defaults
+- env: provider API keys injected as native env var (e.g. `OPENROUTER_API_KEY`, `GEMINI_API_KEY`) — daemon decrypts from cclaw.db kv at fork
+- env: `CCLAW_SECRET_<NAME>` → decrypted agent secrets (injected at fork; cleared from env after read)
+- env: `CCLAW_MODE` → `cli|daemon` (set by parent, not agent_config)
 - db: `cclaw.db` — agents registry, agent_config, providers (name, base_url, endpoint_type, api_key_env, default_model_id), kv (encrypted secrets), channel_bindings, tg_chat_sessions, spawn_queue, cron_jobs, approvals, channels, channel_events, channel_outbox, channel_state
 - db: per-agent `agents/<name>/agent.db` — sessions, entries, inbox, js_tools, memory_blocks, kv (agent-local prefs only)
 - db: `journal.db` — all logs (daemon + agents), source-attributed, timestamped
@@ -78,6 +75,12 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - [error-handling.md](specs/error-handling.md) — LLM API failure classification, retry/fallback logic, response resolution, log levels
 - [extensions.md](specs/extensions.md) — extension system (agent-side tools+hooks, channel processes, package layout, API reference)
 
+Notable kv keys (cclaw.db):
+- `default_agent` → agent name used by `-p` flag + highlighted in agent picker
+- agent_config key `tools` → JSON array of enabled tool names (enforced whitelist); absent = default set per V119 (⊥ all tools)
+- agent_config key `allowed_hosts` → JSON array of hostnames; absent = empty (⊥ allow-all); shared by web_fetch + shell networking
+- agent_config absent-key rule: missing key = system default (conservative); ⊥ missing = unlimited
+
 ## §V INVARIANTS
 V1: ∀ tool exec (`file_read`, `file_write`) → path ! ∈ workspace dir for that agent
 V2: ∀ LLM call returning 429 → retry w/ exponential backoff, respect `Retry-After`
@@ -101,8 +104,8 @@ V19: ∀ session state transition → executed via strict atomic UPDATE with WHE
 V20: ∀ session → `agent_name` identifies agent; config loaded from `agents/<name>/` on disk; fallback to global config when NULL
 V21: ∀ agent execution → daemon forks dedicated process; daemon ⊥ executes LLM logic
 V22: ∀ agent process → trusted binary; primary isolation: `setrlimit` (V23) + application-level network policy (V46); agent process is NOT namespace-sandboxed (needs libcurl, own DB, cclaw.db read)
-V22a: ∀ `shell_exec` child → full namespace sandbox: `unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWNET)` — `/` ro, workspace rw; network via `LD_PRELOAD=libcclaw_net.so` routing through UDS to agent proxy thread; proxy enforces allowed_hosts + secrets injected via env vars
-V23: ∀ agent process → `setrlimit` at fork: RLIMIT_AS (256MB default), RLIMIT_CPU (300s default), RLIMIT_NOFILE (64)
+V22a: ∀ `shell_exec` child → full namespace sandbox: `unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWNET)`; CLI mode: CWD rw + workspace rw + system dirs ro; daemon mode: workspace rw + system dirs ro; network via `LD_PRELOAD=libcclaw_net.so` routing through UDS to agent proxy thread; proxy enforces allowed_hosts + secrets injected via env vars
+V23: ∀ agent process → `setrlimit` at fork: RLIMIT_AS (agent_config `memory_limit`, default 256MB, 0=unlimited, skipped on Android), RLIMIT_CPU (agent_config `cpu_limit`, default 300s, 0=unlimited), RLIMIT_NOFILE (64); limits inherited by shell children
 V24: ∀ session → at most 1 active agent process; daemon forks only when state == "idle"; "running" and "waiting" block new forks
 V25: ∀ channel inserter (Telegram, cron, sub-agent) → inbox_insert + write session_id to signal pipe; ⊥ run agent logic
 V26: ∀ agent process exit → daemon reaps via `waitpid`, reads `last_route` from session, delivers response to channel
@@ -143,7 +146,7 @@ V61: ∀ agent kv table → agent-local preferences only (display settings, tool
 V62: ∀ agent → owns dedicated SQLite file at `.cclaw/agents/<name>/agent.db`; contains: sessions, entries, inbox, kv, memory_blocks, js_tools — all scoped to that agent; agent has full RW; daemon has full RW to all agent DBs (V70); child agents ⊥ access parent DB (namespace sandbox blocks shell children; agent binary only opens own `CCLAW_AGENT_DB`); workspace at `.cclaw/agents/<name>/workspace/`
 V63: ∀ parent→child agent visibility → parent can read child's DB (daemon facilitates via ATTACH or direct read); child ⊥ read parent DB; enforced by: agent binary only opens `CCLAW_AGENT_DB` (trusted code); shell children namespace-sandboxed to own workspace
 V64: ∀ agent config (model, allowed_hosts, tools, max_iterations) → stored in cclaw.db `agent_config` table (V80); daemon reads at fork, injects as env vars; daemon validates config sanity before fork (e.g. allowed_hosts ⊥ include private IPs); config changes require admin approval (V54)
-V65: ∀ agent (named | ephemeral) → same dir structure (`.cclaw/agents/<name>/agent.db` + `workspace/`); ephemeral naming: `ephemeral-<uuid>`; ⊥ deleted — audit trail preserved; all agents are siblings (flat hierarchy under `.cclaw/agents/`)
+V65: ∀ agent → owns dedicated dir `.cclaw/agents/<name>/` (agent.db + workspace/); ⊥ deleted — audit trail preserved; all agents are siblings (flat hierarchy under `.cclaw/agents/`); agents created explicitly (CLI, `create_agent` tool, templates); `spawn_agent` w/ name launches existing agent (⊥ creates new one)
 V66: ∀ agent permissions → agent process opens only own DB + workspace (trusted binary behavior); shell children namespace-sandboxed to workspace only; `read_access` config field: daemon can grant RO access to other agent dirs (passed via env, agent binary honors it); creator→child: daemon grants RW by default; child→creator: nothing; sibling→sibling: nothing
 V67: ∀ secrets + provider config → top-level (daemon-owned); stored in cclaw.db `kv` table encrypted (lowercase keys, e.g. `openrouter_api_key`); daemon decrypts + injects as provider-native env var at fork (e.g. `OPENROUTER_API_KEY`); agents read via `getenv(cfg->provider.api_key_env)`; agents ⊥ store provider keys in own DB — only daemon holds them
 V68: ∀ bootstrap (first run, no named agents) → daemon spawns ephemeral agent w/ onboarding-focused system prompt; same tools as named agents (`configure_provider`, `configure_channel`, `create_agent`, etc.); ephemeral walks user through: provider setup (API key → daemon stores encrypted), channel setup (Telegram token etc.), agent creation (name, model, persona); agent creation requires admin approval
@@ -159,7 +162,7 @@ V77: ∀ daemon reap (exit code 2) → open agent DB, find tool_result entry wit
 V78: ∀ daemon reap (exit code 3) → open agent DB, find tool_result entry with `content = 'PENDING'`, read matching tool_call (by tool_call_id), parse approval args, insert approvals in cclaw.db, notify admin; on admin resolution UPDATE the PENDING entry with result ("approved"/"denied: reason"), transition state→"idle", re-fork
 V79: ∀ daemon reap (exit code 4) → open agent DB, find PENDING tool_result entry, read matching tool_call, validate config change, apply to cclaw.db (provider/channel/agent creation); UPDATE PENDING entry with result ("configured"/"error: ..."), transition state→"idle", re-fork
 V80: ∀ agent_config → stored in cclaw.db `agent_config(agent_name, key, value)` table; ⊥ agent.json files; daemon reads at fork, injects as env vars; keys: model, workspace, tools, allowed_hosts, read_access, max_iterations, shell_timeout, daemon_db_read
-V81: ∀ CLI mode → mini-daemon: opens cclaw.db, loads config via `config_load(db)`, opens agent DB, forks `agent_turn_run` per turn; dispatches on exit codes same as daemon (0=deliver, 2=spawn error, 3=approval prompt, 4=config apply); agent process identical to daemon-forked agent; `CCLAW_PATH` env = CWD (ro file access)
+V81: ∀ CLI mode → mini-daemon: opens cclaw.db, loads config; agent picker (list agents from cclaw.db, create "default" on first run); session picker (first_prompt[:50], last_prompt[:50], datetime); forks `agent_turn_run` per turn; dispatches on exit codes (0=deliver, 3=approval prompt inline, 4=config apply); `CCLAW_MODE=cli`; `CCLAW_PATH`=CWD (file_read ro access); CWD bind-mounted rw in shell namespace
 V82: ∀ `shell_exec` child → transparent credential proxy: `LD_PRELOAD=libcclaw_net.so` intercepts `connect()`/`getaddrinfo()`, routes through UDS to agent proxy thread; `CLONE_NEWNET` as hard backstop (static binaries / raw syscalls get zero network); secrets injected via `CCLAW_SECRET_*` env vars (never in command string); output masked before DB write; graceful fallback if namespaces unavailable
 V83: ∀ credential proxy → thread in agent process; listens on UDS (`<workspace>/.proxy.sock`); reads preamble (dest host:port) from `libcclaw_net.so` connect; checks `allowed_hosts` allowlist; resolves DNS on behalf of child; opens real TCP connection + relays bidirectionally; denies unlisted hosts; dies with agent process
 V84: ∀ credential mapping → stored in cclaw.db `credential_mappings(agent_name, secret_name, host_pattern, path_pattern, location)`; requires admin approval (V54); agent references secrets by name only; proxy resolves + injects at network boundary
@@ -195,6 +198,14 @@ V113: ∀ `beforeToolCall` hook → receives `{name, args}`; can return `{block:
 V114: ∀ `afterToolCall` hook → receives `{name, args, result}`; can return replacement `{result}` or void; chains in load order (each sees previous result)
 V115: ∀ extension permissions → inherit agent's permissions (allowed_hosts, workspace fs); ⊥ per-extension restrictions; extensions share agent's QuickJS heap (V5 limits apply to total)
 V116: ∀ extension `callTool(name, args)` → synchronous dispatch into C tool registry; returns result string; re-entrancy allowed (JS → C tool → JS); depth limit 8 to prevent infinite recursion
+V117: ∀ first run (no agents in cclaw.db) → create agent "default" w/ standard config; tools=[file_read, file_write, js_eval, memory_create, memory_append, memory_replace, request_config]; set kv `default_agent`="default"; agent persisted in cclaw.db agents table + `.cclaw/agents/default/agent.db`
+V118: ∀ CLI agent picker → list agents from cclaw.db (numbered) + "new agent..." option; on select → session picker for that agent: (id, first_prompt[:50], last_prompt[:50], created_at formatted) + "new session" option
+V119: ∀ default agent initial tools → minimum set: `file_read`, `file_write`, `js_eval`, `memory_create`, `memory_append`, `memory_replace`, `request_config`; system prompt enumerates requestable tools (shell_exec, web_fetch, db_query, js_define_tool) so agent knows to escalate
+V120: ∀ `request_config` tool (CLI mode) → agent proposes tool grant | host grant; CLI prompts user inline (approve/deny); approved grants persisted in agent_config (cclaw.db); take effect immediately (next iteration, ⊥ re-fork needed — config reloaded in-process)
+V121: ∀ host allowlist → shared by web_fetch + shell_exec networking; single config key `allowed_hosts` in agent_config; granting host enables both tools to reach it; tool enablement (web_fetch available) orthogonal to host grants
+V122: ∀ new agent creation → inherits default agent config unless cloning existing agent; default config: tools=[file_read, file_write, js_eval, memory_create, memory_append, memory_replace, request_config], allowed_hosts=[], max_iterations=25, shell_timeout=30; clone: copies source agent's full agent_config rows
+V123: ∀ sub-agent spawn → two modes: (1) no name: child session in parent's agent.db, same agent identity, own process; inherits parent's full config verbatim; (2) named: launches existing agent by name (error if ! exist); daemon reads that agent's config, enforces parent ceiling (tools ⊆ parent.tools, allowed_hosts ⊆ parent.allowed_hosts, max_iterations ≤ parent.max_iterations); child runs in own agent.db
+V124: ∀ agent_config defaults → principle of least surprise: (1) no config key = use system default (not "allow everything"); (2) `tools` absent = default tool set per V119 (⊥ all tools); (3) `allowed_hosts` absent = empty (⊥ allow-all); (4) system defaults defined once in code (`AGENT_DEFAULT_*` constants) + documented in specs/schema.md
 
 ## §T TASKS
 id|status|task|cites
@@ -383,7 +394,7 @@ T182|x|integration test: plan-only retry — mock returns bullet-list plan w/ no
 T183|x|integration test: tool loop detection — mock returns same tool_call 12×; verify warning injected at rep 5; verify agent stops at rep 10 w/ error|V43
 T184|x|integration test: blocking sub-agent lifecycle — mock LLM for parent + child; parent calls spawn_agent(blocking); verify state="waiting" + spawn_queue row; simulate sub-agent completion; verify parent re-forks w/ tool_result|V13,V33
 T185|x|integration test: compaction context — insert 300 entries, trigger compaction, run agent loop w/ mock server post-compaction; verify CTE returns summary + recent only; verify FTS5 still indexes old entries|V58,T163
-T186|x|ephemeral agent creation — daemon creates `.cclaw/agents/ephemeral-<uuid>/` w/ agent.db + workspace; minimal config (model from daemon global, basic tools)|V65,V62
+T186|x|ephemeral agent creation — daemon creates agent dir w/ agent.db + workspace; minimal config (model from daemon global, basic tools); used by bootstrap flow|V65,V62
 T187|x|agent permission model — `read_access[]` config field; daemon passes to agent via env; namespace sandbox grants read-only bind-mounts for listed dirs|V66
 T188|x|top-level secrets in daemon DB — provider API keys + channel tokens stored in `.cclaw/cclaw.db` kv (encrypted); daemon decrypts at fork, injects into agent memory; agents reference by name (e.g. `provider.api_key`), ⊥ store copies|V67
 T189|x|bootstrap ephemeral agent — on first run (no named agents), daemon spawns ephemeral w/ tools: `configure_provider`, `configure_channel`, `create_agent`; system prompt guides onboarding flow|V68
@@ -469,6 +480,18 @@ T267|x|test: `callTool` re-entrancy — JS extension calls C tool that triggers 
 T268|x|cost tracking — parse `cost` field from OpenRouter response (generation.total_cost); store `cost_nano INTEGER` (nanodollars, 10^-9 USD) per entry in entries table; `session_cost(db, session_id)` sums session; CLI prints session cost on exit|§D
 T269|x|auto-recall (FTS5) — at context_build, extract keywords from newest user message → FTS5 search over entries (cross-session) + memory_blocks → inject top-N relevant hits as `<recalled_context>` section after system prompt; configurable: `CCLAW_AUTO_RECALL` (bool, default 1), `CCLAW_RECALL_MAX_TOKENS` (int, default 500); skip if query yields 0 results|V7
 T270|x|CLI streaming response — add `"stream":true` to LLM request in CLI mode; parse SSE `data:` chunks via curl write callback; write content tokens to stdout as they arrive (agent child stdout = terminal); reconstruct non-streaming JSON for `llm_parse_response`; suppress `print_response` in parent (child already wrote); `CCLAW_STREAM=1` env var (CLI sets by default); daemon mode leaves 0|§F,§C
+T271|-|CLI agent picker — list agents from cclaw.db, offer "new agent..." option; first run auto-creates "default" + sets kv `default_agent`; highlight default agent|V117,V118
+T272|-|CLI session picker — query agent's agent.db; display (id, first_prompt[:50], last_prompt[:50], created_at formatted); offer "new session"|V118
+T273|-|kv `default_agent` — seeded on first run; `-p` flag uses this agent; agent picker highlights it|V117
+T274|-|`request_config` tool (CLI) — replaces `approval_request` for CLI inline use; prompt approve/deny; persist to agent_config; immediate effect (in-process config reload)|V120
+T275|-|initial tool set enforcement — `CCLAW_TOOLS` env from agent_config `tools` key; default agent starts w/ [file_read, file_write, js_eval, memory_create, memory_append, memory_replace, request_config]; system prompt lists requestable tools|V119
+T276|-|CWD rw bind-mount in CLI shell namespace — `shell_apply_namespace` accepts `cwd_path` param; CLI mode: bind-mount CWD rw alongside workspace; daemon mode passes NULL (workspace rw only)|V22a
+T277|-|agent template system — `extensions/agents/*.json` files; schema: `{name, system_prompt, tools[], allowed_hosts[], memory_blocks[], ephemeral?}`; CLI "new agent..." offers installed templates + blank|§F
+T278|-|agent creation defaults — `create_agent` (daemon + CLI) seeds agent_config w/ default tools per V119; "clone agent" copies all agent_config rows from source; both paths create agents table row + agent.db + workspace dir|V122
+T279|-|sub-agent privilege reduction — `process_spawn_queue` reads parent agent_config at spawn time; intersects parent tools/hosts w/ child config; injects reduced set as `CCLAW_TOOLS`/`CCLAW_ALLOWED_HOSTS` env; child ⊥ exceed parent|V123
+T280|-|`AGENT_DEFAULT_*` constants — define `AGENT_DEFAULT_TOOLS`, `AGENT_DEFAULT_MAX_ITERATIONS` (25), `AGENT_DEFAULT_SHELL_TIMEOUT` (30) in `include/agent_config.h`; used by agent creation, CLI zero-config, and "absent key" resolution in daemon fork|V124
+T281|-|agent_config absent-key semantics — daemon `fork_agent`: if `tools` key missing → inject default tools (V119); if `allowed_hosts` missing → inject empty (no network); document in specs/schema.md|V124
+T282|-|fix `process_spawn_queue` named spawn — if `spawn_agent` args include `name`: validate agent exists (error if not); fork that agent's own session in its agent.db; enforce parent ceiling (intersect configs) via env vars; unnamed spawn (no name) remains as-is: child session in parent's agent.db|V123,B4
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)
@@ -480,6 +503,7 @@ id|date|cause|fix
 B1|2026-05-31|GMICloud returns HTTP 200 w/ 0 tokens + null content + `finish_reason:"stop"` after tool-result follow-up; agent stored empty string as final response; `print_response` printed blank line|V94,V95 — `get_response_text` skips empty; T231 adds retry
 B2|2026-06-01|`build_tools_fragment` closes JSON object w/ `}` — `max_tokens` field ⊥ included when tools present; every agentic request sent without output limit|T237
 B3|2026-06-02|T268 added `cost_nano` column to INSERT SQL + schema template but pre-existing agent.db lacked column; `entry_append_with_turn` failed silently (prepare error → -1); agent returned 0 (success) w/ no response written; also: cost parser looked for `usage.total_cost` but OpenRouter sends `usage.cost`|fix: `db_open_agent` runs `ALTER TABLE entries ADD COLUMN cost_nano INTEGER` (idempotent); parser checks `cost` then `total_cost`; moved `test_integration_cli` → e2e tier (requires live LLM)
+B4|2026-06-03|`process_spawn_queue` only supports unnamed spawn (child session in parent DB); named spawn (launch different agent by name) ⊥ implemented; also no parent ceiling enforcement on named spawn (V123 mode 2)|V123,T282
 
 ## §F FUTURE
 - ~~CLI streaming response~~: implemented (T270) — `"stream":true` in CLI mode, SSE parsing, real-time token output to stdout; configurable via `CCLAW_STREAM` env var; daemon mode remains non-streaming
@@ -501,3 +525,4 @@ B3|2026-06-02|T268 added `cost_nano` column to INSERT SQL + schema template but 
 - Vector recall (NEXT): embedding-based semantic search over entries + memory_blocks + workspace files; hybrid w/ FTS5 (RRF merge); requires embedding model (local or API); `passages` table (text, embedding BLOB, source_type, source_id); agent tool `memory_search(query)` for explicit recall; auto-recall injects top hits same as FTS5 path
 - Input logprobs pruning: use prompt token logprobs to intelligently prune history — low-probability tokens = surprising/informative (keep), high-probability = redundant (safe to drop); requires local model inference (vLLM `--return-prompt-logprobs` or llama.cpp); not available via hosted APIs
 - Shell command safety gate: fast LLM (or pattern-matching) check on `shell_exec` command string before execution; detect: secret values literally in command, `env`/`printenv` dumps, exfiltration patterns (`curl $SECRET` to non-allowlisted host), encoded secret leaks; runs at the command boundary (after LLM produces command, before shell child launches); lightweight — small model or regex heuristics; false positives → block + ask LLM to reformulate
+- Agent templates: `extensions/agents/*.json` ship declarative agent specs (name, system_prompt, tools[], allowed_hosts[], memory_blocks[], ephemeral flag); CLI "new agent..." surfaces installed templates; template instantiation creates real agent in cclaw.db + agent.db; built-in templates: "default" (minimal tools), "ephemeral" (no memory persistence), "developer" (shell + web_fetch + full hosts)

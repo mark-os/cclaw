@@ -491,6 +491,7 @@ int main(int argc, char *argv[]) {
 
     /* CLI mode: enable SSE streaming for real-time token output */
     setenv("CCLAW_STREAM", "1", 1);
+    setenv("CCLAW_MODE", "cli", 1);
     cfg->stream = 1;
 
     /* V96/T233: open journal.db for CLI log persistence */

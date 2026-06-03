@@ -19,11 +19,11 @@
 
 #define SHELL_MAX_OUTPUT (256 * 1024)
 
-/* V82/V37: Apply namespace sandbox in shell child.
+/* V82/V37/V22a: Apply namespace sandbox in shell child.
  * unshare(USER|MNT|NET), write uid/gid maps, pivot_root into minimal fs.
- * System dirs mounted ro, workspace rw.
+ * System dirs mounted ro, workspace rw, cwd_path rw (CLI mode).
  * Returns 0 on success, -1 on failure (caller should log + continue). */
-static int shell_apply_namespace(const char *workspace) {
+static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
     uid_t uid = getuid();
     gid_t gid = getgid();
 
@@ -33,6 +33,14 @@ static int shell_apply_namespace(const char *workspace) {
     if (workspace && workspace[0]) {
         if (realpath(workspace, ws_abs))
             ws_resolved = ws_abs;
+    }
+
+    /* T276/V22a: Resolve CWD path (CLI mode rw bind-mount) */
+    char cwd_abs[PATH_MAX];
+    const char *cwd_resolved = NULL;
+    if (cwd_path && cwd_path[0]) {
+        if (realpath(cwd_path, cwd_abs))
+            cwd_resolved = cwd_abs;
     }
 
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET) != 0)
@@ -115,6 +123,25 @@ static int shell_apply_namespace(const char *workspace) {
         }
     }
 
+    /* T276/V22a: Bind-mount CWD rw (CLI mode) */
+    if (cwd_resolved) {
+        struct stat st;
+        if (stat(cwd_resolved, &st) == 0 && S_ISDIR(st.st_mode)) {
+            char cwd_dst[PATH_MAX + 64];
+            snprintf(cwd_dst, sizeof(cwd_dst), "%s%s", newroot, cwd_resolved);
+            char *p = cwd_dst + strlen(newroot) + 1;
+            for (char *slash = p; *slash; slash++) {
+                if (*slash == '/') {
+                    *slash = '\0';
+                    mkdir(cwd_dst, 0755);
+                    *slash = '/';
+                }
+            }
+            mkdir(cwd_dst, 0755);
+            mount(cwd_resolved, cwd_dst, NULL, MS_BIND, NULL);
+        }
+    }
+
     /* pivot_root into new root */
     char put_old[256];
     snprintf(put_old, sizeof(put_old), "%s/.oldroot", newroot);
@@ -190,9 +217,10 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
 
         /* V82/V37: namespace sandbox — graceful fallback if unavailable */
         const char *ws = user_data ? ((ShellConfig *)user_data)->workspace : NULL;
+        const char *cwd = user_data ? ((ShellConfig *)user_data)->cwd_path : NULL;
         const char *psock = user_data ? ((ShellConfig *)user_data)->proxy_sock : NULL;
         int yolo = user_data ? ((ShellConfig *)user_data)->yolo : 0;
-        if (!yolo && shell_apply_namespace(ws) != 0) {
+        if (!yolo && shell_apply_namespace(ws, cwd) != 0) {
             /* Fallback: continue unsandboxed (log to stderr = captured in output) */
             fprintf(stderr, "[cclaw] warning: namespace sandbox unavailable, "
                     "continuing without (errno=%d)\n", errno);
@@ -351,9 +379,11 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     if (!sc) return -1;
     sc->timeout = (default_timeout > 0) ? default_timeout : TOOL_SHELL_DEFAULT_TIMEOUT;
     sc->workspace = workspace;
+    sc->cwd_path = NULL;
     sc->proxy_sock = NULL;
     sc->secrets = NULL;
     sc->secret_count = 0;
+    sc->yolo = 0;
     int rc = tools_register(reg, "shell_exec",
                             "Execute a shell command and return stdout+stderr",
                             SHELL_PARAMS_JSON, tool_shell_handler, sc);

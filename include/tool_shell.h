@@ -15,6 +15,7 @@ typedef struct {
 typedef struct {
     int timeout;
     const char *workspace;  /* agent workspace (namespace sandbox restricts access) */
+    const char *cwd_path;   /* V22a/T276: CWD rw bind-mount in CLI mode (NULL in daemon) */
     const char *proxy_sock; /* V83: path to .proxy.sock (NULL if proxy not started) */
     ShellSecret *secrets;   /* V88: array of secrets to inject + mask */
     size_t secret_count;

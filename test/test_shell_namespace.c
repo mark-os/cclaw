@@ -159,8 +159,77 @@ static void test_daemon_db_path_blocked(void) {
     printf("  PASS test_daemon_db_path_blocked\n");
 }
 
+/* T276/V22a: CWD rw bind-mount in CLI mode — cwd_path accessible rw alongside workspace */
+static void test_cwd_path_rw(void) {
+    if (!ns_available) { printf("  SKIP test_cwd_path_rw\n"); return; }
+
+    /* Create a separate "cwd" directory to simulate CLI CWD */
+    char cwd_dir[256];
+    snprintf(cwd_dir, sizeof(cwd_dir), "/tmp/cclaw_cwd_test_%d", getpid());
+    mkdir(cwd_dir, 0755);
+
+    /* Write a file in cwd_dir to read from sandbox */
+    char seed[512];
+    snprintf(seed, sizeof(seed), "%s/seed.txt", cwd_dir);
+    FILE *f = fopen(seed, "w");
+    fprintf(f, "cwd_content\n");
+    fclose(f);
+
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .cwd_path = cwd_dir};
+    char args[1024];
+
+    /* Read from cwd_path — should work */
+    snprintf(args, sizeof(args), "{\"command\":\"cat %s/seed.txt\"}", cwd_dir);
+    char *r = tool_shell_handler(args, &sc);
+    assert(r != NULL);
+    assert(strstr(r, "[exit 0]") != NULL);
+    assert(strstr(r, "cwd_content") != NULL);
+    free(r);
+
+    /* Write to cwd_path — should work (rw mount) */
+    snprintf(args, sizeof(args),
+        "{\"command\":\"echo written > %s/out.txt && cat %s/out.txt\"}", cwd_dir, cwd_dir);
+    r = tool_shell_handler(args, &sc);
+    assert(r != NULL);
+    assert(strstr(r, "[exit 0]") != NULL);
+    assert(strstr(r, "written") != NULL);
+    free(r);
+
+    /* Cleanup */
+    snprintf(args, sizeof(args), "rm -rf %s", cwd_dir);
+    system(args);
+    printf("  PASS test_cwd_path_rw\n");
+}
+
+/* T276: Without cwd_path (daemon mode), CWD dir is NOT accessible */
+static void test_no_cwd_path_blocked(void) {
+    if (!ns_available) { printf("  SKIP test_no_cwd_path_blocked\n"); return; }
+
+    char cwd_dir[256];
+    snprintf(cwd_dir, sizeof(cwd_dir), "/tmp/cclaw_nocwd_test_%d", getpid());
+    mkdir(cwd_dir, 0755);
+    char seed[512];
+    snprintf(seed, sizeof(seed), "%s/seed.txt", cwd_dir);
+    FILE *f = fopen(seed, "w");
+    fprintf(f, "secret\n");
+    fclose(f);
+
+    /* No cwd_path — simulates daemon mode */
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .cwd_path = NULL};
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"command\":\"cat %s/seed.txt 2>&1; echo rc=$?\"}", cwd_dir);
+    char *r = tool_shell_handler(args, &sc);
+    assert(r != NULL);
+    assert(strstr(r, "rc=1") != NULL || strstr(r, "No such file") != NULL);
+    free(r);
+
+    snprintf(args, sizeof(args), "rm -rf %s", cwd_dir);
+    system(args);
+    printf("  PASS test_no_cwd_path_blocked\n");
+}
+
 int main(void) {
-    printf("test_shell_namespace (T209/T217):\n");
+    printf("test_shell_namespace (T209/T217/T276):\n");
     setup_workspace();
     test_namespace_active();
     test_write_inside_workspace();
@@ -172,6 +241,8 @@ int main(void) {
     test_etc_shadow_inaccessible();
     test_agent_db_path_blocked();
     test_daemon_db_path_blocked();
+    test_cwd_path_rw();
+    test_no_cwd_path_blocked();
     cleanup_workspace();
     printf("All namespace sandbox tests passed.\n");
     return 0;

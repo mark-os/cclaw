@@ -485,7 +485,7 @@ T272|x|CLI session picker — query agent's agent.db; display (id, first_prompt[
 T273|x|kv `default_agent` — seeded on first run; `-p` flag uses this agent; agent picker highlights it|V117
 T274|x|`request_config` tool (CLI) — replaces `approval_request` for CLI inline use; prompt approve/deny; persist to agent_config; immediate effect (in-process config reload)|V120
 T275|x|initial tool set enforcement — `CCLAW_TOOLS` env from agent_config `tools` key; default agent starts w/ [file_read, file_write, js_eval, memory_create, memory_append, memory_replace, request_config]; system prompt lists requestable tools|V119
-T276|-|CWD rw bind-mount in CLI shell namespace — `shell_apply_namespace` accepts `cwd_path` param; CLI mode: bind-mount CWD rw alongside workspace; daemon mode passes NULL (workspace rw only)|V22a
+T276|x|CWD rw bind-mount in CLI shell namespace — `shell_apply_namespace` accepts `cwd_path` param; CLI mode: bind-mount CWD rw alongside workspace; daemon mode passes NULL (workspace rw only)|V22a
 T277|-|agent template system — `extensions/agents/*.json` files; schema: `{name, system_prompt, tools[], allowed_hosts[], memory_blocks[], ephemeral?}`; CLI "new agent..." offers installed templates + blank|§F
 T278|-|agent creation defaults — `create_agent` (daemon + CLI) seeds agent_config w/ default tools per V119; "clone agent" copies all agent_config rows from source; both paths create agents table row + agent.db + workspace dir|V122
 T279|-|sub-agent privilege reduction — `process_spawn_queue` reads parent agent_config at spawn time; intersects parent tools/hosts w/ child config; injects reduced set as `CCLAW_TOOLS`/`CCLAW_ALLOWED_HOSTS` env; child ⊥ exceed parent|V123

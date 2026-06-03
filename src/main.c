@@ -539,6 +539,14 @@ int main(int argc, char *argv[]) {
     /* Interactive REPL */
     printf("cclaw cli (type 'exit' or Ctrl-D to quit)\n");
 
+    /* Clear stale CLI inbox messages (from crashed turns). Ignore non-CLI
+     * inbox messages — those belong to another channel (daemon handles). */
+    if (unread > 0) {
+        int cleared = inbox_clear_source(adb, session_id, "cli");
+        if (cleared > 0)
+            printf("[cleared %d stale prompt%s]\n", cleared, cleared == 1 ? "" : "s");
+    }
+
     char *line = NULL;
     size_t line_cap = 0;
     ssize_t line_len;

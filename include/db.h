@@ -138,6 +138,7 @@ void inbox_items_free(InboxItem *items, int count);
 
 /* Count unconsumed inbox items for a session. Returns count or -1 on error. */
 int inbox_count(sqlite3 *db, int64_t session_id);
+int inbox_clear_source(sqlite3 *db, int64_t session_id, const char *source);
 
 /* V18: Atomically consume unconsumed inbox items into session entries.
  * Within BEGIN EXCLUSIVE: marks items consumed, inserts as user messages, updates leaf.

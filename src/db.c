@@ -1050,6 +1050,20 @@ int inbox_count(sqlite3 *db, int64_t session_id) {
     return count;
 }
 
+int inbox_clear_source(sqlite3 *db, int64_t session_id, const char *source) {
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db,
+        "DELETE FROM inbox WHERE session_id = ? AND consumed = 0 AND source = ?",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return 0;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, source, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    int cleared = sqlite3_changes(db);
+    sqlite3_finalize(stmt);
+    return cleared;
+}
+
 /* V18: Atomically consume inbox items into session entries */
 int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)

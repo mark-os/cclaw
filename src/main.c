@@ -31,7 +31,7 @@ static void print_response(sqlite3 *db, int64_t session_id) {
     }
 }
 
-/* Prompt user to select or create a session. Returns session id or -1. */
+/* T272/V118: Session picker — show (id, first_prompt[:50], last_prompt[:50], created_at) */
 static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_session) {
     if (new_session)
         return session_create(db, "cli", NULL, -1, 0);
@@ -39,42 +39,84 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
     if (requested_id > 0)
         return requested_id;
 
-    if (!isatty(STDIN_FILENO)) {
-        int count = 0;
-        Session *sessions = session_list(db, &count);
-        if (!sessions || count == 0) {
-            fprintf(stderr, "no sessions. use --new to create one.\n");
-        } else {
-            int show = count < 10 ? count : 10;
-            for (int i = 0; i < show; i++)
-                fprintf(stderr, "%lld\t%s\n", (long long)sessions[i].id,
-                        sessions[i].name ? sessions[i].name : "(unnamed)");
-            if (count > 10) fprintf(stderr, "... and %d more\n", count - 10);
-            fprintf(stderr, "use --session-id=N or --new\n");
+    /* Query sessions with first/last user prompt snippets */
+    const char *sql =
+        "SELECT s.id, s.created_at,"
+        " (SELECT substr(e.content,1,50) FROM entries e WHERE e.session_id=s.id AND e.role=1 ORDER BY e.id ASC LIMIT 1),"
+        " (SELECT substr(e.content,1,50) FROM entries e WHERE e.session_id=s.id AND e.role=1 ORDER BY e.id DESC LIMIT 1)"
+        " FROM sessions s ORDER BY s.updated_at DESC;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return session_create(db, "cli", NULL, -1, 0);
+
+    /* Collect results */
+    int cap = 8, count = 0;
+    int64_t *ids = malloc((size_t)cap * sizeof(int64_t));
+    if (!ids) { sqlite3_finalize(stmt); return -1; }
+
+    /* Display header (buffer rows for non-interactive mode) */
+    typedef struct { int64_t id; time_t created; char first[52]; char last[52]; } Row;
+    Row *rows = malloc((size_t)cap * sizeof(Row));
+    if (!rows) { free(ids); sqlite3_finalize(stmt); return -1; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            ids = realloc(ids, (size_t)cap * sizeof(int64_t));
+            rows = realloc(rows, (size_t)cap * sizeof(Row));
+            if (!ids || !rows) break;
         }
-        session_list_free(sessions, count);
-        return -1;
+        rows[count].id = sqlite3_column_int64(stmt, 0);
+        rows[count].created = (time_t)sqlite3_column_int64(stmt, 1);
+        const char *fp = (const char *)sqlite3_column_text(stmt, 2);
+        const char *lp = (const char *)sqlite3_column_text(stmt, 3);
+        snprintf(rows[count].first, sizeof(rows[count].first), "%s", fp ? fp : "");
+        snprintf(rows[count].last, sizeof(rows[count].last), "%s", lp ? lp : "");
+        ids[count] = rows[count].id;
+        count++;
     }
+    sqlite3_finalize(stmt);
 
-    int count = 0;
-    Session *sessions = session_list(db, &count);
-
-    if (!sessions || count == 0) {
-        session_list_free(sessions, count);
+    if (count == 0) {
+        free(ids); free(rows);
+        if (!isatty(STDIN_FILENO)) {
+            fprintf(stderr, "no sessions. use --new to create one.\n");
+            return -1;
+        }
         return session_create(db, "cli", NULL, -1, 0);
     }
 
+    if (!isatty(STDIN_FILENO)) {
+        int show = count < 10 ? count : 10;
+        for (int i = 0; i < show; i++)
+            fprintf(stderr, "%lld\t%s\n", (long long)rows[i].id,
+                    rows[i].first[0] ? rows[i].first : "(empty)");
+        if (count > 10) fprintf(stderr, "... and %d more\n", count - 10);
+        fprintf(stderr, "use --session-id=N or --new\n");
+        free(ids); free(rows);
+        return -1;
+    }
+
     printf("sessions:\n");
-    for (int i = 0; i < count; i++)
-        printf("  %d) [%lld] %s\n", i + 1, (long long)sessions[i].id,
-               sessions[i].name ? sessions[i].name : "(unnamed)");
+    for (int i = 0; i < count; i++) {
+        char timebuf[20];
+        struct tm tm;
+        localtime_r(&rows[i].created, &tm);
+        strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M", &tm);
+        /* Replace newlines in snippets with spaces for display */
+        for (char *p = rows[i].first; *p; p++) if (*p == '\n') *p = ' ';
+        for (char *p = rows[i].last; *p; p++) if (*p == '\n') *p = ' ';
+        printf("  %d) [%lld] %s | %s | %s\n", i + 1, (long long)rows[i].id,
+               timebuf, rows[i].first[0] ? rows[i].first : "(empty)",
+               rows[i].last[0] ? rows[i].last : "");
+    }
     printf("  n) new session\n");
     printf("select: ");
     fflush(stdout);
 
     char buf[32];
     if (!fgets(buf, sizeof(buf), stdin)) {
-        session_list_free(sessions, count);
+        free(ids); free(rows);
         return -1;
     }
 
@@ -84,11 +126,11 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
     else {
         int choice = atoi(buf);
         if (choice >= 1 && choice <= count)
-            result = sessions[choice - 1].id;
+            result = ids[choice - 1];
         else { fprintf(stderr, "invalid choice\n"); result = -1; }
     }
 
-    session_list_free(sessions, count);
+    free(ids); free(rows);
     return result;
 }
 

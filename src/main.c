@@ -311,6 +311,45 @@ static int cli_handle_config(const Config *cfg, sqlite3 *cclaw_db,
     char *result = daemon_apply_config(cfg, cclaw_db, agent_name, tname, args);
     update_pending_entry(adb, pending_eid, result ? result : "error: config apply failed");
 
+    /* V120: reload CCLAW_TOOLS after grant so next fork sees it immediately */
+    if (result && strncmp(result, "granted tool:", 13) == 0) {
+        AgentConfig *ac = agent_config_load_db(cclaw_db, agent_name);
+        if (ac && ac->tool_count > 0) {
+            size_t len = 0;
+            for (size_t i = 0; i < ac->tool_count; i++)
+                len += strlen(ac->tools[i]) + 1;
+            char *csv = malloc(len);
+            if (csv) {
+                csv[0] = '\0';
+                for (size_t i = 0; i < ac->tool_count; i++) {
+                    if (i > 0) strcat(csv, ",");
+                    strcat(csv, ac->tools[i]);
+                }
+                setenv("CCLAW_TOOLS", csv, 1);
+                free(csv);
+            }
+        }
+        if (ac) agent_config_free(ac);
+    } else if (result && strncmp(result, "granted host:", 13) == 0) {
+        AgentConfig *ac = agent_config_load_db(cclaw_db, agent_name);
+        if (ac && ac->allowed_hosts_count > 0) {
+            size_t len = 0;
+            for (size_t i = 0; i < ac->allowed_hosts_count; i++)
+                len += strlen(ac->allowed_hosts[i]) + 1;
+            char *csv = malloc(len);
+            if (csv) {
+                csv[0] = '\0';
+                for (size_t i = 0; i < ac->allowed_hosts_count; i++) {
+                    if (i > 0) strcat(csv, ",");
+                    strcat(csv, ac->allowed_hosts[i]);
+                }
+                setenv("CCLAW_ALLOWED_HOSTS", csv, 1);
+                free(csv);
+            }
+        }
+        if (ac) agent_config_free(ac);
+    }
+
     printf("\033[36mconfig: %s\033[0m\n", result ? result : "failed");
     free(result);
     free(args);
@@ -639,6 +678,44 @@ int main(int argc, char *argv[]) {
 
     const char *agent_name = agent_name_sel;
     setenv("CCLAW_AGENT_NAME", agent_name, 1);
+
+    /* T275/V119: inject CCLAW_TOOLS from agent_config (or leave unset for default) */
+    if (!yolo_mode) {
+        AgentConfig *ac = agent_config_load_db(cclaw_db, agent_name);
+        if (ac) {
+            if (ac->tool_count > 0) {
+                size_t len = 0;
+                for (size_t i = 0; i < ac->tool_count; i++)
+                    len += strlen(ac->tools[i]) + 1;
+                char *tools_csv = malloc(len);
+                if (tools_csv) {
+                    tools_csv[0] = '\0';
+                    for (size_t i = 0; i < ac->tool_count; i++) {
+                        if (i > 0) strcat(tools_csv, ",");
+                        strcat(tools_csv, ac->tools[i]);
+                    }
+                    setenv("CCLAW_TOOLS", tools_csv, 1);
+                    free(tools_csv);
+                }
+            }
+            if (ac->allowed_hosts_count > 0) {
+                size_t len = 0;
+                for (size_t i = 0; i < ac->allowed_hosts_count; i++)
+                    len += strlen(ac->allowed_hosts[i]) + 1;
+                char *hosts_csv = malloc(len);
+                if (hosts_csv) {
+                    hosts_csv[0] = '\0';
+                    for (size_t i = 0; i < ac->allowed_hosts_count; i++) {
+                        if (i > 0) strcat(hosts_csv, ",");
+                        strcat(hosts_csv, ac->allowed_hosts[i]);
+                    }
+                    setenv("CCLAW_ALLOWED_HOSTS", hosts_csv, 1);
+                    free(hosts_csv);
+                }
+            }
+            agent_config_free(ac);
+        }
+    }
 
     if (yolo_mode) setenv("CCLAW_YOLO", "1", 1);
 

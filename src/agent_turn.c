@@ -17,6 +17,14 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 
+/* V119/V124: default tool whitelist when CCLAW_TOOLS absent */
+static const char *DEFAULT_TOOLS[] = {
+    "file_read", "file_write", "js_eval",
+    "memory_create", "memory_append", "memory_replace",
+    "request_config"
+};
+static const size_t DEFAULT_TOOLS_COUNT = sizeof(DEFAULT_TOOLS) / sizeof(DEFAULT_TOOLS[0]);
+
 static char *dispatch_tools(const char *name, const char *arguments, void *user_data) {
     ToolRegistry *reg = (ToolRegistry *)user_data;
     ToolEntry *e = tools_lookup(reg, name);
@@ -176,6 +184,10 @@ int agent_turn_run(int64_t session_id) {
                 tok = strtok(NULL, ",");
             }
         }
+    } else if (!is_yolo) {
+        /* V119/V124: absent CCLAW_TOOLS → use default set (not all tools) */
+        tool_whitelist = DEFAULT_TOOLS;
+        tool_wl_count = DEFAULT_TOOLS_COUNT;
     }
     const ToolSchema *schemas = tools_schemas_filtered(&setup.reg, tool_whitelist,
                                                        tool_wl_count, &tool_count);

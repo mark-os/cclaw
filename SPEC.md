@@ -490,7 +490,7 @@ T277|-|agent template system — `extensions/agents/*.json` files; schema: `{nam
 T278|x|agent creation defaults — `create_agent` (daemon + CLI) seeds agent_config w/ default tools per V119; "clone agent" copies all agent_config rows from source; both paths create agents table row + agent.db + workspace dir|V122
 T279|x|sub-agent privilege reduction — `process_spawn_queue` reads parent agent_config at spawn time; intersects parent tools/hosts w/ child config; injects reduced set as `CCLAW_TOOLS`/`CCLAW_ALLOWED_HOSTS` env; child ⊥ exceed parent|V123
 T280|x|`AGENT_DEFAULT_*` constants — define `AGENT_DEFAULT_TOOLS`, `AGENT_DEFAULT_MAX_ITERATIONS` (25), `AGENT_DEFAULT_SHELL_TIMEOUT` (30) in `include/agent_config.h`; used by agent creation, CLI zero-config, and "absent key" resolution in daemon fork|V124
-T281|-|agent_config absent-key semantics — daemon `fork_agent`: if `tools` key missing → inject default tools (V119); if `allowed_hosts` missing → inject empty (no network); document in specs/schema.md|V124
+T281|x|agent_config absent-key semantics — daemon `fork_agent`: if `tools` key missing → inject default tools (V119); if `allowed_hosts` missing → inject empty (no network); document in specs/schema.md|V124
 T282|-|fix `process_spawn_queue` named spawn — if `spawn_agent` args include `name`: validate agent exists (error if not); fork that agent's own session in its agent.db; enforce parent ceiling (intersect configs) via env vars; unnamed spawn (no name) remains as-is: child session in parent's agent.db|V123,B4
 
 Test tiers (Makefile targets):

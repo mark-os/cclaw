@@ -583,21 +583,31 @@ static void inject_agent_config_env(sqlite3 *db, const char *agent_name,
     if (parent_ac && ac)
         agent_config_intersect(ac, parent_ac);
 
-    /* Determine effective values */
-    char **eff_tools = ac ? ac->tools : NULL;
-    size_t eff_tool_count = ac ? ac->tool_count : 0;
+    /* V124/T281: resolve effective values — absent key = system default */
+    static const char *default_tools[] = { AGENT_DEFAULT_TOOLS };
+    char **eff_tools = ac && ac->tool_count > 0 ? ac->tools : NULL;
+    size_t eff_tool_count = ac && ac->tool_count > 0 ? ac->tool_count : 0;
     char **eff_hosts = ac ? ac->allowed_hosts : NULL;
     size_t eff_host_count = ac ? ac->allowed_hosts_count : 0;
-    int eff_max_iter = ac ? ac->max_iterations : 0;
+    int eff_max_iter = ac && ac->max_iterations > 0 ? ac->max_iterations : 0;
 
-    /* If no agent config but parent ceiling given, use parent values directly */
     if (!ac && parent_ac) {
+        /* No agent config but parent ceiling given → use parent values */
         eff_tools = parent_ac->tools;
         eff_tool_count = parent_ac->tool_count;
         eff_hosts = parent_ac->allowed_hosts;
         eff_host_count = parent_ac->allowed_hosts_count;
         eff_max_iter = parent_ac->max_iterations;
     }
+
+    /* Absent tools → inject default set (V119) */
+    if (eff_tool_count == 0) {
+        eff_tools = (char **)default_tools;
+        eff_tool_count = AGENT_DEFAULT_TOOLS_COUNT;
+    }
+    /* Absent max_iterations → inject default */
+    if (eff_max_iter <= 0)
+        eff_max_iter = AGENT_DEFAULT_MAX_ITERATIONS;
 
     /* Inject workspace */
     if (ac && ac->workspace) {
@@ -613,13 +623,13 @@ static void inject_agent_config_env(sqlite3 *db, const char *agent_name,
         setenv("CCLAW_MODEL", ac->model, 1);
 
     /* Inject max_iterations */
-    if (eff_max_iter > 0) {
+    {
         char buf[16];
         snprintf(buf, sizeof(buf), "%d", eff_max_iter);
         setenv("CCLAW_MAX_ITERATIONS", buf, 1);
     }
 
-    /* Inject allowed_hosts (comma-separated) */
+    /* Inject allowed_hosts — always set (empty = no network per V124) */
     if (eff_host_count > 0) {
         size_t len = 0;
         for (size_t i = 0; i < eff_host_count; i++)
@@ -634,10 +644,12 @@ static void inject_agent_config_env(sqlite3 *db, const char *agent_name,
             setenv("CCLAW_ALLOWED_HOSTS", hosts, 1);
             free(hosts);
         }
+    } else {
+        setenv("CCLAW_ALLOWED_HOSTS", "", 1);
     }
 
-    /* Inject tools (comma-separated) */
-    if (eff_tool_count > 0) {
+    /* Inject tools (comma-separated) — always set */
+    {
         size_t len = 0;
         for (size_t i = 0; i < eff_tool_count; i++)
             len += strlen(eff_tools[i]) + 1;
@@ -651,6 +663,13 @@ static void inject_agent_config_env(sqlite3 *db, const char *agent_name,
             setenv("CCLAW_TOOLS", tools, 1);
             free(tools);
         }
+    }
+
+    /* Inject shell_timeout — absent = default */
+    {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", AGENT_DEFAULT_SHELL_TIMEOUT);
+        setenv("CCLAW_SHELL_TIMEOUT", buf, 0); /* don't override if ac set it */
     }
 
     if (ac) agent_config_free(ac);

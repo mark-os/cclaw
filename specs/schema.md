@@ -34,7 +34,7 @@ Replaces `agent.json` files. Daemon reads at fork, injects as `CCLAW_*` env vars
 
 Keys: `model`, `workspace`, `tools` (JSON array), `allowed_hosts` (JSON array), `read_access` (JSON array), `max_iterations`, `shell_timeout`, `daemon_db_read` (0\|1).
 
-**Absent-key semantics** (V124): missing key = conservative system default, NOT unlimited.
+**Absent-key semantics** (V124/T281): missing key = conservative system default, NOT unlimited. Daemon always injects `CCLAW_TOOLS` and `CCLAW_ALLOWED_HOSTS` env vars at fork — even when no agent_config rows exist. Agent process never sees "unset" for these keys.
 
 | Key | Absent default | Notes |
 |-----|----------------|-------|

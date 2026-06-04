@@ -252,6 +252,7 @@ B7|2026-06-03|outer `MAX_LLM_RETRIES` loop in `agent_run` re-catches 5xx errors 
 B8|2026-06-03|`setrlimit(RLIMIT_AS, 256MB)` blocks ASAN shadow memory (~20TB virtual) → `ERROR: Failed to mmap` crash before LLM call|V23 — skip RLIMIT_AS under ASAN
 B9|2026-06-03|`free(tool_whitelist)` frees static `DEFAULT_TOOLS` global when `CCLAW_TOOLS` env unset → ASAN alloc-dealloc-mismatch abort after first turn|V119 — conditional free
 B10|2026-06-03|`dest + (w < cap ? w : 0)` in `emit_entry_openai` → UB null+0 during size-calc pass (dest=NULL)|V60 — DEST_AT macro
+B11|2026-06-03|Ctrl-C in CLI doesn't stop child agent — child in same pgroup receives SIGINT but continues streaming; parent blocked in fgets on stderr pipe|fix: child `setpgid(0,0)`, parent kills child on shutdown_requested
 
 ## §F FUTURE
 - ~~CLI streaming response~~: implemented (T270) — `"stream":true` in CLI mode, SSE parsing, real-time token output to stdout; configurable via `CCLAW_STREAM` env var; daemon mode remains non-streaming

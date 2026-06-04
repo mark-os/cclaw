@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <limits.h>
 #include <libgen.h>
 #include "cclaw.h"
@@ -21,6 +22,9 @@
 #include "context.h"
 #include "daemon.h"
 #include "secret.h"
+
+/* Track child pid so SIGINT can forward to it */
+static volatile pid_t g_child_pid = 0;
 
 /* Print last assistant response from session branch */
 static void print_response(sqlite3 *db, int64_t session_id) {
@@ -197,6 +201,8 @@ static int cli_fork_turn(int64_t session_id) {
         return AGENT_EXIT_ERROR;
     }
     if (pid == 0) {
+        /* Child: own pgroup so terminal SIGINT goes only to parent */
+        setpgid(0, 0);
         /* Child: stderr → pipe, stdout inherited */
         close(err_pipe[0]);
         dup2(err_pipe[1], STDERR_FILENO);
@@ -206,6 +212,7 @@ static int cli_fork_turn(int64_t session_id) {
 
     /* Parent: drain stderr pipe → journal.db + optional tee */
     close(err_pipe[1]);
+    g_child_pid = pid;
 
     int tee = g_cli_cfg && g_cli_cfg->log_level >= LOG_LEVEL_DEBUG;
     const char *agent_name = getenv("CCLAW_AGENT_NAME");
@@ -243,6 +250,13 @@ static int cli_fork_turn(int64_t session_id) {
     }
 
     if (stmt) sqlite3_finalize(stmt);
+
+    if (shutdown_requested()) {
+        kill(pid, SIGTERM);
+        usleep(50000);
+        kill(pid, SIGKILL);
+    }
+    g_child_pid = 0;
 
     int status;
     waitpid(pid, &status, 0);

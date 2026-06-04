@@ -280,15 +280,20 @@ static int cli_handle_approval(sqlite3 *adb, int64_t session_id) {
     printf("\033[33m⚠ approval requested");
     if (tname) printf(" [%s]", tname);
     printf(":\033[0m %s\n", args);
-    printf("allow? [y/n]: ");
-    fflush(stdout);
 
-    char buf[16];
+    const char *yolo = getenv("CCLAW_YOLO");
     const char *result;
-    if (fgets(buf, sizeof(buf), stdin) && (buf[0] == 'y' || buf[0] == 'Y'))
+    if (yolo && yolo[0] == '1') {
         result = "approved";
-    else
-        result = "denied";
+    } else {
+        printf("allow? [y/n]: ");
+        fflush(stdout);
+        char buf[16];
+        if (fgets(buf, sizeof(buf), stdin) && (buf[0] == 'y' || buf[0] == 'Y'))
+            result = "approved";
+        else
+            result = "denied";
+    }
 
     update_pending_entry(adb, pending_eid, result);
     free(args);
@@ -311,15 +316,19 @@ static int cli_handle_config(const Config *cfg, sqlite3 *cclaw_db,
 
     /* T274/V120: request_config requires user approval before applying */
     if (tname && strcmp(tname, "request_config") == 0) {
+        const char *yolo = getenv("CCLAW_YOLO");
+        int auto_approve = (yolo && yolo[0] == '1');
         printf("\033[33m⚠ config request:\033[0m %s\n", args);
-        printf("allow? [y/n]: ");
-        fflush(stdout);
-        char buf[16];
-        if (!fgets(buf, sizeof(buf), stdin) || (buf[0] != 'y' && buf[0] != 'Y')) {
-            update_pending_entry(adb, pending_eid, "denied by user");
-            printf("\033[31mdenied\033[0m\n");
-            free(args); free(tname); free(tc_id);
-            return 0;
+        if (!auto_approve) {
+            printf("allow? [y/n]: ");
+            fflush(stdout);
+            char buf[16];
+            if (!fgets(buf, sizeof(buf), stdin) || (buf[0] != 'y' && buf[0] != 'Y')) {
+                update_pending_entry(adb, pending_eid, "denied by user");
+                printf("\033[31mdenied\033[0m\n");
+                free(args); free(tname); free(tc_id);
+                return 0;
+            }
         }
     }
 

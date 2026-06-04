@@ -231,7 +231,7 @@ T277|~|[hold] agent template system — `extensions/agents/*.json`; schema: `{na
 T283|x|e2e: streaming + thinking + tool calls — yolo, DeepSeek V4 Flash, verify thinking blocks handled, tool dispatch works, no ASAN/UBSan, exit 0; see [TEST-CLI.md](TEST-CLI.md)|B8,B9,B10
 T284|x|e2e: non-streaming mode — `CCLAW_STREAM=0`, verify `"stream":false` in request, response printed at end; see [TEST-CLI.md](TEST-CLI.md)|§C
 T285|x|e2e: multi-tool chain — file_write → shell_exec (python3) → verify output; see [TEST-CLI.md](TEST-CLI.md)|V10
-T286|.|e2e: js_eval — Fibonacci via QuickJS, verify result correct, no crash; see [TEST-CLI.md](TEST-CLI.md)|V5
+T286|x|e2e: js_eval — Fibonacci via QuickJS, verify result correct, no crash; see [TEST-CLI.md](TEST-CLI.md)|V5
 T287|.|e2e: web_fetch — fetch httpbin.org, verify content extraction; see [TEST-CLI.md](TEST-CLI.md)|V46
 T288|.|e2e: pure reasoning (no tools) — thinking + content, stop_reason=stop, no tool calls; see [TEST-CLI.md](TEST-CLI.md)|V35
 

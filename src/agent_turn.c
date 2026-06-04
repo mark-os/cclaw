@@ -61,7 +61,10 @@ int agent_turn_run(int64_t session_id) {
 
     /* V23: resource limits */
     struct rlimit rl;
-#if !defined(__ANDROID__) && !__has_feature(address_sanitizer)
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+#if !defined(__ANDROID__) && !defined(__SANITIZE_ADDRESS__) && !__has_feature(address_sanitizer)
     rl.rlim_cur = 256 * 1024 * 1024;
     rl.rlim_max = 256 * 1024 * 1024;
     setrlimit(RLIMIT_AS, &rl);

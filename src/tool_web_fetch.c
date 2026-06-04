@@ -55,10 +55,19 @@ static int http_get(const char *url, HttpResponse *resp) {
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "cclaw/1.0");
 
+    char errbuf[CURL_ERROR_SIZE] = "";
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+
     CURLcode rc = curl_easy_perform(curl);
     long status = -1;
     if (rc == CURLE_OK)
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+
+    /* Stash curl error for caller */
+    if (rc != CURLE_OK && resp->err_detail[0] == '\0') {
+        const char *msg = errbuf[0] ? errbuf : curl_easy_strerror(rc);
+        snprintf(resp->err_detail, sizeof(resp->err_detail), "%s", msg);
+    }
 
     curl_easy_cleanup(curl);
     return (rc == CURLE_OK) ? (int)status : -1;
@@ -162,8 +171,15 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     cJSON_Delete(json);
 
     if (status < 0) {
+        char *msg = malloc(512);
+        if (msg) {
+            if (resp.err_detail[0])
+                snprintf(msg, 512, "error: HTTP request failed: %s", resp.err_detail);
+            else
+                snprintf(msg, 512, "error: HTTP request failed");
+        }
         http_response_free(&resp);
-        return strdup("error: HTTP request failed");
+        return msg ? msg : strdup("error: HTTP request failed");
     }
 
     if (status >= 400) {

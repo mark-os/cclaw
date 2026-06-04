@@ -27,9 +27,15 @@ E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
 MJS_VENDOR_OBJ := $(BUILDDIR)/mjs_mquickjs.o $(BUILDDIR)/mjs_cutils.o $(BUILDDIR)/mjs_dtoa.o \
                   $(BUILDDIR)/mjs_libm.o $(BUILDDIR)/mjs_stdlib.o
 
-.PHONY: all clean test test-integration test-e2e test-all install
+.PHONY: all clean test test-integration test-e2e test-all install debug
 
 all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/channel_telegram
+
+# Development build: debug symbols, no optimization, sanitizers (clang preferred for better traces)
+debug: clean
+	$(MAKE) all CC=clang \
+	            CFLAGS="$(CFLAGS) -O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined" \
+	            LDFLAGS="$(LDFLAGS) -fsanitize=address,undefined"
 
 $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)

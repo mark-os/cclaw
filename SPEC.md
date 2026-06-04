@@ -206,292 +206,28 @@ V121: ∀ host allowlist → shared by web_fetch + shell_exec networking; single
 V122: ∀ new agent creation → inherits default agent config unless cloning existing agent; default config: tools=[file_read, file_write, js_eval, memory_create, memory_append, memory_replace, request_config], allowed_hosts=[], max_iterations=25, shell_timeout=30; clone: copies source agent's full agent_config rows
 V123: ∀ sub-agent spawn → two modes: (1) no name: child session in parent's agent.db, same agent identity, own process; inherits parent's full config verbatim; (2) named: launches existing agent by name (error if ! exist); daemon reads that agent's config, enforces parent ceiling (tools ⊆ parent.tools, allowed_hosts ⊆ parent.allowed_hosts, max_iterations ≤ parent.max_iterations); child runs in own agent.db
 V124: ∀ agent_config defaults → principle of least surprise: (1) no config key = use system default (not "allow everything"); (2) `tools` absent = default tool set per V119 (⊥ all tools); (3) `allowed_hosts` absent = empty (⊥ allow-all); (4) system defaults defined once in code (`AGENT_DEFAULT_*` constants) + documented in specs/schema.md
+V125: ∀ `Authorization` header construction → heap-allocate based on `strlen(api_key)`; ⊥ fixed-size stack buffer; assert header fits before use
+V126: ∀ LLM fallback attempt → `http_response_free(resp)` before passing `resp` to next provider; ⊥ memset over live allocation
+V127: ∀ outer LLM retry loop (`MAX_LLM_RETRIES`) → only `continue` on parse failure | missing finish_reason; `break` on HTTP errors already exhausted by inner retry+fallback chain; ⊥ re-retry server errors with reset backoff
 
 ## §T TASKS
 id|status|task|cites
-T1|x|Makefile — minimal, grows w/ modules|§C
-T2|x|arena allocator (`arena.c`) — create, alloc, destroy|V6
-T3|x|core types (`types.h`) — Message, Session, Entry, Config structs|V14
-T4|x|config (`config.c`) — load from kv table + env var overrides; seed defaults on DB creation|§I.db
-T5|x|DB init (`db.c`) — open, create tables, WAL mode, pragmas|V4
-T6|x|session CRUD — create, list, get_branch (leaf→root), set_leaf|V14
-T7|x|entry append + tree ops (parent_id linking)|V14
-T8|x|FTS5 setup + search fn over message content|V7
-T9|x|HTTP wrapper (`http.c`) — POST w/ headers, response buffer via libcurl|§C
-T10|x|LLM request builder (`llm.c`) — messages + tools → JSON|V9
-T11|x|LLM response parser — extract content, tool_calls, usage|§I.api
-T12|x|context window manager — select turns ≤ budget, cutoff notice, valid boundaries|V7,V8
-T13|x|agent loop (`agent.c`) — call LLM, dispatch tools, repeat until done|V10
-T14|x|tool registry — register/lookup by name, schema storage|§I.tool
-T15|x|max iterations guard|§I.file
-T16|x|session integration — load branch, append entries, flush to DB|V14,T6
-T17|x|`shell_exec` tool — popen, capture stdout+stderr, timeout|§I.tool
-T18|x|`file_read` tool — workspace path restriction|V1
-T19|x|`file_write` tool — workspace path restriction|V1
-T20|x|CLI REPL (`cli.c`) — read line, send to agent, print response|§I.cmd
-T21|x|CLI debug mode — raw req/resp JSON to stderr|§I.cmd
-T22|x|CLI session selection (create new / resume existing)|§I.cmd
-T23|x|Telegram poller (`telegram.c`) — getUpdates loop in thread, inbox_insert + signal daemon pipe|§I.api,V25
-T24|x|Telegram send + typing indicator (every 4s while working)|V11
-T25|x|Telegram offset persistence in DB (survives restart)|§I.api
-T26|x|Telegram chat_id → session routing|§I.api
-T27|x|Telegram exponential backoff on transient errors|V2
-T28|x|civetweb integration — start server, register routes|§I.web
-T29|x|status page — active sessions, uptime, sub-agent status|§I.web
-T30|x|vendor mquickjs, integrate into build|§C
-T31|x|`js_eval` tool — execute code, return result|V5
-T32|x|`js_define_tool` — register JS fn as tool (session-persistent)|§I.tool
-T33|x|JS context replay on session reload|T32
-T34|x|heartbeat timer thread + system msg injection|§C
-T35|x|cron table + scheduler thread|§I.db
-T36|x|`cron_set`/`cron_list`/`cron_remove` tools|T35
-T37|x|`spawn_agent` tool — post spawn request to dispatch queue; daemon forks sub-agent|V3,V13,V21
-T38|x|`db_query` tool — read-only SQL (SELECT only, reject mutations)|§I.tool
-T39|x|sub-agent lifecycle (limits, cleanup, crash isolation)|V3
-T40|x|token estimation (chars/4 heuristic)|V7
-T41|x|graceful shutdown (SIGINT/SIGTERM)|§C
-T42|x|systemd unit file (`cclaw.service`) — restart on failure, env file, journal logging (no test)|§C
-T43|x|SysVinit init script — network wait, respawn loop, PID mgmt, stale PID detect (no test)|§C
-T44|x|error handling — 429 retry, context overflow detect, JSON parse failure recovery|V2,V10
-T45|x|provider fallback chain — config array, try next on 5xx/timeout (test: Gemini `gemma-4-31b-it` via `GEMINI_API_KEY`)|V2
-T46|x|system prompt — load from config per agent, template vars `{session_id}`, `{date}`|§I.file
-T47|x|`shell_exec` timeout — SIGKILL child after configurable N seconds (default 30)|V10
-T48|x|`web_fetch` tool — HTTP GET, extract text from HTML, wrap output in external input protection|V15
-T49|x|test: context window cuts at valid turn boundary, never mid-tool-call|V7,V8
-T50|x|test: per-agent workspace isolation (file tools reject paths outside workspace)|V1,V12
-T51|x|test: external content wrapping — boundary markers, homoglyph sanitization|V15
-T52|x|integration test: live OpenRouter call → parse response, verify tool_calls round-trip|§I.api
-T53|x|integration test: agent loop end-to-end (prompt → tool call → tool result → final answer)|V10,§I.api
-T54|x|integration test: provider fallback (kill primary, verify fallback fires)|T45
-T55|x|DB Schema: sessions CAS columns (state, lock_holder, lock_acquired_at, error_count) + inbox table|V16,V18
-T56|x|CAS Acquire/Release (`session_try_acquire`)|V16,V19
-T57|x|agent.c Turn Tagging (assign `turn_id` via index query)|V17
-T58|x|context.c Incomplete Turn Interception (synthetic failure + notice)|V17
-T59|x|Janitor Sweep Logic (stale locks, orphan pending recovery)|V16,V19
-T60|x|Anti-Crash Loop Limit (`error_count` tracking, quarantine ≥ 3)|V19
-T61|x|Phase A Integration (verification matrices for overlap rejection)|V16
-T62|x|inbox Core Primitives (`inbox_insert`, `inbox_peek`)|V18
-T63|x|Atomic Move Transaction (`inbox_consume_into_entries`)|V18
-T64|x|Background sub-agent completion (post result to parent inbox)|V13,V18
-T65|x|`spawn_agent` blocking mode (wait on child, return result as tool output)|V13,V3
-T66|x|Verification Tests (atomic rollbacks mid-consumption)|V18
-T67|x|CLI workspace triggers (acquire/release keep-alive framework)|V16
-T68|x|Telegram intake handlers (inbox_insert + trigger local lock)|V16
-T69|x|Cron process actions (transactional inbox wrappers)|V16
-T70|x|Integration Test: parallel high-throughput network payloads|V16,V18
-T71|x|Web console updates (state metrics, lock holders, backlog depths)|§I.web
-T72|x|CLI terminal resume paths (echo unread inbox counts)|§I.cmd
-T74|x|[removed — superseded by daemon model]|-
-T75|x|agent discovery — scan `agents/` dir, list available agents by name|V20
-T76|x|agent config loader — read `agents/<name>/agent.json`, merge w/ global config|V20,V12
-T77|x|system prompt loader — read `agents/<name>/system.md`, template vars `{session_id}`, `{date}`, `{agent_name}`|V20,T46
-T78|x|per-agent tool whitelist — filter tool registry by agent config|V20,§I.tool
-T79|x|session↔agent binding — session_create accepts agent_name, load config from disk at agent_run|V20
-T80|x|skill loader — scan `agents/<name>/skills/*.md`, inject into system prompt|V20
-T81|x|daemon main loop — epoll on signal_pipe + SIGCHLD self-pipe, fork/reap agents|V21,V24,V26
-T82|x|signal pipe — create at daemon start, inserters write session_id to wake daemon|V25
-T83|x|agent process entry — fork, setrlimit, drain inbox, run agent loop, exit|V21,V22,V23
-T84|x|[removed — landlock removed in favor of app-level policy]|V22
-T85|x|response delivery — daemon reads `last_route`, dispatches to correct channel|V26
-T86|x|`last_route` tracking — agent updates on inbox consumption from newest source|V27,§D
-T87|x|daemon child tracking — map pid→session_id, enforce V24 (no dup fork)|V24
-T88|x|daemon spawn queue — sub-agent spawn requests from agent processes, daemon picks up + forks|V21,T37
-T89|x|test: daemon forks agent on inbox signal, reaps on exit, delivers response|V21,V26
-T90|x|context_build: skip errored/aborted assistant entries + their orphaned tool_calls|V28
-T91|x|LLM error retry loop — max 3 retries, re-send clean context (V28 stripped), write final error entry on exhaust|V29,V32
-T92|x|graceful child shutdown — daemon SIGTERM → forward to children, children attempt error entry before exit|V31
-T93|x|test: agent crash (simulated SIGKILL) → next fork recovers via V17 incomplete turn notice|V30
-T94|x|daemon startup recovery — scan non-idle sessions, kill orphans, evaluate state, re-track or reset|V34
-T95|x|`StopReason` enum in `types.h` — `STOP_REASON_STOP`, `LENGTH`, `TOOL_USE`, `ERROR`, `ABORTED`|V35
-T96|x|`map_stop_reason()` in `llm.c` — normalize provider `finish_reason` string → `StopReason` enum|V35
-T97|x|`Message.stop_reason` field — add to struct, populate from `LlmResponse.finish_reason` via T96|V35,§D
-T98|x|`entry_append` stores `stop_reason` in entry `data` JSON; `session_get_branch` reads it back|V35,§D
-T99|x|`context_build` V36 filtering — skip `error`/`aborted` assistant entries, synthesize orphaned tool_results|V36,V28
-T100|x|test: StopReason normalization — all provider finish_reason variants map correctly|V35
-T101|x|test: context_build skips errored entries, synthesizes tool_results for orphaned calls|V36
-T102|x|`shell_exec` sandbox — child runs in namespace sandbox (CLONE_NEWUSER/NEWNS/NEWNET); workspace rw, system ro, no network except via UDS proxy|V37
-T103|x|`http_fetch` JS binding — C function exposed to mquickjs; parse URL, check `allowed_hosts`, SSRF reject private IPs, call libcurl, return response|V38
-T104|x|per-agent `allowed_hosts` config — array of hostnames in `agent.json`, loaded into agent config, passed to `http_fetch` binding|V38,§I
-T105|x|tool result truncation in `context_build` — shared `truncate_result(buf, len)` util enforcing 50KB/2000 lines on tool_result messages before sending to LLM; full results stay in DB|V40
-T106|x|streaming request planner — `context_plan()` returns ordered entry ID list + cut point + token budget from SQLite (pass 1, no content loaded)|V41,V7,V8
-T107|x|`RequestStreamer` state machine — phases: preamble → entries (cursor step + reshape per-entry JSON) → tools → close; implements `CURLOPT_READFUNCTION` callback|V41
-T108|x|integrate streaming request into `agent.c` — replace `llm_build_request` (full-buffer) with `RequestStreamer`; verify retry resets cursor|V41,V2
-T109|x|heartbeat agent trigger — daemon injects heartbeat user msg into session inbox, forks agent; heartbeat prompt: "Read HEARTBEAT.md if present. Follow it. If nothing needs attention, reply HEARTBEAT_OK."|V42,T34
-T110|x|`HEARTBEAT_OK` sentinel suppression — daemon checks final assistant response; if content == `HEARTBEAT_OK` → suppress delivery (⊥ send to channel); else deliver normally|V42,V26
-T111|x|`HEARTBEAT.md` workspace file — optional; defines proactive tasks (reminders, checks, maintenance); agent reads via `file_read` during heartbeat turn|V42
-T112|-|~~tool loop detection~~ (removed — max_iterations is sufficient guard; V43 deleted)|—
-T113|x|`[NO_REPLY]` suppression — Telegram group delivery checks response for marker; if present, skip `sendMessage`; system prompt instructs agent when to use it|V44
-T114|x|planning-only retry — after final assistant response w/ no tool_calls, detect plan-only pattern (bullets + promise verbs, no action); re-prompt once w/ act-now instruction; max 1 retry|V45
-T115|x|CLI mid-turn progress — always-on: stream intermediate assistant text + tool call names/args as they execute; tool results truncated aggressively for display (shorter than V40 LLM limit); `--log-level=trace` adds raw JSON req/resp on top|§I.cmd
-T116|x|`HttpPolicy` layer — struct w/ allowed_hosts[], blocked_hosts[], block_private flag; `http_check_policy(url, policy)` validates before curl; integrate into `http_get` (web_fetch), JS `http_fetch` binding; LLM/telegram calls pass NULL policy (unrestricted)|V46
-T117|x|JS `http_fetch` sanitize option — `http_fetch(url, {sanitize: true})` applies html_strip_tags + sanitize_homoglyphs + boundary wrap (reuse web_fetch logic); default false (raw response)|V46,V38
-T118|x|tool result write-time truncation — truncate at append time (not context_build); full output to `/tmp/cclaw-<session_id>/<tool_call_id>.out`; reference path in truncation notice; agent can `file_read` the path; clean temp dir on session idle or daemon restart|V40
-T119|x|`agents` table — schema: id, name, config(JSON), system_prompt, heartbeat, created_at, updated_at; seed from `agents/<name>/agent.json` + `system.md` on first reference; DB authoritative after seed|§D
-T120|x|[removed — superseded by memory_replace]|-
-T121|x|[removed — superseded by memory_append]|-
-T122|x|system prompt assembly — at turn start: render template (system_prompt) + inject memory blocks (AGENT, USER, etc.) + inject skills; memory blocks from DB via `memory_block_list()`|§D,§I
-T123|x|prompt cache hints — send provider-appropriate cache markers in LLM requests: Anthropic `cache_control` on system/last-tool/last-user; OpenAI `prompt_cache_key` + `prompt_cache_retention`; DeepSeek prefix caching (automatic but benefits from stable message ordering); configurable per-provider in config|§C
-T124|x|entry stats columns — store `token_estimate INTEGER` (chars/4) on each entry at insert time; allows `context_plan` to sum tokens via index scan without loading JSON data; also store `content_bytes INTEGER` for quick size checks; avoids full-row reads during preflight planning pass (V41)|V41,§D
-T125|x|mock LLM server test harness — civetweb on port 0 in-process; register `/v1/chat/completions` handler; configurable canned responses per test; helper: `mock_server_start()` → returns port, `mock_server_stop()`|§C
-T126|x|integration test: agent loop with mock LLM — multi-turn tool call sequence (mock returns tool_call → agent dispatches → mock returns final); verify entries in DB match expected flow|V10,T125
-T127|x|integration test: retry + backoff with mock — mock returns 429 with Retry-After, then 200; verify agent retries correctly and respects delay|V2,T125
-T128|x|integration test: context overflow recovery — mock returns 400 with "context window" error; verify agent detects overflow|T125
-T129|x|integration test: mock Telegram API — mock getUpdates + sendMessage endpoints; verify poll→inbox→agent→deliver cycle end-to-end|T125,V25
-T130|x|integration test: daemon fork+reap with mock LLM — daemon forks agent, agent hits mock, writes response, daemon reaps and delivers|T125,V21
-T131|x|`shell_exec` PATH + env hardening — set `PATH=/bin:/usr/bin` in child; unset API keys, HOME, CCLAW_* before exec; test: verify `env` output clean, verify cclaw binary unreachable|V47
-T132|x|`mjs` standalone binary — build mquickjs evaluator (`vendor/mquickjs/`) as separate binary; accepts `-e 'code'` or filename arg; links libcurl; `fetch()` binding calls curl in-process w/ allowed_hosts whitelist; install to `/usr/local/lib/cclaw/mjs`|V48,V49,V51
-T133|x|[removed — fetch proxy protocol replaced by in-process whitelist]|V50
-T134|x|[removed — fetch proxy replaced by in-process whitelist]|-
-T135|x|[removed — fetch proxy tests deleted]|-
-T136|x|[removed — fetch proxy tests deleted]|-
-T137|x|Makefile: `mjs` binary target — compile mquickjs evaluator, install to `build/mjs`; `make install` copies to `/usr/local/lib/cclaw/mjs`|V48
-T138|x|template embedding — `templates/` dir w/ `.md`, `.txt`, `.sql` files; build-time script converts to C byte arrays in `build/templates.h`; replace inline `static const char*` strings in config.c, context.c, db.c w/ `#include "templates.h"` refs; Makefile rule: `build/templates.h` depends on `templates/*`|§C
-T139|x|Telegram admin auth — `admin_chat_ids[]` in config; `telegram_is_admin(chat_id)` check; non-admin messages route to agent normally; admin commands intercepted before inbox_insert|V53,§I
-T140|x|Telegram admin command parser — `/config`, `/key`, `/whitelist` prefix detection in poller thread; dispatch to admin handlers; non-command messages pass through to agent|V53
-T141|x|`/key` dialog — inline keyboard: select provider (OpenRouter, Gemini, custom) → ForceReply prompt for key → `kv_set_secret("provider.api_key", val)` → confirm; key value ⊥ logged, ⊥ enters inbox|V52
-T142|x|`/config model` dialog — inline keyboard: list configured providers → select → ForceReply for model name → `kv_set("provider.model", val)` → reload config in daemon|§I
-T143|x|`/config endpoint` dialog — ForceReply for base_url + provider name → validate URL format → `kv_set("provider.base_url", val)` → reload|§I
-T144|x|`/whitelist` dialog — inline keyboard: list agents → select → show current `allowed_hosts[]` → ForceReply for new host → append to agent config → reload; also support `/whitelist remove`|V46,§I
-T145|x|test: admin commands — verify key write bypasses DB entirely; verify non-admin chat_id rejected; verify config reload picks up changes|V52,V53
-T146|x|`approvals` table — schema: id, session_id, agent_name, type (whitelist_host\|create_agent\|model_change\|tool_enable), payload TEXT (JSON), status (pending\|approved\|denied), admin_chat_id, created_at, resolved_at|V54,§D
-T147|x|`approval_request` tool — agent calls w/ type + payload (e.g. `{"type":"whitelist_host","host":"api.example.com"}`); writes to `approvals` table; daemon delivers inline keyboard to admin via Telegram; agent receives tool_result "pending approval — waiting for admin"|V54
-T148|x|approval delivery — daemon detects new pending approval → sends formatted message + Approve/Deny buttons to all `admin_chat_ids[]`; callback_data encodes approval id|V54,V53
-T149|x|approval callback handler — admin taps Approve → daemon writes to kv table, reloads config, updates approval row, posts result to agent inbox; Deny → posts denial to inbox; agent session transitions idle→running on inbox signal|V54,V25
-T150|x|agent-initiated agent creation — agent proposes new agent via `approval_request` type `create_agent` w/ payload (name, model, system_prompt, tools, allowed_hosts); admin approves → daemon writes `agents/<name>/agent.json` + `system.md` + seeds DB row|V54,V20
-T151|x|test: approval flow end-to-end — agent requests whitelist host → approval pending → mock admin approve → config updated → agent inbox receives confirmation; also test deny path + unauthorized approval attempt|V54,V53
-
-T152|x|memory blocks table — `memory_blocks(id, agent_name, label, value TEXT, description TEXT, char_limit INT DEFAULT 5000, read_only INT DEFAULT 0, created_at, updated_at)`; default blocks on creation: `AGENT` (identity/tone) + `USER` (facts about user); additional blocks via `memory_create` tool or `agent.json` seed|§D,V55
-T153|x|memory tools — `memory_create(label, description, value?)`, `memory_append(label, content)`, `memory_replace(label, old, new)`; operate on block `value` only; respect `read_only` flag; persist to DB immediately|§I,T152
-T154|x|system prompt memory injection — at context build, render blocks into prompt as labeled sections w/ metadata (label, description, chars_used/limit); agent sees structure, knows what each block is for|T152,T122
-T155|x|[removed — no backwards compat migrations]|-
-T156|x|[removed — no backwards compat migrations]|-
-T157|x|`context_plan` query rewrite — use `role`, `stop_reason`, `tool_call_count` integer columns directly (⊥ json_extract); verify plan pass ⊥ touch `content`/`tool_calls` (no overflow page loads)|V56
-T158|x|mmap pragma — set `PRAGMA mmap_size=67108864` + `PRAGMA cache_size=-512` in `db_init()` for agent processes; daemon keeps defaults (lightweight queries); conditional on process role|V57
-T159|x|`original_parent_id` column — nullable `INTEGER` in entries table; populated only on reparent operations|V59
-T160|x|compaction entry type — role=4 (compaction), `content` = summary text, `tool_calls` = NULL; append as entry w/ `parent_id` = last-kept-entry-before-compacted-range; reparent first-entry-after-range to summary node|V58,V59
-T161|x|compaction trigger — detect when CTE branch length exceeds threshold (configurable, default 200 entries beyond budget); invoke summarization; perform atomic reparent in single transaction|V58
-T162|x|compaction summarization — LLM call w/ compacted entries as context; produce structured summary (goal, progress, decisions, next steps); store as compaction entry content|V58,T160
-T163|x|test: compaction — verify CTE from leaf stops at summary node; verify old entries reachable via forward walk; verify `original_parent_id` populated; verify FTS5 still indexes compacted entries|V58,V59
-T164|x|split-column schema — entries table w/ split columns (role int, content text, tool_calls text, etc.); FTS5 on content; `data` column nullable (debug/audit)|V60,§D
-T165|x|`entry_append` rewrite — write split columns directly at insert time; compute `token_estimate` from content+tool_calls lengths; compute `tool_call_count` from array; ⊥ build monolithic `data` JSON|V60
-T166|x|`RequestStreamer` rewrite — `RS_PHASE_ENTRIES` reads `role`, `content`, `tool_calls`, `tool_call_id` columns; emits wire JSON via `json_escape_into` + snprintf; per-provider emit fn (OpenAI default); drop `reshape_entry()`|V60,V41
-T167|x|`json_escape_into(dest, cap, src)` utility — linear pass, write escaped JSON string directly into caller buffer; handle `"`, `\\`, `\n`, `\r`, `\t`, control chars (`\u00XX`); return bytes written; zero-alloc|V60
-T168|x|tool_calls minimal parser — extract `id`, `name`, `args` from stored JSON array w/o full DOM; walk array w/ simple state machine (find key offsets, copy substrings); for OpenAI: escape `args` object as string; for others: emit verbatim|V60
-T169|x|`kv` config seeding — on DB creation, INSERT default rows: `provider.base_url`, `provider.model`, `provider.max_tokens`, `provider.context_window`, `web_port`, `max_iterations`, `workspace`, etc.; env var `OPENROUTER_API_KEY` → `kv_set_secret("provider.api_key", val)` on first run|V61
-T170|x|`kv_get` / `kv_set` — simple key-value read/write; `kv_get_secret` / `kv_set_secret` — decrypt/encrypt transparently; `config_load_from_kv(db)` builds Config struct from kv table + env overrides|V61
-T171|x|ChaCha20-Poly1305 implementation — vendor monocypher (or minimal standalone ~200 LOC); `secret_encrypt(key, plaintext)` → `enc:<hex(nonce\|\|ct\|\|tag)>`; `secret_decrypt(key, enc_str)` → plaintext; key loaded from `<db_dir>/.cclaw_key`|V52
-T172|x|key file management — `secret_key_load_or_create(db_path)` → reads `.cclaw_key` next to DB; creates w/ `getrandom()` + mode 0600 if missing; returns 32-byte key; called once at startup, held in memory for process lifetime|V52
-T173|x|`db_query` secret filtering — WHERE clause or post-filter strips kv rows where value LIKE 'enc:%' from results returned to agent|V52
-T174|x|delete `config.c` JSON parsing — remove cJSON config file loader, `config.json` CLI arg handling; `config_load(path)` → `config_load_from_db(db)`; env override logic stays (reads `CCLAW_*` env vars into Config struct after kv load)|V61
-T175|x|integration test: kv config — empty DB → defaults seeded; env var overrides win; `config_load_from_db` produces correct Config struct; no network|V61,T169
-T176|x|integration test: secrets round-trip — `kv_set_secret` stores `enc:` prefix; `kv_get_secret` returns plaintext; delete key file → decrypt fails gracefully; no network|V52,T171
-T177|x|integration test: wire emission — insert entries via split columns, run RequestStreamer against mock server, capture request body, verify valid OpenAI JSON (tool_calls format, escaped content w/ newlines/quotes/unicode)|V60,T166
-T178|x|integration test: large session memory — insert 500+ entries, run agent loop w/ mock server, verify RSS stays bounded (check `/proc/self/status`); verify context_plan truncates correctly|V41,V56
-T179|x|integration test: db_query secret filtering — seed kv w/ `enc:` values, run `db_query("SELECT * FROM kv")` tool, verify no `enc:` rows in result; no network|V52,T173
-T180|x|[removed — landlock removed]|-
-T181|x|integration test: empty response — mock returns `finish_reason:"stop"` + `content:null`; verify agent treats as valid end-of-turn (content is optional); verify prior tool-call entries survive in DB|V29,V36
-T182|x|integration test: plan-only retry — mock returns bullet-list plan w/ no tool calls; verify agent re-prompts once w/ act-now instruction; second mock response has tool call; verify normal flow resumes|V45
-T183|x|integration test: tool loop detection — mock returns same tool_call 12×; verify warning injected at rep 5; verify agent stops at rep 10 w/ error|V43
-T184|x|integration test: blocking sub-agent lifecycle — mock LLM for parent + child; parent calls spawn_agent(blocking); verify state="waiting" + spawn_queue row; simulate sub-agent completion; verify parent re-forks w/ tool_result|V13,V33
-T185|x|integration test: compaction context — insert 300 entries, trigger compaction, run agent loop w/ mock server post-compaction; verify CTE returns summary + recent only; verify FTS5 still indexes old entries|V58,T163
-T186|x|ephemeral agent creation — daemon creates agent dir w/ agent.db + workspace; minimal config (model from daemon global, basic tools); used by bootstrap flow|V65,V62
-T187|x|agent permission model — `read_access[]` config field; daemon passes to agent via env; namespace sandbox grants read-only bind-mounts for listed dirs|V66
-T188|x|top-level secrets in daemon DB — provider API keys + channel tokens stored in `.cclaw/cclaw.db` kv (encrypted); daemon decrypts at fork, injects into agent memory; agents reference by name (e.g. `provider.api_key`), ⊥ store copies|V67
-T189|x|bootstrap ephemeral agent — on first run (no named agents), daemon spawns ephemeral w/ tools: `configure_provider`, `configure_channel`, `create_agent`; system prompt guides onboarding flow|V68
-T190|x|`configure_provider` tool — prompts user for provider type + API key; posts key to daemon IPC; daemon encrypts + stores in daemon DB; returns confirmation|V68,V67
-T191|x|`configure_channel` tool — prompts user for channel type (Telegram, CLI) + credentials (bot token); posts to daemon; daemon stores + starts channel listener|V68,V69
-T192|x|`create_agent` tool (bootstrap) — proposes named agent (name, model, persona, tools, allowed_hosts); requires user approval; on approve → daemon creates agent dir, seeds DB, binds to channel|V68,V54
-T193|x|channel→agent binding — daemon `channel_bindings` table (channel_type, channel_id, agent_name); route incoming messages to bound agent; `bind_channel` updates binding; old agent stays but stops receiving|V69
-T194|x|token rate limit — daemon tracks rolling hourly token usage (input+output from agent exit reports); reject fork if over limit; default 1M/hr; configurable via kv `token_rate_limit` + env `CCLAW_TOKEN_RATE_LIMIT`|V71
-T195|x|3-DB schema files + init fns — `db_open_daemon()`, `db_open_agent()`, `db_open_journal()`; WAL + busy_timeout; migrate existing `schema.sql` into 3 files|V73,V4
-T196|x|agent_config table + eliminate agent.json — `agent_config(agent_name, key, value)` in cclaw.db; daemon reads at fork, injects as env vars; remove JSON config loader|V80,V74
-T197|x|exit code protocol in agent — `agent_exit.h` defines codes 0-4; `spawn_agent` → exit 2, `approval_request` → exit 3, config tools → exit 4; agent_run detects sentinels, propagates exit|V72
-T198|x|agent opens only own DB — reads `CCLAW_AGENT_DB` env, opens that; config from env vars only; remove `config_load_from_kv()` from agent path; memory_blocks + js_tools + sessions + entries in agent.db|V73,V74
-T199|x|daemon writes inbox to agent DB — `daemon_inbox_insert(agent_name, session_id, source, payload)` opens agent DB, inserts, closes; Telegram/cron/sub-agent completion all use this path|V76
-T200|x|session state in agent DB — agent sets own state (running/idle/waiting); daemon reads before fork; startup recovery scans all agent DBs; daemon tracks `{pid→agent_name, session_id}` in memory|V73,V24
-T201|x|daemon reap dispatch — `reap_children()` handles exit codes: 0→deliver, 2→spawn, 3→approval, 4→config; finds PENDING tool_result entry in agent DB, reads matching tool_call args; on completion UPDATEs PENDING content with real result, re-forks agent|V77,V78,V79,V87
-T202|x|spawn_queue in cclaw.db w/ exit-code flow — after reap exit 2: find PENDING entry, read spawn_agent args from matching tool_call, insert cclaw.db spawn_queue; blocking: state=waiting, UPDATE PENDING on child completion; background: UPDATE PENDING immediately with "background agent spawned", re-fork|V77,V13,V87
-T203|x|approvals in cclaw.db w/ exit-code flow — after reap exit 3: read tool_call, insert cclaw.db approvals; agent state=waiting; admin resolves → result to agent inbox → state idle → signal|V78,V54
-T204|x|cron in cclaw.db — cron_jobs table w/ `agent_name`; scheduler reads cclaw.db; on fire: write task to agent inbox (in agent DB); admin-only management for v1|V76
-T205|x|bootstrap + agent creation w/ 3-DB — `daemon_bootstrap()` creates ephemeral agent dir + agent.db + cclaw.db rows; `create_agent` exit 4 → daemon creates new agent; `configure_provider`/`configure_channel` exit 4 → daemon writes cclaw.db|V79,V68
-T206|x|CLI as standalone agent runner — extract `agent_setup()` shared code; CLI opens agent DB directly; config from env/defaults; lacks spawn_agent/cron/approval; keeps shell/file/js/web_fetch/db_query/memory|V81
-T207|x|integration tests — e2e tests for cross-DB flows (daemon↔agent DB), restart recovery, CLI standalone; delete old unified `schema.sql` + dead migration code|V73
-T208|x|daemon startup namespace check — read max_user_namespaces, test unshare, enforce agent limit ≤ max_ns/6, warn if constrained; graceful degrade if unavailable|V85
-T209|x|namespace sandbox for shell_exec — `unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWNET)` in shell child; remount / ro, workspace rw; uid/gid maps; graceful fallback if unavailable|V82,V37
-T210|x|`libcclaw_net.so` — LD_PRELOAD shared lib; intercept `connect()` + `getaddrinfo()`; on connect, open UDS to `.proxy.sock` in workspace, send preamble (dest host:port), relay data; `getaddrinfo()` forwards through UDS for proxy-side resolution; graceful passthrough if UDS missing (no proxy configured)|V82,V83
-T211|x|proxy thread in agent process — UDS listener on `<workspace>/.proxy.sock`; accept connections, read preamble (host:port), check `allowed_hosts` allowlist, resolve DNS, open real TCP connection via libcurl/raw socket, relay bidirectionally; deny unlisted hosts (RST); die with agent process|V83,V86
-T212|x|secret env-var injection for shell children — agent selectively passes `CCLAW_SECRET_<NAME>` env vars into shell child based on command context; LLM references secrets as `$CCLAW_SECRET_<NAME>` in commands; values never appear in command string or entries; output masking replaces known secret values w/ `***` before DB write|V82,V52
-T213|x|[removed — per-process CA unnecessary; secrets injected via env vars, not MITM proxy]|-
-T214|x|shell output secret masking — before writing tool_result to entries table, scan output for all known secret values (exact match + common encodings: base64, URL-encoded); replace w/ `[REDACTED:<name>]`; masking applied in `tool_shell_handler` before return|V52,V82
-T215|x|test: shell curl through proxy — mock TCP server on allowed host, verify shell child (via LD_PRELOAD + UDS) can reach it; verify response relayed correctly|V82,V83
-T216|x|test: shell cannot reach unlisted host — shell child attempts connect to non-allowlisted host via LD_PRELOAD lib, verify proxy denies (connection refused)|V83
-T217|x|test: shell cannot read filesystem outside workspace — verify /etc/shadow, agent.db, cclaw.db all inaccessible from shell child (existing namespace sandbox)|V82
-T218|x|log collector process — `src/log_collector.c`; unix socketpair + `SCM_RIGHTS` fd passing; epoll on received fds; batch insert to journal.db; daemon stdout/stderr also piped (low priority)|V75
-T219|x|[removed — landlock removed in favor of app-level policy + namespace sandbox]|V22
-T220|x|unit test audit — review all src/*.c for untested code paths; add missing unit tests (no network, no LLM, fast); focus on edge cases in config parsing, context_build, tool dispatch, entry append, session state transitions|§C
-T221|x|integration test audit — review mock-server test coverage; add missing integration tests for: multi-turn tool sequences, retry/backoff paths, context overflow, daemon fork+reap, inbox consumption, sub-agent lifecycle|§C
-T222|x|e2e test audit — review live LLM test coverage; add missing e2e tests for: real provider round-trips, tool_calls parsing across providers, fallback chain, Telegram delivery, full agent turn with workspace side-effects|§C
-T223|x|CLI zero-config startup — CLI works with just `OPENROUTER_API_KEY` in env; defaults: agent_name=`default`, agent_db=`.cclaw/agents/default/agent.db`, workspace=`.cclaw/agents/default/workspace/`, model=`deepseek/deepseek-v4-flash`; creates dirs + DB on first run; no prompts, no daemon, no cclaw.db|V81,V74
-T224|x|partial-turn resume — on agent startup, detect incomplete tool_call batch (assistant entry with more tool_calls than tool_result entries); if PENDING entry found with no resolution → replace with error; if results missing (daemon resolved PENDING, remaining calls unexecuted) → dispatch remaining tool_calls in order, skip already-resolved ones; never re-execute a call that has a result|V87,V17,V13
-
-T225|x|refactor compaction — replace 200-entry threshold w/ token-based trigger (V91); add `context_threshold` (float), `compaction_target` (float), `compaction` (bool) configs; env vars `CCLAW_CONTEXT_THRESHOLD`, `CCLAW_COMPACTION_TARGET`, `CCLAW_COMPACTION`; when disabled, context_build inserts truncation notice per V93; remove `compaction_threshold` int config|V91,V92,V93
-T226|x|mock server JSON templates — `mock_server_load(path)` reads JSON array of `{status, body}` objects; serves in order; integration tests use template files instead of inline C strings; template path passed via env or function arg|V91
-T227|x|move test_mock_server + test_compaction_summary → integration tier (rename to `test_integration_*`); both use mock HTTP server = integration tests by definition|-
-T228|x|CWD as read-only path — CLI sets `CCLAW_PATH=$(pwd)` in child env before fork; `tool_file.c` allows reads from `CCLAW_PATH` (ro) in addition to workspace (rw); daemon ⊥ set CCLAW_PATH; agent_turn reads env if present|V1,V81
-T229|x|yolo mode (`-y`) — CLI parses `-y`, sets `CCLAW_YOLO=1` in own env (inherited by all forked children); agent_turn respects: disable shell sandbox, add shell_exec tool if missing, allowed_hosts=`*`, allowed_paths=`*`; session-lifetime (not persisted)|V82,V46
-T230|x|agent self-rename — config change tool accepts `{"action":"rename","name":"<new>"}` payload; parent (CLI/daemon) handles: `mv ~/.cclaw/agents/<old> ~/.cclaw/agents/<new>`, update cclaw.db agents registry, update CLI agent binding in cclaw.db kv; next fork uses new path|V79,V62
-T231|x|zero-usage retry in agent_run — detect E1 (200 + 0 tokens + empty + stop) in inner retry loop; ⊥ write entry; retry 2x primary via `continue` (re-plan, re-stream); then 1x fallback; on exhaust write error entry|V94,V32
-T232|x|`get_response_text` shared fn — walk branch backward, return first non-empty assistant content, stop at user boundary; replace inline logic in CLI `print_response`, daemon `deliver_response`, `tool_agent`, spawn result|V95
-T233|x|CLI journal parity — `cli_fork_turn` pipes child stderr → parent drains → journal.db + optionally tee to terminal (controlled by `--verbose`/log level); stdout inherited (future: streaming tokens); reuse `db_open_journal`|V96,V75
-T234|x|log level system — `CCLAW_LOG_LEVEL` env var; `cclaw.db` kv `log_level` default `info`; `config_load` reads + injects at fork; agent_turn reads env → `cfg->log_level` enum; replace `cfg->debug` bool w/ level check|V97
-T235|x|trace logging — at trace level, `llm_call_with_fallback_stream` writes full req/resp JSON to stderr (existing debug code, gated on trace); at debug level, write timing + retry decisions + context plan stats|V97
-T236|x|error classification in agent_run — implement detection for E1-E12 per `specs/error-handling.md`; each writes appropriate `stop_reason` + user-facing content on exhaust|V94,V32
-T237|x|fix `request_stream.c` JSON closing — `build_tools_fragment` ! ⊥ close the root object; separate concerns: messages close `]`, then optional `max_tokens`, then optional `tools`, then final `}`; review all RS_PHASE transitions for correctness; ensure trace log shows exact bytes sent|V41,B2
-T238|x|`channels` table — schema: (name TEXT PK, type TEXT, binary_path TEXT, status TEXT DEFAULT 'active', pid INTEGER, created_at INTEGER DEFAULT unixepoch()); add to cclaw.db init|V104,§D
-T239|x|`channel_events` table — schema: (id INTEGER PK, channel_name TEXT, event_type TEXT, payload TEXT, created_at INTEGER DEFAULT unixepoch()); daemon consumes in FIFO order|V106,§D
-T240|x|`channel_outbox` table — schema: (id INTEGER PK, channel_name TEXT, session_id INTEGER, payload TEXT, status TEXT DEFAULT 'pending', created_at INTEGER DEFAULT unixepoch(), acked_at INTEGER); index on (channel_name, status)|V107,§D
-T241|x|`channel_state` table — schema: (channel_name TEXT, key TEXT, value TEXT, PRIMARY KEY(channel_name, key)); channel-private kv|V108,§D
-T242|x|`daemon_wake()` — rename `daemon_signal_external` → `daemon_wake`; write 1 byte (not SignalMsg) to FIFO; daemon epoll handler drains FIFO bytes, then scans `channel_events` table for unprocessed rows|V105
-T243|x|channel API library (`src/channel_api.c`) — `ChannelCtx` struct (db handle, channel_name); `channel_emit(ctx, payload)` inserts channel_events + calls `daemon_wake()`; `channel_get_config(ctx, key)` reads channel_state; `channel_next_outbox(ctx)` returns oldest pending row; `channel_ack_outbox(ctx, id)` marks delivered; `channel_fail_outbox(ctx, id, error)` marks failed|V99,V100,V101
-T244|x|daemon channel launcher — on startup read `channels` table, fork each active channel binary; track pid in `channels.pid`; on SIGCHLD reap channel processes, restart w/ backoff (max 3)|V98,V104
-T245|x|daemon channel_events consumer — after FIFO wake, `SELECT * FROM channel_events WHERE id > last_seen ORDER BY id`; parse event_type: "message" → resolve agent via channel_bindings → `daemon_inbox_insert` + fork agent; delete consumed rows|V100,V106
-T246|x|daemon outbox writer — after agent reap + deliver_response, also INSERT `channel_outbox` row for the channel that originated the message (read from `last_route`)|V101,V107
-T247|x|refactor Telegram → channel process — extract `telegram.c` into standalone `channel_telegram` binary; uses channel API (`channel_emit` for incoming, `channel_next_outbox` for delivery); remove Telegram thread from daemon; daemon launches as channel process|V103,V98
-T248|x|channel_telegram: getUpdates loop — poll Telegram, on message: build payload JSON `{chat_id, text, from}`, call `channel_emit(ctx, payload)`; persist offset in `channel_state`|V103,V108
-T249|x|channel_telegram: outbox delivery — loop: `channel_next_outbox(ctx)` → `sendMessage` to chat_id (from payload) → `channel_ack_outbox` or `channel_fail_outbox`; V11 chunking + rate limiting preserved|V103,V101,V11
-T250|x|channel process graceful shutdown — channel binary handles SIGTERM; flushes pending outbox deliveries; exits cleanly; daemon sends SIGTERM on daemon shutdown|V98,V31
-T251|x|`configure_channel` tool update — agent proposes channel config (type, binary_path, config kv pairs); exit code 4 → daemon inserts `channels` row + seeds `channel_state` + launches process|V104,V79
-T252|x|test: channel process crash → daemon restarts w/ backoff; verify max 3 retries then status='failed'|V98
-T253|x|test: channel_emit → daemon_wake → agent fork → outbox delivery cycle end-to-end w/ mock channel binary|V100,V101
-T254|x|extension discovery — at agent startup, scan `workspace/extensions/*.js` + `workspace/extensions/*/index.js`; return sorted file list|V109,V110
-T255|x|extension loader — for each discovered file: read source, eval in shared QuickJS context as `(function(cclaw){ <source> })(cclaw_api)`; on throw → log warning + skip|V109,V110
-T256|x|`cclaw` API object — C-backed JS object injected into QuickJS context; methods: `registerTool(def)`, `registerHook(event, fn)`, `callTool(name, args)`; `registerTool` delegates to existing `js_tool_register_one`|V111
-T257|x|`cclaw.registerHook` — store hook fns in per-event arrays (C-side linked list or array); events: `beforeRequest`, `afterResponse`, `beforeToolCall`, `afterToolCall`, `turnStart`, `turnEnd`|V111,V112
-T258|x|hook dispatch: `beforeRequest` — in `agent.c` before LLM call, serialize messages to JS array, call each registered hook in order, deserialize modified array back; skip on throw|V112
-T259|x|hook dispatch: `beforeToolCall` / `afterToolCall` — in tool dispatch loop, call hooks before/after execution; `beforeToolCall` can block (return `{block:true}`); `afterToolCall` can replace result|V113,V114
-T260|x|hook dispatch: `turnStart` / `turnEnd` — call at agent_run entry and before exit; informational (no return value used)|V111
-T261|x|hook dispatch: `afterResponse` — after LLM response parsed, call hooks w/ response object (read-only inspect); skip on throw|V111
-T262|x|`cclaw.callTool(name, args)` — synchronous C callback; lookup tool in registry, call handler, return result string to JS; depth counter prevents infinite recursion (limit 8)|V116
-T263|x|extension integration into agent startup — after `tool_js_load_session` (existing js_define_tool replay), run extension discovery + loader; extensions see previously defined JS tools; extensions can define new tools that persist via `js_define_tool` DB path|V109,V110
-T264|x|test: extension registers tool → agent can call it via LLM tool_call; verify tool appears in registry|V109,V111
-T265|x|test: `beforeToolCall` hook blocks execution → LLM receives error result|V113
-T266|x|test: extension throws during load → skipped, other extensions still load, agent turn continues|V109
-T267|x|test: `callTool` re-entrancy — JS extension calls C tool that triggers JS → verify depth limit enforced|V116
-T268|x|cost tracking — parse `cost` field from OpenRouter response (generation.total_cost); store `cost_nano INTEGER` (nanodollars, 10^-9 USD) per entry in entries table; `session_cost(db, session_id)` sums session; CLI prints session cost on exit|§D
-T269|x|auto-recall (FTS5) — at context_build, extract keywords from newest user message → FTS5 search over entries (cross-session) + memory_blocks → inject top-N relevant hits as `<recalled_context>` section after system prompt; configurable: `CCLAW_AUTO_RECALL` (bool, default 1), `CCLAW_RECALL_MAX_TOKENS` (int, default 500); skip if query yields 0 results|V7
-T270|x|CLI streaming response — add `"stream":true` to LLM request in CLI mode; parse SSE `data:` chunks via curl write callback; write content tokens to stdout as they arrive (agent child stdout = terminal); reconstruct non-streaming JSON for `llm_parse_response`; suppress `print_response` in parent (child already wrote); `CCLAW_STREAM=1` env var (CLI sets by default); daemon mode leaves 0|§F,§C
-T271|x|CLI agent picker — list agents from cclaw.db, offer "new agent..." option; first run auto-creates "default" + sets kv `default_agent`; highlight default agent|V117,V118
-T272|x|CLI session picker — query agent's agent.db; display (id, first_prompt[:50], last_prompt[:50], created_at formatted); offer "new session"|V118
-T273|x|kv `default_agent` — seeded on first run; `-p` flag uses this agent; agent picker highlights it|V117
-T274|x|`request_config` tool (CLI) — replaces `approval_request` for CLI inline use; prompt approve/deny; persist to agent_config; immediate effect (in-process config reload)|V120
-T275|x|initial tool set enforcement — `CCLAW_TOOLS` env from agent_config `tools` key; default agent starts w/ [file_read, file_write, js_eval, memory_create, memory_append, memory_replace, request_config]; system prompt lists requestable tools|V119
-T276|x|CWD rw bind-mount in CLI shell namespace — `shell_apply_namespace` accepts `cwd_path` param; CLI mode: bind-mount CWD rw alongside workspace; daemon mode passes NULL (workspace rw only)|V22a
-T277|-|agent template system — `extensions/agents/*.json` files; schema: `{name, system_prompt, tools[], allowed_hosts[], memory_blocks[], ephemeral?}`; CLI "new agent..." offers installed templates + blank|§F
-T278|x|agent creation defaults — `create_agent` (daemon + CLI) seeds agent_config w/ default tools per V119; "clone agent" copies all agent_config rows from source; both paths create agents table row + agent.db + workspace dir|V122
-T279|x|sub-agent privilege reduction — `process_spawn_queue` reads parent agent_config at spawn time; intersects parent tools/hosts w/ child config; injects reduced set as `CCLAW_TOOLS`/`CCLAW_ALLOWED_HOSTS` env; child ⊥ exceed parent|V123
-T280|x|`AGENT_DEFAULT_*` constants — define `AGENT_DEFAULT_TOOLS`, `AGENT_DEFAULT_MAX_ITERATIONS` (25), `AGENT_DEFAULT_SHELL_TIMEOUT` (30) in `include/agent_config.h`; used by agent creation, CLI zero-config, and "absent key" resolution in daemon fork|V124
-T281|x|agent_config absent-key semantics — daemon `fork_agent`: if `tools` key missing → inject default tools (V119); if `allowed_hosts` missing → inject empty (no network); document in specs/schema.md|V124
-T282|x|fix `process_spawn_queue` named spawn — if `spawn_agent` args include `name`: validate agent exists (error if not); fork that agent's own session in its agent.db; enforce parent ceiling (intersect configs) via env vars; unnamed spawn (no name) remains as-is: child session in parent's agent.db|V123,B4
+T1-22|x|Core foundation: Makefile, arena, types, config, DB init, sessions, entries, FTS5, HTTP, LLM req/resp, context manager, agent loop, tool registry, max iterations, CLI REPL + debug + session select|§C,V4,V6,V7,V8,V9,V10,V14
+T23-29|x|Telegram channel: poller, send+typing, offset persistence, chat→session routing, backoff; civetweb status page|V2,V11,V25,§I
+T30-48|x|Tools + runtime: mquickjs, js_eval, js_define_tool, JS replay, heartbeat, cron, spawn_agent, db_query, sub-agent lifecycle, token estimation, graceful shutdown, systemd/sysvinit, error handling, provider fallback, system prompt, shell timeout, web_fetch|V2,V3,V5,V10,V13,V15,V40,V41,V42
+T49-72|x|Phase A tests + concurrency: context/workspace/wrapping tests, live integration tests, session state machine (CAS, turn tagging, incomplete interception, janitor, anti-crash, inbox primitives, atomic move, sub-agent completion, verification), CLI/Telegram/cron triggers, web console|V1,V7,V8,V12,V16,V17,V18,V19
+T74-94|x|Multi-agent + daemon: agent discovery, config/prompt/skill loaders, tool whitelist, session↔agent binding, daemon epoll loop, signal pipe, agent process entry, response delivery, last_route, child tracking, spawn queue, daemon tests, context error skipping, LLM retry loop, graceful child shutdown, crash recovery, startup recovery|V20,V21,V22,V23,V24,V25,V26,V27,V28,V29,V30,V31,V32,V34
+T95-104|x|StopReason normalization + shell sandbox + JS network: enum, map_stop_reason, entry storage, context V36 filtering, tests, namespace sandbox (CLONE_NEW*), http_fetch JS binding, allowed_hosts config|V35,V36,V37,V38
+T105-118|x|Performance + streaming + heartbeat + policy: tool truncation, context_plan, RequestStreamer (CURLOPT_READFUNCTION), heartbeat trigger/suppression, [NO_REPLY], planning-only retry, CLI progress, HttpPolicy layer, JS sanitize, write-time truncation|V40,V41,V42,V44,V45,V46
+T119-151|x|Agents table, memory, prompt assembly, cache hints, entry stats, mock test harness + integration tests (agent loop, retry, overflow, Telegram, daemon fork), shell hardening, mjs binary, template embedding, Telegram admin (auth, commands, /key, /config, /whitelist), approvals table + flow + delivery + callback + agent creation|V47,V48,V52,V53,V54,§D
+T152-185|x|Memory blocks + DB optimization + compaction + split-column schema + kv config + secrets + integration tests (wire emission, large session, db_query filter, empty response, plan retry, tool loop, sub-agent, compaction)|V52,V55,V56,V57,V58,V59,V60,V61
+T186-207|x|3-DB architecture: ephemeral agents, permission model, daemon secrets, bootstrap flow, configure_provider/channel/create_agent tools, channel→agent binding, token rate limit, 3-DB schema + init fns, agent_config table, exit code protocol, agent-only-own-DB, daemon inbox writes, session state, daemon reap dispatch, spawn_queue + approvals + cron in cclaw.db, CLI standalone, integration tests|V62,V65,V66,V67,V68,V69,V71,V72,V73,V74,V76,V77,V78,V79,V80,V81,V85
+T208-224|x|Shell security: namespace sandbox, libcclaw_net.so, proxy thread, secret env injection, output masking, tests (proxy, denied hosts, filesystem isolation), log collector, test audits (unit, integration, e2e), CLI zero-config, partial-turn resume|V75,V82,V83,V86,V87
+T225-237|x|Refinements: compaction refactor (token-based), mock server JSON templates, CWD read-only path, yolo mode, agent self-rename, zero-usage retry, get_response_text, CLI journal parity, log level system, trace logging, error classification, request_stream JSON fix|V91,V92,V93,V94,V95,V96,V97,B2
+T238-253|x|Channel process model: channels/channel_events/channel_outbox/channel_state tables, daemon_wake FIFO, channel API library, daemon launcher + events consumer + outbox writer, Telegram→channel process refactor (getUpdates + outbox delivery), graceful shutdown, configure_channel update, tests|V98,V99,V100,V101,V103,V104,V105,V106,V107,V108
+T254-270|x|Extensions + features: discovery, loader, cclaw API object, registerHook, hook dispatch (beforeRequest, beforeToolCall, afterToolCall, turnStart/End, afterResponse), callTool re-entrancy, integration into startup, tests, cost tracking, auto-recall FTS5, CLI streaming|V109,V110,V111,V112,V113,V114,V116,§D,V7
+T271-282|x|CLI UX + agent management: agent/session pickers, default_agent kv, request_config tool, initial tool set enforcement, CWD rw bind-mount, agent creation defaults, sub-agent privilege reduction, AGENT_DEFAULT_* constants, absent-key semantics, named spawn fix|V117,V118,V119,V120,V122,V123,V124,B4
+T277|-|agent template system — `extensions/agents/*.json`; schema: `{name, system_prompt, tools[], allowed_hosts[], memory_blocks[], ephemeral?}`; CLI "new agent..." offers templates + blank|§F
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)
@@ -504,6 +240,9 @@ B1|2026-05-31|GMICloud returns HTTP 200 w/ 0 tokens + null content + `finish_rea
 B2|2026-06-01|`build_tools_fragment` closes JSON object w/ `}` — `max_tokens` field ⊥ included when tools present; every agentic request sent without output limit|T237
 B3|2026-06-02|T268 added `cost_nano` column to INSERT SQL + schema template but pre-existing agent.db lacked column; `entry_append_with_turn` failed silently (prepare error → -1); agent returned 0 (success) w/ no response written; also: cost parser looked for `usage.total_cost` but OpenRouter sends `usage.cost`|fix: `db_open_agent` runs `ALTER TABLE entries ADD COLUMN cost_nano INTEGER` (idempotent); parser checks `cost` then `total_cost`; moved `test_integration_cli` → e2e tier (requires live LLM)
 B4|2026-06-03|`process_spawn_queue` only supports unnamed spawn (child session in parent DB); named spawn (launch different agent by name) ⊥ implemented; also no parent ceiling enforcement on named spawn (V123 mode 2)|V123,T282
+B5|2026-06-03|`auth_hdr[512]` stack buffer in `llm_call_with_fallback_stream` truncates API keys > 489 chars via snprintf; JWT/OAuth tokens (Vertex AI, Azure AD) silently truncated → persistent 401; no runtime detection|V125
+B6|2026-06-03|`llm_call_with_fallback_stream` passes `resp` to fallback providers without `http_response_free(resp)` first; `http_post_stream` memsets resp to 0 → leaks previous allocation every fallback attempt|V126
+B7|2026-06-03|outer `MAX_LLM_RETRIES` loop in `agent_run` re-catches 5xx errors already exhausted by inner retry+fallback chain; `continue` resets backoff → up to 15 requests (3×5) against provider that already refused 5×|V127
 
 ## §F FUTURE
 - ~~CLI streaming response~~: implemented (T270) — `"stream":true` in CLI mode, SSE parsing, real-time token output to stdout; configurable via `CCLAW_STREAM` env var; daemon mode remains non-streaming

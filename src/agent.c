@@ -174,8 +174,11 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
     char *url = build_url(a, cfg);
     if (!url) return -1;
 
-    char auth_hdr[512];
-    snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", cfg->provider.api_key);
+    /* V125: heap-allocate auth header based on key length */
+    size_t key_len = cfg->provider.api_key ? strlen(cfg->provider.api_key) : 0;
+    char *auth_hdr = arena_alloc(a, 22 + key_len + 1); /* "Authorization: Bearer " + key + NUL */
+    if (!auth_hdr) return -1;
+    sprintf(auth_hdr, "Authorization: Bearer %s", cfg->provider.api_key ? cfg->provider.api_key : "");
     const char *headers[] = { "Content-Type: application/json", auth_hdr, NULL };
 
     /* T258: if body_override provided (from beforeRequest hook), use http_post */
@@ -207,10 +210,15 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
             memcpy(fb_url, fb->base_url, blen);
             memcpy(fb_url + blen, path, plen + 1);
 
-            char fb_auth[512];
-            snprintf(fb_auth, sizeof(fb_auth), "Authorization: Bearer %s", fb->api_key);
+            /* V125: heap-allocate auth header */
+            size_t fb_key_len = strlen(fb->api_key);
+            char *fb_auth = arena_alloc(a, 22 + fb_key_len + 1);
+            if (!fb_auth) continue;
+            sprintf(fb_auth, "Authorization: Bearer %s", fb->api_key);
             const char *fb_headers[] = { "Content-Type: application/json", fb_auth, NULL };
 
+            /* V126: free previous response before fallback attempt */
+            http_response_free(resp);
             status = http_post(fb_url, fb_headers, body_override, resp);
             if (status != -1)
                 return status;
@@ -296,10 +304,15 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
             rs_cleanup(&dbg_rs);
         }
 
-        char fb_auth[512];
-        snprintf(fb_auth, sizeof(fb_auth), "Authorization: Bearer %s", fb->api_key);
+        /* V125: heap-allocate auth header */
+        size_t fb_key_len = strlen(fb->api_key);
+        char *fb_auth = arena_alloc(a, 22 + fb_key_len + 1);
+        if (!fb_auth) { rs_cleanup(&fb_rs); continue; }
+        sprintf(fb_auth, "Authorization: Bearer %s", fb->api_key);
         const char *fb_headers[] = { "Content-Type: application/json", fb_auth, NULL };
 
+        /* V126: free previous response before fallback attempt */
+        http_response_free(resp);
         status = llm_call_with_retry_stream(fb_url, fb_headers, &fb_rs, resp, cfg);
         rs_cleanup(&fb_rs);
         if (status != -1)
@@ -644,7 +657,15 @@ int agent_run(AgentContext *ctx) {
                 break;
             }
 
-            /* E3/other HTTP errors — retry */
+            /* V127: 5xx already exhausted inner retry+fallback chain — break, ⊥ re-retry */
+            if (status >= 500 && status < 600) {
+                LOG_DEBUG(ctx->cfg, "E3: HTTP %d exhausted after inner retries",
+                          status);
+                http_response_free(&resp);
+                break;
+            }
+
+            /* Other unexpected HTTP errors (3xx, no data) — retry at outer level */
             if (status < 200 || status >= 300 || !resp.data) {
                 LOG_DEBUG(ctx->cfg, "E3: HTTP %d, retry %d/%d",
                           status, retry + 1, MAX_LLM_RETRIES);
@@ -890,8 +911,8 @@ int agent_run(AgentContext *ctx) {
             char *stored = truncate_and_spill(result, ctx->session_id,
                                              asst.tool_calls[i].id);
             ToolResult tr = {.tool_call_id = asst.tool_calls[i].id,
-                             .content = stored ? stored : result};
-            int err = (result[0] == 'e' && strncmp(result, "error:", 6) == 0);
+                             .content = stored ? stored : (result ? result : "error: tool returned null")};
+            int err = (result && result[0] == 'e' && strncmp(result, "error:", 6) == 0);
             Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
                                 .tool_name = asst.tool_calls[i].name, .is_error = err};
             entry_append_with_turn(ctx->db, ctx->session_id, &tool_msg, turn_id);

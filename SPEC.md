@@ -227,7 +227,13 @@ T225-237|x|Refinements: compaction refactor (token-based), mock server JSON temp
 T238-253|x|Channel process model: channels/channel_events/channel_outbox/channel_state tables, daemon_wake FIFO, channel API library, daemon launcher + events consumer + outbox writer, Telegram→channel process refactor (getUpdates + outbox delivery), graceful shutdown, configure_channel update, tests|V98,V99,V100,V101,V103,V104,V105,V106,V107,V108
 T254-270|x|Extensions + features: discovery, loader, cclaw API object, registerHook, hook dispatch (beforeRequest, beforeToolCall, afterToolCall, turnStart/End, afterResponse), callTool re-entrancy, integration into startup, tests, cost tracking, auto-recall FTS5, CLI streaming|V109,V110,V111,V112,V113,V114,V116,§D,V7
 T271-282|x|CLI UX + agent management: agent/session pickers, default_agent kv, request_config tool, initial tool set enforcement, CWD rw bind-mount, agent creation defaults, sub-agent privilege reduction, AGENT_DEFAULT_* constants, absent-key semantics, named spawn fix|V117,V118,V119,V120,V122,V123,V124,B4
-T277|-|agent template system — `extensions/agents/*.json`; schema: `{name, system_prompt, tools[], allowed_hosts[], memory_blocks[], ephemeral?}`; CLI "new agent..." offers templates + blank|§F
+T277|~|[hold] agent template system — `extensions/agents/*.json`; schema: `{name, system_prompt, tools[], allowed_hosts[], memory_blocks[], ephemeral?}`; CLI "new agent..." offers templates + blank|§F
+T283|.|e2e: streaming + thinking + tool calls — yolo, DeepSeek V4 Flash, verify thinking blocks handled, tool dispatch works, no ASAN/UBSan, exit 0; see [TEST-CLI.md](TEST-CLI.md)|B8,B9,B10
+T284|.|e2e: non-streaming mode — `CCLAW_STREAM=0`, verify `"stream":false` in request, response printed at end; see [TEST-CLI.md](TEST-CLI.md)|§C
+T285|.|e2e: multi-tool chain — file_write → shell_exec (python3) → verify output; see [TEST-CLI.md](TEST-CLI.md)|V10
+T286|.|e2e: js_eval — Fibonacci via QuickJS, verify result correct, no crash; see [TEST-CLI.md](TEST-CLI.md)|V5
+T287|.|e2e: web_fetch — fetch httpbin.org, verify content extraction; see [TEST-CLI.md](TEST-CLI.md)|V46
+T288|.|e2e: pure reasoning (no tools) — thinking + content, stop_reason=stop, no tool calls; see [TEST-CLI.md](TEST-CLI.md)|V35
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)
@@ -243,6 +249,9 @@ B4|2026-06-03|`process_spawn_queue` only supports unnamed spawn (child session i
 B5|2026-06-03|`auth_hdr[512]` stack buffer in `llm_call_with_fallback_stream` truncates API keys > 489 chars via snprintf; JWT/OAuth tokens (Vertex AI, Azure AD) silently truncated → persistent 401; no runtime detection|V125
 B6|2026-06-03|`llm_call_with_fallback_stream` passes `resp` to fallback providers without `http_response_free(resp)` first; `http_post_stream` memsets resp to 0 → leaks previous allocation every fallback attempt|V126
 B7|2026-06-03|outer `MAX_LLM_RETRIES` loop in `agent_run` re-catches 5xx errors already exhausted by inner retry+fallback chain; `continue` resets backoff → up to 15 requests (3×5) against provider that already refused 5×|V127
+B8|2026-06-03|`setrlimit(RLIMIT_AS, 256MB)` blocks ASAN shadow memory (~20TB virtual) → `ERROR: Failed to mmap` crash before LLM call|V23 — skip RLIMIT_AS under ASAN
+B9|2026-06-03|`free(tool_whitelist)` frees static `DEFAULT_TOOLS` global when `CCLAW_TOOLS` env unset → ASAN alloc-dealloc-mismatch abort after first turn|V119 — conditional free
+B10|2026-06-03|`dest + (w < cap ? w : 0)` in `emit_entry_openai` → UB null+0 during size-calc pass (dest=NULL)|V60 — DEST_AT macro
 
 ## §F FUTURE
 - ~~CLI streaming response~~: implemented (T270) — `"stream":true` in CLI mode, SSE parsing, real-time token output to stdout; configurable via `CCLAW_STREAM` env var; daemon mode remains non-streaming

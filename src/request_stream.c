@@ -63,6 +63,7 @@ static size_t emit_tool_calls_openai(char *dest, size_t cap, const char *tc_json
     if (!tc_json) return 0;
 
     size_t w = 0;
+    #define DEST_AT(off) (dest ? dest + (off) : NULL)
     #define EMIT(s, l) do { \
         for (size_t _i = 0; _i < (l); _i++) { \
             if (w < cap) dest[w] = (s)[_i]; \
@@ -141,12 +142,12 @@ static size_t emit_tool_calls_openai(char *dest, size_t cap, const char *tc_json
         EMITS("\",\"arguments\":\"");
         /* OpenAI: args is a JSON string (escaped JSON object) */
         if (args_start && args_len > 0) {
-            size_t elen = json_escape_into_n(dest + (w < cap ? w : 0),
+            size_t elen = json_escape_into_n(DEST_AT(w < cap ? w : 0),
                                              w < cap ? cap - w : 0,
                                              args_start, args_len);
             w += elen;
         } else {
-            size_t elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0, "{}");
+            size_t elen = json_escape_into(DEST_AT(w < cap ? w : 0), w < cap ? cap - w : 0, "{}");
             w += elen;
         }
         EMITS("\"}}");
@@ -158,6 +159,7 @@ done:
 
     #undef EMIT
     #undef EMITS
+    #undef DEST_AT
     return w;
 }
 
@@ -167,6 +169,7 @@ static size_t emit_entry_openai(char *dest, size_t cap, int role,
                                 const char *content, const char *tool_calls,
                                 const char *tool_call_id) {
     size_t w = 0;
+    #define DEST_AT(off) (dest ? dest + (off) : NULL)
     #define EMIT(s, l) do { \
         for (size_t _i = 0; _i < (l); _i++) { \
             if (w < cap) dest[w] = (s)[_i]; \
@@ -178,11 +181,11 @@ static size_t emit_entry_openai(char *dest, size_t cap, int role,
     if (role == 3) {
         /* tool result → {"role":"tool","tool_call_id":"...","content":"..."} */
         EMITS("{\"role\":\"tool\",\"tool_call_id\":\"");
-        size_t elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0,
+        size_t elen = json_escape_into(DEST_AT(w < cap ? w : 0), w < cap ? cap - w : 0,
                                        tool_call_id ? tool_call_id : "");
         w += elen;
         EMITS("\",\"content\":\"");
-        elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0,
+        elen = json_escape_into(DEST_AT(w < cap ? w : 0), w < cap ? cap - w : 0,
                                 content ? content : "");
         w += elen;
         EMITS("\"}");
@@ -191,14 +194,14 @@ static size_t emit_entry_openai(char *dest, size_t cap, int role,
         EMITS("{\"role\":\"assistant\"");
         if (content) {
             EMITS(",\"content\":\"");
-            size_t elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0, content);
+            size_t elen = json_escape_into(DEST_AT(w < cap ? w : 0), w < cap ? cap - w : 0, content);
             w += elen;
             EMITS("\"");
         } else {
             EMITS(",\"content\":null");
         }
         if (tool_calls) {
-            size_t tc_len = emit_tool_calls_openai(dest + (w < cap ? w : 0),
+            size_t tc_len = emit_tool_calls_openai(DEST_AT(w < cap ? w : 0),
                                                    w < cap ? cap - w : 0, tool_calls);
             w += tc_len;
         }
@@ -209,7 +212,7 @@ static size_t emit_entry_openai(char *dest, size_t cap, int role,
         EMITS("{\"role\":\"");
         EMITS(role_str);
         EMITS("\",\"content\":\"");
-        size_t elen = json_escape_into(dest + (w < cap ? w : 0), w < cap ? cap - w : 0,
+        size_t elen = json_escape_into(DEST_AT(w < cap ? w : 0), w < cap ? cap - w : 0,
                                        content ? content : "");
         w += elen;
         EMITS("\"}");
@@ -218,6 +221,7 @@ static size_t emit_entry_openai(char *dest, size_t cap, int role,
     if (w < cap) dest[w] = '\0';
     #undef EMIT
     #undef EMITS
+    #undef DEST_AT
     return w;
 }
 

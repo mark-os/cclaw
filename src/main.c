@@ -740,10 +740,12 @@ int main(int argc, char *argv[]) {
                             cfg->log_level == LOG_LEVEL_ERROR ? "error" : "info";
     setenv("CCLAW_LOG_LEVEL", level_str, 1);
 
-    /* CLI mode: enable SSE streaming for real-time token output */
-    setenv("CCLAW_STREAM", "1", 1);
+    /* CLI mode: enable SSE streaming by default (user can override with CCLAW_STREAM=0) */
+    if (!getenv("CCLAW_STREAM")) {
+        setenv("CCLAW_STREAM", "1", 1);
+        cfg->stream = 1;
+    }
     setenv("CCLAW_MODE", "cli", 1);
-    cfg->stream = 1;
 
     /* V96/T233: open journal.db for CLI log persistence */
     g_journal_db = db_open_journal(".cclaw/journal.db");

@@ -55,6 +55,17 @@ CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
     END
   );
 END;
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  entry_id INTEGER NOT NULL,
+  call_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  arguments TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_entry ON tool_calls(entry_id);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, status);
 CREATE TABLE IF NOT EXISTS inbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,

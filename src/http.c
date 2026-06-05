@@ -182,6 +182,8 @@ typedef struct {
     int prompt_tokens;
     int completion_tokens;
     int total_tokens;
+    int cache_read_tokens;
+    int cache_write_tokens;
     int64_t cost_nano;
 } SseCtx;
 
@@ -429,6 +431,14 @@ static void sse_process_line(SseCtx *ctx, const char *line, size_t len) {
                 ctx->cost_nano = (int64_t)(c * 1e9);
             }
         }
+        /* Cache tokens from prompt_tokens_details or DeepSeek top-level */
+        const char *cached = strstr(usage, "\"cached_tokens\"");
+        if (cached) { cached = strchr(cached + 15, ':'); if (cached) ctx->cache_read_tokens = atoi(cached + 1); }
+        const char *cw = strstr(usage, "\"cache_write_tokens\"");
+        if (cw) { cw = strchr(cw + 20, ':'); if (cw) ctx->cache_write_tokens = atoi(cw + 1); }
+        /* DeepSeek direct field */
+        const char *pch = strstr(usage, "\"prompt_cache_hit_tokens\"");
+        if (pch) { pch = strchr(pch + 24, ':'); if (pch) ctx->cache_read_tokens = atoi(pch + 1); }
     }
 }
 
@@ -604,6 +614,10 @@ int http_post_stream_sse(const char *url, const char **headers,
                 n += snprintf(out + n, need - (size_t)n,
                     ",\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"total_tokens\":%d",
                     ctx.prompt_tokens, ctx.completion_tokens, ctx.total_tokens);
+                if (ctx.cache_read_tokens > 0 || ctx.cache_write_tokens > 0)
+                    n += snprintf(out + n, need - (size_t)n,
+                        ",\"prompt_tokens_details\":{\"cached_tokens\":%d,\"cache_write_tokens\":%d}",
+                        ctx.cache_read_tokens, ctx.cache_write_tokens);
                 if (ctx.cost_nano > 0)
                     n += snprintf(out + n, need - (size_t)n,
                         ",\"cost\":%.10f", (double)ctx.cost_nano / 1e9);

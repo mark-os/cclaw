@@ -890,8 +890,8 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
     const char *ins_sql =
         "INSERT INTO entries (parent_id, session_id, turn_id, role, content, tool_calls,"
         " tool_call_id, tool_name, is_error, stop_reason, model,"
-        " usage_in, usage_out, cost_nano, token_estimate, content_bytes, tool_call_count)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+        " usage_in, usage_out, cost_nano, token_estimate, content_bytes, tool_call_count, data)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
     if (sqlite3_prepare_v2(db, ins_sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_int64(stmt, 1, parent_id);
@@ -952,6 +952,8 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
     sqlite3_bind_int(stmt, 15, (total_bytes / 4) + 4);
     sqlite3_bind_int(stmt, 16, total_bytes);
     sqlite3_bind_int(stmt, 17, tc_count);
+    if (msg->metadata_json) sqlite3_bind_text(stmt, 18, msg->metadata_json, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, 18);
     free(tc_json);
 
     int rc = sqlite3_step(stmt);

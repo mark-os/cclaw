@@ -225,15 +225,14 @@ static size_t emit_entry_openai(char *dest, size_t cap, int role,
     return w;
 }
 
-/* T123: detect if model needs explicit cache_control markers */
+/* T123: detect if model needs explicit cache_control markers.
+ * Default ON — providers that don't support it silently ignore the field. */
 static int needs_cache_control(const Config *cfg) {
     CacheHints h = cfg->provider.cache_hints;
     if (h == CACHE_HINTS_OFF) return 0;
     if (h == CACHE_HINTS_ON) return 1;
-    /* AUTO: detect from model name */
-    const char *m = cfg->provider.model;
-    if (!m) return 0;
-    return (strstr(m, "anthropic") || strstr(m, "claude"));
+    /* AUTO: always enable — safe to send, ignored by unsupported providers */
+    return 1;
 }
 
 /* Internal buffer management */

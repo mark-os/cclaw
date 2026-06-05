@@ -179,7 +179,12 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
     char *auth_hdr = arena_alloc(a, 22 + key_len + 1); /* "Authorization: Bearer " + key + NUL */
     if (!auth_hdr) return -1;
     sprintf(auth_hdr, "Authorization: Bearer %s", cfg->provider.api_key ? cfg->provider.api_key : "");
-    const char *headers[] = { "Content-Type: application/json", auth_hdr, NULL };
+
+    /* Sticky routing: pin all turns in a session to the same provider for cache hits */
+    char *session_hdr = arena_alloc(a, 64);
+    if (!session_hdr) return -1;
+    snprintf(session_hdr, 64, "x-session-id: cclaw-%lld", (long long)session_id);
+    const char *headers[] = { "Content-Type: application/json", auth_hdr, session_hdr, NULL };
 
     /* T258: if body_override provided (from beforeRequest hook), use http_post */
     if (body_override) {
@@ -215,7 +220,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
             char *fb_auth = arena_alloc(a, 22 + fb_key_len + 1);
             if (!fb_auth) continue;
             sprintf(fb_auth, "Authorization: Bearer %s", fb->api_key);
-            const char *fb_headers[] = { "Content-Type: application/json", fb_auth, NULL };
+            const char *fb_headers[] = { "Content-Type: application/json", fb_auth, session_hdr, NULL };
 
             /* V126: free previous response before fallback attempt */
             http_response_free(resp);
@@ -309,7 +314,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
         char *fb_auth = arena_alloc(a, 22 + fb_key_len + 1);
         if (!fb_auth) { rs_cleanup(&fb_rs); continue; }
         sprintf(fb_auth, "Authorization: Bearer %s", fb->api_key);
-        const char *fb_headers[] = { "Content-Type: application/json", fb_auth, NULL };
+        const char *fb_headers[] = { "Content-Type: application/json", fb_auth, session_hdr, NULL };
 
         /* V126: free previous response before fallback attempt */
         http_response_free(resp);

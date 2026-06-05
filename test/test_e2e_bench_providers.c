@@ -1,0 +1,216 @@
+/* Benchmark: measure caching, latency, throughput, and cost across models.
+ * Builds sessions with growing context, measures cache hits per turn.
+ * Uses cclaw's LLM + HTTP functions directly with a temp DB.
+ *
+ * Usage: ./build/test_e2e_bench_providers
+ * Requires: OPENROUTER_API_KEY
+ *
+ * Default models (override with BENCH_MODELS="model1,model2,..."):
+ *   ibm-granite/granite-4.1-8b
+ *   deepseek/deepseek-v4-flash
+ *   openai/gpt-5-nano
+ *   google/gemini-2.5-flash-lite
+ */
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include "llm.h"
+#include "http.h"
+#include "arena.h"
+#include "db.h"
+
+#define MAX_MODELS 10
+#define TURNS 5
+#define BASE_URL "https://openrouter.ai/api/v1"
+
+static const char *DEFAULT_MODELS[] = {
+    "ibm-granite/granite-4.1-8b",
+    "deepseek/deepseek-v4-flash",
+    "openai/gpt-5-nano",
+    "google/gemini-2.5-flash-lite",
+};
+static const int DEFAULT_MODEL_COUNT = 4;
+
+typedef struct {
+    int prompt_tokens;
+    int completion_tokens;
+    int cache_read;
+    int cache_write;
+    int64_t cost_nano;
+    long latency_ms;
+} TurnResult;
+
+static long elapsed_ms(struct timespec *start, struct timespec *end) {
+    return (end->tv_sec - start->tv_sec) * 1000 +
+           (end->tv_nsec - start->tv_nsec) / 1000000;
+}
+
+/* Send a non-streaming request and parse response */
+static int do_turn(const char *api_key, const char *model,
+                   const char *session_id, Message *msgs, int msg_count,
+                   TurnResult *out) {
+    Arena *a = arena_create(512 * 1024);
+    Config cfg = {0};
+    cfg.provider.base_url = (char *)BASE_URL;
+    cfg.provider.api_key = (char *)api_key;
+    cfg.provider.model = (char *)model;
+    cfg.provider.max_tokens = 2048;
+    cfg.provider.context_window = 128000;
+
+    char *body = llm_build_request(a, &cfg, msgs, (size_t)msg_count, NULL, 0);
+    if (!body) { arena_destroy(a); return -1; }
+
+    char auth_hdr[256];
+    snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", api_key);
+    char session_hdr[128];
+    snprintf(session_hdr, sizeof(session_hdr), "x-session-id: %s", session_id);
+    const char *headers[] = {
+        "Content-Type: application/json", auth_hdr, session_hdr, NULL
+    };
+
+    char url[256];
+    snprintf(url, sizeof(url), "%s/chat/completions", BASE_URL);
+
+    HttpResponse resp = {0};
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int status = http_post(url, headers, body, &resp);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    out->latency_ms = elapsed_ms(&t0, &t1);
+
+    if (status != 200) {
+        fprintf(stderr, "    HTTP %d: %.100s\n", status, resp.data ? resp.data : "");
+        http_response_free(&resp);
+        arena_destroy(a);
+        return -1;
+    }
+
+    LlmResponse llm = {0};
+    if (llm_parse_response(a, resp.data, &llm) != 0) {
+        fprintf(stderr, "    parse error: %.100s\n", resp.data ? resp.data : "");
+        http_response_free(&resp);
+        arena_destroy(a);
+        return -1;
+    }
+
+    out->prompt_tokens = llm.usage.prompt_tokens;
+    out->completion_tokens = llm.usage.completion_tokens;
+    out->cache_read = llm.usage.cache_read_tokens;
+    out->cache_write = llm.usage.cache_write_tokens;
+    out->cost_nano = llm.usage.cost_nano;
+
+    http_response_free(&resp);
+    arena_destroy(a);
+    return 0;
+}
+
+int main(void) {
+    const char *api_key = getenv("OPENROUTER_API_KEY");
+    if (!api_key) {
+        fprintf(stderr, "Set OPENROUTER_API_KEY\n");
+        return 1;
+    }
+
+    /* Parse model list */
+    const char *models[MAX_MODELS];
+    int model_count = 0;
+    const char *env_models = getenv("BENCH_MODELS");
+    if (env_models) {
+        char *buf = strdup(env_models);
+        char *tok = strtok(buf, ",");
+        while (tok && model_count < MAX_MODELS) {
+            models[model_count++] = strdup(tok);
+            tok = strtok(NULL, ",");
+        }
+        free(buf);
+    } else {
+        model_count = DEFAULT_MODEL_COUNT;
+        for (int i = 0; i < model_count; i++)
+            models[i] = DEFAULT_MODELS[i];
+    }
+
+    printf("Provider Benchmark (%d turns per model, non-streaming)\n", TURNS);
+    printf("═══════════════════════════════════════════════════════════════════════════════════\n\n");
+
+    /* System message — short, no padding needed. Context grows from responses. */
+    const char *system_msg = "You are a concise technical assistant.";
+
+    /* User prompts: turn 1 asks for a big response to build context, rest are short */
+    const char *prompts[TURNS] = {
+        "Write a comprehensive 1000-word essay on the history of Unix process management. "
+        "Cover Research Unix V1 fork(), BSD job control, System V IPC, Linux clone() in 2.0, "
+        "the O(1) scheduler, CFS in 2.6.23, namespaces from 2.4.19 through 3.8, "
+        "cgroups v1 in 2.6.24 and v2 in 4.5, seccomp-bpf in 3.5, and how these compose "
+        "into Docker containers. Include kernel version numbers for each development.",
+        "Reply with only: turn-2",
+        "Reply with only: turn-3",
+        "Reply with only: turn-4",
+        "Reply with only: turn-5",
+    };
+
+    for (int m = 0; m < model_count; m++) {
+        printf("─── %s ───\n", models[m]);
+        printf("  %-6s %7s %7s %7s %7s %10s %8s\n",
+               "Turn", "Prompt", "Compl", "Cached", "Hit%", "Cost", "Latency");
+
+        /* Build message array that grows each turn (simulates real session) */
+        Message msgs[2 + TURNS * 2]; /* system + pairs of user/assistant */
+        int msg_count = 0;
+        msgs[msg_count++] = (Message){.role = ROLE_SYSTEM, .content = (char *)system_msg};
+
+        /* Session ID for sticky routing */
+        char session_id[64];
+        snprintf(session_id, sizeof(session_id), "bench-%d-%d", (int)getpid(), m);
+
+        int64_t total_cost = 0;
+        long total_latency = 0;
+        int total_cached = 0, total_prompt = 0;
+
+        for (int t = 0; t < TURNS; t++) {
+            msgs[msg_count++] = (Message){.role = ROLE_USER, .content = (char *)prompts[t]};
+
+            TurnResult r = {0};
+            if (do_turn(api_key, models[m], session_id, msgs, msg_count, &r) != 0) {
+                printf("  %-6d  FAILED\n", t + 1);
+                /* Still add a placeholder so context grows */
+                msgs[msg_count++] = (Message){.role = ROLE_ASSISTANT, .content = "(error)"};
+                continue;
+            }
+
+            int hit_pct = r.prompt_tokens > 0 ? (r.cache_read * 100 / r.prompt_tokens) : 0;
+            printf("  %-6d %7d %7d %7d %6d%% $%9.6f %6ldms\n",
+                   t + 1, r.prompt_tokens, r.completion_tokens,
+                   r.cache_read, hit_pct,
+                   (double)r.cost_nano / 1e9, r.latency_ms);
+
+            total_cost += r.cost_nano;
+            total_latency += r.latency_ms;
+            total_cached += r.cache_read;
+            total_prompt += r.prompt_tokens;
+
+            /* Add assistant response to context for next turn.
+             * We don't have the actual content (arena freed), so use a placeholder
+             * sized to approximate token count. Each turn must have its own buffer. */
+            int len = r.completion_tokens * 4; /* ~4 chars/token */
+            if (len < 100) len = 100;
+            if (len > 8000) len = 8000;
+            char *asst_text = malloc((size_t)len + 1);
+            memset(asst_text, 'A', (size_t)len);
+            asst_text[len] = '\0';
+            msgs[msg_count++] = (Message){.role = ROLE_ASSISTANT, .content = asst_text};
+        }
+
+        int avg_cache = total_prompt > 0 ? (total_cached * 100 / total_prompt) : 0;
+        printf("  ──────────────────────────────────────────────────────────\n");
+        printf("  Total: $%.6f  avg_lat=%ldms  cache_hit=%d%%\n\n",
+               (double)total_cost / 1e9,
+               total_latency / TURNS,
+               avg_cache);
+    }
+
+    return 0;
+}

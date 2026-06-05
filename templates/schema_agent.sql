@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   depth INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL DEFAULT 'idle',
   last_route TEXT,
+  cache_break_after INTEGER DEFAULT -1,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );

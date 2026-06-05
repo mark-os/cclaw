@@ -89,6 +89,8 @@ sqlite3 *db_open_agent(const char *path) {
     if (!db) return NULL;
     /* T268 fixup: add cost_nano if missing (pre-existing DBs) — ignore error */
     sqlite3_exec(db, "ALTER TABLE entries ADD COLUMN cost_nano INTEGER;", NULL, NULL, NULL);
+    /* T295: add cache_break_after if missing */
+    sqlite3_exec(db, "ALTER TABLE sessions ADD COLUMN cache_break_after INTEGER DEFAULT -1;", NULL, NULL, NULL);
     return db;
 }
 

@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include "agent_turn.h"
-#include "agent.h"
 #include "agent_config.h"
 #include "agent_exit.h"
 #include "agent_setup.h"
@@ -8,51 +7,308 @@
 #include "context.h"
 #include "daemon.h"
 #include "db.h"
+#include "db_response.h"
+#include "hook_dispatch.h"
+#include "llm_child.h"
 #include "shutdown.h"
 #include "tools.h"
+#include "cJSON.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 /* V119/V124: default tool whitelist from agent_config.h */
 static const char *DEFAULT_TOOLS[] = { AGENT_DEFAULT_TOOLS };
 static const size_t DEFAULT_TOOLS_COUNT = AGENT_DEFAULT_TOOLS_COUNT;
 
-static char *dispatch_tools(const char *name, const char *arguments, void *user_data) {
-    ToolRegistry *reg = (ToolRegistry *)user_data;
-    ToolEntry *e = tools_lookup(reg, name);
-    if (!e) {
-        char *err = malloc(128);
-        if (err) snprintf(err, 128, "error: unknown tool '%s'", name);
-        return err;
+/* T300: Serialize tool schemas to JSON string for CCLAW_TOOLS_JSON env var.
+ * Returns heap-allocated JSON array string. Caller frees. */
+static char *tools_to_json(const ToolSchema *tools, size_t count) {
+    cJSON *arr = cJSON_CreateArray();
+    for (size_t i = 0; i < count; i++) {
+        cJSON *item = cJSON_CreateObject();
+        if (tools[i].name) cJSON_AddStringToObject(item, "name", tools[i].name);
+        if (tools[i].description) cJSON_AddStringToObject(item, "description", tools[i].description);
+        if (tools[i].parameters_json) {
+            cJSON *p = cJSON_Parse(tools[i].parameters_json);
+            if (p) cJSON_AddItemToObject(item, "parameters", p);
+        }
+        cJSON_AddItemToArray(arr, item);
     }
-    return e->handler(arguments, e->user_data);
+    char *json = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    return json;
 }
 
-/* T115: CLI progress callback — writes tool activity to stdout */
-static void cli_progress(ProgressEvent event, const char *name,
-                         const char *data, void *user_data) {
-    (void)user_data;
-    switch (event) {
-    case PROGRESS_TOOL_START:
-        fprintf(stdout, "\n\033[2m[tool: %s]\033[0m ", name ? name : "?");
-        fflush(stdout);
-        break;
-    case PROGRESS_TOOL_RESULT: {
-        size_t len = data ? strlen(data) : 0;
-        if (len <= 80)
-            fprintf(stdout, "\033[2m→ %s\033[0m\n", data ? data : "(empty)");
-        else
-            fprintf(stdout, "\033[2m→ %.77s...\033[0m\n", data);
-        fflush(stdout);
-        break;
+/* T300: Fork cclaw-llm child, pipe stderr for logging.
+ * Returns LLM_EXIT_STOP (0), LLM_EXIT_TOOLCALL (10), or LLM_EXIT_ERROR (1). */
+static int fork_llm_child(int64_t session_id, const Config *cfg, int is_first_iter) {
+    /* Set recall flag for first iteration only */
+    if (is_first_iter && cfg->auto_recall)
+        setenv("CCLAW_RECALL", "1", 1);
+    else
+        setenv("CCLAW_RECALL", "0", 1);
+
+    pid_t pid = fork();
+    if (pid < 0) return LLM_EXIT_ERROR;
+    if (pid == 0) {
+        /* Child: run LLM call and exit */
+        setpgid(0, 0);
+        _exit(llm_child_main(session_id));
     }
-    case PROGRESS_ASSISTANT_TEXT:
-        break;
+
+    /* Parent: wait for child */
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    return LLM_EXIT_ERROR;
+}
+
+/* T300: Read pending tool_calls from DB for the last assistant entry.
+ * Returns heap-allocated ToolCall array. Caller frees each field + array.
+ * Sets *out_entry_id to the assistant entry containing these tool_calls. */
+static ToolCall *read_pending_tool_calls(sqlite3 *db, int64_t session_id,
+                                         int *out_count, int64_t *out_turn_id,
+                                         int64_t *out_entry_id) {
+    *out_count = 0;
+    *out_turn_id = 0;
+    *out_entry_id = 0;
+
+    /* Find pending tool_calls for this session */
+    const char *sql =
+        "SELECT tc.call_id, tc.name, tc.arguments, e.turn_id, tc.entry_id"
+        " FROM tool_calls tc"
+        " JOIN entries e ON e.id = tc.entry_id"
+        " WHERE tc.session_id=? AND tc.status='pending'"
+        " ORDER BY tc.rowid;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(stmt, 1, session_id);
+
+    int cap = 8, count = 0;
+    ToolCall *calls = malloc((size_t)cap * sizeof(ToolCall));
+    if (!calls) { sqlite3_finalize(stmt); return NULL; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            calls = realloc(calls, (size_t)cap * sizeof(ToolCall));
+            if (!calls) { sqlite3_finalize(stmt); return NULL; }
+        }
+        const char *id = (const char *)sqlite3_column_text(stmt, 0);
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        const char *args = (const char *)sqlite3_column_text(stmt, 2);
+        calls[count].id = id ? strdup(id) : strdup("");
+        calls[count].name = name ? strdup(name) : strdup("");
+        calls[count].arguments = args ? strdup(args) : strdup("{}");
+        *out_turn_id = sqlite3_column_int64(stmt, 3);
+        *out_entry_id = sqlite3_column_int64(stmt, 4);
+        count++;
     }
+    sqlite3_finalize(stmt);
+    *out_count = count;
+    return calls;
+}
+
+/* T300: Parent turn loop — fork cclaw-llm → wait → dispatch tools → loop.
+ * Returns AGENT_EXIT_* codes. */
+static int parent_turn_loop(sqlite3 *db, int64_t session_id, const Config *cfg,
+                            ToolRegistry *reg, const ToolSchema *schemas,
+                            size_t tool_count, ExtensionCtx *ext_ctx) {
+    /* Serialize tool schemas to env for llm child */
+    char *tools_json = tools_to_json(schemas, tool_count);
+    if (tools_json) {
+        setenv("CCLAW_TOOLS_JSON", tools_json, 1);
+        free(tools_json);
+    }
+
+    /* T260/V111: turnStart hook */
+    hook_dispatch_turn_start(ext_ctx);
+
+    int max_iter = cfg->max_iterations > 0 ? cfg->max_iterations : AGENT_DEFAULT_MAX_ITERATIONS;
+    int plan_retried = 0;
+
+    for (int iter = 0; iter < max_iter; iter++) {
+        if (shutdown_requested()) {
+            int64_t tid = db_next_turn_id(db, session_id);
+            Message abort_msg = {.role = ROLE_ASSISTANT,
+                                 .content = strdup("error: agent terminated by shutdown signal"),
+                                 .stop_reason = STOP_REASON_ABORTED,
+                                 .model = cfg->provider.model};
+            entry_append_with_turn(db, session_id, &abort_msg, tid);
+            free(abort_msg.content);
+            return AGENT_EXIT_ERROR;
+        }
+
+        /* Fork LLM child */
+        int llm_rc = fork_llm_child(session_id, cfg, iter == 0);
+
+        if (llm_rc == LLM_EXIT_ERROR) {
+            hook_dispatch_turn_end(ext_ctx);
+            return AGENT_EXIT_ERROR;
+        }
+
+        if (llm_rc == LLM_EXIT_STOP) {
+            /* V45: plan-only detection — check last assistant entry content */
+            if (!plan_retried) {
+                char *resp = get_response_text(db, session_id);
+                if (resp && resp[0]) {
+                    int has_bullets = (strstr(resp, "\n- ") || strstr(resp, "\n* ") ||
+                                       strstr(resp, "\n1.") || strstr(resp, "\n1)"));
+                    if (has_bullets) {
+                        static const char *promises[] = {
+                            "I'll ", "I will ", "Let me ", "I'm going to ",
+                            "Here's my plan", "Here is my plan", "I can ", NULL
+                        };
+                        int is_plan = 0;
+                        for (int p = 0; promises[p]; p++)
+                            if (strstr(resp, promises[p])) { is_plan = 1; break; }
+                        if (is_plan) {
+                            plan_retried = 1;
+                            int64_t tid = db_next_turn_id(db, session_id);
+                            Message reprompt = {.role = ROLE_USER,
+                                .content = (char *)"Do not restate the plan. Act now: take the first concrete tool action. If blocked, state the blocker in one sentence."};
+                            entry_append_with_turn(db, session_id, &reprompt, tid);
+                            free(resp);
+                            continue;
+                        }
+                    }
+                }
+                free(resp);
+            }
+            hook_dispatch_turn_end(ext_ctx);
+            return AGENT_EXIT_DONE;
+        }
+
+        /* LLM_EXIT_TOOLCALL: read tool_calls from DB, dispatch */
+        int tc_count = 0;
+        int64_t turn_id = 0;
+        int64_t entry_id = 0;
+        ToolCall *calls = read_pending_tool_calls(db, session_id, &tc_count, &turn_id, &entry_id);
+        if (!calls || tc_count == 0) {
+            free(calls);
+            hook_dispatch_turn_end(ext_ctx);
+            return AGENT_EXIT_ERROR;
+        }
+
+        /* Use turn_id from DB; if 0, generate new one */
+        if (turn_id == 0) turn_id = db_next_turn_id(db, session_id);
+
+        for (int i = 0; i < tc_count; i++) {
+            if (shutdown_requested()) {
+                /* Write error results for remaining calls */
+                for (int j = i; j < tc_count; j++) {
+                    ToolResult tr = {.tool_call_id = calls[j].id,
+                                     .content = "error: agent terminated by shutdown signal"};
+                    Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                                        .tool_name = calls[j].name, .is_error = 1};
+                    entry_append_with_turn(db, session_id, &tool_msg, turn_id);
+                    db_tool_call_complete(db, entry_id, calls[j].id);
+                }
+                goto cleanup_calls;
+            }
+
+            /* V113: beforeToolCall hook */
+            char *blocked = hook_dispatch_before_tool_call(ext_ctx, calls[i].name, calls[i].arguments);
+            char *result;
+            if (blocked) {
+                result = blocked;
+            } else {
+                /* CLI progress */
+                fprintf(stdout, "\n\033[2m[tool: %s]\033[0m ", calls[i].name);
+                fflush(stdout);
+
+                ToolEntry *e = tools_lookup(reg, calls[i].name);
+                if (e)
+                    result = e->handler(calls[i].arguments, e->user_data);
+                else {
+                    result = malloc(128);
+                    if (result) snprintf(result, 128, "error: unknown tool '%s'", calls[i].name);
+                }
+                if (!result) result = strdup("error: tool returned null");
+
+                /* V114: afterToolCall hook */
+                char *replaced = hook_dispatch_after_tool_call(ext_ctx, calls[i].name,
+                                                              calls[i].arguments, result);
+                if (replaced) { free(result); result = replaced; }
+            }
+
+            /* CLI progress: show result snippet */
+            {
+                size_t rlen = result ? strlen(result) : 0;
+                if (rlen <= 80)
+                    fprintf(stdout, "\033[2m→ %s\033[0m\n", result ? result : "(empty)");
+                else
+                    fprintf(stdout, "\033[2m→ %.77s...\033[0m\n", result);
+                fflush(stdout);
+            }
+
+            /* V72/V13: detect exit-code sentinels */
+            int sentinel_exit = -1;
+            if (strncmp(result, SENTINEL_SPAWN, strlen(SENTINEL_SPAWN)) == 0)
+                sentinel_exit = AGENT_EXIT_SPAWN;
+            else if (strncmp(result, SENTINEL_APPROVAL, strlen(SENTINEL_APPROVAL)) == 0)
+                sentinel_exit = AGENT_EXIT_APPROVAL;
+            else if (strncmp(result, SENTINEL_CONFIG, strlen(SENTINEL_CONFIG)) == 0)
+                sentinel_exit = AGENT_EXIT_CONFIG;
+
+            if (sentinel_exit >= 0) {
+                ToolResult tr = {.tool_call_id = calls[i].id, .content = "PENDING"};
+                Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                                    .tool_name = calls[i].name};
+                entry_append_with_turn(db, session_id, &tool_msg, turn_id);
+                free(result);
+                for (int j = 0; j < tc_count; j++) {
+                    free(calls[j].id); free(calls[j].name); free(calls[j].arguments);
+                }
+                free(calls);
+                unsetenv("CCLAW_TOOLS_JSON");
+                return sentinel_exit;
+            }
+
+            /* V40: truncate large results */
+            char *stored = truncate_and_spill(result, session_id, calls[i].id);
+            ToolResult tr = {.tool_call_id = calls[i].id,
+                             .content = stored ? stored : result};
+            int err = (result[0] == 'e' && strncmp(result, "error:", 6) == 0);
+            Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                                .tool_name = calls[i].name, .is_error = err};
+            entry_append_with_turn(db, session_id, &tool_msg, turn_id);
+
+            /* Mark tool_call as complete */
+            db_tool_call_complete(db, entry_id, calls[i].id);
+
+            free(stored);
+            free(result);
+        }
+
+        for (int j = 0; j < tc_count; j++) {
+            free(calls[j].id); free(calls[j].name); free(calls[j].arguments);
+        }
+        free(calls);
+        continue;
+
+cleanup_calls:
+        for (int j = 0; j < tc_count; j++) {
+            free(calls[j].id); free(calls[j].name); free(calls[j].arguments);
+        }
+        free(calls);
+        hook_dispatch_turn_end(ext_ctx);
+        unsetenv("CCLAW_TOOLS_JSON");
+        return AGENT_EXIT_ERROR;
+    }
+
+    /* Max iterations reached */
+    hook_dispatch_turn_end(ext_ctx);
+    unsetenv("CCLAW_TOOLS_JSON");
+    return AGENT_EXIT_ERROR;
 }
 
 int agent_turn_run(int64_t session_id) {
@@ -191,19 +447,9 @@ int agent_turn_run(int64_t session_id) {
     const ToolSchema *schemas = tools_schemas_filtered(&setup.reg, tool_whitelist,
                                                        tool_wl_count, &tool_count);
 
-    AgentContext ctx = {0};
-    ctx.db = db;
-    ctx.session_id = session_id;
-    ctx.cfg = cfg;
-    ctx.dispatch = dispatch_tools;
-    ctx.dispatch_data = &setup.reg;
-    ctx.tools = schemas;
-    ctx.tool_count = tool_count;
-    ctx.ext_ctx = &setup.ext_ctx;
-    if (setup_mode == AGENT_SETUP_CLI)
-        ctx.progress = cli_progress;
-
-    rc = agent_run(&ctx);
+    /* T300: parent turn loop — fork llm child, dispatch tools in-process */
+    rc = parent_turn_loop(db, session_id, cfg, &setup.reg, schemas, tool_count,
+                          &setup.ext_ctx);
 
     /* V91: trigger compaction if enabled */
     if (rc == 0 && cfg->compaction && session_needs_compaction(db, session_id, cfg))

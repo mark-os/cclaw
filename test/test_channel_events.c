@@ -38,20 +38,17 @@ static void test_channel_events_routing(void) {
     sqlite3 *db = db_open_cclaw(DB_PATH);
     assert(db);
 
-    /* Create agent DB at expected path: <CWD>/agents/testagent/agent.db */
+    /* T297: single DB — set path for daemon helpers */
+    daemon_set_db_path(DB_PATH);
+
+    /* T297: session lives in same DB */
     char old_cwd[512];
     getcwd(old_cwd, sizeof(old_cwd));
     chdir(WORK_DIR);
 
-    char agent_db_path[256];
-    snprintf(agent_db_path, sizeof(agent_db_path), "agents/testagent/agent.db");
-    sqlite3 *adb = db_open_agent(agent_db_path);
-    assert(adb);
-
-    /* Create session in agent DB */
-    int64_t sid = session_create(adb, "test_session", "testagent", -1, 0);
+    /* Create session in same DB */
+    int64_t sid = session_create(db, "test_session", "testagent", -1, 0);
     assert(sid > 0);
-    db_close(adb);
 
     /* Set up channel binding: mychannel + channel_id "user1" → testagent */
     db_channel_binding_set(db, "mychannel", "user1", "testagent");
@@ -86,24 +83,21 @@ static void test_channel_events_routing(void) {
     int64_t inbox_id = daemon_inbox_insert("testagent", sid, "mychannel", "hello from channel");
     assert(inbox_id > 0);
 
-    /* Verify inbox has the message */
-    adb = db_open_agent(agent_db_path);
-    assert(adb);
-    int count = inbox_count(adb, sid);
+    /* Verify inbox has the message (same DB) */
+    int count = inbox_count(db, sid);
     assert(count == 1);
 
     /* Verify content */
     {
         const char *sql = "SELECT payload FROM inbox WHERE session_id=? ORDER BY id DESC LIMIT 1;";
         sqlite3_stmt *stmt;
-        assert(sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) == SQLITE_OK);
+        assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
         sqlite3_bind_int64(stmt, 1, sid);
         assert(sqlite3_step(stmt) == SQLITE_ROW);
         const char *p = (const char *)sqlite3_column_text(stmt, 0);
         assert(p && strstr(p, "hello from channel"));
         sqlite3_finalize(stmt);
     }
-    db_close(adb);
 
     /* Verify channel_events row still exists (we didn't consume it — that's daemon's job) */
     {

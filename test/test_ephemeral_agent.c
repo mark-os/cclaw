@@ -46,9 +46,7 @@ static int test_create_ephemeral(void) {
 
     /* T196: agent.json no longer written — config in cclaw.db */
 
-    /* Verify agent.db created */
-    snprintf(path, sizeof(path), "%s/%s/agent.db", AGENTS_DIR, name);
-    assert(stat(path, &st) == 0 && S_ISREG(st.st_mode));
+    /* T297: per-agent agent.db no longer created — single DB model */
 
     /* Verify seeded in daemon DB */
     AgentRow *row = db_agent_get(db, name);

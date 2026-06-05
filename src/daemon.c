@@ -205,17 +205,24 @@ void daemon_token_usage_reset(void) {
     g_token_bucket_head = 0;
 }
 
-/* ── T199/V76: Daemon writes inbox to agent DB ─────────────────── */
+/* ── T199/V76: Daemon writes inbox (T297: single DB) ─────────────── */
+
+/* T297: daemon DB path stored for helper functions that open/close transiently */
+static char g_daemon_db_path[1024] = "";
+
+void daemon_set_db_path(const char *path) {
+    snprintf(g_daemon_db_path, sizeof(g_daemon_db_path), "%s", path ? path : "");
+}
 
 static char *agent_db_path(const char *agent_name) {
-    if (!agent_name) return NULL;
-    char buf[1024];
-    snprintf(buf, sizeof(buf), "agents/%s/agent.db", agent_name);
-    return strdup(buf);
+    (void)agent_name;
+    if (!g_daemon_db_path[0]) return NULL;
+    return strdup(g_daemon_db_path);
 }
 
 int64_t daemon_inbox_insert(const char *agent_name, int64_t session_id,
                             const char *source, const char *payload) {
+    if (!agent_name) return -1;
     char *path = agent_db_path(agent_name);
     if (!path) return -1;
     sqlite3 *adb = db_open_agent(path);
@@ -227,6 +234,7 @@ int64_t daemon_inbox_insert(const char *agent_name, int64_t session_id,
 }
 
 int daemon_inbox_count(const char *agent_name, int64_t session_id) {
+    if (!agent_name) return -1;
     char *path = agent_db_path(agent_name);
     if (!path) return -1;
     sqlite3 *adb = db_open_agent(path);
@@ -740,9 +748,8 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
         /* V73/V74,T198: inject agent identity + DB path + config as env vars */
         if (agent_name) {
             setenv("CCLAW_AGENT_NAME", agent_name, 1);
-            char agent_db[1024];
-            snprintf(agent_db, sizeof(agent_db), "agents/%s/agent.db", agent_name);
-            setenv("CCLAW_AGENT_DB", agent_db, 1);
+            /* T297: single DB — agent opens same cclaw.db */
+            setenv("CCLAW_AGENT_DB", g_daemon_db_path, 1);
             /* T279: inject config (no ceiling for direct fork) */
             inject_agent_config_env(db, agent_name, NULL);
         }
@@ -1649,9 +1656,8 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
             /* Determine effective agent identity for sub-agent */
             const char *eff_agent = child_agent_name ? child_agent_name : parent_agent_name;
             setenv("CCLAW_AGENT_NAME", eff_agent, 1);
-            char agent_db_buf[1024];
-            snprintf(agent_db_buf, sizeof(agent_db_buf), "agents/%s/agent.db", eff_agent);
-            setenv("CCLAW_AGENT_DB", agent_db_buf, 1);
+            /* T297: single DB — sub-agent opens same cclaw.db */
+            setenv("CCLAW_AGENT_DB", g_daemon_db_path, 1);
 
             /* T279: inject config with parent ceiling enforcement */
             inject_agent_config_env(db, eff_agent, parent_ac);
@@ -1702,66 +1708,59 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
 /* ── T94/T200/V34: Daemon startup recovery — scan all agent DBs ── */
 
 void daemon_startup_recovery(sqlite3 *db) {
-    (void)db; /* cclaw.db not used for session state anymore */
+    /* T297: single DB — all sessions accessible directly */
+    if (!db) {
+        /* Fallback: open from g_daemon_db_path */
+        if (!g_daemon_db_path[0]) return;
+        db = db_open(g_daemon_db_path);
+        if (!db) return;
 
-    /* T200: Scan all agent DBs for non-idle sessions */
-    size_t agent_count = 0;
-    char **names = agent_discover("agents", &agent_count);
-    if (!names) goto cleanup;
-
-    for (size_t a = 0; a < agent_count; a++) {
-        char *path = agent_db_path(names[a]);
-        if (!path) continue;
-        sqlite3 *adb = db_open_agent(path);
-        free(path);
-        if (!adb) continue;
-
-        /* (1) "running" sessions: process died, reset to idle + signal re-fork */
-        {
-            const char *sql = "SELECT id FROM sessions WHERE state='running';";
-            sqlite3_stmt *stmt;
-            if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                int64_t ids[128];
-                int n = 0;
-                while (sqlite3_step(stmt) == SQLITE_ROW && n < 128)
-                    ids[n++] = sqlite3_column_int64(stmt, 0);
-                sqlite3_finalize(stmt);
-
-                sqlite3_exec(adb, "UPDATE sessions SET state='idle' WHERE state='running';",
-                             NULL, NULL, NULL);
-
-                for (int i = 0; i < n; i++)
-                    daemon_signal_session(ids[i]);
-            }
-        }
-
-        /* (2) "waiting" sessions: check inbox for result */
-        {
-            const char *sql = "SELECT id FROM sessions WHERE state='waiting';";
-            sqlite3_stmt *stmt;
-            if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                int64_t ids[128];
-                int n = 0;
-                while (sqlite3_step(stmt) == SQLITE_ROW && n < 128)
-                    ids[n++] = sqlite3_column_int64(stmt, 0);
-                sqlite3_finalize(stmt);
-
-                for (int i = 0; i < n; i++) {
-                    int pending = inbox_count(adb, ids[i]);
-                    if (pending <= 0) {
-                        inbox_insert(adb, ids[i], "recovery",
-                            "error: sub-agent process lost during daemon restart");
-                    }
-                    session_set_state(adb, ids[i], "idle");
-                }
-            }
-        }
-
-        db_close(adb);
+        daemon_startup_recovery(db);
+        db_close(db);
+        return;
     }
-    agent_discover_free(names, agent_count);
 
-cleanup:
+    /* (1) "running" sessions: process died, reset to idle + signal re-fork */
+    {
+        const char *sql = "SELECT id FROM sessions WHERE state='running';";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            int64_t ids[128];
+            int n = 0;
+            while (sqlite3_step(stmt) == SQLITE_ROW && n < 128)
+                ids[n++] = sqlite3_column_int64(stmt, 0);
+            sqlite3_finalize(stmt);
+
+            sqlite3_exec(db, "UPDATE sessions SET state='idle' WHERE state='running';",
+                         NULL, NULL, NULL);
+
+            for (int i = 0; i < n; i++)
+                daemon_signal_session(ids[i]);
+        }
+    }
+
+    /* (2) "waiting" sessions: check inbox for result */
+    {
+        const char *sql = "SELECT id FROM sessions WHERE state='waiting';";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            int64_t ids[128];
+            int n = 0;
+            while (sqlite3_step(stmt) == SQLITE_ROW && n < 128)
+                ids[n++] = sqlite3_column_int64(stmt, 0);
+            sqlite3_finalize(stmt);
+
+            for (int i = 0; i < n; i++) {
+                int pending = inbox_count(db, ids[i]);
+                if (pending <= 0) {
+                    inbox_insert(db, ids[i], "recovery",
+                        "error: sub-agent process lost during daemon restart");
+                }
+                session_set_state(db, ids[i], "idle");
+            }
+        }
+    }
+
     /* T118: Clean up stale session temp dirs */
     (void)system("rm -rf /tmp/cclaw-*");
 }
@@ -2128,6 +2127,10 @@ delete_event:
 /* ── Daemon main loop (T81) ─────────────────────────────────────── */
 
 int daemon_run(const Config *cfg, sqlite3 *db) {
+    /* T297: store DB path for helper functions */
+    if (cfg->db_path)
+        daemon_set_db_path(cfg->db_path);
+
     /* V61: Set CCLAW_DB_PATH so forked agent children find the DB */
     if (cfg->db_path)
         setenv("CCLAW_DB_PATH", cfg->db_path, 1);
@@ -2180,9 +2183,9 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
         const char *slash = strrchr(dbp, '/');
         if (slash) {
             int dirlen = (int)(slash - dbp);
-            snprintf(journal_path, sizeof(journal_path), "%.*s/journal.db", dirlen, dbp);
+            snprintf(journal_path, sizeof(journal_path), "%.*s/cclaw.db", dirlen, dbp);
         } else {
-            snprintf(journal_path, sizeof(journal_path), "journal.db");
+            snprintf(journal_path, sizeof(journal_path), "cclaw.db");
         }
         if (log_collector_start(journal_path) != 0) {
             fprintf(stderr, "daemon: warning: log collector failed to start\n");

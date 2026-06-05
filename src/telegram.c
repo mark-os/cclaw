@@ -1076,20 +1076,8 @@ static void handle_approval_callback(const char *data, int64_t chat_id, const ch
         /* Fallback: no tool_call_id (legacy) — post to inbox */
         if (a->agent_name) {
             daemon_inbox_insert(a->agent_name, a->session_id, "approval", inbox_msg);
-            char *apath = NULL;
-            {
-                char buf[1024];
-                snprintf(buf, sizeof(buf), "agents/%s/agent.db", a->agent_name);
-                apath = strdup(buf);
-            }
-            if (apath) {
-                sqlite3 *adb = db_open_agent(apath);
-                free(apath);
-                if (adb) {
-                    session_set_state(adb, a->session_id, "idle");
-                    db_close(adb);
-                }
-            }
+            /* T297: single DB — use g_db directly */
+            session_set_state(g_db, a->session_id, "idle");
             daemon_signal_session_agent(a->session_id, a->agent_name);
         } else {
             inbox_insert(g_db, a->session_id, "approval", inbox_msg);

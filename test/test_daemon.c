@@ -117,20 +117,20 @@ static void test_daemon_fork_reap(void) {
     mkdir("/tmp/test_daemon_fork_work/agents/testbot/workspace", 0755);
     chdir("/tmp/test_daemon_fork_work");
 
-    /* Create agent DB with session + inbox */
-    sqlite3 *adb = db_open_agent("agents/testbot/agent.db");
-    assert(adb);
-    int64_t sid = session_create(adb, "daemon_test", "testbot", -1, 0);
-    assert(sid > 0);
-    Message sys_msg = {.role = ROLE_SYSTEM, .content = "You are a test agent."};
-    entry_append(adb, sid, &sys_msg);
-    inbox_insert(adb, sid, "test", "hello");
-    db_close(adb);
-
-    /* Create daemon DB */
+    /* Create daemon DB (T297: single DB has all tables) */
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
     assert(db);
+
+    /* T297: set daemon db path for helpers */
+    daemon_set_db_path(DB_PATH);
+
+    /* Create session + inbox in same DB */
+    int64_t sid = session_create(db, "daemon_test", "testbot", -1, 0);
+    assert(sid > 0);
+    Message sys_msg = {.role = ROLE_SYSTEM, .content = "You are a test agent."};
+    entry_append(db, sid, &sys_msg);
+    inbox_insert(db, sid, "test", "hello");
 
     /* Write canned LLM response file */
     const char *mock_path = "/tmp/test_cclaw_mock_response.json";
@@ -178,20 +178,20 @@ static void test_daemon_fork_reap(void) {
     /* Signal with agent_name */
     daemon_signal_session_agent(sid, "testbot");
 
-    /* Poll agent DB until session returns to idle */
+    /* Poll DB until session returns to idle */
     int settled = 0;
     for (int i = 0; i < 100; i++) {
         usleep(100000);
-        adb = db_open_agent("agents/testbot/agent.db");
-        if (!adb) continue;
+        sqlite3 *poll_db = db_open(DB_PATH);
+        if (!poll_db) continue;
         sqlite3_stmt *stmt;
-        sqlite3_prepare_v2(adb, "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
+        sqlite3_prepare_v2(poll_db, "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
         sqlite3_bind_int64(stmt, 1, sid);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *state = (const char *)sqlite3_column_text(stmt, 0);
             if (state && strcmp(state, "idle") == 0) {
                 sqlite3_stmt *s2;
-                sqlite3_prepare_v2(adb,
+                sqlite3_prepare_v2(poll_db,
                     "SELECT COUNT(*) FROM entries WHERE session_id=? AND role=2;",
                     -1, &s2, NULL);
                 sqlite3_bind_int64(s2, 1, sid);
@@ -201,16 +201,18 @@ static void test_daemon_fork_reap(void) {
             }
         }
         sqlite3_finalize(stmt);
-        db_close(adb);
+        db_close(poll_db);
         if (settled) break;
     }
 
     assert(settled);
 
     /* Inbox should be consumed */
-    adb = db_open_agent("agents/testbot/agent.db");
-    assert(inbox_count(adb, sid) == 0);
-    db_close(adb);
+    {
+        sqlite3 *check_db = db_open(DB_PATH);
+        assert(inbox_count(check_db, sid) == 0);
+        db_close(check_db);
+    }
 
     shutdown_request();
     pthread_join(dt, NULL);
@@ -226,24 +228,19 @@ static void test_daemon_fork_reap(void) {
 
 /* ── T94: Daemon startup recovery ────────────────────────────────── */
 
-/* T200: Recovery now scans agent DBs. Create a temp agent dir for testing. */
+/* T200: Recovery now operates on single DB */
 static void setup_recovery_agent(const char *name, int64_t *out_sid) {
-    char dir[256], dbpath[256];
-    snprintf(dir, sizeof(dir), "agents/%s", name);
-    mkdir("agents", 0755);
-    mkdir(dir, 0755);
-    snprintf(dbpath, sizeof(dbpath), "agents/%s/agent.db", name);
-    sqlite3 *adb = db_open_agent(dbpath);
-    assert(adb);
-    *out_sid = session_create(adb, "recovery_test", name, -1, 0);
+    (void)name;
+    /* T297: sessions in single DB — just create session */
+    sqlite3 *db = db_open(DB_PATH);
+    assert(db);
+    *out_sid = session_create(db, "recovery_test", name, -1, 0);
     assert(*out_sid > 0);
-    db_close(adb);
+    db_close(db);
 }
 
 static void cleanup_recovery_agent(const char *name) {
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "rm -rf agents/%s", name);
-    system(cmd);
+    (void)name;
 }
 
 static void test_startup_recovery_running(void) {
@@ -254,20 +251,22 @@ static void test_startup_recovery_running(void) {
     mkdir("/tmp/test_recovery_work", 0755);
     chdir("/tmp/test_recovery_work");
 
+    /* T297: use DB_PATH for setup_recovery_agent */
+    unlink(DB_PATH);
+    daemon_set_db_path(DB_PATH);
+
     int64_t sid;
     setup_recovery_agent("recov_run", &sid);
 
     /* Force state to "running" */
-    char dbpath[256];
-    snprintf(dbpath, sizeof(dbpath), "agents/recov_run/agent.db");
-    sqlite3 *adb = db_open_agent(dbpath);
+    sqlite3 *adb = db_open(DB_PATH);
     sqlite3_exec(adb, "UPDATE sessions SET state='running';", NULL, NULL, NULL);
     db_close(adb);
 
     daemon_startup_recovery(NULL);
 
     /* Should be idle now */
-    adb = db_open_agent(dbpath);
+    adb = db_open(DB_PATH);
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(adb, "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, sid);
@@ -290,29 +289,26 @@ static void test_startup_recovery_waiting_with_inbox(void) {
     mkdir("/tmp/test_recovery_work2", 0755);
     chdir("/tmp/test_recovery_work2");
 
+    unlink(DB_PATH);
+    daemon_set_db_path(DB_PATH);
+
     int64_t sid;
     setup_recovery_agent("recov_wait_inbox", &sid);
 
-    char dbpath[256];
-    snprintf(dbpath, sizeof(dbpath), "agents/recov_wait_inbox/agent.db");
-    sqlite3 *adb = db_open_agent(dbpath);
-    /* Force state to "waiting" (bypass state machine) */
+    sqlite3 *adb = db_open(DB_PATH);
     sqlite3_exec(adb, "UPDATE sessions SET state='waiting';", NULL, NULL, NULL);
-    /* Sub-agent result already in inbox */
     inbox_insert(adb, sid, "sub-agent", "result from child");
     db_close(adb);
 
     daemon_startup_recovery(NULL);
 
-    /* Should be idle, inbox still has the item */
-    adb = db_open_agent(dbpath);
+    adb = db_open(DB_PATH);
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(adb, "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, sid);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "idle") == 0);
     sqlite3_finalize(stmt);
-    /* Inbox count should be 1 (original item, no error added) */
     assert(inbox_count(adb, sid) == 1);
     db_close(adb);
 
@@ -330,21 +326,20 @@ static void test_startup_recovery_waiting_no_inbox(void) {
     mkdir("/tmp/test_recovery_work3", 0755);
     chdir("/tmp/test_recovery_work3");
 
+    unlink(DB_PATH);
+    daemon_set_db_path(DB_PATH);
+
     int64_t sid;
     setup_recovery_agent("recov_wait_empty", &sid);
 
-    char dbpath[256];
-    snprintf(dbpath, sizeof(dbpath), "agents/recov_wait_empty/agent.db");
-    sqlite3 *adb = db_open_agent(dbpath);
-    /* Force state to "waiting" */
+    sqlite3 *adb = db_open(DB_PATH);
     sqlite3_exec(adb, "UPDATE sessions SET state='waiting';", NULL, NULL, NULL);
     assert(inbox_count(adb, sid) == 0);
     db_close(adb);
 
     daemon_startup_recovery(NULL);
 
-    /* Should be idle */
-    adb = db_open_agent(dbpath);
+    adb = db_open(DB_PATH);
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(adb, "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, sid);
@@ -352,7 +347,6 @@ static void test_startup_recovery_waiting_no_inbox(void) {
     assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "idle") == 0);
     sqlite3_finalize(stmt);
 
-    /* Error message should have been injected into inbox */
     assert(inbox_count(adb, sid) == 1);
     int count = 0;
     InboxItem *items = inbox_peek(adb, sid, 1, &count);

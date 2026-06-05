@@ -182,8 +182,8 @@ static void print_usage(void) {
            "  --help             show this help\n");
 }
 
-/* V96/T233: journal.db handle for CLI log persistence */
-static sqlite3 *g_journal_db;
+/* V96/T233: journal handle removed — single DB */
+static sqlite3 *g_db;  /* T297: single DB handle for journal writes in CLI */
 static const Config *g_cli_cfg;
 
 /* Fork agent_turn_run as child, pipe stderr → journal.db + tee to terminal.
@@ -221,8 +221,8 @@ static int cli_fork_turn(int64_t session_id) {
 
     /* Prepare journal insert if DB available */
     sqlite3_stmt *stmt = NULL;
-    if (g_journal_db) {
-        sqlite3_prepare_v2(g_journal_db,
+    if (g_db) {
+        sqlite3_prepare_v2(g_db,
             "INSERT INTO log(source, pid, session_id, stream, line) VALUES(?,?,?,2,?)",
             -1, &stmt, NULL);
     }
@@ -563,7 +563,7 @@ int main(int argc, char *argv[]) {
         if (slash) *slash = '\0';
         else { free(base_dir); base_dir = strdup("."); }
     }
-    free(db_path);
+    char *db_path_resolved = db_path; /* keep for CCLAW_AGENT_DB env */
 
     Config *cfg = config_load(cclaw_db);
     if (!cfg) {
@@ -601,14 +601,9 @@ int main(int argc, char *argv[]) {
     }
 
     /* T271/V118: Agent selection — -p uses default_agent; interactive shows picker */
-    const char *agent_db_env = getenv("CCLAW_AGENT_DB");
     char *agent_name_sel = NULL;
 
-    if (agent_db_env && agent_db_env[0]) {
-        /* Explicit env override — skip picker */
-        const char *env_name = getenv("CCLAW_AGENT_NAME");
-        agent_name_sel = strdup(env_name ? env_name : "default");
-    } else if (prompt || !isatty(STDIN_FILENO)) {
+    if (prompt || !isatty(STDIN_FILENO)) {
         /* Non-interactive / -p: use kv default_agent */
         char *def = db_kv_get(cclaw_db, "default_agent");
         agent_name_sel = def ? def : strdup("default");
@@ -670,35 +665,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Resolve agent DB path */
-    char *agent_db_path;
-    if (agent_db_env && agent_db_env[0]) {
-        agent_db_path = strdup(agent_db_env);
-    } else {
-        agent_db_path = malloc(strlen(base_dir) + strlen(agent_name_sel) + 32);
-        sprintf(agent_db_path, "%s/agents/%s/agent.db", base_dir, agent_name_sel);
-    }
-    ensure_parent_dir(agent_db_path);
-    sqlite3 *adb = db_open_agent(agent_db_path);
-    if (!adb) {
-        fprintf(stderr, "error: cannot open agent database '%s'\n", agent_db_path);
-        free(agent_db_path);
-        free(agent_name_sel);
-        free(base_dir);
-        config_free(cfg);
-        db_close(cclaw_db);
-        return 1;
-    }
-
-    {
-        uint8_t sk[32];
-        if (secret_key_load_or_create(agent_db_path, sk) == 0)
-            db_set_secret_key(sk);
-    }
+    /* T297: single DB — sessions/entries/inbox all in cclaw_db */
+    sqlite3 *adb = cclaw_db;
 
     /* Set env vars for child agent processes */
-    setenv("CCLAW_AGENT_DB", agent_db_path, 1);
-    free(agent_db_path);
+    setenv("CCLAW_AGENT_DB", db_path_resolved, 1);
 
     const char *agent_name = agent_name_sel;
     setenv("CCLAW_AGENT_NAME", agent_name, 1);
@@ -756,8 +727,8 @@ int main(int argc, char *argv[]) {
     }
     setenv("CCLAW_MODE", "cli", 1);
 
-    /* V96/T233: open journal.db for CLI log persistence */
-    g_journal_db = db_open_journal(".cclaw/journal.db");
+    /* T297: single DB handles journal writes too */
+    g_db = cclaw_db;
     g_cli_cfg = cfg;
 
     /* T228: CWD as read-only path for agent file_read */
@@ -771,9 +742,9 @@ int main(int argc, char *argv[]) {
 
     session_id = cli_select_session(adb, session_id, new_session);
     if (session_id < 0) {
-        db_close(adb);
         free(agent_name_sel);
         free(base_dir);
+        free(db_path_resolved);
         config_free(cfg);
         db_close(cclaw_db);
         return 1;
@@ -851,10 +822,9 @@ done:
     }
 
     session_set_state(adb, session_id, "idle");
-    db_close(adb);
-    if (g_journal_db) db_close(g_journal_db);
     free(agent_name_sel);
     free(base_dir);
+    free(db_path_resolved);
     config_free(cfg);
     db_close(cclaw_db);
     return rc == 0 ? 0 : 1;

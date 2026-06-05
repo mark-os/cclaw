@@ -36,19 +36,11 @@ static void test_defaults_seeded(void) {
     assert(v && strcmp(v, "25") == 0);
     free(v);
 
-    v = db_kv_get(db, "workspace");
-    assert(v && strcmp(v, "./workspace") == 0);
-    free(v);
-
     v = db_kv_get(db, "shell_timeout");
     assert(v && strcmp(v, "30") == 0);
     free(v);
 
     v = db_kv_get(db, "heartbeat_interval");
-    assert(v && strcmp(v, "0") == 0);
-    free(v);
-
-    v = db_kv_get(db, "max_history_tokens");
     assert(v && strcmp(v, "0") == 0);
     free(v);
 

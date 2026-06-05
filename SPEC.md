@@ -1,7 +1,7 @@
 # SPEC
 
 ## §G GOAL
-minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (CLI, Telegram), 3-DB SQLite backbone (cclaw.db, per-agent agent.db, journal.db), MicroQuickJS runtime tools, sub-agents, exit-code IPC
+minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (CLI, Telegram), single SQLite DB (cclaw.db), MicroQuickJS runtime tools, sub-agents, exit-code IPC
 
 ## §C CONSTRAINTS
 - C11, `-Wall -Wextra -Werror`
@@ -154,9 +154,9 @@ V69: ∀ channel→agent binding → daemon routes channel messages to bound age
 V70: ∀ daemon → unsandboxed; full RW to all agent DBs; writes: inbox_insert (message delivery), session state transitions, approval resolution + config writes on approve, agent creation seeding; reads: agent config at fork, approval proposals, session state; daemon is sole process w/ cross-agent write access
 V71: ∀ LLM request → daemon tracks rolling token usage (input+output) per hour; if hourly total exceeds `token_rate_limit` (default 1000000, configurable via kv + env `CCLAW_TOKEN_RATE_LIMIT`) → reject agent fork w/ error "token rate limit exceeded"; resets on rolling 1h window; tracked in daemon memory (not persisted — resets on daemon restart)
 V72: ∀ agent process → exit code is sole IPC channel for intent: 0=turn complete (deliver), 1=error, 2=spawn sub-agent, 3=approval requested, 4=config change requested, 127=exec failed, 128+N=killed by signal N; daemon dispatches on code after `waitpid`; exit codes 2/3/4 imply partial turn — agent executed tool_calls in order up to the daemon-requiring call, wrote PENDING entry for it, remaining calls deferred to next fork
-V73: ∀ DB access → 3-file split: `cclaw.db` (registry, permissions, cron, spawn_queue, channels, providers), per-agent `agents/<name>/agent.db` (sessions, entries, inbox, js_tools, memory_blocks, kv), `journal.db` (all logs); agent process opens only own agent.db (+ optional RO cclaw.db if granted)
+V73: ∀ DB access → single `cclaw.db` file (WAL mode, busy_timeout ≥ 5000ms); contains all tables: agents, agent_config, providers, kv, sessions, entries, tool_calls, inbox, memory_blocks, js_tools, channels, channel_events, channel_outbox, channel_state, spawn_queue, cron_jobs, approvals; parent (CLI/daemon) is primary writer; agent child opens same file via `CCLAW_AGENT_DB` env var
 V74: ∀ agent process → config from `CCLAW_*` env vars injected by daemon at fork; ⊥ read config files; ⊥ open cclaw.db for config (unless `daemon_db_read=1` in agent_config)
-V75: ∀ log output (daemon + agents) → piped to log collector process; collector receives fds via `SCM_RIGHTS` over unix socketpair; writes to journal.db (source, pid, session_id, stream, line, timestamp); flush every 100ms or 64 lines
+V75: ∀ log output (daemon + agents) → parent captures child stderr via pipe; daemon mode: writes to syslog (`LOG_DAEMON` facility, falls back to stderr if syslog unavailable); CLI mode: tees to terminal stderr; detect journald at startup (check `JOURNAL_STREAM` env or `/run/systemd/journal/socket` existence) → if present, use `sd_journal_send` for structured logging; else `syslog()`; no log collector process, no journal.db, no SCM_RIGHTS
 V76: ∀ cclaw.db write → daemon process only; agents ⊥ write cclaw.db; daemon writes agent DB only for inbox delivery
 V77: ∀ daemon reap (exit code 2) → open agent DB, find tool_result entry with `content = 'PENDING'`, read matching tool_call from last assistant entry (by tool_call_id), parse spawn_agent args, insert spawn_queue in cclaw.db, fork sub-agent; on sub-agent completion UPDATE the PENDING entry with result
 V78: ∀ daemon reap (exit code 3) → open agent DB, find tool_result entry with `content = 'PENDING'`, read matching tool_call (by tool_call_id), parse approval args, insert approvals in cclaw.db, notify admin; on admin resolution UPDATE the PENDING entry with result ("approved"/"denied: reason"), transition state→"idle", re-fork
@@ -242,11 +242,13 @@ T293|x|bench: verify caching — extend `test_e2e_bench_providers.c` or `bench_p
 T294|x|vendor jsmn; per-provider SSE parsers (`sse_parse_openai`, `sse_parse_gemini`, `sse_parse_anthropic`) per `specs/provider-schemas.md`; stack-alloc token buf (256); unit tests w/ captured chunks; drop-in replace `sse_process_line`|V41,§D
 T295|x|SQL request builder queries — one per provider (OpenAI, Gemini, Anthropic); `json_object()`/`json_group_array()` produce complete request body from entries table; add `cache_break_after` col to sessions; `db_build_request()` C wrapper; test against live APIs|V41,T290
 T296|x|SQL response ingress — non-streaming: `json_extract()` INSERT; tool call validation w/ `json()`; add `tool_calls` table (session_id, entry_id, call_id, name, arguments, status); streaming: jsmn parse → accumulate → single INSERT|T294,T295
-T297|.|merge 3 DBs → single `cclaw.db` — sessions, entries, tool_calls, kv, config, providers, journal all in one file; update all open/access paths; parent sole writer|V73
+T297|x|merge 3 DBs → single `cclaw.db` — sessions, entries, tool_calls, kv, config, providers, journal all in one file; update all open/access paths; parent sole writer|V73
 T298|.|extract `cclaw-llm` child — subcommand `cclaw llm --session=N`; inherits stdout (token stream); stderr piped to parent (journal); owns context planning + request build + curl + SSE parse + DB write; parent forks+waits+reads DB|T295,T296
 T299|.|parent turn loop — fork `cclaw-llm` → wait → read DB → fork tools serially → wait → capture stdout pipe → write result to DB → loop until no tool_calls; CLI + daemon both use this orchestrator|T298
 T300|.|sandbox w/ `unshare` — tool children: `unshare(CLONE_NEWNS\|CLONE_NEWPID\|CLONE_NEWNET)`; network via existing proxy model; per-agent config `sandbox = "sandbox"\|"none"`; remove all landlock/seccomp code|V22a,V37
 T301|.|remove old code — `request_stream.c`, in-process agent loop, old tool dispatch, cJSON in response/tool-arg parsing, multi-DB open logic, landlock/seccomp; clean build, all tests pass|T294,T295,T296,T297,T298,T299,T300
+T302|.|T297 integration test fixes — update all `test_integration_*.c` and remaining unit tests that open per-agent `agent.db` or `journal.db` paths; use single `cclaw.db` via `db_open()`; set `daemon_set_db_path()` where daemon helpers are called; ⚠ integration tests may HANG (not just fail) if DB path not set — always run with `timeout`|T297,V73
+T303|.|syslog logging — remove `log_collector.c`, remove `log` table from schema, remove SCM_RIGHTS fd passing; daemon: detect journald (`/run/systemd/journal/socket` exists) → `sd_journal_send()` else `openlog()+syslog()`; CLI: tee child stderr to terminal (already works); delete `include/log_collector.h`; update daemon startup to skip collector fork|V75,T297
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)

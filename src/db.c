@@ -11,9 +11,7 @@
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
 
-static const char *SCHEMA_DAEMON_SQL = TPL_SCHEMA_DAEMON_SQL;
-static const char *SCHEMA_AGENT_SQL = TPL_SCHEMA_AGENT_SQL;
-static const char *SCHEMA_JOURNAL_SQL = TPL_SCHEMA_JOURNAL_SQL;
+static const char *SCHEMA_SQL = TPL_SCHEMA_SQL;
 
 /* Shared: open + WAL + busy_timeout + schema exec */
 static sqlite3 *db_open_with_schema(const char *path, const char *schema, const char *label) {
@@ -48,9 +46,9 @@ void db_set_agent_pragmas(sqlite3 *db) {
     sqlite3_exec(db, "PRAGMA cache_size=-512;", NULL, NULL, NULL);
 }
 
-/* T195/V73: Open cclaw.db — agents registry, config, providers, channels, approvals */
-sqlite3 *db_open_cclaw(const char *path) {
-    sqlite3 *db = db_open_with_schema(path, SCHEMA_DAEMON_SQL, "db_open_cclaw");
+/* T297: Single unified DB opener — all tables in one file */
+sqlite3 *db_open(const char *path) {
+    sqlite3 *db = db_open_with_schema(path, SCHEMA_SQL, "db_open");
     if (!db) return NULL;
     /* Seed kv defaults on first run */
     sqlite3_stmt *cnt;
@@ -83,104 +81,10 @@ sqlite3 *db_open_cclaw(const char *path) {
     return db;
 }
 
-/* T195/V73: Open agent.db — sessions, entries, inbox, js_tools, memory, kv */
-sqlite3 *db_open_agent(const char *path) {
-    sqlite3 *db = db_open_with_schema(path, SCHEMA_AGENT_SQL, "db_open_agent");
-    if (!db) return NULL;
-    /* T268 fixup: add cost_nano if missing (pre-existing DBs) — ignore error */
-    sqlite3_exec(db, "ALTER TABLE entries ADD COLUMN cost_nano INTEGER;", NULL, NULL, NULL);
-    /* T295: add cache_break_after if missing */
-    sqlite3_exec(db, "ALTER TABLE sessions ADD COLUMN cache_break_after INTEGER DEFAULT -1;", NULL, NULL, NULL);
-    /* T296: create tool_calls table if missing */
-    sqlite3_exec(db,
-        "CREATE TABLE IF NOT EXISTS tool_calls ("
-        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "  session_id INTEGER NOT NULL,"
-        "  entry_id INTEGER NOT NULL,"
-        "  call_id TEXT NOT NULL,"
-        "  name TEXT NOT NULL,"
-        "  arguments TEXT,"
-        "  status TEXT NOT NULL DEFAULT 'pending'"
-        ");"
-        "CREATE INDEX IF NOT EXISTS idx_tool_calls_entry ON tool_calls(entry_id);"
-        "CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, status);",
-        NULL, NULL, NULL);
-    return db;
-}
-
-/* T195/V73: Open journal.db — log table */
-sqlite3 *db_open_journal(const char *path) {
-    return db_open_with_schema(path, SCHEMA_JOURNAL_SQL, "db_open_journal");
-}
-
-/* T207: Legacy unified opener — runs daemon + agent schemas into one DB.
- * Used by tests for convenience. Production code uses db_open_cclaw/db_open_agent. */
-sqlite3 *db_open(const char *path) {
-    sqlite3 *db = NULL;
-    int rc = sqlite3_open(path, &db);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "db_open: %s\n", sqlite3_errmsg(db));
-        sqlite3_close(db);
-        return NULL;
-    }
-    char *err = NULL;
-    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, &err);
-    if (err) { sqlite3_free(err); err = NULL; }
-    sqlite3_exec(db, "PRAGMA busy_timeout=5000;", NULL, NULL, &err);
-    if (err) { sqlite3_free(err); err = NULL; }
-    sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, &err);
-    if (err) { sqlite3_free(err); err = NULL; }
-    /* Apply both daemon + agent schemas for test convenience */
-    rc = sqlite3_exec(db, SCHEMA_DAEMON_SQL, NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "db_open daemon schema: %s\n", err);
-        sqlite3_free(err);
-        sqlite3_close(db);
-        return NULL;
-    }
-    rc = sqlite3_exec(db, SCHEMA_AGENT_SQL, NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "db_open agent schema: %s\n", err);
-        sqlite3_free(err);
-        sqlite3_close(db);
-        return NULL;
-    }
-
-    /* Seed kv defaults on first run (table empty) */
-    {
-        sqlite3_stmt *cnt;
-        if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM kv", -1, &cnt, NULL) == SQLITE_OK) {
-            if (sqlite3_step(cnt) == SQLITE_ROW && sqlite3_column_int(cnt, 0) == 0) {
-                static const char *defaults[][2] = {
-                    {"provider.base_url",    "https://openrouter.ai/api/v1"},
-                    {"provider.model",       "deepseek/deepseek-v4-flash"},
-                    {"provider.max_tokens",  "4096"},
-                    {"provider.context_window", "65536"},
-                    {"provider.cache_hints", "auto"},
-                    {"fallback_providers",   "[]"},
-                    {"telegram_token",       ""},
-                    {"admin_chat_ids",       "[]"},
-                    {"web_port",             "8080"},
-                    {"workspace",            "./workspace"},
-                    {"max_iterations",       STR(AGENT_DEFAULT_MAX_ITERATIONS)},
-                    {"max_history_tokens",   "0"},
-                    {"heartbeat_interval",   "0"},
-                    {"shell_timeout",        STR(AGENT_DEFAULT_SHELL_TIMEOUT)},
-                };
-                size_t n = sizeof(defaults) / sizeof(defaults[0]);
-                for (size_t i = 0; i < n; i++)
-                    db_kv_set(db, defaults[i][0], defaults[i][1]);
-
-                const char *api_key = getenv("OPENROUTER_API_KEY");
-                if (api_key && api_key[0])
-                    db_kv_set(db, "provider.api_key", api_key);
-            }
-            sqlite3_finalize(cnt);
-        }
-    }
-
-    return db;
-}
+/* T297: Compatibility aliases — all open the same unified schema */
+sqlite3 *db_open_cclaw(const char *path) { return db_open(path); }
+sqlite3 *db_open_agent(const char *path) { return db_open(path); }
+sqlite3 *db_open_journal(const char *path) { return db_open(path); }
 
 void db_close(sqlite3 *db) {
     if (db) sqlite3_close(db);

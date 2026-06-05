@@ -487,3 +487,30 @@ No signal pipes, no named FIFOs, no custom IPC. Just: fork, wait, read DB.
 - Parent stays responsive (can handle signals, other agents in daemon mode)
 - Memory safety: a bug in response parsing can't corrupt parent state
 - Clean separation: `cclaw-llm` is a standalone testable unit
+
+### 21. Logging: syslog with journald detection
+
+The log collector process + journal.db are removed entirely. Logging becomes:
+
+**Daemon mode:**
+- At startup, detect journald: check `/run/systemd/journal/socket` exists
+- If journald: use `sd_journal_send()` for structured fields (AGENT_NAME, SESSION_ID, PID)
+- If no journald: `openlog("cclaw", LOG_PID, LOG_DAEMON)` + `syslog()`
+- Parent captures child stderr via pipe → routes each line to syslog/journald
+- No SQLite writes for logging — zero DB contention from log I/O
+
+**CLI mode:**
+- Child stderr piped to parent → tee to terminal stderr (already implemented)
+- No syslog in CLI mode (user is watching the terminal)
+
+**What gets removed:**
+- `src/log_collector.c` (~300 LOC)
+- `include/log_collector.h`
+- `log` table from schema
+- SCM_RIGHTS fd passing, collector fork/reap, epoll for log fds
+- `journal.db` file and all references
+
+**Target platforms:**
+- systemd/journald: modern distros (AL2023, Ubuntu, Fedora) → structured logs via `sd_journal_send`
+- syslog only: Pogoplug (Debian Bookworm armel, busybox syslogd), Chromebook containers → traditional syslog
+- Neither: logs go to stderr only (always available as fallback)

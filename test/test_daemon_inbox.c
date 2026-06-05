@@ -18,12 +18,11 @@ static void setup(void) {
     mkdir(WORK_DIR, 0755);
     chdir(WORK_DIR);
 
-    /* Create agent directory + agent.db */
-    mkdir("agents", 0755);
-    mkdir("agents/" AGENT_NAME, 0755);
-    sqlite3 *adb = db_open_agent("agents/" AGENT_NAME "/agent.db");
-    assert(adb != NULL);
-    db_close(adb);
+    /* T297: single DB — set daemon db path and create it */
+    daemon_set_db_path("cclaw.db");
+    sqlite3 *db = db_open("cclaw.db");
+    assert(db != NULL);
+    db_close(db);
 }
 
 static void teardown(void) {
@@ -71,18 +70,18 @@ static int test_null_agent_returns_error(void) {
     return 0;
 }
 
-static int test_missing_agent_db_returns_error(void) {
+static int test_nonexistent_agent_still_works(void) {
     setup();
 
-    /* Agent dir doesn't exist */
+    /* T297: single DB — any agent name writes to same DB */
     int64_t id = daemon_inbox_insert("nonexistent", 1, "test", "msg");
-    assert(id == -1);
+    assert(id > 0);
 
     int count = daemon_inbox_count("nonexistent", 1);
-    assert(count == -1);
+    assert(count == 1);
 
     teardown();
-    printf("  PASS test_missing_agent_db_returns_error\n");
+    printf("  PASS test_nonexistent_agent_still_works\n");
     return 0;
 }
 
@@ -91,8 +90,8 @@ static int test_verify_in_agent_db(void) {
 
     daemon_inbox_insert(AGENT_NAME, 42, "sub-agent", "result data");
 
-    /* Open agent DB directly and verify */
-    sqlite3 *adb = db_open_agent("agents/" AGENT_NAME "/agent.db");
+    /* T297: verify in same cclaw.db */
+    sqlite3 *adb = db_open("cclaw.db");
     assert(adb != NULL);
 
     int count = 0;
@@ -115,7 +114,7 @@ int main(void) {
     int rc = 0;
     rc |= test_insert_and_count();
     rc |= test_null_agent_returns_error();
-    rc |= test_missing_agent_db_returns_error();
+    rc |= test_nonexistent_agent_still_works();
     rc |= test_verify_in_agent_db();
     if (rc == 0) printf("All daemon inbox tests passed.\n");
     return rc;

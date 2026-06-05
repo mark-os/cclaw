@@ -1018,11 +1018,7 @@ char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db) {
     snprintf(buf + n, sizeof(buf) - (size_t)n, "/workspace");
     mkdir(buf, 0755);
 
-    /* Create agent.db */
-    buf[n] = '\0';
-    snprintf(buf + n, sizeof(buf) - (size_t)n, "/agent.db");
-    sqlite3 *agent_db = db_open_agent(buf);
-    if (agent_db) db_close(agent_db);
+    /* T297: no per-agent DB — sessions/entries in single cclaw.db */
 
     /* Seed into daemon DB if provided */
     if (db) {

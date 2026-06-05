@@ -226,11 +226,12 @@ static void test_unauthorized_attempt(void) {
 
 /* T203/V78: daemon_resolve_approval updates PENDING entry + transitions state */
 static void test_resolve_approval_updates_pending(void) {
-    /* daemon_resolve_approval uses relative path "agents/<name>/agent.db" */
-    system("rm -rf /tmp/test_t203 && mkdir -p /tmp/test_t203/agents/coder");
+    system("rm -rf /tmp/test_t203 && mkdir -p /tmp/test_t203");
     assert(chdir("/tmp/test_t203") == 0);
 
-    sqlite3 *adb = db_open_agent("agents/coder/agent.db");
+    /* T297: single DB — set daemon db path */
+    daemon_set_db_path("cclaw.db");
+    sqlite3 *adb = db_open("cclaw.db");
     assert(adb);
 
     /* Create session in waiting state */
@@ -256,7 +257,7 @@ static void test_resolve_approval_updates_pending(void) {
     assert(rc == 0);
 
     /* Verify: reopen DB and check entry was updated */
-    adb = db_open_agent("agents/coder/agent.db");
+    adb = db_open("cclaw.db");
     assert(adb);
 
     const char *qsql = "SELECT content FROM entries WHERE session_id=? AND tool_call_id='tc_approval_123';";

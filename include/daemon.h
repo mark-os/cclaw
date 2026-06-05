@@ -29,6 +29,9 @@ int daemon_wake(const char *db_path);
 /* Close signal pipe (cleanup). */
 void daemon_signal_close(void);
 
+/* T297: Set daemon DB path for helper functions (inbox insert, etc.) */
+void daemon_set_db_path(const char *path);
+
 /* Get read-end fd for epoll registration. */
 int daemon_signal_fd(void);
 

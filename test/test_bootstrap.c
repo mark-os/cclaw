@@ -49,6 +49,9 @@ static int test_bootstrap_creates_ephemeral(void) {
     sqlite3 *db = db_open(DB_PATH);
     if (!db) { chdir(orig_cwd); FAIL("db_open"); }
 
+    /* T297: set daemon db path for helpers */
+    daemon_set_db_path(DB_PATH);
+
     int64_t sid = daemon_bootstrap(db);
     if (sid <= 0) { db_close(db); chdir(orig_cwd); FAIL("daemon_bootstrap should create session"); }
 
@@ -153,6 +156,7 @@ static int test_bootstrap_ignores_ephemeral_only(void) {
     sqlite3 *db = db_open("/tmp/test_bootstrap3.db");
     if (!db) { chdir(orig_cwd); FAIL("db_open"); }
 
+    daemon_set_db_path("/tmp/test_bootstrap3.db");
     int64_t sid = daemon_bootstrap(db);
     assert(sid > 0); /* should bootstrap since only ephemeral exists */
 

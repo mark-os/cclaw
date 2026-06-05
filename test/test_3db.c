@@ -1,4 +1,4 @@
-/* T195: Test 3-DB schema openers — V73, V4 */
+/* T297: Test unified single-DB schema — all tables in one file */
 #include "db.h"
 #include <assert.h>
 #include <stdio.h>
@@ -25,15 +25,15 @@ static int pragma_int(sqlite3 *db, const char *pragma) {
     return val;
 }
 
-static void test_daemon_db(void) {
-    unlink("/tmp/test_3db_daemon.db");
-    sqlite3 *db = db_open_cclaw("/tmp/test_3db_daemon.db");
+static void test_unified_db(void) {
+    unlink("/tmp/test_unified.db");
+    sqlite3 *db = db_open("/tmp/test_unified.db");
     assert(db);
 
     /* V4: WAL + busy_timeout */
     assert(pragma_int(db, "PRAGMA busy_timeout;") == 5000);
 
-    /* Has daemon tables */
+    /* Has all tables from former daemon schema */
     assert(table_exists(db, "agents"));
     assert(table_exists(db, "agent_config"));
     assert(table_exists(db, "providers"));
@@ -44,97 +44,56 @@ static void test_daemon_db(void) {
     assert(table_exists(db, "cron_jobs"));
     assert(table_exists(db, "approvals"));
 
-    /* Does NOT have agent tables */
-    assert(!table_exists(db, "sessions"));
-    assert(!table_exists(db, "entries"));
-    assert(!table_exists(db, "inbox"));
+    /* Has all tables from former agent schema */
+    assert(table_exists(db, "sessions"));
+    assert(table_exists(db, "entries"));
+    assert(table_exists(db, "inbox"));
+    assert(table_exists(db, "js_tools"));
+    assert(table_exists(db, "memory_blocks"));
+    assert(table_exists(db, "tool_calls"));
 
-    /* Does NOT have journal tables */
-    assert(!table_exists(db, "log"));
+    /* Has journal table */
+    assert(table_exists(db, "log"));
 
     /* kv seeded with defaults */
     char *val = db_kv_get(db, "provider.model");
     assert(val && strcmp(val, "deepseek/deepseek-v4-flash") == 0);
     free(val);
 
-    db_close(db);
-    unlink("/tmp/test_3db_daemon.db");
-    unlink("/tmp/test_3db_daemon.db-wal");
-    unlink("/tmp/test_3db_daemon.db-shm");
-    printf("PASS: test_daemon_db\n");
-}
-
-static void test_agent_db(void) {
-    unlink("/tmp/test_3db_agent.db");
-    sqlite3 *db = db_open_agent("/tmp/test_3db_agent.db");
-    assert(db);
-
-    /* V4: WAL + busy_timeout */
-    assert(pragma_int(db, "PRAGMA busy_timeout;") == 5000);
-
-    /* Has agent tables */
-    assert(table_exists(db, "sessions"));
-    assert(table_exists(db, "entries"));
-    assert(table_exists(db, "inbox"));
-    assert(table_exists(db, "js_tools"));
-    assert(table_exists(db, "memory_blocks"));
-    assert(table_exists(db, "kv"));
-
-    /* Does NOT have daemon tables */
-    assert(!table_exists(db, "agents"));
-    assert(!table_exists(db, "agent_config"));
-    /* T202/V73: spawn_queue is cclaw.db only */
-    assert(!table_exists(db, "spawn_queue"));
-    assert(!table_exists(db, "approvals"));
-
-    /* Does NOT have journal tables */
-    assert(!table_exists(db, "log"));
-
     /* Can create session + entry */
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
+    /* Can insert log line */
+    const char *sql = "INSERT INTO log(source, pid, stream, line) VALUES('test', 1, 1, 'hello');";
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    assert(rc == SQLITE_OK);
+
     db_close(db);
-    unlink("/tmp/test_3db_agent.db");
-    unlink("/tmp/test_3db_agent.db-wal");
-    unlink("/tmp/test_3db_agent.db-shm");
-    printf("PASS: test_agent_db\n");
+    unlink("/tmp/test_unified.db");
+    unlink("/tmp/test_unified.db-wal");
+    unlink("/tmp/test_unified.db-shm");
+    printf("PASS: test_unified_db\n");
 }
 
-static void test_journal_db(void) {
-    unlink("/tmp/test_3db_journal.db");
-    sqlite3 *db = db_open_journal("/tmp/test_3db_journal.db");
+static void test_aliases(void) {
+    /* db_open_cclaw, db_open_agent, db_open_journal all produce same schema */
+    unlink("/tmp/test_alias.db");
+    sqlite3 *db = db_open_cclaw("/tmp/test_alias.db");
     assert(db);
-
-    /* V4: WAL + busy_timeout */
-    assert(pragma_int(db, "PRAGMA busy_timeout;") == 5000);
-
-    /* Has log table */
+    assert(table_exists(db, "sessions"));
+    assert(table_exists(db, "agents"));
     assert(table_exists(db, "log"));
-
-    /* Does NOT have agent or daemon tables */
-    assert(!table_exists(db, "sessions"));
-    assert(!table_exists(db, "agents"));
-    assert(!table_exists(db, "kv"));
-
-    /* Can insert a log line */
-    const char *sql = "INSERT INTO log(source, pid, stream, line) VALUES('test', 1, 1, 'hello');";
-    char *err = NULL;
-    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
-    assert(rc == SQLITE_OK);
-    if (err) sqlite3_free(err);
-
     db_close(db);
-    unlink("/tmp/test_3db_journal.db");
-    unlink("/tmp/test_3db_journal.db-wal");
-    unlink("/tmp/test_3db_journal.db-shm");
-    printf("PASS: test_journal_db\n");
+    unlink("/tmp/test_alias.db");
+    unlink("/tmp/test_alias.db-wal");
+    unlink("/tmp/test_alias.db-shm");
+    printf("PASS: test_aliases\n");
 }
 
 int main(void) {
-    test_daemon_db();
-    test_agent_db();
-    test_journal_db();
+    test_unified_db();
+    test_aliases();
     printf("ALL PASS\n");
     return 0;
 }

@@ -150,6 +150,8 @@ int mock_server_start(void) {
     mg_set_request_handler(s_ctx, "/v1/chat/completions", handle_completions, NULL);
     /* T290: Gemini endpoint pattern */
     mg_set_request_handler(s_ctx, "/models/", handle_completions, NULL);
+    /* T291: Gemini cachedContents endpoint */
+    mg_set_request_handler(s_ctx, "/cachedContents", handle_completions, NULL);
 
     /* Get assigned port */
     struct mg_server_port ports[1];

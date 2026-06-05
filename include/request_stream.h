@@ -48,6 +48,9 @@ typedef struct {
 
     /* T290: Gemini mode — system msgs collected separately */
     int gemini_mode;            /* 1 if endpoint_type == gemini */
+
+    /* T291: Gemini context cache — if set, emit "cachedContent" in request */
+    const char *gemini_cache_name; /* NULL = no cache; caller-owned */
 } RequestStreamer;
 
 /* Initialize streamer. Does NOT prepare cursor yet (deferred to first read).

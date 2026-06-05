@@ -2,6 +2,7 @@
 #include "agent.h"
 #include "agent_exit.h"
 #include "context.h"
+#include "gemini_cache.h"
 #include "hook_dispatch.h"
 #include "log.h"
 #include "request_stream.h"
@@ -163,6 +164,7 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
                                          const ToolSchema *tools, size_t tool_count,
                                          const char *body_override,
                                          const char *recall_text,
+                                         const char *gemini_cache_name,
                                          HttpResponse *resp) {
     /* Mock mode: read canned response from file, skip HTTP entirely */
     const char *mock_path = getenv("CCLAW_LLM_MOCK");
@@ -256,12 +258,14 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
     if (rs_init(&rs, db, session_id, cfg, plan, tools, tool_count) != 0)
         return -1;
     rs.recall_text = recall_text;
+    rs.gemini_cache_name = gemini_cache_name;
 
     if (cfg->log_level >= LOG_LEVEL_TRACE) {
         /* Trace: stream entire request to stderr */
         RequestStreamer dbg_rs;
         rs_init(&dbg_rs, db, session_id, cfg, plan, tools, tool_count);
         dbg_rs.recall_text = recall_text;
+        dbg_rs.gemini_cache_name = gemini_cache_name;
         size_t cap = 4096, len = 0;
         char *dbuf = malloc(cap);
         if (dbuf) {
@@ -628,12 +632,21 @@ int agent_run(AgentContext *ctx) {
             HttpResponse resp = {0};
             struct timespec t_start;
             clock_gettime(CLOCK_MONOTONIC, &t_start);
+
+            /* T291: Gemini context caching — get or create cached content */
+            char *gcache = NULL;
+            if (call_cfg->provider.endpoint_type == ENDPOINT_GEMINI)
+                gcache = gemini_cache_get_or_create(ctx->db, ctx->session_id,
+                                                   call_cfg, &plan);
+
             int status = llm_call_with_fallback_stream(a, call_cfg, ctx->db,
                                                        ctx->session_id, &plan,
                                                        ctx->tools, ctx->tool_count,
                                                        body_override,
                                                        recall_text,
+                                                       gcache,
                                                        &resp);
+            free(gcache);
             free(body_override);
             free(recall_text);
             struct timespec t_end;

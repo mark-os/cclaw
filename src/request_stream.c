@@ -531,6 +531,24 @@ static int rs_advance(RequestStreamer *rs) {
     switch (rs->phase) {
     case RS_PHASE_PREAMBLE: {
         if (rs->gemini_mode) {
+            /* T291: if cached content active, skip systemInstruction (it's in cache) */
+            if (rs->gemini_cache_name && rs->gemini_cache_name[0]) {
+                size_t cn_len = strlen(rs->gemini_cache_name);
+                size_t need = 32 + cn_len * 2;
+                if (buf_ensure(rs, need) != 0) { rs->phase = RS_PHASE_DONE; return 1; }
+                size_t w = 0;
+                int n = snprintf(rs->buf, rs->buf_cap, "{\"cachedContent\":\"");
+                w = (size_t)n;
+                size_t elen = json_escape_into(rs->buf + w, rs->buf_cap - w, rs->gemini_cache_name);
+                w += elen;
+                int n2 = snprintf(rs->buf + w, rs->buf_cap - w, "\",\"contents\":[");
+                w += (size_t)n2;
+                rs->buf_len = w;
+                rs->buf_pos = 0;
+                rs->phase = RS_PHASE_ENTRIES;
+                return 0;
+            }
+
             /* T290: Gemini preamble — collect system msgs into systemInstruction */
             /* First pass: gather system content from plan entries */
             if (prepare_cursor(rs) != 0) { rs->phase = RS_PHASE_DONE; return 1; }

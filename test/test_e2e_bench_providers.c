@@ -152,23 +152,28 @@ int main(void) {
         "Reply with only: turn-5",
     };
 
+    /* Track results for verification */
+    TurnResult all_results[MAX_MODELS][TURNS];
+    int model_ok[MAX_MODELS]; /* 1 = all turns succeeded */
+    memset(all_results, 0, sizeof(all_results));
+    memset(model_ok, 0, sizeof(model_ok));
+
     for (int m = 0; m < model_count; m++) {
         printf("─── %s ───\n", models[m]);
         printf("  %-6s %7s %7s %7s %7s %10s %8s\n",
                "Turn", "Prompt", "Compl", "Cached", "Hit%", "Cost", "Latency");
 
-        /* Build message array that grows each turn (simulates real session) */
-        Message msgs[2 + TURNS * 2]; /* system + pairs of user/assistant */
+        Message msgs[2 + TURNS * 2];
         int msg_count = 0;
         msgs[msg_count++] = (Message){.role = ROLE_SYSTEM, .content = (char *)system_msg};
 
-        /* Session ID for sticky routing */
         char session_id[64];
         snprintf(session_id, sizeof(session_id), "bench-%d-%d", (int)getpid(), m);
 
         int64_t total_cost = 0;
         long total_latency = 0;
         int total_cached = 0, total_prompt = 0;
+        int failed = 0;
 
         for (int t = 0; t < TURNS; t++) {
             msgs[msg_count++] = (Message){.role = ROLE_USER, .content = (char *)prompts[t]};
@@ -176,10 +181,12 @@ int main(void) {
             TurnResult r = {0};
             if (do_turn(api_key, models[m], session_id, msgs, msg_count, &r) != 0) {
                 printf("  %-6d  FAILED\n", t + 1);
-                /* Still add a placeholder so context grows */
                 msgs[msg_count++] = (Message){.role = ROLE_ASSISTANT, .content = "(error)"};
+                failed = 1;
                 continue;
             }
+
+            all_results[m][t] = r;
 
             int hit_pct = r.prompt_tokens > 0 ? (r.cache_read * 100 / r.prompt_tokens) : 0;
             printf("  %-6d %7d %7d %7d %6d%% $%9.6f %6ldms\n",
@@ -192,10 +199,7 @@ int main(void) {
             total_cached += r.cache_read;
             total_prompt += r.prompt_tokens;
 
-            /* Add assistant response to context for next turn.
-             * We don't have the actual content (arena freed), so use a placeholder
-             * sized to approximate token count. Each turn must have its own buffer. */
-            int len = r.completion_tokens * 4; /* ~4 chars/token */
+            int len = r.completion_tokens * 4;
             if (len < 100) len = 100;
             if (len > 8000) len = 8000;
             char *asst_text = malloc((size_t)len + 1);
@@ -204,6 +208,7 @@ int main(void) {
             msgs[msg_count++] = (Message){.role = ROLE_ASSISTANT, .content = asst_text};
         }
 
+        model_ok[m] = !failed;
         int avg_cache = total_prompt > 0 ? (total_cached * 100 / total_prompt) : 0;
         printf("  ──────────────────────────────────────────────────────────\n");
         printf("  Total: $%.6f  avg_lat=%ldms  cache_hit=%d%%\n\n",
@@ -212,5 +217,52 @@ int main(void) {
                avg_cache);
     }
 
+    /* ── Verify caching ── */
+    printf("═══════════════════════════════════════════════════════════════════════════════════\n");
+    printf("Cache Verification\n\n");
+    int any_cached = 0;
+    int any_cost_decreased = 0;
+
+    for (int m = 0; m < model_count; m++) {
+        if (!model_ok[m]) {
+            printf("  [SKIP] %s — had failed turns\n", models[m]);
+            continue;
+        }
+
+        /* Check: cached_tokens > 0 on any turn 3+ (index 2+) */
+        int model_cached = 0;
+        for (int t = 2; t < TURNS; t++) {
+            if (all_results[m][t].cache_read > 0) {
+                model_cached = 1;
+                break;
+            }
+        }
+
+        /* Check: cost at turn 4 < cost at turn 2 (cache reduces effective cost) */
+        int64_t cost_t2 = all_results[m][1].cost_nano; /* turn 2 = index 1 */
+        int64_t cost_t4 = all_results[m][3].cost_nano; /* turn 4 = index 3 */
+        int cost_decreased = (cost_t2 > 0 && cost_t4 < cost_t2);
+
+        if (model_cached && cost_decreased) {
+            printf("  [PASS] %s: cached_tokens>0 on turn 3+, cost t2=$%.6f > t4=$%.6f\n",
+                   models[m], (double)cost_t2 / 1e9, (double)cost_t4 / 1e9);
+            any_cached = 1;
+            any_cost_decreased = 1;
+        } else if (model_cached) {
+            printf("  [WARN] %s: caching active but cost t4=$%.6f >= t2=$%.6f (context growth)\n",
+                   models[m], (double)cost_t4 / 1e9, (double)cost_t2 / 1e9);
+            any_cached = 1;
+        } else {
+            printf("  [WARN] %s: no cache hits reported (provider may not support)\n", models[m]);
+        }
+    }
+
+    if (!any_cached) {
+        printf("\n  [FAIL] No model reported cached_tokens > 0 — cache_control not working\n");
+        return 1;
+    }
+    printf("\n  Cache verification passed: %s%s\n",
+           any_cached ? "caching confirmed" : "",
+           any_cost_decreased ? ", cost decrease observed" : "");
     return 0;
 }

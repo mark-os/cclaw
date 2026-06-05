@@ -239,12 +239,12 @@ static size_t emit_entry_openai(char *dest, size_t cap, int role,
 static size_t emit_tool_calls_gemini(char *dest, size_t cap, const char *tc_json, int has_prior);
 
 /* T123: detect if model needs explicit cache_control markers.
- * Default ON — providers that don't support it silently ignore the field. */
+ * Default ON — providers that don't support it silently ignore the field.
+ * T292: gemini-native disables annotations (uses cachedContents API only). */
 static int needs_cache_control(const Config *cfg) {
     CacheHints h = cfg->provider.cache_hints;
     if (h == CACHE_HINTS_OFF) return 0;
-    if (h == CACHE_HINTS_ON) return 1;
-    /* AUTO: always enable — safe to send, ignored by unsupported providers */
+    if (h == CACHE_HINTS_GEMINI_NATIVE) return 0;
     return 1;
 }
 

@@ -213,6 +213,15 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_STREAM");
     cfg->stream = v ? atoi(v) : 0;
 
+    /* T292: cache_hints */
+    v = getenv("CCLAW_CACHE_HINTS");
+    if (v) {
+        if (strcmp(v, "on") == 0) cfg->provider.cache_hints = CACHE_HINTS_ON;
+        else if (strcmp(v, "off") == 0) cfg->provider.cache_hints = CACHE_HINTS_OFF;
+        else if (strcmp(v, "gemini-native") == 0) cfg->provider.cache_hints = CACHE_HINTS_GEMINI_NATIVE;
+        else cfg->provider.cache_hints = CACHE_HINTS_AUTO;
+    }
+
     return cfg;
 }
 
@@ -268,6 +277,7 @@ Config *config_load(sqlite3 *db) {
         if (v) {
             if (strcmp(v, "on") == 0) cfg->provider.cache_hints = CACHE_HINTS_ON;
             else if (strcmp(v, "off") == 0) cfg->provider.cache_hints = CACHE_HINTS_OFF;
+            else if (strcmp(v, "gemini-native") == 0) cfg->provider.cache_hints = CACHE_HINTS_GEMINI_NATIVE;
             else cfg->provider.cache_hints = CACHE_HINTS_AUTO;
             free(v);
         } else {

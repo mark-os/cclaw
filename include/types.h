@@ -85,9 +85,10 @@ typedef struct {
 
 /* T123: cache hint strategy */
 typedef enum {
-    CACHE_HINTS_AUTO = 0,   /* detect from model name */
-    CACHE_HINTS_ON,         /* force cache markers */
-    CACHE_HINTS_OFF         /* disable cache markers */
+    CACHE_HINTS_AUTO = 0,   /* send annotations for all providers + gemini native */
+    CACHE_HINTS_ON,         /* force cache markers (same as auto) */
+    CACHE_HINTS_OFF,        /* disable all cache markers */
+    CACHE_HINTS_GEMINI_NATIVE /* use T291 cachedContents API only, no annotations */
 } CacheHints;
 
 /* T290: provider endpoint type (wire format) */

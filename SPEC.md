@@ -237,7 +237,7 @@ T288|x|e2e: pure reasoning (no tools) — thinking + content, stop_reason=stop, 
 T289|x|per-content-block `cache_control` — emit `{"type":"text","text":"...","cache_control":{"type":"ephemeral"}}` on last system msg content block in request_stream; enables Gemini+Anthropic+Alibaba explicit caching through OpenRouter; providers that ⊥ support silently ignore|V41
 T290|x|Gemini direct provider — `endpoint_type=gemini` in providers table; request builder emits native Gemini `contents[]` format (⊥ OpenAI compat); response parser handles `candidates[0].content.parts[]`; base_url=`https://generativelanguage.googleapis.com/v1beta/models/{model}`; tool_calls → `functionCall` parts|§I,V89
 T291|x|Gemini context caching — for `endpoint_type=gemini`: if session > 1024 tokens, call `POST /cachedContents` w/ system+history prefix, get `cachedContents/{id}`, pass `cachedContent` field in generateContent; TTL 300s; cache name stored in session kv (`gemini_cache_name`); reuse if ⊥ expired; delete on session end|T290,V61
-T292|.|cache_control config — `cache_hints` values: `auto` (default, send top-level + per-block for all providers), `on` (force), `off` (disable), `gemini-native` (use T291 cachedContents API directly); env `CCLAW_CACHE_HINTS`|V90
+T292|x|cache_control config — `cache_hints` values: `auto` (default, send top-level + per-block for all providers), `on` (force), `off` (disable), `gemini-native` (use T291 cachedContents API directly); env `CCLAW_CACHE_HINTS`|V90
 T293|.|bench: verify caching — extend `test_e2e_bench_providers.c` or `bench_providers.py` to confirm `cached_tokens > 0` on turn 3+ for each model; fail if cost ⊥ decrease between turn 2 and turn 4|T289,T291
 
 Test tiers (Makefile targets):

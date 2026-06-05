@@ -635,7 +635,8 @@ int agent_run(AgentContext *ctx) {
 
             /* T291: Gemini context caching — get or create cached content */
             char *gcache = NULL;
-            if (call_cfg->provider.endpoint_type == ENDPOINT_GEMINI)
+            if (call_cfg->provider.endpoint_type == ENDPOINT_GEMINI &&
+                call_cfg->provider.cache_hints != CACHE_HINTS_OFF)
                 gcache = gemini_cache_get_or_create(ctx->db, ctx->session_id,
                                                    call_cfg, &plan);
 

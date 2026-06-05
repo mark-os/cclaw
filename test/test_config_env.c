@@ -26,6 +26,7 @@ static void clear_env(void) {
     unsetenv("CCLAW_SAVE_USAGE");
     unsetenv("CCLAW_SAVE_LOGPROBS");
     unsetenv("CCLAW_LOG_LEVEL");
+    unsetenv("CCLAW_CACHE_HINTS");
 }
 
 static void test_env_defaults(void) {
@@ -144,6 +145,37 @@ static void test_render_no_template_vars(void) {
     printf("  PASS test_render_no_template_vars\n");
 }
 
+static void test_cache_hints_env(void) {
+    clear_env();
+    setenv("OPENROUTER_API_KEY", "k", 1);
+
+    /* default = auto */
+    Config *cfg = config_load_from_env();
+    assert(cfg->provider.cache_hints == CACHE_HINTS_AUTO);
+    config_free(cfg);
+
+    /* on */
+    setenv("CCLAW_CACHE_HINTS", "on", 1);
+    cfg = config_load_from_env();
+    assert(cfg->provider.cache_hints == CACHE_HINTS_ON);
+    config_free(cfg);
+
+    /* off */
+    setenv("CCLAW_CACHE_HINTS", "off", 1);
+    cfg = config_load_from_env();
+    assert(cfg->provider.cache_hints == CACHE_HINTS_OFF);
+    config_free(cfg);
+
+    /* gemini-native */
+    setenv("CCLAW_CACHE_HINTS", "gemini-native", 1);
+    cfg = config_load_from_env();
+    assert(cfg->provider.cache_hints == CACHE_HINTS_GEMINI_NATIVE);
+    config_free(cfg);
+
+    clear_env();
+    printf("  PASS test_cache_hints_env\n");
+}
+
 int main(void) {
     alarm(10);
     printf("test_config_env:\n");
@@ -153,6 +185,7 @@ int main(void) {
     test_env_all_overrides();
     test_render_workspace_var();
     test_render_no_template_vars();
+    test_cache_hints_env();
     printf("All config_env tests passed.\n");
     return 0;
 }

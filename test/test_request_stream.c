@@ -612,6 +612,48 @@ static void test_multiple_tool_calls_complex_args(void) {
     printf(" OK\n");
 }
 
+/* T292: gemini-native disables per-block cache_control annotations */
+static void test_cache_hints_gemini_native(void) {
+    printf("  test_cache_hints_gemini_native...");
+
+    sqlite3 *db = test_db_open();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    assert(sid > 0);
+
+    Message sys = {.role = ROLE_SYSTEM, .content = "sys prompt"};
+    entry_append(db, sid, &sys);
+    Message msg = {.role = ROLE_USER, .content = "hi"};
+    entry_append(db, sid, &msg);
+
+    Config cfg = {0};
+    cfg.provider.model = "anthropic/claude-sonnet-4";
+    cfg.provider.context_window = 100000;
+    cfg.provider.cache_hints = CACHE_HINTS_GEMINI_NATIVE;
+
+    ContextPlan plan;
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+
+    RequestStreamer rs;
+    assert(rs_init(&rs, db, sid, &cfg, &plan, NULL, 0) == 0);
+
+    char *json = stream_all(&rs);
+    cJSON *root = cJSON_Parse(json);
+    assert(root);
+
+    /* System msg should be plain string (no cache_control annotations) */
+    cJSON *messages = cJSON_GetObjectItem(root, "messages");
+    cJSON *m0 = cJSON_GetArrayItem(messages, 0);
+    cJSON *content = cJSON_GetObjectItem(m0, "content");
+    assert(cJSON_IsString(content));
+
+    cJSON_Delete(root);
+    free(json);
+    rs_cleanup(&rs);
+    context_plan_free(&plan);
+    sqlite3_close(db);
+    printf(" OK\n");
+}
+
 int main(void) {
     printf("test_request_stream:\n");
     test_basic_user_message();
@@ -624,6 +666,7 @@ int main(void) {
     test_cache_hints_anthropic();
     test_cache_hints_deepseek_auto();
     test_cache_hints_forced();
+    test_cache_hints_gemini_native();
     test_multiple_tool_calls_complex_args();
     printf("All request_stream tests passed.\n");
     return 0;

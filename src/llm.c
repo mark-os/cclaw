@@ -2,6 +2,7 @@
 #include "cJSON.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* V35: sole normalization point for provider finish_reason → StopReason */
 StopReason map_stop_reason(const char *finish_reason) {
@@ -251,6 +252,127 @@ int llm_parse_response(Arena *a, const char *json, LlmResponse *out) {
             out->logprobs_json = arena_strdup(a, lp_str);
             free(lp_str);
         }
+    }
+
+    cJSON_Delete(root);
+    return 0;
+}
+
+/* T290: Parse native Gemini generateContent response.
+ * Format: candidates[0].content.parts[] with text/functionCall parts,
+ * finishReason at candidate level, usageMetadata at root. */
+int llm_parse_response_gemini(Arena *a, const char *json, LlmResponse *out) {
+    if (!json || !out) return -1;
+    memset(out, 0, sizeof(*out));
+
+    cJSON *root = cJSON_Parse(json);
+    if (!root) return -1;
+
+    cJSON *candidates = cJSON_GetObjectItem(root, "candidates");
+    if (!candidates || cJSON_GetArraySize(candidates) == 0) {
+        cJSON_Delete(root);
+        return -1;
+    }
+
+    cJSON *cand0 = cJSON_GetArrayItem(candidates, 0);
+    cJSON *content = cJSON_GetObjectItem(cand0, "content");
+    cJSON *parts = content ? cJSON_GetObjectItem(content, "parts") : NULL;
+
+    /* finishReason — Gemini uses UPPER_CASE: STOP, MAX_TOKENS, SAFETY, etc. */
+    cJSON *fr = cJSON_GetObjectItem(cand0, "finishReason");
+    if (fr && cJSON_IsString(fr)) {
+        /* Map Gemini finishReason to OpenAI-style for map_stop_reason */
+        const char *greason = fr->valuestring;
+        if (strcmp(greason, "STOP") == 0)
+            out->finish_reason = arena_strdup(a, "stop");
+        else if (strcmp(greason, "MAX_TOKENS") == 0)
+            out->finish_reason = arena_strdup(a, "length");
+        else if (strcmp(greason, "SAFETY") == 0 || strcmp(greason, "RECITATION") == 0)
+            out->finish_reason = arena_strdup(a, "content_filter");
+        else
+            out->finish_reason = arena_strdup(a, greason);
+    }
+
+    if (parts && cJSON_IsArray(parts)) {
+        int nparts = cJSON_GetArraySize(parts);
+
+        /* Count text and functionCall parts */
+        size_t text_total = 0;
+        int fc_count = 0;
+        for (int i = 0; i < nparts; i++) {
+            cJSON *part = cJSON_GetArrayItem(parts, i);
+            cJSON *text = cJSON_GetObjectItem(part, "text");
+            if (text && cJSON_IsString(text))
+                text_total += strlen(text->valuestring) + 1;
+            if (cJSON_GetObjectItem(part, "functionCall"))
+                fc_count++;
+        }
+
+        /* Concatenate text parts */
+        if (text_total > 0) {
+            char *buf = arena_alloc(a, text_total);
+            if (buf) {
+                buf[0] = '\0';
+                for (int i = 0; i < nparts; i++) {
+                    cJSON *part = cJSON_GetArrayItem(parts, i);
+                    cJSON *text = cJSON_GetObjectItem(part, "text");
+                    if (text && cJSON_IsString(text)) {
+                        if (buf[0]) strcat(buf, "\n");
+                        strcat(buf, text->valuestring);
+                    }
+                }
+                out->content = buf;
+            }
+        }
+
+        /* Extract functionCall parts → tool_calls */
+        if (fc_count > 0) {
+            out->tool_calls = arena_alloc(a, (size_t)fc_count * sizeof(ToolCall));
+            if (out->tool_calls) {
+                out->tool_call_count = (size_t)fc_count;
+                int ti = 0;
+                for (int i = 0; i < nparts && ti < fc_count; i++) {
+                    cJSON *part = cJSON_GetArrayItem(parts, i);
+                    cJSON *fc = cJSON_GetObjectItem(part, "functionCall");
+                    if (!fc) continue;
+                    cJSON *name = cJSON_GetObjectItem(fc, "name");
+                    cJSON *args = cJSON_GetObjectItem(fc, "args");
+
+                    out->tool_calls[ti].name = arena_strdup(a, name && cJSON_IsString(name) ? name->valuestring : "");
+                    /* Generate a synthetic ID (Gemini doesn't provide one) */
+                    char id_buf[32];
+                    snprintf(id_buf, sizeof(id_buf), "call_gemini_%d", ti);
+                    out->tool_calls[ti].id = arena_strdup(a, id_buf);
+                    /* args is an object — stringify it */
+                    if (args) {
+                        char *args_str = cJSON_PrintUnformatted(args);
+                        out->tool_calls[ti].arguments = arena_strdup(a, args_str ? args_str : "{}");
+                        free(args_str);
+                    } else {
+                        out->tool_calls[ti].arguments = arena_strdup(a, "{}");
+                    }
+                    ti++;
+                }
+                /* Set finish_reason to tool_calls if we have function calls */
+                if (!out->finish_reason || strcmp(out->finish_reason, "stop") == 0)
+                    out->finish_reason = arena_strdup(a, "tool_calls");
+            }
+        }
+    }
+
+    /* usageMetadata */
+    cJSON *usage = cJSON_GetObjectItem(root, "usageMetadata");
+    if (usage) {
+        cJSON *pt = cJSON_GetObjectItem(usage, "promptTokenCount");
+        cJSON *ct = cJSON_GetObjectItem(usage, "candidatesTokenCount");
+        cJSON *tt = cJSON_GetObjectItem(usage, "totalTokenCount");
+        if (pt && cJSON_IsNumber(pt)) out->usage.prompt_tokens = pt->valueint;
+        if (ct && cJSON_IsNumber(ct)) out->usage.completion_tokens = ct->valueint;
+        if (tt && cJSON_IsNumber(tt)) out->usage.total_tokens = tt->valueint;
+        else out->usage.total_tokens = out->usage.prompt_tokens + out->usage.completion_tokens;
+        /* Cached token support */
+        cJSON *cached = cJSON_GetObjectItem(usage, "cachedContentTokenCount");
+        if (cached && cJSON_IsNumber(cached)) out->usage.cache_read_tokens = cached->valueint;
     }
 
     cJSON_Delete(root);

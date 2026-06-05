@@ -235,6 +235,9 @@ static size_t emit_entry_openai(char *dest, size_t cap, int role,
     return w;
 }
 
+/* T290: forward declaration for Gemini tool_calls emitter */
+static size_t emit_tool_calls_gemini(char *dest, size_t cap, const char *tc_json, int has_prior);
+
 /* T123: detect if model needs explicit cache_control markers.
  * Default ON — providers that don't support it silently ignore the field. */
 static int needs_cache_control(const Config *cfg) {
@@ -243,6 +246,146 @@ static int needs_cache_control(const Config *cfg) {
     if (h == CACHE_HINTS_ON) return 1;
     /* AUTO: always enable — safe to send, ignored by unsupported providers */
     return 1;
+}
+
+/* T290: Emit a single entry as Gemini wire JSON (contents[] element).
+ * Gemini format: {"role":"user|model","parts":[{"text":"..."}]}
+ * Tool results are functionResponse parts in a user message.
+ * Tool calls are functionCall parts in a model message.
+ * System messages are NOT emitted here — they go in systemInstruction. */
+static size_t emit_entry_gemini(char *dest, size_t cap, int role,
+                                const char *content, const char *tool_calls,
+                                const char *tool_call_id) {
+    size_t w = 0;
+    #define DEST_AT_G(off) (dest ? dest + (off) : NULL)
+    #define EMIT_G(s, l) do { \
+        for (size_t _i = 0; _i < (l); _i++) { \
+            if (w < cap && dest) dest[w] = (s)[_i]; \
+            w++; \
+        } \
+    } while(0)
+    #define EMITS_G(s) EMIT_G(s, strlen(s))
+
+    if (role == 3) {
+        /* tool result → {"role":"user","parts":[{"functionResponse":{"name":"<id>","response":{"content":"..."}}}]} */
+        EMITS_G("{\"role\":\"user\",\"parts\":[{\"functionResponse\":{\"name\":\"");
+        size_t elen = json_escape_into(DEST_AT_G(w < cap ? w : 0), w < cap ? cap - w : 0,
+                                       tool_call_id ? tool_call_id : "");
+        w += elen;
+        EMITS_G("\",\"response\":{\"content\":\"");
+        elen = json_escape_into(DEST_AT_G(w < cap ? w : 0), w < cap ? cap - w : 0,
+                                content ? content : "");
+        w += elen;
+        EMITS_G("\"}}}]}");
+    } else if (role == 2) {
+        /* assistant → {"role":"model","parts":[...]} */
+        EMITS_G("{\"role\":\"model\",\"parts\":[");
+        int has_content = (content && content[0]);
+        if (has_content) {
+            EMITS_G("{\"text\":\"");
+            size_t elen = json_escape_into(DEST_AT_G(w < cap ? w : 0), w < cap ? cap - w : 0, content);
+            w += elen;
+            EMITS_G("\"}");
+        }
+        /* Emit functionCall parts from tool_calls JSON */
+        if (tool_calls) {
+            size_t tc_len = emit_tool_calls_gemini(DEST_AT_G(w < cap ? w : 0),
+                                                   w < cap ? cap - w : 0,
+                                                   tool_calls, has_content);
+            w += tc_len;
+        }
+        EMITS_G("]}");
+    } else if (role == 1) {
+        /* user → {"role":"user","parts":[{"text":"..."}]} */
+        EMITS_G("{\"role\":\"user\",\"parts\":[{\"text\":\"");
+        size_t elen = json_escape_into(DEST_AT_G(w < cap ? w : 0), w < cap ? cap - w : 0,
+                                       content ? content : "");
+        w += elen;
+        EMITS_G("\"}]}");
+    }
+    /* role == 0 (system) skipped — handled separately as systemInstruction */
+
+    if (w < cap && dest) dest[w] = '\0';
+    #undef EMIT_G
+    #undef EMITS_G
+    #undef DEST_AT_G
+    return w;
+}
+
+/* T290: emit tool_calls as Gemini functionCall parts.
+ * Format: ,{"functionCall":{"name":"...","args":{...}}} for each tool call.
+ * The comma prefix is conditional on has_prior (content text before). */
+static size_t emit_tool_calls_gemini(char *dest, size_t cap, const char *tc_json, int has_prior) {
+    if (!tc_json) return 0;
+    size_t w = 0;
+    #define EMIT_TG(s, l) do { \
+        for (size_t _i = 0; _i < (l); _i++) { \
+            if (w < cap && dest) dest[w] = (s)[_i]; \
+            w++; \
+        } \
+    } while(0)
+    #define EMITS_TG(s) EMIT_TG(s, strlen(s))
+
+    size_t p = 0;
+    while (tc_json[p] && tc_json[p] != '[') p++;
+    if (!tc_json[p]) return 0;
+    p++;
+
+    int item_idx = 0;
+    while (tc_json[p]) {
+        while (tc_json[p] == ' ' || tc_json[p] == '\t' || tc_json[p] == '\n' || tc_json[p] == '\r') p++;
+        if (tc_json[p] == ']') break;
+        if (tc_json[p] == ',') { p++; continue; }
+        if (tc_json[p] != '{') break;
+        p++;
+
+        const char *name_start = NULL; size_t name_len = 0;
+        const char *args_start = NULL; size_t args_len = 0;
+
+        while (tc_json[p] && tc_json[p] != '}') {
+            while (tc_json[p] == ' ' || tc_json[p] == '\t' || tc_json[p] == '\n' || tc_json[p] == '\r' || tc_json[p] == ',') p++;
+            if (tc_json[p] == '}') break;
+            if (tc_json[p] != '"') break;
+
+            size_t key_pos = p;
+            p = skip_json_string(tc_json, p);
+            if (p == 0) goto done_g;
+            while (tc_json[p] == ' ' || tc_json[p] == ':' || tc_json[p] == '\t') p++;
+            size_t val_start = p;
+            size_t val_end = skip_json_value(tc_json, p);
+            if (val_end == 0) goto done_g;
+
+            if (match_key(tc_json, key_pos, "name", 4)) {
+                if (tc_json[val_start] == '"') {
+                    name_start = tc_json + val_start + 1;
+                    name_len = val_end - val_start - 2;
+                }
+            } else if (match_key(tc_json, key_pos, "args", 4)) {
+                args_start = tc_json + val_start;
+                args_len = val_end - val_start;
+            }
+            p = val_end;
+        }
+        if (tc_json[p] == '}') p++;
+
+        if (has_prior || item_idx > 0) { EMIT_TG(",", 1); }
+        item_idx++;
+
+        EMITS_TG("{\"functionCall\":{\"name\":\"");
+        if (name_start) EMIT_TG(name_start, name_len);
+        EMITS_TG("\",\"args\":");
+        /* Emit args as raw object (not stringified) */
+        if (args_start && args_len > 0)
+            EMIT_TG(args_start, args_len);
+        else
+            EMITS_TG("{}");
+        EMITS_TG("}}");
+    }
+
+done_g:
+    #undef EMIT_TG
+    #undef EMITS_TG
+    return w;
 }
 
 /* Internal buffer management */
@@ -313,6 +456,42 @@ static char *build_tools_fragment(const ToolSchema *tools, size_t count) {
     return frag;
 }
 
+/* T290: Build Gemini tools fragment: ,"tools":[{"functionDeclarations":[...]}] */
+static char *build_tools_fragment_gemini(const ToolSchema *tools, size_t count) {
+    if (!tools || count == 0) return NULL;
+
+    cJSON *decls = cJSON_CreateArray();
+    for (size_t i = 0; i < count; i++) {
+        cJSON *fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", tools[i].name);
+        if (tools[i].description)
+            cJSON_AddStringToObject(fn, "description", tools[i].description);
+        if (tools[i].parameters_json) {
+            cJSON *params = cJSON_Parse(tools[i].parameters_json);
+            if (params)
+                cJSON_AddItemToObject(fn, "parameters", params);
+        }
+        cJSON_AddItemToArray(decls, fn);
+    }
+
+    cJSON *tool_obj = cJSON_CreateObject();
+    cJSON_AddItemToObject(tool_obj, "functionDeclarations", decls);
+    cJSON *tools_arr = cJSON_CreateArray();
+    cJSON_AddItemToArray(tools_arr, tool_obj);
+
+    char *arr_str = cJSON_PrintUnformatted(tools_arr);
+    cJSON_Delete(tools_arr);
+    if (!arr_str) return NULL;
+
+    size_t alen = strlen(arr_str);
+    size_t flen = 9 + alen; /* ,"tools": + arr */
+    char *frag = malloc(flen + 1);
+    if (!frag) { free(arr_str); return NULL; }
+    snprintf(frag, flen + 1, ",\"tools\":%s", arr_str);
+    free(arr_str);
+    return frag;
+}
+
 int rs_init(RequestStreamer *rs, sqlite3 *db, int64_t session_id,
             const Config *cfg, const ContextPlan *plan,
             const ToolSchema *tools, size_t tool_count) {
@@ -327,10 +506,11 @@ int rs_init(RequestStreamer *rs, sqlite3 *db, int64_t session_id,
     rs->entry_idx = plan->cut; /* start from cut point */
     rs->first_entry = 1;
     rs->cursor = NULL;
+    rs->gemini_mode = (cfg->provider.endpoint_type == ENDPOINT_GEMINI) ? 1 : 0;
 
     /* T289: find last system message index for per-block cache_control */
     rs->last_sys_idx = -1;
-    if (needs_cache_control(cfg)) {
+    if (!rs->gemini_mode && needs_cache_control(cfg)) {
         for (int i = plan->cut; i < plan->count; i++) {
             if (plan->entries[i].role == ROLE_SYSTEM)
                 rs->last_sys_idx = i;
@@ -350,6 +530,70 @@ static int prepare_cursor(RequestStreamer *rs) {
 static int rs_advance(RequestStreamer *rs) {
     switch (rs->phase) {
     case RS_PHASE_PREAMBLE: {
+        if (rs->gemini_mode) {
+            /* T290: Gemini preamble — collect system msgs into systemInstruction */
+            /* First pass: gather system content from plan entries */
+            if (prepare_cursor(rs) != 0) { rs->phase = RS_PHASE_DONE; return 1; }
+
+            /* Estimate: accumulate system text */
+            char *sys_text = NULL;
+            size_t sys_len = 0, sys_cap = 0;
+            for (int i = rs->plan->cut; i < rs->plan->count; i++) {
+                if (rs->plan->entries[i].role != ROLE_SYSTEM) continue;
+                sqlite3_reset(rs->cursor);
+                sqlite3_bind_int64(rs->cursor, 1, rs->plan->entries[i].id);
+                sqlite3_bind_int64(rs->cursor, 2, rs->session_id);
+                if (sqlite3_step(rs->cursor) != SQLITE_ROW) continue;
+                const char *c = (const char *)sqlite3_column_text(rs->cursor, 1);
+                if (!c || !c[0]) continue;
+                size_t clen = strlen(c);
+                if (sys_len + clen + 2 > sys_cap) {
+                    sys_cap = (sys_cap == 0) ? 4096 : sys_cap * 2;
+                    while (sys_cap < sys_len + clen + 2) sys_cap *= 2;
+                    sys_text = realloc(sys_text, sys_cap);
+                }
+                if (sys_len > 0) sys_text[sys_len++] = '\n';
+                memcpy(sys_text + sys_len, c, clen);
+                sys_len += clen;
+                sys_text[sys_len] = '\0';
+            }
+            /* Also include recall_text in system instruction */
+            if (rs->recall_text && rs->recall_text[0]) {
+                size_t rlen = strlen(rs->recall_text);
+                if (sys_len + rlen + 2 > sys_cap) {
+                    sys_cap = sys_len + rlen + 256;
+                    sys_text = realloc(sys_text, sys_cap);
+                }
+                if (sys_len > 0) sys_text[sys_len++] = '\n';
+                memcpy(sys_text + sys_len, rs->recall_text, rlen);
+                sys_len += rlen;
+                sys_text[sys_len] = '\0';
+            }
+
+            /* Build: {"systemInstruction":{"parts":[{"text":"..."}]},"contents":[ */
+            size_t need = 128 + (sys_len * 6); /* escaped text might be 6x */
+            if (buf_ensure(rs, need) != 0) { free(sys_text); return 1; }
+
+            size_t w = 0;
+            if (sys_text && sys_len > 0) {
+                int n = snprintf(rs->buf, rs->buf_cap, "{\"systemInstruction\":{\"parts\":[{\"text\":\"");
+                w = (size_t)n;
+                size_t elen = json_escape_into(rs->buf + w, rs->buf_cap - w, sys_text);
+                w += elen;
+                int n2 = snprintf(rs->buf + w, rs->buf_cap - w, "\"}]},\"contents\":[");
+                w += (size_t)n2;
+            } else {
+                int n = snprintf(rs->buf, rs->buf_cap, "{\"contents\":[");
+                w = (size_t)n;
+            }
+            free(sys_text);
+            rs->buf_len = w;
+            rs->buf_pos = 0;
+            rs->phase = RS_PHASE_ENTRIES;
+            return 0;
+        }
+
+        /* OpenAI preamble (existing) */
         /* Build: {"model":"...","messages":[ */
         /* Also prepend cutoff notice as system message if truncated */
         const char *model = rs->cfg->provider.model ? rs->cfg->provider.model : "unknown";
@@ -406,6 +650,12 @@ static int rs_advance(RequestStreamer *rs) {
             return 1;
         }
 
+        /* T290: skip system entries in Gemini mode (already in systemInstruction) */
+        if (rs->gemini_mode && rs->plan->entries[rs->entry_idx].role == ROLE_SYSTEM) {
+            rs->entry_idx++;
+            return rs_advance(rs);
+        }
+
         int64_t eid = rs->plan->entries[rs->entry_idx].id;
         sqlite3_reset(rs->cursor);
         sqlite3_bind_int64(rs->cursor, 1, eid);
@@ -422,6 +672,26 @@ static int rs_advance(RequestStreamer *rs) {
         const char *content = (const char *)sqlite3_column_text(rs->cursor, 1);
         const char *tool_calls = (const char *)sqlite3_column_text(rs->cursor, 2);
         const char *tool_call_id = (const char *)sqlite3_column_text(rs->cursor, 3);
+
+        if (rs->gemini_mode) {
+            /* T290: Gemini entry emission */
+            size_t need = emit_entry_gemini(NULL, 0, role, content, tool_calls, tool_call_id);
+            need += 2;
+            if (buf_ensure(rs, need) != 0) { rs->entry_idx++; return rs_advance(rs); }
+
+            if (rs->first_entry) {
+                size_t written = emit_entry_gemini(rs->buf, rs->buf_cap, role, content, tool_calls, tool_call_id);
+                rs->buf_len = written;
+                rs->first_entry = 0;
+            } else {
+                rs->buf[0] = ',';
+                size_t written = emit_entry_gemini(rs->buf + 1, rs->buf_cap - 1, role, content, tool_calls, tool_call_id);
+                rs->buf_len = written + 1;
+            }
+            rs->buf_pos = 0;
+            rs->entry_idx++;
+            return 0;
+        }
 
         /* V60: emit directly via json_escape_into + snprintf — no cJSON on output */
         /* T289: mark last system msg for per-block cache_control */
@@ -446,6 +716,26 @@ static int rs_advance(RequestStreamer *rs) {
     }
 
     case RS_PHASE_TOOLS: {
+        if (rs->gemini_mode) {
+            /* T290: Gemini tools format: ],"tools":[{"functionDeclarations":[...]}] */
+            char *frag = NULL;
+            if (rs->tools && rs->tool_count > 0)
+                frag = build_tools_fragment_gemini(rs->tools, rs->tool_count);
+            if (frag) {
+                size_t flen = strlen(frag);
+                if (buf_ensure(rs, 1 + flen) != 0) { free(frag); rs->phase = RS_PHASE_DONE; return 1; }
+                rs->buf[0] = ']';
+                memcpy(rs->buf + 1, frag, flen);
+                rs->buf_len = 1 + flen;
+                rs->buf_pos = 0;
+                free(frag);
+            } else {
+                buf_set(rs, "]", 1);
+            }
+            rs->phase = RS_PHASE_CLOSE;
+            return 0;
+        }
+
         /* Close messages array, optionally append tools fragment */
         char *frag = NULL;
         if (rs->tools && rs->tool_count > 0)
@@ -470,9 +760,16 @@ static int rs_advance(RequestStreamer *rs) {
 
     case RS_PHASE_CLOSE: {
         /* Optional stream + max_tokens + close root object */
-        char close_buf[96];
+        char close_buf[128];
         int n = 0;
-        if (rs->cfg->stream && rs->cfg->provider.max_tokens > 0)
+        if (rs->gemini_mode) {
+            /* T290: Gemini uses generationConfig for max_tokens */
+            if (rs->cfg->provider.max_tokens > 0)
+                n = snprintf(close_buf, sizeof(close_buf),
+                             ",\"generationConfig\":{\"maxOutputTokens\":%d}}", rs->cfg->provider.max_tokens);
+            else
+                n = snprintf(close_buf, sizeof(close_buf), "}");
+        } else if (rs->cfg->stream && rs->cfg->provider.max_tokens > 0)
             n = snprintf(close_buf, sizeof(close_buf),
                          ",\"stream\":true,\"max_tokens\":%d}", rs->cfg->provider.max_tokens);
         else if (rs->cfg->stream)

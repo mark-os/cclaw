@@ -49,4 +49,8 @@ int llm_parse_response(Arena *a, const char *json, LlmResponse *out);
  * Sole normalization point. NULL input → STOP_REASON_STOP. */
 StopReason map_stop_reason(const char *finish_reason);
 
+/* T290: Parse native Gemini generateContent response.
+ * Returns 0 on success, -1 on parse failure. */
+int llm_parse_response_gemini(Arena *a, const char *json, LlmResponse *out);
+
 #endif

@@ -47,6 +47,19 @@ static char *build_url(Arena *a, const Config *cfg) {
     const char *base = cfg->provider.base_url;
     size_t blen = strlen(base);
     if (blen > 0 && base[blen - 1] == '/') blen--;
+
+    if (cfg->provider.endpoint_type == ENDPOINT_GEMINI) {
+        /* T290: Gemini URL: {base_url}/models/{model}:generateContent */
+        const char *model = cfg->provider.model ? cfg->provider.model : "gemini-2.5-flash";
+        size_t mlen = strlen(model);
+        /* /models/ + model + :generateContent */
+        size_t need = blen + 8 + mlen + 16 + 1;
+        char *url = arena_alloc(a, need);
+        if (!url) return NULL;
+        snprintf(url, need, "%.*s/models/%s:generateContent", (int)blen, base, model);
+        return url;
+    }
+
     const char *path = "/chat/completions";
     size_t plen = strlen(path);
     char *url = arena_alloc(a, blen + plen + 1);
@@ -108,7 +121,7 @@ static int llm_call_with_retry_stream(const char *url, const char **headers,
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
         int status;
-        if (cfg->stream)
+        if (cfg->stream && cfg->provider.endpoint_type != ENDPOINT_GEMINI)
             status = http_post_stream_sse(url, headers, rs_read_cb, rs,
                                           sse_token_cb, NULL, resp);
         else
@@ -175,10 +188,18 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
     if (!url) return -1;
 
     /* V125: heap-allocate auth header based on key length */
+    /* T290: Gemini uses x-goog-api-key header instead of Bearer token */
     size_t key_len = cfg->provider.api_key ? strlen(cfg->provider.api_key) : 0;
-    char *auth_hdr = arena_alloc(a, 22 + key_len + 1); /* "Authorization: Bearer " + key + NUL */
-    if (!auth_hdr) return -1;
-    sprintf(auth_hdr, "Authorization: Bearer %s", cfg->provider.api_key ? cfg->provider.api_key : "");
+    char *auth_hdr;
+    if (cfg->provider.endpoint_type == ENDPOINT_GEMINI) {
+        auth_hdr = arena_alloc(a, 16 + key_len + 1); /* "x-goog-api-key: " + key */
+        if (!auth_hdr) return -1;
+        sprintf(auth_hdr, "x-goog-api-key: %s", cfg->provider.api_key ? cfg->provider.api_key : "");
+    } else {
+        auth_hdr = arena_alloc(a, 22 + key_len + 1); /* "Authorization: Bearer " + key + NUL */
+        if (!auth_hdr) return -1;
+        sprintf(auth_hdr, "Authorization: Bearer %s", cfg->provider.api_key ? cfg->provider.api_key : "");
+    }
 
     /* Sticky routing: pin all turns in a session to the same provider for cache hits */
     char *session_hdr = arena_alloc(a, 64);
@@ -679,7 +700,11 @@ int agent_run(AgentContext *ctx) {
             }
 
             /* V10/V29: JSON parse failure → retry */
-            rc = llm_parse_response(a, resp.data, &llm_resp);
+            /* T290: use Gemini parser for native Gemini responses */
+            if (call_cfg->provider.endpoint_type == ENDPOINT_GEMINI)
+                rc = llm_parse_response_gemini(a, resp.data, &llm_resp);
+            else
+                rc = llm_parse_response(a, resp.data, &llm_resp);
             http_response_free(&resp);
             if (rc != 0) {
                 LOG_DEBUG(ctx->cfg, "JSON parse failure, retry %d/%d",

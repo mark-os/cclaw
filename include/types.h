@@ -90,6 +90,12 @@ typedef enum {
     CACHE_HINTS_OFF         /* disable cache markers */
 } CacheHints;
 
+/* T290: provider endpoint type (wire format) */
+typedef enum {
+    ENDPOINT_OPENAI = 0,    /* OpenAI-compatible chat completions (default) */
+    ENDPOINT_GEMINI         /* Native Gemini generateContent format */
+} EndpointType;
+
 /* Provider/model config */
 typedef struct {
     char *base_url;
@@ -98,6 +104,7 @@ typedef struct {
     int max_tokens;         /* max response tokens */
     int context_window;     /* model context window size */
     CacheHints cache_hints; /* T123: prompt cache control */
+    EndpointType endpoint_type; /* T290: wire format (openai or gemini) */
 } ProviderConfig;
 
 /* Top-level config */

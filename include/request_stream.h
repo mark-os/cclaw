@@ -45,6 +45,9 @@ typedef struct {
 
     /* T269: auto-recall text (system message injected after preamble) */
     const char *recall_text;    /* NULL = no recall; caller-owned, must outlive streamer */
+
+    /* T290: Gemini mode — system msgs collected separately */
+    int gemini_mode;            /* 1 if endpoint_type == gemini */
 } RequestStreamer;
 
 /* Initialize streamer. Does NOT prepare cursor yet (deferred to first read).

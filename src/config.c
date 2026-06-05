@@ -155,6 +155,13 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_CONTEXT_WINDOW");
     cfg->provider.context_window = v ? atoi(v) : 65536;
 
+    /* T290: endpoint type */
+    v = getenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
+    if (v && strcmp(v, "gemini") == 0)
+        cfg->provider.endpoint_type = ENDPOINT_GEMINI;
+    else
+        cfg->provider.endpoint_type = ENDPOINT_OPENAI;
+
     /* T223: Workspace — default under .cclaw/agents/default/ for zero-config CLI */
     v = getenv("CCLAW_WORKSPACE");
     cfg->workspace = str_dup(v ? v : ".cclaw/agents/default/workspace");
@@ -265,6 +272,18 @@ Config *config_load(sqlite3 *db) {
             free(v);
         } else {
             cfg->provider.cache_hints = CACHE_HINTS_AUTO;
+        }
+    }
+
+    /* T290: endpoint_type */
+    {
+        char *v = db_kv_get(db, "provider.endpoint_type");
+        if (v) {
+            if (strcmp(v, "gemini") == 0) cfg->provider.endpoint_type = ENDPOINT_GEMINI;
+            else cfg->provider.endpoint_type = ENDPOINT_OPENAI;
+            free(v);
+        } else {
+            cfg->provider.endpoint_type = ENDPOINT_OPENAI;
         }
     }
 
@@ -403,6 +422,13 @@ Config *config_load(sqlite3 *db) {
     env_override_int(&cfg->save_usage, "CCLAW_SAVE_USAGE");
     env_override_int(&cfg->save_logprobs, "CCLAW_SAVE_LOGPROBS");
     env_override_int(&cfg->token_rate_limit, "CCLAW_TOKEN_RATE_LIMIT");
+
+    /* T290: endpoint_type env override */
+    {
+        const char *v = getenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
+        if (v && strcmp(v, "gemini") == 0)
+            cfg->provider.endpoint_type = ENDPOINT_GEMINI;
+    }
 
     /* V91: compaction env overrides */
     {

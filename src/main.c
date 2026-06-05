@@ -15,6 +15,7 @@
 #include "agent_config.h"
 #include "agent_exit.h"
 #include "agent_turn.h"
+#include "llm_child.h"
 #include "web.h"
 #include "heartbeat.h"
 #include "cron.h"
@@ -172,6 +173,7 @@ static void print_usage(void) {
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
            "  --agent            run one agent turn (internal, used by daemon)\n"
+           "  llm                run one LLM call (internal, used by parent turn loop)\n"
            "\n"
            "options:\n"
            "  -p <prompt>        single-turn: send prompt, print response, exit\n"
@@ -429,6 +431,7 @@ static int cli_run_turn(sqlite3 *adb, sqlite3 *cclaw_db, const Config *cfg,
 int main(int argc, char *argv[]) {
     int daemon_mode = 0;
     int agent_mode = 0;
+    int llm_mode = 0;
     LogLevel log_level_override = LOG_LEVEL_INFO;
     int log_level_set = 0;
     int new_session = 0;
@@ -444,6 +447,8 @@ int main(int argc, char *argv[]) {
             daemon_mode = 1;
         } else if (strcmp(argv[i], "--agent") == 0) {
             agent_mode = 1;
+        } else if (strcmp(argv[i], "llm") == 0) {
+            llm_mode = 1;
         } else if (strncmp(argv[i], "--log-level=", 12) == 0) {
             log_level_override = log_level_parse(argv[i] + 12);
             log_level_set = 1;
@@ -473,6 +478,15 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         return agent_turn_run(session_id);
+    }
+
+    /* T299: llm subcommand — run single LLM call */
+    if (llm_mode) {
+        if (session_id < 0) {
+            fprintf(stderr, "error: llm requires -s <id>\n");
+            return 1;
+        }
+        return llm_child_main(session_id);
     }
 
     shutdown_init();

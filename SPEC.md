@@ -233,7 +233,7 @@ T284|x|e2e: non-streaming mode — `CCLAW_STREAM=0`, verify `"stream":false` in 
 T285|x|e2e: multi-tool chain — file_write → shell_exec (python3) → verify output|V10
 T286|x|e2e: js_eval — Fibonacci via QuickJS, verify result correct, no crash|V5
 T287|x|e2e: web_fetch — fetch httpbin.org, verify content extraction|V46
-T288|.|e2e: pure reasoning (no tools) — thinking + content, stop_reason=stop, no tool calls|V35
+T288|x|e2e: pure reasoning (no tools) — thinking + content, stop_reason=stop, no tool calls|V35
 T289|.|per-content-block `cache_control` — emit `{"type":"text","text":"...","cache_control":{"type":"ephemeral"}}` on last system msg content block in request_stream; enables Gemini+Anthropic+Alibaba explicit caching through OpenRouter; providers that ⊥ support silently ignore|V41
 T290|.|Gemini direct provider — `endpoint_type=gemini` in providers table; request builder emits native Gemini `contents[]` format (⊥ OpenAI compat); response parser handles `candidates[0].content.parts[]`; base_url=`https://generativelanguage.googleapis.com/v1beta/models/{model}`; tool_calls → `functionCall` parts|§I,V89
 T291|.|Gemini context caching — for `endpoint_type=gemini`: if session > 1024 tokens, call `POST /cachedContents` w/ system+history prefix, get `cachedContents/{id}`, pass `cachedContent` field in generateContent; TTL 300s; cache name stored in session kv (`gemini_cache_name`); reuse if ⊥ expired; delete on session end|T290,V61

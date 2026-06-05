@@ -59,7 +59,7 @@ static void check_prerequisites(void) {
         printf("  SKIP: libcclaw_net.so not built\n");
         exit(0);
     }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
     char *r = tool_shell_handler("{\"command\":\"echo ns_check\"}", &sc);
     if (r && strstr(r, "namespace sandbox unavailable")) {
         ns_available = 0;
@@ -94,6 +94,7 @@ static void test_shell_denied_unlisted_host(void) {
         .timeout = 10,
         .workspace = workspace,
         .proxy_sock = proxy_sock_path(&proxy),
+        .sandbox = 1,
     };
     char *result = tool_shell_handler(cmd_json, &sc);
 
@@ -144,6 +145,7 @@ static void test_shell_allowed_vs_denied(void) {
         .timeout = 10,
         .workspace = workspace,
         .proxy_sock = proxy_sock_path(&proxy),
+        .sandbox = 1,
     };
     char *result = tool_shell_handler(cmd_json, &sc);
 

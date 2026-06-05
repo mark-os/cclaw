@@ -724,6 +724,20 @@ int main(int argc, char *argv[]) {
             }
             agent_config_free(ac);
         }
+        /* T301/V22a: inject CCLAW_SANDBOX from agent_config */
+        {
+            char *val = NULL;
+            sqlite3_stmt *s;
+            const char *sql = "SELECT value FROM agent_config WHERE agent_name=? AND key='sandbox';";
+            if (sqlite3_prepare_v2(cclaw_db, sql, -1, &s, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(s, 1, agent_name, -1, SQLITE_STATIC);
+                if (sqlite3_step(s) == SQLITE_ROW)
+                    val = strdup((const char *)sqlite3_column_text(s, 0));
+                sqlite3_finalize(s);
+            }
+            setenv("CCLAW_SANDBOX", val ? val : "sandbox", 1);
+            free(val);
+        }
     }
 
     if (yolo_mode) setenv("CCLAW_YOLO", "1", 1);

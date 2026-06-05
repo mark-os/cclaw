@@ -32,7 +32,7 @@ Replaces `agent.json` files. Daemon reads at fork, injects as `CCLAW_*` env vars
 | `value` | TEXT NOT NULL | |
 | PRIMARY KEY | (agent_name, key) | |
 
-Keys: `model`, `workspace`, `tools` (JSON array), `allowed_hosts` (JSON array), `read_access` (JSON array), `max_iterations`, `shell_timeout`, `daemon_db_read` (0\|1).
+Keys: `model`, `workspace`, `tools` (JSON array), `allowed_hosts` (JSON array), `read_access` (JSON array), `max_iterations`, `shell_timeout`, `daemon_db_read` (0\|1), `sandbox` (`"sandbox"` \| `"none"`).
 
 **Absent-key semantics** (V124/T281): missing key = conservative system default, NOT unlimited. Daemon always injects `CCLAW_TOOLS` and `CCLAW_ALLOWED_HOSTS` env vars at fork — even when no agent_config rows exist. Agent process never sees "unset" for these keys.
 
@@ -48,6 +48,7 @@ Keys: `model`, `workspace`, `tools` (JSON array), `allowed_hosts` (JSON array), 
 | `memory_limit` | 268435456 (256MB) | bytes; 0 = unlimited; skipped on Android (`__ANDROID__`) |
 | `cpu_limit` | 300 | seconds; 0 = unlimited |
 | `daemon_db_read` | 0 | |
+| `sandbox` | `sandbox` | `"sandbox"` = namespace isolation (V22a); `"none"` = no isolation |
 
 **Sub-agent inheritance** (V123): when daemon forks a sub-agent, child config = intersection(child's own agent_config, parent's agent_config). Child ⊥ exceed parent: tools ⊆ parent.tools, allowed_hosts ⊆ parent.allowed_hosts, max_iterations ≤ parent.max_iterations.
 
@@ -85,6 +86,7 @@ All injected at fork by daemon/CLI. Agent reads via `config_load_from_env()`.
 | `CCLAW_SAVE_USAGE` | cclaw.db kv | 0 | bool: persist usage stats |
 | `CCLAW_PATH` | CLI sets | (none) | CWD for ro file_read |
 | `CCLAW_YOLO` | CLI `-y` flag | (none) | disables sandbox |
+| `CCLAW_SANDBOX` | agent_config `sandbox` | `sandbox` | `sandbox` \| `none` (V22a) |
 | `CCLAW_SECRET_<NAME>` | cclaw.db kv (encrypted) | — | decrypted at fork, cleared after read |
 
 ### providers

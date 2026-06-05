@@ -43,8 +43,21 @@ static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
             cwd_resolved = cwd_abs;
     }
 
-    if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET) != 0)
+    if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWNET) != 0)
         return -1;
+
+    /* T301: CLONE_NEWPID requires a fork — the child becomes PID 1 in the new
+     * PID namespace. The current process stays in the old namespace. We fork,
+     * the child sets up the mount namespace and execs, parent waits+exits. */
+    pid_t inner = fork();
+    if (inner < 0) return -1;
+    if (inner > 0) {
+        /* Parent of inner fork: wait and propagate exit status */
+        int st;
+        waitpid(inner, &st, 0);
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 254);
+    }
+    /* Inner child: PID 1 in new PID namespace — continue with mount setup */
 
     /* Write uid_map: map ns root (0) to our real uid */
     int fd = open("/proc/self/uid_map", O_WRONLY);
@@ -153,6 +166,9 @@ static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
     umount2("/.oldroot", MNT_DETACH);
     rmdir("/.oldroot");
 
+    /* T301: remount /proc for new PID namespace (stale host procfs causes fork failures) */
+    mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+
     /* CWD into workspace so shell commands start there */
     if (ws_resolved && chdir(ws_resolved) != 0)
         chdir("/tmp");
@@ -220,7 +236,9 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         const char *cwd = user_data ? ((ShellConfig *)user_data)->cwd_path : NULL;
         const char *psock = user_data ? ((ShellConfig *)user_data)->proxy_sock : NULL;
         int yolo = user_data ? ((ShellConfig *)user_data)->yolo : 0;
-        if (!yolo && shell_apply_namespace(ws, cwd) != 0) {
+        int do_sandbox = user_data ? ((ShellConfig *)user_data)->sandbox : 1;
+        if (yolo) do_sandbox = 0;
+        if (do_sandbox && shell_apply_namespace(ws, cwd) != 0) {
             /* Fallback: continue unsandboxed (log to stderr = captured in output) */
             fprintf(stderr, "[cclaw] warning: namespace sandbox unavailable, "
                     "continuing without (errno=%d)\n", errno);
@@ -384,6 +402,7 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     sc->secrets = NULL;
     sc->secret_count = 0;
     sc->yolo = 0;
+    sc->sandbox = 1;
     int rc = tools_register(reg, "shell_exec",
                             "Execute a shell command and return stdout+stderr",
                             SHELL_PARAMS_JSON, tool_shell_handler, sc);

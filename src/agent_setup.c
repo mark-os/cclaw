@@ -38,6 +38,9 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         sc->cwd_path = getenv("CCLAW_PATH");  /* T276/V22a: CWD rw in CLI mode */
         const char *yolo_env = getenv("CCLAW_YOLO");
         sc->yolo = (yolo_env && yolo_env[0] == '1') ? 1 : 0;
+        /* T301/V22a: per-agent sandbox config */
+        const char *sandbox_env = getenv("CCLAW_SANDBOX");
+        sc->sandbox = (!sandbox_env || strcmp(sandbox_env, "none") != 0) ? 1 : 0;
     }
 
     /* File read/write — T118: allow workspace + session temp dir; T228: CCLAW_PATH */

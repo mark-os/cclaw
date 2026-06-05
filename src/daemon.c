@@ -680,6 +680,21 @@ static void inject_agent_config_env(sqlite3 *db, const char *agent_name,
         setenv("CCLAW_SHELL_TIMEOUT", buf, 0); /* don't override if ac set it */
     }
 
+    /* T301/V22a: Inject sandbox config — absent = "sandbox" (default) */
+    {
+        char *val = NULL;
+        sqlite3_stmt *s;
+        const char *sql = "SELECT value FROM agent_config WHERE agent_name=? AND key='sandbox';";
+        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, agent_name, -1, SQLITE_STATIC);
+            if (sqlite3_step(s) == SQLITE_ROW)
+                val = strdup((const char *)sqlite3_column_text(s, 0));
+            sqlite3_finalize(s);
+        }
+        setenv("CCLAW_SANDBOX", val ? val : "sandbox", 1);
+        free(val);
+    }
+
     if (ac) agent_config_free(ac);
 }
 

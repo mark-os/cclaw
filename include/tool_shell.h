@@ -20,6 +20,7 @@ typedef struct {
     ShellSecret *secrets;   /* V88: array of secrets to inject + mask */
     size_t secret_count;
     int yolo;               /* T229: skip sandbox + env hardening */
+    int sandbox;            /* T301: 1=namespace sandbox (default), 0=none */
 } ShellConfig;
 
 /* Register shell_exec tool into registry.

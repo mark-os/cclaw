@@ -164,10 +164,11 @@ done:
 }
 
 /* V60/T166: Emit a single entry as OpenAI wire JSON directly into buffer.
- * No cJSON on output path. Returns bytes written (may exceed cap). */
+ * No cJSON on output path. Returns bytes written (may exceed cap).
+ * T289: cache_control=1 → emit system msg content as array with cache_control block. */
 static size_t emit_entry_openai(char *dest, size_t cap, int role,
                                 const char *content, const char *tool_calls,
-                                const char *tool_call_id) {
+                                const char *tool_call_id, int cache_control) {
     size_t w = 0;
     #define DEST_AT(off) (dest ? dest + (off) : NULL)
     #define EMIT(s, l) do { \
@@ -208,14 +209,23 @@ static size_t emit_entry_openai(char *dest, size_t cap, int role,
         EMITS("}");
     } else {
         /* user (1) / system (0) → {"role":"...","content":"..."} */
+        /* T289: if cache_control && system → content as array with cache_control block */
         const char *role_str = (role == 0) ? "system" : "user";
         EMITS("{\"role\":\"");
         EMITS(role_str);
-        EMITS("\",\"content\":\"");
-        size_t elen = json_escape_into(DEST_AT(w < cap ? w : 0), w < cap ? cap - w : 0,
-                                       content ? content : "");
-        w += elen;
-        EMITS("\"}");
+        if (cache_control && role == 0) {
+            EMITS("\",\"content\":[{\"type\":\"text\",\"text\":\"");
+            size_t elen = json_escape_into(DEST_AT(w < cap ? w : 0), w < cap ? cap - w : 0,
+                                           content ? content : "");
+            w += elen;
+            EMITS("\",\"cache_control\":{\"type\":\"ephemeral\"}}]}");
+        } else {
+            EMITS("\",\"content\":\"");
+            size_t elen = json_escape_into(DEST_AT(w < cap ? w : 0), w < cap ? cap - w : 0,
+                                           content ? content : "");
+            w += elen;
+            EMITS("\"}");
+        }
     }
 
     if (w < cap) dest[w] = '\0';
@@ -317,6 +327,15 @@ int rs_init(RequestStreamer *rs, sqlite3 *db, int64_t session_id,
     rs->entry_idx = plan->cut; /* start from cut point */
     rs->first_entry = 1;
     rs->cursor = NULL;
+
+    /* T289: find last system message index for per-block cache_control */
+    rs->last_sys_idx = -1;
+    if (needs_cache_control(cfg)) {
+        for (int i = plan->cut; i < plan->count; i++) {
+            if (plan->entries[i].role == ROLE_SYSTEM)
+                rs->last_sys_idx = i;
+        }
+    }
     return 0;
 }
 
@@ -332,11 +351,9 @@ static int rs_advance(RequestStreamer *rs) {
     switch (rs->phase) {
     case RS_PHASE_PREAMBLE: {
         /* Build: {"model":"...","messages":[ */
-        /* T123: optionally add "cache_control":{"type":"ephemeral"} for Anthropic */
         /* Also prepend cutoff notice as system message if truncated */
         const char *model = rs->cfg->provider.model ? rs->cfg->provider.model : "unknown";
         int has_cutoff = rs->plan->cut > 0;
-        int cache = needs_cache_control(rs->cfg);
 
         /* Estimate size */
         size_t need = 64 + strlen(model) + 64;
@@ -345,17 +362,7 @@ static int rs_advance(RequestStreamer *rs) {
         if (buf_ensure(rs, need) != 0) return 1;
 
         int written;
-        if (cache && has_cutoff) {
-            written = snprintf(rs->buf, rs->buf_cap,
-                "{\"model\":\"%s\",\"cache_control\":{\"type\":\"ephemeral\"},\"messages\":["
-                "{\"role\":\"system\",\"content\":"
-                "\"[Earlier messages truncated. Use search for full history.]\"},",
-                model);
-        } else if (cache) {
-            written = snprintf(rs->buf, rs->buf_cap,
-                "{\"model\":\"%s\",\"cache_control\":{\"type\":\"ephemeral\"},\"messages\":[",
-                model);
-        } else if (has_cutoff) {
+        if (has_cutoff) {
             written = snprintf(rs->buf, rs->buf_cap,
                 "{\"model\":\"%s\",\"messages\":["
                 "{\"role\":\"system\",\"content\":"
@@ -417,18 +424,20 @@ static int rs_advance(RequestStreamer *rs) {
         const char *tool_call_id = (const char *)sqlite3_column_text(rs->cursor, 3);
 
         /* V60: emit directly via json_escape_into + snprintf — no cJSON on output */
+        /* T289: mark last system msg for per-block cache_control */
+        int cc = (rs->entry_idx == rs->last_sys_idx) ? 1 : 0;
         /* First pass: measure required size */
-        size_t need = emit_entry_openai(NULL, 0, role, content, tool_calls, tool_call_id);
+        size_t need = emit_entry_openai(NULL, 0, role, content, tool_calls, tool_call_id, cc);
         need += 2; /* leading comma + NUL */
         if (buf_ensure(rs, need) != 0) { rs->entry_idx++; return rs_advance(rs); }
 
         if (rs->first_entry) {
-            size_t written = emit_entry_openai(rs->buf, rs->buf_cap, role, content, tool_calls, tool_call_id);
+            size_t written = emit_entry_openai(rs->buf, rs->buf_cap, role, content, tool_calls, tool_call_id, cc);
             rs->buf_len = written;
             rs->first_entry = 0;
         } else {
             rs->buf[0] = ',';
-            size_t written = emit_entry_openai(rs->buf + 1, rs->buf_cap - 1, role, content, tool_calls, tool_call_id);
+            size_t written = emit_entry_openai(rs->buf + 1, rs->buf_cap - 1, role, content, tool_calls, tool_call_id, cc);
             rs->buf_len = written + 1;
         }
         rs->buf_pos = 0;

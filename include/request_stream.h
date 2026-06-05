@@ -40,6 +40,9 @@ typedef struct {
     size_t buf_pos;
     size_t buf_cap;
 
+    /* T289: index into plan->entries of last system msg (for per-block cache_control) */
+    int last_sys_idx;           /* -1 = none */
+
     /* T269: auto-recall text (system message injected after preamble) */
     const char *recall_text;    /* NULL = no recall; caller-owned, must outlive streamer */
 } RequestStreamer;

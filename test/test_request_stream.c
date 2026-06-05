@@ -374,7 +374,7 @@ static void test_small_reads(void) {
     printf(" OK\n");
 }
 
-/* T123: Test cache_control emitted for Anthropic models */
+/* T289: Test per-content-block cache_control on last system message */
 static void test_cache_hints_anthropic(void) {
     printf("  test_cache_hints_anthropic...");
 
@@ -382,10 +382,12 @@ static void test_cache_hints_anthropic(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
+    /* System prompt + user message */
+    Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
+    entry_append(db, sid, &sys);
     Message msg = {.role = ROLE_USER, .content = "hi"};
     entry_append(db, sid, &msg);
 
-    /* Model name contains "claude" → auto-detect cache hints */
     Config cfg = {0};
     cfg.provider.model = "anthropic/claude-sonnet-4";
     cfg.provider.context_window = 100000;
@@ -401,7 +403,19 @@ static void test_cache_hints_anthropic(void) {
     cJSON *root = cJSON_Parse(json);
     assert(root);
 
-    cJSON *cc = cJSON_GetObjectItem(root, "cache_control");
+    /* No top-level cache_control */
+    assert(!cJSON_GetObjectItem(root, "cache_control"));
+
+    /* System message content should be array with cache_control */
+    cJSON *messages = cJSON_GetObjectItem(root, "messages");
+    cJSON *m0 = cJSON_GetArrayItem(messages, 0);
+    assert(strcmp(cJSON_GetObjectItem(m0, "role")->valuestring, "system") == 0);
+    cJSON *content_arr = cJSON_GetObjectItem(m0, "content");
+    assert(cJSON_IsArray(content_arr));
+    cJSON *block = cJSON_GetArrayItem(content_arr, 0);
+    assert(strcmp(cJSON_GetObjectItem(block, "type")->valuestring, "text") == 0);
+    assert(strcmp(cJSON_GetObjectItem(block, "text")->valuestring, "You are helpful.") == 0);
+    cJSON *cc = cJSON_GetObjectItem(block, "cache_control");
     assert(cc);
     assert(strcmp(cJSON_GetObjectItem(cc, "type")->valuestring, "ephemeral") == 0);
 
@@ -413,7 +427,7 @@ static void test_cache_hints_anthropic(void) {
     printf(" OK\n");
 }
 
-/* T123: Test cache_control NOT emitted for DeepSeek (auto) */
+/* T289: No cache_control when disabled */
 static void test_cache_hints_deepseek_auto(void) {
     printf("  test_cache_hints_deepseek_auto...");
 
@@ -421,13 +435,15 @@ static void test_cache_hints_deepseek_auto(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
+    Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
+    entry_append(db, sid, &sys);
     Message msg = {.role = ROLE_USER, .content = "hi"};
     entry_append(db, sid, &msg);
 
     Config cfg = {0};
     cfg.provider.model = "deepseek/deepseek-v4-flash";
     cfg.provider.context_window = 100000;
-    cfg.provider.cache_hints = CACHE_HINTS_AUTO;
+    cfg.provider.cache_hints = CACHE_HINTS_OFF;
 
     ContextPlan plan;
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
@@ -439,8 +455,12 @@ static void test_cache_hints_deepseek_auto(void) {
     cJSON *root = cJSON_Parse(json);
     assert(root);
 
-    /* No cache_control for DeepSeek */
-    assert(!cJSON_GetObjectItem(root, "cache_control"));
+    /* System message content should be plain string (no cache_control) */
+    cJSON *messages = cJSON_GetObjectItem(root, "messages");
+    cJSON *m0 = cJSON_GetArrayItem(messages, 0);
+    assert(strcmp(cJSON_GetObjectItem(m0, "role")->valuestring, "system") == 0);
+    cJSON *content = cJSON_GetObjectItem(m0, "content");
+    assert(cJSON_IsString(content));
 
     cJSON_Delete(root);
     free(json);
@@ -450,7 +470,7 @@ static void test_cache_hints_deepseek_auto(void) {
     printf(" OK\n");
 }
 
-/* T123: Test cache_hints forced on/off via config */
+/* T289: Test cache_hints forced on/off via config */
 static void test_cache_hints_forced(void) {
     printf("  test_cache_hints_forced...");
 
@@ -458,6 +478,8 @@ static void test_cache_hints_forced(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
+    Message sys = {.role = ROLE_SYSTEM, .content = "sys prompt"};
+    entry_append(db, sid, &sys);
     Message msg = {.role = ROLE_USER, .content = "hi"};
     entry_append(db, sid, &msg);
 
@@ -476,7 +498,13 @@ static void test_cache_hints_forced(void) {
     char *json = stream_all(&rs);
     cJSON *root = cJSON_Parse(json);
     assert(root);
-    assert(cJSON_GetObjectItem(root, "cache_control"));
+    /* System msg should have content array with cache_control */
+    cJSON *messages = cJSON_GetObjectItem(root, "messages");
+    cJSON *m0 = cJSON_GetArrayItem(messages, 0);
+    cJSON *content_arr = cJSON_GetObjectItem(m0, "content");
+    assert(cJSON_IsArray(content_arr));
+    cJSON *block = cJSON_GetArrayItem(content_arr, 0);
+    assert(cJSON_GetObjectItem(block, "cache_control"));
     cJSON_Delete(root);
     free(json);
     rs_cleanup(&rs);
@@ -492,7 +520,11 @@ static void test_cache_hints_forced(void) {
     json = stream_all(&rs);
     root = cJSON_Parse(json);
     assert(root);
-    assert(!cJSON_GetObjectItem(root, "cache_control"));
+    /* System msg should be plain string (no cache_control) */
+    messages = cJSON_GetObjectItem(root, "messages");
+    m0 = cJSON_GetArrayItem(messages, 0);
+    cJSON *content = cJSON_GetObjectItem(m0, "content");
+    assert(cJSON_IsString(content));
     cJSON_Delete(root);
     free(json);
     rs_cleanup(&rs);

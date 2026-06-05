@@ -406,7 +406,148 @@ static void sse_process_line(SseCtx *ctx, const char *line, size_t len) {
         }
     }
 
-    /* Extract finish_reason if present */
+    /* Gemini SSE: candidates[0].content.parts[].text / functionCall / thought */
+    if (!delta) {
+        const char *cand = strstr(json, "\"candidates\"");
+        if (cand) {
+            const char *parts = strstr(cand, "\"parts\"");
+            if (parts) {
+                /* Check for thought:true (before text extraction to handle thought text) */
+                int is_thought = (strstr(parts, "\"thought\"") != NULL);
+
+                /* Text part */
+                size_t tlen = 0;
+                const char *text = json_find_str(parts, "text", &tlen);
+                if (text && tlen > 0) {
+                    char *unesc = malloc(tlen + 1);
+                    if (unesc) {
+                        size_t ulen = json_unescape(unesc, tlen + 1, text, tlen);
+                        if (is_thought) {
+                            /* Accumulate as reasoning */
+                            if (ctx->reasoning_len + ulen + 1 > ctx->reasoning_cap) {
+                                size_t nc = ctx->reasoning_cap ? ctx->reasoning_cap * 2 : 4096;
+                                while (nc < ctx->reasoning_len + ulen + 1) nc *= 2;
+                                char *tmp = realloc(ctx->reasoning, nc);
+                                if (tmp) { ctx->reasoning = tmp; ctx->reasoning_cap = nc; }
+                            }
+                            if (ctx->reasoning) {
+                                memcpy(ctx->reasoning + ctx->reasoning_len, unesc, ulen);
+                                ctx->reasoning_len += ulen;
+                                ctx->reasoning[ctx->reasoning_len] = '\0';
+                            }
+                            if (ctx->sse_cb) {
+                                if (!ctx->reasoning_started) {
+                                    ctx->reasoning_started = 1;
+                                    ctx->sse_cb("\033[2m", 4, ctx->sse_data);
+                                }
+                                ctx->sse_cb(unesc, ulen, ctx->sse_data);
+                            }
+                        } else {
+                            /* Regular content */
+                            if (ctx->content_len + ulen + 1 > ctx->content_cap) {
+                                size_t nc = ctx->content_cap ? ctx->content_cap * 2 : 4096;
+                                while (nc < ctx->content_len + ulen + 1) nc *= 2;
+                                char *tmp = realloc(ctx->content, nc);
+                                if (tmp) { ctx->content = tmp; ctx->content_cap = nc; }
+                            }
+                            if (ctx->content) {
+                                memcpy(ctx->content + ctx->content_len, unesc, ulen);
+                                ctx->content_len += ulen;
+                                ctx->content[ctx->content_len] = '\0';
+                            }
+                            if (ctx->sse_cb) {
+                                if (ctx->reasoning_started) {
+                                    ctx->sse_cb("\033[0m\n", 5, ctx->sse_data);
+                                    ctx->reasoning_started = 0;
+                                }
+                                ctx->sse_cb(unesc, ulen, ctx->sse_data);
+                            }
+                        }
+                        free(unesc);
+                    }
+                }
+
+                /* functionCall part */
+                const char *fc = strstr(parts, "\"functionCall\"");
+                if (fc) {
+                    size_t nm_len = 0;
+                    const char *nm = json_find_str(fc, "name", &nm_len);
+                    if (nm && nm_len > 0) {
+                        size_t idx = ctx->tc_count;
+                        if (idx >= ctx->tc_alloc) {
+                            size_t na = idx + 4;
+                            ctx->tc_ids = realloc(ctx->tc_ids, na * sizeof(char *));
+                            ctx->tc_names = realloc(ctx->tc_names, na * sizeof(char *));
+                            ctx->tc_args = realloc(ctx->tc_args, na * sizeof(char *));
+                            ctx->tc_arg_lens = realloc(ctx->tc_arg_lens, na * sizeof(size_t));
+                            ctx->tc_arg_caps = realloc(ctx->tc_arg_caps, na * sizeof(size_t));
+                            for (size_t i = ctx->tc_alloc; i < na; i++) {
+                                ctx->tc_ids[i] = NULL;
+                                ctx->tc_names[i] = NULL;
+                                ctx->tc_args[i] = NULL;
+                                ctx->tc_arg_lens[i] = 0;
+                                ctx->tc_arg_caps[i] = 0;
+                            }
+                            ctx->tc_alloc = na;
+                        }
+                        ctx->tc_count = idx + 1;
+                        ctx->tc_names[idx] = strndup(nm, nm_len);
+                        /* Synthetic ID */
+                        char id_buf[32];
+                        snprintf(id_buf, sizeof(id_buf), "call_%zu", idx);
+                        ctx->tc_ids[idx] = strdup(id_buf);
+                        /* Extract args object as raw JSON substring */
+                        const char *args = strstr(fc, "\"args\"");
+                        if (args) {
+                            args = strchr(args + 5, ':');
+                            if (args) {
+                                args++;
+                                while (*args == ' ') args++;
+                                if (*args == '{') {
+                                    int depth = 0;
+                                    const char *end = args;
+                                    do {
+                                        if (*end == '{') depth++;
+                                        else if (*end == '}') depth--;
+                                        end++;
+                                    } while (depth > 0 && *end);
+                                    size_t alen = (size_t)(end - args);
+                                    ctx->tc_args[idx] = strndup(args, alen);
+                                    ctx->tc_arg_lens[idx] = alen;
+                                    ctx->tc_arg_caps[idx] = alen + 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* Gemini finishReason — map to OpenAI format */
+            size_t frlen2 = 0;
+            const char *fr2 = json_find_str(cand, "finishReason", &frlen2);
+            if (fr2 && frlen2 > 0) {
+                free(ctx->finish_reason);
+                if (frlen2 == 4 && memcmp(fr2, "STOP", 4) == 0)
+                    ctx->finish_reason = strdup("stop");
+                else if (frlen2 == 10 && memcmp(fr2, "MAX_TOKENS", 10) == 0)
+                    ctx->finish_reason = strdup("length");
+                else
+                    ctx->finish_reason = strndup(fr2, frlen2);
+            }
+        }
+
+        /* Gemini usageMetadata */
+        const char *um = strstr(json, "\"usageMetadata\"");
+        if (um) {
+            const char *pt = strstr(um, "\"promptTokenCount\"");
+            if (pt) { pt = strchr(pt + 18, ':'); if (pt) ctx->prompt_tokens = atoi(pt + 1); }
+            const char *ct = strstr(um, "\"candidatesTokenCount\"");
+            if (ct) { ct = strchr(ct + 22, ':'); if (ct) ctx->completion_tokens = atoi(ct + 1); }
+            const char *tt = strstr(um, "\"totalTokenCount\"");
+            if (tt) { tt = strchr(tt + 17, ':'); if (tt) ctx->total_tokens = atoi(tt + 1); }
+        }
+        return;
+    }
     size_t frlen = 0;
     const char *fr = json_find_str(json, "finish_reason", &frlen);
     if (fr && frlen > 0 && !(frlen == 4 && memcmp(fr, "null", 4) == 0)) {

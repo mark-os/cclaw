@@ -239,6 +239,14 @@ T290|x|Gemini direct provider — `endpoint_type=gemini` in providers table; req
 T291|x|Gemini context caching — for `endpoint_type=gemini`: if session > 1024 tokens, call `POST /cachedContents` w/ system+history prefix, get `cachedContents/{id}`, pass `cachedContent` field in generateContent; TTL 300s; cache name stored in session kv (`gemini_cache_name`); reuse if ⊥ expired; delete on session end|T290,V61
 T292|x|cache_control config — `cache_hints` values: `auto` (default, send top-level + per-block for all providers), `on` (force), `off` (disable), `gemini-native` (use T291 cachedContents API directly); env `CCLAW_CACHE_HINTS`|V90
 T293|x|bench: verify caching — extend `test_e2e_bench_providers.c` or `bench_providers.py` to confirm `cached_tokens > 0` on turn 3+ for each model; fail if cost ⊥ decrease between turn 2 and turn 4|T289,T291
+T294|.|vendor jsmn; per-provider SSE parsers (`sse_parse_openai`, `sse_parse_gemini`, `sse_parse_anthropic`) per `specs/provider-schemas.md`; stack-alloc token buf (256); unit tests w/ captured chunks; drop-in replace `sse_process_line`|V41,§D
+T295|.|SQL request builder queries — one per provider (OpenAI, Gemini, Anthropic); `json_object()`/`json_group_array()` produce complete request body from entries table; add `cache_break_after` col to sessions; `db_build_request()` C wrapper; test against live APIs|V41,T290
+T296|.|SQL response ingress — non-streaming: `json_extract()` INSERT; tool call validation w/ `json()`; add `tool_calls` table (session_id, entry_id, call_id, name, arguments, status); streaming: jsmn parse → accumulate → single INSERT|T294,T295
+T297|.|merge 3 DBs → single `cclaw.db` — sessions, entries, tool_calls, kv, config, providers, journal all in one file; update all open/access paths; parent sole writer|V73
+T298|.|extract `cclaw-llm` child — subcommand `cclaw llm --session=N`; inherits stdout (token stream); stderr piped to parent (journal); owns context planning + request build + curl + SSE parse + DB write; parent forks+waits+reads DB|T295,T296
+T299|.|parent turn loop — fork `cclaw-llm` → wait → read DB → fork tools serially → wait → capture stdout pipe → write result to DB → loop until no tool_calls; CLI + daemon both use this orchestrator|T298
+T300|.|sandbox w/ `unshare` — tool children: `unshare(CLONE_NEWNS\|CLONE_NEWPID\|CLONE_NEWNET)`; network via existing proxy model; per-agent config `sandbox = "sandbox"\|"none"`; remove all landlock/seccomp code|V22a,V37
+T301|.|remove old code — `request_stream.c`, in-process agent loop, old tool dispatch, cJSON in response/tool-arg parsing, multi-DB open logic, landlock/seccomp; clean build, all tests pass|T294,T295,T296,T297,T298,T299,T300
 
 Test tiers (Makefile targets):
 - `make test` — unit tests (no network, no LLM, fast, always run)

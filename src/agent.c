@@ -50,14 +50,15 @@ static char *build_url(Arena *a, const Config *cfg) {
     if (blen > 0 && base[blen - 1] == '/') blen--;
 
     if (cfg->provider.endpoint_type == ENDPOINT_GEMINI) {
-        /* T290: Gemini URL: {base_url}/models/{model}:generateContent */
+        /* T290: Gemini URL: {base_url}/models/{model}:{action} */
         const char *model = cfg->provider.model ? cfg->provider.model : "gemini-2.5-flash";
         size_t mlen = strlen(model);
-        /* /models/ + model + :generateContent */
-        size_t need = blen + 8 + mlen + 16 + 1;
+        const char *action = cfg->stream ? "streamGenerateContent?alt=sse" : "generateContent";
+        size_t alen = strlen(action);
+        size_t need = blen + 8 + mlen + 1 + alen + 1; /* /models/ + model + : + action */
         char *url = arena_alloc(a, need);
         if (!url) return NULL;
-        snprintf(url, need, "%.*s/models/%s:generateContent", (int)blen, base, model);
+        snprintf(url, need, "%.*s/models/%s:%s", (int)blen, base, model, action);
         return url;
     }
 
@@ -122,7 +123,7 @@ static int llm_call_with_retry_stream(const char *url, const char **headers,
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
         int status;
-        if (cfg->stream && cfg->provider.endpoint_type != ENDPOINT_GEMINI)
+        if (cfg->stream)
             status = http_post_stream_sse(url, headers, rs_read_cb, rs,
                                           sse_token_cb, NULL, resp);
         else
@@ -714,8 +715,9 @@ int agent_run(AgentContext *ctx) {
             }
 
             /* V10/V29: JSON parse failure → retry */
-            /* T290: use Gemini parser for native Gemini responses */
-            if (call_cfg->provider.endpoint_type == ENDPOINT_GEMINI)
+            /* T290: use Gemini parser for native Gemini responses (non-streaming only;
+             * streaming reconstructs OpenAI-format synthetic JSON) */
+            if (call_cfg->provider.endpoint_type == ENDPOINT_GEMINI && !call_cfg->stream)
                 rc = llm_parse_response_gemini(a, resp.data, &llm_resp);
             else
                 rc = llm_parse_response(a, resp.data, &llm_resp);

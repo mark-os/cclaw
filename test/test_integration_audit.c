@@ -377,31 +377,26 @@ static void test_daemon_agent_error_exit(void) {
     mkdir(cmd, 0755);
     chdir(work_dir);
 
-    /* Create agent DB with session + inbox */
-    char adb_path[256];
-    snprintf(adb_path, sizeof(adb_path), "agents/%s/agent.db", agent_name);
-    sqlite3 *adb = db_open_agent(adb_path);
-    if (!adb) { chdir(orig_cwd); FAIL("db_open_agent"); }
-    int64_t sid = session_create(adb, "error_test", agent_name, -1, 0);
-    inbox_insert(adb, sid, "test", "trigger error");
-    db_close(adb);
-
-    /* Create daemon DB */
-    const char *ddb_path = "/tmp/test_integ_audit_daemon.db";
-    unlink(ddb_path);
-    sqlite3 *ddb = db_open(ddb_path);
-    if (!ddb) { chdir(orig_cwd); FAIL("db_open"); }
+    /* T298: Single unified DB for daemon + agent */
+    const char *db_path = "/tmp/test_integ_audit_daemon.db";
+    unlink(db_path);
+    sqlite3 *db = db_open(db_path);
+    if (!db) { chdir(orig_cwd); FAIL("db_open"); }
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d/v1", s_port);
-    db_kv_set(ddb, "provider.base_url", base_url);
-    db_kv_set(ddb, "provider.model", "mock-model");
-    db_kv_set(ddb, "provider.max_tokens", "256");
-    db_kv_set(ddb, "provider.context_window", "128000");
-    db_kv_set(ddb, "provider.api_key", "mock-key");
-    db_kv_set(ddb, "workspace", "/tmp");
-    db_kv_set(ddb, "max_iterations", "5");
-    db_kv_set(ddb, "shell_timeout", "5");
+    db_kv_set(db, "provider.base_url", base_url);
+    db_kv_set(db, "provider.model", "mock-model");
+    db_kv_set(db, "provider.max_tokens", "256");
+    db_kv_set(db, "provider.context_window", "128000");
+    db_kv_set(db, "provider.api_key", "mock-key");
+    db_kv_set(db, "workspace", "/tmp");
+    db_kv_set(db, "max_iterations", "5");
+    db_kv_set(db, "shell_timeout", "5");
+
+    /* Create session + inbox in same DB */
+    int64_t sid = session_create(db, "error_test", agent_name, -1, 0);
+    inbox_insert(db, sid, "test", "trigger error");
 
     shutdown_reset();
     char self_path[4096];
@@ -409,7 +404,7 @@ static void test_daemon_agent_error_exit(void) {
     daemon_set_self_path(self_path);
 
     Config cfg = {0};
-    cfg.db_path = (char *)ddb_path;
+    cfg.db_path = (char *)db_path;
     cfg.workspace = "/tmp";
     cfg.shell_timeout = 5;
     cfg.provider.base_url = base_url;
@@ -419,7 +414,7 @@ static void test_daemon_agent_error_exit(void) {
     cfg.provider.context_window = 128000;
     cfg.max_iterations = 5;
 
-    void *args[2] = {&cfg, ddb};
+    void *args[2] = {&cfg, db};
     pthread_t dt;
     pthread_create(&dt, NULL, daemon_thread_fn, args);
     usleep(200000);
@@ -430,17 +425,14 @@ static void test_daemon_agent_error_exit(void) {
     int settled = 0;
     for (int i = 0; i < 200; i++) {
         usleep(100000);
-        adb = db_open_agent(adb_path);
-        if (!adb) continue;
         sqlite3_stmt *stmt;
-        sqlite3_prepare_v2(adb, "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
+        sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
         sqlite3_bind_int64(stmt, 1, sid);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *state = (const char *)sqlite3_column_text(stmt, 0);
             if (state && strcmp(state, "idle") == 0) settled = 1;
         }
         sqlite3_finalize(stmt);
-        db_close(adb);
         if (settled) break;
     }
 
@@ -448,16 +440,15 @@ static void test_daemon_agent_error_exit(void) {
     pthread_join(dt, NULL);
 
     if (!settled) {
-        db_close(ddb); chdir(orig_cwd);
+        db_close(db); chdir(orig_cwd);
         snprintf(cmd, sizeof(cmd), "rm -rf %s", work_dir);
-        system(cmd); unlink(ddb_path);
+        system(cmd); unlink(db_path);
         FAIL("session did not return to idle after agent error exit");
     }
 
     /* Verify error entry written */
-    adb = db_open_agent(adb_path);
     int count = 0;
-    Entry *entries = session_get_branch(adb, sid, &count);
+    Entry *entries = session_get_branch(db, sid, &count);
     int found_error = 0;
     if (entries) {
         for (int i = 0; i < count; i++) {
@@ -467,12 +458,11 @@ static void test_daemon_agent_error_exit(void) {
         }
         entry_branch_free(entries, count);
     }
-    db_close(adb);
-    db_close(ddb);
+    db_close(db);
     chdir(orig_cwd);
     snprintf(cmd, sizeof(cmd), "rm -rf %s", work_dir);
     system(cmd);
-    unlink(ddb_path);
+    unlink(db_path);
 
     if (!found_error) FAIL("expected error entry in DB after agent error exit");
     PASS();

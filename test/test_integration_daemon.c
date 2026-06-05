@@ -1,6 +1,7 @@
-/* T130: integration test — daemon fork+reap with mock LLM.
+/* T130/T298: integration test — daemon fork+reap with mock LLM.
  * Daemon forks agent process, agent hits mock HTTP server, writes response,
- * daemon reaps and delivers. Verifies V21 (daemon forks), V26 (delivers). */
+ * daemon reaps and delivers. Verifies V21 (daemon forks), V26 (delivers).
+ * T298: Updated to single unified DB (V73/T297). */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include <stdio.h>
@@ -49,7 +50,7 @@ static void seed_kv_config(sqlite3 *db) {
     db_kv_set(db, "shell_timeout", "5");
 }
 
-/* T200: Setup agent dir + DB for integration tests */
+/* T298: Setup workspace dir for agent (needed for workspace isolation) */
 static void setup_agent_dir(void) {
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", WORK_DIR);
@@ -64,21 +65,19 @@ static void setup_agent_dir(void) {
 }
 
 /* Wait for session to return to idle with an assistant entry (max 15s) */
-static int wait_for_completion(const char *agent_db_path, int64_t sid) {
+static int wait_for_completion(sqlite3 *db, int64_t sid) {
     for (int i = 0; i < 150; i++) {
         usleep(100000);
-        sqlite3 *adb = db_open_agent(agent_db_path);
-        if (!adb) continue;
         sqlite3_stmt *stmt;
         int done = 0;
-        sqlite3_prepare_v2(adb,
+        sqlite3_prepare_v2(db,
             "SELECT state FROM sessions WHERE id=?;", -1, &stmt, NULL);
         sqlite3_bind_int64(stmt, 1, sid);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *state = (const char *)sqlite3_column_text(stmt, 0);
             if (state && strcmp(state, "idle") == 0) {
                 sqlite3_finalize(stmt);
-                sqlite3_prepare_v2(adb,
+                sqlite3_prepare_v2(db,
                     "SELECT COUNT(*) FROM entries WHERE session_id=? AND role=2;",
                     -1, &stmt, NULL);
                 sqlite3_bind_int64(stmt, 1, sid);
@@ -88,7 +87,6 @@ static int wait_for_completion(const char *agent_db_path, int64_t sid) {
             }
         }
         sqlite3_finalize(stmt);
-        db_close(adb);
         if (done) return 0;
     }
     return -1;
@@ -110,22 +108,17 @@ static void test_daemon_fork_reap_mock(void) {
     setup_agent_dir();
     chdir(WORK_DIR);
 
-    /* Create agent DB with session + inbox */
-    char adb_path[256];
-    snprintf(adb_path, sizeof(adb_path), "agents/%s/agent.db", AGENT_NAME);
-    sqlite3 *adb = db_open_agent(adb_path);
-    if (!adb) { chdir(orig_cwd); FAIL("db_open_agent"); }
-    int64_t sid = session_create(adb, "integ_daemon", AGENT_NAME, -1, 0);
-    if (sid < 0) { db_close(adb); chdir(orig_cwd); FAIL("session_create"); }
-    inbox_insert(adb, sid, "test", "hi there");
-    db_close(adb);
-
-    /* Create daemon DB */
+    /* T298: Single unified DB for daemon + agent */
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
     if (!db) { chdir(orig_cwd); FAIL("db_open"); }
     seed_kv_config(db);
     db_kv_set(db, "provider.api_key", "mock-key");
+
+    /* Create session + inbox in same DB */
+    int64_t sid = session_create(db, "integ_daemon", AGENT_NAME, -1, 0);
+    if (sid < 0) { db_close(db); chdir(orig_cwd); FAIL("session_create"); }
+    inbox_insert(db, sid, "test", "hi there");
 
     shutdown_reset();
     char self_path[4096];
@@ -152,7 +145,7 @@ static void test_daemon_fork_reap_mock(void) {
 
     daemon_signal_session_agent(sid, AGENT_NAME);
 
-    if (wait_for_completion(adb_path, sid) != 0) {
+    if (wait_for_completion(db, sid) != 0) {
         shutdown_request();
         pthread_join(dt, NULL);
         db_close(db); chdir(orig_cwd);
@@ -166,15 +159,14 @@ static void test_daemon_fork_reap_mock(void) {
         FAIL("mock server received no requests");
     }
 
-    /* Verify inbox consumed + assistant entry in agent DB */
-    adb = db_open_agent(adb_path);
-    if (inbox_count(adb, sid) != 0) {
-        db_close(adb); shutdown_request(); pthread_join(dt, NULL);
+    /* Verify inbox consumed + assistant entry */
+    if (inbox_count(db, sid) != 0) {
+        shutdown_request(); pthread_join(dt, NULL);
         db_close(db); chdir(orig_cwd);
         FAIL("inbox not consumed");
     }
     int count = 0;
-    Entry *entries = session_get_branch(adb, sid, &count);
+    Entry *entries = session_get_branch(db, sid, &count);
     int found_assistant = 0;
     if (entries) {
         for (int i = 0; i < count; i++) {
@@ -185,7 +177,6 @@ static void test_daemon_fork_reap_mock(void) {
         }
         entry_branch_free(entries, count);
     }
-    db_close(adb);
 
     if (!found_assistant) {
         shutdown_request(); pthread_join(dt, NULL);
@@ -250,20 +241,17 @@ static void test_daemon_fork_reap_tool_call(void) {
     setup_agent_dir();
     chdir(WORK_DIR);
 
-    char adb_path[256];
-    snprintf(adb_path, sizeof(adb_path), "agents/%s/agent.db", AGENT_NAME);
-    sqlite3 *adb = db_open_agent(adb_path);
-    if (!adb) { chdir(orig_cwd); FAIL("db_open_agent"); }
-    int64_t sid = session_create(adb, "integ_daemon_tool", AGENT_NAME, -1, 0);
-    if (sid < 0) { db_close(adb); chdir(orig_cwd); FAIL("session_create"); }
-    inbox_insert(adb, sid, "test", "read the file");
-    db_close(adb);
-
+    /* T298: Single unified DB */
     unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
     if (!db) { chdir(orig_cwd); FAIL("db_open"); }
     seed_kv_config(db);
     db_kv_set(db, "provider.api_key", "mock-key");
+
+    /* Create session + inbox in same DB */
+    int64_t sid = session_create(db, "integ_daemon_tool", AGENT_NAME, -1, 0);
+    if (sid < 0) { db_close(db); chdir(orig_cwd); FAIL("session_create"); }
+    inbox_insert(db, sid, "test", "read the file");
 
     shutdown_reset();
     char self_path[4096];
@@ -290,7 +278,7 @@ static void test_daemon_fork_reap_tool_call(void) {
 
     daemon_signal_session_agent(sid, AGENT_NAME);
 
-    if (wait_for_completion(adb_path, sid) != 0) {
+    if (wait_for_completion(db, sid) != 0) {
         shutdown_request();
         pthread_join(dt, NULL);
         db_close(db); chdir(orig_cwd);
@@ -306,9 +294,8 @@ static void test_daemon_fork_reap_tool_call(void) {
         FAIL(msg);
     }
 
-    adb = db_open_agent(adb_path);
     int count = 0;
-    Entry *entries = session_get_branch(adb, sid, &count);
+    Entry *entries = session_get_branch(db, sid, &count);
     int found = 0;
     if (entries) {
         for (int i = 0; i < count; i++) {
@@ -319,7 +306,6 @@ static void test_daemon_fork_reap_tool_call(void) {
         }
         entry_branch_free(entries, count);
     }
-    db_close(adb);
 
     if (!found) {
         shutdown_request(); pthread_join(dt, NULL);
@@ -339,7 +325,7 @@ static void test_daemon_fork_reap_tool_call(void) {
 int main(void) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
     s_port = mock_server_start();
-    printf("--- test_integration_daemon (T130) ---\n");
+    printf("--- test_integration_daemon (T130/T298) ---\n");
     test_daemon_fork_reap_mock();
     test_daemon_fork_reap_tool_call();
     printf("%d/%d passed\n", tests_passed, tests_run);

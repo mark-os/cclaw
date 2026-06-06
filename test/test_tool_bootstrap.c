@@ -45,7 +45,7 @@ static int test_configure_openrouter(void) {
         "{\"provider\":\"openrouter\",\"api_key\":\"sk-or-test-key-123\"}",
         e->user_data);
     assert(result != NULL);
-    assert(strncmp(result, "AGENT_EXIT_CONFIG:", 18) == 0);
+    assert(strstr(result, "config applied:") != NULL);
     assert(strstr(result, "configure_provider") != NULL);
     free(result);
 
@@ -99,7 +99,7 @@ static int test_configure_custom_with_url(void) {
         "\"model\":\"my-model-7b\"}",
         e->user_data);
     assert(result != NULL);
-    assert(strncmp(result, "AGENT_EXIT_CONFIG:", 18) == 0);
+    assert(strstr(result, "config applied:") != NULL);
     free(result);
 
     /* V76: Tool does NOT write custom values — base_url still has default */
@@ -151,7 +151,7 @@ static int test_configure_channel_telegram(void) {
         "{\"channel_type\":\"telegram\",\"bot_token\":\"123456:ABC-DEF\"}",
         e->user_data);
     assert(result != NULL);
-    assert(strncmp(result, "AGENT_EXIT_CONFIG:", 18) == 0);
+    assert(strstr(result, "config applied:") != NULL);
     assert(strstr(result, "configure_channel") != NULL);
     free(result);
 
@@ -201,7 +201,7 @@ static int test_configure_channel_cli(void) {
     ToolEntry *e = tools_lookup(&reg, "configure_channel");
     char *result = e->handler("{\"channel_type\":\"cli\"}", e->user_data);
     assert(result != NULL);
-    assert(strncmp(result, "AGENT_EXIT_CONFIG:", 18) == 0);
+    assert(strstr(result, "config applied:") != NULL);
     assert(strstr(result, "configure_channel") != NULL);
     free(result);
 
@@ -231,7 +231,7 @@ static int test_configure_channel_unknown(void) {
     /* Custom type with binary_path → sentinel (success) */
     result = e->handler("{\"channel_type\":\"whatsapp\",\"binary_path\":\"/usr/bin/wa\"}", e->user_data);
     assert(result != NULL);
-    assert(strstr(result, "AGENT_EXIT_CONFIG:") != NULL);
+    assert(strstr(result, "config applied:") != NULL);
     free(result);
 
     tools_free(&reg);
@@ -259,7 +259,7 @@ static int test_create_agent_basic(void) {
         "\"allowed_hosts\":[\"api.example.com\"]}",
         e->user_data);
     assert(result != NULL);
-    assert(strncmp(result, "AGENT_EXIT_CONFIG:", 18) == 0);
+    assert(strstr(result, "config applied:") != NULL);
     assert(strstr(result, "create_agent") != NULL);
     free(result);
 

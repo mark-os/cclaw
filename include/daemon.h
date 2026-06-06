@@ -86,11 +86,6 @@ int64_t daemon_inbox_insert(const char *agent_name, int64_t session_id,
 /* T199: Read inbox count from agent DB. Returns count or -1 on error. */
 int daemon_inbox_count(const char *agent_name, int64_t session_id);
 
-/* T203/V78: Resolve approval — UPDATE PENDING entry in agent DB with result,
- * transition state waiting→idle, signal daemon to re-fork.
- * Returns 0 on success, -1 on error. */
-int daemon_resolve_approval(const char *agent_name, int64_t session_id,
-                            const char *tool_call_id, const char *result);
 
 /* T205/V79: Apply config change from agent exit code 4.
  * Daemon reads tool_call args, dispatches to appropriate handler.

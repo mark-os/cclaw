@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_agent.h"
 #include "tool_parse.h"
-#include "agent_exit.h"
 #include "daemon.h"
 #include <cJSON.h>
 #include <stdio.h>
@@ -59,15 +58,10 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         return strdup("error: max system-wide sub-agents reached (limit 10)");
     }
 
-    /* T88/V21/T201: In daemon mode, return sentinel — daemon reads args from tool_call */
+    /* In daemon mode, insert into spawn_queue and return */
     if (ctx->daemon_mode) {
         tool_parse_free(&ta);
-
-        if (background) {
-            /* Background: still return sentinel so daemon handles it */
-            return strdup(SENTINEL_SPAWN "background");
-        }
-        return strdup(SENTINEL_SPAWN "blocking");
+        return strdup(background ? "spawn queued (background)" : "spawn queued (blocking)");
     }
 
     /* V39: CLI mode — fork+exec the agent binary */

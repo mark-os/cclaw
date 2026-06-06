@@ -2,7 +2,6 @@
 #include "daemon.h"
 #include "db.h"
 #include "shutdown.h"
-#include "agent.h"
 #include "agent_config.h"
 #include "tools.h"
 #include "tool_shell.h"
@@ -16,6 +15,7 @@
 #include "context.h"
 #include "log.h"
 #include "agent_exit.h"
+#include "turn_loop.h"
 #include <cJSON.h>
 
 #include <dirent.h>
@@ -244,54 +244,6 @@ int daemon_inbox_count(const char *agent_name, int64_t session_id) {
     int count = inbox_count(adb, session_id);
     db_close(adb);
     return count;
-}
-
-/* T203/V78: Resolve approval — UPDATE PENDING entry, transition state, signal. */
-int daemon_resolve_approval(const char *agent_name, int64_t session_id,
-                            const char *tool_call_id, const char *result) {
-    if (!agent_name || !tool_call_id || !result) return -1;
-    char *path = agent_db_path(agent_name);
-    if (!path) return -1;
-    sqlite3 *adb = db_open(path);
-    free(path);
-    if (!adb) return -1;
-
-    /* Find PENDING entry by tool_call_id */
-    const char *sql = "SELECT id FROM entries WHERE session_id=?"
-                      " AND tool_call_id=? AND content='PENDING' LIMIT 1;";
-    sqlite3_stmt *stmt;
-    int rc = -1;
-    if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(stmt, 1, session_id);
-        sqlite3_bind_text(stmt, 2, tool_call_id, -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            int64_t eid = sqlite3_column_int64(stmt, 0);
-            sqlite3_finalize(stmt);
-            /* UPDATE content */
-            const char *usql = "UPDATE entries SET content=? WHERE id=? AND content='PENDING';";
-            sqlite3_stmt *us;
-            if (sqlite3_prepare_v2(adb, usql, -1, &us, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(us, 1, result, -1, SQLITE_STATIC);
-                sqlite3_bind_int64(us, 2, eid);
-                if (sqlite3_step(us) == SQLITE_DONE) rc = 0;
-                sqlite3_finalize(us);
-            }
-        } else {
-            sqlite3_finalize(stmt);
-        }
-    }
-
-    /* Transition waiting→idle */
-    if (rc == 0)
-        session_set_state(adb, session_id, "idle");
-
-    db_close(adb);
-
-    /* Signal daemon to re-fork */
-    if (rc == 0)
-        daemon_signal_session_agent(session_id, agent_name);
-
-    return rc;
 }
 
 /* ── Namespace check (T208, V85) ────────────────────────────────── */
@@ -791,11 +743,38 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
             }
         }
 
-        /* Child: exec agent process */
-        char sid_arg[64];
-        snprintf(sid_arg, sizeof(sid_arg), "--session-id=%lld", (long long)session_id);
-        execl(g_self_path, g_self_path, "--agent", sid_arg, (char *)NULL);
-        _exit(127);
+        /* Child: run turn loop directly */
+        {
+            Config *child_cfg = config_load_from_env();
+            if (!child_cfg) _exit(AGENT_EXIT_ERROR);
+            sqlite3 *child_db = db_open(g_daemon_db_path);
+            if (!child_db) { config_free(child_cfg); _exit(AGENT_EXIT_ERROR); }
+            db_set_agent_pragmas(child_db);
+
+            /* Drain inbox + ensure system prompt */
+            inbox_consume_into_entries(child_db, session_id, 100);
+            int bc = 0;
+            Entry *branch = session_get_branch(child_db, session_id, &bc);
+            if (bc == 0) {
+                char *sp = agent_build_system_prompt(child_db, agent_name,
+                                                    session_id, "agents", child_cfg);
+                Message sys = {.role = ROLE_SYSTEM, .content = sp};
+                entry_append(child_db, session_id, &sys);
+                free(sp);
+            }
+            entry_branch_free(branch, bc);
+
+            AgentSetup child_setup;
+            agent_setup_init(&child_setup, child_db, session_id, child_cfg,
+                             agent_name, NULL, 0, AGENT_SETUP_DAEMON);
+            int trc = turn_loop_run(child_db, session_id, child_cfg,
+                                    &child_setup, TURN_MODE_DAEMON);
+            agent_setup_destroy(&child_setup);
+            db_close(child_db);
+            config_free(child_cfg);
+            _exit(trc == TURN_EXIT_DONE ? AGENT_EXIT_DONE :
+                  trc == TURN_EXIT_PARKED ? AGENT_EXIT_DONE : AGENT_EXIT_ERROR);
+        }
     }
 
     /* Parent: close write ends, close read ends (child stderr goes to syslog TODO) */
@@ -897,85 +876,6 @@ static void deliver_response(const Config *cfg, sqlite3 *db,
 
     free(reply);
     free(route);
-}
-
-/* ── T201: PENDING entry helpers (V77/V78/V79) ─────────────────── */
-
-/* Find tool_result entry with content='PENDING' in agent DB for given session.
- * Returns tool_call_id (caller frees) or NULL. Sets *entry_id. */
-/* Find PENDING tool_result entry. Returns tool_call_id (caller frees), sets *entry_id. */
-char *find_pending_entry(sqlite3 *adb, int64_t session_id, int64_t *entry_id) {
-    const char *sql =
-        "SELECT id, tool_call_id FROM entries"
-        " WHERE session_id=? AND role=3 AND content='PENDING'"
-        " ORDER BY id DESC LIMIT 1;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    char *tc_id = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        *entry_id = sqlite3_column_int64(stmt, 0);
-        const char *v = (const char *)sqlite3_column_text(stmt, 1);
-        if (v) tc_id = strdup(v);
-    }
-    sqlite3_finalize(stmt);
-    return tc_id;
-}
-
-/* Read tool_call arguments from last assistant entry matching tool_call_id.
- * Returns JSON args string (caller frees) and sets *tool_name. */
-char *read_tool_call_args(sqlite3 *adb, int64_t session_id,
-                                 const char *tool_call_id, char **tool_name) {
-    *tool_name = NULL;
-    /* Find last assistant entry with tool_calls containing this id */
-    const char *sql =
-        "SELECT tool_calls FROM entries"
-        " WHERE session_id=? AND role=2 AND tool_calls IS NOT NULL"
-        " ORDER BY id DESC LIMIT 1;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    char *args = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *tc_json = (const char *)sqlite3_column_text(stmt, 0);
-        if (tc_json) {
-            cJSON *arr = cJSON_Parse(tc_json);
-            if (arr && cJSON_IsArray(arr)) {
-                int n = cJSON_GetArraySize(arr);
-                for (int i = 0; i < n; i++) {
-                    cJSON *item = cJSON_GetArrayItem(arr, i);
-                    cJSON *id = cJSON_GetObjectItem(item, "id");
-                    if (id && id->valuestring &&
-                        strcmp(id->valuestring, tool_call_id) == 0) {
-                        cJSON *a = cJSON_GetObjectItem(item, "args");
-                        if (a) args = cJSON_PrintUnformatted(a);
-                        cJSON *nm = cJSON_GetObjectItem(item, "name");
-                        if (nm && nm->valuestring)
-                            *tool_name = strdup(nm->valuestring);
-                        break;
-                    }
-                }
-            }
-            cJSON_Delete(arr);
-        }
-    }
-    sqlite3_finalize(stmt);
-    return args;
-}
-
-/* UPDATE PENDING entry content with real result */
-int update_pending_entry(sqlite3 *adb, int64_t entry_id, const char *result) {
-    const char *sql = "UPDATE entries SET content=? WHERE id=? AND content='PENDING';";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(adb, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_text(stmt, 1, result, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 2, entry_id);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
 /* ── T205/V79: Apply config changes from agent exit code 4 ──────── */
@@ -1302,150 +1202,6 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
             }
         }
 
-        /* T201/V77: Exit code 2 = spawn request. Find PENDING entry, read tool_call args. */
-        if (exit_code == AGENT_EXIT_SPAWN) {
-            char *path = agent_db_path(agent_name);
-            if (path) {
-                sqlite3 *adb = db_open(path);
-                free(path);
-                if (adb) {
-                    int64_t pending_eid = 0;
-                    char *tc_id = find_pending_entry(adb, session_id, &pending_eid);
-                    if (tc_id) {
-                        char *tname = NULL;
-                        char *args = read_tool_call_args(adb, session_id, tc_id, &tname);
-                        if (args) {
-                            /* Parse spawn_agent args: task, background, name */
-                            cJSON *j = cJSON_Parse(args);
-                            const char *task = "";
-                            const char *child_agent = NULL;
-                            int bg = 0;
-                            int depth = 0;
-                            if (j) {
-                                cJSON *t = cJSON_GetObjectItem(j, "task");
-                                if (t && t->valuestring) task = t->valuestring;
-                                cJSON *b = cJSON_GetObjectItem(j, "background");
-                                if (cJSON_IsTrue(b)) bg = 1;
-                                cJSON *n = cJSON_GetObjectItem(j, "name");
-                                if (n && cJSON_IsString(n) && n->valuestring[0])
-                                    child_agent = n->valuestring;
-                            }
-                            /* Get depth from session */
-                            const char *dsql = "SELECT depth FROM sessions WHERE id=?;";
-                            sqlite3_stmt *ds;
-                            if (sqlite3_prepare_v2(adb, dsql, -1, &ds, NULL) == SQLITE_OK) {
-                                sqlite3_bind_int64(ds, 1, session_id);
-                                if (sqlite3_step(ds) == SQLITE_ROW)
-                                    depth = sqlite3_column_int(ds, 0);
-                                sqlite3_finalize(ds);
-                            }
-                            /* Insert into cclaw.db spawn_queue */
-                            const char *ins = "INSERT INTO spawn_queue"
-                                " (parent_agent, parent_session_id, task, background, depth, tool_call_id, child_agent)"
-                                " VALUES (?,?,?,?,?,?,?);";
-                            sqlite3_stmt *is;
-                            if (sqlite3_prepare_v2(db, ins, -1, &is, NULL) == SQLITE_OK) {
-                                sqlite3_bind_text(is, 1, agent_name, -1, SQLITE_STATIC);
-                                sqlite3_bind_int64(is, 2, session_id);
-                                sqlite3_bind_text(is, 3, task, -1, SQLITE_STATIC);
-                                sqlite3_bind_int(is, 4, bg);
-                                sqlite3_bind_int(is, 5, depth + 1);
-                                sqlite3_bind_text(is, 6, tc_id, -1, SQLITE_STATIC);
-                                if (child_agent)
-                                    sqlite3_bind_text(is, 7, child_agent, -1, SQLITE_STATIC);
-                                else
-                                    sqlite3_bind_null(is, 7);
-                                sqlite3_step(is);
-                                sqlite3_finalize(is);
-                            }
-                            /* Background: resolve PENDING immediately, re-fork */
-                            if (bg) {
-                                update_pending_entry(adb, pending_eid,
-                                    "background agent spawned");
-                                daemon_agent_set_state(agent_name, session_id, "idle");
-                                daemon_signal_session_agent(session_id, agent_name);
-                            }
-                            cJSON_Delete(j);
-                            free(args);
-                        }
-                        free(tname);
-                        free(tc_id);
-                    }
-                    db_close(adb);
-                }
-            }
-        }
-
-        /* T201/V78: Exit code 3 = approval request. Find PENDING, read tool_call args. */
-        if (exit_code == AGENT_EXIT_APPROVAL) {
-            char *path = agent_db_path(agent_name);
-            if (path) {
-                sqlite3 *adb = db_open(path);
-                free(path);
-                if (adb) {
-                    int64_t pending_eid = 0;
-                    char *tc_id = find_pending_entry(adb, session_id, &pending_eid);
-                    if (tc_id) {
-                        char *tname = NULL;
-                        char *args = read_tool_call_args(adb, session_id, tc_id, &tname);
-                        if (args) {
-                            /* Parse approval_request args: type, payload */
-                            cJSON *j = cJSON_Parse(args);
-                            const char *type = "unknown";
-                            char *payload_str = NULL;
-                            if (j) {
-                                cJSON *t = cJSON_GetObjectItem(j, "type");
-                                if (t && t->valuestring) type = t->valuestring;
-                                cJSON *p = cJSON_GetObjectItem(j, "payload");
-                                if (p) payload_str = cJSON_PrintUnformatted(p);
-                            }
-                            if (!payload_str) payload_str = strdup("{}");
-                            /* T203: Insert into cclaw.db approvals w/ tool_call_id */
-                            approval_insert(db, session_id, agent_name,
-                                            tc_id, type, payload_str);
-                            free(payload_str);
-                            cJSON_Delete(j);
-                            free(args);
-                        }
-                        free(tname);
-                        free(tc_id);
-                    }
-                    db_close(adb);
-                }
-            }
-        }
-
-        /* T201/V79: Exit code 4 = config change. Find PENDING, read tool_call args, apply. */
-        if (exit_code == AGENT_EXIT_CONFIG) {
-            char *path = agent_db_path(agent_name);
-            if (path) {
-                sqlite3 *adb = db_open(path);
-                free(path);
-                if (adb) {
-                    int64_t pending_eid = 0;
-                    char *tc_id = find_pending_entry(adb, session_id, &pending_eid);
-                    if (tc_id) {
-                        char *tname = NULL;
-                        char *args = read_tool_call_args(adb, session_id, tc_id, &tname);
-                        if (args) {
-                            /* T205/V79: Daemon applies config to cclaw.db */
-                            char *result = daemon_apply_config(cfg, db, agent_name,
-                                                              tname, args);
-                            update_pending_entry(adb, pending_eid,
-                                                result ? result : "error: config apply failed");
-                            free(result);
-                            daemon_agent_set_state(agent_name, session_id, "idle");
-                            daemon_signal_session_agent(session_id, agent_name);
-                            free(args);
-                        }
-                        free(tname);
-                        free(tc_id);
-                    }
-                    db_close(adb);
-                }
-            }
-        }
-
         /* T201/V33: Check if this was a sub-agent from spawn_queue (blocking).
          * On completion, UPDATE parent's PENDING entry with result. */
         const char *sq_sql =
@@ -1463,6 +1219,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
 
                 /* Get sub-agent result from last assistant entry */
                 const char *result_text = "sub-agent completed with no output";
+                (void)result_text;
                 char *result_buf = NULL;
                 {
                     char *cpath = agent_db_path(agent_name);
@@ -1480,27 +1237,13 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                 spawn_queue_mark(db, sq_id, "done", session_id);
 
                 if (!bg && parent_agent && parent_agent[0] && parent_tc_id) {
-                    /* V77/V33: UPDATE parent's PENDING entry with result */
+                    /* Mark parent's tool_call as done, transition state, re-fork */
                     char *ppath = agent_db_path(parent_agent);
                     if (ppath) {
                         sqlite3 *padb = db_open(ppath);
                         free(ppath);
                         if (padb) {
-                            /* Find PENDING entry by tool_call_id */
-                            const char *fsql =
-                                "SELECT id FROM entries WHERE session_id=?"
-                                " AND tool_call_id=? AND content='PENDING' LIMIT 1;";
-                            sqlite3_stmt *fs;
-                            if (sqlite3_prepare_v2(padb, fsql, -1, &fs, NULL) == SQLITE_OK) {
-                                sqlite3_bind_int64(fs, 1, parent_sid);
-                                sqlite3_bind_text(fs, 2, parent_tc_id, -1, SQLITE_STATIC);
-                                if (sqlite3_step(fs) == SQLITE_ROW) {
-                                    int64_t peid = sqlite3_column_int64(fs, 0);
-                                    update_pending_entry(padb, peid, result_text);
-                                }
-                                sqlite3_finalize(fs);
-                            }
-                            /* Transition parent waiting→idle, re-fork */
+                            db_tool_call_set_status(padb, parent_sid, parent_tc_id, "done", "subagent");
                             session_set_state(padb, parent_sid, "idle");
                             db_close(padb);
                             daemon_signal_session_agent(parent_sid, parent_agent);
@@ -1590,22 +1333,8 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
                     sqlite3 *padb = db_open(ppath);
                     free(ppath);
                     if (padb) {
-                        const char *fsql =
-                            "SELECT id FROM entries WHERE session_id=?"
-                            " AND tool_call_id=? AND content='PENDING' LIMIT 1;";
-                        sqlite3_stmt *fs;
-                        if (sqlite3_prepare_v2(padb, fsql, -1, &fs, NULL) == SQLITE_OK) {
-                            sqlite3_bind_int64(fs, 1, r->parent_session_id);
-                            sqlite3_bind_text(fs, 2, r->tool_call_id, -1, SQLITE_STATIC);
-                            if (sqlite3_step(fs) == SQLITE_ROW) {
-                                int64_t peid = sqlite3_column_int64(fs, 0);
-                                char errbuf[256];
-                                snprintf(errbuf, sizeof(errbuf),
-                                    "error: agent '%s' does not exist", child_agent_name);
-                                update_pending_entry(padb, peid, errbuf);
-                            }
-                            sqlite3_finalize(fs);
-                        }
+                        db_tool_call_set_status(padb, r->parent_session_id,
+                                               r->tool_call_id, "done", "subagent_error");
                         session_set_state(padb, r->parent_session_id, "idle");
                         db_close(padb);
                         daemon_signal_session_agent(r->parent_session_id, parent_agent_name);

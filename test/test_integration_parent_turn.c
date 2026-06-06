@@ -1,6 +1,6 @@
 /* T300: Integration test for parent turn loop (fork LLM child → dispatch tools → loop) */
 #define _POSIX_C_SOURCE 200809L
-#include "agent_turn.h"
+#include "turn_loop.h"
 #include "agent_exit.h"
 #include "config.h"
 #include "db.h"

@@ -906,195 +906,34 @@ static int handle_whitelist_reply(int64_t chat_id, const char *text) {
     telegram_send_message(g_cfg->telegram_token, chat_id, msg);
     return 1;
 }
-
-/* T148: Send approval request to a single admin chat with Approve/Deny buttons */
-static void approval_send_to_admin(const char *token, int64_t chat_id, const Approval *a) {
-    cJSON *body = cJSON_CreateObject();
-    cJSON_AddNumberToObject(body, "chat_id", (double)chat_id);
-
-    char text_buf[512];
-    snprintf(text_buf, sizeof(text_buf),
-             "\xf0\x9f\x94\x91 Approval Request #%lld\n"
-             "Agent: %s\nType: %s\nPayload: %s",
-             (long long)a->id,
-             a->agent_name ? a->agent_name : "unknown",
-             a->type ? a->type : "unknown",
-             a->payload ? a->payload : "{}");
-    cJSON_AddStringToObject(body, "text", text_buf);
-
-    cJSON *markup = cJSON_CreateObject();
-    cJSON *rows = cJSON_CreateArray();
-    cJSON *row = cJSON_CreateArray();
-
-    char approve_data[32], deny_data[32];
-    snprintf(approve_data, sizeof(approve_data), "approve:%lld", (long long)a->id);
-    snprintf(deny_data, sizeof(deny_data), "deny:%lld", (long long)a->id);
-
-    cJSON *btn_approve = cJSON_CreateObject();
-    cJSON_AddStringToObject(btn_approve, "text", "\xe2\x9c\x85 Approve");
-    cJSON_AddStringToObject(btn_approve, "callback_data", approve_data);
-    cJSON_AddItemToArray(row, btn_approve);
-
-    cJSON *btn_deny = cJSON_CreateObject();
-    cJSON_AddStringToObject(btn_deny, "text", "\xe2\x9d\x8c Deny");
-    cJSON_AddStringToObject(btn_deny, "callback_data", deny_data);
-    cJSON_AddItemToArray(row, btn_deny);
-
-    cJSON_AddItemToArray(rows, row);
-    cJSON_AddItemToObject(markup, "inline_keyboard", rows);
-    cJSON_AddItemToObject(body, "reply_markup", markup);
-
-    char *json = cJSON_PrintUnformatted(body);
-    cJSON_Delete(body);
-    if (json) {
-        cJSON *resp = tg_call(token, "sendMessage", json);
-        cJSON_Delete(resp);
-        free(json);
-    }
-}
-
-/* T148: Check for unnotified pending approvals and deliver to all admins */
+/* T148: Check for pending tool_calls awaiting approval and notify admins */
 static void telegram_check_approvals(void) {
     if (!g_cfg || !g_cfg->telegram_token || !g_db) return;
     if (g_cfg->admin_chat_id_count == 0) return;
-
-    int count = 0;
-    Approval *list = approval_list_unnotified(g_db, &count);
-    if (!list) return;
-
-    for (int i = 0; i < count; i++) {
-        for (size_t j = 0; j < g_cfg->admin_chat_id_count; j++) {
-            approval_send_to_admin(g_cfg->telegram_token,
-                                   g_cfg->admin_chat_ids[j], &list[i]);
-        }
-        approval_mark_notified(g_db, list[i].id);
-    }
-    approval_list_free(list, count);
-}
-
-/* T149: Apply approved change based on approval type. Returns 0 on success. */
-static int apply_approval(const Approval *a) {
-    if (!a->type || !a->payload) return -1;
-
-    cJSON *payload = cJSON_Parse(a->payload);
-    if (!payload) return -1;
-
-    int rc = -1;
-    if (strcmp(a->type, "whitelist_host") == 0) {
-        cJSON *host = cJSON_GetObjectItemCaseSensitive(payload, "host");
-        if (cJSON_IsString(host) && a->agent_name)
-            rc = agent_config_add_host(g_db, a->agent_name, host->valuestring);
-    } else if (strcmp(a->type, "model_change") == 0) {
-        cJSON *model = cJSON_GetObjectItemCaseSensitive(payload, "model");
-        cJSON *pidx = cJSON_GetObjectItemCaseSensitive(payload, "provider_index");
-        int idx = (pidx && cJSON_IsNumber(pidx)) ? pidx->valueint : 0;
-        if (cJSON_IsString(model)) {
-            if (idx == 0) {
-                rc = db_kv_set(g_db, "provider.model", model->valuestring);
-            } else {
-                char *fp = db_kv_get(g_db, "fallback_providers");
-                cJSON *arr = fp ? cJSON_Parse(fp) : NULL;
-                free(fp);
-                if (arr && cJSON_IsArray(arr) && cJSON_GetArraySize(arr) >= idx) {
-                    cJSON *p = cJSON_GetArrayItem(arr, idx - 1);
-                    cJSON *existing = cJSON_GetObjectItemCaseSensitive(p, "model");
-                    if (existing) cJSON_SetValuestring(existing, model->valuestring);
-                    else cJSON_AddStringToObject(p, "model", model->valuestring);
-                    char *json = cJSON_PrintUnformatted(arr);
-                    if (json) { rc = db_kv_set(g_db, "fallback_providers", json); free(json); }
-                }
-                cJSON_Delete(arr);
-            }
-        }
-    } else if (strcmp(a->type, "tool_enable") == 0) {
-        /* Tool enable is a config-level change — accepted but no-op for now */
-        rc = 0;
-    } else if (strcmp(a->type, "create_agent") == 0) {
-        /* T150: create agent on disk + seed DB */
-        rc = agent_config_create("agents", g_db, a->payload);
-    }
-
-    cJSON_Delete(payload);
-    return rc;
+    /* TODO: query tool_calls with status='awaiting_approval', notify admins */
 }
 
 /* T148/T149: Handle approve/deny callback from admin inline keyboard */
 static void handle_approval_callback(const char *data, int64_t chat_id, const char *callback_id) {
     int approving = (strncmp(data, "approve:", 8) == 0);
-    const char *id_str = data + (approving ? 8 : 5); /* "approve:" or "deny:" */
-    int64_t approval_id = strtoll(id_str, NULL, 10);
-    if (approval_id <= 0) return;
-
-    const char *status = approving ? "approved" : "denied";
-    int rc = approval_resolve(g_db, approval_id, status, chat_id);
+    const char *id_str = data + (approving ? 8 : 5);
+    int64_t tc_id = strtoll(id_str, NULL, 10);
+    if (tc_id <= 0) return;
 
     /* Answer callback query */
     if (callback_id) {
         char ans[128];
         snprintf(ans, sizeof(ans),
-                 "{\"callback_query_id\":\"%s\",\"text\":\"Approval #%lld %s\"}",
-                 callback_id, (long long)approval_id, status);
+                 "{\"callback_query_id\":\"%s\",\"text\":\"Tool call #%lld %s\"}",
+                 callback_id, (long long)tc_id, approving ? "approved" : "denied");
         cJSON *r = tg_call(g_cfg->telegram_token, "answerCallbackQuery", ans);
         cJSON_Delete(r);
     }
 
-    if (rc != 0) {
-        char msg[128];
-        snprintf(msg, sizeof(msg), "Failed to resolve approval #%lld (already resolved?).",
-                 (long long)approval_id);
-        telegram_send_message(g_cfg->telegram_token, chat_id, msg);
-        return;
-    }
-
-    /* Fetch full approval details for apply + inbox post */
-    Approval *a = approval_get(g_db, approval_id);
-    if (!a) return;
-
-    /* T149: If approved, apply the change */
-    char inbox_msg[256];
-    if (approving) {
-        int apply_rc = apply_approval(a);
-        if (apply_rc == 0)
-            snprintf(inbox_msg, sizeof(inbox_msg),
-                     "Approval #%lld approved: %s %s",
-                     (long long)approval_id, a->type, a->payload ? a->payload : "");
-        else
-            snprintf(inbox_msg, sizeof(inbox_msg),
-                     "Approval #%lld approved but failed to apply: %s",
-                     (long long)approval_id, a->type);
-    } else {
-        snprintf(inbox_msg, sizeof(inbox_msg),
-                 "Approval #%lld denied: %s",
-                 (long long)approval_id, a->type);
-    }
-
-    /* T203/V78: UPDATE PENDING entry with result, transition state, re-fork */
-    if (a->session_id > 0 && a->agent_name && a->tool_call_id) {
-        daemon_resolve_approval(a->agent_name, a->session_id,
-                                a->tool_call_id, inbox_msg);
-    } else if (a->session_id > 0) {
-        /* Fallback: no tool_call_id (legacy) — post to inbox */
-        if (a->agent_name) {
-            daemon_inbox_insert(a->agent_name, a->session_id, "approval", inbox_msg);
-            /* T297: single DB — use g_db directly */
-            session_set_state(g_db, a->session_id, "idle");
-            daemon_signal_session_agent(a->session_id, a->agent_name);
-        } else {
-            inbox_insert(g_db, a->session_id, "approval", inbox_msg);
-            daemon_signal_session(a->session_id);
-        }
-    }
-
-    /* Notify admin */
-    char admin_msg[128];
-    snprintf(admin_msg, sizeof(admin_msg), "Approval #%lld %s.",
-             (long long)approval_id, status);
-    telegram_send_message(g_cfg->telegram_token, chat_id, admin_msg);
-
-    approval_free(a);
+    /* TODO: resolve tool_call via db_tool_call_set_status, re-signal session */
+    (void)chat_id;
 }
 
-/* T140: Dispatch admin command to handler. */
 static void dispatch_admin_command(const char *text, int64_t chat_id) {
     const char *args = NULL;
     int cmd = telegram_parse_admin_command(text, &args);

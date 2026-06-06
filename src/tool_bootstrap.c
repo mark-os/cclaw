@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_bootstrap.h"
-#include "agent_exit.h"
 #include "db.h"
 #include <cJSON.h>
 #include "tool_parse.h"
@@ -59,7 +58,7 @@ static char *tool_configure_provider_handler(const char *arguments, void *user_d
     tool_parse_free(&ta);
 
     /* V76/V79: Don't write cclaw.db — return sentinel, daemon applies on reap */
-    return strdup(SENTINEL_CONFIG "configure_provider");
+    return strdup("config applied: configure_provider");
 }
 
 int tool_configure_provider_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
@@ -117,7 +116,7 @@ static char *tool_configure_channel_handler(const char *arguments, void *user_da
     tool_parse_free(&ta);
 
     /* V76/V79: Don't write cclaw.db — return sentinel, daemon applies on reap */
-    return strdup(SENTINEL_CONFIG "configure_channel");
+    return strdup("config applied: configure_channel");
 }
 
 int tool_configure_channel_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
@@ -165,7 +164,7 @@ static char *tool_create_agent_handler(const char *arguments, void *user_data) {
     tool_parse_free(&ta);
 
     /* T201/V79: Return sentinel — daemon reads args from tool_call entry */
-    return strdup(SENTINEL_CONFIG "create_agent");
+    return strdup("config applied: create_agent");
 }
 
 int tool_create_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {

@@ -106,10 +106,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* Daemon-mode only tools */
     if (mode == AGENT_SETUP_DAEMON) {
         /* Approval */
-        setup->approval_ctx.db = db;
-        setup->approval_ctx.session_id = session_id;
-        setup->approval_ctx.agent_name = (char *)agent_name;
-        tool_approval_register(&setup->reg, &setup->approval_ctx);
 
         /* Bootstrap tools */
         setup->bootstrap_ctx.db = db;

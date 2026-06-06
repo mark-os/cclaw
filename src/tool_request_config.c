@@ -1,7 +1,6 @@
-/* T274/V120: request_config tool — CLI inline approval for tool/host grants */
+/* T274/V120: request_config tool — handled inline by turn_loop parent */
 #define _POSIX_C_SOURCE 200809L
 #include "tool_request_config.h"
-#include "agent_exit.h"
 #include "tool_parse.h"
 #include <stdlib.h>
 #include <string.h>
@@ -43,8 +42,8 @@ static char *handler(const char *arguments, void *user_data) {
     }
 
     tool_parse_free(&ta);
-    /* Exit code 4 — CLI parent reads args, prompts user, applies */
-    return strdup(SENTINEL_CONFIG "request_config");
+    /* This handler should never be called directly — turn_loop handles request_config inline */
+    return strdup("error: request_config must be handled by parent process");
 }
 
 int tool_request_config_register(ToolRegistry *reg) {

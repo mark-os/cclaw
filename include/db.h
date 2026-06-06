@@ -187,44 +187,24 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name);
 /* Free AgentRow. */
 void agent_row_free(AgentRow *row);
 
-/* T146: approvals table — admin approval flow (V54) */
+/* tool_calls status helpers */
 typedef struct {
-    int64_t id;
-    int64_t session_id;
-    char *agent_name;
-    char *tool_call_id;
-    char *type;       /* whitelist_host|create_agent|model_change|tool_enable */
-    char *payload;    /* JSON */
-    char *status;     /* pending|approved|denied */
-    int64_t admin_chat_id;
-    int64_t created_at;
-    int64_t resolved_at; /* 0 if unresolved */
-} Approval;
+    char *call_id;
+    char *name;
+    char *arguments;
+    int64_t entry_id;
+    int64_t turn_id;
+} PendingToolCall;
 
-/* Insert approval request. Returns row id (>0) or -1 on error. */
-int64_t approval_insert(sqlite3 *db, int64_t session_id, const char *agent_name,
-                        const char *tool_call_id, const char *type, const char *payload);
+/* Set tool_call status. resolved_by may be NULL. Returns 0 on success. */
+int db_tool_call_set_status(sqlite3 *db, int64_t session_id, const char *call_id,
+                            const char *status, const char *resolved_by);
 
-/* Get pending approvals. Caller frees with approval_list_free. Sets *count. */
-Approval *approval_list_pending(sqlite3 *db, int *count);
+/* Get pending tool_calls for session. Caller frees with db_tool_call_free_pending. */
+PendingToolCall *db_tool_call_get_pending(sqlite3 *db, int64_t session_id, int *out_count);
 
-/* Get approval by id. Returns NULL if not found. Caller frees with approval_free. */
-Approval *approval_get(sqlite3 *db, int64_t id);
-
-/* Resolve approval (approve or deny). Sets status + resolved_at + admin_chat_id. Returns 0 on success. */
-int approval_resolve(sqlite3 *db, int64_t id, const char *status, int64_t admin_chat_id);
-
-/* T148: Get pending approvals not yet notified to admins. Caller frees with approval_list_free. */
-Approval *approval_list_unnotified(sqlite3 *db, int *count);
-
-/* T148: Mark approval as notified (sent to admins). Returns 0 on success. */
-int approval_mark_notified(sqlite3 *db, int64_t id);
-
-/* Free single Approval. */
-void approval_free(Approval *a);
-
-/* Free Approval array. */
-void approval_list_free(Approval *list, int count);
+/* Free PendingToolCall array. */
+void db_tool_call_free_pending(PendingToolCall *list, int count);
 
 /* T152: memory_blocks table (V55) */
 typedef struct {

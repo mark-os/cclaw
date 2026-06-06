@@ -68,20 +68,7 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   last_run_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
-CREATE TABLE IF NOT EXISTS approvals (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_name TEXT NOT NULL,
-  session_id INTEGER NOT NULL,
-  tool_call_id TEXT,
-  type TEXT NOT NULL,
-  payload TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  admin_chat_id INTEGER,
-  notified INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  resolved_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(status) WHERE status='pending';
+
 CREATE TABLE IF NOT EXISTS channels (
   name TEXT PRIMARY KEY,
   type TEXT NOT NULL,
@@ -183,7 +170,9 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   name TEXT NOT NULL,
   arguments TEXT,
   result_entry_id INTEGER,
-  status TEXT NOT NULL DEFAULT 'pending'
+  status TEXT NOT NULL DEFAULT 'pending',
+  resolved_by TEXT,
+  resolved_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_entry ON tool_calls(entry_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, status);

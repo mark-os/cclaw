@@ -35,15 +35,12 @@ static void test_cli_mode_excludes_daemon_tools(void) {
     AgentSetup setup;
     agent_setup_init(&setup, db, sid, &cfg, "test_agent", NULL, 0, AGENT_SETUP_CLI);
 
-    /* V81: CLI should NOT have launch_agent, approval_request, configure_* */
+    /* V81: CLI should NOT have launch_agent, configure_* */
     if (tools_lookup(&setup.reg, "launch_agent") != NULL) {
         FAIL("launch_agent should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
     if (tools_lookup(&setup.reg, "check_agent") != NULL) {
         FAIL("check_agent should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
-    }
-    if (tools_lookup(&setup.reg, "approval_request") != NULL) {
-        FAIL("approval_request should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
     if (tools_lookup(&setup.reg, "configure_provider") != NULL) {
         FAIL("configure_provider should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
@@ -101,9 +98,6 @@ static void test_daemon_mode_includes_all_tools(void) {
     /* Daemon mode should have all tools including daemon-dependent ones */
     if (tools_lookup(&setup.reg, "launch_agent") == NULL) {
         FAIL("launch_agent missing in daemon mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
-    }
-    if (tools_lookup(&setup.reg, "approval_request") == NULL) {
-        FAIL("approval_request missing in daemon mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
     if (tools_lookup(&setup.reg, "configure_provider") == NULL) {
         FAIL("configure_provider missing in daemon mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;

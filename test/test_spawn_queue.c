@@ -97,7 +97,7 @@ static void test_daemon_mode_background(void) {
     char *r = tool_launch_agent_handler("{\"task\":\"bg task\",\"background\":true}", &ctx);
     assert(r != NULL);
     /* T201: background now returns sentinel (daemon reads args from tool_call) */
-    assert(strncmp(r, "AGENT_EXIT_SPAWN:", 17) == 0);
+    assert(strstr(r, "spawn queued") != NULL);
     assert(strstr(r, "background") != NULL);
     free(r);
 
@@ -123,7 +123,7 @@ static void test_daemon_mode_blocking(void) {
     char *r = tool_launch_agent_handler("{\"task\":\"blocking task\"}", &ctx);
     assert(r != NULL);
     /* Blocking mode returns sentinel */
-    assert(strncmp(r, "AGENT_EXIT_SPAWN:", 17) == 0);
+    assert(strstr(r, "spawn queued") != NULL);
     free(r);
 
     /* T201: tool no longer writes to spawn_queue — daemon does after reap */
@@ -222,7 +222,7 @@ static void test_spawn_tool_name_param(void) {
         "{\"task\":\"run helper\",\"name\":\"helper_agent\"}", &ctx);
     assert(r != NULL);
     /* Should return sentinel (daemon handles spawn) */
-    assert(strncmp(r, "AGENT_EXIT_SPAWN:", 17) == 0);
+    assert(strstr(r, "spawn queued") != NULL);
     free(r);
 
     daemon_signal_close();

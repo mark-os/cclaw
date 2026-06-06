@@ -14,7 +14,7 @@
 #include "log.h"
 #include "agent_config.h"
 #include "agent_exit.h"
-#include "agent_turn.h"
+#include "turn_loop.h"
 #include "llm_child.h"
 #include "web.h"
 #include "heartbeat.h"
@@ -26,7 +26,6 @@
 #include "secret.h"
 
 /* Track child pid so SIGINT can forward to it */
-static volatile pid_t g_child_pid = 0;
 
 /* Print last assistant response from session branch */
 static void print_response(sqlite3 *db, int64_t session_id) {
@@ -172,7 +171,6 @@ static void print_usage(void) {
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
-           "  --agent            run one agent turn (internal, used by daemon)\n"
            "  llm                run one LLM call (internal, used by parent turn loop)\n"
            "\n"
            "options:\n"
@@ -188,230 +186,8 @@ static void print_usage(void) {
 static sqlite3 *g_db;  /* T297: single DB handle for journal writes in CLI */
 static const Config *g_cli_cfg;
 
-/* Fork agent_turn_run as child, pipe stderr → journal.db + tee to terminal.
- * stdout inherited (future: streaming tokens). */
-static int cli_fork_turn(int64_t session_id) {
-    int err_pipe[2];
-    if (pipe(err_pipe) != 0) {
-        perror("pipe");
-        return AGENT_EXIT_ERROR;
-    }
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("fork");
-        close(err_pipe[0]); close(err_pipe[1]);
-        return AGENT_EXIT_ERROR;
-    }
-    if (pid == 0) {
-        /* Child: own pgroup so terminal SIGINT goes only to parent */
-        setpgid(0, 0);
-        /* Child: stderr → pipe, stdout inherited */
-        close(err_pipe[0]);
-        dup2(err_pipe[1], STDERR_FILENO);
-        close(err_pipe[1]);
-        _exit(agent_turn_run(session_id));
-    }
-
-    /* Parent: drain stderr pipe → tee to terminal in debug mode */
-    close(err_pipe[1]);
-    g_child_pid = pid;
-
-    int tee = g_cli_cfg && g_cli_cfg->log_level >= LOG_LEVEL_DEBUG;
-    (void)g_db; /* journal table removed — CLI just tees to stderr */
-
-    FILE *fp = fdopen(err_pipe[0], "r");
-    if (fp) {
-        char buf[4096];
-        while (fgets(buf, sizeof(buf), fp)) {
-            if (tee) {
-                size_t len = strlen(buf);
-                if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
-                fprintf(stderr, "%s\n", buf);
-            }
-        }
-        fclose(fp);
-    } else {
-        close(err_pipe[0]);
-    }
-
-    if (shutdown_requested()) {
-        kill(pid, SIGTERM);
-        usleep(50000);
-        kill(pid, SIGKILL);
-    }
-    g_child_pid = 0;
-
-    int status;
-    waitpid(pid, &status, 0);
-    if (WIFEXITED(status))
-        return WEXITSTATUS(status);
-    return AGENT_EXIT_ERROR;
-}
-
-/* Handle exit code 3: approval request. Prompt user, write result, re-fork. */
-static int cli_handle_approval(sqlite3 *adb, int64_t session_id) {
-    int64_t pending_eid = 0;
-    char *tc_id = find_pending_entry(adb, session_id, &pending_eid);
-    if (!tc_id) return -1;
-
-    char *tname = NULL;
-    char *args = read_tool_call_args(adb, session_id, tc_id, &tname);
-    if (!args) { free(tc_id); return -1; }
-
-    /* Display approval request */
-    printf("\033[33m⚠ approval requested");
-    if (tname) printf(" [%s]", tname);
-    printf(":\033[0m %s\n", args);
-
-    const char *yolo = getenv("CCLAW_YOLO");
-    const char *result;
-    if (yolo && yolo[0] == '1') {
-        result = "approved";
-    } else {
-        printf("allow? [y/n]: ");
-        fflush(stdout);
-        char buf[16];
-        if (fgets(buf, sizeof(buf), stdin) && (buf[0] == 'y' || buf[0] == 'Y'))
-            result = "approved";
-        else
-            result = "denied";
-    }
-
-    update_pending_entry(adb, pending_eid, result);
-    free(args);
-    free(tname);
-    free(tc_id);
-    return 0;
-}
-
-/* Handle exit code 4: config change. Apply and resolve PENDING. */
-static int cli_handle_config(const Config *cfg, sqlite3 *cclaw_db,
-                             sqlite3 *adb, int64_t session_id,
-                             const char *agent_name) {
-    int64_t pending_eid = 0;
-    char *tc_id = find_pending_entry(adb, session_id, &pending_eid);
-    if (!tc_id) return -1;
-
-    char *tname = NULL;
-    char *args = read_tool_call_args(adb, session_id, tc_id, &tname);
-    if (!args) { free(tc_id); return -1; }
-
-    /* T274/V120: request_config requires user approval before applying */
-    if (tname && strcmp(tname, "request_config") == 0) {
-        const char *yolo = getenv("CCLAW_YOLO");
-        int auto_approve = (yolo && yolo[0] == '1');
-        printf("\033[33m⚠ config request:\033[0m %s\n", args);
-        if (!auto_approve) {
-            printf("allow? [y/n]: ");
-            fflush(stdout);
-            char buf[16];
-            if (!fgets(buf, sizeof(buf), stdin) || (buf[0] != 'y' && buf[0] != 'Y')) {
-                update_pending_entry(adb, pending_eid, "denied by user");
-                printf("\033[31mdenied\033[0m\n");
-                free(args); free(tname); free(tc_id);
-                return 0;
-            }
-        }
-    }
-
-    char *result = daemon_apply_config(cfg, cclaw_db, agent_name, tname, args);
-    update_pending_entry(adb, pending_eid, result ? result : "error: config apply failed");
-
-    /* V120: reload CCLAW_TOOLS after grant so next fork sees it immediately */
-    if (result && strncmp(result, "granted tool:", 13) == 0) {
-        AgentConfig *ac = agent_config_load_db(cclaw_db, agent_name);
-        if (ac && ac->tool_count > 0) {
-            size_t len = 0;
-            for (size_t i = 0; i < ac->tool_count; i++)
-                len += strlen(ac->tools[i]) + 1;
-            char *csv = malloc(len);
-            if (csv) {
-                csv[0] = '\0';
-                for (size_t i = 0; i < ac->tool_count; i++) {
-                    if (i > 0) strcat(csv, ",");
-                    strcat(csv, ac->tools[i]);
-                }
-                setenv("CCLAW_TOOLS", csv, 1);
-                free(csv);
-            }
-        }
-        if (ac) agent_config_free(ac);
-    } else if (result && strncmp(result, "granted host:", 13) == 0) {
-        AgentConfig *ac = agent_config_load_db(cclaw_db, agent_name);
-        if (ac && ac->allowed_hosts_count > 0) {
-            size_t len = 0;
-            for (size_t i = 0; i < ac->allowed_hosts_count; i++)
-                len += strlen(ac->allowed_hosts[i]) + 1;
-            char *csv = malloc(len);
-            if (csv) {
-                csv[0] = '\0';
-                for (size_t i = 0; i < ac->allowed_hosts_count; i++) {
-                    if (i > 0) strcat(csv, ",");
-                    strcat(csv, ac->allowed_hosts[i]);
-                }
-                setenv("CCLAW_ALLOWED_HOSTS", csv, 1);
-                free(csv);
-            }
-        }
-        if (ac) agent_config_free(ac);
-    }
-
-    printf("\033[36mconfig: %s\033[0m\n", result ? result : "failed");
-    free(result);
-    free(args);
-    free(tname);
-    free(tc_id);
-    return 0;
-}
-
-/* Run a turn: fork agent, dispatch on exit code. Returns 0 when turn is done. */
-static int cli_run_turn(sqlite3 *adb, sqlite3 *cclaw_db, const Config *cfg,
-                        int64_t session_id, const char *agent_name) {
-    for (;;) {
-        int rc = cli_fork_turn(session_id);
-
-        switch (rc) {
-        case AGENT_EXIT_DONE:
-            return 0;
-        case AGENT_EXIT_ERROR:
-            fprintf(stderr, "error: agent failed\n");
-            return 1;
-        case AGENT_EXIT_APPROVAL:
-            if (cli_handle_approval(adb, session_id) != 0) return 1;
-            /* Re-fork to continue after approval */
-            session_set_state(adb, session_id, "running");
-            continue;
-        case AGENT_EXIT_CONFIG:
-            if (cli_handle_config(cfg, cclaw_db, adb, session_id, agent_name) != 0)
-                return 1;
-            /* Re-fork to continue after config applied */
-            session_set_state(adb, session_id, "running");
-            continue;
-        case AGENT_EXIT_SPAWN:
-            /* For now: print and continue (sub-agent spawning is daemon territory) */
-            printf("\033[33m⚠ agent requested spawn (not supported in CLI mode)\033[0m\n");
-            {
-                int64_t pending_eid = 0;
-                char *tc_id = find_pending_entry(adb, session_id, &pending_eid);
-                if (tc_id) {
-                    update_pending_entry(adb, pending_eid,
-                        "error: spawn not available in CLI mode");
-                    free(tc_id);
-                }
-            }
-            session_set_state(adb, session_id, "running");
-            continue;
-        default:
-            fprintf(stderr, "error: unexpected exit code %d\n", rc);
-            return 1;
-        }
-    }
-}
-
 int main(int argc, char *argv[]) {
     int daemon_mode = 0;
-    int agent_mode = 0;
     int llm_mode = 0;
     LogLevel log_level_override = LOG_LEVEL_INFO;
     int log_level_set = 0;
@@ -426,8 +202,6 @@ int main(int argc, char *argv[]) {
             return 0;
         } else if (strcmp(argv[i], "--daemon") == 0) {
             daemon_mode = 1;
-        } else if (strcmp(argv[i], "--agent") == 0) {
-            agent_mode = 1;
         } else if (strcmp(argv[i], "llm") == 0) {
             llm_mode = 1;
         } else if (strncmp(argv[i], "--log-level=", 12) == 0) {
@@ -450,15 +224,6 @@ int main(int argc, char *argv[]) {
             print_usage();
             return 1;
         }
-    }
-
-    /* --agent: separate program, self-contained */
-    if (agent_mode) {
-        if (session_id < 0) {
-            fprintf(stderr, "error: --agent requires -s <id>\n");
-            return 1;
-        }
-        return agent_turn_run(session_id);
     }
 
     /* T299: llm subcommand — run single LLM call */
@@ -765,10 +530,28 @@ int main(int argc, char *argv[]) {
 
     int rc = 0;
 
+    /* Init tool setup for this session */
+    AgentSetup setup;
+    agent_setup_init(&setup, adb, session_id, cfg, agent_name, NULL, 0, AGENT_SETUP_CLI);
+
+    /* Ensure system prompt exists */
+    {
+        int branch_count = 0;
+        Entry *branch = session_get_branch(adb, session_id, &branch_count);
+        if (branch_count == 0) {
+            char *prompt_txt = agent_build_system_prompt(adb, agent_name, session_id,
+                                                        "agents", cfg);
+            Message sys_msg = {.role = ROLE_SYSTEM, .content = prompt_txt};
+            entry_append(adb, session_id, &sys_msg);
+            free(prompt_txt);
+        }
+        entry_branch_free(branch, branch_count);
+    }
+
     /* Single-turn mode: -p <prompt> */
     if (prompt) {
         inbox_insert(adb, session_id, "cli", prompt);
-        rc = cli_run_turn(adb, cclaw_db, cfg, session_id, agent_name);
+        rc = turn_loop_run(adb, session_id, cfg, &setup, TURN_MODE_CLI);
         if (rc == 0) {
             /* Streaming: child wrote tokens to stdout; just add trailing newline.
              * Non-streaming: print full response from DB. */
@@ -809,7 +592,7 @@ int main(int argc, char *argv[]) {
         if (strcmp(line, "exit") == 0 || strcmp(line, "quit") == 0) break;
 
         inbox_insert(adb, session_id, "cli", line);
-        rc = cli_run_turn(adb, cclaw_db, cfg, session_id, agent_name);
+        rc = turn_loop_run(adb, session_id, cfg, &setup, TURN_MODE_CLI);
         if (rc == 0) {
             if (cfg->stream)
                 printf("\n");
@@ -831,6 +614,7 @@ done:
     }
 
     session_set_state(adb, session_id, "idle");
+    agent_setup_destroy(&setup);
     free(agent_name_sel);
     free(base_dir);
     free(db_path_resolved);

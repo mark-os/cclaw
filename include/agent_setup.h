@@ -6,7 +6,6 @@
 #include "tool_file.h"
 #include "tool_shell.h"
 #include "tool_memory.h"
-#include "tool_approval.h"
 #include "tool_bootstrap.h"
 #include "tool_agent.h"
 #include "http_policy.h"
@@ -27,7 +26,6 @@ typedef struct {
     ToolMemoryCtx mem_ctx;
     JsDefineCtx js_def_ctx;
     /* Daemon-mode only contexts */
-    ToolApprovalCtx approval_ctx;
     ToolBootstrapCtx bootstrap_ctx;
     AgentLaunchCtx launch_ctx;
     /* V83: credential proxy for shell children */

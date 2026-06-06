@@ -91,6 +91,9 @@ static char *build_cache_request(sqlite3 *db, int64_t session_id,
         cJSON_Delete(sys_parts);
     }
 
+    /* Gemini wire format — DOM variant (cJSON).
+     * Streaming variant: request_stream.c:emit_entry_gemini. Keep in sync. */
+
     /* Contents: all non-system entries */
     cJSON *contents = cJSON_CreateArray();
     for (int i = plan->cut; i < plan->count; i++) {

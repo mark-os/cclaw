@@ -3,6 +3,7 @@
 #include "agent_exit.h"
 #include "db.h"
 #include <cJSON.h>
+#include "tool_parse.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -32,32 +33,30 @@ static char *tool_configure_provider_handler(const char *arguments, void *user_d
     if (!ctx)
         return strdup("error: configure_provider unavailable");
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON arguments");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
+        return strdup("error: invalid JSON arguments");
 
-    cJSON *provider = cJSON_GetObjectItemCaseSensitive(json, "provider");
-    cJSON *api_key = cJSON_GetObjectItemCaseSensitive(json, "api_key");
-    cJSON *base_url = cJSON_GetObjectItemCaseSensitive(json, "base_url");
+    const char *pname = targ_str(&ta, "provider");
+    const char *api_key = targ_str(&ta, "api_key");
+    const char *base_url = targ_str(&ta, "base_url");
 
-    if (!cJSON_IsString(provider) || !cJSON_IsString(api_key) ||
-        !api_key->valuestring[0]) {
-        cJSON_Delete(json);
+    if (!pname || !api_key || !api_key[0]) {
+        tool_parse_free(&ta);
         return strdup("error: 'provider' and 'api_key' are required");
     }
-
-    const char *pname = provider->valuestring;
 
     /* Validate known provider or custom with base_url */
     int known = 0;
     for (size_t i = 0; i < PROVIDER_COUNT; i++) {
         if (strcmp(pname, PROVIDERS[i].name) == 0) { known = 1; break; }
     }
-    if (!known && (!cJSON_IsString(base_url) || !base_url->valuestring[0])) {
-        cJSON_Delete(json);
+    if (!known && (!base_url || !base_url[0])) {
+        tool_parse_free(&ta);
         return strdup("error: 'base_url' is required for custom providers");
     }
 
-    cJSON_Delete(json);
+    tool_parse_free(&ta);
 
     /* V76/V79: Don't write cclaw.db — return sentinel, daemon applies on reap */
     return strdup(SENTINEL_CONFIG "configure_provider");
@@ -87,36 +86,35 @@ static char *tool_configure_channel_handler(const char *arguments, void *user_da
     if (!ctx)
         return strdup("error: configure_channel unavailable");
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON arguments");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
+        return strdup("error: invalid JSON arguments");
 
-    cJSON *channel_type = cJSON_GetObjectItemCaseSensitive(json, "channel_type");
-    cJSON *bot_token = cJSON_GetObjectItemCaseSensitive(json, "bot_token");
-    cJSON *binary_path = cJSON_GetObjectItemCaseSensitive(json, "binary_path");
+    const char *ctype = targ_str(&ta, "channel_type");
+    const char *bot_token = targ_str(&ta, "bot_token");
+    const char *binary_path = targ_str(&ta, "binary_path");
 
-    if (!cJSON_IsString(channel_type) || !channel_type->valuestring[0]) {
-        cJSON_Delete(json);
+    if (!ctype || !ctype[0]) {
+        tool_parse_free(&ta);
         return strdup("error: 'channel_type' is required");
     }
 
-    const char *ctype = channel_type->valuestring;
-
     if (strcmp(ctype, "telegram") == 0) {
-        if (!cJSON_IsString(bot_token) || !bot_token->valuestring[0]) {
-            cJSON_Delete(json);
+        if (!bot_token || !bot_token[0]) {
+            tool_parse_free(&ta);
             return strdup("error: 'bot_token' is required for telegram channel");
         }
     } else if (strcmp(ctype, "cli") == 0) {
         /* cli needs no credentials */
     } else {
         /* Custom channel — needs binary_path */
-        if (!cJSON_IsString(binary_path) || !binary_path->valuestring[0]) {
-            cJSON_Delete(json);
+        if (!binary_path || !binary_path[0]) {
+            tool_parse_free(&ta);
             return strdup("error: 'binary_path' required for custom channel type");
         }
     }
 
-    cJSON_Delete(json);
+    tool_parse_free(&ta);
 
     /* V76/V79: Don't write cclaw.db — return sentinel, daemon applies on reap */
     return strdup(SENTINEL_CONFIG "configure_channel");
@@ -148,23 +146,23 @@ static char *tool_create_agent_handler(const char *arguments, void *user_data) {
     if (!ctx || !ctx->db)
         return strdup("error: create_agent unavailable");
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON arguments");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
+        return strdup("error: invalid JSON arguments");
 
-    cJSON *name = cJSON_GetObjectItemCaseSensitive(json, "name");
-    if (!cJSON_IsString(name) || !name->valuestring[0]) {
-        cJSON_Delete(json);
+    const char *n = targ_str(&ta, "name");
+    if (!n || !n[0]) {
+        tool_parse_free(&ta);
         return strdup("error: 'name' is required");
     }
 
     /* Reject invalid names */
-    const char *n = name->valuestring;
     if (strchr(n, '/') || strchr(n, '\\') || strcmp(n, "..") == 0) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: invalid agent name (no path separators)");
     }
 
-    cJSON_Delete(json);
+    tool_parse_free(&ta);
 
     /* T201/V79: Return sentinel — daemon reads args from tool_call entry */
     return strdup(SENTINEL_CONFIG "create_agent");

@@ -130,10 +130,10 @@ static void test_js_eval_sanitize(void) {
         free(r); tools_free(&reg); return;
     }
     /* Verify boundary markers present */
-    if (!strstr(r, "<tool_result name=\"http_fetch\">")) {
+    if (!strstr(r, "<<<UNTRUSTED_EXTERNAL_CONTENT id=\"")) {
         FAIL("missing open boundary"); free(r); tools_free(&reg); return;
     }
-    if (!strstr(r, "</tool_result>")) {
+    if (!strstr(r, "<<<END_UNTRUSTED_EXTERNAL_CONTENT id=\"")) {
         FAIL("missing close boundary"); free(r); tools_free(&reg); return;
     }
     /* Verify HTML tags stripped (no <html>, <head>, etc.) */

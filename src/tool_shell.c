@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "tool_shell.h"
-#include <cJSON.h>
+#include "tool_parse.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -190,28 +190,23 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         if (sc->timeout > 0) default_timeout = sc->timeout;
     }
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) {
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
         return strdup("error: invalid JSON arguments");
-    }
 
-    cJSON *cmd_item = cJSON_GetObjectItemCaseSensitive(json, "command");
-    if (!cJSON_IsString(cmd_item) || !cmd_item->valuestring[0]) {
-        cJSON_Delete(json);
+    const char *command = targ_str(&ta, "command");
+    if (!command || !command[0]) {
+        tool_parse_free(&ta);
         return strdup("error: missing or empty 'command' field");
     }
-    const char *command = cmd_item->valuestring;
 
-    int timeout = default_timeout;
-    cJSON *timeout_item = cJSON_GetObjectItemCaseSensitive(json, "timeout");
-    if (cJSON_IsNumber(timeout_item) && timeout_item->valueint > 0) {
-        timeout = timeout_item->valueint;
-    }
+    int timeout = targ_int(&ta, "timeout", default_timeout);
+    if (timeout <= 0) timeout = default_timeout;
 
     /* Pipe for child stdout+stderr */
     int pipefd[2];
     if (pipe(pipefd) != 0) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: pipe() failed");
     }
 
@@ -219,7 +214,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: fork() failed");
     }
 
@@ -290,7 +285,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     /* Parent: ensure child is in its own process group */
     setpgid(pid, pid);
     close(pipefd[1]);
-    cJSON_Delete(json);
+    tool_parse_free(&ta);
 
     char *output = malloc(SHELL_MAX_OUTPUT + 1);
     if (!output) {

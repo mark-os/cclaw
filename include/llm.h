@@ -33,13 +33,6 @@ typedef struct {
     char *logprobs_json;    /* arena-allocated raw logprobs JSON, NULL if absent */
 } LlmResponse;
 
-/* Build OpenAI-compatible chat completions request JSON.
- * V9: tools array omitted entirely when tool_count == 0.
- * Returns arena-allocated JSON string, or NULL on failure. */
-char *llm_build_request(Arena *a, const Config *cfg, const Message *msgs,
-                        size_t msg_count, const ToolSchema *tools,
-                        size_t tool_count);
-
 /* Parse OpenAI-compatible chat completions response JSON.
  * All strings/arrays in result are arena-allocated.
  * Returns 0 on success, -1 on parse failure. */
@@ -52,5 +45,9 @@ StopReason map_stop_reason(const char *finish_reason);
 /* T290: Parse native Gemini generateContent response.
  * Returns 0 on success, -1 on parse failure. */
 int llm_parse_response_gemini(Arena *a, const char *json, LlmResponse *out);
+
+/* Populate LlmResponse directly from accumulated SSE context (no JSON round-trip). */
+struct SseCtx;
+int llm_response_from_sse(Arena *a, const struct SseCtx *ctx, LlmResponse *out);
 
 #endif

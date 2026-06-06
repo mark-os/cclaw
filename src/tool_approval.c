@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_approval.h"
 #include "agent_exit.h"
-#include <cJSON.h>
+#include "tool_parse.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -18,27 +18,25 @@ static char *tool_approval_handler(const char *arguments, void *user_data) {
     if (!ctx || !ctx->agent_name)
         return strdup("error: approval_request unavailable (no agent context)");
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON arguments");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
+        return strdup("error: invalid JSON arguments");
 
-    cJSON *type_item = cJSON_GetObjectItemCaseSensitive(json, "type");
-
-    if (!cJSON_IsString(type_item)) {
-        cJSON_Delete(json);
+    const char *type = targ_str(&ta, "type");
+    if (!type) {
+        tool_parse_free(&ta);
         return strdup("error: missing or invalid 'type' field");
     }
 
-    /* Validate type */
-    const char *type = type_item->valuestring;
     if (strcmp(type, "whitelist_host") != 0 &&
         strcmp(type, "create_agent") != 0 &&
         strcmp(type, "model_change") != 0 &&
         strcmp(type, "tool_enable") != 0) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: type must be one of: whitelist_host, create_agent, model_change, tool_enable");
     }
 
-    cJSON_Delete(json);
+    tool_parse_free(&ta);
 
     /* T201/V78: Return sentinel — daemon reads args from tool_call entry */
     return strdup(SENTINEL_APPROVAL "pending");

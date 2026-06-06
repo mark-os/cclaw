@@ -30,19 +30,15 @@ ToolEntry *tools_lookup(ToolRegistry *reg, const char *name) {
     return NULL;
 }
 
-const ToolSchema *tools_schemas(ToolRegistry *reg, size_t *out_count) {
-    static ToolSchema schemas[TOOLS_MAX];
-    if (!reg || !out_count) {
-        if (out_count) *out_count = 0;
-        return NULL;
+size_t tools_schemas(ToolRegistry *reg, ToolSchema *out, size_t out_cap) {
+    if (!reg || !out) return 0;
+    size_t n = reg->count < out_cap ? reg->count : out_cap;
+    for (size_t i = 0; i < n; i++) {
+        out[i].name = reg->entries[i].name;
+        out[i].description = reg->entries[i].description;
+        out[i].parameters_json = reg->entries[i].parameters_json;
     }
-    for (size_t i = 0; i < reg->count; i++) {
-        schemas[i].name = reg->entries[i].name;
-        schemas[i].description = reg->entries[i].description;
-        schemas[i].parameters_json = reg->entries[i].parameters_json;
-    }
-    *out_count = reg->count;
-    return schemas;
+    return n;
 }
 
 void tools_free(ToolRegistry *reg) {
@@ -66,25 +62,20 @@ int tools_is_whitelisted(const char *name, const char **whitelist, size_t whitel
     return 0;
 }
 
-const ToolSchema *tools_schemas_filtered(ToolRegistry *reg, const char **whitelist,
-                                         size_t whitelist_count, size_t *out_count) {
-    static ToolSchema schemas[TOOLS_MAX];
-    if (!reg || !out_count) {
-        if (out_count) *out_count = 0;
-        return NULL;
-    }
+size_t tools_schemas_filtered(ToolRegistry *reg, const char **whitelist,
+                              size_t whitelist_count, ToolSchema *out, size_t out_cap) {
+    if (!reg || !out) return 0;
     if (!whitelist || whitelist_count == 0)
-        return tools_schemas(reg, out_count);
+        return tools_schemas(reg, out, out_cap);
 
     size_t n = 0;
-    for (size_t i = 0; i < reg->count; i++) {
+    for (size_t i = 0; i < reg->count && n < out_cap; i++) {
         if (tools_is_whitelisted(reg->entries[i].name, whitelist, whitelist_count)) {
-            schemas[n].name = reg->entries[i].name;
-            schemas[n].description = reg->entries[i].description;
-            schemas[n].parameters_json = reg->entries[i].parameters_json;
+            out[n].name = reg->entries[i].name;
+            out[n].description = reg->entries[i].description;
+            out[n].parameters_json = reg->entries[i].parameters_json;
             n++;
         }
     }
-    *out_count = n;
-    return schemas;
+    return n;
 }

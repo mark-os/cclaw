@@ -4,6 +4,7 @@
 #include "context.h"
 #include "gemini_cache.h"
 #include "hook_dispatch.h"
+#include "llm_transport.h"
 #include "log.h"
 #include "request_stream.h"
 #include "http.h"
@@ -14,40 +15,8 @@
 #include <string.h>
 #include <unistd.h>
 
-/* V2: max retries for 429/5xx */
-#define MAX_RETRIES 5
-#define INITIAL_BACKOFF_MS 1000
-
 /* V32: max LLM error retries per turn (parse failure, missing finish_reason) */
 #define MAX_LLM_RETRIES 3
-
-/* Build URL for chat completions endpoint */
-static char *build_url(Arena *a, const Config *cfg) {
-    const char *base = cfg->provider.base_url;
-    size_t blen = strlen(base);
-    if (blen > 0 && base[blen - 1] == '/') blen--;
-
-    if (cfg->provider.endpoint_type == ENDPOINT_GEMINI) {
-        /* T290: Gemini URL: {base_url}/models/{model}:{action} */
-        const char *model = cfg->provider.model ? cfg->provider.model : "gemini-2.5-flash";
-        size_t mlen = strlen(model);
-        const char *action = cfg->stream ? "streamGenerateContent?alt=sse" : "generateContent";
-        size_t alen = strlen(action);
-        size_t need = blen + 8 + mlen + 1 + alen + 1; /* /models/ + model + : + action */
-        char *url = arena_alloc(a, need);
-        if (!url) return NULL;
-        snprintf(url, need, "%.*s/models/%s:%s", (int)blen, base, model, action);
-        return url;
-    }
-
-    const char *path = "/chat/completions";
-    size_t plen = strlen(path);
-    char *url = arena_alloc(a, blen + plen + 1);
-    if (!url) return NULL;
-    memcpy(url, base, blen);
-    memcpy(url + blen, path, plen + 1);
-    return url;
-}
 
 /* V10: dispatch a single tool call, always returns a result string */
 static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
@@ -81,62 +50,7 @@ static char *dispatch_tool(AgentContext *ctx, const ToolCall *tc) {
     return result;
 }
 
-/* SSE streaming callback: write content tokens to stdout in real-time */
-static int sse_token_cb(const char *token, size_t len, void *userdata) {
-    (void)userdata;
-    if (token && len > 0)
-        fwrite(token, 1, len, stdout);
-    fflush(stdout);
-    return 0;
-}
-
-/* V41,V2: call LLM with streaming upload + retry on 429/5xx. Resets streamer on retry.
- * Returns: HTTP status on success, -1 network error, -2 timeout.
- * 401/403/404 returned immediately (no retry — caller handles fallback). */
-static int llm_call_with_retry_stream(const char *url, const char **headers,
-                                      RequestStreamer *rs, HttpResponse *resp,
-                                      const Config *cfg) {
-    int backoff_ms = INITIAL_BACKOFF_MS;
-    int last_status = -1;
-
-    for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        int status;
-        if (cfg->stream)
-            status = http_post_stream_sse(url, headers, rs_read_cb, rs,
-                                          sse_token_cb, NULL, resp);
-        else
-            status = http_post_stream(url, headers, rs_read_cb, rs, resp);
-        last_status = status;
-
-        /* E10: timeout, E4: network — no retry, return for fallback */
-        if (status == -1 || status == -2)
-            return status;
-
-        /* E11/E12: auth/not-found — no retry, return for fallback */
-        if (status == 401 || status == 403 || status == 404)
-            return status;
-
-        /* E2/E3: 429/5xx — retry with backoff */
-        if (status == 429 || (status >= 500 && status < 600)) {
-            int wait_sec = resp->retry_after > 0 ? resp->retry_after : (backoff_ms / 1000);
-            if (wait_sec < 1) wait_sec = 1;
-            LOG_DEBUG(cfg, "HTTP %d, retry %d/%d (wait %ds)",
-                      status, attempt + 1, MAX_RETRIES, wait_sec);
-            sleep((unsigned)wait_sec);
-
-            http_response_free(resp);
-            rs_reset(rs);
-            backoff_ms *= 2;
-            continue;
-        }
-
-        return status;
-    }
-
-    return last_status;
-}
-
-/* T45,V41: try primary provider with streaming, then fallback chain on 5xx/timeout (-1) */
+/* T45,V41: call LLM via shared transport (includes retry + fallback chain) */
 static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
                                          sqlite3 *db, int64_t session_id,
                                          const ContextPlan *plan,
@@ -144,201 +58,10 @@ static int llm_call_with_fallback_stream(Arena *a, const Config *cfg,
                                          const char *body_override,
                                          const char *recall_text,
                                          const char *gemini_cache_name,
-                                         HttpResponse *resp) {
-    /* Mock mode: read canned response from file, skip HTTP entirely */
-    const char *mock_path = getenv("CCLAW_LLM_MOCK");
-    if (mock_path) {
-        FILE *f = fopen(mock_path, "r");
-        if (!f) return -1;
-        fseek(f, 0, SEEK_END);
-        long len = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        resp->data = malloc((size_t)len + 1);
-        if (resp->data) {
-            fread(resp->data, 1, (size_t)len, f);
-            resp->data[len] = '\0';
-            resp->len = (size_t)len;
-        }
-        fclose(f);
-        (void)a; (void)cfg; (void)db; (void)session_id;
-        (void)plan; (void)tools; (void)tool_count; (void)body_override;
-        return resp->data ? 200 : -1;
-    }
-
-    char *url = build_url(a, cfg);
-    if (!url) return -1;
-
-    /* V125: heap-allocate auth header based on key length */
-    /* T290: Gemini uses x-goog-api-key header instead of Bearer token */
-    size_t key_len = cfg->provider.api_key ? strlen(cfg->provider.api_key) : 0;
-    char *auth_hdr;
-    if (cfg->provider.endpoint_type == ENDPOINT_GEMINI) {
-        auth_hdr = arena_alloc(a, 16 + key_len + 1); /* "x-goog-api-key: " + key */
-        if (!auth_hdr) return -1;
-        sprintf(auth_hdr, "x-goog-api-key: %s", cfg->provider.api_key ? cfg->provider.api_key : "");
-    } else {
-        auth_hdr = arena_alloc(a, 22 + key_len + 1); /* "Authorization: Bearer " + key + NUL */
-        if (!auth_hdr) return -1;
-        sprintf(auth_hdr, "Authorization: Bearer %s", cfg->provider.api_key ? cfg->provider.api_key : "");
-    }
-
-    /* Sticky routing: pin all turns in a session to the same provider for cache hits */
-    char *session_hdr = arena_alloc(a, 64);
-    if (!session_hdr) return -1;
-    snprintf(session_hdr, 64, "x-session-id: cclaw-%lld", (long long)session_id);
-    const char *headers[] = { "Content-Type: application/json", auth_hdr, session_hdr, NULL };
-
-    /* T258: if body_override provided (from beforeRequest hook), use http_post */
-    if (body_override) {
-        if (cfg->log_level >= LOG_LEVEL_TRACE)
-            LOG_TRACE(cfg, "REQ (hook-modified) %s", body_override);
-
-        int status = http_post(url, headers, body_override, resp);
-
-        /* Success — return as-is */
-        if (status >= 200 && status < 300)
-            return status;
-
-        /* Try fallbacks on failure */
-        if (status >= 300 && status < 500 && status != 401 && status != 403 && status != 404 && status != 429)
-            return status;
-
-        for (size_t i = 0; i < cfg->fallback_count; i++) {
-            LOG_DEBUG(cfg, "primary failed, trying fallback %zu", i);
-            const ProviderConfig *fb = &cfg->fallback_providers[i];
-            if (!fb->base_url || !fb->api_key || !fb->model) continue;
-
-            size_t blen = strlen(fb->base_url);
-            if (blen > 0 && fb->base_url[blen - 1] == '/') blen--;
-            const char *path = "/chat/completions";
-            size_t plen = strlen(path);
-            char *fb_url = arena_alloc(a, blen + plen + 1);
-            if (!fb_url) continue;
-            memcpy(fb_url, fb->base_url, blen);
-            memcpy(fb_url + blen, path, plen + 1);
-
-            /* V125: heap-allocate auth header */
-            size_t fb_key_len = strlen(fb->api_key);
-            char *fb_auth = arena_alloc(a, 22 + fb_key_len + 1);
-            if (!fb_auth) continue;
-            sprintf(fb_auth, "Authorization: Bearer %s", fb->api_key);
-            const char *fb_headers[] = { "Content-Type: application/json", fb_auth, session_hdr, NULL };
-
-            /* V126: free previous response before fallback attempt */
-            http_response_free(resp);
-            status = http_post(fb_url, fb_headers, body_override, resp);
-            if (status != -1)
-                return status;
-        }
-        return status;
-    }
-
-    RequestStreamer rs;
-    if (rs_init(&rs, db, session_id, cfg, plan, tools, tool_count) != 0)
-        return -1;
-    rs.recall_text = recall_text;
-    rs.gemini_cache_name = gemini_cache_name;
-
-    if (cfg->log_level >= LOG_LEVEL_TRACE) {
-        /* Trace: stream entire request to stderr */
-        RequestStreamer dbg_rs;
-        rs_init(&dbg_rs, db, session_id, cfg, plan, tools, tool_count);
-        dbg_rs.recall_text = recall_text;
-        dbg_rs.gemini_cache_name = gemini_cache_name;
-        size_t cap = 4096, len = 0;
-        char *dbuf = malloc(cap);
-        if (dbuf) {
-            while (1) {
-                if (len + 1024 > cap) { cap *= 2; dbuf = realloc(dbuf, cap); if (!dbuf) break; }
-                size_t n = rs_read_cb(dbuf + len, 1, 1024, &dbg_rs);
-                if (n == 0) break;
-                len += n;
-            }
-            if (dbuf) { dbuf[len] = '\0'; LOG_TRACE(cfg, "REQ %s", dbuf); free(dbuf); }
-        }
-        rs_cleanup(&dbg_rs);
-    }
-
-    int status = llm_call_with_retry_stream(url, headers, &rs, resp, cfg);
-    rs_cleanup(&rs);
-
-    /* Success — return as-is */
-    if (status >= 200 && status < 300)
-        return status;
-
-    /* Non-fallbackable client errors (except auth/not-found) — return as-is */
-    if (status >= 300 && status < 500 && status != 401 && status != 403 && status != 404 && status != 429)
-        return status;
-
-    /* E2/E3/E4/E10/E11/E12: try fallback providers */
-    for (size_t i = 0; i < cfg->fallback_count; i++) {
-        LOG_DEBUG(cfg, "primary failed, trying fallback %zu", i);
-
-        const ProviderConfig *fb = &cfg->fallback_providers[i];
-        if (!fb->base_url || !fb->api_key || !fb->model) continue;
-
-        size_t blen = strlen(fb->base_url);
-        if (blen > 0 && fb->base_url[blen - 1] == '/') blen--;
-        const char *path = "/chat/completions";
-        size_t plen = strlen(path);
-        char *fb_url = arena_alloc(a, blen + plen + 1);
-        if (!fb_url) continue;
-        memcpy(fb_url, fb->base_url, blen);
-        memcpy(fb_url + blen, path, plen + 1);
-
-        /* Build streamer with fallback config */
-        Config fb_cfg = *cfg;
-        fb_cfg.provider = *fb;
-
-        RequestStreamer fb_rs;
-        if (rs_init(&fb_rs, db, session_id, &fb_cfg, plan, tools, tool_count) != 0)
-            continue;
-        fb_rs.recall_text = recall_text;
-
-        if (cfg->log_level >= LOG_LEVEL_TRACE) {
-            RequestStreamer dbg_rs;
-            rs_init(&dbg_rs, db, session_id, &fb_cfg, plan, tools, tool_count);
-            dbg_rs.recall_text = recall_text;
-            size_t cap = 4096, len = 0;
-            char *dbuf = malloc(cap);
-            if (dbuf) {
-                while (1) {
-                    if (len + 1024 > cap) { cap *= 2; dbuf = realloc(dbuf, cap); if (!dbuf) break; }
-                    size_t n = rs_read_cb(dbuf + len, 1, 1024, &dbg_rs);
-                    if (n == 0) break;
-                    len += n;
-                }
-                if (dbuf) { dbuf[len] = '\0'; LOG_TRACE(cfg, "REQ fallback %zu: %s", i, dbuf); free(dbuf); }
-            }
-            rs_cleanup(&dbg_rs);
-        }
-
-        /* V125: heap-allocate auth header */
-        size_t fb_key_len = strlen(fb->api_key);
-        char *fb_auth = arena_alloc(a, 22 + fb_key_len + 1);
-        if (!fb_auth) { rs_cleanup(&fb_rs); continue; }
-        sprintf(fb_auth, "Authorization: Bearer %s", fb->api_key);
-        const char *fb_headers[] = { "Content-Type: application/json", fb_auth, session_hdr, NULL };
-
-        /* V126: free previous response before fallback attempt */
-        http_response_free(resp);
-        status = llm_call_with_retry_stream(fb_url, fb_headers, &fb_rs, resp, cfg);
-        rs_cleanup(&fb_rs);
-        if (status != -1)
-            return status;
-    }
-
-    return status;
-}
-
-/* Detect context overflow from error response body */
-static int is_context_overflow(const char *body) {
-    if (!body) return 0;
-    /* Common patterns from OpenAI-compatible APIs */
-    return (strstr(body, "context_length_exceeded") != NULL ||
-            strstr(body, "maximum context length") != NULL ||
-            strstr(body, "too many tokens") != NULL ||
-            strstr(body, "context window") != NULL);
+                                         HttpResponse *resp, SseCtx *out_ctx) {
+    return llm_call_with_fallbacks(a, db, session_id, cfg, plan, tools, tool_count,
+                                   resp, llm_sse_stdout_cb, NULL, out_ctx,
+                                   recall_text, gemini_cache_name, body_override);
 }
 
 /* Build metadata JSON from LLM response based on config flags. Returns heap string or NULL. */
@@ -606,6 +329,7 @@ int agent_run(AgentContext *ctx) {
                 &plan, ctx->tools, ctx->tool_count);
 
             HttpResponse resp = {0};
+            SseCtx sse_ctx = {0};
             struct timespec t_start;
             clock_gettime(CLOCK_MONOTONIC, &t_start);
 
@@ -622,7 +346,7 @@ int agent_run(AgentContext *ctx) {
                                                        body_override,
                                                        recall_text,
                                                        gcache,
-                                                       &resp);
+                                                       &resp, &sse_ctx);
             free(gcache);
             free(body_override);
             free(recall_text);
@@ -639,9 +363,10 @@ int agent_run(AgentContext *ctx) {
                 LOG_TRACE(ctx->cfg, "RESP status=%d %s", status, resp.data);
 
             /* Context overflow detection (E5) — return error so caller can trim */
-            if (status == 400 && is_context_overflow(resp.data)) {
+            if (status == 400 && llm_is_context_overflow(resp.data)) {
                 LOG_DEBUG(ctx->cfg, "E5: context overflow detected");
                 http_response_free(&resp);
+                sse_ctx_free(&sse_ctx);
                 arena_destroy(a);
                 return -2;
             }
@@ -650,26 +375,31 @@ int agent_run(AgentContext *ctx) {
             if (status == -2) {
                 LOG_DEBUG(ctx->cfg, "E10: request timed out");
                 http_response_free(&resp);
+                sse_ctx_free(&sse_ctx);
                 break;
             }
             if (status == -1) {
                 LOG_DEBUG(ctx->cfg, "E4: network error");
                 http_response_free(&resp);
+                sse_ctx_free(&sse_ctx);
                 break;
             }
             if (status == 401 || status == 403) {
                 LOG_DEBUG(ctx->cfg, "E11: auth failure (%d)", status);
                 http_response_free(&resp);
+                sse_ctx_free(&sse_ctx);
                 break;
             }
             if (status == 404) {
                 LOG_DEBUG(ctx->cfg, "E12: model not found");
                 http_response_free(&resp);
+                sse_ctx_free(&sse_ctx);
                 break;
             }
             if (status == 429) {
                 LOG_DEBUG(ctx->cfg, "E2: rate limit exhausted after retries");
                 http_response_free(&resp);
+                sse_ctx_free(&sse_ctx);
                 break;
             }
 
@@ -678,6 +408,7 @@ int agent_run(AgentContext *ctx) {
                 LOG_DEBUG(ctx->cfg, "E3: HTTP %d exhausted after inner retries",
                           status);
                 http_response_free(&resp);
+                sse_ctx_free(&sse_ctx);
                 break;
             }
 
@@ -686,17 +417,21 @@ int agent_run(AgentContext *ctx) {
                 LOG_DEBUG(ctx->cfg, "E3: HTTP %d, retry %d/%d",
                           status, retry + 1, MAX_LLM_RETRIES);
                 http_response_free(&resp);
+                sse_ctx_free(&sse_ctx); memset(&sse_ctx, 0, sizeof(sse_ctx));
                 continue;
             }
 
             /* V10/V29: JSON parse failure → retry */
             /* T290: use Gemini parser for native Gemini responses (non-streaming only;
-             * streaming reconstructs OpenAI-format synthetic JSON) */
-            if (call_cfg->provider.endpoint_type == ENDPOINT_GEMINI && !call_cfg->stream)
+             * streaming uses llm_response_from_sse directly) */
+            if (call_cfg->stream)
+                rc = llm_response_from_sse(a, &sse_ctx, &llm_resp);
+            else if (call_cfg->provider.endpoint_type == ENDPOINT_GEMINI)
                 rc = llm_parse_response_gemini(a, resp.data, &llm_resp);
             else
                 rc = llm_parse_response(a, resp.data, &llm_resp);
             http_response_free(&resp);
+            sse_ctx_free(&sse_ctx);
             if (rc != 0) {
                 LOG_DEBUG(ctx->cfg, "JSON parse failure, retry %d/%d",
                           retry + 1, MAX_LLM_RETRIES);

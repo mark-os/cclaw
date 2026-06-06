@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_cron.h"
 #include "cron.h"
-#include <cJSON.h>
+#include "tool_parse.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,33 +23,31 @@ static const char *CRON_REMOVE_PARAMS =
 
 char *tool_cron_set_handler(const char *arguments, void *user_data) {
     ToolCronCtx *ctx = (ToolCronCtx *)user_data;
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON");
 
-    cJSON *name = cJSON_GetObjectItemCaseSensitive(json, "name");
-    cJSON *expr = cJSON_GetObjectItemCaseSensitive(json, "cron_expr");
-    cJSON *task = cJSON_GetObjectItemCaseSensitive(json, "task");
+    const char *name = targ_str(&ta, "name");
+    const char *expr = targ_str(&ta, "cron_expr");
+    const char *task = targ_str(&ta, "task");
 
-    if (!cJSON_IsString(name) || !cJSON_IsString(expr) || !cJSON_IsString(task)) {
-        cJSON_Delete(json);
+    if (!name || !expr || !task) {
+        tool_parse_free(&ta);
         return strdup("error: missing required fields (name, cron_expr, task)");
     }
 
-    int64_t id = cron_add(ctx->db, ctx->agent_name, name->valuestring,
-                          expr->valuestring, ctx->session_id, task->valuestring);
-
-    char *result = malloc(128);
-    if (!result) { cJSON_Delete(json); return strdup("error: OOM"); }
+    int64_t id = cron_add(ctx->db, ctx->agent_name, name,
+                          expr, ctx->session_id, task);
 
     if (id < 0) {
-        cJSON_Delete(json);
-        free(result);
+        tool_parse_free(&ta);
         return strdup("error: invalid cron expression or DB error");
     }
 
+    char *result = malloc(128);
+    if (!result) { tool_parse_free(&ta); return strdup("error: OOM"); }
     snprintf(result, 128, "created cron job id=%lld name=\"%s\"",
-             (long long)id, name->valuestring);
-    cJSON_Delete(json);
+             (long long)id, name);
+    tool_parse_free(&ta);
     return result;
 }
 
@@ -61,45 +59,49 @@ char *tool_cron_list_handler(const char *arguments, void *user_data) {
     CronJob *jobs = cron_list(ctx->db, ctx->agent_name, &count);
     if (count == 0) return strdup("no cron jobs");
 
-    /* Build JSON array output */
-    cJSON *arr = cJSON_CreateArray();
+    /* Build JSON array manually */
+    size_t cap = 256 * (size_t)count + 2;
+    char *buf = malloc(cap);
+    if (!buf) { cron_list_free(jobs, count); return strdup("error: OOM"); }
+    size_t pos = 0;
+    buf[pos++] = '[';
     for (int i = 0; i < count; i++) {
-        cJSON *obj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(obj, "id", (double)jobs[i].id);
-        cJSON_AddStringToObject(obj, "name", jobs[i].name ? jobs[i].name : "");
-        cJSON_AddStringToObject(obj, "cron_expr", jobs[i].cron_expr ? jobs[i].cron_expr : "");
-        cJSON_AddStringToObject(obj, "task", jobs[i].task ? jobs[i].task : "");
-        cJSON_AddBoolToObject(obj, "enabled", jobs[i].enabled);
-        cJSON_AddNumberToObject(obj, "next_run_at", (double)jobs[i].next_run_at);
-        cJSON_AddItemToArray(arr, obj);
+        char esc_name[128], esc_expr[128], esc_task[256];
+        json_escape_into(esc_name, sizeof(esc_name), jobs[i].name ? jobs[i].name : "");
+        json_escape_into(esc_expr, sizeof(esc_expr), jobs[i].cron_expr ? jobs[i].cron_expr : "");
+        json_escape_into(esc_task, sizeof(esc_task), jobs[i].task ? jobs[i].task : "");
+        int n = snprintf(buf + pos, cap - pos,
+            "%s{\"id\":%lld,\"name\":\"%s\",\"cron_expr\":\"%s\","
+            "\"task\":\"%s\",\"enabled\":%s,\"next_run_at\":%lld}",
+            i ? "," : "", (long long)jobs[i].id, esc_name, esc_expr,
+            esc_task, jobs[i].enabled ? "true" : "false",
+            (long long)jobs[i].next_run_at);
+        if (n < 0 || (size_t)n >= cap - pos) break;
+        pos += (size_t)n;
     }
+    buf[pos++] = ']';
+    buf[pos] = '\0';
     cron_list_free(jobs, count);
-
-    char *result = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
-    return result ? result : strdup("error: JSON serialization failed");
+    return buf;
 }
 
 char *tool_cron_remove_handler(const char *arguments, void *user_data) {
     ToolCronCtx *ctx = (ToolCronCtx *)user_data;
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON");
 
-    cJSON *id_item = cJSON_GetObjectItemCaseSensitive(json, "id");
-    if (!cJSON_IsNumber(id_item)) {
-        cJSON_Delete(json);
+    int id = targ_int(&ta, "id", -1);
+    tool_parse_free(&ta);
+
+    if (id < 0)
         return strdup("error: missing required field 'id'");
-    }
 
-    int64_t id = (int64_t)id_item->valuedouble;
-    cJSON_Delete(json);
-
-    if (cron_remove(ctx->db, id) != 0)
+    if (cron_remove(ctx->db, (int64_t)id) != 0)
         return strdup("error: job not found or DB error");
 
     char *result = malloc(64);
     if (!result) return strdup("error: OOM");
-    snprintf(result, 64, "removed cron job id=%lld", (long long)id);
+    snprintf(result, 64, "removed cron job id=%d", id);
     return result;
 }
 

@@ -24,6 +24,9 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t bytes = size * nmemb;
     HttpResponse *resp = userdata;
 
+    if (resp->max_bytes > 0 && resp->len + bytes > resp->max_bytes)
+        return 0;
+
     if (resp->len + bytes + 1 > resp->cap) {
         size_t new_cap = (resp->cap == 0) ? 4096 : resp->cap;
         while (new_cap < resp->len + bytes + 1)
@@ -40,236 +43,57 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     return bytes;
 }
 
-/* V2: capture Retry-After header */
+/* V2: capture Retry-After and Content-Type headers */
 static size_t header_cb(char *buf, size_t size, size_t nmemb, void *userdata) {
     size_t bytes = size * nmemb;
     HttpResponse *resp = userdata;
-    const char *prefix = "retry-after:";
-    size_t plen = 12;
-    if (bytes > plen) {
-        /* Case-insensitive check */
+
+    /* Case-insensitive header matching */
+    if (bytes > 12) {
+        const char *prefix = "retry-after:";
         int match = 1;
-        for (size_t i = 0; i < plen; i++) {
+        for (size_t i = 0; i < 12; i++) {
             if (tolower((unsigned char)buf[i]) != prefix[i]) { match = 0; break; }
         }
         if (match) {
-            const char *val = buf + plen;
+            const char *val = buf + 12;
             while (*val == ' ') val++;
             resp->retry_after = atoi(val);
             if (resp->retry_after < 1) resp->retry_after = 1;
         }
     }
+    if (bytes > 13) {
+        const char *prefix = "content-type:";
+        int match = 1;
+        for (size_t i = 0; i < 13; i++) {
+            if (tolower((unsigned char)buf[i]) != prefix[i]) { match = 0; break; }
+        }
+        if (match) {
+            const char *val = buf + 13;
+            while (*val == ' ') val++;
+            size_t vlen = bytes - (size_t)(val - buf);
+            while (vlen > 0 && (val[vlen-1] == '\r' || val[vlen-1] == '\n')) vlen--;
+            if (vlen >= sizeof(resp->content_type)) vlen = sizeof(resp->content_type) - 1;
+            memcpy(resp->content_type, val, vlen);
+            resp->content_type[vlen] = '\0';
+        }
+    }
     return bytes;
 }
 
-int http_post(const char *url, const char **headers, const char *body,
-              HttpResponse *resp) {
-    memset(resp, 0, sizeof(*resp));
-
-    CURL *curl = curl_easy_init();
-    if (!curl) return -1;
-
-    struct curl_slist *hlist = NULL;
-    if (headers) {
-        for (const char **h = headers; *h; h++)
-            hlist = curl_slist_append(hlist, *h);
-    }
-
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hlist);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 10L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 90L);
-
-    CURLcode rc = curl_easy_perform(curl);
-
-    long status = -1;
-    if (rc == CURLE_OK)
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    else if (rc == CURLE_OPERATION_TIMEDOUT)
-        status = -2;
-
-    curl_slist_free_all(hlist);
-    curl_easy_cleanup(curl);
-
-    resp_strip_leading_ws(resp);
-    return (int)status;
-}
-
-void http_response_free(HttpResponse *resp) {
-    free(resp->data);
-    resp->data = NULL;
-    resp->len = 0;
-    resp->cap = 0;
-}
-
-int http_post_stream(const char *url, const char **headers,
-                     HttpReadFn read_cb, void *read_data,
-                     HttpResponse *resp) {
-    memset(resp, 0, sizeof(*resp));
-
-    CURL *curl = curl_easy_init();
-    if (!curl) return -1;
-
-    struct curl_slist *hlist = NULL;
-    if (headers) {
-        for (const char **h = headers; *h; h++)
-            hlist = curl_slist_append(hlist, *h);
-    }
-    /* Chunked transfer since content-length unknown */
-    hlist = curl_slist_append(hlist, "Transfer-Encoding: chunked");
-
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_cb);
-    curl_easy_setopt(curl, CURLOPT_READDATA, read_data);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hlist);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 10L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 90L);
-
-    CURLcode rc = curl_easy_perform(curl);
-
-    long status = -1;
-    if (rc == CURLE_OK)
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    else if (rc == CURLE_OPERATION_TIMEDOUT)
-        status = -2;
-
-    curl_slist_free_all(hlist);
-    curl_easy_cleanup(curl);
-
-    resp_strip_leading_ws(resp);
-    return (int)status;
-}
-
-/* SSE write callback context */
-typedef struct {
-    HttpResponse *resp;      /* accumulate full raw SSE response */
-    HttpSseFn sse_cb;
-    void *sse_data;
-    /* Line buffer for partial SSE lines */
-    char *line_buf;
-    size_t line_len;
-    size_t line_cap;
-    /* Accumulated content for final response reconstruction */
-    char *content;
-    size_t content_len;
-    size_t content_cap;
-    /* Accumulated reasoning tokens */
-    char *reasoning;
-    size_t reasoning_len;
-    size_t reasoning_cap;
-    int reasoning_started;   /* flag: already printed header */
-    /* Tool call accumulation (index-based assembly) */
-    char **tc_ids;      /* array of tool call IDs */
-    char **tc_names;    /* array of tool call function names */
-    char **tc_args;     /* array of accumulated argument strings */
-    size_t *tc_arg_lens;
-    size_t *tc_arg_caps;
-    size_t tc_count;
-    size_t tc_alloc;
-    char *finish_reason;
-    int prompt_tokens;
-    int completion_tokens;
-    int total_tokens;
-    int cache_read_tokens;
-    int cache_write_tokens;
-    int64_t cost_nano;
-} SseCtx;
-
-/* Unescape a JSON string segment in-place into dest. Returns bytes written. */
-static size_t json_unescape(char *dest, size_t cap, const char *src, size_t src_len) {
-    size_t w = 0;
-    for (size_t i = 0; i < src_len && w < cap; i++) {
-        if (src[i] == '\\' && i + 1 < src_len) {
-            i++;
-            switch (src[i]) {
-            case 'n': dest[w++] = '\n'; break;
-            case 'r': dest[w++] = '\r'; break;
-            case 't': dest[w++] = '\t'; break;
-            case '"': dest[w++] = '"'; break;
-            case '\\': dest[w++] = '\\'; break;
-            case '/': dest[w++] = '/'; break;
-            case 'u':
-                /* Decode \uXXXX, with surrogate pair support for \uD800-\uDBFF\uDC00-\uDFFF */
-                if (i + 4 < src_len) {
-                    unsigned cp = 0;
-                    for (int j = 1; j <= 4; j++) {
-                        char c = src[i + j];
-                        cp <<= 4;
-                        if (c >= '0' && c <= '9') cp |= (unsigned)(c - '0');
-                        else if (c >= 'a' && c <= 'f') cp |= (unsigned)(c - 'a' + 10);
-                        else if (c >= 'A' && c <= 'F') cp |= (unsigned)(c - 'A' + 10);
-                    }
-                    i += 4;
-                    /* Handle UTF-16 surrogate pairs */
-                    if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < src_len &&
-                        src[i + 1] == '\\' && src[i + 2] == 'u') {
-                        unsigned lo = 0;
-                        for (int j = 3; j <= 6; j++) {
-                            char c = src[i + j];
-                            lo <<= 4;
-                            if (c >= '0' && c <= '9') lo |= (unsigned)(c - '0');
-                            else if (c >= 'a' && c <= 'f') lo |= (unsigned)(c - 'a' + 10);
-                            else if (c >= 'A' && c <= 'F') lo |= (unsigned)(c - 'A' + 10);
-                        }
-                        if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                            i += 6;
-                        }
-                    }
-                    if (cp < 0x80) {
-                        dest[w++] = (char)cp;
-                    } else if (cp < 0x800 && w + 1 < cap) {
-                        dest[w++] = (char)(0xC0 | (cp >> 6));
-                        dest[w++] = (char)(0x80 | (cp & 0x3F));
-                    } else if (cp < 0x10000 && w + 2 < cap) {
-                        dest[w++] = (char)(0xE0 | (cp >> 12));
-                        dest[w++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                        dest[w++] = (char)(0x80 | (cp & 0x3F));
-                    } else if (cp >= 0x10000 && w + 3 < cap) {
-                        dest[w++] = (char)(0xF0 | (cp >> 18));
-                        dest[w++] = (char)(0x80 | ((cp >> 12) & 0x3F));
-                        dest[w++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                        dest[w++] = (char)(0x80 | (cp & 0x3F));
-                    }
-                }
-                break;
-            default: dest[w++] = src[i]; break;
-            }
-        } else {
-            dest[w++] = src[i];
-        }
-    }
-    return w;
-}
+/* json_unescape is in json_escape.c */
 
 /* T294: Process one SSE "data:" line using jsmn-based per-provider parsers. */
 static void sse_process_line(SseCtx *ctx, const char *line, size_t len) {
-    /* Skip "data: " prefix */
     if (len < 5 || memcmp(line, "data:", 5) != 0) return;
     const char *json = line + 5;
     size_t jlen = len - 5;
     while (jlen > 0 && (*json == ' ')) { json++; jlen--; }
 
-    /* [DONE] marker */
     if (jlen >= 6 && memcmp(json, "[DONE]", 6) == 0) return;
 
-    /* Auto-detect provider format and parse */
     SseChunk chunk;
     int rc;
-    /* Gemini: has "candidates" at top level */
     if (memchr(json, '{', jlen) && strstr(json, "\"candidates\""))
         rc = sse_parse_gemini(json, jlen, &chunk);
     else
@@ -277,14 +101,11 @@ static void sse_process_line(SseCtx *ctx, const char *line, size_t len) {
 
     if (rc != 0) return;
 
-    /* Apply parsed chunk to SseCtx accumulation state */
-
     /* Content text */
     if (chunk.text && chunk.text_len > 0) {
         char *unesc = malloc(chunk.text_len + 1);
         if (unesc) {
             size_t ulen = json_unescape(unesc, chunk.text_len + 1, chunk.text, chunk.text_len);
-            /* Append to accumulated content */
             if (ctx->content_len + ulen + 1 > ctx->content_cap) {
                 size_t nc = ctx->content_cap ? ctx->content_cap * 2 : 4096;
                 while (nc < ctx->content_len + ulen + 1) nc *= 2;
@@ -337,7 +158,6 @@ static void sse_process_line(SseCtx *ctx, const char *line, size_t len) {
     /* Tool calls */
     if (chunk.tc_index >= 0) {
         size_t idx = (size_t)chunk.tc_index;
-        /* Grow tc arrays if needed */
         if (idx >= ctx->tc_alloc) {
             size_t na = idx + 4;
             ctx->tc_ids = realloc(ctx->tc_ids, na * sizeof(char *));
@@ -359,7 +179,6 @@ static void sse_process_line(SseCtx *ctx, const char *line, size_t len) {
         if (chunk.tc_id && chunk.tc_id_len > 0 && !ctx->tc_ids[idx])
             ctx->tc_ids[idx] = strndup(chunk.tc_id, chunk.tc_id_len);
         else if (!ctx->tc_ids[idx]) {
-            /* Synthetic ID for Gemini */
             char id_buf[32];
             snprintf(id_buf, sizeof(id_buf), "call_%zu", idx);
             ctx->tc_ids[idx] = strdup(id_buf);
@@ -370,13 +189,11 @@ static void sse_process_line(SseCtx *ctx, const char *line, size_t len) {
 
         if (chunk.tc_args && chunk.tc_args_len > 0) {
             if (chunk.tc_args_complete) {
-                /* Gemini: full args object, store directly */
                 free(ctx->tc_args[idx]);
                 ctx->tc_args[idx] = strndup(chunk.tc_args, chunk.tc_args_len);
                 ctx->tc_arg_lens[idx] = chunk.tc_args_len;
                 ctx->tc_arg_caps[idx] = chunk.tc_args_len + 1;
             } else {
-                /* OpenAI: fragment, unescape and append */
                 char *ue = malloc(chunk.tc_args_len + 1);
                 if (ue) {
                     size_t ul = json_unescape(ue, chunk.tc_args_len + 1, chunk.tc_args, chunk.tc_args_len);
@@ -400,7 +217,7 @@ static void sse_process_line(SseCtx *ctx, const char *line, size_t len) {
     /* Finish reason */
     if (chunk.finish && chunk.finish_len > 0) {
         free(ctx->finish_reason);
-        /* Map Gemini STOP/MAX_TOKENS to standard format */
+        ctx->finish_reason = NULL;
         if (chunk.finish_len == 4 && memcmp(chunk.finish, "STOP", 4) == 0)
             ctx->finish_reason = strdup("stop");
         else if (chunk.finish_len == 10 && memcmp(chunk.finish, "MAX_TOKENS", 10) == 0)
@@ -443,7 +260,6 @@ static size_t sse_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
     for (size_t i = 0; i < bytes; i++) {
         char c = data[i];
         if (c == '\n') {
-            /* Process accumulated line (strip trailing \r) */
             if (ctx->line_len > 0) {
                 if (ctx->line_buf[ctx->line_len - 1] == '\r')
                     ctx->line_len--;
@@ -452,7 +268,6 @@ static size_t sse_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
             }
             ctx->line_len = 0;
         } else {
-            /* Append to line buffer */
             if (ctx->line_len + 1 >= ctx->line_cap) {
                 size_t nc = ctx->line_cap ? ctx->line_cap * 2 : 1024;
                 char *tmp = realloc(ctx->line_buf, nc);
@@ -467,39 +282,99 @@ static size_t sse_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
     return bytes;
 }
 
-int http_post_stream_sse(const char *url, const char **headers,
-                         HttpReadFn read_cb, void *read_data,
-                         HttpSseFn sse_cb, void *sse_data,
-                         HttpResponse *resp) {
-    memset(resp, 0, sizeof(*resp));
+void sse_ctx_free(SseCtx *ctx) {
+    if (!ctx) return;
+    free(ctx->line_buf);
+    free(ctx->content);
+    free(ctx->reasoning);
+    free(ctx->finish_reason);
+    for (size_t i = 0; i < ctx->tc_alloc; i++) {
+        free(ctx->tc_ids[i]);
+        free(ctx->tc_names[i]);
+        free(ctx->tc_args[i]);
+    }
+    free(ctx->tc_ids);
+    free(ctx->tc_names);
+    free(ctx->tc_args);
+    free(ctx->tc_arg_lens);
+    free(ctx->tc_arg_caps);
+}
 
-    SseCtx ctx = {0};
-    ctx.resp = resp;
-    ctx.sse_cb = sse_cb;
-    ctx.sse_data = sse_data;
+/* General-purpose HTTP request */
+int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
+    memset(resp, 0, sizeof(*resp));
+    if (!opts || !opts->url) return -1;
+
+    resp->max_bytes = opts->max_response_bytes;
 
     CURL *curl = curl_easy_init();
     if (!curl) return -1;
 
+    char errbuf[CURL_ERROR_SIZE] = "";
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+    curl_easy_setopt(curl, CURLOPT_URL, opts->url);
+
+    /* Method */
+    int is_post = (opts->body || opts->read_cb);
+    const char *method = opts->method;
+    if (!method) method = is_post ? "POST" : "GET";
+
+    if (strcmp(method, "POST") == 0) {
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    } else if (strcmp(method, "GET") != 0) {
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
+    }
+
+    /* Body */
+    if (opts->body) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, opts->body);
+    } else if (opts->read_cb) {
+        curl_easy_setopt(curl, CURLOPT_READFUNCTION, opts->read_cb);
+        curl_easy_setopt(curl, CURLOPT_READDATA, opts->read_data);
+    }
+
+    /* Headers */
     struct curl_slist *hlist = NULL;
-    if (headers) {
-        for (const char **h = headers; *h; h++)
+    if (opts->headers) {
+        for (const char **h = opts->headers; *h; h++)
             hlist = curl_slist_append(hlist, *h);
     }
-    hlist = curl_slist_append(hlist, "Transfer-Encoding: chunked");
+    if (opts->read_cb)
+        hlist = curl_slist_append(hlist, "Transfer-Encoding: chunked");
 
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_cb);
-    curl_easy_setopt(curl, CURLOPT_READDATA, read_data);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hlist);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, sse_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+
+    /* Timeout */
+    long timeout = opts->timeout > 0 ? opts->timeout : 300L;
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 10L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 90L);
+
+    /* Redirects */
+    if (opts->follow_redirects) {
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, opts->max_redirects > 0 ? (long)opts->max_redirects : 5L);
+    }
+
+    /* User agent */
+    if (opts->user_agent)
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, opts->user_agent);
+
+    /* SSE or regular write callback */
+    SseCtx sse_ctx = {0};
+    if (opts->sse_cb) {
+        sse_ctx.resp = resp;
+        sse_ctx.sse_cb = opts->sse_cb;
+        sse_ctx.sse_data = opts->sse_data;
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, sse_write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sse_ctx);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
+    }
+
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
 
     CURLcode rc = curl_easy_perform(curl);
 
@@ -509,119 +384,76 @@ int http_post_stream_sse(const char *url, const char **headers,
     else if (rc == CURLE_OPERATION_TIMEDOUT)
         status = -2;
 
+    /* Stash curl error */
+    if (rc != CURLE_OK && resp->err_detail[0] == '\0') {
+        const char *msg = errbuf[0] ? errbuf : curl_easy_strerror(rc);
+        snprintf(resp->err_detail, sizeof(resp->err_detail), "%s", msg);
+    }
+
     curl_slist_free_all(hlist);
     curl_easy_cleanup(curl);
 
-    /* On success, reconstruct a non-streaming-format JSON response for parsing.
-     * This lets the existing llm_parse_response work unchanged. */
-    if (status >= 200 && status < 300 && (ctx.content || ctx.tc_count > 0 || ctx.finish_reason)) {
-        /* Build synthetic response JSON that llm_parse_response can handle */
-        free(resp->data);
-        resp->data = NULL;
-        resp->len = 0;
-        resp->cap = 0;
-
-        size_t need = (ctx.content_len * 2) + (ctx.reasoning_len * 2) + (ctx.tc_count * 512) + 512;
-        char *out = malloc(need);
-        if (out) {
-            int n = snprintf(out, need, "{\"choices\":[{\"message\":{");
-
-            /* Content */
-            if (ctx.content && ctx.content_len > 0) {
-                n += snprintf(out + n, need - (size_t)n, "\"content\":\"");
-                /* Ensure buffer is large enough for escaped content */
-                size_t esc_need = ctx.content_len * 6 + 1;
-                if ((size_t)n + esc_need + 256 > need) {
-                    need = (size_t)n + esc_need + 1024;
-                    out = realloc(out, need);
-                }
-                size_t esc_len = json_escape_into(out + n, need - (size_t)n, ctx.content);
-                n += (int)esc_len;
-                n += snprintf(out + n, need - (size_t)n, "\"");
-            }
-
-            /* Reasoning */
-            if (ctx.reasoning && ctx.reasoning_len > 0) {
-                if (ctx.content && ctx.content_len > 0)
-                    n += snprintf(out + n, need - (size_t)n, ",");
-                n += snprintf(out + n, need - (size_t)n, "\"reasoning\":\"");
-                size_t esc_need = ctx.reasoning_len * 6 + 1;
-                if ((size_t)n + esc_need + 256 > need) {
-                    need = (size_t)n + esc_need + 1024;
-                    out = realloc(out, need);
-                }
-                size_t esc_len = json_escape_into(out + n, need - (size_t)n, ctx.reasoning);
-                n += (int)esc_len;
-                n += snprintf(out + n, need - (size_t)n, "\"");
-            }
-
-            /* Tool calls */
-            if (ctx.tc_count > 0) {
-                if ((ctx.content && ctx.content_len > 0) || (ctx.reasoning && ctx.reasoning_len > 0))
-                    n += snprintf(out + n, need - (size_t)n, ",");
-                n += snprintf(out + n, need - (size_t)n, "\"tool_calls\":[");
-                for (size_t i = 0; i < ctx.tc_count; i++) {
-                    if (i > 0) out[n++] = ',';
-                    /* Ensure buffer large enough */
-                    size_t tc_need = 128 + (ctx.tc_ids[i] ? strlen(ctx.tc_ids[i]) : 0)
-                                         + (ctx.tc_names[i] ? strlen(ctx.tc_names[i]) : 0)
-                                         + ctx.tc_arg_lens[i] * 2;
-                    if ((size_t)n + tc_need > need) {
-                        need = (size_t)n + tc_need + 1024;
-                        out = realloc(out, need);
-                    }
-                    n += snprintf(out + n, need - (size_t)n,
-                        "{\"id\":\"%s\",\"type\":\"function\",\"function\":{\"name\":\"%s\",\"arguments\":\"",
-                        ctx.tc_ids[i] ? ctx.tc_ids[i] : "",
-                        ctx.tc_names[i] ? ctx.tc_names[i] : "");
-                    /* Escape arguments JSON string */
-                    if (ctx.tc_args[i] && ctx.tc_arg_lens[i] > 0) {
-                        size_t al = json_escape_into(out + n, need - (size_t)n, ctx.tc_args[i]);
-                        n += (int)al;
-                    }
-                    n += snprintf(out + n, need - (size_t)n, "\"}}");
-                }
-                n += snprintf(out + n, need - (size_t)n, "]");
-            }
-
-            n += snprintf(out + n, need - (size_t)n, "},\"finish_reason\":\"%s\"}]",
-                          ctx.finish_reason ? ctx.finish_reason : "stop");
-
-            /* Usage */
-            if (ctx.total_tokens > 0 || ctx.cost_nano > 0) {
-                n += snprintf(out + n, need - (size_t)n,
-                    ",\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"total_tokens\":%d",
-                    ctx.prompt_tokens, ctx.completion_tokens, ctx.total_tokens);
-                if (ctx.cache_read_tokens > 0 || ctx.cache_write_tokens > 0)
-                    n += snprintf(out + n, need - (size_t)n,
-                        ",\"prompt_tokens_details\":{\"cached_tokens\":%d,\"cache_write_tokens\":%d}",
-                        ctx.cache_read_tokens, ctx.cache_write_tokens);
-                if (ctx.cost_nano > 0)
-                    n += snprintf(out + n, need - (size_t)n,
-                        ",\"cost\":%.10f", (double)ctx.cost_nano / 1e9);
-                n += snprintf(out + n, need - (size_t)n, "}");
-            }
-            n += snprintf(out + n, need - (size_t)n, "}");
-            resp->data = out;
-            resp->len = (size_t)n;
-            resp->cap = need;
+    /* SSE: transfer or free accumulated context */
+    if (opts->sse_cb) {
+        if (opts->out_ctx) {
+            *opts->out_ctx = sse_ctx;
+            /* Clear local so nothing gets double-freed */
+            memset(&sse_ctx, 0, sizeof(sse_ctx));
+        } else {
+            sse_ctx_free(&sse_ctx);
         }
     }
-    /* On error (non-2xx), resp->data has the raw error body — leave as-is */
 
-    free(ctx.line_buf);
-    free(ctx.content);
-    free(ctx.reasoning);
-    free(ctx.finish_reason);
-    for (size_t i = 0; i < ctx.tc_alloc; i++) {
-        free(ctx.tc_ids[i]);
-        free(ctx.tc_names[i]);
-        free(ctx.tc_args[i]);
-    }
-    free(ctx.tc_ids);
-    free(ctx.tc_names);
-    free(ctx.tc_args);
-    free(ctx.tc_arg_lens);
-    free(ctx.tc_arg_caps);
+    if (!opts->sse_cb)
+        resp_strip_leading_ws(resp);
+
     return (int)status;
+}
+
+int http_post(const char *url, const char **headers, const char *body,
+              HttpResponse *resp) {
+    HttpRequestOpts opts = {
+        .url = url,
+        .method = "POST",
+        .body = body,
+        .headers = headers,
+    };
+    return http_do(&opts, resp);
+}
+
+int http_post_stream(const char *url, const char **headers,
+                     HttpReadFn read_cb, void *read_data,
+                     HttpResponse *resp) {
+    HttpRequestOpts opts = {
+        .url = url,
+        .method = "POST",
+        .headers = headers,
+        .read_cb = read_cb,
+        .read_data = read_data,
+    };
+    return http_do(&opts, resp);
+}
+
+int http_post_stream_sse(const char *url, const char **headers,
+                         HttpReadFn read_cb, void *read_data,
+                         HttpSseFn sse_cb, void *sse_data,
+                         HttpResponse *resp, SseCtx *out_ctx) {
+    HttpRequestOpts opts = {
+        .url = url,
+        .method = "POST",
+        .headers = headers,
+        .read_cb = read_cb,
+        .read_data = read_data,
+        .sse_cb = sse_cb,
+        .sse_data = sse_data,
+        .out_ctx = out_ctx,
+    };
+    return http_do(&opts, resp);
+}
+
+void http_response_free(HttpResponse *resp) {
+    free(resp->data);
+    resp->data = NULL;
+    resp->len = 0;
+    resp->cap = 0;
 }

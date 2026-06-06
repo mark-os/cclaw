@@ -416,8 +416,9 @@ int agent_turn_run(int64_t session_id) {
         tool_whitelist = DEFAULT_TOOLS;
         tool_wl_count = DEFAULT_TOOLS_COUNT;
     }
-    const ToolSchema *schemas = tools_schemas_filtered(&setup.reg, tool_whitelist,
-                                                       tool_wl_count, &tool_count);
+    ToolSchema schemas[TOOLS_MAX];
+    tool_count = tools_schemas_filtered(&setup.reg, tool_whitelist,
+                                        tool_wl_count, schemas, TOOLS_MAX);
 
     /* T300: parent turn loop — fork llm child, dispatch tools in-process */
     rc = parent_turn_loop(db, session_id, cfg, &setup.reg, schemas, tool_count,

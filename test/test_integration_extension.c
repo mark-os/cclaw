@@ -135,8 +135,8 @@ static void test_extension_tool_in_agent_loop(void) {
     cfg.system_prompt = "You are a helpful assistant.";
 
     /* Build tool schemas from registry */
-    size_t schema_count = 0;
-    const ToolSchema *schemas = tools_schemas(&reg, &schema_count);
+    ToolSchema schemas[TOOLS_MAX];
+    size_t schema_count = tools_schemas(&reg, schemas, TOOLS_MAX);
 
     Message user_msg = {.role = ROLE_USER, .content = "What is 3 + 4?"};
     entry_append(db, sid, &user_msg);
@@ -262,8 +262,8 @@ static void test_before_tool_call_blocks(void) {
     cfg.max_iterations = 10;
     cfg.system_prompt = "You are a helpful assistant.";
 
-    size_t schema_count = 0;
-    const ToolSchema *schemas = tools_schemas(&reg, &schema_count);
+    ToolSchema schemas[TOOLS_MAX];
+    size_t schema_count = tools_schemas(&reg, schemas, TOOLS_MAX);
 
     Message user_msg = {.role = ROLE_USER, .content = "Do the dangerous thing"};
     entry_append(db, sid, &user_msg);
@@ -405,8 +405,8 @@ static void test_extension_throw_skipped_agent_continues(void) {
     cfg.max_iterations = 10;
     cfg.system_prompt = "You are a helpful assistant.";
 
-    size_t schema_count = 0;
-    const ToolSchema *schemas = tools_schemas(&reg, &schema_count);
+    ToolSchema schemas[TOOLS_MAX];
+    size_t schema_count = tools_schemas(&reg, schemas, TOOLS_MAX);
 
     Message user_msg = {.role = ROLE_USER, .content = "Greet World"};
     entry_append(db, sid, &user_msg);
@@ -546,8 +546,8 @@ static void test_calltool_reentry_depth_limit(void) {
     cfg.max_iterations = 10;
     cfg.system_prompt = "You are a helpful assistant.";
 
-    size_t schema_count = 0;
-    const ToolSchema *schemas = tools_schemas(&reg, &schema_count);
+    ToolSchema schemas[TOOLS_MAX];
+    size_t schema_count = tools_schemas(&reg, schemas, TOOLS_MAX);
 
     Message user_msg = {.role = ROLE_USER, .content = "Start reentry test"};
     entry_append(db, sid, &user_msg);

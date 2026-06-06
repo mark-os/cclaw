@@ -1,32 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "js_http_fetch.h"
+#include "http.h"
 #include "http_policy.h"
-#include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-
-#define FETCH_MAX (512 * 1024)
-
-typedef struct { char *data; size_t len; size_t cap; } FetchBuf;
-
-static size_t fetch_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
-    size_t bytes = size * nmemb;
-    FetchBuf *buf = (FetchBuf *)ud;
-    if (buf->len + bytes > FETCH_MAX) return 0;
-    if (buf->len + bytes + 1 > buf->cap) {
-        size_t nc = buf->cap ? buf->cap : 4096;
-        while (nc < buf->len + bytes + 1) nc *= 2;
-        char *tmp = realloc(buf->data, nc);
-        if (!tmp) return 0;
-        buf->data = tmp;
-        buf->cap = nc;
-    }
-    memcpy(buf->data + buf->len, ptr, bytes);
-    buf->len += bytes;
-    buf->data[buf->len] = '\0';
-    return bytes;
-}
 
 JsHttpResult js_http_fetch_exec(const char *url, const char *method,
                                 const char *req_body,
@@ -54,45 +32,32 @@ JsHttpResult js_http_fetch_exec(const char *url, const char *method,
         return r;
     }
 
-    /* Perform HTTP request */
-    CURL *curl = curl_easy_init();
-    if (!curl) { r.error = strdup("curl init failed"); return r; }
-
-    FetchBuf resp = {0};
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fetch_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "cclaw/1.0");
-
     if (!method) method = "GET";
-    if (strcmp(method, "POST") == 0) {
-        curl_easy_setopt(curl, CURLOPT_POST, 1L);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req_body ? req_body : "");
-    } else if (strcmp(method, "PUT") == 0) {
-        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
-        if (req_body) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req_body);
-    } else if (strcmp(method, "DELETE") == 0) {
-        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
-    }
 
-    CURLcode rc = curl_easy_perform(curl);
-    long status = 0;
-    if (rc == CURLE_OK)
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    curl_easy_cleanup(curl);
+    HttpRequestOpts opts = {
+        .url = url,
+        .method = method,
+        .body = (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0) ? (req_body ? req_body : "") : NULL,
+        .timeout = 30,
+        .follow_redirects = 1,
+        .max_redirects = 5,
+        .max_response_bytes = 512 * 1024,
+        .user_agent = "cclaw/1.0",
+    };
 
-    if (rc != CURLE_OK) {
-        free(resp.data);
-        r.error = strdup(curl_easy_strerror(rc));
+    HttpResponse resp = {0};
+    int status = http_do(&opts, &resp);
+
+    if (status == -1 || status == -2) {
+        r.error = strdup(resp.err_detail[0] ? resp.err_detail : "HTTP request failed");
+        http_response_free(&resp);
         return r;
     }
 
-    r.status = (int)status;
+    r.status = status;
     r.body = resp.data;
     r.body_len = resp.len;
+    /* Transfer ownership — don't free resp.data */
     return r;
 }
 

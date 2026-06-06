@@ -21,6 +21,7 @@
 #include "http.h"
 #include "arena.h"
 #include "db.h"
+#include "cJSON.h"
 
 #define MAX_MODELS 10
 #define TURNS 5
@@ -53,15 +54,26 @@ static int do_turn(const char *api_key, const char *model,
                    const char *session_id, Message *msgs, int msg_count,
                    TurnResult *out) {
     Arena *a = arena_create(512 * 1024);
-    Config cfg = {0};
-    cfg.provider.base_url = (char *)BASE_URL;
-    cfg.provider.api_key = (char *)api_key;
-    cfg.provider.model = (char *)model;
-    cfg.provider.max_tokens = 2048;
-    cfg.provider.context_window = 128000;
 
-    char *body = llm_build_request(a, &cfg, msgs, (size_t)msg_count, NULL, 0);
-    if (!body) { arena_destroy(a); return -1; }
+    char *body;
+    {
+        cJSON *root = cJSON_CreateObject();
+        if (!root) { arena_destroy(a); return -1; }
+        cJSON_AddStringToObject(root, "model", model);
+        cJSON_AddNumberToObject(root, "max_tokens", 2048);
+        cJSON *jarr = cJSON_AddArrayToObject(root, "messages");
+        for (int i = 0; i < msg_count; i++) {
+            cJSON *m = cJSON_CreateObject();
+            const char *r = msgs[i].role == ROLE_SYSTEM ? "system" :
+                            msgs[i].role == ROLE_USER ? "user" : "assistant";
+            cJSON_AddStringToObject(m, "role", r);
+            cJSON_AddStringToObject(m, "content", msgs[i].content ? msgs[i].content : "");
+            cJSON_AddItemToArray(jarr, m);
+        }
+        body = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        if (!body) { arena_destroy(a); return -1; }
+    }
 
     char auth_hdr[256];
     snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", api_key);
@@ -79,6 +91,7 @@ static int do_turn(const char *api_key, const char *model,
     clock_gettime(CLOCK_MONOTONIC, &t0);
     int status = http_post(url, headers, body, &resp);
     clock_gettime(CLOCK_MONOTONIC, &t1);
+    free(body);
 
     out->latency_ms = elapsed_ms(&t0, &t1);
 

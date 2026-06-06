@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "tool_file.h"
-#include <cJSON.h>
+#include "tool_parse.h"
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,24 +34,24 @@ char *tool_file_read_handler(const char *arguments, void *user_data) {
     const char *workspace = ctx ? ctx->workspace : NULL;
     if (!workspace) return strdup("error: no workspace configured");
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON arguments");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
+        return strdup("error: invalid JSON arguments");
 
-    cJSON *path_item = cJSON_GetObjectItemCaseSensitive(json, "path");
-    if (!cJSON_IsString(path_item) || !path_item->valuestring[0]) {
-        cJSON_Delete(json);
+    const char *req_path = targ_str(&ta, "path");
+    if (!req_path || !req_path[0]) {
+        tool_parse_free(&ta);
         return strdup("error: missing or empty 'path' field");
     }
 
     /* Build full path: workspace + "/" + path (if relative) */
-    const char *req_path = path_item->valuestring;
     char fullpath[PATH_MAX];
     if (req_path[0] == '/') {
         snprintf(fullpath, sizeof(fullpath), "%s", req_path);
     } else {
         snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
     }
-    cJSON_Delete(json);
+    tool_parse_free(&ta);
 
     /* V1: verify path is within workspace, extra_read_path, or cclaw_path (T228) */
     char resolved[PATH_MAX];
@@ -129,23 +129,21 @@ char *tool_file_write_handler(const char *arguments, void *user_data) {
     const char *workspace = (const char *)user_data;
     if (!workspace) return strdup("error: no workspace configured");
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON arguments");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
+        return strdup("error: invalid JSON arguments");
 
-    cJSON *path_item = cJSON_GetObjectItemCaseSensitive(json, "path");
-    if (!cJSON_IsString(path_item) || !path_item->valuestring[0]) {
-        cJSON_Delete(json);
+    const char *req_path = targ_str(&ta, "path");
+    if (!req_path || !req_path[0]) {
+        tool_parse_free(&ta);
         return strdup("error: missing or empty 'path' field");
     }
 
-    cJSON *content_item = cJSON_GetObjectItemCaseSensitive(json, "content");
-    if (!cJSON_IsString(content_item)) {
-        cJSON_Delete(json);
+    const char *content = targ_str(&ta, "content");
+    if (!content) {
+        tool_parse_free(&ta);
         return strdup("error: missing 'content' field");
     }
-
-    const char *req_path = path_item->valuestring;
-    const char *content = content_item->valuestring;
 
     /* Build full path */
     char fullpath[PATH_MAX];
@@ -159,7 +157,7 @@ char *tool_file_write_handler(const char *arguments, void *user_data) {
     char resolved[PATH_MAX];
     char ws_resolved[PATH_MAX];
     if (!realpath(workspace, ws_resolved)) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: invalid workspace");
     }
     size_t ws_len = strlen(ws_resolved);
@@ -169,7 +167,7 @@ char *tool_file_write_handler(const char *arguments, void *user_data) {
         /* File exists — check it's in workspace */
         if (strncmp(resolved, ws_resolved, ws_len) != 0 ||
             (resolved[ws_len] != '/' && resolved[ws_len] != '\0')) {
-            cJSON_Delete(json);
+            tool_parse_free(&ta);
             return strdup("error: path outside workspace");
         }
         write_path = resolved;
@@ -177,25 +175,23 @@ char *tool_file_write_handler(const char *arguments, void *user_data) {
         /* New file — validate parent is in workspace */
         char validated[PATH_MAX];
         if (!parent_in_workspace(fullpath, workspace, validated, sizeof(validated))) {
-            cJSON_Delete(json);
+            tool_parse_free(&ta);
             return strdup("error: path outside workspace");
         }
-        write_path = validated;
-        /* Copy to resolved so it persists after this block */
         snprintf(resolved, sizeof(resolved), "%s", validated);
         write_path = resolved;
     }
 
     FILE *f = fopen(write_path, "wb");
     if (!f) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: cannot open file for writing");
     }
 
     size_t content_len = strlen(content);
     size_t written = fwrite(content, 1, content_len, f);
     fclose(f);
-    cJSON_Delete(json);
+    tool_parse_free(&ta);
 
     if (written != content_len) {
         return strdup("error: incomplete write");

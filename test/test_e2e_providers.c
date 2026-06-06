@@ -17,6 +17,7 @@
 #include "tools.h"
 #include "tool_file.h"
 #include "telegram.h"
+#include "cJSON.h"
 #include <curl/curl.h>
 
 static int tests_run = 0;
@@ -26,6 +27,67 @@ static int tests_passed = 0;
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
 #define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while(0)
 #define SKIP(msg) do { tests_passed++; printf("SKIP: %s\n", msg); return; } while(0)
+
+/* Build OpenAI-compatible request JSON. Caller must free() result. */
+static char *build_request(const Config *cfg, const Message *msgs, size_t msg_count,
+                           const ToolSchema *tools, size_t tool_count) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return NULL;
+    cJSON_AddStringToObject(root, "model", cfg->provider.model);
+    if (cfg->provider.max_tokens > 0)
+        cJSON_AddNumberToObject(root, "max_tokens", cfg->provider.max_tokens);
+    cJSON *jarr = cJSON_AddArrayToObject(root, "messages");
+    for (size_t i = 0; i < msg_count; i++) {
+        cJSON *m = cJSON_CreateObject();
+        const char *role = msgs[i].role == ROLE_SYSTEM ? "system" :
+                           msgs[i].role == ROLE_USER ? "user" :
+                           msgs[i].role == ROLE_ASSISTANT ? "assistant" : "tool";
+        cJSON_AddStringToObject(m, "role", role);
+        if (msgs[i].role == ROLE_TOOL && msgs[i].tool_result) {
+            cJSON_AddStringToObject(m, "tool_call_id", msgs[i].tool_result->tool_call_id);
+            cJSON_AddStringToObject(m, "content", msgs[i].tool_result->content ? msgs[i].tool_result->content : "");
+        } else if (msgs[i].role == ROLE_ASSISTANT && msgs[i].tool_calls && msgs[i].tool_call_count > 0) {
+            if (msgs[i].content)
+                cJSON_AddStringToObject(m, "content", msgs[i].content);
+            else
+                cJSON_AddNullToObject(m, "content");
+            cJSON *tc_arr = cJSON_AddArrayToObject(m, "tool_calls");
+            for (size_t j = 0; j < msgs[i].tool_call_count; j++) {
+                cJSON *tc = cJSON_CreateObject();
+                cJSON_AddStringToObject(tc, "id", msgs[i].tool_calls[j].id);
+                cJSON_AddStringToObject(tc, "type", "function");
+                cJSON *fn = cJSON_CreateObject();
+                cJSON_AddStringToObject(fn, "name", msgs[i].tool_calls[j].name);
+                cJSON_AddStringToObject(fn, "arguments", msgs[i].tool_calls[j].arguments);
+                cJSON_AddItemToObject(tc, "function", fn);
+                cJSON_AddItemToArray(tc_arr, tc);
+            }
+        } else {
+            cJSON_AddStringToObject(m, "content", msgs[i].content ? msgs[i].content : "");
+        }
+        cJSON_AddItemToArray(jarr, m);
+    }
+    if (tools && tool_count > 0) {
+        cJSON *tarr = cJSON_AddArrayToObject(root, "tools");
+        for (size_t i = 0; i < tool_count; i++) {
+            cJSON *t = cJSON_CreateObject();
+            cJSON_AddStringToObject(t, "type", "function");
+            cJSON *fn = cJSON_CreateObject();
+            cJSON_AddStringToObject(fn, "name", tools[i].name);
+            if (tools[i].description)
+                cJSON_AddStringToObject(fn, "description", tools[i].description);
+            if (tools[i].parameters_json) {
+                cJSON *p = cJSON_Parse(tools[i].parameters_json);
+                if (p) cJSON_AddItemToObject(fn, "parameters", p);
+            }
+            cJSON_AddItemToObject(t, "function", fn);
+            cJSON_AddItemToArray(tarr, t);
+        }
+    }
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return out;
+}
 
 static char *test_dispatch(const char *name, const char *arguments, void *user_data) {
     ToolRegistry *reg = (ToolRegistry *)user_data;
@@ -63,7 +125,7 @@ static void test_gemini_tool_calls(void) {
         .parameters_json = "{\"type\":\"object\",\"properties\":{\"timezone\":{\"type\":\"string\",\"description\":\"Timezone name\"}},\"required\":[\"timezone\"]}"
     }};
 
-    char *req_json = llm_build_request(a, &cfg, msgs, 2, tools, 1);
+    char *req_json = build_request(&cfg, msgs, 2, tools, 1);
     if (!req_json) { arena_destroy(a); FAIL("build request failed"); }
 
     char auth_hdr[256];
@@ -75,6 +137,7 @@ static void test_gemini_tool_calls(void) {
 
     HttpResponse resp = {0};
     int status = http_post(url, headers, req_json, &resp);
+    free(req_json);
     if (status != 200) {
         fprintf(stderr, "    HTTP %d: %.*s\n", status,
                 (int)(resp.len > 200 ? 200 : resp.len), resp.data ? resp.data : "");
@@ -134,8 +197,8 @@ static void test_agent_workspace_side_effects(void) {
     tools_init(&reg);
     tool_file_write_register(&reg, ws_dir);
 
-    size_t tool_count = 0;
-    const ToolSchema *schemas = tools_schemas(&reg, &tool_count);
+    ToolSchema schemas[TOOLS_MAX];
+    size_t tool_count = tools_schemas(&reg, schemas, TOOLS_MAX);
 
     /* System + user message */
     Message sys_msg = {.role = ROLE_SYSTEM, .content = cfg.system_prompt};
@@ -227,7 +290,7 @@ static void test_openrouter_multi_turn(void) {
         .parameters_json = "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\"}},\"required\":[\"expression\"]}"
     }};
 
-    char *req1 = llm_build_request(a, &cfg, msgs1, 2, tools, 1);
+    char *req1 = build_request(&cfg, msgs1, 2, tools, 1);
     if (!req1) { arena_destroy(a); FAIL("build request 1 failed"); }
 
     char auth_hdr[256];
@@ -238,6 +301,7 @@ static void test_openrouter_multi_turn(void) {
 
     HttpResponse resp1 = {0};
     int status = http_post(url, headers, req1, &resp1);
+    free(req1);
     if (status != 200) {
         http_response_free(&resp1);
         arena_destroy(a);
@@ -264,12 +328,13 @@ static void test_openrouter_multi_turn(void) {
           .tool_result = &(ToolResult){ .tool_call_id = llm1.tool_calls[0].id, .content = "91" } },
     };
 
+    char *req2 = build_request(&cfg, msgs2, 4, tools, 1);
+    if (!req2) { arena_destroy(a); FAIL("build request 2 failed"); }
     Arena *a2 = arena_create(ARENA_DEFAULT_SIZE);
-    char *req2 = llm_build_request(a2, &cfg, msgs2, 4, tools, 1);
-    if (!req2) { arena_destroy(a2); arena_destroy(a); FAIL("build request 2 failed"); }
 
     HttpResponse resp2 = {0};
     status = http_post(url, headers, req2, &resp2);
+    free(req2);
     if (status != 200) {
         http_response_free(&resp2);
         arena_destroy(a2);

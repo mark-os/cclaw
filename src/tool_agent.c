@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_agent.h"
+#include "tool_parse.h"
 #include "agent_exit.h"
 #include "daemon.h"
 #include <cJSON.h>
@@ -26,44 +27,41 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     if (!ctx || !ctx->db)
         return strdup("error: launch_agent not configured");
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json)
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
         return strdup("error: invalid JSON arguments");
 
-    cJSON *task_item = cJSON_GetObjectItemCaseSensitive(json, "task");
-    if (!cJSON_IsString(task_item) || !task_item->valuestring[0]) {
-        cJSON_Delete(json);
+    const char *task = targ_str(&ta, "task");
+    if (!task || !task[0]) {
+        tool_parse_free(&ta);
         return strdup("error: missing or empty 'task' field");
     }
-    const char *task = task_item->valuestring;
-
-    cJSON *bg_item = cJSON_GetObjectItemCaseSensitive(json, "background");
-    int background = cJSON_IsTrue(bg_item);
+    int background = targ_bool(&ta, "background", 0);
 
     /* V3: check depth limit (derive from DB) */
     int depth = session_get_depth(ctx->db, ctx->session_id);
     if (depth >= AGENT_MAX_DEPTH) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: max agent depth reached (limit 2)");
     }
 
     /* V3: check per-parent limit */
     int parent_count = session_count_children(ctx->db, ctx->session_id);
     if (parent_count >= AGENT_MAX_PER_PARENT) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: max concurrent sub-agents per parent reached (limit 3)");
     }
 
     /* V3: check system-wide limit */
     int total_count = session_count_active_agents(ctx->db);
     if (total_count >= AGENT_MAX_TOTAL) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: max system-wide sub-agents reached (limit 10)");
     }
 
     /* T88/V21/T201: In daemon mode, return sentinel — daemon reads args from tool_call */
     if (ctx->daemon_mode) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
 
         if (background) {
             /* Background: still return sentinel so daemon handles it */
@@ -76,11 +74,11 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     int64_t child_session_id = session_create(ctx->db, "agent", NULL,
                                               ctx->session_id, depth + 1);
     if (child_session_id < 0) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: failed to create agent session");
     }
     inbox_insert(ctx->db, child_session_id, "spawn", task);
-    cJSON_Delete(json);
+    tool_parse_free(&ta);
 
     pid_t pid = fork();
     if (pid < 0)
@@ -132,17 +130,17 @@ char *tool_check_agent_handler(const char *arguments, void *user_data) {
     if (!ctx || !ctx->db)
         return strdup("error: check_agent not configured");
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json)
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
         return strdup("error: invalid JSON arguments");
 
-    cJSON *id_item = cJSON_GetObjectItemCaseSensitive(json, "session_id");
-    if (!cJSON_IsNumber(id_item)) {
-        cJSON_Delete(json);
+    int session_id_val = targ_int(&ta, "session_id", -1);
+    if (session_id_val < 0) {
+        tool_parse_free(&ta);
         return strdup("error: missing or invalid 'session_id' field");
     }
-    int64_t child_sid = (int64_t)id_item->valuedouble;
-    cJSON_Delete(json);
+    int64_t child_sid = (int64_t)session_id_val;
+    tool_parse_free(&ta);
 
     /* Query child session state */
     const char *sql = "SELECT state FROM sessions WHERE id=? AND parent_session_id=?;";

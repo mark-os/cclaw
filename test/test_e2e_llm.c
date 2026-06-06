@@ -4,6 +4,7 @@
 #include "llm.h"
 #include "http.h"
 #include "arena.h"
+#include "cJSON.h"
 #include <curl/curl.h>
 
 static int tests_run = 0;
@@ -22,7 +23,43 @@ static const char *get_api_key(void) {
 static int call_llm(Arena *a, const Config *cfg, const Message *msgs,
                     size_t msg_count, const ToolSchema *tools,
                     size_t tool_count, LlmResponse *out) {
-    char *req_json = llm_build_request(a, cfg, msgs, msg_count, tools, tool_count);
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return -1;
+    cJSON_AddStringToObject(root, "model", cfg->provider.model);
+    if (cfg->provider.max_tokens > 0)
+        cJSON_AddNumberToObject(root, "max_tokens", cfg->provider.max_tokens);
+
+    cJSON *jarr = cJSON_AddArrayToObject(root, "messages");
+    for (size_t i = 0; i < msg_count; i++) {
+        cJSON *m = cJSON_CreateObject();
+        const char *role = msgs[i].role == ROLE_SYSTEM ? "system" :
+                           msgs[i].role == ROLE_USER ? "user" :
+                           msgs[i].role == ROLE_ASSISTANT ? "assistant" : "tool";
+        cJSON_AddStringToObject(m, "role", role);
+        cJSON_AddStringToObject(m, "content", msgs[i].content ? msgs[i].content : "");
+        cJSON_AddItemToArray(jarr, m);
+    }
+
+    if (tools && tool_count > 0) {
+        cJSON *tarr = cJSON_AddArrayToObject(root, "tools");
+        for (size_t i = 0; i < tool_count; i++) {
+            cJSON *t = cJSON_CreateObject();
+            cJSON_AddStringToObject(t, "type", "function");
+            cJSON *fn = cJSON_CreateObject();
+            cJSON_AddStringToObject(fn, "name", tools[i].name);
+            if (tools[i].description)
+                cJSON_AddStringToObject(fn, "description", tools[i].description);
+            if (tools[i].parameters_json) {
+                cJSON *p = cJSON_Parse(tools[i].parameters_json);
+                if (p) cJSON_AddItemToObject(fn, "parameters", p);
+            }
+            cJSON_AddItemToObject(t, "function", fn);
+            cJSON_AddItemToArray(tarr, t);
+        }
+    }
+
+    char *req_json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
     if (!req_json) return -1;
 
     char auth_hdr[256];
@@ -38,6 +75,7 @@ static int call_llm(Arena *a, const Config *cfg, const Message *msgs,
 
     HttpResponse resp = {0};
     int status = http_post(url, headers, req_json, &resp);
+    free(req_json);
     if (status != 200) {
         fprintf(stderr, "    HTTP %d: %.*s\n", status,
                 (int)(resp.len > 200 ? 200 : resp.len), resp.data ? resp.data : "");

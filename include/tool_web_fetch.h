@@ -15,7 +15,4 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data);
 /* Strip HTML tags from src, write plain text to dst. Returns bytes written. */
 size_t html_strip_tags(const char *src, char *dst, size_t dst_cap);
 
-/* V15: sanitize boundary marker lookalikes (homoglyphs) in content. */
-void sanitize_homoglyphs(char *text);
-
 #endif

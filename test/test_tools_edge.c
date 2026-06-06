@@ -46,8 +46,8 @@ static void test_schemas_filtered(void) {
     tools_register(&reg, "js_eval", "eval js", NULL, dummy_handler, NULL);
 
     const char *wl[] = {"shell_exec", "js_eval"};
-    size_t count = 0;
-    const ToolSchema *schemas = tools_schemas_filtered(&reg, wl, 2, &count);
+    ToolSchema schemas[TOOLS_MAX];
+    size_t count = tools_schemas_filtered(&reg, wl, 2, schemas, TOOLS_MAX);
     assert(count == 2);
     assert(strcmp(schemas[0].name, "shell_exec") == 0);
     assert(strcmp(schemas[1].name, "js_eval") == 0);
@@ -62,10 +62,10 @@ static void test_schemas_filtered_null_whitelist(void) {
     tools_register(&reg, "a", NULL, NULL, dummy_handler, NULL);
     tools_register(&reg, "b", NULL, NULL, dummy_handler, NULL);
 
-    size_t count = 0;
-    const ToolSchema *schemas = tools_schemas_filtered(&reg, NULL, 0, &count);
+    ToolSchema schemas[TOOLS_MAX];
+    size_t count = tools_schemas_filtered(&reg, NULL, 0, schemas, TOOLS_MAX);
     assert(count == 2);
-    assert(schemas != NULL);
+    assert(schemas[0].name != NULL);
 
     tools_free(&reg);
     printf("  PASS test_schemas_filtered_null_whitelist\n");
@@ -107,9 +107,8 @@ static void test_lookup_null_args(void) {
 }
 
 static void test_schemas_null_reg(void) {
-    size_t count = 99;
-    const ToolSchema *s = tools_schemas(NULL, &count);
-    assert(s == NULL);
+    ToolSchema schemas[TOOLS_MAX];
+    size_t count = tools_schemas(NULL, schemas, TOOLS_MAX);
     assert(count == 0);
     printf("  PASS test_schemas_null_reg\n");
 }

@@ -34,9 +34,9 @@ static void test_default_whitelist_filters(void) {
     tools_register(&reg, "db_query", "query", "{}", dummy_handler, NULL);
 
     /* Apply default whitelist */
-    size_t count = 0;
-    const ToolSchema *s = tools_schemas_filtered(&reg, EXPECTED_DEFAULTS,
-                                                  EXPECTED_COUNT, &count);
+    ToolSchema s[TOOLS_MAX];
+    size_t count = tools_schemas_filtered(&reg, EXPECTED_DEFAULTS,
+                                          EXPECTED_COUNT, s, TOOLS_MAX);
     assert(count == EXPECTED_COUNT);
 
     /* Verify only default tools present */

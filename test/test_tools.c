@@ -57,8 +57,8 @@ static void test_schemas(void) {
     tools_register(&reg, "tool_a", "desc_a", "{\"type\":\"object\"}", dummy_handler, NULL);
     tools_register(&reg, "tool_b", "desc_b", NULL, dummy_handler, NULL);
 
-    size_t count = 0;
-    const ToolSchema *schemas = tools_schemas(&reg, &count);
+    ToolSchema schemas[TOOLS_MAX];
+    size_t count = tools_schemas(&reg, schemas, TOOLS_MAX);
     assert(count == 2);
     assert(strcmp(schemas[0].name, "tool_a") == 0);
     assert(strcmp(schemas[0].description, "desc_a") == 0);

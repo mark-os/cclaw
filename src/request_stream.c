@@ -253,6 +253,8 @@ static int needs_cache_control(const Config *cfg) {
  * Tool results are functionResponse parts in a user message.
  * Tool calls are functionCall parts in a model message.
  * System messages are NOT emitted here — they go in systemInstruction. */
+/* Gemini wire format — streaming variant (manual emit).
+ * DOM variant: gemini_cache.c:build_cache_request. Keep in sync. */
 static size_t emit_entry_gemini(char *dest, size_t cap, int role,
                                 const char *content, const char *tool_calls,
                                 const char *tool_call_id) {

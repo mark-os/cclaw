@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_db_query.h"
+#include "tool_parse.h"
 #include <cJSON.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -27,18 +28,18 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     sqlite3 *db = (sqlite3 *)user_data;
     if (!db) return strdup("error: no database connection");
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON arguments");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
+        return strdup("error: invalid JSON arguments");
 
-    cJSON *sql_item = cJSON_GetObjectItemCaseSensitive(json, "sql");
-    if (!cJSON_IsString(sql_item) || !sql_item->valuestring[0]) {
-        cJSON_Delete(json);
+    const char *sql = targ_str(&ta, "sql");
+    if (!sql || !sql[0]) {
+        tool_parse_free(&ta);
         return strdup("error: missing or empty 'sql' field");
     }
-    const char *sql = sql_item->valuestring;
 
     if (!is_select_only(sql)) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: only SELECT queries allowed");
     }
 
@@ -47,7 +48,7 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     if (rc != SQLITE_OK) {
         char *err = malloc(256);
         if (err) snprintf(err, 256, "error: %s", sqlite3_errmsg(db));
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return err ? err : strdup("error: prepare failed");
     }
 
@@ -94,7 +95,7 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     }
 
     sqlite3_finalize(stmt);
-    cJSON_Delete(json);
+    tool_parse_free(&ta);
 
     char *output = cJSON_PrintUnformatted(result);
     cJSON_Delete(result);

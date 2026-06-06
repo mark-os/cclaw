@@ -14,6 +14,7 @@
 #include "tool_cron.h"
 #include "config.h"
 #include "context.h"
+#include "log.h"
 #include "agent_exit.h"
 #include <cJSON.h>
 
@@ -300,12 +301,12 @@ int daemon_resolve_approval(const char *agent_name, int64_t session_id,
 static int g_max_agents = DAEMON_MAX_CHILDREN;
 
 /* V85: Read max_user_namespaces, test unshare, enforce agent limit ≤ max_ns/6 */
-static void daemon_check_namespaces(void) {
+static void daemon_check_namespaces(const Config *cfg) {
     /* Read kernel limit */
     FILE *f = fopen("/proc/sys/user/max_user_namespaces", "r");
     if (!f) {
-        fprintf(stderr, "[daemon] warning: cannot read /proc/sys/user/max_user_namespaces — "
-                "namespace sandbox unavailable, continuing without\n");
+        LOG_INFO(cfg, "[daemon] warning: cannot read /proc/sys/user/max_user_namespaces — "
+                "namespace sandbox unavailable, continuing without");
         return;
     }
     int max_ns = 0;
@@ -313,16 +314,16 @@ static void daemon_check_namespaces(void) {
     fclose(f);
 
     if (max_ns <= 0) {
-        fprintf(stderr, "[daemon] warning: max_user_namespaces=%d — "
-                "namespace sandbox unavailable, continuing without\n", max_ns);
+        LOG_INFO(cfg, "[daemon] warning: max_user_namespaces=%d — "
+                "namespace sandbox unavailable, continuing without", max_ns);
         return;
     }
 
     /* Test unshare in a forked child */
     pid_t pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "[daemon] warning: fork failed for namespace test — "
-                "continuing without namespace check\n");
+        LOG_INFO(cfg, "[daemon] warning: fork failed for namespace test — "
+                "continuing without namespace check");
         return;
     }
     if (pid == 0) {
@@ -332,8 +333,8 @@ static void daemon_check_namespaces(void) {
     int status = 0;
     waitpid(pid, &status, 0);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        fprintf(stderr, "[daemon] warning: unshare(CLONE_NEWUSER) failed — "
-                "namespace sandbox unavailable, continuing without\n");
+        LOG_INFO(cfg, "[daemon] warning: unshare(CLONE_NEWUSER) failed — "
+                "namespace sandbox unavailable, continuing without");
         return;
     }
 
@@ -341,8 +342,8 @@ static void daemon_check_namespaces(void) {
     int ns_limit = max_ns / 6;
     if (ns_limit < g_max_agents) {
         g_max_agents = ns_limit > 0 ? ns_limit : 1;
-        fprintf(stderr, "[daemon] warning: max_user_namespaces=%d constrains "
-                "max concurrent agents to %d (V3 wants 10)\n", max_ns, g_max_agents);
+        LOG_INFO(cfg, "[daemon] warning: max_user_namespaces=%d constrains "
+                "max concurrent agents to %d (V3 wants 10)", max_ns, g_max_agents);
     }
 }
 
@@ -1957,7 +1958,7 @@ static void daemon_launch_channel(const Config *cfg, sqlite3 *db, const char *na
 
     child_add_channel(pid, name, bin_path);
     channel_update_pid(db, name, pid);
-    fprintf(stderr, "[daemon] launched channel '%s' (pid %d)\n", name, (int)pid);
+    LOG_INFO(cfg, "[daemon] launched channel '%s' (pid %d)", name, (int)pid);
 }
 
 /* Fork a channel binary. Returns pid or -1. */
@@ -2008,9 +2009,9 @@ static void daemon_launch_channels(const Config *cfg, sqlite3 *db) {
         if (pid > 0) {
             child_add_channel(pid, name, bpath);
             channel_update_pid(db, name, pid);
-            fprintf(stderr, "[daemon] launched channel '%s' (pid %d)\n", name, (int)pid);
+            LOG_INFO(cfg, "[daemon] launched channel '%s' (pid %d)", name, (int)pid);
         } else {
-            fprintf(stderr, "[daemon] failed to launch channel '%s'\n", name);
+            LOG_ERROR(cfg, "[daemon] failed to launch channel '%s'", name);
         }
     }
     sqlite3_finalize(stmt);
@@ -2018,13 +2019,13 @@ static void daemon_launch_channels(const Config *cfg, sqlite3 *db) {
 
 /* Handle death of a channel process */
 static void reap_one_channel(const Config *cfg, sqlite3 *db, ChildProcess *c, int status) {
-    fprintf(stderr, "[daemon] channel '%s' (pid %d) exited (status %d)\n",
+    LOG_INFO(cfg, "[daemon] channel '%s' (pid %d) exited (status %d)",
             c->channel_name, (int)c->pid,
             WIFEXITED(status) ? WEXITSTATUS(status) : -1);
 
     /* V98: restart immediately, count attempts, mark failed at max */
     if (c->restart_count >= CHANNEL_MAX_RESTARTS) {
-        fprintf(stderr, "[daemon] channel '%s' exceeded max restarts, marking failed\n",
+        LOG_ERROR(cfg, "[daemon] channel '%s' exceeded max restarts, marking failed",
                 c->channel_name);
         channel_set_status(db, c->channel_name, "failed");
         channel_update_pid(db, c->channel_name, 0);
@@ -2037,10 +2038,10 @@ static void reap_one_channel(const Config *cfg, sqlite3 *db, ChildProcess *c, in
     if (new_pid > 0) {
         c->pid = new_pid;
         channel_update_pid(db, c->channel_name, new_pid);
-        fprintf(stderr, "[daemon] restarted channel '%s' (pid %d, attempt %d)\n",
+        LOG_INFO(cfg, "[daemon] restarted channel '%s' (pid %d, attempt %d)",
                 c->channel_name, (int)new_pid, c->restart_count);
     } else {
-        fprintf(stderr, "[daemon] failed to restart channel '%s'\n", c->channel_name);
+        LOG_ERROR(cfg, "[daemon] failed to restart channel '%s'", c->channel_name);
         child_remove(c);
     }
 }
@@ -2218,7 +2219,7 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     daemon_startup_recovery(db);
 
     /* T208/V85: Check namespace support, clamp max agents */
-    daemon_check_namespaces();
+    daemon_check_namespaces(cfg);
 
     /* T244/V98/V104: Launch configured channel processes */
     daemon_launch_channels(cfg, db);

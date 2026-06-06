@@ -25,7 +25,7 @@ static void cleanup(void) {
 static sqlite3 *setup_db(void) {
     cleanup();
     mkdir(AGENTS_DIR, 0755);
-    sqlite3 *db = db_open_cclaw(DB_PATH);
+    sqlite3 *db = db_open(DB_PATH);
     assert(db != NULL);
     uint8_t key[32];
     if (secret_key_load_or_create(DB_PATH, key) == 0)

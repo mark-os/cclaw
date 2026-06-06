@@ -94,7 +94,9 @@ typedef enum {
 /* T290: provider endpoint type (wire format) */
 typedef enum {
     ENDPOINT_OPENAI = 0,    /* OpenAI-compatible chat completions (default) */
-    ENDPOINT_GEMINI         /* Native Gemini generateContent format */
+    ENDPOINT_GEMINI,        /* Native Gemini generateContent format */
+    ENDPOINT_RESPONSES,     /* OpenRouter /api/v1/responses (flat input items) */
+    ENDPOINT_GEMINI_INTERACTIONS /* Gemini interactions API (stateful, delta) */
 } EndpointType;
 
 /* Provider/model config */

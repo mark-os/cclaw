@@ -133,7 +133,6 @@ static int parent_turn_loop(sqlite3 *db, int64_t session_id, const Config *cfg,
     hook_dispatch_turn_start(ext_ctx);
 
     int max_iter = cfg->max_iterations > 0 ? cfg->max_iterations : AGENT_DEFAULT_MAX_ITERATIONS;
-    int plan_retried = 0;
 
     for (int iter = 0; iter < max_iter; iter++) {
         if (shutdown_requested()) {
@@ -156,33 +155,6 @@ static int parent_turn_loop(sqlite3 *db, int64_t session_id, const Config *cfg,
         }
 
         if (llm_rc == LLM_EXIT_STOP) {
-            /* V45: plan-only detection — check last assistant entry content */
-            if (!plan_retried) {
-                char *resp = get_response_text(db, session_id);
-                if (resp && resp[0]) {
-                    int has_bullets = (strstr(resp, "\n- ") || strstr(resp, "\n* ") ||
-                                       strstr(resp, "\n1.") || strstr(resp, "\n1)"));
-                    if (has_bullets) {
-                        static const char *promises[] = {
-                            "I'll ", "I will ", "Let me ", "I'm going to ",
-                            "Here's my plan", "Here is my plan", "I can ", NULL
-                        };
-                        int is_plan = 0;
-                        for (int p = 0; promises[p]; p++)
-                            if (strstr(resp, promises[p])) { is_plan = 1; break; }
-                        if (is_plan) {
-                            plan_retried = 1;
-                            int64_t tid = db_next_turn_id(db, session_id);
-                            Message reprompt = {.role = ROLE_USER,
-                                .content = (char *)"Do not restate the plan. Act now: take the first concrete tool action. If blocked, state the blocker in one sentence."};
-                            entry_append_with_turn(db, session_id, &reprompt, tid);
-                            free(resp);
-                            continue;
-                        }
-                    }
-                }
-                free(resp);
-            }
             hook_dispatch_turn_end(ext_ctx);
             return AGENT_EXIT_DONE;
         }
@@ -343,7 +315,7 @@ int agent_turn_run(int64_t session_id) {
     if (!agent_db_path || !agent_db_path[0])
         agent_db_path = cfg->db_path;
 
-    sqlite3 *db = db_open_agent(agent_db_path);
+    sqlite3 *db = db_open(agent_db_path);
     if (!db) { config_free(cfg); return 1; }
 
     /* V57: mmap + reduced cache for agent processes */

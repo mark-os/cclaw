@@ -23,7 +23,7 @@ static void cleanup(void) { system("rm -rf " WORK_DIR); }
 static sqlite3 *setup_db(void) {
     cleanup();
     system("mkdir -p " WORK_DIR "/agents/default/workspace");
-    sqlite3 *db = db_open_cclaw(DB_PATH);
+    sqlite3 *db = db_open(DB_PATH);
     assert(db);
     return db;
 }
@@ -75,7 +75,7 @@ static void test_simple_stop(void) {
     assert(WEXITSTATUS(status) == AGENT_EXIT_DONE);
 
     /* Verify response in DB */
-    db = db_open_cclaw(DB_PATH);
+    db = db_open(DB_PATH);
     assert(db);
     char *resp = get_response_text(db, sid);
     assert(resp && strstr(resp, "Hi there!"));
@@ -143,7 +143,7 @@ static void test_tool_dispatch(void) {
     assert(WEXITSTATUS(status) == AGENT_EXIT_DONE);
 
     /* Verify final response */
-    db = db_open_cclaw(DB_PATH);
+    db = db_open(DB_PATH);
     assert(db);
     char *resp = get_response_text(db, sid);
     assert(resp && strstr(resp, "file content here"));

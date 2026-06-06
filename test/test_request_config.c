@@ -101,7 +101,7 @@ static void test_invalid_action(void) {
 }
 
 static void test_add_tool_to_config(void) {
-    sqlite3 *db = db_open_cclaw(":memory:");
+    sqlite3 *db = db_open(":memory:");
     assert(db);
 
     /* Seed agent */

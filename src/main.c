@@ -213,46 +213,27 @@ static int cli_fork_turn(int64_t session_id) {
         _exit(agent_turn_run(session_id));
     }
 
-    /* Parent: drain stderr pipe → journal.db + optional tee */
+    /* Parent: drain stderr pipe → tee to terminal in debug mode */
     close(err_pipe[1]);
     g_child_pid = pid;
 
     int tee = g_cli_cfg && g_cli_cfg->log_level >= LOG_LEVEL_DEBUG;
-    const char *agent_name = getenv("CCLAW_AGENT_NAME");
-    if (!agent_name) agent_name = "default";
-
-    /* Prepare journal insert if DB available */
-    sqlite3_stmt *stmt = NULL;
-    if (g_db) {
-        sqlite3_prepare_v2(g_db,
-            "INSERT INTO log(source, pid, session_id, stream, line) VALUES(?,?,?,2,?)",
-            -1, &stmt, NULL);
-    }
+    (void)g_db; /* journal table removed — CLI just tees to stderr */
 
     FILE *fp = fdopen(err_pipe[0], "r");
     if (fp) {
         char buf[4096];
         while (fgets(buf, sizeof(buf), fp)) {
-            /* Strip trailing newline for DB storage */
-            size_t len = strlen(buf);
-            if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
-
-            if (stmt) {
-                sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
-                sqlite3_bind_int(stmt, 2, pid);
-                sqlite3_bind_int64(stmt, 3, session_id);
-                sqlite3_bind_text(stmt, 4, buf, -1, SQLITE_STATIC);
-                sqlite3_step(stmt);
-                sqlite3_reset(stmt);
+            if (tee) {
+                size_t len = strlen(buf);
+                if (len > 0 && buf[len - 1] == '\n') buf[len - 1] = '\0';
+                fprintf(stderr, "%s\n", buf);
             }
-            if (tee) fprintf(stderr, "%s\n", buf);
         }
         fclose(fp);
     } else {
         close(err_pipe[0]);
     }
-
-    if (stmt) sqlite3_finalize(stmt);
 
     if (shutdown_requested()) {
         kill(pid, SIGTERM);
@@ -494,7 +475,7 @@ int main(int argc, char *argv[]) {
     /* Daemon mode */
     if (daemon_mode) {
         char *db_path = resolve_db_path();
-        sqlite3 *db = db_open_cclaw(db_path);
+        sqlite3 *db = db_open(db_path);
         if (!db) {
             fprintf(stderr, "error: cannot open database '%s'\n", db_path);
             free(db_path);
@@ -557,7 +538,7 @@ int main(int argc, char *argv[]) {
 
     char *db_path = resolve_db_path();
     ensure_parent_dir(db_path);
-    sqlite3 *cclaw_db = db_open_cclaw(db_path);
+    sqlite3 *cclaw_db = db_open(db_path);
     if (!cclaw_db) {
         fprintf(stderr, "error: cannot open database '%s'\n", db_path);
         free(db_path);

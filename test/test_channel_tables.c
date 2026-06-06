@@ -8,7 +8,7 @@
 #define TEST_DB "test_channel_tables.db"
 
 static void test_channels_table(void) {
-    sqlite3 *db = db_open_cclaw(TEST_DB);
+    sqlite3 *db = db_open(TEST_DB);
     assert(db);
     /* Insert a channel */
     int rc = sqlite3_exec(db,
@@ -29,7 +29,7 @@ static void test_channels_table(void) {
 }
 
 static void test_channel_events_table(void) {
-    sqlite3 *db = db_open_cclaw(TEST_DB);
+    sqlite3 *db = db_open(TEST_DB);
     assert(db);
     int rc = sqlite3_exec(db,
         "INSERT INTO channel_events(channel_name, event_type, payload) VALUES('telegram','message','{\"chat_id\":123,\"text\":\"hi\"}')",
@@ -51,7 +51,7 @@ static void test_channel_events_table(void) {
 }
 
 static void test_channel_outbox_table(void) {
-    sqlite3 *db = db_open_cclaw(TEST_DB);
+    sqlite3 *db = db_open(TEST_DB);
     assert(db);
     int rc = sqlite3_exec(db,
         "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES('telegram', 1, '{\"text\":\"hello\"}')",
@@ -75,7 +75,7 @@ static void test_channel_outbox_table(void) {
 }
 
 static void test_channel_state_table(void) {
-    sqlite3 *db = db_open_cclaw(TEST_DB);
+    sqlite3 *db = db_open(TEST_DB);
     assert(db);
     int rc = sqlite3_exec(db,
         "INSERT INTO channel_state(channel_name, key, value) VALUES('telegram','offset','12345')",

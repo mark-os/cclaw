@@ -74,7 +74,7 @@ static int wait_for_spawn_status(sqlite3 *db, int64_t parent_sid, const char *st
 static int wait_for_idle_agent(const char *adb_path, int64_t sid, int min_assistant, int wait_ms) {
     for (int i = 0; i < wait_ms / 100; i++) {
         usleep(100000);
-        sqlite3 *adb = db_open_agent(adb_path);
+        sqlite3 *adb = db_open(adb_path);
         if (!adb) continue;
         sqlite3_stmt *stmt;
         int idle = 0;
@@ -128,7 +128,7 @@ static void test_blocking_subagent_lifecycle(void) {
     /* Create agent DB with session + inbox */
     char adb_path[256];
     snprintf(adb_path, sizeof(adb_path), "agents/%s/agent.db", AGENT_NAME);
-    sqlite3 *adb = db_open_agent(adb_path);
+    sqlite3 *adb = db_open(adb_path);
     if (!adb) { chdir(orig_cwd); FAIL("db_open_agent"); }
     int64_t parent_sid = session_create(adb, "parent_agent", AGENT_NAME, -1, 0);
     if (parent_sid < 0) { db_close(adb); chdir(orig_cwd); FAIL("session_create"); }
@@ -137,7 +137,7 @@ static void test_blocking_subagent_lifecycle(void) {
 
     /* Create daemon DB */
     unlink(DB_PATH);
-    sqlite3 *db = db_open_cclaw(DB_PATH);
+    sqlite3 *db = db_open(DB_PATH);
     if (!db) { chdir(orig_cwd); FAIL("db_open_cclaw"); }
     seed_kv_config(db);
 

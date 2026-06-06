@@ -45,7 +45,7 @@ static void test_llm_child_stop(void) {
     mock_server_reset();
     mock_server_enqueue(200, STOP_RESPONSE);
 
-    sqlite3 *db = db_open_agent(db_path);
+    sqlite3 *db = db_open(db_path);
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -75,7 +75,7 @@ static void test_llm_child_stop(void) {
     }
 
     /* Verify entry was written */
-    db = db_open_agent(db_path);
+    db = db_open(db_path);
     assert(db);
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
@@ -112,7 +112,7 @@ static void test_llm_child_tool_calls(void) {
     mock_server_reset();
     mock_server_enqueue(200, TOOL_CALL_RESPONSE);
 
-    sqlite3 *db = db_open_agent(db_path);
+    sqlite3 *db = db_open(db_path);
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -141,7 +141,7 @@ static void test_llm_child_tool_calls(void) {
     }
 
     /* Verify entry was written with tool_calls */
-    db = db_open_agent(db_path);
+    db = db_open(db_path);
     assert(db);
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
@@ -189,7 +189,7 @@ static void test_llm_child_error(void) {
     mock_server_reset();
     mock_server_enqueue(500, "{\"error\":\"internal\"}");
 
-    sqlite3 *db = db_open_agent(db_path);
+    sqlite3 *db = db_open(db_path);
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 

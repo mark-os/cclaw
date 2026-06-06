@@ -15,7 +15,6 @@
 #include "config.h"
 #include "context.h"
 #include "agent_exit.h"
-#include "log_collector.h"
 #include <cJSON.h>
 
 #include <errno.h>
@@ -225,7 +224,7 @@ int64_t daemon_inbox_insert(const char *agent_name, int64_t session_id,
     if (!agent_name) return -1;
     char *path = agent_db_path(agent_name);
     if (!path) return -1;
-    sqlite3 *adb = db_open_agent(path);
+    sqlite3 *adb = db_open(path);
     free(path);
     if (!adb) return -1;
     int64_t id = inbox_insert(adb, session_id, source, payload);
@@ -237,7 +236,7 @@ int daemon_inbox_count(const char *agent_name, int64_t session_id) {
     if (!agent_name) return -1;
     char *path = agent_db_path(agent_name);
     if (!path) return -1;
-    sqlite3 *adb = db_open_agent(path);
+    sqlite3 *adb = db_open(path);
     free(path);
     if (!adb) return -1;
     int count = inbox_count(adb, session_id);
@@ -251,7 +250,7 @@ int daemon_resolve_approval(const char *agent_name, int64_t session_id,
     if (!agent_name || !tool_call_id || !result) return -1;
     char *path = agent_db_path(agent_name);
     if (!path) return -1;
-    sqlite3 *adb = db_open_agent(path);
+    sqlite3 *adb = db_open(path);
     free(path);
     if (!adb) return -1;
 
@@ -435,7 +434,7 @@ static int child_count_for_parent(sqlite3 *db, int64_t parent_session_id) {
         if (g_children[i].agent_name[0]) {
             char *path = agent_db_path(g_children[i].agent_name);
             if (!path) continue;
-            sqlite3 *adb = db_open_agent(path);
+            sqlite3 *adb = db_open(path);
             free(path);
             if (!adb) continue;
             const char *sql = "SELECT parent_session_id FROM sessions WHERE id=?;";
@@ -458,7 +457,7 @@ static int daemon_agent_set_state(const char *agent_name, int64_t session_id, co
     if (!agent_name || !agent_name[0]) return -1;
     char *path = agent_db_path(agent_name);
     if (!path) return -1;
-    sqlite3 *adb = db_open_agent(path);
+    sqlite3 *adb = db_open(path);
     free(path);
     if (!adb) return -1;
     int rc = session_set_state(adb, session_id, state);
@@ -471,7 +470,7 @@ static char *daemon_agent_get_state(const char *agent_name, int64_t session_id) 
     if (!agent_name || !agent_name[0]) return NULL;
     char *path = agent_db_path(agent_name);
     if (!path) return NULL;
-    sqlite3 *adb = db_open_agent(path);
+    sqlite3 *adb = db_open(path);
     free(path);
     if (!adb) return NULL;
     const char *sql = "SELECT state FROM sessions WHERE id=?;";
@@ -797,11 +796,9 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
         _exit(127);
     }
 
-    /* Parent: close write ends, send read ends to log collector */
+    /* Parent: close write ends, close read ends (child stderr goes to syslog TODO) */
     close(out_pipe[1]);
     close(err_pipe[1]);
-    log_collector_send_fd(out_pipe[0], agent_name, pid, session_id, 1);
-    log_collector_send_fd(err_pipe[0], agent_name, pid, session_id, 2);
     close(out_pipe[0]);
     close(err_pipe[0]);
 
@@ -820,7 +817,7 @@ static void deliver_response(const Config *cfg, sqlite3 *db,
     /* Open agent DB to read response */
     char *path = agent_db_path(agent_name);
     if (!path) return;
-    sqlite3 *adb = db_open_agent(path);
+    sqlite3 *adb = db_open(path);
     free(path);
     if (!adb) return;
 
@@ -1284,7 +1281,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
         {
             char *path = agent_db_path(agent_name);
             if (path) {
-                sqlite3 *adb = db_open_agent(path);
+                sqlite3 *adb = db_open(path);
                 free(path);
                 if (adb) {
                     const char *uq = "SELECT COALESCE(SUM(usage_in + usage_out), 0)"
@@ -1307,7 +1304,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
         if (exit_code == AGENT_EXIT_SPAWN) {
             char *path = agent_db_path(agent_name);
             if (path) {
-                sqlite3 *adb = db_open_agent(path);
+                sqlite3 *adb = db_open(path);
                 free(path);
                 if (adb) {
                     int64_t pending_eid = 0;
@@ -1381,7 +1378,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
         if (exit_code == AGENT_EXIT_APPROVAL) {
             char *path = agent_db_path(agent_name);
             if (path) {
-                sqlite3 *adb = db_open_agent(path);
+                sqlite3 *adb = db_open(path);
                 free(path);
                 if (adb) {
                     int64_t pending_eid = 0;
@@ -1420,7 +1417,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
         if (exit_code == AGENT_EXIT_CONFIG) {
             char *path = agent_db_path(agent_name);
             if (path) {
-                sqlite3 *adb = db_open_agent(path);
+                sqlite3 *adb = db_open(path);
                 free(path);
                 if (adb) {
                     int64_t pending_eid = 0;
@@ -1468,7 +1465,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                 {
                     char *cpath = agent_db_path(agent_name);
                     if (cpath) {
-                        sqlite3 *cadb = db_open_agent(cpath);
+                        sqlite3 *cadb = db_open(cpath);
                         free(cpath);
                         if (cadb) {
                             result_buf = get_response_text(cadb, session_id);
@@ -1484,7 +1481,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
                     /* V77/V33: UPDATE parent's PENDING entry with result */
                     char *ppath = agent_db_path(parent_agent);
                     if (ppath) {
-                        sqlite3 *padb = db_open_agent(ppath);
+                        sqlite3 *padb = db_open(ppath);
                         free(ppath);
                         if (padb) {
                             /* Find PENDING entry by tool_call_id */
@@ -1582,13 +1579,13 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
             char *cpath = agent_db_path(child_agent_name);
             if (!cpath) { spawn_queue_mark(db, r->id, "error", 0); continue; }
             /* Check agent DB is openable (agent exists) */
-            sqlite3 *test_db = db_open_agent(cpath);
+            sqlite3 *test_db = db_open(cpath);
             free(cpath);
             if (!test_db) {
                 /* Named agent doesn't exist — error back to parent */
                 char *ppath = agent_db_path(parent_agent_name);
                 if (ppath) {
-                    sqlite3 *padb = db_open_agent(ppath);
+                    sqlite3 *padb = db_open(ppath);
                     free(ppath);
                     if (padb) {
                         const char *fsql =
@@ -1623,7 +1620,7 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
         const char *session_agent = child_agent_name ? child_agent_name : parent_agent_name;
         char *apath = agent_db_path(session_agent);
         if (!apath) { spawn_queue_mark(db, r->id, "error", 0); continue; }
-        sqlite3 *adb = db_open_agent(apath);
+        sqlite3 *adb = db_open(apath);
         free(apath);
         if (!adb) { spawn_queue_mark(db, r->id, "error", 0); continue; }
 
@@ -1702,10 +1699,8 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
             _exit(127);
         }
 
-        /* Parent: send pipe read ends to log collector */
+        /* Parent: close pipe ends */
         close(sa_out[1]); close(sa_err[1]);
-        log_collector_send_fd(sa_out[0], session_agent, pid, child_sid, 1);
-        log_collector_send_fd(sa_err[0], session_agent, pid, child_sid, 2);
         close(sa_out[0]); close(sa_err[0]);
 
         /* Track child (T200: includes agent_name) */
@@ -1837,7 +1832,7 @@ int64_t daemon_bootstrap(sqlite3 *db) {
     /* T200: Create session in agent DB (not daemon.db) */
     char *apath = agent_db_path(agent_name);
     if (!apath) { free(agent_name); return -1; }
-    sqlite3 *adb = db_open_agent(apath);
+    sqlite3 *adb = db_open(apath);
     free(apath);
     if (!adb) { free(agent_name); return -1; }
 
@@ -2086,7 +2081,7 @@ static void consume_channel_events(const Config *cfg, sqlite3 *db) {
                     /* Create new session in agent DB */
                     char *apath = agent_db_path(agent_name);
                     if (apath) {
-                        sqlite3 *adb = db_open_agent(apath);
+                        sqlite3 *adb = db_open(apath);
                         free(apath);
                         if (adb) {
                             char sname[128];
@@ -2190,23 +2185,6 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     migrate_agent_json_files(db);
     daemon_startup_recovery(db);
 
-    /* T218/V75: Start log collector process */
-    {
-        char journal_path[1024];
-        const char *dbp = cfg->db_path ? cfg->db_path : ".cclaw/daemon.db";
-        /* journal.db lives next to daemon.db */
-        const char *slash = strrchr(dbp, '/');
-        if (slash) {
-            int dirlen = (int)(slash - dbp);
-            snprintf(journal_path, sizeof(journal_path), "%.*s/cclaw.db", dirlen, dbp);
-        } else {
-            snprintf(journal_path, sizeof(journal_path), "cclaw.db");
-        }
-        if (log_collector_start(journal_path) != 0) {
-            fprintf(stderr, "daemon: warning: log collector failed to start\n");
-        }
-    }
-
     /* T208/V85: Check namespace support, clamp max agents */
     daemon_check_namespaces();
 
@@ -2291,7 +2269,6 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     sigchld_pipe_close();
     daemon_signal_close();
     daemon_fifo_close(fifo_fd, cfg->db_path);
-    log_collector_stop(); /* T218/V75 */
     g_child_count = 0;
     return 0;
 }

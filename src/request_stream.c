@@ -781,12 +781,15 @@ static int rs_advance(RequestStreamer *rs) {
         char close_buf[128];
         int n = 0;
         if (rs->gemini_mode) {
-            /* T290: Gemini uses generationConfig for max_tokens */
+            /* T290: Gemini uses generationConfig for max_tokens + thinking */
             if (rs->cfg->provider.max_tokens > 0)
                 n = snprintf(close_buf, sizeof(close_buf),
-                             ",\"generationConfig\":{\"maxOutputTokens\":%d}}", rs->cfg->provider.max_tokens);
+                             ",\"generationConfig\":{\"maxOutputTokens\":%d,"
+                             "\"thinkingConfig\":{\"includeThoughts\":true}}}",
+                             rs->cfg->provider.max_tokens);
             else
-                n = snprintf(close_buf, sizeof(close_buf), "}");
+                n = snprintf(close_buf, sizeof(close_buf),
+                             ",\"generationConfig\":{\"thinkingConfig\":{\"includeThoughts\":true}}}");
         } else if (rs->cfg->stream && rs->cfg->provider.max_tokens > 0)
             n = snprintf(close_buf, sizeof(close_buf),
                          ",\"stream\":true,\"max_tokens\":%d}", rs->cfg->provider.max_tokens);

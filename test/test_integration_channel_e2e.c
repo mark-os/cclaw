@@ -75,7 +75,7 @@ static void test_channel_e2e(void) {
         "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}");
 
     /* Create daemon DB */
-    sqlite3 *db = db_open_cclaw(DB_PATH);
+    sqlite3 *db = db_open(DB_PATH);
     assert(db);
     uint8_t key[32];
     secret_key_load_or_create(DB_PATH, key);
@@ -90,7 +90,7 @@ static void test_channel_e2e(void) {
 
     /* Create agent directory + DB */
     system("mkdir -p " WORK_DIR "/agents/default/workspace");
-    sqlite3 *adb = db_open_agent(AGENT_DB);
+    sqlite3 *adb = db_open(AGENT_DB);
     assert(adb);
     db_close(adb);
 
@@ -130,7 +130,7 @@ static void test_channel_e2e(void) {
         chdir(WORK_DIR);
         /* Point daemon at the real cclaw binary for agent fork+exec */
         daemon_set_self_path(cclaw_bin);
-        sqlite3 *ddb = db_open_cclaw(DB_PATH);
+        sqlite3 *ddb = db_open(DB_PATH);
         daemon_run(&cfg, ddb);
         db_close(ddb);
         _exit(0);
@@ -143,7 +143,7 @@ static void test_channel_e2e(void) {
     waitpid(dpid, &status, 0);
 
     /* Verify outbox was delivered */
-    db = db_open_cclaw(DB_PATH);
+    db = db_open(DB_PATH);
     assert(db);
     sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_FULL, NULL, NULL);
 
@@ -160,7 +160,7 @@ static void test_channel_e2e(void) {
     } else {
         sqlite3_finalize(stmt);
         /* Check if agent even ran — look for entries in agent DB */
-        adb = db_open_agent(AGENT_DB);
+        adb = db_open(AGENT_DB);
         if (adb) {
             sqlite3_wal_checkpoint_v2(adb, NULL, SQLITE_CHECKPOINT_FULL, NULL, NULL);
             int cnt = 0;

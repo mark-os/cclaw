@@ -17,13 +17,8 @@ typedef struct {
 } SpawnRequest;
 
 /* Open DB at path, set WAL mode + pragmas, create tables.
- * Returns NULL on failure. (Legacy: creates all tables — agent schema + extras) */
+ * Returns NULL on failure. */
 sqlite3 *db_open(const char *path);
-
-/* T195/V73: 3-DB openers — each creates only its own schema */
-sqlite3 *db_open_cclaw(const char *path);
-sqlite3 *db_open_agent(const char *path);
-sqlite3 *db_open_journal(const char *path);
 
 /* V57: Set mmap + reduced cache pragmas for agent processes. */
 void db_set_agent_pragmas(sqlite3 *db);
@@ -114,6 +109,17 @@ int64_t db_next_turn_id(sqlite3 *db, int64_t session_id);
 
 /* V17: Append entry with explicit turn_id. Like entry_append but tags the entry. */
 int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *msg, int64_t turn_id);
+
+/* Append a flat typed entry. type is one of: "system", "user_message",
+ * "assistant_message", "reasoning", "tool_call", "tool_result".
+ * content: text payload. tool_call_id/tool_name used for tool_call/tool_result.
+ * Returns new entry id or -1. */
+int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
+                           const char *type, int part_index, const char *content,
+                           const char *tool_call_id, const char *tool_name,
+                           int is_error, StopReason stop_reason,
+                           const char *model, int usage_in, int usage_out,
+                           int64_t cost_nano);
 
 /* Set session state (idle, running, waiting, error). Returns 0 on success. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state);

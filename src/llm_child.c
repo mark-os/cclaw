@@ -233,7 +233,7 @@ int llm_child_main(int64_t session_id) {
     const char *db_path = getenv("CCLAW_AGENT_DB");
     if (!db_path || !db_path[0]) db_path = cfg->db_path;
 
-    sqlite3 *db = db_open_agent(db_path);
+    sqlite3 *db = db_open(db_path);
     if (!db) { config_free(cfg); return LLM_EXIT_ERROR; }
     db_set_agent_pragmas(db);
 
@@ -412,21 +412,8 @@ int llm_child_main(int64_t session_id) {
         goto err;
     }
 
-    /* Write response to DB using db_ingest_streaming */
+    /* Write response to DB using typed entries */
     int64_t turn_id = db_next_turn_id(db, session_id);
-
-    /* Get current leaf_id as parent for new entry */
-    int64_t parent_id = -1;
-    {
-        sqlite3_stmt *lf;
-        if (sqlite3_prepare_v2(db, "SELECT leaf_id FROM sessions WHERE id=?;",
-                               -1, &lf, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(lf, 1, session_id);
-            if (sqlite3_step(lf) == SQLITE_ROW)
-                parent_id = sqlite3_column_int64(lf, 0);
-            sqlite3_finalize(lf);
-        }
-    }
 
     const char **tc_ids = NULL, **tc_names = NULL, **tc_args = NULL;
     int tc_count = (int)llm_resp.tool_call_count;
@@ -441,22 +428,24 @@ int llm_child_main(int64_t session_id) {
         }
     }
 
-    IngestResult ir;
-    int rc = db_ingest_streaming(db, session_id, parent_id, turn_id,
-                                 cfg->provider.model,
-                                 llm_resp.content, llm_resp.finish_reason,
-                                 llm_resp.usage.prompt_tokens,
-                                 llm_resp.usage.completion_tokens,
-                                 llm_resp.usage.cost_nano,
-                                 tc_ids, tc_names, tc_args, tc_count, &ir);
+    TypedIngestResult ir;
+    int rc = db_ingest_typed(db, session_id, turn_id,
+                             cfg->provider.model,
+                             llm_resp.content, llm_resp.reasoning,
+                             llm_resp.finish_reason,
+                             llm_resp.usage.prompt_tokens,
+                             llm_resp.usage.completion_tokens,
+                             llm_resp.usage.cost_nano,
+                             tc_ids, tc_names, tc_args, tc_count, &ir);
     free(tc_ids);
     free(tc_names);
     free(tc_args);
 
     if (rc != 0) {
-        LOG_DEBUG(cfg, "llm: db_ingest_streaming failed");
+        LOG_DEBUG(cfg, "llm: db_ingest_typed failed");
         goto err;
     }
+    free(ir.tc_entry_ids);
 
     int exit_code = (tc_count > 0) ? LLM_EXIT_TOOLCALL : LLM_EXIT_STOP;
 

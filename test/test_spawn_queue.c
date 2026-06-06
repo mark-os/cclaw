@@ -18,7 +18,7 @@ static sqlite3 *setup_db(void) {
 
 /* T202: spawn_queue lives in cclaw.db only */
 static sqlite3 *setup_daemon_db(void) {
-    sqlite3 *db = db_open_cclaw(":memory:");
+    sqlite3 *db = db_open(":memory:");
     assert(db != NULL);
     return db;
 }

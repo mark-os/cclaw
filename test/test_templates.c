@@ -12,7 +12,7 @@ int main(void) {
     assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS kv"));
     assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS sessions"));
     assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS entries"));
-    assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS log"));
+    assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS tool_calls"));
     printf("  schema_content... PASS\n");
 
     /* Default system prompt has template vars */

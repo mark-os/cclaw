@@ -13,7 +13,7 @@
 
 ChannelCtx *channel_ctx_open(const char *db_path, const char *channel_name) {
     if (!db_path || !channel_name) return NULL;
-    sqlite3 *db = db_open_cclaw(db_path);
+    sqlite3 *db = db_open(db_path);
     if (!db) return NULL;
     ChannelCtx *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) { db_close(db); return NULL; }

@@ -78,7 +78,7 @@ static void test_cli_zero_config_startup(void) {
     }
 
     system("mkdir -p .cclaw/agents/default");
-    sqlite3 *db = db_open_agent(".cclaw/agents/default/agent.db");
+    sqlite3 *db = db_open(".cclaw/agents/default/agent.db");
     if (!db) {
         chdir(cwd); system("rm -rf .cclaw_test_zc"); config_free(cfg);
         FAIL("db_open_agent failed"); return;

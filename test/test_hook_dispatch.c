@@ -108,7 +108,7 @@ static void test_hook_modifies_messages(void) {
     /* Create a test DB with entries */
     const char *db_path = "/tmp/cclaw_hook_t1.db";
     unlink(db_path);
-    sqlite3 *db = db_open_agent(db_path);
+    sqlite3 *db = db_open(db_path);
     if (!db) {
         tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
         cleanup(ws); FAIL("db open");
@@ -206,7 +206,7 @@ static void test_hook_throws(void) {
     /* Create DB with entry */
     const char *db_path = "/tmp/cclaw_hook_t2.db";
     unlink(db_path);
-    sqlite3 *db = db_open_agent(db_path);
+    sqlite3 *db = db_open(db_path);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     Message user_msg = {.role = ROLE_USER, .content = "hi"};
     entry_append(db, sid, &user_msg);
@@ -282,7 +282,7 @@ static void test_hooks_chain(void) {
 
     const char *db_path = "/tmp/cclaw_hook_t3.db";
     unlink(db_path);
-    sqlite3 *db = db_open_agent(db_path);
+    sqlite3 *db = db_open(db_path);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     Message user_msg = {.role = ROLE_USER, .content = "test"};
     entry_append(db, sid, &user_msg);

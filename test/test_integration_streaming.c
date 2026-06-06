@@ -42,7 +42,7 @@ static void test_stream_request_format(void) {
     mock_server_enqueue(200, sse_body);
 
     /* Setup agent */
-    sqlite3 *db = db_open_agent("/tmp/cclaw_stream_test.db");
+    sqlite3 *db = db_open("/tmp/cclaw_stream_test.db");
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -129,7 +129,7 @@ static void test_stream_tool_calls(void) {
     mock_server_enqueue(200, sse_body);
     mock_server_enqueue(200, final_resp);
 
-    sqlite3 *db = db_open_agent("/tmp/cclaw_stream_tc_test.db");
+    sqlite3 *db = db_open("/tmp/cclaw_stream_tc_test.db");
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -196,7 +196,7 @@ static void test_no_stream(void) {
     mock_server_reset();
     mock_server_enqueue(200, resp_body);
 
-    sqlite3 *db = db_open_agent("/tmp/cclaw_nostream_test.db");
+    sqlite3 *db = db_open("/tmp/cclaw_nostream_test.db");
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 

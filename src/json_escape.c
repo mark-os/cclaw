@@ -1,5 +1,6 @@
 #include "json_escape.h"
 #include <stdio.h>
+#include <string.h>
 
 /* Shared escape logic — processes src_len bytes from src */
 static size_t escape_core(char *dest, size_t cap, const char *src, size_t src_len) {
@@ -37,9 +38,7 @@ static size_t escape_core(char *dest, size_t cap, const char *src, size_t src_le
 
 size_t json_escape_into(char *dest, size_t cap, const char *src) {
     if (!src) { if (cap > 0 && dest) dest[0] = '\0'; return 0; }
-    size_t len = 0;
-    while (src[len]) len++;
-    return escape_core(dest, cap, src, len);
+    return escape_core(dest, cap, src, strlen(src));
 }
 
 size_t json_escape_into_n(char *dest, size_t cap, const char *src, size_t src_len) {

@@ -202,7 +202,7 @@ static size_t json_unescape(char *dest, size_t cap, const char *src, size_t src_
             case '\\': dest[w++] = '\\'; break;
             case '/': dest[w++] = '/'; break;
             case 'u':
-                /* Simple: emit raw \uXXXX as-is for non-ASCII; for ASCII just write char */
+                /* Decode \uXXXX, with surrogate pair support for \uD800-\uDBFF\uDC00-\uDFFF */
                 if (i + 4 < src_len) {
                     unsigned cp = 0;
                     for (int j = 1; j <= 4; j++) {
@@ -213,13 +213,34 @@ static size_t json_unescape(char *dest, size_t cap, const char *src, size_t src_
                         else if (c >= 'A' && c <= 'F') cp |= (unsigned)(c - 'A' + 10);
                     }
                     i += 4;
+                    /* Handle UTF-16 surrogate pairs */
+                    if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 < src_len &&
+                        src[i + 1] == '\\' && src[i + 2] == 'u') {
+                        unsigned lo = 0;
+                        for (int j = 3; j <= 6; j++) {
+                            char c = src[i + j];
+                            lo <<= 4;
+                            if (c >= '0' && c <= '9') lo |= (unsigned)(c - '0');
+                            else if (c >= 'a' && c <= 'f') lo |= (unsigned)(c - 'a' + 10);
+                            else if (c >= 'A' && c <= 'F') lo |= (unsigned)(c - 'A' + 10);
+                        }
+                        if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                            i += 6;
+                        }
+                    }
                     if (cp < 0x80) {
                         dest[w++] = (char)cp;
                     } else if (cp < 0x800 && w + 1 < cap) {
                         dest[w++] = (char)(0xC0 | (cp >> 6));
                         dest[w++] = (char)(0x80 | (cp & 0x3F));
-                    } else if (w + 2 < cap) {
+                    } else if (cp < 0x10000 && w + 2 < cap) {
                         dest[w++] = (char)(0xE0 | (cp >> 12));
+                        dest[w++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                        dest[w++] = (char)(0x80 | (cp & 0x3F));
+                    } else if (cp >= 0x10000 && w + 3 < cap) {
+                        dest[w++] = (char)(0xF0 | (cp >> 18));
+                        dest[w++] = (char)(0x80 | ((cp >> 12) & 0x3F));
                         dest[w++] = (char)(0x80 | ((cp >> 6) & 0x3F));
                         dest[w++] = (char)(0x80 | (cp & 0x3F));
                     }

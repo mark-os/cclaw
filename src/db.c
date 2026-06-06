@@ -289,7 +289,8 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
 
     /* Walk chain using recursive CTE — read split columns.
      * V58: use level counter for ordering (not ORDER BY id) since compaction
-     * entries may have higher ids than entries they precede in the path. */
+     * entries may have higher ids than entries they precede in the path.
+     * Depth capped at 10000 to prevent infinite loops from data corruption. */
     const char *branch_sql =
         "WITH RECURSIVE branch(id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason, lvl) AS ("
         "  SELECT id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason, 0"
@@ -297,6 +298,7 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
         "  UNION ALL"
         "  SELECT e.id, e.parent_id, e.original_parent_id, e.session_id, e.created_at, e.role, e.content, e.tool_calls, e.tool_call_id, e.stop_reason, b.lvl+1"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
+        "    WHERE b.lvl < 10000"
         ") SELECT id, parent_id, original_parent_id, session_id, created_at, role, content, tool_calls, tool_call_id, stop_reason FROM branch ORDER BY lvl DESC;";
 
     if (sqlite3_prepare_v2(db, branch_sql, -1, &stmt, NULL) != SQLITE_OK)

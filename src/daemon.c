@@ -17,6 +17,7 @@
 #include "agent_exit.h"
 #include <cJSON.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -1771,8 +1772,39 @@ void daemon_startup_recovery(sqlite3 *db) {
         }
     }
 
-    /* T118: Clean up stale session temp dirs */
-    (void)system("rm -rf /tmp/cclaw-*");
+    /* T118: Clean up stale session temp dirs (safe: no shell, no symlink follow) */
+    {
+        DIR *d = opendir("/tmp");
+        if (d) {
+            struct dirent *ent;
+            while ((ent = readdir(d)) != NULL) {
+                if (strncmp(ent->d_name, "cclaw-", 6) != 0) continue;
+                /* Remove only directories we own — use unlinkat with AT_REMOVEDIR
+                 * after clearing contents via a nested pass */
+                char path[PATH_MAX];
+                int n = snprintf(path, sizeof(path), "/tmp/%s", ent->d_name);
+                if (n < 0 || (size_t)n >= sizeof(path)) continue;
+                struct stat st;
+                if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+                /* Only remove if owned by us */
+                if (st.st_uid != getuid()) continue;
+                /* Remove contents then dir */
+                DIR *sub = opendir(path);
+                if (!sub) continue;
+                struct dirent *se;
+                while ((se = readdir(sub)) != NULL) {
+                    if (se->d_name[0] == '.' && (!se->d_name[1] ||
+                        (se->d_name[1] == '.' && !se->d_name[2]))) continue;
+                    char fp[PATH_MAX];
+                    int fn = snprintf(fp, sizeof(fp), "%s/%s", path, se->d_name);
+                    if (fn > 0 && (size_t)fn < sizeof(fp)) unlink(fp);
+                }
+                closedir(sub);
+                rmdir(path);
+            }
+            closedir(d);
+        }
+    }
 }
 
 /* ── Bootstrap (T189, V68) ──────────────────────────────────────── */
@@ -2263,6 +2295,16 @@ int daemon_run(const Config *cfg, sqlite3 *db) {
     for (int i = 0; i < 10 && g_child_count > 0; i++) {
         reap_children(cfg, db);
         if (g_child_count > 0) usleep(100000);
+    }
+    /* SIGKILL any children that ignored SIGTERM */
+    for (int i = 0; i < g_child_count; i++) {
+        if (g_children[i].pid > 0)
+            kill(g_children[i].pid, SIGKILL);
+    }
+    /* Final reap after SIGKILL */
+    for (int i = 0; i < 5 && g_child_count > 0; i++) {
+        reap_children(cfg, db);
+        if (g_child_count > 0) usleep(50000);
     }
 
     close(epfd);

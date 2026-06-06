@@ -250,23 +250,23 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         unsetenv("OPENROUTER_API_KEY");
         unsetenv("GEMINI_API_KEY");
         unsetenv("HOME");
-        /* Unset all CCLAW_* env vars */
+        /* Unset all CCLAW_* env vars — collect keys first since unsetenv mutates environ */
         extern char **environ;
-        for (int i = 0; environ[i]; ) {
+        char *cclaw_keys[128];
+        int nkeys = 0;
+        for (int i = 0; environ[i] && nkeys < 128; i++) {
             if (strncmp(environ[i], "CCLAW_", 6) == 0) {
                 char *eq = strchr(environ[i], '=');
                 if (eq) {
                     size_t klen = (size_t)(eq - environ[i]);
-                    char key[klen + 1];
-                    memcpy(key, environ[i], klen);
-                    key[klen] = '\0';
-                    unsetenv(key);
-                } else {
-                    i++;
+                    cclaw_keys[nkeys] = strndup(environ[i], klen);
+                    if (cclaw_keys[nkeys]) nkeys++;
                 }
-            } else {
-                i++;
             }
+        }
+        for (int i = 0; i < nkeys; i++) {
+            unsetenv(cclaw_keys[i]);
+            free(cclaw_keys[i]);
         }
         }
 

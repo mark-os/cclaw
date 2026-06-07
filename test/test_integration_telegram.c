@@ -1,7 +1,9 @@
+
 /* T129: integration test — mock Telegram API.
  * Verify poll→inbox→agent→deliver cycle end-to-end using mock endpoints. */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
+#include "wake.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +14,6 @@
 #include "telegram.h"
 #include "db.h"
 #include "config.h"
-#include "daemon.h"
 static int s_port;
 
 static int tests_run = 0;
@@ -61,8 +62,8 @@ static void test_poll_to_inbox(void) {
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); }
 
-    /* Init signal pipe (needed by process_message → daemon_signal_session) */
-    daemon_signal_init();
+    /* Init signal pipe (needed by process_message → wake_session) */
+    wake_init();
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", s_port);
@@ -74,11 +75,11 @@ static void test_poll_to_inbox(void) {
     cfg.workspace = "./workspace";
 
     int rc = telegram_start(&cfg, db);
-    if (rc != 0) { db_close(db); daemon_signal_close(); FAIL("telegram_start failed"); }
+    if (rc != 0) { db_close(db); wake_close(); FAIL("telegram_start failed"); }
 
     /* Wait for inbox to be populated */
     if (!wait_for(inbox_has_items, db, 3000)) {
-        telegram_stop(); db_close(db); daemon_signal_close();
+        telegram_stop(); db_close(db); wake_close();
         FAIL("inbox not populated within timeout");
     }
 
@@ -86,7 +87,7 @@ static void test_poll_to_inbox(void) {
     sqlite3_stmt *stmt;
     const char *sql = "SELECT payload, source FROM inbox WHERE consumed=0;";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        telegram_stop(); db_close(db); daemon_signal_close();
+        telegram_stop(); db_close(db); wake_close();
         FAIL("query failed");
     }
     int found = 0;
@@ -102,10 +103,10 @@ static void test_poll_to_inbox(void) {
 
     telegram_stop();
 
-    if (!found) { db_close(db); daemon_signal_close(); FAIL("inbox payload mismatch"); }
+    if (!found) { db_close(db); wake_close(); FAIL("inbox payload mismatch"); }
 
     db_close(db);
-    daemon_signal_close();
+    wake_close();
     PASS();
 }
 
@@ -132,7 +133,7 @@ static void test_offset_persistence(void) {
 
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); }
-    daemon_signal_init();
+    wake_init();
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", s_port);
@@ -146,7 +147,7 @@ static void test_offset_persistence(void) {
     telegram_start(&cfg, db);
 
     if (!wait_for(offset_persisted, db, 3000)) {
-        telegram_stop(); db_close(db); daemon_signal_close();
+        telegram_stop(); db_close(db); wake_close();
         FAIL("offset not persisted within timeout");
     }
 
@@ -157,7 +158,7 @@ static void test_offset_persistence(void) {
 
     telegram_stop();
     db_close(db);
-    daemon_signal_close();
+    wake_close();
 
     if (!ok) FAIL("offset should be 201");
     PASS();
@@ -172,7 +173,7 @@ static void test_send_message_delivery(void) {
 
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); }
-    daemon_signal_init();
+    wake_init();
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", s_port);
@@ -193,23 +194,23 @@ static void test_send_message_delivery(void) {
     usleep(100000);
 
     if (mock_tg_send_count() < 1) {
-        telegram_stop(); db_close(db); daemon_signal_close();
+        telegram_stop(); db_close(db); wake_close();
         FAIL("sendMessage not called");
     }
 
     const char *body = mock_tg_last_send_body();
     if (!body || !strstr(body, "Agent response text")) {
-        telegram_stop(); db_close(db); daemon_signal_close();
+        telegram_stop(); db_close(db); wake_close();
         FAIL("sendMessage body mismatch");
     }
     if (!strstr(body, "12345")) {
-        telegram_stop(); db_close(db); daemon_signal_close();
+        telegram_stop(); db_close(db); wake_close();
         FAIL("sendMessage chat_id mismatch");
     }
 
     telegram_stop();
     db_close(db);
-    daemon_signal_close();
+    wake_close();
     PASS();
 }
 
@@ -229,7 +230,7 @@ static void test_chat_session_routing(void) {
 
     sqlite3 *db = db_open(":memory:");
     if (!db) { FAIL("db_open failed"); }
-    daemon_signal_init();
+    wake_init();
 
     char base_url[64];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", s_port);
@@ -265,7 +266,7 @@ static void test_chat_session_routing(void) {
     }
 
     db_close(db);
-    daemon_signal_close();
+    wake_close();
 
     if (session_count != 1) FAIL("expected both messages in same session");
     PASS();

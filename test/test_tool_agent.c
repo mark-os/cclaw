@@ -17,7 +17,7 @@ static sqlite3 *setup_db(void) {
 }
 
 static void test_invalid_json(void) {
-    AgentLaunchCtx ctx = {.db = NULL, .session_id = 1, .self_path = "/bin/true", .daemon_mode = 0};
+    AgentLaunchCtx ctx = {.db = NULL, .session_id = 1};
     char *r = tool_launch_agent_handler("not json", &ctx);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
@@ -27,7 +27,7 @@ static void test_invalid_json(void) {
 
 static void test_missing_task(void) {
     sqlite3 *db = setup_db();
-    AgentLaunchCtx ctx = {.db = db, .session_id = 1, .self_path = "/bin/true", .daemon_mode = 0};
+    AgentLaunchCtx ctx = {.db = db, .session_id = 1};
     char *r = tool_launch_agent_handler("{\"foo\":\"bar\"}", &ctx);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
@@ -41,7 +41,7 @@ static void test_depth_limit(void) {
     /* Create a session at max depth */
     int64_t sid = session_create(db, "deep", NULL, 1, AGENT_MAX_DEPTH);
     assert(sid > 0);
-    AgentLaunchCtx ctx = {.db = db, .session_id = sid, .self_path = "/bin/true", .daemon_mode = 0};
+    AgentLaunchCtx ctx = {.db = db, .session_id = sid};
     char *r = tool_launch_agent_handler("{\"task\":\"hello\"}", &ctx);
     assert(r != NULL);
     assert(strstr(r, "max agent depth") != NULL);
@@ -63,10 +63,10 @@ static void test_per_parent_limit(void) {
         session_set_state(db, child_sid, "running");
     }
 
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid, .self_path = "/bin/true", .daemon_mode = 0};
+    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     char *r = tool_launch_agent_handler("{\"task\":\"one more\"}", &ctx);
     assert(r != NULL);
-    assert(strstr(r, "max concurrent sub-agents per parent") != NULL);
+    assert(strstr(r, "max sub-agents per parent") != NULL);
     free(r);
     db_close(db);
     printf("  PASS test_per_parent_limit\n");
@@ -83,7 +83,7 @@ static void test_system_wide_limit(void) {
     }
 
     int64_t my_sid = session_create(db, "me", NULL, -1, 0);
-    AgentLaunchCtx ctx = {.db = db, .session_id = my_sid, .self_path = "/bin/true", .daemon_mode = 0};
+    AgentLaunchCtx ctx = {.db = db, .session_id = my_sid};
     char *r = tool_launch_agent_handler("{\"task\":\"overflow\"}", &ctx);
     assert(r != NULL);
     assert(strstr(r, "max system-wide") != NULL);
@@ -97,10 +97,10 @@ static void test_spawn_background(void) {
     int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
     assert(parent_sid > 0);
 
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid, .self_path = "/bin/true", .daemon_mode = 0};
+    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     char *r = tool_launch_agent_handler("{\"task\":\"test task\",\"background\":true}", &ctx);
     assert(r != NULL);
-    assert(strstr(r, "launched agent") != NULL);
+    assert(strstr(r, "agent delegated") != NULL);
 
     free(r);
     db_close(db);
@@ -112,11 +112,11 @@ static void test_spawn_blocking(void) {
     int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
     assert(parent_sid > 0);
 
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid, .self_path = "/bin/true", .daemon_mode = 0};
+    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     char *r = tool_launch_agent_handler("{\"task\":\"blocking task\"}", &ctx);
     assert(r != NULL);
-    /* CLI blocking mode polls session state; no daemon → times out */
-    assert(strstr(r, "agent completed") != NULL || strstr(r, "no output") != NULL);
+    /* Now always async — returns delegation notice */
+    assert(strstr(r, "agent delegated") != NULL);
     free(r);
     db_close(db);
     printf("  PASS test_spawn_blocking\n");
@@ -125,7 +125,7 @@ static void test_spawn_blocking(void) {
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    AgentLaunchCtx ctx = {.db = NULL, .session_id = 1, .self_path = "/bin/true", .daemon_mode = 0};
+    AgentLaunchCtx ctx = {.db = NULL, .session_id = 1};
     int rc = tool_launch_agent_register(&reg, &ctx);
     assert(rc == 0);
     ToolEntry *e = tools_lookup(&reg, "launch_agent");
@@ -143,7 +143,7 @@ static void test_register(void) {
 static void test_check_agent_not_found(void) {
     sqlite3 *db = setup_db();
     int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid, .self_path = "/bin/true", .daemon_mode = 0};
+    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     char *r = tool_check_agent_handler("{\"session_id\":9999}", &ctx);
     assert(strstr(r, "not found") != NULL);
     free(r);
@@ -163,7 +163,7 @@ static void test_check_agent_idle_with_result(void) {
     char args[64];
     snprintf(args, sizeof(args), "{\"session_id\":%lld}", (long long)child_sid);
 
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid, .self_path = "/bin/true", .daemon_mode = 0};
+    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     char *r = tool_check_agent_handler(args, &ctx);
     assert(strstr(r, "idle") != NULL);
     assert(strstr(r, "the answer is 42") != NULL);

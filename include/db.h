@@ -255,4 +255,7 @@ int64_t session_cost(sqlite3 *db, int64_t session_id);
 /* Session route tracking */
 int session_set_last_route(sqlite3 *db, int64_t session_id, const char *route);
 char *session_get_last_route(sqlite3 *db, int64_t session_id);
+
+/* Rate limiting — returns 1 if under limit (ok to proceed), 0 if exceeded */
+int rate_limit_check(sqlite3 *db, const char *provider_name);
 #endif

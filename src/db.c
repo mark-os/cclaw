@@ -1621,3 +1621,36 @@ char *session_get_last_route(sqlite3 *db, int64_t session_id) {
     sqlite3_finalize(stmt);
     return result;
 }
+
+int rate_limit_check(sqlite3 *db, const char *provider_name) {
+    if (!db) return 1;
+    int limit = 0;
+    char model_buf[128] = "";
+
+    if (provider_name) {
+        const char *lsql = "SELECT token_rate_limit, default_model_id FROM providers WHERE name=?;";
+        sqlite3_stmt *ls;
+        if (sqlite3_prepare_v2(db, lsql, -1, &ls, NULL) != SQLITE_OK) return 1;
+        sqlite3_bind_text(ls, 1, provider_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(ls) == SQLITE_ROW) {
+            limit = sqlite3_column_int(ls, 0);
+            const char *m = (const char *)sqlite3_column_text(ls, 1);
+            if (m) snprintf(model_buf, sizeof(model_buf), "%s", m);
+        }
+        sqlite3_finalize(ls);
+    }
+    if (limit <= 0) return 1; /* unlimited or not found */
+
+    const char *usql = model_buf[0]
+        ? "SELECT COALESCE(SUM(usage_in+usage_out),0) FROM entries"
+          " WHERE model=? AND created_at > unixepoch()-3600;"
+        : "SELECT COALESCE(SUM(usage_in+usage_out),0) FROM entries"
+          " WHERE created_at > unixepoch()-3600;";
+    sqlite3_stmt *us;
+    if (sqlite3_prepare_v2(db, usql, -1, &us, NULL) != SQLITE_OK) return 1;
+    if (model_buf[0]) sqlite3_bind_text(us, 1, model_buf, -1, SQLITE_STATIC);
+    int used = 0;
+    if (sqlite3_step(us) == SQLITE_ROW) used = sqlite3_column_int(us, 0);
+    sqlite3_finalize(us);
+    return used < limit ? 1 : 0;
+}

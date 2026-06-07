@@ -23,7 +23,8 @@
 #include "db.h"
 #include "db_response.h"
 #include "shutdown.h"
-#include "daemon.h"
+#include "wake.h"
+#include "channel.h"
 #include "secret.h"
 #include "web.h"
 #include "heartbeat.h"
@@ -130,6 +131,12 @@ static int fork_llm_req(int64_t session_id, const char *agent_name, int iteratio
     if (child_has_session(session_id)) return -1;
     if (g_child_count >= CHILD_MAX) return -1;
 
+    /* Rate limit check */
+    if (g_cfg->token_rate_limit > 0 && !rate_limit_check(g_db, NULL)) {
+        session_set_state(g_db, session_id, "rate_limited");
+        return -1;
+    }
+
     int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations : DEFAULT_MAX_ITERATIONS;
     if (iteration >= max_iter) {
         /* Write error entry and go idle */
@@ -185,7 +192,9 @@ static int tool_is_inline(const char *name) {
            strcmp(name, "memory_replace") == 0 ||
            strcmp(name, "db_query") == 0 ||
            strcmp(name, "js_eval") == 0 ||
-           strcmp(name, "js_define_tool") == 0;
+           strcmp(name, "js_define_tool") == 0 ||
+           strcmp(name, "launch_agent") == 0 ||
+           strcmp(name, "check_agent") == 0;
 }
 
 static AgentSetup *g_tool_setup;  /* Initialized once for tool dispatch */
@@ -576,18 +585,77 @@ int main(int argc, char *argv[]) {
     if (!g_cfg) { fprintf(stderr, "config load failed\n"); db_close(g_db); return 1; }
     if (log_level_set) g_cfg->log_level = log_level_override;
 
-    /* ── Daemon mode: delegate to daemon_run (Task 4 integrates into this loop) */
+    /* ── Daemon mode ─────────────────────────────────────────────── */
     if (daemon_mode) {
         g_mode = 1;
         workspace_init(g_cfg);
         printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
         if (g_cfg->telegram_token && g_cfg->telegram_token[0])
-            daemon_register_telegram_channel(g_db, g_cfg->telegram_token);
+            channel_register(g_db, "telegram", "build/channel_telegram");
         web_start(g_cfg, g_db);
         heartbeat_start(g_cfg, g_db);
         cron_start(g_cfg, g_db);
-        daemon_run(g_cfg, g_db);
+
+        /* Startup recovery — reset stale sessions */
+        {   const char *rsql = "UPDATE sessions SET state='idle' WHERE state='running';";
+            sqlite3_exec(g_db, rsql, NULL, NULL, NULL); }
+
+        /* Init wake pipe + FIFO */
+        wake_init();
+        int fifo_fd = wake_fifo_open(db_path);
+
+        /* SIGCHLD self-pipe */
+        if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
+        set_nonblock(g_chld_pipe[0]); set_nonblock(g_chld_pipe[1]);
+        { struct sigaction sa = {0}; sa.sa_handler = sigchld_handler;
+          sigemptyset(&sa.sa_mask); sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+          sigaction(SIGCHLD, &sa, NULL); }
+
+        /* Launch channel processes */
+        channel_launch_all(g_db, db_path);
+
+        /* Epoll setup */
+        int epfd = epoll_create1(0);
+        struct epoll_event ev;
+        ev.events = EPOLLIN; ev.data.fd = g_chld_pipe[0];
+        epoll_ctl(epfd, EPOLL_CTL_ADD, g_chld_pipe[0], &ev);
+        ev.events = EPOLLIN; ev.data.fd = wake_fd();
+        epoll_ctl(epfd, EPOLL_CTL_ADD, wake_fd(), &ev);
+        if (fifo_fd >= 0) { ev.events = EPOLLIN; ev.data.fd = fifo_fd;
+            epoll_ctl(epfd, EPOLL_CTL_ADD, fifo_fd, &ev); }
+
+        /* Daemon event loop */
+        struct epoll_event events[8];
+        while (!shutdown_requested()) {
+            int nfds = epoll_wait(epfd, events, 8, 1000);
+            if (nfds < 0) { if (errno == EINTR) continue; break; }
+
+            for (int i = 0; i < nfds; i++) {
+                if (events[i].data.fd == g_chld_pipe[0]) {
+                    char buf[64];
+                    while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
+                    reap_children();
+                } else if (events[i].data.fd == wake_fd()) {
+                    WakeMsg msg;
+                    while (read(wake_fd(), &msg, sizeof(msg)) == (ssize_t)sizeof(msg)) {
+                        if (child_has_session(msg.session_id)) continue;
+                        char *aname = session_get_agent_name(g_db, msg.session_id);
+                        if (aname) { fork_llm_req(msg.session_id, aname, 0); free(aname); }
+                    }
+                } else if (fifo_fd >= 0 && events[i].data.fd == fifo_fd) {
+                    char drain[64];
+                    while (read(fifo_fd, drain, sizeof(drain)) > 0) {}
+                    channel_consume_events(g_db);
+                }
+            }
+            if (nfds == 0 && g_child_count > 0) reap_children();
+        }
+
+        /* Shutdown */
+        channel_shutdown_all();
         cron_stop(); heartbeat_stop(); web_stop();
+        close(epfd); close(g_chld_pipe[0]); close(g_chld_pipe[1]);
+        wake_close(); wake_fifo_close(fifo_fd, db_path);
         config_free(g_cfg); db_close(g_db); free(db_path);
         return 0;
     }

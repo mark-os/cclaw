@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS providers (
   endpoint_type TEXT NOT NULL DEFAULT 'openai',
   api_key_env TEXT NOT NULL DEFAULT '',
   default_model_id TEXT,
-  context_window INTEGER DEFAULT 128000
+  context_window INTEGER DEFAULT 128000,
+  token_rate_limit INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS kv (
   key TEXT PRIMARY KEY,
@@ -42,20 +43,6 @@ CREATE TABLE IF NOT EXISTS tg_chat_sessions (
   session_id INTEGER NOT NULL,
   agent_name TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS spawn_queue (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  parent_agent TEXT NOT NULL DEFAULT '',
-  parent_session_id INTEGER NOT NULL,
-  tool_call_id TEXT,
-  child_agent TEXT,
-  child_session_id INTEGER,
-  task TEXT NOT NULL,
-  background INTEGER NOT NULL DEFAULT 0,
-  depth INTEGER NOT NULL DEFAULT 1,
-  status TEXT NOT NULL DEFAULT 'pending',
-  created_at INTEGER NOT NULL DEFAULT (unixepoch())
-);
-CREATE INDEX IF NOT EXISTS idx_spawn_queue_pending ON spawn_queue(status) WHERE status='pending';
 CREATE TABLE IF NOT EXISTS cron_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_name TEXT NOT NULL DEFAULT '',

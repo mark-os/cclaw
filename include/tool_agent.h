@@ -9,13 +9,10 @@
 #define AGENT_MAX_PER_PARENT 3
 #define AGENT_MAX_TOTAL 10
 
-/* Context passed as user_data to launch_agent handler */
+/* Context passed as user_data to launch_agent/check_agent handlers */
 typedef struct {
     sqlite3 *db;
     int64_t session_id;
-    const char *self_path;  /* path to cclaw binary (CLI fork+exec) */
-    int daemon_mode;        /* if true, post to spawn_queue instead of fork */
-    const char *tool_call_id; /* current tool_call_id for blocking launch */
 } AgentLaunchCtx;
 
 /* Register launch_agent tool. Returns 0 on success. */

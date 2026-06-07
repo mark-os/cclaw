@@ -1,4 +1,4 @@
-#include "daemon.h"
+#include "config_apply.h"
 #include "db.h"
 #include "config.h"
 #include "secret.h"
@@ -36,9 +36,8 @@ static sqlite3 *setup_db(void) {
 /* T205/V79: configure_provider — daemon stores API key + base_url + model */
 static int test_apply_configure_provider(void) {
     sqlite3 *db = setup_db();
-    Config cfg = {0};
 
-    char *result = daemon_apply_config(&cfg, db, "test-agent",
+    char *result = config_apply(db, "test-agent",
         "configure_provider",
         "{\"provider\":\"openrouter\",\"api_key\":\"sk-or-test-123\"}");
     assert(result != NULL);
@@ -78,9 +77,8 @@ static int test_apply_configure_provider(void) {
 /* T205: configure_provider with custom base_url override */
 static int test_apply_configure_provider_custom(void) {
     sqlite3 *db = setup_db();
-    Config cfg = {0};
 
-    char *result = daemon_apply_config(&cfg, db, "test-agent",
+    char *result = config_apply(db, "test-agent",
         "configure_provider",
         "{\"provider\":\"custom\",\"api_key\":\"mykey\","
         "\"base_url\":\"https://my.llm/v1\",\"model\":\"my-7b\"}");
@@ -107,9 +105,8 @@ static int test_apply_configure_provider_custom(void) {
 /* T251/V104/V79: configure_channel telegram — inserts channels row + seeds channel_state + binds */
 static int test_apply_configure_channel_telegram(void) {
     sqlite3 *db = setup_db();
-    Config cfg = {0};
 
-    char *result = daemon_apply_config(&cfg, db, "my-agent",
+    char *result = config_apply(db, "my-agent",
         "configure_channel",
         "{\"channel_type\":\"telegram\",\"bot_token\":\"123:ABC\"}");
     assert(result != NULL);
@@ -151,9 +148,8 @@ static int test_apply_configure_channel_telegram(void) {
 /* T205/V79: configure_channel cli — binds channel, no credentials */
 static int test_apply_configure_channel_cli(void) {
     sqlite3 *db = setup_db();
-    Config cfg = {0};
 
-    char *result = daemon_apply_config(&cfg, db, "cli-agent",
+    char *result = config_apply(db, "cli-agent",
         "configure_channel",
         "{\"channel_type\":\"cli\"}");
     assert(result != NULL);
@@ -174,9 +170,8 @@ static int test_apply_configure_channel_cli(void) {
 /* T251/V104/V79: configure_channel custom — inserts channels row + seeds config + binds */
 static int test_apply_configure_channel_custom(void) {
     sqlite3 *db = setup_db();
-    Config cfg = {0};
 
-    char *result = daemon_apply_config(&cfg, db, "my-agent",
+    char *result = config_apply(db, "my-agent",
         "configure_channel",
         "{\"channel_type\":\"slack\",\"binary_path\":\"/opt/cclaw/channel_slack\","
         "\"config\":{\"webhook_url\":\"https://hooks.slack.com/x\",\"channel_id\":\"C123\"}}");
@@ -228,7 +223,6 @@ static int test_apply_configure_channel_custom(void) {
 /* T205/V79: create_agent — daemon creates agent dir + DB rows */
 static int test_apply_create_agent(void) {
     sqlite3 *db = setup_db();
-    Config cfg = {0};
 
     /* Temporarily chdir so agent_config_create uses our test agents dir */
     char cwd[1024];
@@ -238,7 +232,7 @@ static int test_apply_create_agent(void) {
     /* Create the agents dir that agent_config_create expects */
     mkdir("agents", 0755);
 
-    char *result = daemon_apply_config(&cfg, db, "bootstrap-agent",
+    char *result = config_apply(db, "bootstrap-agent",
         "create_agent",
         "{\"name\":\"helper\",\"model\":\"gpt-4\","
         "\"system_prompt\":\"You help.\","
@@ -276,9 +270,8 @@ static int test_apply_create_agent(void) {
 /* T205: unknown tool_name returns error */
 static int test_apply_unknown_tool(void) {
     sqlite3 *db = setup_db();
-    Config cfg = {0};
 
-    char *result = daemon_apply_config(&cfg, db, "agent",
+    char *result = config_apply(db, "agent",
         "unknown_tool", "{}");
     assert(result != NULL);
     assert(strstr(result, "error") != NULL);
@@ -294,9 +287,8 @@ static int test_apply_unknown_tool(void) {
 /* T205: invalid JSON args returns error */
 static int test_apply_invalid_json(void) {
     sqlite3 *db = setup_db();
-    Config cfg = {0};
 
-    char *result = daemon_apply_config(&cfg, db, "agent",
+    char *result = config_apply(db, "agent",
         "configure_provider", "not json");
     assert(result != NULL);
     assert(strstr(result, "error") != NULL);

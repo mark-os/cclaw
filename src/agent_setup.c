@@ -118,7 +118,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         /* Agent launch */
         setup->launch_ctx.db = db;
         setup->launch_ctx.session_id = session_id;
-        setup->launch_ctx.daemon_mode = 1;
         tool_launch_agent_register(&setup->reg, &setup->launch_ctx);
         tool_check_agent_register(&setup->reg, &setup->launch_ctx);
     }

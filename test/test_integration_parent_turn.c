@@ -18,11 +18,6 @@ static const char *FINAL_RESP =
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"done\"},"
     "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":3}}";
 
-static const char *TOOLS_JSON =
-    "[{\"type\":\"function\",\"function\":{\"name\":\"memory_create\","
-    "\"description\":\"Create memory block\","
-    "\"parameters\":{\"type\":\"object\",\"properties\":{\"label\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}}}}}]";
-
 int main(void) {
     alarm(10);
     unlink(DB_PATH);
@@ -38,7 +33,6 @@ int main(void) {
     setenv("OPENROUTER_API_KEY", "test-key", 1);
     setenv("CCLAW_MODEL", "test-model", 1);
     setenv("CCLAW_AGENT_NAME", "default", 1);
-    setenv("CCLAW_TOOLS_JSON", TOOLS_JSON, 1);
     setenv("CCLAW_STREAM", "0", 1);
 
     db_agent_upsert(db, "default", NULL, NULL, NULL);

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "llm_proc.h"
+#include "agent_setup.h"
 #include "config.h"
 #include "context.h"
 #include "db.h"
@@ -41,31 +42,16 @@ int llm_proc_main(int64_t session_id) {
     Arena *a = arena_create(ARENA_DEFAULT_SIZE);
     if (!a) { db_close(db); config_free(cfg); return LLM_EXIT_ERROR; }
 
-    /* Read tool schemas from env-specified tool list (CCLAW_TOOLS_JSON) */
-    const char *tools_json_env = getenv("CCLAW_TOOLS_JSON");
-    ToolSchema *tools = NULL;
-    size_t tool_count = 0;
+    /* Load tool schemas from DB via agent setup */
+    const char *agent_name = getenv("CCLAW_AGENT_NAME");
+    if (!agent_name || !agent_name[0]) agent_name = "default";
 
-    if (tools_json_env && tools_json_env[0]) {
-        /* Parse JSON array of {name, description, parameters} */
-        cJSON *arr = cJSON_Parse(tools_json_env);
-        if (arr && cJSON_IsArray(arr)) {
-            tool_count = (size_t)cJSON_GetArraySize(arr);
-            tools = calloc(tool_count, sizeof(ToolSchema));
-            if (tools) {
-                for (size_t i = 0; i < tool_count; i++) {
-                    cJSON *item = cJSON_GetArrayItem(arr, (int)i);
-                    cJSON *n = cJSON_GetObjectItem(item, "name");
-                    cJSON *d = cJSON_GetObjectItem(item, "description");
-                    cJSON *p = cJSON_GetObjectItem(item, "parameters");
-                    if (n) tools[i].name = strdup(n->valuestring);
-                    if (d) tools[i].description = strdup(d->valuestring);
-                    if (p) tools[i].parameters_json = cJSON_PrintUnformatted(p);
-                }
-            }
-        }
-        cJSON_Delete(arr);
-    }
+    AgentSetup setup;
+    agent_setup_init(&setup, db, session_id, cfg, agent_name, NULL, 0, AGENT_SETUP_CLI);
+
+    ToolSchema schemas[TOOLS_MAX];
+    size_t tool_count = agent_setup_schemas(&setup, schemas, TOOLS_MAX);
+    ToolSchema *tools = schemas;
 
     /* Tool overhead for context plan */
     int tool_overhead = 0;
@@ -259,12 +245,7 @@ int llm_proc_main(int64_t session_id) {
     int exit_code = (tc_count > 0) ? LLM_EXIT_TOOLCALL : LLM_EXIT_STOP;
 
     /* Clean exit */
-    for (size_t i = 0; i < tool_count; i++) {
-        free((void *)tools[i].name);
-        free((void *)tools[i].description);
-        free((void *)tools[i].parameters_json);
-    }
-    free(tools);
+    agent_setup_destroy(&setup);
     arena_destroy(a);
     db_close(db);
     config_free(cfg);
@@ -272,12 +253,7 @@ int llm_proc_main(int64_t session_id) {
 
 err:
     context_plan_free(&plan);
-    for (size_t i = 0; i < tool_count; i++) {
-        free((void *)tools[i].name);
-        free((void *)tools[i].description);
-        free((void *)tools[i].parameters_json);
-    }
-    free(tools);
+    agent_setup_destroy(&setup);
     arena_destroy(a);
     db_close(db);
     config_free(cfg);

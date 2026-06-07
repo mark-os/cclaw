@@ -74,6 +74,76 @@ static void test_zero_cap(void) {
     assert(n == 4); /* returns required size even with zero cap */
 }
 
+/* ── json_unescape tests ─────────────────────────────────────────── */
+
+static void test_unescape_surrogate_pair(void) {
+    /* \uD83D\uDE00 → U+1F600 (😀) = F0 9F 98 80 in UTF-8 */
+    const char *src = "\\uD83D\\uDE00";
+    char buf[8];
+    size_t n = json_unescape(buf, sizeof(buf), src, strlen(src));
+    assert(n == 4);
+    assert((unsigned char)buf[0] == 0xF0);
+    assert((unsigned char)buf[1] == 0x9F);
+    assert((unsigned char)buf[2] == 0x98);
+    assert((unsigned char)buf[3] == 0x80);
+}
+
+static void test_unescape_surrogate_pair_then_char(void) {
+    /* Verify no character is skipped after a surrogate pair */
+    const char *src = "\\uD83D\\uDE00A";
+    char buf[8];
+    size_t n = json_unescape(buf, sizeof(buf), src, strlen(src));
+    assert(n == 5);
+    assert((unsigned char)buf[0] == 0xF0);
+    assert((unsigned char)buf[1] == 0x9F);
+    assert((unsigned char)buf[2] == 0x98);
+    assert((unsigned char)buf[3] == 0x80);
+    assert(buf[4] == 'A');
+}
+
+static void test_unescape_isolated_high_surrogate(void) {
+    /* \uD800 alone → U+FFFD = EF BF BD */
+    const char *src = "\\uD800";
+    char buf[8];
+    size_t n = json_unescape(buf, sizeof(buf), src, strlen(src));
+    assert(n == 3);
+    assert((unsigned char)buf[0] == 0xEF);
+    assert((unsigned char)buf[1] == 0xBF);
+    assert((unsigned char)buf[2] == 0xBD);
+}
+
+static void test_unescape_high_surrogate_non_low(void) {
+    /* \uD800\u0041 → U+FFFD then 'A' (0x41 is not a low surrogate) */
+    const char *src = "\\uD800\\u0041";
+    char buf[8];
+    size_t n = json_unescape(buf, sizeof(buf), src, strlen(src));
+    assert(n == 4);
+    assert((unsigned char)buf[0] == 0xEF);
+    assert((unsigned char)buf[1] == 0xBF);
+    assert((unsigned char)buf[2] == 0xBD);
+    assert(buf[3] == 'A');
+}
+
+static void test_unescape_isolated_low_surrogate(void) {
+    /* \uDC00 alone → U+FFFD */
+    const char *src = "\\uDC00";
+    char buf[8];
+    size_t n = json_unescape(buf, sizeof(buf), src, strlen(src));
+    assert(n == 3);
+    assert((unsigned char)buf[0] == 0xEF);
+    assert((unsigned char)buf[1] == 0xBF);
+    assert((unsigned char)buf[2] == 0xBD);
+}
+
+static void test_unescape_back_to_back_pairs(void) {
+    /* Two surrogate pairs back to back */
+    const char *src = "\\uD83D\\uDE00\\uD83D\\uDE00";
+    char buf[16];
+    size_t n = json_unescape(buf, sizeof(buf), src, strlen(src));
+    assert(n == 8);
+    assert((unsigned char)buf[0] == 0xF0 && (unsigned char)buf[4] == 0xF0);
+}
+
 int main(void) {
     test_basic_string();
     test_quotes_and_backslash();
@@ -84,6 +154,12 @@ int main(void) {
     test_buffer_overflow();
     test_overflow_with_escape();
     test_zero_cap();
+    test_unescape_surrogate_pair();
+    test_unescape_surrogate_pair_then_char();
+    test_unescape_isolated_high_surrogate();
+    test_unescape_high_surrogate_non_low();
+    test_unescape_isolated_low_surrogate();
+    test_unescape_back_to_back_pairs();
     printf("test_json_escape: all tests passed\n");
     return 0;
 }

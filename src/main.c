@@ -70,6 +70,7 @@ static ChildProc *child_find(pid_t pid) {
 
 static void child_remove(ChildProc *c) {
     int idx = (int)(c - g_children);
+    if (idx < 0 || idx >= g_child_count) return;
     g_children[idx] = g_children[g_child_count - 1];
     g_child_count--;
 }
@@ -104,25 +105,6 @@ static void sigchld_handler(int sig) {
 static void set_nonblock(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
-/* ── Tool schema serialization (for CCLAW_TOOLS_JSON env) ──────── */
-
-static char *schemas_to_json(const ToolSchema *tools, size_t count) {
-    cJSON *arr = cJSON_CreateArray();
-    for (size_t i = 0; i < count; i++) {
-        cJSON *item = cJSON_CreateObject();
-        if (tools[i].name) cJSON_AddStringToObject(item, "name", tools[i].name);
-        if (tools[i].description) cJSON_AddStringToObject(item, "description", tools[i].description);
-        if (tools[i].parameters_json) {
-            cJSON *p = cJSON_Parse(tools[i].parameters_json);
-            if (p) cJSON_AddItemToObject(item, "parameters", p);
-        }
-        cJSON_AddItemToArray(arr, item);
-    }
-    char *json = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
-    return json;
 }
 
 /* ── fork_llm_req ───────────────────────────────────────────────── */
@@ -499,7 +481,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
     if (!rows) { sqlite3_finalize(stmt); return -1; }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (count >= cap) { cap *= 2; rows = realloc(rows, (size_t)cap * sizeof(Row)); if (!rows) break; }
+        if (count >= cap) { cap *= 2; Row *tmp = realloc(rows, (size_t)cap * sizeof(Row)); if (!tmp) break; rows = tmp; }
         rows[count].id = sqlite3_column_int64(stmt, 0);
         rows[count].created = (time_t)sqlite3_column_int64(stmt, 1);
         const char *fp = (const char *)sqlite3_column_text(stmt, 2);
@@ -735,12 +717,6 @@ int main(int argc, char *argv[]) {
     AgentSetup setup;
     agent_setup_init(&setup, g_db, 0, g_cfg, g_agent_name, NULL, 0, AGENT_SETUP_CLI);
     g_tool_setup = &setup;
-    {
-        ToolSchema schemas[TOOLS_MAX];
-        size_t tc = tools_schemas_filtered(&setup.reg, NULL, 0, schemas, TOOLS_MAX);
-        char *tj = schemas_to_json(schemas, tc);
-        if (tj) { setenv("CCLAW_TOOLS_JSON", tj, 1); free(tj); }
-    }
 
     /* Session selection */
     session_id = cli_select_session(g_db, session_id, new_session);

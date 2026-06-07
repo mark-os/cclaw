@@ -145,9 +145,9 @@ static void test_llm_child_tool_calls(void) {
     assert(db);
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
-    if (count != 3) {
+    if (count != 4) { /* sys + user + assistant_message + tool_call */
         char msg[64];
-        snprintf(msg, sizeof(msg), "expected 3 entries, got %d", count);
+        snprintf(msg, sizeof(msg), "expected 4 entries, got %d", count);
         entry_branch_free(branch, count);
         db_close(db);
         FAIL(msg);
@@ -155,7 +155,7 @@ static void test_llm_child_tool_calls(void) {
     if (branch[2].message.role != ROLE_ASSISTANT) {
         entry_branch_free(branch, count);
         db_close(db);
-        FAIL("last entry not assistant");
+        FAIL("entry[2] not assistant");
     }
     /* Check tool_calls written — query tool_calls table */
     sqlite3_stmt *stmt;

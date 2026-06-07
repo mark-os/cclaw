@@ -73,15 +73,6 @@ void daemon_token_usage_add(int tokens);
 int daemon_token_usage_hourly(void);
 void daemon_token_usage_reset(void);
 
-/* T199/V76: Daemon writes inbox.
- * Returns inbox row id (>0) or -1 on error. */
-int64_t daemon_inbox_insert(const char *agent_name, int64_t session_id,
-                            const char *source, const char *payload);
-
-/* T199: Read inbox count from agent DB. Returns count or -1 on error. */
-int daemon_inbox_count(const char *agent_name, int64_t session_id);
-
-
 /* T205/V79: Apply config change from agent exit code 4.
  * Daemon reads tool_call args, dispatches to appropriate handler.
  * Returns result string (caller frees) or NULL on error. */

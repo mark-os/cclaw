@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <signal.h>
 #include "channel_api.h"
-#include "daemon.h"
+
 #include "db.h"
 
 static const char *DB_PATH = "/tmp/test_channel_events_daemon.db";
@@ -39,7 +39,6 @@ static void test_channel_events_routing(void) {
     assert(db);
 
     /* T297: single DB — set path for daemon helpers */
-    daemon_set_db_path(DB_PATH);
 
     /* T297: session lives in same DB */
     char old_cwd[512];
@@ -80,7 +79,7 @@ static void test_channel_events_routing(void) {
     free(agent);
 
     /* Simulate what consume_channel_events does: read event, resolve, inbox_insert */
-    int64_t inbox_id = daemon_inbox_insert("testagent", sid, "mychannel", "hello from channel");
+    int64_t inbox_id = inbox_insert(db, sid, "mychannel", "hello from channel");
     assert(inbox_id > 0);
 
     /* Verify inbox has the message (same DB) */

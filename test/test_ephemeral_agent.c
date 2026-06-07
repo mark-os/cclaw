@@ -4,66 +4,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
-#define AGENTS_DIR "/tmp/test_ephemeral_agents"
-#define DB_PATH "/tmp/test_ephemeral_agents.db"
+#define DB_PATH "/tmp/test_ephemeral.db"
 
-#define FAIL(msg) do { fprintf(stderr, "FAIL: %s\n", msg); return 1; } while(0)
-
-static void cleanup(void) {
-    system("rm -rf " AGENTS_DIR);
-    unlink(DB_PATH);
-    unlink("/tmp/test_ephemeral_agents.db-wal");
-    unlink("/tmp/test_ephemeral_agents.db-shm");
-}
-
-/* T186: ephemeral agent creation */
 static int test_create_ephemeral(void) {
-    cleanup();
-    mkdir(AGENTS_DIR, 0755);
-
+    unlink(DB_PATH);
     sqlite3 *db = db_open(DB_PATH);
-    if (!db) FAIL("db_open");
+    assert(db);
 
-    char *name = agent_create_ephemeral(AGENTS_DIR, db);
-    if (!name) { db_close(db); FAIL("agent_create_ephemeral returned NULL"); }
+    char *name = agent_create_ephemeral("agents", db);
+    assert(name);
+    assert(strncmp(name, "ephemeral-", 10) == 0);
+    assert(strlen(name) == 10 + 36);
 
-    /* Verify name format: ephemeral-<uuid> */
-    if (strncmp(name, "ephemeral-", 10) != 0) { free(name); db_close(db); FAIL("bad name prefix"); }
-    if (strlen(name) != 10 + 36) { free(name); db_close(db); FAIL("bad name length"); }
-
-    /* Verify directory exists */
-    char path[512];
-    struct stat st;
-    snprintf(path, sizeof(path), "%s/%s", AGENTS_DIR, name);
-    assert(stat(path, &st) == 0 && S_ISDIR(st.st_mode));
-
-    /* Verify workspace subdir */
-    snprintf(path, sizeof(path), "%s/%s/workspace", AGENTS_DIR, name);
-    assert(stat(path, &st) == 0 && S_ISDIR(st.st_mode));
-
-    /* T196: agent.json no longer written — config in cclaw.db */
-
-    /* T297: per-agent agent.db no longer created — single DB model */
-
-    /* Verify seeded in daemon DB */
+    /* Verify seeded in DB */
     AgentRow *row = db_agent_get(db, name);
     assert(row != NULL);
     assert(strcmp(row->name, name) == 0);
     agent_row_free(row);
 
-    /* Two ephemeral agents get different names */
-    char *name2 = agent_create_ephemeral(AGENTS_DIR, db);
-    assert(name2 != NULL);
-    assert(strcmp(name, name2) != 0);
-    assert(strncmp(name2, "ephemeral-", 10) == 0);
+    /* Two calls get different names */
+    char *name2 = agent_create_ephemeral("agents", db);
+    assert(name2 && strcmp(name, name2) != 0);
 
     free(name2);
     free(name);
     db_close(db);
-    cleanup();
+    unlink(DB_PATH);
     printf("PASS: test_create_ephemeral\n");
     return 0;
 }

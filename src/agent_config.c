@@ -989,13 +989,13 @@ int agent_config_add_tool(sqlite3 *db, const char *name, const char *tool) {
 #include <limits.h>
 
 char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db) {
-    if (!agents_dir) return NULL;
+    (void)agents_dir;
 
     /* Generate UUID v4 */
     uint8_t bytes[16];
     if (getrandom(bytes, 16, 0) != 16) return NULL;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; /* version 4 */
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; /* variant 1 */
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
 
     char uuid[37];
     snprintf(uuid, sizeof(uuid),
@@ -1005,25 +1005,12 @@ char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db) {
         bytes[8], bytes[9], bytes[10], bytes[11],
         bytes[12], bytes[13], bytes[14], bytes[15]);
 
-    /* Name: ephemeral-<uuid> */
     char name[64];
     snprintf(name, sizeof(name), "ephemeral-%s", uuid);
 
-    /* Create directory structure */
-    char buf[PATH_MAX];
-    int n = snprintf(buf, sizeof(buf), "%s/%s", agents_dir, name);
-    if (n < 0 || (size_t)n >= sizeof(buf)) return NULL;
-    if (mkdir(buf, 0755) != 0) return NULL;
-
-    snprintf(buf + n, sizeof(buf) - (size_t)n, "/workspace");
-    mkdir(buf, 0755);
-
-    /* T297: no per-agent DB — sessions/entries in single cclaw.db */
-
-    /* Seed into daemon DB if provided */
+    /* Seed DB row only — no directory creation */
     if (db) {
-        AgentRow *row = db_agent_seed(db, agents_dir, name);
-        agent_row_free(row);
+        db_agent_upsert(db, name, NULL, NULL, NULL);
     }
 
     return strdup(name);

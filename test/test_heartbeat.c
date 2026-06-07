@@ -5,7 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "heartbeat.h"
-#include "daemon.h"
+#include "wake.h"
 #include "db.h"
 #include "types.h"
 
@@ -21,8 +21,8 @@ static void test_heartbeat_injects_inbox(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
 
-    /* Init signal pipe so daemon_signal_session doesn't fail */
-    assert(daemon_signal_init() == 0);
+    /* Init signal pipe so wake_session doesn't fail */
+    assert(wake_init() == 0);
 
     /* Create a session, mark idle (default state) */
     int64_t sid = session_create(db, "test_hb", NULL, -1, 0);
@@ -56,14 +56,14 @@ static void test_heartbeat_injects_inbox(void) {
     assert(found);
 
     /* Drain signal pipe to verify session was signaled */
-    int fd = daemon_signal_fd();
+    int fd = wake_fd();
     int64_t signaled_sid = 0;
     ssize_t n = read(fd, &signaled_sid, sizeof(signaled_sid));
     assert(n == sizeof(signaled_sid));
     assert(signaled_sid == sid);
 
     free(items);
-    daemon_signal_close();
+    wake_close();
     db_close(db);
     printf("  PASS: heartbeat injects into inbox + signals daemon\n");
 }
@@ -71,7 +71,7 @@ static void test_heartbeat_injects_inbox(void) {
 static void test_heartbeat_skips_non_idle(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
-    assert(daemon_signal_init() == 0);
+    assert(wake_init() == 0);
 
     /* Create session and set state to running */
     int64_t sid = session_create(db, "test_hb_running", NULL, -1, 0);
@@ -97,7 +97,7 @@ static void test_heartbeat_skips_non_idle(void) {
     assert(count == 0);
     free(items);
 
-    daemon_signal_close();
+    wake_close();
     db_close(db);
     printf("  PASS: heartbeat skips non-idle sessions\n");
 }

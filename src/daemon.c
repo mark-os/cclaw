@@ -14,8 +14,8 @@
 #include "config.h"
 #include "context.h"
 #include "log.h"
-#include "agent_exit.h"
-#include "turn_loop.h"
+#include "llm_proc.h"
+
 #include <cJSON.h>
 
 #include <dirent.h>
@@ -444,30 +444,7 @@ static char *daemon_agent_get_state(const char *agent_name, int64_t session_id) 
 
 /* ── DB helpers (T86) ───────────────────────────────────────────── */
 
-int session_set_last_route(sqlite3 *db, int64_t session_id, const char *route) {
-    const char *sql = "UPDATE sessions SET last_route=?, updated_at=unixepoch() WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, route, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
-}
 
-char *session_get_last_route(sqlite3 *db, int64_t session_id) {
-    const char *sql = "SELECT last_route FROM sessions WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    char *result = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *val = (const char *)sqlite3_column_text(stmt, 0);
-        if (val) result = strdup(val);
-    }
-    sqlite3_finalize(stmt);
-    return result;
-}
 
 /* ── Agent process entry (T83, V21, V23, V34) ──────────────────── */
 
@@ -717,7 +694,7 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
         if (agent_name) {
             setenv("CCLAW_AGENT_NAME", agent_name, 1);
             /* T297: single DB — agent opens same cclaw.db */
-            setenv("CCLAW_AGENT_DB", g_daemon_db_path, 1);
+            setenv("CCLAW_DB", g_daemon_db_path, 1);
             /* T279: inject config (no ceiling for direct fork) */
             inject_agent_config_env(db, agent_name, NULL);
         }
@@ -746,10 +723,10 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
         /* Child: run turn loop directly */
         {
             Config *child_cfg = config_load_from_env();
-            if (!child_cfg) _exit(AGENT_EXIT_ERROR);
+            if (!child_cfg) _exit(1);
             sqlite3 *child_db = db_open(g_daemon_db_path);
-            if (!child_db) { config_free(child_cfg); _exit(AGENT_EXIT_ERROR); }
-            db_set_agent_pragmas(child_db);
+            if (!child_db) { config_free(child_cfg); _exit(1); }
+            db_set_child_pragmas(child_db);
 
             /* Drain inbox + ensure system prompt */
             inbox_consume_into_entries(child_db, session_id, 100);
@@ -764,16 +741,10 @@ static int fork_agent(const Config *cfg, sqlite3 *db, int64_t session_id,
             }
             entry_branch_free(branch, bc);
 
-            AgentSetup child_setup;
-            agent_setup_init(&child_setup, child_db, session_id, child_cfg,
-                             agent_name, NULL, 0, AGENT_SETUP_DAEMON);
-            int trc = turn_loop_run(child_db, session_id, child_cfg,
-                                    &child_setup, TURN_MODE_DAEMON);
-            agent_setup_destroy(&child_setup);
             db_close(child_db);
             config_free(child_cfg);
-            _exit(trc == TURN_EXIT_DONE ? AGENT_EXIT_DONE :
-                  trc == TURN_EXIT_PARKED ? AGENT_EXIT_DONE : AGENT_EXIT_ERROR);
+            /* TODO: Task 3 replaces fork_agent with state machine */
+            _exit(llm_proc_main(session_id));
         }
     }
 
@@ -1174,7 +1145,7 @@ static void reap_children(const Config *cfg, sqlite3 *db) {
          * for normal completion (exit 0/1) or abnormal termination (signal).
          * Exit codes 2/3/4 mean agent set "waiting" — daemon respects that. */
         int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-        if (exit_code == AGENT_EXIT_DONE || exit_code == AGENT_EXIT_ERROR ||
+        if (exit_code == 0 || exit_code == 1 ||
             !WIFEXITED(status)) {
             daemon_agent_set_state(agent_name, session_id, "idle");
         }
@@ -1400,7 +1371,7 @@ static void process_spawn_queue(const Config *cfg, sqlite3 *db) {
             const char *eff_agent = child_agent_name ? child_agent_name : parent_agent_name;
             setenv("CCLAW_AGENT_NAME", eff_agent, 1);
             /* T297: single DB — sub-agent opens same cclaw.db */
-            setenv("CCLAW_AGENT_DB", g_daemon_db_path, 1);
+            setenv("CCLAW_DB", g_daemon_db_path, 1);
 
             /* T279: inject config with parent ceiling enforcement */
             inject_agent_config_env(db, eff_agent, parent_ac);

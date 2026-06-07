@@ -17,7 +17,7 @@ static void clear_env(void) {
     unsetenv("CCLAW_MAX_TOKENS");
     unsetenv("CCLAW_CONTEXT_WINDOW");
     unsetenv("CCLAW_WORKSPACE");
-    unsetenv("CCLAW_AGENT_DB");
+    unsetenv("CCLAW_DB");
     unsetenv("CCLAW_MAX_ITERATIONS");
     unsetenv("CCLAW_MAX_HISTORY_TOKENS");
     unsetenv("CCLAW_SHELL_TIMEOUT");
@@ -39,7 +39,7 @@ static void test_env_defaults(void) {
     assert(cfg->provider.max_tokens == 4096);
     assert(cfg->provider.context_window == 65536);
     assert(strcmp(cfg->workspace, ".cclaw/agents/default/workspace") == 0);
-    assert(strcmp(cfg->db_path, ".cclaw/agents/default/agent.db") == 0);
+    assert(strcmp(cfg->db_path, "cclaw.db") == 0);
     assert(cfg->max_iterations == 25);
     assert(cfg->shell_timeout == 30);
     assert(cfg->token_rate_limit == 1000000);
@@ -81,7 +81,7 @@ static void test_env_all_overrides(void) {
     setenv("CCLAW_MAX_TOKENS", "8192", 1);
     setenv("CCLAW_CONTEXT_WINDOW", "200000", 1);
     setenv("CCLAW_WORKSPACE", "/tmp/ws", 1);
-    setenv("CCLAW_AGENT_DB", "/tmp/a.db", 1);
+    setenv("CCLAW_DB", "/tmp/a.db", 1);
     setenv("CCLAW_MAX_ITERATIONS", "50", 1);
     setenv("CCLAW_MAX_HISTORY_TOKENS", "10000", 1);
     setenv("CCLAW_SHELL_TIMEOUT", "60", 1);

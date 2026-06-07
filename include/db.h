@@ -20,8 +20,8 @@ typedef struct {
  * Returns NULL on failure. */
 sqlite3 *db_open(const char *path);
 
-/* V57: Set mmap + reduced cache pragmas for agent processes. */
-void db_set_agent_pragmas(sqlite3 *db);
+/* Set mmap + reduced cache pragmas for child processes (short-lived). */
+void db_set_child_pragmas(sqlite3 *db);
 
 /* Close DB handle. */
 void db_close(sqlite3 *db);
@@ -249,13 +249,10 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
 char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *channel_id);
 int db_channel_binding_set(sqlite3 *db, const char *channel_type, const char *channel_id, const char *agent_name);
 
-/* Pending entry helpers (used by daemon and CLI for exit code dispatch) */
-char *find_pending_entry(sqlite3 *adb, int64_t session_id, int64_t *entry_id);
-char *read_tool_call_args(sqlite3 *adb, int64_t session_id,
-                          const char *tool_call_id, char **tool_name);
-int update_pending_entry(sqlite3 *adb, int64_t entry_id, const char *result);
-
 /* T268: Sum cost_nano for all entries in a session. Returns total nanodollars. */
 int64_t session_cost(sqlite3 *db, int64_t session_id);
 
+/* Session route tracking */
+int session_set_last_route(sqlite3 *db, int64_t session_id, const char *route);
+char *session_get_last_route(sqlite3 *db, int64_t session_id);
 #endif

@@ -2,7 +2,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "cron.h"
 #include "db.h"
-#include "daemon.h"
+#include "wake.h"
+#include "db.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -196,11 +197,11 @@ void cron_list_free(CronJob *jobs, int count) {
 /* Insert cron task into inbox and signal daemon to process */
 static void execute_job(const char *agent_name, int64_t session_id, const char *task) {
     if (agent_name && agent_name[0]) {
-        daemon_inbox_insert(agent_name, session_id, "cron", task);
-        daemon_signal_session_agent(session_id, agent_name);
+        inbox_insert(cron_db, session_id, "cron", task);
+        wake_session(session_id);
     } else {
         inbox_insert(cron_db, session_id, "cron", task);
-        daemon_signal_session(session_id);
+        wake_session(session_id);
     }
 }
 

@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include "agent.h"
 #include "db.h"
 #include "config.h"
 #include "gemini_cache.h"

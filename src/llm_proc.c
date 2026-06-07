@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
-#include "llm_child.h"
+#include "llm_proc.h"
 #include "config.h"
 #include "context.h"
 #include "db.h"
@@ -23,7 +23,7 @@
 
 #define MAX_LLM_RETRIES 3
 
-int llm_child_main(int64_t session_id) {
+int llm_proc_main(int64_t session_id) {
     /* V34: die if parent dies */
     prctl(PR_SET_PDEATHSIG, SIGTERM);
     shutdown_init();
@@ -31,12 +31,12 @@ int llm_child_main(int64_t session_id) {
     Config *cfg = config_load_from_env();
     if (!cfg) { fprintf(stderr, "llm: config load failed\n"); return LLM_EXIT_ERROR; }
 
-    const char *db_path = getenv("CCLAW_AGENT_DB");
+    const char *db_path = getenv("CCLAW_DB");
     if (!db_path || !db_path[0]) db_path = cfg->db_path;
 
     sqlite3 *db = db_open(db_path);
     if (!db) { config_free(cfg); return LLM_EXIT_ERROR; }
-    db_set_agent_pragmas(db);
+    db_set_child_pragmas(db);
 
     Arena *a = arena_create(ARENA_DEFAULT_SIZE);
     if (!a) { db_close(db); config_free(cfg); return LLM_EXIT_ERROR; }

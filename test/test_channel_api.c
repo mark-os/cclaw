@@ -1,5 +1,5 @@
 #include "channel_api.h"
-#include "daemon.h"
+#include "wake.h"
 #include "db.h"
 #include <assert.h>
 #include <fcntl.h>
@@ -22,7 +22,7 @@ static void cleanup(void) {
 
 static void test_channel_emit(void) {
     cleanup();
-    /* Create FIFO so daemon_wake succeeds */
+    /* Create FIFO so wake_external succeeds */
     mkfifo(TEST_FIFO, 0600);
     /* Open read end non-blocking (so write doesn't block) */
     int rfd = open(TEST_FIFO, O_RDONLY | O_NONBLOCK);
@@ -127,10 +127,10 @@ static void test_channel_outbox(void) {
     channel_ctx_free(ctx);
 }
 
-static void test_daemon_wake(void) {
+static void test_wake_external(void) {
     cleanup();
     /* No FIFO — should return -1 gracefully */
-    int rc = daemon_wake(TEST_DB);
+    int rc = wake_external(TEST_DB);
     assert(rc == -1);
 
     /* Create FIFO */
@@ -138,7 +138,7 @@ static void test_daemon_wake(void) {
     int rfd = open(TEST_FIFO, O_RDONLY | O_NONBLOCK);
     assert(rfd >= 0);
 
-    rc = daemon_wake(TEST_DB);
+    rc = wake_external(TEST_DB);
     assert(rc == 0);
 
     /* Read the byte */
@@ -165,8 +165,8 @@ int main(void) {
     test_channel_outbox();
     printf(" OK\n");
 
-    printf("test_daemon_wake...");
-    test_daemon_wake();
+    printf("test_wake_external...");
+    test_wake_external();
     printf(" OK\n");
 
     cleanup();

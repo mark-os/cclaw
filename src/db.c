@@ -40,7 +40,7 @@ static sqlite3 *db_open_with_schema(const char *path, const char *schema, const 
 }
 
 /* V57: mmap + reduced cache + relaxed sync for agent processes (not daemon) */
-void db_set_agent_pragmas(sqlite3 *db) {
+void db_set_child_pragmas(sqlite3 *db) {
     sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA mmap_size=67108864;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA cache_size=-512;", NULL, NULL, NULL);
@@ -1594,4 +1594,30 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
         }
     }
     cJSON_Delete(root);
+}
+
+/* Session last_route helpers (moved from daemon.c) */
+int session_set_last_route(sqlite3 *db, int64_t session_id, const char *route) {
+    const char *sql = "UPDATE sessions SET last_route=?, updated_at=unixepoch() WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, route, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+char *session_get_last_route(sqlite3 *db, int64_t session_id) {
+    const char *sql = "SELECT last_route FROM sessions WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    char *result = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (val) result = strdup(val);
+    }
+    sqlite3_finalize(stmt);
+    return result;
 }

@@ -166,9 +166,9 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_WORKSPACE");
     cfg->workspace = str_dup(v ? v : ".cclaw/agents/default/workspace");
 
-    /* T223: Agent DB path — default under .cclaw/agents/default/ */
-    v = getenv("CCLAW_AGENT_DB");
-    cfg->db_path = str_dup(v ? v : ".cclaw/agents/default/agent.db");
+    /* DB path — parent sets CCLAW_DB for children at fork */
+    v = getenv("CCLAW_DB");
+    cfg->db_path = str_dup(v ? v : "cclaw.db");
 
     /* Scalars */
     v = getenv("CCLAW_MAX_ITERATIONS");

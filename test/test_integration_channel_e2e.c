@@ -1,4 +1,4 @@
-/* T253: channel_emit → daemon_wake → agent fork → outbox delivery cycle.
+/* T253: channel_emit → wake_external → agent fork → outbox delivery cycle.
  * Uses a mock channel binary that emits one message and reads outbox. */
 #define _GNU_SOURCE
 #include "daemon.h"

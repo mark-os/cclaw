@@ -92,9 +92,9 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
  * Returns 0 on success, -1 on failure. */
 int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json);
 
-/* T186: Create an ephemeral agent directory with agent.db + workspace.
- * Generates name "ephemeral-<uuid>". Creates agents_dir/name/ with agent.json,
- * agent.db (initialized), and workspace/ subdir. Seeds DB row.
+/* T186: Create an ephemeral agent directory with workspace.
+ * Generates name "ephemeral-<uuid>". Creates agents_dir/name/ with
+ * workspace/ subdir. Seeds DB row.
  * Returns heap-allocated agent name on success (caller frees), NULL on failure. */
 char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db);
 

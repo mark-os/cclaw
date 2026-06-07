@@ -2,7 +2,7 @@
 #include "telegram.h"
 #include "config.h"
 #include "db.h"
-#include "daemon.h"
+#include "wake.h"
 #include "http.h"
 #include "agent_config.h"
 #include "cJSON.h"
@@ -1025,12 +1025,12 @@ static void process_message(cJSON *msg) {
     {
         char *aname = session_get_agent_name(g_db, session_id);
         if (aname) {
-            daemon_inbox_insert(aname, session_id, "telegram", text->valuestring);
-            daemon_signal_session_agent(session_id, aname);
+            inbox_insert(g_db, session_id, "telegram", text->valuestring);
+            wake_session(session_id);
             free(aname);
         } else {
             inbox_insert(g_db, session_id, "telegram", text->valuestring);
-            daemon_signal_session(session_id);
+            wake_session(session_id);
         }
     }
 }

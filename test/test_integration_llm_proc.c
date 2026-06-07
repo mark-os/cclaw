@@ -10,7 +10,7 @@
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
-#include "llm_child.h"
+#include "llm_proc.h"
 #include "db.h"
 #include "config.h"
 #include "mock_server.h"
@@ -62,12 +62,12 @@ static void test_llm_child_stop(void) {
     setenv("OPENROUTER_API_KEY", "test-key", 1);
     setenv("CCLAW_MODEL", "test-model", 1);
     setenv("CCLAW_CONTEXT_WINDOW", "128000", 1);
-    setenv("CCLAW_AGENT_DB", db_path, 1);
+    setenv("CCLAW_DB", db_path, 1);
     setenv("CCLAW_STREAM", "0", 1);
     setenv("CCLAW_MAX_ITERATIONS", "5", 1);
     setenv("CCLAW_AUTO_RECALL", "0", 1);
 
-    int rc = llm_child_main(sid);
+    int rc = llm_proc_main(sid);
     if (rc != LLM_EXIT_STOP) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected exit 0, got %d", rc);
@@ -128,12 +128,12 @@ static void test_llm_child_tool_calls(void) {
     setenv("OPENROUTER_API_KEY", "test-key", 1);
     setenv("CCLAW_MODEL", "test-model", 1);
     setenv("CCLAW_CONTEXT_WINDOW", "128000", 1);
-    setenv("CCLAW_AGENT_DB", db_path, 1);
+    setenv("CCLAW_DB", db_path, 1);
     setenv("CCLAW_STREAM", "0", 1);
     setenv("CCLAW_MAX_ITERATIONS", "5", 1);
     setenv("CCLAW_AUTO_RECALL", "0", 1);
 
-    int rc = llm_child_main(sid);
+    int rc = llm_proc_main(sid);
     if (rc != LLM_EXIT_TOOLCALL) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected exit 10, got %d", rc);
@@ -205,12 +205,12 @@ static void test_llm_child_error(void) {
     setenv("OPENROUTER_API_KEY", "test-key", 1);
     setenv("CCLAW_MODEL", "test-model", 1);
     setenv("CCLAW_CONTEXT_WINDOW", "128000", 1);
-    setenv("CCLAW_AGENT_DB", db_path, 1);
+    setenv("CCLAW_DB", db_path, 1);
     setenv("CCLAW_STREAM", "0", 1);
     setenv("CCLAW_MAX_ITERATIONS", "5", 1);
     setenv("CCLAW_AUTO_RECALL", "0", 1);
 
-    int rc = llm_child_main(sid);
+    int rc = llm_proc_main(sid);
     if (rc != LLM_EXIT_ERROR) {
         char msg[64];
         snprintf(msg, sizeof(msg), "expected exit 1, got %d", rc);

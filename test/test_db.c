@@ -207,7 +207,7 @@ static void test_agent_pragmas(void) {
     sqlite3 *db = db_open(path);
     assert(db != NULL);
 
-    db_set_agent_pragmas(db);
+    db_set_child_pragmas(db);
 
     /* After: mmap_size=67108864, cache_size=-512 */
     sqlite3_int64 mmap_after = 0;

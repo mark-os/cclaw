@@ -1,7 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "heartbeat.h"
 #include "db.h"
-#include "daemon.h"
+#include "wake.h"
+#include "db.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,12 +32,12 @@ static void inject_heartbeat(void) {
         int64_t sid = sqlite3_column_int64(stmt, 0);
         char *aname = session_get_agent_name(hb_db, sid);
         if (aname) {
-            daemon_inbox_insert(aname, sid, "heartbeat", HEARTBEAT_PROMPT);
-            daemon_signal_session_agent(sid, aname);
+            inbox_insert(hb_db, sid, "heartbeat", HEARTBEAT_PROMPT);
+            wake_session(sid);
             free(aname);
         } else {
             inbox_insert(hb_db, sid, "heartbeat", HEARTBEAT_PROMPT);
-            daemon_signal_session(sid);
+            wake_session(sid);
         }
     }
     sqlite3_finalize(stmt);

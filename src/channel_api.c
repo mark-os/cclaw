@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "channel_api.h"
-#include "daemon.h"
+#include "wake.h"
 #include "db.h"
 
 #include <fcntl.h>
@@ -46,7 +46,7 @@ int channel_emit(ChannelCtx *ctx, const char *event_type, const char *payload) {
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
-    daemon_wake(ctx->db_path);
+    wake_external(ctx->db_path);
     return 0;
 }
 
@@ -153,15 +153,3 @@ int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* V105/T242: Wake daemon via named FIFO — write 1 byte */
-int daemon_wake(const char *db_path) {
-    char *path = daemon_pipe_path(db_path);
-    if (!path) return -1;
-    int fd = open(path, O_WRONLY | O_NONBLOCK);
-    free(path);
-    if (fd < 0) return -1;
-    char c = 1;
-    ssize_t n = write(fd, &c, 1);
-    close(fd);
-    return (n == 1) ? 0 : -1;
-}

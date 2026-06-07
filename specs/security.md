@@ -46,7 +46,7 @@ The agent process is **your compiled code** — not a container running arbitrar
 | Agent ignores config limit | Infinite loop, resource exhaustion | `setrlimit` is kernel-enforced (can't be bypassed from userspace) |
 | Memory corruption | Arbitrary behavior | `-Wall -Wextra -Werror`, ASAN in dev, arena allocator limits scope |
 | Agent leaks secret to LLM context | Key visible in session history | Never include provider-native env var (e.g. `OPENROUTER_API_KEY`) in any message/tool_result; grep for leaks in tests |
-| Agent writes to wrong DB | Cross-agent data corruption | Agent only opens `CCLAW_AGENT_DB` path; namespace sandbox hides other paths |
+| Agent writes to wrong DB | Cross-agent data corruption | Agent only opens `CCLAW_DB` path; writes scoped by agent_name |
 
 ### Why This Is Acceptable
 
@@ -65,7 +65,7 @@ Daemon injects config at fork time. Agent reads once at startup, builds internal
 1. **Env vars are the sole config source** — agent never reads config files, never opens cclaw.db for config
 2. **Parse once, validate early** — `agent_config_from_env()` runs at startup, validates all values, fails fast on malformed input
 3. **Immutable after load** — config struct is read-only for process lifetime; no runtime config reload
-4. **Fail closed** — missing required var (e.g. `CCLAW_AGENT_DB`) → `_exit(AGENT_EXIT_ERROR)` immediately
+4. **Fail closed** — missing required var (e.g. `CCLAW_DB`) → `_exit(AGENT_EXIT_ERROR)` immediately
 5. **Minimal surface** — only inject what the agent needs; don't pass daemon internals
 
 ### Env Var Security Properties
@@ -73,7 +73,7 @@ Daemon injects config at fork time. Agent reads once at startup, builds internal
 | Var | Sensitivity | Notes |
 |-----|-------------|-------|
 | `CCLAW_AGENT_NAME` | Low | Identity string |
-| `CCLAW_AGENT_DB` | Low | Path |
+| `CCLAW_DB` | Low | Path |
 | `CCLAW_WORKSPACE` | Low | Path |
 | `CCLAW_MODEL` | Low | Model name string |
 | `CCLAW_MAX_ITERATIONS` | Low | Integer cap |
@@ -152,7 +152,7 @@ Child:  tools=[file_read,web_fetch], hosts=[api.github.com]
 
 **Why intersection, not union**: prevents privilege escalation via sub-agent. A restricted agent cannot grant itself more permissions by spawning a child with a broader config.
 
-**Unnamed spawn** (no name arg): child session in parent's agent.db, same agent, same config. Process isolation only (own fork, setrlimit). No privilege boundary — it's the same agent doing parallel work.
+**Unnamed spawn** (no name arg): child session in same cclaw.db, same agent, same config. Process isolation only (own fork, setrlimit). No privilege boundary — it's the same agent doing parallel work.
 
 **Named spawn** (launch existing agent): runs in target agent's own DB with target's own config, but daemon enforces parent ceiling. Target agent's config is a *request*, parent's config is the *ceiling*. Agent must already exist (⊥ created at spawn time).
 | 4 | `http_check_policy()` | Agent outbound HTTP | No (app-level) | Only via code bug |
@@ -190,8 +190,8 @@ Mitigations:
 Agent has path traversal in `db_open()` and opens another agent's DB.
 
 Mitigations:
-- Agent only receives own DB path via `CCLAW_AGENT_DB`
-- No mechanism to discover other agent paths (no cclaw.db access by default)
+- Agent receives DB path via `CCLAW_DB`; all data scoped by agent_name column
+- No cross-agent data access (agent_name enforced in queries)
 
 ### Malicious config in cclaw.db
 

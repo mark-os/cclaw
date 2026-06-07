@@ -82,29 +82,28 @@ Exception: zero-usage retry happens WITHIN the agent process (no exit/re-fork). 
 
 ## Log Levels & Observability
 
-Implemented via `LOG_*` macros in `include/log.h`. All output → stderr → pipe → journal.db.
+Implemented via `LOG_*` macros in `include/log.h`. All output → stderr → pipe → parent.
 
 | level | env value | what's logged | destination |
 |-------|-----------|---------------|-------------|
-| error | `error` | errors only | stderr → journal.db |
-| info (default) | `info` | + turn start/end, warnings | stderr → journal.db |
-| debug | `debug` | + tool dispatch, LLM timing, context plan stats, retry decisions, response shapes | stderr → journal.db |
-| trace | `trace` | + full req/resp JSON | stderr → journal.db |
+| error | `error` | errors only | stderr → syslog/terminal |
+| info (default) | `info` | + turn start/end, warnings | stderr → syslog/terminal |
+| debug | `debug` | + tool dispatch, LLM timing, context plan stats, retry decisions, response shapes | stderr → syslog/terminal |
+| trace | `trace` | + full req/resp JSON | stderr → syslog/terminal |
 
-`CCLAW_LOG_LEVEL` env var, stored in cclaw.db kv as `log_level`, injected at fork.
 `CCLAW_LOG_LEVEL` env var, stored in cclaw.db kv as `log_level`, injected at fork.
 CLI `--log-level=trace` enables full req/resp JSON. CLI `--verbose` tees stderr pipe to terminal.
 
-Format: `HH:MM:SS.mmm [LEVEL] message\n` — parseable by journal.db collector and grep.
+Format: `HH:MM:SS.mmm [LEVEL] message\n` — parseable by syslog and grep.
 
 ## CLI/Daemon Logging Parity
 
-**Daemon mode (implemented):**
-- `pipe(stderr)` → log_collector → journal.db
-- `pipe(stdout)` → log_collector → journal.db (currently unused by agent)
+**Daemon mode:**
+- `pipe(stderr)` → parent drains → syslog (`LOG_DAEMON` facility; `sd_journal_send` if journald available)
+- `pipe(stdout)` → /dev/null (response delivered from DB post-exit)
 
-**CLI mode (T233):**
-- `pipe(stderr)` → parent drains → journal.db + tee to terminal (if `--verbose`)
-- stdout: inherited by child (goes directly to terminal; future: streaming tokens)
+**CLI mode:**
+- `pipe(stderr)` → parent drains → tee to terminal (if `--verbose` or log_level ≥ debug)
+- stdout: inherited by child (goes directly to terminal for streaming display)
 
-**Design principle:** stderr = structured logs (always persisted). stdout = user content (display only, not persisted to journal).
+**Design principle:** stderr = structured logs (daemon persists via syslog). stdout = user content (display only).

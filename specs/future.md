@@ -54,7 +54,7 @@ Move to §T when ready to implement.
 - Episodic memory: key events/decisions tagged and retrievable by topic
 
 ### Shared memory blocks
-- Problem: each agent's memory_blocks live in its own agent.db — no cross-agent visibility
+- Problem: memory_blocks are scoped by agent_name in cclaw.db — no cross-agent visibility
 - Approach: `shared_memory_blocks` table in cclaw.db (daemon-owned)
 - Read: agents get read-only access via `shared_memory_read` tool (or bind-mount cclaw.db ro)
 - Write: mediated by daemon — agent requests write via exit code 4 or a dedicated tool that posts to inbox

@@ -38,7 +38,7 @@ Load order: alphabetical by filename/dirname.
 
 ## Agent-Side Component (Tools + Hooks)
 
-Runs inside `agent_run` in the shared QuickJS context. Loaded fresh each turn (process is disposable — no persistent JS state beyond what's in agent.db).
+Runs inside `agent_run` in the shared QuickJS context. Loaded fresh each turn (process is disposable — no persistent JS state beyond what's in cclaw.db).
 
 ### Factory Function
 
@@ -259,4 +259,4 @@ CREATE TABLE channel_state (
 
 **Why shared context for agent-side?** Extensions need to interact — an MCP extension registers tools that a guardrails extension might hook via `beforeToolCall`. Separate contexts would prevent this. The shared heap is bounded by V5 limits regardless.
 
-**Why no persistent JS state?** Agent processes are one-turn-then-exit. Any state that needs to survive goes in agent.db (via `callTool("db_query", ...)` or the existing `js_define_tool` persistence path). This matches CClaw's process model — memory fully reclaimed after each turn.
+**Why no persistent JS state?** Agent processes are one-turn-then-exit. Any state that needs to survive goes in cclaw.db (via `callTool("db_query", ...)` or the existing `js_define_tool` persistence path). This matches CClaw's process model — memory fully reclaimed after each turn.

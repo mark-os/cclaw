@@ -6,7 +6,7 @@ A minimal autonomous AI agent runtime in C. Turn-based execution, SQLite persist
 
 - **Agent runtime first** — excellent at running agent loops across providers.
 - **Daemon as init** — schedules, forks, reaps. Never executes LLM logic.
-- **Agents as users** — each gets a home directory, own DB, own workspace.
+- **Agents as users** — each gets a workspace directory, sessions scoped by name.
 - **Processes are disposable** — one turn, then exit. Memory fully reclaimed.
 - **Exit codes as IPC** — agents signal intent, daemon reads details from DB.
 - **Config via environment** — injected at fork, immutable for process lifetime.
@@ -33,22 +33,22 @@ graph TD
     A1 --> DB
     A2 --> DB
 
-    DB[(3-DB SQLite WAL<br/>cclaw.db · agent.db · journal.db)]
+    DB[(SQLite WAL<br/>cclaw.db)]
 ```
 
 **Daemon mode** (`--daemon`): epoll loop forks isolated agent processes per session turn. Dispatches on exit code (0=deliver, 2=spawn, 3=approval, 4=config).
 
-**CLI mode** (default): single process, runs the agent loop directly against `~/.cclaw/agents/default/agent.db`.
+**CLI mode** (default): single process, runs the agent loop directly against `~/.cclaw/cclaw.db`.
 
 **Agent processes**: sandboxed with setrlimit (memory/CPU caps). Drain inbox → LLM loop → write response → exit with intent code.
 
 ## Deployment Models
 
-Agent processes are stateless — one turn, then exit, memory fully reclaimed. All persistent state lives in SQLite (3-DB model). This means any environment that can provide env vars + SQLite can run agent turns:
+Agent processes are stateless — one turn, then exit, memory fully reclaimed. All persistent state lives in SQLite (single `cclaw.db`). This means any environment that can provide env vars + SQLite can run agent turns:
 
 - **CLI** (default) — single process, no daemon. Proves the agent loop is self-contained.
 - **Linux daemon** — orchestrator that forks/reaps agent processes, handles channels, cron, approvals. Not required for agent execution.
-- **Lambda / Workers / embedded** — set `CCLAW_*` env vars, point at an agent.db, run one turn. No daemon, no long-lived process.
+- **Lambda / Workers / embedded** — set `CCLAW_*` env vars, point at a cclaw.db, run one turn. No daemon, no long-lived process.
 
 The daemon adds multi-agent coordination, Telegram/webhook channels, and sub-agent spawning. The core agent loop needs nothing beyond env config and a writable SQLite file.
 
@@ -94,12 +94,10 @@ Config resolution (highest priority first):
 
 ```
 ~/.cclaw/
-├── cclaw.db           ← system registry + config
+├── cclaw.db           ← all state (sessions, entries, config, memory)
 ├── .cclaw_key         ← encryption key (mode 0600)
-├── journal.db         ← all logs
 └── agents/
     └── default/
-        ├── agent.db   ← sessions, entries, memory
         └── workspace/ ← agent-created files
 ```
 

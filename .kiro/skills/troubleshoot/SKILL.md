@@ -34,15 +34,15 @@ FROM entries WHERE role=2 AND usage_in IS NULL AND usage_out IS NULL
 
 If found: provider returned HTTP 200 with 0 tokens. See `specs/error-handling.md` E1.
 
-### 3. Check journal.db for stderr output
+### 3. Check stderr logs
 
-```sql
--- Recent log lines for a session
-SELECT source, pid, stream, line, datetime(created_at, 'unixepoch') as ts
-FROM log WHERE session_id=N ORDER BY id DESC LIMIT 50;
+Daemon mode: logs go to syslog (`journalctl -u cclaw` or `/var/log/syslog`).
+CLI mode: stderr tees to terminal. Use `--log-level=trace` for full details.
+
+```bash
+# Recent syslog entries (if using systemd)
+journalctl -u cclaw --since "5 min ago"
 ```
-
-Stream: 1=stdout, 2=stderr. Note: CLI mode currently does NOT pipe to journal (T233 pending).
 
 ### 4. Reproduce with --log-level=trace
 
@@ -99,5 +99,4 @@ SELECT id, name, leaf_id, state FROM sessions WHERE id=N;
 
 - `specs/error-handling.md` — full error classification table
 - `scripts/repro_empty_response.sh` — provider reliability test
-- Agent DB: `~/.cclaw/agents/<name>/agent.db` (or `.cclaw/agents/<name>/agent.db` relative)
-- Journal: `~/.cclaw/journal.db` (daemon mode only until T233)
+- DB: `~/.cclaw/cclaw.db` (all state: sessions, entries, config)

@@ -92,15 +92,12 @@ Set by the CLI process, not from agent_config:
 
 ```
 ~/.cclaw/
-├── cclaw.db           ← system registry + config (kv + agent_config tables)
+├── cclaw.db           ← all state (sessions, entries, config, memory, channels)
 ├── .cclaw_key         ← encryption key for secrets (mode 0600)
-├── journal.db         ← all logs
 └── agents/
     ├── default/
-    │   ├── agent.db   ← sessions, entries, memory
     │   └── workspace/ ← agent-created files
     └── researcher/
-        ├── agent.db
         └── workspace/
 ```
 

@@ -10,11 +10,11 @@ CClaw is a **minimal** autonomous AI agent in C. Every line of code must earn it
 
 CClaw is designed around Unix philosophy:
 - Daemon as init system — schedules, forks, reaps. Never executes LLM logic.
-- Agents as isolated users — each has a home directory (`agents/<name>/`), own DB, own workspace.
+- Agents as isolated users — each has a workspace directory (`agents/<name>/workspace/`), sessions scoped by agent_name in cclaw.db.
 - Processes are cheap and disposable — one turn, then exit. Memory fully reclaimed.
-- Communication via exit codes — agents signal intent (0=done, 2=spawn, 3=approval, 4=config), daemon reads details from agent DB post-reap.
+- Communication via exit codes — agents signal intent (0=done, 2=spawn, 3=approval, 4=config), daemon reads details from DB post-reap.
 - Config via environment — daemon injects `CCLAW_*` env vars at fork. No config files in agent processes.
-- Pipes for logging — stdout/stderr piped to log collector, written to journal.db.
+- Logging via syslog (daemon) or stderr tee (CLI). No log collector.
 - Trust the binary, sandbox the children — agent process is trusted C code; shell/mjs children are untrusted (namespace-sandboxed).
 
 **Inspiration**
@@ -31,26 +31,10 @@ CClaw shamelessly borrows ideas from these projects:
 
 **Principles:**
 - Simple over clever. Blocking I/O. Threads over callbacks.
-- 3-DB SQLite backbone — cclaw.db (policy/registry), agent.db (sessions/state), journal.db (logs).
+- Single-file SQLite backbone — cclaw.db (all state: sessions, entries, config, memory, channels).
 - Self-augmenting via MicroQuickJS plugin system — agents load JS extensions from workspace at startup.
 - One tool at a time during development. Prove each layer works before adding the next.
 - No backward compatibility. No migrations. No users yet — move fast, break things.
-
-## Architecture (3-DB Split)
-
-```
-cclaw.db (daemon-owned)           Per-agent agent.db              journal.db (collector-owned)
-├── agents registry               ├── sessions                    └── log (all stdout/stderr)
-├── agent_config (policy)         ├── entries (split-column)
-├── providers                     ├── inbox
-├── kv (encrypted secrets)        ├── js_tools
-├── channel_bindings              ├── memory_blocks
-├── spawn_queue                   └── kv (local prefs only)
-├── cron_jobs
-└── approvals
-```
-
-See [specs/schema.md](specs/schema.md) for full DDL.
 
 ## Target Platforms
 

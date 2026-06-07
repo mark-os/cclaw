@@ -6,7 +6,7 @@
 #include <time.h>
 
 /* V97: Logging macros. All output goes to stderr.
- * Timestamp + level prefix for journal.db parsing.
+ * Timestamp + level prefix for structured logging.
  * Usage: LOG_INFO(cfg, "turn %d started", turn_id); */
 
 #define CCLAW_LOG(level, cfg_ptr, fmt, ...) do { \

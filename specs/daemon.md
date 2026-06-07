@@ -4,21 +4,20 @@
 
 | Component | Responsibility | ⊥ Does |
 |-----------|---------------|--------|
-| Daemon | fork agents, reap children, dispatch on exit code, deliver responses, enforce limits, write agent inboxes, spawn log collector | LLM calls, tool exec, context build |
-| Agent process | drain inbox, run LLM loop, write entries to own DB, exit w/ code | fork other agents, deliver to channels, write cclaw.db |
-| Log collector | receive stdout/stderr from all processes via fd passing, write journal.db | anything else |
-| Channel threads | inbox_insert (to agent DB) + signal daemon | run agent logic, write entries directly |
-| CLI | in-process agent (no daemon), opens agent DB directly | multi-session concurrency, spawn_agent, approvals |
+| Daemon | fork agents, reap children, dispatch on exit code, deliver responses, enforce limits, write inboxes | LLM calls, tool exec, context build |
+| Agent process | drain inbox, run LLM loop, write entries to DB, exit w/ code | fork other agents, deliver to channels, write coordination tables |
+| Channel processes | emit events to cclaw.db + wake daemon | run agent logic, write entries directly |
+| CLI | in-process agent (no daemon), opens cclaw.db directly | multi-session concurrency, spawn_agent, approvals |
 
 ## Exit Code Protocol
 
 | Code | Meaning | Daemon Action |
 |------|---------|---------------|
-| 0 | Turn complete, deliver response | Read last assistant entry from agent DB → deliver to channel |
+| 0 | Turn complete, deliver response | Read last assistant entry from DB → deliver to channel |
 | 1 | Turn complete with error | Log error, mark session idle |
-| 2 | Spawn sub-agent requested | Read last tool_call from agent DB → fork child |
-| 3 | Approval requested | Read last tool_call from agent DB → notify admin |
-| 4 | Config change requested | Read last tool_call from agent DB → validate + apply |
+| 2 | Spawn sub-agent requested | Read last tool_call from DB → fork child |
+| 3 | Approval requested | Read last tool_call from DB → notify admin |
+| 4 | Config change requested | Read last tool_call from DB → validate + apply |
 | 127 | exec failed | Log error |
 | 128+N | Killed by signal N | Log crash, synthesize error |
 
@@ -30,15 +29,14 @@ Agent sets own session state before exit:
 
 ```
 1. Message arrives (Telegram, cron, webhook, sub-agent completion, CLI)
-2. Daemon: daemon_inbox_insert(agent_name, session_id, source, payload)
-   → opens agent's DB, inserts inbox row, closes
+2. Daemon: inbox_insert(session_id, source, payload) in cclaw.db
 3. Daemon: write(signal_pipe, &session_id, sizeof(int64))
 4. Daemon: epoll wakes on signal_pipe readable
-5. Daemon: read session_id, open agent DB, check session state == idle?
+5. Daemon: read session_id, check session state == idle?
 6. If idle: fork_agent(agent_name, session_id)
 7. Agent process:
    a. Read CCLAW_* env vars (config from daemon)
-   b. Open CCLAW_AGENT_DB
+   b. Open CCLAW_DB (cclaw.db)
    c. setrlimit(RLIMIT_AS, RLIMIT_CPU, RLIMIT_NOFILE)
    e. session state → "running"
    f. inbox_consume_into_entries(session_id) — atomic, sets last_route
@@ -48,12 +46,12 @@ Agent sets own session state before exit:
    j. _exit(code)
 8. Daemon: SIGCHLD → waitpid(WNOHANG) → reap
 9. Daemon: dispatch on exit code:
-   - 0: read last_route + last assistant entry from agent DB → deliver
-   - 2: read last tool_call → insert spawn_queue → fork sub-agent
-   - 3: read last tool_call → insert approvals → notify admin
+   - 0: read last_route + last assistant entry → deliver
+   - 2: read last tool_call → fork sub-agent
+   - 3: read last tool_call → notify admin
    - 4: read last tool_call → validate + apply config
    - 1/signal: log error
-10. Daemon: inbox_peek(agent DB, session_id) → items pending? → fork again
+10. Daemon: inbox_peek(session_id) → items pending? → fork again
 ```
 
 ## Main Loop
@@ -96,16 +94,15 @@ void fork_agent(const char *agent_name, int64_t session_id) {
     // Read config from cclaw.db agent_config table
     AgentConfig cfg = agent_config_load(daemon_db, agent_name);
 
-    // Create pipe for log collector
+    // Create pipe for stderr capture
     int log_pipe[2];
     pipe(log_pipe);
-    send_fd_to_collector(collector_sock, log_pipe[0], agent_name, session_id);
 
     pid_t pid = fork();
     if (pid == 0) {
         // Child — set env vars
         setenv("CCLAW_AGENT_NAME", agent_name, 1);
-        setenv("CCLAW_AGENT_DB", cfg.db_path, 1);
+        setenv("CCLAW_DB", db_path, 1);
         setenv("CCLAW_WORKSPACE", cfg.workspace, 1);
         setenv("CCLAW_MODEL", cfg.model, 1);
         setenv("CCLAW_MAX_ITERATIONS", cfg.max_iterations_str, 1);
@@ -113,45 +110,23 @@ void fork_agent(const char *agent_name, int64_t session_id) {
         setenv("CCLAW_TOOLS", cfg.tools_csv, 1);
         setenv("CCLAW_SHELL_TIMEOUT", cfg.shell_timeout_str, 1);
         setenv(cfg.provider.api_key_env, decrypted_key, 1);  // e.g. OPENROUTER_API_KEY
-        if (cfg.daemon_db_read)
-            setenv("CCLAW_DAEMON_DB", daemon_db_path, 1);
 
-        // Redirect stdout/stderr to log pipe
-        dup2(log_pipe[1], STDOUT_FILENO);
+        // Redirect stderr to log pipe (parent drains → syslog)
         dup2(log_pipe[1], STDERR_FILENO);
         close(log_pipe[0]); close(log_pipe[1]);
 
         close(signal_pipe[0]); close(signal_pipe[1]); close(epfd);
         prctl(PR_SET_PDEATHSIG, SIGTERM);  // V34
 
-        // Agent reads config from env, opens own DB
+        // Agent reads config from env, opens CCLAW_DB
         apply_rlimits();
         run_agent_turn(session_id);
         // run_agent_turn calls _exit(code)
     }
-    close(log_pipe[1]);  // daemon doesn't write to agent's pipe
+    close(log_pipe[1]);  // daemon reads child stderr from log_pipe[0] → syslog
     add_to_running(pid, agent_name, session_id);
 }
 ```
-
-## Log Collector
-
-Spawned once at daemon startup. Long-lived child process.
-
-```
-Daemon ←──socketpair──→ Log Collector
-                              │
-                              ├── epoll on received fds
-                              ├── read lines from agent pipes
-                              ├── batch INSERT to journal.db
-                              └── flush every 100ms or 64 lines
-```
-
-- Daemon creates unix socketpair at startup, forks collector
-- On each agent fork: daemon creates pipe, dups write-end to child stdout/stderr, sends read-end to collector via `SCM_RIGHTS` with metadata (agent_name, session_id, pid)
-- Daemon's own stdout/stderr also piped to collector (source="daemon")
-- Collector crash ⊥ kill agents (pipe write gets EPIPE, agent ignores)
-- Collector is unsandboxed (needs journal.db write access)
 
 ## Process I/O Model (stdout vs stderr)
 
@@ -159,22 +134,14 @@ Agent processes use two distinct output channels:
 
 | fd | Purpose | Content | Destination (daemon) | Destination (CLI) |
 |----|---------|---------|---------------------|-------------------|
-| stdout | User-facing content | Future: streamed LLM tokens (SSE parse → token write). Currently unused. | /dev/null (daemon delivers via channel post-exit) | Inherited — displays directly to terminal |
-| stderr | Structured logs | `LOG_*` macro output: `HH:MM:SS.mmm [LEVEL] message` | pipe → log collector → journal.db | pipe → parent drains → journal.db + optional tee to terminal |
+| stdout | Streaming tokens | SSE-parsed LLM output (CLI streaming mode) | /dev/null (daemon delivers via channel post-exit) | Inherited — displays directly to terminal |
+| stderr | Structured logs | `LOG_*` macro output: `HH:MM:SS.mmm [LEVEL] message` | pipe → parent drains → syslog | pipe → parent drains → tee to terminal |
 
 **Key design points:**
 - Agent code writes logs exclusively via `LOG_*` macros (stderr). Never `printf` to stdout.
-- Daemon mode: both stdout+stderr piped to log collector. stdout lines tagged stream=1, stderr stream=2.
-- CLI mode: stderr piped (parent tees to terminal if `--verbose` or log_level ≥ debug). stdout inherited (goes directly to terminal for future streaming display).
-- Log level controls what agent writes to stderr. Display level (CLI `--verbose`) controls what parent echoes to terminal from the pipe.
-- journal.db stores everything from the pipe regardless of display preference — full audit trail.
-
-**Future streaming (CLI only):**
-- Agent sends `"stream":true` in LLM request
-- Parses SSE `data:` chunks from curl write callback
-- Writes tokens to stdout as they arrive: `write(STDOUT_FILENO, token, len)`
-- Parent displays stdout directly (no pipe, no journal for token stream)
-- Daemon mode: stdout piped to /dev/null (response delivered from DB post-exit)
+- Daemon mode: parent drains child stderr pipe, forwards to syslog (`LOG_DAEMON` facility; `sd_journal_send` if journald available).
+- CLI mode: parent drains child stderr pipe, tees to terminal (if `--verbose` or log_level ≥ debug). stdout inherited for streaming display.
+- Log level controls what agent writes to stderr. Display level (CLI `--verbose`) controls what parent echoes.
 
 ## Env-Var Config Injection
 
@@ -183,7 +150,7 @@ Daemon reads `agent_config` table from cclaw.db at fork time. Injects as env var
 | Env Var | Source | Notes |
 |---------|--------|-------|
 | `CCLAW_AGENT_NAME` | agent identity | |
-| `CCLAW_AGENT_DB` | path to agent.db | |
+| `CCLAW_DB` | path to cclaw.db | |
 | `CCLAW_WORKSPACE` | agent_config.workspace | |
 | `CCLAW_MODEL` | agent_config.model | |
 | `CCLAW_MAX_ITERATIONS` | agent_config.max_iterations | |
@@ -191,10 +158,10 @@ Daemon reads `agent_config` table from cclaw.db at fork time. Injects as env var
 | `CCLAW_TOOLS` | agent_config.tools | comma-separated |
 | `CCLAW_SHELL_TIMEOUT` | agent_config.shell_timeout | seconds |
 | `CCLAW_LOG_LEVEL` | cclaw.db kv `log_level` | trace\|debug\|info\|error |
-| Provider API key (e.g. `OPENROUTER_API_KEY`) | cclaw.db kv (decrypted) | injected as native env var per provider config |
+| Provider API key (e.g. `OPENROUTER_API_KEY`) | cclaw.db kv (decrypted) | injected as native env var |
 | `CCLAW_DAEMON_DB` | cclaw.db path | only if daemon_db_read=1 |
 
-Agent reads env vars at startup. ⊥ opens config files. ⊥ opens cclaw.db for config.
+Agent reads env vars at startup. ⊥ opens config files. ⊥ opens cclaw.db for config (reads `CCLAW_DB` for data access).
 
 ## Resource Limits
 
@@ -207,16 +174,15 @@ Agent reads env vars at startup. ⊥ opens config files. ⊥ opens cclaw.db for 
 ## Blocking Sub-Agents (Exit Code 2)
 
 1. Parent LLM returns tool_call: `spawn_agent(blocking=true, ...)`
-2. Parent writes assistant entry (with tool_call) to own DB
+2. Parent writes assistant entry (with tool_call) to DB
 3. Parent sets session state → "waiting", exits with code 2
-4. Daemon reaps, reads tool_call from parent's agent DB
-5. Daemon inserts spawn_queue row in cclaw.db
-6. Daemon forks sub-agent (own session, own agent DB, own sandbox)
-7. Sub-agent completes → exits 0
-8. Daemon reaps sub-agent, reads result from sub-agent's DB
-9. Daemon writes tool_result to parent's inbox (in parent's agent DB)
-10. Daemon transitions parent state "waiting" → "idle", forks parent
-11. Parent drains inbox: sub-agent result → tool_result entry → resumes LLM loop
+4. Daemon reaps, reads tool_call from DB
+5. Daemon forks sub-agent (own session in cclaw.db, scoped by agent_name)
+6. Sub-agent completes → exits 0
+7. Daemon reaps sub-agent, reads result from DB
+8. Daemon writes tool_result to parent's inbox in cclaw.db
+9. Daemon transitions parent state "waiting" → "idle", forks parent
+10. Parent drains inbox: sub-agent result → tool_result entry → resumes LLM loop
 
 **State machine:**
 ```
@@ -230,8 +196,8 @@ idle ──[fork]──→ running ──[exit 0]──→ idle
 ## Approval Flow (Exit Code 3)
 
 1. Agent calls `approval_request(type, payload)`
-2. Agent writes tool_call to own DB, sets state → "waiting", exits with code 3
-3. Daemon reaps, reads tool_call, inserts into cclaw.db approvals table
+2. Agent writes tool_call to DB, sets state → "waiting", exits with code 3
+3. Daemon reaps, reads tool_call from cclaw.db
 4. Daemon sends inline keyboard to admin via Telegram
 5. Admin approves/denies → daemon writes result to agent inbox → state idle → signal
 6. Agent re-forks, drains inbox, receives approval result as tool_result
@@ -239,7 +205,7 @@ idle ──[fork]──→ running ──[exit 0]──→ idle
 ## CLI Exception
 
 CLI runs agent in-process. No daemon needed for 1:1 interactive use.
-Opens agent DB directly. Config from env vars or defaults.
+Opens cclaw.db directly. Config from env vars or defaults.
 Same logical flow (inbox_insert → consume → agent_run → print response).
 Lacks: spawn_agent, cron, approval_request (no daemon to handle exit codes).
 Keeps: shell, file, js, web_fetch, db_query, memory tools.
@@ -250,11 +216,11 @@ Keeps: shell, file, js, web_fetch, db_query, memory tools.
 
 Format: `telegram:<chat_id>`, `cli`, `cron:<job>`, `subagent:<sid>`
 
-Daemon reads from agent DB after reaping child to decide delivery target.
+Daemon reads from DB after reaping child to decide delivery target.
 
 ## Daemon Startup Recovery
 
-1. Scan all agent DBs for sessions with state != "idle"
+1. Scan sessions table in cclaw.db for state != "idle"
 2. "running" → children already dead (daemon restarted) → reset to "idle"
 3. "waiting" w/ result in inbox → reset to "idle" (will fork on next signal)
 4. "waiting" w/o result → write error tool_result to inbox, reset to "idle"

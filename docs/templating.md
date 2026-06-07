@@ -28,9 +28,7 @@ Source files `#include "templates.h"` (from `build/`) and reference the constant
 | `cutoff_notice.txt` | `context.c` | Prepended when conversation history is truncated |
 | `incomplete_turn_notice.txt` | `context.c` | Injected when a previous turn was interrupted |
 | `incomplete_tool_content.txt` | `context.c` | Placeholder for tool results from interrupted turns |
-| `schema_daemon.sql` | `db.c` | DDL for cclaw.db (daemon-owned) |
-| `schema_agent.sql` | `db.c` | DDL for agent.db (per-agent) |
-| `schema_journal.sql` | `db.c` | DDL for journal.db (log collector) |
+| `schema.sql` | `db.c` | DDL for cclaw.db (unified schema) |
 
 ## Template Variables
 

@@ -21,10 +21,12 @@
 #include "tools.h"
 #include "context.h"
 #include "db.h"
+#include "templates.h"
 #include "db_response.h"
 #include "shutdown.h"
 #include "wake.h"
 #include "channel.h"
+#include "channel_api.h"
 #include "secret.h"
 #include "web.h"
 #include "heartbeat.h"
@@ -290,8 +292,47 @@ static void deliver_response(int64_t session_id) {
             if (text) { printf("%s\n", text); free(text); }
         }
         g_cli_turn_active = 0;
+        return;
     }
-    /* TODO: daemon delivery via channel_outbox (Task 4) */
+
+    /* Daemon mode: read channel from session, write outbox */
+    const char *src_sql = "SELECT channel_name, channel_id FROM sessions WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(g_db, src_sql, -1, &stmt, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    char *channel = NULL, *channel_id = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *s = (const char *)sqlite3_column_text(stmt, 0);
+        if (s) channel = strdup(s);
+        s = (const char *)sqlite3_column_text(stmt, 1);
+        if (s) channel_id = strdup(s);
+    }
+    sqlite3_finalize(stmt);
+    if (!channel) return;
+
+    char *text = get_response_text(g_db, session_id);
+    if (!text) { free(channel); free(channel_id); return; }
+
+    /* Build outbox payload via SQLite json_object (safe escaping) */
+    const char *ins_sql =
+        "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+        " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4));";
+    sqlite3_stmt *ins;
+    if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(ins, 1, channel, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(ins, 2, session_id);
+        sqlite3_bind_text(ins, 3, channel_id ? channel_id : "0", -1, SQLITE_STATIC);
+        sqlite3_bind_text(ins, 4, text, -1, SQLITE_STATIC);
+        sqlite3_step(ins);
+        sqlite3_finalize(ins);
+
+        const char *db_path = getenv("CCLAW_DB");
+        if (db_path) channel_outbox_wake(db_path, channel);
+    }
+
+    free(text);
+    free(channel);
+    free(channel_id);
 }
 
 static void reap_children(void) {
@@ -525,8 +566,57 @@ static void cli_start_turn(const char *input) {
 
 /* ── main ───────────────────────────────────────────────────────── */
 
+/* Extract builtin extension templates to ~/.cclaw/extensions/ on first run */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
+    /* Check if any extensions are registered */
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM extensions", -1, &s, NULL) != SQLITE_OK) return;
+    int has_ext = 0;
+    if (sqlite3_step(s) == SQLITE_ROW) has_ext = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    if (has_ext > 0) return;
+
+    /* Derive base dir from db_path (strip /cclaw.db) */
+    char base[PATH_MAX];
+    snprintf(base, sizeof(base), "%s", db_path);
+    char *sl = strrchr(base, '/');
+    if (sl) *sl = '\0'; else return;
+
+    /* Create extensions/telegram/ directory */
+    char tg_dir[2*PATH_MAX];
+    snprintf(tg_dir, sizeof(tg_dir), "%s/extensions/telegram", base);
+    char mkdir_cmd[2*PATH_MAX];
+    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "%s/extensions/telegram/.keep", base);
+    ensure_parent_dir(mkdir_cmd);
+
+    /* Write channel.js */
+    char js_path[2*PATH_MAX];
+    snprintf(js_path, sizeof(js_path), "%s/channel.js", tg_dir);
+    FILE *f = fopen(js_path, "w");
+    if (f) { fputs(TPL_CHANNEL_TELEGRAM_JS, f); fclose(f); }
+
+    /* Write telegram.json */
+    char json_path[2*PATH_MAX];
+    snprintf(json_path, sizeof(json_path), "%s/telegram.json", tg_dir);
+    f = fopen(json_path, "w");
+    if (f) { fputs(TPL_CHANNEL_TELEGRAM_JSON, f); fclose(f); }
+
+    /* Register in extensions table */
+    const char *isql = "INSERT OR IGNORE INTO extensions(name, path, builtin)"
+                       " VALUES('telegram', ?, 1);";
+    sqlite3_stmt *ins;
+    if (sqlite3_prepare_v2(db, isql, -1, &ins, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(ins, 1, tg_dir, -1, SQLITE_STATIC);
+        sqlite3_step(ins);
+        sqlite3_finalize(ins);
+    }
+}
+
 int main(int argc, char *argv[]) {
     int daemon_mode = 0, llm_mode = 0, new_session = 0, yolo_mode = 0;
+    const char *channel_mode = NULL;
     LogLevel log_level_override = LOG_LEVEL_INFO;
     int log_level_set = 0;
     int64_t session_id = -1;
@@ -535,6 +625,7 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0) { print_usage(); return 0; }
         else if (strcmp(argv[i], "--daemon") == 0) daemon_mode = 1;
+        else if (strcmp(argv[i], "--channel") == 0) { if (++i >= argc) { fprintf(stderr, "--channel requires name\n"); return 1; } channel_mode = argv[i]; }
         else if (strcmp(argv[i], "llm") == 0) llm_mode = 1;
         else if (strncmp(argv[i], "--log-level=", 12) == 0) { log_level_override = log_level_parse(argv[i]+12); log_level_set = 1; }
         else if (strcmp(argv[i], "--new") == 0) new_session = 1;
@@ -563,17 +654,28 @@ int main(int argc, char *argv[]) {
 
     setenv("CCLAW_DB", db_path, 1);
 
+    /* First-run initialization (no-op if already seeded) */
+    db_seed_defaults(g_db);
+    extract_builtin_extensions(g_db, db_path);
+
     g_cfg = config_load(g_db);
     if (!g_cfg) { fprintf(stderr, "config load failed\n"); db_close(g_db); return 1; }
     if (log_level_set) g_cfg->log_level = log_level_override;
 
     /* ── Daemon mode ─────────────────────────────────────────────── */
+    /* ── Channel mode ─────────────────────────────────────────────── */
+    if (channel_mode) {
+        config_free(g_cfg); db_close(g_db);
+        execl("build/channel_runner", "channel_runner", db_path, channel_mode, (char *)NULL);
+        perror("execl channel_runner");
+        free(db_path);
+        return 1;
+    }
+
     if (daemon_mode) {
         g_mode = 1;
         workspace_init(g_cfg);
         printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
-        if (g_cfg->telegram_token && g_cfg->telegram_token[0])
-            channel_register(g_db, "telegram", "build/channel_telegram");
         web_start(g_cfg, g_db);
         heartbeat_start(g_cfg, g_db);
         cron_start(g_cfg, g_db);
@@ -654,11 +756,23 @@ int main(int argc, char *argv[]) {
     char *base_dir = strdup(db_path);
     { char *sl = strrchr(base_dir, '/'); if (sl) *sl = '\0'; else { free(base_dir); base_dir = strdup("."); } }
 
-    /* Ensure default agent exists */
+    /* Ensure default agent exists — bootstrap on first run */
     { int ac = 0; char **al = db_agent_list(g_db, &ac);
       if (!al || ac == 0) {
           char ws[PATH_MAX]; snprintf(ws, sizeof(ws), "%s/agents/default/workspace/.keep", base_dir);
-          ensure_parent_dir(ws); db_agent_upsert(g_db, "default", NULL, NULL, NULL);
+          ensure_parent_dir(ws);
+          /* Create bootstrap agent with elevated permissions */
+          const char *bootstrap_sql =
+              "INSERT OR IGNORE INTO agents(name, system_prompt, trust_level, allowed_tools)"
+              " VALUES('default', ?, 'bootstrap', ?);"
+              ;
+          const char *bootstrap_tools = "[\"configure_provider\",\"configure_channel\",\"create_agent\",\"file_read\",\"file_write\",\"js_eval\",\"request_config\"]";
+          sqlite3_stmt *bs;
+          if (sqlite3_prepare_v2(g_db, bootstrap_sql, -1, &bs, NULL) == SQLITE_OK) {
+              sqlite3_bind_text(bs, 1, TPL_BOOTSTRAP_SYSTEM_PROMPT_MD, -1, SQLITE_STATIC);
+              sqlite3_bind_text(bs, 2, bootstrap_tools, -1, SQLITE_STATIC);
+              sqlite3_step(bs); sqlite3_finalize(bs);
+          }
           db_kv_set(g_db, "default_agent", "default");
       }
       if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }

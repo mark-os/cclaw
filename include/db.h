@@ -20,6 +20,9 @@ typedef struct {
  * Returns NULL on failure. */
 sqlite3 *db_open(const char *path);
 
+/* Seed default config + provider. Call once from main() on first run. */
+int db_seed_defaults(sqlite3 *db);
+
 /* Set mmap + reduced cache pragmas for child processes (short-lived). */
 void db_set_child_pragmas(sqlite3 *db);
 

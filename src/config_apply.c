@@ -73,7 +73,7 @@ char *config_apply(sqlite3 *db, const char *agent_name,
             if (!cJSON_IsString(bot_token) || !bot_token->valuestring[0]) {
                 cJSON_Delete(args); return strdup("error: bot_token required for telegram");
             }
-            /* Store token + register channel */
+            /* Store token in channel_state */
             const char *isql = "INSERT OR REPLACE INTO channel_state(channel_name, key, value)"
                                " VALUES('telegram','bot_token',?);";
             sqlite3_stmt *s;
@@ -81,17 +81,17 @@ char *config_apply(sqlite3 *db, const char *agent_name,
                 sqlite3_bind_text(s, 1, bot_token->valuestring, -1, SQLITE_STATIC);
                 sqlite3_step(s); sqlite3_finalize(s);
             }
-            channel_register(db, "telegram", "build/channel_telegram");
-            db_channel_binding_set(db, "telegram", "default", agent_name);
+            channel_register(db, "telegram", "telegram");
+            db_channel_binding_set(db, "telegram", "*", agent_name);
             result = strdup("channel configured: telegram");
         } else if (strcmp(ctype, "cli") == 0) {
-            db_channel_binding_set(db, "cli", "default", agent_name);
+            db_channel_binding_set(db, "cli", "*", agent_name);
             result = strdup("channel configured: cli");
         } else {
             if (!cJSON_IsString(binary_path) || !binary_path->valuestring[0]) {
                 cJSON_Delete(args); return strdup("error: binary_path required for custom channel");
             }
-            channel_register(db, ctype, binary_path->valuestring);
+            channel_register(db, ctype, ctype);
             /* Seed config into channel_state */
             if (cJSON_IsObject(config_obj)) {
                 cJSON *kv = NULL;
@@ -109,7 +109,7 @@ char *config_apply(sqlite3 *db, const char *agent_name,
                     }
                 }
             }
-            db_channel_binding_set(db, ctype, "default", agent_name);
+            db_channel_binding_set(db, ctype, "*", agent_name);
             char buf[256];
             snprintf(buf, sizeof(buf), "channel configured: %s", ctype);
             result = strdup(buf);

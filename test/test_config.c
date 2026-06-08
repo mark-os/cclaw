@@ -47,16 +47,15 @@ static void test_kv_values(void) {
 
     sqlite3 *db = fresh_db();
     assert(db);
-    db_kv_set(db, "provider.base_url", "http://localhost:8000/v1");
-    db_kv_set(db, "provider.model", "gpt-4");
-    db_kv_set(db, "provider.max_tokens", "2048");
+    /* Remove auto-seeded provider, set our own */
+    sqlite3_exec(db, "INSERT OR REPLACE INTO providers(name,base_url,endpoint_type,api_key_env,default_model,priority)"
+        " VALUES('test','http://localhost:8000/v1','openai','OPENROUTER_API_KEY','gpt-4',0);", NULL, NULL, NULL);
     db_kv_set(db, "web_port", "9090");
 
     Config *cfg = config_load(db);
     assert(cfg != NULL);
     assert(strcmp(cfg->provider.base_url, "http://localhost:8000/v1") == 0);
     assert(strcmp(cfg->provider.model, "gpt-4") == 0);
-    assert(cfg->provider.max_tokens == 2048);
     assert(cfg->web_port == 9090);
     config_free(cfg);
     db_close(db);
@@ -85,30 +84,23 @@ static void test_env_overrides_kv(void) {
 }
 
 static void test_fallback_providers(void) {
-    unsetenv("OPENROUTER_API_KEY");
-    unsetenv("CCLAW_PROVIDER");
-    unsetenv("CCLAW_MODEL");
-
-    sqlite3 *db = fresh_db();
+    sqlite3 *db = db_open(":memory:");
     assert(db);
-    db_kv_set(db, "fallback_providers",
-        "[{\"base_url\":\"https://gemini.example.com/v1\",\"api_key\":\"gem-key\","
-        "\"model\":\"gemma-4-31b-it\",\"max_tokens\":1024},"
-        "{\"base_url\":\"https://backup.example.com/v1\",\"api_key\":\"bak-key\","
-        "\"model\":\"backup-model\"}]");
+    sqlite3_exec(db, "INSERT INTO providers(name,base_url,endpoint_type,api_key_env,default_model,priority)"
+        " VALUES('primary','http://p.com/v1','openai','KEY1','model-a',0);", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO providers(name,base_url,endpoint_type,api_key_env,default_model,priority)"
+        " VALUES('fb1','http://fb1.com/v1','openai','KEY2','model-b',1);", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO providers(name,base_url,endpoint_type,api_key_env,default_model,priority)"
+        " VALUES('fb2','http://fb2.com/v1','gemini','KEY3','model-c',2);", NULL, NULL, NULL);
 
     Config *cfg = config_load(db);
-    assert(cfg != NULL);
+    assert(cfg);
+    assert(strcmp(cfg->provider.base_url, "http://p.com/v1") == 0);
+    assert(strcmp(cfg->provider.model, "model-a") == 0);
     assert(cfg->fallback_count == 2);
-    assert(strcmp(cfg->fallback_providers[0].base_url, "https://gemini.example.com/v1") == 0);
-    assert(strcmp(cfg->fallback_providers[0].api_key, "gem-key") == 0);
-    assert(strcmp(cfg->fallback_providers[0].model, "gemma-4-31b-it") == 0);
-    assert(cfg->fallback_providers[0].max_tokens == 1024);
-    assert(strcmp(cfg->fallback_providers[1].base_url, "https://backup.example.com/v1") == 0);
-    assert(strcmp(cfg->fallback_providers[1].api_key, "bak-key") == 0);
-    assert(strcmp(cfg->fallback_providers[1].model, "backup-model") == 0);
-    /* Inherits primary max_tokens as default */
-    assert(cfg->fallback_providers[1].max_tokens == 4096);
+    assert(strcmp(cfg->fallback_providers[0].model, "model-b") == 0);
+    assert(strcmp(cfg->fallback_providers[1].model, "model-c") == 0);
+    assert(cfg->fallback_providers[1].endpoint_type == ENDPOINT_GEMINI);
     config_free(cfg);
     db_close(db);
     printf("  PASS: test_fallback_providers\n");
@@ -176,34 +168,6 @@ static void test_system_prompt(void) {
     printf("  PASS: test_system_prompt\n");
 }
 
-static void test_admin_chat_ids(void) {
-    unsetenv("OPENROUTER_API_KEY");
-
-    sqlite3 *db = fresh_db();
-    assert(db);
-    db_kv_set(db, "admin_chat_ids", "[111222333, 444555666]");
-
-    Config *cfg = config_load(db);
-    assert(cfg != NULL);
-    assert(cfg->admin_chat_id_count == 2);
-    assert(cfg->admin_chat_ids[0] == 111222333);
-    assert(cfg->admin_chat_ids[1] == 444555666);
-    config_free(cfg);
-    db_close(db);
-
-    /* No admin_chat_ids → count 0, pointer NULL */
-    setenv("OPENROUTER_API_KEY", "sk-test", 1);
-    db = fresh_db();
-    cfg = config_load(db);
-    assert(cfg != NULL);
-    assert(cfg->admin_chat_id_count == 0);
-    assert(cfg->admin_chat_ids == NULL);
-    config_free(cfg);
-    db_close(db);
-
-    unsetenv("OPENROUTER_API_KEY");
-    printf("  PASS: test_admin_chat_ids\n");
-}
 
 int main(void) {
     printf("test_config:\n");
@@ -213,7 +177,6 @@ int main(void) {
     test_fallback_providers();
     test_stale_lock_timeout();
     test_system_prompt();
-    test_admin_chat_ids();
     printf("All config tests passed.\n");
     return 0;
 }

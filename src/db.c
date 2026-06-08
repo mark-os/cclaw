@@ -46,39 +46,40 @@ void db_set_child_pragmas(sqlite3 *db) {
     sqlite3_exec(db, "PRAGMA cache_size=-512;", NULL, NULL, NULL);
 }
 
-/* T297: Single unified DB opener — all tables in one file */
+/* Schema only — no seed data, no side effects beyond table creation */
 sqlite3 *db_open(const char *path) {
-    sqlite3 *db = db_open_with_schema(path, SCHEMA_SQL, "db_open");
-    if (!db) return NULL;
-    /* Seed kv defaults on first run */
+    return db_open_with_schema(path, SCHEMA_SQL, "db_open");
+}
+
+/* Seed default config + provider on first run. Call once from main(). */
+int db_seed_defaults(sqlite3 *db) {
+    if (!db) return -1;
     sqlite3_stmt *cnt;
-    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM kv", -1, &cnt, NULL) == SQLITE_OK) {
-        if (sqlite3_step(cnt) == SQLITE_ROW && sqlite3_column_int(cnt, 0) == 0) {
-            static const char *defaults[][2] = {
-                {"provider.base_url",    "https://openrouter.ai/api/v1"},
-                {"provider.model",       "deepseek/deepseek-v4-flash"},
-                {"provider.max_tokens",  "4096"},
-                {"provider.context_window", "65536"},
-                {"provider.cache_hints", "auto"},
-                {"fallback_providers",   "[]"},
-                {"telegram_token",       ""},
-                {"admin_chat_ids",       "[]"},
-                {"web_port",             "8080"},
-                {"max_iterations",       STR(AGENT_DEFAULT_MAX_ITERATIONS)},
-                {"heartbeat_interval",   "0"},
-                {"shell_timeout",        STR(AGENT_DEFAULT_SHELL_TIMEOUT)},
-                {"token_rate_limit",     "1000000"},
-            };
-            size_t n = sizeof(defaults) / sizeof(defaults[0]);
-            for (size_t i = 0; i < n; i++)
-                db_kv_set(db, defaults[i][0], defaults[i][1]);
-            const char *api_key = getenv("OPENROUTER_API_KEY");
-            if (api_key && api_key[0])
-                db_kv_set(db, "provider.api_key", api_key);
-        }
-        sqlite3_finalize(cnt);
-    }
-    return db;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM config", -1, &cnt, NULL) != SQLITE_OK)
+        return -1;
+    int empty = 0;
+    if (sqlite3_step(cnt) == SQLITE_ROW && sqlite3_column_int(cnt, 0) == 0)
+        empty = 1;
+    sqlite3_finalize(cnt);
+    if (!empty) return 0;
+
+    static const char *defaults[][2] = {
+        {"default_model",         "deepseek/deepseek-v4-flash"},
+        {"default_provider",      "openrouter"},
+        {"max_iterations",        STR(AGENT_DEFAULT_MAX_ITERATIONS)},
+        {"shell_timeout",         STR(AGENT_DEFAULT_SHELL_TIMEOUT)},
+        {"web_port",              "8080"},
+        {"default_allowed_tools", "[\"file_read\",\"file_write\",\"js_eval\",\"request_config\"]"},
+    };
+    size_t n = sizeof(defaults) / sizeof(defaults[0]);
+    for (size_t i = 0; i < n; i++)
+        db_kv_set(db, defaults[i][0], defaults[i][1]);
+
+    const char *prov_sql =
+        "INSERT OR IGNORE INTO providers(name,base_url,endpoint_type,api_key_env,default_model,priority)"
+        " VALUES('openrouter','https://openrouter.ai/api/v1','openai','OPENROUTER_API_KEY','deepseek/deepseek-v4-flash',0);";
+    sqlite3_exec(db, prov_sql, NULL, NULL, NULL);
+    return 0;
 }
 
 void db_close(sqlite3 *db) {
@@ -91,15 +92,9 @@ int64_t session_create(sqlite3 *db, const char *name, const char *agent_name,
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    if (agent_name)
-        sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC);
-    else
-        sqlite3_bind_null(stmt, 2);
-    if (parent_session_id > 0)
-        sqlite3_bind_int64(stmt, 3, parent_session_id);
-    else
-        sqlite3_bind_int64(stmt, 3, -1);
+    if (name) sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC); else sqlite3_bind_null(stmt, 1);
+    if (agent_name) sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC); else sqlite3_bind_null(stmt, 2);
+    sqlite3_bind_int64(stmt, 3, parent_session_id > 0 ? parent_session_id : -1);
     sqlite3_bind_int(stmt, 4, depth);
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
@@ -649,7 +644,7 @@ int64_t session_cost(sqlite3 *db, int64_t session_id) {
 
 /* Key-value store for persistent settings (e.g. Telegram offset) */
 char *db_kv_get(sqlite3 *db, const char *key) {
-    const char *sql = "SELECT value FROM kv WHERE key=?;";
+    const char *sql = "SELECT value FROM config WHERE key=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return NULL;
@@ -664,7 +659,7 @@ char *db_kv_get(sqlite3 *db, const char *key) {
 }
 
 int db_kv_set(sqlite3 *db, const char *key, const char *value) {
-    const char *sql = "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?);";
+    const char *sql = "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -705,7 +700,7 @@ int db_kv_set_secret(sqlite3 *db, const char *key, const char *value) {
 }
 
 int64_t db_tg_get_session(sqlite3 *db, int64_t chat_id) {
-    const char *sql = "SELECT session_id FROM tg_chat_sessions WHERE chat_id = ?;";
+    const char *sql = "SELECT session_id FROM channel_routes WHERE channel_name='telegram' AND channel_id=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -718,7 +713,7 @@ int64_t db_tg_get_session(sqlite3 *db, int64_t chat_id) {
 }
 
 int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id) {
-    const char *sql = "INSERT OR REPLACE INTO tg_chat_sessions (chat_id, session_id) VALUES (?, ?);";
+    const char *sql = "INSERT OR REPLACE INTO channel_routes(channel_name, channel_id, agent_name, session_id) VALUES('telegram', ?, 'default', ?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -732,7 +727,7 @@ int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id) {
 /* T193/V69: Channel→agent binding */
 
 char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *channel_id) {
-    const char *sql = "SELECT agent_name FROM channel_bindings WHERE channel_type=? AND channel_id=?;";
+    const char *sql = "SELECT agent_name FROM channel_routes WHERE channel_name=? AND channel_id=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, channel_type, -1, SQLITE_STATIC);
@@ -748,8 +743,8 @@ char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *
 
 int db_channel_binding_set(sqlite3 *db, const char *channel_type, const char *channel_id, const char *agent_name) {
     const char *sql =
-        "INSERT OR REPLACE INTO channel_bindings (channel_type, channel_id, agent_name, updated_at)"
-        " VALUES (?, ?, ?, unixepoch());";
+        "INSERT OR REPLACE INTO channel_routes (channel_name, channel_id, agent_name)"
+        " VALUES (?, ?, ?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, channel_type, -1, SQLITE_STATIC);
@@ -999,7 +994,7 @@ int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const 
         "INSERT INTO inbox (session_id, source, payload) VALUES (?, ?, ?)", -1, &stmt, NULL);
     if (rc != SQLITE_OK) return -1;
     sqlite3_bind_int64(stmt, 1, session_id);
-    sqlite3_bind_text(stmt, 2, source, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, source ? source : "cli", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, payload, -1, SQLITE_STATIC);
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -1250,8 +1245,7 @@ void spawn_request_free(SpawnRequest *list, int count) {
 
 AgentRow *db_agent_get(sqlite3 *db, const char *name) {
     if (!db || !name) return NULL;
-    const char *sql = "SELECT id, name, config, system_prompt, heartbeat, "
-                      "created_at, updated_at FROM agents WHERE name = ?";
+    const char *sql = "SELECT name, system_prompt, created_at FROM agents WHERE name = ?";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
@@ -1260,17 +1254,15 @@ AgentRow *db_agent_get(sqlite3 *db, const char *name) {
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         row = calloc(1, sizeof(AgentRow));
         if (row) {
-            row->id = sqlite3_column_int64(stmt, 0);
-            const char *v = (const char *)sqlite3_column_text(stmt, 1);
+            const char *v = (const char *)sqlite3_column_text(stmt, 0);
             row->name = v ? strdup(v) : NULL;
-            v = (const char *)sqlite3_column_text(stmt, 2);
-            row->config = v ? strdup(v) : NULL;
-            v = (const char *)sqlite3_column_text(stmt, 3);
+            v = (const char *)sqlite3_column_text(stmt, 1);
             row->system_prompt = v ? strdup(v) : NULL;
-            v = (const char *)sqlite3_column_text(stmt, 4);
-            row->heartbeat = v ? strdup(v) : NULL;
-            row->created_at = sqlite3_column_int64(stmt, 5);
-            row->updated_at = sqlite3_column_int64(stmt, 6);
+            row->created_at = sqlite3_column_int64(stmt, 2);
+            row->id = 0;
+            row->config = NULL;
+            row->heartbeat = NULL;
+            row->updated_at = row->created_at;
         }
     }
     sqlite3_finalize(stmt);
@@ -1306,20 +1298,17 @@ char **db_agent_list(sqlite3 *db, int *count) {
 
 int db_agent_upsert(sqlite3 *db, const char *name, const char *config,
                     const char *system_prompt, const char *heartbeat) {
+    (void)config; (void)heartbeat;
     if (!db || !name) return -1;
     const char *sql =
-        "INSERT INTO agents (name, config, system_prompt, heartbeat) "
-        "VALUES (?, ?, ?, ?) "
+        "INSERT INTO agents (name, system_prompt) "
+        "VALUES (?, ?) "
         "ON CONFLICT(name) DO UPDATE SET "
-        "config=excluded.config, system_prompt=excluded.system_prompt, "
-        "heartbeat=excluded.heartbeat, "
-        "updated_at=unixepoch()";
+        "system_prompt=COALESCE(excluded.system_prompt, agents.system_prompt)";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, config, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, system_prompt, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, heartbeat, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, system_prompt, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? 0 : -1;

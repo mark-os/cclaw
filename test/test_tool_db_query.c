@@ -110,10 +110,10 @@ static void test_secret_filtering(void) {
     assert(db);
 
     /* Insert plaintext and encrypted kv rows */
-    sqlite3_exec(db, "INSERT OR REPLACE INTO kv(key,value) VALUES('test.plain','visible')", NULL, NULL, NULL);
-    sqlite3_exec(db, "INSERT OR REPLACE INTO kv(key,value) VALUES('test.secret','enc:abcdef1234567890')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('test.plain','visible')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('test.secret','enc:abcdef1234567890')", NULL, NULL, NULL);
 
-    char *r = tool_db_query_handler("{\"sql\":\"SELECT key, value FROM kv WHERE key LIKE 'test.%'\"}", db);
+    char *r = tool_db_query_handler("{\"sql\":\"SELECT key, value FROM config WHERE key LIKE 'test.%'\"}", db);
     assert(r);
     /* Plaintext row visible */
     assert(strstr(r, "test.plain"));

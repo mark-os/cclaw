@@ -4,7 +4,7 @@ LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
 TEMPLATES := $(wildcard templates/*)
-SRC      := $(filter-out src/mjs_main.c src/preload_net.c src/channel_telegram_main.c,$(wildcard src/*.c))
+SRC      := $(filter-out src/mjs_main.c src/preload_net.c src/channel_runner.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 DEP      := $(OBJ:.o=.d)
 
@@ -29,7 +29,7 @@ MJS_VENDOR_OBJ := $(BUILDDIR)/mjs_mquickjs.o $(BUILDDIR)/mjs_cutils.o $(BUILDDIR
 
 .PHONY: all clean test test-integration test-e2e test-all install debug
 
-all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/channel_telegram
+all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/channel_runner
 
 # Development build: debug symbols, no optimization, sanitizers (clang preferred for better traces)
 debug: clean
@@ -117,12 +117,39 @@ $(BUILDDIR)/mjs: $(BUILDDIR)/mjs_main.o $(MJS_VENDOR_OBJ) | $(BUILDDIR)/
 $(BUILDDIR)/libcclaw_net.so: src/preload_net.c | $(BUILDDIR)/
 	$(CC) -std=c11 -Wall -Wextra -Werror -shared -fPIC -o $@ $< -ldl
 
-# T247: channel_telegram standalone binary
-$(BUILDDIR)/channel_telegram_main.o: src/channel_telegram_main.c | $(BUILDDIR)/
+# Channel runner: universal JS channel binary
+CR_VENDOR_OBJ := $(BUILDDIR)/cr_mquickjs.o $(BUILDDIR)/cr_cutils.o $(BUILDDIR)/cr_dtoa.o \
+                 $(BUILDDIR)/cr_libm.o $(BUILDDIR)/cr_stdlib.o
+
+$(BUILDDIR)/mquickjs_stdlib_channel.c: vendor/mquickjs/mqjs_host_channel.c $(BUILDDIR)/gen_stdlib | $(BUILDDIR)/
+	printf '#define _POSIX_C_SOURCE 199309L\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <math.h>\n#include <time.h>\n#include "mquickjs_priv.h"\n\n' > $@
+	cat vendor/mquickjs/mqjs_host_channel.c >> $@
+	./$(BUILDDIR)/gen_stdlib -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
+
+$(BUILDDIR)/cr_stdlib.o: $(BUILDDIR)/mquickjs_stdlib_channel.c | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/cr_mquickjs.o: vendor/mquickjs/mquickjs.c vendor/mquickjs/mquickjs_atom.h | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/cr_cutils.o: vendor/mquickjs/cutils.c | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/cr_dtoa.o: vendor/mquickjs/dtoa.c | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/cr_libm.o: vendor/mquickjs/libm.c | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+
+$(BUILDDIR)/channel_runner.o: src/channel_runner.c | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -c -o $@ $<
 
-$(BUILDDIR)/channel_telegram: $(BUILDDIR)/channel_telegram_main.o $(BUILDDIR)/libcclaw.a | $(BUILDDIR)/
-	$(CC) $(CFLAGS) -o $@ $< $(BUILDDIR)/libcclaw.a $(LDFLAGS)
+CR_LIB_OBJ := $(BUILDDIR)/admin_api.o $(BUILDDIR)/agent_config.o $(BUILDDIR)/channel_api.o \
+              $(BUILDDIR)/db.o $(BUILDDIR)/wake.o $(BUILDDIR)/secret.o $(BUILDDIR)/config.o \
+              $(BUILDDIR)/sqlite3.o $(BUILDDIR)/cJSON.o $(BUILDDIR)/monocypher.o
+
+$(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(CR_VENDOR_OBJ) $(CR_LIB_OBJ) | $(BUILDDIR)/
+	$(CC) $(CFLAGS) -o $@ $^ -lcurl -lm -lpthread -ldl
 
 install: $(BUILDDIR)/mjs
 	install -d /usr/local/lib/cclaw

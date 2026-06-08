@@ -1,5 +1,5 @@
 /* T179: integration test — db_query secret filtering.
- * Seed kv w/ enc: values, run db_query("SELECT * FROM kv") tool,
+ * Seed kv w/ enc: values, run db_query("SELECT * FROM config") tool,
  * verify no enc: rows in result; no network.
  * Cites V52, T173. */
 #define _POSIX_C_SOURCE 200809L
@@ -60,8 +60,8 @@ static void test_select_star_filters_secrets(void) {
     db_kv_set_secret(db, "provider.api_key", "sk-or-v1-secret123");
     db_kv_set_secret(db, "gemini.api_key", "AIzaSy-secret456");
 
-    /* Run db_query tool: SELECT * FROM kv */
-    char *result = tool_db_query_handler("{\"sql\":\"SELECT * FROM kv\"}", db);
+    /* Run db_query tool: SELECT * FROM config */
+    char *result = tool_db_query_handler("{\"sql\":\"SELECT * FROM config\"}", db);
     if (!result) { db_close(db); FAIL("handler returned NULL"); }
 
     /* Plaintext rows visible */
@@ -87,7 +87,7 @@ static void test_where_clause_secret_key(void) {
     if (!db) FAIL("db_open");
 
     char *result = tool_db_query_handler(
-        "{\"sql\":\"SELECT key, value FROM kv WHERE key = 'provider.api_key'\"}", db);
+        "{\"sql\":\"SELECT key, value FROM config WHERE key = 'provider.api_key'\"}", db);
     if (!result) { db_close(db); FAIL("handler returned NULL"); }
 
     /* Should be empty array — row filtered */
@@ -127,7 +127,7 @@ static void test_count_excludes_secrets(void) {
 
     /* Count only plaintext rows — secrets filtered at row level */
     char *result = tool_db_query_handler(
-        "{\"sql\":\"SELECT COUNT(*) AS cnt FROM kv WHERE key LIKE 'provider.%' OR key LIKE 'gemini.%'\"}", db);
+        "{\"sql\":\"SELECT COUNT(*) AS cnt FROM config WHERE key LIKE 'provider.%' OR key LIKE 'gemini.%'\"}", db);
     if (!result) { db_close(db); FAIL("handler returned NULL"); }
 
     /* COUNT(*) is computed by SQLite before filtering, so it includes all rows.

@@ -4,9 +4,11 @@
 #include "db.h"
 
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* ── T243/V99: Channel API library ──────────────────────────────── */
@@ -153,3 +155,70 @@ int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+
+/* ── Per-channel outbox wake FIFO ──────────────────────────────── */
+
+char *channel_outbox_fifo_path(const char *db_path, const char *channel_name) {
+    if (!db_path || !channel_name) return NULL;
+    if (strcmp(db_path, ":memory:") == 0) return NULL;
+    size_t db_len = strlen(db_path);
+    size_t ch_len = strlen(channel_name);
+    /* Format: <db_path_without_.db>.<channel_name>.pipe */
+    size_t base_len = db_len;
+    if (db_len > 3 && strcmp(db_path + db_len - 3, ".db") == 0)
+        base_len = db_len - 3;
+    char *path = malloc(base_len + 1 + ch_len + 6);
+    if (!path) return NULL;
+    memcpy(path, db_path, base_len);
+    path[base_len] = '.';
+    memcpy(path + base_len + 1, channel_name, ch_len);
+    memcpy(path + base_len + 1 + ch_len, ".pipe", 6);
+    return path;
+}
+
+int channel_outbox_fifo_open(const char *db_path, const char *channel_name) {
+    char *path = channel_outbox_fifo_path(db_path, channel_name);
+    if (!path) return -1;
+    unlink(path);
+    if (mkfifo(path, 0600) != 0 && errno != EEXIST) { free(path); return -1; }
+    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    free(path);
+    return fd;
+}
+
+void channel_outbox_fifo_close(int fd, const char *db_path, const char *channel_name) {
+    if (fd >= 0) close(fd);
+    char *path = channel_outbox_fifo_path(db_path, channel_name);
+    if (path) { unlink(path); free(path); }
+}
+
+int channel_outbox_wake(const char *db_path, const char *channel_name) {
+    char *path = channel_outbox_fifo_path(db_path, channel_name);
+    if (!path) return -1;
+    int fd = open(path, O_WRONLY | O_NONBLOCK);
+    free(path);
+    if (fd < 0) return -1;
+    char c = 1;
+    (void)write(fd, &c, 1);
+    close(fd);
+    return 0;
+}
+
+/* ── Outbox insert (daemon side) ───────────────────────────────── */
+
+int channel_outbox_insert(sqlite3 *db, const char *channel_name,
+                          int64_t session_id, const char *payload) {
+    if (!db || !channel_name || !payload) return -1;
+    const char *sql =
+        "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+        " VALUES(?,?,?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    sqlite3_bind_text(stmt, 3, payload, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}

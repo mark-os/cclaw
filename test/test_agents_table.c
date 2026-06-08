@@ -30,10 +30,10 @@ static void test_upsert_and_get(void) {
     AgentRow *row = db_agent_get(db, "coder");
     assert(row != NULL);
     assert(strcmp(row->name, "coder") == 0);
-    assert(strcmp(row->config, "{\"model\":\"gpt-4\"}") == 0);
+    /* config column removed */
     assert(strcmp(row->system_prompt, "You are a coder.") == 0);
-    assert(row->heartbeat == NULL);
-    assert(row->id > 0);
+    /* heartbeat column removed */
+    /* id column removed from new schema */
     agent_row_free(row);
 
     /* Update existing */
@@ -42,9 +42,9 @@ static void test_upsert_and_get(void) {
 
     row = db_agent_get(db, "coder");
     assert(row != NULL);
-    assert(strcmp(row->config, "{\"model\":\"gpt-5\"}") == 0);
+    /* config column removed */
     assert(strcmp(row->system_prompt, "Updated prompt.") == 0);
-    assert(strcmp(row->heartbeat, "check logs") == 0);
+    /* heartbeat column removed */
     agent_row_free(row);
 
     teardown(db);
@@ -80,7 +80,7 @@ static void test_seed_from_disk(void) {
     AgentRow *row = db_agent_seed(db, AGENTS_DIR, "mybot");
     assert(row != NULL);
     assert(strcmp(row->name, "mybot") == 0);
-    assert(strstr(row->config, "deepseek") != NULL);
+    /* config column removed */
     assert(strcmp(row->system_prompt, "You are mybot.") == 0);
     agent_row_free(row);
 
@@ -90,7 +90,7 @@ static void test_seed_from_disk(void) {
     /* Second call returns DB version, not disk */
     row = db_agent_seed(db, AGENTS_DIR, "mybot");
     assert(row != NULL);
-    assert(strcmp(row->config, "{\"model\":\"changed\"}") == 0);
+    /* config column removed */
     assert(strcmp(row->system_prompt, "DB prompt.") == 0);
     agent_row_free(row);
 

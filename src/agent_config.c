@@ -645,37 +645,29 @@ int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload
     return 0;
 }
 
-/* T196/V80: Load agent config from cclaw.db agent_config table */
+/* Load agent config directly from agents table */
 AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
     if (!db || !name) return NULL;
 
-    const char *sql = "SELECT key, value FROM agent_config WHERE agent_name=?;";
+    const char *sql = "SELECT model, allowed_tools, allowed_hosts, max_iterations"
+                      " FROM agents WHERE name=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
 
     AgentConfig *ac = NULL;
-    int found = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (!ac) {
-            ac = calloc(1, sizeof(AgentConfig));
-            if (!ac) break;
-            ac->name = strdup(name);
-        }
-        found = 1;
-        const char *key = (const char *)sqlite3_column_text(stmt, 0);
-        const char *val = (const char *)sqlite3_column_text(stmt, 1);
-        if (!key || !val) continue;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        ac = calloc(1, sizeof(AgentConfig));
+        if (!ac) { sqlite3_finalize(stmt); return NULL; }
+        ac->name = strdup(name);
 
-        if (strcmp(key, "model") == 0) {
-            ac->model = strdup(val);
-        } else if (strcmp(key, "workspace") == 0) {
-            ac->workspace = strdup(val);
-        } else if (strcmp(key, "max_iterations") == 0) {
-            ac->max_iterations = atoi(val);
-        } else if (strcmp(key, "tools") == 0) {
-            /* JSON array string */
-            cJSON *arr = cJSON_Parse(val);
+        const char *v = (const char *)sqlite3_column_text(stmt, 0);
+        if (v) ac->model = strdup(v);
+
+        /* Parse allowed_tools JSON array */
+        v = (const char *)sqlite3_column_text(stmt, 1);
+        if (v) {
+            cJSON *arr = cJSON_Parse(v);
             if (arr && cJSON_IsArray(arr)) {
                 int cnt = cJSON_GetArraySize(arr);
                 if (cnt > 0) {
@@ -683,15 +675,19 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
                     if (ac->tools) {
                         for (int i = 0; i < cnt; i++) {
                             cJSON *item = cJSON_GetArrayItem(arr, i);
-                            if (cJSON_IsString(item) && item->valuestring)
+                            if (cJSON_IsString(item))
                                 ac->tools[ac->tool_count++] = strdup(item->valuestring);
                         }
                     }
                 }
             }
             cJSON_Delete(arr);
-        } else if (strcmp(key, "allowed_hosts") == 0) {
-            cJSON *arr = cJSON_Parse(val);
+        }
+
+        /* Parse allowed_hosts JSON array */
+        v = (const char *)sqlite3_column_text(stmt, 2);
+        if (v) {
+            cJSON *arr = cJSON_Parse(v);
             if (arr && cJSON_IsArray(arr)) {
                 int cnt = cJSON_GetArraySize(arr);
                 if (cnt > 0) {
@@ -699,113 +695,26 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
                     if (ac->allowed_hosts) {
                         for (int i = 0; i < cnt; i++) {
                             cJSON *item = cJSON_GetArrayItem(arr, i);
-                            if (cJSON_IsString(item) && item->valuestring)
+                            if (cJSON_IsString(item))
                                 ac->allowed_hosts[ac->allowed_hosts_count++] = strdup(item->valuestring);
                         }
                     }
                 }
             }
             cJSON_Delete(arr);
-        } else if (strcmp(key, "read_access") == 0) {
-            cJSON *arr = cJSON_Parse(val);
-            if (arr && cJSON_IsArray(arr)) {
-                int cnt = cJSON_GetArraySize(arr);
-                if (cnt > 0) {
-                    ac->read_access = malloc((size_t)cnt * sizeof(char *));
-                    if (ac->read_access) {
-                        for (int i = 0; i < cnt; i++) {
-                            cJSON *item = cJSON_GetArrayItem(arr, i);
-                            if (cJSON_IsString(item) && item->valuestring)
-                                ac->read_access[ac->read_access_count++] = strdup(item->valuestring);
-                        }
-                    }
-                }
-            }
-            cJSON_Delete(arr);
         }
+
+        int mi = sqlite3_column_int(stmt, 3);
+        if (mi > 0) ac->max_iterations = mi;
     }
     sqlite3_finalize(stmt);
-
-    if (!found) return NULL;
-
-    /* V12: workspace fallback */
-    if (ac && !ac->workspace) {
-        char ws[1024];
-        snprintf(ws, sizeof(ws), "./workspace/%s", name);
-        ac->workspace = strdup(ws);
-    }
     return ac;
 }
 
 /* T196/V80: Save agent config to cclaw.db agent_config table */
 int agent_config_save_db(sqlite3 *db, const AgentConfig *ac) {
-    if (!db || !ac || !ac->name) return -1;
-
-    const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,?,?);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) != SQLITE_OK) return -1;
-
-    #define SAVE_STR(k, v) do { \
-        if (v) { \
-            sqlite3_reset(stmt); \
-            sqlite3_bind_text(stmt, 1, ac->name, -1, SQLITE_STATIC); \
-            sqlite3_bind_text(stmt, 2, k, -1, SQLITE_STATIC); \
-            sqlite3_bind_text(stmt, 3, v, -1, SQLITE_STATIC); \
-            sqlite3_step(stmt); \
-        } \
-    } while(0)
-
-    SAVE_STR("model", ac->model);
-    SAVE_STR("workspace", ac->workspace);
-
-    if (ac->max_iterations > 0) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d", ac->max_iterations);
-        sqlite3_reset(stmt);
-        sqlite3_bind_text(stmt, 1, ac->name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, "max_iterations", -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 3, buf, -1, SQLITE_STATIC);
-        sqlite3_step(stmt);
-    }
-
-    /* tools as JSON array */
-    if (ac->tools && ac->tool_count > 0) {
-        cJSON *arr = cJSON_CreateArray();
-        for (size_t i = 0; i < ac->tool_count; i++)
-            cJSON_AddItemToArray(arr, cJSON_CreateString(ac->tools[i]));
-        char *json = cJSON_PrintUnformatted(arr);
-        SAVE_STR("tools", json);
-        free(json);
-        cJSON_Delete(arr);
-    }
-
-    /* allowed_hosts as JSON array */
-    if (ac->allowed_hosts && ac->allowed_hosts_count > 0) {
-        cJSON *arr = cJSON_CreateArray();
-        for (size_t i = 0; i < ac->allowed_hosts_count; i++)
-            cJSON_AddItemToArray(arr, cJSON_CreateString(ac->allowed_hosts[i]));
-        char *json = cJSON_PrintUnformatted(arr);
-        SAVE_STR("allowed_hosts", json);
-        free(json);
-        cJSON_Delete(arr);
-    } else {
-        SAVE_STR("allowed_hosts", "[]");
-    }
-
-    /* read_access as JSON array */
-    if (ac->read_access && ac->read_access_count > 0) {
-        cJSON *arr = cJSON_CreateArray();
-        for (size_t i = 0; i < ac->read_access_count; i++)
-            cJSON_AddItemToArray(arr, cJSON_CreateString(ac->read_access[i]));
-        char *json = cJSON_PrintUnformatted(arr);
-        SAVE_STR("read_access", json);
-        free(json);
-        cJSON_Delete(arr);
-    }
-
-    #undef SAVE_STR
-    sqlite3_finalize(stmt);
-    return 0;
+    (void)db; (void)ac;
+    return 0; /* no-op: config now on agents table directly */
 }
 
 /* T196: Migrate agent.json → cclaw.db agent_config, delete file after */
@@ -830,114 +739,53 @@ int agent_config_migrate_json(sqlite3 *db, const char *agents_dir, const char *n
 
 int agent_config_add_host(sqlite3 *db, const char *name, const char *host) {
     if (!db || !name || !host || !host[0]) return -1;
-
-    /* Read current allowed_hosts */
-    const char *sql = "SELECT value FROM agent_config WHERE agent_name=? AND key='allowed_hosts';";
+    /* Use SQLite json functions on agents.allowed_hosts */
+    const char *sql =
+        "UPDATE agents SET allowed_hosts = "
+        "  CASE WHEN json_array_length(allowed_hosts) = 0 THEN json_array(?2)"
+        "  ELSE (SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each(allowed_hosts) WHERE value=?2)"
+        "    THEN allowed_hosts ELSE json_insert(allowed_hosts, '$[#]', ?2) END)"
+        "  END WHERE name=?1;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-
-    cJSON *arr = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *val = (const char *)sqlite3_column_text(stmt, 0);
-        if (val) arr = cJSON_Parse(val);
-    }
-    sqlite3_finalize(stmt);
-
-    if (!arr) arr = cJSON_CreateArray();
-
-    /* Check duplicate */
-    cJSON *item;
-    cJSON_ArrayForEach(item, arr) {
-        if (cJSON_IsString(item) && strcmp(item->valuestring, host) == 0) {
-            cJSON_Delete(arr);
-            return 0;
-        }
-    }
-
-    cJSON_AddItemToArray(arr, cJSON_CreateString(host));
-    char *json = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
-
-    /* Upsert */
-    const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,'allowed_hosts',?);";
-    if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) != SQLITE_OK) { free(json); return -1; }
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, host, -1, SQLITE_STATIC);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
-    free(json);
     return rc;
 }
 
 int agent_config_remove_host(sqlite3 *db, const char *name, const char *host) {
     if (!db || !name || !host || !host[0]) return -1;
-
-    const char *sql = "SELECT value FROM agent_config WHERE agent_name=? AND key='allowed_hosts';";
+    const char *sql =
+        "UPDATE agents SET allowed_hosts = "
+        "  (SELECT json_group_array(value) FROM json_each(agents.allowed_hosts) WHERE value != ?2)"
+        " WHERE name=?1;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-
-    cJSON *arr = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *val = (const char *)sqlite3_column_text(stmt, 0);
-        if (val) arr = cJSON_Parse(val);
-    }
-    sqlite3_finalize(stmt);
-
-    if (!arr) return 0; /* Nothing to remove from */
-
-    int sz = cJSON_GetArraySize(arr);
-    for (int i = 0; i < sz; i++) {
-        cJSON *item = cJSON_GetArrayItem(arr, i);
-        if (cJSON_IsString(item) && strcmp(item->valuestring, host) == 0) {
-            cJSON_DeleteItemFromArray(arr, i);
-            break;
-        }
-    }
-
-    char *json = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
-
-    const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,'allowed_hosts',?);";
-    if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) != SQLITE_OK) { free(json); return -1; }
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, host, -1, SQLITE_STATIC);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
-    free(json);
     return rc;
 }
 
 char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count) {
     *count = 0;
     if (!db || !name) return NULL;
-
-    const char *sql = "SELECT value FROM agent_config WHERE agent_name=? AND key='allowed_hosts';";
+    const char *sql = "SELECT value FROM json_each((SELECT allowed_hosts FROM agents WHERE name=?));";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-
-    char **hosts = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *val = (const char *)sqlite3_column_text(stmt, 0);
-        if (val) {
-            cJSON *arr = cJSON_Parse(val);
-            if (arr && cJSON_IsArray(arr)) {
-                int sz = cJSON_GetArraySize(arr);
-                if (sz > 0) {
-                    hosts = malloc((size_t)sz * sizeof(char *));
-                    if (hosts) {
-                        for (int i = 0; i < sz; i++) {
-                            cJSON *item = cJSON_GetArrayItem(arr, i);
-                            if (cJSON_IsString(item) && item->valuestring)
-                                hosts[(*count)++] = strdup(item->valuestring);
-                        }
-                    }
-                }
-            }
-            cJSON_Delete(arr);
-        }
+    size_t cap = 8;
+    char **hosts = malloc(cap * sizeof(char *));
+    if (!hosts) { sqlite3_finalize(stmt); return NULL; }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(stmt, 0);
+        if (!v) continue;
+        if (*count >= cap) { cap *= 2; hosts = realloc(hosts, cap * sizeof(char *)); }
+        hosts[*count] = strdup(v);
+        (*count)++;
     }
     sqlite3_finalize(stmt);
     return hosts;
@@ -946,41 +794,18 @@ char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count) {
 /* T274/V120: Add tool to agent's tools whitelist in cclaw.db agent_config */
 int agent_config_add_tool(sqlite3 *db, const char *name, const char *tool) {
     if (!db || !name || !tool || !tool[0]) return -1;
-
-    const char *sql = "SELECT value FROM agent_config WHERE agent_name=? AND key='tools';";
+    const char *sql =
+        "UPDATE agents SET allowed_tools = "
+        "  CASE WHEN json_array_length(allowed_tools) = 0 THEN json_array(?2)"
+        "  ELSE (SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each(allowed_tools) WHERE value=?2)"
+        "    THEN allowed_tools ELSE json_insert(allowed_tools, '$[#]', ?2) END)"
+        "  END WHERE name=?1;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-
-    cJSON *arr = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *val = (const char *)sqlite3_column_text(stmt, 0);
-        if (val) arr = cJSON_Parse(val);
-    }
-    sqlite3_finalize(stmt);
-
-    if (!arr) arr = cJSON_CreateArray();
-
-    /* Check duplicate */
-    cJSON *item;
-    cJSON_ArrayForEach(item, arr) {
-        if (cJSON_IsString(item) && strcmp(item->valuestring, tool) == 0) {
-            cJSON_Delete(arr);
-            return 0;
-        }
-    }
-
-    cJSON_AddItemToArray(arr, cJSON_CreateString(tool));
-    char *json = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
-
-    const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,'tools',?);";
-    if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) != SQLITE_OK) { free(json); return -1; }
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, tool, -1, SQLITE_STATIC);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
-    free(json);
     return rc;
 }
 

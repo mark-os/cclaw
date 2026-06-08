@@ -46,4 +46,14 @@ int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error);
 /* V105: Wake daemon via named FIFO (1 byte write). */
 int daemon_wake(const char *db_path);
 
+/* Per-channel outbox wake FIFO (daemon → channel process). */
+char *channel_outbox_fifo_path(const char *db_path, const char *channel_name);
+int channel_outbox_fifo_open(const char *db_path, const char *channel_name);
+void channel_outbox_fifo_close(int fd, const char *db_path, const char *channel_name);
+int channel_outbox_wake(const char *db_path, const char *channel_name);
+
+/* Insert outbox row for a channel. Called by daemon after agent turn completes. */
+int channel_outbox_insert(sqlite3 *db, const char *channel_name,
+                          int64_t session_id, const char *payload);
+
 #endif

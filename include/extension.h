@@ -1,6 +1,7 @@
 #ifndef CCLAW_EXTENSION_H
 #define CCLAW_EXTENSION_H
 
+#include <sqlite3.h>
 #include "tool_js.h"
 #include "tools.h"
 #include "config.h"
@@ -35,6 +36,8 @@ typedef struct {
  * Returns sorted array of absolute file paths. Caller frees via extension_list_free().
  * Scans .js files and subdir index.js files, sorted alphabetically. */
 char **extension_discover(const char *workspace, size_t *count);
+char **extension_discover_for_agent(sqlite3 *db, const char *agent_name,
+                                    const char *workspace, size_t *count);
 void extension_list_free(char **paths, size_t count);
 
 /* T255/T256: Load discovered extensions into shared QuickJS context.

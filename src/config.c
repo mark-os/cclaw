@@ -117,8 +117,6 @@ void config_free(Config *cfg) {
     free(cfg->fallback_providers);
     free(cfg->db_path);
     free(cfg->workspace);
-    free(cfg->telegram_token);
-    free(cfg->admin_chat_ids);
     free(cfg->system_prompt);
     free(cfg->env_file);
     free(cfg);
@@ -245,136 +243,63 @@ Config *config_load(sqlite3 *db) {
         free(v); \
     } while(0)
 
-    char *cfg_val;
+    char *cfg_val; (void)cfg_val;
     int int_val;
 
-    /* Provider config */
-    KV_STR("provider.base_url", "https://openrouter.ai/api/v1");
-    cfg->provider.base_url = cfg_val;
 
-    KV_STR("provider.model", "deepseek/deepseek-v4-flash");
-    cfg->provider.model = cfg_val;
 
-    /* api_key: V67/T188 — prefer env var (from provider's api_key_env) over DB decryption */
+    /* Load providers from providers table (ordered by priority) */
     {
-        const char *key_env = getenv("CCLAW_PROVIDER_API_KEY_ENV");
-        const char *injected = key_env && key_env[0] ? getenv(key_env) : NULL;
-        if (injected && injected[0])
-            cfg->provider.api_key = str_dup(injected);
-        else
-            cfg->provider.api_key = db_kv_get_secret(db, "provider.api_key");
-    }
-
-    KV_INT("provider.max_tokens", 4096);
-    cfg->provider.max_tokens = int_val;
-
-    KV_INT("provider.context_window", 65536);
-    cfg->provider.context_window = int_val;
-
-    /* cache_hints */
-    {
-        char *v = db_kv_get(db, "provider.cache_hints");
-        if (v) {
-            if (strcmp(v, "on") == 0) cfg->provider.cache_hints = CACHE_HINTS_ON;
-            else if (strcmp(v, "off") == 0) cfg->provider.cache_hints = CACHE_HINTS_OFF;
-            else if (strcmp(v, "gemini-native") == 0) cfg->provider.cache_hints = CACHE_HINTS_GEMINI_NATIVE;
-            else cfg->provider.cache_hints = CACHE_HINTS_AUTO;
-            free(v);
-        } else {
-            cfg->provider.cache_hints = CACHE_HINTS_AUTO;
-        }
-    }
-
-    /* T290: endpoint_type */
-    {
-        char *v = db_kv_get(db, "provider.endpoint_type");
-        if (v) {
-            if (strcmp(v, "gemini") == 0) cfg->provider.endpoint_type = ENDPOINT_GEMINI;
-            else cfg->provider.endpoint_type = ENDPOINT_OPENAI;
-            free(v);
-        } else {
-            cfg->provider.endpoint_type = ENDPOINT_OPENAI;
-        }
-    }
-
-    /* Fallback providers (JSON array in kv) */
-    {
-        char *fp = db_kv_get(db, "fallback_providers");
-        if (fp && fp[0] != '\0' && strcmp(fp, "[]") != 0) {
-            cJSON *arr = cJSON_Parse(fp);
-            if (arr && cJSON_IsArray(arr)) {
-                int count = cJSON_GetArraySize(arr);
-                if (count > 0) {
-                    cfg->fallback_providers = calloc((size_t)count, sizeof(ProviderConfig));
-                    if (cfg->fallback_providers) {
-                        cfg->fallback_count = (size_t)count;
-                        for (int i = 0; i < count; i++) {
-                            cJSON *p = cJSON_GetArrayItem(arr, i);
-                            cJSON *v;
-                            v = cJSON_GetObjectItemCaseSensitive(p, "base_url");
-                            if (cJSON_IsString(v)) cfg->fallback_providers[i].base_url = str_dup(v->valuestring);
-                            v = cJSON_GetObjectItemCaseSensitive(p, "api_key");
-                            if (cJSON_IsString(v)) cfg->fallback_providers[i].api_key = str_dup(v->valuestring);
-                            v = cJSON_GetObjectItemCaseSensitive(p, "model");
-                            if (cJSON_IsString(v)) cfg->fallback_providers[i].model = str_dup(v->valuestring);
-                            v = cJSON_GetObjectItemCaseSensitive(p, "max_tokens");
-                            cfg->fallback_providers[i].max_tokens = cJSON_IsNumber(v) ? v->valueint : cfg->provider.max_tokens;
-                            v = cJSON_GetObjectItemCaseSensitive(p, "context_window");
-                            cfg->fallback_providers[i].context_window = cJSON_IsNumber(v) ? v->valueint : cfg->provider.context_window;
-                        }
+        const char *prov_sql = "SELECT name, base_url, endpoint_type, api_key_env,"
+                               " default_model, context_window FROM providers ORDER BY priority;";
+        sqlite3_stmt *ps;
+        if (sqlite3_prepare_v2(db, prov_sql, -1, &ps, NULL) == SQLITE_OK) {
+            int idx = 0;
+            size_t fb_cap = 4;
+            cfg->fallback_providers = calloc(fb_cap, sizeof(ProviderConfig));
+            while (sqlite3_step(ps) == SQLITE_ROW) {
+                ProviderConfig *p = (idx == 0) ? &cfg->provider : NULL;
+                if (idx > 0) {
+                    if (cfg->fallback_count >= fb_cap) {
+                        fb_cap *= 2;
+                        cfg->fallback_providers = realloc(cfg->fallback_providers,
+                            fb_cap * sizeof(ProviderConfig));
                     }
+                    p = &cfg->fallback_providers[cfg->fallback_count];
+                    memset(p, 0, sizeof(*p));
                 }
-            }
-            cJSON_Delete(arr);
-        }
-        free(fp);
-    }
-
-    /* DB path: derive from DB handle's filename */
-    {
-        const char *db_filename = sqlite3_db_filename(db, "main");
-        if (db_filename && db_filename[0])
-            cfg->db_path = str_dup(db_filename);
-        else
-            cfg->db_path = str_dup("cclaw.db");
-    }
-
-    KV_STR("workspace", "./workspace");
-    cfg->workspace = cfg_val;
-
-    /* telegram_token: V67/T188 — prefer daemon-injected env var over DB */
-    {
-        const char *injected = getenv("CCLAW_INJECTED_TELEGRAM_TOKEN");
-        if (injected && injected[0])
-            cfg->telegram_token = str_dup(injected);
-        else {
-            char *v = db_kv_get_secret(db, "telegram_token");
-            cfg->telegram_token = v ? v : str_dup("");
-        }
-    }
-
-    /* admin_chat_ids (JSON array in kv) */
-    {
-        char *ids = db_kv_get(db, "admin_chat_ids");
-        if (ids && ids[0] != '\0' && strcmp(ids, "[]") != 0) {
-            cJSON *arr = cJSON_Parse(ids);
-            if (arr && cJSON_IsArray(arr)) {
-                int n = cJSON_GetArraySize(arr);
-                if (n > 0) {
-                    cfg->admin_chat_ids = calloc((size_t)n, sizeof(int64_t));
-                    if (cfg->admin_chat_ids) {
-                        cfg->admin_chat_id_count = (size_t)n;
-                        for (int i = 0; i < n; i++) {
-                            cJSON *item = cJSON_GetArrayItem(arr, i);
-                            if (cJSON_IsNumber(item))
-                                cfg->admin_chat_ids[i] = (int64_t)item->valuedouble;
-                        }
-                    }
+                const char *v;
+                v = (const char *)sqlite3_column_text(ps, 1);
+                p->base_url = v ? strdup(v) : strdup("https://openrouter.ai/api/v1");
+                v = (const char *)sqlite3_column_text(ps, 2);
+                p->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
+                v = (const char *)sqlite3_column_text(ps, 3);
+                if (v && v[0]) {
+                    const char *key_val = getenv(v);
+                    p->api_key = (key_val && key_val[0]) ? strdup(key_val) : NULL;
                 }
+                v = (const char *)sqlite3_column_text(ps, 4);
+                p->model = v ? strdup(v) : strdup("deepseek/deepseek-v4-flash");
+                p->context_window = sqlite3_column_int(ps, 5);
+                if (p->context_window <= 0) p->context_window = 128000;
+                p->max_tokens = 4096;
+                p->cache_hints = CACHE_HINTS_AUTO;
+                if (idx > 0) cfg->fallback_count++;
+                idx++;
             }
-            cJSON_Delete(arr);
+            sqlite3_finalize(ps);
+            /* If no providers found, set defaults */
+            if (idx == 0) {
+                cfg->provider.base_url = strdup("https://openrouter.ai/api/v1");
+                cfg->provider.model = strdup("deepseek/deepseek-v4-flash");
+                cfg->provider.max_tokens = 4096;
+                cfg->provider.context_window = 128000;
+                cfg->provider.endpoint_type = ENDPOINT_OPENAI;
+                cfg->provider.cache_hints = CACHE_HINTS_AUTO;
+                const char *key = getenv("OPENROUTER_API_KEY");
+                if (key && key[0]) cfg->provider.api_key = strdup(key);
+            }
         }
-        free(ids);
     }
 
     KV_INT("web_port", 8080);
@@ -419,7 +344,6 @@ Config *config_load(sqlite3 *db) {
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER_BASE_URL");
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER");
     env_override_str(&cfg->provider.model, "CCLAW_MODEL");
-    env_override_str(&cfg->telegram_token, "CCLAW_TELEGRAM_TOKEN");
     env_override_str(&cfg->db_path, "CCLAW_DB_PATH");
     env_override_str(&cfg->system_prompt, "CCLAW_SYSTEM_PROMPT");
     env_override_int(&cfg->web_port, "CCLAW_WEB_PORT");

@@ -3,6 +3,7 @@
  * The cclaw API object provides registerTool, registerHook, callTool. */
 #define _POSIX_C_SOURCE 200809L
 #include "extension.h"
+#include <sqlite3.h>
 #include "log.h"
 #include <cJSON.h>
 #include <dirent.h>
@@ -20,56 +21,118 @@ char **extension_discover(const char *workspace, size_t *count) {
     *count = 0;
     if (!workspace) return NULL;
 
-    char ext_dir[1024];
-    int n = snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", workspace);
-    if (n < 0 || (size_t)n >= sizeof(ext_dir)) return NULL;
-
-    DIR *d = opendir(ext_dir);
-    if (!d) return NULL;
-
     size_t cap = 8;
     char **paths = malloc(cap * sizeof(char *));
-    if (!paths) { closedir(d); return NULL; }
+    if (!paths) return NULL;
 
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
+    /* Scan workspace/extensions/ for local drafts (index.js or *.js) */
+    char ext_dir[1024];
+    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", workspace);
 
-        char full[2048];
-        snprintf(full, sizeof(full), "%s/%s", ext_dir, ent->d_name);
+    DIR *d = opendir(ext_dir);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            char full[2048];
+            snprintf(full, sizeof(full), "%s/%s", ext_dir, ent->d_name);
+            struct stat st;
+            if (stat(full, &st) != 0) continue;
 
-        struct stat st;
-        if (stat(full, &st) != 0) continue;
-
-        const char *to_add = NULL;
-        char idx_path[2080];
-
-        if (S_ISREG(st.st_mode)) {
-            size_t len = strlen(ent->d_name);
-            if (len > 3 && strcmp(ent->d_name + len - 3, ".js") == 0)
-                to_add = full;
-        } else if (S_ISDIR(st.st_mode)) {
-            snprintf(idx_path, sizeof(idx_path), "%s/index.js", full);
-            if (stat(idx_path, &st) == 0 && S_ISREG(st.st_mode))
-                to_add = idx_path;
-        }
-
-        if (to_add) {
-            if (*count >= cap) {
-                cap *= 2;
-                char **tmp = realloc(paths, cap * sizeof(char *));
-                if (!tmp) break;
-                paths = tmp;
+            const char *to_add = NULL;
+            char idx_path[2080];
+            if (S_ISREG(st.st_mode)) {
+                size_t len = strlen(ent->d_name);
+                if (len > 3 && strcmp(ent->d_name + len - 3, ".js") == 0)
+                    to_add = full;
+            } else if (S_ISDIR(st.st_mode)) {
+                snprintf(idx_path, sizeof(idx_path), "%s/index.js", full);
+                if (stat(idx_path, &st) == 0 && S_ISREG(st.st_mode))
+                    to_add = idx_path;
             }
-            paths[*count] = strdup(to_add);
-            if (paths[*count]) (*count)++;
+            if (to_add) {
+                if (*count >= cap) { cap *= 2; paths = realloc(paths, cap * sizeof(char *)); }
+                paths[*count] = strdup(to_add);
+                if (paths[*count]) (*count)++;
+            }
         }
+        closedir(d);
     }
-    closedir(d);
 
     if (*count > 1)
         qsort(paths, *count, sizeof(char *), cmp_str);
+    return paths;
+}
 
+/* DB-aware discovery: load extensions attached to an agent */
+char **extension_discover_for_agent(sqlite3 *db, const char *agent_name,
+                                    const char *workspace, size_t *count) {
+    *count = 0;
+    size_t cap = 8;
+    char **paths = malloc(cap * sizeof(char *));
+    if (!paths) return NULL;
+
+    /* Global extensions attached to this agent */
+    if (db && agent_name) {
+        const char *sql =
+            "SELECT e.path FROM extensions e"
+            " JOIN agent_extensions ae ON ae.extension_name=e.name"
+            " WHERE ae.agent_name=? AND e.enabled=1;";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *ext_path = (const char *)sqlite3_column_text(stmt, 0);
+                if (!ext_path) continue;
+                char idx[2048];
+                snprintf(idx, sizeof(idx), "%s/index.js", ext_path);
+                struct stat st;
+                if (stat(idx, &st) == 0) {
+                    if (*count >= cap) { cap *= 2; paths = realloc(paths, cap * sizeof(char *)); }
+                    paths[*count] = strdup(idx);
+                    if (paths[*count]) (*count)++;
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    /* Also scan workspace/extensions/ for local drafts */
+    if (workspace) {
+        char ext_dir[1024];
+        snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", workspace);
+        DIR *d = opendir(ext_dir);
+        if (d) {
+            struct dirent *ent;
+            while ((ent = readdir(d)) != NULL) {
+                if (ent->d_name[0] == '.') continue;
+                char full[2048];
+                snprintf(full, sizeof(full), "%s/%s", ext_dir, ent->d_name);
+                struct stat st;
+                if (stat(full, &st) != 0) continue;
+                const char *to_add = NULL;
+                char idx_path[2080];
+                if (S_ISREG(st.st_mode)) {
+                    size_t len = strlen(ent->d_name);
+                    if (len > 3 && strcmp(ent->d_name + len - 3, ".js") == 0)
+                        to_add = full;
+                } else if (S_ISDIR(st.st_mode)) {
+                    snprintf(idx_path, sizeof(idx_path), "%s/index.js", full);
+                    if (stat(idx_path, &st) == 0 && S_ISREG(st.st_mode))
+                        to_add = idx_path;
+                }
+                if (to_add) {
+                    if (*count >= cap) { cap *= 2; paths = realloc(paths, cap * sizeof(char *)); }
+                    paths[*count] = strdup(to_add);
+                    if (paths[*count]) (*count)++;
+                }
+            }
+            closedir(d);
+        }
+    }
+
+    if (*count > 1)
+        qsort(paths, *count, sizeof(char *), cmp_str);
     return paths;
 }
 

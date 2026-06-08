@@ -75,74 +75,15 @@ static void test_injected_api_key(void) {
 }
 
 /* V67: injected env var overrides DB value for telegram_token */
-static void test_injected_telegram_token(void) {
-    TEST(injected_telegram_token);
-
-    unsetenv("CCLAW_TELEGRAM_TOKEN");
-    unsetenv("CCLAW_INJECTED_TELEGRAM_TOKEN");
-
-    sqlite3 *db = db_open(db_path);
-    if (!db) FAIL("db_open");
-
-    db_kv_set(db, "telegram_token", "db-token");
-
-    setenv("CCLAW_INJECTED_TELEGRAM_TOKEN", "daemon-injected-token", 1);
-
-    Config *cfg = config_load(db);
-    if (!cfg) { db_close(db); FAIL("config_load"); }
-
-    if (!cfg->telegram_token || strcmp(cfg->telegram_token, "daemon-injected-token") != 0) {
-        config_free(cfg);
-        db_close(db);
-        FAIL("expected daemon-injected-token");
-    }
-
-    config_free(cfg);
-    db_close(db);
-    unsetenv("CCLAW_INJECTED_TELEGRAM_TOKEN");
-    PASS();
-}
 
 /* V67: without injected env, falls back to DB value */
-static void test_fallback_to_db(void) {
-    TEST(fallback_to_db);
-
-    unsetenv("OPENROUTER_API_KEY");
-    unsetenv("CCLAW_PROVIDER_API_KEY_ENV");
-    unsetenv("CCLAW_INJECTED_TELEGRAM_TOKEN");
-    unsetenv("CCLAW_TELEGRAM_TOKEN");
-
-    sqlite3 *db = db_open(db_path);
-    if (!db) FAIL("db_open");
-
-    db_kv_set(db, "provider.api_key", "plain-db-key");
-    db_kv_set(db, "telegram_token", "plain-db-token");
-
-    Config *cfg = config_load(db);
-    if (!cfg) { db_close(db); FAIL("config_load"); }
-
-    if (!cfg->provider.api_key || strcmp(cfg->provider.api_key, "plain-db-key") != 0) {
-        config_free(cfg);
-        db_close(db);
-        FAIL("expected plain-db-key from DB");
-    }
-    if (!cfg->telegram_token || strcmp(cfg->telegram_token, "plain-db-token") != 0) {
-        config_free(cfg);
-        db_close(db);
-        FAIL("expected plain-db-token from DB");
-    }
-
-    config_free(cfg);
-    db_close(db);
-    PASS();
-}
 
 int main(void) {
     printf("test_daemon_secrets (T188):\n");
     setup();
     test_injected_api_key();
-    test_injected_telegram_token();
-    test_fallback_to_db();
+    /* test_injected_telegram_token(); -- telegram_token removed from config */
+    /* test_fallback_to_db(); -- provider.api_key now comes from providers table env var */
     teardown();
     printf("  %d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

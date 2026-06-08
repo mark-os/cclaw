@@ -9,7 +9,7 @@ int main(void) {
 
     /* T297: unified schema template contains expected tables */
     assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS agents"));
-    assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS kv"));
+    assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS config"));
     assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS sessions"));
     assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS entries"));
     assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS tool_calls"));

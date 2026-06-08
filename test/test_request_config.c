@@ -65,7 +65,7 @@ static void test_add_tool_to_config(void) {
     assert(rc == 0);
 
     sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, "SELECT value FROM agent_config WHERE agent_name='test' AND key='tools'",
+    sqlite3_prepare_v2(db, "SELECT allowed_tools FROM agents WHERE name='test'",
                        -1, &stmt, NULL);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
     const char *val = (const char *)sqlite3_column_text(stmt, 0);

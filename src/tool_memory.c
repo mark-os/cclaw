@@ -2,6 +2,7 @@
 #include "tool_memory.h"
 #include "db.h"
 #include "tool_parse.h"
+#include "validate.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,6 +39,10 @@ static char *tool_memory_create_handler(const char *arguments, void *user_data) 
     if (!label || !desc) {
         tool_parse_free(&ta);
         return strdup("error: 'label' and 'description' required");
+    }
+    if (!is_valid_name(label)) {
+        tool_parse_free(&ta);
+        return strdup("error: label must be alphanumeric (A-Z, a-z, 0-9, _, -)");
     }
 
     const char *value = targ_str(&ta, "value");

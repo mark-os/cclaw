@@ -36,8 +36,6 @@ typedef struct {
     int instruction_limit;
     char **allowed_hosts;
     size_t allowed_hosts_count;
-    void *tool_registry;
-    int call_depth;
 } HostCtx;
 
 static int interrupt_handler(JSContext *ctx, void *opaque) {
@@ -282,13 +280,13 @@ JSValue js_admin_list_providers(JSContext *ctx, JSValue *this_val, int argc, JSV
 
 JSValue js_admin_list_agents(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     (void)this_val; (void)argc; (void)argv;
-    size_t count = 0;
-    char **names = admin_list_agents("agents", &count);
-    JSValue arr = JS_NewArray(ctx, (int)count);
-    for (size_t i = 0; i < count; i++) {
+    int count = 0;
+    char **names = db_agent_list(g_ctx->db, &count);
+    JSValue arr = JS_NewArray(ctx, count);
+    for (int i = 0; i < count; i++) {
         JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewString(ctx, names[i]));
     }
-    if (names) { for (size_t i = 0; i < count; i++) free(names[i]); free(names); }
+    if (names) { for (int i = 0; i < count; i++) free(names[i]); free(names); }
     return arr;
 }
 
@@ -301,12 +299,16 @@ JSValue js_admin_is_admin(JSContext *ctx, JSValue *this_val, int argc, JSValue *
     /* Check channel_state for admin_ids (comma-separated) */
     char *admins = channel_get_config(g_ctx, "admin_ids");
     if (!admins) return JS_NewBool(0);
-    char *tok = strtok(admins, ",");
+    size_t cid_len = strlen(channel_id);
     int found = 0;
-    while (tok) {
-        while (*tok == ' ') tok++;
-        if (strcmp(tok, channel_id) == 0) { found = 1; break; }
-        tok = strtok(NULL, ",");
+    const char *p = admins;
+    while (*p) {
+        while (*p == ' ' || *p == ',') p++;
+        const char *end = p;
+        while (*end && *end != ',') end++;
+        size_t seg_len = (size_t)(end - p);
+        if (seg_len == cid_len && memcmp(p, channel_id, cid_len) == 0) { found = 1; break; }
+        p = *end ? end + 1 : end;
     }
     free(admins);
     return JS_NewBool(found);
@@ -405,24 +407,11 @@ static char *read_file(const char *path) {
 
 /* Call a JS function by name with a string argument. Returns heap string or NULL. */
 static char *call_js_str(JSContext *ctx, const char *fn, const char *arg) {
-    char code[4096];
+    char code[128];
     if (arg) {
-        /* Escape the argument for JS string literal */
-        size_t alen = strlen(arg);
-        size_t needed = alen * 2 + 128;
-        char *escaped = malloc(needed);
-        if (!escaped) return NULL;
-        size_t o = 0;
-        for (size_t i = 0; i < alen && o < needed - 4; i++) {
-            if (arg[i] == '\\') { escaped[o++] = '\\'; escaped[o++] = '\\'; }
-            else if (arg[i] == '\'') { escaped[o++] = '\\'; escaped[o++] = '\''; }
-            else if (arg[i] == '\n') { escaped[o++] = '\\'; escaped[o++] = 'n'; }
-            else if (arg[i] == '\r') { escaped[o++] = '\\'; escaped[o++] = 'r'; }
-            else escaped[o++] = arg[i];
-        }
-        escaped[o] = '\0';
-        snprintf(code, sizeof(code), "JSON.stringify(%s('%s'))", fn, escaped);
-        free(escaped);
+        JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cr_call_arg",
+                          JS_NewString(ctx, arg));
+        snprintf(code, sizeof(code), "JSON.stringify(%s(__cr_call_arg))", fn);
     } else {
         snprintf(code, sizeof(code), "JSON.stringify(%s())", fn);
     }
@@ -442,16 +431,10 @@ static char *call_js_str(JSContext *ctx, const char *fn, const char *arg) {
 
 /* Call JS onNetwork(body_string). */
 static void call_on_network(JSContext *ctx, const char *body) {
-    /* Pass raw body as argument to onNetwork — let JS parse it */
-    size_t blen = strlen(body);
-    size_t code_cap = blen * 2 + 256;
-    char *code = malloc(code_cap);
-    if (!code) return;
-
-    /* We pass the body via a global to avoid escaping issues */
+    /* Pass raw body via global property to avoid escaping issues */
     JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cr_net_body",
                       JS_NewString(ctx, body));
-    snprintf(code, code_cap, "onNetwork(__cr_net_body)");
+    const char *code = "onNetwork(__cr_net_body)";
     JSValue val = JS_Eval(ctx, code, strlen(code), "<net>", 0);
     if (JS_IsException(val)) {
         JSValue exc = JS_GetException(ctx);
@@ -459,7 +442,6 @@ static void call_on_network(JSContext *ctx, const char *body) {
         const char *msg = JS_ToCString(ctx, exc, &buf);
         fprintf(stderr, "[channel_runner] onNetwork error: %s\n", msg ? msg : "?");
     }
-    free(code);
 }
 
 /* Call JS onOutbox({id, session_id, payload}). */
@@ -492,15 +474,20 @@ int main(int argc, char **argv) {
     const char *channel_name = argv[2];
 
     /* Resolve js_path from extensions table */
-    sqlite3 *tmp_db = db_open(db_path);
-    if (!tmp_db) { fprintf(stderr, "[channel_runner] DB open failed\n"); return 1; }
+    signal(SIGTERM, handle_signal);
+    signal(SIGINT, handle_signal);
+
+    /* Open channel context */
+    g_ctx = channel_ctx_open(db_path, channel_name);
+    if (!g_ctx) { fprintf(stderr, "[channel_runner] DB open failed\n"); return 1; }
+
     char js_path_buf[1024] = {0};
     {
         const char *sql = "SELECT e.path FROM channels c"
                           " JOIN extensions e ON c.extension_name=e.name"
                           " WHERE c.name=?;";
         sqlite3_stmt *s;
-        if (sqlite3_prepare_v2(tmp_db, sql, -1, &s, NULL) == SQLITE_OK) {
+        if (sqlite3_prepare_v2(g_ctx->db, sql, -1, &s, NULL) == SQLITE_OK) {
             sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
             if (sqlite3_step(s) == SQLITE_ROW) {
                 const char *p = (const char *)sqlite3_column_text(s, 0);
@@ -509,19 +496,12 @@ int main(int argc, char **argv) {
             sqlite3_finalize(s);
         }
     }
-    db_close(tmp_db);
     const char *js_path = js_path_buf;
     if (!js_path[0]) {
-        fprintf(stderr, "[channel_runner] no extension path for channel \'%s\'\n", channel_name);
+        fprintf(stderr, "[channel_runner] no extension path for channel '%s'\n", channel_name);
+        channel_ctx_free(g_ctx);
         return 1;
     }
-
-    signal(SIGTERM, handle_signal);
-    signal(SIGINT, handle_signal);
-
-    /* Open channel context */
-    g_ctx = channel_ctx_open(db_path, channel_name);
-    if (!g_ctx) { fprintf(stderr, "[channel_runner] DB open failed\n"); return 1; }
 
     /* Open outbox wake FIFO */
     int outbox_fd = channel_outbox_fifo_open(db_path, channel_name);
@@ -691,6 +671,7 @@ int main(int argc, char **argv) {
         curl_global_cleanup();
 
     } else if (poll_type == POLL_LISTEN) {
+        /* NOT YET FUNCTIONAL — minimal TCP server, no HTTP parsing */
         /* TCP server socket */
         int port = 0;
         const char *get_port = "globalThis.__cr_init.port || 8080";

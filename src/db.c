@@ -2,6 +2,7 @@
 #include "db.h"
 #include "agent_config.h"
 #include "secret.h"
+#include "validate.h"
 #include "cJSON.h"
 #include "templates.h"
 #include <stdio.h>
@@ -1376,6 +1377,70 @@ void agent_row_free(AgentRow *row) {
     free(row);
 }
 
+int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
+                 int64_t requesting_session_id) {
+    if (!db || !old_name || !new_name) return -3;
+    if (!is_valid_name(new_name)) return -3;
+
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
+        return -1;
+
+    /* Check agent exists */
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM agents WHERE name=?", -1, &s, NULL) != SQLITE_OK)
+        goto rollback_busy;
+    sqlite3_bind_text(s, 1, old_name, -1, SQLITE_STATIC);
+    int found = (sqlite3_step(s) == SQLITE_ROW);
+    sqlite3_finalize(s);
+    if (!found) { sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL); return -4; }
+
+    /* Check no active sessions (excluding the requesting one) */
+    if (sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM sessions WHERE agent_name=? AND state!='idle' AND id!=?",
+        -1, &s, NULL) != SQLITE_OK) goto rollback_busy;
+    sqlite3_bind_text(s, 1, old_name, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(s, 2, requesting_session_id);
+    int busy = 0;
+    if (sqlite3_step(s) == SQLITE_ROW) busy = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    if (busy > 0) { sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL); return -1; }
+
+    /* Check new name not taken */
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM agents WHERE name=?", -1, &s, NULL) != SQLITE_OK)
+        goto rollback_busy;
+    sqlite3_bind_text(s, 1, new_name, -1, SQLITE_STATIC);
+    int conflict = (sqlite3_step(s) == SQLITE_ROW);
+    sqlite3_finalize(s);
+    if (conflict) { sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL); return -2; }
+
+    /* Cascade rename across all tables */
+    const char *updates[] = {
+        "UPDATE agents SET name=?1 WHERE name=?2",
+        "UPDATE agent_extensions SET agent_name=?1 WHERE agent_name=?2",
+        "UPDATE channel_routes SET agent_name=?1 WHERE agent_name=?2",
+        "UPDATE sessions SET agent_name=?1 WHERE agent_name=?2",
+        "UPDATE cron_jobs SET agent_name=?1 WHERE agent_name=?2",
+        "UPDATE memory_blocks SET agent_name=?1 WHERE agent_name=?2",
+        "UPDATE config SET value=?1 WHERE key='default_agent' AND value=?2",
+    };
+    for (size_t i = 0; i < sizeof(updates)/sizeof(updates[0]); i++) {
+        if (sqlite3_prepare_v2(db, updates[i], -1, &s, NULL) != SQLITE_OK)
+            goto rollback_busy;
+        sqlite3_bind_text(s, 1, new_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, old_name, -1, SQLITE_STATIC);
+        sqlite3_step(s);
+        sqlite3_finalize(s);
+    }
+
+    if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
+        goto rollback_busy;
+    return 0;
+
+rollback_busy:
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    return -1;
+}
+
 /* tool_calls status helpers */
 
 int db_tool_call_set_status(sqlite3 *db, int64_t session_id, const char *call_id,
@@ -1464,6 +1529,7 @@ void memory_block_list_free(MemoryBlock *list, int count) {
 
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
                             const char *description, const char *value, int char_limit) {
+    if (!label || !is_valid_name(label)) return -1;
     const char *sql = "INSERT INTO memory_blocks(agent_name, label, description, value, char_limit)"
                       " VALUES(?,?,?,?,?);";
     sqlite3_stmt *stmt;

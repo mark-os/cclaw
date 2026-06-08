@@ -12,7 +12,7 @@
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    int rc = tool_request_config_register(&reg);
+    int rc = tool_request_config_register(&reg, NULL);
     assert(rc == 0);
 
     ToolEntry *e = tools_lookup(&reg, "request_config");
@@ -24,17 +24,16 @@ static void test_register(void) {
     printf("  PASS test_register\n");
 }
 
-/* In the new architecture, request_config handler is never called directly
- * (turn_loop handles it inline). But if called, it returns an error. */
+/* With NULL context, handler returns unavailable error. */
 static void test_handler_returns_error(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    tool_request_config_register(&reg);
+    tool_request_config_register(&reg, NULL);
 
     ToolEntry *e = tools_lookup(&reg, "request_config");
     char *result = e->handler("{\"action\":\"grant_tool\",\"tool\":\"shell_exec\"}", e->user_data);
     assert(result != NULL);
-    assert(strstr(result, "error") != NULL || strstr(result, "parent") != NULL);
+    assert(strstr(result, "error") != NULL);
     free(result);
 
     tools_free(&reg);
@@ -44,7 +43,7 @@ static void test_handler_returns_error(void) {
 static void test_missing_tool_field(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    tool_request_config_register(&reg);
+    tool_request_config_register(&reg, NULL);
 
     ToolEntry *e = tools_lookup(&reg, "request_config");
     char *result = e->handler("{\"action\":\"grant_tool\"}", e->user_data);

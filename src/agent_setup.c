@@ -100,8 +100,12 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     if (setup->js_rt)
         js_runtime_set_registry(setup->js_rt, &setup->reg);
 
-    /* T274/V120: request_config — CLI inline tool/host grant */
-    tool_request_config_register(&setup->reg);
+    /* T274/V120: request_config — CLI inline tool/host/rename */
+    setup->req_cfg_ctx.db = db;
+    setup->req_cfg_ctx.agent_name = agent_name;
+    setup->req_cfg_ctx.session_id = session_id;
+    setup->req_cfg_ctx.agents_dir = NULL;  /* set by caller if known */
+    tool_request_config_register(&setup->reg, &setup->req_cfg_ctx);
 
     /* Daemon-mode only tools */
     if (mode == AGENT_SETUP_DAEMON) {

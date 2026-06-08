@@ -774,6 +774,13 @@ int main(int argc, char *argv[]) {
               sqlite3_step(bs); sqlite3_finalize(bs);
           }
           db_kv_set(g_db, "default_agent", "default");
+          /* Seed default memory blocks */
+          memory_block_create(g_db, "default", "AGENT",
+              "Your identity, capabilities, and operational notes. Update as you learn about yourself.",
+              NULL, 5000);
+          memory_block_create(g_db, "default", "USER",
+              "Information about the user: preferences, context, working style. Update as you learn.",
+              NULL, 5000);
       }
       if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
     }
@@ -831,11 +838,17 @@ int main(int argc, char *argv[]) {
     AgentSetup setup;
     agent_setup_init(&setup, g_db, 0, g_cfg, g_agent_name, NULL, 0, AGENT_SETUP_CLI);
     g_tool_setup = &setup;
+    /* Set agents_dir for rename support; point agent_name at g_agent_name for live update */
+    char agents_dir[PATH_MAX];
+    snprintf(agents_dir, sizeof(agents_dir), "%s/agents", base_dir);
+    setup.req_cfg_ctx.agents_dir = agents_dir;
+    setup.req_cfg_ctx.agent_name = g_agent_name;
 
     /* Session selection */
     session_id = cli_select_session(g_db, session_id, new_session);
     if (session_id < 0) { agent_setup_destroy(&setup); free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path); return 1; }
     g_cli_session = session_id;
+    setup.req_cfg_ctx.session_id = session_id;
 
     /* Ensure system prompt */
     { int bc = 0; Entry *br = session_get_branch(g_db, session_id, &bc);

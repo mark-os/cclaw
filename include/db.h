@@ -190,6 +190,11 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name);
 /* Free AgentRow. */
 void agent_row_free(AgentRow *row);
 
+/* Atomic agent rename: cascades to all tables. Returns:
+ * 0=success, -1=busy (sessions active), -2=name conflict, -3=invalid name, -4=not found */
+int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
+                 int64_t requesting_session_id);
+
 /* tool_calls status helpers */
 typedef struct {
     char *call_id;

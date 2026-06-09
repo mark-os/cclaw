@@ -277,7 +277,7 @@ static int process_registered_tools(JsSessionRuntime *rt, ToolRegistry *reg,
         /* Register via existing js_tool path (re-uses JsSessionRuntime) */
         if (js_tool_register_ext(reg, name, desc, params, handler_code, rt) == 0) {
             registered++;
-            LOG_DEBUG(cfg, "extension: registered tool '%s'", name);
+            LOG_DEBUG_(cfg, "extension: registered tool '%s'", name);
         }
     }
     return registered;
@@ -314,7 +314,7 @@ static void process_registered_hooks(JsSessionRuntime *rt, ExtensionCtx *ext_ctx
             hl->fns[hl->count] = strdup(ref);
             if (hl->fns[hl->count]) hl->count++;
         }
-        LOG_DEBUG(cfg, "extension: %zu %s hooks registered",
+        LOG_DEBUG_(cfg, "extension: %zu %s hooks registered",
                   hl->count, hook_event_names[ev]);
     }
 }
@@ -328,7 +328,7 @@ int extension_load(char **paths, size_t count, JsSessionRuntime *rt,
     /* T256: Install cclaw API object before loading extensions */
     JSValue init_val = JS_Eval(ctx, CCLAW_API_INIT, strlen(CCLAW_API_INIT), "<cclaw>", 0);
     if (JS_IsException(init_val)) {
-        LOG_INFO(cfg, "extension: failed to init cclaw API");
+        LOG_INFO_(cfg, "extension: failed to init cclaw API");
         return 0;
     }
 
@@ -337,7 +337,7 @@ int extension_load(char **paths, size_t count, JsSessionRuntime *rt,
         size_t src_len = 0;
         char *src = read_file(paths[i], &src_len);
         if (!src) {
-            LOG_INFO(cfg, "extension: skip %s (unreadable)", paths[i]);
+            LOG_INFO_(cfg, "extension: skip %s (unreadable)", paths[i]);
             continue;
         }
 
@@ -354,11 +354,11 @@ int extension_load(char **paths, size_t count, JsSessionRuntime *rt,
             JSValue exc = JS_GetException(ctx);
             JSCStringBuf buf;
             const char *msg = JS_ToCString(ctx, exc, &buf);
-            LOG_INFO(cfg, "extension: skip %s (error: %s)", paths[i],
+            LOG_INFO_(cfg, "extension: skip %s (error: %s)", paths[i],
                      msg ? msg : "unknown");
         } else {
             loaded++;
-            LOG_DEBUG(cfg, "extension: loaded %s", paths[i]);
+            LOG_DEBUG_(cfg, "extension: loaded %s", paths[i]);
         }
         free(wrapped);
     }

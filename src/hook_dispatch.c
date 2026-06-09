@@ -200,7 +200,7 @@ char *hook_dispatch_before_request(ExtensionCtx *ext_ctx, sqlite3 *db,
     free(messages_json);
     free(tools_json);
 
-    LOG_DEBUG(cfg, "beforeRequest hook: modified request (%zu bytes)", strlen(body));
+    LOG_DEBUG_(cfg, "beforeRequest hook: modified request (%zu bytes)", strlen(body));
     return body;
 }
 

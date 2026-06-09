@@ -90,7 +90,7 @@ int llm_call_with_retry(const char *url, const char **headers,
         if (status == 429 || (status >= 500 && status < 600)) {
             int wait_sec = resp->retry_after > 0 ? resp->retry_after : (backoff_ms / 1000);
             if (wait_sec < 1) wait_sec = 1;
-            LOG_DEBUG(cfg, "HTTP %d, retry %d/%d (wait %ds)",
+            LOG_DEBUG_(cfg, "HTTP %d, retry %d/%d (wait %ds)",
                       status, attempt + 1, MAX_RETRIES, wait_sec);
             sleep((unsigned)wait_sec);
             http_response_free(resp);
@@ -130,7 +130,7 @@ static void trace_dump_request(const Config *cfg, sqlite3 *db, int64_t session_i
             if (n == 0) break;
             len += n;
         }
-        if (dbuf) { dbuf[len] = '\0'; LOG_TRACE(cfg, "REQ %s%s", label, dbuf); free(dbuf); }
+        if (dbuf) { dbuf[len] = '\0'; LOG_TRACE_(cfg, "REQ %s%s", label, dbuf); free(dbuf); }
     }
     rs_cleanup(&dbg_rs);
 }
@@ -174,7 +174,7 @@ int llm_call_with_fallbacks(Arena *a, sqlite3 *db, int64_t session_id,
     /* body_override path (hook-modified request) */
     if (body_override) {
         if (cfg->log_level >= LOG_LEVEL_TRACE)
-            LOG_TRACE(cfg, "REQ (hook-modified) %s", body_override);
+            LOG_TRACE_(cfg, "REQ (hook-modified) %s", body_override);
         HttpRequestOpts opts = {
             .url = url, .method = "POST", .headers = headers,
             .body = body_override, .curl_handle = curl,
@@ -231,7 +231,7 @@ int llm_call_with_fallbacks(Arena *a, sqlite3 *db, int64_t session_id,
 
     /* Fallback providers */
     for (size_t i = 0; i < cfg->fallback_count; i++) {
-        LOG_DEBUG(cfg, "primary failed, trying fallback %zu", i);
+        LOG_DEBUG_(cfg, "primary failed, trying fallback %zu", i);
         const ProviderConfig *fb = &cfg->fallback_providers[i];
         if (!fb->base_url || !fb->api_key || !fb->model) continue;
 

@@ -80,10 +80,10 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     /* Context planning */
     ContextPlan plan = {0};
     if (context_plan(db, session_id, cfg, tool_overhead, &plan) != 0) {
-        LOG_DEBUG(cfg, "llm_req: context_plan failed");
+        LOG_DEBUG_(cfg, "llm_req: context_plan failed");
         goto err;
     }
-    LOG_DEBUG(cfg, "llm_req: %d entries, cut=%d", plan.count, plan.cut);
+    LOG_DEBUG_(cfg, "llm_req: %d entries, cut=%d", plan.count, plan.cut);
 
     /* Auto-recall */
     char *recall_text = NULL;
@@ -123,7 +123,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             fb_cfg = *cfg;
             fb_cfg.provider = cfg->fallback_providers[0];
             call_cfg = &fb_cfg;
-            LOG_DEBUG(cfg, "E1 zero-usage: trying fallback model");
+            LOG_DEBUG_(cfg, "E1 zero-usage: trying fallback model");
         }
 
         HttpResponse resp = {0};
@@ -140,16 +140,16 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         long elapsed_ms = (t_end.tv_sec - t_start.tv_sec) * 1000 +
                           (t_end.tv_nsec - t_start.tv_nsec) / 1000000;
         last_status = status;
-        LOG_DEBUG(cfg, "llm_req: %ldms status=%d ttfb=%.3fs tls=%.3fs%s",
+        LOG_DEBUG_(cfg, "llm_req: %ldms status=%d ttfb=%.3fs tls=%.3fs%s",
                   elapsed_ms, status, resp.ttfb, resp.tls_time,
                   resp.conn_reused ? " conn_reused" : "");
 
         if (cfg->log_level >= LOG_LEVEL_TRACE && resp.data)
-            LOG_TRACE(cfg, "RESP status=%d %s", status, resp.data);
+            LOG_TRACE_(cfg, "RESP status=%d %s", status, resp.data);
 
         /* Context overflow */
         if (status == 400 && llm_is_context_overflow(resp.data)) {
-            LOG_DEBUG(cfg, "E5: context overflow");
+            LOG_DEBUG_(cfg, "E5: context overflow");
             http_response_free(&resp);
             sse_ctx_free(&sse_ctx);
             goto err;
@@ -180,15 +180,15 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         http_response_free(&resp);
         sse_ctx_free(&sse_ctx);
 
-        if (rc != 0) { LOG_DEBUG(cfg, "parse failure, retry"); continue; }
-        if (!llm_resp.finish_reason) { LOG_DEBUG(cfg, "missing finish_reason, retry"); continue; }
+        if (rc != 0) { LOG_DEBUG_(cfg, "parse failure, retry"); continue; }
+        if (!llm_resp.finish_reason) { LOG_DEBUG_(cfg, "missing finish_reason, retry"); continue; }
 
         /* V94: zero-usage empty stop */
         if (llm_resp.usage.total_tokens == 0 &&
             (!llm_resp.content || !llm_resp.content[0]) &&
             strcmp(llm_resp.finish_reason, "stop") == 0) {
             e1_retries++;
-            LOG_DEBUG(cfg, "E1 zero-usage, retry %d", e1_retries);
+            LOG_DEBUG_(cfg, "E1 zero-usage, retry %d", e1_retries);
             if (e1_retries <= 2 || (e1_retries == 3 && cfg->fallback_count > 0))
                 continue;
             break;
@@ -250,7 +250,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     free(tc_args);
 
     if (rc != 0) {
-        LOG_DEBUG(cfg, "llm_req: db_ingest_typed failed");
+        LOG_DEBUG_(cfg, "llm_req: db_ingest_typed failed");
         goto err;
     }
     free(ir.tc_entry_ids);

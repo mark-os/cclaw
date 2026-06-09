@@ -430,7 +430,7 @@ static void reap_children(void) {
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         /* Worker crash recovery */
         if (pid == llm_worker_pid()) {
-            LOG_ERROR(g_cfg, "LLM worker crashed, respawning");
+            LOG_ERROR_(g_cfg, "LLM worker crashed, respawning");
             llm_worker_respawn();
             continue;
         }
@@ -1004,7 +1004,7 @@ int main(int argc, char *argv[]) {
                 while (llm_worker_read(&completed_sid) == 0) {
                     /* Queue overflow sentinel */
                     if (completed_sid == -1) {
-                        LOG_ERROR(g_cfg, "LLM worker queue full");
+                        LOG_ERROR_(g_cfg, "LLM worker queue full");
                         continue;
                     }
                     /* Find tracking entry and get iteration */

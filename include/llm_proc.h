@@ -13,8 +13,9 @@
 
 /* Core LLM request: one HTTP call, writes entry to DB.
  * Accepts persistent handles (worker mode) or NULL (fork mode creates/destroys).
+ * recall: 1 = first req in turn (trigger auto-recall), 0 = subsequent.
  * Returns 0 on success (entry written), -1 on error. */
-int llm_req(sqlite3 *db, CURL *curl, int64_t session_id);
+int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall);
 
 /* Fork-mode entry point: opens DB, calls llm_req, closes, exits.
  * Reads config from CCLAW_* env vars. Returns LLM_EXIT_* code. */

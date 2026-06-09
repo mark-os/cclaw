@@ -139,7 +139,6 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
             return -1;
         }
 
-        setenv("CCLAW_RECALL", iteration == 0 ? "1" : "0", 1);
         session_set_state(g_db, session_id, "llm_running");
 
         /* Track iteration in a lightweight way for worker callbacks */
@@ -161,7 +160,7 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
             snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
         }
 
-        return llm_worker_submit(session_id);
+        return llm_worker_submit(session_id, iteration == 0 ? 1 : 0);
     }
     /* Fork mode */
     return fork_llm_req(session_id, agent_name, iteration);
@@ -429,6 +428,13 @@ static void reap_children(void) {
     int status;
     pid_t pid;
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        /* Worker crash recovery */
+        if (pid == llm_worker_pid()) {
+            LOG_ERROR(g_cfg, "LLM worker crashed, respawning");
+            llm_worker_respawn();
+            continue;
+        }
+
         ChildProc *c = child_find(pid);
         if (!c) continue;
 
@@ -996,6 +1002,11 @@ int main(int argc, char *argv[]) {
                 /* Worker completed an LLM request */
                 int64_t completed_sid;
                 while (llm_worker_read(&completed_sid) == 0) {
+                    /* Queue overflow sentinel */
+                    if (completed_sid == -1) {
+                        LOG_ERROR(g_cfg, "LLM worker queue full");
+                        continue;
+                    }
                     /* Find tracking entry and get iteration */
                     ChildProc *wc = NULL;
                     for (int j = 0; j < g_child_count; j++) {

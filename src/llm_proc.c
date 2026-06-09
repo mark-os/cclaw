@@ -51,9 +51,9 @@ int turn_complete(sqlite3 *db, int64_t session_id) {
 
 /* ── llm_req: single LLM HTTP call ────────────────────────────── */
 
-int llm_req(sqlite3 *db, CURL *curl, int64_t session_id) {
-    Config *cfg = config_load_from_env();
-    if (!cfg) { syslog(LOG_ERR, "llm_req: config load failed"); return -1; }
+int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
+    Config *cfg = config_load(db);
+    if (!cfg) { fprintf(stderr, "llm_req: config load failed\n"); return -1; }
 
     Arena *a = arena_create(ARENA_DEFAULT_SIZE);
     if (!a) { config_free(cfg); return -1; }
@@ -87,22 +87,19 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id) {
 
     /* Auto-recall */
     char *recall_text = NULL;
-    if (cfg->auto_recall) {
-        const char *recall_env = getenv("CCLAW_RECALL");
-        if (recall_env && recall_env[0] == '1') {
-            const char *uq = "SELECT content FROM entries WHERE session_id=? AND role=1"
-                             " ORDER BY id DESC LIMIT 1;";
-            sqlite3_stmt *ust;
-            if (sqlite3_prepare_v2(db, uq, -1, &ust, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(ust, 1, session_id);
-                if (sqlite3_step(ust) == SQLITE_ROW) {
-                    const char *umsg = (const char *)sqlite3_column_text(ust, 0);
-                    if (umsg)
-                        recall_text = context_auto_recall(db, session_id, umsg,
-                                                         cfg->recall_max_tokens);
-                }
-                sqlite3_finalize(ust);
+    if (cfg->auto_recall && recall) {
+        const char *uq = "SELECT content FROM entries WHERE session_id=? AND role=1"
+                         " ORDER BY id DESC LIMIT 1;";
+        sqlite3_stmt *ust;
+        if (sqlite3_prepare_v2(db, uq, -1, &ust, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(ust, 1, session_id);
+            if (sqlite3_step(ust) == SQLITE_ROW) {
+                const char *umsg = (const char *)sqlite3_column_text(ust, 0);
+                if (umsg)
+                    recall_text = context_auto_recall(db, session_id, umsg,
+                                                     cfg->recall_max_tokens);
             }
+            sqlite3_finalize(ust);
         }
     }
 
@@ -288,7 +285,11 @@ int llm_proc_main(int64_t session_id) {
     if (!db) return LLM_EXIT_ERROR;
     db_set_child_pragmas(db);
 
-    int rc = llm_req(db, NULL, session_id);
+    int recall = 0;
+    const char *recall_env = getenv("CCLAW_RECALL");
+    if (recall_env && recall_env[0] == '1') recall = 1;
+
+    int rc = llm_req(db, NULL, session_id, recall);
     if (rc != 0) {
         db_close(db);
         return LLM_EXIT_ERROR;

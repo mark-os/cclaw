@@ -7,7 +7,6 @@
 #include <curl/curl.h>
 #include <pthread.h>
 #include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
@@ -23,12 +22,20 @@ static pid_t g_worker_pid = -1;
 static char g_db_path[4096];
 static int g_max_threads = 4;
 
+/* ── Pipe message structs ──────────────────────────────────────── */
+
+typedef struct {
+    int64_t session_id;
+    int recall;
+    int _pad;
+} WorkRequest;
+
 /* ── Per-thread CURL handle pool (endpoint → CURL*) ────────────── */
 
 #define HANDLE_POOL_CAP 8
 
 typedef struct {
-    char *endpoint;   /* "host:port" key */
+    char *endpoint;
     CURL *curl;
 } HandleEntry;
 
@@ -44,9 +51,7 @@ static CURL *handle_pool_get(HandlePool *p, const char *endpoint) {
         if (strcmp(p->entries[i].endpoint, endpoint) == 0)
             return p->entries[i].curl;
     }
-    /* Create new */
     if (p->count >= HANDLE_POOL_CAP) {
-        /* Evict oldest */
         curl_easy_cleanup(p->entries[0].curl);
         free(p->entries[0].endpoint);
         memmove(&p->entries[0], &p->entries[1], (size_t)(p->count - 1) * sizeof(HandleEntry));
@@ -74,12 +79,11 @@ static void handle_pool_free(HandlePool *p) {
 #define IDLE_TIMEOUT_SEC 30
 
 typedef struct {
-    int64_t items[QUEUE_CAP];
+    WorkRequest items[QUEUE_CAP];
     int head, tail, count;
     pthread_mutex_t mtx;
     pthread_cond_t cond;
     int shutdown;
-    /* Elastic pool tracking */
     int active_threads;
     int idle_threads;
     int max_threads;
@@ -96,8 +100,7 @@ static void wq_init(WorkQueue *q, int max_threads, int result_fd, const char *db
     snprintf(q->db_path, sizeof(q->db_path), "%s", db_path);
 }
 
-/* Returns 0 if item dequeued, -1 on shutdown, -2 on timeout */
-static int wq_pop(WorkQueue *q, int64_t *out) {
+static int wq_pop(WorkQueue *q, WorkRequest *out) {
     pthread_mutex_lock(&q->mtx);
     q->idle_threads++;
 
@@ -107,14 +110,12 @@ static int wq_pop(WorkQueue *q, int64_t *out) {
         ts.tv_sec += IDLE_TIMEOUT_SEC;
         int rc = pthread_cond_timedwait(&q->cond, &q->mtx, &ts);
         if (rc != 0 && q->count == 0) {
-            /* Timeout — thread should exit (unless it's the last one) */
             if (q->active_threads > 1) {
                 q->idle_threads--;
                 q->active_threads--;
                 pthread_mutex_unlock(&q->mtx);
-                return -2;
+                return -2;  /* timeout, thread exits */
             }
-            /* Last thread stays alive */
         }
     }
 
@@ -132,14 +133,16 @@ static int wq_pop(WorkQueue *q, int64_t *out) {
 
 static void *worker_thread(void *arg);
 
-static void wq_push(WorkQueue *q, int64_t val) {
+/* Returns 0 on success, -1 on queue full */
+static int wq_push(WorkQueue *q, const WorkRequest *req) {
     pthread_mutex_lock(&q->mtx);
-    /* Enqueue */
-    if (q->count < QUEUE_CAP) {
-        q->items[q->tail] = val;
-        q->tail = (q->tail + 1) % QUEUE_CAP;
-        q->count++;
+    if (q->count >= QUEUE_CAP) {
+        pthread_mutex_unlock(&q->mtx);
+        return -1;
     }
+    q->items[q->tail] = *req;
+    q->tail = (q->tail + 1) % QUEUE_CAP;
+    q->count++;
     /* Spin up thread if all are busy and below max */
     if (q->idle_threads == 0 && q->active_threads < q->max_threads) {
         q->active_threads++;
@@ -152,6 +155,7 @@ static void wq_push(WorkQueue *q, int64_t val) {
     }
     pthread_cond_signal(&q->cond);
     pthread_mutex_unlock(&q->mtx);
+    return 0;
 }
 
 static void wq_shutdown(WorkQueue *q) {
@@ -166,24 +170,22 @@ static void wq_shutdown(WorkQueue *q) {
 static void *worker_thread(void *arg) {
     WorkQueue *q = arg;
     sqlite3 *db = db_open(q->db_path);
-    if (!db) { syslog(LOG_ERR, "worker thread: db_open failed"); return NULL; }
+    if (!db) { fprintf(stderr, "worker thread: db_open failed\n"); return NULL; }
     db_set_child_pragmas(db);
 
     HandlePool handles;
     handle_pool_init(&handles);
 
-    int64_t session_id;
-    int rc;
-    while ((rc = wq_pop(q, &session_id)) == 0) {
-        /* Determine endpoint from config to select CURL handle */
-        Config *cfg = config_load_from_env();
+    WorkRequest req;
+    while (wq_pop(q, &req) == 0) {
+        /* Load config from DB per-req (picks up live changes) */
+        Config *cfg = config_load(db);
         const char *endpoint = cfg ? cfg->provider.base_url : "default";
         CURL *curl = handle_pool_get(&handles, endpoint);
         config_free(cfg);
 
-        llm_req(db, curl, session_id);
-        /* Signal completion */
-        (void)write(q->result_fd, &session_id, sizeof(session_id));
+        llm_req(db, curl, req.session_id, req.recall);
+        (void)write(q->result_fd, &req.session_id, sizeof(req.session_id));
     }
 
     handle_pool_free(&handles);
@@ -197,18 +199,14 @@ static void worker_main(int req_fd, int res_fd, const char *db_path, int max_thr
     prctl(PR_SET_PDEATHSIG, SIGTERM);
     cclaw_log_init();
 
-    /* Resource limits — generous for curl+sqlite */
-    struct rlimit rl;
 #if !defined(__SANITIZE_ADDRESS__) && !defined(__has_feature)
-    rl.rlim_cur = 512 * 1024 * 1024;
-    rl.rlim_max = 512 * 1024 * 1024;
+    struct rlimit rl = { .rlim_cur = 512 * 1024 * 1024, .rlim_max = 512 * 1024 * 1024 };
     setrlimit(RLIMIT_AS, &rl);
 #endif
 
     WorkQueue queue;
     wq_init(&queue, max_threads, res_fd, db_path);
 
-    /* Start with 1 thread */
     pthread_mutex_lock(&queue.mtx);
     queue.active_threads = 1;
     pthread_mutex_unlock(&queue.mtx);
@@ -220,15 +218,17 @@ static void worker_main(int req_fd, int res_fd, const char *db_path, int max_thr
     pthread_create(&initial, &attr, worker_thread, &queue);
     pthread_attr_destroy(&attr);
 
-    /* Main thread: read session_ids from parent, enqueue */
-    int64_t session_id;
-    while (read(req_fd, &session_id, sizeof(session_id)) == (ssize_t)sizeof(session_id)) {
-        wq_push(&queue, session_id);
+    /* Read requests from parent pipe, enqueue */
+    WorkRequest req;
+    while (read(req_fd, &req, sizeof(req)) == (ssize_t)sizeof(req)) {
+        if (wq_push(&queue, &req) != 0) {
+            /* Queue full — signal error back as session_id = -1 */
+            int64_t err_sid = -1;
+            (void)write(res_fd, &err_sid, sizeof(err_sid));
+        }
     }
 
-    /* Parent closed pipe — shutdown */
     wq_shutdown(&queue);
-    /* Give threads a moment to finish */
     sleep(1);
     close(req_fd);
     close(res_fd);
@@ -264,10 +264,11 @@ int llm_worker_start(const char *db_path, int max_threads) {
     return 0;
 }
 
-int llm_worker_submit(int64_t session_id) {
+int llm_worker_submit(int64_t session_id, int recall) {
     if (g_req_pipe[1] < 0) return -1;
-    ssize_t n = write(g_req_pipe[1], &session_id, sizeof(session_id));
-    return (n == (ssize_t)sizeof(session_id)) ? 0 : -1;
+    WorkRequest req = { .session_id = session_id, .recall = recall };
+    ssize_t n = write(g_req_pipe[1], &req, sizeof(req));
+    return (n == (ssize_t)sizeof(req)) ? 0 : -1;
 }
 
 int llm_worker_fd(void) { return g_res_pipe[0]; }
@@ -289,3 +290,5 @@ int llm_worker_respawn(void) {
 }
 
 int llm_worker_alive(void) { return g_worker_pid > 0; }
+
+pid_t llm_worker_pid(void) { return g_worker_pid; }

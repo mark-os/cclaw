@@ -143,8 +143,9 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id) {
         long elapsed_ms = (t_end.tv_sec - t_start.tv_sec) * 1000 +
                           (t_end.tv_nsec - t_start.tv_nsec) / 1000000;
         last_status = status;
-        LOG_DEBUG(cfg, "llm_req: %ldms status=%d %s", elapsed_ms, status,
-                  resp.err_detail[0] ? resp.err_detail : "");
+        LOG_DEBUG(cfg, "llm_req: %ldms status=%d ttfb=%.3fs tls=%.3fs%s",
+                  elapsed_ms, status, resp.ttfb, resp.tls_time,
+                  resp.conn_reused ? " conn_reused" : "");
 
         if (cfg->log_level >= LOG_LEVEL_TRACE && resp.data)
             LOG_TRACE(cfg, "RESP status=%d %s", status, resp.data);

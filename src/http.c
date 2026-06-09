@@ -391,15 +391,9 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
         /* Task 6: connection reuse metrics (visible at TRACE level via caller) */
         long num_connects = 0;
         curl_easy_getinfo(curl, CURLINFO_NUM_CONNECTS, &num_connects);
-        /* Timing metrics */
-        double ttfb = 0, tls_time = 0;
-        curl_easy_getinfo(curl, CURLINFO_STARTTRANSFER_TIME, &ttfb);
-        curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME, &tls_time);
-        int off = 0;
-        if (num_connects == 0)
-            off = snprintf(resp->err_detail, sizeof(resp->err_detail), "conn_reused ");
-        snprintf(resp->err_detail + off, sizeof(resp->err_detail) - (size_t)off,
-                 "ttfb=%.3fs tls=%.3fs", ttfb, tls_time);
+        resp->conn_reused = (num_connects == 0);
+        curl_easy_getinfo(curl, CURLINFO_STARTTRANSFER_TIME, &resp->ttfb);
+        curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME, &resp->tls_time);
     } else if (rc == CURLE_OPERATION_TIMEDOUT)
         status = -2;
 

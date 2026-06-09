@@ -13,6 +13,10 @@ typedef struct {
     int retry_after;        /* Retry-After header value in seconds, 0 if absent */
     char content_type[128]; /* Content-Type header value, empty if absent */
     char err_detail[256];   /* curl error description on failure */
+    /* Timing metrics (populated on success) */
+    double ttfb;            /* CURLINFO_STARTTRANSFER_TIME — first byte received */
+    double tls_time;        /* CURLINFO_APPCONNECT_TIME — TLS handshake */
+    int conn_reused;        /* 1 if CURLINFO_NUM_CONNECTS == 0 */
 } HttpResponse;
 
 /* Streaming upload read callback */

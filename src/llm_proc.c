@@ -137,7 +137,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id) {
         int status = llm_call_with_fallbacks(a, db, session_id, call_cfg,
                                               &plan, schemas, tool_count,
                                               &resp, llm_sse_stdout_cb, NULL, &sse_ctx,
-                                              recall_text, gcache, NULL);
+                                              recall_text, gcache, NULL, curl);
         struct timespec t_end;
         clock_gettime(CLOCK_MONOTONIC, &t_end);
         long elapsed_ms = (t_end.tv_sec - t_start.tv_sec) * 1000 +
@@ -260,7 +260,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id) {
     agent_setup_destroy(&setup);
     arena_destroy(a);
     config_free(cfg);
-    (void)curl; /* TODO: pass to http layer when llm_transport supports it */
     return 0;
 
 err:

@@ -60,17 +60,28 @@ char *llm_build_auth_header(Arena *a, const Config *cfg) {
 int llm_call_with_retry(const char *url, const char **headers,
                         RequestStreamer *rs, HttpResponse *resp,
                         const Config *cfg, HttpSseFn sse_cb, void *sse_data,
-                        SseCtx *out_ctx) {
+                        SseCtx *out_ctx, CURL *curl) {
     int backoff_ms = INITIAL_BACKOFF_MS;
     int last_status = -1;
 
     for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
         int status;
-        if (cfg->stream)
-            status = http_post_stream_sse(url, headers, rs_read_cb, rs,
-                                          sse_cb, sse_data, resp, out_ctx);
-        else
-            status = http_post_stream(url, headers, rs_read_cb, rs, resp);
+        if (cfg->stream) {
+            HttpRequestOpts opts = {
+                .url = url, .method = "POST", .headers = headers,
+                .read_cb = rs_read_cb, .read_data = rs,
+                .sse_cb = sse_cb, .sse_data = sse_data,
+                .out_ctx = out_ctx, .curl_handle = curl,
+            };
+            status = http_do(&opts, resp);
+        } else {
+            HttpRequestOpts opts = {
+                .url = url, .method = "POST", .headers = headers,
+                .read_cb = rs_read_cb, .read_data = rs,
+                .curl_handle = curl,
+            };
+            status = http_do(&opts, resp);
+        }
         last_status = status;
 
         if (status == -1 || status == -2) return status;
@@ -101,7 +112,6 @@ int llm_is_context_overflow(const char *body) {
             strstr(body, "context window") != NULL);
 }
 
-/* Dump streamer content for TRACE logging */
 static void trace_dump_request(const Config *cfg, sqlite3 *db, int64_t session_id,
                                const Config *rs_cfg, const ContextPlan *plan,
                                const ToolSchema *tools, size_t tool_count,
@@ -131,7 +141,7 @@ int llm_call_with_fallbacks(Arena *a, sqlite3 *db, int64_t session_id,
                             HttpResponse *resp, HttpSseFn sse_cb, void *sse_data,
                             SseCtx *out_ctx, const char *recall_text,
                             const char *gemini_cache_name,
-                            const char *body_override) {
+                            const char *body_override, CURL *curl) {
     /* Mock mode */
     const char *mock_path = getenv("CCLAW_LLM_MOCK");
     if (mock_path) {
@@ -165,12 +175,16 @@ int llm_call_with_fallbacks(Arena *a, sqlite3 *db, int64_t session_id,
     if (body_override) {
         if (cfg->log_level >= LOG_LEVEL_TRACE)
             LOG_TRACE(cfg, "REQ (hook-modified) %s", body_override);
-        int status = http_post(url, headers, body_override, resp);
+        HttpRequestOpts opts = {
+            .url = url, .method = "POST", .headers = headers,
+            .body = body_override, .curl_handle = curl,
+        };
+        int status = http_do(&opts, resp);
         if (status >= 200 && status < 300) return status;
         if (status >= 300 && status < 500 && status != 401 && status != 403 &&
             status != 404 && status != 429)
             return status;
-        /* Try fallbacks with body_override */
+        /* Fallbacks with body_override */
         for (size_t i = 0; i < cfg->fallback_count; i++) {
             const ProviderConfig *fb = &cfg->fallback_providers[i];
             if (!fb->base_url || !fb->api_key || !fb->model) continue;
@@ -186,13 +200,17 @@ int llm_call_with_fallbacks(Arena *a, sqlite3 *db, int64_t session_id,
             sprintf(fb_auth, "Authorization: Bearer %s", fb->api_key);
             const char *fb_headers[] = { "Content-Type: application/json", fb_auth, session_hdr, NULL };
             http_response_free(resp);
-            status = http_post(fb_url, fb_headers, body_override, resp);
+            HttpRequestOpts fb_opts = {
+                .url = fb_url, .method = "POST", .headers = fb_headers,
+                .body = body_override, .curl_handle = curl,
+            };
+            status = http_do(&fb_opts, resp);
             if (status != -1) return status;
         }
         return status;
     }
 
-    /* Streaming path */
+    /* Streaming upload path */
     RequestStreamer rs;
     if (rs_init(&rs, db, session_id, cfg, plan, tools, tool_count) != 0)
         return -1;
@@ -203,7 +221,7 @@ int llm_call_with_fallbacks(Arena *a, sqlite3 *db, int64_t session_id,
         trace_dump_request(cfg, db, session_id, cfg, plan, tools, tool_count,
                            recall_text, gemini_cache_name, "");
 
-    int status = llm_call_with_retry(url, headers, &rs, resp, cfg, sse_cb, sse_data, out_ctx);
+    int status = llm_call_with_retry(url, headers, &rs, resp, cfg, sse_cb, sse_data, out_ctx, curl);
     rs_cleanup(&rs);
 
     if (status >= 200 && status < 300) return status;
@@ -243,7 +261,8 @@ int llm_call_with_fallbacks(Arena *a, sqlite3 *db, int64_t session_id,
 
         http_response_free(resp);
         if (out_ctx) { sse_ctx_free(out_ctx); memset(out_ctx, 0, sizeof(*out_ctx)); }
-        status = llm_call_with_retry(fb_url, fb_headers, &fb_rs, resp, cfg, sse_cb, sse_data, out_ctx);
+        /* Note: fallback uses same curl handle — different endpoint but same thread */
+        status = llm_call_with_retry(fb_url, fb_headers, &fb_rs, resp, cfg, sse_cb, sse_data, out_ctx, curl);
         rs_cleanup(&fb_rs);
         if (status != -1) return status;
     }

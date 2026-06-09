@@ -24,25 +24,41 @@
 
 #define MAX_LLM_RETRIES 3
 
-int llm_proc_main(int64_t session_id) {
-    /* V34: die if parent dies */
-    prctl(PR_SET_PDEATHSIG, SIGTERM);
-    shutdown_init();
+/* ── turn_complete: DB-based completion detection ──────────────── */
 
+int turn_complete(sqlite3 *db, int64_t session_id) {
+    int tc_count = 0;
+    PendingToolCall *calls = db_tool_call_get_pending(db, session_id, &tc_count);
+    if (calls) {
+        db_tool_call_free_pending(calls, tc_count);
+        if (tc_count > 0) return 1;  /* has pending tool_calls */
+    }
+    /* Check last entry's stop_reason */
+    const char *sql = "SELECT stop_reason FROM entries WHERE session_id=?"
+                      " AND role=2 ORDER BY id DESC LIMIT 1;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    int result = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *sr = (const char *)sqlite3_column_text(stmt, 0);
+        if (sr && strcmp(sr, "error") == 0) result = -1;
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+/* ── llm_req: single LLM HTTP call ────────────────────────────── */
+
+int llm_req(sqlite3 *db, CURL *curl, int64_t session_id) {
     Config *cfg = config_load_from_env();
-    if (!cfg) { fprintf(stderr, "llm: config load failed\n"); return LLM_EXIT_ERROR; }
-
-    const char *db_path = getenv("CCLAW_DB");
-    if (!db_path || !db_path[0]) db_path = cfg->db_path;
-
-    sqlite3 *db = db_open(db_path);
-    if (!db) { config_free(cfg); return LLM_EXIT_ERROR; }
-    db_set_child_pragmas(db);
+    if (!cfg) { syslog(LOG_ERR, "llm_req: config load failed"); return -1; }
 
     Arena *a = arena_create(ARENA_DEFAULT_SIZE);
-    if (!a) { db_close(db); config_free(cfg); return LLM_EXIT_ERROR; }
+    if (!a) { config_free(cfg); return -1; }
 
-    /* Load tool schemas from DB via agent setup */
+    /* Load tool schemas */
     const char *agent_name = getenv("CCLAW_AGENT_NAME");
     if (!agent_name || !agent_name[0]) agent_name = "default";
 
@@ -51,26 +67,25 @@ int llm_proc_main(int64_t session_id) {
 
     ToolSchema schemas[TOOLS_MAX];
     size_t tool_count = agent_setup_schemas(&setup, schemas, TOOLS_MAX);
-    ToolSchema *tools = schemas;
 
     /* Tool overhead for context plan */
     int tool_overhead = 0;
     for (size_t i = 0; i < tool_count; i++) {
         tool_overhead += 4;
-        if (tools[i].name) tool_overhead += (int)strlen(tools[i].name) / 4;
-        if (tools[i].description) tool_overhead += (int)strlen(tools[i].description) / 4;
-        if (tools[i].parameters_json) tool_overhead += (int)strlen(tools[i].parameters_json) / 4;
+        if (schemas[i].name) tool_overhead += (int)strlen(schemas[i].name) / 4;
+        if (schemas[i].description) tool_overhead += (int)strlen(schemas[i].description) / 4;
+        if (schemas[i].parameters_json) tool_overhead += (int)strlen(schemas[i].parameters_json) / 4;
     }
 
     /* Context planning */
     ContextPlan plan = {0};
     if (context_plan(db, session_id, cfg, tool_overhead, &plan) != 0) {
-        LOG_DEBUG(cfg, "llm: context_plan failed");
+        LOG_DEBUG(cfg, "llm_req: context_plan failed");
         goto err;
     }
-    LOG_DEBUG(cfg, "llm: context_plan: %d entries, cut=%d", plan.count, plan.cut);
+    LOG_DEBUG(cfg, "llm_req: %d entries, cut=%d", plan.count, plan.cut);
 
-    /* Auto-recall (first call only — parent signals via env) */
+    /* Auto-recall */
     char *recall_text = NULL;
     if (cfg->auto_recall) {
         const char *recall_env = getenv("CCLAW_RECALL");
@@ -120,7 +135,7 @@ int llm_proc_main(int64_t session_id) {
         clock_gettime(CLOCK_MONOTONIC, &t_start);
 
         int status = llm_call_with_fallbacks(a, db, session_id, call_cfg,
-                                              &plan, tools, tool_count,
+                                              &plan, schemas, tool_count,
                                               &resp, llm_sse_stdout_cb, NULL, &sse_ctx,
                                               recall_text, gcache, NULL);
         struct timespec t_end;
@@ -128,12 +143,13 @@ int llm_proc_main(int64_t session_id) {
         long elapsed_ms = (t_end.tv_sec - t_start.tv_sec) * 1000 +
                           (t_end.tv_nsec - t_start.tv_nsec) / 1000000;
         last_status = status;
-        LOG_DEBUG(cfg, "llm: %ldms, status=%d", elapsed_ms, status);
+        LOG_DEBUG(cfg, "llm_req: %ldms status=%d %s", elapsed_ms, status,
+                  resp.err_detail[0] ? resp.err_detail : "");
 
         if (cfg->log_level >= LOG_LEVEL_TRACE && resp.data)
             LOG_TRACE(cfg, "RESP status=%d %s", status, resp.data);
 
-        /* Context overflow → exit 1 (parent handles) */
+        /* Context overflow */
         if (status == 400 && llm_is_context_overflow(resp.data)) {
             LOG_DEBUG(cfg, "E5: context overflow");
             http_response_free(&resp);
@@ -189,7 +205,6 @@ int llm_proc_main(int64_t session_id) {
     context_plan_free(&plan);
 
     if (!llm_ok) {
-        /* Write error entry */
         int64_t turn_id = db_next_turn_id(db, session_id);
         const char *err_text = e1_retries > 0
             ? "error: model returned empty response — provider glitch"
@@ -207,7 +222,7 @@ int llm_proc_main(int64_t session_id) {
         goto err;
     }
 
-    /* Write response to DB using typed entries */
+    /* Write response to DB */
     int64_t turn_id = db_next_turn_id(db, session_id);
 
     const char **tc_ids = NULL, **tc_names = NULL, **tc_args = NULL;
@@ -237,25 +252,50 @@ int llm_proc_main(int64_t session_id) {
     free(tc_args);
 
     if (rc != 0) {
-        LOG_DEBUG(cfg, "llm: db_ingest_typed failed");
+        LOG_DEBUG(cfg, "llm_req: db_ingest_typed failed");
         goto err;
     }
     free(ir.tc_entry_ids);
 
-    int exit_code = (tc_count > 0) ? LLM_EXIT_TOOLCALL : LLM_EXIT_STOP;
-
-    /* Clean exit */
     agent_setup_destroy(&setup);
     arena_destroy(a);
-    db_close(db);
     config_free(cfg);
-    return exit_code;
+    (void)curl; /* TODO: pass to http layer when llm_transport supports it */
+    return 0;
 
 err:
     context_plan_free(&plan);
     agent_setup_destroy(&setup);
     arena_destroy(a);
-    db_close(db);
     config_free(cfg);
-    return LLM_EXIT_ERROR;
+    return -1;
+}
+
+/* ── llm_proc_main: fork-mode entry point ──────────────────────── */
+
+int llm_proc_main(int64_t session_id) {
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+    shutdown_init();
+    cclaw_log_init();
+
+    const char *db_path = getenv("CCLAW_DB");
+    if (!db_path || !db_path[0]) {
+        syslog(LOG_ERR, "llm_proc_main: CCLAW_DB not set");
+        return LLM_EXIT_ERROR;
+    }
+
+    sqlite3 *db = db_open(db_path);
+    if (!db) return LLM_EXIT_ERROR;
+    db_set_child_pragmas(db);
+
+    int rc = llm_req(db, NULL, session_id);
+    if (rc != 0) {
+        db_close(db);
+        return LLM_EXIT_ERROR;
+    }
+
+    /* Determine exit code from DB state for backward compat */
+    int tc = turn_complete(db, session_id);
+    db_close(db);
+    return (tc == 1) ? LLM_EXIT_TOOLCALL : LLM_EXIT_STOP;
 }

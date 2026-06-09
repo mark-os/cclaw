@@ -307,7 +307,14 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
 
     resp->max_bytes = opts->max_response_bytes;
 
-    CURL *curl = curl_easy_init();
+    int own_curl = 0;
+    CURL *curl = opts->curl_handle;
+    if (!curl) {
+        curl = curl_easy_init();
+        own_curl = 1;
+    } else {
+        curl_easy_reset(curl);
+    }
     if (!curl) return -1;
 
     char errbuf[CURL_ERROR_SIZE] = "";
@@ -379,9 +386,14 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     CURLcode rc = curl_easy_perform(curl);
 
     long status = -1;
-    if (rc == CURLE_OK)
+    if (rc == CURLE_OK) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    else if (rc == CURLE_OPERATION_TIMEDOUT)
+        /* Task 6: connection reuse metrics (visible at TRACE level via caller) */
+        long num_connects = 0;
+        curl_easy_getinfo(curl, CURLINFO_NUM_CONNECTS, &num_connects);
+        if (num_connects == 0 && resp->err_detail[0] == '\0')
+            snprintf(resp->err_detail, sizeof(resp->err_detail), "conn_reused");
+    } else if (rc == CURLE_OPERATION_TIMEDOUT)
         status = -2;
 
     /* Stash curl error */
@@ -391,7 +403,7 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     }
 
     curl_slist_free_all(hlist);
-    curl_easy_cleanup(curl);
+    if (own_curl) curl_easy_cleanup(curl);
 
     /* SSE: transfer or free accumulated context */
     if (opts->sse_cb) {

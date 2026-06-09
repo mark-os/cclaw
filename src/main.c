@@ -18,6 +18,7 @@
 #include "agent_config.h"
 #include "agent_setup.h"
 #include "llm_proc.h"
+#include "llm_worker.h"
 #include "tools.h"
 #include "context.h"
 #include "db.h"
@@ -87,9 +88,16 @@ static int child_has_session(int64_t session_id) {
 
 /* ── Globals ────────────────────────────────────────────────────── */
 
+/* Forward declarations */
+static int fork_llm_req(int64_t session_id, const char *agent_name, int iteration);
+static void deliver_response(int64_t session_id);
+static int fork_tool_exec(int64_t session_id, const char *agent_name, PendingToolCall *tc);
+
 static sqlite3 *g_db;
 static Config *g_cfg;
 static int g_mode;  /* 0=cli, 1=daemon */
+static int g_llm_fork;             /* 1 = old fork-per-turn, 0 = worker mode */
+static int g_llm_threads = 2;     /* worker thread pool size */
 static int64_t g_cli_session;
 static char g_agent_name[64];
 static int g_cli_turn_active;   /* 1 while CLI is waiting for a turn to finish */
@@ -110,6 +118,54 @@ static void set_nonblock(int fd) {
 }
 
 /* ── fork_llm_req ───────────────────────────────────────────────── */
+
+/* Handle LLM completion: query DB, dispatch tools or deliver response */
+static void handle_llm_complete(int64_t session_id, const char *agent_name, int iteration);
+
+/* Dispatch LLM request via worker or fork depending on mode */
+static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iteration) {
+    if (!g_llm_fork && llm_worker_alive()) {
+        /* Worker mode: submit to worker, track session state */
+        if (child_has_session(session_id)) return -1;
+
+        int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations : DEFAULT_MAX_ITERATIONS;
+        if (iteration >= max_iter) {
+            int64_t turn_id = db_next_turn_id(g_db, session_id);
+            Message msg = {.role = ROLE_ASSISTANT,
+                           .content = "error: max iterations reached",
+                           .stop_reason = STOP_REASON_ERROR};
+            entry_append_with_turn(g_db, session_id, &msg, turn_id);
+            session_set_state(g_db, session_id, "idle");
+            return -1;
+        }
+
+        setenv("CCLAW_RECALL", iteration == 0 ? "1" : "0", 1);
+        session_set_state(g_db, session_id, "llm_running");
+
+        /* Track iteration in a lightweight way for worker callbacks */
+        for (int i = 0; i < g_child_count; i++) {
+            if (g_children[i].session_id == session_id) {
+                g_children[i].iteration = iteration;
+                break;
+            }
+        }
+        /* Add tracking entry if not present */
+        if (!child_has_session(session_id) && g_child_count < CHILD_MAX) {
+            ChildProc *c = &g_children[g_child_count++];
+            memset(c, 0, sizeof(*c));
+            c->pid = -1; /* sentinel: worker-managed */
+            c->type = CHILD_LLM_REQ;
+            c->session_id = session_id;
+            c->iteration = iteration;
+            c->result_pipe = -1;
+            snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
+        }
+
+        return llm_worker_submit(session_id);
+    }
+    /* Fork mode */
+    return fork_llm_req(session_id, agent_name, iteration);
+}
 
 static int fork_llm_req(int64_t session_id, const char *agent_name, int iteration) {
     if (child_has_session(session_id)) return -1;
@@ -282,6 +338,40 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
 
 /* ── reap_children (state machine) ──────────────────────────────── */
 
+/* handle_llm_complete: query DB for next action after LLM request finishes */
+static void handle_llm_complete(int64_t session_id, const char *agent_name, int iteration) {
+    int tc_state = turn_complete(g_db, session_id);
+    if (tc_state == 1) {
+        /* Has pending tool_calls — dispatch */
+        int tc_count = 0;
+        PendingToolCall *calls = db_tool_call_get_pending(g_db, session_id, &tc_count);
+        if (tc_count > 0) {
+            int i = 0;
+            while (i < tc_count) {
+                int rc = fork_tool_exec(session_id, agent_name, &calls[i]);
+                if (rc == 1) { i++; continue; }
+                break;
+            }
+            if (i >= tc_count)
+                dispatch_llm_req(session_id, agent_name, iteration + 1);
+        } else {
+            session_set_state(g_db, session_id, "idle");
+        }
+        db_tool_call_free_pending(calls, tc_count);
+    } else if (tc_state == 0) {
+        /* Final stop — deliver */
+        session_set_state(g_db, session_id, "idle");
+        deliver_response(session_id);
+    } else {
+        /* Error */
+        session_set_state(g_db, session_id, "idle");
+        if (g_mode == 0) {
+            fprintf(stderr, "error: LLM request failed\n");
+            g_cli_turn_active = 0;
+        }
+    }
+}
+
 static void deliver_response(int64_t session_id) {
     if (g_mode == 0) {
         /* CLI: streaming wrote to stdout already, just newline */
@@ -343,46 +433,15 @@ static void reap_children(void) {
         if (!c) continue;
 
         if (c->type == CHILD_LLM_REQ) {
-            int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : LLM_EXIT_ERROR;
+            (void)status; /* exit code ignored — use DB-based detection */
             int64_t session_id = c->session_id;
             char aname[64];
             snprintf(aname, sizeof(aname), "%s", c->agent_name);
             int iter = c->iteration;
             child_remove(c);
 
-            if (exit_code == LLM_EXIT_TOOLCALL) {
-                int tc_count = 0;
-                PendingToolCall *calls = db_tool_call_get_pending(g_db, session_id, &tc_count);
-                if (tc_count > 0) {
-                    /* Dispatch tools serially — handle inline ones immediately */
-                    int i = 0;
-                    while (i < tc_count) {
-                        int rc = fork_tool_exec(session_id, aname, &calls[i]);
-                        if (rc == 1) {
-                            /* Inline tool handled — try next */
-                            i++;
-                            continue;
-                        }
-                        break; /* Forked or error — wait for reap */
-                    }
-                    /* If all tools were inline, go back to LLM */
-                    if (i >= tc_count)
-                        fork_llm_req(session_id, aname, iter + 1);
-                } else {
-                    session_set_state(g_db, session_id, "idle");
-                }
-                db_tool_call_free_pending(calls, tc_count);
-            } else if (exit_code == LLM_EXIT_STOP) {
-                session_set_state(g_db, session_id, "idle");
-                deliver_response(session_id);
-            } else {
-                /* Error */
-                session_set_state(g_db, session_id, "idle");
-                if (g_mode == 0) {
-                    fprintf(stderr, "error: LLM process failed\n");
-                    g_cli_turn_active = 0;
-                }
-            }
+            /* DB-based completion detection (Task 2) */
+            handle_llm_complete(session_id, aname, iter);
         } else if (c->type == CHILD_TOOL_EXEC) {
             int64_t session_id = c->session_id;
             char aname[64];
@@ -446,12 +505,12 @@ static void reap_children(void) {
                     /* All remaining were inline — back to LLM */
                     /* Need iteration count — derive from how many LLM turns happened */
                     int llm_iter = iter + 1;
-                    fork_llm_req(session_id, aname, llm_iter);
+                    dispatch_llm_req(session_id, aname, llm_iter);
                 }
             } else {
                 /* All tools done — back to LLM */
                 int llm_iter = iter + 1;
-                fork_llm_req(session_id, aname, llm_iter);
+                dispatch_llm_req(session_id, aname, llm_iter);
             }
             db_tool_call_free_pending(calls, tc_count);
         }
@@ -561,7 +620,7 @@ static void cli_start_turn(const char *input) {
     inbox_insert(g_db, g_cli_session, "cli", input);
     inbox_consume_into_entries(g_db, g_cli_session, 100);
     g_cli_turn_active = 1;
-    fork_llm_req(g_cli_session, g_agent_name, 0);
+    dispatch_llm_req(g_cli_session, g_agent_name, 0);
 }
 
 /* ── main ───────────────────────────────────────────────────────── */
@@ -615,6 +674,7 @@ static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
 }
 
 int main(int argc, char *argv[]) {
+    cclaw_log_init();
     int daemon_mode = 0, llm_mode = 0, new_session = 0, yolo_mode = 0;
     const char *channel_mode = NULL;
     LogLevel log_level_override = LOG_LEVEL_INFO;
@@ -630,6 +690,8 @@ int main(int argc, char *argv[]) {
         else if (strncmp(argv[i], "--log-level=", 12) == 0) { log_level_override = log_level_parse(argv[i]+12); log_level_set = 1; }
         else if (strcmp(argv[i], "--new") == 0) new_session = 1;
         else if (strcmp(argv[i], "-y") == 0) yolo_mode = 1;
+        else if (strcmp(argv[i], "--llm-fork") == 0) g_llm_fork = 1;
+        else if (strncmp(argv[i], "--llm-threads=", 14) == 0) g_llm_threads = atoi(argv[i]+14);
         else if (strcmp(argv[i], "-p") == 0) { if (++i >= argc) { fprintf(stderr, "-p requires arg\n"); return 1; } prompt = argv[i]; }
         else if (strcmp(argv[i], "-s") == 0) { if (++i >= argc) { fprintf(stderr, "-s requires arg\n"); return 1; } session_id = atoll(argv[i]); }
         else if (strncmp(argv[i], "--session-id=", 13) == 0) session_id = atoll(argv[i]+13);
@@ -660,7 +722,13 @@ int main(int argc, char *argv[]) {
 
     g_cfg = config_load(g_db);
     if (!g_cfg) { fprintf(stderr, "config load failed\n"); db_close(g_db); return 1; }
-    if (log_level_set) g_cfg->log_level = log_level_override;
+    if (log_level_set) {
+        g_cfg->log_level = log_level_override;
+        const char *lvl_str = log_level_override == LOG_LEVEL_TRACE ? "trace" :
+                              log_level_override == LOG_LEVEL_DEBUG ? "debug" :
+                              log_level_override == LOG_LEVEL_ERROR ? "error" : "info";
+        setenv("CCLAW_LOG_LEVEL", lvl_str, 1);
+    }
 
     /* ── Daemon mode ─────────────────────────────────────────────── */
     /* ── Channel mode ─────────────────────────────────────────────── */
@@ -724,7 +792,7 @@ int main(int argc, char *argv[]) {
                     while (read(wake_fd(), &msg, sizeof(msg)) == (ssize_t)sizeof(msg)) {
                         if (child_has_session(msg.session_id)) continue;
                         char *aname = session_get_agent_name(g_db, msg.session_id);
-                        if (aname) { fork_llm_req(msg.session_id, aname, 0); free(aname); }
+                        if (aname) { dispatch_llm_req(msg.session_id, aname, 0); free(aname); }
                     }
                 } else if (fifo_fd >= 0 && events[i].data.fd == fifo_fd) {
                     char drain[64];
@@ -868,6 +936,20 @@ int main(int argc, char *argv[]) {
     int epfd = epoll_create1(0);
     struct epoll_event ev;
 
+    /* Start LLM worker (unless --llm-fork) */
+    int worker_fd = -1;
+    if (!g_llm_fork) {
+        if (llm_worker_start(db_path, g_llm_threads) == 0) {
+            worker_fd = llm_worker_fd();
+            set_nonblock(worker_fd);
+            ev.events = EPOLLIN; ev.data.fd = worker_fd;
+            epoll_ctl(epfd, EPOLL_CTL_ADD, worker_fd, &ev);
+        } else {
+            /* Fallback to fork mode if worker start fails */
+            g_llm_fork = 1;
+        }
+    }
+
     /* Register SIGCHLD pipe */
     ev.events = EPOLLIN; ev.data.fd = g_chld_pipe[0];
     epoll_ctl(epfd, EPOLL_CTL_ADD, g_chld_pipe[0], &ev);
@@ -910,6 +992,34 @@ int main(int argc, char *argv[]) {
                     /* Re-prompt */
                     printf("> "); fflush(stdout);
                 }
+            } else if (worker_fd >= 0 && events[i].data.fd == worker_fd) {
+                /* Worker completed an LLM request */
+                int64_t completed_sid;
+                while (llm_worker_read(&completed_sid) == 0) {
+                    /* Find tracking entry and get iteration */
+                    ChildProc *wc = NULL;
+                    for (int j = 0; j < g_child_count; j++) {
+                        if (g_children[j].session_id == completed_sid &&
+                            g_children[j].type == CHILD_LLM_REQ &&
+                            g_children[j].pid == -1) {
+                            wc = &g_children[j];
+                            break;
+                        }
+                    }
+                    char aname[64] = "default";
+                    int iter = 0;
+                    if (wc) {
+                        snprintf(aname, sizeof(aname), "%s", wc->agent_name);
+                        iter = wc->iteration;
+                        child_remove(wc);
+                    }
+                    handle_llm_complete(completed_sid, aname, iter);
+
+                    if (g_mode == 0 && !g_cli_turn_active) {
+                        if (g_cli_done) goto done;
+                        printf("> "); fflush(stdout);
+                    }
+                }
             } else if (events[i].data.fd == STDIN_FILENO && stdin_registered) {
                 if (g_cli_turn_active) continue; /* Ignore input while turn running */
 
@@ -937,6 +1047,7 @@ done:
 
     session_set_state(g_db, g_cli_session, "idle");
     agent_setup_destroy(&setup);
+    llm_worker_stop();
     close(epfd);
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
     free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path);

@@ -2,26 +2,27 @@
 #define CCLAW_LOG_H
 
 #include "types.h"
+#include <syslog.h>
 #include <stdio.h>
-#include <time.h>
 
-/* V97: Logging macros. All output goes to stderr.
- * Timestamp + level prefix for structured logging.
- * Usage: LOG_INFO(cfg, "turn %d started", turn_id); */
+/* Capture syslog priority values before we clobber the macros */
+enum { CCLAW_SYSLOG_ERR = LOG_ERR, CCLAW_SYSLOG_NOTICE = LOG_NOTICE, CCLAW_SYSLOG_DBG = LOG_DEBUG };
 
+/* V75: Logging via syslog. LOG_PERROR ensures stderr tee for CLI. */
+static inline void cclaw_log_init(void) {
+    openlog("cclaw", LOG_PID | LOG_PERROR, LOG_USER);
+}
+
+/* Undefine syslog macros that collide with our names */
+#undef LOG_INFO
+#undef LOG_DEBUG
+
+/* Map our levels to syslog priorities */
 #define CCLAW_LOG(level, cfg_ptr, fmt, ...) do { \
     if ((cfg_ptr) && (cfg_ptr)->log_level >= (level)) { \
-        struct timespec _ts; \
-        clock_gettime(CLOCK_REALTIME, &_ts); \
-        struct tm _tm; \
-        localtime_r(&_ts.tv_sec, &_tm); \
-        fprintf(stderr, "%02d:%02d:%02d.%03ld [%s] " fmt "\n", \
-                _tm.tm_hour, _tm.tm_min, _tm.tm_sec, \
-                _ts.tv_nsec / 1000000, \
-                (level) == LOG_LEVEL_ERROR ? "ERROR" : \
-                (level) == LOG_LEVEL_INFO  ? "INFO"  : \
-                (level) == LOG_LEVEL_DEBUG ? "DEBUG" : "TRACE", \
-                ##__VA_ARGS__); \
+        int _prio = (level) == LOG_LEVEL_ERROR ? CCLAW_SYSLOG_ERR : \
+                    (level) == LOG_LEVEL_INFO  ? CCLAW_SYSLOG_NOTICE : CCLAW_SYSLOG_DBG; \
+        syslog(_prio, fmt, ##__VA_ARGS__); \
     } \
 } while(0)
 

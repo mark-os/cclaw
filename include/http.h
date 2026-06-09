@@ -72,6 +72,7 @@ typedef struct {
     void *sse_data;
     SseCtx *out_ctx;             /* If set, SSE accumulation transferred here */
     const char *user_agent;      /* NULL = no User-Agent header */
+    void *curl_handle;           /* If non-NULL, reuse this CURL* (caller owns lifecycle) */
 } HttpRequestOpts;
 
 /* General-purpose HTTP request. Returns HTTP status, -1 on curl error, -2 on timeout. */

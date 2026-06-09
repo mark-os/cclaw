@@ -22,11 +22,12 @@ static inline int test_run_session(sqlite3 *db, int64_t session_id, AgentSetup *
         setenv("CCLAW_RECALL", iteration == 0 ? "1" : "0", 1);
         int rc = llm_proc_main(session_id);
 
-        if (rc == LLM_EXIT_STOP || rc == LLM_EXIT_ERROR)
-            return rc;
-
-        if (rc != LLM_EXIT_TOOLCALL)
-            return LLM_EXIT_ERROR;
+        /* Use DB state for dispatch (forward-compatible with worker mode) */
+        int tc_state = turn_complete(db, session_id);
+        if (tc_state <= 0) {
+            /* No tool_calls or error — done */
+            return (rc == LLM_EXIT_ERROR || tc_state < 0) ? LLM_EXIT_ERROR : LLM_EXIT_STOP;
+        }
 
         /* Dispatch pending tool calls */
         int tc_count = 0;

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <sys/types.h>
+#include "sqlite3.h"
 
 #define LLM_WORKER_QUEUE_FULL -2
 
@@ -10,11 +11,11 @@
  * Returns 0 on success, -1 on error. */
 int llm_worker_start(const char *db_path, int num_threads);
 
-/* Submit a session for LLM processing.
- * Returns 0 on success, -1 on pipe error, LLM_WORKER_QUEUE_FULL on overflow. */
-int llm_worker_submit(int64_t session_id, int recall);
+/* Submit a session for LLM processing via DB job queue.
+ * Returns 0 on success, -1 on error. */
+int llm_worker_submit(sqlite3 *db, int64_t session_id, const char *agent_name, int recall);
 
-/* Get the result pipe fd (for epoll registration). */
+/* Get the result pipe fd (for poll registration). */
 int llm_worker_fd(void);
 
 /* Read completed session_id from result pipe. Returns 0 on success. */

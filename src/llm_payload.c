@@ -1,0 +1,295 @@
+#define _POSIX_C_SOURCE 200809L
+#include "llm_payload.h"
+#include "context.h"
+#include "config.h"
+#include "db.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ── Populate temp plan table with entry IDs in order ──────────── */
+
+static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
+    sqlite3_exec(db, "DROP TABLE IF EXISTS _plan;", NULL, NULL, NULL);
+    sqlite3_exec(db,
+        "CREATE TEMP TABLE _plan(pos INTEGER PRIMARY KEY, entry_id INTEGER NOT NULL);",
+        NULL, NULL, NULL);
+    sqlite3_stmt *ins;
+    if (sqlite3_prepare_v2(db, "INSERT INTO _plan(pos,entry_id) VALUES(?,?);",
+                           -1, &ins, NULL) != SQLITE_OK)
+        return -1;
+    for (int i = plan->cut; i < plan->count; i++) {
+        sqlite3_bind_int(ins, 1, i - plan->cut);
+        sqlite3_bind_int64(ins, 2, plan->entries[i].id);
+        sqlite3_step(ins);
+        sqlite3_reset(ins);
+    }
+    sqlite3_finalize(ins);
+    return 0;
+}
+
+/* ── SQL templates ─────────────────────────────────────────────── */
+
+static const char SQL_OPENAI_MESSAGES[] =
+    "SELECT json_group_array(json(msg) ORDER BY pos) FROM ("
+    "  SELECT p.pos,"
+    "    CASE e.type"
+    "      WHEN 'system' THEN"
+    "        json_object('role','system','content',COALESCE(e.content,''))"
+    "      WHEN 'user_message' THEN"
+    "        json_object('role','user','content',COALESCE(e.content,''))"
+    "      WHEN 'assistant_message' THEN"
+    "        CASE WHEN EXISTS("
+    "          SELECT 1 FROM entries tc WHERE tc.session_id=e.session_id"
+    "            AND tc.turn_id=e.turn_id AND tc.type='tool_call')"
+    "        THEN json_patch("
+    "          json_object('role','assistant','content',e.content),"
+    "          json_object('tool_calls',"
+    "            (SELECT json_group_array("
+    "              json_object('id',tc2.tool_call_id,'type','function',"
+    "                'function',json_object('name',tc2.tool_name,"
+    "                  'arguments',COALESCE(tc2.content,'{}'))))"
+    "             FROM entries tc2 WHERE tc2.session_id=e.session_id"
+    "               AND tc2.turn_id=e.turn_id AND tc2.type='tool_call'"
+    "             ORDER BY tc2.part_index)))"
+    "        ELSE json_object('role','assistant','content',e.content)"
+    "        END"
+    "      WHEN 'tool_result' THEN"
+    "        json_object('role','tool','tool_call_id',e.tool_call_id,"
+    "                    'content',COALESCE(e.content,''))"
+    "      ELSE NULL"
+    "    END AS msg"
+    "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
+    "  WHERE e.type NOT IN ('tool_call','reasoning')"
+    ") sub WHERE msg IS NOT NULL;";
+
+static const char SQL_OPENAI_TOOLS[] =
+    "SELECT json_group_array("
+    "  json_object('type','function','function',"
+    "    json_object('name',t.name,'description',t.description,"
+    "      'parameters',json(t.parameters_json)))"
+    ") FROM tools t"
+    " WHERE t.enabled=1"
+    "   AND (t.agent_name IS NULL OR t.agent_name=?1)"
+    "   AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2)));";
+
+static const char SQL_OPENAI_FULL[] =
+    "SELECT json_object("
+    "  'model', ?1,"
+    "  'messages', CASE WHEN ?2 IS NOT NULL"
+    "    THEN json(json_insert(?3,'$[#]',json_object('role','system','content',?2)))"
+    "    ELSE json(?3) END,"
+    "  'stream', CASE WHEN ?4 THEN json('true') ELSE NULL END,"
+    "  'max_tokens', CASE WHEN ?5 > 0 THEN ?5 ELSE NULL END,"
+    "  'tools', CASE WHEN json_array_length(?6) > 0 THEN json(?6) ELSE NULL END"
+    ");";
+
+static const char SQL_GEMINI_SYSTEM[] =
+    "SELECT group_concat(e.content, char(10))"
+    " FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?"
+    " WHERE e.role = 0 AND e.content IS NOT NULL AND e.content != ''"
+    " ORDER BY p.pos;";
+
+static const char SQL_GEMINI_CONTENTS[] =
+    "SELECT json_group_array(json(content_obj) ORDER BY min_pos) FROM ("
+    "  SELECT MIN(p.pos) AS min_pos,"
+    "    CASE"
+    "      WHEN e.type IN ('assistant_message','tool_call','reasoning') THEN"
+    "        json_object('role','model','parts',"
+    "          (SELECT json_group_array(json(part)) FROM ("
+    "            SELECT e2.part_index AS ord,"
+    "              CASE e2.type"
+    "                WHEN 'assistant_message' THEN"
+    "                  CASE WHEN e2.content IS NOT NULL AND e2.content != ''"
+    "                  THEN json_object('text',e2.content) ELSE NULL END"
+    "                WHEN 'tool_call' THEN"
+    "                  json_object('functionCall',json_object('name',e2.tool_name,"
+    "                    'args',CASE WHEN json_valid(e2.content) THEN json(e2.content)"
+    "                             ELSE json('{}') END))"
+    "                ELSE NULL"
+    "              END AS part"
+    "            FROM _plan p2 JOIN entries e2 ON e2.id=p2.entry_id AND e2.session_id=?1"
+    "            WHERE e2.turn_id=e.turn_id"
+    "              AND e2.type IN ('assistant_message','tool_call')"
+    "            ORDER BY e2.part_index"
+    "          ) WHERE part IS NOT NULL))"
+    "      WHEN e.type = 'tool_result' THEN"
+    "        json_object('role','user','parts',"
+    "          json_array(json_object('functionResponse',"
+    "            json_object('name',COALESCE(e.tool_name,e.tool_call_id),"
+    "              'response',json_object('content',COALESCE(e.content,''))))))"
+    "      WHEN e.type = 'user_message' THEN"
+    "        json_object('role','user','parts',"
+    "          json_array(json_object('text',COALESCE(e.content,''))))"
+    "      ELSE NULL"
+    "    END AS content_obj"
+    "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
+    "  WHERE e.type != 'system'"
+    "  GROUP BY CASE WHEN e.type IN ('assistant_message','tool_call','reasoning')"
+    "    THEN e.turn_id ELSE e.id END"
+    ") sub WHERE content_obj IS NOT NULL;";
+
+static const char SQL_GEMINI_TOOLS[] =
+    "SELECT json_array(json_object('functionDeclarations',"
+    "  (SELECT json_group_array("
+    "    json_object('name',t.name,'description',t.description,"
+    "      'parameters',json(t.parameters_json))"
+    "  ) FROM tools t"
+    "   WHERE t.enabled=1"
+    "     AND (t.agent_name IS NULL OR t.agent_name=?1)"
+    "     AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2))))"
+    "));";
+
+static const char SQL_GEMINI_FULL[] =
+    "SELECT json_object("
+    "  'systemInstruction', CASE WHEN ?1 IS NOT NULL AND ?1 != ''"
+    "    THEN json_object('parts',json_array(json_object('text',?1)))"
+    "    ELSE NULL END,"
+    "  'contents', json(?2),"
+    "  'tools', CASE WHEN json_array_length(json_extract(?3,'$[0].functionDeclarations')) > 0"
+    "    THEN json(?3) ELSE NULL END,"
+    "  'generationConfig', CASE WHEN ?4 > 0"
+    "    THEN json_object('maxOutputTokens',?4) ELSE NULL END"
+    ");";
+
+/* ── Helpers ───────────────────────────────────────────────────── */
+
+static char *query_text(sqlite3 *db, const char *sql, int64_t session_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_int64(s, 1, session_id);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t) r = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return r;
+}
+
+static char *query_tools(sqlite3 *db, const char *sql,
+                         const char *agent_name, const char *allowed_tools) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
+    if (agent_name) sqlite3_bind_text(s, 1, agent_name, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(s, 1);
+    if (allowed_tools) sqlite3_bind_text(s, 2, allowed_tools, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(s, 2);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t) r = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return r;
+}
+
+/* ── Public API ────────────────────────────────────────────────── */
+
+int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
+                      const ContextPlan *plan, const char *recall_text,
+                      const char *gemini_cache_name, LlmPayload *out) {
+    if (!db || !cfg || !plan || !out) return -1;
+    (void)gemini_cache_name; /* TODO: wire cached content */
+    memset(out, 0, sizeof(*out));
+    out->db = db;
+
+    int gemini = (cfg->provider.endpoint_type == ENDPOINT_GEMINI);
+    if (populate_plan(db, plan) != 0) return -1;
+
+    /* Get agent allowed_tools filter */
+    char *agent_name = session_get_agent_name(db, session_id);
+    char *allowed_tools = NULL;
+    if (agent_name) {
+        sqlite3_stmt *at;
+        if (sqlite3_prepare_v2(db, "SELECT allowed_tools FROM agents WHERE name=?",
+                               -1, &at, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(at, 1, agent_name, -1, SQLITE_STATIC);
+            if (sqlite3_step(at) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(at, 0);
+                if (v && strcmp(v, "[]") != 0) allowed_tools = strdup(v);
+            }
+            sqlite3_finalize(at);
+        }
+    }
+
+    if (gemini) {
+        char *sys_text = query_text(db, SQL_GEMINI_SYSTEM, session_id);
+        if (recall_text && recall_text[0]) {
+            if (sys_text) {
+                size_t sl = strlen(sys_text), rl = strlen(recall_text);
+                sys_text = realloc(sys_text, sl + rl + 2);
+                sys_text[sl] = '\n';
+                memcpy(sys_text + sl + 1, recall_text, rl + 1);
+            } else {
+                sys_text = strdup(recall_text);
+            }
+        }
+        char *contents = query_text(db, SQL_GEMINI_CONTENTS, session_id);
+        char *tools_json = query_tools(db, SQL_GEMINI_TOOLS, agent_name, allowed_tools);
+
+        sqlite3_stmt *full;
+        if (sqlite3_prepare_v2(db, SQL_GEMINI_FULL, -1, &full, NULL) != SQLITE_OK) {
+            free(sys_text); free(contents); free(tools_json);
+            free(agent_name); free(allowed_tools);
+            return -1;
+        }
+        if (sys_text) sqlite3_bind_text(full, 1, sys_text, -1, SQLITE_TRANSIENT);
+        else sqlite3_bind_null(full, 1);
+        sqlite3_bind_text(full, 2, contents ? contents : "[]", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(full, 3, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(full, 4, cfg->provider.max_tokens);
+
+        free(sys_text); free(contents); free(tools_json);
+
+        if (sqlite3_step(full) == SQLITE_ROW) {
+            out->stmt = full;
+            out->body = (const char *)sqlite3_column_text(full, 0);
+        } else {
+            sqlite3_finalize(full);
+            free(agent_name); free(allowed_tools);
+            return -1;
+        }
+    } else {
+        char *messages = query_text(db, SQL_OPENAI_MESSAGES, session_id);
+        if (!messages) messages = strdup("[]");
+        char *tools_json = query_tools(db, SQL_OPENAI_TOOLS, agent_name, allowed_tools);
+
+        sqlite3_stmt *full;
+        if (sqlite3_prepare_v2(db, SQL_OPENAI_FULL, -1, &full, NULL) != SQLITE_OK) {
+            free(messages); free(tools_json);
+            free(agent_name); free(allowed_tools);
+            return -1;
+        }
+        sqlite3_bind_text(full, 1, cfg->provider.model ? cfg->provider.model : "unknown",
+                          -1, SQLITE_STATIC);
+        if (recall_text && recall_text[0])
+            sqlite3_bind_text(full, 2, recall_text, -1, SQLITE_STATIC);
+        else sqlite3_bind_null(full, 2);
+        sqlite3_bind_text(full, 3, messages, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(full, 4, cfg->stream);
+        sqlite3_bind_int(full, 5, cfg->provider.max_tokens);
+        sqlite3_bind_text(full, 6, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
+
+        free(messages); free(tools_json);
+
+        if (sqlite3_step(full) == SQLITE_ROW) {
+            out->stmt = full;
+            out->body = (const char *)sqlite3_column_text(full, 0);
+        } else {
+            sqlite3_finalize(full);
+            free(agent_name); free(allowed_tools);
+            return -1;
+        }
+    }
+
+    free(agent_name); free(allowed_tools);
+    return 0;
+}
+
+void llm_payload_release(LlmPayload *p) {
+    if (!p) return;
+    if (p->stmt) { sqlite3_finalize(p->stmt); p->stmt = NULL; }
+    if (p->db) { sqlite3_exec(p->db, "DROP TABLE IF EXISTS _plan;", NULL, NULL, NULL); }
+    p->body = NULL;
+}

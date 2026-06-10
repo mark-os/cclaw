@@ -379,6 +379,7 @@ Config *config_load(sqlite3 *db) {
     if (cfg->recall_max_tokens == 0) cfg->recall_max_tokens = 500;
     env_override_int(&cfg->auto_recall, "CCLAW_AUTO_RECALL");
     env_override_int(&cfg->recall_max_tokens, "CCLAW_RECALL_MAX_TOKENS");
+    env_override_int(&cfg->stream, "CCLAW_STREAM");
 
     return cfg;
 }

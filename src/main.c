@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/epoll.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -160,7 +160,7 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
             snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
         }
 
-        return llm_worker_submit(session_id, iteration == 0 ? 1 : 0);
+        return llm_worker_submit(g_db, session_id, agent_name, iteration == 0 ? 1 : 0);
     }
     /* Fork mode */
     return fork_llm_req(session_id, agent_name, iteration);
@@ -704,7 +704,7 @@ int main(int argc, char *argv[]) {
         else { fprintf(stderr, "unknown option: %s\n", argv[i]); return 1; }
     }
 
-    /* LLM subprocess mode — direct call, no epoll */
+    /* LLM subprocess mode — direct call, no poll */
     if (llm_mode) {
         if (session_id < 0) { fprintf(stderr, "llm requires -s <id>\n"); return 1; }
         return llm_proc_main(session_id);
@@ -772,47 +772,44 @@ int main(int argc, char *argv[]) {
         /* Launch channel processes */
         channel_launch_all(g_db, db_path);
 
-        /* Epoll setup */
-        int epfd = epoll_create1(0);
-        struct epoll_event ev;
-        ev.events = EPOLLIN; ev.data.fd = g_chld_pipe[0];
-        epoll_ctl(epfd, EPOLL_CTL_ADD, g_chld_pipe[0], &ev);
-        ev.events = EPOLLIN; ev.data.fd = wake_fd();
-        epoll_ctl(epfd, EPOLL_CTL_ADD, wake_fd(), &ev);
-        if (fifo_fd >= 0) { ev.events = EPOLLIN; ev.data.fd = fifo_fd;
-            epoll_ctl(epfd, EPOLL_CTL_ADD, fifo_fd, &ev); }
+        /* poll() setup */
+        struct pollfd pfds[4];
+        int nfds_total = 0;
+        pfds[nfds_total].fd = g_chld_pipe[0]; pfds[nfds_total].events = POLLIN; nfds_total++;
+        pfds[nfds_total].fd = wake_fd(); pfds[nfds_total].events = POLLIN; nfds_total++;
+        int fifo_idx = -1;
+        if (fifo_fd >= 0) { fifo_idx = nfds_total; pfds[nfds_total].fd = fifo_fd; pfds[nfds_total].events = POLLIN; nfds_total++; }
 
         /* Daemon event loop */
-        struct epoll_event events[8];
         while (!shutdown_requested()) {
-            int nfds = epoll_wait(epfd, events, 8, 1000);
-            if (nfds < 0) { if (errno == EINTR) continue; break; }
+            int rc = poll(pfds, (nfds_t)nfds_total, 1000);
+            if (rc < 0) { if (errno == EINTR) continue; break; }
 
-            for (int i = 0; i < nfds; i++) {
-                if (events[i].data.fd == g_chld_pipe[0]) {
-                    char buf[64];
-                    while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
-                    reap_children();
-                } else if (events[i].data.fd == wake_fd()) {
-                    WakeMsg msg;
-                    while (read(wake_fd(), &msg, sizeof(msg)) == (ssize_t)sizeof(msg)) {
-                        if (child_has_session(msg.session_id)) continue;
-                        char *aname = session_get_agent_name(g_db, msg.session_id);
-                        if (aname) { dispatch_llm_req(msg.session_id, aname, 0); free(aname); }
-                    }
-                } else if (fifo_fd >= 0 && events[i].data.fd == fifo_fd) {
-                    char drain[64];
-                    while (read(fifo_fd, drain, sizeof(drain)) > 0) {}
-                    channel_consume_events(g_db);
+            if (pfds[0].revents & POLLIN) {
+                char buf[64];
+                while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
+                reap_children();
+            }
+            if (pfds[1].revents & POLLIN) {
+                WakeMsg msg;
+                while (read(wake_fd(), &msg, sizeof(msg)) == (ssize_t)sizeof(msg)) {
+                    if (child_has_session(msg.session_id)) continue;
+                    char *aname = session_get_agent_name(g_db, msg.session_id);
+                    if (aname) { dispatch_llm_req(msg.session_id, aname, 0); free(aname); }
                 }
             }
-            if (nfds == 0 && g_child_count > 0) reap_children();
+            if (fifo_idx >= 0 && (pfds[fifo_idx].revents & POLLIN)) {
+                char drain[64];
+                while (read(fifo_fd, drain, sizeof(drain)) > 0) {}
+                channel_consume_events(g_db);
+            }
+            if (rc == 0 && g_child_count > 0) reap_children();
         }
 
         /* Shutdown */
         channel_shutdown_all();
         cron_stop(); heartbeat_stop(); web_stop();
-        close(epfd); close(g_chld_pipe[0]); close(g_chld_pipe[1]);
+        close(g_chld_pipe[0]); close(g_chld_pipe[1]);
         wake_close(); wake_fifo_close(fifo_fd, db_path);
         config_free(g_cfg); db_close(g_db); free(db_path);
         return 0;
@@ -938,35 +935,34 @@ int main(int argc, char *argv[]) {
       sigemptyset(&sa.sa_mask); sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
       sigaction(SIGCHLD, &sa, NULL); }
 
-    /* ── Epoll setup ─────────────────────────────────────────────── */
-    int epfd = epoll_create1(0);
-    struct epoll_event ev;
+    /* ── poll() setup ──────────────────────────────────────────────── */
+    struct pollfd cli_pfds[4];
+    int cli_nfds = 0;
 
     /* Start LLM worker (unless --llm-fork) */
     int worker_fd = -1;
+    int worker_idx = -1;
     if (!g_llm_fork) {
         if (llm_worker_start(db_path, g_llm_threads) == 0) {
             worker_fd = llm_worker_fd();
             set_nonblock(worker_fd);
-            ev.events = EPOLLIN; ev.data.fd = worker_fd;
-            epoll_ctl(epfd, EPOLL_CTL_ADD, worker_fd, &ev);
+            worker_idx = cli_nfds;
+            cli_pfds[cli_nfds].fd = worker_fd; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
         } else {
-            /* Fallback to fork mode if worker start fails */
             g_llm_fork = 1;
         }
     }
 
     /* Register SIGCHLD pipe */
-    ev.events = EPOLLIN; ev.data.fd = g_chld_pipe[0];
-    epoll_ctl(epfd, EPOLL_CTL_ADD, g_chld_pipe[0], &ev);
+    int chld_idx = cli_nfds;
+    cli_pfds[cli_nfds].fd = g_chld_pipe[0]; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
 
     /* Register stdin for interactive mode */
-    int stdin_registered = 0;
+    int stdin_idx = -1;
     if (!prompt && isatty(STDIN_FILENO)) {
         set_nonblock(STDIN_FILENO);
-        ev.events = EPOLLIN; ev.data.fd = STDIN_FILENO;
-        epoll_ctl(epfd, EPOLL_CTL_ADD, STDIN_FILENO, &ev);
-        stdin_registered = 1;
+        stdin_idx = cli_nfds;
+        cli_pfds[cli_nfds].fd = STDIN_FILENO; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
         printf("cclaw cli (type 'exit' or Ctrl-D to quit)\n> ");
         fflush(stdout);
     }
@@ -978,77 +974,69 @@ int main(int argc, char *argv[]) {
     }
 
     /* ── Event loop ──────────────────────────────────────────────── */
-    struct epoll_event events[4];
     int rc = 0;
 
     while (!shutdown_requested()) {
-        int nfds = epoll_wait(epfd, events, 4, 500);
-        if (nfds < 0) { if (errno == EINTR) continue; break; }
+        int nready = poll(cli_pfds, (nfds_t)cli_nfds, 500);
+        if (nready < 0) { if (errno == EINTR) continue; break; }
 
-        for (int i = 0; i < nfds; i++) {
-            if (events[i].data.fd == g_chld_pipe[0]) {
-                /* Drain self-pipe */
-                char buf[64];
-                while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
-                reap_children();
+        if (cli_pfds[chld_idx].revents & POLLIN) {
+            char buf[64];
+            while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
+            reap_children();
 
-                /* Check if CLI turn completed */
-                if (g_mode == 0 && !g_cli_turn_active) {
-                    if (g_cli_done) goto done;
-                    /* Re-prompt */
-                    printf("> "); fflush(stdout);
-                }
-            } else if (worker_fd >= 0 && events[i].data.fd == worker_fd) {
-                /* Worker completed an LLM request */
-                int64_t completed_sid;
-                while (llm_worker_read(&completed_sid) == 0) {
-                    /* Queue overflow sentinel */
-                    if (completed_sid == -1) {
-                        LOG_ERROR_(g_cfg, "LLM worker queue full");
-                        continue;
-                    }
-                    /* Find tracking entry and get iteration */
-                    ChildProc *wc = NULL;
-                    for (int j = 0; j < g_child_count; j++) {
-                        if (g_children[j].session_id == completed_sid &&
-                            g_children[j].type == CHILD_LLM_REQ &&
-                            g_children[j].pid == -1) {
-                            wc = &g_children[j];
-                            break;
-                        }
-                    }
-                    char aname[64] = "default";
-                    int iter = 0;
-                    if (wc) {
-                        snprintf(aname, sizeof(aname), "%s", wc->agent_name);
-                        iter = wc->iteration;
-                        child_remove(wc);
-                    }
-                    handle_llm_complete(completed_sid, aname, iter);
-
-                    if (g_mode == 0 && !g_cli_turn_active) {
-                        if (g_cli_done) goto done;
-                        printf("> "); fflush(stdout);
-                    }
-                }
-            } else if (events[i].data.fd == STDIN_FILENO && stdin_registered) {
-                if (g_cli_turn_active) continue; /* Ignore input while turn running */
-
-                char *line = NULL; size_t cap = 0;
-                ssize_t len = getline(&line, &cap, stdin);
-                if (len < 0) { free(line); goto done; }
-                if (len > 0 && line[len-1] == '\n') line[len-1] = '\0';
-
-                if (!line[0]) { free(line); printf("> "); fflush(stdout); continue; }
-                if (strcmp(line, "exit") == 0 || strcmp(line, "quit") == 0) { free(line); goto done; }
-
-                cli_start_turn(line);
-                free(line);
+            if (g_mode == 0 && !g_cli_turn_active) {
+                if (g_cli_done) goto done;
+                printf("> "); fflush(stdout);
             }
         }
+        if (worker_idx >= 0 && (cli_pfds[worker_idx].revents & POLLIN)) {
+            int64_t completed_sid;
+            while (llm_worker_read(&completed_sid) == 0) {
+                if (completed_sid == -1) {
+                    LOG_ERROR_(g_cfg, "LLM worker queue full");
+                    continue;
+                }
+                ChildProc *wc = NULL;
+                for (int j = 0; j < g_child_count; j++) {
+                    if (g_children[j].session_id == completed_sid &&
+                        g_children[j].type == CHILD_LLM_REQ &&
+                        g_children[j].pid == -1) {
+                        wc = &g_children[j];
+                        break;
+                    }
+                }
+                char aname[64] = "default";
+                int iter = 0;
+                if (wc) {
+                    snprintf(aname, sizeof(aname), "%s", wc->agent_name);
+                    iter = wc->iteration;
+                    child_remove(wc);
+                }
+                handle_llm_complete(completed_sid, aname, iter);
 
-        /* Defensive reap on timeout */
-        if (nfds == 0 && g_child_count > 0) reap_children();
+                if (g_mode == 0 && !g_cli_turn_active) {
+                    if (g_cli_done) goto done;
+                    printf("> "); fflush(stdout);
+                }
+            }
+        }
+        if (stdin_idx >= 0 && (cli_pfds[stdin_idx].revents & POLLIN)) {
+            if (g_cli_turn_active) continue;
+
+            char *line = NULL; size_t cap = 0;
+            ssize_t len = getline(&line, &cap, stdin);
+            if (len < 0) { free(line); goto done; }
+            if (len > 0 && line[len-1] == '\n') line[len-1] = '\0';
+
+            if (!line[0]) { free(line); printf("> "); fflush(stdout); continue; }
+            if (strcmp(line, "exit") == 0 || strcmp(line, "quit") == 0) { free(line); goto done; }
+
+            cli_start_turn(line);
+            free(line);
+        }
+
+        if (nready == 0 && g_child_count > 0) reap_children();
     }
 
 done:
@@ -1059,7 +1047,6 @@ done:
     session_set_state(g_db, g_cli_session, "idle");
     agent_setup_destroy(&setup);
     llm_worker_stop();
-    close(epfd);
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
     free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path);
     return rc;

@@ -15,8 +15,46 @@ CREATE TABLE IF NOT EXISTS providers (
   api_key_env TEXT NOT NULL DEFAULT '',
   default_model TEXT,
   context_window INTEGER DEFAULT 128000,
-  priority INTEGER NOT NULL DEFAULT 0
+  priority INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'healthy'
 );
+
+-- ═══ Models ═══
+CREATE TABLE IF NOT EXISTS models (
+  id TEXT PRIMARY KEY,
+  provider_name TEXT NOT NULL,
+  model TEXT NOT NULL,
+  sub_provider TEXT,
+  context_window INTEGER DEFAULT 128000,
+  max_output_tokens INTEGER,
+  capabilities TEXT DEFAULT '[]',
+  priority INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'healthy',
+  degraded_until INTEGER,
+  total_requests INTEGER DEFAULT 0,
+  total_tokens_in INTEGER DEFAULT 0,
+  total_tokens_out INTEGER DEFAULT 0,
+  total_cost_nano INTEGER DEFAULT 0,
+  error_count_5xx INTEGER DEFAULT 0,
+  error_count_429 INTEGER DEFAULT 0,
+  last_success_at INTEGER,
+  last_error_at INTEGER,
+  synced_at INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_models_routing ON models(priority, status);
+
+-- ═══ LLM Jobs (transient queue) ═══
+CREATE TABLE IF NOT EXISTS llm_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  agent_name TEXT NOT NULL DEFAULT 'default',
+  recall INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending',
+  claimed_at INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_llm_jobs_pending ON llm_jobs(status) WHERE status='pending';
 
 -- ═══ Extensions ═══
 CREATE TABLE IF NOT EXISTS extensions (
@@ -191,7 +229,18 @@ CREATE TABLE IF NOT EXISTS inbox (
 );
 CREATE INDEX IF NOT EXISTS idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0;
 
--- ═══ JS tools (per-session defined) ═══
+-- ═══ Tools ═══
+CREATE TABLE IF NOT EXISTS tools (
+  name TEXT PRIMARY KEY,
+  description TEXT,
+  parameters_json TEXT,
+  path TEXT,
+  builtin INTEGER NOT NULL DEFAULT 1,
+  agent_name TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1
+);
+
+-- ═══ JS tools (deprecated — use tools table) ═══
 CREATE TABLE IF NOT EXISTS js_tools (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,

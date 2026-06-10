@@ -64,22 +64,13 @@ int db_seed_defaults(sqlite3 *db) {
     sqlite3_finalize(cnt);
     if (!empty) return 0;
 
-    static const char *defaults[][2] = {
-        {"default_model",         "deepseek/deepseek-v4-flash"},
-        {"default_provider",      "openrouter"},
-        {"max_iterations",        STR(AGENT_DEFAULT_MAX_ITERATIONS)},
-        {"shell_timeout",         STR(AGENT_DEFAULT_SHELL_TIMEOUT)},
-        {"web_port",              "8080"},
-        {"default_allowed_tools", "[\"file_read\",\"file_write\",\"js_eval\",\"request_config\"]"},
-    };
-    size_t n = sizeof(defaults) / sizeof(defaults[0]);
-    for (size_t i = 0; i < n; i++)
-        db_kv_set(db, defaults[i][0], defaults[i][1]);
-
-    const char *prov_sql =
-        "INSERT OR IGNORE INTO providers(name,base_url,endpoint_type,api_key_env,default_model,priority)"
-        " VALUES('openrouter','https://openrouter.ai/api/v1','openai','OPENROUTER_API_KEY','deepseek/deepseek-v4-flash',0);";
-    sqlite3_exec(db, prov_sql, NULL, NULL, NULL);
+    char *err = NULL;
+    int rc = sqlite3_exec(db, TPL_SEED_SQL, NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_seed_defaults: %s\n", err);
+        sqlite3_free(err);
+        return -1;
+    }
     return 0;
 }
 

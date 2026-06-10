@@ -15,10 +15,6 @@ static void setup_session(sqlite3 *db, int64_t *sid) {
     *sid = session_create(db, "test", "default", -1, 0);
     assert(*sid > 0);
 
-    /* System message */
-    Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append(db, *sid, &sys);
-
     /* User message with special chars */
     Message user = {.role = ROLE_USER, .content = "Hello \"world\"\nLine2\ttab"};
     entry_append(db, *sid, &user);
@@ -45,10 +41,10 @@ static void test_openai_payload(void) {
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
-    assert(plan.count >= 3);
+    assert(plan.count >= 2);
 
     LlmPayload payload;
-    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, NULL, &payload) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
     assert(payload.body);
 
     /* Verify valid JSON */
@@ -109,7 +105,7 @@ static void test_gemini_payload(void) {
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     LlmPayload payload;
-    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, NULL, &payload) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
     assert(payload.body);
 
     cJSON *root = cJSON_Parse(payload.body);
@@ -163,7 +159,7 @@ static void test_payload_with_tools(void) {
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
     LlmPayload payload;
-    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, NULL, &payload) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
     assert(payload.body);
 
     cJSON *root = cJSON_Parse(payload.body);

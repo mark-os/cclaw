@@ -21,7 +21,7 @@ typedef struct {
  * Returns 0 on success, -1 on error. */
 int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
                       const ContextPlan *plan, const char *recall_text,
-                      const char *gemini_cache_name, LlmPayload *out);
+                      const char *system_prompt, LlmPayload *out);
 
 /* Release payload resources (finalize stmt, drop temp table). */
 void llm_payload_release(LlmPayload *p);

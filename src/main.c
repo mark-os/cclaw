@@ -921,12 +921,6 @@ int main(int argc, char *argv[]) {
     g_cli_session = session_id;
     setup.req_cfg_ctx.session_id = session_id;
 
-    /* Ensure system prompt */
-    { int bc = 0; Entry *br = session_get_branch(g_db, session_id, &bc);
-      if (bc == 0) { char *sp = agent_build_system_prompt(g_db, g_agent_name, session_id, "agents", g_cfg);
-          Message m = {.role = ROLE_SYSTEM, .content = sp}; entry_append(g_db, session_id, &m); free(sp); }
-      entry_branch_free(br, bc); }
-
     /* ── SIGCHLD self-pipe ───────────────────────────────────────── */
     if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
     set_nonblock(g_chld_pipe[0]);

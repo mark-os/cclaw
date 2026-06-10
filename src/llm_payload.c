@@ -76,19 +76,19 @@ static const char SQL_OPENAI_TOOLS[] =
 static const char SQL_OPENAI_FULL[] =
     "SELECT json_object("
     "  'model', ?1,"
-    "  'messages', CASE WHEN ?2 IS NOT NULL"
-    "    THEN json(json_insert(?3,'$[#]',json_object('role','system','content',?2)))"
-    "    ELSE json(?3) END,"
+    "  'messages', (SELECT json_group_array(json(m)) FROM ("
+    "    SELECT 0 AS ord, 0 AS sub, json_object('role','system','content',?2) AS m"
+    "      WHERE ?2 IS NOT NULL"
+    "    UNION ALL"
+    "    SELECT 1, rowid, json(value) FROM json_each(?3)"
+    "    UNION ALL"
+    "    SELECT 2, 0, json_object('role','system','content',?7)"
+    "      WHERE ?7 IS NOT NULL"
+    "    ORDER BY ord, sub)),"
     "  'stream', CASE WHEN ?4 THEN json('true') ELSE NULL END,"
     "  'max_tokens', CASE WHEN ?5 > 0 THEN ?5 ELSE NULL END,"
     "  'tools', CASE WHEN json_array_length(?6) > 0 THEN json(?6) ELSE NULL END"
     ");";
-
-static const char SQL_GEMINI_SYSTEM[] =
-    "SELECT group_concat(e.content, char(10))"
-    " FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?"
-    " WHERE e.role = 0 AND e.content IS NOT NULL AND e.content != ''"
-    " ORDER BY p.pos;";
 
 static const char SQL_GEMINI_CONTENTS[] =
     "SELECT json_group_array(json(content_obj) ORDER BY min_pos) FROM ("
@@ -188,9 +188,8 @@ static char *query_tools(sqlite3 *db, const char *sql,
 
 int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
                       const ContextPlan *plan, const char *recall_text,
-                      const char *gemini_cache_name, LlmPayload *out) {
+                      const char *system_prompt, LlmPayload *out) {
     if (!db || !cfg || !plan || !out) return -1;
-    (void)gemini_cache_name; /* TODO: wire cached content */
     memset(out, 0, sizeof(*out));
     out->db = db;
 
@@ -214,7 +213,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     }
 
     if (gemini) {
-        char *sys_text = query_text(db, SQL_GEMINI_SYSTEM, session_id);
+        char *sys_text = system_prompt ? strdup(system_prompt) : NULL;
         if (recall_text && recall_text[0]) {
             if (sys_text) {
                 size_t sl = strlen(sys_text), rl = strlen(recall_text);
@@ -263,13 +262,16 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         }
         sqlite3_bind_text(full, 1, cfg->provider.model ? cfg->provider.model : "unknown",
                           -1, SQLITE_STATIC);
-        if (recall_text && recall_text[0])
-            sqlite3_bind_text(full, 2, recall_text, -1, SQLITE_STATIC);
+        if (system_prompt && system_prompt[0])
+            sqlite3_bind_text(full, 2, system_prompt, -1, SQLITE_STATIC);
         else sqlite3_bind_null(full, 2);
         sqlite3_bind_text(full, 3, messages, -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(full, 4, cfg->stream);
         sqlite3_bind_int(full, 5, cfg->provider.max_tokens);
         sqlite3_bind_text(full, 6, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
+        if (recall_text && recall_text[0])
+            sqlite3_bind_text(full, 7, recall_text, -1, SQLITE_STATIC);
+        else sqlite3_bind_null(full, 7);
 
         free(messages); free(tools_json);
 

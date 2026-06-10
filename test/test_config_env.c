@@ -166,12 +166,6 @@ static void test_cache_hints_env(void) {
     assert(cfg->provider.cache_hints == CACHE_HINTS_OFF);
     config_free(cfg);
 
-    /* gemini-native */
-    setenv("CCLAW_CACHE_HINTS", "gemini-native", 1);
-    cfg = config_load_from_env();
-    assert(cfg->provider.cache_hints == CACHE_HINTS_GEMINI_NATIVE);
-    config_free(cfg);
-
     clear_env();
     printf("  PASS test_cache_hints_env\n");
 }

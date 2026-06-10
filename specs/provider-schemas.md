@@ -174,20 +174,28 @@ cacheWrite = prompt_tokens_details.cache_write_tokens
 
 ### Caching & System Messages
 
-- **Prefix-based**: Automatic. Hash includes tools → system → messages in order.
-  Minimum 1024 tokens. Cache hit requires exact byte-for-byte prefix match.
+- **Implicit prefix caching**: Automatic for all providers behind OpenRouter.
+  Server detects identical prefix across requests, caches internally, reports
+  savings via `prompt_tokens_details.cached_tokens`. No wire format changes.
+- **128-token granularity** (OpenAI): Caches at every 128-token boundary
+  starting at 1024 tokens. This means sub-prefixes of prior requests are
+  cached — appending varying content at the end doesn't prevent cache hits
+  on the stable portion at the start.
+- **Growing conversations are inherently cache-friendly**: Each turn appends
+  to the end of the messages array; the prefix (all prior turns) is stable and
+  gets cache reads automatically. Only the new tail incurs full input cost.
+- **What breaks the cache**: Changing `tools` or `system` — these are
+  serialized first in the prefix (`tools → system → messages`). Any byte
+  change there invalidates the entire cache for that request. Tool changes
+  mid-session are a one-turn cache miss.
 - **Multiple system messages**: Supported anywhere in the messages array.
   All are treated as system-level instructions regardless of position.
 - **Cache-safe injection**: Append new system/developer messages at the *end*
-  of the messages array (after all prior turns). The cached prefix is preserved;
-  only the new message is processed as fresh input.
-- **What breaks the cache**: Changing anything in the first 1024+ tokens
-  (system prompt, early messages, tool definitions). Appending at the end is safe.
-- **`prompt_cache_key`**: Optional parameter to improve routing for requests
-  sharing long common prefixes across different conversations.
-- **OpenRouter routing**: Hashes first system + first non-system message for
-  provider routing consistency. Changing the initial system prompt may reroute.
-- **DeepSeek**: Follows OpenAI prefix rules. Supports `prompt_cache_hit_tokens`.
+  of the messages array (after all prior turns). The cached prefix is preserved.
+- **DeepSeek**: Follows OpenAI prefix rules. Reports `prompt_cache_hit_tokens`.
+- **OpenRouter sticky routing**: Routes subsequent requests in the same
+  conversation to the same physical backend. Use `session_id` for explicit
+  control over sticky sessions.
 
 ---
 
@@ -320,22 +328,25 @@ cacheWrite = 0  (automatic caching, no write metric)
 
 ### Caching & System Messages
 
-- **Explicit caching**: Via `cachedContents` API. Create a named cache object
-  containing a prefix (systemInstruction + early contents). Reference by name
-  in subsequent requests via `"cachedContent": "cachedContents/abc123"`.
+- **Implicit prefix caching** (Gemini 2.5+): Automatic. Server detects identical
+  prefix, charges reduced rate (`cachedContentTokenCount` in usageMetadata).
+  Same behavior as OpenAI — send the same contents, get savings. Min 2048–4096
+  tokens depending on model. No wire format changes needed.
+- **Explicit `cachedContents` API** (not used by CClaw): Separate API to create
+  named cache objects with hourly storage fees. Designed for fan-out use cases
+  (many users sharing one large static prefix like a video or document).
+  Not useful for single-user growing conversations where implicit caching
+  already handles the prefix.
 - **`systemInstruction` is top-level only**: Cannot place system messages in
-  `contents[]`. Changing `systemInstruction` invalidates any cached content.
-- **Cache-safe new instructions**: Two options:
-  1. Append as a user message in `contents[]` (less authoritative but cache-safe)
-  2. Create a new cached content object with updated systemInstruction (cache miss
-     for the old one, but starts a new cache)
+  `contents[]`. Changing `systemInstruction` invalidates any cached prefix.
 - **No mid-conversation system role**: Unlike OpenAI/Anthropic, Gemini has no
   `role: "system"` in the contents array. System-level instructions after session
-  start must go as user messages or rebuild the systemInstruction (cache-breaking).
+  start must go as user messages.
 - **Implication for CClaw**: System entries added mid-session should be emitted
   as user messages in the Gemini wire format (not aggregated into systemInstruction)
   to preserve the cached prefix. Only the *initial* system prompt goes in
-  systemInstruction.
+  systemInstruction. Recall text should also go as a trailing user message
+  for Gemini (not in systemInstruction) to avoid cache-busting.
 
 ---
 
@@ -498,22 +509,31 @@ total = input + output + cacheRead + cacheWrite  (computed)
 
 ### Caching & System Messages
 
-- **Explicit cache control**: Place `"cache_control": {"type": "ephemeral"}`
-  on content blocks. Recommended positions: last system block, last tool
-  definition, last user message. TTL configurable (`"ttl": "1h"`).
-- **Top-level `system` field is cached prefix**: Changing it invalidates the
-  entire cache for everything that follows.
+- **Opt-in prefix caching**: Requires `"cache_control": {"type": "ephemeral"}`
+  to activate. Two modes:
+  - **Automatic** (recommended for conversations): Single top-level
+    `"cache_control": {"type": "ephemeral"}` on the request body. Server
+    auto-places the breakpoint on the last cacheable block and advances it
+    each turn. Growing conversation prefix gets cache reads (0.1× base cost),
+    new tail gets a cache write (1.25× base cost). Net effect: sub-linear
+    cost growth per turn.
+  - **Explicit breakpoints**: Place `cache_control` on up to 4 individual
+    content blocks for fine-grained control over what's cached separately.
+- **Still a single request format**: Unlike Gemini's `cachedContents` API,
+  Anthropic caching does NOT require a separate API call. You send the full
+  messages every turn — the server handles caching internally based on the
+  breakpoint markers. No 2-step create-then-reference flow.
+- **5-minute TTL** (default), refreshed on each cache hit. 1-hour TTL
+  available at 2× base cost for infrequent requests.
+- **Top-level `system` field is cached prefix**: Changing it invalidates
+  the entire cache for everything that follows.
 - **Mid-conversation `{"role": "system"}` messages**: Supported in the messages
   array (Claude Opus 4.8+). These are appended after the cached prefix and
   treated as operator-level instructions without breaking the cache.
-- **Use cases for mid-conversation system**: Mode switches, tool availability
-  changes, per-turn policy injection, state observations from the application.
-  Higher priority than user messages (operator-level authority).
 - **Cache hash order**: tools → system → messages (prefix-based, like OpenAI).
-- **Implication for CClaw**: Initial system prompt → top-level `system` field
-  (cached). Later system entries → `{"role": "system"}` messages in the array
-  (cache-preserving). The SQL payload builder should separate initial vs
-  mid-conversation system entries based on position.
+- **Implication for CClaw**: Add top-level `"cache_control": {"type": "ephemeral"}`
+  to Anthropic requests. The payload builder already produces a deterministic
+  prefix; this one field activates the cost savings. No per-block markers needed.
 
 ---
 

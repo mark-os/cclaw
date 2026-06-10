@@ -216,7 +216,6 @@ Config *config_load_from_env(void) {
     if (v) {
         if (strcmp(v, "on") == 0) cfg->provider.cache_hints = CACHE_HINTS_ON;
         else if (strcmp(v, "off") == 0) cfg->provider.cache_hints = CACHE_HINTS_OFF;
-        else if (strcmp(v, "gemini-native") == 0) cfg->provider.cache_hints = CACHE_HINTS_GEMINI_NATIVE;
         else cfg->provider.cache_hints = CACHE_HINTS_AUTO;
     }
 

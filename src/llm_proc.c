@@ -1,11 +1,12 @@
 #define _POSIX_C_SOURCE 200809L
 #include "llm_proc.h"
+#include "agent_config.h"
 #include "agent_setup.h"
 #include "config.h"
 #include "context.h"
 #include "db.h"
 #include "db_response.h"
-#include "gemini_cache.h"
+
 #include "http.h"
 #include "llm.h"
 #include "llm_payload.h"
@@ -165,6 +166,11 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         }
     }
 
+    /* Generate system prompt (like tools — not stored as entry) */
+    char *system_prompt = agent_build_system_prompt(db, agent_name, session_id, "agents", cfg);
+    if (system_prompt)
+        tool_overhead += (int)strlen(system_prompt) / 4;
+
     /* Context planning */
     ContextPlan plan = {0};
     if (context_plan(db, session_id, cfg, tool_overhead, &plan) != 0) {
@@ -189,12 +195,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             sqlite3_finalize(ust);
         }
     }
-
-    /* Gemini cache */
-    char *gcache = NULL;
-    if (cfg->provider.endpoint_type == ENDPOINT_GEMINI &&
-        cfg->provider.cache_hints != CACHE_HINTS_OFF)
-        gcache = gemini_cache_get_or_create(db, session_id, cfg, &plan);
 
     /* ── Mock mode ─────────────────────────────────────────────── */
     const char *mock_path = getenv("CCLAW_LLM_MOCK");
@@ -237,7 +237,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                         llm_resp.usage.prompt_tokens, llm_resp.usage.completion_tokens,
                         llm_resp.usage.cost_nano, tc_ids, tc_names, tc_args, tcc, &ir);
         free(tc_ids); free(tc_names); free(tc_args); free(ir.tc_entry_ids);
-        free(recall_text); free(gcache); context_plan_free(&plan);
+        free(recall_text); free(system_prompt); context_plan_free(&plan);
         agent_setup_destroy(&setup); arena_destroy(a); config_free(cfg); free(agent_name_alloc);
         return 0;
     }
@@ -283,7 +283,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
         /* Build payload (zero-copy — holds stmt open) */
         LlmPayload payload;
-        if (llm_build_payload(db, session_id, &route_cfg, &plan, recall_text, gcache, &payload) != 0) {
+        if (llm_build_payload(db, session_id, &route_cfg, &plan, recall_text, system_prompt, &payload) != 0) {
             free(key_buf); continue;
         }
 
@@ -383,8 +383,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         free(key_buf);
     }
 
-    free(gcache);
     free(recall_text);
+    free(system_prompt);
     context_plan_free(&plan);
 
     if (!llm_ok) {
@@ -441,6 +441,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     return 0;
 
 err:
+    free(system_prompt);
     context_plan_free(&plan);
     agent_setup_destroy(&setup);
     arena_destroy(a);

@@ -25,6 +25,61 @@ All state lives in `cclaw.db`. Agent data scoped by `agent_name` column. Session
 
 See [specs/schema.md](../specs/schema.md) for full DDL.
 
+## LLM Request Pipeline
+
+### Two-Pass Context Building
+
+Building an LLM request never loads the full session into memory:
+
+1. **Plan pass** (index-only): Recursive CTE walks `parent_id` from `leaf_id` to root, collecting entry metadata (`role`, `stop_reason`, `token_estimate`, `tool_call_count`). Covered entirely by `idx_entries_plan` — no main table access, no content loaded. Result is reversed to root→leaf order.
+
+2. **Cut**: Walk the plan array from leaf toward root, accumulating token estimates until budget is exhausted. Tool-call groups (assistant + tool_results) are kept or dropped as a unit.
+
+3. **Payload pass**: Surviving entry IDs go into a temp `_plan` table. SQL joins `_plan` against `entries` to produce the final JSON payload via `json_object()`/`json_group_array()` — one query per provider format (OpenAI or Gemini). The result is zero-copy: `payload.body` points directly into the SQLite statement result buffer until `llm_payload_release()`.
+
+### Why Entries Are One Row Per Piece
+
+An assistant turn with tool calls is stored as separate entries:
+
+```
+reasoning (type='reasoning', part_index=0)
+  → assistant_message (type='assistant_message', part_index=1)
+    → tool_call (type='tool_call', part_index=2)
+      → tool_call (type='tool_call', part_index=3)
+```
+
+Each is a node in the `parent_id` chain. This design is driven by four requirements:
+
+**Multi-provider wire emission (V60)**: Each provider reassembles tool calls differently — OpenAI stringifies args, Gemini uses native objects in a `parts` array, Anthropic uses content blocks. Storing args as a plain `content` column per tool_call entry lets the SQL payload builder emit any format without parsing JSON.
+
+**Streaming writes**: Tool calls arrive incrementally during SSE streaming. Each call is committed as its own entry the moment assembly completes, rather than buffering the entire turn.
+
+**Uniform tree for planning (V56)**: The plan pass walks a linked list of entries using only integer columns. If tool calls were embedded JSON inside the assistant entry, planning would need to parse content to count or estimate them.
+
+**Daemon dispatch (V13/V77)**: When an agent exits with code 2/3, the daemon finds the specific `tool_call` entry by `tool_call_id` to read spawn/approval args — a simple `SELECT content FROM entries WHERE tool_call_id=?`.
+
+The cost is that OpenAI-format payload building requires correlated subqueries to re-merge tool_call entries back into the assistant message's `tool_calls` array. This runs only on entries that survived the cut (~20-50 entries), indexed by `turn_id`.
+
+### Prompt Caching
+
+All major providers offer prefix-based caching — if the beginning of your request matches a previous request, the cached prefix is reused at reduced cost. CClaw benefits from this automatically because:
+
+1. The payload is deterministic (same entries → same JSON, byte-for-byte).
+2. Conversations grow by appending at the end — the prefix (prior turns) is stable.
+3. No per-request variation is injected into the prefix (recall text is appended after all messages).
+
+Provider-specific behavior:
+
+- **OpenAI/OpenRouter/Gemini**: Fully implicit. No wire format changes. Send the same prefix, get automatic savings. OpenAI caches at every 128-token boundary (min 1024 tokens), so partial prefix matches work — appending varying content at the end doesn't prevent cache hits on the stable prefix.
+- **Anthropic**: Requires opt-in via `"cache_control": {"type": "ephemeral"}` on the request body. Still a single request format — not a 2-step upload-then-reference flow. The server caches at the breakpoint, charges writes at 1.25× and reads at 0.1× base cost.
+- **OpenRouter sticky routing**: Routes subsequent requests to the same physical backend so the KV cache stays warm. Automatic when cache usage is detected, or force with `session_id` header.
+
+What breaks the cache:
+
+- **Changing tool definitions**: Tools are serialized before messages in the cache prefix (`tools → system → messages`). Any modification invalidates the entire cache. Accept the one-turn miss for rare tool changes, or keep a stable core toolset.
+- **Changing the system prompt**: Same as tools — it's part of the prefix.
+- **Recall text at the end**: Does NOT break the cache. It's appended after all messages, past the stable prefix. Providers cache sub-prefixes (128-token boundaries on OpenAI), so the conversation portion gets cache hits regardless of trailing content.
+
 ## Exit Code Protocol
 
 Agent processes communicate intent to the daemon via exit codes. The daemon reads details from cclaw.db after reap.

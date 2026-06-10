@@ -172,6 +172,23 @@ cacheWrite = prompt_tokens_details.cache_write_tokens
   chunk. Moonshot puts it in `choices[0].usage`.
 - **Empty deltas**: Chunks with `delta: {}` are valid. Don't crash.
 
+### Caching & System Messages
+
+- **Prefix-based**: Automatic. Hash includes tools → system → messages in order.
+  Minimum 1024 tokens. Cache hit requires exact byte-for-byte prefix match.
+- **Multiple system messages**: Supported anywhere in the messages array.
+  All are treated as system-level instructions regardless of position.
+- **Cache-safe injection**: Append new system/developer messages at the *end*
+  of the messages array (after all prior turns). The cached prefix is preserved;
+  only the new message is processed as fresh input.
+- **What breaks the cache**: Changing anything in the first 1024+ tokens
+  (system prompt, early messages, tool definitions). Appending at the end is safe.
+- **`prompt_cache_key`**: Optional parameter to improve routing for requests
+  sharing long common prefixes across different conversations.
+- **OpenRouter routing**: Hashes first system + first non-system message for
+  provider routing consistency. Changing the initial system prompt may reroute.
+- **DeepSeek**: Follows OpenAI prefix rules. Supports `prompt_cache_hit_tokens`.
+
 ---
 
 ## 2. Google Gemini
@@ -300,6 +317,25 @@ cacheWrite = 0  (automatic caching, no write metric)
 - **thoughtSignature**: Opaque base64. Must be replayed verbatim on corresponding
   part in subsequent turns. Only valid for same provider+model. Validate: base64
   format, length % 4 == 0.
+
+### Caching & System Messages
+
+- **Explicit caching**: Via `cachedContents` API. Create a named cache object
+  containing a prefix (systemInstruction + early contents). Reference by name
+  in subsequent requests via `"cachedContent": "cachedContents/abc123"`.
+- **`systemInstruction` is top-level only**: Cannot place system messages in
+  `contents[]`. Changing `systemInstruction` invalidates any cached content.
+- **Cache-safe new instructions**: Two options:
+  1. Append as a user message in `contents[]` (less authoritative but cache-safe)
+  2. Create a new cached content object with updated systemInstruction (cache miss
+     for the old one, but starts a new cache)
+- **No mid-conversation system role**: Unlike OpenAI/Anthropic, Gemini has no
+  `role: "system"` in the contents array. System-level instructions after session
+  start must go as user messages or rebuild the systemInstruction (cache-breaking).
+- **Implication for CClaw**: System entries added mid-session should be emitted
+  as user messages in the Gemini wire format (not aggregated into systemInstruction)
+  to preserve the cached prefix. Only the *initial* system prompt goes in
+  systemInstruction.
 
 ---
 
@@ -459,6 +495,25 @@ total = input + output + cacheRead + cacheWrite  (computed)
 - **No `[DONE]`**: Ends with `message_stop` event.
 - **Tool call ID format**: 64 chars max, `[a-zA-Z0-9_-]` only.
 - **Error events**: `event: error` can arrive anytime. Abort.
+
+### Caching & System Messages
+
+- **Explicit cache control**: Place `"cache_control": {"type": "ephemeral"}`
+  on content blocks. Recommended positions: last system block, last tool
+  definition, last user message. TTL configurable (`"ttl": "1h"`).
+- **Top-level `system` field is cached prefix**: Changing it invalidates the
+  entire cache for everything that follows.
+- **Mid-conversation `{"role": "system"}` messages**: Supported in the messages
+  array (Claude Opus 4.8+). These are appended after the cached prefix and
+  treated as operator-level instructions without breaking the cache.
+- **Use cases for mid-conversation system**: Mode switches, tool availability
+  changes, per-turn policy injection, state observations from the application.
+  Higher priority than user messages (operator-level authority).
+- **Cache hash order**: tools → system → messages (prefix-based, like OpenAI).
+- **Implication for CClaw**: Initial system prompt → top-level `system` field
+  (cached). Later system entries → `{"role": "system"}` messages in the array
+  (cache-preserving). The SQL payload builder should separate initial vs
+  mid-conversation system entries based on position.
 
 ---
 

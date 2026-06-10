@@ -135,6 +135,10 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
                            .stop_reason = STOP_REASON_ERROR};
             entry_append_with_turn(g_db, session_id, &msg, turn_id);
             session_set_state(g_db, session_id, "idle");
+            if (g_mode == 0) {
+                fprintf(stderr, "\nerror: max iterations reached\n");
+                g_cli_turn_active = 0;
+            }
             return -1;
         }
 
@@ -352,8 +356,10 @@ static void handle_llm_complete(int64_t session_id, const char *agent_name, int 
                 if (rc == 1) { i++; continue; }
                 break;
             }
-            if (i >= tc_count)
-                dispatch_llm_req(session_id, agent_name, iteration + 1);
+            if (i >= tc_count) {
+                if (dispatch_llm_req(session_id, agent_name, iteration + 1) < 0 && g_mode == 0)
+                    g_cli_turn_active = 0;
+            }
         } else {
             session_set_state(g_db, session_id, "idle");
         }
@@ -629,7 +635,10 @@ static void cli_start_turn(const char *input) {
     inbox_insert(g_db, g_cli_session, "cli", input);
     inbox_consume_into_entries(g_db, g_cli_session, 100);
     g_cli_turn_active = 1;
-    dispatch_llm_req(g_cli_session, g_agent_name, 0);
+    if (dispatch_llm_req(g_cli_session, g_agent_name, 0) < 0) {
+        fprintf(stderr, "error: failed to dispatch LLM request\n");
+        g_cli_turn_active = 0;
+    }
 }
 
 /* ── main ───────────────────────────────────────────────────────── */

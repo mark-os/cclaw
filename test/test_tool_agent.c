@@ -165,8 +165,8 @@ static void test_check_agent_idle_with_result(void) {
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     char *r = tool_check_agent_handler(args, &ctx);
-    assert(strstr(r, "idle") != NULL);
-    assert(strstr(r, "the answer is 42") != NULL);
+    assert(strstr(r, "state: idle") != NULL);
+    assert(strstr(r, "result: the answer is 42") != NULL);
     free(r);
     db_close(db);
     printf("  PASS test_check_agent_idle_with_result\n");

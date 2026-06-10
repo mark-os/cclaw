@@ -59,28 +59,25 @@ char *tool_cron_list_handler(const char *arguments, void *user_data) {
     CronJob *jobs = cron_list(ctx->db, ctx->agent_name, &count);
     if (count == 0) return strdup("no cron jobs");
 
-    /* Build JSON array manually */
-    size_t cap = 256 * (size_t)count + 2;
+    size_t cap = 128 * (size_t)count + 64;
     char *buf = malloc(cap);
     if (!buf) { cron_list_free(jobs, count); return strdup("error: OOM"); }
     size_t pos = 0;
-    buf[pos++] = '[';
+
+    /* Header */
+    pos += (size_t)snprintf(buf + pos, cap - pos,
+        "id|name|cron_expr|task|enabled|next_run_at\n");
+
     for (int i = 0; i < count; i++) {
-        char esc_name[128], esc_expr[128], esc_task[256];
-        json_escape_into(esc_name, sizeof(esc_name), jobs[i].name ? jobs[i].name : "");
-        json_escape_into(esc_expr, sizeof(esc_expr), jobs[i].cron_expr ? jobs[i].cron_expr : "");
-        json_escape_into(esc_task, sizeof(esc_task), jobs[i].task ? jobs[i].task : "");
-        int n = snprintf(buf + pos, cap - pos,
-            "%s{\"id\":%lld,\"name\":\"%s\",\"cron_expr\":\"%s\","
-            "\"task\":\"%s\",\"enabled\":%s,\"next_run_at\":%lld}",
-            i ? "," : "", (long long)jobs[i].id, esc_name, esc_expr,
-            esc_task, jobs[i].enabled ? "true" : "false",
+        int n = snprintf(buf + pos, cap - pos, "%lld|%s|%s|%s|%s|%lld\n",
+            (long long)jobs[i].id,
+            jobs[i].name ? jobs[i].name : "",
+            jobs[i].cron_expr ? jobs[i].cron_expr : "",
+            jobs[i].task ? jobs[i].task : "",
+            jobs[i].enabled ? "true" : "false",
             (long long)jobs[i].next_run_at);
-        if (n < 0 || (size_t)n >= cap - pos) break;
-        pos += (size_t)n;
+        if (n > 0) pos += (size_t)n;
     }
-    buf[pos++] = ']';
-    buf[pos] = '\0';
     cron_list_free(jobs, count);
     return buf;
 }

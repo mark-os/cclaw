@@ -3,7 +3,6 @@
 #include "agent_config.h"
 #include "secret.h"
 #include "validate.h"
-#include "cJSON.h"
 #include "templates.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -177,62 +176,78 @@ static StopReason int_to_stop_reason(int i) {
     return STOP_REASON_NONE;
 }
 
-/* Serialize tool_calls array to provider-neutral JSON.
+/* Serialize tool_calls array to provider-neutral JSON via SQLite.
  * Format: [{"id":"...","name":"...","args":{...}},...] */
-static char *serialize_tool_calls(const ToolCall *tcs, size_t count) {
-    if (!tcs || count == 0) return NULL;
-    cJSON *arr = cJSON_CreateArray();
+static char *serialize_tool_calls(sqlite3 *db, const ToolCall *tcs, size_t count) {
+    if (!tcs || count == 0 || !db) return NULL;
+
+    sqlite3_exec(db, "DROP TABLE IF EXISTS _tc_ser;", NULL, NULL, NULL);
+    sqlite3_exec(db, "CREATE TEMP TABLE _tc_ser(pos INTEGER,id TEXT,name TEXT,args TEXT);", NULL, NULL, NULL);
+
+    sqlite3_stmt *ins;
+    if (sqlite3_prepare_v2(db, "INSERT INTO _tc_ser VALUES(?,?,?,?)", -1, &ins, NULL) != SQLITE_OK)
+        return NULL;
     for (size_t i = 0; i < count; i++) {
-        cJSON *tc = cJSON_CreateObject();
-        cJSON_AddStringToObject(tc, "id", tcs[i].id ? tcs[i].id : "");
-        cJSON_AddStringToObject(tc, "name", tcs[i].name ? tcs[i].name : "");
-        if (tcs[i].arguments) {
-            cJSON *args = cJSON_Parse(tcs[i].arguments);
-            if (args)
-                cJSON_AddItemToObject(tc, "args", args);
-            else
-                cJSON_AddRawToObject(tc, "args", "{}");
-        } else {
-            cJSON_AddRawToObject(tc, "args", "{}");
-        }
-        cJSON_AddItemToArray(arr, tc);
+        sqlite3_bind_int(ins, 1, (int)i);
+        sqlite3_bind_text(ins, 2, tcs[i].id ? tcs[i].id : "", -1, SQLITE_STATIC);
+        sqlite3_bind_text(ins, 3, tcs[i].name ? tcs[i].name : "", -1, SQLITE_STATIC);
+        sqlite3_bind_text(ins, 4, tcs[i].arguments ? tcs[i].arguments : "{}", -1, SQLITE_STATIC);
+        sqlite3_step(ins); sqlite3_reset(ins);
     }
-    char *json = cJSON_PrintUnformatted(arr);
-    cJSON_Delete(arr);
-    return json;
+    sqlite3_finalize(ins);
+
+    char *result = NULL;
+    sqlite3_stmt *sel;
+    if (sqlite3_prepare_v2(db,
+        "SELECT json_group_array(json_object('id',id,'name',name,'args',"
+        "CASE WHEN json_valid(args) THEN json(args) ELSE json('{}') END) ORDER BY pos)"
+        " FROM _tc_ser", -1, &sel, NULL) == SQLITE_OK) {
+        if (sqlite3_step(sel) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(sel, 0);
+            if (v) result = strdup(v);
+        }
+        sqlite3_finalize(sel);
+    }
+    sqlite3_exec(db, "DROP TABLE IF EXISTS _tc_ser;", NULL, NULL, NULL);
+    return result;
 }
 
-/* Deserialize tool_calls from provider-neutral JSON array.
+/* Deserialize tool_calls from provider-neutral JSON array via SQLite.
  * Sets *out_count. Returns heap array or NULL. */
-static ToolCall *deserialize_tool_calls(const char *json, size_t *out_count) {
+static ToolCall *deserialize_tool_calls(sqlite3 *db, const char *json, size_t *out_count) {
     *out_count = 0;
-    if (!json) return NULL;
-    cJSON *arr = cJSON_Parse(json);
-    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return NULL; }
-    int n = cJSON_GetArraySize(arr);
-    if (n == 0) { cJSON_Delete(arr); return NULL; }
+    if (!json || !db) return NULL;
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db,
+        "SELECT json_extract(value,'$.id'), json_extract(value,'$.name'),"
+        " json_extract(value,'$.args') FROM json_each(?)", -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(stmt, 1, json, -1, SQLITE_STATIC);
+
+    int n = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) n++;
+    if (n == 0) { sqlite3_finalize(stmt); return NULL; }
+    sqlite3_reset(stmt);
+
     ToolCall *tcs = malloc((size_t)n * sizeof(ToolCall));
-    for (int i = 0; i < n; i++) {
-        cJSON *item = cJSON_GetArrayItem(arr, i);
-        cJSON *id = cJSON_GetObjectItem(item, "id");
-        cJSON *name = cJSON_GetObjectItem(item, "name");
-        cJSON *args = cJSON_GetObjectItem(item, "args");
-        tcs[i].id = (id && id->valuestring) ? strdup(id->valuestring) : NULL;
-        tcs[i].name = (name && name->valuestring) ? strdup(name->valuestring) : NULL;
-        if (args) {
-            char *s = cJSON_PrintUnformatted(args);
-            tcs[i].arguments = s;
-        } else {
-            tcs[i].arguments = NULL;
-        }
+    int i = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && i < n) {
+        const char *id = (const char *)sqlite3_column_text(stmt, 0);
+        const char *name = (const char *)sqlite3_column_text(stmt, 1);
+        const char *args = (const char *)sqlite3_column_text(stmt, 2);
+        tcs[i].id = id ? strdup(id) : NULL;
+        tcs[i].name = name ? strdup(name) : NULL;
+        tcs[i].arguments = args ? strdup(args) : NULL;
+        i++;
     }
-    *out_count = (size_t)n;
-    cJSON_Delete(arr);
+    *out_count = (size_t)i;
+    sqlite3_finalize(stmt);
     return tcs;
 }
 
 /* Populate Message from split columns read from DB row */
-static void read_entry_from_columns(sqlite3_stmt *stmt, int col_role, int col_content,
+static void read_entry_from_columns(sqlite3 *db, sqlite3_stmt *stmt, int col_role, int col_content,
                                     int col_tool_calls, int col_tool_call_id,
                                     int col_stop_reason, Message *msg) {
     memset(msg, 0, sizeof(*msg));
@@ -251,7 +266,7 @@ static void read_entry_from_columns(sqlite3_stmt *stmt, int col_role, int col_co
     } else if (msg->role == ROLE_ASSISTANT) {
         const char *tc_json = (const char *)sqlite3_column_text(stmt, col_tool_calls);
         if (tc_json) {
-            msg->tool_calls = deserialize_tool_calls(tc_json, &msg->tool_call_count);
+            msg->tool_calls = deserialize_tool_calls(db, tc_json, &msg->tool_call_count);
         }
     }
 }
@@ -311,7 +326,7 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
         e->session_id = sqlite3_column_int64(stmt, 3);
         e->created_at = (time_t)sqlite3_column_int64(stmt, 4);
         /* cols: 5=role, 6=content, 7=tool_calls, 8=tool_call_id, 9=stop_reason */
-        read_entry_from_columns(stmt, 5, 6, 7, 8, 9, &e->message);
+        read_entry_from_columns(db, stmt, 5, 6, 7, 8, 9, &e->message);
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -432,7 +447,7 @@ int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, cons
     char *tc_json = NULL;
     int tc_count = 0;
     if (msg->role == ROLE_ASSISTANT && msg->tool_calls && msg->tool_call_count > 0) {
-        tc_json = serialize_tool_calls(msg->tool_calls, msg->tool_call_count);
+        tc_json = serialize_tool_calls(db, msg->tool_calls, msg->tool_call_count);
         tc_count = (int)msg->tool_call_count;
     }
     if (tc_json) sqlite3_bind_text(stmt, 7, tc_json, -1, SQLITE_TRANSIENT);
@@ -612,7 +627,7 @@ Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *cou
         e->session_id = sqlite3_column_int64(stmt, 2);
         e->created_at = (time_t)sqlite3_column_int64(stmt, 3);
         /* cols: 4=role, 5=content, 6=tool_calls, 7=tool_call_id, 8=stop_reason */
-        read_entry_from_columns(stmt, 4, 5, 6, 7, 8, &e->message);
+        read_entry_from_columns(db, stmt, 4, 5, 6, 7, 8, &e->message);
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -830,7 +845,7 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
     char *tc_json = NULL;
     int tc_count = 0;
     if (msg->role == ROLE_ASSISTANT && msg->tool_calls && msg->tool_call_count > 0) {
-        tc_json = serialize_tool_calls(msg->tool_calls, msg->tool_call_count);
+        tc_json = serialize_tool_calls(db, msg->tool_calls, msg->tool_call_count);
         tc_count = (int)msg->tool_call_count;
     }
     if (tc_json) sqlite3_bind_text(stmt, 8, tc_json, -1, SQLITE_TRANSIENT);
@@ -1609,37 +1624,39 @@ int memory_block_set_value(sqlite3 *db, const char *agent_name, const char *labe
 
 void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str) {
     if (!agent_json_str || !agent_name) return;
-    cJSON *root = cJSON_Parse(agent_json_str);
-    if (!root) return;
-    cJSON *blocks = cJSON_GetObjectItemCaseSensitive(root, "memory_blocks");
-    if (!cJSON_IsArray(blocks)) { cJSON_Delete(root); return; }
-    cJSON *item;
-    cJSON_ArrayForEach(item, blocks) {
-        cJSON *lbl = cJSON_GetObjectItemCaseSensitive(item, "label");
-        if (!cJSON_IsString(lbl)) continue;
+
+    /* Use json_each to iterate memory_blocks array, json_extract for fields */
+    const char *sql =
+        "SELECT json_extract(value,'$.label'), json_extract(value,'$.description'),"
+        " json_extract(value,'$.value'), json_extract(value,'$.char_limit'),"
+        " json_extract(value,'$.read_only')"
+        " FROM json_each(?1, '$.memory_blocks')";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(stmt, 1, agent_json_str, -1, SQLITE_STATIC);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *lbl = (const char *)sqlite3_column_text(stmt, 0);
+        if (!lbl) continue;
         /* Only seed if not already in DB (DB authoritative) */
-        MemoryBlock *existing = memory_block_get(db, agent_name, lbl->valuestring);
+        MemoryBlock *existing = memory_block_get(db, agent_name, lbl);
         if (existing) { memory_block_free(existing); continue; }
-        cJSON *desc = cJSON_GetObjectItemCaseSensitive(item, "description");
-        cJSON *val = cJSON_GetObjectItemCaseSensitive(item, "value");
-        cJSON *limit = cJSON_GetObjectItemCaseSensitive(item, "char_limit");
-        cJSON *ro = cJSON_GetObjectItemCaseSensitive(item, "read_only");
-        int cl = cJSON_IsNumber(limit) ? (int)limit->valuedouble : 5000;
-        int64_t id = memory_block_create(db, agent_name, lbl->valuestring,
-                                         cJSON_IsString(desc) ? desc->valuestring : NULL,
-                                         cJSON_IsString(val) ? val->valuestring : NULL, cl);
-        if (id > 0 && cJSON_IsTrue(ro)) {
-            /* Set read_only flag directly (not exposed via normal API) */
-            const char *sql = "UPDATE memory_blocks SET read_only=1 WHERE id=?;";
-            sqlite3_stmt *stmt;
-            if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(stmt, 1, id);
-                sqlite3_step(stmt);
-                sqlite3_finalize(stmt);
+        const char *desc = (const char *)sqlite3_column_text(stmt, 1);
+        const char *val = (const char *)sqlite3_column_text(stmt, 2);
+        int cl = sqlite3_column_type(stmt, 3) == SQLITE_INTEGER ? sqlite3_column_int(stmt, 3) : 5000;
+        int ro = sqlite3_column_int(stmt, 4);
+        int64_t id = memory_block_create(db, agent_name, lbl, desc, val, cl);
+        if (id > 0 && ro) {
+            const char *ro_sql = "UPDATE memory_blocks SET read_only=1 WHERE id=?;";
+            sqlite3_stmt *rstmt;
+            if (sqlite3_prepare_v2(db, ro_sql, -1, &rstmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(rstmt, 1, id);
+                sqlite3_step(rstmt);
+                sqlite3_finalize(rstmt);
             }
         }
     }
-    cJSON_Delete(root);
+    sqlite3_finalize(stmt);
 }
 
 /* Session last_route helpers (moved from daemon.c) */

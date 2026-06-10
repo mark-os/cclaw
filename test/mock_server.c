@@ -1,7 +1,7 @@
 #define _DEFAULT_SOURCE
 #include "mock_server.h"
 #include "civetweb.h"
-#include "cJSON.h"
+#include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -380,34 +380,33 @@ int mock_server_load(const char *path) {
     data[nread] = '\0';
     fclose(f);
 
-    cJSON *arr = cJSON_Parse(data);
-    free(data);
-    if (!arr || !cJSON_IsArray(arr)) {
-        cJSON_Delete(arr);
-        return -1;
+    /* Use SQLite json_each to iterate the array */
+    sqlite3 *db;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) { free(data); return -1; }
+
+    sqlite3_stmt *stmt;
+    const char *sql =
+        "SELECT COALESCE(json_extract(value,'$.status'),200),"
+        "       CASE WHEN json_type(value,'$.body')='text'"
+        "         THEN json_extract(value,'$.body')"
+        "         ELSE json_extract(value,'$.body') END,"
+        "       json_type(value,'$.body')"
+        " FROM json_each(?1)";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        sqlite3_close(db); free(data); return -1;
     }
+    sqlite3_bind_text(stmt, 1, data, -1, SQLITE_STATIC);
 
     int count = 0;
-    cJSON *item;
-    cJSON_ArrayForEach(item, arr) {
-        cJSON *status_j = cJSON_GetObjectItemCaseSensitive(item, "status");
-        cJSON *body_j = cJSON_GetObjectItemCaseSensitive(item, "body");
-        int status = cJSON_IsNumber(status_j) ? status_j->valueint : 200;
-        char *body;
-        if (cJSON_IsString(body_j))
-            body = body_j->valuestring;
-        else if (body_j) {
-            body = cJSON_PrintUnformatted(body_j);
-            mock_server_enqueue(status, body);
-            free(body);
-            count++;
-            continue;
-        } else {
-            body = "{}";
-        }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int status = sqlite3_column_int(stmt, 0);
+        const char *body = (const char *)sqlite3_column_text(stmt, 1);
+        if (!body) body = "{}";
         mock_server_enqueue(status, body);
         count++;
     }
-    cJSON_Delete(arr);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    free(data);
     return count;
 }

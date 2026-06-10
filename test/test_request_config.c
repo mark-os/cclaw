@@ -3,7 +3,6 @@
 #include "tools.h"
 #include "tool_request_config.h"
 #include "agent_config.h"
-#include <cJSON.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,13 +63,11 @@ static void test_add_tool_to_config(void) {
     assert(rc == 0);
 
     sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, "SELECT allowed_tools FROM agents WHERE name='test'",
-                       -1, &stmt, NULL);
+    sqlite3_prepare_v2(db,
+        "SELECT json_array_length(allowed_tools) FROM agents WHERE name='test'",
+        -1, &stmt, NULL);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
-    const char *val = (const char *)sqlite3_column_text(stmt, 0);
-    cJSON *arr = cJSON_Parse(val);
-    assert(arr && cJSON_GetArraySize(arr) == 1);
-    cJSON_Delete(arr);
+    assert(sqlite3_column_int(stmt, 0) == 1);
     sqlite3_finalize(stmt);
 
     db_close(db);

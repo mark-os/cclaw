@@ -2,7 +2,6 @@
 #include "agent_config.h"
 #include "config.h"
 #include "db.h"
-#include "cJSON.h"
 #include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,74 +78,94 @@ AgentConfig *agent_config_load(const char *agents_dir, const char *name) {
     buf[len] = '\0';
     fclose(f);
 
-    cJSON *root = cJSON_Parse(buf);
-    free(buf);
-    if (!root) return NULL;
+    /* Use in-memory SQLite to parse JSON via json_extract/json_each */
+    sqlite3 *tmp;
+    if (sqlite3_open(":memory:", &tmp) != SQLITE_OK) { free(buf); return NULL; }
+
+    /* Validate JSON */
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(tmp, "SELECT json_valid(?)", -1, &stmt, NULL) != SQLITE_OK) {
+        sqlite3_close(tmp); free(buf); return NULL;
+    }
+    sqlite3_bind_text(stmt, 1, buf, -1, SQLITE_STATIC);
+    int valid = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) valid = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    if (!valid) { sqlite3_close(tmp); free(buf); return NULL; }
 
     AgentConfig *ac = calloc(1, sizeof(AgentConfig));
-    if (!ac) { cJSON_Delete(root); return NULL; }
-
+    if (!ac) { sqlite3_close(tmp); free(buf); return NULL; }
     ac->name = strdup(name);
 
-    cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "model");
-    if (cJSON_IsString(v) && v->valuestring) ac->model = strdup(v->valuestring);
-
-    v = cJSON_GetObjectItemCaseSensitive(root, "workspace");
-    if (cJSON_IsString(v) && v->valuestring)
-        ac->workspace = strdup(v->valuestring);
-
-    v = cJSON_GetObjectItemCaseSensitive(root, "max_iterations");
-    if (cJSON_IsNumber(v)) ac->max_iterations = v->valueint;
-
-    /* Tool whitelist array */
-    v = cJSON_GetObjectItemCaseSensitive(root, "tools");
-    if (v && cJSON_IsArray(v)) {
-        int cnt = cJSON_GetArraySize(v);
-        if (cnt > 0) {
-            ac->tools = malloc((size_t)cnt * sizeof(char *));
-            if (ac->tools) {
-                for (int i = 0; i < cnt; i++) {
-                    cJSON *item = cJSON_GetArrayItem(v, i);
-                    if (cJSON_IsString(item) && item->valuestring)
-                        ac->tools[ac->tool_count++] = strdup(item->valuestring);
-                }
-            }
+    /* Extract scalar fields */
+    if (sqlite3_prepare_v2(tmp,
+        "SELECT json_extract(?1,'$.model'), json_extract(?1,'$.workspace'),"
+        " json_extract(?1,'$.max_iterations')", -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, buf, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(stmt, 0);
+            if (v) ac->model = strdup(v);
+            v = (const char *)sqlite3_column_text(stmt, 1);
+            if (v) ac->workspace = strdup(v);
+            if (sqlite3_column_type(stmt, 2) == SQLITE_INTEGER)
+                ac->max_iterations = sqlite3_column_int(stmt, 2);
         }
+        sqlite3_finalize(stmt);
     }
 
-    /* Allowed hosts array */
-    v = cJSON_GetObjectItemCaseSensitive(root, "allowed_hosts");
-    if (v && cJSON_IsArray(v)) {
-        int cnt = cJSON_GetArraySize(v);
-        if (cnt > 0) {
-            ac->allowed_hosts = malloc((size_t)cnt * sizeof(char *));
-            if (ac->allowed_hosts) {
-                for (int i = 0; i < cnt; i++) {
-                    cJSON *item = cJSON_GetArrayItem(v, i);
-                    if (cJSON_IsString(item) && item->valuestring)
-                        ac->allowed_hosts[ac->allowed_hosts_count++] = strdup(item->valuestring);
-                }
-            }
+    /* Extract array fields via json_each */
+    const char *arr_sql = "SELECT value FROM json_each(?1, ?2)";
+
+    /* tools */
+    if (sqlite3_prepare_v2(tmp, arr_sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, buf, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, "$.tools", -1, SQLITE_STATIC);
+        size_t cap = 8;
+        ac->tools = malloc(cap * sizeof(char *));
+        while (ac->tools && sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(stmt, 0);
+            if (!v) continue;
+            if (ac->tool_count >= cap) { cap *= 2; ac->tools = realloc(ac->tools, cap * sizeof(char *)); }
+            ac->tools[ac->tool_count++] = strdup(v);
         }
+        sqlite3_finalize(stmt);
+        if (ac->tool_count == 0) { free(ac->tools); ac->tools = NULL; }
     }
 
-    /* V66: Read access array */
-    v = cJSON_GetObjectItemCaseSensitive(root, "read_access");
-    if (v && cJSON_IsArray(v)) {
-        int cnt = cJSON_GetArraySize(v);
-        if (cnt > 0) {
-            ac->read_access = malloc((size_t)cnt * sizeof(char *));
-            if (ac->read_access) {
-                for (int i = 0; i < cnt; i++) {
-                    cJSON *item = cJSON_GetArrayItem(v, i);
-                    if (cJSON_IsString(item) && item->valuestring)
-                        ac->read_access[ac->read_access_count++] = strdup(item->valuestring);
-                }
-            }
+    /* allowed_hosts */
+    if (sqlite3_prepare_v2(tmp, arr_sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, buf, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, "$.allowed_hosts", -1, SQLITE_STATIC);
+        size_t cap = 8;
+        ac->allowed_hosts = malloc(cap * sizeof(char *));
+        while (ac->allowed_hosts && sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(stmt, 0);
+            if (!v) continue;
+            if (ac->allowed_hosts_count >= cap) { cap *= 2; ac->allowed_hosts = realloc(ac->allowed_hosts, cap * sizeof(char *)); }
+            ac->allowed_hosts[ac->allowed_hosts_count++] = strdup(v);
         }
+        sqlite3_finalize(stmt);
+        if (ac->allowed_hosts_count == 0) { free(ac->allowed_hosts); ac->allowed_hosts = NULL; }
     }
 
-    cJSON_Delete(root);
+    /* V66: read_access */
+    if (sqlite3_prepare_v2(tmp, arr_sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, buf, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, "$.read_access", -1, SQLITE_STATIC);
+        size_t cap = 8;
+        ac->read_access = malloc(cap * sizeof(char *));
+        while (ac->read_access && sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(stmt, 0);
+            if (!v) continue;
+            if (ac->read_access_count >= cap) { cap *= 2; ac->read_access = realloc(ac->read_access, cap * sizeof(char *)); }
+            ac->read_access[ac->read_access_count++] = strdup(v);
+        }
+        sqlite3_finalize(stmt);
+        if (ac->read_access_count == 0) { free(ac->read_access); ac->read_access = NULL; }
+    }
+
+    sqlite3_close(tmp);
+    free(buf);
 
     /* V12: workspace fallback to ./workspace/{name} */
     if (!ac->workspace) {
@@ -519,96 +538,119 @@ static const size_t AGENT_CREATE_DEFAULT_TOOLS_COUNT = AGENT_DEFAULT_TOOLS_COUNT
 int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json) {
     if (!agents_dir || !db || !payload_json) return -1;
 
-    cJSON *payload = cJSON_Parse(payload_json);
-    if (!payload) return -1;
-
-    cJSON *name_item = cJSON_GetObjectItemCaseSensitive(payload, "name");
-    if (!cJSON_IsString(name_item) || !name_item->valuestring[0]) {
-        cJSON_Delete(payload);
+    /* Extract name from payload */
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.name')", -1, &stmt, NULL) != SQLITE_OK)
         return -1;
+    sqlite3_bind_text(stmt, 1, payload_json, -1, SQLITE_STATIC);
+    const char *name = NULL;
+    char name_buf[256] = {0};
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(stmt, 0);
+        if (v && v[0]) { snprintf(name_buf, sizeof(name_buf), "%s", v); name = name_buf; }
     }
-    const char *name = name_item->valuestring;
+    sqlite3_finalize(stmt);
+    if (!name) return -1;
 
     /* Reject names with path separators */
-    if (strchr(name, '/') || strchr(name, '\\') || strcmp(name, "..") == 0) {
-        cJSON_Delete(payload);
+    if (strchr(name, '/') || strchr(name, '\\') || strcmp(name, "..") == 0)
         return -1;
-    }
 
     /* Create agents/<name>/ directory */
     char dir[512];
     snprintf(dir, sizeof(dir), "%s/%s", agents_dir, name);
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
-        cJSON_Delete(payload);
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST)
         return -1;
-    }
 
     /* Create workspace subdir */
     char ws[1024];
     snprintf(ws, sizeof(ws), "%s/workspace", dir);
     mkdir(ws, 0755);
 
-    /* V122: clone mode — copy all agent_config rows from source agent */
-    cJSON *clone_from = cJSON_GetObjectItemCaseSensitive(payload, "clone_from");
-    if (cJSON_IsString(clone_from) && clone_from->valuestring[0]) {
-        const char *src = clone_from->valuestring;
+    /* V122: clone mode */
+    const char *clone_check = "SELECT json_extract(?1,'$.clone_from')";
+    char *clone_from = NULL;
+    if (sqlite3_prepare_v2(db, clone_check, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, payload_json, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(stmt, 0);
+            if (v && v[0]) clone_from = strdup(v);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    if (clone_from) {
         const char *sql = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) "
                           "SELECT ?, key, value FROM agent_config WHERE agent_name=?;";
-        sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 2, src, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, clone_from, -1, SQLITE_STATIC);
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         }
+        free(clone_from);
     } else {
         /* Build AgentConfig from payload or defaults */
         AgentConfig ac = {0};
         ac.name = (char *)name;
 
-        cJSON *model = cJSON_GetObjectItemCaseSensitive(payload, "model");
-        if (cJSON_IsString(model)) ac.model = model->valuestring;
-
-        cJSON *tools = cJSON_GetObjectItemCaseSensitive(payload, "tools");
-        if (cJSON_IsArray(tools)) {
-            int cnt = cJSON_GetArraySize(tools);
-            char **tool_arr = malloc((size_t)cnt * sizeof(char *));
-            if (tool_arr) {
-                for (int i = 0; i < cnt; i++) {
-                    cJSON *item = cJSON_GetArrayItem(tools, i);
-                    if (cJSON_IsString(item)) tool_arr[ac.tool_count++] = item->valuestring;
-                }
-                ac.tools = tool_arr;
+        /* Model */
+        if (sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.model')", -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, payload_json, -1, SQLITE_STATIC);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(stmt, 0);
+                if (v) ac.model = (char *)v;
             }
+            sqlite3_finalize(stmt);
+        }
+
+        /* Tools array */
+        char **tool_arr = NULL;
+        int has_tools = 0;
+        if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?1,'$.tools')", -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, payload_json, -1, SQLITE_STATIC);
+            size_t cap = 16;
+            tool_arr = malloc(cap * sizeof(char *));
+            while (tool_arr && sqlite3_step(stmt) == SQLITE_ROW) {
+                has_tools = 1;
+                const char *v = (const char *)sqlite3_column_text(stmt, 0);
+                if (!v) continue;
+                if (ac.tool_count >= cap) { cap *= 2; tool_arr = realloc(tool_arr, cap * sizeof(char *)); }
+                tool_arr[ac.tool_count++] = (char *)v;
+            }
+            sqlite3_finalize(stmt);
+        }
+        if (has_tools) {
+            ac.tools = tool_arr;
         } else {
-            /* V119/V122: seed default tools when not specified */
+            free(tool_arr);
             ac.tools = (char **)AGENT_CREATE_DEFAULT_TOOLS;
             ac.tool_count = AGENT_CREATE_DEFAULT_TOOLS_COUNT;
         }
 
-        cJSON *hosts = cJSON_GetObjectItemCaseSensitive(payload, "allowed_hosts");
-        if (cJSON_IsArray(hosts)) {
-            int cnt = cJSON_GetArraySize(hosts);
-            char **host_arr = malloc((size_t)cnt * sizeof(char *));
-            if (host_arr) {
-                for (int i = 0; i < cnt; i++) {
-                    cJSON *item = cJSON_GetArrayItem(hosts, i);
-                    if (cJSON_IsString(item)) host_arr[ac.allowed_hosts_count++] = item->valuestring;
-                }
-                ac.allowed_hosts = host_arr;
+        /* Allowed hosts */
+        char **host_arr = NULL;
+        if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?1,'$.allowed_hosts')", -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, payload_json, -1, SQLITE_STATIC);
+            size_t cap = 8;
+            host_arr = malloc(cap * sizeof(char *));
+            while (host_arr && sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(stmt, 0);
+                if (!v) continue;
+                if (ac.allowed_hosts_count >= cap) { cap *= 2; host_arr = realloc(host_arr, cap * sizeof(char *)); }
+                host_arr[ac.allowed_hosts_count++] = (char *)v;
             }
+            sqlite3_finalize(stmt);
+            ac.allowed_hosts = host_arr;
         }
 
-        /* V122/V124: default max_iterations + shell_timeout */
         ac.max_iterations = AGENT_DEFAULT_MAX_ITERATIONS;
-
         agent_config_save_db(db, &ac);
 
-        /* Save shell_timeout separately (not in AgentConfig struct) */
+        /* Save shell_timeout */
         char st_buf[16];
         snprintf(st_buf, sizeof(st_buf), "%d", AGENT_DEFAULT_SHELL_TIMEOUT);
         const char *upsert = "INSERT OR REPLACE INTO agent_config(agent_name, key, value) VALUES(?,?,?);";
-        sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db, upsert, -1, &stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 2, "shell_timeout", -1, SQLITE_STATIC);
@@ -617,29 +659,27 @@ int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload
             sqlite3_finalize(stmt);
         }
 
-        /* Free only if we allocated (not default array) */
-        if (cJSON_IsArray(tools)) free(ac.tools);
-        free(ac.allowed_hosts);
+        if (has_tools) free(ac.tools);
+        free(host_arr);
     }
 
     /* Write system.md if provided */
-    cJSON *sys_prompt = cJSON_GetObjectItemCaseSensitive(payload, "system_prompt");
-    if (cJSON_IsString(sys_prompt) && sys_prompt->valuestring[0]) {
-        char path[1024];
-        snprintf(path, sizeof(path), "%s/system.md", dir);
-        FILE *f = fopen(path, "w");
-        if (f) {
-            fputs(sys_prompt->valuestring, f);
-            fclose(f);
+    if (sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.system_prompt')", -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, payload_json, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *sp = (const char *)sqlite3_column_text(stmt, 0);
+            if (sp && sp[0]) {
+                char path[1024];
+                snprintf(path, sizeof(path), "%s/system.md", dir);
+                FILE *f = fopen(path, "w");
+                if (f) { fputs(sp, f); fclose(f); }
+            }
         }
+        sqlite3_finalize(stmt);
     }
 
-    /* Seed DB agents table row (before freeing payload — name points into it) */
-    char name_copy[256];
-    snprintf(name_copy, sizeof(name_copy), "%s", name);
-    cJSON_Delete(payload);
-
-    AgentRow *row = db_agent_seed(db, agents_dir, name_copy);
+    /* Seed DB agents table row */
+    AgentRow *row = db_agent_seed(db, agents_dir, name_buf);
     agent_row_free(row);
 
     return 0;
@@ -664,44 +704,48 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
         const char *v = (const char *)sqlite3_column_text(stmt, 0);
         if (v) ac->model = strdup(v);
 
-        /* Parse allowed_tools JSON array */
-        v = (const char *)sqlite3_column_text(stmt, 1);
-        if (v) {
-            cJSON *arr = cJSON_Parse(v);
-            if (arr && cJSON_IsArray(arr)) {
-                int cnt = cJSON_GetArraySize(arr);
-                if (cnt > 0) {
-                    ac->tools = malloc((size_t)cnt * sizeof(char *));
-                    if (ac->tools) {
-                        for (int i = 0; i < cnt; i++) {
-                            cJSON *item = cJSON_GetArrayItem(arr, i);
-                            if (cJSON_IsString(item))
-                                ac->tools[ac->tool_count++] = strdup(item->valuestring);
-                        }
+        /* Parse allowed_tools via json_each() */
+        const char *tools_json = (const char *)sqlite3_column_text(stmt, 1);
+        if (tools_json && tools_json[0] == '[') {
+            sqlite3_stmt *js;
+            if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?)",
+                                   -1, &js, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(js, 1, tools_json, -1, SQLITE_STATIC);
+                size_t cap = 8;
+                ac->tools = malloc(cap * sizeof(char *));
+                while (ac->tools && sqlite3_step(js) == SQLITE_ROW) {
+                    const char *item = (const char *)sqlite3_column_text(js, 0);
+                    if (!item) continue;
+                    if (ac->tool_count >= cap) {
+                        cap *= 2;
+                        ac->tools = realloc(ac->tools, cap * sizeof(char *));
                     }
+                    ac->tools[ac->tool_count++] = strdup(item);
                 }
+                sqlite3_finalize(js);
             }
-            cJSON_Delete(arr);
         }
 
-        /* Parse allowed_hosts JSON array */
-        v = (const char *)sqlite3_column_text(stmt, 2);
-        if (v) {
-            cJSON *arr = cJSON_Parse(v);
-            if (arr && cJSON_IsArray(arr)) {
-                int cnt = cJSON_GetArraySize(arr);
-                if (cnt > 0) {
-                    ac->allowed_hosts = malloc((size_t)cnt * sizeof(char *));
-                    if (ac->allowed_hosts) {
-                        for (int i = 0; i < cnt; i++) {
-                            cJSON *item = cJSON_GetArrayItem(arr, i);
-                            if (cJSON_IsString(item))
-                                ac->allowed_hosts[ac->allowed_hosts_count++] = strdup(item->valuestring);
-                        }
+        /* Parse allowed_hosts via json_each() */
+        const char *hosts_json = (const char *)sqlite3_column_text(stmt, 2);
+        if (hosts_json && hosts_json[0] == '[') {
+            sqlite3_stmt *js;
+            if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?)",
+                                   -1, &js, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(js, 1, hosts_json, -1, SQLITE_STATIC);
+                size_t cap = 8;
+                ac->allowed_hosts = malloc(cap * sizeof(char *));
+                while (ac->allowed_hosts && sqlite3_step(js) == SQLITE_ROW) {
+                    const char *item = (const char *)sqlite3_column_text(js, 0);
+                    if (!item) continue;
+                    if (ac->allowed_hosts_count >= cap) {
+                        cap *= 2;
+                        ac->allowed_hosts = realloc(ac->allowed_hosts, cap * sizeof(char *));
                     }
+                    ac->allowed_hosts[ac->allowed_hosts_count++] = strdup(item);
                 }
+                sqlite3_finalize(js);
             }
-            cJSON_Delete(arr);
         }
 
         int mi = sqlite3_column_int(stmt, 3);

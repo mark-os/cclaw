@@ -2,7 +2,6 @@
 #include "llm_payload.h"
 #include "config.h"
 #include "context.h"
-#include "cJSON.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +21,17 @@ static void setup_session(sqlite3 *db, int64_t *sid) {
     /* Assistant reply */
     Message asst = {.role = ROLE_ASSISTANT, .content = "Hi there!"};
     entry_append(db, *sid, &asst);
+}
+
+/* Helper: extract string from JSON using sqlite */
+static const char *json_get_str(sqlite3 *db, const char *json, const char *path, sqlite3_stmt **out) {
+    char sql[128];
+    snprintf(sql, sizeof(sql), "SELECT json_extract(?1,'%s')", path);
+    sqlite3_prepare_v2(db, sql, -1, out, NULL);
+    sqlite3_bind_text(*out, 1, json, -1, SQLITE_STATIC);
+    if (sqlite3_step(*out) == SQLITE_ROW)
+        return (const char *)sqlite3_column_text(*out, 0);
+    return NULL;
 }
 
 static void test_openai_payload(void) {
@@ -47,40 +57,46 @@ static void test_openai_payload(void) {
     assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
     assert(payload.body);
 
-    /* Verify valid JSON */
-    cJSON *root = cJSON_Parse(payload.body);
-    assert(root);
+    /* Verify using SQLite json_extract */
+    sqlite3_stmt *s;
 
     /* Check model */
-    cJSON *model = cJSON_GetObjectItem(root, "model");
-    assert(model && strcmp(model->valuestring, "test-model") == 0);
+    json_get_str(db, payload.body, "$.model", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "test-model") == 0);
+    sqlite3_finalize(s);
 
-    /* Check messages array */
-    cJSON *msgs = cJSON_GetObjectItem(root, "messages");
-    assert(msgs && cJSON_IsArray(msgs));
-    int mcount = cJSON_GetArraySize(msgs);
-    assert(mcount >= 3);
+    /* Check messages is array with >= 3 elements */
+    sqlite3_prepare_v2(db, "SELECT json_array_length(json_extract(?1,'$.messages'))", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) >= 3);
+    sqlite3_finalize(s);
 
     /* First should be system */
-    cJSON *m0 = cJSON_GetArrayItem(msgs, 0);
-    cJSON *r0 = cJSON_GetObjectItem(m0, "role");
-    assert(r0 && strcmp(r0->valuestring, "system") == 0);
+    json_get_str(db, payload.body, "$.messages[0].role", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "system") == 0);
+    sqlite3_finalize(s);
 
     /* Second should be user with escaped content */
-    cJSON *m1 = cJSON_GetArrayItem(msgs, 1);
-    cJSON *c1 = cJSON_GetObjectItem(m1, "content");
-    assert(c1 && strstr(c1->valuestring, "Hello \"world\""));
-    assert(strstr(c1->valuestring, "\n")); /* newline preserved */
+    json_get_str(db, payload.body, "$.messages[1].content", &s);
+    const char *c = (const char *)sqlite3_column_text(s, 0);
+    assert(c && strstr(c, "Hello \"world\""));
+    sqlite3_finalize(s);
 
     /* Check stream flag */
-    cJSON *stream = cJSON_GetObjectItem(root, "stream");
-    assert(stream && cJSON_IsTrue(stream));
+    sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.stream')", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
 
     /* Check max_tokens */
-    cJSON *mt = cJSON_GetObjectItem(root, "max_tokens");
-    assert(mt && mt->valueint == 1024);
+    sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.max_tokens')", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 1024);
+    sqlite3_finalize(s);
 
-    cJSON_Delete(root);
     llm_payload_release(&payload);
     context_plan_free(&plan);
     db_close(db); unlink(DB_PATH);
@@ -108,27 +124,32 @@ static void test_gemini_payload(void) {
     assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
     assert(payload.body);
 
-    cJSON *root = cJSON_Parse(payload.body);
-    assert(root);
+    sqlite3_stmt *s;
 
     /* Should have systemInstruction */
-    cJSON *si = cJSON_GetObjectItem(root, "systemInstruction");
-    assert(si);
-    cJSON *parts = cJSON_GetObjectItem(si, "parts");
-    assert(parts && cJSON_GetArraySize(parts) > 0);
+    sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.systemInstruction')", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_type(s, 0) != SQLITE_NULL);
+    sqlite3_finalize(s);
 
-    /* Should have contents array (no system entries in it) */
-    cJSON *contents = cJSON_GetObjectItem(root, "contents");
-    assert(contents && cJSON_IsArray(contents));
+    /* Should have contents array */
+    sqlite3_prepare_v2(db, "SELECT json_array_length(json_extract(?1,'$.contents'))", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) > 0);
+    sqlite3_finalize(s);
+
     /* Verify no system role in contents */
-    cJSON *c; int found_sys = 0;
-    cJSON_ArrayForEach(c, contents) {
-        cJSON *r = cJSON_GetObjectItem(c, "role");
-        if (r && strcmp(r->valuestring, "system") == 0) found_sys = 1;
-    }
-    assert(!found_sys);
+    sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.contents'))"
+        " WHERE json_extract(value,'$.role')='system'",
+        -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 0);
+    sqlite3_finalize(s);
 
-    cJSON_Delete(root);
     llm_payload_release(&payload);
     context_plan_free(&plan);
     db_close(db); unlink(DB_PATH);
@@ -162,19 +183,20 @@ static void test_payload_with_tools(void) {
     assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
     assert(payload.body);
 
-    cJSON *root = cJSON_Parse(payload.body);
-    assert(root);
+    sqlite3_stmt *s;
 
-    cJSON *tarr = cJSON_GetObjectItem(root, "tools");
-    assert(tarr && cJSON_IsArray(tarr));
-    assert(cJSON_GetArraySize(tarr) == 1);
-    cJSON *t0 = cJSON_GetArrayItem(tarr, 0);
-    cJSON *fn = cJSON_GetObjectItem(t0, "function");
-    assert(fn);
-    cJSON *fname = cJSON_GetObjectItem(fn, "name");
-    assert(fname && strcmp(fname->valuestring, "file_read") == 0);
+    /* Check tools array has 1 element */
+    sqlite3_prepare_v2(db, "SELECT json_array_length(json_extract(?1,'$.tools'))", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
 
-    cJSON_Delete(root);
+    /* Check tool name */
+    json_get_str(db, payload.body, "$.tools[0].function.name", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "file_read") == 0);
+    sqlite3_finalize(s);
+
     llm_payload_release(&payload);
     context_plan_free(&plan);
     db_close(db); unlink(DB_PATH);

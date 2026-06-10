@@ -1,5 +1,5 @@
 CC      ?= cc
-CFLAGS  := -std=c11 -Wall -Wextra -Werror -Iinclude -Ivendor/cJSON -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/mquickjs -Ivendor/monocypher -Ivendor/jsmn
+CFLAGS  := -std=c11 -Wall -Wextra -Werror -Iinclude -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/mquickjs -Ivendor/monocypher -Ivendor/jsmn
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
@@ -8,11 +8,11 @@ SRC      := $(filter-out src/mjs_main.c src/preload_net.c src/channel_runner.c,$
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 DEP      := $(OBJ:.o=.d)
 
-VENDOR_SRC := vendor/cJSON/cJSON.c vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
+VENDOR_SRC := vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
               vendor/mquickjs/mquickjs.c vendor/mquickjs/cutils.c vendor/mquickjs/dtoa.c \
               vendor/mquickjs/libm.c vendor/mquickjs/mquickjs_stdlib.c \
               vendor/monocypher/monocypher.c
-VENDOR_OBJ := $(BUILDDIR)/cJSON.o $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
+VENDOR_OBJ := $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
               $(BUILDDIR)/mquickjs.o $(BUILDDIR)/mqjs_cutils.o $(BUILDDIR)/mqjs_dtoa.o \
               $(BUILDDIR)/mqjs_libm.o $(BUILDDIR)/mqjs_stdlib.o $(BUILDDIR)/monocypher.o
 
@@ -45,9 +45,6 @@ $(BUILDDIR)/templates.h: $(TEMPLATES) scripts/gen_templates.sh | $(BUILDDIR)/
 
 $(BUILDDIR)/%.o: src/%.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -c -o $@ $<
-
-$(BUILDDIR)/cJSON.o: vendor/cJSON/cJSON.c | $(BUILDDIR)/
-	$(CC) $(CFLAGS) -Wno-unused-parameter -c -o $@ $<
 
 $(BUILDDIR)/sqlite3.o: vendor/sqlite3/sqlite3.c | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -c -o $@ $<
@@ -146,7 +143,7 @@ $(BUILDDIR)/channel_runner.o: src/channel_runner.c | $(BUILDDIR)/
 
 CR_LIB_OBJ := $(BUILDDIR)/admin_api.o $(BUILDDIR)/agent_config.o $(BUILDDIR)/channel_api.o \
               $(BUILDDIR)/db.o $(BUILDDIR)/wake.o $(BUILDDIR)/secret.o $(BUILDDIR)/config.o \
-              $(BUILDDIR)/sqlite3.o $(BUILDDIR)/cJSON.o $(BUILDDIR)/monocypher.o
+              $(BUILDDIR)/sqlite3.o $(BUILDDIR)/monocypher.o
 
 $(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(CR_VENDOR_OBJ) $(CR_LIB_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ -lcurl -lm -lpthread -ldl

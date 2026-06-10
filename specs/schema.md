@@ -348,7 +348,7 @@ CREATE INDEX idx_channel_outbox_pending ON channel_outbox(channel_name, status) 
 1. **Single DB** — all state in one `cclaw.db`; WAL mode allows concurrent readers; parent serializes writes; simplifies deployment (one file to back up/move)
 2. **Exit code IPC** — agents signal intent via exit code; daemon reads details from DB post-reap; no shared-memory IPC, no pipes for structured data
 3. **agent_config in DB** — daemon reads at fork, injects as env vars; single source of truth for policy
-4. **Split columns over JSON** — zero cJSON parsing on LLM request hot path (V60); metadata columns enable plan pass without overflow page loads (V56)
+4. **Split columns over JSON** — SQLite `json_object()` builds wire JSON directly from columns (V60); metadata columns enable plan pass without overflow page loads (V56)
 5. **INTEGER ids** — faster joins, smaller indexes, natural ordering
 6. **parent_id tree** — supports branching (Pi model); walk leaf→root via recursive CTE
 7. **Inbox as table** — durable queue; survives crashes; atomic consumption via `BEGIN EXCLUSIVE`

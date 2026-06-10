@@ -88,7 +88,7 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
 /* T150/T196: Create a new agent from approval payload.
  * Creates agents_dir/name/ directory + workspace, writes config to cclaw.db agent_config,
  * seeds agents table + system.md on disk.
- * payload is a cJSON object with: name, model, system_prompt, tools[], allowed_hosts[].
+ * payload is a JSON string with: name, model, system_prompt, tools[], allowed_hosts[].
  * Returns 0 on success, -1 on failure. */
 int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json);
 

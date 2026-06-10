@@ -2,7 +2,6 @@
 #include "tool_agent.h"
 #include "tool_parse.h"
 #include "wake.h"
-#include <cJSON.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,18 +104,23 @@ char *tool_check_agent_handler(const char *arguments, void *user_data) {
     snprintf(state_buf, sizeof(state_buf), "%s", state ? state : "unknown");
     sqlite3_finalize(stmt);
 
-    cJSON *resp = cJSON_CreateObject();
-    cJSON_AddNumberToObject(resp, "session_id", (double)child_sid);
-    cJSON_AddStringToObject(resp, "state", state_buf);
+    /* Plain text output */
+    char *result = NULL;
+    if (strcmp(state_buf, "idle") == 0)
+        result = get_response_text(ctx->db, child_sid);
 
-    if (strcmp(state_buf, "idle") == 0) {
-        char *result = get_response_text(ctx->db, child_sid);
-        if (result) { cJSON_AddStringToObject(resp, "result", result); free(result); }
+    size_t needed = 128 + (result ? strlen(result) : 0);
+    char *out = malloc(needed);
+    if (!out) { free(result); return strdup("error: OOM"); }
+    if (result) {
+        snprintf(out, needed, "session_id: %lld\nstate: %s\nresult: %s",
+                 (long long)child_sid, state_buf, result);
+        free(result);
+    } else {
+        snprintf(out, needed, "session_id: %lld\nstate: %s",
+                 (long long)child_sid, state_buf);
     }
-
-    char *out = cJSON_PrintUnformatted(resp);
-    cJSON_Delete(resp);
-    return out ? out : strdup("error: OOM");
+    return out;
 }
 
 int tool_check_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {

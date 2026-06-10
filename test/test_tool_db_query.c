@@ -11,8 +11,9 @@ static void test_select_returns_results(void) {
 
     char *r = tool_db_query_handler("{\"sql\":\"SELECT 1 AS val, 'hello' AS msg\"}", db);
     assert(r);
-    assert(strstr(r, "\"val\":1"));
-    assert(strstr(r, "\"msg\":\"hello\""));
+    /* Pipe-separated: header then data */
+    assert(strstr(r, "val|msg\n"));
+    assert(strstr(r, "1|hello\n"));
     free(r);
     db_close(db);
     printf("  PASS: select returns results\n");
@@ -94,12 +95,12 @@ static void test_query_sessions_table(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
 
-    /* Create a session so there's data */
     session_create(db, "test-session", NULL, -1, 0);
 
     char *r = tool_db_query_handler("{\"sql\":\"SELECT id, name FROM sessions\"}", db);
     assert(r);
-    assert(strstr(r, "\"name\":\"test-session\""));
+    assert(strstr(r, "id|name\n"));
+    assert(strstr(r, "test-session"));
     free(r);
     db_close(db);
     printf("  PASS: query sessions table\n");
@@ -109,16 +110,13 @@ static void test_secret_filtering(void) {
     sqlite3 *db = db_open(":memory:");
     assert(db);
 
-    /* Insert plaintext and encrypted kv rows */
     sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('test.plain','visible')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('test.secret','enc:abcdef1234567890')", NULL, NULL, NULL);
 
     char *r = tool_db_query_handler("{\"sql\":\"SELECT key, value FROM config WHERE key LIKE 'test.%'\"}", db);
     assert(r);
-    /* Plaintext row visible */
     assert(strstr(r, "test.plain"));
     assert(strstr(r, "visible"));
-    /* Encrypted row filtered out */
     assert(!strstr(r, "test.secret"));
     assert(!strstr(r, "enc:"));
     free(r);

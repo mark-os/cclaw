@@ -21,8 +21,9 @@
 #include "http.h"
 #include "arena.h"
 #include "db.h"
-#include "cJSON.h"
+#include <sqlite3.h>
 
+static sqlite3 *g_bench_db;
 #define MAX_MODELS 10
 #define TURNS 5
 #define BASE_URL "https://openrouter.ai/api/v1"
@@ -55,25 +56,39 @@ static int do_turn(const char *api_key, const char *model,
                    TurnResult *out) {
     Arena *a = arena_create(512 * 1024);
 
-    char *body;
-    {
-        cJSON *root = cJSON_CreateObject();
-        if (!root) { arena_destroy(a); return -1; }
-        cJSON_AddStringToObject(root, "model", model);
-        cJSON_AddNumberToObject(root, "max_tokens", 2048);
-        cJSON *jarr = cJSON_AddArrayToObject(root, "messages");
-        for (int i = 0; i < msg_count; i++) {
-            cJSON *m = cJSON_CreateObject();
-            const char *r = msgs[i].role == ROLE_SYSTEM ? "system" :
-                            msgs[i].role == ROLE_USER ? "user" : "assistant";
-            cJSON_AddStringToObject(m, "role", r);
-            cJSON_AddStringToObject(m, "content", msgs[i].content ? msgs[i].content : "");
-            cJSON_AddItemToArray(jarr, m);
-        }
-        body = cJSON_PrintUnformatted(root);
-        cJSON_Delete(root);
-        if (!body) { arena_destroy(a); return -1; }
+    /* Build messages JSON via SQLite */
+    sqlite3_exec(g_bench_db, "DROP TABLE IF EXISTS _bmsg;", NULL, NULL, NULL);
+    sqlite3_exec(g_bench_db,
+        "CREATE TEMP TABLE _bmsg(pos INTEGER PRIMARY KEY, role TEXT, content TEXT);",
+        NULL, NULL, NULL);
+    sqlite3_stmt *ins;
+    sqlite3_prepare_v2(g_bench_db, "INSERT INTO _bmsg VALUES(?,?,?)", -1, &ins, NULL);
+    for (int i = 0; i < msg_count; i++) {
+        const char *r = msgs[i].role == ROLE_SYSTEM ? "system" :
+                        msgs[i].role == ROLE_USER ? "user" : "assistant";
+        sqlite3_bind_int(ins, 1, i);
+        sqlite3_bind_text(ins, 2, r, -1, SQLITE_STATIC);
+        sqlite3_bind_text(ins, 3, msgs[i].content ? msgs[i].content : "", -1, SQLITE_STATIC);
+        sqlite3_step(ins);
+        sqlite3_reset(ins);
     }
+    sqlite3_finalize(ins);
+
+    sqlite3_stmt *bld;
+    sqlite3_prepare_v2(g_bench_db,
+        "SELECT json_object('model',?1,'max_tokens',2048,"
+        " 'messages',(SELECT json_group_array("
+        "   json_object('role',role,'content',content)) FROM _bmsg ORDER BY pos))",
+        -1, &bld, NULL);
+    sqlite3_bind_text(bld, 1, model, -1, SQLITE_STATIC);
+
+    char *body = NULL;
+    if (sqlite3_step(bld) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(bld, 0);
+        if (t) body = strdup(t);
+    }
+    sqlite3_finalize(bld);
+    if (!body) { arena_destroy(a); return -1; }
 
     char auth_hdr[256];
     snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", api_key);
@@ -103,7 +118,7 @@ static int do_turn(const char *api_key, const char *model,
     }
 
     LlmResponse llm = {0};
-    if (llm_parse_response(a, resp.data, &llm) != 0) {
+    if (llm_parse_response(g_bench_db, a, resp.data, &llm) != 0) {
         fprintf(stderr, "    parse error: %.100s\n", resp.data ? resp.data : "");
         http_response_free(&resp);
         arena_destroy(a);
@@ -122,6 +137,7 @@ static int do_turn(const char *api_key, const char *model,
 }
 
 int main(void) {
+    sqlite3_open(":memory:", &g_bench_db);
     const char *api_key = getenv("OPENROUTER_API_KEY");
     if (!api_key) {
         fprintf(stderr, "Set OPENROUTER_API_KEY\n");
@@ -277,5 +293,6 @@ int main(void) {
     printf("\n  Cache verification passed: %s%s\n",
            any_cached ? "caching confirmed" : "",
            any_cost_decreased ? ", cost decrease observed" : "");
+    sqlite3_close(g_bench_db);
     return 0;
 }

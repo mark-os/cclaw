@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "arena.h"
+#include <sqlite3.h>
 
 /* Tool schema for inclusion in LLM request */
 typedef struct {
@@ -36,7 +37,7 @@ typedef struct {
 /* Parse OpenAI-compatible chat completions response JSON.
  * All strings/arrays in result are arena-allocated.
  * Returns 0 on success, -1 on parse failure. */
-int llm_parse_response(Arena *a, const char *json, LlmResponse *out);
+int llm_parse_response(sqlite3 *db, Arena *a, const char *json, LlmResponse *out);
 
 /* V35: normalize provider finish_reason string → StopReason enum.
  * Sole normalization point. NULL input → STOP_REASON_STOP. */
@@ -44,7 +45,7 @@ StopReason map_stop_reason(const char *finish_reason);
 
 /* T290: Parse native Gemini generateContent response.
  * Returns 0 on success, -1 on parse failure. */
-int llm_parse_response_gemini(Arena *a, const char *json, LlmResponse *out);
+int llm_parse_response_gemini(sqlite3 *db, Arena *a, const char *json, LlmResponse *out);
 
 /* Populate LlmResponse directly from accumulated SSE context (no JSON round-trip). */
 struct SseCtx;

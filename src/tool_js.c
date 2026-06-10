@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_js.h"
-#include <cJSON.h>
+#include "tool_parse.h"
 #include <mquickjs.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,19 +109,19 @@ static const char *JSEVAL_PARAMS_JSON =
 char *tool_js_eval_handler(const char *arguments, void *user_data) {
     JsEvalCtx *ectx = (JsEvalCtx *)user_data;
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON arguments");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
 
-    cJSON *code_item = cJSON_GetObjectItemCaseSensitive(json, "code");
-    if (!cJSON_IsString(code_item) || !code_item->valuestring[0]) {
-        cJSON_Delete(json);
+    const char *code = targ_str(&ta, "code");
+    if (!code || !code[0]) {
+        tool_parse_free(&ta);
         return strdup("error: missing or empty 'code' field");
     }
 
     char **hosts = ectx ? ectx->allowed_hosts : NULL;
     size_t hosts_count = ectx ? ectx->allowed_hosts_count : 0;
-    char *result = js_eval_code_with_hosts(code_item->valuestring, hosts, hosts_count);
-    cJSON_Delete(json);
+    char *result = js_eval_code_with_hosts(code, hosts, hosts_count);
+    tool_parse_free(&ta);
     return result;
 }
 
@@ -153,15 +153,13 @@ static char *js_defined_tool_handler(const char *arguments, void *user_data) {
     if (!td || !td->code) return strdup("error: no code for this tool");
 
     /* Wrap: (function(args){<code>})(JSON.parse('<escaped_args>')) */
-    cJSON *args_json = cJSON_Parse(arguments);
-    char *args_str = args_json ? cJSON_PrintUnformatted(args_json) : strdup("{}");
-    cJSON_Delete(args_json);
+    const char *args_str = arguments ? arguments : "{}";
 
-    /* Escape single quotes in args for embedding in JS string literal */
+    /* Escape single quotes and backslashes for embedding in JS string literal */
     size_t args_len = strlen(args_str);
     size_t escaped_cap = args_len * 2 + 1;
     char *escaped = malloc(escaped_cap);
-    if (!escaped) { free(args_str); return strdup("error: OOM"); }
+    if (!escaped) { return strdup("error: OOM"); }
     size_t j = 0;
     for (size_t i = 0; i < args_len; i++) {
         if (args_str[i] == '\'' || args_str[i] == '\\') {
@@ -170,7 +168,6 @@ static char *js_defined_tool_handler(const char *arguments, void *user_data) {
         escaped[j++] = args_str[i];
     }
     escaped[j] = '\0';
-    free(args_str);
 
     size_t wrap_len = strlen(td->code) + j + 64;
     char *wrapped = malloc(wrap_len);
@@ -261,47 +258,40 @@ char *tool_js_define_handler(const char *arguments, void *user_data) {
     JsDefineCtx *ctx = (JsDefineCtx *)user_data;
     if (!ctx || !ctx->db || !ctx->reg) return strdup("error: js_define_tool not configured");
 
-    cJSON *json = cJSON_Parse(arguments);
-    if (!json) return strdup("error: invalid JSON arguments");
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
 
-    cJSON *name_item = cJSON_GetObjectItemCaseSensitive(json, "name");
-    cJSON *code_item = cJSON_GetObjectItemCaseSensitive(json, "code");
-    if (!cJSON_IsString(name_item) || !name_item->valuestring[0] ||
-        !cJSON_IsString(code_item) || !code_item->valuestring[0]) {
-        cJSON_Delete(json);
+    const char *name = targ_str(&ta, "name");
+    const char *code = targ_str(&ta, "code");
+    if (!name || !name[0] || !code || !code[0]) {
+        tool_parse_free(&ta);
         return strdup("error: 'name' and 'code' are required non-empty strings");
     }
 
-    const char *name = name_item->valuestring;
-    const char *code = code_item->valuestring;
-
-    cJSON *desc_item = cJSON_GetObjectItemCaseSensitive(json, "description");
-    const char *description = cJSON_IsString(desc_item) ? desc_item->valuestring : NULL;
-
-    cJSON *params_item = cJSON_GetObjectItemCaseSensitive(json, "parameters");
-    const char *parameters = cJSON_IsString(params_item) ? params_item->valuestring : "{}";
+    const char *description = targ_str(&ta, "description");
+    const char *parameters = targ_str(&ta, "parameters");
+    if (!parameters) parameters = "{}";
 
     /* Persist to DB */
     if (js_tool_persist(ctx->db, ctx->session_id, name, description, parameters, code) != 0) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: failed to persist tool definition");
     }
 
     /* Register in live registry */
     if (js_tool_register_ext(ctx->reg, name, description, parameters, code, ctx->rt) != 0) {
-        cJSON_Delete(json);
+        tool_parse_free(&ta);
         return strdup("error: failed to register tool");
     }
 
     /* Replay into shared runtime so other tools can reference it */
     js_runtime_replay_tool(ctx->rt, name, code);
 
-    cJSON_Delete(json);
-
     size_t rlen = strlen(name) + 32;
     char *result = malloc(rlen);
     if (result) snprintf(result, rlen, "tool '%s' defined", name);
     else result = strdup("ok");
+    tool_parse_free(&ta);
     return result;
 }
 

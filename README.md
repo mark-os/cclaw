@@ -145,7 +145,6 @@ LLM generation: 1073 ms (model-dependent)
 
 | Library | License |
 |---------|---------|
-| [cJSON 1.7.19](https://github.com/DaveGamble/cJSON) | MIT |
 | [SQLite 3.53.1](https://sqlite.org) | Public Domain |
 | [civetweb 1.16](https://github.com/civetweb/civetweb) | MIT |
 | [MicroQuickJS](https://github.com/nicholasgasior/mquickjs) | MIT |

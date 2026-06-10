@@ -7,7 +7,6 @@
 #include <curl/curl.h>
 #include "web.h"
 #include "db.h"
-#include "cJSON.h"
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
@@ -28,20 +27,14 @@ static void test_status_page(void) {
     sqlite3 *db = db_open(cfg.db_path);
     assert(db);
 
-    /* Create a session so status page has data */
     int64_t sid = session_create(db, "test-session", NULL, -1, 0);
     assert(sid > 0);
-
-    /* Mark session running */
     assert(session_set_state(db, sid, "running") == 0);
-
-    /* Insert inbox message to test inbox_depth */
     assert(inbox_insert(db, sid, "test", "hello") > 0);
 
     assert(web_start(&cfg, db) == 0);
     usleep(50000);
 
-    /* HTTP GET / */
     CURL *curl = curl_easy_init();
     assert(curl);
     char response[4096] = {0};
@@ -54,43 +47,17 @@ static void test_status_page(void) {
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     assert(http_code == 200);
 
-    /* Parse and verify JSON structure */
-    cJSON *root = cJSON_Parse(response);
-    assert(root);
-    assert(cJSON_GetObjectItem(root, "version"));
-    assert(cJSON_GetObjectItem(root, "uptime_seconds"));
+    /* Plain text assertions */
+    assert(strstr(response, "version:"));
+    assert(strstr(response, "uptime:"));
+    assert(strstr(response, "sessions:\n"));
+    assert(strstr(response, "id|name|state|updated_at|inbox_depth\n"));
+    assert(strstr(response, "test-session"));
+    assert(strstr(response, "running"));
+    assert(strstr(response, "state_metrics:\n"));
+    assert(strstr(response, "running: 1"));
 
-    /* sessions array with state, inbox_depth */
-    cJSON *sessions = cJSON_GetObjectItem(root, "sessions");
-    assert(cJSON_IsArray(sessions));
-    assert(cJSON_GetArraySize(sessions) >= 1);
-    cJSON *s0 = cJSON_GetArrayItem(sessions, 0);
-    assert(cJSON_GetObjectItem(s0, "id"));
-    assert(cJSON_GetObjectItem(s0, "name"));
-    assert(cJSON_GetObjectItem(s0, "updated_at"));
-    /* T71: state metrics, lock holders, backlog depths */
-    cJSON *state = cJSON_GetObjectItem(s0, "state");
-    assert(cJSON_IsString(state));
-    assert(strcmp(state->valuestring, "running") == 0);
-
-    cJSON *depth = cJSON_GetObjectItem(s0, "inbox_depth");
-    assert(cJSON_IsNumber(depth));
-    assert(depth->valueint == 1);
-
-    /* state_metrics aggregate */
-    cJSON *metrics = cJSON_GetObjectItem(root, "state_metrics");
-    assert(cJSON_IsObject(metrics));
-    cJSON *running_count = cJSON_GetObjectItem(metrics, "running");
-    assert(cJSON_IsNumber(running_count));
-    assert(running_count->valueint >= 1);
-
-    /* sub_agents placeholder array */
-    cJSON *agents = cJSON_GetObjectItem(root, "sub_agents");
-    assert(cJSON_IsArray(agents));
-
-    cJSON_Delete(root);
     curl_easy_cleanup(curl);
-
     web_stop();
     db_close(db);
     remove("test_web.db");

@@ -1,7 +1,6 @@
 #include "web.h"
 #include "cclaw.h"
 #include "civetweb.h"
-#include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,13 +15,17 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
     time_t now = time(NULL);
     long uptime = (long)(now - s_start_time);
 
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "version", CCLAW_VERSION);
-    cJSON_AddNumberToObject(root, "uptime_seconds", (double)uptime);
+    size_t cap = 4096, pos = 0;
+    char *buf = malloc(cap);
+    if (!buf) { mg_printf(conn, "HTTP/1.1 500\r\n\r\n"); return 500; }
 
-    /* Active sessions with state, lock holders, inbox depths */
-    cJSON *sessions = cJSON_AddArrayToObject(root, "sessions");
+    pos += (size_t)snprintf(buf + pos, cap - pos,
+        "version: %s\nuptime: %lds\n", CCLAW_VERSION, uptime);
+
     if (s_db) {
+        pos += (size_t)snprintf(buf + pos, cap - pos,
+            "\nsessions:\nid|name|state|updated_at|inbox_depth\n");
+
         sqlite3_stmt *stmt;
         const char *sql =
             "SELECT s.id, s.name, s.state, s.updated_at,"
@@ -30,48 +33,43 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
             " FROM sessions s ORDER BY s.updated_at DESC;";
         if (sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
             while (sqlite3_step(stmt) == SQLITE_ROW) {
-                cJSON *s = cJSON_CreateObject();
-                cJSON_AddNumberToObject(s, "id", (double)sqlite3_column_int64(stmt, 0));
+                int64_t id = sqlite3_column_int64(stmt, 0);
                 const char *name = (const char *)sqlite3_column_text(stmt, 1);
-                cJSON_AddStringToObject(s, "name", name ? name : "");
                 const char *state = (const char *)sqlite3_column_text(stmt, 2);
-                cJSON_AddStringToObject(s, "state", state ? state : "idle");
-                cJSON_AddNumberToObject(s, "updated_at", (double)sqlite3_column_int64(stmt, 3));
-                cJSON_AddNumberToObject(s, "inbox_depth", (double)sqlite3_column_int(stmt, 4));
-                cJSON_AddItemToArray(sessions, s);
+                int64_t updated = sqlite3_column_int64(stmt, 3);
+                int inbox = sqlite3_column_int(stmt, 4);
+                while (pos + 256 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                pos += (size_t)snprintf(buf + pos, cap - pos,
+                    "%lld|%s|%s|%lld|%d\n",
+                    (long long)id, name ? name : "", state ? state : "idle",
+                    (long long)updated, inbox);
             }
             sqlite3_finalize(stmt);
         }
 
-        /* Aggregate state metrics */
-        cJSON *metrics = cJSON_AddObjectToObject(root, "state_metrics");
+        /* State metrics */
         sqlite3_stmt *mstmt;
         const char *msql = "SELECT state, COUNT(*) FROM sessions GROUP BY state;";
         if (sqlite3_prepare_v2(s_db, msql, -1, &mstmt, NULL) == SQLITE_OK) {
+            pos += (size_t)snprintf(buf + pos, cap - pos, "\nstate_metrics:\n");
             while (sqlite3_step(mstmt) == SQLITE_ROW) {
                 const char *st = (const char *)sqlite3_column_text(mstmt, 0);
                 int cnt = sqlite3_column_int(mstmt, 1);
-                if (st) cJSON_AddNumberToObject(metrics, st, (double)cnt);
+                while (pos + 64 > cap) { cap *= 2; buf = realloc(buf, cap); }
+                if (st) pos += (size_t)snprintf(buf + pos, cap - pos, "%s: %d\n", st, cnt);
             }
             sqlite3_finalize(mstmt);
         }
     }
 
-    /* Sub-agent status */
-    cJSON_AddArrayToObject(root, "sub_agents");
-
-    char *body = cJSON_PrintUnformatted(root);
-    int len = (int)strlen(body);
-
     mg_printf(conn,
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\n"
+        "Content-Type: text/plain\r\n"
         "Content-Length: %d\r\n"
         "\r\n"
-        "%s", len, body);
+        "%s", (int)pos, buf);
 
-    free(body);
-    cJSON_Delete(root);
+    free(buf);
     return 200;
 }
 

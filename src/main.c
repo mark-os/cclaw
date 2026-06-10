@@ -32,7 +32,6 @@
 #include "web.h"
 #include "heartbeat.h"
 #include "cron.h"
-#include "cJSON.h"
 
 /* ── Constants ──────────────────────────────────────────────────── */
 

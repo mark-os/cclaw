@@ -5,7 +5,6 @@
 #include "extension.h"
 #include <sqlite3.h>
 #include "log.h"
-#include <cJSON.h>
 #include <dirent.h>
 #include <mquickjs.h>
 #include <stdio.h>

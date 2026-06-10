@@ -3,7 +3,6 @@
 #include "agent_config.h"
 #include "db.h"
 #include "log.h"
-#include "cJSON.h"
 #include "templates.h"
 #include <stdlib.h>
 #include <string.h>

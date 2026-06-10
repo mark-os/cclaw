@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sqlite3.h>
 #include "extension.h"
 #include "hook_dispatch.h"
 #include "tool_js.h"
@@ -279,6 +280,8 @@ static void test_turn_start_end_hooks(void) {
 /* T261: afterResponse hook receives response object */
 static void test_after_response_hook(void) {
     TEST(after_response_hook);
+    sqlite3 *db;
+    sqlite3_open(":memory:", &db);
     const char *ws = "/tmp/cclaw_ext_api_t6";
     cleanup(ws);
     char ext_dir[256];
@@ -312,7 +315,7 @@ static void test_after_response_hook(void) {
     }
 
     /* Dispatch */
-    hook_dispatch_after_response(&ext_ctx, "Hello world", "stop", 0);
+    hook_dispatch_after_response(&ext_ctx, db, "Hello world", "stop", 0);
 
     /* Verify */
     JSContext *ctx = (JSContext *)rt->ctx;
@@ -345,6 +348,7 @@ static void test_after_response_hook(void) {
     tools_free(&reg);
     extension_ctx_destroy(&ext_ctx);
     js_runtime_destroy(rt);
+    sqlite3_close(db);
     cleanup(ws);
     PASS();
 }

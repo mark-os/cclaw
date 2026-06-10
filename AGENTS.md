@@ -76,7 +76,7 @@ See [specs/security.md](specs/security.md) for full details.
 ```
 src/           C source files
 include/       C headers (public API for each module)
-vendor/        Vendored libs (cJSON, sqlite3, civetweb, mquickjs)
+vendor/        Vendored libs (sqlite3, civetweb, mquickjs, jsmn)
 templates/     Schema SQL, system prompts, embedded text (build-time → templates.h)
 test/          Test files (test_*.c)
 specs/         Detailed reference docs (schema, daemon, memory, providers, security, shell-networking)
@@ -137,7 +137,7 @@ Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 
 | Dep | Purpose | Vendored? |
 |-----|---------|-----------|
-| cJSON | JSON parsing | Yes |
+| jsmn | JSON tokenizer (SSE parsing, tool args) | Yes |
 | SQLite 3.53 | Persistence, FTS5, JSON functions | Yes |
 | libcurl | HTTP client (LLM API, Telegram) | System (dynamic link) |
 | civetweb | Embedded HTTP server (webhooks, dashboard) | Yes |

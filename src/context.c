@@ -4,7 +4,6 @@
 #include "db.h"
 #include "http.h"
 #include "llm.h"
-#include "cJSON.h"
 #include "templates.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -683,28 +682,29 @@ int64_t session_try_compact(sqlite3 *db, int64_t session_id, const Config *cfg) 
                     "Include: goal, progress, key decisions, and next steps. "
                     "Be concise (under 500 words). Output plain text only.";
 
-                cJSON *root = cJSON_CreateObject();
-                if (root) {
-                    cJSON_AddStringToObject(root, "model", cfg->provider.model);
-                    if (cfg->provider.max_tokens > 0)
-                        cJSON_AddNumberToObject(root, "max_tokens",
-                            cfg->provider.max_tokens < 1024 ? cfg->provider.max_tokens : 1024);
-                    else
-                        cJSON_AddNumberToObject(root, "max_tokens", 1024);
-                    cJSON *msgs = cJSON_AddArrayToObject(root, "messages");
-                    cJSON *sys = cJSON_CreateObject();
-                    cJSON_AddStringToObject(sys, "role", "system");
-                    cJSON_AddStringToObject(sys, "content", sys_prompt);
-                    cJSON_AddItemToArray(msgs, sys);
-                    cJSON *usr = cJSON_CreateObject();
-                    cJSON_AddStringToObject(usr, "role", "user");
-                    cJSON_AddStringToObject(usr, "content", text);
-                    cJSON_AddItemToArray(msgs, usr);
+                int max_tok = (cfg->provider.max_tokens > 0 && cfg->provider.max_tokens < 1024)
+                    ? cfg->provider.max_tokens : 1024;
+                /* Build compaction request via SQLite json_object */
+                char *body = NULL;
+                sqlite3_stmt *cstmt;
+                if (sqlite3_prepare_v2(db,
+                    "SELECT json_object('model',?1,'max_tokens',?2,"
+                    "'messages',json_array("
+                    "json_object('role','system','content',?3),"
+                    "json_object('role','user','content',?4)))",
+                    -1, &cstmt, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(cstmt, 1, cfg->provider.model, -1, SQLITE_STATIC);
+                    sqlite3_bind_int(cstmt, 2, max_tok);
+                    sqlite3_bind_text(cstmt, 3, sys_prompt, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(cstmt, 4, text, -1, SQLITE_STATIC);
+                    if (sqlite3_step(cstmt) == SQLITE_ROW) {
+                        const char *v = (const char *)sqlite3_column_text(cstmt, 0);
+                        if (v) body = strdup(v);
+                    }
+                    sqlite3_finalize(cstmt);
+                }
 
-                    char *body = cJSON_PrintUnformatted(root);
-                    cJSON_Delete(root);
-
-                    if (body) {
+                if (body) {
                         /* Build URL */
                         size_t blen = strlen(cfg->provider.base_url);
                         while (blen > 0 && cfg->provider.base_url[blen - 1] == '/') blen--;
@@ -722,7 +722,7 @@ int64_t session_try_compact(sqlite3 *db, int64_t session_id, const Config *cfg) 
                             if (status == 200 && resp.data) {
                                 Arena *a = arena_create(resp.len + 256);
                                 LlmResponse llm = {0};
-                                if (a && llm_parse_response(a, resp.data, &llm) == 0 && llm.content) {
+                                if (a && llm_parse_response(db, a, resp.data, &llm) == 0 && llm.content) {
                                     summary = strdup(llm.content);
                                 }
                                 arena_destroy(a);
@@ -731,7 +731,6 @@ int64_t session_try_compact(sqlite3 *db, int64_t session_id, const Config *cfg) 
                             free(url);
                         }
                         free(body);
-                    }
                 }
             }
             free(text);

@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_db_query.h"
 #include "tool_parse.h"
-#include <cJSON.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,11 +14,8 @@ static const char *DB_QUERY_PARAMS_JSON =
 
 #define MAX_ROWS 500
 
-/* Check if SQL is a SELECT statement (reject mutations) */
 static int is_select_only(const char *sql) {
-    /* Skip leading whitespace */
     while (*sql && isspace((unsigned char)*sql)) sql++;
-    /* Must start with SELECT (case-insensitive) */
     return (strncasecmp(sql, "SELECT", 6) == 0 &&
             (sql[6] == '\0' || isspace((unsigned char)sql[6])));
 }
@@ -52,54 +48,67 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
         return err ? err : strdup("error: prepare failed");
     }
 
-    cJSON *result = cJSON_CreateArray();
     int col_count = sqlite3_column_count(stmt);
-    int rows = 0;
+    size_t cap = 4096, pos = 0;
+    char *buf = malloc(cap);
+    if (!buf) { sqlite3_finalize(stmt); tool_parse_free(&ta); return strdup("error: OOM"); }
 
+    /* Header row */
+    for (int i = 0; i < col_count; i++) {
+        const char *name = sqlite3_column_name(stmt, i);
+        size_t nlen = strlen(name);
+        while (pos + nlen + 2 > cap) { cap *= 2; buf = realloc(buf, cap); }
+        if (i > 0) buf[pos++] = '|';
+        memcpy(buf + pos, name, nlen); pos += nlen;
+    }
+    buf[pos++] = '\n';
+
+    int rows = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && rows < MAX_ROWS) {
         /* V52,T173: skip rows containing encrypted secret values */
         int has_secret = 0;
         for (int i = 0; i < col_count; i++) {
             if (sqlite3_column_type(stmt, i) == SQLITE_TEXT) {
                 const char *val = (const char *)sqlite3_column_text(stmt, i);
-                if (val && strncmp(val, "enc:", 4) == 0) {
-                    has_secret = 1;
-                    break;
-                }
+                if (val && strncmp(val, "enc:", 4) == 0) { has_secret = 1; break; }
             }
         }
         if (has_secret) continue;
 
-        cJSON *row = cJSON_CreateObject();
         for (int i = 0; i < col_count; i++) {
-            const char *col_name = sqlite3_column_name(stmt, i);
-            int col_type = sqlite3_column_type(stmt, i);
-            switch (col_type) {
-            case SQLITE_INTEGER:
-                cJSON_AddNumberToObject(row, col_name, (double)sqlite3_column_int64(stmt, i));
-                break;
-            case SQLITE_FLOAT:
-                cJSON_AddNumberToObject(row, col_name, sqlite3_column_double(stmt, i));
-                break;
-            case SQLITE_NULL:
-                cJSON_AddNullToObject(row, col_name);
-                break;
-            default: /* TEXT or BLOB */
-                cJSON_AddStringToObject(row, col_name,
-                    (const char *)sqlite3_column_text(stmt, i));
-                break;
+            const char *val;
+            char numbuf[64];
+            if (sqlite3_column_type(stmt, i) == SQLITE_NULL) {
+                val = "";
+            } else if (sqlite3_column_type(stmt, i) == SQLITE_INTEGER) {
+                snprintf(numbuf, sizeof(numbuf), "%lld", (long long)sqlite3_column_int64(stmt, i));
+                val = numbuf;
+            } else if (sqlite3_column_type(stmt, i) == SQLITE_FLOAT) {
+                snprintf(numbuf, sizeof(numbuf), "%g", sqlite3_column_double(stmt, i));
+                val = numbuf;
+            } else {
+                val = (const char *)sqlite3_column_text(stmt, i);
+                if (!val) val = "";
             }
+            size_t vlen = strlen(val);
+            while (pos + vlen + 2 > cap) { cap *= 2; buf = realloc(buf, cap); }
+            if (i > 0) buf[pos++] = '|';
+            memcpy(buf + pos, val, vlen); pos += vlen;
         }
-        cJSON_AddItemToArray(result, row);
+        buf[pos++] = '\n';
         rows++;
     }
 
     sqlite3_finalize(stmt);
     tool_parse_free(&ta);
 
-    char *output = cJSON_PrintUnformatted(result);
-    cJSON_Delete(result);
-    return output ? output : strdup("[]");
+    if (rows == 0 && pos > 0) {
+        /* Just header, no data rows */
+        buf[pos] = '\0';
+        return buf;
+    }
+    buf[pos] = '\0';
+    return buf;
 }
 
 int tool_db_query_register(ToolRegistry *reg, sqlite3 *db) {

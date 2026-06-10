@@ -14,6 +14,7 @@
 
 static int tests_run = 0;
 static int tests_passed = 0;
+static sqlite3 *g_hook_db;
 
 #define TEST(name) do { tests_run++; printf("  %s... ", #name); } while(0)
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
@@ -352,7 +353,7 @@ static void test_before_tool_call_blocks(void) {
     extension_list_free(paths, ext_count);
 
     /* Call for blocked tool */
-    char *blocked = hook_dispatch_before_tool_call(&ext_ctx, "dangerous", "{}");
+    char *blocked = hook_dispatch_before_tool_call(&ext_ctx, g_hook_db, "dangerous", "{}");
     if (!blocked) {
         tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
         cleanup(ws); FAIL("expected block");
@@ -365,7 +366,7 @@ static void test_before_tool_call_blocks(void) {
     free(blocked);
 
     /* Call for allowed tool */
-    char *allowed = hook_dispatch_before_tool_call(&ext_ctx, "safe_tool", "{}");
+    char *allowed = hook_dispatch_before_tool_call(&ext_ctx, g_hook_db, "safe_tool", "{}");
     if (allowed) {
         free(allowed); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
         js_runtime_destroy(rt); cleanup(ws); FAIL("expected NULL for allowed tool");
@@ -408,7 +409,7 @@ static void test_after_tool_call_replaces(void) {
     extension_list_free(paths, ext_count);
 
     /* Call for matching tool */
-    char *replaced = hook_dispatch_after_tool_call(&ext_ctx, "fetch", "{}", "original data");
+    char *replaced = hook_dispatch_after_tool_call(&ext_ctx, g_hook_db, "fetch", "{}", "original data");
     if (!replaced) {
         tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
         cleanup(ws); FAIL("expected replacement");
@@ -421,7 +422,7 @@ static void test_after_tool_call_replaces(void) {
     free(replaced);
 
     /* Non-matching tool → no replacement */
-    char *noop = hook_dispatch_after_tool_call(&ext_ctx, "other", "{}", "data");
+    char *noop = hook_dispatch_after_tool_call(&ext_ctx, g_hook_db, "other", "{}", "data");
     if (noop) {
         free(noop); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
         js_runtime_destroy(rt); cleanup(ws); FAIL("expected NULL for non-matching");
@@ -466,7 +467,7 @@ static void test_after_tool_call_chains(void) {
     extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx);
     extension_list_free(paths, ext_count);
 
-    char *result = hook_dispatch_after_tool_call(&ext_ctx, "any", "{}", "start");
+    char *result = hook_dispatch_after_tool_call(&ext_ctx, g_hook_db, "any", "{}", "start");
     if (!result) {
         tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
         cleanup(ws); FAIL("expected result");
@@ -488,6 +489,7 @@ static void test_after_tool_call_chains(void) {
 
 int main(void) {
     printf("test_hook_dispatch:\n");
+    sqlite3_open(":memory:", &g_hook_db);
     test_no_hooks();
     test_hook_modifies_messages();
     test_hook_throws();
@@ -495,6 +497,7 @@ int main(void) {
     test_before_tool_call_blocks();
     test_after_tool_call_replaces();
     test_after_tool_call_chains();
+    sqlite3_close(g_hook_db);
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

@@ -210,9 +210,9 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         LlmResponse llm_resp; memset(&llm_resp, 0, sizeof(llm_resp));
         int rc;
         if (cfg->provider.endpoint_type == ENDPOINT_GEMINI)
-            rc = llm_parse_response_gemini(a, mock_data, &llm_resp);
+            rc = llm_parse_response_gemini(db, a, mock_data, &llm_resp);
         else
-            rc = llm_parse_response(a, mock_data, &llm_resp);
+            rc = llm_parse_response(db, a, mock_data, &llm_resp);
         free(mock_data);
         if (rc != 0) goto err;
         goto ingest_response;
@@ -360,9 +360,9 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             if (route_cfg.stream)
                 rc = llm_response_from_sse(a, &sse_ctx, &llm_resp);
             else if (route_cfg.provider.endpoint_type == ENDPOINT_GEMINI)
-                rc = llm_parse_response_gemini(a, resp.data, &llm_resp);
+                rc = llm_parse_response_gemini(db, a, resp.data, &llm_resp);
             else
-                rc = llm_parse_response(a, resp.data, &llm_resp);
+                rc = llm_parse_response(db, a, resp.data, &llm_resp);
             http_response_free(&resp); sse_ctx_free(&sse_ctx);
 
             if (rc != 0 || !llm_resp.finish_reason) break; /* parse failure */

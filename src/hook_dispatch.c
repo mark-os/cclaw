@@ -3,9 +3,7 @@
  * deserialize modified array back. Skip on throw. */
 #define _POSIX_C_SOURCE 200809L
 #include "hook_dispatch.h"
-#include "json_escape.h"
 #include "log.h"
-#include <cJSON.h>
 #include <mquickjs.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,8 +13,19 @@
  * Injects into global scope as __hook_messages. */
 static int build_messages_array(JSContext *ctx, sqlite3 *db,
                                 int64_t session_id, const ContextPlan *plan) {
-    const char *sql = "SELECT role, content, tool_calls, tool_call_id "
-                      "FROM entries WHERE id=? AND session_id=?;";
+    /* Build each message as JSON using SQLite json_object */
+    const char *sql =
+        "SELECT CASE"
+        "  WHEN role=3 THEN json_object('role','tool',"
+        "    'tool_call_id',COALESCE(tool_call_id,''),"
+        "    'content',COALESCE(content,''))"
+        "  WHEN role=2 AND tool_calls IS NOT NULL THEN"
+        "    json_patch(json_object('role','assistant','content',content),"
+        "      json_object('tool_calls',json(tool_calls)))"
+        "  WHEN role=2 THEN json_object('role','assistant','content',content)"
+        "  WHEN role=0 THEN json_object('role','system','content',COALESCE(content,''))"
+        "  ELSE json_object('role','user','content',COALESCE(content,''))"
+        " END FROM entries WHERE id=? AND session_id=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -32,41 +41,7 @@ static int build_messages_array(JSContext *ctx, sqlite3 *db,
         sqlite3_bind_int64(stmt, 2, session_id);
         if (sqlite3_step(stmt) != SQLITE_ROW) continue;
 
-        int role = sqlite3_column_int(stmt, 0);
-        const char *content = (const char *)sqlite3_column_text(stmt, 1);
-        const char *tool_calls_raw = (const char *)sqlite3_column_text(stmt, 2);
-        const char *tool_call_id = (const char *)sqlite3_column_text(stmt, 3);
-
-        /* Build message object as JSON, then parse in JS */
-        cJSON *msg = cJSON_CreateObject();
-        const char *role_str;
-        switch (role) {
-            case 0: role_str = "system"; break;
-            case 1: role_str = "user"; break;
-            case 2: role_str = "assistant"; break;
-            case 3: role_str = "tool"; break;
-            default: role_str = "user"; break;
-        }
-        cJSON_AddStringToObject(msg, "role", role_str);
-
-        if (role == 3) {
-            /* tool result */
-            if (tool_call_id) cJSON_AddStringToObject(msg, "tool_call_id", tool_call_id);
-            cJSON_AddStringToObject(msg, "content", content ? content : "");
-        } else if (role == 2) {
-            /* assistant */
-            if (content) cJSON_AddStringToObject(msg, "content", content);
-            else cJSON_AddNullToObject(msg, "content");
-            if (tool_calls_raw) {
-                cJSON *tc = cJSON_Parse(tool_calls_raw);
-                if (tc) cJSON_AddItemToObject(msg, "tool_calls", tc);
-            }
-        } else {
-            cJSON_AddStringToObject(msg, "content", content ? content : "");
-        }
-
-        char *json_str = cJSON_PrintUnformatted(msg);
-        cJSON_Delete(msg);
+        const char *json_str = (const char *)sqlite3_column_text(stmt, 0);
         if (!json_str) continue;
 
         /* Push into JS array */
@@ -79,7 +54,6 @@ static int build_messages_array(JSContext *ctx, sqlite3 *db,
             if (JS_IsException(r)) { /* skip entry */ }
             free(code);
         }
-        free(json_str);
     }
 
     sqlite3_finalize(stmt);
@@ -149,53 +123,56 @@ char *hook_dispatch_before_request(ExtensionCtx *ext_ctx, sqlite3 *db,
     /* Build full request body: {"model":"...","messages":ARRAY,"tools":...,"max_tokens":...} */
     const char *model = cfg->provider.model ? cfg->provider.model : "unknown";
 
-    /* Tools fragment */
+    /* Tools fragment via SQLite */
     char *tools_json = NULL;
     if (tools && tool_count > 0) {
-        cJSON *arr = cJSON_CreateArray();
-        for (size_t i = 0; i < tool_count; i++) {
-            cJSON *tool = cJSON_CreateObject();
-            cJSON_AddStringToObject(tool, "type", "function");
-            cJSON *fn = cJSON_CreateObject();
-            cJSON_AddStringToObject(fn, "name", tools[i].name);
-            if (tools[i].description)
-                cJSON_AddStringToObject(fn, "description", tools[i].description);
-            if (tools[i].parameters_json) {
-                cJSON *params = cJSON_Parse(tools[i].parameters_json);
-                if (params) cJSON_AddItemToObject(fn, "parameters", params);
+        sqlite3_exec(db, "DROP TABLE IF EXISTS _hook_tools;", NULL, NULL, NULL);
+        sqlite3_exec(db, "CREATE TEMP TABLE _hook_tools(pos INTEGER,name TEXT,description TEXT,params TEXT);", NULL, NULL, NULL);
+        sqlite3_stmt *ins;
+        if (sqlite3_prepare_v2(db, "INSERT INTO _hook_tools VALUES(?,?,?,?)", -1, &ins, NULL) == SQLITE_OK) {
+            for (size_t i = 0; i < tool_count; i++) {
+                sqlite3_bind_int(ins, 1, (int)i);
+                sqlite3_bind_text(ins, 2, tools[i].name, -1, SQLITE_STATIC);
+                sqlite3_bind_text(ins, 3, tools[i].description ? tools[i].description : "", -1, SQLITE_STATIC);
+                sqlite3_bind_text(ins, 4, tools[i].parameters_json ? tools[i].parameters_json : "{}", -1, SQLITE_STATIC);
+                sqlite3_step(ins); sqlite3_reset(ins);
             }
-            cJSON_AddItemToObject(tool, "function", fn);
-            cJSON_AddItemToArray(arr, tool);
+            sqlite3_finalize(ins);
         }
-        tools_json = cJSON_PrintUnformatted(arr);
-        cJSON_Delete(arr);
+        sqlite3_stmt *sel;
+        if (sqlite3_prepare_v2(db,
+            "SELECT json_group_array(json_object('type','function','function',"
+            "json_object('name',name,'description',description,"
+            "'parameters',json(params))) ORDER BY pos) FROM _hook_tools",
+            -1, &sel, NULL) == SQLITE_OK) {
+            if (sqlite3_step(sel) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(sel, 0);
+                if (v) tools_json = strdup(v);
+            }
+            sqlite3_finalize(sel);
+        }
+        sqlite3_exec(db, "DROP TABLE IF EXISTS _hook_tools;", NULL, NULL, NULL);
     }
 
-    /* Assemble: {"model":"<model>","messages":<messages>[,"tools":<tools>][,"max_tokens":<n>]} */
-    size_t needed = 32 + strlen(model) + strlen(messages_json) +
-                    (tools_json ? strlen(tools_json) + 16 : 0) + 32;
-    char *body = malloc(needed);
-    if (!body) { free(messages_json); free(tools_json); return NULL; }
-
-    int written;
-    if (tools_json && cfg->provider.max_tokens > 0) {
-        written = snprintf(body, needed,
-                           "{\"model\":\"%s\",\"messages\":%s,\"tools\":%s,\"max_tokens\":%d}",
-                           model, messages_json, tools_json, cfg->provider.max_tokens);
-    } else if (tools_json) {
-        written = snprintf(body, needed,
-                           "{\"model\":\"%s\",\"messages\":%s,\"tools\":%s}",
-                           model, messages_json, tools_json);
-    } else if (cfg->provider.max_tokens > 0) {
-        written = snprintf(body, needed,
-                           "{\"model\":\"%s\",\"messages\":%s,\"max_tokens\":%d}",
-                           model, messages_json, cfg->provider.max_tokens);
-    } else {
-        written = snprintf(body, needed,
-                           "{\"model\":\"%s\",\"messages\":%s}",
-                           model, messages_json);
+    /* Assemble full request via SQLite json_object */
+    char *body = NULL;
+    sqlite3_stmt *asm_stmt;
+    if (sqlite3_prepare_v2(db,
+        "SELECT json_object('model',?1,'messages',json(?2),"
+        "'tools',CASE WHEN ?3 IS NOT NULL AND json_array_length(?3)>0 THEN json(?3) ELSE NULL END,"
+        "'max_tokens',CASE WHEN ?4>0 THEN ?4 ELSE NULL END)",
+        -1, &asm_stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(asm_stmt, 1, model, -1, SQLITE_STATIC);
+        sqlite3_bind_text(asm_stmt, 2, messages_json, -1, SQLITE_STATIC);
+        if (tools_json) sqlite3_bind_text(asm_stmt, 3, tools_json, -1, SQLITE_STATIC);
+        else sqlite3_bind_null(asm_stmt, 3);
+        sqlite3_bind_int(asm_stmt, 4, cfg->provider.max_tokens);
+        if (sqlite3_step(asm_stmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(asm_stmt, 0);
+            if (v) body = strdup(v);
+        }
+        sqlite3_finalize(asm_stmt);
     }
-    (void)written;
 
     free(messages_json);
     free(tools_json);
@@ -206,26 +183,28 @@ char *hook_dispatch_before_request(ExtensionCtx *ext_ctx, sqlite3 *db,
 
 /* V113: beforeToolCall hook dispatch.
  * Calls each hook with {name, args}. If any returns {block:true}, return error. */
-char *hook_dispatch_before_tool_call(ExtensionCtx *ext_ctx, const char *name,
-                                     const char *args) {
+char *hook_dispatch_before_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
+                                     const char *name, const char *args) {
     if (!ext_ctx || !ext_ctx->rt || !ext_ctx->rt->ctx) return NULL;
     HookList *hl = &ext_ctx->hooks[HOOK_BEFORE_TOOL_CALL];
     if (hl->count == 0) return NULL;
 
     JSContext *ctx = (JSContext *)ext_ctx->rt->ctx;
 
-    /* Build context object as JSON */
-    cJSON *obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(obj, "name", name ? name : "");
-    if (args) {
-        cJSON *parsed = cJSON_Parse(args);
-        if (parsed) cJSON_AddItemToObject(obj, "args", parsed);
-        else cJSON_AddStringToObject(obj, "args", args);
-    } else {
-        cJSON_AddNullToObject(obj, "args");
+    /* Build context object as JSON using SQLite */
+    char *json_str = NULL;
+    sqlite3_stmt *jstmt;
+    const char *jsql = "SELECT json_object('name',?1,'args',"
+        "CASE WHEN json_valid(?2) THEN json(?2) ELSE ?2 END)";
+    if (sqlite3_prepare_v2(db, jsql, -1, &jstmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(jstmt, 1, name ? name : "", -1, SQLITE_STATIC);
+        sqlite3_bind_text(jstmt, 2, args ? args : "null", -1, SQLITE_STATIC);
+        if (sqlite3_step(jstmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(jstmt, 0);
+            if (v) json_str = strdup(v);
+        }
+        sqlite3_finalize(jstmt);
     }
-    char *json_str = cJSON_PrintUnformatted(obj);
-    cJSON_Delete(obj);
     if (!json_str) return NULL;
 
     /* Set as global for hooks to access */
@@ -261,19 +240,22 @@ char *hook_dispatch_before_tool_call(ExtensionCtx *ext_ctx, const char *name,
         JSCStringBuf buf;
         const char *str = JS_ToCString(ctx, v, &buf);
         if (str && str[0]) {
-            /* Blocked — extract reason */
-            cJSON *res = cJSON_Parse(str);
+            /* Blocked — extract reason via SQLite */
             const char *reason = "blocked by extension hook";
-            if (res) {
-                cJSON *r = cJSON_GetObjectItem(res, "reason");
-                if (r && r->valuestring) reason = r->valuestring;
+            sqlite3_stmt *rstmt;
+            if (sqlite3_prepare_v2(db,
+                "SELECT json_extract(?,'$.reason')", -1, &rstmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(rstmt, 1, str, -1, SQLITE_STATIC);
+                if (sqlite3_step(rstmt) == SQLITE_ROW) {
+                    const char *r = (const char *)sqlite3_column_text(rstmt, 0);
+                    if (r) reason = r;
+                }
                 char *ret = malloc(strlen(reason) + 16);
                 if (ret) snprintf(ret, strlen(reason) + 16, "error: %s", reason);
-                cJSON_Delete(res);
+                sqlite3_finalize(rstmt);
                 return ret;
             }
-            char *ret = strdup("error: blocked by extension hook");
-            return ret;
+            return strdup("error: blocked by extension hook");
         }
     }
     return NULL;
@@ -281,27 +263,30 @@ char *hook_dispatch_before_tool_call(ExtensionCtx *ext_ctx, const char *name,
 
 /* V114: afterToolCall hook dispatch.
  * Calls each hook with {name, args, result}. Returns replacement if any. */
-char *hook_dispatch_after_tool_call(ExtensionCtx *ext_ctx, const char *name,
-                                    const char *args, const char *result) {
+char *hook_dispatch_after_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
+                                    const char *name, const char *args,
+                                    const char *result) {
     if (!ext_ctx || !ext_ctx->rt || !ext_ctx->rt->ctx) return NULL;
     HookList *hl = &ext_ctx->hooks[HOOK_AFTER_TOOL_CALL];
     if (hl->count == 0) return NULL;
 
     JSContext *ctx = (JSContext *)ext_ctx->rt->ctx;
 
-    /* Build context object */
-    cJSON *obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(obj, "name", name ? name : "");
-    if (args) {
-        cJSON *parsed = cJSON_Parse(args);
-        if (parsed) cJSON_AddItemToObject(obj, "args", parsed);
-        else cJSON_AddStringToObject(obj, "args", args);
-    } else {
-        cJSON_AddNullToObject(obj, "args");
+    /* Build context object via SQLite */
+    char *json_str = NULL;
+    sqlite3_stmt *jstmt;
+    const char *jsql = "SELECT json_object('name',?1,'args',"
+        "CASE WHEN json_valid(?2) THEN json(?2) ELSE ?2 END,'result',?3)";
+    if (sqlite3_prepare_v2(db, jsql, -1, &jstmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(jstmt, 1, name ? name : "", -1, SQLITE_STATIC);
+        sqlite3_bind_text(jstmt, 2, args ? args : "null", -1, SQLITE_STATIC);
+        sqlite3_bind_text(jstmt, 3, result ? result : "", -1, SQLITE_STATIC);
+        if (sqlite3_step(jstmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(jstmt, 0);
+            if (v) json_str = strdup(v);
+        }
+        sqlite3_finalize(jstmt);
     }
-    cJSON_AddStringToObject(obj, "result", result ? result : "");
-    char *json_str = cJSON_PrintUnformatted(obj);
-    cJSON_Delete(obj);
     if (!json_str) return NULL;
 
     size_t code_len = strlen(json_str) + 64;
@@ -378,7 +363,8 @@ void hook_dispatch_turn_end(ExtensionCtx *ext_ctx) {
 }
 
 /* V111/T261: afterResponse — read-only inspect of LLM response. */
-void hook_dispatch_after_response(ExtensionCtx *ext_ctx, const char *content,
+void hook_dispatch_after_response(ExtensionCtx *ext_ctx, sqlite3 *db,
+                                  const char *content,
                                   const char *finish_reason, int tool_call_count) {
     if (!ext_ctx || !ext_ctx->rt || !ext_ctx->rt->ctx) return;
     HookList *hl = &ext_ctx->hooks[HOOK_AFTER_RESPONSE];
@@ -386,13 +372,21 @@ void hook_dispatch_after_response(ExtensionCtx *ext_ctx, const char *content,
 
     JSContext *ctx = (JSContext *)ext_ctx->rt->ctx;
 
-    /* Build response object as JSON */
-    cJSON *obj = cJSON_CreateObject();
-    cJSON_AddStringToObject(obj, "content", content ? content : "");
-    cJSON_AddStringToObject(obj, "finish_reason", finish_reason ? finish_reason : "");
-    cJSON_AddNumberToObject(obj, "tool_call_count", tool_call_count);
-    char *json_str = cJSON_PrintUnformatted(obj);
-    cJSON_Delete(obj);
+    /* Build response object via SQLite */
+    char *json_str = NULL;
+    sqlite3_stmt *jstmt;
+    if (sqlite3_prepare_v2(db,
+        "SELECT json_object('content',?1,'finish_reason',?2,'tool_call_count',?3)",
+        -1, &jstmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(jstmt, 1, content ? content : "", -1, SQLITE_STATIC);
+        sqlite3_bind_text(jstmt, 2, finish_reason ? finish_reason : "", -1, SQLITE_STATIC);
+        sqlite3_bind_int(jstmt, 3, tool_call_count);
+        if (sqlite3_step(jstmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(jstmt, 0);
+            if (v) json_str = strdup(v);
+        }
+        sqlite3_finalize(jstmt);
+    }
     if (!json_str) return;
 
     size_t setup_len = strlen(json_str) + 64;

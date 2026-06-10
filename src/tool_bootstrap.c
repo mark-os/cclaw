@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_bootstrap.h"
 #include "db.h"
-#include <cJSON.h>
 #include "tool_parse.h"
 #include <stdlib.h>
 #include <string.h>

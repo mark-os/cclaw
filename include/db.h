@@ -247,7 +247,7 @@ void memory_block_free(MemoryBlock *mb);
 /* Free a MemoryBlock array. */
 void memory_block_list_free(MemoryBlock *list, int count);
 
-/* Seed memory blocks from agent.json memory_blocks[] array (cJSON).
+/* Seed memory blocks from agent.json memory_blocks[] array (SQLite json_each).
  * Only inserts blocks that don't already exist (DB authoritative). */
 void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str);
 

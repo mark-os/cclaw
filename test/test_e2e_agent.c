@@ -16,7 +16,7 @@ int main(void) {
     printf("test_e2e_agent:\n");
 
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int port = mock_server_start();

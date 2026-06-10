@@ -248,11 +248,11 @@ Config *config_load(sqlite3 *db) {
 
     /* Load providers from providers table (ordered by priority) */
     {
+        int idx = 0;
         const char *prov_sql = "SELECT name, base_url, endpoint_type, api_key_env,"
                                " default_model, context_window FROM providers ORDER BY priority;";
         sqlite3_stmt *ps;
         if (sqlite3_prepare_v2(db, prov_sql, -1, &ps, NULL) == SQLITE_OK) {
-            int idx = 0;
             size_t fb_cap = 4;
             cfg->fallback_providers = calloc(fb_cap, sizeof(ProviderConfig));
             while (sqlite3_step(ps) == SQLITE_ROW) {
@@ -286,17 +286,17 @@ Config *config_load(sqlite3 *db) {
                 idx++;
             }
             sqlite3_finalize(ps);
-            /* If no providers found, set defaults */
-            if (idx == 0) {
-                cfg->provider.base_url = strdup("https://openrouter.ai/api/v1");
-                cfg->provider.model = strdup("deepseek/deepseek-v4-flash");
-                cfg->provider.max_tokens = 4096;
-                cfg->provider.context_window = 128000;
-                cfg->provider.endpoint_type = ENDPOINT_OPENAI;
-                cfg->provider.cache_hints = CACHE_HINTS_AUTO;
-                const char *key = getenv("OPENROUTER_API_KEY");
-                if (key && key[0]) cfg->provider.api_key = strdup(key);
-            }
+        }
+        /* If no providers loaded (empty table OR stale schema), set defaults */
+        if (idx == 0) {
+            cfg->provider.base_url = strdup("https://openrouter.ai/api/v1");
+            cfg->provider.model = strdup("deepseek/deepseek-v4-flash");
+            cfg->provider.max_tokens = 4096;
+            cfg->provider.context_window = 128000;
+            cfg->provider.endpoint_type = ENDPOINT_OPENAI;
+            cfg->provider.cache_hints = CACHE_HINTS_AUTO;
+            const char *key = getenv("OPENROUTER_API_KEY");
+            if (key && key[0]) cfg->provider.api_key = strdup(key);
         }
     }
 
@@ -378,6 +378,12 @@ Config *config_load(sqlite3 *db) {
     env_override_int(&cfg->auto_recall, "CCLAW_AUTO_RECALL");
     env_override_int(&cfg->recall_max_tokens, "CCLAW_RECALL_MAX_TOKENS");
     env_override_int(&cfg->stream, "CCLAW_STREAM");
+
+    /* Log level: env override (inherited by worker child) */
+    {
+        const char *v = getenv("CCLAW_LOG_LEVEL");
+        if (v) cfg->log_level = log_level_parse(v);
+    }
 
     return cfg;
 }

@@ -6,7 +6,7 @@
 #include <string.h>
 
 static sqlite3 *setup(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     return db;
 }

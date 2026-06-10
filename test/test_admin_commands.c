@@ -18,7 +18,7 @@ static void test_key_bypasses_db(void) {
     unlink(env_path);
     unlink(db_path);
 
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     assert(db);
 
     /* Write key to env file */
@@ -50,7 +50,7 @@ static void test_config_reload(void) {
     const char *db_path = "/tmp/cclaw_test_admin_reload.db";
     unlink(db_path);
 
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     assert(db);
     db_seed_defaults(db);
 

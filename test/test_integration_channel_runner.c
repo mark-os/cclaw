@@ -58,7 +58,7 @@ static void write_test_js(void) {
 
 static sqlite3 *setup_db(int port) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     if (!db) return NULL;
 
     /* Seed channel_state */
@@ -130,7 +130,7 @@ int main(void) {
 
     /* Wait for the runner to process the getUpdates response */
     /* Poll DB until channel_events appears or timeout */
-    db = db_open(DB_PATH);
+    db = test_db_open(DB_PATH);
     if (!db) { kill(pid, SIGTERM); waitpid(pid, NULL, 0); mock_server_stop(); FAIL("db reopen"); }
 
     int found_event = 0;

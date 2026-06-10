@@ -9,7 +9,7 @@ static const char *DB_PATH = "/tmp/test_cclaw_subagent_inbox.sqlite";
 /* V13: sub-agent completion posts to parent inbox */
 static void test_subagent_completion_posts_to_parent_inbox(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
@@ -43,7 +43,7 @@ static void test_subagent_completion_posts_to_parent_inbox(void) {
 /* V13: error sub-agent also posts to parent inbox */
 static void test_subagent_error_posts_to_parent_inbox(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int64_t parent_sid = session_create(db, "parent2", NULL, -1, 0);

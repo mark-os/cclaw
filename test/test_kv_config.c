@@ -13,7 +13,7 @@
 static void test_fresh_db_defaults(void) {
     unlink(DB_PATH);
     setenv("OPENROUTER_API_KEY", "sk-test", 1);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     db_seed_defaults(db);
 

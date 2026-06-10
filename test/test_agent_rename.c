@@ -9,7 +9,7 @@
 
 static sqlite3 *setup(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     /* Seed an agent */
     sqlite3_exec(db, "INSERT INTO agents(name) VALUES('old-agent')", NULL, NULL, NULL);

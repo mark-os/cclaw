@@ -32,7 +32,7 @@ static void append_tool_result(sqlite3 *db, int64_t sid, const char *tc_id, cons
 
 static void test_basic_plan(void) {
     TEST(basic_plan);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) FAIL("db_open");
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);
@@ -58,7 +58,7 @@ static void test_basic_plan(void) {
 
 static void test_v28_filtering(void) {
     TEST(v28_filtering);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) FAIL("db_open");
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);
@@ -93,7 +93,7 @@ static void test_v28_filtering(void) {
 
 static void test_cut_point(void) {
     TEST(cut_point_respects_budget);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) FAIL("db_open");
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);
@@ -124,7 +124,7 @@ static void test_cut_point(void) {
 
 static void test_v8_tool_call_group(void) {
     TEST(v8_tool_call_group_not_split);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) FAIL("db_open");
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);
@@ -158,7 +158,7 @@ static void test_v8_tool_call_group(void) {
 
 static void test_plan_no_content_access(void) {
     TEST(plan_no_content_or_tool_calls_access);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) FAIL("db_open");
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);

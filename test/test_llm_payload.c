@@ -36,7 +36,7 @@ static const char *json_get_str(sqlite3 *db, const char *json, const char *path,
 
 static void test_openai_payload(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int64_t sid;
@@ -105,7 +105,7 @@ static void test_openai_payload(void) {
 
 static void test_gemini_payload(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int64_t sid;
@@ -158,7 +158,7 @@ static void test_gemini_payload(void) {
 
 static void test_payload_with_tools(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int64_t sid;

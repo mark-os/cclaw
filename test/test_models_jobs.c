@@ -9,7 +9,7 @@ static const char *DB_PATH = "/tmp/test_cclaw_models.db";
 
 static void test_models_table(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     db_seed_defaults(db);
 
@@ -38,7 +38,7 @@ static void test_models_table(void) {
 
 static void test_llm_jobs_claim(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     /* Insert a job */
@@ -76,7 +76,7 @@ static void test_llm_jobs_claim(void) {
 
 static void test_providers_status_column(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     db_seed_defaults(db);
 

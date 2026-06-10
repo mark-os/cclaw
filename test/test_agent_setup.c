@@ -18,7 +18,7 @@ static void test_cli_mode_excludes_daemon_tools(void) {
     TEST(cli_mode_excludes_daemon_tools);
     const char *dbpath = "/tmp/test_agent_setup_cli.db";
     unlink(dbpath);
-    sqlite3 *db = db_open(dbpath);
+    sqlite3 *db = test_db_open(dbpath);
     if (!db) { FAIL("db_open_agent"); return; }
 
     /* Create a session */
@@ -79,7 +79,7 @@ static void test_daemon_mode_includes_all_tools(void) {
     TEST(daemon_mode_includes_all_tools);
     const char *dbpath = "/tmp/test_agent_setup_daemon.db";
     unlink(dbpath);
-    sqlite3 *db = db_open(dbpath);
+    sqlite3 *db = test_db_open(dbpath);
     if (!db) { FAIL("db_open_agent"); return; }
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);

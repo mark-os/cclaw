@@ -10,7 +10,7 @@
 
 static int test_create_ephemeral(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     char *name = agent_create_ephemeral("agents", db);

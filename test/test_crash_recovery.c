@@ -60,7 +60,7 @@ static int64_t insert_tool_result(sqlite3 *db, int64_t session_id,
 
 static void test_crash_recovery_synthesizes_notice(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int64_t sid = session_create(db, "crash_test", NULL, -1, 0);
@@ -130,7 +130,7 @@ static void test_crash_recovery_synthesizes_notice(void) {
 
 static void test_crash_recovery_partial_results(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int64_t sid = session_create(db, "partial_crash", NULL, -1, 0);
@@ -186,7 +186,7 @@ static void test_crash_recovery_partial_results(void) {
 
 static void test_no_crash_no_recovery(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int64_t sid = session_create(db, "no_crash", NULL, -1, 0);

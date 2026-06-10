@@ -113,12 +113,29 @@ static void test_schemas_null_reg(void) {
     printf("  PASS test_schemas_null_reg\n");
 }
 
+static void test_whitelist_no_match(void) {
+    ToolRegistry reg;
+    tools_init(&reg);
+    tools_register(&reg, "shell_exec", "run cmd", "{}", dummy_handler, NULL);
+
+    const char *wl[] = {"nonexistent"};
+    ToolSchema schemas[TOOLS_MAX];
+    size_t count = tools_schemas_filtered(&reg, wl, 1, schemas, TOOLS_MAX);
+    assert(count == 0);
+    assert(tools_is_whitelisted("shell_exec", wl, 1) == 0);
+    assert(tools_is_whitelisted(NULL, wl, 1) == 0);
+
+    tools_free(&reg);
+    printf("  PASS test_whitelist_no_match\n");
+}
+
 int main(void) {
     alarm(10);
     printf("test_tools_edge:\n");
     test_whitelist_null_allows_all();
     test_whitelist_null_name();
     test_whitelist_match();
+    test_whitelist_no_match();
     test_schemas_filtered();
     test_schemas_filtered_null_whitelist();
     test_free_fn_called_on_cleanup();

@@ -20,11 +20,17 @@ typedef struct {
  * Returns NULL on failure. */
 sqlite3 *db_open(const char *path);
 
+/* Apply schema (CREATE TABLE IF NOT EXISTS). Call once from main process. */
+int db_ensure_schema(sqlite3 *db);
+
 /* Seed default config + provider. Call once from main() on first run. */
 int db_seed_defaults(sqlite3 *db);
 
 /* Set mmap + reduced cache pragmas for child processes (short-lived). */
 void db_set_child_pragmas(sqlite3 *db);
+
+/* Enable sqlite3_trace_v2 profiling (logs queries > 1ms via syslog). */
+void db_enable_trace(sqlite3 *db);
 
 /* Close DB handle. */
 void db_close(sqlite3 *db);
@@ -266,4 +272,12 @@ char *session_get_last_route(sqlite3 *db, int64_t session_id);
 
 /* Rate limiting — returns 1 if under limit (ok to proceed), 0 if exceeded */
 int rate_limit_check(sqlite3 *db, const char *provider_name);
+
+/* Convenience: open + ensure schema. Used by tests and one-shot tools. */
+static inline sqlite3 *test_db_open(const char *path) {
+    sqlite3 *db = db_open(path);
+    if (db) db_ensure_schema(db);
+    return db;
+}
+
 #endif

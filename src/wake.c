@@ -16,6 +16,8 @@ static void set_nonblock(int fd) {
 
 int wake_init(void) {
     if (pipe(g_pipe) != 0) return -1;
+    fcntl(g_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(g_pipe[1], F_SETFD, FD_CLOEXEC);
     set_nonblock(g_pipe[0]);
     set_nonblock(g_pipe[1]);
     return 0;
@@ -55,7 +57,7 @@ int wake_fifo_open(const char *db_path) {
     if (!path) return -1;
     unlink(path);
     if (mkfifo(path, 0600) != 0 && errno != EEXIST) { free(path); return -1; }
-    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     free(path);
     return fd;
 }

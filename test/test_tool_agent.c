@@ -11,7 +11,7 @@
 #include <sys/wait.h>
 
 static sqlite3 *setup_db(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db != NULL);
     return db;
 }

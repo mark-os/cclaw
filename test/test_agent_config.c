@@ -10,7 +10,7 @@
 
 static void test_whitelist_add_remove(void) {
     unlink("/tmp/test_agent_wl.db");
-    sqlite3 *db = db_open("/tmp/test_agent_wl.db");
+    sqlite3 *db = test_db_open("/tmp/test_agent_wl.db");
     assert(db != NULL);
     db_agent_upsert(db, "bot", NULL, NULL, NULL);
 
@@ -47,7 +47,7 @@ static void test_whitelist_add_remove(void) {
 
 static void test_add_tool(void) {
     unlink("/tmp/test_agent_tool.db");
-    sqlite3 *db = db_open("/tmp/test_agent_tool.db");
+    sqlite3 *db = test_db_open("/tmp/test_agent_tool.db");
     assert(db);
     db_agent_upsert(db, "bot", NULL, NULL, NULL);
 

@@ -9,7 +9,7 @@
 #define FAIL(msg) do { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } while(0)
 
 static sqlite3 *setup_db(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) { FAIL("db_open"); }
     return db;
 }

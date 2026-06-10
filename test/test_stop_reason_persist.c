@@ -22,7 +22,7 @@ static void test_stop_reason_roundtrip(void) {
     if (fd < 0) FAIL("mkstemp");
     close(fd);
 
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     if (!db) { unlink(path); FAIL("db_open"); }
 
     int64_t sid = session_create(db, "test_sr", NULL, -1, 0);
@@ -62,7 +62,7 @@ static void test_stop_reason_none_not_stored(void) {
     if (fd < 0) FAIL("mkstemp");
     close(fd);
 
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     if (!db) { unlink(path); FAIL("db_open"); }
 
     int64_t sid = session_create(db, "test_sr2", NULL, -1, 0);
@@ -98,7 +98,7 @@ static void test_all_stop_reasons(void) {
     if (fd < 0) FAIL("mkstemp");
     close(fd);
 
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     if (!db) { unlink(path); FAIL("db_open"); }
 
     int64_t sid = session_create(db, "test_sr3", NULL, -1, 0);

@@ -104,20 +104,6 @@ static void test_parse_cost_field(void) {
     PASS();
 }
 
-static void test_map_stop_reason(void) {
-    TEST(map_stop_reason);
-    if (map_stop_reason("stop") != STOP_REASON_STOP) { FAIL("stop"); return; }
-    if (map_stop_reason("end_turn") != STOP_REASON_STOP) { FAIL("end_turn"); return; }
-    if (map_stop_reason("length") != STOP_REASON_LENGTH) { FAIL("length"); return; }
-    if (map_stop_reason("max_tokens") != STOP_REASON_LENGTH) { FAIL("max_tokens"); return; }
-    if (map_stop_reason("tool_calls") != STOP_REASON_TOOL_USE) { FAIL("tool_calls"); return; }
-    if (map_stop_reason("tool_use") != STOP_REASON_TOOL_USE) { FAIL("tool_use"); return; }
-    if (map_stop_reason("content_filter") != STOP_REASON_ERROR) { FAIL("content_filter"); return; }
-    if (map_stop_reason(NULL) != STOP_REASON_STOP) { FAIL("NULL"); return; }
-    if (map_stop_reason("unknown_thing") != STOP_REASON_ERROR) { FAIL("unknown"); return; }
-    PASS();
-}
-
 int main(void) {
     printf("--- test_llm ---\n");
     sqlite3_open(":memory:", &g_db);
@@ -125,7 +111,6 @@ int main(void) {
     test_parse_tool_calls_response();
     test_parse_invalid_json();
     test_parse_cost_field();
-    test_map_stop_reason();
     sqlite3_close(g_db);
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

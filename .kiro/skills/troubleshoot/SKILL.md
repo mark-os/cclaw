@@ -92,8 +92,75 @@ SELECT id, name, leaf_id, state FROM sessions WHERE id=N;
 | blank response | empty content stored as `""` | entries table, content column |
 | "error: LLM request failed after retries" | HTTP 429/5xx exhausted retries | journal stderr, --log-level=trace |
 | no response at all | agent crashed (SIGKILL/OOM) | session state=running, no final entry |
+| hangs forever | worker thread deadlock/crash | step 9 |
 | partial response | `finish_reason=length` (E8) | stop_reason=2 in entries |
 | wrong response shown | stale leaf_id (WAL visibility) | compare leaf_id vs max entry id |
+
+## 9. Process-level hangs and crashes
+
+When cclaw hangs (no output, no error, prompt never returns), the issue is
+below the LLM layer — in the worker threads, DB, or process plumbing.
+
+### Triage order
+
+```bash
+# 0. Kill orphan cclaw processes from previous runs
+pkill -9 -f "build/cclaw"; sleep 1
+
+# 1. Reproduce with trace — redirect to FILE, never pipe through head/grep
+timeout 10 ./build/cclaw --log-level=trace --new -p "test" >/tmp/out.txt 2>/tmp/err.txt
+# Then read the files:
+cat /tmp/err.txt
+
+# 2. Check if it's the worker or the LLM path — run LLM directly
+sqlite3 ~/.cclaw/cclaw.db "SELECT id FROM sessions ORDER BY id DESC LIMIT 1;"
+CCLAW_DB=~/.cclaw/cclaw.db timeout 10 ./build/cclaw llm -s <ID>
+# If this works instantly → problem is worker subsystem, not LLM
+
+# 3. Try fork mode (bypasses worker threads entirely)
+timeout 10 ./build/cclaw --llm-fork --new -p "test"
+# If this works → problem is specifically in the worker thread pool
+
+# 4. For crashes/segfaults — use the debug build
+make debug
+timeout 10 ./build/cclaw --new -p "test"
+# ASAN prints stack trace on crash. No strace/gdb needed.
+
+# 5. For deadlocks — check what the process is doing
+./build/cclaw --new -p "test" & PID=$!; sleep 3
+ls -la /proc/$PID/fd/          # file descriptors
+cat /proc/$PID/stack           # kernel stack (shows syscall)
+kill $PID
+```
+
+### Rules for debugging agents
+
+- **Never pipe cclaw output through head/grep/tail** — SIGPIPE kills the
+  process and gives false results. Always redirect to file first, then read.
+- **Kill orphans first** — stale processes hold DB locks and confuse pgrep.
+- **Use `make debug` for crashes** — ASAN catches NULL derefs, UAF, buffer
+  overflows with exact stack traces. Faster than strace.
+- **`--llm-fork` isolates** — if fork mode works and worker mode doesn't,
+  the bug is in the thread pool, not the LLM code path.
+- **`./build/cclaw llm -s <id>` isolates further** — runs one LLM call in a
+  clean subprocess. If this works, the request building and HTTP are fine.
+
+### Worker thread observability
+
+The worker threads log to syslog (LOG_PERROR tees to stderr):
+- `worker: session=N model start` — thread picked up job
+- `llm_req: Nms status=200 model=X` — HTTP call completed
+- `worker: config_load failed` — DB or schema issue
+
+At `--log-level=trace`, `sqlite3_trace_v2` logs any query taking >1ms.
+
+### Known past issues (resolved)
+
+| issue | root cause | fix |
+|-------|-----------|-----|
+| worker thread deadlock | bare fork (no exec) inherited poisoned glibc mutexes | switched to in-process threads |
+| config_load returns NULL base_url | providers table query fails on stale schema, fallback was inside the if-guard | moved fallback outside prepare-success block |
+| dispatcher drain loop blocks | pipe fd not set to O_NONBLOCK after exec | set O_NONBLOCK on ping fd |
 
 ## Files
 

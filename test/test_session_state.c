@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 static void test_valid_transitions(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
     assert(sid > 0);
@@ -30,7 +30,7 @@ static void test_valid_transitions(void) {
 }
 
 static void test_invalid_transitions(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
     assert(sid > 0);
@@ -55,7 +55,7 @@ static void test_invalid_transitions(void) {
 }
 
 static void test_concurrent_acquire(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t s1 = session_create(db, "a", NULL, -1, 0);
     int64_t s2 = session_create(db, "b", NULL, -1, 0);

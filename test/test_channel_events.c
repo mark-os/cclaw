@@ -35,7 +35,7 @@ static void test_channel_events_routing(void) {
     setup();
 
     /* Open daemon DB */
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     /* T297: single DB — set path for daemon helpers */
@@ -117,7 +117,7 @@ static void test_channel_events_routing(void) {
 static void test_channel_events_default_binding(void) {
     setup();
 
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     /* Set up "default" binding for channel type */
@@ -142,7 +142,7 @@ static void test_channel_events_default_binding(void) {
 static void test_channels_table(void) {
     setup();
 
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     /* Insert a channel row */

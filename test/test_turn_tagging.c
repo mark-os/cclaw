@@ -29,7 +29,7 @@ static int64_t get_entry_turn_id(sqlite3 *db, int64_t entry_id) {
 
 static void test_next_turn_id_empty_session(void) {
     TEST(next_turn_id_empty_session);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     int64_t tid = db_next_turn_id(db, sid);
     if (tid != 1) { FAIL("expected 1 for empty session"); db_close(db); return; }
@@ -39,7 +39,7 @@ static void test_next_turn_id_empty_session(void) {
 
 static void test_next_turn_id_increments(void) {
     TEST(next_turn_id_increments);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message msg = {.role = ROLE_USER, .content = "hello"};
@@ -58,7 +58,7 @@ static void test_next_turn_id_increments(void) {
 
 static void test_append_with_turn_tags_entry(void) {
     TEST(append_with_turn_tags_entry);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message msg = {.role = ROLE_USER, .content = "hi"};
@@ -74,7 +74,7 @@ static void test_append_with_turn_tags_entry(void) {
 
 static void test_multiple_entries_same_turn(void) {
     TEST(multiple_entries_same_turn);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     /* Simulate a turn: assistant + tool_result share turn_id=1 */
@@ -98,7 +98,7 @@ static void test_multiple_entries_same_turn(void) {
 
 static void test_entries_without_turn_id_ignored(void) {
     TEST(entries_without_turn_id_ignored);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     /* entry_append (no turn_id) leaves turn_id NULL */

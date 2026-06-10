@@ -53,7 +53,7 @@ static void test_fifo_wake(void) {
 
 static void test_outbox_insert(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     assert(channel_outbox_insert(db, "telegram", 42,

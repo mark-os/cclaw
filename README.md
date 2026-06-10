@@ -1,78 +1,6 @@
 # CClaw
 
-A minimal autonomous AI agent runtime in C. Turn-based execution, SQLite persistence, Unix process model. Adaptable via MicroQuickJS plugins.
-
-## Design Philosophy
-
-- **Agent runtime first** — excellent at running agent loops across providers.
-- **Daemon as init** — schedules, forks, reaps. Never executes LLM logic.
-- **Agents as users** — each gets a workspace directory, sessions scoped by name.
-- **Processes are disposable** — one turn, then exit. Memory fully reclaimed.
-- **Exit codes as IPC** — agents signal intent, daemon reads details from DB.
-- **Config via environment** — injected at fork, immutable for process lifetime.
-
-## Architecture
-
-```mermaid
-graph TD
-    CLI[CLI<br/>standalone process]
-    TG[Telegram poller<br/>thread]
-    WEB[Civetweb<br/>webhooks]
-    CRON[Cron thread]
-
-    TG --> INBOX[inbox_insert + signal pipe]
-    WEB --> INBOX
-    CRON --> INBOX
-
-    INBOX --> DAEMON[DAEMON<br/>epoll: signal pipe + SIGCHLD<br/>fork agent on inbox signal<br/>reap children, dispatch on exit code]
-
-    DAEMON --> A1[Agent process<br/>setrlimit · drain inbox<br/>LLM loop · exit code]
-    DAEMON --> A2[Agent process<br/>setrlimit · drain inbox<br/>LLM loop · exit code]
-
-    CLI --> DB
-    A1 --> DB
-    A2 --> DB
-
-    DB[(SQLite WAL<br/>cclaw.db)]
-```
-
-**Daemon mode** (`--daemon`): epoll loop forks isolated agent processes per session turn. Dispatches on exit code (0=deliver, 2=spawn, 3=approval, 4=config).
-
-**CLI mode** (default): single process, runs the agent loop directly against `~/.cclaw/cclaw.db`.
-
-**Agent processes**: sandboxed with setrlimit (memory/CPU caps). Drain inbox → LLM loop → write response → exit with intent code.
-
-## Deployment Models
-
-Agent processes are stateless — one turn, then exit, memory fully reclaimed. All persistent state lives in SQLite (single `cclaw.db`). This means any environment that can provide env vars + SQLite can run agent turns:
-
-- **CLI** (default) — single process, no daemon. Proves the agent loop is self-contained.
-- **Linux daemon** — orchestrator that forks/reaps agent processes, handles channels, cron, approvals. Not required for agent execution.
-- **Lambda / Workers / embedded** — set `CCLAW_*` env vars, point at a cclaw.db, run one turn. No daemon, no long-lived process.
-
-The daemon adds multi-agent coordination, Telegram/webhook channels, and sub-agent spawning. The core agent loop needs nothing beyond env config and a writable SQLite file.
-
-## Security
-
-- **Agent process**: `setrlimit` (memory/CPU caps). Trusted compiled code; tools enforce policy (workspace-scoped file ops, host allowlist on HTTP).
-- **Shell children**: namespace-isolated (CLONE_NEWUSER, CLONE_NEWNET, CLONE_NEWNS). Filesystem restricted to workspace (rw) + system dirs (ro). Network access proxied back to the agent via UDS — agent enforces host allowlist.
-- **Secrets**: encrypted at rest in cclaw.db (ChaCha20-Poly1305). Decrypted by daemon, injected via env at fork.
-
-## Requirements
-
-- Linux (any arch: ARM64, ARMv7, ARMv5TE, x86_64, RISC-V)
-- libcurl (system, dynamic link — sole runtime dependency)
-- An OpenAI-compatible API key (default: OpenRouter)
-
-## Building
-
-```bash
-make              # build ./build/cclaw
-make test         # unit tests (fast, no network)
-make clean        # remove build/
-```
-
-System requirement: a C11 compiler and `libcurl` development headers (`libcurl-dev` / `libcurl-devel`). Everything else is vendored.
+A minimal autonomous AI agent runtime in C. Single binary, multi-agent, fork+exec for isolation. Runs anywhere libcurl does.
 
 ## Quick Start
 
@@ -82,61 +10,151 @@ make
 ./build/cclaw
 ```
 
-That's it. First run creates `~/.cclaw/` with everything needed.
+First run creates `~/.cclaw/`, bootstraps a default agent, and walks you through setup interactively.
 
-## Configuration
+## Architecture
 
-Config resolution (highest priority first):
-
-1. `CCLAW_*` env vars (works everywhere: Lambda, Workers, daemon fork)
-2. `~/.cclaw/cclaw.db` kv table (persistent, encrypted secrets)
-3. `OPENROUTER_API_KEY` env var (system-level fallback)
+CClaw combines threads for concurrency with fork+exec for isolation. The main process uses a poll loop (not an event loop — no callbacks, no async) with worker threads for LLM calls. Tool execution forks+execs to sandbox untrusted work in separate address spaces.
 
 ```
-~/.cclaw/
-├── cclaw.db           ← all state (sessions, entries, config, memory)
-├── .cclaw_key         ← encryption key (mode 0600)
-└── agents/
-    └── default/
-        └── workspace/ ← agent-created files
+Main process
+├─ main thread: poll loop (stdin, signals, worker notifications)
+├─ worker threads (1–N elastic, each owns sqlite3* + CURL*)
+│    LLM HTTP calls, connection reuse, 30s idle timeout
+│
+├─ fork+exec → shell children (sandboxed: namespaces, no network)
+└─ fork+exec → channel runners (long-lived, per messaging platform)
 ```
+
+All state lives in a single SQLite WAL database (`cclaw.db`). Sessions, entries, config, memory, secrets, job queue — one file, one source of truth. WAL mode allows concurrent reads and writes across threads without blocking.
+
+**CLI mode** (default): main process with worker thread pool. Simple, fast, no daemon.
+
+**Daemon mode** (`--daemon`): adds Telegram polling, webhook server, cron scheduling, and multi-agent coordination. Worker threads handle concurrent sessions. `--llm-fork` is available as a fallback that fork+execs each LLM call for full process isolation at the cost of connection reuse.
+
+## Secure
+
+Agent tool calls are sandboxed at multiple levels:
+
+- **Shell children** run in Linux namespaces (CLONE_NEWUSER, CLONE_NEWNET, CLONE_NEWNS). Filesystem restricted to workspace (rw) + system dirs (ro). No direct network access.
+- **Network proxy** — shell children that need HTTP connect back to the parent via a Unix domain socket. The parent enforces a per-agent host allowlist before forwarding. No unvetted outbound connections.
+- **Workspace isolation** — file tools are scoped to `agents/<name>/workspace/`. No traversal, no access to other agents' data.
+- **Secrets** — encrypted at rest in cclaw.db (ChaCha20-Poly1305, via Monocypher). Decrypted only at runtime, injected via env, never exposed to the model or logged.
+- **Resource limits** — agent processes get `setrlimit` caps (memory, CPU time) preventing runaway consumption.
+
+## Portable
+
+CClaw vendors everything except libcurl:
+
+| Vendored | Purpose |
+|----------|---------|
+| SQLite 3.53 | All persistence |
+| civetweb | Embedded HTTP server |
+| MicroQuickJS | JS plugin engine |
+| Monocypher | Encryption |
+
+**Runtime dependency:** `libcurl.so` (system-provided, dynamically linked). Available on every Linux distribution, every architecture.
+
+**Build dependency:** a C11 compiler. That's it.
+
+**Targets:** ARM64, ARMv7, ARMv5TE, x86_64, RISC-V. Tested on EC2 t4g.small, Chromebooks, and a Pogoplug V4 (128MB RAM, ARMv5TE).
+
+```
+Binary size: 2.1 MB (1.5 MB is SQLite)
+Peak RSS:    9.7 MB (single turn)
+Startup:     10 ms
+```
+
+## Self-Configuring
+
+Agents can request their own reconfiguration through exit codes and tool calls:
+
+- **Provider configuration** — agents call `configure_provider` to set API keys, models, endpoints
+- **Channel configuration** — agents call `configure_channel` to set up Telegram bots or webhooks
+- **Agent creation** — agents call `create_agent` to spawn new agents with custom system prompts and tool permissions
+- **Approval flow** — agents can request human approval for sensitive operations (exit code 3 → daemon queues for approval)
+- **Escalation** — a sub-agent that hits its limits can escalate to its parent agent
+
+Configuration is hierarchical: env vars override DB values override defaults. Agents read from DB but can only write through sanctioned tool calls.
+
+## Extensible
+
+The MicroQuickJS plugin system lets agents load JavaScript extensions at runtime:
+
+- **Channel plugins** — JS files that implement polling/sending for messaging platforms (Telegram ships built-in, others addable)
+- **Runtime tools** — agents can define new tools via `js_define_tool`, expanding their own capabilities mid-session
+- **Custom logic** — extensions loaded from `agents/<name>/workspace/` at startup, scoped per-agent
+
+Channels are self-contained JS programs that speak a simple protocol: poll for messages, emit events to the DB, read outbox for responses. The daemon manages their lifecycle (spawn, monitor, restart).
+
+## Self-Bootstrapping
+
+On first run with just an API key, CClaw:
+
+1. Creates a bootstrap agent with elevated permissions
+2. The bootstrap agent walks the user through setup conversationally
+3. User provides secrets (API keys, bot tokens) via `request_config` — the agent asks, the CLI collects input, encrypts it, stores it. **The secret value is never shown to the model.**
+4. The bootstrap agent creates a permanent agent with appropriate tools and permissions
+5. Setup complete — the bootstrap agent demotes itself
+
+No manual config files. No YAML. The agent configures itself through the same tool-call interface it uses for everything else.
 
 ## Usage
 
 ```bash
-cclaw                    # interactive CLI (default agent, streaming output)
+cclaw                    # interactive CLI (default agent, streaming)
 cclaw -p "hello"         # single-turn: print response and exit
 cclaw -s 3               # resume session 3
 cclaw --new              # force new session
-cclaw --daemon           # run as daemon (telegram, web, cron)
-cclaw --log-level=trace  # full LLM request/response JSON to stderr
-cclaw --help             # show all options
+cclaw --daemon           # daemon mode (channels, cron, multi-agent)
+cclaw -v                 # debug logging (timing, SQL profiling)
+cclaw -vv                # trace logging (full LLM req/resp JSON)
+cclaw --llm-fork         # use fork-per-call instead of thread pool
+cclaw --help             # all options
+```
+
+## Configuration
+
+Priority (highest first):
+
+1. `CCLAW_*` env vars
+2. `~/.cclaw/cclaw.db` kv table
+3. `OPENROUTER_API_KEY` env var (convenience fallback)
+
+```
+~/.cclaw/
+├── cclaw.db           ← all state
+├── .cclaw_key         ← encryption key (mode 0600)
+└── agents/
+    └── default/
+        └── workspace/ ← agent file sandbox
+```
+
+## Building
+
+```bash
+make              # build ./build/cclaw
+make test         # unit tests (no network)
+make debug        # ASAN + UBSan build (clang, -O0 -g3)
+make clean        # remove build/
 ```
 
 ## Benchmarks
 
-Measured on Acer Chromebook Plus 514 (Intel i3-N305, 8GB RAM, Linux container). Still optimizing memory usage.
+Measured on Acer Chromebook Plus 514 (Intel i3-N305, 8GB RAM, Linux container).
 
 ```
-Binary size:     2.1 MB (1.5 MB is SQLite)
-Startup:         10 ms (--help)
-DB open:         1 ms (existing DB), 165 ms (first run with schema creation)
-Agent overhead:  ~13 ms (DB + context build + setup, before network)
-Peak RSS:        9.7 MB (single turn — includes curl + SQLite + arena)
-```
-
-TTFB breakdown against OpenRouter (DeepSeek V4 Flash):
-
-```
-CClaw overhead:   13 ms
-DNS + TCP + TLS: 113 ms
-LLM generation: 1073 ms (model-dependent)
+Agent overhead:  ~13 ms (DB + context build, before network)
+TTFB breakdown (OpenRouter, DeepSeek V4 Flash):
+  CClaw:         13 ms
+  DNS+TCP+TLS:  113 ms
+  LLM:         1073 ms (model-dependent)
 ```
 
 ## Documentation
 
-- [SPEC.md](SPEC.md) — full specification, invariants, and task list
-- [specs/](specs/) — detailed reference docs (schema, daemon, memory, providers, security)
+- [SPEC.md](SPEC.md) — specification, invariants, task list
+- [specs/](specs/) — reference docs (schema, daemon, memory, providers, security)
 - [AGENTS.md](AGENTS.md) — project ethos, coding conventions, build instructions
 
 ## Acknowledgements
@@ -151,8 +169,6 @@ LLM generation: 1073 ms (model-dependent)
 | [Monocypher 4.0.2](https://monocypher.org) | BSD-2-Clause / CC0-1.0 |
 
 ### Inspiration
-
-These projects informed CClaw's design. No code was taken from them.
 
 | Project | What we learned |
 |---------|-----------------|

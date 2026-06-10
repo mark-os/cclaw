@@ -8,7 +8,7 @@ static const char *DB_PATH = "/tmp/test_cclaw_inbox_rollback.sqlite";
 
 /* V18: rollback on missing session (leaf_id lookup fails) */
 static void test_rollback_missing_session(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "rollback_miss", NULL, -1, 0);
     assert(sid > 0);
@@ -46,7 +46,7 @@ static int progress_abort(void *data) {
 
 /* V18: mid-transaction abort via progress handler → full rollback */
 static void test_rollback_mid_consumption(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "rollback_mid", NULL, -1, 0);
     assert(sid > 0);
@@ -81,7 +81,7 @@ static void test_rollback_mid_consumption(void) {
             /* Simpler: just recreate */
             db_close(db);
             unlink(DB_PATH);
-            db = db_open(DB_PATH);
+            db = test_db_open(DB_PATH);
             sid = session_create(db, "rollback_mid", NULL, -1, 0);
             for (int i = 0; i < 5; i++) {
                 char buf[32];
@@ -110,7 +110,7 @@ static void test_rollback_mid_consumption(void) {
 
 /* V18: successful consume then verify no double-consume on retry */
 static void test_no_double_consume_after_success(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "no_double", NULL, -1, 0);
     assert(sid > 0);

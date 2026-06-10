@@ -7,7 +7,7 @@
 static const char *DB_PATH = "/tmp/test_cclaw_inbox.sqlite";
 
 static void test_inbox_insert(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "inbox_test", NULL, -1, 0);
     assert(sid > 0);
@@ -22,7 +22,7 @@ static void test_inbox_insert(void) {
 }
 
 static void test_inbox_peek_empty(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "inbox_empty", NULL, -1, 0);
     assert(sid > 0);
@@ -37,7 +37,7 @@ static void test_inbox_peek_empty(void) {
 }
 
 static void test_inbox_peek_returns_unconsumed(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "inbox_peek", NULL, -1, 0);
     assert(sid > 0);
@@ -61,7 +61,7 @@ static void test_inbox_peek_returns_unconsumed(void) {
 }
 
 static void test_inbox_peek_respects_limit(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "inbox_limit", NULL, -1, 0);
     assert(sid > 0);
@@ -83,7 +83,7 @@ static void test_inbox_peek_respects_limit(void) {
 }
 
 static void test_inbox_peek_session_isolation(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t s1 = session_create(db, "inbox_iso1", NULL, -1, 0);
     int64_t s2 = session_create(db, "inbox_iso2", NULL, -1, 0);
@@ -107,7 +107,7 @@ static void test_inbox_peek_session_isolation(void) {
 }
 
 static void test_inbox_consume_into_entries(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "inbox_consume", NULL, -1, 0);
     assert(sid > 0);
@@ -147,7 +147,7 @@ static void test_inbox_consume_into_entries(void) {
 }
 
 static void test_inbox_consume_empty(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "inbox_consume_empty", NULL, -1, 0);
     assert(sid > 0);
@@ -160,7 +160,7 @@ static void test_inbox_consume_empty(void) {
 }
 
 static void test_inbox_consume_respects_limit(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "inbox_consume_limit", NULL, -1, 0);
     assert(sid > 0);
@@ -185,7 +185,7 @@ static void test_inbox_consume_respects_limit(void) {
 }
 
 static void test_inbox_count(void) {
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     int64_t sid = session_create(db, "inbox_count", NULL, -1, 0);
     assert(sid > 0);

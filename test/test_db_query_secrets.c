@@ -45,7 +45,7 @@ static void teardown(void) {
 static void test_select_star_filters_secrets(void) {
     TEST(select_star_filters_secrets);
 
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     if (!db) FAIL("db_open");
 
     uint8_t key[32];
@@ -83,7 +83,7 @@ static void test_select_star_filters_secrets(void) {
 static void test_where_clause_secret_key(void) {
     TEST(where_clause_secret_key);
 
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     if (!db) FAIL("db_open");
 
     char *result = tool_db_query_handler(
@@ -103,7 +103,7 @@ static void test_where_clause_secret_key(void) {
 static void test_non_kv_table_unaffected(void) {
     TEST(non_kv_table_unaffected);
 
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     if (!db) FAIL("db_open");
 
     /* sessions table should work normally */
@@ -122,7 +122,7 @@ static void test_non_kv_table_unaffected(void) {
 static void test_count_excludes_secrets(void) {
     TEST(count_excludes_secrets);
 
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     if (!db) FAIL("db_open");
 
     /* Count only plaintext rows — secrets filtered at row level */

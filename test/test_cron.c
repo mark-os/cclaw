@@ -51,7 +51,7 @@ static void test_cron_next_run_step(void) {
 }
 
 static void test_cron_crud(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
     int64_t sid = session_create(db, "cron_test", NULL, -1, 0);
@@ -82,7 +82,7 @@ static void test_cron_crud(void) {
 }
 
 static void test_cron_table_created(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
     sqlite3_stmt *stmt;
@@ -98,7 +98,7 @@ static void test_cron_table_created(void) {
 }
 
 static void test_cron_agent_isolation(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);

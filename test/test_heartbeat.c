@@ -18,7 +18,7 @@ static void test_heartbeat_disabled(void) {
 }
 
 static void test_heartbeat_injects_inbox(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
     /* Init signal pipe so wake_session doesn't fail */
@@ -69,7 +69,7 @@ static void test_heartbeat_injects_inbox(void) {
 }
 
 static void test_heartbeat_skips_non_idle(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     assert(wake_init() == 0);
 

@@ -19,7 +19,7 @@ static void test_cli_session_resume(void) {
     TEST(cli_session_resume);
     const char *dbpath = "test_cli_resume.db";
     unlink(dbpath);
-    sqlite3 *db = db_open(dbpath);
+    sqlite3 *db = test_db_open(dbpath);
     if (!db) { FAIL("db_open"); return; }
 
     int64_t s1 = session_create(db, "first", NULL, -1, 0);
@@ -78,7 +78,7 @@ static void test_cli_zero_config_startup(void) {
     }
 
     system("mkdir -p .cclaw/agents/default");
-    sqlite3 *db = db_open(".cclaw/agents/default/agent.db");
+    sqlite3 *db = test_db_open(".cclaw/agents/default/agent.db");
     if (!db) {
         chdir(cwd); system("rm -rf .cclaw_test_zc"); config_free(cfg);
         FAIL("db_open_agent failed"); return;

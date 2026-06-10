@@ -8,7 +8,7 @@
 #include <string.h>
 
 static sqlite3 *setup(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     session_create(db, "test", NULL, -1, 0);
     return db;

@@ -8,7 +8,7 @@
 #include <string.h>
 
 static void test_cron_set_valid(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
@@ -26,7 +26,7 @@ static void test_cron_set_valid(void) {
 }
 
 static void test_cron_set_invalid_expr(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -41,7 +41,7 @@ static void test_cron_set_invalid_expr(void) {
 }
 
 static void test_cron_set_missing_fields(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -55,7 +55,7 @@ static void test_cron_set_missing_fields(void) {
 }
 
 static void test_cron_list_empty(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -69,7 +69,7 @@ static void test_cron_list_empty(void) {
 }
 
 static void test_cron_list_with_jobs(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -88,7 +88,7 @@ static void test_cron_list_with_jobs(void) {
 }
 
 static void test_cron_remove_valid(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -113,7 +113,7 @@ static void test_cron_remove_valid(void) {
 }
 
 static void test_cron_remove_nonexistent(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -127,7 +127,7 @@ static void test_cron_remove_nonexistent(void) {
 }
 
 static void test_cron_register(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
     ToolRegistry reg;

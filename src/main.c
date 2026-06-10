@@ -301,7 +301,9 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
         return -1;
     }
     if (pid == 0) {
-        /* Child: write result to pipe, exit */
+        /* Child: only the output pipe write end is inherited (no O_CLOEXEC).
+         * Parent infrastructure fds (DB, sigchld pipe, notify pipe) are
+         * O_CLOEXEC and will close on exec within the shell sandbox. */
         close(pipefd[0]);
         char *result = te->handler(tc->arguments, te->user_data);
         if (result) {
@@ -563,6 +565,8 @@ static void print_usage(void) {
            "  -y                 yolo mode: no sandbox, all hosts allowed\n"
            "  --new              create a new session\n"
            "  --log-level=LEVEL  set log level (error|info|debug|trace)\n"
+           "  -v, --debug        debug logging (timing, context stats)\n"
+           "  -vv, --trace       trace logging (full req/resp JSON)\n"
            "  --help             show this help\n");
 }
 
@@ -693,6 +697,8 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--channel") == 0) { if (++i >= argc) { fprintf(stderr, "--channel requires name\n"); return 1; } channel_mode = argv[i]; }
         else if (strcmp(argv[i], "llm") == 0) llm_mode = 1;
         else if (strncmp(argv[i], "--log-level=", 12) == 0) { log_level_override = log_level_parse(argv[i]+12); log_level_set = 1; }
+        else if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-v") == 0) { log_level_override = LOG_LEVEL_DEBUG; log_level_set = 1; }
+        else if (strcmp(argv[i], "--trace") == 0 || strcmp(argv[i], "-vv") == 0) { log_level_override = LOG_LEVEL_TRACE; log_level_set = 1; }
         else if (strcmp(argv[i], "--new") == 0) new_session = 1;
         else if (strcmp(argv[i], "-y") == 0) yolo_mode = 1;
         else if (strcmp(argv[i], "--llm-fork") == 0) g_llm_fork = 1;
@@ -716,6 +722,7 @@ int main(int argc, char *argv[]) {
     ensure_parent_dir(db_path);
     g_db = db_open(db_path);
     if (!g_db) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
+    if (db_ensure_schema(g_db) != 0) { db_close(g_db); free(db_path); return 1; }
 
     { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
 
@@ -734,6 +741,10 @@ int main(int argc, char *argv[]) {
                               log_level_override == LOG_LEVEL_ERROR ? "error" : "info";
         setenv("CCLAW_LOG_LEVEL", lvl_str, 1);
     }
+
+    /* Enable SQLite query profiling at trace level */
+    if (g_cfg->log_level >= LOG_LEVEL_DEBUG)
+        db_enable_trace(g_db);
 
     /* ── Daemon mode ─────────────────────────────────────────────── */
     /* ── Channel mode ─────────────────────────────────────────────── */
@@ -763,6 +774,8 @@ int main(int argc, char *argv[]) {
 
         /* SIGCHLD self-pipe */
         if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
+        fcntl(g_chld_pipe[0], F_SETFD, FD_CLOEXEC);
+        fcntl(g_chld_pipe[1], F_SETFD, FD_CLOEXEC);
         set_nonblock(g_chld_pipe[0]); set_nonblock(g_chld_pipe[1]);
         { struct sigaction sa = {0}; sa.sa_handler = sigchld_handler;
           sigemptyset(&sa.sa_mask); sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
@@ -922,6 +935,8 @@ int main(int argc, char *argv[]) {
 
     /* ── SIGCHLD self-pipe ───────────────────────────────────────── */
     if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
+    fcntl(g_chld_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(g_chld_pipe[1], F_SETFD, FD_CLOEXEC);
     set_nonblock(g_chld_pipe[0]);
     set_nonblock(g_chld_pipe[1]);
     { struct sigaction sa = {0}; sa.sa_handler = sigchld_handler;

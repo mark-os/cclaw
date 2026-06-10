@@ -44,7 +44,7 @@ static void teardown(void) {
 static void test_roundtrip(void) {
     TEST(roundtrip);
 
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     if (!db) FAIL("db_open");
 
     uint8_t key[32];
@@ -75,7 +75,7 @@ static void test_roundtrip(void) {
 static void test_deleted_key_file(void) {
     TEST(deleted_key_file_graceful_fail);
 
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     if (!db) FAIL("db_open");
 
     /* Key was created in previous test; store a secret */
@@ -89,7 +89,7 @@ static void test_deleted_key_file(void) {
     unlink(key_path);
 
     /* Reopen DB — load key should create a NEW key (different from original) */
-    db = db_open(db_path);
+    db = test_db_open(db_path);
     if (!db) FAIL("db_open 2");
 
     uint8_t new_key[32];
@@ -111,7 +111,7 @@ static void test_deleted_key_file(void) {
 static void test_multiple_secrets(void) {
     TEST(multiple_secrets);
 
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     if (!db) FAIL("db_open");
 
     uint8_t key[32];
@@ -139,7 +139,7 @@ static void test_multiple_secrets(void) {
 static void test_overwrite_secret(void) {
     TEST(overwrite_secret);
 
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     if (!db) FAIL("db_open");
 
     uint8_t key[32];

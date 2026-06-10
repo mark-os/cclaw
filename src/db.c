@@ -7,48 +7,66 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
 
 static const char *SCHEMA_SQL = TPL_SCHEMA_SQL;
 
-/* Shared: open + WAL + busy_timeout + schema exec */
-static sqlite3 *db_open_with_schema(const char *path, const char *schema, const char *label) {
+/* ── sqlite3_trace_v2 callback ─────────────────────────────────── */
+
+static int db_trace_cb(unsigned mask, void *ctx, void *p, void *x) {
+    (void)ctx;
+    if (mask == SQLITE_TRACE_PROFILE) {
+        sqlite3_stmt *stmt = p;
+        int64_t ns = *(int64_t *)x;
+        const char *sql = sqlite3_sql(stmt);
+        if (ns > 1000000) /* only log queries > 1ms */
+            syslog(LOG_DEBUG, "sql: %ldms %s",
+                   (long)(ns / 1000000), sql ? sql : "?");
+    }
+    return 0;
+}
+
+/* Enable sqlite3_trace_v2 on a connection (call when log_level >= trace). */
+void db_enable_trace(sqlite3 *db) {
+    sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, db_trace_cb, NULL);
+}
+
+/* Open DB with WAL + busy_timeout. No schema applied. */
+sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(path, &db);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "%s: %s\n", label, sqlite3_errmsg(db));
+        fprintf(stderr, "db_open: %s (extended=%d)\n",
+                sqlite3_errmsg(db), sqlite3_extended_errcode(db));
         sqlite3_close(db);
         return NULL;
     }
-    char *err = NULL;
-    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, &err);
-    if (err) { sqlite3_free(err); err = NULL; }
-    sqlite3_exec(db, "PRAGMA busy_timeout=5000;", NULL, NULL, &err);
-    if (err) { sqlite3_free(err); err = NULL; }
-    sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, &err);
-    if (err) { sqlite3_free(err); err = NULL; }
-    rc = sqlite3_exec(db, schema, NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr, "%s schema: %s\n", label, err);
-        sqlite3_free(err);
-        sqlite3_close(db);
-        return NULL;
-    }
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+    sqlite3_exec(db, "PRAGMA busy_timeout=5000;", NULL, NULL, NULL);
+    sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL);
     return db;
 }
 
-/* V57: mmap + reduced cache + relaxed sync for agent processes (not daemon) */
+/* Apply schema (CREATE TABLE IF NOT EXISTS). Call once from main at startup. */
+int db_ensure_schema(sqlite3 *db) {
+    char *err = NULL;
+    int rc = sqlite3_exec(db, SCHEMA_SQL, NULL, NULL, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "db_ensure_schema: %s\n", err);
+        sqlite3_free(err);
+        return -1;
+    }
+    return 0;
+}
+
+/* V57: mmap + reduced cache + relaxed sync for child processes (short-lived). */
 void db_set_child_pragmas(sqlite3 *db) {
     sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA mmap_size=67108864;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA cache_size=-512;", NULL, NULL, NULL);
-}
-
-/* Schema only — no seed data, no side effects beyond table creation */
-sqlite3 *db_open(const char *path) {
-    return db_open_with_schema(path, SCHEMA_SQL, "db_open");
 }
 
 /* Seed default config + provider on first run. Call once from main(). */

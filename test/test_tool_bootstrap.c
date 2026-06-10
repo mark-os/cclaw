@@ -21,7 +21,7 @@ static sqlite3 *setup_db(void) {
     cleanup();
     /* Prevent env var from seeding provider.api_key during db_open */
     unsetenv("OPENROUTER_API_KEY");
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db != NULL);
     /* Load secret key so encryption works */
     uint8_t key[32];

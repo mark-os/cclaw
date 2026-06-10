@@ -13,7 +13,7 @@ static int tests_passed = 0;
 
 static void test_entry_stats_populated(void) {
     TEST(entry_stats_populated);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) FAIL("db_open");
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);
@@ -47,7 +47,7 @@ static void test_entry_stats_populated(void) {
 
 static void test_context_plan_uses_stored_stats(void) {
     TEST(context_plan_uses_stored_stats);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) FAIL("db_open");
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);
@@ -79,7 +79,7 @@ static void test_context_plan_uses_stored_stats(void) {
 
 static void test_split_columns_written(void) {
     TEST(split_columns_written);
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) FAIL("db_open");
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);

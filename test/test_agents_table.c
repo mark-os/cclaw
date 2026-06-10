@@ -12,7 +12,7 @@
 
 static sqlite3 *setup(void) {
     unlink(TEST_DB);
-    return db_open(TEST_DB);
+    return test_db_open(TEST_DB);
 }
 
 static void teardown(sqlite3 *db) {

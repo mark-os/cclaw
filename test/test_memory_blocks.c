@@ -10,7 +10,7 @@
 #define TEST_DB "/tmp/test_cclaw_memblocks.sqlite"
 
 static void test_create_and_get(void) {
-    sqlite3 *db = db_open(TEST_DB);
+    sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
     int64_t id = memory_block_create(db, "test_agent", "persona",
@@ -41,7 +41,7 @@ static void test_create_and_get(void) {
 }
 
 static void test_list(void) {
-    sqlite3 *db = db_open(TEST_DB);
+    sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
     memory_block_create(db, "agent1", "a", "d1", "v1", 5000);
@@ -69,7 +69,7 @@ static void test_list(void) {
 }
 
 static void test_set_value(void) {
-    sqlite3 *db = db_open(TEST_DB);
+    sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
     memory_block_create(db, "agent", "notes", "my notes", "", 20);
@@ -100,7 +100,7 @@ static void test_set_value(void) {
 }
 
 static void test_read_only(void) {
-    sqlite3 *db = db_open(TEST_DB);
+    sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
     int64_t id = memory_block_create(db, "agent", "instructions", "standing orders", "do X", 5000);
@@ -127,7 +127,7 @@ static void test_read_only(void) {
 }
 
 static void test_seed(void) {
-    sqlite3 *db = db_open(TEST_DB);
+    sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
     const char *json =
@@ -165,7 +165,7 @@ static void test_seed(void) {
 }
 
 static void test_prompt_injection(void) {
-    sqlite3 *db = db_open(TEST_DB);
+    sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
     /* Seed agent with system prompt */

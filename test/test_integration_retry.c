@@ -14,7 +14,7 @@ static const char *OK_RESPONSE =
 int main(void) {
     alarm(10);
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int port = mock_server_start();

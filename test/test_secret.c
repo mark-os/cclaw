@@ -101,7 +101,7 @@ static void test_different_encryptions_differ(void) {
 }
 
 static void test_db_kv_secret_roundtrip(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db != NULL);
 
     db_set_secret_key(TEST_KEY);
@@ -156,7 +156,7 @@ static void test_startup_integration(void) {
     snprintf(db_path, sizeof(db_path), "%s/test.db", tmpdir);
 
     /* Simulate startup: open DB, load key, set key */
-    sqlite3 *db = db_open(db_path);
+    sqlite3 *db = test_db_open(db_path);
     assert(db != NULL);
 
     uint8_t key[32];
@@ -173,7 +173,7 @@ static void test_startup_integration(void) {
     db_close(db);
 
     /* Simulate restart: reopen DB, reload same key, verify secret persists */
-    db = db_open(db_path);
+    db = test_db_open(db_path);
     assert(db != NULL);
 
     uint8_t key2[32];

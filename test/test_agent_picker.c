@@ -7,7 +7,7 @@
 #include <unistd.h>
 
 static void test_agent_list_empty(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
     int count = 0;
@@ -20,7 +20,7 @@ static void test_agent_list_empty(void) {
 }
 
 static void test_agent_list_one(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
     int rc = db_agent_upsert(db, "default", NULL, NULL, NULL);
@@ -39,7 +39,7 @@ static void test_agent_list_one(void) {
 }
 
 static void test_agent_list_multiple_sorted(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
     db_agent_upsert(db, "zebra", NULL, NULL, NULL);
@@ -62,7 +62,7 @@ static void test_agent_list_multiple_sorted(void) {
 }
 
 static void test_default_agent_kv(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
     /* First run: no agents, set default_agent */

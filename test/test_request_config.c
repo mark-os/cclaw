@@ -55,7 +55,7 @@ static void test_missing_tool_field(void) {
 }
 
 static void test_add_tool_to_config(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     db_agent_upsert(db, "test", NULL, NULL, NULL);
 

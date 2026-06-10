@@ -20,14 +20,15 @@
 #define SHELL_MAX_OUTPUT (256 * 1024)
 
 /* V82/V37/V22a: Apply namespace sandbox in shell child.
- * unshare(USER|MNT|NET), write uid/gid maps, pivot_root into minimal fs.
+ * unshare(USER|MNT|PID|NET), write uid/gid maps, pivot_root into minimal fs.
  * System dirs mounted ro, workspace rw, cwd_path rw (CLI mode).
+ * Mount setup happens before the PID namespace fork.
  * Returns 0 on success, -1 on failure (caller should log + continue). */
 static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
     uid_t uid = getuid();
     gid_t gid = getgid();
 
-    /* Resolve workspace to absolute path before pivot_root changes the root */
+    /* Resolve paths before pivot_root changes the root */
     char ws_abs[PATH_MAX];
     const char *ws_resolved = NULL;
     if (workspace && workspace[0]) {
@@ -35,7 +36,6 @@ static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
             ws_resolved = ws_abs;
     }
 
-    /* T276/V22a: Resolve CWD path (CLI mode rw bind-mount) */
     char cwd_abs[PATH_MAX];
     const char *cwd_resolved = NULL;
     if (cwd_path && cwd_path[0]) {
@@ -45,19 +45,6 @@ static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
 
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWNET) != 0)
         return -1;
-
-    /* T301: CLONE_NEWPID requires a fork — the child becomes PID 1 in the new
-     * PID namespace. The current process stays in the old namespace. We fork,
-     * the child sets up the mount namespace and execs, parent waits+exits. */
-    pid_t inner = fork();
-    if (inner < 0) return -1;
-    if (inner > 0) {
-        /* Parent of inner fork: wait and propagate exit status */
-        int st;
-        waitpid(inner, &st, 0);
-        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 254);
-    }
-    /* Inner child: PID 1 in new PID namespace — continue with mount setup */
 
     /* Write uid_map: map ns root (0) to our real uid */
     int fd = open("/proc/self/uid_map", O_WRONLY);
@@ -122,7 +109,6 @@ static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
         if (stat(ws_resolved, &st) == 0 && S_ISDIR(st.st_mode)) {
             char ws_dst[PATH_MAX + 64];
             snprintf(ws_dst, sizeof(ws_dst), "%s%s", newroot, ws_resolved);
-            /* Create parent dirs for workspace path */
             char *p = ws_dst + strlen(newroot) + 1;
             for (char *slash = p; *slash; slash++) {
                 if (*slash == '/') {
@@ -136,7 +122,7 @@ static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
         }
     }
 
-    /* T276/V22a: Bind-mount CWD rw (CLI mode) */
+    /* Bind-mount CWD rw (CLI mode) */
     if (cwd_resolved) {
         struct stat st;
         if (stat(cwd_resolved, &st) == 0 && S_ISDIR(st.st_mode)) {
@@ -166,7 +152,18 @@ static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
     umount2("/.oldroot", MNT_DETACH);
     rmdir("/.oldroot");
 
-    /* T301: remount /proc for new PID namespace (stale host procfs causes fork failures) */
+    /* CLONE_NEWPID requires a fork — the child becomes PID 1 in the new
+     * PID namespace. Mount setup is already done, so the fork+exec is clean. */
+    pid_t inner = fork();
+    if (inner < 0) return -1;
+    if (inner > 0) {
+        /* Parent of inner fork: wait and propagate exit status */
+        int st;
+        waitpid(inner, &st, 0);
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 254);
+    }
+
+    /* PID 1 in new namespace: remount /proc for correct PID view */
     mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
 
     /* CWD into workspace so shell commands start there */

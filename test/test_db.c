@@ -50,7 +50,7 @@ static void test_open_close(void) {
     const char *path = "/tmp/test_cclaw_db.sqlite";
     unlink(path);
 
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     assert(db != NULL);
     db_close(db);
     unlink(path);
@@ -61,7 +61,7 @@ static void test_wal_mode(void) {
     const char *path = "/tmp/test_cclaw_wal.sqlite";
     unlink(path);
 
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
     char mode[16] = {0};
@@ -77,7 +77,7 @@ static void test_busy_timeout(void) {
     const char *path = "/tmp/test_cclaw_timeout.sqlite";
     unlink(path);
 
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
     /* V4: busy_timeout >= 5000 */
@@ -93,7 +93,7 @@ static void test_tables_created(void) {
     const char *path = "/tmp/test_cclaw_tables.sqlite";
     unlink(path);
 
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
     assert(table_exists(db, "sessions") == 1);
@@ -108,12 +108,12 @@ static void test_reopen_idempotent(void) {
     const char *path = "/tmp/test_cclaw_reopen.sqlite";
     unlink(path);
 
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     assert(db != NULL);
     db_close(db);
 
     /* Open again — should not fail on CREATE IF NOT EXISTS */
-    db = db_open(path);
+    db = test_db_open(path);
     assert(db != NULL);
     db_close(db);
 
@@ -125,7 +125,7 @@ static void test_fts5_search(void) {
     const char *path = "/tmp/test_cclaw_fts5.sqlite";
     unlink(path);
 
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
     int64_t sid = session_create(db, "fts_test", NULL, -1, 0);
@@ -166,7 +166,7 @@ static void test_kv(void) {
     const char *path = "/tmp/test_cclaw_kv.sqlite";
     unlink(path);
 
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
     /* Get missing key returns NULL */
@@ -189,7 +189,7 @@ static void test_kv(void) {
 
     /* Survives reopen */
     db_close(db);
-    db = db_open(path);
+    db = test_db_open(path);
     assert(db != NULL);
     val = db_kv_get(db, "tg_offset");
     assert(val != NULL);
@@ -204,7 +204,7 @@ static void test_kv(void) {
 static void test_agent_pragmas(void) {
     const char *path = "/tmp/test_cclaw_agent_pragmas.db";
     unlink(path);
-    sqlite3 *db = db_open(path);
+    sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
     db_set_child_pragmas(db);

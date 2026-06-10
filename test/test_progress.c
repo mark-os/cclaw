@@ -16,7 +16,7 @@ int main(void) {
     printf("test_progress:\n");
 
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
     int port = mock_server_start();
@@ -52,7 +52,7 @@ int main(void) {
     sqlite3_bind_int64(stmt, 1, sid);
     r = sqlite3_step(stmt);
     if (r == SQLITE_ROW) {
-        const char *state = (const char *)sqlite3_column_text(stmt, 1);
+        const char *state = (const char *)sqlite3_column_text(stmt, 0);
         if (state) {
             assert(strcmp(state, "running") != 0);
             printf("  session state after turn: %s\n", state);

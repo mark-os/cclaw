@@ -24,7 +24,7 @@ static void test_status_page(void) {
     cfg.web_port = 19876;
     cfg.db_path = "test_web.db";
 
-    sqlite3 *db = db_open(cfg.db_path);
+    sqlite3 *db = test_db_open(cfg.db_path);
     assert(db);
 
     int64_t sid = session_create(db, "test-session", NULL, -1, 0);

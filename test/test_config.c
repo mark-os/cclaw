@@ -11,7 +11,7 @@ static const char *TEST_DB = "/tmp/cclaw_test_config.sqlite";
 
 static sqlite3 *fresh_db(void) {
     unlink(TEST_DB);
-    return db_open(TEST_DB);
+    return test_db_open(TEST_DB);
 }
 
 static void test_defaults(void) {
@@ -84,7 +84,7 @@ static void test_env_overrides_kv(void) {
 }
 
 static void test_fallback_providers(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     sqlite3_exec(db, "INSERT INTO providers(name,base_url,endpoint_type,api_key_env,default_model,priority)"
         " VALUES('primary','http://p.com/v1','openai','KEY1','model-a',0);", NULL, NULL, NULL);

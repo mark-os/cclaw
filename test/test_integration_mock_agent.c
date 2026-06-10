@@ -13,7 +13,7 @@ static const char *MOCK_RESPONSE =
 
 static int test_basic_turn(void) {
     unlink(DB_PATH);
-    sqlite3 *db = db_open(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
     if (!db) FAIL("db_open");
 
     int port = mock_server_start();

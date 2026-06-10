@@ -14,7 +14,7 @@ static int tests_passed = 0;
 
 static void test_define_basic(void) {
     TEST("define_basic");
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) { FAIL("db_open"); return; }
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -49,7 +49,7 @@ static void test_define_basic(void) {
 
 static void test_define_persist_reload(void) {
     TEST("define_persist_reload");
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) { FAIL("db_open"); return; }
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -90,7 +90,7 @@ static void test_define_persist_reload(void) {
 /* T33: Verify shared context — tool B can call helper defined by tool A after reload */
 static void test_context_replay_shared_state(void) {
     TEST("context_replay_shared_state");
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) { FAIL("db_open"); return; }
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -147,7 +147,7 @@ static void test_context_replay_shared_state(void) {
 
 static void test_define_missing_name(void) {
     TEST("define_missing_name");
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) { FAIL("db_open"); return; }
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
@@ -166,7 +166,7 @@ static void test_define_missing_name(void) {
 
 static void test_define_redefine(void) {
     TEST("define_redefine");
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     if (!db) { FAIL("db_open"); return; }
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 

@@ -18,6 +18,9 @@ static void cleanup(void) {
     unlink(TEST_DB "-wal");
     unlink(TEST_DB "-shm");
     unlink(TEST_FIFO);
+    /* Re-create schema so channel_ctx_open has tables ready */
+    sqlite3 *db = test_db_open(TEST_DB);
+    if (db) db_close(db);
 }
 
 static void test_channel_emit(void) {

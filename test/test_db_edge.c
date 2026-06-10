@@ -7,7 +7,7 @@
 #include <unistd.h>
 
 static void test_next_turn_id_empty(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
     assert(sid > 0);
@@ -19,7 +19,7 @@ static void test_next_turn_id_empty(void) {
 }
 
 static void test_next_turn_id_increments(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
@@ -35,7 +35,7 @@ static void test_next_turn_id_increments(void) {
 }
 
 static void test_entry_append_with_turn_stores_turn_id(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
@@ -62,7 +62,7 @@ static void test_entry_append_with_turn_stores_turn_id(void) {
 }
 
 static void test_session_get_agent_name(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", "myagent", -1, 0);
     char *name = session_get_agent_name(db, sid);
@@ -80,7 +80,7 @@ static void test_session_get_agent_name(void) {
 }
 
 static void test_session_get_depth(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "top", NULL, -1, 0);
     assert(session_get_depth(db, sid) == 0);
@@ -93,7 +93,7 @@ static void test_session_get_depth(void) {
 }
 
 static void test_session_count_children(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t parent = session_create(db, "parent", NULL, -1, 0);
     assert(session_count_children(db, parent) == 0);
@@ -114,7 +114,7 @@ static void test_session_count_children(void) {
 }
 
 static void test_session_count_active_agents(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t parent = session_create(db, "parent", NULL, -1, 0);
     /* Sub-agents have parent_session_id > 0 */
@@ -141,7 +141,7 @@ static void test_session_count_active_agents(void) {
 }
 
 static void test_entry_append_stop_reason_roundtrip(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
@@ -160,7 +160,7 @@ static void test_entry_append_stop_reason_roundtrip(void) {
 }
 
 static void test_entry_append_multiple_tool_calls(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
@@ -190,7 +190,7 @@ static void test_entry_append_multiple_tool_calls(void) {
 }
 
 static void test_entry_append_tool_result_with_name(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
@@ -219,7 +219,7 @@ static void test_entry_append_tool_result_with_name(void) {
 }
 
 static void test_session_state_waiting_to_idle(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
@@ -232,7 +232,7 @@ static void test_session_state_waiting_to_idle(void) {
 }
 
 static void test_kv_get_nonexistent(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     char *val = db_kv_get(db, "nonexistent_key");
     assert(val == NULL);
@@ -241,7 +241,7 @@ static void test_kv_get_nonexistent(void) {
 }
 
 static void test_kv_overwrite(void) {
-    sqlite3 *db = db_open(":memory:");
+    sqlite3 *db = test_db_open(":memory:");
     assert(db);
     db_kv_set(db, "key1", "val1");
     db_kv_set(db, "key1", "val2");

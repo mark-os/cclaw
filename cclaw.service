@@ -1,15 +1,16 @@
 [Unit]
-Description=CClaw autonomous AI agent
+Description=CClaw autonomous AI agent daemon
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/cclaw
+ExecStart=/usr/local/bin/cclaw --daemon
 EnvironmentFile=/etc/cclaw/env
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
+# Set CCLAW_LLM_FORK=1 in /etc/cclaw/env for fork-per-request isolation
 
 [Install]
 WantedBy=multi-user.target

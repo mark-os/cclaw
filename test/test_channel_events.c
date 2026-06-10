@@ -13,6 +13,23 @@
 
 #include "db.h"
 
+static int test_binding_set(sqlite3 *db, const char *type, const char *id, const char *agent) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO channel_routes(channel_name,channel_id,agent_name) VALUES(?,?,?)", -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, type, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, agent, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s); sqlite3_finalize(s);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+static int test_inbox_count(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM inbox WHERE session_id=? AND consumed=0", -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(s, 1, session_id);
+    int c = 0; if (sqlite3_step(s) == SQLITE_ROW) c = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s); return c;
+}
+
 static const char *DB_PATH = "/tmp/test_channel_events_daemon.db";
 static const char *WORK_DIR = "/tmp/test_channel_events_work";
 
@@ -50,7 +67,7 @@ static void test_channel_events_routing(void) {
     assert(sid > 0);
 
     /* Set up channel binding: mychannel + channel_id "user1" → testagent */
-    db_channel_binding_set(db, "mychannel", "user1", "testagent");
+    test_binding_set(db, "mychannel", "user1", "testagent");
 
     /* Store session mapping in channel_state */
     char sid_str[32];
@@ -83,7 +100,7 @@ static void test_channel_events_routing(void) {
     assert(inbox_id > 0);
 
     /* Verify inbox has the message (same DB) */
-    int count = inbox_count(db, sid);
+    int count = test_inbox_count(db, sid);
     assert(count == 1);
 
     /* Verify content */
@@ -121,7 +138,7 @@ static void test_channel_events_default_binding(void) {
     assert(db);
 
     /* Set up "default" binding for channel type */
-    db_channel_binding_set(db, "webchat", "default", "testagent");
+    test_binding_set(db, "webchat", "default", "testagent");
 
     /* Verify fallback: no specific binding for "user99", but "default" exists */
     char *agent = db_channel_binding_get(db, "webchat", "user99");

@@ -109,6 +109,10 @@ cat /tmp/t.txt            # or: tail -20 /tmp/t.txt
 
 # NEVER pipe a test binary through head/tail/grep directly — it breaks
 # timeouts via SIGPIPE. Always redirect to file first, then read the file.
+
+# NEVER pipe make/build output through grep or head either.
+# Tests already have timeouts (alarm + Makefile wrapper), output goes to /tmp.
+# Just run them directly and check the exit code.
 ```
 
 ## Building

@@ -709,6 +709,15 @@ int main(int argc, char *argv[]) {
         else { fprintf(stderr, "unknown option: %s\n", argv[i]); return 1; }
     }
 
+    /* Env var overrides (CLI flags take precedence) */
+    if (!g_llm_fork) {
+        const char *v = getenv("CCLAW_LLM_FORK");
+        if (v && v[0] == '1') g_llm_fork = 1;
+    }
+    {   const char *v = getenv("CCLAW_LLM_THREADS");
+        if (v && atoi(v) > 0) g_llm_threads = atoi(v);
+    }
+
     /* LLM subprocess mode — direct call, no poll */
     if (llm_mode) {
         if (session_id < 0) { fprintf(stderr, "llm requires -s <id>\n"); return 1; }

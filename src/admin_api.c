@@ -167,7 +167,3 @@ void admin_providers_free(AdminProvider *providers, size_t count) {
     }
     free(providers);
 }
-
-char **admin_list_agents(const char *agents_dir, size_t *count) {
-    return agent_discover(agents_dir, count);
-}

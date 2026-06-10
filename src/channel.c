@@ -45,15 +45,6 @@ static void update_pid(sqlite3 *db, const char *name, pid_t pid) {
     }
 }
 
-static void set_status(sqlite3 *db, const char *name, const char *status) {
-    const char *sql = "UPDATE channels SET status=? WHERE name=?;";
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(s, 1, status, -1, SQLITE_STATIC);
-        sqlite3_bind_text(s, 2, name, -1, SQLITE_STATIC);
-        sqlite3_step(s); sqlite3_finalize(s);
-    }
-}
 
 int channel_launch_all(sqlite3 *db, const char *db_path) {
     const char *sql = "SELECT c.name, e.path FROM channels c"
@@ -86,28 +77,6 @@ int channel_launch_all(sqlite3 *db, const char *db_path) {
     return launched;
 }
 
-int channel_reap(pid_t pid, int status, sqlite3 *db, const char *db_path) {
-    ChannelProc *c = find_by_pid(pid);
-    if (!c) return 0;
-    (void)status;
-
-    if (c->restart_count >= CHANNEL_MAX_RESTARTS) {
-        set_status(db, c->name, "failed");
-        update_pid(db, c->name, 0);
-        remove_channel(c);
-        return 1;
-    }
-
-    c->restart_count++;
-    pid_t new_pid = do_fork(db_path, c->name);
-    if (new_pid > 0) {
-        c->pid = new_pid;
-        update_pid(db, c->name, new_pid);
-    } else {
-        remove_channel(c);
-    }
-    return 1;
-}
 
 void channel_shutdown_all(void) {
     for (int i = 0; i < g_count; i++)

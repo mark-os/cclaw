@@ -15,8 +15,7 @@ typedef struct {
     int tool_call_count;    /* number of tool_calls in assistant msg (0 otherwise) */
 } PlanEntry;
 
-/* V41: Result of context_plan() — ordered entry IDs + cut point.
- * Entries are in root→leaf order after V28 filtering. */
+/* V41: Result of context_plan() — ordered entry IDs + cut point. */
 typedef struct {
     PlanEntry *entries;     /* heap-allocated array */
     int count;              /* total entries after V28 filtering */
@@ -26,68 +25,24 @@ typedef struct {
 
 /* V41,V7,V8: Plan which entries to include in LLM request (pass 1).
  * Queries SQLite for branch metadata without loading content.
- * Applies V28 filtering and V8 cut logic.
- * overhead: estimated tokens consumed by tool definitions + other fixed request
- *           content not stored as entries (subtracted from budget before cut).
+ * overhead: estimated tokens consumed by tool definitions + other fixed content.
  * Returns 0 on success, -1 on error. Caller frees with context_plan_free(). */
 int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhead, ContextPlan *out);
 
 /* Free a ContextPlan. */
 void context_plan_free(ContextPlan *plan);
 
-/* V7,V8: Select most recent messages from branch that fit within token budget.
- * - Budget defaults to 60% of config context_window.
- * - Never cuts mid-tool-call (V8): a tool_calls assistant msg and its
- *   corresponding tool result msgs are kept or dropped as a unit.
- * - If truncation occurs, a system message with cutoff notice is prepended.
- *
- * entries: full branch in root→leaf order (from session_get_branch)
- * count: number of entries
- * cfg: config (for context_window)
- * out_msgs: receives pointer to malloc'd Message array (caller frees with context_free)
- * out_count: receives number of messages in result
- *
- * Returns 0 on success, -1 on error. */
-int context_build(const Entry *entries, int count, const Config *cfg,
-                  Message **out_msgs, int *out_count);
-
-/* Free message array returned by context_build. */
-void context_free(Message *msgs, int count);
-
-/* Estimate token count for a message (chars/4 heuristic). */
-int context_estimate_tokens(const Message *msg);
-
-/* V40: Truncate tool result content to 50KB / 2000 lines (whichever first).
- * Returns malloc'd truncated string with suffix, or strdup(src) if within limits.
- * Caller frees. */
-char *truncate_result(const char *src, size_t len);
-
 /* T118: Truncate tool result at write time. If content exceeds limits, writes
  * full output to /tmp/cclaw-<session_id>/<tool_call_id>.out and returns
- * truncated content with file path reference. Returns malloc'd string (caller frees).
- * If no truncation needed, returns strdup(src). */
+ * truncated content with file path reference. Returns malloc'd string (caller frees). */
 char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_call_id);
 
-/* T118: Build session temp dir path: /tmp/cclaw-<session_id>
- * Writes into buf (must be >= 64 bytes). */
+/* T118: Build session temp dir path: /tmp/cclaw-<session_id> */
 void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz);
 
-/* T118: Remove session temp dir recursively. */
-void session_tmp_cleanup(int64_t session_id);
-
-/* V58,T161: Check if session branch needs compaction.
- * Returns 1 if session tokens exceed context_threshold × context_window, 0 otherwise. */
-int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg);
-
-/* T269: Auto-recall — extract keywords from user message, FTS5 search across
- * all sessions for relevant entries. Returns heap-allocated text (caller frees)
- * or NULL if nothing recalled. max_tokens limits output size (chars/4). */
+/* T269: Auto-recall — FTS5 search across sessions for relevant context.
+ * Returns heap-allocated text (caller frees) or NULL if nothing recalled. */
 char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
                           int max_tokens);
-
-/* V58,T161: Trigger compaction on session if needed.
- * Detects excess entries, generates summary (T162), performs atomic reparent.
- * Returns compaction entry id (>0) if compacted, 0 if not needed, -1 on error. */
-int64_t session_try_compact(sqlite3 *db, int64_t session_id, const Config *cfg);
 
 #endif

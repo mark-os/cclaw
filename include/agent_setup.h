@@ -53,7 +53,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
                      int mode);
 
 /* Get tool schemas from setup. */
-size_t agent_setup_schemas(AgentSetup *setup, ToolSchema *out, size_t out_cap);
 
 /* Destroy setup (free registry, JS runtime). */
 void agent_setup_destroy(AgentSetup *setup);

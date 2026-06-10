@@ -50,9 +50,9 @@ static void test_llm_child_stop(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append(db, sid, &sys);
+    entry_append_with_turn(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "Hello"};
-    entry_append(db, sid, &user);
+    entry_append_with_turn(db, sid, &user, 1);
     db_close(db);
 
     /* Set env vars as the parent would */
@@ -117,9 +117,9 @@ static void test_llm_child_tool_calls(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append(db, sid, &sys);
+    entry_append_with_turn(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "Read foo.txt"};
-    entry_append(db, sid, &user);
+    entry_append_with_turn(db, sid, &user, 1);
     db_close(db);
 
     char url[64];
@@ -194,9 +194,9 @@ static void test_llm_child_error(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append(db, sid, &sys);
+    entry_append_with_turn(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "Hello"};
-    entry_append(db, sid, &user);
+    entry_append_with_turn(db, sid, &user, 1);
     db_close(db);
 
     char url[64];

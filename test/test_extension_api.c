@@ -212,146 +212,8 @@ static void test_hook_event_from_name(void) {
 }
 
 /* T260: turnStart/turnEnd hooks fire without error */
-static void test_turn_start_end_hooks(void) {
-    TEST(turn_start_end_hooks);
-    const char *ws = "/tmp/cclaw_ext_api_t5";
-    cleanup(ws);
-    char ext_dir[256];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
-    mkdirs(ext_dir);
-
-    char p1[512];
-    snprintf(p1, sizeof(p1), "%s/lifecycle.js", ext_dir);
-    write_file(p1,
-        "globalThis.__turn_started = false;\n"
-        "globalThis.__turn_ended = false;\n"
-        "cclaw.registerHook('turnStart', function() { globalThis.__turn_started = true; });\n"
-        "cclaw.registerHook('turnEnd', function() { globalThis.__turn_ended = true; });\n");
-
-    JsSessionRuntime *rt = js_runtime_create();
-    if (!rt) FAIL("rt");
-    ToolRegistry reg;
-    tools_init(&reg);
-    ExtensionCtx ext_ctx;
-    extension_ctx_init(&ext_ctx, rt);
-
-    size_t count = 0;
-    char **paths = extension_discover(ws, &count);
-    Config cfg = {.log_level = LOG_LEVEL_INFO};
-    extension_load(paths, count, rt, &reg, &cfg, &ext_ctx);
-    extension_list_free(paths, count);
-
-    if (ext_ctx.hooks[HOOK_TURN_START].count != 1) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("expected 1 turnStart hook");
-    }
-
-    /* Dispatch turnStart */
-    hook_dispatch_turn_start(&ext_ctx);
-
-    /* Verify global was set */
-    JSContext *ctx = (JSContext *)rt->ctx;
-    const char *chk = "globalThis.__turn_started ? 'yes' : 'no'";
-    JSValue v = JS_Eval(ctx, chk, strlen(chk), "<test>", JS_EVAL_RETVAL);
-    JSCStringBuf buf;
-    const char *s = JS_ToCString(ctx, v, &buf);
-    if (!s || strcmp(s, "yes") != 0) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("turnStart hook did not fire");
-    }
-
-    /* Dispatch turnEnd */
-    hook_dispatch_turn_end(&ext_ctx);
-    chk = "globalThis.__turn_ended ? 'yes' : 'no'";
-    v = JS_Eval(ctx, chk, strlen(chk), "<test>", JS_EVAL_RETVAL);
-    s = JS_ToCString(ctx, v, &buf);
-    if (!s || strcmp(s, "yes") != 0) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("turnEnd hook did not fire");
-    }
-
-    tools_free(&reg);
-    extension_ctx_destroy(&ext_ctx);
-    js_runtime_destroy(rt);
-    cleanup(ws);
-    PASS();
-}
 
 /* T261: afterResponse hook receives response object */
-static void test_after_response_hook(void) {
-    TEST(after_response_hook);
-    sqlite3 *db;
-    sqlite3_open(":memory:", &db);
-    const char *ws = "/tmp/cclaw_ext_api_t6";
-    cleanup(ws);
-    char ext_dir[256];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
-    mkdirs(ext_dir);
-
-    char p1[512];
-    snprintf(p1, sizeof(p1), "%s/resp.js", ext_dir);
-    write_file(p1,
-        "globalThis.__last_resp = null;\n"
-        "cclaw.registerHook('afterResponse', function(resp) {\n"
-        "  globalThis.__last_resp = resp;\n"
-        "});\n");
-
-    JsSessionRuntime *rt = js_runtime_create();
-    if (!rt) FAIL("rt");
-    ToolRegistry reg;
-    tools_init(&reg);
-    ExtensionCtx ext_ctx;
-    extension_ctx_init(&ext_ctx, rt);
-
-    size_t count = 0;
-    char **paths = extension_discover(ws, &count);
-    Config cfg = {.log_level = LOG_LEVEL_INFO};
-    extension_load(paths, count, rt, &reg, &cfg, &ext_ctx);
-    extension_list_free(paths, count);
-
-    if (ext_ctx.hooks[HOOK_AFTER_RESPONSE].count != 1) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("expected 1 afterResponse hook");
-    }
-
-    /* Dispatch */
-    hook_dispatch_after_response(&ext_ctx, db, "Hello world", "stop", 0);
-
-    /* Verify */
-    JSContext *ctx = (JSContext *)rt->ctx;
-    const char *chk = "globalThis.__last_resp ? globalThis.__last_resp.content : 'NONE'";
-    JSValue v = JS_Eval(ctx, chk, strlen(chk), "<test>", JS_EVAL_RETVAL);
-    JSCStringBuf buf;
-    const char *s = JS_ToCString(ctx, v, &buf);
-    if (!s || strcmp(s, "Hello world") != 0) {
-        printf("got: %s ", s ? s : "NULL");
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("afterResponse content mismatch");
-    }
-
-    chk = "globalThis.__last_resp.finish_reason";
-    v = JS_Eval(ctx, chk, strlen(chk), "<test>", JS_EVAL_RETVAL);
-    s = JS_ToCString(ctx, v, &buf);
-    if (!s || strcmp(s, "stop") != 0) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("afterResponse finish_reason mismatch");
-    }
-
-    chk = "globalThis.__last_resp.tool_call_count";
-    v = JS_Eval(ctx, chk, strlen(chk), "<test>", JS_EVAL_RETVAL);
-    int32_t tc_count;
-    if (JS_ToInt32(ctx, &tc_count, v) != 0 || tc_count != 0) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("afterResponse tool_call_count mismatch");
-    }
-
-    tools_free(&reg);
-    extension_ctx_destroy(&ext_ctx);
-    js_runtime_destroy(rt);
-    sqlite3_close(db);
-    cleanup(ws);
-    PASS();
-}
 
 int main(void) {
     printf("test_extension_api:\n");
@@ -359,8 +221,6 @@ int main(void) {
     test_register_hook();
     test_register_tool_invalid();
     test_hook_event_from_name();
-    test_turn_start_end_hooks();
-    test_after_response_hook();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

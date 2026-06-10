@@ -158,7 +158,7 @@ static void test_check_agent_idle_with_result(void) {
 
     /* Add an assistant entry to child session */
     Message msg = {.role = ROLE_ASSISTANT, .content = "the answer is 42"};
-    entry_append(db, child_sid, &msg);
+    entry_append_with_turn(db, child_sid, &msg, 1);
 
     char args[64];
     snprintf(args, sizeof(args), "{\"session_id\":%lld}", (long long)child_sid);

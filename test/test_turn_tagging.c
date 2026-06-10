@@ -96,24 +96,6 @@ static void test_multiple_entries_same_turn(void) {
     PASS();
 }
 
-static void test_entries_without_turn_id_ignored(void) {
-    TEST(entries_without_turn_id_ignored);
-    sqlite3 *db = test_db_open(":memory:");
-    int64_t sid = session_create(db, "test", NULL, -1, 0);
-
-    /* entry_append (no turn_id) leaves turn_id NULL */
-    Message msg = {.role = ROLE_USER, .content = "hi"};
-    int64_t eid = entry_append(db, sid, &msg);
-    int64_t tid = get_entry_turn_id(db, eid);
-    if (tid != -1) { FAIL("expected NULL (-1) for untagged entry"); db_close(db); return; }
-
-    /* next_turn_id still returns 1 since MAX(NULL) = NULL → COALESCE → 0+1=1 */
-    int64_t next = db_next_turn_id(db, sid);
-    if (next != 1) { FAIL("expected 1 when no turn_ids set"); db_close(db); return; }
-
-    db_close(db);
-    PASS();
-}
 
 int main(void) {
     printf("test_turn_tagging:\n");
@@ -121,7 +103,6 @@ int main(void) {
     test_next_turn_id_increments();
     test_append_with_turn_tags_entry();
     test_multiple_entries_same_turn();
-    test_entries_without_turn_id_ignored();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

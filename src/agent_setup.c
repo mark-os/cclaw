@@ -129,10 +129,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     return 0;
 }
 
-size_t agent_setup_schemas(AgentSetup *setup, ToolSchema *out, size_t out_cap) {
-    return tools_schemas(&setup->reg, out, out_cap);
-}
-
 void agent_setup_destroy(AgentSetup *setup) {
     proxy_stop(&setup->proxy_ctx);
     extension_ctx_destroy(&setup->ext_ctx);

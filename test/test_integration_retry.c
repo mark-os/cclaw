@@ -31,9 +31,9 @@ int main(void) {
     db_agent_upsert(db, "default", NULL, NULL, NULL);
     int64_t sid = session_create(db, "test", "default", -1, 0);
     Message sys = {.role = ROLE_SYSTEM, .content = "sys"};
-    entry_append(db, sid, &sys);
+    entry_append_with_turn(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "hi"};
-    entry_append(db, sid, &user);
+    entry_append_with_turn(db, sid, &user, 1);
 
     /* First: 429 rate limit, second: 200 success */
     mock_server_enqueue(429, "{\"error\":{\"message\":\"rate limited\"}}");

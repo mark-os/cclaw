@@ -108,7 +108,7 @@ static void test_legacy_entry_gets_type(void) {
 
     /* Use legacy entry_append — should get type derived from role */
     Message msg = {.role = ROLE_USER, .content = "hello"};
-    int64_t id = entry_append(db, sid, &msg);
+    int64_t id = entry_append_with_turn(db, sid, &msg, 1);
     assert(id > 0);
 
     sqlite3_stmt *stmt;
@@ -122,7 +122,7 @@ static void test_legacy_entry_gets_type(void) {
 
     /* Assistant message */
     Message amsg = {.role = ROLE_ASSISTANT, .content = "hi"};
-    int64_t id2 = entry_append(db, sid, &amsg);
+    int64_t id2 = entry_append_with_turn(db, sid, &amsg, 1);
     assert(id2 > 0);
     assert(sqlite3_prepare_v2(db, "SELECT type FROM entries WHERE id=?;",
            -1, &stmt, NULL) == SQLITE_OK);

@@ -35,7 +35,6 @@ int admin_list_providers(sqlite3 *db, AdminProvider **out, size_t *out_count);
 void admin_providers_free(AdminProvider *providers, size_t count);
 
 /* List agents. Returns heap-allocated array of names (caller frees each + array). */
-char **admin_list_agents(const char *agents_dir, size_t *count);
 
 /* Write key=value to env file, replacing existing line if present. Returns 0 on success. */
 int admin_write_env_key(const char *env_file, const char *var_name, const char *value);

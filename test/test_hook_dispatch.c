@@ -124,7 +124,7 @@ static void test_hook_modifies_messages(void) {
 
     /* Append a user message */
     Message user_msg = {.role = ROLE_USER, .content = "hello"};
-    entry_append(db, sid, &user_msg);
+    entry_append_with_turn(db, sid, &user_msg, 1);
 
     /* Build plan */
     ContextPlan plan;
@@ -210,7 +210,7 @@ static void test_hook_throws(void) {
     sqlite3 *db = test_db_open(db_path);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     Message user_msg = {.role = ROLE_USER, .content = "hi"};
-    entry_append(db, sid, &user_msg);
+    entry_append_with_turn(db, sid, &user_msg, 1);
 
     ContextPlan plan;
     context_plan(db, sid, &cfg, 0, &plan);
@@ -286,7 +286,7 @@ static void test_hooks_chain(void) {
     sqlite3 *db = test_db_open(db_path);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     Message user_msg = {.role = ROLE_USER, .content = "test"};
-    entry_append(db, sid, &user_msg);
+    entry_append_with_turn(db, sid, &user_msg, 1);
 
     ContextPlan plan;
     context_plan(db, sid, &cfg, 0, &plan);

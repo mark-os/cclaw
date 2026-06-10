@@ -31,7 +31,7 @@ static void test_ingest_typed(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message msg = {.role = ROLE_USER, .content = "do it"};
-    entry_append(db, sid, &msg);
+    entry_append_with_turn(db, sid, &msg, 1);
 
     const char *tc_ids[] = {"call_typed"};
     const char *tc_names[] = {"shell_exec"};
@@ -70,7 +70,7 @@ static void test_tool_call_complete(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message msg = {.role = ROLE_USER, .content = "do it"};
-    entry_append(db, sid, &msg);
+    entry_append_with_turn(db, sid, &msg, 1);
 
     const char *tc_ids[] = {"call_x"};
     const char *tc_names[] = {"shell_exec"};

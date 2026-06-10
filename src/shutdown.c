@@ -27,10 +27,3 @@ int shutdown_requested(void) {
     return g_shutdown;
 }
 
-void shutdown_request(void) {
-    g_shutdown = 1;
-}
-
-void shutdown_reset(void) {
-    g_shutdown = 0;
-}

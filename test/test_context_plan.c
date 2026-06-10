@@ -19,7 +19,7 @@ static void append_msg(sqlite3 *db, int64_t sid, Role role, const char *content,
     m.stop_reason = sr;
     m.tool_calls = tcs;
     m.tool_call_count = tc_count;
-    entry_append(db, sid, &m);
+    entry_append_with_turn(db, sid, &m, 1);
 }
 
 static void append_tool_result(sqlite3 *db, int64_t sid, const char *tc_id, const char *content) {
@@ -27,7 +27,7 @@ static void append_tool_result(sqlite3 *db, int64_t sid, const char *tc_id, cons
     m.role = ROLE_TOOL;
     ToolResult tr = { .tool_call_id = (char *)tc_id, .content = (char *)content };
     m.tool_result = &tr;
-    entry_append(db, sid, &m);
+    entry_append_with_turn(db, sid, &m, 1);
 }
 
 static void test_basic_plan(void) {

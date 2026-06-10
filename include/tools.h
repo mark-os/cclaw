@@ -42,15 +42,6 @@ ToolEntry *tools_lookup(ToolRegistry *reg, const char *name);
  * Returns number of schemas written (up to out_cap). */
 size_t tools_schemas(ToolRegistry *reg, ToolSchema *out, size_t out_cap);
 
-/* T78: Get filtered schema array — only tools in whitelist.
- * If whitelist is NULL or whitelist_count is 0, returns all tools (no filter).
- * Writes into caller-provided array. Returns count written. */
-size_t tools_schemas_filtered(ToolRegistry *reg, const char **whitelist,
-                              size_t whitelist_count, ToolSchema *out, size_t out_cap);
-
-/* T78: Check if a tool name is allowed by whitelist.
- * NULL whitelist = all allowed. */
-int tools_is_whitelisted(const char *name, const char **whitelist, size_t whitelist_count);
 
 /* Free all heap strings in the registry */
 void tools_free(ToolRegistry *reg);

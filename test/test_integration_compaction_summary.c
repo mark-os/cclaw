@@ -53,7 +53,7 @@ static void test_llm_summary(void) {
         Message m = {.role = (i % 2 == 0) ? ROLE_USER : ROLE_ASSISTANT,
                      .content = buf,
                      .stop_reason = (i % 2 == 1) ? STOP_REASON_STOP : STOP_REASON_NONE};
-        entry_append(db, sid, &m);
+        entry_append_with_turn(db, sid, &m, 1);
     }
 
     int64_t cid = session_try_compact(db, sid, &cfg);
@@ -110,7 +110,7 @@ static void test_fallback_on_failure(void) {
         Message m = {.role = (i % 2 == 0) ? ROLE_USER : ROLE_ASSISTANT,
                      .content = buf,
                      .stop_reason = (i % 2 == 1) ? STOP_REASON_STOP : STOP_REASON_NONE};
-        entry_append(db, sid, &m);
+        entry_append_with_turn(db, sid, &m, 1);
     }
 
     int64_t cid = session_try_compact(db, sid, &cfg);

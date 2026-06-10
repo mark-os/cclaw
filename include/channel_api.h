@@ -52,8 +52,4 @@ int channel_outbox_fifo_open(const char *db_path, const char *channel_name);
 void channel_outbox_fifo_close(int fd, const char *db_path, const char *channel_name);
 int channel_outbox_wake(const char *db_path, const char *channel_name);
 
-/* Insert outbox row for a channel. Called by daemon after agent turn completes. */
-int channel_outbox_insert(sqlite3 *db, const char *channel_name,
-                          int64_t session_id, const char *payload);
-
 #endif

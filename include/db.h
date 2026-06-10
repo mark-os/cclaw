@@ -62,16 +62,13 @@ char *session_get_agent_name(sqlite3 *db, int64_t session_id);
 int session_get_depth(sqlite3 *db, int64_t session_id);
 
 /* Set leaf_id for session. Returns 0 on success, -1 on error. */
-int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id);
 
 /* V14: Append entry as child of current leaf, update session leaf_id.
  * If session has no entries (leaf_id == -1), entry becomes root (parent_id = -1).
  * Returns new entry id (>0) or -1 on error. */
-int64_t entry_append(sqlite3 *db, int64_t session_id, const Message *msg);
 
 /* V14: Append entry as child of a specific parent (for branching).
  * Updates session leaf_id to new entry. Returns new entry id or -1. */
-int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, const Message *msg);
 
 /* V58,V59: Insert compaction summary and reparent.
  * Inserts ROLE_COMPACTION entry as child of last_kept_id.
@@ -103,12 +100,6 @@ int db_kv_set_secret(sqlite3 *db, const char *key, const char *value);
  * Must be called before db_kv_get_secret/db_kv_set_secret. */
 void db_set_secret_key(const uint8_t key[32]);
 
-/* T26: Telegram chat_id → session routing.
- * db_tg_get_session returns session_id or -1 if not mapped.
- * db_tg_set_session returns 0 on success, -1 on error. */
-int64_t db_tg_get_session(sqlite3 *db, int64_t chat_id);
-int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id);
-
 /* V3: Sub-agent limits — count active child sessions */
 int session_count_children(sqlite3 *db, int64_t parent_session_id);
 int session_count_active_agents(sqlite3 *db);
@@ -132,6 +123,7 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
 
 /* Set session state (idle, running, waiting, error). Returns 0 on success. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state);
+int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id);
 
 /* V18: Inbox primitives */
 typedef struct {
@@ -145,8 +137,7 @@ typedef struct {
 /* Insert a message into the inbox. Returns row id (>0) or -1 on error. */
 int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const char *payload);
 
-/* Peek at unconsumed inbox items for a session (oldest first, max `limit`).
- * Caller must free with inbox_items_free. Sets *count. Returns NULL on error/empty. */
+/* Peek at unconsumed inbox items for a session (oldest first, max `limit`). */
 InboxItem *inbox_peek(sqlite3 *db, int64_t session_id, int limit, int *count);
 
 /* Free an InboxItem array returned by inbox_peek. */
@@ -154,17 +145,13 @@ void inbox_items_free(InboxItem *items, int count);
 
 /* Count unconsumed inbox items for a session. Returns count or -1 on error. */
 int inbox_count(sqlite3 *db, int64_t session_id);
-int inbox_clear_source(sqlite3 *db, int64_t session_id, const char *source);
 
 /* V18: Atomically consume unconsumed inbox items into session entries.
- * Within BEGIN EXCLUSIVE: marks items consumed, inserts as user messages, updates leaf.
  * Returns number of items consumed (≥0) or -1 on error (transaction rolled back). */
 int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit);
 
 /* T88/T202: Spawn queue — cclaw.db only (V73). peek/mark used by daemon. */
 SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count);
-int spawn_queue_mark(sqlite3 *db, int64_t id, const char *status, int64_t child_session_id);
-void spawn_request_free(SpawnRequest *list, int count);
 
 /* T119: agents table — DB-authoritative agent identity */
 typedef struct {
@@ -253,21 +240,16 @@ void memory_block_free(MemoryBlock *mb);
 /* Free a MemoryBlock array. */
 void memory_block_list_free(MemoryBlock *list, int count);
 
-/* Seed memory blocks from agent.json memory_blocks[] array (SQLite json_each).
- * Only inserts blocks that don't already exist (DB authoritative). */
+/* Seed memory blocks from agent JSON config (json_each over $.memory_blocks). */
 void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str);
 
-/* T193/V69: Channel→agent binding.
- * db_channel_binding_get returns heap-allocated agent_name or NULL if unbound.
- * db_channel_binding_set upserts binding. Returns 0 on success, -1 on error. */
+/* T193/V69: Channel→agent binding. Returns heap-allocated agent_name or NULL. */
 char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *channel_id);
-int db_channel_binding_set(sqlite3 *db, const char *channel_type, const char *channel_id, const char *agent_name);
 
 /* T268: Sum cost_nano for all entries in a session. Returns total nanodollars. */
 int64_t session_cost(sqlite3 *db, int64_t session_id);
 
 /* Session route tracking */
-int session_set_last_route(sqlite3 *db, int64_t session_id, const char *route);
 char *session_get_last_route(sqlite3 *db, int64_t session_id);
 
 /* Rate limiting — returns 1 if under limit (ok to proceed), 0 if exceeded */

@@ -17,20 +17,11 @@
     "request_config"
 #define AGENT_DEFAULT_TOOLS_COUNT 7
 
-/* T75: agent discovery — scan agents/ dir, list available agents by name.
- * Returns heap-allocated array of agent names (each heap-allocated).
- * Caller must free each name and the array. Sets *count. */
-char **agent_discover(const char *agents_dir, size_t *count);
-
-/* Free array returned by agent_discover. */
-void agent_discover_free(char **names, size_t count);
-
-/* T76: per-agent config loaded from agents/<name>/agent.json.
+/* Per-agent config loaded from agents table in cclaw.db.
  * Fields override global Config when non-NULL/non-zero. */
 typedef struct {
-    char *name;             /* agent name (from dir) */
+    char *name;             /* agent name */
     char *model;            /* model override (NULL = use global) */
-    char *workspace;        /* V12: per-agent workspace (NULL = ./workspace/{name}) */
     char **tools;           /* tool whitelist (NULL = all tools) */
     size_t tool_count;
     char **allowed_hosts;   /* V38: hostnames for http_fetch */
@@ -40,31 +31,12 @@ typedef struct {
     int max_iterations;     /* 0 = use global */
 } AgentConfig;
 
-/* Load agent config from agents_dir/name/agent.json (legacy, for migration).
- * Returns NULL on missing file (caller should use global defaults).
- * Applies V12 workspace fallback if workspace not specified. */
-AgentConfig *agent_config_load(const char *agents_dir, const char *name);
-
-/* T196/V80: Load agent config from cclaw.db agent_config table.
- * Returns NULL if no config rows exist for this agent.
- * Applies V12 workspace fallback if workspace not specified. */
+/* Load agent config from cclaw.db agents table.
+ * Returns NULL if agent not found. */
 AgentConfig *agent_config_load_db(sqlite3 *db, const char *name);
 
-/* T196/V80: Save agent config to cclaw.db agent_config table.
- * Upserts all non-NULL fields as key-value rows. Returns 0 on success. */
-int agent_config_save_db(sqlite3 *db, const AgentConfig *ac);
-
-/* T196: Import agent.json into cclaw.db agent_config table, delete file after.
- * Called during daemon startup migration. Returns 0 on success, -1 on error. */
-int agent_config_migrate_json(sqlite3 *db, const char *agents_dir, const char *name);
-
-/* Free AgentConfig returned by agent_config_load. */
+/* Free AgentConfig. */
 void agent_config_free(AgentConfig *ac);
-
-/* Merge agent config into a copy of global config.
- * Returns heap-allocated Config with agent overrides applied.
- * Caller must config_free() the result. ac may be NULL (returns copy of global). */
-Config *agent_config_merge(const Config *global, const AgentConfig *ac);
 
 /* T77: Load system prompt from agents/<name>/system.md, render template vars
  * {session_id}, {date}, {agent_name}. Returns heap-allocated string.
@@ -78,45 +50,25 @@ char *agent_load_system_prompt(const char *agents_dir, const char *name,
 char *agent_load_skills(const char *agents_dir, const char *name);
 
 /* T122: Assemble system prompt from DB agent row (template + soul + memory + skills).
- * Seeds agent from disk if not in DB. Renders template vars {session_id}, {date}, {agent_name}.
- * Falls back to config_render_system_prompt if agent_name is NULL.
  * Returns heap-allocated string. Caller must free. */
 char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
                                 int64_t session_id, const char *agents_dir,
                                 const Config *fallback_cfg);
 
-/* T150/T196: Create a new agent from approval payload.
- * Creates agents_dir/name/ directory + workspace, writes config to cclaw.db agent_config,
- * seeds agents table + system.md on disk.
- * payload is a JSON string with: name, model, system_prompt, tools[], allowed_hosts[].
- * Returns 0 on success, -1 on failure. */
-int agent_config_create(const char *agents_dir, sqlite3 *db, const char *payload_json);
-
 /* T186: Create an ephemeral agent directory with workspace.
- * Generates name "ephemeral-<uuid>". Creates agents_dir/name/ with
- * workspace/ subdir. Seeds DB row.
  * Returns heap-allocated agent name on success (caller frees), NULL on failure. */
 char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db);
 
-/* T144/T196: Add host to agent's allowed_hosts in cclaw.db agent_config.
- * Returns 0 on success, -1 on failure. */
+/* T144/T196: Add host to agent's allowed_hosts. Returns 0 on success. */
 int agent_config_add_host(sqlite3 *db, const char *name, const char *host);
 
-/* T144/T196: Remove host from agent's allowed_hosts in cclaw.db agent_config.
- * Returns 0 on success (including host not found), -1 on failure. */
+/* T144/T196: Remove host from agent's allowed_hosts. Returns 0 on success. */
 int agent_config_remove_host(sqlite3 *db, const char *name, const char *host);
 
-/* T144/T196: Get current allowed_hosts for agent from cclaw.db. Returns heap-allocated array.
- * Caller must free each string and the array. Sets *count. */
+/* T144/T196: Get current allowed_hosts for agent. Caller frees array + strings. */
 char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count);
 
-/* T274/V120: Add tool to agent's tools whitelist in cclaw.db agent_config.
- * Returns 0 on success (including already present), -1 on failure. */
+/* T274/V120: Add tool to agent's tools whitelist. Returns 0 on success. */
 int agent_config_add_tool(sqlite3 *db, const char *name, const char *tool);
-
-/* T279/V123: Intersect child config with parent ceiling. Modifies child in-place.
- * tools = child ∩ parent, hosts = child ∩ parent, iterations = min(child, parent).
- * If child field is empty/zero, inherits parent's value (ceiling becomes effective). */
-void agent_config_intersect(AgentConfig *child, const AgentConfig *parent);
 
 #endif

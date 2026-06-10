@@ -56,8 +56,14 @@ static void test_outbox_insert(void) {
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
-    assert(channel_outbox_insert(db, "telegram", 42,
-        "{\"chat_id\":\"123\",\"text\":\"hello\"}") == 0);
+    {   sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db, "INSERT INTO channel_outbox(channel_name,session_id,payload) VALUES(?,?,?)", -1, &s, NULL) == SQLITE_OK);
+        sqlite3_bind_text(s, 1, "telegram", -1, SQLITE_STATIC);
+        sqlite3_bind_int64(s, 2, 42);
+        sqlite3_bind_text(s, 3, "{\"chat_id\":\"123\",\"text\":\"hello\"}", -1, SQLITE_STATIC);
+        assert(sqlite3_step(s) == SQLITE_DONE);
+        sqlite3_finalize(s);
+    }
 
     /* Verify via channel_next_outbox */
     ChannelCtx *ctx = channel_ctx_open(DB_PATH, "telegram");

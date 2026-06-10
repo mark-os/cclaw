@@ -27,7 +27,7 @@ static void test_insert_and_get_pending(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
     Message msg = {.role = ROLE_ASSISTANT, .content = "hello"};
-    int64_t eid = entry_append(db, sid, &msg);
+    int64_t eid = entry_append_with_turn(db, sid, &msg, 1);
     assert(eid > 0);
 
     /* Insert tool_call rows */
@@ -57,7 +57,7 @@ static void test_set_status(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     Message msg = {.role = ROLE_ASSISTANT, .content = "hi"};
-    int64_t eid = entry_append(db, sid, &msg);
+    int64_t eid = entry_append_with_turn(db, sid, &msg, 1);
 
     const char *sql = "INSERT INTO tool_calls(session_id, entry_id, call_id, name, arguments)"
                       " VALUES(?, ?, 'call_2', 'web_fetch', '{}');";

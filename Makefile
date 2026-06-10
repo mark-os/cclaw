@@ -27,7 +27,7 @@ E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
 MJS_VENDOR_OBJ := $(BUILDDIR)/mjs_mquickjs.o $(BUILDDIR)/mjs_cutils.o $(BUILDDIR)/mjs_dtoa.o \
                   $(BUILDDIR)/mjs_libm.o $(BUILDDIR)/mjs_stdlib.o
 
-.PHONY: all clean test test-integration test-e2e test-all install debug
+.PHONY: all clean test test-integration test-e2e test-all install install-daemon debug
 
 all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/channel_runner
 
@@ -151,6 +151,15 @@ $(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(CR_VENDOR_OBJ) $(CR_L
 install: $(BUILDDIR)/mjs
 	install -d /usr/local/lib/cclaw
 	install -m 755 $(BUILDDIR)/mjs /usr/local/lib/cclaw/mjs
+
+install-daemon: $(BUILDDIR)/cclaw
+	install -d /usr/local/bin
+	install -m 755 $(BUILDDIR)/cclaw /usr/local/bin/cclaw
+	install -d /etc/cclaw
+	test -f /etc/cclaw/env || install -m 600 cclaw.env.example /etc/cclaw/env
+	install -m 644 cclaw.service /etc/systemd/system/cclaw.service
+	systemctl daemon-reload
+	@echo "Installed. Edit /etc/cclaw/env then: systemctl enable --now cclaw"
 
 $(BUILDDIR)/:
 	mkdir -p $(BUILDDIR)

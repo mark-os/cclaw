@@ -33,9 +33,9 @@ int main(void) {
     db_agent_upsert(db, "default", NULL, NULL, NULL);
     int64_t sid = session_create(db, "test", "default", -1, 0);
     Message sys = {.role = ROLE_SYSTEM, .content = "sys"};
-    entry_append(db, sid, &sys);
+    entry_append_with_turn(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "hello"};
-    entry_append(db, sid, &user);
+    entry_append_with_turn(db, sid, &user, 1);
 
     const char *hdrs[] = {"Content-Type: text/event-stream", NULL};
     mock_server_enqueue_with_headers(200, SSE_RESPONSE, hdrs);

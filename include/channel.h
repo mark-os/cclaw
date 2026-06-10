@@ -19,7 +19,6 @@ int channel_launch_all(sqlite3 *db, const char *db_path);
 void channel_shutdown_all(void);
 
 /* Reaping — returns 1 if pid belonged to a channel, 0 otherwise */
-int channel_reap(pid_t pid, int status, sqlite3 *db, const char *db_path);
 
 /* Registration */
 int channel_register(sqlite3 *db, const char *name, const char *binary_path);

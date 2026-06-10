@@ -32,7 +32,7 @@ static void test_cli_session_resume(void) {
     if (sessions[0].id != s1 || sessions[1].id != s2) { FAIL("wrong session ids"); session_list_free(sessions, count); db_close(db); unlink(dbpath); return; }
 
     Message msg = {.role = ROLE_USER, .content = "hello"};
-    entry_append(db, s1, &msg);
+    entry_append_with_turn(db, s1, &msg, 1);
 
     int branch_count = 0;
     Entry *branch = session_get_branch(db, s1, &branch_count);

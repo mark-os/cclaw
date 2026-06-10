@@ -434,35 +434,6 @@ int http_post(const char *url, const char **headers, const char *body,
     return http_do(&opts, resp);
 }
 
-int http_post_stream(const char *url, const char **headers,
-                     HttpReadFn read_cb, void *read_data,
-                     HttpResponse *resp) {
-    HttpRequestOpts opts = {
-        .url = url,
-        .method = "POST",
-        .headers = headers,
-        .read_cb = read_cb,
-        .read_data = read_data,
-    };
-    return http_do(&opts, resp);
-}
-
-int http_post_stream_sse(const char *url, const char **headers,
-                         HttpReadFn read_cb, void *read_data,
-                         HttpSseFn sse_cb, void *sse_data,
-                         HttpResponse *resp, SseCtx *out_ctx) {
-    HttpRequestOpts opts = {
-        .url = url,
-        .method = "POST",
-        .headers = headers,
-        .read_cb = read_cb,
-        .read_data = read_data,
-        .sse_cb = sse_cb,
-        .sse_data = sse_data,
-        .out_ctx = out_ctx,
-    };
-    return http_do(&opts, resp);
-}
 
 void http_response_free(HttpResponse *resp) {
     free(resp->data);

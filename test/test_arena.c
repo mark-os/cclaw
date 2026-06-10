@@ -43,19 +43,6 @@ static void test_alloc_overflow(void) {
     PASS();
 }
 
-static void test_reset(void) {
-    TEST(reset);
-    Arena *a = arena_create(128);
-    arena_alloc(a, 100);
-    if (a->used == 0) { FAIL("used should be nonzero"); arena_destroy(a); return; }
-    arena_reset(a);
-    if (a->used != 0) { FAIL("used not zero after reset"); arena_destroy(a); return; }
-    /* Can allocate again after reset */
-    void *p = arena_alloc(a, 100);
-    if (!p) { FAIL("alloc after reset failed"); arena_destroy(a); return; }
-    arena_destroy(a);
-    PASS();
-}
 
 static void test_default_size(void) {
     TEST(default_size);
@@ -71,7 +58,6 @@ int main(void) {
     test_create_destroy();
     test_alloc_basic();
     test_alloc_overflow();
-    test_reset();
     test_default_size();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

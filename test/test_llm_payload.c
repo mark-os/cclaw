@@ -16,11 +16,11 @@ static void setup_session(sqlite3 *db, int64_t *sid) {
 
     /* User message with special chars */
     Message user = {.role = ROLE_USER, .content = "Hello \"world\"\nLine2\ttab"};
-    entry_append(db, *sid, &user);
+    entry_append_with_turn(db, *sid, &user, 1);
 
     /* Assistant reply */
     Message asst = {.role = ROLE_ASSISTANT, .content = "Hi there!"};
-    entry_append(db, *sid, &asst);
+    entry_append_with_turn(db, *sid, &asst, 1);
 }
 
 /* Helper: extract string from JSON using sqlite */

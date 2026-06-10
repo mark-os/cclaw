@@ -148,6 +148,15 @@ Session *session_list(sqlite3 *db, int *count) {
     return list;
 }
 
+void session_list_free(Session *sessions, int count) {
+    if (!sessions) return;
+    for (int i = 0; i < count; i++) {
+        free(sessions[i].name);
+        free(sessions[i].agent_name);
+    }
+    free(sessions);
+}
+
 /* Serialize tool_calls array to JSON string. Caller must free. Returns NULL if none. */
 static int role_to_int(Role r) {
     switch (r) {
@@ -354,7 +363,30 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
 
 /* Resolve deliverable response text from session branch.
  * Walks backward from leaf: returns first non-empty assistant content found.
- * Skips empty/null final entries (provider glitch) to reach intermediate texts.
+ * Skips empty/null final entries (provider glitch) to reach intermediate texts. */
+
+void entry_branch_free(Entry *entries, int count) {
+    if (!entries) return;
+    for (int i = 0; i < count; i++) {
+        free(entries[i].message.content);
+        if (entries[i].message.tool_calls) {
+            for (size_t t = 0; t < entries[i].message.tool_call_count; t++) {
+                free(entries[i].message.tool_calls[t].id);
+                free(entries[i].message.tool_calls[t].name);
+                free(entries[i].message.tool_calls[t].arguments);
+            }
+            free(entries[i].message.tool_calls);
+        }
+        if (entries[i].message.tool_result) {
+            free(entries[i].message.tool_result->tool_call_id);
+            free(entries[i].message.tool_result->content);
+            free(entries[i].message.tool_result);
+        }
+    }
+    free(entries);
+}
+
+/* T263: Get latest assistant response text from session branch.
  * Note: OpenClaw concatenates ALL non-empty assistant texts from the turn as
  * fallback; we only return the last non-empty one. Revisit if needed.
  * Returns heap-allocated string or NULL if no deliverable content. */
@@ -403,26 +435,6 @@ int session_get_depth(sqlite3 *db, int64_t session_id) {
     return depth;
 }
 
-int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id) {
-    const char *sql = "UPDATE sessions SET leaf_id=?, updated_at=unixepoch() WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, leaf_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
-}
-
-void session_list_free(Session *sessions, int count) {
-    if (!sessions) return;
-    for (int i = 0; i < count; i++) {
-        free(sessions[i].name);
-        free(sessions[i].agent_name);
-    }
-    free(sessions);
-}
 
 /* Derive entry type string from Role (backward compat for legacy callers) */
 static const char *type_from_role(const Message *msg) {
@@ -434,114 +446,6 @@ static const char *type_from_role(const Message *msg) {
         case ROLE_COMPACTION: return "system";
     }
     return "user_message";
-}
-
-/* V14: insert entry with given parent_id, update session leaf — split columns */
-int64_t entry_append_at(sqlite3 *db, int64_t session_id, int64_t parent_id, const Message *msg) {
-    const char *sql =
-        "INSERT INTO entries (parent_id, session_id, type, part_index, role, content, tool_calls,"
-        " tool_call_id, tool_name, is_error, stop_reason, model,"
-        " usage_in, usage_out, cost_nano, token_estimate, content_bytes, tool_call_count)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, parent_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    sqlite3_bind_text(stmt, 3, type_from_role(msg), -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 4, 0); /* part_index=0 default */
-    sqlite3_bind_int(stmt, 5, role_to_int(msg->role));
-
-    /* content */
-    const char *content_val = NULL;
-    if (msg->role == ROLE_TOOL && msg->tool_result)
-        content_val = msg->tool_result->content;
-    else
-        content_val = msg->content;
-    if (content_val) sqlite3_bind_text(stmt, 6, content_val, -1, SQLITE_TRANSIENT);
-    else sqlite3_bind_null(stmt, 6);
-
-    /* tool_calls (deprecated — kept for backward compat) */
-    char *tc_json = NULL;
-    int tc_count = 0;
-    if (msg->role == ROLE_ASSISTANT && msg->tool_calls && msg->tool_call_count > 0) {
-        tc_json = serialize_tool_calls(db, msg->tool_calls, msg->tool_call_count);
-        tc_count = (int)msg->tool_call_count;
-    }
-    if (tc_json) sqlite3_bind_text(stmt, 7, tc_json, -1, SQLITE_TRANSIENT);
-    else sqlite3_bind_null(stmt, 7);
-
-    /* tool_call_id */
-    if (msg->role == ROLE_TOOL && msg->tool_result && msg->tool_result->tool_call_id)
-        sqlite3_bind_text(stmt, 8, msg->tool_result->tool_call_id, -1, SQLITE_TRANSIENT);
-    else
-        sqlite3_bind_null(stmt, 8);
-
-    /* tool_name */
-    if (msg->tool_name) sqlite3_bind_text(stmt, 9, msg->tool_name, -1, SQLITE_TRANSIENT);
-    else sqlite3_bind_null(stmt, 9);
-
-    /* is_error */
-    sqlite3_bind_int(stmt, 10, msg->is_error);
-
-    /* stop_reason */
-    sqlite3_bind_int(stmt, 11, stop_reason_to_int(msg->stop_reason));
-
-    /* model */
-    if (msg->model) sqlite3_bind_text(stmt, 12, msg->model, -1, SQLITE_TRANSIENT);
-    else sqlite3_bind_null(stmt, 12);
-
-    /* usage */
-    if (msg->usage_in > 0) sqlite3_bind_int(stmt, 13, msg->usage_in);
-    else sqlite3_bind_null(stmt, 13);
-    if (msg->usage_out > 0) sqlite3_bind_int(stmt, 14, msg->usage_out);
-    else sqlite3_bind_null(stmt, 14);
-
-    /* cost */
-    if (msg->cost_nano > 0) sqlite3_bind_int64(stmt, 15, msg->cost_nano);
-    else sqlite3_bind_null(stmt, 15);
-
-    /* token_estimate + content_bytes */
-    int content_len = content_val ? (int)strlen(content_val) : 0;
-    int tc_len = tc_json ? (int)strlen(tc_json) : 0;
-    int total_bytes = content_len + tc_len;
-    sqlite3_bind_int(stmt, 16, (total_bytes / 4) + 4);
-    sqlite3_bind_int(stmt, 17, total_bytes);
-    sqlite3_bind_int(stmt, 18, tc_count);
-
-    free(tc_json);
-
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-
-    if (rc != SQLITE_DONE)
-        return -1;
-
-    int64_t entry_id = sqlite3_last_insert_rowid(db);
-
-    if (session_set_leaf(db, session_id, entry_id) != 0)
-        return -1;
-
-    return entry_id;
-}
-
-/* V14: append as child of current leaf (linear continuation) */
-int64_t entry_append(sqlite3 *db, int64_t session_id, const Message *msg) {
-    /* Get current leaf_id */
-    const char *sql = "SELECT leaf_id FROM sessions WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    if (sqlite3_step(stmt) != SQLITE_ROW) {
-        sqlite3_finalize(stmt);
-        return -1;
-    }
-    int64_t parent_id = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-
-    /* leaf_id == -1 means no entries yet → parent_id stays -1 (root) */
-    return entry_append_at(db, session_id, parent_id, msg);
 }
 
 /* V58,V59: Insert compaction summary entry and reparent.
@@ -591,26 +495,6 @@ int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
     return compact_id;
 }
 
-void entry_branch_free(Entry *entries, int count) {
-    if (!entries) return;
-    for (int i = 0; i < count; i++) {
-        free(entries[i].message.content);
-        if (entries[i].message.tool_calls) {
-            for (size_t t = 0; t < entries[i].message.tool_call_count; t++) {
-                free(entries[i].message.tool_calls[t].id);
-                free(entries[i].message.tool_calls[t].name);
-                free(entries[i].message.tool_calls[t].arguments);
-            }
-            free(entries[i].message.tool_calls);
-        }
-        if (entries[i].message.tool_result) {
-            free(entries[i].message.tool_result->tool_call_id);
-            free(entries[i].message.tool_result->content);
-            free(entries[i].message.tool_result);
-        }
-    }
-    free(entries);
-}
 
 /* V7: FTS5 search over message content */
 Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *count) {
@@ -716,37 +600,12 @@ char *db_kv_get_secret(sqlite3 *db, const char *key) {
 }
 
 int db_kv_set_secret(sqlite3 *db, const char *key, const char *value) {
-    if (!s_secret_key_loaded) return db_kv_set(db, key, value); /* fallback */
+    if (!s_secret_key_loaded) return db_kv_set(db, key, value);
     char *encrypted = secret_encrypt(s_secret_key, value);
     if (!encrypted) return -1;
     int rc = db_kv_set(db, key, encrypted);
     free(encrypted);
     return rc;
-}
-
-int64_t db_tg_get_session(sqlite3 *db, int64_t chat_id) {
-    const char *sql = "SELECT session_id FROM channel_routes WHERE channel_name='telegram' AND channel_id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, chat_id);
-    int64_t session_id = -1;
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        session_id = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-    return session_id;
-}
-
-int db_tg_set_session(sqlite3 *db, int64_t chat_id, int64_t session_id) {
-    const char *sql = "INSERT OR REPLACE INTO channel_routes(channel_name, channel_id, agent_name, session_id) VALUES('telegram', ?, 'default', ?);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, chat_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
 /* T193/V69: Channel→agent binding */
@@ -766,19 +625,6 @@ char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *
     return result;
 }
 
-int db_channel_binding_set(sqlite3 *db, const char *channel_type, const char *channel_id, const char *agent_name) {
-    const char *sql =
-        "INSERT OR REPLACE INTO channel_routes (channel_name, channel_id, agent_name)"
-        " VALUES (?, ?, ?);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, channel_type, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, channel_id, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, agent_name, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
-}
 
 /* V3: sub-agent limits — count active child sessions */
 
@@ -821,6 +667,18 @@ int64_t db_next_turn_id(sqlite3 *db, int64_t session_id) {
         tid = sqlite3_column_int64(stmt, 0);
     sqlite3_finalize(stmt);
     return tid;
+}
+
+int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id) {
+    const char *sql = "UPDATE sessions SET leaf_id=?, updated_at=unixepoch() WHERE id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, leaf_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
 }
 
 /* V17: append entry with explicit turn_id */
@@ -1066,30 +924,13 @@ void inbox_items_free(InboxItem *items, int count) {
 
 int inbox_count(sqlite3 *db, int64_t session_id) {
     sqlite3_stmt *stmt;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM inbox WHERE session_id = ? AND consumed = 0",
-        -1, &stmt, NULL);
-    if (rc != SQLITE_OK) return -1;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM inbox WHERE session_id=? AND consumed=0",
+                           -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_int64(stmt, 1, session_id);
-    int count = -1;
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        count = sqlite3_column_int(stmt, 0);
+    int c = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) c = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
-    return count;
-}
-
-int inbox_clear_source(sqlite3 *db, int64_t session_id, const char *source) {
-    sqlite3_stmt *stmt;
-    int rc = sqlite3_prepare_v2(db,
-        "DELETE FROM inbox WHERE session_id = ? AND consumed = 0 AND source = ?",
-        -1, &stmt, NULL);
-    if (rc != SQLITE_OK) return 0;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    sqlite3_bind_text(stmt, 2, source, -1, SQLITE_STATIC);
-    sqlite3_step(stmt);
-    int cleared = sqlite3_changes(db);
-    sqlite3_finalize(stmt);
-    return cleared;
+    return c;
 }
 
 /* V18: Atomically consume inbox items into session entries */
@@ -1241,30 +1082,6 @@ SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count) {
     return list;
 }
 
-int spawn_queue_mark(sqlite3 *db, int64_t id, const char *status, int64_t child_session_id) {
-    const char *sql =
-        "UPDATE spawn_queue SET status=?, child_session_id=? WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, status, -1, SQLITE_STATIC);
-    if (child_session_id > 0)
-        sqlite3_bind_int64(stmt, 2, child_session_id);
-    else
-        sqlite3_bind_null(stmt, 2);
-    sqlite3_bind_int64(stmt, 3, id);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
-}
-
-void spawn_request_free(SpawnRequest *list, int count) {
-    for (int i = 0; i < count; i++) {
-        free(list[i].task);
-        free(list[i].tool_call_id);
-        free(list[i].child_agent);
-    }
-    free(list);
-}
 
 /* T119: agents table operations */
 
@@ -1353,6 +1170,39 @@ static char *read_file_str(const char *path) {
     buf[len] = '\0';
     fclose(f);
     return buf;
+}
+
+void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str) {
+    if (!agent_json_str || !agent_name) return;
+    const char *sql =
+        "SELECT json_extract(value,'$.label'), json_extract(value,'$.description'),"
+        " json_extract(value,'$.value'), json_extract(value,'$.char_limit'),"
+        " json_extract(value,'$.read_only')"
+        " FROM json_each(?1, '$.memory_blocks')";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(stmt, 1, agent_json_str, -1, SQLITE_STATIC);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *lbl = (const char *)sqlite3_column_text(stmt, 0);
+        if (!lbl) continue;
+        MemoryBlock *existing = memory_block_get(db, agent_name, lbl);
+        if (existing) { memory_block_free(existing); continue; }
+        const char *desc = (const char *)sqlite3_column_text(stmt, 1);
+        const char *val = (const char *)sqlite3_column_text(stmt, 2);
+        int cl = sqlite3_column_type(stmt, 3) == SQLITE_INTEGER ? sqlite3_column_int(stmt, 3) : 5000;
+        int ro = sqlite3_column_int(stmt, 4);
+        int64_t id = memory_block_create(db, agent_name, lbl, desc, val, cl);
+        if (id > 0 && ro) {
+            const char *ro_sql = "UPDATE memory_blocks SET read_only=1 WHERE id=?;";
+            sqlite3_stmt *rstmt;
+            if (sqlite3_prepare_v2(db, ro_sql, -1, &rstmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(rstmt, 1, id);
+                sqlite3_step(rstmt);
+                sqlite3_finalize(rstmt);
+            }
+        }
+    }
+    sqlite3_finalize(stmt);
 }
 
 AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
@@ -1640,54 +1490,6 @@ int memory_block_set_value(sqlite3 *db, const char *agent_name, const char *labe
     return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
 }
 
-void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str) {
-    if (!agent_json_str || !agent_name) return;
-
-    /* Use json_each to iterate memory_blocks array, json_extract for fields */
-    const char *sql =
-        "SELECT json_extract(value,'$.label'), json_extract(value,'$.description'),"
-        " json_extract(value,'$.value'), json_extract(value,'$.char_limit'),"
-        " json_extract(value,'$.read_only')"
-        " FROM json_each(?1, '$.memory_blocks')";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
-    sqlite3_bind_text(stmt, 1, agent_json_str, -1, SQLITE_STATIC);
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *lbl = (const char *)sqlite3_column_text(stmt, 0);
-        if (!lbl) continue;
-        /* Only seed if not already in DB (DB authoritative) */
-        MemoryBlock *existing = memory_block_get(db, agent_name, lbl);
-        if (existing) { memory_block_free(existing); continue; }
-        const char *desc = (const char *)sqlite3_column_text(stmt, 1);
-        const char *val = (const char *)sqlite3_column_text(stmt, 2);
-        int cl = sqlite3_column_type(stmt, 3) == SQLITE_INTEGER ? sqlite3_column_int(stmt, 3) : 5000;
-        int ro = sqlite3_column_int(stmt, 4);
-        int64_t id = memory_block_create(db, agent_name, lbl, desc, val, cl);
-        if (id > 0 && ro) {
-            const char *ro_sql = "UPDATE memory_blocks SET read_only=1 WHERE id=?;";
-            sqlite3_stmt *rstmt;
-            if (sqlite3_prepare_v2(db, ro_sql, -1, &rstmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(rstmt, 1, id);
-                sqlite3_step(rstmt);
-                sqlite3_finalize(rstmt);
-            }
-        }
-    }
-    sqlite3_finalize(stmt);
-}
-
-/* Session last_route helpers (moved from daemon.c) */
-int session_set_last_route(sqlite3 *db, int64_t session_id, const char *route) {
-    const char *sql = "UPDATE sessions SET last_route=?, updated_at=unixepoch() WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, route, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
-}
 
 char *session_get_last_route(sqlite3 *db, int64_t session_id) {
     const char *sql = "SELECT last_route FROM sessions WHERE id=?;";

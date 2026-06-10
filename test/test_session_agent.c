@@ -68,50 +68,11 @@ static void test_list_includes_agent_name(void) {
     printf("  PASS test_list_includes_agent_name\n");
 }
 
-/* T79: agent_config_merge with agent_name produces correct effective config */
-static void test_merge_at_run_time(void) {
-    /* Create agent dir with config */
-    mkdir("/tmp/test_agents", 0755);
-    mkdir("/tmp/test_agents/mybot", 0755);
-    FILE *f = fopen("/tmp/test_agents/mybot/agent.json", "w");
-    fprintf(f, "{\"model\":\"gpt-4\",\"max_iterations\":5}");
-    fclose(f);
-
-    Config global = {0};
-    global.provider.base_url = strdup("https://api.example.com");
-    global.provider.api_key = strdup("key");
-    global.provider.model = strdup("default-model");
-    global.max_iterations = 25;
-
-    AgentConfig *ac = agent_config_load("/tmp/test_agents", "mybot");
-    assert(ac != NULL);
-    assert(strcmp(ac->model, "gpt-4") == 0);
-
-    Config *merged = agent_config_merge(&global, ac);
-    assert(merged != NULL);
-    assert(strcmp(merged->provider.model, "gpt-4") == 0);
-    assert(merged->max_iterations == 5);
-    /* base_url/api_key inherited from global */
-    assert(strcmp(merged->provider.base_url, "https://api.example.com") == 0);
-
-    config_free(merged);
-    agent_config_free(ac);
-    free(global.provider.base_url);
-    free(global.provider.api_key);
-    free(global.provider.model);
-
-    unlink("/tmp/test_agents/mybot/agent.json");
-    rmdir("/tmp/test_agents/mybot");
-    rmdir("/tmp/test_agents");
-    printf("  PASS test_merge_at_run_time\n");
-}
-
 int main(void) {
     printf("test_session_agent:\n");
     test_create_with_agent_name();
     test_create_without_agent_name();
     test_list_includes_agent_name();
-    test_merge_at_run_time();
     printf("All session↔agent binding tests passed.\n");
     return 0;
 }

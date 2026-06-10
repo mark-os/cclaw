@@ -21,9 +21,6 @@ void *arena_alloc(Arena *a, size_t n) {
     return ptr;
 }
 
-void arena_reset(Arena *a) {
-    a->used = 0;
-}
 
 void arena_destroy(Arena *a) {
     if (a) {

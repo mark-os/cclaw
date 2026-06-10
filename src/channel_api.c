@@ -206,19 +206,3 @@ int channel_outbox_wake(const char *db_path, const char *channel_name) {
 
 /* ── Outbox insert (daemon side) ───────────────────────────────── */
 
-int channel_outbox_insert(sqlite3 *db, const char *channel_name,
-                          int64_t session_id, const char *payload) {
-    if (!db || !channel_name || !payload) return -1;
-    const char *sql =
-        "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-        " VALUES(?,?,?);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    sqlite3_bind_text(stmt, 3, payload, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
-}

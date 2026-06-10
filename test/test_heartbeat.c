@@ -29,7 +29,7 @@ static void test_heartbeat_injects_inbox(void) {
     assert(sid > 0);
     /* Touch updated_at so session is "recently active" */
     Message user_msg = {.role = ROLE_USER, .content = "hello"};
-    entry_append(db, sid, &user_msg);
+    entry_append_with_turn(db, sid, &user_msg, 1);
 
     /* Start heartbeat with 1s interval */
     Config cfg = {0};
@@ -77,7 +77,7 @@ static void test_heartbeat_skips_non_idle(void) {
     int64_t sid = session_create(db, "test_hb_running", NULL, -1, 0);
     assert(sid > 0);
     Message user_msg = {.role = ROLE_USER, .content = "hello"};
-    entry_append(db, sid, &user_msg);
+    entry_append_with_turn(db, sid, &user_msg, 1);
 
     /* Force state to running */
     char sql[128];

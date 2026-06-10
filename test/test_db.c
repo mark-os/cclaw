@@ -134,9 +134,9 @@ static void test_fts5_search(void) {
     Message m1 = {.role = ROLE_USER, .content = "hello world from the user"};
     Message m2 = {.role = ROLE_ASSISTANT, .content = "goodbye cruel world"};
     Message m3 = {.role = ROLE_USER, .content = "unrelated message about cats"};
-    assert(entry_append(db, sid, &m1) > 0);
-    assert(entry_append(db, sid, &m2) > 0);
-    assert(entry_append(db, sid, &m3) > 0);
+    assert(entry_append_with_turn(db, sid, &m1, 1) > 0);
+    assert(entry_append_with_turn(db, sid, &m2, 1) > 0);
+    assert(entry_append_with_turn(db, sid, &m3, 1) > 0);
 
     /* Search for "world" — should find 2 entries */
     int count = 0;

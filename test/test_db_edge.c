@@ -147,7 +147,7 @@ static void test_entry_append_stop_reason_roundtrip(void) {
 
     Message m = {.role = ROLE_ASSISTANT, .content = "done",
                  .stop_reason = STOP_REASON_LENGTH};
-    entry_append(db, sid, &m);
+    entry_append_with_turn(db, sid, &m, 1);
 
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
@@ -165,7 +165,7 @@ static void test_entry_append_multiple_tool_calls(void) {
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
     Message m1 = {.role = ROLE_USER, .content = "go"};
-    entry_append(db, sid, &m1);
+    entry_append_with_turn(db, sid, &m1, 1);
 
     ToolCall tcs[3] = {
         {.id = "c1", .name = "shell_exec", .arguments = "{\"cmd\":\"ls\"}"},
@@ -174,7 +174,7 @@ static void test_entry_append_multiple_tool_calls(void) {
     };
     Message m2 = {.role = ROLE_ASSISTANT, .content = NULL,
                   .tool_calls = tcs, .tool_call_count = 3};
-    entry_append(db, sid, &m2);
+    entry_append_with_turn(db, sid, &m2, 1);
 
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
@@ -195,16 +195,16 @@ static void test_entry_append_tool_result_with_name(void) {
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
     Message m1 = {.role = ROLE_USER, .content = "go"};
-    entry_append(db, sid, &m1);
+    entry_append_with_turn(db, sid, &m1, 1);
 
     ToolCall tc = {.id = "c1", .name = "shell_exec", .arguments = "{}"};
     Message m2 = {.role = ROLE_ASSISTANT, .tool_calls = &tc, .tool_call_count = 1};
-    entry_append(db, sid, &m2);
+    entry_append_with_turn(db, sid, &m2, 1);
 
     ToolResult tr = {.tool_call_id = "c1", .content = "output"};
     Message m3 = {.role = ROLE_TOOL, .tool_result = &tr,
                   .tool_name = "shell_exec", .is_error = 0};
-    entry_append(db, sid, &m3);
+    entry_append_with_turn(db, sid, &m3, 1);
 
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);

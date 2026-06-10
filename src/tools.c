@@ -53,29 +53,3 @@ void tools_free(ToolRegistry *reg) {
     reg->count = 0;
 }
 
-int tools_is_whitelisted(const char *name, const char **whitelist, size_t whitelist_count) {
-    if (!whitelist || whitelist_count == 0) return 1;
-    if (!name) return 0;
-    for (size_t i = 0; i < whitelist_count; i++) {
-        if (whitelist[i] && strcmp(name, whitelist[i]) == 0) return 1;
-    }
-    return 0;
-}
-
-size_t tools_schemas_filtered(ToolRegistry *reg, const char **whitelist,
-                              size_t whitelist_count, ToolSchema *out, size_t out_cap) {
-    if (!reg || !out) return 0;
-    if (!whitelist || whitelist_count == 0)
-        return tools_schemas(reg, out, out_cap);
-
-    size_t n = 0;
-    for (size_t i = 0; i < reg->count && n < out_cap; i++) {
-        if (tools_is_whitelisted(reg->entries[i].name, whitelist, whitelist_count)) {
-            out[n].name = reg->entries[i].name;
-            out[n].description = reg->entries[i].description;
-            out[n].parameters_json = reg->entries[i].parameters_json;
-            n++;
-        }
-    }
-    return n;
-}

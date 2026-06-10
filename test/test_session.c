@@ -155,15 +155,15 @@ static void test_entry_append(void) {
     int64_t sid = session_create(db, "append", NULL, -1, 0);
 
     Message m1 = { .role = ROLE_USER, .content = "hello" };
-    int64_t e1 = entry_append(db, sid, &m1);
+    int64_t e1 = entry_append_with_turn(db, sid, &m1, 1);
     assert(e1 > 0);
 
     Message m2 = { .role = ROLE_ASSISTANT, .content = "hi" };
-    int64_t e2 = entry_append(db, sid, &m2);
+    int64_t e2 = entry_append_with_turn(db, sid, &m2, 1);
     assert(e2 > e1);
 
     Message m3 = { .role = ROLE_USER, .content = "bye" };
-    int64_t e3 = entry_append(db, sid, &m3);
+    int64_t e3 = entry_append_with_turn(db, sid, &m3, 1);
     assert(e3 > e2);
 
     /* Verify branch is correct chain */
@@ -182,43 +182,12 @@ static void test_entry_append(void) {
     printf("  PASS test_entry_append\n");
 }
 
-/* T7/V14: branching — entry_append_at forks from non-leaf */
-static void test_entry_append_at_branch(void) {
-    sqlite3 *db = setup();
-    int64_t sid = session_create(db, "branching", NULL, -1, 0);
-
-    Message m1 = { .role = ROLE_USER, .content = "root" };
-    int64_t e1 = entry_append(db, sid, &m1);
-
-    Message m2 = { .role = ROLE_ASSISTANT, .content = "branch-a" };
-    int64_t e2 = entry_append(db, sid, &m2);
-    (void)e2;
-
-    /* Fork from e1 (not current leaf e2) */
-    Message m3 = { .role = ROLE_ASSISTANT, .content = "branch-b" };
-    int64_t e3 = entry_append_at(db, sid, e1, &m3);
-    assert(e3 > 0);
-
-    /* Leaf should now be e3 */
-    int count = 0;
-    Entry *branch = session_get_branch(db, sid, &count);
-    assert(count == 2);
-    assert(branch[0].id == e1);
-    assert(branch[0].parent_id == -1);
-    assert(branch[1].id == e3);
-    assert(branch[1].parent_id == e1);
-    assert(strcmp(branch[1].message.content, "branch-b") == 0);
-
-    entry_branch_free(branch, count);
-    teardown(db);
-    printf("  PASS test_entry_append_at_branch\n");
-}
 
 /* T7: entry_append on invalid session */
 static void test_entry_append_invalid_session(void) {
     sqlite3 *db = setup();
     Message m = { .role = ROLE_USER, .content = "nope" };
-    int64_t id = entry_append(db, 9999, &m);
+    int64_t id = entry_append_with_turn(db, 9999, &m, 1);
     assert(id == -1);
 
     teardown(db);
@@ -232,20 +201,20 @@ static void test_entry_tool_calls_roundtrip(void) {
 
     /* Append user message */
     Message m1 = { .role = ROLE_USER, .content = "do something" };
-    int64_t e1 = entry_append(db, sid, &m1);
+    int64_t e1 = entry_append_with_turn(db, sid, &m1, 1);
     assert(e1 > 0);
 
     /* Append assistant message with tool_calls */
     ToolCall tc = { .id = "call_123", .name = "shell_exec", .arguments = "{\"cmd\":\"ls\"}" };
     Message m2 = { .role = ROLE_ASSISTANT, .content = NULL,
                    .tool_calls = &tc, .tool_call_count = 1 };
-    int64_t e2 = entry_append(db, sid, &m2);
+    int64_t e2 = entry_append_with_turn(db, sid, &m2, 1);
     assert(e2 > 0);
 
     /* Append tool result */
     ToolResult tr = { .tool_call_id = "call_123", .content = "file1.txt\nfile2.txt" };
     Message m3 = { .role = ROLE_TOOL, .tool_result = &tr };
-    int64_t e3 = entry_append(db, sid, &m3);
+    int64_t e3 = entry_append_with_turn(db, sid, &m3, 1);
     assert(e3 > 0);
 
     /* Read back branch and verify deserialization */
@@ -375,7 +344,6 @@ int main(void) {
     test_session_get_branch();
     test_session_get_branch_empty();
     test_entry_append();
-    test_entry_append_at_branch();
     test_entry_append_invalid_session();
     test_entry_tool_calls_roundtrip();
     test_original_parent_id();

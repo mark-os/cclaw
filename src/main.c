@@ -345,6 +345,8 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
 /* handle_llm_complete: query DB for next action after LLM request finishes */
 static void handle_llm_complete(int64_t session_id, const char *agent_name, int iteration) {
     int tc_state = turn_complete(g_db, session_id);
+    LOG_DEBUG_(g_cfg, "handle_llm_complete: session=%lld iter=%d tc_state=%d",
+               (long long)session_id, iteration, tc_state);
     if (tc_state == 1) {
         /* Has pending tool_calls — dispatch */
         int tc_count = 0;
@@ -711,6 +713,7 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--new") == 0) new_session = 1;
         else if (strcmp(argv[i], "-y") == 0) yolo_mode = 1;
         else if (strcmp(argv[i], "--llm-fork") == 0) g_llm_fork = 1;
+        else if (strcmp(argv[i], "--no-stream") == 0) setenv("CCLAW_STREAM", "0", 1);
         else if (strncmp(argv[i], "--llm-threads=", 14) == 0) g_llm_threads = atoi(argv[i]+14);
         else if (strcmp(argv[i], "-p") == 0) { if (++i >= argc) { fprintf(stderr, "-p requires arg\n"); return 1; } prompt = argv[i]; }
         else if (strcmp(argv[i], "-s") == 0) { if (++i >= argc) { fprintf(stderr, "-s requires arg\n"); return 1; } session_id = atoll(argv[i]); }
@@ -1048,18 +1051,31 @@ int main(int argc, char *argv[]) {
             }
         }
         if (stdin_idx >= 0 && (cli_pfds[stdin_idx].revents & POLLIN)) {
-            if (g_cli_turn_active) continue;
+            if (g_cli_turn_active) {
+                LOG_DEBUG_(g_cfg, "stdin: POLLIN but turn active, skipping");
+                continue;
+            }
 
-            char *line = NULL; size_t cap = 0;
-            ssize_t len = getline(&line, &cap, stdin);
-            if (len < 0) { free(line); goto done; }
-            if (len > 0 && line[len-1] == '\n') line[len-1] = '\0';
+            /* Read line directly (avoid stdio buffering issues with non-blocking fd) */
+            static char linebuf[4096];
+            static size_t linepos = 0;
+            ssize_t n = read(STDIN_FILENO, linebuf + linepos, sizeof(linebuf) - linepos - 1);
+            if (n <= 0) { if (n == 0) goto done; continue; } /* EOF or EAGAIN */
+            linepos += (size_t)n;
+            linebuf[linepos] = '\0';
+            char *nl = strchr(linebuf, '\n');
+            if (!nl) continue; /* partial line, wait for more */
+            *nl = '\0';
+            LOG_DEBUG_(g_cfg, "stdin: read line [%s]", linebuf);
 
-            if (!line[0]) { free(line); printf("> "); fflush(stdout); continue; }
-            if (strcmp(line, "exit") == 0 || strcmp(line, "quit") == 0) { free(line); goto done; }
+            if (!linebuf[0]) { linepos = 0; printf("> "); fflush(stdout); continue; }
+            if (strcmp(linebuf, "exit") == 0 || strcmp(linebuf, "quit") == 0) goto done;
 
-            cli_start_turn(line);
-            free(line);
+            cli_start_turn(linebuf);
+            /* Shift any remaining data after the newline */
+            size_t consumed = (size_t)(nl - linebuf) + 1;
+            linepos -= consumed;
+            if (linepos > 0) memmove(linebuf, nl + 1, linepos);
         }
 
         if (nready == 0 && g_child_count > 0) reap_children();

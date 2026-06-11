@@ -384,8 +384,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     }
 
     free(recall_text);
-    free(system_prompt);
-    context_plan_free(&plan);
+    free(system_prompt); system_prompt = NULL;
+    context_plan_free(&plan); memset(&plan, 0, sizeof(plan));
 
     if (!llm_ok) {
         int64_t turn_id = db_next_turn_id(db, session_id);

@@ -241,6 +241,17 @@ static int tool_is_inline(const char *name) {
 
 static AgentSetup *g_tool_setup;  /* Initialized once for tool dispatch */
 
+/* CLI progress: "[tool_name {"arg":"value"}]" dimmed, args truncated */
+static void cli_print_tool_call(const char *name, const char *args) {
+    fprintf(stdout, "\n\033[2m[%s", name);
+    if (args && args[0] && strcmp(args, "{}") != 0) {
+        if (strlen(args) <= 200) fprintf(stdout, " %s", args);
+        else fprintf(stdout, " %.197s...", args);
+    }
+    fprintf(stdout, "]\033[0m ");
+    fflush(stdout);
+}
+
 static int fork_tool_exec(int64_t session_id, const char *agent_name,
                           PendingToolCall *tc) {
     if (g_child_count >= CHILD_MAX) return -1;
@@ -265,7 +276,7 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
 
         /* CLI progress */
         if (g_mode == 0) {
-            fprintf(stdout, "\n\033[2m[%s]\033[0m ", tc->name);
+            cli_print_tool_call(tc->name, tc->arguments);
             size_t rlen = strlen(result);
             if (rlen <= 80)
                 fprintf(stdout, "\033[2m→ %s\033[0m\n", result);
@@ -292,10 +303,8 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
     if (pipe(pipefd) != 0) return -1;
 
     /* CLI progress */
-    if (g_mode == 0) {
-        fprintf(stdout, "\n\033[2m[%s]\033[0m ", tc->name);
-        fflush(stdout);
-    }
+    if (g_mode == 0)
+        cli_print_tool_call(tc->name, tc->arguments);
 
     session_set_state(g_db, session_id, "tool_running");
 
@@ -762,6 +771,7 @@ int main(int argc, char *argv[]) {
                               log_level_override == LOG_LEVEL_ERROR ? "error" : "info";
         setenv("CCLAW_LOG_LEVEL", lvl_str, 1);
     }
+    cclaw_log_set_level(g_cfg->log_level);
 
     /* Enable SQLite query profiling at trace level */
     if (g_cfg->log_level >= LOG_LEVEL_DEBUG)

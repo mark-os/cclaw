@@ -451,6 +451,7 @@ int llm_proc_main(int64_t session_id) {
 #endif
     shutdown_init();
     cclaw_log_init();
+    cclaw_log_set_level(log_level_parse(getenv("CCLAW_LOG_LEVEL")));
 
     const char *db_path = getenv("CCLAW_DB");
     if (!db_path || !db_path[0]) {

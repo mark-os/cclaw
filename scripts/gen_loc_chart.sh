@@ -16,6 +16,9 @@ git log --reverse --format="%H" | {
         total=$((total+delta))
         echo "$i,$total"
     done
+    # Final point: actual working-tree count, so uncommitted changes show up
+    current=$(cat src/*.c src/*.h include/*.h 2>/dev/null | wc -l)
+    echo "$((i+1)),$current"
 } | awk -F, '
 { x[NR]=$1; y[NR]=$2; if($2>max) max=$2; n=NR }
 END {

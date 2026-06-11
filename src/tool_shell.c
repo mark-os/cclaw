@@ -239,26 +239,35 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         /* V47: PATH restriction + env hardening (skip in yolo mode) */
         if (!yolo) {
         setenv("PATH", "/bin:/usr/bin", 1);
-        unsetenv("OPENROUTER_API_KEY");
-        unsetenv("GEMINI_API_KEY");
         unsetenv("HOME");
-        /* Unset all CCLAW_* env vars — collect keys first since unsetenv mutates environ */
+        /* Credential scrub: drop CCLAW_* plus any var whose name looks like
+         * a secret — generic, not a hardcoded provider list (the old list
+         * caught OPENROUTER_API_KEY but leaked NVIDIA_API_KEY etc.).
+         * CCLAW_SECRET_* is the deliberate channel for handing secrets to
+         * the shell; those are re-injected below. Collect names first since
+         * unsetenv mutates environ. */
         extern char **environ;
-        char *cclaw_keys[128];
+        char *drop_keys[256];
         int nkeys = 0;
-        for (int i = 0; environ[i] && nkeys < 128; i++) {
-            if (strncmp(environ[i], "CCLAW_", 6) == 0) {
-                char *eq = strchr(environ[i], '=');
-                if (eq) {
-                    size_t klen = (size_t)(eq - environ[i]);
-                    cclaw_keys[nkeys] = strndup(environ[i], klen);
-                    if (cclaw_keys[nkeys]) nkeys++;
-                }
+        for (int i = 0; environ[i] && nkeys < 256; i++) {
+            char *eq = strchr(environ[i], '=');
+            if (!eq) continue;
+            size_t klen = (size_t)(eq - environ[i]);
+            char name[256];
+            if (klen >= sizeof(name)) continue;
+            memcpy(name, environ[i], klen);
+            name[klen] = '\0';
+            if (strncmp(name, "CCLAW_", 6) == 0 ||
+                strstr(name, "API_KEY") || strstr(name, "APIKEY") ||
+                strstr(name, "TOKEN") || strstr(name, "SECRET") ||
+                strstr(name, "PASSWORD") || strstr(name, "CREDENTIALS")) {
+                drop_keys[nkeys] = strdup(name);
+                if (drop_keys[nkeys]) nkeys++;
             }
         }
         for (int i = 0; i < nkeys; i++) {
-            unsetenv(cclaw_keys[i]);
-            free(cclaw_keys[i]);
+            unsetenv(drop_keys[i]);
+            free(drop_keys[i]);
         }
         }
 

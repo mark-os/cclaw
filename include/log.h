@@ -10,6 +10,15 @@ static inline void cclaw_log_init(void) {
     openlog("cclaw", LOG_PID | LOG_PERROR, LOG_USER);
 }
 
+/* Mask raw syslog() calls below the configured level (the CCLAW_LOG macros
+ * filter via cfg, but bare syslog(LOG_DEBUG, ...) would still hit stderr
+ * through LOG_PERROR without this). */
+static inline void cclaw_log_set_level(LogLevel level) {
+    int up = level >= LOG_LEVEL_DEBUG ? LOG_DEBUG :
+             level == LOG_LEVEL_INFO  ? LOG_NOTICE : LOG_ERR;
+    setlogmask(LOG_UPTO(up));
+}
+
 #define CCLAW_LOG(level, cfg_ptr, fmt, ...) do { \
     if ((cfg_ptr) && (cfg_ptr)->log_level >= (level)) { \
         int _prio = (level) == LOG_LEVEL_ERROR ? LOG_ERR : \

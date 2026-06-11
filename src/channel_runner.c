@@ -468,6 +468,7 @@ static void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row) {
 
 int main(int argc, char **argv) {
     cclaw_log_init();
+    cclaw_log_set_level(log_level_parse(getenv("CCLAW_LOG_LEVEL")));
     if (argc < 3) {
         fprintf(stderr, "usage: channel_runner <db_path> <channel_name>\n");
         return 1;

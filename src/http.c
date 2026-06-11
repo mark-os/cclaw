@@ -160,11 +160,21 @@ static void sse_process_line(SseCtx *ctx, const char *line, size_t len) {
         size_t idx = (size_t)chunk.tc_index;
         if (idx >= ctx->tc_alloc) {
             size_t na = idx + 4;
-            ctx->tc_ids = realloc(ctx->tc_ids, na * sizeof(char *));
-            ctx->tc_names = realloc(ctx->tc_names, na * sizeof(char *));
-            ctx->tc_args = realloc(ctx->tc_args, na * sizeof(char *));
-            ctx->tc_arg_lens = realloc(ctx->tc_arg_lens, na * sizeof(size_t));
-            ctx->tc_arg_caps = realloc(ctx->tc_arg_caps, na * sizeof(size_t));
+            #define SSE_REALLOC(ptr, sz) do { \
+                void *_tmp = realloc(ptr, sz); \
+                if (!_tmp) { \
+                    fprintf(stderr, "[sse] alloc failed for tool_call[%zu]\n", idx); \
+                    ctx->alloc_errors++; \
+                    return; \
+                } \
+                (ptr) = _tmp; \
+            } while(0)
+            SSE_REALLOC(ctx->tc_ids, na * sizeof(char *));
+            SSE_REALLOC(ctx->tc_names, na * sizeof(char *));
+            SSE_REALLOC(ctx->tc_args, na * sizeof(char *));
+            SSE_REALLOC(ctx->tc_arg_lens, na * sizeof(size_t));
+            SSE_REALLOC(ctx->tc_arg_caps, na * sizeof(size_t));
+            #undef SSE_REALLOC
             for (size_t i = ctx->tc_alloc; i < na; i++) {
                 ctx->tc_ids[i] = NULL;
                 ctx->tc_names[i] = NULL;

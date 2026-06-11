@@ -5,19 +5,19 @@
 #define _POSIX_C_SOURCE 200809L
 #include "channel_api.h"
 #include "admin_api.h"
+#include "civetweb.h"
 #include "db.h"
 #include "log.h"
 #include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <mquickjs.h>
-#include <netinet/in.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #define CR_HEAP_SIZE (2 * 1024 * 1024)
@@ -359,6 +359,7 @@ typedef struct {
     RespBuf resp;
     char *url;          /* current request URL (owned) */
     int active;         /* 1 = transfer in progress */
+    struct curl_slist *headers;  /* owned, reused across requests */
 } LongPollState;
 
 static void lp_start_request(LongPollState *lp, const char *url) {
@@ -373,9 +374,9 @@ static void lp_start_request(LongPollState *lp, const char *url) {
     curl_easy_setopt(lp->easy, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(lp->easy, CURLOPT_WRITEDATA, &lp->resp);
     curl_easy_setopt(lp->easy, CURLOPT_TIMEOUT, 35L); /* slightly longer than TG timeout */
-    struct curl_slist *h = curl_slist_append(NULL, "Content-Type: application/json");
-    curl_easy_setopt(lp->easy, CURLOPT_HTTPHEADER, h);
-    /* Note: headers leak — acceptable for long-running process */
+    if (!lp->headers)
+        lp->headers = curl_slist_append(NULL, "Content-Type: application/json");
+    curl_easy_setopt(lp->easy, CURLOPT_HTTPHEADER, lp->headers);
     curl_multi_add_handle(lp->multi, lp->easy);
     lp->active = 1;
 }
@@ -383,8 +384,158 @@ static void lp_start_request(LongPollState *lp, const char *url) {
 static void lp_cleanup(LongPollState *lp) {
     if (lp->easy) { curl_multi_remove_handle(lp->multi, lp->easy); curl_easy_cleanup(lp->easy); }
     if (lp->multi) curl_multi_cleanup(lp->multi);
+    curl_slist_free_all(lp->headers);
     free(lp->resp.data);
     free(lp->url);
+}
+
+/* ── Listen mode: thread-safe request queue ────────────────────── */
+
+typedef struct {
+    char *request_json;
+    char *response;
+    int status_code;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int done;
+} ListenRequest;
+
+typedef struct {
+    ListenRequest **items;
+    size_t len;
+    size_t cap;
+    pthread_mutex_t mutex;
+    int wake_pipe[2];
+} ListenQueue;
+
+static void listen_queue_init(ListenQueue *q) {
+    q->cap = 16;
+    q->len = 0;
+    q->items = calloc(q->cap, sizeof(ListenRequest *));
+    pthread_mutex_init(&q->mutex, NULL);
+    pipe(q->wake_pipe);
+    int flags = fcntl(q->wake_pipe[0], F_GETFL, 0);
+    fcntl(q->wake_pipe[0], F_SETFL, flags | O_NONBLOCK);
+}
+
+static void listen_queue_push(ListenQueue *q, ListenRequest *req) {
+    pthread_mutex_lock(&q->mutex);
+    if (q->len >= q->cap) {
+        q->cap *= 2;
+        q->items = realloc(q->items, q->cap * sizeof(ListenRequest *));
+    }
+    q->items[q->len++] = req;
+    pthread_mutex_unlock(&q->mutex);
+    char c = 1;
+    (void)write(q->wake_pipe[1], &c, 1);
+}
+
+static ListenRequest *listen_queue_pop(ListenQueue *q) {
+    ListenRequest *req = NULL;
+    pthread_mutex_lock(&q->mutex);
+    if (q->len > 0) {
+        req = q->items[0];
+        q->len--;
+        if (q->len > 0)
+            memmove(q->items, q->items + 1, q->len * sizeof(ListenRequest *));
+    }
+    pthread_mutex_unlock(&q->mutex);
+    return req;
+}
+
+static void listen_queue_destroy(ListenQueue *q) {
+    free(q->items);
+    pthread_mutex_destroy(&q->mutex);
+    close(q->wake_pipe[0]);
+    close(q->wake_pipe[1]);
+}
+
+/* JSON-escape a string into dst, return bytes written (excluding NUL) */
+static size_t json_esc(char *dst, size_t cap, const char *src, size_t slen) {
+    size_t o = 0;
+    for (size_t i = 0; i < slen && o + 6 < cap; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '"') { dst[o++] = '\\'; dst[o++] = '"'; }
+        else if (c == '\\') { dst[o++] = '\\'; dst[o++] = '\\'; }
+        else if (c == '\n') { dst[o++] = '\\'; dst[o++] = 'n'; }
+        else if (c == '\r') { dst[o++] = '\\'; dst[o++] = 'r'; }
+        else if (c == '\t') { dst[o++] = '\\'; dst[o++] = 't'; }
+        else if (c < 0x20) { o += (size_t)snprintf(dst + o, cap - o, "\\u%04x", c); }
+        else { dst[o++] = (char)c; }
+    }
+    dst[o] = '\0';
+    return o;
+}
+
+static int listen_handler(struct mg_connection *conn, void *cbdata) {
+    ListenQueue *q = (ListenQueue *)cbdata;
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+
+    /* Read body */
+    char body_buf[65536];
+    int body_len = 0;
+    if (ri->content_length > 0 && ri->content_length < (long long)sizeof(body_buf))
+        body_len = mg_read(conn, body_buf, (size_t)ri->content_length);
+    else if (ri->content_length < 0) /* chunked/unknown — read what's available */
+        body_len = mg_read(conn, body_buf, sizeof(body_buf) - 1);
+    if (body_len < 0) body_len = 0;
+    body_buf[body_len] = '\0';
+
+    /* Build JSON: {"method":"...","path":"...","headers":{...},"body":"..."} */
+    size_t json_cap = (size_t)body_len * 2 + 4096;
+    char *json = malloc(json_cap);
+    if (!json) { mg_printf(conn, "HTTP/1.1 500\r\nContent-Length: 0\r\n\r\n"); return 500; }
+
+    size_t pos = 0;
+    pos += (size_t)snprintf(json + pos, json_cap - pos, "{\"method\":\"");
+    if (ri->request_method)
+        pos += json_esc(json + pos, json_cap - pos, ri->request_method, strlen(ri->request_method));
+    pos += (size_t)snprintf(json + pos, json_cap - pos, "\",\"path\":\"");
+    if (ri->local_uri)
+        pos += json_esc(json + pos, json_cap - pos, ri->local_uri, strlen(ri->local_uri));
+    pos += (size_t)snprintf(json + pos, json_cap - pos, "\",\"headers\":{");
+    for (int i = 0; i < ri->num_headers; i++) {
+        if (i > 0) json[pos++] = ',';
+        json[pos++] = '"';
+        pos += json_esc(json + pos, json_cap - pos, ri->http_headers[i].name,
+                        strlen(ri->http_headers[i].name));
+        pos += (size_t)snprintf(json + pos, json_cap - pos, "\":\"");
+        pos += json_esc(json + pos, json_cap - pos, ri->http_headers[i].value,
+                        strlen(ri->http_headers[i].value));
+        json[pos++] = '"';
+    }
+    pos += (size_t)snprintf(json + pos, json_cap - pos, "},\"body\":\"");
+    pos += json_esc(json + pos, json_cap - pos, body_buf, (size_t)body_len);
+    pos += (size_t)snprintf(json + pos, json_cap - pos, "\"}");
+
+    /* Enqueue and wait for JS to process */
+    ListenRequest req = {.request_json = json, .response = NULL, .status_code = 200, .done = 0};
+    pthread_mutex_init(&req.mutex, NULL);
+    pthread_cond_init(&req.cond, NULL);
+
+    listen_queue_push(q, &req);
+
+    pthread_mutex_lock(&req.mutex);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 5;
+    while (!req.done) {
+        if (pthread_cond_timedwait(&req.cond, &req.mutex, &ts) != 0) break;
+    }
+    pthread_mutex_unlock(&req.mutex);
+
+    const char *resp_body = req.response ? req.response : "ok";
+    size_t resp_len = strlen(resp_body);
+    mg_printf(conn,
+        "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        req.done ? req.status_code : 504, resp_len, resp_body);
+
+    free(req.request_json);
+    free(req.response);
+    pthread_mutex_destroy(&req.mutex);
+    pthread_cond_destroy(&req.cond);
+    return req.done ? req.status_code : 504;
 }
 
 /* ── Main event loop ───────────────────────────────────────────── */
@@ -674,50 +825,51 @@ int main(int argc, char **argv) {
         curl_global_cleanup();
 
     } else if (poll_type == POLL_LISTEN) {
-        /* NOT YET FUNCTIONAL — minimal TCP server, no HTTP parsing */
-        /* TCP server socket */
+        /* Civetweb-based HTTP listener for webhooks */
         int port = 0;
         const char *get_port = "globalThis.__cr_init.port || 8080";
         JSValue pv = JS_Eval(ctx, get_port, strlen(get_port), "<port>", JS_EVAL_RETVAL);
         JS_ToInt32(ctx, &port, pv);
 
-        int srv = socket(AF_INET, SOCK_STREAM, 0);
-        if (srv < 0) { perror("socket"); goto cleanup; }
-        int opt = 1;
-        setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        mg_init_library(0);
+        ListenQueue lq;
+        listen_queue_init(&lq);
 
-        struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port),
-                                   .sin_addr.s_addr = INADDR_ANY};
-        if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-            perror("bind"); close(srv); goto cleanup;
+        char port_str[16];
+        snprintf(port_str, sizeof(port_str), "%d", port);
+        const char *options[] = {"listening_ports", port_str, "num_threads", "2", NULL};
+        struct mg_context *mg_ctx = mg_start(NULL, NULL, options);
+        if (!mg_ctx) {
+            fprintf(stderr, "[channel_runner] civetweb start failed on port %d\n", port);
+            listen_queue_destroy(&lq);
+            mg_exit_library();
+            goto cleanup;
         }
-        listen(srv, 16);
-        fprintf(stderr, "[channel_runner] listening on port %d\n", port);
+        mg_set_request_handler(mg_ctx, "/", listen_handler, &lq);
+
+        fprintf(stderr, "[channel_runner] listening on port %d (civetweb)\n", port);
 
         while (g_running) {
             struct pollfd fds[2];
             int nfds = 0;
-            fds[nfds].fd = srv; fds[nfds].events = POLLIN; nfds++;
+            fds[nfds].fd = lq.wake_pipe[0]; fds[nfds].events = POLLIN; nfds++;
             if (outbox_fd >= 0) { fds[nfds].fd = outbox_fd; fds[nfds].events = POLLIN; nfds++; }
 
             int r = poll(fds, (nfds_t)nfds, 1000);
             if (r < 0) { if (errno == EINTR) continue; break; }
 
-            /* Check server socket */
+            /* Process incoming webhook requests */
             if (fds[0].revents & POLLIN) {
-                int client = accept(srv, NULL, NULL);
-                if (client >= 0) {
-                    /* Read request body */
-                    char buf[65536];
-                    ssize_t n = read(client, buf, sizeof(buf) - 1);
-                    if (n > 0) {
-                        buf[n] = '\0';
-                        call_on_network(ctx, buf);
-                    }
-                    /* TODO: send HTTP response */
-                    const char *resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
-                    (void)write(client, resp, strlen(resp));
-                    close(client);
+                char drain[64];
+                while (read(lq.wake_pipe[0], drain, sizeof(drain)) > 0) {}
+                ListenRequest *req;
+                while ((req = listen_queue_pop(&lq)) != NULL) {
+                    char *result = call_js_str(ctx, "onNetwork", req->request_json);
+                    pthread_mutex_lock(&req->mutex);
+                    req->response = result;
+                    req->done = 1;
+                    pthread_cond_signal(&req->cond);
+                    pthread_mutex_unlock(&req->mutex);
                 }
             }
 
@@ -732,7 +884,10 @@ int main(int argc, char **argv) {
                 }
             }
         }
-        close(srv);
+
+        mg_stop(mg_ctx);
+        listen_queue_destroy(&lq);
+        mg_exit_library();
 
     } else if (poll_type == POLL_WEBSOCKET) {
         /* WebSocket — use curl for initial HTTP upgrade, then raw fd */

@@ -48,6 +48,7 @@ typedef struct SseCtx {
     size_t *tc_arg_caps;
     size_t tc_count;
     size_t tc_alloc;
+    size_t alloc_errors;
     char *finish_reason;
     int prompt_tokens;
     int completion_tokens;

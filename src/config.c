@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <limits.h>
 #include <time.h>
 #include <unistd.h>
 #include <libgen.h>
@@ -36,13 +39,24 @@ static void env_override_int(int *field, const char *env_name) {
 /* Read file into malloc'd string. Returns NULL if file doesn't exist or on error. */
 static const char *DEFAULT_SYSTEM_PROMPT = TPL_DEFAULT_SYSTEM_PROMPT_MD;
 
+static int mkdir_p(const char *path) {
+    char buf[PATH_MAX];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(buf)) return -1;
+    memcpy(buf, path, len + 1);
+    for (char *p = buf + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
+        *p = '/';
+    }
+    if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
 int workspace_init(const Config *cfg) {
     if (!cfg || !cfg->workspace) return -1;
-    /* mkdir -p workspace */
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "mkdir -p %s", cfg->workspace);
-    if (system(cmd) != 0) return -1;
-    return 0;
+    return mkdir_p(cfg->workspace);
 }
 
 /* T46: render system prompt with template vars and workspace context */
@@ -71,7 +85,12 @@ char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
         if (tmpl[i] == '{') {
             if (strncmp(tmpl + i, "{session_id}", 12) == 0) {
                 size_t slen = strlen(sid_buf);
-                while (oi + slen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                while (oi + slen >= out_cap) {
+                    out_cap *= 2;
+                    char *tmp = realloc(out, out_cap);
+                    if (!tmp) { free(out); return str_dup(tmpl); }
+                    out = tmp;
+                }
                 memcpy(out + oi, sid_buf, slen);
                 oi += slen;
                 i += 12;
@@ -79,7 +98,12 @@ char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
             }
             if (strncmp(tmpl + i, "{date}", 6) == 0) {
                 size_t dlen = strlen(date_buf);
-                while (oi + dlen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                while (oi + dlen >= out_cap) {
+                    out_cap *= 2;
+                    char *tmp = realloc(out, out_cap);
+                    if (!tmp) { free(out); return str_dup(tmpl); }
+                    out = tmp;
+                }
                 memcpy(out + oi, date_buf, dlen);
                 oi += dlen;
                 i += 6;
@@ -88,14 +112,24 @@ char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
             if (strncmp(tmpl + i, "{workspace}", 11) == 0) {
                 const char *ws = cfg->workspace ? cfg->workspace : ".";
                 size_t wlen = strlen(ws);
-                while (oi + wlen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                while (oi + wlen >= out_cap) {
+                    out_cap *= 2;
+                    char *tmp = realloc(out, out_cap);
+                    if (!tmp) { free(out); return str_dup(tmpl); }
+                    out = tmp;
+                }
                 memcpy(out + oi, ws, wlen);
                 oi += wlen;
                 i += 11;
                 continue;
             }
         }
-        if (oi + 1 >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        if (oi + 1 >= out_cap) {
+            out_cap *= 2;
+            char *tmp = realloc(out, out_cap);
+            if (!tmp) { free(out); return str_dup(tmpl); }
+            out = tmp;
+        }
         out[oi++] = tmpl[i++];
     }
 

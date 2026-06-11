@@ -143,7 +143,7 @@ $(BUILDDIR)/channel_runner.o: src/channel_runner.c | $(BUILDDIR)/
 
 CR_LIB_OBJ := $(BUILDDIR)/admin_api.o $(BUILDDIR)/agent_config.o $(BUILDDIR)/channel_api.o \
               $(BUILDDIR)/db.o $(BUILDDIR)/wake.o $(BUILDDIR)/secret.o $(BUILDDIR)/config.o \
-              $(BUILDDIR)/sqlite3.o $(BUILDDIR)/monocypher.o
+              $(BUILDDIR)/sqlite3.o $(BUILDDIR)/monocypher.o $(BUILDDIR)/civetweb.o
 
 $(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(CR_VENDOR_OBJ) $(CR_LIB_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ -lcurl -lm -lpthread -ldl

@@ -480,8 +480,10 @@ static void mask_replace(char *output, size_t *len, size_t cap,
             memcpy(p, tag, taglen);
             *len = *len - nlen + taglen;
         } else {
-            memcpy(p, tag, taglen);
-            *len = offset + taglen;
+            size_t can_write = cap - offset - 1;
+            if (taglen < can_write) can_write = taglen;
+            memcpy(p, tag, can_write);
+            *len = offset + can_write;
             output[*len] = '\0';
             break;
         }

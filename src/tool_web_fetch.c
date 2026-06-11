@@ -244,8 +244,9 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     char err[256];
     if (http_check_policy(url, policy, err, sizeof(err)) != 0) {
         tool_parse_free(&ta);
-        char *msg = malloc(strlen(err) + 8);
-        if (msg) { sprintf(msg, "error: %s", err); return msg; }
+        size_t needed = strlen(err) + 8;
+        char *msg = malloc(needed);
+        if (msg) { snprintf(msg, needed, "error: %s", err); return msg; }
         return strdup("error: policy denied");
     }
 

@@ -37,7 +37,7 @@ static void generate_boundary_id(char out[BOUNDARY_ID_BYTES * 2 + 1]) {
     if (fd >= 0) { read(fd, bytes, sizeof(bytes)); close(fd); }
     else memset(bytes, 0x42, sizeof(bytes)); /* fallback */
     for (int i = 0; i < BOUNDARY_ID_BYTES; i++)
-        sprintf(out + i * 2, "%02x", bytes[i]);
+        snprintf(out + i * 2, 3, "%02x", bytes[i]);
 }
 
 /* ── Unicode homoglyph detection ─────────────────────────────────── */

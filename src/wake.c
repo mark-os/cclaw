@@ -44,11 +44,13 @@ char *wake_fifo_path(const char *db_path) {
     size_t len = strlen(db_path);
     char *path = malloc(len + 6);
     if (!path) return NULL;
-    memcpy(path, db_path, len);
-    if (len > 3 && strcmp(db_path + len - 3, ".db") == 0)
-        strcpy(path + len - 3, ".pipe");
-    else
-        strcpy(path + len, ".pipe");
+    if (len > 3 && strcmp(db_path + len - 3, ".db") == 0) {
+        memcpy(path, db_path, len - 3);
+        memcpy(path + len - 3, ".pipe", 6);
+    } else {
+        memcpy(path, db_path, len);
+        memcpy(path + len, ".pipe", 6);
+    }
     return path;
 }
 

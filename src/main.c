@@ -546,8 +546,9 @@ static char *resolve_db_path(void) {
     const char *home = getenv("HOME");
     if (home) {
         size_t len = strlen(home);
-        char *p = malloc(len + sizeof("/.cclaw/cclaw.db"));
-        if (p) { sprintf(p, "%s/.cclaw/cclaw.db", home); return p; }
+        size_t size = len + sizeof("/.cclaw/cclaw.db");
+        char *p = malloc(size);
+        if (p) { snprintf(p, size, "%s/.cclaw/cclaw.db", home); return p; }
     }
     return strdup("cclaw.db");
 }
@@ -898,14 +899,28 @@ int main(int argc, char *argv[]) {
         if (ac) {
             if (ac->tool_count > 0) {
                 size_t len = 0; for (size_t i = 0; i < ac->tool_count; i++) len += strlen(ac->tools[i]) + 1;
-                char *csv = malloc(len); if (csv) { csv[0] = '\0';
-                    for (size_t i = 0; i < ac->tool_count; i++) { if (i) strcat(csv, ","); strcat(csv, ac->tools[i]); }
+                char *csv = malloc(len + 1); if (csv) { csv[0] = '\0';
+                    size_t pos = 0;
+                    for (size_t i = 0; i < ac->tool_count; i++) {
+                        if (i) csv[pos++] = ',';
+                        size_t tlen = strlen(ac->tools[i]);
+                        memcpy(csv + pos, ac->tools[i], tlen);
+                        pos += tlen;
+                    }
+                    csv[pos] = '\0';
                     setenv("CCLAW_TOOLS", csv, 1); free(csv); }
             }
             if (ac->allowed_hosts_count > 0) {
                 size_t len = 0; for (size_t i = 0; i < ac->allowed_hosts_count; i++) len += strlen(ac->allowed_hosts[i]) + 1;
-                char *csv = malloc(len); if (csv) { csv[0] = '\0';
-                    for (size_t i = 0; i < ac->allowed_hosts_count; i++) { if (i) strcat(csv, ","); strcat(csv, ac->allowed_hosts[i]); }
+                char *csv = malloc(len + 1); if (csv) { csv[0] = '\0';
+                    size_t pos = 0;
+                    for (size_t i = 0; i < ac->allowed_hosts_count; i++) {
+                        if (i) csv[pos++] = ',';
+                        size_t tlen = strlen(ac->allowed_hosts[i]);
+                        memcpy(csv + pos, ac->allowed_hosts[i], tlen);
+                        pos += tlen;
+                    }
+                    csv[pos] = '\0';
                     setenv("CCLAW_ALLOWED_HOSTS", csv, 1); free(csv); }
             }
             agent_config_free(ac);

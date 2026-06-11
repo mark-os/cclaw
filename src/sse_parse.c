@@ -16,7 +16,12 @@ static int tok_eq(const char *json, const jsmntok_t *t, const char *key) {
 /* Helper: get int value from a primitive token */
 static int tok_int(const char *json, const jsmntok_t *t) {
     if (t->type != JSMN_PRIMITIVE) return 0;
-    return atoi(json + t->start);
+    char tmp[32];
+    size_t len = (size_t)(t->end - t->start);
+    if (len >= sizeof(tmp)) len = sizeof(tmp) - 1;
+    memcpy(tmp, json + t->start, len);
+    tmp[len] = '\0';
+    return atoi(tmp);
 }
 
 /* Helper: skip a token and all its children, return next index */
@@ -137,7 +142,12 @@ int sse_parse_openai(const char *json, size_t len, SseChunk *out) {
         /* cost */
         int cost_i = obj_find(json, tokens, usage_i, ntok, "cost");
         if (cost_i >= 0 && tokens[cost_i].type == JSMN_PRIMITIVE) {
-            double c = strtod(json + tokens[cost_i].start, NULL);
+            char tmp[64];
+            size_t len = (size_t)(tokens[cost_i].end - tokens[cost_i].start);
+            if (len >= sizeof(tmp)) len = sizeof(tmp) - 1;
+            memcpy(tmp, json + tokens[cost_i].start, len);
+            tmp[len] = '\0';
+            double c = strtod(tmp, NULL);
             out->cost_nano = (int64_t)(c * 1e9);
         }
         /* cached tokens */

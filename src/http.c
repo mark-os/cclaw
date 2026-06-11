@@ -57,8 +57,13 @@ static size_t header_cb(char *buf, size_t size, size_t nmemb, void *userdata) {
         }
         if (match) {
             const char *val = buf + 12;
-            while (*val == ' ') val++;
-            resp->retry_after = atoi(val);
+            size_t vlen = bytes - 12;
+            while (vlen > 0 && *val == ' ') { val++; vlen--; }
+            char tmp[32];
+            size_t tlen = vlen < (sizeof(tmp)-1) ? vlen : (sizeof(tmp)-1);
+            memcpy(tmp, val, tlen);
+            tmp[tlen] = '\0';
+            resp->retry_after = atoi(tmp);
             if (resp->retry_after < 1) resp->retry_after = 1;
         }
     }
@@ -70,8 +75,8 @@ static size_t header_cb(char *buf, size_t size, size_t nmemb, void *userdata) {
         }
         if (match) {
             const char *val = buf + 13;
-            while (*val == ' ') val++;
-            size_t vlen = bytes - (size_t)(val - buf);
+            size_t vlen = bytes - 13;
+            while (vlen > 0 && *val == ' ') { val++; vlen--; }
             while (vlen > 0 && (val[vlen-1] == '\r' || val[vlen-1] == '\n')) vlen--;
             if (vlen >= sizeof(resp->content_type)) vlen = sizeof(resp->content_type) - 1;
             memcpy(resp->content_type, val, vlen);

@@ -58,20 +58,19 @@ Resolve policy in ONE place (agent_setup_init → ShellConfig), not scattered.
 
 ## Implementation steps
 
-1. `include/tool_shell.h` ShellConfig: add `env_mode`, `net_mode`,
+1. ✅ `include/tool_shell.h` ShellConfig: add `env_mode`, `net_mode`,
    `mount_cwd`, `workspace_ro`, rlimit values.
-2. `src/agent_setup.c agent_setup_init`: read `agents.trust_level`, map to
+2. ✅ `src/agent_setup.c agent_setup_init`: read `agents.trust_level`, map to
    the bundle above, fill ShellConfig. Unknown values → `standard`.
-3. `src/tool_shell.c` child setup:
+3. ✅ `src/tool_shell.c` child setup:
    - env_mode clean → clearenv()+allowlist (replaces scrub block)
    - workspace_ro → add MS_RDONLY on the workspace bind remount
    - mount_cwd=0 → skip the CWD bind-mount block
    - setrlimit() calls before execl
-4. `proxy`/`agent_setup`: net_mode none → don't pass proxy_sock.
+4. ✅ `proxy`/`agent_setup`: net_mode none → don't pass proxy_sock.
 5. Tests: per-level env visibility, no-egress (proxy sock absent), CWD
    absent in restricted, ro workspace write fails, NPROC limit enforced.
-6. Docs: update specs/security.md trust table; AGENTS.md note on choosing
-   a trust_level when creating agents.
+6. ✅ Docs: updated specs/security.md trust table; AGENTS.md note pending.
 
 ## Non-goals
 

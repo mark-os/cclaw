@@ -59,6 +59,25 @@ See [specs/security.md](specs/security.md) for full details.
 - **Agent process**: trusted binary. `setrlimit` (kernel-enforced) + `http_check_policy()` (app-level).
 - **Shell children**: untrusted. Namespace sandbox + transparent credential proxy. See [specs/shell-networking.md](specs/shell-networking.md).
 - **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted by daemon, injected to agent at fork, cleared from env immediately.
+- **Secret scanner**: AC-based DLP scans all tool results and user messages for leaked credentials before they enter the context window. See [specs/security.md](specs/security.md#secret-scanner-ac-based-content-dlp).
+- **Secret interpolation**: LLMs reference secrets via `{{SECRET:name}}` — cclaw interpolates the real value before tool execution, the context never sees it.
+- **Trust levels**: `agents.trust_level` controls shell sandbox strictness (`trusted`, `standard`, `restricted`). See [specs/shell-trust-levels.md](specs/shell-trust-levels.md).
+
+### Choosing a trust_level for new agents
+
+| Level | Use for |
+|-------|---------|
+| `trusted` | Default agent, bootstrap — full env access, CWD mounted |
+| `standard` | Most agents — clean env, network via proxy, workspace rw |
+| `restricted` | Observer/audit agents — no network, workspace read-only, tight limits |
+
+### Using secrets in tool calls
+
+Tell the LLM in the system prompt:
+> You have these secrets available: `{{SECRET:GITHUB_TOKEN}}`, `{{SECRET:NPM_TOKEN}}`.
+> Use `{{SECRET:name}}` in tool arguments. Never write actual secret values.
+
+The `{{SECRET:name}}` syntax works in shell_exec, web_fetch, and js_eval arguments.
 
 ## Code Style
 

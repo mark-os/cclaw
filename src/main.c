@@ -29,6 +29,8 @@
 #include "channel.h"
 #include "channel_api.h"
 #include "secret.h"
+#include "secret_scan.h"
+#include "secret_interp.h"
 #include "web.h"
 #include "heartbeat.h"
 #include "cron.h"
@@ -271,8 +273,23 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
 
     /* Inline tools: execute in parent process */
     if (tool_is_inline(tc->name)) {
-        char *result = te->handler(tc->arguments, te->user_data);
+        /* Interpolate {{SECRET:X}} placeholders before execution */
+        char *interp_args = (g_tool_setup && g_tool_setup->secret_count > 0)
+            ? secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count)
+            : NULL;
+        char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
+        free(interp_args);
         if (!result) result = strdup("error: tool returned null");
+
+        /* Deinterpolate: replace literal secret values back to placeholders */
+        if (g_tool_setup && g_tool_setup->secret_count > 0) {
+            char *deinterp = secret_deinterpolate(result, g_tool_setup->secrets, g_tool_setup->secret_count);
+            if (deinterp) { free(result); result = deinterp; }
+        }
+
+        /* Secret scan: redact leaked secrets before storage */
+        { size_t rlen = strlen(result);
+          secret_scan_redact(result, &rlen, rlen + 1); }
 
         /* CLI progress */
         if (g_mode == 0) {
@@ -318,7 +335,12 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
          * Parent infrastructure fds (DB, sigchld pipe, notify pipe) are
          * O_CLOEXEC and will close on exec within the shell sandbox. */
         close(pipefd[0]);
-        char *result = te->handler(tc->arguments, te->user_data);
+        /* Interpolate {{SECRET:X}} in child before execution */
+        char *interp_args = (g_tool_setup && g_tool_setup->secret_count > 0)
+            ? secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count)
+            : NULL;
+        char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
+        free(interp_args);
         if (result) {
             size_t len = strlen(result);
             if (len > TOOL_MAX_OUTPUT) len = TOOL_MAX_OUTPUT;
@@ -487,6 +509,9 @@ static void reap_children(void) {
             if (c->result_pipe >= 0) close(c->result_pipe);
             if (!output) output = strdup("error: OOM");
 
+            /* Secret scan: redact leaked secrets before storage */
+            secret_scan_redact(output, &out_len, TOOL_MAX_OUTPUT + 1);
+
             /* CLI progress */
             if (g_mode == 0) {
                 if (out_len <= 80)
@@ -643,7 +668,19 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
 /* ── CLI turn trigger ───────────────────────────────────────────── */
 
 static void cli_start_turn(const char *input) {
-    inbox_insert(g_db, g_cli_session, "cli", input);
+    /* Secret scan user input (warn + redact before it enters context) */
+    size_t ilen = strlen(input);
+    char *scanned = malloc(ilen + 1);
+    if (scanned) {
+        memcpy(scanned, input, ilen + 1);
+        int nf = secret_scan_redact(scanned, &ilen, ilen + 1);
+        if (nf > 0)
+            LOG_INFO_(g_cfg, "secret_scan: redacted %d finding(s) in user input", nf);
+        inbox_insert(g_db, g_cli_session, "cli", scanned);
+        free(scanned);
+    } else {
+        inbox_insert(g_db, g_cli_session, "cli", input);
+    }
     inbox_consume_into_entries(g_db, g_cli_session, 100);
     g_cli_turn_active = 1;
     if (dispatch_llm_req(g_cli_session, g_agent_name, 0) < 0) {

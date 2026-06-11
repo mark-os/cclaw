@@ -38,3 +38,4 @@ workspace/
 .kiro/settings/
 compile_commands.json
 .cclaw/
+__pycache__/

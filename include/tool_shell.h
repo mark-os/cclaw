@@ -21,6 +21,12 @@ typedef struct {
     size_t secret_count;
     int yolo;               /* T229: skip sandbox + env hardening */
     int sandbox;            /* T301: 1=namespace sandbox (default), 0=none */
+    /* Trust-level policy bundle */
+    int env_mode;           /* 0=inherit+scrub (trusted), 1=clean allowlist */
+    int net_mode;           /* 0=proxy available, 1=no network */
+    int mount_cwd;          /* 1=mount CWD rw, 0=skip */
+    int workspace_ro;       /* 0=rw, 1=read-only */
+    struct { int nproc; int as_mb; int cpu_sec; } rlimits; /* 0 = no limit */
 } ShellConfig;
 
 /* Register shell_exec tool into registry.

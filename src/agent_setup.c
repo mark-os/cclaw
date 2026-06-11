@@ -27,9 +27,25 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* V88: Collect secrets from env, clear from process env */
     setup->secrets = shell_secrets_collect(&setup->secret_count);
 
+    /* Query trust_level from agents table */
+    const char *trust_level = NULL;
+    char trust_buf[32] = {0};
+    {
+        sqlite3_stmt *tl_stmt;
+        if (sqlite3_prepare_v2(db,
+                "SELECT trust_level FROM agents WHERE name=?", -1, &tl_stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(tl_stmt, 1, agent_name, -1, SQLITE_STATIC);
+            if (sqlite3_step(tl_stmt) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(tl_stmt, 0);
+                if (v) { snprintf(trust_buf, sizeof(trust_buf), "%s", v); trust_level = trust_buf; }
+            }
+            sqlite3_finalize(tl_stmt);
+        }
+    }
+
     /* Shell — pass proxy socket path */
     tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace);
-    /* Inject proxy sock path + secrets + yolo into shell config */
+    /* Inject proxy sock path + secrets + yolo + trust-level policy into shell config */
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
@@ -42,6 +58,18 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         /* T301/V22a: per-agent sandbox config */
         const char *sandbox_env = getenv("CCLAW_SANDBOX");
         sc->sandbox = (!sandbox_env || strcmp(sandbox_env, "none") != 0) ? 1 : 0;
+        /* Trust-level policy bundle */
+        if (!trust_level || strcmp(trust_level, "trusted") == 0 ||
+            strcmp(trust_level, "bootstrap") == 0) {
+            sc->env_mode = 0; sc->net_mode = 0; sc->mount_cwd = 1; sc->workspace_ro = 0;
+            sc->rlimits.nproc = 0; sc->rlimits.as_mb = 0; sc->rlimits.cpu_sec = 0;
+        } else if (strcmp(trust_level, "restricted") == 0) {
+            sc->env_mode = 1; sc->net_mode = 1; sc->mount_cwd = 0; sc->workspace_ro = 1;
+            sc->rlimits.nproc = 8; sc->rlimits.as_mb = 128; sc->rlimits.cpu_sec = 10;
+        } else { /* "standard" and unknown */
+            sc->env_mode = 1; sc->net_mode = 0; sc->mount_cwd = 0; sc->workspace_ro = 0;
+            sc->rlimits.nproc = 64; sc->rlimits.as_mb = 512; sc->rlimits.cpu_sec = 60;
+        }
     }
 
     /* File read/write — T118: allow workspace + session temp dir; T228: CCLAW_PATH */

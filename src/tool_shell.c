@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -229,59 +230,91 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         const char *psock = user_data ? ((ShellConfig *)user_data)->proxy_sock : NULL;
         int yolo = user_data ? ((ShellConfig *)user_data)->yolo : 0;
         int do_sandbox = user_data ? ((ShellConfig *)user_data)->sandbox : 1;
+        ShellConfig *sc_child = user_data ? (ShellConfig *)user_data : NULL;
         if (yolo) do_sandbox = 0;
+
+        /* Trust-level: suppress CWD mount if mount_cwd=0 */
+        if (sc_child && !sc_child->mount_cwd) cwd = NULL;
+        /* Trust-level: suppress proxy if net_mode=1 */
+        if (sc_child && sc_child->net_mode) psock = NULL;
+
         if (do_sandbox && shell_apply_namespace(ws, cwd) != 0) {
             /* Fallback: continue unsandboxed (log to stderr = captured in output) */
             fprintf(stderr, "[cclaw] warning: namespace sandbox unavailable, "
                     "continuing without (errno=%d)\n", errno);
         }
 
+        /* Trust-level: remount workspace read-only if workspace_ro=1 */
+        if (do_sandbox && sc_child && sc_child->workspace_ro && ws) {
+            /* After pivot_root, workspace is at its resolved path */
+            char ws_real[PATH_MAX];
+            if (realpath(ws, ws_real) != NULL)
+                mount(NULL, ws_real, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL);
+        }
+
         /* V47: PATH restriction + env hardening (skip in yolo mode) */
         if (!yolo) {
-        setenv("PATH", "/bin:/usr/bin", 1);
-        unsetenv("HOME");
-        /* Credential scrub: drop CCLAW_* plus any var whose name looks like
-         * a secret — generic, not a hardcoded provider list (the old list
-         * caught OPENROUTER_API_KEY but leaked NVIDIA_API_KEY etc.).
-         * CCLAW_SECRET_* is the deliberate channel for handing secrets to
-         * the shell; those are re-injected below. Collect names first since
-         * unsetenv mutates environ. */
-        extern char **environ;
-        char *drop_keys[256];
-        int nkeys = 0;
-        for (int i = 0; environ[i] && nkeys < 256; i++) {
-            char *eq = strchr(environ[i], '=');
-            if (!eq) continue;
-            size_t klen = (size_t)(eq - environ[i]);
-            char name[256];
-            if (klen >= sizeof(name)) continue;
-            memcpy(name, environ[i], klen);
-            name[klen] = '\0';
-            if (strncmp(name, "CCLAW_", 6) == 0 ||
-                strstr(name, "API_KEY") || strstr(name, "APIKEY") ||
-                strstr(name, "TOKEN") || strstr(name, "SECRET") ||
-                strstr(name, "PASSWORD") || strstr(name, "CREDENTIALS")) {
-                drop_keys[nkeys] = strdup(name);
-                if (drop_keys[nkeys]) nkeys++;
+        if (sc_child && sc_child->env_mode == 1) {
+            /* Clean allowlist: wipe entire env, set only essentials */
+            extern char **environ;
+            if (environ) environ[0] = NULL;  /* portable clearenv */
+            setenv("PATH", "/bin:/usr/bin", 1);
+            setenv("TMPDIR", "/tmp", 1);
+        } else {
+            /* Legacy trusted mode: inherit env minus known secret names */
+            setenv("PATH", "/bin:/usr/bin", 1);
+            unsetenv("HOME");
+            extern char **environ;
+            char *drop_keys[256];
+            int nkeys = 0;
+            for (int i = 0; environ[i] && nkeys < 256; i++) {
+                char *eq = strchr(environ[i], '=');
+                if (!eq) continue;
+                size_t klen = (size_t)(eq - environ[i]);
+                char name[256];
+                if (klen >= sizeof(name)) continue;
+                memcpy(name, environ[i], klen);
+                name[klen] = '\0';
+                if (strncmp(name, "CCLAW_", 6) == 0 ||
+                    strstr(name, "API_KEY") || strstr(name, "APIKEY") ||
+                    strstr(name, "TOKEN") || strstr(name, "SECRET") ||
+                    strstr(name, "PASSWORD") || strstr(name, "CREDENTIALS")) {
+                    drop_keys[nkeys] = strdup(name);
+                    if (drop_keys[nkeys]) nkeys++;
+                }
             }
-        }
-        for (int i = 0; i < nkeys; i++) {
-            unsetenv(drop_keys[i]);
-            free(drop_keys[i]);
+            for (int i = 0; i < nkeys; i++) {
+                unsetenv(drop_keys[i]);
+                free(drop_keys[i]);
+            }
         }
         }
 
-        /* V83: set proxy socket path for LD_PRELOAD lib (after CCLAW_* cleanup) */
+        /* V83: set proxy socket path for LD_PRELOAD lib (after env cleanup) */
         if (psock) setenv("CCLAW_PROXY_SOCK", psock, 1);
 
         /* V88: inject secrets into shell child env */
-        if (user_data) {
-            ShellConfig *sc2 = (ShellConfig *)user_data;
-            for (size_t i = 0; i < sc2->secret_count; i++) {
+        if (sc_child) {
+            for (size_t i = 0; i < sc_child->secret_count; i++) {
                 char envname[256];
-                snprintf(envname, sizeof(envname), "CCLAW_SECRET_%s", sc2->secrets[i].name);
-                setenv(envname, sc2->secrets[i].value, 1);
+                snprintf(envname, sizeof(envname), "CCLAW_SECRET_%s", sc_child->secrets[i].name);
+                setenv(envname, sc_child->secrets[i].value, 1);
             }
+        }
+
+        /* Trust-level: apply resource limits before exec */
+        if (sc_child && sc_child->rlimits.nproc > 0) {
+            struct rlimit rl = {(rlim_t)sc_child->rlimits.nproc, (rlim_t)sc_child->rlimits.nproc};
+            setrlimit(RLIMIT_NPROC, &rl);
+        }
+        if (sc_child && sc_child->rlimits.as_mb > 0) {
+            rlim_t bytes = (rlim_t)sc_child->rlimits.as_mb * 1024 * 1024;
+            struct rlimit rl = {bytes, bytes};
+            setrlimit(RLIMIT_AS, &rl);
+        }
+        if (sc_child && sc_child->rlimits.cpu_sec > 0) {
+            struct rlimit rl = {(rlim_t)sc_child->rlimits.cpu_sec, (rlim_t)sc_child->rlimits.cpu_sec};
+            setrlimit(RLIMIT_CPU, &rl);
         }
 
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);

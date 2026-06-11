@@ -175,7 +175,7 @@ static void test_cwd_path_rw(void) {
     fprintf(f, "cwd_content\n");
     fclose(f);
 
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .cwd_path = cwd_dir, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .cwd_path = cwd_dir, .sandbox = 1, .mount_cwd = 1};
     char args[1024];
 
     /* Read from cwd_path — should work */

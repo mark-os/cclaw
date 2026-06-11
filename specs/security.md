@@ -218,3 +218,57 @@ If CClaw ever becomes multi-user, the trust model changes fundamentally:
 - Config injection would need cryptographic attestation
 - Daemon.db would need per-user access control
 - This is explicitly out of scope.
+
+## Secret Scanner (AC-based Content DLP)
+
+All text entering the context window is scanned for leaked secrets before storage:
+
+- **User messages** (CLI and channel) — scanned before `inbox_insert`
+- **Tool results** (inline and forked) — scanned after handler returns, before `entry_append`
+
+### How it works
+
+1. **Aho-Corasick automaton** — 70 keywords compiled into a state machine at build time (from `vendor/gitleaks.toml`). O(N) single-pass scan, zero heap allocation.
+2. **Prefix validation** — on AC match, verify the tail chars match expected charset and length (e.g., `AKIA` + 16 uppercase alphanums).
+3. **Contextual detection** — for generic keywords (`token`, `password`, `api_key`), check for assignment pattern nearby and entropy > 3.5 bits/byte.
+4. **Redaction** — matched regions replaced with `[SECRET_DETECTED:<rule_id>]`.
+
+### Coverage
+
+~46 rules curated from gitleaks (AWS, GCP, Azure, GitHub, GitLab, Anthropic, OpenAI, Slack, Stripe, npm, PyPI, private keys, JWTs, etc.).
+
+Update: `python scripts/gen_secret_scan.py` regenerates headers from `vendor/gitleaks.toml`.
+
+## {{SECRET:name}} Interpolation
+
+Secrets are referenced by placeholder in the LLM context:
+
+```
+LLM writes:  curl -H "Authorization: Bearer {{SECRET:GITHUB_TOKEN}}" ...
+cclaw does:  interpolate → execute → deinterpolate → scan → store
+Stored:      curl -H "Authorization: Bearer {{SECRET:GITHUB_TOKEN}}" ...
+```
+
+The actual secret value **never enters the entries table or context window**.
+
+- `secret_interpolate()` — before tool handler, replaces `{{SECRET:X}}` with real value
+- `secret_deinterpolate()` — after tool handler, replaces literal values back to placeholders
+- AC scanner — catches any OTHER secrets that leak through tool output
+
+## Trust-Level Policy Bundles
+
+The `agents.trust_level` column maps to a shell sandbox profile:
+
+| Policy | trusted | standard (default) | restricted |
+|--------|---------|-------------------|------------|
+| env | inherit + scrub | clean allowlist | clean allowlist |
+| network | proxy | proxy | none |
+| CWD mount | rw | no | no |
+| workspace | rw | rw | ro |
+| RLIMIT_NPROC | none | 64 | 8 |
+| RLIMIT_AS | none | 512MB | 128MB |
+| RLIMIT_CPU | none | 60s | 10s |
+
+- `bootstrap` maps to `trusted`
+- Unknown values map to `standard`
+- Resolved once in `agent_setup_init()`, stored in `ShellConfig`

@@ -17,6 +17,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
                      char **allowed_hosts, size_t allowed_hosts_count,
                      int mode) {
     memset(setup, 0, sizeof(*setup));
+    setup->proxy_ctx.listen_fd = -1;  /* fd 0 is stdin — zeroed ctx must not close it */
     tools_init(&setup->reg);
 
     /* V83: Start credential proxy thread for shell children */

@@ -170,7 +170,8 @@ CREATE INDEX IF NOT EXISTS idx_entries_stop_reason ON entries(session_id, stop_r
 CREATE INDEX IF NOT EXISTS idx_entries_plan ON entries(parent_id, session_id, id, role, stop_reason, token_estimate, tool_call_count);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
-  content, content=entries, content_rowid=id
+  content, content=entries, content_rowid=id,
+  tokenize='porter unicode61'
 );
 CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
   INSERT INTO entries_fts(rowid, content) VALUES (

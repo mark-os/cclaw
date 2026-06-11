@@ -103,6 +103,48 @@ static void test_openai_payload(void) {
     printf("  PASS test_openai_payload\n");
 }
 
+/* Regression: stream=0 / max_tokens=0 / no tools must OMIT the keys entirely.
+ * json_object emits JSON null for SQL NULL; strict providers (DeepSeek) 400
+ * on "stream":null. */
+static void test_openai_payload_no_stream_omits_nulls(void) {
+    unlink(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+
+    int64_t sid;
+    setup_session(db, &sid);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.max_tokens = 0;
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.provider.context_window = 128000;
+    cfg.stream = 0;
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    assert(payload.body);
+
+    /* None of the optional keys may exist (not even as JSON null) */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM json_each(?1)"
+        " WHERE key IN ('stream','max_tokens','tools')",
+        -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 0);
+    sqlite3_finalize(s);
+
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+    db_close(db); unlink(DB_PATH);
+    printf("  PASS test_openai_payload_no_stream_omits_nulls\n");
+}
+
 static void test_gemini_payload(void) {
     unlink(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
@@ -156,6 +198,63 @@ static void test_gemini_payload(void) {
     printf("  PASS test_gemini_payload\n");
 }
 
+/* Recall must ride at the TAIL as a user message on both endpoints (keeps
+ * the prompt prefix byte-stable for provider caching; never in the system
+ * prompt / systemInstruction). */
+static void test_recall_tail_user_message(void) {
+    unlink(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+
+    int64_t sid;
+    setup_session(db, &sid);
+
+    const char *recall = "---Possibly relevant context---\n[session 3, user] hi\n---End of context---";
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.provider.context_window = 128000;
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, recall, "You are helpful.", &payload) == 0);
+
+    sqlite3_stmt *s;
+    /* Last message: role=user, content=recall text */
+    sqlite3_prepare_v2(db,
+        "SELECT json_extract(?1,'$.messages[#-1].role'),"
+        " json_extract(?1,'$.messages[#-1].content')", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "user") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), recall) == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+
+    /* Gemini: recall appended as final user content, NOT in systemInstruction */
+    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
+    assert(llm_build_payload(db, sid, &cfg, &plan, recall, "You are helpful.", &payload) == 0);
+
+    sqlite3_prepare_v2(db,
+        "SELECT json_extract(?1,'$.contents[#-1].role'),"
+        " json_extract(?1,'$.contents[#-1].parts[0].text'),"
+        " json_extract(?1,'$.systemInstruction.parts[0].text')", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "user") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), recall) == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "You are helpful.") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+
+    context_plan_free(&plan);
+    db_close(db); unlink(DB_PATH);
+    printf("  PASS test_recall_tail_user_message\n");
+}
+
 static void test_payload_with_tools(void) {
     unlink(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
@@ -206,7 +305,9 @@ static void test_payload_with_tools(void) {
 int main(void) {
     printf("test_llm_payload:\n");
     test_openai_payload();
+    test_openai_payload_no_stream_omits_nulls();
     test_gemini_payload();
+    test_recall_tail_user_message();
     test_payload_with_tools();
     printf("All payload tests passed.\n");
     return 0;

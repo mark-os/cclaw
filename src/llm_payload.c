@@ -73,8 +73,11 @@ static const char SQL_OPENAI_TOOLS[] =
     "   AND (t.agent_name IS NULL OR t.agent_name=?1)"
     "   AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2)));";
 
+/* Both FULL templates wrap json_object in json_patch('{}', ...): RFC 7386
+ * merge drops top-level NULL-valued keys, which json_object would otherwise
+ * emit as JSON null ("stream":null etc.) — strict providers 400 on those. */
 static const char SQL_OPENAI_FULL[] =
-    "SELECT json_object("
+    "SELECT json_patch('{}', json_object("
     "  'model', ?1,"
     "  'messages', (SELECT json_group_array(json(m)) FROM ("
     "    SELECT 0 AS ord, 0 AS sub, json_object('role','system','content',?2) AS m"
@@ -82,13 +85,15 @@ static const char SQL_OPENAI_FULL[] =
     "    UNION ALL"
     "    SELECT 1, rowid, json(value) FROM json_each(?3)"
     "    UNION ALL"
-    "    SELECT 2, 0, json_object('role','system','content',?7)"
+    /* Auto-recall rides at the tail as a user message: keeps the prompt
+     * prefix byte-stable across turns so provider prompt caching works. */
+    "    SELECT 2, 0, json_object('role','user','content',?7)"
     "      WHERE ?7 IS NOT NULL"
     "    ORDER BY ord, sub)),"
     "  'stream', CASE WHEN ?4 THEN json('true') ELSE NULL END,"
     "  'max_tokens', CASE WHEN ?5 > 0 THEN ?5 ELSE NULL END,"
     "  'tools', CASE WHEN json_array_length(?6) > 0 THEN json(?6) ELSE NULL END"
-    ");";
+    "));";
 
 static const char SQL_GEMINI_CONTENTS[] =
     "SELECT json_group_array(json(content_obj) ORDER BY min_pos) FROM ("
@@ -141,16 +146,22 @@ static const char SQL_GEMINI_TOOLS[] =
     "));";
 
 static const char SQL_GEMINI_FULL[] =
-    "SELECT json_object("
+    "SELECT json_patch('{}', json_object("
     "  'systemInstruction', CASE WHEN ?1 IS NOT NULL AND ?1 != ''"
     "    THEN json_object('parts',json_array(json_object('text',?1)))"
     "    ELSE NULL END,"
-    "  'contents', json(?2),"
+    /* Auto-recall (?5) appends as a trailing user content — never into
+     * systemInstruction, which would break prefix caching every turn. */
+    "  'contents', CASE WHEN ?5 IS NOT NULL"
+    "    THEN json_insert(json(?2),'$[#]',"
+    "      json_object('role','user','parts',"
+    "        json_array(json_object('text',?5))))"
+    "    ELSE json(?2) END,"
     "  'tools', CASE WHEN json_array_length(json_extract(?3,'$[0].functionDeclarations')) > 0"
     "    THEN json(?3) ELSE NULL END,"
     "  'generationConfig', CASE WHEN ?4 > 0"
     "    THEN json_object('maxOutputTokens',?4) ELSE NULL END"
-    ");";
+    "));";
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -213,33 +224,26 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     }
 
     if (gemini) {
-        char *sys_text = system_prompt ? strdup(system_prompt) : NULL;
-        if (recall_text && recall_text[0]) {
-            if (sys_text) {
-                size_t sl = strlen(sys_text), rl = strlen(recall_text);
-                sys_text = realloc(sys_text, sl + rl + 2);
-                sys_text[sl] = '\n';
-                memcpy(sys_text + sl + 1, recall_text, rl + 1);
-            } else {
-                sys_text = strdup(recall_text);
-            }
-        }
         char *contents = query_text(db, SQL_GEMINI_CONTENTS, session_id);
         char *tools_json = query_tools(db, SQL_GEMINI_TOOLS, agent_name, allowed_tools);
 
         sqlite3_stmt *full;
         if (sqlite3_prepare_v2(db, SQL_GEMINI_FULL, -1, &full, NULL) != SQLITE_OK) {
-            free(sys_text); free(contents); free(tools_json);
+            free(contents); free(tools_json);
             free(agent_name); free(allowed_tools);
             return -1;
         }
-        if (sys_text) sqlite3_bind_text(full, 1, sys_text, -1, SQLITE_TRANSIENT);
+        if (system_prompt && system_prompt[0])
+            sqlite3_bind_text(full, 1, system_prompt, -1, SQLITE_STATIC);
         else sqlite3_bind_null(full, 1);
         sqlite3_bind_text(full, 2, contents ? contents : "[]", -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(full, 3, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(full, 4, cfg->provider.max_tokens);
+        if (recall_text && recall_text[0])
+            sqlite3_bind_text(full, 5, recall_text, -1, SQLITE_STATIC);
+        else sqlite3_bind_null(full, 5);
 
-        free(sys_text); free(contents); free(tools_json);
+        free(contents); free(tools_json);
 
         if (sqlite3_step(full) == SQLITE_ROW) {
             out->stmt = full;

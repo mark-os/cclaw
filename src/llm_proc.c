@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "llm_proc.h"
 #include "agent_config.h"
-#include "agent_setup.h"
 #include "config.h"
 #include "context.h"
 #include "db.h"
@@ -148,10 +147,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     char *agent_name_alloc = session_get_agent_name(db, session_id);
     const char *agent_name = agent_name_alloc ? agent_name_alloc : "default";
 
-    /* Agent setup (for hooks + tool dispatch — schemas now come from DB) */
-    AgentSetup setup;
-    agent_setup_init(&setup, db, session_id, cfg, agent_name, NULL, 0, AGENT_SETUP_CLI);
-
     /* Estimate tool overhead for context budget */
     int tool_overhead = 0;
     {
@@ -238,7 +233,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                         llm_resp.usage.cost_nano, tc_ids, tc_names, tc_args, tcc, &ir);
         free(tc_ids); free(tc_names); free(tc_args); free(ir.tc_entry_ids);
         free(recall_text); free(system_prompt); context_plan_free(&plan);
-        agent_setup_destroy(&setup); arena_destroy(a); config_free(cfg); free(agent_name_alloc);
+        arena_destroy(a); config_free(cfg); free(agent_name_alloc);
         return 0;
     }
 
@@ -434,7 +429,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     if (rc != 0) { LOG_DEBUG_(cfg, "llm_req: db_ingest_typed failed"); goto err; }
     free(ir.tc_entry_ids);
 
-    agent_setup_destroy(&setup);
     arena_destroy(a);
     config_free(cfg);
     free(agent_name_alloc);
@@ -443,7 +437,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 err:
     free(system_prompt);
     context_plan_free(&plan);
-    agent_setup_destroy(&setup);
     arena_destroy(a);
     config_free(cfg);
     free(agent_name_alloc);

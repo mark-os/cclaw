@@ -278,13 +278,9 @@ int proxy_start(ProxyContext *ctx, const char *workspace,
     ctx->listen_fd = fd;
     ctx->running = 1;
 
-    /* Start accept loop thread (detached — dies with process) */
-    pthread_t t;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    int rc = pthread_create(&t, &attr, proxy_loop, ctx);
-    pthread_attr_destroy(&attr);
+    /* Start accept loop thread (joined in proxy_stop) */
+    int rc = pthread_create(&ctx->thread, NULL, proxy_loop, ctx);
+    if (rc == 0) ctx->thread_started = 1;
 
     if (rc != 0) {
         close(fd);
@@ -300,6 +296,10 @@ int proxy_start(ProxyContext *ctx, const char *workspace,
 
 void proxy_stop(ProxyContext *ctx) {
     ctx->running = 0;
+    if (ctx->thread_started) {
+        pthread_join(ctx->thread, NULL);
+        ctx->thread_started = 0;
+    }
     if (ctx->listen_fd >= 0) {
         close(ctx->listen_fd);
         ctx->listen_fd = -1;

@@ -243,8 +243,9 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
                           int max_tokens) {
     if (!db || !user_msg || !user_msg[0]) return NULL;
 
-    /* Extract keywords: words ≥ 4 chars, skip duplicates, max 8 keywords.
-     * Build FTS5 query: word1 OR word2 OR ... */
+    /* Extract keywords: words ≥ 3 chars, skip duplicates, max 8 keywords.
+     * (Short floor — dynamic stopword filtering below handles common words;
+     * 3 lets useful short terms through: git, ssh, npm, sql.) */
     char query[512] = {0};
     int qlen = 0;
     char *dup = strdup(user_msg);
@@ -254,7 +255,7 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
     int nwords = 0;
     char *tok = strtok(dup, " \t\n\r.,;:!?\"'()[]{}");
     while (tok && nwords < 8) {
-        if (strlen(tok) < 4) { tok = strtok(NULL, " \t\n\r.,;:!?\"'()[]{}"); continue; }
+        if (strlen(tok) < 3) { tok = strtok(NULL, " \t\n\r.,;:!?\"'()[]{}"); continue; }
         /* skip duplicates */
         int found = 0;
         for (int i = 0; i < nwords; i++)
@@ -265,15 +266,48 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
 
     if (nwords == 0) { free(dup); return NULL; }
 
+    /* Dynamic stopwords: drop keywords present in > 25% of indexed rows.
+     * MATCH runs the query word through the same tokenizer as the index
+     * (incl. porter stemming), so the count is the true document frequency.
+     * Recall goes silent when every keyword is conversational filler. */
+    {
+        int64_t total = 0;
+        sqlite3_stmt *ts;
+        if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM entries", -1, &ts, NULL) == SQLITE_OK) {
+            if (sqlite3_step(ts) == SQLITE_ROW) total = sqlite3_column_int64(ts, 0);
+            sqlite3_finalize(ts);
+        }
+        if (total >= 8) {  /* tiny corpora: frequencies too noisy to filter on */
+            sqlite3_stmt *dfs;
+            if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH ?",
+                                   -1, &dfs, NULL) == SQLITE_OK) {
+                int kept = 0;
+                for (int i = 0; i < nwords; i++) {
+                    char term[80];
+                    snprintf(term, sizeof(term), "\"%s\"", words[i]);
+                    sqlite3_bind_text(dfs, 1, term, -1, SQLITE_TRANSIENT);
+                    int64_t df = 0;
+                    if (sqlite3_step(dfs) == SQLITE_ROW) df = sqlite3_column_int64(dfs, 0);
+                    sqlite3_reset(dfs);
+                    if (df * 4 <= total) words[kept++] = words[i];
+                }
+                sqlite3_finalize(dfs);
+                nwords = kept;
+            }
+        }
+    }
+
+    if (nwords == 0) { free(dup); return NULL; }
+
     for (int i = 0; i < nwords; i++) {
         if (i > 0) qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen, " OR ");
-        qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen, "%s", words[i]);
+        qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen, "\"%s\"", words[i]);
     }
     free(dup);
 
     /* FTS5 search — skip entries from current session */
     const char *sql =
-        "SELECT e.content, e.session_id FROM entries_fts f"
+        "SELECT e.content, e.session_id, e.role, f.rank FROM entries_fts f"
         " JOIN entries e ON e.id = f.rowid"
         " WHERE entries_fts MATCH ? AND e.session_id != ? AND e.role IN (1,2)"
         " ORDER BY rank LIMIT 5;";
@@ -283,29 +317,44 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
     sqlite3_bind_text(stmt, 1, query, -1, SQLITE_STATIC);
     sqlite3_bind_int64(stmt, 2, session_id);
 
-    /* Build output */
+    /* Build output: search-result list, one line per hit, tagged with the
+     * source session so the agent can expand via db_query on entries. */
     int max_chars = max_tokens * 4;
-    size_t cap = (size_t)max_chars + 128;
+    size_t cap = (size_t)max_chars + 512;
     char *out = malloc(cap);
     if (!out) { sqlite3_finalize(stmt); return NULL; }
-    int olen = snprintf(out, cap, "<recalled_context>\n");
+    int olen = snprintf(out, cap,
+        "---Possibly relevant context---\n"
+        "Keyword-search results from other sessions; may be irrelevant —"
+        " the user's latest message takes precedence. To read a full"
+        " conversation, query the entries table by session_id.\n");
 
     int hits = 0;
+    double best_rank = 0.0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *content = (const char *)sqlite3_column_text(stmt, 0);
         if (!content || !content[0]) continue;
+        /* Relevance gate: BM25 rank is negative, best first. Stop once a
+         * hit scores less than half the best — top-5 is a cap, not a quota. */
+        double rank = sqlite3_column_double(stmt, 3);
+        if (hits == 0) best_rank = rank;
+        else if (rank > best_rank * 0.5) break;
+        int64_t src_sid = sqlite3_column_int64(stmt, 1);
+        const char *who = sqlite3_column_int(stmt, 2) == 1 ? "user" : "assistant";
         /* Truncate individual entries to ~100 tokens */
         int entry_max = 400;
         int clen = (int)strlen(content);
         if (clen > entry_max) clen = entry_max;
-        if (olen + clen + 10 > max_chars) break;
-        olen += snprintf(out + olen, cap - (size_t)olen, "- %.*s\n", clen, content);
+        if (olen + clen + 64 > max_chars) break;
+        olen += snprintf(out + olen, cap - (size_t)olen,
+                         "[session %lld, %s] %.*s\n",
+                         (long long)src_sid, who, clen, content);
         hits++;
     }
     sqlite3_finalize(stmt);
 
     if (hits == 0) { free(out); return NULL; }
 
-    snprintf(out + olen, cap - (size_t)olen, "</recalled_context>");
+    snprintf(out + olen, cap - (size_t)olen, "---End of context---");
     return out;
 }

@@ -3,6 +3,19 @@
 Parking lot for features explicitly out-of-scope in current SPEC.md.
 Move to §T when ready to implement.
 
+## Auto-Recall: Diversity + Per-Hit Metadata
+- Cap hits per source session (1–2) so one session can't fill all recall slots
+  (GROUP BY session_id, keep best-ranked per session)
+- Tag each hit with session date + first-message snippet so the agent can judge
+  whether to expand: `[session 6, 2026-06-10, "good evening assistant."] ...`
+- Pairs with the existing "query entries by session_id" hint in the recall header
+
+## Auto-Recall: Recency Tiebreak
+- BM25 has no concept of time; an old session outranks yesterday's at equal score
+- Blend rank with age: `ORDER BY rank + (age_days * 0.05)` or similar small
+  additive penalty — bias toward recent sessions when relevance is close
+- Keep pure BM25 for large score gaps (genuinely better match wins regardless)
+
 ## WhatsApp Business API Channel
 - Webhook endpoint via civetweb: `POST /webhook/whatsapp`
 - Verify endpoint: `GET /webhook/whatsapp?hub.verify_token=...`

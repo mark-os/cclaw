@@ -1,13 +1,14 @@
 #ifndef CCLAW_PROXY_H
 #define CCLAW_PROXY_H
 
+#include <pthread.h>
 #include <stddef.h>
 
 /* V83: Credential proxy thread for shell children.
  * Listens on UDS at <workspace>/.proxy.sock.
  * Accepts connections, reads preamble (host:port or RESOLVE host),
  * checks allowed_hosts, resolves DNS, relays TCP bidirectionally.
- * Dies with agent process (thread is detached). */
+ * Accept-loop thread is joined in proxy_stop(). */
 
 typedef struct {
     char **allowed_hosts;   /* NULL or array of allowed hostnames */
@@ -15,6 +16,8 @@ typedef struct {
     char *sock_path;        /* heap-allocated path to .proxy.sock */
     int listen_fd;          /* listening socket fd (-1 if not started) */
     int running;            /* set to 0 to stop */
+    pthread_t thread;       /* accept-loop thread (valid if thread_started) */
+    int thread_started;
 } ProxyContext;
 
 /* Start proxy thread. Creates UDS at <workspace>/.proxy.sock.

@@ -1050,6 +1050,12 @@ int main(int argc, char *argv[]) {
                 }
             }
         }
+        if (stdin_idx >= 0 && (cli_pfds[stdin_idx].revents & (POLLERR | POLLNVAL))) {
+            /* stdin fd broken/closed — exit instead of spinning on POLLNVAL */
+            LOG_ERROR_(g_cfg, "stdin: poll error (revents=0x%x), exiting",
+                       cli_pfds[stdin_idx].revents);
+            goto done;
+        }
         if (stdin_idx >= 0 && (cli_pfds[stdin_idx].revents & POLLIN)) {
             if (g_cli_turn_active) {
                 LOG_DEBUG_(g_cfg, "stdin: POLLIN but turn active, skipping");

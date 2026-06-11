@@ -59,6 +59,34 @@ int db_ensure_schema(sqlite3 *db) {
         sqlite3_free(err);
         return -1;
     }
+
+    /* Keep entries_fts in sync with the current tokenizer: IF NOT EXISTS
+     * leaves an existing table on its old definition, so if it differs,
+     * drop and re-index. DROP only removes index shadow tables ('entries'
+     * is the content source); the check just avoids re-indexing every boot. */
+    int fts_needs_porter = 0;
+    sqlite3_stmt *fts_chk;
+    if (sqlite3_prepare_v2(db, "SELECT sql FROM sqlite_master WHERE name='entries_fts'",
+                           -1, &fts_chk, NULL) == SQLITE_OK) {
+        if (sqlite3_step(fts_chk) == SQLITE_ROW) {
+            const char *fsql = (const char *)sqlite3_column_text(fts_chk, 0);
+            if (fsql && !strstr(fsql, "porter")) fts_needs_porter = 1;
+        }
+        sqlite3_finalize(fts_chk);
+    }
+    if (fts_needs_porter) {
+        rc = sqlite3_exec(db,
+            "DROP TABLE entries_fts;"
+            "CREATE VIRTUAL TABLE entries_fts USING fts5("
+            "  content, content=entries, content_rowid=id,"
+            "  tokenize='porter unicode61');"
+            "INSERT INTO entries_fts(entries_fts) VALUES('rebuild');",
+            NULL, NULL, &err);
+        if (rc != SQLITE_OK) {
+            fprintf(stderr, "db_ensure_schema: fts rebuild: %s\n", err);
+            sqlite3_free(err);  /* non-fatal — recall degrades, chat still works */
+        }
+    }
     return 0;
 }
 

@@ -203,6 +203,82 @@ static void test_startup_integration(void) {
     printf("  PASS: startup integration (load_or_create + set_key + persist)\n");
 }
 
+static void test_deleted_key_file(void) {
+    char tmpdir[] = "/tmp/cclaw_test_delkey_XXXXXX";
+    assert(mkdtemp(tmpdir) != NULL);
+    char db_path[256], key_path[256];
+    snprintf(db_path, sizeof(db_path), "%s/test.db", tmpdir);
+    snprintf(key_path, sizeof(key_path), "%s/.cclaw_key", tmpdir);
+
+    sqlite3 *db = test_db_open(db_path);
+    assert(db != NULL);
+
+    uint8_t key[32];
+    assert(secret_key_load_or_create(db_path, key) == 0);
+    db_set_secret_key(key);
+    assert(db_kv_set_secret(db, "test.key", "secret-value") == 0);
+    db_close(db);
+
+    /* Delete the key file */
+    unlink(key_path);
+
+    /* Reopen DB — load key should create a NEW key */
+    db = test_db_open(db_path);
+    assert(db != NULL);
+
+    uint8_t new_key[32];
+    assert(secret_key_load_or_create(db_path, new_key) == 0);
+    db_set_secret_key(new_key);
+    assert(memcmp(key, new_key, 32) != 0);
+
+    /* Decrypt with wrong key fails gracefully (NULL) */
+    char *dec = db_kv_get_secret(db, "test.key");
+    assert(dec == NULL);
+
+    db_close(db);
+    unlink(db_path);
+    rmdir(tmpdir);
+    printf("  PASS: deleted key file (recreate and fail decrypt)\n");
+}
+
+static void test_multiple_secrets(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db != NULL);
+    db_set_secret_key(TEST_KEY);
+
+    db_kv_set_secret(db, "key.one", "value-one");
+    db_kv_set_secret(db, "key.two", "value-two");
+    db_kv_set_secret(db, "key.three", "value-three");
+
+    char *v1 = db_kv_get_secret(db, "key.one");
+    char *v2 = db_kv_get_secret(db, "key.two");
+    char *v3 = db_kv_get_secret(db, "key.three");
+
+    assert(v1 && strcmp(v1, "value-one") == 0);
+    assert(v2 && strcmp(v2, "value-two") == 0);
+    assert(v3 && strcmp(v3, "value-three") == 0);
+
+    free(v1); free(v2); free(v3);
+    db_close(db);
+    printf("  PASS: multiple secrets\n");
+}
+
+static void test_overwrite_secret(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db != NULL);
+    db_set_secret_key(TEST_KEY);
+
+    db_kv_set_secret(db, "overwrite.key", "original");
+    db_kv_set_secret(db, "overwrite.key", "updated");
+
+    char *dec = db_kv_get_secret(db, "overwrite.key");
+    assert(dec && strcmp(dec, "updated") == 0);
+    free(dec);
+
+    db_close(db);
+    printf("  PASS: overwrite secret\n");
+}
+
 int main(void) {
     printf("test_secret:\n");
     test_encrypt_decrypt_roundtrip();
@@ -214,6 +290,9 @@ int main(void) {
     test_db_kv_secret_roundtrip();
     test_key_file_create_and_load();
     test_startup_integration();
+    test_deleted_key_file();
+    test_multiple_secrets();
+    test_overwrite_secret();
     printf("All secret tests passed.\n");
     return 0;
 }

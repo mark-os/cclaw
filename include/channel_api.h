@@ -37,6 +37,12 @@ int channel_set_config(ChannelCtx *ctx, const char *key, const char *value);
 ChannelOutboxRow *channel_next_outbox(ChannelCtx *ctx);
 void channel_outbox_row_free(ChannelOutboxRow *row);
 
+/* Mark a pending row 'sending' once handed to JS (async send in flight). */
+int channel_dispatch_outbox(ChannelCtx *ctx, int64_t id);
+
+/* Startup recovery: 'sending' rows (crashed mid-send) back to 'pending'. */
+int channel_reset_outbox(ChannelCtx *ctx);
+
 /* V101: Mark outbox row as delivered. */
 int channel_ack_outbox(ChannelCtx *ctx, int64_t id);
 
@@ -45,6 +51,10 @@ int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error);
 
 /* V105: Wake daemon via named FIFO (1 byte write). */
 int daemon_wake(const char *db_path);
+
+/* Per-channel request UDS path (daemon proxies inbound HTTP here).
+ * Format: <db_path_without_.db>.<channel_name>.sock — caller frees. */
+char *channel_uds_path(const char *db_path, const char *channel_name);
 
 /* Per-channel outbox wake FIFO (daemon → channel process). */
 char *channel_outbox_fifo_path(const char *db_path, const char *channel_name);

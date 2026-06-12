@@ -105,7 +105,12 @@ No per-extension sandboxing. Extensions are trusted at the same level as `js_def
 
 ## Channel Component
 
-A channel extension's `channel.js` (or compiled binary) runs as a **separate process** managed by the daemon. It communicates exclusively through the channel API.
+A channel extension's `channel.js` runs inside `channel_runner` — a **separate
+process** per channel, forked by the daemon (crash isolation, restart with
+backoff). The runner owns one single-threaded poll() event loop; channel JS is
+purely reactive and **never blocks on the network**. All outbound HTTP is
+described as request shapes that the runner's C loop executes on a curl_multi
+handle; all inbound HTTP arrives pre-parsed from the daemon.
 
 ### Channel Process Lifecycle
 
@@ -114,81 +119,84 @@ A channel extension's `channel.js` (or compiled binary) runs as a **separate pro
 2. Agent proposes channel via configure_channel tool (exit code 4)
 3. Admin approves → daemon inserts `channels` row + seeds `channel_state`
 4. Daemon forks channel process on startup (or immediately after approval)
-5. Channel process runs indefinitely (polling, webhooks, etc.)
-6. On crash: daemon restarts with backoff (max 3 retries)
-7. On daemon shutdown: SIGTERM → channel flushes outbox → exits
+5. Channel process runs indefinitely (long-poll, proxied webhooks, etc.)
+6. On crash: daemon restarts with backoff (max 3 retries);
+   outbox rows stuck 'sending' are reset to 'pending' at startup
+7. On daemon shutdown: SIGTERM → channel exits
 ```
 
-### Channel API
+### JS Contract (channel.js handlers)
 
-Channel processes link against `libchannel_api` (or use the mjs binary with channel bindings). Limited cclaw.db access — no arbitrary SQL.
+All handlers optional except `onInit`. A request shape is
+`{method?, url, body?, headers?: ["Name: value"], timeout?}`.
+
+| Handler | Called when | Returns |
+|---------|-------------|---------|
+| `onInit()` | startup | `{poll?: Req}` — optional first long-poll shape |
+| `onPoll({status, body, error})` | long-poll completed | `{poll?: Req}` next shape; `{poll: null}` stops |
+| `onRequest(req)` | daemon proxies an inbound HTTP request over UDS | `{status?, body?}` (or a body string) |
+| `onOutbox({id, session_id, payload})` | agent message ready to deliver | nothing — queue sends via `cclaw.send` |
+| `onResult({tag, status, body, error})` | a tagged `cclaw.send` completed | nothing |
+
+`onRequest` is where **verification lives** — signature checks, challenge
+echoes, auth — because verification is code, not config. The daemon's
+`/hook/<channel>` endpoint is a dumb proxy: it forwards
+`{method, path, headers, body}` to the runner's unix socket and relays the
+reply. Returning `{status: 401}` rejects a forged webhook.
+
+### JS API (`cclaw.*`)
 
 | Function | Description |
 |----------|-------------|
-| `channel_emit(ctx, payload_json)` | Insert `channel_events` row + `daemon_wake()`. Daemon routes to agent inbox. |
-| `channel_get_config(ctx, key)` | Read from `channel_state` kv (scoped to this channel). |
-| `channel_set_config(ctx, key, value)` | Write to `channel_state` kv (own state only). |
-| `channel_next_outbox(ctx)` | Return oldest pending outbox row for this channel. Blocking or poll. |
-| `channel_ack_outbox(ctx, id)` | Mark outbox row as delivered. |
-| `channel_fail_outbox(ctx, id, error)` | Mark outbox row as failed with error message. |
+| `cclaw.send(req)` | Queue an outbound HTTP request; the C loop executes it. Extra fields: `tag` (get `onResult` callback), `outbox_id` + `final` (auto-ack: the row is acked when the final send gets 2xx, failed otherwise). |
+| `cclaw.emit(type, payload_json)` | Insert `channel_events` row + `daemon_wake()`. Daemon routes to agent inbox. |
+| `cclaw.getConfig(key)` / `setConfig(key, value)` | `channel_state` kv (scoped to this channel). |
+| `cclaw.ackOutbox(id)` / `failOutbox(id, error)` | Manual outbox resolution (e.g. unparseable payload). Sends with `outbox_id` ack automatically. |
+| `cclaw.log(msg)` | stderr line, prefixed with channel name. |
+| `cclaw.admin.*` | Admin operations (keys, models, hosts) for admin-gated chat commands. |
+
+There is **no blocking fetch**. `http_fetch` throws in channel JS.
 
 ### Channel Event Flow
 
 ```
-Incoming (channel → agent):
-  channel_emit(ctx, '{"chat_id":123,"text":"hello","from":"user"}')
-    → INSERT channel_events (channel_name, event_type='message', payload)
-    → daemon_wake() (1 byte to FIFO)
-    → daemon reads channel_events
-    → daemon resolves agent via channel_bindings
-    → daemon_inbox_insert(agent_name, session_id, source, payload)
-    → fork agent
+Incoming (platform → agent), webhook mode:
+  platform POSTs https://daemon/hook/<channel>
+    → daemon web server forwards envelope over <db>.<channel>.sock
+    → runner: onRequest(req) verifies, parses, cclaw.emit(...)
+    → reply {status, body} relayed to the platform by the daemon
+    → daemon reads channel_events, routes to agent inbox, forks agent
+
+Incoming (platform → agent), long-poll mode:
+  C loop completes the poll shape
+    → onPoll(result) parses, cclaw.emit(...), returns next shape
 
 Outgoing (agent → channel):
   agent completes turn (exit 0)
-    → daemon reaps, reads response
-    → daemon INSERT channel_outbox (channel_name, session_id, payload)
-    → channel process: channel_next_outbox(ctx) returns row
-    → channel delivers (sendMessage, webhook POST, etc.)
-    → channel_ack_outbox(ctx, id)
+    → daemon INSERT channel_outbox (status='pending') + FIFO wake
+    → runner marks row 'sending', calls onOutbox(item)
+    → onOutbox queues cclaw.send(..., {outbox_id: item.id, final: 1})
+    → C loop executes sends in order; final 2xx → 'delivered',
+      any failure → 'failed: <err>' and queued sends for that row dropped
 ```
 
-### Example: Discord Channel Extension
+### Example: minimal webhook channel
 
-```
-workspace/extensions/discord/
-├── index.js       # agent-side: adds prompt guidance for Discord formatting
-└── channel.js     # channel process: Discord gateway + outbox delivery
-```
-
-**index.js** (runs in agent_run):
 ```javascript
-function(cclaw) {
-    cclaw.registerHook("beforeRequest", function(messages) {
-        // Add Discord-specific formatting guidance
-        messages.push({
-            role: "system",
-            content: "Format responses for Discord: use markdown, keep under 2000 chars."
-        });
-        return messages;
-    });
+function onInit() { return {}; }   // no polling; webhook only
+
+function onRequest(req) {
+    if ((req.headers["X-Hub-Signature"] || "") !== expected(req.body))
+        return {status: 401, body: "bad signature"};
+    var ev = JSON.parse(req.body);
+    cclaw.emit("message", JSON.stringify({channel_id: ev.chat, text: ev.text}));
+    return {status: 200, body: "ok"};
 }
-```
 
-**channel.js** (runs as separate process via mjs):
-```javascript
-// Launched by daemon as: mjs workspace/extensions/discord/channel.js
-var token = channel_get_config("bot_token");
-// ... Discord gateway connection, message polling ...
-// On message received:
-channel_emit(JSON.stringify({ guild_id: "...", channel_id: "...", text: msg.content }));
-// Outbox delivery loop:
-while (true) {
-    var item = channel_next_outbox();
-    if (item) {
-        discord_send(item.payload);
-        channel_ack_outbox(item.id);
-    }
+function onOutbox(item) {
+    var p = JSON.parse(item.payload);
+    cclaw.send({url: API + "/send", body: JSON.stringify({to: p.channel_id, text: p.text}),
+                outbox_id: item.id, final: 1});
 }
 ```
 
@@ -217,7 +225,7 @@ CREATE TABLE channel_outbox (
     channel_name TEXT NOT NULL,
     session_id   INTEGER NOT NULL,
     payload      TEXT NOT NULL,
-    status       TEXT DEFAULT 'pending',  -- pending|delivered|failed
+    status       TEXT DEFAULT 'pending',  -- pending|sending|delivered|failed
     error        TEXT,
     created_at   INTEGER DEFAULT (unixepoch()),
     acked_at     INTEGER

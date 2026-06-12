@@ -119,6 +119,40 @@ void channel_outbox_row_free(ChannelOutboxRow *row) {
     free(row);
 }
 
+/* Mark a row handed to JS so next_outbox doesn't re-deliver it while the
+ * async send is in flight. Only moves pending rows — a row JS already
+ * failed stays failed. */
+int channel_dispatch_outbox(ChannelCtx *ctx, int64_t id) {
+    if (!ctx) return -1;
+    const char *sql =
+        "UPDATE channel_outbox SET status='sending'"
+        " WHERE id=? AND channel_name=? AND status='pending';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(stmt, 1, id);
+    sqlite3_bind_text(stmt, 2, ctx->channel_name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/* Crash recovery at runner startup: rows stuck 'sending' (process died
+ * mid-send) go back to 'pending' for at-least-once redelivery. */
+int channel_reset_outbox(ChannelCtx *ctx) {
+    if (!ctx) return -1;
+    const char *sql =
+        "UPDATE channel_outbox SET status='pending'"
+        " WHERE channel_name=? AND status='sending';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(stmt, 1, ctx->channel_name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
 /* V101: Mark delivered */
 int channel_ack_outbox(ChannelCtx *ctx, int64_t id) {
     if (!ctx) return -1;
@@ -156,24 +190,34 @@ int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error) {
 }
 
 
-/* ── Per-channel outbox wake FIFO ──────────────────────────────── */
+/* ── Per-channel IPC paths ─────────────────────────────────────── */
 
-char *channel_outbox_fifo_path(const char *db_path, const char *channel_name) {
+/* Format: <db_path_without_.db>.<channel_name><suffix> */
+static char *channel_ipc_path(const char *db_path, const char *channel_name,
+                              const char *suffix) {
     if (!db_path || !channel_name) return NULL;
     if (strcmp(db_path, ":memory:") == 0) return NULL;
     size_t db_len = strlen(db_path);
     size_t ch_len = strlen(channel_name);
-    /* Format: <db_path_without_.db>.<channel_name>.pipe */
+    size_t sfx_len = strlen(suffix);
     size_t base_len = db_len;
     if (db_len > 3 && strcmp(db_path + db_len - 3, ".db") == 0)
         base_len = db_len - 3;
-    char *path = malloc(base_len + 1 + ch_len + 6);
+    char *path = malloc(base_len + 1 + ch_len + sfx_len + 1);
     if (!path) return NULL;
     memcpy(path, db_path, base_len);
     path[base_len] = '.';
     memcpy(path + base_len + 1, channel_name, ch_len);
-    memcpy(path + base_len + 1 + ch_len, ".pipe", 6);
+    memcpy(path + base_len + 1 + ch_len, suffix, sfx_len + 1);
     return path;
+}
+
+char *channel_outbox_fifo_path(const char *db_path, const char *channel_name) {
+    return channel_ipc_path(db_path, channel_name, ".pipe");
+}
+
+char *channel_uds_path(const char *db_path, const char *channel_name) {
+    return channel_ipc_path(db_path, channel_name, ".sock");
 }
 
 int channel_outbox_fifo_open(const char *db_path, const char *channel_name) {

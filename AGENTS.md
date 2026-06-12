@@ -113,6 +113,9 @@ Tests must never hang. Follow these rules:
 - **No backward-compatible code** — there are no users yet. No migrations, no deprecation shims, no version checks. Delete old code, don't wrap it.
 - **Subprocess tests** — if forking a child that execs something (python, sh), use `waitpid` with awareness that the child may die.
 - **Makefile enforces timeouts** — `make test` wraps each binary in `timeout 20`, `make test-integration` in `timeout 45`. A hung test is killed. Per-test output goes to `/tmp/cclaw_<testname>.txt`. `alarm()` only needed in tests with intentional sleeps (retry backoff) — set below the wrapper timeout. Most tests need no alarm.
+- **Line-buffer test stdout** — `setvbuf(stdout, NULL, _IOLBF, 0)` first thing in main. When the timeout wrapper kills a hung test, fully-buffered stdout vanishes and the /tmp log shows only stderr — you debug blind. (Running a binary manually, `stdbuf -oL -eL` does the same.)
+- **Clean ALL derived artifacts at startup, not just the .db** — a killed run leaves `<db>-wal`, `<db>-shm`, `<db_base>.<channel>.pipe`, `.sock`, and possibly an orphaned child process holding them. Stale debris makes the next run hang somewhere different, so repros look non-deterministic. Integration tests should start by removing the whole `<db_base>*` family.
+- **Isolate before instrumenting** — when an integration test hangs, reproduce the single suspect path against a minimal standalone harness (a 20-line python HTTP server, a bare UDS client) before adding debug output to the full test. The full test couples DB + mock server + FIFO + child lifecycle; the bug is usually visible in one of them alone.
 
 **Agent workflow for running tests**:
 

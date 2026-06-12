@@ -119,19 +119,20 @@ $(BUILDDIR)/cr_stdlib.o: $(BUILDDIR)/mquickjs_stdlib_channel.c | $(BUILDDIR)/
 
 CR_LIB_OBJ := $(BUILDDIR)/admin_api.o $(BUILDDIR)/agent_config.o $(BUILDDIR)/channel_api.o \
               $(BUILDDIR)/db.o $(BUILDDIR)/wake.o $(BUILDDIR)/secret.o $(BUILDDIR)/config.o \
-              $(BUILDDIR)/sqlite3.o $(BUILDDIR)/monocypher.o $(BUILDDIR)/civetweb.o
+              $(BUILDDIR)/sqlite3.o $(BUILDDIR)/monocypher.o
 
 $(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(MQJS_CORE_OBJ) $(BUILDDIR)/cr_stdlib.o $(CR_LIB_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ -lcurl -lm -lpthread -ldl
 
 # Everything a production box needs: the daemon binary, the mjs evaluator
 # (system prompts reference /usr/local/lib/cclaw/mjs from sandboxed shells),
-# env file, and the systemd unit. channel_runner is not installed — the
-# daemon re-execs /proc/self/exe for channel children.
-install: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs
+# channel_runner (the --channel branch resolves it relative to the cclaw
+# binary: sibling dir, then ../lib/cclaw/), env file, and the systemd unit.
+install: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/channel_runner
 	install -d /usr/local/bin /usr/local/lib/cclaw /etc/cclaw
 	install -m 755 $(BUILDDIR)/cclaw /usr/local/bin/cclaw
 	install -m 755 $(BUILDDIR)/mjs /usr/local/lib/cclaw/mjs
+	install -m 755 $(BUILDDIR)/channel_runner /usr/local/lib/cclaw/channel_runner
 	test -f /etc/cclaw/env || install -m 600 cclaw.env.example /etc/cclaw/env
 	install -m 644 cclaw.service /etc/systemd/system/cclaw.service
 	systemctl daemon-reload

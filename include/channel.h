@@ -10,12 +10,11 @@
 typedef struct {
     pid_t pid;
     char name[64];
-    char binary_path[512];
     int restart_count;
 } ChannelProc;
 
 /* Lifecycle */
-int channel_launch_all(sqlite3 *db, const char *db_path);
+int channel_launch_all(sqlite3 *db);
 void channel_shutdown_all(void);
 
 /* Reaping — returns 1 if pid belonged to a channel, 0 otherwise */

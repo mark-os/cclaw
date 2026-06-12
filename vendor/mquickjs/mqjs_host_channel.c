@@ -13,8 +13,7 @@ extern JSValue js_ch_get_config(JSContext *ctx, JSValue *this_val, int argc, JSV
 extern JSValue js_ch_set_config(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 extern JSValue js_ch_ack_outbox(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 extern JSValue js_ch_fail_outbox(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-extern JSValue js_ch_http_post(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
-extern JSValue js_ch_http_get(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
+extern JSValue js_ch_send(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 extern JSValue js_ch_log(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 extern JSValue js_admin_set_key(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
 extern JSValue js_admin_set_model(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv);
@@ -45,8 +44,7 @@ JSValue js_call_tool(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
     if (strcmp(name, "setConfig") == 0) return js_ch_set_config(ctx, this_val, sub_argc, sub_argv);
     if (strcmp(name, "ackOutbox") == 0) return js_ch_ack_outbox(ctx, this_val, sub_argc, sub_argv);
     if (strcmp(name, "failOutbox") == 0) return js_ch_fail_outbox(ctx, this_val, sub_argc, sub_argv);
-    if (strcmp(name, "httpPost") == 0) return js_ch_http_post(ctx, this_val, sub_argc, sub_argv);
-    if (strcmp(name, "httpGet") == 0) return js_ch_http_get(ctx, this_val, sub_argc, sub_argv);
+    if (strcmp(name, "send") == 0) return js_ch_send(ctx, this_val, sub_argc, sub_argv);
     if (strcmp(name, "log") == 0) return js_ch_log(ctx, this_val, sub_argc, sub_argv);
     if (strcmp(name, "admin.setKey") == 0) return js_admin_set_key(ctx, this_val, sub_argc, sub_argv);
     if (strcmp(name, "admin.setModel") == 0) return js_admin_set_model(ctx, this_val, sub_argc, sub_argv);
@@ -60,9 +58,12 @@ JSValue js_call_tool(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv)
     return JS_ThrowTypeError(ctx, "call_tool: unknown function '%s'", name);
 }
 
-/* http_fetch — for channel runner, delegates to the httpGet/httpPost functions */
+/* http_fetch — blocking network I/O is not available in channel JS.
+ * Outbound requests are described via cclaw.send() and executed by the
+ * C event loop. */
 JSValue js_http_fetch(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
-    return js_ch_http_get(ctx, this_val, argc, argv);
+    (void)this_val; (void)argc; (void)argv;
+    return JS_ThrowTypeError(ctx, "no blocking fetch in channels; use cclaw.send()");
 }
 
 /* Date.now() */

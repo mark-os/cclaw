@@ -251,3 +251,19 @@ the proxy UDS protocol directly. The LLM is instructed to use `cclaw-fetch`
 instead of `curl`/`wget`. Anything not using the wrapper gets zero network
 (kernel-enforced). Simple but requires LLM cooperation and doesn't help tools
 like `git clone` that internally resolve + connect.
+
+## Session Sweeper
+
+Writes summary entries as new nodes in the parent/leaf tree (git-squash style),
+never overwrites existing entries. Summaries reference the head entry-id of the
+branch they summarize. Dead ends preserved as structured negative results,
+invisible to context assembly, fully indexed for recall. Runs on heartbeat tick
+outside the recency window.
+
+## sqlite-vec + Binary Quantization
+
+After FTS5 is shipping. 384-dim vectors, brute-force Hamming over
+binary-quantized index, full-precision rerank of top-N, RRF fusion with BM25 and
+recency term. Embedding at write time via cheap API (async, `needs_embedding`
+flag, broker sweep). FTS5-only remains the offline fallback. Guide users through
+local-model setup when they want it.

@@ -1,27 +1,46 @@
 /* channel_runner — universal JS channel process.
- * Owns the poll() event loop; JS is purely reactive (onInit, onNetwork, onOutbox).
- * Supports: http_long_poll, websocket, listen.
- * argv: channel_runner <db_path> <channel_name> <js_path> */
+ *
+ * One single-threaded poll loop; JS is purely reactive and never blocks on
+ * the network. All outbound HTTP is described as request shapes
+ * (cclaw.send / poll shapes) and executed here on a curl_multi handle.
+ * Inbound HTTP arrives pre-parsed from the daemon over a unix socket.
+ *
+ * JS contract (all handlers optional except onInit):
+ *   onInit() -> {poll?: Req}                 start; optional first poll shape
+ *   onPoll({status,body,error}) -> {poll?: Req}   poll completed; next shape
+ *   onRequest(req) -> {status?, body?}       proxied HTTP request from daemon
+ *   onOutbox({id,session_id,payload})        agent message to deliver
+ *   onResult({tag,status,body,error})        tagged cclaw.send completed
+ *
+ *   Req = {method?, url, body?, headers?: ["Name: v"], timeout?}
+ *   cclaw.send(Req + {tag?, outbox_id?, final?}) queues an outbound request.
+ *   A send carrying outbox_id is acked on final 2xx, failed otherwise.
+ *
+ * argv: channel_runner <db_path> <channel_name> */
 #define _POSIX_C_SOURCE 200809L
 #include "channel_api.h"
 #include "admin_api.h"
-#include "civetweb.h"
 #include "db.h"
 #include "log.h"
 #include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <mquickjs.h>
-#include <poll.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CR_HEAP_SIZE (2 * 1024 * 1024)
 #define CR_MAX_INSTRUCTIONS 100000000
+#define CR_REQ_MAX (512 * 1024)   /* max proxied request envelope */
+#define CR_SEND_TIMEOUT 60L
+#define CR_POLL_TIMEOUT 35L       /* slightly longer than TG long-poll */
 
 extern const JSSTDLibraryDef js_std_library;
 
@@ -35,8 +54,6 @@ static void handle_signal(int sig) { (void)sig; g_running = 0; }
 typedef struct {
     int instruction_count;
     int instruction_limit;
-    char **allowed_hosts;
-    size_t allowed_hosts_count;
 } HostCtx;
 
 static int interrupt_handler(JSContext *ctx, void *opaque) {
@@ -44,6 +61,105 @@ static int interrupt_handler(JSContext *ctx, void *opaque) {
     HostCtx *h = (HostCtx *)opaque;
     h->instruction_count++;
     return h->instruction_count > h->instruction_limit;
+}
+
+/* ── JS value helpers ──────────────────────────────────────────── */
+
+static char *get_str_prop(JSContext *ctx, JSValue obj, const char *name) {
+    JSValue v = JS_GetPropertyStr(ctx, obj, name);
+    if (JS_IsException(v) || JS_IsUndefined(v) || JS_IsNull(v)) return NULL;
+    JSCStringBuf buf;
+    const char *s = JS_ToCString(ctx, v, &buf);
+    return s ? strdup(s) : NULL;
+}
+
+static int get_int_prop(JSContext *ctx, JSValue obj, const char *name, int dflt) {
+    JSValue v = JS_GetPropertyStr(ctx, obj, name);
+    if (JS_IsException(v) || JS_IsUndefined(v) || JS_IsNull(v)) return dflt;
+    int i = dflt;
+    JS_ToInt32(ctx, &i, v);
+    return i;
+}
+
+/* Eval JS, logging any exception. Returns the value (JS_UNDEFINED on error). */
+static JSValue eval_js(JSContext *ctx, const char *code, const char *tag) {
+    JSValue v = JS_Eval(ctx, code, strlen(code), tag, JS_EVAL_RETVAL);
+    if (JS_IsException(v)) {
+        JSValue exc = JS_GetException(ctx);
+        JSCStringBuf buf;
+        const char *msg = JS_ToCString(ctx, exc, &buf);
+        fprintf(stderr, "[channel_runner] JS error in %s: %s\n", tag, msg ? msg : "?");
+        return JS_UNDEFINED;
+    }
+    return v;
+}
+
+static void set_global_str(JSContext *ctx, const char *name, const char *val) {
+    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), name,
+                      val ? JS_NewString(ctx, val) : JS_NULL);
+}
+
+static void set_global_int(JSContext *ctx, const char *name, int val) {
+    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), name, JS_NewInt32(ctx, val));
+}
+
+/* ── Send queue (filled by cclaw.send, drained by the curl loop) ── */
+
+typedef struct SendReq {
+    char *method;
+    char *url;
+    char *body;
+    char *tag;
+    char **headers;
+    int n_headers;
+    int64_t outbox_id;   /* 0 = not outbox-bound */
+    int is_final;        /* last send for this outbox row */
+    long timeout;
+    struct SendReq *next;
+} SendReq;
+
+static SendReq *g_send_head, *g_send_tail;
+
+static void send_req_free(SendReq *r) {
+    if (!r) return;
+    free(r->method); free(r->url); free(r->body); free(r->tag);
+    for (int i = 0; i < r->n_headers; i++) free(r->headers[i]);
+    free(r->headers);
+    free(r);
+}
+
+static void send_queue_push(SendReq *r) {
+    r->next = NULL;
+    if (g_send_tail) g_send_tail->next = r;
+    else g_send_head = r;
+    g_send_tail = r;
+}
+
+static SendReq *send_queue_pop(void) {
+    SendReq *r = g_send_head;
+    if (r) {
+        g_send_head = r->next;
+        if (!g_send_head) g_send_tail = NULL;
+    }
+    return r;
+}
+
+/* Drop queued sends bound to a failed outbox row (skip stale chunks). */
+static void send_queue_drop_outbox(int64_t outbox_id) {
+    SendReq **pp = &g_send_head;
+    while (*pp) {
+        SendReq *r = *pp;
+        if (r->outbox_id == outbox_id) {
+            *pp = r->next;
+            if (g_send_tail == r) {
+                g_send_tail = NULL;
+                for (SendReq *t = g_send_head; t; t = t->next) g_send_tail = t;
+            }
+            send_req_free(r);
+        } else {
+            pp = &r->next;
+        }
+    }
 }
 
 /* ── JS host functions: channel API ────────────────────────────── */
@@ -112,91 +228,47 @@ JSValue js_ch_log(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     return JS_UNDEFINED;
 }
 
-/* ── JS host functions: HTTP ───────────────────────────────────── */
-
-typedef struct {
-    char *data;
-    size_t len;
-    size_t cap;
-} RespBuf;
-
-static size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
-    size_t bytes = size * nmemb;
-    RespBuf *b = (RespBuf *)ud;
-    if (b->len + bytes + 1 > b->cap) {
-        size_t nc = b->cap ? b->cap * 2 : 4096;
-        while (nc < b->len + bytes + 1) nc *= 2;
-        char *tmp = realloc(b->data, nc);
-        if (!tmp) return 0;
-        b->data = tmp;
-        b->cap = nc;
-    }
-    memcpy(b->data + b->len, ptr, bytes);
-    b->len += bytes;
-    b->data[b->len] = '\0';
-    return bytes;
-}
-
-JSValue js_http_request(JSContext *ctx, const char *method,
-                               const char *url, const char *body) {
-    CURL *c = curl_easy_init();
-    if (!c) return JS_ThrowTypeError(ctx, "curl_easy_init failed");
-
-    RespBuf resp = {0};
-    curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 60L);
-
-    struct curl_slist *headers = NULL;
-    if (body) {
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-        curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
-    }
-    if (strcmp(method, "GET") != 0 && !body)
-        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method);
-
-    CURLcode res = curl_easy_perform(c);
-    long status = 0;
-    if (res == CURLE_OK) curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(c);
-
-    if (res != CURLE_OK) {
-        free(resp.data);
-        JSValue obj = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, -1));
-        JS_SetPropertyStr(ctx, obj, "error",
-            JS_NewString(ctx, curl_easy_strerror(res)));
-        return obj;
-    }
-
-    JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, (int32_t)status));
-    JS_SetPropertyStr(ctx, obj, "body",
-        JS_NewString(ctx, resp.data ? resp.data : ""));
-    free(resp.data);
-    return obj;
-}
-
-JSValue js_ch_http_post(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
+/* cclaw.send(req) — queue an outbound HTTP request for the C loop.
+ * The JS wrapper normalizes the shape before calling here. */
+JSValue js_ch_send(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     (void)this_val;
-    if (argc < 2) return JS_ThrowTypeError(ctx, "httpPost(url, body)");
-    JSCStringBuf ubuf, bbuf;
-    const char *url = JS_ToCString(ctx, argv[0], &ubuf);
-    const char *body = JS_ToCString(ctx, argv[1], &bbuf);
-    if (!url) return JS_ThrowTypeError(ctx, "httpPost: url required");
-    return js_http_request(ctx, "POST", url, body);
-}
+    if (argc < 1) return JS_ThrowTypeError(ctx, "send(request)");
+    JSValue o = argv[0];
 
-JSValue js_ch_http_get(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_ThrowTypeError(ctx, "httpGet(url)");
-    JSCStringBuf ubuf;
-    const char *url = JS_ToCString(ctx, argv[0], &ubuf);
-    if (!url) return JS_ThrowTypeError(ctx, "httpGet: url required");
-    return js_http_request(ctx, "GET", url, NULL);
+    char *url = get_str_prop(ctx, o, "url");
+    if (!url || !url[0]) {
+        free(url);
+        return JS_ThrowTypeError(ctx, "send: url required");
+    }
+
+    SendReq *r = calloc(1, sizeof(SendReq));
+    if (!r) { free(url); return JS_ThrowTypeError(ctx, "send: OOM"); }
+    r->url = url;
+    r->method = get_str_prop(ctx, o, "method");
+    r->body = get_str_prop(ctx, o, "body");
+    r->tag = get_str_prop(ctx, o, "tag");
+    r->outbox_id = get_int_prop(ctx, o, "outbox_id", 0);
+    r->is_final = get_int_prop(ctx, o, "final", 0);
+    r->timeout = get_int_prop(ctx, o, "timeout", 0);
+
+    JSValue h = JS_GetPropertyStr(ctx, o, "headers");
+    if (!JS_IsException(h) && !JS_IsUndefined(h) && !JS_IsNull(h)) {
+        int n = get_int_prop(ctx, h, "length", 0);
+        if (n > 0 && n <= 32) {
+            r->headers = calloc((size_t)n, sizeof(char *));
+            if (r->headers) {
+                for (int i = 0; i < n; i++) {
+                    JSValue hv = JS_GetPropertyUint32(ctx, h, (uint32_t)i);
+                    JSCStringBuf hbuf;
+                    const char *hs = JS_ToCString(ctx, hv, &hbuf);
+                    if (hs) r->headers[r->n_headers++] = strdup(hs);
+                }
+            }
+        }
+    }
+
+    send_queue_push(r);
+    return JS_NewInt32(ctx, 0);
 }
 
 /* ── JS host functions: admin API ──────────────────────────────── */
@@ -319,7 +391,8 @@ JSValue js_admin_is_admin(JSContext *ctx, JSValue *this_val, int argc, JSValue *
 
 static void install_host_fns(JSContext *ctx) {
     /* Host functions are dispatched via __cclaw_call_tool(name, ...args).
-     * We create the cclaw namespace object that wraps this dispatch. */
+     * cclaw.send normalizes the request shape so the C side reads
+     * predictable types. */
     const char *init_code =
         "globalThis.cclaw = {\n"
         "  emit: function(t,p) { return __cclaw_call_tool('emit',t,p); },\n"
@@ -327,8 +400,16 @@ static void install_host_fns(JSContext *ctx) {
         "  setConfig: function(k,v) { return __cclaw_call_tool('setConfig',k,v); },\n"
         "  ackOutbox: function(id) { return __cclaw_call_tool('ackOutbox',id); },\n"
         "  failOutbox: function(id,e) { return __cclaw_call_tool('failOutbox',id,e); },\n"
-        "  httpPost: function(u,b) { return __cclaw_call_tool('httpPost',u,b); },\n"
-        "  httpGet: function(u) { return __cclaw_call_tool('httpGet',u); },\n"
+        "  send: function(r) { return __cclaw_call_tool('send', {\n"
+        "    url: '' + r.url,\n"
+        "    method: r.method || (r.body != null ? 'POST' : 'GET'),\n"
+        "    body: r.body == null ? null : '' + r.body,\n"
+        "    tag: r.tag == null ? null : '' + r.tag,\n"
+        "    headers: r.headers || null,\n"
+        "    outbox_id: r.outbox_id ? (r.outbox_id|0) : 0,\n"
+        "    final: r.final ? 1 : 0,\n"
+        "    timeout: r.timeout ? (r.timeout|0) : 0\n"
+        "  }); },\n"
         "  log: function(m) { return __cclaw_call_tool('log',m); },\n"
         "  admin: {\n"
         "    setKey: function(p,v) { return __cclaw_call_tool('admin.setKey',p,v); },\n"
@@ -351,196 +432,247 @@ static void install_host_fns(JSContext *ctx) {
     }
 }
 
-/* ── curl_multi based long-poll ────────────────────────────────── */
+/* ── HTTP transfers (poll + sends) on one curl_multi ───────────── */
 
 typedef struct {
-    CURLM *multi;
-    CURL *easy;
-    RespBuf resp;
-    char *url;          /* current request URL (owned) */
-    int active;         /* 1 = transfer in progress */
-    struct curl_slist *headers;  /* owned, reused across requests */
-} LongPollState;
-
-static void lp_start_request(LongPollState *lp, const char *url) {
-    if (lp->easy) { curl_multi_remove_handle(lp->multi, lp->easy); curl_easy_cleanup(lp->easy); }
-    free(lp->resp.data);
-    memset(&lp->resp, 0, sizeof(lp->resp));
-    free(lp->url);
-    lp->url = strdup(url);
-
-    lp->easy = curl_easy_init();
-    curl_easy_setopt(lp->easy, CURLOPT_URL, url);
-    curl_easy_setopt(lp->easy, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(lp->easy, CURLOPT_WRITEDATA, &lp->resp);
-    curl_easy_setopt(lp->easy, CURLOPT_TIMEOUT, 35L); /* slightly longer than TG timeout */
-    if (!lp->headers)
-        lp->headers = curl_slist_append(NULL, "Content-Type: application/json");
-    curl_easy_setopt(lp->easy, CURLOPT_HTTPHEADER, lp->headers);
-    curl_multi_add_handle(lp->multi, lp->easy);
-    lp->active = 1;
-}
-
-static void lp_cleanup(LongPollState *lp) {
-    if (lp->easy) { curl_multi_remove_handle(lp->multi, lp->easy); curl_easy_cleanup(lp->easy); }
-    if (lp->multi) curl_multi_cleanup(lp->multi);
-    curl_slist_free_all(lp->headers);
-    free(lp->resp.data);
-    free(lp->url);
-}
-
-/* ── Listen mode: thread-safe request queue ────────────────────── */
-
-typedef struct {
-    char *request_json;
-    char *response;
-    int status_code;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    int done;
-} ListenRequest;
-
-typedef struct {
-    ListenRequest **items;
+    char *data;
     size_t len;
     size_t cap;
-    pthread_mutex_t mutex;
-    int wake_pipe[2];
-} ListenQueue;
+} RespBuf;
 
-static void listen_queue_init(ListenQueue *q) {
-    q->cap = 16;
-    q->len = 0;
-    q->items = calloc(q->cap, sizeof(ListenRequest *));
-    pthread_mutex_init(&q->mutex, NULL);
-    pipe(q->wake_pipe);
-    int flags = fcntl(q->wake_pipe[0], F_GETFL, 0);
-    fcntl(q->wake_pipe[0], F_SETFL, flags | O_NONBLOCK);
-}
-
-static void listen_queue_push(ListenQueue *q, ListenRequest *req) {
-    pthread_mutex_lock(&q->mutex);
-    if (q->len >= q->cap) {
-        q->cap *= 2;
-        q->items = realloc(q->items, q->cap * sizeof(ListenRequest *));
+static size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
+    size_t bytes = size * nmemb;
+    RespBuf *b = (RespBuf *)ud;
+    if (b->len + bytes + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 4096;
+        while (nc < b->len + bytes + 1) nc *= 2;
+        char *tmp = realloc(b->data, nc);
+        if (!tmp) return 0;
+        b->data = tmp;
+        b->cap = nc;
     }
-    q->items[q->len++] = req;
-    pthread_mutex_unlock(&q->mutex);
-    char c = 1;
-    (void)write(q->wake_pipe[1], &c, 1);
+    memcpy(b->data + b->len, ptr, bytes);
+    b->len += bytes;
+    b->data[b->len] = '\0';
+    return bytes;
 }
 
-static ListenRequest *listen_queue_pop(ListenQueue *q) {
-    ListenRequest *req = NULL;
-    pthread_mutex_lock(&q->mutex);
-    if (q->len > 0) {
-        req = q->items[0];
-        q->len--;
-        if (q->len > 0)
-            memmove(q->items, q->items + 1, q->len * sizeof(ListenRequest *));
+static CURLM *g_multi;
+
+/* Poller: the recurring long-poll request (shape owned here) */
+static struct {
+    CURL *easy;
+    RespBuf resp;
+    char *method, *url, *body;
+    struct curl_slist *hdrs;
+    int active;
+    int errors;          /* consecutive failures, drives backoff */
+    time_t next_at;
+} g_poll;
+
+/* One in-flight send at a time preserves per-channel ordering */
+static SendReq *g_send_active;
+static CURL *g_send_easy;
+static RespBuf g_send_resp;
+static struct curl_slist *g_send_hdrs;
+
+static CURL *make_easy(const char *method, const char *url, const char *body,
+                       char **headers, int n_headers, long timeout,
+                       RespBuf *resp, struct curl_slist **out_hdrs) {
+    CURL *c = curl_easy_init();
+    if (!c) return NULL;
+    free(resp->data);
+    memset(resp, 0, sizeof(*resp));
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, resp);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, timeout);
+
+    struct curl_slist *hl = NULL;
+    int have_ct = 0;
+    for (int i = 0; i < n_headers; i++) {
+        hl = curl_slist_append(hl, headers[i]);
+        if (strncasecmp(headers[i], "Content-Type:", 13) == 0) have_ct = 1;
     }
-    pthread_mutex_unlock(&q->mutex);
-    return req;
-}
-
-static void listen_queue_destroy(ListenQueue *q) {
-    free(q->items);
-    pthread_mutex_destroy(&q->mutex);
-    close(q->wake_pipe[0]);
-    close(q->wake_pipe[1]);
-}
-
-/* JSON-escape a string into dst, return bytes written (excluding NUL) */
-static size_t json_esc(char *dst, size_t cap, const char *src, size_t slen) {
-    size_t o = 0;
-    for (size_t i = 0; i < slen && o + 6 < cap; i++) {
-        unsigned char c = (unsigned char)src[i];
-        if (c == '"') { dst[o++] = '\\'; dst[o++] = '"'; }
-        else if (c == '\\') { dst[o++] = '\\'; dst[o++] = '\\'; }
-        else if (c == '\n') { dst[o++] = '\\'; dst[o++] = 'n'; }
-        else if (c == '\r') { dst[o++] = '\\'; dst[o++] = 'r'; }
-        else if (c == '\t') { dst[o++] = '\\'; dst[o++] = 't'; }
-        else if (c < 0x20) { o += (size_t)snprintf(dst + o, cap - o, "\\u%04x", c); }
-        else { dst[o++] = (char)c; }
+    if (body) {
+        if (!have_ct) hl = curl_slist_append(hl, "Content-Type: application/json");
+        curl_easy_setopt(c, CURLOPT_POSTFIELDS, body);
     }
-    dst[o] = '\0';
-    return o;
+    if (hl) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hl);
+    if (method && strcmp(method, "GET") != 0 && !body)
+        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method);
+    else if (method && strcmp(method, "POST") != 0 && body)
+        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method);
+    *out_hdrs = hl;
+    return c;
 }
 
-static int listen_handler(struct mg_connection *conn, void *cbdata) {
-    ListenQueue *q = (ListenQueue *)cbdata;
-    const struct mg_request_info *ri = mg_get_request_info(conn);
-
-    /* Read body */
-    char body_buf[65536];
-    int body_len = 0;
-    if (ri->content_length > 0 && ri->content_length < (long long)sizeof(body_buf))
-        body_len = mg_read(conn, body_buf, (size_t)ri->content_length);
-    else if (ri->content_length < 0) /* chunked/unknown — read what's available */
-        body_len = mg_read(conn, body_buf, sizeof(body_buf) - 1);
-    if (body_len < 0) body_len = 0;
-    body_buf[body_len] = '\0';
-
-    /* Build JSON: {"method":"...","path":"...","headers":{...},"body":"..."} */
-    size_t json_cap = (size_t)body_len * 2 + 4096;
-    char *json = malloc(json_cap);
-    if (!json) { mg_printf(conn, "HTTP/1.1 500\r\nContent-Length: 0\r\n\r\n"); return 500; }
-
-    size_t pos = 0;
-    pos += (size_t)snprintf(json + pos, json_cap - pos, "{\"method\":\"");
-    if (ri->request_method)
-        pos += json_esc(json + pos, json_cap - pos, ri->request_method, strlen(ri->request_method));
-    pos += (size_t)snprintf(json + pos, json_cap - pos, "\",\"path\":\"");
-    if (ri->local_uri)
-        pos += json_esc(json + pos, json_cap - pos, ri->local_uri, strlen(ri->local_uri));
-    pos += (size_t)snprintf(json + pos, json_cap - pos, "\",\"headers\":{");
-    for (int i = 0; i < ri->num_headers; i++) {
-        if (i > 0) json[pos++] = ',';
-        json[pos++] = '"';
-        pos += json_esc(json + pos, json_cap - pos, ri->http_headers[i].name,
-                        strlen(ri->http_headers[i].name));
-        pos += (size_t)snprintf(json + pos, json_cap - pos, "\":\"");
-        pos += json_esc(json + pos, json_cap - pos, ri->http_headers[i].value,
-                        strlen(ri->http_headers[i].value));
-        json[pos++] = '"';
-    }
-    pos += (size_t)snprintf(json + pos, json_cap - pos, "},\"body\":\"");
-    pos += json_esc(json + pos, json_cap - pos, body_buf, (size_t)body_len);
-    pos += (size_t)snprintf(json + pos, json_cap - pos, "\"}");
-
-    /* Enqueue and wait for JS to process */
-    ListenRequest req = {.request_json = json, .response = NULL, .status_code = 200, .done = 0};
-    pthread_mutex_init(&req.mutex, NULL);
-    pthread_cond_init(&req.cond, NULL);
-
-    listen_queue_push(q, &req);
-
-    pthread_mutex_lock(&req.mutex);
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += 5;
-    while (!req.done) {
-        if (pthread_cond_timedwait(&req.cond, &req.mutex, &ts) != 0) break;
-    }
-    pthread_mutex_unlock(&req.mutex);
-
-    const char *resp_body = req.response ? req.response : "ok";
-    size_t resp_len = strlen(resp_body);
-    mg_printf(conn,
-        "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\n"
-        "Content-Length: %zu\r\n\r\n%s",
-        req.done ? req.status_code : 504, resp_len, resp_body);
-
-    free(req.request_json);
-    free(req.response);
-    pthread_mutex_destroy(&req.mutex);
-    pthread_cond_destroy(&req.cond);
-    return req.done ? req.status_code : 504;
+/* Replace the poll shape from a JS {poll: Req} return value (if present). */
+static void poll_shape_update(JSContext *ctx, JSValue ret) {
+    if (JS_IsUndefined(ret) || JS_IsNull(ret)) return;
+    JSValue p = JS_GetPropertyStr(ctx, ret, "poll");
+    if (JS_IsException(p) || JS_IsUndefined(p)) return;
+    free(g_poll.method); free(g_poll.url); free(g_poll.body);
+    g_poll.method = g_poll.url = g_poll.body = NULL;
+    if (JS_IsNull(p)) return;  /* explicit null stops polling */
+    g_poll.url = get_str_prop(ctx, p, "url");
+    g_poll.method = get_str_prop(ctx, p, "method");
+    g_poll.body = get_str_prop(ctx, p, "body");
 }
 
-/* ── Main event loop ───────────────────────────────────────────── */
+static void poll_start(void) {
+    if (g_poll.active || !g_poll.url || !g_poll.url[0]) return;
+    if (time(NULL) < g_poll.next_at) return;
+    if (g_poll.easy) { curl_multi_remove_handle(g_multi, g_poll.easy); curl_easy_cleanup(g_poll.easy); }
+    curl_slist_free_all(g_poll.hdrs); g_poll.hdrs = NULL;
+    g_poll.easy = make_easy(g_poll.method, g_poll.url, g_poll.body,
+                            NULL, 0, CR_POLL_TIMEOUT, &g_poll.resp, &g_poll.hdrs);
+    if (!g_poll.easy) return;
+    curl_multi_add_handle(g_multi, g_poll.easy);
+    g_poll.active = 1;
+}
 
-enum PollType { POLL_HTTP_LONG_POLL, POLL_LISTEN, POLL_WEBSOCKET };
+static void send_start_next(void) {
+    if (g_send_active) return;
+    SendReq *r = send_queue_pop();
+    if (!r) return;
+    g_send_easy = make_easy(r->method, r->url, r->body, r->headers, r->n_headers,
+                            r->timeout > 0 ? r->timeout : CR_SEND_TIMEOUT,
+                            &g_send_resp, &g_send_hdrs);
+    if (!g_send_easy) {
+        if (r->outbox_id > 0) channel_fail_outbox(g_ctx, r->outbox_id, "curl init failed");
+        send_req_free(r);
+        return;
+    }
+    curl_multi_add_handle(g_multi, g_send_easy);
+    g_send_active = r;
+}
+
+/* ── JS handler call sites ─────────────────────────────────────── */
+
+static void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row) {
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "id", JS_NewInt32(ctx, (int32_t)row->id));
+    JS_SetPropertyStr(ctx, obj, "session_id", JS_NewInt32(ctx, (int32_t)row->session_id));
+    JS_SetPropertyStr(ctx, obj, "payload",
+        JS_NewString(ctx, row->payload ? row->payload : ""));
+    JS_SetPropertyStr(ctx, global, "__cr_outbox_item", obj);
+    eval_js(ctx, "onOutbox(__cr_outbox_item)", "onOutbox");
+}
+
+static void drain_outbox(JSContext *ctx) {
+    ChannelOutboxRow *row;
+    while ((row = channel_next_outbox(g_ctx)) != NULL) {
+        /* Move to 'sending' first — the send is async, so a still-pending
+         * row would be re-fetched forever */
+        channel_dispatch_outbox(g_ctx, row->id);
+        call_on_outbox(ctx, row);
+        channel_outbox_row_free(row);
+    }
+}
+
+static void call_on_poll_done(JSContext *ctx, int status, const char *body,
+                              const char *error) {
+    set_global_int(ctx, "__cr_status", status);
+    set_global_str(ctx, "__cr_body", body);
+    set_global_str(ctx, "__cr_err", error);
+    JSValue ret = eval_js(ctx,
+        "(typeof onPoll === 'function')"
+        " ? onPoll({status: __cr_status, body: __cr_body, error: __cr_err}) : null",
+        "onPoll");
+    poll_shape_update(ctx, ret);
+}
+
+static void call_on_result(JSContext *ctx, const char *tag, int status,
+                           const char *body, const char *error) {
+    set_global_str(ctx, "__cr_tag", tag);
+    set_global_int(ctx, "__cr_status", status);
+    set_global_str(ctx, "__cr_body", body);
+    set_global_str(ctx, "__cr_err", error);
+    eval_js(ctx,
+        "(typeof onResult === 'function')"
+        " ? onResult({tag: __cr_tag, status: __cr_status, body: __cr_body,"
+        "             error: __cr_err}) : null",
+        "onResult");
+}
+
+/* ── Proxied requests over UDS (from the daemon) ───────────────── */
+
+static int uds_listen_open(const char *db_path, const char *name) {
+    char *path = channel_uds_path(db_path, name);
+    if (!path) return -1;
+    unlink(path);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) { free(path); return -1; }
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", path);
+    free(path);
+    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(fd, 8) != 0) {
+        close(fd);
+        return -1;
+    }
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    return fd;
+}
+
+/* Read the full envelope (daemon writes then shuts down its end), run
+ * onRequest, write "status\nbody" back. One request per connection. */
+static void uds_handle_conn(JSContext *ctx, int cfd) {
+    struct timeval tv = {5, 0};
+    setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    size_t cap = 8192, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) { close(cfd); return; }
+    for (;;) {
+        if (len + 4096 + 1 > cap) {
+            if (cap >= CR_REQ_MAX) break;
+            cap *= 2;
+            char *tmp = realloc(buf, cap);
+            if (!tmp) break;
+            buf = tmp;
+        }
+        ssize_t n = read(cfd, buf + len, 4096);
+        if (n > 0) { len += (size_t)n; continue; }
+        if (n < 0 && errno == EINTR) continue;
+        break; /* EOF or error/timeout */
+    }
+    buf[len] = '\0';
+
+    set_global_str(ctx, "__cr_req", buf);
+    free(buf);
+
+    /* The wrapper builds the "status\nbody" wire reply directly. */
+    JSValue ret = eval_js(ctx,
+        "(function(){\n"
+        "  try {\n"
+        "    var r = (typeof onRequest === 'function')"
+        "            ? onRequest(JSON.parse(__cr_req)) : null;\n"
+        "    if (r == null) return '200\\nok';\n"
+        "    if (typeof r === 'string') return '200\\n' + r;\n"
+        "    return (r.status || 200) + '\\n' + (r.body == null ? '' : '' + r.body);\n"
+        "  } catch (e) { return '500\\n' + e; }\n"
+        "})()",
+        "onRequest");
+
+    JSCStringBuf rbuf;
+    const char *reply = JS_ToCString(ctx, ret, &rbuf);
+    if (!reply) reply = "500\n";
+    size_t rlen = strlen(reply), off = 0;
+    while (off < rlen) {
+        ssize_t n = write(cfd, reply + off, rlen - off);
+        if (n <= 0) { if (n < 0 && errno == EINTR) continue; break; }
+        off += (size_t)n;
+    }
+    close(cfd);
+}
+
+/* ── Main ──────────────────────────────────────────────────────── */
 
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "r");
@@ -557,66 +689,6 @@ static char *read_file(const char *path) {
     return buf;
 }
 
-/* Call a JS function by name with a string argument. Returns heap string or NULL. */
-static char *call_js_str(JSContext *ctx, const char *fn, const char *arg) {
-    char code[128];
-    if (arg) {
-        JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cr_call_arg",
-                          JS_NewString(ctx, arg));
-        snprintf(code, sizeof(code), "JSON.stringify(%s(__cr_call_arg))", fn);
-    } else {
-        snprintf(code, sizeof(code), "JSON.stringify(%s())", fn);
-    }
-    JSValue val = JS_Eval(ctx, code, strlen(code), "<call>", JS_EVAL_RETVAL);
-    if (JS_IsException(val)) {
-        JSValue exc = JS_GetException(ctx);
-        JSCStringBuf buf;
-        const char *msg = JS_ToCString(ctx, exc, &buf);
-        fprintf(stderr, "[channel_runner] JS error in %s: %s\n", fn, msg ? msg : "?");
-        return NULL;
-    }
-    if (JS_IsNull(val) || JS_IsUndefined(val)) return NULL;
-    JSCStringBuf buf;
-    const char *s = JS_ToCString(ctx, val, &buf);
-    return s ? strdup(s) : NULL;
-}
-
-/* Call JS onNetwork(body_string). */
-static void call_on_network(JSContext *ctx, const char *body) {
-    /* Pass raw body via global property to avoid escaping issues */
-    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cr_net_body",
-                      JS_NewString(ctx, body));
-    const char *code = "onNetwork(__cr_net_body)";
-    JSValue val = JS_Eval(ctx, code, strlen(code), "<net>", 0);
-    if (JS_IsException(val)) {
-        JSValue exc = JS_GetException(ctx);
-        JSCStringBuf buf;
-        const char *msg = JS_ToCString(ctx, exc, &buf);
-        fprintf(stderr, "[channel_runner] onNetwork error: %s\n", msg ? msg : "?");
-    }
-}
-
-/* Call JS onOutbox({id, session_id, payload}). */
-static void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row) {
-    /* Set outbox data as a global object */
-    char code[256];
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "id", JS_NewInt32(ctx, (int32_t)row->id));
-    JS_SetPropertyStr(ctx, obj, "session_id", JS_NewInt32(ctx, (int32_t)row->session_id));
-    JS_SetPropertyStr(ctx, obj, "payload",
-        JS_NewString(ctx, row->payload ? row->payload : ""));
-    JS_SetPropertyStr(ctx, global, "__cr_outbox_item", obj);
-    snprintf(code, sizeof(code), "onOutbox(__cr_outbox_item)");
-    JSValue val = JS_Eval(ctx, code, strlen(code), "<outbox>", 0);
-    if (JS_IsException(val)) {
-        JSValue exc = JS_GetException(ctx);
-        JSCStringBuf buf;
-        const char *msg = JS_ToCString(ctx, exc, &buf);
-        fprintf(stderr, "[channel_runner] onOutbox error: %s\n", msg ? msg : "?");
-    }
-}
-
 int main(int argc, char **argv) {
     cclaw_log_init();
     cclaw_log_set_level(log_level_parse(getenv("CCLAW_LOG_LEVEL")));
@@ -627,15 +699,15 @@ int main(int argc, char **argv) {
     const char *db_path = argv[1];
     const char *channel_name = argv[2];
 
-    /* Resolve js_path from extensions table */
     signal(SIGTERM, handle_signal);
     signal(SIGINT, handle_signal);
+    signal(SIGPIPE, SIG_IGN);
 
-    /* Open channel context */
     g_ctx = channel_ctx_open(db_path, channel_name);
     if (!g_ctx) { fprintf(stderr, "[channel_runner] DB open failed\n"); return 1; }
 
-    char js_path_buf[1024] = {0};
+    /* Resolve js_path from extensions table */
+    char js_path[1024] = {0};
     {
         const char *sql = "SELECT e.path FROM channels c"
                           " JOIN extensions e ON c.extension_name=e.name"
@@ -645,24 +717,25 @@ int main(int argc, char **argv) {
             sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
             if (sqlite3_step(s) == SQLITE_ROW) {
                 const char *p = (const char *)sqlite3_column_text(s, 0);
-                if (p) snprintf(js_path_buf, sizeof(js_path_buf), "%s/channel.js", p);
+                if (p) snprintf(js_path, sizeof(js_path), "%s/channel.js", p);
             }
             sqlite3_finalize(s);
         }
     }
-    const char *js_path = js_path_buf;
     if (!js_path[0]) {
         fprintf(stderr, "[channel_runner] no extension path for channel '%s'\n", channel_name);
         channel_ctx_free(g_ctx);
         return 1;
     }
 
-    /* Open outbox wake FIFO */
     int outbox_fd = channel_outbox_fifo_open(db_path, channel_name);
     if (outbox_fd < 0)
         fprintf(stderr, "[channel_runner] warning: outbox FIFO unavailable\n");
 
-    /* Load JS */
+    int uds_fd = uds_listen_open(db_path, channel_name);
+    if (uds_fd < 0)
+        fprintf(stderr, "[channel_runner] warning: request socket unavailable\n");
+
     char *js_src = read_file(js_path);
     if (!js_src) {
         fprintf(stderr, "[channel_runner] cannot read %s\n", js_path);
@@ -670,23 +743,17 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Create MQJS context */
     void *heap = malloc(CR_HEAP_SIZE);
     if (!heap) { free(js_src); channel_ctx_free(g_ctx); return 1; }
     JSContext *ctx = JS_NewContext(heap, CR_HEAP_SIZE, &js_std_library);
     if (!ctx) { free(heap); free(js_src); channel_ctx_free(g_ctx); return 1; }
 
-    HostCtx hctx = {.instruction_limit = CR_MAX_INSTRUCTIONS};
+    HostCtx hctx = {.instruction_count = 0, .instruction_limit = CR_MAX_INSTRUCTIONS};
     JS_SetInterruptHandler(ctx, interrupt_handler);
     JS_SetContextOpaque(ctx, &hctx);
 
-    /* Install host functions — they need to be in the stdlib's c_function_table.
-     * Since we can't modify the stdlib at runtime, we use a different approach:
-     * evaluate JS code that references the built-in functions (http_fetch, Date.now)
-     * and add our channel functions via the global object. */
     install_host_fns(ctx);
 
-    /* Evaluate channel JS */
     JSValue load_val = JS_Eval(ctx, js_src, strlen(js_src), js_path, 0);
     free(js_src);
     if (JS_IsException(load_val)) {
@@ -698,220 +765,145 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Call onInit() */
-    char *init_result = call_js_str(ctx, "onInit", NULL);
-    if (!init_result) {
-        fprintf(stderr, "[channel_runner] onInit() failed or returned null\n");
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    g_multi = curl_multi_init();
+
+    /* onInit: required; may set a poll shape and queue sends */
+    JSValue init_ret = JS_Eval(ctx, "onInit()", 8, "<init>", JS_EVAL_RETVAL);
+    if (JS_IsException(init_ret)) {
+        JSValue exc = JS_GetException(ctx);
+        JSCStringBuf buf;
+        const char *msg = JS_ToCString(ctx, exc, &buf);
+        fprintf(stderr, "[channel_runner] onInit failed: %s\n", msg ? msg : "?");
+        curl_multi_cleanup(g_multi); curl_global_cleanup();
         JS_FreeContext(ctx); free(heap); channel_ctx_free(g_ctx);
         return 1;
     }
+    poll_shape_update(ctx, init_ret);
 
-    /* Parse init result to determine poll_type and url */
-    /* Quick JSON parse via JS eval */
-    char parse_code[4096];
-    snprintf(parse_code, sizeof(parse_code),
-        "var __cr_init = %s; __cr_init;", init_result);
-    JS_Eval(ctx, parse_code, strlen(parse_code), "<parse>", 0);
-    free(init_result);
+    fprintf(stderr, "[channel_runner] started: channel=%s poll=%s requests=%s\n",
+            channel_name, g_poll.url ? "yes" : "no", uds_fd >= 0 ? "yes" : "no");
 
-    /* Extract poll_type */
-    const char *extract_pt = "globalThis.__cr_init.poll_type";
-    JSValue pt_val = JS_Eval(ctx, extract_pt, strlen(extract_pt), "<pt>", JS_EVAL_RETVAL);
-    JSCStringBuf ptbuf;
-    const char *poll_type_str = JS_ToCString(ctx, pt_val, &ptbuf);
+    /* Recover rows a crashed predecessor left mid-send, then deliver
+     * anything queued before startup */
+    channel_reset_outbox(g_ctx);
+    drain_outbox(ctx);
 
-    enum PollType poll_type = POLL_HTTP_LONG_POLL;
-    if (poll_type_str) {
-        if (strcmp(poll_type_str, "listen") == 0) poll_type = POLL_LISTEN;
-        else if (strcmp(poll_type_str, "websocket") == 0) poll_type = POLL_WEBSOCKET;
-    }
+    /* ── Event loop: curl transfers + outbox FIFO + request UDS ── */
+    while (g_running) {
+        int still = 0;
+        curl_multi_perform(g_multi, &still);
+        send_start_next();
+        poll_start();
 
-    /* Extract URL */
-    const char *extract_url = "globalThis.__cr_init.url || ''";
-    JSValue url_val = JS_Eval(ctx, extract_url, strlen(extract_url), "<url>", JS_EVAL_RETVAL);
-    JSCStringBuf urlbuf;
-    const char *init_url = JS_ToCString(ctx, url_val, &urlbuf);
-    char *poll_url = init_url ? strdup(init_url) : NULL;
-
-    fprintf(stderr, "[channel_runner] started: channel=%s poll_type=%s\n",
-            channel_name, poll_type_str ? poll_type_str : "http_long_poll");
-
-    /* ── Initial outbox drain (handles messages queued before startup) ── */
-    {
-        ChannelOutboxRow *row;
-        while ((row = channel_next_outbox(g_ctx)) != NULL) {
-            call_on_outbox(ctx, row);
-            channel_outbox_row_free(row);
+        struct curl_waitfd extra[2];
+        int n_extra = 0;
+        if (outbox_fd >= 0) {
+            extra[n_extra].fd = outbox_fd;
+            extra[n_extra].events = CURL_WAIT_POLLIN;
+            extra[n_extra].revents = 0;
+            n_extra++;
         }
-    }
+        int uds_slot = -1;
+        if (uds_fd >= 0) {
+            uds_slot = n_extra;
+            extra[n_extra].fd = uds_fd;
+            extra[n_extra].events = CURL_WAIT_POLLIN;
+            extra[n_extra].revents = 0;
+            n_extra++;
+        }
 
-    /* ── Event loop ────────────────────────────────────────────── */
+        int numfds = 0;
+        curl_multi_poll(g_multi, extra, (unsigned)n_extra, 1000, &numfds);
 
-    if (poll_type == POLL_HTTP_LONG_POLL) {
-        curl_global_init(CURL_GLOBAL_DEFAULT);
-        LongPollState lp = {0};
-        lp.multi = curl_multi_init();
+        if (outbox_fd >= 0 && (extra[0].revents & CURL_WAIT_POLLIN)) {
+            char drain[64];
+            while (read(outbox_fd, drain, sizeof(drain)) > 0) {}
+            drain_outbox(ctx);
+        }
 
-        /* Start first request */
-        if (poll_url && poll_url[0])
-            lp_start_request(&lp, poll_url);
-
-        while (g_running) {
-            /* Drive curl_multi */
-            int still_running = 0;
-            curl_multi_perform(lp.multi, &still_running);
-
-            /* Get curl fds for poll */
-            /* Use curl_multi_poll to wait on both curl + our extra fd */
-            struct curl_waitfd extra[1];
-            int n_extra = 0;
-            if (outbox_fd >= 0) {
-                extra[0].fd = outbox_fd;
-                extra[0].events = CURL_WAIT_POLLIN;
-                extra[0].revents = 0;
-                n_extra = 1;
-            }
-
-            int numfds = 0;
-            curl_multi_poll(lp.multi, extra, (unsigned)n_extra, 1000, &numfds);
-
-            /* Check outbox FIFO */
-            if (n_extra > 0 && (extra[0].revents & CURL_WAIT_POLLIN)) {
-                char drain[64];
-                while (read(outbox_fd, drain, sizeof(drain)) > 0) {}
-                /* Drain all pending outbox rows */
-                ChannelOutboxRow *row;
-                while ((row = channel_next_outbox(g_ctx)) != NULL) {
-                    call_on_outbox(ctx, row);
-                    channel_outbox_row_free(row);
-                }
-            }
-
-            /* Check for completed transfers */
-            CURLMsg *msg;
-            int msgs_left;
-            while ((msg = curl_multi_info_read(lp.multi, &msgs_left)) != NULL) {
-                if (msg->msg == CURLMSG_DONE) {
-                    /* Got response */
-                    if (msg->data.result == CURLE_OK && lp.resp.data)
-                        call_on_network(ctx, lp.resp.data);
-
-                    /* Get next URL from JS (onNetwork may update offset) */
-                    const char *get_url =
-                        "typeof getNextUrl === 'function' ? getNextUrl() : globalThis.__cr_init.url";
-                    JSValue nu = JS_Eval(ctx, get_url, strlen(get_url), "<nu>", JS_EVAL_RETVAL);
-                    JSCStringBuf nubuf;
-                    const char *next = JS_ToCString(ctx, nu, &nubuf);
-                    if (next && next[0] && g_running)
-                        lp_start_request(&lp, next);
-                    else
-                        lp.active = 0;
-                }
-            }
-
-            /* If no active transfer and still running, restart */
-            if (!lp.active && g_running && poll_url && poll_url[0]) {
-                const char *get_url =
-                    "typeof getNextUrl === 'function' ? getNextUrl() : globalThis.__cr_init.url";
-                JSValue nu = JS_Eval(ctx, get_url, strlen(get_url), "<nu>", JS_EVAL_RETVAL);
-                JSCStringBuf nubuf;
-                const char *next = JS_ToCString(ctx, nu, &nubuf);
-                if (next && next[0])
-                    lp_start_request(&lp, next);
+        if (uds_slot >= 0 && (extra[uds_slot].revents & CURL_WAIT_POLLIN)) {
+            for (;;) {
+                int cfd = accept(uds_fd, NULL, NULL);
+                if (cfd < 0) break;
+                uds_handle_conn(ctx, cfd);
             }
         }
 
-        lp_cleanup(&lp);
-        curl_global_cleanup();
+        /* Completed transfers */
+        CURLMsg *msg;
+        int msgs_left;
+        while ((msg = curl_multi_info_read(g_multi, &msgs_left)) != NULL) {
+            if (msg->msg != CURLMSG_DONE) continue;
+            long status = 0;
+            const char *cerr = (msg->data.result == CURLE_OK)
+                               ? NULL : curl_easy_strerror(msg->data.result);
+            if (!cerr) curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &status);
 
-    } else if (poll_type == POLL_LISTEN) {
-        /* Civetweb-based HTTP listener for webhooks */
-        int port = 0;
-        const char *get_port = "globalThis.__cr_init.port || 8080";
-        JSValue pv = JS_Eval(ctx, get_port, strlen(get_port), "<port>", JS_EVAL_RETVAL);
-        JS_ToInt32(ctx, &port, pv);
-
-        mg_init_library(0);
-        ListenQueue lq;
-        listen_queue_init(&lq);
-
-        char port_str[16];
-        snprintf(port_str, sizeof(port_str), "%d", port);
-        const char *options[] = {"listening_ports", port_str, "num_threads", "2", NULL};
-        struct mg_context *mg_ctx = mg_start(NULL, NULL, options);
-        if (!mg_ctx) {
-            fprintf(stderr, "[channel_runner] civetweb start failed on port %d\n", port);
-            listen_queue_destroy(&lq);
-            mg_exit_library();
-            goto cleanup;
-        }
-        mg_set_request_handler(mg_ctx, "/", listen_handler, &lq);
-
-        fprintf(stderr, "[channel_runner] listening on port %d (civetweb)\n", port);
-
-        while (g_running) {
-            struct pollfd fds[2];
-            int nfds = 0;
-            fds[nfds].fd = lq.wake_pipe[0]; fds[nfds].events = POLLIN; nfds++;
-            if (outbox_fd >= 0) { fds[nfds].fd = outbox_fd; fds[nfds].events = POLLIN; nfds++; }
-
-            int r = poll(fds, (nfds_t)nfds, 1000);
-            if (r < 0) { if (errno == EINTR) continue; break; }
-
-            /* Process incoming webhook requests */
-            if (fds[0].revents & POLLIN) {
-                char drain[64];
-                while (read(lq.wake_pipe[0], drain, sizeof(drain)) > 0) {}
-                ListenRequest *req;
-                while ((req = listen_queue_pop(&lq)) != NULL) {
-                    char *result = call_js_str(ctx, "onNetwork", req->request_json);
-                    pthread_mutex_lock(&req->mutex);
-                    req->response = result;
-                    req->done = 1;
-                    pthread_cond_signal(&req->cond);
-                    pthread_mutex_unlock(&req->mutex);
+            if (msg->easy_handle == g_poll.easy) {
+                int ok = (!cerr && status >= 200 && status < 400);
+                call_on_poll_done(ctx, (int)status,
+                                  g_poll.resp.data ? g_poll.resp.data : "", cerr);
+                curl_multi_remove_handle(g_multi, g_poll.easy);
+                curl_easy_cleanup(g_poll.easy);
+                g_poll.easy = NULL;
+                g_poll.active = 0;
+                if (ok) {
+                    g_poll.errors = 0;
+                    g_poll.next_at = 0;
+                } else {
+                    /* Back off so a dead endpoint doesn't hot-loop */
+                    g_poll.errors++;
+                    int delay = g_poll.errors < 6 ? (1 << g_poll.errors) : 60;
+                    g_poll.next_at = time(NULL) + delay;
                 }
-            }
-
-            /* Check outbox */
-            if (outbox_fd >= 0 && nfds > 1 && (fds[1].revents & POLLIN)) {
-                char drain[64];
-                while (read(outbox_fd, drain, sizeof(drain)) > 0) {}
-                ChannelOutboxRow *row;
-                while ((row = channel_next_outbox(g_ctx)) != NULL) {
-                    call_on_outbox(ctx, row);
-                    channel_outbox_row_free(row);
+            } else if (msg->easy_handle == g_send_easy) {
+                SendReq *r = g_send_active;
+                int ok = (!cerr && status >= 200 && status < 300);
+                if (r->outbox_id > 0) {
+                    if (!ok) {
+                        char err[256];
+                        snprintf(err, sizeof(err), "%s",
+                                 cerr ? cerr : (g_send_resp.data ? g_send_resp.data : "http error"));
+                        channel_fail_outbox(g_ctx, r->outbox_id, err);
+                        send_queue_drop_outbox(r->outbox_id);
+                    } else if (r->is_final) {
+                        channel_ack_outbox(g_ctx, r->outbox_id);
+                    }
                 }
-            }
-        }
-
-        mg_stop(mg_ctx);
-        listen_queue_destroy(&lq);
-        mg_exit_library();
-
-    } else if (poll_type == POLL_WEBSOCKET) {
-        /* WebSocket — use curl for initial HTTP upgrade, then raw fd */
-        fprintf(stderr, "[channel_runner] websocket mode: not yet implemented\n");
-        /* Placeholder: poll outbox only */
-        while (g_running) {
-            struct pollfd fds[1];
-            if (outbox_fd < 0) { sleep(1); continue; }
-            fds[0].fd = outbox_fd; fds[0].events = POLLIN;
-            int r = poll(fds, 1, 1000);
-            if (r > 0 && (fds[0].revents & POLLIN)) {
-                char drain[64];
-                while (read(outbox_fd, drain, sizeof(drain)) > 0) {}
-                ChannelOutboxRow *row;
-                while ((row = channel_next_outbox(g_ctx)) != NULL) {
-                    call_on_outbox(ctx, row);
-                    channel_outbox_row_free(row);
-                }
+                if (r->tag)
+                    call_on_result(ctx, r->tag, (int)status,
+                                   g_send_resp.data ? g_send_resp.data : "", cerr);
+                curl_multi_remove_handle(g_multi, g_send_easy);
+                curl_easy_cleanup(g_send_easy);
+                curl_slist_free_all(g_send_hdrs);
+                g_send_easy = NULL;
+                g_send_hdrs = NULL;
+                send_req_free(r);
+                g_send_active = NULL;
             }
         }
     }
 
-cleanup:
-    free(poll_url);
+    /* ── Cleanup ───────────────────────────────────────────────── */
+    if (g_poll.easy) { curl_multi_remove_handle(g_multi, g_poll.easy); curl_easy_cleanup(g_poll.easy); }
+    curl_slist_free_all(g_poll.hdrs);
+    free(g_poll.method); free(g_poll.url); free(g_poll.body);
+    free(g_poll.resp.data);
+    if (g_send_easy) { curl_multi_remove_handle(g_multi, g_send_easy); curl_easy_cleanup(g_send_easy); }
+    curl_slist_free_all(g_send_hdrs);
+    send_req_free(g_send_active);
+    free(g_send_resp.data);
+    SendReq *r;
+    while ((r = send_queue_pop()) != NULL) send_req_free(r);
+    curl_multi_cleanup(g_multi);
+    curl_global_cleanup();
+
+    if (uds_fd >= 0) {
+        close(uds_fd);
+        char *sp = channel_uds_path(db_path, channel_name);
+        if (sp) { unlink(sp); free(sp); }
+    }
     if (outbox_fd >= 0)
         channel_outbox_fifo_close(outbox_fd, db_path, channel_name);
     JS_FreeContext(ctx);

@@ -57,6 +57,8 @@ typedef struct {
     int64_t turn_id;
     int64_t entry_id;       /* tool_call entry id */
     int result_pipe;        /* read end of pipe for tool output */
+    char *outbuf;           /* Accumulator for tool output (grows with realloc) */
+    size_t outbuf_len;      /* Bytes currently in outbuf */
     /* Channel fields */
     char channel_name[64];
     char binary_path[512];
@@ -75,6 +77,14 @@ static ChildProc *child_find(pid_t pid) {
 static void child_remove(ChildProc *c) {
     int idx = (int)(c - g_children);
     if (idx < 0 || idx >= g_child_count) return;
+    /* Clean up pipe and buffer before removal */
+    if (c->result_pipe >= 0) {
+        close(c->result_pipe);
+        c->result_pipe = -1;
+    }
+    free(c->outbuf);
+    c->outbuf = NULL;
+    c->outbuf_len = 0;
     g_children[idx] = g_children[g_child_count - 1];
     g_child_count--;
 }
@@ -207,9 +217,6 @@ static int fork_llm_req(int64_t session_id, const char *agent_name, int iteratio
         return -1;
     }
 
-    /* Set recall env for first iteration */
-    setenv("CCLAW_RECALL", iteration == 0 ? "1" : "0", 1);
-
     session_set_state(g_db, session_id, "llm_running");
 
     pid_t pid = fork();
@@ -218,7 +225,9 @@ static int fork_llm_req(int64_t session_id, const char *agent_name, int iteratio
         return -1;
     }
     if (pid == 0) {
-        /* Child: LLM proc */
+        /* Child: LLM proc. Recall env set here so it never leaks into the
+         * supervisor's environment (and thus into unrelated children). */
+        setenv("CCLAW_RECALL", iteration == 0 ? "1" : "0", 1);
         if (g_mode == 1) {
             /* Daemon: redirect stdout to /dev/null */
             int devnull = open("/dev/null", O_WRONLY);
@@ -376,6 +385,8 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
 
     /* Parent: track */
     close(pipefd[1]);
+    /* Set read end nonblocking so we can drain as data arrives */
+    set_nonblock(pipefd[0]);
     ChildProc *c = &g_children[g_child_count++];
     memset(c, 0, sizeof(*c));
     c->pid = pid;
@@ -384,9 +395,66 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
     c->turn_id = tc->turn_id;
     c->entry_id = tc->entry_id;
     c->result_pipe = pipefd[0];
+    c->outbuf = NULL;
+    c->outbuf_len = 0;
     snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
     snprintf(c->tool_call_id, sizeof(c->tool_call_id), "%s", tc->call_id);
     return 0;
+}
+
+/* ── Pipe draining helpers ─────────────────────────────────────── */
+
+/* Drain a tool child's result pipe (nonblocking) into c->outbuf, kept
+ * NUL-terminated. Bytes beyond TOOL_MAX_OUTPUT are read and discarded so
+ * the child never blocks on a full pipe. Closes the fd on EOF or error;
+ * leaves it open on EAGAIN (more data may come). */
+static void child_drain_pipe(ChildProc *c) {
+    if (c->result_pipe < 0) return;
+
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(c->result_pipe, buf, sizeof(buf))) > 0) {
+        size_t to_copy = (size_t)n;
+        if (c->outbuf_len + to_copy > TOOL_MAX_OUTPUT)
+            to_copy = TOOL_MAX_OUTPUT - c->outbuf_len;
+        if (to_copy == 0) continue; /* at cap: keep draining, discard */
+        char *tmp = realloc(c->outbuf, c->outbuf_len + to_copy + 1);
+        if (!tmp) continue; /* OOM: drop chunk, keep child unblocked */
+        memcpy(tmp + c->outbuf_len, buf, to_copy);
+        c->outbuf = tmp;
+        c->outbuf_len += to_copy;
+        c->outbuf[c->outbuf_len] = '\0';
+    }
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        close(c->result_pipe);
+        c->result_pipe = -1;
+    }
+}
+
+/* Append every live tool result pipe to a pollfd set being rebuilt. */
+static int add_result_pipe_fds(struct pollfd *pfds, int nfds, int max) {
+    for (int i = 0; i < g_child_count && nfds < max; i++) {
+        if (g_children[i].type == CHILD_TOOL_EXEC && g_children[i].result_pipe >= 0) {
+            pfds[nfds].fd = g_children[i].result_pipe;
+            pfds[nfds].events = POLLIN;
+            nfds++;
+        }
+    }
+    return nfds;
+}
+
+/* Drain whichever result pipes poll() reported readable. */
+static void drain_ready_result_pipes(const struct pollfd *pfds, int base, int nfds) {
+    for (int i = base; i < nfds; i++) {
+        if (!(pfds[i].revents & (POLLIN | POLLHUP))) continue;
+        for (int j = 0; j < g_child_count; j++) {
+            if (g_children[j].type == CHILD_TOOL_EXEC &&
+                g_children[j].result_pipe == pfds[i].fd) {
+                child_drain_pipe(&g_children[j]);
+                break;
+            }
+        }
+    }
 }
 
 /* ── reap_children (state machine) ──────────────────────────────── */
@@ -531,19 +599,22 @@ static void reap_children(void) {
             snprintf(aname, sizeof(aname), "%s", c->agent_name);
             int iter = c->iteration;
 
-            /* Read tool result from pipe */
-            char *output = malloc(TOOL_MAX_OUTPUT + 1);
-            size_t out_len = 0;
-            if (output && c->result_pipe >= 0) {
-                while (out_len < TOOL_MAX_OUTPUT) {
-                    ssize_t n = read(c->result_pipe, output + out_len,
-                                     TOOL_MAX_OUTPUT - out_len);
-                    if (n <= 0) break;
-                    out_len += (size_t)n;
-                }
-                output[out_len] = '\0';
+            /* Drain what's left, then force-close: the child has exited, so
+             * EAGAIN here means a leaked grandchild holds the write end —
+             * don't let it stall the turn. */
+            child_drain_pipe(c);
+            if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
+
+            /* Use accumulated buffer (or empty string if no output) */
+            char *output;
+            size_t out_len;
+            if (c->outbuf) {
+                output = c->outbuf;
+                out_len = c->outbuf_len;
+            } else {
+                output = strdup("");
+                out_len = 0;
             }
-            if (c->result_pipe >= 0) close(c->result_pipe);
             if (!output) output = strdup("error: OOM");
 
             /* Secret postprocess: deinterpolate + scan */
@@ -572,6 +643,9 @@ static void reap_children(void) {
             db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, rid);
             free(stored);
             free(output);
+            /* outbuf already freed as part of output above */
+            c->outbuf = NULL;
+            c->outbuf_len = 0;
 
             /* Find LLM iteration from parent child that spawned us.
              * We stored it... actually we didn't. Get from session's last LLM. */
@@ -613,11 +687,18 @@ static void ensure_parent_dir(const char *path) {
     char *dup = strdup(path);
     if (!dup) return;
     char *slash = strrchr(dup, '/');
-    if (slash) {
+    if (slash && slash != dup) {
         *slash = '\0';
-        char cmd[4096];
-        snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dup);
-        (void)system(cmd);
+        /* mkdir(2) each component — no shell, no injection */
+        for (char *p = dup + 1; ; p++) {
+            if (*p == '/' || *p == '\0') {
+                char saved = *p;
+                *p = '\0';
+                if (mkdir(dup, 0755) != 0 && errno != EEXIST) break;
+                *p = saved;
+                if (saved == '\0') break;
+            }
+        }
     }
     free(dup);
 }
@@ -855,21 +936,38 @@ int main(int argc, char *argv[]) {
     if (g_cfg->log_level >= LOG_LEVEL_DEBUG)
         db_enable_trace(g_db);
 
-    /* ── Daemon mode ─────────────────────────────────────────────── */
     /* ── Channel mode ─────────────────────────────────────────────── */
     if (channel_mode) {
         config_free(g_cfg); db_close(g_db);
-        execl("build/channel_runner", "channel_runner", db_path, channel_mode, (char *)NULL);
+        /* channel_runner lives next to the cclaw binary (dev: build/) or in
+         * ../lib/cclaw/ relative to it (prod: /usr/local/lib/cclaw/). Resolve
+         * from /proc/self/exe so the daemon's cwd doesn't matter. */
+        char self[PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+        if (n > 0) {
+            self[n] = '\0';
+            char *slash = strrchr(self, '/');
+            if (slash) {
+                *slash = '\0';
+                char runner[PATH_MAX];
+                snprintf(runner, sizeof(runner), "%s/channel_runner", self);
+                execl(runner, "channel_runner", db_path, channel_mode, (char *)NULL);
+                snprintf(runner, sizeof(runner), "%s/../lib/cclaw/channel_runner", self);
+                execl(runner, "channel_runner", db_path, channel_mode, (char *)NULL);
+            }
+        }
         perror("execl channel_runner");
         free(db_path);
         return 1;
     }
 
+    /* ── Daemon mode ─────────────────────────────────────────────── */
+
     if (daemon_mode) {
         g_mode = 1;
         workspace_init(g_cfg);
         printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
-        web_start(g_cfg, g_db);
+        web_start(g_cfg, g_db, db_path);
         heartbeat_start(g_cfg, g_db);
         cron_start(g_cfg, g_db);
 
@@ -891,20 +989,29 @@ int main(int argc, char *argv[]) {
           sigaction(SIGCHLD, &sa, NULL); }
 
         /* Launch channel processes */
-        channel_launch_all(g_db, db_path);
+        channel_launch_all(g_db);
 
-        /* poll() setup */
-        struct pollfd pfds[4];
-        int nfds_total = 0;
-        pfds[nfds_total].fd = g_chld_pipe[0]; pfds[nfds_total].events = POLLIN; nfds_total++;
-        pfds[nfds_total].fd = wake_fd(); pfds[nfds_total].events = POLLIN; nfds_total++;
-        int fifo_idx = -1;
-        if (fifo_fd >= 0) { fifo_idx = nfds_total; pfds[nfds_total].fd = fifo_fd; pfds[nfds_total].events = POLLIN; nfds_total++; }
+        /* poll() setup — sized for fixed fds + all children with result pipes */
+        int max_pfds = 4 + CHILD_MAX;  /* chld, wake, fifo, result pipes */
+        struct pollfd *pfds = malloc(max_pfds * sizeof(struct pollfd));
+        if (!pfds) { perror("malloc"); return 1; }
 
         /* Daemon event loop */
         while (!shutdown_requested()) {
-            int rc = poll(pfds, (nfds_t)nfds_total, 1000);
+            /* Rebuild pollfd set each iteration to include active result pipes */
+            int nfds = 0;
+            pfds[nfds].fd = g_chld_pipe[0]; pfds[nfds].events = POLLIN; nfds++;
+            pfds[nfds].fd = wake_fd(); pfds[nfds].events = POLLIN; nfds++;
+            int fifo_idx = -1;
+            if (fifo_fd >= 0) { fifo_idx = nfds; pfds[nfds].fd = fifo_fd; pfds[nfds].events = POLLIN; nfds++; }
+
+            int result_pipe_base = nfds;
+            nfds = add_result_pipe_fds(pfds, nfds, max_pfds);
+
+            int rc = poll(pfds, (nfds_t)nfds, 1000);
             if (rc < 0) { if (errno == EINTR) continue; break; }
+
+            drain_ready_result_pipes(pfds, result_pipe_base, nfds);
 
             if (pfds[0].revents & POLLIN) {
                 char buf[64];
@@ -926,6 +1033,8 @@ int main(int argc, char *argv[]) {
             }
             if (rc == 0 && g_child_count > 0) reap_children();
         }
+
+        free(pfds);
 
         /* Shutdown */
         channel_shutdown_all();
@@ -1053,33 +1162,29 @@ int main(int argc, char *argv[]) {
       sigaction(SIGCHLD, &sa, NULL); }
 
     /* ── poll() setup ──────────────────────────────────────────────── */
-    struct pollfd cli_pfds[4];
-    int cli_nfds = 0;
+    /* Allocate for fixed fds + all children with result pipes */
+    int cli_max_pfds = 4 + CHILD_MAX;
+    struct pollfd *cli_pfds = malloc(cli_max_pfds * sizeof(struct pollfd));
+    if (!cli_pfds) { perror("malloc"); return 1; }
 
     /* Start LLM worker (unless --llm-fork) */
     int worker_fd = -1;
-    int worker_idx = -1;
+    int worker_idx = -1;  /* slot index, recomputed each loop iteration */
     if (!g_llm_fork) {
         if (llm_worker_start(db_path, g_llm_threads) == 0) {
             worker_fd = llm_worker_fd();
             set_nonblock(worker_fd);
-            worker_idx = cli_nfds;
-            cli_pfds[cli_nfds].fd = worker_fd; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
         } else {
             g_llm_fork = 1;
         }
     }
 
-    /* Register SIGCHLD pipe */
-    int chld_idx = cli_nfds;
-    cli_pfds[cli_nfds].fd = g_chld_pipe[0]; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
-
     /* Register stdin for interactive mode */
-    int stdin_idx = -1;
+    int use_stdin = 0;
+    int stdin_idx = -1;   /* slot index, recomputed each loop iteration */
     if (!prompt && isatty(STDIN_FILENO)) {
         set_nonblock(STDIN_FILENO);
-        stdin_idx = cli_nfds;
-        cli_pfds[cli_nfds].fd = STDIN_FILENO; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
+        use_stdin = 1;
         printf("cclaw cli (type 'exit' or Ctrl-D to quit)\n> ");
         fflush(stdout);
     }
@@ -1094,8 +1199,30 @@ int main(int argc, char *argv[]) {
     int rc = 0;
 
     while (!shutdown_requested()) {
+        /* Rebuild pollfd set each iteration to include active result pipes.
+         * Slot indexes are recomputed because slot order depends on which
+         * fixed fds are present. */
+        int cli_nfds = 0;
+        worker_idx = -1;
+        stdin_idx = -1;
+        if (worker_fd >= 0) {
+            worker_idx = cli_nfds;
+            cli_pfds[cli_nfds].fd = worker_fd; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
+        }
+        if (use_stdin) {
+            stdin_idx = cli_nfds;
+            cli_pfds[cli_nfds].fd = STDIN_FILENO; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
+        }
+        int chld_idx = cli_nfds;
+        cli_pfds[cli_nfds].fd = g_chld_pipe[0]; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
+
+        int result_pipe_base = cli_nfds;
+        cli_nfds = add_result_pipe_fds(cli_pfds, cli_nfds, cli_max_pfds);
+
         int nready = poll(cli_pfds, (nfds_t)cli_nfds, 500);
         if (nready < 0) { if (errno == EINTR) continue; break; }
+
+        drain_ready_result_pipes(cli_pfds, result_pipe_base, cli_nfds);
 
         if (cli_pfds[chld_idx].revents & POLLIN) {
             char buf[64];
@@ -1208,6 +1335,7 @@ done:
     agent_setup_destroy(&setup);
     llm_worker_stop();
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
+    free(cli_pfds);
     free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path);
     return rc;
 }

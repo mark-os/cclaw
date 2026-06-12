@@ -81,3 +81,23 @@ size_t json_unescape(char *dest, size_t cap, const char *src, size_t src_len) {
     }
     return w;
 }
+
+size_t json_escape(char *dest, size_t cap, const char *src, size_t src_len) {
+    size_t w = 0;
+    for (size_t i = 0; i < src_len && w + 6 < cap; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '"') { dest[w++] = '\\'; dest[w++] = '"'; }
+        else if (c == '\\') { dest[w++] = '\\'; dest[w++] = '\\'; }
+        else if (c == '\n') { dest[w++] = '\\'; dest[w++] = 'n'; }
+        else if (c == '\r') { dest[w++] = '\\'; dest[w++] = 'r'; }
+        else if (c == '\t') { dest[w++] = '\\'; dest[w++] = 't'; }
+        else if (c < 0x20) {
+            dest[w++] = '\\'; dest[w++] = 'u'; dest[w++] = '0'; dest[w++] = '0';
+            dest[w++] = "0123456789abcdef"[c >> 4];
+            dest[w++] = "0123456789abcdef"[c & 0xf];
+        }
+        else dest[w++] = (char)c;
+    }
+    dest[w] = '\0';
+    return w;
+}

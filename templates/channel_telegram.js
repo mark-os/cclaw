@@ -1,5 +1,6 @@
 // Telegram channel extension for channel_runner
-// Reactive handlers: onInit, onNetwork, onOutbox, getNextUrl
+// Reactive handlers: onInit, onPoll, onRequest, onOutbox.
+// All outbound HTTP goes through cclaw.send() — nothing here blocks.
 
 var TG_MAX_MSG_LEN = 4096;
 var config = {};
@@ -12,42 +13,70 @@ var locale = JSON.parse(cclaw.getConfig("locale") || "{}");
 function onInit() {
     config.token = cclaw.getConfig("bot_token");
     config.base = cclaw.getConfig("base_url") || "https://api.telegram.org";
+    config.webhook_secret = cclaw.getConfig("webhook_secret") || "";
 
     if (!config.token) {
         cclaw.log("ERROR: no bot_token in channel_state");
-        return null;
+        throw new Error("no bot_token");
     }
 
     // Restore offset
     var saved = cclaw.getConfig("tg_offset");
     if (saved) offset = parseInt(saved, 10) || 0;
 
-    cclaw.log("telegram channel ready (offset=" + offset + ")");
+    // webhook mode: platform POSTs to the daemon, proxied to onRequest.
+    // Default: long-poll getUpdates.
+    var mode = cclaw.getConfig("mode") || "poll";
+    cclaw.log("telegram channel ready (mode=" + mode + ", offset=" + offset + ")");
+    if (mode === "webhook") return {};
+    return {poll: pollShape()};
+}
+
+function pollShape() {
     return {
-        poll_type: "http_long_poll",
-        url: buildGetUpdatesUrl()
+        method: "GET",
+        url: config.base + "/bot" + config.token + "/getUpdates?" +
+             "timeout=30" + (offset > 0 ? "&offset=" + offset : "")
     };
 }
 
-function buildGetUpdatesUrl() {
-    var body = {timeout: 30};
-    if (offset > 0) body.offset = offset;
-    // For long-poll we POST JSON to getUpdates
-    return config.base + "/bot" + config.token + "/getUpdates?" +
-        "timeout=30" + (offset > 0 ? "&offset=" + offset : "");
+// ── Long-poll completion ─────────────────────────────────────────
+
+function onPoll(result) {
+    if (result.error) {
+        cclaw.log("poll error: " + result.error);
+        return {poll: pollShape()};
+    }
+    processUpdates(result.body);
+    return {poll: pollShape()};
 }
 
-function getNextUrl() {
-    return buildGetUpdatesUrl();
+// ── Webhook mode: proxied request from the daemon ────────────────
+
+function onRequest(req) {
+    // Verification is channel code, not daemon config: Telegram echoes the
+    // secret we registered with setWebhook in this header.
+    if (config.webhook_secret &&
+        (req.headers["X-Telegram-Bot-Api-Secret-Token"] || "") !== config.webhook_secret)
+        return {status: 401, body: "bad secret"};
+
+    var update;
+    try { update = JSON.parse(req.body); } catch (e) {
+        return {status: 400, body: "bad json"};
+    }
+    if (update.message) processMessage(update.message);
+    if (update.callback_query) processCallback(update.callback_query);
+    return {status: 200, body: "ok"};
 }
 
-function onNetwork(response) {
+// ── Update processing (shared by poll + webhook) ─────────────────
+
+function processUpdates(body) {
     var data;
-    try { data = JSON.parse(response); } catch(e) {
+    try { data = JSON.parse(body); } catch(e) {
         cclaw.log("parse error: " + e);
         return;
     }
-
     if (!data.ok || !data.result) return;
 
     for (var i = 0; i < data.result.length; i++) {
@@ -61,6 +90,8 @@ function onNetwork(response) {
     // Persist offset
     if (offset > 0) cclaw.setConfig("tg_offset", "" + offset);
 }
+
+// ── Outbox delivery ──────────────────────────────────────────────
 
 function onOutbox(item) {
     var payload;
@@ -76,8 +107,9 @@ function onOutbox(item) {
         return;
     }
 
-    sendChunked(chatId, text);
-    cclaw.ackOutbox(item.id);
+    // Queue all chunks; the C loop sends them in order and acks the
+    // outbox row when the final chunk gets a 2xx.
+    sendChunked(chatId, text, item.id);
 }
 
 // ── Message processing ──────────────────────────────────────────
@@ -220,29 +252,36 @@ function handleDialogReply(chatId, text) {
     }
 }
 
-// ── Telegram API helpers ─────────────────────────────────────────
+// ── Telegram API helpers (queue shapes; the C loop executes) ─────
 
-function tgCall(method, body) {
-    var url = config.base + "/bot" + config.token + "/" + method;
-    return cclaw.httpPost(url, body);
+function tgCall(method, body, extra) {
+    var req = {
+        method: "POST",
+        url: config.base + "/bot" + config.token + "/" + method,
+        body: body
+    };
+    if (extra) {
+        if (extra.outbox_id) req.outbox_id = extra.outbox_id;
+        if (extra.final) req.final = 1;
+    }
+    cclaw.send(req);
 }
 
 function sendMessage(chatId, text) {
     tgCall("sendMessage", JSON.stringify({chat_id: parseInt(chatId, 10), text: text}));
 }
 
-function sendChunked(chatId, text) {
+function sendChunked(chatId, text, outboxId) {
     var total = text.length;
     var pos = 0;
     while (pos < total) {
         var remaining = total - pos;
         var chunkLen = remaining <= TG_MAX_MSG_LEN ? remaining : findSplit(text, pos, TG_MAX_MSG_LEN);
         var chunk = text.substring(pos, pos + chunkLen);
-        tgCall("sendMessage", JSON.stringify({chat_id: parseInt(chatId, 10), text: chunk}));
         pos += chunkLen;
-        if (pos < total) {
-            // Small delay between chunks handled by the blocking httpPost
-        }
+        tgCall("sendMessage",
+            JSON.stringify({chat_id: parseInt(chatId, 10), text: chunk}),
+            {outbox_id: outboxId, final: pos >= total});
     }
 }
 

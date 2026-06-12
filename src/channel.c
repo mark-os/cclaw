@@ -24,13 +24,13 @@ static void remove_channel(ChannelProc *c) {
     *c = g_channels[--g_count];
 }
 
-static pid_t do_fork(const char *db_path, const char *name) {
+static pid_t do_fork(const char *name) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        /* Re-exec self; the --channel branch resolves channel_runner
+         * relative to the binary, never the cwd. */
         execl("/proc/self/exe", "cclaw", "--channel", name, (char *)NULL);
-        /* Fallback: try channel_runner directly */
-        execl("build/channel_runner", "channel_runner", db_path, name, (char *)NULL);
         _exit(127);
     }
     return pid;
@@ -47,7 +47,7 @@ static void update_pid(sqlite3 *db, const char *name, pid_t pid) {
 }
 
 
-int channel_launch_all(sqlite3 *db, const char *db_path) {
+int channel_launch_all(sqlite3 *db) {
     const char *sql = "SELECT c.name, e.path FROM channels c"
                       " JOIN extensions e ON c.extension_name=e.name"
                       " WHERE c.status='active';";
@@ -63,13 +63,12 @@ int channel_launch_all(sqlite3 *db, const char *db_path) {
         char js_path[1024];
         snprintf(js_path, sizeof(js_path), "%s/channel.js", ext_path);
 
-        pid_t pid = do_fork(db_path, name);
+        pid_t pid = do_fork(name);
         if (pid > 0) {
             ChannelProc *c = &g_channels[g_count++];
             c->pid = pid;
             c->restart_count = 0;
             snprintf(c->name, sizeof(c->name), "%s", name);
-            snprintf(c->binary_path, sizeof(c->binary_path), "/proc/self/exe");
             update_pid(db, name, pid);
             launched++;
         }

@@ -458,6 +458,14 @@ def main():
             if kw_vtype == VTYPE_KEYWORD and entropy == 0.0:
                 entropy = 3.5  # default for contextual rules
 
+            # Cap entropy at what's achievable: log2(tail_max) is the theoretical
+            # max for a tail of that length. Use 90% of that as ceiling.
+            if kw_vtype == VTYPE_PREFIX and entropy > 0 and tail_max > 0:
+                import math
+                max_possible = math.log2(tail_max) if tail_max > 1 else 0
+                if entropy > max_possible:
+                    entropy = round(max_possible - 0.5, 1)  # conservative cap
+
             rules_meta.append({
                 'id': rule['id'],
                 'keyword': kw_canonical,

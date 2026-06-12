@@ -68,7 +68,7 @@ static const ScanRule scan_rules[66] = {
     {"heroku-api-key-v2", "hrku-aa", 0, 58, 58, 3, 1, 4.0f},
     {"huggingface-access-token", "hf_", 0, 34, 34, 2, 1, 2.0f},
     {"linear-api-key", "lin_api_", 0, 40, 40, 2, 1, 2.0f},
-    {"notion-api-token", "ntn_", 0, 11, 11, 3, 1, 4.0f},
+    {"notion-api-token", "ntn_", 0, 11, 11, 3, 1, 3.0f},
     {"npm-access-token", "npm_", 0, 36, 36, 2, 1, 2.0f},
     {"openai-api-key", "t3blbkfj", 0, 74, 74, 3, 1, 3.0f},
     {"perplexity-api-key", "pplx-", 0, 48, 48, 3, 1, 4.0f},

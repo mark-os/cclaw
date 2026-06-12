@@ -82,14 +82,24 @@ char *agent_load_system_prompt(const char *agents_dir, const char *name,
             }
             if (rep) {
                 size_t rlen = strlen(rep);
-                while (oi + rlen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                while (oi + rlen >= out_cap) {
+                    out_cap *= 2;
+                    char *tmp = realloc(out, out_cap);
+                    if (!tmp) { free(out); free(tmpl); return NULL; }
+                    out = tmp;
+                }
                 memcpy(out + oi, rep, rlen);
                 oi += rlen;
                 i += skip;
                 continue;
             }
         }
-        if (oi + 1 >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        if (oi + 1 >= out_cap) {
+            out_cap *= 2;
+            char *tmp = realloc(out, out_cap);
+            if (!tmp) { free(out); free(tmpl); return NULL; }
+            out = tmp;
+        }
         out[oi++] = tmpl[i++];
     }
     out[oi] = '\0';
@@ -132,10 +142,12 @@ char *agent_load_skills(const char *agents_dir, const char *name) {
 
         /* Grow buffer: existing + newline separator + file content */
         size_t need = out_len + (out_len > 0 ? 1 : 0) + (size_t)flen;
-        while (need >= out_cap) { out_cap *= 2; }
-        char *tmp = realloc(out, out_cap);
-        if (!tmp) { fclose(f); break; }
-        out = tmp;
+        if (need >= out_cap) {
+            while (need >= out_cap) { out_cap *= 2; }
+            char *tmp = realloc(out, out_cap);
+            if (!tmp) { fclose(f); break; }
+            out = tmp;
+        }
 
         if (out_len > 0) out[out_len++] = '\n';
         fread(out + out_len, 1, (size_t)flen, f);
@@ -184,14 +196,24 @@ static char *render_template(const char *tmpl, int64_t session_id,
             }
             if (rep) {
                 size_t rlen = strlen(rep);
-                while (oi + rlen >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+                while (oi + rlen >= out_cap) {
+                    out_cap *= 2;
+                    char *tmp = realloc(out, out_cap);
+                    if (!tmp) { free(out); return NULL; }
+                    out = tmp;
+                }
                 memcpy(out + oi, rep, rlen);
                 oi += rlen;
                 i += skip;
                 continue;
             }
         }
-        if (oi + 1 >= out_cap) { out_cap *= 2; out = realloc(out, out_cap); }
+        if (oi + 1 >= out_cap) {
+            out_cap *= 2;
+            char *tmp = realloc(out, out_cap);
+            if (!tmp) { free(out); return NULL; }
+            out = tmp;
+        }
         out[oi++] = tmpl[i++];
     }
     out[oi] = '\0';

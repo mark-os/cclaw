@@ -197,7 +197,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         FILE *f = fopen(mock_path, "r");
         if (!f) goto err;
         fseek(f, 0, SEEK_END); long flen = ftell(f); fseek(f, 0, SEEK_SET);
-        char *mock_data = malloc((size_t)flen + 1);
+        char *mock_data = arena_alloc(a, (size_t)flen + 1);
         if (!mock_data) { fclose(f); goto err; }
         fread(mock_data, 1, (size_t)flen, f); mock_data[flen] = '\0';
         fclose(f);
@@ -208,7 +208,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             rc = llm_parse_response_gemini(db, a, mock_data, &llm_resp);
         else
             rc = llm_parse_response(db, a, mock_data, &llm_resp);
-        free(mock_data);
         if (rc != 0) goto err;
         goto ingest_response;
 
@@ -217,21 +216,22 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         const char **tc_ids = NULL, **tc_names = NULL, **tc_args = NULL;
         int tcc = (int)llm_resp.tool_call_count;
         if (tcc > 0) {
-            tc_ids = malloc((size_t)tcc * sizeof(char *));
-            tc_names = malloc((size_t)tcc * sizeof(char *));
-            tc_args = malloc((size_t)tcc * sizeof(char *));
+            tc_ids = arena_alloc(a, (size_t)tcc * sizeof(char *));
+            tc_names = arena_alloc(a, (size_t)tcc * sizeof(char *));
+            tc_args = arena_alloc(a, (size_t)tcc * sizeof(char *));
+            if (!tc_ids || !tc_names || !tc_args) goto err;
             for (int i = 0; i < tcc; i++) {
                 tc_ids[i] = llm_resp.tool_calls[i].id;
                 tc_names[i] = llm_resp.tool_calls[i].name;
                 tc_args[i] = llm_resp.tool_calls[i].arguments;
             }
         }
-        TypedIngestResult ir;
+        TypedIngestResult ir = {0};
         db_ingest_typed(db, session_id, turn_id, cfg->provider.model,
                         llm_resp.content, llm_resp.reasoning, llm_resp.finish_reason,
                         llm_resp.usage.prompt_tokens, llm_resp.usage.completion_tokens,
                         llm_resp.usage.cost_nano, tc_ids, tc_names, tc_args, tcc, &ir);
-        free(tc_ids); free(tc_names); free(tc_args); free(ir.tc_entry_ids);
+        free(ir.tc_entry_ids);
         free(recall_text); free(system_prompt); context_plan_free(&plan);
         arena_destroy(a); config_free(cfg); free(agent_name_alloc);
         return 0;
@@ -408,9 +408,10 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     const char **tc_ids = NULL, **tc_names = NULL, **tc_args = NULL;
     int tc_count = (int)llm_resp.tool_call_count;
     if (tc_count > 0) {
-        tc_ids = malloc((size_t)tc_count * sizeof(char *));
-        tc_names = malloc((size_t)tc_count * sizeof(char *));
-        tc_args = malloc((size_t)tc_count * sizeof(char *));
+        tc_ids = arena_alloc(a, (size_t)tc_count * sizeof(char *));
+        tc_names = arena_alloc(a, (size_t)tc_count * sizeof(char *));
+        tc_args = arena_alloc(a, (size_t)tc_count * sizeof(char *));
+        if (!tc_ids || !tc_names || !tc_args) goto err;
         for (int i = 0; i < tc_count; i++) {
             tc_ids[i] = llm_resp.tool_calls[i].id;
             tc_names[i] = llm_resp.tool_calls[i].name;
@@ -418,15 +419,18 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         }
     }
 
-    TypedIngestResult ir;
+    TypedIngestResult ir = {0};
     int rc = db_ingest_typed(db, session_id, turn_id,
                              used_model_id ? used_model_id : cfg->provider.model,
                              llm_resp.content, llm_resp.reasoning, llm_resp.finish_reason,
                              llm_resp.usage.prompt_tokens, llm_resp.usage.completion_tokens,
                              llm_resp.usage.cost_nano,
                              tc_ids, tc_names, tc_args, tc_count, &ir);
-    free(tc_ids); free(tc_names); free(tc_args);
-    if (rc != 0) { LOG_DEBUG_(cfg, "llm_req: db_ingest_typed failed"); goto err; }
+    if (rc != 0) {
+        free(ir.tc_entry_ids);
+        LOG_DEBUG_(cfg, "llm_req: db_ingest_typed failed");
+        goto err;
+    }
     free(ir.tc_entry_ids);
 
     arena_destroy(a);

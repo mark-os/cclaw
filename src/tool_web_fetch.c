@@ -38,10 +38,17 @@ static void mdbuf_append(MdBuf *buf, const char *str, size_t len) {
         size_t nc = buf->cap ? buf->cap * 2 : 4096;
         while (nc < buf->len + len + 1) nc *= 2;
         char *tmp = realloc(buf->data, nc);
-        if (!tmp) return;
+        if (!tmp) {
+            free(buf->data);
+            buf->data = NULL;
+            buf->len = 0;
+            buf->cap = 0;
+            return;
+        }
         buf->data = tmp;
         buf->cap = nc;
     }
+    if (!buf->data) return;
     memcpy(buf->data + buf->len, str, len);
     buf->len += len;
     buf->data[buf->len] = '\0';

@@ -473,6 +473,13 @@ ShellSecret *shell_secrets_collect(size_t *count) {
                 size_t namelen = (size_t)(eq - environ[i]) - 13;
                 secrets[idx].name = strndup(environ[i] + 13, namelen);
                 secrets[idx].value = strdup(eq + 1);
+
+                if (!secrets[idx].name || !secrets[idx].value) {
+                    shell_secrets_free(secrets, idx + 1);
+                    *count = 0;
+                    return NULL;
+                }
+
                 idx++;
                 /* Unset from env (modifies environ, don't increment i) */
                 char key[256];

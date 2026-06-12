@@ -149,7 +149,8 @@ int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings
     for (size_t i = 0; i < len && count < max_findings; i++) {
         unsigned char b = (unsigned char)text[i];
         if (b >= 128) { state = 0; continue; } /* non-ASCII resets */
-        state = scan_ac_goto[state][b];
+        if (b >= 'A' && b <= 'Z') b |= 0x20;  /* case-fold at scan time */
+        state = scan_ac_goto[state][scan_ac_col[b]];
 
         /* Check accepts at this state */
         int n_accept = scan_ac_accept[state][0];

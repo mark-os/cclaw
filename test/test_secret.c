@@ -203,6 +203,75 @@ static void test_startup_integration(void) {
     printf("  PASS: startup integration (load_or_create + set_key + persist)\n");
 }
 
+/* T176: Delete key file → decrypt fails gracefully (returns NULL, no crash) */
+static void test_deleted_key_file(void) {
+    char tmpdir[] = "/tmp/cclaw_t176_XXXXXX";
+    assert(mkdtemp(tmpdir) != NULL);
+    char db_path[256];
+    snprintf(db_path, sizeof(db_path), "%s/test.db", tmpdir);
+    char key_path[256];
+    snprintf(key_path, sizeof(key_path), "%s/.cclaw_key", tmpdir);
+
+    sqlite3 *db = test_db_open(db_path);
+    assert(db != NULL);
+
+    uint8_t key[32];
+    assert(secret_key_load_or_create(db_path, key) == 0);
+    db_set_secret_key(key);
+    assert(db_kv_set_secret(db, "test.key", "secret-value") == 0);
+    db_close(db);
+
+    /* Delete the key file */
+    unlink(key_path);
+
+    /* Reopen DB — load key should create a NEW key */
+    db = test_db_open(db_path);
+    assert(db != NULL);
+
+    uint8_t new_key[32];
+    assert(secret_key_load_or_create(db_path, new_key) == 0);
+    db_set_secret_key(new_key);
+
+    /* Keys differ */
+    assert(memcmp(key, new_key, 32) != 0);
+
+    /* Decrypt with wrong key fails gracefully */
+    char *dec = db_kv_get_secret(db, "test.key");
+    assert(dec == NULL);
+
+    db_close(db);
+    unlink(key_path);
+    unlink(db_path);
+    /* Remove WAL/SHM if present */
+    char wal_path[280], shm_path[280];
+    snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
+    snprintf(shm_path, sizeof(shm_path), "%s-shm", db_path);
+    unlink(wal_path);
+    unlink(shm_path);
+    rmdir(tmpdir);
+    printf("  PASS: deleted key file (graceful fail)\n");
+}
+
+/* Overwrite secret → new value decrypts correctly */
+static void test_overwrite_secret(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db != NULL);
+
+    uint8_t key[32] = {1,2,3};
+    db_set_secret_key(key);
+
+    assert(db_kv_set_secret(db, "overwrite.key", "original") == 0);
+    assert(db_kv_set_secret(db, "overwrite.key", "updated") == 0);
+
+    char *dec = db_kv_get_secret(db, "overwrite.key");
+    assert(dec != NULL);
+    assert(strcmp(dec, "updated") == 0);
+    free(dec);
+
+    db_close(db);
+    printf("  PASS: overwrite secret\n");
+}
+
 int main(void) {
     printf("test_secret:\n");
     test_encrypt_decrypt_roundtrip();
@@ -214,6 +283,8 @@ int main(void) {
     test_db_kv_secret_roundtrip();
     test_key_file_create_and_load();
     test_startup_integration();
+    test_deleted_key_file();
+    test_overwrite_secret();
     printf("All secret tests passed.\n");
     return 0;
 }

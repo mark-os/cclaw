@@ -178,6 +178,28 @@ static void test_memory_char_limit(void) {
     printf("  PASS test_memory_char_limit\n");
 }
 
+static void test_missing_fields(void) {
+    sqlite3 *db = setup_db();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolMemoryCtx ctx = {.db = db, .agent_name = "bot"};
+    tool_memory_register(&reg, &ctx);
+
+    ToolEntry *e = tools_lookup(&reg, "memory_create");
+    char *r = e->handler("{}", e->user_data);
+    assert(strstr(r, "error"));
+    free(r);
+
+    e = tools_lookup(&reg, "memory_append");
+    r = e->handler("{\"label\":\"x\"}", e->user_data);
+    assert(strstr(r, "error"));
+    free(r);
+
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_missing_fields\n");
+}
+
 int main(void) {
     printf("test_tool_memory_blocks:\n");
     test_memory_create();
@@ -185,6 +207,7 @@ int main(void) {
     test_memory_replace();
     test_memory_read_only();
     test_memory_char_limit();
+    test_missing_fields();
     printf("ALL PASSED\n");
     return 0;
 }

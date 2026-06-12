@@ -358,3 +358,31 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
     snprintf(out + olen, cap - (size_t)olen, "---End of context---");
     return out;
 }
+
+/* V58,T161: Compaction trigger — recovered from f4b50e0's dead-code purge,
+ * now driven post-turn by the worker-job path instead of synchronously. */
+int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg) {
+    if (!db || !cfg || !cfg->compaction) return 0;
+    float threshold = cfg->context_threshold > 0 ? cfg->context_threshold : 0.6f;
+    int token_limit = (int)(threshold * (float)cfg->provider.context_window);
+    if (token_limit <= 0) token_limit = 8000;
+
+    const char *sql =
+        "WITH RECURSIVE branch(id, parent_id, token_estimate) AS ("
+        "  SELECT id, parent_id, token_estimate FROM entries"
+        "    WHERE id=(SELECT leaf_id FROM sessions WHERE id=?) AND session_id=?"
+        "  UNION ALL"
+        "  SELECT e.id, e.parent_id, e.token_estimate"
+        "    FROM entries e JOIN branch b ON e.id=b.parent_id"
+        ") SELECT COALESCE(SUM(token_estimate),0) FROM branch;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    int total_tokens = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        total_tokens = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+
+    return total_tokens > token_limit;
+}

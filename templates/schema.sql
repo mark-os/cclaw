@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
   session_id INTEGER NOT NULL,
   agent_name TEXT NOT NULL DEFAULT 'default',
   recall INTEGER NOT NULL DEFAULT 0,
+  job_type INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending',
   claimed_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())

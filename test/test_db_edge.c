@@ -105,9 +105,9 @@ static void test_session_count_children(void) {
     assert(session_count_children(db, parent) == 0);
 
     /* Set children to running — now counted */
-    session_set_state(db, c1, "running");
+    session_set_state(db, c1, "llm_running");
     assert(session_count_children(db, parent) == 1);
-    session_set_state(db, c2, "running");
+    session_set_state(db, c2, "llm_running");
     assert(session_count_children(db, parent) == 2);
 
     db_close(db);
@@ -127,10 +127,10 @@ static void test_session_count_active_agents(void) {
     assert(session_count_active_agents(db) == 0);
 
     /* Set some to running */
-    session_set_state(db, s1, "running");
+    session_set_state(db, s1, "llm_running");
     assert(session_count_active_agents(db) == 1);
 
-    session_set_state(db, s2, "running");
+    session_set_state(db, s2, "llm_running");
     assert(session_count_active_agents(db) == 2);
 
     /* Back to idle */
@@ -224,8 +224,9 @@ static void test_session_state_waiting_to_idle(void) {
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
-    assert(session_set_state(db, sid, "running") == 0);
-    assert(session_set_state(db, sid, "waiting") == 0);
+    assert(session_set_state(db, sid, "llm_running") == 0);
+    assert(session_set_state(db, sid, "idle") == 0);
+    assert(session_set_state(db, sid, "tool_running") == 0);
     assert(session_set_state(db, sid, "idle") == 0);
 
     db_close(db);

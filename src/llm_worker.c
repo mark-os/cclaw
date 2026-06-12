@@ -114,10 +114,28 @@ static void *worker_fn(void *arg) {
 
     WorkItem item;
     while (pool_pop(&item) == 0) {
-        syslog(LOG_DEBUG, "worker: session=%lld model start",
-               (long long)item.session_id);
+        /* Determine job type from DB */
+        int job_type = 0;
+        sqlite3_stmt *qstmt;
+        if (sqlite3_prepare_v2(db, "SELECT job_type FROM llm_jobs WHERE id=?",
+                               -1, &qstmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(qstmt, 1, item.job_id);
+            if (sqlite3_step(qstmt) == SQLITE_ROW)
+                job_type = sqlite3_column_int(qstmt, 0);
+            sqlite3_finalize(qstmt);
+        }
 
-        llm_req(db, curl, item.session_id, item.recall);
+        if (job_type == 1) {
+            /* Compaction job */
+            syslog(LOG_DEBUG, "worker: session=%lld compaction start",
+                   (long long)item.session_id);
+            llm_compaction(db, curl, item.session_id, item.agent_name);
+        } else {
+            /* LLM turn job */
+            syslog(LOG_DEBUG, "worker: session=%lld model start",
+                   (long long)item.session_id);
+            llm_req(db, curl, item.session_id, item.recall);
+        }
 
         /* Clean up job record */
         sqlite3_stmt *del;
@@ -215,6 +233,31 @@ void llm_worker_stop(void) {
     if (g_notify_pipe[0] >= 0) { close(g_notify_pipe[0]); g_notify_pipe[0] = -1; }
     if (g_notify_pipe[1] >= 0) { close(g_notify_pipe[1]); g_notify_pipe[1] = -1; }
     g_started = 0;
+}
+
+int llm_worker_submit_compact(sqlite3 *db, int64_t session_id, const char *agent_name) {
+    if (!g_started) return -1;
+
+    /* Persist job (crash recovery) */
+    sqlite3_stmt *stmt;
+    const char *sql = "INSERT INTO llm_jobs(session_id, agent_name, job_type) VALUES(?,?,1)";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, agent_name ? agent_name : "default", -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    int64_t job_id = sqlite3_last_insert_rowid(db);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+
+    /* Push to thread pool */
+    WorkItem item = {
+        .job_id = job_id,
+        .session_id = session_id,
+        .recall = 0
+    };
+    snprintf(item.agent_name, sizeof(item.agent_name), "%s",
+             agent_name ? agent_name : "default");
+    return pool_push(&item);
 }
 
 int llm_worker_respawn(void) { return 0; /* no-op: threads self-manage */ }

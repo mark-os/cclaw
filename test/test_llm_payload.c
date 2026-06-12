@@ -303,6 +303,67 @@ static void test_payload_with_tools(void) {
     printf("  PASS test_payload_with_tools\n");
 }
 
+/* Compaction summaries must reach the model on BOTH endpoints: as a system
+ * message in OpenAI format, and as a user text part in Gemini format (which
+ * filters type='system' because the prompt rides in systemInstruction). */
+static void test_compaction_entry_in_payload(void) {
+    unlink(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+    assert(sid > 0);
+    Message m1 = {.role = ROLE_USER, .content = "first question"};
+    int64_t e1 = entry_append_with_turn(db, sid, &m1, 1);
+    Message m2 = {.role = ROLE_ASSISTANT, .content = "first answer"};
+    entry_append_with_turn(db, sid, &m2, 1);
+    Message m3 = {.role = ROLE_USER, .content = "next question"};
+    entry_append_with_turn(db, sid, &m3, 2);
+    Message m4 = {.role = ROLE_ASSISTANT, .content = "next answer"};
+    int64_t e4 = entry_append_with_turn(db, sid, &m4, 2);
+    assert(e1 > 0 && e4 > 0);
+    /* Summarize e2+e3 away; keep e1 and e4 */
+    int64_t cid = entry_compact(db, sid, e1, e4,
+                                "Earlier: user greeted, assistant replied.");
+    assert(cid > 0);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.provider.context_window = 128000;
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    assert(strstr(payload.body, "Earlier: user greeted") != NULL);
+    /* rendered as system, not user */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.messages'))"
+        " WHERE json_extract(value,'$.role')='system'"
+        "   AND json_extract(value,'$.content') LIKE '%Earlier: user greeted%'",
+        -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    /* Gemini: summary must survive the type!='system' filter as user text */
+    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    assert(strstr(payload.body, "Earlier: user greeted") != NULL);
+    assert(strstr(payload.body, "[Summary of earlier conversation]") != NULL);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    db_close(db);
+    printf("  PASS test_compaction_entry_in_payload\n");
+}
+
 int main(void) {
     printf("test_llm_payload:\n");
     test_openai_payload();
@@ -310,6 +371,7 @@ int main(void) {
     test_gemini_payload();
     test_recall_tail_user_message();
     test_payload_with_tools();
+    test_compaction_entry_in_payload();
     printf("All payload tests passed.\n");
     return 0;
 }

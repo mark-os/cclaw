@@ -376,6 +376,7 @@ Config *config_load(sqlite3 *db) {
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER_BASE_URL");
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER");
     env_override_str(&cfg->provider.model, "CCLAW_MODEL");
+    env_override_int(&cfg->provider.context_window, "CCLAW_CONTEXT_WINDOW");
     env_override_str(&cfg->db_path, "CCLAW_DB_PATH");
     env_override_str(&cfg->system_prompt, "CCLAW_SYSTEM_PROMPT");
     env_override_int(&cfg->web_port, "CCLAW_WEB_PORT");

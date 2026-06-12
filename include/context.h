@@ -42,6 +42,9 @@ void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz);
 
 /* T269: Auto-recall — FTS5 search across sessions for relevant context.
  * Returns heap-allocated text (caller frees) or NULL if nothing recalled. */
+/* Compaction trigger: branch token sum exceeds context_threshold x window. */
+int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg);
+
 char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
                           int max_tokens);
 

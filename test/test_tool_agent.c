@@ -63,7 +63,7 @@ static void test_per_parent_limit(void) {
         int64_t child_sid = session_create(db, "child", NULL, parent_sid, 1);
         assert(child_sid > 0);
         /* Mark as running */
-        session_set_state(db, child_sid, "running");
+        session_set_state(db, child_sid, "llm_running");
     }
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
@@ -82,7 +82,7 @@ static void test_system_wide_limit(void) {
     for (int i = 0; i < AGENT_MAX_TOTAL; i++) {
         int64_t psid = session_create(db, "p", NULL, -1, 0);
         int64_t csid = session_create(db, "c", NULL, psid, 1);
-        session_set_state(db, csid, "running");
+        session_set_state(db, csid, "llm_running");
     }
 
     int64_t my_sid = session_create(db, "me", NULL, -1, 0);
@@ -199,12 +199,12 @@ static void test_session_count_children(void) {
 
     /* Create child, mark running */
     int64_t c1 = session_create(db, "c1", NULL, parent_sid, 1);
-    session_set_state(db, c1, "running");
+    session_set_state(db, c1, "llm_running");
     assert(session_count_children(db, parent_sid) == 1);
 
     /* Create another, mark running */
     int64_t c2 = session_create(db, "c2", NULL, parent_sid, 1);
-    session_set_state(db, c2, "running");
+    session_set_state(db, c2, "llm_running");
     assert(session_count_children(db, parent_sid) == 2);
 
     /* Release one — should drop count */

@@ -471,7 +471,7 @@ static const char *type_from_role(const Message *msg) {
         case ROLE_USER:      return "user_message";
         case ROLE_ASSISTANT: return "assistant_message";
         case ROLE_TOOL:      return "tool_result";
-        case ROLE_COMPACTION: return "system";
+        case ROLE_COMPACTION: return "compaction";
     }
     return "user_message";
 }
@@ -489,7 +489,7 @@ int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
     const char *ins_sql =
         "INSERT INTO entries (parent_id, session_id, type, role, content, stop_reason,"
         " token_estimate, content_bytes, tool_call_count)"
-        " VALUES (?,?,'system',4,?,0,?,?,0);";
+        " VALUES (?,?,'compaction',4,?,0,?,?,0);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, ins_sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -658,7 +658,7 @@ char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *
 
 int session_count_children(sqlite3 *db, int64_t parent_session_id) {
     const char *sql =
-        "SELECT COUNT(*) FROM sessions WHERE parent_session_id=? AND state IN ('running','waiting');";
+        "SELECT COUNT(*) FROM sessions WHERE parent_session_id=? AND state IN ('llm_running','tool_running','compacting','waiting');";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -672,7 +672,7 @@ int session_count_children(sqlite3 *db, int64_t parent_session_id) {
 
 int session_count_active_agents(sqlite3 *db) {
     const char *sql =
-        "SELECT COUNT(*) FROM sessions WHERE parent_session_id > 0 AND state IN ('running','waiting');";
+        "SELECT COUNT(*) FROM sessions WHERE parent_session_id > 0 AND state IN ('llm_running','tool_running','compacting','waiting');";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -821,6 +821,7 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
     else if (strcmp(type, "reasoning") == 0) role = 2;
     else if (strcmp(type, "tool_call") == 0) role = 2;
     else if (strcmp(type, "tool_result") == 0) role = 3;
+    else if (strcmp(type, "compaction") == 0) role = 4;
 
     /* Get current leaf */
     sqlite3_stmt *stmt;
@@ -874,15 +875,18 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
     return entry_id;
 }
 
-/* State transition with concurrency guard. Only valid transitions succeed:
- * idle → running, running → idle|waiting|error, waiting → idle, error → idle */
+/* State transition guard. Busy states (llm_running/tool_running/compacting/
+ * rate_limited) are reachable from idle or each other (a turn moves
+ * llm_running → tool_running → llm_running, and ends llm_running → compacting);
+ * idle is reachable from any busy state plus legacy waiting/error rows. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     const char *sql =
         "UPDATE sessions SET state=?, updated_at=unixepoch()"
         " WHERE id=? AND ("
-        "  (? = 'running' AND state = 'idle') OR"
-        "  (? IN ('idle','waiting','error') AND state = 'running') OR"
-        "  (? = 'idle' AND state IN ('waiting','error'))"
+        "  (? IN ('llm_running','tool_running','compacting','rate_limited')"
+        "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited')) OR"
+        "  (? = 'idle' AND state IN"
+        "     ('llm_running','tool_running','compacting','rate_limited','waiting','error'))"
         ");";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -891,7 +895,6 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     sqlite3_bind_int64(stmt, 2, session_id);
     sqlite3_bind_text(stmt, 3, state, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, state, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 5, state, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;

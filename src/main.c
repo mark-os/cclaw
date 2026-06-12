@@ -43,7 +43,7 @@
 
 /* ── Child types and tracking ───────────────────────────────────── */
 
-typedef enum { CHILD_CHANNEL, CHILD_LLM_REQ, CHILD_TOOL_EXEC } ChildType;
+typedef enum { CHILD_CHANNEL, CHILD_LLM_REQ, CHILD_TOOL_EXEC, CHILD_COMPACT } ChildType;
 
 typedef struct {
     pid_t pid;
@@ -87,6 +87,13 @@ static int child_has_session(int64_t session_id) {
     return 0;
 }
 
+static int child_is_compacting(int64_t session_id) {
+    for (int i = 0; i < g_child_count; i++)
+        if (g_children[i].type == CHILD_COMPACT && g_children[i].session_id == session_id)
+            return 1;
+    return 0;
+}
+
 /* ── Globals ────────────────────────────────────────────────────── */
 
 /* Forward declarations */
@@ -125,6 +132,13 @@ static void handle_llm_complete(int64_t session_id, const char *agent_name, int 
 
 /* Dispatch LLM request via worker or fork depending on mode */
 static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iteration) {
+    if (child_has_session(session_id)) return -1;
+    /* Turn start: move queued inbox into entries. Daemon-side consumption was
+     * lost when daemon.c was deleted (a2fe3a3) — this is the one chokepoint
+     * for every wake source (channel, cron, heartbeat, spawn, post-compact).
+     * Mid-turn iterations skip it so a turn's context stays stable. */
+    if (iteration == 0)
+        inbox_consume_into_entries(g_db, session_id, 100);
     if (!g_llm_fork && llm_worker_alive()) {
         /* Worker mode: submit to worker, track session state */
         if (child_has_session(session_id)) return -1;
@@ -402,9 +416,28 @@ static void handle_llm_complete(int64_t session_id, const char *agent_name, int 
         }
         db_tool_call_free_pending(calls, tc_count);
     } else if (tc_state == 0) {
-        /* Final stop — deliver */
-        session_set_state(g_db, session_id, "idle");
+        /* Final stop — deliver first; compaction runs in the dead time after,
+         * never delaying the response */
         deliver_response(session_id);
+        if (g_cfg->compaction && !g_llm_fork && llm_worker_alive() &&
+            session_needs_compaction(g_db, session_id, g_cfg) &&
+            !child_is_compacting(session_id) && g_child_count < CHILD_MAX) {
+            session_set_state(g_db, session_id, "compacting");
+            ChildProc *c = &g_children[g_child_count++];
+            memset(c, 0, sizeof(*c));
+            c->pid = -1; /* sentinel: worker-managed */
+            c->type = CHILD_COMPACT;
+            c->session_id = session_id;
+            c->result_pipe = -1;
+            snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
+            if (llm_worker_submit_compact(g_db, session_id, agent_name) != 0) {
+                /* Submit failed — must not leave the session stuck compacting */
+                child_remove(c);
+                session_set_state(g_db, session_id, "idle");
+            }
+        } else {
+            session_set_state(g_db, session_id, "idle");
+        }
     } else {
         /* Error */
         session_set_state(g_db, session_id, "idle");
@@ -841,7 +874,7 @@ int main(int argc, char *argv[]) {
         cron_start(g_cfg, g_db);
 
         /* Startup recovery — reset stale sessions */
-        {   const char *rsql = "UPDATE sessions SET state='idle' WHERE state='running';";
+        {   const char *rsql = "UPDATE sessions SET state='idle' WHERE state IN ('running','llm_running','tool_running','compacting');";
             sqlite3_exec(g_db, rsql, NULL, NULL, NULL); }
 
         /* Init wake pipe + FIFO */
@@ -1081,6 +1114,30 @@ int main(int argc, char *argv[]) {
                     LOG_ERROR_(g_cfg, "LLM worker queue full");
                     continue;
                 }
+                
+                /* Check for CHILD_COMPACT completion */
+                ChildProc *cc = NULL;
+                for (int j = 0; j < g_child_count; j++) {
+                    if (g_children[j].session_id == completed_sid &&
+                        g_children[j].type == CHILD_COMPACT &&
+                        g_children[j].pid == -1) {
+                        cc = &g_children[j];
+                        break;
+                    }
+                }
+                
+                if (cc) {
+                    /* Compaction done (response was delivered before the job
+                     * started). Anything queued while compacting gets a fresh
+                     * wake so the normal dispatch path picks it up. */
+                    child_remove(cc);
+                    session_set_state(g_db, completed_sid, "idle");
+                    if (inbox_count(g_db, completed_sid) > 0)
+                        wake_session(completed_sid);
+                    continue;
+                }
+                
+                /* Otherwise, handle LLM turn completion */
                 ChildProc *wc = NULL;
                 for (int j = 0; j < g_child_count; j++) {
                     if (g_children[j].session_id == completed_sid &&

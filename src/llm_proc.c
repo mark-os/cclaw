@@ -443,6 +443,201 @@ err:
     return -1;
 }
 
+/* ── Compaction: LLM-driven session summarization ─────────────── */
+
+int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agent_name) {
+    (void)agent_name;  /* unused */
+    Config *cfg = config_load(db);
+    if (!cfg || !cfg->compaction) return -1;
+
+    /* Re-check the trigger: a crash-recovered or queued-up job may run after
+     * the branch was already compacted */
+    if (!session_needs_compaction(db, session_id, cfg)) {
+        config_free(cfg);
+        return 0;
+    }
+
+    /* Compute target — keep tail entries that fit in target × context_window */
+    float target_ratio = cfg->compaction_target > 0 ? cfg->compaction_target : 0.3f;
+    int target_tokens = (int)(target_ratio * (float)cfg->provider.context_window);
+    if (target_tokens <= 0) target_tokens = 4000;
+
+    /* Plan branch */
+    ContextPlan plan = {0};
+    if (context_plan(db, session_id, cfg, 0, &plan) != 0) {
+        config_free(cfg);
+        return -1;
+    }
+
+    /* Walk backwards from tail, accumulate tokens */
+    int keep_from = 0;
+    int cumulative = 0;
+    for (int i = plan.count - 1; i >= 0; i--) {
+        cumulative += plan.entries[i].token_estimate;
+        if (cumulative > target_tokens) {
+            keep_from = i + 1;
+            break;
+        }
+    }
+
+    /* Even the newest entry alone exceeds the target: keep just the leaf */
+    if (keep_from >= plan.count)
+        keep_from = plan.count - 1;
+    if (keep_from <= 1) {
+        /* Nothing to compact */
+        context_plan_free(&plan);
+        config_free(cfg);
+        return 0;
+    }
+
+    int64_t last_kept_id = plan.entries[0].id;
+    int64_t first_after_id = plan.entries[keep_from].id;
+
+    /* Load content of entries to compact for LLM summarization */
+    char *text = malloc(4096);
+    if (!text) {
+        context_plan_free(&plan);
+        config_free(cfg);
+        return -1;
+    }
+    size_t text_cap = 4096, text_len = 0;
+    text[0] = '\0';
+
+    for (int i = 1; i < keep_from && text_len < 100000; i++) {
+        const char *sql = "SELECT role, content FROM entries WHERE id=? AND session_id=?;";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) continue;
+        sqlite3_bind_int64(stmt, 1, plan.entries[i].id);
+        sqlite3_bind_int64(stmt, 2, session_id);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            int role = sqlite3_column_int(stmt, 0);
+            const char *content = (const char *)sqlite3_column_text(stmt, 1);
+            const char *rname = role == 2 ? "assistant" : role == 1 ? "user" : role == 3 ? "tool" : "system";
+            if (content) {
+                size_t clen = strlen(content);
+                size_t need = text_len + strlen(rname) + clen + 8;
+                if (need > text_cap) {
+                    while (need > text_cap) text_cap *= 2;
+                    char *tmp = realloc(text, text_cap);
+                    if (!tmp) { sqlite3_finalize(stmt); break; }
+                    text = tmp;
+                }
+                text_len += (size_t)snprintf(text + text_len, text_cap - text_len,
+                                             "[%s] %s\n", rname, content);
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    if (text_len == 0) {
+        /* No content to summarize */
+        free(text);
+        context_plan_free(&plan);
+        config_free(cfg);
+        return 0;
+    }
+
+    /* Build LLM request */
+    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
+    if (!a) {
+        free(text);
+        context_plan_free(&plan);
+        config_free(cfg);
+        return -1;
+    }
+
+    const char *sys_prompt =
+        "Summarize the following conversation excerpt into a structured summary. "
+        "Include: goal, progress, key decisions, and next steps. "
+        "Be concise (under 500 words). Output plain text only.";
+
+    int max_tok = (cfg->provider.max_tokens > 0 && cfg->provider.max_tokens < 1024)
+        ? cfg->provider.max_tokens : 1024;
+
+    char *body = NULL;
+    sqlite3_stmt *cstmt;
+    if (sqlite3_prepare_v2(db,
+        "SELECT json_object('model',?1,'max_tokens',?2,'messages',json_array("
+        "json_object('role','system','content',?3),"
+        "json_object('role','user','content',?4)));",
+        -1, &cstmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(cstmt, 1, cfg->provider.model ? cfg->provider.model : "gpt-4", -1, SQLITE_STATIC);
+        sqlite3_bind_int(cstmt, 2, max_tok);
+        sqlite3_bind_text(cstmt, 3, sys_prompt, -1, SQLITE_STATIC);
+        sqlite3_bind_text(cstmt, 4, text, (int)text_len, SQLITE_STATIC);
+        if (sqlite3_step(cstmt) == SQLITE_ROW)
+            body = strdup((const char *)sqlite3_column_text(cstmt, 0));
+        sqlite3_finalize(cstmt);
+    }
+
+    free(text);
+
+    if (!body) {
+        arena_destroy(a);
+        context_plan_free(&plan);
+        config_free(cfg);
+        return -1;
+    }
+
+    /* Make HTTP call */
+    char *url = llm_build_url(a, cfg);
+    char *auth = llm_build_auth_header(a, cfg);
+    if (!url || !auth) {
+        free(body);
+        arena_destroy(a);
+        context_plan_free(&plan);
+        config_free(cfg);
+        return -1;
+    }
+
+    const char *headers[] = { "Content-Type: application/json", auth, NULL };
+
+    HttpResponse resp = {0};
+    HttpRequestOpts opts = {
+        .url = url, .method = "POST", .headers = headers,
+        .body = body, .curl_handle = curl,
+        .sse_cb = NULL, .out_ctx = NULL,
+    };
+    int status = http_do(&opts, &resp);
+    free(body);
+
+    if (status < 200 || status >= 300) {
+        /* LLM call failed — skip compaction */
+        http_response_free(&resp);
+        arena_destroy(a);
+        context_plan_free(&plan);
+        config_free(cfg);
+        return -1;
+    }
+
+    /* Parse response */
+    LlmResponse llm_resp = {0};
+    int rc;
+    if (cfg->provider.endpoint_type == ENDPOINT_GEMINI)
+        rc = llm_parse_response_gemini(db, a, resp.data, &llm_resp);
+    else
+        rc = llm_parse_response(db, a, resp.data, &llm_resp);
+
+    http_response_free(&resp);
+
+    if (rc != 0 || !llm_resp.content) {
+        /* Parse failure — skip */
+        arena_destroy(a);
+        context_plan_free(&plan);
+        config_free(cfg);
+        return -1;
+    }
+
+    /* Call entry_compact to insert summary and reparent */
+    int64_t compact_id = entry_compact(db, session_id, last_kept_id, first_after_id, llm_resp.content);
+
+    arena_destroy(a);
+    context_plan_free(&plan);
+    config_free(cfg);
+
+    return (compact_id > 0) ? 0 : -1;
+}
+
 /* ── llm_proc_main: fork-mode entry point ──────────────────────── */
 
 int llm_proc_main(int64_t session_id) {

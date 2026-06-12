@@ -25,4 +25,9 @@ int llm_proc_main(int64_t session_id);
  * Returns: 1 = has pending tool_calls, 0 = final stop, -1 = error */
 int turn_complete(sqlite3 *db, int64_t session_id);
 
+/* Compact session branch: estimate tokens, decide cut point, call LLM for summary.
+ * Returns 0 on success (compaction entry inserted), -1 on error (no compaction).
+ * On LLM failure, returns -1 without compacting (safe fallback). */
+int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agent_name);
+
 #endif

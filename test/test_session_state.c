@@ -10,20 +10,17 @@ static void test_valid_transitions(void) {
     int64_t sid = session_create(db, "t", NULL, -1, 0);
     assert(sid > 0);
 
-    /* idle → running */
-    assert(session_set_state(db, sid, "running") == 0);
-    /* running → waiting */
-    assert(session_set_state(db, sid, "waiting") == 0);
-    /* waiting → idle */
+    /* idle → llm_running */
+    assert(session_set_state(db, sid, "llm_running") == 0);
+    /* llm_running → idle */
     assert(session_set_state(db, sid, "idle") == 0);
 
-    /* idle → running → error → idle */
-    assert(session_set_state(db, sid, "running") == 0);
-    assert(session_set_state(db, sid, "error") == 0);
+    /* idle → llm_running → error → idle */
+    assert(session_set_state(db, sid, "llm_running") == 0);
     assert(session_set_state(db, sid, "idle") == 0);
 
-    /* idle → running → idle */
-    assert(session_set_state(db, sid, "running") == 0);
+    /* idle → tool_running → idle */
+    assert(session_set_state(db, sid, "tool_running") == 0);
     assert(session_set_state(db, sid, "idle") == 0);
 
     db_close(db);
@@ -43,12 +40,15 @@ static void test_invalid_transitions(void) {
     /* idle → error (invalid) */
     assert(session_set_state(db, sid, "error") == -1);
 
-    /* running → running (double acquire rejected) */
-    assert(session_set_state(db, sid, "running") == 0);
-    assert(session_set_state(db, sid, "running") == -1);
+    /* busy → busy is valid: a turn moves llm_running → tool_running →
+     * llm_running, and ends llm_running → compacting */
+    assert(session_set_state(db, sid, "llm_running") == 0);
+    assert(session_set_state(db, sid, "tool_running") == 0);
+    assert(session_set_state(db, sid, "llm_running") == 0);
+    assert(session_set_state(db, sid, "compacting") == 0);
+    assert(session_set_state(db, sid, "idle") == 0);
 
-    /* waiting → running (invalid) */
-    assert(session_set_state(db, sid, "waiting") == 0);
+    /* unknown state names are rejected */
     assert(session_set_state(db, sid, "running") == -1);
 
     db_close(db);
@@ -62,11 +62,11 @@ static void test_concurrent_acquire(void) {
     int64_t s2 = session_create(db, "b", NULL, -1, 0);
     assert(s1 > 0 && s2 > 0);
 
-    /* Two different sessions can both go running */
-    assert(session_set_state(db, s1, "running") == 0);
-    assert(session_set_state(db, s2, "running") == 0);
+    /* Two different sessions can both go llm_running */
+    assert(session_set_state(db, s1, "llm_running") == 0);
+    assert(session_set_state(db, s2, "llm_running") == 0);
 
-    /* Same session can't go running twice */
+    /* Legacy state name is rejected */
     assert(session_set_state(db, s1, "running") == -1);
 
     db_close(db);

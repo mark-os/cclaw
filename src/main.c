@@ -834,20 +834,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
 /* ── CLI turn trigger ───────────────────────────────────────────── */
 
 static void cli_start_turn(const char *input) {
-    /* Secret scan user input (warn + redact before it enters context) */
-    size_t ilen = strlen(input);
-    char *scanned = malloc(ilen + 1);
-    if (scanned) {
-        memcpy(scanned, input, ilen + 1);
-        int nf = secret_scan_redact(scanned, &ilen, ilen + 1);
-        if (nf != 0)
-            LOG_INFO_(g_cfg, "secret_scan: redacted finding(s) in user input%s",
-                      nf < 0 ? " (truncated)" : "");
-        inbox_insert(g_db, g_cli_session, "cli", scanned);
-        free(scanned);
-    } else {
-        inbox_insert(g_db, g_cli_session, "cli", input);
-    }
+    inbox_insert_scanned(g_db, g_cli_session, "cli", input);
     g_cli_turn_active = 1;
     run_advance(g_cli_session);
 }

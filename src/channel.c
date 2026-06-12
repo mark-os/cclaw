@@ -228,17 +228,7 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
             if (sid > 0) {
-                /* Secret scan inbound channel message */
-                size_t plen = strlen(payload);
-                char *scanned = malloc(plen + 1);
-                if (scanned) {
-                    memcpy(scanned, payload, plen + 1);
-                    secret_scan_redact(scanned, &plen, plen + 1);
-                    inbox_insert(db, sid, ch_name, scanned);
-                    free(scanned);
-                } else {
-                    inbox_insert(db, sid, ch_name, payload);
-                }
+                inbox_insert_scanned(db, sid, ch_name, payload);
                 wake_session(sid);
             }
             free(agent);

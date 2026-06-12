@@ -152,6 +152,9 @@ typedef struct {
 /* Insert a message into the inbox. Returns row id (>0) or -1 on error. */
 int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const char *payload);
 
+/* Scan payload for secrets, redact findings, then insert. */
+int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source, const char *payload);
+
 /* Peek at unconsumed inbox items for a session (oldest first, max `limit`). */
 InboxItem *inbox_peek(sqlite3 *db, int64_t session_id, int limit, int *count);
 

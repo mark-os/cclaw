@@ -197,10 +197,10 @@ void cron_list_free(CronJob *jobs, int count) {
 /* Insert cron task into inbox and signal daemon to process */
 static void execute_job(const char *agent_name, int64_t session_id, const char *task) {
     if (agent_name && agent_name[0]) {
-        inbox_insert(cron_db, session_id, "cron", task);
+        inbox_insert_scanned(cron_db, session_id, "cron", task);
         wake_session(session_id);
     } else {
-        inbox_insert(cron_db, session_id, "cron", task);
+        inbox_insert_scanned(cron_db, session_id, "cron", task);
         wake_session(session_id);
     }
 }

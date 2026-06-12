@@ -4,10 +4,13 @@
 #include "tools.h"
 #include "db.h"
 
-/* Agent launch limits */
+/* Agent launch limits (defaults — overridable via DB config key "agent_max_depth") */
 #define AGENT_MAX_DEPTH 2
 #define AGENT_MAX_PER_PARENT 3
 #define AGENT_MAX_TOTAL 10
+
+/* Read agent_max_depth from DB kv, fallback to AGENT_MAX_DEPTH */
+int agent_max_depth(sqlite3 *db);
 
 /* Context passed as user_data to launch_agent/check_agent handlers */
 typedef struct {

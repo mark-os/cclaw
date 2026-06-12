@@ -228,6 +228,9 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             sqlite3_finalize(at);
         }
     }
+    /* Fallback: use default_allowed_tools from config table */
+    if (!allowed_tools)
+        allowed_tools = db_kv_get(db, "default_allowed_tools");
 
     if (gemini) {
         char *contents = query_text(db, SQL_GEMINI_CONTENTS, session_id);

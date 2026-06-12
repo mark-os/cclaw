@@ -150,10 +150,13 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         tool_configure_channel_register(&setup->reg, &setup->bootstrap_ctx);
         tool_create_agent_register(&setup->reg, &setup->bootstrap_ctx);
 
-        /* Agent launch */
+        /* Agent launch — only register if depth allows spawning */
         setup->launch_ctx.db = db;
         setup->launch_ctx.session_id = session_id;
-        tool_launch_agent_register(&setup->reg, &setup->launch_ctx);
+        int depth = session_get_depth(db, session_id);
+        if (depth < agent_max_depth(db)) {
+            tool_launch_agent_register(&setup->reg, &setup->launch_ctx);
+        }
         tool_check_agent_register(&setup->reg, &setup->launch_ctx);
     }
 

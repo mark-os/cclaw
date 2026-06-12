@@ -50,3 +50,9 @@ INSERT OR IGNORE INTO tools(name, description, parameters_json) VALUES
 INSERT OR IGNORE INTO tools(name, description, parameters_json) VALUES
   ('request_config', 'Request a configuration change from the user',
    '{"type":"object","properties":{"key":{"type":"string","description":"Config key to set"},"value":{"type":"string","description":"Config value"}},"required":["key","value"]}');
+INSERT OR IGNORE INTO tools(name, description, parameters_json) VALUES
+  ('launch_agent', 'Launch a sub-agent to perform a task',
+   '{"type":"object","properties":{"task":{"type":"string","description":"Task description for the sub-agent"},"name":{"type":"string","description":"Name of existing agent to launch (omit for default)"},"background":{"type":"boolean","description":"Run in background (default: false, blocks until done)"}},"required":["task"]}');
+INSERT OR IGNORE INTO tools(name, description, parameters_json) VALUES
+  ('check_agent', 'Check a background sub-agent status and result',
+   '{"type":"object","properties":{"session_id":{"type":"integer","description":"Session ID of the sub-agent to check"}},"required":["session_id"]}');

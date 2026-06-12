@@ -224,6 +224,14 @@ Benefits:
 
 Pattern mirrors existing shell networking proxy (shell→agent UDS) but one level up (agent→parent UDS).
 
+### LLM Broker (collapse dual mode)
+
+`g_llm_fork`, `llm_worker_alive()`, and the `pid = -1` sentinel create two
+parallel code paths (threaded workers vs fork-per-call). Replace with a
+persistent `llm_broker` child that owns curl/TLS handles — crash isolation
+restored, TLS reuse preserved, dual mode deleted. Natural consumer of
+`http_transport_uds` once the abstraction exists.
+
 ## Alternative Proxy Mechanisms for Static/Go/Rust Binaries
 
 Current proxy relies on `LD_PRELOAD=libcclaw_net.so` to intercept libc

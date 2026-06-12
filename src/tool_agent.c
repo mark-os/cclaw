@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_agent.h"
 #include "tool_parse.h"
+#include "db.h"
 #include "wake.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +14,13 @@ static const char *SPAWN_PARAMS_JSON =
     "\"background\":{\"type\":\"boolean\",\"description\":\"Run in background (default: false, blocks until done)\"}"
     "},\"required\":[\"task\"]}";
 
+int agent_max_depth(sqlite3 *db) {
+    char *v = db_kv_get(db, "agent_max_depth");
+    if (!v) return AGENT_MAX_DEPTH;
+    int d = atoi(v);
+    free(v);
+    return (d > 0) ? d : AGENT_MAX_DEPTH;
+}
 char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     AgentLaunchCtx *ctx = (AgentLaunchCtx *)user_data;
     if (!ctx || !ctx->db)
@@ -30,7 +38,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
 
     /* Depth + concurrency checks */
     int depth = session_get_depth(ctx->db, ctx->session_id);
-    if (depth >= AGENT_MAX_DEPTH) {
+    if (depth >= agent_max_depth(ctx->db)) {
         tool_parse_free(&ta); return strdup("error: max agent depth reached");
     }
     int children = session_count_children(ctx->db, ctx->session_id);

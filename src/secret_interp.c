@@ -67,25 +67,31 @@ char *secret_interpolate(const char *text, const ShellSecret *secrets, size_t co
     return out;
 }
 
+static const ShellSecret *s_deinterp_secrets; /* qsort context */
+
+static int cmp_secret_len_desc(const void *a, const void *b) {
+    size_t ia = *(const size_t *)a, ib = *(const size_t *)b;
+    size_t la = strlen(s_deinterp_secrets[ia].value);
+    size_t lb = strlen(s_deinterp_secrets[ib].value);
+    return (la < lb) - (la > lb); /* descending */
+}
+
 char *secret_deinterpolate(const char *text, const ShellSecret *secrets, size_t count) {
     if (!text) return NULL;
     if (!secrets || count == 0) return strdup(text);
 
     /* Sort indices by value length descending (longest first) */
-    size_t order[128];
-    size_t n = count < 128 ? count : 128;
-    for (size_t i = 0; i < n; i++) order[i] = i;
-    for (size_t i = 0; i < n - 1; i++)
-        for (size_t j = i + 1; j < n; j++)
-            if (strlen(secrets[order[j]].value) > strlen(secrets[order[i]].value)) {
-                size_t tmp = order[i]; order[i] = order[j]; order[j] = tmp;
-            }
+    size_t *order = malloc(count * sizeof(size_t));
+    if (!order) return strdup(text);
+    for (size_t i = 0; i < count; i++) order[i] = i;
+    s_deinterp_secrets = secrets;
+    qsort(order, count, sizeof(size_t), cmp_secret_len_desc);
 
     /* Iteratively replace each secret value with its placeholder */
     char *cur = strdup(text);
     if (!cur) return NULL;
 
-    for (size_t idx = 0; idx < n; idx++) {
+    for (size_t idx = 0; idx < count; idx++) {
         const ShellSecret *s = &secrets[order[idx]];
         if (!s->value || !s->value[0]) continue;
         size_t vlen = strlen(s->value);
@@ -117,6 +123,7 @@ char *secret_deinterpolate(const char *text, const ShellSecret *secrets, size_t 
         free(cur);
         cur = out;
     }
+    free(order);
     return cur;
 }
 

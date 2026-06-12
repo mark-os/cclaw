@@ -2,6 +2,7 @@
 #include "secret_scan_ac.h"
 #include "secret_scan_rules.h"
 #include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
 #include <ctype.h>
@@ -228,21 +229,18 @@ static int scan_replace(char *buf, size_t *len, size_t cap,
     return -1;
 }
 
+static int cmp_findings(const void *a, const void *b) {
+    const ScanFinding *fa = a, *fb = b;
+    if (fa->offset != fb->offset) return fa->offset - fb->offset;
+    return fb->match_len - fa->match_len; /* longer first at same offset */
+}
+
 int secret_scan_redact(char *text, size_t *len, size_t cap) {
     ScanFinding findings[SCAN_MAX_FINDINGS];
     int n = secret_scan(text, *len, findings, SCAN_MAX_FINDINGS);
     if (n == 0) return 0;
 
-    /* Sort by offset ascending, then by match_len descending (prefer longer) */
-    for (int i = 0; i < n - 1; i++)
-        for (int j = i + 1; j < n; j++)
-            if (findings[j].offset < findings[i].offset ||
-                (findings[j].offset == findings[i].offset &&
-                 findings[j].match_len > findings[i].match_len)) {
-                ScanFinding tmp = findings[i];
-                findings[i] = findings[j];
-                findings[j] = tmp;
-            }
+    qsort(findings, (size_t)n, sizeof(ScanFinding), cmp_findings);
 
     /* Remove overlapping findings (keep first/longest at each position) */
     int keep[SCAN_MAX_FINDINGS];

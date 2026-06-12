@@ -881,10 +881,12 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
  * idle is reachable from any busy state plus legacy waiting/error rows. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     const char *sql =
-        "UPDATE sessions SET state=?, updated_at=unixepoch()"
+        "UPDATE sessions SET state=?, updated_at=unixepoch(),"
+        " turn_iteration = CASE WHEN ?='idle' THEN 0 ELSE turn_iteration END"
         " WHERE id=? AND ("
         "  (? IN ('llm_running','tool_running','compacting','rate_limited')"
         "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited')) OR"
+        "  (? = 'waiting' AND state IN ('idle','llm_running','tool_running')) OR"
         "  (? = 'idle' AND state IN"
         "     ('llm_running','tool_running','compacting','rate_limited','waiting','error'))"
         ");";
@@ -892,12 +894,78 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(stmt, 1, state, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    sqlite3_bind_text(stmt, 3, state, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, state, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 3, session_id);
     sqlite3_bind_text(stmt, 4, state, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, state, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, state, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+}
+
+/* Turn iteration accessors */
+
+int session_get_iteration(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT turn_iteration FROM sessions WHERE id=?",
+                           -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    int val = (sqlite3_step(stmt) == SQLITE_ROW) ? sqlite3_column_int(stmt, 0) : -1;
+    sqlite3_finalize(stmt);
+    return val;
+}
+
+int session_set_iteration(sqlite3 *db, int64_t session_id, int iter) {
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "UPDATE sessions SET turn_iteration=? WHERE id=?",
+                           -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, iter);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int session_bump_iteration(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db,
+        "UPDATE sessions SET turn_iteration = turn_iteration + 1 WHERE id=?"
+        " RETURNING turn_iteration", -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    int val = (sqlite3_step(stmt) == SQLITE_ROW) ? sqlite3_column_int(stmt, 0) : -1;
+    sqlite3_finalize(stmt);
+    return val;
+}
+
+/* Parent info for sub-agent completion */
+
+SessionParentInfo session_get_parent_info(sqlite3 *db, int64_t session_id) {
+    SessionParentInfo info = { .parent_session_id = -1, .parent_tool_call_id = NULL };
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db,
+        "SELECT parent_session_id, parent_tool_call_id FROM sessions WHERE id=?",
+        -1, &stmt, NULL) != SQLITE_OK) return info;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        info.parent_session_id = sqlite3_column_int64(stmt, 0);
+        const char *tc = (const char *)sqlite3_column_text(stmt, 1);
+        if (tc) info.parent_tool_call_id = strdup(tc);
+    }
+    sqlite3_finalize(stmt);
+    return info;
+}
+
+int session_set_parent_tool_call_id(sqlite3 *db, int64_t session_id, const char *call_id) {
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db,
+        "UPDATE sessions SET parent_tool_call_id=? WHERE id=?",
+        -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, call_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
 /* V18: Inbox primitives */

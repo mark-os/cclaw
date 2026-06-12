@@ -125,6 +125,21 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state);
 int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id);
 
+/* Turn iteration tracking (advance_session uses this instead of in-memory counter) */
+int session_get_iteration(sqlite3 *db, int64_t session_id);
+int session_set_iteration(sqlite3 *db, int64_t session_id, int iter);
+int session_bump_iteration(sqlite3 *db, int64_t session_id);
+
+/* Parent info for sub-agent completion wake */
+typedef struct {
+    int64_t parent_session_id;
+    char *parent_tool_call_id;  /* NULL if background mode */
+} SessionParentInfo;
+SessionParentInfo session_get_parent_info(sqlite3 *db, int64_t session_id);
+
+/* Set parent_tool_call_id on a child session (blocking sub-agent) */
+int session_set_parent_tool_call_id(sqlite3 *db, int64_t session_id, const char *call_id);
+
 /* V18: Inbox primitives */
 typedef struct {
     int64_t id;

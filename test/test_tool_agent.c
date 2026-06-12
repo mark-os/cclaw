@@ -115,12 +115,22 @@ static void test_spawn_blocking(void) {
     int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
     assert(parent_sid > 0);
 
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
+    /* With tool_call_id set: blocking parks parent, returns NULL */
+    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid,
+                          .current_tool_call_id = "call_123"};
+    session_set_state(db, parent_sid, "llm_running");
+    session_set_state(db, parent_sid, "tool_running");
     char *r = tool_launch_agent_handler("{\"task\":\"blocking task\"}", &ctx);
-    assert(r != NULL);
-    /* Now always async — returns delegation notice */
-    assert(strstr(r, "agent delegated") != NULL);
-    free(r);
+    assert(r == NULL); /* NULL = blocked, real result comes on child completion */
+
+    /* Verify parent is in waiting state */
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?", -1, &stmt, NULL);
+    sqlite3_bind_int64(stmt, 1, parent_sid);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "waiting") == 0);
+    sqlite3_finalize(stmt);
+
     db_close(db);
     printf("  PASS test_spawn_blocking\n");
 }

@@ -68,6 +68,9 @@ int channel_launch_all(sqlite3 *db) {
             ChannelProc *c = &g_channels[g_count++];
             c->pid = pid;
             c->restart_count = 0;
+            c->first_crash = 0;
+            c->next_restart_at = 0;
+            c->started_at = time(NULL);
             snprintf(c->name, sizeof(c->name), "%s", name);
             update_pid(db, name, pid);
             launched++;
@@ -93,6 +96,63 @@ void channel_shutdown_all(void) {
         if (g_channels[i].pid > 0) kill(g_channels[i].pid, SIGKILL);
     g_count = 0;
 }
+int channel_reap(pid_t pid, sqlite3 *db) {
+    ChannelProc *c = find_by_pid(pid);
+    if (!c) return 0;
+
+    time_t now = time(NULL);
+    c->pid = -1;
+    c->restart_count++;
+
+    if (c->first_crash == 0) c->first_crash = now;
+
+    /* Flap detection: 3+ crashes in 5 minutes → broken */
+    if (c->restart_count >= CHANNEL_MAX_RESTARTS &&
+        (now - c->first_crash) < CHANNEL_FLAP_WINDOW) {
+        fprintf(stderr, "channel '%s': flapping (%d crashes in %lds), marking broken\n",
+                c->name, c->restart_count, (long)(now - c->first_crash));
+        const char *sql = "UPDATE channels SET status='broken' WHERE name=?;";
+        sqlite3_stmt *s;
+        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, c->name, -1, SQLITE_STATIC);
+            sqlite3_step(s); sqlite3_finalize(s);
+        }
+        remove_channel(c);
+        return 1;
+    }
+
+    /* Exponential backoff: min(60, 1 << restart_count) */
+    int delay = 1 << c->restart_count;
+    if (delay > CHANNEL_MAX_BACKOFF) delay = CHANNEL_MAX_BACKOFF;
+    c->next_restart_at = now + delay;
+    return 1;
+}
+
+void channel_tick(sqlite3 *db) {
+    time_t now = time(NULL);
+    for (int i = 0; i < g_count; i++) {
+        ChannelProc *c = &g_channels[i];
+
+        /* Restart channels whose backoff expired */
+        if (c->pid <= 0 && c->next_restart_at > 0 && now >= c->next_restart_at) {
+            c->next_restart_at = 0;
+            pid_t pid = do_fork(c->name);
+            if (pid > 0) {
+                c->pid = pid;
+                c->started_at = now;
+                update_pid(db, c->name, pid);
+            }
+        }
+
+        /* Reset restart_count if healthy for 5 minutes */
+        if (c->pid > 0 && c->restart_count > 0 &&
+            c->started_at > 0 && (now - c->started_at) > CHANNEL_FLAP_WINDOW) {
+            c->restart_count = 0;
+            c->first_crash = 0;
+        }
+    }
+}
+
 
 int channel_register(sqlite3 *db, const char *name, const char *extension_name) {
     const char *sql =

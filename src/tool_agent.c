@@ -9,7 +9,8 @@
 static const char *SPAWN_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"task\":{\"type\":\"string\",\"description\":\"Task description for the sub-agent\"},"
-    "\"name\":{\"type\":\"string\",\"description\":\"Name of existing agent to launch (omit for default)\"}"
+    "\"name\":{\"type\":\"string\",\"description\":\"Name of existing agent to launch (omit for default)\"},"
+    "\"background\":{\"type\":\"boolean\",\"description\":\"Run in background (default: false, blocks until done)\"}"
     "},\"required\":[\"task\"]}";
 
 char *tool_launch_agent_handler(const char *arguments, void *user_data) {
@@ -44,9 +45,8 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     /* Create child session */
     const char *agent = targ_str(&ta, "name");
     if (!agent || !agent[0]) agent = "default";
+    int background = targ_bool(&ta, "background", 0);
 
-    /* Trust policy is derived from the agents row at fork time — an unknown
-     * name must never reach session_create. */
     AgentRow *row = db_agent_get(ctx->db, agent);
     if (!row) {
         char err[128];
@@ -58,19 +58,37 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
 
     int64_t child_sid = session_create(ctx->db, "agent", agent,
                                        ctx->session_id, depth + 1);
-    tool_parse_free(&ta);
-    if (child_sid < 0)
+    if (child_sid < 0) {
+        tool_parse_free(&ta);
         return strdup("error: failed to create child session");
+    }
+
+    /* If blocking: store parent's tool_call_id on child so completion
+     * can write the tool result directly */
+    if (!background && ctx->current_tool_call_id) {
+        session_set_parent_tool_call_id(ctx->db, child_sid, ctx->current_tool_call_id);
+        /* Park parent in waiting state */
+        session_set_state(ctx->db, ctx->session_id, "waiting");
+    }
 
     /* Insert task into child's inbox and wake it */
     inbox_insert(ctx->db, child_sid, "spawn", task);
+    tool_parse_free(&ta);
     wake_session(child_sid);
 
-    char buf[128];
-    snprintf(buf, sizeof(buf),
-             "agent delegated (session_id=%lld). Use check_agent to poll result.",
-             (long long)child_sid);
-    return strdup(buf);
+    if (background) {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "agent delegated in background (session_id=%lld). "
+                 "Result will arrive in your inbox when done.",
+                 (long long)child_sid);
+        return strdup(buf);
+    }
+
+    /* Blocking: return empty string — real result arrives when child finishes.
+     * The tool_call stays pending; advance_session on the child's completion
+     * will write the actual result. */
+    return NULL;
 }
 
 int tool_launch_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {

@@ -13,6 +13,7 @@
 typedef struct {
     sqlite3 *db;
     int64_t session_id;
+    const char *current_tool_call_id;  /* set before handler call for blocking mode */
 } AgentLaunchCtx;
 
 /* Register launch_agent tool. Returns 0 on success. */

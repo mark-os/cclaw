@@ -26,6 +26,7 @@
 #include "db_response.h"
 #include "shutdown.h"
 #include "wake.h"
+#include "advance.h"
 #include "channel.h"
 #include "channel_api.h"
 #include "secret.h"
@@ -63,6 +64,8 @@ typedef struct {
     char channel_name[64];
     char binary_path[512];
     int restart_count;
+    /* Deadline: 0 = no timeout, >0 = SIGKILL after this time */
+    time_t deadline;
 } ChildProc;
 
 static ChildProc g_children[CHILD_MAX];
@@ -245,6 +248,7 @@ static int fork_llm_req(int64_t session_id, const char *agent_name, int iteratio
     c->session_id = session_id;
     c->iteration = iteration;
     c->result_pipe = -1;
+    c->deadline = time(NULL) + 300;
     snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
     return 0;
 }
@@ -307,8 +311,14 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
         char *interp_args = NULL;
         if (tool_needs_interpolation(tc->name) && g_tool_setup && g_tool_setup->secret_count > 0)
             interp_args = secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count);
+        /* Thread tool_call_id for launch_agent blocking mode */
+        if (strcmp(tc->name, "launch_agent") == 0 && te->user_data)
+            ((AgentLaunchCtx *)te->user_data)->current_tool_call_id = tc->call_id;
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         free(interp_args);
+        /* NULL return means blocking (launch_agent parks parent in waiting) */
+        if (!result && strcmp(tc->name, "launch_agent") == 0)
+            return 2; /* Signal: parked, don't advance */
         if (!result) result = strdup("error: tool returned null");
 
         /* Postprocess: deinterpolate + secret scan (scan runs even with no
@@ -397,6 +407,7 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
     c->result_pipe = pipefd[0];
     c->outbuf = NULL;
     c->outbuf_len = 0;
+    c->deadline = time(NULL) + 120;
     snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
     snprintf(c->tool_call_id, sizeof(c->tool_call_id), "%s", tc->call_id);
     return 0;
@@ -459,61 +470,104 @@ static void drain_ready_result_pipes(const struct pollfd *pfds, int base, int nf
 
 /* ── reap_children (state machine) ──────────────────────────────── */
 
-/* handle_llm_complete: query DB for next action after LLM request finishes */
-static void handle_llm_complete(int64_t session_id, const char *agent_name, int iteration) {
-    int tc_state = turn_complete(g_db, session_id);
-    LOG_DEBUG_(g_cfg, "handle_llm_complete: session=%lld iter=%d tc_state=%d",
-               (long long)session_id, iteration, tc_state);
-    if (tc_state == 1) {
-        /* Has pending tool_calls — dispatch */
-        int tc_count = 0;
-        PendingToolCall *calls = db_tool_call_get_pending(g_db, session_id, &tc_count);
-        if (tc_count > 0) {
-            int i = 0;
-            while (i < tc_count) {
-                int rc = fork_tool_exec(session_id, agent_name, &calls[i]);
-                if (rc == 1) { i++; continue; }
-                break;
-            }
-            if (i >= tc_count) {
-                if (dispatch_llm_req(session_id, agent_name, iteration + 1) < 0 && g_mode == 0)
-                    g_cli_turn_active = 0;
-            }
-        } else {
-            session_set_state(g_db, session_id, "idle");
+/* ── child_sweep_deadlines: kill timed-out children ──────────── */
+
+static void child_sweep_deadlines(void) {
+    time_t now = time(NULL);
+    for (int i = 0; i < g_child_count; i++) {
+        ChildProc *c = &g_children[i];
+        if (c->deadline == 0 || c->pid <= 0 || now < c->deadline)
+            continue;
+        kill(c->pid, SIGKILL);
+        if (c->type == CHILD_TOOL_EXEC) {
+            if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
+            free(c->outbuf); c->outbuf = NULL; c->outbuf_len = 0;
+            const char *err = "error: tool timed out (120s)";
+            ToolResult tr = {.tool_call_id = c->tool_call_id, .content = (char *)err};
+            Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                           .tool_name = "", .is_error = 1};
+            entry_append_with_turn(g_db, c->session_id, &msg, c->turn_id);
+            db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, -1);
+        } else if (c->type == CHILD_LLM_REQ) {
+            int64_t turn_id = db_next_turn_id(g_db, c->session_id);
+            Message msg = {.role = ROLE_ASSISTANT,
+                           .content = "error: LLM request timed out",
+                           .stop_reason = STOP_REASON_ABORTED};
+            entry_append_with_turn(g_db, c->session_id, &msg, turn_id);
         }
-        db_tool_call_free_pending(calls, tc_count);
-    } else if (tc_state == 0) {
-        /* Final stop — deliver first; compaction runs in the dead time after,
-         * never delaying the response */
+        c->deadline = -1; /* mark consumed so reap doesn't double-advance */
+    }
+}
+
+/* ── run_advance: call advance_session and execute the decision ── */
+
+static void run_advance(int64_t session_id) {
+    int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations : DEFAULT_MAX_ITERATIONS;
+    AdvanceOutput out = advance_session(g_db, session_id, max_iter);
+
+    switch (out.action) {
+    case ADVANCE_DISPATCH_LLM:
+        if (dispatch_llm_req(session_id, out.agent_name, out.iteration) < 0) {
+            if (g_mode == 0) g_cli_turn_active = 0;
+        }
+        break;
+    case ADVANCE_DISPATCH_TOOLS: {
+        int i = 0;
+        int parked = 0;
+        while (i < out.tc_count) {
+            int rc = fork_tool_exec(session_id, out.agent_name, &out.calls[i]);
+            if (rc == 1) { i++; continue; } /* inline tool — try next */
+            if (rc == 2) { parked = 1; break; } /* blocking sub-agent */
+            break; /* forked — stop (one at a time for forked) */
+        }
+        if (!parked && i >= out.tc_count) {
+            /* All were inline — advance again (tools all done) */
+            run_advance(session_id);
+        }
+        db_tool_call_free_pending(out.calls, out.tc_count);
+        break;
+    }
+    case ADVANCE_DONE:
         deliver_response(session_id);
+        /* Attempt compaction if configured */
         if (g_cfg->compaction && !g_llm_fork && llm_worker_alive() &&
             session_needs_compaction(g_db, session_id, g_cfg) &&
             !child_is_compacting(session_id) && g_child_count < CHILD_MAX) {
             session_set_state(g_db, session_id, "compacting");
             ChildProc *c = &g_children[g_child_count++];
             memset(c, 0, sizeof(*c));
-            c->pid = -1; /* sentinel: worker-managed */
+            c->pid = -1;
             c->type = CHILD_COMPACT;
             c->session_id = session_id;
             c->result_pipe = -1;
-            snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
-            if (llm_worker_submit_compact(g_db, session_id, agent_name) != 0) {
-                /* Submit failed — must not leave the session stuck compacting */
+            snprintf(c->agent_name, sizeof(c->agent_name), "%s", out.agent_name);
+            if (llm_worker_submit_compact(g_db, session_id, out.agent_name) != 0) {
                 child_remove(c);
                 session_set_state(g_db, session_id, "idle");
             }
-        } else {
-            session_set_state(g_db, session_id, "idle");
         }
-    } else {
-        /* Error */
-        session_set_state(g_db, session_id, "idle");
         if (g_mode == 0) {
-            fprintf(stderr, "error: LLM request failed\n");
             g_cli_turn_active = 0;
         }
+        break;
+    case ADVANCE_WAITING:
+    case ADVANCE_NOOP:
+        if (g_mode == 0 && !child_has_session(session_id))
+            g_cli_turn_active = 0;
+        break;
+    case ADVANCE_ERROR:
+        if (g_mode == 0) {
+            fprintf(stderr, "error: session advance failed\n");
+            g_cli_turn_active = 0;
+        }
+        break;
     }
+}
+
+/* handle_llm_complete: query DB for next action after LLM request finishes */
+static void handle_llm_complete(int64_t session_id, const char *agent_name, int iteration) {
+    (void)agent_name; (void)iteration;
+    run_advance(session_id);
 }
 
 static void deliver_response(int64_t session_id) {
@@ -581,20 +635,33 @@ static void reap_children(void) {
         }
 
         ChildProc *c = child_find(pid);
-        if (!c) continue;
+        if (!c) {
+            /* Check if it's a channel process */
+            channel_reap(pid, g_db);
+            continue;
+        }
 
         if (c->type == CHILD_LLM_REQ) {
-            (void)status; /* exit code ignored — use DB-based detection */
+            (void)status;
             int64_t session_id = c->session_id;
-            char aname[64];
-            snprintf(aname, sizeof(aname), "%s", c->agent_name);
-            int iter = c->iteration;
+            /* If killed by deadline sweep, error already written — just advance */
+            if (c->deadline == -1) {
+                child_remove(c);
+                run_advance(session_id);
+                continue;
+            }
             child_remove(c);
-
-            /* DB-based completion detection (Task 2) */
-            handle_llm_complete(session_id, aname, iter);
+            handle_llm_complete(session_id, "", 0);
         } else if (c->type == CHILD_TOOL_EXEC) {
             int64_t session_id = c->session_id;
+
+            /* If killed by deadline sweep, result already written */
+            if (c->deadline == -1) {
+                child_remove(c);
+                run_advance(session_id);
+                continue;
+            }
+
             char aname[64];
             snprintf(aname, sizeof(aname), "%s", c->agent_name);
             int iter = c->iteration;
@@ -653,31 +720,9 @@ static void reap_children(void) {
 
             child_remove(c);
 
-            /* Check for more pending tools */
-            int tc_count = 0;
-            PendingToolCall *calls = db_tool_call_get_pending(g_db, session_id, &tc_count);
-            if (tc_count > 0) {
-                /* More tools — dispatch next (inline or forked) */
-                int i = 0;
-                while (i < tc_count) {
-                    int rc = fork_tool_exec(session_id, aname, &calls[i]);
-                    if (rc == 1) { i++; continue; }
-                    break;
-                }
-                if (i >= tc_count) {
-                    /* All remaining were inline — back to LLM */
-                    /* Need iteration count — derive from how many LLM turns happened */
-                    int llm_iter = iter + 1;
-                    dispatch_llm_req(session_id, aname, llm_iter);
-                }
-            } else {
-                /* All tools done — back to LLM */
-                int llm_iter = iter + 1;
-                dispatch_llm_req(session_id, aname, llm_iter);
-            }
-            db_tool_call_free_pending(calls, tc_count);
+            /* advance_session decides: more tools, next LLM, or done */
+            run_advance(session_id);
         }
-        /* CHILD_CHANNEL handling deferred to Task 4 */
     }
 }
 
@@ -803,12 +848,8 @@ static void cli_start_turn(const char *input) {
     } else {
         inbox_insert(g_db, g_cli_session, "cli", input);
     }
-    inbox_consume_into_entries(g_db, g_cli_session, 100);
     g_cli_turn_active = 1;
-    if (dispatch_llm_req(g_cli_session, g_agent_name, 0) < 0) {
-        fprintf(stderr, "error: failed to dispatch LLM request\n");
-        g_cli_turn_active = 0;
-    }
+    run_advance(g_cli_session);
 }
 
 /* ── main ───────────────────────────────────────────────────────── */
@@ -1022,8 +1063,7 @@ int main(int argc, char *argv[]) {
                 WakeMsg msg;
                 while (read(wake_fd(), &msg, sizeof(msg)) == (ssize_t)sizeof(msg)) {
                     if (child_has_session(msg.session_id)) continue;
-                    char *aname = session_get_agent_name(g_db, msg.session_id);
-                    if (aname) { dispatch_llm_req(msg.session_id, aname, 0); free(aname); }
+                    run_advance(msg.session_id);
                 }
             }
             if (fifo_idx >= 0 && (pfds[fifo_idx].revents & POLLIN)) {
@@ -1032,6 +1072,8 @@ int main(int argc, char *argv[]) {
                 channel_consume_events(g_db);
             }
             if (rc == 0 && g_child_count > 0) reap_children();
+            channel_tick(g_db);
+            child_sweep_deadlines();
         }
 
         free(pfds);
@@ -1254,13 +1296,9 @@ int main(int argc, char *argv[]) {
                 }
                 
                 if (cc) {
-                    /* Compaction done (response was delivered before the job
-                     * started). Anything queued while compacting gets a fresh
-                     * wake so the normal dispatch path picks it up. */
+                    /* Compaction done — advance picks up any queued inbox */
                     child_remove(cc);
-                    session_set_state(g_db, completed_sid, "idle");
-                    if (inbox_count(g_db, completed_sid) > 0)
-                        wake_session(completed_sid);
+                    run_advance(completed_sid);
                     continue;
                 }
                 
@@ -1274,14 +1312,8 @@ int main(int argc, char *argv[]) {
                         break;
                     }
                 }
-                char aname[64] = "default";
-                int iter = 0;
-                if (wc) {
-                    snprintf(aname, sizeof(aname), "%s", wc->agent_name);
-                    iter = wc->iteration;
-                    child_remove(wc);
-                }
-                handle_llm_complete(completed_sid, aname, iter);
+                if (wc) child_remove(wc);
+                run_advance(completed_sid);
 
                 if (g_mode == 0 && !g_cli_turn_active) {
                     if (g_cli_done) goto done;
@@ -1324,6 +1356,7 @@ int main(int argc, char *argv[]) {
         }
 
         if (nready == 0 && g_child_count > 0) reap_children();
+        child_sweep_deadlines();
     }
 
 done:

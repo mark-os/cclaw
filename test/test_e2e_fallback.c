@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <signal.h>
+#include "test_util.h"
 
 #define DB_PATH "/tmp/test_e2e_fallback.db"
 

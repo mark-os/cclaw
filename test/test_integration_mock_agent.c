@@ -3,6 +3,7 @@
 #include "mock_server.h"
 #include <assert.h>
 #include <unistd.h>
+#include "test_util.h"
 
 #define DB_PATH "/tmp/test_integ_mock_agent.db"
 #define FAIL(m) do { fprintf(stderr, "FAIL: %s\n", m); return 1; } while(0)

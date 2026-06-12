@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include "llm_proc.h"
 #include "db.h"
+#include "test_util.h"
 #include "config.h"
 #include "mock_server.h"
 

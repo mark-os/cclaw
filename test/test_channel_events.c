@@ -12,6 +12,7 @@
 #include "channel_api.h"
 
 #include "db.h"
+#include "test_util.h"
 
 static int test_binding_set(sqlite3 *db, const char *type, const char *id, const char *agent) {
     sqlite3_stmt *s;

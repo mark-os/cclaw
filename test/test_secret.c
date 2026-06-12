@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include "secret.h"
 #include "db.h"
+#include "test_util.h"
 
 #define FAIL(msg) do { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } while(0)
 

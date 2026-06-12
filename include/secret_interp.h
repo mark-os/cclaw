@@ -14,4 +14,8 @@ char *secret_interpolate(const char *text, const ShellSecret *secrets, size_t co
  * Returns new heap-allocated string (caller frees). */
 char *secret_deinterpolate(const char *text, const ShellSecret *secrets, size_t count);
 
+/* Post-process a tool result: deinterpolate + secret scan.
+ * Returns new heap-allocated string if modified, or NULL if unchanged. */
+char *tool_result_postprocess(const char *result, const ShellSecret *secrets, size_t count);
+
 #endif /* CCLAW_SECRET_INTERP_H */

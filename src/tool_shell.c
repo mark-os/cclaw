@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "tool_shell.h"
 #include "tool_parse.h"
+#include "preload_blob.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -224,14 +225,12 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
 
-        /* V82/V37: namespace sandbox — graceful fallback if unavailable */
+        /* V82/V37: namespace sandbox — required unless trust_level is host */
         const char *ws = user_data ? ((ShellConfig *)user_data)->workspace : NULL;
         const char *cwd = user_data ? ((ShellConfig *)user_data)->cwd_path : NULL;
         const char *psock = user_data ? ((ShellConfig *)user_data)->proxy_sock : NULL;
-        int yolo = user_data ? ((ShellConfig *)user_data)->yolo : 0;
         int do_sandbox = user_data ? ((ShellConfig *)user_data)->sandbox : 1;
         ShellConfig *sc_child = user_data ? (ShellConfig *)user_data : NULL;
-        if (yolo) do_sandbox = 0;
 
         /* Trust-level: suppress CWD mount if mount_cwd=0 */
         if (sc_child && !sc_child->mount_cwd) cwd = NULL;
@@ -239,21 +238,27 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         if (sc_child && sc_child->net_mode) psock = NULL;
 
         if (do_sandbox && shell_apply_namespace(ws, cwd) != 0) {
-            /* Fallback: continue unsandboxed (log to stderr = captured in output) */
-            fprintf(stderr, "[cclaw] warning: namespace sandbox unavailable, "
-                    "continuing without (errno=%d)\n", errno);
+            /* Fail closed: a runtime failure must not grant what only
+             * trust_level=host may grant (stderr = captured in output). */
+            fprintf(stderr, "error: namespace sandbox unavailable (errno=%d); "
+                    "this trust level requires it — enable unprivileged user "
+                    "namespaces or set the agent's trust_level to 'host'\n", errno);
+            _exit(126);
         }
 
         /* Trust-level: remount workspace read-only if workspace_ro=1 */
         if (do_sandbox && sc_child && sc_child->workspace_ro && ws) {
             /* After pivot_root, workspace is at its resolved path */
             char ws_real[PATH_MAX];
-            if (realpath(ws, ws_real) != NULL)
-                mount(NULL, ws_real, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL);
+            if (realpath(ws, ws_real) == NULL ||
+                mount(NULL, ws_real, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) != 0) {
+                fprintf(stderr, "error: read-only workspace remount failed "
+                        "(errno=%d); refusing to run writable\n", errno);
+                _exit(126);
+            }
         }
 
-        /* V47: PATH restriction + env hardening (skip in yolo mode) */
-        if (!yolo) {
+        /* V47: PATH restriction + env hardening */
         if (sc_child && sc_child->env_mode == 1) {
             /* Clean allowlist: wipe entire env, set only essentials */
             extern char **environ;
@@ -288,7 +293,6 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
                 free(drop_keys[i]);
             }
         }
-        }
 
         /* V83: set proxy socket path for LD_PRELOAD lib (after env cleanup) */
         if (psock) setenv("CCLAW_PROXY_SOCK", psock, 1);
@@ -315,6 +319,20 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         if (sc_child && sc_child->rlimits.cpu_sec > 0) {
             struct rlimit rl = {(rlim_t)sc_child->rlimits.cpu_sec, (rlim_t)sc_child->rlimits.cpu_sec};
             setrlimit(RLIMIT_CPU, &rl);
+        }
+
+        /* Write preload lib into the namespace's private /tmp and set
+         * LD_PRELOAD — the interposer is the only egress inside CLONE_NEWNET,
+         * so a failed write must be loud, not silently no-network. */
+        if (psock && do_sandbox) {
+            int pfd = open("/tmp/libcclaw_net.so", O_WRONLY | O_CREAT | O_TRUNC, 0755);
+            ssize_t wr = pfd >= 0 ? write(pfd, preload_net_blob, (size_t)preload_net_blob_len) : -1;
+            if (pfd >= 0) close(pfd);
+            if (wr == (ssize_t)preload_net_blob_len)
+                setenv("LD_PRELOAD", "/tmp/libcclaw_net.so", 1);
+            else
+                fprintf(stderr, "[cclaw] warning: proxy preload setup failed "
+                        "(errno=%d); shell has no network\n", errno);
         }
 
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);
@@ -435,7 +453,6 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     sc->proxy_sock = NULL;
     sc->secrets = NULL;
     sc->secret_count = 0;
-    sc->yolo = 0;
     sc->sandbox = 1;
     int rc = tools_register(reg, "shell_exec",
                             "Execute a shell command and return stdout+stderr",

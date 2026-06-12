@@ -3,6 +3,7 @@
 #include <string.h>
 #include "context.h"
 #include "db.h"
+#include "test_util.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;

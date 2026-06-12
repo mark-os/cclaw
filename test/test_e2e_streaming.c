@@ -55,13 +55,13 @@ static int file_contains(const char *path, const char *needle) {
     return 0;
 }
 
-/* T283: Streaming + thinking + tool calls (yolo mode) */
+/* T283: Streaming + thinking + tool calls (host mode, -y) */
 static void test_streaming_thinking_tools(void) {
     TEST(streaming_thinking_tools);
     if (!getenv("OPENROUTER_API_KEY")) SKIP("OPENROUTER_API_KEY not set");
 
     const char *out = "/tmp/cclaw_e2e_t283_stream.txt";
-    /* Prompt designed to force a tool call (js_eval is available in yolo) */
+    /* Prompt designed to force a tool call (js_eval is available in host mode) */
     int rc = run_cclaw(
         "-y --new --log-level=trace -p \"Use js_eval to compute 2+2 and tell me the result\"",
         out, NULL);

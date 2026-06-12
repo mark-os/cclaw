@@ -1,5 +1,6 @@
 /* T271: Unit test for CLI agent picker DB operations */
 #include "db.h"
+#include "test_util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

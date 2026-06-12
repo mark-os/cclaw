@@ -241,6 +241,13 @@ static int tool_is_inline(const char *name) {
            strcmp(name, "check_agent") == 0;
 }
 
+/* Tools that need {{SECRET:X}} resolved to real values at exec time */
+static int tool_needs_interpolation(const char *name) {
+    return strcmp(name, "shell_exec") == 0 ||
+           strcmp(name, "web_fetch") == 0 ||
+           strcmp(name, "js_eval") == 0;
+}
+
 static AgentSetup *g_tool_setup;  /* Initialized once for tool dispatch */
 
 /* CLI progress: "[tool_name {"arg":"value"}]" dimmed, args truncated */
@@ -273,23 +280,20 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
 
     /* Inline tools: execute in parent process */
     if (tool_is_inline(tc->name)) {
-        /* Interpolate {{SECRET:X}} placeholders before execution */
-        char *interp_args = (g_tool_setup && g_tool_setup->secret_count > 0)
-            ? secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count)
-            : NULL;
+        /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
+        char *interp_args = NULL;
+        if (tool_needs_interpolation(tc->name) && g_tool_setup && g_tool_setup->secret_count > 0)
+            interp_args = secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count);
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         free(interp_args);
         if (!result) result = strdup("error: tool returned null");
 
-        /* Deinterpolate: replace literal secret values back to placeholders */
-        if (g_tool_setup && g_tool_setup->secret_count > 0) {
-            char *deinterp = secret_deinterpolate(result, g_tool_setup->secrets, g_tool_setup->secret_count);
-            if (deinterp) { free(result); result = deinterp; }
-        }
-
-        /* Secret scan: redact leaked secrets before storage */
-        { size_t rlen = strlen(result);
-          secret_scan_redact(result, &rlen, rlen + 1); }
+        /* Postprocess: deinterpolate + secret scan (scan runs even with no
+         * secrets loaded — inline js_eval output can carry leaked credentials) */
+        { char *pp = tool_result_postprocess(result,
+              g_tool_setup ? g_tool_setup->secrets : NULL,
+              g_tool_setup ? g_tool_setup->secret_count : 0);
+          if (pp) { free(result); result = pp; } }
 
         /* CLI progress */
         if (g_mode == 0) {
@@ -335,10 +339,10 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
          * Parent infrastructure fds (DB, sigchld pipe, notify pipe) are
          * O_CLOEXEC and will close on exec within the shell sandbox. */
         close(pipefd[0]);
-        /* Interpolate {{SECRET:X}} in child before execution */
-        char *interp_args = (g_tool_setup && g_tool_setup->secret_count > 0)
-            ? secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count)
-            : NULL;
+        /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
+        char *interp_args = NULL;
+        if (tool_needs_interpolation(tc->name) && g_tool_setup && g_tool_setup->secret_count > 0)
+            interp_args = secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count);
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         free(interp_args);
         if (result) {
@@ -509,8 +513,11 @@ static void reap_children(void) {
             if (c->result_pipe >= 0) close(c->result_pipe);
             if (!output) output = strdup("error: OOM");
 
-            /* Secret scan: redact leaked secrets before storage */
-            secret_scan_redact(output, &out_len, TOOL_MAX_OUTPUT + 1);
+            /* Secret postprocess: deinterpolate + scan */
+            { char *pp = tool_result_postprocess(output,
+                  g_tool_setup ? g_tool_setup->secrets : NULL,
+                  g_tool_setup ? g_tool_setup->secret_count : 0);
+              if (pp) { free(output); output = pp; out_len = strlen(output); } }
 
             /* CLI progress */
             if (g_mode == 0) {
@@ -604,7 +611,7 @@ static void print_usage(void) {
            "options:\n"
            "  -p <prompt>        single-turn: send prompt, print response, exit\n"
            "  -s <id>            session id\n"
-           "  -y                 yolo mode: no sandbox, all hosts allowed\n"
+           "  -y                 host mode: no sandbox, all tools and hosts allowed\n"
            "  --new              create a new session\n"
            "  --log-level=LEVEL  set log level (error|info|debug|trace)\n"
            "  -v, --debug        debug logging (timing, context stats)\n"
@@ -674,8 +681,9 @@ static void cli_start_turn(const char *input) {
     if (scanned) {
         memcpy(scanned, input, ilen + 1);
         int nf = secret_scan_redact(scanned, &ilen, ilen + 1);
-        if (nf > 0)
-            LOG_INFO_(g_cfg, "secret_scan: redacted %d finding(s) in user input", nf);
+        if (nf != 0)
+            LOG_INFO_(g_cfg, "secret_scan: redacted finding(s) in user input%s",
+                      nf < 0 ? " (truncated)" : "");
         inbox_insert(g_db, g_cli_session, "cli", scanned);
         free(scanned);
     } else {
@@ -741,7 +749,7 @@ static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
 
 int main(int argc, char *argv[]) {
     cclaw_log_init();
-    int daemon_mode = 0, llm_mode = 0, new_session = 0, yolo_mode = 0;
+    int daemon_mode = 0, llm_mode = 0, new_session = 0, host_mode = 0;
     const char *channel_mode = NULL;
     LogLevel log_level_override = LOG_LEVEL_INFO;
     int log_level_set = 0;
@@ -757,7 +765,7 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-v") == 0) { log_level_override = LOG_LEVEL_DEBUG; log_level_set = 1; }
         else if (strcmp(argv[i], "--trace") == 0 || strcmp(argv[i], "-vv") == 0) { log_level_override = LOG_LEVEL_TRACE; log_level_set = 1; }
         else if (strcmp(argv[i], "--new") == 0) new_session = 1;
-        else if (strcmp(argv[i], "-y") == 0) yolo_mode = 1;
+        else if (strcmp(argv[i], "-y") == 0) host_mode = 1;
         else if (strcmp(argv[i], "--llm-fork") == 0) g_llm_fork = 1;
         else if (strcmp(argv[i], "--no-stream") == 0) setenv("CCLAW_STREAM", "0", 1);
         else if (strncmp(argv[i], "--llm-threads=", 14) == 0) g_llm_threads = atoi(argv[i]+14);
@@ -961,7 +969,7 @@ int main(int argc, char *argv[]) {
     free(agent_sel);
 
     /* Inject agent config env vars */
-    if (!yolo_mode) {
+    if (!host_mode) {
         AgentConfig *ac = agent_config_load_db(g_db, g_agent_name);
         if (ac) {
             if (ac->tool_count > 0) {
@@ -979,7 +987,7 @@ int main(int argc, char *argv[]) {
             agent_config_free(ac);
         }
     }
-    if (yolo_mode) setenv("CCLAW_YOLO", "1", 1);
+    if (host_mode) setenv("CCLAW_TRUST_LEVEL", "host", 1);
     if (!getenv("CCLAW_STREAM")) { setenv("CCLAW_STREAM", "1", 1); g_cfg->stream = 1; }
     setenv("CCLAW_MODE", "cli", 1);
     { char cwd[PATH_MAX]; if (getcwd(cwd, sizeof(cwd))) setenv("CCLAW_PATH", cwd, 1); }

@@ -1,4 +1,5 @@
 #include "db.h"
+#include "test_util.h"
 #include "db_response.h"
 #include "db_request.h"
 #include "types.h"

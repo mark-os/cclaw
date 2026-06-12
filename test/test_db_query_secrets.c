@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include "db.h"
+#include "test_util.h"
 #include "tool_db_query.h"
 #include "secret.h"
 

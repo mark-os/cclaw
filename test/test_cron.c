@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "cron.h"
 #include "db.h"
+#include "test_util.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

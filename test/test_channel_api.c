@@ -1,6 +1,7 @@
 #include "channel_api.h"
 #include "wake.h"
 #include "db.h"
+#include "test_util.h"
 #include <assert.h>
 #include <fcntl.h>
 #include <signal.h>

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "test_util.h"
 #include "tool_memory.h"
 #include "tools.h"
 #include <assert.h>

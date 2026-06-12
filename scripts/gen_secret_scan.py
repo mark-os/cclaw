@@ -109,8 +109,21 @@ CURATED_IDS = {
 }
 
 # Validation types
-VTYPE_PREFIX = 0   # Fixed prefix: validate tail charset + length
-VTYPE_KEYWORD = 1  # Contextual keyword: check assignment pattern + entropy
+VTYPE_PREFIX  = 0   # Fixed prefix: validate tail charset + length
+VTYPE_KEYWORD = 1   # Contextual keyword: check assignment pattern + entropy
+VTYPE_LITERAL = 2   # Strong literal marker: flag on the anchor alone
+
+# Charset classes (must match secret_scan.c charset_ok)
+CHARSET_ANY         = 0
+CHARSET_UPPER_ALNUM = 1
+CHARSET_LOWER_ALNUM = 2
+CHARSET_ALNUM       = 3
+CHARSET_HEX         = 4
+
+# Lowering thresholds
+MIN_ANCHOR_LEN     = 3      # anchors shorter than this carpet-bomb the AC scan
+LITERAL_ANCHOR_LEN = 8      # strong enough to flag on its own (e.g. -----BEGIN)
+OPEN_TAIL_CAP      = 4096   # cap for open-ended {n,} quantifiers
 
 
 def classify_rule(rule):
@@ -124,30 +137,82 @@ def classify_rule(rule):
     return VTYPE_PREFIX
 
 
+def map_charset(charset_str):
+    """Map a regex character-class body to a SCAN_CHARSET_* enum, preserving
+    hex-ness and case (a collapse to generic ALNUM is what made e.g. the
+    twilio 'SK[0-9a-fA-F]{32}' rule match base64 blobs and file paths)."""
+    norm = charset_str.replace('\\', '')
+    # Pure hex: ranges drawn only from 0-9 / a-f / A-F, and at least one of a-f.
+    leftover = re.sub(r'(?:0-9|a-f|A-F)', '', norm)
+    if leftover == '' and ('a-f' in norm or 'A-F' in norm):
+        return CHARSET_HEX
+    # Punctuation (=, ., +, /) is only covered by the broad ALNUM class; the
+    # LOWER/UPPER classes exclude it and would truncate the tail early.
+    if any(p in norm for p in ('=', '.', '+', '/')):
+        return CHARSET_ALNUM
+    has_upper = 'A-Z' in charset_str
+    has_lower = 'a-z' in charset_str
+    if has_upper and has_lower:
+        return CHARSET_ALNUM
+    if has_upper:
+        return CHARSET_UPPER_ALNUM
+    if has_lower:
+        return CHARSET_LOWER_ALNUM
+    return CHARSET_ALNUM
+
+
 def extract_tail_params(rule):
-    """For prefix rules, extract expected tail charset and length from regex."""
+    """Extract (tail_min, tail_max, charset) from the first bounded character
+    class in a prefix rule's regex.
+
+    Returns None when the tail cannot be faithfully represented as a single
+    contiguous charset run — an open-set class like [\\s\\S], or no bounded
+    quantifier at all. The caller then either treats the rule as a literal
+    marker (strong anchor) or drops it, rather than inventing parameters. The
+    old blind '{N,M}' fallback is what turned the jwt rule into a degenerate
+    'ey' + {0,2} matcher (it latched onto the trailing '={0,2}')."""
     regex = rule.get('regex', '')
-    # Common patterns: [A-Z2-7]{16}, [a-z0-9]{36}, [a-zA-Z0-9_-]{93}
-    m = re.search(r'\[([A-Za-z0-9\-_\\]+)\]\{(\d+)(?:,(\d+))?\}', regex)
-    if m:
-        charset_str = m.group(1)
-        min_len = int(m.group(2))
-        max_len = int(m.group(3)) if m.group(3) else min_len
-        # Map charset to enum
-        if 'A-Z' in charset_str and 'a-z' in charset_str:
-            charset = 3  # CHARSET_ALNUM
-        elif 'A-Z' in charset_str:
-            charset = 1  # CHARSET_UPPER_ALNUM
-        elif 'a-z' in charset_str:
-            charset = 2  # CHARSET_LOWER_ALNUM
-        else:
-            charset = 3  # CHARSET_ALNUM
-        return min_len, max_len, charset
-    # Try {N,M} without charset (means any)
-    m = re.search(r'\{(\d+),(\d+)\}', regex)
-    if m:
-        return int(m.group(1)), int(m.group(2)), 3
-    return 20, 100, 3  # defaults for unknown patterns
+    # Common patterns: [A-Z2-7]{16}, [a-z0-9]{36}, [a-zA-Z0-9_-]{93}, [\w-]{17,}
+    m = re.search(r'\[([A-Za-z0-9\-_\\/+=.]+)\]\{(\d+)(?:,(\d+)?)?\}', regex)
+    if not m:
+        return None
+    charset_str = m.group(1)
+    # [\s..]/[\S..] match arbitrary bytes (incl. newlines) — not a tail we can
+    # validate with one charset run; let the caller fall back to literal/drop.
+    if '\\s' in charset_str or '\\S' in charset_str:
+        return None
+    min_len = int(m.group(2))
+    if m.group(3):
+        max_len = int(m.group(3))
+    elif ',' in m.group(0):          # open-ended {n,}
+        max_len = max(min_len, OPEN_TAIL_CAP)
+    else:                            # exact {n}
+        max_len = min_len
+    return min_len, max_len, map_charset(charset_str)
+
+
+def extract_literal_prefix(regex):
+    """Leading run of literal characters at the start of the secret body, used
+    to pin the exact case of a short anchor (so e.g. twilio's 'SK' stays upper
+    even though the AC table is case-folded). Returns '' when the regex opens
+    with an alternation/group/metaclass — i.e. no single literal prefix."""
+    s = regex
+    for pre in ('(?i)', r'\b', '^', '(?:', '('):
+        while s.startswith(pre):
+            s = s[len(pre):]
+    out = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == '\\' and i + 1 < len(s):
+            nxt = s[i + 1]
+            if nxt.isalpha():        # \w \d \s ... — a metaclass, stop
+                break
+            out.append(nxt); i += 2; continue   # \. \- ... — literal punct
+        if c.isalnum() or c in '_-':
+            out.append(c); i += 1; continue
+        break
+    return ''.join(out)
 
 
 def build_ac(keywords):
@@ -258,21 +323,24 @@ def emit_headers(keywords, rules_meta, goto, failure, accept, state_count):
         f.write("#ifndef CCLAW_SECRET_SCAN_RULES_H\n#define CCLAW_SECRET_SCAN_RULES_H\n\n")
         f.write("/* Validation types */\n")
         f.write("#define SCAN_VTYPE_PREFIX  0\n")
-        f.write("#define SCAN_VTYPE_KEYWORD 1\n\n")
+        f.write("#define SCAN_VTYPE_KEYWORD 1\n")
+        f.write("#define SCAN_VTYPE_LITERAL 2\n\n")
         f.write("/* Charset classes */\n")
-        f.write("#define SCAN_CHARSET_ANY        0\n")
+        f.write("#define SCAN_CHARSET_ANY         0\n")
         f.write("#define SCAN_CHARSET_UPPER_ALNUM 1\n")
         f.write("#define SCAN_CHARSET_LOWER_ALNUM 2\n")
-        f.write("#define SCAN_CHARSET_ALNUM      3\n\n")
+        f.write("#define SCAN_CHARSET_ALNUM       3\n")
+        f.write("#define SCAN_CHARSET_HEX         4\n\n")
 
         f.write(f"#define SCAN_RULE_COUNT {len(rules_meta)}\n\n")
         f.write("typedef struct {\n")
         f.write("    const char *id;\n")
         f.write("    const char *keyword;\n")
-        f.write("    int vtype;        /* SCAN_VTYPE_PREFIX or SCAN_VTYPE_KEYWORD */\n")
+        f.write("    int vtype;        /* SCAN_VTYPE_PREFIX/KEYWORD/LITERAL */\n")
         f.write("    int tail_min;     /* min chars after prefix (prefix type) */\n")
         f.write("    int tail_max;     /* max chars after prefix */\n")
         f.write("    int charset;      /* SCAN_CHARSET_* */\n")
+        f.write("    int nocase;       /* 1 = match anchor case-insensitively; 0 = exact case */\n")
         f.write("    float entropy;    /* min entropy threshold (0 = no check) */\n")
         f.write("} ScanRule;\n\n")
 
@@ -280,7 +348,7 @@ def emit_headers(keywords, rules_meta, goto, failure, accept, state_count):
         for rm in rules_meta:
             f.write(f'    {{"{rm["id"]}", "{rm["keyword"]}", '
                     f'{rm["vtype"]}, {rm["tail_min"]}, {rm["tail_max"]}, '
-                    f'{rm["charset"]}, {rm["entropy"]:.1f}f}},\n')
+                    f'{rm["charset"]}, {rm["nocase"]}, {rm["entropy"]:.1f}f}},\n')
         f.write("};\n\n")
 
         f.write("#endif /* CCLAW_SECRET_SCAN_RULES_H */\n")
@@ -315,35 +383,71 @@ def main():
     rules_meta = []
     seen_keywords = set()
 
+    dropped = 0
     for rule in curated:
         vtype = classify_rule(rule)
+        params = extract_tail_params(rule) if vtype == VTYPE_PREFIX else None
         for kw in rule.get('keywords', []):
             kw_lower = kw.lower()
             if kw_lower in seen_keywords:
                 continue
-            seen_keywords.add(kw_lower)
-            keywords.append(kw_lower)
 
-            if vtype == VTYPE_PREFIX:
-                tail_min, tail_max, charset = extract_tail_params(rule)
+            kw_canonical = kw_lower   # case used for the C-side exact re-check
+            nocase = 1                # default: case-insensitive (AC table is folded)
+
+            if vtype == VTYPE_KEYWORD:
+                kw_vtype = VTYPE_KEYWORD
+                tail_min, tail_max, charset = 10, 150, CHARSET_ALNUM
+            elif params is not None:
+                tail_min, tail_max, charset = params
+                if len(kw_lower) < MIN_ANCHOR_LEN:
+                    # A short anchor only earns its place if the tail is strong
+                    # enough that the anchor isn't doing the work — a fixed-length
+                    # HEX run — AND we can pin the exact case so it doesn't match
+                    # folded (twilio: SK[0-9a-fA-F]{32}, not every "sk"/"Sk").
+                    lit = extract_literal_prefix(rule.get('regex', ''))
+                    if (charset == CHARSET_HEX and tail_min == tail_max
+                            and tail_min >= 16 and lit and lit.lower() == kw_lower
+                            and '(?i)' not in rule.get('regex', '')):
+                        nocase = 0
+                        kw_canonical = lit
+                    else:
+                        print(f"  drop {rule['id']!r} anchor {kw_lower!r}: "
+                              f"too short ({len(kw_lower)} < {MIN_ANCHOR_LEN})",
+                              file=sys.stderr)
+                        dropped += 1
+                        continue
+                kw_vtype = VTYPE_PREFIX
+            elif len(kw_lower) >= LITERAL_ANCHOR_LEN:
+                # Unparseable tail but a strong, distinctive literal: flag on
+                # the anchor alone (e.g. -----BEGIN ... PRIVATE KEY-----).
+                kw_vtype = VTYPE_LITERAL
+                tail_min, tail_max, charset = 0, 0, CHARSET_ANY
             else:
-                tail_min, tail_max, charset = 10, 150, 3
+                print(f"  drop {rule['id']!r} anchor {kw_lower!r}: "
+                      f"unparseable tail and weak anchor", file=sys.stderr)
+                dropped += 1
+                continue
+
+            seen_keywords.add(kw_lower)
+            keywords.append(kw_lower)   # AC trie: lowercase; the table is folded
 
             entropy = rule.get('entropy', 0.0)
-            if vtype == VTYPE_KEYWORD and entropy == 0.0:
+            if kw_vtype == VTYPE_KEYWORD and entropy == 0.0:
                 entropy = 3.5  # default for contextual rules
 
             rules_meta.append({
                 'id': rule['id'],
-                'keyword': kw_lower,
-                'vtype': vtype,
+                'keyword': kw_canonical,
+                'vtype': kw_vtype,
                 'tail_min': tail_min,
                 'tail_max': tail_max,
                 'charset': charset,
+                'nocase': nocase,
                 'entropy': entropy,
             })
 
-    print(f"Keywords: {len(keywords)}")
+    print(f"Keywords: {len(keywords)} ({dropped} anchors dropped)")
 
     # Build AC automaton
     goto, failure, accept, state_count = build_ac(keywords)

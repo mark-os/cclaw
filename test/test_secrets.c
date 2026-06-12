@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include "db.h"
+#include "test_util.h"
 #include "secret.h"
 
 static int tests_run = 0;

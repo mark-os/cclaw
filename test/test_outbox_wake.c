@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include "channel_api.h"
 #include "db.h"
+#include "test_util.h"
 
 #define DB_PATH "/tmp/test_outbox_wake.db"
 

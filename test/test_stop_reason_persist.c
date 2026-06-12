@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "db.h"
+#include "test_util.h"
 #include "types.h"
 
 static int tests_run = 0;

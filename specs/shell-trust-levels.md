@@ -15,7 +15,7 @@ Every sandboxed `shell_exec` child already gets (src/tool_shell.c):
 - env hardening: PATH=/bin:/usr/bin, HOME unset, `CCLAW_*` unset, generic
   credential scrub (names containing API_KEY/APIKEY/TOKEN/SECRET/PASSWORD/
   CREDENTIALS); `CCLAW_SECRET_*` re-injected as the deliberate channel
-- `-y` (yolo) disables all of the above
+- `-y` forces `trust_level=host` for the session (no sandbox at all)
 
 Per-agent knobs that exist today:
 
@@ -38,16 +38,27 @@ Per-agent knobs that exist today:
 
 Resolve policy in ONE place (agent_setup_init → ShellConfig), not scattered.
 
-| Policy                  | trusted          | standard (default) | restricted |
-|-------------------------|------------------|--------------------|------------|
-| env                     | inherit+scrub    | clean allowlist    | clean allowlist |
-| network                 | proxy            | proxy              | none (no proxy sock) |
-| CWD mount (CLI)         | rw               | no                 | no         |
-| workspace mount         | rw               | rw                 | ro         |
-| rlimits (NPROC/AS/CPU)  | none             | generous           | tight      |
+| Policy                  | host             | trusted          | standard (default) | restricted |
+|-------------------------|------------------|------------------|--------------------|------------|
+| namespace sandbox       | **none**         | required         | required           | required   |
+| env                     | inherit+scrub    | inherit+scrub    | clean allowlist    | clean allowlist |
+| network                 | direct           | proxy            | proxy              | none (no proxy sock) |
+| CWD mount (CLI)         | rw (host fs)     | rw               | no                 | no         |
+| workspace mount         | rw (host fs)     | rw               | rw                 | ro         |
+| rlimits (NPROC/AS/CPU)  | none             | none             | generous           | tight      |
+
+**Fail-closed rule**: every level except `host` requires the namespace. If
+`unshare`/`pivot_root` fails (or the `restricted` read-only remount fails), the
+shell child prints an error and exits 126 instead of degrading — a runtime
+failure must not grant what only `host` may grant. `host` never attempts the
+sandbox; it is the explicit opt-out (per-agent via `agents.trust_level`, or
+session-wide via `-y`, which sets `CCLAW_TRUST_LEVEL=host`). The former
+`CCLAW_SANDBOX`/yolo knobs are gone — sandbox on/off is derived from the level.
 
 - `trusted` = today's behavior (current default agent keeps working;
   `bootstrap` maps to `trusted`)
+- `host` = trusted policy without the namespace — for dev (`-y`) and hosts
+  where unprivileged user namespaces are unavailable
 - **clean allowlist env**: `clearenv()`, then set only PATH, TMPDIR,
   CCLAW_PROXY_SOCK, and `CCLAW_SECRET_*` injections (~10 lines in the
   child setup; replaces the blacklist scrub for these levels)

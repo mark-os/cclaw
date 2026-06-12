@@ -4,6 +4,7 @@
 #include <string.h>
 #include <assert.h>
 #include "db.h"
+#include "test_util.h"
 #include "tool_memory.h"
 
 #define FAIL(msg) do { fprintf(stderr, "FAIL: %s\n", msg); exit(1); } while(0)

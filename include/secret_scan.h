@@ -18,7 +18,9 @@ int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings
 
 /* Scan and redact in-place. Replaces findings with [SECRET_DETECTED:<rule_id>].
  * Updates *len to new length. cap = buffer capacity.
- * Returns number of redactions applied. */
+ * Every finding is always removed, even when cap is too small for the tag to
+ * expand into — trailing bytes that no longer fit are dropped in that case.
+ * Returns number of redactions applied, or -1 if any bytes were dropped. */
 int secret_scan_redact(char *text, size_t *len, size_t cap);
 
 /* Shannon entropy of a byte string. Returns bits per byte (0.0–8.0). */

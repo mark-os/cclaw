@@ -1,4 +1,5 @@
 #include "db.h"
+#include "test_util.h"
 #include "context.h"
 #include <assert.h>
 #include <stdio.h>

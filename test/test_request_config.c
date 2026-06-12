@@ -1,5 +1,6 @@
 /* T274: Unit test for request_config tool + agent_config_add_tool */
 #include "db.h"
+#include "test_util.h"
 #include "tools.h"
 #include "tool_request_config.h"
 #include "agent_config.h"

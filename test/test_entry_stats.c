@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "db.h"
+#include "test_util.h"
 #include "context.h"
 
 static int tests_run = 0;

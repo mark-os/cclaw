@@ -19,8 +19,7 @@ typedef struct {
     const char *proxy_sock; /* V83: path to .proxy.sock (NULL if proxy not started) */
     ShellSecret *secrets;   /* V88: array of secrets to inject + mask */
     size_t secret_count;
-    int yolo;               /* T229: skip sandbox + env hardening */
-    int sandbox;            /* T301: 1=namespace sandbox (default), 0=none */
+    int sandbox;            /* derived from trust_level: 1=namespace required, 0=none (host) */
     /* Trust-level policy bundle */
     int env_mode;           /* 0=inherit+scrub (trusted), 1=clean allowlist */
     int net_mode;           /* 0=proxy available, 1=no network */

@@ -1,6 +1,7 @@
 /* Test: config table seeding and provider access */
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "test_util.h"
 #include "config.h"
 #include <assert.h>
 #include <stdio.h>

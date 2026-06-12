@@ -1,4 +1,5 @@
 #include "db.h"
+#include "test_util.h"
 #include "agent_config.h"
 #include "config.h"
 #include <stdio.h>

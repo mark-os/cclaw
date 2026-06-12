@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db_response.h"
 #include "db.h"
+#include "test_util.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

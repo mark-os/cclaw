@@ -44,6 +44,18 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     /* Create child session */
     const char *agent = targ_str(&ta, "name");
     if (!agent || !agent[0]) agent = "default";
+
+    /* Trust policy is derived from the agents row at fork time — an unknown
+     * name must never reach session_create. */
+    AgentRow *row = db_agent_get(ctx->db, agent);
+    if (!row) {
+        char err[128];
+        snprintf(err, sizeof(err), "error: unknown agent '%.64s'", agent);
+        tool_parse_free(&ta);
+        return strdup(err);
+    }
+    agent_row_free(row);
+
     int64_t child_sid = session_create(ctx->db, "agent", agent,
                                        ctx->session_id, depth + 1);
     tool_parse_free(&ta);

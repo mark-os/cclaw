@@ -1,5 +1,6 @@
 /* Test session_set_state concurrency guard */
 #include "db.h"
+#include "test_util.h"
 #include <assert.h>
 #include <stdio.h>
 

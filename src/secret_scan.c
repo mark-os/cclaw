@@ -27,6 +27,8 @@ static int charset_ok(unsigned char c, int charset) {
         return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
     case SCAN_CHARSET_LOWER_ALNUM:
         return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+    case SCAN_CHARSET_HEX:
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
     case SCAN_CHARSET_ALNUM:
         return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
                (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '+' ||
@@ -36,6 +38,21 @@ static int charset_ok(unsigned char c, int charset) {
     }
 }
 
+/* Word char per regex \b semantics: [A-Za-z0-9_]. */
+static int is_word_char(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Reject a prefix/literal match glued to the end of another token, mirroring
+ * gitleaks' leading \b. Only enforced when the anchor itself starts with a
+ * word char — anchors like "-----begin" have no meaningful word boundary. */
+static int boundary_ok(const char *text, int offset, const ScanRule *rule) {
+    if (offset <= 0) return 1;
+    if (!is_word_char((unsigned char)rule->keyword[0])) return 1;
+    return !is_word_char((unsigned char)text[offset - 1]);
+}
+
 /* Validate a prefix-type match: check that tail_min..tail_max chars follow
  * the keyword at text[offset + kw_len] and match the charset. */
 static int validate_prefix(const char *text, size_t text_len, int offset,
@@ -43,10 +60,11 @@ static int validate_prefix(const char *text, size_t text_len, int offset,
     int kw_len = (int)strlen(rule->keyword);
     int start = offset + kw_len;
 
-    /* Private key special case: just verify the prefix matched */
-    if (rule->tail_min == 0 && rule->tail_max == 100)
-        return 1;
-
+    if (!boundary_ok(text, offset, rule)) return 0;
+    /* Case-folded AC match is a prefilter; case-sensitive rules re-verify the
+     * exact anchor bytes (e.g. twilio "SK", not every "sk"/"Sk"). */
+    if (!rule->nocase && strncmp(text + offset, rule->keyword, (size_t)kw_len) != 0)
+        return 0;
     if (start >= (int)text_len) return 0;
 
     /* Count valid tail characters */
@@ -143,7 +161,16 @@ int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings
             int match_offset = (int)i - kw_len + 1;
             if (match_offset < 0) continue;
 
-            if (rule->vtype == SCAN_VTYPE_PREFIX) {
+            if (rule->vtype == SCAN_VTYPE_LITERAL) {
+                if (boundary_ok(text, match_offset, rule) &&
+                    (rule->nocase ||
+                     strncmp(text + match_offset, rule->keyword, (size_t)kw_len) == 0)) {
+                    out[count].rule_id = rule->id;
+                    out[count].offset = match_offset;
+                    out[count].match_len = kw_len;
+                    count++;
+                }
+            } else if (rule->vtype == SCAN_VTYPE_PREFIX) {
                 if (validate_prefix(text, len, match_offset, rule)) {
                     int tail = 0;
                     int start = match_offset + kw_len;
@@ -171,23 +198,33 @@ int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings
 }
 
 /* In-place replacement helper (same as tool_shell.c mask_replace) */
-static void scan_replace(char *buf, size_t *len, size_t cap,
-                         int offset, int old_len,
-                         const char *tag, int tag_len) {
+static int scan_replace(char *buf, size_t *len, size_t cap,
+                        int offset, int old_len,
+                        const char *tag, int tag_len) {
     size_t tail = *len - (size_t)(offset + old_len);
     if ((size_t)offset + (size_t)tag_len + tail < cap) {
         memmove(buf + offset + tag_len, buf + offset + old_len, tail + 1);
         memcpy(buf + offset, tag, (size_t)tag_len);
         *len = *len - (size_t)old_len + (size_t)tag_len;
-    } else {
-        /* Truncate if replacement would overflow */
-        int fit = (int)(cap - 1) - offset;
-        if (fit > 0 && fit <= tag_len) {
-            memcpy(buf + offset, tag, (size_t)fit);
-            *len = (size_t)(offset + fit);
-            buf[*len] = '\0';
-        }
+        return 0;
     }
+    /* Tag + tail won't fit. The secret must still be removed: write as much
+     * of the tag as fits, then keep as much tail as remains — only the bytes
+     * that genuinely don't fit are dropped. */
+    int fit = (int)(cap - 1) - offset;
+    if (fit <= 0) {
+        *len = (size_t)offset;
+        buf[*len] = '\0';
+        return -1;
+    }
+    int tcopy = fit < tag_len ? fit : tag_len;
+    size_t keep = (size_t)(fit - tcopy);
+    if (keep > tail) keep = tail;
+    memmove(buf + offset + tcopy, buf + offset + old_len, keep);
+    memcpy(buf + offset, tag, (size_t)tcopy);
+    *len = (size_t)offset + (size_t)tcopy + keep;
+    buf[*len] = '\0';
+    return -1;
 }
 
 int secret_scan_redact(char *text, size_t *len, size_t cap) {
@@ -217,14 +254,18 @@ int secret_scan_redact(char *text, size_t *len, size_t cap) {
         }
     }
 
-    /* Apply replacements back-to-front to preserve offsets */
+    /* Apply replacements back-to-front to preserve offsets. A truncated
+     * replacement must not abort the loop: the remaining findings sit to the
+     * left of the truncation point and still need redacting. */
+    int truncated = 0;
     for (int i = nkeep - 1; i >= 0; i--) {
         ScanFinding *f = &findings[keep[i]];
         char tag[80];
         int tag_len = snprintf(tag, sizeof(tag), "[SECRET_DETECTED:%s]", f->rule_id);
         if (tag_len >= (int)sizeof(tag)) tag_len = (int)sizeof(tag) - 1;
-        scan_replace(text, len, cap, f->offset, f->match_len, tag, tag_len);
+        if (scan_replace(text, len, cap, f->offset, f->match_len, tag, tag_len) < 0)
+            truncated = 1;
     }
     text[*len] = '\0';
-    return nkeep;
+    return truncated ? -1 : nkeep;
 }

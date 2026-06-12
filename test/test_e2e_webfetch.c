@@ -1,5 +1,5 @@
 /* T287: e2e web_fetch — fetch httpbin.org, verify content extraction.
- * Cites: V46 (http_policy allows in yolo mode). Requires OPENROUTER_API_KEY. */
+ * Cites: V46 (http_policy allows in host mode (-y)). Requires OPENROUTER_API_KEY. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>

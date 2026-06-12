@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include "config.h"
 #include "db.h"
+#include "test_util.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;

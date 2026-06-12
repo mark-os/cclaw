@@ -1,4 +1,5 @@
 #include "db.h"
+#include "test_util.h"
 #include "llm_payload.h"
 #include "config.h"
 #include "context.h"

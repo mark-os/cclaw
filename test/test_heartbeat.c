@@ -7,6 +7,7 @@
 #include "heartbeat.h"
 #include "wake.h"
 #include "db.h"
+#include "test_util.h"
 #include "types.h"
 
 static void test_heartbeat_disabled(void) {

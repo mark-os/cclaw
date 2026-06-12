@@ -78,8 +78,7 @@ All injected at fork by daemon/CLI. Agent reads via `config_load_from_env()`.
 | `CCLAW_SAVE_REASONING` | cclaw.db kv | 0 | bool: persist reasoning |
 | `CCLAW_SAVE_USAGE` | cclaw.db kv | 0 | bool: persist usage stats |
 | `CCLAW_PATH` | CLI sets | (none) | CWD for ro file_read |
-| `CCLAW_YOLO` | CLI `-y` flag | (none) | disables sandbox |
-| `CCLAW_SANDBOX` | agent_config `sandbox` | `sandbox` | `sandbox` \| `none` (V22a) |
+| `CCLAW_TRUST_LEVEL` | CLI `-y` flag | (none) | overrides `agents.trust_level`; `-y` sets `host` |
 | `CCLAW_SECRET_<NAME>` | cclaw.db kv (encrypted) | — | decrypted at fork, cleared after read |
 
 ## providers

@@ -1,5 +1,6 @@
 /* Test: tool_calls status helpers (db_tool_call_set_status, db_tool_call_get_pending) */
 #include "db.h"
+#include "test_util.h"
 #include "db_response.h"
 #include <assert.h>
 #include <stdio.h>

@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include "channel_api.h"
 #include "db.h"
+#include "test_util.h"
 #include "mock_server.h"
 
 #define DB_PATH "/tmp/test_integ_cr.db"
@@ -154,9 +155,12 @@ int main(void) {
     }
     printf("  PASS: incoming message → channel_events\n");
 
-    /* Test outbox delivery: insert an outbox row + wake the FIFO */
-    channel_outbox_insert(db, "test", 1,
-        "{\"chat_id\":\"42\",\"text\":\"reply from agent\"}");
+    /* Test outbox delivery: insert an outbox row (same SQL the daemon's
+     * deliver_response uses) + wake the FIFO */
+    sqlite3_exec(db,
+        "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
+        "('test', 1, '{\"chat_id\":\"42\",\"text\":\"reply from agent\"}')",
+        NULL, NULL, NULL);
     channel_outbox_wake(DB_PATH, "test");
 
     /* Wait for runner to deliver */

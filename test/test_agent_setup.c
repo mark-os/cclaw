@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include "agent_setup.h"
 #include "db.h"
+#include "test_util.h"
 #include "config.h"
 
 static int tests_run = 0;

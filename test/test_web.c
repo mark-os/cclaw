@@ -7,6 +7,7 @@
 #include <curl/curl.h>
 #include "web.h"
 #include "db.h"
+#include "test_util.h"
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;

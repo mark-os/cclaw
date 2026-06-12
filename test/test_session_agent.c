@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "test_util.h"
 #include "agent_config.h"
 #include "config.h"
 #include <stdio.h>

@@ -96,14 +96,15 @@ static void test_network_isolated(void) {
     printf("  PASS test_network_isolated\n");
 }
 
-/* Test: graceful fallback — handler still works even if namespace fails */
-static void test_graceful_fallback(void) {
-    /* Without workspace, namespace still attempted; command should work either way */
+/* Test: NULL config defaults to sandboxed (fail-closed: if the namespace were
+ * unavailable the handler would error out, never run unsandboxed) */
+static void test_null_config_sandboxed(void) {
+    if (!ns_available) { printf("  SKIP test_null_config_sandboxed\n"); return; }
     char *r = tool_shell_handler("{\"command\":\"echo works\"}", NULL);
     assert(r != NULL);
     assert(strstr(r, "works") != NULL);
     free(r);
-    printf("  PASS test_graceful_fallback\n");
+    printf("  PASS test_null_config_sandboxed\n");
 }
 
 /* Test: agent DB path is not accessible from shell child */
@@ -255,7 +256,7 @@ int main(void) {
     test_write_system_dir_blocked();
     test_read_system_files();
     test_network_isolated();
-    test_graceful_fallback();
+    test_null_config_sandboxed();
     test_agent_db_inaccessible();
     test_etc_shadow_inaccessible();
     test_agent_db_path_blocked();

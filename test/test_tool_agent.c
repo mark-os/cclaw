@@ -2,6 +2,7 @@
 #define _DEFAULT_SOURCE
 #include "tool_agent.h"
 #include "db.h"
+#include "test_util.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +14,8 @@
 static sqlite3 *setup_db(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db != NULL);
+    /* launch_agent refuses names without an agents row */
+    sqlite3_exec(db, "INSERT INTO agents(name) VALUES('default')", NULL, NULL, NULL);
     return db;
 }
 
@@ -140,6 +143,21 @@ static void test_register(void) {
     printf("  PASS test_register\n");
 }
 
+static void test_unknown_agent_rejected(void) {
+    sqlite3 *db = setup_db();
+    int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
+    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
+    /* Trust policy comes from the agents row; an unregistered name must be
+     * refused, not spawned (it would run with no row to derive policy from) */
+    char *r = tool_launch_agent_handler(
+        "{\"task\":\"x\",\"name\":\"x-nonexistent\"}", &ctx);
+    assert(r != NULL);
+    assert(strstr(r, "unknown agent") != NULL);
+    free(r);
+    db_close(db);
+    printf("  PASS test_unknown_agent_rejected\n");
+}
+
 static void test_check_agent_not_found(void) {
     sqlite3 *db = setup_db();
     int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
@@ -207,6 +225,7 @@ int main(void) {
     test_spawn_background();
     test_spawn_blocking();
     test_register();
+    test_unknown_agent_rejected();
     test_check_agent_not_found();
     test_check_agent_idle_with_result();
     test_session_count_children();

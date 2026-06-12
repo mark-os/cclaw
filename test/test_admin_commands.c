@@ -10,6 +10,7 @@
 #include "admin_api.h"
 #include <sqlite3.h>
 #include "db.h"
+#include "test_util.h"
 
 /* V52: admin_write_env_key writes to file, never touches DB */
 static void test_key_bypasses_db(void) {

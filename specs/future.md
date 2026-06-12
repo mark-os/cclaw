@@ -223,3 +223,31 @@ Benefits:
 - Same agent binary, different transport selected at startup via `CCLAW_HTTP_TRANSPORT` env
 
 Pattern mirrors existing shell networking proxy (shell→agent UDS) but one level up (agent→parent UDS).
+
+## Alternative Proxy Mechanisms for Static/Go/Rust Binaries
+
+Current proxy relies on `LD_PRELOAD=libcclaw_net.so` to intercept libc
+`connect()`/`getaddrinfo()`. This works for dynamically-linked programs
+(curl, git, python, node) but not for statically-linked or Go/Rust binaries
+that make raw syscalls. Those get zero network (`CLONE_NEWNET` hard backstop).
+
+### seccomp-unotify (kernel ≥5.9)
+Intercept the `connect()` syscall in the parent process via seccomp user
+notification (`SECCOMP_RET_USER_NOTIF`). The parent reads the target address
+from the child's memory, performs the proxy logic, and injects the connected
+fd back. Works for everything regardless of linking — no .so needed. Requires
+kernel ≥5.9 and is significantly more complex (~500 LOC).
+
+### Application-level proxy env vars
+Set `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` pointing to a proxy endpoint.
+Problem: inside `CLONE_NEWNET` there's no TCP loopback, so the proxy would
+need to listen on a UDS and programs would need native UDS proxy support
+(most don't). Go's net/http respects `HTTP_PROXY` but not over a Unix socket
+natively.
+
+### Helper-script wrapper
+Provide a `cclaw-fetch` binary in `/bin/` inside the namespace that speaks
+the proxy UDS protocol directly. The LLM is instructed to use `cclaw-fetch`
+instead of `curl`/`wget`. Anything not using the wrapper gets zero network
+(kernel-enforced). Simple but requires LLM cooperation and doesn't help tools
+like `git clone` that internally resolve + connect.

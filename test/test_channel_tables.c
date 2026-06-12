@@ -1,4 +1,5 @@
 #include "db.h"
+#include "test_util.h"
 #include <assert.h>
 #include <signal.h>
 #include <stdio.h>

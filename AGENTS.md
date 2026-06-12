@@ -61,12 +61,13 @@ See [specs/security.md](specs/security.md) for full details.
 - **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted by daemon, injected to agent at fork, cleared from env immediately.
 - **Secret scanner**: AC-based DLP scans all tool results and user messages for leaked credentials before they enter the context window. See [specs/security.md](specs/security.md#secret-scanner-ac-based-content-dlp).
 - **Secret interpolation**: LLMs reference secrets via `{{SECRET:name}}` — cclaw interpolates the real value before tool execution, the context never sees it.
-- **Trust levels**: `agents.trust_level` controls shell sandbox strictness (`trusted`, `standard`, `restricted`). See [specs/shell-trust-levels.md](specs/shell-trust-levels.md).
+- **Trust levels**: `agents.trust_level` controls shell sandbox strictness (`host`, `trusted`, `standard`, `restricted`). Every level except `host` *requires* the namespace sandbox — if it can't be established, the shell refuses to run (fail-closed). See [specs/shell-trust-levels.md](specs/shell-trust-levels.md).
 
 ### Choosing a trust_level for new agents
 
 | Level | Use for |
 |-------|---------|
+| `host` | Dev / hosts without unprivileged userns — **no sandbox at all** (`-y` forces this) |
 | `trusted` | Default agent, bootstrap — full env access, CWD mounted |
 | `standard` | Most agents — clean env, network via proxy, workspace rw |
 | `restricted` | Observer/audit agents — no network, workspace read-only, tight limits |
@@ -111,27 +112,25 @@ Tests must never hang. Follow these rules:
 - **Timeout on `accept()`** — any mock server thread must set `SO_RCVTIMEO` on the listening socket so it doesn't block forever if the client crashes before connecting.
 - **No backward-compatible code** — there are no users yet. No migrations, no deprecation shims, no version checks. Delete old code, don't wrap it.
 - **Subprocess tests** — if forking a child that execs something (python, sh), use `waitpid` with awareness that the child may die.
-- **Makefile enforces timeouts** — `make test-integration` wraps each binary in `timeout 20`. A hung test is killed after 20s. Output goes to `/tmp/cclaw_<testname>.txt`. `alarm()` only needed in tests with intentional sleeps (retry backoff) — set below 20s. Most integration tests need no alarm.
+- **Makefile enforces timeouts** — `make test` wraps each binary in `timeout 20`, `make test-integration` in `timeout 45`. A hung test is killed. Per-test output goes to `/tmp/cclaw_<testname>.txt`. `alarm()` only needed in tests with intentional sleeps (retry backoff) — set below the wrapper timeout. Most tests need no alarm.
 
-**Agent workflow for running tests** (prevents shell hangs):
+**Agent workflow for running tests**:
 
 ```bash
-# Unit tests — fast, safe to run directly
-make test
+# Both targets are pipe-safe: each binary's output is captured to
+# /tmp/cclaw_<testname>.txt and make prints one PASS/FAIL line per suite
+# (plus the tail of the log on failure). `make test | tail -20` is fine.
+make test               # unit tests
+make test-integration   # mock-server tests
 
-# Integration tests — each binary gets timeout 20s, output captured to file
-make test-integration
-
-# Single integration test — redirect to file, read after
-./build/test_integration_foo > /tmp/t.txt 2>&1; echo $?
+# Single test binary — redirect to file, read after
+./build/test_foo > /tmp/t.txt 2>&1; echo $?
 cat /tmp/t.txt            # or: tail -20 /tmp/t.txt
 
-# NEVER pipe a test binary through head/tail/grep directly — it breaks
-# timeouts via SIGPIPE. Always redirect to file first, then read the file.
-
-# NEVER pipe make/build output through grep or head either.
-# Tests already have timeouts (alarm + Makefile wrapper), output goes to /tmp.
-# Just run them directly and check the exit code.
+# NEVER pipe an individual test binary through head/tail/grep — a forked
+# mock-server child can hold the pipe open (reader hangs waiting for EOF),
+# and an early-exit reader SIGPIPEs the test mid-run. The make targets are
+# immune because children inherit a /tmp file fd, never your pipe.
 ```
 
 ## Building

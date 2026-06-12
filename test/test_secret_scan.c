@@ -99,6 +99,90 @@ static void test_redact(void) {
     PASS("redact replaces aws key");
 }
 
+static void test_redact_zero_slack(void) {
+    /* Regression: with cap = len+1 (every inbox/CLI call site) and a tag
+     * longer than the match, scan_replace used to silently leave the secret
+     * in place while redact reported success. */
+    char buf[128];
+    snprintf(buf, sizeof(buf), "my key AKIAIOSFODNN7EXAMPLE is for the s3 bucket");
+    size_t len = strlen(buf);
+    int n = secret_scan_redact(buf, &len, len + 1);
+    assert(n == -1);  /* bytes dropped */
+    assert(strstr(buf, "AKIAIOSFODNN7EXAMPLE") == NULL);
+    assert(strstr(buf, "[SECRET_DETECTED:") != NULL);
+    assert(strstr(buf, " is for") != NULL);  /* tail kept up to capacity */
+    PASS("zero-slack redact removes secret, keeps fitting tail");
+}
+
+static void test_redact_zero_slack_multi(void) {
+    /* Regression: a truncated replacement must not abort the back-to-front
+     * loop — the findings left of the truncation still need redacting. */
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "a AKIAIOSFODNN7EXAMPLE b AKIAIOSFODNN7EXAMPL2 c");
+    size_t len = strlen(buf);
+    int n = secret_scan_redact(buf, &len, len + 1);
+    assert(n == -1);
+    assert(strstr(buf, "AKIAIOSFODNN7EXAMPL") == NULL);
+    PASS("zero-slack redact handles multiple findings");
+}
+
+static void test_no_false_positive_words(void) {
+    /* Regression: the jwt rule used to degenerate to anchor "ey" and flag
+     * every "ey" bigram; collapsing hex/lower charsets to generic ALNUM made
+     * the "sk"/"s." anchors match file paths, base64 and URLs. */
+    const char *texts[] = {
+        "they said the monkey had a key",
+        "/home/user/Desktop/node_modules/react/index.js",
+        "https://docs.google.com/spreadsheets/d/abc123def456",
+        "please review the survey results before friday",
+    };
+    for (size_t t = 0; t < sizeof(texts) / sizeof(texts[0]); t++) {
+        ScanFinding f[8];
+        int n = secret_scan(texts[t], strlen(texts[t]), f, 8);
+        for (int i = 0; i < n; i++)
+            printf("    unexpected: %s in \"%s\"\n", f[i].rule_id, texts[t]);
+        assert(n == 0);
+    }
+    PASS("no false positives on ordinary text");
+}
+
+static void test_twilio_case_pinned(void) {
+    /* twilio is SK[0-9a-fA-F]{32}: real uppercase key matches; the lowercase
+     * "sk"+hex form and ordinary "sk" text do not (case-pinned, hex-only). */
+    const char *hit  = "key SK0123456789abcdef0123456789abcdef rest";
+    const char *miss_lower = "key sk0123456789abcdef0123456789abcdef rest";
+    const char *miss_word  = "the Desktop folder and a task list";
+    ScanFinding f[8];
+
+    int n = secret_scan(hit, strlen(hit), f, 8);
+    int found = 0;
+    for (int i = 0; i < n; i++)
+        if (strcmp(f[i].rule_id, "twilio-api-key") == 0) found = 1;
+    assert(found);
+
+    n = secret_scan(miss_lower, strlen(miss_lower), f, 8);
+    for (int i = 0; i < n; i++)
+        assert(strcmp(f[i].rule_id, "twilio-api-key") != 0);
+
+    n = secret_scan(miss_word, strlen(miss_word), f, 8);
+    assert(n == 0);
+    PASS("twilio case-pinned + hex tail");
+}
+
+static void test_boundary_required(void) {
+    /* A prefix anchor glued to a preceding word char is not a real token
+     * start (mirrors gitleaks' leading \b). */
+    const char *text = "xghp_aB3kL9mXp7qR2wNv4jH8sT5uY1cF6gW0eDzQ";
+    ScanFinding f[8];
+    int n = secret_scan(text, strlen(text), f, 8);
+    int found = 0;
+    for (int i = 0; i < n; i++)
+        if (strcmp(f[i].rule_id, "github-pat") == 0) found = 1;
+    assert(!found);
+    PASS("reject prefix glued to preceding token");
+}
+
 static void test_entropy_calculation(void) {
     /* All same char = 0 entropy */
     float e1 = secret_scan_entropy("aaaaaaaaaa", 10);
@@ -118,7 +202,12 @@ int main(void) {
     test_generic_api_key();
     test_reject_low_entropy();
     test_reject_short_akia();
+    test_no_false_positive_words();
+    test_twilio_case_pinned();
+    test_boundary_required();
     test_redact();
+    test_redact_zero_slack();
+    test_redact_zero_slack_multi();
     test_entropy_calculation();
     printf("  ALL PASSED\n");
     return 0;

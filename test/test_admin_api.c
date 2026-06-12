@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include "admin_api.h"
 #include "db.h"
+#include "test_util.h"
 #include <sqlite3.h>
 #include "agent_config.h"
 

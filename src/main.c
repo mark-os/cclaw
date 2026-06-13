@@ -780,7 +780,7 @@ static void print_usage(void) {
 
 /* Session picker (preserved from old main.c) */
 static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_session) {
-    if (new_session) return session_create(db, "cli", NULL, -1, 0);
+    if (new_session) return session_create(db, "cli", g_agent_name, -1, 0);
     if (requested_id > 0) return requested_id;
 
     const char *sql =
@@ -790,7 +790,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
         " FROM sessions s ORDER BY s.updated_at DESC;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return session_create(db, "cli", NULL, -1, 0);
+        return session_create(db, "cli", g_agent_name, -1, 0);
 
     typedef struct { int64_t id; time_t created; char first[52]; char last[52]; } Row;
     int cap = 8, count = 0;
@@ -809,7 +809,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
     }
     sqlite3_finalize(stmt);
 
-    if (count == 0) { free(rows); return session_create(db, "cli", NULL, -1, 0); }
+    if (count == 0) { free(rows); return session_create(db, "cli", g_agent_name, -1, 0); }
     if (!isatty(STDIN_FILENO)) { int64_t r = rows[0].id; free(rows); return r; }
 
     printf("sessions:\n");
@@ -825,7 +825,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
     char buf[32];
     if (!fgets(buf, sizeof(buf), stdin)) { free(rows); return -1; }
     int64_t result;
-    if (buf[0] == 'n' || buf[0] == 'N') result = session_create(db, "cli", NULL, -1, 0);
+    if (buf[0] == 'n' || buf[0] == 'N') result = session_create(db, "cli", g_agent_name, -1, 0);
     else { int ch = atoi(buf); result = (ch >= 1 && ch <= count) ? rows[ch-1].id : -1; }
     free(rows);
     return result;

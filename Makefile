@@ -106,7 +106,9 @@ $(BUILDDIR)/libcclaw_net.so: src/preload_net.c | $(BUILDDIR)/
 	$(CC) -std=c11 -Wall -Wextra -Werror -shared -fPIC -o $@ $< -ldl
 
 $(BUILDDIR)/preload_blob.h: $(BUILDDIR)/libcclaw_net.so
-	xxd -i $< | sed 's/build_libcclaw_net_so/preload_net_blob/g; s/unsigned/static const unsigned/' > $@
+	printf 'static const unsigned char preload_net_blob[] = {\n' > $@
+	xxd -i < $< >> $@
+	printf '};\nstatic const unsigned int preload_net_blob_len = sizeof(preload_net_blob);\n' >> $@
 
 # Channel runner: universal JS channel binary
 $(BUILDDIR)/mquickjs_stdlib_channel.c: vendor/mquickjs/mqjs_host_channel.c $(BUILDDIR)/gen_stdlib | $(BUILDDIR)/
@@ -118,7 +120,7 @@ $(BUILDDIR)/cr_stdlib.o: $(BUILDDIR)/mquickjs_stdlib_channel.c | $(BUILDDIR)/
 	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
 
 CR_LIB_OBJ := $(BUILDDIR)/admin_api.o $(BUILDDIR)/agent_config.o $(BUILDDIR)/channel_api.o \
-              $(BUILDDIR)/db.o $(BUILDDIR)/wake.o $(BUILDDIR)/secret.o $(BUILDDIR)/config.o \
+              $(BUILDDIR)/db.o $(BUILDDIR)/wake.o $(BUILDDIR)/secret.o $(BUILDDIR)/secret_scan.o $(BUILDDIR)/config.o \
               $(BUILDDIR)/sqlite3.o $(BUILDDIR)/monocypher.o
 
 $(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(MQJS_CORE_OBJ) $(BUILDDIR)/cr_stdlib.o $(CR_LIB_OBJ) | $(BUILDDIR)/

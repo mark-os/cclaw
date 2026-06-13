@@ -1,7 +1,4 @@
 #define _GNU_SOURCE
-#include "tool_shell.h"
-#include "tool_parse.h"
-#include "preload_blob.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -16,8 +13,11 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
-#include <unistd.h>
 #include <time.h>
+#include <unistd.h>
+#include "tool_shell.h"
+#include "tool_parse.h"
+#include "preload_blob.h"
 
 #define SHELL_MAX_OUTPUT (256 * 1024)
 

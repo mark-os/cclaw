@@ -31,14 +31,6 @@ StopReason map_stop_reason(const char *finish_reason) {
     return STOP_REASON_ERROR;
 }
 
-static char *arena_strdup(Arena *a, const char *src) {
-    if (!src) return NULL;
-    size_t len = strlen(src);
-    char *dst = arena_alloc(a, len + 1);
-    if (dst) memcpy(dst, src, len + 1);
-    return dst;
-}
-
 int llm_parse_response(sqlite3 *db, Arena *a, const char *json, LlmResponse *out) {
     if (!json || !out || !db) return -1;
     memset(out, 0, sizeof(*out));

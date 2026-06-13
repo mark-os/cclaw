@@ -42,14 +42,16 @@ char *llm_build_url(Arena *a, const Config *cfg) {
 char *llm_build_auth_header(Arena *a, const Config *cfg) {
     size_t key_len = cfg->provider.api_key ? strlen(cfg->provider.api_key) : 0;
     if (cfg->provider.endpoint_type == ENDPOINT_GEMINI) {
-        char *h = arena_alloc(a, 16 + key_len + 1);
+        size_t cap = 16 + key_len + 1;
+        char *h = arena_alloc(a, cap);
         if (!h) return NULL;
-        sprintf(h, "x-goog-api-key: %s", cfg->provider.api_key ? cfg->provider.api_key : "");
+        snprintf(h, cap, "x-goog-api-key: %s", cfg->provider.api_key ? cfg->provider.api_key : "");
         return h;
     }
-    char *h = arena_alloc(a, 22 + key_len + 1);
+    size_t cap = 22 + key_len + 1;
+    char *h = arena_alloc(a, cap);
     if (!h) return NULL;
-    sprintf(h, "Authorization: Bearer %s", cfg->provider.api_key ? cfg->provider.api_key : "");
+    snprintf(h, cap, "Authorization: Bearer %s", cfg->provider.api_key ? cfg->provider.api_key : "");
     return h;
 }
 

@@ -90,6 +90,11 @@ int db_ingest_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
         int64_t tc_entry = entry_append_typed(db, session_id, turn_id, "tool_call", part++,
                                               args_val, tc_ids[i], tc_names[i],
                                               0, STOP_REASON_NONE, NULL, 0, 0, 0);
+        if (tc_entry < 0) {
+            if (tc_stmt) sqlite3_finalize(tc_stmt);
+            if (out) { free(out->tc_entry_ids); out->tc_entry_ids = NULL; }
+            return -1;
+        }
         if (out && out->tc_entry_ids) out->tc_entry_ids[i] = tc_entry;
 
         if (tc_stmt && tc_entry > 0) {

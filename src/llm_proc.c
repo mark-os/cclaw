@@ -217,9 +217,10 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         const char **tc_ids = NULL, **tc_names = NULL, **tc_args = NULL;
         int tcc = (int)llm_resp.tool_call_count;
         if (tcc > 0) {
-            tc_ids = malloc((size_t)tcc * sizeof(char *));
-            tc_names = malloc((size_t)tcc * sizeof(char *));
-            tc_args = malloc((size_t)tcc * sizeof(char *));
+            tc_ids = arena_alloc(a, (size_t)tcc * sizeof(char *));
+            tc_names = arena_alloc(a, (size_t)tcc * sizeof(char *));
+            tc_args = arena_alloc(a, (size_t)tcc * sizeof(char *));
+            if (!tc_ids || !tc_names || !tc_args) goto err;
             for (int i = 0; i < tcc; i++) {
                 tc_ids[i] = llm_resp.tool_calls[i].id;
                 tc_names[i] = llm_resp.tool_calls[i].name;
@@ -231,7 +232,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                         llm_resp.content, llm_resp.reasoning, llm_resp.finish_reason,
                         llm_resp.usage.prompt_tokens, llm_resp.usage.completion_tokens,
                         llm_resp.usage.cost_nano, tc_ids, tc_names, tc_args, tcc, &ir);
-        free(tc_ids); free(tc_names); free(tc_args); free(ir.tc_entry_ids);
+        free(ir.tc_entry_ids);
         free(recall_text); free(system_prompt); context_plan_free(&plan);
         arena_destroy(a); config_free(cfg); free(agent_name_alloc);
         return 0;
@@ -408,9 +409,10 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     const char **tc_ids = NULL, **tc_names = NULL, **tc_args = NULL;
     int tc_count = (int)llm_resp.tool_call_count;
     if (tc_count > 0) {
-        tc_ids = malloc((size_t)tc_count * sizeof(char *));
-        tc_names = malloc((size_t)tc_count * sizeof(char *));
-        tc_args = malloc((size_t)tc_count * sizeof(char *));
+        tc_ids = arena_alloc(a, (size_t)tc_count * sizeof(char *));
+        tc_names = arena_alloc(a, (size_t)tc_count * sizeof(char *));
+        tc_args = arena_alloc(a, (size_t)tc_count * sizeof(char *));
+        if (!tc_ids || !tc_names || !tc_args) goto err;
         for (int i = 0; i < tc_count; i++) {
             tc_ids[i] = llm_resp.tool_calls[i].id;
             tc_names[i] = llm_resp.tool_calls[i].name;
@@ -425,7 +427,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                              llm_resp.usage.prompt_tokens, llm_resp.usage.completion_tokens,
                              llm_resp.usage.cost_nano,
                              tc_ids, tc_names, tc_args, tc_count, &ir);
-    free(tc_ids); free(tc_names); free(tc_args);
     if (rc != 0) { LOG_DEBUG_(cfg, "llm_req: db_ingest_typed failed"); goto err; }
     free(ir.tc_entry_ids);
 

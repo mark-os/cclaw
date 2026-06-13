@@ -31,14 +31,6 @@ StopReason map_stop_reason(const char *finish_reason) {
     return STOP_REASON_ERROR;
 }
 
-static char *arena_strdup(Arena *a, const char *src) {
-    if (!src) return NULL;
-    size_t len = strlen(src);
-    char *dst = arena_alloc(a, len + 1);
-    if (dst) memcpy(dst, src, len + 1);
-    return dst;
-}
-
 int llm_parse_response(sqlite3 *db, Arena *a, const char *json, LlmResponse *out) {
     if (!json || !out || !db) return -1;
     memset(out, 0, sizeof(*out));
@@ -108,30 +100,39 @@ int llm_parse_response(sqlite3 *db, Arena *a, const char *json, LlmResponse *out
 
     /* Extract tool_calls array */
     const char *tc_sql =
-        "SELECT json_extract(value,'$.id'),"
-        " json_extract(value,'$.function.name'),"
-        " json_extract(value,'$.function.arguments')"
+        "SELECT json_group_array(json_object('id',json_extract(value,'$.id'),"
+        "'name',json_extract(value,'$.function.name'),"
+        "'args',json_extract(value,'$.function.arguments')))"
         " FROM json_each(?1,'$.choices[0].message.tool_calls')";
     if (sqlite3_prepare_v2(db, tc_sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, json, -1, SQLITE_STATIC);
-
-        /* Count first */
-        int count = 0;
-        while (sqlite3_step(stmt) == SQLITE_ROW) count++;
-        sqlite3_reset(stmt);
-
-        if (count > 0) {
-            out->tool_calls = arena_alloc(a, (size_t)count * sizeof(ToolCall));
-            out->tool_call_count = (size_t)count;
-            int i = 0;
-            while (sqlite3_step(stmt) == SQLITE_ROW && i < count) {
-                const char *id = (const char *)sqlite3_column_text(stmt, 0);
-                const char *name = (const char *)sqlite3_column_text(stmt, 1);
-                const char *args = (const char *)sqlite3_column_text(stmt, 2);
-                out->tool_calls[i].id = arena_strdup(a, id ? id : "");
-                out->tool_calls[i].name = arena_strdup(a, name ? name : "");
-                out->tool_calls[i].arguments = arena_strdup(a, args ? args : "");
-                i++;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *tc_json = (const char *)sqlite3_column_text(stmt, 0);
+            if (tc_json && strcmp(tc_json, "[]") != 0) {
+                sqlite3_stmt *each_stmt;
+                if (sqlite3_prepare_v2(db, "SELECT json_extract(value,'$.id'), "
+                    "json_extract(value,'$.name'), json_extract(value,'$.args') "
+                    "FROM json_each(?)", -1, &each_stmt, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(each_stmt, 1, tc_json, -1, SQLITE_STATIC);
+                    int count = 0;
+                    while (sqlite3_step(each_stmt) == SQLITE_ROW) count++;
+                    sqlite3_reset(each_stmt);
+                    if (count > 0) {
+                        out->tool_calls = arena_alloc(a, (size_t)count * sizeof(ToolCall));
+                        out->tool_call_count = (size_t)count;
+                        int i = 0;
+                        while (sqlite3_step(each_stmt) == SQLITE_ROW && i < count) {
+                            const char *id = (const char *)sqlite3_column_text(each_stmt, 0);
+                            const char *name = (const char *)sqlite3_column_text(each_stmt, 1);
+                            const char *args = (const char *)sqlite3_column_text(each_stmt, 2);
+                            out->tool_calls[i].id = arena_strdup(a, id ? id : "");
+                            out->tool_calls[i].name = arena_strdup(a, name ? name : "");
+                            out->tool_calls[i].arguments = arena_strdup(a, args ? args : "");
+                            i++;
+                        }
+                    }
+                    sqlite3_finalize(each_stmt);
+                }
             }
         }
         sqlite3_finalize(stmt);
@@ -145,47 +146,50 @@ int llm_parse_response_gemini(sqlite3 *db, Arena *a, const char *json, LlmRespon
     if (!json || !out || !db) return -1;
     memset(out, 0, sizeof(*out));
 
-    /* Validate candidates array */
-    const char *check_sql = "SELECT json_array_length(?1,'$.candidates')";
+    const char *scalar_sql =
+        "SELECT "
+        " json_extract(?1,'$.candidates[0].finishReason'), "
+        " (SELECT group_concat(json_extract(value,'$.text'), char(10)) "
+        "  FROM json_each(?1,'$.candidates[0].content.parts') "
+        "  WHERE json_extract(value,'$.text') IS NOT NULL), "
+        " json_extract(?1,'$.usageMetadata.promptTokenCount'), "
+        " json_extract(?1,'$.usageMetadata.candidatesTokenCount'), "
+        " json_extract(?1,'$.usageMetadata.totalTokenCount'), "
+        " json_extract(?1,'$.usageMetadata.cachedContentTokenCount'), "
+        " json_array_length(?1,'$.candidates')";
+
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, check_sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    if (sqlite3_prepare_v2(db, scalar_sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, json, -1, SQLITE_STATIC);
-    int has_candidates = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) == SQLITE_INTEGER)
-        has_candidates = sqlite3_column_int(stmt, 0) > 0;
+
+    if (sqlite3_step(stmt) != SQLITE_ROW || sqlite3_column_int(stmt, 6) <= 0) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    const char *gr = (const char *)sqlite3_column_text(stmt, 0);
+    if (gr) {
+        /* Map Gemini finishReason to OpenAI-style for StopReason mapping */
+        const char *mapped = gr;
+        if (strcmp(gr, "STOP") == 0) mapped = "stop";
+        else if (strcmp(gr, "MAX_TOKENS") == 0) mapped = "length";
+        else if (strcmp(gr, "SAFETY") == 0 || strcmp(gr, "RECITATION") == 0)
+            mapped = "content_filter";
+        out->finish_reason = arena_strdup(a, mapped);
+    }
+
+    const char *v = (const char *)sqlite3_column_text(stmt, 1);
+    if (v) out->content = arena_strdup(a, v);
+
+    out->usage.prompt_tokens = sqlite3_column_int(stmt, 2);
+    out->usage.completion_tokens = sqlite3_column_int(stmt, 3);
+    if (sqlite3_column_type(stmt, 4) == SQLITE_INTEGER)
+        out->usage.total_tokens = sqlite3_column_int(stmt, 4);
+    else
+        out->usage.total_tokens = out->usage.prompt_tokens + out->usage.completion_tokens;
+    out->usage.cache_read_tokens = sqlite3_column_int(stmt, 5);
+
     sqlite3_finalize(stmt);
-    if (!has_candidates) return -1;
-
-    /* Extract finishReason and map to OpenAI-style */
-    const char *fr_sql = "SELECT json_extract(?1,'$.candidates[0].finishReason')";
-    if (sqlite3_prepare_v2(db, fr_sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, json, -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char *gr = (const char *)sqlite3_column_text(stmt, 0);
-            if (gr) {
-                if (strcmp(gr, "STOP") == 0) out->finish_reason = arena_strdup(a, "stop");
-                else if (strcmp(gr, "MAX_TOKENS") == 0) out->finish_reason = arena_strdup(a, "length");
-                else if (strcmp(gr, "SAFETY") == 0 || strcmp(gr, "RECITATION") == 0)
-                    out->finish_reason = arena_strdup(a, "content_filter");
-                else out->finish_reason = arena_strdup(a, gr);
-            }
-        }
-        sqlite3_finalize(stmt);
-    }
-
-    /* Extract text parts (concatenate) */
-    const char *text_sql =
-        "SELECT group_concat(json_extract(value,'$.text'), char(10))"
-        " FROM json_each(?1,'$.candidates[0].content.parts')"
-        " WHERE json_extract(value,'$.text') IS NOT NULL";
-    if (sqlite3_prepare_v2(db, text_sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, json, -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char *v = (const char *)sqlite3_column_text(stmt, 0);
-            if (v) out->content = arena_strdup(a, v);
-        }
-        sqlite3_finalize(stmt);
-    }
 
     /* Extract functionCall parts */
     const char *fc_sql =
@@ -215,29 +219,6 @@ int llm_parse_response_gemini(sqlite3 *db, Arena *a, const char *json, LlmRespon
             }
             if (!out->finish_reason || strcmp(out->finish_reason, "stop") == 0)
                 out->finish_reason = arena_strdup(a, "tool_calls");
-        }
-        sqlite3_finalize(stmt);
-    }
-
-    /* usageMetadata */
-    const char *usage_sql =
-        "SELECT json_extract(?1,'$.usageMetadata.promptTokenCount'),"
-        " json_extract(?1,'$.usageMetadata.candidatesTokenCount'),"
-        " json_extract(?1,'$.usageMetadata.totalTokenCount'),"
-        " json_extract(?1,'$.usageMetadata.cachedContentTokenCount')";
-    if (sqlite3_prepare_v2(db, usage_sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, json, -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            if (sqlite3_column_type(stmt, 0) == SQLITE_INTEGER)
-                out->usage.prompt_tokens = sqlite3_column_int(stmt, 0);
-            if (sqlite3_column_type(stmt, 1) == SQLITE_INTEGER)
-                out->usage.completion_tokens = sqlite3_column_int(stmt, 1);
-            if (sqlite3_column_type(stmt, 2) == SQLITE_INTEGER)
-                out->usage.total_tokens = sqlite3_column_int(stmt, 2);
-            else
-                out->usage.total_tokens = out->usage.prompt_tokens + out->usage.completion_tokens;
-            if (sqlite3_column_type(stmt, 3) == SQLITE_INTEGER)
-                out->usage.cache_read_tokens = sqlite3_column_int(stmt, 3);
         }
         sqlite3_finalize(stmt);
     }

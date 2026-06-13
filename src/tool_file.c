@@ -17,7 +17,7 @@ static const char *FILE_READ_PARAMS_JSON =
 /* V1: check resolved path starts with resolved workspace */
 static int path_in_workspace(const char *filepath, const char *workspace, char *resolved, size_t resolved_size) {
     char ws_resolved[PATH_MAX];
-    if (!realpath(workspace, ws_resolved)) return 0;
+    if (!workspace || !realpath(workspace, ws_resolved)) return 0;
     if (!realpath(filepath, resolved)) return 0;
 
     size_t ws_len = strlen(ws_resolved);
@@ -27,6 +27,31 @@ static int path_in_workspace(const char *filepath, const char *workspace, char *
     if (strncmp(resolved, ws_resolved, ws_len) != 0) return 0;
     if (resolved[ws_len] != '/' && resolved[ws_len] != '\0') return 0;
     return 1;
+}
+
+/* Common path builder and validator. Returns resolved path or NULL. */
+static char *resolve_and_validate(const char *req_path, const char *workspace,
+                                 const char *extra_path, const char *cclaw_path,
+                                 char *resolved_out) {
+    if (!req_path || !workspace) return NULL;
+
+    char fullpath[PATH_MAX];
+    if (req_path[0] == '/') {
+        snprintf(fullpath, sizeof(fullpath), "%s", req_path);
+    } else {
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
+    }
+
+    if (path_in_workspace(fullpath, workspace, resolved_out, PATH_MAX))
+        return resolved_out;
+
+    if (extra_path && path_in_workspace(fullpath, extra_path, resolved_out, PATH_MAX))
+        return resolved_out;
+
+    if (cclaw_path && path_in_workspace(fullpath, cclaw_path, resolved_out, PATH_MAX))
+        return resolved_out;
+
+    return NULL;
 }
 
 char *tool_file_read_handler(const char *arguments, void *user_data) {
@@ -44,30 +69,13 @@ char *tool_file_read_handler(const char *arguments, void *user_data) {
         return strdup("error: missing or empty 'path' field");
     }
 
-    /* Build full path: workspace + "/" + path (if relative) */
-    char fullpath[PATH_MAX];
-    if (req_path[0] == '/') {
-        snprintf(fullpath, sizeof(fullpath), "%s", req_path);
-    } else {
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
-    }
-    tool_parse_free(&ta);
-
-    /* V1: verify path is within workspace, extra_read_path, or cclaw_path (T228) */
     char resolved[PATH_MAX];
-    if (!path_in_workspace(fullpath, workspace, resolved, sizeof(resolved))) {
-        /* T118: check extra read path */
-        if (ctx->extra_read_path &&
-            path_in_workspace(fullpath, ctx->extra_read_path, resolved, sizeof(resolved)))
-            goto read_file;
-        /* T228: check CCLAW_PATH (CWD, read-only) */
-        if (ctx->cclaw_path &&
-            path_in_workspace(fullpath, ctx->cclaw_path, resolved, sizeof(resolved)))
-            goto read_file;
+    if (!resolve_and_validate(req_path, workspace, ctx->extra_read_path,
+                             ctx->cclaw_path, resolved)) {
+        tool_parse_free(&ta);
         return strdup("error: path outside workspace");
     }
-
-read_file:;
+    tool_parse_free(&ta);
 
     FILE *f = fopen(resolved, "rb");
     if (!f) return strdup("error: cannot open file");
@@ -145,34 +153,18 @@ char *tool_file_write_handler(const char *arguments, void *user_data) {
         return strdup("error: missing 'content' field");
     }
 
-    /* Build full path */
-    char fullpath[PATH_MAX];
-    if (req_path[0] == '/') {
-        snprintf(fullpath, sizeof(fullpath), "%s", req_path);
-    } else {
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
-    }
-
-    /* V1: try realpath first (file exists → overwrite case) */
     char resolved[PATH_MAX];
-    char ws_resolved[PATH_MAX];
-    if (!realpath(workspace, ws_resolved)) {
-        tool_parse_free(&ta);
-        return strdup("error: invalid workspace");
-    }
-    size_t ws_len = strlen(ws_resolved);
-
     char *write_path = NULL;
-    if (realpath(fullpath, resolved)) {
-        /* File exists — check it's in workspace */
-        if (strncmp(resolved, ws_resolved, ws_len) != 0 ||
-            (resolved[ws_len] != '/' && resolved[ws_len] != '\0')) {
-            tool_parse_free(&ta);
-            return strdup("error: path outside workspace");
-        }
+
+    /* V1: try resolving existing file first */
+    if (resolve_and_validate(req_path, workspace, NULL, NULL, resolved)) {
         write_path = resolved;
     } else {
         /* New file — validate parent is in workspace */
+        char fullpath[PATH_MAX];
+        if (req_path[0] == '/') snprintf(fullpath, sizeof(fullpath), "%s", req_path);
+        else snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
+
         char validated[PATH_MAX];
         if (!parent_in_workspace(fullpath, workspace, validated, sizeof(validated))) {
             tool_parse_free(&ta);

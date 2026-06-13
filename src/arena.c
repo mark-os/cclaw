@@ -1,6 +1,7 @@
 #include "arena.h"
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 
 Arena *arena_create(size_t capacity) {
     Arena *a = malloc(sizeof(Arena));
@@ -21,6 +22,29 @@ void *arena_alloc(Arena *a, size_t n) {
     return ptr;
 }
 
+void arena_reset(Arena *a) {
+    if (a) a->used = 0;
+}
+
+char *arena_strdup(Arena *a, const char *s) {
+    if (!s) return NULL;
+    size_t len = strlen(s);
+    char *dst = arena_alloc(a, len + 1);
+    if (dst) memcpy(dst, s, len + 1);
+    return dst;
+}
+
+char *arena_strndup(Arena *a, const char *s, size_t n) {
+    if (!s) return NULL;
+    size_t len = 0;
+    while (len < n && s[len]) len++;
+    char *dst = arena_alloc(a, len + 1);
+    if (dst) {
+        memcpy(dst, s, len);
+        dst[len] = '\0';
+    }
+    return dst;
+}
 
 void arena_destroy(Arena *a) {
     if (a) {

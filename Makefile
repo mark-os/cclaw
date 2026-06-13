@@ -106,7 +106,7 @@ $(BUILDDIR)/libcclaw_net.so: src/preload_net.c | $(BUILDDIR)/
 	$(CC) -std=c11 -Wall -Wextra -Werror -shared -fPIC -o $@ $< -ldl
 
 $(BUILDDIR)/preload_blob.h: $(BUILDDIR)/libcclaw_net.so
-	python3 scripts/bin2c.py $< $@
+	( echo 'static const unsigned char preload_net_blob[] = {'; xxd -i < $<; echo '};'; echo 'static const unsigned int preload_net_blob_len = sizeof(preload_net_blob);' ) > $@
 
 # Channel runner: universal JS channel binary
 $(BUILDDIR)/mquickjs_stdlib_channel.c: vendor/mquickjs/mqjs_host_channel.c $(BUILDDIR)/gen_stdlib | $(BUILDDIR)/

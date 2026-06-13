@@ -1,6 +1,6 @@
 # CClaw
 
-A minimal autonomous AI agent runtime in C. Single binary, multi-agent, fork+exec for isolation. Runs anywhere libcurl does.
+A minimal autonomous AI agent runtime in C. Single binary, multi-agent, sandbox isolation via fork+exec for tools. Runs anywhere libcurl does.
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ All state lives in a single SQLite WAL database (`cclaw.db`). Sessions, entries,
 
 **CLI mode** (default): main process with worker thread pool. Simple, fast, no daemon.
 
-**Daemon mode** (`--daemon`): adds Telegram polling, webhook server, cron scheduling, and multi-agent coordination. Worker threads handle concurrent sessions. `--llm-fork` is available as a fallback that fork+execs each LLM call for full process isolation at the cost of connection reuse.
+**Daemon mode** (`--daemon`): adds Telegram polling, webhook server, cron scheduling, and multi-agent coordination. Worker threads handle concurrent sessions.
 
 ## Secure
 
@@ -40,7 +40,7 @@ Agent tool calls are sandboxed at multiple levels:
 - **Network proxy** — shell children that need HTTP connect back to the parent via a Unix domain socket. The parent enforces a per-agent host allowlist before forwarding. No unvetted outbound connections.
 - **Workspace isolation** — file tools are scoped to `agents/<name>/workspace/`. No traversal, no access to other agents' data.
 - **Secrets** — encrypted at rest in cclaw.db (ChaCha20-Poly1305, via Monocypher). Decrypted only at runtime, injected via env, never exposed to the model or logged.
-- **Resource limits** — agent processes get `setrlimit` caps (memory, CPU time) preventing runaway consumption.
+- **Resource limits** — `setrlimit` caps (memory, CPU time) prevent runaway consumption.
 
 ## Portable
 
@@ -72,7 +72,7 @@ Agents can request their own reconfiguration through exit codes and tool calls:
 - **Provider configuration** — agents call `configure_provider` to set API keys, models, endpoints
 - **Channel configuration** — agents call `configure_channel` to set up Telegram bots or webhooks
 - **Agent creation** — agents call `create_agent` to spawn new agents with custom system prompts and tool permissions
-- **Approval flow** — agents can request human approval for sensitive operations (exit code 3 → daemon queues for approval)
+- **Approval flow** — agents can request human approval for sensitive operations via tool calls
 - **Escalation** — a sub-agent that hits its limits can escalate to its parent agent
 
 Configuration is hierarchical: env vars override DB values override defaults. Agents read from DB but can only write through sanctioned tool calls.
@@ -109,7 +109,6 @@ cclaw --new              # force new session
 cclaw --daemon           # daemon mode (channels, cron, multi-agent)
 cclaw -v                 # debug logging (timing, SQL profiling)
 cclaw -vv                # trace logging (full LLM req/resp JSON)
-cclaw --llm-fork         # use fork-per-call instead of thread pool
 cclaw --help             # all options
 ```
 

@@ -42,7 +42,7 @@ int main(void) {
     AgentSetup setup;
     agent_setup_init(&setup, db, sid, cfg, "default", NULL, 0, AGENT_SETUP_CLI);
     int rc = test_run_session(db, sid, &setup);
-    assert(rc == LLM_EXIT_STOP);
+    assert(rc == 0);
 
     /* Verify usage_in and usage_out on assistant entry (role=2 is ROLE_ASSISTANT) */
     sqlite3_stmt *stmt;

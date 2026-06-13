@@ -72,13 +72,13 @@ Note: OpenClaw concatenates ALL non-empty assistant texts from turn as fallback;
 
 ## Async Considerations
 
-Agent process lifecycle:
-1. Fork → drain inbox → LLM loop → write final entry → exit code
-2. Parent (daemon/CLI) reaps → reads DB → delivers response
+Agent turn lifecycle:
+1. Worker thread: llm_req() → write entry to DB → notify main
+2. Main thread: advance_session() → dispatch tools or deliver response
 
-The agent ! always write a final entry before exit. The delivery layer reads from DB post-exit. There is no in-flight state to lose — everything is persisted before the process dies.
+The agent always writes a final entry before completion. The delivery layer reads from DB. There is no in-flight state to lose — everything is persisted before advancing.
 
-Exception: zero-usage retry happens WITHIN the agent process (no exit/re-fork). The agent simply loops internally. From the parent's perspective, the turn just takes longer.
+Exception: zero-usage retry happens WITHIN llm_req (no re-dispatch). The worker simply retries internally. From the main loop's perspective, the turn just takes longer.
 
 ## Log Levels & Observability
 

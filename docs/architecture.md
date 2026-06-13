@@ -4,97 +4,92 @@
 
 CClaw has two execution modes sharing the same binary:
 
-**CLI mode** (default): single process, runs the agent loop directly. No daemon, no threads (except the credential proxy for shell children). Opens `~/.cclaw/cclaw.db` and talks to the LLM.
+**CLI mode** (default): single process with a worker thread pool for LLM calls. Poll loop handles stdin, worker completions, and tool child processes. Opens `~/.cclaw/cclaw.db` directly.
 
-**Daemon mode** (`--daemon`): epoll loop that forks isolated agent processes per session turn. Manages channels (Telegram, webhooks), cron, and the web dashboard. Never executes LLM logic itself.
+**Daemon mode** (`--daemon`): same process model plus channel management (Telegram, webhooks), cron scheduling, web dashboard, and multi-agent coordination. Worker threads handle concurrent sessions.
 
 ```
-Daemon (optional)                    Agent process (forked or standalone)
-├── Telegram poller thread           ├── Opens cclaw.db (shared, via CCLAW_DB)
-├── Civetweb thread (webhooks)       ├── setrlimit (memory/CPU caps)
-├── Cron scheduler thread            ├── Drains inbox → builds context
-├── Heartbeat thread                 ├── LLM call (libcurl)
-├── Epoll: signal pipe + SIGCHLD     ├── Tool dispatch loop
-│                                    ├── Writes response to DB
-└── Forks agent on inbox signal      └── exit(code) — signals intent
+Main process
+├─ main thread: poll loop (stdin/wake/fifo, signals, worker notifications)
+├─ worker threads (1–N elastic, each owns sqlite3* + CURL*)
+│    LLM HTTP calls, connection reuse, 30s idle timeout
+│
+├─ fork+exec → shell children (sandboxed: namespaces, no direct network)
+├─ fork+exec → channel runners (long-lived, per messaging platform)
+├─ civetweb thread (webhooks, dashboard)
+├─ heartbeat thread
+└─ cron scheduler thread
 ```
 
 ## Single DB
 
-All state lives in `cclaw.db`. Agent data scoped by `agent_name` column. Sessions scoped by `session_id`. Parent (CLI/daemon) is primary writer.
+All state lives in `cclaw.db` (WAL mode). Sessions, entries, config, memory, secrets, job queue — one file, one source of truth. WAL allows concurrent reads/writes across threads without blocking.
 
 See [specs/schema.md](../specs/schema.md) for full DDL.
+
+## Turn Lifecycle
+
+```
+1. Message arrives (Telegram, cron, webhook, sub-agent completion, CLI stdin)
+2. inbox_insert(session_id, source, payload)
+3. Wake notification → poll loop wakes
+4. advance_session(session_id) — state machine decides next action:
+   - DISPATCH_LLM → submit to worker thread pool
+   - DISPATCH_TOOLS → fork tool children or run inline
+   - DONE → deliver response
+5. Worker thread: llm_req() → HTTP call → write entry to DB → notify main
+6. Main thread: run_advance() → check for tool calls → dispatch or deliver
+7. Tool children: fork, execute, write result via pipe → reap → advance again
+8. Repeat until stop_reason == "stop" with no pending tool calls
+```
 
 ## LLM Request Pipeline
 
 ### Two-Pass Context Building
 
-Building an LLM request never loads the full session into memory:
+1. **Plan pass** (index-only): Recursive CTE walks `parent_id` from `leaf_id` to root, collecting entry metadata. Covered entirely by index — no content loaded.
 
-1. **Plan pass** (index-only): Recursive CTE walks `parent_id` from `leaf_id` to root, collecting entry metadata (`role`, `stop_reason`, `token_estimate`, `tool_call_count`). Covered entirely by `idx_entries_plan` — no main table access, no content loaded. Result is reversed to root→leaf order.
+2. **Cut**: Walk from leaf toward root, accumulating token estimates until budget exhausted. Tool-call groups kept/dropped as a unit.
 
-2. **Cut**: Walk the plan array from leaf toward root, accumulating token estimates until budget is exhausted. Tool-call groups (assistant + tool_results) are kept or dropped as a unit.
-
-3. **Payload pass**: Surviving entry IDs go into a temp `_plan` table. SQL joins `_plan` against `entries` to produce the final JSON payload via `json_object()`/`json_group_array()` — one query per provider format (OpenAI or Gemini). The result is zero-copy: `payload.body` points directly into the SQLite statement result buffer until `llm_payload_release()`.
-
-### Why Entries Are One Row Per Piece
-
-An assistant turn with tool calls is stored as separate entries:
-
-```
-reasoning (type='reasoning', part_index=0)
-  → assistant_message (type='assistant_message', part_index=1)
-    → tool_call (type='tool_call', part_index=2)
-      → tool_call (type='tool_call', part_index=3)
-```
-
-Each is a node in the `parent_id` chain. This design is driven by four requirements:
-
-**Multi-provider wire emission (V60)**: Each provider reassembles tool calls differently — OpenAI stringifies args, Gemini uses native objects in a `parts` array, Anthropic uses content blocks. Storing args as a plain `content` column per tool_call entry lets the SQL payload builder emit any format without parsing JSON.
-
-**Streaming writes**: Tool calls arrive incrementally during SSE streaming. Each call is committed as its own entry the moment assembly completes, rather than buffering the entire turn.
-
-**Uniform tree for planning (V56)**: The plan pass walks a linked list of entries using only integer columns. If tool calls were embedded JSON inside the assistant entry, planning would need to parse content to count or estimate them.
-
-**Daemon dispatch (V13/V77)**: When an agent exits with code 2/3, the daemon finds the specific `tool_call` entry by `tool_call_id` to read spawn/approval args — a simple `SELECT content FROM entries WHERE tool_call_id=?`.
-
-The cost is that OpenAI-format payload building requires correlated subqueries to re-merge tool_call entries back into the assistant message's `tool_calls` array. This runs only on entries that survived the cut (~20-50 entries), indexed by `turn_id`.
+3. **Payload pass**: Surviving entry IDs joined against `entries` to produce JSON payload via SQLite `json_object()`/`json_group_array()`. Zero-copy: payload body points into SQLite statement buffer until `llm_payload_release()`.
 
 ### Prompt Caching
 
-All major providers offer prefix-based caching — if the beginning of your request matches a previous request, the cached prefix is reused at reduced cost. CClaw benefits from this automatically because:
+Providers offer prefix-based caching automatically. CClaw benefits because:
+- Payload is deterministic (same entries → same JSON, byte-for-byte)
+- Conversations grow by appending — prefix is stable
+- Recall text appended after messages, doesn't break cache
 
-1. The payload is deterministic (same entries → same JSON, byte-for-byte).
-2. Conversations grow by appending at the end — the prefix (prior turns) is stable.
-3. No per-request variation is injected into the prefix (recall text is appended after all messages).
+## State Machine
 
-Provider-specific behavior:
+Session state drives the event loop via `advance_session()`:
 
-- **OpenAI/OpenRouter/Gemini**: Fully implicit. No wire format changes. Send the same prefix, get automatic savings. OpenAI caches at every 128-token boundary (min 1024 tokens), so partial prefix matches work — appending varying content at the end doesn't prevent cache hits on the stable prefix.
-- **Anthropic**: Requires opt-in via `"cache_control": {"type": "ephemeral"}` on the request body. Still a single request format — not a 2-step upload-then-reference flow. The server caches at the breakpoint, charges writes at 1.25× and reads at 0.1× base cost.
-- **OpenRouter sticky routing**: Routes subsequent requests to the same physical backend so the KV cache stays warm. Automatic when cache usage is detected, or force with `session_id` header.
+```
+idle ──[inbox has work]──→ llm_running ──[tool_calls]──→ tool_running
+  ↑                            │                              │
+  │                            └──[stop, no tools]────────────┘
+  │                                                           │
+  └───────────────────────[all tools done]────────────────────┘
+                               ↓
+                          compacting (optional)
+                               ↓
+                             idle
+```
 
-What breaks the cache:
+Special states: `waiting` (blocked on sub-agent), `rate_limited`.
 
-- **Changing tool definitions**: Tools are serialized before messages in the cache prefix (`tools → system → messages`). Any modification invalidates the entire cache. Accept the one-turn miss for rare tool changes, or keep a stable core toolset.
-- **Changing the system prompt**: Same as tools — it's part of the prefix.
-- **Recall text at the end**: Does NOT break the cache. It's appended after all messages, past the stable prefix. Providers cache sub-prefixes (128-token boundaries on OpenAI), so the conversation portion gets cache hits regardless of trailing content.
+## Security Layers
 
-## Exit Code Protocol
+| Layer | Protects | Enforced by |
+|-------|----------|-------------|
+| setrlimit | Resource exhaustion | Kernel (main process) |
+| http_check_policy | Network exfiltration | Application (LLM calls) |
+| Namespace sandbox | Filesystem + network | Kernel (shell children) |
+| UDS proxy | Host allowlist for shell | Application (proxy thread) |
+| Env stripping | Secret leakage to shell | Application (fork) |
+| Encrypted secrets | Disk theft | ChaCha20-Poly1305 (cclaw.db) |
 
-Agent processes communicate intent to the daemon via exit codes. The daemon reads details from cclaw.db after reap.
-
-| Code | Meaning | Daemon Action |
-|------|---------|---------------|
-| 0 | Turn complete | Deliver last assistant entry to channel |
-| 1 | Error | Log error, mark session idle |
-| 2 | Spawn sub-agent | Read tool_call args, fork child agent |
-| 3 | Approval needed | Read tool_call args, notify admin |
-| 4 | Config change | Read tool_call args, validate + apply |
-| 127 | exec failed | Log error |
-| 128+N | Killed by signal N | Log crash, synthesize error entry |
-
-In CLI mode, exit codes are unused — the process handles everything inline.
+See [specs/security.md](../specs/security.md) for full details.
 
 ## First-Run Flow
 
@@ -102,26 +97,5 @@ In CLI mode, exit codes are unused — the process handles everything inline.
 2. Create `~/.cclaw/`, generate `.cclaw_key` (32 random bytes, mode 0600)
 3. Create `cclaw.db` with schema, seed default config
 4. If `OPENROUTER_API_KEY` in env → encrypt and store in cclaw.db kv
-5. Create default agent in cclaw.db + `agents/default/workspace/`
+5. Create default agent + `agents/default/workspace/`
 6. Enter agent loop — user is chatting immediately
-
-Total first-run overhead: ~165ms (schema creation + WAL init).
-
-## Config Injection
-
-Daemon reads agent config from cclaw.db at fork time, injects as `CCLAW_*` env vars. Agent processes only read env vars — never open cclaw.db for config lookup (they open it for data access via `CCLAW_DB`).
-
-See [docs/configs.md](configs.md) for the full config reference.
-
-## Security Layers
-
-| Layer | Protects | Enforced by |
-|-------|----------|-------------|
-| setrlimit | Resource exhaustion | Kernel (agent process) |
-| http_check_policy | Network exfiltration | Application (agent process) |
-| Namespace sandbox | Filesystem + network | Kernel (shell children) |
-| UDS proxy | Host allowlist for shell | Application (agent process) |
-| Env stripping | Secret leakage to shell | Application (agent process) |
-| Encrypted secrets | Disk theft | ChaCha20-Poly1305 (cclaw.db) |
-
-See [specs/security.md](../specs/security.md) for full details.

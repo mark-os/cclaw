@@ -27,9 +27,7 @@ void llm_worker_stop(void);
  * Returns 0 on success, -1 on error. */
 int llm_worker_submit_compact(sqlite3 *db, int64_t session_id, const char *agent_name);
 
-/* No-ops (kept for API compat with main.c) */
-int llm_worker_respawn(void);
+/* Check if worker pool is running */
 int llm_worker_alive(void);
-pid_t llm_worker_pid(void);
 
 #endif

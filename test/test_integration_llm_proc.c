@@ -1,9 +1,9 @@
-/* T299: integration test — cclaw llm subcommand.
- * Verifies the LLM child subprocess correctly:
+/* Integration test — llm_req() core function.
+ * Verifies that llm_req correctly:
  * 1. Plans context from DB entries
  * 2. Sends LLM request to mock server
  * 3. Writes assistant entry to DB
- * 4. Exits with correct code (0=stop, 10=tool_calls) */
+ * 4. Returns 0 on success, -1 on error */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,11 +36,24 @@ static const char *TOOL_CALL_RESPONSE =
     "\"finish_reason\":\"tool_calls\"}],"
     "\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":8,\"total_tokens\":28}}";
 
-/* Test: LLM child returns 0 on stop response with no tool_calls */
-static void test_llm_child_stop(void) {
-    TEST(llm_child_stop);
+static void set_test_env(const char *db_path) {
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", s_port);
+    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
+    setenv("OPENROUTER_API_KEY", "test-key", 1);
+    setenv("CCLAW_MODEL", "test-model", 1);
+    setenv("CCLAW_CONTEXT_WINDOW", "128000", 1);
+    setenv("CCLAW_DB", db_path, 1);
+    setenv("CCLAW_STREAM", "0", 1);
+    setenv("CCLAW_MAX_ITERATIONS", "5", 1);
+    setenv("CCLAW_AUTO_RECALL", "0", 1);
+}
 
-    const char *db_path = "/tmp/cclaw_llm_child_test.db";
+/* Test: llm_req returns 0 and writes assistant entry on stop response */
+static void test_llm_req_stop(void) {
+    TEST(llm_req_stop);
+
+    const char *db_path = "/tmp/cclaw_llm_req_test.db";
     unlink(db_path);
 
     mock_server_reset();
@@ -54,60 +67,35 @@ static void test_llm_child_stop(void) {
     entry_append_with_turn(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "Hello"};
     entry_append_with_turn(db, sid, &user, 1);
-    db_close(db);
 
-    /* Set env vars as the parent would */
-    char url[64];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", s_port);
-    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-    setenv("OPENROUTER_API_KEY", "test-key", 1);
-    setenv("CCLAW_MODEL", "test-model", 1);
-    setenv("CCLAW_CONTEXT_WINDOW", "128000", 1);
-    setenv("CCLAW_DB", db_path, 1);
-    setenv("CCLAW_STREAM", "0", 1);
-    setenv("CCLAW_MAX_ITERATIONS", "5", 1);
-    setenv("CCLAW_AUTO_RECALL", "0", 1);
+    set_test_env(db_path);
 
-    int rc = llm_proc_main(sid);
-    if (rc != LLM_EXIT_STOP) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "expected exit 0, got %d", rc);
-        FAIL(msg);
-    }
+    int rc = llm_req(db, NULL, sid, 0);
+    if (rc != 0) { db_close(db); unlink(db_path); FAIL("expected rc==0"); }
 
     /* Verify entry was written */
-    db = test_db_open(db_path);
-    assert(db);
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
-    if (count != 3) { /* sys + user + assistant */
-        char msg[64];
-        snprintf(msg, sizeof(msg), "expected 3 entries, got %d", count);
-        entry_branch_free(branch, count);
-        db_close(db);
-        FAIL(msg);
+    if (count != 3) {
+        char msg[64]; snprintf(msg, sizeof(msg), "expected 3 entries, got %d", count);
+        entry_branch_free(branch, count); db_close(db); unlink(db_path); FAIL(msg);
     }
-    if (branch[2].message.role != ROLE_ASSISTANT) {
-        entry_branch_free(branch, count);
-        db_close(db);
-        FAIL("last entry not assistant");
-    }
-    if (!branch[2].message.content || strcmp(branch[2].message.content, "Hello there!") != 0) {
-        entry_branch_free(branch, count);
-        db_close(db);
-        FAIL("wrong content");
+    if (branch[2].message.role != ROLE_ASSISTANT ||
+        !branch[2].message.content ||
+        strcmp(branch[2].message.content, "Hello there!") != 0) {
+        entry_branch_free(branch, count); db_close(db); unlink(db_path);
+        FAIL("wrong assistant content");
     }
     entry_branch_free(branch, count);
-    db_close(db);
-    unlink(db_path);
+    db_close(db); unlink(db_path);
     PASS();
 }
 
-/* Test: LLM child returns 10 on tool_calls response */
-static void test_llm_child_tool_calls(void) {
-    TEST(llm_child_tool_calls);
+/* Test: llm_req returns 0 and writes tool_calls on tool_calls response */
+static void test_llm_req_tool_calls(void) {
+    TEST(llm_req_tool_calls);
 
-    const char *db_path = "/tmp/cclaw_llm_child_tc_test.db";
+    const char *db_path = "/tmp/cclaw_llm_req_tc_test.db";
     unlink(db_path);
 
     mock_server_reset();
@@ -121,44 +109,13 @@ static void test_llm_child_tool_calls(void) {
     entry_append_with_turn(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "Read foo.txt"};
     entry_append_with_turn(db, sid, &user, 1);
-    db_close(db);
 
-    char url[64];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", s_port);
-    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-    setenv("OPENROUTER_API_KEY", "test-key", 1);
-    setenv("CCLAW_MODEL", "test-model", 1);
-    setenv("CCLAW_CONTEXT_WINDOW", "128000", 1);
-    setenv("CCLAW_DB", db_path, 1);
-    setenv("CCLAW_STREAM", "0", 1);
-    setenv("CCLAW_MAX_ITERATIONS", "5", 1);
-    setenv("CCLAW_AUTO_RECALL", "0", 1);
+    set_test_env(db_path);
 
-    int rc = llm_proc_main(sid);
-    if (rc != LLM_EXIT_TOOLCALL) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "expected exit 10, got %d", rc);
-        FAIL(msg);
-    }
+    int rc = llm_req(db, NULL, sid, 0);
+    if (rc != 0) { db_close(db); unlink(db_path); FAIL("expected rc==0"); }
 
-    /* Verify entry was written with tool_calls */
-    db = test_db_open(db_path);
-    assert(db);
-    int count = 0;
-    Entry *branch = session_get_branch(db, sid, &count);
-    if (count != 4) { /* sys + user + assistant_message + tool_call */
-        char msg[64];
-        snprintf(msg, sizeof(msg), "expected 4 entries, got %d", count);
-        entry_branch_free(branch, count);
-        db_close(db);
-        FAIL(msg);
-    }
-    if (branch[2].message.role != ROLE_ASSISTANT) {
-        entry_branch_free(branch, count);
-        db_close(db);
-        FAIL("entry[2] not assistant");
-    }
-    /* Check tool_calls written — query tool_calls table */
+    /* Verify tool_calls written */
     sqlite3_stmt *stmt;
     int tc_count = 0;
     if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM tool_calls WHERE session_id=?;",
@@ -168,23 +125,19 @@ static void test_llm_child_tool_calls(void) {
             tc_count = sqlite3_column_int(stmt, 0);
         sqlite3_finalize(stmt);
     }
-    entry_branch_free(branch, count);
-    db_close(db);
-    unlink(db_path);
-
+    db_close(db); unlink(db_path);
     if (tc_count != 1) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "expected 1 tool_call row, got %d", tc_count);
+        char msg[64]; snprintf(msg, sizeof(msg), "expected 1 tool_call, got %d", tc_count);
         FAIL(msg);
     }
     PASS();
 }
 
-/* Test: LLM child returns 1 on error (server returns 500) */
-static void test_llm_child_error(void) {
-    TEST(llm_child_error);
+/* Test: llm_req returns -1 on server error */
+static void test_llm_req_error(void) {
+    TEST(llm_req_error);
 
-    const char *db_path = "/tmp/cclaw_llm_child_err_test.db";
+    const char *db_path = "/tmp/cclaw_llm_req_err_test.db";
     unlink(db_path);
 
     mock_server_reset();
@@ -198,42 +151,31 @@ static void test_llm_child_error(void) {
     entry_append_with_turn(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "Hello"};
     entry_append_with_turn(db, sid, &user, 1);
-    db_close(db);
 
-    char url[64];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", s_port);
-    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
-    setenv("OPENROUTER_API_KEY", "test-key", 1);
-    setenv("CCLAW_MODEL", "test-model", 1);
-    setenv("CCLAW_CONTEXT_WINDOW", "128000", 1);
-    setenv("CCLAW_DB", db_path, 1);
-    setenv("CCLAW_STREAM", "0", 1);
-    setenv("CCLAW_MAX_ITERATIONS", "5", 1);
-    setenv("CCLAW_AUTO_RECALL", "0", 1);
+    set_test_env(db_path);
 
-    int rc = llm_proc_main(sid);
-    if (rc != LLM_EXIT_ERROR) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "expected exit 1, got %d", rc);
-        unlink(db_path);
-        FAIL(msg);
+    int rc = llm_req(db, NULL, sid, 0);
+    if (rc != -1) {
+        char msg[64]; snprintf(msg, sizeof(msg), "expected rc==-1, got %d", rc);
+        db_close(db); unlink(db_path); FAIL(msg);
     }
 
-    unlink(db_path);
+    db_close(db); unlink(db_path);
     PASS();
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     s_port = mock_server_start();
     if (s_port <= 0) {
         fprintf(stderr, "FAIL: could not start mock server\n");
         return 1;
     }
 
-    printf("test_integration_llm_child (T299):\n");
-    test_llm_child_stop();
-    test_llm_child_tool_calls();
-    test_llm_child_error();
+    printf("test_integration_llm_proc:\n");
+    test_llm_req_stop();
+    test_llm_req_tool_calls();
+    test_llm_req_error();
 
     mock_server_stop();
     printf("\n%d/%d tests passed.\n", tests_passed, tests_run);

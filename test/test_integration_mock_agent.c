@@ -20,7 +20,7 @@ static int test_basic_turn(void) {
     int port = mock_server_start();
     if (port < 0) { db_close(db); FAIL("mock_server_start"); }
 
-    /* Set env for llm_proc_main */
+    /* Set env for llm_req */
     char url[64]; snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
     setenv("CCLAW_DB", DB_PATH, 1);
     setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
@@ -45,7 +45,7 @@ static int test_basic_turn(void) {
     AgentSetup setup;
     agent_setup_init(&setup, db, sid, cfg, "default", NULL, 0, AGENT_SETUP_CLI);
     int rc = test_run_session(db, sid, &setup);
-    assert(rc == LLM_EXIT_STOP);
+    assert(rc == 0);
 
     /* Verify assistant entry */
     int count = 0;

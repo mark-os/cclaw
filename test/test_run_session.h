@@ -13,27 +13,25 @@
 
 #define TEST_MAX_ITERATIONS 20
 
-/* Run the state machine synchronously (no fork, no epoll).
- * Calls llm_proc_main in-process, dispatches tools inline.
- * Returns final exit code (LLM_EXIT_STOP or LLM_EXIT_ERROR). */
+/* Run the agent loop synchronously (no threads, no fork).
+ * Calls llm_req() in-process, dispatches tools inline.
+ * Returns 0 on success, -1 on error. */
 static inline int test_run_session(sqlite3 *db, int64_t session_id, AgentSetup *setup) {
     int iteration = 0;
     while (iteration < TEST_MAX_ITERATIONS) {
-        setenv("CCLAW_RECALL", iteration == 0 ? "1" : "0", 1);
-        int rc = llm_proc_main(session_id);
+        int recall = (iteration == 0) ? 1 : 0;
+        int rc = llm_req(db, NULL, session_id, recall);
+        if (rc != 0) return -1;
 
-        /* Use DB state for dispatch (forward-compatible with worker mode) */
-        int tc_state = turn_complete(db, session_id);
-        if (tc_state <= 0) {
-            /* No tool_calls or error — done */
-            return (rc == LLM_EXIT_ERROR || tc_state < 0) ? LLM_EXIT_ERROR : LLM_EXIT_STOP;
-        }
-
-        /* Dispatch pending tool calls */
+        /* Check for pending tool calls */
         int tc_count = 0;
         PendingToolCall *tcs = db_tool_call_get_pending(db, session_id, &tc_count);
-        if (!tcs || tc_count == 0) return LLM_EXIT_ERROR;
+        if (!tcs || tc_count == 0) {
+            db_tool_call_free_pending(tcs, tc_count);
+            return 0; /* No tools — turn complete */
+        }
 
+        /* Dispatch pending tool calls inline */
         for (int i = 0; i < tc_count; i++) {
             PendingToolCall *tc = &tcs[i];
             ToolEntry *te = tools_lookup(&setup->reg, tc->name);
@@ -56,7 +54,7 @@ static inline int test_run_session(sqlite3 *db, int64_t session_id, AgentSetup *
         db_tool_call_free_pending(tcs, tc_count);
         iteration++;
     }
-    return LLM_EXIT_ERROR; /* max iterations */
+    return -1; /* max iterations */
 }
 
 #endif

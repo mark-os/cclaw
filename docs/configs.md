@@ -4,11 +4,11 @@
 
 Config is resolved highest-priority-first:
 
-1. **`CCLAW_*` env vars** — works everywhere (daemon fork, CLI, Lambda)
+1. **`CCLAW_*` env vars** — works everywhere (daemon, CLI, Lambda)
 2. **cclaw.db `kv` table** — persistent config, encrypted secrets
 3. **`OPENROUTER_API_KEY` env var** — system-level API key fallback
 
-Agent processes only read env vars — they never open cclaw.db for config. The daemon/CLI reads cclaw.db, then injects as `CCLAW_*` env vars at fork.
+Config is loaded once at startup from env vars and cclaw.db. Worker threads inherit the loaded config.
 
 ## Global Config (cclaw.db `kv` table)
 

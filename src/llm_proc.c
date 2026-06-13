@@ -11,15 +11,10 @@
 #include "llm_payload.h"
 #include "llm_transport.h"
 #include "log.h"
-#include "shutdown.h"
 #include "arena.h"
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef __linux__
-#include <sys/prctl.h>
-#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -27,29 +22,7 @@
 #define MAX_429_RETRIES 3
 #define MAX_PARSE_RETRIES 3
 
-/* ── turn_complete: DB-based completion detection ──────────────── */
 
-int turn_complete(sqlite3 *db, int64_t session_id) {
-    int tc_count = 0;
-    PendingToolCall *calls = db_tool_call_get_pending(db, session_id, &tc_count);
-    if (calls) {
-        db_tool_call_free_pending(calls, tc_count);
-        if (tc_count > 0) return 1;
-    }
-    const char *sql = "SELECT stop_reason FROM entries WHERE session_id=?"
-                      " AND role=2 ORDER BY id DESC LIMIT 1;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    int result = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *sr = (const char *)sqlite3_column_text(stmt, 0);
-        if (sr && strcmp(sr, "error") == 0) result = -1;
-    }
-    sqlite3_finalize(stmt);
-    return result;
-}
 
 /* ── Model candidate (loaded from DB) ──────────────────────────── */
 
@@ -639,34 +612,4 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
     return (compact_id > 0) ? 0 : -1;
 }
 
-/* ── llm_proc_main: fork-mode entry point ──────────────────────── */
 
-int llm_proc_main(int64_t session_id) {
-#ifdef __linux__
-    prctl(PR_SET_PDEATHSIG, SIGTERM);
-#endif
-    shutdown_init();
-    cclaw_log_init();
-    cclaw_log_set_level(log_level_parse(getenv("CCLAW_LOG_LEVEL")));
-
-    const char *db_path = getenv("CCLAW_DB");
-    if (!db_path || !db_path[0]) {
-        syslog(LOG_ERR, "llm_proc_main: CCLAW_DB not set");
-        return LLM_EXIT_ERROR;
-    }
-
-    sqlite3 *db = db_open(db_path);
-    if (!db) return LLM_EXIT_ERROR;
-    db_set_child_pragmas(db);
-
-    int recall_flag = 0;
-    const char *recall_env = getenv("CCLAW_RECALL");
-    if (recall_env && recall_env[0] == '1') recall_flag = 1;
-
-    int rc = llm_req(db, NULL, session_id, recall_flag);
-    if (rc != 0) { db_close(db); return LLM_EXIT_ERROR; }
-
-    int tc = turn_complete(db, session_id);
-    db_close(db);
-    return (tc == 1) ? LLM_EXIT_TOOLCALL : LLM_EXIT_STOP;
-}

@@ -44,7 +44,7 @@ int main(void) {
     AgentSetup setup;
     agent_setup_init(&setup, db, sid, cfg, "default", NULL, 0, AGENT_SETUP_CLI);
     int rc = test_run_session(db, sid, &setup);
-    assert(rc == LLM_EXIT_STOP);
+    assert(rc == 0);
     assert(mock_server_request_count() == 2);
 
     int count = 0;

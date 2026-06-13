@@ -9,11 +9,11 @@ CClaw is a **minimal** autonomous AI agent in C. Every line of code must earn it
 **Unix Principles**
 
 CClaw is designed around Unix philosophy:
-- Daemon as init system — schedules, forks, reaps. Never executes LLM logic.
+- Daemon as supervisor — schedules work, manages channels, dispatches to worker threads. Tool children are forked for sandbox isolation.
 - Agents as isolated users — each has a workspace directory (`agents/<name>/workspace/`), sessions scoped by agent_name in cclaw.db.
 - Processes are cheap and disposable — one turn, then exit. Memory fully reclaimed.
-- Communication via exit codes — agents signal intent (0=done, 2=spawn, 3=approval, 4=config), daemon reads details from DB post-reap.
-- Config via environment — daemon injects `CCLAW_*` env vars at fork. No config files in agent processes.
+- Communication via DB state — `advance_session()` reads session state, decides next action. No IPC beyond worker notification pipe.
+- Config via environment — process reads `CCLAW_*` env vars at startup. No config files in agent processes.
 - Logging via syslog (daemon) or stderr tee (CLI). No log collector.
 - Trust the binary, sandbox the children — agent process is trusted C code; shell/mjs children are untrusted (namespace-sandboxed).
 
@@ -58,7 +58,7 @@ See [specs/security.md](specs/security.md) for full details.
 
 - **Agent process**: trusted binary. `setrlimit` (kernel-enforced) + `http_check_policy()` (app-level).
 - **Shell children**: untrusted. Namespace sandbox + transparent credential proxy. See [specs/shell-networking.md](specs/shell-networking.md).
-- **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted by daemon, injected to agent at fork, cleared from env immediately.
+- **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted at runtime, injected to tool children via env, never exposed to the model or logged.
 - **Secret scanner**: AC-based DLP scans all tool results and user messages for leaked credentials before they enter the context window. See [specs/security.md](specs/security.md#secret-scanner-ac-based-content-dlp).
 - **Secret interpolation**: LLMs reference secrets via `{{SECRET:name}}` — cclaw interpolates the real value before tool execution, the context never sees it.
 - **Trust levels**: `agents.trust_level` controls shell sandbox strictness (`host`, `trusted`, `standard`, `restricted`). Every level except `host` *requires* the namespace sandbox — if it can't be established, the shell refuses to run (fail-closed). See [specs/shell-trust-levels.md](specs/shell-trust-levels.md).
@@ -152,7 +152,7 @@ make clean        # remove build/
 # Minimal — just needs an API key (defaults to OpenRouter + DeepSeek V4 Flash)
 export OPENROUTER_API_KEY="sk-or-v1-..."
 ./build/cclaw              # interactive CLI (default)
-./build/cclaw --daemon     # daemon mode (Telegram, web, cron, forks agents)
+./build/cclaw --daemon     # daemon mode (Telegram, web, cron, multi-agent)
 ./build/cclaw --log-level=trace  # full LLM req/resp JSON to stderr
 ```
 

@@ -10,7 +10,6 @@ Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-# Set CCLAW_LLM_FORK=1 in /etc/cclaw/env for fork-per-request isolation
 
 [Install]
 WantedBy=multi-user.target

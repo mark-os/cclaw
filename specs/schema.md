@@ -20,7 +20,7 @@ Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_S
 
 ## agent_config
 
-Replaces config files. Daemon reads at fork, injects as `CCLAW_*` env vars.
+Replaces config files. Loaded at startup, injected as `CCLAW_*` env vars to tool children.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -29,7 +29,7 @@ Replaces config files. Daemon reads at fork, injects as `CCLAW_*` env vars.
 | `value` | TEXT NOT NULL | |
 | PRIMARY KEY | (agent_name, key) | |
 
-**Absent-key semantics** (V124): missing key = conservative system default, NOT unlimited. Daemon always injects `CCLAW_TOOLS` and `CCLAW_ALLOWED_HOSTS` env vars at fork — even when no agent_config rows exist.
+**Absent-key semantics** (V124): missing key = conservative system default, NOT unlimited. Always inject `CCLAW_TOOLS` and `CCLAW_ALLOWED_HOSTS` env vars — even when no agent_config rows exist.
 
 | Key | Absent default | Notes |
 |-----|----------------|-------|
@@ -49,7 +49,7 @@ Replaces config files. Daemon reads at fork, injects as `CCLAW_*` env vars.
 
 ## Full config env var reference
 
-All injected at fork by daemon/CLI. Agent reads via `config_load_from_env()`.
+All injected at startup. Config loaded via `config_load()`.
 
 | Env var | Source | Default | Notes |
 |---------|--------|---------|-------|
@@ -345,8 +345,8 @@ CREATE INDEX idx_channel_outbox_pending ON channel_outbox(channel_name, status) 
 ## Design decisions
 
 1. **Single DB** — all state in one `cclaw.db`; WAL mode allows concurrent readers; parent serializes writes; simplifies deployment (one file to back up/move)
-2. **Exit code IPC** — agents signal intent via exit code; daemon reads details from DB post-reap; no shared-memory IPC, no pipes for structured data
-3. **agent_config in DB** — daemon reads at fork, injects as env vars; single source of truth for policy
+2. **DB-driven state machine** — `advance_session()` reads DB state, decides next action; worker threads notify via pipe; no shared-memory IPC
+3. **agent_config in DB** — loaded at startup, injected as env vars; single source of truth for policy
 4. **Split columns over JSON** — SQLite `json_object()` builds wire JSON directly from columns (V60); metadata columns enable plan pass without overflow page loads (V56)
 5. **INTEGER ids** — faster joins, smaller indexes, natural ordering
 6. **parent_id tree** — supports branching (Pi model); walk leaf→root via recursive CTE

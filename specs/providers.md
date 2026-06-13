@@ -6,7 +6,7 @@ All provider configuration lives in `cclaw.db`:
 - `providers` table: name, base_url, model, context_window
 - `kv` table: encrypted API keys (`enc:` prefix), fallback config
 
-Agents ⊥ store provider keys. Daemon decrypts at fork, injects via `provider-native env var (e.g. OPENROUTER_API_KEY)` env var.
+Agents ⊥ store provider keys. Keys decrypted at runtime, injected to worker threads and tool children via env vars.
 
 ## Supported Providers
 
@@ -46,7 +46,7 @@ CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI 
 
 - Provider API keys stored encrypted in cclaw.db `kv` (ChaCha20-Poly1305 AEAD)
 - Decryption key: `.cclaw/.cclaw_key` (32 bytes, mode 0600, daemon-only)
-- Daemon decrypts at fork → injects as `provider-native env var (e.g. OPENROUTER_API_KEY)` env var
+- Decrypted at startup → loaded into config, available to worker threads
 - Agent uses key for LLM calls, key lives only in process memory
 - `shell_exec` children have `provider-native env var (e.g. OPENROUTER_API_KEY)` unset before exec (V47)
 - Agent ⊥ has access to `.cclaw_key` file (daemon-only, not exposed to agents)

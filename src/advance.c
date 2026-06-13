@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include "advance.h"
-#include "llm_proc.h"
 #include "wake.h"
 #include <stdio.h>
 #include <string.h>
@@ -69,66 +68,79 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
 
     if (strcmp(state, "llm_running") == 0) {
         /* LLM finished — check what to do next */
-        int tc_state = turn_complete(db, session_id);
-        if (tc_state == 1) {
+        int tc_count = 0;
+        PendingToolCall *calls = db_tool_call_get_pending(db, session_id, &tc_count);
+        if (tc_count > 0) {
             /* Has pending tool calls */
-            int tc_count = 0;
-            PendingToolCall *calls = db_tool_call_get_pending(db, session_id, &tc_count);
-            if (tc_count > 0) {
-                session_set_state(db, session_id, "tool_running");
-                AdvanceOutput out = make_output(ADVANCE_DISPATCH_TOOLS, session_id, agent, iter);
-                out.tc_count = tc_count;
-                out.calls = calls;
-                free(agent);
-                return out;
-            }
-            /* No pending calls despite tc_state=1 — fall through to done */
-            db_tool_call_free_pending(calls, tc_count);
-        }
-        if (tc_state == 0) {
-            /* Normal stop — turn complete */
-            session_set_state(db, session_id, "idle");
-
-            /* Notify parent session if this is a sub-agent */
-            SessionParentInfo pi = session_get_parent_info(db, session_id);
-            if (pi.parent_session_id > 0) {
-                char *result_text = get_response_text(db, session_id);
-                if (!result_text) result_text = strdup("(no response)");
-
-                if (pi.parent_tool_call_id) {
-                    /* Blocking mode: write tool result for parent's tool call */
-                    int64_t parent_turn = db_next_turn_id(db, pi.parent_session_id);
-                    ToolResult tr = { .tool_call_id = pi.parent_tool_call_id,
-                                      .content = result_text };
-                    Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
-                                     .tool_name = "launch_agent", .is_error = 0 };
-                    int64_t rid = entry_append_with_turn(db, pi.parent_session_id,
-                                                        &rmsg, parent_turn);
-                    (void)rid;
-                    db_tool_call_set_status(db, pi.parent_session_id,
-                                           pi.parent_tool_call_id, "done", NULL);
-                    /* Unpark parent */
-                    session_set_state(db, pi.parent_session_id, "tool_running");
-                } else {
-                    /* Background mode: insert into parent inbox */
-                    char payload[256];
-                    snprintf(payload, sizeof(payload),
-                             "Sub-agent (session %lld) completed: %.*s",
-                             (long long)session_id, 200, result_text);
-                    inbox_insert(db, pi.parent_session_id, "agent_result", payload);
-                }
-                wake_session(pi.parent_session_id);
-                free(result_text);
-                free(pi.parent_tool_call_id);
-            }
-
-            AdvanceOutput out = make_output(ADVANCE_DONE, session_id, agent, iter);
+            session_set_state(db, session_id, "tool_running");
+            AdvanceOutput out = make_output(ADVANCE_DISPATCH_TOOLS, session_id, agent, iter);
+            out.tc_count = tc_count;
+            out.calls = calls;
             free(agent);
             return out;
         }
-        /* Error from turn_complete */
+        db_tool_call_free_pending(calls, tc_count);
+
+        /* Check if last assistant entry was an error */
+        int is_error = 0;
+        {   sqlite3_stmt *sr_stmt;
+            if (sqlite3_prepare_v2(db,
+                    "SELECT stop_reason FROM entries WHERE session_id=?"
+                    " AND role=2 ORDER BY id DESC LIMIT 1",
+                    -1, &sr_stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(sr_stmt, 1, session_id);
+                if (sqlite3_step(sr_stmt) == SQLITE_ROW) {
+                    const char *sr = (const char *)sqlite3_column_text(sr_stmt, 0);
+                    if (sr && strcmp(sr, "error") == 0) is_error = 1;
+                }
+                sqlite3_finalize(sr_stmt);
+            }
+        }
+
+        if (is_error) {
+            session_set_state(db, session_id, "idle");
+            AdvanceOutput out = make_output(ADVANCE_ERROR, session_id, agent, iter);
+            free(agent);
+            return out;
+        }
+
+        /* Normal stop — turn complete */
         session_set_state(db, session_id, "idle");
-        AdvanceOutput out = make_output(ADVANCE_ERROR, session_id, agent, iter);
+
+        /* Notify parent session if this is a sub-agent */
+        SessionParentInfo pi = session_get_parent_info(db, session_id);
+        if (pi.parent_session_id > 0) {
+            char *result_text = get_response_text(db, session_id);
+            if (!result_text) result_text = strdup("(no response)");
+
+            if (pi.parent_tool_call_id) {
+                /* Blocking mode: write tool result for parent's tool call */
+                int64_t parent_turn = db_next_turn_id(db, pi.parent_session_id);
+                ToolResult tr = { .tool_call_id = pi.parent_tool_call_id,
+                                  .content = result_text };
+                Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
+                                 .tool_name = "launch_agent", .is_error = 0 };
+                int64_t rid = entry_append_with_turn(db, pi.parent_session_id,
+                                                    &rmsg, parent_turn);
+                (void)rid;
+                db_tool_call_set_status(db, pi.parent_session_id,
+                                       pi.parent_tool_call_id, "done", NULL);
+                /* Unpark parent */
+                session_set_state(db, pi.parent_session_id, "tool_running");
+            } else {
+                /* Background mode: insert into parent inbox */
+                char payload[256];
+                snprintf(payload, sizeof(payload),
+                         "Sub-agent (session %lld) completed: %.*s",
+                         (long long)session_id, 200, result_text);
+                inbox_insert(db, pi.parent_session_id, "agent_result", payload);
+            }
+            wake_session(pi.parent_session_id);
+            free(result_text);
+            free(pi.parent_tool_call_id);
+        }
+
+        AdvanceOutput out = make_output(ADVANCE_DONE, session_id, agent, iter);
         free(agent);
         return out;
     }

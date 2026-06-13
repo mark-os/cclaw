@@ -42,7 +42,7 @@ int main(void) {
     AgentSetup setup;
     agent_setup_init(&setup, db, sid, cfg, "default", NULL, 0, AGENT_SETUP_CLI);
     int rc = test_run_session(db, sid, &setup);
-    assert(rc == LLM_EXIT_ERROR);
+    assert(rc == -1);
 
     agent_setup_destroy(&setup);
     config_free(cfg);

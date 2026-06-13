@@ -260,6 +260,4 @@ int llm_worker_submit_compact(sqlite3 *db, int64_t session_id, const char *agent
     return pool_push(&item);
 }
 
-int llm_worker_respawn(void) { return 0; /* no-op: threads self-manage */ }
 int llm_worker_alive(void) { return g_started; }
-pid_t llm_worker_pid(void) { return -1; /* no child process */ }

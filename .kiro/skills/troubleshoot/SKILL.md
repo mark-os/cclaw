@@ -117,11 +117,7 @@ sqlite3 ~/.cclaw/cclaw.db "SELECT id FROM sessions ORDER BY id DESC LIMIT 1;"
 CCLAW_DB=~/.cclaw/cclaw.db timeout 10 ./build/cclaw llm -s <ID>
 # If this works instantly → problem is worker subsystem, not LLM
 
-# 3. Try fork mode (bypasses worker threads entirely)
-timeout 10 ./build/cclaw --llm-fork --new -p "test"
-# If this works → problem is specifically in the worker thread pool
-
-# 4. For crashes/segfaults — use the debug build
+# 3. For crashes/segfaults — use the debug build
 make debug
 timeout 10 ./build/cclaw --new -p "test"
 # ASAN prints stack trace on crash. No strace/gdb needed.
@@ -140,11 +136,6 @@ kill $PID
 - **Kill orphans first** — stale processes hold DB locks and confuse pgrep.
 - **Use `make debug` for crashes** — ASAN catches NULL derefs, UAF, buffer
   overflows with exact stack traces. Faster than strace.
-- **`--llm-fork` isolates** — if fork mode works and worker mode doesn't,
-  the bug is in the thread pool, not the LLM code path.
-- **`./build/cclaw llm -s <id>` isolates further** — runs one LLM call in a
-  clean subprocess. If this works, the request building and HTTP are fine.
-
 ### Worker thread observability
 
 The worker threads log to syslog (LOG_PERROR tees to stderr):

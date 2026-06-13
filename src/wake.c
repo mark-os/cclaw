@@ -2,6 +2,7 @@
 #include "wake.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -42,13 +43,14 @@ void wake_close(void) {
 char *wake_fifo_path(const char *db_path) {
     if (!db_path) return NULL;
     size_t len = strlen(db_path);
-    char *path = malloc(len + 6);
+    size_t cap = len + 6;
+    char *path = malloc(cap);
     if (!path) return NULL;
     memcpy(path, db_path, len);
     if (len > 3 && strcmp(db_path + len - 3, ".db") == 0)
-        strcpy(path + len - 3, ".pipe");
+        snprintf(path + len - 3, 6, ".pipe");
     else
-        strcpy(path + len, ".pipe");
+        snprintf(path + len, 6, ".pipe");
     return path;
 }
 

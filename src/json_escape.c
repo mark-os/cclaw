@@ -10,6 +10,7 @@ static inline int parse_hex_digit(char c) {
 }
 
 size_t json_unescape(char *dest, size_t cap, const char *src, size_t src_len) {
+    if (cap == 0) return 0;
     size_t w = 0;
     for (size_t i = 0; i < src_len && w < cap; i++) {
         if (src[i] == '\\' && i + 1 < src_len) {
@@ -56,18 +57,24 @@ size_t json_unescape(char *dest, size_t cap, const char *src, size_t src_len) {
                     /* Encode to UTF-8 */
                     if (cp < 0x80) {
                         dest[w++] = (char)cp;
-                    } else if (cp < 0x800 && w + 1 < cap) {
-                        dest[w++] = (char)(0xC0 | (cp >> 6));
-                        dest[w++] = (char)(0x80 | (cp & 0x3F));
-                    } else if (cp < 0x10000 && w + 2 < cap) {
-                        dest[w++] = (char)(0xE0 | (cp >> 12));
-                        dest[w++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                        dest[w++] = (char)(0x80 | (cp & 0x3F));
-                    } else if (cp >= 0x10000 && w + 3 < cap) {
-                        dest[w++] = (char)(0xF0 | (cp >> 18));
-                        dest[w++] = (char)(0x80 | ((cp >> 12) & 0x3F));
-                        dest[w++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                        dest[w++] = (char)(0x80 | (cp & 0x3F));
+                    } else if (cp < 0x800) {
+                        if (w + 1 < cap) {
+                            dest[w++] = (char)(0xC0 | (cp >> 6));
+                            dest[w++] = (char)(0x80 | (cp & 0x3F));
+                        } else { break; }
+                    } else if (cp < 0x10000) {
+                        if (w + 2 < cap) {
+                            dest[w++] = (char)(0xE0 | (cp >> 12));
+                            dest[w++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                            dest[w++] = (char)(0x80 | (cp & 0x3F));
+                        } else { break; }
+                    } else {
+                        if (w + 3 < cap) {
+                            dest[w++] = (char)(0xF0 | (cp >> 18));
+                            dest[w++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                            dest[w++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                            dest[w++] = (char)(0x80 | (cp & 0x3F));
+                        } else { break; }
                     }
                 } else {
                     dest[w++] = 'u';
@@ -83,6 +90,7 @@ size_t json_unescape(char *dest, size_t cap, const char *src, size_t src_len) {
 }
 
 size_t json_escape(char *dest, size_t cap, const char *src, size_t src_len) {
+    if (cap == 0) return 0;
     size_t w = 0;
     for (size_t i = 0; i < src_len && w + 6 < cap; i++) {
         unsigned char c = (unsigned char)src[i];

@@ -754,8 +754,9 @@ static char *resolve_db_path(void) {
     const char *home = getenv("HOME");
     if (home) {
         size_t len = strlen(home);
-        char *p = malloc(len + sizeof("/.cclaw/cclaw.db"));
-        if (p) { sprintf(p, "%s/.cclaw/cclaw.db", home); return p; }
+        size_t cap = len + sizeof("/.cclaw/cclaw.db");
+        char *p = malloc(cap);
+        if (p) { snprintf(p, cap, "%s/.cclaw/cclaw.db", home); return p; }
     }
     return strdup("cclaw.db");
 }
@@ -1084,7 +1085,8 @@ int main(int argc, char *argv[]) {
 
     /* Derive base_dir for workspace */
     char *base_dir = strdup(db_path);
-    { char *sl = strrchr(base_dir, '/'); if (sl) *sl = '\0'; else { free(base_dir); base_dir = strdup("."); } }
+    if (!base_dir) { fprintf(stderr, "out of memory\n"); config_free(g_cfg); db_close(g_db); free(db_path); return 1; }
+    { char *sl = strrchr(base_dir, '/'); if (sl) *sl = '\0'; else { free(base_dir); base_dir = strdup("."); if (!base_dir) { fprintf(stderr, "out of memory\n"); config_free(g_cfg); db_close(g_db); free(db_path); return 1; } } }
 
     /* Ensure default agent exists — bootstrap on first run */
     { int ac = 0; char **al = db_agent_list(g_db, &ac);
@@ -1134,7 +1136,7 @@ int main(int argc, char *argv[]) {
         }
         if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
     }
-    if (!agent_sel) { fprintf(stderr, "no agent selected\n"); free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path); return 1; }
+    if (!agent_sel) { fprintf(stderr, "no agent selected or out of memory\n"); free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path); return 1; }
     snprintf(g_agent_name, sizeof(g_agent_name), "%s", agent_sel);
     setenv("CCLAW_AGENT_NAME", g_agent_name, 1);
     free(agent_sel);
@@ -1145,15 +1147,35 @@ int main(int argc, char *argv[]) {
         if (ac) {
             if (ac->tool_count > 0) {
                 size_t len = 0; for (size_t i = 0; i < ac->tool_count; i++) len += strlen(ac->tools[i]) + 1;
-                char *csv = malloc(len); if (csv) { csv[0] = '\0';
-                    for (size_t i = 0; i < ac->tool_count; i++) { if (i) strcat(csv, ","); strcat(csv, ac->tools[i]); }
-                    setenv("CCLAW_TOOLS", csv, 1); free(csv); }
+                char *csv = malloc(len);
+                if (csv) {
+                    char *ptr = csv;
+                    for (size_t i = 0; i < ac->tool_count; i++) {
+                        if (i) *ptr++ = ',';
+                        size_t slen = strlen(ac->tools[i]);
+                        memcpy(ptr, ac->tools[i], slen);
+                        ptr += slen;
+                    }
+                    *ptr = '\0';
+                    setenv("CCLAW_TOOLS", csv, 1);
+                    free(csv);
+                }
             }
             if (ac->allowed_hosts_count > 0) {
                 size_t len = 0; for (size_t i = 0; i < ac->allowed_hosts_count; i++) len += strlen(ac->allowed_hosts[i]) + 1;
-                char *csv = malloc(len); if (csv) { csv[0] = '\0';
-                    for (size_t i = 0; i < ac->allowed_hosts_count; i++) { if (i) strcat(csv, ","); strcat(csv, ac->allowed_hosts[i]); }
-                    setenv("CCLAW_ALLOWED_HOSTS", csv, 1); free(csv); }
+                char *csv = malloc(len);
+                if (csv) {
+                    char *ptr = csv;
+                    for (size_t i = 0; i < ac->allowed_hosts_count; i++) {
+                        if (i) *ptr++ = ',';
+                        size_t slen = strlen(ac->allowed_hosts[i]);
+                        memcpy(ptr, ac->allowed_hosts[i], slen);
+                        ptr += slen;
+                    }
+                    *ptr = '\0';
+                    setenv("CCLAW_ALLOWED_HOSTS", csv, 1);
+                    free(csv);
+                }
             }
             agent_config_free(ac);
         }

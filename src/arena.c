@@ -13,9 +13,10 @@ Arena *arena_create(size_t capacity) {
 }
 
 void *arena_alloc(Arena *a, size_t n) {
+    if (n > SIZE_MAX - 7) return NULL;
     /* 8-byte alignment */
     size_t aligned = (n + 7) & ~(size_t)7;
-    if (a->used + aligned > a->cap) return NULL;
+    if (a->used > a->cap || aligned > a->cap - a->used) return NULL;
     void *ptr = a->buf + a->used;
     a->used += aligned;
     return ptr;

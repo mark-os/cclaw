@@ -26,7 +26,58 @@
  * System dirs mounted ro, workspace rw, cwd_path rw (CLI mode).
  * Mount setup happens before the PID namespace fork.
  * Returns 0 on success, -1 on failure (caller should log + continue). */
-static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
+/* Bind-mask the secret key + DB ciphertext from the child's view.
+ *
+ * The key lives at <dir of db_path>/.cclaw_key, next to cclaw.db. trusted /
+ * bootstrap agents get the CWD bind-mounted rw, and in CLI mode that CWD is
+ * the dir holding both files — so a shell child could read the key and decrypt
+ * every stored secret. We bind an empty, unreadable file over each sensitive
+ * path *inside the new root*. Files not reachable in the child's mount tree
+ * (the standard/restricted case) never materialize under newroot, so the stat
+ * fails and we skip them — they are already invisible by omission. */
+static void shell_mask_state_files(const char *newroot, const char *db_path) {
+    if (!db_path || !db_path[0]) return;
+
+    char db_abs[PATH_MAX];
+    if (!realpath(db_path, db_abs)) return;  /* db must exist to be masked */
+
+    /* Empty, mode-0 masking source on the new root's tmpfs */
+    char empty[PATH_MAX];
+    int n = snprintf(empty, sizeof(empty), "%s/.cclaw_masked", newroot);
+    if (n < 0 || (size_t)n >= sizeof(empty)) return;
+    int efd = open(empty, O_CREAT | O_WRONLY, 0000);
+    if (efd < 0) return;
+    close(efd);
+
+    /* Targets: the DB family (ciphertext) and the key file (crown jewel). */
+    char keyf[PATH_MAX];
+    char *slash = strrchr(db_abs, '/');
+    int klen = slash
+        ? snprintf(keyf, sizeof(keyf), "%.*s/.cclaw_key", (int)(slash - db_abs), db_abs)
+        : snprintf(keyf, sizeof(keyf), ".cclaw_key");
+    const char *targets[5];
+    char dbwal[PATH_MAX + 8], dbshm[PATH_MAX + 8];
+    snprintf(dbwal, sizeof(dbwal), "%s-wal", db_abs);
+    snprintf(dbshm, sizeof(dbshm), "%s-shm", db_abs);
+    size_t nt = 0;
+    targets[nt++] = db_abs;
+    targets[nt++] = dbwal;
+    targets[nt++] = dbshm;
+    if (klen > 0 && (size_t)klen < sizeof(keyf)) targets[nt++] = keyf;
+
+    for (size_t i = 0; i < nt; i++) {
+        char dst[PATH_MAX + 64];
+        int dn = snprintf(dst, sizeof(dst), "%s%s", newroot, targets[i]);
+        if (dn < 0 || (size_t)dn >= sizeof(dst)) continue;
+        struct stat st;
+        if (stat(dst, &st) != 0) continue;  /* not in a bound path → already hidden */
+        if (mount(empty, dst, NULL, MS_BIND, NULL) == 0)
+            mount(NULL, dst, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID, NULL);
+    }
+}
+
+static int shell_apply_namespace(const char *workspace, const char *cwd_path,
+                                 const char *db_path) {
     uid_t uid = getuid();
     gid_t gid = getgid();
 
@@ -143,6 +194,10 @@ static int shell_apply_namespace(const char *workspace, const char *cwd_path) {
         }
     }
 
+    /* Mask the secret key + DB ciphertext if a bound path (CWD/workspace)
+     * would otherwise expose them. Must run after the binds, before pivot_root. */
+    shell_mask_state_files(newroot, db_path);
+
     /* pivot_root into new root */
     char put_old[256];
     snprintf(put_old, sizeof(put_old), "%s/.oldroot", newroot);
@@ -180,6 +235,23 @@ static const char *SHELL_PARAMS_JSON =
     "\"command\":{\"type\":\"string\",\"description\":\"Shell command to execute\"},"
     "\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds (default 30)\"}"
     "},\"required\":[\"command\"]}";
+
+/* True if the command references $CCLAW_SECRET_<name> as a whole env-var
+ * token. Used to scope env injection to referenced secrets only. The trailing
+ * char must not extend the identifier, so CCLAW_SECRET_API does not match a
+ * reference to $CCLAW_SECRET_API_KEY. */
+static int command_uses_secret_env(const char *command, const char *name) {
+    char tok[256];
+    int tlen = snprintf(tok, sizeof(tok), "CCLAW_SECRET_%s", name);
+    if (tlen <= 0 || tlen >= (int)sizeof(tok)) return 0;
+    for (const char *p = command; (p = strstr(p, tok)) != NULL; p += tlen) {
+        char after = p[tlen];
+        if (!((after >= 'A' && after <= 'Z') || (after >= 'a' && after <= 'z') ||
+              (after >= '0' && after <= '9') || after == '_'))
+            return 1;
+    }
+    return 0;
+}
 
 char *tool_shell_handler(const char *arguments, void *user_data) {
     int default_timeout = TOOL_SHELL_DEFAULT_TIMEOUT;
@@ -237,7 +309,8 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         /* Trust-level: suppress proxy if net_mode=1 */
         if (sc_child && sc_child->net_mode) psock = NULL;
 
-        if (do_sandbox && shell_apply_namespace(ws, cwd) != 0) {
+        const char *dbp = user_data ? ((ShellConfig *)user_data)->db_path : NULL;
+        if (do_sandbox && shell_apply_namespace(ws, cwd, dbp) != 0) {
             /* Fail closed: a runtime failure must not grant what only
              * trust_level=host may grant (stderr = captured in output). */
             fprintf(stderr, "error: namespace sandbox unavailable (errno=%d); "
@@ -297,9 +370,16 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         /* V83: set proxy socket path for LD_PRELOAD lib (after env cleanup) */
         if (psock) setenv("CCLAW_PROXY_SOCK", psock, 1);
 
-        /* V88: inject secrets into shell child env */
+        /* Inject secrets into the child env — but only those this command
+         * actually references via $CCLAW_SECRET_<NAME> (least privilege).
+         * Secrets used via {{SECRET:NAME}} are already interpolated into the
+         * command (argv) before the handler runs, so they need no env var;
+         * injecting every scoped secret would let `cat /proc/self/environ`
+         * dump the agent's whole credential set from any command. */
         if (sc_child) {
             for (size_t i = 0; i < sc_child->secret_count; i++) {
+                if (!command_uses_secret_env(command, sc_child->secrets[i].name))
+                    continue;
                 char envname[256];
                 snprintf(envname, sizeof(envname), "CCLAW_SECRET_%s", sc_child->secrets[i].name);
                 setenv(envname, sc_child->secrets[i].value, 1);
@@ -410,11 +490,8 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         kill(-pid, SIGKILL);
         waitpid(pid, NULL, 0);
         output[out_len] = '\0';
-        /* V88: mask secrets in timeout output */
-        if (user_data) {
-            ShellConfig *sc3 = (ShellConfig *)user_data;
-            shell_mask_secrets(output, &out_len, SHELL_MAX_OUTPUT, sc3->secrets, sc3->secret_count);
-        }
+        /* Secrets are masked by tool_result_postprocess() in the parent — the
+         * single masking chokepoint. The handler returns raw output. */
         size_t needed = out_len + 128;
         char *result = malloc(needed);
         if (!result) { free(output); return strdup("error: timeout + OOM"); }
@@ -428,12 +505,8 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
 format_result:
     output[out_len] = '\0';
 
-    /* V88: mask secret values in output before returning */
-    if (user_data) {
-        ShellConfig *sc3 = (ShellConfig *)user_data;
-        shell_mask_secrets(output, &out_len, SHELL_MAX_OUTPUT, sc3->secrets, sc3->secret_count);
-    }
-
+    /* Secrets are masked by tool_result_postprocess() in the parent — the
+     * single masking chokepoint. The handler returns raw output. */
     int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
     size_t needed = out_len + 64;
@@ -450,6 +523,7 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     sc->timeout = (default_timeout > 0) ? default_timeout : TOOL_SHELL_DEFAULT_TIMEOUT;
     sc->workspace = workspace;
     sc->cwd_path = NULL;
+    sc->db_path = NULL;
     sc->proxy_sock = NULL;
     sc->secrets = NULL;
     sc->secret_count = 0;
@@ -521,102 +595,3 @@ void shell_secrets_free(ShellSecret *secrets, size_t count) {
     free(secrets);
 }
 
-/* Replace all occurrences of needle in output with tag (in-place) */
-static void mask_replace(char *output, size_t *len, size_t cap,
-                         const char *needle, size_t nlen,
-                         const char *tag, size_t taglen) {
-    char *p = output;
-    while ((p = memmem(p, *len - (size_t)(p - output), needle, nlen)) != NULL) {
-        size_t offset = (size_t)(p - output);
-        size_t tail = *len - offset - nlen;
-
-        if (taglen <= nlen) {
-            memcpy(p, tag, taglen);
-            memmove(p + taglen, p + nlen, tail + 1);
-            *len = *len - nlen + taglen;
-        } else if (*len - nlen + taglen < cap) {
-            memmove(p + taglen, p + nlen, tail + 1);
-            memcpy(p, tag, taglen);
-            *len = *len - nlen + taglen;
-        } else {
-            memcpy(p, tag, taglen);
-            *len = offset + taglen;
-            output[*len] = '\0';
-            break;
-        }
-        p = output + offset + taglen;
-    }
-}
-
-/* Base64 encode src into dst. Returns bytes written (no NUL). */
-static size_t b64_encode(char *dst, size_t dst_cap, const char *src, size_t src_len) {
-    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    size_t needed = ((src_len + 2) / 3) * 4;
-    if (needed > dst_cap) return 0;
-    size_t o = 0;
-    for (size_t i = 0; i < src_len; i += 3) {
-        unsigned char a = (unsigned char)src[i];
-        unsigned char b = (i + 1 < src_len) ? (unsigned char)src[i + 1] : 0;
-        unsigned char c = (i + 2 < src_len) ? (unsigned char)src[i + 2] : 0;
-        dst[o++] = t[a >> 2];
-        dst[o++] = t[((a & 3) << 4) | (b >> 4)];
-        dst[o++] = (i + 1 < src_len) ? t[((b & 0xf) << 2) | (c >> 6)] : '=';
-        dst[o++] = (i + 2 < src_len) ? t[c & 0x3f] : '=';
-    }
-    return o;
-}
-
-/* URL-encode src into dst. Returns bytes written (no NUL). */
-static size_t url_encode(char *dst, size_t dst_cap, const char *src, size_t src_len) {
-    static const char hex[] = "0123456789ABCDEF";
-    size_t o = 0;
-    for (size_t i = 0; i < src_len; i++) {
-        unsigned char ch = (unsigned char)src[i];
-        int safe = ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
-                    (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
-                    ch == '.' || ch == '~');
-        if (safe) {
-            if (o + 1 > dst_cap) return 0;
-            dst[o++] = (char)ch;
-        } else {
-            if (o + 3 > dst_cap) return 0;
-            dst[o++] = '%';
-            dst[o++] = hex[ch >> 4];
-            dst[o++] = hex[ch & 0xf];
-        }
-    }
-    return o;
-}
-
-/* V88: Replace secret values in output with [REDACTED:<name>].
- * Scans for exact match + base64 + URL-encoded variants. */
-void shell_mask_secrets(char *output, size_t *len, size_t cap,
-                        const ShellSecret *secrets, size_t secret_count) {
-    if (!secrets || secret_count == 0 || !output) return;
-
-    for (size_t s = 0; s < secret_count; s++) {
-        const char *val = secrets[s].value;
-        size_t vlen = strlen(val);
-        if (vlen == 0) continue;
-
-        char tag[280];
-        int tlen = snprintf(tag, sizeof(tag), "[REDACTED:%s]", secrets[s].name);
-        if (tlen < 0 || (size_t)tlen >= sizeof(tag)) continue;
-        size_t taglen = (size_t)tlen;
-
-        /* Exact match */
-        mask_replace(output, len, cap, val, vlen, tag, taglen);
-
-        /* Base64-encoded variant */
-        char b64[1024];
-        size_t b64len = b64_encode(b64, sizeof(b64), val, vlen);
-        if (b64len > 0 && b64len != vlen) /* skip if same as raw (unlikely) */
-            mask_replace(output, len, cap, b64, b64len, tag, taglen);
-
-        /* URL-encoded variant (only if it differs from raw) */
-        char urlenc[2048];
-        size_t urllen = url_encode(urlenc, sizeof(urlenc), val, vlen);
-        if (urllen > 0 && urllen != vlen)
-            mask_replace(output, len, cap, urlenc, urllen, tag, taglen);
-    }
-}

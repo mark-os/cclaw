@@ -76,6 +76,71 @@ static int cmp_secret_len_desc(const void *a, const void *b) {
     return (la < lb) - (la > lb); /* descending */
 }
 
+/* Base64-encode src into dst. Returns bytes written (no NUL), 0 if too small. */
+static size_t b64_encode(char *dst, size_t dst_cap, const char *src, size_t src_len) {
+    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t needed = ((src_len + 2) / 3) * 4;
+    if (needed > dst_cap) return 0;
+    size_t o = 0;
+    for (size_t i = 0; i < src_len; i += 3) {
+        unsigned char a = (unsigned char)src[i];
+        unsigned char b = (i + 1 < src_len) ? (unsigned char)src[i + 1] : 0;
+        unsigned char c = (i + 2 < src_len) ? (unsigned char)src[i + 2] : 0;
+        dst[o++] = t[a >> 2];
+        dst[o++] = t[((a & 3) << 4) | (b >> 4)];
+        dst[o++] = (i + 1 < src_len) ? t[((b & 0xf) << 2) | (c >> 6)] : '=';
+        dst[o++] = (i + 2 < src_len) ? t[c & 0x3f] : '=';
+    }
+    return o;
+}
+
+/* URL-encode src into dst. Returns bytes written (no NUL), 0 if too small. */
+static size_t url_encode(char *dst, size_t dst_cap, const char *src, size_t src_len) {
+    static const char hex[] = "0123456789ABCDEF";
+    size_t o = 0;
+    for (size_t i = 0; i < src_len; i++) {
+        unsigned char ch = (unsigned char)src[i];
+        int safe = ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                    (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
+                    ch == '.' || ch == '~');
+        if (safe) {
+            if (o + 1 > dst_cap) return 0;
+            dst[o++] = (char)ch;
+        } else {
+            if (o + 3 > dst_cap) return 0;
+            dst[o++] = '%';
+            dst[o++] = hex[ch >> 4];
+            dst[o++] = hex[ch & 0xf];
+        }
+    }
+    return o;
+}
+
+/* Replace every occurrence of needle with ph in cur. Returns a fresh string
+ * (caller frees the old cur). On OOM leaves cur unchanged and returns it. */
+static char *replace_all(char *cur, const char *needle, size_t nlen,
+                         const char *ph, size_t ph_len) {
+    if (!needle || nlen == 0) return cur;
+    size_t cur_len = strlen(cur);
+    size_t out_cap = cur_len + 1;
+    if (ph_len > nlen)
+        out_cap += (cur_len / nlen + 1) * (ph_len - nlen);
+    char *out = malloc(out_cap);
+    if (!out) return cur;
+    size_t oi = 0;
+    const char *scan = cur, *pos;
+    while ((pos = strstr(scan, needle)) != NULL) {
+        size_t chunk = (size_t)(pos - scan);
+        memcpy(out + oi, scan, chunk); oi += chunk;
+        memcpy(out + oi, ph, ph_len); oi += ph_len;
+        scan = pos + nlen;
+    }
+    size_t tail = cur_len - (size_t)(scan - cur) + 1;
+    memcpy(out + oi, scan, tail);
+    free(cur);
+    return out;
+}
+
 char *secret_deinterpolate(const char *text, const ShellSecret *secrets, size_t count) {
     if (!text) return NULL;
     if (!secrets || count == 0) return strdup(text);
@@ -87,41 +152,37 @@ char *secret_deinterpolate(const char *text, const ShellSecret *secrets, size_t 
     s_deinterp_secrets = secrets;
     qsort(order, count, sizeof(size_t), cmp_secret_len_desc);
 
-    /* Iteratively replace each secret value with its placeholder */
     char *cur = strdup(text);
-    if (!cur) return NULL;
+    if (!cur) { free(order); return NULL; }
 
     for (size_t idx = 0; idx < count; idx++) {
         const ShellSecret *s = &secrets[order[idx]];
         if (!s->value || !s->value[0]) continue;
         size_t vlen = strlen(s->value);
-        /* Build placeholder: {{SECRET:name}} */
-        char ph[256];
-        int ph_len = snprintf(ph, sizeof(ph), "{{SECRET:%s}}", s->name);
-        if (ph_len >= (int)sizeof(ph)) continue;
 
-        /* Replace all occurrences — single forward pass (no re-scan) */
-        size_t cur_len = strlen(cur);
-        size_t out_cap = cur_len + 1;
-        if ((size_t)ph_len > vlen)
-            out_cap += (cur_len / vlen + 1) * ((size_t)ph_len - vlen);
-        char *out = malloc(out_cap);
-        if (!out) continue;
-        size_t oi = 0;
-        const char *scan = cur;
-        const char *pos;
-        while ((pos = strstr(scan, s->value)) != NULL) {
-            size_t chunk = (size_t)(pos - scan);
-            memcpy(out + oi, scan, chunk);
-            oi += chunk;
-            memcpy(out + oi, ph, (size_t)ph_len);
-            oi += (size_t)ph_len;
-            scan = pos + vlen;
+        char ph[256];
+        int phl = snprintf(ph, sizeof(ph), "{{SECRET:%s}}", s->name);
+        if (phl <= 0 || phl >= (int)sizeof(ph)) continue;
+        size_t ph_len = (size_t)phl;
+
+        /* Raw value, then its base64 and URL-encoded variants. Encoded forms
+         * are longer than the raw value, so masking them after the raw pass
+         * can never re-hit an already-substituted region. */
+        cur = replace_all(cur, s->value, vlen, ph, ph_len);
+
+        char b64[1024];
+        size_t b64len = b64_encode(b64, sizeof(b64) - 1, s->value, vlen);
+        if (b64len > 0 && b64len != vlen) {
+            b64[b64len] = '\0';  /* replace_all uses strstr — needs termination */
+            cur = replace_all(cur, b64, b64len, ph, ph_len);
         }
-        size_t tail = cur_len - (size_t)(scan - cur) + 1;
-        memcpy(out + oi, scan, tail);
-        free(cur);
-        cur = out;
+
+        char urlenc[2048];
+        size_t urllen = url_encode(urlenc, sizeof(urlenc) - 1, s->value, vlen);
+        if (urllen > 0 && urllen != vlen) {
+            urlenc[urllen] = '\0';
+            cur = replace_all(cur, urlenc, urllen, ph, ph_len);
+        }
     }
     free(order);
     return cur;

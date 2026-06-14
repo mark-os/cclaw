@@ -229,6 +229,56 @@ static void test_no_cwd_path_blocked(void) {
     printf("  PASS test_no_cwd_path_blocked\n");
 }
 
+/* Secret key + DB ciphertext are bind-masked even when their dir is mounted.
+ * Simulates trusted/bootstrap CLI: CWD (holding cclaw.db + .cclaw_key) is
+ * bind-mounted rw, but the key/db must still be unreadable to the shell child. */
+static void test_key_masked_in_mounted_cwd(void) {
+    if (!ns_available) { printf("  SKIP test_key_masked_in_mounted_cwd\n"); return; }
+
+    char cwd_dir[256];
+    snprintf(cwd_dir, sizeof(cwd_dir), "/tmp/cclaw_keymask_%d", getpid());
+    mkdir(cwd_dir, 0755);
+
+    char db_file[320], key_file[320], normal[320];
+    snprintf(db_file, sizeof(db_file), "%s/cclaw.db", cwd_dir);
+    snprintf(key_file, sizeof(key_file), "%s/.cclaw_key", cwd_dir);
+    snprintf(normal, sizeof(normal), "%s/notes.txt", cwd_dir);
+
+    FILE *f = fopen(db_file, "w"); fprintf(f, "DBCIPHERTEXTMARKER"); fclose(f);
+    f = fopen(key_file, "w"); fprintf(f, "SECRETKEYMARKER0123456789abcdef0"); fclose(f);
+    f = fopen(normal, "w"); fprintf(f, "ordinary_file_content"); fclose(f);
+
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .cwd_path = cwd_dir,
+                      .db_path = db_file, .sandbox = 1, .mount_cwd = 1};
+    char args[1024];
+
+    /* Key content must NOT leak */
+    snprintf(args, sizeof(args), "{\"command\":\"cat %s 2>&1\"}", key_file);
+    char *r = tool_shell_handler(args, &sc);
+    assert(r != NULL);
+    assert(strstr(r, "SECRETKEYMARKER") == NULL);
+    free(r);
+
+    /* DB ciphertext must NOT leak */
+    snprintf(args, sizeof(args), "{\"command\":\"cat %s 2>&1\"}", db_file);
+    r = tool_shell_handler(args, &sc);
+    assert(r != NULL);
+    assert(strstr(r, "DBCIPHERTEXTMARKER") == NULL);
+    free(r);
+
+    /* A normal file in the same mounted dir is still readable (mask is surgical) */
+    snprintf(args, sizeof(args), "{\"command\":\"cat %s\"}", normal);
+    r = tool_shell_handler(args, &sc);
+    assert(r != NULL);
+    assert(strstr(r, "[exit 0]") != NULL);
+    assert(strstr(r, "ordinary_file_content") != NULL);
+    free(r);
+
+    snprintf(args, sizeof(args), "rm -rf %s", cwd_dir);
+    system(args);
+    printf("  PASS test_key_masked_in_mounted_cwd\n");
+}
+
 /* T301: sandbox=none config — namespace NOT applied, child runs unsandboxed */
 static void test_sandbox_none_skips_namespace(void) {
     ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 0};
@@ -263,6 +313,7 @@ int main(void) {
     test_daemon_db_path_blocked();
     test_cwd_path_rw();
     test_no_cwd_path_blocked();
+    test_key_masked_in_mounted_cwd();
     test_sandbox_none_skips_namespace();
     cleanup_workspace();
     printf("All namespace sandbox tests passed.\n");

@@ -16,6 +16,7 @@ typedef struct {
     int timeout;
     const char *workspace;  /* agent workspace (namespace sandbox restricts access) */
     const char *cwd_path;   /* V22a/T276: CWD rw bind-mount in CLI mode (NULL in daemon) */
+    const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key — bind-masked inside the ns */
     const char *proxy_sock; /* V83: path to .proxy.sock (NULL if proxy not started) */
     ShellSecret *secrets;   /* V88: array of secrets to inject + mask */
     size_t secret_count;
@@ -44,10 +45,5 @@ ShellSecret *shell_secrets_collect(size_t *count);
 
 /* Free secrets array */
 void shell_secrets_free(ShellSecret *secrets, size_t count);
-
-/* V88: Mask secret values in output buffer (in-place).
- * Replaces occurrences of secret values with [REDACTED:<name>]. */
-void shell_mask_secrets(char *output, size_t *len, size_t cap,
-                        const ShellSecret *secrets, size_t secret_count);
 
 #endif

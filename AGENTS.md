@@ -11,7 +11,7 @@ CClaw is a **minimal** autonomous AI agent in C. Every line of code must earn it
 CClaw is designed around Unix philosophy:
 - Daemon as supervisor — schedules work, manages channels, dispatches to worker threads. Tool children are forked for sandbox isolation.
 - Agents as isolated users — each has a workspace directory (`agents/<name>/workspace/`), sessions scoped by agent_name in cclaw.db.
-- Processes are cheap and disposable — one turn, then exit. Memory fully reclaimed.
+- Long-lived core, disposable work — the daemon process stays up running the event loop. The cheap, reclaimable unit is the forked tool child (exits after one tool call). No per-turn process churn — LLM requests are blocking curl calls on a worker thread pool that write results back to the DB.
 - Communication via DB state — `advance_session()` reads session state, decides next action. No IPC beyond worker notification pipe.
 - Config via environment — process reads `CCLAW_*` env vars at startup. No config files in agent processes.
 - Logging via syslog (daemon) or stderr tee (CLI). No log collector.
@@ -28,6 +28,7 @@ CClaw shamelessly borrows ideas from these projects:
 | Letta | `reference/letta` | Innovative memory system, stateful agent design | REST API, Postgres, Python |
 | nullclaw | `reference/nullclaw` | Zig clone of OpenClaw (architecture reference) | Pure-Zig everything for cross-compat (we link system curl) |
 | IronClaw | `reference/ironclaw` | Secure execution model (secret injection, sandboxing) | Rust |
+| Hermes | `reference/hermes` | Self-improving agent loop, skill/extension library patterns (closest cousin to our self-augmentation goal), multi-channel gateway | TS/Python runtime sprawl, huge feature surface |
 
 **Principles:**
 - Simple over clever. Blocking I/O. Threads over callbacks.
@@ -35,6 +36,29 @@ CClaw shamelessly borrows ideas from these projects:
 - Self-augmenting via MicroQuickJS plugin system — agents load JS extensions from workspace at startup.
 - One tool at a time during development. Prove each layer works before adding the next.
 - No backward compatibility. No migrations. No users yet — move fast, break things.
+
+## Working With the Grain
+
+CClaw follows the **principle of least surprise**: pick the boring, obvious solution a maintainer would guess, match the patterns already in the file, and get the job done. The cleverness is in *choosing the right existing tool* — SQLite and Unix — not in writing new machinery. Before adding a data structure, cache, queue, or state machine in C, ask whether SQLite or the OS already does it.
+
+**Lean on SQLite — it is the architecture, not just storage.**
+- Build and parse structured JSON with SQLite's JSON1 (`json_object`, `json_group_array`, `json_each`, `json_patch`), not hand-rolled C. The LLM request body is assembled this way (`src/llm_payload.c`) — a SQL query over `entries` *is* the serializer.
+- Search with FTS5. Queues and work state are tables. Concurrency is WAL. Ordering is `ORDER BY pos`. Reach for a C container only when SQLite genuinely can't express it.
+
+**Trust the Unix system — don't reimplement it in C.**
+- Isolation: namespaces, `setrlimit`, file permissions, `fork`/`exec`. Lifecycle: signals + the event loop. Scheduling: cron. Communication: fds and the worker pipe. Let the kernel do the kernel's job.
+
+**State has one home.** Durable state is `cclaw.db`. Memory holds only the active session branch and per-turn scratch. Do **not** introduce parallel state (globals, caches, sidecar files) that can drift from the DB — state management is the part that churned the most before stabilizing, so changes here have wide blast radius. `advance_session()` is the load-bearing wall: re-read it before changing how a turn progresses.
+
+**jsmn vs SQLite JSON — use the right one.** jsmn tokenizes *untrusted/streaming* JSON you don't own (SSE chunks, tool-call arguments from the model). SQLite JSON handles *structured data you own* in the DB. They are not interchangeable; don't swap one for the other to "unify."
+
+### Counterintuitive on purpose — don't "fix" these
+
+These look odd at a glance but are deliberate. Understand them before touching them; if you think one is wrong, that's the signal to ask, not to refactor.
+
+- **A SQL query emits the LLM request JSON.** `src/llm_payload.c` returns the request body zero-copy from an open statement. This is intentional and fast — do not replace it with a C JSON builder.
+- **Forked tool children, threaded LLM calls.** LLM requests run on a worker thread pool in the long-lived process; only untrusted/blocking tools fork. (This replaced an earlier fork-per-turn design — don't reintroduce it.)
+- **No config files in agent logic, no migrations, no compat shims.** Config comes from env at startup; there are no users, so delete old code instead of versioning it.
 
 ## Target Platforms
 
@@ -48,9 +72,21 @@ CClaw shamelessly borrows ideas from these projects:
 ## Memory Model
 
 - **Session**: heap-owned growable message array. Each message owns its strings via `malloc`. Only the active session branch is in memory — SQLite holds everything else.
-- **Per-turn Arena**: 512KB scratch for LLM request/response JSON, tool output, parsing. Created fresh each turn, destroyed after.
 - **Config**: loaded once from env vars at process start. Immutable for process lifetime.
-- **AgentContext**: per-turn struct referencing `{session, arena, config}`. Passed to agent/llm functions.
+- **AgentContext**: per-turn struct referencing `{session, config}`. Passed to agent/llm functions.
+
+## Self-Augmentation (core differentiator)
+
+This is what CClaw *is for*, not an add-on. Agents extend themselves at runtime via the MicroQuickJS engine, adding **new tools, channels, and scripts**.
+
+**One model: JS lives in files, the DB holds config + a path.** Every JS artifact — tools, channels, scripts — is a file in the agent's workspace (`agents/<name>/workspace/`), referenced by path. The DB stores the *definition* (name, description, JSON schema, trust flags) and a `path` to the implementation; it never stores code. The Telegram channel is the canonical example: `channels.extension_name` joins `extensions.name` to resolve a `js_path`, and the runner loads that file (`src/channel_runner.c`).
+
+- **Definition is config, not code.** `js_define_tool` is a config change: the agent passes a **path to a code file** in its workspace plus the tool's schema — never inline JS. Defining a tool = write/point at the draft file + insert the `extensions` (and `agent_extensions`) row.
+- **Draft → promote lifecycle.** JS starts as a draft file in `workspace/extensions/`, usable only by that agent. Promotion registers it (`name → path` in `extensions`, linked via `agent_extensions`) so it loads at startup — and that registration is the trust boundary (a sub-agent's draft must not auto-promote to a global tool).
+- `js_eval` runs JS in the sandboxed engine for one-off evaluation.
+- The JS bridge (tool registration, channel dispatch) is a first-class API surface. When changing how tools register or channels dispatch, preserve the agent's ability to self-augment — don't optimize it away as "just plugins."
+
+> **Slated for removal:** the legacy code-in-DB path — the `js_tools.code` column and its startup reload (`SELECT ... code FROM js_tools`, `src/tool_js.c`). It is the lone artifact that stores JS in the DB; fold `js_define_tool` onto the path-based `extensions` model above and delete it.
 
 ## Security Model
 

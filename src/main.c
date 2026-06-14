@@ -229,7 +229,11 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
             ((AgentLaunchCtx *)te->user_data)->current_tool_call_id = tc->call_id;
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         free(interp_args);
-        /* NULL return means blocking (launch_agent parks parent in waiting) */
+        /* NULL return means blocking: launch_agent parked the parent in
+         * 'waiting' and left this tool_call pending (see tool_agent.c). Leave it
+         * pending — advance_session writes the result on child completion. This
+         * is an explicit allowlist on purpose: a NULL from any other tool must
+         * fall through to "error: tool returned null" below, not silently hang. */
         if (!result && strcmp(tc->name, "launch_agent") == 0)
             return 2; /* Signal: parked, don't advance */
         if (!result) result = strdup("error: tool returned null");

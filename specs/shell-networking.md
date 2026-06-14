@@ -114,8 +114,9 @@ shell child env: CCLAW_SECRET_GITHUB_TOKEN=ghp_abc123
   │ command string in DB only contains "$CCLAW_SECRET_GITHUB_TOKEN" (safe)
   ▼
 shell output: "HTTP/1.1 200 OK..."
-  │ agent scans for known secret values
-  │ replaces any matches with [REDACTED:github_token]
+  │ tool_result_postprocess() (single masking chokepoint, in the parent)
+  │ deinterpolate: known values (raw+base64+url) → {{SECRET:github_token}}
+  │ then AC scan for unknown signature-matching secrets
   ▼
 entries table: masked output stored
 ```

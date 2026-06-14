@@ -93,9 +93,12 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         return strdup(buf);
     }
 
-    /* Blocking: return empty string — real result arrives when child finishes.
-     * The tool_call stays pending; advance_session on the child's completion
-     * will write the actual result. */
+    /* Blocking: return NULL — the parent was parked in 'waiting' above and its
+     * tool_call stays pending. The dispatcher special-cases this NULL for
+     * launch_agent (see main.c, "NULL return means blocking") and skips writing
+     * a result; advance_session writes the real result on the child's
+     * completion (see advance.c, parent_tool_call_id path). If you make another
+     * tool return NULL to park, update the dispatcher's allowlist to match. */
     return NULL;
 }
 

@@ -53,6 +53,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         sc->secrets = setup->secrets;
         sc->secret_count = setup->secret_count;
         sc->cwd_path = getenv("CCLAW_PATH");  /* T276/V22a: CWD rw in CLI mode */
+        sc->db_path = cfg->db_path;           /* mask .cclaw_key + db ciphertext from shell children */
         /* Trust-level policy bundle. Sandbox is derived: every level requires
          * the namespace except host, which never attempts it. */
         sc->sandbox = 1;

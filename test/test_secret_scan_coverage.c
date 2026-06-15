@@ -86,6 +86,21 @@ static int test_keyword(int rule_idx) {
     return 0;
 }
 
+/* Test a BASE64 rule: anchor + base64 of a user:pass pair */
+static int test_base64(int rule_idx) {
+    const ScanRule *r = &scan_rules[rule_idx];
+    /* base64("admin:password") — decodes to printable ASCII with a colon. */
+    static const char sample[] = "YWRtaW46cGFzc3dvcmQ=";
+    char buf[256];
+    int off = snprintf(buf, sizeof(buf), "found %s%s end", r->keyword, sample);
+
+    ScanFinding f[SCAN_MAX_FINDINGS];
+    int n = secret_scan(buf, (size_t)off, f, SCAN_MAX_FINDINGS);
+    for (int i = 0; i < n; i++)
+        if (strcmp(f[i].rule_id, r->id) == 0) return 1;
+    return 0;
+}
+
 /* Test a LITERAL rule: just the keyword present with word boundary */
 static int test_literal(int rule_idx) {
     const ScanRule *r = &scan_rules[rule_idx];
@@ -123,6 +138,7 @@ int main(void) {
         case SCAN_VTYPE_PREFIX:  ok = test_prefix(i); break;
         case SCAN_VTYPE_KEYWORD: ok = test_keyword(i); break;
         case SCAN_VTYPE_LITERAL: ok = test_literal(i); break;
+        case SCAN_VTYPE_BASE64:  ok = test_base64(i); break;
         }
 
         if (ok) {

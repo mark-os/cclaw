@@ -12,8 +12,11 @@ typedef struct {
 } ScanFinding;
 
 /* Scan text for leaked secrets using AC automaton.
- * Writes findings to caller-provided array. Returns count found.
- * Zero heap allocation — safe for hot path. */
+ * Writes up to max_findings results to out[]. Returns count written,
+ * or max_findings+1 if the input is saturated (more matches exist
+ * than can be recorded — caller should treat entire content as tainted).
+ * Precondition: text must contain complete logical units; SSE-chunked
+ * streams must be reassembled before scanning. Zero heap allocation. */
 int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings);
 
 /* Scan and redact in-place. Replaces findings with [SECRET_DETECTED:<rule_id>].

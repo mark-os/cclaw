@@ -7,6 +7,12 @@
 #include <math.h>
 #include <ctype.h>
 
+_Static_assert(sizeof(scan_ac_col) == 128, "scan_ac_col must cover ASCII");
+_Static_assert(sizeof(scan_ac_goto) / sizeof(scan_ac_goto[0]) == SCAN_AC_STATES,
+               "goto rows must match state count");
+_Static_assert(sizeof(scan_ac_accept) / sizeof(scan_ac_accept[0]) == SCAN_AC_STATES,
+               "accept rows must match state count");
+
 float secret_scan_entropy(const char *s, int len) {
     if (len <= 0) return 0.0f;
     int freq[256] = {0};
@@ -98,6 +104,7 @@ static int validate_keyword(const char *text, size_t text_len, int offset,
     int eq_pos = -1;
     for (int i = offset + kw_len; i < search_end; i++) {
         char c = text[i];
+        if (c == '\n' || c == '\r') break;
         if (c == '=' || c == ':') { eq_pos = i; break; }
     }
     if (eq_pos < 0) return 0;
@@ -143,11 +150,69 @@ static int validate_keyword(const char *text, size_t text_len, int offset,
     return 1;
 }
 
+/* Base64 symbol value, accepting both standard (+/) and url (-_) alphabets.
+ * Returns -1 for non-base64 bytes (incl. '=' padding). */
+static int b64val(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+' || c == '-') return 62;
+    if (c == '/' || c == '_') return 63;
+    return -1;
+}
+
+/* Validate an HTTP Basic value: the run after the anchor must base64-decode to
+ * printable ASCII containing ':' (the user:pass shape). This catches weak,
+ * low-entropy credentials an entropy gate misses, while rejecting plain words
+ * like "instructions" (which decode to non-printable bytes with no colon).
+ * Zero heap — decodes a bounded prefix into a stack buffer, enough to confirm
+ * the shape. */
+static int validate_base64(const char *text, size_t text_len, int offset,
+                           const ScanRule *rule, int *out_start, int *out_len) {
+    int kw_len = (int)strlen(rule->keyword);
+    if (!boundary_ok(text, offset, rule)) return 0;
+    int start = offset + kw_len;
+    if (start >= (int)text_len) return 0;
+
+    /* Span of the base64 run (data + '=' padding), bounded by tail_max. */
+    int run = 0;
+    for (int i = start; i < (int)text_len && run < rule->tail_max; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (b64val(c) < 0 && c != '=') break;
+        run++;
+    }
+    if (run < rule->tail_min) return 0;
+
+    /* Decode a bounded prefix; reject on any non-printable byte, require ':'. */
+    unsigned char dec[96];
+    int dn = 0, bits = 0, has_colon = 0;
+    unsigned int acc = 0;
+    for (int i = start; i < start + run && dn < (int)sizeof(dec); i++) {
+        int v = b64val((unsigned char)text[i]);
+        if (v < 0) break;                 /* '=' padding ends the data */
+        acc = (acc << 6) | (unsigned)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            unsigned char o = (unsigned char)((acc >> bits) & 0xFF);
+            if (o < 0x20 || o > 0x7E) return 0;   /* not printable → not Basic */
+            if (o == ':') has_colon = 1;
+            dec[dn++] = o;
+        }
+    }
+    if (dn < 2 || !has_colon) return 0;
+
+    *out_start = start;
+    *out_len = run;
+    return 1;
+}
+
 int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings) {
     int count = 0;
     int state = 0;
+    int saturated = 0;
 
-    for (size_t i = 0; i < len && count < max_findings; i++) {
+    for (size_t i = 0; i < len; i++) {
         unsigned char b = (unsigned char)text[i];
         if (b >= 128) { state = 0; continue; } /* non-ASCII resets */
         if (b >= 'A' && b <= 'Z') b |= 0x20;  /* case-fold at scan time */
@@ -155,7 +220,8 @@ int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings
 
         /* Check accepts at this state */
         int n_accept = scan_ac_accept[state][0];
-        for (int a = 0; a < n_accept && count < max_findings; a++) {
+        for (int a = 0; a < n_accept; a++) {
+            if (saturated) break;
             int rule_idx = scan_ac_accept[state][1 + a];
             if (rule_idx < 0 || rule_idx >= SCAN_RULE_COUNT) continue;
             const ScanRule *rule = &scan_rules[rule_idx];
@@ -167,36 +233,52 @@ int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings
                 if (boundary_ok(text, match_offset, rule) &&
                     (rule->nocase ||
                      strncmp(text + match_offset, rule->keyword, (size_t)kw_len) == 0)) {
-                    out[count].rule_id = rule->id;
-                    out[count].offset = match_offset;
-                    out[count].match_len = kw_len;
-                    count++;
+                    if (count < max_findings) {
+                        out[count].rule_id = rule->id;
+                        out[count].offset = match_offset;
+                        out[count].match_len = kw_len;
+                        count++;
+                    } else { saturated = 1; }
                 }
             } else if (rule->vtype == SCAN_VTYPE_PREFIX) {
                 if (validate_prefix(text, len, match_offset, rule)) {
-                    int tail = 0;
-                    int start = match_offset + kw_len;
-                    for (int j = start; j < (int)len && tail < rule->tail_max; j++) {
-                        if (!charset_ok((unsigned char)text[j], rule->charset)) break;
-                        tail++;
-                    }
-                    out[count].rule_id = rule->id;
-                    out[count].offset = match_offset;
-                    out[count].match_len = kw_len + tail;
-                    count++;
+                    if (count < max_findings) {
+                        int tail = 0;
+                        int start = match_offset + kw_len;
+                        for (int j = start; j < (int)len && tail < rule->tail_max; j++) {
+                            if (!charset_ok((unsigned char)text[j], rule->charset)) break;
+                            tail++;
+                        }
+                        out[count].rule_id = rule->id;
+                        out[count].offset = match_offset;
+                        out[count].match_len = kw_len + tail;
+                        count++;
+                    } else { saturated = 1; }
+                }
+            } else if (rule->vtype == SCAN_VTYPE_BASE64) {
+                int val_start, val_len;
+                if (validate_base64(text, len, match_offset, rule, &val_start, &val_len)) {
+                    if (count < max_findings) {
+                        out[count].rule_id = rule->id;
+                        out[count].offset = val_start;
+                        out[count].match_len = val_len;
+                        count++;
+                    } else { saturated = 1; }
                 }
             } else { /* SCAN_VTYPE_KEYWORD */
                 int val_start, val_len;
                 if (validate_keyword(text, len, match_offset, rule, &val_start, &val_len)) {
-                    out[count].rule_id = rule->id;
-                    out[count].offset = val_start;
-                    out[count].match_len = val_len;
-                    count++;
+                    if (count < max_findings) {
+                        out[count].rule_id = rule->id;
+                        out[count].offset = val_start;
+                        out[count].match_len = val_len;
+                        count++;
+                    } else { saturated = 1; }
                 }
             }
         }
     }
-    return count;
+    return saturated ? max_findings + 1 : count;
 }
 
 /* In-place replacement helper (same as tool_shell.c mask_replace) */
@@ -239,6 +321,19 @@ int secret_scan_redact(char *text, size_t *len, size_t cap) {
     ScanFinding findings[SCAN_MAX_FINDINGS];
     int n = secret_scan(text, *len, findings, SCAN_MAX_FINDINGS);
     if (n == 0) return 0;
+    if (n > SCAN_MAX_FINDINGS) {
+        static const char tag[] = "[SECRET_DETECTED:content_redacted]";
+        size_t tag_len = sizeof(tag) - 1;
+        if (tag_len < cap) {
+            memcpy(text, tag, tag_len);
+            text[tag_len] = '\0';
+            *len = tag_len;
+        } else {
+            text[0] = '\0';
+            *len = 0;
+        }
+        return 1;
+    }
 
     qsort(findings, (size_t)n, sizeof(ScanFinding), cmp_findings);
 

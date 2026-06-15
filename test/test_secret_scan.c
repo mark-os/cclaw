@@ -193,6 +193,146 @@ static void test_entropy_calculation(void) {
     PASS("entropy calculation");
 }
 
+static void test_saturation_signal(void) {
+    /* 33 AWS keys — exceeds SCAN_MAX_FINDINGS (32) */
+    char buf[2048] = {0};
+    int off = 0;
+    for (int i = 0; i < 33; i++) {
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+                        "AKIA%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c ",
+                        'A'+(i%26), 'B', 'C', 'D', 'E', 'F', 'G', 'H',
+                        'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P');
+    }
+    ScanFinding f[SCAN_MAX_FINDINGS];
+    int n = secret_scan(buf, strlen(buf), f, SCAN_MAX_FINDINGS);
+    assert(n == SCAN_MAX_FINDINGS + 1);
+    PASS("saturation signal (33 keys → max+1)");
+}
+
+static void test_saturation_exact(void) {
+    /* Exactly 32 keys — should return 32, not saturated */
+    char buf[2048] = {0};
+    int off = 0;
+    for (int i = 0; i < 32; i++) {
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+                        "AKIA%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c ",
+                        'A'+(i%26), 'B', 'C', 'D', 'E', 'F', 'G', 'H',
+                        'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P');
+    }
+    ScanFinding f[SCAN_MAX_FINDINGS];
+    int n = secret_scan(buf, strlen(buf), f, SCAN_MAX_FINDINGS);
+    assert(n == 32);
+    PASS("exact 32 keys → not saturated");
+}
+
+static void test_saturation_full_redact(void) {
+    /* Saturation triggers full content replacement */
+    char buf[2048] = {0};
+    int off = 0;
+    for (int i = 0; i < 33; i++) {
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+                        "AKIA%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c ",
+                        'A'+(i%26), 'B', 'C', 'D', 'E', 'F', 'G', 'H',
+                        'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P');
+    }
+    size_t len = strlen(buf);
+    int n = secret_scan_redact(buf, &len, sizeof(buf));
+    assert(n == 1);
+    assert(strcmp(buf, "[SECRET_DETECTED:content_redacted]") == 0);
+    assert(strstr(buf, "AKIA") == NULL);
+    PASS("saturation full redact");
+}
+
+static void test_keyword_newline_stop(void) {
+    /* Operator on next line — must NOT match */
+    const char *cross = "api_key\n=aB3kL9mXp7qR2wNv4jH8sT5uY1cF6";
+    ScanFinding f[8];
+    int n = secret_scan(cross, strlen(cross), f, 8);
+    int found = 0;
+    for (int i = 0; i < n; i++)
+        if (strcmp(f[i].rule_id, "generic-api-key") == 0) found = 1;
+    assert(!found);
+
+    /* Same line — must match */
+    const char *same = "api_key=aB3kL9mXp7qR2wNv4jH8sT5uY1cF6";
+    n = secret_scan(same, strlen(same), f, 8);
+    found = 0;
+    for (int i = 0; i < n; i++)
+        if (strcmp(f[i].rule_id, "generic-api-key") == 0) found = 1;
+    assert(found);
+    PASS("keyword newline stop");
+}
+
+static int has_rule(const char *text, const char *rule_id) {
+    ScanFinding f[32];
+    int n = secret_scan(text, strlen(text), f, 32);
+    if (n > 32) return 1; /* saturated — treat as present */
+    for (int i = 0; i < n; i++)
+        if (strcmp(f[i].rule_id, rule_id) == 0) return 1;
+    return 0;
+}
+
+static void test_authorization_bearer(void) {
+    /* Real credential after the scheme word must be caught. The generic rule
+     * can't — it stops at "Bearer" (all-alpha) and never sees the token. */
+    assert(has_rule("Authorization: Bearer "
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwfQ.dozjgNryP4J3jVmNHl0w5N",
+        "http-authorization-bearer"));
+    assert(has_rule("authorization:Bearer ghp_aB3kL9mXp7qR2wNv4jH8sT5uY1cF6dE0xZ",
+        "http-authorization-bearer"));
+    /* Prose, placeholders, and env refs must NOT fire. */
+    assert(!has_rule("Use the Authorization: Bearer <token> header.",
+        "http-authorization-bearer"));
+    assert(!has_rule("Authorization: Bearer YOUR_TOKEN_HERE",
+        "http-authorization-bearer"));
+    assert(!has_rule("Send Authorization: Bearer ${ACCESS_TOKEN} now",
+        "http-authorization-bearer"));
+    assert(!has_rule("Bearer bonds are a fixed-income security.",
+        "http-authorization-bearer"));
+    PASS("authorization bearer");
+}
+
+static void test_authorization_basic(void) {
+    /* Long credential — base64(username:supersecretpassword123). */
+    assert(has_rule("Authorization: Basic "
+        "dXNlcm5hbWU6c3VwZXJzZWNyZXRwYXNzd29yZDEyMw==",
+        "http-authorization-basic"));
+    /* Weak/short creds an entropy gate would miss: base64("admin:admin") and
+     * base64("root:toor") decode to printable user:pass, so they're caught. */
+    assert(has_rule("Authorization: Basic YWRtaW46YWRtaW4=",
+        "http-authorization-basic"));
+    assert(has_rule("Authorization: Basic cm9vdDp0b29y",
+        "http-authorization-basic"));
+    /* Prose must not fire — including "instructions", which is valid base64
+     * *shape* (12 chars) but decodes to non-printable bytes with no colon. */
+    assert(!has_rule("Basic authentication is required here.",
+        "http-authorization-basic"));
+    assert(!has_rule("Authorization: Basic instructions",
+        "http-authorization-basic"));
+    assert(!has_rule("Authorization: Basic configuration",
+        "http-authorization-basic"));
+    PASS("authorization basic (base64 decode)");
+}
+
+static void test_jwt_token(void) {
+    /* Standalone JWT, no assignment context. */
+    assert(has_rule("token is "
+        "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjEsImV4cCI6OTk5OX0."
+        "abcDEF123456789xyzABCdef", "jwt-token"));
+    /* Short "eyj..." words must not trip it. */
+    assert(!has_rule("the key eyjafjallajokull is a volcano", "jwt-token"));
+    assert(!has_rule("function f() { return eyjConfig; }", "jwt-token"));
+    PASS("jwt token");
+}
+
+static void test_slack_variants(void) {
+    assert(has_rule("xoxa-2-1111111111-2222222222-aBcDeFgHiJkLmNoPqRsTuVwX",
+        "slack-misc-token"));
+    assert(has_rule("xapp-1-A01B2C3D4E5-1234567890-abcdef1234567890abcdef",
+        "slack-app-token"));
+    PASS("slack token variants");
+}
+
 int main(void) {
     printf("test_secret_scan:\n");
     test_aws_key();
@@ -209,6 +349,14 @@ int main(void) {
     test_redact_zero_slack();
     test_redact_zero_slack_multi();
     test_entropy_calculation();
+    test_saturation_signal();
+    test_saturation_exact();
+    test_saturation_full_redact();
+    test_keyword_newline_stop();
+    test_authorization_bearer();
+    test_authorization_basic();
+    test_jwt_token();
+    test_slack_variants();
     printf("  ALL PASSED\n");
     return 0;
 }

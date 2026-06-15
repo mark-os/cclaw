@@ -63,6 +63,9 @@ def parse_toml_rules(path):
                     current['regex'] = val.strip("'")
                 else:
                     current['regex'] = val.strip("'\"")
+            elif key == 'validator':
+                # Custom-rule override forcing a specific VTYPE (e.g. "base64").
+                current['validator'] = val.strip("'\"")
             elif key == 'keywords':
                 # Single-line array or start of multi-line
                 kws = re.findall(r'"([^"]*)"', val)
@@ -76,6 +79,9 @@ def parse_toml_rules(path):
 
 # High-signal rules to include (curated subset)
 CURATED_IDS = {
+    # Custom rules from vendor/secrets_custom.toml
+    'http-authorization-bearer', 'http-authorization-basic',
+    'jwt-token', 'slack-misc-token',
     'aws-access-token', 'anthropic-api-key', 'anthropic-admin-api-key',
     'gcp-api-key', 'azure-ad-client-secret',
     'github-pat', 'github-fine-grained-pat', 'github-oauth', 'github-app-token',
@@ -112,6 +118,7 @@ CURATED_IDS = {
 VTYPE_PREFIX  = 0   # Fixed prefix: validate tail charset + length
 VTYPE_KEYWORD = 1   # Contextual keyword: check assignment pattern + entropy
 VTYPE_LITERAL = 2   # Strong literal marker: flag on the anchor alone
+VTYPE_BASE64  = 3   # Base64 tail: decode + require printable ':' (HTTP Basic)
 
 # Charset classes (must match secret_scan.c charset_ok)
 CHARSET_ANY         = 0
@@ -138,9 +145,10 @@ def classify_rule(rule):
 
 
 def map_charset(charset_str):
-    """Map a regex character-class body to a SCAN_CHARSET_* enum, preserving
-    hex-ness and case (a collapse to generic ALNUM is what made e.g. the
-    twilio 'SK[0-9a-fA-F]{32}' rule match base64 blobs and file paths)."""
+    """Map a regex character-class body to a SCAN_CHARSET_* enum, keeping the
+    HEX/UPPER/LOWER classes narrow rather than collapsing everything to ALNUM.
+    The narrow classes matter: twilio's 'SK[0-9a-fA-F]{32}' must map to HEX, or
+    an ALNUM tail would also match base64 blobs and file paths."""
     norm = charset_str.replace('\\', '')
     # Pure hex: ranges drawn only from 0-9 / a-f / A-F, and at least one of a-f.
     leftover = re.sub(r'(?:0-9|a-f|A-F)', '', norm)
@@ -165,12 +173,10 @@ def extract_tail_params(rule):
     """Extract (tail_min, tail_max, charset) from the first bounded character
     class in a prefix rule's regex.
 
-    Returns None when the tail cannot be faithfully represented as a single
-    contiguous charset run — an open-set class like [\\s\\S], or no bounded
-    quantifier at all. The caller then either treats the rule as a literal
-    marker (strong anchor) or drops it, rather than inventing parameters. The
-    old blind '{N,M}' fallback is what turned the jwt rule into a degenerate
-    'ey' + {0,2} matcher (it latched onto the trailing '={0,2}')."""
+    Returns None when the tail cannot be represented as a single contiguous
+    charset run — an open-set class like [\\s\\S], or no bounded quantifier at
+    all. The caller then treats the rule as a literal marker (if the anchor is
+    strong enough) or drops it, rather than inventing tail parameters."""
     regex = rule.get('regex', '')
     # Common patterns: [A-Z2-7]{16}, [a-z0-9]{36}, [a-zA-Z0-9_-]{93}, [\w-]{17,}
     m = re.search(r'\[([A-Za-z0-9\-_\\/+=.]+)\]\{(\d+)(?:,(\d+)?)?\}', regex)
@@ -345,7 +351,8 @@ def emit_headers(keywords, rules_meta, goto, failure, accept, state_count):
         f.write("/* Validation types */\n")
         f.write("#define SCAN_VTYPE_PREFIX  0\n")
         f.write("#define SCAN_VTYPE_KEYWORD 1\n")
-        f.write("#define SCAN_VTYPE_LITERAL 2\n\n")
+        f.write("#define SCAN_VTYPE_LITERAL 2\n")
+        f.write("#define SCAN_VTYPE_BASE64  3\n\n")
         f.write("/* Charset classes */\n")
         f.write("#define SCAN_CHARSET_ANY         0\n")
         f.write("#define SCAN_CHARSET_UPPER_ALNUM 1\n")
@@ -408,7 +415,10 @@ def main():
     dropped = 0
     for rule in curated:
         vtype = classify_rule(rule)
-        params = extract_tail_params(rule) if vtype == VTYPE_PREFIX else None
+        if rule.get('validator') == 'base64':
+            vtype = VTYPE_BASE64   # explicit override; tail params still needed
+        params = (extract_tail_params(rule)
+                  if vtype in (VTYPE_PREFIX, VTYPE_BASE64) else None)
         for kw in rule.get('keywords', []):
             kw_lower = kw.lower()
             if kw_lower in seen_keywords:
@@ -420,6 +430,14 @@ def main():
             if vtype == VTYPE_KEYWORD:
                 kw_vtype = VTYPE_KEYWORD
                 tail_min, tail_max, charset = 10, 150, CHARSET_ALNUM
+            elif vtype == VTYPE_BASE64:
+                if params is None:
+                    print(f"  drop {rule['id']!r} anchor {kw_lower!r}: "
+                          f"base64 validator needs a bounded tail", file=sys.stderr)
+                    dropped += 1
+                    continue
+                tail_min, tail_max, charset = params
+                kw_vtype = VTYPE_BASE64
             elif params is not None:
                 tail_min, tail_max, charset = params
                 if len(kw_lower) < MIN_ANCHOR_LEN:

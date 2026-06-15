@@ -6,6 +6,7 @@
 #define SCAN_VTYPE_PREFIX  0
 #define SCAN_VTYPE_KEYWORD 1
 #define SCAN_VTYPE_LITERAL 2
+#define SCAN_VTYPE_BASE64  3
 
 /* Charset classes */
 #define SCAN_CHARSET_ANY         0
@@ -14,7 +15,7 @@
 #define SCAN_CHARSET_ALNUM       3
 #define SCAN_CHARSET_HEX         4
 
-#define SCAN_RULE_COUNT 66
+#define SCAN_RULE_COUNT 73
 
 typedef struct {
     const char *id;
@@ -27,7 +28,7 @@ typedef struct {
     float entropy;    /* min entropy threshold (0 = no check) */
 } ScanRule;
 
-static const ScanRule scan_rules[66] = {
+static const ScanRule scan_rules[73] = {
     {"age-secret-key", "age-secret-key-1", 0, 58, 58, 3, 1, 0.0f},
     {"anthropic-admin-api-key", "sk-ant-admin01", 0, 93, 93, 3, 1, 0.0f},
     {"anthropic-api-key", "sk-ant-api03", 0, 93, 93, 3, 1, 0.0f},
@@ -94,6 +95,13 @@ static const ScanRule scan_rules[66] = {
     {"twilio-api-key", "SK", 0, 32, 32, 4, 0, 3.0f},
     {"vault-batch-token", "hvb.", 0, 138, 300, 3, 1, 4.0f},
     {"vault-service-token", "hvs.", 0, 90, 120, 3, 1, 3.5f},
+    {"http-authorization-bearer", "bearer ", 0, 16, 2048, 3, 1, 3.5f},
+    {"http-authorization-basic", "basic ", 3, 12, 1024, 3, 1, 0.0f},
+    {"jwt-token", "eyj", 0, 40, 4096, 3, 1, 4.0f},
+    {"slack-misc-token", "xoxa-", 0, 10, 1024, 3, 1, 3.0f},
+    {"slack-misc-token", "xoxr-", 0, 10, 1024, 3, 1, 3.0f},
+    {"slack-misc-token", "xoxs-", 0, 10, 1024, 3, 1, 3.0f},
+    {"slack-app-token", "xapp-", 0, 10, 1024, 3, 1, 3.0f},
 };
 
 #endif /* CCLAW_SECRET_SCAN_RULES_H */

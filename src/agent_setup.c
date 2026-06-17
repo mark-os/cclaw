@@ -6,7 +6,6 @@
 #include "tool_db_query.h"
 #include "tool_cron.h"
 #include "tool_request_config.h"
-#include "context.h"
 #include "sandbox.h"
 #include "log.h"
 #include <stdlib.h>
@@ -73,13 +72,18 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         sc->rlimits.cpu_sec = trust_policy.rlimits.cpu_sec;
     }
 
-    /* File read/write — T118: allow workspace + session temp dir; T228: CCLAW_PATH */
-    char tmp_dir[64];
-    session_tmp_dir(session_id, tmp_dir, sizeof(tmp_dir));
+    /* File tools — forked sandbox path shares trust policy with shell */
     setup->file_read_ctx.workspace = cfg->workspace;
-    setup->file_read_ctx.extra_read_path = tmp_dir;
-    setup->file_read_ctx.cclaw_path = getenv("CCLAW_PATH");
+    setup->file_read_ctx.cwd_path = getenv("CCLAW_PATH");
+    setup->file_read_ctx.db_path = cfg->db_path;
     setup->file_read_ctx.read_only = trust_policy.workspace_ro;
+    setup->file_read_ctx.sandbox = trust_policy.sandbox;
+    setup->file_read_ctx.workspace_ro = trust_policy.workspace_ro;
+    setup->file_read_ctx.mount_cwd = trust_policy.mount_cwd;
+    setup->file_read_ctx.env_mode = trust_policy.env_mode;
+    setup->file_read_ctx.rlimits.nproc = trust_policy.rlimits.nproc;
+    setup->file_read_ctx.rlimits.as_mb = trust_policy.rlimits.as_mb;
+    setup->file_read_ctx.rlimits.cpu_sec = trust_policy.rlimits.cpu_sec;
     tool_file_read_register(&setup->reg, &setup->file_read_ctx);
     tool_file_write_register(&setup->reg, &setup->file_read_ctx);
     tool_file_list_register(&setup->reg, &setup->file_read_ctx);

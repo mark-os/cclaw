@@ -11,58 +11,165 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define FILE_READ_MAX (256 * 1024)
 #define FILE_LIST_DEFAULT_LIMIT 500
 #define FIND_DEFAULT_LIMIT 1000
 #define FIND_MAX_DEPTH 32
 
+/* ── Forked sandbox runner ────────────────────────────────────────────── */
+
+/* Run handler in a forked child under the kernel sandbox. If sandbox==0
+ * (host trust or no workspace), run in-process directly. */
+char *file_sandbox_run(FileReadCtx *ctx, char *(*handler)(const char *, void *),
+                       const char *arguments) {
+    if (!ctx->sandbox || !ctx->workspace) {
+        /* Host mode / unit tests: run in-process */
+        return handler(arguments, ctx);
+    }
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0)
+        return strdup("error: pipe() failed");
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return strdup("error: fork() failed");
+    }
+
+    if (pid == 0) {
+        /* Child */
+        close(pipefd[0]);
+
+        SandboxConfig cfg = {0};
+        cfg.workspace    = ctx->workspace;
+        cfg.cwd_path     = ctx->cwd_path;
+        cfg.db_path      = ctx->db_path;
+        cfg.sandbox      = 1;
+        cfg.workspace_ro = ctx->workspace_ro;
+        cfg.mount_cwd    = ctx->mount_cwd;
+        cfg.env_mode     = ctx->env_mode;
+        cfg.net_mode     = 1;  /* file ops never need network */
+        cfg.proxy_sock   = NULL;
+        cfg.rlimits.nproc   = ctx->rlimits.nproc;
+        cfg.rlimits.as_mb   = ctx->rlimits.as_mb;
+        cfg.rlimits.cpu_sec = ctx->rlimits.cpu_sec;
+
+        if (sandbox_child_setup(&cfg) != 0) {
+            const char *msg = "error: namespace sandbox unavailable";
+            (void)write(pipefd[1], msg, strlen(msg));
+            _exit(126);
+        }
+
+        char *result = handler(arguments, ctx);
+        if (result) {
+            size_t len = strlen(result);
+            size_t written = 0;
+            while (written < len) {
+                ssize_t n = write(pipefd[1], result + written, len - written);
+                if (n <= 0) break;
+                written += (size_t)n;
+            }
+            free(result);
+        }
+        close(pipefd[1]);
+        _exit(0);
+    }
+
+    /* Parent: read entire pipe into growable buffer */
+    close(pipefd[1]);
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) {
+        close(pipefd[0]);
+        waitpid(pid, NULL, 0);
+        return strdup("error: OOM");
+    }
+    for (;;) {
+        if (len + 4096 > cap) {
+            cap = cap * 2;
+            char *nb = realloc(buf, cap);
+            if (!nb) { free(buf); close(pipefd[0]); waitpid(pid, NULL, 0); return strdup("error: OOM"); }
+            buf = nb;
+        }
+        ssize_t n = read(pipefd[0], buf + len, cap - len);
+        if (n <= 0) break;
+        len += (size_t)n;
+    }
+    close(pipefd[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    buf[len] = '\0';
+
+    if (len == 0) {
+        free(buf);
+        return strdup("error: empty response from sandbox child");
+    }
+    return buf;
+}
+
+/* ── Wrappers: dispatch through sandbox runner ────────────────────────── */
+
+static char *file_read_inner(const char *arguments, void *user_data);
+static char *file_write_inner(const char *arguments, void *user_data);
+static char *file_list_inner(const char *arguments, void *user_data);
+static char *file_find_inner(const char *arguments, void *user_data);
+static char *file_edit_inner(const char *arguments, void *user_data);
+static char *file_grep_inner(const char *arguments, void *user_data);
+
+char *tool_file_read_handler(const char *arguments, void *user_data) {
+    FileReadCtx *ctx = (FileReadCtx *)user_data;
+    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    return file_sandbox_run(ctx, file_read_inner, arguments);
+}
+
+char *tool_file_write_handler(const char *arguments, void *user_data) {
+    FileReadCtx *ctx = (FileReadCtx *)user_data;
+    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    if (ctx->read_only) return strdup("error: workspace is read-only (restricted trust level)");
+    return file_sandbox_run(ctx, file_write_inner, arguments);
+}
+
+char *tool_file_list_handler(const char *arguments, void *user_data) {
+    FileReadCtx *ctx = (FileReadCtx *)user_data;
+    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    return file_sandbox_run(ctx, file_list_inner, arguments);
+}
+
+char *tool_file_find_handler(const char *arguments, void *user_data) {
+    FileReadCtx *ctx = (FileReadCtx *)user_data;
+    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    return file_sandbox_run(ctx, file_find_inner, arguments);
+}
+
+char *tool_file_edit_handler(const char *arguments, void *user_data) {
+    FileReadCtx *ctx = (FileReadCtx *)user_data;
+    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    if (ctx->read_only) return strdup("error: workspace is read-only (restricted trust level)");
+    return file_sandbox_run(ctx, file_edit_inner, arguments);
+}
+
+char *tool_file_grep_handler(const char *arguments, void *user_data) {
+    FileReadCtx *ctx = (FileReadCtx *)user_data;
+    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    return file_sandbox_run(ctx, file_grep_inner, arguments);
+}
+
+/* ── file_read ────────────────────────────────────────────────────────── */
+
 static const char *FILE_READ_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"path\":{\"type\":\"string\",\"description\":\"File path to read (relative to workspace)\"}"
     "},\"required\":[\"path\"]}";
 
-/* V1: check resolved path starts with resolved workspace */
-static int path_in_workspace(const char *filepath, const char *workspace, char *resolved, size_t resolved_size) {
-    char ws_resolved[PATH_MAX];
-    if (!realpath(workspace, ws_resolved)) return 0;
-    if (!realpath(filepath, resolved)) return 0;
-
-    size_t ws_len = strlen(ws_resolved);
-    if (ws_len >= resolved_size) return 0;
-
-    /* Path must start with workspace and next char must be '/' or '\0' */
-    if (strncmp(resolved, ws_resolved, ws_len) != 0) return 0;
-    if (resolved[ws_len] != '/' && resolved[ws_len] != '\0') return 0;
-    return 1;
-}
-
-/* Resolve a request path against the readable roots file_read allows
- * (workspace, session temp, CCLAW_PATH). Returns 1 and fills `resolved` if the
- * path is inside one of them. The target must exist (realpath is used). */
-static int resolve_readable(FileReadCtx *ctx, const char *req_path,
-                            char *resolved, size_t resolved_size) {
-    char fullpath[PATH_MAX];
-    if (req_path[0] == '/')
-        snprintf(fullpath, sizeof(fullpath), "%s", req_path);
-    else
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", ctx->workspace, req_path);
-
-    if (path_in_workspace(fullpath, ctx->workspace, resolved, resolved_size))
-        return 1;
-    if (ctx->extra_read_path &&
-        path_in_workspace(fullpath, ctx->extra_read_path, resolved, resolved_size))
-        return 1;
-    if (ctx->cclaw_path &&
-        path_in_workspace(fullpath, ctx->cclaw_path, resolved, resolved_size))
-        return 1;
-    return 0;
-}
-
-char *tool_file_read_handler(const char *arguments, void *user_data) {
+static char *file_read_inner(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
-    const char *workspace = ctx ? ctx->workspace : NULL;
-    if (!workspace) return strdup("error: no workspace configured");
+    const char *workspace = ctx->workspace;
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0)
@@ -74,32 +181,14 @@ char *tool_file_read_handler(const char *arguments, void *user_data) {
         return strdup("error: missing or empty 'path' field");
     }
 
-    /* Build full path: workspace + "/" + path (if relative) */
     char fullpath[PATH_MAX];
-    if (req_path[0] == '/') {
+    if (req_path[0] == '/')
         snprintf(fullpath, sizeof(fullpath), "%s", req_path);
-    } else {
+    else
         snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
-    }
     tool_parse_free(&ta);
 
-    /* V1: verify path is within workspace, extra_read_path, or cclaw_path (T228) */
-    char resolved[PATH_MAX];
-    if (!path_in_workspace(fullpath, workspace, resolved, sizeof(resolved))) {
-        /* T118: check extra read path */
-        if (ctx->extra_read_path &&
-            path_in_workspace(fullpath, ctx->extra_read_path, resolved, sizeof(resolved)))
-            goto read_file;
-        /* T228: check CCLAW_PATH (CWD, read-only) */
-        if (ctx->cclaw_path &&
-            path_in_workspace(fullpath, ctx->cclaw_path, resolved, sizeof(resolved)))
-            goto read_file;
-        return strdup("error: path outside workspace");
-    }
-
-read_file:;
-
-    FILE *f = fopen(resolved, "rb");
+    FILE *f = fopen(fullpath, "rb");
     if (!f) return strdup("error: cannot open file");
 
     char *buf = malloc(FILE_READ_MAX + 1);
@@ -118,46 +207,16 @@ int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           (void *)ctx);
 }
 
+/* ── file_write ───────────────────────────────────────────────────────── */
+
 static const char *FILE_WRITE_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"path\":{\"type\":\"string\",\"description\":\"File path to write (relative to workspace)\"},"
     "\"content\":{\"type\":\"string\",\"description\":\"Content to write\"}"
     "},\"required\":[\"path\",\"content\"]}";
 
-/* V1: validate parent dir exists within workspace (for new files realpath won't work) */
-static int parent_in_workspace(const char *filepath, const char *workspace, char *fullpath_out, size_t out_size) {
-    char ws_resolved[PATH_MAX];
-    if (!realpath(workspace, ws_resolved)) return 0;
-    size_t ws_len = strlen(ws_resolved);
-
-    /* Find last slash to get parent dir */
-    const char *last_slash = strrchr(filepath, '/');
-    if (!last_slash) {
-        /* File in workspace root — parent is workspace itself */
-        snprintf(fullpath_out, out_size, "%s/%s", ws_resolved, filepath);
-        return 1;
-    }
-
-    /* Resolve parent directory */
-    char parent[PATH_MAX];
-    size_t plen = (size_t)(last_slash - filepath);
-    if (plen >= sizeof(parent)) return 0;
-    memcpy(parent, filepath, plen);
-    parent[plen] = '\0';
-
-    char parent_resolved[PATH_MAX];
-    if (!realpath(parent, parent_resolved)) return 0;
-
-    if (strncmp(parent_resolved, ws_resolved, ws_len) != 0) return 0;
-    if (parent_resolved[ws_len] != '/' && parent_resolved[ws_len] != '\0') return 0;
-
-    snprintf(fullpath_out, out_size, "%s/%s", parent_resolved, last_slash + 1);
-    return 1;
-}
-
-char *tool_file_write_handler(const char *arguments, void *user_data) {
+static char *file_write_inner(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
     if (ctx->read_only) return strdup("error: workspace is read-only (restricted trust level)");
     const char *workspace = ctx->workspace;
 
@@ -171,7 +230,7 @@ char *tool_file_write_handler(const char *arguments, void *user_data) {
         return strdup("error: missing or empty 'path' field");
     }
 
-    /* Reject memory-file names — memories are not files */
+    /* Reject memory-file names */
     const char *bn = strrchr(req_path, '/');
     bn = bn ? bn + 1 : req_path;
     if (strcasecmp(bn, "MEMORY.md") == 0 || strcasecmp(bn, "SOUL.md") == 0) {
@@ -185,44 +244,13 @@ char *tool_file_write_handler(const char *arguments, void *user_data) {
         return strdup("error: missing 'content' field");
     }
 
-    /* Build full path */
     char fullpath[PATH_MAX];
-    if (req_path[0] == '/') {
+    if (req_path[0] == '/')
         snprintf(fullpath, sizeof(fullpath), "%s", req_path);
-    } else {
+    else
         snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
-    }
 
-    /* V1: try realpath first (file exists → overwrite case) */
-    char resolved[PATH_MAX];
-    char ws_resolved[PATH_MAX];
-    if (!realpath(workspace, ws_resolved)) {
-        tool_parse_free(&ta);
-        return strdup("error: invalid workspace");
-    }
-    size_t ws_len = strlen(ws_resolved);
-
-    char *write_path = NULL;
-    if (realpath(fullpath, resolved)) {
-        /* File exists — check it's in workspace */
-        if (strncmp(resolved, ws_resolved, ws_len) != 0 ||
-            (resolved[ws_len] != '/' && resolved[ws_len] != '\0')) {
-            tool_parse_free(&ta);
-            return strdup("error: path outside workspace");
-        }
-        write_path = resolved;
-    } else {
-        /* New file — validate parent is in workspace */
-        char validated[PATH_MAX];
-        if (!parent_in_workspace(fullpath, workspace, validated, sizeof(validated))) {
-            tool_parse_free(&ta);
-            return strdup("error: path outside workspace");
-        }
-        snprintf(resolved, sizeof(resolved), "%s", validated);
-        write_path = resolved;
-    }
-
-    FILE *f = fopen(write_path, "wb");
+    FILE *f = fopen(fullpath, "wb");
     if (!f) {
         tool_parse_free(&ta);
         return strdup("error: cannot open file for writing");
@@ -233,9 +261,8 @@ char *tool_file_write_handler(const char *arguments, void *user_data) {
     fclose(f);
     tool_parse_free(&ta);
 
-    if (written != content_len) {
+    if (written != content_len)
         return strdup("error: incomplete write");
-    }
 
     char *result = malloc(64);
     if (!result) return strdup("ok");
@@ -250,12 +277,12 @@ int tool_file_write_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           (void *)ctx);
 }
 
+/* ── file_list ────────────────────────────────────────────────────────── */
+
 /* Skip these directory names everywhere (matches Pi's default ignores). */
 static int is_ignored_dir(const char *name) {
     return strcmp(name, ".git") == 0 || strcmp(name, "node_modules") == 0;
 }
-
-/* --- file_list (ls) --- */
 
 static const char *FILE_LIST_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
@@ -269,9 +296,9 @@ static int ls_entry_cmp(const void *a, const void *b) {
     return strcasecmp(((const LsEntry *)a)->name, ((const LsEntry *)b)->name);
 }
 
-char *tool_file_list_handler(const char *arguments, void *user_data) {
+static char *file_list_inner(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    const char *workspace = ctx->workspace;
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0)
@@ -282,14 +309,15 @@ char *tool_file_list_handler(const char *arguments, void *user_data) {
     if (limit < 1) limit = FILE_LIST_DEFAULT_LIMIT;
 
     char resolved[PATH_MAX];
-    int ok = resolve_readable(ctx, req_path, resolved, sizeof(resolved));
+    if (req_path[0] == '/')
+        snprintf(resolved, sizeof(resolved), "%s", req_path);
+    else
+        snprintf(resolved, sizeof(resolved), "%s/%s", workspace, req_path);
     tool_parse_free(&ta);
-    if (!ok) return strdup("error: path outside workspace");
 
     DIR *d = opendir(resolved);
     if (!d) return strdup("error: not a directory or cannot open");
 
-    /* Collect entries (dotfiles included), then sort alphabetically. */
     LsEntry *entries = NULL;
     size_t n = 0, ecap = 0;
     struct dirent *ent;
@@ -335,7 +363,7 @@ char *tool_file_list_handler(const char *arguments, void *user_data) {
 
     if (!out) return strdup("error: OOM");
     if (len == 0) { free(out); return strdup("(empty directory)"); }
-    if (out[len - 1] == '\n') out[len - 1] = '\0';  /* trim trailing newline */
+    if (out[len - 1] == '\n') out[len - 1] = '\0';
     if (limited) {
         size_t need = len + 48;
         char *nb = realloc(out, need);
@@ -352,7 +380,7 @@ int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           FILE_LIST_PARAMS_JSON, tool_file_list_handler, (void *)ctx);
 }
 
-/* --- find (glob) --- */
+/* ── file_find (glob) ─────────────────────────────────────────────────── */
 
 static const char *FIND_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
@@ -361,17 +389,12 @@ static const char *FIND_PARAMS_JSON =
     "\"limit\":{\"type\":\"number\",\"description\":\"Maximum results (default 1000)\"}"
     "},\"required\":[\"pattern\"]}";
 
-/* Glob match with globstar semantics, used for patterns that contain '/':
- *   '**' matches any run of characters including '/'
- *   '*'  matches any run except '/'
- *   '?'  matches one char except '/'
- * Character classes/braces are not supported (rare in agent globs). */
 static int glob_match(const char *pat, const char *str) {
     while (*pat) {
         if (pat[0] == '*' && pat[1] == '*') {
             pat += 2;
-            while (*pat == '/') pat++;          /* skip slashes after a globstar */
-            if (*pat == '\0') return 1;          /* trailing globstar matches the rest */
+            while (*pat == '/') pat++;
+            if (*pat == '\0') return 1;
             for (const char *s = str;; s++) {
                 if (glob_match(pat, s)) return 1;
                 if (*s == '\0') return 0;
@@ -398,12 +421,10 @@ typedef struct {
     size_t cap, len;
     int count;
     int limit;
-    const char *pattern;  /* effective pattern */
-    int path_mode;        /* 1 = match relative path with glob_match; 0 = basename via fnmatch */
+    const char *pattern;
+    int path_mode;
 } FindAcc;
 
-/* Recursively walk `absdir`, accumulating files matching the pattern.
- * `reldir` is the path relative to the search root, used for matching/display. */
 static void find_walk(const char *absdir, const char *reldir, int depth, FindAcc *a) {
     if (depth > FIND_MAX_DEPTH || a->count >= a->limit) return;
     DIR *d = opendir(absdir);
@@ -423,7 +444,7 @@ static void find_walk(const char *absdir, const char *reldir, int depth, FindAcc
         struct stat st;
         if (stat(absfull, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
-            if (is_ignored_dir(ent->d_name)) continue;  /* skip .git, node_modules */
+            if (is_ignored_dir(ent->d_name)) continue;
             find_walk(absfull, relfull, depth + 1, a);
             continue;
         }
@@ -445,9 +466,9 @@ static void find_walk(const char *absdir, const char *reldir, int depth, FindAcc
     closedir(d);
 }
 
-char *tool_file_find_handler(const char *arguments, void *user_data) {
+static char *file_find_inner(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    const char *workspace = ctx->workspace;
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0)
@@ -462,10 +483,6 @@ char *tool_file_find_handler(const char *arguments, void *user_data) {
     int limit = targ_int(&ta, "limit", FIND_DEFAULT_LIMIT);
     if (limit < 1) limit = FIND_DEFAULT_LIMIT;
 
-    /* A pattern with '/' matches the path relative to the search root; one
-     * without matches a file's basename at any depth. For path patterns that
-     * are not already anchored with a leading globstar or '/', prepend one so
-     * they match at any depth (mirrors Pi in fd --full-path mode). */
     char eff[300];
     int path_mode = (strchr(pattern, '/') != NULL);
     if (path_mode && strncmp(pattern, "**/", 3) != 0 && pattern[0] != '/' &&
@@ -475,9 +492,11 @@ char *tool_file_find_handler(const char *arguments, void *user_data) {
         snprintf(eff, sizeof(eff), "%s", pattern);
 
     char resolved[PATH_MAX];
-    int ok = resolve_readable(ctx, req_path, resolved, sizeof(resolved));
+    if (req_path[0] == '/')
+        snprintf(resolved, sizeof(resolved), "%s", req_path);
+    else
+        snprintf(resolved, sizeof(resolved), "%s/%s", workspace, req_path);
     tool_parse_free(&ta);
-    if (!ok) return strdup("error: path outside workspace");
 
     FindAcc a = {.buf = malloc(4096), .cap = 4096, .len = 0, .count = 0,
                  .limit = limit, .pattern = eff, .path_mode = path_mode};
@@ -505,7 +524,7 @@ int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           FIND_PARAMS_JSON, tool_file_find_handler, (void *)ctx);
 }
 
-/* --- file_edit (search/replace) --- */
+/* ── file_edit (search/replace) ───────────────────────────────────────── */
 
 #define FILE_EDIT_MAX_EDITS 32
 #define FILE_EDIT_MAX_TOKENS 512
@@ -524,10 +543,9 @@ static const char *FILE_EDIT_PARAMS_JSON =
 typedef struct {
     char *old_text; size_t old_len;
     char *new_text; size_t new_len;
-    size_t off;  /* match offset in the original file */
+    size_t off;
 } EditOp;
 
-/* Index of the token just past the subtree rooted at i (standard jsmn walk). */
 static int jtok_skip(const jsmntok_t *t, int i) {
     if (t[i].type == JSMN_OBJECT) {
         int j = i + 1;
@@ -548,7 +566,6 @@ static int jtok_key_eq(const jsmntok_t *t, const char *json, const char *key) {
            memcmp(json + t->start, key, klen) == 0;
 }
 
-/* Find a top-level object key, returning the value token index, or -1. */
 static int jtok_find(const jsmntok_t *t, const char *json, const char *key) {
     int j = 1;
     for (int k = 0; k < t[0].size; k++) {
@@ -559,7 +576,6 @@ static int jtok_find(const jsmntok_t *t, const char *json, const char *key) {
     return -1;
 }
 
-/* Count non-overlapping occurrences of needle in [hay, hay+hlen). */
 static int mem_count(const char *hay, size_t hlen, const char *ned, size_t nlen) {
     if (nlen == 0 || nlen > hlen) return 0;
     int c = 0;
@@ -585,13 +601,11 @@ static void edits_free(EditOp *e, int n) {
     for (int i = 0; i < n; i++) { free(e[i].old_text); free(e[i].new_text); }
 }
 
-char *tool_file_edit_handler(const char *arguments, void *user_data) {
+static char *file_edit_inner(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
     if (ctx->read_only) return strdup("error: workspace is read-only (restricted trust level)");
     if (!arguments) return strdup("error: invalid JSON arguments");
 
-    /* Own jsmn parse — the edits array can exceed the shared 64-token budget. */
     jsmntok_t toks[FILE_EDIT_MAX_TOKENS];
     jsmn_parser p;
     jsmn_init(&p);
@@ -608,7 +622,6 @@ char *tool_file_edit_handler(const char *arguments, void *user_data) {
     if (toks[avi].size < 1) return strdup("error: 'edits' is empty");
     if (toks[avi].size > FILE_EDIT_MAX_EDITS) return strdup("error: too many edits");
 
-    /* Resolve path within the workspace (file must exist). */
     char req_path[PATH_MAX];
     size_t plen = (size_t)(toks[pvi].end - toks[pvi].start);
     if (plen >= sizeof(req_path)) return strdup("error: path too long");
@@ -618,12 +631,8 @@ char *tool_file_edit_handler(const char *arguments, void *user_data) {
     char fullpath[PATH_MAX * 2];
     if (req_path[0] == '/') snprintf(fullpath, sizeof(fullpath), "%s", req_path);
     else snprintf(fullpath, sizeof(fullpath), "%s/%s", ctx->workspace, req_path);
-    char resolved[PATH_MAX];
-    if (!path_in_workspace(fullpath, ctx->workspace, resolved, sizeof(resolved)))
-        return strdup("error: path outside workspace");
 
-    /* Read the whole file. */
-    FILE *f = fopen(resolved, "rb");
+    FILE *f = fopen(fullpath, "rb");
     if (!f) return strdup("error: cannot open file");
     fseek(f, 0, SEEK_END);
     long fsz = ftell(f);
@@ -635,7 +644,6 @@ char *tool_file_edit_handler(const char *arguments, void *user_data) {
     fclose(f);
     orig[olen] = '\0';
 
-    /* Parse + locate each edit against the ORIGINAL content. */
     EditOp ops[FILE_EDIT_MAX_EDITS];
     int nedits = 0;
     int ei = avi + 1;
@@ -657,7 +665,6 @@ char *tool_file_edit_handler(const char *arguments, void *user_data) {
         ei = jtok_skip(toks, ei);
         if (!have_old || !have_new) { errmsg = "error: each edit needs oldText and newText"; break; }
 
-        /* Unescape into owned buffers. */
         EditOp *o = &ops[nedits];
         o->old_text = malloc(ol + 1); o->new_text = malloc(nl + 1);
         if (!o->old_text || !o->new_text) { free(o->old_text); free(o->new_text); errmsg = "error: OOM"; break; }
@@ -674,7 +681,6 @@ char *tool_file_edit_handler(const char *arguments, void *user_data) {
     }
     if (errmsg) { edits_free(ops, nedits); free(orig); return strdup(errmsg); }
 
-    /* Order by offset, reject overlapping ranges. */
     qsort(ops, (size_t)nedits, sizeof(EditOp), edit_off_cmp);
     for (int i = 1; i < nedits; i++) {
         if (ops[i].off < ops[i - 1].off + ops[i - 1].old_len) {
@@ -683,7 +689,6 @@ char *tool_file_edit_handler(const char *arguments, void *user_data) {
         }
     }
 
-    /* Splice into a new buffer. */
     size_t new_total = olen;
     for (int i = 0; i < nedits; i++) new_total = new_total - ops[i].old_len + ops[i].new_len;
     char *out = malloc(new_total + 1);
@@ -701,8 +706,7 @@ char *tool_file_edit_handler(const char *arguments, void *user_data) {
     edits_free(ops, nedits);
     free(orig);
 
-    /* Write back. */
-    f = fopen(resolved, "wb");
+    f = fopen(fullpath, "wb");
     if (!f) { free(out); return strdup("error: cannot open file for writing"); }
     size_t written = fwrite(out, 1, w, f);
     fclose(f);
@@ -724,10 +728,10 @@ int tool_file_edit_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           FILE_EDIT_PARAMS_JSON, tool_file_edit_handler, (void *)ctx);
 }
 
-/* --- file_grep (content search) --- */
+/* ── file_grep (content search) ───────────────────────────────────────── */
 
 #define GREP_DEFAULT_LIMIT 1000
-#define GREP_MAX_FILE_SIZE (1024 * 1024)  /* 1 MB */
+#define GREP_MAX_FILE_SIZE (1024 * 1024)
 
 static const char *GREP_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
@@ -743,7 +747,7 @@ typedef struct {
     int count;
     int limit;
     regex_t re;
-    const char *glob;  /* NULL = all files */
+    const char *glob;
 } GrepAcc;
 
 static void grep_file(const char *abspath, const char *relpath, GrepAcc *a) {
@@ -756,7 +760,6 @@ static void grep_file(const char *abspath, const char *relpath, GrepAcc *a) {
     FILE *f = fopen(abspath, "rb");
     if (!f) return;
 
-    /* Check for binary: read first chunk and look for NUL */
     char probe[512];
     size_t n = fread(probe, 1, sizeof(probe), f);
     if (memchr(probe, '\0', n)) { fclose(f); return; }
@@ -769,15 +772,13 @@ static void grep_file(const char *abspath, const char *relpath, GrepAcc *a) {
         lineno++;
         if (a->count >= a->limit) break;
         if (regexec(&a->re, line, 0, NULL, 0) == 0) {
-            /* Strip trailing newline */
             size_t ll = strlen(line);
             while (ll > 0 && (line[ll - 1] == '\n' || line[ll - 1] == '\r'))
                 ll--;
-            /* Format: relpath:lineno:line */
             char hdr[PATH_MAX + 256];
             int hlen = snprintf(hdr, sizeof(hdr), "%s:%d:", relpath, lineno);
             if (hlen < 0) continue;
-            if ((size_t)hlen >= sizeof(hdr)) hlen = (int)sizeof(hdr) - 1;  /* snprintf returns would-be len */
+            if ((size_t)hlen >= sizeof(hdr)) hlen = (int)sizeof(hdr) - 1;
             size_t total = (size_t)hlen + ll;
             size_t need = a->len + total + 2;
             if (need > a->cap) {
@@ -823,7 +824,6 @@ static void grep_walk(const char *absdir, const char *reldir, int depth, GrepAcc
             continue;
         }
 
-        /* Apply glob filter on basename */
         if (a->glob && fnmatch(a->glob, ent->d_name, 0) != 0) continue;
 
         grep_file(absfull, relfull, a);
@@ -831,9 +831,9 @@ static void grep_walk(const char *absdir, const char *reldir, int depth, GrepAcc
     closedir(d);
 }
 
-char *tool_file_grep_handler(const char *arguments, void *user_data) {
+static char *file_grep_inner(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    const char *workspace = ctx->workspace;
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0)
@@ -847,11 +847,10 @@ char *tool_file_grep_handler(const char *arguments, void *user_data) {
     if (!req_path || !req_path[0]) req_path = ".";
     const char *glob_arg = targ_str(&ta, "glob");
     char glob_buf[256];
-    if (glob_arg && glob_arg[0]) {
+    if (glob_arg && glob_arg[0])
         snprintf(glob_buf, sizeof(glob_buf), "%s", glob_arg);
-    } else {
+    else
         glob_buf[0] = '\0';
-    }
     int limit = targ_int(&ta, "limit", GREP_DEFAULT_LIMIT);
     if (limit < 1) limit = GREP_DEFAULT_LIMIT;
 
@@ -862,9 +861,11 @@ char *tool_file_grep_handler(const char *arguments, void *user_data) {
     }
 
     char resolved[PATH_MAX];
-    int ok = resolve_readable(ctx, req_path, resolved, sizeof(resolved));
+    if (req_path[0] == '/')
+        snprintf(resolved, sizeof(resolved), "%s", req_path);
+    else
+        snprintf(resolved, sizeof(resolved), "%s/%s", workspace, req_path);
     tool_parse_free(&ta);
-    if (!ok) { regfree(&re); return strdup("error: path outside workspace"); }
 
     GrepAcc a = {.buf = malloc(4096), .cap = 4096, .len = 0, .count = 0,
                  .limit = limit, .re = re, .glob = glob_buf[0] ? glob_buf : NULL};
@@ -875,7 +876,6 @@ char *tool_file_grep_handler(const char *arguments, void *user_data) {
     regfree(&re);
 
     if (a.len == 0) { free(a.buf); return strdup("No matches found"); }
-    /* Trim trailing newline */
     if (a.buf[a.len - 1] == '\n') a.buf[--a.len] = '\0';
     if (a.count >= limit) {
         size_t need = a.len + 48;

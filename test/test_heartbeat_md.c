@@ -16,7 +16,6 @@ static void setup_workspace(void) {
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cclaw_hb_test_XXXXXX");
     assert(mkdtemp(tmpdir) != NULL);
     file_ctx.workspace = tmpdir;
-    file_ctx.extra_read_path = NULL;
 }
 
 static void cleanup_workspace(void) {

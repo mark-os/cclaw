@@ -98,7 +98,7 @@ static void test_hook_modifies_messages(void) {
     char **paths = extension_discover(ws, &ext_count);
     Config cfg = {.log_level = LOG_LEVEL_INFO,
                   .provider = {.model = "test-model", .max_tokens = 100}};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx);
+    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
     extension_list_free(paths, ext_count);
 
     /* Verify hook registered */
@@ -202,7 +202,7 @@ static void test_hook_throws(void) {
     char **paths = extension_discover(ws, &ext_count);
     Config cfg = {.log_level = LOG_LEVEL_INFO,
                   .provider = {.model = "test-model", .max_tokens = 50}};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx);
+    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
     extension_list_free(paths, ext_count);
 
     /* Create DB with entry */
@@ -274,7 +274,7 @@ static void test_hooks_chain(void) {
     char **paths = extension_discover(ws, &ext_count);
     Config cfg = {.log_level = LOG_LEVEL_INFO,
                   .provider = {.model = "test-model"}};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx);
+    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
     extension_list_free(paths, ext_count);
 
     if (ext_ctx.hooks[HOOK_BEFORE_REQUEST].count != 2) {
@@ -350,7 +350,7 @@ static void test_before_tool_call_blocks(void) {
     size_t ext_count = 0;
     char **paths = extension_discover(ws, &ext_count);
     Config cfg = {.log_level = LOG_LEVEL_INFO};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx);
+    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
     extension_list_free(paths, ext_count);
 
     /* Call for blocked tool */
@@ -406,7 +406,7 @@ static void test_after_tool_call_replaces(void) {
     size_t ext_count = 0;
     char **paths = extension_discover(ws, &ext_count);
     Config cfg = {.log_level = LOG_LEVEL_INFO};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx);
+    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
     extension_list_free(paths, ext_count);
 
     /* Call for matching tool */
@@ -465,7 +465,7 @@ static void test_after_tool_call_chains(void) {
     size_t ext_count = 0;
     char **paths = extension_discover(ws, &ext_count);
     Config cfg = {.log_level = LOG_LEVEL_INFO};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx);
+    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
     extension_list_free(paths, ext_count);
 
     char *result = hook_dispatch_after_tool_call(&ext_ctx, g_hook_db, "any", "{}", "start");

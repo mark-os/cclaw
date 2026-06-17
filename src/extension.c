@@ -1,6 +1,6 @@
 /* T254-T257: Extension discovery, loading, and cclaw API object.
  * V109-V112: Extensions are JS modules evaluated in shared QuickJS context.
- * The cclaw API object provides registerTool, registerHook, callTool. */
+ * The cclaw API object provides registerTool, registerHook. */
 #define _POSIX_C_SOURCE 200809L
 #include "extension.h"
 #include <sqlite3.h>
@@ -163,7 +163,8 @@ static char *read_file(const char *path, size_t *out_len) {
 /* V111: JS source that defines the cclaw API object.
  * registerTool accumulates into __cclaw_tools[].
  * registerHook accumulates into __cclaw_hooks{event: [fn...]}.
- * callTool is a placeholder (T262 implements real dispatch). */
+ * Tool handlers must be strings (JS function body receiving 'args') because
+ * MicroQuickJS cannot serialize function source for forked execution. */
 static const char CCLAW_API_INIT[] =
     "globalThis.__cclaw_tools = [];\n"
     "globalThis.__cclaw_hooks = {};\n"
@@ -171,11 +172,16 @@ static const char CCLAW_API_INIT[] =
     "  registerTool: function(def) {\n"
     "    if (!def || !def.name || !def.handler)\n"
     "      throw new Error('registerTool requires {name, handler}');\n"
+    "    var code = def.handler;\n"
+    "    if (typeof code === 'function') {\n"
+    "      throw new Error('registerTool handler must be a string (function body), not a function. '"
+    "        + 'MicroQuickJS cannot serialize functions for sandboxed execution.');\n"
+    "    }\n"
     "    globalThis.__cclaw_tools.push({\n"
     "      name: def.name,\n"
     "      description: def.description || '',\n"
     "      parameters: def.parameters || {},\n"
-    "      handler: def.handler\n"
+    "      handler: code\n"
     "    });\n"
     "  },\n"
     "  registerHook: function(event, fn) {\n"
@@ -189,9 +195,6 @@ static const char CCLAW_API_INIT[] =
     "      globalThis.__cclaw_hooks[event] = [];\n"
     "    globalThis.__cclaw_hooks[event].push(fn);\n"
     "  },\n"
-    "  callTool: function(name, args) {\n"
-    "    return callTool(name, args);\n"
-    "  }\n"
     "};\n";
 
 int hook_event_from_name(const char *name) {
@@ -225,7 +228,7 @@ void extension_ctx_destroy(ExtensionCtx *ctx) {
 
 /* After extensions loaded, read __cclaw_tools[] from JS and register each. */
 static int process_registered_tools(JsSessionRuntime *rt, ToolRegistry *reg,
-                                    const Config *cfg) {
+                                    const Config *cfg, JsEvalCtx *ectx) {
     if (!rt || !rt->ctx) return 0;
     JSContext *ctx = (JSContext *)rt->ctx;
 
@@ -263,18 +266,17 @@ static int process_registered_tools(JsSessionRuntime *rt, ToolRegistry *reg,
                              JS_ToCString(ctx, params_val, &pbuf);
         if (!params) params = "{}";
 
-        /* Store handler as a global function for later invocation */
+        /* Handler is stored as a string (function body receiving 'args') */
         snprintf(code, sizeof(code),
-                 "globalThis.__cclaw_tool_%d = globalThis.__cclaw_tools[%d].handler", i, i);
-        JS_Eval(ctx, code, strlen(code), "<ext>", 0);
+                 "globalThis.__cclaw_tools[%d].handler", i);
+        JSValue fn_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_RETVAL);
+        JSCStringBuf fbuf;
+        const char *fn_src = JS_IsException(fn_val) ? NULL :
+                             JS_ToCString(ctx, fn_val, &fbuf);
+        if (!fn_src) continue;
 
-        /* Build handler code that calls the stored function */
-        char handler_code[128];
-        snprintf(handler_code, sizeof(handler_code),
-                 "return globalThis.__cclaw_tool_%d(args)", i);
-
-        /* Register via existing js_tool path (re-uses JsSessionRuntime) */
-        if (js_tool_register_ext(reg, name, desc, params, handler_code, rt) == 0) {
+        /* Register via existing js_tool path (forks via eval ctx) */
+        if (js_tool_register_ext(reg, name, desc, params, fn_src, ectx) == 0) {
             registered++;
             LOG_DEBUG_(cfg, "extension: registered tool '%s'", name);
         }
@@ -319,7 +321,8 @@ static void process_registered_hooks(JsSessionRuntime *rt, ExtensionCtx *ext_ctx
 }
 
 int extension_load(char **paths, size_t count, JsSessionRuntime *rt,
-                   ToolRegistry *reg, const Config *cfg, ExtensionCtx *ext_ctx) {
+                   ToolRegistry *reg, const Config *cfg, ExtensionCtx *ext_ctx,
+                   JsEvalCtx *ectx) {
     if (!paths || count == 0 || !rt || !rt->ctx) return 0;
 
     JSContext *ctx = (JSContext *)rt->ctx;
@@ -363,7 +366,7 @@ int extension_load(char **paths, size_t count, JsSessionRuntime *rt,
     }
 
     /* Process accumulated registrations from JS → C */
-    process_registered_tools(rt, reg, cfg);
+    process_registered_tools(rt, reg, cfg, ectx);
     if (ext_ctx)
         process_registered_hooks(rt, ext_ctx, cfg);
 

@@ -121,14 +121,10 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         char **ext_paths = extension_discover(cfg->workspace, &ext_count);
         if (ext_paths && ext_count > 0) {
             extension_load(ext_paths, ext_count, setup->js_rt, &setup->reg, cfg,
-                           &setup->ext_ctx);
+                           &setup->ext_ctx, &setup->js_eval_ctx);
             extension_list_free(ext_paths, ext_count);
         }
     }
-
-    /* V116: Set tool registry on JS runtime for callTool dispatch */
-    if (setup->js_rt)
-        js_runtime_set_registry(setup->js_rt, &setup->reg);
 
     /* T274/V120: request_config — CLI inline tool/host/rename */
     setup->req_cfg_ctx.db = db;

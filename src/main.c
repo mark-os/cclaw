@@ -811,7 +811,7 @@ static const char *MJS_EVAL_PRELUDE =
     "console.warn = console.log;\n"
     "console.error = console.log;\n"
     "var require = function() {\n"
-    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readDir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_fetch(url).');\n"
+    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readDir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url).');\n"
     "};\n"
     "var process = {};\n"
     "Object.defineProperty(process, 'env', {get: function() { throw new TypeError('process.env not available.'); }});\n"
@@ -825,7 +825,10 @@ static const char *MJS_EVAL_PRELUDE =
     "  set: function() { throw new TypeError('module.exports not available. Return your value as the last expression.'); }\n"
     "});\n"
     "var Map = function() { throw new TypeError('Map not available. Use plain objects.'); };\n"
-    "var Set = function() { throw new TypeError('Set not available. Use: var s = {}; s[x] = true;'); };\n";
+    "var Set = function() { throw new TypeError('Set not available. Use: var s = {}; s[x] = true;'); };\n"
+    "var print = console.log;\n";
+
+extern const char JS_HTTP_PRELUDE[];
 
 static int mjs_interrupt_handler(JSContext *ctx, void *opaque) {
     (void)ctx;
@@ -846,7 +849,9 @@ static const char *mjs_syntax_hint(const char *code) {
     if (strstr(code, "`"))
         return " — hint: template literals are unsupported; concatenate with 'a' + b";
     if (strstr(code, "require(") || strstr(code, "import "))
-        return " — hint: no modules; 'fs' and 'http_fetch' are globals (e.g. fs.readDir('.'))";
+        return " — hint: no modules; 'fs' and 'http_request' are globals (e.g. fs.readDir('.'))";
+    if (strstr(code, "await ") || strstr(code, ".then("))
+        return " — hint: this engine is synchronous; assign directly: var r = http_request(url); then use r.body / r.json()";
     return "";
 }
 
@@ -937,8 +942,6 @@ static int mjs_eval_main(int argc, char **argv) {
         .instruction_limit = MJS_MAX_INSTRUCTIONS,
         .allowed_hosts = allowed_hosts,
         .allowed_hosts_count = hosts_count,
-        .tool_registry = NULL,
-        .call_depth = 0
     };
     JS_SetInterruptHandler(ctx, mjs_interrupt_handler);
     JS_SetContextOpaque(ctx, &hctx);
@@ -950,6 +953,15 @@ static int mjs_eval_main(int argc, char **argv) {
         JSCStringBuf buf;
         const char *msg = JS_ToCString(ctx, exc, &buf);
         printf("error: prelude failed: %s\n", msg ? msg : "unknown");
+        _exit(1);
+    }
+
+    JSValue hv = JS_Eval(ctx, JS_HTTP_PRELUDE, strlen(JS_HTTP_PRELUDE), "<http-prelude>", 0);
+    if (JS_IsException(hv)) {
+        JSValue exc = JS_GetException(ctx);
+        JSCStringBuf buf;
+        const char *msg = JS_ToCString(ctx, exc, &buf);
+        printf("error: http prelude failed: %s\n", msg ? msg : "unknown");
         _exit(1);
     }
 

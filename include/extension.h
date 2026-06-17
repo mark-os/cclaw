@@ -45,7 +45,8 @@ void extension_list_free(char **paths, size_t count);
  * accumulated tool/hook registrations from JS into C structures.
  * Returns number of extensions successfully loaded. */
 int extension_load(char **paths, size_t count, JsSessionRuntime *rt,
-                   ToolRegistry *reg, const Config *cfg, ExtensionCtx *ext_ctx);
+                   ToolRegistry *reg, const Config *cfg, ExtensionCtx *ext_ctx,
+                   JsEvalCtx *ectx);
 
 /* Initialize extension context. Call before extension_load. */
 void extension_ctx_init(ExtensionCtx *ctx, JsSessionRuntime *rt);

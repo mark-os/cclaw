@@ -10,11 +10,11 @@ DEP      := $(OBJ:.o=.d)
 
 VENDOR_SRC := vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
               vendor/mquickjs/mquickjs.c vendor/mquickjs/cutils.c vendor/mquickjs/dtoa.c \
-              vendor/mquickjs/libm.c vendor/mquickjs/mquickjs_stdlib.c \
+              vendor/mquickjs/libm.c \
               vendor/monocypher/monocypher.c
 VENDOR_OBJ := $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
               $(BUILDDIR)/mquickjs.o $(BUILDDIR)/mqjs_cutils.o $(BUILDDIR)/mqjs_dtoa.o \
-              $(BUILDDIR)/mqjs_libm.o $(BUILDDIR)/mqjs_stdlib.o $(BUILDDIR)/eval_stdlib.o \
+              $(BUILDDIR)/mqjs_libm.o $(BUILDDIR)/eval_stdlib.o \
               $(BUILDDIR)/monocypher.o
 
 INTEG_SRC := $(wildcard test/test_integration_*.c)
@@ -73,20 +73,9 @@ $(BUILDDIR)/mqjs_dtoa.o: vendor/mquickjs/dtoa.c | $(BUILDDIR)/
 $(BUILDDIR)/mqjs_libm.o: vendor/mquickjs/libm.c | $(BUILDDIR)/
 	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
 
-$(BUILDDIR)/mqjs_stdlib.o: vendor/mquickjs/mquickjs_stdlib.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
-
 vendor/mquickjs/mquickjs_atom.h: vendor/mquickjs/gen_atoms.c | $(BUILDDIR)/
 	$(CC) -o $(BUILDDIR)/gen_atoms $<
 	./$(BUILDDIR)/gen_atoms > $@
-
-vendor/mquickjs/mquickjs_stdlib.c: vendor/mquickjs/gen_stdlib_main.c vendor/mquickjs/mqjs_objects.h vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c vendor/mquickjs/mqjs_host_main.c $(BUILDDIR)/gen_stdlib_main | $(BUILDDIR)/
-	printf '#define _POSIX_C_SOURCE 199309L\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <math.h>\n#include <time.h>\n#include "mquickjs_priv.h"\n\n' > $@
-	cat vendor/mquickjs/mqjs_host_main.c >> $@
-	./$(BUILDDIR)/gen_stdlib_main -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
-
-$(BUILDDIR)/gen_stdlib_main: vendor/mquickjs/gen_stdlib_main.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c | $(BUILDDIR)/
-	$(CC) -Ivendor/mquickjs -o $@ vendor/mquickjs/gen_stdlib_main.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c -lm
 
 # Eval profile stdlib → js_std_library_eval (forked sandboxed evaluator)
 $(BUILDDIR)/gen_stdlib_eval: vendor/mquickjs/gen_stdlib_eval.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c | $(BUILDDIR)/
@@ -124,6 +113,7 @@ $(BUILDDIR)/cr_stdlib.o: $(BUILDDIR)/mquickjs_stdlib_channel.c | $(BUILDDIR)/
 
 CR_LIB_OBJ := $(BUILDDIR)/admin_api.o $(BUILDDIR)/agent_config.o $(BUILDDIR)/channel_api.o \
               $(BUILDDIR)/db.o $(BUILDDIR)/wake.o $(BUILDDIR)/secret.o $(BUILDDIR)/secret_scan.o $(BUILDDIR)/config.o \
+              $(BUILDDIR)/js_http_prelude.o \
               $(BUILDDIR)/sqlite3.o $(BUILDDIR)/monocypher.o
 
 $(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(MQJS_CORE_OBJ) $(BUILDDIR)/cr_stdlib.o $(CR_LIB_OBJ) | $(BUILDDIR)/

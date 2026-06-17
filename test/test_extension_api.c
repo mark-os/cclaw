@@ -1,4 +1,5 @@
 /* T256/T257: Test cclaw extension API — registerTool, registerHook */
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -38,6 +39,20 @@ static void cleanup(const char *ws) {
     (void)system(cmd);
 }
 
+/* Set CCLAW_MJS_EXE to sibling cclaw binary (same pattern as test_tool_js) */
+static void setup_mjs_env(void) {
+    char self[4096];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n <= 0) return;
+    self[n] = '\0';
+    char *slash = strrchr(self, '/');
+    if (slash) slash[1] = '\0'; else self[0] = '\0';
+    char cclaw_path[4128];
+    snprintf(cclaw_path, sizeof(cclaw_path), "%scclaw", self);
+    setenv("CCLAW_MJS_EXE", cclaw_path, 1);
+    setenv("CCLAW_MJS_HOST", "1", 1);
+}
+
 /* V111: registerTool registers a tool callable from the agent */
 static void test_register_tool(void) {
     TEST(register_tool);
@@ -54,7 +69,7 @@ static void test_register_tool(void) {
         "  name: 'greet',\n"
         "  description: 'Say hello',\n"
         "  parameters: {type:'object',properties:{name:{type:'string'}}},\n"
-        "  handler: function(args) { return 'hello ' + (args.name || 'world'); }\n"
+        "  handler: \"return 'hello ' + (args.name || 'world');\"\n"
         "});\n");
 
     JsSessionRuntime *rt = js_runtime_create();
@@ -65,12 +80,13 @@ static void test_register_tool(void) {
     ExtensionCtx ext_ctx;
     extension_ctx_init(&ext_ctx, rt);
 
+    JsEvalCtx ectx = {0};
     size_t count = 0;
     char **paths = extension_discover(ws, &count);
     if (count != 1) { js_runtime_destroy(rt); cleanup(ws); FAIL("discover"); }
 
     Config cfg = {.log_level = LOG_LEVEL_INFO};
-    int loaded = extension_load(paths, count, rt, &reg, &cfg, &ext_ctx);
+    int loaded = extension_load(paths, count, rt, &reg, &cfg, &ext_ctx, &ectx);
     extension_list_free(paths, count);
 
     if (loaded != 1) { js_runtime_destroy(rt); cleanup(ws); FAIL("load"); }
@@ -126,7 +142,7 @@ static void test_register_hook(void) {
     size_t count = 0;
     char **paths = extension_discover(ws, &count);
     Config cfg = {.log_level = LOG_LEVEL_INFO};
-    extension_load(paths, count, rt, &reg, &cfg, &ext_ctx);
+    extension_load(paths, count, rt, &reg, &cfg, &ext_ctx, NULL);
     extension_list_free(paths, count);
 
     /* beforeToolCall should have 2, afterToolCall should have 1 */
@@ -176,7 +192,7 @@ static void test_register_tool_invalid(void) {
     size_t count = 0;
     char **paths = extension_discover(ws, &count);
     Config cfg = {.log_level = LOG_LEVEL_INFO};
-    int loaded = extension_load(paths, count, rt, &reg, &cfg, &ext_ctx);
+    int loaded = extension_load(paths, count, rt, &reg, &cfg, &ext_ctx, NULL);
     extension_list_free(paths, count);
 
     /* Extension threw → loaded == 0 */
@@ -216,6 +232,8 @@ static void test_hook_event_from_name(void) {
 /* T261: afterResponse hook receives response object */
 
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setup_mjs_env();
     printf("test_extension_api:\n");
     test_register_tool();
     test_register_hook();

@@ -43,6 +43,7 @@
 #define CR_POLL_TIMEOUT 35L       /* slightly longer than TG long-poll */
 
 extern const JSSTDLibraryDef js_std_library_channel;
+extern const char JS_HTTP_PRELUDE[];
 
 static volatile sig_atomic_t g_running = 1;
 ChannelCtx *g_ctx;
@@ -481,6 +482,8 @@ int main(int argc, char **argv) {
     HostCtx hctx = {.instruction_count = 0, .instruction_limit = CR_MAX_INSTRUCTIONS};
     JS_SetInterruptHandler(ctx, interrupt_handler);
     JS_SetContextOpaque(ctx, &hctx);
+
+    JS_Eval(ctx, JS_HTTP_PRELUDE, strlen(JS_HTTP_PRELUDE), "<http-prelude>", 0);
 
     JSValue load_val = JS_Eval(ctx, js_src, strlen(js_src), js_path, 0);
     free(js_src);

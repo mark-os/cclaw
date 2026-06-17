@@ -132,10 +132,10 @@ static void test_runtime_set_hosts(void) {
  * path through js_eval requires a real network fetch inside the forked
  * `--mjs_eval` child, so it lives in the e2e suite, not here. */
 
-/* JS eval: http_fetch without hosts throws */
+/* JS eval: http_request without hosts throws */
 static void test_js_eval_no_hosts(void) {
     TEST("js_eval_no_hosts");
-    char *r = tool_js_eval_handler("{\"code\":\"http_fetch('https://example.com')\"}", NULL);
+    char *r = tool_js_eval_handler("{\"code\":\"http_request('https://example.com')\"}", NULL);
     if (!r) { FAIL("NULL result"); return; }
     /* Should get an error about no allowed_hosts */
     if (strstr(r, "error") == NULL && strstr(r, "Error") == NULL) {
@@ -145,7 +145,7 @@ static void test_js_eval_no_hosts(void) {
     PASS();
 }
 
-/* T104: js_eval with allowed_hosts configured passes hosts to http_fetch */
+/* T104: js_eval with allowed_hosts configured passes hosts to http_request */
 static void test_js_eval_with_hosts(void) {
     TEST("js_eval_with_hosts");
     /* Register js_eval with allowed_hosts context */
@@ -157,10 +157,10 @@ static void test_js_eval_with_hosts(void) {
     ToolEntry *e = tools_lookup(&reg, "js_eval");
     if (!e) { FAIL("lookup failed"); tools_free(&reg); return; }
 
-    /* Call http_fetch for a disallowed host — should get "not in allowed_hosts".
+    /* Call http_request for a disallowed host — should get "not in allowed_hosts".
      * This verifies the ectx allowed_hosts reach the forked child via
      * CCLAW_ALLOWED_HOSTS; the host check rejects before any socket is opened. */
-    char *r = e->handler("{\"code\":\"http_fetch('https://evil.com/')\"}", e->user_data);
+    char *r = e->handler("{\"code\":\"http_request('https://evil.com/')\"}", e->user_data);
     if (!r) { FAIL("NULL result"); tools_free(&reg); return; }
     if (!strstr(r, "not in allowed_hosts")) {
         FAIL(r); free(r); tools_free(&reg); return;

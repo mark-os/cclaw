@@ -37,25 +37,21 @@ static char *handler(const char *arguments, void *user_data) {
     if (strcmp(act, "grant_tool") == 0) {
         const char *tool = targ_str(&ta, "tool");
         if (!tool || !tool[0]) { tool_parse_free(&ta); return strdup("error: 'tool' required for grant_tool"); }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "granted tool: %s", tool);
         int rc = agent_config_add_tool(ctx->db, ctx->agent_name, tool);
         tool_parse_free(&ta);
-        if (rc == 0) {
-            char buf[128];
-            snprintf(buf, sizeof(buf), "granted tool: %s", tool);
-            return strdup(buf);
-        }
+        if (rc == 0) return strdup(buf);
         return strdup("error: failed to grant tool");
 
     } else if (strcmp(act, "grant_host") == 0) {
         const char *host = targ_str(&ta, "host");
         if (!host || !host[0]) { tool_parse_free(&ta); return strdup("error: 'host' required for grant_host"); }
+        char buf[128];
+        snprintf(buf, sizeof(buf), "granted host: %s", host);
         int rc = agent_config_add_host(ctx->db, ctx->agent_name, host);
         tool_parse_free(&ta);
-        if (rc == 0) {
-            char buf[128];
-            snprintf(buf, sizeof(buf), "granted host: %s", host);
-            return strdup(buf);
-        }
+        if (rc == 0) return strdup(buf);
         return strdup("error: failed to grant host");
 
     } else if (strcmp(act, "rename_agent") == 0) {

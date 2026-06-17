@@ -16,96 +16,8 @@
 #define JS_HEAP_SIZE (1024 * 1024)
 #define JS_MAX_INSTRUCTIONS 10000000
 
-extern const JSSTDLibraryDef js_std_library_main;
-
-static int interrupt_handler(JSContext *ctx, void *opaque) {
-    (void)ctx;
-    JsHostCtx *hctx = (JsHostCtx *)opaque;
-    hctx->instruction_count++;
-    return hctx->instruction_count > hctx->instruction_limit;
-}
-
-/* Eval JS code in a fresh sandboxed context. Returns heap-allocated result. */
-static char *js_eval_code_with_hosts(const char *code, char **hosts, size_t hosts_count) {
-    size_t code_len = strlen(code);
-
-    void *heap = malloc(JS_HEAP_SIZE);
-    if (!heap) return strdup("error: out of memory");
-
-    JSContext *ctx = JS_NewContext(heap, JS_HEAP_SIZE, &js_std_library_main);
-    if (!ctx) { free(heap); return strdup("error: JS context creation failed"); }
-
-    JsHostCtx hctx = {.instruction_count = 0, .instruction_limit = JS_MAX_INSTRUCTIONS,
-                       .allowed_hosts = hosts, .allowed_hosts_count = hosts_count};
-    JS_SetInterruptHandler(ctx, interrupt_handler);
-    JS_SetContextOpaque(ctx, &hctx);
-
-    JSValue val = JS_Eval(ctx, code, code_len, "<eval>", JS_EVAL_RETVAL);
-
-    char *result;
-    if (JS_IsException(val)) {
-        JSValue exc = JS_GetException(ctx);
-        JSCStringBuf buf;
-        const char *msg = JS_ToCString(ctx, exc, &buf);
-        if (msg) {
-            size_t len = strlen(msg) + 16;
-            result = malloc(len);
-            if (result) snprintf(result, len, "error: %s", msg);
-            else result = strdup("error: OOM");
-        } else {
-            result = strdup("error: exception (no message)");
-        }
-    } else if (hctx.instruction_count > JS_MAX_INSTRUCTIONS) {
-        result = strdup("error: instruction limit exceeded (10M)");
-    } else if (JS_IsUndefined(val)) {
-        result = strdup("undefined");
-    } else if (JS_IsNull(val)) {
-        result = strdup("null");
-    } else {
-        JSCStringBuf buf;
-        const char *str = JS_ToCString(ctx, val, &buf);
-        result = str ? strdup(str) : strdup("error: cannot convert result to string");
-    }
-
-    JS_FreeContext(ctx);
-    free(heap);
-    return result;
-}
-
-/* Eval JS code in a persistent session runtime. Returns heap-allocated result. */
-static char *js_eval_in_runtime(JsSessionRuntime *rt, const char *code) {
-    if (!rt || !rt->ctx) return js_eval_code_with_hosts(code, NULL, 0);
-
-    JSContext *ctx = (JSContext *)rt->ctx;
-    size_t code_len = strlen(code);
-
-    JSValue val = JS_Eval(ctx, code, code_len, "<tool>", JS_EVAL_RETVAL);
-
-    char *result;
-    if (JS_IsException(val)) {
-        JSValue exc = JS_GetException(ctx);
-        JSCStringBuf buf;
-        const char *msg = JS_ToCString(ctx, exc, &buf);
-        if (msg) {
-            size_t len = strlen(msg) + 16;
-            result = malloc(len);
-            if (result) snprintf(result, len, "error: %s", msg);
-            else result = strdup("error: OOM");
-        } else {
-            result = strdup("error: exception (no message)");
-        }
-    } else if (JS_IsUndefined(val)) {
-        result = strdup("undefined");
-    } else if (JS_IsNull(val)) {
-        result = strdup("null");
-    } else {
-        JSCStringBuf buf;
-        const char *str = JS_ToCString(ctx, val, &buf);
-        result = str ? strdup(str) : strdup("error: cannot convert result to string");
-    }
-
-    return result;
-}
+extern const JSSTDLibraryDef js_std_library_eval;
+extern const char JS_HTTP_PRELUDE[];
 
 static const char *JSEVAL_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
@@ -306,55 +218,57 @@ done:
 
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
     return tools_register(reg, "js_eval",
-                          "Run JavaScript in MicroQuickJS (ES5 only: var, function(){}, string concat; "
-                          "NO let/const, arrow =>, template literals, for...of, destructuring, async). "
-                          "Top-level 'this' is not enumerable (do not iterate it). "
-                          "Globals: fs.readDir(path), fs.readFile(path), fs.writeFile(path, data), "
-                          "fs.stat(path), fs.cwd(). "
-                          "Network: fetch(url, opts) / http_fetch(url, opts) — only allow-listed hosts work; "
-                          "to add one, call request_config with {\"action\":\"grant_host\",\"host\":\"...\"}. "
-                          "Returns the last expression value (or console.log output).",
+                          "Run JavaScript in MicroQuickJS (ES5 + SYNCHRONOUS — no Promises/async/await; "
+                          "use 'var' not let/const, function(){} not arrow =>, string concatenation not template literals).\n"
+                          "Example:\n"
+                          "  var r = http_request('https://api.example.com/x');  // synchronous; NOT a Promise\n"
+                          "  print(r.status, r.body);                              // print == console.log\n"
+                          "  var data = r.json();                                  // or JSON.parse(r.body)\n"
+                          "http_request(url[, opts]) is THE HTTP call. 'fetch' is unavailable (it would imply a Promise; "
+                          "this engine has none). The response object exposes: status, ok, body, text, responseText, "
+                          "response, and json(). print(...) is an alias for console.log(...).\n"
+                          "File globals: fs.readDir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd().\n"
+                          "Only allow-listed hosts work; to add one, call request_config with "
+                          "{\"action\":\"grant_host\",\"host\":\"...\"}.\n"
+                          "Returns the last expression value (or printed output).",
                           JSEVAL_PARAMS_JSON, tool_js_eval_handler, ctx);
 }
 
 /* --- JS-defined tool support (extension-path) --- */
 
-/* User data for JS-defined tool handler: code + runtime pointer */
+/* User data for JS-defined tool handler: code + eval-ctx for forked execution */
 typedef struct {
     char *code;
-    JsSessionRuntime *rt;
+    JsEvalCtx *ectx;
 } JsToolData;
 
-/* Handler for JS-defined tools. user_data points to JsToolData. */
+/* Handler for JS-defined tools — forks via tool_js_eval_handler. */
 static char *js_defined_tool_handler(const char *arguments, void *user_data) {
     JsToolData *td = (JsToolData *)user_data;
     if (!td || !td->code) return strdup("error: no code for this tool");
+    const char *args_str = (arguments && arguments[0]) ? arguments : "{}";
 
-    /* Wrap: (function(args){<code>})(JSON.parse('<escaped_args>')) */
-    const char *args_str = arguments ? arguments : "{}";
-
-    /* Escape single quotes and backslashes for embedding in JS string literal */
-    size_t args_len = strlen(args_str);
-    size_t escaped_cap = args_len * 2 + 1;
-    char *escaped = malloc(escaped_cap);
-    if (!escaped) { return strdup("error: OOM"); }
-    size_t j = 0;
-    for (size_t i = 0; i < args_len; i++) {
-        if (args_str[i] == '\'' || args_str[i] == '\\') {
-            escaped[j++] = '\\';
-        }
-        escaped[j++] = args_str[i];
-    }
-    escaped[j] = '\0';
-
-    size_t wrap_len = strlen(td->code) + j + 64;
+    /* wrapped = (function(args){<code>})(<args JSON literal>) */
+    size_t wrap_len = strlen(td->code) + strlen(args_str) + 32;
     char *wrapped = malloc(wrap_len);
-    if (!wrapped) { free(escaped); return strdup("error: OOM"); }
-    snprintf(wrapped, wrap_len, "(function(args){%s})(JSON.parse('%s'))", td->code, escaped);
-    free(escaped);
+    if (!wrapped) return strdup("error: OOM");
+    snprintf(wrapped, wrap_len, "(function(args){%s})(%s)", td->code, args_str);
 
-    char *result = js_eval_in_runtime(td->rt, wrapped);
+    /* Build {"code":"<json-escaped wrapped>"} and run via the forked js_eval path */
+    size_t esc_cap = strlen(wrapped) * 2 + 8;
+    char *esc = malloc(esc_cap);
+    if (!esc) { free(wrapped); return strdup("error: OOM"); }
+    size_t esc_len = json_escape(esc, esc_cap, wrapped, strlen(wrapped));
     free(wrapped);
+
+    size_t blob_len = esc_len + 16;
+    char *blob = malloc(blob_len);
+    if (!blob) { free(esc); return strdup("error: OOM"); }
+    snprintf(blob, blob_len, "{\"code\":\"%s\"}", esc);
+    free(esc);
+
+    char *result = tool_js_eval_handler(blob, td->ectx);
+    free(blob);
     return result;
 }
 
@@ -366,18 +280,18 @@ static void js_tool_data_free(void *user_data) {
     if (td) { free(td->code); free(td); }
 }
 
-/* Register a single JS-defined tool into the registry with shared runtime.
+/* Register a single JS-defined tool into the registry with forked eval ctx.
  * Exported for use by extension.c (T256). */
 int js_tool_register_ext(ToolRegistry *reg, const char *name,
                                 const char *description, const char *parameters_json,
-                                const char *code, JsSessionRuntime *rt) {
+                                const char *code, JsEvalCtx *ectx) {
     /* Check if already registered (re-define overwrites) */
     ToolEntry *existing = tools_lookup(reg, name);
     if (existing) {
         JsToolData *td = (JsToolData *)existing->user_data;
         free(td->code);
         td->code = strdup(code);
-        td->rt = rt;
+        td->ectx = ectx;
         free(existing->description);
         free(existing->parameters_json);
         existing->description = description ? strdup(description) : NULL;
@@ -388,7 +302,7 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
     JsToolData *td = malloc(sizeof(JsToolData));
     if (!td) return -1;
     td->code = strdup(code);
-    td->rt = rt;
+    td->ectx = ectx;
     if (!td->code) { free(td); return -1; }
     int rc = tools_register(reg, name, description, parameters_json,
                             js_defined_tool_handler, td);
@@ -412,8 +326,9 @@ JsSessionRuntime *js_runtime_create(void) {
     if (!rt) return NULL;
     rt->heap = malloc(JS_HEAP_SIZE);
     if (!rt->heap) { free(rt); return NULL; }
-    rt->ctx = JS_NewContext(rt->heap, JS_HEAP_SIZE, &js_std_library_main);
+    rt->ctx = JS_NewContext(rt->heap, JS_HEAP_SIZE, &js_std_library_eval);
     if (!rt->ctx) { free(rt->heap); free(rt); return NULL; }
+    JS_Eval((JSContext *)rt->ctx, JS_HTTP_PRELUDE, strlen(JS_HTTP_PRELUDE), "<http-prelude>", 0);
     return rt;
 }
 
@@ -442,16 +357,5 @@ void js_runtime_set_hosts(JsSessionRuntime *rt, char **hosts, size_t count) {
     hctx->allowed_hosts_count = count;
 }
 
-void js_runtime_set_registry(JsSessionRuntime *rt, ToolRegistry *reg) {
-    if (!rt || !rt->ctx) return;
-    JSContext *ctx = (JSContext *)rt->ctx;
-    JsHostCtx *hctx = (JsHostCtx *)JS_GetContextOpaque(ctx);
-    if (!hctx) {
-        hctx = calloc(1, sizeof(JsHostCtx));
-        if (!hctx) return;
-        JS_SetContextOpaque(ctx, hctx);
-    }
-    hctx->tool_registry = reg;
-}
 
 

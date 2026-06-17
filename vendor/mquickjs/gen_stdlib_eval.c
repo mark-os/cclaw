@@ -46,8 +46,7 @@ static const JSPropDef js_global_object[] = {
     JS_CFUNC_DEF("eval", 1, js_global_eval),
     JS_CFUNC_DEF("isNaN", 1, js_global_isNaN ),
     JS_CFUNC_DEF("isFinite", 1, js_global_isFinite ),
-    JS_CFUNC_DEF("http_fetch", 2, js_http_fetch ),
-    JS_CFUNC_DEF("fetch", 2, js_http_fetch ),
+    JS_CFUNC_DEF("http_request", 2, js_http_fetch ),
 
     JS_PROP_DOUBLE_DEF("Infinity", 1.0 / 0.0, 0 ),
     JS_PROP_DOUBLE_DEF("NaN", NAN, 0 ),

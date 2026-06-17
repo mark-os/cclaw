@@ -1,6 +1,6 @@
 /* Host-provided JS functions for channel_runner binary.
  * Provides baked native channel.* and channel.admin.* objects,
- * plus http_fetch (throws) and Date.now(). */
+ * plus http_request (throws) and Date.now(). */
 
 #include <stdlib.h>
 #include <string.h>
@@ -257,7 +257,7 @@ JSValue js_admin_is_admin(JSContext *ctx, JSValue *this_val, int argc, JSValue *
     return JS_NewBool(found);
 }
 
-/* http_fetch — blocking network I/O is not available in channel JS. */
+/* http_request — blocking network I/O is not available in channel JS. */
 JSValue js_http_fetch(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_ThrowTypeError(ctx, "no blocking fetch in channels; use channel.send()");

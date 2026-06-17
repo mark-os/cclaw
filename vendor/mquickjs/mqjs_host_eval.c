@@ -66,12 +66,12 @@ static JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
     }
 
     if (argc < 1)
-        return JS_ThrowTypeError(ctx, "http_fetch: url argument required");
+        return JS_ThrowTypeError(ctx, "http_request: url argument required");
 
     JSCStringBuf url_buf;
     const char *url = JS_ToCString(ctx, argv[0], &url_buf);
     if (!url)
-        return JS_ThrowTypeError(ctx, "http_fetch: url must be a string");
+        return JS_ThrowTypeError(ctx, "http_request: url must be a string");
 
     const char *method = NULL;
     const char *body = NULL;
@@ -94,7 +94,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
 
     if (r.status < 0) {
         char msg[256];
-        snprintf(msg, sizeof(msg), "http_fetch: %s", r.error ? r.error : "unknown error");
+        snprintf(msg, sizeof(msg), "http_request: %s", r.error ? r.error : "unknown error");
         js_http_result_free(&r);
         return JS_ThrowTypeError(ctx, "%s", msg);
     }
@@ -107,7 +107,7 @@ static JSValue js_http_fetch(JSContext *ctx, JSValue *this_val,
         char *text = (char *)malloc(cap);
         if (text) {
             size_t tlen = html_strip_tags(r.body, text, cap);
-            char *wrapped = wrap_external_content(text, tlen, "http_fetch");
+            char *wrapped = wrap_external_content(text, tlen, "http_request");
             if (wrapped) {
                 JS_SetPropertyStr(ctx, result, "body",
                                   JS_NewStringLen(ctx, wrapped, strlen(wrapped)));

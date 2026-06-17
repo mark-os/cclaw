@@ -109,7 +109,7 @@ static void test_load_success(void) {
     if (count != 1) { js_runtime_destroy(rt); FAIL("discover failed"); }
 
     Config cfg = {.log_level = LOG_LEVEL_DEBUG};
-    int loaded = extension_load(paths, count, rt, NULL, &cfg, NULL);
+    int loaded = extension_load(paths, count, rt, NULL, &cfg, NULL, NULL);
     extension_list_free(paths, count);
 
     if (loaded != 1) { js_runtime_destroy(rt); FAIL("expected 1 loaded"); }
@@ -141,7 +141,7 @@ static void test_load_throw_skips(void) {
     if (count != 2) { js_runtime_destroy(rt); FAIL("discover"); }
 
     Config cfg = {.log_level = LOG_LEVEL_DEBUG};
-    int loaded = extension_load(paths, count, rt, NULL, &cfg, NULL);
+    int loaded = extension_load(paths, count, rt, NULL, &cfg, NULL, NULL);
     extension_list_free(paths, count);
 
     /* bad.js throws → skipped, good.js succeeds */

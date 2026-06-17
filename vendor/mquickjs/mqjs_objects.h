@@ -358,6 +358,4 @@ static const JSPropDef js_channel[] = {
 static const JSClassDef js_channel_obj =
     JS_OBJECT_DEF("channel", js_channel);
 
-/* main profile — callTool native (defined in mqjs_host_main.c). */
-
 #endif /* CCLAW_MQJS_OBJECTS_H */

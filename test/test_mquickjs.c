@@ -3,7 +3,7 @@
 #include <string.h>
 #include "mquickjs.h"
 
-extern const JSSTDLibraryDef js_std_library_main;
+extern const JSSTDLibraryDef js_std_library_eval;
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -22,7 +22,7 @@ static int tests_passed = 0;
 static void test_context_create(void) {
     TEST("context_create");
     void *heap = malloc(HEAP_SIZE);
-    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_main);
+    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_eval);
     if (!ctx) { FAIL("JS_NewContext returned NULL"); free(heap); return; }
     JS_FreeContext(ctx);
     free(heap);
@@ -32,7 +32,7 @@ static void test_context_create(void) {
 static void test_eval_int(void) {
     TEST("eval_int");
     void *heap = malloc(HEAP_SIZE);
-    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_main);
+    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_eval);
     JSValue val = JS_Eval(ctx, "1 + 2", 5, "<test>", JS_EVAL_RETVAL);
     if (JS_IsException(val)) { FAIL("exception"); JS_FreeContext(ctx); free(heap); return; }
     int result;
@@ -46,7 +46,7 @@ static void test_eval_int(void) {
 static void test_eval_string(void) {
     TEST("eval_string");
     void *heap = malloc(HEAP_SIZE);
-    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_main);
+    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_eval);
     JSValue val = JS_Eval(ctx, "'hello' + ' world'", 18, "<test>", JS_EVAL_RETVAL);
     if (JS_IsException(val)) { FAIL("exception"); JS_FreeContext(ctx); free(heap); return; }
     JSCStringBuf buf;
@@ -61,7 +61,7 @@ static void test_eval_string(void) {
 static void test_eval_math(void) {
     TEST("eval_math");
     void *heap = malloc(HEAP_SIZE);
-    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_main);
+    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_eval);
     JSValue val = JS_Eval(ctx, "Math.floor(3.7)", 15, "<test>", JS_EVAL_RETVAL);
     if (JS_IsException(val)) { FAIL("exception"); JS_FreeContext(ctx); free(heap); return; }
     int result;
@@ -75,7 +75,7 @@ static void test_eval_math(void) {
 static void test_eval_json(void) {
     TEST("eval_json");
     void *heap = malloc(HEAP_SIZE);
-    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_main);
+    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_eval);
     const char *code = "JSON.stringify({a: 1, b: 'x'})";
     JSValue val = JS_Eval(ctx, code, strlen(code), "<test>", JS_EVAL_RETVAL);
     if (JS_IsException(val)) { FAIL("exception"); JS_FreeContext(ctx); free(heap); return; }
@@ -91,7 +91,7 @@ static void test_eval_json(void) {
 static void test_date_now(void) {
     TEST("date_now");
     void *heap = malloc(HEAP_SIZE);
-    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_main);
+    JSContext *ctx = JS_NewContext(heap, HEAP_SIZE, &js_std_library_eval);
     const char *code = "Date.now()";
     JSValue val = JS_Eval(ctx, code, strlen(code), "<test>", JS_EVAL_RETVAL);
     if (JS_IsException(val)) { FAIL("exception"); JS_FreeContext(ctx); free(heap); return; }

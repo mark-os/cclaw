@@ -1,10 +1,29 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "tool_js.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
+
+/* js_eval now forks `cclaw --mjs_eval`. Point the handler at the real cclaw
+ * binary (sibling of this test binary) and run it in host mode (no sandbox),
+ * so these unit tests exercise the real subprocess path without needing a
+ * working userns sandbox or any network. */
+static void setup_mjs_env(void) {
+    char self[4096];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n <= 0) { fprintf(stderr, "readlink /proc/self/exe failed\n"); exit(2); }
+    self[n] = '\0';
+    char *slash = strrchr(self, '/');
+    if (slash) slash[1] = '\0'; else self[0] = '\0';
+    char cclaw_path[4128];
+    snprintf(cclaw_path, sizeof(cclaw_path), "%scclaw", self);
+    setenv("CCLAW_MJS_EXE", cclaw_path, 1);
+    setenv("CCLAW_MJS_HOST", "1", 1);
+}
 
 #define TEST(name) do { tests_run++; printf("  " name "... "); } while(0)
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
@@ -87,6 +106,8 @@ static void test_register(void) {
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setup_mjs_env();
     printf("test_tool_js:\n");
     test_basic_eval();
     test_string_result();

@@ -4,11 +4,14 @@
 #include "db.h"
 #include "http.h"
 #include "llm.h"
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define TRUNCATE_MAX_BYTES  (50 * 1024)
 #define TRUNCATE_MAX_LINES  2000
@@ -186,7 +189,14 @@ void context_plan_free(ContextPlan *plan) {
 /* ── T118: Write-time truncation with spill to temp file ─────────── */
 
 void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz) {
-    snprintf(buf, bufsz, "/tmp/cclaw-%lld", (long long)session_id);
+    /* Spill into the agent workspace (natural lifetime, no symlink-prone
+     * world-writable /tmp). Fall back to /tmp when no workspace is set
+     * (CLI without a workspace, tests). */
+    const char *ws = getenv("CCLAW_WORKSPACE");
+    if (ws && ws[0])
+        snprintf(buf, bufsz, "%s/spill/%lld", ws, (long long)session_id);
+    else
+        snprintf(buf, bufsz, "/tmp/cclaw-%lld", (long long)session_id);
 }
 
 char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_call_id) {
@@ -205,17 +215,33 @@ char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_c
     }
     if (cut >= len) return strdup(src);
 
-    /* Write full output to temp file */
-    char dir[64];
+    /* Write full output to a spill file. Create the immediate parent then the
+     * session dir (one extra level under the workspace's spill/), ignoring
+     * EEXIST. */
+    char dir[PATH_MAX];
     session_tmp_dir(session_id, dir, sizeof(dir));
+    char parent[PATH_MAX];
+    snprintf(parent, sizeof(parent), "%s", dir);
+    char *last_slash = strrchr(parent, '/');
+    if (last_slash && last_slash != parent) {
+        *last_slash = '\0';
+        mkdir(parent, 0700);  /* ignore error if exists */
+    }
     mkdir(dir, 0700);  /* ignore error if exists */
 
-    char path[128];
+    char path[PATH_MAX + 64];
     snprintf(path, sizeof(path), "%s/%s.out", dir, tool_call_id ? tool_call_id : "unknown");
-    FILE *f = fopen(path, "w");
-    if (f) {
-        fwrite(src, 1, len, f);
-        fclose(f);
+    /* O_NOFOLLOW: never follow a symlink planted at the spill path — a
+     * pre-existing symlink makes open() fail (ELOOP) and we skip the spill. */
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd >= 0) {
+        ssize_t off = 0;
+        while ((size_t)off < len) {
+            ssize_t w = write(fd, src + off, len - (size_t)off);
+            if (w <= 0) break;
+            off += w;
+        }
+        close(fd);
     }
 
     /* Count total lines */
@@ -223,8 +249,8 @@ char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_c
     for (size_t i = 0; i < len; i++)
         if (src[i] == '\n') total_lines++;
 
-    /* Build suffix with file path reference */
-    char suffix[256];
+    /* Build suffix with file path reference (sized to hold the full path) */
+    char suffix[PATH_MAX + 256];
     snprintf(suffix, sizeof(suffix),
              "\n[truncated — showing first %d lines of %d. Full output: %s]",
              lines < TRUNCATE_MAX_LINES ? lines : TRUNCATE_MAX_LINES,

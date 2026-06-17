@@ -35,10 +35,10 @@ static ToolEntry *tools_lookup_host(ToolRegistry *reg, const char *name) {
 
 #define CALL_TOOL_MAX_DEPTH 8
 
-/* V116: cclaw.callTool(name, args) — synchronous dispatch into C tool registry.
+/* V116: callTool(name, args) — synchronous dispatch into C tool registry.
  * Depth limit 8 to prevent infinite recursion. */
-JSValue js_call_tool(JSContext *ctx, JSValue *this_val,
-                     int argc, JSValue *argv)
+JSValue js_callTool(JSContext *ctx, JSValue *this_val,
+                    int argc, JSValue *argv)
 {
     (void)this_val;
 

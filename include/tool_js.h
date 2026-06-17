@@ -25,6 +25,7 @@ typedef struct {
 typedef struct {
     char **allowed_hosts;
     size_t allowed_hosts_count;
+    int host_mode;  /* 1 = trust_level host (no sandbox), 0 = sandbox child */
 } JsEvalCtx;
 
 /* Set allowed_hosts on a persistent JS runtime (V38).
@@ -43,20 +44,6 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx);
  * Returns heap-allocated result string. */
 char *tool_js_eval_handler(const char *arguments, void *user_data);
 
-/* Context for js_define_tool (needs DB + session + registry + runtime) */
-typedef struct {
-    sqlite3 *db;
-    int64_t session_id;
-    ToolRegistry *reg;
-    JsSessionRuntime *rt;
-} JsDefineCtx;
-
-/* Register js_define_tool into registry. Returns 0 on success. */
-int tool_js_define_register(ToolRegistry *reg, JsDefineCtx *ctx);
-
-/* Handler: parse JSON args {name, description, parameters, code},
- * persist to DB, register as callable tool. */
-char *tool_js_define_handler(const char *arguments, void *user_data);
 
 /* Create a persistent JS runtime for a session. Returns NULL on failure. */
 JsSessionRuntime *js_runtime_create(void);
@@ -64,14 +51,9 @@ JsSessionRuntime *js_runtime_create(void);
 /* Destroy a session runtime (free heap). */
 void js_runtime_destroy(JsSessionRuntime *rt);
 
-/* Load all JS-defined tools for a session from DB into registry,
- * replaying definitions into the shared runtime context.
- * Call after session selection. Returns number loaded, or -1 on error. */
-int tool_js_load_session(sqlite3 *db, int64_t session_id, ToolRegistry *reg,
-                         JsSessionRuntime *rt);
 
-/* T256: Register a JS tool from extension — same as internal js_define_tool
- * but callable from extension.c. code is the JS function body receiving 'args'. */
+/* T256: Register a JS tool from extension code.
+ * Callable from extension.c. code is the JS function body receiving 'args'. */
 int js_tool_register_ext(ToolRegistry *reg, const char *name,
                          const char *description, const char *parameters_json,
                          const char *code, JsSessionRuntime *rt);

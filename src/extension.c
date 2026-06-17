@@ -190,7 +190,7 @@ static const char CCLAW_API_INIT[] =
     "    globalThis.__cclaw_hooks[event].push(fn);\n"
     "  },\n"
     "  callTool: function(name, args) {\n"
-    "    return __cclaw_call_tool(name, args);\n"
+    "    return callTool(name, args);\n"
     "  }\n"
     "};\n";
 

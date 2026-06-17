@@ -1,6 +1,6 @@
 // Telegram channel extension for channel_runner
 // Reactive handlers: onInit, onPoll, onRequest, onOutbox.
-// All outbound HTTP goes through cclaw.send() — nothing here blocks.
+// All outbound HTTP goes through channel.send() — nothing here blocks.
 
 var TG_MAX_MSG_LEN = 4096;
 var config = {};
@@ -8,26 +8,26 @@ var offset = 0;
 var dialogs = {}; // chat_id -> {type, data}
 
 // Load telegram.json locale
-var locale = JSON.parse(cclaw.getConfig("locale") || "{}");
+var locale = JSON.parse(channel.getConfig("locale") || "{}");
 
 function onInit() {
-    config.token = cclaw.getConfig("bot_token");
-    config.base = cclaw.getConfig("base_url") || "https://api.telegram.org";
-    config.webhook_secret = cclaw.getConfig("webhook_secret") || "";
+    config.token = channel.getConfig("bot_token");
+    config.base = channel.getConfig("base_url") || "https://api.telegram.org";
+    config.webhook_secret = channel.getConfig("webhook_secret") || "";
 
     if (!config.token) {
-        cclaw.log("ERROR: no bot_token in channel_state");
+        channel.log("ERROR: no bot_token in channel_state");
         throw new Error("no bot_token");
     }
 
     // Restore offset
-    var saved = cclaw.getConfig("tg_offset");
+    var saved = channel.getConfig("tg_offset");
     if (saved) offset = parseInt(saved, 10) || 0;
 
     // webhook mode: platform POSTs to the daemon, proxied to onRequest.
     // Default: long-poll getUpdates.
-    var mode = cclaw.getConfig("mode") || "poll";
-    cclaw.log("telegram channel ready (mode=" + mode + ", offset=" + offset + ")");
+    var mode = channel.getConfig("mode") || "poll";
+    channel.log("telegram channel ready (mode=" + mode + ", offset=" + offset + ")");
     if (mode === "webhook") return {};
     return {poll: pollShape()};
 }
@@ -44,7 +44,7 @@ function pollShape() {
 
 function onPoll(result) {
     if (result.error) {
-        cclaw.log("poll error: " + result.error);
+        channel.log("poll error: " + result.error);
         return {poll: pollShape()};
     }
     processUpdates(result.body);
@@ -74,7 +74,7 @@ function onRequest(req) {
 function processUpdates(body) {
     var data;
     try { data = JSON.parse(body); } catch(e) {
-        cclaw.log("parse error: " + e);
+        channel.log("parse error: " + e);
         return;
     }
     if (!data.ok || !data.result) return;
@@ -88,7 +88,7 @@ function processUpdates(body) {
     }
 
     // Persist offset
-    if (offset > 0) cclaw.setConfig("tg_offset", "" + offset);
+    if (offset > 0) channel.setConfig("tg_offset", "" + offset);
 }
 
 // ── Outbox delivery ──────────────────────────────────────────────
@@ -96,14 +96,14 @@ function processUpdates(body) {
 function onOutbox(item) {
     var payload;
     try { payload = JSON.parse(item.payload); } catch(e) {
-        cclaw.failOutbox(item.id, "JSON parse error");
+        channel.failOutbox(item.id, "JSON parse error");
         return;
     }
 
     var chatId = payload.chat_id || payload.channel_id;
     var text = payload.text;
     if (!chatId || !text) {
-        cclaw.failOutbox(item.id, "missing chat_id or text");
+        channel.failOutbox(item.id, "missing chat_id or text");
         return;
     }
 
@@ -130,7 +130,7 @@ function processMessage(msg) {
     // Admin commands
     if (text.indexOf("/key") === 0 || text.indexOf("/config") === 0 ||
         text.indexOf("/whitelist") === 0) {
-        if (!cclaw.admin.isAdmin(chatId)) return;
+        if (!channel.admin.isAdmin(chatId)) return;
         dispatchAdminCommand(chatId, text);
         return;
     }
@@ -141,12 +141,12 @@ function processMessage(msg) {
         text: text,
         from: msg.from ? msg.from.first_name || "" : ""
     });
-    cclaw.emit("message", payload);
+    channel.emit("message", payload);
 }
 
 function processCallback(cbq) {
     var fromId = cbq.from ? "" + cbq.from.id : "";
-    if (!cclaw.admin.isAdmin(fromId)) return;
+    if (!channel.admin.isAdmin(fromId)) return;
 
     // Answer callback to dismiss loading
     if (cbq.id) {
@@ -230,22 +230,22 @@ function handleDialogReply(chatId, text) {
     delete dialogs[chatId];
 
     if (d.type === "key") {
-        var rc = cclaw.admin.setKey(d.provider, text);
+        var rc = channel.admin.setKey(d.provider, text);
         sendMessage(chatId, rc === 0 ? msg("key_saved") : msg("key_failed"));
     } else if (d.type === "config_model") {
-        var rc2 = cclaw.admin.setModel(d.index, text);
+        var rc2 = channel.admin.setModel(d.index, text);
         sendMessage(chatId, rc2 === 0 ? msg("config_model_updated") + text : "Failed to update model.");
     } else if (d.type === "config_endpoint") {
         if (text.indexOf("http://") !== 0 && text.indexOf("https://") !== 0) {
             sendMessage(chatId, msg("config_endpoint_invalid"));
             return;
         }
-        var rc3 = cclaw.admin.setEndpoint(d.index, text);
+        var rc3 = channel.admin.setEndpoint(d.index, text);
         sendMessage(chatId, rc3 === 0 ? msg("config_endpoint_updated") + text : "Failed to update endpoint.");
     } else if (d.type === "whitelist") {
         var rc4 = d.removing ?
-            cclaw.admin.removeHost(d.agent, text) :
-            cclaw.admin.addHost(d.agent, text);
+            channel.admin.removeHost(d.agent, text) :
+            channel.admin.addHost(d.agent, text);
         sendMessage(chatId, rc4 === 0 ?
             (d.removing ? msg("wl_host_removed") : msg("wl_host_added")) :
             msg("wl_failed"));
@@ -264,7 +264,7 @@ function tgCall(method, body, extra) {
         if (extra.outbox_id) req.outbox_id = extra.outbox_id;
         if (extra.final) req.final = 1;
     }
-    cclaw.send(req);
+    channel.send(req);
 }
 
 function sendMessage(chatId, text) {
@@ -323,7 +323,7 @@ function sendForceReply(chatId, text) {
 }
 
 function sendProviderKeyboard(chatId, prefix) {
-    var providers = cclaw.admin.listProviders();
+    var providers = channel.admin.listProviders();
     var keyboard = [];
     for (var i = 0; i < providers.length; i++) {
         var p = providers[i];
@@ -335,7 +335,7 @@ function sendProviderKeyboard(chatId, prefix) {
 }
 
 function sendAgentKeyboard(chatId, removing) {
-    var agents = cclaw.admin.listAgents();
+    var agents = channel.admin.listAgents();
     if (!agents || agents.length === 0) {
         sendMessage(chatId, "No agents found.");
         return;

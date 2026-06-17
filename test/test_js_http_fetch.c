@@ -1,12 +1,30 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "js_http_fetch.h"
 #include "tool_js.h"
 #include "tools.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
+
+/* js_eval now forks `cclaw --mjs_eval`. Point the handler at the real cclaw
+ * binary (sibling of this test) in host mode. The handler-based tests below
+ * only exercise host-validation rejection paths, which never open a socket. */
+static void setup_mjs_env(void) {
+    char self[4096];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n <= 0) { fprintf(stderr, "readlink /proc/self/exe failed\n"); exit(2); }
+    self[n] = '\0';
+    char *slash = strrchr(self, '/');
+    if (slash) slash[1] = '\0'; else self[0] = '\0';
+    char cclaw_path[4128];
+    snprintf(cclaw_path, sizeof(cclaw_path), "%scclaw", self);
+    setenv("CCLAW_MJS_EXE", cclaw_path, 1);
+    setenv("CCLAW_MJS_HOST", "1", 1);
+}
 
 #define TEST(name) do { tests_run++; printf("  " name "... "); } while(0)
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
@@ -109,69 +127,10 @@ static void test_runtime_set_hosts(void) {
     PASS();
 }
 
-/* T117: sanitize option — verify JS eval with sanitize:true wraps output */
-static void test_js_eval_sanitize(void) {
-    TEST("js_eval_sanitize");
-    JsEvalCtx ectx = {.allowed_hosts = (char *[]){"example.com"}, .allowed_hosts_count = 1};
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_js_eval_register(&reg, &ectx);
-
-    ToolEntry *e = tools_lookup(&reg, "js_eval");
-    if (!e) { FAIL("lookup failed"); tools_free(&reg); return; }
-
-    /* Fetch example.com with sanitize:true — should get boundary-wrapped text */
-    char *r = e->handler("{\"code\":\"var r = http_fetch('https://example.com/', {sanitize: true}); r.body\"}", e->user_data);
-    if (!r) { FAIL("NULL result"); tools_free(&reg); return; }
-    /* If network fails, skip gracefully */
-    if (strstr(r, "error") || strstr(r, "Error")) {
-        printf("SKIP (network: %s)\n", r);
-        tests_passed++;
-        free(r); tools_free(&reg); return;
-    }
-    /* Verify boundary markers present */
-    if (!strstr(r, "<<<UNTRUSTED_EXTERNAL_CONTENT id=\"")) {
-        FAIL("missing open boundary"); free(r); tools_free(&reg); return;
-    }
-    if (!strstr(r, "<<<END_UNTRUSTED_EXTERNAL_CONTENT id=\"")) {
-        FAIL("missing close boundary"); free(r); tools_free(&reg); return;
-    }
-    /* Verify HTML tags stripped (no <html>, <head>, etc.) */
-    if (strstr(r, "<html") || strstr(r, "<head") || strstr(r, "<body")) {
-        FAIL("HTML tags not stripped"); free(r); tools_free(&reg); return;
-    }
-    free(r);
-    tools_free(&reg);
-    PASS();
-}
-
-/* T117: without sanitize, raw body returned */
-static void test_js_eval_no_sanitize(void) {
-    TEST("js_eval_no_sanitize");
-    JsEvalCtx ectx = {.allowed_hosts = (char *[]){"example.com"}, .allowed_hosts_count = 1};
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_js_eval_register(&reg, &ectx);
-
-    ToolEntry *e = tools_lookup(&reg, "js_eval");
-    if (!e) { FAIL("lookup failed"); tools_free(&reg); return; }
-
-    /* Fetch without sanitize — should get raw HTML */
-    char *r = e->handler("{\"code\":\"var r = http_fetch('https://example.com/'); r.body\"}", e->user_data);
-    if (!r) { FAIL("NULL result"); tools_free(&reg); return; }
-    if (strstr(r, "error") || strstr(r, "Error")) {
-        printf("SKIP (network: %s)\n", r);
-        tests_passed++;
-        free(r); tools_free(&reg); return;
-    }
-    /* Raw response should NOT have boundary markers */
-    if (strstr(r, "<tool_result name=\"http_fetch\">")) {
-        FAIL("unexpected boundary in raw mode"); free(r); tools_free(&reg); return;
-    }
-    free(r);
-    tools_free(&reg);
-    PASS();
-}
+/* Note: the sanitize/HTML-strip helpers (html_strip_tags, wrap_external_content)
+ * are unit-tested directly in test_tool_web_fetch.c. The end-to-end sanitize
+ * path through js_eval requires a real network fetch inside the forked
+ * `--mjs_eval` child, so it lives in the e2e suite, not here. */
 
 /* JS eval: http_fetch without hosts throws */
 static void test_js_eval_no_hosts(void) {
@@ -198,19 +157,13 @@ static void test_js_eval_with_hosts(void) {
     ToolEntry *e = tools_lookup(&reg, "js_eval");
     if (!e) { FAIL("lookup failed"); tools_free(&reg); return; }
 
-    /* Call http_fetch for a disallowed host — should get "not in allowed_hosts" */
+    /* Call http_fetch for a disallowed host — should get "not in allowed_hosts".
+     * This verifies the ectx allowed_hosts reach the forked child via
+     * CCLAW_ALLOWED_HOSTS; the host check rejects before any socket is opened. */
     char *r = e->handler("{\"code\":\"http_fetch('https://evil.com/')\"}", e->user_data);
     if (!r) { FAIL("NULL result"); tools_free(&reg); return; }
     if (!strstr(r, "not in allowed_hosts")) {
         FAIL(r); free(r); tools_free(&reg); return;
-    }
-    free(r);
-
-    /* Call http_fetch for allowed host — should NOT get "no allowed_hosts" error */
-    r = e->handler("{\"code\":\"http_fetch('https://example.com/')\"}", e->user_data);
-    if (!r) { FAIL("NULL result"); tools_free(&reg); return; }
-    if (strstr(r, "no allowed_hosts")) {
-        FAIL("hosts not passed through"); free(r); tools_free(&reg); return;
     }
     free(r);
 
@@ -219,6 +172,8 @@ static void test_js_eval_with_hosts(void) {
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setup_mjs_env();
     printf("test_js_http_fetch:\n");
     test_no_hosts_rejects();
     test_host_not_allowed();
@@ -229,8 +184,6 @@ int main(void) {
     test_runtime_set_hosts();
     test_js_eval_no_hosts();
     test_js_eval_with_hosts();
-    test_js_eval_sanitize();
-    test_js_eval_no_sanitize();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

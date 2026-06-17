@@ -128,7 +128,7 @@ static void test_spawn_blocking(void) {
     sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, parent_sid);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "waiting") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "awaiting_agent") == 0);
     sqlite3_finalize(stmt);
 
     db_close(db);
@@ -144,11 +144,11 @@ static void test_register(void) {
     ToolEntry *e = tools_lookup(&reg, "launch_agent");
     assert(e != NULL);
     assert(e->handler == tool_launch_agent_handler);
-    rc = tool_check_agent_register(&reg, &ctx);
+    rc = tool_check_session_register(&reg, &ctx);
     assert(rc == 0);
-    e = tools_lookup(&reg, "check_agent");
+    e = tools_lookup(&reg, "check_session");
     assert(e != NULL);
-    assert(e->handler == tool_check_agent_handler);
+    assert(e->handler == tool_check_session_handler);
     tools_free(&reg);
     printf("  PASS test_register\n");
 }
@@ -172,7 +172,7 @@ static void test_check_agent_not_found(void) {
     sqlite3 *db = setup_db();
     int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_check_agent_handler("{\"session_id\":9999}", &ctx);
+    char *r = tool_check_session_handler("{\"session_id\":9999}", &ctx);
     assert(strstr(r, "not found") != NULL);
     free(r);
     db_close(db);
@@ -192,7 +192,7 @@ static void test_check_agent_idle_with_result(void) {
     snprintf(args, sizeof(args), "{\"session_id\":%lld}", (long long)child_sid);
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_check_agent_handler(args, &ctx);
+    char *r = tool_check_session_handler(args, &ctx);
     assert(strstr(r, "state: idle") != NULL);
     assert(strstr(r, "result: the answer is 42") != NULL);
     free(r);

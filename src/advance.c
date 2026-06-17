@@ -45,7 +45,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
 
     /* ── State machine ───────────────────────────────────── */
 
-    if (strcmp(state, "waiting") == 0) {
+    if (strcmp(state, "awaiting_agent") == 0) {
         AdvanceOutput out = make_output(ADVANCE_WAITING, session_id, agent, iter);
         free(agent);
         return out;

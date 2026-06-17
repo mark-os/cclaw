@@ -35,8 +35,8 @@ static void test_invalid_transitions(void) {
 
     /* idle → idle (no-op, rejected) */
     assert(session_set_state(db, sid, "idle") == -1);
-    /* idle → waiting (now valid for blocking sub-agent) */
-    assert(session_set_state(db, sid, "waiting") == 0);
+    /* idle → awaiting_agent (now valid for blocking sub-agent) */
+    assert(session_set_state(db, sid, "awaiting_agent") == 0);
     assert(session_set_state(db, sid, "idle") == 0);
     /* idle → error (invalid) */
     assert(session_set_state(db, sid, "error") == -1);
@@ -107,10 +107,10 @@ static void test_waiting_transition(void) {
     int64_t sid = session_create(db, "t", NULL, -1, 0);
     assert(sid > 0);
 
-    /* idle → llm_running → tool_running → waiting → idle */
+    /* idle → llm_running → tool_running → awaiting_agent → idle */
     assert(session_set_state(db, sid, "llm_running") == 0);
     assert(session_set_state(db, sid, "tool_running") == 0);
-    assert(session_set_state(db, sid, "waiting") == 0);
+    assert(session_set_state(db, sid, "awaiting_agent") == 0);
     assert(session_set_state(db, sid, "idle") == 0);
 
     db_close(db);

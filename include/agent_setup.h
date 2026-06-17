@@ -25,7 +25,6 @@ typedef struct {
     JsEvalCtx js_eval_ctx;
     HttpPolicy web_policy;
     ToolMemoryCtx mem_ctx;
-    JsDefineCtx js_def_ctx;
     /* Daemon-mode only contexts */
     ToolBootstrapCtx bootstrap_ctx;
     AgentLaunchCtx launch_ctx;

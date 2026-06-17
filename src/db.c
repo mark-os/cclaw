@@ -659,7 +659,7 @@ char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *
 
 int session_count_children(sqlite3 *db, int64_t parent_session_id) {
     const char *sql =
-        "SELECT COUNT(*) FROM sessions WHERE parent_session_id=? AND state IN ('llm_running','tool_running','compacting','waiting');";
+        "SELECT COUNT(*) FROM sessions WHERE parent_session_id=? AND state != 'idle';";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -673,7 +673,7 @@ int session_count_children(sqlite3 *db, int64_t parent_session_id) {
 
 int session_count_active_agents(sqlite3 *db) {
     const char *sql =
-        "SELECT COUNT(*) FROM sessions WHERE parent_session_id > 0 AND state IN ('llm_running','tool_running','compacting','waiting');";
+        "SELECT COUNT(*) FROM sessions WHERE parent_session_id > 0 AND state != 'idle';";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -879,7 +879,7 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
 /* State transition guard. Busy states (llm_running/tool_running/compacting/
  * rate_limited) are reachable from idle or each other (a turn moves
  * llm_running → tool_running → llm_running, and ends llm_running → compacting);
- * idle is reachable from any busy state plus legacy waiting/error rows. */
+ * idle is reachable from any busy state plus awaiting_agent/error rows. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     const char *sql =
         "UPDATE sessions SET state=?, updated_at=unixepoch(),"
@@ -887,9 +887,9 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
         " WHERE id=? AND ("
         "  (? IN ('llm_running','tool_running','compacting','rate_limited')"
         "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited')) OR"
-        "  (? = 'waiting' AND state IN ('idle','llm_running','tool_running')) OR"
+        "  (? = 'awaiting_agent' AND state IN ('idle','llm_running','tool_running')) OR"
         "  (? = 'idle' AND state IN"
-        "     ('llm_running','tool_running','compacting','rate_limited','waiting','error'))"
+        "     ('llm_running','tool_running','compacting','rate_limited','awaiting_agent','error'))"
         ");";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)

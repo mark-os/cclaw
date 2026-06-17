@@ -4,7 +4,7 @@ LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
 TEMPLATES := $(wildcard templates/*)
-SRC      := $(filter-out src/mjs_main.c src/preload_net.c src/channel_runner.c,$(wildcard src/*.c))
+SRC      := $(filter-out src/preload_net.c src/channel_runner.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 DEP      := $(OBJ:.o=.d)
 
@@ -14,7 +14,8 @@ VENDOR_SRC := vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
               vendor/monocypher/monocypher.c
 VENDOR_OBJ := $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
               $(BUILDDIR)/mquickjs.o $(BUILDDIR)/mqjs_cutils.o $(BUILDDIR)/mqjs_dtoa.o \
-              $(BUILDDIR)/mqjs_libm.o $(BUILDDIR)/mqjs_stdlib.o $(BUILDDIR)/monocypher.o
+              $(BUILDDIR)/mqjs_libm.o $(BUILDDIR)/mqjs_stdlib.o $(BUILDDIR)/eval_stdlib.o \
+              $(BUILDDIR)/monocypher.o
 
 INTEG_SRC := $(wildcard test/test_integration_*.c)
 E2E_SRC   := $(wildcard test/test_e2e_*.c)
@@ -23,14 +24,14 @@ TEST_BIN  := $(patsubst test/%.c,$(BUILDDIR)/%,$(TEST_SRC))
 INTEG_BIN := $(patsubst test/%.c,$(BUILDDIR)/%,$(INTEG_SRC))
 E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
 
-# mquickjs core objects are shared by cclaw, mjs, and channel_runner — only
+# mquickjs core objects are shared by cclaw and channel_runner — only
 # the generated stdlib (which embeds a per-binary host file) differs.
 MQJS_CORE_OBJ := $(BUILDDIR)/mquickjs.o $(BUILDDIR)/mqjs_cutils.o $(BUILDDIR)/mqjs_dtoa.o \
                  $(BUILDDIR)/mqjs_libm.o
 
 .PHONY: all clean test test-integration test-e2e test-all check-gen install debug
 
-all: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/channel_runner
+all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/channel_runner
 
 # Development build: debug symbols, no optimization, sanitizers (clang preferred for better traces)
 debug: clean
@@ -47,7 +48,7 @@ $(BUILDDIR)/templates.h: $(TEMPLATES) scripts/gen_templates.sh | $(BUILDDIR)/
 $(BUILDDIR)/%.o: src/%.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -c -o $@ $<
 
-$(BUILDDIR)/tool_shell.o: $(BUILDDIR)/preload_blob.h
+$(BUILDDIR)/sandbox.o: $(BUILDDIR)/preload_blob.h
 
 $(BUILDDIR)/sqlite3.o: vendor/sqlite3/sqlite3.c | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -c -o $@ $<
@@ -61,46 +62,45 @@ $(BUILDDIR)/monocypher.o: vendor/monocypher/monocypher.c | $(BUILDDIR)/
 MQJS_CFLAGS := -std=c11 -O2 -Ivendor/mquickjs -Wno-unused-parameter -Wno-sign-compare -Wno-unused-variable -Wno-unused-but-set-variable
 
 $(BUILDDIR)/mquickjs.o: vendor/mquickjs/mquickjs.c vendor/mquickjs/mquickjs_atom.h | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
 
 $(BUILDDIR)/mqjs_cutils.o: vendor/mquickjs/cutils.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
 
 $(BUILDDIR)/mqjs_dtoa.o: vendor/mquickjs/dtoa.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
 
 $(BUILDDIR)/mqjs_libm.o: vendor/mquickjs/libm.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
 
 $(BUILDDIR)/mqjs_stdlib.o: vendor/mquickjs/mquickjs_stdlib.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
 
 vendor/mquickjs/mquickjs_atom.h: vendor/mquickjs/gen_atoms.c | $(BUILDDIR)/
 	$(CC) -o $(BUILDDIR)/gen_atoms $<
 	./$(BUILDDIR)/gen_atoms > $@
 
-vendor/mquickjs/mquickjs_stdlib.c: vendor/mquickjs/gen_stdlib.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c vendor/mquickjs/mqjs_host.c $(BUILDDIR)/gen_stdlib | $(BUILDDIR)/
+vendor/mquickjs/mquickjs_stdlib.c: vendor/mquickjs/gen_stdlib_main.c vendor/mquickjs/mqjs_objects.h vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c vendor/mquickjs/mqjs_host_main.c $(BUILDDIR)/gen_stdlib_main | $(BUILDDIR)/
 	printf '#define _POSIX_C_SOURCE 199309L\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <math.h>\n#include <time.h>\n#include "mquickjs_priv.h"\n\n' > $@
-	cat vendor/mquickjs/mqjs_host.c >> $@
-	./$(BUILDDIR)/gen_stdlib -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
+	cat vendor/mquickjs/mqjs_host_main.c >> $@
+	./$(BUILDDIR)/gen_stdlib_main -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
 
-$(BUILDDIR)/gen_stdlib: vendor/mquickjs/gen_stdlib.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c | $(BUILDDIR)/
-	$(CC) -Ivendor/mquickjs -o $@ vendor/mquickjs/gen_stdlib.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c -lm
+$(BUILDDIR)/gen_stdlib_main: vendor/mquickjs/gen_stdlib_main.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c | $(BUILDDIR)/
+	$(CC) -Ivendor/mquickjs -o $@ vendor/mquickjs/gen_stdlib_main.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c -lm
 
-# mjs standalone stdlib (uses mqjs_host_mjs.c instead of mqjs_host.c)
-$(BUILDDIR)/mquickjs_stdlib_mjs.c: vendor/mquickjs/mqjs_host_mjs.c $(BUILDDIR)/gen_stdlib | $(BUILDDIR)/
+# Eval profile stdlib → js_std_library_eval (forked sandboxed evaluator)
+$(BUILDDIR)/gen_stdlib_eval: vendor/mquickjs/gen_stdlib_eval.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c | $(BUILDDIR)/
+	$(CC) -Ivendor/mquickjs -o $@ vendor/mquickjs/gen_stdlib_eval.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c -lm
+
+$(BUILDDIR)/mquickjs_stdlib_eval.c: vendor/mquickjs/gen_stdlib_eval.c vendor/mquickjs/mqjs_objects.h vendor/mquickjs/mqjs_host_eval.c $(BUILDDIR)/gen_stdlib_eval | $(BUILDDIR)/
 	printf '#define _POSIX_C_SOURCE 199309L\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <math.h>\n#include <time.h>\n#include <unistd.h>\n#include "mquickjs_priv.h"\n\n' > $@
-	cat vendor/mquickjs/mqjs_host_mjs.c >> $@
-	./$(BUILDDIR)/gen_stdlib -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
+	cat vendor/mquickjs/mqjs_host_eval.c >> $@
+	./$(BUILDDIR)/gen_stdlib_eval -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
 
-$(BUILDDIR)/mjs_stdlib.o: $(BUILDDIR)/mquickjs_stdlib_mjs.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+$(BUILDDIR)/eval_stdlib.o: $(BUILDDIR)/mquickjs_stdlib_eval.c | $(BUILDDIR)/
+	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
 
-$(BUILDDIR)/mjs_main.o: src/mjs_main.c | $(BUILDDIR)/
-	$(CC) -std=c11 -Wall -Wextra -Werror -Ivendor/mquickjs -c -o $@ $<
 
-$(BUILDDIR)/mjs: $(BUILDDIR)/mjs_main.o $(MQJS_CORE_OBJ) $(BUILDDIR)/mjs_stdlib.o | $(BUILDDIR)/
-	$(CC) -std=c11 -o $@ $^ -lm
 
 $(BUILDDIR)/libcclaw_net.so: src/preload_net.c | $(BUILDDIR)/
 	$(CC) -std=c11 -Wall -Wextra -Werror -shared -fPIC -o $@ $< -ldl
@@ -111,13 +111,16 @@ $(BUILDDIR)/preload_blob.h: $(BUILDDIR)/libcclaw_net.so
 	printf '};\nstatic const unsigned int preload_net_blob_len = sizeof(preload_net_blob);\n' >> $@
 
 # Channel runner: universal JS channel binary
-$(BUILDDIR)/mquickjs_stdlib_channel.c: vendor/mquickjs/mqjs_host_channel.c $(BUILDDIR)/gen_stdlib | $(BUILDDIR)/
-	printf '#define _POSIX_C_SOURCE 199309L\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <math.h>\n#include <time.h>\n#include "mquickjs_priv.h"\n\n' > $@
+$(BUILDDIR)/mquickjs_stdlib_channel.c: vendor/mquickjs/gen_stdlib_channel.c vendor/mquickjs/mqjs_objects.h vendor/mquickjs/mqjs_host_channel.c $(BUILDDIR)/gen_stdlib_channel | $(BUILDDIR)/
+	printf '#define _POSIX_C_SOURCE 200809L\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <math.h>\n#include <time.h>\n#include "mquickjs_priv.h"\n\n' > $@
 	cat vendor/mquickjs/mqjs_host_channel.c >> $@
-	./$(BUILDDIR)/gen_stdlib -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
+	./$(BUILDDIR)/gen_stdlib_channel -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
+
+$(BUILDDIR)/gen_stdlib_channel: vendor/mquickjs/gen_stdlib_channel.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c | $(BUILDDIR)/
+	$(CC) -Ivendor/mquickjs -o $@ vendor/mquickjs/gen_stdlib_channel.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c -lm
 
 $(BUILDDIR)/cr_stdlib.o: $(BUILDDIR)/mquickjs_stdlib_channel.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -c -o $@ $<
+	$(CC) $(MQJS_CFLAGS) -Iinclude -Ivendor/sqlite3 -c -o $@ $<
 
 CR_LIB_OBJ := $(BUILDDIR)/admin_api.o $(BUILDDIR)/agent_config.o $(BUILDDIR)/channel_api.o \
               $(BUILDDIR)/db.o $(BUILDDIR)/wake.o $(BUILDDIR)/secret.o $(BUILDDIR)/secret_scan.o $(BUILDDIR)/config.o \
@@ -126,14 +129,12 @@ CR_LIB_OBJ := $(BUILDDIR)/admin_api.o $(BUILDDIR)/agent_config.o $(BUILDDIR)/cha
 $(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(MQJS_CORE_OBJ) $(BUILDDIR)/cr_stdlib.o $(CR_LIB_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ -lcurl -lm -lpthread -ldl
 
-# Everything a production box needs: the daemon binary, the mjs evaluator
-# (system prompts reference /usr/local/lib/cclaw/mjs from sandboxed shells),
-# channel_runner (the --channel branch resolves it relative to the cclaw
-# binary: sibling dir, then ../lib/cclaw/), env file, and the systemd unit.
-install: $(BUILDDIR)/cclaw $(BUILDDIR)/mjs $(BUILDDIR)/channel_runner
+# Everything a production box needs: the daemon binary, channel_runner
+# (the --channel branch resolves it relative to the cclaw binary:
+# sibling dir, then ../lib/cclaw/), env file, and the systemd unit.
+install: $(BUILDDIR)/cclaw $(BUILDDIR)/channel_runner
 	install -d /usr/local/bin /usr/local/lib/cclaw /etc/cclaw
 	install -m 755 $(BUILDDIR)/cclaw /usr/local/bin/cclaw
-	install -m 755 $(BUILDDIR)/mjs /usr/local/lib/cclaw/mjs
 	install -m 755 $(BUILDDIR)/channel_runner /usr/local/lib/cclaw/channel_runner
 	test -f /etc/cclaw/env || install -m 600 cclaw.env.example /etc/cclaw/env
 	install -m 644 cclaw.service /etc/systemd/system/cclaw.service

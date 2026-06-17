@@ -244,16 +244,7 @@ CREATE TABLE IF NOT EXISTS tools (
   enabled INTEGER NOT NULL DEFAULT 1
 );
 
--- ═══ JS tools (deprecated — use tools table) ═══
-CREATE TABLE IF NOT EXISTS js_tools (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  description TEXT,
-  parameters_json TEXT,
-  code TEXT NOT NULL,
-  UNIQUE(session_id, name)
-);
+
 
 -- ═══ Memory ═══
 CREATE TABLE IF NOT EXISTS memory_blocks (

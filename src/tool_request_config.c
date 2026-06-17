@@ -125,7 +125,7 @@ static char *handler(const char *arguments, void *user_data) {
 int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
     return tools_register(reg, "request_config",
         "Request a configuration change. "
-        "Actions: grant_tool (enable shell_exec, web_fetch, db_query, js_define_tool), "
+        "Actions: grant_tool (enable shell_exec, web_fetch, db_query), "
         "grant_host (add hostname to allowed_hosts), "
         "rename_agent (rename this agent, with optional preamble).",
         PARAMS_JSON, handler, ctx);

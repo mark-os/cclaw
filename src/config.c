@@ -420,6 +420,15 @@ Config *config_load(sqlite3 *db) {
         if (v) cfg->log_level = log_level_parse(v);
     }
 
+    /* Workspace: DB kv → default, env override (mirrors config_load_from_env).
+     * Without this the file tools, proxy mount, and workspace_init all see a
+     * NULL workspace and fail with "no workspace configured". */
+    {
+        char *v = db_kv_get(db, "workspace");
+        cfg->workspace = v ? v : str_dup(".cclaw/agents/default/workspace");
+    }
+    env_override_str(&cfg->workspace, "CCLAW_WORKSPACE");
+
     return cfg;
 }
 

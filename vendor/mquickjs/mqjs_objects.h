@@ -1,5 +1,6 @@
 /*
- * Micro QuickJS REPL library
+ * Shared base-class definitions for mquickjs stdlib generators.
+ * Included by gen_stdlib_main.c, gen_stdlib_channel.c, etc.
  *
  * Copyright (c) 2017-2025 Fabrice Bellard
  * Copyright (c) 2017-2025 Charlie Gordon
@@ -22,11 +23,11 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
+#ifndef CCLAW_MQJS_OBJECTS_H
+#define CCLAW_MQJS_OBJECTS_H
 
 #include "mquickjs_build.h"
+#include <math.h>
 
 static const JSPropDef js_object_proto[] = {
     JS_CFUNC_DEF("hasOwnProperty", 1, js_object_hasOwnProperty),
@@ -77,9 +78,9 @@ static const JSPropDef js_number[] = {
     JS_PROP_DOUBLE_DEF("NaN", NAN, 0 ),
     JS_PROP_DOUBLE_DEF("NEGATIVE_INFINITY", -INFINITY, 0 ),
     JS_PROP_DOUBLE_DEF("POSITIVE_INFINITY", INFINITY, 0 ),
-    JS_PROP_DOUBLE_DEF("EPSILON", 2.220446049250313e-16, 0 ), /* ES6 */
-    JS_PROP_DOUBLE_DEF("MAX_SAFE_INTEGER", 9007199254740991.0, 0 ), /* ES6 */
-    JS_PROP_DOUBLE_DEF("MIN_SAFE_INTEGER", -9007199254740991.0, 0 ), /* ES6 */
+    JS_PROP_DOUBLE_DEF("EPSILON", 2.220446049250313e-16, 0 ),
+    JS_PROP_DOUBLE_DEF("MAX_SAFE_INTEGER", 9007199254740991.0, 0 ),
+    JS_PROP_DOUBLE_DEF("MIN_SAFE_INTEGER", -9007199254740991.0, 0 ),
     JS_PROP_END,
 };
 
@@ -298,6 +299,20 @@ static const JSPropDef js_regexp_proto[] = {
 static const JSClassDef js_regexp_class =
     JS_CLASS_DEF("RegExp", 2, js_regexp_constructor, JS_CLASS_REGEXP, NULL, js_regexp_proto, NULL, NULL);
 
+/* fs object — eval profile */
+
+static const JSPropDef js_fs[] = {
+    JS_CFUNC_DEF("readFile", 1, js_fs_readFile),
+    JS_CFUNC_DEF("writeFile", 2, js_fs_writeFile),
+    JS_CFUNC_DEF("readDir", 1, js_fs_readDir),
+    JS_CFUNC_DEF("stat", 1, js_fs_stat),
+    JS_CFUNC_DEF("cwd", 0, js_fs_cwd),
+    JS_PROP_END,
+};
+
+static const JSClassDef js_fs_obj =
+    JS_OBJECT_DEF("fs", js_fs);
+
 /* other objects */
 
 static const JSPropDef js_date[] = {
@@ -308,62 +323,41 @@ static const JSPropDef js_date[] = {
 static const JSClassDef js_date_class =
     JS_CLASS_DEF("Date", 7, js_date_constructor, JS_CLASS_DATE, js_date, NULL, NULL, NULL);
 
-static const JSPropDef js_global_object[] = {
-    JS_PROP_CLASS_DEF("Object", &js_object_class),
-    JS_PROP_CLASS_DEF("Function", &js_function_class),
-    JS_PROP_CLASS_DEF("Number", &js_number_class),
-    JS_PROP_CLASS_DEF("Boolean", &js_boolean_class),
-    JS_PROP_CLASS_DEF("String", &js_string_class),
-    JS_PROP_CLASS_DEF("Array", &js_array_class),
-    JS_PROP_CLASS_DEF("Math", &js_math_obj),
-    JS_PROP_CLASS_DEF("Date", &js_date_class),
-    JS_PROP_CLASS_DEF("JSON", &js_json_obj),
-    JS_PROP_CLASS_DEF("RegExp", &js_regexp_class),
+/* channel profile — baked native objects.
+ * JS_CFUNC_DEF stringifies the function name (see mquickjs_build.h), so the
+ * generator needs no C declaration of these host functions — they are defined
+ * in mqjs_host_channel.c, which is compiled into the channel stdlib TU. */
 
-    JS_PROP_CLASS_DEF("Error", &js_error_class),
-    JS_PROP_CLASS_DEF("EvalError", &js_eval_error_class),
-    JS_PROP_CLASS_DEF("RangeError", &js_range_error_class),
-    JS_PROP_CLASS_DEF("ReferenceError", &js_reference_error_class),
-    JS_PROP_CLASS_DEF("SyntaxError", &js_syntax_error_class),
-    JS_PROP_CLASS_DEF("TypeError", &js_type_error_class),
-    JS_PROP_CLASS_DEF("URIError", &js_uri_error_class),
-    JS_PROP_CLASS_DEF("InternalError", &js_internal_error_class),
-
-    JS_PROP_CLASS_DEF("ArrayBuffer", &js_array_buffer_class),
-    JS_PROP_CLASS_DEF("Uint8ClampedArray", &js_Uint8ClampedArray_class),
-    JS_PROP_CLASS_DEF("Int8Array", &js_Int8Array_class),
-    JS_PROP_CLASS_DEF("Uint8Array", &js_Uint8Array_class),
-    JS_PROP_CLASS_DEF("Int16Array", &js_Int16Array_class),
-    JS_PROP_CLASS_DEF("Uint16Array", &js_Uint16Array_class),
-    JS_PROP_CLASS_DEF("Int32Array", &js_Int32Array_class),
-    JS_PROP_CLASS_DEF("Uint32Array", &js_Uint32Array_class),
-    JS_PROP_CLASS_DEF("Float32Array", &js_Float32Array_class),
-    JS_PROP_CLASS_DEF("Float64Array", &js_Float64Array_class),
-
-    JS_CFUNC_DEF("parseInt", 2, js_number_parseInt ),
-    JS_CFUNC_DEF("parseFloat", 1, js_number_parseFloat ),
-    JS_CFUNC_DEF("eval", 1, js_global_eval),
-    JS_CFUNC_DEF("isNaN", 1, js_global_isNaN ),
-    JS_CFUNC_DEF("isFinite", 1, js_global_isFinite ),
-    JS_CFUNC_DEF("http_fetch", 2, js_http_fetch ),
-    JS_CFUNC_DEF("fetch", 2, js_http_fetch ),
-    JS_CFUNC_DEF("__cclaw_call_tool", 2, js_call_tool ),
-
-    JS_PROP_DOUBLE_DEF("Infinity", 1.0 / 0.0, 0 ),
-    JS_PROP_DOUBLE_DEF("NaN", NAN, 0 ),
-    JS_PROP_UNDEFINED_DEF("undefined", 0 ),
-    /* Note: null is expanded as the global object in js_global_object[] */
-    JS_PROP_NULL_DEF("globalThis", 0 ),
+static const JSPropDef js_channel_admin[] = {
+    JS_CFUNC_DEF("setKey", 2, js_admin_set_key),
+    JS_CFUNC_DEF("setModel", 2, js_admin_set_model),
+    JS_CFUNC_DEF("setEndpoint", 2, js_admin_set_endpoint),
+    JS_CFUNC_DEF("addHost", 2, js_admin_add_host),
+    JS_CFUNC_DEF("removeHost", 2, js_admin_remove_host),
+    JS_CFUNC_DEF("listProviders", 0, js_admin_list_providers),
+    JS_CFUNC_DEF("listAgents", 0, js_admin_list_agents),
+    JS_CFUNC_DEF("isAdmin", 1, js_admin_is_admin),
     JS_PROP_END,
 };
 
-static const JSPropDef js_c_function_decl[] = {
-    /* must come first if "bind" is defined */
-    JS_CFUNC_SPECIAL_DEF("bound", 0, generic_params, js_function_bound ),
+static const JSClassDef js_channel_admin_obj =
+    JS_OBJECT_DEF("admin", js_channel_admin);
+
+static const JSPropDef js_channel[] = {
+    JS_CFUNC_DEF("emit", 2, js_ch_emit),
+    JS_CFUNC_DEF("send", 1, js_ch_send),
+    JS_CFUNC_DEF("getConfig", 1, js_ch_get_config),
+    JS_CFUNC_DEF("setConfig", 2, js_ch_set_config),
+    JS_CFUNC_DEF("ackOutbox", 1, js_ch_ack_outbox),
+    JS_CFUNC_DEF("failOutbox", 2, js_ch_fail_outbox),
+    JS_CFUNC_DEF("log", 1, js_ch_log),
+    JS_PROP_CLASS_DEF("admin", &js_channel_admin_obj),
     JS_PROP_END,
 };
 
-int main(int argc, char **argv)
-{
-    return build_atoms("js_std_library", js_global_object, js_c_function_decl, argc, argv);
-}
+static const JSClassDef js_channel_obj =
+    JS_OBJECT_DEF("channel", js_channel);
+
+/* main profile — callTool native (defined in mqjs_host_main.c). */
+
+#endif /* CCLAW_MQJS_OBJECTS_H */

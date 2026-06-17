@@ -75,8 +75,8 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
      * can write the tool result directly */
     if (!background && ctx->current_tool_call_id) {
         session_set_parent_tool_call_id(ctx->db, child_sid, ctx->current_tool_call_id);
-        /* Park parent in waiting state */
-        session_set_state(ctx->db, ctx->session_id, "waiting");
+        /* Park parent in awaiting_agent state */
+        session_set_state(ctx->db, ctx->session_id, "awaiting_agent");
     }
 
     /* Insert task into child's inbox and wake it */
@@ -108,17 +108,17 @@ int tool_launch_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
                           SPAWN_PARAMS_JSON, tool_launch_agent_handler, ctx);
 }
 
-/* --- check_agent tool --- */
+/* --- check_session tool --- */
 
 static const char *CHECK_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"session_id\":{\"type\":\"integer\",\"description\":\"Session ID of the sub-agent to check\"}"
     "},\"required\":[\"session_id\"]}";
 
-char *tool_check_agent_handler(const char *arguments, void *user_data) {
+char *tool_check_session_handler(const char *arguments, void *user_data) {
     AgentLaunchCtx *ctx = (AgentLaunchCtx *)user_data;
     if (!ctx || !ctx->db)
-        return strdup("error: check_agent not configured");
+        return strdup("error: check_session not configured");
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0)
@@ -164,8 +164,8 @@ char *tool_check_agent_handler(const char *arguments, void *user_data) {
     return out;
 }
 
-int tool_check_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
-    return tools_register(reg, "check_agent",
-                          "Check the status and result of a sub-agent",
-                          CHECK_PARAMS_JSON, tool_check_agent_handler, ctx);
+int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
+    return tools_register(reg, "check_session",
+                          "Check the status and result of a sub-agent session",
+                          CHECK_PARAMS_JSON, tool_check_session_handler, ctx);
 }

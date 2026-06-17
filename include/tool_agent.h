@@ -12,7 +12,7 @@
 /* Read agent_max_depth from DB kv, fallback to AGENT_MAX_DEPTH */
 int agent_max_depth(sqlite3 *db);
 
-/* Context passed as user_data to launch_agent/check_agent handlers */
+/* Context passed as user_data to launch_agent/check_session handlers */
 typedef struct {
     sqlite3 *db;
     int64_t session_id;
@@ -25,10 +25,10 @@ int tool_launch_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx);
 /* Handler: parse JSON args, launch agent process */
 char *tool_launch_agent_handler(const char *arguments, void *user_data);
 
-/* Register check_agent tool. Returns 0 on success. */
-int tool_check_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx);
+/* Register check_session tool. Returns 0 on success. */
+int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx);
 
-/* Handler: check agent session state + result */
-char *tool_check_agent_handler(const char *arguments, void *user_data);
+/* Handler: check session state + result */
+char *tool_check_session_handler(const char *arguments, void *user_data);
 
 #endif

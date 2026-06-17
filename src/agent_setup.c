@@ -87,6 +87,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* JS eval with per-agent allowed_hosts */
     setup->js_eval_ctx.allowed_hosts = allowed_hosts;
     setup->js_eval_ctx.allowed_hosts_count = allowed_hosts_count;
+    setup->js_eval_ctx.host_mode = (trust_level && strcmp(trust_level, "host") == 0) ? 1 : 0;
     tool_js_eval_register(&setup->reg, &setup->js_eval_ctx);
 
     /* V46: web_fetch policy */
@@ -105,16 +106,10 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->mem_ctx.agent_name = (char *)agent_name;
     tool_memory_register(&setup->reg, &setup->mem_ctx);
 
-    /* JS persistent runtime + define tool */
+    /* JS persistent runtime */
     setup->js_rt = js_runtime_create();
     if (setup->js_rt && allowed_hosts_count > 0)
         js_runtime_set_hosts(setup->js_rt, allowed_hosts, allowed_hosts_count);
-    setup->js_def_ctx.db = db;
-    setup->js_def_ctx.session_id = session_id;
-    setup->js_def_ctx.reg = &setup->reg;
-    setup->js_def_ctx.rt = setup->js_rt;
-    tool_js_define_register(&setup->reg, &setup->js_def_ctx);
-    tool_js_load_session(db, session_id, &setup->reg, setup->js_rt);
 
     /* T254/T255/T256: Load extensions from workspace/extensions/ */
     extension_ctx_init(&setup->ext_ctx, setup->js_rt);
@@ -158,7 +153,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         if (depth < agent_max_depth(db)) {
             tool_launch_agent_register(&setup->reg, &setup->launch_ctx);
         }
-        tool_check_agent_register(&setup->reg, &setup->launch_ctx);
+        tool_check_session_register(&setup->reg, &setup->launch_ctx);
     }
 
     return 0;

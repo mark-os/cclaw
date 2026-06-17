@@ -15,6 +15,9 @@
 #include "cclaw.h"
 #include "config.h"
 #include "log.h"
+#include "sandbox.h"
+#include "tool_js.h"
+#include <mquickjs.h>
 #include "agent_config.h"
 #include "agent_setup.h"
 #include "llm_proc.h"
@@ -175,10 +178,8 @@ static int tool_is_inline(const char *name) {
            strcmp(name, "memory_append") == 0 ||
            strcmp(name, "memory_replace") == 0 ||
            strcmp(name, "db_query") == 0 ||
-           strcmp(name, "js_eval") == 0 ||
-           strcmp(name, "js_define_tool") == 0 ||
            strcmp(name, "launch_agent") == 0 ||
-           strcmp(name, "check_agent") == 0;
+           strcmp(name, "check_session") == 0;
 }
 
 /* Tools that need {{SECRET:X}} resolved to real values at exec time */
@@ -660,6 +661,7 @@ static void print_usage(void) {
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
+           "  --mjs_eval         sandboxed JS evaluator (forked child mode)\n"
            "\n"
            "options:\n"
            "  -p <prompt>        single-turn: send prompt, print response, exit\n"
@@ -736,8 +738,10 @@ static void cli_start_turn(const char *input) {
 /* ── main ───────────────────────────────────────────────────────── */
 
 /* Extract builtin extension templates to ~/.cclaw/extensions/ on first run */
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
 static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
     /* Check if any extensions are registered */
     sqlite3_stmt *s;
@@ -783,7 +787,257 @@ static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
     }
 }
 
+/* ── --mjs_eval mode: sandboxed one-shot JS evaluator ────────────── */
+
+extern const JSSTDLibraryDef js_std_library_eval;
+
+#define MJS_HEAP_SIZE (1024 * 1024)
+#define MJS_MAX_INSTRUCTIONS 10000000
+#define MJS_MAX_OUTPUT (60 * 1024)
+#define MJS_MAX_FILE  (1024 * 1024)
+
+static const char *MJS_EVAL_PRELUDE =
+    "var __console_buf = [];\n"
+    "var console = {\n"
+    "  log: function() {\n"
+    "    var parts = [];\n"
+    "    for (var i = 0; i < arguments.length; i++) {\n"
+    "      var v = arguments[i];\n"
+    "      parts.push(typeof v === 'object' ? JSON.stringify(v) : '' + v);\n"
+    "    }\n"
+    "    __console_buf.push(parts.join(' '));\n"
+    "  }\n"
+    "};\n"
+    "console.warn = console.log;\n"
+    "console.error = console.log;\n"
+    "var require = function() {\n"
+    "  throw new TypeError('require() not available. Use fs.readFile() for files, http_fetch() for network.');\n"
+    "};\n"
+    "var process = {};\n"
+    "Object.defineProperty(process, 'env', {get: function() { throw new TypeError('process.env not available.'); }});\n"
+    "Object.defineProperty(process, 'cwd', {get: function() { throw new TypeError('process.cwd not available. Use fs.cwd().'); }});\n"
+    "Object.defineProperty(process, 'argv', {get: function() { throw new TypeError('process.argv not available.'); }});\n"
+    "Object.defineProperty(process, 'exit', {get: function() { throw new TypeError('process.exit not available.'); }});\n"
+    "Object.defineProperty(process, 'platform', {get: function() { throw new TypeError('process.platform not available.'); }});\n"
+    "var module = {};\n"
+    "Object.defineProperty(module, 'exports', {\n"
+    "  get: function() { throw new TypeError('module.exports not available.'); },\n"
+    "  set: function() { throw new TypeError('module.exports not available. Return your value as the last expression.'); }\n"
+    "});\n"
+    "var Map = function() { throw new TypeError('Map not available. Use plain objects.'); };\n"
+    "var Set = function() { throw new TypeError('Set not available. Use: var s = {}; s[x] = true;'); };\n";
+
+static int mjs_interrupt_handler(JSContext *ctx, void *opaque) {
+    (void)ctx;
+    JsHostCtx *hctx = (JsHostCtx *)opaque;
+    hctx->instruction_count++;
+    return hctx->instruction_count > hctx->instruction_limit;
+}
+
+static int mjs_eval_main(int argc, char **argv) {
+    /* (a) Parse argv after "--mjs_eval" */
+    int inline_mode = 0;
+    const char *code_str = NULL;
+    const char *file_path = NULL;
+    const char *args_json = NULL;
+
+    if (argc < 3) {
+        fprintf(stderr, "usage: cclaw --mjs_eval -e 'CODE' | FILE [ARGS_JSON]\n");
+        _exit(1);
+    }
+    if (strcmp(argv[2], "-e") == 0) {
+        if (argc < 4) { fprintf(stderr, "--mjs_eval -e requires code\n"); _exit(1); }
+        inline_mode = 1;
+        code_str = argv[3];
+    } else {
+        file_path = argv[2];
+        if (argc >= 4) args_json = argv[3];
+    }
+
+    /* (b) Read env vars into locals before sandbox scrubs them */
+    const char *workspace_env = getenv("CCLAW_WORKSPACE");
+    char *workspace = workspace_env ? strdup(workspace_env) : NULL;
+    const char *db_env = getenv("CCLAW_DB");
+    char *db_path = db_env ? strdup(db_env) : NULL;
+    const char *proxy_env = getenv("CCLAW_PROXY_SOCK");
+    char *proxy_sock = proxy_env ? strdup(proxy_env) : NULL;
+    const char *host_mode_env = getenv("CCLAW_MJS_HOST");
+    int no_sandbox = (host_mode_env && strcmp(host_mode_env, "1") == 0);
+
+    /* Parse allowed hosts */
+    char **allowed_hosts = NULL;
+    size_t hosts_count = 0;
+    const char *hosts_env = getenv("CCLAW_ALLOWED_HOSTS");
+    if (hosts_env && hosts_env[0]) {
+        char *tmp = strdup(hosts_env);
+        char *tok = strtok(tmp, ",");
+        while (tok) { hosts_count++; tok = strtok(NULL, ","); }
+        allowed_hosts = malloc(hosts_count * sizeof(char *));
+        /* re-parse */
+        free(tmp);
+        tmp = strdup(hosts_env);
+        tok = strtok(tmp, ",");
+        for (size_t i = 0; i < hosts_count; i++) {
+            allowed_hosts[i] = strdup(tok);
+            tok = strtok(NULL, ",");
+        }
+        free(tmp);
+    }
+
+    /* rlimits */
+    const char *rl_nproc = getenv("CCLAW_RLIMIT_NPROC");
+    const char *rl_as = getenv("CCLAW_RLIMIT_AS_MB");
+    const char *rl_cpu = getenv("CCLAW_RLIMIT_CPU");
+
+    /* (c) Sandbox */
+    SandboxConfig cfg = {0};
+    cfg.workspace = workspace;
+    cfg.db_path = db_path;
+    cfg.cwd_path = NULL;
+    cfg.proxy_sock = proxy_sock;
+    cfg.env_mode = 1;
+    cfg.mount_cwd = 0;
+    cfg.workspace_ro = 0;
+    cfg.net_mode = (hosts_count > 0) ? 0 : 1;
+    cfg.sandbox = no_sandbox ? 0 : 1;
+    cfg.rlimits.nproc = rl_nproc ? atoi(rl_nproc) : 0;
+    cfg.rlimits.as_mb = rl_as ? atoi(rl_as) : 0;
+    cfg.rlimits.cpu_sec = rl_cpu ? atoi(rl_cpu) : 0;
+
+    if (sandbox_child_setup(&cfg) != 0) {
+        printf("error: sandbox setup failed\n");
+        _exit(126);
+    }
+
+    /* (d) Create JS context with eval profile */
+    void *heap = malloc(MJS_HEAP_SIZE);
+    if (!heap) { printf("error: out of memory\n"); _exit(1); }
+
+    JSContext *ctx = JS_NewContext(heap, MJS_HEAP_SIZE, &js_std_library_eval);
+    if (!ctx) { free(heap); printf("error: JS context creation failed\n"); _exit(1); }
+
+    JsHostCtx hctx = {
+        .instruction_count = 0,
+        .instruction_limit = MJS_MAX_INSTRUCTIONS,
+        .allowed_hosts = allowed_hosts,
+        .allowed_hosts_count = hosts_count,
+        .tool_registry = NULL,
+        .call_depth = 0
+    };
+    JS_SetInterruptHandler(ctx, mjs_interrupt_handler);
+    JS_SetContextOpaque(ctx, &hctx);
+
+    /* (e) Run prelude */
+    JSValue pv = JS_Eval(ctx, MJS_EVAL_PRELUDE, strlen(MJS_EVAL_PRELUDE), "<prelude>", 0);
+    if (JS_IsException(pv)) {
+        JSValue exc = JS_GetException(ctx);
+        JSCStringBuf buf;
+        const char *msg = JS_ToCString(ctx, exc, &buf);
+        printf("error: prelude failed: %s\n", msg ? msg : "unknown");
+        _exit(1);
+    }
+
+    /* (f) Build code to eval */
+    char *eval_code = NULL;
+    if (inline_mode) {
+        eval_code = (char *)code_str;  /* no free needed */
+    } else {
+        /* Read file (after sandbox, so sandboxed fs view) */
+        FILE *f = fopen(file_path, "r");
+        if (!f) { printf("error: cannot open %s\n", file_path); _exit(1); }
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        if (sz < 0 || sz > MJS_MAX_FILE) {
+            fclose(f);
+            printf("error: file too large or unreadable\n");
+            _exit(1);
+        }
+        fseek(f, 0, SEEK_SET);
+        char *fbuf = malloc((size_t)sz + 1);
+        if (!fbuf) { fclose(f); printf("error: out of memory\n"); _exit(1); }
+        size_t rd = fread(fbuf, 1, (size_t)sz, f);
+        fclose(f);
+        fbuf[rd] = '\0';
+
+        if (args_json) {
+            /* Wrap: (function(args){\n<file>\n})(<args>) */
+            size_t wlen = 20 + rd + 4 + strlen(args_json) + 2;
+            eval_code = malloc(wlen);
+            if (!eval_code) { printf("error: out of memory\n"); _exit(1); }
+            snprintf(eval_code, wlen, "(function(args){\n%s\n})(%s)", fbuf, args_json);
+            free(fbuf);
+        } else {
+            eval_code = fbuf;
+        }
+    }
+
+    /* (g) Eval */
+    size_t eval_len = strlen(eval_code);
+    JSValue val = JS_Eval(ctx, eval_code, eval_len, "<mjs_eval>", JS_EVAL_RETVAL);
+
+    int failed = 0;
+    char *result = NULL;
+
+    if (JS_IsException(val)) {
+        failed = 1;
+        JSValue exc = JS_GetException(ctx);
+        JSCStringBuf buf;
+        const char *msg = JS_ToCString(ctx, exc, &buf);
+        if (msg) {
+            size_t len = strlen(msg) + 16;
+            result = malloc(len);
+            if (result) snprintf(result, len, "error: %s", msg);
+            else result = strdup("error: OOM");
+        } else {
+            result = strdup("error: exception (no message)");
+        }
+    } else if (hctx.instruction_count > MJS_MAX_INSTRUCTIONS) {
+        failed = 1;
+        result = strdup("error: instruction limit exceeded (10M)");
+    } else if (JS_IsUndefined(val)) {
+        /* (h) Console fallback */
+        const char *check = "__console_buf.length > 0 ? __console_buf.join('\\n') : undefined";
+        JSValue buf_val = JS_Eval(ctx, check, strlen(check), "<console>", JS_EVAL_RETVAL);
+        if (!JS_IsUndefined(buf_val)) {
+            JSCStringBuf sb;
+            const char *str = JS_ToCString(ctx, buf_val, &sb);
+            result = str ? strdup(str) : strdup("undefined");
+        } else {
+            result = strdup("undefined");
+        }
+    } else if (JS_IsNull(val)) {
+        result = strdup("null");
+    } else {
+        JSCStringBuf buf;
+        const char *str = JS_ToCString(ctx, val, &buf);
+        result = str ? strdup(str) : strdup("error: cannot convert result to string");
+    }
+
+    /* (i) Output */
+    size_t out_len = strlen(result);
+    if (out_len > MJS_MAX_OUTPUT) out_len = MJS_MAX_OUTPUT;
+    fwrite(result, 1, out_len, stdout);
+    if (out_len > 0 && result[out_len - 1] != '\n') fwrite("\n", 1, 1, stdout);
+    fflush(stdout);
+
+    /* Cleanup */
+    free(result);
+    if (!inline_mode && eval_code != code_str) free(eval_code);
+    JS_FreeContext(ctx);
+    free(heap);
+    for (size_t i = 0; i < hosts_count; i++) free(allowed_hosts[i]);
+    free(allowed_hosts);
+    free(workspace);
+    free(db_path);
+    free(proxy_sock);
+
+    _exit(failed ? 1 : 0);
+}
+
 int main(int argc, char *argv[]) {
+    /* --mjs_eval: early intercept before any config/logging setup */
+    if (argc >= 2 && strcmp(argv[1], "--mjs_eval") == 0) return mjs_eval_main(argc, argv);
+
     cclaw_log_init();
     int daemon_mode = 0, new_session = 0, host_mode = 0;
     const char *channel_mode = NULL;

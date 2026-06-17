@@ -176,11 +176,16 @@ cat /tmp/t.txt            # or: tail -20 /tmp/t.txt
 
 ```bash
 make              # native build (ARM64 or x86_64)
+make debug        # clean + clang build with -O0 -g3 + ASan/UBSan
 make test         # unit tests (fast, no network)
 make test-integration  # mock-server tests
 make test-e2e     # live LLM tests (needs API key)
 make clean        # remove build/
 ```
+
+- **`make debug` uses clang, not gcc.** GCC-only `#pragma GCC diagnostic` directives must be guarded with `#if defined(__GNUC__) && !defined(__clang__)` — under `-Werror` clang turns an unknown warning group (e.g. `-Wformat-truncation`) into a hard error.
+- **`make test` does not build `build/cclaw`.** The main binary is not a dependency of the `test` target, but `test_tool_js` forks it via `CCLAW_MJS_EXE` (the `--mjs_eval` subprocess). After `make clean`, run **`make && make test`** — a bare `make test` makes `test_tool_js` fail with empty results (missing binary), which looks like a real regression but isn't.
+- **Don't mix sanitizer and release objects in `build/`.** A `make debug` followed by a plain `make test` link-fails on undefined `__asan_*`/`__ubsan_*` symbols (stale instrumented `.o` in `libcclaw.a`). `make clean` between the two.
 
 ## Running
 
@@ -188,11 +193,19 @@ make clean        # remove build/
 # Minimal — just needs an API key (defaults to OpenRouter + DeepSeek V4 Flash)
 export OPENROUTER_API_KEY="sk-or-v1-..."
 ./build/cclaw              # interactive CLI (default)
+./build/cclaw -p "..."     # single-turn: send prompt, print response, exit
+./build/cclaw -p "..." -s <id>   # single-turn against an existing session
 ./build/cclaw --daemon     # daemon mode (Telegram, web, cron, multi-agent)
 ./build/cclaw --log-level=trace  # full LLM req/resp JSON to stderr
 ```
 
+- **The real DB is `~/.cclaw/cclaw.db`, not `./cclaw.db`.** `resolve_db_path()` returns `$HOME/.cclaw/cclaw.db` when `$HOME` is set (override with `CCLAW_DB_PATH`). "Delete the db" means that path — and its `-wal`/`-shm` siblings.
+- **No migrations means: delete the DB after a schema change.** Running a new binary against a DB created by an older `templates/schema.sql` does *not* migrate — it hits missing columns/tables, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang. Always start a freshly-changed binary against a fresh DB.
+- **`-p` with piped/non-tty stdin auto-selects the most recent session**; `-s <id>` pins one. Useful for scripted multi-turn testing (turn 1 creates the session, reuse its id for turn 2+).
+
 Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
+
+> **Workspace must be set in `config_load()`, not only `config_load_from_env()`.** `main()` loads config via `config_load(db)`; if `cfg->workspace` is left NULL there, file tools, the proxy mount, and `workspace_init()` all fail with "no workspace configured" even though the env path looks fine. Both loaders set the same default.
 
 ## Dependencies
 

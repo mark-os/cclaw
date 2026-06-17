@@ -93,7 +93,7 @@ static void test_max_iterations(void) {
 static void test_waiting(void) {
     sqlite3 *db = test_db_open(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
-    session_set_state(db, sid, "waiting");
+    session_set_state(db, sid, "awaiting_agent");
 
     AdvanceOutput out = advance_session(db, sid, 25);
     assert(out.action == ADVANCE_WAITING);

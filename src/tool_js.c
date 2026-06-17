@@ -1,16 +1,22 @@
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include "tool_js.h"
 #include "tool_parse.h"
 #include <mquickjs.h>
+#include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 
 /* V5: 1MB heap cap, 10M instruction limit */
 #define JS_HEAP_SIZE (1024 * 1024)
 #define JS_MAX_INSTRUCTIONS 10000000
 
-extern const JSSTDLibraryDef js_std_library;
+extern const JSSTDLibraryDef js_std_library_main;
 
 static int interrupt_handler(JSContext *ctx, void *opaque) {
     (void)ctx;
@@ -26,7 +32,7 @@ static char *js_eval_code_with_hosts(const char *code, char **hosts, size_t host
     void *heap = malloc(JS_HEAP_SIZE);
     if (!heap) return strdup("error: out of memory");
 
-    JSContext *ctx = JS_NewContext(heap, JS_HEAP_SIZE, &js_std_library);
+    JSContext *ctx = JS_NewContext(heap, JS_HEAP_SIZE, &js_std_library_main);
     if (!ctx) { free(heap); return strdup("error: JS context creation failed"); }
 
     JsHostCtx hctx = {.instruction_count = 0, .instruction_limit = JS_MAX_INSTRUCTIONS,
@@ -103,26 +109,199 @@ static char *js_eval_in_runtime(JsSessionRuntime *rt, const char *code) {
 
 static const char *JSEVAL_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"code\":{\"type\":\"string\",\"description\":\"JavaScript code to execute\"}"
-    "},\"required\":[\"code\"]}";
+    "\"code\":{\"type\":\"string\",\"description\":\"JavaScript code to execute (inline)\"},"
+    "\"filename\":{\"type\":\"string\",\"description\":\"Workspace-relative .js file to execute\"},"
+    "\"args\":{\"type\":\"object\",\"description\":\"Arguments object passed to file (only with filename)\"}"
+    "}}";
+
+#define JSEVAL_MAX_OUTPUT (64 * 1024)
+#define JSEVAL_TIMEOUT 120
 
 char *tool_js_eval_handler(const char *arguments, void *user_data) {
     JsEvalCtx *ectx = (JsEvalCtx *)user_data;
+
+    /* Fork-bomb guard. We re-exec the cclaw binary (/proc/self/exe) as
+     * `cclaw --mjs_eval`, which main() intercepts and runs to completion — it
+     * never re-enters this handler. But if the host binary is NOT cclaw (e.g. a
+     * test binary that ignores argv and re-runs its own main), the re-exec would
+     * call this handler again and fork without bound. The child sets
+     * CCLAW_MJS_GUARD before exec; if we ever see it set on entry, the host
+     * failed to intercept --mjs_eval, so refuse to fork. */
+    if (getenv("CCLAW_MJS_GUARD"))
+        return strdup("error: js_eval recursion guard (host binary did not intercept --mjs_eval)");
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
 
     const char *code = targ_str(&ta, "code");
-    if (!code || !code[0]) {
+    const char *filename = targ_str(&ta, "filename");
+    if ((!code || !code[0]) && (!filename || !filename[0])) {
         tool_parse_free(&ta);
-        return strdup("error: missing or empty 'code' field");
+        return strdup("error: must provide 'code' or 'filename'");
     }
 
-    char **hosts = ectx ? ectx->allowed_hosts : NULL;
-    size_t hosts_count = ectx ? ectx->allowed_hosts_count : 0;
-    char *result = js_eval_code_with_hosts(code, hosts, hosts_count);
+    /* Get raw args JSON if present */
+    const char *args_raw = NULL;
+    size_t args_raw_len = 0;
+    char *args_str = NULL;
+    if (filename && targ_raw(&ta, "args", &args_raw, &args_raw_len) == 0) {
+        args_str = malloc(args_raw_len + 1);
+        if (args_str) { memcpy(args_str, args_raw, args_raw_len); args_str[args_raw_len] = '\0'; }
+    }
+
+    /* Pipe for child output */
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        tool_parse_free(&ta);
+        free(args_str);
+        return strdup("error: pipe() failed");
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]); close(pipefd[1]);
+        tool_parse_free(&ta);
+        free(args_str);
+        return strdup("error: fork() failed");
+    }
+
+    if (pid == 0) {
+        /* Child */
+        setpgid(0, 0);
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+
+        /* Defuse any accidental self-exec fork bomb: a re-exec that fails to
+         * intercept --mjs_eval will see this and refuse to fork again. */
+        setenv("CCLAW_MJS_GUARD", "1", 1);
+
+        if (ectx && ectx->host_mode)
+            setenv("CCLAW_MJS_HOST", "1", 1);
+
+        /* Set allowed hosts */
+        if (ectx && ectx->allowed_hosts_count > 0) {
+            size_t csv_len = 0;
+            for (size_t i = 0; i < ectx->allowed_hosts_count; i++)
+                csv_len += strlen(ectx->allowed_hosts[i]) + 1;
+            char *csv = malloc(csv_len);
+            if (csv) {
+                csv[0] = '\0';
+                for (size_t i = 0; i < ectx->allowed_hosts_count; i++) {
+                    if (i > 0) strcat(csv, ",");
+                    strcat(csv, ectx->allowed_hosts[i]);
+                }
+                setenv("CCLAW_ALLOWED_HOSTS", csv, 1);
+                free(csv);
+            }
+        } else {
+            setenv("CCLAW_ALLOWED_HOSTS", "", 1);
+        }
+
+        /* Default to /proc/self/exe (robust to rename/PATH); tests override
+         * with CCLAW_MJS_EXE to point at the real cclaw binary. */
+        const char *self_exe = getenv("CCLAW_MJS_EXE");
+        if (!self_exe || !self_exe[0]) self_exe = "/proc/self/exe";
+
+        if (code) {
+            execl(self_exe, "cclaw", "--mjs_eval", "-e", code, (char *)NULL);
+        } else if (args_str) {
+            execl(self_exe, "cclaw", "--mjs_eval", filename, args_str, (char *)NULL);
+        } else {
+            execl(self_exe, "cclaw", "--mjs_eval", filename, (char *)NULL);
+        }
+        _exit(127);
+    }
+
+    /* Parent */
+    setpgid(pid, pid);
+    close(pipefd[1]);
     tool_parse_free(&ta);
-    return result;
+    free(args_str);
+
+    char *output = malloc(JSEVAL_MAX_OUTPUT + 1);
+    if (!output) {
+        close(pipefd[0]);
+        kill(-pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        return strdup("error: out of memory");
+    }
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += JSEVAL_TIMEOUT;
+
+    size_t out_len = 0;
+    int timed_out = 0;
+    int status = 0;
+
+    while (1) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+            timed_out = 1;
+            break;
+        }
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(pipefd[0], &rfds);
+
+        struct timeval tv;
+        long remaining = deadline.tv_sec - now.tv_sec;
+        if (remaining > 1) remaining = 1;
+        tv.tv_sec = remaining > 0 ? remaining : 0;
+        tv.tv_usec = 100000;
+
+        int sel = select(pipefd[0] + 1, &rfds, NULL, NULL, &tv);
+        if (sel > 0) {
+            ssize_t n = read(pipefd[0], output + out_len, JSEVAL_MAX_OUTPUT - out_len);
+            if (n <= 0) break;
+            out_len += (size_t)n;
+            if (out_len >= JSEVAL_MAX_OUTPUT) break;
+        } else if (sel < 0 && errno != EINTR) {
+            break;
+        }
+
+        int wr = waitpid(pid, &status, WNOHANG);
+        if (wr > 0) {
+            while (out_len < JSEVAL_MAX_OUTPUT) {
+                ssize_t n = read(pipefd[0], output + out_len, JSEVAL_MAX_OUTPUT - out_len);
+                if (n <= 0) break;
+                out_len += (size_t)n;
+            }
+            close(pipefd[0]);
+            goto done;
+        }
+    }
+
+    close(pipefd[0]);
+
+    if (timed_out) {
+        kill(-pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        output[out_len] = '\0';
+        size_t needed = out_len + 64;
+        char *result = malloc(needed);
+        if (!result) { free(output); return strdup("error: timeout + OOM"); }
+        snprintf(result, needed, "[timeout after %ds]\n%s", JSEVAL_TIMEOUT, output);
+        free(output);
+        return result;
+    }
+
+    waitpid(pid, &status, 0);
+
+done:
+    output[out_len] = '\0';
+
+    /* Strip trailing newline from child output for clean result */
+    if (out_len > 0 && output[out_len - 1] == '\n') output[--out_len] = '\0';
+
+    char *result = strdup(output);
+    free(output);
+    return result ? result : strdup("error: OOM");
 }
 
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
@@ -131,15 +310,7 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
                           JSEVAL_PARAMS_JSON, tool_js_eval_handler, ctx);
 }
 
-/* --- js_define_tool --- */
-
-static const char *JSDEFINE_PARAMS_JSON =
-    "{\"type\":\"object\",\"properties\":{"
-    "\"name\":{\"type\":\"string\",\"description\":\"Tool name (snake_case)\"},"
-    "\"description\":{\"type\":\"string\",\"description\":\"What the tool does\"},"
-    "\"parameters\":{\"type\":\"string\",\"description\":\"JSON Schema for tool parameters\"},"
-    "\"code\":{\"type\":\"string\",\"description\":\"JS function body. Receives 'args' object, must return a string.\"}"
-    "},\"required\":[\"name\",\"code\"]}";
+/* --- JS-defined tool support (extension-path) --- */
 
 /* User data for JS-defined tool handler: code + runtime pointer */
 typedef struct {
@@ -180,25 +351,7 @@ static char *js_defined_tool_handler(const char *arguments, void *user_data) {
     return result;
 }
 
-/* Persist a JS tool definition to DB */
-static int js_tool_persist(sqlite3 *db, int64_t session_id, const char *name,
-                           const char *description, const char *parameters_json,
-                           const char *code) {
-    const char *sql =
-        "INSERT OR REPLACE INTO js_tools (session_id, name, description, parameters_json, code)"
-        " VALUES (?, ?, ?, ?, ?);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, description ? description : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, parameters_json, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 5, code, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
-}
+
 
 /* Free function for JsToolData */
 static void js_tool_data_free(void *user_data) {
@@ -239,67 +392,11 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
     return rc;
 }
 
-/* Replay a tool definition into the persistent runtime.
- * Registers as global function AND executes once to restore side effects. */
-static void js_runtime_replay_tool(JsSessionRuntime *rt, const char *name, const char *code) {
-    if (!rt || !rt->ctx) return;
-    /* Register and call: globalThis.<name> = function(args){<code>}; <name>({}) */
-    size_t wrap_len = strlen(name) * 2 + strlen(code) + 80;
-    char *wrapped = malloc(wrap_len);
-    if (!wrapped) return;
-    snprintf(wrapped, wrap_len,
-             "globalThis.%s = function(args){%s}; %s({})", name, code, name);
-    JSContext *ctx = (JSContext *)rt->ctx;
-    JS_Eval(ctx, wrapped, strlen(wrapped), "<replay>", 0);
-    free(wrapped);
-}
 
-char *tool_js_define_handler(const char *arguments, void *user_data) {
-    JsDefineCtx *ctx = (JsDefineCtx *)user_data;
-    if (!ctx || !ctx->db || !ctx->reg) return strdup("error: js_define_tool not configured");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
 
-    const char *name = targ_str(&ta, "name");
-    const char *code = targ_str(&ta, "code");
-    if (!name || !name[0] || !code || !code[0]) {
-        tool_parse_free(&ta);
-        return strdup("error: 'name' and 'code' are required non-empty strings");
-    }
 
-    const char *description = targ_str(&ta, "description");
-    const char *parameters = targ_str(&ta, "parameters");
-    if (!parameters) parameters = "{}";
 
-    /* Persist to DB */
-    if (js_tool_persist(ctx->db, ctx->session_id, name, description, parameters, code) != 0) {
-        tool_parse_free(&ta);
-        return strdup("error: failed to persist tool definition");
-    }
-
-    /* Register in live registry */
-    if (js_tool_register_ext(ctx->reg, name, description, parameters, code, ctx->rt) != 0) {
-        tool_parse_free(&ta);
-        return strdup("error: failed to register tool");
-    }
-
-    /* Replay into shared runtime so other tools can reference it */
-    js_runtime_replay_tool(ctx->rt, name, code);
-
-    size_t rlen = strlen(name) + 32;
-    char *result = malloc(rlen);
-    if (result) snprintf(result, rlen, "tool '%s' defined", name);
-    else result = strdup("ok");
-    tool_parse_free(&ta);
-    return result;
-}
-
-int tool_js_define_register(ToolRegistry *reg, JsDefineCtx *ctx) {
-    return tools_register(reg, "js_define_tool",
-                          "Define a new tool from JavaScript code. The code receives an 'args' object and must return a string.",
-                          JSDEFINE_PARAMS_JSON, tool_js_define_handler, ctx);
-}
 
 /* --- Session runtime --- */
 
@@ -308,7 +405,7 @@ JsSessionRuntime *js_runtime_create(void) {
     if (!rt) return NULL;
     rt->heap = malloc(JS_HEAP_SIZE);
     if (!rt->heap) { free(rt); return NULL; }
-    rt->ctx = JS_NewContext(rt->heap, JS_HEAP_SIZE, &js_std_library);
+    rt->ctx = JS_NewContext(rt->heap, JS_HEAP_SIZE, &js_std_library_main);
     if (!rt->ctx) { free(rt->heap); free(rt); return NULL; }
     return rt;
 }
@@ -350,28 +447,4 @@ void js_runtime_set_registry(JsSessionRuntime *rt, ToolRegistry *reg) {
     hctx->tool_registry = reg;
 }
 
-int tool_js_load_session(sqlite3 *db, int64_t session_id, ToolRegistry *reg,
-                         JsSessionRuntime *rt) {
-    const char *sql = "SELECT name, description, parameters_json, code FROM js_tools WHERE session_id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
 
-    int loaded = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *name = (const char *)sqlite3_column_text(stmt, 0);
-        const char *desc = (const char *)sqlite3_column_text(stmt, 1);
-        const char *params = (const char *)sqlite3_column_text(stmt, 2);
-        const char *code = (const char *)sqlite3_column_text(stmt, 3);
-        if (name && code) {
-            if (js_tool_register_ext(reg, name, desc, params, code, rt) == 0) {
-                /* Replay into shared runtime */
-                js_runtime_replay_tool(rt, name, code);
-                loaded++;
-            }
-        }
-    }
-    sqlite3_finalize(stmt);
-    return loaded;
-}

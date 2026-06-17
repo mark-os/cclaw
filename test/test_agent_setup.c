@@ -40,8 +40,8 @@ static void test_cli_mode_excludes_daemon_tools(void) {
     if (tools_lookup(&setup.reg, "launch_agent") != NULL) {
         FAIL("launch_agent should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
-    if (tools_lookup(&setup.reg, "check_agent") != NULL) {
-        FAIL("check_agent should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
+    if (tools_lookup(&setup.reg, "check_session") != NULL) {
+        FAIL("check_session should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
     if (tools_lookup(&setup.reg, "configure_provider") != NULL) {
         FAIL("configure_provider should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;

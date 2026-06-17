@@ -2,6 +2,7 @@
 #define CCLAW_TOOLS_H
 
 #include "llm.h"
+#include "sqlite3.h"
 #include <stddef.h>
 
 #define TOOLS_MAX 32
@@ -42,6 +43,11 @@ ToolEntry *tools_lookup(ToolRegistry *reg, const char *name);
  * Returns number of schemas written (up to out_cap). */
 size_t tools_schemas(ToolRegistry *reg, ToolSchema *out, size_t out_cap);
 
+
+/* Sync built-in tool schemas to the DB `tools` table.
+ * parameters_json is code-owned: force-overwrite it from the registry.
+ * description is DB-editable: fill only if the row is missing/NULL, never clobber. */
+void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db);
 
 /* Free all heap strings in the registry */
 void tools_free(ToolRegistry *reg);

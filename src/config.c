@@ -22,6 +22,22 @@ static char *str_dup(const char *s) {
     return d;
 }
 
+/* Default workspace, anchored to the DB directory so it can't diverge from the
+ * agent tree by launch location. main() exports CCLAW_DB as the resolved
+ * absolute DB path before either config loader runs; fall back to a cwd-relative
+ * path only when it is unavailable. Caller owns the returned string. */
+static char *default_workspace(void) {
+    const char *dbp = getenv("CCLAW_DB");
+    const char *slash = dbp ? strrchr(dbp, '/') : NULL;
+    if (slash) {
+        char ws[PATH_MAX];
+        snprintf(ws, sizeof(ws), "%.*s/agents/default/workspace",
+                 (int)(slash - dbp), dbp);
+        return str_dup(ws);
+    }
+    return str_dup(".cclaw/agents/default/workspace");
+}
+
 /* Apply env var override: if env set, replace *field */
 static void env_override_str(char **field, const char *env_name) {
     const char *val = getenv(env_name);
@@ -193,9 +209,9 @@ Config *config_load_from_env(void) {
     else
         cfg->provider.endpoint_type = ENDPOINT_OPENAI;
 
-    /* T223: Workspace — default under .cclaw/agents/default/ for zero-config CLI */
+    /* T223: Workspace — default under ~/.cclaw/agents/default/ for zero-config CLI */
     v = getenv("CCLAW_WORKSPACE");
-    cfg->workspace = str_dup(v ? v : ".cclaw/agents/default/workspace");
+    cfg->workspace = v ? str_dup(v) : default_workspace();
 
     /* DB path — parent sets CCLAW_DB for children at fork */
     v = getenv("CCLAW_DB");
@@ -425,7 +441,7 @@ Config *config_load(sqlite3 *db) {
      * NULL workspace and fail with "no workspace configured". */
     {
         char *v = db_kv_get(db, "workspace");
-        cfg->workspace = v ? v : str_dup(".cclaw/agents/default/workspace");
+        cfg->workspace = v ? v : default_workspace();
     }
     env_override_str(&cfg->workspace, "CCLAW_WORKSPACE");
 

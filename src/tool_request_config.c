@@ -32,11 +32,11 @@ static char *handler(const char *arguments, void *user_data) {
     if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON");
 
     const char *act = targ_str(&ta, "action");
-    if (!act) { tool_parse_free(&ta); return strdup("error: 'action' required"); }
+    if (!act) { tool_parse_free(&ta); return strdup("error: 'action' required (one of: grant_tool, grant_host, rename_agent)"); }
 
     if (strcmp(act, "grant_tool") == 0) {
         const char *tool = targ_str(&ta, "tool");
-        if (!tool || !tool[0]) { tool_parse_free(&ta); return strdup("error: 'tool' required"); }
+        if (!tool || !tool[0]) { tool_parse_free(&ta); return strdup("error: 'tool' required for grant_tool"); }
         int rc = agent_config_add_tool(ctx->db, ctx->agent_name, tool);
         tool_parse_free(&ta);
         if (rc == 0) {
@@ -48,7 +48,7 @@ static char *handler(const char *arguments, void *user_data) {
 
     } else if (strcmp(act, "grant_host") == 0) {
         const char *host = targ_str(&ta, "host");
-        if (!host || !host[0]) { tool_parse_free(&ta); return strdup("error: 'host' required"); }
+        if (!host || !host[0]) { tool_parse_free(&ta); return strdup("error: 'host' required for grant_host"); }
         int rc = agent_config_add_host(ctx->db, ctx->agent_name, host);
         tool_parse_free(&ta);
         if (rc == 0) {

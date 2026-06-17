@@ -169,6 +169,14 @@ char *tool_file_write_handler(const char *arguments, void *user_data) {
         return strdup("error: missing or empty 'path' field");
     }
 
+    /* Reject memory-file names — memories are not files */
+    const char *bn = strrchr(req_path, '/');
+    bn = bn ? bn + 1 : req_path;
+    if (strcasecmp(bn, "MEMORY.md") == 0 || strcasecmp(bn, "SOUL.md") == 0) {
+        tool_parse_free(&ta);
+        return strdup("error: memories are not files — use the memory tools (memory_add/memory_edit) instead of writing MEMORY.md");
+    }
+
     const char *content = targ_str(&ta, "content");
     if (!content) {
         tool_parse_free(&ta);

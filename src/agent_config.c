@@ -255,33 +255,52 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     char *mb_section = NULL;
     size_t mb_len = 0;
     if (blocks && mb_count > 0) {
-        /* Estimate size: header + per-block metadata + value */
+        /* Estimate size: header + per-block metadata + entries */
         size_t est = 64;
         for (int i = 0; i < mb_count; i++) {
-            est += 128; /* metadata line overhead */
+            est += 128;
             est += blocks[i].label ? strlen(blocks[i].label) : 0;
             est += blocks[i].description ? strlen(blocks[i].description) : 0;
-            est += blocks[i].value ? strlen(blocks[i].value) : 0;
+        }
+        /* First pass: gather entries per block to estimate total */
+        int *ecounts = calloc((size_t)mb_count, sizeof(int));
+        MemoryEntry **elists = calloc((size_t)mb_count, sizeof(MemoryEntry *));
+        for (int i = 0; i < mb_count; i++) {
+            elists[i] = memory_entries_list(db, agent_name, blocks[i].label, &ecounts[i]);
+            for (int j = 0; j < ecounts[i]; j++)
+                est += 64 + (elists[i][j].text ? strlen(elists[i][j].text) : 0);
         }
         mb_section = malloc(est);
         if (mb_section) {
             size_t pos = 0;
             pos += (size_t)snprintf(mb_section + pos, est - pos, "\n\n## Memory Blocks\n");
             for (int i = 0; i < mb_count; i++) {
-                int val_len = blocks[i].value ? (int)strlen(blocks[i].value) : 0;
+                size_t used = 0;
+                for (int j = 0; j < ecounts[i]; j++)
+                    used += elists[i][j].text ? strlen(elists[i][j].text) : 0;
                 pos += (size_t)snprintf(mb_section + pos, est - pos,
                     "\n### %s\n"
                     "description: %s\n"
-                    "usage: %d/%d chars | %s\n"
-                    "---\n%s\n",
+                    "usage: %zu/%d chars | %s\n",
                     blocks[i].label ? blocks[i].label : "",
                     blocks[i].description ? blocks[i].description : "",
-                    val_len, blocks[i].char_limit,
-                    blocks[i].read_only ? "read-only" : "read-write",
-                    blocks[i].value ? blocks[i].value : "");
+                    used, blocks[i].char_limit,
+                    blocks[i].read_only ? "read-only" : "read-write");
+                if (ecounts[i] == 0) {
+                    pos += (size_t)snprintf(mb_section + pos, est - pos, "(no entries yet)\n");
+                } else {
+                    for (int j = 0; j < ecounts[i]; j++)
+                        pos += (size_t)snprintf(mb_section + pos, est - pos, "%d. %s\n",
+                                                elists[i][j].pos,
+                                                elists[i][j].text ? elists[i][j].text : "");
+                }
             }
             mb_len = pos;
         }
+        for (int i = 0; i < mb_count; i++)
+            if (elists[i]) memory_entries_free(elists[i], ecounts[i]);
+        free(elists);
+        free(ecounts);
         memory_block_list_free(blocks, mb_count);
     }
 

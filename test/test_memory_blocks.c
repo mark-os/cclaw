@@ -172,9 +172,11 @@ static void test_prompt_injection(void) {
     /* Seed agent with system prompt */
     db_agent_upsert(db, "testagent", "{}", "You are a test agent.", NULL);
 
-    /* Create memory blocks */
-    memory_block_create(db, "testagent", "persona", "Agent identity", "I am helpful", 5000);
-    memory_block_create(db, "testagent", "human", "User facts", "Likes cats", 3000);
+    /* Create memory blocks (containers) and add numbered entries */
+    memory_block_create(db, "testagent", "persona", "Agent identity", "", 5000);
+    memory_block_create(db, "testagent", "human", "User facts", "", 3000);
+    memory_entry_add(db, "testagent", "persona", "I am helpful"); /* 12 chars */
+    memory_entry_add(db, "testagent", "human", "Likes cats");     /* 10 chars */
 
     /* Build system prompt — no agents_dir needed, agent already in DB */
     Config cfg = {0};
@@ -182,16 +184,16 @@ static void test_prompt_injection(void) {
     char *prompt = agent_build_system_prompt(db, "testagent", 1, NULL, &cfg);
     assert(prompt);
 
-    /* Verify memory blocks section present */
+    /* Verify memory blocks render as numbered entries */
     assert(strstr(prompt, "## Memory Blocks"));
     assert(strstr(prompt, "### persona"));
     assert(strstr(prompt, "description: Agent identity"));
     assert(strstr(prompt, "usage: 12/5000 chars"));
-    assert(strstr(prompt, "I am helpful"));
+    assert(strstr(prompt, "1. I am helpful"));
     assert(strstr(prompt, "### human"));
     assert(strstr(prompt, "description: User facts"));
     assert(strstr(prompt, "usage: 10/3000 chars"));
-    assert(strstr(prompt, "Likes cats"));
+    assert(strstr(prompt, "1. Likes cats"));
     assert(strstr(prompt, "read-write"));
 
     free(prompt);

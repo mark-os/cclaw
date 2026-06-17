@@ -1253,16 +1253,18 @@ int main(int argc, char *argv[]) {
       if (!al || ac == 0) {
           char ws[PATH_MAX]; snprintf(ws, sizeof(ws), "%s/agents/default/workspace/.keep", base_dir);
           ensure_parent_dir(ws);
-          /* Create bootstrap agent with elevated permissions */
-          const char *bootstrap_sql =
+          /* Create default agent */
+          const char *agent_sql =
               "INSERT OR IGNORE INTO agents(name, system_prompt, trust_level, allowed_tools)"
-              " VALUES('default', ?, 'bootstrap', ?);"
+              " VALUES('default', ?, 'trusted', ?);"
               ;
-          const char *bootstrap_tools = "[\"configure_provider\",\"configure_channel\",\"create_agent\",\"file_read\",\"file_write\",\"js_eval\",\"request_config\"]";
+          const char *agent_tools = "[\"file_read\",\"file_write\",\"js_eval\",\"request_config\","
+              "\"search_config\",\"memory_create\",\"memory_add\",\"memory_edit\","
+              "\"memory_delete\",\"configure_provider\",\"configure_channel\",\"create_agent\"]";
           sqlite3_stmt *bs;
-          if (sqlite3_prepare_v2(g_db, bootstrap_sql, -1, &bs, NULL) == SQLITE_OK) {
-              sqlite3_bind_text(bs, 1, TPL_BOOTSTRAP_SYSTEM_PROMPT_MD, -1, SQLITE_STATIC);
-              sqlite3_bind_text(bs, 2, bootstrap_tools, -1, SQLITE_STATIC);
+          if (sqlite3_prepare_v2(g_db, agent_sql, -1, &bs, NULL) == SQLITE_OK) {
+              sqlite3_bind_text(bs, 1, TPL_DEFAULT_SYSTEM_PROMPT_MD, -1, SQLITE_STATIC);
+              sqlite3_bind_text(bs, 2, agent_tools, -1, SQLITE_STATIC);
               sqlite3_step(bs); sqlite3_finalize(bs);
           }
           db_kv_set(g_db, "default_agent", "default");
@@ -1273,6 +1275,10 @@ int main(int argc, char *argv[]) {
           memory_block_create(g_db, "default", "USER",
               "Information about the user: preferences, context, working style. Update as you learn.",
               NULL, 5000);
+          memory_entry_add(g_db, "default", "AGENT",
+              "You are CClaw. You do not have a name yet — ask the user what they would like to call you, then save it here with memory_edit.");
+          memory_entry_add(g_db, "default", "USER",
+              "Record what you learn about the user here: their name, preferences, and how they like you to work.");
       }
       if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
     }
@@ -1323,8 +1329,14 @@ int main(int argc, char *argv[]) {
     if (host_mode) setenv("CCLAW_TRUST_LEVEL", "host", 1);
     if (!getenv("CCLAW_STREAM")) { setenv("CCLAW_STREAM", "1", 1); g_cfg->stream = 1; }
     setenv("CCLAW_MODE", "cli", 1);
-    { char cwd[PATH_MAX]; if (getcwd(cwd, sizeof(cwd))) setenv("CCLAW_PATH", cwd, 1); }
     workspace_init(g_cfg);
+    /* Make the workspace the process cwd so relative paths, shell children, and
+     * fs.* all operate in the agent's workspace by default. (CLI only — the
+     * daemon serves multiple agents and its tool children chdir per-agent.) */
+    if (g_cfg->workspace && chdir(g_cfg->workspace) != 0)
+        fprintf(stderr, "warning: chdir to workspace %s failed: %s\n",
+                g_cfg->workspace, strerror(errno));
+    { char cwd[PATH_MAX]; if (getcwd(cwd, sizeof(cwd))) setenv("CCLAW_PATH", cwd, 1); }
 
     /* Set up tool schemas env for LLM proc children */
     AgentSetup setup;

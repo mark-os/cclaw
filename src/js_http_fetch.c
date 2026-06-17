@@ -13,7 +13,7 @@ JsHttpResult js_http_fetch_exec(const char *url, const char *method,
 
     /* V38: no allowlist = no network from JS */
     if (!allowed_hosts || hosts_count == 0) {
-        r.error = strdup("no allowed_hosts configured");
+        r.error = strdup("no allowed_hosts configured — request one with request_config {\"action\":\"grant_host\",\"host\":\"example.com\"}");
         return r;
     }
 

@@ -261,6 +261,32 @@ void memory_block_list_free(MemoryBlock *list, int count);
 /* Seed memory blocks from agent JSON config (json_each over $.memory_blocks). */
 void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str);
 
+/* A numbered entry inside a memory block. */
+typedef struct {
+    int pos;       /* 1-based display number, contiguous within the block */
+    char *text;
+} MemoryEntry;
+
+/* List entries of a block ordered by pos. Caller frees with memory_entries_free.
+ * Sets *count. Returns NULL when the block has no entries (count 0). */
+MemoryEntry *memory_entries_list(sqlite3 *db, const char *agent_name,
+                                 const char *block_label, int *count);
+void memory_entries_free(MemoryEntry *list, int count);
+
+/* Append an entry. Returns its new pos (>=1) or -1 on error. */
+int memory_entry_add(sqlite3 *db, const char *agent_name,
+                     const char *block_label, const char *text);
+
+/* Replace the text of the entry at the given number/pos.
+ * Returns 0 on success, -1 if no entry has that number. */
+int memory_entry_set(sqlite3 *db, const char *agent_name,
+                     const char *block_label, int number, const char *text);
+
+/* Delete entries whose pos is in numbers[0..n_numbers). After deletion,
+ * renumber the remaining entries contiguously (1..N). Returns count deleted. */
+int memory_entries_delete(sqlite3 *db, const char *agent_name,
+                          const char *block_label, const int *numbers, int n_numbers);
+
 /* T193/V69: Channel→agent binding. Returns heap-allocated agent_name or NULL. */
 char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *channel_id);
 

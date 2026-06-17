@@ -260,6 +260,18 @@ CREATE TABLE IF NOT EXISTS memory_blocks (
   UNIQUE(agent_name, label)
 );
 
+-- Numbered entries within a memory block (block = container of entries)
+CREATE TABLE IF NOT EXISTS memory_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_name TEXT NOT NULL,
+  block_label TEXT NOT NULL,
+  pos INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_memory_entries_block
+  ON memory_entries(agent_name, block_label, pos);
+
 -- ═══ Cron ═══
 CREATE TABLE IF NOT EXISTS cron_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

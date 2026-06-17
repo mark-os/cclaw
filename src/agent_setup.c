@@ -61,15 +61,14 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
             sc->sandbox = 0;
             sc->env_mode = 0; sc->net_mode = 0; sc->mount_cwd = 1; sc->workspace_ro = 0;
             sc->rlimits.nproc = 0; sc->rlimits.as_mb = 0; sc->rlimits.cpu_sec = 0;
-        } else if (trust_level && (strcmp(trust_level, "trusted") == 0 ||
-            strcmp(trust_level, "bootstrap") == 0)) {
+        } else if (trust_level && strcmp(trust_level, "trusted") == 0) {
             sc->env_mode = 0; sc->net_mode = 0; sc->mount_cwd = 1; sc->workspace_ro = 0;
             sc->rlimits.nproc = 0; sc->rlimits.as_mb = 0; sc->rlimits.cpu_sec = 0;
         } else if (trust_level && strcmp(trust_level, "restricted") == 0) {
             sc->env_mode = 1; sc->net_mode = 1; sc->mount_cwd = 0; sc->workspace_ro = 1;
             sc->rlimits.nproc = 8; sc->rlimits.as_mb = 128; sc->rlimits.cpu_sec = 10;
         } else { /* "standard", unknown, and NULL (missing row / failed lookup):
-                    only an explicit trusted/bootstrap/host string elevates */
+                    only an explicit trusted/host string elevates */
             sc->env_mode = 1; sc->net_mode = 0; sc->mount_cwd = 0; sc->workspace_ro = 0;
             sc->rlimits.nproc = 64; sc->rlimits.as_mb = 512; sc->rlimits.cpu_sec = 60;
         }
@@ -138,17 +137,22 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->req_cfg_ctx.agents_dir = NULL;  /* set by caller if known */
     tool_request_config_register(&setup->reg, &setup->req_cfg_ctx);
 
+    /* Read-only config introspection — always available */
+    setup->search_cfg_ctx.db = db;
+    setup->search_cfg_ctx.agent_name = agent_name;
+    tool_search_config_register(&setup->reg, &setup->search_cfg_ctx);
+
+    /* Bootstrap tools — available in both CLI and daemon (DB config only) */
+    setup->bootstrap_ctx.db = db;
+    setup->bootstrap_ctx.session_id = session_id;
+    setup->bootstrap_ctx.agent_name = (char *)agent_name;
+    tool_configure_provider_register(&setup->reg, &setup->bootstrap_ctx);
+    tool_configure_channel_register(&setup->reg, &setup->bootstrap_ctx);
+    tool_create_agent_register(&setup->reg, &setup->bootstrap_ctx);
+
     /* Daemon-mode only tools */
     if (mode == AGENT_SETUP_DAEMON) {
         /* Approval */
-
-        /* Bootstrap tools */
-        setup->bootstrap_ctx.db = db;
-        setup->bootstrap_ctx.session_id = session_id;
-        setup->bootstrap_ctx.agent_name = (char *)agent_name;
-        tool_configure_provider_register(&setup->reg, &setup->bootstrap_ctx);
-        tool_configure_channel_register(&setup->reg, &setup->bootstrap_ctx);
-        tool_create_agent_register(&setup->reg, &setup->bootstrap_ctx);
 
         /* Agent launch — only register if depth allows spawning */
         setup->launch_ctx.db = db;
@@ -160,6 +164,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         tool_check_session_register(&setup->reg, &setup->launch_ctx);
     }
 
+    tools_sync_to_db(&setup->reg, db);
     return 0;
 }
 

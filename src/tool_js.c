@@ -306,11 +306,14 @@ done:
 
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
     return tools_register(reg, "js_eval",
-                          "Run JavaScript in a sandboxed ES5 engine; returns the last expression (or console.log output). "
-                          "ES5 only: use 'var' (no const/let), function(){} (no arrow =>), string concat (no `template` literals), "
-                          "no destructuring/async/generators, no require/import. "
-                          "Globals: fs.readDir(path) (lists a directory), fs.readFile(path), fs.writeFile(path, data), "
-                          "fs.stat(path), fs.cwd(), http_fetch(url). Example: var f = fs.readDir('.'); f",
+                          "Run JavaScript in MicroQuickJS (ES5 only: var, function(){}, string concat; "
+                          "NO let/const, arrow =>, template literals, for...of, destructuring, async). "
+                          "Top-level 'this' is not enumerable (do not iterate it). "
+                          "Globals: fs.readDir(path), fs.readFile(path), fs.writeFile(path, data), "
+                          "fs.stat(path), fs.cwd(). "
+                          "Network: fetch(url, opts) / http_fetch(url, opts) — only allow-listed hosts work; "
+                          "to add one, call request_config with {\"action\":\"grant_host\",\"host\":\"...\"}. "
+                          "Returns the last expression value (or console.log output).",
                           JSEVAL_PARAMS_JSON, tool_js_eval_handler, ctx);
 }
 

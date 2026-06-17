@@ -12,7 +12,7 @@ static const char *TOOL_CALL_RESP =
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,"
     "\"tool_calls\":[{\"id\":\"tc1\",\"type\":\"function\","
     "\"function\":{\"name\":\"memory_create\","
-    "\"arguments\":\"{\\\"label\\\":\\\"test\\\",\\\"description\\\":\\\"a test block\\\",\\\"value\\\":\\\"hello\\\"}\"}}]},"
+    "\"arguments\":\"{\\\"label\\\":\\\"test\\\",\\\"description\\\":\\\"a test block\\\"}\"}}]},"
     "\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
 
 static const char *FINAL_RESP =
@@ -52,10 +52,10 @@ int main(void) {
     int rc = test_run_session(db, sid, &setup);
     assert(rc == 0);
 
-    /* Verify memory block was created */
+    /* Verify memory block (container) was created via the tool call */
     MemoryBlock *mb = memory_block_get(db, "default", "test");
     assert(mb);
-    assert(strcmp(mb->value, "hello") == 0);
+    assert(strcmp(mb->description, "a test block") == 0);
     memory_block_free(mb);
 
     /* Verify final assistant response */

@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* T153: memory tools supersede old memory_set (T121) */
+/* Memory tools: numbered-entry model (memory_create/add/edit/delete). */
 
 static sqlite3 *setup(void) {
     sqlite3 *db = test_db_open(":memory:");
@@ -16,7 +16,7 @@ static sqlite3 *setup(void) {
     return db;
 }
 
-static void test_create_and_append(void) {
+static void test_create_and_add(void) {
     sqlite3 *db = setup();
     ToolRegistry reg;
     tools_init(&reg);
@@ -29,22 +29,26 @@ static void test_create_and_append(void) {
     assert(strstr(r, "ok"));
     free(r);
 
-    e = tools_lookup(&reg, "memory_append");
+    e = tools_lookup(&reg, "memory_add");
     assert(e);
-    r = e->handler("{\"label\":\"facts\",\"content\":\"likes coffee\"}", e->user_data);
-    assert(strstr(r, "ok"));
+    r = e->handler("{\"block\":\"facts\",\"text\":\"likes coffee\"}", e->user_data);
+    /* result echoes the rendered block including the new entry */
+    assert(strstr(r, "likes coffee"));
     free(r);
 
-    MemoryBlock *mb = memory_block_get(db, "bot", "facts");
-    assert(mb && strcmp(mb->value, "likes coffee") == 0);
-    memory_block_free(mb);
+    int n = 0;
+    MemoryEntry *entries = memory_entries_list(db, "bot", "facts", &n);
+    assert(n == 1);
+    assert(entries[0].pos == 1);
+    assert(strcmp(entries[0].text, "likes coffee") == 0);
+    memory_entries_free(entries, n);
 
     tools_free(&reg);
     db_close(db);
-    printf("PASS: test_create_and_append\n");
+    printf("PASS: test_create_and_add\n");
 }
 
-static void test_replace(void) {
+static void test_edit_batch(void) {
     sqlite3 *db = setup();
     ToolRegistry reg;
     tools_init(&reg);
@@ -52,22 +56,65 @@ static void test_replace(void) {
     tool_memory_register(&reg, &ctx);
 
     ToolEntry *create = tools_lookup(&reg, "memory_create");
-    char *r = create->handler("{\"label\":\"bio\",\"description\":\"about\",\"value\":\"age 30\"}", create->user_data);
-    assert(strstr(r, "ok"));
+    char *r = create->handler("{\"label\":\"bio\",\"description\":\"about\"}", create->user_data);
+    assert(strstr(r, "ok")); free(r);
+
+    ToolEntry *add = tools_lookup(&reg, "memory_add");
+    r = add->handler("{\"block\":\"bio\",\"text\":\"age 30\"}", add->user_data); free(r);
+    r = add->handler("{\"block\":\"bio\",\"text\":\"city NYC\"}", add->user_data); free(r);
+
+    /* Batch edit both entries by number */
+    ToolEntry *edit = tools_lookup(&reg, "memory_edit");
+    r = edit->handler(
+        "{\"block\":\"bio\",\"edits\":[{\"number\":1,\"text\":\"age 31\"},"
+        "{\"number\":2,\"text\":\"city LA\"}]}", edit->user_data);
+    assert(strstr(r, "edited 2"));
     free(r);
 
-    ToolEntry *replace = tools_lookup(&reg, "memory_replace");
-    r = replace->handler("{\"label\":\"bio\",\"old\":\"30\",\"new\":\"31\"}", replace->user_data);
-    assert(strstr(r, "ok"));
-    free(r);
-
-    MemoryBlock *mb = memory_block_get(db, "bot", "bio");
-    assert(mb && strcmp(mb->value, "age 31") == 0);
-    memory_block_free(mb);
+    int n = 0;
+    MemoryEntry *entries = memory_entries_list(db, "bot", "bio", &n);
+    assert(n == 2);
+    assert(strcmp(entries[0].text, "age 31") == 0);
+    assert(strcmp(entries[1].text, "city LA") == 0);
+    memory_entries_free(entries, n);
 
     tools_free(&reg);
     db_close(db);
-    printf("PASS: test_replace\n");
+    printf("PASS: test_edit_batch\n");
+}
+
+static void test_delete_renumber(void) {
+    sqlite3 *db = setup();
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolMemoryCtx ctx = {.db = db, .agent_name = "bot"};
+    tool_memory_register(&reg, &ctx);
+
+    ToolEntry *create = tools_lookup(&reg, "memory_create");
+    char *r = create->handler("{\"label\":\"log\",\"description\":\"events\"}", create->user_data);
+    assert(strstr(r, "ok")); free(r);
+
+    ToolEntry *add = tools_lookup(&reg, "memory_add");
+    r = add->handler("{\"block\":\"log\",\"text\":\"one\"}", add->user_data); free(r);
+    r = add->handler("{\"block\":\"log\",\"text\":\"two\"}", add->user_data); free(r);
+    r = add->handler("{\"block\":\"log\",\"text\":\"three\"}", add->user_data); free(r);
+
+    /* Delete the middle entry; survivors must renumber to 1,2 */
+    ToolEntry *del = tools_lookup(&reg, "memory_delete");
+    r = del->handler("{\"block\":\"log\",\"numbers\":[2]}", del->user_data);
+    assert(strstr(r, "deleted 1"));
+    free(r);
+
+    int n = 0;
+    MemoryEntry *entries = memory_entries_list(db, "bot", "log", &n);
+    assert(n == 2);
+    assert(entries[0].pos == 1 && strcmp(entries[0].text, "one") == 0);
+    assert(entries[1].pos == 2 && strcmp(entries[1].text, "three") == 0);
+    memory_entries_free(entries, n);
+
+    tools_free(&reg);
+    db_close(db);
+    printf("PASS: test_delete_renumber\n");
 }
 
 static void test_missing_fields(void) {
@@ -82,8 +129,13 @@ static void test_missing_fields(void) {
     assert(strstr(r, "error"));
     free(r);
 
-    e = tools_lookup(&reg, "memory_append");
-    r = e->handler("{\"label\":\"x\"}", e->user_data);
+    e = tools_lookup(&reg, "memory_add");
+    r = e->handler("{\"block\":\"x\"}", e->user_data);
+    assert(strstr(r, "error"));
+    free(r);
+
+    /* add to nonexistent block */
+    r = e->handler("{\"block\":\"nope\",\"text\":\"y\"}", e->user_data);
     assert(strstr(r, "error"));
     free(r);
 
@@ -93,8 +145,10 @@ static void test_missing_fields(void) {
 }
 
 int main(void) {
-    test_create_and_append();
-    test_replace();
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    test_create_and_add();
+    test_edit_batch();
+    test_delete_renumber();
     test_missing_fields();
     printf("All memory tool tests passed.\n");
     return 0;

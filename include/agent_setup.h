@@ -9,6 +9,7 @@
 #include "tool_bootstrap.h"
 #include "tool_agent.h"
 #include "tool_request_config.h"
+#include "tool_search_config.h"
 #include "http_policy.h"
 #include "proxy.h"
 #include "extension.h"
@@ -29,6 +30,7 @@ typedef struct {
     ToolBootstrapCtx bootstrap_ctx;
     AgentLaunchCtx launch_ctx;
     RequestConfigCtx req_cfg_ctx;
+    SearchConfigCtx search_cfg_ctx;
     /* V83: credential proxy for shell children */
     ProxyContext proxy_ctx;
     /* V88: secrets for shell injection + masking */

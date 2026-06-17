@@ -10,7 +10,7 @@ typedef struct {
     const char *agent_name;
 } ToolMemoryCtx;
 
-/* Register memory_create, memory_append, memory_replace tools. */
+/* Register memory_create, memory_add, memory_edit, memory_delete tools. */
 int tool_memory_register(ToolRegistry *reg, ToolMemoryCtx *ctx);
 
 #endif

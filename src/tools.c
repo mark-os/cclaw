@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tools.h"
+#include "sqlite3.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,5 +52,27 @@ void tools_free(ToolRegistry *reg) {
             reg->entries[i].free_fn(reg->entries[i].user_data);
     }
     reg->count = 0;
+}
+
+void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db) {
+    if (!reg || !db) return;
+    static const char *sql =
+        "INSERT INTO tools(name, description, parameters_json, builtin) "
+        "VALUES(?1, ?2, ?3, 1) "
+        "ON CONFLICT(name) DO UPDATE SET "
+        "parameters_json = excluded.parameters_json, "
+        "description = COALESCE(tools.description, excluded.description)";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+    for (size_t i = 0; i < reg->count; i++) {
+        ToolEntry *e = &reg->entries[i];
+        if (!e->name || !e->parameters_json) continue;
+        sqlite3_bind_text(stmt, 1, e->name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, e->description, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, e->parameters_json, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_reset(stmt);
+    }
+    sqlite3_finalize(stmt);
 }
 

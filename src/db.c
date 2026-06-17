@@ -1610,6 +1610,116 @@ int memory_block_set_value(sqlite3 *db, const char *agent_name, const char *labe
     return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
 }
 
+/* memory_entries CRUD */
+
+MemoryEntry *memory_entries_list(sqlite3 *db, const char *agent_name,
+                                 const char *block_label, int *count) {
+    *count = 0;
+    const char *sql = "SELECT pos, text FROM memory_entries"
+                      " WHERE agent_name=? AND block_label=? ORDER BY pos;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, block_label, -1, SQLITE_STATIC);
+    int cap = 8;
+    MemoryEntry *list = calloc((size_t)cap, sizeof(MemoryEntry));
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (*count >= cap) { cap *= 2; list = realloc(list, (size_t)cap * sizeof(MemoryEntry)); }
+        MemoryEntry *e = &list[*count];
+        e->pos = sqlite3_column_int(stmt, 0);
+        const char *s = (const char *)sqlite3_column_text(stmt, 1);
+        e->text = s ? strdup(s) : strdup("");
+        (*count)++;
+    }
+    sqlite3_finalize(stmt);
+    if (*count == 0) { free(list); return NULL; }
+    return list;
+}
+
+void memory_entries_free(MemoryEntry *list, int count) {
+    if (!list) return;
+    for (int i = 0; i < count; i++) free(list[i].text);
+    free(list);
+}
+
+int memory_entry_add(sqlite3 *db, const char *agent_name,
+                     const char *block_label, const char *text) {
+    const char *sql = "INSERT INTO memory_entries(agent_name, block_label, pos, text)"
+                      " VALUES(?1,?2,(SELECT COALESCE(MAX(pos),0)+1 FROM memory_entries"
+                      " WHERE agent_name=?1 AND block_label=?2),?3);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, block_label, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, text, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    /* Retrieve the pos of the just-inserted row */
+    int64_t rowid = sqlite3_last_insert_rowid(db);
+    const char *pos_sql = "SELECT pos FROM memory_entries WHERE id=?;";
+    if (sqlite3_prepare_v2(db, pos_sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, rowid);
+    int pos = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) pos = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return pos;
+}
+
+int memory_entry_set(sqlite3 *db, const char *agent_name,
+                     const char *block_label, int number, const char *text) {
+    const char *sql = "UPDATE memory_entries SET text=?"
+                      " WHERE agent_name=? AND block_label=? AND pos=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, text, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, block_label, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, number);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (sqlite3_changes(db) > 0) ? 0 : -1;
+}
+
+int memory_entries_delete(sqlite3 *db, const char *agent_name,
+                          const char *block_label, const int *numbers, int n_numbers) {
+    sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+    int deleted = 0;
+    const char *del_sql = "DELETE FROM memory_entries"
+                          " WHERE agent_name=? AND block_label=? AND pos=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, del_sql, -1, &stmt, NULL) != SQLITE_OK) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return 0;
+    }
+    for (int i = 0; i < n_numbers; i++) {
+        sqlite3_reset(stmt);
+        sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, block_label, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 3, numbers[i]);
+        sqlite3_step(stmt);
+        deleted += sqlite3_changes(db);
+    }
+    sqlite3_finalize(stmt);
+    /* Renumber survivors contiguously */
+    const char *renum_sql =
+        "WITH ranked AS ("
+        "  SELECT id, ROW_NUMBER() OVER (ORDER BY pos) AS rn"
+        "  FROM memory_entries WHERE agent_name=?1 AND block_label=?2)"
+        " UPDATE memory_entries"
+        "  SET pos = (SELECT rn FROM ranked WHERE ranked.id = memory_entries.id)"
+        "  WHERE agent_name=?1 AND block_label=?2;";
+    if (sqlite3_prepare_v2(db, renum_sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, block_label, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    } else {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    }
+    return deleted;
+}
 
 char *session_get_last_route(sqlite3 *db, int64_t session_id) {
     const char *sql = "SELECT last_route FROM sessions WHERE id=?;";

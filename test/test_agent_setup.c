@@ -36,15 +36,20 @@ static void test_cli_mode_excludes_daemon_tools(void) {
     AgentSetup setup;
     agent_setup_init(&setup, db, sid, &cfg, "test_agent", NULL, 0, AGENT_SETUP_CLI);
 
-    /* V81: CLI should NOT have launch_agent, configure_* */
+    /* CLI excludes only daemon-runtime tools (launch/check need the daemon's
+     * session scheduler). DB-config tools (configure_*, create_agent) are now
+     * available in both modes — capability is agent/trust-based, not mode-gated. */
     if (tools_lookup(&setup.reg, "launch_agent") != NULL) {
         FAIL("launch_agent should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
     if (tools_lookup(&setup.reg, "check_session") != NULL) {
         FAIL("check_session should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
-    if (tools_lookup(&setup.reg, "configure_provider") != NULL) {
-        FAIL("configure_provider should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
+    if (tools_lookup(&setup.reg, "configure_provider") == NULL) {
+        FAIL("configure_provider should be available in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
+    }
+    if (tools_lookup(&setup.reg, "search_config") == NULL) {
+        FAIL("search_config should be available in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
 
     /* CLI should have core tools */

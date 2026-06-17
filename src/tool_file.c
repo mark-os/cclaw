@@ -156,8 +156,10 @@ static int parent_in_workspace(const char *filepath, const char *workspace, char
 }
 
 char *tool_file_write_handler(const char *arguments, void *user_data) {
-    const char *workspace = (const char *)user_data;
-    if (!workspace) return strdup("error: no workspace configured");
+    FileReadCtx *ctx = (FileReadCtx *)user_data;
+    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    if (ctx->read_only) return strdup("error: workspace is read-only (restricted trust level)");
+    const char *workspace = ctx->workspace;
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0)
@@ -241,11 +243,11 @@ char *tool_file_write_handler(const char *arguments, void *user_data) {
     return result;
 }
 
-int tool_file_write_register(ToolRegistry *reg, const char *workspace) {
+int tool_file_write_register(ToolRegistry *reg, FileReadCtx *ctx) {
     return tools_register(reg, "file_write",
                           "Write content to a file within the workspace directory",
                           FILE_WRITE_PARAMS_JSON, tool_file_write_handler,
-                          (void *)workspace);
+                          (void *)ctx);
 }
 
 /* Skip these directory names everywhere (matches Pi's default ignores). */
@@ -586,6 +588,7 @@ static void edits_free(EditOp *e, int n) {
 char *tool_file_edit_handler(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
     if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
+    if (ctx->read_only) return strdup("error: workspace is read-only (restricted trust level)");
     if (!arguments) return strdup("error: invalid JSON arguments");
 
     /* Own jsmn parse — the edits array can exceed the shared 64-token budget. */

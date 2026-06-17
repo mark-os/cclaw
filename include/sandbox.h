@@ -23,4 +23,9 @@ typedef struct {
  * unconfined. The proxy preload failing is a soft warning (returns 0). */
 int sandbox_child_setup(const SandboxConfig *cfg);
 
+/* Single source of truth: trust_level string → sandbox policy fields.
+ * Fills cfg->sandbox, env_mode, net_mode, mount_cwd, workspace_ro, rlimits.
+ * Does NOT touch workspace/db_path/proxy_sock/cwd_path (caller sets those). */
+void sandbox_policy_from_trust(const char *trust_level, SandboxConfig *cfg);
+
 #endif

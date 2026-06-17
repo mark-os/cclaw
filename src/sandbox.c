@@ -330,3 +330,23 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
 
     return 0;
 }
+
+void sandbox_policy_from_trust(const char *trust_level, SandboxConfig *cfg) {
+    if (trust_level && strcmp(trust_level, "host") == 0) {
+        cfg->sandbox = 0;
+        cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1; cfg->workspace_ro = 0;
+        cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
+    } else if (trust_level && strcmp(trust_level, "trusted") == 0) {
+        cfg->sandbox = 1;
+        cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1; cfg->workspace_ro = 0;
+        cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
+    } else if (trust_level && strcmp(trust_level, "restricted") == 0) {
+        cfg->sandbox = 1;
+        cfg->env_mode = 1; cfg->net_mode = 1; cfg->mount_cwd = 0; cfg->workspace_ro = 1;
+        cfg->rlimits.nproc = 8; cfg->rlimits.as_mb = 128; cfg->rlimits.cpu_sec = 10;
+    } else { /* "standard", unknown, NULL */
+        cfg->sandbox = 1;
+        cfg->env_mode = 1; cfg->net_mode = 0; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
+        cfg->rlimits.nproc = 64; cfg->rlimits.as_mb = 512; cfg->rlimits.cpu_sec = 60;
+    }
+}

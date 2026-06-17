@@ -92,6 +92,9 @@ char *tool_js_eval_handler(const char *arguments, void *user_data) {
         if (ectx && ectx->host_mode)
             setenv("CCLAW_MJS_HOST", "1", 1);
 
+        if (ectx && ectx->trust_level)
+            setenv("CCLAW_TRUST_LEVEL", ectx->trust_level, 1);
+
         /* Set allowed hosts */
         if (ectx && ectx->allowed_hosts_count > 0) {
             size_t csv_len = 0;

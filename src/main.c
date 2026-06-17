@@ -905,25 +905,15 @@ static int mjs_eval_main(int argc, char **argv) {
         free(tmp);
     }
 
-    /* rlimits */
-    const char *rl_nproc = getenv("CCLAW_RLIMIT_NPROC");
-    const char *rl_as = getenv("CCLAW_RLIMIT_AS_MB");
-    const char *rl_cpu = getenv("CCLAW_RLIMIT_CPU");
-
-    /* (c) Sandbox */
+    /* (c) Sandbox — derive policy from trust level */
+    const char *trust_env = getenv("CCLAW_TRUST_LEVEL");
     SandboxConfig cfg = {0};
+    sandbox_policy_from_trust(trust_env, &cfg);
     cfg.workspace = workspace;
     cfg.db_path = db_path;
     cfg.cwd_path = NULL;
     cfg.proxy_sock = proxy_sock;
-    cfg.env_mode = 1;
-    cfg.mount_cwd = 0;
-    cfg.workspace_ro = 0;
-    cfg.net_mode = (hosts_count > 0) ? 0 : 1;
-    cfg.sandbox = no_sandbox ? 0 : 1;
-    cfg.rlimits.nproc = rl_nproc ? atoi(rl_nproc) : 0;
-    cfg.rlimits.as_mb = rl_as ? atoi(rl_as) : 0;
-    cfg.rlimits.cpu_sec = rl_cpu ? atoi(rl_cpu) : 0;
+    if (no_sandbox) cfg.sandbox = 0;
 
     if (sandbox_child_setup(&cfg) != 0) {
         printf("error: sandbox setup failed\n");

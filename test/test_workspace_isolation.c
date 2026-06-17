@@ -79,7 +79,7 @@ static void test_read_cross_workspace_reverse(void) {
 static void test_write_cross_workspace(void) {
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"%s/evil.txt\",\"content\":\"pwned\"}", ws_b);
-    char *r = tool_file_write_handler(args, (void *)ws_a);
+    char *r = tool_file_write_handler(args, (void *)&ctx_a);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -107,7 +107,7 @@ static void test_write_traversal_to_other_workspace(void) {
     assert(b_name != NULL);
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"..%s/evil.txt\",\"content\":\"pwned\"}", b_name);
-    char *r = tool_file_write_handler(args, (void *)ws_a);
+    char *r = tool_file_write_handler(args, (void *)&ctx_a);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);

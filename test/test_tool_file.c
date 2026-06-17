@@ -112,7 +112,7 @@ static void test_register(void) {
 static void test_write_new_file(void) {
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"newfile.txt\",\"content\":\"hello write\"}");
-    char *r = tool_file_write_handler(args, (void *)tmpdir);
+    char *r = tool_file_write_handler(args, (void *)&file_ctx);
     assert(r != NULL);
     assert(strstr(r, "wrote") != NULL);
     free(r);
@@ -125,7 +125,7 @@ static void test_write_new_file(void) {
 }
 
 static void test_write_overwrite(void) {
-    char *r = tool_file_write_handler("{\"path\":\"hello.txt\",\"content\":\"overwritten\"}", (void *)tmpdir);
+    char *r = tool_file_write_handler("{\"path\":\"hello.txt\",\"content\":\"overwritten\"}", (void *)&file_ctx);
     assert(r != NULL);
     assert(strstr(r, "wrote") != NULL);
     free(r);
@@ -139,7 +139,7 @@ static void test_write_overwrite(void) {
 static void test_write_nested(void) {
     char args[512];
     snprintf(args, sizeof(args), "{\"path\":\"sub/written.txt\",\"content\":\"nested write\"}");
-    char *r = tool_file_write_handler(args, (void *)tmpdir);
+    char *r = tool_file_write_handler(args, (void *)&file_ctx);
     assert(r != NULL);
     assert(strstr(r, "wrote") != NULL);
     free(r);
@@ -152,7 +152,7 @@ static void test_write_nested(void) {
 
 static void test_write_traversal_blocked(void) {
     /* V1: path escape via ../ */
-    char *r = tool_file_write_handler("{\"path\":\"../../evil.txt\",\"content\":\"bad\"}", (void *)tmpdir);
+    char *r = tool_file_write_handler("{\"path\":\"../../evil.txt\",\"content\":\"bad\"}", (void *)&file_ctx);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -161,7 +161,7 @@ static void test_write_traversal_blocked(void) {
 
 static void test_write_absolute_outside(void) {
     /* V1: absolute path outside workspace */
-    char *r = tool_file_write_handler("{\"path\":\"/tmp/evil.txt\",\"content\":\"bad\"}", (void *)tmpdir);
+    char *r = tool_file_write_handler("{\"path\":\"/tmp/evil.txt\",\"content\":\"bad\"}", (void *)&file_ctx);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -169,7 +169,7 @@ static void test_write_absolute_outside(void) {
 }
 
 static void test_write_missing_content(void) {
-    char *r = tool_file_write_handler("{\"path\":\"foo.txt\"}", (void *)tmpdir);
+    char *r = tool_file_write_handler("{\"path\":\"foo.txt\"}", (void *)&file_ctx);
     assert(r != NULL);
     assert(strstr(r, "error") != NULL);
     free(r);
@@ -179,7 +179,7 @@ static void test_write_missing_content(void) {
 static void test_write_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    int rc = tool_file_write_register(&reg, tmpdir);
+    int rc = tool_file_write_register(&reg, &file_ctx);
     assert(rc == 0);
     ToolEntry *e = tools_lookup(&reg, "file_write");
     assert(e != NULL);
@@ -253,7 +253,7 @@ static void test_find_missing_pattern(void) {
 static void test_edit_batch(void) {
     /* Two non-overlapping edits, matched against the original content */
     char *r = tool_file_write_handler(
-        "{\"path\":\"edit.txt\",\"content\":\"alpha\\nbeta\\ngamma\"}", (void *)tmpdir);
+        "{\"path\":\"edit.txt\",\"content\":\"alpha\\nbeta\\ngamma\"}", (void *)&file_ctx);
     free(r);
     r = tool_file_edit_handler(
         "{\"path\":\"edit.txt\",\"edits\":["
@@ -270,7 +270,7 @@ static void test_edit_batch(void) {
 
 static void test_edit_not_unique(void) {
     char *r = tool_file_write_handler(
-        "{\"path\":\"dup.txt\",\"content\":\"x x x\"}", (void *)tmpdir);
+        "{\"path\":\"dup.txt\",\"content\":\"x x x\"}", (void *)&file_ctx);
     free(r);
     r = tool_file_edit_handler(
         "{\"path\":\"dup.txt\",\"edits\":[{\"oldText\":\"x\",\"newText\":\"y\"}]}",
@@ -293,7 +293,7 @@ static void test_edit_not_found(void) {
 
 static void test_edit_overlap(void) {
     char *r = tool_file_write_handler(
-        "{\"path\":\"ov.txt\",\"content\":\"abcdef\"}", (void *)tmpdir);
+        "{\"path\":\"ov.txt\",\"content\":\"abcdef\"}", (void *)&file_ctx);
     free(r);
     r = tool_file_edit_handler(
         "{\"path\":\"ov.txt\",\"edits\":["
@@ -310,7 +310,7 @@ static void test_edit_overlap(void) {
 static void test_grep_basic(void) {
     /* Create a file with known content for grep */
     char *w = tool_file_write_handler(
-        "{\"path\":\"grep_target.txt\",\"content\":\"alpha\\nbeta\\ngamma\"}", (void *)tmpdir);
+        "{\"path\":\"grep_target.txt\",\"content\":\"alpha\\nbeta\\ngamma\"}", (void *)&file_ctx);
     free(w);
     char *r = tool_file_grep_handler("{\"pattern\":\"beta\"}", (void *)&file_ctx);
     assert(r != NULL);
@@ -322,10 +322,10 @@ static void test_grep_basic(void) {
 static void test_grep_glob_filter(void) {
     /* glob restricts to matching basenames */
     char *w = tool_file_write_handler(
-        "{\"path\":\"src.c\",\"content\":\"findme here\"}", (void *)tmpdir);
+        "{\"path\":\"src.c\",\"content\":\"findme here\"}", (void *)&file_ctx);
     free(w);
     w = tool_file_write_handler(
-        "{\"path\":\"src.py\",\"content\":\"findme there\"}", (void *)tmpdir);
+        "{\"path\":\"src.py\",\"content\":\"findme there\"}", (void *)&file_ctx);
     free(w);
     char *r = tool_file_grep_handler(
         "{\"pattern\":\"findme\",\"glob\":\"*.c\"}", (void *)&file_ctx);
@@ -339,7 +339,7 @@ static void test_grep_glob_filter(void) {
 static void test_grep_recursive(void) {
     /* Should find matches in subdirectories */
     char *w = tool_file_write_handler(
-        "{\"path\":\"sub/deep.txt\",\"content\":\"unique_marker\"}", (void *)tmpdir);
+        "{\"path\":\"sub/deep.txt\",\"content\":\"unique_marker\"}", (void *)&file_ctx);
     free(w);
     char *r = tool_file_grep_handler("{\"pattern\":\"unique_marker\"}", (void *)&file_ctx);
     assert(r != NULL);

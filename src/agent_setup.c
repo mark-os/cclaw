@@ -7,6 +7,7 @@
 #include "tool_cron.h"
 #include "tool_request_config.h"
 #include "context.h"
+#include "sandbox.h"
 #include "log.h"
 #include <stdlib.h>
 #include <string.h>
@@ -42,9 +43,17 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
             sqlite3_finalize(tl_stmt);
         }
     }
+    /* Export so forked children (js_eval) inherit it */
+    if (trust_level)
+        setenv("CCLAW_TRUST_LEVEL", trust_level, 1);
 
     /* Shell — pass proxy socket path */
     tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace);
+
+    /* Trust-level policy bundle via shared helper */
+    SandboxConfig trust_policy = {0};
+    sandbox_policy_from_trust(trust_level, &trust_policy);
+
     /* Inject proxy sock path + secrets + trust-level policy into shell config */
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
@@ -54,24 +63,14 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         sc->secret_count = setup->secret_count;
         sc->cwd_path = getenv("CCLAW_PATH");  /* T276/V22a: CWD rw in CLI mode */
         sc->db_path = cfg->db_path;           /* mask .cclaw_key + db ciphertext from shell children */
-        /* Trust-level policy bundle. Sandbox is derived: every level requires
-         * the namespace except host, which never attempts it. */
-        sc->sandbox = 1;
-        if (trust_level && strcmp(trust_level, "host") == 0) {
-            sc->sandbox = 0;
-            sc->env_mode = 0; sc->net_mode = 0; sc->mount_cwd = 1; sc->workspace_ro = 0;
-            sc->rlimits.nproc = 0; sc->rlimits.as_mb = 0; sc->rlimits.cpu_sec = 0;
-        } else if (trust_level && strcmp(trust_level, "trusted") == 0) {
-            sc->env_mode = 0; sc->net_mode = 0; sc->mount_cwd = 1; sc->workspace_ro = 0;
-            sc->rlimits.nproc = 0; sc->rlimits.as_mb = 0; sc->rlimits.cpu_sec = 0;
-        } else if (trust_level && strcmp(trust_level, "restricted") == 0) {
-            sc->env_mode = 1; sc->net_mode = 1; sc->mount_cwd = 0; sc->workspace_ro = 1;
-            sc->rlimits.nproc = 8; sc->rlimits.as_mb = 128; sc->rlimits.cpu_sec = 10;
-        } else { /* "standard", unknown, and NULL (missing row / failed lookup):
-                    only an explicit trusted/host string elevates */
-            sc->env_mode = 1; sc->net_mode = 0; sc->mount_cwd = 0; sc->workspace_ro = 0;
-            sc->rlimits.nproc = 64; sc->rlimits.as_mb = 512; sc->rlimits.cpu_sec = 60;
-        }
+        sc->sandbox = trust_policy.sandbox;
+        sc->env_mode = trust_policy.env_mode;
+        sc->net_mode = trust_policy.net_mode;
+        sc->mount_cwd = trust_policy.mount_cwd;
+        sc->workspace_ro = trust_policy.workspace_ro;
+        sc->rlimits.nproc = trust_policy.rlimits.nproc;
+        sc->rlimits.as_mb = trust_policy.rlimits.as_mb;
+        sc->rlimits.cpu_sec = trust_policy.rlimits.cpu_sec;
     }
 
     /* File read/write — T118: allow workspace + session temp dir; T228: CCLAW_PATH */
@@ -80,8 +79,9 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->file_read_ctx.workspace = cfg->workspace;
     setup->file_read_ctx.extra_read_path = tmp_dir;
     setup->file_read_ctx.cclaw_path = getenv("CCLAW_PATH");
+    setup->file_read_ctx.read_only = trust_policy.workspace_ro;
     tool_file_read_register(&setup->reg, &setup->file_read_ctx);
-    tool_file_write_register(&setup->reg, cfg->workspace);
+    tool_file_write_register(&setup->reg, &setup->file_read_ctx);
     tool_file_list_register(&setup->reg, &setup->file_read_ctx);
     tool_file_find_register(&setup->reg, &setup->file_read_ctx);
     tool_file_edit_register(&setup->reg, &setup->file_read_ctx);
@@ -91,6 +91,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->js_eval_ctx.allowed_hosts = allowed_hosts;
     setup->js_eval_ctx.allowed_hosts_count = allowed_hosts_count;
     setup->js_eval_ctx.host_mode = (trust_level && strcmp(trust_level, "host") == 0) ? 1 : 0;
+    setup->js_eval_ctx.trust_level = trust_level;
     tool_js_eval_register(&setup->reg, &setup->js_eval_ctx);
 
     /* V46: web_fetch policy */

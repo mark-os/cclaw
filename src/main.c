@@ -811,7 +811,7 @@ static const char *MJS_EVAL_PRELUDE =
     "console.warn = console.log;\n"
     "console.error = console.log;\n"
     "var require = function() {\n"
-    "  throw new TypeError('require() not available. Use fs.readFile() for files, http_fetch() for network.');\n"
+    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readDir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_fetch(url).');\n"
     "};\n"
     "var process = {};\n"
     "Object.defineProperty(process, 'env', {get: function() { throw new TypeError('process.env not available.'); }});\n"
@@ -832,6 +832,22 @@ static int mjs_interrupt_handler(JSContext *ctx, void *opaque) {
     JsHostCtx *hctx = (JsHostCtx *)opaque;
     hctx->instruction_count++;
     return hctx->instruction_count > hctx->instruction_limit;
+}
+
+/* The eval profile is an ES5 engine, but models reach for ES6/Node syntax by
+ * default and the parser only reports a generic "unexpected character". Map the
+ * common offenders to an actionable hint so the model can self-correct. */
+static const char *mjs_syntax_hint(const char *code) {
+    if (!code) return "";
+    if (strstr(code, "const ") || strstr(code, "let "))
+        return " — hint: this engine is ES5; use 'var' instead of 'const'/'let'";
+    if (strstr(code, "=>"))
+        return " — hint: arrow functions are unsupported; use function(x){ return ...; }";
+    if (strstr(code, "`"))
+        return " — hint: template literals are unsupported; concatenate with 'a' + b";
+    if (strstr(code, "require(") || strstr(code, "import "))
+        return " — hint: no modules; 'fs' and 'http_fetch' are globals (e.g. fs.readDir('.'))";
+    return "";
 }
 
 static int mjs_eval_main(int argc, char **argv) {
@@ -984,9 +1000,10 @@ static int mjs_eval_main(int argc, char **argv) {
         JSCStringBuf buf;
         const char *msg = JS_ToCString(ctx, exc, &buf);
         if (msg) {
-            size_t len = strlen(msg) + 16;
+            const char *hint = strstr(msg, "SyntaxError") ? mjs_syntax_hint(eval_code) : "";
+            size_t len = strlen(msg) + strlen(hint) + 16;
             result = malloc(len);
-            if (result) snprintf(result, len, "error: %s", msg);
+            if (result) snprintf(result, len, "error: %s%s", msg, hint);
             else result = strdup("error: OOM");
         } else {
             result = strdup("error: exception (no message)");

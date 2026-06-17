@@ -47,8 +47,12 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - web: `GET /` → minimal status page (active sessions, state metrics, inbox depths, uptime)
 - tool: `shell_exec` — run cmd, return stdout/stderr
 - tool: `file_read` — read file (workspace-restricted)
-- tool: `file_write` — write file (workspace-restricted)
-- tool: `js_eval` — execute JS in sandboxed mquickjs (plugin engine: agents use this to run workspace scripts, test logic, transform data)
+- tool: `file_write` — create/overwrite file entirely (workspace-restricted)
+- tool: `file_edit` — batched search/replace; each `oldText` unique, matched against original, non-overlapping
+- tool: `file_list` — list a directory (sorted, `/` marks dirs); workspace-restricted
+- tool: `file_find` — find files by glob (basename, or path with `**`); skips `.git`/`node_modules`
+- tool: `file_grep` — search file contents by POSIX ERE, returns `path:line:match`; skips binaries/`.git`/`node_modules`
+- tool: `js_eval` — execute JS in sandboxed mquickjs (ES5: `var`, no `const`/`let`/modules; globals `fs.*`, `http_fetch`); agents run workspace scripts, test logic, transform data
 - tool: `js_define_tool` — register JS fn as callable tool (session-persistent); foundation of plugin system — agents augment themselves by defining new tools at runtime
 - js binding: `http_fetch(url, {method, headers, body, sanitize})` — C-provided, enforces agent `allowed_hosts` + SSRF protection; `sanitize: true` strips HTML + homoglyphs + boundary wraps (same as web_fetch); sole network path from JS runtime
 - tool: `spawn_agent` — agent exits w/ code 2; daemon reads tool_call from agent DB, forks sub-agent

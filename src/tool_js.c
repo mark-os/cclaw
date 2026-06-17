@@ -306,7 +306,11 @@ done:
 
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
     return tools_register(reg, "js_eval",
-                          "Execute JavaScript code in a sandboxed environment and return the result",
+                          "Run JavaScript in a sandboxed ES5 engine; returns the last expression (or console.log output). "
+                          "ES5 only: use 'var' (no const/let), function(){} (no arrow =>), string concat (no `template` literals), "
+                          "no destructuring/async/generators, no require/import. "
+                          "Globals: fs.readDir(path) (lists a directory), fs.readFile(path), fs.writeFile(path, data), "
+                          "fs.stat(path), fs.cwd(), http_fetch(url). Example: var f = fs.readDir('.'); f",
                           JSEVAL_PARAMS_JSON, tool_js_eval_handler, ctx);
 }
 

@@ -25,4 +25,21 @@ int tool_file_write_register(ToolRegistry *reg, const char *workspace);
  * user_data is the workspace path (char*). Returns heap-allocated result. */
 char *tool_file_write_handler(const char *arguments, void *user_data);
 
+/* Register file_list (ls) tool. Shares FileReadCtx with file_read for path
+ * guarding. ctx must remain valid for tool lifetime. */
+int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx);
+char *tool_file_list_handler(const char *arguments, void *user_data);
+
+/* Register file_find (glob) tool. Shares FileReadCtx with file_read. */
+int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx);
+char *tool_file_find_handler(const char *arguments, void *user_data);
+
+/* Register file_edit (search/replace) tool. Edits files within the workspace. */
+int tool_file_edit_register(ToolRegistry *reg, FileReadCtx *ctx);
+char *tool_file_edit_handler(const char *arguments, void *user_data);
+
+/* Register file_grep (content search) tool. Shares FileReadCtx with file_read. */
+int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx);
+char *tool_file_grep_handler(const char *arguments, void *user_data);
+
 #endif

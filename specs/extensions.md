@@ -16,6 +16,28 @@ Channel components are **special** — they run as separate processes with their
 
 An extension can provide all three, or just one. Installing an extension makes all its components available.
 
+## JS Runtime: Dialect & Globals
+
+All JavaScript in CClaw — extension tools/hooks, `js_define_tool` handlers, and the `js_eval` tool — runs in the same MicroQuickJS engine. It is **ES5**, not modern JS:
+
+- Use `var` — `const` and `let` are **not** parsed (they raise `SyntaxError: unexpected character in expression`).
+- No arrow functions (`=>`), template literals (`` `...` ``), destructuring, generators, or `async`/`await`. Use `function(){}` and string concatenation.
+- No module system — `require`/`import` throw. Capabilities are **globals**, not imports.
+- `RegExp` literals (`/\.c$/`) and `JSON` are supported.
+
+Available globals:
+
+| Global | Description |
+|--------|-------------|
+| `fs.readDir(path)` | List a directory. Returns `[names, errno]` — index `[0]` for the array. |
+| `fs.readFile(path)` / `fs.writeFile(path, data)` | Read / write a file (workspace-scoped). |
+| `fs.stat(path)` | Returns `[{size, mode, mtime, isDir}, errno]`. |
+| `fs.cwd()` | Current working directory. |
+| `http_fetch(url)` | Blocking HTTP GET (host-allowlisted). **Throws in channel JS** — channels use `cclaw.send`. |
+| `console.log/warn/error` | Buffered; emitted as the result if the script returns `undefined`. |
+
+`js_eval` returns the value of the last expression (or buffered `console.log` output if that is `undefined`). Example: `var f = fs.readDir("."); f[0]`.
+
 ## Extension Package Layout
 
 ```

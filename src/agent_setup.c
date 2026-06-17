@@ -83,6 +83,10 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->file_read_ctx.cclaw_path = getenv("CCLAW_PATH");
     tool_file_read_register(&setup->reg, &setup->file_read_ctx);
     tool_file_write_register(&setup->reg, cfg->workspace);
+    tool_file_list_register(&setup->reg, &setup->file_read_ctx);
+    tool_file_find_register(&setup->reg, &setup->file_read_ctx);
+    tool_file_edit_register(&setup->reg, &setup->file_read_ctx);
+    tool_file_grep_register(&setup->reg, &setup->file_read_ctx);
 
     /* JS eval with per-agent allowed_hosts */
     setup->js_eval_ctx.allowed_hosts = allowed_hosts;

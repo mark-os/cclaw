@@ -77,6 +77,27 @@ Agents can request their own reconfiguration through exit codes and tool calls:
 
 Configuration is hierarchical: env vars override DB values override defaults. Agents read from DB but can only write through sanctioned tool calls.
 
+## Built-in Tools
+
+Every agent starts with a core toolset (more can be added at runtime — see [Extensible](#extensible)):
+
+| Tool | Purpose |
+|------|---------|
+| `file_read` / `file_write` | Read a file / create or overwrite it entirely |
+| `file_edit` | Targeted search/replace edits — batched, matched against the original, non-overlapping |
+| `file_list` | List a directory (sorted alphabetically, `/` marks directories) |
+| `file_find` | Find files by glob (`*.c`, `src/**/*.spec.ts`) |
+| `file_grep` | Search file contents by POSIX regex, returns `path:line:match` |
+| `shell_exec` | Run a shell command in the namespace sandbox |
+| `js_eval` | Run JavaScript in the sandboxed ES5 engine |
+| `web_fetch` | Fetch a URL (host-allowlisted) |
+| `db_query` | Query the agent's own SQLite database |
+| `memory_create` / `memory_append` / `memory_replace` | Edit persistent memory blocks |
+
+File tools are workspace-scoped (no traversal); `file_find`/`file_grep` skip `.git` and `node_modules`. `js_eval` runs an **ES5** dialect (`var`, not `const`/`let`; no `require`/`import`) with filesystem globals `fs.readDir/readFile/writeFile/stat/cwd` plus `http_fetch` — see [specs/extensions.md](specs/extensions.md#js-runtime-dialect--globals).
+
+Daemon mode adds orchestration tools (`create_agent`, `launch_agent`, `configure_provider`, `configure_channel`, `cron_*`); any agent can request more via `request_config`.
+
 ## Extensible
 
 The MicroQuickJS plugin system lets agents load JavaScript extensions at runtime:

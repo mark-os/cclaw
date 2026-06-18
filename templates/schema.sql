@@ -295,3 +295,20 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
+
+-- ═══ Approvals ═══
+CREATE TABLE IF NOT EXISTS approvals (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id   INTEGER NOT NULL,
+  tool_call_id TEXT,
+  tool_name    TEXT,
+  action       TEXT,
+  scope        TEXT NOT NULL DEFAULT 'persist',
+  args_json    TEXT,
+  args_hash    TEXT,
+  state        TEXT NOT NULL DEFAULT 'pending',
+  decided_via  TEXT,
+  requested_at INTEGER DEFAULT (unixepoch()),
+  expires_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS approvals_pending ON approvals(session_id, state) WHERE state='pending';

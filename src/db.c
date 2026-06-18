@@ -879,17 +879,20 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
 /* State transition guard. Busy states (llm_running/tool_running/compacting/
  * rate_limited) are reachable from idle or each other (a turn moves
  * llm_running → tool_running → llm_running, and ends llm_running → compacting);
- * idle is reachable from any busy state plus awaiting_agent rows. */
+ * idle is reachable from any busy state plus awaiting_agent/awaiting_approval;
+ * awaiting_approval is reachable from llm_running/tool_running;
+ * tool_running is also reachable from awaiting_approval (approval resolved). */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     const char *sql =
         "UPDATE sessions SET state=?, updated_at=unixepoch(),"
         " turn_iteration = CASE WHEN ?='idle' THEN 0 ELSE turn_iteration END"
         " WHERE id=? AND ("
         "  (? IN ('llm_running','tool_running','compacting','rate_limited')"
-        "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited')) OR"
+        "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited','awaiting_approval')) OR"
         "  (? = 'awaiting_agent' AND state IN ('idle','llm_running','tool_running')) OR"
+        "  (? = 'awaiting_approval' AND state IN ('llm_running','tool_running')) OR"
         "  (? = 'idle' AND state IN"
-        "     ('llm_running','tool_running','compacting','rate_limited','awaiting_agent'))"
+        "     ('llm_running','tool_running','compacting','rate_limited','awaiting_agent','awaiting_approval'))"
         ");";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -900,6 +903,7 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     sqlite3_bind_text(stmt, 4, state, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 5, state, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 6, state, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 7, state, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;

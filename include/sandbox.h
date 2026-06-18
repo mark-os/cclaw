@@ -16,6 +16,9 @@ typedef struct {
     int net_mode;           /* 0 = proxy available, 1 = no network */
     int env_mode;           /* 0 = inherit + scrub secrets, 1 = clean allowlist */
     struct { int nproc, as_mb, cpu_sec; } rlimits; /* 0 = no limit */
+    /* Layer 2: extra bind-mounts from read_path/write_path grants */
+    struct { const char *path; int ro; } *extra_mounts;
+    size_t extra_mount_count;
 } SandboxConfig;
 
 /* Run in the forked child before exec. Returns 0 on success, -1 on a hard

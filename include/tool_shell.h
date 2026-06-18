@@ -28,6 +28,11 @@ typedef struct {
     int mount_cwd;          /* 1=mount CWD rw, 0=skip */
     int workspace_ro;       /* 0=rw, 1=read-only */
     struct { int nproc; int as_mb; int cpu_sec; } rlimits; /* 0 = no limit */
+    /* Layer 2: extra paths from grants (pointers into AgentCaps) */
+    char **read_paths;
+    size_t read_path_count;
+    char **write_paths;
+    size_t write_path_count;
 } ShellConfig;
 
 /* Register shell_exec tool into registry.

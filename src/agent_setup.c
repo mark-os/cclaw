@@ -72,6 +72,10 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         sc->rlimits.nproc = trust_policy.rlimits.nproc;
         sc->rlimits.as_mb = trust_policy.rlimits.as_mb;
         sc->rlimits.cpu_sec = trust_policy.rlimits.cpu_sec;
+        sc->read_paths = setup->caps.read_paths;
+        sc->read_path_count = setup->caps.read_count;
+        sc->write_paths = setup->caps.write_paths;
+        sc->write_path_count = setup->caps.write_count;
     }
 
     /* File tools — forked sandbox path shares trust policy with shell */
@@ -86,6 +90,10 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->file_read_ctx.rlimits.nproc = trust_policy.rlimits.nproc;
     setup->file_read_ctx.rlimits.as_mb = trust_policy.rlimits.as_mb;
     setup->file_read_ctx.rlimits.cpu_sec = trust_policy.rlimits.cpu_sec;
+    setup->file_read_ctx.read_paths = setup->caps.read_paths;
+    setup->file_read_ctx.read_path_count = setup->caps.read_count;
+    setup->file_read_ctx.write_paths = setup->caps.write_paths;
+    setup->file_read_ctx.write_path_count = setup->caps.write_count;
     tool_file_read_register(&setup->reg, &setup->file_read_ctx);
     tool_file_write_register(&setup->reg, &setup->file_read_ctx);
     tool_file_list_register(&setup->reg, &setup->file_read_ctx);
@@ -98,6 +106,10 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->js_eval_ctx.allowed_hosts_count = setup->caps.host_count;
     setup->js_eval_ctx.host_mode = (trust_level && strcmp(trust_level, "host") == 0) ? 1 : 0;
     setup->js_eval_ctx.trust_level = trust_level;
+    setup->js_eval_ctx.read_paths = setup->caps.read_paths;
+    setup->js_eval_ctx.read_path_count = setup->caps.read_count;
+    setup->js_eval_ctx.write_paths = setup->caps.write_paths;
+    setup->js_eval_ctx.write_path_count = setup->caps.write_count;
     tool_js_eval_register(&setup->reg, &setup->js_eval_ctx);
 
     /* V46: web_fetch policy */

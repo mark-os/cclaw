@@ -100,6 +100,25 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
             cfg.rlimits.nproc   = sc_child->rlimits.nproc;
             cfg.rlimits.as_mb   = sc_child->rlimits.as_mb;
             cfg.rlimits.cpu_sec = sc_child->rlimits.cpu_sec;
+            /* Layer 2: build extra_mounts from read/write path grants */
+            size_t n_extra = sc_child->read_path_count + sc_child->write_path_count;
+            if (n_extra > 0) {
+                cfg.extra_mounts = malloc(n_extra * sizeof(*cfg.extra_mounts));
+                if (cfg.extra_mounts) {
+                    size_t j = 0;
+                    for (size_t i = 0; i < sc_child->read_path_count; i++) {
+                        cfg.extra_mounts[j].path = sc_child->read_paths[i];
+                        cfg.extra_mounts[j].ro = 1;
+                        j++;
+                    }
+                    for (size_t i = 0; i < sc_child->write_path_count; i++) {
+                        cfg.extra_mounts[j].path = sc_child->write_paths[i];
+                        cfg.extra_mounts[j].ro = 0;
+                        j++;
+                    }
+                    cfg.extra_mount_count = n_extra;
+                }
+            }
         } else {
             cfg.sandbox = 1;  /* no config → sandbox still required */
         }

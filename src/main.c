@@ -910,6 +910,23 @@ static int mjs_eval_main(int argc, char **argv) {
         free(tmp);
     }
 
+    /* Layer 2: parse read/write paths from env → extra_mounts */
+    size_t read_count = 0, write_count = 0;
+    const char *rp_env = getenv("CCLAW_READ_PATHS");
+    const char *wp_env = getenv("CCLAW_WRITE_PATHS");
+    if (rp_env && rp_env[0]) {
+        char *tmp = strdup(rp_env);
+        for (char *t = strtok(tmp, ","); t; t = strtok(NULL, ",")) read_count++;
+        free(tmp);
+    }
+    if (wp_env && wp_env[0]) {
+        char *tmp = strdup(wp_env);
+        for (char *t = strtok(tmp, ","); t; t = strtok(NULL, ",")) write_count++;
+        free(tmp);
+    }
+    size_t n_extra = read_count + write_count;
+    char **rp_strs = NULL, **wp_strs = NULL;
+
     /* (c) Sandbox — derive policy from trust level */
     const char *trust_env = getenv("CCLAW_TRUST_LEVEL");
     SandboxConfig cfg = {0};
@@ -920,6 +937,38 @@ static int mjs_eval_main(int argc, char **argv) {
     cfg.cwd_path = NULL;
     cfg.proxy_sock = proxy_sock;
     if (no_sandbox) cfg.sandbox = 0;
+
+    if (n_extra > 0) {
+        cfg.extra_mounts = malloc(n_extra * sizeof(*cfg.extra_mounts));
+        cfg.extra_mount_count = n_extra;
+        size_t j = 0;
+        if (read_count > 0) {
+            rp_strs = malloc(read_count * sizeof(char *));
+            char *tmp = strdup(rp_env);
+            char *tok = strtok(tmp, ",");
+            for (size_t i = 0; i < read_count; i++) {
+                rp_strs[i] = strdup(tok);
+                cfg.extra_mounts[j].path = rp_strs[i];
+                cfg.extra_mounts[j].ro = 1;
+                j++;
+                tok = strtok(NULL, ",");
+            }
+            free(tmp);
+        }
+        if (write_count > 0) {
+            wp_strs = malloc(write_count * sizeof(char *));
+            char *tmp = strdup(wp_env);
+            char *tok = strtok(tmp, ",");
+            for (size_t i = 0; i < write_count; i++) {
+                wp_strs[i] = strdup(tok);
+                cfg.extra_mounts[j].path = wp_strs[i];
+                cfg.extra_mounts[j].ro = 0;
+                j++;
+                tok = strtok(NULL, ",");
+            }
+            free(tmp);
+        }
+    }
 
     if (sandbox_child_setup(&cfg) != 0) {
         printf("error: sandbox setup failed\n");

@@ -15,6 +15,11 @@ typedef struct {
     int mount_cwd;
     int env_mode;
     struct { int nproc; int as_mb; int cpu_sec; } rlimits;
+    /* Layer 2: extra paths from grants (pointers into AgentCaps) */
+    char **read_paths;
+    size_t read_path_count;
+    char **write_paths;
+    size_t write_path_count;
 } FileReadCtx;
 
 /* Register file_read tool into registry. Returns 0 on success.

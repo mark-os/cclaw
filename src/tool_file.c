@@ -60,6 +60,26 @@ char *file_sandbox_run(FileReadCtx *ctx, char *(*handler)(const char *, void *),
         cfg.rlimits.as_mb   = ctx->rlimits.as_mb;
         cfg.rlimits.cpu_sec = ctx->rlimits.cpu_sec;
 
+        /* Layer 2: build extra_mounts from read/write path grants */
+        size_t n_extra = ctx->read_path_count + ctx->write_path_count;
+        if (n_extra > 0) {
+            cfg.extra_mounts = malloc(n_extra * sizeof(*cfg.extra_mounts));
+            if (cfg.extra_mounts) {
+                size_t j = 0;
+                for (size_t i = 0; i < ctx->read_path_count; i++) {
+                    cfg.extra_mounts[j].path = ctx->read_paths[i];
+                    cfg.extra_mounts[j].ro = 1;
+                    j++;
+                }
+                for (size_t i = 0; i < ctx->write_path_count; i++) {
+                    cfg.extra_mounts[j].path = ctx->write_paths[i];
+                    cfg.extra_mounts[j].ro = 0;
+                    j++;
+                }
+                cfg.extra_mount_count = n_extra;
+            }
+        }
+
         if (sandbox_child_setup(&cfg) != 0) {
             const char *msg = "error: namespace sandbox unavailable";
             (void)write(pipefd[1], msg, strlen(msg));

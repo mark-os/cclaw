@@ -25,6 +25,11 @@ typedef struct {
     size_t allowed_hosts_count;
     int host_mode;  /* 1 = trust_level host (no sandbox), 0 = sandbox child */
     const char *trust_level;  /* propagated to forked child via CCLAW_TRUST_LEVEL */
+    /* Layer 2: extra paths from grants (pointers into AgentCaps) */
+    char **read_paths;
+    size_t read_path_count;
+    char **write_paths;
+    size_t write_path_count;
 } JsEvalCtx;
 
 /* Set allowed_hosts on a persistent JS runtime (V38).

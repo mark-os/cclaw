@@ -89,12 +89,35 @@ static int sandbox_remount_ro(const char *path) {
     return mount(NULL, path, NULL, flags, NULL);
 }
 
+/* Bind a single directory into newroot at its absolute path.
+ * Creates intermediate dirs, bind-mounts, optionally remounts ro. */
+static void bind_dir_into(const char *newroot, const char *abspath, int ro) {
+    struct stat st;
+    if (stat(abspath, &st) != 0 || !S_ISDIR(st.st_mode)) return;
+    char dst[PATH_MAX + 64];
+    int n = snprintf(dst, sizeof(dst), "%s%s", newroot, abspath);
+    if (n < 0 || (size_t)n >= sizeof(dst)) return;
+    /* mkdir -p the target under newroot */
+    char *p = dst + strlen(newroot) + 1;
+    for (char *slash = p; *slash; slash++) {
+        if (*slash == '/') {
+            *slash = '\0';
+            mkdir(dst, 0755);
+            *slash = '/';
+        }
+    }
+    mkdir(dst, 0755);
+    if (mount(abspath, dst, NULL, MS_BIND, NULL) != 0) return;
+    if (ro) sandbox_remount_ro(dst);
+}
+
 /* V82/V37/V22a: Apply namespace sandbox in the child.
  * unshare(USER|MNT|PID|NET), write uid/gid maps, pivot_root into minimal fs.
  * System dirs mounted ro, workspace rw, cwd_path rw (CLI mode).
  * Returns 0 on success, -1 on failure. */
 static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
-                                   const char *db_path, const char *env_file) {
+                                   const char *db_path, const char *env_file,
+                                   const SandboxConfig *full_cfg) {
     uid_t uid = getuid();
     gid_t gid = getgid();
 
@@ -178,40 +201,21 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
     mkdir(tmp_path, 01777);
 
     /* Bind-mount workspace rw */
-    if (ws_resolved) {
-        struct stat st;
-        if (stat(ws_resolved, &st) == 0 && S_ISDIR(st.st_mode)) {
-            char ws_dst[PATH_MAX + 64];
-            snprintf(ws_dst, sizeof(ws_dst), "%s%s", newroot, ws_resolved);
-            char *p = ws_dst + strlen(newroot) + 1;
-            for (char *slash = p; *slash; slash++) {
-                if (*slash == '/') {
-                    *slash = '\0';
-                    mkdir(ws_dst, 0755);
-                    *slash = '/';
-                }
-            }
-            mkdir(ws_dst, 0755);
-            mount(ws_resolved, ws_dst, NULL, MS_BIND, NULL);
-        }
-    }
+    if (ws_resolved)
+        bind_dir_into(newroot, ws_resolved, 0);
 
     /* Bind-mount CWD rw (CLI mode) */
-    if (cwd_resolved) {
-        struct stat st;
-        if (stat(cwd_resolved, &st) == 0 && S_ISDIR(st.st_mode)) {
-            char cwd_dst[PATH_MAX + 64];
-            snprintf(cwd_dst, sizeof(cwd_dst), "%s%s", newroot, cwd_resolved);
-            char *p = cwd_dst + strlen(newroot) + 1;
-            for (char *slash = p; *slash; slash++) {
-                if (*slash == '/') {
-                    *slash = '\0';
-                    mkdir(cwd_dst, 0755);
-                    *slash = '/';
-                }
-            }
-            mkdir(cwd_dst, 0755);
-            mount(cwd_resolved, cwd_dst, NULL, MS_BIND, NULL);
+    if (cwd_resolved)
+        bind_dir_into(newroot, cwd_resolved, 0);
+
+    /* Layer 2: extra bind-mounts from read_path/write_path grants */
+    if (full_cfg && full_cfg->extra_mounts) {
+        for (size_t i = 0; i < full_cfg->extra_mount_count; i++) {
+            const char *p = full_cfg->extra_mounts[i].path;
+            if (!p || !p[0]) continue;
+            char abs[PATH_MAX];
+            if (!realpath(p, abs)) continue;
+            bind_dir_into(newroot, abs, full_cfg->extra_mounts[i].ro);
         }
     }
 
@@ -317,7 +321,7 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     if (cfg->net_mode) psock = NULL;
 
     /* V82/V37: namespace sandbox — fail closed if requested but unavailable */
-    if (cfg->sandbox && sandbox_apply_namespace(ws, cwd, cfg->db_path, cfg->env_file) != 0) {
+    if (cfg->sandbox && sandbox_apply_namespace(ws, cwd, cfg->db_path, cfg->env_file, cfg) != 0) {
         fprintf(stderr, "error: namespace sandbox unavailable (errno=%d); "
                 "this trust level requires it — enable unprivileged user "
                 "namespaces or set the agent's trust_level to 'host'\n", errno);

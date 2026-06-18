@@ -114,6 +114,38 @@ char *tool_js_eval_handler(const char *arguments, void *user_data) {
             setenv("CCLAW_ALLOWED_HOSTS", "", 1);
         }
 
+        /* Layer 2: pass read/write paths to forked child via env */
+        if (ectx && ectx->read_path_count > 0) {
+            size_t csv_len = 0;
+            for (size_t i = 0; i < ectx->read_path_count; i++)
+                csv_len += strlen(ectx->read_paths[i]) + 1;
+            char *csv = malloc(csv_len);
+            if (csv) {
+                csv[0] = '\0';
+                for (size_t i = 0; i < ectx->read_path_count; i++) {
+                    if (i > 0) strcat(csv, ",");
+                    strcat(csv, ectx->read_paths[i]);
+                }
+                setenv("CCLAW_READ_PATHS", csv, 1);
+                free(csv);
+            }
+        }
+        if (ectx && ectx->write_path_count > 0) {
+            size_t csv_len = 0;
+            for (size_t i = 0; i < ectx->write_path_count; i++)
+                csv_len += strlen(ectx->write_paths[i]) + 1;
+            char *csv = malloc(csv_len);
+            if (csv) {
+                csv[0] = '\0';
+                for (size_t i = 0; i < ectx->write_path_count; i++) {
+                    if (i > 0) strcat(csv, ",");
+                    strcat(csv, ectx->write_paths[i]);
+                }
+                setenv("CCLAW_WRITE_PATHS", csv, 1);
+                free(csv);
+            }
+        }
+
         /* Default to /proc/self/exe (robust to rename/PATH); tests override
          * with CCLAW_MJS_EXE to point at the real cclaw binary. */
         const char *self_exe = getenv("CCLAW_MJS_EXE");

@@ -123,7 +123,7 @@ function processMessage(msg, updateId) {
 
     // Check for pending dialog reply
     if (dialogs[chatId]) {
-        handleDialogReply(chatId, text);
+        handleDialogReply(chatId, text, msg.message_id);
         return;
     }
 
@@ -225,11 +225,14 @@ function handleWhitelistCallback(chatId, data) {
 
 // ── Dialog reply handler ─────────────────────────────────────────
 
-function handleDialogReply(chatId, text) {
+function handleDialogReply(chatId, text, messageId) {
     var d = dialogs[chatId];
     delete dialogs[chatId];
 
     if (d.type === "key") {
+        if (messageId) {
+            tgCall("deleteMessage", JSON.stringify({chat_id: parseInt(chatId, 10), message_id: messageId}));
+        }
         var rc = channel.admin.setKey(d.provider, text);
         sendMessage(chatId, rc === 0 ? msg("key_saved") : msg("key_failed"));
     } else if (d.type === "config_model") {

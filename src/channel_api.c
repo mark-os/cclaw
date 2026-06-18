@@ -34,17 +34,22 @@ void channel_ctx_free(ChannelCtx *ctx) {
 }
 
 /* V100/V105: Insert event + wake daemon */
-int channel_emit(ChannelCtx *ctx, const char *event_type, const char *payload) {
+int channel_emit(ChannelCtx *ctx, const char *event_type, const char *payload,
+                 const char *external_id) {
     if (!ctx || !event_type || !payload) return -1;
     const char *sql =
-        "INSERT INTO channel_events(channel_name, event_type, payload)"
-        " VALUES(?,?,?);";
+        "INSERT OR IGNORE INTO channel_events(channel_name, event_type, payload, external_id)"
+        " VALUES(?,?,?,?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(stmt, 1, ctx->channel_name, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, event_type, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, payload, -1, SQLITE_STATIC);
+    if (external_id)
+        sqlite3_bind_text(stmt, 4, external_id, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 4);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;

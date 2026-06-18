@@ -183,22 +183,28 @@ void channel_consume_events(sqlite3 *db) {
 
         /* Resolve agent via channel_routes, find/create session */
         {
-            /* Extract channel_id from payload if present */
+            /* Extract channel_id from payload via SQLite json_extract */
             const char *cid = "*";
             char cid_buf[64] = {0};
-            const char *cid_key = "\"channel_id\":\"";
-            const char *p = strstr(payload, cid_key);
-            if (p) {
-                p += strlen(cid_key);
-                const char *end = strchr(p, '"');
-                if (end && (size_t)(end - p) < sizeof(cid_buf)) {
-                    memcpy(cid_buf, p, (size_t)(end - p));
-                    cid_buf[end - p] = '\0';
-                    cid = cid_buf;
+            {
+                const char *jsql = "SELECT CAST(json_extract(?, '$.channel_id') AS TEXT);";
+                sqlite3_stmt *js;
+                if (sqlite3_prepare_v2(db, jsql, -1, &js, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(js, 1, payload, -1, SQLITE_STATIC);
+                    if (sqlite3_step(js) == SQLITE_ROW) {
+                        const char *val = (const char *)sqlite3_column_text(js, 0);
+                        if (val && val[0] && strlen(val) < sizeof(cid_buf)) {
+                            memcpy(cid_buf, val, strlen(val) + 1);
+                            cid = cid_buf;
+                        }
+                    }
+                    sqlite3_finalize(js);
                 }
             }
 
             char *agent = db_channel_binding_get(db, ch_name, cid);
+            if (!agent && strcmp(cid, "*") != 0)
+                agent = db_channel_binding_get(db, ch_name, "*");
             if (!agent) goto del;
 
             /* Find or create session for this channel+channel_id */
@@ -228,7 +234,12 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
             if (sid > 0) {
-                inbox_insert_scanned(db, sid, ch_name, payload);
+                int64_t irc = inbox_insert_scanned(db, sid, ch_name, payload);
+                if (irc < 0) {
+                    /* Enqueue failed — leave event for retry */
+                    free(agent);
+                    continue;
+                }
                 wake_session(sid);
             }
             free(agent);

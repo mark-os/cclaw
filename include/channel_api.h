@@ -25,7 +25,8 @@ ChannelCtx *channel_ctx_open(const char *db_path, const char *channel_name);
 void channel_ctx_free(ChannelCtx *ctx);
 
 /* V100: Insert channel_events row + daemon_wake(). */
-int channel_emit(ChannelCtx *ctx, const char *event_type, const char *payload);
+int channel_emit(ChannelCtx *ctx, const char *event_type, const char *payload,
+                 const char *external_id);
 
 /* V102: Read from channel_state kv. Caller frees returned string. */
 char *channel_get_config(ChannelCtx *ctx, const char *key);

@@ -209,7 +209,9 @@ CREATE TABLE IF NOT EXISTS channel_events (
   channel_name TEXT NOT NULL,
   event_type TEXT NOT NULL DEFAULT 'message',
   payload TEXT NOT NULL,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  external_id TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  UNIQUE(channel_name, external_id)
 );
 
 CREATE TABLE IF NOT EXISTS channel_outbox (

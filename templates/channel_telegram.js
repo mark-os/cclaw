@@ -64,7 +64,7 @@ function onRequest(req) {
     try { update = JSON.parse(req.body); } catch (e) {
         return {status: 400, body: "bad json"};
     }
-    if (update.message) processMessage(update.message);
+    if (update.message) processMessage(update.message, update.update_id);
     if (update.callback_query) processCallback(update.callback_query);
     return {status: 200, body: "ok"};
 }
@@ -83,7 +83,7 @@ function processUpdates(body) {
         var update = data.result[i];
         if (update.update_id >= offset) offset = update.update_id + 1;
 
-        if (update.message) processMessage(update.message);
+        if (update.message) processMessage(update.message, update.update_id);
         if (update.callback_query) processCallback(update.callback_query);
     }
 
@@ -114,7 +114,7 @@ function onOutbox(item) {
 
 // ── Message processing ──────────────────────────────────────────
 
-function processMessage(msg) {
+function processMessage(msg, updateId) {
     var chat = msg.chat;
     var text = msg.text;
     if (!chat || !text) return;
@@ -141,7 +141,7 @@ function processMessage(msg) {
         text: text,
         from: msg.from ? msg.from.first_name || "" : ""
     });
-    channel.emit("message", payload);
+    channel.emit("message", payload, "tg_" + updateId);
 }
 
 function processCallback(cbq) {

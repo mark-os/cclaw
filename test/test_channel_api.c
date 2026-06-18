@@ -35,7 +35,7 @@ static void test_channel_emit(void) {
     ChannelCtx *ctx = channel_ctx_open(TEST_DB, "telegram");
     assert(ctx);
 
-    int rc = channel_emit(ctx, "message", "{\"chat_id\":123,\"text\":\"hello\"}");
+    int rc = channel_emit(ctx, "message", "{\"chat_id\":123,\"text\":\"hello\"}", NULL);
     assert(rc == 0);
 
     /* Verify row in channel_events */

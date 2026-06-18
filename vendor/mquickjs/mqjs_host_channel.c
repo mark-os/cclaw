@@ -44,7 +44,12 @@ JSValue js_ch_emit(JSContext *ctx, JSValue *this_val, int argc, JSValue *argv) {
     const char *type = JS_ToCString(ctx, argv[0], &tbuf);
     const char *payload = JS_ToCString(ctx, argv[1], &pbuf);
     if (!type || !payload) return JS_ThrowTypeError(ctx, "emit: string args required");
-    int rc = channel_emit(g_ctx, type, payload);
+    const char *external_id = NULL;
+    JSCStringBuf eid_buf;
+    if (argc >= 3) {
+        external_id = JS_ToCString(ctx, argv[2], &eid_buf);
+    }
+    int rc = channel_emit(g_ctx, type, payload, external_id);
     return JS_NewInt32(ctx, rc);
 }
 

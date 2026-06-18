@@ -879,7 +879,7 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
 /* State transition guard. Busy states (llm_running/tool_running/compacting/
  * rate_limited) are reachable from idle or each other (a turn moves
  * llm_running → tool_running → llm_running, and ends llm_running → compacting);
- * idle is reachable from any busy state plus awaiting_agent/error rows. */
+ * idle is reachable from any busy state plus awaiting_agent rows. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
     const char *sql =
         "UPDATE sessions SET state=?, updated_at=unixepoch(),"
@@ -889,7 +889,7 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
         "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited')) OR"
         "  (? = 'awaiting_agent' AND state IN ('idle','llm_running','tool_running')) OR"
         "  (? = 'idle' AND state IN"
-        "     ('llm_running','tool_running','compacting','rate_limited','awaiting_agent','error'))"
+        "     ('llm_running','tool_running','compacting','rate_limited','awaiting_agent'))"
         ");";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)

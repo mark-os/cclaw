@@ -104,7 +104,11 @@ static char *handler(const char *arguments, void *user_data) {
         "\n## Requesting changes (use the request_config tool)\n"
         "- grant a tool:  {\"action\":\"grant_tool\",\"tool\":\"<name>\"}\n"
         "- allow a host:  {\"action\":\"grant_host\",\"host\":\"<hostname>\"}\n"
-        "- rename agent:  {\"action\":\"rename_agent\",\"name\":\"<new_name>\"}\n");
+        "- grant a path:  {\"action\":\"grant_path\",\"path\":\"/absolute/path\"}\n"
+        "- rename agent:  {\"action\":\"rename_agent\",\"name\":\"<new_name>\"}\n"
+        "Optional: add \"scope\":\"once\" for a grant that expires at turn end "
+        "(default is \"persist\").\n"
+        "All gated actions require human approval before taking effect.\n");
 
     tool_parse_free(&ta);
     return out;

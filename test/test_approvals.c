@@ -1,5 +1,6 @@
 /* Test approvals module: create, pending, resolve, expire, state transitions */
 #define _POSIX_C_SOURCE 200809L
+#include "agent_config.h"
 #include "approval.h"
 #include "db.h"
 #include "test_util.h"
@@ -249,6 +250,30 @@ static void test_fail_closed_denied(void) {
     printf("  PASS: test_fail_closed_denied\n");
 }
 
+static void test_once_grant_caps_load(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+
+    /* Once-scoped grant with no expiry — should load */
+    agent_config_grant(db, "bot", "host", "tmp.io", "once", 0);
+    AgentCaps caps;
+    agent_caps_load(db, "bot", &caps);
+    assert(caps.host_count == 1);
+    assert(strcmp(caps.hosts[0], "tmp.io") == 0);
+    agent_caps_free(&caps);
+
+    /* Set expires_at to the past — should NOT load */
+    sqlite3_exec(db, "UPDATE grants SET expires_at = unixepoch() - 10 WHERE value='tmp.io'",
+                 NULL, NULL, NULL);
+    agent_caps_load(db, "bot", &caps);
+    assert(caps.host_count == 0);
+    agent_caps_free(&caps);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_once_grant_caps_load\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_approvals:\n");
@@ -259,6 +284,7 @@ int main(void) {
     test_scope_once_expiry();
     test_session_set_state_awaiting_approval();
     test_fail_closed_denied();
+    test_once_grant_caps_load();
     printf("all approval tests passed\n");
     return 0;
 }

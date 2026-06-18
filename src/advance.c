@@ -51,6 +51,12 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         return out;
     }
 
+    if (strcmp(state, "awaiting_approval") == 0) {
+        AdvanceOutput out = make_output(ADVANCE_WAITING, session_id, agent, iter);
+        free(agent);
+        return out;
+    }
+
     if (strcmp(state, "idle") == 0) {
         /* Idle: check inbox for new work */
         if (inbox_count(db, session_id) > 0) {

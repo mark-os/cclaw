@@ -20,9 +20,12 @@
 #include <mquickjs.h>
 #include "agent_config.h"
 #include "agent_setup.h"
+#include "approval.h"
 #include "llm_proc.h"
 #include "llm_worker.h"
 #include "tools.h"
+#include "tool_parse.h"
+#include "tool_request_config.h"
 #include "context.h"
 #include "db.h"
 #include "templates.h"
@@ -172,6 +175,11 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
     return llm_worker_submit(g_db, session_id, agent_name, iteration == 0 ? 1 : 0);
 }
 
+/* Forward declarations for approval + advance (used by fork_tool_exec and resolve_approval) */
+static void run_advance(int64_t session_id);
+static void handle_approval_park(int64_t session_id);
+static void resolve_approval(int64_t approval_id, int approved, const char *decided_via);
+
 /* ── fork_tool_exec ─────────────────────────────────────────────── */
 
 /* Tools that run in-process (need parent's DB handle or user interaction) */
@@ -228,18 +236,24 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
         char *interp_args = NULL;
         if (tool_needs_interpolation(tc->name) && g_tool_setup && g_tool_setup->secret_count > 0)
             interp_args = secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count);
-        /* Thread tool_call_id for launch_agent blocking mode */
+        /* Thread tool_call_id for blocking modes (launch_agent, request_config) */
         if (strcmp(tc->name, "launch_agent") == 0 && te->user_data)
             ((AgentLaunchCtx *)te->user_data)->current_tool_call_id = tc->call_id;
+        if (strcmp(tc->name, "request_config") == 0 && te->user_data)
+            ((RequestConfigCtx *)te->user_data)->current_tool_call_id = tc->call_id;
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         free(interp_args);
-        /* NULL return means blocking: launch_agent parked the parent in
-         * 'waiting' and left this tool_call pending (see tool_agent.c). Leave it
-         * pending — advance_session writes the result on child completion. This
-         * is an explicit allowlist on purpose: a NULL from any other tool must
-         * fall through to "error: tool returned null" below, not silently hang. */
-        if (!result && strcmp(tc->name, "launch_agent") == 0)
+        /* NULL return means blocking: the tool parked the session (awaiting_agent
+         * or awaiting_approval) and left this tool_call pending. Leave it
+         * pending — resolve_approval or advance_session writes the result later.
+         * Explicit allowlist: a NULL from any other tool is an error. */
+        if (!result && (strcmp(tc->name, "launch_agent") == 0 ||
+                        strcmp(tc->name, "request_config") == 0)) {
+            /* Handle approval parking: prompt the approver */
+            if (strcmp(tc->name, "request_config") == 0)
+                handle_approval_park(session_id);
             return 2; /* Signal: parked, don't advance */
+        }
         if (!result) result = strdup("error: tool returned null");
 
         /* Postprocess: deinterpolate + secret scan (scan runs even with no
@@ -414,12 +428,174 @@ static void child_sweep_deadlines(void) {
     }
 }
 
+/* ── resolve_approval: approve/deny a parked approval ────────── */
+
+static void resolve_approval(int64_t approval_id, int approved, const char *decided_via) {
+    Approval *a = approval_resolve(g_db, approval_id, approved, decided_via);
+    if (!a) return;
+
+    int64_t session_id = a->session_id;
+    const char *agent = session_get_agent_name(g_db, session_id);
+
+    if (approved) {
+        /* Apply the grant — write grants row for both persist and once */
+        const char *scope = a->scope;
+        if (strcmp(a->action, "grant_tool") == 0) {
+            ToolArgs ta; tool_parse(a->args_json, &ta);
+            const char *v = targ_str(&ta, "tool");
+            if (v) agent_config_grant(g_db, agent, "tool", v, scope, 0);
+            tool_parse_free(&ta);
+        } else if (strcmp(a->action, "grant_host") == 0) {
+            ToolArgs ta; tool_parse(a->args_json, &ta);
+            const char *v = targ_str(&ta, "host");
+            if (v) agent_config_grant(g_db, agent, "host", v, scope, 0);
+            tool_parse_free(&ta);
+        } else if (strcmp(a->action, "grant_path") == 0) {
+            ToolArgs ta; tool_parse(a->args_json, &ta);
+            const char *v = targ_str(&ta, "path");
+            if (v) agent_config_grant(g_db, agent, "write_path", v, scope, 0);
+            tool_parse_free(&ta);
+        } else if (strcmp(a->action, "rename_agent") == 0) {
+            ToolArgs ta; tool_parse(a->args_json, &ta);
+            const char *nn = targ_str(&ta, "name");
+            const char *pr = targ_str(&ta, "preamble");
+            if (nn) {
+                int rc = agent_rename(g_db, agent, nn, session_id);
+                if (rc == 0 && g_tool_setup) {
+                    /* Disk rename */
+                    RequestConfigCtx *rctx = &g_tool_setup->req_cfg_ctx;
+                    if (rctx->agents_dir) {
+                        char old_path[512], new_path[512];
+                        snprintf(old_path, sizeof(old_path), "%s/%s", rctx->agents_dir, agent);
+                        snprintf(new_path, sizeof(new_path), "%s/%s", rctx->agents_dir, nn);
+                        struct stat st;
+                        if (stat(old_path, &st) == 0) {
+                            if (rename(old_path, new_path) != 0) {
+                                /* Rollback DB rename on disk failure */
+                                agent_rename(g_db, nn, agent, session_id);
+                                goto rename_done;
+                            }
+                        }
+                    }
+                    /* Optional preamble update */
+                    if (pr && pr[0]) {
+                        const char *sql = "UPDATE agents SET system_prompt=? WHERE name=?";
+                        sqlite3_stmt *s;
+                        if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) == SQLITE_OK) {
+                            sqlite3_bind_text(s, 1, pr, -1, SQLITE_STATIC);
+                            sqlite3_bind_text(s, 2, nn, -1, SQLITE_STATIC);
+                            sqlite3_step(s); sqlite3_finalize(s);
+                        }
+                    }
+                    /* Update live agent name */
+                    snprintf((char *)rctx->agent_name, 64, "%s", nn);
+                    setenv("CCLAW_AGENT_NAME", nn, 1);
+                }
+            }
+rename_done:
+            tool_parse_free(&ta);
+        }
+        /* Refresh caps in the live setup */
+        if (g_tool_setup)
+            agent_caps_refresh(g_db, agent, &g_tool_setup->caps);
+    }
+
+    /* Build tool result message */
+    char result_buf[256];
+    if (approved)
+        snprintf(result_buf, sizeof(result_buf), "approved (%s): %s",
+                 a->scope, a->action);
+    else
+        snprintf(result_buf, sizeof(result_buf), "denied (%s): %s",
+                 decided_via, a->action);
+
+    /* Write the parked tool_call result */
+    if (a->tool_call_id) {
+        int64_t turn_id = db_next_turn_id(g_db, session_id);
+        ToolResult tr = { .tool_call_id = a->tool_call_id, .content = result_buf };
+        Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
+                        .tool_name = "request_config", .is_error = !approved };
+        entry_append_with_turn(g_db, session_id, &msg, turn_id);
+        db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
+    }
+
+    /* Transition awaiting_approval → tool_running and re-advance */
+    session_set_state(g_db, session_id, "tool_running");
+    free((char *)agent);
+    approval_free(a);
+    wake_session(session_id);
+    run_advance(session_id);
+}
+
+/* ── handle_approval_park: prompt the approver ────────────────── */
+
+static void handle_approval_park(int64_t session_id) {
+    Approval *a = approval_get_pending(g_db, session_id);
+    if (!a) return;
+
+    if (g_mode == 0) {
+        /* CLI mode */
+        if (!isatty(STDIN_FILENO)) {
+            /* Non-interactive (-p mode): auto-deny */
+            resolve_approval(a->id, 0, "auto:no-approver");
+            approval_free(a);
+            return;
+        }
+        /* Interactive: prompt user */
+        fprintf(stdout, "\n\033[1mApproval required:\033[0m %s", a->action);
+        if (a->args_json) fprintf(stdout, " %s", a->args_json);
+        if (strcmp(a->scope, "once") == 0) fprintf(stdout, " (once, expires at turn end)");
+        fprintf(stdout, "\nApprove? (y/n): ");
+        fflush(stdout);
+        g_cli_turn_active = 0;  /* unblock input loop for the y/n read */
+        /* The actual y/n is read in the CLI input loop — see cli_handle_approval */
+        approval_free(a);
+        return;
+    }
+
+    /* Daemon mode: enqueue outbox prompt if session has channel, else auto-deny */
+    const char *sql = "SELECT channel_name, channel_id FROM sessions WHERE id=?;";
+    sqlite3_stmt *stmt;
+    int has_channel = 0;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, session_id);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *ch = (const char *)sqlite3_column_text(stmt, 0);
+            const char *cid = (const char *)sqlite3_column_text(stmt, 1);
+            if (ch && ch[0]) {
+                has_channel = 1;
+                /* Enqueue approval prompt to channel */
+                char prompt[512];
+                snprintf(prompt, sizeof(prompt),
+                         "Approval required: %s %s [scope=%s]. Reply yes/no.",
+                         a->action, a->args_json ? a->args_json : "", a->scope);
+                const char *ins_sql =
+                    "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+                    " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4));";
+                sqlite3_stmt *ins;
+                if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(ins, 1, ch, -1, SQLITE_STATIC);
+                    sqlite3_bind_int64(ins, 2, session_id);
+                    sqlite3_bind_text(ins, 3, cid ? cid : "0", -1, SQLITE_STATIC);
+                    sqlite3_bind_text(ins, 4, prompt, -1, SQLITE_STATIC);
+                    sqlite3_step(ins); sqlite3_finalize(ins);
+                }
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    if (!has_channel) {
+        /* No channel binding — fail-closed: auto-deny */
+        resolve_approval(a->id, 0, "auto:no-approver");
+    }
+    approval_free(a);
+}
+
 /* ── run_advance: call advance_session and execute the decision ── */
 
 /* ── event_step: shared event handling for both daemon and CLI loops ── */
 
 static void reap_children(void);
-static void run_advance(int64_t session_id);
 
 static void event_step_worker(int worker_fd) {
     (void)worker_fd;
@@ -465,6 +641,19 @@ static void run_advance(int64_t session_id) {
         break;
     }
     case ADVANCE_DONE:
+        /* Expire once-scoped approvals, delete once grants, refresh caps */
+        approval_expire_once(g_db, session_id);
+        {
+            const char *del_once = "DELETE FROM grants WHERE agent_name=? AND scope='once'";
+            sqlite3_stmt *del_stmt;
+            if (sqlite3_prepare_v2(g_db, del_once, -1, &del_stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(del_stmt, 1, out.agent_name, -1, SQLITE_STATIC);
+                sqlite3_step(del_stmt);
+                sqlite3_finalize(del_stmt);
+            }
+        }
+        if (g_tool_setup)
+            agent_caps_refresh(g_db, out.agent_name, &g_tool_setup->caps);
         deliver_response(session_id);
         /* Attempt compaction if configured */
         if (g_cfg->compaction && llm_worker_alive() &&
@@ -1531,6 +1720,21 @@ int main(int argc, char *argv[]) {
 
             if (!linebuf[0]) { linepos = 0; printf("> "); fflush(stdout); continue; }
             if (strcmp(linebuf, "exit") == 0 || strcmp(linebuf, "quit") == 0) goto done;
+
+            /* Check if we're waiting for an approval decision */
+            {
+                Approval *pa = approval_get_pending(g_db, g_cli_session);
+                if (pa) {
+                    int approved = (linebuf[0] == 'y' || linebuf[0] == 'Y');
+                    resolve_approval(pa->id, approved, "cli:interactive");
+                    approval_free(pa);
+                    /* Shift and continue */
+                    size_t consumed = (size_t)(nl - linebuf) + 1;
+                    linepos -= consumed;
+                    if (linepos > 0) memmove(linebuf, nl + 1, linepos);
+                    continue;
+                }
+            }
 
             cli_start_turn(linebuf);
             /* Shift any remaining data after the newline */

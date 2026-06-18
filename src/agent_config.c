@@ -457,7 +457,8 @@ int agent_config_revoke(sqlite3 *db, const char *agent, const char *kind,
 char *grants_json(sqlite3 *db, const char *agent, const char *kind) {
     if (!db || !agent || !kind) return strdup("[]");
     const char *sql =
-        "SELECT json_group_array(value) FROM grants WHERE agent_name=? AND kind=?;";
+        "SELECT json_group_array(value) FROM grants WHERE agent_name=? AND kind=?"
+        " AND (expires_at IS NULL OR expires_at > unixepoch());";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return strdup("[]");

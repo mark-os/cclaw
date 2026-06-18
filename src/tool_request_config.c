@@ -1,8 +1,10 @@
 /* request_config tool — handled inline by parent process.
- * Actions: grant_tool, grant_host, rename_agent. */
+ * Actions: grant_tool, grant_host, grant_path, rename_agent.
+ * All gated actions create an approval and return NULL (park signal). */
 #define _POSIX_C_SOURCE 200809L
 #include "tool_request_config.h"
 #include "agent_config.h"
+#include "approval.h"
 #include "db.h"
 #include "validate.h"
 #include "tool_parse.h"
@@ -15,13 +17,30 @@
 
 static const char *PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"action\":{\"type\":\"string\",\"enum\":[\"grant_tool\",\"grant_host\",\"rename_agent\"],"
+    "\"action\":{\"type\":\"string\",\"enum\":[\"grant_tool\",\"grant_host\",\"grant_path\",\"rename_agent\"],"
     "\"description\":\"Type of config request\"},"
     "\"tool\":{\"type\":\"string\",\"description\":\"Tool name to enable (for grant_tool)\"},"
     "\"host\":{\"type\":\"string\",\"description\":\"Hostname to allow (for grant_host)\"},"
+    "\"path\":{\"type\":\"string\",\"description\":\"Absolute path to grant (for grant_path)\"},"
+    "\"scope\":{\"type\":\"string\",\"enum\":[\"persist\",\"once\"],\"description\":\"Grant scope: persist (default) or once (expires at turn end)\"},"
     "\"name\":{\"type\":\"string\",\"description\":\"New agent name (for rename_agent)\"},"
     "\"preamble\":{\"type\":\"string\",\"description\":\"New system prompt preamble (for rename_agent, optional)\"}"
     "},\"required\":[\"action\"]}";
+
+/* Build canonical args JSON for the approval row. Caller frees. */
+static char *build_args_json(const char *action, const char *key, const char *value,
+                             const char *preamble) {
+    /* Simple JSON object — use snprintf since values are validated */
+    size_t cap = 256 + (value ? strlen(value) : 0) + (preamble ? strlen(preamble) : 0);
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    if (preamble)
+        snprintf(buf, cap, "{\"action\":\"%s\",\"%s\":\"%s\",\"preamble\":\"%s\"}",
+                 action, key, value, preamble);
+    else
+        snprintf(buf, cap, "{\"action\":\"%s\",\"%s\":\"%s\"}", action, key, value);
+    return buf;
+}
 
 static char *handler(const char *arguments, void *user_data) {
     RequestConfigCtx *ctx = (RequestConfigCtx *)user_data;
@@ -32,97 +51,79 @@ static char *handler(const char *arguments, void *user_data) {
     if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON");
 
     const char *act = targ_str(&ta, "action");
-    if (!act) { tool_parse_free(&ta); return strdup("error: 'action' required (one of: grant_tool, grant_host, rename_agent)"); }
+    if (!act) { tool_parse_free(&ta); return strdup("error: 'action' required (one of: grant_tool, grant_host, grant_path, rename_agent)"); }
+
+    const char *scope = targ_str(&ta, "scope");
+    if (!scope || !scope[0]) scope = "persist";
+    if (strcmp(scope, "persist") != 0 && strcmp(scope, "once") != 0) {
+        tool_parse_free(&ta);
+        return strdup("error: scope must be 'persist' or 'once'");
+    }
 
     if (strcmp(act, "grant_tool") == 0) {
         const char *tool = targ_str(&ta, "tool");
         if (!tool || !tool[0]) { tool_parse_free(&ta); return strdup("error: 'tool' required for grant_tool"); }
-        char buf[128];
-        snprintf(buf, sizeof(buf), "granted tool: %s", tool);
-        int rc = agent_config_grant(ctx->db, ctx->agent_name, "tool", tool, "persist", 0);
+        char *args = build_args_json("grant_tool", "tool", tool, NULL);
+        int64_t aid = approval_create(ctx->db, ctx->session_id,
+            ctx->current_tool_call_id, "request_config", "grant_tool", scope, args);
+        free(args);
         tool_parse_free(&ta);
-        if (rc == 0) return strdup(buf);
-        return strdup("error: failed to grant tool");
+        if (aid < 0) return strdup("error: failed to create approval");
+        session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
+        return NULL; /* park */
 
     } else if (strcmp(act, "grant_host") == 0) {
         const char *host = targ_str(&ta, "host");
         if (!host || !host[0]) { tool_parse_free(&ta); return strdup("error: 'host' required for grant_host"); }
-        char buf[128];
-        snprintf(buf, sizeof(buf), "granted host: %s", host);
-        int rc = agent_config_grant(ctx->db, ctx->agent_name, "host", host, "persist", 0);
+        char *args = build_args_json("grant_host", "host", host, NULL);
+        int64_t aid = approval_create(ctx->db, ctx->session_id,
+            ctx->current_tool_call_id, "request_config", "grant_host", scope, args);
+        free(args);
         tool_parse_free(&ta);
-        if (rc == 0) return strdup(buf);
-        return strdup("error: failed to grant host");
+        if (aid < 0) return strdup("error: failed to create approval");
+        session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
+        return NULL; /* park */
+
+    } else if (strcmp(act, "grant_path") == 0) {
+        const char *path = targ_str(&ta, "path");
+        if (!path || !path[0]) { tool_parse_free(&ta); return strdup("error: 'path' required for grant_path"); }
+        if (path[0] != '/') { tool_parse_free(&ta); return strdup("error: path must be absolute (start with '/')"); }
+        char *args = build_args_json("grant_path", "path", path, NULL);
+        int64_t aid = approval_create(ctx->db, ctx->session_id,
+            ctx->current_tool_call_id, "request_config", "grant_path", scope, args);
+        free(args);
+        tool_parse_free(&ta);
+        if (aid < 0) return strdup("error: failed to create approval");
+        session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
+        return NULL; /* park */
 
     } else if (strcmp(act, "rename_agent") == 0) {
         const char *new_name = targ_str(&ta, "name");
         const char *preamble = targ_str(&ta, "preamble");
         if (!new_name || !new_name[0]) { tool_parse_free(&ta); return strdup("error: 'name' required"); }
-
-        /* Copy strings before freeing parser */
-        char *nn = strdup(new_name);
-        char *pr = preamble ? strdup(preamble) : NULL;
+        if (!is_valid_name(new_name)) { tool_parse_free(&ta); return strdup("error: invalid name (use A-Za-z0-9_- only)"); }
+        char *args = build_args_json("rename_agent", "name", new_name, preamble);
+        int64_t aid = approval_create(ctx->db, ctx->session_id,
+            ctx->current_tool_call_id, "request_config", "rename_agent", scope, args);
+        free(args);
         tool_parse_free(&ta);
-
-        int rc = agent_rename(ctx->db, ctx->agent_name, nn, ctx->session_id);
-        if (rc != 0) {
-            const char *msg = rc == -1 ? "error: agent has active sessions"
-                            : rc == -2 ? "error: name already taken"
-                            : rc == -3 ? "error: invalid name (use A-Za-z0-9_- only)"
-                            : "error: agent not found";
-            free(nn); free(pr);
-            return strdup(msg);
-        }
-
-        /* Disk rename */
-        if (ctx->agents_dir) {
-            char old_path[512], new_path[512];
-            snprintf(old_path, sizeof(old_path), "%s/%s", ctx->agents_dir, ctx->agent_name);
-            snprintf(new_path, sizeof(new_path), "%s/%s", ctx->agents_dir, nn);
-            struct stat st;
-            if (stat(old_path, &st) == 0) {
-                if (rename(old_path, new_path) != 0) {
-                    /* Compensate: rollback DB rename */
-                    agent_rename(ctx->db, nn, ctx->agent_name, ctx->session_id);
-                    char buf[128];
-                    snprintf(buf, sizeof(buf), "error: disk rename failed: %s", strerror(errno));
-                    free(nn); free(pr);
-                    return strdup(buf);
-                }
-            }
-        }
-
-        /* Optional preamble update */
-        if (pr && pr[0]) {
-            const char *sql = "UPDATE agents SET system_prompt=? WHERE name=?";
-            sqlite3_stmt *s;
-            if (sqlite3_prepare_v2(ctx->db, sql, -1, &s, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(s, 1, pr, -1, SQLITE_STATIC);
-                sqlite3_bind_text(s, 2, nn, -1, SQLITE_STATIC);
-                sqlite3_step(s); sqlite3_finalize(s);
-            }
-        }
-
-        /* Update ctx for subsequent tool calls in this turn */
-        snprintf((char *)ctx->agent_name, 64, "%s", nn);
-        setenv("CCLAW_AGENT_NAME", nn, 1);
-
-        char buf[128];
-        snprintf(buf, sizeof(buf), "agent renamed: %s", nn);
-        free(nn); free(pr);
-        return strdup(buf);
+        if (aid < 0) return strdup("error: failed to create approval");
+        session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
+        return NULL; /* park */
 
     } else {
         tool_parse_free(&ta);
-        return strdup("error: action must be grant_tool, grant_host, or rename_agent");
+        return strdup("error: action must be grant_tool, grant_host, grant_path, or rename_agent");
     }
 }
 
 int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
     return tools_register(reg, "request_config",
-        "Request a configuration change. "
+        "Request a configuration change (requires approval). "
         "Actions: grant_tool (enable shell_exec, web_fetch, db_query), "
         "grant_host (add hostname to allowed_hosts), "
-        "rename_agent (rename this agent, with optional preamble).",
+        "grant_path (grant read/write access to an absolute path), "
+        "rename_agent (rename this agent, with optional preamble). "
+        "Optional scope: 'persist' (default, permanent) or 'once' (expires at turn end).",
         PARAMS_JSON, handler, ctx);
 }

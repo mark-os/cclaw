@@ -167,7 +167,9 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
 
     /* Daemon-mode only tools */
     if (mode == AGENT_SETUP_DAEMON) {
-        /* Approval */
+        /* Approval — request_config context already registered above;
+         * the resolve logic lives in main.c (resolve_approval) and uses
+         * the same approval module. No extra registration needed here. */
 
         /* Agent launch — only register if depth allows spawning */
         setup->launch_ctx.db = db;

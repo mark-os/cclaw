@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "channel.h"
+#include "approval.h"
 #include "db.h"
 #include "secret_scan.h"
 #include "wake.h"
@@ -8,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -234,13 +236,63 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
             if (sid > 0) {
-                int64_t irc = inbox_insert_scanned(db, sid, ch_name, payload);
-                if (irc < 0) {
-                    /* Enqueue failed — leave event for retry */
-                    free(agent);
-                    continue;
+                /* Check if session is awaiting approval — route as decision */
+                Approval *pa = approval_get_pending(db, sid);
+                if (pa) {
+                    /* Extract text from payload */
+                    const char *tsql = "SELECT json_extract(?, '$.text');";
+                    sqlite3_stmt *ts;
+                    char *text = NULL;
+                    if (sqlite3_prepare_v2(db, tsql, -1, &ts, NULL) == SQLITE_OK) {
+                        sqlite3_bind_text(ts, 1, payload, -1, SQLITE_STATIC);
+                        if (sqlite3_step(ts) == SQLITE_ROW) {
+                            const char *tv = (const char *)sqlite3_column_text(ts, 0);
+                            if (tv) text = strdup(tv);
+                        }
+                        sqlite3_finalize(ts);
+                    }
+                    int is_approve = 0;
+                    if (text) {
+                        is_approve = (text[0] == 'y' || text[0] == 'Y' ||
+                                      strcasecmp(text, "approve") == 0);
+                        free(text);
+                    }
+                    char decided[128];
+                    snprintf(decided, sizeof(decided), "channel:%s", ch_name);
+                    /* Resolve inline: set state, write result */
+                    const char *new_state = is_approve ? "approved" : "denied";
+                    const char *rsql =
+                        "UPDATE approvals SET state=?, decided_via=? WHERE id=? AND state='pending'";
+                    sqlite3_stmt *rs;
+                    if (sqlite3_prepare_v2(db, rsql, -1, &rs, NULL) == SQLITE_OK) {
+                        sqlite3_bind_text(rs, 1, new_state, -1, SQLITE_STATIC);
+                        sqlite3_bind_text(rs, 2, decided, -1, SQLITE_STATIC);
+                        sqlite3_bind_int64(rs, 3, pa->id);
+                        sqlite3_step(rs); sqlite3_finalize(rs);
+                    }
+                    /* Build tool result */
+                    char result_buf[256];
+                    snprintf(result_buf, sizeof(result_buf), "%s (%s): %s",
+                             is_approve ? "approved" : "denied", decided, pa->action);
+                    if (pa->tool_call_id) {
+                        int64_t turn_id = db_next_turn_id(db, sid);
+                        ToolResult tr = { .tool_call_id = pa->tool_call_id, .content = result_buf };
+                        Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
+                                        .tool_name = "request_config", .is_error = !is_approve };
+                        entry_append_with_turn(db, sid, &msg, turn_id);
+                        db_tool_call_set_status(db, sid, pa->tool_call_id, "done", decided);
+                    }
+                    session_set_state(db, sid, "tool_running");
+                    approval_free(pa);
+                    wake_session(sid);
+                } else {
+                    int64_t irc = inbox_insert_scanned(db, sid, ch_name, payload);
+                    if (irc < 0) {
+                        free(agent);
+                        continue;
+                    }
+                    wake_session(sid);
                 }
-                wake_session(sid);
             }
             free(agent);
         }

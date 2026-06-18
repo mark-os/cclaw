@@ -123,11 +123,11 @@ int admin_set_endpoint(sqlite3 *db, int provider_index, const char *url) {
 }
 
 int admin_add_host(sqlite3 *db, const char *agent_name, const char *host) {
-    return agent_config_add_host(db, agent_name, host);
+    return agent_config_grant(db, agent_name, "host", host, "persist", 0);
 }
 
 int admin_remove_host(sqlite3 *db, const char *agent_name, const char *host) {
-    return agent_config_remove_host(db, agent_name, host);
+    return agent_config_revoke(db, agent_name, "host", host);
 }
 
 int admin_list_providers(sqlite3 *db, AdminProvider **out, size_t *out_count) {

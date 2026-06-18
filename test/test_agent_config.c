@@ -1,4 +1,4 @@
-/* Test agent config functions on new schema */
+/* Test agent config grant/revoke/caps API */
 #define _POSIX_C_SOURCE 200809L
 #include "agent_config.h"
 #include "db.h"
@@ -15,31 +15,31 @@ static void test_whitelist_add_remove(void) {
     assert(db != NULL);
     db_agent_upsert(db, "bot", NULL, NULL, NULL);
 
-    assert(agent_config_add_host(db, "bot", "api.example.com") == 0);
-    size_t count = 0;
-    char **hosts = agent_config_get_hosts(db, "bot", &count);
-    assert(count == 1);
-    assert(strcmp(hosts[0], "api.example.com") == 0);
-    free(hosts[0]); free(hosts);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", "persist", 0) == 0);
+    AgentCaps caps;
+    agent_caps_load(db, "bot", &caps);
+    assert(caps.host_count == 1);
+    assert(strcmp(caps.hosts[0], "api.example.com") == 0);
+    agent_caps_free(&caps);
 
     /* Duplicate is no-op */
-    assert(agent_config_add_host(db, "bot", "api.example.com") == 0);
-    hosts = agent_config_get_hosts(db, "bot", &count);
-    assert(count == 1);
-    free(hosts[0]); free(hosts);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", "persist", 0) == 0);
+    agent_caps_load(db, "bot", &caps);
+    assert(caps.host_count == 1);
+    agent_caps_free(&caps);
 
     /* Add second */
-    assert(agent_config_add_host(db, "bot", "api.github.com") == 0);
-    hosts = agent_config_get_hosts(db, "bot", &count);
-    assert(count == 2);
-    free(hosts[0]); free(hosts[1]); free(hosts);
+    assert(agent_config_grant(db, "bot", "host", "api.github.com", "persist", 0) == 0);
+    agent_caps_load(db, "bot", &caps);
+    assert(caps.host_count == 2);
+    agent_caps_free(&caps);
 
     /* Remove */
-    assert(agent_config_remove_host(db, "bot", "api.example.com") == 0);
-    hosts = agent_config_get_hosts(db, "bot", &count);
-    assert(count == 1);
-    assert(strcmp(hosts[0], "api.github.com") == 0);
-    free(hosts[0]); free(hosts);
+    assert(agent_config_revoke(db, "bot", "host", "api.example.com") == 0);
+    agent_caps_load(db, "bot", &caps);
+    assert(caps.host_count == 1);
+    assert(strcmp(caps.hosts[0], "api.github.com") == 0);
+    agent_caps_free(&caps);
 
     db_close(db);
     unlink("/tmp/test_agent_wl.db");
@@ -52,14 +52,20 @@ static void test_add_tool(void) {
     assert(db);
     db_agent_upsert(db, "bot", NULL, NULL, NULL);
 
-    assert(agent_config_add_tool(db, "bot", "shell_exec") == 0);
-    assert(agent_config_add_tool(db, "bot", "web_fetch") == 0);
+    assert(agent_config_grant(db, "bot", "tool", "shell_exec", "persist", 0) == 0);
+    assert(agent_config_grant(db, "bot", "tool", "web_fetch", "persist", 0) == 0);
 
-    /* Verify via load */
-    AgentConfig *ac = agent_config_load_db(db, "bot");
-    assert(ac);
-    assert(ac->tool_count == 2);
-    agent_config_free(ac);
+    AgentCaps caps;
+    agent_caps_load(db, "bot", &caps);
+    assert(caps.tool_count == 2);
+    /* Both present (order-independent) */
+    int found_shell = 0, found_web = 0;
+    for (size_t i = 0; i < caps.tool_count; i++) {
+        if (strcmp(caps.tools[i], "shell_exec") == 0) found_shell = 1;
+        if (strcmp(caps.tools[i], "web_fetch") == 0) found_web = 1;
+    }
+    assert(found_shell && found_web);
+    agent_caps_free(&caps);
 
     db_close(db);
     unlink("/tmp/test_agent_tool.db");

@@ -14,6 +14,7 @@
 #include "proxy.h"
 #include "extension.h"
 #include "config.h"
+#include "agent_config.h"
 #include "db.h"
 
 /* T206: Shared agent tool setup context — holds all tool contexts that need
@@ -21,6 +22,8 @@
 typedef struct {
     ToolRegistry reg;
     JsSessionRuntime *js_rt;
+    /* Live-refreshable capability arrays from grants table */
+    AgentCaps caps;
     /* Contexts that tools reference (must stay alive during agent_run) */
     FileReadCtx file_read_ctx;
     JsEvalCtx js_eval_ctx;
@@ -49,13 +52,9 @@ typedef struct {
  * cli_mode=AGENT_SETUP_DAEMON includes all tools.
  * Returns 0 on success. Caller must call agent_setup_destroy() when done. */
 int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
-                     const Config *cfg, const char *agent_name,
-                     char **allowed_hosts, size_t allowed_hosts_count,
-                     int mode);
+                     const Config *cfg, const char *agent_name, int mode);
 
-/* Get tool schemas from setup. */
-
-/* Destroy setup (free registry, JS runtime). */
+/* Destroy setup (free registry, JS runtime, caps). */
 void agent_setup_destroy(AgentSetup *setup);
 
 #endif

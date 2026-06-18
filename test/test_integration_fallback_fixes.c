@@ -44,7 +44,7 @@ int main(void) {
 
     Config *cfg = config_load_from_env();
     AgentSetup setup;
-    agent_setup_init(&setup, db, sid, cfg, "default", NULL, 0, AGENT_SETUP_CLI);
+    agent_setup_init(&setup, db, sid, cfg, "default", AGENT_SETUP_CLI);
     int rc = test_run_session(db, sid, &setup);
     assert(rc == 0);
 

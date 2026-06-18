@@ -1,4 +1,4 @@
-/* T274: Unit test for request_config tool + agent_config_add_tool */
+/* T274: Unit test for request_config tool + agent_config_grant */
 #include "db.h"
 #include "test_util.h"
 #include "tools.h"
@@ -60,16 +60,13 @@ static void test_add_tool_to_config(void) {
     assert(db);
     db_agent_upsert(db, "test", NULL, NULL, NULL);
 
-    int rc = agent_config_add_tool(db, "test", "shell_exec");
+    int rc = agent_config_grant(db, "test", "tool", "shell_exec", "persist", 0);
     assert(rc == 0);
 
-    sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db,
-        "SELECT json_array_length(allowed_tools) FROM agents WHERE name='test'",
-        -1, &stmt, NULL);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(sqlite3_column_int(stmt, 0) == 1);
-    sqlite3_finalize(stmt);
+    AgentCaps caps;
+    agent_caps_load(db, "test", &caps);
+    assert(caps.tool_count == 1);
+    agent_caps_free(&caps);
 
     db_close(db);
     printf("  PASS test_add_tool_to_config\n");

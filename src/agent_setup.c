@@ -13,16 +13,17 @@
 #include <unistd.h>
 
 int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
-                     const Config *cfg, const char *agent_name,
-                     char **allowed_hosts, size_t allowed_hosts_count,
-                     int mode) {
+                     const Config *cfg, const char *agent_name, int mode) {
     memset(setup, 0, sizeof(*setup));
     setup->proxy_ctx.listen_fd = -1;  /* fd 0 is stdin — zeroed ctx must not close it */
     tools_init(&setup->reg);
 
+    /* Load capabilities from grants table */
+    agent_caps_load(db, agent_name, &setup->caps);
+
     /* V83: Start credential proxy thread for shell children */
     if (cfg->workspace)
-        proxy_start(&setup->proxy_ctx, cfg->workspace, allowed_hosts, allowed_hosts_count);
+        proxy_start(&setup->proxy_ctx, cfg->workspace, setup->caps.hosts, setup->caps.host_count);
 
     /* V88: Collect secrets from env, clear from process env */
     setup->secrets = shell_secrets_collect(&setup->secret_count);
@@ -93,19 +94,19 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     tool_file_grep_register(&setup->reg, &setup->file_read_ctx);
 
     /* JS eval with per-agent allowed_hosts */
-    setup->js_eval_ctx.allowed_hosts = allowed_hosts;
-    setup->js_eval_ctx.allowed_hosts_count = allowed_hosts_count;
+    setup->js_eval_ctx.allowed_hosts = setup->caps.hosts;
+    setup->js_eval_ctx.allowed_hosts_count = setup->caps.host_count;
     setup->js_eval_ctx.host_mode = (trust_level && strcmp(trust_level, "host") == 0) ? 1 : 0;
     setup->js_eval_ctx.trust_level = trust_level;
     tool_js_eval_register(&setup->reg, &setup->js_eval_ctx);
 
     /* V46: web_fetch policy */
-    setup->web_policy.allowed_hosts = allowed_hosts;
-    setup->web_policy.allowed_count = allowed_hosts_count;
+    setup->web_policy.allowed_hosts = setup->caps.hosts;
+    setup->web_policy.allowed_count = setup->caps.host_count;
     setup->web_policy.blocked_hosts = NULL;
     setup->web_policy.blocked_count = 0;
     setup->web_policy.block_private = 1;
-    tool_web_fetch_register(&setup->reg, (allowed_hosts_count > 0) ? &setup->web_policy : NULL);
+    tool_web_fetch_register(&setup->reg, (setup->caps.host_count > 0) ? &setup->web_policy : NULL);
 
     /* db_query */
     tool_db_query_register(&setup->reg, db);
@@ -117,8 +118,8 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
 
     /* JS persistent runtime */
     setup->js_rt = js_runtime_create();
-    if (setup->js_rt && allowed_hosts_count > 0)
-        js_runtime_set_hosts(setup->js_rt, allowed_hosts, allowed_hosts_count);
+    if (setup->js_rt && setup->caps.host_count > 0)
+        js_runtime_set_hosts(setup->js_rt, setup->caps.hosts, setup->caps.host_count);
 
     /* T254/T255/T256: Load extensions from workspace/extensions/ */
     extension_ctx_init(&setup->ext_ctx, setup->js_rt);
@@ -175,5 +176,6 @@ void agent_setup_destroy(AgentSetup *setup) {
     extension_ctx_destroy(&setup->ext_ctx);
     js_runtime_destroy(setup->js_rt);
     shell_secrets_free(setup->secrets, setup->secret_count);
+    agent_caps_free(&setup->caps);
     tools_free(&setup->reg);
 }

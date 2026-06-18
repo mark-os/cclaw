@@ -2,6 +2,7 @@
 #define CCLAW_AGENT_CONFIG_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <sqlite3.h>
 #include "types.h"
 
@@ -31,12 +32,42 @@ typedef struct {
     int max_iterations;     /* 0 = use global */
 } AgentConfig;
 
+/* Live-refreshable capability arrays from grants table. */
+typedef struct {
+    char **hosts;
+    size_t host_count;
+    char **tools;
+    size_t tool_count;
+    char **read_paths;
+    size_t read_count;
+    char **write_paths;
+    size_t write_count;
+} AgentCaps;
+
+/* Load all grants for an agent into caps (zeroes struct first). */
+void agent_caps_load(sqlite3 *db, const char *agent, AgentCaps *caps);
+
+/* Free existing arrays, reload in place. */
+void agent_caps_refresh(sqlite3 *db, const char *agent, AgentCaps *caps);
+
+/* Free all arrays in caps. */
+void agent_caps_free(AgentCaps *caps);
+
 /* Load agent config from cclaw.db agents table.
  * Returns NULL if agent not found. */
 AgentConfig *agent_config_load_db(sqlite3 *db, const char *name);
 
 /* Free AgentConfig. */
 void agent_config_free(AgentConfig *ac);
+
+/* Uniform grant/revoke API over the grants table. */
+int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
+                       const char *value, const char *scope, int64_t expires_at);
+int agent_config_revoke(sqlite3 *db, const char *agent, const char *kind,
+                        const char *value);
+
+/* Returns malloc'd JSON array string (e.g. '["a","b"]'). Caller frees. */
+char *grants_json(sqlite3 *db, const char *agent, const char *kind);
 
 /* T77: Load system prompt from agents/<name>/system.md, render template vars
  * {session_id}, {date}, {agent_name}. Returns heap-allocated string.
@@ -58,17 +89,5 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
 /* T186: Create an ephemeral agent directory with workspace.
  * Returns heap-allocated agent name on success (caller frees), NULL on failure. */
 char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db);
-
-/* T144/T196: Add host to agent's allowed_hosts. Returns 0 on success. */
-int agent_config_add_host(sqlite3 *db, const char *name, const char *host);
-
-/* T144/T196: Remove host from agent's allowed_hosts. Returns 0 on success. */
-int agent_config_remove_host(sqlite3 *db, const char *name, const char *host);
-
-/* T144/T196: Get current allowed_hosts for agent. Caller frees array + strings. */
-char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count);
-
-/* T274/V120: Add tool to agent's tools whitelist. Returns 0 on success. */
-int agent_config_add_tool(sqlite3 *db, const char *name, const char *tool);
 
 #endif

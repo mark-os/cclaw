@@ -1265,18 +1265,22 @@ int main(int argc, char *argv[]) {
           ensure_parent_dir(ws);
           /* Create default agent */
           const char *agent_sql =
-              "INSERT OR IGNORE INTO agents(name, system_prompt, trust_level, allowed_tools)"
-              " VALUES('default', ?, 'trusted', ?);"
+              "INSERT OR IGNORE INTO agents(name, system_prompt, trust_level)"
+              " VALUES('default', ?, 'trusted');"
               ;
-          const char *agent_tools = "[\"file_read\",\"file_write\",\"js_eval\",\"request_config\","
-              "\"search_config\",\"memory_create\",\"memory_add\",\"memory_edit\","
-              "\"memory_delete\",\"configure_provider\",\"configure_channel\",\"create_agent\"]";
           sqlite3_stmt *bs;
           if (sqlite3_prepare_v2(g_db, agent_sql, -1, &bs, NULL) == SQLITE_OK) {
               sqlite3_bind_text(bs, 1, TPL_DEFAULT_SYSTEM_PROMPT_MD, -1, SQLITE_STATIC);
-              sqlite3_bind_text(bs, 2, agent_tools, -1, SQLITE_STATIC);
               sqlite3_step(bs); sqlite3_finalize(bs);
           }
+          /* Seed default tools as grants */
+          static const char *default_tools[] = {
+              "file_read", "file_write", "js_eval", "request_config",
+              "search_config", "memory_create", "memory_add", "memory_edit",
+              "memory_delete", "configure_provider", "configure_channel", "create_agent"
+          };
+          for (size_t i = 0; i < sizeof(default_tools)/sizeof(default_tools[0]); i++)
+              agent_config_grant(g_db, "default", "tool", default_tools[i], "persist", 0);
           db_kv_set(g_db, "default_agent", "default");
           /* Seed default memory blocks */
           memory_block_create(g_db, "default", "AGENT",
@@ -1317,7 +1321,7 @@ int main(int argc, char *argv[]) {
     setenv("CCLAW_AGENT_NAME", g_agent_name, 1);
     free(agent_sel);
 
-    /* Inject agent config env vars */
+    /* Inject agent config env vars (for forked children) */
     if (!host_mode) {
         AgentConfig *ac = agent_config_load_db(g_db, g_agent_name);
         if (ac) {
@@ -1350,7 +1354,7 @@ int main(int argc, char *argv[]) {
 
     /* Set up tool schemas env for LLM proc children */
     AgentSetup setup;
-    agent_setup_init(&setup, g_db, 0, g_cfg, g_agent_name, NULL, 0, AGENT_SETUP_CLI);
+    agent_setup_init(&setup, g_db, 0, g_cfg, g_agent_name, AGENT_SETUP_CLI);
     g_tool_setup = &setup;
     /* Set agents_dir for rename support; point agent_name at g_agent_name for live update */
     char agents_dir[PATH_MAX];

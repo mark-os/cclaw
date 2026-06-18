@@ -344,12 +344,11 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
 }
 
 
-/* Load agent config directly from agents table */
+/* Load agent config from agents table + grants table */
 AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
     if (!db || !name) return NULL;
 
-    const char *sql = "SELECT model, allowed_tools, allowed_hosts, max_iterations"
-                      " FROM agents WHERE name=?;";
+    const char *sql = "SELECT model, max_iterations FROM agents WHERE name=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
@@ -363,129 +362,172 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
         const char *v = (const char *)sqlite3_column_text(stmt, 0);
         if (v) ac->model = strdup(v);
 
-        /* Parse allowed_tools via json_each() */
-        const char *tools_json = (const char *)sqlite3_column_text(stmt, 1);
-        if (tools_json && tools_json[0] == '[') {
-            sqlite3_stmt *js;
-            if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?)",
-                                   -1, &js, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(js, 1, tools_json, -1, SQLITE_STATIC);
-                size_t cap = 8;
-                ac->tools = malloc(cap * sizeof(char *));
-                while (ac->tools && sqlite3_step(js) == SQLITE_ROW) {
-                    const char *item = (const char *)sqlite3_column_text(js, 0);
-                    if (!item) continue;
-                    if (ac->tool_count >= cap) {
-                        cap *= 2;
-                        ac->tools = realloc(ac->tools, cap * sizeof(char *));
-                    }
-                    ac->tools[ac->tool_count++] = strdup(item);
-                }
-                sqlite3_finalize(js);
-            }
-        }
-
-        /* Parse allowed_hosts via json_each() */
-        const char *hosts_json = (const char *)sqlite3_column_text(stmt, 2);
-        if (hosts_json && hosts_json[0] == '[') {
-            sqlite3_stmt *js;
-            if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?)",
-                                   -1, &js, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(js, 1, hosts_json, -1, SQLITE_STATIC);
-                size_t cap = 8;
-                ac->allowed_hosts = malloc(cap * sizeof(char *));
-                while (ac->allowed_hosts && sqlite3_step(js) == SQLITE_ROW) {
-                    const char *item = (const char *)sqlite3_column_text(js, 0);
-                    if (!item) continue;
-                    if (ac->allowed_hosts_count >= cap) {
-                        cap *= 2;
-                        ac->allowed_hosts = realloc(ac->allowed_hosts, cap * sizeof(char *));
-                    }
-                    ac->allowed_hosts[ac->allowed_hosts_count++] = strdup(item);
-                }
-                sqlite3_finalize(js);
-            }
-        }
-
-        int mi = sqlite3_column_int(stmt, 3);
+        int mi = sqlite3_column_int(stmt, 1);
         if (mi > 0) ac->max_iterations = mi;
     }
     sqlite3_finalize(stmt);
+    if (!ac) return NULL;
+
+    /* Load tools from grants */
+    char *tools_json = grants_json(db, name, "tool");
+    if (tools_json && strcmp(tools_json, "[]") != 0) {
+        sqlite3_stmt *js;
+        if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?)",
+                               -1, &js, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(js, 1, tools_json, -1, SQLITE_STATIC);
+            size_t cap = 8;
+            ac->tools = malloc(cap * sizeof(char *));
+            while (ac->tools && sqlite3_step(js) == SQLITE_ROW) {
+                const char *item = (const char *)sqlite3_column_text(js, 0);
+                if (!item) continue;
+                if (ac->tool_count >= cap) {
+                    cap *= 2;
+                    ac->tools = realloc(ac->tools, cap * sizeof(char *));
+                }
+                ac->tools[ac->tool_count++] = strdup(item);
+            }
+            sqlite3_finalize(js);
+        }
+    }
+    free(tools_json);
+
+    /* Load hosts from grants */
+    char *hosts_json = grants_json(db, name, "host");
+    if (hosts_json && strcmp(hosts_json, "[]") != 0) {
+        sqlite3_stmt *js;
+        if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?)",
+                               -1, &js, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(js, 1, hosts_json, -1, SQLITE_STATIC);
+            size_t cap = 8;
+            ac->allowed_hosts = malloc(cap * sizeof(char *));
+            while (ac->allowed_hosts && sqlite3_step(js) == SQLITE_ROW) {
+                const char *item = (const char *)sqlite3_column_text(js, 0);
+                if (!item) continue;
+                if (ac->allowed_hosts_count >= cap) {
+                    cap *= 2;
+                    ac->allowed_hosts = realloc(ac->allowed_hosts, cap * sizeof(char *));
+                }
+                ac->allowed_hosts[ac->allowed_hosts_count++] = strdup(item);
+            }
+            sqlite3_finalize(js);
+        }
+    }
+    free(hosts_json);
+
     return ac;
 }
 
-/* T144/T196: host management via cclaw.db agent_config table */
+/* ── Grants API ─────────────────────────────────────────────────── */
 
-int agent_config_add_host(sqlite3 *db, const char *name, const char *host) {
-    if (!db || !name || !host || !host[0]) return -1;
-    /* Use SQLite json functions on agents.allowed_hosts */
+int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
+                       const char *value, const char *scope, int64_t expires_at) {
+    if (!db || !agent || !kind || !value) return -1;
     const char *sql =
-        "UPDATE agents SET allowed_hosts = "
-        "  CASE WHEN json_array_length(allowed_hosts) = 0 THEN json_array(?2)"
-        "  ELSE (SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each(allowed_hosts) WHERE value=?2)"
-        "    THEN allowed_hosts ELSE json_insert(allowed_hosts, '$[#]', ?2) END)"
-        "  END WHERE name=?1;";
+        "INSERT OR IGNORE INTO grants (agent_name, kind, value, scope, expires_at)"
+        " VALUES (?1, ?2, ?3, ?4, ?5);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, host, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, kind, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, value, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, scope ? scope : "persist", -1, SQLITE_STATIC);
+    if (expires_at > 0)
+        sqlite3_bind_int64(stmt, 5, expires_at);
+    else
+        sqlite3_bind_null(stmt, 5);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
 }
 
-int agent_config_remove_host(sqlite3 *db, const char *name, const char *host) {
-    if (!db || !name || !host || !host[0]) return -1;
-    const char *sql =
-        "UPDATE agents SET allowed_hosts = "
-        "  (SELECT json_group_array(value) FROM json_each(agents.allowed_hosts) WHERE value != ?2)"
-        " WHERE name=?1;";
+int agent_config_revoke(sqlite3 *db, const char *agent, const char *kind,
+                        const char *value) {
+    if (!db || !agent || !kind || !value) return -1;
+    const char *sql = "DELETE FROM grants WHERE agent_name=?1 AND kind=?2 AND value=?3;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, host, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, kind, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, value, -1, SQLITE_STATIC);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
 }
 
-char **agent_config_get_hosts(sqlite3 *db, const char *name, size_t *count) {
-    *count = 0;
-    if (!db || !name) return NULL;
-    const char *sql = "SELECT value FROM json_each((SELECT allowed_hosts FROM agents WHERE name=?));";
+char *grants_json(sqlite3 *db, const char *agent, const char *kind) {
+    if (!db || !agent || !kind) return strdup("[]");
+    const char *sql =
+        "SELECT json_group_array(value) FROM grants WHERE agent_name=? AND kind=?;";
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    size_t cap = 8;
-    char **hosts = malloc(cap * sizeof(char *));
-    if (!hosts) { sqlite3_finalize(stmt); return NULL; }
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return strdup("[]");
+    sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, kind, -1, SQLITE_STATIC);
+    char *result = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *v = (const char *)sqlite3_column_text(stmt, 0);
-        if (!v) continue;
-        if (*count >= cap) { cap *= 2; hosts = realloc(hosts, cap * sizeof(char *)); }
-        hosts[*count] = strdup(v);
-        (*count)++;
+        if (v) result = strdup(v);
     }
     sqlite3_finalize(stmt);
-    return hosts;
+    if (!result || strcmp(result, "null") == 0) {
+        free(result);
+        return strdup("[]");
+    }
+    return result;
 }
 
-/* T274/V120: Add tool to agent's tools whitelist in cclaw.db agent_config */
-int agent_config_add_tool(sqlite3 *db, const char *name, const char *tool) {
-    if (!db || !name || !tool || !tool[0]) return -1;
-    const char *sql =
-        "UPDATE agents SET allowed_tools = "
-        "  CASE WHEN json_array_length(allowed_tools) = 0 THEN json_array(?2)"
-        "  ELSE (SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each(allowed_tools) WHERE value=?2)"
-        "    THEN allowed_tools ELSE json_insert(allowed_tools, '$[#]', ?2) END)"
-        "  END WHERE name=?1;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, tool, -1, SQLITE_STATIC);
-    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-    sqlite3_finalize(stmt);
-    return rc;
+/* ── AgentCaps ─────────────────────────────────────────────────── */
+
+static void caps_load_kind(sqlite3 *db, const char *agent, const char *kind,
+                           char ***out_arr, size_t *out_count) {
+    *out_arr = NULL;
+    *out_count = 0;
+    char *json = grants_json(db, agent, kind);
+    if (!json || strcmp(json, "[]") == 0) { free(json); return; }
+    sqlite3_stmt *js;
+    if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?)",
+                           -1, &js, NULL) != SQLITE_OK) { free(json); return; }
+    sqlite3_bind_text(js, 1, json, -1, SQLITE_STATIC);
+    size_t cap = 8;
+    char **arr = malloc(cap * sizeof(char *));
+    size_t count = 0;
+    while (arr && sqlite3_step(js) == SQLITE_ROW) {
+        const char *item = (const char *)sqlite3_column_text(js, 0);
+        if (!item) continue;
+        if (count >= cap) { cap *= 2; arr = realloc(arr, cap * sizeof(char *)); }
+        arr[count++] = strdup(item);
+    }
+    sqlite3_finalize(js);
+    free(json);
+    *out_arr = arr;
+    *out_count = count;
+}
+
+void agent_caps_load(sqlite3 *db, const char *agent, AgentCaps *caps) {
+    memset(caps, 0, sizeof(*caps));
+    if (!db || !agent) return;
+    caps_load_kind(db, agent, "host", &caps->hosts, &caps->host_count);
+    caps_load_kind(db, agent, "tool", &caps->tools, &caps->tool_count);
+    caps_load_kind(db, agent, "read_path", &caps->read_paths, &caps->read_count);
+    caps_load_kind(db, agent, "write_path", &caps->write_paths, &caps->write_count);
+}
+
+void agent_caps_free(AgentCaps *caps) {
+    if (!caps) return;
+    for (size_t i = 0; i < caps->host_count; i++) free(caps->hosts[i]);
+    free(caps->hosts);
+    for (size_t i = 0; i < caps->tool_count; i++) free(caps->tools[i]);
+    free(caps->tools);
+    for (size_t i = 0; i < caps->read_count; i++) free(caps->read_paths[i]);
+    free(caps->read_paths);
+    for (size_t i = 0; i < caps->write_count; i++) free(caps->write_paths[i]);
+    free(caps->write_paths);
+    memset(caps, 0, sizeof(*caps));
+}
+
+void agent_caps_refresh(sqlite3 *db, const char *agent, AgentCaps *caps) {
+    agent_caps_free(caps);
+    agent_caps_load(db, agent, caps);
 }
 
 /* T186/T196: Create ephemeral agent (V65, V62) — config in cclaw.db */

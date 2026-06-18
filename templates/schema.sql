@@ -73,15 +73,22 @@ CREATE TABLE IF NOT EXISTS agents (
   model TEXT,
   provider TEXT,
   system_prompt TEXT,
-  allowed_hosts TEXT DEFAULT '[]',
-  allowed_tools TEXT DEFAULT '[]',
-  read_paths TEXT DEFAULT '[]',
-  write_paths TEXT DEFAULT '[]',
   max_iterations INTEGER DEFAULT 25,
   max_output_tokens INTEGER,
   shell_timeout INTEGER DEFAULT 30,
   trust_level TEXT DEFAULT 'standard',
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+-- ═══ Grants (normalized capabilities) ═══
+CREATE TABLE IF NOT EXISTS grants (
+  agent_name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  value TEXT NOT NULL,
+  scope TEXT NOT NULL DEFAULT 'persist',
+  expires_at INTEGER,
+  created_at INTEGER DEFAULT (unixepoch()),
+  PRIMARY KEY (agent_name, kind, value)
 );
 
 CREATE TABLE IF NOT EXISTS agent_extensions (

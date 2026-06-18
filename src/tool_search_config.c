@@ -48,27 +48,36 @@ static char *handler(const char *arguments, void *user_data) {
     /* Section 1: current grants */
     sqlite3_stmt *st = NULL;
     int rc = sqlite3_prepare_v2(ctx->db,
-        "SELECT trust_level,"
-        " COALESCE((SELECT group_concat(value,', ') FROM json_each(allowed_tools)),'(none)'),"
-        " COALESCE((SELECT group_concat(value,', ') FROM json_each(allowed_hosts)),'(none)')"
-        " FROM agents WHERE name=?1", -1, &st, NULL);
+        "SELECT trust_level FROM agents WHERE name=?1", -1, &st, NULL);
     if (rc == SQLITE_OK) {
         sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
             const char *trust = (const char *)sqlite3_column_text(st, 0);
-            const char *tools_list = (const char *)sqlite3_column_text(st, 1);
-            const char *hosts_list = (const char *)sqlite3_column_text(st, 2);
             buf_appendf(&out, &len, &cap,
                 "## Your current grants (agent: %s)\n"
-                "trust_level: %s\n"
-                "allowed_tools: %s\n"
-                "allowed_hosts: %s\n",
+                "trust_level: %s\n",
                 ctx->agent_name,
-                trust ? trust : "(unknown)",
-                tools_list ? tools_list : "(none)",
-                hosts_list ? hosts_list : "(none)");
+                trust ? trust : "(unknown)");
         }
         sqlite3_finalize(st);
+    }
+
+    /* Report grants per kind */
+    static const char *kinds[] = {"host", "tool", "read_path", "write_path"};
+    for (int ki = 0; ki < 4; ki++) {
+        rc = sqlite3_prepare_v2(ctx->db,
+            "SELECT COALESCE(group_concat(value, ', '), '(none)')"
+            " FROM grants WHERE agent_name=?1 AND kind=?2",
+            -1, &st, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(st, 2, kinds[ki], -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(st, 0);
+                buf_appendf(&out, &len, &cap, "%ss: %s\n", kinds[ki], v ? v : "(none)");
+            }
+            sqlite3_finalize(st);
+        }
     }
 
     /* Section 2: tools list */

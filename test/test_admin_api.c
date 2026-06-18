@@ -156,18 +156,16 @@ static void test_host_management(void) {
     assert(admin_add_host(db, "testagent", "example.com") == 0);
     assert(admin_add_host(db, "testagent", "api.openai.com") == 0);
 
-    size_t count = 0;
-    char **hosts = agent_config_get_hosts(db, "testagent", &count);
-    assert(count == 2);
-    for (size_t i = 0; i < count; i++) free(hosts[i]);
-    free(hosts);
+    AgentCaps caps;
+    agent_caps_load(db, "testagent", &caps);
+    assert(caps.host_count == 2);
+    agent_caps_free(&caps);
 
     assert(admin_remove_host(db, "testagent", "example.com") == 0);
-    hosts = agent_config_get_hosts(db, "testagent", &count);
-    assert(count == 1);
-    assert(strcmp(hosts[0], "api.openai.com") == 0);
-    for (size_t i = 0; i < count; i++) free(hosts[i]);
-    free(hosts);
+    agent_caps_load(db, "testagent", &caps);
+    assert(caps.host_count == 1);
+    assert(strcmp(caps.hosts[0], "api.openai.com") == 0);
+    agent_caps_free(&caps);
 
     db_close(db);
     unlink(DB_PATH);

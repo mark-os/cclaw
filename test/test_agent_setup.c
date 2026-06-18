@@ -34,7 +34,7 @@ static void test_cli_mode_excludes_daemon_tools(void) {
     cfg.provider.model = "test";
 
     AgentSetup setup;
-    agent_setup_init(&setup, db, sid, &cfg, "test_agent", NULL, 0, AGENT_SETUP_CLI);
+    agent_setup_init(&setup, db, sid, &cfg, "test_agent", AGENT_SETUP_CLI);
 
     /* CLI excludes only daemon-runtime tools (launch/check need the daemon's
      * session scheduler). DB-config tools (configure_*, create_agent) are now
@@ -99,7 +99,7 @@ static void test_daemon_mode_includes_all_tools(void) {
     cfg.provider.model = "test";
 
     AgentSetup setup;
-    agent_setup_init(&setup, db, sid, &cfg, "test_agent", NULL, 0, AGENT_SETUP_DAEMON);
+    agent_setup_init(&setup, db, sid, &cfg, "test_agent", AGENT_SETUP_DAEMON);
 
     /* Daemon mode should have all tools including daemon-dependent ones */
     if (tools_lookup(&setup.reg, "launch_agent") == NULL) {

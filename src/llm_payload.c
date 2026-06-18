@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "llm_payload.h"
+#include "agent_config.h"
 #include "context.h"
 #include "config.h"
 #include "db.h"
@@ -217,15 +218,10 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     char *agent_name = session_get_agent_name(db, session_id);
     char *allowed_tools = NULL;
     if (agent_name) {
-        sqlite3_stmt *at;
-        if (sqlite3_prepare_v2(db, "SELECT allowed_tools FROM agents WHERE name=?",
-                               -1, &at, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(at, 1, agent_name, -1, SQLITE_STATIC);
-            if (sqlite3_step(at) == SQLITE_ROW) {
-                const char *v = (const char *)sqlite3_column_text(at, 0);
-                if (v && strcmp(v, "[]") != 0) allowed_tools = strdup(v);
-            }
-            sqlite3_finalize(at);
+        allowed_tools = grants_json(db, agent_name, "tool");
+        if (allowed_tools && strcmp(allowed_tools, "[]") == 0) {
+            free(allowed_tools);
+            allowed_tools = NULL;
         }
     }
     /* Fallback: use default_allowed_tools from config table */

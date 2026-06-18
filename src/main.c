@@ -39,6 +39,9 @@
 #include "heartbeat.h"
 #include "cron.h"
 
+_Static_assert(sizeof(WakeMsg) <= PIPE_BUF,
+    "WakeMsg must fit in PIPE_BUF so wake-pipe writes stay atomic");
+
 /* ── Constants ──────────────────────────────────────────────────── */
 
 #define CHILD_MAX 48

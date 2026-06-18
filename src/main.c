@@ -880,6 +880,8 @@ static int mjs_eval_main(int argc, char **argv) {
     char *workspace = workspace_env ? strdup(workspace_env) : NULL;
     const char *db_env = getenv("CCLAW_DB");
     char *db_path = db_env ? strdup(db_env) : NULL;
+    const char *env_file_env = getenv("CCLAW_ENV_FILE");
+    char *env_file = env_file_env ? strdup(env_file_env) : NULL;
     const char *proxy_env = getenv("CCLAW_PROXY_SOCK");
     char *proxy_sock = proxy_env ? strdup(proxy_env) : NULL;
     const char *host_mode_env = getenv("CCLAW_MJS_HOST");
@@ -911,6 +913,7 @@ static int mjs_eval_main(int argc, char **argv) {
     sandbox_policy_from_trust(trust_env, &cfg);
     cfg.workspace = workspace;
     cfg.db_path = db_path;
+    cfg.env_file = env_file;
     cfg.cwd_path = NULL;
     cfg.proxy_sock = proxy_sock;
     if (no_sandbox) cfg.sandbox = 0;
@@ -1048,6 +1051,7 @@ static int mjs_eval_main(int argc, char **argv) {
     free(allowed_hosts);
     free(workspace);
     free(db_path);
+    free(env_file);
     free(proxy_sock);
 
     _exit(failed ? 1 : 0);
@@ -1105,6 +1109,7 @@ int main(int argc, char *argv[]) {
 
     g_cfg = config_load(g_db);
     if (!g_cfg) { fprintf(stderr, "config load failed\n"); db_close(g_db); return 1; }
+    if (g_cfg->env_file) setenv("CCLAW_ENV_FILE", g_cfg->env_file, 1);
     if (log_level_set) {
         g_cfg->log_level = log_level_override;
         const char *lvl_str = log_level_override == LOG_LEVEL_TRACE ? "trace" :

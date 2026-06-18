@@ -17,6 +17,7 @@ typedef struct {
     const char *workspace;  /* agent workspace (namespace sandbox restricts access) */
     const char *cwd_path;   /* V22a/T276: CWD rw bind-mount in CLI mode (NULL in daemon) */
     const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key — bind-masked inside the ns */
+    const char *env_file;   /* provider env file: bind-masked inside the ns */
     const char *proxy_sock; /* V83: path to .proxy.sock (NULL if proxy not started) */
     ShellSecret *secrets;   /* V88: array of secrets to inject + mask */
     size_t secret_count;

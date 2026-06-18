@@ -9,6 +9,7 @@
 #include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -24,7 +25,8 @@
  * path *inside the new root*. Files not reachable in the child's mount tree
  * (the standard/restricted case) never materialize under newroot, so the stat
  * fails and we skip them — they are already invisible by omission. */
-static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
+static void sandbox_mask_state_files(const char *newroot, const char *db_path,
+                                     const char *env_file) {
     if (!db_path || !db_path[0]) return;
 
     char db_abs[PATH_MAX];
@@ -44,7 +46,7 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     int klen = slash
         ? snprintf(keyf, sizeof(keyf), "%.*s/.cclaw_key", (int)(slash - db_abs), db_abs)
         : snprintf(keyf, sizeof(keyf), ".cclaw_key");
-    const char *targets[5];
+    const char *targets[6];
     char dbwal[PATH_MAX + 8], dbshm[PATH_MAX + 8];
     snprintf(dbwal, sizeof(dbwal), "%s-wal", db_abs);
     snprintf(dbshm, sizeof(dbshm), "%s-shm", db_abs);
@@ -53,6 +55,10 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     targets[nt++] = dbwal;
     targets[nt++] = dbshm;
     if (klen > 0 && (size_t)klen < sizeof(keyf)) targets[nt++] = keyf;
+
+    char envf[PATH_MAX];
+    if (env_file && env_file[0] && realpath(env_file, envf))
+        targets[nt++] = envf;
 
     for (size_t i = 0; i < nt; i++) {
         char dst[PATH_MAX + 64];
@@ -65,12 +71,30 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     }
 }
 
+/* Read-only remount of a bind mount, preserving the flags the kernel locked
+ * onto it when it was propagated from the host. In an unprivileged user
+ * namespace a remount that would clear a locked flag (nosuid/nodev/noexec/
+ * atime policy) returns EPERM, so we query the live flags via statvfs and OR
+ * them back in — only then is adding MS_RDONLY permitted. Returns 0/-1. */
+static int sandbox_remount_ro(const char *path) {
+    unsigned long flags = MS_REMOUNT | MS_BIND | MS_RDONLY | MS_NOSUID;
+    struct statvfs vfs;
+    if (statvfs(path, &vfs) == 0) {
+        if (vfs.f_flag & ST_NODEV)      flags |= MS_NODEV;
+        if (vfs.f_flag & ST_NOEXEC)     flags |= MS_NOEXEC;
+        if (vfs.f_flag & ST_NOATIME)    flags |= MS_NOATIME;
+        if (vfs.f_flag & ST_NODIRATIME) flags |= MS_NODIRATIME;
+        if (vfs.f_flag & ST_RELATIME)   flags |= MS_RELATIME;
+    }
+    return mount(NULL, path, NULL, flags, NULL);
+}
+
 /* V82/V37/V22a: Apply namespace sandbox in the child.
  * unshare(USER|MNT|PID|NET), write uid/gid maps, pivot_root into minimal fs.
  * System dirs mounted ro, workspace rw, cwd_path rw (CLI mode).
  * Returns 0 on success, -1 on failure. */
 static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
-                                   const char *db_path) {
+                                   const char *db_path, const char *env_file) {
     uid_t uid = getuid();
     gid_t gid = getgid();
 
@@ -139,8 +163,12 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         snprintf(dst, sizeof(dst), "%s%s", newroot, sys_dirs[i]);
         mkdir(dst, 0755);
         if (mount(sys_dirs[i], dst, NULL, MS_BIND | MS_REC, NULL) == 0) {
-            mount(NULL, dst, NULL,
-                  MS_REMOUNT | MS_BIND | MS_REC | MS_RDONLY | MS_NOSUID, NULL);
+            /* Non-recursive RO remount of the top bind (recursive RO can't
+             * relock host submounts under /dev,/proc in an unprivileged
+             * userns; /proc is replaced fresh below). A failure means the dir
+             * would be writable — fail closed. */
+            if (sandbox_remount_ro(dst) != 0)
+                return -1;
         }
     }
 
@@ -189,7 +217,7 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
 
     /* Mask the secret key + DB ciphertext if a bound path (CWD/workspace)
      * would otherwise expose them. Must run after binds, before pivot_root. */
-    sandbox_mask_state_files(newroot, db_path);
+    sandbox_mask_state_files(newroot, db_path, env_file);
 
     /* pivot_root into new root */
     char put_old[256];
@@ -289,7 +317,7 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     if (cfg->net_mode) psock = NULL;
 
     /* V82/V37: namespace sandbox — fail closed if requested but unavailable */
-    if (cfg->sandbox && sandbox_apply_namespace(ws, cwd, cfg->db_path) != 0) {
+    if (cfg->sandbox && sandbox_apply_namespace(ws, cwd, cfg->db_path, cfg->env_file) != 0) {
         fprintf(stderr, "error: namespace sandbox unavailable (errno=%d); "
                 "this trust level requires it — enable unprivileged user "
                 "namespaces or set the agent's trust_level to 'host'\n", errno);

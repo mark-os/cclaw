@@ -62,7 +62,7 @@ static char *tool_configure_provider_handler(const char *arguments, void *user_d
 
 int tool_configure_provider_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
     return tools_register(reg, "configure_provider",
-                          "Set up LLM provider. Stores API key encrypted. "
+                          "Set up LLM provider. Stores API key in a local env file with 0600 permissions. "
                           "Known providers: openrouter, gemini, anthropic. "
                           "Use 'custom' with base_url for others.",
                           CONFIGURE_PROVIDER_PARAMS,

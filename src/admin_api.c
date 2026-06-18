@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 const char *admin_key_env_name(const char *provider) {
     if (!provider) return NULL;
@@ -33,8 +36,11 @@ int admin_write_env_key(const char *env_file, const char *var_name, const char *
         fclose(f);
     }
 
-    f = fopen(env_file, "w");
-    if (!f) { free(existing); return -1; }
+    int fd = open(env_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { free(existing); return -1; }
+    fchmod(fd, 0600);
+    f = fdopen(fd, "w");
+    if (!f) { close(fd); free(existing); return -1; }
 
     size_t var_len = strlen(var_name);
     int replaced = 0;

@@ -1,6 +1,7 @@
 #include "sse_parse.h"
 #define JSMN_STATIC
 #include "jsmn.h"
+#include "jsmn_util.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -24,28 +25,6 @@ static int tok_int(const char *json, const jsmntok_t *t) {
     return atoi(tmp);
 }
 
-/* Helper: skip a token and all its children, return next index */
-static int tok_skip(const jsmntok_t *tokens, int i, int ntok) {
-    if (i >= ntok) return ntok;
-    if (tokens[i].type == JSMN_OBJECT) {
-        int pairs = tokens[i].size;
-        int j = i + 1;
-        for (int p = 0; p < pairs && j < ntok; p++) {
-            j++; /* key */
-            j = tok_skip(tokens, j, ntok); /* value */
-        }
-        return j;
-    }
-    if (tokens[i].type == JSMN_ARRAY) {
-        int elems = tokens[i].size;
-        int j = i + 1;
-        for (int e = 0; e < elems && j < ntok; e++)
-            j = tok_skip(tokens, j, ntok);
-        return j;
-    }
-    return i + 1;
-}
-
 /* Find key in object starting at tokens[obj_idx], return value token index or -1 */
 static int obj_find(const char *json, const jsmntok_t *tokens, int obj_idx, int ntok, const char *key) {
     if (obj_idx >= ntok || tokens[obj_idx].type != JSMN_OBJECT) return -1;
@@ -55,7 +34,7 @@ static int obj_find(const char *json, const jsmntok_t *tokens, int obj_idx, int 
         if (tok_eq(json, &tokens[j], key))
             return j + 1; /* value is next token */
         j++; /* skip key */
-        j = tok_skip(tokens, j, ntok); /* skip value */
+        j = jsmn_skip(tokens, j, ntok); /* skip value */
     }
     return -1;
 }
@@ -252,7 +231,7 @@ int sse_parse_gemini(const char *json, size_t len, SseChunk *out) {
                             }
                         }
                     }
-                    pi = tok_skip(toks, pi, ntok);
+                    pi = jsmn_skip(toks, pi, ntok);
                 }
             }
         }

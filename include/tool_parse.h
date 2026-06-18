@@ -17,6 +17,7 @@
 
 #define JSMN_STATIC
 #include "jsmn.h"
+#include "jsmn_util.h"
 #include "json_escape.h"
 #include <stdlib.h>
 #include <string.h>
@@ -61,21 +62,8 @@ static inline int targ_find(const ToolArgs *ta, const char *key) {
             (size_t)(kt->end - kt->start) == klen &&
             memcmp(ta->json + kt->start, key, klen) == 0)
             return i + 1;
-        /* Skip value */
-        i += 2; /* key + primitive/string value */
-        /* For object/array values, skip children */
-        jsmntok_t *vt = &((jsmntok_t *)ta->tokens)[i - 1];
-        if (vt->type == JSMN_OBJECT || vt->type == JSMN_ARRAY) {
-            /* Count all nested tokens */
-            int depth = 1, j = i;
-            while (j < ta->ntok && depth > 0) {
-                if (ta->tokens[j].type == JSMN_OBJECT || ta->tokens[j].type == JSMN_ARRAY)
-                    depth += ta->tokens[j].size;
-                depth--;
-                j++;
-            }
-            i = j;
-        }
+        /* Skip key, then skip value (handles nested objects/arrays) */
+        i = jsmn_skip(ta->tokens, i + 1, ta->ntok);
     }
     return -1;
 }

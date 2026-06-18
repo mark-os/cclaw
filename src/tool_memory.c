@@ -2,6 +2,7 @@
 #include "tool_memory.h"
 #include "db.h"
 #include "tool_parse.h"
+#include "jsmn_util.h"
 #include "json_escape.h"
 #include "validate.h"
 #include <stdio.h>
@@ -11,21 +12,7 @@
 #define MEM_TOK_CAP 512
 #define MEM_MAX_ENTRIES 64
 
-/* --- jsmn helpers (local copies from tool_file.c pattern) --- */
-
-static int jtok_skip(const jsmntok_t *t, int i) {
-    if (t[i].type == JSMN_OBJECT) {
-        int j = i + 1;
-        for (int k = 0; k < t[i].size; k++) { j = jtok_skip(t, j); j = jtok_skip(t, j); }
-        return j;
-    }
-    if (t[i].type == JSMN_ARRAY) {
-        int j = i + 1;
-        for (int k = 0; k < t[i].size; k++) j = jtok_skip(t, j);
-        return j;
-    }
-    return i + 1;
-}
+/* --- jsmn helpers --- */
 
 static int jtok_key_eq(const jsmntok_t *t, const char *json, const char *key) {
     size_t klen = strlen(key);
@@ -33,12 +20,12 @@ static int jtok_key_eq(const jsmntok_t *t, const char *json, const char *key) {
            memcmp(json + t->start, key, klen) == 0;
 }
 
-static int jtok_find(const jsmntok_t *t, const char *json, const char *key) {
+static int jtok_find(const jsmntok_t *t, int ntok, const char *json, const char *key) {
     int j = 1;
     for (int k = 0; k < t[0].size; k++) {
         int vi = j + 1;
         if (jtok_key_eq(&t[j], json, key)) return vi;
-        j = jtok_skip(t, vi);
+        j = jsmn_skip(t, vi, ntok);
     }
     return -1;
 }
@@ -207,8 +194,8 @@ static char *tool_memory_edit_handler(const char *arguments, void *user_data) {
     if (ntoks < 1 || toks[0].type != JSMN_OBJECT)
         return strdup("error: invalid JSON arguments");
 
-    int bvi = jtok_find(toks, arguments, "block");
-    int evi = jtok_find(toks, arguments, "edits");
+    int bvi = jtok_find(toks, ntoks, arguments, "block");
+    int evi = jtok_find(toks, ntoks, arguments, "edits");
     if (bvi < 0 || toks[bvi].type != JSMN_STRING)
         return strdup("error: missing or invalid 'block'");
     if (evi < 0 || toks[evi].type != JSMN_ARRAY)
@@ -234,7 +221,7 @@ static char *tool_memory_edit_handler(const char *arguments, void *user_data) {
 
     int ei = evi + 1;
     for (int i = 0; i < n_edits; i++) {
-        if (toks[ei].type != JSMN_OBJECT) { ei = jtok_skip(toks, ei); continue; }
+        if (toks[ei].type != JSMN_OBJECT) { ei = jsmn_skip(toks, ei, ntoks); continue; }
 
         int number = -1;
         const char *tp = NULL;
@@ -250,9 +237,9 @@ static char *tool_memory_edit_handler(const char *arguments, void *user_data) {
                 tp = arguments + vt->start;
                 tl = (size_t)(vt->end - vt->start);
             }
-            fj = jtok_skip(toks, fj + 1);
+            fj = jsmn_skip(toks, fj + 1, ntoks);
         }
-        ei = jtok_skip(toks, ei);
+        ei = jsmn_skip(toks, ei, ntoks);
 
         if (number < 1 || !tp) continue;
 
@@ -303,8 +290,8 @@ static char *tool_memory_delete_handler(const char *arguments, void *user_data) 
     if (ntoks < 1 || toks[0].type != JSMN_OBJECT)
         return strdup("error: invalid JSON arguments");
 
-    int bvi = jtok_find(toks, arguments, "block");
-    int nvi = jtok_find(toks, arguments, "numbers");
+    int bvi = jtok_find(toks, ntoks, arguments, "block");
+    int nvi = jtok_find(toks, ntoks, arguments, "numbers");
     if (bvi < 0 || toks[bvi].type != JSMN_STRING)
         return strdup("error: missing or invalid 'block'");
     if (nvi < 0 || toks[nvi].type != JSMN_ARRAY)

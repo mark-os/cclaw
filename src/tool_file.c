@@ -2,6 +2,7 @@
 #define _DEFAULT_SOURCE
 #include "tool_file.h"
 #include "tool_parse.h"
+#include "jsmn_util.h"
 #include <dirent.h>
 #include <fnmatch.h>
 #include <limits.h>
@@ -546,32 +547,18 @@ typedef struct {
     size_t off;
 } EditOp;
 
-static int jtok_skip(const jsmntok_t *t, int i) {
-    if (t[i].type == JSMN_OBJECT) {
-        int j = i + 1;
-        for (int k = 0; k < t[i].size; k++) { j = jtok_skip(t, j); j = jtok_skip(t, j); }
-        return j;
-    }
-    if (t[i].type == JSMN_ARRAY) {
-        int j = i + 1;
-        for (int k = 0; k < t[i].size; k++) j = jtok_skip(t, j);
-        return j;
-    }
-    return i + 1;
-}
-
 static int jtok_key_eq(const jsmntok_t *t, const char *json, const char *key) {
     size_t klen = strlen(key);
     return t->type == JSMN_STRING && (size_t)(t->end - t->start) == klen &&
            memcmp(json + t->start, key, klen) == 0;
 }
 
-static int jtok_find(const jsmntok_t *t, const char *json, const char *key) {
+static int jtok_find(const jsmntok_t *t, int ntok, const char *json, const char *key) {
     int j = 1;
     for (int k = 0; k < t[0].size; k++) {
         int vi = j + 1;
         if (jtok_key_eq(&t[j], json, key)) return vi;
-        j = jtok_skip(t, vi);
+        j = jsmn_skip(t, vi, ntok);
     }
     return -1;
 }
@@ -613,8 +600,8 @@ static char *file_edit_inner(const char *arguments, void *user_data) {
     if (nt < 1 || toks[0].type != JSMN_OBJECT)
         return strdup("error: invalid JSON arguments (or too many edits)");
 
-    int pvi = jtok_find(toks, arguments, "path");
-    int avi = jtok_find(toks, arguments, "edits");
+    int pvi = jtok_find(toks, nt, arguments, "path");
+    int avi = jtok_find(toks, nt, arguments, "edits");
     if (pvi < 0 || toks[pvi].type != JSMN_STRING)
         return strdup("error: missing or invalid 'path'");
     if (avi < 0 || toks[avi].type != JSMN_ARRAY)
@@ -660,9 +647,9 @@ static char *file_edit_inner(const char *arguments, void *user_data) {
             } else if (jtok_key_eq(kt, arguments, "newText") && vt->type == JSMN_STRING) {
                 np = arguments + vt->start; nl = (size_t)(vt->end - vt->start); have_new = 1;
             }
-            fj = jtok_skip(toks, fj + 1);
+            fj = jsmn_skip(toks, fj + 1, nt);
         }
-        ei = jtok_skip(toks, ei);
+        ei = jsmn_skip(toks, ei, nt);
         if (!have_old || !have_new) { errmsg = "error: each edit needs oldText and newText"; break; }
 
         EditOp *o = &ops[nedits];

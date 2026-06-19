@@ -127,7 +127,7 @@ static void test_shell_curl_through_proxy(void) {
     pthread_create(&thr, NULL, mock_http_thread, &ma);
 
     ProxyContext proxy;
-    int rc = proxy_start(&proxy, workspace, NULL, 0);
+    int rc = proxy_start(&proxy, workspace, NULL, NULL);
     assert(rc == 0);
 
     /* Use curl (simpler than python, always available).
@@ -186,7 +186,7 @@ static void test_proxy_relay_integrity(void) {
     pthread_create(&thr, NULL, mock_http_thread, &ma);
 
     ProxyContext proxy;
-    int rc = proxy_start(&proxy, workspace, NULL, 0);
+    int rc = proxy_start(&proxy, workspace, NULL, NULL);
     assert(rc == 0);
 
     char cmd_json[2048];

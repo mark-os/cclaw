@@ -1,10 +1,11 @@
 /* test_integration_shell_proxy_deny.c — T216: shell cannot reach unlisted host.
- * Starts proxy with allowed_hosts=["allowed.test"], starts mock TCP server,
- * shell child attempts connect to 127.0.0.1 (not in allowlist) via proxy.
+ * Starts proxy with DB-backed grants (only "allowed.test"), starts mock TCP server,
+ * shell child attempts connect to 127.0.0.1 (not in grants) via proxy.
  * Verifies proxy denies the connection. */
 #define _GNU_SOURCE
 #include "proxy.h"
 #include "tool_shell.h"
+#include <sqlite3.h>
 #include <arpa/inet.h>
 #include <assert.h>
 #include <netinet/in.h>
@@ -19,6 +20,7 @@
 
 static char workspace[256];
 static char preload_in_ws[512];
+static char deny_db_path[512];
 static int ns_available = 1;
 
 static void setup_workspace(void) {
@@ -28,6 +30,24 @@ static void setup_workspace(void) {
     char cmd[1024];
     snprintf(cmd, sizeof(cmd), "cp ./build/libcclaw_net.so %s", preload_in_ws);
     system(cmd);
+    /* Create test DB with grants */
+    snprintf(deny_db_path, sizeof(deny_db_path), "%s/test.db", workspace);
+    sqlite3 *db;
+    assert(sqlite3_open(deny_db_path, &db) == SQLITE_OK);
+    sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS grants("
+        " id INTEGER PRIMARY KEY, agent_name TEXT, kind TEXT, value TEXT,"
+        " expires_at INTEGER);",
+        NULL, NULL, NULL);
+    /* Only grant "allowed.test" to testbot */
+    sqlite3_exec(db,
+        "INSERT INTO grants(agent_name,kind,value) VALUES('testbot','host','allowed.test');",
+        NULL, NULL, NULL);
+    /* Grant 127.0.0.1 to testbot2 for the allowed_vs_denied test */
+    sqlite3_exec(db,
+        "INSERT INTO grants(agent_name,kind,value) VALUES('testbot2','host','127.0.0.1');",
+        NULL, NULL, NULL);
+    sqlite3_close(db);
 }
 
 static void cleanup_workspace(void) {
@@ -77,10 +97,9 @@ static void test_shell_denied_unlisted_host(void) {
     uint16_t port;
     int listen_fd = start_mock_tcp(&port);
 
-    /* Start proxy with allowed_hosts that does NOT include 127.0.0.1 */
-    char *allowed[] = {"allowed.test"};
+    /* Start proxy with DB grants that do NOT include 127.0.0.1 */
     ProxyContext proxy;
-    int rc = proxy_start(&proxy, workspace, allowed, 1);
+    int rc = proxy_start(&proxy, workspace, deny_db_path, "testbot");
     assert(rc == 0);
 
     /* Shell child tries to curl 127.0.0.1 — should be denied by proxy */
@@ -125,9 +144,8 @@ static void test_shell_allowed_vs_denied(void) {
     int listen_fd = start_mock_tcp(&port);
 
     /* Allow only "127.0.0.1" — so connecting to it should work */
-    char *allowed[] = {"127.0.0.1"};
     ProxyContext proxy;
-    int rc = proxy_start(&proxy, workspace, allowed, 1);
+    int rc = proxy_start(&proxy, workspace, deny_db_path, "testbot2");
     assert(rc == 0);
 
     /* Mock server thread to accept one connection */

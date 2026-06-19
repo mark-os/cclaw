@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "proxy.h"
+#include <sqlite3.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -18,16 +19,28 @@
 #define RELAY_BUF_SIZE 4096
 #define PREAMBLE_MAX 300
 
-/* V83: check if host is in allowed list (case-insensitive).
- * Empty list = allow all. */
+/* V83: check if host is allowed by querying grants table.
+ * No db_path/agent_name = allow all (open mode for tests). */
 static int host_allowed(const ProxyContext *ctx, const char *host) {
-    if (!ctx->allowed_hosts || ctx->allowed_count == 0)
+    if (!ctx->db_path || !ctx->agent_name)
         return 1;
-    for (size_t i = 0; i < ctx->allowed_count; i++) {
-        if (strcasecmp(host, ctx->allowed_hosts[i]) == 0)
-            return 1;
+    sqlite3 *db;
+    if (sqlite3_open_v2(ctx->db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
+        return 0;
+    const char *sql =
+        "SELECT 1 FROM grants WHERE agent_name=?1 AND kind='host'"
+        " AND value=?2 AND (expires_at IS NULL OR expires_at > unixepoch()) LIMIT 1";
+    sqlite3_stmt *stmt;
+    int allowed = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, ctx->agent_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, host, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            allowed = 1;
+        sqlite3_finalize(stmt);
     }
-    return 0;
+    sqlite3_close(db);
+    return allowed;
 }
 
 /* Resolve hostname to IPv4/IPv6 address string. Returns 0 on success. */
@@ -162,8 +175,8 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
      * is set and host is an IP, check if it matches any resolved allowed host.
      * In practice, the preload lib sends IPs from our RESOLVE responses. */
     if (!host_allowed(ctx, host)) {
-        /* Host might be an IP — allow if allowed_hosts is empty (allow-all mode) */
-        if (ctx->allowed_hosts && ctx->allowed_count > 0) {
+        /* Host might be an IP — allow if no DB/agent (open mode) */
+        if (ctx->db_path && ctx->agent_name) {
             write(client_fd, "DENIED\n", 7);
             close(client_fd);
             return;
@@ -229,11 +242,11 @@ static void *proxy_loop(void *arg) {
 }
 
 int proxy_start(ProxyContext *ctx, const char *workspace,
-                char **allowed_hosts, size_t allowed_count) {
+                const char *db_path, const char *agent_name) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->listen_fd = -1;
-    ctx->allowed_hosts = allowed_hosts;
-    ctx->allowed_count = allowed_count;
+    ctx->db_path = db_path ? strdup(db_path) : NULL;
+    ctx->agent_name = agent_name ? strdup(agent_name) : NULL;
 
     /* Build socket path */
     size_t wlen = strlen(workspace);
@@ -309,6 +322,10 @@ void proxy_stop(ProxyContext *ctx) {
         free(ctx->sock_path);
         ctx->sock_path = NULL;
     }
+    free(ctx->db_path);
+    ctx->db_path = NULL;
+    free(ctx->agent_name);
+    ctx->agent_name = NULL;
 }
 
 const char *proxy_sock_path(const ProxyContext *ctx) {

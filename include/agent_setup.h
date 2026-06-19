@@ -54,6 +54,9 @@ typedef struct {
 int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
                      const Config *cfg, const char *agent_name, int mode);
 
+/* Refresh caps from DB and rebind all consumer pointers atomically. */
+void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent);
+
 /* Destroy setup (free registry, JS runtime, caps). */
 void agent_setup_destroy(AgentSetup *setup);
 

@@ -448,7 +448,9 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
 
     int64_t session_id = a->session_id;
     const char *agent = session_get_agent_name(g_db, session_id);
+    const char *refresh_agent = agent;
 
+    int rename_failed = 0;
     if (decision == APPROVAL_ALWAYS) {
         /* Apply the standing grant */
         if (strcmp(a->action, "grant_tool") == 0) {
@@ -484,6 +486,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                             if (rename(old_path, new_path) != 0) {
                                 /* Rollback DB rename on disk failure */
                                 agent_rename(g_db, nn, agent, session_id);
+                                rename_failed = 1;
                                 goto rename_done;
                             }
                         }
@@ -498,22 +501,25 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                             sqlite3_step(s); sqlite3_finalize(s);
                         }
                     }
-                    /* Update live agent name */
+                    /* Update live agent name — use nn for subsequent refresh */
                     snprintf((char *)rctx->agent_name, 64, "%s", nn);
                     setenv("CCLAW_AGENT_NAME", nn, 1);
+                    refresh_agent = rctx->agent_name;
                 }
             }
 rename_done:
             tool_parse_free(&ta);
         }
         /* Refresh caps in the live setup */
-        if (g_tool_setup)
-            agent_caps_refresh(g_db, agent, &g_tool_setup->caps);
+        if (g_tool_setup && !rename_failed)
+            agent_setup_refresh_caps(g_tool_setup, g_db, refresh_agent);
     }
 
     /* Build tool result message */
     char result_buf[256];
-    if (decision == APPROVAL_ALWAYS)
+    if (rename_failed)
+        snprintf(result_buf, sizeof(result_buf), "error: rename failed, rolled back");
+    else if (decision == APPROVAL_ALWAYS)
         snprintf(result_buf, sizeof(result_buf), "approved: %s", a->action);
     else if (decision == APPROVAL_ONCE)
         snprintf(result_buf, sizeof(result_buf), "approved (once): %s", a->action);
@@ -526,7 +532,8 @@ rename_done:
         int64_t turn_id = db_next_turn_id(g_db, session_id);
         ToolResult tr = { .tool_call_id = a->tool_call_id, .content = result_buf };
         Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
-                        .tool_name = "request_config", .is_error = (decision == APPROVAL_DENY) };
+                        .tool_name = "request_config",
+                        .is_error = (decision == APPROVAL_DENY || rename_failed) };
         entry_append_with_turn(g_db, session_id, &msg, turn_id);
         db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
     }
@@ -653,7 +660,7 @@ static void run_advance(int64_t session_id) {
     }
     case ADVANCE_DONE:
         if (g_tool_setup)
-            agent_caps_refresh(g_db, out.agent_name, &g_tool_setup->caps);
+            agent_setup_refresh_caps(g_tool_setup, g_db, out.agent_name);
         deliver_response(session_id);
         /* Attempt compaction if configured */
         if (g_cfg->compaction && llm_worker_alive() &&

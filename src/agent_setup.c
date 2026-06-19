@@ -23,7 +23,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
 
     /* V83: Start credential proxy thread for shell children */
     if (cfg->workspace)
-        proxy_start(&setup->proxy_ctx, cfg->workspace, setup->caps.hosts, setup->caps.host_count);
+        proxy_start(&setup->proxy_ctx, cfg->workspace, cfg->db_path, agent_name);
 
     /* V88: Collect secrets from env, clear from process env */
     setup->secrets = shell_secrets_collect(&setup->secret_count);
@@ -183,6 +183,38 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
 
     tools_sync_to_db(&setup->reg, db);
     return 0;
+}
+
+void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent) {
+    agent_caps_refresh(db, agent, &setup->caps);
+
+    /* Rebind all consumer pointers to the new arrays */
+    setup->file_read_ctx.read_paths = setup->caps.read_paths;
+    setup->file_read_ctx.read_path_count = setup->caps.read_count;
+    setup->file_read_ctx.write_paths = setup->caps.write_paths;
+    setup->file_read_ctx.write_path_count = setup->caps.write_count;
+
+    setup->js_eval_ctx.allowed_hosts = setup->caps.hosts;
+    setup->js_eval_ctx.allowed_hosts_count = setup->caps.host_count;
+    setup->js_eval_ctx.read_paths = setup->caps.read_paths;
+    setup->js_eval_ctx.read_path_count = setup->caps.read_count;
+    setup->js_eval_ctx.write_paths = setup->caps.write_paths;
+    setup->js_eval_ctx.write_path_count = setup->caps.write_count;
+
+    ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
+    if (shell_entry && shell_entry->user_data) {
+        ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
+        sc->read_paths = setup->caps.read_paths;
+        sc->read_path_count = setup->caps.read_count;
+        sc->write_paths = setup->caps.write_paths;
+        sc->write_path_count = setup->caps.write_count;
+    }
+
+    setup->web_policy.allowed_hosts = setup->caps.hosts;
+    setup->web_policy.allowed_count = setup->caps.host_count;
+
+    if (setup->js_rt)
+        js_runtime_set_hosts(setup->js_rt, setup->caps.hosts, setup->caps.host_count);
 }
 
 void agent_setup_destroy(AgentSetup *setup) {

@@ -26,19 +26,28 @@ static const char *PARAMS_JSON =
     "\"preamble\":{\"type\":\"string\",\"description\":\"New system prompt preamble (for rename_agent, optional)\"}"
     "},\"required\":[\"action\"]}";
 
-/* Build canonical args JSON for the approval row. Caller frees. */
-static char *build_args_json(const char *action, const char *key, const char *value,
-                             const char *preamble) {
-    /* Simple JSON object — use snprintf since values are validated */
-    size_t cap = 256 + (value ? strlen(value) : 0) + (preamble ? strlen(preamble) : 0);
-    char *buf = malloc(cap);
-    if (!buf) return NULL;
+/* Build canonical args JSON for the approval row using SQLite json_object
+ * for safe escaping of model-controlled text. Caller frees. */
+static char *build_args_json(sqlite3 *db, const char *action, const char *key,
+                             const char *value, const char *preamble) {
+    sqlite3_stmt *s;
+    const char *sql = preamble
+        ? "SELECT json_object('action',?1,?2,?3,'preamble',?4)"
+        : "SELECT json_object('action',?1,?2,?3)";
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(s, 1, action, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, key, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, value, -1, SQLITE_STATIC);
     if (preamble)
-        snprintf(buf, cap, "{\"action\":\"%s\",\"%s\":\"%s\",\"preamble\":\"%s\"}",
-                 action, key, value, preamble);
-    else
-        snprintf(buf, cap, "{\"action\":\"%s\",\"%s\":\"%s\"}", action, key, value);
-    return buf;
+        sqlite3_bind_text(s, 4, preamble, -1, SQLITE_STATIC);
+    char *result = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *txt = (const char *)sqlite3_column_text(s, 0);
+        if (txt) result = strdup(txt);
+    }
+    sqlite3_finalize(s);
+    return result;
 }
 
 static char *handler(const char *arguments, void *user_data) {
@@ -55,7 +64,7 @@ static char *handler(const char *arguments, void *user_data) {
     if (strcmp(act, "grant_tool") == 0) {
         const char *tool = targ_str(&ta, "tool");
         if (!tool || !tool[0]) { tool_parse_free(&ta); return strdup("error: 'tool' required for grant_tool"); }
-        char *args = build_args_json("grant_tool", "tool", tool, NULL);
+        char *args = build_args_json(ctx->db, "grant_tool", "tool", tool, NULL);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
             ctx->current_tool_call_id, "request_config", "grant_tool", args);
         free(args);
@@ -67,7 +76,7 @@ static char *handler(const char *arguments, void *user_data) {
     } else if (strcmp(act, "grant_host") == 0) {
         const char *host = targ_str(&ta, "host");
         if (!host || !host[0]) { tool_parse_free(&ta); return strdup("error: 'host' required for grant_host"); }
-        char *args = build_args_json("grant_host", "host", host, NULL);
+        char *args = build_args_json(ctx->db, "grant_host", "host", host, NULL);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
             ctx->current_tool_call_id, "request_config", "grant_host", args);
         free(args);
@@ -80,7 +89,7 @@ static char *handler(const char *arguments, void *user_data) {
         const char *path = targ_str(&ta, "path");
         if (!path || !path[0]) { tool_parse_free(&ta); return strdup("error: 'path' required for grant_path"); }
         if (path[0] != '/') { tool_parse_free(&ta); return strdup("error: path must be absolute (start with '/')"); }
-        char *args = build_args_json("grant_path", "path", path, NULL);
+        char *args = build_args_json(ctx->db, "grant_path", "path", path, NULL);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
             ctx->current_tool_call_id, "request_config", "grant_path", args);
         free(args);
@@ -94,7 +103,7 @@ static char *handler(const char *arguments, void *user_data) {
         const char *preamble = targ_str(&ta, "preamble");
         if (!new_name || !new_name[0]) { tool_parse_free(&ta); return strdup("error: 'name' required"); }
         if (!is_valid_name(new_name)) { tool_parse_free(&ta); return strdup("error: invalid name (use A-Za-z0-9_- only)"); }
-        char *args = build_args_json("rename_agent", "name", new_name, preamble);
+        char *args = build_args_json(ctx->db, "rename_agent", "name", new_name, preamble);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
             ctx->current_tool_call_id, "request_config", "rename_agent", args);
         free(args);

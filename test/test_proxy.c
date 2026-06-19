@@ -2,6 +2,7 @@
  * Tests UDS accept, RESOLVE, CONNECT preamble, allowed_hosts enforcement. */
 #define _POSIX_C_SOURCE 200809L
 #include "proxy.h"
+#include <sqlite3.h>
 #include <arpa/inet.h>
 #include <assert.h>
 #include <signal.h>
@@ -14,10 +15,25 @@
 #include <unistd.h>
 
 static char tmpdir[128];
+static char db_path[256];
 
 static void setup_tmpdir(void) {
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/test_proxy_XXXXXX");
     assert(mkdtemp(tmpdir) != NULL);
+    /* Create a temp DB with grants table for deny tests */
+    snprintf(db_path, sizeof(db_path), "%s/test.db", tmpdir);
+    sqlite3 *db;
+    assert(sqlite3_open(db_path, &db) == SQLITE_OK);
+    sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS grants("
+        " id INTEGER PRIMARY KEY, agent_name TEXT, kind TEXT, value TEXT,"
+        " expires_at INTEGER);",
+        NULL, NULL, NULL);
+    /* Grant "example.com" to agent "testbot" */
+    sqlite3_exec(db,
+        "INSERT INTO grants(agent_name,kind,value) VALUES('testbot','host','example.com');",
+        NULL, NULL, NULL);
+    sqlite3_close(db);
 }
 
 static void cleanup_tmpdir(void) {
@@ -56,7 +72,7 @@ static int read_line(int fd, char *buf, int max) {
 
 static void test_proxy_start_stop(void) {
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, NULL, 0);
+    int rc = proxy_start(&ctx, tmpdir, NULL, NULL);
     assert(rc == 0);
     assert(proxy_sock_path(&ctx) != NULL);
 
@@ -80,7 +96,7 @@ static void test_proxy_start_stop(void) {
 static void test_resolve_allowed(void) {
     /* No allowlist = allow all */
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, NULL, 0);
+    int rc = proxy_start(&ctx, tmpdir, NULL, NULL);
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));
@@ -102,10 +118,9 @@ static void test_resolve_allowed(void) {
 }
 
 static void test_resolve_denied(void) {
-    /* Allowlist with only "example.com" — localhost should be denied */
-    char *hosts[] = { "example.com" };
+    /* DB grants only "example.com" to "testbot" — localhost should be denied */
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, hosts, 1);
+    int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));
@@ -125,10 +140,9 @@ static void test_resolve_denied(void) {
 }
 
 static void test_connect_denied(void) {
-    /* Allowlist with only "example.com" — connecting to other host denied */
-    char *hosts[] = { "example.com" };
+    /* DB grants only "example.com" — connecting to other host denied */
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, hosts, 1);
+    int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));
@@ -149,7 +163,7 @@ static void test_connect_denied(void) {
 
 static void test_connect_bad_preamble(void) {
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, NULL, 0);
+    int rc = proxy_start(&ctx, tmpdir, NULL, NULL);
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));

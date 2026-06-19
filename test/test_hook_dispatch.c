@@ -12,10 +12,21 @@
 #include "tools.h"
 #include "db.h"
 #include "test_util.h"
+#include <mquickjs.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;
 static sqlite3 *g_hook_db;
+
+/* Read a JS global expression to a C string (heap, caller frees) or NULL. */
+static char *js_read_global(JsSessionRuntime *rt, const char *expr) {
+    JSContext *ctx = (JSContext *)rt->ctx;
+    JSValue v = JS_Eval(ctx, expr, strlen(expr), "<t>", JS_EVAL_RETVAL);
+    if (JS_IsException(v)) return NULL;
+    JSCStringBuf buf;
+    const char *s = JS_ToCString(ctx, v, &buf);
+    return s ? strdup(s) : NULL;
+}
 
 #define TEST(name) do { tests_run++; printf("  %s... ", #name); } while(0)
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
@@ -324,9 +335,9 @@ static void test_hooks_chain(void) {
     PASS();
 }
 
-/* V113: beforeToolCall blocks execution */
-static void test_before_tool_call_blocks(void) {
-    TEST(before_tool_call_blocks);
+/* §8 gating hook: restrict-only {allow|ask|deny}, most-restrictive wins. */
+static void test_gate_restrict_only(void) {
+    TEST(gate_restrict_only);
 
     const char *ws = "/tmp/cclaw_hook_t4";
     cleanup(ws);
@@ -335,10 +346,13 @@ static void test_before_tool_call_blocks(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/block.js", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/gate.js", ext_dir);
     write_file(p1,
         "cclaw.registerHook('beforeToolCall', function(ctx) {\n"
-        "  if (ctx.name === 'dangerous') return {block: true, reason: 'not allowed'};\n"
+        "  if (ctx.name === 'dangerous') return {deny: true, reason: 'not allowed'};\n"
+        "  if (ctx.name === 'risky') return {ask: true, reason: 'confirm please'};\n"
+        "  if (ctx.name === 'legacy') return {block: true};\n"  /* block aliases deny */
+        "  if (ctx.name === 'greedy') return {allow: true};\n"  /* cannot relax */
         "});\n");
 
     JsSessionRuntime *rt = js_runtime_create();
@@ -353,24 +367,34 @@ static void test_before_tool_call_blocks(void) {
     extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
     extension_list_free(paths, ext_count);
 
-    /* Call for blocked tool */
-    char *blocked = hook_dispatch_before_tool_call(&ext_ctx, g_hook_db, "dangerous", "{}");
-    if (!blocked) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("expected block");
-    }
-    if (!strstr(blocked, "not allowed")) {
-        printf("got: %s ", blocked);
-        free(blocked); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); FAIL("missing reason");
-    }
-    free(blocked);
+    char *reason = NULL;
+    HookGate g;
 
-    /* Call for allowed tool */
-    char *allowed = hook_dispatch_before_tool_call(&ext_ctx, g_hook_db, "safe_tool", "{}");
-    if (allowed) {
-        free(allowed); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); FAIL("expected NULL for allowed tool");
+    g = hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "dangerous", "{}", &reason);
+    if (g != HOOK_GATE_DENY || !reason || strcmp(reason, "not allowed") != 0) {
+        free(reason); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
+        js_runtime_destroy(rt); cleanup(ws); FAIL("deny+reason expected");
+    }
+    free(reason); reason = NULL;
+
+    g = hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "risky", "{}", &reason);
+    if (g != HOOK_GATE_ASK || !reason || strcmp(reason, "confirm please") != 0) {
+        free(reason); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
+        js_runtime_destroy(rt); cleanup(ws); FAIL("ask+reason expected");
+    }
+    free(reason); reason = NULL;
+
+    g = hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "legacy", "{}", NULL);
+    if (g != HOOK_GATE_DENY) {
+        tools_free(&reg); extension_ctx_destroy(&ext_ctx);
+        js_runtime_destroy(rt); cleanup(ws); FAIL("block should map to deny");
+    }
+
+    /* allow / unknown / safe → ALLOW (a hook can never raise authority) */
+    if (hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "greedy", "{}", NULL) != HOOK_GATE_ALLOW ||
+        hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "safe", "{}", NULL) != HOOK_GATE_ALLOW) {
+        tools_free(&reg); extension_ctx_destroy(&ext_ctx);
+        js_runtime_destroy(rt); cleanup(ws); FAIL("allow/unknown should be ALLOW");
     }
 
     tools_free(&reg);
@@ -380,9 +404,9 @@ static void test_before_tool_call_blocks(void) {
     PASS();
 }
 
-/* V114: afterToolCall replaces result */
-static void test_after_tool_call_replaces(void) {
-    TEST(after_tool_call_replaces);
+/* §8 observer hook: side-effect only — runs, but cannot modify the result. */
+static void test_observer_side_effect_only(void) {
+    TEST(observer_side_effect_only);
 
     const char *ws = "/tmp/cclaw_hook_t5";
     cleanup(ws);
@@ -391,10 +415,14 @@ static void test_after_tool_call_replaces(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/replace.js", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/observe.js", ext_dir);
+    /* Records what it saw into a global, and *tries* to return a replacement
+     * (which the dispatcher must ignore — observers cannot gate/modify). */
     write_file(p1,
+        "globalThis.__seen = '';\n"
         "cclaw.registerHook('afterToolCall', function(ctx) {\n"
-        "  if (ctx.name === 'fetch') return {result: 'replaced: ' + ctx.result};\n"
+        "  globalThis.__seen = ctx.name + '=' + ctx.result;\n"
+        "  return {result: 'SHOULD BE IGNORED'};\n"
         "});\n");
 
     JsSessionRuntime *rt = js_runtime_create();
@@ -409,25 +437,16 @@ static void test_after_tool_call_replaces(void) {
     extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
     extension_list_free(paths, ext_count);
 
-    /* Call for matching tool */
-    char *replaced = hook_dispatch_after_tool_call(&ext_ctx, g_hook_db, "fetch", "{}", "original data");
-    if (!replaced) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("expected replacement");
-    }
-    if (strcmp(replaced, "replaced: original data") != 0) {
-        printf("got: %s ", replaced);
-        free(replaced); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); FAIL("wrong replacement");
-    }
-    free(replaced);
+    /* Returns void — there is no way for an observer to alter the result. */
+    hook_dispatch_observe_tool_call(&ext_ctx, g_hook_db, "fetch", "{}", "original data");
 
-    /* Non-matching tool → no replacement */
-    char *noop = hook_dispatch_after_tool_call(&ext_ctx, g_hook_db, "other", "{}", "data");
-    if (noop) {
-        free(noop); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); FAIL("expected NULL for non-matching");
+    char *seen = js_read_global(rt, "globalThis.__seen");
+    if (!seen || strcmp(seen, "fetch=original data") != 0) {
+        printf("seen: %s ", seen ? seen : "(null)");
+        free(seen); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
+        js_runtime_destroy(rt); cleanup(ws); FAIL("observer did not run / saw wrong data");
     }
+    free(seen);
 
     tools_free(&reg);
     extension_ctx_destroy(&ext_ctx);
@@ -436,55 +455,21 @@ static void test_after_tool_call_replaces(void) {
     PASS();
 }
 
-/* V114: afterToolCall hooks chain — each sees previous result */
-static void test_after_tool_call_chains(void) {
-    TEST(after_tool_call_chains);
-
-    const char *ws = "/tmp/cclaw_hook_t6";
-    cleanup(ws);
-    char ext_dir[256];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
-    mkdirs(ext_dir);
-
-    char p1[512];
-    snprintf(p1, sizeof(p1), "%s/chain.js", ext_dir);
-    write_file(p1,
-        "cclaw.registerHook('afterToolCall', function(ctx) {\n"
-        "  return {result: ctx.result + '+A'};\n"
-        "});\n"
-        "cclaw.registerHook('afterToolCall', function(ctx) {\n"
-        "  return {result: ctx.result + '+B'};\n"
-        "});\n");
-
-    JsSessionRuntime *rt = js_runtime_create();
-    ToolRegistry reg;
-    tools_init(&reg);
+/* No tool-call hooks registered → gate ALLOWs, observer is a no-op. */
+static void test_no_tool_hooks(void) {
+    TEST(no_tool_hooks);
     ExtensionCtx ext_ctx;
+    JsSessionRuntime *rt = js_runtime_create();
     extension_ctx_init(&ext_ctx, rt);
 
-    size_t ext_count = 0;
-    char **paths = extension_discover(ws, &ext_count);
-    Config cfg = {.log_level = LOG_LEVEL_INFO};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
-    extension_list_free(paths, ext_count);
+    char *reason = (char *)0x1;  /* must be NULLed even when no hooks */
+    HookGate g = hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "x", "{}", &reason);
+    int ok = (g == HOOK_GATE_ALLOW && reason == NULL);
+    hook_dispatch_observe_tool_call(&ext_ctx, g_hook_db, "x", "{}", "r");  /* no crash */
 
-    char *result = hook_dispatch_after_tool_call(&ext_ctx, g_hook_db, "any", "{}", "start");
-    if (!result) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("expected result");
-    }
-    /* First hook: "start+A", second sees that and returns "start+A+B" */
-    if (strcmp(result, "start+A+B") != 0) {
-        printf("got: %s ", result);
-        free(result); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); FAIL("wrong chain result");
-    }
-    free(result);
-
-    tools_free(&reg);
     extension_ctx_destroy(&ext_ctx);
     js_runtime_destroy(rt);
-    cleanup(ws);
+    if (!ok) FAIL("expected ALLOW + NULL reason with no hooks");
     PASS();
 }
 
@@ -495,9 +480,9 @@ int main(void) {
     test_hook_modifies_messages();
     test_hook_throws();
     test_hooks_chain();
-    test_before_tool_call_blocks();
-    test_after_tool_call_replaces();
-    test_after_tool_call_chains();
+    test_gate_restrict_only();
+    test_observer_side_effect_only();
+    test_no_tool_hooks();
     sqlite3_close(g_hook_db);
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

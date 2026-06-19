@@ -20,6 +20,7 @@
 #include <mquickjs.h>
 #include "agent_config.h"
 #include "agent_setup.h"
+#include "hook_dispatch.h"
 #include "approval.h"
 #include "llm_proc.h"
 #include "llm_worker.h"
@@ -65,6 +66,8 @@ typedef struct {
     int iteration;
     /* TOOL_EXEC fields */
     char tool_call_id[64];
+    char tool_name[64];     /* for the §8 observer hook */
+    char *tool_args;        /* strdup'd args for the observer; freed on cleanup */
     int64_t turn_id;
     int64_t entry_id;       /* tool_call entry id */
     int result_pipe;        /* read end of pipe for tool output */
@@ -98,6 +101,8 @@ static void child_remove(ChildProc *c) {
     free(c->outbuf);
     c->outbuf = NULL;
     c->outbuf_len = 0;
+    free(c->tool_args);
+    c->tool_args = NULL;
     g_children[idx] = g_children[g_child_count - 1];
     g_child_count--;
 }
@@ -231,12 +236,34 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
         return 1; /* Signal: handled inline, check for more */
     }
 
-    /* §4 Axis B: approval gate. A granted tool whose mode is not 'silent' parks
-     * before executing. Re-entrant (§7a): on re-dispatch after approval the same
-     * frozen tool_call runs; a denial answers the call with an error. */
+    /* §4+§8 dispatch gate (fixed order: capability ceiling → gating hook →
+     * approval gate). The gating hook may only *raise* restriction
+     * (silent→ask, ask→deny) — a hook can veto, only a grant authorizes.
+     * Re-entrant (§7a): the approval is matched by tool_call_id, so a denial
+     * answers this call and an approval re-runs the same frozen tool_call. */
     {
         ToolApprovalMode mode = agent_tool_mode(g_db, agent_name, tc->name);
-        if (mode != TOOL_MODE_SILENT) {
+        HookGate gate = (mode == TOOL_MODE_SILENT) ? HOOK_GATE_ALLOW : HOOK_GATE_ASK;
+        if (g_tool_setup) {
+            char *reason = NULL;
+            HookGate h = hook_dispatch_gate_tool_call(&g_tool_setup->ext_ctx, g_db,
+                                                      tc->name, tc->arguments, &reason);
+            if (h > gate) gate = h;  /* restrict-only: most restrictive wins */
+            if (gate == HOOK_GATE_DENY) {
+                char err[256];
+                snprintf(err, sizeof(err), "error: %s blocked by hook%s%s", tc->name,
+                         reason ? ": " : "", reason ? reason : "");
+                ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
+                Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                               .tool_name = tc->name, .is_error = 1};
+                entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+                db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "hook:deny");
+                free(reason);
+                return 1;
+            }
+            free(reason);
+        }
+        if (gate == HOOK_GATE_ASK) {
             Approval *ap = approval_get_for_tool_call(g_db, tc->call_id);
             int approved = ap && ap->state && strcmp(ap->state, "approved") == 0;
             int denied   = ap && ap->state && strcmp(ap->state, "denied") == 0;
@@ -318,6 +345,10 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
                        .tool_name = tc->name, .is_error = is_err};
         int64_t rid = entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
         db_tool_call_complete_with_result(g_db, tc->entry_id, tc->call_id, rid);
+        /* §8 observer hook (after execution; side-effect only) */
+        if (g_tool_setup)
+            hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx, g_db,
+                                            tc->name, tc->arguments, result);
         free(stored);
         free(result);
         return 1; /* Handled inline */
@@ -381,6 +412,8 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
     c->deadline = time(NULL) + 120;
     snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
     snprintf(c->tool_call_id, sizeof(c->tool_call_id), "%s", tc->call_id);
+    snprintf(c->tool_name, sizeof(c->tool_name), "%s", tc->name);
+    c->tool_args = tc->arguments ? strdup(tc->arguments) : NULL;  /* for §8 observer */
     return 0;
 }
 
@@ -882,6 +915,10 @@ static void reap_children(void) {
                            .tool_name = "", .is_error = is_err};
             int64_t rid = entry_append_with_turn(g_db, session_id, &msg, c->turn_id);
             db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, rid);
+            /* §8 observer hook (after execution; side-effect only) */
+            if (g_tool_setup)
+                hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx, g_db,
+                                                c->tool_name, c->tool_args, output);
             free(stored);
             free(output);
             c->outbuf = NULL;

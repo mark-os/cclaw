@@ -18,20 +18,27 @@ char *hook_dispatch_before_request(ExtensionCtx *ext_ctx, sqlite3 *db,
                                    const ContextPlan *plan,
                                    const ToolSchema *tools, size_t tool_count);
 
-/* V113: Dispatch beforeToolCall hooks.
- * Calls each hook with {name, args}. Hook can return {block:true, reason} to
- * prevent execution. Returns heap-allocated error string if blocked, NULL if allowed.
- * Caller frees returned string. */
-char *hook_dispatch_before_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
-                                     const char *name, const char *args);
+/* §8 gating hook — restrict-only decision, most-restrictive wins. */
+typedef enum { HOOK_GATE_ALLOW = 0, HOOK_GATE_ASK = 1, HOOK_GATE_DENY = 2 } HookGate;
 
-/* V114: Dispatch afterToolCall hooks.
- * Calls each hook with {name, args, result}. Hook can return {result} to replace.
- * Returns replacement result (heap-allocated) if any hook replaced, NULL otherwise.
- * Caller frees returned string. */
-char *hook_dispatch_after_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
-                                    const char *name, const char *args,
-                                    const char *result);
+/* §8 Gating hook (event "beforeToolCall"): fires once, after capability
+ * resolution, before execution. Calls each hook with {name, args}. A hook may
+ * only *restrict*: returning {deny:true,reason} (or {block:true}) → DENY,
+ * {ask:true,reason} → ASK, anything else → ALLOW. The most restrictive decision
+ * across all hooks wins — a hook can veto, never authorize. On DENY/ASK,
+ * *reason_out (if non-NULL) receives a heap reason string (caller frees; may be
+ * left NULL). Returns HOOK_GATE_ALLOW when no gating hooks are registered. */
+HookGate hook_dispatch_gate_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
+                                      const char *name, const char *args,
+                                      char **reason_out);
+
+/* §8 Observer hook (event "afterToolCall"): fires once, after execution.
+ * Side-effect only — each hook is called with {name, args, result} and any
+ * return value is ignored. An observer can audit/notify/react but cannot gate
+ * or modify the result (the action already happened). */
+void hook_dispatch_observe_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
+                                     const char *name, const char *args,
+                                     const char *result);
 
 /* V111/T260: Dispatch turnStart/turnEnd hooks. Informational — no return value. */
 

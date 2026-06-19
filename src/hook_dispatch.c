@@ -181,156 +181,123 @@ char *hook_dispatch_before_request(ExtensionCtx *ext_ctx, sqlite3 *db,
     return body;
 }
 
-/* V113: beforeToolCall hook dispatch.
- * Calls each hook with {name, args}. If any returns {block:true}, return error. */
-char *hook_dispatch_before_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
-                                     const char *name, const char *args) {
-    if (!ext_ctx || !ext_ctx->rt || !ext_ctx->rt->ctx) return NULL;
-    HookList *hl = &ext_ctx->hooks[HOOK_BEFORE_TOOL_CALL];
-    if (hl->count == 0) return NULL;
-
-    JSContext *ctx = (JSContext *)ext_ctx->rt->ctx;
-
-    /* Build context object as JSON using SQLite */
+/* Build {name, args[, result]} as a JSON string via SQLite. Caller frees. */
+static char *build_tc_ctx_json(sqlite3 *db, const char *name, const char *args,
+                               const char *result) {
     char *json_str = NULL;
     sqlite3_stmt *jstmt;
-    const char *jsql = "SELECT json_object('name',?1,'args',"
-        "CASE WHEN json_valid(?2) THEN json(?2) ELSE ?2 END)";
+    const char *jsql = result
+        ? "SELECT json_object('name',?1,'args',"
+          "CASE WHEN json_valid(?2) THEN json(?2) ELSE ?2 END,'result',?3)"
+        : "SELECT json_object('name',?1,'args',"
+          "CASE WHEN json_valid(?2) THEN json(?2) ELSE ?2 END)";
     if (sqlite3_prepare_v2(db, jsql, -1, &jstmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(jstmt, 1, name ? name : "", -1, SQLITE_STATIC);
         sqlite3_bind_text(jstmt, 2, args ? args : "null", -1, SQLITE_STATIC);
+        if (result) sqlite3_bind_text(jstmt, 3, result, -1, SQLITE_STATIC);
         if (sqlite3_step(jstmt) == SQLITE_ROW) {
             const char *v = (const char *)sqlite3_column_text(jstmt, 0);
             if (v) json_str = strdup(v);
         }
         sqlite3_finalize(jstmt);
     }
-    if (!json_str) return NULL;
-
-    /* Set as global for hooks to access */
-    size_t code_len = strlen(json_str) + 64;
-    char *setup = malloc(code_len);
-    if (!setup) { free(json_str); return NULL; }
-    snprintf(setup, code_len, "globalThis.__hook_tc_ctx = %s;", json_str);
-    free(json_str);
-    JSValue sv = JS_Eval(ctx, setup, strlen(setup), "<hook>", 0);
-    free(setup);
-    if (JS_IsException(sv)) return NULL;
-
-    /* Call each hook — first block wins */
-    for (size_t i = 0; i < hl->count; i++) {
-        size_t cl = strlen(hl->fns[i]) + 256;
-        char *code = malloc(cl);
-        if (!code) continue;
-        snprintf(code, cl,
-                 "(function(){"
-                 "var __fn = %s;"
-                 "var __r = __fn(globalThis.__hook_tc_ctx);"
-                 "if (__r && __r.block) return JSON.stringify(__r);"
-                 "return '';"
-                 "})()",
-                 hl->fns[i]);
-        JSValue v = JS_Eval(ctx, code, strlen(code), "<hook>", JS_EVAL_RETVAL);
-        free(code);
-        if (JS_IsException(v)) {
-            JSValue exc = JS_GetException(ctx);
-            (void)exc;
-            continue;
-        }
-        JSCStringBuf buf;
-        const char *str = JS_ToCString(ctx, v, &buf);
-        if (str && str[0]) {
-            /* Blocked — extract reason via SQLite */
-            const char *reason = "blocked by extension hook";
-            sqlite3_stmt *rstmt;
-            if (sqlite3_prepare_v2(db,
-                "SELECT json_extract(?,'$.reason')", -1, &rstmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(rstmt, 1, str, -1, SQLITE_STATIC);
-                if (sqlite3_step(rstmt) == SQLITE_ROW) {
-                    const char *r = (const char *)sqlite3_column_text(rstmt, 0);
-                    if (r) reason = r;
-                }
-                char *ret = malloc(strlen(reason) + 16);
-                if (ret) snprintf(ret, strlen(reason) + 16, "error: %s", reason);
-                sqlite3_finalize(rstmt);
-                return ret;
-            }
-            return strdup("error: blocked by extension hook");
-        }
-    }
-    return NULL;
+    return json_str;
 }
 
-/* V114: afterToolCall hook dispatch.
- * Calls each hook with {name, args, result}. Returns replacement if any. */
-char *hook_dispatch_after_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
-                                    const char *name, const char *args,
-                                    const char *result) {
-    if (!ext_ctx || !ext_ctx->rt || !ext_ctx->rt->ctx) return NULL;
-    HookList *hl = &ext_ctx->hooks[HOOK_AFTER_TOOL_CALL];
-    if (hl->count == 0) return NULL;
+/* §8 gating hook dispatch — restrict-only, most-restrictive wins. */
+HookGate hook_dispatch_gate_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
+                                      const char *name, const char *args,
+                                      char **reason_out) {
+    if (reason_out) *reason_out = NULL;
+    if (!ext_ctx || !ext_ctx->rt || !ext_ctx->rt->ctx) return HOOK_GATE_ALLOW;
+    HookList *hl = &ext_ctx->hooks[HOOK_BEFORE_TOOL_CALL];
+    if (hl->count == 0) return HOOK_GATE_ALLOW;
 
     JSContext *ctx = (JSContext *)ext_ctx->rt->ctx;
 
-    /* Build context object via SQLite */
-    char *json_str = NULL;
-    sqlite3_stmt *jstmt;
-    const char *jsql = "SELECT json_object('name',?1,'args',"
-        "CASE WHEN json_valid(?2) THEN json(?2) ELSE ?2 END,'result',?3)";
-    if (sqlite3_prepare_v2(db, jsql, -1, &jstmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(jstmt, 1, name ? name : "", -1, SQLITE_STATIC);
-        sqlite3_bind_text(jstmt, 2, args ? args : "null", -1, SQLITE_STATIC);
-        sqlite3_bind_text(jstmt, 3, result ? result : "", -1, SQLITE_STATIC);
-        if (sqlite3_step(jstmt) == SQLITE_ROW) {
-            const char *v = (const char *)sqlite3_column_text(jstmt, 0);
-            if (v) json_str = strdup(v);
-        }
-        sqlite3_finalize(jstmt);
-    }
-    if (!json_str) return NULL;
-
+    char *json_str = build_tc_ctx_json(db, name, args, NULL);
+    if (!json_str) return HOOK_GATE_ALLOW;
     size_t code_len = strlen(json_str) + 64;
     char *setup = malloc(code_len);
-    if (!setup) { free(json_str); return NULL; }
+    if (!setup) { free(json_str); return HOOK_GATE_ALLOW; }
     snprintf(setup, code_len, "globalThis.__hook_tc_ctx = %s;", json_str);
     free(json_str);
     JSValue sv = JS_Eval(ctx, setup, strlen(setup), "<hook>", 0);
     free(setup);
-    if (JS_IsException(sv)) return NULL;
+    if (JS_IsException(sv)) return HOOK_GATE_ALLOW;
 
-    char *replacement = NULL;
-
-    /* Call each hook in order — each sees previous result */
+    HookGate decision = HOOK_GATE_ALLOW;
+    /* Each hook returns "deny:<reason>", "ask:<reason>", or "" (allow).
+     * A hook may only restrict, so we keep the most restrictive across hooks. */
     for (size_t i = 0; i < hl->count; i++) {
-        size_t cl = strlen(hl->fns[i]) + 192;
+        size_t cl = strlen(hl->fns[i]) + 320;
         char *code = malloc(cl);
         if (!code) continue;
         snprintf(code, cl,
                  "(function(){"
                  "var __fn = %s;"
                  "var __r = __fn(globalThis.__hook_tc_ctx);"
-                 "if (__r && typeof __r.result === 'string') {"
-                 "  globalThis.__hook_tc_ctx.result = __r.result;"
-                 "  return __r.result;"
-                 "}"
+                 "if (!__r) return '';"
+                 "var __why = (typeof __r.reason === 'string') ? __r.reason : '';"
+                 "if (__r.deny || __r.block) return 'deny:' + __why;"
+                 "if (__r.ask) return 'ask:' + __why;"
                  "return '';"
                  "})()",
                  hl->fns[i]);
         JSValue v = JS_Eval(ctx, code, strlen(code), "<hook>", JS_EVAL_RETVAL);
         free(code);
-        if (JS_IsException(v)) {
-            JSValue exc = JS_GetException(ctx);
-            (void)exc;
-            continue;
-        }
+        if (JS_IsException(v)) { JSValue exc = JS_GetException(ctx); (void)exc; continue; }
         JSCStringBuf buf;
         const char *str = JS_ToCString(ctx, v, &buf);
-        if (str && str[0]) {
-            free(replacement);
-            replacement = strdup(str);
+        if (!str || !str[0]) continue;
+        HookGate g = HOOK_GATE_ALLOW;
+        const char *why = NULL;
+        if (strncmp(str, "deny:", 5) == 0) { g = HOOK_GATE_DENY; why = str + 5; }
+        else if (strncmp(str, "ask:", 4) == 0) { g = HOOK_GATE_ASK; why = str + 4; }
+        if (g > decision) {
+            decision = g;
+            if (reason_out) {
+                free(*reason_out);
+                *reason_out = (why && why[0]) ? strdup(why) : NULL;
+            }
         }
     }
-    return replacement;
+    return decision;
+}
+
+/* §8 observer hook dispatch — side-effect only, return value ignored. */
+void hook_dispatch_observe_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
+                                     const char *name, const char *args,
+                                     const char *result) {
+    if (!ext_ctx || !ext_ctx->rt || !ext_ctx->rt->ctx) return;
+    HookList *hl = &ext_ctx->hooks[HOOK_AFTER_TOOL_CALL];
+    if (hl->count == 0) return;
+
+    JSContext *ctx = (JSContext *)ext_ctx->rt->ctx;
+
+    char *json_str = build_tc_ctx_json(db, name, args, result ? result : "");
+    if (!json_str) return;
+    size_t code_len = strlen(json_str) + 64;
+    char *setup = malloc(code_len);
+    if (!setup) { free(json_str); return; }
+    snprintf(setup, code_len, "globalThis.__hook_tc_ctx = %s;", json_str);
+    free(json_str);
+    JSValue sv = JS_Eval(ctx, setup, strlen(setup), "<hook>", 0);
+    free(setup);
+    if (JS_IsException(sv)) return;
+
+    /* Call each observer; its return value is deliberately ignored. */
+    for (size_t i = 0; i < hl->count; i++) {
+        size_t cl = strlen(hl->fns[i]) + 128;
+        char *code = malloc(cl);
+        if (!code) continue;
+        snprintf(code, cl,
+                 "(function(){ var __fn = %s; __fn(globalThis.__hook_tc_ctx); })()",
+                 hl->fns[i]);
+        JSValue v = JS_Eval(ctx, code, strlen(code), "<hook>", 0);
+        free(code);
+        if (JS_IsException(v)) { JSValue exc = JS_GetException(ctx); (void)exc; }
+    }
 }
 
 /* V111/T260: turnStart/turnEnd — informational, no return value. */

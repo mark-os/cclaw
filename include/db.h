@@ -100,6 +100,10 @@ int db_kv_set_secret(sqlite3 *db, const char *key, const char *value);
  * Must be called before db_kv_get_secret/db_kv_set_secret. */
 void db_set_secret_key(const uint8_t key[32]);
 
+/* Wipe the master key from this process's memory. Used in the forked tool-exec
+ * broker so the relay process carries no key material. */
+void db_wipe_secret_key(void);
+
 /* V3: Sub-agent limits — count active child sessions */
 int session_count_children(sqlite3 *db, int64_t parent_session_id);
 int session_count_active_agents(sqlite3 *db);

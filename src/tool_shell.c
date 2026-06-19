@@ -163,10 +163,15 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
 
     /* Parent: ensure child is in its own process group */
     setpgid(pid, pid);
+    close(pipefd[1]);
+    /* The parsed command may carry interpolated {{SECRET}} plaintext. The
+     * sandbox child already holds its own copy, so wipe ours from broker memory
+     * now — before the proxy relay thread and the drain loop run. */
+    for (int i = 0; i < ta.nstrs; i++)
+        if (ta.strs[i]) explicit_bzero(ta.strs[i], strlen(ta.strs[i]));
+    tool_parse_free(&ta);
     /* Sandbox fork is done — now safe to start the proxy accept thread. */
     if (proxy_active) proxy_serve(&proxy);
-    close(pipefd[1]);
-    tool_parse_free(&ta);
 
     char *output = malloc(SHELL_MAX_OUTPUT + 1);
     if (!output) {
@@ -338,7 +343,11 @@ void shell_secrets_free(ShellSecret *secrets, size_t count) {
     if (!secrets) return;
     for (size_t i = 0; i < count; i++) {
         free(secrets[i].name);
-        free(secrets[i].value);
+        /* Wipe the plaintext value before releasing it back to the heap. */
+        if (secrets[i].value) {
+            explicit_bzero(secrets[i].value, strlen(secrets[i].value));
+            free(secrets[i].value);
+        }
     }
     free(secrets);
 }

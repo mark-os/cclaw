@@ -305,7 +305,7 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
         if (strcmp(tc->name, "request_config") == 0 && te->user_data)
             ((RequestConfigCtx *)te->user_data)->current_tool_call_id = tc->call_id;
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
-        free(interp_args);
+        if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
         /* NULL return means blocking: the tool parked the session (awaiting_agent
          * or awaiting_approval) and left this tool_call pending. Leave it
          * pending — resolve_approval or advance_session writes the result later.
@@ -374,12 +374,17 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
          * Parent infrastructure fds (DB, sigchld pipe, notify pipe) are
          * O_CLOEXEC and will close on exec within the shell sandbox. */
         close(pipefd[0]);
+        /* This broker holds no DB handle and never needs the master key — wipe
+         * the inherited copy so the relay process carries no key material. */
+        db_wipe_secret_key();
         /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
         char *interp_args = NULL;
         if (tool_needs_interpolation(tc->name) && g_tool_setup && g_tool_setup->secret_count > 0)
             interp_args = secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count);
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
-        free(interp_args);
+        /* Wipe the interpolated args (may carry {{SECRET}} plaintext) before the
+         * broker writes its result to the pipe and exits. */
+        if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
         if (result) {
             size_t len = strlen(result);
             if (len > TOOL_MAX_OUTPUT) len = TOOL_MAX_OUTPUT;

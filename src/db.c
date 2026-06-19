@@ -5,6 +5,7 @@
 #include "secret.h"
 #include "validate.h"
 #include "templates.h"
+#include "monocypher.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -622,6 +623,15 @@ static int s_secret_key_loaded = 0;
 void db_set_secret_key(const uint8_t key[32]) {
     memcpy(s_secret_key, key, 32);
     s_secret_key_loaded = 1;
+}
+
+/* Wipe the master key from this process's memory. Called in the forked
+ * tool-exec broker (which holds no DB handle and never needs the key) so the
+ * relay process — exposed to untrusted, model-driven traffic — carries no key
+ * material. The daemon's own copy is untouched (separate process post-fork). */
+void db_wipe_secret_key(void) {
+    crypto_wipe(s_secret_key, sizeof(s_secret_key));
+    s_secret_key_loaded = 0;
 }
 
 /* V52,T171: Secret-aware kv access with ChaCha20-Poly1305 AEAD. */

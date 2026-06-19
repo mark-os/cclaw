@@ -1,13 +1,18 @@
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
@@ -15,6 +20,7 @@
 #include <unistd.h>
 #include "sandbox.h"
 #include "preload_blob.h"
+#include "net_shim_blob.h"
 
 /* Bind-mask the secret key + DB ciphertext from the child's view.
  *
@@ -351,6 +357,81 @@ static void sandbox_apply_rlimits(const SandboxConfig *cfg) {
     }
 }
 
+/* Bring the loopback interface up inside the netns. `lo` exists but is DOWN in
+ * a fresh CLONE_NEWNET; we hold CAP_NET_ADMIN as root of the user namespace, so
+ * SIOCSIFFLAGS is permitted. Returns 0 on success, -1 otherwise. */
+static int sandbox_bring_up_lo(void) {
+    int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return -1;
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, "lo", IFNAMSIZ - 1);
+    if (ioctl(s, SIOCGIFFLAGS, &ifr) != 0) { close(s); return -1; }
+    ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+    int rc = ioctl(s, SIOCSIFFLAGS, &ifr);
+    close(s);
+    return rc;
+}
+
+/* Static-binary egress: bring up lo, bind a loopback HTTP CONNECT listener, and
+ * fork the link-isolated net_shim to serve it from /tmp. Static clients that
+ * honor HTTP_PROXY then tunnel through the shim → the same per-call UDS the
+ * preload uses, with the broker still the sole policy authority.
+ *
+ * Best-effort: any failure simply leaves the proxy env unset, so static
+ * binaries stay networkless (the safe pre-feature default) while dynamic
+ * binaries keep working via the preload. Runs as PID 1, before the exec. */
+static void sandbox_setup_static_egress(const char *psock) {
+    if (sandbox_bring_up_lo() != 0) return;
+
+    /* Bind 127.0.0.1:0 — the shim's HTTP CONNECT listener. Not CLOEXEC: the
+     * forked shim must keep it across its exec. */
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) return;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        listen(lfd, 16) != 0) { close(lfd); return; }
+    socklen_t alen = sizeof(addr);
+    if (getsockname(lfd, (struct sockaddr *)&addr, &alen) != 0) { close(lfd); return; }
+    int port = ntohs(addr.sin_port);
+
+    /* Materialize the shim in the namespace's private /tmp (tmpfs, not noexec). */
+    int sfd = open("/tmp/net_shim", O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    ssize_t wr = sfd >= 0 ? write(sfd, net_shim_blob, (size_t)net_shim_blob_len) : -1;
+    if (sfd >= 0) close(sfd);
+    if (wr != (ssize_t)net_shim_blob_len) { close(lfd); return; }
+
+    pid_t shim = fork();
+    if (shim < 0) { close(lfd); return; }
+    if (shim == 0) {
+        /* Shim: drop stdout/stderr (they point at the tool result pipe — the
+         * shim must not pollute tool output nor hold the pipe open), keep lfd,
+         * exec the link-isolated binary with the listener fd + UDS path. */
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); dup2(devnull, STDOUT_FILENO);
+                            dup2(devnull, STDERR_FILENO); if (devnull > 2) close(devnull); }
+        char fdbuf[16];
+        snprintf(fdbuf, sizeof(fdbuf), "%d", lfd);
+        execl("/tmp/net_shim", "net_shim", fdbuf, psock, (char *)NULL);
+        _exit(127);
+    }
+
+    /* PID 1: the shim owns the listener now; advertise it to the command. The
+     * command never sees lfd (closed here, and it is not CLOEXEC-safe to leak). */
+    close(lfd);
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d", port);
+    setenv("HTTP_PROXY", url, 1);  setenv("http_proxy", url, 1);
+    setenv("HTTPS_PROXY", url, 1); setenv("https_proxy", url, 1);
+    setenv("ALL_PROXY", url, 1);   setenv("all_proxy", url, 1);
+    setenv("NO_PROXY", "localhost,127.0.0.1,::1", 1);
+    setenv("no_proxy", "localhost,127.0.0.1,::1", 1);
+}
+
 int sandbox_child_setup(const SandboxConfig *cfg) {
     const char *ws = cfg->workspace;
     const char *cwd = cfg->cwd_path;
@@ -398,6 +479,12 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
         else
             fprintf(stderr, "[cclaw] warning: proxy preload setup failed "
                     "(errno=%d); child has no network\n", errno);
+
+        /* Static binaries ignore LD_PRELOAD — give them a loopback HTTP_PROXY
+         * served by net_shim, forwarding to the same broker UDS. Best-effort:
+         * on failure static binaries stay networkless; dynamic ones are
+         * unaffected (they already have the preload above). */
+        sandbox_setup_static_egress(psock);
     }
 
     return 0;

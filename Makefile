@@ -4,7 +4,7 @@ LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
 TEMPLATES := $(wildcard templates/*)
-SRC      := $(filter-out src/preload_net.c src/channel_runner.c,$(wildcard src/*.c))
+SRC      := $(filter-out src/preload_net.c src/channel_runner.c src/net_shim.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 DEP      := $(OBJ:.o=.d)
 
@@ -31,7 +31,7 @@ MQJS_CORE_OBJ := $(BUILDDIR)/mquickjs.o $(BUILDDIR)/mqjs_cutils.o $(BUILDDIR)/mq
 
 .PHONY: all clean test test-integration test-e2e test-all check-gen install debug
 
-all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/channel_runner
+all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/net_shim $(BUILDDIR)/channel_runner
 
 # Development build: debug symbols, no optimization, sanitizers (clang preferred for better traces)
 debug: clean
@@ -48,7 +48,7 @@ $(BUILDDIR)/templates.h: $(TEMPLATES) scripts/gen_templates.sh | $(BUILDDIR)/
 $(BUILDDIR)/%.o: src/%.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -c -o $@ $<
 
-$(BUILDDIR)/sandbox.o: $(BUILDDIR)/preload_blob.h
+$(BUILDDIR)/sandbox.o: $(BUILDDIR)/preload_blob.h $(BUILDDIR)/net_shim_blob.h
 
 $(BUILDDIR)/sqlite3.o: vendor/sqlite3/sqlite3.c | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -c -o $@ $<
@@ -98,6 +98,17 @@ $(BUILDDIR)/preload_blob.h: $(BUILDDIR)/libcclaw_net.so
 	printf 'static const unsigned char preload_net_blob[] = {\n' > $@
 	xxd -i < $< >> $@
 	printf '};\nstatic const unsigned int preload_net_blob_len = sizeof(preload_net_blob);\n' >> $@
+
+# net_shim: loopback HTTP CONNECT proxy for static binaries (link-isolated —
+# its own TU, libc only, no policy/resolver/secret symbols). Embedded as a blob
+# and written into the sandbox /tmp at runtime, like the preload .so.
+$(BUILDDIR)/net_shim: src/net_shim.c | $(BUILDDIR)/
+	$(CC) -std=c11 -Wall -Wextra -Werror -o $@ $<
+
+$(BUILDDIR)/net_shim_blob.h: $(BUILDDIR)/net_shim
+	printf 'static const unsigned char net_shim_blob[] = {\n' > $@
+	xxd -i < $< >> $@
+	printf '};\nstatic const unsigned int net_shim_blob_len = sizeof(net_shim_blob);\n' >> $@
 
 # Channel runner: universal JS channel binary
 $(BUILDDIR)/mquickjs_stdlib_channel.c: vendor/mquickjs/gen_stdlib_channel.c vendor/mquickjs/mqjs_objects.h vendor/mquickjs/mqjs_host_channel.c $(BUILDDIR)/gen_stdlib_channel | $(BUILDDIR)/

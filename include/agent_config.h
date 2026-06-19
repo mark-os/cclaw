@@ -66,6 +66,23 @@ int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
 int agent_config_revoke(sqlite3 *db, const char *agent, const char *kind,
                         const char *value);
 
+/* §4 Axis B — per-(agent,tool) approval mode. */
+typedef enum {
+    TOOL_MODE_SILENT,   /* runs freely */
+    TOOL_MODE_ALWAYS,   /* every call parks for approval */
+    TOOL_MODE_DECIDES   /* predicate decides; fail-closed to ALWAYS if none */
+} ToolApprovalMode;
+
+/* Approval mode of a granted tool. Ungranted/unknown → TOOL_MODE_SILENT
+ * (uninstrumented tools keep their run-freely default). */
+ToolApprovalMode agent_tool_mode(sqlite3 *db, const char *agent, const char *tool);
+
+/* Set approval_mode on an existing tool grant. mode is one of
+ * "silent"/"always"/"tool_decides". Returns 0 on success (a row was updated),
+ * -1 on error or if the tool is not granted. */
+int agent_config_set_tool_mode(sqlite3 *db, const char *agent,
+                               const char *tool, const char *mode);
+
 /* Returns malloc'd JSON array string (e.g. '["a","b"]'). Caller frees. */
 char *grants_json(sqlite3 *db, const char *agent, const char *kind);
 

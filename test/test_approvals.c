@@ -310,6 +310,64 @@ static void test_approval_list_expired(void) {
     printf("  PASS: test_approval_list_expired\n");
 }
 
+static void test_tool_mode(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+
+    /* Ungranted tool → silent (run-freely default). */
+    assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_SILENT);
+
+    /* Grant it: still silent until a mode is set. */
+    agent_config_grant(db, "bot", "tool", "email_send", 0);
+    assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_SILENT);
+
+    /* Tighten → always / tool_decides. */
+    assert(agent_config_set_tool_mode(db, "bot", "email_send", "always") == 0);
+    assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_ALWAYS);
+    assert(agent_config_set_tool_mode(db, "bot", "email_send", "tool_decides") == 0);
+    assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_DECIDES);
+
+    /* Relax back to silent. */
+    assert(agent_config_set_tool_mode(db, "bot", "email_send", "silent") == 0);
+    assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_SILENT);
+
+    /* Invalid mode rejected; setting an ungranted tool fails. */
+    assert(agent_config_set_tool_mode(db, "bot", "email_send", "bogus") == -1);
+    assert(agent_config_set_tool_mode(db, "bot", "not_granted", "always") == -1);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_tool_mode\n");
+}
+
+static void test_get_for_tool_call(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    int64_t sid = session_create(db, "test", "bot", -1, 0);
+
+    /* No approval yet for this call. */
+    assert(approval_get_for_tool_call(db, "call_z") == NULL);
+
+    int64_t id = approval_create(db, sid, "call_z", "email_send", "email_send",
+                                 "{\"to\":\"a@b.c\"}");
+    assert(id > 0);
+
+    Approval *a = approval_get_for_tool_call(db, "call_z");
+    assert(a && a->id == id && strcmp(a->state, "pending") == 0);
+    approval_free(a);
+
+    /* After resolve, the latest row reflects the new state. */
+    Approval *r = approval_resolve(db, id, 1, "cli");
+    assert(r); approval_free(r);
+    a = approval_get_for_tool_call(db, "call_z");
+    assert(a && strcmp(a->state, "approved") == 0);
+    approval_free(a);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_get_for_tool_call\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_approvals:\n");
@@ -322,6 +380,8 @@ int main(void) {
     test_fail_closed_denied();
     test_grant_caps_load();
     test_approval_list_expired();
+    test_tool_mode();
+    test_get_for_tool_call();
     printf("all approval tests passed\n");
     return 0;
 }

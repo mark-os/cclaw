@@ -81,10 +81,15 @@ CREATE TABLE IF NOT EXISTS agents (
 );
 
 -- ═══ Grants (normalized capabilities) ═══
+-- approval_mode applies only to kind='tool' rows (Axis B of §4 authority):
+--   'silent'       — granted tool runs freely (default)
+--   'always'       — every call parks for approval
+--   'tool_decides' — predicate decides; absent a predicate, fail-closed to 'always'
 CREATE TABLE IF NOT EXISTS grants (
   agent_name TEXT NOT NULL,
   kind TEXT NOT NULL,
   value TEXT NOT NULL,
+  approval_mode TEXT NOT NULL DEFAULT 'silent',
   expires_at INTEGER,
   created_at INTEGER DEFAULT (unixepoch()),
   PRIMARY KEY (agent_name, kind, value)

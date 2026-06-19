@@ -252,15 +252,18 @@ void channel_consume_events(sqlite3 *db) {
                         }
                         sqlite3_finalize(ts);
                     }
-                    int is_approve = 0;
+                    ApprovalDecision d = APPROVAL_DENY;
                     if (text) {
-                        is_approve = (text[0] == 'y' || text[0] == 'Y' ||
-                                      strcasecmp(text, "approve") == 0);
+                        if (strcasecmp(text, "once") == 0 || text[0] == 'o' || text[0] == 'O')
+                            d = APPROVAL_ONCE;
+                        else if (text[0] == 'y' || text[0] == 'Y' ||
+                                 strcasecmp(text, "approve") == 0)
+                            d = APPROVAL_ALWAYS;
                         free(text);
                     }
                     char decided[128];
                     snprintf(decided, sizeof(decided), "channel:%s", ch_name);
-                    resolve_approval(pa->id, is_approve ? APPROVAL_ALWAYS : APPROVAL_DENY, decided);
+                    resolve_approval(pa->id, d, decided);
                     approval_free(pa);
                     wake_session(sid);
                 } else {

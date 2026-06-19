@@ -30,6 +30,10 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
 /* Get the pending approval for a session. Returns heap-allocated Approval or NULL. */
 Approval *approval_get_pending(sqlite3 *db, int64_t session_id);
 
+/* Get the most recent approval for a tool_call_id (any state). Used by the
+ * dispatch gate's re-entrancy check (§7a). Returns heap-allocated or NULL. */
+Approval *approval_get_for_tool_call(sqlite3 *db, const char *tool_call_id);
+
 /* Resolve an approval (approve or deny). Returns heap-allocated resolved Approval or NULL. */
 Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *decided_via);
 

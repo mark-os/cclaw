@@ -102,6 +102,23 @@ Approval *approval_get_pending(sqlite3 *db, int64_t session_id) {
     return a;
 }
 
+Approval *approval_get_for_tool_call(sqlite3 *db, const char *tool_call_id) {
+    if (!tool_call_id) return NULL;
+    const char *sql =
+        "SELECT id, session_id, tool_call_id, tool_name, action,"
+        " args_json, args_hash, state, decided_via, requested_at, expires_at"
+        " FROM approvals WHERE tool_call_id=? ORDER BY id DESC LIMIT 1";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(stmt, 1, tool_call_id, -1, SQLITE_STATIC);
+    Approval *a = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        a = row_to_approval(stmt);
+    sqlite3_finalize(stmt);
+    return a;
+}
+
 Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *decided_via) {
     const char *new_state = approved ? "approved" : "denied";
     const char *sql =

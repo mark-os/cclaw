@@ -450,6 +450,45 @@ int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
     return rc;
 }
 
+ToolApprovalMode agent_tool_mode(sqlite3 *db, const char *agent, const char *tool) {
+    if (!db || !agent || !tool) return TOOL_MODE_SILENT;
+    const char *sql =
+        "SELECT approval_mode FROM grants"
+        " WHERE agent_name=?1 AND kind='tool' AND value=?2"
+        " AND (expires_at IS NULL OR expires_at > unixepoch());";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return TOOL_MODE_SILENT;
+    sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, tool, -1, SQLITE_STATIC);
+    ToolApprovalMode mode = TOOL_MODE_SILENT;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *m = (const char *)sqlite3_column_text(stmt, 0);
+        if (m && strcmp(m, "always") == 0) mode = TOOL_MODE_ALWAYS;
+        else if (m && strcmp(m, "tool_decides") == 0) mode = TOOL_MODE_DECIDES;
+    }
+    sqlite3_finalize(stmt);
+    return mode;
+}
+
+int agent_config_set_tool_mode(sqlite3 *db, const char *agent,
+                               const char *tool, const char *mode) {
+    if (!db || !agent || !tool || !mode) return -1;
+    if (strcmp(mode, "silent") != 0 && strcmp(mode, "always") != 0 &&
+        strcmp(mode, "tool_decides") != 0)
+        return -1;
+    const char *sql =
+        "UPDATE grants SET approval_mode=?3"
+        " WHERE agent_name=?1 AND kind='tool' AND value=?2;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, tool, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, mode, -1, SQLITE_STATIC);
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
 int agent_config_revoke(sqlite3 *db, const char *agent, const char *kind,
                         const char *value) {
     if (!db || !agent || !kind || !value) return -1;

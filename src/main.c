@@ -231,6 +231,41 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
         return 1; /* Signal: handled inline, check for more */
     }
 
+    /* §4 Axis B: approval gate. A granted tool whose mode is not 'silent' parks
+     * before executing. Re-entrant (§7a): on re-dispatch after approval the same
+     * frozen tool_call runs; a denial answers the call with an error. */
+    {
+        ToolApprovalMode mode = agent_tool_mode(g_db, agent_name, tc->name);
+        if (mode != TOOL_MODE_SILENT) {
+            Approval *ap = approval_get_for_tool_call(g_db, tc->call_id);
+            int approved = ap && ap->state && strcmp(ap->state, "approved") == 0;
+            int denied   = ap && ap->state && strcmp(ap->state, "denied") == 0;
+            int pending  = ap && ap->state && strcmp(ap->state, "pending") == 0;
+            if (denied) {
+                char err[128];
+                snprintf(err, sizeof(err), "error: %s denied by user", tc->name);
+                ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
+                Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                               .tool_name = tc->name, .is_error = 1};
+                entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+                db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "denied");
+                approval_free(ap);
+                return 1;
+            }
+            if (!approved) {
+                /* none → create + park; pending → re-park idempotently. */
+                if (!pending)
+                    approval_create(g_db, session_id, tc->call_id, tc->name,
+                                    tc->name, tc->arguments);
+                session_set_state(g_db, session_id, "awaiting_approval");
+                approval_free(ap);
+                handle_approval_park(session_id);
+                return 2; /* parked */
+            }
+            approval_free(ap);  /* approved → fall through and execute */
+        }
+    }
+
     /* Inline tools: execute in parent process */
     if (tool_is_inline(tc->name)) {
         /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
@@ -441,15 +476,52 @@ static void approval_sweep_expired(void) {
 
 /* ── resolve_approval: approve/deny a parked approval ────────── */
 
+/* request_config config-change actions (the action *is* a config mutation,
+ * applied here). Anything else is an action-tool approval — the action is the
+ * tool name, and the tool itself runs on re-dispatch. */
+static int is_config_action(const char *action) {
+    return action && (strcmp(action, "grant_tool") == 0 ||
+                      strcmp(action, "grant_host") == 0 ||
+                      strcmp(action, "grant_path") == 0 ||
+                      strcmp(action, "rename_agent") == 0);
+}
+
 void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via) {
-    int approved = (decision == APPROVAL_ALWAYS);
+    int approved = (decision != APPROVAL_DENY);
     Approval *a = approval_resolve(g_db, approval_id, approved, decided_via);
     if (!a) return;
 
     int64_t session_id = a->session_id;
     const char *agent = session_get_agent_name(g_db, session_id);
-    const char *refresh_agent = agent;
 
+    if (!is_config_action(a->action)) {
+        /* ── Action-tool approval (§4 Axis B). The frozen tool_call stays
+         * pending; re-dispatch executes it through the gate. ── */
+        if (decision == APPROVAL_DENY) {
+            /* Answer the call with an error now; nothing re-runs. */
+            if (a->tool_call_id) {
+                int64_t turn_id = db_next_turn_id(g_db, session_id);
+                char buf[160];
+                snprintf(buf, sizeof(buf), "error: %s denied (%s)", a->action, decided_via);
+                ToolResult tr = { .tool_call_id = a->tool_call_id, .content = buf };
+                Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
+                                .tool_name = a->action, .is_error = 1 };
+                entry_append_with_turn(g_db, session_id, &msg, turn_id);
+                db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
+            }
+        } else if (decision == APPROVAL_ALWAYS && agent) {
+            /* "Allow and stop asking" — flip the standing mode to silent. */
+            agent_config_set_tool_mode(g_db, agent, a->action, "silent");
+        }
+        session_set_state(g_db, session_id, "tool_running");
+        free((char *)agent);
+        approval_free(a);
+        wake_session(session_id);
+        run_advance(session_id);
+        return;
+    }
+
+    const char *refresh_agent = agent;
     int rename_failed = 0;
     if (decision == APPROVAL_ALWAYS) {
         /* Apply the standing grant */
@@ -563,7 +635,7 @@ static void handle_approval_park(int64_t session_id) {
         /* Interactive: prompt user */
         fprintf(stdout, "\n\033[1mApproval required:\033[0m %s", a->action);
         if (a->args_json) fprintf(stdout, " %s", a->args_json);
-        fprintf(stdout, "\nApprove? (y/n): ");
+        fprintf(stdout, "\nApprove? (y=always / o=once / n=no): ");
         fflush(stdout);
         g_cli_turn_active = 0;  /* unblock input loop for the y/n read */
         /* The actual y/n is read in the CLI input loop — see cli_handle_approval */
@@ -1733,8 +1805,10 @@ int main(int argc, char *argv[]) {
             {
                 Approval *pa = approval_get_pending(g_db, g_cli_session);
                 if (pa) {
-                    ApprovalDecision d = (linebuf[0] == 'y' || linebuf[0] == 'Y')
-                        ? APPROVAL_ALWAYS : APPROVAL_DENY;
+                    ApprovalDecision d =
+                        (linebuf[0] == 'y' || linebuf[0] == 'Y') ? APPROVAL_ALWAYS :
+                        (linebuf[0] == 'o' || linebuf[0] == 'O') ? APPROVAL_ONCE :
+                                                                   APPROVAL_DENY;
                     resolve_approval(pa->id, d, "cli:interactive");
                     approval_free(pa);
                     /* Shift and continue */

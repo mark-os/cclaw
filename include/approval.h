@@ -33,6 +33,9 @@ Approval *approval_get_pending(sqlite3 *db, int64_t session_id);
 /* Resolve an approval (approve or deny). Returns heap-allocated resolved Approval or NULL. */
 Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *decided_via);
 
+/* Return malloc'd array of expired pending approval ids. Caller frees. Sets *out_count. */
+int64_t *approval_list_expired(sqlite3 *db, int *out_count);
+
 /* Free an Approval struct. */
 void approval_free(Approval *a);
 

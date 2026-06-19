@@ -269,6 +269,47 @@ static void test_grant_caps_load(void) {
     printf("  PASS: test_grant_caps_load\n");
 }
 
+static void test_approval_list_expired(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    int64_t sid = session_create(db, "test", "bot", -1, 0);
+
+    /* Create a pending approval (expires_at is in the future by default) */
+    int64_t id = approval_create(db, sid, "call_e", "request_config",
+                                 "grant_host", "{\"host\":\"exp.com\"}");
+    assert(id > 0);
+
+    /* Not expired yet */
+    int count = 0;
+    int64_t *ids = approval_list_expired(db, &count);
+    assert(count == 0 && ids == NULL);
+
+    /* Force it expired */
+    char sql[128];
+    snprintf(sql, sizeof(sql),
+             "UPDATE approvals SET expires_at = unixepoch() - 10 WHERE id = %lld",
+             (long long)id);
+    sqlite3_exec(db, sql, NULL, NULL, NULL);
+
+    ids = approval_list_expired(db, &count);
+    assert(count == 1);
+    assert(ids[0] == id);
+    free(ids);
+
+    /* A fresh (future) approval should NOT be returned */
+    int64_t id2 = approval_create(db, sid, "call_f", "request_config",
+                                  "grant_host", "{\"host\":\"fresh.com\"}");
+    assert(id2 > 0);
+    ids = approval_list_expired(db, &count);
+    assert(count == 1);
+    assert(ids[0] == id);
+    free(ids);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_approval_list_expired\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_approvals:\n");
@@ -280,6 +321,7 @@ int main(void) {
     test_session_set_state_awaiting_approval();
     test_fail_closed_denied();
     test_grant_caps_load();
+    test_approval_list_expired();
     printf("all approval tests passed\n");
     return 0;
 }

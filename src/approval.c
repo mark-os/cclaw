@@ -1,8 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "approval.h"
+#include "db.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* FNV-1a 32-bit hash → 8 hex chars */
 static void fnv1a_hex(const char *data, char *out) {
@@ -55,9 +57,19 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
     char hash[9];
     fnv1a_hex(args_json, hash);
 
+    /* Deadline: kv "approval_timeout_sec" or default 3600 */
+    int64_t timeout = 3600;
+    char *kv = db_kv_get(db, "approval_timeout_sec");
+    if (kv) {
+        long v = strtol(kv, NULL, 10);
+        if (v > 0) timeout = v;
+        free(kv);
+    }
+    int64_t expires_at = (int64_t)time(NULL) + timeout;
+
     const char *sql =
-        "INSERT INTO approvals(session_id, tool_call_id, tool_name, action, args_json, args_hash)"
-        " VALUES(?,?,?,?,?,?)";
+        "INSERT INTO approvals(session_id, tool_call_id, tool_name, action, args_json, args_hash, expires_at)"
+        " VALUES(?,?,?,?,?,?,?)";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -67,6 +79,7 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
     sqlite3_bind_text(stmt, 4, action, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 5, args_json, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 6, hash, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 7, expires_at);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
@@ -120,3 +133,26 @@ Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *de
 }
 
 
+
+int64_t *approval_list_expired(sqlite3 *db, int *out_count) {
+    *out_count = 0;
+    const char *sql =
+        "SELECT id FROM approvals WHERE state='pending'"
+        " AND expires_at IS NOT NULL AND expires_at < unixepoch()";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+
+    int cap = 0, n = 0;
+    int64_t *ids = NULL;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (n >= cap) {
+            cap = cap ? cap * 2 : 8;
+            ids = realloc(ids, (size_t)cap * sizeof(*ids));
+        }
+        ids[n++] = sqlite3_column_int64(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    *out_count = n;
+    return ids;
+}

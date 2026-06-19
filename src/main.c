@@ -429,6 +429,16 @@ static void child_sweep_deadlines(void) {
     }
 }
 
+/* ── approval_sweep_expired: deny timed-out pending approvals ── */
+
+static void approval_sweep_expired(void) {
+    int n = 0;
+    int64_t *ids = approval_list_expired(g_db, &n);
+    for (int i = 0; i < n; i++)
+        resolve_approval(ids[i], APPROVAL_DENY, "auto:timeout");
+    free(ids);
+}
+
 /* ── resolve_approval: approve/deny a parked approval ────────── */
 
 void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via) {
@@ -1460,6 +1470,7 @@ int main(int argc, char *argv[]) {
             if (rc == 0 && g_child_count > 0) reap_children();
             channel_tick(g_db);
             child_sweep_deadlines();
+            approval_sweep_expired();
         }
 
         free(pfds);

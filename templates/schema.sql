@@ -296,6 +296,9 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 
 
 -- ═══ Approvals ═══
+-- approvals is history/audit; expires_at is the park deadline (fail-closed deny).
+-- grants is live truth; grants.expires_at is the time-bounded-grant feature.
+-- They do not overlap now that once-scope is gone.
 CREATE TABLE IF NOT EXISTS approvals (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id   INTEGER NOT NULL,

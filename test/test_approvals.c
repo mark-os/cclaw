@@ -32,7 +32,7 @@ static void test_create_and_pending(void) {
     assert(sid > 0);
 
     int64_t id = approval_create(db, sid, "call_1", "request_config",
-                                 "grant_host", "persist", "{\"host\":\"api.example.com\"}");
+                                 "grant_host", "{\"host\":\"api.example.com\"}");
     assert(id > 0);
 
     Approval *a = approval_get_pending(db, sid);
@@ -42,7 +42,6 @@ static void test_create_and_pending(void) {
     assert(strcmp(a->tool_call_id, "call_1") == 0);
     assert(strcmp(a->tool_name, "request_config") == 0);
     assert(strcmp(a->action, "grant_host") == 0);
-    assert(strcmp(a->scope, "persist") == 0);
     assert(strcmp(a->state, "pending") == 0);
     assert(a->args_hash != NULL && strlen(a->args_hash) == 8);
     approval_free(a);
@@ -58,7 +57,7 @@ static void test_approve(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_2", "request_config",
-                                 "grant_tool", "persist", "{\"tool\":\"shell_exec\"}");
+                                 "grant_tool", "{\"tool\":\"shell_exec\"}");
     assert(id > 0);
 
     Approval *a = approval_resolve(db, id, 1, "cli:user");
@@ -82,7 +81,7 @@ static void test_deny(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_3", "request_config",
-                                 "grant_host", "persist", "{\"host\":\"evil.com\"}");
+                                 "grant_host", "{\"host\":\"evil.com\"}");
     assert(id > 0);
 
     Approval *a = approval_resolve(db, id, 0, "auto:no-approver");
@@ -107,9 +106,9 @@ static void test_args_hash_binding(void) {
 
     /* Same args → same hash */
     int64_t id1 = approval_create(db, sid, "c1", "request_config",
-                                  "grant_host", "persist", "{\"host\":\"a.com\"}");
+                                  "grant_host", "{\"host\":\"a.com\"}");
     int64_t id2 = approval_create(db, sid, "c2", "request_config",
-                                  "grant_host", "persist", "{\"host\":\"a.com\"}");
+                                  "grant_host", "{\"host\":\"a.com\"}");
     assert(id1 > 0 && id2 > 0);
 
     /* Fetch both and compare hashes */
@@ -132,7 +131,7 @@ static void test_args_hash_binding(void) {
 
     /* Different args → different hash */
     int64_t id3 = approval_create(db, sid, "c3", "request_config",
-                                  "grant_host", "persist", "{\"host\":\"b.com\"}");
+                                  "grant_host", "{\"host\":\"b.com\"}");
     sqlite3_prepare_v2(db, "SELECT args_hash FROM approvals WHERE id=?", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, id3);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
@@ -147,46 +146,42 @@ static void test_args_hash_binding(void) {
     printf("  PASS: test_args_hash_binding\n");
 }
 
-static void test_scope_once_expiry(void) {
+static void test_approve_and_deny_states(void) {
     sqlite3 *db = fresh_db();
     db_agent_upsert(db, "bot", NULL, NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id1 = approval_create(db, sid, "c1", "request_config",
-                                  "grant_host", "once", "{\"host\":\"tmp.com\"}");
+                                  "grant_host", "{\"host\":\"tmp.com\"}");
     int64_t id2 = approval_create(db, sid, "c2", "request_config",
-                                  "grant_host", "persist", "{\"host\":\"perm.com\"}");
+                                  "grant_host", "{\"host\":\"perm.com\"}");
     assert(id1 > 0 && id2 > 0);
 
-    /* Approve both */
+    /* Approve first, deny second */
     Approval *a = approval_resolve(db, id1, 1, "cli");
     assert(a && strcmp(a->state, "approved") == 0);
     approval_free(a);
-    a = approval_resolve(db, id2, 1, "cli");
-    assert(a && strcmp(a->state, "approved") == 0);
+    a = approval_resolve(db, id2, 0, "cli");
+    assert(a && strcmp(a->state, "denied") == 0);
     approval_free(a);
 
-    /* Expire once-scoped */
-    int expired = approval_expire_once(db, sid);
-    assert(expired == 1);
-
-    /* Verify: once is expired, persist is still approved */
+    /* Verify states */
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(db, "SELECT state FROM approvals WHERE id=?", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, id1);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "expired") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "approved") == 0);
     sqlite3_finalize(stmt);
 
     sqlite3_prepare_v2(db, "SELECT state FROM approvals WHERE id=?", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, id2);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "approved") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "denied") == 0);
     sqlite3_finalize(stmt);
 
     db_close(db);
     clean_db();
-    printf("  PASS: test_scope_once_expiry\n");
+    printf("  PASS: test_approve_and_deny_states\n");
 }
 
 static void test_session_set_state_awaiting_approval(void) {
@@ -229,7 +224,7 @@ static void test_fail_closed_denied(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_x", "request_config",
-                                 "grant_host", "persist", "{\"host\":\"bad.com\"}");
+                                 "grant_host", "{\"host\":\"bad.com\"}");
     assert(id > 0);
 
     Approval *a = approval_resolve(db, id, 0, "auto:no-approver");
@@ -250,12 +245,12 @@ static void test_fail_closed_denied(void) {
     printf("  PASS: test_fail_closed_denied\n");
 }
 
-static void test_once_grant_caps_load(void) {
+static void test_grant_caps_load(void) {
     sqlite3 *db = fresh_db();
     db_agent_upsert(db, "bot", NULL, NULL, NULL);
 
-    /* Once-scoped grant with no expiry — should load */
-    agent_config_grant(db, "bot", "host", "tmp.io", "once", 0);
+    /* Grant with no expiry — should load */
+    agent_config_grant(db, "bot", "host", "tmp.io", 0);
     AgentCaps caps;
     agent_caps_load(db, "bot", &caps);
     assert(caps.host_count == 1);
@@ -271,7 +266,7 @@ static void test_once_grant_caps_load(void) {
 
     db_close(db);
     clean_db();
-    printf("  PASS: test_once_grant_caps_load\n");
+    printf("  PASS: test_grant_caps_load\n");
 }
 
 int main(void) {
@@ -281,10 +276,10 @@ int main(void) {
     test_approve();
     test_deny();
     test_args_hash_binding();
-    test_scope_once_expiry();
+    test_approve_and_deny_states();
     test_session_set_state_awaiting_approval();
     test_fail_closed_denied();
-    test_once_grant_caps_load();
+    test_grant_caps_load();
     printf("all approval tests passed\n");
     return 0;
 }

@@ -5,6 +5,7 @@
 #include "db.h"
 #include "secret_scan.h"
 #include "wake.h"
+#include "resolve.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -259,30 +260,7 @@ void channel_consume_events(sqlite3 *db) {
                     }
                     char decided[128];
                     snprintf(decided, sizeof(decided), "channel:%s", ch_name);
-                    /* Resolve inline: set state, write result */
-                    const char *new_state = is_approve ? "approved" : "denied";
-                    const char *rsql =
-                        "UPDATE approvals SET state=?, decided_via=? WHERE id=? AND state='pending'";
-                    sqlite3_stmt *rs;
-                    if (sqlite3_prepare_v2(db, rsql, -1, &rs, NULL) == SQLITE_OK) {
-                        sqlite3_bind_text(rs, 1, new_state, -1, SQLITE_STATIC);
-                        sqlite3_bind_text(rs, 2, decided, -1, SQLITE_STATIC);
-                        sqlite3_bind_int64(rs, 3, pa->id);
-                        sqlite3_step(rs); sqlite3_finalize(rs);
-                    }
-                    /* Build tool result */
-                    char result_buf[256];
-                    snprintf(result_buf, sizeof(result_buf), "%s (%s): %s",
-                             is_approve ? "approved" : "denied", decided, pa->action);
-                    if (pa->tool_call_id) {
-                        int64_t turn_id = db_next_turn_id(db, sid);
-                        ToolResult tr = { .tool_call_id = pa->tool_call_id, .content = result_buf };
-                        Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
-                                        .tool_name = "request_config", .is_error = !is_approve };
-                        entry_append_with_turn(db, sid, &msg, turn_id);
-                        db_tool_call_set_status(db, sid, pa->tool_call_id, "done", decided);
-                    }
-                    session_set_state(db, sid, "tool_running");
+                    resolve_approval(pa->id, is_approve ? APPROVAL_ALWAYS : APPROVAL_DENY, decided);
                     approval_free(pa);
                     wake_session(sid);
                 } else {

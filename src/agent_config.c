@@ -420,21 +420,20 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
 /* ── Grants API ─────────────────────────────────────────────────── */
 
 int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
-                       const char *value, const char *scope, int64_t expires_at) {
+                       const char *value, int64_t expires_at) {
     if (!db || !agent || !kind || !value) return -1;
     const char *sql =
-        "INSERT OR IGNORE INTO grants (agent_name, kind, value, scope, expires_at)"
-        " VALUES (?1, ?2, ?3, ?4, ?5);";
+        "INSERT OR IGNORE INTO grants (agent_name, kind, value, expires_at)"
+        " VALUES (?1, ?2, ?3, ?4);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, kind, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, value, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, scope ? scope : "persist", -1, SQLITE_STATIC);
     if (expires_at > 0)
-        sqlite3_bind_int64(stmt, 5, expires_at);
+        sqlite3_bind_int64(stmt, 4, expires_at);
     else
-        sqlite3_bind_null(stmt, 5);
+        sqlite3_bind_null(stmt, 4);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;

@@ -22,7 +22,6 @@ static const char *PARAMS_JSON =
     "\"tool\":{\"type\":\"string\",\"description\":\"Tool name to enable (for grant_tool)\"},"
     "\"host\":{\"type\":\"string\",\"description\":\"Hostname to allow (for grant_host)\"},"
     "\"path\":{\"type\":\"string\",\"description\":\"Absolute path to grant (for grant_path)\"},"
-    "\"scope\":{\"type\":\"string\",\"enum\":[\"persist\",\"once\"],\"description\":\"Grant scope: persist (default) or once (expires at turn end)\"},"
     "\"name\":{\"type\":\"string\",\"description\":\"New agent name (for rename_agent)\"},"
     "\"preamble\":{\"type\":\"string\",\"description\":\"New system prompt preamble (for rename_agent, optional)\"}"
     "},\"required\":[\"action\"]}";
@@ -53,19 +52,12 @@ static char *handler(const char *arguments, void *user_data) {
     const char *act = targ_str(&ta, "action");
     if (!act) { tool_parse_free(&ta); return strdup("error: 'action' required (one of: grant_tool, grant_host, grant_path, rename_agent)"); }
 
-    const char *scope = targ_str(&ta, "scope");
-    if (!scope || !scope[0]) scope = "persist";
-    if (strcmp(scope, "persist") != 0 && strcmp(scope, "once") != 0) {
-        tool_parse_free(&ta);
-        return strdup("error: scope must be 'persist' or 'once'");
-    }
-
     if (strcmp(act, "grant_tool") == 0) {
         const char *tool = targ_str(&ta, "tool");
         if (!tool || !tool[0]) { tool_parse_free(&ta); return strdup("error: 'tool' required for grant_tool"); }
         char *args = build_args_json("grant_tool", "tool", tool, NULL);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
-            ctx->current_tool_call_id, "request_config", "grant_tool", scope, args);
+            ctx->current_tool_call_id, "request_config", "grant_tool", args);
         free(args);
         tool_parse_free(&ta);
         if (aid < 0) return strdup("error: failed to create approval");
@@ -77,7 +69,7 @@ static char *handler(const char *arguments, void *user_data) {
         if (!host || !host[0]) { tool_parse_free(&ta); return strdup("error: 'host' required for grant_host"); }
         char *args = build_args_json("grant_host", "host", host, NULL);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
-            ctx->current_tool_call_id, "request_config", "grant_host", scope, args);
+            ctx->current_tool_call_id, "request_config", "grant_host", args);
         free(args);
         tool_parse_free(&ta);
         if (aid < 0) return strdup("error: failed to create approval");
@@ -90,7 +82,7 @@ static char *handler(const char *arguments, void *user_data) {
         if (path[0] != '/') { tool_parse_free(&ta); return strdup("error: path must be absolute (start with '/')"); }
         char *args = build_args_json("grant_path", "path", path, NULL);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
-            ctx->current_tool_call_id, "request_config", "grant_path", scope, args);
+            ctx->current_tool_call_id, "request_config", "grant_path", args);
         free(args);
         tool_parse_free(&ta);
         if (aid < 0) return strdup("error: failed to create approval");
@@ -104,7 +96,7 @@ static char *handler(const char *arguments, void *user_data) {
         if (!is_valid_name(new_name)) { tool_parse_free(&ta); return strdup("error: invalid name (use A-Za-z0-9_- only)"); }
         char *args = build_args_json("rename_agent", "name", new_name, preamble);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
-            ctx->current_tool_call_id, "request_config", "rename_agent", scope, args);
+            ctx->current_tool_call_id, "request_config", "rename_agent", args);
         free(args);
         tool_parse_free(&ta);
         if (aid < 0) return strdup("error: failed to create approval");
@@ -123,7 +115,6 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "Actions: grant_tool (enable shell_exec, web_fetch, db_query), "
         "grant_host (add hostname to allowed_hosts), "
         "grant_path (grant read/write access to an absolute path), "
-        "rename_agent (rename this agent, with optional preamble). "
-        "Optional scope: 'persist' (default, permanent) or 'once' (expires at turn end).",
+        "rename_agent (rename this agent, with optional preamble).",
         PARAMS_JSON, handler, ctx);
 }

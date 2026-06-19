@@ -15,7 +15,7 @@ static void test_whitelist_add_remove(void) {
     assert(db != NULL);
     db_agent_upsert(db, "bot", NULL, NULL, NULL);
 
-    assert(agent_config_grant(db, "bot", "host", "api.example.com", "persist", 0) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", 0) == 0);
     AgentCaps caps;
     agent_caps_load(db, "bot", &caps);
     assert(caps.host_count == 1);
@@ -23,13 +23,13 @@ static void test_whitelist_add_remove(void) {
     agent_caps_free(&caps);
 
     /* Duplicate is no-op */
-    assert(agent_config_grant(db, "bot", "host", "api.example.com", "persist", 0) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.example.com", 0) == 0);
     agent_caps_load(db, "bot", &caps);
     assert(caps.host_count == 1);
     agent_caps_free(&caps);
 
     /* Add second */
-    assert(agent_config_grant(db, "bot", "host", "api.github.com", "persist", 0) == 0);
+    assert(agent_config_grant(db, "bot", "host", "api.github.com", 0) == 0);
     agent_caps_load(db, "bot", &caps);
     assert(caps.host_count == 2);
     agent_caps_free(&caps);
@@ -52,8 +52,8 @@ static void test_add_tool(void) {
     assert(db);
     db_agent_upsert(db, "bot", NULL, NULL, NULL);
 
-    assert(agent_config_grant(db, "bot", "tool", "shell_exec", "persist", 0) == 0);
-    assert(agent_config_grant(db, "bot", "tool", "web_fetch", "persist", 0) == 0);
+    assert(agent_config_grant(db, "bot", "tool", "shell_exec", 0) == 0);
+    assert(agent_config_grant(db, "bot", "tool", "web_fetch", 0) == 0);
 
     AgentCaps caps;
     agent_caps_load(db, "bot", &caps);

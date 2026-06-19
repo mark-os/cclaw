@@ -60,7 +60,7 @@ static void test_add_tool_to_config(void) {
     assert(db);
     db_agent_upsert(db, "test", NULL, NULL, NULL);
 
-    int rc = agent_config_grant(db, "test", "tool", "shell_exec", "persist", 0);
+    int rc = agent_config_grant(db, "test", "tool", "shell_exec", 0);
     assert(rc == 0);
 
     AgentCaps caps;

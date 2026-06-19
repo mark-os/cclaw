@@ -85,7 +85,6 @@ CREATE TABLE IF NOT EXISTS grants (
   agent_name TEXT NOT NULL,
   kind TEXT NOT NULL,
   value TEXT NOT NULL,
-  scope TEXT NOT NULL DEFAULT 'persist',
   expires_at INTEGER,
   created_at INTEGER DEFAULT (unixepoch()),
   PRIMARY KEY (agent_name, kind, value)
@@ -303,7 +302,6 @@ CREATE TABLE IF NOT EXISTS approvals (
   tool_call_id TEXT,
   tool_name    TEXT,
   action       TEXT,
-  scope        TEXT NOT NULL DEFAULT 'persist',
   args_json    TEXT,
   args_hash    TEXT,
   state        TEXT NOT NULL DEFAULT 'pending',

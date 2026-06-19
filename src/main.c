@@ -38,6 +38,7 @@
 #include "secret.h"
 #include "secret_scan.h"
 #include "secret_interp.h"
+#include "resolve.h"
 #include "web.h"
 #include "heartbeat.h"
 #include "cron.h"
@@ -178,7 +179,7 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
 /* Forward declarations for approval + advance (used by fork_tool_exec and resolve_approval) */
 static void run_advance(int64_t session_id);
 static void handle_approval_park(int64_t session_id);
-static void resolve_approval(int64_t approval_id, int approved, const char *decided_via);
+/* resolve_approval declared in resolve.h (non-static) */
 
 /* ── fork_tool_exec ─────────────────────────────────────────────── */
 
@@ -430,30 +431,30 @@ static void child_sweep_deadlines(void) {
 
 /* ── resolve_approval: approve/deny a parked approval ────────── */
 
-static void resolve_approval(int64_t approval_id, int approved, const char *decided_via) {
+void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via) {
+    int approved = (decision == APPROVAL_ALWAYS);
     Approval *a = approval_resolve(g_db, approval_id, approved, decided_via);
     if (!a) return;
 
     int64_t session_id = a->session_id;
     const char *agent = session_get_agent_name(g_db, session_id);
 
-    if (approved) {
-        /* Apply the grant — write grants row for both persist and once */
-        const char *scope = a->scope;
+    if (decision == APPROVAL_ALWAYS) {
+        /* Apply the standing grant */
         if (strcmp(a->action, "grant_tool") == 0) {
             ToolArgs ta; tool_parse(a->args_json, &ta);
             const char *v = targ_str(&ta, "tool");
-            if (v) agent_config_grant(g_db, agent, "tool", v, scope, 0);
+            if (v) agent_config_grant(g_db, agent, "tool", v, 0);
             tool_parse_free(&ta);
         } else if (strcmp(a->action, "grant_host") == 0) {
             ToolArgs ta; tool_parse(a->args_json, &ta);
             const char *v = targ_str(&ta, "host");
-            if (v) agent_config_grant(g_db, agent, "host", v, scope, 0);
+            if (v) agent_config_grant(g_db, agent, "host", v, 0);
             tool_parse_free(&ta);
         } else if (strcmp(a->action, "grant_path") == 0) {
             ToolArgs ta; tool_parse(a->args_json, &ta);
             const char *v = targ_str(&ta, "path");
-            if (v) agent_config_grant(g_db, agent, "write_path", v, scope, 0);
+            if (v) agent_config_grant(g_db, agent, "write_path", v, 0);
             tool_parse_free(&ta);
         } else if (strcmp(a->action, "rename_agent") == 0) {
             ToolArgs ta; tool_parse(a->args_json, &ta);
@@ -502,9 +503,10 @@ rename_done:
 
     /* Build tool result message */
     char result_buf[256];
-    if (approved)
-        snprintf(result_buf, sizeof(result_buf), "approved (%s): %s",
-                 a->scope, a->action);
+    if (decision == APPROVAL_ALWAYS)
+        snprintf(result_buf, sizeof(result_buf), "approved: %s", a->action);
+    else if (decision == APPROVAL_ONCE)
+        snprintf(result_buf, sizeof(result_buf), "approved (once): %s", a->action);
     else
         snprintf(result_buf, sizeof(result_buf), "denied (%s): %s",
                  decided_via, a->action);
@@ -514,7 +516,7 @@ rename_done:
         int64_t turn_id = db_next_turn_id(g_db, session_id);
         ToolResult tr = { .tool_call_id = a->tool_call_id, .content = result_buf };
         Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
-                        .tool_name = "request_config", .is_error = !approved };
+                        .tool_name = "request_config", .is_error = (decision == APPROVAL_DENY) };
         entry_append_with_turn(g_db, session_id, &msg, turn_id);
         db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
     }
@@ -537,14 +539,13 @@ static void handle_approval_park(int64_t session_id) {
         /* CLI mode */
         if (!isatty(STDIN_FILENO)) {
             /* Non-interactive (-p mode): auto-deny */
-            resolve_approval(a->id, 0, "auto:no-approver");
+            resolve_approval(a->id, APPROVAL_DENY, "auto:no-approver");
             approval_free(a);
             return;
         }
         /* Interactive: prompt user */
         fprintf(stdout, "\n\033[1mApproval required:\033[0m %s", a->action);
         if (a->args_json) fprintf(stdout, " %s", a->args_json);
-        if (strcmp(a->scope, "once") == 0) fprintf(stdout, " (once, expires at turn end)");
         fprintf(stdout, "\nApprove? (y/n): ");
         fflush(stdout);
         g_cli_turn_active = 0;  /* unblock input loop for the y/n read */
@@ -567,8 +568,8 @@ static void handle_approval_park(int64_t session_id) {
                 /* Enqueue approval prompt to channel */
                 char prompt[512];
                 snprintf(prompt, sizeof(prompt),
-                         "Approval required: %s %s [scope=%s]. Reply yes/no.",
-                         a->action, a->args_json ? a->args_json : "", a->scope);
+                         "Approval required: %s %s. Reply yes/no.",
+                         a->action, a->args_json ? a->args_json : "");
                 const char *ins_sql =
                     "INSERT INTO channel_outbox(channel_name, session_id, payload)"
                     " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4));";
@@ -586,7 +587,7 @@ static void handle_approval_park(int64_t session_id) {
     }
     if (!has_channel) {
         /* No channel binding — fail-closed: auto-deny */
-        resolve_approval(a->id, 0, "auto:no-approver");
+        resolve_approval(a->id, APPROVAL_DENY, "auto:no-approver");
     }
     approval_free(a);
 }
@@ -641,17 +642,6 @@ static void run_advance(int64_t session_id) {
         break;
     }
     case ADVANCE_DONE:
-        /* Expire once-scoped approvals, delete once grants, refresh caps */
-        approval_expire_once(g_db, session_id);
-        {
-            const char *del_once = "DELETE FROM grants WHERE agent_name=? AND scope='once'";
-            sqlite3_stmt *del_stmt;
-            if (sqlite3_prepare_v2(g_db, del_once, -1, &del_stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(del_stmt, 1, out.agent_name, -1, SQLITE_STATIC);
-                sqlite3_step(del_stmt);
-                sqlite3_finalize(del_stmt);
-            }
-        }
         if (g_tool_setup)
             agent_caps_refresh(g_db, out.agent_name, &g_tool_setup->caps);
         deliver_response(session_id);
@@ -1518,7 +1508,7 @@ int main(int argc, char *argv[]) {
               "memory_delete", "configure_provider", "configure_channel", "create_agent"
           };
           for (size_t i = 0; i < sizeof(default_tools)/sizeof(default_tools[0]); i++)
-              agent_config_grant(g_db, "default", "tool", default_tools[i], "persist", 0);
+              agent_config_grant(g_db, "default", "tool", default_tools[i], 0);
           db_kv_set(g_db, "default_agent", "default");
           /* Seed default memory blocks */
           memory_block_create(g_db, "default", "AGENT",
@@ -1725,8 +1715,9 @@ int main(int argc, char *argv[]) {
             {
                 Approval *pa = approval_get_pending(g_db, g_cli_session);
                 if (pa) {
-                    int approved = (linebuf[0] == 'y' || linebuf[0] == 'Y');
-                    resolve_approval(pa->id, approved, "cli:interactive");
+                    ApprovalDecision d = (linebuf[0] == 'y' || linebuf[0] == 'Y')
+                        ? APPROVAL_ALWAYS : APPROVAL_DENY;
+                    resolve_approval(pa->id, d, "cli:interactive");
                     approval_free(pa);
                     /* Shift and continue */
                     size_t consumed = (size_t)(nl - linebuf) + 1;

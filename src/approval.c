@@ -28,13 +28,12 @@ static Approval *row_to_approval(sqlite3_stmt *stmt) {
     a->tool_call_id = dup_or_null(sqlite3_column_text(stmt, 2));
     a->tool_name = dup_or_null(sqlite3_column_text(stmt, 3));
     a->action = dup_or_null(sqlite3_column_text(stmt, 4));
-    a->scope = dup_or_null(sqlite3_column_text(stmt, 5));
-    a->args_json = dup_or_null(sqlite3_column_text(stmt, 6));
-    a->args_hash = dup_or_null(sqlite3_column_text(stmt, 7));
-    a->state = dup_or_null(sqlite3_column_text(stmt, 8));
-    a->decided_via = dup_or_null(sqlite3_column_text(stmt, 9));
-    a->requested_at = sqlite3_column_int64(stmt, 10);
-    a->expires_at = sqlite3_column_int64(stmt, 11);
+    a->args_json = dup_or_null(sqlite3_column_text(stmt, 5));
+    a->args_hash = dup_or_null(sqlite3_column_text(stmt, 6));
+    a->state = dup_or_null(sqlite3_column_text(stmt, 7));
+    a->decided_via = dup_or_null(sqlite3_column_text(stmt, 8));
+    a->requested_at = sqlite3_column_int64(stmt, 9);
+    a->expires_at = sqlite3_column_int64(stmt, 10);
     return a;
 }
 
@@ -43,7 +42,6 @@ void approval_free(Approval *a) {
     free(a->tool_call_id);
     free(a->tool_name);
     free(a->action);
-    free(a->scope);
     free(a->args_json);
     free(a->args_hash);
     free(a->state);
@@ -53,13 +51,13 @@ void approval_free(Approval *a) {
 
 int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_id,
                         const char *tool_name, const char *action,
-                        const char *scope, const char *args_json) {
+                        const char *args_json) {
     char hash[9];
     fnv1a_hex(args_json, hash);
 
     const char *sql =
-        "INSERT INTO approvals(session_id, tool_call_id, tool_name, action, scope, args_json, args_hash)"
-        " VALUES(?,?,?,?,?,?,?)";
+        "INSERT INTO approvals(session_id, tool_call_id, tool_name, action, args_json, args_hash)"
+        " VALUES(?,?,?,?,?,?)";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -67,9 +65,8 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
     sqlite3_bind_text(stmt, 2, tool_call_id, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, tool_name, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, action, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 5, scope ? scope : "persist", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 6, args_json, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 7, hash, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, args_json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, hash, -1, SQLITE_TRANSIENT);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
@@ -78,7 +75,7 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
 
 Approval *approval_get_pending(sqlite3 *db, int64_t session_id) {
     const char *sql =
-        "SELECT id, session_id, tool_call_id, tool_name, action, scope,"
+        "SELECT id, session_id, tool_call_id, tool_name, action,"
         " args_json, args_hash, state, decided_via, requested_at, expires_at"
         " FROM approvals WHERE session_id=? AND state='pending' LIMIT 1";
     sqlite3_stmt *stmt;
@@ -109,7 +106,7 @@ Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *de
 
     /* Return the resolved row */
     const char *sel =
-        "SELECT id, session_id, tool_call_id, tool_name, action, scope,"
+        "SELECT id, session_id, tool_call_id, tool_name, action,"
         " args_json, args_hash, state, decided_via, requested_at, expires_at"
         " FROM approvals WHERE id=?";
     if (sqlite3_prepare_v2(db, sel, -1, &stmt, NULL) != SQLITE_OK)
@@ -122,15 +119,4 @@ Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *de
     return a;
 }
 
-int approval_expire_once(sqlite3 *db, int64_t session_id) {
-    const char *sql =
-        "UPDATE approvals SET state='expired' WHERE session_id=? AND scope='once' AND state='approved'";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return 0;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    sqlite3_step(stmt);
-    int n = sqlite3_changes(db);
-    sqlite3_finalize(stmt);
-    return n;
-}
+

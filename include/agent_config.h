@@ -62,7 +62,7 @@ void agent_config_free(AgentConfig *ac);
 
 /* Uniform grant/revoke API over the grants table. */
 int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
-                       const char *value, const char *scope, int64_t expires_at);
+                       const char *value, int64_t expires_at);
 int agent_config_revoke(sqlite3 *db, const char *agent, const char *kind,
                         const char *value);
 

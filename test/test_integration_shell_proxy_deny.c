@@ -19,17 +19,13 @@
 #include <unistd.h>
 
 static char workspace[256];
-static char preload_in_ws[512];
 static char deny_db_path[512];
 static int ns_available = 1;
 
 static void setup_workspace(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_proxy_deny_%d", getpid());
     mkdir(workspace, 0755);
-    snprintf(preload_in_ws, sizeof(preload_in_ws), "%s/libcclaw_net.so", workspace);
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "cp ./build/libcclaw_net.so %s", preload_in_ws);
-    system(cmd);
+    /* The broker writes the preload .so from its embedded blob; no copy needed. */
     /* Create test DB with grants */
     snprintf(deny_db_path, sizeof(deny_db_path), "%s/test.db", workspace);
     sqlite3 *db;
@@ -97,28 +93,22 @@ static void test_shell_denied_unlisted_host(void) {
     uint16_t port;
     int listen_fd = start_mock_tcp(&port);
 
-    /* Start proxy with DB grants that do NOT include 127.0.0.1 */
-    ProxyContext proxy;
-    int rc = proxy_start(&proxy, workspace, deny_db_path, "testbot");
-    assert(rc == 0);
-
-    /* Shell child tries to curl 127.0.0.1 — should be denied by proxy */
+    /* Shell child tries to curl 127.0.0.1 — testbot has no such grant, so the
+     * broker's per-call proxy denies it. */
     char cmd_json[2048];
     snprintf(cmd_json, sizeof(cmd_json),
-        "{\"command\":\"LD_PRELOAD=%s CCLAW_PROXY_SOCK=%s "
-        "curl -s --max-time 5 http://127.0.0.1:%u/test\"}",
-        preload_in_ws, proxy_sock_path(&proxy), port);
+        "{\"command\":\"curl -s --max-time 5 http://127.0.0.1:%u/test\"}", port);
 
     ShellConfig sc = {
         .timeout = 10,
         .workspace = workspace,
-        .proxy_sock = proxy_sock_path(&proxy),
+        .db_path = deny_db_path,
+        .agent_name = "testbot",
         .sandbox = 1,
     };
     char *result = tool_shell_handler(cmd_json, &sc);
 
     close(listen_fd);
-    proxy_stop(&proxy);
 
     assert(result != NULL);
     /* Connection should fail — curl reports error or empty response */
@@ -143,32 +133,22 @@ static void test_shell_allowed_vs_denied(void) {
     uint16_t port;
     int listen_fd = start_mock_tcp(&port);
 
-    /* Allow only "127.0.0.1" — so connecting to it should work */
-    ProxyContext proxy;
-    int rc = proxy_start(&proxy, workspace, deny_db_path, "testbot2");
-    assert(rc == 0);
-
-    /* Mock server thread to accept one connection */
-    /* We'll just test the deny case with a different "host" name.
-     * Since the preload lib sends the hostname from the connect call,
-     * we can test by trying to reach "denied.test" which resolves nowhere
-     * but the proxy should deny before even trying DNS. */
+    /* testbot2 grants only "127.0.0.1", so a different hostname is denied by
+     * the allowlist before any DNS — the proxy denies "denied.test". */
     char cmd_json[2048];
     snprintf(cmd_json, sizeof(cmd_json),
-        "{\"command\":\"LD_PRELOAD=%s CCLAW_PROXY_SOCK=%s "
-        "curl -s --max-time 5 http://denied.test:%u/test\"}",
-        preload_in_ws, proxy_sock_path(&proxy), port);
+        "{\"command\":\"curl -s --max-time 5 http://denied.test:%u/test\"}", port);
 
     ShellConfig sc = {
         .timeout = 10,
         .workspace = workspace,
-        .proxy_sock = proxy_sock_path(&proxy),
+        .db_path = deny_db_path,
+        .agent_name = "testbot2",
         .sandbox = 1,
     };
     char *result = tool_shell_handler(cmd_json, &sc);
 
     close(listen_fd);
-    proxy_stop(&proxy);
 
     assert(result != NULL);
     if (strstr(result, "PROXY_WORKS") || strstr(result, "HTTP")) {

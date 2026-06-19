@@ -124,7 +124,6 @@ static void test_shell_inject_then_mask(void) {
     ShellConfig sc = {
         .timeout = 5,
         .workspace = NULL,
-        .proxy_sock = NULL,
         .secrets = secrets,
         .secret_count = count,
         .sandbox = 1,
@@ -156,7 +155,7 @@ static void test_env_injection_scoped(void) {
     assert(count == 2);
 
     ShellConfig sc = {
-        .timeout = 5, .workspace = NULL, .proxy_sock = NULL,
+        .timeout = 5, .workspace = NULL,
         .secrets = secrets, .secret_count = count, .sandbox = 1,
     };
 

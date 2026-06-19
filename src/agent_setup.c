@@ -15,15 +15,14 @@
 int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
                      const Config *cfg, const char *agent_name, int mode) {
     memset(setup, 0, sizeof(*setup));
-    setup->proxy_ctx.listen_fd = -1;  /* fd 0 is stdin — zeroed ctx must not close it */
     tools_init(&setup->reg);
 
     /* Load capabilities from grants table */
     agent_caps_load(db, agent_name, &setup->caps);
 
-    /* V83: Start credential proxy thread for shell children */
-    if (cfg->workspace)
-        proxy_start(&setup->proxy_ctx, cfg->workspace, cfg->db_path, agent_name);
+    /* The shell egress proxy is no longer a process-lifetime singleton here —
+     * each shell_exec stands up its own proxy in the per-call broker (see
+     * tool_shell_handler). The daemon holds no proxy/dial socket. */
 
     /* V88: Collect secrets from env, clear from process env */
     setup->secrets = shell_secrets_collect(&setup->secret_count);
@@ -58,7 +57,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
-        sc->proxy_sock = proxy_sock_path(&setup->proxy_ctx);
+        sc->agent_name = agent_name;
         sc->secrets = setup->secrets;
         sc->secret_count = setup->secret_count;
         sc->cwd_path = getenv("CCLAW_PATH");  /* T276/V22a: CWD rw in CLI mode */
@@ -218,7 +217,6 @@ void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent)
 }
 
 void agent_setup_destroy(AgentSetup *setup) {
-    proxy_stop(&setup->proxy_ctx);
     extension_ctx_destroy(&setup->ext_ctx);
     js_runtime_destroy(setup->js_rt);
     shell_secrets_free(setup->secrets, setup->secret_count);

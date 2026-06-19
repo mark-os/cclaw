@@ -11,6 +11,7 @@
 #include "tool_shell.h"
 #include "tool_parse.h"
 #include "sandbox.h"
+#include "proxy.h"
 
 #define SHELL_MAX_OUTPUT (256 * 1024)
 
@@ -38,12 +39,9 @@ static int command_uses_secret_env(const char *command, const char *name) {
 }
 
 char *tool_shell_handler(const char *arguments, void *user_data) {
-    int default_timeout = TOOL_SHELL_DEFAULT_TIMEOUT;
-
-    if (user_data) {
-        ShellConfig *sc = (ShellConfig *)user_data;
-        if (sc->timeout > 0) default_timeout = sc->timeout;
-    }
+    ShellConfig *sc = (ShellConfig *)user_data;
+    int default_timeout = (sc && sc->timeout > 0) ? sc->timeout
+                                                  : TOOL_SHELL_DEFAULT_TIMEOUT;
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0)
@@ -65,10 +63,27 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         return strdup("error: pipe() failed");
     }
 
+    /* Per-call egress proxy. Bind the UDS now, while this broker is still
+     * single-threaded, so the sandbox fork below stays single-threaded (no
+     * fork-in-threaded-process hazard); the accept thread starts afterward.
+     * Policy + the outbound dial socket thus live in this disposable per-call
+     * process, never the long-lived daemon. Skipped when the trust level has no
+     * network (net_mode) or no sandbox (host) — both reach the network without
+     * the proxy or not at all. */
+    ProxyContext proxy;
+    const char *psock = NULL;
+    int proxy_active = 0;
+    if (sc && sc->sandbox && !sc->net_mode && sc->workspace && sc->workspace[0] &&
+        proxy_bind(&proxy, sc->workspace, sc->db_path, sc->agent_name) == 0) {
+        psock = proxy_sock_path(&proxy);
+        proxy_active = 1;
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
+        if (proxy_active) proxy_stop(&proxy);
         tool_parse_free(&ta);
         return strdup("error: fork() failed");
     }
@@ -91,7 +106,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
             cfg.cwd_path        = sc_child->cwd_path;
             cfg.db_path         = sc_child->db_path;
             cfg.env_file        = sc_child->env_file;
-            cfg.proxy_sock      = sc_child->proxy_sock;
+            cfg.proxy_sock      = psock;
             cfg.sandbox         = sc_child->sandbox;
             cfg.workspace_ro    = sc_child->workspace_ro;
             cfg.mount_cwd       = sc_child->mount_cwd;
@@ -148,6 +163,8 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
 
     /* Parent: ensure child is in its own process group */
     setpgid(pid, pid);
+    /* Sandbox fork is done — now safe to start the proxy accept thread. */
+    if (proxy_active) proxy_serve(&proxy);
     close(pipefd[1]);
     tool_parse_free(&ta);
 
@@ -156,6 +173,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         close(pipefd[0]);
         kill(-pid, SIGKILL);
         waitpid(pid, NULL, 0);
+        if (proxy_active) proxy_stop(&proxy);
         return strdup("error: out of memory");
     }
 
@@ -216,6 +234,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     if (timed_out) {
         kill(-pid, SIGKILL);
         waitpid(pid, NULL, 0);
+        if (proxy_active) proxy_stop(&proxy);
         output[out_len] = '\0';
         /* Secrets are masked by tool_result_postprocess() in the parent — the
          * single masking chokepoint. The handler returns raw output. */
@@ -230,6 +249,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     waitpid(pid, &status, 0);
 
 format_result:
+    if (proxy_active) proxy_stop(&proxy);
     output[out_len] = '\0';
 
     /* Secrets are masked by tool_result_postprocess() in the parent — the
@@ -251,7 +271,7 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     sc->workspace = workspace;
     sc->cwd_path = NULL;
     sc->db_path = NULL;
-    sc->proxy_sock = NULL;
+    sc->agent_name = NULL;
     sc->secrets = NULL;
     sc->secret_count = 0;
     sc->sandbox = 1;

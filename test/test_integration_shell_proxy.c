@@ -21,7 +21,6 @@
 #include <unistd.h>
 
 static char workspace[256];
-static char preload_in_ws[512]; /* path to .so inside workspace */
 static char db_path[512];       /* temp DB holding the host grants */
 static int ns_available = 1;
 
@@ -29,13 +28,11 @@ static void setup_workspace(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_proxy_integ_%d", getpid());
     mkdir(workspace, 0755);
 
-    /* Copy libcclaw_net.so into workspace so it's accessible after pivot_root */
-    snprintf(preload_in_ws, sizeof(preload_in_ws), "%s/libcclaw_net.so", workspace);
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "cp ./build/libcclaw_net.so %s", preload_in_ws);
-    system(cmd);
-
-    /* Grant the loopback literal so the proxy permits the mock server. A
+    /* The per-call broker writes the preload .so from its embedded blob and
+     * sets LD_PRELOAD/CCLAW_PROXY_SOCK itself — the test only supplies the
+     * workspace, the grant DB, and the agent name.
+     *
+     * Grant the loopback literal so the proxy permits the mock server. A
      * private IP is only reachable when explicitly granted as a literal — a
      * hostname resolving to loopback is still rejected (SSRF). */
     snprintf(db_path, sizeof(db_path), "%s/test.db", workspace);
@@ -144,29 +141,23 @@ static void test_shell_curl_through_proxy(void) {
     pthread_t thr;
     pthread_create(&thr, NULL, mock_http_thread, &ma);
 
-    ProxyContext proxy;
-    int rc = proxy_start(&proxy, workspace, db_path, "testbot");
-    assert(rc == 0);
-
-    /* Use curl (simpler than python, always available).
-     * The .so is in workspace which is accessible inside the sandbox. */
+    /* The broker stands up its own per-call proxy from workspace + grants;
+     * the sandbox supplies LD_PRELOAD + CCLAW_PROXY_SOCK to the command. */
     char cmd_json[2048];
     snprintf(cmd_json, sizeof(cmd_json),
-        "{\"command\":\"LD_PRELOAD=%s CCLAW_PROXY_SOCK=%s "
-        "curl -s http://127.0.0.1:%u/test\"}",
-        preload_in_ws, proxy_sock_path(&proxy), port);
+        "{\"command\":\"curl -s http://127.0.0.1:%u/test\"}", port);
 
     ShellConfig sc = {
         .timeout = 10,
         .workspace = workspace,
-        .proxy_sock = proxy_sock_path(&proxy),
+        .db_path = db_path,
+        .agent_name = "testbot",
         .sandbox = 1,
     };
     char *result = tool_shell_handler(cmd_json, &sc);
 
     pthread_join(thr, NULL);
     close(listen_fd);
-    proxy_stop(&proxy);
 
     assert(result != NULL);
     if (strstr(result, "PROXY_WORKS!")) {
@@ -203,27 +194,21 @@ static void test_proxy_relay_integrity(void) {
     pthread_t thr;
     pthread_create(&thr, NULL, mock_http_thread, &ma);
 
-    ProxyContext proxy;
-    int rc = proxy_start(&proxy, workspace, db_path, "testbot");
-    assert(rc == 0);
-
     char cmd_json[2048];
     snprintf(cmd_json, sizeof(cmd_json),
-        "{\"command\":\"LD_PRELOAD=%s CCLAW_PROXY_SOCK=%s "
-        "curl -s http://127.0.0.1:%u/\"}",
-        preload_in_ws, proxy_sock_path(&proxy), port);
+        "{\"command\":\"curl -s http://127.0.0.1:%u/\"}", port);
 
     ShellConfig sc = {
         .timeout = 10,
         .workspace = workspace,
-        .proxy_sock = proxy_sock_path(&proxy),
+        .db_path = db_path,
+        .agent_name = "testbot",
         .sandbox = 1,
     };
     char *result = tool_shell_handler(cmd_json, &sc);
 
     pthread_join(thr, NULL);
     close(listen_fd);
-    proxy_stop(&proxy);
 
     assert(result != NULL);
     if (strstr(result, "line1:ABCDEF") && strstr(result, "line2:123456") &&

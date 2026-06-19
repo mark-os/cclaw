@@ -34,8 +34,6 @@ typedef struct {
     AgentLaunchCtx launch_ctx;
     RequestConfigCtx req_cfg_ctx;
     SearchConfigCtx search_cfg_ctx;
-    /* V83: credential proxy for shell children */
-    ProxyContext proxy_ctx;
     /* V88: secrets for shell injection + masking */
     ShellSecret *secrets;
     size_t secret_count;

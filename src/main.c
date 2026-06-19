@@ -1002,7 +1002,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
     if (!rows) { sqlite3_finalize(stmt); return -1; }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (count >= cap) { cap *= 2; Row *tmp = realloc(rows, (size_t)cap * sizeof(Row)); if (!tmp) break; rows = tmp; }
+        if (count >= cap) { cap *= 2; Row *tmp = realloc(rows, (size_t)cap * sizeof(Row)); if (!tmp) { free(rows); sqlite3_finalize(stmt); return -1; } rows = tmp; }
         rows[count].id = sqlite3_column_int64(stmt, 0);
         rows[count].created = (time_t)sqlite3_column_int64(stmt, 1);
         const char *fp = (const char *)sqlite3_column_text(stmt, 2);
@@ -1873,8 +1873,10 @@ done:
       if (cost > 0) fprintf(stderr, "\n[session cost: $%.6f]\n", (double)cost / 1e9); }
 
     session_set_state(g_db, g_cli_session, "idle");
-    agent_setup_destroy(&setup);
+    /* Quiesce the worker pool before freeing anything it may still touch
+     * (g_tool_setup/g_cfg/g_db). Mirrors the daemon shutdown order. */
     llm_worker_stop();
+    agent_setup_destroy(&setup);
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
     free(cli_pfds);
     free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path);

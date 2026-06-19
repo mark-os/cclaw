@@ -82,9 +82,10 @@ static int pool_pop(WorkItem *out) {
         ts.tv_sec += IDLE_TIMEOUT_S;
         int rc = pthread_cond_timedwait(&g_pool.cond, &g_pool.mtx, &ts);
         if (rc != 0 && g_pool.count == 0 && g_pool.active > 1) {
-            /* Idle timeout — shrink pool */
+            /* Idle timeout — shrink pool. active-- happens in worker_fn's
+             * single exit point so the drain barrier in llm_worker_stop()
+             * accounts for every thread exactly once. */
             g_pool.idle--;
-            g_pool.active--;
             pthread_mutex_unlock(&g_pool.mtx);
             return -1;
         }
@@ -152,6 +153,14 @@ static void *worker_fn(void *arg) {
 
     if (curl) curl_easy_cleanup(curl);
     db_close(db);
+
+    /* Single exit point for thread accounting. Decrement active and, when the
+     * last worker leaves, wake llm_worker_stop()'s drain wait. */
+    pthread_mutex_lock(&g_pool.mtx);
+    g_pool.active--;
+    if (g_pool.active == 0)
+        pthread_cond_broadcast(&g_pool.cond);
+    pthread_mutex_unlock(&g_pool.mtx);
     return NULL;
 }
 
@@ -228,10 +237,19 @@ void llm_worker_stop(void) {
     pthread_mutex_lock(&g_pool.mtx);
     g_pool.shutdown = 1;
     pthread_cond_broadcast(&g_pool.cond);
+    /* Drain barrier: block until every worker has finished its in-flight
+     * request and exited. Detached threads racing process teardown (touching
+     * config/db/curl state the caller is about to free) was the rare exit
+     * SIGSEGV — stop() must mean stopped before the caller frees anything. */
+    while (g_pool.active > 0)
+        pthread_cond_wait(&g_pool.cond, &g_pool.mtx);
     pthread_mutex_unlock(&g_pool.mtx);
-    /* Threads are detached — they'll exit on next pop attempt */
+
+    /* Safe to close now: no worker can still write to notify_fd. */
     if (g_notify_pipe[0] >= 0) { close(g_notify_pipe[0]); g_notify_pipe[0] = -1; }
     if (g_notify_pipe[1] >= 0) { close(g_notify_pipe[1]); g_notify_pipe[1] = -1; }
+    pthread_mutex_destroy(&g_pool.mtx);
+    pthread_cond_destroy(&g_pool.cond);
     g_started = 0;
 }
 

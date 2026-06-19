@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db_request.h"
+#include "db.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -326,15 +327,5 @@ int session_set_cache_break(sqlite3 *db, int64_t session_id, int64_t entry_id) {
 }
 
 int64_t session_get_cache_break(sqlite3 *db, int64_t session_id) {
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db,
-            "SELECT cache_break_after FROM sessions WHERE id=?;",
-            -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    int64_t val = -1;
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        val = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-    return val;
+    return db_scalar_i64(db, "SELECT cache_break_after FROM sessions WHERE id=?;", session_id, -1);
 }

@@ -124,6 +124,30 @@ void db_close(sqlite3 *db) {
     if (db) sqlite3_close(db);
 }
 
+int64_t db_scalar_i64(sqlite3 *db, const char *sql, int64_t arg, int64_t dflt) {
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return dflt;
+    sqlite3_bind_int64(stmt, 1, arg);
+    int64_t result = dflt;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        result = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+char *db_scalar_text(sqlite3 *db, const char *sql, int64_t arg) {
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_int64(stmt, 1, arg);
+    char *result = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *val = (const char *)sqlite3_column_text(stmt, 0);
+        if (val) result = strdup(val);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 int64_t session_create(sqlite3 *db, const char *name, const char *agent_name,
                        int64_t parent_session_id, int depth) {
     const char *sql = "INSERT INTO sessions (name, agent_name, parent_session_id, depth) VALUES (?, ?, ?, ?);";
@@ -158,7 +182,12 @@ Session *session_list(sqlite3 *db, int *count) {
         if (*count >= cap) {
             cap *= 2;
             Session *tmp = realloc(list, (size_t)cap * sizeof(Session));
-            if (!tmp) { break; }
+            if (!tmp) {
+                session_list_free(list, *count);
+                *count = 0;
+                sqlite3_finalize(stmt);
+                return NULL;
+            }
             list = tmp;
         }
         Session *s = &list[*count];
@@ -439,29 +468,11 @@ char *get_response_text(sqlite3 *db, int64_t session_id) {
 }
 
 char *session_get_agent_name(sqlite3 *db, int64_t session_id) {
-    const char *sql = "SELECT agent_name FROM sessions WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    char *result = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *val = (const char *)sqlite3_column_text(stmt, 0);
-        if (val) result = strdup(val);
-    }
-    sqlite3_finalize(stmt);
-    return result;
+    return db_scalar_text(db, "SELECT agent_name FROM sessions WHERE id=?;", session_id);
 }
 
 int session_get_depth(sqlite3 *db, int64_t session_id) {
-    const char *sql = "SELECT depth FROM sessions WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    int depth = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        depth = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return depth;
+    return (int)db_scalar_i64(db, "SELECT depth FROM sessions WHERE id=?;", session_id, 0);
 }
 
 
@@ -548,7 +559,12 @@ Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *cou
         if (*count >= cap) {
             cap *= 2;
             Entry *tmp = realloc(entries, (size_t)cap * sizeof(Entry));
-            if (!tmp) break;
+            if (!tmp) {
+                entry_branch_free(entries, *count);
+                *count = 0;
+                sqlite3_finalize(stmt);
+                return NULL;
+            }
             entries = tmp;
         }
         Entry *e = &entries[*count];
@@ -568,16 +584,7 @@ Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *cou
 
 /* T268: Sum cost_nano for all entries in a session */
 int64_t session_cost(sqlite3 *db, int64_t session_id) {
-    const char *sql = "SELECT COALESCE(SUM(cost_nano),0) FROM entries WHERE session_id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return 0;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    int64_t total = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        total = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-    return total;
+    return db_scalar_i64(db, "SELECT COALESCE(SUM(cost_nano),0) FROM entries WHERE session_id=?;", session_id, 0);
 }
 
 /* Key-value store for persistent settings (e.g. Telegram offset) */
@@ -658,17 +665,9 @@ char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *
 /* V3: sub-agent limits — count active child sessions */
 
 int session_count_children(sqlite3 *db, int64_t parent_session_id) {
-    const char *sql =
-        "SELECT COUNT(*) FROM sessions WHERE parent_session_id=? AND state != 'idle';";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, parent_session_id);
-    int count = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        count = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return count;
+    return (int)db_scalar_i64(db,
+        "SELECT COUNT(*) FROM sessions WHERE parent_session_id=? AND state != 'idle';",
+        parent_session_id, -1);
 }
 
 int session_count_active_agents(sqlite3 *db) {
@@ -686,16 +685,7 @@ int session_count_active_agents(sqlite3 *db) {
 
 /* V17: next turn_id for a session */
 int64_t db_next_turn_id(sqlite3 *db, int64_t session_id) {
-    const char *sql = "SELECT COALESCE(MAX(turn_id), 0) + 1 FROM entries WHERE session_id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return 1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    int64_t tid = 1;
-    if (sqlite3_step(stmt) == SQLITE_ROW)
-        tid = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-    return tid;
+    return db_scalar_i64(db, "SELECT COALESCE(MAX(turn_id), 0) + 1 FROM entries WHERE session_id=?;", session_id, 1);
 }
 
 int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id) {
@@ -912,13 +902,7 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
 /* Turn iteration accessors */
 
 int session_get_iteration(sqlite3 *db, int64_t session_id) {
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "SELECT turn_iteration FROM sessions WHERE id=?",
-                           -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    int val = (sqlite3_step(stmt) == SQLITE_ROW) ? sqlite3_column_int(stmt, 0) : -1;
-    sqlite3_finalize(stmt);
-    return val;
+    return (int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", session_id, -1);
 }
 
 int session_set_iteration(sqlite3 *db, int64_t session_id, int iter) {
@@ -1028,8 +1012,10 @@ InboxItem *inbox_peek(sqlite3 *db, int64_t session_id, int limit, int *count) {
         InboxItem *it = &items[*count];
         it->id = sqlite3_column_int64(stmt, 0);
         it->session_id = sqlite3_column_int64(stmt, 1);
-        it->source = strdup((const char *)sqlite3_column_text(stmt, 2));
-        it->payload = strdup((const char *)sqlite3_column_text(stmt, 3));
+        const char *src = (const char *)sqlite3_column_text(stmt, 2);
+        it->source = src ? strdup(src) : NULL;
+        const char *pay = (const char *)sqlite3_column_text(stmt, 3);
+        it->payload = pay ? strdup(pay) : NULL;
         it->created_at = sqlite3_column_int64(stmt, 4);
         (*count)++;
     }
@@ -1047,14 +1033,7 @@ void inbox_items_free(InboxItem *items, int count) {
 }
 
 int inbox_count(sqlite3 *db, int64_t session_id) {
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM inbox WHERE session_id=? AND consumed=0",
-                           -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    int c = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW) c = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return c;
+    return (int)db_scalar_i64(db, "SELECT COUNT(*) FROM inbox WHERE session_id=? AND consumed=0", session_id, -1);
 }
 
 /* V18: Atomically consume inbox items into session entries */
@@ -1185,7 +1164,17 @@ SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count) {
         if (*count >= cap) {
             cap *= 2;
             SpawnRequest *tmp = realloc(list, (size_t)cap * sizeof(SpawnRequest));
-            if (!tmp) break;
+            if (!tmp) {
+                for (int i = 0; i < *count; i++) {
+                    free(list[i].task);
+                    free(list[i].tool_call_id);
+                    free(list[i].child_agent);
+                }
+                free(list);
+                *count = 0;
+                sqlite3_finalize(stmt);
+                return NULL;
+            }
             list = tmp;
         }
         SpawnRequest *r = &list[*count];
@@ -1251,7 +1240,13 @@ char **db_agent_list(sqlite3 *db, int *count) {
         if (*count >= cap) {
             cap *= 2;
             char **tmp = realloc(names, (size_t)cap * sizeof(char *));
-            if (!tmp) break;
+            if (!tmp) {
+                for (int i = 0; i < *count; i++) free(names[i]);
+                free(names);
+                *count = 0;
+                sqlite3_finalize(stmt);
+                return NULL;
+            }
             names = tmp;
         }
         names[*count] = strdup(n);
@@ -1726,17 +1721,7 @@ int memory_entries_delete(sqlite3 *db, const char *agent_name,
 }
 
 char *session_get_last_route(sqlite3 *db, int64_t session_id) {
-    const char *sql = "SELECT last_route FROM sessions WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    char *result = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *val = (const char *)sqlite3_column_text(stmt, 0);
-        if (val) result = strdup(val);
-    }
-    sqlite3_finalize(stmt);
-    return result;
+    return db_scalar_text(db, "SELECT last_route FROM sessions WHERE id=?;", session_id);
 }
 
 int rate_limit_check(sqlite3 *db, const char *provider_name) {

@@ -123,7 +123,11 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
         if (raw_count >= cap) {
             cap *= 2;
             PlanEntry *tmp = realloc(raw, (size_t)cap * sizeof(PlanEntry));
-            if (!tmp) break;
+            if (!tmp) {
+                free(raw);
+                sqlite3_finalize(stmt);
+                return -1;
+            }
             raw = tmp;
         }
         PlanEntry *pe = &raw[raw_count];

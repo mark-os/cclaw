@@ -151,7 +151,12 @@ CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count) {
         if (*count >= cap) {
             cap *= 2;
             CronJob *tmp = realloc(jobs, (size_t)cap * sizeof(CronJob));
-            if (!tmp) break;
+            if (!tmp) {
+                cron_list_free(jobs, *count);
+                *count = 0;
+                sqlite3_finalize(stmt);
+                return NULL;
+            }
             jobs = tmp;
         }
         CronJob *j = &jobs[*count];
@@ -226,7 +231,16 @@ static void run_due_jobs(void) {
         if (count >= cap) {
             cap *= 2;
             DueJob *tmp = realloc(due, (size_t)cap * sizeof(DueJob));
-            if (!tmp) break;
+            if (!tmp) {
+                for (int i = 0; i < count; i++) {
+                    free(due[i].expr);
+                    free(due[i].task);
+                    free(due[i].agent_name);
+                }
+                free(due);
+                sqlite3_finalize(stmt);
+                return;
+            }
             due = tmp;
         }
         due[count].id = sqlite3_column_int64(stmt, 0);

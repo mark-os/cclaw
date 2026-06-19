@@ -148,7 +148,11 @@ int admin_list_providers(sqlite3 *db, AdminProvider **out, size_t *out_count) {
         if (count >= cap) {
             cap *= 2;
             AdminProvider *tmp = realloc(providers, cap * sizeof(AdminProvider));
-            if (!tmp) break;
+            if (!tmp) {
+                admin_providers_free(providers, count);
+                sqlite3_finalize(stmt);
+                return -1;
+            }
             providers = tmp;
         }
         const char *m = (const char *)sqlite3_column_text(stmt, 1);

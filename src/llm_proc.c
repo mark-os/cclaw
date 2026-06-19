@@ -539,8 +539,10 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
         sqlite3_bind_int(cstmt, 2, max_tok);
         sqlite3_bind_text(cstmt, 3, sys_prompt, -1, SQLITE_STATIC);
         sqlite3_bind_text(cstmt, 4, text, (int)text_len, SQLITE_STATIC);
-        if (sqlite3_step(cstmt) == SQLITE_ROW)
-            body = strdup((const char *)sqlite3_column_text(cstmt, 0));
+        if (sqlite3_step(cstmt) == SQLITE_ROW) {
+            const char *col = (const char *)sqlite3_column_text(cstmt, 0);
+            body = col ? strdup(col) : NULL;
+        }
         sqlite3_finalize(cstmt);
     }
 

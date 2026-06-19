@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "proxy.h"
+#include "http_policy.h"
 #include <sqlite3.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -13,17 +14,19 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #define PROXY_BACKLOG 8
 #define RELAY_BUF_SIZE 4096
 #define PREAMBLE_MAX 300
 
-/* V83: check if host is allowed by querying grants table.
- * No db_path/agent_name = allow all (open mode for tests). */
+/* Check if host is allowed by querying the grants table. Deny-by-default:
+ * no policy source (db_path/agent_name) means no network, not allow-all. An
+ * empty grant set therefore denies every host. */
 static int host_allowed(const ProxyContext *ctx, const char *host) {
     if (!ctx->db_path || !ctx->agent_name)
-        return 1;
+        return 0;
     sqlite3 *db;
     if (sqlite3_open_v2(ctx->db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
         return 0;
@@ -43,47 +46,151 @@ static int host_allowed(const ProxyContext *ctx, const char *host) {
     return allowed;
 }
 
-/* Resolve hostname to IPv4/IPv6 address string. Returns 0 on success. */
-static int resolve_host(const char *host, char *ip_buf, size_t ip_cap) {
-    struct addrinfo hints = {0}, *res;
+/* Parse an IP string to its binary form. Returns 0 + family/bytes on success. */
+static int ip_to_bin(const char *ip, int *fam, unsigned char *buf16) {
+    struct in_addr a4;
+    if (inet_pton(AF_INET, ip, &a4) == 1) {
+        *fam = AF_INET;
+        memcpy(buf16, &a4, 4);
+        return 0;
+    }
+    struct in6_addr a6;
+    if (inet_pton(AF_INET6, ip, &a6) == 1) {
+        *fam = AF_INET6;
+        memcpy(buf16, &a6, 16);
+        return 0;
+    }
+    return -1;
+}
+
+/* True if `ip` is in the blessed set and not expired. */
+static int bless_contains(ProxyContext *ctx, const char *ip) {
+    int fam;
+    unsigned char bin[16];
+    if (ip_to_bin(ip, &fam, bin) != 0) return 0;
+    int len = (fam == AF_INET) ? 4 : 16;
+    long now = (long)time(NULL);
+    int found = 0;
+    pthread_mutex_lock(&ctx->blessed_mu);
+    for (int i = 0; i < ctx->blessed_count; i++) {
+        ProxyBlessedAddr *b = &ctx->blessed[i];
+        if (b->expiry <= now) continue;
+        if (b->family == fam && memcmp(b->addr, bin, (size_t)len) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&ctx->blessed_mu);
+    return found;
+}
+
+/* Add `ip` to the blessed set with a fresh TTL. Prunes expired entries and
+ * evicts the oldest if the set is full. Refreshes the TTL on a duplicate. */
+static void bless_add(ProxyContext *ctx, const char *ip) {
+    int fam;
+    unsigned char bin[16];
+    if (ip_to_bin(ip, &fam, bin) != 0) return;
+    int len = (fam == AF_INET) ? 4 : 16;
+    long now = (long)time(NULL);
+    pthread_mutex_lock(&ctx->blessed_mu);
+    /* Drop expired entries (compact in place). */
+    int w = 0;
+    for (int i = 0; i < ctx->blessed_count; i++) {
+        if (ctx->blessed[i].expiry > now) {
+            if (w != i) ctx->blessed[w] = ctx->blessed[i];
+            w++;
+        }
+    }
+    ctx->blessed_count = w;
+    /* Refresh if already present. */
+    for (int i = 0; i < ctx->blessed_count; i++) {
+        if (ctx->blessed[i].family == fam &&
+            memcmp(ctx->blessed[i].addr, bin, (size_t)len) == 0) {
+            ctx->blessed[i].expiry = now + PROXY_BLESS_TTL_SECS;
+            pthread_mutex_unlock(&ctx->blessed_mu);
+            return;
+        }
+    }
+    if (ctx->blessed_count >= PROXY_BLESS_MAX) {
+        int oldest = 0;
+        for (int i = 1; i < ctx->blessed_count; i++)
+            if (ctx->blessed[i].expiry < ctx->blessed[oldest].expiry) oldest = i;
+        ctx->blessed[oldest] = ctx->blessed[ctx->blessed_count - 1];
+        ctx->blessed_count--;
+    }
+    ProxyBlessedAddr *b = &ctx->blessed[ctx->blessed_count++];
+    b->family = fam;
+    memset(b->addr, 0, sizeof(b->addr));
+    memcpy(b->addr, bin, (size_t)len);
+    b->expiry = now + PROXY_BLESS_TTL_SECS;
+    pthread_mutex_unlock(&ctx->blessed_mu);
+}
+
+/* A resolved address may be blessed if it is public, or if its literal form is
+ * itself explicitly granted — the operator opting into a private target. A
+ * hostname that merely *resolves* to a private IP is rejected (SSRF / rebind). */
+static int addr_permitted(const ProxyContext *ctx, const char *ip) {
+    if (!http_is_private_ip(ip)) return 1;
+    return host_allowed(ctx, ip);
+}
+
+/* Resolve host (allowlist already checked by the caller), drop disallowed
+ * addresses, bless the survivors with a TTL. On success writes the first
+ * blessed IP into ip_out and returns 0; returns -1 if nothing is permitted. */
+static int resolve_and_bless(ProxyContext *ctx, const char *host,
+                             char *ip_out, size_t ip_cap) {
+    struct addrinfo hints = {0}, *res, *rp;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     if (getaddrinfo(host, NULL, &hints, &res) != 0)
         return -1;
-    int ok = -1;
-    if (res->ai_family == AF_INET) {
-        struct sockaddr_in *s = (struct sockaddr_in *)res->ai_addr;
-        if (inet_ntop(AF_INET, &s->sin_addr, ip_buf, (socklen_t)ip_cap))
-            ok = 0;
-    } else if (res->ai_family == AF_INET6) {
-        struct sockaddr_in6 *s = (struct sockaddr_in6 *)res->ai_addr;
-        if (inet_ntop(AF_INET6, &s->sin6_addr, ip_buf, (socklen_t)ip_cap))
-            ok = 0;
+    int got = 0;
+    for (rp = res; rp; rp = rp->ai_next) {
+        char ip[INET6_ADDRSTRLEN];
+        if (rp->ai_family == AF_INET) {
+            struct sockaddr_in *s = (struct sockaddr_in *)rp->ai_addr;
+            if (!inet_ntop(AF_INET, &s->sin_addr, ip, sizeof(ip))) continue;
+        } else if (rp->ai_family == AF_INET6) {
+            struct sockaddr_in6 *s = (struct sockaddr_in6 *)rp->ai_addr;
+            if (!inet_ntop(AF_INET6, &s->sin6_addr, ip, sizeof(ip))) continue;
+        } else continue;
+        if (!addr_permitted(ctx, ip)) continue;
+        bless_add(ctx, ip);
+        if (!got) {
+            snprintf(ip_out, ip_cap, "%s", ip);
+            got = 1;
+        }
     }
     freeaddrinfo(res);
-    return ok;
+    return got ? 0 : -1;
 }
 
-/* Open TCP connection to host:port. Returns fd or -1. */
-static int tcp_connect(const char *host, uint16_t port) {
-    struct addrinfo hints = {0}, *res, *rp;
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", port);
-    if (getaddrinfo(host, port_str, &hints, &res) != 0)
-        return -1;
-    int fd = -1;
-    for (rp = res; rp; rp = rp->ai_next) {
-        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0)
-            break;
-        close(fd);
-        fd = -1;
+/* Dial a literal IP:port directly — no name resolution, so the dialed address
+ * is exactly the blessed one (no resolve/connect TOCTOU). Returns fd or -1. */
+static int dial_ip(const char *ip, uint16_t port) {
+    struct in_addr a4;
+    if (inet_pton(AF_INET, ip, &a4) == 1) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+        struct sockaddr_in sa = {0};
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(port);
+        sa.sin_addr = a4;
+        if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) { close(fd); return -1; }
+        return fd;
     }
-    freeaddrinfo(res);
-    return fd;
+    struct in6_addr a6;
+    if (inet_pton(AF_INET6, ip, &a6) == 1) {
+        int fd = socket(AF_INET6, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+        struct sockaddr_in6 sa = {0};
+        sa.sin6_family = AF_INET6;
+        sa.sin6_port = htons(port);
+        sa.sin6_addr = a6;
+        if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) { close(fd); return -1; }
+        return fd;
+    }
+    return -1;
 }
 
 /* Relay data bidirectionally between two fds until one closes. */
@@ -131,7 +238,10 @@ static int proxy_read_line(int fd, char *buf, int max) {
     return pos;
 }
 
-/* Handle a single client connection from shell child. */
+/* Handle a single client connection from a shell child. One unified policy
+ * path: a hostname is allowlist-checked, resolved, SSRF-filtered, and blessed;
+ * a numeric target is dialed only if it was blessed by a prior RESOLVE or is an
+ * explicitly granted literal IP. The dialed address is always one we blessed. */
 static void handle_client(ProxyContext *ctx, int client_fd) {
     char preamble[PREAMBLE_MAX];
     int len = proxy_read_line(client_fd, preamble, PREAMBLE_MAX);
@@ -146,7 +256,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
             return;
         }
         char ip[INET6_ADDRSTRLEN];
-        if (resolve_host(host, ip, sizeof(ip)) == 0) {
+        if (resolve_and_bless(ctx, host, ip, sizeof(ip)) == 0) {
             char resp[INET6_ADDRSTRLEN + 8];
             int n = snprintf(resp, sizeof(resp), "ADDR %s\n", ip);
             write(client_fd, resp, (size_t)n);
@@ -165,25 +275,43 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
         return;
     }
     *colon = '\0';
-    const char *host = preamble;
+    const char *target = preamble;
     uint16_t port = (uint16_t)atoi(colon + 1);
 
-    /* V83: For IP-based connects, we need to check if the IP was resolved
-     * by us (via RESOLVE). Since CLONE_NEWNET blocks direct connects anyway,
-     * and the preload lib sends the IP it got from our RESOLVE, we allow
-     * IPs that correspond to allowed hosts. For simplicity: if allowed_hosts
-     * is set and host is an IP, check if it matches any resolved allowed host.
-     * In practice, the preload lib sends IPs from our RESOLVE responses. */
-    if (!host_allowed(ctx, host)) {
-        /* Host might be an IP — allow if no DB/agent (open mode) */
-        if (ctx->db_path && ctx->agent_name) {
+    char resolved[INET6_ADDRSTRLEN];
+    const char *dial;
+    int fam;
+    unsigned char bin[16];
+    if (ip_to_bin(target, &fam, bin) == 0) {
+        /* Numeric target: must be blessed by a prior RESOLVE, or an explicitly
+         * granted literal IP. A literal IP that is neither (e.g. a raw
+         * 1.2.3.4 SSRF attempt) is refused — there is no resolve to bless it. */
+        if (bless_contains(ctx, target)) {
+            dial = target;
+        } else if (host_allowed(ctx, target)) {
+            bless_add(ctx, target);
+            dial = target;
+        } else {
             write(client_fd, "DENIED\n", 7);
             close(client_fd);
             return;
         }
+    } else {
+        /* Hostname target: allowlist, then resolve + SSRF-filter + bless. */
+        if (!host_allowed(ctx, target)) {
+            write(client_fd, "DENIED\n", 7);
+            close(client_fd);
+            return;
+        }
+        if (resolve_and_bless(ctx, target, resolved, sizeof(resolved)) != 0) {
+            write(client_fd, "ERROR resolve\n", 14);
+            close(client_fd);
+            return;
+        }
+        dial = resolved;
     }
 
-    int remote_fd = tcp_connect(host, port);
+    int remote_fd = dial_ip(dial, port);
     if (remote_fd < 0) {
         write(client_fd, "ERROR connect\n", 14);
         close(client_fd);
@@ -245,6 +373,7 @@ int proxy_start(ProxyContext *ctx, const char *workspace,
                 const char *db_path, const char *agent_name) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->listen_fd = -1;
+    pthread_mutex_init(&ctx->blessed_mu, NULL);
     ctx->db_path = db_path ? strdup(db_path) : NULL;
     ctx->agent_name = agent_name ? strdup(agent_name) : NULL;
 
@@ -326,6 +455,7 @@ void proxy_stop(ProxyContext *ctx) {
     ctx->db_path = NULL;
     free(ctx->agent_name);
     ctx->agent_name = NULL;
+    pthread_mutex_destroy(&ctx->blessed_mu);
 }
 
 const char *proxy_sock_path(const ProxyContext *ctx) {

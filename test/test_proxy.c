@@ -29,9 +29,13 @@ static void setup_tmpdir(void) {
         " id INTEGER PRIMARY KEY, agent_name TEXT, kind TEXT, value TEXT,"
         " expires_at INTEGER);",
         NULL, NULL, NULL);
-    /* Grant "example.com" to agent "testbot" */
+    /* Grants for agent "testbot": a hostname, a public literal IP, and a
+     * hostname that resolves only to loopback (to exercise the SSRF filter). */
     sqlite3_exec(db,
-        "INSERT INTO grants(agent_name,kind,value) VALUES('testbot','host','example.com');",
+        "INSERT INTO grants(agent_name,kind,value) VALUES"
+        "('testbot','host','example.com'),"
+        "('testbot','host','8.8.8.8'),"
+        "('testbot','host','localhost');",
         NULL, NULL, NULL);
     sqlite3_close(db);
 }
@@ -93,32 +97,55 @@ static void test_proxy_start_stop(void) {
     printf("  PASS: proxy start/stop\n");
 }
 
-static void test_resolve_allowed(void) {
-    /* No allowlist = allow all */
+static void test_resolve_blessed(void) {
+    /* A granted, public literal IP resolves and is blessed. getaddrinfo of a
+     * numeric literal does not touch the network. */
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, NULL, NULL);
+    int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));
     assert(fd >= 0);
 
-    /* RESOLVE localhost should work */
-    const char *req = "RESOLVE localhost\n";
+    const char *req = "RESOLVE 8.8.8.8\n";
     write(fd, req, strlen(req));
 
     char resp[128];
     int n = read_line(fd, resp, sizeof(resp));
     assert(n > 0);
-    /* Should get "ADDR 127.0.0.1\n" or "ADDR ::1\n" */
-    assert(strncmp(resp, "ADDR ", 5) == 0);
+    assert(strncmp(resp, "ADDR 8.8.8.8", 12) == 0);
     close(fd);
 
     proxy_stop(&ctx);
-    printf("  PASS: resolve allowed (no allowlist)\n");
+    printf("  PASS: resolve blessed (granted public IP)\n");
 }
 
 static void test_resolve_denied(void) {
-    /* DB grants only "example.com" to "testbot" — localhost should be denied */
+    /* A host not in the grant set is denied by the allowlist (no resolve). */
+    ProxyContext ctx;
+    int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
+    assert(rc == 0);
+
+    int fd = uds_connect(proxy_sock_path(&ctx));
+    assert(fd >= 0);
+
+    const char *req = "RESOLVE notallowed.test\n";
+    write(fd, req, strlen(req));
+
+    char resp[128];
+    int n = read_line(fd, resp, sizeof(resp));
+    assert(n > 0);
+    assert(strncmp(resp, "ERROR", 5) == 0);
+    close(fd);
+
+    proxy_stop(&ctx);
+    printf("  PASS: resolve denied (not in allowlist)\n");
+}
+
+static void test_resolve_private_rejected(void) {
+    /* "localhost" IS granted, but it resolves only to loopback (127.0.0.1/::1),
+     * which is not itself explicitly granted — the SSRF filter rejects it so a
+     * granted name cannot be rebound onto a host-internal address. */
     ProxyContext ctx;
     int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
     assert(rc == 0);
@@ -136,7 +163,7 @@ static void test_resolve_denied(void) {
     close(fd);
 
     proxy_stop(&ctx);
-    printf("  PASS: resolve denied (not in allowlist)\n");
+    printf("  PASS: resolve private rejected (SSRF)\n");
 }
 
 static void test_connect_denied(void) {
@@ -183,15 +210,40 @@ static void test_connect_bad_preamble(void) {
     printf("  PASS: connect bad preamble\n");
 }
 
+static void test_connect_literal_ip_denied(void) {
+    /* A raw literal IP that was never RESOLVE'd and is not explicitly granted
+     * is refused — the anti-SSRF rule for direct numeric connects. */
+    ProxyContext ctx;
+    int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
+    assert(rc == 0);
+
+    int fd = uds_connect(proxy_sock_path(&ctx));
+    assert(fd >= 0);
+
+    const char *req = "1.2.3.4:80\n";
+    write(fd, req, strlen(req));
+
+    char resp[128];
+    int n = read_line(fd, resp, sizeof(resp));
+    assert(n > 0);
+    assert(strncmp(resp, "DENIED", 6) == 0);
+    close(fd);
+
+    proxy_stop(&ctx);
+    printf("  PASS: connect literal IP denied (unblessed)\n");
+}
+
 int main(void) {
     alarm(10);
     setup_tmpdir();
 
     printf("test_proxy:\n");
     test_proxy_start_stop();
-    test_resolve_allowed();
+    test_resolve_blessed();
     test_resolve_denied();
+    test_resolve_private_rejected();
     test_connect_denied();
+    test_connect_literal_ip_denied();
     test_connect_bad_preamble();
 
     cleanup_tmpdir();

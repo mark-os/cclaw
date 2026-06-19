@@ -10,6 +10,21 @@
  * checks allowed_hosts, resolves DNS, relays TCP bidirectionally.
  * Accept-loop thread is joined in proxy_stop(). */
 
+#define PROXY_BLESS_MAX 256
+#define PROXY_BLESS_TTL_SECS 60
+
+/* A resolution-blessed address: an IP that passed the allowlist + SSRF check
+ * via a prior RESOLVE, or an explicitly granted literal IP. A numeric CONNECT
+ * is permitted only if its address is present here and unexpired — this binds
+ * the dialed IP to a prior allowed resolution (anti SSRF / DNS-rebinding). The
+ * set is per-ProxyContext: process-lifetime while the proxy is a singleton,
+ * per-call once the proxy moves into the broker. */
+typedef struct {
+    int family;                 /* AF_INET or AF_INET6 */
+    unsigned char addr[16];     /* binary address (4 or 16 bytes used) */
+    long expiry;                /* unix time when this bless expires */
+} ProxyBlessedAddr;
+
 typedef struct {
     char *db_path;          /* heap-allocated copy of DB path */
     char *agent_name;       /* heap-allocated copy of agent name */
@@ -18,6 +33,9 @@ typedef struct {
     int running;            /* set to 0 to stop */
     pthread_t thread;       /* accept-loop thread (valid if thread_started) */
     int thread_started;
+    ProxyBlessedAddr blessed[PROXY_BLESS_MAX];  /* TTL-bound blessed-IP set */
+    int blessed_count;
+    pthread_mutex_t blessed_mu; /* guards blessed[]/blessed_count */
 } ProxyContext;
 
 /* Start proxy thread. Creates UDS at <workspace>/.proxy.sock.

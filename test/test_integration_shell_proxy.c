@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 #include "proxy.h"
 #include "tool_shell.h"
+#include <sqlite3.h>
 #include <arpa/inet.h>
 #include <assert.h>
 #include <netinet/in.h>
@@ -21,6 +22,7 @@
 
 static char workspace[256];
 static char preload_in_ws[512]; /* path to .so inside workspace */
+static char db_path[512];       /* temp DB holding the host grants */
 static int ns_available = 1;
 
 static void setup_workspace(void) {
@@ -32,6 +34,22 @@ static void setup_workspace(void) {
     char cmd[1024];
     snprintf(cmd, sizeof(cmd), "cp ./build/libcclaw_net.so %s", preload_in_ws);
     system(cmd);
+
+    /* Grant the loopback literal so the proxy permits the mock server. A
+     * private IP is only reachable when explicitly granted as a literal — a
+     * hostname resolving to loopback is still rejected (SSRF). */
+    snprintf(db_path, sizeof(db_path), "%s/test.db", workspace);
+    sqlite3 *db;
+    if (sqlite3_open(db_path, &db) == SQLITE_OK) {
+        sqlite3_exec(db,
+            "CREATE TABLE IF NOT EXISTS grants("
+            " id INTEGER PRIMARY KEY, agent_name TEXT, kind TEXT, value TEXT,"
+            " expires_at INTEGER);"
+            "INSERT INTO grants(agent_name,kind,value) VALUES"
+            "('testbot','host','127.0.0.1');",
+            NULL, NULL, NULL);
+        sqlite3_close(db);
+    }
 }
 
 static void cleanup_workspace(void) {
@@ -127,7 +145,7 @@ static void test_shell_curl_through_proxy(void) {
     pthread_create(&thr, NULL, mock_http_thread, &ma);
 
     ProxyContext proxy;
-    int rc = proxy_start(&proxy, workspace, NULL, NULL);
+    int rc = proxy_start(&proxy, workspace, db_path, "testbot");
     assert(rc == 0);
 
     /* Use curl (simpler than python, always available).
@@ -186,7 +204,7 @@ static void test_proxy_relay_integrity(void) {
     pthread_create(&thr, NULL, mock_http_thread, &ma);
 
     ProxyContext proxy;
-    int rc = proxy_start(&proxy, workspace, NULL, NULL);
+    int rc = proxy_start(&proxy, workspace, db_path, "testbot");
     assert(rc == 0);
 
     char cmd_json[2048];

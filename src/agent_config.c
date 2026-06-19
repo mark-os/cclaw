@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE        /* realpath() declaration */
 #define _POSIX_C_SOURCE 200809L
 #include "agent_config.h"
 #include "config.h"
@@ -8,6 +9,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
 #include <unistd.h>
 
 static int str_ends_with(const char *s, const char *suffix) {
@@ -422,6 +424,15 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
 int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
                        const char *value, int64_t expires_at) {
     if (!db || !agent || !kind || !value) return -1;
+    /* Canonicalize path grants so stored values are absolute + symlink-resolved
+     * (downstream prefix comparisons are only meaningful on canonical paths,
+     * and a non-canonical grant could otherwise dodge a naive check). realpath()
+     * needs the path to exist; if it doesn't yet, store the literal value —
+     * mount-time realpath() canonicalizes when it does. */
+    char canon[PATH_MAX];
+    if ((strcmp(kind, "read_path") == 0 || strcmp(kind, "write_path") == 0)
+        && realpath(value, canon))
+        value = canon;
     const char *sql =
         "INSERT OR IGNORE INTO grants (agent_name, kind, value, expires_at)"
         " VALUES (?1, ?2, ?3, ?4);";

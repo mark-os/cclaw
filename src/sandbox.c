@@ -89,6 +89,43 @@ static int sandbox_remount_ro(const char *path) {
     return mount(NULL, path, NULL, flags, NULL);
 }
 
+/* Count path components (slash count) — canonical realpath() output has no
+ * trailing slash, so this orders ancestors before descendants. */
+static int mount_depth(const char *p) {
+    int d = 0;
+    for (const char *c = p; *c; c++) if (*c == '/') d++;
+    return d;
+}
+
+/* qsort comparator: shallow→deep, strcmp tie-break for determinism. */
+static int mount_cmp(const void *a, const void *b) {
+    const SandboxMount *x = a, *y = b;
+    int dx = mount_depth(x->path), dy = mount_depth(y->path);
+    if (dx != dy) return dx - dy;
+    return strcmp(x->path, y->path);
+}
+
+size_t sandbox_plan_mounts(const SandboxMountReq *in, size_t n, SandboxMount *out) {
+    size_t cnt = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!in[i].path || !in[i].path[0]) continue;
+        char abs[PATH_MAX];
+        if (!realpath(in[i].path, abs)) continue;  /* drop unresolvable */
+        size_t k;
+        for (k = 0; k < cnt; k++)
+            if (strcmp(out[k].path, abs) == 0) break;
+        if (k < cnt) {                 /* same subtree already planned */
+            if (!in[i].ro) out[k].ro = 0;  /* rw wins: write implies read */
+            continue;
+        }
+        snprintf(out[cnt].path, sizeof(out[cnt].path), "%s", abs);
+        out[cnt].ro = in[i].ro;
+        cnt++;
+    }
+    qsort(out, cnt, sizeof(*out), mount_cmp);
+    return cnt;
+}
+
 /* Bind a single directory into newroot at its absolute path.
  * Creates intermediate dirs, bind-mounts, optionally remounts ro. */
 static void bind_dir_into(const char *newroot, const char *abspath, int ro) {
@@ -208,14 +245,17 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
     if (cwd_resolved)
         bind_dir_into(newroot, cwd_resolved, 0);
 
-    /* Layer 2: extra bind-mounts from read_path/write_path grants */
-    if (full_cfg && full_cfg->extra_mounts) {
-        for (size_t i = 0; i < full_cfg->extra_mount_count; i++) {
-            const char *p = full_cfg->extra_mounts[i].path;
-            if (!p || !p[0]) continue;
-            char abs[PATH_MAX];
-            if (!realpath(p, abs)) continue;
-            bind_dir_into(newroot, abs, full_cfg->extra_mounts[i].ro);
+    /* Layer 2: extra bind-mounts from read_path/write_path grants.
+     * Canonicalize + dedup (rw wins) + sort shallow→deep so a child mount
+     * shadows its parent, independent of grant insertion order. */
+    if (full_cfg && full_cfg->extra_mounts && full_cfg->extra_mount_count > 0) {
+        size_t n = full_cfg->extra_mount_count;
+        SandboxMount *plan = calloc(n, sizeof(*plan));
+        if (plan) {
+            size_t pn = sandbox_plan_mounts(full_cfg->extra_mounts, n, plan);
+            for (size_t i = 0; i < pn; i++)
+                bind_dir_into(newroot, plan[i].path, plan[i].ro);
+            free(plan);
         }
     }
 

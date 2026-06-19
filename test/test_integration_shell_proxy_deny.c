@@ -5,7 +5,6 @@
 #define _GNU_SOURCE
 #include "proxy.h"
 #include "tool_shell.h"
-#include <sqlite3.h>
 #include <arpa/inet.h>
 #include <assert.h>
 #include <netinet/in.h>
@@ -19,31 +18,19 @@
 #include <unistd.h>
 
 static char workspace[256];
-static char deny_db_path[512];
 static int ns_available = 1;
+
+/* The broker takes its egress allowlist as data — no grant DB. Two distinct
+ * allowlists exercise the deny path: "testbot" may reach only "allowed.test"
+ * (so a 127.0.0.1 connect is denied), and "testbot2" may reach only the
+ * loopback literal (so the hostname "denied.test" is denied before any DNS). */
+static char *allow_named[] = {"allowed.test"};
+static char *allow_loopback[] = {"127.0.0.1"};
 
 static void setup_workspace(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_proxy_deny_%d", getpid());
     mkdir(workspace, 0755);
     /* The broker writes the preload .so from its embedded blob; no copy needed. */
-    /* Create test DB with grants */
-    snprintf(deny_db_path, sizeof(deny_db_path), "%s/test.db", workspace);
-    sqlite3 *db;
-    assert(sqlite3_open(deny_db_path, &db) == SQLITE_OK);
-    sqlite3_exec(db,
-        "CREATE TABLE IF NOT EXISTS grants("
-        " id INTEGER PRIMARY KEY, agent_name TEXT, kind TEXT, value TEXT,"
-        " expires_at INTEGER);",
-        NULL, NULL, NULL);
-    /* Only grant "allowed.test" to testbot */
-    sqlite3_exec(db,
-        "INSERT INTO grants(agent_name,kind,value) VALUES('testbot','host','allowed.test');",
-        NULL, NULL, NULL);
-    /* Grant 127.0.0.1 to testbot2 for the allowed_vs_denied test */
-    sqlite3_exec(db,
-        "INSERT INTO grants(agent_name,kind,value) VALUES('testbot2','host','127.0.0.1');",
-        NULL, NULL, NULL);
-    sqlite3_close(db);
 }
 
 static void cleanup_workspace(void) {
@@ -102,8 +89,8 @@ static void test_shell_denied_unlisted_host(void) {
     ShellConfig sc = {
         .timeout = 10,
         .workspace = workspace,
-        .db_path = deny_db_path,
-        .agent_name = "testbot",
+        .allowed_hosts = allow_named,
+        .allowed_host_count = 1,
         .sandbox = 1,
     };
     char *result = tool_shell_handler(cmd_json, &sc);
@@ -142,8 +129,8 @@ static void test_shell_allowed_vs_denied(void) {
     ShellConfig sc = {
         .timeout = 10,
         .workspace = workspace,
-        .db_path = deny_db_path,
-        .agent_name = "testbot2",
+        .allowed_hosts = allow_loopback,
+        .allowed_host_count = 1,
         .sandbox = 1,
     };
     char *result = tool_shell_handler(cmd_json, &sc);

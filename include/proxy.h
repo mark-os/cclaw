@@ -26,8 +26,8 @@ typedef struct {
 } ProxyBlessedAddr;
 
 typedef struct {
-    char *db_path;          /* heap-allocated copy of DB path */
-    char *agent_name;       /* heap-allocated copy of agent name */
+    char **hosts;           /* borrowed egress allowlist (NULL ⇒ deny all) */
+    size_t host_count;      /* must outlive the proxy (per-call caps->hosts) */
     char *sock_path;        /* heap-allocated path to .proxy.sock */
     int listen_fd;          /* listening socket fd (-1 if not started) */
     int running;            /* set to 0 to stop */
@@ -40,9 +40,11 @@ typedef struct {
 
 /* Bind + listen on a per-call UDS at <workspace>/.proxy.<pid>.sock without
  * starting the accept thread. Lets the broker create the socket single-threaded,
- * fork the sandbox, then serve. Returns 0 on success. */
+ * fork the sandbox, then serve. The egress allowlist (`hosts`/`host_count`) is
+ * borrowed — it must outlive the proxy; the broker holds no DB handle.
+ * Returns 0 on success. */
 int proxy_bind(ProxyContext *ctx, const char *workspace,
-               const char *db_path, const char *agent_name);
+               char **hosts, size_t host_count);
 
 /* Start the accept-loop thread for a bound context. Returns 0 on success. */
 int proxy_serve(ProxyContext *ctx);
@@ -51,7 +53,7 @@ int proxy_serve(ProxyContext *ctx);
  * Returns 0 on success, -1 on failure.
  * Caller must call proxy_stop() before process exit. */
 int proxy_start(ProxyContext *ctx, const char *workspace,
-                const char *db_path, const char *agent_name);
+                char **hosts, size_t host_count);
 
 /* Stop proxy thread and clean up socket file. */
 void proxy_stop(ProxyContext *ctx);

@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "proxy.h"
 #include "http_policy.h"
-#include <sqlite3.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -21,29 +20,15 @@
 #define RELAY_BUF_SIZE 4096
 #define PREAMBLE_MAX 300
 
-/* Check if host is allowed by querying the grants table. Deny-by-default:
- * no policy source (db_path/agent_name) means no network, not allow-all. An
- * empty grant set therefore denies every host. */
+/* Check if host is allowed against the in-memory allowlist. The broker holds no
+ * DB handle: the allowlist is the already-loaded caps->hosts (grants of
+ * kind='host', expiry-filtered at load). Deny-by-default — an empty/NULL list
+ * denies every host, so no network rather than allow-all. */
 static int host_allowed(const ProxyContext *ctx, const char *host) {
-    if (!ctx->db_path || !ctx->agent_name)
-        return 0;
-    sqlite3 *db;
-    if (sqlite3_open_v2(ctx->db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
-        return 0;
-    const char *sql =
-        "SELECT 1 FROM grants WHERE agent_name=?1 AND kind='host'"
-        " AND value=?2 AND (expires_at IS NULL OR expires_at > unixepoch()) LIMIT 1";
-    sqlite3_stmt *stmt;
-    int allowed = 0;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, ctx->agent_name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, host, -1, SQLITE_STATIC);
-        if (sqlite3_step(stmt) == SQLITE_ROW)
-            allowed = 1;
-        sqlite3_finalize(stmt);
-    }
-    sqlite3_close(db);
-    return allowed;
+    for (size_t i = 0; i < ctx->host_count; i++)
+        if (ctx->hosts[i] && strcmp(ctx->hosts[i], host) == 0)
+            return 1;
+    return 0;
 }
 
 /* Parse an IP string to its binary form. Returns 0 + family/bytes on success. */
@@ -374,12 +359,12 @@ static void *proxy_loop(void *arg) {
  * fork the sandbox (a single-threaded fork — no fork-in-threaded-process
  * hazard), and only then start the accept thread. Returns 0 on success. */
 int proxy_bind(ProxyContext *ctx, const char *workspace,
-               const char *db_path, const char *agent_name) {
+               char **hosts, size_t host_count) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->listen_fd = -1;
     pthread_mutex_init(&ctx->blessed_mu, NULL);
-    ctx->db_path = db_path ? strdup(db_path) : NULL;
-    ctx->agent_name = agent_name ? strdup(agent_name) : NULL;
+    ctx->hosts = hosts;          /* borrowed — must outlive the proxy */
+    ctx->host_count = host_count;
 
     /* Per-call socket path: unique per process so concurrent brokers (each its
      * own pid) never collide. Sequential reuse within one process is covered by
@@ -441,8 +426,8 @@ int proxy_serve(ProxyContext *ctx) {
 
 /* Convenience: bind + serve in one call (single-threaded callers and tests). */
 int proxy_start(ProxyContext *ctx, const char *workspace,
-                const char *db_path, const char *agent_name) {
-    if (proxy_bind(ctx, workspace, db_path, agent_name) != 0)
+                char **hosts, size_t host_count) {
+    if (proxy_bind(ctx, workspace, hosts, host_count) != 0)
         return -1;
     if (proxy_serve(ctx) != 0) {
         proxy_stop(ctx);
@@ -466,10 +451,8 @@ void proxy_stop(ProxyContext *ctx) {
         free(ctx->sock_path);
         ctx->sock_path = NULL;
     }
-    free(ctx->db_path);
-    ctx->db_path = NULL;
-    free(ctx->agent_name);
-    ctx->agent_name = NULL;
+    ctx->hosts = NULL;          /* borrowed — not owned, do not free */
+    ctx->host_count = 0;
     pthread_mutex_destroy(&ctx->blessed_mu);
 }
 

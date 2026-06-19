@@ -7,7 +7,6 @@
 #define _GNU_SOURCE
 #include "proxy.h"
 #include "tool_shell.h"
-#include <sqlite3.h>
 #include <arpa/inet.h>
 #include <assert.h>
 #include <netinet/in.h>
@@ -21,8 +20,13 @@
 #include <unistd.h>
 
 static char workspace[256];
-static char db_path[512];       /* temp DB holding the host grants */
 static int ns_available = 1;
+
+/* The broker takes its egress allowlist as data (caps->hosts in production), so
+ * the test passes it directly — no grant DB. Grant the loopback literal so the
+ * proxy permits the mock server: a private IP is reachable only when explicitly
+ * granted as a literal; a hostname resolving to loopback is still rejected. */
+static char *allow_loopback[] = {"127.0.0.1"};
 
 static void setup_workspace(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_proxy_integ_%d", getpid());
@@ -30,23 +34,7 @@ static void setup_workspace(void) {
 
     /* The per-call broker writes the preload .so from its embedded blob and
      * sets LD_PRELOAD/CCLAW_PROXY_SOCK itself — the test only supplies the
-     * workspace, the grant DB, and the agent name.
-     *
-     * Grant the loopback literal so the proxy permits the mock server. A
-     * private IP is only reachable when explicitly granted as a literal — a
-     * hostname resolving to loopback is still rejected (SSRF). */
-    snprintf(db_path, sizeof(db_path), "%s/test.db", workspace);
-    sqlite3 *db;
-    if (sqlite3_open(db_path, &db) == SQLITE_OK) {
-        sqlite3_exec(db,
-            "CREATE TABLE IF NOT EXISTS grants("
-            " id INTEGER PRIMARY KEY, agent_name TEXT, kind TEXT, value TEXT,"
-            " expires_at INTEGER);"
-            "INSERT INTO grants(agent_name,kind,value) VALUES"
-            "('testbot','host','127.0.0.1');",
-            NULL, NULL, NULL);
-        sqlite3_close(db);
-    }
+     * workspace, the allowlist, and the command. */
 }
 
 static void cleanup_workspace(void) {
@@ -150,8 +138,8 @@ static void test_shell_curl_through_proxy(void) {
     ShellConfig sc = {
         .timeout = 10,
         .workspace = workspace,
-        .db_path = db_path,
-        .agent_name = "testbot",
+        .allowed_hosts = allow_loopback,
+        .allowed_host_count = 1,
         .sandbox = 1,
     };
     char *result = tool_shell_handler(cmd_json, &sc);
@@ -201,8 +189,8 @@ static void test_proxy_relay_integrity(void) {
     ShellConfig sc = {
         .timeout = 10,
         .workspace = workspace,
-        .db_path = db_path,
-        .agent_name = "testbot",
+        .allowed_hosts = allow_loopback,
+        .allowed_host_count = 1,
         .sandbox = 1,
     };
     char *result = tool_shell_handler(cmd_json, &sc);

@@ -57,7 +57,8 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
-        sc->agent_name = agent_name;
+        sc->allowed_hosts = setup->caps.hosts;       /* per-call egress proxy allowlist (data, no DB) */
+        sc->allowed_host_count = setup->caps.host_count;
         sc->secrets = setup->secrets;
         sc->secret_count = setup->secret_count;
         sc->cwd_path = getenv("CCLAW_PATH");  /* T276/V22a: CWD rw in CLI mode */
@@ -203,6 +204,8 @@ void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent)
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
+        sc->allowed_hosts = setup->caps.hosts;
+        sc->allowed_host_count = setup->caps.host_count;
         sc->read_paths = setup->caps.read_paths;
         sc->read_path_count = setup->caps.read_count;
         sc->write_paths = setup->caps.write_paths;

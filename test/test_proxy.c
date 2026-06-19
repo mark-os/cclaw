@@ -2,7 +2,6 @@
  * Tests UDS accept, RESOLVE, CONNECT preamble, allowed_hosts enforcement. */
 #define _POSIX_C_SOURCE 200809L
 #include "proxy.h"
-#include <sqlite3.h>
 #include <arpa/inet.h>
 #include <assert.h>
 #include <signal.h>
@@ -15,29 +14,16 @@
 #include <unistd.h>
 
 static char tmpdir[128];
-static char db_path[256];
+
+/* In-memory allowlist for "testbot" — the broker holds no DB handle, so the
+ * proxy takes the host list as data (caps->hosts in production). A hostname, a
+ * public literal IP, and a loopback-only hostname (to exercise the SSRF filter). */
+static char *grant_hosts[] = {"example.com", "8.8.8.8", "localhost"};
+#define GRANT_HOST_COUNT (sizeof(grant_hosts) / sizeof(grant_hosts[0]))
 
 static void setup_tmpdir(void) {
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/test_proxy_XXXXXX");
     assert(mkdtemp(tmpdir) != NULL);
-    /* Create a temp DB with grants table for deny tests */
-    snprintf(db_path, sizeof(db_path), "%s/test.db", tmpdir);
-    sqlite3 *db;
-    assert(sqlite3_open(db_path, &db) == SQLITE_OK);
-    sqlite3_exec(db,
-        "CREATE TABLE IF NOT EXISTS grants("
-        " id INTEGER PRIMARY KEY, agent_name TEXT, kind TEXT, value TEXT,"
-        " expires_at INTEGER);",
-        NULL, NULL, NULL);
-    /* Grants for agent "testbot": a hostname, a public literal IP, and a
-     * hostname that resolves only to loopback (to exercise the SSRF filter). */
-    sqlite3_exec(db,
-        "INSERT INTO grants(agent_name,kind,value) VALUES"
-        "('testbot','host','example.com'),"
-        "('testbot','host','8.8.8.8'),"
-        "('testbot','host','localhost');",
-        NULL, NULL, NULL);
-    sqlite3_close(db);
 }
 
 static void cleanup_tmpdir(void) {
@@ -76,7 +62,7 @@ static int read_line(int fd, char *buf, int max) {
 
 static void test_proxy_start_stop(void) {
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, NULL, NULL);
+    int rc = proxy_start(&ctx, tmpdir, NULL, 0);
     assert(rc == 0);
     assert(proxy_sock_path(&ctx) != NULL);
 
@@ -101,7 +87,7 @@ static void test_resolve_blessed(void) {
     /* A granted, public literal IP resolves and is blessed. getaddrinfo of a
      * numeric literal does not touch the network. */
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
+    int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));
@@ -123,7 +109,7 @@ static void test_resolve_blessed(void) {
 static void test_resolve_denied(void) {
     /* A host not in the grant set is denied by the allowlist (no resolve). */
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
+    int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));
@@ -147,7 +133,7 @@ static void test_resolve_private_rejected(void) {
      * which is not itself explicitly granted — the SSRF filter rejects it so a
      * granted name cannot be rebound onto a host-internal address. */
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
+    int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));
@@ -169,7 +155,7 @@ static void test_resolve_private_rejected(void) {
 static void test_connect_denied(void) {
     /* DB grants only "example.com" — connecting to other host denied */
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
+    int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));
@@ -190,7 +176,7 @@ static void test_connect_denied(void) {
 
 static void test_connect_bad_preamble(void) {
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, NULL, NULL);
+    int rc = proxy_start(&ctx, tmpdir, NULL, 0);
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));
@@ -214,7 +200,7 @@ static void test_connect_literal_ip_denied(void) {
     /* A raw literal IP that was never RESOLVE'd and is not explicitly granted
      * is refused — the anti-SSRF rule for direct numeric connects. */
     ProxyContext ctx;
-    int rc = proxy_start(&ctx, tmpdir, db_path, "testbot");
+    int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
 
     int fd = uds_connect(proxy_sock_path(&ctx));

@@ -18,7 +18,8 @@ typedef struct {
     const char *cwd_path;   /* V22a/T276: CWD rw bind-mount in CLI mode (NULL in daemon) */
     const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key — bind-masked inside the ns */
     const char *env_file;   /* provider env file: bind-masked inside the ns */
-    const char *agent_name; /* for the per-call egress proxy's grant lookups */
+    char **allowed_hosts;   /* borrowed egress allowlist for the per-call proxy */
+    size_t allowed_host_count;
     ShellSecret *secrets;   /* V88: array of secrets to inject + mask */
     size_t secret_count;
     int sandbox;            /* derived from trust_level: 1=namespace required, 0=none (host) */

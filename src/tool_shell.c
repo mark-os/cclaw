@@ -74,7 +74,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     const char *psock = NULL;
     int proxy_active = 0;
     if (sc && sc->sandbox && !sc->net_mode && sc->workspace && sc->workspace[0] &&
-        proxy_bind(&proxy, sc->workspace, sc->db_path, sc->agent_name) == 0) {
+        proxy_bind(&proxy, sc->workspace, sc->allowed_hosts, sc->allowed_host_count) == 0) {
         psock = proxy_sock_path(&proxy);
         proxy_active = 1;
     }
@@ -271,7 +271,8 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     sc->workspace = workspace;
     sc->cwd_path = NULL;
     sc->db_path = NULL;
-    sc->agent_name = NULL;
+    sc->allowed_hosts = NULL;
+    sc->allowed_host_count = 0;
     sc->secrets = NULL;
     sc->secret_count = 0;
     sc->sandbox = 1;

@@ -38,7 +38,16 @@ typedef struct {
     pthread_mutex_t blessed_mu; /* guards blessed[]/blessed_count */
 } ProxyContext;
 
-/* Start proxy thread. Creates UDS at <workspace>/.proxy.sock.
+/* Bind + listen on a per-call UDS at <workspace>/.proxy.<pid>.sock without
+ * starting the accept thread. Lets the broker create the socket single-threaded,
+ * fork the sandbox, then serve. Returns 0 on success. */
+int proxy_bind(ProxyContext *ctx, const char *workspace,
+               const char *db_path, const char *agent_name);
+
+/* Start the accept-loop thread for a bound context. Returns 0 on success. */
+int proxy_serve(ProxyContext *ctx);
+
+/* Convenience: proxy_bind + proxy_serve. Creates UDS at <workspace>/.proxy.<pid>.sock.
  * Returns 0 on success, -1 on failure.
  * Caller must call proxy_stop() before process exit. */
 int proxy_start(ProxyContext *ctx, const char *workspace,

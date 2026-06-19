@@ -369,26 +369,31 @@ static void *proxy_loop(void *arg) {
     return NULL;
 }
 
-int proxy_start(ProxyContext *ctx, const char *workspace,
-                const char *db_path, const char *agent_name) {
+/* Bind + listen on the per-call UDS, but do not start serving yet. Splitting
+ * bind from serve lets the broker create the socket while still single-threaded,
+ * fork the sandbox (a single-threaded fork — no fork-in-threaded-process
+ * hazard), and only then start the accept thread. Returns 0 on success. */
+int proxy_bind(ProxyContext *ctx, const char *workspace,
+               const char *db_path, const char *agent_name) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->listen_fd = -1;
     pthread_mutex_init(&ctx->blessed_mu, NULL);
     ctx->db_path = db_path ? strdup(db_path) : NULL;
     ctx->agent_name = agent_name ? strdup(agent_name) : NULL;
 
-    /* Build socket path */
-    size_t wlen = strlen(workspace);
-    size_t plen = wlen + sizeof("/.proxy.sock");
+    /* Per-call socket path: unique per process so concurrent brokers (each its
+     * own pid) never collide. Sequential reuse within one process is covered by
+     * the unlink below and proxy_stop's unlink. */
+    size_t plen = strlen(workspace) + 32;
     ctx->sock_path = malloc(plen);
     if (!ctx->sock_path) return -1;
-    snprintf(ctx->sock_path, plen, "%s/.proxy.sock", workspace);
+    snprintf(ctx->sock_path, plen, "%s/.proxy.%d.sock", workspace, (int)getpid());
 
     /* Remove stale socket */
     unlink(ctx->sock_path);
 
-    /* Create UDS listener */
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    /* Create UDS listener (CLOEXEC so it never rides into the sandbox exec) */
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) { free(ctx->sock_path); ctx->sock_path = NULL; return -1; }
 
     struct sockaddr_un addr;
@@ -418,21 +423,31 @@ int proxy_start(ProxyContext *ctx, const char *workspace,
     }
 
     ctx->listen_fd = fd;
+    return 0;
+}
+
+/* Start the accept-loop thread (joined in proxy_stop). Call after proxy_bind,
+ * and in the broker after forking the sandbox. Returns 0 on success. */
+int proxy_serve(ProxyContext *ctx) {
+    if (ctx->listen_fd < 0) return -1;
     ctx->running = 1;
-
-    /* Start accept loop thread (joined in proxy_stop) */
-    int rc = pthread_create(&ctx->thread, NULL, proxy_loop, ctx);
-    if (rc == 0) ctx->thread_started = 1;
-
-    if (rc != 0) {
-        close(fd);
-        unlink(ctx->sock_path);
-        free(ctx->sock_path);
-        ctx->sock_path = NULL;
-        ctx->listen_fd = -1;
+    if (pthread_create(&ctx->thread, NULL, proxy_loop, ctx) != 0) {
+        ctx->running = 0;
         return -1;
     }
+    ctx->thread_started = 1;
+    return 0;
+}
 
+/* Convenience: bind + serve in one call (single-threaded callers and tests). */
+int proxy_start(ProxyContext *ctx, const char *workspace,
+                const char *db_path, const char *agent_name) {
+    if (proxy_bind(ctx, workspace, db_path, agent_name) != 0)
+        return -1;
+    if (proxy_serve(ctx) != 0) {
+        proxy_stop(ctx);
+        return -1;
+    }
     return 0;
 }
 

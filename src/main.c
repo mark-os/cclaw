@@ -559,6 +559,28 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         return;
     }
 
+    /* §6 fail-closed: "once" is incoherent for config actions (ambient
+     * capabilities have no single-use semantics). Reject as error. */
+    if (decision == APPROVAL_ONCE) {
+        char err[256];
+        snprintf(err, sizeof(err),
+                 "error: once-approval invalid for config action %s", a->action);
+        if (a->tool_call_id) {
+            int64_t turn_id = db_next_turn_id(g_db, session_id);
+            ToolResult tr = { .tool_call_id = a->tool_call_id, .content = err };
+            Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
+                            .tool_name = "request_config", .is_error = 1 };
+            entry_append_with_turn(g_db, session_id, &msg, turn_id);
+            db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
+        }
+        session_set_state(g_db, session_id, "tool_running");
+        free((char *)agent);
+        approval_free(a);
+        wake_session(session_id);
+        run_advance(session_id);
+        return;
+    }
+
     const char *refresh_agent = agent;
     int rename_failed = 0;
     if (decision == APPROVAL_ALWAYS) {
@@ -625,14 +647,12 @@ rename_done:
             agent_setup_refresh_caps(g_tool_setup, g_db, refresh_agent);
     }
 
-    /* Build tool result message */
+    /* Build tool result message (ONCE already returned above — only ALWAYS/DENY reach here) */
     char result_buf[256];
     if (rename_failed)
         snprintf(result_buf, sizeof(result_buf), "error: rename failed, rolled back");
     else if (decision == APPROVAL_ALWAYS)
         snprintf(result_buf, sizeof(result_buf), "approved: %s", a->action);
-    else if (decision == APPROVAL_ONCE)
-        snprintf(result_buf, sizeof(result_buf), "approved (once): %s", a->action);
     else
         snprintf(result_buf, sizeof(result_buf), "denied (%s): %s",
                  decided_via, a->action);
@@ -673,7 +693,10 @@ static void handle_approval_park(int64_t session_id) {
         /* Interactive: prompt user */
         fprintf(stdout, "\n\033[1mApproval required:\033[0m %s", a->action);
         if (a->args_json) fprintf(stdout, " %s", a->args_json);
-        fprintf(stdout, "\nApprove? (y=always / o=once / n=no): ");
+        if (is_config_action(a->action))
+            fprintf(stdout, "\nGrant? (y/n): ");
+        else
+            fprintf(stdout, "\nApprove? (y=always / o=once / n=no): ");
         fflush(stdout);
         g_cli_turn_active = 0;  /* unblock input loop for the y/n read */
         /* The actual y/n is read in the CLI input loop — see cli_handle_approval */

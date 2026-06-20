@@ -82,6 +82,20 @@ static void *mock_proxy_resolve(void *arg) {
     return NULL;
 }
 
+/* Mock proxy that records whether the broker was ever contacted. Used by the
+ * loopback-passthrough test: a loopback connect must NOT reach the broker. */
+static volatile int broker_hit = 0;
+static void *mock_proxy_watch(void *arg) {
+    (void)arg;
+    struct timeval tv = {2, 0};
+    setsockopt(server_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    int client = accept(server_fd, NULL, NULL);
+    if (client < 0) return NULL;  /* timed out: never contacted — the good path */
+    broker_hit = 1;
+    close(client);
+    return NULL;
+}
+
 static void setup_uds(void) {
     snprintf(sock_path, sizeof(sock_path), "/tmp/.cclaw_test_proxy_%d.sock", getpid());
     unlink(sock_path);
@@ -262,6 +276,41 @@ static void test_no_proxy_passthrough(void) {
     printf(" ok\n");
 }
 
+/* P0 regression: with the preload loaded and a proxy sock set, a loopback
+ * connect must reach the local listener directly and must NOT be forwarded to
+ * the broker (which would SSRF-reject 127.0.0.1, breaking the shim path). */
+static void test_loopback_passthrough(void) {
+    printf("  test_loopback_passthrough...");
+    broker_hit = 0;
+
+    pthread_t thr;
+    pthread_create(&thr, NULL, mock_proxy_watch, NULL);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(5);
+        setenv("LD_PRELOAD", "./build/libcclaw_net.so", 1);
+        setenv("CCLAW_PROXY_SOCK", sock_path, 1);
+        execl("/bin/sh", "sh", "-c",
+            "python3 -c '"
+            "import socket\n"
+            "srv = socket.socket(); srv.bind((\"127.0.0.1\", 0)); srv.listen(1)\n"
+            "port = srv.getsockname()[1]\n"
+            "c = socket.socket(); c.settimeout(2); c.connect((\"127.0.0.1\", port))\n"
+            "conn, _ = srv.accept()\n"
+            "print(\"LOOPBACK_OK\")'",
+            NULL);
+        _exit(127);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    pthread_join(thr, NULL);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(broker_hit == 0 && "loopback connect must not reach the broker");
+    printf(" ok\n");
+}
+
 int main(void) {
     printf("test_preload_net:\n");
     alarm(10); /* Hard timeout — kill test if stuck */
@@ -269,6 +318,7 @@ int main(void) {
     test_so_loads();
 
     setup_uds();
+    test_loopback_passthrough();
     test_connect_ok();
     test_no_proxy_passthrough();
     test_preload_connect_ok();

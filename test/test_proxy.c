@@ -4,6 +4,8 @@
 #include "proxy.h"
 #include <arpa/inet.h>
 #include <assert.h>
+#include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +13,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 static char tmpdir[128];
@@ -219,6 +222,82 @@ static void test_connect_literal_ip_denied(void) {
     printf("  PASS: connect literal IP denied (unblessed)\n");
 }
 
+/* A throwaway loopback listener that accepts and holds connections open, so the
+ * broker's dial succeeds and the relay stays live (occupying a relay slot). */
+static int g_sink_fds[PROXY_MAX_RELAYS + 8];
+static int g_sink_n;
+static void *sink_accept(void *arg) {
+    int lfd = *(int *)arg;
+    for (;;) {
+        int c = accept(lfd, NULL, NULL);
+        if (c < 0) return NULL;
+        if (g_sink_n < (int)(sizeof(g_sink_fds) / sizeof(g_sink_fds[0])))
+            g_sink_fds[g_sink_n++] = c;  /* hold it open */
+    }
+}
+
+static void test_relay_cap(void) {
+    /* Grant the loopback literal so numeric CONNECTs to it dial directly (the
+     * operator-opt-in path bypasses the SSRF filter). Open PROXY_MAX_RELAYS live
+     * tunnels; the next must be refused cleanly without wedging the broker. */
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    assert(lfd >= 0);
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = 0;
+    assert(bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) == 0);
+    assert(listen(lfd, 128) == 0);
+    socklen_t al = sizeof(sa);
+    assert(getsockname(lfd, (struct sockaddr *)&sa, &al) == 0);
+    int sink_port = ntohs(sa.sin_port);
+    pthread_t th;
+    pthread_create(&th, NULL, sink_accept, &lfd);
+
+    char *hosts[] = {"127.0.0.1"};
+    ProxyContext ctx;
+    assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
+
+    int clients[PROXY_MAX_RELAYS];
+    for (int i = 0; i < PROXY_MAX_RELAYS; i++) {
+        int fd = uds_connect(proxy_sock_path(&ctx));
+        assert(fd >= 0);
+        char req[64];
+        int rn = snprintf(req, sizeof(req), "127.0.0.1:%d\n", sink_port);
+        assert(write(fd, req, (size_t)rn) == rn);
+        char resp[64];
+        assert(read_line(fd, resp, sizeof(resp)) > 0);
+        assert(strncmp(resp, "OK", 2) == 0);
+        clients[i] = fd;  /* keep open → relay stays live */
+    }
+
+    /* One past the cap: refused cleanly (DENIED), broker still serving. */
+    int over = uds_connect(proxy_sock_path(&ctx));
+    assert(over >= 0);
+    char req[64];
+    int rn = snprintf(req, sizeof(req), "127.0.0.1:%d\n", sink_port);
+    assert(write(over, req, (size_t)rn) == rn);
+    char resp[64];
+    assert(read_line(over, resp, sizeof(resp)) > 0);
+    assert(strncmp(resp, "DENIED", 6) == 0);
+    close(over);
+
+    /* Free one slot and confirm a new tunnel is admitted again. */
+    close(clients[0]);
+    nanosleep(&(struct timespec){.tv_nsec = 50000000}, NULL);
+    int again = uds_connect(proxy_sock_path(&ctx));
+    assert(again >= 0);
+    assert(write(again, req, (size_t)rn) == rn);
+    assert(read_line(again, resp, sizeof(resp)) > 0);
+    assert(strncmp(resp, "OK", 2) == 0);
+    close(again);
+
+    for (int i = 1; i < PROXY_MAX_RELAYS; i++) close(clients[i]);
+    proxy_stop(&ctx);
+    close(lfd);
+    printf("  PASS: relay cap enforced (refuse past PROXY_MAX_RELAYS)\n");
+}
+
 int main(void) {
     alarm(10);
     setup_tmpdir();
@@ -231,6 +310,7 @@ int main(void) {
     test_connect_denied();
     test_connect_literal_ip_denied();
     test_connect_bad_preamble();
+    test_relay_cap();
 
     cleanup_tmpdir();
     printf("All proxy tests passed.\n");

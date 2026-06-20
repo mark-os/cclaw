@@ -354,11 +354,12 @@ static void *proxy_loop(void *arg) {
     return NULL;
 }
 
-/* Bind + listen on the per-call UDS, but do not start serving yet. Splitting
- * bind from serve lets the broker create the socket while still single-threaded,
- * fork the sandbox (a single-threaded fork — no fork-in-threaded-process
- * hazard), and only then start the accept thread. Returns 0 on success. */
-int proxy_bind(ProxyContext *ctx, const char *workspace,
+/* Bind + listen on the per-call UDS in `dir` (the agent folder), but do not
+ * start serving yet. Splitting bind from serve lets the broker create the
+ * socket while still single-threaded, fork the sandbox (a single-threaded fork
+ * — no fork-in-threaded-process hazard), and only then start the accept thread.
+ * Returns 0 on success. */
+int proxy_bind(ProxyContext *ctx, const char *dir,
                char **hosts, size_t host_count) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->listen_fd = -1;
@@ -366,13 +367,14 @@ int proxy_bind(ProxyContext *ctx, const char *workspace,
     ctx->hosts = hosts;          /* borrowed — must outlive the proxy */
     ctx->host_count = host_count;
 
-    /* Per-call socket path: unique per process so concurrent brokers (each its
-     * own pid) never collide. Sequential reuse within one process is covered by
-     * the unlink below and proxy_stop's unlink. */
-    size_t plen = strlen(workspace) + 32;
+    /* Per-call socket path in `dir` (the agent folder, not the agent-visible
+     * workspace): unique per process so concurrent brokers (each its own pid)
+     * never collide. Sequential reuse within one process is covered by the
+     * unlink below and proxy_stop's unlink. */
+    size_t plen = strlen(dir) + 32;
     ctx->sock_path = malloc(plen);
     if (!ctx->sock_path) return -1;
-    snprintf(ctx->sock_path, plen, "%s/.proxy.%d.sock", workspace, (int)getpid());
+    snprintf(ctx->sock_path, plen, "%s/.proxy.%d.sock", dir, (int)getpid());
 
     /* Remove stale socket */
     unlink(ctx->sock_path);
@@ -425,9 +427,9 @@ int proxy_serve(ProxyContext *ctx) {
 }
 
 /* Convenience: bind + serve in one call (single-threaded callers and tests). */
-int proxy_start(ProxyContext *ctx, const char *workspace,
+int proxy_start(ProxyContext *ctx, const char *dir,
                 char **hosts, size_t host_count) {
-    if (proxy_bind(ctx, workspace, hosts, host_count) != 0)
+    if (proxy_bind(ctx, dir, hosts, host_count) != 0)
         return -1;
     if (proxy_serve(ctx) != 0) {
         proxy_stop(ctx);

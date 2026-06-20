@@ -5,9 +5,11 @@
 #include <stddef.h>
 
 /* V83: Credential proxy thread for shell children.
- * Listens on UDS at <workspace>/.proxy.sock.
- * Accepts connections, reads preamble (host:port or RESOLVE host),
- * checks allowed_hosts, resolves DNS, relays TCP bidirectionally.
+ * Listens on a per-call pathname UDS at <agent-folder>/.proxy.<pid>.sock — the
+ * agent folder, never the agent-visible workspace. The sandbox bind-mounts the
+ * socket to a fixed in-netns path so the in-sandbox preload/shim can reach it.
+ * Accepts connections, reads preamble (host:port or RESOLVE host), checks the
+ * allowlist, resolves DNS, relays TCP bidirectionally.
  * Accept-loop thread is joined in proxy_stop(). */
 
 #define PROXY_BLESS_MAX 256
@@ -38,21 +40,21 @@ typedef struct {
     pthread_mutex_t blessed_mu; /* guards blessed[]/blessed_count */
 } ProxyContext;
 
-/* Bind + listen on a per-call UDS at <workspace>/.proxy.<pid>.sock without
- * starting the accept thread. Lets the broker create the socket single-threaded,
- * fork the sandbox, then serve. The egress allowlist (`hosts`/`host_count`) is
- * borrowed — it must outlive the proxy; the broker holds no DB handle.
- * Returns 0 on success. */
-int proxy_bind(ProxyContext *ctx, const char *workspace,
+/* Bind + listen on a per-call UDS at <dir>/.proxy.<pid>.sock (dir = the agent
+ * folder) without starting the accept thread. Lets the broker create the socket
+ * single-threaded, fork the sandbox, then serve. The egress allowlist
+ * (`hosts`/`host_count`) is borrowed — it must outlive the proxy; the broker
+ * holds no DB handle. Returns 0 on success. */
+int proxy_bind(ProxyContext *ctx, const char *dir,
                char **hosts, size_t host_count);
 
 /* Start the accept-loop thread for a bound context. Returns 0 on success. */
 int proxy_serve(ProxyContext *ctx);
 
-/* Convenience: proxy_bind + proxy_serve. Creates UDS at <workspace>/.proxy.<pid>.sock.
+/* Convenience: proxy_bind + proxy_serve. Creates UDS at <dir>/.proxy.<pid>.sock.
  * Returns 0 on success, -1 on failure.
  * Caller must call proxy_stop() before process exit. */
-int proxy_start(ProxyContext *ctx, const char *workspace,
+int proxy_start(ProxyContext *ctx, const char *dir,
                 char **hosts, size_t host_count);
 
 /* Stop proxy thread and clean up socket file. */

@@ -22,6 +22,11 @@
 #include "preload_blob.h"
 #include "net_shim_blob.h"
 
+/* Fixed in-sandbox path the broker's per-call proxy UDS is bind-mounted to. The
+ * socket itself lives in the agent folder on the host (outside the workspace);
+ * inside the netns the preload lib and net_shim reach it here. */
+#define SANDBOX_PROXY_SOCK_PATH "/tmp/.cclaw_proxy.sock"
+
 /* Bind-mask the secret key + DB ciphertext from the child's view.
  *
  * The key lives at <dir of db_path>/.cclaw_key, next to cclaw.db. trusted /
@@ -243,6 +248,21 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
     snprintf(tmp_path, sizeof(tmp_path), "%s/tmp", newroot);
     mkdir(tmp_path, 01777);
 
+    /* Bind the broker's per-call proxy UDS (created in the agent folder, outside
+     * the agent-visible workspace) onto a fixed path inside the sandbox. Keeps
+     * the control-plane socket out of the workspace while still letting the
+     * in-netns preload/shim reach the broker over a pathname UDS. Best-effort:
+     * a bind failure leaves no socket inside → no network (fail-closed). */
+    if (full_cfg && full_cfg->proxy_sock && full_cfg->proxy_sock[0]) {
+        char sdst[PATH_MAX];
+        int sn = snprintf(sdst, sizeof(sdst), "%s%s", newroot, SANDBOX_PROXY_SOCK_PATH);
+        if (sn > 0 && (size_t)sn < sizeof(sdst)) {
+            int tfd = open(sdst, O_CREAT | O_WRONLY, 0600);
+            if (tfd >= 0) close(tfd);
+            mount(full_cfg->proxy_sock, sdst, NULL, MS_BIND, NULL);
+        }
+    }
+
     /* Bind-mount workspace rw */
     if (ws_resolved)
         bind_dir_into(newroot, ws_resolved, 0);
@@ -381,7 +401,7 @@ static int sandbox_bring_up_lo(void) {
  * Best-effort: any failure simply leaves the proxy env unset, so static
  * binaries stay networkless (the safe pre-feature default) while dynamic
  * binaries keep working via the preload. Runs as PID 1, before the exec. */
-static void sandbox_setup_static_egress(const char *psock) {
+static void sandbox_setup_static_egress(const char *uds_path) {
     if (sandbox_bring_up_lo() != 0) return;
 
     /* Bind 127.0.0.1:0 — the shim's HTTP CONNECT listener. Not CLOEXEC: the
@@ -416,7 +436,7 @@ static void sandbox_setup_static_egress(const char *psock) {
                             dup2(devnull, STDERR_FILENO); if (devnull > 2) close(devnull); }
         char fdbuf[16];
         snprintf(fdbuf, sizeof(fdbuf), "%d", lfd);
-        execl("/tmp/net_shim", "net_shim", fdbuf, psock, (char *)NULL);
+        execl("/tmp/net_shim", "net_shim", fdbuf, uds_path, (char *)NULL);
         _exit(127);
     }
 
@@ -462,8 +482,9 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
 
     sandbox_scrub_env(cfg->env_mode);
 
-    /* V83: set proxy socket path for LD_PRELOAD lib (after env cleanup) */
-    if (psock) setenv("CCLAW_PROXY_SOCK", psock, 1);
+    /* V83: the proxy UDS is reachable at a fixed in-sandbox path (bound from the
+     * broker's agent-folder socket in sandbox_apply_namespace). */
+    if (psock) setenv("CCLAW_PROXY_SOCK", SANDBOX_PROXY_SOCK_PATH, 1);
 
     sandbox_apply_rlimits(cfg);
 
@@ -484,7 +505,7 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
          * served by net_shim, forwarding to the same broker UDS. Best-effort:
          * on failure static binaries stay networkless; dynamic ones are
          * unaffected (they already have the preload above). */
-        sandbox_setup_static_egress(psock);
+        sandbox_setup_static_egress(SANDBOX_PROXY_SOCK_PATH);
     }
 
     return 0;

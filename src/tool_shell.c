@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +39,22 @@ static int command_uses_secret_env(const char *command, const char *name) {
     return 0;
 }
 
+/* Parent directory of `path` into `out`. The per-call proxy socket lives in the
+ * agent folder (the parent of the workspace), never the agent-visible workspace
+ * itself — the workspace is bind-mounted rw into the sandbox and listed by the
+ * file tools, so it must not carry control-plane sockets. Falls back to `path`
+ * unchanged if it has no usable parent. */
+static const char *parent_dir(const char *path, char *out, size_t cap) {
+    size_t len = strlen(path);
+    while (len > 1 && path[len - 1] == '/') len--;   /* trim trailing slashes */
+    while (len > 0 && path[len - 1] != '/') len--;   /* drop last component */
+    while (len > 1 && path[len - 1] == '/') len--;   /* trim the separator */
+    if (len == 0 || len >= cap) return path;
+    memcpy(out, path, len);
+    out[len] = '\0';
+    return out;
+}
+
 char *tool_shell_handler(const char *arguments, void *user_data) {
     ShellConfig *sc = (ShellConfig *)user_data;
     int default_timeout = (sc && sc->timeout > 0) ? sc->timeout
@@ -73,8 +90,10 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     ProxyContext proxy;
     const char *psock = NULL;
     int proxy_active = 0;
+    char sockdir[PATH_MAX];
     if (sc && sc->sandbox && !sc->net_mode && sc->workspace && sc->workspace[0] &&
-        proxy_bind(&proxy, sc->workspace, sc->allowed_hosts, sc->allowed_host_count) == 0) {
+        proxy_bind(&proxy, parent_dir(sc->workspace, sockdir, sizeof(sockdir)),
+                   sc->allowed_hosts, sc->allowed_host_count) == 0) {
         psock = proxy_sock_path(&proxy);
         proxy_active = 1;
     }

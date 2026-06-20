@@ -86,8 +86,6 @@ This is what CClaw *is for*, not an add-on. Agents extend themselves at runtime 
 - `js_eval` runs JS in the sandboxed engine for one-off evaluation.
 - The JS bridge (tool registration, channel dispatch) is a first-class API surface. When changing how tools register or channels dispatch, preserve the agent's ability to self-augment — don't optimize it away as "just plugins."
 
-> **Slated for removal:** the legacy code-in-DB path — the `js_tools.code` column and its startup reload (`SELECT ... code FROM js_tools`, `src/tool_js.c`). It is the lone artifact that stores JS in the DB; fold `js_define_tool` onto the path-based `extensions` model above and delete it.
-
 ## Security Model
 
 See [specs/security.md](specs/security.md) for full details.

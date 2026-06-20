@@ -296,17 +296,6 @@ Indexes: `idx_tool_calls_entry(entry_id)`, `idx_tool_calls_session(session_id, s
 
 Index: `idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0`
 
-## js_tools
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `session_id` | INTEGER NOT NULL | |
-| `name` | TEXT NOT NULL | UNIQUE(session_id, name) |
-| `description` | TEXT | |
-| `parameters_json` | TEXT | |
-| `code` | TEXT NOT NULL | |
-
 ## memory_blocks
 
 | Column | Type | Notes |

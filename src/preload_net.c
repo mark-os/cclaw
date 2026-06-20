@@ -102,6 +102,21 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (!addr || (addr->sa_family != AF_INET && addr->sa_family != AF_INET6))
         return real_connect(sockfd, addr, addrlen);
 
+    /* Pass loopback connects straight through. A dynamic client that honors
+     * HTTP_PROXY dials the in-netns shim at 127.0.0.1:<port>; intercepting that
+     * loopback hop would forward 127.0.0.1 to the broker, which SSRF-rejects it.
+     * Local IPC must never be molested by the preload — only the shim itself
+     * dials the broker. */
+    if (addr->sa_family == AF_INET) {
+        const struct sockaddr_in *sa4 = (const struct sockaddr_in *)addr;
+        if ((ntohl(sa4->sin_addr.s_addr) >> 24) == 127)
+            return real_connect(sockfd, addr, addrlen);
+    } else {
+        const struct sockaddr_in6 *sa6 = (const struct sockaddr_in6 *)addr;
+        if (IN6_IS_ADDR_LOOPBACK(&sa6->sin6_addr))
+            return real_connect(sockfd, addr, addrlen);
+    }
+
     int sock_type = 0;
     socklen_t optlen = sizeof(sock_type);
     if (getsockopt(sockfd, SOL_SOCKET, SO_TYPE, &sock_type, &optlen) != 0 ||

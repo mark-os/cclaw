@@ -1,9 +1,8 @@
-/* test_integration_shell_proxy.c — T215: shell curl through proxy.
- * Starts a mock TCP server, starts the proxy thread, runs a shell child
- * with LD_PRELOAD=libcclaw_net.so that connects through the proxy to the
- * mock server, verifies response relayed correctly.
- *
- * Key: the .so must be inside the workspace (accessible after pivot_root). */
+/* test_integration_shell_proxy.c — T215: dynamic client (curl) reaching a mock
+ * server via HTTP_PROXY → shim → broker, with LD_PRELOAD=libcclaw_net.so still
+ * loaded. The target is loopback, so the preload now passes the client→shim hop
+ * straight through (P0) rather than hijacking it; curl proxies through the shim,
+ * which forwards host:port to the broker. Verifies the response is relayed. */
 #define _GNU_SOURCE
 #include "proxy.h"
 #include "tool_shell.h"
@@ -129,11 +128,17 @@ static void test_shell_curl_through_proxy(void) {
     pthread_t thr;
     pthread_create(&thr, NULL, mock_http_thread, &ma);
 
-    /* The broker stands up its own per-call proxy from workspace + grants;
-     * the sandbox supplies LD_PRELOAD + CCLAW_PROXY_SOCK to the command. */
+    /* Dynamic client (LD_PRELOAD stays loaded) reaching an allowlisted host via
+     * HTTP_PROXY → shim → broker. The target is loopback, so the preload now
+     * passes the client→shim hop straight through (P0) instead of hijacking it;
+     * curl reaches the shim, which forwards host:port to the broker. NO_PROXY is
+     * cleared so curl proxies the loopback target; --proxytunnel forces CONNECT
+     * (the shim is CONNECT-only). */
     char cmd_json[2048];
     snprintf(cmd_json, sizeof(cmd_json),
-        "{\"command\":\"curl -s http://127.0.0.1:%u/test\"}", port);
+        "{\"command\":\"export NO_PROXY= no_proxy=; "
+        "curl -s --max-time 5 -x \\\"$HTTP_PROXY\\\" --proxytunnel "
+        "http://127.0.0.1:%u/test\"}", port);
 
     ShellConfig sc = {
         .timeout = 10,
@@ -184,7 +189,9 @@ static void test_proxy_relay_integrity(void) {
 
     char cmd_json[2048];
     snprintf(cmd_json, sizeof(cmd_json),
-        "{\"command\":\"curl -s http://127.0.0.1:%u/\"}", port);
+        "{\"command\":\"export NO_PROXY= no_proxy=; "
+        "curl -s --max-time 5 -x \\\"$HTTP_PROXY\\\" --proxytunnel "
+        "http://127.0.0.1:%u/\"}", port);
 
     ShellConfig sc = {
         .timeout = 10,

@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -419,14 +420,16 @@ static void sandbox_setup_static_egress(const char *uds_path) {
     if (getsockname(lfd, (struct sockaddr *)&addr, &alen) != 0) { close(lfd); return; }
     int port = ntohs(addr.sin_port);
 
-    /* Materialize the shim in the namespace's private /tmp (tmpfs, not noexec). */
-    int sfd = open("/tmp/net_shim", O_WRONLY | O_CREAT | O_TRUNC, 0755);
-    ssize_t wr = sfd >= 0 ? write(sfd, net_shim_blob, (size_t)net_shim_blob_len) : -1;
-    if (sfd >= 0) close(sfd);
-    if (wr != (ssize_t)net_shim_blob_len) { close(lfd); return; }
+    /* Materialize the shim in an anonymous memfd — no on-disk artifact and no
+     * dependency on /tmp being exec-able. Not MFD_CLOEXEC: the fork must keep it
+     * across exec (it execs /proc/self/fd/<mfd>). */
+    int mfd = memfd_create("net_shim", 0);
+    if (mfd < 0) { close(lfd); return; }
+    ssize_t wr = write(mfd, net_shim_blob, (size_t)net_shim_blob_len);
+    if (wr != (ssize_t)net_shim_blob_len) { close(mfd); close(lfd); return; }
 
     pid_t shim = fork();
-    if (shim < 0) { close(lfd); return; }
+    if (shim < 0) { close(mfd); close(lfd); return; }
     if (shim == 0) {
         /* Shim: drop stdout/stderr (they point at the tool result pipe — the
          * shim must not pollute tool output nor hold the pipe open), keep lfd,
@@ -434,11 +437,14 @@ static void sandbox_setup_static_egress(const char *uds_path) {
         int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) { dup2(devnull, STDIN_FILENO); dup2(devnull, STDOUT_FILENO);
                             dup2(devnull, STDERR_FILENO); if (devnull > 2) close(devnull); }
-        char fdbuf[16];
+        char fdbuf[16], exepath[32];
         snprintf(fdbuf, sizeof(fdbuf), "%d", lfd);
-        execl("/tmp/net_shim", "net_shim", fdbuf, uds_path, (char *)NULL);
+        snprintf(exepath, sizeof(exepath), "/proc/self/fd/%d", mfd);
+        execl(exepath, "net_shim", fdbuf, uds_path, (char *)NULL);
         _exit(127);
     }
+
+    close(mfd);
 
     /* PID 1: the shim owns the listener now; advertise it to the command. The
      * command never sees lfd (closed here, and it is not CLOEXEC-safe to leak). */

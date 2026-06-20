@@ -32,7 +32,7 @@ static void test_create_and_pending(void) {
     assert(sid > 0);
 
     int64_t id = approval_create(db, sid, "call_1", "request_config",
-                                 "grant_host", "{\"host\":\"api.example.com\"}");
+                                 "grant_host", "{\"host\":\"api.example.com\"}", "apply");
     assert(id > 0);
 
     Approval *a = approval_get_pending(db, sid);
@@ -57,7 +57,7 @@ static void test_approve(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_2", "request_config",
-                                 "grant_tool", "{\"tool\":\"shell_exec\"}");
+                                 "grant_tool", "{\"tool\":\"shell_exec\"}", "apply");
     assert(id > 0);
 
     Approval *a = approval_resolve(db, id, 1, "cli:user");
@@ -81,7 +81,7 @@ static void test_deny(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_3", "request_config",
-                                 "grant_host", "{\"host\":\"evil.com\"}");
+                                 "grant_host", "{\"host\":\"evil.com\"}", "apply");
     assert(id > 0);
 
     Approval *a = approval_resolve(db, id, 0, "auto:no-approver");
@@ -106,9 +106,9 @@ static void test_args_hash_binding(void) {
 
     /* Same args → same hash */
     int64_t id1 = approval_create(db, sid, "c1", "request_config",
-                                  "grant_host", "{\"host\":\"a.com\"}");
+                                  "grant_host", "{\"host\":\"a.com\"}", "apply");
     int64_t id2 = approval_create(db, sid, "c2", "request_config",
-                                  "grant_host", "{\"host\":\"a.com\"}");
+                                  "grant_host", "{\"host\":\"a.com\"}", "apply");
     assert(id1 > 0 && id2 > 0);
 
     /* Fetch both and compare hashes */
@@ -131,7 +131,7 @@ static void test_args_hash_binding(void) {
 
     /* Different args → different hash */
     int64_t id3 = approval_create(db, sid, "c3", "request_config",
-                                  "grant_host", "{\"host\":\"b.com\"}");
+                                  "grant_host", "{\"host\":\"b.com\"}", "apply");
     sqlite3_prepare_v2(db, "SELECT args_hash FROM approvals WHERE id=?", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, id3);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
@@ -152,9 +152,9 @@ static void test_approve_and_deny_states(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id1 = approval_create(db, sid, "c1", "request_config",
-                                  "grant_host", "{\"host\":\"tmp.com\"}");
+                                  "grant_host", "{\"host\":\"tmp.com\"}", "apply");
     int64_t id2 = approval_create(db, sid, "c2", "request_config",
-                                  "grant_host", "{\"host\":\"perm.com\"}");
+                                  "grant_host", "{\"host\":\"perm.com\"}", "apply");
     assert(id1 > 0 && id2 > 0);
 
     /* Approve first, deny second */
@@ -224,7 +224,7 @@ static void test_fail_closed_denied(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_x", "request_config",
-                                 "grant_host", "{\"host\":\"bad.com\"}");
+                                 "grant_host", "{\"host\":\"bad.com\"}", "apply");
     assert(id > 0);
 
     Approval *a = approval_resolve(db, id, 0, "auto:no-approver");
@@ -276,7 +276,7 @@ static void test_approval_list_expired(void) {
 
     /* Create a pending approval (expires_at is in the future by default) */
     int64_t id = approval_create(db, sid, "call_e", "request_config",
-                                 "grant_host", "{\"host\":\"exp.com\"}");
+                                 "grant_host", "{\"host\":\"exp.com\"}", "apply");
     assert(id > 0);
 
     /* Not expired yet */
@@ -298,7 +298,7 @@ static void test_approval_list_expired(void) {
 
     /* A fresh (future) approval should NOT be returned */
     int64_t id2 = approval_create(db, sid, "call_f", "request_config",
-                                  "grant_host", "{\"host\":\"fresh.com\"}");
+                                  "grant_host", "{\"host\":\"fresh.com\"}", "apply");
     assert(id2 > 0);
     ids = approval_list_expired(db, &count);
     assert(count == 1);
@@ -346,26 +346,60 @@ static void test_get_for_tool_call(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     /* No approval yet for this call. */
-    assert(approval_get_for_tool_call(db, "call_z") == NULL);
+    assert(approval_get_for_tool_call(db, sid, "call_z") == NULL);
 
     int64_t id = approval_create(db, sid, "call_z", "email_send", "email_send",
-                                 "{\"to\":\"a@b.c\"}");
+                                 "{\"to\":\"a@b.c\"}", "rerun");
     assert(id > 0);
 
-    Approval *a = approval_get_for_tool_call(db, "call_z");
+    Approval *a = approval_get_for_tool_call(db, sid, "call_z");
     assert(a && a->id == id && strcmp(a->state, "pending") == 0);
     approval_free(a);
+
+    /* Scoped to the session: another session reusing the same tool_call_id
+     * must NOT see this approval. */
+    int64_t other = session_create(db, "test2", "bot", -1, 0);
+    assert(approval_get_for_tool_call(db, other, "call_z") == NULL);
 
     /* After resolve, the latest row reflects the new state. */
     Approval *r = approval_resolve(db, id, 1, "cli");
     assert(r); approval_free(r);
-    a = approval_get_for_tool_call(db, "call_z");
+    a = approval_get_for_tool_call(db, sid, "call_z");
     assert(a && strcmp(a->state, "approved") == 0);
     approval_free(a);
 
     db_close(db);
     clean_db();
     printf("  PASS: test_get_for_tool_call\n");
+}
+
+static void test_consume(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    int64_t sid = session_create(db, "test", "bot", -1, 0);
+
+    int64_t id = approval_create(db, sid, "call_c", "email_send", "email_send",
+                                 "{\"to\":\"a@b.c\"}", "rerun");
+    assert(id > 0);
+    /* Cannot consume while still pending. */
+    assert(approval_consume(db, id) == -1);
+
+    Approval *r = approval_resolve(db, id, 1, "cli");
+    assert(r); approval_free(r);
+
+    /* First consume transitions approved → consumed. */
+    assert(approval_consume(db, id) == 0);
+    Approval *a = approval_get_for_tool_call(db, sid, "call_c");
+    assert(a && strcmp(a->state, "consumed") == 0);
+    approval_free(a);
+
+    /* Second consume is a no-op: the once-grant is spent, so a replayed
+     * tool_call_id no longer green-lights at the gate. */
+    assert(approval_consume(db, id) == -1);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_consume\n");
 }
 
 int main(void) {
@@ -382,6 +416,7 @@ int main(void) {
     test_approval_list_expired();
     test_tool_mode();
     test_get_for_tool_call();
+    test_consume();
     printf("all approval tests passed\n");
     return 0;
 }

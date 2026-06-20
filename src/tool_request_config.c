@@ -1,7 +1,7 @@
 /* request_config tool — handled inline by parent process.
- * Actions: grant_tool, grant_host, grant_path, rename_agent (gated: create an
- * approval and return NULL to park), set_mode (applies immediately, tightens
- * a granted tool's approval mode — no park). */
+ * Actions: grant_tool, grant_host, grant_path, rename_agent (all gated:
+ * create an approval and return NULL to park). Mode is set by the human
+ * at approval time, not by the agent. */
 #define _POSIX_C_SOURCE 200809L
 #include "tool_request_config.h"
 #include "agent_config.h"
@@ -18,14 +18,13 @@
 
 static const char *PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"action\":{\"type\":\"string\",\"enum\":[\"grant_tool\",\"grant_host\",\"grant_path\",\"rename_agent\",\"set_mode\"],"
+    "\"action\":{\"type\":\"string\",\"enum\":[\"grant_tool\",\"grant_host\",\"grant_path\",\"rename_agent\"],"
     "\"description\":\"Type of config request\"},"
-    "\"tool\":{\"type\":\"string\",\"description\":\"Tool name (for grant_tool / set_mode)\"},"
+    "\"tool\":{\"type\":\"string\",\"description\":\"Tool name (for grant_tool)\"},"
     "\"host\":{\"type\":\"string\",\"description\":\"Hostname to allow (for grant_host)\"},"
     "\"path\":{\"type\":\"string\",\"description\":\"Absolute path to grant (for grant_path)\"},"
     "\"name\":{\"type\":\"string\",\"description\":\"New agent name (for rename_agent)\"},"
-    "\"preamble\":{\"type\":\"string\",\"description\":\"New system prompt preamble (for rename_agent, optional)\"},"
-    "\"mode\":{\"type\":\"string\",\"enum\":[\"always\",\"tool_decides\"],\"description\":\"Approval mode for set_mode: 'always' parks every call, 'tool_decides' uses the tool's predicate\"}"
+    "\"preamble\":{\"type\":\"string\",\"description\":\"New system prompt preamble (for rename_agent, optional)\"}"
     "},\"required\":[\"action\"]}";
 
 /* Build canonical args JSON for the approval row using SQLite json_object
@@ -68,7 +67,7 @@ static char *handler(const char *arguments, void *user_data) {
         if (!tool || !tool[0]) { tool_parse_free(&ta); return strdup("error: 'tool' required for grant_tool"); }
         char *args = build_args_json(ctx->db, "grant_tool", "tool", tool, NULL);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
-            ctx->current_tool_call_id, "request_config", "grant_tool", args);
+            ctx->current_tool_call_id, "request_config", "grant_tool", args, "apply");
         free(args);
         tool_parse_free(&ta);
         if (aid < 0) return strdup("error: failed to create approval");
@@ -80,7 +79,7 @@ static char *handler(const char *arguments, void *user_data) {
         if (!host || !host[0]) { tool_parse_free(&ta); return strdup("error: 'host' required for grant_host"); }
         char *args = build_args_json(ctx->db, "grant_host", "host", host, NULL);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
-            ctx->current_tool_call_id, "request_config", "grant_host", args);
+            ctx->current_tool_call_id, "request_config", "grant_host", args, "apply");
         free(args);
         tool_parse_free(&ta);
         if (aid < 0) return strdup("error: failed to create approval");
@@ -93,7 +92,7 @@ static char *handler(const char *arguments, void *user_data) {
         if (path[0] != '/') { tool_parse_free(&ta); return strdup("error: path must be absolute (start with '/')"); }
         char *args = build_args_json(ctx->db, "grant_path", "path", path, NULL);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
-            ctx->current_tool_call_id, "request_config", "grant_path", args);
+            ctx->current_tool_call_id, "request_config", "grant_path", args, "apply");
         free(args);
         tool_parse_free(&ta);
         if (aid < 0) return strdup("error: failed to create approval");
@@ -107,45 +106,25 @@ static char *handler(const char *arguments, void *user_data) {
         if (!is_valid_name(new_name)) { tool_parse_free(&ta); return strdup("error: invalid name (use A-Za-z0-9_- only)"); }
         char *args = build_args_json(ctx->db, "rename_agent", "name", new_name, preamble);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
-            ctx->current_tool_call_id, "request_config", "rename_agent", args);
+            ctx->current_tool_call_id, "request_config", "rename_agent", args, "apply");
         free(args);
         tool_parse_free(&ta);
         if (aid < 0) return strdup("error: failed to create approval");
         session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
         return NULL; /* park */
 
-    } else if (strcmp(act, "set_mode") == 0) {
-        /* Tighten oversight on an already-granted tool. Increasing scrutiny
-         * (silent→always/tool_decides) needs no approval; loosening to silent
-         * happens through the "approve always" decision, not here. */
-        const char *tool = targ_str(&ta, "tool");
-        const char *mode = targ_str(&ta, "mode");
-        if (!tool || !tool[0]) { tool_parse_free(&ta); return strdup("error: 'tool' required for set_mode"); }
-        if (!mode || !mode[0]) { tool_parse_free(&ta); return strdup("error: 'mode' required for set_mode (always or tool_decides)"); }
-        if (strcmp(mode, "always") != 0 && strcmp(mode, "tool_decides") != 0) {
-            tool_parse_free(&ta);
-            return strdup("error: set_mode only tightens (always or tool_decides); relax via approving with 'always'");
-        }
-        int rc = agent_config_set_tool_mode(ctx->db, ctx->agent_name, tool, mode);
-        tool_parse_free(&ta);
-        if (rc != 0) return strdup("error: set_mode failed (is the tool granted?)");
-        char ok[128];
-        snprintf(ok, sizeof(ok), "ok: %s now parks per mode '%s'", tool, mode);
-        return strdup(ok);
-
     } else {
         tool_parse_free(&ta);
-        return strdup("error: action must be grant_tool, grant_host, grant_path, rename_agent, or set_mode");
+        return strdup("error: action must be grant_tool, grant_host, grant_path, or rename_agent");
     }
 }
 
 int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
     return tools_register(reg, "request_config",
-        "Request a configuration change. Grants require human approval; set_mode "
-        "applies immediately. Actions: grant_tool (enable shell_exec, web_fetch, "
-        "db_query), grant_host (add hostname to allowed_hosts), grant_path (grant "
-        "read/write access to an absolute path), rename_agent (rename this agent, "
-        "with optional preamble), set_mode (require approval before each call of a "
-        "granted tool: mode 'always' or 'tool_decides').",
+        "Request a configuration change (requires human approval). "
+        "Actions: grant_tool (enable shell_exec, web_fetch, db_query), "
+        "grant_host (add hostname to allowed_hosts), grant_path (grant "
+        "read/write access to an absolute path), rename_agent (rename this "
+        "agent, with optional preamble).",
         PARAMS_JSON, handler, ctx);
 }

@@ -239,8 +239,9 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
     /* §4+§8 dispatch gate (fixed order: capability ceiling → gating hook →
      * approval gate). The gating hook may only *raise* restriction
      * (silent→ask, ask→deny) — a hook can veto, only a grant authorizes.
-     * Re-entrant (§7a): the approval is matched by tool_call_id, so a denial
-     * answers this call and an approval re-runs the same frozen tool_call. */
+     * Re-entrant (§7a): the approval is matched by (session_id, tool_call_id),
+     * so a denial answers this call and an approval re-runs the same frozen
+     * tool_call once (the approval is consumed on use). */
     {
         ToolApprovalMode mode = agent_tool_mode(g_db, agent_name, tc->name);
         HookGate gate = (mode == TOOL_MODE_SILENT) ? HOOK_GATE_ALLOW : HOOK_GATE_ASK;
@@ -264,7 +265,7 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
             free(reason);
         }
         if (gate == HOOK_GATE_ASK) {
-            Approval *ap = approval_get_for_tool_call(g_db, tc->call_id);
+            Approval *ap = approval_get_for_tool_call(g_db, session_id, tc->call_id);
             int approved = ap && ap->state && strcmp(ap->state, "approved") == 0;
             int denied   = ap && ap->state && strcmp(ap->state, "denied") == 0;
             int pending  = ap && ap->state && strcmp(ap->state, "pending") == 0;
@@ -283,13 +284,19 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
                 /* none → create + park; pending → re-park idempotently. */
                 if (!pending)
                     approval_create(g_db, session_id, tc->call_id, tc->name,
-                                    tc->name, tc->arguments);
+                                    tc->name, tc->arguments, "rerun");
                 session_set_state(g_db, session_id, "awaiting_approval");
                 approval_free(ap);
                 handle_approval_park(session_id);
                 return 2; /* parked */
             }
-            approval_free(ap);  /* approved → fall through and execute */
+            /* approved → consume (single-use) and fall through to execute the
+             * frozen call. An ALWAYS decision flips the tool mode to silent so
+             * it never reaches the gate again; only a "once" approval lands
+             * here, and consuming it stops a replayed tool_call_id from
+             * re-using the same grant. */
+            approval_consume(g_db, ap->id);
+            approval_free(ap);
         }
     }
 
@@ -514,16 +521,6 @@ static void approval_sweep_expired(void) {
 
 /* ── resolve_approval: approve/deny a parked approval ────────── */
 
-/* request_config config-change actions (the action *is* a config mutation,
- * applied here). Anything else is an action-tool approval — the action is the
- * tool name, and the tool itself runs on re-dispatch. */
-static int is_config_action(const char *action) {
-    return action && (strcmp(action, "grant_tool") == 0 ||
-                      strcmp(action, "grant_host") == 0 ||
-                      strcmp(action, "grant_path") == 0 ||
-                      strcmp(action, "rename_agent") == 0);
-}
-
 void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via) {
     int approved = (decision != APPROVAL_DENY);
     Approval *a = approval_resolve(g_db, approval_id, approved, decided_via);
@@ -532,11 +529,10 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     int64_t session_id = a->session_id;
     const char *agent = session_get_agent_name(g_db, session_id);
 
-    if (!is_config_action(a->action)) {
-        /* ── Action-tool approval (§4 Axis B). The frozen tool_call stays
-         * pending; re-dispatch executes it through the gate. ── */
+    /* Dispatch on the approval's resolve strategy. */
+    if (!a->resolve || strcmp(a->resolve, "rerun") == 0) {
+        /* ── "rerun": the frozen tool_call proceeds on approval. ── */
         if (decision == APPROVAL_DENY) {
-            /* Answer the call with an error now; nothing re-runs. */
             if (a->tool_call_id) {
                 int64_t turn_id = db_next_turn_id(g_db, session_id);
                 char buf[160];
@@ -559,17 +555,19 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         return;
     }
 
-    /* §6 fail-closed: "once" is incoherent for config actions (ambient
-     * capabilities have no single-use semantics). Reject as error. */
+    /* ── "apply": the tool's side effect is applied here, not re-run. ── */
+
+    /* "once" is incoherent for apply-style approvals (ambient capabilities
+     * have no single-use semantics). Reject as error. */
     if (decision == APPROVAL_ONCE) {
         char err[256];
         snprintf(err, sizeof(err),
-                 "error: once-approval invalid for config action %s", a->action);
+                 "error: once-approval invalid for %s", a->action);
         if (a->tool_call_id) {
             int64_t turn_id = db_next_turn_id(g_db, session_id);
             ToolResult tr = { .tool_call_id = a->tool_call_id, .content = err };
             Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
-                            .tool_name = "request_config", .is_error = 1 };
+                            .tool_name = a->tool_name, .is_error = 1 };
             entry_append_with_turn(g_db, session_id, &msg, turn_id);
             db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
         }
@@ -647,7 +645,7 @@ rename_done:
             agent_setup_refresh_caps(g_tool_setup, g_db, refresh_agent);
     }
 
-    /* Build tool result message (ONCE already returned above — only ALWAYS/DENY reach here) */
+    /* Build tool result message */
     char result_buf[256];
     if (rename_failed)
         snprintf(result_buf, sizeof(result_buf), "error: rename failed, rolled back");
@@ -657,18 +655,16 @@ rename_done:
         snprintf(result_buf, sizeof(result_buf), "denied (%s): %s",
                  decided_via, a->action);
 
-    /* Write the parked tool_call result */
     if (a->tool_call_id) {
         int64_t turn_id = db_next_turn_id(g_db, session_id);
         ToolResult tr = { .tool_call_id = a->tool_call_id, .content = result_buf };
         Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
-                        .tool_name = "request_config",
+                        .tool_name = a->tool_name,
                         .is_error = (decision == APPROVAL_DENY || rename_failed) };
         entry_append_with_turn(g_db, session_id, &msg, turn_id);
         db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
     }
 
-    /* Transition awaiting_approval → tool_running and re-advance */
     session_set_state(g_db, session_id, "tool_running");
     free((char *)agent);
     approval_free(a);
@@ -693,7 +689,7 @@ static void handle_approval_park(int64_t session_id) {
         /* Interactive: prompt user */
         fprintf(stdout, "\n\033[1mApproval required:\033[0m %s", a->action);
         if (a->args_json) fprintf(stdout, " %s", a->args_json);
-        if (is_config_action(a->action))
+        if (a->resolve && strcmp(a->resolve, "apply") == 0)
             fprintf(stdout, "\nGrant? (y/n): ");
         else
             fprintf(stdout, "\nApprove? (y=always / o=once / n=no): ");

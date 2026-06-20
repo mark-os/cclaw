@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -13,6 +14,7 @@
 #include "tool_parse.h"
 #include "sandbox.h"
 #include "proxy.h"
+#include "config.h"
 
 #define SHELL_MAX_OUTPUT (256 * 1024)
 
@@ -37,22 +39,6 @@ static int command_uses_secret_env(const char *command, const char *name) {
             return 1;
     }
     return 0;
-}
-
-/* Parent directory of `path` into `out`. The per-call proxy socket lives in the
- * agent folder (the parent of the workspace), never the agent-visible workspace
- * itself — the workspace is bind-mounted rw into the sandbox and listed by the
- * file tools, so it must not carry control-plane sockets. Falls back to `path`
- * unchanged if it has no usable parent. */
-static const char *parent_dir(const char *path, char *out, size_t cap) {
-    size_t len = strlen(path);
-    while (len > 1 && path[len - 1] == '/') len--;   /* trim trailing slashes */
-    while (len > 0 && path[len - 1] != '/') len--;   /* drop last component */
-    while (len > 1 && path[len - 1] == '/') len--;   /* trim the separator */
-    if (len == 0 || len >= cap) return path;
-    memcpy(out, path, len);
-    out[len] = '\0';
-    return out;
 }
 
 char *tool_shell_handler(const char *arguments, void *user_data) {
@@ -91,11 +77,16 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     const char *psock = NULL;
     int proxy_active = 0;
     char sockdir[PATH_MAX];
-    if (sc && sc->sandbox && !sc->net_mode && sc->workspace && sc->workspace[0] &&
-        proxy_bind(&proxy, parent_dir(sc->workspace, sockdir, sizeof(sockdir)),
-                   sc->allowed_hosts, sc->allowed_host_count) == 0) {
-        psock = proxy_sock_path(&proxy);
-        proxy_active = 1;
+    if (sc && sc->sandbox && !sc->net_mode &&
+        ((sc->workspace && sc->workspace[0]) || (sc->db_path && sc->db_path[0]))) {
+        /* The control-plane socket lives in the agent folder, never the
+         * agent-visible workspace (bind-mounted rw + listed by the file tools). */
+        agent_dir_resolve(sc->workspace, sc->db_path, sockdir, sizeof(sockdir));
+        mkdir(sockdir, 0700);  /* best-effort: parent-of-workspace already exists */
+        if (proxy_bind(&proxy, sockdir, sc->allowed_hosts, sc->allowed_host_count) == 0) {
+            psock = proxy_sock_path(&proxy);
+            proxy_active = 1;
+        }
     }
 
     pid_t pid = fork();

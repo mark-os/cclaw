@@ -170,8 +170,41 @@ static void test_system_prompt(void) {
 }
 
 
+static void test_agent_dir_resolve(void) {
+    char out[256];
+
+    /* Normal case: agent folder is the parent of the workspace. */
+    assert(strcmp(agent_dir_resolve("/home/x/.cclaw/agents/bot/workspace", NULL,
+                                    out, sizeof(out)),
+                  "/home/x/.cclaw/agents/bot") == 0);
+
+    /* Trailing slash on the workspace is tolerated. */
+    assert(strcmp(agent_dir_resolve("/a/b/workspace/", NULL, out, sizeof(out)),
+                  "/a/b") == 0);
+
+    /* No workspace → anchor to the DB directory's agents/ tree. */
+    assert(strcmp(agent_dir_resolve(NULL, "/home/x/.cclaw/cclaw.db",
+                                    out, sizeof(out)),
+                  "/home/x/.cclaw/agents") == 0);
+    assert(strcmp(agent_dir_resolve("", "/home/x/.cclaw/cclaw.db",
+                                    out, sizeof(out)),
+                  "/home/x/.cclaw/agents") == 0);
+
+    /* Workspace wins over db_path when both are present. */
+    assert(strcmp(agent_dir_resolve("/ws/agents/a/workspace", "/db/cclaw.db",
+                                    out, sizeof(out)),
+                  "/ws/agents/a") == 0);
+
+    /* Nothing usable → relative last-resort. */
+    assert(strcmp(agent_dir_resolve(NULL, NULL, out, sizeof(out)),
+                  ".cclaw/agents") == 0);
+
+    printf("  PASS: test_agent_dir_resolve\n");
+}
+
 int main(void) {
     printf("test_config:\n");
+    test_agent_dir_resolve();
     test_defaults();
     test_kv_values();
     test_env_overrides_kv();

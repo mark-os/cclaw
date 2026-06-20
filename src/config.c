@@ -38,6 +38,34 @@ static char *default_workspace(void) {
     return str_dup(".cclaw/agents/default/workspace");
 }
 
+/* See config.h. The agent folder is one level up from agents/<name>/workspace,
+ * wherever the workspace was configured; with no workspace we anchor to the DB
+ * directory (the same root default_workspace() uses), so the socket still lands
+ * in the agent tree rather than a random cwd. */
+const char *agent_dir_resolve(const char *workspace, const char *db_path,
+                              char *out, size_t cap) {
+    if (workspace && workspace[0]) {
+        size_t len = strlen(workspace);
+        while (len > 1 && workspace[len - 1] == '/') len--;   /* trim trailing / */
+        while (len > 0 && workspace[len - 1] != '/') len--;   /* drop last comp  */
+        while (len > 1 && workspace[len - 1] == '/') len--;   /* trim separator  */
+        if (len > 0 && len < cap) {
+            memcpy(out, workspace, len);
+            out[len] = '\0';
+            return out;
+        }
+    }
+    if (db_path && db_path[0]) {
+        const char *slash = strrchr(db_path, '/');
+        if (slash) {
+            int n = snprintf(out, cap, "%.*s/agents", (int)(slash - db_path), db_path);
+            if (n > 0 && (size_t)n < cap) return out;
+        }
+    }
+    snprintf(out, cap, ".cclaw/agents");
+    return out;
+}
+
 /* Apply env var override: if env set, replace *field */
 static void env_override_str(char **field, const char *env_name) {
     const char *val = getenv(env_name);

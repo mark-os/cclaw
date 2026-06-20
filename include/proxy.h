@@ -15,6 +15,11 @@
 #define PROXY_BLESS_MAX 256
 #define PROXY_BLESS_TTL_SECS 60
 
+/* Per-call cap on simultaneous relays — bounds broker-side fd consumption when a
+ * pooling HTTP client opens many CONNECT tunnels. Leaves headroom under the
+ * broker's setrlimit fd cap. */
+#define PROXY_MAX_RELAYS 64
+
 /* A resolution-blessed address: an IP that passed the allowlist + SSRF check
  * via a prior RESOLVE, or an explicitly granted literal IP. A numeric CONNECT
  * is permitted only if its address is present here and unexpired — this binds
@@ -37,7 +42,8 @@ typedef struct {
     int thread_started;
     ProxyBlessedAddr blessed[PROXY_BLESS_MAX];  /* TTL-bound blessed-IP set */
     int blessed_count;
-    pthread_mutex_t blessed_mu; /* guards blessed[]/blessed_count */
+    int relay_count;            /* live relays (guarded by blessed_mu) */
+    pthread_mutex_t blessed_mu; /* guards blessed[]/blessed_count/relay_count */
 } ProxyContext;
 
 /* Bind + listen on a per-call UDS at <dir>/.proxy.<pid>.sock (dir = the agent

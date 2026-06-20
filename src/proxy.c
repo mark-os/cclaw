@@ -178,6 +178,21 @@ static int dial_ip(const char *ip, uint16_t port) {
     return -1;
 }
 
+/* Reserve a relay slot. Returns 1 on success, 0 if at the per-call cap. */
+static int relay_acquire(ProxyContext *ctx) {
+    int ok = 0;
+    pthread_mutex_lock(&ctx->blessed_mu);
+    if (ctx->relay_count < PROXY_MAX_RELAYS) { ctx->relay_count++; ok = 1; }
+    pthread_mutex_unlock(&ctx->blessed_mu);
+    return ok;
+}
+
+static void relay_release(ProxyContext *ctx) {
+    pthread_mutex_lock(&ctx->blessed_mu);
+    if (ctx->relay_count > 0) ctx->relay_count--;
+    pthread_mutex_unlock(&ctx->blessed_mu);
+}
+
 /* Relay data bidirectionally between two fds until one closes. */
 static void relay(int fd1, int fd2) {
     struct pollfd fds[2];
@@ -296,10 +311,18 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
         dial = resolved;
     }
 
+    /* Bound simultaneous relays per call — refuse cleanly when at the cap. */
+    if (!relay_acquire(ctx)) {
+        write(client_fd, "DENIED\n", 7);
+        close(client_fd);
+        return;
+    }
+
     int remote_fd = dial_ip(dial, port);
     if (remote_fd < 0) {
         write(client_fd, "ERROR connect\n", 14);
         close(client_fd);
+        relay_release(ctx);
         return;
     }
 
@@ -307,6 +330,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     relay(client_fd, remote_fd);
     close(remote_fd);
     close(client_fd);
+    relay_release(ctx);
 }
 
 /* Per-connection thread */

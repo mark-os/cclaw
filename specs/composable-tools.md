@@ -253,6 +253,48 @@ Policy evaluation happens in C in the main process before forking. Zero cost for
 denied calls. `ask` and `allow` both proceed to the same mode gate every tool
 already passes — policy only decides eligibility, the gate decides approval.
 
+## Minimal policy example: `notes`
+
+The smallest end-to-end demonstrator of the policy layer — an `fs.*`-only tool (no
+`cclaw.exec`, no network, no secrets) that exercises the full effect matrix.
+Authoring its `policy` inline via `registerTool` is enough: the harvester lands it
+on `ToolEntry.policy_json`, the dispatch gate reads it, and `delete` is blocked in C
+before any fork. (Used during development to validate the gate; not a shipping tool.)
+
+```javascript
+(function (cclaw) {
+  cclaw.registerTool({
+    name: "notes",
+    description: "Manage plain-text notes. Actions: list, read, write, delete.",
+    parameters: {            // plain object — the harvester JSON.stringify's it
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "read", "write", "delete"] },
+        name:   { type: "string", description: "note filename (no path)" },
+        body:   { type: "string", description: "content for write" }
+      },
+      required: ["action"]
+    },
+    policy: {                // plain object too
+      rules: [
+        { match: { action: "delete" }, effect: "deny"  },
+        { match: { action: "write"  }, effect: "ask"   },
+        { match: {},                   effect: "allow" }  // reads fall through
+      ]
+    },
+    // handler MUST be a string (function body receiving `args`); ES5 only.
+    handler: [
+      "var dir = fs.cwd() + '/.notes/';",
+      "var a = args.action;",
+      "if (a === 'list')  return (fs.readDir(dir) || []).join('\\n');",
+      "if (a === 'read')  return fs.readFile(dir + args.name);",
+      "if (a === 'write') { fs.writeFile(dir + args.name, args.body || ''); return 'ok'; }",
+      "return 'error: unknown action ' + a;"  // delete never reaches here (policy denies)
+    ].join("\n")
+  });
+})(cclaw);
+```
+
 ## The GitHub Tool in MJS
 
 ```javascript

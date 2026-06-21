@@ -120,27 +120,118 @@ side-effecting (`resolve="apply"`) approvals, and its mutation logic lives in th
 trusted parent (`resolve_approval()`) — a place an MJS handler can never author
 code into. See "Reconciling with the approval model" below.
 
-### Policy layer: `extensions.policy`
+### Definition is data: install → load → call
 
-Policy is a **per-argument pre-filter, evaluated in C in the parent before the
-fork**, sitting *in front of* the existing per-tool mode gate (the approval gate
-every tool already passes through). It is not a parallel approval system — it
-decides whether a call is even eligible to reach that gate.
+**The DB is the source of truth for tool definitions; the `.mjs` file is only the
+implementation, referenced by `path`.** This is the AGENTS.md contract ("the DB
+stores the definition and a path; it never stores code"), and it inverts the
+current flow, where `registerTool` is harvested at every startup
+(`process_registered_tools`) into the in-memory registry and the `tools` table is a
+downstream *mirror* written from it (`tools_persist`). That harvest is **deleted**;
+definitions flow the other way.
 
-Policy is a property of the **tool**, not the extension package (an extension is
-an install/trust unit that *provides* 0..N tools). It is keyed on the tool name and
-carried on the tool definition. Durable home is a `policy` column on the `tools`
-table; the in-memory home is `ToolEntry.policy_json`, read at dispatch:
+Every tool — builtin or JS — is **one row in `tools`**
+(`name, description, parameters_json, path, policy, agent_name, enabled, builtin`).
+The row *is* the definition the model is shown: `llm_payload.c` already builds the
+request's tool list straight from this table, per-agent-filtered
+(`WHERE enabled=1 AND (agent_name IS NULL OR agent_name=?1)`). The only thing that
+differs between tool kinds is how the handler resolves:
 
-```sql
-ALTER TABLE tools ADD COLUMN policy TEXT; -- JSON policy rules (authored, per-tool)
-```
+| | Definition | Handler |
+|---|---|---|
+| **Builtin** | `tools` row, `builtin=1`, `path=NULL`, seeded in `seed.sql` | C function, looked up by name |
+| **JS tool** | `tools` row, `builtin=0`, `path=<file>` | function in the `.mjs` at `path`, called by name |
 
-JS-defined tools source policy from their `registerTool({policy})` field (harvested
-into the registry at load); builtin/promoted tools source it from `tools.policy`.
-Either way it lands on `ToolEntry.policy_json` — no per-dispatch DB query.
+So C tools stop defining their schema inline and instead seed a row + provide a
+named handler — the same shape as JS tools providing a handler by path. Predictable
+representation in data *and* code.
 
-Policy schema:
+**Install / promote — rare, audited (the trust boundary).** A JS extension ships
+`index.mjs` (handlers + policy code) plus a `manifest.json` that *declares the
+extent* of each tool: its arg schema, the bound of its policy (which args it may
+gate, the maximum effect it may reach, whether the policy fn is pure), and its
+requirements (`trust_level`, `bins`, `secrets`). `register_extension`/promote runs
+the **light audit**:
+- manifest well-formed; each `parameters` is valid JSON Schema; the declared policy
+  stays within its stated extent
+- requested `trust_level`/`bins`/`secrets` are within the installer's authority — a
+  sub-agent draft cannot self-promote to a global tool (AGENTS.md promotion boundary)
+- load the file once in the audited sandbox; confirm each declared handler (and
+  policy fn) exists and is a function
+- compute and store a **content hash** of the code file (`extensions.hash`)
+
+On success it writes the rows — `extensions(name, path, version, hash)`, `tools(...)`,
+and the tool-to-agent binding (see "Where policy is stored") — and never evaluates
+the file for config again.
+
+**Load — every startup, pure DB read, zero JS eval.** Build the registry from
+`SELECT … FROM tools WHERE enabled` joined to the agent's bindings. Schema, policy,
+and `path` come from the row; the handler is **not** loaded — only `path` is recorded
+on the `ToolEntry`. `extension.c`'s `extension_load` / `process_registered_tools`
+harvest is removed.
+
+**Call — per invocation, fork + dispatch.** The trusted parent reads the file at
+`path` (it holds the path anyway), **hashes it and compares to `extensions.hash`,
+failing closed on mismatch** — a tool whose code drifted from what was audited never
+runs, before the sandboxed child starts. It then forks `--mjs_tool <path> <name>
+<args>`: the child evals the whole file (real function objects in its own engine,
+helpers in scope), looks up the handler by name, and calls it with `args`. No
+stringified handler bodies, no author-written IIFE (the loader already wraps the
+file in `(function(cclaw){…})(__cclaw_api)`), no per-handler island.
+
+> The `registerTool({handler: "<string body>"})` examples elsewhere in this doc
+> predate this model and are superseded: authored files export real functions and a
+> `manifest.json`; the harvest-at-load path is gone.
+
+### Policy: authored on the tool, evaluated pre-fork
+
+Policy is a **per-argument pre-filter, evaluated in the parent before the fork**,
+sitting *in front of* the existing per-tool mode gate (the approval gate every tool
+already passes through). It is not a parallel approval system — it decides whether a
+call is even eligible to reach that gate.
+
+Policy is a property of the **tool**, not the extension package (an extension is an
+install/trust unit that *provides* 0..N tools). Its durable home is the `policy`
+column on the `tools` table (already present); the in-memory home is
+`ToolEntry.policy_json`, populated at load from the row — **no harvest, no
+per-dispatch DB query**.
+
+Effects are ordered `allow < ask < deny`. A tool's policy is **two layers, and the
+effective effect for a call is the `max` of them**:
+
+1. **Static floor** (`tools.policy`, JSON rules, C-evaluated, zero-cost). Sets the
+   per-action *default* — "reads → allow, `send` → ask," etc. This is the form most
+   tools need, and on its own it is the whole policy.
+2. **JS ratchet** (an optional `policy(args) → "allow"|"ask"|"deny"` authored in the
+   `.mjs`). Its return is **`max`'d with the floor**, so it can only *raise*
+   restriction — deny, ask, or `allow` (a no-op that leaves the floor standing). It
+   can **never** make a call more permissive than the floor. Use it for decisions the
+   exact-match grammar can't express (the `email` recipient/domain case below).
+
+This is not two competing forms — it is one model where data carries the part you
+must audit and JS carries the part that's safe not to:
+
+- **The static floor is the audited ceiling: maximum permissiveness, in plain data.**
+  A human reading `send → allow` vs `send → ask` at install knows the worst case in
+  one line. That single value *is* the fail-open surface.
+- **The JS ratchet needs no permissiveness audit, because `max(floor, js)` makes
+  over-permission structurally impossible.** Its audit collapses to "is it pure,
+  args-only, bounded?" — not "does it ever wrongly allow?" It can't. So a
+  `transfer → ask` floor means no JS return, however buggy or compromised, can ever
+  produce a silent transfer.
+
+**Where the JS runs.** Same machinery as the existing gating hooks
+(`hook_dispatch_gate_tool_call`): in the parent, **pre-fork**, so a `deny` costs no
+process and an `ask` lands directly in the parent's approval path (no IPC). The
+`manifest.json` declares its extent — pure function of `args`, no network/fs — and
+the install audit holds it to that envelope; the parent caps it with an
+instruction/time budget (the bound the gating hooks already need) so it can't hang
+the daemon.
+
+Above the tool, the per-agent grant restriction and gating hooks compose the same
+way (`max`, restrict-only) — every layer may add friction, none may remove it.
+
+Static-floor schema:
 ```json
 {
   "rules": [
@@ -184,14 +275,29 @@ only for `request_config`'s grants, which an MJS handler cannot reach (no DB han
 no parent-side code). The agent has no runtime path to set its own tool modes or
 policy; the human chooses the mode at approval time.
 
-### Where policy is stored
+### Where policy is stored: tool envelope + per-agent registration
 
-**One level: the authored per-tool policy** (`tools.policy` / `ToolEntry.policy_json`,
-never `extensions.policy`). Policy is set by the tool
-author at registration and is **not agent-mutable at runtime** — there is no
-per-agent override and no self-service tighten/loosen. If a runtime policy change
-is ever genuinely needed, it is a human-approved `request_config` `apply` action,
-not something the agent or its tools can do on their own.
+Two layers, composed — **neither agent-self-mutable**:
+
+1. **Tool-authored policy** — the tool's intrinsic safety envelope, on
+   `tools.policy` (static rules) or the `.mjs` policy fn. Travels with the tool,
+   set by its author, audited at install. "send always asks" lives here.
+2. **Tool-to-agent registration** — the binding of a tool to an agent, on the
+   `grants` table (`kind='tool'`, `value=<toolname>`). This already carries
+   `approval_mode` (the per-agent silent/always/tool_decides mode); per-agent
+   **argument restriction** ("this agent may only use `action` in `[read,search]`")
+   is the same kind of operator-set config and lives on the same binding.
+
+The effective decision is the **most restrictive** of the two (the restrict-only
+rule the dispatch gate already uses). The presented schema (`tools.parameters_json`)
+may optionally be *narrowed* per agent to match the binding's restriction so the
+model isn't even shown a forbidden enum value — but enforcement is the call-time
+composition, which the model cannot bypass by ignoring the schema.
+
+This revises the earlier "one level, no per-agent override": there *is* a per-agent
+layer, but it is set at registration by an operator (or a human-approved
+`request_config` `apply`), **never self-service by the agent** — the surviving
+principle is "an agent cannot loosen its own policy," not "there is only one level."
 
 ### Tool registration with policy (JS API)
 
@@ -382,6 +488,99 @@ before any fork. (Used during development to validate the gate; not a shipping t
 })(cclaw);
 ```
 
+## Per-argument policy & irreversible actions: `email`
+
+`email` is the sharpest test of the policy model because, unlike `tmux`, its
+dangerous action has no escape hatch — the only way to send is `action:"send"` —
+and the *risk lives in an argument value* (the recipient), not just the verb. It is
+the worked example of the **static floor + JS ratchet** model.
+
+Action surface: `read`, `search`, `draft`, `send`.
+
+**Static floor** (`tools.policy`) — the part a human audits at install. The author
+chooses the `send` default here, and `send → allow` is the deliberate, visible
+fail-open choice that lets the JS ratchet silently allow safe recipients:
+
+```javascript
+policy: {                              // plain object; the floor, in data
+  rules: [
+    { match: { action: ["read","search","draft"] }, effect: "allow" }, // nothing leaves the box
+    { match: { action: "send" },                     effect: "allow" }, // default: permitted; JS adds friction
+    { match: {},                                     effect: "deny"  }  // default-deny catch-all
+  ]
+}
+```
+
+**JS ratchet** (in the `.mjs`) — pure, args-only, `max`'d with the floor, so it can
+only *raise* restriction. This is where the recipient/domain logic the data grammar
+can't express lives:
+
+```javascript
+function policy(args) {
+  if (args.action !== "send") return "allow";                 // floor stands
+  var to = String(args.to || "");
+  if (/@(competitor|press)\.com$/i.test(to)) return "deny";   // never
+  if (!/@mycompany\.com$/i.test(to))         return "ask";    // external → park & ask
+  return "allow";                                             // internal → floor stands, silent
+}
+```
+
+`max(floor, js)`: internal recipient → `allow` (silent send), external → `ask`
+(park), competitor → `deny` — exactly "send matching-this silently, matching-that
+park-and-ask." The pattern logic is in JS; it can never loosen below the floor; the
+one auditable fail-open knob is the single `send → allow` line of data.
+
+`draft` sits deliberately on the `allow` side: writing a draft is reversible and
+stays local, so the agent composes freely; only the irreversible step is gated.
+
+### The floor is the knob; the wrinkle is honest
+
+- **Want safe recipients to send *silently*?** Floor = `send → allow` (above). The
+  human accepted that worst case in one readable line; the JS only adds friction.
+- **Want sends to *never* go without at least one approval** (the `transfer`/`pay`
+  posture)? Floor = `send → ask`. Then `max(ask, anything) ≥ ask` — no JS return,
+  however buggy or compromised, can produce a silent send.
+
+You **cannot** have both "gated by default" (floor=ask) *and* "JS silently allows
+safe ones" — silent-allow is de-escalation, which `max` forbids on purpose. A tool
+that needs content-based silent-allow must set floor=`allow`, and that fail-open is
+precisely what the install audit exists to surface. That is the boundary working,
+not a gap.
+
+Two adjuncts that need no policy code at all:
+
+- **The approval prompt already shows the args.** `handle_approval_park` prints the
+  approval's `args_json`, so a human approving a `send` sees the real
+  `to`/`subject`/`body`. With a `send → ask` floor and no JS, the human is the
+  recipient policy — often enough on its own.
+- **Hard "never" can also live in the handler.** It can return an error string (a
+  hard deny, no fork-back) but cannot *park* — so use it for "never," not "maybe";
+  prefer the JS ratchet's `deny` so the decision stays in the audited policy slot.
+
+### Open question: `ask` + "always" is unsafe for `send`
+
+An `ask` effect uses the `rerun` approval, which offers the human **once /
+always / deny**. "Always" flips the tool's mode to `silent` — so one "always" on
+*send to Bob* authorizes *every future send, to anyone*, unprompted. For an
+outward, irreversible action that is precisely the wrong default.
+
+The model has no per-action "once-only" today, and the approval identity is the
+`tool_call_id`, not `(tool, recipient)` — so "always" can't be scoped to a
+recipient. Options, in rough order of effort:
+
+1. **Author-declared `once_only` (or `effect:"ask_once"`)** — marks `send` so its
+   approval prompt omits "always"; the gate keeps asking every call. Smallest
+   change, safe, and generalizes to every irreversible outward action (`post`,
+   `transfer`, `merge --auto`).
+2. **Scope the standing grant to a matched arg** — `always` flips to silent only
+   for calls whose `to` matches the approved value; a new recipient re-gates.
+   Needs the approval row to remember a per-arg key (a schema change).
+3. **Operator discipline** — document "never answer *always* to a `send`."
+   Fragile.
+
+Recommendation: option 1 is the minimal honest fix and is the open design item
+to settle before `email` — or any send-capable tool — ships.
+
 ## Implementation Phases
 
 ### Phase 1: `cclaw.exec` (minimal, unblocks composable tools)
@@ -462,6 +661,42 @@ host, a path, or a trust level. It is just files in the agent's own workspace.
 
 The CClaw model is simpler (no regex parsing of command strings) and more
 precise (policy operates on typed JSON, not shell tokenization).
+
+## When a typed tool beats a skill
+
+OpenClaw exposes most capabilities as **skills**: a `SKILL.md` prompt plus a
+`requires.bins` allowlist, with every command flowing through the one `exec`
+tool under one exec policy. That is the right default *when the agent already has
+shell* — a typed wrapper then adds maintenance for almost no security gain,
+because the agent can call the underlying binary through `shell_exec` anyway.
+CClaw can do the same; see `templates/skill_shell.md`. Fine-grained policy on a
+tmux tool is pointless next to a general `shell_exec` grant: the agent just types
+`tmux …` into the shell.
+
+A typed MJS tool earns its complexity only when at least one of these holds:
+
+1. **Grant-in-isolation.** You want the agent to have this capability *without*
+   general shell — a monitor that may read panes but not run arbitrary commands,
+   an agent that may use `github` with no `gh`/network grant. A skill can't
+   separate the capability from `exec`; a registry tool with its own
+   per-`(agent,tool)` mode can. This is the strongest reason.
+2. **The gated distinction is structural, not an escape hatch.** Policy on typed
+   args is only as real as the narrowest action the agent can't bypass. It has
+   teeth for `email.send` (the *only* way to send is the typed action) and none
+   for `tmux.send-keys` (which types into a live shell — arbitrary exec no matter
+   how the enum is sliced). Gate the boundary the tool actually enforces (read
+   vs. mutate, draft vs. send), not a sub-action taxonomy the underlying binary
+   lets the agent route around.
+3. **Argument-value gating matters.** "Whom" / "which" is part of the risk and
+   the value lives in a structured field the policy — or the human at approval
+   time — can see: `send` *to whom*, `message_send` *in which channel*. A regex
+   over a shell string can't do this precisely; a typed arg can.
+
+If none hold, ship a skill. Choosing to *type* a tool should be driven by one of
+the three above, not by "it would be neater as a tool." For `tmux` specifically,
+only #1 applies (and only the read-vs-mutate split, since `send-keys` is an exec
+escape hatch) — so type it only for a shell-less agent, and keep its policy to
+that one boundary rather than a per-subcommand taxonomy.
 
 ## Candidate MJS Tools (from OpenClaw skills catalog)
 

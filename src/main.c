@@ -1885,10 +1885,16 @@ int main(int argc, char *argv[]) {
             {
                 Approval *pa = approval_get_pending(g_db, g_cli_session);
                 if (pa) {
-                    ApprovalDecision d =
-                        (linebuf[0] == 'y' || linebuf[0] == 'Y') ? APPROVAL_ALWAYS :
-                        (linebuf[0] == 'o' || linebuf[0] == 'O') ? APPROVAL_ONCE :
-                                                                   APPROVAL_DENY;
+                    ApprovalDecision d;
+                    if (strcasecmp(linebuf, "once") == 0 || strcasecmp(linebuf, "o") == 0)
+                        d = APPROVAL_ONCE;
+                    else if (linebuf[0] == 'y' || linebuf[0] == 'Y' ||
+                             strcasecmp(linebuf, "ok") == 0 ||
+                             strcasecmp(linebuf, "okay") == 0 ||
+                             strcasecmp(linebuf, "approve") == 0)
+                        d = APPROVAL_ALWAYS;
+                    else
+                        d = APPROVAL_DENY;
                     resolve_approval(pa->id, d, "cli:interactive");
                     approval_free(pa);
                     /* Shift and continue */

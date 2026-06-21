@@ -44,6 +44,8 @@ typedef struct {
     int blessed_count;
     int relay_count;            /* live relays (guarded by blessed_mu) */
     pthread_mutex_t blessed_mu; /* guards blessed[]/blessed_count/relay_count */
+    int conn_active;            /* in-flight conn_threads (guarded by blessed_mu) */
+    pthread_cond_t conn_cond;   /* signalled when conn_active reaches 0 */
 } ProxyContext;
 
 /* Bind + listen on a per-call UDS at <dir>/.proxy.<pid>.sock (dir = the agent

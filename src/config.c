@@ -49,7 +49,7 @@ const char *agent_dir_resolve(const char *workspace, const char *db_path,
         while (len > 1 && workspace[len - 1] == '/') len--;   /* trim trailing / */
         while (len > 0 && workspace[len - 1] != '/') len--;   /* drop last comp  */
         while (len > 1 && workspace[len - 1] == '/') len--;   /* trim separator  */
-        if (len > 0 && len < cap) {
+        if (len > 1 && len < cap) {
             memcpy(out, workspace, len);
             out[len] = '\0';
             return out;

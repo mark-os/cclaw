@@ -181,7 +181,12 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
         if (ta.strs[i]) explicit_bzero(ta.strs[i], strlen(ta.strs[i]));
     tool_parse_free(&ta);
     /* Sandbox fork is done — now safe to start the proxy accept thread. */
-    if (proxy_active) proxy_serve(&proxy);
+    if (proxy_active) {
+        if (proxy_serve(&proxy) != 0) {
+            proxy_stop(&proxy);
+            proxy_active = 0;
+        }
+    }
 
     char *output = malloc(SHELL_MAX_OUTPUT + 1);
     if (!output) {

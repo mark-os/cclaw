@@ -254,9 +254,11 @@ void channel_consume_events(sqlite3 *db) {
                     }
                     ApprovalDecision d = APPROVAL_DENY;
                     if (text) {
-                        if (strcasecmp(text, "once") == 0 || text[0] == 'o' || text[0] == 'O')
+                        if (strcasecmp(text, "once") == 0 || strcasecmp(text, "o") == 0)
                             d = APPROVAL_ONCE;
                         else if (text[0] == 'y' || text[0] == 'Y' ||
+                                 strcasecmp(text, "ok") == 0 ||
+                                 strcasecmp(text, "okay") == 0 ||
                                  strcasecmp(text, "approve") == 0)
                             d = APPROVAL_ALWAYS;
                         free(text);

@@ -341,8 +341,14 @@ struct conn_args {
 
 static void *conn_thread(void *arg) {
     struct conn_args *ca = (struct conn_args *)arg;
-    handle_client(ca->ctx, ca->fd);
+    ProxyContext *ctx = ca->ctx;
+    handle_client(ctx, ca->fd);
     free(ca);
+    pthread_mutex_lock(&ctx->blessed_mu);
+    ctx->conn_active--;
+    if (ctx->conn_active == 0)
+        pthread_cond_broadcast(&ctx->conn_cond);
+    pthread_mutex_unlock(&ctx->blessed_mu);
     return NULL;
 }
 
@@ -364,11 +370,20 @@ static void *proxy_loop(void *arg) {
         ca->ctx = ctx;
         ca->fd = client;
 
+        pthread_mutex_lock(&ctx->blessed_mu);
+        ctx->conn_active++;
+        pthread_mutex_unlock(&ctx->blessed_mu);
+
         pthread_t t;
         pthread_attr_t attr;
         pthread_attr_init(&attr);
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
         if (pthread_create(&t, &attr, conn_thread, ca) != 0) {
+            pthread_mutex_lock(&ctx->blessed_mu);
+            ctx->conn_active--;
+            if (ctx->conn_active == 0)
+                pthread_cond_broadcast(&ctx->conn_cond);
+            pthread_mutex_unlock(&ctx->blessed_mu);
             close(client);
             free(ca);
         }
@@ -388,6 +403,7 @@ int proxy_bind(ProxyContext *ctx, const char *dir,
     memset(ctx, 0, sizeof(*ctx));
     ctx->listen_fd = -1;
     pthread_mutex_init(&ctx->blessed_mu, NULL);
+    pthread_cond_init(&ctx->conn_cond, NULL);
     ctx->hosts = hosts;          /* borrowed — must outlive the proxy */
     ctx->host_count = host_count;
 
@@ -468,6 +484,11 @@ void proxy_stop(ProxyContext *ctx) {
         pthread_join(ctx->thread, NULL);
         ctx->thread_started = 0;
     }
+    /* Wait for all in-flight conn_threads to finish */
+    pthread_mutex_lock(&ctx->blessed_mu);
+    while (ctx->conn_active > 0)
+        pthread_cond_wait(&ctx->conn_cond, &ctx->blessed_mu);
+    pthread_mutex_unlock(&ctx->blessed_mu);
     if (ctx->listen_fd >= 0) {
         close(ctx->listen_fd);
         ctx->listen_fd = -1;
@@ -480,6 +501,7 @@ void proxy_stop(ProxyContext *ctx) {
     ctx->hosts = NULL;          /* borrowed — not owned, do not free */
     ctx->host_count = 0;
     pthread_mutex_destroy(&ctx->blessed_mu);
+    pthread_cond_destroy(&ctx->conn_cond);
 }
 
 const char *proxy_sock_path(const ProxyContext *ctx) {

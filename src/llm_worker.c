@@ -108,7 +108,15 @@ static int pool_pop(WorkItem *out) {
 static void *worker_fn(void *arg) {
     (void)arg;
     sqlite3 *db = db_open(g_pool.db_path);
-    if (!db) { syslog(LOG_ERR, "worker: db_open failed"); return NULL; }
+    if (!db) {
+        syslog(LOG_ERR, "worker: db_open failed");
+        pthread_mutex_lock(&g_pool.mtx);
+        g_pool.active--;
+        if (g_pool.active == 0)
+            pthread_cond_broadcast(&g_pool.cond);
+        pthread_mutex_unlock(&g_pool.mtx);
+        return NULL;
+    }
     db_set_child_pragmas(db);
 
     CURL *curl = curl_easy_init();

@@ -127,11 +127,18 @@ fork**, sitting *in front of* the existing per-tool mode gate (the approval gate
 every tool already passes through). It is not a parallel approval system — it
 decides whether a call is even eligible to reach that gate.
 
-Add a single authored `policy` column to the extension definition:
+Policy is a property of the **tool**, not the extension package (an extension is
+an install/trust unit that *provides* 0..N tools). It is keyed on the tool name and
+carried on the tool definition. Durable home is a `policy` column on the `tools`
+table; the in-memory home is `ToolEntry.policy_json`, read at dispatch:
 
 ```sql
-ALTER TABLE extensions ADD COLUMN policy TEXT; -- JSON policy rules (authored)
+ALTER TABLE tools ADD COLUMN policy TEXT; -- JSON policy rules (authored, per-tool)
 ```
+
+JS-defined tools source policy from their `registerTool({policy})` field (harvested
+into the registry at load); builtin/promoted tools source it from `tools.policy`.
+Either way it lands on `ToolEntry.policy_json` — no per-dispatch DB query.
 
 Policy schema:
 ```json
@@ -179,13 +186,19 @@ policy; the human chooses the mode at approval time.
 
 ### Where policy is stored
 
-**One level: the authored `extensions.policy` column.** Policy is set by the tool
+**One level: the authored per-tool policy** (`tools.policy` / `ToolEntry.policy_json`,
+never `extensions.policy`). Policy is set by the tool
 author at registration and is **not agent-mutable at runtime** — there is no
 per-agent override and no self-service tighten/loosen. If a runtime policy change
 is ever genuinely needed, it is a human-approved `request_config` `apply` action,
 not something the agent or its tools can do on their own.
 
 ### Tool registration with policy (JS API)
+
+> **Convention:** pass `parameters` and `policy` as **plain objects**, not
+> `JSON.stringify(...)` strings — the harvester (`process_registered_tools`)
+> stringifies them, so pre-stringifying double-encodes. (Some examples below still
+> show `JSON.stringify`; treat the object form as canonical.)
 
 ```javascript
 cclaw.registerTool({
@@ -225,7 +238,7 @@ per-tool mode gate in `fork_tool_exec`. Policy never replaces the gate, it feeds
 ```
 LLM calls github({"action": "pr_merge", "number": 123})
   → main process: lookup tool "github" in registry
-  → main process: load authored policy (extensions.policy), evaluate against args
+  → main process: read the tool's policy (ToolEntry.policy_json), evaluate against args
   → effect = deny  → return "error: action 'pr_merge' denied by policy" (no fork)
   → effect = ask   → set this call's gate to ASK → existing approval_create(...,"rerun")
                      → park; human picks once/always/deny → frozen call re-runs on approve
@@ -340,9 +353,11 @@ already passes — policy only decides eligibility, the gate decides approval.
 
 ### Phase 2: Policy layer
 
-- Add the single authored `policy` column to the `extensions` table (no
-  `agent_extensions` override — policy is authored config, not agent-mutable)
-- Policy evaluation in C (jsmn parse of policy JSON, match args), before the fork
+- Add the authored `policy` column to the `tools` table (per-tool, not on
+  `extensions`); carry it on `ToolEntry.policy_json`, sourced from
+  `registerTool({policy})` for JS tools and `tools.policy` for builtin/promoted
+- Policy evaluation in C (jsmn parse of policy JSON, match args), before the fork,
+  reading `ToolEntry.policy_json` (no per-dispatch DB query)
 - `deny` → error to LLM (no fork); `allow`/`ask` → fall through to the existing
   per-tool mode gate, with `ask` taking the shipped `approval_create(..., "rerun")`
   + park path (human picks once/always/deny)

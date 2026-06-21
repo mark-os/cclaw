@@ -34,7 +34,7 @@ typedef struct {
 
 /* T254: Discover extensions in workspace/extensions/.
  * Returns sorted array of absolute file paths. Caller frees via extension_list_free().
- * Scans .js files and subdir index.js files, sorted alphabetically. */
+ * Scans .mjs files and subdir index.mjs files, sorted alphabetically. */
 char **extension_discover(const char *workspace, size_t *count);
 char **extension_discover_for_agent(sqlite3 *db, const char *agent_name,
                                     const char *workspace, size_t *count);

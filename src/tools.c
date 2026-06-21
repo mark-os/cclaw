@@ -16,6 +16,7 @@ int tools_register(ToolRegistry *reg, const char *name, const char *description,
     e->name = strdup(name);
     e->description = description ? strdup(description) : NULL;
     e->parameters_json = parameters_json ? strdup(parameters_json) : NULL;
+    e->policy_json = NULL;
     e->handler = handler;
     e->user_data = user_data;
     reg->count++;
@@ -48,6 +49,7 @@ void tools_free(ToolRegistry *reg) {
         free(reg->entries[i].name);
         free(reg->entries[i].description);
         free(reg->entries[i].parameters_json);
+        free(reg->entries[i].policy_json);
         if (reg->entries[i].free_fn)
             reg->entries[i].free_fn(reg->entries[i].user_data);
     }

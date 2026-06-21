@@ -18,6 +18,7 @@ typedef struct {
     char *name;
     char *description;
     char *parameters_json;
+    char *policy_json;
     ToolHandlerFn handler;
     void *user_data;
     ToolFreeFn free_fn;

@@ -319,7 +319,8 @@ static void js_tool_data_free(void *user_data) {
  * Exported for use by extension.c (T256). */
 int js_tool_register_ext(ToolRegistry *reg, const char *name,
                                 const char *description, const char *parameters_json,
-                                const char *code, JsEvalCtx *ectx) {
+                                const char *code, JsEvalCtx *ectx,
+                                const char *policy_json) {
     /* Check if already registered (re-define overwrites) */
     ToolEntry *existing = tools_lookup(reg, name);
     if (existing) {
@@ -329,8 +330,10 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
         td->ectx = ectx;
         free(existing->description);
         free(existing->parameters_json);
+        free(existing->policy_json);
         existing->description = description ? strdup(description) : NULL;
         existing->parameters_json = parameters_json ? strdup(parameters_json) : NULL;
+        existing->policy_json = policy_json ? strdup(policy_json) : NULL;
         existing->handler = js_defined_tool_handler;
         return 0;
     }
@@ -343,7 +346,10 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
                             js_defined_tool_handler, td);
     if (rc == 0) {
         ToolEntry *e = tools_lookup(reg, name);
-        if (e) e->free_fn = js_tool_data_free;
+        if (e) {
+            e->free_fn = js_tool_data_free;
+            e->policy_json = policy_json ? strdup(policy_json) : NULL;
+        }
     }
     return rc;
 }

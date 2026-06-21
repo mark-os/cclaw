@@ -90,7 +90,7 @@ static void test_hook_modifies_messages(void) {
 
     /* Extension: prepend a system message */
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/inject.js", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/inject.mjs", ext_dir);
     write_file(p1,
         "cclaw.registerHook('beforeRequest', function(msgs) {\n"
         "  msgs.unshift({role: 'system', content: 'injected by hook'});\n"
@@ -196,7 +196,7 @@ static void test_hook_throws(void) {
 
     /* Extension: throws */
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/bad.js", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/bad.mjs", ext_dir);
     write_file(p1,
         "cclaw.registerHook('beforeRequest', function(msgs) {\n"
         "  throw new Error('oops');\n"
@@ -264,7 +264,7 @@ static void test_hooks_chain(void) {
 
     /* Two hooks: first adds "first", second adds "second" */
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/chain.js", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/chain.mjs", ext_dir);
     write_file(p1,
         "cclaw.registerHook('beforeRequest', function(msgs) {\n"
         "  msgs.push({role: 'system', content: 'FIRST'});\n"
@@ -346,7 +346,7 @@ static void test_gate_restrict_only(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/gate.js", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/gate.mjs", ext_dir);
     write_file(p1,
         "cclaw.registerHook('beforeToolCall', function(ctx) {\n"
         "  if (ctx.name === 'dangerous') return {deny: true, reason: 'not allowed'};\n"
@@ -415,7 +415,7 @@ static void test_observer_side_effect_only(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/observe.js", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/observe.mjs", ext_dir);
     /* Records what it saw into a global, and *tries* to return a replacement
      * (which the dispatcher must ignore — observers cannot gate/modify). */
     write_file(p1,

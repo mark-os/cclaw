@@ -57,6 +57,7 @@ void js_runtime_destroy(JsSessionRuntime *rt);
  * Callable from extension.c. code is the JS function body receiving 'args'. */
 int js_tool_register_ext(ToolRegistry *reg, const char *name,
                          const char *description, const char *parameters_json,
-                         const char *code, JsEvalCtx *ectx);
+                         const char *code, JsEvalCtx *ectx,
+                         const char *policy_json);
 
 #endif

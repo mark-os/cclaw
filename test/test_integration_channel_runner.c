@@ -21,7 +21,7 @@
 #include "mock_server.h"
 
 #define DB_PATH "/tmp/test_integ_cr.db"
-#define JS_PATH "/tmp/test_integ_cr_ext/channel.js"
+#define JS_PATH "/tmp/test_integ_cr_ext/channel.mjs"
 #define FAIL(m) do { fprintf(stderr, "FAIL: %s\n", m); return 1; } while(0)
 
 /* Test channel JS exercising the new contract: poll shapes, cclaw.send

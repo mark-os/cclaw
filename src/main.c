@@ -38,6 +38,7 @@
 #include "channel_api.h"
 #include "secret.h"
 #include "secret_scan.h"
+#include "tool_policy.h"
 #include "secret_interp.h"
 #include "resolve.h"
 #include "web.h"
@@ -245,6 +246,24 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
     {
         ToolApprovalMode mode = agent_tool_mode(g_db, agent_name, tc->name);
         HookGate gate = (mode == TOOL_MODE_SILENT) ? HOOK_GATE_ALLOW : HOOK_GATE_ASK;
+
+        /* Per-argument policy pre-filter (restrict-only, before hooks) */
+        if (te->policy_json) {
+            PolicyEffect pe = policy_eval(tc->arguments, te->policy_json);
+            if (pe == POLICY_DENY) {
+                char err[128];
+                snprintf(err, sizeof(err), "error: %s denied by policy", tc->name);
+                ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
+                Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                               .tool_name = tc->name, .is_error = 1};
+                entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+                db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "policy:deny");
+                return 1;
+            }
+            if (pe == POLICY_ASK && gate < HOOK_GATE_ASK)
+                gate = HOOK_GATE_ASK;
+        }
+
         if (g_tool_setup) {
             char *reason = NULL;
             HookGate h = hook_dispatch_gate_tool_call(&g_tool_setup->ext_ctx, g_db,
@@ -1096,11 +1115,11 @@ static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
     snprintf(mkdir_cmd, sizeof(mkdir_cmd), "%s/extensions/telegram/.keep", base);
     ensure_parent_dir(mkdir_cmd);
 
-    /* Write channel.js */
+    /* Write channel.mjs */
     char js_path[2*PATH_MAX];
-    snprintf(js_path, sizeof(js_path), "%s/channel.js", tg_dir);
+    snprintf(js_path, sizeof(js_path), "%s/channel.mjs", tg_dir);
     FILE *f = fopen(js_path, "w");
-    if (f) { fputs(TPL_CHANNEL_TELEGRAM_JS, f); fclose(f); }
+    if (f) { fputs(TPL_CHANNEL_TELEGRAM_MJS, f); fclose(f); }
 
     /* Write telegram.json */
     char json_path[2*PATH_MAX];

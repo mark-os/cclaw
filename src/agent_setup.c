@@ -145,6 +145,24 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         }
     }
 
+    /* Load DB-stored policy into registry entries (builtin + promoted tools) */
+    {
+        sqlite3_stmt *ps;
+        if (sqlite3_prepare_v2(db,
+                "SELECT name, policy FROM tools WHERE policy IS NOT NULL",
+                -1, &ps, NULL) == SQLITE_OK) {
+            while (sqlite3_step(ps) == SQLITE_ROW) {
+                const char *tname = (const char *)sqlite3_column_text(ps, 0);
+                const char *pol = (const char *)sqlite3_column_text(ps, 1);
+                if (!tname || !pol) continue;
+                ToolEntry *te = tools_lookup(&setup->reg, tname);
+                if (te && !te->policy_json)
+                    te->policy_json = strdup(pol);
+            }
+            sqlite3_finalize(ps);
+        }
+    }
+
     /* T274/V120: request_config — CLI inline tool/host/rename */
     setup->req_cfg_ctx.db = db;
     setup->req_cfg_ctx.agent_name = agent_name;

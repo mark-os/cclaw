@@ -63,7 +63,7 @@ static void test_register_tool(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/mytool.js", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/mytool.mjs", ext_dir);
     write_file(p1,
         "cclaw.registerTool({\n"
         "  name: 'greet',\n"
@@ -125,7 +125,7 @@ static void test_register_hook(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/hooks.js", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/hooks.mjs", ext_dir);
     write_file(p1,
         "cclaw.registerHook('beforeToolCall', function(ctx) { return ctx; });\n"
         "cclaw.registerHook('afterToolCall', function(ctx) { return ctx; });\n"
@@ -178,7 +178,7 @@ static void test_register_tool_invalid(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/bad.js", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/bad.mjs", ext_dir);
     /* Missing handler → throws */
     write_file(p1, "cclaw.registerTool({name: 'broken'});");
 

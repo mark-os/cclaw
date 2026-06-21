@@ -448,7 +448,7 @@ int main(int argc, char **argv) {
             sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
             if (sqlite3_step(s) == SQLITE_ROW) {
                 const char *p = (const char *)sqlite3_column_text(s, 0);
-                if (p) snprintf(js_path, sizeof(js_path), "%s/channel.js", p);
+                if (p) snprintf(js_path, sizeof(js_path), "%s/channel.mjs", p);
             }
             sqlite3_finalize(s);
         }

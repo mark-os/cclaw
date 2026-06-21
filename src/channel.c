@@ -62,9 +62,9 @@ int channel_launch_all(sqlite3 *db) {
         const char *ext_path = (const char *)sqlite3_column_text(stmt, 1);
         if (!name || !ext_path) continue;
 
-        /* Build js_path: <ext_path>/channel.js */
+        /* Build js_path: <ext_path>/channel.mjs */
         char js_path[1024];
-        snprintf(js_path, sizeof(js_path), "%s/channel.js", ext_path);
+        snprintf(js_path, sizeof(js_path), "%s/channel.mjs", ext_path);
 
         pid_t pid = do_fork(name);
         if (pid > 0) {

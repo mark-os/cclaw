@@ -24,7 +24,7 @@ char **extension_discover(const char *workspace, size_t *count) {
     char **paths = malloc(cap * sizeof(char *));
     if (!paths) return NULL;
 
-    /* Scan workspace/extensions/ for local drafts (index.js or *.js) */
+    /* Scan workspace/extensions/ for local drafts (index.mjs or *.mjs) */
     char ext_dir[1024];
     snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", workspace);
 
@@ -42,10 +42,10 @@ char **extension_discover(const char *workspace, size_t *count) {
             char idx_path[2080];
             if (S_ISREG(st.st_mode)) {
                 size_t len = strlen(ent->d_name);
-                if (len > 3 && strcmp(ent->d_name + len - 3, ".js") == 0)
+                if (len > 4 && strcmp(ent->d_name + len - 4, ".mjs") == 0)
                     to_add = full;
             } else if (S_ISDIR(st.st_mode)) {
-                snprintf(idx_path, sizeof(idx_path), "%s/index.js", full);
+                snprintf(idx_path, sizeof(idx_path), "%s/index.mjs", full);
                 if (stat(idx_path, &st) == 0 && S_ISREG(st.st_mode))
                     to_add = idx_path;
             }
@@ -84,7 +84,7 @@ char **extension_discover_for_agent(sqlite3 *db, const char *agent_name,
                 const char *ext_path = (const char *)sqlite3_column_text(stmt, 0);
                 if (!ext_path) continue;
                 char idx[2048];
-                snprintf(idx, sizeof(idx), "%s/index.js", ext_path);
+                snprintf(idx, sizeof(idx), "%s/index.mjs", ext_path);
                 struct stat st;
                 if (stat(idx, &st) == 0) {
                     if (*count >= cap) { cap *= 2; paths = realloc(paths, cap * sizeof(char *)); }
@@ -113,10 +113,10 @@ char **extension_discover_for_agent(sqlite3 *db, const char *agent_name,
                 char idx_path[2080];
                 if (S_ISREG(st.st_mode)) {
                     size_t len = strlen(ent->d_name);
-                    if (len > 3 && strcmp(ent->d_name + len - 3, ".js") == 0)
+                    if (len > 4 && strcmp(ent->d_name + len - 4, ".mjs") == 0)
                         to_add = full;
                 } else if (S_ISDIR(st.st_mode)) {
-                    snprintf(idx_path, sizeof(idx_path), "%s/index.js", full);
+                    snprintf(idx_path, sizeof(idx_path), "%s/index.mjs", full);
                     if (stat(idx_path, &st) == 0 && S_ISREG(st.st_mode))
                         to_add = idx_path;
                 }
@@ -181,6 +181,7 @@ static const char CCLAW_API_INIT[] =
     "      name: def.name,\n"
     "      description: def.description || '',\n"
     "      parameters: def.parameters || {},\n"
+    "      policy: def.policy || null,\n"
     "      handler: code\n"
     "    });\n"
     "  },\n"
@@ -266,6 +267,18 @@ static int process_registered_tools(JsSessionRuntime *rt, ToolRegistry *reg,
                              JS_ToCString(ctx, params_val, &pbuf);
         if (!params) params = "{}";
 
+        /* Policy: stringify if present, NULL if absent */
+        snprintf(code, sizeof(code),
+                 "globalThis.__cclaw_tools[%d].policy ? JSON.stringify(globalThis.__cclaw_tools[%d].policy) : null", i, i);
+        JSValue pol_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_RETVAL);
+        const char *policy = NULL;
+        JSCStringBuf polbuf;
+        if (!JS_IsException(pol_val)) {
+            const char *ps = JS_ToCString(ctx, pol_val, &polbuf);
+            if (ps && strcmp(ps, "null") != 0)
+                policy = ps;
+        }
+
         /* Handler is stored as a string (function body receiving 'args') */
         snprintf(code, sizeof(code),
                  "globalThis.__cclaw_tools[%d].handler", i);
@@ -276,7 +289,7 @@ static int process_registered_tools(JsSessionRuntime *rt, ToolRegistry *reg,
         if (!fn_src) continue;
 
         /* Register via existing js_tool path (forks via eval ctx) */
-        if (js_tool_register_ext(reg, name, desc, params, fn_src, ectx) == 0) {
+        if (js_tool_register_ext(reg, name, desc, params, fn_src, ectx, policy) == 0) {
             registered++;
             LOG_DEBUG_(cfg, "extension: registered tool '%s'", name);
         }

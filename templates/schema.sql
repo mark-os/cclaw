@@ -254,7 +254,8 @@ CREATE TABLE IF NOT EXISTS tools (
   path TEXT,
   builtin INTEGER NOT NULL DEFAULT 1,
   agent_name TEXT,
-  enabled INTEGER NOT NULL DEFAULT 1
+  enabled INTEGER NOT NULL DEFAULT 1,
+  policy TEXT
 );
 
 

@@ -297,33 +297,30 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
     if (nwords == 0) { free(dup); return NULL; }
 
     /* Dynamic stopwords: drop keywords present in > 25% of indexed rows.
-     * MATCH runs the query word through the same tokenizer as the index
-     * (incl. porter stemming), so the count is the true document frequency.
-     * Recall goes silent when every keyword is conversational filler. */
+     * Single query folds total count + per-word DF filter via VALUES CTE. */
     {
-        int64_t total = 0;
-        sqlite3_stmt *ts;
-        if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM entries", -1, &ts, NULL) == SQLITE_OK) {
-            if (sqlite3_step(ts) == SQLITE_ROW) total = sqlite3_column_int64(ts, 0);
-            sqlite3_finalize(ts);
-        }
-        if (total >= 8) {  /* tiny corpora: frequencies too noisy to filter on */
-            sqlite3_stmt *dfs;
-            if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH ?",
-                                   -1, &dfs, NULL) == SQLITE_OK) {
-                int kept = 0;
-                for (int i = 0; i < nwords; i++) {
-                    char term[80];
-                    snprintf(term, sizeof(term), "\"%s\"", words[i]);
-                    sqlite3_bind_text(dfs, 1, term, -1, SQLITE_TRANSIENT);
-                    int64_t df = 0;
-                    if (sqlite3_step(dfs) == SQLITE_ROW) df = sqlite3_column_int64(dfs, 0);
-                    sqlite3_reset(dfs);
-                    if (df * 4 <= total) words[kept++] = words[i];
-                }
-                sqlite3_finalize(dfs);
-                nwords = kept;
+        static const char *stop_sql =
+            "WITH t(total) AS (SELECT COUNT(*) FROM entries),"
+            "     cand(idx, w) AS (VALUES (0,?1),(1,?2),(2,?3),(3,?4),(4,?5),(5,?6),(6,?7),(7,?8))"
+            " SELECT cand.idx FROM cand, t"
+            " WHERE cand.w IS NOT NULL"
+            "   AND (t.total < 8"
+            "        OR (SELECT COUNT(*) FROM entries_fts"
+            "            WHERE entries_fts MATCH '\"' || cand.w || '\"') * 4 <= t.total)"
+            " ORDER BY cand.idx;";
+        sqlite3_stmt *ss;
+        if (sqlite3_prepare_v2(db, stop_sql, -1, &ss, NULL) == SQLITE_OK) {
+            for (int i = 0; i < 8; i++) {
+                if (i < nwords)
+                    sqlite3_bind_text(ss, i + 1, words[i], -1, SQLITE_STATIC);
+                else
+                    sqlite3_bind_null(ss, i + 1);
             }
+            int kept = 0;
+            while (sqlite3_step(ss) == SQLITE_ROW)
+                words[kept++] = words[sqlite3_column_int(ss, 0)];
+            sqlite3_finalize(ss);
+            nwords = kept;
         }
     }
 

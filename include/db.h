@@ -168,6 +168,10 @@ void inbox_items_free(InboxItem *items, int count);
 /* Count unconsumed inbox items for a session. Returns count or -1 on error. */
 int inbox_count(sqlite3 *db, int64_t session_id);
 
+/* V18: Consume unconsumed inbox items into session entries (no transaction).
+ * Caller must hold an open transaction. Returns count (≥0) or -1 on error. */
+int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit);
+
 /* V18: Atomically consume unconsumed inbox items into session entries.
  * Returns number of items consumed (≥0) or -1 on error (transaction rolled back). */
 int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit);

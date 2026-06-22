@@ -1038,16 +1038,12 @@ int inbox_count(sqlite3 *db, int64_t session_id) {
 }
 
 /* V18: Atomically consume inbox items into session entries */
-int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
-        return -1;
-
+int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit) {
     /* Peek unconsumed items */
     sqlite3_stmt *sel;
     if (sqlite3_prepare_v2(db,
         "SELECT id, payload FROM inbox WHERE session_id = ? AND consumed = 0 ORDER BY id ASC LIMIT ?",
         -1, &sel, NULL) != SQLITE_OK) {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         return -1;
     }
     sqlite3_bind_int64(sel, 1, session_id);
@@ -1057,14 +1053,12 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
     sqlite3_stmt *leaf_stmt;
     if (sqlite3_prepare_v2(db, "SELECT leaf_id FROM sessions WHERE id=?", -1, &leaf_stmt, NULL) != SQLITE_OK) {
         sqlite3_finalize(sel);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         return -1;
     }
     sqlite3_bind_int64(leaf_stmt, 1, session_id);
     if (sqlite3_step(leaf_stmt) != SQLITE_ROW) {
         sqlite3_finalize(leaf_stmt);
         sqlite3_finalize(sel);
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         return -1;
     }
     int64_t parent_id = sqlite3_column_int64(leaf_stmt, 0);
@@ -1084,7 +1078,6 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
             " VALUES (?,?,1,?,?,?)",
             -1, &ins, NULL) != SQLITE_OK) {
             sqlite3_finalize(sel);
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             return -1;
         }
         sqlite3_bind_int64(ins, 1, parent_id);
@@ -1096,7 +1089,6 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
         sqlite3_finalize(ins);
         if (rc != SQLITE_DONE) {
             sqlite3_finalize(sel);
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             return -1;
         }
         parent_id = sqlite3_last_insert_rowid(db);
@@ -1106,7 +1098,6 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
         if (sqlite3_prepare_v2(db,
             "UPDATE inbox SET consumed = 1 WHERE id = ?", -1, &upd, NULL) != SQLITE_OK) {
             sqlite3_finalize(sel);
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             return -1;
         }
         sqlite3_bind_int64(upd, 1, inbox_id);
@@ -1114,7 +1105,6 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
         sqlite3_finalize(upd);
         if (rc != SQLITE_DONE) {
             sqlite3_finalize(sel);
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             return -1;
         }
         consumed++;
@@ -1127,7 +1117,6 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
         if (sqlite3_prepare_v2(db,
             "UPDATE sessions SET leaf_id=?, updated_at=unixepoch() WHERE id=?",
             -1, &lf, NULL) != SQLITE_OK) {
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             return -1;
         }
         sqlite3_bind_int64(lf, 1, parent_id);
@@ -1135,16 +1124,26 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
         int rc = sqlite3_step(lf);
         sqlite3_finalize(lf);
         if (rc != SQLITE_DONE) {
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             return -1;
         }
     }
 
+    return consumed;
+}
+
+int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
+        return -1;
+    int rc = inbox_consume_into_entries_locked(db, session_id, limit);
+    if (rc < 0) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        return -1;
+    }
     if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         return -1;
     }
-    return consumed;
+    return rc;
 }
 
 /* T88/T202: Spawn queue — cclaw.db only (V73). Daemon inserts inline in reap_children. */

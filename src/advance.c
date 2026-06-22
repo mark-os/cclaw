@@ -58,11 +58,27 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
     }
 
     if (strcmp(state, "idle") == 0) {
-        /* Idle: check inbox for new work */
-        if (inbox_count(db, session_id) > 0) {
-            inbox_consume_into_entries(db, session_id, 100);
+        /* Idle: atomically consume inbox + flip to llm_running */
+        if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+            free(agent);
+            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
+        }
+        int consumed = inbox_consume_into_entries_locked(db, session_id, 100);
+        if (consumed > 0) {
             session_set_iteration(db, session_id, 0);
             session_set_state(db, session_id, "llm_running");
+        }
+        if (consumed < 0) {
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            free(agent);
+            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
+        }
+        if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            free(agent);
+            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
+        }
+        if (consumed > 0) {
             AdvanceOutput out = make_output(ADVANCE_DISPATCH_LLM, session_id, agent, 0);
             free(agent);
             return out;
@@ -119,28 +135,43 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             char *result_text = get_response_text(db, session_id);
             if (!result_text) result_text = strdup("(no response)");
 
-            if (pi.parent_tool_call_id) {
-                /* Blocking mode: write tool result for parent's tool call */
-                ToolResult tr = { .tool_call_id = pi.parent_tool_call_id,
-                                  .content = result_text };
-                Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
-                                 .tool_name = "launch_agent", .is_error = 0 };
-                int64_t rid = entry_append_with_turn(db, pi.parent_session_id,
-                                                    &rmsg, 0);
-                (void)rid;
-                db_tool_call_set_status(db, pi.parent_session_id,
-                                       pi.parent_tool_call_id, "done", NULL);
-                /* Unpark parent */
-                session_set_state(db, pi.parent_session_id, "tool_running");
-            } else {
-                /* Background mode: insert into parent inbox */
-                char payload[256];
-                snprintf(payload, sizeof(payload),
-                         "Sub-agent (session %lld) completed: %.*s",
-                         (long long)session_id, 200, result_text);
-                inbox_insert(db, pi.parent_session_id, "agent_result", payload);
+            int txn_ok = 1;
+            if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+                txn_ok = 0;
             }
-            wake_session(pi.parent_session_id);
+
+            if (txn_ok) {
+                if (pi.parent_tool_call_id) {
+                    /* Blocking mode: write tool result for parent's tool call */
+                    ToolResult tr = { .tool_call_id = pi.parent_tool_call_id,
+                                      .content = result_text };
+                    Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
+                                     .tool_name = "launch_agent", .is_error = 0 };
+                    int64_t rid = entry_append_with_turn(db, pi.parent_session_id,
+                                                        &rmsg, 0);
+                    (void)rid;
+                    db_tool_call_set_status(db, pi.parent_session_id,
+                                           pi.parent_tool_call_id, "done", NULL);
+                    /* Unpark parent */
+                    session_set_state(db, pi.parent_session_id, "tool_running");
+                } else {
+                    /* Background mode: insert into parent inbox */
+                    char payload[256];
+                    snprintf(payload, sizeof(payload),
+                             "Sub-agent (session %lld) completed: %.*s",
+                             (long long)session_id, 200, result_text);
+                    inbox_insert(db, pi.parent_session_id, "agent_result", payload);
+                }
+
+                if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+                    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+                    txn_ok = 0;
+                }
+            }
+
+            if (txn_ok)
+                wake_session(pi.parent_session_id);
+
             free(result_text);
             free(pi.parent_tool_call_id);
         }
@@ -184,12 +215,28 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
     }
 
     if (strcmp(state, "compacting") == 0) {
-        /* Compaction finished — go idle, check for queued work */
+        /* Compaction finished — atomically go idle + check inbox */
+        if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+            free(agent);
+            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
+        }
         session_set_state(db, session_id, "idle");
-        if (inbox_count(db, session_id) > 0) {
-            inbox_consume_into_entries(db, session_id, 100);
+        int consumed = inbox_consume_into_entries_locked(db, session_id, 100);
+        if (consumed > 0) {
             session_set_iteration(db, session_id, 0);
             session_set_state(db, session_id, "llm_running");
+        }
+        if (consumed < 0) {
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            free(agent);
+            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
+        }
+        if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            free(agent);
+            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
+        }
+        if (consumed > 0) {
             AdvanceOutput out = make_output(ADVANCE_DISPATCH_LLM, session_id, agent, 0);
             free(agent);
             return out;

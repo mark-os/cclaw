@@ -1590,15 +1590,10 @@ MemoryBlock *memory_block_list(sqlite3 *db, const char *agent_name, int *count) 
 }
 
 int memory_block_set_value(sqlite3 *db, const char *agent_name, const char *label, const char *value) {
-    /* V55: check read_only + char_limit */
-    MemoryBlock *mb = memory_block_get(db, agent_name, label);
-    if (!mb) return -1;
-    if (mb->read_only) { memory_block_free(mb); return -1; }
-    if (value && (int)strlen(value) > mb->char_limit) { memory_block_free(mb); return -1; }
-    memory_block_free(mb);
-
-    const char *sql = "UPDATE memory_blocks SET value=?, updated_at=unixepoch()"
-                      " WHERE agent_name=? AND label=?;";
+    /* Guarded UPDATE: read_only + char_limit enforced in WHERE (TOCTOU-free). */
+    const char *sql = "UPDATE memory_blocks SET value=?1, updated_at=unixepoch()"
+                      " WHERE agent_name=?2 AND label=?3 AND read_only=0"
+                      " AND length(?1) <= char_limit;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, value ? value : "", -1, SQLITE_STATIC);
@@ -1606,7 +1601,7 @@ int memory_block_set_value(sqlite3 *db, const char *agent_name, const char *labe
     sqlite3_bind_text(stmt, 3, label, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
 }
 
 /* memory_entries CRUD */
@@ -1663,6 +1658,31 @@ int memory_entry_add(sqlite3 *db, const char *agent_name,
     if (sqlite3_step(stmt) == SQLITE_ROW) pos = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
     return pos;
+}
+
+int memory_entry_add_guarded(sqlite3 *db, const char *agent_name,
+                             const char *block_label, const char *text) {
+    /* Append entry only if sum of existing + new fits char_limit and block is writable. */
+    const char *sql =
+        "INSERT INTO memory_entries (agent_name, block_label, pos, text)"
+        " SELECT ?1, ?2,"
+        " (SELECT COALESCE(MAX(pos),0)+1 FROM memory_entries WHERE agent_name=?1 AND block_label=?2),"
+        " ?3"
+        " WHERE EXISTS ("
+        "  SELECT 1 FROM memory_blocks b"
+        "  WHERE b.agent_name=?1 AND b.label=?2 AND b.read_only=0"
+        "   AND (SELECT COALESCE(SUM(length(text)),0) FROM memory_entries"
+        "        WHERE agent_name=?1 AND block_label=?2) + length(?3) <= b.char_limit"
+        ");";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, block_label, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, text, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    return (sqlite3_changes(db) == 1) ? 1 : 0;
 }
 
 int memory_entry_set(sqlite3 *db, const char *agent_name,

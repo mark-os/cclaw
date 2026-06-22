@@ -156,25 +156,11 @@ static char *tool_memory_add_handler(const char *arguments, void *user_data) {
     MemoryBlock *mb = memory_block_get(ctx->db, ctx->agent_name, block);
     if (!mb) { tool_parse_free(&ta); return strdup("error: block not found"); }
     if (mb->read_only) { memory_block_free(mb); tool_parse_free(&ta); return strdup("error: block is read-only"); }
-
-    /* Check char_limit against sum of existing entry text + new text */
-    int ecount = 0;
-    MemoryEntry *entries = memory_entries_list(ctx->db, ctx->agent_name, block, &ecount);
-    size_t used = 0;
-    for (int i = 0; i < ecount; i++)
-        used += entries[i].text ? strlen(entries[i].text) : 0;
-    if (entries) memory_entries_free(entries, ecount);
-
-    size_t add_len = strlen(text);
-    if ((int)(used + add_len) > mb->char_limit) {
-        memory_block_free(mb);
-        tool_parse_free(&ta);
-        return strdup("error: would exceed char_limit");
-    }
     memory_block_free(mb);
 
-    int pos = memory_entry_add(ctx->db, ctx->agent_name, block, text);
-    if (pos < 0) { tool_parse_free(&ta); return strdup("error: failed to add entry"); }
+    int rc = memory_entry_add_guarded(ctx->db, ctx->agent_name, block, text);
+    if (rc == 0) { tool_parse_free(&ta); return strdup("error: would exceed char_limit"); }
+    if (rc < 0) { tool_parse_free(&ta); return strdup("error: failed to add entry"); }
 
     /* Render while `block` (owned by ta) is still valid, then free ta. */
     char *out = render_block(ctx->db, ctx->agent_name, block);

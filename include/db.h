@@ -285,6 +285,12 @@ void memory_entries_free(MemoryEntry *list, int count);
 int memory_entry_add(sqlite3 *db, const char *agent_name,
                      const char *block_label, const char *text);
 
+/* Append a memory entry only if (sum of existing entry lengths + new text)
+ * fits char_limit and the block is writable. Returns 1 if inserted, 0 if the
+ * guard rejected it (over limit / read-only / missing), -1 on error. */
+int memory_entry_add_guarded(sqlite3 *db, const char *agent_name,
+                             const char *block_label, const char *text);
+
 /* Replace the text of the entry at the given number/pos.
  * Returns 0 on success, -1 if no entry has that number. */
 int memory_entry_set(sqlite3 *db, const char *agent_name,

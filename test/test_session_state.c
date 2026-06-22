@@ -3,6 +3,8 @@
 #include "test_util.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static void test_valid_transitions(void) {
     sqlite3 *db = test_db_open(":memory:");
@@ -117,6 +119,68 @@ static void test_waiting_transition(void) {
     printf("  PASS test_waiting_transition\n");
 }
 
+/* H1/H4/H5: startup crash recovery resets every transient/waiting state to
+ * idle, zeroes turn_iteration, and reconciles orphaned pending tool_calls. */
+static void force_state(sqlite3 *db, int64_t sid, const char *state, int iter) {
+    char sql[160];
+    snprintf(sql, sizeof(sql),
+        "UPDATE sessions SET state='%s', turn_iteration=%d WHERE id=%lld;",
+        state, iter, (long long)sid);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+}
+
+static void test_startup_recovery(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
+
+    /* One session stuck in each non-idle state a crash can strand. */
+    const char *stuck[] = {"llm_running","tool_running","compacting",
+                           "awaiting_agent","awaiting_approval","rate_limited"};
+    int64_t ids[6];
+    for (int i = 0; i < 6; i++) {
+        ids[i] = session_create(db, "t", NULL, -1, 0);
+        assert(ids[i] > 0);
+        force_state(db, ids[i], stuck[i], 7 /* non-zero iteration */);
+    }
+    /* A control session left idle must be untouched. */
+    int64_t idle_id = session_create(db, "t", NULL, -1, 0);
+    force_state(db, idle_id, "idle", 0);
+
+    /* An orphaned pending tool_call: fork happened, result never written. */
+    int64_t tc_sid = ids[1]; /* the tool_running one */
+    assert(sqlite3_exec(db,
+        "INSERT INTO tool_calls (session_id, entry_id, call_id, name, status)"
+        " VALUES ((SELECT id FROM sessions WHERE state='tool_running' LIMIT 1),"
+        " 1, 'call_orphan', 'shell_exec', 'pending');",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    /* Recover. */
+    assert(db_recover_stale_sessions(db) == 0);
+
+    /* Every stuck session is now idle with turn_iteration zeroed. */
+    for (int i = 0; i < 6; i++) {
+        char *st = db_scalar_text(db, "SELECT state FROM sessions WHERE id=?;", ids[i]);
+        assert(st && strcmp(st, "idle") == 0);
+        free(st);
+        assert(session_get_iteration(db, ids[i]) == 0);
+    }
+
+    /* The orphaned call no longer resurfaces as pending... */
+    int n = -1;
+    PendingToolCall *p = db_tool_call_get_pending(db, tc_sid, &n);
+    assert(n == 0);
+    db_tool_call_free_pending(p, n);
+
+    /* ...and a synthetic error tool_result keeps the branch well-formed. */
+    int64_t res = db_scalar_i64(db,
+        "SELECT COUNT(*) FROM entries WHERE session_id=? AND type='tool_result'"
+        " AND tool_call_id='call_orphan';", tc_sid, -1);
+    assert(res == 1);
+
+    db_close(db);
+    printf("  PASS test_startup_recovery\n");
+}
+
 int main(void) {
     printf("test_session_state:\n");
     test_valid_transitions();
@@ -124,6 +188,7 @@ int main(void) {
     test_concurrent_acquire();
     test_turn_iteration();
     test_waiting_transition();
+    test_startup_recovery();
     printf("All session state tests passed.\n");
     return 0;
 }

@@ -1756,3 +1756,80 @@ int rate_limit_check(sqlite3 *db, const char *provider_name) {
     sqlite3_finalize(us);
     return used < limit ? 1 : 0;
 }
+
+/* Startup crash recovery: the daemon loop is edge-triggered, so any session
+ * left in a transient/waiting state by a crash never gets re-advanced. Reset
+ * them all to idle (zeroing turn_iteration) and reconcile orphaned pending
+ * tool_calls — a fork happened but the result was never written — by writing a
+ * synthetic error tool_result and marking the call done, so the branch stays
+ * well-formed and the call is not re-dispatched. Returns 0 on success, -1 on error. */
+int db_recover_stale_sessions(sqlite3 *db) {
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
+        return -1;
+
+    /* a) Reset transient states + zero iteration */
+    const char *reset_sql =
+        "UPDATE sessions SET state='idle', turn_iteration=0, updated_at=unixepoch()"
+        " WHERE state IN ('llm_running','tool_running','compacting',"
+        "'awaiting_agent','awaiting_approval','rate_limited');";
+    if (sqlite3_exec(db, reset_sql, NULL, NULL, NULL) != SQLITE_OK)
+        goto rollback;
+
+    /* b) Collect orphaned pending tool_calls */
+    const char *orphan_sql =
+        "SELECT session_id, call_id, name FROM tool_calls"
+        " WHERE status='pending'"
+        "   AND NOT EXISTS (SELECT 1 FROM entries e"
+        "                   WHERE e.session_id = tool_calls.session_id"
+        "                     AND e.tool_call_id = tool_calls.call_id"
+        "                     AND e.type='tool_result');";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, orphan_sql, -1, &stmt, NULL) != SQLITE_OK)
+        goto rollback;
+
+    typedef struct { int64_t session_id; char *call_id; char *name; } OrphanRow;
+    int cap = 8, count = 0;
+    OrphanRow *rows = malloc(cap * sizeof(OrphanRow));
+    if (!rows) { sqlite3_finalize(stmt); goto rollback; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            OrphanRow *tmp = realloc(rows, cap * sizeof(OrphanRow));
+            if (!tmp) { sqlite3_finalize(stmt); goto free_rollback; }
+            rows = tmp;
+        }
+        rows[count].session_id = sqlite3_column_int64(stmt, 0);
+        rows[count].call_id = strdup((const char *)sqlite3_column_text(stmt, 1));
+        rows[count].name = strdup((const char *)sqlite3_column_text(stmt, 2));
+        count++;
+    }
+    sqlite3_finalize(stmt);
+
+    /* Write synthetic error results + mark done */
+    for (int i = 0; i < count; i++) {
+        ToolResult tr = {.tool_call_id = rows[i].call_id,
+                         .content = "error: interrupted by daemon restart"};
+        Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                       .tool_name = rows[i].name, .is_error = 1};
+        if (entry_append_with_turn(db, rows[i].session_id, &msg, 0) < 0)
+            goto free_rollback;
+        if (db_tool_call_set_status(db, rows[i].session_id, rows[i].call_id,
+                                    "done", "recovery") != 0)
+            goto free_rollback;
+    }
+
+    for (int i = 0; i < count; i++) { free(rows[i].call_id); free(rows[i].name); }
+    free(rows);
+
+    if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
+        return -1;
+    return 0;
+
+free_rollback:
+    for (int i = 0; i < count; i++) { free(rows[i].call_id); free(rows[i].name); }
+    free(rows);
+rollback:
+    sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+    return -1;
+}

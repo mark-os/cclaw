@@ -1544,6 +1544,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* ── Startup crash recovery (covers both CLI and daemon — a prior crashed
+     * -p run can leave a stale session that hangs the edge-triggered loop) ── */
+    if (db_recover_stale_sessions(g_db) != 0)
+        fprintf(stderr, "warning: startup recovery failed\n");
+
     /* ── Daemon mode ─────────────────────────────────────────────── */
 
     if (daemon_mode) {
@@ -1561,10 +1566,6 @@ int main(int argc, char *argv[]) {
         }
         int daemon_worker_fd = llm_worker_fd();
         set_nonblock(daemon_worker_fd);
-
-        /* Startup recovery — reset stale sessions */
-        {   const char *rsql = "UPDATE sessions SET state='idle' WHERE state IN ('running','llm_running','tool_running','compacting');";
-            sqlite3_exec(g_db, rsql, NULL, NULL, NULL); }
 
         /* Init wake pipe + FIFO */
         wake_init();

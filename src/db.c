@@ -446,25 +446,47 @@ void entry_branch_free(Entry *entries, int count) {
 }
 
 /* T263: Get latest assistant response text from session branch.
- * Note: OpenClaw concatenates ALL non-empty assistant texts from the turn as
- * fallback; we only return the last non-empty one. Revisit if needed.
+ * Walks parent chain from leaf; returns first non-empty assistant content,
+ * stops at user boundary. No full-branch materialization.
  * Returns heap-allocated string or NULL if no deliverable content. */
 char *get_response_text(sqlite3 *db, int64_t session_id) {
-    int count = 0;
-    Entry *entries = session_get_branch(db, session_id, &count);
-    if (!entries || count == 0) return NULL;
+    /* Get leaf_id */
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT leaf_id FROM sessions WHERE id=?",
+                           -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); return NULL; }
+    int64_t leaf_id = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    if (leaf_id < 0) return NULL;
+
+    const char *sql =
+        "WITH RECURSIVE branch(id, parent_id, role, content, lvl) AS ("
+        "  SELECT id, parent_id, role, content, 0"
+        "    FROM entries WHERE id=? AND session_id=?"
+        "  UNION ALL"
+        "  SELECT e.id, e.parent_id, e.role, e.content, b.lvl+1"
+        "    FROM entries e JOIN branch b ON e.id=b.parent_id"
+        "    WHERE b.lvl < 10000"
+        ") SELECT role, content FROM branch"
+        "  WHERE (role=2 AND content IS NOT NULL AND content != '') OR role=1"
+        "  ORDER BY lvl ASC LIMIT 1;";
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(stmt, 1, leaf_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
 
     char *result = NULL;
-    for (int i = count - 1; i >= 0; i--) {
-        if (entries[i].message.role == ROLE_ASSISTANT &&
-            entries[i].message.content && entries[i].message.content[0]) {
-            result = strdup(entries[i].message.content);
-            break;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        int role = sqlite3_column_int(stmt, 0);
+        if (role == 2) {
+            const char *c = (const char *)sqlite3_column_text(stmt, 1);
+            if (c) result = strdup(c);
         }
-        /* Stop at user boundary — don't leak previous turn's response */
-        if (entries[i].message.role == ROLE_USER) break;
     }
-    entry_branch_free(entries, count);
+    sqlite3_finalize(stmt);
     return result;
 }
 
@@ -1378,32 +1400,27 @@ int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
         return -1;
 
-    /* Check agent exists */
+    /* Check exists, busy sessions, and name conflict in one query */
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, "SELECT 1 FROM agents WHERE name=?", -1, &s, NULL) != SQLITE_OK)
-        goto rollback_busy;
-    sqlite3_bind_text(s, 1, old_name, -1, SQLITE_STATIC);
-    int found = (sqlite3_step(s) == SQLITE_ROW);
-    sqlite3_finalize(s);
-    if (!found) { sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL); return -4; }
-
-    /* Check no active sessions (excluding the requesting one) */
     if (sqlite3_prepare_v2(db,
-        "SELECT COUNT(*) FROM sessions WHERE agent_name=? AND state!='idle' AND id!=?",
+        "SELECT EXISTS(SELECT 1 FROM agents WHERE name=?1),"
+        " (SELECT COUNT(*) FROM sessions WHERE agent_name=?1 AND state!='idle' AND id!=?2),"
+        " EXISTS(SELECT 1 FROM agents WHERE name=?3)",
         -1, &s, NULL) != SQLITE_OK) goto rollback_busy;
     sqlite3_bind_text(s, 1, old_name, -1, SQLITE_STATIC);
     sqlite3_bind_int64(s, 2, requesting_session_id);
-    int busy = 0;
-    if (sqlite3_step(s) == SQLITE_ROW) busy = sqlite3_column_int(s, 0);
-    sqlite3_finalize(s);
-    if (busy > 0) { sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL); return -1; }
+    sqlite3_bind_text(s, 3, new_name, -1, SQLITE_STATIC);
 
-    /* Check new name not taken */
-    if (sqlite3_prepare_v2(db, "SELECT 1 FROM agents WHERE name=?", -1, &s, NULL) != SQLITE_OK)
-        goto rollback_busy;
-    sqlite3_bind_text(s, 1, new_name, -1, SQLITE_STATIC);
-    int conflict = (sqlite3_step(s) == SQLITE_ROW);
+    int found = 0, busy = 0, conflict = 0;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        found = sqlite3_column_int(s, 0);
+        busy = sqlite3_column_int(s, 1);
+        conflict = sqlite3_column_int(s, 2);
+    }
     sqlite3_finalize(s);
+
+    if (!found) { sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL); return -4; }
+    if (busy > 0) { sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL); return -1; }
     if (conflict) { sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL); return -2; }
 
     /* Cascade rename across all tables */

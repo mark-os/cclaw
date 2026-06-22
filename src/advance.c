@@ -19,29 +19,29 @@ static AdvanceOutput make_output(AdvanceResult action, int64_t sid,
 AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iterations) {
     if (max_iterations <= 0) max_iterations = DEFAULT_MAX_ITER;
 
-    /* Read session state + agent */
-    char *agent = session_get_agent_name(db, session_id);
-    if (!agent)
-        return make_output(ADVANCE_ERROR, session_id, NULL, 0);
-
-    /* Read state */
+    /* Read agent_name, state, turn_iteration in one query */
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?",
-                           -1, &stmt, NULL) != SQLITE_OK) {
-        free(agent);
+    if (sqlite3_prepare_v2(db,
+            "SELECT agent_name, state, turn_iteration FROM sessions WHERE id=?",
+            -1, &stmt, NULL) != SQLITE_OK)
         return make_output(ADVANCE_ERROR, session_id, NULL, 0);
-    }
     sqlite3_bind_int64(stmt, 1, session_id);
+
+    char *agent = NULL;
     char state[32] = {0};
+    int iter = 0;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *s = (const char *)sqlite3_column_text(stmt, 0);
+        const char *a = (const char *)sqlite3_column_text(stmt, 0);
+        const char *s = (const char *)sqlite3_column_text(stmt, 1);
+        if (a) agent = strdup(a);
         if (s) snprintf(state, sizeof(state), "%s", s);
+        iter = sqlite3_column_int(stmt, 2);
     }
     sqlite3_finalize(stmt);
 
+    if (!agent)
+        return make_output(ADVANCE_ERROR, session_id, NULL, 0);
     if (!state[0]) { free(agent); return make_output(ADVANCE_ERROR, session_id, NULL, 0); }
-
-    int iter = session_get_iteration(db, session_id);
 
     /* ── State machine ───────────────────────────────────── */
 

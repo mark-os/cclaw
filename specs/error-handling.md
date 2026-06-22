@@ -30,7 +30,7 @@ LLM API calls fail in many ways. This doc classifies failure modes, defines reco
 ## Zero-Usage Retry Flow (E1)
 
 ```
-agent_run loop iteration:
+advance_session turn-loop iteration:
   1. context_plan() → entry IDs
   2. llm_call_with_fallback_stream() → HTTP 200
   3. llm_parse_response() → success

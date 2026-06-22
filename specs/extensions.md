@@ -6,11 +6,11 @@ An extension is a single JS package that can provide any combination of:
 
 | Component | Runs in | Lifecycle |
 |-----------|---------|-----------|
-| Tools | agent process (inside `agent_run`) | per-turn, fresh each turn |
-| Hooks | agent process (inside `agent_run`) | per-turn, fresh each turn |
+| Tools | agent process (the `advance_session` turn loop) | per-turn, fresh each turn |
+| Hooks | agent process (the `advance_session` turn loop) | per-turn, fresh each turn |
 | Channel | separate process (daemon-managed) | long-lived, restarted on crash |
 
-Tools and hooks are **agent-side** — they execute inside the agent process as part of `agent_run`, same as built-in tools. They share the agent's QuickJS heap, permissions, and turn lifecycle.
+Tools and hooks are **agent-side** — they execute inside the agent process as part of the `advance_session` turn loop, same as built-in tools. They share the agent's QuickJS heap, permissions, and turn lifecycle.
 
 Channel components are **special** — they run as separate processes with their own event loop, communicating with the daemon via the channel API (V98–V108). A channel extension provides a binary (or script) that the daemon launches and monitors.
 
@@ -60,7 +60,7 @@ Load order: alphabetical by filename/dirname.
 
 ## Agent-Side Component (Tools + Hooks)
 
-Runs inside `agent_run` in the shared QuickJS context. Loaded fresh each turn (process is disposable — no persistent JS state beyond what's in cclaw.db).
+Runs inside the `advance_session` turn loop in the shared QuickJS context. Loaded fresh each turn (process is disposable — no persistent JS state beyond what's in cclaw.db).
 
 ### Factory Function
 
@@ -105,7 +105,7 @@ function(cclaw) {
 
 | Event | Signature | Can modify | Notes |
 |-------|-----------|-----------|-------|
-| `turnStart` | `fn()` | — | Informational. Called at agent_run entry. |
+| `turnStart` | `fn()` | — | Informational. Called at turn-loop entry. |
 | `beforeRequest` | `fn(messages) → messages\|void` | messages array | Chain in load order. Return modified array or void. |
 | `afterResponse` | `fn(response)` | — | Read-only inspect of parsed LLM response. |
 | `beforeToolCall` | `fn({name, args}) → {block, reason}\|void` | args (mutate in place) | First `{block:true}` wins. |

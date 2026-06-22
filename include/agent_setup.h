@@ -24,7 +24,7 @@ typedef struct {
     JsSessionRuntime *js_rt;
     /* Live-refreshable capability arrays from grants table */
     AgentCaps caps;
-    /* Contexts that tools reference (must stay alive during agent_run) */
+    /* Contexts that tools reference (must stay alive across the turn loop) */
     FileReadCtx file_read_ctx;
     JsEvalCtx js_eval_ctx;
     HttpPolicy web_policy;

@@ -357,7 +357,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     context_plan_free(&plan); memset(&plan, 0, sizeof(plan));
 
     if (!llm_ok) {
-        int64_t turn_id = db_next_turn_id(db, session_id);
         const char *err_text =
             last_status == -2 ? "error: request timed out"
             : last_status == -1 ? "error: network error"
@@ -368,7 +367,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             : "error: LLM request failed";
         Message err_msg = {.role = ROLE_ASSISTANT, .content = (char *)err_text,
                            .stop_reason = STOP_REASON_ERROR, .model = cfg->provider.model};
-        entry_append_with_turn(db, session_id, &err_msg, turn_id);
+        entry_append_with_turn(db, session_id, &err_msg, 0);
         goto err;
     }
 

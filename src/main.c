@@ -159,11 +159,10 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
 
     int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations : DEFAULT_MAX_ITERATIONS;
     if (iteration >= max_iter) {
-        int64_t turn_id = db_next_turn_id(g_db, session_id);
         Message msg = {.role = ROLE_ASSISTANT,
                        .content = "error: max iterations reached",
                        .stop_reason = STOP_REASON_ERROR};
-        entry_append_with_turn(g_db, session_id, &msg, turn_id);
+        entry_append_with_turn(g_db, session_id, &msg, 0);
         session_set_state(g_db, session_id, "idle");
         if (g_mode == 0) {
             fprintf(stderr, "\nerror: max iterations reached\n");
@@ -553,13 +552,12 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         /* ── "rerun": the frozen tool_call proceeds on approval. ── */
         if (decision == APPROVAL_DENY) {
             if (a->tool_call_id) {
-                int64_t turn_id = db_next_turn_id(g_db, session_id);
                 char buf[160];
                 snprintf(buf, sizeof(buf), "error: %s denied (%s)", a->action, decided_via);
                 ToolResult tr = { .tool_call_id = a->tool_call_id, .content = buf };
                 Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                                 .tool_name = a->action, .is_error = 1 };
-                entry_append_with_turn(g_db, session_id, &msg, turn_id);
+                entry_append_with_turn(g_db, session_id, &msg, 0);
                 db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
             }
         } else if (decision == APPROVAL_ALWAYS && agent) {
@@ -583,11 +581,10 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         snprintf(err, sizeof(err),
                  "error: once-approval invalid for %s", a->action);
         if (a->tool_call_id) {
-            int64_t turn_id = db_next_turn_id(g_db, session_id);
             ToolResult tr = { .tool_call_id = a->tool_call_id, .content = err };
             Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                             .tool_name = a->tool_name, .is_error = 1 };
-            entry_append_with_turn(g_db, session_id, &msg, turn_id);
+            entry_append_with_turn(g_db, session_id, &msg, 0);
             db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
         }
         session_set_state(g_db, session_id, "tool_running");
@@ -675,12 +672,11 @@ rename_done:
                  decided_via, a->action);
 
     if (a->tool_call_id) {
-        int64_t turn_id = db_next_turn_id(g_db, session_id);
         ToolResult tr = { .tool_call_id = a->tool_call_id, .content = result_buf };
         Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                         .tool_name = a->tool_name,
                         .is_error = (decision == APPROVAL_DENY || rename_failed) };
-        entry_append_with_turn(g_db, session_id, &msg, turn_id);
+        entry_append_with_turn(g_db, session_id, &msg, 0);
         db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
     }
 

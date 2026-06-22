@@ -121,13 +121,12 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
 
             if (pi.parent_tool_call_id) {
                 /* Blocking mode: write tool result for parent's tool call */
-                int64_t parent_turn = db_next_turn_id(db, pi.parent_session_id);
                 ToolResult tr = { .tool_call_id = pi.parent_tool_call_id,
                                   .content = result_text };
                 Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
                                  .tool_name = "launch_agent", .is_error = 0 };
                 int64_t rid = entry_append_with_turn(db, pi.parent_session_id,
-                                                    &rmsg, parent_turn);
+                                                    &rmsg, 0);
                 (void)rid;
                 db_tool_call_set_status(db, pi.parent_session_id,
                                        pi.parent_tool_call_id, "done", NULL);
@@ -169,11 +168,10 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         int new_iter = session_bump_iteration(db, session_id);
         if (new_iter >= max_iterations) {
             /* Hit iteration cap */
-            int64_t turn_id = db_next_turn_id(db, session_id);
             Message msg = { .role = ROLE_ASSISTANT,
                             .content = "error: max iterations reached",
                             .stop_reason = STOP_REASON_ERROR };
-            entry_append_with_turn(db, session_id, &msg, turn_id);
+            entry_append_with_turn(db, session_id, &msg, 0);
             session_set_state(db, session_id, "idle");
             AdvanceOutput out = make_output(ADVANCE_DONE, session_id, agent, new_iter);
             free(agent);

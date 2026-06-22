@@ -198,6 +198,13 @@ CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
   );
 END;
 
+-- Leaf advance is atomic with insert; compaction excluded (entry_compact inserts mid-branch)
+CREATE TRIGGER IF NOT EXISTS entries_leaf_ai AFTER INSERT ON entries
+WHEN NEW.type != 'compaction'
+BEGIN
+  UPDATE sessions SET leaf_id = NEW.id, updated_at = unixepoch() WHERE id = NEW.session_id;
+END;
+
 -- ═══ Tool calls ═══
 CREATE TABLE IF NOT EXISTS tool_calls (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

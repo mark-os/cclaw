@@ -698,6 +698,7 @@ int64_t db_next_turn_id(sqlite3 *db, int64_t session_id) {
     return db_scalar_i64(db, "SELECT COALESCE(MAX(turn_id), 0) + 1 FROM entries WHERE session_id=?;", session_id, 1);
 }
 
+/* Retained for tests and callers outside append paths (trigger handles append) */
 int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id) {
     const char *sql = "UPDATE sessions SET leaf_id=?, updated_at=unixepoch() WHERE id=?;";
     sqlite3_stmt *stmt;
@@ -712,40 +713,45 @@ int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id) {
 
 /* V17: append entry with explicit turn_id */
 int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *msg, int64_t turn_id) {
-    /* Get current leaf_id */
-    const char *sql = "SELECT leaf_id FROM sessions WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    if (sqlite3_step(stmt) != SQLITE_ROW) {
-        sqlite3_finalize(stmt);
-        return -1;
-    }
-    int64_t parent_id = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
+    /* parent_id and turn_id computed as subqueries — atomic with the INSERT
+     * via the entries_leaf_ai trigger (no separate SELECT + set_leaf). */
+    const char *ins_sql = turn_id > 0
+        ? "INSERT INTO entries (parent_id, session_id, turn_id, type, part_index, role, content, tool_calls,"
+          " tool_call_id, tool_name, is_error, stop_reason, model,"
+          " usage_in, usage_out, cost_nano, token_estimate, content_bytes, tool_call_count, data)"
+          " VALUES ((SELECT leaf_id FROM sessions WHERE id=?1),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19);"
+        : "INSERT INTO entries (parent_id, session_id, turn_id, type, part_index, role, content, tool_calls,"
+          " tool_call_id, tool_name, is_error, stop_reason, model,"
+          " usage_in, usage_out, cost_nano, token_estimate, content_bytes, tool_call_count, data)"
+          " VALUES ((SELECT leaf_id FROM sessions WHERE id=?1),?1,"
+          "(SELECT COALESCE(MAX(turn_id),0)+1 FROM entries WHERE session_id=?1),"
+          "?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18);";
 
-    const char *ins_sql =
-        "INSERT INTO entries (parent_id, session_id, turn_id, type, part_index, role, content, tool_calls,"
-        " tool_call_id, tool_name, is_error, stop_reason, model,"
-        " usage_in, usage_out, cost_nano, token_estimate, content_bytes, tool_call_count, data)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+    sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, ins_sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
-    sqlite3_bind_int64(stmt, 1, parent_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    sqlite3_bind_int64(stmt, 3, turn_id);
-    sqlite3_bind_text(stmt, 4, type_from_role(msg), -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 5, 0); /* part_index default */
-    sqlite3_bind_int(stmt, 6, role_to_int(msg->role));
+
+    int b; /* next bind index */
+    sqlite3_bind_int64(stmt, 1, session_id);
+    if (turn_id > 0) {
+        sqlite3_bind_int64(stmt, 2, turn_id);
+        b = 3;
+    } else {
+        b = 2;
+    }
+
+    sqlite3_bind_text(stmt, b, type_from_role(msg), -1, SQLITE_STATIC); b++;
+    sqlite3_bind_int(stmt, b, 0); b++; /* part_index */
+    sqlite3_bind_int(stmt, b, role_to_int(msg->role)); b++;
 
     const char *content_val = NULL;
     if (msg->role == ROLE_TOOL && msg->tool_result)
         content_val = msg->tool_result->content;
     else
         content_val = msg->content;
-    if (content_val) sqlite3_bind_text(stmt, 7, content_val, -1, SQLITE_TRANSIENT);
-    else sqlite3_bind_null(stmt, 7);
+    if (content_val) sqlite3_bind_text(stmt, b, content_val, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, b);
+    b++;
 
     char *tc_json = NULL;
     int tc_count = 0;
@@ -753,57 +759,53 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
         tc_json = serialize_tool_calls(db, msg->tool_calls, msg->tool_call_count);
         tc_count = (int)msg->tool_call_count;
     }
-    if (tc_json) sqlite3_bind_text(stmt, 8, tc_json, -1, SQLITE_TRANSIENT);
-    else sqlite3_bind_null(stmt, 8);
+    if (tc_json) sqlite3_bind_text(stmt, b, tc_json, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, b);
+    b++;
 
     if (msg->role == ROLE_TOOL && msg->tool_result && msg->tool_result->tool_call_id)
-        sqlite3_bind_text(stmt, 9, msg->tool_result->tool_call_id, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, b, msg->tool_result->tool_call_id, -1, SQLITE_TRANSIENT);
     else
-        sqlite3_bind_null(stmt, 9);
+        sqlite3_bind_null(stmt, b);
+    b++;
 
-    /* tool_name */
-    if (msg->tool_name) sqlite3_bind_text(stmt, 10, msg->tool_name, -1, SQLITE_TRANSIENT);
-    else sqlite3_bind_null(stmt, 10);
+    if (msg->tool_name) sqlite3_bind_text(stmt, b, msg->tool_name, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, b);
+    b++;
 
-    /* is_error */
-    sqlite3_bind_int(stmt, 11, msg->is_error);
+    sqlite3_bind_int(stmt, b, msg->is_error); b++;
+    sqlite3_bind_int(stmt, b, stop_reason_to_int(msg->stop_reason)); b++;
 
-    /* stop_reason */
-    sqlite3_bind_int(stmt, 12, stop_reason_to_int(msg->stop_reason));
+    if (msg->model) sqlite3_bind_text(stmt, b, msg->model, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, b);
+    b++;
 
-    /* model */
-    if (msg->model) sqlite3_bind_text(stmt, 13, msg->model, -1, SQLITE_TRANSIENT);
-    else sqlite3_bind_null(stmt, 13);
+    if (msg->usage_in > 0) sqlite3_bind_int(stmt, b, msg->usage_in);
+    else sqlite3_bind_null(stmt, b);
+    b++;
+    if (msg->usage_out > 0) sqlite3_bind_int(stmt, b, msg->usage_out);
+    else sqlite3_bind_null(stmt, b);
+    b++;
 
-    /* usage */
-    if (msg->usage_in > 0) sqlite3_bind_int(stmt, 14, msg->usage_in);
-    else sqlite3_bind_null(stmt, 14);
-    if (msg->usage_out > 0) sqlite3_bind_int(stmt, 15, msg->usage_out);
-    else sqlite3_bind_null(stmt, 15);
+    if (msg->cost_nano > 0) sqlite3_bind_int64(stmt, b, msg->cost_nano);
+    else sqlite3_bind_null(stmt, b);
+    b++;
 
-    /* cost */
-    if (msg->cost_nano > 0) sqlite3_bind_int64(stmt, 16, msg->cost_nano);
-    else sqlite3_bind_null(stmt, 16);
-
-    /* token_estimate + content_bytes */
     int content_len = content_val ? (int)strlen(content_val) : 0;
     int tc_len = tc_json ? (int)strlen(tc_json) : 0;
     int total_bytes = content_len + tc_len;
-    sqlite3_bind_int(stmt, 17, (total_bytes / 4) + 4);
-    sqlite3_bind_int(stmt, 18, total_bytes);
-    sqlite3_bind_int(stmt, 19, tc_count);
-    if (msg->metadata_json) sqlite3_bind_text(stmt, 20, msg->metadata_json, -1, SQLITE_TRANSIENT);
-    else sqlite3_bind_null(stmt, 20);
+    sqlite3_bind_int(stmt, b, (total_bytes / 4) + 4); b++;
+    sqlite3_bind_int(stmt, b, total_bytes); b++;
+    sqlite3_bind_int(stmt, b, tc_count); b++;
+    if (msg->metadata_json) sqlite3_bind_text(stmt, b, msg->metadata_json, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, b);
     free(tc_json);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
 
-    int64_t entry_id = sqlite3_last_insert_rowid(db);
-    if (session_set_leaf(db, session_id, entry_id) != 0)
-        return -1;
-    return entry_id;
+    return sqlite3_last_insert_rowid(db);
 }
 
 /* Append a flat typed entry — the new event-sourced API. */
@@ -824,56 +826,45 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
     else if (strcmp(type, "tool_result") == 0) role = 3;
     else if (strcmp(type, "compaction") == 0) role = 4;
 
-    /* Get current leaf */
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "SELECT leaf_id FROM sessions WHERE id=?;", -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); return -1; }
-    int64_t parent_id = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
-
+    /* parent_id via subquery — atomic with INSERT via entries_leaf_ai trigger */
     const char *sql =
         "INSERT INTO entries (parent_id, session_id, turn_id, type, part_index, role,"
         " content, tool_call_id, tool_name, is_error, stop_reason, model,"
         " usage_in, usage_out, cost_nano, token_estimate, content_bytes)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+        " VALUES ((SELECT leaf_id FROM sessions WHERE id=?1),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16);";
+    sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
-    sqlite3_bind_int64(stmt, 1, parent_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    sqlite3_bind_int64(stmt, 3, turn_id);
-    sqlite3_bind_text(stmt, 4, type, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 5, part_index);
-    sqlite3_bind_int(stmt, 6, role);
-    if (content) sqlite3_bind_text(stmt, 7, content, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_int64(stmt, 2, turn_id);
+    sqlite3_bind_text(stmt, 3, type, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, part_index);
+    sqlite3_bind_int(stmt, 5, role);
+    if (content) sqlite3_bind_text(stmt, 6, content, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, 6);
+    if (tool_call_id) sqlite3_bind_text(stmt, 7, tool_call_id, -1, SQLITE_TRANSIENT);
     else sqlite3_bind_null(stmt, 7);
-    if (tool_call_id) sqlite3_bind_text(stmt, 8, tool_call_id, -1, SQLITE_TRANSIENT);
+    if (tool_name) sqlite3_bind_text(stmt, 8, tool_name, -1, SQLITE_TRANSIENT);
     else sqlite3_bind_null(stmt, 8);
-    if (tool_name) sqlite3_bind_text(stmt, 9, tool_name, -1, SQLITE_TRANSIENT);
-    else sqlite3_bind_null(stmt, 9);
-    sqlite3_bind_int(stmt, 10, is_error);
-    sqlite3_bind_int(stmt, 11, stop_reason_to_int(stop_reason));
-    if (model) sqlite3_bind_text(stmt, 12, model, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 9, is_error);
+    sqlite3_bind_int(stmt, 10, stop_reason_to_int(stop_reason));
+    if (model) sqlite3_bind_text(stmt, 11, model, -1, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(stmt, 11);
+    if (usage_in > 0) sqlite3_bind_int(stmt, 12, usage_in);
     else sqlite3_bind_null(stmt, 12);
-    if (usage_in > 0) sqlite3_bind_int(stmt, 13, usage_in);
+    if (usage_out > 0) sqlite3_bind_int(stmt, 13, usage_out);
     else sqlite3_bind_null(stmt, 13);
-    if (usage_out > 0) sqlite3_bind_int(stmt, 14, usage_out);
+    if (cost_nano > 0) sqlite3_bind_int64(stmt, 14, cost_nano);
     else sqlite3_bind_null(stmt, 14);
-    if (cost_nano > 0) sqlite3_bind_int64(stmt, 15, cost_nano);
-    else sqlite3_bind_null(stmt, 15);
     int clen = content ? (int)strlen(content) : 0;
-    sqlite3_bind_int(stmt, 16, (clen / 4) + 4);
-    sqlite3_bind_int(stmt, 17, clen);
+    sqlite3_bind_int(stmt, 15, (clen / 4) + 4);
+    sqlite3_bind_int(stmt, 16, clen);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
 
-    int64_t entry_id = sqlite3_last_insert_rowid(db);
-    if (session_set_leaf(db, session_id, entry_id) != 0)
-        return -1;
-    return entry_id;
+    return sqlite3_last_insert_rowid(db);
 }
 
 /* State transition guard. Busy states (llm_running/tool_running/compacting/

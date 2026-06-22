@@ -249,61 +249,40 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     /* Load skills from disk (skills stay on filesystem per §D) */
     char *skills = agents_dir ? agent_load_skills(agents_dir, agent_name) : NULL;
 
-    /* T154: Load memory blocks from DB */
-    int mb_count = 0;
-    MemoryBlock *blocks = memory_block_list(db, agent_name, &mb_count);
-
-    /* Render memory blocks section */
+    /* Render memory blocks section — single query (S7/group 5c) */
     char *mb_section = NULL;
     size_t mb_len = 0;
-    if (blocks && mb_count > 0) {
-        /* Estimate size: header + per-block metadata + entries */
-        size_t est = 64;
-        for (int i = 0; i < mb_count; i++) {
-            est += 128;
-            est += blocks[i].label ? strlen(blocks[i].label) : 0;
-            est += blocks[i].description ? strlen(blocks[i].description) : 0;
-        }
-        /* First pass: gather entries per block to estimate total */
-        int *ecounts = calloc((size_t)mb_count, sizeof(int));
-        MemoryEntry **elists = calloc((size_t)mb_count, sizeof(MemoryEntry *));
-        for (int i = 0; i < mb_count; i++) {
-            elists[i] = memory_entries_list(db, agent_name, blocks[i].label, &ecounts[i]);
-            for (int j = 0; j < ecounts[i]; j++)
-                est += 64 + (elists[i][j].text ? strlen(elists[i][j].text) : 0);
-        }
-        mb_section = malloc(est);
-        if (mb_section) {
-            size_t pos = 0;
-            pos += (size_t)snprintf(mb_section + pos, est - pos, "\n\n## Memory Blocks\n");
-            for (int i = 0; i < mb_count; i++) {
-                size_t used = 0;
-                for (int j = 0; j < ecounts[i]; j++)
-                    used += elists[i][j].text ? strlen(elists[i][j].text) : 0;
-                pos += (size_t)snprintf(mb_section + pos, est - pos,
-                    "\n### %s\n"
-                    "description: %s\n"
-                    "usage: %zu/%d chars | %s\n",
-                    blocks[i].label ? blocks[i].label : "",
-                    blocks[i].description ? blocks[i].description : "",
-                    used, blocks[i].char_limit,
-                    blocks[i].read_only ? "read-only" : "read-write");
-                if (ecounts[i] == 0) {
-                    pos += (size_t)snprintf(mb_section + pos, est - pos, "(no entries yet)\n");
-                } else {
-                    for (int j = 0; j < ecounts[i]; j++)
-                        pos += (size_t)snprintf(mb_section + pos, est - pos, "%d. %s\n",
-                                                elists[i][j].pos,
-                                                elists[i][j].text ? elists[i][j].text : "");
-                }
+    {
+        sqlite3_stmt *mbs = NULL;
+        const char *mb_sql =
+            "WITH per_block AS ("
+            "  SELECT b.id,"
+            "    char(10) || '### ' || COALESCE(b.label,'') || char(10) ||"
+            "    'description: ' || COALESCE(b.description,'') || char(10) ||"
+            "    'usage: ' ||"
+            "      (SELECT COALESCE(SUM(length(text)),0) FROM memory_entries e"
+            "       WHERE e.agent_name=b.agent_name AND e.block_label=b.label) ||"
+            "      '/' || b.char_limit || ' chars | ' ||"
+            "      CASE WHEN b.read_only THEN 'read-only' ELSE 'read-write' END || char(10) ||"
+            "    COALESCE("
+            "      (SELECT group_concat(e.pos || '. ' || e.text, char(10) ORDER BY e.pos) || char(10)"
+            "         FROM memory_entries e WHERE e.agent_name=b.agent_name AND e.block_label=b.label),"
+            "      '(no entries yet)' || char(10)"
+            "    ) AS block_text"
+            "  FROM memory_blocks b WHERE b.agent_name=?1 ORDER BY b.id"
+            ")"
+            "SELECT char(10) || char(10) || '## Memory Blocks' || char(10) ||"
+            "       group_concat(block_text, '' ORDER BY id)"
+            "FROM per_block;";
+        if (sqlite3_prepare_v2(db, mb_sql, -1, &mbs, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(mbs, 1, agent_name, -1, SQLITE_STATIC);
+            if (sqlite3_step(mbs) == SQLITE_ROW && sqlite3_column_type(mbs, 0) != SQLITE_NULL) {
+                const char *txt = (const char *)sqlite3_column_text(mbs, 0);
+                mb_section = strdup(txt);
+                mb_len = strlen(mb_section);
             }
-            mb_len = pos;
+            sqlite3_finalize(mbs);
         }
-        for (int i = 0; i < mb_count; i++)
-            if (elists[i]) memory_entries_free(elists[i], ecounts[i]);
-        free(elists);
-        free(ecounts);
-        memory_block_list_free(blocks, mb_count);
     }
 
     /* Calculate total size */

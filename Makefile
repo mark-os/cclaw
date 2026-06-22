@@ -1,21 +1,28 @@
 CC      ?= cc
-CFLAGS  := -std=c11 -Wall -Wextra -Werror -Iinclude -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/mquickjs -Ivendor/monocypher -Ivendor/jsmn
+CFLAGS  := -std=c11 -Wall -Wextra -Werror -Iinclude -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
 TEMPLATES := $(wildcard templates/*)
-SRC      := $(filter-out src/preload_net.c src/channel_runner.c src/net_shim.c,$(wildcard src/*.c))
+SRC      := $(filter-out src/preload_net.c src/channel_runner.c src/qjs_host_channel.c src/net_shim.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 DEP      := $(OBJ:.o=.d)
 
 VENDOR_SRC := vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
-              vendor/mquickjs/mquickjs.c vendor/mquickjs/cutils.c vendor/mquickjs/dtoa.c \
-              vendor/mquickjs/libm.c \
+              vendor/quickjs/quickjs.c vendor/quickjs/cutils.c \
+              vendor/quickjs/dtoa.c vendor/quickjs/libunicode.c \
+              vendor/quickjs/libregexp.c \
               vendor/monocypher/monocypher.c
 VENDOR_OBJ := $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
-              $(BUILDDIR)/mquickjs.o $(BUILDDIR)/mqjs_cutils.o $(BUILDDIR)/mqjs_dtoa.o \
-              $(BUILDDIR)/mqjs_libm.o $(BUILDDIR)/eval_stdlib.o \
+              $(BUILDDIR)/quickjs.o $(BUILDDIR)/qjs_cutils.o \
+              $(BUILDDIR)/qjs_dtoa.o $(BUILDDIR)/qjs_libunicode.o \
+              $(BUILDDIR)/qjs_libregexp.o \
               $(BUILDDIR)/monocypher.o
+
+# QuickJS objects shared by cclaw and channel_runner
+QJS_CORE_OBJ := $(BUILDDIR)/quickjs.o $(BUILDDIR)/qjs_cutils.o \
+                $(BUILDDIR)/qjs_dtoa.o $(BUILDDIR)/qjs_libunicode.o \
+                $(BUILDDIR)/qjs_libregexp.o
 
 INTEG_SRC := $(wildcard test/test_integration_*.c)
 E2E_SRC   := $(wildcard test/test_e2e_*.c)
@@ -23,11 +30,6 @@ TEST_SRC  := $(filter-out $(INTEG_SRC) $(E2E_SRC),$(wildcard test/test_*.c))
 TEST_BIN  := $(patsubst test/%.c,$(BUILDDIR)/%,$(TEST_SRC))
 INTEG_BIN := $(patsubst test/%.c,$(BUILDDIR)/%,$(INTEG_SRC))
 E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
-
-# mquickjs core objects are shared by cclaw and channel_runner — only
-# the generated stdlib (which embeds a per-binary host file) differs.
-MQJS_CORE_OBJ := $(BUILDDIR)/mquickjs.o $(BUILDDIR)/mqjs_cutils.o $(BUILDDIR)/mqjs_dtoa.o \
-                 $(BUILDDIR)/mqjs_libm.o
 
 .PHONY: all clean test test-integration test-e2e test-all check-gen install debug
 
@@ -59,37 +61,26 @@ $(BUILDDIR)/civetweb.o: vendor/civetweb/civetweb.c | $(BUILDDIR)/
 $(BUILDDIR)/monocypher.o: vendor/monocypher/monocypher.c | $(BUILDDIR)/
 	$(CC) -std=c11 -O2 -c -o $@ $<
 
-MQJS_CFLAGS := -std=c11 -O2 -Ivendor/mquickjs -Wno-unused-parameter -Wno-sign-compare -Wno-unused-variable -Wno-unused-but-set-variable
+# QuickJS compilation flags — suppress vendor warnings
+QJS_CFLAGS := -std=gnu11 -O2 -Ivendor/quickjs -DCONFIG_VERSION=\"2026-06-04\" \
+              -D_GNU_SOURCE \
+              -Wno-unused-parameter -Wno-sign-compare -Wno-unused-variable \
+              -Wno-unused-but-set-variable -Wno-implicit-fallthrough
 
-$(BUILDDIR)/mquickjs.o: vendor/mquickjs/mquickjs.c vendor/mquickjs/mquickjs_atom.h | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
+$(BUILDDIR)/quickjs.o: vendor/quickjs/quickjs.c | $(BUILDDIR)/
+	$(CC) $(QJS_CFLAGS) -c -o $@ $<
 
-$(BUILDDIR)/mqjs_cutils.o: vendor/mquickjs/cutils.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
+$(BUILDDIR)/qjs_cutils.o: vendor/quickjs/cutils.c | $(BUILDDIR)/
+	$(CC) $(QJS_CFLAGS) -c -o $@ $<
 
-$(BUILDDIR)/mqjs_dtoa.o: vendor/mquickjs/dtoa.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
+$(BUILDDIR)/qjs_libunicode.o: vendor/quickjs/libunicode.c | $(BUILDDIR)/
+	$(CC) $(QJS_CFLAGS) -c -o $@ $<
 
-$(BUILDDIR)/mqjs_libm.o: vendor/mquickjs/libm.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
+$(BUILDDIR)/qjs_libregexp.o: vendor/quickjs/libregexp.c | $(BUILDDIR)/
+	$(CC) $(QJS_CFLAGS) -c -o $@ $<
 
-vendor/mquickjs/mquickjs_atom.h: vendor/mquickjs/gen_atoms.c | $(BUILDDIR)/
-	$(CC) -o $(BUILDDIR)/gen_atoms $<
-	./$(BUILDDIR)/gen_atoms > $@
-
-# Eval profile stdlib → js_std_library_eval (forked sandboxed evaluator)
-$(BUILDDIR)/gen_stdlib_eval: vendor/mquickjs/gen_stdlib_eval.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c | $(BUILDDIR)/
-	$(CC) -Ivendor/mquickjs -o $@ vendor/mquickjs/gen_stdlib_eval.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c -lm
-
-$(BUILDDIR)/mquickjs_stdlib_eval.c: vendor/mquickjs/gen_stdlib_eval.c vendor/mquickjs/mqjs_objects.h vendor/mquickjs/mqjs_host_eval.c $(BUILDDIR)/gen_stdlib_eval | $(BUILDDIR)/
-	printf '#define _POSIX_C_SOURCE 199309L\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <math.h>\n#include <time.h>\n#include <unistd.h>\n#include "mquickjs_priv.h"\n\n' > $@
-	cat vendor/mquickjs/mqjs_host_eval.c >> $@
-	./$(BUILDDIR)/gen_stdlib_eval -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
-
-$(BUILDDIR)/eval_stdlib.o: $(BUILDDIR)/mquickjs_stdlib_eval.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -Iinclude -c -o $@ $<
-
-
+$(BUILDDIR)/qjs_dtoa.o: vendor/quickjs/dtoa.c | $(BUILDDIR)/
+	$(CC) $(QJS_CFLAGS) -c -o $@ $<
 
 $(BUILDDIR)/libcclaw_net.so: src/preload_net.c | $(BUILDDIR)/
 	$(CC) -std=c11 -Wall -Wextra -Werror -shared -fPIC -o $@ $< -ldl
@@ -111,23 +102,12 @@ $(BUILDDIR)/net_shim_blob.h: $(BUILDDIR)/net_shim
 	printf '};\nstatic const unsigned int net_shim_blob_len = sizeof(net_shim_blob);\n' >> $@
 
 # Channel runner: universal JS channel binary
-$(BUILDDIR)/mquickjs_stdlib_channel.c: vendor/mquickjs/gen_stdlib_channel.c vendor/mquickjs/mqjs_objects.h vendor/mquickjs/mqjs_host_channel.c $(BUILDDIR)/gen_stdlib_channel | $(BUILDDIR)/
-	printf '#define _POSIX_C_SOURCE 200809L\n#include <stdlib.h>\n#include <string.h>\n#include <stdio.h>\n#include <math.h>\n#include <time.h>\n#include "mquickjs_priv.h"\n\n' > $@
-	cat vendor/mquickjs/mqjs_host_channel.c >> $@
-	./$(BUILDDIR)/gen_stdlib_channel -m64 | sed '1,/^#include "mquickjs_priv.h"/d' >> $@
-
-$(BUILDDIR)/gen_stdlib_channel: vendor/mquickjs/gen_stdlib_channel.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c | $(BUILDDIR)/
-	$(CC) -Ivendor/mquickjs -o $@ vendor/mquickjs/gen_stdlib_channel.c vendor/mquickjs/mquickjs_build.c vendor/mquickjs/cutils.c -lm
-
-$(BUILDDIR)/cr_stdlib.o: $(BUILDDIR)/mquickjs_stdlib_channel.c | $(BUILDDIR)/
-	$(CC) $(MQJS_CFLAGS) -Iinclude -Ivendor/sqlite3 -c -o $@ $<
-
 CR_LIB_OBJ := $(BUILDDIR)/admin_api.o $(BUILDDIR)/agent_config.o $(BUILDDIR)/channel_api.o \
               $(BUILDDIR)/db.o $(BUILDDIR)/wake.o $(BUILDDIR)/secret.o $(BUILDDIR)/secret_scan.o $(BUILDDIR)/config.o \
-              $(BUILDDIR)/js_http_prelude.o \
+              $(BUILDDIR)/qjs_helpers.o $(BUILDDIR)/qjs_host_channel.o \
               $(BUILDDIR)/sqlite3.o $(BUILDDIR)/monocypher.o
 
-$(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(MQJS_CORE_OBJ) $(BUILDDIR)/cr_stdlib.o $(CR_LIB_OBJ) | $(BUILDDIR)/
+$(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(QJS_CORE_OBJ) $(CR_LIB_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ -lcurl -lm -lpthread -ldl
 
 # Everything a production box needs: the daemon binary, channel_runner

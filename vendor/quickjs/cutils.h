@@ -1,6 +1,6 @@
 /*
  * C utilities
- * 
+ *
  * Copyright (c) 2017 Fabrice Bellard
  * Copyright (c) 2018 Charlie Gordon
  *
@@ -26,10 +26,8 @@
 #define CUTILS_H
 
 #include <stdlib.h>
+#include <string.h>
 #include <inttypes.h>
-
-/* set if CPU is big endian */
-#undef WORDS_BIGENDIAN
 
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
@@ -48,9 +46,16 @@
 #ifndef countof
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 #endif
-
+#ifndef container_of
 /* return the pointer of type 'type *' containing 'ptr' as field 'member' */
 #define container_of(ptr, type, member) ((type *)((uint8_t *)(ptr) - offsetof(type, member)))
+#endif
+
+#if !defined(_MSC_VER) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#define minimum_length(n)  static n
+#else
+#define minimum_length(n)  n
+#endif
 
 typedef int BOOL;
 
@@ -65,6 +70,12 @@ void pstrcpy(char *buf, int buf_size, const char *str);
 char *pstrcat(char *buf, int buf_size, const char *s);
 int strstart(const char *str, const char *val, const char **ptr);
 int has_suffix(const char *str, const char *suffix);
+
+/* Prevent UB when n == 0 and (src == NULL or dest == NULL) */
+static inline void memcpy_no_ub(void *dest, const void *src, size_t n) {
+    if (n)
+        memcpy(dest, src, n);
+}
 
 static inline int max_int(int a, int b)
 {
@@ -107,22 +118,6 @@ static inline int64_t max_int64(int64_t a, int64_t b)
 }
 
 static inline int64_t min_int64(int64_t a, int64_t b)
-{
-    if (a < b)
-        return a;
-    else
-        return b;
-}
-
-static inline size_t max_size_t(size_t a, size_t b)
-{
-    if (a > b)
-        return a;
-    else
-        return b;
-}
-
-static inline size_t min_size_t(size_t a, size_t b)
 {
     if (a < b)
         return a;
@@ -226,79 +221,145 @@ static inline void put_u8(uint8_t *tab, uint8_t val)
     *tab = val;
 }
 
+#ifndef bswap16
 static inline uint16_t bswap16(uint16_t x)
 {
     return (x >> 8) | (x << 8);
 }
+#endif
 
+#ifndef bswap32
 static inline uint32_t bswap32(uint32_t v)
 {
     return ((v & 0xff000000) >> 24) | ((v & 0x00ff0000) >>  8) |
         ((v & 0x0000ff00) <<  8) | ((v & 0x000000ff) << 24);
 }
+#endif
 
+#ifndef bswap64
 static inline uint64_t bswap64(uint64_t v)
 {
-    return ((v & ((uint64_t)0xff << (7 * 8))) >> (7 * 8)) | 
-        ((v & ((uint64_t)0xff << (6 * 8))) >> (5 * 8)) | 
-        ((v & ((uint64_t)0xff << (5 * 8))) >> (3 * 8)) | 
-        ((v & ((uint64_t)0xff << (4 * 8))) >> (1 * 8)) | 
-        ((v & ((uint64_t)0xff << (3 * 8))) << (1 * 8)) | 
-        ((v & ((uint64_t)0xff << (2 * 8))) << (3 * 8)) | 
-        ((v & ((uint64_t)0xff << (1 * 8))) << (5 * 8)) | 
+    return ((v & ((uint64_t)0xff << (7 * 8))) >> (7 * 8)) |
+        ((v & ((uint64_t)0xff << (6 * 8))) >> (5 * 8)) |
+        ((v & ((uint64_t)0xff << (5 * 8))) >> (3 * 8)) |
+        ((v & ((uint64_t)0xff << (4 * 8))) >> (1 * 8)) |
+        ((v & ((uint64_t)0xff << (3 * 8))) << (1 * 8)) |
+        ((v & ((uint64_t)0xff << (2 * 8))) << (3 * 8)) |
+        ((v & ((uint64_t)0xff << (1 * 8))) << (5 * 8)) |
         ((v & ((uint64_t)0xff << (0 * 8))) << (7 * 8));
 }
+#endif
 
-static inline uint32_t get_be32(const uint8_t *d)
+/* XXX: should take an extra argument to pass slack information to the caller */
+typedef void *DynBufReallocFunc(void *opaque, void *ptr, size_t size);
+
+typedef struct DynBuf {
+    uint8_t *buf;
+    size_t size;
+    size_t allocated_size;
+    BOOL error; /* true if a memory allocation error occurred */
+    DynBufReallocFunc *realloc_func;
+    void *opaque; /* for realloc_func */
+} DynBuf;
+
+void dbuf_init(DynBuf *s);
+void dbuf_init2(DynBuf *s, void *opaque, DynBufReallocFunc *realloc_func);
+int dbuf_claim(DynBuf *s, size_t len);
+int dbuf_put(DynBuf *s, const uint8_t *data, size_t len);
+int dbuf_put_self(DynBuf *s, size_t offset, size_t len);
+int dbuf_putstr(DynBuf *s, const char *str);
+int __dbuf_putc(DynBuf *s, uint8_t c);
+int __dbuf_put_u16(DynBuf *s, uint16_t val);
+int __dbuf_put_u32(DynBuf *s, uint32_t val);
+int __dbuf_put_u64(DynBuf *s, uint64_t val);
+
+static inline int dbuf_putc(DynBuf *s, uint8_t val)
 {
-    return bswap32(get_u32(d));
-}
-
-static inline void put_be32(uint8_t *d, uint32_t v)
-{
-    put_u32(d, bswap32(v));
-}
-
-#define UTF8_CHAR_LEN_MAX 4
-
-size_t __unicode_to_utf8(uint8_t *buf, unsigned int c);
-int __unicode_from_utf8(const uint8_t *p, size_t max_len, size_t *plen);
-int __utf8_get(const uint8_t *p, size_t *plen);
-
-/* Note: at most 21 bits are encoded. At most UTF8_CHAR_LEN_MAX bytes
-   are output. */
-static inline size_t unicode_to_utf8(uint8_t *buf, unsigned int c)
-{
-    if (c < 0x80) {
-        buf[0] = c;
-        return 1;
+    if (unlikely((s->allocated_size - s->size) < 1)) {
+        return __dbuf_putc(s, val);
     } else {
-        return __unicode_to_utf8(buf, c);
+        s->buf[s->size++] = val;
+        return 0;
     }
 }
 
-/* return -1 in case of error. Surrogates are accepted. max_len must
-   be >= 1. *plen is set in case of error and always >= 1. */
-static inline int unicode_from_utf8(const uint8_t *buf, size_t max_len, size_t *plen)
+static inline int dbuf_put_u16(DynBuf *s, uint16_t val)
 {
-    if (buf[0] < 0x80) {
-        *plen = 1;
-        return buf[0];
+    if (unlikely((s->allocated_size - s->size) < 2)) {
+        return __dbuf_put_u16(s, val);
     } else {
-        return __unicode_from_utf8(buf, max_len, plen);
+        put_u16(s->buf + s->size, val);
+        s->size += 2;
+        return 0;
     }
 }
 
-/* Warning: no error checking is done so the UTF-8 encoding must be
-   validated before. */
-static force_inline int utf8_get(const uint8_t *buf, size_t *plen)
+static inline int dbuf_put_u32(DynBuf *s, uint32_t val)
 {
-    if (likely(buf[0] < 0x80)) {
-        *plen = 1;
-        return buf[0];
+    if (unlikely((s->allocated_size - s->size) < 4)) {
+        return __dbuf_put_u32(s, val);
     } else {
-        return __utf8_get(buf, plen);
+        put_u32(s->buf + s->size, val);
+        s->size += 4;
+        return 0;
     }
+}
+
+static inline int dbuf_put_u64(DynBuf *s, uint64_t val)
+{
+    if (unlikely((s->allocated_size - s->size) < 8)) {
+        return __dbuf_put_u64(s, val);
+    } else {
+        put_u64(s->buf + s->size, val);
+        s->size += 8;
+        return 0;
+    }
+}
+
+int __attribute__((format(printf, 2, 3))) dbuf_printf(DynBuf *s,
+                                                      const char *fmt, ...);
+void dbuf_free(DynBuf *s);
+static inline BOOL dbuf_error(DynBuf *s) {
+    return s->error;
+}
+static inline void dbuf_set_error(DynBuf *s)
+{
+    s->error = TRUE;
+}
+
+#define UTF8_CHAR_LEN_MAX 6
+
+int unicode_to_utf8(uint8_t *buf, unsigned int c);
+int unicode_from_utf8(const uint8_t *p, int max_len, const uint8_t **pp);
+
+static inline BOOL is_surrogate(uint32_t c)
+{
+    return (c >> 11) == (0xD800 >> 11); // 0xD800-0xDFFF
+}
+
+static inline BOOL is_hi_surrogate(uint32_t c)
+{
+    return (c >> 10) == (0xD800 >> 10); // 0xD800-0xDBFF
+}
+
+static inline BOOL is_lo_surrogate(uint32_t c)
+{
+    return (c >> 10) == (0xDC00 >> 10); // 0xDC00-0xDFFF
+}
+
+static inline uint32_t get_hi_surrogate(uint32_t c)
+{
+    return (c >> 10) - (0x10000 >> 10) + 0xD800;
+}
+
+static inline uint32_t get_lo_surrogate(uint32_t c)
+{
+    return (c & 0x3FF) | 0xDC00;
+}
+
+static inline uint32_t from_surrogate(uint32_t hi, uint32_t lo)
+{
+    return 0x10000 + 0x400 * (hi - 0xD800) + (lo - 0xDC00);
 }
 
 static inline int from_hex(int c)
@@ -312,6 +373,10 @@ static inline int from_hex(int c)
     else
         return -1;
 }
+
+void rqsort(void *base, size_t nmemb, size_t size,
+            int (*cmp)(const void *, const void *, void *),
+            void *arg);
 
 static inline uint64_t float64_as_uint64(double d)
 {
@@ -333,23 +398,60 @@ static inline double uint64_as_float64(uint64_t u64)
     return u.d;
 }
 
-typedef union {
-    uint32_t u32;
-    float f;
-} f32_union;
-
-static inline uint32_t float_as_uint(float f)
+static inline double fromfp16(uint16_t v)
 {
-    f32_union u;
-    u.f = f;
-    return u.u32;
+    double d;
+    uint32_t v1;
+    v1 = v & 0x7fff;
+    if (unlikely(v1 >= 0x7c00))
+        v1 += 0x1f8000; /* NaN or infinity */
+    d = uint64_as_float64(((uint64_t)(v >> 15) << 63) | ((uint64_t)v1 << (52 - 10)));
+    return d * 0x1p1008;
 }
 
-static inline float uint_as_float(uint32_t v)
+static inline uint16_t tofp16(double d)
 {
-    f32_union u;
-    u.u32 = v;
-    return u.f;
+    uint64_t a, addend;
+    uint32_t v, sgn;
+    int shift;
+    
+    a = float64_as_uint64(d);
+    sgn = a >> 63;
+    a = a & 0x7fffffffffffffff;
+    if (unlikely(a > 0x7ff0000000000000)) {
+        /* nan */
+        v = 0x7c01;
+    } else if (a < 0x3f10000000000000) { /* 0x1p-14 */
+        /* subnormal f16 number or zero */
+        if (a <= 0x3e60000000000000) { /* 0x1p-25 */
+            v = 0x0000; /* zero */
+        } else {
+            shift = 1051 - (a >> 52);
+            a = ((uint64_t)1 << 52) | (a & (((uint64_t)1 << 52) - 1));
+            addend = ((a >> shift) & 1) + (((uint64_t)1 << (shift - 1)) - 1);
+            v = (a + addend) >> shift;
+        }
+    } else {
+        /* normal number or infinity */
+        a -= 0x3f00000000000000; /* adjust the exponent */
+        /* round */
+        addend = ((a >> (52 - 10)) & 1) + (((uint64_t)1 << (52 - 11)) - 1);
+        v = (a + addend) >> (52 - 10);
+        /* overflow ? */
+        if (unlikely(v > 0x7c00))
+            v = 0x7c00;
+    }
+    return v | (sgn << 15);
+}
+
+static inline int isfp16nan(uint16_t v)
+{
+    return (v & 0x7FFF) > 0x7C00;
+}
+
+static inline int isfp16zero(uint16_t v)
+{
+    return (v & 0x7FFF) == 0;
 }
 
 #endif  /* CUTILS_H */

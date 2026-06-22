@@ -1,7 +1,7 @@
 /*
  * Tiny float64 printing and parsing library
  *
- * Copyright (c) 2024-2025 Fabrice Bellard
+ * Copyright (c) 2024 Fabrice Bellard
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -1184,14 +1184,14 @@ int js_dtoa(char *buf, double d, int radix, int n_digits, int flags,
     if (fmt == JS_DTOA_FORMAT_FREE) {
         int P_max, E0, e1, E_found, P_found;
         uint64_t m1, mant_found, mant, mant_max1;
-        /* P_max is guaranteed to work by construction */
+        /* P_max is guarranteed to work by construction */
         P_max = dtoa_max_digits_table[radix - 2];
         E0 = E;
         E_found = 0;
         P_found = 0;
         mant_found = 0;
         /* find the minimum number of digits by successive tries */
-        P = P_max; /* P_max is guaranteed to work */
+        P = P_max; /* P_max is guarateed to work */
         for(;;) {
             /* mant_max always fits on 64 bits */
             mant_max1 = pow_ui(radix, P);
@@ -1210,7 +1210,7 @@ int js_dtoa(char *buf, double d, int radix, int n_digits, int flags,
                 mant /= radix;
                 P--;
             }
-            /* guaranteed to work for P = P_max */
+            /* garanteed to work for P = P_max */
             if (P_found == 0)
                 goto prec_found;
             /* convert back to base 2 */

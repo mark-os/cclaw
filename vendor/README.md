@@ -13,15 +13,16 @@
 - Built with: `-DNO_SSL -DNO_CGI -DUSE_IPV6 -DNO_CACHING`
 - License: MIT
 
-## MicroQuickJS
+## QuickJS (2026-06-04)
 
-- Repo: https://github.com/nicholasgasior/mquickjs (fork of QuickJS by Bellard)
-- Files: Full source tree (mquickjs.c, build system, stdlib generator)
-- Built with: gen_atoms → mquickjs_atom.h, gen_stdlib → mquickjs_stdlib.c
+- Repo: https://github.com/bellard/quickjs
+- Files: `quickjs.c`, `quickjs.h`, `quickjs-atom.h`, `quickjs-opcode.h`,
+  `quickjs-libc.c`, `quickjs-libc.h`, `cutils.c`, `cutils.h`, `dtoa.c`, `dtoa.h`,
+  `list.h`, `libunicode.c`, `libunicode.h`, `libunicode-table.h`,
+  `libregexp.c`, `libregexp.h`, `libregexp-opcode.h`
+- Built with: `-std=gnu11 -D_GNU_SOURCE -DCONFIG_VERSION`
 - License: MIT
-- **Custom modifications:**
-  - `mqjs_host.c` — CClaw host functions (http_fetch with allowed_hosts + SSRF protection)
-  - stdlib upgraded with `Date.now` support
+- Arena-based slab allocator for small blocks (16–512 bytes), ES2025 support
 
 ## Monocypher 4.0.2
 

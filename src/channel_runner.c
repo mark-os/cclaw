@@ -17,15 +17,17 @@
  *   A send carrying outbox_id is acked on final 2xx, failed otherwise.
  *
  * argv: channel_runner <db_path> <channel_name> */
-#define _POSIX_C_SOURCE 200809L
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "channel_api.h"
 #include "admin_api.h"
 #include "db.h"
 #include "log.h"
+#include "qjs_helpers.h"
 #include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <mquickjs.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,66 +44,67 @@
 #define CR_SEND_TIMEOUT 60L
 #define CR_POLL_TIMEOUT 35L       /* slightly longer than TG long-poll */
 
-extern const JSSTDLibraryDef js_std_library_channel;
-extern const char JS_HTTP_PRELUDE[];
-
 static volatile sig_atomic_t g_running = 1;
 ChannelCtx *g_ctx;
 
 static void handle_signal(int sig) { (void)sig; g_running = 0; }
 
-/* ── Host context for MQJS ─────────────────────────────────────── */
-
-typedef struct {
-    int instruction_count;
-    int instruction_limit;
-} HostCtx;
-
-static int interrupt_handler(JSContext *ctx, void *opaque) {
-    (void)ctx;
-    HostCtx *h = (HostCtx *)opaque;
-    h->instruction_count++;
-    return h->instruction_count > h->instruction_limit;
-}
+/* ── QuickJS runtime for channel ───────────────────────────────── */
+static QjsRuntime *g_qrt;
 
 /* ── JS value helpers ──────────────────────────────────────────── */
 
 char *get_str_prop(JSContext *ctx, JSValue obj, const char *name) {
     JSValue v = JS_GetPropertyStr(ctx, obj, name);
-    if (JS_IsException(v) || JS_IsUndefined(v) || JS_IsNull(v)) return NULL;
-    JSCStringBuf buf;
-    const char *s = JS_ToCString(ctx, v, &buf);
-    return s ? strdup(s) : NULL;
+    if (JS_IsException(v) || JS_IsUndefined(v) || JS_IsNull(v)) {
+        JS_FreeValue(ctx, v);
+        return NULL;
+    }
+    const char *s = JS_ToCString(ctx, v);
+    JS_FreeValue(ctx, v);
+    if (!s) return NULL;
+    char *r = strdup(s);
+    JS_FreeCString(ctx, s);
+    return r;
 }
 
 int get_int_prop(JSContext *ctx, JSValue obj, const char *name, int dflt) {
     JSValue v = JS_GetPropertyStr(ctx, obj, name);
-    if (JS_IsException(v) || JS_IsUndefined(v) || JS_IsNull(v)) return dflt;
+    if (JS_IsException(v) || JS_IsUndefined(v) || JS_IsNull(v)) {
+        JS_FreeValue(ctx, v);
+        return dflt;
+    }
     int i = dflt;
     JS_ToInt32(ctx, &i, v);
+    JS_FreeValue(ctx, v);
     return i;
 }
 
 /* Eval JS, logging any exception. Returns the value (JS_UNDEFINED on error). */
 static JSValue eval_js(JSContext *ctx, const char *code, const char *tag) {
-    JSValue v = JS_Eval(ctx, code, strlen(code), tag, JS_EVAL_RETVAL);
+    JSValue v = JS_Eval(ctx, code, strlen(code), tag, JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(v)) {
         JSValue exc = JS_GetException(ctx);
-        JSCStringBuf buf;
-        const char *msg = JS_ToCString(ctx, exc, &buf);
+        const char *msg = JS_ToCString(ctx, exc);
         fprintf(stderr, "[channel_runner] JS error in %s: %s\n", tag, msg ? msg : "?");
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, exc);
         return JS_UNDEFINED;
     }
     return v;
 }
 
 static void set_global_str(JSContext *ctx, const char *name, const char *val) {
-    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), name,
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, name,
                       val ? JS_NewString(ctx, val) : JS_NULL);
+    JS_FreeValue(ctx, global);
 }
 
 static void set_global_int(JSContext *ctx, const char *name, int val) {
-    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), name, JS_NewInt32(ctx, val));
+    JSValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, name, JS_NewInt32(ctx, val));
+    JS_FreeValue(ctx, global);
 }
 
 /* ── Send queue (filled by cclaw.send, drained by the curl loop) ── */
@@ -391,8 +394,7 @@ static void uds_handle_conn(JSContext *ctx, int cfd) {
         "})()",
         "onRequest");
 
-    JSCStringBuf rbuf;
-    const char *reply = JS_ToCString(ctx, ret, &rbuf);
+    const char *reply = JS_ToCString(ctx, ret);
     if (!reply) reply = "500\n";
     size_t rlen = strlen(reply), off = 0;
     while (off < rlen) {
@@ -400,6 +402,8 @@ static void uds_handle_conn(JSContext *ctx, int cfd) {
         if (n <= 0) { if (n < 0 && errno == EINTR) continue; break; }
         off += (size_t)n;
     }
+    JS_FreeCString(ctx, reply);
+    JS_FreeValue(ctx, ret);
     close(cfd);
 }
 
@@ -448,7 +452,7 @@ int main(int argc, char **argv) {
             sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
             if (sqlite3_step(s) == SQLITE_ROW) {
                 const char *p = (const char *)sqlite3_column_text(s, 0);
-                if (p) snprintf(js_path, sizeof(js_path), "%s/channel.mjs", p);
+                if (p) snprintf(js_path, sizeof(js_path), "%s/channel.qjs", p);
             }
             sqlite3_finalize(s);
         }
@@ -474,40 +478,37 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    void *heap = malloc(CR_HEAP_SIZE);
-    if (!heap) { free(js_src); channel_ctx_free(g_ctx); return 1; }
-    JSContext *ctx = JS_NewContext(heap, CR_HEAP_SIZE, &js_std_library_channel);
-    if (!ctx) { free(heap); free(js_src); channel_ctx_free(g_ctx); return 1; }
+    g_qrt = qjs_runtime_create(CR_HEAP_SIZE);
+    if (!g_qrt) { free(js_src); channel_ctx_free(g_ctx); return 1; }
+    qjs_set_interrupt_limit(g_qrt, CR_MAX_INSTRUCTIONS);
+    JSContext *ctx = qjs_context_create(g_qrt, QJS_PROFILE_CHANNEL);
+    if (!ctx) { qjs_runtime_destroy(g_qrt); free(js_src); channel_ctx_free(g_ctx); return 1; }
 
-    HostCtx hctx = {.instruction_count = 0, .instruction_limit = CR_MAX_INSTRUCTIONS};
-    JS_SetInterruptHandler(ctx, interrupt_handler);
-    JS_SetContextOpaque(ctx, &hctx);
+    /* Register channel host functions (cclaw.*, admin.*) */
+    qjs_register_channel_host_functions(ctx);
 
-    JS_Eval(ctx, JS_HTTP_PRELUDE, strlen(JS_HTTP_PRELUDE), "<http-prelude>", 0);
-
-    JSValue load_val = JS_Eval(ctx, js_src, strlen(js_src), js_path, 0);
+    JSValue load_val = JS_Eval(ctx, js_src, strlen(js_src), js_path, JS_EVAL_TYPE_GLOBAL);
     free(js_src);
     if (JS_IsException(load_val)) {
         JSValue exc = JS_GetException(ctx);
-        JSCStringBuf buf;
-        const char *msg = JS_ToCString(ctx, exc, &buf);
+        const char *msg = JS_ToCString(ctx, exc);
         fprintf(stderr, "[channel_runner] JS load error: %s\n", msg ? msg : "?");
-        JS_FreeContext(ctx); free(heap); channel_ctx_free(g_ctx);
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, exc);
+        JS_FreeContext(ctx); qjs_runtime_destroy(g_qrt); channel_ctx_free(g_ctx);
         return 1;
     }
+    JS_FreeValue(ctx, load_val);
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
     g_multi = curl_multi_init();
 
     /* onInit: required; may set a poll shape and queue sends */
-    JSValue init_ret = JS_Eval(ctx, "onInit()", 8, "<init>", JS_EVAL_RETVAL);
-    if (JS_IsException(init_ret)) {
-        JSValue exc = JS_GetException(ctx);
-        JSCStringBuf buf;
-        const char *msg = JS_ToCString(ctx, exc, &buf);
-        fprintf(stderr, "[channel_runner] onInit failed: %s\n", msg ? msg : "?");
+    JSValue init_ret = eval_js(ctx, "onInit()", "<init>");
+    if (JS_IsUndefined(init_ret)) {
+        fprintf(stderr, "[channel_runner] onInit failed\n");
         curl_multi_cleanup(g_multi); curl_global_cleanup();
-        JS_FreeContext(ctx); free(heap); channel_ctx_free(g_ctx);
+        JS_FreeContext(ctx); qjs_runtime_destroy(g_qrt); channel_ctx_free(g_ctx);
         return 1;
     }
     poll_shape_update(ctx, init_ret);
@@ -638,7 +639,7 @@ int main(int argc, char **argv) {
     if (outbox_fd >= 0)
         channel_outbox_fifo_close(outbox_fd, db_path, channel_name);
     JS_FreeContext(ctx);
-    free(heap);
+    qjs_runtime_destroy(g_qrt);
     channel_ctx_free(g_ctx);
     fprintf(stderr, "[channel_runner] stopped\n");
     return 0;

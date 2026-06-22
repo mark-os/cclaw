@@ -1,0 +1,327 @@
+/* Host C functions for the channel_runner binary.
+ * Registered as cclaw.* and admin.* globals. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include "qjs_helpers.h"
+#include "channel_api.h"
+#include "admin_api.h"
+#include "db.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+extern ChannelCtx *g_ctx;
+
+/* Forward decl from channel_runner.c */
+extern char *get_str_prop(JSContext *ctx, JSValue obj, const char *name);
+extern int get_int_prop(JSContext *ctx, JSValue obj, const char *name, int dflt);
+
+/* Send queue (defined in channel_runner.c) */
+typedef struct SendReq {
+    char *method;
+    char *url;
+    char *body;
+    char *tag;
+    char **headers;
+    int n_headers;
+    int64_t outbox_id;
+    int is_final;
+    long timeout;
+    struct SendReq *next;
+} SendReq;
+extern void send_queue_push(SendReq *r);
+
+/* ── cclaw.emit(type, payload[, external_id]) ──────────────────── */
+
+static JSValue js_ch_emit(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "emit(type, payload)");
+    const char *type = JS_ToCString(ctx, argv[0]);
+    const char *payload = JS_ToCString(ctx, argv[1]);
+    if (!type || !payload) {
+        if (type) JS_FreeCString(ctx, type);
+        if (payload) JS_FreeCString(ctx, payload);
+        return JS_ThrowTypeError(ctx, "emit: string args required");
+    }
+    const char *external_id = NULL;
+    if (argc >= 3 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2]))
+        external_id = JS_ToCString(ctx, argv[2]);
+
+    int rc = channel_emit(g_ctx, type, payload, external_id);
+    JS_FreeCString(ctx, type);
+    JS_FreeCString(ctx, payload);
+    if (external_id) JS_FreeCString(ctx, external_id);
+    return JS_NewInt32(ctx, rc);
+}
+
+/* ── cclaw.getConfig(key) ──────────────────────────────────────── */
+
+static JSValue js_ch_get_config(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "getConfig(key)");
+    const char *key = JS_ToCString(ctx, argv[0]);
+    if (!key) return JS_NULL;
+    char *val = channel_get_config(g_ctx, key);
+    JS_FreeCString(ctx, key);
+    if (!val) return JS_NULL;
+    JSValue r = JS_NewString(ctx, val);
+    free(val);
+    return r;
+}
+
+/* ── cclaw.setConfig(key, value) ───────────────────────────────── */
+
+static JSValue js_ch_set_config(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "setConfig(key, value)");
+    const char *key = JS_ToCString(ctx, argv[0]);
+    const char *val = JS_ToCString(ctx, argv[1]);
+    if (!key || !val) {
+        if (key) JS_FreeCString(ctx, key);
+        if (val) JS_FreeCString(ctx, val);
+        return JS_ThrowTypeError(ctx, "setConfig: string args required");
+    }
+    int rc = channel_set_config(g_ctx, key, val);
+    JS_FreeCString(ctx, key);
+    JS_FreeCString(ctx, val);
+    return JS_NewInt32(ctx, rc);
+}
+
+/* ── cclaw.ackOutbox(id) ───────────────────────────────────────── */
+
+static JSValue js_ch_ack_outbox(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "ackOutbox(id)");
+    int id = 0;
+    JS_ToInt32(ctx, &id, argv[0]);
+    int rc = channel_ack_outbox(g_ctx, (int64_t)id);
+    return JS_NewInt32(ctx, rc);
+}
+
+/* ── cclaw.failOutbox(id, error) ───────────────────────────────── */
+
+static JSValue js_ch_fail_outbox(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "failOutbox(id, error)");
+    int id = 0;
+    JS_ToInt32(ctx, &id, argv[0]);
+    const char *err = JS_ToCString(ctx, argv[1]);
+    int rc = channel_fail_outbox(g_ctx, (int64_t)id, err ? err : "unknown");
+    if (err) JS_FreeCString(ctx, err);
+    return JS_NewInt32(ctx, rc);
+}
+
+/* ── cclaw.log(msg) ────────────────────────────────────────────── */
+
+static JSValue js_ch_log(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    const char *msg = JS_ToCString(ctx, argv[0]);
+    if (msg) { fprintf(stderr, "[%s] %s\n", g_ctx->channel_name, msg); JS_FreeCString(ctx, msg); }
+    return JS_UNDEFINED;
+}
+
+/* ── cclaw.send(request) ───────────────────────────────────────── */
+
+static JSValue js_ch_send(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "send(request)");
+    JSValueConst o = argv[0];
+
+    char *url = get_str_prop(ctx, (JSValue)o, "url");
+    if (!url || !url[0]) { free(url); return JS_ThrowTypeError(ctx, "send: url required"); }
+
+    SendReq *r = calloc(1, sizeof(SendReq));
+    if (!r) { free(url); return JS_ThrowTypeError(ctx, "send: OOM"); }
+    r->url = url;
+    r->method = get_str_prop(ctx, (JSValue)o, "method");
+    r->body = get_str_prop(ctx, (JSValue)o, "body");
+    r->tag = get_str_prop(ctx, (JSValue)o, "tag");
+    r->outbox_id = get_int_prop(ctx, (JSValue)o, "outbox_id", 0);
+    r->is_final = get_int_prop(ctx, (JSValue)o, "final", 0);
+    r->timeout = get_int_prop(ctx, (JSValue)o, "timeout", 0);
+
+    JSValue h = JS_GetPropertyStr(ctx, o, "headers");
+    if (!JS_IsException(h) && !JS_IsUndefined(h) && !JS_IsNull(h)) {
+        int n = get_int_prop(ctx, h, "length", 0);
+        if (n > 0 && n <= 32) {
+            r->headers = calloc((size_t)n, sizeof(char *));
+            if (r->headers) {
+                for (int i = 0; i < n; i++) {
+                    JSValue hv = JS_GetPropertyUint32(ctx, h, (uint32_t)i);
+                    const char *hs = JS_ToCString(ctx, hv);
+                    JS_FreeValue(ctx, hv);
+                    if (hs) { r->headers[r->n_headers++] = strdup(hs); JS_FreeCString(ctx, hs); }
+                }
+            }
+        }
+    }
+    JS_FreeValue(ctx, h);
+
+    send_queue_push(r);
+    return JS_NewInt32(ctx, 0);
+}
+
+/* ── admin.* functions ─────────────────────────────────────────── */
+
+static JSValue js_admin_set_key(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "admin.setKey(provider, value)");
+    const char *provider = JS_ToCString(ctx, argv[0]);
+    const char *value = JS_ToCString(ctx, argv[1]);
+    if (!provider || !value) { if (provider) JS_FreeCString(ctx, provider); if (value) JS_FreeCString(ctx, value); return JS_NewInt32(ctx, -1); }
+    char *env_file = channel_get_config(g_ctx, "env_file");
+    const char *ef = (env_file && env_file[0]) ? env_file : "/etc/cclaw/env";
+    int rc = admin_set_key(ef, provider, value);
+    free(env_file);
+    JS_FreeCString(ctx, provider);
+    JS_FreeCString(ctx, value);
+    return JS_NewInt32(ctx, rc);
+}
+
+static JSValue js_admin_set_model(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "admin.setModel(index, model)");
+    int idx = 0; JS_ToInt32(ctx, &idx, argv[0]);
+    const char *model = JS_ToCString(ctx, argv[1]);
+    if (!model) return JS_NewInt32(ctx, -1);
+    int rc = admin_set_model(g_ctx->db, idx, model);
+    JS_FreeCString(ctx, model);
+    return JS_NewInt32(ctx, rc);
+}
+
+static JSValue js_admin_set_endpoint(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "admin.setEndpoint(index, url)");
+    int idx = 0; JS_ToInt32(ctx, &idx, argv[0]);
+    const char *url = JS_ToCString(ctx, argv[1]);
+    if (!url) return JS_NewInt32(ctx, -1);
+    int rc = admin_set_endpoint(g_ctx->db, idx, url);
+    JS_FreeCString(ctx, url);
+    return JS_NewInt32(ctx, rc);
+}
+
+static JSValue js_admin_add_host(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "admin.addHost(agent, host)");
+    const char *agent = JS_ToCString(ctx, argv[0]);
+    const char *host = JS_ToCString(ctx, argv[1]);
+    if (!agent || !host) { if (agent) JS_FreeCString(ctx, agent); if (host) JS_FreeCString(ctx, host); return JS_NewInt32(ctx, -1); }
+    int rc = admin_add_host(g_ctx->db, agent, host);
+    JS_FreeCString(ctx, agent);
+    JS_FreeCString(ctx, host);
+    return JS_NewInt32(ctx, rc);
+}
+
+static JSValue js_admin_remove_host(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "admin.removeHost(agent, host)");
+    const char *agent = JS_ToCString(ctx, argv[0]);
+    const char *host = JS_ToCString(ctx, argv[1]);
+    if (!agent || !host) { if (agent) JS_FreeCString(ctx, agent); if (host) JS_FreeCString(ctx, host); return JS_NewInt32(ctx, -1); }
+    int rc = admin_remove_host(g_ctx->db, agent, host);
+    JS_FreeCString(ctx, agent);
+    JS_FreeCString(ctx, host);
+    return JS_NewInt32(ctx, rc);
+}
+
+static JSValue js_admin_list_providers(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    AdminProvider *providers = NULL;
+    size_t count = 0;
+    if (admin_list_providers(g_ctx->db, &providers, &count) != 0)
+        return JS_NewArray(ctx);
+    JSValue arr = JS_NewArray(ctx);
+    for (size_t i = 0; i < count; i++) {
+        JSValue obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, obj, "index", JS_NewInt32(ctx, providers[i].index));
+        JS_SetPropertyStr(ctx, obj, "model", JS_NewString(ctx, providers[i].model ? providers[i].model : ""));
+        JS_SetPropertyStr(ctx, obj, "base_url", JS_NewString(ctx, providers[i].base_url ? providers[i].base_url : ""));
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, obj);
+    }
+    admin_providers_free(providers, count);
+    return arr;
+}
+
+static JSValue js_admin_list_agents(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    int count = 0;
+    char **names = db_agent_list(g_ctx->db, &count);
+    JSValue arr = JS_NewArray(ctx);
+    for (int i = 0; i < count; i++)
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewString(ctx, names[i]));
+    if (names) { for (int i = 0; i < count; i++) free(names[i]); free(names); }
+    return arr;
+}
+
+static JSValue js_admin_is_admin(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewBool(ctx, 0);
+    const char *channel_id = JS_ToCString(ctx, argv[0]);
+    if (!channel_id) return JS_NewBool(ctx, 0);
+    char *admins = channel_get_config(g_ctx, "admin_ids");
+    if (!admins) { JS_FreeCString(ctx, channel_id); return JS_NewBool(ctx, 0); }
+    size_t cid_len = strlen(channel_id);
+    int found = 0;
+    char *p = admins;
+    while (*p) {
+        while (*p == ',' || *p == ' ') p++;
+        if (!*p) break;
+        char *end = p;
+        while (*end && *end != ',' && *end != ' ') end++;
+        if ((size_t)(end - p) == cid_len && strncmp(p, channel_id, cid_len) == 0) { found = 1; break; }
+        p = end;
+    }
+    free(admins);
+    JS_FreeCString(ctx, channel_id);
+    return JS_NewBool(ctx, found);
+}
+
+/* ── Registration entry point ──────────────────────────────────── */
+
+void qjs_register_channel_host_functions(JSContext *ctx) {
+    JSValue global = JS_GetGlobalObject(ctx);
+
+    /* cclaw object */
+    JSValue cclaw = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, cclaw, "emit", JS_NewCFunction(ctx, js_ch_emit, "emit", 3));
+    JS_SetPropertyStr(ctx, cclaw, "send", JS_NewCFunction(ctx, js_ch_send, "send", 1));
+    JS_SetPropertyStr(ctx, cclaw, "getConfig", JS_NewCFunction(ctx, js_ch_get_config, "getConfig", 1));
+    JS_SetPropertyStr(ctx, cclaw, "setConfig", JS_NewCFunction(ctx, js_ch_set_config, "setConfig", 2));
+    JS_SetPropertyStr(ctx, cclaw, "ackOutbox", JS_NewCFunction(ctx, js_ch_ack_outbox, "ackOutbox", 1));
+    JS_SetPropertyStr(ctx, cclaw, "failOutbox", JS_NewCFunction(ctx, js_ch_fail_outbox, "failOutbox", 2));
+    JS_SetPropertyStr(ctx, cclaw, "log", JS_NewCFunction(ctx, js_ch_log, "log", 1));
+    JS_SetPropertyStr(ctx, global, "cclaw", cclaw);
+
+    /* admin object */
+    JSValue admin = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, admin, "setKey", JS_NewCFunction(ctx, js_admin_set_key, "setKey", 2));
+    JS_SetPropertyStr(ctx, admin, "setModel", JS_NewCFunction(ctx, js_admin_set_model, "setModel", 2));
+    JS_SetPropertyStr(ctx, admin, "setEndpoint", JS_NewCFunction(ctx, js_admin_set_endpoint, "setEndpoint", 2));
+    JS_SetPropertyStr(ctx, admin, "addHost", JS_NewCFunction(ctx, js_admin_add_host, "addHost", 2));
+    JS_SetPropertyStr(ctx, admin, "removeHost", JS_NewCFunction(ctx, js_admin_remove_host, "removeHost", 2));
+    JS_SetPropertyStr(ctx, admin, "listProviders", JS_NewCFunction(ctx, js_admin_list_providers, "listProviders", 0));
+    JS_SetPropertyStr(ctx, admin, "listAgents", JS_NewCFunction(ctx, js_admin_list_agents, "listAgents", 0));
+    JS_SetPropertyStr(ctx, admin, "isAdmin", JS_NewCFunction(ctx, js_admin_is_admin, "isAdmin", 1));
+    JS_SetPropertyStr(ctx, global, "admin", admin);
+
+    /* Date.now() — already available via JS_AddIntrinsicDate in full context */
+    JS_FreeValue(ctx, global);
+}

@@ -122,7 +122,7 @@ code into. See "Reconciling with the approval model" below.
 
 ### Definition is data: install → load → call
 
-**The DB is the source of truth for tool definitions; the `.mjs` file is only the
+**The DB is the source of truth for tool definitions; the `.qjs` file is only the
 implementation, referenced by `path`.** This is the AGENTS.md contract ("the DB
 stores the definition and a path; it never stores code"), and it inverts the
 current flow, where `registerTool` is harvested at every startup
@@ -140,14 +140,14 @@ differs between tool kinds is how the handler resolves:
 | | Definition | Handler |
 |---|---|---|
 | **Builtin** | `tools` row, `builtin=1`, `path=NULL`, seeded in `seed.sql` | C function, looked up by name |
-| **JS tool** | `tools` row, `builtin=0`, `path=<file>` | function in the `.mjs` at `path`, called by name |
+| **JS tool** | `tools` row, `builtin=0`, `path=<file>` | function in the `.qjs` at `path`, called by name |
 
 So C tools stop defining their schema inline and instead seed a row + provide a
 named handler — the same shape as JS tools providing a handler by path. Predictable
 representation in data *and* code.
 
 **Install / promote — rare, audited (the trust boundary).** A JS extension ships
-`index.mjs` (handlers + policy code) plus a `manifest.json` that *declares the
+`index.qjs` (handlers + policy code) plus a `manifest.json` that *declares the
 extent* of each tool: its arg schema, the bound of its policy (which args it may
 gate, the maximum effect it may reach, whether the policy fn is pure), and its
 requirements (`trust_level`, `bins`, `secrets`). `register_extension`/promote runs
@@ -203,7 +203,7 @@ effective effect for a call is the `max` of them**:
    per-action *default* — "reads → allow, `send` → ask," etc. This is the form most
    tools need, and on its own it is the whole policy.
 2. **JS ratchet** (an optional `policy(args) → "allow"|"ask"|"deny"` authored in the
-   `.mjs`). Its return is **`max`'d with the floor**, so it can only *raise*
+   `.qjs`). Its return is **`max`'d with the floor**, so it can only *raise*
    restriction — deny, ask, or `allow` (a no-op that leaves the floor standing). It
    can **never** make a call more permissive than the floor. Use it for decisions the
    exact-match grammar can't express (the `email` recipient/domain case below).
@@ -280,7 +280,7 @@ policy; the human chooses the mode at approval time.
 Two layers, composed — **neither agent-self-mutable**:
 
 1. **Tool-authored policy** — the tool's intrinsic safety envelope, on
-   `tools.policy` (static rules) or the `.mjs` policy fn. Travels with the tool,
+   `tools.policy` (static rules) or the `.qjs` policy fn. Travels with the tool,
    set by its author, audited at install. "send always asks" lives here.
 2. **Tool-to-agent registration** — the binding of a tool to an agent, on the
    `grants` table (`kind='tool'`, `value=<toolname>`). This already carries
@@ -511,7 +511,7 @@ policy: {                              // plain object; the floor, in data
 }
 ```
 
-**JS ratchet** (in the `.mjs`) — pure, args-only, `max`'d with the floor, so it can
+**JS ratchet** (in the `.qjs`) — pure, args-only, `max`'d with the floor, so it can
 only *raise* restriction. This is where the recipient/domain logic the data grammar
 can't express lives:
 

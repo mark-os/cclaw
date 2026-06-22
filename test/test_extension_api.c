@@ -10,7 +10,7 @@
 #include "hook_dispatch.h"
 #include "tool_js.h"
 #include "tools.h"
-#include <mquickjs.h>
+#include "qjs_helpers.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -63,7 +63,7 @@ static void test_register_tool(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/mytool.mjs", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/mytool.qjs", ext_dir);
     write_file(p1,
         "cclaw.registerTool({\n"
         "  name: 'greet',\n"
@@ -125,7 +125,7 @@ static void test_register_hook(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/hooks.mjs", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/hooks.qjs", ext_dir);
     write_file(p1,
         "cclaw.registerHook('beforeToolCall', function(ctx) { return ctx; });\n"
         "cclaw.registerHook('afterToolCall', function(ctx) { return ctx; });\n"
@@ -178,7 +178,7 @@ static void test_register_tool_invalid(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/bad.mjs", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/bad.qjs", ext_dir);
     /* Missing handler → throws */
     write_file(p1, "cclaw.registerTool({name: 'broken'});");
 

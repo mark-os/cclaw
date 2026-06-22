@@ -1,12 +1,14 @@
 /* T254-T257: Extension discovery, loading, and cclaw API object.
  * V109-V112: Extensions are JS modules evaluated in shared QuickJS context.
  * The cclaw API object provides registerTool, registerHook. */
-#define _POSIX_C_SOURCE 200809L
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "extension.h"
 #include <sqlite3.h>
+#include "qjs_helpers.h"
 #include "log.h"
 #include <dirent.h>
-#include <mquickjs.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +26,7 @@ char **extension_discover(const char *workspace, size_t *count) {
     char **paths = malloc(cap * sizeof(char *));
     if (!paths) return NULL;
 
-    /* Scan workspace/extensions/ for local drafts (index.mjs or *.mjs) */
+    /* Scan workspace/extensions/ for local drafts (index.qjs or *.qjs) */
     char ext_dir[1024];
     snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", workspace);
 
@@ -42,10 +44,10 @@ char **extension_discover(const char *workspace, size_t *count) {
             char idx_path[2080];
             if (S_ISREG(st.st_mode)) {
                 size_t len = strlen(ent->d_name);
-                if (len > 4 && strcmp(ent->d_name + len - 4, ".mjs") == 0)
+                if (len > 4 && strcmp(ent->d_name + len - 4, ".qjs") == 0)
                     to_add = full;
             } else if (S_ISDIR(st.st_mode)) {
-                snprintf(idx_path, sizeof(idx_path), "%s/index.mjs", full);
+                snprintf(idx_path, sizeof(idx_path), "%s/index.qjs", full);
                 if (stat(idx_path, &st) == 0 && S_ISREG(st.st_mode))
                     to_add = idx_path;
             }
@@ -84,7 +86,7 @@ char **extension_discover_for_agent(sqlite3 *db, const char *agent_name,
                 const char *ext_path = (const char *)sqlite3_column_text(stmt, 0);
                 if (!ext_path) continue;
                 char idx[2048];
-                snprintf(idx, sizeof(idx), "%s/index.mjs", ext_path);
+                snprintf(idx, sizeof(idx), "%s/index.qjs", ext_path);
                 struct stat st;
                 if (stat(idx, &st) == 0) {
                     if (*count >= cap) { cap *= 2; paths = realloc(paths, cap * sizeof(char *)); }
@@ -113,10 +115,10 @@ char **extension_discover_for_agent(sqlite3 *db, const char *agent_name,
                 char idx_path[2080];
                 if (S_ISREG(st.st_mode)) {
                     size_t len = strlen(ent->d_name);
-                    if (len > 4 && strcmp(ent->d_name + len - 4, ".mjs") == 0)
+                    if (len > 4 && strcmp(ent->d_name + len - 4, ".qjs") == 0)
                         to_add = full;
                 } else if (S_ISDIR(st.st_mode)) {
-                    snprintf(idx_path, sizeof(idx_path), "%s/index.mjs", full);
+                    snprintf(idx_path, sizeof(idx_path), "%s/index.qjs", full);
                     if (stat(idx_path, &st) == 0 && S_ISREG(st.st_mode))
                         to_add = idx_path;
                 }
@@ -144,15 +146,12 @@ void extension_list_free(char **paths, size_t count) {
 static char *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "r");
     if (!f) return NULL;
-
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     if (len <= 0) { fclose(f); return NULL; }
     fseek(f, 0, SEEK_SET);
-
     char *buf = malloc((size_t)len + 1);
     if (!buf) { fclose(f); return NULL; }
-
     size_t rd = fread(buf, 1, (size_t)len, f);
     fclose(f);
     buf[rd] = '\0';
@@ -160,11 +159,7 @@ static char *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
-/* V111: JS source that defines the cclaw API object.
- * registerTool accumulates into __cclaw_tools[].
- * registerHook accumulates into __cclaw_hooks{event: [fn...]}.
- * Tool handlers must be strings (JS function body receiving 'args') because
- * MicroQuickJS cannot serialize function source for forked execution. */
+/* V111: JS source that defines the cclaw API object. */
 static const char CCLAW_API_INIT[] =
     "globalThis.__cclaw_tools = [];\n"
     "globalThis.__cclaw_hooks = {};\n"
@@ -175,7 +170,7 @@ static const char CCLAW_API_INIT[] =
     "    var code = def.handler;\n"
     "    if (typeof code === 'function') {\n"
     "      throw new Error('registerTool handler must be a string (function body), not a function. '"
-    "        + 'MicroQuickJS cannot serialize functions for sandboxed execution.');\n"
+    "        + 'QuickJS tools fork+exec — pass a code string.');\n"
     "    }\n"
     "    globalThis.__cclaw_tools.push({\n"
     "      name: def.name,\n"
@@ -227,77 +222,88 @@ void extension_ctx_destroy(ExtensionCtx *ctx) {
     }
 }
 
-/* After extensions loaded, read __cclaw_tools[] from JS and register each. */
+/* After extensions loaded, read __cclaw_tools[] and register each. */
 static int process_registered_tools(JsSessionRuntime *rt, ToolRegistry *reg,
                                     const Config *cfg, JsEvalCtx *ectx) {
     if (!rt || !rt->ctx) return 0;
     JSContext *ctx = (JSContext *)rt->ctx;
 
-    /* Get count */
     const char *count_code = "globalThis.__cclaw_tools.length";
-    JSValue count_val = JS_Eval(ctx, count_code, strlen(count_code), "<ext>", JS_EVAL_RETVAL);
-    if (JS_IsException(count_val)) return 0;
+    JSValue count_val = JS_Eval(ctx, count_code, strlen(count_code), "<ext>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(count_val)) { JS_FreeValue(ctx, JS_GetException(ctx)); return 0; }
     int count = 0;
     JS_ToInt32(ctx, &count, count_val);
+    JS_FreeValue(ctx, count_val);
     if (count <= 0) return 0;
 
     int registered = 0;
     for (int i = 0; i < count; i++) {
-        /* Extract tool definition fields */
         char code[256];
 
         snprintf(code, sizeof(code), "globalThis.__cclaw_tools[%d].name", i);
-        JSValue name_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_RETVAL);
-        if (JS_IsException(name_val)) continue;
-        JSCStringBuf nbuf;
-        const char *name = JS_ToCString(ctx, name_val, &nbuf);
+        JSValue name_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(name_val)) { JS_FreeValue(ctx, JS_GetException(ctx)); continue; }
+        const char *name = JS_ToCString(ctx, name_val);
+        JS_FreeValue(ctx, name_val);
         if (!name) continue;
 
         snprintf(code, sizeof(code), "globalThis.__cclaw_tools[%d].description", i);
-        JSValue desc_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_RETVAL);
-        JSCStringBuf dbuf;
-        const char *desc = JS_IsException(desc_val) ? "" : JS_ToCString(ctx, desc_val, &dbuf);
+        JSValue desc_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_TYPE_GLOBAL);
+        const char *desc = "";
+        if (!JS_IsException(desc_val)) desc = JS_ToCString(ctx, desc_val);
         if (!desc) desc = "";
 
-        snprintf(code, sizeof(code),
-                 "JSON.stringify(globalThis.__cclaw_tools[%d].parameters)", i);
-        JSValue params_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_RETVAL);
-        JSCStringBuf pbuf;
-        const char *params = JS_IsException(params_val) ? "{}" :
-                             JS_ToCString(ctx, params_val, &pbuf);
+        snprintf(code, sizeof(code), "JSON.stringify(globalThis.__cclaw_tools[%d].parameters)", i);
+        JSValue params_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_TYPE_GLOBAL);
+        const char *params = "{}";
+        if (!JS_IsException(params_val)) params = JS_ToCString(ctx, params_val);
         if (!params) params = "{}";
 
-        /* Policy: stringify if present, NULL if absent */
         snprintf(code, sizeof(code),
                  "globalThis.__cclaw_tools[%d].policy ? JSON.stringify(globalThis.__cclaw_tools[%d].policy) : null", i, i);
-        JSValue pol_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_RETVAL);
+        JSValue pol_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_TYPE_GLOBAL);
         const char *policy = NULL;
-        JSCStringBuf polbuf;
         if (!JS_IsException(pol_val)) {
-            const char *ps = JS_ToCString(ctx, pol_val, &polbuf);
-            if (ps && strcmp(ps, "null") != 0)
-                policy = ps;
+            const char *ps = JS_ToCString(ctx, pol_val);
+            if (ps && strcmp(ps, "null") != 0) policy = ps;
+            else if (ps) JS_FreeCString(ctx, ps);
         }
 
-        /* Handler is stored as a string (function body receiving 'args') */
-        snprintf(code, sizeof(code),
-                 "globalThis.__cclaw_tools[%d].handler", i);
-        JSValue fn_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_RETVAL);
-        JSCStringBuf fbuf;
-        const char *fn_src = JS_IsException(fn_val) ? NULL :
-                             JS_ToCString(ctx, fn_val, &fbuf);
-        if (!fn_src) continue;
+        snprintf(code, sizeof(code), "globalThis.__cclaw_tools[%d].handler", i);
+        JSValue fn_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_TYPE_GLOBAL);
+        const char *fn_src = NULL;
+        if (!JS_IsException(fn_val)) fn_src = JS_ToCString(ctx, fn_val);
+        JS_FreeValue(ctx, fn_val);
+        if (!fn_src) {
+            JS_FreeCString(ctx, name);
+            if (desc[0]) JS_FreeCString(ctx, desc);
+            if (strcmp(params, "{}") != 0) JS_FreeCString(ctx, params);
+            JS_FreeValue(ctx, desc_val);
+            JS_FreeValue(ctx, params_val);
+            JS_FreeValue(ctx, pol_val);
+            continue;
+        }
 
-        /* Register via existing js_tool path (forks via eval ctx) */
         if (js_tool_register_ext(reg, name, desc, params, fn_src, ectx, policy) == 0) {
             registered++;
             LOG_DEBUG_(cfg, "extension: registered tool '%s'", name);
         }
+
+        JS_FreeCString(ctx, fn_src);
+        JS_FreeCString(ctx, name);
+        if (desc[0]) JS_FreeCString(ctx, desc);
+        if (strcmp(params, "{}") != 0) JS_FreeCString(ctx, params);
+        if (policy) JS_FreeCString(ctx, policy);
+        JS_FreeValue(ctx, desc_val);
+        JS_FreeValue(ctx, params_val);
+        JS_FreeValue(ctx, pol_val);
     }
     return registered;
 }
 
-/* After extensions loaded, read __cclaw_hooks{} and store references. */
+/* After extensions loaded, read __cclaw_hooks{} and store function source.
+ * We extract each hook fn's source via toString() so it can be re-evaled
+ * in fresh contexts during dispatch. */
 static void process_registered_hooks(JsSessionRuntime *rt, ExtensionCtx *ext_ctx,
                                      const Config *cfg) {
     if (!rt || !rt->ctx || !ext_ctx) return;
@@ -308,10 +314,11 @@ static void process_registered_hooks(JsSessionRuntime *rt, ExtensionCtx *ext_ctx
         snprintf(code, sizeof(code),
                  "globalThis.__cclaw_hooks['%s'] ? globalThis.__cclaw_hooks['%s'].length : 0",
                  hook_event_names[ev], hook_event_names[ev]);
-        JSValue count_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_RETVAL);
-        if (JS_IsException(count_val)) continue;
+        JSValue count_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(count_val)) { JS_FreeValue(ctx, JS_GetException(ctx)); continue; }
         int count = 0;
         JS_ToInt32(ctx, &count, count_val);
+        JS_FreeValue(ctx, count_val);
         if (count <= 0) continue;
 
         HookList *hl = &ext_ctx->hooks[ev];
@@ -320,13 +327,20 @@ static void process_registered_hooks(JsSessionRuntime *rt, ExtensionCtx *ext_ctx
         hl->cap = (size_t)count;
 
         for (int i = 0; i < count; i++) {
-            /* Store each hook fn as a named global for later dispatch */
-            char ref[128];
-            snprintf(ref, sizeof(ref),
-                     "globalThis.__cclaw_hooks['%s'][%d]",
+            /* Extract function source: "(function(...){...})" */
+            char src_code[256];
+            snprintf(src_code, sizeof(src_code),
+                     "'(' + globalThis.__cclaw_hooks['%s'][%d].toString() + ')'",
                      hook_event_names[ev], i);
-            hl->fns[hl->count] = strdup(ref);
-            if (hl->fns[hl->count]) hl->count++;
+            JSValue src_val = JS_Eval(ctx, src_code, strlen(src_code), "<ext>", JS_EVAL_TYPE_GLOBAL);
+            if (JS_IsException(src_val)) { JS_FreeValue(ctx, JS_GetException(ctx)); continue; }
+            const char *src = JS_ToCString(ctx, src_val);
+            JS_FreeValue(ctx, src_val);
+            if (src) {
+                hl->fns[hl->count] = strdup(src);
+                JS_FreeCString(ctx, src);
+                if (hl->fns[hl->count]) hl->count++;
+            }
         }
         LOG_DEBUG_(cfg, "extension: %zu %s hooks registered",
                   hl->count, hook_event_names[ev]);
@@ -340,12 +354,15 @@ int extension_load(char **paths, size_t count, JsSessionRuntime *rt,
 
     JSContext *ctx = (JSContext *)rt->ctx;
 
-    /* T256: Install cclaw API object before loading extensions */
-    JSValue init_val = JS_Eval(ctx, CCLAW_API_INIT, strlen(CCLAW_API_INIT), "<cclaw>", 0);
+    /* Install cclaw API object before loading extensions */
+    JSValue init_val = JS_Eval(ctx, CCLAW_API_INIT, strlen(CCLAW_API_INIT), "<cclaw>",
+                               JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(init_val)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
         LOG_INFO_(cfg, "extension: failed to init cclaw API");
         return 0;
     }
+    JS_FreeValue(ctx, init_val);
 
     int loaded = 0;
     for (size_t i = 0; i < count; i++) {
@@ -364,14 +381,17 @@ int extension_load(char **paths, size_t count, JsSessionRuntime *rt,
                  "(function(cclaw){%s})(globalThis.__cclaw_api)", src);
         free(src);
 
-        JSValue val = JS_Eval(ctx, wrapped, strlen(wrapped), paths[i], 0);
+        JSValue val = JS_Eval(ctx, wrapped, strlen(wrapped), paths[i],
+                              JS_EVAL_TYPE_GLOBAL);
         if (JS_IsException(val)) {
             JSValue exc = JS_GetException(ctx);
-            JSCStringBuf buf;
-            const char *msg = JS_ToCString(ctx, exc, &buf);
+            const char *msg = JS_ToCString(ctx, exc);
             LOG_INFO_(cfg, "extension: skip %s (error: %s)", paths[i],
                      msg ? msg : "unknown");
+            if (msg) JS_FreeCString(ctx, msg);
+            JS_FreeValue(ctx, exc);
         } else {
+            JS_FreeValue(ctx, val);
             loaded++;
             LOG_DEBUG_(cfg, "extension: loaded %s", paths[i]);
         }

@@ -44,11 +44,11 @@ static void test_discover_files(void) {
     snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
     mkdirs(ext_dir);
 
-    /* Create some .mjs files */
+    /* Create some .qjs files */
     char p1[512], p2[512], p3[512];
-    snprintf(p1, sizeof(p1), "%s/beta.mjs", ext_dir);
-    snprintf(p2, sizeof(p2), "%s/alpha.mjs", ext_dir);
-    snprintf(p3, sizeof(p3), "%s/readme.txt", ext_dir); /* not .mjs */
+    snprintf(p1, sizeof(p1), "%s/beta.qjs", ext_dir);
+    snprintf(p2, sizeof(p2), "%s/alpha.qjs", ext_dir);
+    snprintf(p3, sizeof(p3), "%s/readme.txt", ext_dir); /* not .qjs */
     write_file(p1, "// beta");
     write_file(p2, "// alpha");
     write_file(p3, "not js");
@@ -57,8 +57,8 @@ static void test_discover_files(void) {
     char **paths = extension_discover(ws, &count);
     if (count != 2) { printf("got %zu ", count); FAIL("expected 2 files"); }
     /* Should be sorted alphabetically */
-    if (!strstr(paths[0], "alpha.mjs")) FAIL("first should be alpha.mjs");
-    if (!strstr(paths[1], "beta.mjs")) FAIL("second should be beta.mjs");
+    if (!strstr(paths[0], "alpha.qjs")) FAIL("first should be alpha.qjs");
+    if (!strstr(paths[1], "beta.qjs")) FAIL("second should be beta.qjs");
     extension_list_free(paths, count);
 
     unlink(p1); unlink(p2); unlink(p3);
@@ -76,13 +76,13 @@ static void test_discover_subdir_index(void) {
     mkdirs(sub_dir);
 
     char idx[512];
-    snprintf(idx, sizeof(idx), "%s/index.mjs", sub_dir);
+    snprintf(idx, sizeof(idx), "%s/index.qjs", sub_dir);
     write_file(idx, "// plugin");
 
     size_t count = 0;
     char **paths = extension_discover(ws, &count);
     if (count != 1) { printf("got %zu ", count); FAIL("expected 1"); }
-    if (!strstr(paths[0], "myplugin/index.mjs")) FAIL("should be myplugin/index.mjs");
+    if (!strstr(paths[0], "myplugin/index.qjs")) FAIL("should be myplugin/index.qjs");
     extension_list_free(paths, count);
 
     unlink(idx); rmdir(sub_dir); rmdir(ext_dir);
@@ -101,7 +101,7 @@ static void test_load_success(void) {
     mkdirs(ext_dir);
 
     char p1[512];
-    snprintf(p1, sizeof(p1), "%s/good.mjs", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/good.qjs", ext_dir);
     write_file(p1, "globalThis.__ext_loaded = true;");
 
     size_t count = 0;
@@ -131,8 +131,8 @@ static void test_load_throw_skips(void) {
     mkdirs(ext_dir);
 
     char p1[512], p2[512];
-    snprintf(p1, sizeof(p1), "%s/bad.mjs", ext_dir);
-    snprintf(p2, sizeof(p2), "%s/good.mjs", ext_dir);
+    snprintf(p1, sizeof(p1), "%s/bad.qjs", ext_dir);
+    snprintf(p2, sizeof(p2), "%s/good.qjs", ext_dir);
     write_file(p1, "throw new Error('intentional');");
     write_file(p2, "globalThis.__ext2 = 1;");
 
@@ -144,7 +144,7 @@ static void test_load_throw_skips(void) {
     int loaded = extension_load(paths, count, rt, NULL, &cfg, NULL, NULL);
     extension_list_free(paths, count);
 
-    /* bad.mjs throws → skipped, good.mjs succeeds */
+    /* bad.qjs throws → skipped, good.qjs succeeds */
     if (loaded != 1) {
         printf("loaded=%d ", loaded);
         js_runtime_destroy(rt);

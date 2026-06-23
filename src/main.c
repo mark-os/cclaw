@@ -1265,6 +1265,23 @@ static int qjs_eval_main(int argc, char **argv) {
     size_t n_extra = read_count + write_count;
     char **rp_strs = NULL, **wp_strs = NULL;
 
+    /* Layer 5: always mount the shared extension store read-only so sandboxed
+     * (non-host) agents can load promoted tool/hook handlers — which live under
+     * <db_dir>/extensions — without an explicit read_path grant. */
+    char store_dir[PATH_MAX] = {0};
+    int have_store = 0;
+    if (db_path && db_path[0]) {
+        char tmp[PATH_MAX];
+        snprintf(tmp, sizeof(tmp), "%s", db_path);
+        char *sl = strrchr(tmp, '/');
+        if (sl) {
+            *sl = '\0';
+            snprintf(store_dir, sizeof(store_dir), "%s/extensions", tmp);
+            struct stat sb;
+            if (stat(store_dir, &sb) == 0 && S_ISDIR(sb.st_mode)) have_store = 1;
+        }
+    }
+
     /* (c) Sandbox — derive policy from trust level */
     const char *trust_env = getenv("CCLAW_TRUST_LEVEL");
     SandboxConfig cfg = {0};
@@ -1276,9 +1293,10 @@ static int qjs_eval_main(int argc, char **argv) {
     cfg.proxy_sock = proxy_sock;
     if (no_sandbox) cfg.sandbox = 0;
 
-    if (n_extra > 0) {
-        cfg.extra_mounts = malloc(n_extra * sizeof(*cfg.extra_mounts));
-        cfg.extra_mount_count = n_extra;
+    size_t total_extra = n_extra + (have_store ? 1 : 0);
+    if (total_extra > 0) {
+        cfg.extra_mounts = malloc(total_extra * sizeof(*cfg.extra_mounts));
+        cfg.extra_mount_count = total_extra;
         size_t j = 0;
         if (read_count > 0) {
             rp_strs = malloc(read_count * sizeof(char *));
@@ -1305,6 +1323,11 @@ static int qjs_eval_main(int argc, char **argv) {
                 tok = strtok(NULL, ",");
             }
             free(tmp);
+        }
+        if (have_store) {
+            cfg.extra_mounts[j].path = store_dir;
+            cfg.extra_mounts[j].ro = 1;
+            j++;
         }
     }
 

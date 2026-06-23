@@ -2,152 +2,209 @@
 
 ## Overview
 
-An extension is a single JS package that can provide any combination of:
+An **extension** is a bundle of related capabilities: a manifest plus the handler
+files it points to. It can provide any combination of the following — zero or more
+of each:
 
 | Component | Runs in | Lifecycle |
 |-----------|---------|-----------|
-| Tools | agent process (the `advance_session` turn loop) | per-turn, fresh each turn |
-| Hooks | agent process (the `advance_session` turn loop) | per-turn, fresh each turn |
-| Channel | separate process (daemon-managed) | long-lived, restarted on crash |
+| Tools | forked child of the agent process (one fork+exec per call) | per-call, isolated |
+| Hooks | agent process, fresh QuickJS context per dispatch | per turn-event |
+| Channel | separate `channel_runner` process (daemon-managed) | long-lived, restarted on crash |
+| Scripts | forked child, on a cron schedule | per-run, isolated |
+| Skills (future) | — | — |
 
-Tools and hooks are **agent-side** — they execute inside the agent process as part of the `advance_session` turn loop, same as built-in tools. They share the agent's QuickJS heap, permissions, and turn lifecycle.
+The extension is the **unit** — the thing you install, enable, disable, uninstall,
+and publish. Every capability it provides carries its `extension_name`, so the set
+is always known and removable as a whole. This is the property the earlier
+implementation lacked: tools were discovered by *executing* JS that called
+`cclaw.registerTool()` and scraping the resulting globals, so nothing remembered
+which extension a tool came from and an extension had no runtime identity.
 
-Channel components are **special** — they run as separate processes with their own event loop, communicating with the daemon via the channel API (V98–V108). A channel extension provides a binary (or script) that the daemon launches and monitors.
+**The manifest declares the contents; nothing registers itself by running.** See
+[Why declarative, not `registerTool`](#why-declarative-not-registertool).
 
-An extension can provide all three, or just one. Installing an extension makes all its components available.
+## The Manifest
 
-## JS Runtime: Dialect & Globals
+Each extension is a directory whose root holds `extension.json`. The manifest
+*declares* what the extension provides; handler paths are relative to the bundle
+directory.
 
-All JavaScript in CClaw — extension tools/hooks, `js_define_tool` handlers, and the `js_eval` tool — runs in the same MicroQuickJS engine. It is **ES5**, not modern JS:
+```json
+{
+  "name": "nws",
+  "version": "0.1.0",
+  "description": "US National Weather Service tools",
 
-- Use `var` — `const` and `let` are **not** parsed (they raise `SyntaxError: unexpected character in expression`).
-- No arrow functions (`=>`), template literals (`` `...` ``), destructuring, generators, or `async`/`await`. Use `function(){}` and string concatenation.
-- No module system — `require`/`import` throw. Capabilities are **globals**, not imports.
-- `RegExp` literals (`/\.c$/`) and `JSON` are supported.
+  "tools": [
+    {
+      "name": "get_forecast",
+      "description": "Get the NWS forecast for a lat/lon",
+      "parameters": { "type": "object",
+        "properties": { "lat": {"type":"number"}, "lon": {"type":"number"} },
+        "required": ["lat","lon"] },
+      "handler": "forecast.js",
+      "policy": null
+    }
+  ],
 
-Available globals:
+  "hooks": [
+    { "event": "beforeToolCall", "handler": "guard.js" }
+  ],
 
-| Global | Description |
-|--------|-------------|
-| `fs.readDir(path)` | List a directory. Returns `[names, errno]` — index `[0]` for the array. |
-| `fs.readFile(path)` / `fs.writeFile(path, data)` | Read / write a file (workspace-scoped). |
-| `fs.stat(path)` | Returns `[{size, mode, mtime, isDir}, errno]`. |
-| `fs.cwd()` | Current working directory. |
-| `http_fetch(url)` | Blocking HTTP GET (host-allowlisted). **Throws in channel JS** — channels use `cclaw.send`. |
-| `console.log/warn/error` | Buffered; emitted as the result if the script returns `undefined`. |
+  "channel": { "type": "telegram", "handler": "channel.js" },
 
-`js_eval` returns the value of the last expression (or buffered `console.log` output if that is `undefined`). Example: `var f = fs.readDir("."); f[0]`.
-
-## Extension Package Layout
-
-```
-workspace/extensions/
-├── my_tool.js                    # single-file extension (tools + hooks only)
-├── mcp/
-│   ├── index.js                  # agent-side: registers MCP tools + hooks
-│   └── channel.js                # channel component (optional)
-└── discord/
-    ├── index.js                  # agent-side: prompt snippets, hooks
-    └── channel.js                # channel binary entry point
-```
-
-Discovery rules:
-1. `workspace/extensions/*.js` — single-file extensions (agent-side only)
-2. `workspace/extensions/*/index.js` — package extensions (agent-side component)
-3. `workspace/extensions/*/channel.js` — channel component (daemon launches separately)
-
-Load order: alphabetical by filename/dirname.
-
-## Agent-Side Component (Tools + Hooks)
-
-Runs inside the `advance_session` turn loop in the shared QuickJS context. Loaded fresh each turn (process is disposable — no persistent JS state beyond what's in cclaw.db).
-
-### Factory Function
-
-```javascript
-// workspace/extensions/my_extension.js
-function(cclaw) {
-    // Register tools
-    cclaw.registerTool({
-        name: "weather",
-        description: "Get current weather for a city",
-        parameters: '{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}',
-        handler: function(args) {
-            var resp = http_fetch("https://wttr.in/" + args.city + "?format=3");
-            return resp;
-        }
-    });
-
-    // Register hooks
-    cclaw.registerHook("beforeToolCall", function(ctx) {
-        if (ctx.name === "shell_exec" && ctx.args.command.includes("rm -rf")) {
-            return { block: true, reason: "destructive command blocked by extension" };
-        }
-    });
-
-    cclaw.registerHook("beforeRequest", function(messages) {
-        // Inject a system message before every LLM call
-        messages.unshift({ role: "system", content: "Always be concise." });
-        return messages;
-    });
+  "scripts": [
+    { "name": "morning_report", "handler": "report.js", "schedule": "0 7 * * *" }
+  ]
 }
 ```
 
-### API Reference
+| Field | Meaning |
+|-------|---------|
+| `name` | Extension identity. Primary key in `extensions`. |
+| `version` | Free-form version string (display / update tracking). |
+| `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), policy?}`. |
+| `hooks[]` | Each: `{event, handler (file)}`. `event` is one of the six hook events below. |
+| `channel` | At most one: `{type, handler (file)}`. The channel runs as a separate process. |
+| `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
 
-| Method | Description |
+The manifest carries **identity and declarations only** — never tool *code*. Code
+lives in the handler files. (DB holds config + path; files hold code.)
+
+## Two Locations: Draft vs. Installed
+
+Extensions exist in one of two places, and which one a file is in *is* its trust
+state:
+
+```
+~/.cclaw/agents/<agent>/workspace/extensions/<name>/   ← DRAFT  (agent-writable, private)
+~/.cclaw/extensions/<name>/                             ← INSTALLED (agent-immutable, shared)
+```
+
+- A **draft** is the authoring working copy. The owning agent can read and write
+  it; it is visible only to that agent. Drafts are discovered by scanning the
+  workspace.
+- An **installed** extension lives in the shared store outside any workspace. Tool
+  children get this directory mounted **read-only**, so a registered extension's
+  code cannot be modified by the agent that owns it. The DB's `extensions.path`
+  points here.
+
+"Migrating to `~/.cclaw`" means exactly this: **promotion copies the bundle from
+the workspace into the shared store, and ingests its declarations into the DB.**
+(File copy, not a schema migration — no conflict with the no-migrations rule.)
+
+## Lifecycle
+
+Four verbs, each a DB operation plus (for promote) a file copy:
+
+| Verb | Effect | DB | Files |
+|------|--------|-----|-------|
+| **draft** | author/iterate, usable by owner only | — | write `workspace/extensions/<name>/` |
+| **promote** | register as a real extension for the owner | `INSERT extensions(owner_agent,…,published=0)`, ingest `tools`/`hooks` rows, `INSERT agent_extensions(self)`, seed `cron` for scheduled scripts | **copy** bundle → `~/.cclaw/extensions/<name>/` |
+| **publish** | make attachable by any agent | `UPDATE extensions SET published=1` | — |
+| **attach** | another agent installs a published extension | `INSERT agent_extensions(other, name)` | — |
+
+Inverse operations are pure SQL: **disable** = `UPDATE agent_extensions SET
+enabled=0`; **uninstall** = `DELETE FROM agent_extensions WHERE extension_name=?`
+(the load join stops returning its capabilities); fully removing a published
+extension also deletes its `extensions`/`tools`/`hooks` rows and the shared-store
+directory.
+
+Promotion is the **trust boundary** (per [security.md](security.md)): a sub-agent's
+draft must not auto-promote into a globally callable tool. Because promote copies
+the code out of the writable workspace, a tool that has been promoted is immutable
+from the agent's side — closing the promote-then-swap-the-handler hole.
+
+## Loading: the DB is the registry
+
+The in-memory tool registry is a **cache of a SQL query**, not a parallel truth.
+At agent setup, the registry is materialized for the current agent:
+
+```sql
+SELECT t.name, t.description, t.parameters_json, t.path, t.policy
+  FROM tools t
+  JOIN agent_extensions ae ON ae.extension_name = t.extension_name
+ WHERE ae.agent_name = ?1 AND ae.enabled = 1
+   AND (e.published = 1 OR e.owner_agent = ?1);
+```
+
+Built-in C tools register as today; extension tools come from this join. Hooks load
+the same way from the `hooks` table. **No JS is evaluated at load time** — loading
+is parsing JSON-derived rows, not running extension code. The only JS execution is
+when a tool *runs* (fork child) or a hook *fires* (fresh context). This deletes the
+entire eval-and-scrape subsystem (`__cclaw_api`, `__cclaw_tools[]` accumulation,
+`process_registered_tools`/`process_registered_hooks`).
+
+Because the registry is derived from the DB, a tool promoted **mid-session** becomes
+callable the same session by re-running the query and appending to the live
+registry — no restart, no parallel in-memory state. This mirrors
+`agent_setup_refresh_caps()`, which already re-reads grants and rebinds live tool
+contexts.
+
+## Tool Handler Contract
+
+A tool handler is a JS file. It runs in a **forked, sandboxed child** (`cclaw
+--qjs_eval`) — one fork+exec per call, no shared process state. The child evaluates
+the handler file with the call's `args` (a parsed object) in scope; the value of
+the last expression — or buffered `console.log` output if that value is `undefined`
+— is the tool result string. This is the same execution model as the `js_eval`
+tool, so there is one JS contract, not two.
+
+Because handlers fork+exec, **a handler cannot capture closures or share an
+in-process client** — every input is static data and every run is isolated. This is
+precisely why declarative manifests lose nothing relative to imperative
+registration (see design notes).
+
+### JS dialect & globals
+
+JavaScript runs in **QuickJS** (bellard/quickjs). The eval/channel profiles have
+full modern JS (`let`/`const`, arrow functions, template literals, `async`/`await`,
+`Promise`); the in-process hooks profile is minimal (Base + Eval + JSON + RegExp,
+no `Promise`). Globals available to tool handlers (the `qjs_register_eval_host_functions`
+environment):
+
+| Global | Description |
 |--------|-------------|
-| `cclaw.registerTool({name, description, parameters, handler})` | Register a callable tool. `handler(args)` returns string. Delegates to same registry as `js_define_tool`. |
-| `cclaw.registerHook(event, fn)` | Register a hook function for an event. |
-| `cclaw.callTool(name, args)` | Synchronous call into C tool registry. Returns result string. Re-entrant (depth limit 8). |
+| `http_request(req)` | Blocking HTTP (host-allowlisted). Returns `{status, body}`. External bodies are boundary-wrapped. |
+| `fs.readFile/writeFile/readdir/stat/lstat/cwd` (+ `…Sync` aliases) | Workspace-scoped filesystem. |
+| `console.log/warn/error`, `print` | Buffered; emitted as the result when the handler returns `undefined`. |
 
-### Hook Events
+Secrets are referenced as `{{SECRET:NAME}}` in handler arguments and interpolated
+by C before execution — never visible to the model or written to the handler.
+
+## Hook Handler Contract
+
+A hook handler is a JS file run **in the agent process** in a fresh QuickJS context
+per dispatch (isolation between extensions; no cross-call leakage). The injected
+turn data is the handler's input; its return value (when the event allows) replaces
+or augments that data.
 
 | Event | Signature | Can modify | Notes |
 |-------|-----------|-----------|-------|
-| `turnStart` | `fn()` | — | Informational. Called at turn-loop entry. |
-| `beforeRequest` | `fn(messages) → messages\|void` | messages array | Chain in load order. Return modified array or void. |
+| `turnStart` | `fn()` | — | Informational, at turn-loop entry. |
+| `beforeRequest` | `fn(messages) → messages\|void` | messages array | Chained in load order. |
 | `afterResponse` | `fn(response)` | — | Read-only inspect of parsed LLM response. |
-| `beforeToolCall` | `fn({name, args}) → {block, reason}\|void` | args (mutate in place) | First `{block:true}` wins. |
-| `afterToolCall` | `fn({name, args, result}) → {result}\|void` | result replacement | Chains: each hook sees previous result. |
-| `turnEnd` | `fn()` | — | Informational. Called before agent exit. |
+| `beforeToolCall` | `fn({name, args}) → {block, reason}\|void` | args (in place) | First `{block:true}` wins. |
+| `afterToolCall` | `fn({name, args, result}) → {result}\|void` | result replacement | Chained; each sees the previous result. |
+| `turnEnd` | `fn()` | — | Informational, before agent exit. |
 
-### Failure Policy
-
-Extension throws during load or hook execution → skip that extension, log warning to stderr, continue turn. One broken extension ⊥ kill the agent.
-
-### Permissions
-
-Extensions inherit the agent's permissions:
-- `allowed_hosts` for `http_fetch`
-- Workspace filesystem access
-- Shared QuickJS heap (V5: 1MB default, configurable)
-
-No per-extension sandboxing. Extensions are trusted at the same level as `js_define_tool` code.
+A hook that throws during dispatch is skipped (logged to stderr); one broken hook
+must not kill the turn.
 
 ## Channel Component
 
-A channel extension's `channel.js` runs inside `channel_runner` — a **separate
-process** per channel, forked by the daemon (crash isolation, restart with
-backoff). The runner owns one single-threaded poll() event loop; channel JS is
-purely reactive and **never blocks on the network**. All outbound HTTP is
-described as request shapes that the runner's C loop executes on a curl_multi
-handle; all inbound HTTP arrives pre-parsed from the daemon.
+A channel runs inside `channel_runner` — a **separate process per channel**, forked
+by the daemon (crash isolation, restart with backoff). The runner owns one
+single-threaded `poll()` event loop; channel JS is purely reactive and **never
+blocks on the network**. All outbound HTTP is described as request shapes the
+runner's C loop executes on a `curl_multi` handle; inbound HTTP arrives pre-parsed.
 
-### Channel Process Lifecycle
+The channel is declared in the manifest (`"channel": {type, handler}`); promoting an
+extension with a channel inserts the `channels` row (joined to the extension by
+`extension_name`) and the daemon launches `<ext_path>/<handler>`.
 
-```
-1. User installs extension (copies to workspace/extensions/<name>/)
-2. Agent proposes channel via configure_channel tool (exit code 4)
-3. Admin approves → daemon inserts `channels` row + seeds `channel_state`
-4. Daemon forks channel process on startup (or immediately after approval)
-5. Channel process runs indefinitely (long-poll, proxied webhooks, etc.)
-6. On crash: daemon restarts with backoff (max 3 retries);
-   outbox rows stuck 'sending' are reset to 'pending' at startup
-7. On daemon shutdown: SIGTERM → channel exits
-```
-
-### JS Contract (channel.js handlers)
+### JS contract (channel handler)
 
 All handlers optional except `onInit`. A request shape is
 `{method?, url, body?, headers?: ["Name: value"], timeout?}`.
@@ -157,136 +214,171 @@ All handlers optional except `onInit`. A request shape is
 | `onInit()` | startup | `{poll?: Req}` — optional first long-poll shape |
 | `onPoll({status, body, error})` | long-poll completed | `{poll?: Req}` next shape; `{poll: null}` stops |
 | `onRequest(req)` | daemon proxies an inbound HTTP request over UDS | `{status?, body?}` (or a body string) |
-| `onOutbox({id, session_id, payload})` | agent message ready to deliver | nothing — queue sends via `cclaw.send` |
+| `onOutbox({id, session_id, payload})` | agent message ready to deliver | nothing — send via `cclaw.send` |
 | `onResult({tag, status, body, error})` | a tagged `cclaw.send` completed | nothing |
 
-`onRequest` is where **verification lives** — signature checks, challenge
-echoes, auth — because verification is code, not config. The daemon's
-`/hook/<channel>` endpoint is a dumb proxy: it forwards
-`{method, path, headers, body}` to the runner's unix socket and relays the
-reply. Returning `{status: 401}` rejects a forged webhook.
+`onRequest` is where **verification lives** — signature checks, challenge echoes,
+auth — because verification is code, not config. The daemon's `/hook/<channel>`
+endpoint is a dumb proxy. Returning `{status: 401}` rejects a forged webhook.
 
-### JS API (`cclaw.*`)
+### Channel JS API (`cclaw.*`)
 
 | Function | Description |
 |----------|-------------|
-| `cclaw.send(req)` | Queue an outbound HTTP request; the C loop executes it. Extra fields: `tag` (get `onResult` callback), `outbox_id` + `final` (auto-ack: the row is acked when the final send gets 2xx, failed otherwise). |
-| `cclaw.emit(type, payload_json)` | Insert `channel_events` row + `daemon_wake()`. Daemon routes to agent inbox. |
+| `cclaw.send(req)` | Queue an outbound request. Extra: `tag` (→ `onResult`), `outbox_id` + `final` (auto-ack the row when the final send is 2xx). |
+| `cclaw.emit(type, payload_json)` | Insert `channel_events` + `daemon_wake()`. Daemon routes to the agent inbox. |
 | `cclaw.getConfig(key)` / `setConfig(key, value)` | `channel_state` kv (scoped to this channel). |
-| `cclaw.ackOutbox(id)` / `failOutbox(id, error)` | Manual outbox resolution (e.g. unparseable payload). Sends with `outbox_id` ack automatically. |
+| `cclaw.ackOutbox(id)` / `failOutbox(id, error)` | Manual outbox resolution. |
 | `cclaw.log(msg)` | stderr line, prefixed with channel name. |
 | `cclaw.admin.*` | Admin operations (keys, models, hosts) for admin-gated chat commands. |
 
-There is **no blocking fetch**. `http_fetch` throws in channel JS.
+There is **no blocking fetch** in channel JS; `http_request` is unavailable —
+channels use `cclaw.send`.
 
-### Channel Event Flow
+### Event flow
 
 ```
-Incoming (platform → agent), webhook mode:
+Incoming (webhook):
   platform POSTs https://daemon/hook/<channel>
-    → daemon web server forwards envelope over <db>.<channel>.sock
+    → daemon forwards envelope over <db>.<channel>.sock
     → runner: onRequest(req) verifies, parses, cclaw.emit(...)
-    → reply {status, body} relayed to the platform by the daemon
+    → reply {status, body} relayed to the platform
     → daemon reads channel_events, routes to agent inbox, forks agent
-
-Incoming (platform → agent), long-poll mode:
-  C loop completes the poll shape
-    → onPoll(result) parses, cclaw.emit(...), returns next shape
-
-Outgoing (agent → channel):
-  agent completes turn (exit 0)
-    → daemon INSERT channel_outbox (status='pending') + FIFO wake
-    → runner marks row 'sending', calls onOutbox(item)
-    → onOutbox queues cclaw.send(..., {outbox_id: item.id, final: 1})
-    → C loop executes sends in order; final 2xx → 'delivered',
-      any failure → 'failed: <err>' and queued sends for that row dropped
+Incoming (long-poll):
+  C loop completes the poll shape → onPoll(result) → cclaw.emit(...) → next shape
+Outgoing:
+  agent turn completes → daemon INSERT channel_outbox(pending) + FIFO wake
+    → runner marks 'sending', onOutbox(item) → cclaw.send(..., {outbox_id, final:1})
+    → C loop sends in order; final 2xx → 'delivered', any failure → 'failed'
 ```
 
-### Example: minimal webhook channel
+## Scripts
 
-```javascript
-function onInit() { return {}; }   // no polling; webhook only
+A script is a JS handler run as a forked child on a schedule — the low-ceremony
+path. The canonical example: *"send me a weather report every morning."* The agent
+writes `report.js`, and either runs it ad hoc or declares `"schedule": "0 7 * * *"`
+so promotion seeds a `cron` row. No tool, no channel, no promotion ladder required
+for a one-off. An extension exists only when the user wants a reusable, named,
+publishable capability (an `nws` extension with a `get_forecast` tool) rather than a
+single scheduled script.
 
-function onRequest(req) {
-    if ((req.headers["X-Hub-Signature"] || "") !== expected(req.body))
-        return {status: 401, body: "bad signature"};
-    var ev = JSON.parse(req.body);
-    cclaw.emit("message", JSON.stringify({channel_id: ev.chat, text: ev.text}));
-    return {status: 200, body: "ok"};
-}
+## Schema (cclaw.db)
 
-function onOutbox(item) {
-    var p = JSON.parse(item.payload);
-    cclaw.send({url: API + "/send", body: JSON.stringify({to: p.channel_id, text: p.text}),
-                outbox_id: item.id, final: 1});
-}
-```
-
-## Schema (cclaw.db additions)
+Deltas to the current schema; channel tables (`channel_events`, `channel_outbox`,
+`channel_state`, `channel_routes`) are unchanged — see [schema.md](schema.md).
 
 ```sql
-CREATE TABLE channels (
-    name        TEXT PRIMARY KEY,
-    type        TEXT NOT NULL,           -- 'telegram', 'discord', 'webhook', etc.
-    binary_path TEXT NOT NULL,           -- path to channel binary/script
-    status      TEXT DEFAULT 'active',   -- active|failed|disabled
-    pid         INTEGER,                 -- current process pid (NULL if not running)
-    created_at  INTEGER DEFAULT (unixepoch())
+-- extension = the installable unit
+CREATE TABLE extensions (
+  name        TEXT PRIMARY KEY,
+  path        TEXT NOT NULL,            -- shared store dir: ~/.cclaw/extensions/<name>
+  version     TEXT DEFAULT '0.0.0',
+  owner_agent TEXT,                     -- who promoted it (NULL for builtin)
+  published   INTEGER NOT NULL DEFAULT 0,  -- the single publish flag
+  builtin     INTEGER NOT NULL DEFAULT 0,
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
-CREATE TABLE channel_events (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel_name TEXT NOT NULL,
-    event_type   TEXT NOT NULL DEFAULT 'message',
-    payload      TEXT NOT NULL,
-    created_at   INTEGER DEFAULT (unixepoch())
+-- which agents have installed which extensions (+ per-agent config)
+CREATE TABLE agent_extensions (
+  agent_name     TEXT,
+  extension_name TEXT NOT NULL,
+  config         TEXT,
+  enabled        INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (agent_name, extension_name)
 );
 
-CREATE TABLE channel_outbox (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel_name TEXT NOT NULL,
-    session_id   INTEGER NOT NULL,
-    payload      TEXT NOT NULL,
-    status       TEXT DEFAULT 'pending',  -- pending|sending|delivered|failed
-    error        TEXT,
-    created_at   INTEGER DEFAULT (unixepoch()),
-    acked_at     INTEGER
+-- tools: authoritative registry, provenance via extension_name
+CREATE TABLE tools (
+  name            TEXT PRIMARY KEY,
+  extension_name  TEXT,                 -- NULL for built-in C tools
+  description     TEXT,
+  parameters_json TEXT,
+  path            TEXT,                 -- handler file (in the shared store)
+  agent_name      TEXT,                 -- owner scope, NULL = global
+  policy          TEXT,
+  builtin         INTEGER NOT NULL DEFAULT 0,
+  enabled         INTEGER NOT NULL DEFAULT 1
 );
-CREATE INDEX idx_outbox_pending ON channel_outbox(channel_name, status)
-    WHERE status = 'pending';
 
-CREATE TABLE channel_state (
-    channel_name TEXT NOT NULL,
-    key          TEXT NOT NULL,
-    value        TEXT,
-    PRIMARY KEY (channel_name, key)
+-- hooks: same provenance model as tools (replaces the __cclaw_hooks scrape)
+CREATE TABLE hooks (
+  extension_name TEXT NOT NULL,
+  event          TEXT NOT NULL,         -- one of the six hook events
+  path           TEXT NOT NULL,         -- handler file (in the shared store)
+  enabled        INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (extension_name, event, path)
 );
 ```
 
-## Relationship to Existing Systems
+The `tools` table becomes the source of truth (it was previously written by
+`tools_sync_to_db` with `builtin=1` and no path — a display mirror). Loading reads
+it; promote writes it.
 
-| Before | After |
-|--------|-------|
-| Telegram runs as thread inside daemon | Telegram runs as channel process (same as extensions) |
-| `daemon_signal_external` writes SignalMsg to FIFO | `daemon_wake()` writes 1 byte; daemon scans `channel_events` |
-| `deliver_response` calls `telegram_send_message` directly | Daemon writes `channel_outbox`; channel process delivers |
-| `channel_bindings` maps type→agent | Still used — daemon reads to route `channel_events` to correct agent |
-| Internal signal_pipe for in-process wake | Unchanged — cron, spawn_queue still use it |
+## Security & Trust
 
-## Installation Flow
-
-1. Agent creates extension files in `workspace/extensions/<name>/`
-2. Agent-side component (index.js) loads automatically next turn
-3. For channel component: agent calls `configure_channel` tool with `{type, binary_path, config: {key: value, ...}}`
-4. Admin approves (V54)
-5. Daemon inserts `channels` row, seeds `channel_state` with config, launches process
+- **Promotion is the trust boundary.** Drafts are private and untrusted; an
+  installed extension's code is copied out of the agent-writable workspace so it is
+  immutable from the agent's side. No promote-then-swap.
+- **One read-only mount.** Tool children get `~/.cclaw/extensions/` mounted
+  read-only — a single mount serves every agent, instead of cross-agent workspace
+  mounts that publishing-from-workspace would require.
+- **Trust level unchanged.** Extension tools run at the same sandbox trust as the
+  agent's other tools (`agents.trust_level`); they get no extra privilege. Per-tool
+  `policy` and `grants` gate *callability* — a statically-declared tool can still be
+  approval-gated or denied. Conditional availability is a policy concern, not a
+  registration-time concern.
 
 ## Design Decisions
 
-**Why one package for both?** An extension like MCP or Discord needs agent-side behavior (prompt guidance, tool registration) AND a channel process (network I/O, protocol handling). Keeping them together means one install, one update, coherent versioning.
+### Why declarative, not `registerTool`
 
-**Why separate processes for channels?** Channels have unbounded lifetimes and external network dependencies. A misbehaving Discord gateway reconnect loop shouldn't affect agent turns or the daemon's epoll loop. Crash isolation is the primary motivation.
+`registerTool`/`registerHook` (code that registers itself at load) earns its keep in
+in-process plugin systems where a handler is a live closure over a configured
+client and registration can be conditional. **CClaw discarded that model when it
+chose fork+exec isolation:** a handler is an isolated source string, so every
+`registerTool` argument is already static data — the call is a JSON literal wearing
+a function-call costume. The only things imperative registration buys here are
+*conditional* and *programmatic* registration, and both undermine the goal of an
+inspectable, DB-authoritative registry (a tool that only sometimes exists depending
+on load-time JS). Programmatic generation is better done by generating the manifest
+once at author time; conditional availability is a `policy`/`grants` concern. So the
+manifest declares; nothing registers by running. This also realigns with the
+documented intent that defining a tool is *"a path to a code file plus the tool's
+schema — never inline JS."*
 
-**Why shared context for agent-side?** Extensions need to interact — an MCP extension registers tools that a guardrails extension might hook via `beforeToolCall`. Separate contexts would prevent this. The shared heap is bounded by V5 limits regardless.
+### Why a shared store instead of staying in the workspace
 
-**Why no persistent JS state?** Agent processes are one-turn-then-exit. Any state that needs to survive goes in cclaw.db (via `callTool("db_query", ...)` or the existing `js_define_tool` persistence path). This matches CClaw's process model — memory fully reclaimed after each turn.
+A published extension must be readable by other agents and immutable by its author.
+Keeping it in the owner's writable workspace breaks both (cross-tenant reads;
+mutable-after-promote). A central file store beside the central DB registry is the
+in-grain choice. The alternative — copying the bundle into each consumer's
+workspace on attach — buys workspace portability at the cost of duplication and
+frozen copies (no update propagation); rejected for CClaw because the DB is already
+the central registry.
+
+### Why separate processes for channels
+
+Channels have unbounded lifetimes and external network dependencies. A misbehaving
+gateway reconnect loop must not affect agent turns or the daemon loop. Crash
+isolation is the primary motivation.
+
+### Why fresh context per hook, forked child per tool
+
+Hooks run in-process for low latency but in a fresh QuickJS context each dispatch,
+so one extension's hook cannot pollute another's (QuickJS has no safe context-reset
+primitive; a fresh context *is* the reset). Tools fork+exec for full sandbox
+isolation and to bound a misbehaving handler. Both keep the long-lived runtime's GC
+heap shared and reused — one runtime, many short-lived contexts.
+
+## Implementation Status
+
+This spec describes the **target** model. As of this writing the codebase still
+loads extensions via the `cclaw.registerTool`/`registerHook` scrape
+(`src/extension.c`, `CCLAW_API_INIT`) and `tools_sync_to_db` writes a display-only
+mirror. The **channel component contract above is implemented** (`channel_runner`,
+the `channels`/`channel_*` tables, the `cclaw.*` channel API). Migrating tools/hooks
+to the declarative model is the work this spec defines: the manifest loader, the
+shared store + promote copy, the `tools`/`hooks`/`extensions` schema deltas, the
+read-only mount, and the promote/publish/attach operations.

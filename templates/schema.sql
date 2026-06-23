@@ -60,8 +60,10 @@ CREATE INDEX IF NOT EXISTS idx_llm_jobs_pending ON llm_jobs(status) WHERE status
 -- ═══ Extensions ═══
 CREATE TABLE IF NOT EXISTS extensions (
   name TEXT PRIMARY KEY,
-  path TEXT NOT NULL,
+  path TEXT NOT NULL,                       -- shared store dir: ~/.cclaw/extensions/<name>
   version TEXT DEFAULT '0.0.0',
+  owner_agent TEXT,                         -- who promoted it (NULL for builtin)
+  published INTEGER NOT NULL DEFAULT 0,     -- the single publish flag
   builtin INTEGER NOT NULL DEFAULT 0,
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -99,6 +101,7 @@ CREATE TABLE IF NOT EXISTS agent_extensions (
   agent_name TEXT,
   extension_name TEXT NOT NULL,
   config TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (agent_name, extension_name)
 );
 
@@ -256,16 +259,25 @@ CREATE INDEX IF NOT EXISTS idx_inbox_pending ON inbox(session_id, consumed) WHER
 -- ═══ Tools ═══
 CREATE TABLE IF NOT EXISTS tools (
   name TEXT PRIMARY KEY,
+  extension_name TEXT,                       -- NULL for built-in C tools
   description TEXT,
   parameters_json TEXT,
-  path TEXT,
-  builtin INTEGER NOT NULL DEFAULT 1,
-  agent_name TEXT,
+  path TEXT,                                 -- handler file (in the shared store)
+  builtin INTEGER NOT NULL DEFAULT 0,
+  agent_name TEXT,                           -- owner scope, NULL = global
   enabled INTEGER NOT NULL DEFAULT 1,
   policy TEXT
 );
 
-
+-- ═══ Hooks ═══
+-- Same provenance model as tools (replaces the __cclaw_hooks scrape).
+CREATE TABLE IF NOT EXISTS hooks (
+  extension_name TEXT NOT NULL,
+  event TEXT NOT NULL,                        -- one of the six hook events
+  path TEXT NOT NULL,                         -- handler file (in the shared store)
+  enabled INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (extension_name, event, path)
+);
 
 -- ═══ Memory ═══
 CREATE TABLE IF NOT EXISTS memory_blocks (

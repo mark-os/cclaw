@@ -39,7 +39,7 @@ static void cleanup(const char *ws) {
     (void)system(cmd);
 }
 
-/* Set CCLAW_MJS_EXE to sibling cclaw binary (same pattern as test_tool_js) */
+/* Set CCLAW_QJS_EXE to sibling cclaw binary (same pattern as test_tool_js) */
 static void setup_mjs_env(void) {
     char self[4096];
     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
@@ -49,8 +49,8 @@ static void setup_mjs_env(void) {
     if (slash) slash[1] = '\0'; else self[0] = '\0';
     char cclaw_path[4128];
     snprintf(cclaw_path, sizeof(cclaw_path), "%scclaw", self);
-    setenv("CCLAW_MJS_EXE", cclaw_path, 1);
-    setenv("CCLAW_MJS_HOST", "1", 1);
+    setenv("CCLAW_QJS_EXE", cclaw_path, 1);
+    setenv("CCLAW_QJS_HOST", "1", 1);
 }
 
 /* V111: registerTool registers a tool callable from the agent */

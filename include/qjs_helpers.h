@@ -55,12 +55,14 @@ void qjs_register_eval_host_functions(JSContext *ctx);
 /* Register channel-profile host functions (cclaw.*, admin.*). */
 void qjs_register_channel_host_functions(JSContext *ctx);
 
-/* Drain the microtask/job queue to completion. Call after any JS_Eval. */
-void qjs_drain_jobs(JSRuntime *rt);
-
-/* If val is a fulfilled Promise, return its result (new ref). If pending/rejected,
- * free val and return JS_UNDEFINED. Otherwise return val unchanged. */
-JSValue qjs_unwrap_promise(JSContext *ctx, JSValue val);
+/* Resolve an eval result. Drains the microtask queue to completion (running all
+ * pending async work and settling promise chains), then unwraps a settled
+ * top-level promise: fulfilled → its result (new ref); rejected → re-thrown so
+ * the caller's exception path reports the reason; non-promise or still-pending →
+ * returned unchanged. Mirrors quickjs-libc's js_std_loop + js_std_await, minus
+ * the os_poll step (we expose no timers/IO, so promises settle via microtasks).
+ * Call after JS_Eval on any value that isn't already an exception. */
+JSValue qjs_resolve(JSContext *ctx, JSValue val);
 
 /* Reset instruction counter — call before each handler dispatch in long-lived runtimes. */
 void qjs_reset_instructions(QjsRuntime *qrt);

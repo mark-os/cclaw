@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "qjs_helpers.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -67,6 +68,8 @@ char *qjs_eval_to_string(JSContext *ctx, const char *code, const char *filename)
     if (!ctx || !code) return NULL;
     JSValue val = JS_Eval(ctx, code, strlen(code), filename ? filename : "<eval>",
                           JS_EVAL_TYPE_GLOBAL);
+    if (!JS_IsException(val))
+        val = qjs_resolve(ctx, val);   /* drain microtasks; await/unwrap promise */
     if (JS_IsException(val))
         return qjs_get_exception_string(ctx);
 
@@ -132,32 +135,41 @@ char *qjs_get_exception_string(JSContext *ctx) {
     return result;
 }
 
-void qjs_drain_jobs(JSRuntime *rt) {
-    JSContext *c;
-    while (JS_ExecutePendingJob(rt, &c) > 0) {}
-}
+JSValue qjs_resolve(JSContext *ctx, JSValue val) {
+    JSRuntime *rt = JS_GetRuntime(ctx);
 
-JSValue qjs_unwrap_promise(JSContext *ctx, JSValue val) {
-    if (JS_PromiseState(ctx, val) == JS_PROMISE_PENDING) {
-        /* Not a promise at all, or genuinely pending — JS_PromiseState returns
-         * JS_PROMISE_PENDING for non-promise values too, but JS_PromiseResult
-         * would crash. Check via duck-typing: if it's not an object, pass through. */
+    /* Drain the whole microtask queue (js_std_loop's inner loop): runs every
+     * pending job and settles all promise chains. A side job that throws leaves
+     * its exception pending on the realm context — report and clear it so it
+     * can't poison the unwrap or the caller, then keep draining. */
+    for (;;) {
+        int err = JS_ExecutePendingJob(rt, NULL);
+        if (err == 0) break;
+        if (err < 0) {
+            char *msg = qjs_get_exception_string(ctx);
+            if (msg) { fprintf(stderr, "[qjs] job error: %s\n", msg); free(msg); }
+        }
     }
-    /* JS_PromiseState returns -1 for non-promise values in some builds,
-     * but the bellard 2026 version returns JS_PROMISE_PENDING. Safest check:
-     * only unwrap if result is a fulfilled or rejected promise. */
-    JSPromiseStateEnum state = JS_PromiseState(ctx, val);
-    if (state == JS_PROMISE_FULFILLED) {
+
+    /* Unwrap the now-settled top-level promise (js_std_await's terminal cases).
+     * JS_PromiseState returns -1 for non-promise values, so -1 and a still-
+     * pending 0 both fall through unchanged. */
+    switch (JS_PromiseState(ctx, val)) {
+    case JS_PROMISE_FULFILLED: {
+        /* JS_PromiseResult already returns a new ref — transfer it, don't re-dup. */
         JSValue result = JS_PromiseResult(ctx, val);
         JS_FreeValue(ctx, val);
-        return JS_DupValue(ctx, result);
+        return result;
     }
-    if (state == JS_PROMISE_REJECTED) {
+    case JS_PROMISE_REJECTED: {
+        /* Re-throw the reason so the caller's normal exception path reports it. */
+        JSValue exc = JS_Throw(ctx, JS_PromiseResult(ctx, val));
         JS_FreeValue(ctx, val);
-        return JS_UNDEFINED;
+        return exc;
     }
-    /* Not a promise or still pending — return as-is */
-    return val;
+    default:
+        return val;
+    }
 }
 
 void qjs_reset_instructions(QjsRuntime *qrt) {

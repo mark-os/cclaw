@@ -1377,10 +1377,10 @@ static int qjs_eval_main(int argc, char **argv) {
     size_t eval_len = strlen(eval_code);
     JSValue val = JS_Eval(ctx, eval_code, eval_len, "<qjs_eval>", JS_EVAL_TYPE_GLOBAL);
 
-    /* Flush microtasks and unwrap any fulfilled promise */
-    qjs_drain_jobs(qrt->rt);
+    /* Drain microtasks and await/unwrap any returned promise (a rejection
+     * re-throws, so it reports via the exception path below). */
     if (!JS_IsException(val))
-        val = qjs_unwrap_promise(ctx, val);
+        val = qjs_resolve(ctx, val);
 
     int failed = 0;
     char *result = NULL;

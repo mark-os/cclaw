@@ -90,7 +90,7 @@ char *tool_js_eval_handler(const char *arguments, void *user_data) {
         setenv("CCLAW_QJS_GUARD", "1", 1);
 
         if (ectx && ectx->host_mode)
-            setenv("CCLAW_MJS_HOST", "1", 1);
+            setenv("CCLAW_QJS_HOST", "1", 1);
 
         if (ectx && ectx->trust_level)
             setenv("CCLAW_TRUST_LEVEL", ectx->trust_level, 1);

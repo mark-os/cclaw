@@ -81,11 +81,14 @@ int get_int_prop(JSContext *ctx, JSValue obj, const char *name, int dflt) {
     return i;
 }
 
-/* Eval JS, logging any exception. Drains microtasks and unwraps promises.
- * Returns the resolved value (JS_UNDEFINED on error/rejected). */
+/* Eval JS, logging any exception. Drains microtasks and awaits/unwraps a
+ * returned promise. A sync throw or a rejected promise lands on the same path:
+ * log and return JS_UNDEFINED (channel handlers are fire-and-forget). */
 static JSValue eval_js(JSContext *ctx, const char *code, const char *tag) {
     qjs_reset_instructions(g_qrt);
     JSValue v = JS_Eval(ctx, code, strlen(code), tag, JS_EVAL_TYPE_GLOBAL);
+    if (!JS_IsException(v))
+        v = qjs_resolve(ctx, v);
     if (JS_IsException(v)) {
         JSValue exc = JS_GetException(ctx);
         const char *msg = JS_ToCString(ctx, exc);
@@ -94,8 +97,7 @@ static JSValue eval_js(JSContext *ctx, const char *code, const char *tag) {
         JS_FreeValue(ctx, exc);
         return JS_UNDEFINED;
     }
-    qjs_drain_jobs(JS_GetRuntime(ctx));
-    return qjs_unwrap_promise(ctx, v);
+    return v;
 }
 
 static void set_global_str(JSContext *ctx, const char *name, const char *val) {

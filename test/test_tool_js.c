@@ -21,8 +21,8 @@ static void setup_mjs_env(void) {
     if (slash) slash[1] = '\0'; else self[0] = '\0';
     char cclaw_path[4128];
     snprintf(cclaw_path, sizeof(cclaw_path), "%scclaw", self);
-    setenv("CCLAW_MJS_EXE", cclaw_path, 1);
-    setenv("CCLAW_MJS_HOST", "1", 1);
+    setenv("CCLAW_QJS_EXE", cclaw_path, 1);
+    setenv("CCLAW_QJS_HOST", "1", 1);
 }
 
 #define TEST(name) do { tests_run++; printf("  " name "... "); } while(0)

@@ -227,8 +227,19 @@ typedef struct {
 int db_tool_call_set_status(sqlite3 *db, int64_t session_id, const char *call_id,
                             const char *status, const char *resolved_by);
 
+/* Mark a tool_call done and record the result entry, keyed by (session_id,
+ * call_id). Like db_tool_call_complete_with_result but for callers that hold
+ * the session_id rather than the assistant entry_id (sub-agent completion). */
+int db_tool_call_complete_by_call(sqlite3 *db, int64_t session_id,
+                                  const char *call_id, int64_t result_entry_id);
+
 /* Get pending tool_calls for session. Caller frees with db_tool_call_free_pending. */
 PendingToolCall *db_tool_call_get_pending(sqlite3 *db, int64_t session_id, int *out_count);
+
+/* 1 if the session has any tool_call still in flight (status='running' — an
+ * async tool dispatched but not yet completed: a forked tool child or a
+ * sub-agent). The turn's tool phase isn't done until this returns 0. */
+int db_tool_call_any_running(sqlite3 *db, int64_t session_id);
 
 /* Free PendingToolCall array. */
 void db_tool_call_free_pending(PendingToolCall *list, int count);

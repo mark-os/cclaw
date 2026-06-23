@@ -45,12 +45,6 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
 
     /* ── State machine ───────────────────────────────────── */
 
-    if (strcmp(state, "awaiting_agent") == 0) {
-        AdvanceOutput out = make_output(ADVANCE_WAITING, session_id, agent, iter);
-        free(agent);
-        return out;
-    }
-
     if (strcmp(state, "awaiting_approval") == 0) {
         AdvanceOutput out = make_output(ADVANCE_WAITING, session_id, agent, iter);
         free(agent);
@@ -149,9 +143,8 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
                                      .tool_name = "launch_agent", .is_error = 0 };
                     int64_t rid = entry_append_with_turn(db, pi.parent_session_id,
                                                         &rmsg, 0);
-                    (void)rid;
-                    db_tool_call_set_status(db, pi.parent_session_id,
-                                           pi.parent_tool_call_id, "done", NULL);
+                    db_tool_call_complete_by_call(db, pi.parent_session_id,
+                                                  pi.parent_tool_call_id, rid);
                     /* Unpark parent */
                     session_set_state(db, pi.parent_session_id, "tool_running");
                 } else {
@@ -194,6 +187,16 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             return out;
         }
         db_tool_call_free_pending(calls, tc_count);
+
+        /* No un-dispatched calls left, but async ones (forked tools or
+         * sub-agents) may still be in flight. Stay in tool_running and wait;
+         * each completion wakes us again and re-checks. The turn only proceeds
+         * to the LLM once every tool_call has a result. */
+        if (db_tool_call_any_running(db, session_id)) {
+            AdvanceOutput out = make_output(ADVANCE_WAITING, session_id, agent, iter);
+            free(agent);
+            return out;
+        }
 
         /* All tools done — dispatch next LLM iteration */
         int new_iter = session_bump_iteration(db, session_id);

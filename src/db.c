@@ -1474,6 +1474,28 @@ int db_tool_call_set_status(sqlite3 *db, int64_t session_id, const char *call_id
     return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
 }
 
+int db_tool_call_complete_by_call(sqlite3 *db, int64_t session_id,
+                                  const char *call_id, int64_t result_entry_id) {
+    if (!db || !call_id) return -1;
+    const char *sql =
+        "UPDATE tool_calls SET status='done', result_entry_id=?"
+        " WHERE session_id=? AND call_id=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, result_entry_id);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    sqlite3_bind_text(stmt, 3, call_id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+}
+
+int db_tool_call_any_running(sqlite3 *db, int64_t session_id) {
+    return (int)db_scalar_i64(db,
+        "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE session_id=? AND status='running');",
+        session_id, 0);
+}
+
 PendingToolCall *db_tool_call_get_pending(sqlite3 *db, int64_t session_id, int *out_count) {
     *out_count = 0;
     const char *sql =
@@ -1812,10 +1834,14 @@ int db_recover_stale_sessions(sqlite3 *db) {
     if (sqlite3_exec(db, reset_sql, NULL, NULL, NULL) != SQLITE_OK)
         goto rollback;
 
-    /* b) Collect orphaned pending tool_calls */
+    /* b) Collect orphaned tool_calls — anything that hadn't produced a result
+     * when we died. 'pending' = never dispatched; 'running' = a forked tool or
+     * sub-agent was in flight (the async state added for parallel dispatch).
+     * Both leave the assistant turn with an unanswered tool_call, so reconcile
+     * them identically: synthetic error result + mark done. */
     const char *orphan_sql =
         "SELECT session_id, call_id, name FROM tool_calls"
-        " WHERE status='pending'"
+        " WHERE status IN ('pending','running')"
         "   AND NOT EXISTS (SELECT 1 FROM entries e"
         "                   WHERE e.session_id = tool_calls.session_id"
         "                     AND e.tool_call_id = tool_calls.call_id"

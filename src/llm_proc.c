@@ -120,6 +120,11 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     char *agent_name_alloc = session_get_agent_name(db, session_id);
     const char *agent_name = agent_name_alloc ? agent_name_alloc : "default";
 
+    /* Sub-agents (depth > 0) must not stream tokens to stdout — only the root
+     * CLI session owns the terminal. With parallel sub-agents several run at
+     * once; their output is collected via the DB, not interleaved on screen. */
+    int suppress_stream = session_get_depth(db, session_id) > 0;
+
     /* Estimate tool overhead for context budget */
     int tool_overhead = 0;
     {
@@ -240,6 +245,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
         /* Build config for this model */
         Config route_cfg = *cfg;
+        if (suppress_stream) route_cfg.stream = 0;
         ProviderConfig route_prov = cfg->provider;
         route_prov.base_url = m->base_url;
         route_prov.model = m->model;

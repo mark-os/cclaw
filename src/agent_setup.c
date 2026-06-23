@@ -166,21 +166,17 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->ext_tool_ctx.workspace = cfg->workspace;
     tool_extension_register(&setup->reg, &setup->ext_tool_ctx);
 
-    /* Daemon-mode only tools */
-    if (mode == AGENT_SETUP_DAEMON) {
-        /* Approval — request_config context already registered above;
-         * the resolve logic lives in main.c (resolve_approval) and uses
-         * the same approval module. No extra registration needed here. */
-
-        /* Agent launch — only register if depth allows spawning */
-        setup->launch_ctx.db = db;
-        setup->launch_ctx.session_id = session_id;
-        int depth = session_get_depth(db, session_id);
-        if (depth < agent_max_depth(db)) {
-            tool_launch_agent_register(&setup->reg, &setup->launch_ctx);
-        }
-        tool_check_session_register(&setup->reg, &setup->launch_ctx);
-    }
+    /* Agent launch + status check. Available in both CLI and daemon: both run
+     * the same event loop with a wake pipe, so a spawned child advances and a
+     * parent waiting on it resumes in either. launch_agent is gated by depth
+     * (a leaf agent at the ceiling can't spawn). */
+    (void)mode;
+    setup->launch_ctx.db = db;
+    setup->launch_ctx.session_id = session_id;
+    int depth = session_get_depth(db, session_id);
+    if (depth < agent_max_depth(db))
+        tool_launch_agent_register(&setup->reg, &setup->launch_ctx);
+    tool_check_session_register(&setup->reg, &setup->launch_ctx);
 
     /* Persist builtin schemas (builtin=1), then materialize this agent's
      * extension tools from the DB join — order matters: the sync must see only

@@ -154,6 +154,17 @@ static void test_startup_recovery(void) {
         " 1, 'call_orphan', 'shell_exec', 'pending');",
         NULL, NULL, NULL) == SQLITE_OK);
 
+    /* An orphaned *running* tool_call: a forked tool or sub-agent was in flight
+     * (the async state used for parallel dispatch) when we crashed. Recovery
+     * must reconcile it exactly like a pending orphan, or the assistant turn is
+     * left with an unanswered tool_call. */
+    char insrun[256];
+    snprintf(insrun, sizeof(insrun),
+        "INSERT INTO tool_calls (session_id, entry_id, call_id, name, status)"
+        " VALUES (%lld, 1, 'call_running', 'launch_agent', 'running');",
+        (long long)tc_sid);
+    assert(sqlite3_exec(db, insrun, NULL, NULL, NULL) == SQLITE_OK);
+
     /* Recover. */
     assert(db_recover_stale_sessions(db) == 0);
 
@@ -176,6 +187,17 @@ static void test_startup_recovery(void) {
         "SELECT COUNT(*) FROM entries WHERE session_id=? AND type='tool_result'"
         " AND tool_call_id='call_orphan';", tc_sid, -1);
     assert(res == 1);
+
+    /* The in-flight 'running' call is reconciled the same way: no longer
+     * running, and answered by a synthetic tool_result. */
+    int64_t still_running = db_scalar_i64(db,
+        "SELECT COUNT(*) FROM tool_calls WHERE call_id='call_running'"
+        " AND status='running';", -1, -1);
+    assert(still_running == 0);
+    int64_t res_run = db_scalar_i64(db,
+        "SELECT COUNT(*) FROM entries WHERE session_id=? AND type='tool_result'"
+        " AND tool_call_id='call_running';", tc_sid, -1);
+    assert(res_run == 1);
 
     db_close(db);
     printf("  PASS test_startup_recovery\n");

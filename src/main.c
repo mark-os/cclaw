@@ -203,6 +203,14 @@ static int tool_is_inline(const char *name) {
            strcmp(name, "extension_list") == 0;
 }
 
+/* Tools whose sibling calls in one assistant turn may run concurrently.
+ * Default is serial (safe): models emit ordered calls — shell especially —
+ * expecting sequential side effects on the shared workspace. Only independent,
+ * self-contained delegations opt in. Concurrency is a property of the tool. */
+static int tool_is_parallel_safe(const char *name) {
+    return strcmp(name, "launch_agent") == 0;
+}
+
 /* Tools that need {{SECRET:X}} resolved to real values at exec time */
 static int tool_needs_interpolation(const char *name) {
     return strcmp(name, "shell_exec") == 0 ||
@@ -328,23 +336,40 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
         char *interp_args = NULL;
         if (tool_needs_interpolation(tc->name) && g_tool_setup && g_tool_setup->secret_count > 0)
             interp_args = secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count);
-        /* Thread tool_call_id for blocking modes (launch_agent, request_config) */
-        if (strcmp(tc->name, "launch_agent") == 0 && te->user_data)
-            ((AgentLaunchCtx *)te->user_data)->current_tool_call_id = tc->call_id;
+        /* Thread the live session + tool_call_id into the per-tool context.
+         * g_tool_setup is a single shared instance, so the session_id captured
+         * at agent_setup_init time is stale (0 in CLI) — the dispatching session
+         * varies per call (root or any sub-agent). launch_agent uses it as the
+         * child's parent, so without this the child gets parent -1 and its
+         * result can never route back. check_session shares the same ctx. */
+        if ((strcmp(tc->name, "launch_agent") == 0 ||
+             strcmp(tc->name, "check_session") == 0) && te->user_data) {
+            AgentLaunchCtx *lc = (AgentLaunchCtx *)te->user_data;
+            lc->session_id = session_id;
+            lc->current_tool_call_id = tc->call_id;
+        }
         if (strcmp(tc->name, "request_config") == 0 && te->user_data)
             ((RequestConfigCtx *)te->user_data)->current_tool_call_id = tc->call_id;
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
-        /* NULL return means blocking: the tool parked the session (awaiting_agent
-         * or awaiting_approval) and left this tool_call pending. Leave it
-         * pending — resolve_approval or advance_session writes the result later.
-         * Explicit allowlist: a NULL from any other tool is an error. */
-        if (!result && (strcmp(tc->name, "launch_agent") == 0 ||
-                        strcmp(tc->name, "request_config") == 0)) {
-            /* Handle approval parking: prompt the approver */
-            if (strcmp(tc->name, "request_config") == 0)
-                handle_approval_park(session_id);
-            return 2; /* Signal: parked, don't advance */
+        /* A NULL result means the tool dispatched async work and left this
+         * tool_call without an inline result. Two distinct shapes: */
+        if (!result && strcmp(tc->name, "launch_agent") == 0) {
+            /* Sub-agent launched. Mark this call 'running' so the turn-join
+             * (advance_session, tool_running) neither re-dispatches it nor
+             * proceeds to the LLM until the child completes and writes the
+             * result keyed by this call_id. The parent stays tool_running, so
+             * sibling launch_agent calls keep dispatching → real parallelism. */
+            db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+            /* parallel-safe tools let dispatch continue to siblings (3);
+             * a serial tool would stop and wait (0). */
+            return tool_is_parallel_safe(tc->name) ? 3 : 0;
+        }
+        if (!result && strcmp(tc->name, "request_config") == 0) {
+            /* Approval gate: the session is parked in awaiting_approval; the
+             * tool_call stays pending until resolve_approval writes the result. */
+            handle_approval_park(session_id);
+            return 2; /* parked, don't advance */
         }
         if (!result) result = strdup("error: tool returned null");
 
@@ -448,7 +473,14 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
     snprintf(c->tool_call_id, sizeof(c->tool_call_id), "%s", tc->call_id);
     snprintf(c->tool_name, sizeof(c->tool_name), "%s", tc->name);
     c->tool_args = tc->arguments ? strdup(tc->arguments) : NULL;  /* for §8 observer */
-    return 0;
+    /* In flight: exclude from get_pending so a re-advance (another wake landing
+     * while this child runs) can't fork a duplicate. reap_children flips it to
+     * 'done' via db_tool_call_complete_with_result. */
+    db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+    /* Forked tools are serial by default (0): the next pending call waits for
+     * this child to be reaped. A tool marked parallel-safe continues (3) so
+     * siblings fork concurrently — the poll loop already multiplexes N pipes. */
+    return tool_is_parallel_safe(tc->name) ? 3 : 0;
 }
 
 /* ── Pipe draining helpers ─────────────────────────────────────── */
@@ -787,22 +819,32 @@ static void run_advance(int64_t session_id) {
     switch (out.action) {
     case ADVANCE_DISPATCH_LLM:
         if (dispatch_llm_req(session_id, out.agent_name, out.iteration) < 0) {
-            if (g_mode == 0) g_cli_turn_active = 0;
+            /* Only the root CLI session drives the prompt; sub-agents advance
+             * silently in the background. */
+            if (g_mode == 0 && session_id == g_cli_session) g_cli_turn_active = 0;
         }
         break;
     case ADVANCE_DISPATCH_TOOLS: {
-        int i = 0;
-        int parked = 0;
-        while (i < out.tc_count) {
+        /* fork_tool_exec returns: 1 = inline (result written),
+         * 3 = async parallel-safe dispatched (keep going), 0 = async serial
+         * dispatched (stop and wait), 2 = parked for approval, <0 = failure.
+         * Parallel-safe calls are launched back-to-back; a serial async call
+         * (or a park/failure) stops dispatch and we wait for its completion. */
+        int async_in_flight = 0;
+        int stop = 0;
+        for (int i = 0; i < out.tc_count && !stop; i++) {
             int rc = fork_tool_exec(session_id, out.agent_name, &out.calls[i]);
-            if (rc == 1) { i++; continue; } /* inline tool — try next */
-            if (rc == 2) { parked = 1; break; } /* blocking sub-agent */
-            break; /* forked — stop (one at a time for forked) */
+            switch (rc) {
+            case 1: break;                              /* inline done — next */
+            case 3: async_in_flight = 1; break;         /* parallel async — next */
+            case 0: async_in_flight = 1; stop = 1; break; /* serial async — wait */
+            default: stop = 1; break;                   /* parked or failure */
+            }
         }
-        if (!parked && i >= out.tc_count) {
-            /* All were inline — advance again (tools all done) */
+        /* Only advance now if every call ran inline. If anything async is in
+         * flight, its completion (reap or sub-agent finish) re-advances us. */
+        if (!async_in_flight && !stop)
             run_advance(session_id);
-        }
         db_tool_call_free_pending(out.calls, out.tc_count);
         break;
     }
@@ -817,19 +859,24 @@ static void run_advance(int64_t session_id) {
             if (llm_worker_submit_compact(g_db, session_id, out.agent_name) != 0)
                 session_set_state(g_db, session_id, "idle");
         }
-        if (g_mode == 0) {
+        if (g_mode == 0 && session_id == g_cli_session) {
             g_cli_turn_active = 0;
         }
         break;
     case ADVANCE_WAITING:
     case ADVANCE_NOOP:
-        if (g_mode == 0 && !child_has_session(session_id))
+        /* Root turn stays active while its own async work (forked tools or
+         * sub-agents) is in flight; awaiting_approval has neither, so the prompt
+         * is released for the user's y/n. Sub-agents never touch the root flag. */
+        if (g_mode == 0 && session_id == g_cli_session
+            && !child_has_session(session_id)
+            && !db_tool_call_any_running(g_db, session_id))
             g_cli_turn_active = 0;
         break;
     case ADVANCE_ERROR:
         if (g_mode == 0) {
             fprintf(stderr, "error: session advance failed\n");
-            g_cli_turn_active = 0;
+            if (session_id == g_cli_session) g_cli_turn_active = 0;
         }
         break;
     }
@@ -837,7 +884,10 @@ static void run_advance(int64_t session_id) {
 
 static void deliver_response(int64_t session_id) {
     if (g_mode == 0) {
-        /* CLI: streaming wrote to stdout already, just newline */
+        /* CLI stdout belongs to the root session's turn. A sub-agent finishing
+         * routes its result to the parent's tool_call (advance.c), not stdout. */
+        if (session_id != g_cli_session) return;
+        /* streaming wrote to stdout already, just newline */
         if (g_cfg->stream)
             printf("\n");
         else {
@@ -1693,7 +1743,8 @@ int main(int argc, char *argv[]) {
               "file_read", "file_write", "js_eval", "request_config",
               "search_config", "memory_create", "memory_add", "memory_edit",
               "memory_delete", "configure_provider", "configure_channel", "create_agent",
-              "extension_promote", "extension_publish", "extension_attach", "extension_list"
+              "extension_promote", "extension_publish", "extension_attach", "extension_list",
+              "launch_agent", "check_session"
           };
           for (size_t i = 0; i < sizeof(default_tools)/sizeof(default_tools[0]); i++)
               agent_config_grant(g_db, "default", "tool", default_tools[i], 0);
@@ -1811,6 +1862,14 @@ int main(int argc, char *argv[]) {
         agent_setup_destroy(&setup); free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path); return 1;
     }
 
+    /* Wake pipe: sub-agent launch and completion wake sessions through this fd,
+     * exactly as in the daemon loop. Without it wake_session() is a no-op, so a
+     * spawned child session would never advance and a parent waiting on it would
+     * hang. This is what lets the CLI run the multi-agent code, not just the
+     * daemon — the only remaining difference is that the CLI has no channels. */
+    int wake_pipe_fd = -1;
+    if (wake_init() == 0) wake_pipe_fd = wake_fd();
+
     /* Register stdin for interactive mode */
     int use_stdin = 0;
     int stdin_idx = -1;   /* slot index, recomputed each loop iteration */
@@ -1848,6 +1907,12 @@ int main(int argc, char *argv[]) {
         int chld_idx = cli_nfds;
         cli_pfds[cli_nfds].fd = g_chld_pipe[0]; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
 
+        int wake_idx = -1;
+        if (wake_pipe_fd >= 0) {
+            wake_idx = cli_nfds;
+            cli_pfds[cli_nfds].fd = wake_pipe_fd; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
+        }
+
         int result_pipe_base = cli_nfds;
         cli_nfds = add_result_pipe_fds(cli_pfds, cli_nfds, cli_max_pfds);
 
@@ -1867,6 +1932,18 @@ int main(int argc, char *argv[]) {
         if (worker_idx >= 0 && (cli_pfds[worker_idx].revents & POLLIN)) {
             event_step_worker(worker_fd);
 
+            if (g_mode == 0 && !g_cli_turn_active) {
+                if (g_cli_done) goto done;
+                printf("> "); fflush(stdout);
+            }
+        }
+        if (wake_idx >= 0 && (cli_pfds[wake_idx].revents & POLLIN)) {
+            /* Sub-agent sessions woken by launch/completion advance here. */
+            WakeMsg msg;
+            while (read(wake_pipe_fd, &msg, sizeof(msg)) == (ssize_t)sizeof(msg)) {
+                if (child_has_session(msg.session_id)) continue;
+                run_advance(msg.session_id);
+            }
             if (g_mode == 0 && !g_cli_turn_active) {
                 if (g_cli_done) goto done;
                 printf("> "); fflush(stdout);
@@ -1948,6 +2025,7 @@ done:
      * close would otherwise have the handler write into a reused fd. */
     signal(SIGCHLD, SIG_DFL);
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
+    wake_close();
     free(cli_pfds);
     free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path);
     return rc;

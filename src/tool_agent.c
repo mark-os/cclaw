@@ -71,13 +71,13 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         return strdup("error: failed to create child session");
     }
 
-    /* If blocking: store parent's tool_call_id on child so completion
-     * can write the tool result directly */
-    if (!background && ctx->current_tool_call_id) {
+    /* If blocking: record which of the parent's tool_calls this child answers.
+     * The parent stays in tool_running with that call marked 'running' (by the
+     * dispatcher) — it is NOT parked on a single child, so multiple sub-agents
+     * can be outstanding at once. On completion advance_session writes the tool
+     * result keyed by this id and flips the call to 'done' (see advance.c). */
+    if (!background && ctx->current_tool_call_id)
         session_set_parent_tool_call_id(ctx->db, child_sid, ctx->current_tool_call_id);
-        /* Park parent in awaiting_agent state */
-        session_set_state(ctx->db, ctx->session_id, "awaiting_agent");
-    }
 
     /* Insert task into child's inbox and wake it */
     inbox_insert(ctx->db, child_sid, "spawn", task);

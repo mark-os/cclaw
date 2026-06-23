@@ -93,7 +93,17 @@ static void test_max_iterations(void) {
 static void test_waiting(void) {
     sqlite3 *db = test_db_open(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
-    session_set_state(db, sid, "awaiting_agent");
+    session_set_state(db, sid, "llm_running");
+    session_set_state(db, sid, "tool_running");
+
+    /* An async tool_call still in flight (status='running' — e.g. a sub-agent
+     * or a forked tool) keeps the turn parked in tool_running: advance must
+     * WAIT, not bump to the LLM, until every call has a result. */
+    char ins[256];
+    snprintf(ins, sizeof(ins),
+        "INSERT INTO tool_calls(session_id, entry_id, call_id, name, status)"
+        " VALUES(%lld, 1, 'c1', 'launch_agent', 'running');", (long long)sid);
+    assert(sqlite3_exec(db, ins, NULL, NULL, NULL) == SQLITE_OK);
 
     AdvanceOutput out = advance_session(db, sid, 25);
     assert(out.action == ADVANCE_WAITING);

@@ -15,8 +15,8 @@ static int tests_passed = 0;
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
 #define FAIL(msg) do { printf("FAIL: %s\n", msg); } while(0)
 
-static void test_cli_mode_excludes_daemon_tools(void) {
-    TEST(cli_mode_excludes_daemon_tools);
+static void test_cli_mode_includes_agent_tools(void) {
+    TEST(cli_mode_includes_agent_tools);
     const char *dbpath = "/tmp/test_agent_setup_cli.db";
     unlink(dbpath);
     sqlite3 *db = test_db_open(dbpath);
@@ -36,14 +36,14 @@ static void test_cli_mode_excludes_daemon_tools(void) {
     AgentSetup setup;
     agent_setup_init(&setup, db, sid, &cfg, "test_agent", AGENT_SETUP_CLI);
 
-    /* CLI excludes only daemon-runtime tools (launch/check need the daemon's
-     * session scheduler). DB-config tools (configure_*, create_agent) are now
-     * available in both modes — capability is agent/trust-based, not mode-gated. */
-    if (tools_lookup(&setup.reg, "launch_agent") != NULL) {
-        FAIL("launch_agent should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
+    /* launch_agent/check_session are now available in CLI too: the CLI runs the
+     * same wake-pipe event loop as the daemon, so sub-agents advance there. A
+     * depth-0 session is below the spawn ceiling, so launch_agent is present. */
+    if (tools_lookup(&setup.reg, "launch_agent") == NULL) {
+        FAIL("launch_agent should be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
-    if (tools_lookup(&setup.reg, "check_session") != NULL) {
-        FAIL("check_session should not be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
+    if (tools_lookup(&setup.reg, "check_session") == NULL) {
+        FAIL("check_session should be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
     if (tools_lookup(&setup.reg, "configure_provider") == NULL) {
         FAIL("configure_provider should be available in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
@@ -127,7 +127,7 @@ static void test_daemon_mode_includes_all_tools(void) {
 
 int main(void) {
     printf("test_agent_setup:\n");
-    test_cli_mode_excludes_daemon_tools();
+    test_cli_mode_includes_agent_tools();
     test_daemon_mode_includes_all_tools();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

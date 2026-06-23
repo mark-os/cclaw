@@ -115,20 +115,33 @@ static void test_spawn_blocking(void) {
     int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
     assert(parent_sid > 0);
 
-    /* With tool_call_id set: blocking parks parent, returns NULL */
+    /* Blocking launch returns NULL (no inline result — the child writes the
+     * tool result on completion) and records the parent's tool_call_id on the
+     * child so completion can route back. The handler does NOT change parent
+     * state: the dispatcher marks the tool_call 'running' and the parent stays
+     * in tool_running, so sibling launch_agent calls keep dispatching. */
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid,
                           .current_tool_call_id = "call_123"};
     session_set_state(db, parent_sid, "llm_running");
     session_set_state(db, parent_sid, "tool_running");
     char *r = tool_launch_agent_handler("{\"task\":\"blocking task\"}", &ctx);
-    assert(r == NULL); /* NULL = blocked, real result comes on child completion */
+    assert(r == NULL); /* NULL = async, real result comes on child completion */
 
-    /* Verify parent is in waiting state */
+    /* Parent state is unchanged by the handler (still tool_running) */
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, parent_sid);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "awaiting_agent") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "tool_running") == 0);
+    sqlite3_finalize(stmt);
+
+    /* The child carries the parent's tool_call_id for result routing */
+    sqlite3_prepare_v2(db,
+        "SELECT parent_tool_call_id FROM sessions WHERE parent_session_id=?"
+        " ORDER BY id DESC LIMIT 1", -1, &stmt, NULL);
+    sqlite3_bind_int64(stmt, 1, parent_sid);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "call_123") == 0);
     sqlite3_finalize(stmt);
 
     db_close(db);

@@ -10,6 +10,7 @@
 #include "tool_agent.h"
 #include "tool_request_config.h"
 #include "tool_search_config.h"
+#include "tool_extension.h"
 #include "http_policy.h"
 #include "proxy.h"
 #include "extension.h"
@@ -34,6 +35,7 @@ typedef struct {
     AgentLaunchCtx launch_ctx;
     RequestConfigCtx req_cfg_ctx;
     SearchConfigCtx search_cfg_ctx;
+    ToolExtensionCtx ext_tool_ctx;
     /* V88: secrets for shell injection + masking */
     ShellSecret *secrets;
     size_t secret_count;

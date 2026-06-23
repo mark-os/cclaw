@@ -196,7 +196,11 @@ static int tool_is_inline(const char *name) {
            strcmp(name, "memory_replace") == 0 ||
            strcmp(name, "db_query") == 0 ||
            strcmp(name, "launch_agent") == 0 ||
-           strcmp(name, "check_session") == 0;
+           strcmp(name, "check_session") == 0 ||
+           strcmp(name, "extension_promote") == 0 ||
+           strcmp(name, "extension_publish") == 0 ||
+           strcmp(name, "extension_attach") == 0 ||
+           strcmp(name, "extension_list") == 0;
 }
 
 /* Tools that need {{SECRET:X}} resolved to real values at exec time */
@@ -1662,7 +1666,8 @@ int main(int argc, char *argv[]) {
           static const char *default_tools[] = {
               "file_read", "file_write", "js_eval", "request_config",
               "search_config", "memory_create", "memory_add", "memory_edit",
-              "memory_delete", "configure_provider", "configure_channel", "create_agent"
+              "memory_delete", "configure_provider", "configure_channel", "create_agent",
+              "extension_promote", "extension_publish", "extension_attach", "extension_list"
           };
           for (size_t i = 0; i < sizeof(default_tools)/sizeof(default_tools[0]); i++)
               agent_config_grant(g_db, "default", "tool", default_tools[i], 0);

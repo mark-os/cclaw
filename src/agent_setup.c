@@ -159,6 +159,13 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     tool_configure_channel_register(&setup->reg, &setup->bootstrap_ctx);
     tool_create_agent_register(&setup->reg, &setup->bootstrap_ctx);
 
+    /* Extension lifecycle — inline tools (apply in-process via ctx->db), so
+     * available in both CLI and daemon like the bootstrap tools. */
+    setup->ext_tool_ctx.db = db;
+    setup->ext_tool_ctx.agent_name = agent_name;
+    setup->ext_tool_ctx.workspace = cfg->workspace;
+    tool_extension_register(&setup->reg, &setup->ext_tool_ctx);
+
     /* Daemon-mode only tools */
     if (mode == AGENT_SETUP_DAEMON) {
         /* Approval — request_config context already registered above;

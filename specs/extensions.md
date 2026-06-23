@@ -145,11 +145,13 @@ contexts.
 ## Tool Handler Contract
 
 A tool handler is a JS file. It runs in a **forked, sandboxed child** (`cclaw
---qjs_eval`) — one fork+exec per call, no shared process state. The child evaluates
-the handler file with the call's `args` (a parsed object) in scope; the value of
-the last expression — or buffered `console.log` output if that value is `undefined`
-— is the tool result string. This is the same execution model as the `js_eval`
-tool, so there is one JS contract, not two.
+--qjs_eval`) — one fork+exec per call, no shared process state. The child wraps the
+handler file as a **function body** with the call's `args` (a parsed object) in
+scope — roughly `(function(args){ <file> })(args)` — so the handler must `return`
+its result (a bare trailing expression evaluates to `undefined`). The returned
+value is the tool result string; if it returns `undefined`/nothing, buffered
+`console.log` output is used instead. This is the same execution model as the
+`js_eval` tool in file mode, so there is one JS contract, not two.
 
 Because handlers fork+exec, **a handler cannot capture closures or share an
 in-process client** — every input is static data and every run is isolated. This is

@@ -93,6 +93,29 @@ static void test_global_json(void) {
     qjs_runtime_destroy(qrt);
 }
 
+
+static void test_console_log_circular(void) {
+    QjsRuntime *qrt = qjs_runtime_create(2 * 1024 * 1024);
+    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+    qjs_register_eval_host_functions(ctx);
+
+    /* Prelude: create __console_buf */
+    JS_Eval(ctx, "var __console_buf = [];", 23, "<pre>", JS_EVAL_TYPE_GLOBAL);
+
+    /* Circular ref should not leave a pending exception */
+    char *r = qjs_eval_to_string(ctx, "var a = {}; a.self = a; console.log(a); 'ok'", NULL);
+    ASSERT(r && strcmp(r, "ok") == 0, "console.log circular does not corrupt context");
+    free(r);
+
+    /* Subsequent eval must still work */
+    r = qjs_eval_to_string(ctx, "2 + 2", NULL);
+    ASSERT(r && strcmp(r, "4") == 0, "eval after circular console.log");
+    free(r);
+
+    JS_FreeContext(ctx);
+    qjs_runtime_destroy(qrt);
+}
+
 static void test_interrupt_limit(void) {
     QjsRuntime *qrt = qjs_runtime_create(1024 * 1024);
     qjs_set_interrupt_limit(qrt, 100);
@@ -114,6 +137,7 @@ int main(void) {
     test_context_profiles();
     test_eval_to_string();
     test_global_json();
+    test_console_log_circular();
     test_interrupt_limit();
 
     if (failures == 0)

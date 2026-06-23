@@ -299,16 +299,16 @@ static JSValue js_admin_is_admin(JSContext *ctx, JSValueConst this_val,
 void qjs_register_channel_host_functions(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
 
-    /* cclaw object */
-    JSValue cclaw = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, cclaw, "emit", JS_NewCFunction(ctx, js_ch_emit, "emit", 3));
-    JS_SetPropertyStr(ctx, cclaw, "send", JS_NewCFunction(ctx, js_ch_send, "send", 1));
-    JS_SetPropertyStr(ctx, cclaw, "getConfig", JS_NewCFunction(ctx, js_ch_get_config, "getConfig", 1));
-    JS_SetPropertyStr(ctx, cclaw, "setConfig", JS_NewCFunction(ctx, js_ch_set_config, "setConfig", 2));
-    JS_SetPropertyStr(ctx, cclaw, "ackOutbox", JS_NewCFunction(ctx, js_ch_ack_outbox, "ackOutbox", 1));
-    JS_SetPropertyStr(ctx, cclaw, "failOutbox", JS_NewCFunction(ctx, js_ch_fail_outbox, "failOutbox", 2));
-    JS_SetPropertyStr(ctx, cclaw, "log", JS_NewCFunction(ctx, js_ch_log, "log", 1));
-    JS_SetPropertyStr(ctx, global, "cclaw", cclaw);
+    /* channel object */
+    JSValue ch = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, ch, "emit", JS_NewCFunction(ctx, js_ch_emit, "emit", 3));
+    JS_SetPropertyStr(ctx, ch, "send", JS_NewCFunction(ctx, js_ch_send, "send", 1));
+    JS_SetPropertyStr(ctx, ch, "getConfig", JS_NewCFunction(ctx, js_ch_get_config, "getConfig", 1));
+    JS_SetPropertyStr(ctx, ch, "setConfig", JS_NewCFunction(ctx, js_ch_set_config, "setConfig", 2));
+    JS_SetPropertyStr(ctx, ch, "ackOutbox", JS_NewCFunction(ctx, js_ch_ack_outbox, "ackOutbox", 1));
+    JS_SetPropertyStr(ctx, ch, "failOutbox", JS_NewCFunction(ctx, js_ch_fail_outbox, "failOutbox", 2));
+    JS_SetPropertyStr(ctx, ch, "log", JS_NewCFunction(ctx, js_ch_log, "log", 1));
+    JS_SetPropertyStr(ctx, global, "channel", ch);
 
     /* admin object */
     JSValue admin = JS_NewObject(ctx);

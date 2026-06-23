@@ -110,6 +110,7 @@ static JSValue js_fs_readFile(JSContext *ctx, JSValueConst this_val,
 
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
+    if (sz < 0) { fclose(f); return make_err_tuple(ctx, EIO); }
     fseek(f, 0, SEEK_SET);
     char *buf = malloc(sz > 0 ? (size_t)sz : 1);
     if (!buf) { fclose(f); return make_err_tuple(ctx, ENOMEM); }
@@ -234,8 +235,14 @@ static JSValue js_console_log(JSContext *ctx, JSValueConst this_val,
         const char *s;
         if (JS_IsObject(argv[i])) {
             JSValue json = JS_JSONStringify(ctx, argv[i], JS_UNDEFINED, JS_UNDEFINED);
-            s = JS_ToCString(ctx, json);
-            JS_FreeValue(ctx, json);
+            if (JS_IsException(json)) {
+                JSValue ex = JS_GetException(ctx);
+                JS_FreeValue(ctx, ex);
+                s = JS_ToCString(ctx, argv[i]);
+            } else {
+                s = JS_ToCString(ctx, json);
+                JS_FreeValue(ctx, json);
+            }
         } else {
             s = JS_ToCString(ctx, argv[i]);
         }

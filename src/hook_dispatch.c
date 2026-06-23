@@ -56,8 +56,9 @@ static char *build_messages_json(sqlite3 *db, int64_t session_id,
         size_t need = len + jlen + 2;
         if (need >= cap) {
             cap = need * 2;
-            buf = realloc(buf, cap);
-            if (!buf) { sqlite3_finalize(stmt); return NULL; }
+            char *tmp = realloc(buf, cap);
+            if (!tmp) { free(buf); sqlite3_finalize(stmt); return NULL; }
+            buf = tmp;
         }
         if (!first) buf[len++] = ',';
         memcpy(buf + len, json_str, jlen);
@@ -283,7 +284,7 @@ void hook_dispatch_observe_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
     free(json_str);
 
     for (size_t i = 0; i < hl->count; i++) {
-        size_t cl = strlen(hl->fns[i]) + 128;
+        size_t cl = strlen(hl->fns[i]) + 256;
         char *code = malloc(cl);
         if (!code) continue;
         snprintf(code, cl,

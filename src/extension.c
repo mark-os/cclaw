@@ -250,13 +250,15 @@ static int process_registered_tools(JsSessionRuntime *rt, ToolRegistry *reg,
         snprintf(code, sizeof(code), "globalThis.__cclaw_tools[%d].description", i);
         JSValue desc_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_TYPE_GLOBAL);
         const char *desc = "";
-        if (!JS_IsException(desc_val)) desc = JS_ToCString(ctx, desc_val);
+        int desc_owned = 0;
+        if (!JS_IsException(desc_val)) { desc = JS_ToCString(ctx, desc_val); desc_owned = (desc != NULL); }
         if (!desc) desc = "";
 
         snprintf(code, sizeof(code), "JSON.stringify(globalThis.__cclaw_tools[%d].parameters)", i);
         JSValue params_val = JS_Eval(ctx, code, strlen(code), "<ext>", JS_EVAL_TYPE_GLOBAL);
         const char *params = "{}";
-        if (!JS_IsException(params_val)) params = JS_ToCString(ctx, params_val);
+        int params_owned = 0;
+        if (!JS_IsException(params_val)) { params = JS_ToCString(ctx, params_val); params_owned = (params != NULL); }
         if (!params) params = "{}";
 
         snprintf(code, sizeof(code),
@@ -276,8 +278,9 @@ static int process_registered_tools(JsSessionRuntime *rt, ToolRegistry *reg,
         JS_FreeValue(ctx, fn_val);
         if (!fn_src) {
             JS_FreeCString(ctx, name);
-            if (desc[0]) JS_FreeCString(ctx, desc);
-            if (strcmp(params, "{}") != 0) JS_FreeCString(ctx, params);
+            if (desc_owned) JS_FreeCString(ctx, desc);
+            if (params_owned) JS_FreeCString(ctx, params);
+            if (policy) JS_FreeCString(ctx, policy);
             JS_FreeValue(ctx, desc_val);
             JS_FreeValue(ctx, params_val);
             JS_FreeValue(ctx, pol_val);
@@ -291,8 +294,8 @@ static int process_registered_tools(JsSessionRuntime *rt, ToolRegistry *reg,
 
         JS_FreeCString(ctx, fn_src);
         JS_FreeCString(ctx, name);
-        if (desc[0]) JS_FreeCString(ctx, desc);
-        if (strcmp(params, "{}") != 0) JS_FreeCString(ctx, params);
+        if (desc_owned) JS_FreeCString(ctx, desc);
+        if (params_owned) JS_FreeCString(ctx, params);
         if (policy) JS_FreeCString(ctx, policy);
         JS_FreeValue(ctx, desc_val);
         JS_FreeValue(ctx, params_val);

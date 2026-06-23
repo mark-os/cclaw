@@ -34,6 +34,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -245,13 +246,14 @@ static CURL *make_easy(const char *method, const char *url, const char *body,
 static void poll_shape_update(JSContext *ctx, JSValue ret) {
     if (JS_IsUndefined(ret) || JS_IsNull(ret)) return;
     JSValue p = JS_GetPropertyStr(ctx, ret, "poll");
-    if (JS_IsException(p) || JS_IsUndefined(p)) return;
+    if (JS_IsException(p) || JS_IsUndefined(p)) { JS_FreeValue(ctx, p); return; }
     free(g_poll.method); free(g_poll.url); free(g_poll.body);
     g_poll.method = g_poll.url = g_poll.body = NULL;
-    if (JS_IsNull(p)) return;  /* explicit null stops polling */
+    if (JS_IsNull(p)) { JS_FreeValue(ctx, p); return; }  /* explicit null stops polling */
     g_poll.url = get_str_prop(ctx, p, "url");
     g_poll.method = get_str_prop(ctx, p, "method");
     g_poll.body = get_str_prop(ctx, p, "body");
+    JS_FreeValue(ctx, p);
 }
 
 static void poll_start(void) {
@@ -293,6 +295,7 @@ static void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row) {
         JS_NewString(ctx, row->payload ? row->payload : ""));
     JS_SetPropertyStr(ctx, global, "__cr_outbox_item", obj);
     eval_js(ctx, "onOutbox(__cr_outbox_item)", "onOutbox");
+    JS_FreeValue(ctx, global);
 }
 
 static void drain_outbox(JSContext *ctx) {
@@ -316,6 +319,7 @@ static void call_on_poll_done(JSContext *ctx, int status, const char *body,
         " ? onPoll({status: __cr_status, body: __cr_body, error: __cr_err}) : null",
         "onPoll");
     poll_shape_update(ctx, ret);
+    JS_FreeValue(ctx, ret);
 }
 
 static void call_on_result(JSContext *ctx, const char *tag, int status,
@@ -324,11 +328,12 @@ static void call_on_result(JSContext *ctx, const char *tag, int status,
     set_global_int(ctx, "__cr_status", status);
     set_global_str(ctx, "__cr_body", body);
     set_global_str(ctx, "__cr_err", error);
-    eval_js(ctx,
+    JSValue ret = eval_js(ctx,
         "(typeof onResult === 'function')"
         " ? onResult({tag: __cr_tag, status: __cr_status, body: __cr_body,"
         "             error: __cr_err}) : null",
         "onResult");
+    JS_FreeValue(ctx, ret);
 }
 
 /* ── Proxied requests over UDS (from the daemon) ───────────────── */
@@ -395,6 +400,7 @@ static void uds_handle_conn(JSContext *ctx, int cfd) {
         "onRequest");
 
     const char *reply = JS_ToCString(ctx, ret);
+    int reply_owned = (reply != NULL);
     if (!reply) reply = "500\n";
     size_t rlen = strlen(reply), off = 0;
     while (off < rlen) {
@@ -402,7 +408,7 @@ static void uds_handle_conn(JSContext *ctx, int cfd) {
         if (n <= 0) { if (n < 0 && errno == EINTR) continue; break; }
         off += (size_t)n;
     }
-    JS_FreeCString(ctx, reply);
+    if (reply_owned) JS_FreeCString(ctx, reply);
     JS_FreeValue(ctx, ret);
     close(cfd);
 }
@@ -452,7 +458,13 @@ int main(int argc, char **argv) {
             sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
             if (sqlite3_step(s) == SQLITE_ROW) {
                 const char *p = (const char *)sqlite3_column_text(s, 0);
-                if (p) snprintf(js_path, sizeof(js_path), "%s/channel.qjs", p);
+                if (p) {
+                    struct stat st;
+                    if (stat(p, &st) == 0 && S_ISREG(st.st_mode))
+                        snprintf(js_path, sizeof(js_path), "%s", p);
+                    else
+                        snprintf(js_path, sizeof(js_path), "%s/channel.qjs", p);
+                }
             }
             sqlite3_finalize(s);
         }

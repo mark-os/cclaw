@@ -279,7 +279,7 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
             if (sqlite3_step(mbs) == SQLITE_ROW && sqlite3_column_type(mbs, 0) != SQLITE_NULL) {
                 const char *txt = (const char *)sqlite3_column_text(mbs, 0);
                 mb_section = strdup(txt);
-                mb_len = strlen(mb_section);
+                mb_len = mb_section ? strlen(mb_section) : 0;
             }
             sqlite3_finalize(mbs);
         }

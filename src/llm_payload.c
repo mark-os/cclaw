@@ -74,7 +74,11 @@ static const char SQL_OPENAI_TOOLS[] =
     ") FROM tools t"
     " WHERE t.enabled=1"
     "   AND (t.agent_name IS NULL OR t.agent_name=?1)"
-    "   AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2)));";
+    "   AND ((?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2)))"
+    "        OR t.extension_name IN (SELECT ae.extension_name FROM agent_extensions ae"
+    "             JOIN extensions e ON e.name=ae.extension_name"
+    "             WHERE ae.agent_name=?1 AND ae.enabled=1"
+    "               AND (e.published=1 OR e.owner_agent=?1)));";
 
 /* Both FULL templates wrap json_object in json_patch('{}', ...): RFC 7386
  * merge drops top-level NULL-valued keys, which json_object would otherwise
@@ -149,7 +153,11 @@ static const char SQL_GEMINI_TOOLS[] =
     "  ) FROM tools t"
     "   WHERE t.enabled=1"
     "     AND (t.agent_name IS NULL OR t.agent_name=?1)"
-    "     AND (?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2))))"
+    "     AND ((?2 IS NULL OR t.name IN (SELECT value FROM json_each(?2)))"
+    "          OR t.extension_name IN (SELECT ae.extension_name FROM agent_extensions ae"
+    "               JOIN extensions e ON e.name=ae.extension_name"
+    "               WHERE ae.agent_name=?1 AND ae.enabled=1"
+    "                 AND (e.published=1 OR e.owner_agent=?1))))"
     "));";
 
 static const char SQL_GEMINI_FULL[] =

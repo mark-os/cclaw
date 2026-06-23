@@ -47,11 +47,12 @@ JsSessionRuntime *js_runtime_create(void);
 /* Destroy a session runtime. */
 void js_runtime_destroy(JsSessionRuntime *rt);
 
-/* Register a JS tool from extension code.
- * code is the JS function body receiving 'args'. */
+/* Register an extension tool. `path` is the absolute handler .qjs file in the
+ * shared store; it is fork+exec'd with the call args in scope when the tool
+ * runs (same model as js_eval's filename mode). */
 int js_tool_register_ext(ToolRegistry *reg, const char *name,
                          const char *description, const char *parameters_json,
-                         const char *code, JsEvalCtx *ectx,
+                         const char *path, JsEvalCtx *ectx,
                          const char *policy_json);
 
 #endif

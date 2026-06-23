@@ -90,80 +90,11 @@ static void test_discover_subdir_index(void) {
     PASS();
 }
 
-static void test_load_success(void) {
-    TEST(load_success);
-    JsSessionRuntime *rt = js_runtime_create();
-    if (!rt) FAIL("js_runtime_create");
-
-    const char *ws = "/tmp/cclaw_ext_test_ws3";
-    char ext_dir[256];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
-    mkdirs(ext_dir);
-
-    char p1[512];
-    snprintf(p1, sizeof(p1), "%s/good.qjs", ext_dir);
-    write_file(p1, "globalThis.__ext_loaded = true;");
-
-    size_t count = 0;
-    char **paths = extension_discover(ws, &count);
-    if (count != 1) { js_runtime_destroy(rt); FAIL("discover failed"); }
-
-    Config cfg = {.log_level = LOG_LEVEL_DEBUG};
-    int loaded = extension_load(paths, count, rt, NULL, &cfg, NULL, NULL);
-    extension_list_free(paths, count);
-
-    if (loaded != 1) { js_runtime_destroy(rt); FAIL("expected 1 loaded"); }
-
-    js_runtime_destroy(rt);
-    unlink(p1); rmdir(ext_dir);
-    char ws2[256]; snprintf(ws2, sizeof(ws2), "%s", ws); rmdir(ws2);
-    PASS();
-}
-
-static void test_load_throw_skips(void) {
-    TEST(load_throw_skips);
-    JsSessionRuntime *rt = js_runtime_create();
-    if (!rt) FAIL("js_runtime_create");
-
-    const char *ws = "/tmp/cclaw_ext_test_ws4";
-    char ext_dir[256];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
-    mkdirs(ext_dir);
-
-    char p1[512], p2[512];
-    snprintf(p1, sizeof(p1), "%s/bad.qjs", ext_dir);
-    snprintf(p2, sizeof(p2), "%s/good.qjs", ext_dir);
-    write_file(p1, "throw new Error('intentional');");
-    write_file(p2, "globalThis.__ext2 = 1;");
-
-    size_t count = 0;
-    char **paths = extension_discover(ws, &count);
-    if (count != 2) { js_runtime_destroy(rt); FAIL("discover"); }
-
-    Config cfg = {.log_level = LOG_LEVEL_DEBUG};
-    int loaded = extension_load(paths, count, rt, NULL, &cfg, NULL, NULL);
-    extension_list_free(paths, count);
-
-    /* bad.qjs throws → skipped, good.qjs succeeds */
-    if (loaded != 1) {
-        printf("loaded=%d ", loaded);
-        js_runtime_destroy(rt);
-        FAIL("expected 1 loaded (bad skipped)");
-    }
-
-    js_runtime_destroy(rt);
-    unlink(p1); unlink(p2); rmdir(ext_dir);
-    char ws2[256]; snprintf(ws2, sizeof(ws2), "%s", ws); rmdir(ws2);
-    PASS();
-}
-
 int main(void) {
     printf("test_extension:\n");
     test_discover_empty();
     test_discover_files();
     test_discover_subdir_index();
-    test_load_success();
-    test_load_throw_skips();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

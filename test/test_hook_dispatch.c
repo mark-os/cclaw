@@ -1,5 +1,7 @@
-/* T258: Test beforeRequest hook dispatch.
- * V112: hooks receive messages array, can modify/add/remove, chain in load order. */
+/* Hook dispatch — fresh QuickJS context per invocation.
+ * Hooks now load from the DB `hooks` table (extension_load_hooks); the dispatch
+ * logic (beforeRequest chaining, gating, observer) is unchanged. Each handler
+ * file holds a function expression. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <string.h>
@@ -16,11 +18,12 @@
 
 static int tests_run = 0;
 static int tests_passed = 0;
-static sqlite3 *g_hook_db;
 
 #define TEST(name) do { tests_run++; printf("  %s... ", #name); } while(0)
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
 #define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while(0)
+
+#define STORE "/tmp/cclaw_hookstore"
 
 static void mkdirs(const char *path) {
     char tmp[512];
@@ -42,14 +45,38 @@ static void cleanup(const char *path) {
     (void)system(cmd);
 }
 
-/* No hooks registered → returns NULL */
+/* Seed one hook into the DB + shared store, then load it into ext_ctx.
+ * agent owns the extension (so the load join's visibility test passes). */
+static void seed_hook(sqlite3 *db, const char *agent, const char *ext,
+                      const char *event, const char *fn_source) {
+    char dir[512], path[700], sql[4096];
+    snprintf(dir, sizeof(dir), "%s/%s", STORE, ext);
+    mkdirs(dir);
+    snprintf(path, sizeof(path), "%s/%s.qjs", dir, event);
+    write_file(path, fn_source);
+
+    snprintf(sql, sizeof(sql),
+        "INSERT OR REPLACE INTO extensions(name,path,owner_agent,published,enabled) "
+        "VALUES('%s','%s','%s',0,1);"
+        "INSERT OR REPLACE INTO agent_extensions(agent_name,extension_name,enabled) "
+        "VALUES('%s','%s',1);"
+        "INSERT OR REPLACE INTO hooks(extension_name,event,path,enabled) "
+        "VALUES('%s','%s','%s',1);",
+        ext, dir, agent, agent, ext, ext, event, path);
+    char *err = NULL;
+    if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
+        fprintf(stderr, "seed_hook sql error: %s\n", err ? err : "?");
+        sqlite3_free(err);
+    }
+}
+
+/* No hooks loaded → returns NULL */
 static void test_no_hooks(void) {
     TEST(no_hooks_returns_null);
 
     ExtensionCtx ext_ctx;
     JsSessionRuntime *rt = js_runtime_create();
     extension_ctx_init(&ext_ctx, rt);
-    /* No hooks registered */
 
     Config cfg = {.log_level = LOG_LEVEL_INFO,
                   .provider = {.model = "test-model", .max_tokens = 100}};
@@ -68,224 +95,122 @@ static void test_no_hooks(void) {
     PASS();
 }
 
-/* Hook modifies messages — adds a system message */
+/* Hook modifies messages — prepends a system message */
 static void test_hook_modifies_messages(void) {
     TEST(hook_modifies_messages);
+    cleanup(STORE);
 
-    const char *ws = "/tmp/cclaw_hook_t1";
-    cleanup(ws);
-    char ext_dir[256];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
-    mkdirs(ext_dir);
-
-    /* Extension: prepend a system message */
-    char p1[512];
-    snprintf(p1, sizeof(p1), "%s/inject.qjs", ext_dir);
-    write_file(p1,
-        "cclaw.registerHook('beforeRequest', function(msgs) {\n"
-        "  msgs.unshift({role: 'system', content: 'injected by hook'});\n"
-        "  return msgs;\n"
-        "});\n");
-
-    JsSessionRuntime *rt = js_runtime_create();
-    if (!rt) FAIL("rt create");
-
-    ToolRegistry reg;
-    tools_init(&reg);
-    ExtensionCtx ext_ctx;
-    extension_ctx_init(&ext_ctx, rt);
-
-    size_t ext_count = 0;
-    char **paths = extension_discover(ws, &ext_count);
-    Config cfg = {.log_level = LOG_LEVEL_INFO,
-                  .provider = {.model = "test-model", .max_tokens = 100}};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
-    extension_list_free(paths, ext_count);
-
-    /* Verify hook registered */
-    if (ext_ctx.hooks[HOOK_BEFORE_REQUEST].count != 1) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("expected 1 hook");
-    }
-
-    /* Create a test DB with entries */
     const char *db_path = "/tmp/cclaw_hook_t1.db";
     unlink(db_path);
     sqlite3 *db = test_db_open(db_path);
-    if (!db) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("db open");
+    if (!db) FAIL("db open");
+
+    seed_hook(db, "test", "inject", "beforeRequest",
+        "(function(msgs){ msgs.unshift({role:'system',content:'injected by hook'}); return msgs; })");
+
+    JsSessionRuntime *rt = js_runtime_create();
+    if (!rt) FAIL("rt create");
+    ExtensionCtx ext_ctx;
+    extension_ctx_init(&ext_ctx, rt);
+    extension_load_hooks(&ext_ctx, db, "test");
+
+    if (ext_ctx.hooks[HOOK_BEFORE_REQUEST].count != 1) {
+        extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
+        sqlite3_close(db); cleanup(STORE); unlink(db_path); FAIL("expected 1 hook");
     }
 
-    /* Create session */
+    Config cfg = {.log_level = LOG_LEVEL_INFO,
+                  .provider = {.model = "test-model", .max_tokens = 100}};
     int64_t sid = session_create(db, "test", NULL, -1, 0);
-    if (sid < 0) {
-        sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("session create");
-    }
-
-    /* Append a user message */
     Message user_msg = {.role = ROLE_USER, .content = "hello"};
     entry_append_with_turn(db, sid, &user_msg, 1);
 
-    /* Build plan */
     ContextPlan plan;
-    int rc = context_plan(db, sid, &cfg, 0, &plan);
-    if (rc != 0) {
-        sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("context_plan");
+    if (context_plan(db, sid, &cfg, 0, &plan) != 0) {
+        extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
+        sqlite3_close(db); cleanup(STORE); unlink(db_path); FAIL("context_plan");
     }
 
-    /* Dispatch hook */
     char *body = hook_dispatch_before_request(&ext_ctx, db, sid, &cfg, &plan, NULL, 0);
     context_plan_free(&plan);
 
-    if (!body) {
-        sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("expected non-NULL body");
-    }
-
-    /* Verify the body contains the injected message */
-    if (!strstr(body, "injected by hook")) {
-        printf("body: %.200s ", body);
-        free(body); sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("missing injected message");
-    }
-
-    /* Verify it also contains the original user message */
-    if (!strstr(body, "hello")) {
-        free(body); sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("missing original message");
-    }
-
-    /* Verify it has model */
-    if (!strstr(body, "test-model")) {
-        free(body); sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("missing model");
-    }
-
+    int ok = body && strstr(body, "injected by hook") && strstr(body, "hello") &&
+             strstr(body, "test-model");
+    if (!ok && body) printf("body: %.200s ", body);
     free(body);
-    sqlite3_close(db);
-    tools_free(&reg);
     extension_ctx_destroy(&ext_ctx);
     js_runtime_destroy(rt);
-    cleanup(ws);
+    sqlite3_close(db);
+    cleanup(STORE);
     unlink(db_path);
+    if (!ok) FAIL("body missing expected content");
     PASS();
 }
 
 /* Hook throws → skipped, messages pass through unmodified */
 static void test_hook_throws(void) {
     TEST(hook_throws_skipped);
+    cleanup(STORE);
 
-    const char *ws = "/tmp/cclaw_hook_t2";
-    cleanup(ws);
-    char ext_dir[256];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
-    mkdirs(ext_dir);
-
-    /* Extension: throws */
-    char p1[512];
-    snprintf(p1, sizeof(p1), "%s/bad.qjs", ext_dir);
-    write_file(p1,
-        "cclaw.registerHook('beforeRequest', function(msgs) {\n"
-        "  throw new Error('oops');\n"
-        "});\n");
-
-    JsSessionRuntime *rt = js_runtime_create();
-    if (!rt) FAIL("rt");
-    ToolRegistry reg;
-    tools_init(&reg);
-    ExtensionCtx ext_ctx;
-    extension_ctx_init(&ext_ctx, rt);
-
-    size_t ext_count = 0;
-    char **paths = extension_discover(ws, &ext_count);
-    Config cfg = {.log_level = LOG_LEVEL_INFO,
-                  .provider = {.model = "test-model", .max_tokens = 50}};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
-    extension_list_free(paths, ext_count);
-
-    /* Create DB with entry */
     const char *db_path = "/tmp/cclaw_hook_t2.db";
     unlink(db_path);
     sqlite3 *db = test_db_open(db_path);
+
+    seed_hook(db, "test", "bad", "beforeRequest",
+        "(function(msgs){ throw new Error('oops'); })");
+
+    JsSessionRuntime *rt = js_runtime_create();
+    ExtensionCtx ext_ctx;
+    extension_ctx_init(&ext_ctx, rt);
+    extension_load_hooks(&ext_ctx, db, "test");
+
+    Config cfg = {.log_level = LOG_LEVEL_INFO,
+                  .provider = {.model = "test-model", .max_tokens = 50}};
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     Message user_msg = {.role = ROLE_USER, .content = "hi"};
     entry_append_with_turn(db, sid, &user_msg, 1);
 
     ContextPlan plan;
     context_plan(db, sid, &cfg, 0, &plan);
-
-    /* Should still produce valid body (hook threw but messages remain) */
     char *body = hook_dispatch_before_request(&ext_ctx, db, sid, &cfg, &plan, NULL, 0);
     context_plan_free(&plan);
 
-    if (!body) {
-        sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("expected body even on throw");
-    }
-
-    /* Should still have the user message */
-    if (!strstr(body, "hi")) {
-        free(body); sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("missing original msg");
-    }
-
+    int ok = body && strstr(body, "hi");
     free(body);
-    sqlite3_close(db);
-    tools_free(&reg);
     extension_ctx_destroy(&ext_ctx);
     js_runtime_destroy(rt);
-    cleanup(ws);
+    sqlite3_close(db);
+    cleanup(STORE);
     unlink(db_path);
+    if (!ok) FAIL("expected body with original msg even on throw");
     PASS();
 }
 
-/* Multiple hooks chain in load order */
+/* Multiple hooks chain in load order (ordered by extension_name) */
 static void test_hooks_chain(void) {
     TEST(hooks_chain_in_order);
-
-    const char *ws = "/tmp/cclaw_hook_t3";
-    cleanup(ws);
-    char ext_dir[256];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
-    mkdirs(ext_dir);
-
-    /* Two hooks: first adds "first", second adds "second" */
-    char p1[512];
-    snprintf(p1, sizeof(p1), "%s/chain.qjs", ext_dir);
-    write_file(p1,
-        "cclaw.registerHook('beforeRequest', function(msgs) {\n"
-        "  msgs.push({role: 'system', content: 'FIRST'});\n"
-        "  return msgs;\n"
-        "});\n"
-        "cclaw.registerHook('beforeRequest', function(msgs) {\n"
-        "  msgs.push({role: 'system', content: 'SECOND'});\n"
-        "  return msgs;\n"
-        "});\n");
-
-    JsSessionRuntime *rt = js_runtime_create();
-    ToolRegistry reg;
-    tools_init(&reg);
-    ExtensionCtx ext_ctx;
-    extension_ctx_init(&ext_ctx, rt);
-
-    size_t ext_count = 0;
-    char **paths = extension_discover(ws, &ext_count);
-    Config cfg = {.log_level = LOG_LEVEL_INFO,
-                  .provider = {.model = "test-model"}};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
-    extension_list_free(paths, ext_count);
-
-    if (ext_ctx.hooks[HOOK_BEFORE_REQUEST].count != 2) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
-        cleanup(ws); FAIL("expected 2 hooks");
-    }
+    cleanup(STORE);
 
     const char *db_path = "/tmp/cclaw_hook_t3.db";
     unlink(db_path);
     sqlite3 *db = test_db_open(db_path);
+
+    seed_hook(db, "test", "a_first", "beforeRequest",
+        "(function(msgs){ msgs.push({role:'system',content:'FIRST'}); return msgs; })");
+    seed_hook(db, "test", "b_second", "beforeRequest",
+        "(function(msgs){ msgs.push({role:'system',content:'SECOND'}); return msgs; })");
+
+    JsSessionRuntime *rt = js_runtime_create();
+    ExtensionCtx ext_ctx;
+    extension_ctx_init(&ext_ctx, rt);
+    extension_load_hooks(&ext_ctx, db, "test");
+
+    if (ext_ctx.hooks[HOOK_BEFORE_REQUEST].count != 2) {
+        extension_ctx_destroy(&ext_ctx); js_runtime_destroy(rt);
+        sqlite3_close(db); cleanup(STORE); unlink(db_path); FAIL("expected 2 hooks");
+    }
+
+    Config cfg = {.log_level = LOG_LEVEL_INFO, .provider = {.model = "test-model"}};
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     Message user_msg = {.role = ROLE_USER, .content = "test"};
     entry_append_with_turn(db, sid, &user_msg, 1);
@@ -295,175 +220,121 @@ static void test_hooks_chain(void) {
     char *body = hook_dispatch_before_request(&ext_ctx, db, sid, &cfg, &plan, NULL, 0);
     context_plan_free(&plan);
 
-    if (!body) {
-        sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("expected body");
-    }
-
-    /* Both should be present */
-    if (!strstr(body, "FIRST") || !strstr(body, "SECOND")) {
-        printf("body: %.300s ", body);
-        free(body); sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("missing hook messages");
-    }
-
-    /* FIRST should appear before SECOND (chaining order) */
-    char *first_pos = strstr(body, "FIRST");
-    char *second_pos = strstr(body, "SECOND");
-    if (first_pos >= second_pos) {
-        free(body); sqlite3_close(db); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); unlink(db_path); FAIL("wrong chain order");
-    }
-
+    char *first_pos = body ? strstr(body, "FIRST") : NULL;
+    char *second_pos = body ? strstr(body, "SECOND") : NULL;
+    int ok = first_pos && second_pos && first_pos < second_pos;
+    if (!ok && body) printf("body: %.300s ", body);
     free(body);
-    sqlite3_close(db);
-    tools_free(&reg);
     extension_ctx_destroy(&ext_ctx);
     js_runtime_destroy(rt);
-    cleanup(ws);
+    sqlite3_close(db);
+    cleanup(STORE);
     unlink(db_path);
+    if (!ok) FAIL("hooks not chained in order");
     PASS();
 }
 
 /* §8 gating hook: restrict-only {allow|ask|deny}, most-restrictive wins. */
 static void test_gate_restrict_only(void) {
     TEST(gate_restrict_only);
+    cleanup(STORE);
 
-    const char *ws = "/tmp/cclaw_hook_t4";
-    cleanup(ws);
-    char ext_dir[256];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
-    mkdirs(ext_dir);
+    const char *db_path = "/tmp/cclaw_hook_t4.db";
+    unlink(db_path);
+    sqlite3 *db = test_db_open(db_path);
 
-    char p1[512];
-    snprintf(p1, sizeof(p1), "%s/gate.qjs", ext_dir);
-    write_file(p1,
-        "cclaw.registerHook('beforeToolCall', function(ctx) {\n"
-        "  if (ctx.name === 'dangerous') return {deny: true, reason: 'not allowed'};\n"
-        "  if (ctx.name === 'risky') return {ask: true, reason: 'confirm please'};\n"
-        "  if (ctx.name === 'legacy') return {block: true};\n"  /* block aliases deny */
-        "  if (ctx.name === 'greedy') return {allow: true};\n"  /* cannot relax */
-        "});\n");
+    seed_hook(db, "test", "gate", "beforeToolCall",
+        "(function(ctx){"
+        "  if (ctx.name === 'dangerous') return {deny:true, reason:'not allowed'};"
+        "  if (ctx.name === 'risky') return {ask:true, reason:'confirm please'};"
+        "  if (ctx.name === 'legacy') return {block:true};"
+        "  if (ctx.name === 'greedy') return {allow:true};"
+        "})");
 
     JsSessionRuntime *rt = js_runtime_create();
-    ToolRegistry reg;
-    tools_init(&reg);
     ExtensionCtx ext_ctx;
     extension_ctx_init(&ext_ctx, rt);
-
-    size_t ext_count = 0;
-    char **paths = extension_discover(ws, &ext_count);
-    Config cfg = {.log_level = LOG_LEVEL_INFO};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
-    extension_list_free(paths, ext_count);
+    extension_load_hooks(&ext_ctx, db, "test");
 
     char *reason = NULL;
     HookGate g;
+    int ok = 1;
 
-    g = hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "dangerous", "{}", &reason);
-    if (g != HOOK_GATE_DENY || !reason || strcmp(reason, "not allowed") != 0) {
-        free(reason); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); FAIL("deny+reason expected");
-    }
+    g = hook_dispatch_gate_tool_call(&ext_ctx, db, "dangerous", "{}", &reason);
+    if (g != HOOK_GATE_DENY || !reason || strcmp(reason, "not allowed") != 0) ok = 0;
     free(reason); reason = NULL;
 
-    g = hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "risky", "{}", &reason);
-    if (g != HOOK_GATE_ASK || !reason || strcmp(reason, "confirm please") != 0) {
-        free(reason); tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); FAIL("ask+reason expected");
-    }
+    g = hook_dispatch_gate_tool_call(&ext_ctx, db, "risky", "{}", &reason);
+    if (g != HOOK_GATE_ASK || !reason || strcmp(reason, "confirm please") != 0) ok = 0;
     free(reason); reason = NULL;
 
-    g = hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "legacy", "{}", NULL);
-    if (g != HOOK_GATE_DENY) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); FAIL("block should map to deny");
-    }
+    if (hook_dispatch_gate_tool_call(&ext_ctx, db, "legacy", "{}", NULL) != HOOK_GATE_DENY) ok = 0;
+    if (hook_dispatch_gate_tool_call(&ext_ctx, db, "greedy", "{}", NULL) != HOOK_GATE_ALLOW) ok = 0;
+    if (hook_dispatch_gate_tool_call(&ext_ctx, db, "safe", "{}", NULL) != HOOK_GATE_ALLOW) ok = 0;
 
-    /* allow / unknown / safe → ALLOW (a hook can never raise authority) */
-    if (hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "greedy", "{}", NULL) != HOOK_GATE_ALLOW ||
-        hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "safe", "{}", NULL) != HOOK_GATE_ALLOW) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); FAIL("allow/unknown should be ALLOW");
-    }
-
-    tools_free(&reg);
     extension_ctx_destroy(&ext_ctx);
     js_runtime_destroy(rt);
-    cleanup(ws);
+    sqlite3_close(db);
+    cleanup(STORE);
+    unlink(db_path);
+    if (!ok) FAIL("gate decisions incorrect");
     PASS();
 }
 
-/* §8 observer hook: side-effect only — runs but cannot modify the result.
- * With fresh-context-per-invocation, JS side effects don't persist to the
- * session runtime. Verify it runs without crashing and doesn't gate. */
+/* §8 observer hook: side-effect only — runs, cannot modify the result. */
 static void test_observer_side_effect_only(void) {
     TEST(observer_side_effect_only);
+    cleanup(STORE);
 
-    const char *ws = "/tmp/cclaw_hook_t5";
-    cleanup(ws);
-    char ext_dir[256];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", ws);
-    mkdirs(ext_dir);
+    const char *db_path = "/tmp/cclaw_hook_t5.db";
+    unlink(db_path);
+    sqlite3 *db = test_db_open(db_path);
 
-    char p1[512];
-    snprintf(p1, sizeof(p1), "%s/observe.qjs", ext_dir);
-    /* Observer that accesses the context data (verifies it's injected) */
-    write_file(p1,
-        "cclaw.registerHook('afterToolCall', function(ctx) {\n"
-        "  if (!ctx.name || !ctx.result) throw new Error('bad context');\n"
-        "  return {result: 'SHOULD BE IGNORED'};\n"
-        "});\n");
+    seed_hook(db, "test", "observe", "afterToolCall",
+        "(function(ctx){ if (!ctx.name || !ctx.result) throw new Error('bad context');"
+        "  return {result:'SHOULD BE IGNORED'}; })");
 
     JsSessionRuntime *rt = js_runtime_create();
-    ToolRegistry reg;
-    tools_init(&reg);
     ExtensionCtx ext_ctx;
     extension_ctx_init(&ext_ctx, rt);
+    extension_load_hooks(&ext_ctx, db, "test");
 
-    size_t ext_count = 0;
-    char **paths = extension_discover(ws, &ext_count);
-    Config cfg = {.log_level = LOG_LEVEL_INFO};
-    extension_load(paths, ext_count, rt, &reg, &cfg, &ext_ctx, NULL);
-    extension_list_free(paths, ext_count);
+    hook_dispatch_observe_tool_call(&ext_ctx, db, "fetch", "{}", "original data");
 
-    /* Returns void — runs without crashing */
-    hook_dispatch_observe_tool_call(&ext_ctx, g_hook_db, "fetch", "{}", "original data");
-
-    /* Observer registered → count > 0 */
-    if (ext_ctx.hooks[HOOK_AFTER_TOOL_CALL].count == 0) {
-        tools_free(&reg); extension_ctx_destroy(&ext_ctx);
-        js_runtime_destroy(rt); cleanup(ws); FAIL("observer hook not registered");
-    }
-
-    tools_free(&reg);
+    int ok = ext_ctx.hooks[HOOK_AFTER_TOOL_CALL].count > 0;
     extension_ctx_destroy(&ext_ctx);
     js_runtime_destroy(rt);
-    cleanup(ws);
+    sqlite3_close(db);
+    cleanup(STORE);
+    unlink(db_path);
+    if (!ok) FAIL("observer hook not loaded");
     PASS();
 }
 
-/* No tool-call hooks registered → gate ALLOWs, observer is a no-op. */
+/* No tool-call hooks → gate ALLOWs, observer is a no-op. */
 static void test_no_tool_hooks(void) {
     TEST(no_tool_hooks);
     ExtensionCtx ext_ctx;
     JsSessionRuntime *rt = js_runtime_create();
     extension_ctx_init(&ext_ctx, rt);
+    sqlite3 *db = NULL;
+    sqlite3_open(":memory:", &db);
 
     char *reason = (char *)0x1;  /* must be NULLed even when no hooks */
-    HookGate g = hook_dispatch_gate_tool_call(&ext_ctx, g_hook_db, "x", "{}", &reason);
+    HookGate g = hook_dispatch_gate_tool_call(&ext_ctx, db, "x", "{}", &reason);
     int ok = (g == HOOK_GATE_ALLOW && reason == NULL);
-    hook_dispatch_observe_tool_call(&ext_ctx, g_hook_db, "x", "{}", "r");  /* no crash */
+    hook_dispatch_observe_tool_call(&ext_ctx, db, "x", "{}", "r");  /* no crash */
 
     extension_ctx_destroy(&ext_ctx);
     js_runtime_destroy(rt);
+    sqlite3_close(db);
     if (!ok) FAIL("expected ALLOW + NULL reason with no hooks");
     PASS();
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_hook_dispatch:\n");
-    sqlite3_open(":memory:", &g_hook_db);
     test_no_hooks();
     test_hook_modifies_messages();
     test_hook_throws();
@@ -471,7 +342,7 @@ int main(void) {
     test_gate_restrict_only();
     test_observer_side_effect_only();
     test_no_tool_hooks();
-    sqlite3_close(g_hook_db);
+    cleanup(STORE);
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

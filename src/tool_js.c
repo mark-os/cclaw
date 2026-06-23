@@ -253,8 +253,8 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
     return tools_register(reg, "js_eval",
                           "Run JavaScript in QuickJS (ES2025). "
                           "http_request(url[, opts]) is synchronous HTTP. "
-                          "File globals: fs.readDir(path), fs.readFile(path), fs.writeFile(path, data), "
-                          "fs.stat(path), fs.cwd(). Only allow-listed hosts work. "
+                          "File globals: fs.readdir(path[,cb]), fs.readFile(path[,cb]), fs.writeFile(path, data[,cb]), "
+                          "fs.stat(path[,cb]), fs.lstat(path[,cb]), fs.cwd(). Only allow-listed hosts work. "
                           "Returns the last expression value (or printed output). "
                           "When using 'filename', must be a .qjs file.",
                           JSEVAL_PARAMS_JSON, tool_js_eval_handler, ctx);
@@ -263,30 +263,28 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
 /* --- JS-defined tool support (extension-path) --- */
 
 typedef struct {
-    char *code;
+    char *path;       /* absolute handler .qjs path in the shared store */
     JsEvalCtx *ectx;
 } JsToolData;
 
+/* An extension tool runs its handler file in the same forked, sandboxed child
+ * as js_eval: build {"filename": <path>, "args": <call args>} and reuse the
+ * file-eval path. The handler file evaluates with `args` in scope; its last
+ * expression (or printed output) is the result. */
 static char *js_defined_tool_handler(const char *arguments, void *user_data) {
     JsToolData *td = (JsToolData *)user_data;
-    if (!td || !td->code) return strdup("error: no code for this tool");
+    if (!td || !td->path) return strdup("error: no handler path for this tool");
     const char *args_str = (arguments && arguments[0]) ? arguments : "{}";
 
-    size_t wrap_len = strlen(td->code) + strlen(args_str) + 32;
-    char *wrapped = malloc(wrap_len);
-    if (!wrapped) return strdup("error: OOM");
-    snprintf(wrapped, wrap_len, "(function(args){%s})(%s)", td->code, args_str);
-
-    size_t esc_cap = strlen(wrapped) * 2 + 8;
+    size_t esc_cap = strlen(td->path) * 2 + 8;
     char *esc = malloc(esc_cap);
-    if (!esc) { free(wrapped); return strdup("error: OOM"); }
-    size_t esc_len = json_escape(esc, esc_cap, wrapped, strlen(wrapped));
-    free(wrapped);
+    if (!esc) return strdup("error: OOM");
+    size_t esc_len = json_escape(esc, esc_cap, td->path, strlen(td->path));
 
-    size_t blob_len = esc_len + 16;
+    size_t blob_len = esc_len + strlen(args_str) + 32;
     char *blob = malloc(blob_len);
     if (!blob) { free(esc); return strdup("error: OOM"); }
-    snprintf(blob, blob_len, "{\"code\":\"%s\"}", esc);
+    snprintf(blob, blob_len, "{\"filename\":\"%s\",\"args\":%s}", esc, args_str);
     free(esc);
 
     char *result = tool_js_eval_handler(blob, td->ectx);
@@ -296,18 +294,18 @@ static char *js_defined_tool_handler(const char *arguments, void *user_data) {
 
 static void js_tool_data_free(void *user_data) {
     JsToolData *td = (JsToolData *)user_data;
-    if (td) { free(td->code); free(td); }
+    if (td) { free(td->path); free(td); }
 }
 
 int js_tool_register_ext(ToolRegistry *reg, const char *name,
                          const char *description, const char *parameters_json,
-                         const char *code, JsEvalCtx *ectx,
+                         const char *path, JsEvalCtx *ectx,
                          const char *policy_json) {
     ToolEntry *existing = tools_lookup(reg, name);
     if (existing) {
         JsToolData *td = (JsToolData *)existing->user_data;
-        free(td->code);
-        td->code = strdup(code);
+        free(td->path);
+        td->path = strdup(path);
         td->ectx = ectx;
         free(existing->description);
         free(existing->parameters_json);
@@ -320,9 +318,9 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
     }
     JsToolData *td = malloc(sizeof(JsToolData));
     if (!td) return -1;
-    td->code = strdup(code);
+    td->path = strdup(path);
     td->ectx = ectx;
-    if (!td->code) { free(td); return -1; }
+    if (!td->path) { free(td); return -1; }
     int rc = tools_register(reg, name, description, parameters_json,
                             js_defined_tool_handler, td);
     if (rc == 0) {

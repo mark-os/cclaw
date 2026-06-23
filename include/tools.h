@@ -45,10 +45,20 @@ ToolEntry *tools_lookup(ToolRegistry *reg, const char *name);
 size_t tools_schemas(ToolRegistry *reg, ToolSchema *out, size_t out_cap);
 
 
-/* Sync built-in tool schemas to the DB `tools` table.
- * parameters_json is code-owned: force-overwrite it from the registry.
- * description is DB-editable: fill only if the row is missing/NULL, never clobber. */
+/* Sync built-in tool schemas to the DB `tools` table (builtin=1,
+ * extension_name=NULL). parameters_json is code-owned: force-overwrite it from
+ * the registry. description is DB-editable: fill only if the row is
+ * missing/NULL, never clobber. Call with a registry holding only builtins
+ * (before loading extension tools), so extension rows are never clobbered. */
 void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db);
+
+/* Materialize this agent's extension tools from the DB registry into `reg`.
+ * Runs the tools⨝agent_extensions⨝extensions join (enabled + published-or-owned)
+ * and registers each as a path-based JS tool (handler in the shared store),
+ * carrying its policy. `ectx` is a JsEvalCtx* (opaque here to avoid an include
+ * cycle). No JS is evaluated — loading is reading rows, not running code. */
+void tools_load_extension_tools(ToolRegistry *reg, sqlite3 *db,
+                                const char *agent_name, void *ectx);
 
 /* Free all heap strings in the registry */
 void tools_free(ToolRegistry *reg);

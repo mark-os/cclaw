@@ -133,35 +133,11 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     if (setup->js_rt && setup->caps.host_count > 0)
         js_runtime_set_hosts(setup->js_rt, setup->caps.hosts, setup->caps.host_count);
 
-    /* T254/T255/T256: Load extensions from workspace/extensions/ */
+    /* Extension hook context + DB-driven hook load. Extension *tools* load from
+     * the DB after tools_sync_to_db (below) so the builtin sync never clobbers
+     * extension rows. No JS is evaluated at load time. */
     extension_ctx_init(&setup->ext_ctx, setup->js_rt);
-    if (cfg->workspace) {
-        size_t ext_count = 0;
-        char **ext_paths = extension_discover(cfg->workspace, &ext_count);
-        if (ext_paths && ext_count > 0) {
-            extension_load(ext_paths, ext_count, setup->js_rt, &setup->reg, cfg,
-                           &setup->ext_ctx, &setup->js_eval_ctx);
-            extension_list_free(ext_paths, ext_count);
-        }
-    }
-
-    /* Load DB-stored policy into registry entries (builtin + promoted tools) */
-    {
-        sqlite3_stmt *ps;
-        if (sqlite3_prepare_v2(db,
-                "SELECT name, policy FROM tools WHERE policy IS NOT NULL",
-                -1, &ps, NULL) == SQLITE_OK) {
-            while (sqlite3_step(ps) == SQLITE_ROW) {
-                const char *tname = (const char *)sqlite3_column_text(ps, 0);
-                const char *pol = (const char *)sqlite3_column_text(ps, 1);
-                if (!tname || !pol) continue;
-                ToolEntry *te = tools_lookup(&setup->reg, tname);
-                if (te && !te->policy_json)
-                    te->policy_json = strdup(pol);
-            }
-            sqlite3_finalize(ps);
-        }
-    }
+    extension_load_hooks(&setup->ext_ctx, db, agent_name);
 
     /* T274/V120: request_config — CLI inline tool/host/rename */
     setup->req_cfg_ctx.db = db;
@@ -199,7 +175,11 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         tool_check_session_register(&setup->reg, &setup->launch_ctx);
     }
 
+    /* Persist builtin schemas (builtin=1), then materialize this agent's
+     * extension tools from the DB join — order matters: the sync must see only
+     * builtins. */
     tools_sync_to_db(&setup->reg, db);
+    tools_load_extension_tools(&setup->reg, db, agent_name, &setup->js_eval_ctx);
     return 0;
 }
 

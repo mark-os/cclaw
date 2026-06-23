@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tools.h"
+#include "tool_js.h"
 #include "sqlite3.h"
 #include <stdlib.h>
 #include <string.h>
@@ -58,12 +59,16 @@ void tools_free(ToolRegistry *reg) {
 
 void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db) {
     if (!reg || !db) return;
+    /* Builtins only: the registry passed here holds C tools (extension tools are
+     * loaded after this call). Write honest provenance — builtin=1, no
+     * extension_name, no handler path. */
     static const char *sql =
-        "INSERT INTO tools(name, description, parameters_json, builtin) "
-        "VALUES(?1, ?2, ?3, 1) "
+        "INSERT INTO tools(name, extension_name, description, parameters_json, path, builtin) "
+        "VALUES(?1, NULL, ?2, ?3, NULL, 1) "
         "ON CONFLICT(name) DO UPDATE SET "
         "parameters_json = excluded.parameters_json, "
-        "description = COALESCE(tools.description, excluded.description)";
+        "description = COALESCE(tools.description, excluded.description), "
+        "builtin = 1, extension_name = NULL";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
     for (size_t i = 0; i < reg->count; i++) {
@@ -76,5 +81,35 @@ void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db) {
         sqlite3_reset(stmt);
     }
     sqlite3_finalize(stmt);
+}
+
+void tools_load_extension_tools(ToolRegistry *reg, sqlite3 *db,
+                                const char *agent_name, void *ectx) {
+    if (!reg || !db || !agent_name) return;
+    /* The registry is a cache of this query (specs/extensions.md#loading):
+     * an agent sees a tool when it has the extension attached + enabled, and
+     * the extension is published or owned by the agent. */
+    static const char *sql =
+        "SELECT t.name, t.description, t.parameters_json, t.path, t.policy "
+        "FROM tools t "
+        "JOIN agent_extensions ae ON ae.extension_name = t.extension_name "
+        "JOIN extensions e ON e.name = t.extension_name "
+        "WHERE ae.agent_name = ?1 AND ae.enabled = 1 AND t.enabled = 1 "
+        "  AND t.path IS NOT NULL "
+        "  AND (e.published = 1 OR e.owner_agent = ?1)";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(st, 1, agent_name, -1, SQLITE_STATIC);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(st, 0);
+        const char *desc = (const char *)sqlite3_column_text(st, 1);
+        const char *params = (const char *)sqlite3_column_text(st, 2);
+        const char *path = (const char *)sqlite3_column_text(st, 3);
+        const char *policy = (const char *)sqlite3_column_text(st, 4);
+        if (!name || !path) continue;
+        js_tool_register_ext(reg, name, desc, params ? params : "{}", path,
+                             (JsEvalCtx *)ectx, policy);
+    }
+    sqlite3_finalize(st);
 }
 

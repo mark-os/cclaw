@@ -185,7 +185,7 @@ char *tool_file_grep_handler(const char *arguments, void *user_data) {
 
 static const char *FILE_READ_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"path\":{\"type\":\"string\",\"description\":\"File path to read (relative to workspace)\"}"
+    "\"path\":{\"type\":\"string\",\"description\":\"File path to read (relative or absolute)\"}"
     "},\"required\":[\"path\"]}";
 
 static char *file_read_inner(const char *arguments, void *user_data) {
@@ -223,7 +223,7 @@ static char *file_read_inner(const char *arguments, void *user_data) {
 
 int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx) {
     return tools_register(reg, "file_read",
-                          "Read a file within the workspace directory",
+                          "Read a file (path relative or absolute)",
                           FILE_READ_PARAMS_JSON, tool_file_read_handler,
                           (void *)ctx);
 }
@@ -232,7 +232,7 @@ int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx) {
 
 static const char *FILE_WRITE_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"path\":{\"type\":\"string\",\"description\":\"File path to write (relative to workspace)\"},"
+    "\"path\":{\"type\":\"string\",\"description\":\"File path to write (relative or absolute)\"},"
     "\"content\":{\"type\":\"string\",\"description\":\"Content to write\"}"
     "},\"required\":[\"path\",\"content\"]}";
 
@@ -293,7 +293,7 @@ static char *file_write_inner(const char *arguments, void *user_data) {
 
 int tool_file_write_register(ToolRegistry *reg, FileReadCtx *ctx) {
     return tools_register(reg, "file_write",
-                          "Write content to a file within the workspace directory",
+                          "Write content to a file (path relative or absolute)",
                           FILE_WRITE_PARAMS_JSON, tool_file_write_handler,
                           (void *)ctx);
 }
@@ -307,7 +307,7 @@ static int is_ignored_dir(const char *name) {
 
 static const char *FILE_LIST_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"path\":{\"type\":\"string\",\"description\":\"Directory to list (relative to workspace, default '.')\"},"
+    "\"path\":{\"type\":\"string\",\"description\":\"Directory to list (relative or absolute, default '.')\"},"
     "\"limit\":{\"type\":\"number\",\"description\":\"Maximum entries to return (default 500)\"}"
     "}}";
 
@@ -395,7 +395,7 @@ static char *file_list_inner(const char *arguments, void *user_data) {
 
 int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx) {
     return tools_register(reg, "file_list",
-                          "List directory contents within the workspace. Returns entries sorted "
+                          "List directory contents. Returns entries sorted "
                           "alphabetically, with a '/' suffix for directories. Includes dotfiles. "
                           "Use this to see what files exist.",
                           FILE_LIST_PARAMS_JSON, tool_file_list_handler, (void *)ctx);
@@ -406,7 +406,7 @@ int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx) {
 static const char *FIND_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"pattern\":{\"type\":\"string\",\"description\":\"Glob pattern, e.g. '*.c', '**/*.json', or 'src/**/*.spec.ts'. A pattern with no '/' matches a file's name at any depth; '**' matches across directories.\"},"
-    "\"path\":{\"type\":\"string\",\"description\":\"Directory to search in (relative to workspace, default '.')\"},"
+    "\"path\":{\"type\":\"string\",\"description\":\"Directory to search in (relative or absolute, default '.')\"},"
     "\"limit\":{\"type\":\"number\",\"description\":\"Maximum results (default 1000)\"}"
     "},\"required\":[\"pattern\"]}";
 
@@ -538,7 +538,7 @@ static char *file_find_inner(const char *arguments, void *user_data) {
 
 int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
     return tools_register(reg, "file_find",
-                          "Search for files by glob pattern within the workspace. Returns matching "
+                          "Search for files by glob pattern. Returns matching "
                           "file paths relative to the search directory. A pattern without '/' (e.g. "
                           "'*.c') matches a file's name at any depth; use '**' to cross directories "
                           "(e.g. 'src/**/*.spec.ts'). Skips .git and node_modules.",
@@ -553,7 +553,7 @@ int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
 
 static const char *FILE_EDIT_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"path\":{\"type\":\"string\",\"description\":\"File to edit (relative to workspace)\"},"
+    "\"path\":{\"type\":\"string\",\"description\":\"File to edit (relative or absolute)\"},"
     "\"edits\":{\"type\":\"array\",\"description\":\"List of replacements applied to the original file\","
     "\"items\":{\"type\":\"object\",\"properties\":{"
     "\"oldText\":{\"type\":\"string\",\"description\":\"Exact text to find; must occur exactly once\"},"
@@ -743,7 +743,7 @@ int tool_file_edit_register(ToolRegistry *reg, FileReadCtx *ctx) {
 static const char *GREP_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"pattern\":{\"type\":\"string\",\"description\":\"POSIX extended regex matched per line\"},"
-    "\"path\":{\"type\":\"string\",\"description\":\"Directory to search (relative to workspace, default '.')\"},"
+    "\"path\":{\"type\":\"string\",\"description\":\"Directory to search (relative or absolute, default '.')\"},"
     "\"glob\":{\"type\":\"string\",\"description\":\"Only search files whose basename matches this glob (e.g. '*.c')\"},"
     "\"limit\":{\"type\":\"number\",\"description\":\"Maximum match lines (default 1000)\"}"
     "},\"required\":[\"pattern\"]}";

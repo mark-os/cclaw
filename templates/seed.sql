@@ -24,8 +24,8 @@ INSERT OR IGNORE INTO models(id, provider_name, model, context_window, priority)
 
 -- ═══ Built-in tools ═══
 INSERT OR IGNORE INTO tools(name, description) VALUES
-  ('file_read', 'Read a file within the workspace directory'),
-  ('file_write', 'Write content to a file within the workspace directory'),
+  ('file_read', 'Read a file (path relative or absolute)'),
+  ('file_write', 'Write content to a file (path relative or absolute)'),
   ('shell_exec', 'Execute a shell command in a sandboxed environment'),
   ('js_eval', 'Evaluate JavaScript code using the embedded QuickJS engine'),
   ('web_fetch', 'Fetch content from a URL'),

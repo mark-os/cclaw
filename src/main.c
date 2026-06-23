@@ -125,7 +125,7 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name, PendingToo
 static sqlite3 *g_db;
 static Config *g_cfg;
 static int g_mode;  /* 0=cli, 1=daemon */
-static int g_llm_threads = 2;     /* worker thread pool size */
+static int g_llm_threads = 4;     /* worker thread pool size */
 static int64_t g_cli_session;
 static char g_agent_name[64];
 static int g_cli_turn_active;   /* 1 while CLI is waiting for a turn to finish */
@@ -1652,6 +1652,9 @@ int main(int argc, char *argv[]) {
         llm_worker_stop();
         channel_shutdown_all();
         cron_stop(); heartbeat_stop(); web_stop();
+        /* Disarm SIGCHLD before closing the self-pipe: a child reaped after the
+         * close would otherwise have the handler write into a reused fd. */
+        signal(SIGCHLD, SIG_DFL);
         close(g_chld_pipe[0]); close(g_chld_pipe[1]);
         wake_close(); wake_fifo_close(fifo_fd, db_path);
         config_free(g_cfg); db_close(g_db); free(db_path);
@@ -1941,6 +1944,9 @@ done:
      * (g_tool_setup/g_cfg/g_db). Mirrors the daemon shutdown order. */
     llm_worker_stop();
     agent_setup_destroy(&setup);
+    /* Disarm SIGCHLD before closing the self-pipe: a child reaped after the
+     * close would otherwise have the handler write into a reused fd. */
+    signal(SIGCHLD, SIG_DFL);
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
     free(cli_pfds);
     free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path);

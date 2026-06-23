@@ -64,7 +64,8 @@ static int pool_push(const WorkItem *item) {
         pthread_attr_t attr;
         pthread_attr_init(&attr);
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        pthread_create(&t, &attr, worker_fn, NULL);
+        if (pthread_create(&t, &attr, worker_fn, NULL) != 0)
+            g_pool.active--;   /* rollback: no thread reached the exit point */
         pthread_attr_destroy(&attr);
     }
     pthread_cond_signal(&g_pool.cond);
@@ -191,14 +192,22 @@ int llm_worker_start(const char *db_path, int max_threads) {
     g_pool.notify_fd = g_notify_pipe[1];
     snprintf(g_pool.db_path, sizeof(g_pool.db_path), "%s", db_path);
 
-    /* Pre-start one thread */
+    /* Pre-start one thread — fail closed if it can't be created */
     g_pool.active = 1;
     pthread_t t;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_create(&t, &attr, worker_fn, NULL);
+    int cr = pthread_create(&t, &attr, worker_fn, NULL);
     pthread_attr_destroy(&attr);
+    if (cr != 0) {
+        g_pool.active = 0;
+        pthread_mutex_destroy(&g_pool.mtx);
+        pthread_cond_destroy(&g_pool.cond);
+        close(g_notify_pipe[0]); g_notify_pipe[0] = -1;
+        close(g_notify_pipe[1]); g_notify_pipe[1] = -1;
+        return -1;
+    }
 
     g_started = 1;
     return 0;

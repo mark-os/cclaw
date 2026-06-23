@@ -88,14 +88,47 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
     return result;
 }
 
-/* ── fs.readFile(path) → [content, errno] ──────────────────────── */
+/* ── Dual-mode return: tuple or callback ───────────────────────── */
+/* If cb is a function, invoke cb(err, result) Node-style and return undefined.
+ * Otherwise return [result, errno] tuple (Go-style). */
 
-static JSValue make_err_tuple(JSContext *ctx, int err) {
+static JSValue fs_return(JSContext *ctx, JSValueConst cb, JSValue result, int err) {
+    if (JS_IsFunction(ctx, cb)) {
+        JSValue args[2];
+        args[0] = err ? JS_NewString(ctx, strerror(err)) : JS_NULL;
+        args[1] = err ? JS_NULL : result;
+        JSValue ret = JS_Call(ctx, cb, JS_UNDEFINED, 2, args);
+        JS_FreeValue(ctx, args[0]);
+        if (err) JS_FreeValue(ctx, result);
+        if (JS_IsException(ret)) {
+            JSValue ex = JS_GetException(ctx);
+            JS_FreeValue(ctx, ex);
+        }
+        JS_FreeValue(ctx, ret);
+        return JS_UNDEFINED;
+    }
+    /* Tuple mode */
+    if (err) {
+        JS_FreeValue(ctx, result);
+        JSValue arr = JS_NewArray(ctx);
+        JS_SetPropertyUint32(ctx, arr, 0, JS_NULL);
+        JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, err));
+        return arr;
+    }
     JSValue arr = JS_NewArray(ctx);
-    JS_SetPropertyUint32(ctx, arr, 0, JS_NULL);
-    JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, err));
+    JS_SetPropertyUint32(ctx, arr, 0, result);
+    JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, 0));
     return arr;
 }
+
+/* Detect callback: last arg if it's a function */
+static JSValueConst fs_get_cb(JSContext *ctx, int argc, JSValueConst *argv, int cb_pos) {
+    if (argc > cb_pos && JS_IsFunction(ctx, argv[cb_pos]))
+        return argv[cb_pos];
+    return JS_UNDEFINED;
+}
+
+/* ── fs.readFile(path[, cb]) ────────────────────────────────────── */
 
 static JSValue js_fs_readFile(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
@@ -103,28 +136,27 @@ static JSValue js_fs_readFile(JSContext *ctx, JSValueConst this_val,
     if (argc < 1) return JS_ThrowTypeError(ctx, "fs.readFile: path required");
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_ThrowTypeError(ctx, "fs.readFile: path must be a string");
+    JSValueConst cb = fs_get_cb(ctx, argc, argv, 1);
 
     FILE *f = fopen(path, "rb");
-    if (!f) { int e = errno; JS_FreeCString(ctx, path); return make_err_tuple(ctx, e); }
+    if (!f) { int e = errno; JS_FreeCString(ctx, path); return fs_return(ctx, cb, JS_NULL, e); }
     JS_FreeCString(ctx, path);
 
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
-    if (sz < 0) { fclose(f); return make_err_tuple(ctx, EIO); }
+    if (sz < 0) { fclose(f); return fs_return(ctx, cb, JS_NULL, EIO); }
     fseek(f, 0, SEEK_SET);
     char *buf = malloc(sz > 0 ? (size_t)sz : 1);
-    if (!buf) { fclose(f); return make_err_tuple(ctx, ENOMEM); }
+    if (!buf) { fclose(f); return fs_return(ctx, cb, JS_NULL, ENOMEM); }
     size_t nread = fread(buf, 1, (size_t)sz, f);
     fclose(f);
 
-    JSValue arr = JS_NewArray(ctx);
-    JS_SetPropertyUint32(ctx, arr, 0, JS_NewStringLen(ctx, buf, nread));
-    JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, 0));
+    JSValue content = JS_NewStringLen(ctx, buf, nread);
     free(buf);
-    return arr;
+    return fs_return(ctx, cb, content, 0);
 }
 
-/* ── fs.writeFile(path, content) → [written, errno] ────────────── */
+/* ── fs.writeFile(path, content[, cb]) ──────────────────────────── */
 
 static JSValue js_fs_writeFile(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
@@ -132,67 +164,76 @@ static JSValue js_fs_writeFile(JSContext *ctx, JSValueConst this_val,
     if (argc < 2) return JS_ThrowTypeError(ctx, "fs.writeFile: path and content required");
     const char *path = JS_ToCString(ctx, argv[0]);
     if (!path) return JS_ThrowTypeError(ctx, "fs.writeFile: path must be a string");
+    JSValueConst cb = fs_get_cb(ctx, argc, argv, 2);
 
     size_t clen = 0;
     const char *content = JS_ToCStringLen(ctx, &clen, argv[1]);
     if (!content) { JS_FreeCString(ctx, path); return JS_ThrowTypeError(ctx, "fs.writeFile: content must be a string"); }
 
     FILE *f = fopen(path, "wb");
-    if (!f) { int e = errno; JS_FreeCString(ctx, path); JS_FreeCString(ctx, content); return make_err_tuple(ctx, e); }
+    if (!f) { int e = errno; JS_FreeCString(ctx, path); JS_FreeCString(ctx, content); return fs_return(ctx, cb, JS_NULL, e); }
     JS_FreeCString(ctx, path);
     size_t written = fwrite(content, 1, clen, f);
     int err = ferror(f) ? errno : 0;
     fclose(f);
     JS_FreeCString(ctx, content);
 
-    if (err) return make_err_tuple(ctx, err);
-    JSValue arr = JS_NewArray(ctx);
-    JS_SetPropertyUint32(ctx, arr, 0, JS_NewInt32(ctx, (int32_t)written));
-    JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, 0));
-    return arr;
+    return fs_return(ctx, cb, JS_NewInt32(ctx, (int32_t)written), err);
 }
 
-/* ── fs.readDir(path) → [names[], errno] ───────────────────────── */
+/* ── fs.readdir(path[, cb]) ─────────────────────────────────────── */
+
+static const char *dtype_str(unsigned char d_type) {
+    switch (d_type) {
+    case DT_DIR: return "dir";
+    case DT_LNK: return "link";
+    case DT_REG: return "file";
+    default:     return "file";
+    }
+}
 
 static JSValue js_fs_readDir(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
     (void)this_val;
-    if (argc < 1) return JS_ThrowTypeError(ctx, "fs.readDir: path required");
+    if (argc < 1) return JS_ThrowTypeError(ctx, "fs.readdir: path required");
     const char *path = JS_ToCString(ctx, argv[0]);
-    if (!path) return JS_ThrowTypeError(ctx, "fs.readDir: path must be a string");
+    if (!path) return JS_ThrowTypeError(ctx, "fs.readdir: path must be a string");
+    JSValueConst cb = fs_get_cb(ctx, argc, argv, 1);
 
     DIR *d = opendir(path);
-    if (!d) { int e = errno; JS_FreeCString(ctx, path); return make_err_tuple(ctx, e); }
+    if (!d) { int e = errno; JS_FreeCString(ctx, path); return fs_return(ctx, cb, JS_NULL, e); }
     JS_FreeCString(ctx, path);
 
-    JSValue names = JS_NewArray(ctx);
+    JSValue entries = JS_NewArray(ctx);
     struct dirent *ent;
     uint32_t idx = 0;
     while ((ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.' &&
             (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0')))
             continue;
-        JS_SetPropertyUint32(ctx, names, idx++, JS_NewString(ctx, ent->d_name));
+        JSValue obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, obj, "name", JS_NewString(ctx, ent->d_name));
+        JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, dtype_str(ent->d_type)));
+        JS_SetPropertyUint32(ctx, entries, idx++, obj);
     }
     closedir(d);
 
-    JSValue arr = JS_NewArray(ctx);
-    JS_SetPropertyUint32(ctx, arr, 0, names);
-    JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, 0));
-    return arr;
+    return fs_return(ctx, cb, entries, 0);
 }
 
-/* ── fs.stat(path) → [{size,mode,mtime,isDir}, errno] ─────────── */
+/* ── fs.stat / fs.lstat shared implementation ──────────────────── */
 
-static JSValue js_fs_stat(JSContext *ctx, JSValueConst this_val,
-                          int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_ThrowTypeError(ctx, "fs.stat: path required");
+static JSValue js_fs_stat_impl(JSContext *ctx, int argc, JSValueConst *argv,
+                               int use_lstat) {
+    const char *fn = use_lstat ? "fs.lstat" : "fs.stat";
+    if (argc < 1) return JS_ThrowTypeError(ctx, "%s: path required", fn);
     const char *path = JS_ToCString(ctx, argv[0]);
-    if (!path) return JS_ThrowTypeError(ctx, "fs.stat: path must be a string");
+    if (!path) return JS_ThrowTypeError(ctx, "%s: path must be a string", fn);
+    JSValueConst cb = fs_get_cb(ctx, argc, argv, 1);
 
     struct stat st;
-    if (stat(path, &st) != 0) { int e = errno; JS_FreeCString(ctx, path); return make_err_tuple(ctx, e); }
+    int rc = use_lstat ? lstat(path, &st) : stat(path, &st);
+    if (rc != 0) { int e = errno; JS_FreeCString(ctx, path); return fs_return(ctx, cb, JS_NULL, e); }
     JS_FreeCString(ctx, path);
 
     JSValue obj = JS_NewObject(ctx);
@@ -200,24 +241,31 @@ static JSValue js_fs_stat(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyStr(ctx, obj, "mode", JS_NewInt32(ctx, (int32_t)st.st_mode));
     JS_SetPropertyStr(ctx, obj, "mtime", JS_NewFloat64(ctx, (double)st.st_mtime));
     JS_SetPropertyStr(ctx, obj, "isDir", JS_NewBool(ctx, S_ISDIR(st.st_mode)));
+    JS_SetPropertyStr(ctx, obj, "isLink", JS_NewBool(ctx, S_ISLNK(st.st_mode)));
 
-    JSValue arr = JS_NewArray(ctx);
-    JS_SetPropertyUint32(ctx, arr, 0, obj);
-    JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, 0));
-    return arr;
+    return fs_return(ctx, cb, obj, 0);
 }
 
-/* ── fs.cwd() → [path, errno] ─────────────────────────────────── */
+static JSValue js_fs_stat(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    return js_fs_stat_impl(ctx, argc, argv, 0);
+}
+
+static JSValue js_fs_lstat(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    return js_fs_stat_impl(ctx, argc, argv, 1);
+}
+
+/* ── fs.cwd() ──────────────────────────────────────────────────── */
 
 static JSValue js_fs_cwd(JSContext *ctx, JSValueConst this_val,
                          int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
     char buf[4096];
-    if (!getcwd(buf, sizeof(buf))) return make_err_tuple(ctx, errno);
-    JSValue arr = JS_NewArray(ctx);
-    JS_SetPropertyUint32(ctx, arr, 0, JS_NewString(ctx, buf));
-    JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, 0));
-    return arr;
+    if (!getcwd(buf, sizeof(buf))) return fs_return(ctx, JS_UNDEFINED, JS_NULL, errno);
+    return fs_return(ctx, JS_UNDEFINED, JS_NewString(ctx, buf), 0);
 }
 
 /* ── console.log / print ───────────────────────────────────────── */
@@ -278,12 +326,18 @@ void qjs_register_eval_host_functions(JSContext *ctx) {
     JS_SetPropertyStr(ctx, global, "http_request",
         JS_NewCFunction(ctx, js_http_request, "http_request", 2));
 
-    /* fs object */
+    /* fs object — both Node callback style and Sync style point to same impl */
     JSValue fs = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, fs, "readFile", JS_NewCFunction(ctx, js_fs_readFile, "readFile", 1));
-    JS_SetPropertyStr(ctx, fs, "writeFile", JS_NewCFunction(ctx, js_fs_writeFile, "writeFile", 2));
-    JS_SetPropertyStr(ctx, fs, "readDir", JS_NewCFunction(ctx, js_fs_readDir, "readDir", 1));
-    JS_SetPropertyStr(ctx, fs, "stat", JS_NewCFunction(ctx, js_fs_stat, "stat", 1));
+    JS_SetPropertyStr(ctx, fs, "readFile", JS_NewCFunction(ctx, js_fs_readFile, "readFile", 2));
+    JS_SetPropertyStr(ctx, fs, "readFileSync", JS_NewCFunction(ctx, js_fs_readFile, "readFileSync", 1));
+    JS_SetPropertyStr(ctx, fs, "writeFile", JS_NewCFunction(ctx, js_fs_writeFile, "writeFile", 3));
+    JS_SetPropertyStr(ctx, fs, "writeFileSync", JS_NewCFunction(ctx, js_fs_writeFile, "writeFileSync", 2));
+    JS_SetPropertyStr(ctx, fs, "readdir", JS_NewCFunction(ctx, js_fs_readDir, "readdir", 2));
+    JS_SetPropertyStr(ctx, fs, "readdirSync", JS_NewCFunction(ctx, js_fs_readDir, "readdirSync", 1));
+    JS_SetPropertyStr(ctx, fs, "stat", JS_NewCFunction(ctx, js_fs_stat, "stat", 2));
+    JS_SetPropertyStr(ctx, fs, "statSync", JS_NewCFunction(ctx, js_fs_stat, "statSync", 1));
+    JS_SetPropertyStr(ctx, fs, "lstat", JS_NewCFunction(ctx, js_fs_lstat, "lstat", 2));
+    JS_SetPropertyStr(ctx, fs, "lstatSync", JS_NewCFunction(ctx, js_fs_lstat, "lstatSync", 1));
     JS_SetPropertyStr(ctx, fs, "cwd", JS_NewCFunction(ctx, js_fs_cwd, "cwd", 0));
     JS_SetPropertyStr(ctx, global, "fs", fs);
 

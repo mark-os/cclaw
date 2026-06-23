@@ -1157,7 +1157,7 @@ static const char *QJS_EVAL_PRELUDE =
     "console.warn = console.log;\n"
     "console.error = console.log;\n"
     "var require = function() {\n"
-    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readDir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url).');\n"
+    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readdir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url).');\n"
     "};\n"
     "var process = {};\n"
     "Object.defineProperty(process, 'env', {get: function() { throw new TypeError('process.env not available.'); }});\n"
@@ -1186,7 +1186,7 @@ static const char *qjs_syntax_hint(const char *code) {
     if (strstr(code, "`"))
         return " — hint: template literals are unsupported; concatenate with 'a' + b";
     if (strstr(code, "require(") || strstr(code, "import "))
-        return " — hint: no modules; 'fs' and 'http_request' are globals (e.g. fs.readDir('.'))";
+        return " — hint: no modules; 'fs' and 'http_request' are globals (e.g. fs.readdir('.'))";
     if (strstr(code, "await ") || strstr(code, ".then("))
         return " — hint: this engine is synchronous; assign directly: var r = http_request(url); then use r.body / r.json()";
     return "";

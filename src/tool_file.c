@@ -311,7 +311,7 @@ static const char *FILE_LIST_PARAMS_JSON =
     "\"limit\":{\"type\":\"number\",\"description\":\"Maximum entries to return (default 500)\"}"
     "}}";
 
-typedef struct { char *name; int is_dir; } LsEntry;
+typedef struct { char *name; int is_dir; int is_link; } LsEntry;
 
 static int ls_entry_cmp(const void *a, const void *b) {
     return strcasecmp(((const LsEntry *)a)->name, ((const LsEntry *)b)->name);
@@ -352,6 +352,8 @@ static char *file_list_inner(const char *arguments, void *user_data) {
         }
         char full[PATH_MAX + 256];
         snprintf(full, sizeof(full), "%s/%s", resolved, ent->d_name);
+        struct stat lst;
+        entries[n].is_link = (lstat(full, &lst) == 0 && S_ISLNK(lst.st_mode));
         struct stat st;
         entries[n].is_dir = (stat(full, &st) == 0 && S_ISDIR(st.st_mode));
         entries[n].name = strdup(ent->d_name);
@@ -369,7 +371,7 @@ static char *file_list_inner(const char *arguments, void *user_data) {
     char *out = malloc(cap);
     if (out) out[0] = '\0';
     for (size_t i = 0; out && i < shown; i++) {
-        const char *suffix = entries[i].is_dir ? "/" : "";
+        const char *suffix = entries[i].is_dir ? "/" : entries[i].is_link ? "@" : "";
         size_t need = len + strlen(entries[i].name) + 2;
         if (need + 1 > cap) {
             cap = need * 2;

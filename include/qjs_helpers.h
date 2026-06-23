@@ -12,7 +12,7 @@
 /* Execution profiles — determines which intrinsics are loaded */
 typedef enum {
     QJS_PROFILE_HOOKS,    /* in-process hooks: Base + JSON + RegExp only */
-    QJS_PROFILE_EVAL,     /* fork+exec js_eval: full minus Proxy */
+    QJS_PROFILE_EVAL,     /* fork+exec js_eval: full (includes Proxy, Promise) */
     QJS_PROFILE_CHANNEL,  /* fork+exec channel_runner: full + Promise */
 } QjsProfile;
 
@@ -20,7 +20,7 @@ typedef enum {
 typedef struct {
     JSRuntime *rt;
     int instruction_count;
-    int instruction_limit;  /* 0 = no limit */
+    int instruction_limit;  /* 0 = no limit (counter not incremented) */
 } QjsRuntime;
 
 /* Create a runtime with memory limit (bytes). 0 = no limit. */
@@ -54,5 +54,15 @@ void qjs_register_eval_host_functions(JSContext *ctx);
 
 /* Register channel-profile host functions (cclaw.*, admin.*). */
 void qjs_register_channel_host_functions(JSContext *ctx);
+
+/* Drain the microtask/job queue to completion. Call after any JS_Eval. */
+void qjs_drain_jobs(JSRuntime *rt);
+
+/* If val is a fulfilled Promise, return its result (new ref). If pending/rejected,
+ * free val and return JS_UNDEFINED. Otherwise return val unchanged. */
+JSValue qjs_unwrap_promise(JSContext *ctx, JSValue val);
+
+/* Reset instruction counter — call before each handler dispatch in long-lived runtimes. */
+void qjs_reset_instructions(QjsRuntime *qrt);
 
 #endif

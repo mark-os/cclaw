@@ -343,6 +343,7 @@ JsSessionRuntime *js_runtime_create(void) {
     rt->heap = qjs_runtime_create(JS_HEAP_SIZE);
     if (!rt->heap) { free(rt); return NULL; }
     QjsRuntime *qrt = (QjsRuntime *)rt->heap;
+    qjs_set_interrupt_limit(qrt, JS_MAX_INSTRUCTIONS);
     rt->ctx = qjs_context_create(qrt, QJS_PROFILE_HOOKS);
     if (!rt->ctx) { qjs_runtime_destroy(qrt); free(rt); return NULL; }
     return rt;

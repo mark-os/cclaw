@@ -5,13 +5,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Interrupt handler — counts operations, stops at limit */
+/* Interrupt handler — counts operations, stops at limit.
+ * Only increments when a limit is set (avoids overflow UB in unlimited mode). */
 static int qjs_interrupt_handler(JSRuntime *rt, void *opaque) {
     (void)rt;
     QjsRuntime *qrt = (QjsRuntime *)opaque;
+    if (qrt->instruction_limit <= 0) return 0;
     qrt->instruction_count++;
-    return (qrt->instruction_limit > 0 &&
-            qrt->instruction_count > qrt->instruction_limit);
+    return (qrt->instruction_count > qrt->instruction_limit);
 }
 
 QjsRuntime *qjs_runtime_create(size_t memory_limit) {
@@ -129,4 +130,36 @@ char *qjs_get_exception_string(JSContext *ctx) {
     char *result = strdup(str);
     JS_FreeCString(ctx, str);
     return result;
+}
+
+void qjs_drain_jobs(JSRuntime *rt) {
+    JSContext *c;
+    while (JS_ExecutePendingJob(rt, &c) > 0) {}
+}
+
+JSValue qjs_unwrap_promise(JSContext *ctx, JSValue val) {
+    if (JS_PromiseState(ctx, val) == JS_PROMISE_PENDING) {
+        /* Not a promise at all, or genuinely pending — JS_PromiseState returns
+         * JS_PROMISE_PENDING for non-promise values too, but JS_PromiseResult
+         * would crash. Check via duck-typing: if it's not an object, pass through. */
+    }
+    /* JS_PromiseState returns -1 for non-promise values in some builds,
+     * but the bellard 2026 version returns JS_PROMISE_PENDING. Safest check:
+     * only unwrap if result is a fulfilled or rejected promise. */
+    JSPromiseStateEnum state = JS_PromiseState(ctx, val);
+    if (state == JS_PROMISE_FULFILLED) {
+        JSValue result = JS_PromiseResult(ctx, val);
+        JS_FreeValue(ctx, val);
+        return JS_DupValue(ctx, result);
+    }
+    if (state == JS_PROMISE_REJECTED) {
+        JS_FreeValue(ctx, val);
+        return JS_UNDEFINED;
+    }
+    /* Not a promise or still pending — return as-is */
+    return val;
+}
+
+void qjs_reset_instructions(QjsRuntime *qrt) {
+    if (qrt) qrt->instruction_count = 0;
 }

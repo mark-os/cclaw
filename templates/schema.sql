@@ -331,7 +331,6 @@ CREATE TABLE IF NOT EXISTS approvals (
   tool_name    TEXT,
   action       TEXT,
   args_json    TEXT,
-  args_hash    TEXT,
   resolve      TEXT NOT NULL DEFAULT 'rerun',
   state        TEXT NOT NULL DEFAULT 'pending',
   decided_via  TEXT,

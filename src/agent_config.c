@@ -455,15 +455,20 @@ int agent_config_set_tool_mode(sqlite3 *db, const char *agent,
     if (strcmp(mode, "silent") != 0 && strcmp(mode, "always") != 0 &&
         strcmp(mode, "tool_decides") != 0)
         return -1;
+    /* Upsert: "stop asking" must persist even when no grant row exists yet
+     * (e.g. a tool raised to ASK by a policy/hook rather than a standing
+     * grant). A bare UPDATE would silently no-op and drop the user's intent. */
     const char *sql =
-        "UPDATE grants SET approval_mode=?3"
-        " WHERE agent_name=?1 AND kind='tool' AND value=?2;";
+        "INSERT INTO grants (agent_name, kind, value, approval_mode)"
+        " VALUES (?1, 'tool', ?2, ?3)"
+        " ON CONFLICT(agent_name, kind, value)"
+        " DO UPDATE SET approval_mode=excluded.approval_mode;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, tool, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, mode, -1, SQLITE_STATIC);
-    int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
 }
@@ -480,6 +485,38 @@ int agent_config_revoke(sqlite3 *db, const char *agent, const char *kind,
     int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
+}
+
+int grants_contains(sqlite3 *db, const char *agent, const char *kind,
+                    const char *value) {
+    if (!db || !agent || !kind || !value) return 0;
+    const char *sql =
+        "SELECT 1 FROM grants WHERE agent_name=?1 AND kind=?2 AND value=?3"
+        " AND (expires_at IS NULL OR expires_at > unixepoch());";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, kind, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, value, -1, SQLITE_STATIC);
+    int found = (sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+void agent_grant_defaults(sqlite3 *db, const char *agent) {
+    if (!db || !agent) return;
+    /* Safe baseline toolset. High-privilege tools (shell_exec, web_fetch,
+     * db_query) are deliberately omitted — the agent must request them via
+     * request_config, which routes through the approval gate. */
+    static const char *default_tools[] = {
+        "file_read", "file_write", "js_eval", "request_config",
+        "search_config", "memory_create", "memory_add", "memory_edit",
+        "memory_delete", "configure_provider", "configure_channel", "create_agent",
+        "extension_promote", "extension_publish", "extension_attach", "extension_list",
+        "launch_agent", "check_session"
+    };
+    for (size_t i = 0; i < sizeof(default_tools) / sizeof(default_tools[0]); i++)
+        agent_config_grant(db, agent, "tool", default_tools[i], 0);
 }
 
 char *grants_json(sqlite3 *db, const char *agent, const char *kind) {

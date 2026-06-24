@@ -6,18 +6,6 @@
 #include <string.h>
 #include <time.h>
 
-/* FNV-1a 32-bit hash → 8 hex chars */
-static void fnv1a_hex(const char *data, char *out) {
-    uint32_t h = 2166136261u;
-    if (data) {
-        for (const char *p = data; *p; p++) {
-            h ^= (uint8_t)*p;
-            h *= 16777619u;
-        }
-    }
-    snprintf(out, 9, "%08x", h);
-}
-
 static char *dup_or_null(const unsigned char *s) {
     return s ? strdup((const char *)s) : NULL;
 }
@@ -31,12 +19,11 @@ static Approval *row_to_approval(sqlite3_stmt *stmt) {
     a->tool_name = dup_or_null(sqlite3_column_text(stmt, 3));
     a->action = dup_or_null(sqlite3_column_text(stmt, 4));
     a->args_json = dup_or_null(sqlite3_column_text(stmt, 5));
-    a->args_hash = dup_or_null(sqlite3_column_text(stmt, 6));
-    a->resolve = dup_or_null(sqlite3_column_text(stmt, 7));
-    a->state = dup_or_null(sqlite3_column_text(stmt, 8));
-    a->decided_via = dup_or_null(sqlite3_column_text(stmt, 9));
-    a->requested_at = sqlite3_column_int64(stmt, 10);
-    a->expires_at = sqlite3_column_int64(stmt, 11);
+    a->resolve = dup_or_null(sqlite3_column_text(stmt, 6));
+    a->state = dup_or_null(sqlite3_column_text(stmt, 7));
+    a->decided_via = dup_or_null(sqlite3_column_text(stmt, 8));
+    a->requested_at = sqlite3_column_int64(stmt, 9);
+    a->expires_at = sqlite3_column_int64(stmt, 10);
     return a;
 }
 
@@ -46,7 +33,6 @@ void approval_free(Approval *a) {
     free(a->tool_name);
     free(a->action);
     free(a->args_json);
-    free(a->args_hash);
     free(a->resolve);
     free(a->state);
     free(a->decided_via);
@@ -56,8 +42,6 @@ void approval_free(Approval *a) {
 int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_id,
                         const char *tool_name, const char *action,
                         const char *args_json, const char *resolve) {
-    char hash[9];
-    fnv1a_hex(args_json, hash);
     if (!resolve) resolve = "rerun";
 
     /* Deadline: kv "approval_timeout_sec" or default 3600 */
@@ -71,8 +55,8 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
     int64_t expires_at = (int64_t)time(NULL) + timeout;
 
     const char *sql =
-        "INSERT INTO approvals(session_id, tool_call_id, tool_name, action, args_json, args_hash, resolve, expires_at)"
-        " VALUES(?,?,?,?,?,?,?,?)";
+        "INSERT INTO approvals(session_id, tool_call_id, tool_name, action, args_json, resolve, expires_at)"
+        " VALUES(?,?,?,?,?,?,?)";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -81,9 +65,8 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
     sqlite3_bind_text(stmt, 3, tool_name, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, action, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 5, args_json, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 6, hash, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 7, resolve, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 8, expires_at);
+    sqlite3_bind_text(stmt, 6, resolve, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 7, expires_at);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
@@ -93,7 +76,7 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
 Approval *approval_get_pending(sqlite3 *db, int64_t session_id) {
     const char *sql =
         "SELECT id, session_id, tool_call_id, tool_name, action,"
-        " args_json, args_hash, resolve, state, decided_via, requested_at, expires_at"
+        " args_json, resolve, state, decided_via, requested_at, expires_at"
         " FROM approvals WHERE session_id=? AND state='pending' LIMIT 1";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -114,7 +97,7 @@ Approval *approval_get_for_tool_call(sqlite3 *db, int64_t session_id,
      * reused id collide with another session's approved row. */
     const char *sql =
         "SELECT id, session_id, tool_call_id, tool_name, action,"
-        " args_json, args_hash, resolve, state, decided_via, requested_at, expires_at"
+        " args_json, resolve, state, decided_via, requested_at, expires_at"
         " FROM approvals WHERE session_id=? AND tool_call_id=? ORDER BY id DESC LIMIT 1";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -161,7 +144,7 @@ Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *de
     /* Return the resolved row */
     const char *sel =
         "SELECT id, session_id, tool_call_id, tool_name, action,"
-        " args_json, args_hash, resolve, state, decided_via, requested_at, expires_at"
+        " args_json, resolve, state, decided_via, requested_at, expires_at"
         " FROM approvals WHERE id=?";
     if (sqlite3_prepare_v2(db, sel, -1, &stmt, NULL) != SQLITE_OK)
         return NULL;

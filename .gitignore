@@ -40,5 +40,3 @@ compile_commands.json
 .cclaw/
 __pycache__/
 
-# Local working notes (not tracked)
-TODO.md

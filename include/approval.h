@@ -13,8 +13,6 @@ typedef struct {
     char *tool_name;
     char *action;
     char *args_json;
-    /* args_hash is an audit/dedup fingerprint only, never used as a security check. */
-    char *args_hash;
     char *resolve;  /* "rerun" or "apply" — how approval is acted on */
     char *state;
     char *decided_via;
@@ -22,7 +20,7 @@ typedef struct {
     int64_t expires_at;
 } Approval;
 
-/* Insert a pending approval. Computes args_hash from args_json (FNV-1a hex).
+/* Insert a pending approval.
  * resolve is "rerun" (re-execute frozen call) or "apply" (invoke tool's apply handler).
  * Returns the new row id (>0) or -1 on error. */
 int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_id,

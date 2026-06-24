@@ -256,7 +256,8 @@ void channel_consume_events(sqlite3 *db) {
                     if (text) {
                         if (strcasecmp(text, "once") == 0 || strcasecmp(text, "o") == 0)
                             d = APPROVAL_ONCE;
-                        else if (text[0] == 'y' || text[0] == 'Y' ||
+                        else if (strcasecmp(text, "y") == 0 ||
+                                 strcasecmp(text, "yes") == 0 ||
                                  strcasecmp(text, "ok") == 0 ||
                                  strcasecmp(text, "okay") == 0 ||
                                  strcasecmp(text, "approve") == 0)

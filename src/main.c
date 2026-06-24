@@ -255,6 +255,23 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
      * so a denial answers this call and an approval re-runs the same frozen
      * tool_call once (the approval is consumed on use). */
     {
+        /* Authorization floor: a tool with no live grant is denied outright.
+         * agent_tool_mode's run-freely default (SILENT) describes *how* a
+         * granted tool is gated, not *whether* the tool is authorized — so the
+         * grant must be checked first or an ungranted tool would slip through
+         * as SILENT→ALLOW. */
+        if (!grants_contains(g_db, agent_name, "tool", tc->name)) {
+            char err[160];
+            snprintf(err, sizeof(err),
+                     "error: %s not granted — request it with request_config",
+                     tc->name);
+            ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
+            Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                           .tool_name = tc->name, .is_error = 1};
+            entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+            db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "not_granted");
+            return 1;
+        }
         ToolApprovalMode mode = agent_tool_mode(g_db, agent_name, tc->name);
         HookGate gate = (mode == TOOL_MODE_SILENT) ? HOOK_GATE_ALLOW : HOOK_GATE_ASK;
 
@@ -1739,15 +1756,7 @@ int main(int argc, char *argv[]) {
               sqlite3_step(bs); sqlite3_finalize(bs);
           }
           /* Seed default tools as grants */
-          static const char *default_tools[] = {
-              "file_read", "file_write", "js_eval", "request_config",
-              "search_config", "memory_create", "memory_add", "memory_edit",
-              "memory_delete", "configure_provider", "configure_channel", "create_agent",
-              "extension_promote", "extension_publish", "extension_attach", "extension_list",
-              "launch_agent", "check_session"
-          };
-          for (size_t i = 0; i < sizeof(default_tools)/sizeof(default_tools[0]); i++)
-              agent_config_grant(g_db, "default", "tool", default_tools[i], 0);
+          agent_grant_defaults(g_db, "default");
           db_kv_set(g_db, "default_agent", "default");
           /* Seed default memory blocks */
           memory_block_create(g_db, "default", "AGENT",
@@ -1983,7 +1992,8 @@ int main(int argc, char *argv[]) {
                     ApprovalDecision d;
                     if (strcasecmp(linebuf, "once") == 0 || strcasecmp(linebuf, "o") == 0)
                         d = APPROVAL_ONCE;
-                    else if (linebuf[0] == 'y' || linebuf[0] == 'Y' ||
+                    else if (strcasecmp(linebuf, "y") == 0 ||
+                             strcasecmp(linebuf, "yes") == 0 ||
                              strcasecmp(linebuf, "ok") == 0 ||
                              strcasecmp(linebuf, "okay") == 0 ||
                              strcasecmp(linebuf, "approve") == 0)

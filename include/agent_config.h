@@ -66,6 +66,17 @@ int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
 int agent_config_revoke(sqlite3 *db, const char *agent, const char *kind,
                         const char *value);
 
+/* True if a live (unexpired) grant exists for (agent, kind, value). This is
+ * the authorization check the dispatch gate uses: a tool with no grant is
+ * denied, regardless of agent_tool_mode's run-freely default. */
+int grants_contains(sqlite3 *db, const char *agent, const char *kind,
+                    const char *value);
+
+/* Seed an agent's baseline tool grants (the safe default toolset; excludes
+ * shell_exec/web_fetch/db_query, which require an explicit request_config
+ * grant). Idempotent — uses INSERT OR IGNORE per tool. */
+void agent_grant_defaults(sqlite3 *db, const char *agent);
+
 /* §4 Axis B — per-(agent,tool) approval mode. */
 typedef enum {
     TOOL_MODE_SILENT,   /* runs freely */

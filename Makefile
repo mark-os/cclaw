@@ -1,5 +1,5 @@
 CC      ?= cc
-CFLAGS  := -std=c11 -Wall -Wextra -Werror -Iinclude -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn
+CFLAGS  := -std=c11 -Wall -Wextra -Werror -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
@@ -26,7 +26,13 @@ TEST_BIN  := $(patsubst test/%.c,$(BUILDDIR)/%,$(TEST_SRC))
 INTEG_BIN := $(patsubst test/%.c,$(BUILDDIR)/%,$(INTEG_SRC))
 E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
 
-.PHONY: all clean test test-integration test-e2e test-all check-gen install debug
+.PHONY: all clean test smoke test-integration test-e2e test-all check-gen install debug
+
+# Curated fast unit subset — no network, no fork. Target: a few seconds.
+SMOKE := test_db test_config test_advance_session test_llm_payload test_tools \
+         test_session_state test_tool_file test_context_plan test_secret_scan \
+         test_agent_setup
+SMOKE_BIN := $(patsubst %,$(BUILDDIR)/%,$(SMOKE))
 
 all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/net_shim
 
@@ -114,7 +120,9 @@ $(BUILDDIR)/:
 # This keeps `make test | tail/grep/head` safe: leaked mock-server children
 # hold the file fd, not the pipe, so readers always see EOF; and only make's
 # own one-liners can take a SIGPIPE.
-test: $(TEST_BIN)
+# test_tool_js / test_js_http_fetch fork build/cclaw via CCLAW_QJS_EXE, so the
+# binary must be fresh — depend on it so a stale build/cclaw can't slip in.
+test: $(TEST_BIN) $(BUILDDIR)/cclaw
 	@fail=0; for t in $(TEST_BIN); do \
 		out="/tmp/cclaw_$$(basename $$t).txt"; \
 		timeout 20 ./$$t > $$out 2>&1; rc=$$?; \
@@ -123,6 +131,18 @@ test: $(TEST_BIN)
 		else echo "FAIL $$t (exit $$rc → $$out)"; tail -20 $$out | sed 's/^/  | /'; fail=1; fi; \
 	done; \
 	if [ $$fail -eq 0 ]; then echo "All unit tests passed ($(words $(TEST_BIN)) suites)"; fi; \
+	exit $$fail
+
+# Fast smoke subset — same per-binary capture/report loop as `test`.
+smoke: $(SMOKE_BIN)
+	@fail=0; for t in $(SMOKE_BIN); do \
+		out="/tmp/cclaw_$$(basename $$t).txt"; \
+		timeout 20 ./$$t > $$out 2>&1; rc=$$?; \
+		if [ $$rc -eq 0 ]; then echo "PASS $$t (→ $$out)"; \
+		elif [ $$rc -eq 124 ]; then echo "TIMEOUT $$t (killed after 20s → $$out)"; fail=1; \
+		else echo "FAIL $$t (exit $$rc → $$out)"; tail -20 $$out | sed 's/^/  | /'; fail=1; fi; \
+	done; \
+	if [ $$fail -eq 0 ]; then echo "Smoke passed ($(words $(SMOKE_BIN)) suites)"; fi; \
 	exit $$fail
 
 test-integration: $(INTEG_BIN) $(BUILDDIR)/cclaw
@@ -149,15 +169,15 @@ test-e2e: $(E2E_BIN)
 # embedded builds never grow a python dependency.
 check-gen:
 	@command -v python3 >/dev/null 2>&1 || { echo "check-gen: skipped (no python3)"; exit 0; }; \
-	cp include/secret_scan_ac.h /tmp/cclaw_checkgen_ac.h; \
-	cp include/secret_scan_rules.h /tmp/cclaw_checkgen_rules.h; \
+	cp src/secret_scan_ac.h /tmp/cclaw_checkgen_ac.h; \
+	cp src/secret_scan_rules.h /tmp/cclaw_checkgen_rules.h; \
 	python3 scripts/gen_secret_scan.py >/dev/null 2>&1; \
-	if cmp -s include/secret_scan_ac.h /tmp/cclaw_checkgen_ac.h && \
-	   cmp -s include/secret_scan_rules.h /tmp/cclaw_checkgen_rules.h; then \
+	if cmp -s src/secret_scan_ac.h /tmp/cclaw_checkgen_ac.h && \
+	   cmp -s src/secret_scan_rules.h /tmp/cclaw_checkgen_rules.h; then \
 		echo "check-gen: secret-scan headers in sync"; \
 	else \
-		cp /tmp/cclaw_checkgen_ac.h include/secret_scan_ac.h; \
-		cp /tmp/cclaw_checkgen_rules.h include/secret_scan_rules.h; \
+		cp /tmp/cclaw_checkgen_ac.h src/secret_scan_ac.h; \
+		cp /tmp/cclaw_checkgen_rules.h src/secret_scan_rules.h; \
 		echo "check-gen: STALE — rerun 'python3 scripts/gen_secret_scan.py' and commit"; \
 		exit 1; \
 	fi

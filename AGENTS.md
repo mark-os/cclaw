@@ -129,8 +129,7 @@ The `{{SECRET:name}}` syntax works in shell_exec, web_fetch, and js_eval argumen
 ## File Layout
 
 ```
-src/           C source files
-include/       C headers (public API for each module)
+src/           C source files + headers (each module's .c and .h live together)
 vendor/        Vendored libs (sqlite3, civetweb, quickjs, jsmn)
 templates/     Schema SQL, system prompts, embedded text (build-time → templates.h)
 test/          Test files (test_*.c)
@@ -176,6 +175,7 @@ cat /tmp/t.txt            # or: tail -20 /tmp/t.txt
 ```bash
 make              # native build (ARM64 or x86_64)
 make debug        # clean + clang build with -O0 -g3 + ASan/UBSan
+make smoke        # curated fast unit subset (~10 suites, a few seconds)
 make test         # unit tests (fast, no network)
 make test-integration  # mock-server tests
 make test-e2e     # live LLM tests (needs API key)
@@ -183,7 +183,7 @@ make clean        # remove build/
 ```
 
 - **`make debug` uses clang, not gcc.** GCC-only `#pragma GCC diagnostic` directives must be guarded with `#if defined(__GNUC__) && !defined(__clang__)` — under `-Werror` clang turns an unknown warning group (e.g. `-Wformat-truncation`) into a hard error.
-- **`make test` does not build `build/cclaw`.** The main binary is not a dependency of the `test` target, but `test_tool_js` forks it via `CCLAW_QJS_EXE` (the `--qjs_eval` subprocess). After `make clean`, run **`make && make test`** — a bare `make test` makes `test_tool_js` fail with empty results (missing binary), which looks like a real regression but isn't.
+- **`make test` builds `build/cclaw` first.** `test_tool_js` / `test_js_http_fetch` fork the main binary via `CCLAW_QJS_EXE` (the `--qjs_eval` subprocess), so the `test` target depends on `$(BUILDDIR)/cclaw` — it's always rebuilt before the suite runs, even after `make clean`. (`make smoke` deliberately omits the dep: its curated subset has no fork-the-binary tests.)
 - **Don't mix sanitizer and release objects in `build/`.** A `make debug` followed by a plain `make test` link-fails on undefined `__asan_*`/`__ubsan_*` symbols (stale instrumented `.o` in `libcclaw.a`). `make clean` between the two.
 
 ## Running

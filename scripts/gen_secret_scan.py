@@ -3,8 +3,8 @@
 
 Reads vendor/gitleaks.toml (and optional vendor/secrets_custom.toml),
 extracts keywords and regex metadata, builds an AC automaton, and emits:
-  - include/secret_scan_ac.h   (state transitions, failure links, accept states)
-  - include/secret_scan_rules.h (per-rule validation parameters)
+  - src/secret_scan_ac.h   (state transitions, failure links, accept states)
+  - src/secret_scan_rules.h (per-rule validation parameters)
 
 The generated tables are const and live in .rodata (zero heap on Pogoplug).
 """
@@ -273,7 +273,7 @@ def emit_headers(keywords, rules_meta, goto, failure, accept, state_count):
     """Emit C headers for the AC automaton."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.dirname(script_dir)
-    include_dir = os.path.join(repo_root, 'include')
+    include_dir = os.path.join(repo_root, 'src')
 
     # --- Compute column remap ---
     # Find all bytes actually used in goto transitions (already lowercase from trie)
@@ -384,8 +384,8 @@ def emit_headers(keywords, rules_meta, goto, failure, accept, state_count):
     table_bytes = state_count * num_cols * 2
     print(f"Generated: {state_count} states, {len(keywords)} keywords, "
           f"{len(rules_meta)} rules, {num_cols} columns")
-    print(f"  include/secret_scan_ac.h ({table_bytes} bytes transition table + 128 byte remap)")
-    print(f"  include/secret_scan_rules.h")
+    print(f"  src/secret_scan_ac.h ({table_bytes} bytes transition table + 128 byte remap)")
+    print(f"  src/secret_scan_rules.h")
 
 
 def main():

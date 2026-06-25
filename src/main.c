@@ -1538,184 +1538,101 @@ static int qjs_eval_main(int argc, char **argv) {
     _exit(failed ? 1 : 0);
 }
 
-int main(int argc, char *argv[]) {
-    /* --qjs_eval: early intercept before any config/logging setup */
-    if (argc >= 2 && strcmp(argv[1], "--qjs_eval") == 0) return qjs_eval_main(argc, argv);
+static int run_daemon(char *db_path) {
+    g_mode = 1;
+    workspace_init(g_cfg);
+    printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
+    web_start(g_cfg, g_db, db_path);
+    heartbeat_start(g_cfg, g_db);
+    cron_start(g_cfg, g_db);
 
-    cclaw_log_init();
-    int daemon_mode = 0, new_session = 0, host_mode = 0;
-    const char *channel_mode = NULL;
-    LogLevel log_level_override = LOG_LEVEL_INFO;
-    int log_level_set = 0;
-    int64_t session_id = -1;
-    const char *prompt = NULL;
-
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0) { print_usage(); return 0; }
-        else if (strcmp(argv[i], "--daemon") == 0) daemon_mode = 1;
-        else if (strcmp(argv[i], "--channel") == 0) { if (++i >= argc) { fprintf(stderr, "--channel requires name\n"); return 1; } channel_mode = argv[i]; }
-        else if (strncmp(argv[i], "--log-level=", 12) == 0) { log_level_override = log_level_parse(argv[i]+12); log_level_set = 1; }
-        else if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-v") == 0) { log_level_override = LOG_LEVEL_DEBUG; log_level_set = 1; }
-        else if (strcmp(argv[i], "--trace") == 0 || strcmp(argv[i], "-vv") == 0) { log_level_override = LOG_LEVEL_TRACE; log_level_set = 1; }
-        else if (strcmp(argv[i], "--new") == 0) new_session = 1;
-        else if (strcmp(argv[i], "-y") == 0) host_mode = 1;
-        else if (strcmp(argv[i], "--no-stream") == 0) setenv("CCLAW_STREAM", "0", 1);
-        else if (strncmp(argv[i], "--llm-threads=", 14) == 0) g_llm_threads = atoi(argv[i]+14);
-        else if (strcmp(argv[i], "-p") == 0) { if (++i >= argc) { fprintf(stderr, "-p requires arg\n"); return 1; } prompt = argv[i]; }
-        else if (strcmp(argv[i], "-s") == 0) { if (++i >= argc) { fprintf(stderr, "-s requires arg\n"); return 1; } session_id = atoll(argv[i]); }
-        else if (strncmp(argv[i], "--session-id=", 13) == 0) session_id = atoll(argv[i]+13);
-        else { fprintf(stderr, "unknown option: %s\n", argv[i]); return 1; }
+    /* Start LLM worker threads */
+    if (llm_worker_start(db_path, g_llm_threads) != 0) {
+        fprintf(stderr, "error: failed to start LLM worker\n");
+        config_free(g_cfg); db_close(g_db); free(db_path); return 1;
     }
+    int daemon_worker_fd = llm_worker_fd();
+    set_nonblock(daemon_worker_fd);
 
-    {   const char *v = getenv("CCLAW_LLM_THREADS");
-        if (v && atoi(v) > 0) g_llm_threads = atoi(v);
-    }
+    /* Init wake pipe + FIFO */
+    wake_init();
+    int fifo_fd = wake_fifo_open(db_path);
 
-    shutdown_init();
+    /* SIGCHLD self-pipe */
+    if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
+    fcntl(g_chld_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(g_chld_pipe[1], F_SETFD, FD_CLOEXEC);
+    set_nonblock(g_chld_pipe[0]); set_nonblock(g_chld_pipe[1]);
+    { struct sigaction sa = {0}; sa.sa_handler = sigchld_handler;
+      sigemptyset(&sa.sa_mask); sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+      sigaction(SIGCHLD, &sa, NULL); }
 
-    /* ── Open DB ─────────────────────────────────────────────────── */
-    char *db_path = resolve_db_path();
-    ensure_parent_dir(db_path);
-    g_db = db_open(db_path);
-    if (!g_db) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
-    if (db_ensure_schema(g_db) != 0) { db_close(g_db); free(db_path); return 1; }
+    /* Launch channel processes */
+    channel_launch_all(g_db);
 
-    { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
+    /* poll() setup — sized for fixed fds + all children with result pipes */
+    int max_pfds = 5 + CHILD_MAX;  /* chld, wake, fifo, worker, result pipes */
+    struct pollfd *pfds = malloc(max_pfds * sizeof(struct pollfd));
+    if (!pfds) { perror("malloc"); return 1; }
 
-    setenv("CCLAW_DB", db_path, 1);
+    /* Daemon event loop */
+    while (!shutdown_requested()) {
+        /* Rebuild pollfd set each iteration to include active result pipes */
+        int nfds = 0;
+        pfds[nfds].fd = g_chld_pipe[0]; pfds[nfds].events = POLLIN; nfds++;
+        pfds[nfds].fd = wake_fd(); pfds[nfds].events = POLLIN; nfds++;
+        int fifo_idx = -1;
+        if (fifo_fd >= 0) { fifo_idx = nfds; pfds[nfds].fd = fifo_fd; pfds[nfds].events = POLLIN; nfds++; }
+        int d_worker_idx = nfds;
+        pfds[nfds].fd = daemon_worker_fd; pfds[nfds].events = POLLIN; nfds++;
 
-    /* First-run initialization (no-op if already seeded) */
-    db_seed_defaults(g_db);
-    extract_builtin_extensions(g_db, db_path);
+        int result_pipe_base = nfds;
+        nfds = add_result_pipe_fds(pfds, nfds, max_pfds);
 
-    g_cfg = config_load(g_db);
-    if (!g_cfg) { fprintf(stderr, "config load failed\n"); db_close(g_db); return 1; }
-    if (g_cfg->env_file) setenv("CCLAW_ENV_FILE", g_cfg->env_file, 1);
-    if (log_level_set) {
-        g_cfg->log_level = log_level_override;
-        const char *lvl_str = log_level_override == LOG_LEVEL_TRACE ? "trace" :
-                              log_level_override == LOG_LEVEL_DEBUG ? "debug" :
-                              log_level_override == LOG_LEVEL_ERROR ? "error" : "info";
-        setenv("CCLAW_LOG_LEVEL", lvl_str, 1);
-    }
-    cclaw_log_set_level(g_cfg->log_level);
+        int rc = poll(pfds, (nfds_t)nfds, 1000);
+        if (rc < 0) { if (errno == EINTR) continue; break; }
 
-    /* Enable SQLite query profiling at trace level */
-    if (g_cfg->log_level >= LOG_LEVEL_DEBUG)
-        db_enable_trace(g_db);
+        drain_ready_result_pipes(pfds, result_pipe_base, nfds);
 
-    /* ── Channel mode ─────────────────────────────────────────────── */
-    /* The daemon fork+execs `cclaw --channel <name>` (do_fork) for a clean
-     * process image; we run the channel loop directly here — no separate
-     * channel_runner binary, so ps shows `cclaw --channel <name>`. The runner
-     * opens its own DB ctx, so drop ours first. */
-    if (channel_mode) {
-        config_free(g_cfg); db_close(g_db);
-        int rc = channel_runner_main(db_path, channel_mode);
-        free(db_path);
-        return rc;
-    }
-
-    /* ── Startup crash recovery (covers both CLI and daemon — a prior crashed
-     * -p run can leave a stale session that hangs the edge-triggered loop) ── */
-    if (db_recover_stale_sessions(g_db) != 0)
-        fprintf(stderr, "warning: startup recovery failed\n");
-
-    /* ── Daemon mode ─────────────────────────────────────────────── */
-
-    if (daemon_mode) {
-        g_mode = 1;
-        workspace_init(g_cfg);
-        printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
-        web_start(g_cfg, g_db, db_path);
-        heartbeat_start(g_cfg, g_db);
-        cron_start(g_cfg, g_db);
-
-        /* Start LLM worker threads */
-        if (llm_worker_start(db_path, g_llm_threads) != 0) {
-            fprintf(stderr, "error: failed to start LLM worker\n");
-            config_free(g_cfg); db_close(g_db); free(db_path); return 1;
-        }
-        int daemon_worker_fd = llm_worker_fd();
-        set_nonblock(daemon_worker_fd);
-
-        /* Init wake pipe + FIFO */
-        wake_init();
-        int fifo_fd = wake_fifo_open(db_path);
-
-        /* SIGCHLD self-pipe */
-        if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
-        fcntl(g_chld_pipe[0], F_SETFD, FD_CLOEXEC);
-        fcntl(g_chld_pipe[1], F_SETFD, FD_CLOEXEC);
-        set_nonblock(g_chld_pipe[0]); set_nonblock(g_chld_pipe[1]);
-        { struct sigaction sa = {0}; sa.sa_handler = sigchld_handler;
-          sigemptyset(&sa.sa_mask); sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-          sigaction(SIGCHLD, &sa, NULL); }
-
-        /* Launch channel processes */
-        channel_launch_all(g_db);
-
-        /* poll() setup — sized for fixed fds + all children with result pipes */
-        int max_pfds = 5 + CHILD_MAX;  /* chld, wake, fifo, worker, result pipes */
-        struct pollfd *pfds = malloc(max_pfds * sizeof(struct pollfd));
-        if (!pfds) { perror("malloc"); return 1; }
-
-        /* Daemon event loop */
-        while (!shutdown_requested()) {
-            /* Rebuild pollfd set each iteration to include active result pipes */
-            int nfds = 0;
-            pfds[nfds].fd = g_chld_pipe[0]; pfds[nfds].events = POLLIN; nfds++;
-            pfds[nfds].fd = wake_fd(); pfds[nfds].events = POLLIN; nfds++;
-            int fifo_idx = -1;
-            if (fifo_fd >= 0) { fifo_idx = nfds; pfds[nfds].fd = fifo_fd; pfds[nfds].events = POLLIN; nfds++; }
-            int d_worker_idx = nfds;
-            pfds[nfds].fd = daemon_worker_fd; pfds[nfds].events = POLLIN; nfds++;
-
-            int result_pipe_base = nfds;
-            nfds = add_result_pipe_fds(pfds, nfds, max_pfds);
-
-            int rc = poll(pfds, (nfds_t)nfds, 1000);
-            if (rc < 0) { if (errno == EINTR) continue; break; }
-
-            drain_ready_result_pipes(pfds, result_pipe_base, nfds);
-
-            if (pfds[0].revents & POLLIN)
-                event_step_chld();
-            if (pfds[1].revents & POLLIN) {
-                WakeMsg msg;
-                while (read(wake_fd(), &msg, sizeof(msg)) == (ssize_t)sizeof(msg)) {
-                    if (child_has_session(msg.session_id)) continue;
-                    run_advance(msg.session_id);
-                }
+        if (pfds[0].revents & POLLIN)
+            event_step_chld();
+        if (pfds[1].revents & POLLIN) {
+            WakeMsg msg;
+            while (read(wake_fd(), &msg, sizeof(msg)) == (ssize_t)sizeof(msg)) {
+                if (child_has_session(msg.session_id)) continue;
+                run_advance(msg.session_id);
             }
-            if (fifo_idx >= 0 && (pfds[fifo_idx].revents & POLLIN)) {
-                char drain[64];
-                while (read(fifo_fd, drain, sizeof(drain)) > 0) {}
-                channel_consume_events(g_db);
-            }
-            if (pfds[d_worker_idx].revents & POLLIN)
-                event_step_worker(daemon_worker_fd);
-            if (rc == 0 && g_child_count > 0) reap_children();
-            channel_tick(g_db);
-            child_sweep_deadlines();
-            approval_sweep_expired();
         }
-
-        free(pfds);
-
-        /* Shutdown */
-        llm_worker_stop();
-        channel_shutdown_all();
-        cron_stop(); heartbeat_stop(); web_stop();
-        /* Disarm SIGCHLD before closing the self-pipe: a child reaped after the
-         * close would otherwise have the handler write into a reused fd. */
-        signal(SIGCHLD, SIG_DFL);
-        close(g_chld_pipe[0]); close(g_chld_pipe[1]);
-        wake_close(); wake_fifo_close(fifo_fd, db_path);
-        config_free(g_cfg); db_close(g_db); free(db_path);
-        return 0;
+        if (fifo_idx >= 0 && (pfds[fifo_idx].revents & POLLIN)) {
+            char drain[64];
+            while (read(fifo_fd, drain, sizeof(drain)) > 0) {}
+            channel_consume_events(g_db);
+        }
+        if (pfds[d_worker_idx].revents & POLLIN)
+            event_step_worker(daemon_worker_fd);
+        if (rc == 0 && g_child_count > 0) reap_children();
+        channel_tick(g_db);
+        child_sweep_deadlines();
+        approval_sweep_expired();
     }
 
+    free(pfds);
+
+    /* Shutdown */
+    llm_worker_stop();
+    channel_shutdown_all();
+    cron_stop(); heartbeat_stop(); web_stop();
+    /* Disarm SIGCHLD before closing the self-pipe: a child reaped after the
+     * close would otherwise have the handler write into a reused fd. */
+    signal(SIGCHLD, SIG_DFL);
+    close(g_chld_pipe[0]); close(g_chld_pipe[1]);
+    wake_close(); wake_fifo_close(fifo_fd, db_path);
+    config_free(g_cfg); db_close(g_db); free(db_path);
+    return 0;
+}
+
+static int run_cli(char *db_path, const char *prompt,
+                   int64_t session_id, int new_session, int host_mode) {
     /* ── CLI mode ────────────────────────────────────────────────── */
     g_mode = 0;
 
@@ -2027,4 +1944,91 @@ done:
     free(cli_pfds);
     free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path);
     return rc;
+}
+
+int main(int argc, char *argv[]) {
+    /* --qjs_eval: early intercept before any config/logging setup */
+    if (argc >= 2 && strcmp(argv[1], "--qjs_eval") == 0) return qjs_eval_main(argc, argv);
+
+    cclaw_log_init();
+    int daemon_mode = 0, new_session = 0, host_mode = 0;
+    const char *channel_mode = NULL;
+    LogLevel log_level_override = LOG_LEVEL_INFO;
+    int log_level_set = 0;
+    int64_t session_id = -1;
+    const char *prompt = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0) { print_usage(); return 0; }
+        else if (strcmp(argv[i], "--daemon") == 0) daemon_mode = 1;
+        else if (strcmp(argv[i], "--channel") == 0) { if (++i >= argc) { fprintf(stderr, "--channel requires name\n"); return 1; } channel_mode = argv[i]; }
+        else if (strncmp(argv[i], "--log-level=", 12) == 0) { log_level_override = log_level_parse(argv[i]+12); log_level_set = 1; }
+        else if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-v") == 0) { log_level_override = LOG_LEVEL_DEBUG; log_level_set = 1; }
+        else if (strcmp(argv[i], "--trace") == 0 || strcmp(argv[i], "-vv") == 0) { log_level_override = LOG_LEVEL_TRACE; log_level_set = 1; }
+        else if (strcmp(argv[i], "--new") == 0) new_session = 1;
+        else if (strcmp(argv[i], "-y") == 0) host_mode = 1;
+        else if (strcmp(argv[i], "--no-stream") == 0) setenv("CCLAW_STREAM", "0", 1);
+        else if (strncmp(argv[i], "--llm-threads=", 14) == 0) g_llm_threads = atoi(argv[i]+14);
+        else if (strcmp(argv[i], "-p") == 0) { if (++i >= argc) { fprintf(stderr, "-p requires arg\n"); return 1; } prompt = argv[i]; }
+        else if (strcmp(argv[i], "-s") == 0) { if (++i >= argc) { fprintf(stderr, "-s requires arg\n"); return 1; } session_id = atoll(argv[i]); }
+        else if (strncmp(argv[i], "--session-id=", 13) == 0) session_id = atoll(argv[i]+13);
+        else { fprintf(stderr, "unknown option: %s\n", argv[i]); return 1; }
+    }
+
+    {   const char *v = getenv("CCLAW_LLM_THREADS");
+        if (v && atoi(v) > 0) g_llm_threads = atoi(v);
+    }
+
+    shutdown_init();
+
+    /* ── Open DB ─────────────────────────────────────────────────── */
+    char *db_path = resolve_db_path();
+    ensure_parent_dir(db_path);
+    g_db = db_open(db_path);
+    if (!g_db) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
+    if (db_ensure_schema(g_db) != 0) { db_close(g_db); free(db_path); return 1; }
+
+    { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
+
+    setenv("CCLAW_DB", db_path, 1);
+
+    /* First-run initialization (no-op if already seeded) */
+    db_seed_defaults(g_db);
+    extract_builtin_extensions(g_db, db_path);
+
+    g_cfg = config_load(g_db);
+    if (!g_cfg) { fprintf(stderr, "config load failed\n"); db_close(g_db); return 1; }
+    if (g_cfg->env_file) setenv("CCLAW_ENV_FILE", g_cfg->env_file, 1);
+    if (log_level_set) {
+        g_cfg->log_level = log_level_override;
+        const char *lvl_str = log_level_override == LOG_LEVEL_TRACE ? "trace" :
+                              log_level_override == LOG_LEVEL_DEBUG ? "debug" :
+                              log_level_override == LOG_LEVEL_ERROR ? "error" : "info";
+        setenv("CCLAW_LOG_LEVEL", lvl_str, 1);
+    }
+    cclaw_log_set_level(g_cfg->log_level);
+
+    /* Enable SQLite query profiling at trace level */
+    if (g_cfg->log_level >= LOG_LEVEL_DEBUG)
+        db_enable_trace(g_db);
+
+    /* ── Channel mode ─────────────────────────────────────────────── */
+    /* The daemon fork+execs `cclaw --channel <name>` (do_fork) for a clean
+     * process image; we run the channel loop directly here — no separate
+     * channel_runner binary, so ps shows `cclaw --channel <name>`. The runner
+     * opens its own DB ctx, so drop ours first. */
+    if (channel_mode) {
+        config_free(g_cfg); db_close(g_db);
+        int rc = channel_runner_main(db_path, channel_mode);
+        free(db_path);
+        return rc;
+    }
+
+    /* ── Startup crash recovery (covers both CLI and daemon — a prior crashed
+     * -p run can leave a stale session that hangs the edge-triggered loop) ── */
+    if (db_recover_stale_sessions(g_db) != 0)
+        fprintf(stderr, "warning: startup recovery failed\n");
+
+    if (daemon_mode) return run_daemon(db_path);
+    return run_cli(db_path, prompt, session_id, new_session, host_mode);
 }

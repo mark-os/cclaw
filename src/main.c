@@ -444,7 +444,16 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
     if (pid == 0) {
         /* Child: only the output pipe write end is inherited (no O_CLOEXEC).
          * Parent infrastructure fds (DB, sigchld pipe, notify pipe) are
-         * O_CLOEXEC and will close on exec within the shell sandbox. */
+         * O_CLOEXEC and will close on exec within the shell sandbox.
+         *
+         * No per-subsystem teardown is needed here, and no separate "thin"
+         * child binary: COW fork shares the parent's pages read-only, and
+         * demand paging keeps any subsystem this child never calls (civetweb,
+         * QuickJS, most of SQLite) out of its resident set. The forked C-tool
+         * broker only runs the tool handler and writes a pipe — it touches none
+         * of that machinery, so those pages stay non-resident in the child. The
+         * inherited SQLite handle is left open on purpose: SQLite is not
+         * fork-safe, so closing it would risk the parent's shared connection. */
         close(pipefd[0]);
         /* This broker holds no DB handle and never needs the master key — wipe
          * the inherited copy so the relay process carries no key material. */
@@ -1264,6 +1273,11 @@ static const char *qjs_syntax_hint(const char *code) {
     return "";
 }
 
+/* Entry for the re-exec'd `cclaw --qjs_eval` JS child. main() jumps here before
+ * any DB/config/log init (and before the daemon's civetweb ever starts), so the
+ * JS sandbox process never initializes SQLite or civetweb — demand paging keeps
+ * their text out of its RSS. No separate JS-only binary is required: the single
+ * image is reused, and the unused subsystems simply stay non-resident. */
 static int qjs_eval_main(int argc, char **argv) {
     /* (a) Parse argv after "--qjs_eval" */
     int inline_mode = 0;

@@ -59,6 +59,7 @@ These look odd at a glance but are deliberate. Understand them before touching t
 - **A SQL query emits the LLM request JSON.** `src/llm_payload.c` returns the request body zero-copy from an open statement. This is intentional and fast — do not replace it with a C JSON builder.
 - **Forked tool children, threaded LLM calls.** LLM requests run on a worker thread pool in the long-lived process; only untrusted/blocking tools fork. (This replaced an earlier fork-per-turn design — don't reintroduce it.)
 - **No config files in agent logic, no migrations, no compat shims.** Config comes from env at startup; there are no users, so delete old code instead of versioning it.
+- **One binary for every process mode — no per-subsystem "thin" child.** The forked C-tool broker and the re-exec'd `cclaw --qjs_eval` JS child reuse the full image. COW fork + demand paging already keep the subsystems a child never calls (civetweb, QuickJS, most of SQLite) out of its resident set; `qjs_eval_main` is intercepted before any DB/config init so the JS child never even starts them. Splitting out a minimal child binary would buy nothing and is not worth the build/maintenance cost.
 
 ## Target Platforms
 

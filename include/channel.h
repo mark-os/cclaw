@@ -29,9 +29,6 @@ int channel_reap(pid_t pid, sqlite3 *db);
 /* Tick — restart channels whose backoff expired, reset healthy ones */
 void channel_tick(sqlite3 *db);
 
-/* Registration */
-int channel_register(sqlite3 *db, const char *name, const char *binary_path);
-
 /* Channel events — process pending channel_events rows */
 void channel_consume_events(sqlite3 *db);
 

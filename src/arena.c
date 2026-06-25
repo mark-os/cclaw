@@ -31,15 +31,6 @@ char *arena_strdup(Arena *a, const char *s) {
     return dst;
 }
 
-char *arena_strndup(Arena *a, const char *s, size_t n) {
-    if (!s) return NULL;
-    size_t len = 0;
-    while (len < n && s[len]) len++;
-    char *dst = arena_alloc(a, len + 1);
-    if (dst) { memcpy(dst, s, len); dst[len] = '\0'; }
-    return dst;
-}
-
 void arena_destroy(Arena *a) {
     if (a) {
         free(a->buf);

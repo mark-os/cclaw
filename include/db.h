@@ -5,17 +5,6 @@
 #include "types.h"
 #include <sys/types.h>
 
-/* T88: Spawn queue request */
-typedef struct {
-    int64_t id;
-    int64_t parent_session_id;
-    char *task;
-    int background;
-    int depth;
-    char *tool_call_id;
-    char *child_agent;  /* T282: named agent to spawn (NULL = unnamed, use parent) */
-} SpawnRequest;
-
 /* Open DB at path, set WAL mode + pragmas, create tables.
  * Returns NULL on failure. */
 sqlite3 *db_open(const char *path);
@@ -176,9 +165,6 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
  * Returns number of items consumed (≥0) or -1 on error (transaction rolled back). */
 int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit);
 
-/* T88/T202: Spawn queue — cclaw.db only (V73). peek/mark used by daemon. */
-SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count);
-
 /* T119: agents table — DB-authoritative agent identity */
 typedef struct {
     int64_t id;
@@ -317,9 +303,6 @@ char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *
 
 /* T268: Sum cost_nano for all entries in a session. Returns total nanodollars. */
 int64_t session_cost(sqlite3 *db, int64_t session_id);
-
-/* Session route tracking */
-char *session_get_last_route(sqlite3 *db, int64_t session_id);
 
 /* Rate limiting — returns 1 if under limit (ok to proceed), 0 if exceeded */
 int rate_limit_check(sqlite3 *db, const char *provider_name);

@@ -10,7 +10,7 @@
 typedef struct {
     sqlite3 *db;          /* cclaw.db handle */
     char *channel_name;   /* this channel's name */
-    char *db_path;        /* path to cclaw.db (for daemon_wake FIFO) */
+    char *db_path;        /* path to cclaw.db (for the daemon wake FIFO) */
 } ChannelCtx;
 
 /* Outbox row returned by channel_next_outbox */
@@ -24,7 +24,7 @@ typedef struct {
 ChannelCtx *channel_ctx_open(const char *db_path, const char *channel_name);
 void channel_ctx_free(ChannelCtx *ctx);
 
-/* V100: Insert channel_events row + daemon_wake(). */
+/* V100: Insert channel_events row + wake the daemon via the FIFO. */
 int channel_emit(ChannelCtx *ctx, const char *event_type, const char *payload,
                  const char *external_id);
 
@@ -49,9 +49,6 @@ int channel_ack_outbox(ChannelCtx *ctx, int64_t id);
 
 /* V101: Mark outbox row as failed. */
 int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error);
-
-/* V105: Wake daemon via named FIFO (1 byte write). */
-int daemon_wake(const char *db_path);
 
 /* Per-channel request UDS path (daemon proxies inbound HTTP here).
  * Format: <db_path_without_.db>.<channel_name>.sock — caller frees. */

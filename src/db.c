@@ -1168,56 +1168,6 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
     return rc;
 }
 
-/* T88/T202: Spawn queue — cclaw.db only (V73). Daemon inserts inline in reap_children. */
-
-SpawnRequest *spawn_queue_peek_pending(sqlite3 *db, int *count) {
-    *count = 0;
-    const char *sql =
-        "SELECT id, parent_session_id, task, background, depth, tool_call_id, child_agent"
-        " FROM spawn_queue WHERE status='pending' ORDER BY id ASC;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-
-    int cap = 8;
-    SpawnRequest *list = malloc((size_t)cap * sizeof(SpawnRequest));
-    if (!list) { sqlite3_finalize(stmt); return NULL; }
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (*count >= cap) {
-            cap *= 2;
-            SpawnRequest *tmp = realloc(list, (size_t)cap * sizeof(SpawnRequest));
-            if (!tmp) {
-                for (int i = 0; i < *count; i++) {
-                    free(list[i].task);
-                    free(list[i].tool_call_id);
-                    free(list[i].child_agent);
-                }
-                free(list);
-                *count = 0;
-                sqlite3_finalize(stmt);
-                return NULL;
-            }
-            list = tmp;
-        }
-        SpawnRequest *r = &list[*count];
-        r->id = sqlite3_column_int64(stmt, 0);
-        r->parent_session_id = sqlite3_column_int64(stmt, 1);
-        const char *t = (const char *)sqlite3_column_text(stmt, 2);
-        r->task = t ? strdup(t) : NULL;
-        r->background = sqlite3_column_int(stmt, 3);
-        r->depth = sqlite3_column_int(stmt, 4);
-        const char *tc = (const char *)sqlite3_column_text(stmt, 5);
-        r->tool_call_id = tc ? strdup(tc) : NULL;
-        const char *ca = (const char *)sqlite3_column_text(stmt, 6);
-        r->child_agent = ca ? strdup(ca) : NULL;
-        (*count)++;
-    }
-    sqlite3_finalize(stmt);
-    if (*count == 0) { free(list); return NULL; }
-    return list;
-}
-
-
 /* T119: agents table operations */
 
 AgentRow *db_agent_get(sqlite3 *db, const char *name) {
@@ -1777,10 +1727,6 @@ int memory_entries_delete(sqlite3 *db, const char *agent_name,
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
     }
     return deleted;
-}
-
-char *session_get_last_route(sqlite3 *db, int64_t session_id) {
-    return db_scalar_text(db, "SELECT last_route FROM sessions WHERE id=?;", session_id);
 }
 
 int rate_limit_check(sqlite3 *db, const char *provider_name) {

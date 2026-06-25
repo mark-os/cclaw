@@ -97,12 +97,6 @@ int agent_config_set_tool_mode(sqlite3 *db, const char *agent,
 /* Returns malloc'd JSON array string (e.g. '["a","b"]'). Caller frees. */
 char *grants_json(sqlite3 *db, const char *agent, const char *kind);
 
-/* T77: Load system prompt from agents/<name>/system.md, render template vars
- * {session_id}, {date}, {agent_name}. Returns heap-allocated string.
- * Returns NULL if file missing (caller should fall back to global system_prompt). */
-char *agent_load_system_prompt(const char *agents_dir, const char *name,
-                               int64_t session_id);
-
 /* T80: Load all skills from agents/<name>/skills/ (.md files), concatenate content.
  * Returns heap-allocated string (newline-separated skill contents).
  * Returns NULL if no skills dir or no .md files found. */

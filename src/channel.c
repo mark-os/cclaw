@@ -158,18 +158,6 @@ void channel_tick(sqlite3 *db) {
 }
 
 
-int channel_register(sqlite3 *db, const char *name, const char *extension_name) {
-    const char *sql =
-        "INSERT OR REPLACE INTO channels(name, extension_name, status) VALUES(?,?,'active');";
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 2, extension_name, -1, SQLITE_STATIC);
-    int rc = (sqlite3_step(s) == SQLITE_DONE) ? 0 : -1;
-    sqlite3_finalize(s);
-    return rc;
-}
-
 void channel_consume_events(sqlite3 *db) {
     const char *sql = "SELECT id, channel_name, event_type, payload"
                       " FROM channel_events ORDER BY id ASC;";

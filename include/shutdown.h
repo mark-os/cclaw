@@ -10,7 +10,4 @@ int shutdown_requested(void);
 /* Programmatically request shutdown (e.g., from tests). */
 void shutdown_request(void);
 
-/* Reset shutdown flag (for tests). */
-void shutdown_reset(void);
-
 #endif

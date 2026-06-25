@@ -36,6 +36,7 @@
 #include "advance.h"
 #include "channel.h"
 #include "channel_api.h"
+#include "channel_runner.h"
 #include "secret.h"
 #include "secret_scan.h"
 #include "tool_policy.h"
@@ -1604,28 +1605,15 @@ int main(int argc, char *argv[]) {
         db_enable_trace(g_db);
 
     /* ── Channel mode ─────────────────────────────────────────────── */
+    /* The daemon fork+execs `cclaw --channel <name>` (do_fork) for a clean
+     * process image; we run the channel loop directly here — no separate
+     * channel_runner binary, so ps shows `cclaw --channel <name>`. The runner
+     * opens its own DB ctx, so drop ours first. */
     if (channel_mode) {
         config_free(g_cfg); db_close(g_db);
-        /* channel_runner lives next to the cclaw binary (dev: build/) or in
-         * ../lib/cclaw/ relative to it (prod: /usr/local/lib/cclaw/). Resolve
-         * from /proc/self/exe so the daemon's cwd doesn't matter. */
-        char self[PATH_MAX];
-        ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
-        if (n > 0) {
-            self[n] = '\0';
-            char *slash = strrchr(self, '/');
-            if (slash) {
-                *slash = '\0';
-                char runner[PATH_MAX];
-                snprintf(runner, sizeof(runner), "%s/channel_runner", self);
-                execl(runner, "channel_runner", db_path, channel_mode, (char *)NULL);
-                snprintf(runner, sizeof(runner), "%s/../lib/cclaw/channel_runner", self);
-                execl(runner, "channel_runner", db_path, channel_mode, (char *)NULL);
-            }
-        }
-        perror("execl channel_runner");
+        int rc = channel_runner_main(db_path, channel_mode);
         free(db_path);
-        return 1;
+        return rc;
     }
 
     /* ── Startup crash recovery (covers both CLI and daemon — a prior crashed

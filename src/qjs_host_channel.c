@@ -1,4 +1,4 @@
-/* Host C functions for the channel_runner binary.
+/* Host C functions for the channel runner (cclaw --channel mode).
  * Registered as cclaw.* and admin.* globals. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE

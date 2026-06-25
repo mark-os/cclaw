@@ -13,7 +13,7 @@
 typedef enum {
     QJS_PROFILE_HOOKS,    /* in-process hooks: Base + JSON + RegExp only */
     QJS_PROFILE_EVAL,     /* fork+exec js_eval: full (includes Proxy, Promise) */
-    QJS_PROFILE_CHANNEL,  /* fork+exec channel_runner: full + Promise */
+    QJS_PROFILE_CHANNEL,  /* cclaw --channel runner: full + Promise */
 } QjsProfile;
 
 /* Wrapper around JSRuntime with interrupt-based instruction limiting */

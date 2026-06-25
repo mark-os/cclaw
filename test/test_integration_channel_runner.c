@@ -1,4 +1,4 @@
-/* Integration test: channel_runner + mock server + pipe wake + request UDS.
+/* Integration test: `cclaw --channel` runner + mock server + pipe wake + request UDS.
  * Verifies: JS loads, long-poll receives message, shape-based outbox
  * delivery auto-acks, proxied requests over UDS reach onRequest. */
 #define _POSIX_C_SOURCE 200809L
@@ -155,9 +155,12 @@ int main(void) {
     mkdir("/tmp/test_integ_cr_ext", 0755);
     write_test_js();
 
+    /* Channels now run as `cclaw --channel <name>` (the daemon fork+execs this;
+     * no separate channel_runner binary). Point it at the test DB via env. */
     pid_t pid = fork();
     if (pid == 0) {
-        execl("./build/channel_runner", "channel_runner", DB_PATH, "test", (char *)NULL);
+        setenv("CCLAW_DB_PATH", DB_PATH, 1);
+        execl("./build/cclaw", "cclaw", "--channel", "test", (char *)NULL);
         _exit(127);
     }
     if (pid < 0) { mock_server_stop(); FAIL("fork"); }

@@ -31,8 +31,9 @@ static pid_t do_fork(const char *name) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        /* Re-exec self; the --channel branch resolves channel_runner
-         * relative to the binary, never the cwd. */
+        /* Re-exec self for a clean process image; the --channel branch runs the
+         * channel loop in-process (channel_runner_main), so ps shows
+         * `cclaw --channel <name>`. */
         execl("/proc/self/exe", "cclaw", "--channel", name, (char *)NULL);
         _exit(127);
     }

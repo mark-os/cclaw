@@ -10,7 +10,7 @@ of each:
 |-----------|---------|-----------|
 | Tools | forked child of the agent process (one fork+exec per call) | per-call, isolated |
 | Hooks | agent process, fresh QuickJS context per dispatch | per turn-event |
-| Channel | separate `channel_runner` process (daemon-managed) | long-lived, restarted on crash |
+| Channel | separate `cclaw --channel` process (daemon-managed) | long-lived, restarted on crash |
 | Scripts | forked child, on a cron schedule | per-run, isolated |
 | Skills (future) | — | — |
 
@@ -196,8 +196,9 @@ must not kill the turn.
 
 ## Channel Component
 
-A channel runs inside `channel_runner` — a **separate process per channel**, forked
-by the daemon (crash isolation, restart with backoff). The runner owns one
+A channel runs as `cclaw --channel <name>` — a **separate process per channel**,
+fork+exec'd by the daemon (clean process image, crash isolation, restart with
+backoff); there is no separate runner binary. The runner owns one
 single-threaded `poll()` event loop; channel JS is purely reactive and **never
 blocks on the network**. All outbound HTTP is described as request shapes the
 runner's C loop executes on a `curl_multi` handle; inbound HTTP arrives pre-parsed.
@@ -379,7 +380,7 @@ heap shared and reused — one runtime, many short-lived contexts.
 This spec describes the **target** model. As of this writing the codebase still
 loads extensions via the `cclaw.registerTool`/`registerHook` scrape
 (`src/extension.c`, `CCLAW_API_INIT`) and `tools_sync_to_db` writes a display-only
-mirror. The **channel component contract above is implemented** (`channel_runner`,
+mirror. The **channel component contract above is implemented** (`cclaw --channel`,
 the `channels`/`channel_*` tables, the `cclaw.*` channel API). Migrating tools/hooks
 to the declarative model is the work this spec defines: the manifest loader, the
 shared store + promote copy, the `tools`/`hooks`/`extensions` schema deltas, the

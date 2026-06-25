@@ -4,7 +4,7 @@ LDFLAGS := -lcurl -lm -lpthread -ldl
 
 BUILDDIR := build
 TEMPLATES := $(wildcard templates/*)
-SRC      := $(filter-out src/preload_net.c src/channel_runner.c src/qjs_host_channel.c src/net_shim.c,$(wildcard src/*.c))
+SRC      := $(filter-out src/preload_net.c src/net_shim.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
 DEP      := $(OBJ:.o=.d)
 
@@ -19,11 +19,6 @@ VENDOR_OBJ := $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
               $(BUILDDIR)/qjs_libregexp.o \
               $(BUILDDIR)/monocypher.o
 
-# QuickJS objects shared by cclaw and channel_runner
-QJS_CORE_OBJ := $(BUILDDIR)/quickjs.o $(BUILDDIR)/qjs_cutils.o \
-                $(BUILDDIR)/qjs_dtoa.o $(BUILDDIR)/qjs_libunicode.o \
-                $(BUILDDIR)/qjs_libregexp.o
-
 INTEG_SRC := $(wildcard test/test_integration_*.c)
 E2E_SRC   := $(wildcard test/test_e2e_*.c)
 TEST_SRC  := $(filter-out $(INTEG_SRC) $(E2E_SRC),$(wildcard test/test_*.c))
@@ -33,7 +28,7 @@ E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
 
 .PHONY: all clean test test-integration test-e2e test-all check-gen install debug
 
-all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/net_shim $(BUILDDIR)/channel_runner
+all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/net_shim
 
 # Development build: debug symbols, no optimization, sanitizers (clang preferred for better traces)
 debug: clean
@@ -101,22 +96,12 @@ $(BUILDDIR)/net_shim_blob.h: $(BUILDDIR)/net_shim
 	xxd -i < $< >> $@
 	printf '};\nstatic const unsigned int net_shim_blob_len = sizeof(net_shim_blob);\n' >> $@
 
-# Channel runner: universal JS channel binary
-CR_LIB_OBJ := $(BUILDDIR)/admin_api.o $(BUILDDIR)/agent_config.o $(BUILDDIR)/channel_api.o \
-              $(BUILDDIR)/db.o $(BUILDDIR)/wake.o $(BUILDDIR)/secret.o $(BUILDDIR)/secret_scan.o $(BUILDDIR)/config.o \
-              $(BUILDDIR)/qjs_helpers.o $(BUILDDIR)/qjs_host_channel.o \
-              $(BUILDDIR)/sqlite3.o $(BUILDDIR)/monocypher.o
-
-$(BUILDDIR)/channel_runner: $(BUILDDIR)/channel_runner.o $(QJS_CORE_OBJ) $(CR_LIB_OBJ) | $(BUILDDIR)/
-	$(CC) $(CFLAGS) -o $@ $^ -lcurl -lm -lpthread -ldl
-
-# Everything a production box needs: the daemon binary, channel_runner
-# (the --channel branch resolves it relative to the cclaw binary:
-# sibling dir, then ../lib/cclaw/), env file, and the systemd unit.
-install: $(BUILDDIR)/cclaw $(BUILDDIR)/channel_runner
-	install -d /usr/local/bin /usr/local/lib/cclaw /etc/cclaw
+# Everything a production box needs: the cclaw binary (channels run as
+# `cclaw --channel <name>`, fork+exec'd by the daemon — no separate runner),
+# env file, and the systemd unit.
+install: $(BUILDDIR)/cclaw
+	install -d /usr/local/bin /etc/cclaw
 	install -m 755 $(BUILDDIR)/cclaw /usr/local/bin/cclaw
-	install -m 755 $(BUILDDIR)/channel_runner /usr/local/lib/cclaw/channel_runner
 	test -f /etc/cclaw/env || install -m 600 cclaw.env.example /etc/cclaw/env
 	install -m 644 cclaw.service /etc/systemd/system/cclaw.service
 	systemctl daemon-reload
@@ -140,7 +125,7 @@ test: $(TEST_BIN)
 	if [ $$fail -eq 0 ]; then echo "All unit tests passed ($(words $(TEST_BIN)) suites)"; fi; \
 	exit $$fail
 
-test-integration: $(INTEG_BIN)
+test-integration: $(INTEG_BIN) $(BUILDDIR)/cclaw
 	@fail=0; for t in $(INTEG_BIN); do \
 		out="/tmp/cclaw_$$(basename $$t).txt"; \
 		timeout 45 ./$$t > $$out 2>&1; rc=$$?; \

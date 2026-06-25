@@ -21,6 +21,7 @@
 #define _GNU_SOURCE
 #endif
 #include "channel_api.h"
+#include "channel_runner.h"
 #include "admin_api.h"
 #include "db.h"
 #include "log.h"
@@ -435,16 +436,8 @@ static char *read_file(const char *path) {
     return buf;
 }
 
-int main(int argc, char **argv) {
-    cclaw_log_init();
-    cclaw_log_set_level(log_level_parse(getenv("CCLAW_LOG_LEVEL")));
-    if (argc < 3) {
-        fprintf(stderr, "usage: channel_runner <db_path> <channel_name>\n");
-        return 1;
-    }
-    const char *db_path = argv[1];
-    const char *channel_name = argv[2];
-
+int channel_runner_main(const char *db_path, const char *channel_name) {
+    /* Logging is already initialized by main() before the --channel branch. */
     signal(SIGTERM, handle_signal);
     signal(SIGINT, handle_signal);
     signal(SIGPIPE, SIG_IGN);

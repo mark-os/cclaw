@@ -15,7 +15,7 @@ CClaw is designed around Unix philosophy:
 - Communication via DB state — `advance_session()` reads session state, decides next action. No IPC beyond worker notification pipe.
 - Config via environment — process reads `CCLAW_*` env vars at startup. No config files in agent processes.
 - Logging via syslog (daemon) or stderr tee (CLI). No log collector.
-- Trust the binary, sandbox the children — agent process is trusted C code; shell/mjs children are untrusted (namespace-sandboxed).
+- Trust the binary, sandbox the children — agent process is trusted C code; shell/qjs children are untrusted (namespace-sandboxed).
 
 **Inspiration**
 
@@ -33,7 +33,7 @@ CClaw shamelessly borrows ideas from these projects:
 **Principles:**
 - Simple over clever. Blocking I/O. Threads over callbacks.
 - Single-file SQLite backbone — cclaw.db (all state: sessions, entries, config, memory, channels).
-- Self-augmenting via MicroQuickJS plugin system — agents load JS extensions from workspace at startup.
+- Self-augmenting via QuickJS plugin system — agents load JS extensions from workspace at startup.
 - One tool at a time during development. Prove each layer works before adding the next.
 - No backward compatibility. No migrations. No users yet — move fast, break things.
 
@@ -77,7 +77,7 @@ These look odd at a glance but are deliberate. Understand them before touching t
 
 ## Self-Augmentation (core differentiator)
 
-This is what CClaw *is for*, not an add-on. Agents extend themselves at runtime via the MicroQuickJS engine, adding **new tools, channels, and scripts**.
+This is what CClaw *is for*, not an add-on. Agents extend themselves at runtime via the QuickJS engine, adding **new tools, channels, and scripts**.
 
 **One model: JS lives in files, the DB holds config + a path.** Every JS artifact — tools, channels, scripts — is a file in the agent's workspace (`agents/<name>/workspace/`), referenced by path. The DB stores the *definition* (name, description, JSON schema, trust flags) and a `path` to the implementation; it never stores code. The Telegram channel is the canonical example: `channels.extension_name` joins `extensions.name` to resolve a `js_path`, and the runner loads that file (`src/channel_runner.c`).
 
@@ -130,7 +130,7 @@ The `{{SECRET:name}}` syntax works in shell_exec, web_fetch, and js_eval argumen
 ```
 src/           C source files
 include/       C headers (public API for each module)
-vendor/        Vendored libs (sqlite3, civetweb, mquickjs, jsmn)
+vendor/        Vendored libs (sqlite3, civetweb, quickjs, jsmn)
 templates/     Schema SQL, system prompts, embedded text (build-time → templates.h)
 test/          Test files (test_*.c)
 specs/         Detailed reference docs (schema, daemon, memory, providers, security, shell-networking)
@@ -182,7 +182,7 @@ make clean        # remove build/
 ```
 
 - **`make debug` uses clang, not gcc.** GCC-only `#pragma GCC diagnostic` directives must be guarded with `#if defined(__GNUC__) && !defined(__clang__)` — under `-Werror` clang turns an unknown warning group (e.g. `-Wformat-truncation`) into a hard error.
-- **`make test` does not build `build/cclaw`.** The main binary is not a dependency of the `test` target, but `test_tool_js` forks it via `CCLAW_MJS_EXE` (the `--mjs_eval` subprocess). After `make clean`, run **`make && make test`** — a bare `make test` makes `test_tool_js` fail with empty results (missing binary), which looks like a real regression but isn't.
+- **`make test` does not build `build/cclaw`.** The main binary is not a dependency of the `test` target, but `test_tool_js` forks it via `CCLAW_QJS_EXE` (the `--qjs_eval` subprocess). After `make clean`, run **`make && make test`** — a bare `make test` makes `test_tool_js` fail with empty results (missing binary), which looks like a real regression but isn't.
 - **Don't mix sanitizer and release objects in `build/`.** A `make debug` followed by a plain `make test` link-fails on undefined `__asan_*`/`__ubsan_*` symbols (stale instrumented `.o` in `libcclaw.a`). `make clean` between the two.
 
 ## Running
@@ -213,7 +213,7 @@ Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 | SQLite 3.53 | Persistence, FTS5, JSON functions | Yes |
 | libcurl | HTTP client (LLM API, Telegram) | System (dynamic link) |
 | civetweb | Embedded HTTP server (webhooks, dashboard) | Yes |
-| MicroQuickJS | JS plugin engine (runtime tool creation, extensions) | Yes |
+| QuickJS | JS plugin engine (runtime tool creation, extensions) | Yes |
 
 ## LLM Provider
 

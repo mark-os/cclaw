@@ -50,7 +50,7 @@ CClaw vendors everything except libcurl:
 |----------|---------|
 | SQLite 3.53 | All persistence |
 | civetweb | Embedded HTTP server |
-| MicroQuickJS | JS plugin engine |
+| QuickJS | JS plugin engine |
 | Monocypher | Encryption |
 
 **Runtime dependency:** `libcurl.so` (system-provided, dynamically linked). Available on every Linux distribution, every architecture.
@@ -100,7 +100,7 @@ Daemon mode adds orchestration tools (`create_agent`, `launch_agent`, `configure
 
 ## Extensible
 
-The MicroQuickJS plugin system lets agents load JavaScript extensions at runtime:
+The QuickJS plugin system lets agents load JavaScript extensions at runtime:
 
 - **Channel plugins** — JS files that implement polling/sending for messaging platforms (Telegram ships built-in, others addable)
 - **Runtime tools** — agents can define new tools via `js_define_tool`, expanding their own capabilities mid-session
@@ -189,7 +189,7 @@ TTFB breakdown (OpenRouter, DeepSeek V4 Flash):
 |---------|---------|
 | [SQLite 3.53.1](https://sqlite.org) | Public Domain |
 | [civetweb 1.16](https://github.com/civetweb/civetweb) | MIT |
-| [MicroQuickJS](https://github.com/nicholasgasior/mquickjs) | MIT |
+| [QuickJS](https://bellard.org/quickjs/) | MIT |
 | [Monocypher 4.0.2](https://monocypher.org) | BSD-2-Clause / CC0-1.0 |
 
 ### Inspiration

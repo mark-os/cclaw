@@ -1,7 +1,7 @@
 # SPEC
 
 ## §G GOAL
-minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (CLI, Telegram), single SQLite DB (cclaw.db), MicroQuickJS runtime tools, sub-agents, exit-code IPC
+minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (CLI, Telegram), single SQLite DB (cclaw.db), QuickJS runtime tools, sub-agents, exit-code IPC
 
 ## §C CONSTRAINTS
 - C11, `-Wall -Wextra -Werror`
@@ -13,7 +13,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - daemon reads agent DB after reap to discover requests; writes agent DB only for inbox delivery
 - syslog logging — parent captures child stderr via pipe; daemon mode→syslog (`LOG_DAEMON` facility, journald if available); CLI mode→tee to terminal; no log collector process, no journal.db
 - config injected to agents via `CCLAW_*` env vars at fork time (⊥ config file reads in agent)
-- system libcurl (dynamic link); vendor jsmn, sqlite3, civetweb, mquickjs
+- system libcurl (dynamic link); vendor jsmn, sqlite3, civetweb, quickjs
 - primary target: EC2 t4g.small ARM64 AL2023
 - single user — no multi-tenant auth
 - OpenAI-compatible chat completions format ∀ providers
@@ -52,7 +52,7 @@ minimal autonomous AI agent in C, inspired by Pi & OpenClaw — multi-channel (C
 - tool: `file_list` — list a directory (sorted, `/` marks dirs); workspace-restricted
 - tool: `file_find` — find files by glob (basename, or path with `**`); skips `.git`/`node_modules`
 - tool: `file_grep` — search file contents by POSIX ERE, returns `path:line:match`; skips binaries/`.git`/`node_modules`
-- tool: `js_eval` — execute JS in sandboxed mquickjs (ES5: `var`, no `const`/`let`/modules; globals `fs.*`, `http_fetch`); agents run workspace scripts, test logic, transform data
+- tool: `js_eval` — execute JS in sandboxed quickjs (ES5: `var`, no `const`/`let`/modules; globals `fs.*`, `http_fetch`); agents run workspace scripts, test logic, transform data
 - tool: `js_define_tool` — register JS fn as callable tool (session-persistent); foundation of plugin system — agents augment themselves by defining new tools at runtime
 - js binding: `http_fetch(url, {method, headers, body, sanitize})` — C-provided, enforces agent `allowed_hosts` + SSRF protection; `sanitize: true` strips HTML + homoglyphs + boundary wraps (same as web_fetch); sole network path from JS runtime
 - tool: `spawn_agent` — agent exits w/ code 2; daemon reads tool_call from agent DB, forks sub-agent
@@ -131,10 +131,10 @@ V44: ∀ Telegram group msg → if agent response contains `[NO_REPLY]` → supp
 V45: ∀ agent response → if `stop_reason == stop` & no tool_calls & response is plan-only (bullet list + "I'll do X" promise, no tool action taken) → re-prompt once: "Do not restate the plan. Act now: take the first concrete tool action. If blocked, state the blocker in one sentence."
 V46: ∀ outbound HTTP (libcurl) → single `http_policy` layer validates before connect; two modes: (1) default-deny: `allowed_hosts[]` non-empty → only listed hosts reachable, (2) default-allow: `allowed_hosts[]` empty → all hosts reachable except `blocked_hosts[]`; `block_private` configurable per-agent (default true — blocks RFC1918/loopback/link-local + cloud metadata 169.254.169.254); `blocked_hosts` loadable from plain text file (one domain/line, compatible w/ abuse.ch/Pi-hole domain-only format); loaded into hash set at startup; all callers share one code path: LLM calls pass trusted policy (provider endpoints only), web_fetch/JS fetch pass agent's policy
 V47: ∀ `shell_exec` child → PATH restricted to `/bin:/usr/bin`; unset `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `HOME`, and all `CCLAW_*` env vars before exec; prevents agent from invoking cclaw binary or leaking credentials via shell
-V48: ∀ `shell_exec` child → `mjs` binary available at fixed path (e.g. `/usr/local/lib/cclaw/mjs`); PATH ! include its directory — agent invokes via absolute path; `mjs` = standalone mquickjs evaluator w/ `fetch()` binding; convenience for shell pipelines (not a security boundary — shell children get full networking via namespace+proxy)
-V49: ∀ `mjs` process (spawned via shell_exec) → inherits shell child's namespace sandbox (V82); network goes through credential proxy like any other shell process; `fetch()` binding calls libcurl in-process; composable with unix pipes (V51)
+V48: [removed — no standalone evaluator binary; `js_eval` forks `cclaw --qjs_eval` directly]
+V49: [removed — see V48]
 V50: [removed — fetch proxy protocol replaced by in-process whitelist]
-V51: ∀ `mjs` invocation via shell → composable w/ unix pipes; stdout/stderr flow through shell pipeline normally; no side-channel fd needed
+V51: [removed — see V48]
 V52: ∀ secret → all secrets stored in cclaw.db `kv` table (encrypted, ChaCha20-Poly1305 AEAD); two tiers: (1) provider/channel secrets (API keys, bot tokens) — daemon-managed; (2) agent-specific secrets (tool credentials, user tokens) — agent requests via exit code 4, daemon encrypts + stores after admin approval; decryption key `.cclaw/.cclaw_key` (32 bytes, mode 0600) held by daemon only; at fork, daemon decrypts needed secrets + injects into child env; agent clears from env immediately after read; shell_exec children ⊥ access (env stripped before exec)
 V53: ∀ Telegram admin command (config, key, whitelist) → restricted to `admin_chat_ids` in kv table; unauthorized chat_id → silent ignore (⊥ error msg, ⊥ inbox_insert)
 V54: ∀ config/permission mutation → requires admin approval; agent proposes via `approval_request` tool (exit code 3); daemon reads proposal, delivers to admin (inline keyboard); admin approve → daemon writes config to cclaw.db agent_config; admin deny → posts denial to agent inbox; config changes take effect on next fork (daemon re-reads agent_config)
@@ -212,12 +212,12 @@ V127: ∀ outer LLM retry loop (`MAX_LLM_RETRIES`) → only `continue` on parse 
 id|status|task|cites
 T1-22|x|Core foundation: Makefile, arena, types, config, DB init, sessions, entries, FTS5, HTTP, LLM req/resp, context manager, agent loop, tool registry, max iterations, CLI REPL + debug + session select|§C,V4,V6,V7,V8,V9,V10,V14
 T23-29|x|Telegram channel: poller, send+typing, offset persistence, chat→session routing, backoff; civetweb status page|V2,V11,V25,§I
-T30-48|x|Tools + runtime: mquickjs, js_eval, js_define_tool, JS replay, heartbeat, cron, spawn_agent, db_query, sub-agent lifecycle, token estimation, graceful shutdown, systemd/sysvinit, error handling, provider fallback, system prompt, shell timeout, web_fetch|V2,V3,V5,V10,V13,V15,V40,V41,V42
+T30-48|x|Tools + runtime: quickjs, js_eval, js_define_tool, JS replay, heartbeat, cron, spawn_agent, db_query, sub-agent lifecycle, token estimation, graceful shutdown, systemd/sysvinit, error handling, provider fallback, system prompt, shell timeout, web_fetch|V2,V3,V5,V10,V13,V15,V40,V41,V42
 T49-72|x|Phase A tests + concurrency: context/workspace/wrapping tests, live integration tests, session state machine (CAS, turn tagging, incomplete interception, janitor, anti-crash, inbox primitives, atomic move, sub-agent completion, verification), CLI/Telegram/cron triggers, web console|V1,V7,V8,V12,V16,V17,V18,V19
 T74-94|x|Multi-agent + daemon: agent discovery, config/prompt/skill loaders, tool whitelist, session↔agent binding, daemon epoll loop, signal pipe, agent process entry, response delivery, last_route, child tracking, spawn queue, daemon tests, context error skipping, LLM retry loop, graceful child shutdown, crash recovery, startup recovery|V20,V21,V22,V23,V24,V25,V26,V27,V28,V29,V30,V31,V32,V34
 T95-104|x|StopReason normalization + shell sandbox + JS network: enum, map_stop_reason, entry storage, context V36 filtering, tests, namespace sandbox (CLONE_NEW*), http_fetch JS binding, allowed_hosts config|V35,V36,V37,V38
 T105-118|x|Performance + streaming + heartbeat + policy: tool truncation, context_plan, RequestStreamer (CURLOPT_READFUNCTION), heartbeat trigger/suppression, [NO_REPLY], planning-only retry, CLI progress, HttpPolicy layer, JS sanitize, write-time truncation|V40,V41,V42,V44,V45,V46
-T119-151|x|Agents table, memory, prompt assembly, cache hints, entry stats, mock test harness + integration tests (agent loop, retry, overflow, Telegram, daemon fork), shell hardening, mjs binary, template embedding, Telegram admin (auth, commands, /key, /config, /whitelist), approvals table + flow + delivery + callback + agent creation|V47,V48,V52,V53,V54,§D
+T119-151|x|Agents table, memory, prompt assembly, cache hints, entry stats, mock test harness + integration tests (agent loop, retry, overflow, Telegram, daemon fork), shell hardening, qjs evaluator (`--qjs_eval`), template embedding, Telegram admin (auth, commands, /key, /config, /whitelist), approvals table + flow + delivery + callback + agent creation|V47,V48,V52,V53,V54,§D
 T152-185|x|Memory blocks + DB optimization + compaction + split-column schema + kv config + secrets + integration tests (wire emission, large session, db_query filter, empty response, plan retry, tool loop, sub-agent, compaction)|V52,V55,V56,V57,V58,V59,V60,V61
 T186-207|x|3-DB architecture: ephemeral agents, permission model, daemon secrets, bootstrap flow, configure_provider/channel/create_agent tools, channel→agent binding, token rate limit, 3-DB schema + init fns, agent_config table, exit code protocol, agent-only-own-DB, daemon inbox writes, session state, daemon reap dispatch, spawn_queue + approvals + cron in cclaw.db, CLI standalone, integration tests|V62,V65,V66,V67,V68,V69,V71,V72,V73,V74,V76,V77,V78,V79,V80,V81,V85
 T208-224|x|Shell security: namespace sandbox, libcclaw_net.so, proxy thread, secret env injection, output masking, tests (proxy, denied hosts, filesystem isolation), log collector, test audits (unit, integration, e2e), CLI zero-config, partial-turn resume|V75,V82,V83,V86,V87

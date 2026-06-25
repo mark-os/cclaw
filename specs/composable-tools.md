@@ -1,12 +1,12 @@
-# Composable MJS Tools — Design
+# Composable JS Tools — Design
 
 ## Problem
 
-CClaw MJS tools currently can't invoke shell commands or other tools from their
-handler. The only IO available is `http_fetch` and `fs.*`. This means an MJS
+CClaw JS tools currently can't invoke shell commands or other tools from their
+handler. The only IO available is `http_fetch` and `fs.*`. This means an JS
 tool can't wrap a CLI binary (like `gh`) into a typed, policy-gated interface.
 
-The goal: MJS tools become a **composable layer above raw shell_exec** — the
+The goal: JS tools become a **composable layer above raw shell_exec** — the
 agent calls a typed tool with structured arguments, a policy layer decides
 allow/deny before execution, and the handler shells out as an implementation
 detail.
@@ -22,7 +22,7 @@ The only gating is trust_level (sandbox yes/no) and allowed_hosts (network).
 There's no way to say "allow pr list but deny pr merge" without regexing the
 command string at a hook level.
 
-With a composable MJS tool:
+With a composable JS tool:
 ```
 github({"action": "pr_merge", "number": 123, "auto": true})
 ```
@@ -42,31 +42,31 @@ LLM calls tool
   → child returns result string, exits
 ```
 
-The MJS child runs in the same forked-process model as shell_exec itself, but
+The JS child runs in the same forked-process model as shell_exec itself, but
 it has no mechanism to invoke a shell command from within its execution context.
 
 ## Design
 
 ### New primitive: `cclaw.exec(command, opts)`
 
-Add a `cclaw.exec` global to the MJS tool handler environment. This is the
+Add a `cclaw.exec` global to the JS tool handler environment. This is the
 bridge from JS to the sandbox shell.
 
 ```javascript
-// Available inside MJS tool handlers only (not js_eval, not channels)
+// Available inside JS tool handlers only (not js_eval, not channels)
 var result = cclaw.exec("gh pr list --json number,title", {
     timeout: 30    // optional, seconds
 });
 // result = { stdout: "...", stderr: "...", exit_code: 0 }
 ```
 
-**Implementation**: the MJS child (already forked) fork+execs `/bin/sh -c`
-with the same namespace sandbox applied to normal shell_exec calls. The MJS
+**Implementation**: the JS child (already forked) fork+execs `/bin/sh -c`
+with the same namespace sandbox applied to normal shell_exec calls. The JS
 child's trust_level determines the sandbox profile. The call is synchronous
 (blocks the JS handler until the shell command completes or times out).
 
 This is NOT re-entrant into the agent — it's a direct fork+exec from the
-already-forked MJS child. No IPC back to the parent. The MJS child is already
+already-forked JS child. No IPC back to the parent. The JS child is already
 sandboxed at the same trust level, so the nested shell inherits that sandbox.
 
 ### New primitive: `cclaw.callTool(name, args)`
@@ -79,7 +79,7 @@ parent process via a pipe/UDS protocol.
 var result = cclaw.callTool("web_fetch", { url: "https://api.github.com/..." });
 ```
 
-**Implementation**: the forked MJS child sends a request over a pre-arranged
+**Implementation**: the forked JS child sends a request over a pre-arranged
 fd (pipe or socketpair) to the parent, which dispatches the tool call in-process
 and writes the result back. Depth-limited (max 4) to prevent infinite recursion.
 
@@ -88,7 +88,7 @@ This is more complex than `cclaw.exec` and may be deferred to a later phase.
 
 ### Config & Authority Boundary
 
-**An MJS tool never mutates capability/trust config.** It cannot grant itself (or
+**An JS tool never mutates capability/trust config.** It cannot grant itself (or
 its agent) a tool, a host, a path, or a trust level. This is not a convention to
 remember — it is structurally impossible, enforced by two independent walls:
 
@@ -117,7 +117,7 @@ if (/blocked|DENIED|ENETUNREACH/.test(r.stderr))
 The **agent** then calls `request_config`; a human approves; the capability lands
 on the **agent**, not the tool. `request_config` is the sole creator of
 side-effecting (`resolve="apply"`) approvals, and its mutation logic lives in the
-trusted parent (`resolve_approval()`) — a place an MJS handler can never author
+trusted parent (`resolve_approval()`) — a place an JS handler can never author
 code into. See "Reconciling with the approval model" below.
 
 ### Definition is data: install → load → call
@@ -173,7 +173,7 @@ harvest is removed.
 **Call — per invocation, fork + dispatch.** The trusted parent reads the file at
 `path` (it holds the path anyway), **hashes it and compares to `extensions.hash`,
 failing closed on mismatch** — a tool whose code drifted from what was audited never
-runs, before the sandboxed child starts. It then forks `--mjs_tool <path> <name>
+runs, before the sandboxed child starts. It then forks `--qjs_tool <path> <name>
 <args>`: the child evals the whole file (real function objects in its own engine,
 helpers in scope), looks up the handler by name, and calls it with `args`. No
 stringified handler bodies, no author-written IIFE (the loader already wraps the
@@ -269,9 +269,9 @@ The approval system carries a `resolve` strategy per approval:
 - `resolve="apply"` — a side effect applied in the trusted parent
   (`resolve_approval()`), reserved for built-in C tools whose mutation lives there.
 
-**MJS tools only ever create `resolve="rerun"` approvals** (via the `ask` effect or
+**JS tools only ever create `resolve="rerun"` approvals** (via the `ask` effect or
 their standing tool mode). They never create `resolve="apply"` — that path exists
-only for `request_config`'s grants, which an MJS handler cannot reach (no DB handle,
+only for `request_config`'s grants, which an JS handler cannot reach (no DB handle,
 no parent-side code). The agent has no runtime path to set its own tool modes or
 policy; the human chooses the mode at approval time.
 
@@ -349,7 +349,7 @@ LLM calls github({"action": "pr_merge", "number": 123})
   → effect = ask   → set this call's gate to ASK → existing approval_create(...,"rerun")
                      → park; human picks once/always/deny → frozen call re-runs on approve
   → effect = allow → fall through to the normal per-tool mode gate (fork_tool_exec)
-                     → fork MJS child, execute handler
+                     → fork JS child, execute handler
                        → handler calls cclaw.exec("gh pr list --json ...")
                        → nested fork+exec /bin/sh inside same sandbox
                        → result flows back to LLM
@@ -401,7 +401,7 @@ before any fork. (Used during development to validate the gate; not a shipping t
 })(cclaw);
 ```
 
-## The GitHub Tool in MJS
+## The GitHub Tool in JS
 
 ```javascript
 // workspace/extensions/github.js
@@ -585,8 +585,8 @@ to settle before `email` — or any send-capable tool — ships.
 
 ### Phase 1: `cclaw.exec` (minimal, unblocks composable tools)
 
-- Add `cclaw_exec` native function to the MJS tool child environment
-- Implementation: `fork()` + `exec("/bin/sh", "-c", cmd)` from the MJS child
+- Add `cclaw_exec` native function to the JS tool child environment
+- Implementation: `fork()` + `exec("/bin/sh", "-c", cmd)` from the JS child
 - Apply same sandbox as shell_exec (inherit trust_level from agent)
 - Timeout via alarm/waitpid
 - Return `{stdout, stderr, exit_code}` as JS object
@@ -602,15 +602,15 @@ to settle before `email` — or any send-capable tool — ships.
 - `deny` → error to LLM (no fork); `allow`/`ask` → fall through to the existing
   per-tool mode gate, with `ask` taking the shipped `approval_create(..., "rerun")`
   + park path (human picks once/always/deny)
-- Wire MJS tool dispatch into `tool_needs_interpolation()` (or a `tools`-table flag)
+- Wire JS tool dispatch into `tool_needs_interpolation()` (or a `tools`-table flag)
   so `{{SECRET:name}}` resolves in `cclaw.exec` args
 
 ### Phase 3: `cclaw.callTool` (optional, deferred)
 
-- Socketpair between parent and MJS child
+- Socketpair between parent and JS child
 - Request/response protocol: `{tool, args}` → `{result}`
 - Depth limit (4) enforced by parent
-- Enables MJS tools calling other MJS tools or C tools (web_fetch, file_read)
+- Enables JS tools calling other JS tools or C tools (web_fetch, file_read)
 - Adds complexity; only implement if real use cases demand it
 
 ## Tool-scoped data
@@ -629,13 +629,13 @@ host, a path, or a trust level. It is just files in the agent's own workspace.
 - `cclaw.exec` inherits the agent's trust_level sandbox — no privilege escalation
 - Policy evaluation is in C, before JS runs — can't be bypassed from handler
 - **The forked child has no DB handle** — config rows are unreachable from a
-  handler or `cclaw.exec`, so an MJS tool cannot mutate capability/trust config
+  handler or `cclaw.exec`, so an JS tool cannot mutate capability/trust config
   (see "Config & Authority Boundary"). It can only create `resolve="rerun"`
   approvals, never `resolve="apply"`.
 - **Secret interpolation requires wiring `cclaw.exec` into the interpolation set.**
   `{{SECRET:name}}` resolution is gated by a per-tool allowlist in `src/main.c`
-  (currently `shell_exec`, `web_fetch`, `js_eval`). A forked MJS tool's args are
-  **not** interpolated unless MJS tool dispatch is added to that allowlist — or the
+  (currently `shell_exec`, `web_fetch`, `js_eval`). A forked JS tool's args are
+  **not** interpolated unless JS tool dispatch is added to that allowlist — or the
   property becomes a flag on the `tools` table. This is a required implementation
   step for the GitHub-via-`gh` example to work, not automatic.
 - Handler code is workspace-scoped (agent authored) — same trust as a draft extension
@@ -652,7 +652,7 @@ host, a path, or a trust level. It is just files in the agent's own workspace.
 
 | Concern | OpenClaw | CClaw (this design) |
 |---------|----------|---------------------|
-| Typed tool surface | Plugins register tools via SDK | MJS registerTool with JSON schema |
+| Typed tool surface | Plugins register tools via SDK | JS registerTool with JSON schema |
 | Shell access | exec tool (binary) | cclaw.exec inside handler (hidden from LLM) |
 | Policy | exec approvals (binary+argPattern regex) | Structured JSON rules on typed args |
 | Approval UX | allow-once / allow-always interactive | per-rule deny/allow; `ask` reuses the `rerun` approval path (human picks once/always/deny) |
@@ -673,7 +673,7 @@ CClaw can do the same; see `templates/skill_shell.md`. Fine-grained policy on a
 tmux tool is pointless next to a general `shell_exec` grant: the agent just types
 `tmux …` into the shell.
 
-A typed MJS tool earns its complexity only when at least one of these holds:
+A typed JS tool earns its complexity only when at least one of these holds:
 
 1. **Grant-in-isolation.** You want the agent to have this capability *without*
    general shell — a monitor that may read panes but not run arbitrary commands,
@@ -698,9 +698,9 @@ only #1 applies (and only the read-vs-mutate split, since `send-keys` is an exec
 escape hatch) — so type it only for a shell-less agent, and keep its policy to
 that one boundary rather than a per-subcommand taxonomy.
 
-## Candidate MJS Tools (from OpenClaw skills catalog)
+## Candidate JS Tools (from OpenClaw skills catalog)
 
-### Pure HTTP API — no CLI needed (best candidates for MJS tools)
+### Pure HTTP API — no CLI needed (best candidates for JS tools)
 
 | Tool | API surface | Policy value |
 |------|-------------|--------------|
@@ -733,7 +733,7 @@ that one boundary rather than a per-subcommand taxonomy.
 | himalaya (email) | IMAP/SMTP protocol directly is possible but painful; CLI handles auth/TLS |
 | gh-issues | Subset of github, same REST API works |
 
-## Recommended First MJS Tool: `github`
+## Recommended First JS Tool: `github`
 
 **Why github:**
 1. Clean REST API — no CLI dependency, works everywhere
@@ -743,7 +743,7 @@ that one boundary rather than a per-subcommand taxonomy.
 5. Tests the full design: schema, policy, http_fetch, secret interpolation
 
 **What it proves:**
-- MJS tool with typed `action` enum works
+- JS tool with typed `action` enum works
 - Policy layer catches destructive calls before execution
 - `http_fetch` (extended with method/headers/body) is sufficient for real work
 - No `cclaw.exec` needed — validates the pure-API path first

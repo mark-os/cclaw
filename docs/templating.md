@@ -23,7 +23,7 @@ Source files `#include "templates.h"` (from `build/`) and reference the constant
 | File | Used by | Purpose |
 |------|---------|---------|
 | `default_system_prompt.md` | `config.c` | Default system prompt when no agent-specific prompt exists |
-| `skill_shell.md` | `agent_setup.c` | Injected into system prompt to teach the agent about shell_exec + mjs |
+| `skill_shell.md` | `agent_setup.c` | Injected into system prompt to teach the agent about shell_exec + qjs |
 | `cutoff_notice.txt` | `context.c` | Prepended when conversation history is truncated |
 | `incomplete_turn_notice.txt` | `context.c` | Injected when a previous turn was interrupted |
 | `incomplete_tool_content.txt` | `context.c` | Placeholder for tool results from interrupted turns |

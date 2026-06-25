@@ -10,10 +10,10 @@
 static int tests_run = 0;
 static int tests_passed = 0;
 
-/* js_eval now forks `cclaw --mjs_eval`. Point the handler at the real cclaw
+/* js_eval now forks `cclaw --qjs_eval`. Point the handler at the real cclaw
  * binary (sibling of this test) in host mode. The handler-based tests below
  * only exercise host-validation rejection paths, which never open a socket. */
-static void setup_mjs_env(void) {
+static void setup_qjs_env(void) {
     char self[4096];
     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
     if (n <= 0) { fprintf(stderr, "readlink /proc/self/exe failed\n"); exit(2); }
@@ -130,7 +130,7 @@ static void test_runtime_set_hosts(void) {
 /* Note: the sanitize/HTML-strip helpers (html_strip_tags, wrap_external_content)
  * are unit-tested directly in test_tool_web_fetch.c. The end-to-end sanitize
  * path through js_eval requires a real network fetch inside the forked
- * `--mjs_eval` child, so it lives in the e2e suite, not here. */
+ * `--qjs_eval` child, so it lives in the e2e suite, not here. */
 
 /* JS eval: http_request without hosts throws */
 static void test_js_eval_no_hosts(void) {
@@ -173,7 +173,7 @@ static void test_js_eval_with_hosts(void) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    setup_mjs_env();
+    setup_qjs_env();
     printf("test_js_http_fetch:\n");
     test_no_hosts_rejects();
     test_host_not_allowed();

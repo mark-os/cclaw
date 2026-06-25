@@ -14,7 +14,7 @@ typedef struct { const char *path; int ro; } SandboxMountReq;
 /* A planned bind-mount: canonical path + ro flag, owned inline. */
 typedef struct { char path[PATH_MAX]; int ro; } SandboxMount;
 
-/* Child sandbox setup, shared by shell_exec and the forked --mjs_eval mode.
+/* Child sandbox setup, shared by shell_exec and the forked --qjs_eval mode.
  * Establishes the namespace sandbox, scrubs the environment, applies rlimits,
  * and installs the network proxy preload. All fields default to 0/NULL. */
 typedef struct {

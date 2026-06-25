@@ -8,11 +8,11 @@
 static int tests_run = 0;
 static int tests_passed = 0;
 
-/* js_eval now forks `cclaw --mjs_eval`. Point the handler at the real cclaw
+/* js_eval now forks `cclaw --qjs_eval`. Point the handler at the real cclaw
  * binary (sibling of this test binary) and run it in host mode (no sandbox),
  * so these unit tests exercise the real subprocess path without needing a
  * working userns sandbox or any network. */
-static void setup_mjs_env(void) {
+static void setup_qjs_env(void) {
     char self[4096];
     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
     if (n <= 0) { fprintf(stderr, "readlink /proc/self/exe failed\n"); exit(2); }
@@ -107,7 +107,7 @@ static void test_register(void) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    setup_mjs_env();
+    setup_qjs_env();
     printf("test_tool_js:\n");
     test_basic_eval();
     test_string_result();

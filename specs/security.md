@@ -14,7 +14,7 @@
 │  Constrained by: setrlimit, http_policy, config values  │
 ├─────────────────────────────────────────────────────────┤
 │  UNTRUSTED                                              │
-│  Shell children / mjs — execute LLM-directed commands   │
+│  Shell children / qjs — execute LLM-directed commands   │
 │  Sandboxed by: namespaces, proxy, env stripping         │
 │  Cannot: reach arbitrary hosts, read secrets, escape fs │
 └─────────────────────────────────────────────────────────┘
@@ -131,7 +131,7 @@ Ordered from most to least critical:
 | # | Layer | Scope | Kernel-enforced? | Bypassable by agent? |
 |---|-------|-------|------------------|---------------------|
 | 1 | `setrlimit` | Agent + children | Yes | No |
-| 2 | Namespace sandbox | Shell/mjs children | Yes | No (separate process) |
+| 2 | Namespace sandbox | Shell/qjs children | Yes | No (separate process) |
 | 3 | Credential proxy | Shell children network | Yes (iptables) | No (separate netns) |
 | 4 | `http_check_policy()` | Agent outbound HTTP | No (app-level) | Only via code bug |
 | 5 | Env stripping (V47) | Shell children | No (app-level) | Only via code bug |

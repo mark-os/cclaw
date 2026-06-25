@@ -41,7 +41,7 @@ Move to §T when ready to implement.
 ## Cross-compile for Legacy Embedded Targets
 - Target: ARMv5TE and similar (128MB RAM)
 - musl static link or armel dynamic
-- Reduced feature set (no mquickjs? smaller arena?)
+- Reduced feature set (no quickjs? smaller arena?)
 
 ## Multi-model Routing
 - Different models for different tasks (cheap for compaction, expensive for reasoning)
@@ -76,7 +76,7 @@ Move to §T when ready to implement.
 
 ## JS Extension System
 
-MicroQuickJS is the extension language for CClaw. Current foundation: `js_define_tool` (runtime tool creation) and `js_eval` (one-shot execution). The full extension system will cover:
+QuickJS is the extension language for CClaw. Current foundation: `js_define_tool` (runtime tool creation) and `js_eval` (one-shot execution). The full extension system will cover:
 
 ### Planned Extension Points
 
@@ -100,9 +100,9 @@ See `reference/pi-extensions.md` for Pi's approach:
 - Extensions can register tools dynamically
 - Extensions have scoped permissions
 
-CClaw adaptation: same concepts, implemented in MicroQuickJS instead of TypeScript, with SQLite for state instead of in-memory.
+CClaw adaptation: same concepts, implemented in QuickJS instead of TypeScript, with SQLite for state instead of in-memory.
 
-### Tool Authoring via mquickjs (foundation ✓)
+### Tool Authoring via quickjs (foundation ✓)
 
 `js_define_tool` lets agents create tools at runtime. Persists per-session. Remaining work:
 - Tool composition: JS tools calling other tools via `callTool(name, args)`
@@ -120,7 +120,7 @@ Synchronous fetch via UDS proxy. Respects allowed_hosts. Remaining work:
 
 ### fetch() ✓ (implemented)
 
-Synchronous (mquickjs is blocking). Wraps libcurl via UDS proxy. Respects allowed_hosts.
+Synchronous (quickjs is blocking). Wraps libcurl via UDS proxy. Respects allowed_hosts.
 
 - URL allowlist? Or inherit agent's permissions?
 - Response size cap (heap is bounded)
@@ -194,7 +194,7 @@ Enables JS tools that behave differently based on context (e.g., a tool that's m
 ### CClaw Adaptation
 
 - C is the core (agent loop, DB, HTTP, tool dispatch)
-- mquickjs is the extension language (replaces TypeScript role)
+- quickjs is the extension language (replaces TypeScript role)
 - Shell scripts are the escape hatch (replaces "any language" flexibility)
 - SQLite is the coordination layer (replaces message queues / IPC)
 - No hot-reload needed — JS tools are eval'd fresh each call (or replayed from DB)

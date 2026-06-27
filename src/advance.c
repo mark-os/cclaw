@@ -16,6 +16,75 @@ static AdvanceOutput make_output(AdvanceResult action, int64_t sid,
     return out;
 }
 
+/* Notify a sub-agent's parent that the child finished. Blocking mode writes a
+ * ToolResult for the parent's launch_agent call; background mode posts to the
+ * parent inbox. Called on every terminal path (normal stop, error, max-iter) so
+ * a parent blocked on launch_agent always gets a result and never parks forever.
+ * On is_error the parent receives the error text with is_error=1. */
+static void notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
+    SessionParentInfo pi = session_get_parent_info(db, session_id);
+    if (pi.parent_session_id <= 0) {
+        free(pi.parent_tool_call_id);
+        return;
+    }
+
+    char *result_text = get_response_text(db, session_id);
+    if (!result_text)
+        result_text = strdup(is_error ? "error: sub-agent terminated abnormally"
+                                      : "(no response)");
+
+    int txn_ok = (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
+    if (txn_ok) {
+        if (pi.parent_tool_call_id) {
+            /* Blocking mode: write tool result for parent's tool call */
+            ToolResult tr = { .tool_call_id = pi.parent_tool_call_id,
+                              .content = result_text };
+            Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
+                             .tool_name = "launch_agent", .is_error = is_error };
+            int64_t rid = entry_append_with_turn(db, pi.parent_session_id, &rmsg, 0);
+            db_tool_call_complete_by_call(db, pi.parent_session_id,
+                                          pi.parent_tool_call_id, rid);
+            /* Unpark parent — but only from a state that permits it. A parent
+             * sitting in awaiting_approval or compacting must not be stomped
+             * back to tool_running (that double-prompts / re-emits per sibling
+             * completion); the eventual wake re-advances it from its own state. */
+            char pstate[32] = {0};
+            sqlite3_stmt *ps;
+            if (sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?",
+                                   -1, &ps, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(ps, 1, pi.parent_session_id);
+                if (sqlite3_step(ps) == SQLITE_ROW) {
+                    const char *s = (const char *)sqlite3_column_text(ps, 0);
+                    if (s) snprintf(pstate, sizeof(pstate), "%s", s);
+                }
+                sqlite3_finalize(ps);
+            }
+            if (strcmp(pstate, "awaiting_approval") != 0 &&
+                strcmp(pstate, "compacting") != 0)
+                session_set_state(db, pi.parent_session_id, "tool_running");
+        } else {
+            /* Background mode: insert into parent inbox */
+            char payload[256];
+            snprintf(payload, sizeof(payload),
+                     "Sub-agent (session %lld) %s: %.*s",
+                     (long long)session_id,
+                     is_error ? "failed" : "completed", 200, result_text);
+            inbox_insert(db, pi.parent_session_id, "agent_result", payload);
+        }
+
+        if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            txn_ok = 0;
+        }
+    }
+
+    if (txn_ok)
+        wake_session(pi.parent_session_id);
+
+    free(result_text);
+    free(pi.parent_tool_call_id);
+}
+
 AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iterations) {
     if (max_iterations <= 0) max_iterations = DEFAULT_MAX_ITER;
 
@@ -115,6 +184,9 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
 
         if (is_error) {
             session_set_state(db, session_id, "idle");
+            /* Abnormal stop: still notify a waiting parent so a blocking
+             * launch_agent gets an error result instead of hanging. */
+            notify_parent(db, session_id, 1);
             AdvanceOutput out = make_output(ADVANCE_ERROR, session_id, agent, iter);
             free(agent);
             return out;
@@ -124,50 +196,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         session_set_state(db, session_id, "idle");
 
         /* Notify parent session if this is a sub-agent */
-        SessionParentInfo pi = session_get_parent_info(db, session_id);
-        if (pi.parent_session_id > 0) {
-            char *result_text = get_response_text(db, session_id);
-            if (!result_text) result_text = strdup("(no response)");
-
-            int txn_ok = 1;
-            if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
-                txn_ok = 0;
-            }
-
-            if (txn_ok) {
-                if (pi.parent_tool_call_id) {
-                    /* Blocking mode: write tool result for parent's tool call */
-                    ToolResult tr = { .tool_call_id = pi.parent_tool_call_id,
-                                      .content = result_text };
-                    Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
-                                     .tool_name = "launch_agent", .is_error = 0 };
-                    int64_t rid = entry_append_with_turn(db, pi.parent_session_id,
-                                                        &rmsg, 0);
-                    db_tool_call_complete_by_call(db, pi.parent_session_id,
-                                                  pi.parent_tool_call_id, rid);
-                    /* Unpark parent */
-                    session_set_state(db, pi.parent_session_id, "tool_running");
-                } else {
-                    /* Background mode: insert into parent inbox */
-                    char payload[256];
-                    snprintf(payload, sizeof(payload),
-                             "Sub-agent (session %lld) completed: %.*s",
-                             (long long)session_id, 200, result_text);
-                    inbox_insert(db, pi.parent_session_id, "agent_result", payload);
-                }
-
-                if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
-                    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-                    txn_ok = 0;
-                }
-            }
-
-            if (txn_ok)
-                wake_session(pi.parent_session_id);
-
-            free(result_text);
-            free(pi.parent_tool_call_id);
-        }
+        notify_parent(db, session_id, 0);
 
         AdvanceOutput out = make_output(ADVANCE_DONE, session_id, agent, iter);
         free(agent);
@@ -207,6 +236,8 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
                             .stop_reason = STOP_REASON_ERROR };
             entry_append_with_turn(db, session_id, &msg, 0);
             session_set_state(db, session_id, "idle");
+            /* Max-iter is a terminal error for a sub-agent too — notify parent. */
+            notify_parent(db, session_id, 1);
             AdvanceOutput out = make_output(ADVANCE_DONE, session_id, agent, new_iter);
             free(agent);
             return out;
@@ -218,6 +249,26 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
     }
 
     if (strcmp(state, "compacting") == 0) {
+        /* A wake while compacting is only a *completion* once the compaction
+         * job row is gone — the worker deletes it (llm_worker.c) before
+         * notifying. Any other wake (inbox insert, sibling sub-agent finish)
+         * must not flip us to idle and consume the inbox while the worker is
+         * still mutating the branch; stay parked and wait for the real signal. */
+        int compaction_in_flight = 0;
+        {   sqlite3_stmt *js;
+            if (sqlite3_prepare_v2(db,
+                    "SELECT 1 FROM llm_jobs WHERE session_id=? AND job_type=1 LIMIT 1",
+                    -1, &js, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(js, 1, session_id);
+                if (sqlite3_step(js) == SQLITE_ROW) compaction_in_flight = 1;
+                sqlite3_finalize(js);
+            }
+        }
+        if (compaction_in_flight) {
+            AdvanceOutput out = make_output(ADVANCE_WAITING, session_id, agent, iter);
+            free(agent);
+            return out;
+        }
         /* Compaction finished — atomically go idle + check inbox */
         if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
             free(agent);

@@ -233,8 +233,26 @@ char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_c
     }
     mkdir(dir, 0700);  /* ignore error if exists */
 
+    /* The call_id is model-emitted: reject anything that isn't a flat,
+     * filesystem-safe token before it becomes a path component. A '/' or ".."
+     * would otherwise let the (unsandboxed) parent write ≤60KB anywhere the
+     * agent UID reaches; fall back to the "unknown" sentinel inside dir. */
+    const char *safe_id = tool_call_id;
+    if (safe_id) {
+        if (strstr(safe_id, "..") || !safe_id[0]) {
+            safe_id = NULL;
+        } else {
+            for (const char *p = safe_id; *p; p++) {
+                if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                      (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')) {
+                    safe_id = NULL;
+                    break;
+                }
+            }
+        }
+    }
     char path[PATH_MAX + 64];
-    snprintf(path, sizeof(path), "%s/%s.out", dir, tool_call_id ? tool_call_id : "unknown");
+    snprintf(path, sizeof(path), "%s/%s.out", dir, safe_id ? safe_id : "unknown");
     /* O_NOFOLLOW: never follow a symlink planted at the spill path — a
      * pre-existing symlink makes open() fail (ELOOP) and we skip the spill. */
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
@@ -327,8 +345,21 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
     if (nwords == 0) { free(dup); return NULL; }
 
     for (int i = 0; i < nwords; i++) {
-        if (i > 0) qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen, " OR ");
-        qlen += snprintf(query + qlen, sizeof(query) - (size_t)qlen, "\"%s\"", words[i]);
+        /* snprintf returns the would-have-written length; once the buffer fills,
+         * sizeof(query) - qlen underflows (size_t) into a huge bound and the
+         * next write runs off the stack. Clamp the remaining space and stop as
+         * soon as a write is truncated. */
+        size_t rem = (size_t)qlen >= sizeof(query) ? 0 : sizeof(query) - (size_t)qlen;
+        if (rem == 0) break;
+        if (i > 0) {
+            int n = snprintf(query + qlen, rem, " OR ");
+            if (n < 0 || (size_t)n >= rem) { query[qlen] = '\0'; break; }
+            qlen += n;
+            rem -= (size_t)n;
+        }
+        int n = snprintf(query + qlen, rem, "\"%s\"", words[i]);
+        if (n < 0 || (size_t)n >= rem) { query[qlen] = '\0'; break; }
+        qlen += n;
     }
     free(dup);
 

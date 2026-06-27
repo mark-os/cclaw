@@ -338,8 +338,10 @@ Config *config_load(sqlite3 *db) {
                 if (idx > 0) {
                     if (cfg->fallback_count >= fb_cap) {
                         fb_cap *= 2;
-                        cfg->fallback_providers = realloc(cfg->fallback_providers,
+                        ProviderConfig *tmp = realloc(cfg->fallback_providers,
                             fb_cap * sizeof(ProviderConfig));
+                        if (!tmp) break;
+                        cfg->fallback_providers = tmp;
                     }
                     p = &cfg->fallback_providers[cfg->fallback_count];
                     memset(p, 0, sizeof(*p));

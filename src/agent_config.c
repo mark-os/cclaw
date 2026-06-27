@@ -73,8 +73,10 @@ char *agent_load_skills(const char *agents_dir, const char *name) {
         out = tmp;
 
         if (out_len > 0) out[out_len++] = '\n';
-        fread(out + out_len, 1, (size_t)flen, f);
-        out_len += (size_t)flen;
+        /* Advance by bytes actually read, not ftell's flen: a short read would
+         * otherwise bake uninitialized heap into the prompt. */
+        size_t got = fread(out + out_len, 1, (size_t)flen, f);
+        out_len += got;
         out[out_len] = '\0';
         fclose(f);
     }
@@ -158,15 +160,17 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
         return config_render_system_prompt(fallback_cfg, session_id);
     }
 
-    /* Render template from DB system_prompt (or fallback to global) */
+    /* Render the prompt body: from the DB template when present, else the global
+     * fallback (every ephemeral agent has a NULL template). Either way fall
+     * through to the memory+skills assembly below so those blocks aren't dropped.
+     * A NULL render is a hard failure — don't continue with an empty body. */
     const char *tmpl = row->system_prompt;
-    char *rendered = NULL;
-    if (tmpl && tmpl[0]) {
-        rendered = render_template(tmpl, session_id, agent_name);
-    } else {
-        rendered = config_render_system_prompt(fallback_cfg, session_id);
+    char *rendered = (tmpl && tmpl[0])
+        ? render_template(tmpl, session_id, agent_name)
+        : config_render_system_prompt(fallback_cfg, session_id);
+    if (!rendered) {
         agent_row_free(row);
-        return rendered;
+        return NULL;
     }
 
     /* Load skills from disk (skills stay on filesystem per §D) */
@@ -286,7 +290,9 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
                 if (!item) continue;
                 if (ac->tool_count >= cap) {
                     cap *= 2;
-                    ac->tools = realloc(ac->tools, cap * sizeof(char *));
+                    char **tmp = realloc(ac->tools, cap * sizeof(char *));
+                    if (!tmp) break;
+                    ac->tools = tmp;
                 }
                 ac->tools[ac->tool_count++] = strdup(item);
             }
@@ -309,7 +315,9 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
                 if (!item) continue;
                 if (ac->allowed_hosts_count >= cap) {
                     cap *= 2;
-                    ac->allowed_hosts = realloc(ac->allowed_hosts, cap * sizeof(char *));
+                    char **tmp = realloc(ac->allowed_hosts, cap * sizeof(char *));
+                    if (!tmp) break;
+                    ac->allowed_hosts = tmp;
                 }
                 ac->allowed_hosts[ac->allowed_hosts_count++] = strdup(item);
             }

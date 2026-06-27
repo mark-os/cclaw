@@ -180,7 +180,13 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
     }
 
     session_set_state(g_db, session_id, "llm_running");
-    return llm_worker_submit(g_db, session_id, agent_name, iteration == 0 ? 1 : 0);
+    int rc = llm_worker_submit(g_db, session_id, agent_name, iteration == 0 ? 1 : 0);
+    if (rc < 0) {
+        /* No worker accepted the job — don't strand the session in llm_running
+         * (no completion will ever fire to move it off). Revert to idle. */
+        session_set_state(g_db, session_id, "idle");
+    }
+    return rc;
 }
 
 /* Forward declarations for approval + advance (used by fork_tool_exec and resolve_approval) */
@@ -428,9 +434,23 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
         return 1; /* Handled inline */
     }
 
-    /* Forkable tool: pipe for result capture */
+    /* Forkable tool: pipe for result capture. A pipe()/fork() failure must not
+     * leave the call pending forever — the session has already moved to
+     * tool_running and no wake resurrects an un-dispatched call. Synthesize an
+     * error result and complete the call inline, mirroring the unknown-tool
+     * branch, so the turn can advance. */
     int pipefd[2];
-    if (pipe(pipefd) != 0) return -1;
+    if (pipe(pipefd) != 0) {
+        char err[160];
+        snprintf(err, sizeof(err), "error: %s: pipe failed: %s",
+                 tc->name, strerror(errno));
+        ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
+        Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                       .tool_name = tc->name, .is_error = 1};
+        entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+        db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "fork_failed");
+        return 1;
+    }
 
     /* CLI progress */
     if (g_mode == 0)
@@ -440,8 +460,16 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
 
     pid_t pid = fork();
     if (pid < 0) {
+        char err[160];
+        snprintf(err, sizeof(err), "error: %s: fork failed: %s",
+                 tc->name, strerror(errno));
         close(pipefd[0]); close(pipefd[1]);
-        return -1;
+        ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
+        Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                       .tool_name = tc->name, .is_error = 1};
+        entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+        db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "fork_failed");
+        return 1;
     }
     if (pid == 0) {
         /* Child: only the output pipe write end is inherited (no O_CLOEXEC).
@@ -820,7 +848,10 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
 rename_done:
         tool_parse_free(&ta);
     }
-    if (g_tool_setup && !*rename_failed)
+    /* Only rebind the shared setup when the grant target is the bound agent
+     * (CLI root). A grant applied to a sub-agent must not leave root's setup
+     * carrying its caps; the dispatch path re-binds per call. */
+    if (g_tool_setup && !*rename_failed && strcmp(refresh_agent, g_agent_name) == 0)
         agent_setup_refresh_caps(g_tool_setup, g_db, refresh_agent);
 }
 
@@ -1080,6 +1111,12 @@ static void run_advance(int64_t session_id) {
          * dispatched (stop and wait), 2 = parked for approval, <0 = failure.
          * Parallel-safe calls are launched back-to-back; a serial async call
          * (or a park/failure) stops dispatch and we wait for its completion. */
+        /* The shared setup serves whichever session is advancing — root or any
+         * sub-agent (in the daemon, many agents through one setup). Rebind caps
+         * to the advancing session's agent before forking so each tool runs
+         * under that agent's grants, not whoever dispatched last. */
+        if (g_tool_setup)
+            agent_setup_refresh_caps(g_tool_setup, g_db, out.agent_name);
         int async_in_flight = 0;
         int stop = 0;
         for (int i = 0; i < out.tc_count && !stop; i++) {
@@ -1099,7 +1136,11 @@ static void run_advance(int64_t session_id) {
         break;
     }
     case ADVANCE_DONE:
-        if (g_tool_setup)
+        /* Refresh only when the completing agent is the one the shared setup is
+         * bound to (CLI root). A sub-agent completion must not leave root's
+         * setup carrying the sub-agent's grants; the dispatch path re-binds
+         * caps per call anyway. */
+        if (g_tool_setup && strcmp(out.agent_name, g_agent_name) == 0)
             agent_setup_refresh_caps(g_tool_setup, g_db, out.agent_name);
         deliver_response(session_id);
         /* Attempt compaction if configured */
@@ -1779,6 +1820,27 @@ static int run_daemon(char *db_path) {
     g_mode = 1;
     g_next_db_poll = time(NULL);  /* run DB checks immediately on first iter */
     workspace_init(g_cfg);
+
+    /* Tool dispatch setup. Without this g_tool_setup is NULL and every forkable
+     * tool resolves to "unknown tool" in daemon mode. The daemon serves many
+     * agents through this one shared setup; caps are re-bound to the advancing
+     * session's agent before each dispatch (run_advance). The init agent name
+     * just seeds the caps/contexts; agents_dir backs rename support. */
+    char daemon_agent[64];
+    { char *def = db_kv_get(g_db, "default_agent");
+      snprintf(daemon_agent, sizeof(daemon_agent), "%s", def ? def : "default");
+      free(def); }
+    snprintf(g_agent_name, sizeof(g_agent_name), "%s", daemon_agent);
+    char daemon_agents_dir[PATH_MAX];
+    { char base[PATH_MAX]; snprintf(base, sizeof(base), "%s", db_path);
+      char *sl = strrchr(base, '/'); if (sl) *sl = '\0'; else snprintf(base, sizeof(base), ".");
+      snprintf(daemon_agents_dir, sizeof(daemon_agents_dir), "%s/agents", base); }
+    AgentSetup daemon_setup;
+    agent_setup_init(&daemon_setup, g_db, 0, g_cfg, g_agent_name, AGENT_SETUP_DAEMON);
+    daemon_setup.req_cfg_ctx.agents_dir = daemon_agents_dir;
+    daemon_setup.req_cfg_ctx.agent_name = g_agent_name;
+    g_tool_setup = &daemon_setup;
+
     printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
     web_start(g_cfg, g_db, db_path);
     heartbeat_start(g_cfg, g_db);
@@ -1877,6 +1939,8 @@ static int run_daemon(char *db_path) {
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
     wake_close(); wake_fifo_close(fifo_fd, db_path);
     process_unregister(g_db, g_instance_id);
+    g_tool_setup = NULL;
+    agent_setup_destroy(&daemon_setup);
     config_free(g_cfg); db_close(g_db); free(db_path);
     return 0;
 }

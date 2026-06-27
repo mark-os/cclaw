@@ -1,5 +1,5 @@
 #!/bin/bash
-# Generate an SVG chart of lines of code (src/*.c, src/*.h) over commits.
+# Generate an SVG chart of lines of code (src/*.c, src/*.h, include/*.h, include/*.c) over commits.
 set -eu
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
@@ -11,13 +11,13 @@ git log --reverse --format="%H" | {
     total=0; i=0
     while read -r hash; do
         i=$((i+1))
-        delta=$(git diff --numstat "$hash~" "$hash" -- 'src/*.c' 'src/*.h' 2>/dev/null | awk '{s+=$1-$2} END{print s+0}')
+        delta=$(git diff --numstat "$hash~" "$hash" -- 'src/*.c' 'src/*.h' 'include/*.h' 'include/*.c' 2>/dev/null | awk '{s+=$1-$2} END{print s+0}')
         delta=${delta:-0}
         total=$((total+delta))
         echo "$i,$total"
     done
     # Final point: actual working-tree count, so uncommitted changes show up
-    current=$(cat src/*.c src/*.h 2>/dev/null | wc -l)
+    current=$(cat src/*.c src/*.h include/*.h include/*.c 2>/dev/null | wc -l)
     echo "$((i+1)),$current"
 } | awk -F, '
 { x[NR]=$1; y[NR]=$2; if($2>max) max=$2; n=NR }

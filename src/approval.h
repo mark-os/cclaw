@@ -45,8 +45,32 @@ int approval_consume(sqlite3 *db, int64_t id);
 /* Resolve an approval (approve or deny). Returns heap-allocated resolved Approval or NULL. */
 Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *decided_via);
 
-/* Return malloc'd array of expired pending approval ids. Caller frees. Sets *out_count. */
-int64_t *approval_list_expired(sqlite3 *db, int *out_count);
+/* Return malloc'd array of expired pending approval ids, owner-scoped: only
+ * approvals on sessions owned by `me`, unowned, or dead-owned (owner absent
+ * from the processes registry). `me` may be NULL/"" to mean "no live owner".
+ * Caller frees. Sets *out_count. */
+int64_t *approval_list_expired(sqlite3 *db, const char *me, int *out_count);
+
+/* Return malloc'd array of pending approval ids past the short block window
+ * (requested_at + block_sec < now) whose session is still awaiting_approval,
+ * owner-scoped to `me` exactly like approval_list_expired. Caller frees. */
+int64_t *approval_list_block_due(sqlite3 *db, int block_sec, const char *me, int *out_count);
+
+/* Post-window delivery outcomes — how a late approval decision is described in
+ * the inbox follow-up turn (see approval_deliver_postwindow). */
+typedef enum {
+    APPROVAL_PW_RERUN_APPROVED,  /* gated tool call: notify-only, re-issue if needed */
+    APPROVAL_PW_RERUN_DENIED,
+    APPROVAL_PW_APPLY_GRANTED,    /* capability grant applied by the caller */
+    APPROVAL_PW_APPLY_DENIED,
+    APPROVAL_PW_EXPIRED,
+} ApprovalPostWindow;
+
+/* Deliver a late (post-block-window) approval decision as a new inbox turn.
+ * Pure delivery: composes the message from the approval + outcome and inserts
+ * it into the session's inbox. Does NOT mutate session/tool_call state or apply
+ * grants (the caller does that). Returns the inbox row id (>0) or -1. */
+int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPostWindow outcome);
 
 /* Free an Approval struct. */
 void approval_free(Approval *a);

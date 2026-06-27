@@ -32,4 +32,7 @@ void channel_tick(sqlite3 *db);
 /* Channel events — process pending channel_events rows */
 void channel_consume_events(sqlite3 *db);
 
+/* Earliest next_restart_at across pending channels (0 = none pending) */
+time_t channel_next_deadline(void);
+
 #endif

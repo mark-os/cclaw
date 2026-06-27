@@ -126,6 +126,7 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name, PendingToo
 static sqlite3 *g_db;
 static Config *g_cfg;
 static int g_mode;  /* 0=cli, 1=daemon */
+static char g_instance_id[40];  /* this process's registry instance id ("" until registered) */
 static int g_llm_threads = 4;     /* worker thread pool size */
 static int64_t g_cli_session;
 static char g_agent_name[64];
@@ -198,6 +199,7 @@ static int tool_is_inline(const char *name) {
            strcmp(name, "db_query") == 0 ||
            strcmp(name, "launch_agent") == 0 ||
            strcmp(name, "check_session") == 0 ||
+           strcmp(name, "check_approval") == 0 ||
            strcmp(name, "extension_promote") == 0 ||
            strcmp(name, "extension_publish") == 0 ||
            strcmp(name, "extension_attach") == 0 ||
@@ -567,6 +569,37 @@ static void drain_ready_result_pipes(const struct pollfd *pfds, int base, int nf
 
 /* ── reap_children (state machine) ──────────────────────────────── */
 
+/* ── compute_timeout_ms: dynamic poll() timeout ─────────────── */
+
+#define POLL_DB_INTERVAL 5   /* seconds between DB polls (approvals, future cron) */
+#define POLL_MAX_SLEEP   30  /* upper bound on poll() sleep */
+
+static time_t g_next_db_poll;  /* next time DB periodic work is due */
+
+static int compute_timeout_ms(void) {
+    time_t now = time(NULL);
+    time_t nearest = now + POLL_MAX_SLEEP;
+
+    /* Tier 1: in-memory deadlines (precise) */
+    for (int i = 0; i < g_child_count; i++) {
+        time_t d = g_children[i].deadline;
+        if (d > 0 && d < nearest)
+            nearest = d;
+    }
+    if (g_mode == 1) {
+        time_t cd = channel_next_deadline();
+        if (cd > 0 && cd < nearest)
+            nearest = cd;
+    }
+
+    /* Tier 2: periodic DB poll */
+    if (g_next_db_poll < nearest)
+        nearest = g_next_db_poll;
+
+    int ms = (int)((nearest - now) * 1000);
+    return ms < 0 ? 0 : ms;
+}
+
 /* ── child_sweep_deadlines: kill timed-out children ──────────── */
 
 static void child_sweep_deadlines(void) {
@@ -594,10 +627,253 @@ static void child_sweep_deadlines(void) {
 
 static void approval_sweep_expired(void) {
     int n = 0;
-    int64_t *ids = approval_list_expired(g_db, &n);
+    int64_t *ids = approval_list_expired(g_db, g_instance_id, &n);
     for (int i = 0; i < n; i++)
-        resolve_approval(ids[i], APPROVAL_DENY, "auto:timeout");
+        resolve_approval(ids[i], APPROVAL_DENY, "auto:expired");
     free(ids);
+}
+
+/* approval_block_sec (KV, default 60), clamped to approval_timeout_sec so the
+ * short block never outlasts the final expiry deadline. */
+static int approval_block_seconds(void) {
+    int block = 60;
+    char *kv = db_kv_get(g_db, "approval_block_sec");
+    if (kv) { long v = strtol(kv, NULL, 10); if (v > 0) block = (int)v; free(kv); }
+    int timeout = 3600;
+    char *tv = db_kv_get(g_db, "approval_timeout_sec");
+    if (tv) { long v = strtol(tv, NULL, 10); if (v > 0) timeout = (int)v; free(tv); }
+    if (block > timeout) block = timeout;
+    return block;
+}
+
+/* Unpark one approval past the short block window: answer the frozen tool_call
+ * with a non-terminal "still pending" result and resume the turn, leaving the
+ * approval pending so a later decision is delivered async (post-window). Under
+ * BEGIN IMMEDIATE because db_tool_call_set_status is not itself a CAS — re-check
+ * the parked invariant before mutating so a concurrent resolve can't double-act. */
+static void approval_unpark_block_window(int64_t approval_id) {
+    if (sqlite3_exec(g_db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
+        return;
+
+    int64_t session_id = -1;
+    char call_id[128] = {0}, tool_name[128] = {0};
+    int ok = 0;
+    sqlite3_stmt *s;
+    const char *sel =
+        "SELECT a.session_id, a.tool_call_id, a.tool_name FROM approvals a"
+        " JOIN sessions s ON s.id = a.session_id"
+        " JOIN tool_calls t ON t.session_id = a.session_id AND t.call_id = a.tool_call_id"
+        " WHERE a.id=? AND a.state='pending' AND s.state='awaiting_approval'"
+        "   AND t.status='pending';";
+    if (sqlite3_prepare_v2(g_db, sel, -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(s, 1, approval_id);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            session_id = sqlite3_column_int64(s, 0);
+            const char *cid = (const char *)sqlite3_column_text(s, 1);
+            const char *tn = (const char *)sqlite3_column_text(s, 2);
+            if (cid) snprintf(call_id, sizeof(call_id), "%s", cid);
+            if (tn) snprintf(tool_name, sizeof(tool_name), "%s", tn);
+            ok = cid != NULL;
+        }
+        sqlite3_finalize(s);
+    }
+    if (!ok) { sqlite3_exec(g_db, "ROLLBACK;", NULL, NULL, NULL); return; }
+
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "approval #%lld still pending — you'll be notified when it's "
+             "decided; continuing for now.", (long long)approval_id);
+    ToolResult tr = { .tool_call_id = call_id, .content = buf };
+    Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
+                    .tool_name = tool_name, .is_error = 0 };
+    if (entry_append_with_turn(g_db, session_id, &msg, 0) < 0 ||
+        db_tool_call_set_status(g_db, session_id, call_id, "done", "block_window") != 0 ||
+        session_set_state(g_db, session_id, "tool_running") != 0) {
+        sqlite3_exec(g_db, "ROLLBACK;", NULL, NULL, NULL);
+        return;
+    }
+    if (sqlite3_exec(g_db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
+        return;
+
+    wake_session(session_id);
+    run_advance(session_id);
+}
+
+/* ── approval_sweep_block_window: unpark approvals past the short block ── */
+
+static void approval_sweep_block_window(void) {
+    int block = approval_block_seconds();
+    int n = 0;
+    int64_t *ids = approval_list_block_due(g_db, block, g_instance_id, &n);
+    for (int i = 0; i < n; i++)
+        approval_unpark_block_window(ids[i]);
+    free(ids);
+}
+
+/* ── session_sweep_inbox: backstop for idle sessions with queued work ──
+ * Edge wakes (wake pipe / worker / reap) are process-local, so a peer can leave
+ * an inbox row on a now-idle session without any live process holding an edge
+ * for it (e.g. a cross-process post-window approval delivered by a -p run that
+ * then exits). This catches that orphan ≤ POLL_DB_INTERVAL late — a backstop,
+ * not the scheduler. advance_session claims an idle session atomically (BEGIN
+ * IMMEDIATE + inbox-consume + owner-stamping CAS), so a concurrent edge can't
+ * double-dispatch: the loser consumes nothing and NOOPs. Daemon only — a
+ * transient CLI is scoped to its own session and must not adopt orphans. */
+static void session_sweep_inbox(void) {
+    const char *sql =
+        "SELECT s.id FROM sessions s WHERE s.state='idle'"
+        "  AND EXISTS (SELECT 1 FROM inbox i"
+        "              WHERE i.session_id=s.id AND i.consumed=0)"
+        " LIMIT 64;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK) return;
+    int cap = 0, n = 0;
+    int64_t *ids = NULL;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n >= cap) { cap = cap ? cap * 2 : 16; ids = realloc(ids, (size_t)cap * sizeof(*ids)); }
+        ids[n++] = sqlite3_column_int64(st, 0);
+    }
+    sqlite3_finalize(st);
+    for (int i = 0; i < n; i++)
+        if (!child_has_session(ids[i])) run_advance(ids[i]);
+    free(ids);
+}
+
+/* ── db_periodic: recurring DB housekeeping. Owner-scoped recovery is safe to
+ * repeat here (it reclaims only dead-owned sessions), so CLI and daemon peers
+ * can both keep the shared DB consistent. ── */
+
+static void db_periodic(void) {
+    process_heartbeat(g_db, g_instance_id);
+    process_gc_dead(g_db, PROCESS_TTL_SEC);
+    db_recover_stale_sessions(g_db);   /* owner-scoped, safe to repeat */
+    approval_sweep_block_window();
+    approval_sweep_expired();
+    if (g_mode == 1) {
+        session_sweep_inbox();
+        cron_run_due(g_db);
+    }
+}
+
+/* ── apply_grant: apply an 'apply'-style capability grant ──────────
+ * Extracted from resolve_approval so both the in-window path and the
+ * post-window inbox path apply grants identically. Called only for an approved
+ * (APPROVAL_ALWAYS) apply approval. Sets *rename_failed if a rename's disk step
+ * failed (DB change rolled back); refreshes live caps on success. */
+static void apply_grant(const Approval *a, const char *agent, int *rename_failed) {
+    *rename_failed = 0;
+    const char *refresh_agent = agent;
+    if (strcmp(a->action, "grant_tool") == 0) {
+        ToolArgs ta; tool_parse(a->args_json, &ta);
+        const char *v = targ_str(&ta, "tool");
+        if (v) agent_config_grant(g_db, agent, "tool", v, 0);
+        tool_parse_free(&ta);
+    } else if (strcmp(a->action, "grant_host") == 0) {
+        ToolArgs ta; tool_parse(a->args_json, &ta);
+        const char *v = targ_str(&ta, "host");
+        if (v) agent_config_grant(g_db, agent, "host", v, 0);
+        tool_parse_free(&ta);
+    } else if (strcmp(a->action, "grant_path") == 0) {
+        ToolArgs ta; tool_parse(a->args_json, &ta);
+        const char *v = targ_str(&ta, "path");
+        if (v) agent_config_grant(g_db, agent, "write_path", v, 0);
+        tool_parse_free(&ta);
+    } else if (strcmp(a->action, "rename_agent") == 0) {
+        ToolArgs ta; tool_parse(a->args_json, &ta);
+        const char *nn = targ_str(&ta, "name");
+        const char *pr = targ_str(&ta, "preamble");
+        if (nn) {
+            int rc = agent_rename(g_db, agent, nn, a->session_id);
+            if (rc == 0 && g_tool_setup) {
+                /* Disk rename */
+                RequestConfigCtx *rctx = &g_tool_setup->req_cfg_ctx;
+                if (rctx->agents_dir) {
+                    char old_path[512], new_path[512];
+                    snprintf(old_path, sizeof(old_path), "%s/%s", rctx->agents_dir, agent);
+                    snprintf(new_path, sizeof(new_path), "%s/%s", rctx->agents_dir, nn);
+                    struct stat st;
+                    if (stat(old_path, &st) == 0) {
+                        if (rename(old_path, new_path) != 0) {
+                            /* Rollback DB rename on disk failure */
+                            agent_rename(g_db, nn, agent, a->session_id);
+                            *rename_failed = 1;
+                            goto rename_done;
+                        }
+                    }
+                }
+                /* Optional preamble update */
+                if (pr && pr[0]) {
+                    const char *sql = "UPDATE agents SET system_prompt=? WHERE name=?";
+                    sqlite3_stmt *s;
+                    if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) == SQLITE_OK) {
+                        sqlite3_bind_text(s, 1, pr, -1, SQLITE_STATIC);
+                        sqlite3_bind_text(s, 2, nn, -1, SQLITE_STATIC);
+                        sqlite3_step(s); sqlite3_finalize(s);
+                    }
+                }
+                /* Update live agent name — use nn for subsequent refresh */
+                snprintf((char *)rctx->agent_name, 64, "%s", nn);
+                setenv("CCLAW_AGENT_NAME", nn, 1);
+                refresh_agent = rctx->agent_name;
+            }
+        }
+rename_done:
+        tool_parse_free(&ta);
+    }
+    if (g_tool_setup && !*rename_failed)
+        agent_setup_refresh_caps(g_tool_setup, g_db, refresh_agent);
+}
+
+/* Post-window iff the block sweep already advanced this turn: the frozen
+ * tool_call is no longer pending OR the session is no longer awaiting_approval.
+ * A genuinely missing tool_call also reads as post-window (deliver via inbox). */
+static int approval_is_post_window(int64_t session_id, const char *tool_call_id) {
+    char tcs[32] = {0}, ss[32] = {0};
+    sqlite3_stmt *s;
+    const char *sql =
+        "SELECT (SELECT status FROM tool_calls WHERE session_id=?1 AND call_id=?2"
+        "        ORDER BY id DESC LIMIT 1),"
+        "       (SELECT state FROM sessions WHERE id=?1);";
+    if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(s, 1, session_id);
+        if (tool_call_id) sqlite3_bind_text(s, 2, tool_call_id, -1, SQLITE_STATIC);
+        else sqlite3_bind_null(s, 2);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *t = (const char *)sqlite3_column_text(s, 0);
+            const char *st = (const char *)sqlite3_column_text(s, 1);
+            if (t) snprintf(tcs, sizeof tcs, "%s", t);
+            if (st) snprintf(ss, sizeof ss, "%s", st);
+        }
+        sqlite3_finalize(s);
+    }
+    return strcmp(tcs, "pending") != 0 || strcmp(ss, "awaiting_approval") != 0;
+}
+
+/* Deliver a late decision (block window already lapsed) as a new inbox turn:
+ * apply grants here too, but never mutate the (already-answered) turn state or
+ * re-run a frozen call out of context. */
+static void resolve_approval_post_window(const Approval *a, const char *agent,
+                                         ApprovalDecision decision, const char *decided_via) {
+    int approved = (decision != APPROVAL_DENY);
+    int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
+    int expired = decided_via && strncmp(decided_via, "auto:", 5) == 0;
+    if (is_apply) {
+        if (approved && decision == APPROVAL_ALWAYS) {
+            int rename_failed = 0;
+            apply_grant(a, agent, &rename_failed);
+            approval_deliver_postwindow(g_db, a,
+                rename_failed ? APPROVAL_PW_APPLY_DENIED : APPROVAL_PW_APPLY_GRANTED);
+        } else {
+            approval_deliver_postwindow(g_db, a,
+                expired ? APPROVAL_PW_EXPIRED : APPROVAL_PW_APPLY_DENIED);
+        }
+    } else {
+        if (approved)
+            approval_deliver_postwindow(g_db, a, APPROVAL_PW_RERUN_APPROVED);
+        else
+            approval_deliver_postwindow(g_db, a,
+                expired ? APPROVAL_PW_EXPIRED : APPROVAL_PW_RERUN_DENIED);
+    }
 }
 
 /* ── resolve_approval: approve/deny a parked approval ────────── */
@@ -609,6 +885,15 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
 
     int64_t session_id = a->session_id;
     const char *agent = session_get_agent_name(g_db, session_id);
+
+    /* Block window already lapsed → deliver async, leave the turn untouched. */
+    if (approval_is_post_window(session_id, a->tool_call_id)) {
+        resolve_approval_post_window(a, agent, decision, decided_via);
+        free((char *)agent);
+        approval_free(a);
+        wake_session(session_id);
+        return;
+    }
 
     /* Dispatch on the approval's resolve strategy. */
     if (!a->resolve || strcmp(a->resolve, "rerun") == 0) {
@@ -658,71 +943,9 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         return;
     }
 
-    const char *refresh_agent = agent;
     int rename_failed = 0;
-    if (decision == APPROVAL_ALWAYS) {
-        /* Apply the standing grant */
-        if (strcmp(a->action, "grant_tool") == 0) {
-            ToolArgs ta; tool_parse(a->args_json, &ta);
-            const char *v = targ_str(&ta, "tool");
-            if (v) agent_config_grant(g_db, agent, "tool", v, 0);
-            tool_parse_free(&ta);
-        } else if (strcmp(a->action, "grant_host") == 0) {
-            ToolArgs ta; tool_parse(a->args_json, &ta);
-            const char *v = targ_str(&ta, "host");
-            if (v) agent_config_grant(g_db, agent, "host", v, 0);
-            tool_parse_free(&ta);
-        } else if (strcmp(a->action, "grant_path") == 0) {
-            ToolArgs ta; tool_parse(a->args_json, &ta);
-            const char *v = targ_str(&ta, "path");
-            if (v) agent_config_grant(g_db, agent, "write_path", v, 0);
-            tool_parse_free(&ta);
-        } else if (strcmp(a->action, "rename_agent") == 0) {
-            ToolArgs ta; tool_parse(a->args_json, &ta);
-            const char *nn = targ_str(&ta, "name");
-            const char *pr = targ_str(&ta, "preamble");
-            if (nn) {
-                int rc = agent_rename(g_db, agent, nn, session_id);
-                if (rc == 0 && g_tool_setup) {
-                    /* Disk rename */
-                    RequestConfigCtx *rctx = &g_tool_setup->req_cfg_ctx;
-                    if (rctx->agents_dir) {
-                        char old_path[512], new_path[512];
-                        snprintf(old_path, sizeof(old_path), "%s/%s", rctx->agents_dir, agent);
-                        snprintf(new_path, sizeof(new_path), "%s/%s", rctx->agents_dir, nn);
-                        struct stat st;
-                        if (stat(old_path, &st) == 0) {
-                            if (rename(old_path, new_path) != 0) {
-                                /* Rollback DB rename on disk failure */
-                                agent_rename(g_db, nn, agent, session_id);
-                                rename_failed = 1;
-                                goto rename_done;
-                            }
-                        }
-                    }
-                    /* Optional preamble update */
-                    if (pr && pr[0]) {
-                        const char *sql = "UPDATE agents SET system_prompt=? WHERE name=?";
-                        sqlite3_stmt *s;
-                        if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) == SQLITE_OK) {
-                            sqlite3_bind_text(s, 1, pr, -1, SQLITE_STATIC);
-                            sqlite3_bind_text(s, 2, nn, -1, SQLITE_STATIC);
-                            sqlite3_step(s); sqlite3_finalize(s);
-                        }
-                    }
-                    /* Update live agent name — use nn for subsequent refresh */
-                    snprintf((char *)rctx->agent_name, 64, "%s", nn);
-                    setenv("CCLAW_AGENT_NAME", nn, 1);
-                    refresh_agent = rctx->agent_name;
-                }
-            }
-rename_done:
-            tool_parse_free(&ta);
-        }
-        /* Refresh caps in the live setup */
-        if (g_tool_setup && !rename_failed)
-            agent_setup_refresh_caps(g_tool_setup, g_db, refresh_agent);
-    }
+    if (decision == APPROVAL_ALWAYS)
+        apply_grant(a, agent, &rename_failed);
 
     /* Build tool result message */
     char result_buf[256];
@@ -1554,11 +1777,11 @@ static int qjs_eval_main(int argc, char **argv) {
 
 static int run_daemon(char *db_path) {
     g_mode = 1;
+    g_next_db_poll = time(NULL);  /* run DB checks immediately on first iter */
     workspace_init(g_cfg);
     printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
     web_start(g_cfg, g_db, db_path);
     heartbeat_start(g_cfg, g_db);
-    cron_start(g_cfg, g_db);
 
     /* Start LLM worker threads */
     if (llm_worker_start(db_path, g_llm_threads) != 0) {
@@ -1589,6 +1812,12 @@ static int run_daemon(char *db_path) {
     struct pollfd *pfds = malloc(max_pfds * sizeof(struct pollfd));
     if (!pfds) { perror("malloc"); return 1; }
 
+    /* Register in the liveness table so this daemon's in-flight sessions are
+     * owner-stamped and never reclaimed by a peer's recovery. */
+    if (process_register(g_db, "daemon", getpid(), g_instance_id, sizeof(g_instance_id)) != 0)
+        fprintf(stderr, "warning: process registration failed\n");
+    db_set_instance_id(g_instance_id);
+
     /* Daemon event loop */
     while (!shutdown_requested()) {
         /* Rebuild pollfd set each iteration to include active result pipes */
@@ -1603,7 +1832,7 @@ static int run_daemon(char *db_path) {
         int result_pipe_base = nfds;
         nfds = add_result_pipe_fds(pfds, nfds, max_pfds);
 
-        int rc = poll(pfds, (nfds_t)nfds, 1000);
+        int rc = poll(pfds, (nfds_t)nfds, compute_timeout_ms());
         if (rc < 0) { if (errno == EINTR) continue; break; }
 
         drain_ready_result_pipes(pfds, result_pipe_base, nfds);
@@ -1624,10 +1853,16 @@ static int run_daemon(char *db_path) {
         }
         if (pfds[d_worker_idx].revents & POLLIN)
             event_step_worker(daemon_worker_fd);
-        if (rc == 0 && g_child_count > 0) reap_children();
-        channel_tick(g_db);
+
         child_sweep_deadlines();
-        approval_sweep_expired();
+        channel_tick(g_db);
+
+        /* DB periodic work — gated on interval */
+        time_t now = time(NULL);
+        if (now >= g_next_db_poll) {
+            db_periodic();
+            g_next_db_poll = now + POLL_DB_INTERVAL;
+        }
     }
 
     free(pfds);
@@ -1635,12 +1870,13 @@ static int run_daemon(char *db_path) {
     /* Shutdown */
     llm_worker_stop();
     channel_shutdown_all();
-    cron_stop(); heartbeat_stop(); web_stop();
+    heartbeat_stop(); web_stop();
     /* Disarm SIGCHLD before closing the self-pipe: a child reaped after the
      * close would otherwise have the handler write into a reused fd. */
     signal(SIGCHLD, SIG_DFL);
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
     wake_close(); wake_fifo_close(fifo_fd, db_path);
+    process_unregister(g_db, g_instance_id);
     config_free(g_cfg); db_close(g_db); free(db_path);
     return 0;
 }
@@ -1649,6 +1885,7 @@ static int run_cli(char *db_path, const char *prompt,
                    int64_t session_id, int new_session, int host_mode) {
     /* ── CLI mode ────────────────────────────────────────────────── */
     g_mode = 0;
+    g_next_db_poll = time(NULL);
 
     if (!g_cfg->provider.api_key || !g_cfg->provider.api_key[0]) {
         fprintf(stderr, "error: no API key (set OPENROUTER_API_KEY)\n");
@@ -1763,6 +2000,54 @@ static int run_cli(char *db_path, const char *prompt,
     g_cli_session = session_id;
     setup.req_cfg_ctx.session_id = session_id;
 
+    /* Register in the liveness table before touching session state, so our
+     * transitions stamp owner_instance and recovery won't reclaim them. */
+    if (process_register(g_db, "cli", getpid(), g_instance_id, sizeof(g_instance_id)) != 0)
+        fprintf(stderr, "warning: process registration failed\n");
+    db_set_instance_id(g_instance_id);
+
+    /* Refuse to drive a session another live process is mid-turn on — two
+     * writers would corrupt its branch. Idle (owner NULL) or dead-owned
+     * sessions are takeable; only a live *other* owner blocks us. */
+    {
+        char st[32] = {0}, owner[40] = {0};
+        sqlite3_stmt *gs;
+        if (sqlite3_prepare_v2(g_db,
+                "SELECT state, COALESCE(owner_instance,'') FROM sessions WHERE id=?;",
+                -1, &gs, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(gs, 1, session_id);
+            if (sqlite3_step(gs) == SQLITE_ROW) {
+                snprintf(st, sizeof st, "%s", (const char *)sqlite3_column_text(gs, 0));
+                snprintf(owner, sizeof owner, "%s", (const char *)sqlite3_column_text(gs, 1));
+            }
+            sqlite3_finalize(gs);
+        }
+        int transient = strcmp(st, "idle") != 0 && st[0];
+        if (transient && owner[0] && strcmp(owner, g_instance_id) != 0 &&
+            process_is_live(g_db, owner, PROCESS_TTL_SEC)) {
+            char omode[16] = "cclaw"; int opid = 0;
+            sqlite3_stmt *ps;
+            if (sqlite3_prepare_v2(g_db,
+                    "SELECT mode, pid FROM processes WHERE instance_id=?;",
+                    -1, &ps, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(ps, 1, owner, -1, SQLITE_STATIC);
+                if (sqlite3_step(ps) == SQLITE_ROW) {
+                    const char *m = (const char *)sqlite3_column_text(ps, 0);
+                    if (m) snprintf(omode, sizeof omode, "%s", m);
+                    opid = sqlite3_column_int(ps, 1);
+                }
+                sqlite3_finalize(ps);
+            }
+            fprintf(stderr,
+                    "error: session %lld is being driven by %s pid %d\n",
+                    (long long)session_id, omode, opid);
+            process_unregister(g_db, g_instance_id);
+            agent_setup_destroy(&setup); free(base_dir);
+            config_free(g_cfg); db_close(g_db); free(db_path);
+            return 1;
+        }
+    }
+
     /* ── SIGCHLD self-pipe ───────────────────────────────────────── */
     if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
     fcntl(g_chld_pipe[0], F_SETFD, FD_CLOEXEC);
@@ -1844,7 +2129,7 @@ static int run_cli(char *db_path, const char *prompt,
         int result_pipe_base = cli_nfds;
         cli_nfds = add_result_pipe_fds(cli_pfds, cli_nfds, cli_max_pfds);
 
-        int nready = poll(cli_pfds, (nfds_t)cli_nfds, 500);
+        int nready = poll(cli_pfds, (nfds_t)cli_nfds, compute_timeout_ms());
         if (nready < 0) { if (errno == EINTR) continue; break; }
 
         drain_ready_result_pipes(cli_pfds, result_pipe_base, cli_nfds);
@@ -1936,8 +2221,14 @@ static int run_cli(char *db_path, const char *prompt,
             if (linepos > 0) memmove(linebuf, nl + 1, linepos);
         }
 
-        if (nready == 0 && g_child_count > 0) reap_children();
         child_sweep_deadlines();
+
+        /* DB periodic work — gated on interval */
+        time_t now = time(NULL);
+        if (now >= g_next_db_poll) {
+            db_periodic();
+            g_next_db_poll = now + POLL_DB_INTERVAL;
+        }
     }
 
 done:
@@ -1956,6 +2247,11 @@ done:
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
     wake_close();
     free(cli_pfds);
+    /* Drop our registry row, then run recovery: any still-transient sessions we
+     * owned (e.g. -p exiting with background sub-agents in flight, or a turn cut
+     * short) are now dead-owned and get reclaimed instead of orphaned. */
+    process_unregister(g_db, g_instance_id);
+    db_recover_stale_sessions(g_db);
     free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path);
     return rc;
 }
@@ -2038,8 +2334,12 @@ int main(int argc, char *argv[]) {
         return rc;
     }
 
-    /* ── Startup crash recovery (covers both CLI and daemon — a prior crashed
-     * -p run can leave a stale session that hangs the edge-triggered loop) ── */
+    /* ── Startup crash recovery (covers both CLI and daemon). GC dead registry
+     * rows first so crashed predecessors are absent from the processes table,
+     * making their sessions dead-owned and thus reclaimable. This process is not
+     * yet registered, so it owns nothing — a live peer's row spares its own
+     * sessions. Owner-scoped, so it's also safe on the periodic path. ── */
+    process_gc_dead(g_db, PROCESS_TTL_SEC);
     if (db_recover_stale_sessions(g_db) != 0)
         fprintf(stderr, "warning: startup recovery failed\n");
 

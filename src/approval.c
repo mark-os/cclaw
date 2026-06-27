@@ -158,15 +158,7 @@ Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *de
 
 
 
-int64_t *approval_list_expired(sqlite3 *db, int *out_count) {
-    *out_count = 0;
-    const char *sql =
-        "SELECT id FROM approvals WHERE state='pending'"
-        " AND expires_at IS NOT NULL AND expires_at < unixepoch()";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
-
+static int64_t *drain_ids(sqlite3_stmt *stmt, int *out_count) {
     int cap = 0, n = 0;
     int64_t *ids = NULL;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -179,4 +171,76 @@ int64_t *approval_list_expired(sqlite3 *db, int *out_count) {
     sqlite3_finalize(stmt);
     *out_count = n;
     return ids;
+}
+
+/* Owner filter shared by the sweeps: the approval's session is owned by `me`,
+ * unowned, or dead-owned (owner not in the live registry). With `me` bound NULL
+ * the `= ?me` arm is never true, reducing to "unowned or dead-owned". */
+static void bind_me(sqlite3_stmt *stmt, int idx, const char *me) {
+    if (me && me[0]) sqlite3_bind_text(stmt, idx, me, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(stmt, idx);
+}
+
+int64_t *approval_list_expired(sqlite3 *db, const char *me, int *out_count) {
+    *out_count = 0;
+    const char *sql =
+        "SELECT a.id FROM approvals a JOIN sessions s ON s.id = a.session_id"
+        " WHERE a.state='pending'"
+        "   AND a.expires_at IS NOT NULL AND a.expires_at < unixepoch()"
+        "   AND (s.owner_instance IS NULL OR s.owner_instance = ?1"
+        "        OR s.owner_instance NOT IN (SELECT instance_id FROM processes));";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    bind_me(stmt, 1, me);
+    return drain_ids(stmt, out_count);
+}
+
+int64_t *approval_list_block_due(sqlite3 *db, int block_sec, const char *me, int *out_count) {
+    *out_count = 0;
+    const char *sql =
+        "SELECT a.id FROM approvals a JOIN sessions s ON s.id = a.session_id"
+        " WHERE a.state='pending' AND s.state='awaiting_approval'"
+        "   AND a.requested_at + ?1 < unixepoch()"
+        "   AND (s.owner_instance IS NULL OR s.owner_instance = ?2"
+        "        OR s.owner_instance NOT IN (SELECT instance_id FROM processes));";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int(stmt, 1, block_sec);
+    bind_me(stmt, 2, me);
+    return drain_ids(stmt, out_count);
+}
+
+int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPostWindow outcome) {
+    if (!a) return -1;
+    const char *what = a->action ? a->action : (a->tool_name ? a->tool_name : "tool");
+    char buf[320];
+    switch (outcome) {
+    case APPROVAL_PW_RERUN_APPROVED:
+        snprintf(buf, sizeof(buf),
+                 "Approval #%lld for '%s' was approved after the wait window — "
+                 "re-issue the call if it's still needed.",
+                 (long long)a->id, what);
+        break;
+    case APPROVAL_PW_RERUN_DENIED:
+        snprintf(buf, sizeof(buf), "Approval #%lld for '%s' was denied.",
+                 (long long)a->id, what);
+        break;
+    case APPROVAL_PW_APPLY_GRANTED:
+        snprintf(buf, sizeof(buf), "Approval #%lld granted: %s applied.",
+                 (long long)a->id, what);
+        break;
+    case APPROVAL_PW_APPLY_DENIED:
+        snprintf(buf, sizeof(buf), "Approval #%lld denied: %s.",
+                 (long long)a->id, what);
+        break;
+    case APPROVAL_PW_EXPIRED:
+    default:
+        snprintf(buf, sizeof(buf),
+                 "Approval #%lld for '%s' expired without a decision.",
+                 (long long)a->id, what);
+        break;
+    }
+    return inbox_insert(db, a->session_id, "approval", buf);
 }

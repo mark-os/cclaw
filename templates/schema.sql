@@ -1,5 +1,7 @@
 -- cclaw.db unified schema
--- Single file, WAL mode. Daemon is primary writer for coordination tables.
+-- Single file, WAL mode. CLI and daemon are peers sharing one source of truth;
+-- per-session ownership (sessions.owner_instance → processes) makes recovery
+-- owner-scoped so a live peer's in-flight sessions are never stomped.
 
 -- ═══ Global settings ═══
 CREATE TABLE IF NOT EXISTS config (
@@ -142,6 +144,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   parent_tool_call_id TEXT,
   depth INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL DEFAULT 'idle',
+  owner_instance TEXT,                      -- live owner (processes.instance_id); NULL ⟺ state='idle'
   turn_iteration INTEGER NOT NULL DEFAULT 0,
   leaf_id INTEGER DEFAULT -1,
   last_route TEXT,
@@ -151,6 +154,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS NOT NULL;
 
 -- ═══ Entries ═══
 CREATE TABLE IF NOT EXISTS entries (
@@ -338,3 +342,15 @@ CREATE TABLE IF NOT EXISTS approvals (
   expires_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS approvals_pending ON approvals(session_id, state) WHERE state='pending';
+
+-- ═══ Process registry (liveness) ═══
+-- One row per live cclaw process (daemon or cli) sharing this DB. Sessions stamp
+-- their owner_instance here; owner-scoped recovery reclaims only sessions whose
+-- owner is absent (crashed) or stale (no heartbeat within PROCESS_TTL_SEC).
+CREATE TABLE IF NOT EXISTS processes (
+  instance_id  TEXT PRIMARY KEY,
+  pid          INTEGER NOT NULL,
+  mode         TEXT NOT NULL,                 -- 'daemon' | 'cli'
+  started_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+  heartbeat_at INTEGER NOT NULL DEFAULT (unixepoch())
+);

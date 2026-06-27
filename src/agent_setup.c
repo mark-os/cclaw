@@ -166,6 +166,12 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->ext_tool_ctx.workspace = cfg->workspace;
     tool_extension_register(&setup->reg, &setup->ext_tool_ctx);
 
+    /* Cron tools — DB CRUD only; daemon fires jobs, CLI just manages them. */
+    setup->cron_ctx.db = db;
+    setup->cron_ctx.session_id = session_id;
+    setup->cron_ctx.agent_name = agent_name;
+    tool_cron_register(&setup->reg, &setup->cron_ctx);
+
     /* Agent launch + status check. Available in both CLI and daemon: both run
      * the same event loop with a wake pipe, so a spawned child advances and a
      * parent waiting on it resumes in either. launch_agent is gated by depth
@@ -177,6 +183,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     if (depth < agent_max_depth(db))
         tool_launch_agent_register(&setup->reg, &setup->launch_ctx);
     tool_check_session_register(&setup->reg, &setup->launch_ctx);
+    tool_check_approval_register(&setup->reg, &setup->launch_ctx);
 
     /* Persist builtin schemas (builtin=1), then materialize this agent's
      * extension tools from the DB join — order matters: the sync must see only

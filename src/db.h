@@ -114,6 +114,33 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
                            const char *model, int usage_in, int usage_out,
                            int64_t cost_nano);
 
+/* ── Process registry + per-session liveness ──────────────────────
+ * A registry row is considered dead once its pid is gone or it has missed a
+ * heartbeat for longer than PROCESS_TTL_SEC. The heartbeat fires from the
+ * periodic loop well inside this window. */
+#define PROCESS_TTL_SEC 60
+
+/* This process's instance id (stamped into sessions.owner_instance by the
+ * session_set_state CAS). Set once after process_register; "" until then. */
+void db_set_instance_id(const char *id);
+const char *db_get_instance_id(void);
+
+/* Insert a registry row with a fresh random instance id (lower-hex of 16
+ * random bytes). Writes the id into out_id. Returns 0 on success, -1 on error. */
+int process_register(sqlite3 *db, const char *mode, int pid, char *out_id, size_t out_sz);
+
+/* Refresh this process's heartbeat_at. Returns 0 on success. */
+int process_heartbeat(sqlite3 *db, const char *id);
+
+/* Remove this process's registry row (clean shutdown). Returns 0 on success. */
+int process_unregister(sqlite3 *db, const char *id);
+
+/* Prune dead registry rows (missed heartbeat > ttl_sec, or pid gone). Returns 0. */
+int process_gc_dead(sqlite3 *db, int ttl_sec);
+
+/* 1 if the given instance id has a fresh, pid-present registry row, else 0. */
+int process_is_live(sqlite3 *db, const char *id, int ttl_sec);
+
 /* Set session state (idle, running, waiting, error). Returns 0 on success. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state);
 int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id);
@@ -307,8 +334,11 @@ int64_t session_cost(sqlite3 *db, int64_t session_id);
 /* Rate limiting — returns 1 if under limit (ok to proceed), 0 if exceeded */
 int rate_limit_check(sqlite3 *db, const char *provider_name);
 
-/* Startup crash recovery: reset stale transient sessions to idle and reconcile
- * orphaned pending tool_calls with synthetic error results. Returns 0 on success. */
+/* Crash recovery, owner-scoped: reclaims only dead-owned stale sessions (owner
+ * absent from the processes registry) — any live instance may call it (startup
+ * and periodically) without stomping a live peer's in-flight sessions. Resets
+ * them to idle and reconciles orphaned tool_calls / llm_jobs / approvals.
+ * Returns 0 on success. */
 int db_recover_stale_sessions(sqlite3 *db);
 
 /* Scalar query helpers — single int64 bind on param 1, read column 0.

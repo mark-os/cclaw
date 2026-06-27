@@ -2,6 +2,7 @@
 #include "tool_agent.h"
 #include "tool_parse.h"
 #include "db.h"
+#include "approval.h"
 #include "wake.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -168,4 +169,133 @@ int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
     return tools_register(reg, "check_session",
                           "Check the status and result of a sub-agent session",
                           CHECK_PARAMS_JSON, tool_check_session_handler, ctx);
+}
+
+/* --- check_approval tool ---
+ * Lets an agent inspect its own approvals and re-raise a decided one. Reuses
+ * AgentLaunchCtx for the {db, session_id} it needs. */
+
+static const char *CHECK_APPROVAL_PARAMS_JSON =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"action\":{\"type\":\"string\",\"enum\":[\"status\",\"rerequest\"],"
+    "\"description\":\"'status' lists this session's approvals; 'rerequest' re-raises a decided one\"},"
+    "\"approval_id\":{\"type\":\"integer\",\"description\":\"Approval id (required for 'rerequest')\"}"
+    "},\"required\":[\"action\"]}";
+
+char *tool_check_approval_handler(const char *arguments, void *user_data) {
+    AgentLaunchCtx *ctx = (AgentLaunchCtx *)user_data;
+    if (!ctx || !ctx->db)
+        return strdup("error: check_approval not configured");
+
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0)
+        return strdup("error: invalid JSON arguments");
+
+    const char *action = targ_str(&ta, "action");
+    if (!action || !action[0]) { tool_parse_free(&ta); return strdup("error: missing action"); }
+
+    if (strcmp(action, "status") == 0) {
+        int block_sec = 60;
+        char *kv = db_kv_get(ctx->db, "approval_block_sec");
+        if (kv) { long v = strtol(kv, NULL, 10); if (v > 0) block_sec = (int)v; free(kv); }
+        tool_parse_free(&ta);
+
+        const char *sql =
+            "SELECT id, COALESCE(tool_name, action, '?'), state, COALESCE(decided_via,''),"
+            " requested_at + ?2, COALESCE(expires_at, 0)"
+            " FROM approvals WHERE session_id=?1 ORDER BY id DESC LIMIT 20;";
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(ctx->db, sql, -1, &st, NULL) != SQLITE_OK)
+            return strdup("error: db query failed");
+        sqlite3_bind_int64(st, 1, ctx->session_id);
+        sqlite3_bind_int(st, 2, block_sec);
+
+        size_t cap = 1024, len = 0;
+        char *out = malloc(cap);
+        if (!out) { sqlite3_finalize(st); return strdup("error: OOM"); }
+        len += (size_t)snprintf(out, cap, "approvals for session %lld:\n",
+                                (long long)ctx->session_id);
+        int rows = 0;
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            rows++;
+            char line[256];
+            int n = snprintf(line, sizeof(line),
+                "  #%lld %s — %s%s%s (block_until=%lld, expires_at=%lld)\n",
+                (long long)sqlite3_column_int64(st, 0),
+                (const char *)sqlite3_column_text(st, 1),
+                (const char *)sqlite3_column_text(st, 2),
+                sqlite3_column_text(st, 3) && sqlite3_column_text(st, 3)[0] ? " via " : "",
+                (const char *)sqlite3_column_text(st, 3),
+                (long long)sqlite3_column_int64(st, 4),
+                (long long)sqlite3_column_int64(st, 5));
+            if (n < 0) continue;
+            if (len + (size_t)n + 1 > cap) {
+                cap = (len + (size_t)n + 1) * 2;
+                char *tmp = realloc(out, cap);
+                if (!tmp) break;
+                out = tmp;
+            }
+            memcpy(out + len, line, (size_t)n);
+            len += (size_t)n;
+            out[len] = '\0';
+        }
+        sqlite3_finalize(st);
+        if (rows == 0) {
+            free(out);
+            return strdup("no approvals for this session");
+        }
+        return out;
+    }
+
+    if (strcmp(action, "rerequest") == 0) {
+        int aid = targ_int(&ta, "approval_id", -1);
+        if (aid < 0) { tool_parse_free(&ta); return strdup("error: missing approval_id"); }
+
+        /* Must be a terminal (decided) approval owned by this session. */
+        const char *sql =
+            "SELECT tool_name, action, args_json, resolve FROM approvals"
+            " WHERE id=?1 AND session_id=?2 AND state != 'pending';";
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(ctx->db, sql, -1, &st, NULL) != SQLITE_OK) {
+            tool_parse_free(&ta);
+            return strdup("error: db query failed");
+        }
+        sqlite3_bind_int(st, 1, aid);
+        sqlite3_bind_int64(st, 2, ctx->session_id);
+        char *tool_name = NULL, *act = NULL, *args = NULL, *resolve = NULL;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const unsigned char *c;
+            if ((c = sqlite3_column_text(st, 0))) tool_name = strdup((const char *)c);
+            if ((c = sqlite3_column_text(st, 1))) act = strdup((const char *)c);
+            if ((c = sqlite3_column_text(st, 2))) args = strdup((const char *)c);
+            if ((c = sqlite3_column_text(st, 3))) resolve = strdup((const char *)c);
+        }
+        sqlite3_finalize(st);
+        tool_parse_free(&ta);
+
+        if (!act && !tool_name) {
+            free(tool_name); free(act); free(args); free(resolve);
+            return strdup("error: no decided approval with that id in this session");
+        }
+        /* Fresh pending row, not tied to any frozen tool_call (not re-parked):
+         * a later decision is delivered to the inbox via the post-window path. */
+        int64_t new_id = approval_create(ctx->db, ctx->session_id, NULL,
+                                         tool_name, act, args, resolve);
+        free(tool_name); free(act); free(args); free(resolve);
+        if (new_id < 0) return strdup("error: failed to create approval");
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+                 "re-requested as approval #%lld — the decision will arrive in your inbox.",
+                 (long long)new_id);
+        return strdup(buf);
+    }
+
+    tool_parse_free(&ta);
+    return strdup("error: unknown action (use 'status' or 'rerequest')");
+}
+
+int tool_check_approval_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
+    return tools_register(reg, "check_approval",
+                          "Inspect this session's approvals, or re-raise a decided one",
+                          CHECK_APPROVAL_PARAMS_JSON, tool_check_approval_handler, ctx);
 }

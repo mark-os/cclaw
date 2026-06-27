@@ -436,7 +436,7 @@ void agent_grant_defaults(sqlite3 *db, const char *agent) {
         "search_config", "memory_create", "memory_add", "memory_edit",
         "memory_delete", "configure_provider", "configure_channel", "create_agent",
         "extension_promote", "extension_publish", "extension_attach", "extension_list",
-        "launch_agent", "check_session"
+        "launch_agent", "check_session", "check_approval"
     };
     for (size_t i = 0; i < sizeof(default_tools) / sizeof(default_tools[0]); i++)
         agent_config_grant(db, agent, "tool", default_tools[i], 0);

@@ -1,7 +1,7 @@
 #ifndef CCLAW_CRON_H
 #define CCLAW_CRON_H
 
-#include "types.h"
+#include <stdint.h>
 #include "sqlite3.h"
 
 /* Cron job record */
@@ -16,12 +16,8 @@ typedef struct {
     int64_t last_run_at;
 } CronJob;
 
-/* Start scheduler thread. Checks for due jobs every 60s.
- * Returns 0 on success, -1 on thread creation failure. */
-int cron_start(const Config *cfg, sqlite3 *db);
-
-/* Stop scheduler thread. Safe to call even if not started. */
-void cron_stop(void);
+/* Execute any due cron jobs now. Called from the main event loop (daemon). */
+void cron_run_due(sqlite3 *db);
 
 /* CRUD — daemon-only management (T204, V76) */
 int64_t cron_add(sqlite3 *db, const char *agent_name, const char *name,

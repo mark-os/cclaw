@@ -10,11 +10,143 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <unistd.h>
+#include <signal.h>
+#include <errno.h>
+#include <time.h>
 
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
 
 static const char *SCHEMA_SQL = TPL_SCHEMA_SQL;
+
+/* ── Process registry + per-session ownership ──────────────────────
+ * g_owner_instance is this process's instance id, set once at startup
+ * (run_daemon/run_cli) and read inside session_set_state's CAS to stamp
+ * sessions.owner_instance. Safe as a process-global: every session_set_state
+ * call site runs on the owner process's main thread (workers never transition
+ * state). Empty until set → stamps NULL (keeps standalone unit tests green). */
+static char g_owner_instance[40];
+
+void db_set_instance_id(const char *id) {
+    if (!id) { g_owner_instance[0] = '\0'; return; }
+    snprintf(g_owner_instance, sizeof(g_owner_instance), "%s", id);
+}
+
+const char *db_get_instance_id(void) { return g_owner_instance; }
+
+int process_register(sqlite3 *db, const char *mode, int pid, char *out_id, size_t out_sz) {
+    if (!db || !out_id || out_sz == 0) return -1;
+    /* id = lower(hex(randomblob(16))) — a 32-char hex token */
+    char id[40] = {0};
+    sqlite3_stmt *g;
+    if (sqlite3_prepare_v2(db, "SELECT lower(hex(randomblob(16)));", -1, &g, NULL) != SQLITE_OK)
+        return -1;
+    if (sqlite3_step(g) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(g, 0);
+        if (v) snprintf(id, sizeof(id), "%s", v);
+    }
+    sqlite3_finalize(g);
+    if (!id[0]) return -1;
+
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO processes(instance_id, pid, mode) VALUES(?,?,?);",
+            -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(s, 1, id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(s, 2, pid);
+    sqlite3_bind_text(s, 3, mode ? mode : "cli", -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    if (rc != SQLITE_DONE) return -1;
+    snprintf(out_id, out_sz, "%s", id);
+    return 0;
+}
+
+int process_heartbeat(sqlite3 *db, const char *id) {
+    if (!db || !id || !id[0]) return -1;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE processes SET heartbeat_at=unixepoch() WHERE instance_id=?;",
+            -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(s, 1, id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int process_unregister(sqlite3 *db, const char *id) {
+    if (!db || !id || !id[0]) return -1;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "DELETE FROM processes WHERE instance_id=?;",
+                           -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(s, 1, id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/* A registry row is dead iff its pid is gone (kill(pid,0) == ESRCH) OR it has
+ * not heartbeat within ttl_sec. kill==0 only suppresses the fast-path delete;
+ * the TTL covers pid reuse (a reused pid won't heartbeat our row). Single-host
+ * assumption — local SQLite means all owners share this kernel's pid space. */
+int process_gc_dead(sqlite3 *db, int ttl_sec) {
+    if (!db) return -1;
+    /* Stale heartbeat → dead, regardless of pid liveness. */
+    sqlite3_stmt *del;
+    if (sqlite3_prepare_v2(db,
+            "DELETE FROM processes WHERE unixepoch() - heartbeat_at > ?;",
+            -1, &del, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(del, 1, ttl_sec);
+        sqlite3_step(del);
+        sqlite3_finalize(del);
+    }
+    /* Among the rest, prune any whose pid no longer exists. */
+    sqlite3_stmt *sel;
+    if (sqlite3_prepare_v2(db, "SELECT instance_id, pid FROM processes;",
+                           -1, &sel, NULL) != SQLITE_OK)
+        return -1;
+    int cap = 0, n = 0;
+    char **dead = NULL;
+    while (sqlite3_step(sel) == SQLITE_ROW) {
+        const char *id = (const char *)sqlite3_column_text(sel, 0);
+        int pid = sqlite3_column_int(sel, 1);
+        if (pid > 0 && kill(pid, 0) == -1 && errno == ESRCH) {
+            if (n >= cap) { cap = cap ? cap * 2 : 8; dead = realloc(dead, (size_t)cap * sizeof(*dead)); }
+            dead[n++] = strdup(id ? id : "");
+        }
+    }
+    sqlite3_finalize(sel);
+    for (int i = 0; i < n; i++) {
+        process_unregister(db, dead[i]);
+        free(dead[i]);
+    }
+    free(dead);
+    return 0;
+}
+
+int process_is_live(sqlite3 *db, const char *id, int ttl_sec) {
+    if (!db || !id || !id[0]) return 0;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT pid, heartbeat_at FROM processes WHERE instance_id=?;",
+            -1, &s, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(s, 1, id, -1, SQLITE_STATIC);
+    int live = 0;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        int pid = sqlite3_column_int(s, 0);
+        int64_t hb = sqlite3_column_int64(s, 1);
+        int fresh = ((int64_t)time(NULL) - hb) <= ttl_sec;
+        int present = (pid > 0) && !(kill(pid, 0) == -1 && errno == ESRCH);
+        live = fresh && present;
+    }
+    sqlite3_finalize(s);
+    return live;
+}
 
 /* ── sqlite3_trace_v2 callback ─────────────────────────────────── */
 
@@ -896,27 +1028,32 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
  * awaiting_approval is reachable from llm_running/tool_running;
  * tool_running is also reachable from awaiting_approval (approval resolved). */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
+    /* Stamp ownership in the same guarded CAS: idle clears the owner (invariant
+     * state='idle' ⟺ owner_instance IS NULL), any busy state stamps this
+     * process's instance id. ?2 is g_owner_instance bound as NULL when empty
+     * (untouched unit tests), so a busy transition without an instance stamps
+     * NULL rather than "". */
     const char *sql =
-        "UPDATE sessions SET state=?, updated_at=unixepoch(),"
-        " turn_iteration = CASE WHEN ?='idle' THEN 0 ELSE turn_iteration END"
-        " WHERE id=? AND ("
-        "  (? IN ('llm_running','tool_running','compacting','rate_limited')"
+        "UPDATE sessions SET state=?1, updated_at=unixepoch(),"
+        " turn_iteration = CASE WHEN ?1='idle' THEN 0 ELSE turn_iteration END,"
+        " owner_instance = CASE WHEN ?1='idle' THEN NULL ELSE ?2 END"
+        " WHERE id=?3 AND ("
+        "  (?1 IN ('llm_running','tool_running','compacting','rate_limited')"
         "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited','awaiting_approval')) OR"
-        "  (? = 'awaiting_agent' AND state IN ('idle','llm_running','tool_running')) OR"
-        "  (? = 'awaiting_approval' AND state IN ('llm_running','tool_running')) OR"
-        "  (? = 'idle' AND state IN"
+        "  (?1 = 'awaiting_agent' AND state IN ('idle','llm_running','tool_running')) OR"
+        "  (?1 = 'awaiting_approval' AND state IN ('llm_running','tool_running')) OR"
+        "  (?1 = 'idle' AND state IN"
         "     ('llm_running','tool_running','compacting','rate_limited','awaiting_agent','awaiting_approval'))"
         ");";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(stmt, 1, state, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, state, -1, SQLITE_STATIC);
+    if (g_owner_instance[0])
+        sqlite3_bind_text(stmt, 2, g_owner_instance, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 2);
     sqlite3_bind_int64(stmt, 3, session_id);
-    sqlite3_bind_text(stmt, 4, state, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 5, state, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 6, state, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 7, state, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
@@ -1762,36 +1899,44 @@ int rate_limit_check(sqlite3 *db, const char *provider_name) {
     return used < limit ? 1 : 0;
 }
 
-/* Startup crash recovery: the daemon loop is edge-triggered, so any session
- * left in a transient/waiting state by a crash never gets re-advanced. Reset
- * them all to idle (zeroing turn_iteration) and reconcile orphaned pending
- * tool_calls — a fork happened but the result was never written — by writing a
- * synthetic error tool_result and marking the call done, so the branch stays
- * well-formed and the call is not re-dispatched. Returns 0 on success, -1 on error. */
+/* Set of session states that mean "a turn was in flight" — a crash here leaves
+ * the edge-triggered loop with no event to re-advance them. */
+#define RECOVER_STALE_STATES \
+    "('llm_running','tool_running','compacting','awaiting_agent','awaiting_approval','rate_limited')"
+
+/* Dead-owner predicate: a stale-state session whose owner is gone. owner NULL
+ * (legacy/idle-races) or an owner with no live processes row both qualify; a
+ * live peer's sessions are spared because its instance_id is still registered. */
+#define RECOVER_DEAD_OWNER \
+    "state IN " RECOVER_STALE_STATES \
+    " AND (owner_instance IS NULL" \
+    "      OR owner_instance NOT IN (SELECT instance_id FROM processes))"
+
+/* Crash recovery, owner-scoped: any live instance may call this (startup and
+ * the periodic path) and it reclaims only dead-owned stale sessions — a live
+ * peer's in-flight sessions are never stomped. For each such session: reconcile
+ * orphaned tool_calls (synthetic error result + mark done), drop its inert
+ * llm_jobs dead-letters, deny its stale pending approvals, then reset it to
+ * idle. Reconcile-before-reset matters: every step keys on the dead-owner
+ * predicate, which includes the stale state, so the reset must run last or it
+ * would clear the state the earlier steps select on. Returns 0, -1 on error. */
 int db_recover_stale_sessions(sqlite3 *db) {
     if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
         return -1;
 
-    /* a) Reset transient states + zero iteration */
-    const char *reset_sql =
-        "UPDATE sessions SET state='idle', turn_iteration=0, updated_at=unixepoch()"
-        " WHERE state IN ('llm_running','tool_running','compacting',"
-        "'awaiting_agent','awaiting_approval','rate_limited');";
-    if (sqlite3_exec(db, reset_sql, NULL, NULL, NULL) != SQLITE_OK)
-        goto rollback;
-
-    /* b) Collect orphaned tool_calls — anything that hadn't produced a result
-     * when we died. 'pending' = never dispatched; 'running' = a forked tool or
-     * sub-agent was in flight (the async state added for parallel dispatch).
-     * Both leave the assistant turn with an unanswered tool_call, so reconcile
-     * them identically: synthetic error result + mark done. */
+    /* a) Collect orphaned tool_calls for dead-owned sessions — anything that
+     * hadn't produced a result when the owner died. 'pending' = never
+     * dispatched; 'running' = a forked tool or sub-agent was in flight. Both
+     * leave the assistant turn with an unanswered tool_call, so reconcile them
+     * identically: synthetic error result + mark done. */
     const char *orphan_sql =
         "SELECT session_id, call_id, name FROM tool_calls"
         " WHERE status IN ('pending','running')"
         "   AND NOT EXISTS (SELECT 1 FROM entries e"
         "                   WHERE e.session_id = tool_calls.session_id"
         "                     AND e.tool_call_id = tool_calls.call_id"
-        "                     AND e.type='tool_result');";
+        "                     AND e.type='tool_result')"
+        "   AND session_id IN (SELECT id FROM sessions WHERE " RECOVER_DEAD_OWNER ");";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, orphan_sql, -1, &stmt, NULL) != SQLITE_OK)
         goto rollback;
@@ -1830,6 +1975,34 @@ int db_recover_stale_sessions(sqlite3 *db) {
 
     for (int i = 0; i < count; i++) { free(rows[i].call_id); free(rows[i].name); }
     free(rows);
+
+    /* b) Drop inert llm_jobs for dead-owned sessions. A crashed process's job
+     * rows are dead-letters (jobs only ever enter via in-process pool_push, and
+     * a worker deletes its own row), so no live peer will claim them — reclaim
+     * is just deletion. */
+    const char *orphan_jobs_sql =
+        "DELETE FROM llm_jobs WHERE session_id IN"
+        " (SELECT id FROM sessions WHERE " RECOVER_DEAD_OWNER ");";
+    if (sqlite3_exec(db, orphan_jobs_sql, NULL, NULL, NULL) != SQLITE_OK)
+        goto rollback;
+
+    /* c) Deny pending approvals for dead-owned sessions (their approver is
+     * gone). Keyed on the dead-owner predicate directly — must precede the
+     * reset, which would otherwise clear the stale state this selects on. */
+    const char *orphan_approvals_sql =
+        "UPDATE approvals SET state='denied', decided_via='recovery'"
+        " WHERE state='pending'"
+        "   AND session_id IN (SELECT id FROM sessions WHERE " RECOVER_DEAD_OWNER ");";
+    if (sqlite3_exec(db, orphan_approvals_sql, NULL, NULL, NULL) != SQLITE_OK)
+        goto rollback;
+
+    /* d) Reset the dead-owned stale sessions to idle (clearing owner + zeroing
+     * iteration). Runs last so the predicate still matched for steps a–c. */
+    const char *reset_sql =
+        "UPDATE sessions SET state='idle', turn_iteration=0, owner_instance=NULL,"
+        " updated_at=unixepoch() WHERE " RECOVER_DEAD_OWNER ";";
+    if (sqlite3_exec(db, reset_sql, NULL, NULL, NULL) != SQLITE_OK)
+        goto rollback;
 
     if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
         return -1;

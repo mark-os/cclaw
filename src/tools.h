@@ -5,7 +5,7 @@
 #include "sqlite3.h"
 #include <stddef.h>
 
-#define TOOLS_MAX 32
+#define TOOLS_MAX 48
 
 /* Tool handler function. Returns heap-allocated result string (never NULL). */
 typedef char *(*ToolHandlerFn)(const char *arguments, void *user_data);

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static void test_valid_transitions(void) {
     sqlite3 *db = test_db_open(":memory:");
@@ -203,7 +204,99 @@ static void test_startup_recovery(void) {
     printf("  PASS test_startup_recovery\n");
 }
 
+static char *get_owner(sqlite3 *db, int64_t sid) {
+    return db_scalar_text(db, "SELECT owner_instance FROM sessions WHERE id=?;", sid);
+}
+
+static void test_owner_instance_stamping(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
+    int64_t sid = session_create(db, "t", NULL, -1, 0);
+    assert(sid > 0);
+
+    /* With no instance set, busy state stamps NULL */
+    assert(session_set_state(db, sid, "llm_running") == 0);
+    char *owner = get_owner(db, sid);
+    assert(owner == NULL);
+    assert(session_set_state(db, sid, "idle") == 0);
+    owner = get_owner(db, sid);
+    assert(owner == NULL);
+
+    /* Set an instance id, busy state stamps it */
+    db_set_instance_id("test-inst-001");
+    assert(session_set_state(db, sid, "llm_running") == 0);
+    owner = get_owner(db, sid);
+    assert(owner && strcmp(owner, "test-inst-001") == 0);
+    free(owner);
+
+    /* idle clears owner_instance */
+    assert(session_set_state(db, sid, "idle") == 0);
+    owner = get_owner(db, sid);
+    assert(owner == NULL);
+
+    /* Reset global for other tests */
+    db_set_instance_id(NULL);
+    db_close(db);
+    printf("  PASS test_owner_instance_stamping\n");
+}
+
+static void test_recovery_owner_scoped(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
+
+    /* Register a live process */
+    char live_id[64];
+    assert(process_register(db, "cli", getpid(), live_id, sizeof(live_id)) == 0);
+
+    /* Session 1: transient, owned by the live process — should NOT be reset */
+    int64_t s1 = session_create(db, "t", NULL, -1, 0);
+    assert(s1 > 0);
+    force_state(db, s1, "llm_running", 3);
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+        "UPDATE sessions SET owner_instance='%s' WHERE id=%lld;",
+        live_id, (long long)s1);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+
+    /* Session 2: transient, owned by a dead (unregistered) instance */
+    int64_t s2 = session_create(db, "t", NULL, -1, 0);
+    assert(s2 > 0);
+    force_state(db, s2, "tool_running", 5);
+    snprintf(sql, sizeof(sql),
+        "UPDATE sessions SET owner_instance='dead-instance-xyz' WHERE id=%lld;",
+        (long long)s2);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+
+    /* Session 3: transient, NULL owner — should be reset */
+    int64_t s3 = session_create(db, "t", NULL, -1, 0);
+    assert(s3 > 0);
+    force_state(db, s3, "compacting", 2);
+
+    /* Recover */
+    assert(db_recover_stale_sessions(db) == 0);
+
+    /* s1 untouched (live owner) */
+    char *st = db_scalar_text(db, "SELECT state FROM sessions WHERE id=?;", s1);
+    assert(st && strcmp(st, "llm_running") == 0);
+    free(st);
+
+    /* s2 reset (dead owner) */
+    st = db_scalar_text(db, "SELECT state FROM sessions WHERE id=?;", s2);
+    assert(st && strcmp(st, "idle") == 0);
+    free(st);
+
+    /* s3 reset (NULL owner) */
+    st = db_scalar_text(db, "SELECT state FROM sessions WHERE id=?;", s3);
+    assert(st && strcmp(st, "idle") == 0);
+    free(st);
+
+    process_unregister(db, live_id);
+    db_close(db);
+    printf("  PASS test_recovery_owner_scoped\n");
+}
+
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_session_state:\n");
     test_valid_transitions();
     test_invalid_transitions();
@@ -211,6 +304,8 @@ int main(void) {
     test_turn_iteration();
     test_waiting_transition();
     test_startup_recovery();
+    test_owner_instance_stamping();
+    test_recovery_owner_scoped();
     printf("All session state tests passed.\n");
     return 0;
 }

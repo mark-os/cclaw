@@ -233,7 +233,7 @@ static void test_approval_list_expired(void) {
 
     /* Not expired yet */
     int count = 0;
-    int64_t *ids = approval_list_expired(db, &count);
+    int64_t *ids = approval_list_expired(db, NULL, &count);
     assert(count == 0 && ids == NULL);
 
     /* Force it expired */
@@ -243,7 +243,7 @@ static void test_approval_list_expired(void) {
              (long long)id);
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 
-    ids = approval_list_expired(db, &count);
+    ids = approval_list_expired(db, NULL, &count);
     assert(count == 1);
     assert(ids[0] == id);
     free(ids);
@@ -252,7 +252,7 @@ static void test_approval_list_expired(void) {
     int64_t id2 = approval_create(db, sid, "call_f", "request_config",
                                   "grant_host", "{\"host\":\"fresh.com\"}", "apply");
     assert(id2 > 0);
-    ids = approval_list_expired(db, &count);
+    ids = approval_list_expired(db, NULL, &count);
     assert(count == 1);
     assert(ids[0] == id);
     free(ids);

@@ -279,3 +279,13 @@ del:;
     }
     sqlite3_finalize(stmt);
 }
+
+time_t channel_next_deadline(void) {
+    time_t earliest = 0;
+    for (int i = 0; i < g_count; i++) {
+        time_t t = g_channels[i].next_restart_at;
+        if (t > 0 && (earliest == 0 || t < earliest))
+            earliest = t;
+    }
+    return earliest;
+}

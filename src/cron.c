@@ -4,17 +4,11 @@
 #include "db.h"
 #include "wake.h"
 #include "db.h"
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-
-static pthread_t cron_thread;
-static volatile int cron_running;
-static const Config *cron_cfg;
-static sqlite3 *cron_db;
 
 /* Parse a single cron field. Supports: star, N, N-M, star/N, N-M/S, comma-separated.
  * Sets bits in out for values in [min, max]. Returns 0 on success. */
@@ -200,24 +194,20 @@ void cron_list_free(CronJob *jobs, int count) {
 }
 
 /* Insert cron task into inbox and signal daemon to process */
-static void execute_job(const char *agent_name, int64_t session_id, const char *task) {
-    if (agent_name && agent_name[0]) {
-        inbox_insert_scanned(cron_db, session_id, "cron", task);
-        wake_session(session_id);
-    } else {
-        inbox_insert_scanned(cron_db, session_id, "cron", task);
-        wake_session(session_id);
-    }
+static void execute_job(sqlite3 *db, const char *agent_name, int64_t session_id, const char *task) {
+    (void)agent_name;
+    inbox_insert_scanned(db, session_id, "cron", task);
+    wake_session(session_id);
 }
 
 /* Check and execute due cron jobs */
-static void run_due_jobs(void) {
+static void run_due_jobs(sqlite3 *db) {
     int64_t now = (int64_t)time(NULL);
     const char *sql =
         "SELECT id, cron_expr, session_id, task, agent_name FROM cron_jobs"
         " WHERE enabled=1 AND next_run_at <= ?;";
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(cron_db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return;
     sqlite3_bind_int64(stmt, 1, now);
 
@@ -258,14 +248,14 @@ static void run_due_jobs(void) {
     /* Execute each due job */
     for (int i = 0; i < count; i++) {
         if (due[i].task)
-            execute_job(due[i].agent_name, due[i].session_id, due[i].task);
+            execute_job(db, due[i].agent_name, due[i].session_id, due[i].task);
 
         /* Update last_run_at and next_run_at */
         int64_t next = cron_next_run(due[i].expr, now);
         const char *upd =
             "UPDATE cron_jobs SET last_run_at=?, next_run_at=? WHERE id=?;";
         sqlite3_stmt *ustmt;
-        if (sqlite3_prepare_v2(cron_db, upd, -1, &ustmt, NULL) == SQLITE_OK) {
+        if (sqlite3_prepare_v2(db, upd, -1, &ustmt, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(ustmt, 1, now);
             sqlite3_bind_int64(ustmt, 2, next > 0 ? next : now + 3600);
             sqlite3_bind_int64(ustmt, 3, due[i].id);
@@ -279,34 +269,6 @@ static void run_due_jobs(void) {
     free(due);
 }
 
-static void *cron_loop(void *arg) {
-    (void)arg;
-    while (cron_running) {
-        /* Sleep 60s in 1s increments for responsive shutdown */
-        for (int i = 0; i < 60 && cron_running; i++)
-            sleep(1);
-        if (cron_running)
-            run_due_jobs();
-    }
-    return NULL;
-}
-
-int cron_start(const Config *cfg, sqlite3 *db) {
-    if (!cfg || !db) return -1;
-
-    cron_cfg = cfg;
-    cron_db = db;
-    cron_running = 1;
-
-    if (pthread_create(&cron_thread, NULL, cron_loop, NULL) != 0) {
-        cron_running = 0;
-        return -1;
-    }
-    return 0;
-}
-
-void cron_stop(void) {
-    if (!cron_running) return;
-    cron_running = 0;
-    pthread_join(cron_thread, NULL);
+void cron_run_due(sqlite3 *db) {
+    run_due_jobs(db);
 }

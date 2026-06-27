@@ -12,7 +12,8 @@ INSERT OR IGNORE INTO config(key, value) VALUES
   ('health_5xx_threshold',  '3'),
   ('health_429_threshold',  '10'),
   ('health_window_sec',     '300'),
-  ('health_cooldown_sec',   '300');
+  ('health_cooldown_sec',   '300'),
+  ('approval_block_sec',    '60');
 
 -- ═══ Default provider ═══
 INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)

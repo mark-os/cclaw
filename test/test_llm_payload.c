@@ -48,7 +48,6 @@ static void test_openai_payload(void) {
     cfg.provider.max_tokens = 1024;
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
     cfg.provider.context_window = 128000;
-    cfg.stream = 1;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
@@ -84,11 +83,11 @@ static void test_openai_payload(void) {
     assert(c && strstr(c, "Hello \"world\""));
     sqlite3_finalize(s);
 
-    /* Check stream flag */
+    /* Stream key must never be emitted (streaming removed) */
     sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.stream')", -1, &s, NULL);
     sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(sqlite3_column_int(s, 0) == 1);
+    assert(sqlite3_column_type(s, 0) == SQLITE_NULL);
     sqlite3_finalize(s);
 
     /* Check max_tokens */
@@ -120,7 +119,6 @@ static void test_openai_payload_no_stream_omits_nulls(void) {
     cfg.provider.max_tokens = 0;
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
     cfg.provider.context_window = 128000;
-    cfg.stream = 0;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);

@@ -1178,13 +1178,8 @@ static void deliver_response(int64_t session_id) {
         /* CLI stdout belongs to the root session's turn. A sub-agent finishing
          * routes its result to the parent's tool_call (advance.c), not stdout. */
         if (session_id != g_cli_session) return;
-        /* streaming wrote to stdout already, just newline */
-        if (g_cfg->stream)
-            printf("\n");
-        else {
-            char *text = get_response_text(g_db, session_id);
-            if (text) { printf("%s\n", text); free(text); }
-        }
+        char *text = get_response_text(g_db, session_id);
+        if (text) { printf("%s\n", text); free(text); }
         g_cli_turn_active = 0;
         return;
     }
@@ -2037,7 +2032,6 @@ static int run_cli(char *db_path, const char *prompt,
         }
     }
     if (host_mode) setenv("CCLAW_TRUST_LEVEL", "host", 1);
-    if (!getenv("CCLAW_STREAM")) { setenv("CCLAW_STREAM", "1", 1); g_cfg->stream = 1; }
     setenv("CCLAW_MODE", "cli", 1);
     workspace_init(g_cfg);
     /* Make the workspace the process cwd so relative paths, shell children, and
@@ -2341,7 +2335,6 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--trace") == 0 || strcmp(argv[i], "-vv") == 0) { log_level_override = LOG_LEVEL_TRACE; log_level_set = 1; }
         else if (strcmp(argv[i], "--new") == 0) new_session = 1;
         else if (strcmp(argv[i], "-y") == 0) host_mode = 1;
-        else if (strcmp(argv[i], "--no-stream") == 0) setenv("CCLAW_STREAM", "0", 1);
         else if (strncmp(argv[i], "--llm-threads=", 14) == 0) g_llm_threads = atoi(argv[i]+14);
         else if (strcmp(argv[i], "-p") == 0) { if (++i >= argc) { fprintf(stderr, "-p requires arg\n"); return 1; } prompt = argv[i]; }
         else if (strcmp(argv[i], "-s") == 0) { if (++i >= argc) { fprintf(stderr, "-s requires arg\n"); return 1; } session_id = atoll(argv[i]); }

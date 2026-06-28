@@ -1,46 +1,74 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <sqlite3.h>
-#include "llm.h"
+#include <assert.h>
+#include "db_response.h"
+#include "db.h"
+#include "test_util.h"
+
+/* db_ingest_response: parse a response body straight into entries + tool_calls. */
 
 static int tests_run = 0;
 static int tests_passed = 0;
-static sqlite3 *g_db;
 
 #define TEST(name) do { tests_run++; printf("  %s... ", #name); } while(0)
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); } while(0)
+#define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while(0)
 
-static void test_parse_content_response(void) {
-    TEST(parse_content_response);
-    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
+static sqlite3 *fresh_db(int64_t *sid_out) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
+    sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS tool_calls ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  session_id INTEGER NOT NULL, entry_id INTEGER NOT NULL,"
+        "  call_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT,"
+        "  status TEXT NOT NULL DEFAULT 'pending', result_entry_id INTEGER);",
+        NULL, NULL, NULL);
+    *sid_out = session_create(db, "t", NULL, -1, 0);
+    return db;
+}
+
+/* Fetch assistant_message content for a session (NULL-safe; caller frees). */
+static char *asst_content(sqlite3 *db, int64_t sid) {
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "SELECT content FROM entries WHERE session_id=? AND type='assistant_message'"
+        " ORDER BY id DESC LIMIT 1;", -1, &s, NULL);
+    sqlite3_bind_int64(s, 1, sid);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        r = t ? strdup(t) : NULL;
+    }
+    sqlite3_finalize(s);
+    return r;
+}
+
+static void test_content_response(void) {
+    TEST(content_response);
+    int64_t sid; sqlite3 *db = fresh_db(&sid);
 
     const char *json =
         "{\"choices\":[{\"message\":{\"content\":\"Hello world\",\"role\":\"assistant\"},"
         "\"finish_reason\":\"stop\"}],"
         "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}";
 
-    LlmResponse resp;
-    int rc = llm_parse_response(g_db, a, json, &resp);
-    if (rc != 0) { FAIL("parse failed"); arena_destroy(a); return; }
-    if (!resp.content || strcmp(resp.content, "Hello world") != 0) {
-        FAIL("wrong content"); arena_destroy(a); return;
-    }
-    if (resp.tool_call_count != 0) { FAIL("unexpected tool_calls"); arena_destroy(a); return; }
-    if (resp.usage.prompt_tokens != 10 || resp.usage.completion_tokens != 5 || resp.usage.total_tokens != 15) {
-        FAIL("wrong usage"); arena_destroy(a); return;
-    }
-    if (!resp.finish_reason || strcmp(resp.finish_reason, "stop") != 0) {
-        FAIL("wrong finish_reason"); arena_destroy(a); return;
-    }
-
-    arena_destroy(a);
+    TypedIngestResult ir;
+    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, &ir);
+    if (st != LLM_RESP_OK) FAIL("ingest failed");
+    if (ir.prompt_tokens != 10 || ir.completion_tokens != 5) FAIL("wrong usage");
+    char *c = asst_content(db, sid);
+    if (!c || strcmp(c, "Hello world") != 0) { free(c); FAIL("wrong content"); }
+    free(c);
+    db_close(db);
     PASS();
 }
 
-static void test_parse_tool_calls_response(void) {
-    TEST(parse_tool_calls_response);
-    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
+static void test_tool_calls_response(void) {
+    TEST(tool_calls_response);
+    int64_t sid; sqlite3 *db = fresh_db(&sid);
 
     const char *json =
         "{\"choices\":[{\"message\":{\"content\":null,\"role\":\"assistant\","
@@ -49,69 +77,64 @@ static void test_parse_tool_calls_response(void) {
         "\"finish_reason\":\"tool_calls\"}],"
         "\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":10,\"total_tokens\":30}}";
 
-    LlmResponse resp;
-    int rc = llm_parse_response(g_db, a, json, &resp);
-    if (rc != 0) { FAIL("parse failed"); arena_destroy(a); return; }
-    if (resp.content != NULL) { FAIL("content should be NULL"); arena_destroy(a); return; }
-    if (resp.tool_call_count != 1) { FAIL("wrong tool_call_count"); arena_destroy(a); return; }
-    if (strcmp(resp.tool_calls[0].id, "call_abc") != 0) { FAIL("wrong tc id"); arena_destroy(a); return; }
-    if (strcmp(resp.tool_calls[0].name, "shell_exec") != 0) { FAIL("wrong tc name"); arena_destroy(a); return; }
-    if (strcmp(resp.tool_calls[0].arguments, "{\"cmd\":\"ls\"}") != 0) { FAIL("wrong tc args"); arena_destroy(a); return; }
-    if (!resp.finish_reason || strcmp(resp.finish_reason, "tool_calls") != 0) {
-        FAIL("wrong finish_reason"); arena_destroy(a); return;
-    }
+    TypedIngestResult ir;
+    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, &ir);
+    if (st != LLM_RESP_OK) FAIL("ingest failed");
 
-    arena_destroy(a);
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "SELECT call_id, name, arguments FROM tool_calls WHERE session_id=?;", -1, &s, NULL);
+    sqlite3_bind_int64(s, 1, sid);
+    if (sqlite3_step(s) != SQLITE_ROW) { sqlite3_finalize(s); FAIL("no tool_call row"); }
+    if (strcmp((const char *)sqlite3_column_text(s, 0), "call_abc") != 0) { sqlite3_finalize(s); FAIL("wrong tc id"); }
+    if (strcmp((const char *)sqlite3_column_text(s, 1), "shell_exec") != 0) { sqlite3_finalize(s); FAIL("wrong tc name"); }
+    if (strcmp((const char *)sqlite3_column_text(s, 2), "{\"cmd\":\"ls\"}") != 0) { sqlite3_finalize(s); FAIL("wrong tc args"); }
+    sqlite3_finalize(s);
+    db_close(db);
     PASS();
 }
 
-static void test_parse_invalid_json(void) {
-    TEST(parse_invalid_json);
-    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
-
-    LlmResponse resp;
-    int rc = llm_parse_response(g_db, a, "not json", &resp);
-    if (rc != -1) { FAIL("should fail on invalid JSON"); arena_destroy(a); return; }
-
-    rc = llm_parse_response(g_db, a, NULL, &resp);
-    if (rc != -1) { FAIL("should fail on NULL"); arena_destroy(a); return; }
-
-    rc = llm_parse_response(g_db, a, "{\"choices\":[]}", &resp);
-    if (rc != -1) { FAIL("should fail on empty choices"); arena_destroy(a); return; }
-
-    arena_destroy(a);
+static void test_malformed(void) {
+    TEST(malformed);
+    int64_t sid; sqlite3 *db = fresh_db(&sid);
+    TypedIngestResult ir;
+    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "not json", &ir) != LLM_RESP_MALFORMED)
+        FAIL("should fail on invalid JSON");
+    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, NULL, &ir) != LLM_RESP_MALFORMED)
+        FAIL("should fail on NULL");
+    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "{\"choices\":[]}", &ir) != LLM_RESP_MALFORMED)
+        FAIL("should fail on empty choices");
+    db_close(db);
     PASS();
 }
 
-static void test_parse_cost_field(void) {
-    TEST(parse_cost_field);
-    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
-
+static void test_cost_field(void) {
+    TEST(cost_field);
+    int64_t sid; sqlite3 *db = fresh_db(&sid);
     const char *json =
         "{\"choices\":[{\"message\":{\"content\":\"hi\",\"role\":\"assistant\"},"
         "\"finish_reason\":\"stop\"}],"
         "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"total_tokens\":105,"
         "\"cost\":0.000072112}}";
 
-    LlmResponse resp;
-    int rc = llm_parse_response(g_db, a, json, &resp);
-    if (rc != 0) { FAIL("parse failed"); arena_destroy(a); return; }
-    if (resp.usage.cost_nano != 72112) {
-        char buf[64]; snprintf(buf, sizeof(buf), "expected 72112, got %lld", (long long)resp.usage.cost_nano);
-        FAIL(buf); arena_destroy(a); return;
+    TypedIngestResult ir;
+    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, &ir);
+    if (st != LLM_RESP_OK) FAIL("ingest failed");
+    if (ir.cost_nano != 72112) {
+        char buf[64]; snprintf(buf, sizeof(buf), "expected 72112, got %lld", (long long)ir.cost_nano);
+        FAIL(buf);
     }
-    arena_destroy(a);
+    db_close(db);
     PASS();
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     printf("--- test_llm ---\n");
-    sqlite3_open(":memory:", &g_db);
-    test_parse_content_response();
-    test_parse_tool_calls_response();
-    test_parse_invalid_json();
-    test_parse_cost_field();
-    sqlite3_close(g_db);
+    test_content_response();
+    test_tool_calls_response();
+    test_malformed();
+    test_cost_field();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

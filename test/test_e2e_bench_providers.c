@@ -19,7 +19,6 @@
 #include <unistd.h>
 #include "llm.h"
 #include "http.h"
-#include "arena.h"
 #include "db.h"
 #include <sqlite3.h>
 
@@ -54,8 +53,6 @@ static long elapsed_ms(struct timespec *start, struct timespec *end) {
 static int do_turn(const char *api_key, const char *model,
                    const char *session_id, Message *msgs, int msg_count,
                    TurnResult *out) {
-    Arena *a = arena_create(512 * 1024);
-
     /* Build messages JSON via SQLite */
     sqlite3_exec(g_bench_db, "DROP TABLE IF EXISTS _bmsg;", NULL, NULL, NULL);
     sqlite3_exec(g_bench_db,
@@ -88,7 +85,7 @@ static int do_turn(const char *api_key, const char *model,
         if (t) body = strdup(t);
     }
     sqlite3_finalize(bld);
-    if (!body) { arena_destroy(a); return -1; }
+    if (!body) return -1;
 
     char auth_hdr[256];
     snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s", api_key);
@@ -113,26 +110,34 @@ static int do_turn(const char *api_key, const char *model,
     if (status != 200) {
         fprintf(stderr, "    HTTP %d: %.100s\n", status, resp.data ? resp.data : "");
         http_response_free(&resp);
-        arena_destroy(a);
         return -1;
     }
 
-    LlmResponse llm = {0};
-    if (llm_parse_response(g_bench_db, a, resp.data, &llm) != 0) {
-        fprintf(stderr, "    parse error: %.100s\n", resp.data ? resp.data : "");
+    /* Extract usage scalars straight from the body (incl. cache details). */
+    sqlite3_stmt *us;
+    if (sqlite3_prepare_v2(g_bench_db,
+            "SELECT json_extract(?1,'$.usage.prompt_tokens'),"
+            " json_extract(?1,'$.usage.completion_tokens'),"
+            " COALESCE(json_extract(?1,'$.usage.prompt_tokens_details.cached_tokens'),"
+            "          json_extract(?1,'$.usage.prompt_cache_hit_tokens')),"
+            " json_extract(?1,'$.usage.prompt_tokens_details.cache_write_tokens'),"
+            " COALESCE(json_extract(?1,'$.usage.cost'), json_extract(?1,'$.usage.total_cost'))",
+            -1, &us, NULL) != SQLITE_OK) {
         http_response_free(&resp);
-        arena_destroy(a);
         return -1;
     }
-
-    out->prompt_tokens = llm.usage.prompt_tokens;
-    out->completion_tokens = llm.usage.completion_tokens;
-    out->cache_read = llm.usage.cache_read_tokens;
-    out->cache_write = llm.usage.cache_write_tokens;
-    out->cost_nano = llm.usage.cost_nano;
+    sqlite3_bind_text(us, 1, resp.data, -1, SQLITE_STATIC);
+    if (sqlite3_step(us) == SQLITE_ROW) {
+        out->prompt_tokens = sqlite3_column_int(us, 0);
+        out->completion_tokens = sqlite3_column_int(us, 1);
+        out->cache_read = sqlite3_column_int(us, 2);
+        out->cache_write = sqlite3_column_int(us, 3);
+        if (sqlite3_column_type(us, 4) != SQLITE_NULL)
+            out->cost_nano = (int64_t)(sqlite3_column_double(us, 4) * 1e9 + 0.5);
+    }
+    sqlite3_finalize(us);
 
     http_response_free(&resp);
-    arena_destroy(a);
     return 0;
 }
 

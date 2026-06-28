@@ -11,7 +11,6 @@
 #include "llm_payload.h"
 #include "llm_transport.h"
 #include "log.h"
-#include "arena.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -114,16 +113,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     Config *cfg = config_load(db);
     if (!cfg) { fprintf(stderr, "llm_req: config load failed\n"); return -1; }
 
-    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
-    if (!a) { config_free(cfg); return -1; }
-
     char *agent_name_alloc = session_get_agent_name(db, session_id);
     const char *agent_name = agent_name_alloc ? agent_name_alloc : "default";
-
-    /* Sub-agents (depth > 0) must not stream tokens to stdout — only the root
-     * CLI session owns the terminal. With parallel sub-agents several run at
-     * once; their output is collected via the DB, not interleaved on screen. */
-    int suppress_stream = session_get_depth(db, session_id) > 0;
 
     /* Estimate tool overhead for context budget */
     int tool_overhead = 0;
@@ -180,40 +171,21 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         fread(mock_data, 1, (size_t)flen, f); mock_data[flen] = '\0';
         fclose(f);
 
-        LlmResponse llm_resp; memset(&llm_resp, 0, sizeof(llm_resp));
-        int rc;
-        if (cfg->provider.endpoint_type == ENDPOINT_GEMINI)
-            rc = llm_parse_response_gemini(db, a, mock_data, &llm_resp);
-        else
-            rc = llm_parse_response(db, a, mock_data, &llm_resp);
-        free(mock_data);
-        if (rc != 0) goto err;
-        goto ingest_response;
-
-    ingest_response: ;
         int64_t turn_id = db_next_turn_id(db, session_id);
-        const char **tc_ids = NULL, **tc_names = NULL, **tc_args = NULL;
-        int tcc = (int)llm_resp.tool_call_count;
-        if (tcc > 0) {
-            tc_ids = arena_alloc(a, (size_t)tcc * sizeof(char *));
-            tc_names = arena_alloc(a, (size_t)tcc * sizeof(char *));
-            tc_args = arena_alloc(a, (size_t)tcc * sizeof(char *));
-            if (!tc_ids || !tc_names || !tc_args) goto err;
-            for (int i = 0; i < tcc; i++) {
-                tc_ids[i] = llm_resp.tool_calls[i].id;
-                tc_names[i] = llm_resp.tool_calls[i].name;
-                tc_args[i] = llm_resp.tool_calls[i].arguments;
-            }
-        }
         TypedIngestResult ir;
-        db_ingest_typed(db, session_id, turn_id, cfg->provider.model,
-                        llm_resp.content, llm_resp.reasoning, llm_resp.finish_reason,
-                        llm_resp.usage.prompt_tokens, llm_resp.usage.completion_tokens,
-                        llm_resp.usage.cost_nano, tc_ids, tc_names, tc_args, tcc, &ir);
-        free(ir.tc_entry_ids);
+        LlmRespStatus st = db_ingest_response(db, session_id, turn_id,
+                               cfg->provider.model, cfg->provider.endpoint_type,
+                               mock_data, &ir);
+        free(mock_data);
+
+        if (st != LLM_RESP_OK) {
+            Message err_msg = {.role = ROLE_ASSISTANT, .content = "error: malformed LLM response",
+                               .stop_reason = STOP_REASON_ERROR, .model = cfg->provider.model};
+            entry_append_with_turn(db, session_id, &err_msg, 0);
+        }
         free(recall_text); free(system_prompt); context_plan_free(&plan);
-        arena_destroy(a); config_free(cfg); free(agent_name_alloc);
-        return 0;
+        config_free(cfg); free(agent_name_alloc);
+        return (st == LLM_RESP_OK) ? 0 : -1;
     }
 
     /* ── Routing state machine ─────────────────────────────────── */
@@ -235,9 +207,11 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     uint32_t skip_mask = 0;
     int last_status = -1;
     int llm_ok = 0;
-    LlmResponse llm_resp;
-    memset(&llm_resp, 0, sizeof(llm_resp));
-    const char *used_model_id = NULL;
+
+    /* One turn id for this user-turn: every raw response archived below (the
+     * failed attempts and the final ingest) shares it. db_next_turn_id is a
+     * pure read, so it stays stable until the success path inserts entries. */
+    int64_t turn_id = db_next_turn_id(db, session_id);
 
     for (int mi = 0; mi < nmodels && !llm_ok; mi++) {
         if (skip_mask & (1u << mi)) continue;
@@ -245,7 +219,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
         /* Build config for this model */
         Config route_cfg = *cfg;
-        if (suppress_stream) route_cfg.stream = 0;
         ProviderConfig route_prov = cfg->provider;
         route_prov.base_url = m->base_url;
         route_prov.model = m->model;
@@ -263,9 +236,9 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         }
 
         /* Build URL + auth */
-        char *url = llm_build_url(a, &route_cfg);
-        char *auth = llm_build_auth_header(a, &route_cfg);
-        if (!url || !auth) { llm_payload_release(&payload); free(key_buf); continue; }
+        char *url = llm_build_url(&route_cfg);
+        char *auth = llm_build_auth_header(&route_cfg);
+        if (!url || !auth) { free(url); free(auth); llm_payload_release(&payload); free(key_buf); continue; }
 
         char session_hdr[64];
         snprintf(session_hdr, sizeof(session_hdr), "x-session-id: cclaw-%lld", (long long)session_id);
@@ -274,15 +247,11 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         /* Inner loop: 429 retry */
         for (int retry = 0; retry <= MAX_429_RETRIES; retry++) {
             HttpResponse resp = {0};
-            SseCtx sse_ctx = {0};
             struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
 
             HttpRequestOpts opts = {
                 .url = url, .method = "POST", .headers = headers,
                 .body = payload.body, .curl_handle = curl,
-                .sse_cb = route_cfg.stream ? llm_sse_stdout_cb : NULL,
-                .sse_data = NULL,
-                .out_ctx = route_cfg.stream ? &sse_ctx : NULL,
             };
             int status = http_do(&opts, &resp);
 
@@ -294,10 +263,21 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             if (cfg->log_level >= LOG_LEVEL_TRACE && resp.data)
                 LOG_TRACE_(cfg, "RESP %s", resp.data);
 
+            /* Archive every non-2xx / network response (2xx bodies are archived
+             * by db_ingest_response below). */
+            if (status < 200 || status >= 300) {
+                char lbl[24];
+                if (status == -2) snprintf(lbl, sizeof(lbl), "timeout");
+                else if (status < 0) snprintf(lbl, sizeof(lbl), "network_error");
+                else snprintf(lbl, sizeof(lbl), "http_%d", status);
+                db_archive_response(db, session_id, turn_id, m->id, lbl,
+                                    resp.data ? resp.data : resp.err_detail);
+            }
+
             /* 429: retry with backoff */
             if (status == 429) {
                 int wait = resp.retry_after > 0 ? resp.retry_after : (1 << retry);
-                http_response_free(&resp); sse_ctx_free(&sse_ctx);
+                http_response_free(&resp);
                 model_stat_error(db, m->id, 429);
                 if (retry < MAX_429_RETRIES) { sleep((unsigned)wait); continue; }
                 break;
@@ -305,55 +285,50 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             /* 5xx: retry with backoff, degrade after exhaustion */
             if (status >= 500 && status < 600) {
                 int wait = resp.retry_after > 0 ? resp.retry_after : (1 << retry);
-                http_response_free(&resp); sse_ctx_free(&sse_ctx);
+                http_response_free(&resp);
                 model_stat_error(db, m->id, status);
                 if (retry < MAX_429_RETRIES) { sleep((unsigned)wait); continue; }
                 break;
             }
             /* Prompt-specific errors: skip this model */
             if (status == 400 && llm_is_context_overflow(resp.data)) {
-                http_response_free(&resp); sse_ctx_free(&sse_ctx);
+                http_response_free(&resp);
                 skip_mask |= (1u << mi); break;
             }
             if (status == 401 || status == 403 || status == 404) {
-                http_response_free(&resp); sse_ctx_free(&sse_ctx);
+                http_response_free(&resp);
                 skip_mask |= (1u << mi); break;
             }
             /* Network/timeout error */
             if (status < 0) {
-                http_response_free(&resp); sse_ctx_free(&sse_ctx);
+                http_response_free(&resp);
                 break;
             }
             /* Non-2xx */
             if (status < 200 || status >= 300) {
-                http_response_free(&resp); sse_ctx_free(&sse_ctx);
+                http_response_free(&resp);
                 break;
             }
 
-            /* ── Parse response ────────────────────────────────── */
-            int rc;
-            if (route_cfg.stream)
-                rc = llm_response_from_sse(a, &sse_ctx, &llm_resp);
-            else if (route_cfg.provider.endpoint_type == ENDPOINT_GEMINI)
-                rc = llm_parse_response_gemini(db, a, resp.data, &llm_resp);
-            else
-                rc = llm_parse_response(db, a, resp.data, &llm_resp);
-            http_response_free(&resp); sse_ctx_free(&sse_ctx);
+            /* ── Ingest response straight to the DB (zero-copy: resp.data
+             * outlives the bind, so free it only after ingest). ── */
+            TypedIngestResult ir;
+            LlmRespStatus st = db_ingest_response(db, session_id, turn_id,
+                                   m->id, route_cfg.provider.endpoint_type,
+                                   resp.data, &ir);
+            http_response_free(&resp);
 
-            if (rc != 0 || !llm_resp.finish_reason) break; /* parse failure */
-
-            /* Zero-usage empty stop (provider glitch) */
-            if (llm_resp.usage.total_tokens == 0 &&
-                (!llm_resp.content || !llm_resp.content[0]) &&
-                strcmp(llm_resp.finish_reason, "stop") == 0) {
-                skip_mask |= (1u << mi); break; /* try next model */
+            if (st == LLM_RESP_OK) {
+                model_stat_success(db, m->id, ir.prompt_tokens, ir.completion_tokens, ir.cost_nano);
+                llm_ok = 1;
+                break;
             }
-
-            used_model_id = m->id;
-            llm_ok = 1;
+            if (st == LLM_RESP_EMPTY) { skip_mask |= (1u << mi); break; }
+            /* LLM_RESP_MALFORMED: try next model */
             break;
         }
 
+        free(url); free(auth);
         llm_payload_release(&payload);
         free(key_buf);
     }
@@ -377,38 +352,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         goto err;
     }
 
-    /* ── Write response to DB ──────────────────────────────────── */
-    model_stat_success(db, used_model_id,
-                       llm_resp.usage.prompt_tokens,
-                       llm_resp.usage.completion_tokens,
-                       llm_resp.usage.cost_nano);
-
-    int64_t turn_id = db_next_turn_id(db, session_id);
-    const char **tc_ids = NULL, **tc_names = NULL, **tc_args = NULL;
-    int tc_count = (int)llm_resp.tool_call_count;
-    if (tc_count > 0) {
-        tc_ids = arena_alloc(a, (size_t)tc_count * sizeof(char *));
-        tc_names = arena_alloc(a, (size_t)tc_count * sizeof(char *));
-        tc_args = arena_alloc(a, (size_t)tc_count * sizeof(char *));
-        if (!tc_ids || !tc_names || !tc_args) goto err;
-        for (int i = 0; i < tc_count; i++) {
-            tc_ids[i] = llm_resp.tool_calls[i].id;
-            tc_names[i] = llm_resp.tool_calls[i].name;
-            tc_args[i] = llm_resp.tool_calls[i].arguments;
-        }
-    }
-
-    TypedIngestResult ir;
-    int rc = db_ingest_typed(db, session_id, turn_id,
-                             used_model_id ? used_model_id : cfg->provider.model,
-                             llm_resp.content, llm_resp.reasoning, llm_resp.finish_reason,
-                             llm_resp.usage.prompt_tokens, llm_resp.usage.completion_tokens,
-                             llm_resp.usage.cost_nano,
-                             tc_ids, tc_names, tc_args, tc_count, &ir);
-    if (rc != 0) { LOG_DEBUG_(cfg, "llm_req: db_ingest_typed failed"); goto err; }
-    free(ir.tc_entry_ids);
-
-    arena_destroy(a);
     config_free(cfg);
     free(agent_name_alloc);
     return 0;
@@ -416,13 +359,33 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 err:
     free(system_prompt);
     context_plan_free(&plan);
-    arena_destroy(a);
     config_free(cfg);
     free(agent_name_alloc);
     return -1;
 }
 
 /* ── Compaction: LLM-driven session summarization ─────────────── */
+
+/* Pull the assistant text out of a response body (OpenAI or Gemini).
+ * Returns a malloc'd string the caller frees, or NULL if absent. */
+static char *extract_content(sqlite3 *db, EndpointType ep, const char *body) {
+    if (!body) return NULL;
+    const char *sql = (ep == ENDPOINT_GEMINI)
+        ? "SELECT group_concat(json_extract(value,'$.text'), char(10))"
+          " FROM json_each(?1,'$.candidates[0].content.parts')"
+          " WHERE json_extract(value,'$.text') IS NOT NULL"
+        : "SELECT json_extract(?1,'$.choices[0].message.content')";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(s, 1, body, -1, SQLITE_STATIC);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t) r = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return r;
+}
 
 int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agent_name) {
     (void)agent_name;  /* unused */
@@ -516,15 +479,6 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
         return 0;
     }
 
-    /* Build LLM request */
-    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
-    if (!a) {
-        free(text);
-        context_plan_free(&plan);
-        config_free(cfg);
-        return -1;
-    }
-
     const char *sys_prompt =
         "Summarize the following conversation excerpt into a structured summary. "
         "Include: goal, progress, key decisions, and next steps. "
@@ -554,18 +508,16 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
     free(text);
 
     if (!body) {
-        arena_destroy(a);
         context_plan_free(&plan);
         config_free(cfg);
         return -1;
     }
 
     /* Make HTTP call */
-    char *url = llm_build_url(a, cfg);
-    char *auth = llm_build_auth_header(a, cfg);
+    char *url = llm_build_url(cfg);
+    char *auth = llm_build_auth_header(cfg);
     if (!url || !auth) {
-        free(body);
-        arena_destroy(a);
+        free(url); free(auth); free(body);
         context_plan_free(&plan);
         config_free(cfg);
         return -1;
@@ -577,42 +529,33 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
     HttpRequestOpts opts = {
         .url = url, .method = "POST", .headers = headers,
         .body = body, .curl_handle = curl,
-        .sse_cb = NULL, .out_ctx = NULL,
     };
     int status = http_do(&opts, &resp);
-    free(body);
+    free(body); free(url); free(auth);
 
     if (status < 200 || status >= 300) {
         /* LLM call failed — skip compaction */
         http_response_free(&resp);
-        arena_destroy(a);
         context_plan_free(&plan);
         config_free(cfg);
         return -1;
     }
 
-    /* Parse response */
-    LlmResponse llm_resp = {0};
-    int rc;
-    if (cfg->provider.endpoint_type == ENDPOINT_GEMINI)
-        rc = llm_parse_response_gemini(db, a, resp.data, &llm_resp);
-    else
-        rc = llm_parse_response(db, a, resp.data, &llm_resp);
-
+    /* Extract the summary text from the response body */
+    char *summary = extract_content(db, cfg->provider.endpoint_type, resp.data);
     http_response_free(&resp);
 
-    if (rc != 0 || !llm_resp.content) {
+    if (!summary) {
         /* Parse failure — skip */
-        arena_destroy(a);
         context_plan_free(&plan);
         config_free(cfg);
         return -1;
     }
 
     /* Call entry_compact to insert summary and reparent */
-    int64_t compact_id = entry_compact(db, session_id, last_kept_id, first_after_id, llm_resp.content);
+    int64_t compact_id = entry_compact(db, session_id, last_kept_id, first_after_id, summary);
+    free(summary);
 
-    arena_destroy(a);
     context_plan_free(&plan);
     config_free(cfg);
 

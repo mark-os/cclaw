@@ -82,7 +82,7 @@ static const char SQL_OPENAI_TOOLS[] =
 
 /* Both FULL templates wrap json_object in json_patch('{}', ...): RFC 7386
  * merge drops top-level NULL-valued keys, which json_object would otherwise
- * emit as JSON null ("stream":null etc.) — strict providers 400 on those. */
+ * emit as JSON null ("max_tokens":null etc.) — strict providers 400 on those. */
 static const char SQL_OPENAI_FULL[] =
     "SELECT json_patch('{}', json_object("
     "  'model', ?1,"
@@ -94,12 +94,11 @@ static const char SQL_OPENAI_FULL[] =
     "    UNION ALL"
     /* Auto-recall rides at the tail as a user message: keeps the prompt
      * prefix byte-stable across turns so provider prompt caching works. */
-    "    SELECT 2, 0, json_object('role','user','content',?7)"
-    "      WHERE ?7 IS NOT NULL"
+    "    SELECT 2, 0, json_object('role','user','content',?6)"
+    "      WHERE ?6 IS NOT NULL"
     "    ORDER BY ord, sub)),"
-    "  'stream', CASE WHEN ?4 THEN json('true') ELSE NULL END,"
-    "  'max_tokens', CASE WHEN ?5 > 0 THEN ?5 ELSE NULL END,"
-    "  'tools', CASE WHEN json_array_length(?6) > 0 THEN json(?6) ELSE NULL END"
+    "  'max_tokens', CASE WHEN ?4 > 0 THEN ?4 ELSE NULL END,"
+    "  'tools', CASE WHEN json_array_length(?5) > 0 THEN json(?5) ELSE NULL END"
     "));";
 
 static const char SQL_GEMINI_CONTENTS[] =
@@ -283,12 +282,11 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             sqlite3_bind_text(full, 2, system_prompt, -1, SQLITE_STATIC);
         else sqlite3_bind_null(full, 2);
         sqlite3_bind_text(full, 3, messages, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(full, 4, cfg->stream);
-        sqlite3_bind_int(full, 5, cfg->provider.max_tokens);
-        sqlite3_bind_text(full, 6, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(full, 4, cfg->provider.max_tokens);
+        sqlite3_bind_text(full, 5, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
         if (recall_text && recall_text[0])
-            sqlite3_bind_text(full, 7, recall_text, -1, SQLITE_STATIC);
-        else sqlite3_bind_null(full, 7);
+            sqlite3_bind_text(full, 6, recall_text, -1, SQLITE_STATIC);
+        else sqlite3_bind_null(full, 6);
 
         free(messages); free(tools_json);
 

@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include "context.h"
-#include "arena.h"
 #include "db.h"
 #include "http.h"
 #include "llm.h"

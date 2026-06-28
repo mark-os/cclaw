@@ -285,9 +285,6 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_RECALL_MAX_TOKENS");
     cfg->recall_max_tokens = v ? atoi(v) : 500;
 
-    v = getenv("CCLAW_STREAM");
-    cfg->stream = v ? atoi(v) : 0;
-
     /* T292: cache_hints */
     v = getenv("CCLAW_CACHE_HINTS");
     if (v) {
@@ -457,7 +454,6 @@ Config *config_load(sqlite3 *db) {
     if (cfg->recall_max_tokens == 0) cfg->recall_max_tokens = 500;
     env_override_int(&cfg->auto_recall, "CCLAW_AUTO_RECALL");
     env_override_int(&cfg->recall_max_tokens, "CCLAW_RECALL_MAX_TOKENS");
-    env_override_int(&cfg->stream, "CCLAW_STREAM");
 
     /* Log level: env override (inherited by worker child) */
     {

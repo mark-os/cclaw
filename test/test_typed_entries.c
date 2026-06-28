@@ -188,20 +188,24 @@ static void test_ingest_typed(void) {
     int64_t sid = 1;
     int64_t turn = db_next_turn_id(db, sid);
 
-    const char *tc_ids[] = {"call_1", "call_2"};
-    const char *tc_names[] = {"file_read", "shell_exec"};
-    const char *tc_args[] = {"{\"path\":\"/tmp\"}", "{\"cmd\":\"ls\"}"};
+    const char *body =
+        "{\"choices\":[{\"message\":{\"content\":\"Here are the results.\","
+        "\"reasoning\":\"I need to think...\","
+        "\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"file_read\","
+        "\"arguments\":\"{\\\"path\\\":\\\"/tmp\\\"}\"}},"
+        "{\"id\":\"call_2\",\"function\":{\"name\":\"shell_exec\","
+        "\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}]},"
+        "\"finish_reason\":\"tool_calls\"}],"
+        "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"cost\":0.0000015}}";
 
     TypedIngestResult res;
-    int rc = db_ingest_typed(db, sid, turn, "gpt-4o",
-        "Here are the results.", "I need to think...",
-        "tool_calls", 100, 50, 1500,
-        tc_ids, tc_names, tc_args, 2, &res);
-    assert(rc == 0);
+    LlmRespStatus st = db_ingest_response(db, sid, turn, "gpt-4o", ENDPOINT_OPENAI,
+                                          body, &res);
+    assert(st == LLM_RESP_OK);
     assert(res.assistant_entry_id > 0);
-    assert(res.tc_count == 2);
-    assert(res.tc_entry_ids[0] > 0);
-    assert(res.tc_entry_ids[1] > 0);
+    assert(res.prompt_tokens == 100);
+    assert(res.completion_tokens == 50);
+    assert(res.cost_nano == 1500);
 
     /* Verify entries: should be reasoning(0) + assistant(1) + 2 tool_calls(2,3) */
     sqlite3_stmt *stmt;
@@ -243,7 +247,6 @@ static void test_ingest_typed(void) {
     assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "call_2") == 0);
     sqlite3_finalize(stmt);
 
-    free(res.tc_entry_ids);
     db_close(db);
     printf("  ingest_typed... PASS\n");
 }

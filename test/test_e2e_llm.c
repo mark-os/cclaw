@@ -1,9 +1,12 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "llm.h"
 #include "http.h"
-#include "arena.h"
+#include "db.h"
+#include "db_response.h"
+#include "test_util.h"
 #include <sqlite3.h>
 #include <curl/curl.h>
 
@@ -24,10 +27,7 @@ static const char *get_api_key(void) {
 static char *build_request(sqlite3 *db, const char *model, int max_tokens,
                            const Message *msgs, size_t msg_count,
                            const ToolSchema *tools, size_t tool_count) {
-    /* Build messages array */
-    const char *msgs_sql =
-        "SELECT json_group_array(json_object('role',?1,'content',?2))";
-    /* Actually, we need to iterate — use a temp table approach */
+    /* Build messages array via a temp table (one row per message) */
     sqlite3_exec(db, "DROP TABLE IF EXISTS _tmsg;", NULL, NULL, NULL);
     sqlite3_exec(db,
         "CREATE TEMP TABLE _tmsg(pos INTEGER PRIMARY KEY, role TEXT, content TEXT);",
@@ -103,10 +103,10 @@ static char *build_request(sqlite3 *db, const char *model, int max_tokens,
     return result;
 }
 
-/* Call LLM and return parsed response. Returns 0 on success. */
-static int call_llm(Arena *a, const Config *cfg, const Message *msgs,
-                    size_t msg_count, const ToolSchema *tools,
-                    size_t tool_count, LlmResponse *out) {
+/* Call LLM, ingest into a fresh session. Returns session id (>0) or -1. */
+static int64_t call_llm(const Config *cfg, const Message *msgs,
+                        size_t msg_count, const ToolSchema *tools,
+                        size_t tool_count, TypedIngestResult *out) {
     char *req_json = build_request(g_db, cfg->provider.model,
                                    cfg->provider.max_tokens,
                                    msgs, msg_count, tools, tool_count);
@@ -133,9 +133,28 @@ static int call_llm(Arena *a, const Config *cfg, const Message *msgs,
         return -1;
     }
 
-    int rc = llm_parse_response(g_db, a, resp.data, out);
+    int64_t sid = session_create(g_db, "e2e", NULL, -1, 0);
+    int64_t turn = db_next_turn_id(g_db, sid);
+    LlmRespStatus st = db_ingest_response(g_db, sid, turn, cfg->provider.model,
+                                          ENDPOINT_OPENAI, resp.data, out);
     http_response_free(&resp);
-    return rc;
+    return (st == LLM_RESP_OK) ? sid : -1;
+}
+
+/* Fetch the assistant_message content for a session (caller frees). */
+static char *asst_content(int64_t sid) {
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(g_db,
+        "SELECT content FROM entries WHERE session_id=? AND type='assistant_message'"
+        " ORDER BY id DESC LIMIT 1;", -1, &s, NULL);
+    sqlite3_bind_int64(s, 1, sid);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        r = t ? strdup(t) : NULL;
+    }
+    sqlite3_finalize(s);
+    return r;
 }
 
 /* T52: live call with simple prompt, verify content response */
@@ -144,7 +163,6 @@ static void test_live_content_response(void) {
     const char *key = get_api_key();
     if (!key) SKIP("OPENROUTER_API_KEY not set");
 
-    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
     Config cfg = {0};
     cfg.provider.base_url = "https://openrouter.ai/api/v1";
     cfg.provider.api_key = (char *)key;
@@ -154,13 +172,14 @@ static void test_live_content_response(void) {
 
     Message msgs[1] = {{ .role = ROLE_USER, .content = "Reply with exactly: hello" }};
 
-    LlmResponse resp;
-    int rc = call_llm(a, &cfg, msgs, 1, NULL, 0, &resp);
-    if (rc != 0) { arena_destroy(a); FAIL("LLM call failed"); }
-    if (!resp.content || strlen(resp.content) == 0) { arena_destroy(a); FAIL("empty content"); }
-    if (resp.usage.total_tokens == 0) { arena_destroy(a); FAIL("no usage reported"); }
+    TypedIngestResult ir;
+    int64_t sid = call_llm(&cfg, msgs, 1, NULL, 0, &ir);
+    if (sid < 0) FAIL("LLM call failed");
+    char *c = asst_content(sid);
+    if (!c || strlen(c) == 0) { free(c); FAIL("empty content"); }
+    free(c);
+    if (ir.prompt_tokens == 0 && ir.completion_tokens == 0) FAIL("no usage reported");
 
-    arena_destroy(a);
     PASS();
 }
 
@@ -170,7 +189,6 @@ static void test_live_tool_call_roundtrip(void) {
     const char *key = get_api_key();
     if (!key) SKIP("OPENROUTER_API_KEY not set");
 
-    Arena *a = arena_create(ARENA_DEFAULT_SIZE);
     Config cfg = {0};
     cfg.provider.base_url = "https://openrouter.ai/api/v1";
     cfg.provider.api_key = (char *)key;
@@ -189,27 +207,31 @@ static void test_live_tool_call_roundtrip(void) {
         .parameters_json = "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City name\"}},\"required\":[\"city\"]}"
     }};
 
-    LlmResponse resp;
-    int rc = call_llm(a, &cfg, msgs, 2, tools, 1, &resp);
-    if (rc != 0) { arena_destroy(a); FAIL("LLM call failed"); }
-    if (resp.tool_call_count == 0) { arena_destroy(a); FAIL("no tool_calls returned"); }
-    if (!resp.tool_calls[0].id || strlen(resp.tool_calls[0].id) == 0) {
-        arena_destroy(a); FAIL("empty tool_call id");
-    }
-    if (strcmp(resp.tool_calls[0].name, "get_weather") != 0) {
-        arena_destroy(a); FAIL("wrong tool name");
-    }
-    if (!resp.tool_calls[0].arguments || strlen(resp.tool_calls[0].arguments) == 0) {
-        arena_destroy(a); FAIL("empty arguments");
-    }
+    TypedIngestResult ir;
+    int64_t sid = call_llm(&cfg, msgs, 2, tools, 1, &ir);
+    if (sid < 0) FAIL("LLM call failed");
 
-    arena_destroy(a);
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(g_db,
+        "SELECT call_id, name, arguments FROM tool_calls WHERE session_id=? ORDER BY rowid LIMIT 1;",
+        -1, &s, NULL);
+    sqlite3_bind_int64(s, 1, sid);
+    if (sqlite3_step(s) != SQLITE_ROW) { sqlite3_finalize(s); FAIL("no tool_calls returned"); }
+    const char *id = (const char *)sqlite3_column_text(s, 0);
+    const char *name = (const char *)sqlite3_column_text(s, 1);
+    const char *args = (const char *)sqlite3_column_text(s, 2);
+    if (!id || strlen(id) == 0) { sqlite3_finalize(s); FAIL("empty tool_call id"); }
+    if (!name || strcmp(name, "get_weather") != 0) { sqlite3_finalize(s); FAIL("wrong tool name"); }
+    if (!args || strlen(args) == 0) { sqlite3_finalize(s); FAIL("empty arguments"); }
+    sqlite3_finalize(s);
+
     PASS();
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    sqlite3_open(":memory:", &g_db);
+    g_db = test_db_open(":memory:");
     printf("--- test_integration_llm ---\n");
     test_live_content_response();
     test_live_tool_call_roundtrip();

@@ -25,29 +25,48 @@ static sqlite3 *test_db(void) {
     return db;
 }
 
-/* Test: db_ingest_typed creates entries correctly */
-static void test_ingest_typed(void) {
-    printf("  test_ingest_typed...");
+static int count_rows(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *s; int n = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
+        if (sqlite3_step(s) == SQLITE_ROW) n = sqlite3_column_int(s, 0);
+        sqlite3_finalize(s);
+    }
+    return n;
+}
+
+static int64_t tc_entry_id(sqlite3 *db, const char *call_id) {
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT entry_id FROM tool_calls WHERE call_id=?;", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, call_id, -1, SQLITE_STATIC);
+    int64_t id = (sqlite3_step(s) == SQLITE_ROW) ? sqlite3_column_int64(s, 0) : -1;
+    sqlite3_finalize(s);
+    return id;
+}
+
+/* Test: db_ingest_response writes entries + tool_calls from an OpenAI body */
+static void test_ingest_response(void) {
+    printf("  test_ingest_response...");
     sqlite3 *db = test_db();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message msg = {.role = ROLE_USER, .content = "do it"};
     entry_append_with_turn(db, sid, &msg, 1);
 
-    const char *tc_ids[] = {"call_typed"};
-    const char *tc_names[] = {"shell_exec"};
-    const char *tc_args[] = {"{\"cmd\":\"ls\"}"};
+    const char *body =
+        "{\"choices\":[{\"message\":{\"content\":\"Let me list files.\","
+        "\"tool_calls\":[{\"id\":\"call_typed\",\"type\":\"function\","
+        "\"function\":{\"name\":\"shell_exec\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}]},"
+        "\"finish_reason\":\"tool_calls\"}],"
+        "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"cost\":0.0000015}}";
 
     TypedIngestResult result;
-    int rc = db_ingest_typed(db, sid, 1, "deepseek-v4",
-                             "Let me list files.", NULL, "tool_calls",
-                             100, 50, 1500,
-                             tc_ids, tc_names, tc_args, 1, &result);
-    assert(rc == 0);
+    LlmRespStatus st = db_ingest_response(db, sid, 1, "deepseek-v4", ENDPOINT_OPENAI,
+                                          body, &result);
+    assert(st == LLM_RESP_OK);
     assert(result.assistant_entry_id > 0);
-    assert(result.tc_count == 1);
-    assert(result.tc_entry_ids != NULL);
-    assert(result.tc_entry_ids[0] > 0);
+    assert(result.prompt_tokens == 100);
+    assert(result.completion_tokens == 50);
+    assert(result.cost_nano == 1500);
 
     /* Verify tool_calls table */
     sqlite3_stmt *stmt;
@@ -59,7 +78,119 @@ static void test_ingest_typed(void) {
     assert(strcmp((const char *)sqlite3_column_text(stmt, 1), "shell_exec") == 0);
     sqlite3_finalize(stmt);
 
-    free(result.tc_entry_ids);
+    db_close(db);
+    printf(" OK\n");
+}
+
+/* Test: malformed body (no choices) returns LLM_RESP_MALFORMED, writes nothing */
+static void test_ingest_malformed(void) {
+    printf("  test_ingest_malformed...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    TypedIngestResult result;
+    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI,
+                                          "{\"error\":\"nope\"}", &result);
+    assert(st == LLM_RESP_MALFORMED);
+
+    st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "not json", &result);
+    assert(st == LLM_RESP_MALFORMED);
+
+    st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "{\"choices\":[]}", &result);
+    assert(st == LLM_RESP_MALFORMED);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
+/* Test: db_ingest_response archives the raw body to llm_responses as JSONB */
+static void test_ingest_archive(void) {
+    printf("  test_ingest_archive...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    const char *body =
+        "{\"id\":\"resp_abc\",\"choices\":[{\"message\":{\"content\":\"hi\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
+    TypedIngestResult ir;
+    assert(db_ingest_response(db, sid, 7, "m", ENDPOINT_OPENAI, body, &ir) == LLM_RESP_OK);
+
+    /* Row archived: status, provider id, turn_id, and a re-queryable JSONB body. */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "SELECT status, provider_id, turn_id, typeof(body),"
+        " json_extract(body,'$.choices[0].message.content')"
+        " FROM llm_responses WHERE session_id=? ORDER BY id DESC LIMIT 1;", -1, &s, NULL);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "ok") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "resp_abc") == 0);
+    assert(sqlite3_column_int64(s, 2) == 7);
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "blob") == 0);   /* stored as JSONB */
+    assert(strcmp((const char *)sqlite3_column_text(s, 4), "hi") == 0);     /* re-queryable */
+    sqlite3_finalize(s);
+
+    /* Not-JSON body archives as status='malformed' with the raw text. */
+    assert(db_ingest_response(db, sid, 8, "m", ENDPOINT_OPENAI, "<html>nope", &ir) == LLM_RESP_MALFORMED);
+    sqlite3_prepare_v2(db,
+        "SELECT status, typeof(body), body FROM llm_responses WHERE turn_id=8;", -1, &s, NULL);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "malformed") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "text") == 0);   /* raw text, not JSONB */
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "<html>nope") == 0);
+    sqlite3_finalize(s);
+
+    db_close(db);
+    printf(" OK\n");
+}
+
+/* Test: db_archive_response (any HTTP outcome) + configurable retention */
+static void test_archive_retention(void) {
+    printf("  test_archive_retention...");
+    sqlite3 *db = test_db();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    /* An error body archives under its label; JSON gets provider_id extracted. */
+    db_archive_response(db, sid, 1, "m", "http_500",
+                        "{\"id\":\"err_1\",\"error\":{\"message\":\"boom\"}}");
+    db_archive_response(db, sid, 2, "m", "timeout", "upstream timed out");  /* not JSON */
+
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "SELECT status, provider_id, typeof(body) FROM llm_responses WHERE turn_id=1;", -1, &s, NULL);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "http_500") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "err_1") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "blob") == 0);   /* JSONB */
+    sqlite3_finalize(s);
+    sqlite3_prepare_v2(db,
+        "SELECT status, typeof(body) FROM llm_responses WHERE turn_id=2;", -1, &s, NULL);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "timeout") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "text") == 0);   /* raw text */
+    sqlite3_finalize(s);
+
+    /* Cap = 2: pruning keeps only the most recent rows. */
+    sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('llm_response_archive_max','2');",
+                 NULL, NULL, NULL);
+    for (int i = 0; i < 5; i++)
+        db_archive_response(db, sid, 100 + i, "m", "ok", "{\"x\":1}");
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 2);
+
+    /* Cap = -1: pruning disabled, rows accumulate. */
+    sqlite3_exec(db, "UPDATE config SET value='-1' WHERE key='llm_response_archive_max';",
+                 NULL, NULL, NULL);
+    for (int i = 0; i < 5; i++)
+        db_archive_response(db, sid, 200 + i, "m", "ok", "{\"x\":1}");
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 7);
+
+    /* Cap = 0: archiving off — nothing written (no churn, count unchanged). */
+    sqlite3_exec(db, "UPDATE config SET value='0' WHERE key='llm_response_archive_max';",
+                 NULL, NULL, NULL);
+    for (int i = 0; i < 3; i++)
+        db_archive_response(db, sid, 300 + i, "m", "ok", "{\"x\":1}");
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 7);
+
     db_close(db);
     printf(" OK\n");
 }
@@ -73,16 +204,22 @@ static void test_tool_call_complete(void) {
     Message msg = {.role = ROLE_USER, .content = "do it"};
     entry_append_with_turn(db, sid, &msg, 1);
 
-    const char *tc_ids[] = {"call_x"};
-    const char *tc_names[] = {"shell_exec"};
-    const char *tc_args[] = {"{\"cmd\":\"echo hi\"}"};
+    const char *body =
+        "{\"choices\":[{\"message\":{\"content\":null,"
+        "\"tool_calls\":[{\"id\":\"call_x\",\"type\":\"function\","
+        "\"function\":{\"name\":\"shell_exec\",\"arguments\":\"{\\\"cmd\\\":\\\"echo hi\\\"}\"}}]},"
+        "\"finish_reason\":\"tool_calls\"}],"
+        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
 
     TypedIngestResult result;
-    db_ingest_typed(db, sid, 1, "m", NULL, NULL, "tool_calls",
-                    0, 0, 0, tc_ids, tc_names, tc_args, 1, &result);
+    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, body, &result);
+    assert(st == LLM_RESP_OK);
+
+    int64_t eid = tc_entry_id(db, "call_x");
+    assert(eid > 0);
 
     /* Mark complete */
-    int rc = db_tool_call_complete(db, result.tc_entry_ids[0], "call_x");
+    int rc = db_tool_call_complete(db, eid, "call_x");
     assert(rc == 0);
 
     /* Verify status changed */
@@ -94,17 +231,20 @@ static void test_tool_call_complete(void) {
     sqlite3_finalize(stmt);
 
     /* Non-existent call_id returns -1 */
-    rc = db_tool_call_complete(db, result.tc_entry_ids[0], "no_such");
+    rc = db_tool_call_complete(db, eid, "no_such");
     assert(rc == -1);
 
-    free(result.tc_entry_ids);
     db_close(db);
     printf(" OK\n");
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_db_response:\n");
-    test_ingest_typed();
+    test_ingest_response();
+    test_ingest_malformed();
+    test_ingest_archive();
+    test_archive_retention();
     test_tool_call_complete();
     printf("  ALL PASSED\n");
     return 0;

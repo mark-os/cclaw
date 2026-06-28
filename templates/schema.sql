@@ -228,6 +228,23 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 CREATE INDEX IF NOT EXISTS idx_tool_calls_entry ON tool_calls(entry_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, status);
 
+-- ═══ Raw LLM responses (forensics / shape archive) ═══
+-- One row per LLM response (any HTTP outcome). Retention is set by config key
+-- 'llm_response_archive_max': >0 keeps the most recent N, 0 disables archiving,
+-- <0 keeps all. body holds the parsed JSONB blob when the response is valid
+-- JSON, or the raw text when it isn't; turn_id joins back to entries.
+CREATE TABLE IF NOT EXISTS llm_responses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  turn_id INTEGER NOT NULL,
+  model TEXT,
+  status TEXT NOT NULL,          -- ok | empty | malformed | http_<code> | timeout | network_error
+  provider_id TEXT,              -- provider's own response id ($.id), NULL if absent
+  body BLOB,                     -- JSONB when parseable, raw text otherwise
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_llm_responses_turn ON llm_responses(session_id, turn_id);
+
 -- ═══ IPC ═══
 CREATE TABLE IF NOT EXISTS channel_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

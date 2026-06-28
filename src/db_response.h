@@ -21,22 +21,37 @@ int db_tool_call_complete(sqlite3 *db, int64_t entry_id, const char *call_id);
 int db_tool_call_complete_with_result(sqlite3 *db, int64_t entry_id,
                                       const char *call_id, int64_t result_entry_id);
 
-/* Typed response result */
+/* Status of ingesting an LLM response body. */
+typedef enum {
+    LLM_RESP_OK = 0,     /* well-formed; entries written */
+    LLM_RESP_EMPTY,      /* zero-usage empty-stop provider glitch — retry next model */
+    LLM_RESP_MALFORMED   /* missing/empty choices|candidates — treat as failure */
+} LlmRespStatus;
+
+/* Usage scalars from a successful ingest (for model stats). */
 typedef struct {
     int64_t assistant_entry_id; /* the assistant_message entry */
-    int64_t *tc_entry_ids;      /* heap array of tool_call entry IDs (caller frees) */
-    int tc_count;
+    int prompt_tokens;
+    int completion_tokens;
+    int64_t cost_nano;
 } TypedIngestResult;
 
-/* Ingest streaming response as flat typed entries.
- * Creates: reasoning (optional) + assistant_message + N tool_call entries.
- * All share the same turn_id. Returns 0 on success, -1 on error. */
-int db_ingest_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
-                    const char *model, const char *content, const char *reasoning,
-                    const char *finish_reason,
-                    int usage_in, int usage_out, int64_t cost_nano,
-                    const char *const *tc_ids, const char *const *tc_names,
-                    const char *const *tc_args, int tc_count,
-                    TypedIngestResult *out);
+/* Parse an LLM response body (OpenAI or Gemini, selected by ep) straight into
+ * entries + tool_calls rows. Zero-copy: the JSON body is bound once and the
+ * extracted column pointers bind directly into the inserts — no intermediate
+ * heap copies. Creates: reasoning (optional) + assistant_message + N tool_call
+ * entries, all sharing turn_id. On LLM_RESP_OK, *out carries usage/cost. */
+LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
+                                 const char *model, EndpointType ep,
+                                 const char *body, TypedIngestResult *out);
+
+/* Archive a raw response body for forensics regardless of HTTP outcome. Parses
+ * to JSONB when valid, stores raw text otherwise. status is a free-form label
+ * (e.g. "http_500", "timeout"). Retention via config 'llm_response_archive_max'
+ * (default 500): >0 keeps the most recent N, 0 disables archiving, <0 keeps all.
+ * db_ingest_response archives the 2xx bodies it handles; this is for the
+ * non-2xx / network-error paths. */
+void db_archive_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
+                         const char *model, const char *status, const char *body);
 
 #endif

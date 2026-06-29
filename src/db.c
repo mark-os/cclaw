@@ -788,6 +788,10 @@ void db_wipe_secret_key(void) {
     s_secret_key_loaded = 0;
 }
 
+int db_secret_key_loaded(void) {
+    return s_secret_key_loaded;
+}
+
 /* V52,T171: Secret-aware kv access with ChaCha20-Poly1305 AEAD. */
 char *db_kv_get_secret(sqlite3 *db, const char *key) {
     char *raw = db_kv_get(db, key);

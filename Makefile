@@ -35,7 +35,7 @@ SMOKE := test_db test_config test_advance_session test_llm_payload test_tools \
          test_approval_block_window test_approval_postwindow test_tool_check_approval
 SMOKE_BIN := $(patsubst %,$(BUILDDIR)/%,$(SMOKE))
 
-all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/net_shim compile_commands.json
+all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libcclaw_net.so $(BUILDDIR)/net_shim compile_commands.json
 
 # Development build: debug symbols, no optimization, sanitizers (clang preferred for better traces)
 debug: clean

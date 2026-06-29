@@ -27,7 +27,13 @@ typedef struct {
     int workspace_ro;       /* 0 = rw, 1 = read-only remount */
     int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
     int net_mode;           /* 0 = proxy available, 1 = no network */
-    int env_mode;           /* 0 = inherit + scrub secrets, 1 = clean allowlist */
+    int skip_pid_ns;        /* 1 = omit CLONE_NEWPID (no inner fork); file tier */
+    int env_mode;           /* 0 = inherit-present-env + scrub secrets, 1 = clean
+                             * allowlist. NB: under the --run-tool re-exec model the
+                             * child starts from an empty environ (execve envp={NULL}),
+                             * so mode 0 yields only PATH + proxy vars, not the daemon's
+                             * environment — "inherit" means whatever the child was
+                             * given, which is currently nothing sensitive. */
     struct { int nproc, as_mb, cpu_sec; } rlimits; /* 0 = no limit */
     /* Layer 2: extra bind-mounts from read_path/write_path grants */
     SandboxMountReq *extra_mounts;

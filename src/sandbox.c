@@ -6,12 +6,14 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -185,7 +187,10 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
             cwd_resolved = cwd_abs;
     }
 
-    if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWNET) != 0)
+    int clone_flags = CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET;
+    if (!full_cfg || !full_cfg->skip_pid_ns)
+        clone_flags |= CLONE_NEWPID;
+    if (unshare(clone_flags) != 0)
         return -1;
 
     /* Write uid_map: map ns root (0) to our real uid */
@@ -229,6 +234,12 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         "/bin", "/usr", "/lib", "/lib64", "/etc", "/proc", "/dev", "/sbin", NULL
     };
     for (int i = 0; sys_dirs[i]; i++) {
+        /* File tier (skip_pid_ns): exclude /proc — no PID namespace backs it,
+         * and the host procfs would leak process info. uid_map/gid_map writes
+         * happen before pivot_root using the original /proc, so they're fine. */
+        if (full_cfg && full_cfg->skip_pid_ns &&
+            strcmp(sys_dirs[i], "/proc") == 0)
+            continue;
         struct stat st;
         if (stat(sys_dirs[i], &st) != 0) continue;
         char dst[256];
@@ -302,18 +313,29 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
     rmdir("/.oldroot");
 
     /* CLONE_NEWPID requires a fork — the child becomes PID 1 in the new
-     * PID namespace. Mount setup is already done, so the fork+exec is clean. */
-    pid_t inner = fork();
-    if (inner < 0) return -1;
-    if (inner > 0) {
-        /* Parent of inner fork: wait and propagate exit status */
-        int st;
-        waitpid(inner, &st, 0);
-        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 254);
-    }
+     * PID namespace. Mount setup is already done, so the fork+exec is clean.
+     * When skip_pid_ns is set (file tier), no PID NS was created so no fork. */
+    if (!full_cfg || !full_cfg->skip_pid_ns) {
+        pid_t inner = fork();
+        if (inner < 0) return -1;
+        if (inner > 0) {
+            /* Parent of inner fork: wait and propagate exit status */
+            int st;
+            waitpid(inner, &st, 0);
+            _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 254);
+        }
 
-    /* PID 1 in new namespace: remount /proc for correct PID view */
-    mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+        /* PID 1 in new namespace: remount /proc for correct PID view */
+        mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+
+        /* Tie this PID-namespace init to its parent (the sandbox child). If the
+         * parent is killed — e.g. the daemon's backstop SIGKILLs the broker and
+         * PR_SET_PDEATHSIG cascades down — this init dies too, and the kernel
+         * tears down the whole PID namespace with it, leaving no orphaned shell
+         * subtree. PR_SET_PDEATHSIG is cleared across fork, so it must be re-set
+         * here on the inner child, not inherited from the broker. */
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+    }
 
     /* CWD into workspace so commands start there */
     if (ws_resolved && chdir(ws_resolved) != 0)

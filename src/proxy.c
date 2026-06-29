@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "proxy.h"
+#include "host_match.h"
 #include "http_policy.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -20,14 +21,51 @@
 #define RELAY_BUF_SIZE 4096
 #define PREAMBLE_MAX 300
 
-/* Check if host is allowed against the in-memory allowlist. The broker holds no
- * DB handle: the allowlist is the already-loaded caps->hosts (grants of
- * kind='host', expiry-filtered at load). Deny-by-default — an empty/NULL list
- * denies every host, so no network rather than allow-all. */
-static int host_allowed(const ProxyContext *ctx, const char *host) {
-    for (size_t i = 0; i < ctx->host_count; i++)
-        if (ctx->hosts[i] && strcmp(ctx->hosts[i], host) == 0)
-            return 1;
+/* Structural metadata range — in CODE, not config (§6 guarantee).
+ * 169.254.0.0/16 (v4 link-local, covers AWS/GCP/Azure metadata at
+ * 169.254.169.254) and fe80::/10 (v6 link-local, covers cloud v6 metadata
+ * endpoints). A granted CIDR that contains these ranges CANNOT authorize
+ * access — only an exact literal grant works (the metadata carve-out).
+ *
+ * fd00:ec2::254 is AWS's IMDS endpoint over IPv6 — a ULA (fc00::/7), which
+ * http_is_private_ip treats as ordinary private space, so without listing it
+ * here a broad ULA grant (fd00::/8) would reach instance credentials. Listed
+ * as an exact /128 so only a literal grant for it authorizes access.
+ * IPv4-mapped IPv6 (::ffff:169.254.169.254) is NOT handled here — ip_to_bin
+ * canonicalizes mapped addresses to their v4 form before any metadata test. */
+static const Cidr METADATA_RANGES[] = {
+    { .family = AF_INET,  .prefix = {169, 254, 0, 0}, .prefix_len = 16 },
+    { .family = AF_INET6, .prefix = {0xfe, 0x80},     .prefix_len = 10 },
+    { .family = AF_INET6,
+      .prefix = {0xfd, 0x00, 0x0e, 0xc2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x54},
+      .prefix_len = 128 },
+};
+#define METADATA_RANGE_COUNT 3
+
+static int in_metadata_range(int family, const unsigned char *addr) {
+    return cidr_match(METADATA_RANGES, METADATA_RANGE_COUNT, family, addr);
+}
+
+/* Check if host is allowed via the partitioned rules: hostname rules go through
+ * host_match (exact + suffix), numeric IPs go through cidr_match (containment).
+ * Default-deny — empty/NULL rules deny everything.
+ * For numeric IPs in the metadata range, the carve-out applies: only an exact
+ * literal grant (/32 or /128) authorizes access — a covering CIDR does not. */
+static int ip_to_bin(const char *ip, int *fam, unsigned char *buf16);
+static int host_decide(const ProxyContext *ctx, const char *host) {
+    /* Try hostname rules (exact/suffix match) */
+    if (host_match(ctx->host_rules, ctx->host_rule_count, host)) return 1;
+    /* Try as a numeric IP against CIDR rules */
+    int fam;
+    unsigned char bin[16];
+    if (ip_to_bin(host, &fam, bin) == 0) {
+        /* Metadata carve-out: numeric IP in metadata range requires exact grant.
+         * Also enforced in addr_permitted (resolve path); both paths required.
+         * See egress-filter.md §4. */
+        if (in_metadata_range(fam, bin))
+            return granted_exact(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin);
+        if (cidr_match(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin)) return 1;
+    }
     return 0;
 }
 
@@ -41,6 +79,17 @@ static int ip_to_bin(const char *ip, int *fam, unsigned char *buf16) {
     }
     struct in6_addr a6;
     if (inet_pton(AF_INET6, ip, &a6) == 1) {
+        /* Canonicalize IPv4-mapped IPv6 (::ffff:a.b.c.d) to its v4 form so the
+         * metadata carve-out and CIDR checks cannot be bypassed by spelling a
+         * v4 address (e.g. 169.254.169.254) in mapped notation. Every caller
+         * routes through here, so the normalization is uniform. */
+        static const unsigned char mapped_prefix[12] =
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+        if (memcmp(a6.s6_addr, mapped_prefix, 12) == 0) {
+            *fam = AF_INET;
+            memcpy(buf16, &a6.s6_addr[12], 4);
+            return 0;
+        }
         *fam = AF_INET6;
         memcpy(buf16, &a6, 16);
         return 0;
@@ -111,12 +160,30 @@ static void bless_add(ProxyContext *ctx, const char *ip) {
     pthread_mutex_unlock(&ctx->blessed_mu);
 }
 
-/* A resolved address may be blessed if it is public, or if its literal form is
- * itself explicitly granted — the operator opting into a private target. A
- * hostname that merely *resolves* to a private IP is rejected (SSRF / rebind). */
+/* A resolved address is permitted per the egress-filter.md §4 pipeline:
+ *   1. Metadata range → exact grant only (CIDR grants cannot reach metadata)
+ *   2. Public IP → ALLOW
+ *   3. Private IP in granted CIDR → ALLOW
+ *   4. Otherwise → DENY
+ * Ordering is security-critical: metadata check MUST precede CIDR check. */
 static int addr_permitted(const ProxyContext *ctx, const char *ip) {
+    int fam;
+    unsigned char bin[16];
+    if (ip_to_bin(ip, &fam, bin) != 0) return 0;
+
+    /* Metadata range: only an exact literal grant authorizes access.
+     * A covering CIDR (e.g. 169.254.0.0/16 or 0.0.0.0/0) is not enough.
+     * Also enforced in host_decide (numeric CONNECT path); both paths required.
+     * See egress-filter.md §4. */
+    if (in_metadata_range(fam, bin))
+        return granted_exact(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin);
+
+    /* Public IPs are always permitted (no private range match). */
     if (!http_is_private_ip(ip)) return 1;
-    return host_allowed(ctx, ip);
+
+    /* Private IP: allowed only if covered by a granted CIDR (includes exact
+     * literal grants since those are stored as /32 or /128 rules). */
+    return cidr_match(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin);
 }
 
 /* Resolve host (allowlist already checked by the caller), drop disallowed
@@ -250,7 +317,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     /* RESOLVE request: "RESOLVE <host>" */
     if (strncmp(preamble, "RESOLVE ", 8) == 0) {
         const char *host = preamble + 8;
-        if (!host_allowed(ctx, host)) {
+        if (!host_decide(ctx, host)) {
             write(client_fd, "ERROR denied\n", 13);
             close(client_fd);
             return;
@@ -288,7 +355,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
          * 1.2.3.4 SSRF attempt) is refused — there is no resolve to bless it. */
         if (bless_contains(ctx, target)) {
             dial = target;
-        } else if (host_allowed(ctx, target)) {
+        } else if (host_decide(ctx, target)) {
             bless_add(ctx, target);
             dial = target;
         } else {
@@ -298,7 +365,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
         }
     } else {
         /* Hostname target: allowlist, then resolve + SSRF-filter + bless. */
-        if (!host_allowed(ctx, target)) {
+        if (!host_decide(ctx, target)) {
             write(client_fd, "DENIED\n", 7);
             close(client_fd);
             return;
@@ -407,50 +474,74 @@ int proxy_bind(ProxyContext *ctx, const char *dir,
     ctx->hosts = hosts;          /* borrowed — must outlive the proxy */
     ctx->host_count = host_count;
 
+    /* Partition grants into hostname rules vs CIDR/IP rules.
+     * A grant containing '/' is a CIDR. A bare IP (parseable by inet_pton)
+     * becomes a full-length CIDR (/32 or /128). Everything else is a hostname
+     * rule (exact or suffix). */
+    ctx->host_rules = NULL;
+    ctx->host_rule_count = 0;
+    ctx->cidr_rules = NULL;
+    ctx->cidr_rule_count = 0;
+
+    int fd = -1;  /* function-scope so the `fail` cleanup can close it */
+
+    if (host_count > 0) {
+        ctx->host_rules = malloc(host_count * sizeof(char *));
+        ctx->cidr_rules = malloc(host_count * sizeof(Cidr));
+        if (!ctx->host_rules || !ctx->cidr_rules) goto fail;
+        for (size_t i = 0; i < host_count; i++) {
+            if (!hosts[i]) continue;
+            Cidr c;
+            if (cidr_parse(hosts[i], &c) == 0) {
+                ctx->cidr_rules[ctx->cidr_rule_count++] = c;
+            } else {
+                /* hostname rule — borrowed pointer, same lifetime as hosts[] */
+                ctx->host_rules[ctx->host_rule_count++] = hosts[i];
+            }
+        }
+    }
+
     /* Per-call socket path in `dir` (the agent folder, not the agent-visible
      * workspace): unique per process so concurrent brokers (each its own pid)
      * never collide. Sequential reuse within one process is covered by the
      * unlink below and proxy_stop's unlink. */
     size_t plen = strlen(dir) + 32;
     ctx->sock_path = malloc(plen);
-    if (!ctx->sock_path) return -1;
+    if (!ctx->sock_path) goto fail;
     snprintf(ctx->sock_path, plen, "%s/.proxy.%d.sock", dir, (int)getpid());
 
     /* Remove stale socket */
     unlink(ctx->sock_path);
 
     /* Create UDS listener (CLOEXEC so it never rides into the sandbox exec) */
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) { free(ctx->sock_path); ctx->sock_path = NULL; return -1; }
+    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) goto fail;
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    if (strlen(ctx->sock_path) >= sizeof(addr.sun_path)) {
-        close(fd);
-        free(ctx->sock_path);
-        ctx->sock_path = NULL;
-        return -1;
-    }
+    if (strlen(ctx->sock_path) >= sizeof(addr.sun_path)) goto fail;
     strncpy(addr.sun_path, ctx->sock_path, sizeof(addr.sun_path) - 1);
 
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        close(fd);
-        free(ctx->sock_path);
-        ctx->sock_path = NULL;
-        return -1;
-    }
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) goto fail;
 
-    if (listen(fd, PROXY_BACKLOG) != 0) {
-        close(fd);
-        unlink(ctx->sock_path);
-        free(ctx->sock_path);
-        ctx->sock_path = NULL;
-        return -1;
-    }
+    if (listen(fd, PROXY_BACKLOG) != 0) goto fail;
 
     ctx->listen_fd = fd;
     return 0;
+
+fail:
+    /* Every error path lands here: free the just-allocated partition arrays
+     * (proxy_stop is NOT called on a failed bind), the socket path, and the fd. */
+    if (fd >= 0) close(fd);
+    if (ctx->sock_path) {
+        unlink(ctx->sock_path);
+        free(ctx->sock_path);
+        ctx->sock_path = NULL;
+    }
+    free(ctx->host_rules);  ctx->host_rules = NULL;  ctx->host_rule_count = 0;
+    free(ctx->cidr_rules);  ctx->cidr_rules = NULL;  ctx->cidr_rule_count = 0;
+    return -1;
 }
 
 /* Start the accept-loop thread (joined in proxy_stop). Call after proxy_bind,
@@ -500,6 +591,12 @@ void proxy_stop(ProxyContext *ctx) {
     }
     ctx->hosts = NULL;          /* borrowed — not owned, do not free */
     ctx->host_count = 0;
+    free(ctx->host_rules);      /* owned partition array (pointers are borrowed) */
+    ctx->host_rules = NULL;
+    ctx->host_rule_count = 0;
+    free(ctx->cidr_rules);      /* owned parsed CIDR array */
+    ctx->cidr_rules = NULL;
+    ctx->cidr_rule_count = 0;
     pthread_mutex_destroy(&ctx->blessed_mu);
     pthread_cond_destroy(&ctx->conn_cond);
 }

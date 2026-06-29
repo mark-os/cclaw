@@ -3,6 +3,7 @@
 
 #include <pthread.h>
 #include <stddef.h>
+#include "host_match.h"
 
 /* V83: Credential proxy thread for shell children.
  * Listens on a per-call pathname UDS at <agent-folder>/.proxy.<pid>.sock — the
@@ -35,6 +36,10 @@ typedef struct {
 typedef struct {
     char **hosts;           /* borrowed egress allowlist (NULL ⇒ deny all) */
     size_t host_count;      /* must outlive the proxy (per-call caps->hosts) */
+    char **host_rules;      /* partitioned: hostname rules (exact/suffix) */
+    size_t host_rule_count;
+    Cidr *cidr_rules;       /* partitioned: CIDR + literal-IP rules (owned) */
+    size_t cidr_rule_count;
     char *sock_path;        /* heap-allocated path to .proxy.sock */
     int listen_fd;          /* listening socket fd (-1 if not started) */
     int running;            /* set to 0 to stop */

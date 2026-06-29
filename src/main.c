@@ -9,6 +9,7 @@
 #include <string.h>
 #include <poll.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -41,6 +42,8 @@
 #include "secret_scan.h"
 #include "tool_policy.h"
 #include "secret_interp.h"
+#include "run_tool.h"
+#include "tool_file.h"
 #include "resolve.h"
 #include "web.h"
 #include "heartbeat.h"
@@ -81,6 +84,7 @@ typedef struct {
     int restart_count;
     /* Deadline: 0 = no timeout, >0 = SIGKILL after this time */
     time_t deadline;
+    int timeout_sec;        /* window used for `deadline`, for the timeout message */
 } ChildProc;
 
 static ChildProc g_children[CHILD_MAX];
@@ -122,6 +126,11 @@ static int child_has_session(int64_t session_id) {
 /* Forward declarations */
 static void deliver_response(int64_t session_id);
 static int fork_tool_exec(int64_t session_id, const char *agent_name, PendingToolCall *tc);
+static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
+                                const char *tool_call_id, const char *tool_name,
+                                const char *tool_args, int64_t turn_id,
+                                int64_t entry_id, const char *blob, size_t blob_len,
+                                int timeout_sec);
 
 static sqlite3 *g_db;
 static Config *g_cfg;
@@ -238,6 +247,20 @@ static void cli_print_tool_call(const char *name, const char *args) {
     }
     fprintf(stdout, "]\033[0m ");
     fflush(stdout);
+}
+
+/* Append an inline error tool-result and mark the call done. `detail` is the
+ * status detail column (may be NULL). Always returns 1 (handled inline). */
+static int tool_inline_error(int64_t session_id, PendingToolCall *tc,
+                             const char *msg, const char *detail) {
+    char *err = strdup(msg);
+    ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
+    Message m = {.role = ROLE_TOOL, .tool_result = &tr,
+                 .tool_name = tc->name, .is_error = 1};
+    entry_append_with_turn(g_db, session_id, &m, tc->turn_id);
+    db_tool_call_set_status(g_db, session_id, tc->call_id, "done", detail);
+    free(err);
+    return 1;
 }
 
 static int fork_tool_exec(int64_t session_id, const char *agent_name,
@@ -434,6 +457,160 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
         return 1; /* Handled inline */
     }
 
+    /* ── File-tier re-exec path: fork+exec a clean --run-tool child ────
+     * Replaces the fork-only path for file tools when sandbox is required.
+     * The daemon is multithreaded; fork-without-exec is UB (frozen locks in
+     * child). The re-exec'd child is single-threaded and sets up its own
+     * namespace sandbox. */
+    if (te->user_data && (strcmp(tc->name, "file_read") == 0 ||
+                          strcmp(tc->name, "file_write") == 0 ||
+                          strcmp(tc->name, "file_edit") == 0 ||
+                          strcmp(tc->name, "file_list") == 0 ||
+                          strcmp(tc->name, "file_find") == 0 ||
+                          strcmp(tc->name, "file_grep") == 0)) {
+        FileReadCtx *fctx = (FileReadCtx *)te->user_data;
+        if (fctx->sandbox && fctx->workspace) {
+            /* CLI progress */
+            if (g_mode == 0)
+                cli_print_tool_call(tc->name, tc->arguments);
+            session_set_state(g_db, session_id, "tool_running");
+
+            size_t blob_len = 0;
+            char *blob = run_tool_serialize_file_request(
+                tc->name, tc->arguments, fctx->workspace,
+                (const char **)fctx->read_paths, fctx->read_path_count,
+                (const char **)fctx->write_paths, fctx->write_path_count,
+                fctx->workspace_ro, fctx->mount_cwd, fctx->cwd_path,
+                fctx->env_mode,
+                fctx->rlimits.nproc, fctx->rlimits.as_mb, fctx->rlimits.cpu_sec,
+                &blob_len);
+            if (!blob)
+                return tool_inline_error(session_id, tc,
+                    "error: file tool request exceeds 32KB cap", NULL);
+            int rc = spawn_run_tool_child(session_id, agent_name,
+                         tc->call_id, tc->name, tc->arguments,
+                         tc->turn_id, tc->entry_id, blob, blob_len, 120);
+            free(blob);
+            if (rc != 0)
+                return tool_inline_error(session_id, tc,
+                    "error: spawn_run_tool_child failed", "fork_failed");
+            db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+            return 0; /* async serial — wait for reap */
+        }
+        /* else: sandbox==0 (host mode) — fall through to generic fork path
+         * which runs the handler in-process via file_sandbox_run's shortcut */
+    }
+
+    /* ── Shell-tier re-exec path: fork+exec a clean --run-tool broker ────
+     * A broker is interposed IFF the tier needs gated egress (web, shell).
+     * The broker IS the --run-tool process — fork+exec, never fork-only.
+     * Network-less tiers (file) spawn directly via spawn_run_tool_child.
+     * Secrets: interpolated HERE in the daemon parent, blob carries resolved
+     * values. Broker/child never hold the master key. */
+    if (strcmp(tc->name, "shell_exec") == 0 && te->user_data) {
+        ShellConfig *sc = (ShellConfig *)te->user_data;
+        if (sc->sandbox && sc->workspace) {
+            if (g_mode == 0)
+                cli_print_tool_call(tc->name, tc->arguments);
+            session_set_state(g_db, session_id, "tool_running");
+
+            /* Parse arguments to extract command + timeout */
+            ToolArgs ta;
+            if (tool_parse(tc->arguments, &ta) != 0)
+                return tool_inline_error(session_id, tc,
+                    "error: invalid shell_exec arguments", NULL);
+            const char *command = targ_str(&ta, "command");
+            int cmd_timeout = targ_int(&ta, "timeout", sc->timeout);
+            if (cmd_timeout <= 0) cmd_timeout = sc->timeout;
+
+            /* Parent-side secret interpolation (daemon holds the key) */
+            char *interp_cmd = NULL;
+            if (g_tool_setup && g_tool_setup->secret_count > 0)
+                interp_cmd = secret_interpolate(command, g_tool_setup->secrets,
+                                                g_tool_setup->secret_count);
+            const char *resolved_cmd = interp_cmd ? interp_cmd : command;
+
+            /* Filter secrets to minimal set (only those referenced by command) */
+            RunToolSecret *min_secrets = NULL;
+            size_t min_count = 0;
+            if (sc->secrets && sc->secret_count > 0) {
+                min_secrets = malloc(sc->secret_count * sizeof(RunToolSecret));
+                if (min_secrets) {
+                    for (size_t i = 0; i < sc->secret_count; i++) {
+                        /* Check if command references $CCLAW_SECRET_<name> */
+                        char tok[256];
+                        int tlen = snprintf(tok, sizeof(tok), "CCLAW_SECRET_%s", sc->secrets[i].name);
+                        if (tlen <= 0 || tlen >= (int)sizeof(tok)) continue;
+                        int found = 0;
+                        for (const char *p = resolved_cmd; (p = strstr(p, tok)) != NULL; p += tlen) {
+                            /* Require a word boundary on BOTH sides: a bare
+                             * substring of a larger identifier (e.g. the env
+                             * name MY_CCLAW_SECRET_FOO) is not a reference to
+                             * CCLAW_SECRET_FOO and must not pull that secret in. */
+                            char before = (p == resolved_cmd) ? '\0' : p[-1];
+                            char after = p[tlen];
+                            int before_ident = (before >= 'A' && before <= 'Z') ||
+                                                (before >= 'a' && before <= 'z') ||
+                                                (before >= '0' && before <= '9') || before == '_';
+                            int after_ident = (after >= 'A' && after <= 'Z') ||
+                                               (after >= 'a' && after <= 'z') ||
+                                               (after >= '0' && after <= '9') || after == '_';
+                            if (!before_ident && !after_ident) { found = 1; break; }
+                        }
+                        if (found) {
+                            min_secrets[min_count].name = sc->secrets[i].name;
+                            min_secrets[min_count].value = sc->secrets[i].value;
+                            min_count++;
+                        }
+                    }
+                }
+            }
+
+            /* Resolve agent_dir for proxy socket */
+            char agent_dir[PATH_MAX];
+            agent_dir_resolve(sc->workspace, sc->db_path, agent_dir, sizeof(agent_dir));
+
+            size_t blob_len = 0;
+            char *blob = run_tool_serialize_shell_request(
+                resolved_cmd, cmd_timeout,
+                sc->workspace, sc->cwd_path, agent_dir,
+                (const char **)sc->allowed_hosts, sc->allowed_host_count,
+                min_secrets, min_count,
+                sc->sandbox, sc->env_mode, sc->net_mode, sc->mount_cwd,
+                sc->workspace_ro,
+                sc->rlimits.nproc, sc->rlimits.as_mb, sc->rlimits.cpu_sec,
+                (const char **)sc->read_paths, sc->read_path_count,
+                (const char **)sc->write_paths, sc->write_path_count,
+                &blob_len);
+
+            /* Wipe interpolated command (contains secret plaintext) */
+            if (interp_cmd) { explicit_bzero(interp_cmd, strlen(interp_cmd)); free(interp_cmd); }
+            free(min_secrets);
+            tool_parse_free(&ta);
+
+            if (!blob)
+                return tool_inline_error(session_id, tc,
+                    "error: shell request exceeds 32KB cap", NULL);
+
+            /* Daemon backstop fires margin-seconds AFTER the broker's own
+             * cmd_timeout, so the broker's (well-tested) teardown — which kills
+             * the sandbox child's process group — wins in the normal case. */
+            int rc = spawn_run_tool_child(session_id, agent_name,
+                         tc->call_id, tc->name, tc->arguments,
+                         tc->turn_id, tc->entry_id, blob, blob_len,
+                         cmd_timeout + 30);
+            /* Wipe blob (carries interpolated secrets) */
+            explicit_bzero(blob, blob_len);
+            free(blob);
+            if (rc != 0)
+                return tool_inline_error(session_id, tc,
+                    "error: spawn_run_tool_child failed", "fork_failed");
+            db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+            return 0;
+        }
+        /* else: sandbox==0 (host mode) — fall through to generic fork path */
+    }
+
     /* Forkable tool: pipe for result capture. A pipe()/fork() failure must not
      * leave the call pending forever — the session has already moved to
      * tool_running and no wake resurrects an un-dispatched call. Synthesize an
@@ -525,7 +702,8 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
     c->result_pipe = pipefd[0];
     c->outbuf = NULL;
     c->outbuf_len = 0;
-    c->deadline = time(NULL) + 120;
+    c->timeout_sec = 120;
+    c->deadline = time(NULL) + c->timeout_sec;
     snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
     snprintf(c->tool_call_id, sizeof(c->tool_call_id), "%s", tc->call_id);
     snprintf(c->tool_name, sizeof(c->tool_name), "%s", tc->name);
@@ -595,6 +773,89 @@ static void drain_ready_result_pipes(const struct pollfd *pfds, int base, int nf
     }
 }
 
+/* ── spawn_run_tool_child: fork+exec a --run-tool child ──────────── */
+
+#define FD_REQUEST RUNTOOL_FD_REQUEST  /* the socketpair fd in the child */
+
+/* Spawn a sandboxed tool child via fork+execve. The request blob is sent
+ * over a socketpair (fd 3 in the child). Returns 0 on success (child is
+ * registered in g_children), -1 on failure (error result written inline). */
+static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
+                                const char *tool_call_id, const char *tool_name,
+                                const char *tool_args, int64_t turn_id,
+                                int64_t entry_id, const char *blob, size_t blob_len,
+                                int timeout_sec) {
+    if (g_child_count >= CHILD_MAX) return -1;
+
+    int sp[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) != 0) return -1;
+
+    /* sp[0] = parent side, sp[1] = child side (becomes fd 3) */
+    /* Set O_CLOEXEC on parent side so it doesn't leak into other children */
+    fcntl(sp[0], F_SETFD, FD_CLOEXEC);
+    /* Child side must NOT have CLOEXEC (it becomes fd 3 post-dup2) */
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(sp[0]); close(sp[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        /* CHILD: async-signal-safe only. No malloc, no stdio, no snprintf. */
+        close(sp[0]);
+        /* dup2 child socket to fd 3 */
+        if (sp[1] != FD_REQUEST) {
+            dup2(sp[1], FD_REQUEST);
+            close(sp[1]);
+        }
+        /* execve self as --run-tool. Minimal env (inherits nothing sensitive). */
+        char *const argv[] = {"cclaw", "--run-tool", NULL};
+        char *const envp[] = {NULL};
+        execve("/proc/self/exe", argv, envp);
+        /* execve failed — write static error to fd 3 and die */
+        const char *err = "error: execve failed";
+        (void)write(FD_REQUEST, err, 20);
+        _exit(127);
+    }
+
+    /* PARENT: close child end, write request blob (blocking, safe because
+     * blob is capped at RUNTOOL_REQUEST_MAX < kernel socket buffer) */
+    close(sp[1]);
+    ssize_t written = 0;
+    size_t total = blob_len;
+    while ((size_t)written < total) {
+        ssize_t w = write(sp[0], blob + written, total - (size_t)written);
+        if (w <= 0) {
+            close(sp[0]);
+            waitpid(pid, NULL, 0);
+            return -1;
+        }
+        written += w;
+    }
+
+    /* Switch to nonblocking for result reads in poll loop */
+    set_nonblock(sp[0]);
+
+    /* Register child — mirrors fork_tool_exec bookkeeping */
+    ChildProc *c = &g_children[g_child_count++];
+    memset(c, 0, sizeof(*c));
+    c->pid = pid;
+    c->type = CHILD_TOOL_EXEC;
+    c->session_id = session_id;
+    c->turn_id = turn_id;
+    c->entry_id = entry_id;
+    c->result_pipe = sp[0];
+    c->outbuf = NULL;
+    c->outbuf_len = 0;
+    c->timeout_sec = timeout_sec > 0 ? timeout_sec : 120;
+    c->deadline = time(NULL) + c->timeout_sec;
+    snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
+    snprintf(c->tool_call_id, sizeof(c->tool_call_id), "%s", tool_call_id);
+    snprintf(c->tool_name, sizeof(c->tool_name), "%s", tool_name);
+    c->tool_args = tool_args ? strdup(tool_args) : NULL;
+    return 0;
+}
+
 /* ── reap_children (state machine) ──────────────────────────────── */
 
 /* ── compute_timeout_ms: dynamic poll() timeout ─────────────── */
@@ -640,8 +901,10 @@ static void child_sweep_deadlines(void) {
         if (c->type == CHILD_TOOL_EXEC) {
             if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
             free(c->outbuf); c->outbuf = NULL; c->outbuf_len = 0;
-            const char *err = "error: tool timed out (120s)";
-            ToolResult tr = {.tool_call_id = c->tool_call_id, .content = (char *)err};
+            char errbuf[64];
+            snprintf(errbuf, sizeof(errbuf), "error: tool timed out (%ds)",
+                     c->timeout_sec > 0 ? c->timeout_sec : 120);
+            ToolResult tr = {.tool_call_id = c->tool_call_id, .content = errbuf};
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = "", .is_error = 1};
             entry_append_with_turn(g_db, c->session_id, &msg, c->turn_id);
@@ -2317,6 +2580,9 @@ done:
 int main(int argc, char *argv[]) {
     /* --qjs_eval: early intercept before any config/logging setup */
     if (argc >= 2 && strcmp(argv[1], "--qjs_eval") == 0) return qjs_eval_main(argc, argv);
+    /* --run-tool: early intercept for sandboxed file tool child. No DB, no key,
+     * no config. The child reads its request from fd 3. */
+    if (argc >= 2 && strcmp(argv[1], "--run-tool") == 0) return run_tool_main();
 
     cclaw_log_init();
     int daemon_mode = 0, new_session = 0, host_mode = 0;

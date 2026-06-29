@@ -93,6 +93,9 @@ void db_set_secret_key(const uint8_t key[32]);
  * broker so the relay process carries no key material. */
 void db_wipe_secret_key(void);
 
+/* Returns 1 if the master secret key is loaded in this process, 0 otherwise. */
+int db_secret_key_loaded(void);
+
 /* V3: Sub-agent limits — count active child sessions */
 int session_count_children(sqlite3 *db, int64_t parent_session_id);
 int session_count_active_agents(sqlite3 *db);

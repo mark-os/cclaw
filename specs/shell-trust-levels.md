@@ -20,8 +20,10 @@ Every sandboxed `shell_exec` child already gets (src/tool_shell.c):
 Per-agent knobs that exist today:
 
 - `allowed_tools` — withholding `shell_exec` is the strongest lockdown
-- `allowed_hosts` — gates the proxy = gates shell egress; **empty list
-  currently means allow-all**, so "no network" is not expressible
+- `allowed_hosts` — gates the proxy = gates shell egress; **empty/NULL list
+  means deny-all** (default-deny; the proxy refuses every host with no rules),
+  so "no network at all" is already expressible by passing an empty list — but
+  the trust-level table makes that explicit rather than accidental
 - `trust_level` — column exists (`standard`, `bootstrap`), carries almost
   no policy yet
 

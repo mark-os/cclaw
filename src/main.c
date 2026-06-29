@@ -25,6 +25,7 @@
 #include "approval.h"
 #include "llm_proc.h"
 #include "llm_worker.h"
+#include "tool_thread.h"
 #include "tools.h"
 #include "tool_parse.h"
 #include "tool_request_config.h"
@@ -125,7 +126,7 @@ static int child_has_session(int64_t session_id) {
 
 /* Forward declarations */
 static void deliver_response(int64_t session_id);
-static int fork_tool_exec(int64_t session_id, const char *agent_name, PendingToolCall *tc);
+static int dispatch_tool(int64_t session_id, const char *agent_name, PendingToolCall *tc);
 static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
                                 const char *tool_call_id, const char *tool_name,
                                 const char *tool_args, int64_t turn_id,
@@ -198,28 +199,12 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
     return rc;
 }
 
-/* Forward declarations for approval + advance (used by fork_tool_exec and resolve_approval) */
+/* Forward declarations for approval + advance (used by dispatch_tool and resolve_approval) */
 static void run_advance(int64_t session_id);
 static void handle_approval_park(int64_t session_id);
 /* resolve_approval declared in resolve.h (non-static) */
 
-/* ── fork_tool_exec ─────────────────────────────────────────────── */
-
-/* Tools that run in-process (need parent's DB handle or user interaction) */
-static int tool_is_inline(const char *name) {
-    return strcmp(name, "request_config") == 0 ||
-           strcmp(name, "memory_create") == 0 ||
-           strcmp(name, "memory_append") == 0 ||
-           strcmp(name, "memory_replace") == 0 ||
-           strcmp(name, "db_query") == 0 ||
-           strcmp(name, "launch_agent") == 0 ||
-           strcmp(name, "check_session") == 0 ||
-           strcmp(name, "check_approval") == 0 ||
-           strcmp(name, "extension_promote") == 0 ||
-           strcmp(name, "extension_publish") == 0 ||
-           strcmp(name, "extension_attach") == 0 ||
-           strcmp(name, "extension_list") == 0;
-}
+/* ── dispatch_tool ─────────────────────────────────────────────── */
 
 /* Tools whose sibling calls in one assistant turn may run concurrently.
  * Default is serial (safe): models emit ordered calls — shell especially —
@@ -263,8 +248,8 @@ static int tool_inline_error(int64_t session_id, PendingToolCall *tc,
     return 1;
 }
 
-static int fork_tool_exec(int64_t session_id, const char *agent_name,
-                          PendingToolCall *tc) {
+static int dispatch_tool(int64_t session_id, const char *agent_name,
+                         PendingToolCall *tc) {
     if (g_child_count >= CHILD_MAX) return -1;
 
     ToolEntry *te = g_tool_setup ? tools_lookup(&g_tool_setup->reg, tc->name) : NULL;
@@ -380,7 +365,7 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
     }
 
     /* Inline tools: execute in parent process */
-    if (tool_is_inline(tc->name)) {
+    if (te->recipe.vehicle == EXEC_INLINE) {
         /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
         char *interp_args = NULL;
         if (tool_needs_interpolation(tc->name) && g_tool_setup && g_tool_setup->secret_count > 0)
@@ -462,28 +447,34 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
      * The daemon is multithreaded; fork-without-exec is UB (frozen locks in
      * child). The re-exec'd child is single-threaded and sets up its own
      * namespace sandbox. */
-    if (te->user_data && (strcmp(tc->name, "file_read") == 0 ||
-                          strcmp(tc->name, "file_write") == 0 ||
-                          strcmp(tc->name, "file_edit") == 0 ||
-                          strcmp(tc->name, "file_list") == 0 ||
-                          strcmp(tc->name, "file_find") == 0 ||
-                          strcmp(tc->name, "file_grep") == 0)) {
+    if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_FILE &&
+        te->user_data) {
         FileReadCtx *fctx = (FileReadCtx *)te->user_data;
-        if (fctx->sandbox && fctx->workspace) {
+        if (fctx->workspace) {
             /* CLI progress */
             if (g_mode == 0)
                 cli_print_tool_call(tc->name, tc->arguments);
             session_set_state(g_db, session_id, "tool_running");
 
+            /* Host mode (sandbox=0) rides the SAME broker path: the child sets
+             * up no namespace and run_file_tier runs the handler in-process,
+             * exactly as the (now-deleted) generic fork path did. */
             size_t blob_len = 0;
-            char *blob = run_tool_serialize_file_request(
-                tc->name, tc->arguments, fctx->workspace,
-                (const char **)fctx->read_paths, fctx->read_path_count,
-                (const char **)fctx->write_paths, fctx->write_path_count,
-                fctx->workspace_ro, fctx->mount_cwd, fctx->cwd_path,
-                fctx->env_mode,
-                fctx->rlimits.nproc, fctx->rlimits.as_mb, fctx->rlimits.cpu_sec,
-                &blob_len);
+            RunToolReq req = {
+                .tier = RUNTOOL_TIER_FILE,
+                .tool_name = tc->name, .arguments = tc->arguments,
+                .env_mode = fctx->sb.env_mode,
+                .nproc = fctx->sb.rlimits.nproc, .as_mb = fctx->sb.rlimits.as_mb,
+                .cpu_sec = fctx->sb.rlimits.cpu_sec,
+                .sandbox = fctx->sb.sandbox,
+                .workspace = fctx->workspace, .cwd_path = fctx->cwd_path,
+                .workspace_ro = fctx->sb.workspace_ro, .mount_cwd = fctx->sb.mount_cwd,
+                .read_paths = (const char **)fctx->sb.read_paths,
+                .read_count = fctx->sb.read_path_count,
+                .write_paths = (const char **)fctx->sb.write_paths,
+                .write_count = fctx->sb.write_path_count,
+            };
+            char *blob = run_tool_serialize_request(&req, &blob_len);
             if (!blob)
                 return tool_inline_error(session_id, tc,
                     "error: file tool request exceeds 32KB cap", NULL);
@@ -497,8 +488,6 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
             db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
             return 0; /* async serial — wait for reap */
         }
-        /* else: sandbox==0 (host mode) — fall through to generic fork path
-         * which runs the handler in-process via file_sandbox_run's shortcut */
     }
 
     /* ── Shell-tier re-exec path: fork+exec a clean --run-tool broker ────
@@ -507,9 +496,13 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
      * Network-less tiers (file) spawn directly via spawn_run_tool_child.
      * Secrets: interpolated HERE in the daemon parent, blob carries resolved
      * values. Broker/child never hold the master key. */
-    if (strcmp(tc->name, "shell_exec") == 0 && te->user_data) {
+    if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_SHELL &&
+        te->user_data) {
         ShellConfig *sc = (ShellConfig *)te->user_data;
-        if (sc->sandbox && sc->workspace) {
+        if (sc->workspace) {
+            /* Host mode (sandbox=0) rides the SAME broker path: the child execs
+             * /bin/sh with no namespace (sandbox is threaded into SandboxConfig),
+             * replacing the deleted host-mode fork-only branch. */
             if (g_mode == 0)
                 cli_print_tool_call(tc->name, tc->arguments);
             session_set_state(g_db, session_id, "tool_running");
@@ -571,17 +564,26 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
             agent_dir_resolve(sc->workspace, sc->db_path, agent_dir, sizeof(agent_dir));
 
             size_t blob_len = 0;
-            char *blob = run_tool_serialize_shell_request(
-                resolved_cmd, cmd_timeout,
-                sc->workspace, sc->cwd_path, agent_dir,
-                (const char **)sc->allowed_hosts, sc->allowed_host_count,
-                min_secrets, min_count,
-                sc->sandbox, sc->env_mode, sc->net_mode, sc->mount_cwd,
-                sc->workspace_ro,
-                sc->rlimits.nproc, sc->rlimits.as_mb, sc->rlimits.cpu_sec,
-                (const char **)sc->read_paths, sc->read_path_count,
-                (const char **)sc->write_paths, sc->write_path_count,
-                &blob_len);
+            RunToolReq req = {
+                .tier = RUNTOOL_TIER_SHELL,
+                .tool_name = tc->name, .arguments = tc->arguments,
+                .env_mode = sc->sb.env_mode,
+                .nproc = sc->sb.rlimits.nproc, .as_mb = sc->sb.rlimits.as_mb,
+                .cpu_sec = sc->sb.rlimits.cpu_sec,
+                .sandbox = sc->sb.sandbox, .net_mode = sc->sb.net_mode,
+                .workspace = sc->workspace, .cwd_path = sc->cwd_path,
+                .workspace_ro = sc->sb.workspace_ro, .mount_cwd = sc->sb.mount_cwd,
+                .read_paths = (const char **)sc->sb.read_paths,
+                .read_count = sc->sb.read_path_count,
+                .write_paths = (const char **)sc->sb.write_paths,
+                .write_count = sc->sb.write_path_count,
+                .agent_dir = agent_dir,
+                .host_rules = (const char **)sc->allowed_hosts,
+                .host_count = sc->allowed_host_count,
+                .command = resolved_cmd, .timeout = cmd_timeout,
+                .secrets = min_secrets, .secret_count = min_count,
+            };
+            char *blob = run_tool_serialize_request(&req, &blob_len);
 
             /* Wipe interpolated command (contains secret plaintext) */
             if (interp_cmd) { explicit_bzero(interp_cmd, strlen(interp_cmd)); free(interp_cmd); }
@@ -608,114 +610,197 @@ static int fork_tool_exec(int64_t session_id, const char *agent_name,
             db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
             return 0;
         }
-        /* else: sandbox==0 (host mode) — fall through to generic fork path */
     }
 
-    /* Forkable tool: pipe for result capture. A pipe()/fork() failure must not
-     * leave the call pending forever — the session has already moved to
-     * tool_running and no wake resurrects an un-dispatched call. Synthesize an
-     * error result and complete the call inline, mirroring the unknown-tool
-     * branch, so the turn can advance. */
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
-        char err[160];
-        snprintf(err, sizeof(err), "error: %s: pipe failed: %s",
-                 tc->name, strerror(errno));
-        ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
-        Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
-                       .tool_name = tc->name, .is_error = 1};
-        entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
-        db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "fork_failed");
-        return 1;
-    }
+    /* ── Web-tier broker path (SBX_WEB): the same fork+execve --run-tool broker
+     * as shell, but the inner child runs OUR curl in-process (no inner exec).
+     * Egress is decided per-hop by the proxy — no pre-flight. Host mode rides the
+     * same path with sandbox=0 (no namespace, no proxy). */
+    if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_WEB &&
+        te->user_data) {
+        WebFetchCtx *wc = (WebFetchCtx *)te->user_data;
+        if (g_mode == 0)
+            cli_print_tool_call(tc->name, tc->arguments);
+        session_set_state(g_db, session_id, "tool_running");
 
-    /* CLI progress */
-    if (g_mode == 0)
-        cli_print_tool_call(tc->name, tc->arguments);
-
-    session_set_state(g_db, session_id, "tool_running");
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        char err[160];
-        snprintf(err, sizeof(err), "error: %s: fork failed: %s",
-                 tc->name, strerror(errno));
-        close(pipefd[0]); close(pipefd[1]);
-        ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
-        Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
-                       .tool_name = tc->name, .is_error = 1};
-        entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
-        db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "fork_failed");
-        return 1;
-    }
-    if (pid == 0) {
-        /* Child: only the output pipe write end is inherited (no O_CLOEXEC).
-         * Parent infrastructure fds (DB, sigchld pipe, notify pipe) are
-         * O_CLOEXEC and will close on exec within the shell sandbox.
-         *
-         * No per-subsystem teardown is needed here, and no separate "thin"
-         * child binary: COW fork shares the parent's pages read-only, and
-         * demand paging keeps any subsystem this child never calls (civetweb,
-         * QuickJS, most of SQLite) out of its resident set. The forked C-tool
-         * broker only runs the tool handler and writes a pipe — it touches none
-         * of that machinery, so those pages stay non-resident in the child. The
-         * inherited SQLite handle is left open on purpose: SQLite is not
-         * fork-safe, so closing it would risk the parent's shared connection. */
-        close(pipefd[0]);
-        /* This broker holds no DB handle and never needs the master key — wipe
-         * the inherited copy so the relay process carries no key material. */
-        db_wipe_secret_key();
-        /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
+        /* Interpolate {{SECRET:X}} (a URL may carry a token). */
         char *interp_args = NULL;
-        if (tool_needs_interpolation(tc->name) && g_tool_setup && g_tool_setup->secret_count > 0)
-            interp_args = secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count);
-        char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
-        /* Wipe the interpolated args (may carry {{SECRET}} plaintext) before the
-         * broker writes its result to the pipe and exits. */
+        if (g_tool_setup && g_tool_setup->secret_count > 0)
+            interp_args = secret_interpolate(tc->arguments, g_tool_setup->secrets,
+                                             g_tool_setup->secret_count);
+        const char *resolved_args = interp_args ? interp_args : tc->arguments;
+
+        char agent_dir[PATH_MAX];
+        agent_dir_resolve(wc->workspace, wc->db_path, agent_dir, sizeof(agent_dir));
+
+        size_t blob_len = 0;
+        RunToolReq req = {
+            .tier = RUNTOOL_TIER_WEB,
+            .tool_name = tc->name, .arguments = resolved_args,
+            .env_mode = wc->sb.env_mode,
+            .nproc = wc->sb.rlimits.nproc, .as_mb = wc->sb.rlimits.as_mb,
+            .cpu_sec = wc->sb.rlimits.cpu_sec,
+            .sandbox = wc->sb.sandbox, .net_mode = wc->sb.net_mode,
+            .workspace = wc->workspace, .cwd_path = wc->cwd_path,
+            .workspace_ro = wc->sb.workspace_ro, .mount_cwd = wc->sb.mount_cwd,
+            .read_paths = (const char **)wc->sb.read_paths,
+            .read_count = wc->sb.read_path_count,
+            .write_paths = (const char **)wc->sb.write_paths,
+            .write_count = wc->sb.write_path_count,
+            .agent_dir = agent_dir,
+            .host_rules = (const char **)wc->allowed_hosts,
+            .host_count = wc->allowed_host_count,
+            .timeout = 60,
+        };
+        char *blob = run_tool_serialize_request(&req, &blob_len);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
-        if (result) {
-            size_t len = strlen(result);
-            if (len > TOOL_MAX_OUTPUT) len = TOOL_MAX_OUTPUT;
-            size_t written = 0;
-            while (written < len) {
-                ssize_t n = write(pipefd[1], result + written, len - written);
-                if (n <= 0) break;
-                written += (size_t)n;
-            }
-            free(result);
-        }
-        close(pipefd[1]);
-        _exit(0);
+        if (!blob)
+            return tool_inline_error(session_id, tc,
+                "error: web request exceeds 32KB cap", NULL);
+        int rc = spawn_run_tool_child(session_id, agent_name,
+                     tc->call_id, tc->name, tc->arguments,
+                     tc->turn_id, tc->entry_id, blob, blob_len, 90);
+        explicit_bzero(blob, blob_len);
+        free(blob);
+        if (rc != 0)
+            return tool_inline_error(session_id, tc,
+                "error: spawn_run_tool_child failed", "fork_failed");
+        db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+        return 0;
     }
 
-    /* Parent: track */
-    close(pipefd[1]);
-    /* Set read end nonblocking so we can drain as data arrives */
-    set_nonblock(pipefd[0]);
-    ChildProc *c = &g_children[g_child_count++];
-    memset(c, 0, sizeof(*c));
-    c->pid = pid;
-    c->type = CHILD_TOOL_EXEC;
-    c->session_id = session_id;
-    c->turn_id = tc->turn_id;
-    c->entry_id = tc->entry_id;
-    c->result_pipe = pipefd[0];
-    c->outbuf = NULL;
-    c->outbuf_len = 0;
-    c->timeout_sec = 120;
-    c->deadline = time(NULL) + c->timeout_sec;
-    snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
-    snprintf(c->tool_call_id, sizeof(c->tool_call_id), "%s", tc->call_id);
-    snprintf(c->tool_name, sizeof(c->tool_name), "%s", tc->name);
-    c->tool_args = tc->arguments ? strdup(tc->arguments) : NULL;  /* for §8 observer */
-    /* In flight: exclude from get_pending so a re-advance (another wake landing
-     * while this child runs) can't fork a duplicate. reap_children flips it to
-     * 'done' via db_tool_call_complete_with_result. */
-    db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
-    /* Forked tools are serial by default (0): the next pending call waits for
-     * this child to be reaped. A tool marked parallel-safe continues (3) so
-     * siblings fork concurrently — the poll loop already multiplexes N pipes. */
-    return tool_is_parallel_safe(tc->name) ? 3 : 0;
+    /* ── JS-tier broker path (SBX_JS): web's twin. The inner child evals qjs
+     * in-process (no inner exec); http_request's curl reaches the proxy via
+     * HTTP_PROXY → decide() per hop. fs.* paths are real bind-mounts; the shared
+     * extension store is mounted read-only so promoted handler files resolve.
+     * Covers both js_eval and JS-defined extension tools (resolved via the same
+     * entry's recipe). Host mode rides the same path with sandbox=0. */
+    if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_JS &&
+        te->user_data) {
+        JsEvalCtx *jc = NULL;
+        char *eval_args = NULL;
+        if (js_tool_resolve_request(te, tc->arguments, &jc, &eval_args) != 0 || !jc)
+            return tool_inline_error(session_id, tc,
+                "error: js tool request resolution failed", NULL);
+
+        if (g_mode == 0)
+            cli_print_tool_call(tc->name, tc->arguments);
+        session_set_state(g_db, session_id, "tool_running");
+
+        /* Interpolate {{SECRET:X}} (args may carry a token for http_request). */
+        char *interp_args = NULL;
+        if (g_tool_setup && g_tool_setup->secret_count > 0)
+            interp_args = secret_interpolate(eval_args, g_tool_setup->secrets,
+                                             g_tool_setup->secret_count);
+        const char *resolved_args = interp_args ? interp_args : eval_args;
+
+        char agent_dir[PATH_MAX];
+        agent_dir_resolve(jc->workspace, jc->db_path, agent_dir, sizeof(agent_dir));
+
+        /* Mount the shared extension store read-only (<db_dir>/extensions), in
+         * addition to the agent's own read grants, so promoted handler files
+         * load without an explicit grant. Build a transient read-path array. */
+        char store_dir[PATH_MAX] = {0};
+        int have_store = 0;
+        if (jc->db_path && jc->db_path[0]) {
+            char tmp[PATH_MAX - 16];
+            snprintf(tmp, sizeof(tmp), "%s", jc->db_path);
+            char *sl = strrchr(tmp, '/');
+            if (sl) {
+                *sl = '\0';
+                snprintf(store_dir, sizeof(store_dir), "%s/extensions", tmp);
+                struct stat sb;
+                if (stat(store_dir, &sb) == 0 && S_ISDIR(sb.st_mode)) have_store = 1;
+            }
+        }
+        size_t rc_count = jc->sb.read_path_count + (have_store ? 1 : 0);
+        const char **read_paths = NULL;
+        if (rc_count > 0) {
+            read_paths = malloc(rc_count * sizeof(*read_paths));
+            if (read_paths) {
+                size_t k = 0;
+                for (size_t i = 0; i < jc->sb.read_path_count; i++)
+                    read_paths[k++] = jc->sb.read_paths[i];
+                if (have_store) read_paths[k++] = store_dir;
+            } else {
+                rc_count = 0;
+            }
+        }
+
+        size_t blob_len = 0;
+        RunToolReq req = {
+            .tier = RUNTOOL_TIER_JS,
+            .tool_name = "js_eval", .arguments = resolved_args,
+            .env_mode = jc->sb.env_mode,
+            .nproc = jc->sb.rlimits.nproc, .as_mb = jc->sb.rlimits.as_mb,
+            .cpu_sec = jc->sb.rlimits.cpu_sec,
+            .sandbox = jc->sb.sandbox, .net_mode = jc->sb.net_mode,
+            .workspace = jc->workspace, .cwd_path = jc->cwd_path,
+            .workspace_ro = jc->sb.workspace_ro, .mount_cwd = jc->sb.mount_cwd,
+            .read_paths = read_paths, .read_count = rc_count,
+            .write_paths = (const char **)jc->sb.write_paths,
+            .write_count = jc->sb.write_path_count,
+            .agent_dir = agent_dir,
+            .host_rules = (const char **)jc->allowed_hosts,
+            .host_count = jc->allowed_hosts_count,
+            .timeout = 120,
+        };
+        char *blob = run_tool_serialize_request(&req, &blob_len);
+        free(read_paths);
+        if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
+        free(eval_args);
+        if (!blob)
+            return tool_inline_error(session_id, tc,
+                "error: js request exceeds 32KB cap", NULL);
+        int rc = spawn_run_tool_child(session_id, agent_name,
+                     tc->call_id, tc->name, tc->arguments,
+                     tc->turn_id, tc->entry_id, blob, blob_len, 150);
+        explicit_bzero(blob, blob_len);
+        free(blob);
+        if (rc != 0)
+            return tool_inline_error(session_id, tc,
+                "error: spawn_run_tool_child failed", "fork_failed");
+        db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+        return 0;
+    }
+
+    /* ── EXEC_THREAD: fire-and-forget detached thread for DB/session-only
+     * tools. The tool runs to completion on its own thread with its OWN sqlite3*
+     * (never the registry handler's captured handle, which is the poll thread's),
+     * writes the result + completes the call, then wakes the poll loop via the
+     * tool-notify pipe → run_advance. The poll loop never blocks on tool logic. */
+    if (te->recipe.vehicle == EXEC_THREAD && te->recipe.thread_run) {
+        if (g_mode == 0)
+            cli_print_tool_call(tc->name, tc->arguments);
+        session_set_state(g_db, session_id, "tool_running");
+
+        ToolThreadJob job = {0};
+        job.session_id = session_id;
+        job.turn_id = tc->turn_id;
+        job.entry_id = tc->entry_id;
+        snprintf(job.tool_call_id, sizeof(job.tool_call_id), "%s", tc->call_id);
+        snprintf(job.tool_name, sizeof(job.tool_name), "%s", tc->name);
+        snprintf(job.agent_name, sizeof(job.agent_name), "%s", agent_name);
+        job.args = strdup(tc->arguments ? tc->arguments : "{}");
+        job.run = te->recipe.thread_run;
+        /* No THREAD (DB) tool references {{SECRET}} — interpolation is a
+         * sandbox-tier concern. The thread still postprocesses (DLP scan). */
+        job.secrets = g_tool_setup ? g_tool_setup->secrets : NULL;
+        job.secret_count = g_tool_setup ? g_tool_setup->secret_count : 0;
+
+        /* Mark running BEFORE spawn so a re-advance landing while the thread
+         * runs can't double-dispatch; the thread flips it to done. */
+        db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+        if (tool_thread_spawn(&job) != 0)
+            return tool_inline_error(session_id, tc,
+                "error: failed to spawn tool thread", "thread_failed");
+        return 0; /* serial async — wait for the thread's completion notify */
+    }
+
+    /* No recipe matched — unreachable in practice. Fail the call so the turn
+     * advances instead of hanging on a pending tool_call. */
+    return tool_inline_error(session_id, tc,
+        "error: tool has no execution recipe", NULL);
 }
 
 /* ── Pipe draining helpers ─────────────────────────────────────── */
@@ -836,7 +921,7 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
     /* Switch to nonblocking for result reads in poll loop */
     set_nonblock(sp[0]);
 
-    /* Register child — mirrors fork_tool_exec bookkeeping */
+    /* Register child — mirrors dispatch_tool bookkeeping */
     ChildProc *c = &g_children[g_child_count++];
     memset(c, 0, sizeof(*c));
     c->pid = pid;
@@ -1348,6 +1433,17 @@ static void event_step_worker(int worker_fd) {
     }
 }
 
+/* Drain tool-thread completion notifications: a finished EXEC_THREAD tool wrote
+ * its result + completed its call with its own db, then pushed session_id here.
+ * Advance on the poll thread exactly like worker/child completions. */
+static void event_step_tool_thread(void) {
+    int64_t completed_sid;
+    while (tool_thread_read(&completed_sid) == 0) {
+        if (completed_sid == -1) continue;
+        run_advance(completed_sid);
+    }
+}
+
 static void event_step_chld(void) {
     char buf[64];
     while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
@@ -1369,7 +1465,7 @@ static void run_advance(int64_t session_id) {
         }
         break;
     case ADVANCE_DISPATCH_TOOLS: {
-        /* fork_tool_exec returns: 1 = inline (result written),
+        /* dispatch_tool returns: 1 = inline (result written),
          * 3 = async parallel-safe dispatched (keep going), 0 = async serial
          * dispatched (stop and wait), 2 = parked for approval, <0 = failure.
          * Parallel-safe calls are launched back-to-back; a serial async call
@@ -1383,7 +1479,7 @@ static void run_advance(int64_t session_id) {
         int async_in_flight = 0;
         int stop = 0;
         for (int i = 0; i < out.tc_count && !stop; i++) {
-            int rc = fork_tool_exec(session_id, out.agent_name, &out.calls[i]);
+            int rc = dispatch_tool(session_id, out.agent_name, &out.calls[i]);
             switch (rc) {
             case 1: break;                              /* inline done — next */
             case 3: async_in_flight = 1; break;         /* parallel async — next */
@@ -1611,7 +1707,6 @@ static void print_usage(void) {
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
-           "  --qjs_eval         sandboxed JS evaluator (forked child mode)\n"
            "\n"
            "options:\n"
            "  -p <prompt>        single-turn: send prompt, print response, exit\n"
@@ -1737,342 +1832,6 @@ static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
     }
 }
 
-/* ── --qjs_eval mode: sandboxed one-shot JS evaluator ────────────── */
-
-
-#define QJS_EVAL_HEAP_SIZE (1024 * 1024)
-#define QJS_EVAL_MAX_INSTRUCTIONS 10000000
-#define QJS_EVAL_MAX_OUTPUT (60 * 1024)
-#define QJS_EVAL_MAX_FILE  (1024 * 1024)
-
-static const char *QJS_EVAL_PRELUDE =
-    "var __console_buf = [];\n"
-    "var console = {\n"
-    "  log: function() {\n"
-    "    var parts = [];\n"
-    "    for (var i = 0; i < arguments.length; i++) {\n"
-    "      var v = arguments[i];\n"
-    "      parts.push(typeof v === 'object' ? JSON.stringify(v) : '' + v);\n"
-    "    }\n"
-    "    __console_buf.push(parts.join(' '));\n"
-    "  }\n"
-    "};\n"
-    "console.warn = console.log;\n"
-    "console.error = console.log;\n"
-    "var require = function() {\n"
-    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readdir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url).');\n"
-    "};\n"
-    "var process = {};\n"
-    "Object.defineProperty(process, 'env', {get: function() { throw new TypeError('process.env not available.'); }});\n"
-    "Object.defineProperty(process, 'cwd', {get: function() { throw new TypeError('process.cwd not available. Use fs.cwd().'); }});\n"
-    "Object.defineProperty(process, 'argv', {get: function() { throw new TypeError('process.argv not available.'); }});\n"
-    "Object.defineProperty(process, 'exit', {get: function() { throw new TypeError('process.exit not available.'); }});\n"
-    "Object.defineProperty(process, 'platform', {get: function() { throw new TypeError('process.platform not available.'); }});\n"
-    "var module = {};\n"
-    "Object.defineProperty(module, 'exports', {\n"
-    "  get: function() { throw new TypeError('module.exports not available.'); },\n"
-    "  set: function() { throw new TypeError('module.exports not available. Return your value as the last expression.'); }\n"
-    "});\n"
-    "var Map = function() { throw new TypeError('Map not available. Use plain objects.'); };\n"
-    "var Set = function() { throw new TypeError('Set not available. Use: var s = {}; s[x] = true;'); };\n"
-    "var print = console.log;\n";
-
-
-/* The eval profile is ES2025 but models sometimes reach for patterns that
- * fail — provide actionable hints. */
-static const char *qjs_syntax_hint(const char *code) {
-    if (!code) return "";
-    if (strstr(code, "const ") || strstr(code, "let "))
-        return " — hint: this engine is ES5; use 'var' instead of 'const'/'let'";
-    if (strstr(code, "=>"))
-        return " — hint: arrow functions are unsupported; use function(x){ return ...; }";
-    if (strstr(code, "`"))
-        return " — hint: template literals are unsupported; concatenate with 'a' + b";
-    if (strstr(code, "require(") || strstr(code, "import "))
-        return " — hint: no modules; 'fs' and 'http_request' are globals (e.g. fs.readdir('.'))";
-    if (strstr(code, "await ") || strstr(code, ".then("))
-        return " — hint: this engine is synchronous; assign directly: var r = http_request(url); then use r.body / r.json()";
-    return "";
-}
-
-/* Entry for the re-exec'd `cclaw --qjs_eval` JS child. main() jumps here before
- * any DB/config/log init (and before the daemon's civetweb ever starts), so the
- * JS sandbox process never initializes SQLite or civetweb — demand paging keeps
- * their text out of its RSS. No separate JS-only binary is required: the single
- * image is reused, and the unused subsystems simply stay non-resident. */
-static int qjs_eval_main(int argc, char **argv) {
-    /* (a) Parse argv after "--qjs_eval" */
-    int inline_mode = 0;
-    const char *code_str = NULL;
-    const char *file_path = NULL;
-    const char *args_json = NULL;
-
-    if (argc < 3) {
-        fprintf(stderr, "usage: cclaw --qjs_eval -e 'CODE' | FILE [ARGS_JSON]\n");
-        _exit(1);
-    }
-    if (strcmp(argv[2], "-e") == 0) {
-        if (argc < 4) { fprintf(stderr, "--qjs_eval -e requires code\n"); _exit(1); }
-        inline_mode = 1;
-        code_str = argv[3];
-    } else {
-        file_path = argv[2];
-        if (argc >= 4) args_json = argv[3];
-    }
-
-    /* (b) Read env vars into locals before sandbox scrubs them */
-    const char *workspace_env = getenv("CCLAW_WORKSPACE");
-    char *workspace = workspace_env ? strdup(workspace_env) : NULL;
-    const char *db_env = getenv("CCLAW_DB");
-    char *db_path = db_env ? strdup(db_env) : NULL;
-    const char *env_file_env = getenv("CCLAW_ENV_FILE");
-    char *env_file = env_file_env ? strdup(env_file_env) : NULL;
-    const char *proxy_env = getenv("CCLAW_PROXY_SOCK");
-    char *proxy_sock = proxy_env ? strdup(proxy_env) : NULL;
-    const char *host_mode_env = getenv("CCLAW_QJS_HOST");
-    int no_sandbox = (host_mode_env && strcmp(host_mode_env, "1") == 0);
-
-    /* Parse allowed hosts */
-    char **allowed_hosts = NULL;
-    size_t hosts_count = 0;
-    const char *hosts_env = getenv("CCLAW_ALLOWED_HOSTS");
-    if (hosts_env && hosts_env[0]) {
-        char *tmp = strdup(hosts_env);
-        char *tok = strtok(tmp, ",");
-        while (tok) { hosts_count++; tok = strtok(NULL, ","); }
-        allowed_hosts = malloc(hosts_count * sizeof(char *));
-        /* re-parse */
-        free(tmp);
-        tmp = strdup(hosts_env);
-        tok = strtok(tmp, ",");
-        for (size_t i = 0; i < hosts_count; i++) {
-            allowed_hosts[i] = strdup(tok);
-            tok = strtok(NULL, ",");
-        }
-        free(tmp);
-    }
-
-    /* Layer 2: parse read/write paths from env → extra_mounts */
-    size_t read_count = 0, write_count = 0;
-    const char *rp_env = getenv("CCLAW_READ_PATHS");
-    const char *wp_env = getenv("CCLAW_WRITE_PATHS");
-    if (rp_env && rp_env[0]) {
-        char *tmp = strdup(rp_env);
-        for (char *t = strtok(tmp, ","); t; t = strtok(NULL, ",")) read_count++;
-        free(tmp);
-    }
-    if (wp_env && wp_env[0]) {
-        char *tmp = strdup(wp_env);
-        for (char *t = strtok(tmp, ","); t; t = strtok(NULL, ",")) write_count++;
-        free(tmp);
-    }
-    size_t n_extra = read_count + write_count;
-    char **rp_strs = NULL, **wp_strs = NULL;
-
-    /* Layer 5: always mount the shared extension store read-only so sandboxed
-     * (non-host) agents can load promoted tool/hook handlers — which live under
-     * <db_dir>/extensions — without an explicit read_path grant. */
-    char store_dir[PATH_MAX] = {0};
-    int have_store = 0;
-    if (db_path && db_path[0]) {
-        char tmp[PATH_MAX];
-        snprintf(tmp, sizeof(tmp), "%s", db_path);
-        char *sl = strrchr(tmp, '/');
-        if (sl) {
-            *sl = '\0';
-            snprintf(store_dir, sizeof(store_dir), "%s/extensions", tmp);
-            struct stat sb;
-            if (stat(store_dir, &sb) == 0 && S_ISDIR(sb.st_mode)) have_store = 1;
-        }
-    }
-
-    /* (c) Sandbox — derive policy from trust level */
-    const char *trust_env = getenv("CCLAW_TRUST_LEVEL");
-    SandboxConfig cfg = {0};
-    sandbox_policy_from_trust(trust_env, &cfg);
-    cfg.workspace = workspace;
-    cfg.db_path = db_path;
-    cfg.env_file = env_file;
-    cfg.cwd_path = NULL;
-    cfg.proxy_sock = proxy_sock;
-    if (no_sandbox) cfg.sandbox = 0;
-
-    size_t total_extra = n_extra + (have_store ? 1 : 0);
-    if (total_extra > 0) {
-        cfg.extra_mounts = malloc(total_extra * sizeof(*cfg.extra_mounts));
-        cfg.extra_mount_count = total_extra;
-        size_t j = 0;
-        if (read_count > 0) {
-            rp_strs = malloc(read_count * sizeof(char *));
-            char *tmp = strdup(rp_env);
-            char *tok = strtok(tmp, ",");
-            for (size_t i = 0; i < read_count; i++) {
-                rp_strs[i] = strdup(tok);
-                cfg.extra_mounts[j].path = rp_strs[i];
-                cfg.extra_mounts[j].ro = 1;
-                j++;
-                tok = strtok(NULL, ",");
-            }
-            free(tmp);
-        }
-        if (write_count > 0) {
-            wp_strs = malloc(write_count * sizeof(char *));
-            char *tmp = strdup(wp_env);
-            char *tok = strtok(tmp, ",");
-            for (size_t i = 0; i < write_count; i++) {
-                wp_strs[i] = strdup(tok);
-                cfg.extra_mounts[j].path = wp_strs[i];
-                cfg.extra_mounts[j].ro = 0;
-                j++;
-                tok = strtok(NULL, ",");
-            }
-            free(tmp);
-        }
-        if (have_store) {
-            cfg.extra_mounts[j].path = store_dir;
-            cfg.extra_mounts[j].ro = 1;
-            j++;
-        }
-    }
-
-    if (sandbox_child_setup(&cfg) != 0) {
-        printf("error: sandbox setup failed\n");
-        _exit(126);
-    }
-
-    /* (d) Create JS context with eval profile */
-    QjsRuntime *qrt = qjs_runtime_create(QJS_EVAL_HEAP_SIZE);
-    if (!qrt) { printf("error: out of memory\n"); _exit(1); }
-    qjs_set_interrupt_limit(qrt, QJS_EVAL_MAX_INSTRUCTIONS);
-
-    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
-    if (!ctx) { qjs_runtime_destroy(qrt); printf("error: JS context creation failed\n"); _exit(1); }
-
-    /* Store allowed_hosts in context opaque for host functions */
-    JsHostCtx hctx = {
-        .instruction_count = 0,
-        .instruction_limit = QJS_EVAL_MAX_INSTRUCTIONS,
-        .allowed_hosts = allowed_hosts,
-        .allowed_hosts_count = hosts_count,
-    };
-    JS_SetContextOpaque(ctx, &hctx);
-
-    /* Register host C functions (http_request, fs.*, console, print) */
-    qjs_register_eval_host_functions(ctx);
-
-    /* (e) Run prelude */
-    JSValue pv = JS_Eval(ctx, QJS_EVAL_PRELUDE, strlen(QJS_EVAL_PRELUDE), "<prelude>", JS_EVAL_TYPE_GLOBAL);
-    if (JS_IsException(pv)) {
-        char *msg = qjs_get_exception_string(ctx);
-        printf("error: prelude failed: %s\n", msg ? msg : "unknown");
-        free(msg);
-        _exit(1);
-    }
-    JS_FreeValue(ctx, pv);
-
-    /* (f) Build code to eval */
-    char *eval_code = NULL;
-    if (inline_mode) {
-        eval_code = (char *)code_str;  /* no free needed */
-    } else {
-        /* Read file (after sandbox, so sandboxed fs view) */
-        FILE *f = fopen(file_path, "r");
-        if (!f) { printf("error: cannot open %s\n", file_path); _exit(1); }
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f);
-        if (sz < 0 || sz > QJS_EVAL_MAX_FILE) {
-            fclose(f);
-            printf("error: file too large or unreadable\n");
-            _exit(1);
-        }
-        fseek(f, 0, SEEK_SET);
-        char *fbuf = malloc((size_t)sz + 1);
-        if (!fbuf) { fclose(f); printf("error: out of memory\n"); _exit(1); }
-        size_t rd = fread(fbuf, 1, (size_t)sz, f);
-        fclose(f);
-        fbuf[rd] = '\0';
-
-        if (args_json) {
-            /* Wrap: (function(args){\n<file>\n})(<args>) */
-            size_t wlen = 20 + rd + 4 + strlen(args_json) + 2;
-            eval_code = malloc(wlen);
-            if (!eval_code) { printf("error: out of memory\n"); _exit(1); }
-            snprintf(eval_code, wlen, "(function(args){\n%s\n})(%s)", fbuf, args_json);
-            free(fbuf);
-        } else {
-            eval_code = fbuf;
-        }
-    }
-
-    /* (g) Eval */
-    size_t eval_len = strlen(eval_code);
-    JSValue val = JS_Eval(ctx, eval_code, eval_len, "<qjs_eval>", JS_EVAL_TYPE_GLOBAL);
-
-    /* Drain microtasks and await/unwrap any returned promise (a rejection
-     * re-throws, so it reports via the exception path below). */
-    if (!JS_IsException(val))
-        val = qjs_resolve(ctx, val);
-
-    int failed = 0;
-    char *result = NULL;
-
-    if (JS_IsException(val)) {
-        failed = 1;
-        char *msg = qjs_get_exception_string(ctx);
-        if (msg) {
-            const char *hint = strstr(msg, "SyntaxError") ? qjs_syntax_hint(eval_code) : "";
-            size_t len = strlen(msg) + strlen(hint) + 16;
-            result = malloc(len);
-            if (result) snprintf(result, len, "error: %s%s", msg, hint);
-            else result = strdup("error: OOM");
-            free(msg);
-        } else {
-            result = strdup("error: exception (no message)");
-        }
-    } else if (JS_IsUndefined(val)) {
-        /* (h) Console fallback */
-        JS_FreeValue(ctx, val);
-        const char *check = "__console_buf.length > 0 ? __console_buf.join('\\n') : undefined";
-        JSValue buf_val = JS_Eval(ctx, check, strlen(check), "<console>", JS_EVAL_TYPE_GLOBAL);
-        if (!JS_IsUndefined(buf_val) && !JS_IsException(buf_val)) {
-            const char *str = JS_ToCString(ctx, buf_val);
-            result = str ? strdup(str) : strdup("undefined");
-            if (str) JS_FreeCString(ctx, str);
-        } else {
-            result = strdup("undefined");
-        }
-        JS_FreeValue(ctx, buf_val);
-    } else if (JS_IsNull(val)) {
-        JS_FreeValue(ctx, val);
-        result = strdup("null");
-    } else {
-        const char *str = JS_ToCString(ctx, val);
-        result = str ? strdup(str) : strdup("error: cannot convert result to string");
-        if (str) JS_FreeCString(ctx, str);
-        JS_FreeValue(ctx, val);
-    }
-
-    /* (i) Output */
-    size_t out_len = strlen(result);
-    if (out_len > QJS_EVAL_MAX_OUTPUT) out_len = QJS_EVAL_MAX_OUTPUT;
-    fwrite(result, 1, out_len, stdout);
-    if (out_len > 0 && result[out_len - 1] != '\n') fwrite("\n", 1, 1, stdout);
-    fflush(stdout);
-
-    /* Cleanup */
-    free(result);
-    if (!inline_mode && eval_code != code_str) free(eval_code);
-    JS_FreeContext(ctx);
-    qjs_runtime_destroy(qrt);
-    for (size_t i = 0; i < hosts_count; i++) free(allowed_hosts[i]);
-    free(allowed_hosts);
-    free(workspace);
-    free(db_path);
-    free(env_file);
-    free(proxy_sock);
-
-    _exit(failed ? 1 : 0);
-}
 
 static int run_daemon(char *db_path) {
     g_mode = 1;
@@ -2111,6 +1870,14 @@ static int run_daemon(char *db_path) {
     int daemon_worker_fd = llm_worker_fd();
     set_nonblock(daemon_worker_fd);
 
+    /* Fire-and-forget tool threads (EXEC_THREAD vehicle) */
+    if (tool_thread_start(db_path, 0) != 0) {
+        fprintf(stderr, "error: failed to start tool threads\n");
+        llm_worker_stop();
+        config_free(g_cfg); db_close(g_db); free(db_path); return 1;
+    }
+    int daemon_tool_fd = tool_thread_fd();
+
     /* Init wake pipe + FIFO */
     wake_init();
     int fifo_fd = wake_fifo_open(db_path);
@@ -2128,7 +1895,7 @@ static int run_daemon(char *db_path) {
     channel_launch_all(g_db);
 
     /* poll() setup — sized for fixed fds + all children with result pipes */
-    int max_pfds = 5 + CHILD_MAX;  /* chld, wake, fifo, worker, result pipes */
+    int max_pfds = 6 + CHILD_MAX;  /* chld, wake, fifo, worker, tool-thread, result pipes */
     struct pollfd *pfds = malloc(max_pfds * sizeof(struct pollfd));
     if (!pfds) { perror("malloc"); return 1; }
 
@@ -2148,6 +1915,8 @@ static int run_daemon(char *db_path) {
         if (fifo_fd >= 0) { fifo_idx = nfds; pfds[nfds].fd = fifo_fd; pfds[nfds].events = POLLIN; nfds++; }
         int d_worker_idx = nfds;
         pfds[nfds].fd = daemon_worker_fd; pfds[nfds].events = POLLIN; nfds++;
+        int d_tool_idx = nfds;
+        pfds[nfds].fd = daemon_tool_fd; pfds[nfds].events = POLLIN; nfds++;
 
         int result_pipe_base = nfds;
         nfds = add_result_pipe_fds(pfds, nfds, max_pfds);
@@ -2173,6 +1942,8 @@ static int run_daemon(char *db_path) {
         }
         if (pfds[d_worker_idx].revents & POLLIN)
             event_step_worker(daemon_worker_fd);
+        if (pfds[d_tool_idx].revents & POLLIN)
+            event_step_tool_thread();
 
         child_sweep_deadlines();
         channel_tick(g_db);
@@ -2189,6 +1960,7 @@ static int run_daemon(char *db_path) {
 
     /* Shutdown */
     llm_worker_stop();
+    tool_thread_stop();  /* drain in-flight tool threads before freeing state */
     channel_shutdown_all();
     heartbeat_stop(); web_stop();
     /* Disarm SIGCHLD before closing the self-pipe: a child reaped after the
@@ -2285,12 +2057,6 @@ static int run_cli(char *db_path, const char *prompt,
                     for (size_t i = 0; i < ac->tool_count; i++) { if (i) strcat(csv, ","); strcat(csv, ac->tools[i]); }
                     setenv("CCLAW_TOOLS", csv, 1); free(csv); }
             }
-            if (ac->allowed_hosts_count > 0) {
-                size_t len = 0; for (size_t i = 0; i < ac->allowed_hosts_count; i++) len += strlen(ac->allowed_hosts[i]) + 1;
-                char *csv = malloc(len); if (csv) { csv[0] = '\0';
-                    for (size_t i = 0; i < ac->allowed_hosts_count; i++) { if (i) strcat(csv, ","); strcat(csv, ac->allowed_hosts[i]); }
-                    setenv("CCLAW_ALLOWED_HOSTS", csv, 1); free(csv); }
-            }
             agent_config_free(ac);
         }
     }
@@ -2381,7 +2147,7 @@ static int run_cli(char *db_path, const char *prompt,
 
     /* ── poll() setup ──────────────────────────────────────────────── */
     /* Allocate for fixed fds + all children with result pipes */
-    int cli_max_pfds = 4 + CHILD_MAX;
+    int cli_max_pfds = 5 + CHILD_MAX;  /* worker, stdin, chld, wake, tool-thread + pipes */
     struct pollfd *cli_pfds = malloc(cli_max_pfds * sizeof(struct pollfd));
     if (!cli_pfds) { perror("malloc"); return 1; }
 
@@ -2395,6 +2161,11 @@ static int run_cli(char *db_path, const char *prompt,
         fprintf(stderr, "error: failed to start LLM worker\n");
         agent_setup_destroy(&setup); free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path); return 1;
     }
+
+    /* Fire-and-forget tool threads (EXEC_THREAD vehicle); cli_mode=1 prints the
+     * dim "→ result" progress line like the inline path. */
+    int cli_tool_fd = -1;
+    if (tool_thread_start(db_path, 1) == 0) cli_tool_fd = tool_thread_fd();
 
     /* Wake pipe: sub-agent launch and completion wake sessions through this fd,
      * exactly as in the daemon loop. Without it wake_session() is a no-op, so a
@@ -2446,6 +2217,11 @@ static int run_cli(char *db_path, const char *prompt,
             wake_idx = cli_nfds;
             cli_pfds[cli_nfds].fd = wake_pipe_fd; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
         }
+        int tool_idx = -1;
+        if (cli_tool_fd >= 0) {
+            tool_idx = cli_nfds;
+            cli_pfds[cli_nfds].fd = cli_tool_fd; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
+        }
 
         int result_pipe_base = cli_nfds;
         cli_nfds = add_result_pipe_fds(cli_pfds, cli_nfds, cli_max_pfds);
@@ -2478,6 +2254,13 @@ static int run_cli(char *db_path, const char *prompt,
                 if (child_has_session(msg.session_id)) continue;
                 run_advance(msg.session_id);
             }
+            if (g_mode == 0 && !g_cli_turn_active) {
+                if (g_cli_done) goto done;
+                printf("> "); fflush(stdout);
+            }
+        }
+        if (tool_idx >= 0 && (cli_pfds[tool_idx].revents & POLLIN)) {
+            event_step_tool_thread();
             if (g_mode == 0 && !g_cli_turn_active) {
                 if (g_cli_done) goto done;
                 printf("> "); fflush(stdout);
@@ -2561,6 +2344,7 @@ done:
     /* Quiesce the worker pool before freeing anything it may still touch
      * (g_tool_setup/g_cfg/g_db). Mirrors the daemon shutdown order. */
     llm_worker_stop();
+    tool_thread_stop();  /* drain in-flight tool threads before freeing state */
     agent_setup_destroy(&setup);
     /* Disarm SIGCHLD before closing the self-pipe: a child reaped after the
      * close would otherwise have the handler write into a reused fd. */
@@ -2578,8 +2362,6 @@ done:
 }
 
 int main(int argc, char *argv[]) {
-    /* --qjs_eval: early intercept before any config/logging setup */
-    if (argc >= 2 && strcmp(argv[1], "--qjs_eval") == 0) return qjs_eval_main(argc, argv);
     /* --run-tool: early intercept for sandboxed file tool child. No DB, no key,
      * no config. The child reads its request from fd 3. */
     if (argc >= 2 && strcmp(argv[1], "--run-tool") == 0) return run_tool_main();

@@ -320,6 +320,32 @@ static char *tool_memory_delete_handler(const char *arguments, void *user_data) 
     return out;
 }
 
+/* --- EXEC_THREAD shims: rebuild the ctx around the thread's own db handle --- */
+static char *memory_create_thread_run(sqlite3 *db, const char *agent_name,
+                                      int64_t session_id, const char *args) {
+    (void)session_id;
+    ToolMemoryCtx c = {.db = db, .agent_name = agent_name};
+    return tool_memory_create_handler(args, &c);
+}
+static char *memory_add_thread_run(sqlite3 *db, const char *agent_name,
+                                   int64_t session_id, const char *args) {
+    (void)session_id;
+    ToolMemoryCtx c = {.db = db, .agent_name = agent_name};
+    return tool_memory_add_handler(args, &c);
+}
+static char *memory_edit_thread_run(sqlite3 *db, const char *agent_name,
+                                    int64_t session_id, const char *args) {
+    (void)session_id;
+    ToolMemoryCtx c = {.db = db, .agent_name = agent_name};
+    return tool_memory_edit_handler(args, &c);
+}
+static char *memory_delete_thread_run(sqlite3 *db, const char *agent_name,
+                                      int64_t session_id, const char *args) {
+    (void)session_id;
+    ToolMemoryCtx c = {.db = db, .agent_name = agent_name};
+    return tool_memory_delete_handler(args, &c);
+}
+
 /* --- Registration --- */
 
 int tool_memory_register(ToolRegistry *reg, ToolMemoryCtx *ctx) {
@@ -339,5 +365,10 @@ int tool_memory_register(ToolRegistry *reg, ToolMemoryCtx *ctx) {
                        "Delete notes by number (others renumber). Args: block, numbers (array of integers).",
                        MEMORY_DELETE_PARAMS, tool_memory_delete_handler, ctx) != 0)
         return -1;
+    /* All DB-only — fire-and-forget threads with their own db handle. */
+    tools_set_recipe(reg, "memory_create", (ToolRecipe){EXEC_THREAD, SBX_NONE, memory_create_thread_run});
+    tools_set_recipe(reg, "memory_add",    (ToolRecipe){EXEC_THREAD, SBX_NONE, memory_add_thread_run});
+    tools_set_recipe(reg, "memory_edit",   (ToolRecipe){EXEC_THREAD, SBX_NONE, memory_edit_thread_run});
+    tools_set_recipe(reg, "memory_delete", (ToolRecipe){EXEC_THREAD, SBX_NONE, memory_delete_thread_run});
     return 0;
 }

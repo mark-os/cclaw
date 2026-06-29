@@ -241,6 +241,7 @@ CREATE TABLE IF NOT EXISTS llm_responses (
   status TEXT NOT NULL,          -- ok | empty | malformed | http_<code> | timeout | network_error
   provider_id TEXT,              -- provider's own response id ($.id), NULL if absent
   body BLOB,                     -- JSONB when parseable, raw text otherwise
+  request_body BLOB,             -- JSONB of the payload we sent (failures only); NULL on success
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_llm_responses_turn ON llm_responses(session_id, turn_id);

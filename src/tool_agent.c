@@ -104,9 +104,12 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
 }
 
 int tool_launch_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
-    return tools_register(reg, "launch_agent",
+    int rc = tools_register(reg, "launch_agent",
                           "Delegate a task to another agent",
                           SPAWN_PARAMS_JSON, tool_launch_agent_handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "launch_agent", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    return rc;
 }
 
 /* --- check_session tool --- */
@@ -166,9 +169,12 @@ char *tool_check_session_handler(const char *arguments, void *user_data) {
 }
 
 int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
-    return tools_register(reg, "check_session",
+    int rc = tools_register(reg, "check_session",
                           "Check the status and result of a sub-agent session",
                           CHECK_PARAMS_JSON, tool_check_session_handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "check_session", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    return rc;
 }
 
 /* --- check_approval tool ---
@@ -295,7 +301,10 @@ char *tool_check_approval_handler(const char *arguments, void *user_data) {
 }
 
 int tool_check_approval_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
-    return tools_register(reg, "check_approval",
+    int rc = tools_register(reg, "check_approval",
                           "Inspect this session's approvals, or re-raise a decided one",
                           CHECK_APPROVAL_PARAMS_JSON, tool_check_approval_handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "check_approval", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    return rc;
 }

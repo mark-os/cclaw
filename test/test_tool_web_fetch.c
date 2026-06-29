@@ -126,6 +126,7 @@ static void test_register(void) {
     ToolEntry *e = tools_lookup(&reg, "web_fetch");
     assert(e != NULL);
     assert(strcmp(e->name, "web_fetch") == 0);
+    assert(e->recipe.vehicle == EXEC_SANDBOX && e->recipe.tier == SBX_WEB);
     tools_free(&reg);
     printf("  PASS: register\n");
 }

@@ -150,18 +150,22 @@ static void test_archive_retention(void) {
     sqlite3 *db = test_db();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
-    /* An error body archives under its label; JSON gets provider_id extracted. */
+    /* An error body archives under its label; JSON gets provider_id extracted.
+     * The request body we sent is archived alongside (recoverable for debugging). */
     db_archive_response(db, sid, 1, "m", "http_500",
-                        "{\"id\":\"err_1\",\"error\":{\"message\":\"boom\"}}");
-    db_archive_response(db, sid, 2, "m", "timeout", "upstream timed out");  /* not JSON */
+                        "{\"id\":\"err_1\",\"error\":{\"message\":\"boom\"}}",
+                        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\"}]}");
+    db_archive_response(db, sid, 2, "m", "timeout", "upstream timed out", NULL);  /* not JSON */
 
     sqlite3_stmt *s;
     sqlite3_prepare_v2(db,
-        "SELECT status, provider_id, typeof(body) FROM llm_responses WHERE turn_id=1;", -1, &s, NULL);
+        "SELECT status, provider_id, typeof(body),"
+        " json_extract(request_body,'$.model') FROM llm_responses WHERE turn_id=1;", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "http_500") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "err_1") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 2), "blob") == 0);   /* JSONB */
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "m") == 0);      /* request archived */
     sqlite3_finalize(s);
     sqlite3_prepare_v2(db,
         "SELECT status, typeof(body) FROM llm_responses WHERE turn_id=2;", -1, &s, NULL);
@@ -174,21 +178,21 @@ static void test_archive_retention(void) {
     sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('llm_response_archive_max','2');",
                  NULL, NULL, NULL);
     for (int i = 0; i < 5; i++)
-        db_archive_response(db, sid, 100 + i, "m", "ok", "{\"x\":1}");
+        db_archive_response(db, sid, 100 + i, "m", "ok", "{\"x\":1}", NULL);
     assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 2);
 
     /* Cap = -1: pruning disabled, rows accumulate. */
     sqlite3_exec(db, "UPDATE config SET value='-1' WHERE key='llm_response_archive_max';",
                  NULL, NULL, NULL);
     for (int i = 0; i < 5; i++)
-        db_archive_response(db, sid, 200 + i, "m", "ok", "{\"x\":1}");
+        db_archive_response(db, sid, 200 + i, "m", "ok", "{\"x\":1}", NULL);
     assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 7);
 
     /* Cap = 0: archiving off — nothing written (no churn, count unchanged). */
     sqlite3_exec(db, "UPDATE config SET value='0' WHERE key='llm_response_archive_max';",
                  NULL, NULL, NULL);
     for (int i = 0; i < 3; i++)
-        db_archive_response(db, sid, 300 + i, "m", "ok", "{\"x\":1}");
+        db_archive_response(db, sid, 300 + i, "m", "ok", "{\"x\":1}", NULL);
     assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 7);
 
     db_close(db);

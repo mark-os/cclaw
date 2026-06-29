@@ -223,7 +223,7 @@ size_t html_strip_tags(const char *src, char *dst, size_t dst_cap) {
 /* ── Tool handler ────────────────────────────────────────────────── */
 
 char *tool_web_fetch_handler(const char *arguments, void *user_data) {
-    HttpPolicy *policy = (HttpPolicy *)user_data;
+    (void)user_data;  /* egress is enforced by the per-hop proxy, not a preflight */
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0)
@@ -240,14 +240,8 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     int max_chars = targ_int(&ta, "max_chars", WEB_FETCH_DEFAULT_MAX_CHARS);
     if (max_chars <= 0) max_chars = WEB_FETCH_DEFAULT_MAX_CHARS;
 
-    /* V46: check policy before connecting */
-    char err[256];
-    if (http_check_policy(url, policy, err, sizeof(err)) != 0) {
-        tool_parse_free(&ta);
-        char *msg = malloc(strlen(err) + 8);
-        if (msg) { sprintf(msg, "error: %s", err); return msg; }
-        return strdup("error: policy denied");
-    }
+    /* Egress is decided per-hop by the broker proxy (decide()) — no pre-flight
+     * http_check_policy here: a single check can't see redirects (SSRF). */
 
     if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
         tool_parse_free(&ta);
@@ -331,8 +325,11 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     return result ? result : strdup("error: out of memory");
 }
 
-int tool_web_fetch_register(ToolRegistry *reg, HttpPolicy *policy) {
-    return tools_register(reg, "web_fetch",
+int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx) {
+    int rc = tools_register(reg, "web_fetch",
                           "Fetch a URL via HTTP GET and return content as markdown",
-                          WEB_FETCH_PARAMS_JSON, tool_web_fetch_handler, policy);
+                          WEB_FETCH_PARAMS_JSON, tool_web_fetch_handler, ctx);
+    if (rc == 0)  /* sandboxed broker; egress via per-hop proxy decide() */
+        tools_set_recipe(reg, "web_fetch", (ToolRecipe){EXEC_SANDBOX, SBX_WEB, NULL});
+    return rc;
 }

@@ -4,22 +4,13 @@
 #include "tools.h"
 #include "sandbox.h"
 
-/* Context for file tools — workspace + sandbox policy for forked execution */
+/* Context for file tools — workspace + shared sandbox profile for forked
+ * execution. The profile's workspace_ro doubles as the write-refusal flag. */
 typedef struct {
     const char *workspace;
     const char *cwd_path;       /* CWD rw mount (CLI mode, NULL in daemon) */
     const char *db_path;        /* cclaw.db path for masking */
-    int read_only;              /* 1 = refuse writes (restricted trust) */
-    int sandbox;                /* 1 = fork+namespace, 0 = in-process (host) */
-    int workspace_ro;
-    int mount_cwd;
-    int env_mode;
-    struct { int nproc; int as_mb; int cpu_sec; } rlimits;
-    /* Layer 2: extra paths from grants (pointers into AgentCaps) */
-    char **read_paths;
-    size_t read_path_count;
-    char **write_paths;
-    size_t write_path_count;
+    SandboxProfile sb;          /* trust-derived policy + grant paths */
 } FileReadCtx;
 
 /* Register file_read tool into registry. Returns 0 on success.

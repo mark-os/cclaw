@@ -1,4 +1,4 @@
-/* Host C functions for the --qjs_eval child process.
+/* Host C functions for in-process qjs eval (the SBX_JS --run-tool broker child).
  * Registered into the QuickJS context as globals: http_request, fs.*, console.log, print. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -21,9 +21,6 @@
 static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val;
-    JsHostCtx *hctx = (JsHostCtx *)JS_GetContextOpaque(ctx);
-    char **hosts = hctx ? hctx->allowed_hosts : NULL;
-    size_t hosts_count = hctx ? hctx->allowed_hosts_count : 0;
 
     if (argc < 1)
         return JS_ThrowTypeError(ctx, "http_request: url argument required");
@@ -47,7 +44,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JS_FreeValue(ctx, s);
     }
 
-    JsHttpResult r = js_http_fetch_exec(url, method, body, hosts, hosts_count);
+    JsHttpResult r = js_http_fetch_exec(url, method, body);
     JS_FreeCString(ctx, url);
     if (method) JS_FreeCString(ctx, method);
     if (body) JS_FreeCString(ctx, body);
@@ -350,4 +347,168 @@ void qjs_register_eval_host_functions(JSContext *ctx) {
     JS_SetPropertyStr(ctx, global, "print", JS_NewCFunction(ctx, js_console_log, "print", 0));
 
     JS_FreeValue(ctx, global);
+}
+
+/* ── In-process eval driver (qjs_eval_run) ──────────────────────────────── */
+
+#define QJS_EVAL_HEAP_SIZE       (1024 * 1024)
+#define QJS_EVAL_MAX_INSTRUCTIONS 10000000
+#define QJS_EVAL_MAX_FILE        (1024 * 1024)
+
+static const char *QJS_EVAL_PRELUDE =
+    "var __console_buf = [];\n"
+    "var console = {\n"
+    "  log: function() {\n"
+    "    var parts = [];\n"
+    "    for (var i = 0; i < arguments.length; i++) {\n"
+    "      var v = arguments[i];\n"
+    "      parts.push(typeof v === 'object' ? JSON.stringify(v) : '' + v);\n"
+    "    }\n"
+    "    __console_buf.push(parts.join(' '));\n"
+    "  }\n"
+    "};\n"
+    "console.warn = console.log;\n"
+    "console.error = console.log;\n"
+    "var require = function() {\n"
+    "  throw new TypeError('require() not available — there are no modules. Use globals: fs.readdir(path), fs.readFile(path), fs.writeFile(path, data), fs.stat(path), fs.cwd(), http_request(url).');\n"
+    "};\n"
+    "var process = {};\n"
+    "Object.defineProperty(process, 'env', {get: function() { throw new TypeError('process.env not available.'); }});\n"
+    "Object.defineProperty(process, 'cwd', {get: function() { throw new TypeError('process.cwd not available. Use fs.cwd().'); }});\n"
+    "Object.defineProperty(process, 'argv', {get: function() { throw new TypeError('process.argv not available.'); }});\n"
+    "Object.defineProperty(process, 'exit', {get: function() { throw new TypeError('process.exit not available.'); }});\n"
+    "Object.defineProperty(process, 'platform', {get: function() { throw new TypeError('process.platform not available.'); }});\n"
+    "var module = {};\n"
+    "Object.defineProperty(module, 'exports', {\n"
+    "  get: function() { throw new TypeError('module.exports not available.'); },\n"
+    "  set: function() { throw new TypeError('module.exports not available. Return your value as the last expression.'); }\n"
+    "});\n"
+    "var Map = function() { throw new TypeError('Map not available. Use plain objects.'); };\n"
+    "var Set = function() { throw new TypeError('Set not available. Use: var s = {}; s[x] = true;'); };\n"
+    "var print = console.log;\n";
+
+static const char *qjs_syntax_hint(const char *code) {
+    if (!code) return "";
+    if (strstr(code, "const ") || strstr(code, "let "))
+        return " — hint: this engine is ES5; use 'var' instead of 'const'/'let'";
+    if (strstr(code, "=>"))
+        return " — hint: arrow functions are unsupported; use function(x){ return ...; }";
+    if (strstr(code, "`"))
+        return " — hint: template literals are unsupported; concatenate with 'a' + b";
+    if (strstr(code, "require(") || strstr(code, "import "))
+        return " — hint: no modules; 'fs' and 'http_request' are globals (e.g. fs.readdir('.'))";
+    if (strstr(code, "await ") || strstr(code, ".then("))
+        return " — hint: this engine is synchronous; assign directly: var r = http_request(url); then use r.body / r.json()";
+    return "";
+}
+
+char *qjs_eval_run(const char *code, const char *filename, const char *args_json) {
+    if ((!code || !code[0]) && (!filename || !filename[0]))
+        return strdup("error: must provide 'code' or 'filename'");
+
+    QjsRuntime *qrt = qjs_runtime_create(QJS_EVAL_HEAP_SIZE);
+    if (!qrt) return strdup("error: out of memory");
+    qjs_set_interrupt_limit(qrt, QJS_EVAL_MAX_INSTRUCTIONS);
+
+    JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
+    if (!ctx) { qjs_runtime_destroy(qrt); return strdup("error: JS context creation failed"); }
+
+    JsHostCtx hctx = { .instruction_count = 0,
+                       .instruction_limit = QJS_EVAL_MAX_INSTRUCTIONS,
+                       .allowed_hosts = NULL, .allowed_hosts_count = 0 };
+    JS_SetContextOpaque(ctx, &hctx);
+    qjs_register_eval_host_functions(ctx);
+
+    JSValue pv = JS_Eval(ctx, QJS_EVAL_PRELUDE, strlen(QJS_EVAL_PRELUDE),
+                         "<prelude>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(pv)) {
+        char *msg = qjs_get_exception_string(ctx);
+        size_t len = (msg ? strlen(msg) : 8) + 32;
+        char *r = malloc(len);
+        if (r) snprintf(r, len, "error: prelude failed: %s", msg ? msg : "unknown");
+        free(msg);
+        JS_FreeContext(ctx); qjs_runtime_destroy(qrt);
+        return r ? r : strdup("error: prelude failed");
+    }
+    JS_FreeValue(ctx, pv);
+
+    /* Build code to eval */
+    char *eval_code = NULL;
+    int free_eval = 0;
+    if (code && code[0]) {
+        eval_code = (char *)code;  /* borrowed */
+    } else {
+        FILE *f = fopen(filename, "r");
+        if (!f) {
+            size_t len = strlen(filename) + 32;
+            char *r = malloc(len);
+            if (r) snprintf(r, len, "error: cannot open %s", filename);
+            JS_FreeContext(ctx); qjs_runtime_destroy(qrt);
+            return r ? r : strdup("error: cannot open file");
+        }
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        if (sz < 0 || sz > QJS_EVAL_MAX_FILE) {
+            fclose(f); JS_FreeContext(ctx); qjs_runtime_destroy(qrt);
+            return strdup("error: file too large or unreadable");
+        }
+        fseek(f, 0, SEEK_SET);
+        char *fbuf = malloc((size_t)sz + 1);
+        if (!fbuf) { fclose(f); JS_FreeContext(ctx); qjs_runtime_destroy(qrt); return strdup("error: out of memory"); }
+        size_t rd = fread(fbuf, 1, (size_t)sz, f);
+        fclose(f);
+        fbuf[rd] = '\0';
+        if (args_json && args_json[0]) {
+            size_t wlen = 20 + rd + 4 + strlen(args_json) + 2;
+            eval_code = malloc(wlen);
+            if (!eval_code) { free(fbuf); JS_FreeContext(ctx); qjs_runtime_destroy(qrt); return strdup("error: out of memory"); }
+            snprintf(eval_code, wlen, "(function(args){\n%s\n})(%s)", fbuf, args_json);
+            free(fbuf);
+        } else {
+            eval_code = fbuf;
+        }
+        free_eval = 1;
+    }
+
+    JSValue val = JS_Eval(ctx, eval_code, strlen(eval_code), "<qjs_eval>", JS_EVAL_TYPE_GLOBAL);
+    if (!JS_IsException(val))
+        val = qjs_resolve(ctx, val);
+
+    char *result = NULL;
+    if (JS_IsException(val)) {
+        char *msg = qjs_get_exception_string(ctx);
+        if (msg) {
+            const char *hint = strstr(msg, "SyntaxError") ? qjs_syntax_hint(eval_code) : "";
+            size_t len = strlen(msg) + strlen(hint) + 16;
+            result = malloc(len);
+            if (result) snprintf(result, len, "error: %s%s", msg, hint);
+            free(msg);
+        }
+        if (!result) result = strdup("error: exception (no message)");
+    } else if (JS_IsUndefined(val)) {
+        JS_FreeValue(ctx, val);
+        const char *check = "__console_buf.length > 0 ? __console_buf.join('\\n') : undefined";
+        JSValue buf_val = JS_Eval(ctx, check, strlen(check), "<console>", JS_EVAL_TYPE_GLOBAL);
+        if (!JS_IsUndefined(buf_val) && !JS_IsException(buf_val)) {
+            const char *str = JS_ToCString(ctx, buf_val);
+            result = str ? strdup(str) : strdup("undefined");
+            if (str) JS_FreeCString(ctx, str);
+        } else {
+            result = strdup("undefined");
+        }
+        JS_FreeValue(ctx, buf_val);
+    } else if (JS_IsNull(val)) {
+        JS_FreeValue(ctx, val);
+        result = strdup("null");
+    } else {
+        const char *str = JS_ToCString(ctx, val);
+        result = str ? strdup(str) : strdup("error: cannot convert result to string");
+        if (str) JS_FreeCString(ctx, str);
+        JS_FreeValue(ctx, val);
+    }
+
+    if (free_eval) free(eval_code);
+    JS_FreeContext(ctx);
+    qjs_runtime_destroy(qrt);
+    return result ? result : strdup("error: OOM");
 }

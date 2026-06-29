@@ -98,7 +98,8 @@ static const char TC_GEMINI[] =
  * never affect ingest. */
 static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
                           const char *model, const char *status,
-                          const void *body, int blen, int is_jsonb) {
+                          const void *body, int blen, int is_jsonb,
+                          const char *request_body) {
     /* Retention cap (config 'llm_response_archive_max'):
      *   > 0  keep the most recent N rows
      *   == 0 archiving off — write nothing
@@ -115,10 +116,11 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
     if (cap == 0) return;   /* archiving disabled — skip the insert entirely */
 
     const char *sql =
-        "INSERT INTO llm_responses(session_id,turn_id,model,status,provider_id,body)"
+        "INSERT INTO llm_responses(session_id,turn_id,model,status,provider_id,body,request_body)"
         " VALUES(?1,?2,?3,?4,"
         "  CASE WHEN ?5 THEN COALESCE(json_extract(?6,'$.id'),"
-        "                             json_extract(?6,'$.responseId')) END, ?6);";
+        "                             json_extract(?6,'$.responseId')) END, ?6,"
+        "  CASE WHEN ?7 IS NOT NULL THEN jsonb(?7) END);";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(s, 1, session_id);
@@ -128,6 +130,8 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
         sqlite3_bind_int(s, 5, is_jsonb);
         if (is_jsonb) sqlite3_bind_blob(s, 6, body, blen, SQLITE_STATIC);
         else sqlite3_bind_text(s, 6, (const char *)body, -1, SQLITE_STATIC);
+        if (request_body) sqlite3_bind_text(s, 7, request_body, -1, SQLITE_STATIC);
+        else sqlite3_bind_null(s, 7);
         sqlite3_step(s);
         sqlite3_finalize(s);
     }
@@ -144,7 +148,8 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
  * Parses to JSONB when valid, stores raw text otherwise. Used for non-2xx /
  * network errors that never reach db_ingest_response. */
 void db_archive_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
-                         const char *model, const char *status, const char *body) {
+                         const char *model, const char *status, const char *body,
+                         const char *request_body) {
     if (!db || !status) return;
     if (!body) body = "";
     sqlite3_stmt *j;
@@ -152,13 +157,14 @@ void db_archive_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
         sqlite3_bind_text(j, 1, body, -1, SQLITE_STATIC);
         if (sqlite3_step(j) == SQLITE_ROW) {
             archive_store(db, session_id, turn_id, model, status,
-                          sqlite3_column_blob(j, 0), sqlite3_column_bytes(j, 0), 1);
+                          sqlite3_column_blob(j, 0), sqlite3_column_bytes(j, 0), 1,
+                          request_body);
             sqlite3_finalize(j);
             return;
         }
         sqlite3_finalize(j);
     }
-    archive_store(db, session_id, turn_id, model, status, body, -1, 0);
+    archive_store(db, session_id, turn_id, model, status, body, -1, 0, request_body);
 }
 
 LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
@@ -173,13 +179,17 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
      * blob (no re-parse), and the same blob is archived. Keep this statement
      * open: the blob lives in its result memory until it is finalized. ── */
     sqlite3_stmt *j;
-    if (sqlite3_prepare_v2(db, "SELECT jsonb(?1)", -1, &j, NULL) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db, "SELECT jsonb(?1)", -1, &j, NULL) != SQLITE_OK) {
+        /* Our-side failure (e.g. SQLITE_BUSY), not a bad response — archive the
+         * raw body so a valid reply lost to DB contention is still recoverable. */
+        archive_store(db, session_id, turn_id, model, "ingest_error", body, -1, 0, NULL);
         return LLM_RESP_MALFORMED;
+    }
     sqlite3_bind_text(j, 1, body, -1, SQLITE_STATIC);
     if (sqlite3_step(j) != SQLITE_ROW) {
         /* Not valid JSON at all — archive the raw text for forensics. */
         sqlite3_finalize(j);
-        archive_store(db, session_id, turn_id, model, "malformed", body, -1, 0);
+        archive_store(db, session_id, turn_id, model, "malformed", body, -1, 0, NULL);
         return LLM_RESP_MALFORMED;
     }
     const void *blob = sqlite3_column_blob(j, 0);
@@ -189,13 +199,15 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
      * extracted column pointers stay valid through the entry inserts. ── */
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, gemini ? SCALAR_GEMINI : SCALAR_OPENAI, -1, &s, NULL) != SQLITE_OK) {
+        /* Our-side failure — archive the (valid) body for forensics + recovery. */
+        archive_store(db, session_id, turn_id, model, "ingest_error", blob, blen, 1, NULL);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
     sqlite3_bind_blob(s, 1, blob, blen, SQLITE_STATIC);
     if (sqlite3_step(s) != SQLITE_ROW) {
         sqlite3_finalize(s);
-        archive_store(db, session_id, turn_id, model, "malformed", blob, blen, 1);
+        archive_store(db, session_id, turn_id, model, "malformed", blob, blen, 1, NULL);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
@@ -203,7 +215,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
     /* Shape check: choices/candidates array present and non-empty. */
     if (sqlite3_column_type(s, 7) == SQLITE_NULL || sqlite3_column_int(s, 7) == 0) {
         sqlite3_finalize(s);
-        archive_store(db, session_id, turn_id, model, "malformed", blob, blen, 1);
+        archive_store(db, session_id, turn_id, model, "malformed", blob, blen, 1, NULL);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
@@ -236,13 +248,13 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
         finish && strcmp(finish, "stop") == 0) {
         sqlite3_finalize(s);
         if (tc) sqlite3_finalize(tc);
-        archive_store(db, session_id, turn_id, model, "empty", blob, blen, 1);
+        archive_store(db, session_id, turn_id, model, "empty", blob, blen, 1, NULL);
         sqlite3_finalize(j);
         return LLM_RESP_EMPTY;
     }
 
     /* Well-formed — archive before flattening into entries. */
-    archive_store(db, session_id, turn_id, model, "ok", blob, blen, 1);
+    archive_store(db, session_id, turn_id, model, "ok", blob, blen, 1, NULL);
 
     StopReason stop = map_stop_reason(finish);
     if (tc_count > 0 && stop != STOP_REASON_TOOL_USE)

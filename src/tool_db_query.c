@@ -111,8 +111,19 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     return buf;
 }
 
+/* EXEC_THREAD shim: db_query's "ctx" is just a db handle — use the thread's. */
+static char *db_query_thread_run(sqlite3 *db, const char *agent_name,
+                                 int64_t session_id, const char *args) {
+    (void)agent_name; (void)session_id;
+    return tool_db_query_handler(args, db);
+}
+
 int tool_db_query_register(ToolRegistry *reg, sqlite3 *db) {
-    return tools_register(reg, "db_query",
+    int rc = tools_register(reg, "db_query",
                           "Execute read-only SQL (SELECT only) against cclaw.db",
                           DB_QUERY_PARAMS_JSON, tool_db_query_handler, db);
+    if (rc == 0)
+        tools_set_recipe(reg, "db_query",
+                         (ToolRecipe){EXEC_THREAD, SBX_NONE, db_query_thread_run});
+    return rc;
 }

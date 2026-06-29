@@ -12,6 +12,7 @@
 #include "tool_search_config.h"
 #include "tool_extension.h"
 #include "tool_cron.h"
+#include "tool_web_fetch.h"
 #include "http_policy.h"
 #include "proxy.h"
 #include "extension.h"
@@ -30,6 +31,7 @@ typedef struct {
     FileReadCtx file_read_ctx;
     JsEvalCtx js_eval_ctx;
     HttpPolicy web_policy;
+    WebFetchCtx web_ctx;
     ToolMemoryCtx mem_ctx;
     /* Daemon-mode only contexts */
     ToolBootstrapCtx bootstrap_ctx;

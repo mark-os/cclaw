@@ -35,7 +35,7 @@ static void cleanup(void) {
 }
 
 static void test_ns_available(void) {
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
     char *r = tool_shell_handler("{\"command\":\"echo ns_ok\"}", &sc);
     assert(r != NULL);
     if (strstr(r, "namespace sandbox unavailable")) {
@@ -53,8 +53,8 @@ static void test_write_rw_mount(void) {
     if (!ns_available) { printf("  SKIP test_write_rw_mount\n"); return; }
     char *rw_paths[] = { rw_dir };
     ShellConfig sc = {
-        .timeout = 5, .workspace = workspace, .sandbox = 1,
-        .write_paths = rw_paths, .write_path_count = 1
+        .timeout = 5, .workspace = workspace, .sb.sandbox = 1,
+        .sb.write_paths = rw_paths, .sb.write_path_count = 1
     };
     char args[1024];
     snprintf(args, sizeof(args),
@@ -73,8 +73,8 @@ static void test_read_ro_mount(void) {
     if (!ns_available) { printf("  SKIP test_read_ro_mount\n"); return; }
     char *ro_paths[] = { ro_dir };
     ShellConfig sc = {
-        .timeout = 5, .workspace = workspace, .sandbox = 1,
-        .read_paths = ro_paths, .read_path_count = 1
+        .timeout = 5, .workspace = workspace, .sb.sandbox = 1,
+        .sb.read_paths = ro_paths, .sb.read_path_count = 1
     };
     char args[512];
     snprintf(args, sizeof(args),
@@ -91,8 +91,8 @@ static void test_write_ro_mount_fails(void) {
     if (!ns_available) { printf("  SKIP test_write_ro_mount_fails\n"); return; }
     char *ro_paths[] = { ro_dir };
     ShellConfig sc = {
-        .timeout = 5, .workspace = workspace, .sandbox = 1,
-        .read_paths = ro_paths, .read_path_count = 1
+        .timeout = 5, .workspace = workspace, .sb.sandbox = 1,
+        .sb.read_paths = ro_paths, .sb.read_path_count = 1
     };
     char args[512];
     snprintf(args, sizeof(args),

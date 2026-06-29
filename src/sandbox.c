@@ -459,10 +459,15 @@ static void sandbox_setup_static_egress(const char *uds_path) {
         int devnull = open("/dev/null", O_RDWR);
         if (devnull >= 0) { dup2(devnull, STDIN_FILENO); dup2(devnull, STDOUT_FILENO);
                             dup2(devnull, STDERR_FILENO); if (devnull > 2) close(devnull); }
-        char fdbuf[16], exepath[32];
+        char fdbuf[16];
         snprintf(fdbuf, sizeof(fdbuf), "%d", lfd);
-        snprintf(exepath, sizeof(exepath), "/proc/self/fd/%d", mfd);
-        execl(exepath, "net_shim", fdbuf, uds_path, (char *)NULL);
+        /* fexecve (execveat AT_EMPTY_PATH under the hood on Linux ≥3.19) execs
+         * the memfd WITHOUT touching /proc — the skip_pid_ns network tiers (web)
+         * have no /proc, so an execl("/proc/self/fd/N") would ENOENT and the shim
+         * would die, closing the listener (curl → connection refused). */
+        char *const argv[] = { "net_shim", fdbuf, (char *)uds_path, NULL };
+        extern char **environ;
+        fexecve(mfd, argv, environ);
         _exit(127);
     }
 
@@ -516,23 +521,28 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
 
     sandbox_apply_rlimits(cfg);
 
-    /* Write preload lib into the namespace's private /tmp and set LD_PRELOAD —
-     * the interposer is the only egress inside CLONE_NEWNET, so a failed write
-     * must be loud, not silently no-network. */
     if (psock && cfg->sandbox) {
-        int pfd = open("/tmp/libcclaw_net.so", O_WRONLY | O_CREAT | O_TRUNC, 0755);
-        ssize_t wr = pfd >= 0 ? write(pfd, preload_net_blob, (size_t)preload_net_blob_len) : -1;
-        if (pfd >= 0) close(pfd);
-        if (wr == (ssize_t)preload_net_blob_len)
-            setenv("LD_PRELOAD", "/tmp/libcclaw_net.so", 1);
-        else
-            fprintf(stderr, "[cclaw] warning: proxy preload setup failed "
-                    "(errno=%d); child has no network\n", errno);
+        /* LD_PRELOAD interposer: only for the shell tier (PID-ns present, an
+         * untrusted subprocess tree that dials network itself). The skip_pid_ns
+         * network tiers (web/js) run OUR own libcurl, which honors HTTP_PROXY →
+         * net_shim (spec §4: "no preload" for web). Loading the preload there
+         * would intercept curl's loopback connect to the shim and fight the
+         * HTTP_PROXY path, so it is gated off. The interposer is the only egress
+         * inside CLONE_NEWNET for shell, so a failed write must be loud. */
+        if (!cfg->skip_pid_ns) {
+            int pfd = open("/tmp/libcclaw_net.so", O_WRONLY | O_CREAT | O_TRUNC, 0755);
+            ssize_t wr = pfd >= 0 ? write(pfd, preload_net_blob, (size_t)preload_net_blob_len) : -1;
+            if (pfd >= 0) close(pfd);
+            if (wr == (ssize_t)preload_net_blob_len)
+                setenv("LD_PRELOAD", "/tmp/libcclaw_net.so", 1);
+            else
+                fprintf(stderr, "[cclaw] warning: proxy preload setup failed "
+                        "(errno=%d); child has no network\n", errno);
+        }
 
-        /* Static binaries ignore LD_PRELOAD — give them a loopback HTTP_PROXY
-         * served by net_shim, forwarding to the same broker UDS. Best-effort:
-         * on failure static binaries stay networkless; dynamic ones are
-         * unaffected (they already have the preload above). */
+        /* net_shim: a loopback HTTP CONNECT proxy forwarding to the broker UDS.
+         * Used by web/js's own curl (via HTTP_PROXY) and by shell's static
+         * binaries (which ignore LD_PRELOAD). Best-effort. */
         sandbox_setup_static_egress(SANDBOX_PROXY_SOCK_PATH);
     }
 
@@ -557,4 +567,17 @@ void sandbox_policy_from_trust(const char *trust_level, SandboxConfig *cfg) {
         cfg->env_mode = 1; cfg->net_mode = 0; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
         cfg->rlimits.nproc = 64; cfg->rlimits.as_mb = 512; cfg->rlimits.cpu_sec = 60;
     }
+}
+
+void sandbox_profile_from_trust(const char *trust_level, SandboxProfile *p) {
+    SandboxConfig c = {0};
+    sandbox_policy_from_trust(trust_level, &c);
+    p->sandbox      = c.sandbox;
+    p->env_mode     = c.env_mode;
+    p->net_mode     = c.net_mode;
+    p->mount_cwd    = c.mount_cwd;
+    p->workspace_ro = c.workspace_ro;
+    p->rlimits.nproc   = c.rlimits.nproc;
+    p->rlimits.as_mb   = c.rlimits.as_mb;
+    p->rlimits.cpu_sec = c.rlimits.cpu_sec;
 }

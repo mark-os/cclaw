@@ -112,10 +112,22 @@ static char *handler(const char *arguments, void *user_data) {
     return out;
 }
 
+/* EXEC_THREAD shim: rebuild SearchConfigCtx around the thread's own db. */
+static char *search_config_thread_run(sqlite3 *db, const char *agent_name,
+                                      int64_t session_id, const char *args) {
+    (void)session_id;
+    SearchConfigCtx c = {.db = db, .agent_name = agent_name};
+    return handler(args, &c);
+}
+
 int tool_search_config_register(ToolRegistry *reg, SearchConfigCtx *ctx) {
-    return tools_register(reg, "search_config",
+    int rc = tools_register(reg, "search_config",
         "Discover your current configuration and what you can request: your trust level, "
         "granted tools and hosts, the full list of available tools, and how to request more "
         "via request_config. Optional 'query' filters the tool list.",
         PARAMS_JSON, handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "search_config",
+                         (ToolRecipe){EXEC_THREAD, SBX_NONE, search_config_thread_run});
+    return rc;
 }

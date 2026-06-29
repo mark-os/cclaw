@@ -50,8 +50,11 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
  * (e.g. "http_500", "timeout"). Retention via config 'llm_response_archive_max'
  * (default 500): >0 keeps the most recent N, 0 disables archiving, <0 keeps all.
  * db_ingest_response archives the 2xx bodies it handles; this is for the
- * non-2xx / network-error paths. */
+ * non-2xx / network-error paths. request_body (the payload we sent, may be NULL)
+ * is stored as JSONB alongside the failure so the request that triggered it is
+ * recoverable for troubleshooting. */
 void db_archive_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
-                         const char *model, const char *status, const char *body);
+                         const char *model, const char *status, const char *body,
+                         const char *request_body);
 
 #endif

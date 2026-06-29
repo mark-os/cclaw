@@ -120,11 +120,14 @@ static char *handler(const char *arguments, void *user_data) {
 }
 
 int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
-    return tools_register(reg, "request_config",
+    int rc = tools_register(reg, "request_config",
         "Request a configuration change (requires human approval). "
         "Actions: grant_tool (enable shell_exec, web_fetch, db_query), "
         "grant_host (add hostname to allowed_hosts), grant_path (grant "
         "read/write access to an absolute path), rename_agent (rename this "
         "agent, with optional preamble).",
         PARAMS_JSON, handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "request_config", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    return rc;
 }

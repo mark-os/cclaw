@@ -1,34 +1,18 @@
 #define _POSIX_C_SOURCE 200809L
 #include "js_http_fetch.h"
 #include "http.h"
-#include "http_policy.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
 JsHttpResult js_http_fetch_exec(const char *url, const char *method,
-                                const char *req_body,
-                                char **allowed_hosts, size_t hosts_count) {
+                                const char *req_body) {
     JsHttpResult r = {.status = -1, .body = NULL, .body_len = 0, .error = NULL};
 
-    /* V38: no allowlist = no network from JS */
-    if (!allowed_hosts || hosts_count == 0) {
-        r.error = strdup("no allowed_hosts configured — request one with request_config {\"action\":\"grant_host\",\"host\":\"example.com\"}");
-        return r;
-    }
-
-    /* V46: use HttpPolicy layer for validation */
-    HttpPolicy policy = {
-        .allowed_hosts = allowed_hosts,
-        .allowed_count = hosts_count,
-        .blocked_hosts = NULL,
-        .blocked_count = 0,
-        .block_private = 1
-    };
-
-    char err[256];
-    if (http_check_policy(url, &policy, err, sizeof(err)) != 0) {
-        r.error = strdup(err);
+    /* Scheme guard only — egress (host/IP/redirect gating) is enforced per-hop
+     * by the broker proxy's decide(), reached via HTTP_PROXY. */
+    if (!url || (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)) {
+        r.error = strdup("url must start with http:// or https://");
         return r;
     }
 

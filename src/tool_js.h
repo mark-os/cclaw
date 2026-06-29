@@ -2,6 +2,7 @@
 #define CCLAW_TOOL_JS_H
 
 #include "tools.h"
+#include "sandbox.h"
 #include <sqlite3.h>
 #include <stdint.h>
 
@@ -19,16 +20,19 @@ typedef struct {
     size_t allowed_hosts_count;
 } JsHostCtx;
 
-/* T104: Context for js_eval tool — carries per-agent allowed_hosts */
+/* Context for js_eval (SBX_JS tier) — carries the sandbox profile, mirroring
+ * the shell/web profile. js runs in the same fork+execve --run-tool broker; its
+ * http_request curl reaches the per-hop decide() proxy via HTTP_PROXY. Egress is
+ * the proxy's job (allowed_hosts feed proxy_bind), not a pre-flight. */
 typedef struct {
-    char **allowed_hosts;
+    char **allowed_hosts;        /* egress allowlist for the per-call proxy */
     size_t allowed_hosts_count;
-    int host_mode;  /* 1 = trust_level host (no sandbox), 0 = sandbox child */
+    int host_mode;               /* 1 = trust_level host (sandbox=0), 0 = sandboxed */
     const char *trust_level;
-    char **read_paths;
-    size_t read_path_count;
-    char **write_paths;
-    size_t write_path_count;
+    const char *workspace;
+    const char *cwd_path;
+    const char *db_path;         /* for the shared extension-store mount */
+    SandboxProfile sb;           /* trust-derived policy + grant paths */
 } JsEvalCtx;
 
 /* Set allowed_hosts on a persistent JS runtime (unused — hosts passed via env). */
@@ -48,11 +52,19 @@ JsSessionRuntime *js_runtime_create(void);
 void js_runtime_destroy(JsSessionRuntime *rt);
 
 /* Register an extension tool. `path` is the absolute handler .qjs file in the
- * shared store; it is fork+exec'd with the call args in scope when the tool
- * runs (same model as js_eval's filename mode). */
+ * shared store; the SBX_JS broker evals it (filename mode) with the call args in
+ * scope when the tool runs (same model as js_eval's filename mode). */
 int js_tool_register_ext(ToolRegistry *reg, const char *name,
                          const char *description, const char *parameters_json,
                          const char *path, JsEvalCtx *ectx,
                          const char *policy_json);
+
+/* Resolve a JS-tier tool entry (js_eval OR an extension tool) into its sandbox
+ * profile and the JSON eval request to ship in the SBX_JS blob. For js_eval the
+ * args pass through; for an extension tool they are wrapped as
+ * {"filename":<path>,"args":<args>}. Returns 0 on success; *out_args is malloc'd
+ * (caller frees), *out_ctx borrows the entry's profile. */
+int js_tool_resolve_request(const ToolEntry *te, const char *arguments,
+                            JsEvalCtx **out_ctx, char **out_args);
 
 #endif

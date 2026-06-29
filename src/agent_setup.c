@@ -49,11 +49,16 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* Shell — pass proxy socket path */
     tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace);
 
-    /* Trust-level policy bundle via shared helper */
-    SandboxConfig trust_policy = {0};
-    sandbox_policy_from_trust(trust_level, &trust_policy);
+    /* Trust-derived sandbox profile, filled once and embedded in every tool ctx.
+     * The grant-path fields are bound just below (and rebound on cap refresh). */
+    SandboxProfile profile = {0};
+    sandbox_profile_from_trust(trust_level, &profile);
+    profile.read_paths = setup->caps.read_paths;
+    profile.read_path_count = setup->caps.read_count;
+    profile.write_paths = setup->caps.write_paths;
+    profile.write_path_count = setup->caps.write_count;
 
-    /* Inject proxy sock path + secrets + trust-level policy into shell config */
+    /* Inject proxy sock path + secrets + the shared profile into shell config */
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
@@ -64,36 +69,14 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         sc->cwd_path = getenv("CCLAW_PATH");  /* T276/V22a: CWD rw in CLI mode */
         sc->db_path = cfg->db_path;           /* mask .cclaw_key + db ciphertext from shell children */
         sc->env_file = cfg->env_file;         /* mask provider env file from shell children */
-        sc->sandbox = trust_policy.sandbox;
-        sc->env_mode = trust_policy.env_mode;
-        sc->net_mode = trust_policy.net_mode;
-        sc->mount_cwd = trust_policy.mount_cwd;
-        sc->workspace_ro = trust_policy.workspace_ro;
-        sc->rlimits.nproc = trust_policy.rlimits.nproc;
-        sc->rlimits.as_mb = trust_policy.rlimits.as_mb;
-        sc->rlimits.cpu_sec = trust_policy.rlimits.cpu_sec;
-        sc->read_paths = setup->caps.read_paths;
-        sc->read_path_count = setup->caps.read_count;
-        sc->write_paths = setup->caps.write_paths;
-        sc->write_path_count = setup->caps.write_count;
+        sc->sb = profile;
     }
 
-    /* File tools — forked sandbox path shares trust policy with shell */
+    /* File tools — forked sandbox path shares the profile with shell */
     setup->file_read_ctx.workspace = cfg->workspace;
     setup->file_read_ctx.cwd_path = getenv("CCLAW_PATH");
     setup->file_read_ctx.db_path = cfg->db_path;
-    setup->file_read_ctx.read_only = trust_policy.workspace_ro;
-    setup->file_read_ctx.sandbox = trust_policy.sandbox;
-    setup->file_read_ctx.workspace_ro = trust_policy.workspace_ro;
-    setup->file_read_ctx.mount_cwd = trust_policy.mount_cwd;
-    setup->file_read_ctx.env_mode = trust_policy.env_mode;
-    setup->file_read_ctx.rlimits.nproc = trust_policy.rlimits.nproc;
-    setup->file_read_ctx.rlimits.as_mb = trust_policy.rlimits.as_mb;
-    setup->file_read_ctx.rlimits.cpu_sec = trust_policy.rlimits.cpu_sec;
-    setup->file_read_ctx.read_paths = setup->caps.read_paths;
-    setup->file_read_ctx.read_path_count = setup->caps.read_count;
-    setup->file_read_ctx.write_paths = setup->caps.write_paths;
-    setup->file_read_ctx.write_path_count = setup->caps.write_count;
+    setup->file_read_ctx.sb = profile;
     tool_file_read_register(&setup->reg, &setup->file_read_ctx);
     tool_file_write_register(&setup->reg, &setup->file_read_ctx);
     tool_file_list_register(&setup->reg, &setup->file_read_ctx);
@@ -101,24 +84,27 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     tool_file_edit_register(&setup->reg, &setup->file_read_ctx);
     tool_file_grep_register(&setup->reg, &setup->file_read_ctx);
 
-    /* JS eval with per-agent allowed_hosts */
+    /* JS eval (SBX_JS broker): mirrors web/shell — qjs runs in-process in the
+     * fork+execve --run-tool child, egress via per-hop proxy decide(). */
     setup->js_eval_ctx.allowed_hosts = setup->caps.hosts;
     setup->js_eval_ctx.allowed_hosts_count = setup->caps.host_count;
     setup->js_eval_ctx.host_mode = (trust_level && strcmp(trust_level, "host") == 0) ? 1 : 0;
     setup->js_eval_ctx.trust_level = trust_level;
-    setup->js_eval_ctx.read_paths = setup->caps.read_paths;
-    setup->js_eval_ctx.read_path_count = setup->caps.read_count;
-    setup->js_eval_ctx.write_paths = setup->caps.write_paths;
-    setup->js_eval_ctx.write_path_count = setup->caps.write_count;
+    setup->js_eval_ctx.workspace = cfg->workspace;
+    setup->js_eval_ctx.cwd_path = getenv("CCLAW_PATH");
+    setup->js_eval_ctx.db_path = cfg->db_path;
+    setup->js_eval_ctx.sb = profile;
     tool_js_eval_register(&setup->reg, &setup->js_eval_ctx);
 
-    /* V46: web_fetch policy */
-    setup->web_policy.allowed_hosts = setup->caps.hosts;
-    setup->web_policy.allowed_count = setup->caps.host_count;
-    setup->web_policy.blocked_hosts = NULL;
-    setup->web_policy.blocked_count = 0;
-    setup->web_policy.block_private = 1;
-    tool_web_fetch_register(&setup->reg, (setup->caps.host_count > 0) ? &setup->web_policy : NULL);
+    /* web_fetch — sandboxed broker (SBX_WEB), egress via per-hop proxy decide().
+     * Shares the profile + workspace + host grants with shell. */
+    setup->web_ctx.workspace = cfg->workspace;
+    setup->web_ctx.cwd_path = getenv("CCLAW_PATH");
+    setup->web_ctx.db_path = cfg->db_path;
+    setup->web_ctx.allowed_hosts = setup->caps.hosts;
+    setup->web_ctx.allowed_host_count = setup->caps.host_count;
+    setup->web_ctx.sb = profile;
+    tool_web_fetch_register(&setup->reg, &setup->web_ctx);
 
     /* db_query */
     tool_db_query_register(&setup->reg, db);
@@ -196,32 +182,37 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
 void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent) {
     agent_caps_refresh(db, agent, &setup->caps);
 
-    /* Rebind all consumer pointers to the new arrays */
-    setup->file_read_ctx.read_paths = setup->caps.read_paths;
-    setup->file_read_ctx.read_path_count = setup->caps.read_count;
-    setup->file_read_ctx.write_paths = setup->caps.write_paths;
-    setup->file_read_ctx.write_path_count = setup->caps.write_count;
+    /* Rebind the grant-path pointers in every embedded profile to the new arrays.
+     * Only the path half changes on a cap refresh; the trust policy is fixed. */
+    setup->file_read_ctx.sb.read_paths = setup->caps.read_paths;
+    setup->file_read_ctx.sb.read_path_count = setup->caps.read_count;
+    setup->file_read_ctx.sb.write_paths = setup->caps.write_paths;
+    setup->file_read_ctx.sb.write_path_count = setup->caps.write_count;
 
     setup->js_eval_ctx.allowed_hosts = setup->caps.hosts;
     setup->js_eval_ctx.allowed_hosts_count = setup->caps.host_count;
-    setup->js_eval_ctx.read_paths = setup->caps.read_paths;
-    setup->js_eval_ctx.read_path_count = setup->caps.read_count;
-    setup->js_eval_ctx.write_paths = setup->caps.write_paths;
-    setup->js_eval_ctx.write_path_count = setup->caps.write_count;
+    setup->js_eval_ctx.sb.read_paths = setup->caps.read_paths;
+    setup->js_eval_ctx.sb.read_path_count = setup->caps.read_count;
+    setup->js_eval_ctx.sb.write_paths = setup->caps.write_paths;
+    setup->js_eval_ctx.sb.write_path_count = setup->caps.write_count;
 
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
         sc->allowed_hosts = setup->caps.hosts;
         sc->allowed_host_count = setup->caps.host_count;
-        sc->read_paths = setup->caps.read_paths;
-        sc->read_path_count = setup->caps.read_count;
-        sc->write_paths = setup->caps.write_paths;
-        sc->write_path_count = setup->caps.write_count;
+        sc->sb.read_paths = setup->caps.read_paths;
+        sc->sb.read_path_count = setup->caps.read_count;
+        sc->sb.write_paths = setup->caps.write_paths;
+        sc->sb.write_path_count = setup->caps.write_count;
     }
 
-    setup->web_policy.allowed_hosts = setup->caps.hosts;
-    setup->web_policy.allowed_count = setup->caps.host_count;
+    setup->web_ctx.allowed_hosts = setup->caps.hosts;
+    setup->web_ctx.allowed_host_count = setup->caps.host_count;
+    setup->web_ctx.sb.read_paths = setup->caps.read_paths;
+    setup->web_ctx.sb.read_path_count = setup->caps.read_count;
+    setup->web_ctx.sb.write_paths = setup->caps.write_paths;
+    setup->web_ctx.sb.write_path_count = setup->caps.write_count;
 
     if (setup->js_rt)
         js_runtime_set_hosts(setup->js_rt, setup->caps.hosts, setup->caps.host_count);

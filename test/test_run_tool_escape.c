@@ -57,12 +57,13 @@ static void cleanup(void) {
  * Returns the tool result (malloc'd) or NULL on spawn failure. */
 static char *run_tool_request(const char *tool_name, const char *arguments) {
     size_t blob_len = 0;
-    char *blob = run_tool_serialize_file_request(
-        tool_name, arguments, workspace,
-        NULL, 0, NULL, 0,  /* no extra grants */
-        0, 0, NULL,        /* workspace rw, no cwd mount */
-        1, 64, 512, 60,   /* env_mode=1, rlimits */
-        &blob_len);
+    RunToolReq req = {
+        .tier = RUNTOOL_TIER_FILE,
+        .tool_name = tool_name, .arguments = arguments,
+        .workspace = workspace,
+        .env_mode = 1, .nproc = 64, .as_mb = 512, .cpu_sec = 60,
+    };
+    char *blob = run_tool_serialize_request(&req, &blob_len);
     if (!blob) return strdup("error: serialize failed");
 
     int sp[2];

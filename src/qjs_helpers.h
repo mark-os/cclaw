@@ -52,6 +52,16 @@ char *qjs_get_exception_string(JSContext *ctx);
 /* Register eval-profile host functions (http_request, fs.*, console, print). */
 void qjs_register_eval_host_functions(JSContext *ctx);
 
+/* In-process JS evaluator (SBX_JS run_fn + unit-test entry). Runs the eval
+ * profile with host functions in THIS process — the caller is responsible for
+ * any sandbox/namespace setup beforehand (the broker child does it; unit tests
+ * run host-mode in-process). Exactly one of `code` / `filename` is used; with
+ * `filename`, `args_json` (may be NULL) is bound as `args`. Returns a malloc'd
+ * result string (never NULL): the last expression value, console output, or an
+ * "error: ..." message. Egress (http_request) is via HTTP_PROXY, not a
+ * pre-flight. */
+char *qjs_eval_run(const char *code, const char *filename, const char *args_json);
+
 /* Register channel-profile host functions (cclaw.*, admin.*). */
 void qjs_register_channel_host_functions(JSContext *ctx);
 

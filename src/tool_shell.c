@@ -77,7 +77,7 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
     const char *psock = NULL;
     int proxy_active = 0;
     char sockdir[PATH_MAX];
-    if (sc && sc->sandbox && !sc->net_mode &&
+    if (sc && sc->sb.sandbox && !sc->sb.net_mode &&
         ((sc->workspace && sc->workspace[0]) || (sc->db_path && sc->db_path[0]))) {
         /* The control-plane socket lives in the agent folder, never the
          * agent-visible workspace (bind-mounted rw + listed by the file tools). */
@@ -117,27 +117,27 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
             cfg.db_path         = sc_child->db_path;
             cfg.env_file        = sc_child->env_file;
             cfg.proxy_sock      = psock;
-            cfg.sandbox         = sc_child->sandbox;
-            cfg.workspace_ro    = sc_child->workspace_ro;
-            cfg.mount_cwd       = sc_child->mount_cwd;
-            cfg.net_mode        = sc_child->net_mode;
-            cfg.env_mode        = sc_child->env_mode;
-            cfg.rlimits.nproc   = sc_child->rlimits.nproc;
-            cfg.rlimits.as_mb   = sc_child->rlimits.as_mb;
-            cfg.rlimits.cpu_sec = sc_child->rlimits.cpu_sec;
+            cfg.sandbox         = sc_child->sb.sandbox;
+            cfg.workspace_ro    = sc_child->sb.workspace_ro;
+            cfg.mount_cwd       = sc_child->sb.mount_cwd;
+            cfg.net_mode        = sc_child->sb.net_mode;
+            cfg.env_mode        = sc_child->sb.env_mode;
+            cfg.rlimits.nproc   = sc_child->sb.rlimits.nproc;
+            cfg.rlimits.as_mb   = sc_child->sb.rlimits.as_mb;
+            cfg.rlimits.cpu_sec = sc_child->sb.rlimits.cpu_sec;
             /* Layer 2: build extra_mounts from read/write path grants */
-            size_t n_extra = sc_child->read_path_count + sc_child->write_path_count;
+            size_t n_extra = sc_child->sb.read_path_count + sc_child->sb.write_path_count;
             if (n_extra > 0) {
                 cfg.extra_mounts = malloc(n_extra * sizeof(*cfg.extra_mounts));
                 if (cfg.extra_mounts) {
                     size_t j = 0;
-                    for (size_t i = 0; i < sc_child->read_path_count; i++) {
-                        cfg.extra_mounts[j].path = sc_child->read_paths[i];
+                    for (size_t i = 0; i < sc_child->sb.read_path_count; i++) {
+                        cfg.extra_mounts[j].path = sc_child->sb.read_paths[i];
                         cfg.extra_mounts[j].ro = 1;
                         j++;
                     }
-                    for (size_t i = 0; i < sc_child->write_path_count; i++) {
-                        cfg.extra_mounts[j].path = sc_child->write_paths[i];
+                    for (size_t i = 0; i < sc_child->sb.write_path_count; i++) {
+                        cfg.extra_mounts[j].path = sc_child->sb.write_paths[i];
                         cfg.extra_mounts[j].ro = 0;
                         j++;
                     }
@@ -295,13 +295,16 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     sc->allowed_host_count = 0;
     sc->secrets = NULL;
     sc->secret_count = 0;
-    sc->sandbox = 1;
+    sc->sb.sandbox = 1;
     int rc = tools_register(reg, "shell_exec",
                             "Execute a shell command and return stdout+stderr",
                             SHELL_PARAMS_JSON, tool_shell_handler, sc);
     if (rc == 0) {
         ToolEntry *e = tools_lookup(reg, "shell_exec");
-        if (e) e->free_fn = free;
+        if (e) {
+            e->free_fn = free;
+            e->recipe = (ToolRecipe){EXEC_SANDBOX, SBX_SHELL, NULL};
+        }
     } else {
         free(sc);
     }

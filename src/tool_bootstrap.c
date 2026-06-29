@@ -60,13 +60,39 @@ static char *tool_configure_provider_handler(const char *arguments, void *user_d
     return strdup("config applied: configure_provider");
 }
 
+static char *tool_configure_channel_handler(const char *arguments, void *user_data);
+static char *tool_create_agent_handler(const char *arguments, void *user_data);
+
+/* EXEC_THREAD shims. These handlers are validation-only (they return a sentinel;
+ * the real config apply is the admin-approved path), so the rebuilt ctx only
+ * needs a live db handle to pass the availability null-check. */
+static char *configure_provider_thread_run(sqlite3 *db, const char *agent_name,
+                                           int64_t session_id, const char *args) {
+    ToolBootstrapCtx c = {.db = db, .session_id = session_id, .agent_name = agent_name};
+    return tool_configure_provider_handler(args, &c);
+}
+static char *configure_channel_thread_run(sqlite3 *db, const char *agent_name,
+                                          int64_t session_id, const char *args) {
+    ToolBootstrapCtx c = {.db = db, .session_id = session_id, .agent_name = agent_name};
+    return tool_configure_channel_handler(args, &c);
+}
+static char *create_agent_thread_run(sqlite3 *db, const char *agent_name,
+                                     int64_t session_id, const char *args) {
+    ToolBootstrapCtx c = {.db = db, .session_id = session_id, .agent_name = agent_name};
+    return tool_create_agent_handler(args, &c);
+}
+
 int tool_configure_provider_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
-    return tools_register(reg, "configure_provider",
+    int rc = tools_register(reg, "configure_provider",
                           "Set up LLM provider. Stores API key in a local env file with 0600 permissions. "
                           "Known providers: openrouter, gemini, anthropic. "
                           "Use 'custom' with base_url for others.",
                           CONFIGURE_PROVIDER_PARAMS,
                           tool_configure_provider_handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "configure_provider",
+                         (ToolRecipe){EXEC_THREAD, SBX_NONE, configure_provider_thread_run});
+    return rc;
 }
 
 /* ── T251: configure_channel ─────────────────────────────────────── */
@@ -119,12 +145,16 @@ static char *tool_configure_channel_handler(const char *arguments, void *user_da
 }
 
 int tool_configure_channel_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
-    return tools_register(reg, "configure_channel",
+    int rc = tools_register(reg, "configure_channel",
                           "Set up a communication channel. "
                           "Supported: telegram (requires bot_token), cli, or custom (requires binary_path). "
                           "Optional config object seeds channel_state kv pairs.",
                           CONFIGURE_CHANNEL_PARAMS,
                           tool_configure_channel_handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "configure_channel",
+                         (ToolRecipe){EXEC_THREAD, SBX_NONE, configure_channel_thread_run});
+    return rc;
 }
 
 /* ── T192: create_agent ──────────────────────────────────────────── */
@@ -167,9 +197,13 @@ static char *tool_create_agent_handler(const char *arguments, void *user_data) {
 }
 
 int tool_create_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
-    return tools_register(reg, "create_agent",
+    int rc = tools_register(reg, "create_agent",
                           "Propose creation of a named agent. Requires admin approval. "
                           "On approval, daemon creates agent directory, seeds DB, and binds to channel.",
                           CREATE_AGENT_PARAMS,
                           tool_create_agent_handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "create_agent",
+                         (ToolRecipe){EXEC_THREAD, SBX_NONE, create_agent_thread_run});
+    return rc;
 }

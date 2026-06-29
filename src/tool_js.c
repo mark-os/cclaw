@@ -28,12 +28,14 @@ static const char *JSEVAL_PARAMS_JSON =
 #define JSEVAL_MAX_OUTPUT (64 * 1024)
 #define JSEVAL_TIMEOUT 120
 
+/* js_eval is an SBX_JS tool: the daemon dispatch builds a blob and the
+ * --run-tool broker evals it in-process via qjs_eval_run inside the sandbox.
+ * This handler is therefore NOT the production execution path — the dispatcher
+ * never calls it for an EXEC_SANDBOX recipe. It remains as (a) the identity
+ * marker js_tool_resolve_request keys on and (b) a host-mode, in-process
+ * evaluator for unit tests. No fork, no re-exec — the fork-bomb hazard is gone. */
 char *tool_js_eval_handler(const char *arguments, void *user_data) {
-    JsEvalCtx *ectx = (JsEvalCtx *)user_data;
-
-    /* Fork-bomb guard. */
-    if (getenv("CCLAW_QJS_GUARD"))
-        return strdup("error: js_eval recursion guard (host binary did not intercept --qjs_eval)");
+    (void)user_data;
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
@@ -44,8 +46,6 @@ char *tool_js_eval_handler(const char *arguments, void *user_data) {
         tool_parse_free(&ta);
         return strdup("error: must provide 'code' or 'filename'");
     }
-
-    /* Enforce .qjs extension */
     if (filename && filename[0]) {
         size_t flen = strlen(filename);
         if (flen < 5 || strcmp(filename + flen - 4, ".qjs") != 0) {
@@ -54,203 +54,22 @@ char *tool_js_eval_handler(const char *arguments, void *user_data) {
         }
     }
 
-    /* Get raw args JSON if present */
+    char *args_str = NULL;
     const char *args_raw = NULL;
     size_t args_raw_len = 0;
-    char *args_str = NULL;
     if (filename && targ_raw(&ta, "args", &args_raw, &args_raw_len) == 0) {
         args_str = malloc(args_raw_len + 1);
         if (args_str) { memcpy(args_str, args_raw, args_raw_len); args_str[args_raw_len] = '\0'; }
     }
 
-    /* Pipe for child output */
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
-        tool_parse_free(&ta);
-        free(args_str);
-        return strdup("error: pipe() failed");
-    }
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]); close(pipefd[1]);
-        tool_parse_free(&ta);
-        free(args_str);
-        return strdup("error: fork() failed");
-    }
-
-    if (pid == 0) {
-        /* Child */
-        setpgid(0, 0);
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
-
-        setenv("CCLAW_QJS_GUARD", "1", 1);
-
-        if (ectx && ectx->host_mode)
-            setenv("CCLAW_QJS_HOST", "1", 1);
-
-        if (ectx && ectx->trust_level)
-            setenv("CCLAW_TRUST_LEVEL", ectx->trust_level, 1);
-
-        /* Set allowed hosts */
-        if (ectx && ectx->allowed_hosts_count > 0) {
-            size_t csv_len = 0;
-            for (size_t i = 0; i < ectx->allowed_hosts_count; i++)
-                csv_len += strlen(ectx->allowed_hosts[i]) + 1;
-            char *csv = malloc(csv_len);
-            if (csv) {
-                csv[0] = '\0';
-                for (size_t i = 0; i < ectx->allowed_hosts_count; i++) {
-                    if (i > 0) strcat(csv, ",");
-                    strcat(csv, ectx->allowed_hosts[i]);
-                }
-                setenv("CCLAW_ALLOWED_HOSTS", csv, 1);
-                free(csv);
-            }
-        } else {
-            setenv("CCLAW_ALLOWED_HOSTS", "", 1);
-        }
-
-        /* Layer 2: pass read/write paths to forked child via env */
-        if (ectx && ectx->read_path_count > 0) {
-            size_t csv_len = 0;
-            for (size_t i = 0; i < ectx->read_path_count; i++)
-                csv_len += strlen(ectx->read_paths[i]) + 1;
-            char *csv = malloc(csv_len);
-            if (csv) {
-                csv[0] = '\0';
-                for (size_t i = 0; i < ectx->read_path_count; i++) {
-                    if (i > 0) strcat(csv, ",");
-                    strcat(csv, ectx->read_paths[i]);
-                }
-                setenv("CCLAW_READ_PATHS", csv, 1);
-                free(csv);
-            }
-        }
-        if (ectx && ectx->write_path_count > 0) {
-            size_t csv_len = 0;
-            for (size_t i = 0; i < ectx->write_path_count; i++)
-                csv_len += strlen(ectx->write_paths[i]) + 1;
-            char *csv = malloc(csv_len);
-            if (csv) {
-                csv[0] = '\0';
-                for (size_t i = 0; i < ectx->write_path_count; i++) {
-                    if (i > 0) strcat(csv, ",");
-                    strcat(csv, ectx->write_paths[i]);
-                }
-                setenv("CCLAW_WRITE_PATHS", csv, 1);
-                free(csv);
-            }
-        }
-
-        const char *self_exe = getenv("CCLAW_QJS_EXE");
-        if (!self_exe || !self_exe[0]) self_exe = "/proc/self/exe";
-
-        if (code) {
-            execl(self_exe, "cclaw", "--qjs_eval", "-e", code, (char *)NULL);
-        } else if (args_str) {
-            execl(self_exe, "cclaw", "--qjs_eval", filename, args_str, (char *)NULL);
-        } else {
-            execl(self_exe, "cclaw", "--qjs_eval", filename, (char *)NULL);
-        }
-        _exit(127);
-    }
-
-    /* Parent */
-    setpgid(pid, pid);
-    close(pipefd[1]);
-    tool_parse_free(&ta);
+    char *result = qjs_eval_run(code, filename, args_str);
     free(args_str);
-
-    char *output = malloc(JSEVAL_MAX_OUTPUT + 1);
-    if (!output) {
-        close(pipefd[0]);
-        kill(-pid, SIGKILL);
-        waitpid(pid, NULL, 0);
-        return strdup("error: out of memory");
-    }
-
-    struct timespec deadline;
-    clock_gettime(CLOCK_MONOTONIC, &deadline);
-    deadline.tv_sec += JSEVAL_TIMEOUT;
-
-    size_t out_len = 0;
-    int timed_out = 0;
-    int status = 0;
-
-    while (1) {
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        if (now.tv_sec > deadline.tv_sec ||
-            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
-            timed_out = 1;
-            break;
-        }
-
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(pipefd[0], &rfds);
-
-        struct timeval tv;
-        long remaining = deadline.tv_sec - now.tv_sec;
-        if (remaining > 1) remaining = 1;
-        tv.tv_sec = remaining > 0 ? remaining : 0;
-        tv.tv_usec = 100000;
-
-        int sel = select(pipefd[0] + 1, &rfds, NULL, NULL, &tv);
-        if (sel > 0) {
-            ssize_t n = read(pipefd[0], output + out_len, JSEVAL_MAX_OUTPUT - out_len);
-            if (n <= 0) break;
-            out_len += (size_t)n;
-            if (out_len >= JSEVAL_MAX_OUTPUT) break;
-        } else if (sel < 0 && errno != EINTR) {
-            break;
-        }
-
-        int wr = waitpid(pid, &status, WNOHANG);
-        if (wr > 0) {
-            while (out_len < JSEVAL_MAX_OUTPUT) {
-                ssize_t n = read(pipefd[0], output + out_len, JSEVAL_MAX_OUTPUT - out_len);
-                if (n <= 0) break;
-                out_len += (size_t)n;
-            }
-            close(pipefd[0]);
-            goto done;
-        }
-    }
-
-    close(pipefd[0]);
-
-    if (timed_out) {
-        kill(-pid, SIGKILL);
-        waitpid(pid, NULL, 0);
-        output[out_len] = '\0';
-        size_t needed = out_len + 64;
-        char *result = malloc(needed);
-        if (!result) { free(output); return strdup("error: timeout + OOM"); }
-        snprintf(result, needed, "[timeout after %ds]\n%s", JSEVAL_TIMEOUT, output);
-        free(output);
-        return result;
-    }
-
-    waitpid(pid, &status, 0);
-
-done:
-    output[out_len] = '\0';
-
-    /* Strip trailing newline from child output */
-    if (out_len > 0 && output[out_len - 1] == '\n') output[--out_len] = '\0';
-
-    char *result = strdup(output);
-    free(output);
-    return result ? result : strdup("error: OOM");
+    tool_parse_free(&ta);
+    return result;
 }
 
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
-    return tools_register(reg, "js_eval",
+    int rc = tools_register(reg, "js_eval",
                           "Run JavaScript in QuickJS (ES2025). "
                           "http_request(url[, opts]) is synchronous HTTP. "
                           "File globals: fs.readdir(path[,cb]), fs.readFile(path[,cb]), fs.writeFile(path, data[,cb]), "
@@ -258,6 +77,9 @@ int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
                           "Returns the last expression value (or printed output). "
                           "When using 'filename', must be a .qjs file.",
                           JSEVAL_PARAMS_JSON, tool_js_eval_handler, ctx);
+    if (rc == 0)  /* sandboxed broker; qjs runs in-process, egress via proxy */
+        tools_set_recipe(reg, "js_eval", (ToolRecipe){EXEC_SANDBOX, SBX_JS, NULL});
+    return rc;
 }
 
 /* --- JS-defined tool support (extension-path) --- */
@@ -314,6 +136,7 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
         existing->parameters_json = parameters_json ? strdup(parameters_json) : NULL;
         existing->policy_json = policy_json ? strdup(policy_json) : NULL;
         existing->handler = js_defined_tool_handler;
+        existing->recipe = (ToolRecipe){EXEC_SANDBOX, SBX_JS, NULL};
         return 0;
     }
     JsToolData *td = malloc(sizeof(JsToolData));
@@ -328,9 +151,43 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
         if (e) {
             e->free_fn = js_tool_data_free;
             e->policy_json = policy_json ? strdup(policy_json) : NULL;
+            e->recipe = (ToolRecipe){EXEC_SANDBOX, SBX_JS, NULL};
         }
     }
     return rc;
+}
+
+/* Resolve a JS-tier entry into its profile + the eval-request JSON for the blob.
+ * js_eval (handler == tool_js_eval_handler): args pass through, profile is the
+ * JsEvalCtx user_data. Extension tool (handler == js_defined_tool_handler):
+ * wrap as {"filename":<path>,"args":<args>}, profile is td->ectx. */
+int js_tool_resolve_request(const ToolEntry *te, const char *arguments,
+                            JsEvalCtx **out_ctx, char **out_args) {
+    if (!te || !out_ctx || !out_args) return -1;
+    const char *args = (arguments && arguments[0]) ? arguments : "{}";
+
+    if (te->handler == tool_js_eval_handler) {
+        *out_ctx = (JsEvalCtx *)te->user_data;
+        *out_args = strdup(args);
+        return *out_args ? 0 : -1;
+    }
+
+    /* Extension tool: te->user_data is JsToolData {path, ectx}. */
+    JsToolData *td = (JsToolData *)te->user_data;
+    if (!td || !td->path) return -1;
+    *out_ctx = td->ectx;
+
+    size_t esc_cap = strlen(td->path) * 2 + 8;
+    char *esc = malloc(esc_cap);
+    if (!esc) return -1;
+    size_t esc_len = json_escape(esc, esc_cap, td->path, strlen(td->path));
+    size_t blen = esc_len + strlen(args) + 32;
+    char *blob = malloc(blen);
+    if (!blob) { free(esc); return -1; }
+    snprintf(blob, blen, "{\"filename\":\"%s\",\"args\":%s}", esc, args);
+    free(esc);
+    *out_args = blob;
+    return 0;
 }
 
 /* --- Session runtime (used by extensions for hooks context) --- */

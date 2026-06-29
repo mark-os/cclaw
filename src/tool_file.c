@@ -26,7 +26,7 @@
  * (host trust or no workspace), run in-process directly. */
 char *file_sandbox_run(FileReadCtx *ctx, char *(*handler)(const char *, void *),
                        const char *arguments) {
-    if (!ctx->sandbox || !ctx->workspace) {
+    if (!ctx->sb.sandbox || !ctx->workspace) {
         /* Host mode / unit tests: run in-process */
         return handler(arguments, ctx);
     }
@@ -51,28 +51,28 @@ char *file_sandbox_run(FileReadCtx *ctx, char *(*handler)(const char *, void *),
         cfg.cwd_path     = ctx->cwd_path;
         cfg.db_path      = ctx->db_path;
         cfg.sandbox      = 1;
-        cfg.workspace_ro = ctx->workspace_ro;
-        cfg.mount_cwd    = ctx->mount_cwd;
-        cfg.env_mode     = ctx->env_mode;
+        cfg.workspace_ro = ctx->sb.workspace_ro;
+        cfg.mount_cwd    = ctx->sb.mount_cwd;
+        cfg.env_mode     = ctx->sb.env_mode;
         cfg.net_mode     = 1;  /* file ops never need network */
         cfg.proxy_sock   = NULL;
-        cfg.rlimits.nproc   = ctx->rlimits.nproc;
-        cfg.rlimits.as_mb   = ctx->rlimits.as_mb;
-        cfg.rlimits.cpu_sec = ctx->rlimits.cpu_sec;
+        cfg.rlimits.nproc   = ctx->sb.rlimits.nproc;
+        cfg.rlimits.as_mb   = ctx->sb.rlimits.as_mb;
+        cfg.rlimits.cpu_sec = ctx->sb.rlimits.cpu_sec;
 
         /* Layer 2: build extra_mounts from read/write path grants */
-        size_t n_extra = ctx->read_path_count + ctx->write_path_count;
+        size_t n_extra = ctx->sb.read_path_count + ctx->sb.write_path_count;
         if (n_extra > 0) {
             cfg.extra_mounts = malloc(n_extra * sizeof(*cfg.extra_mounts));
             if (cfg.extra_mounts) {
                 size_t j = 0;
-                for (size_t i = 0; i < ctx->read_path_count; i++) {
-                    cfg.extra_mounts[j].path = ctx->read_paths[i];
+                for (size_t i = 0; i < ctx->sb.read_path_count; i++) {
+                    cfg.extra_mounts[j].path = ctx->sb.read_paths[i];
                     cfg.extra_mounts[j].ro = 1;
                     j++;
                 }
-                for (size_t i = 0; i < ctx->write_path_count; i++) {
-                    cfg.extra_mounts[j].path = ctx->write_paths[i];
+                for (size_t i = 0; i < ctx->sb.write_path_count; i++) {
+                    cfg.extra_mounts[j].path = ctx->sb.write_paths[i];
                     cfg.extra_mounts[j].ro = 0;
                     j++;
                 }
@@ -152,7 +152,7 @@ char *tool_file_read_handler(const char *arguments, void *user_data) {
 char *tool_file_write_handler(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
     if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
-    if (ctx->read_only) return strdup("error: workspace is read-only (restricted trust level)");
+    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted trust level)");
     return file_sandbox_run(ctx, file_write_inner, arguments);
 }
 
@@ -171,7 +171,7 @@ char *tool_file_find_handler(const char *arguments, void *user_data) {
 char *tool_file_edit_handler(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
     if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
-    if (ctx->read_only) return strdup("error: workspace is read-only (restricted trust level)");
+    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted trust level)");
     return file_sandbox_run(ctx, file_edit_inner, arguments);
 }
 
@@ -222,10 +222,13 @@ static char *file_read_inner(const char *arguments, void *user_data) {
 }
 
 int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx) {
-    return tools_register(reg, "file_read",
+    int rc = tools_register(reg, "file_read",
                           "Read a file (path relative or absolute)",
                           FILE_READ_PARAMS_JSON, tool_file_read_handler,
                           (void *)ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "file_read", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+    return rc;
 }
 
 /* ── file_write ───────────────────────────────────────────────────────── */
@@ -238,7 +241,7 @@ static const char *FILE_WRITE_PARAMS_JSON =
 
 static char *file_write_inner(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (ctx->read_only) return strdup("error: workspace is read-only (restricted trust level)");
+    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted trust level)");
     const char *workspace = ctx->workspace;
 
     ToolArgs ta;
@@ -292,10 +295,13 @@ static char *file_write_inner(const char *arguments, void *user_data) {
 }
 
 int tool_file_write_register(ToolRegistry *reg, FileReadCtx *ctx) {
-    return tools_register(reg, "file_write",
+    int rc = tools_register(reg, "file_write",
                           "Write content to a file (path relative or absolute)",
                           FILE_WRITE_PARAMS_JSON, tool_file_write_handler,
                           (void *)ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "file_write", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+    return rc;
 }
 
 /* ── file_list ────────────────────────────────────────────────────────── */
@@ -396,11 +402,14 @@ static char *file_list_inner(const char *arguments, void *user_data) {
 }
 
 int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx) {
-    return tools_register(reg, "file_list",
+    int rc = tools_register(reg, "file_list",
                           "List directory contents. Returns entries sorted "
                           "alphabetically, with a '/' suffix for directories. Includes dotfiles. "
                           "Use this to see what files exist.",
                           FILE_LIST_PARAMS_JSON, tool_file_list_handler, (void *)ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "file_list", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+    return rc;
 }
 
 /* ── file_find (glob) ─────────────────────────────────────────────────── */
@@ -539,12 +548,15 @@ static char *file_find_inner(const char *arguments, void *user_data) {
 }
 
 int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
-    return tools_register(reg, "file_find",
+    int rc = tools_register(reg, "file_find",
                           "Search for files by glob pattern. Returns matching "
                           "file paths relative to the search directory. A pattern without '/' (e.g. "
                           "'*.c') matches a file's name at any depth; use '**' to cross directories "
                           "(e.g. 'src/**/*.spec.ts'). Skips .git and node_modules.",
                           FIND_PARAMS_JSON, tool_file_find_handler, (void *)ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "file_find", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+    return rc;
 }
 
 /* ── file_edit (search/replace) ───────────────────────────────────────── */
@@ -612,7 +624,7 @@ static void edits_free(EditOp *e, int n) {
 
 static char *file_edit_inner(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (ctx->read_only) return strdup("error: workspace is read-only (restricted trust level)");
+    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted trust level)");
     if (!arguments) return strdup("error: invalid JSON arguments");
 
     jsmntok_t toks[FILE_EDIT_MAX_TOKENS];
@@ -729,12 +741,15 @@ static char *file_edit_inner(const char *arguments, void *user_data) {
 }
 
 int tool_file_edit_register(ToolRegistry *reg, FileReadCtx *ctx) {
-    return tools_register(reg, "file_edit",
+    int rc = tools_register(reg, "file_edit",
                           "Apply targeted search/replace edits to a file in the workspace, without "
                           "rewriting the whole file. Each edit's 'oldText' must occur exactly once in "
                           "the file; all edits are matched against the original content and must not "
                           "overlap. Use file_write to create a file or replace it entirely.",
                           FILE_EDIT_PARAMS_JSON, tool_file_edit_handler, (void *)ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "file_edit", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+    return rc;
 }
 
 /* ── file_grep (content search) ───────────────────────────────────────── */
@@ -895,9 +910,12 @@ static char *file_grep_inner(const char *arguments, void *user_data) {
 }
 
 int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx) {
-    return tools_register(reg, "file_grep",
+    int rc = tools_register(reg, "file_grep",
                           "Search file contents for lines matching a POSIX extended regex. "
                           "Returns matching lines as path:lineno:line. Searches recursively "
                           "under the given directory. Skips binary files, .git, and node_modules.",
                           GREP_PARAMS_JSON, tool_file_grep_handler, (void *)ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "file_grep", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
+    return rc;
 }

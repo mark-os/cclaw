@@ -271,7 +271,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 else if (status < 0) snprintf(lbl, sizeof(lbl), "network_error");
                 else snprintf(lbl, sizeof(lbl), "http_%d", status);
                 db_archive_response(db, session_id, turn_id, m->id, lbl,
-                                    resp.data ? resp.data : resp.err_detail);
+                                    resp.data ? resp.data : resp.err_detail,
+                                    payload.body);
             }
 
             /* 429: retry with backoff */
@@ -307,6 +308,20 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             /* Non-2xx */
             if (status < 200 || status >= 300) {
                 http_response_free(&resp);
+                break;
+            }
+
+            /* A 2xx with an empty body is a provider/gateway hiccup (often a slow
+             * near-timeout response). db_ingest_response would bail on the NULL
+             * body *before* archiving, leaving an opaque "LLM request failed" with
+             * no forensic trail. Archive it (with the request we sent) and retry
+             * the same model with backoff before giving up. */
+            if (!resp.data || !resp.data[0]) {
+                db_archive_response(db, session_id, turn_id, m->id, "empty",
+                                    resp.data, payload.body);
+                http_response_free(&resp);
+                model_stat_error(db, m->id, status);
+                if (retry < MAX_429_RETRIES) { sleep(1u << retry); continue; }
                 break;
             }
 
@@ -346,7 +361,25 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             : last_status == 429 ? "error: rate limited"
             : last_status >= 500 ? "error: provider server error"
             : "error: LLM request failed";
-        Message err_msg = {.role = ROLE_ASSISTANT, .content = (char *)err_text,
+        /* Cite the archived llm_responses row so the operator can pull the exact
+         * request + provider reply with `cclaw --last-error` (or a db_query). */
+        int64_t resp_id = 0;
+        sqlite3_stmt *rs;
+        if (sqlite3_prepare_v2(db,
+                "SELECT MAX(id) FROM llm_responses WHERE session_id=?1 AND turn_id=?2",
+                -1, &rs, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(rs, 1, session_id);
+            sqlite3_bind_int64(rs, 2, turn_id);
+            if (sqlite3_step(rs) == SQLITE_ROW && sqlite3_column_type(rs, 0) != SQLITE_NULL)
+                resp_id = sqlite3_column_int64(rs, 0);
+            sqlite3_finalize(rs);
+        }
+        char err_buf[96];
+        if (resp_id > 0)
+            snprintf(err_buf, sizeof(err_buf), "%s [resp #%lld]", err_text, (long long)resp_id);
+        else
+            snprintf(err_buf, sizeof(err_buf), "%s", err_text);
+        Message err_msg = {.role = ROLE_ASSISTANT, .content = err_buf,
                            .stop_reason = STOP_REASON_ERROR, .model = cfg->provider.model};
         entry_append_with_turn(db, session_id, &err_msg, 0);
         goto err;

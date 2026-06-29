@@ -194,5 +194,10 @@ int tool_extension_register(ToolRegistry *reg, ToolExtensionCtx *ctx) {
         "List extensions visible to you (owned or published), with owner, publish "
         "state, and whether you have each attached. Returns a JSON array.",
         EMPTY_PARAMS, tool_extension_list_handler, ctx);
+    /* Inline tools: apply in-process via ctx->db. */
+    tools_set_recipe(reg, "extension_promote", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    tools_set_recipe(reg, "extension_publish", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    tools_set_recipe(reg, "extension_attach",  (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    tools_set_recipe(reg, "extension_list",    (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
     return rc;
 }

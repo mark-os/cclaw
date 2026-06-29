@@ -11,10 +11,27 @@
 /* A requested extra bind-mount (read_path/write_path grant). path is borrowed. */
 typedef struct { const char *path; int ro; } SandboxMountReq;
 
+/* Trust-derived sandbox policy + grant-path bundle, shared by the file/shell/
+ * web/js tool contexts. Filled once per agent in agent_setup (policy from
+ * trust_level via sandbox_profile_from_trust; paths from the agent's grants) and
+ * embedded in each tool ctx — one definition instead of four identical copies.
+ * The policy half maps 1:1 to the matching SandboxConfig fields. Path pointers
+ * borrow AgentCaps and are rebound on cap refresh. */
+typedef struct {
+    int sandbox;            /* 1 = namespace required, 0 = none (host trust level) */
+    int env_mode;           /* 0 = inherit-present-env + scrub, 1 = clean allowlist */
+    int net_mode;           /* 0 = proxy available, 1 = no network */
+    int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
+    int workspace_ro;       /* 0 = rw, 1 = read-only */
+    struct { int nproc, as_mb, cpu_sec; } rlimits; /* 0 = no limit */
+    char **read_paths;  size_t read_path_count;    /* extra bind-mounts from grants */
+    char **write_paths; size_t write_path_count;
+} SandboxProfile;
+
 /* A planned bind-mount: canonical path + ro flag, owned inline. */
 typedef struct { char path[PATH_MAX]; int ro; } SandboxMount;
 
-/* Child sandbox setup, shared by shell_exec and the forked --qjs_eval mode.
+/* Child sandbox setup, shared by all --run-tool sandbox tiers (file/shell/web/js).
  * Establishes the namespace sandbox, scrubs the environment, applies rlimits,
  * and installs the network proxy preload. All fields default to 0/NULL. */
 typedef struct {
@@ -50,6 +67,11 @@ int sandbox_child_setup(const SandboxConfig *cfg);
  * Fills cfg->sandbox, env_mode, net_mode, mount_cwd, workspace_ro, rlimits.
  * Does NOT touch workspace/db_path/proxy_sock/cwd_path (caller sets those). */
 void sandbox_policy_from_trust(const char *trust_level, SandboxConfig *cfg);
+
+/* Fill the policy half of a SandboxProfile (sandbox/env_mode/net_mode/mount_cwd/
+ * workspace_ro/rlimits) from trust_level. The caller sets the grant-path fields
+ * separately (they come from AgentCaps, not the trust level). */
+void sandbox_profile_from_trust(const char *trust_level, SandboxProfile *p);
 
 /* Resolve extra-mount requests into a bind plan: canonicalize each path (drop
  * those whose realpath() fails), dedup by canonical path (rw wins over ro — a

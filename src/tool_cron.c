@@ -102,6 +102,24 @@ char *tool_cron_remove_handler(const char *arguments, void *user_data) {
     return result;
 }
 
+/* EXEC_THREAD shims: rebuild ToolCronCtx around the thread's own db. cron_set
+ * needs session_id (it stamps the job's owning session). */
+static char *cron_set_thread_run(sqlite3 *db, const char *agent_name,
+                                 int64_t session_id, const char *args) {
+    ToolCronCtx c = {.db = db, .session_id = session_id, .agent_name = agent_name};
+    return tool_cron_set_handler(args, &c);
+}
+static char *cron_list_thread_run(sqlite3 *db, const char *agent_name,
+                                  int64_t session_id, const char *args) {
+    ToolCronCtx c = {.db = db, .session_id = session_id, .agent_name = agent_name};
+    return tool_cron_list_handler(args, &c);
+}
+static char *cron_remove_thread_run(sqlite3 *db, const char *agent_name,
+                                    int64_t session_id, const char *args) {
+    ToolCronCtx c = {.db = db, .session_id = session_id, .agent_name = agent_name};
+    return tool_cron_remove_handler(args, &c);
+}
+
 int tool_cron_register(ToolRegistry *reg, ToolCronCtx *ctx) {
     if (tools_register(reg, "cron_set", "Create a scheduled cron job",
                        CRON_SET_PARAMS, tool_cron_set_handler, ctx) != 0)
@@ -112,5 +130,8 @@ int tool_cron_register(ToolRegistry *reg, ToolCronCtx *ctx) {
     if (tools_register(reg, "cron_remove", "Remove a cron job by ID",
                        CRON_REMOVE_PARAMS, tool_cron_remove_handler, ctx) != 0)
         return -1;
+    tools_set_recipe(reg, "cron_set",    (ToolRecipe){EXEC_THREAD, SBX_NONE, cron_set_thread_run});
+    tools_set_recipe(reg, "cron_list",   (ToolRecipe){EXEC_THREAD, SBX_NONE, cron_list_thread_run});
+    tools_set_recipe(reg, "cron_remove", (ToolRecipe){EXEC_THREAD, SBX_NONE, cron_remove_thread_run});
     return 0;
 }

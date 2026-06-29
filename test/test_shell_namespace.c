@@ -25,7 +25,7 @@ static void cleanup_workspace(void) {
 
 /* Detect if namespaces work by checking first command output */
 static void test_namespace_active(void) {
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
     char *r = tool_shell_handler("{\"command\":\"echo ns_check\"}", &sc);
     assert(r != NULL);
     if (strstr(r, "namespace sandbox unavailable")) {
@@ -41,7 +41,7 @@ static void test_namespace_active(void) {
 /* Test: writing inside workspace succeeds */
 static void test_write_inside_workspace(void) {
     if (!ns_available) { printf("  SKIP test_write_inside_workspace\n"); return; }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
     char args[1024];
     snprintf(args, sizeof(args),
         "{\"command\":\"echo hello > %s/test_file.txt && cat %s/test_file.txt\"}",
@@ -57,7 +57,7 @@ static void test_write_inside_workspace(void) {
 /* Test: writing to /etc fails (read-only bind mount) */
 static void test_write_system_dir_blocked(void) {
     if (!ns_available) { printf("  SKIP test_write_system_dir_blocked\n"); return; }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
     char *r = tool_shell_handler(
         "{\"command\":\"touch /etc/cclaw_escape_test 2>&1; echo rc=$?\"}", &sc);
     assert(r != NULL);
@@ -70,7 +70,7 @@ static void test_write_system_dir_blocked(void) {
 /* Test: reading system files still works (/ is ro, not invisible) */
 static void test_read_system_files(void) {
     if (!ns_available) { printf("  SKIP test_read_system_files\n"); return; }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
     char *r = tool_shell_handler("{\"command\":\"ls /bin/sh\"}", &sc);
     assert(r != NULL);
     assert(strstr(r, "[exit 0]") != NULL);
@@ -82,7 +82,7 @@ static void test_read_system_files(void) {
 /* Test: network is isolated (CLONE_NEWNET = no interfaces except lo down) */
 static void test_network_isolated(void) {
     if (!ns_available) { printf("  SKIP test_network_isolated\n"); return; }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
     /* In a new network namespace, only lo exists and it's down.
      * Some kernels also create sit0 (IPv6-over-IPv4 tunnel) in new netns. */
     char *r = tool_shell_handler(
@@ -110,7 +110,7 @@ static void test_null_config_sandboxed(void) {
 /* Test: agent DB path is not accessible from shell child */
 static void test_agent_db_inaccessible(void) {
     if (!ns_available) { printf("  SKIP test_agent_db_inaccessible\n"); return; }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
     /* Try to read a path outside the sandbox — should not exist in new root */
     char *r = tool_shell_handler(
         "{\"command\":\"cat /root/.bashrc 2>&1; echo rc=$?\"}", &sc);
@@ -124,7 +124,7 @@ static void test_agent_db_inaccessible(void) {
 /* T217: Verify /etc/shadow inaccessible from shell child */
 static void test_etc_shadow_inaccessible(void) {
     if (!ns_available) { printf("  SKIP test_etc_shadow_inaccessible\n"); return; }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
     char *r = tool_shell_handler(
         "{\"command\":\"cat /etc/shadow 2>&1; echo rc=$?\"}", &sc);
     assert(r != NULL);
@@ -138,7 +138,7 @@ static void test_etc_shadow_inaccessible(void) {
 /* T217: Verify agent.db path inaccessible from shell child */
 static void test_agent_db_path_blocked(void) {
     if (!ns_available) { printf("  SKIP test_agent_db_path_blocked\n"); return; }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
     /* Typical agent.db path — outside workspace, not bind-mounted */
     char *r = tool_shell_handler(
         "{\"command\":\"cat .cclaw/agents/default/agent.db 2>&1; echo rc=$?\"}", &sc);
@@ -151,7 +151,7 @@ static void test_agent_db_path_blocked(void) {
 /* T217: Verify cclaw.db path inaccessible from shell child */
 static void test_daemon_db_path_blocked(void) {
     if (!ns_available) { printf("  SKIP test_daemon_db_path_blocked\n"); return; }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
     char *r = tool_shell_handler(
         "{\"command\":\"cat .cclaw/cclaw.db 2>&1; echo rc=$?\"}", &sc);
     assert(r != NULL);
@@ -176,7 +176,7 @@ static void test_cwd_path_rw(void) {
     fprintf(f, "cwd_content\n");
     fclose(f);
 
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .cwd_path = cwd_dir, .sandbox = 1, .mount_cwd = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .cwd_path = cwd_dir, .sb.sandbox = 1, .sb.mount_cwd = 1};
     char args[1024];
 
     /* Read from cwd_path — should work */
@@ -216,7 +216,7 @@ static void test_no_cwd_path_blocked(void) {
     fclose(f);
 
     /* No cwd_path — simulates daemon mode */
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .cwd_path = NULL, .sandbox = 1};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .cwd_path = NULL, .sb.sandbox = 1};
     char args[1024];
     snprintf(args, sizeof(args), "{\"command\":\"cat %s/seed.txt 2>&1; echo rc=$?\"}", cwd_dir);
     char *r = tool_shell_handler(args, &sc);
@@ -249,7 +249,7 @@ static void test_key_masked_in_mounted_cwd(void) {
     f = fopen(normal, "w"); fprintf(f, "ordinary_file_content"); fclose(f);
 
     ShellConfig sc = {.timeout = 5, .workspace = workspace, .cwd_path = cwd_dir,
-                      .db_path = db_file, .sandbox = 1, .mount_cwd = 1};
+                      .db_path = db_file, .sb.sandbox = 1, .sb.mount_cwd = 1};
     char args[1024];
 
     /* Key content must NOT leak */
@@ -281,7 +281,7 @@ static void test_key_masked_in_mounted_cwd(void) {
 
 /* T301: sandbox=none config — namespace NOT applied, child runs unsandboxed */
 static void test_sandbox_none_skips_namespace(void) {
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sandbox = 0};
+    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 0};
     /* With sandbox=0, child should be able to write to /tmp directly (no pivot_root) */
     char args[256];
     snprintf(args, sizeof(args),

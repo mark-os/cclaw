@@ -24,6 +24,11 @@ int tools_register(ToolRegistry *reg, const char *name, const char *description,
     return 0;
 }
 
+void tools_set_recipe(ToolRegistry *reg, const char *name, ToolRecipe recipe) {
+    ToolEntry *e = tools_lookup(reg, name);
+    if (e) e->recipe = recipe;
+}
+
 ToolEntry *tools_lookup(ToolRegistry *reg, const char *name) {
     if (!reg || !name) return NULL;
     for (size_t i = 0; i < reg->count; i++) {

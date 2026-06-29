@@ -29,11 +29,11 @@ static void setup(void) {
 
     memset(&ctx_a, 0, sizeof(ctx_a));
     ctx_a.workspace = ws_a;
-    ctx_a.sandbox = 1;
+    ctx_a.sb.sandbox = 1;
 
     memset(&ctx_b, 0, sizeof(ctx_b));
     ctx_b.workspace = ws_b;
-    ctx_b.sandbox = 1;
+    ctx_b.sb.sandbox = 1;
 
     /* Agent A's file */
     char path[512];
@@ -171,7 +171,7 @@ static void test_workspace_fallback_path(void) {
     fprintf(f, "agent1_only");
     fclose(f);
 
-    FileReadCtx fb_ctx = {.workspace = agent_ws, .sandbox = 1};
+    FileReadCtx fb_ctx = {.workspace = agent_ws, .sb.sandbox = 1};
     char *r = tool_file_read_handler("{\"path\":\"data.txt\"}", (void *)&fb_ctx);
     assert(r != NULL);
     assert(strcmp(r, "agent1_only") == 0);

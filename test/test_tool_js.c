@@ -8,22 +8,8 @@
 static int tests_run = 0;
 static int tests_passed = 0;
 
-/* js_eval now forks `cclaw --qjs_eval`. Point the handler at the real cclaw
- * binary (sibling of this test binary) and run it in host mode (no sandbox),
- * so these unit tests exercise the real subprocess path without needing a
- * working userns sandbox or any network. */
-static void setup_qjs_env(void) {
-    char self[4096];
-    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
-    if (n <= 0) { fprintf(stderr, "readlink /proc/self/exe failed\n"); exit(2); }
-    self[n] = '\0';
-    char *slash = strrchr(self, '/');
-    if (slash) slash[1] = '\0'; else self[0] = '\0';
-    char cclaw_path[4128];
-    snprintf(cclaw_path, sizeof(cclaw_path), "%scclaw", self);
-    setenv("CCLAW_QJS_EXE", cclaw_path, 1);
-    setenv("CCLAW_QJS_HOST", "1", 1);
-}
+/* js_eval now evaluates in-process via qjs_eval_run — no fork, no --qjs_eval
+ * re-exec. These unit tests call the handler directly (host mode, no network). */
 
 #define TEST(name) do { tests_run++; printf("  " name "... "); } while(0)
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
@@ -101,13 +87,15 @@ static void test_register(void) {
     if (rc != 0) { FAIL("register failed"); tools_free(&reg); return; }
     ToolEntry *e = tools_lookup(&reg, "js_eval");
     if (!e) { FAIL("lookup failed"); tools_free(&reg); return; }
+    if (e->recipe.vehicle != EXEC_SANDBOX || e->recipe.tier != SBX_JS) {
+        FAIL("expected EXEC_SANDBOX/SBX_JS recipe"); tools_free(&reg); return;
+    }
     tools_free(&reg);
     PASS();
 }
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    setup_qjs_env();
     printf("test_tool_js:\n");
     test_basic_eval();
     test_string_result();

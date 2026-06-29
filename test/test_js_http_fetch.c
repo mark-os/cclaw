@@ -10,82 +10,16 @@
 static int tests_run = 0;
 static int tests_passed = 0;
 
-/* js_eval now forks `cclaw --qjs_eval`. Point the handler at the real cclaw
- * binary (sibling of this test) in host mode. The handler-based tests below
- * only exercise host-validation rejection paths, which never open a socket. */
-static void setup_qjs_env(void) {
-    char self[4096];
-    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
-    if (n <= 0) { fprintf(stderr, "readlink /proc/self/exe failed\n"); exit(2); }
-    self[n] = '\0';
-    char *slash = strrchr(self, '/');
-    if (slash) slash[1] = '\0'; else self[0] = '\0';
-    char cclaw_path[4128];
-    snprintf(cclaw_path, sizeof(cclaw_path), "%scclaw", self);
-    setenv("CCLAW_QJS_EXE", cclaw_path, 1);
-    setenv("CCLAW_QJS_HOST", "1", 1);
-}
-
 #define TEST(name) do { tests_run++; printf("  " name "... "); } while(0)
 #define PASS() do { tests_passed++; printf("PASS\n"); } while(0)
 #define FAIL(msg) do { printf("FAIL: %s\n", msg); } while(0)
 
-/* V38: no allowed_hosts = no network */
-static void test_no_hosts_rejects(void) {
-    TEST("no_hosts_rejects");
-    JsHttpResult r = js_http_fetch_exec("https://example.com", "GET", NULL, NULL, 0);
-    if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
-    if (!r.error || !strstr(r.error, "no allowed_hosts")) {
-        FAIL(r.error ? r.error : "NULL"); js_http_result_free(&r); return;
-    }
-    js_http_result_free(&r);
-    PASS();
-}
-
-/* V38: host not in allowed list */
-static void test_host_not_allowed(void) {
-    TEST("host_not_allowed");
-    char *hosts[] = {"api.example.com"};
-    JsHttpResult r = js_http_fetch_exec("https://evil.com/data", "GET", NULL, hosts, 1);
-    if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
-    if (!r.error || !strstr(r.error, "not in allowed_hosts")) {
-        FAIL(r.error ? r.error : "NULL"); js_http_result_free(&r); return;
-    }
-    js_http_result_free(&r);
-    PASS();
-}
-
-/* V38: SSRF — reject private IPs (localhost) */
-static void test_ssrf_localhost(void) {
-    TEST("ssrf_localhost");
-    char *hosts[] = {"localhost"};
-    JsHttpResult r = js_http_fetch_exec("http://localhost/secret", "GET", NULL, hosts, 1);
-    if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
-    if (!r.error || !strstr(r.error, "private IP")) {
-        FAIL(r.error ? r.error : "NULL"); js_http_result_free(&r); return;
-    }
-    js_http_result_free(&r);
-    PASS();
-}
-
-/* V38: SSRF — reject 127.x.x.x */
-static void test_ssrf_127(void) {
-    TEST("ssrf_127.0.0.1");
-    char *hosts[] = {"127.0.0.1"};
-    JsHttpResult r = js_http_fetch_exec("http://127.0.0.1/secret", "GET", NULL, hosts, 1);
-    if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
-    if (!r.error || !strstr(r.error, "private IP")) {
-        FAIL(r.error ? r.error : "NULL"); js_http_result_free(&r); return;
-    }
-    js_http_result_free(&r);
-    PASS();
-}
-
-/* Invalid scheme rejected */
+/* Egress (host/IP/redirect gating) is no longer a pre-flight in js_http_fetch —
+ * it moved to the broker proxy's per-hop decide() (see test_proxy_decide.c).
+ * The only validation left here is the scheme guard: http:// or https:// only. */
 static void test_invalid_scheme(void) {
     TEST("invalid_scheme");
-    char *hosts[] = {"example.com"};
-    JsHttpResult r = js_http_fetch_exec("ftp://example.com/file", "GET", NULL, hosts, 1);
+    JsHttpResult r = js_http_fetch_exec("ftp://example.com/file", "GET", NULL);
     if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
     if (!r.error || !strstr(r.error, "http://")) {
         FAIL(r.error ? r.error : "NULL"); js_http_result_free(&r); return;
@@ -94,96 +28,66 @@ static void test_invalid_scheme(void) {
     PASS();
 }
 
-/* V38: allowed host passes validation (actual fetch may fail but that's OK) */
-static void test_allowed_host_passes_validation(void) {
-    TEST("allowed_host_passes_validation");
-    /* Use a host that resolves to a public IP but connection will likely fail/timeout.
-     * The point is it passes the allowed_hosts + SSRF checks. */
-    char *hosts[] = {"example.com"};
-    JsHttpResult r = js_http_fetch_exec("https://example.com/", "GET", NULL, hosts, 1);
-    /* Should either succeed (status >= 0) or fail with a curl error (not our validation) */
-    if (r.status == -1 && r.error &&
-        (strstr(r.error, "not in allowed_hosts") || strstr(r.error, "private IP") ||
-         strstr(r.error, "no allowed_hosts"))) {
-        FAIL("should have passed validation");
-        js_http_result_free(&r);
-        return;
-    }
+static void test_null_url(void) {
+    TEST("null_url");
+    JsHttpResult r = js_http_fetch_exec(NULL, "GET", NULL);
+    if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
+    if (!r.error) { FAIL("expected error message"); js_http_result_free(&r); return; }
     js_http_result_free(&r);
     PASS();
 }
 
-/* JS runtime set_hosts wiring */
+/* JS runtime set_hosts wiring (no-op now, hosts feed the proxy not the runtime) */
 static void test_runtime_set_hosts(void) {
     TEST("runtime_set_hosts");
     JsSessionRuntime *rt = js_runtime_create();
     if (!rt) { FAIL("create failed"); return; }
     char *hosts[] = {"api.example.com", "data.example.com"};
     js_runtime_set_hosts(rt, hosts, 2);
-    /* Verify by evaluating http_fetch — should fail with "host not in allowed_hosts"
-     * since we're calling a disallowed host */
-    /* Actually just verify the function exists and throws appropriately */
     js_runtime_destroy(rt);
     PASS();
 }
 
-/* Note: the sanitize/HTML-strip helpers (html_strip_tags, wrap_external_content)
- * are unit-tested directly in test_tool_web_fetch.c. The end-to-end sanitize
- * path through js_eval requires a real network fetch inside the forked
- * `--qjs_eval` child, so it lives in the e2e suite, not here. */
-
-/* JS eval: http_request without hosts throws */
-static void test_js_eval_no_hosts(void) {
-    TEST("js_eval_no_hosts");
-    char *r = tool_js_eval_handler("{\"code\":\"http_request('https://example.com')\"}", NULL);
+/* In-process js_eval compute: arithmetic returns the last expression value. No
+ * fork, no re-exec, no network. */
+static void test_js_eval_compute(void) {
+    TEST("js_eval_compute");
+    char *r = tool_js_eval_handler("{\"code\":\"6 * 7\"}", NULL);
     if (!r) { FAIL("NULL result"); return; }
-    /* Should get an error about no allowed_hosts */
-    if (strstr(r, "error") == NULL && strstr(r, "Error") == NULL) {
-        FAIL(r); free(r); return;
-    }
+    if (strcmp(r, "42") != 0) { FAIL(r); free(r); return; }
     free(r);
     PASS();
 }
 
-/* T104: js_eval with allowed_hosts configured passes hosts to http_request */
-static void test_js_eval_with_hosts(void) {
-    TEST("js_eval_with_hosts");
-    /* Register js_eval with allowed_hosts context */
-    JsEvalCtx ectx = {.allowed_hosts = (char *[]){"example.com"}, .allowed_hosts_count = 1};
-    ToolRegistry reg;
-    tools_init(&reg);
-    tool_js_eval_register(&reg, &ectx);
-
-    ToolEntry *e = tools_lookup(&reg, "js_eval");
-    if (!e) { FAIL("lookup failed"); tools_free(&reg); return; }
-
-    /* Call http_request for a disallowed host — should get "not in allowed_hosts".
-     * This verifies the ectx allowed_hosts reach the forked child via
-     * CCLAW_ALLOWED_HOSTS; the host check rejects before any socket is opened. */
-    char *r = e->handler("{\"code\":\"http_request('https://evil.com/')\"}", e->user_data);
-    if (!r) { FAIL("NULL result"); tools_free(&reg); return; }
-    if (!strstr(r, "not in allowed_hosts")) {
-        FAIL(r); free(r); tools_free(&reg); return;
-    }
+/* In-process js_eval: console.log output is captured. */
+static void test_js_eval_console(void) {
+    TEST("js_eval_console");
+    char *r = tool_js_eval_handler("{\"code\":\"console.log('hi'); undefined\"}", NULL);
+    if (!r) { FAIL("NULL result"); return; }
+    if (!strstr(r, "hi")) { FAIL(r); free(r); return; }
     free(r);
+    PASS();
+}
 
-    tools_free(&reg);
+/* js_eval requires code or filename. */
+static void test_js_eval_requires_arg(void) {
+    TEST("js_eval_requires_arg");
+    char *r = tool_js_eval_handler("{}", NULL);
+    if (!r) { FAIL("NULL result"); return; }
+    if (!strstr(r, "error")) { FAIL(r); free(r); return; }
+    free(r);
     PASS();
 }
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    setup_qjs_env();
     printf("test_js_http_fetch:\n");
-    test_no_hosts_rejects();
-    test_host_not_allowed();
-    test_ssrf_localhost();
-    test_ssrf_127();
     test_invalid_scheme();
-    test_allowed_host_passes_validation();
+    test_null_url();
     test_runtime_set_hosts();
-    test_js_eval_no_hosts();
-    test_js_eval_with_hosts();
+    test_js_eval_compute();
+    test_js_eval_console();
+    test_js_eval_requires_arg();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

@@ -126,7 +126,7 @@ static void test_shell_inject_then_mask(void) {
         .workspace = NULL,
         .secrets = secrets,
         .secret_count = count,
-        .sandbox = 1,
+        .sb.sandbox = 1,
     };
 
     /* Handler returns RAW output now (masking moved to the parent) */
@@ -156,7 +156,7 @@ static void test_env_injection_scoped(void) {
 
     ShellConfig sc = {
         .timeout = 5, .workspace = NULL,
-        .secrets = secrets, .secret_count = count, .sandbox = 1,
+        .secrets = secrets, .secret_count = count, .sb.sandbox = 1,
     };
 
     /* References USEDKEY only; never names UNUSEDKEY. Dump injected secret var

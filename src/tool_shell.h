@@ -2,6 +2,7 @@
 #define CCLAW_TOOL_SHELL_H
 
 #include "tools.h"
+#include "sandbox.h"
 
 #define TOOL_SHELL_DEFAULT_TIMEOUT 30
 
@@ -22,18 +23,7 @@ typedef struct {
     size_t allowed_host_count;
     ShellSecret *secrets;   /* V88: array of secrets to inject + mask */
     size_t secret_count;
-    int sandbox;            /* derived from trust_level: 1=namespace required, 0=none (host) */
-    /* Trust-level policy bundle */
-    int env_mode;           /* 0=inherit+scrub (trusted), 1=clean allowlist */
-    int net_mode;           /* 0=proxy available, 1=no network */
-    int mount_cwd;          /* 1=mount CWD rw, 0=skip */
-    int workspace_ro;       /* 0=rw, 1=read-only */
-    struct { int nproc; int as_mb; int cpu_sec; } rlimits; /* 0 = no limit */
-    /* Layer 2: extra paths from grants (pointers into AgentCaps) */
-    char **read_paths;
-    size_t read_path_count;
-    char **write_paths;
-    size_t write_path_count;
+    SandboxProfile sb;      /* trust-derived policy + grant paths */
 } ShellConfig;
 
 /* Register shell_exec tool into registry.

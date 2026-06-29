@@ -25,7 +25,7 @@ static void setup(void) {
     /* Sandboxed context — for escape/isolation tests */
     memset(&sandbox_ctx, 0, sizeof(sandbox_ctx));
     sandbox_ctx.workspace = tmpdir;
-    sandbox_ctx.sandbox = 1;
+    sandbox_ctx.sb.sandbox = 1;
 
     /* Create a test file */
     char path[512];

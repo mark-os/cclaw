@@ -11,11 +11,12 @@ typedef struct {
     char *error;      /* error message if status == -1 (heap-allocated) */
 } JsHttpResult;
 
-/* V38: Execute HTTP fetch with allowed_hosts + SSRF protection.
- * Returns result struct. Caller must call js_http_result_free(). */
+/* Execute an HTTP fetch. Egress is enforced per-hop by the broker proxy
+ * (HTTP_PROXY → net_shim → decide()), NOT a pre-flight allowlist — a single
+ * check can't see redirects. Returns result struct; caller frees with
+ * js_http_result_free(). */
 JsHttpResult js_http_fetch_exec(const char *url, const char *method,
-                                const char *body,
-                                char **allowed_hosts, size_t hosts_count);
+                                const char *body);
 
 void js_http_result_free(JsHttpResult *r);
 

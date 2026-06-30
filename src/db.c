@@ -169,6 +169,20 @@ void db_enable_trace(sqlite3 *db) {
 }
 
 /* Open DB with WAL + busy_timeout. No schema applied. */
+/* Process-global SQLite log hook (SQLITE_CONFIG_LOG). SQLite invokes this for
+ * every internal error/warning — BUSY, WAL recovery, malformed schema, etc. —
+ * that would otherwise be silently swallowed inside a library call. May fire on
+ * any thread, so keep it to a single fprintf. */
+static void sqlite_log_cb(void *arg, int rc, const char *msg) {
+    (void)arg;
+    fprintf(stderr, "sqlite[%d %s]: %s\n", rc, sqlite3_errstr(rc), msg ? msg : "");
+}
+
+void db_configure_logging(void) {
+    /* Must precede sqlite3_initialize() — i.e. the first sqlite3_open(). */
+    sqlite3_config(SQLITE_CONFIG_LOG, sqlite_log_cb, NULL);
+}
+
 sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(path, &db);
@@ -178,6 +192,9 @@ sqlite3 *db_open(const char *path) {
         sqlite3_close(db);
         return NULL;
     }
+    /* Per-connection: turn plain result codes into extended ones, so a BUSY
+     * surfaces as e.g. SQLITE_BUSY_SNAPSHOT (the read→write upgrade case). */
+    sqlite3_extended_result_codes(db, 1);
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA busy_timeout=5000;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL);

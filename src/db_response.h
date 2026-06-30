@@ -25,7 +25,8 @@ int db_tool_call_complete_with_result(sqlite3 *db, int64_t entry_id,
 typedef enum {
     LLM_RESP_OK = 0,     /* well-formed; entries written */
     LLM_RESP_EMPTY,      /* zero-usage empty-stop provider glitch — retry next model */
-    LLM_RESP_MALFORMED   /* missing/empty choices|candidates — treat as failure */
+    LLM_RESP_MALFORMED,  /* missing/empty choices|candidates — treat as failure */
+    LLM_RESP_DBERR       /* our-side DB error (prepare failed) — body is valid, not a provider issue */
 } LlmRespStatus;
 
 /* Usage scalars from a successful ingest (for model stats). */

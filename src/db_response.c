@@ -183,7 +183,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
         /* Our-side failure (e.g. SQLITE_BUSY), not a bad response — archive the
          * raw body so a valid reply lost to DB contention is still recoverable. */
         archive_store(db, session_id, turn_id, model, "ingest_error", body, -1, 0, NULL);
-        return LLM_RESP_MALFORMED;
+        return LLM_RESP_DBERR;
     }
     sqlite3_bind_text(j, 1, body, -1, SQLITE_STATIC);
     if (sqlite3_step(j) != SQLITE_ROW) {
@@ -202,7 +202,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
         /* Our-side failure — archive the (valid) body for forensics + recovery. */
         archive_store(db, session_id, turn_id, model, "ingest_error", blob, blen, 1, NULL);
         sqlite3_finalize(j);
-        return LLM_RESP_MALFORMED;
+        return LLM_RESP_DBERR;
     }
     sqlite3_bind_blob(s, 1, blob, blen, SQLITE_STATIC);
     if (sqlite3_step(s) != SQLITE_ROW) {
@@ -274,7 +274,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
     if (asst_id < 0) {
         if (tc) sqlite3_finalize(tc);
         sqlite3_finalize(j);
-        return LLM_RESP_MALFORMED;
+        return LLM_RESP_DBERR;
     }
 
     /* ── Tool call entries + tool_calls table rows ── */

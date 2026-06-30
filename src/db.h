@@ -5,6 +5,10 @@
 #include "types.h"
 #include <sys/types.h>
 
+/* Install the process-global SQLite error log handler. Must be called once,
+ * before the first db_open() (i.e. before sqlite3_initialize runs). */
+void db_configure_logging(void);
+
 /* Open DB at path, set WAL mode + pragmas, create tables.
  * Returns NULL on failure. */
 sqlite3 *db_open(const char *path);

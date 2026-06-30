@@ -2397,18 +2397,29 @@ int main(int argc, char *argv[]) {
     shutdown_init();
 
     /* ── Open DB ─────────────────────────────────────────────────── */
+    db_configure_logging();   /* before the first db_open (sqlite3_initialize) */
     char *db_path = resolve_db_path();
     ensure_parent_dir(db_path);
     g_db = db_open(db_path);
     if (!g_db) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
-    if (db_ensure_schema(g_db) != 0) { db_close(g_db); free(db_path); return 1; }
+
+    /* Schema + seed in one exclusive transaction. When multiple processes
+     * start concurrently (daemon + CLI), the first grabs the write lock and
+     * does all DDL + seeding atomically; the others wait (busy_timeout) then
+     * find everything already done (IF NOT EXISTS / COUNT>0 checks). */
+    sqlite3_exec(g_db, "BEGIN EXCLUSIVE", NULL, NULL, NULL);
+    if (db_ensure_schema(g_db) != 0) {
+        sqlite3_exec(g_db, "ROLLBACK", NULL, NULL, NULL);
+        db_close(g_db); free(db_path); return 1;
+    }
+    db_seed_defaults(g_db);
+    sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL);
 
     { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
 
     setenv("CCLAW_DB", db_path, 1);
 
-    /* First-run initialization (no-op if already seeded) */
-    db_seed_defaults(g_db);
+    /* extract_builtin_extensions is idempotent (IF NOT EXISTS checks) */
     extract_builtin_extensions(g_db, db_path);
 
     g_cfg = config_load(g_db);

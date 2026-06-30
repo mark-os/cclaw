@@ -207,6 +207,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     uint32_t skip_mask = 0;
     int last_status = -1;
     int llm_ok = 0;
+    int had_dberr = 0;  /* set if any model hit LLM_RESP_DBERR (our-side DB failure) */
 
     /* One turn id for this user-turn: every raw response archived below (the
      * failed attempts and the final ingest) shares it. db_next_turn_id is a
@@ -235,10 +236,17 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             free(key_buf); continue;
         }
 
+        /* Stash request body on the heap: payload.body is only valid while the
+         * stmt is open, but we must release the stmt (drop TRANS_READ) before any
+         * DB write, and the body has to outlive that release to survive 429/5xx
+         * resends in the retry loop below. */
+        char *req_body = payload.body ? strdup(payload.body) : NULL;
+        llm_payload_release(&payload);
+
         /* Build URL + auth */
         char *url = llm_build_url(&route_cfg);
         char *auth = llm_build_auth_header(&route_cfg);
-        if (!url || !auth) { free(url); free(auth); llm_payload_release(&payload); free(key_buf); continue; }
+        if (!url || !auth) { free(url); free(auth); free(req_body); free(key_buf); continue; }
 
         char session_hdr[64];
         snprintf(session_hdr, sizeof(session_hdr), "x-session-id: cclaw-%lld", (long long)session_id);
@@ -251,7 +259,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
             HttpRequestOpts opts = {
                 .url = url, .method = "POST", .headers = headers,
-                .body = payload.body, .curl_handle = curl,
+                .body = req_body, .curl_handle = curl,
             };
             int status = http_do(&opts, &resp);
 
@@ -272,7 +280,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 else snprintf(lbl, sizeof(lbl), "http_%d", status);
                 db_archive_response(db, session_id, turn_id, m->id, lbl,
                                     resp.data ? resp.data : resp.err_detail,
-                                    payload.body);
+                                    req_body);
             }
 
             /* 429: retry with backoff */
@@ -318,15 +326,14 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
              * the same model with backoff before giving up. */
             if (!resp.data || !resp.data[0]) {
                 db_archive_response(db, session_id, turn_id, m->id, "empty",
-                                    resp.data, payload.body);
+                                    resp.data, req_body);
                 http_response_free(&resp);
                 model_stat_error(db, m->id, status);
                 if (retry < MAX_429_RETRIES) { sleep(1u << retry); continue; }
                 break;
             }
 
-            /* ── Ingest response straight to the DB (zero-copy: resp.data
-             * outlives the bind, so free it only after ingest). ── */
+            /* ── Ingest response straight to the DB ── */
             TypedIngestResult ir;
             LlmRespStatus st = db_ingest_response(db, session_id, turn_id,
                                    m->id, route_cfg.provider.endpoint_type,
@@ -339,12 +346,18 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 break;
             }
             if (st == LLM_RESP_EMPTY) { skip_mask |= (1u << mi); break; }
-            /* LLM_RESP_MALFORMED: try next model */
+            /* LLM_RESP_DBERR: our DB failed (SQLITE_BUSY) — body was valid.
+             * Don't retry same model (issue is our-side, not provider-side).
+             * Diagnostics already logged by db_ingest_response. */
+            if (st == LLM_RESP_DBERR) { had_dberr = 1; break; }
+            /* LLM_RESP_MALFORMED: bad body from provider (E6). Retry on same
+             * model up to MAX_PARSE_RETRIES before trying next model. */
+            if (retry < MAX_PARSE_RETRIES) continue;
             break;
         }
 
         free(url); free(auth);
-        llm_payload_release(&payload);
+        free(req_body);
         free(key_buf);
     }
 
@@ -354,7 +367,8 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
     if (!llm_ok) {
         const char *err_text =
-            last_status == -2 ? "error: request timed out"
+            had_dberr ? "error: DB contention during response ingest (SQLITE_BUSY) — check logs"
+            : last_status == -2 ? "error: request timed out"
             : last_status == -1 ? "error: network error"
             : last_status == 401 || last_status == 403 ? "error: authentication failed"
             : last_status == 404 ? "error: model not available"
@@ -374,7 +388,14 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 resp_id = sqlite3_column_int64(rs, 0);
             sqlite3_finalize(rs);
         }
-        char err_buf[96];
+        /* DBERR loses a valid, paid response — log it (body is in llm_responses
+         * when archiving is on; resp #0 means it isn't, so this line is the only
+         * trail). Metadata only: the body can be large and may carry secrets. */
+        if (had_dberr)
+            LOG_ERROR_(cfg, "llm_req: response ingest failed (DB contention) "
+                       "session=%lld turn=%lld resp=#%lld — response discarded",
+                       (long long)session_id, (long long)turn_id, (long long)resp_id);
+        char err_buf[160];
         if (resp_id > 0)
             snprintf(err_buf, sizeof(err_buf), "%s [resp #%lld]", err_text, (long long)resp_id);
         else

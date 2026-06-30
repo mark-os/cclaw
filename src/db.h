@@ -16,6 +16,11 @@ sqlite3 *db_open(const char *path);
 /* Apply schema (CREATE TABLE IF NOT EXISTS). Call once from main process. */
 int db_ensure_schema(sqlite3 *db);
 
+/* 1 if the DB's schema generation is compatible with this build (fresh/empty
+ * or current), 0 if it's stale/foreign and must be deleted. Check before
+ * db_ensure_schema — a stale DB silently misbehaves otherwise. */
+int db_schema_compat(sqlite3 *db);
+
 /* Seed default config + provider. Call once from main() on first run. */
 int db_seed_defaults(sqlite3 *db);
 

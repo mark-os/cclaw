@@ -223,8 +223,44 @@ static int tool_needs_interpolation(const char *name) {
 
 static AgentSetup *g_tool_setup;  /* Initialized once for tool dispatch */
 
+/* ── CLI terminal output ─────────────────────────────────────────────
+ * The CLI runs in the terminal's canonical mode: the kernel echoes input
+ * and owns line editing, so the prompt below is never deletable and we
+ * never enter raw mode. Output here is the program's UI (stdout), distinct
+ * from diagnostics (syslog via LOG_*). */
+
+#define CLI_PROMPT "> "   /* set to "" to drop the prompt symbol */
+
+/* ANSI only when stdout is a real terminal — piped / -p output stays clean. */
+static int cli_ansi(void) {
+    static int v = -1;
+    if (v < 0) v = isatty(STDOUT_FILENO) ? 1 : 0;
+    return v;
+}
+
+static void cli_prompt(void) {
+    fputs(CLI_PROMPT, stdout);
+    fflush(stdout);
+}
+
+/* Transient "working" cue shown between the user's Enter and the turn's first
+ * output. The response isn't streamed, so a tool-less turn would otherwise
+ * show nothing while the model runs; the first real output clears it. */
+static int g_cli_indicator;
+static void cli_indicator_show(void) {
+    if (!cli_ansi()) return;
+    fputs("\033[2m…\033[0m", stdout);
+    fflush(stdout);
+    g_cli_indicator = 1;
+}
+static void cli_indicator_clear(void) {
+    if (g_cli_indicator && cli_ansi()) { fputs("\r\033[K", stdout); fflush(stdout); }
+    g_cli_indicator = 0;
+}
+
 /* CLI progress: "[tool_name {"arg":"value"}]" dimmed, args truncated */
 static void cli_print_tool_call(const char *name, const char *args) {
+    cli_indicator_clear();
     fprintf(stdout, "\n\033[2m[%s", name);
     if (args && args[0] && strcmp(args, "{}") != 0) {
         if (strlen(args) <= 200) fprintf(stdout, " %s", args);
@@ -1456,6 +1492,11 @@ static void run_advance(int64_t session_id) {
     int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations : DEFAULT_MAX_ITERATIONS;
     AdvanceOutput out = advance_session(g_db, session_id, max_iter);
 
+    /* Tag every log line from here — and from the dispatch/deliver calls below,
+     * which run on this thread — with the advancing session and agent, so
+     * support logs tie back to the conversation and its llm_responses rows. */
+    cclaw_log_set_ctx(session_id, -1, out.agent_name);
+
     switch (out.action) {
     case ADVANCE_DISPATCH_LLM:
         if (dispatch_llm_req(session_id, out.agent_name, out.iteration) < 0) {
@@ -1524,12 +1565,16 @@ static void run_advance(int64_t session_id) {
             g_cli_turn_active = 0;
         break;
     case ADVANCE_ERROR:
+        /* In daemon mode this used to vanish silently — log it so a stuck
+         * session leaves a trail the user can send. */
+        LOG_ERROR_(g_cfg, "advance_session failed");
         if (g_mode == 0) {
             fprintf(stderr, "error: session advance failed\n");
             if (session_id == g_cli_session) g_cli_turn_active = 0;
         }
         break;
     }
+    cclaw_log_clear_ctx();
 }
 
 static void deliver_response(int64_t session_id) {
@@ -1537,6 +1582,7 @@ static void deliver_response(int64_t session_id) {
         /* CLI stdout belongs to the root session's turn. A sub-agent finishing
          * routes its result to the parent's tool_call (advance.c), not stdout. */
         if (session_id != g_cli_session) return;
+        cli_indicator_clear();
         char *text = get_response_text(g_db, session_id);
         if (text) { printf("%s\n", text); free(text); }
         g_cli_turn_active = 0;
@@ -1777,6 +1823,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
 static void cli_start_turn(const char *input) {
     inbox_insert_scanned(g_db, g_cli_session, "cli", input);
     g_cli_turn_active = 1;
+    cli_indicator_show();
     run_advance(g_cli_session);
 }
 
@@ -1864,7 +1911,7 @@ static int run_daemon(char *db_path) {
 
     /* Start LLM worker threads */
     if (llm_worker_start(db_path, g_llm_threads) != 0) {
-        fprintf(stderr, "error: failed to start LLM worker\n");
+        LOG_ERROR_(g_cfg, "daemon: failed to start LLM worker");
         config_free(g_cfg); db_close(g_db); free(db_path); return 1;
     }
     int daemon_worker_fd = llm_worker_fd();
@@ -1872,7 +1919,7 @@ static int run_daemon(char *db_path) {
 
     /* Fire-and-forget tool threads (EXEC_THREAD vehicle) */
     if (tool_thread_start(db_path, 0) != 0) {
-        fprintf(stderr, "error: failed to start tool threads\n");
+        LOG_ERROR_(g_cfg, "daemon: failed to start tool threads");
         llm_worker_stop();
         config_free(g_cfg); db_close(g_db); free(db_path); return 1;
     }
@@ -1902,7 +1949,7 @@ static int run_daemon(char *db_path) {
     /* Register in the liveness table so this daemon's in-flight sessions are
      * owner-stamped and never reclaimed by a peer's recovery. */
     if (process_register(g_db, "daemon", getpid(), g_instance_id, sizeof(g_instance_id)) != 0)
-        fprintf(stderr, "warning: process registration failed\n");
+        LOG_ERROR_(g_cfg, "daemon: process registration failed");
     db_set_instance_id(g_instance_id);
 
     /* Daemon event loop */
@@ -2236,7 +2283,7 @@ static int run_cli(char *db_path, const char *prompt,
 
             if (g_mode == 0 && !g_cli_turn_active) {
                 if (g_cli_done) goto done;
-                printf("> "); fflush(stdout);
+                cli_prompt();
             }
         }
         if (worker_idx >= 0 && (cli_pfds[worker_idx].revents & POLLIN)) {
@@ -2244,7 +2291,7 @@ static int run_cli(char *db_path, const char *prompt,
 
             if (g_mode == 0 && !g_cli_turn_active) {
                 if (g_cli_done) goto done;
-                printf("> "); fflush(stdout);
+                cli_prompt();
             }
         }
         if (wake_idx >= 0 && (cli_pfds[wake_idx].revents & POLLIN)) {
@@ -2256,14 +2303,14 @@ static int run_cli(char *db_path, const char *prompt,
             }
             if (g_mode == 0 && !g_cli_turn_active) {
                 if (g_cli_done) goto done;
-                printf("> "); fflush(stdout);
+                cli_prompt();
             }
         }
         if (tool_idx >= 0 && (cli_pfds[tool_idx].revents & POLLIN)) {
             event_step_tool_thread();
             if (g_mode == 0 && !g_cli_turn_active) {
                 if (g_cli_done) goto done;
-                printf("> "); fflush(stdout);
+                cli_prompt();
             }
         }
         if (stdin_idx >= 0 && (cli_pfds[stdin_idx].revents & (POLLERR | POLLNVAL))) {
@@ -2290,7 +2337,7 @@ static int run_cli(char *db_path, const char *prompt,
             *nl = '\0';
             LOG_DEBUG_(g_cfg, "stdin: read line [%s]", linebuf);
 
-            if (!linebuf[0]) { linepos = 0; printf("> "); fflush(stdout); continue; }
+            if (!linebuf[0]) { linepos = 0; cli_prompt(); continue; }
             if (strcmp(linebuf, "exit") == 0 || strcmp(linebuf, "quit") == 0) goto done;
 
             /* Check if we're waiting for an approval decision */
@@ -2366,7 +2413,6 @@ int main(int argc, char *argv[]) {
      * no config. The child reads its request from fd 3. */
     if (argc >= 2 && strcmp(argv[1], "--run-tool") == 0) return run_tool_main();
 
-    cclaw_log_init();
     int daemon_mode = 0, new_session = 0, host_mode = 0;
     const char *channel_mode = NULL;
     LogLevel log_level_override = LOG_LEVEL_INFO;
@@ -2394,6 +2440,11 @@ int main(int argc, char *argv[]) {
         if (v && atoi(v) > 0) g_llm_threads = atoi(v);
     }
 
+    /* CLI tees logs to stderr so the interactive session sees them inline;
+     * daemon and channel-runner children log strictly to syslog/journald. */
+    int cli_tty = (!daemon_mode && channel_mode == NULL);
+    cclaw_log_init(cli_tty);
+
     shutdown_init();
 
     /* ── Open DB ─────────────────────────────────────────────────── */
@@ -2402,6 +2453,15 @@ int main(int argc, char *argv[]) {
     ensure_parent_dir(db_path);
     g_db = db_open(db_path);
     if (!g_db) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
+
+    if (!db_schema_compat(g_db)) {
+        fprintf(stderr,
+            "error: %s was created by a different cclaw schema (this build expects v%d).\n"
+            "No migrations yet — delete it (and its -wal/-shm siblings) and restart:\n"
+            "  rm %s %s-wal %s-shm\n",
+            db_path, CCLAW_SCHEMA_VERSION, db_path, db_path, db_path);
+        db_close(g_db); free(db_path); return 1;
+    }
 
     /* Schema + seed in one exclusive transaction. When multiple processes
      * start concurrently (daemon + CLI), the first grabs the write lock and
@@ -2431,6 +2491,11 @@ int main(int argc, char *argv[]) {
                               log_level_override == LOG_LEVEL_DEBUG ? "debug" :
                               log_level_override == LOG_LEVEL_ERROR ? "error" : "info";
         setenv("CCLAW_LOG_LEVEL", lvl_str, 1);
+    } else if (cli_tty && !getenv("CCLAW_LOG_LEVEL")) {
+        /* Interactive CLI defaults to errors-only on the tty so logs don't
+         * clutter the conversation; -v/-vv or CCLAW_LOG_LEVEL opt back in.
+         * (The daemon keeps the info default.) */
+        g_cfg->log_level = LOG_LEVEL_ERROR;
     }
     cclaw_log_set_level(g_cfg->log_level);
 

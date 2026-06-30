@@ -93,7 +93,7 @@ static JSValue eval_js(JSContext *ctx, const char *code, const char *tag) {
     if (JS_IsException(v)) {
         JSValue exc = JS_GetException(ctx);
         const char *msg = JS_ToCString(ctx, exc);
-        fprintf(stderr, "[channel_runner] JS error in %s: %s\n", tag, msg ? msg : "?");
+        cclaw_log_write(LOG_ERR, "channel_runner: JS error in %s: %s", tag, msg ? msg : "?");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, exc);
         return JS_UNDEFINED;
@@ -443,7 +443,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     signal(SIGPIPE, SIG_IGN);
 
     g_ctx = channel_ctx_open(db_path, channel_name);
-    if (!g_ctx) { fprintf(stderr, "[channel_runner] DB open failed\n"); return 1; }
+    if (!g_ctx) { cclaw_log_write(LOG_ERR, "channel_runner: DB open failed"); return 1; }
 
     /* Resolve js_path from extensions table */
     char js_path[1024] = {0};
@@ -468,22 +468,22 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
         }
     }
     if (!js_path[0]) {
-        fprintf(stderr, "[channel_runner] no extension path for channel '%s'\n", channel_name);
+        cclaw_log_write(LOG_ERR, "channel_runner: no extension path for channel '%s'", channel_name);
         channel_ctx_free(g_ctx);
         return 1;
     }
 
     int outbox_fd = channel_outbox_fifo_open(db_path, channel_name);
     if (outbox_fd < 0)
-        fprintf(stderr, "[channel_runner] warning: outbox FIFO unavailable\n");
+        cclaw_log_write(LOG_WARNING, "channel_runner: outbox FIFO unavailable");
 
     int uds_fd = uds_listen_open(db_path, channel_name);
     if (uds_fd < 0)
-        fprintf(stderr, "[channel_runner] warning: request socket unavailable\n");
+        cclaw_log_write(LOG_WARNING, "channel_runner: request socket unavailable");
 
     char *js_src = read_file(js_path);
     if (!js_src) {
-        fprintf(stderr, "[channel_runner] cannot read %s\n", js_path);
+        cclaw_log_write(LOG_ERR, "channel_runner: cannot read %s", js_path);
         channel_ctx_free(g_ctx);
         return 1;
     }
@@ -502,7 +502,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     if (JS_IsException(load_val)) {
         JSValue exc = JS_GetException(ctx);
         const char *msg = JS_ToCString(ctx, exc);
-        fprintf(stderr, "[channel_runner] JS load error: %s\n", msg ? msg : "?");
+        cclaw_log_write(LOG_ERR, "channel_runner: JS load error: %s", msg ? msg : "?");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, exc);
         JS_FreeContext(ctx); qjs_runtime_destroy(g_qrt); channel_ctx_free(g_ctx);
@@ -516,14 +516,14 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     /* onInit: required; may set a poll shape and queue sends */
     JSValue init_ret = eval_js(ctx, "onInit()", "<init>");
     if (JS_IsUndefined(init_ret)) {
-        fprintf(stderr, "[channel_runner] onInit failed\n");
+        cclaw_log_write(LOG_ERR, "channel_runner: onInit failed");
         curl_multi_cleanup(g_multi); curl_global_cleanup();
         JS_FreeContext(ctx); qjs_runtime_destroy(g_qrt); channel_ctx_free(g_ctx);
         return 1;
     }
     poll_shape_update(ctx, init_ret);
 
-    fprintf(stderr, "[channel_runner] started: channel=%s poll=%s requests=%s\n",
+    cclaw_log_write(LOG_NOTICE, "channel_runner: started: channel=%s poll=%s requests=%s",
             channel_name, g_poll.url ? "yes" : "no", uds_fd >= 0 ? "yes" : "no");
 
     /* Recover rows a crashed predecessor left mid-send, then deliver
@@ -651,6 +651,6 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     JS_FreeContext(ctx);
     qjs_runtime_destroy(g_qrt);
     channel_ctx_free(g_ctx);
-    fprintf(stderr, "[channel_runner] stopped\n");
+    cclaw_log_write(LOG_NOTICE, "channel_runner: stopped");
     return 0;
 }

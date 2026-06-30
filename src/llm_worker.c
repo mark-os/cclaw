@@ -110,7 +110,7 @@ static void *worker_fn(void *arg) {
     (void)arg;
     sqlite3 *db = db_open(g_pool.db_path);
     if (!db) {
-        syslog(LOG_ERR, "worker: db_open failed");
+        cclaw_log_write(LOG_ERR, "worker: db_open failed");
         pthread_mutex_lock(&g_pool.mtx);
         g_pool.active--;
         if (g_pool.active == 0)
@@ -135,17 +135,21 @@ static void *worker_fn(void *arg) {
             sqlite3_finalize(qstmt);
         }
 
+        /* Tag this worker thread's log lines (including llm_req's) with the
+         * session and agent for the duration of the job. */
+        cclaw_log_set_ctx(item.session_id, -1, item.agent_name);
+
         if (job_type == 1) {
             /* Compaction job */
-            syslog(LOG_DEBUG, "worker: session=%lld compaction start",
-                   (long long)item.session_id);
+            cclaw_log_write(LOG_DEBUG, "worker: compaction start");
             llm_compaction(db, curl, item.session_id, item.agent_name);
         } else {
             /* LLM turn job */
-            syslog(LOG_DEBUG, "worker: session=%lld model start",
-                   (long long)item.session_id);
+            cclaw_log_write(LOG_DEBUG, "worker: model start");
             llm_req(db, curl, item.session_id, item.recall);
         }
+
+        cclaw_log_clear_ctx();
 
         /* Clean up job record */
         sqlite3_stmt *del;

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "cclaw.h"
 #include "secret_scan.h"
 #include "agent_config.h"
 #include "secret.h"
@@ -238,7 +239,33 @@ int db_ensure_schema(sqlite3 *db) {
             sqlite3_free(err);  /* non-fatal — recall degrades, chat still works */
         }
     }
+
+    /* Stamp the schema generation. Only reached for a fresh or already-current
+     * DB — db_schema_compat() refuses stale ones before we get here. */
+    char pragma[48];
+    snprintf(pragma, sizeof pragma, "PRAGMA user_version=%d", CCLAW_SCHEMA_VERSION);
+    sqlite3_exec(db, pragma, NULL, NULL, NULL);
     return 0;
+}
+
+/* Gate startup on schema compatibility. Returns 1 if the DB is safe to use
+ * (fresh/empty, or stamped with the current generation), 0 if it predates or
+ * postdates this build and must be deleted (no migrations). */
+int db_schema_compat(sqlite3 *db) {
+    int uv = 0, has_tables = 0;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &s, NULL) == SQLITE_OK) {
+        if (sqlite3_step(s) == SQLITE_ROW) uv = sqlite3_column_int(s, 0);
+        sqlite3_finalize(s);
+    }
+    if (uv == CCLAW_SCHEMA_VERSION) return 1;       /* current */
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1",
+            -1, &s, NULL) == SQLITE_OK) {
+        if (sqlite3_step(s) == SQLITE_ROW) has_tables = 1;
+        sqlite3_finalize(s);
+    }
+    return (uv == 0 && !has_tables);                /* fresh DB: schema stamps it */
 }
 
 /* V57: mmap + reduced cache + relaxed sync for child processes (short-lived). */

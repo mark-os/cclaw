@@ -3,12 +3,26 @@
 
 #include "types.h"
 #include <syslog.h>
+#include <stdint.h>
 #include <stdio.h>
 
-/* V75: Logging via syslog. LOG_PERROR ensures stderr tee for CLI. */
-static inline void cclaw_log_init(void) {
-    openlog("cclaw", LOG_PID | LOG_PERROR, LOG_USER);
-}
+/* Logging goes to syslog (journald captures it under `cclaw` automatically).
+ * tee_stderr adds LOG_PERROR so the interactive CLI sees its own logs inline;
+ * the daemon passes 0 so its logs go strictly to the system facility. */
+void cclaw_log_init(int tee_stderr);
+
+/* Per-thread logfmt context. CCLAW_LOG appends ` session=.. turn=.. agent=".."`
+ * to every message while a context is set, tying log lines back to the session
+ * and the llm_responses rows. The daemon advances one session per thread at a
+ * time, so thread-local is exact. Pass session/turn <0 to omit that field. */
+void cclaw_log_set_ctx(int64_t session_id, int64_t turn_id, const char *agent);
+void cclaw_log_clear_ctx(void);
+
+/* Format a message, append the current thread's context, and syslog() it.
+ * Heap-promotes for messages larger than the stack buffer (trace dumps the
+ * full response body), so nothing is truncated before syslog sees it. */
+void cclaw_log_write(int prio, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
 
 /* Mask raw syslog() calls below the configured level (the CCLAW_LOG macros
  * filter via cfg, but bare syslog(LOG_DEBUG, ...) would still hit stderr
@@ -23,7 +37,7 @@ static inline void cclaw_log_set_level(LogLevel level) {
     if ((cfg_ptr) && (cfg_ptr)->log_level >= (level)) { \
         int _prio = (level) == LOG_LEVEL_ERROR ? LOG_ERR : \
                     (level) == LOG_LEVEL_INFO  ? LOG_NOTICE : LOG_DEBUG; \
-        syslog(_prio, fmt, ##__VA_ARGS__); \
+        cclaw_log_write(_prio, fmt, ##__VA_ARGS__); \
     } \
 } while(0)
 

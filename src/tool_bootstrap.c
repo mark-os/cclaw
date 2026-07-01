@@ -28,7 +28,7 @@ static const char *CONFIGURE_PROVIDER_PARAMS =
 
 static char *tool_configure_provider_handler(const char *arguments, void *user_data) {
     ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
-    if (!ctx)
+    if (!ctx || !ctx->db)
         return strdup("error: configure_provider unavailable");
 
     ToolArgs ta;
@@ -38,34 +38,67 @@ static char *tool_configure_provider_handler(const char *arguments, void *user_d
     const char *pname = targ_str(&ta, "provider");
     const char *api_key = targ_str(&ta, "api_key");
     const char *base_url = targ_str(&ta, "base_url");
+    const char *model = targ_str(&ta, "model");
 
     if (!pname || !api_key || !api_key[0]) {
         tool_parse_free(&ta);
         return strdup("error: 'provider' and 'api_key' are required");
     }
 
-    /* Validate known provider or custom with base_url */
-    int known = 0;
+    /* Validate known provider or custom with base_url; pick up defaults */
+    int known = -1;
     for (size_t i = 0; i < PROVIDER_COUNT; i++) {
-        if (strcmp(pname, PROVIDERS[i].name) == 0) { known = 1; break; }
+        if (strcmp(pname, PROVIDERS[i].name) == 0) { known = (int)i; break; }
     }
-    if (!known && (!base_url || !base_url[0])) {
+    if (known < 0 && (!base_url || !base_url[0])) {
         tool_parse_free(&ta);
         return strdup("error: 'base_url' is required for custom providers");
     }
+    const char *url = (base_url && base_url[0]) ? base_url : PROVIDERS[known].base_url;
+    if (!model || !model[0]) model = (known >= 0) ? PROVIDERS[known].model : NULL;
 
+    /* Key lives in the encrypted kv under the provider's canonical env-var
+     * name, so config_load's env → kv fallback resolves it. */
+    char env_name[96];
+    size_t en = 0;
+    for (const char *c = pname; *c && en < sizeof(env_name) - 12; c++)
+        env_name[en++] = (*c >= 'a' && *c <= 'z') ? (char)(*c - 32)
+                       : ((*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9')) ? *c : '_';
+    memcpy(env_name + en, "_API_KEY", 9);
+
+    if (db_kv_set_secret(ctx->db, env_name, api_key) != 0) {
+        tool_parse_free(&ta);
+        return strdup("error: failed to store API key");
+    }
+
+    const char *sql =
+        "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)"
+        " VALUES(?,?, 'openai', ?, ?, COALESCE((SELECT MAX(priority)+1 FROM providers), 0))"
+        " ON CONFLICT(name) DO UPDATE SET base_url=excluded.base_url,"
+        "   api_key_env=excluded.api_key_env,"
+        "   default_model=COALESCE(excluded.default_model, default_model);";
+    sqlite3_stmt *stmt;
+    int rc = -1;
+    if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, pname, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, url, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, env_name, -1, SQLITE_STATIC);
+        if (model) sqlite3_bind_text(stmt, 4, model, -1, SQLITE_STATIC);
+        rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+        sqlite3_finalize(stmt);
+    }
     tool_parse_free(&ta);
-
-    /* V76/V79: Don't write cclaw.db — return sentinel, daemon applies on reap */
-    return strdup("config applied: configure_provider");
+    if (rc != 0)
+        return strdup("error: failed to store provider config");
+    return strdup("config applied: configure_provider (key stored in encrypted kv)");
 }
 
 static char *tool_configure_channel_handler(const char *arguments, void *user_data);
 static char *tool_create_agent_handler(const char *arguments, void *user_data);
 
-/* EXEC_THREAD shims. These handlers are validation-only (they return a sentinel;
- * the real config apply is the admin-approved path), so the rebuilt ctx only
- * needs a live db handle to pass the availability null-check. */
+/* EXEC_THREAD shims: rebuild a minimal ctx around the thread's live db handle.
+ * configure_provider applies directly (providers upsert + encrypted kv);
+ * configure_channel/create_agent are validation-only sentinels. */
 static char *configure_provider_thread_run(sqlite3 *db, const char *agent_name,
                                            int64_t session_id, const char *args) {
     ToolBootstrapCtx c = {.db = db, .session_id = session_id, .agent_name = agent_name};
@@ -84,7 +117,7 @@ static char *create_agent_thread_run(sqlite3 *db, const char *agent_name,
 
 int tool_configure_provider_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
     int rc = tools_register(reg, "configure_provider",
-                          "Set up LLM provider. Stores API key in a local env file with 0600 permissions. "
+                          "Set up LLM provider. Stores the API key encrypted in cclaw.db. "
                           "Known providers: openrouter, gemini, anthropic. "
                           "Use 'custom' with base_url for others.",
                           CONFIGURE_PROVIDER_PARAMS,

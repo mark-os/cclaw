@@ -26,6 +26,7 @@
 #include "db.h"
 #include "log.h"
 #include "qjs_helpers.h"
+#include "secret.h"
 #include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -483,6 +484,13 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
 
     g_ctx = channel_ctx_open(db_path, channel_name);
     if (!g_ctx) { cclaw_log_write(LOG_ERR, "channel_runner: DB open failed"); return 1; }
+
+    /* Load the secret key so admin.setKey can write to the encrypted kv. */
+    {
+        uint8_t sk[32];
+        if (secret_key_load_or_create(db_path, sk) == 0)
+            db_set_secret_key(sk);
+    }
 
     /* Resolve js_path from extensions table */
     char js_path[1024] = {0};

@@ -195,7 +195,6 @@ void config_free(Config *cfg) {
     free(cfg->db_path);
     free(cfg->workspace);
     free(cfg->system_prompt);
-    free(cfg->env_file);
     free(cfg);
 }
 
@@ -351,7 +350,9 @@ Config *config_load(sqlite3 *db) {
                 v = (const char *)sqlite3_column_text(ps, 3);
                 if (v && v[0]) {
                     const char *key_val = getenv(v);
-                    p->api_key = (key_val && key_val[0]) ? strdup(key_val) : NULL;
+                    /* env first (user's shell may source a .env), then encrypted kv */
+                    p->api_key = (key_val && key_val[0]) ? strdup(key_val)
+                                                         : db_kv_get_secret(db, v);
                 }
                 v = (const char *)sqlite3_column_text(ps, 4);
                 p->model = v ? strdup(v) : strdup("deepseek/deepseek-v4-flash");
@@ -373,7 +374,9 @@ Config *config_load(sqlite3 *db) {
             cfg->provider.endpoint_type = ENDPOINT_OPENAI;
             cfg->provider.cache_hints = CACHE_HINTS_AUTO;
             const char *key = getenv("OPENROUTER_API_KEY");
-            if (key && key[0]) cfg->provider.api_key = strdup(key);
+            cfg->provider.api_key = (key && key[0])
+                ? strdup(key)
+                : db_kv_get_secret(db, "OPENROUTER_API_KEY");
         }
     }
 

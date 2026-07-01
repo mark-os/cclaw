@@ -273,7 +273,6 @@ static void build_sandbox_cfg(const ParsedReq *q, int skip_pid_ns,
     cfg->workspace    = q->workspace;
     cfg->cwd_path     = q->cwd_path;
     cfg->db_path      = NULL;  /* no DB in this process */
-    cfg->env_file     = NULL;
     cfg->proxy_sock   = proxy_sock;
     cfg->sandbox      = q->sandbox;
     cfg->workspace_ro = q->workspace_ro;

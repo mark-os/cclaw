@@ -115,7 +115,6 @@ char *tool_shell_handler(const char *arguments, void *user_data) {
             cfg.workspace       = sc_child->workspace;
             cfg.cwd_path        = sc_child->cwd_path;
             cfg.db_path         = sc_child->db_path;
-            cfg.env_file        = sc_child->env_file;
             cfg.proxy_sock      = psock;
             cfg.sandbox         = sc_child->sb.sandbox;
             cfg.workspace_ro    = sc_child->sb.workspace_ro;

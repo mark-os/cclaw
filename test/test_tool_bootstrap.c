@@ -31,7 +31,7 @@ static sqlite3 *setup_db(void) {
     return db;
 }
 
-/* T190: configure_provider returns sentinel (V76: no DB write from agent) */
+/* T190: configure_provider applies config (providers row + encrypted kv) */
 static int test_configure_openrouter(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -50,7 +50,21 @@ static int test_configure_openrouter(void) {
     assert(strstr(result, "configure_provider") != NULL);
     free(result);
 
-    /* V76: Tool does NOT write to DB — daemon applies on reap */
+    /* Key stored encrypted in kv under the canonical env-var name */
+    char *key = db_kv_get_secret(db, "OPENROUTER_API_KEY");
+    assert(key && strcmp(key, "sk-or-test-key-123") == 0);
+    free(key);
+    char *raw = db_kv_get(db, "OPENROUTER_API_KEY");
+    assert(raw && strncmp(raw, "enc:", 4) == 0);
+    free(raw);
+
+    /* Provider row upserted with defaults */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT base_url, api_key_env FROM providers WHERE name='openrouter'", -1, &s, NULL);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "https://openrouter.ai/api/v1") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "OPENROUTER_API_KEY") == 0);
+    sqlite3_finalize(s);
 
     tools_free(&reg);
     db_close(db);
@@ -83,7 +97,7 @@ static int test_configure_custom_requires_base_url(void) {
     return 0;
 }
 
-/* T190: configure_provider with custom provider + base_url returns sentinel */
+/* T190: configure_provider with custom provider + base_url applies config */
 static int test_configure_custom_with_url(void) {
     sqlite3 *db = setup_db();
     db_seed_defaults(db);
@@ -102,11 +116,23 @@ static int test_configure_custom_with_url(void) {
     assert(strstr(result, "config applied:") != NULL);
     free(result);
 
-    /* V76: Tool does NOT write custom values — base_url still has default */
-    sqlite3_stmt *_s; sqlite3_prepare_v2(db, "SELECT base_url FROM providers WHERE priority=0", -1, &_s, NULL); char *url = NULL; if (sqlite3_step(_s)==SQLITE_ROW) { const char *v=(const char*)sqlite3_column_text(_s,0); if(v) url=strdup(v); } sqlite3_finalize(_s);
-    assert(url != NULL);
-    assert(strcmp(url, "https://openrouter.ai/api/v1") == 0); /* unchanged default */
-    free(url);
+    /* Custom provider appended after existing ones — priority 0 untouched */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT base_url FROM providers WHERE priority=0", -1, &s, NULL);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "https://openrouter.ai/api/v1") == 0);
+    sqlite3_finalize(s);
+
+    sqlite3_prepare_v2(db, "SELECT base_url, default_model, api_key_env FROM providers WHERE name='custom'", -1, &s, NULL);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "https://my-llm.example.com/v1") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "my-model-7b") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "CUSTOM_API_KEY") == 0);
+    sqlite3_finalize(s);
+
+    char *key = db_kv_get_secret(db, "CUSTOM_API_KEY");
+    assert(key && strcmp(key, "mykey") == 0);
+    free(key);
 
     tools_free(&reg);
     db_close(db);

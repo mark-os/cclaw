@@ -2,12 +2,8 @@
 #include "admin_api.h"
 #include "agent_config.h"
 #include "db.h"
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 const char *admin_key_env_name(const char *provider) {
     if (!provider) return NULL;
@@ -16,59 +12,8 @@ const char *admin_key_env_name(const char *provider) {
     return NULL;
 }
 
-int admin_write_env_key(const char *env_file, const char *var_name, const char *value) {
-    if (!env_file || !var_name || !value) return -1;
-
-    char *existing = NULL;
-    size_t existing_len = 0;
-    FILE *f = fopen(env_file, "r");
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        long len = ftell(f);
-        if (len > 0) {
-            fseek(f, 0, SEEK_SET);
-            existing = malloc((size_t)len + 1);
-            if (existing) {
-                existing_len = fread(existing, 1, (size_t)len, f);
-                existing[existing_len] = '\0';
-            }
-        }
-        fclose(f);
-    }
-
-    int fd = open(env_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) { free(existing); return -1; }
-    fchmod(fd, 0600);
-    f = fdopen(fd, "w");
-    if (!f) { close(fd); free(existing); return -1; }
-
-    size_t var_len = strlen(var_name);
-    int replaced = 0;
-    if (existing) {
-        char *line = existing;
-        while (*line) {
-            char *eol = strchr(line, '\n');
-            size_t line_len = eol ? (size_t)(eol - line) : strlen(line);
-            if (line_len > var_len && line[var_len] == '=' &&
-                strncmp(line, var_name, var_len) == 0) {
-                fprintf(f, "%s=%s\n", var_name, value);
-                replaced = 1;
-            } else if (line_len > 0) {
-                fwrite(line, 1, line_len, f);
-                fputc('\n', f);
-            }
-            line += line_len + (eol ? 1 : 0);
-            if (!eol) break;
-        }
-        free(existing);
-    }
-    if (!replaced) fprintf(f, "%s=%s\n", var_name, value);
-    fclose(f);
-    return 0;
-}
-
-int admin_set_key(const char *env_file, const char *provider, const char *value) {
-    if (!env_file || !value) return -1;
+int admin_set_key(sqlite3 *db, const char *provider, const char *value) {
+    if (!db || !value) return -1;
 
     if (!provider || strcmp(provider, "custom") == 0) {
         /* Expect value as "VAR_NAME=actual_value" */
@@ -79,14 +24,14 @@ int admin_set_key(const char *env_file, const char *provider, const char *value)
         if (!var) return -1;
         memcpy(var, value, name_len);
         var[name_len] = '\0';
-        int rc = admin_write_env_key(env_file, var, eq + 1);
+        int rc = db_kv_set_secret(db, var, eq + 1);
         free(var);
         return rc;
     }
 
     const char *var_name = admin_key_env_name(provider);
     if (!var_name) return -1;
-    return admin_write_env_key(env_file, var_name, value);
+    return db_kv_set_secret(db, var_name, value);
 }
 
 int admin_set_model(sqlite3 *db, int provider_index, const char *model) {

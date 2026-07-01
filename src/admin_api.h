@@ -6,10 +6,11 @@
 
 /* Generic admin operations — channel-agnostic, usable by CLI or any channel. */
 
-/* Write an API key to the env file. Returns 0 on success.
- * provider: "openrouter", "gemini", or NULL for custom (var_name=value format).
- * For known providers, maps to the canonical env var name. */
-int admin_set_key(const char *env_file, const char *provider, const char *value);
+/* Store an API key in the encrypted kv (never a file). Returns 0 on success.
+ * provider: "openrouter", "gemini", or NULL/"custom" (var_name=value format).
+ * For known providers, the kv key is the canonical env var name, so the
+ * config loader's env → encrypted-kv fallback finds it. */
+int admin_set_key(sqlite3 *db, const char *provider, const char *value);
 
 /* Map provider name to env var. Returns NULL if unknown. */
 const char *admin_key_env_name(const char *provider);
@@ -33,10 +34,5 @@ typedef struct {
 
 int admin_list_providers(sqlite3 *db, AdminProvider **out, size_t *out_count);
 void admin_providers_free(AdminProvider *providers, size_t count);
-
-/* List agents. Returns heap-allocated array of names (caller frees each + array). */
-
-/* Write key=value to env file, replacing existing line if present. Returns 0 on success. */
-int admin_write_env_key(const char *env_file, const char *var_name, const char *value);
 
 #endif

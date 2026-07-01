@@ -121,7 +121,6 @@ typedef struct {
     int64_t *admin_chat_ids; /* V53: Telegram admin chat IDs (heap array) */
     size_t admin_chat_id_count;
     char *system_prompt;    /* T46: per-agent system prompt, supports {session_id} {date} */
-    char *env_file;         /* T141: path to env file for key writes (default /etc/cclaw/env) */
     int web_port;
     int max_iterations;     /* agent loop iteration cap */
     int max_history_tokens; /* V7: token budget for context (0 = 60% of context_window) */

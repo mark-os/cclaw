@@ -2576,7 +2576,6 @@ int main(int argc, char *argv[]) {
 
     g_cfg = config_load(g_db);
     if (!g_cfg) { fprintf(stderr, "config load failed\n"); db_close(g_db); return 1; }
-    if (g_cfg->env_file) setenv("CCLAW_ENV_FILE", g_cfg->env_file, 1);
     if (log_level_set) {
         g_cfg->log_level = log_level_override;
         const char *lvl_str = log_level_override == LOG_LEVEL_TRACE ? "trace" :

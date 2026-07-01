@@ -39,8 +39,7 @@
  * path *inside the new root*. Files not reachable in the child's mount tree
  * (the standard/restricted case) never materialize under newroot, so the stat
  * fails and we skip them — they are already invisible by omission. */
-static void sandbox_mask_state_files(const char *newroot, const char *db_path,
-                                     const char *env_file) {
+static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     if (!db_path || !db_path[0]) return;
 
     char db_abs[PATH_MAX];
@@ -69,10 +68,6 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path,
     targets[nt++] = dbwal;
     targets[nt++] = dbshm;
     if (klen > 0 && (size_t)klen < sizeof(keyf)) targets[nt++] = keyf;
-
-    char envf[PATH_MAX];
-    if (env_file && env_file[0] && realpath(env_file, envf))
-        targets[nt++] = envf;
 
     for (size_t i = 0; i < nt; i++) {
         char dst[PATH_MAX + 64];
@@ -167,7 +162,7 @@ static void bind_dir_into(const char *newroot, const char *abspath, int ro) {
  * System dirs mounted ro, workspace rw, cwd_path rw (CLI mode).
  * Returns 0 on success, -1 on failure. */
 static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
-                                   const char *db_path, const char *env_file,
+                                   const char *db_path,
                                    const SandboxConfig *full_cfg) {
     uid_t uid = getuid();
     gid_t gid = getgid();
@@ -299,7 +294,7 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
 
     /* Mask the secret key + DB ciphertext if a bound path (CWD/workspace)
      * would otherwise expose them. Must run after binds, before pivot_root. */
-    sandbox_mask_state_files(newroot, db_path, env_file);
+    sandbox_mask_state_files(newroot, db_path);
 
     /* pivot_root into new root */
     char put_old[256];
@@ -495,7 +490,7 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     if (cfg->net_mode) psock = NULL;
 
     /* V82/V37: namespace sandbox — fail closed if requested but unavailable */
-    if (cfg->sandbox && sandbox_apply_namespace(ws, cwd, cfg->db_path, cfg->env_file, cfg) != 0) {
+    if (cfg->sandbox && sandbox_apply_namespace(ws, cwd, cfg->db_path, cfg) != 0) {
         fprintf(stderr, "error: namespace sandbox unavailable (errno=%d); "
                 "this trust level requires it — enable unprivileged user "
                 "namespaces or set the agent's trust_level to 'host'\n", errno);

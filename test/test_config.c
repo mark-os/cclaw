@@ -84,6 +84,25 @@ static void test_env_overrides_kv(void) {
     printf("  PASS: test_env_overrides_kv\n");
 }
 
+static void test_kv_secret_fallback(void) {
+    /* Third-priority key source: env unset → encrypted kv */
+    unsetenv("OPENROUTER_API_KEY");
+    static const uint8_t k[32] = {9, 8, 7, 6, 5, 4, 3, 2, 1};
+
+    sqlite3 *db = fresh_db();
+    assert(db);
+    db_set_secret_key(k);
+    assert(db_kv_set_secret(db, "OPENROUTER_API_KEY", "sk-from-kv") == 0);
+
+    Config *cfg = config_load(db);
+    assert(cfg != NULL);
+    assert(cfg->provider.api_key != NULL);
+    assert(strcmp(cfg->provider.api_key, "sk-from-kv") == 0);
+    config_free(cfg);
+    db_close(db);
+    printf("  PASS: test_kv_secret_fallback\n");
+}
+
 static void test_fallback_providers(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
@@ -208,6 +227,7 @@ int main(void) {
     test_defaults();
     test_kv_values();
     test_env_overrides_kv();
+    test_kv_secret_fallback();
     test_fallback_providers();
     test_stale_lock_timeout();
     test_system_prompt();

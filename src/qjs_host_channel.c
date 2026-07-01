@@ -180,10 +180,7 @@ static JSValue js_admin_set_key(JSContext *ctx, JSValueConst this_val,
     const char *provider = JS_ToCString(ctx, argv[0]);
     const char *value = JS_ToCString(ctx, argv[1]);
     if (!provider || !value) { if (provider) JS_FreeCString(ctx, provider); if (value) JS_FreeCString(ctx, value); return JS_NewInt32(ctx, -1); }
-    char *env_file = channel_get_config(g_ctx, "env_file");
-    const char *ef = (env_file && env_file[0]) ? env_file : "/etc/cclaw/env";
-    int rc = admin_set_key(ef, provider, value);
-    free(env_file);
+    int rc = admin_set_key(g_ctx->db, provider, value);
     JS_FreeCString(ctx, provider);
     JS_FreeCString(ctx, value);
     return JS_NewInt32(ctx, rc);

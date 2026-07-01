@@ -11,12 +11,17 @@
 #include "agent_config.h"
 
 #define DB_PATH "/tmp/test_admin_api.db"
-#define ENV_PATH "/tmp/test_admin_api_env"
+
+static const uint8_t TEST_KEY[32] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32
+};
 
 static sqlite3 *setup_db(void) {
     unlink(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
+    db_set_secret_key(TEST_KEY);
     return db;
 }
 
@@ -28,58 +33,37 @@ static void test_key_env_name(void) {
     printf("  PASS: test_key_env_name\n");
 }
 
-static void test_write_env_key(void) {
-    unlink(ENV_PATH);
-    assert(admin_write_env_key(ENV_PATH, "FOO", "bar") == 0);
-
-    FILE *f = fopen(ENV_PATH, "r");
-    assert(f);
-    char buf[256];
-    assert(fgets(buf, sizeof(buf), f));
-    assert(strstr(buf, "FOO=bar") != NULL);
-    fclose(f);
-
-    /* Replace existing */
-    assert(admin_write_env_key(ENV_PATH, "FOO", "baz") == 0);
-    f = fopen(ENV_PATH, "r");
-    assert(f);
-    assert(fgets(buf, sizeof(buf), f));
-    assert(strstr(buf, "FOO=baz") != NULL);
-    /* No second FOO line */
-    assert(fgets(buf, sizeof(buf), f) == NULL || strstr(buf, "FOO=") == NULL);
-    fclose(f);
-
-    unlink(ENV_PATH);
-    printf("  PASS: test_write_env_key\n");
-}
-
 static void test_set_key_known_provider(void) {
-    unlink(ENV_PATH);
-    assert(admin_set_key(ENV_PATH, "openrouter", "sk-test-123") == 0);
+    sqlite3 *db = setup_db();
+    assert(admin_set_key(db, "openrouter", "sk-test-123") == 0);
 
-    FILE *f = fopen(ENV_PATH, "r");
-    assert(f);
-    char buf[256];
-    assert(fgets(buf, sizeof(buf), f));
-    assert(strstr(buf, "OPENROUTER_API_KEY=sk-test-123") != NULL);
-    fclose(f);
+    /* Stored encrypted under the canonical env-var name */
+    char *val = db_kv_get_secret(db, "OPENROUTER_API_KEY");
+    assert(val && strcmp(val, "sk-test-123") == 0);
+    free(val);
+    char *raw = db_kv_get(db, "OPENROUTER_API_KEY");
+    assert(raw && strncmp(raw, "enc:", 4) == 0);
+    free(raw);
 
-    unlink(ENV_PATH);
+    db_close(db);
+    unlink(DB_PATH);
     printf("  PASS: test_set_key_known_provider\n");
 }
 
 static void test_set_key_custom(void) {
-    unlink(ENV_PATH);
-    assert(admin_set_key(ENV_PATH, "custom", "MY_VAR=secret") == 0);
+    sqlite3 *db = setup_db();
+    assert(admin_set_key(db, "custom", "MY_VAR=secret") == 0);
 
-    FILE *f = fopen(ENV_PATH, "r");
-    assert(f);
-    char buf[256];
-    assert(fgets(buf, sizeof(buf), f));
-    assert(strstr(buf, "MY_VAR=secret") != NULL);
-    fclose(f);
+    char *val = db_kv_get_secret(db, "MY_VAR");
+    assert(val && strcmp(val, "secret") == 0);
+    free(val);
 
-    unlink(ENV_PATH);
+    /* Malformed custom values rejected */
+    assert(admin_set_key(db, "custom", "no-equals") == -1);
+    assert(admin_set_key(db, "custom", "=leading-eq") == -1);
+
+    db_close(db);
+    unlink(DB_PATH);
     printf("  PASS: test_set_key_custom\n");
 }
 
@@ -197,7 +181,6 @@ static void test_list_providers(void) {
 int main(void) {
     printf("test_admin_api:\n");
     test_key_env_name();
-    test_write_env_key();
     test_set_key_known_provider();
     test_set_key_custom();
     test_set_model_primary();

@@ -225,8 +225,13 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         route_prov.model = m->model;
         route_prov.context_window = m->context_window;
         route_prov.endpoint_type = m->endpoint_type;
+        /* env → encrypted kv → cfg. Re-reading kv here (not mutating cfg,
+         * which worker threads share) picks up keys set after startup. */
         const char *key = m->api_key_env[0] ? getenv(m->api_key_env) : cfg->provider.api_key;
-        char *key_buf = key ? strdup(key) : strdup("");
+        char *key_buf = (key && key[0]) ? strdup(key)
+                      : m->api_key_env[0] ? db_kv_get_secret(db, m->api_key_env)
+                      : NULL;
+        if (!key_buf) key_buf = strdup("");
         route_prov.api_key = key_buf;
         route_cfg.provider = route_prov;
 

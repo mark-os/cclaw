@@ -1,5 +1,5 @@
 /* T145: admin command tests (migrated to admin_api)
- * V52: key write bypasses DB entirely
+ * admin_set_key stores encrypted in kv, never plaintext
  * Config reload picks up changes */
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
@@ -12,37 +12,43 @@
 #include "db.h"
 #include "test_util.h"
 
-/* V52: admin_write_env_key writes to file, never touches DB */
-static void test_key_bypasses_db(void) {
-    const char *env_path = "/tmp/cclaw_test_admin_env";
+static const uint8_t TEST_KEY[32] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32
+};
+
+/* admin_set_key stores the key encrypted in kv — never plaintext in the DB */
+static void test_key_encrypted_in_kv(void) {
     const char *db_path = "/tmp/cclaw_test_admin.db";
-    unlink(env_path);
     unlink(db_path);
 
     sqlite3 *db = test_db_open(db_path);
     assert(db);
+    db_set_secret_key(TEST_KEY);
 
-    /* Write key to env file */
-    assert(admin_write_env_key(env_path, "OPENROUTER_API_KEY", "sk-secret-123") == 0);
+    /* Known provider maps to its canonical env-var name */
+    assert(admin_set_key(db, "openrouter", "sk-secret-123") == 0);
+    char *val = db_kv_get_secret(db, "OPENROUTER_API_KEY");
+    assert(val && strcmp(val, "sk-secret-123") == 0);
+    free(val);
 
-    /* Verify key is in env file */
-    FILE *f = fopen(env_path, "r");
-    assert(f);
-    char buf[256];
-    assert(fgets(buf, sizeof(buf), f));
-    assert(strstr(buf, "sk-secret-123") != NULL);
-    fclose(f);
+    /* Raw kv value is ciphertext, not the plaintext key */
+    char *raw = db_kv_get(db, "OPENROUTER_API_KEY");
+    assert(raw && strncmp(raw, "enc:", 4) == 0);
+    assert(strstr(raw, "sk-secret-123") == NULL);
+    free(raw);
 
-    /* Verify DB has no trace of the key value */
-    sqlite3_stmt *stmt;
-    const char *sql = "SELECT COUNT(*) FROM entries WHERE content LIKE '%sk-secret-123%';";
-    assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(sqlite3_column_int(stmt, 0) == 0);
-    sqlite3_finalize(stmt);
+    /* Custom provider: VAR_NAME=value form */
+    assert(admin_set_key(db, "custom", "MY_API_KEY=sk-custom-456") == 0);
+    val = db_kv_get_secret(db, "MY_API_KEY");
+    assert(val && strcmp(val, "sk-custom-456") == 0);
+    free(val);
+
+    /* Malformed custom value rejected */
+    assert(admin_set_key(db, "custom", "no-equals-sign") == -1);
+    assert(admin_set_key(db, "unknown-provider", "sk-x") == -1);
 
     db_close(db);
-    unlink(env_path);
     unlink(db_path);
 }
 
@@ -77,8 +83,8 @@ static void test_config_reload(void) {
 }
 
 int main(void) {
-    printf("test_key_bypasses_db...");
-    test_key_bypasses_db();
+    printf("test_key_encrypted_in_kv...");
+    test_key_encrypted_in_kv();
     printf(" OK\n");
 
     printf("test_config_reload...");

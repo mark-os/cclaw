@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "external_content.h"
+#include "unicode_normalize.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -150,7 +151,11 @@ char *sanitize_markers(const char *content, size_t len) {
 }
 
 char *wrap_external_content(const char *content, size_t len, const char *source) {
-    char *sanitized = sanitize_markers(content, len);
+    size_t stripped_len = len;
+    char *stripped = unicode_strip_invisible(content, len, &stripped_len);
+    char *sanitized = sanitize_markers(stripped ? stripped : content,
+                                       stripped ? stripped_len : len);
+    free(stripped);
     if (!sanitized) return NULL;
 
     char boundary[BOUNDARY_ID_BYTES * 2 + 1];

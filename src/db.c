@@ -2,6 +2,7 @@
 #include "db.h"
 #include "cclaw.h"
 #include "secret_scan.h"
+#include "unicode_normalize.h"
 #include "agent_config.h"
 #include "secret.h"
 #include "validate.h"
@@ -1189,17 +1190,29 @@ int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const 
 int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source, const char *payload) {
     if (!payload || !payload[0])
         return inbox_insert(db, session_id, source, payload);
+    /* Strip invisible Unicode BEFORE the secret scan — zero-width chars would
+     * otherwise split a credential across the scanner's pattern window. */
     size_t len = strlen(payload);
+    char *clean = unicode_strip_invisible(payload, len, &len);
+    const char *scanned = clean ? clean : payload;
+    if (!clean) len = strlen(payload);
     ScanFinding f[SCAN_MAX_FINDINGS];
-    int n = secret_scan(payload, len, f, SCAN_MAX_FINDINGS);
-    if (n == 0)
-        return inbox_insert(db, session_id, source, payload);
+    int n = secret_scan(scanned, len, f, SCAN_MAX_FINDINGS);
+    if (n == 0) {
+        int64_t id = inbox_insert(db, session_id, source, scanned);
+        free(clean);
+        return id;
+    }
     /* Findings present — copy and redact */
     size_t cap = len + 1 + (size_t)n * 80;
     char *buf = malloc(cap);
-    if (!buf)
-        return inbox_insert(db, session_id, source, payload);
-    memcpy(buf, payload, len + 1);
+    if (!buf) {
+        int64_t id = inbox_insert(db, session_id, source, scanned);
+        free(clean);
+        return id;
+    }
+    memcpy(buf, scanned, len + 1);
+    free(clean);
     secret_scan_redact(buf, &len, cap);
     int64_t id = inbox_insert(db, session_id, source, buf);
     free(buf);

@@ -3,13 +3,11 @@
 
 #include <stddef.h>
 
-/* Wrap untrusted external content with randomized anti-spoofing boundaries.
- * Sanitizes any spoofed markers (ASCII + Unicode homoglyphs) in content.
- * Returns malloc'd string. Caller frees. */
-char *wrap_external_content(const char *content, size_t len, const char *source);
-
-/* Sanitize spoofed boundary markers in-place (replaces with [[MARKER_SANITIZED]]).
- * Handles ASCII and common Unicode homoglyphs. Returns new malloc'd string. */
+/* Neutralize spoofed <<<UNTRUSTED_EXTERNAL_CONTENT>>> boundary markers
+ * (replaced with [[MARKER_SANITIZED]]). Handles ASCII and common Unicode
+ * homoglyphs. Returns new malloc'd string. Untrusted content is wrapped in
+ * real markers at query time (llm_payload) via the entry's network_hosts tag;
+ * this sanitizer runs at storage time so the wrap can't be broken out of. */
 char *sanitize_markers(const char *content, size_t len);
 
 #endif

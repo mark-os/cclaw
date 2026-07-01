@@ -312,16 +312,15 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
              off, max_chars, total_len, truncated ? " truncated" : "");
     size_t meta_len = strlen(meta);
 
+    /* No storage-time wrapping: the entry is tagged with network_hosts by the
+     * broker frame, sanitized in the parent, and wrapped at query time. */
     char *slice = malloc(meta_len + slice_len + 1);
     if (!slice) { free(text); return strdup("error: out of memory"); }
     memcpy(slice, meta, meta_len);
     memcpy(slice + meta_len, text + off, slice_len);
     slice[meta_len + slice_len] = '\0';
     free(text);
-
-    char *result = wrap_external_content(slice, meta_len + slice_len, "web_fetch");
-    free(slice);
-    return result ? result : strdup("error: out of memory");
+    return slice;
 }
 
 int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx) {

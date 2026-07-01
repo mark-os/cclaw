@@ -31,6 +31,18 @@ static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
 
 /* ── SQL templates ─────────────────────────────────────────────── */
 
+/* Query-time untrusted-content wrap: a tool_result whose entry carries a
+ * network_hosts tag came (at least partly) from the network. Content was
+ * sanitized at storage time (invisible Unicode stripped, marker lookalikes
+ * neutralized), so static boundary markers here cannot be forged from inside. */
+#define SQL_WRAP_TOOL_CONTENT \
+    "CASE WHEN e.network_hosts IS NOT NULL THEN" \
+    "  '<<<UNTRUSTED_EXTERNAL_CONTENT>>>' || char(10) ||" \
+    "  'Contacted hosts: ' || e.network_hosts || char(10) || '---' || char(10) ||" \
+    "  COALESCE(e.content,'') || char(10) ||" \
+    "  '<<<END_UNTRUSTED_EXTERNAL_CONTENT>>>'" \
+    " ELSE COALESCE(e.content,'') END"
+
 static const char SQL_OPENAI_MESSAGES[] =
     "SELECT json_group_array(json(msg) ORDER BY pos) FROM ("
     "  SELECT p.pos,"
@@ -59,7 +71,7 @@ static const char SQL_OPENAI_MESSAGES[] =
     "        END"
     "      WHEN 'tool_result' THEN"
     "        json_object('role','tool','tool_call_id',e.tool_call_id,"
-    "                    'content',COALESCE(e.content,''))"
+    "                    'content'," SQL_WRAP_TOOL_CONTENT ")"
     "      ELSE NULL"
     "    END AS msg"
     "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
@@ -128,7 +140,7 @@ static const char SQL_GEMINI_CONTENTS[] =
     "        json_object('role','user','parts',"
     "          json_array(json_object('functionResponse',"
     "            json_object('name',COALESCE(e.tool_name,e.tool_call_id),"
-    "              'response',json_object('content',COALESCE(e.content,''))))))"
+    "              'response',json_object('content'," SQL_WRAP_TOOL_CONTENT ")))))"
     "      WHEN e.type = 'user_message' THEN"
     "        json_object('role','user','parts',"
     "          json_array(json_object('text',COALESCE(e.content,''))))"

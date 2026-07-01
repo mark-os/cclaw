@@ -229,8 +229,21 @@ static int write_all(int fd, const void *buf, size_t n) {
     return 0;
 }
 
+/* ── fd-3 response framing ──────────────────────────────────────────────
+ * [4-byte meta_len (network order)][hosts JSON][result bytes to EOF].
+ * meta_len=0 (NULL hosts) for non-network tiers and every error path — an
+ * unframed write would be misparsed by the parent's drain loop. */
+static int write_framed(int fd, const char *hosts_json, const char *result) {
+    size_t mlen = hosts_json ? strlen(hosts_json) : 0;
+    unsigned char hdr[4] = { (unsigned char)(mlen >> 24), (unsigned char)(mlen >> 16),
+                             (unsigned char)(mlen >> 8),  (unsigned char)mlen };
+    if (write_all(fd, hdr, 4) != 0) return -1;
+    if (mlen && write_all(fd, hosts_json, mlen) != 0) return -1;
+    return write_all(fd, result, strlen(result));
+}
+
 static void die(const char *msg) {
-    write_all(FD_REQUEST, msg, strlen(msg));
+    write_framed(FD_REQUEST, NULL, msg);
     _exit(1);
 }
 
@@ -520,7 +533,9 @@ static void serve_network_child(const TierDescriptor *desc, ParsedReq *q,
         waitpid(pid, &status, 0);
     }
 
-net_format:
+net_format:;
+    /* Capture the contacted-hosts tag before proxy_stop frees the list. */
+    char *hosts_json = proxy_active ? proxy_hosts_json(&proxy) : NULL;
     if (proxy_active) proxy_stop(&proxy);
     output[out_len] = '\0';
 
@@ -547,7 +562,8 @@ net_format:
         }
     }
 
-    write_all(FD_REQUEST, result, strlen(result));
+    write_framed(FD_REQUEST, hosts_json, result);
+    free(hosts_json);
     free(result);
     _exit(0);
 }
@@ -622,7 +638,7 @@ int run_tool_main(void) {
 
     char *result = desc->run_fn(&q);
     if (!result) result = strdup("");
-    write_all(FD_REQUEST, result, strlen(result));
+    write_framed(FD_REQUEST, NULL, result);  /* file tier: zero-length meta */
     free(result);
     _exit(0);
 }

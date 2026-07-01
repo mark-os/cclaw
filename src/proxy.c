@@ -165,6 +165,25 @@ static void bless_add(ProxyContext *ctx, const char *ip) {
     pthread_mutex_unlock(&ctx->blessed_mu);
 }
 
+/* Remember an allowed target for the entry's network_hosts tag. Dedup'd,
+ * capped at PROXY_CONTACTED_MAX (overflow drops silently — the tag is
+ * provenance metadata, not policy). Called from conn threads. */
+static void record_host(ProxyContext *ctx, const char *host) {
+    if (!host || !host[0]) return;
+    pthread_mutex_lock(&ctx->blessed_mu);
+    for (int i = 0; i < ctx->contacted_count; i++) {
+        if (strcmp(ctx->contacted[i], host) == 0) {
+            pthread_mutex_unlock(&ctx->blessed_mu);
+            return;
+        }
+    }
+    if (ctx->contacted_count < PROXY_CONTACTED_MAX) {
+        char *dup = strdup(host);
+        if (dup) ctx->contacted[ctx->contacted_count++] = dup;
+    }
+    pthread_mutex_unlock(&ctx->blessed_mu);
+}
+
 /* A resolved address is permitted per the egress-filter.md §4 pipeline:
  *   1. Metadata range → exact grant only (CIDR grants cannot reach metadata)
  *   2. Public IP → ALLOW
@@ -471,6 +490,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
         }
         char ip[INET6_ADDRSTRLEN];
         if (resolve_and_bless(ctx, host, ip, sizeof(ip)) == 0) {
+            record_host(ctx, host);
             char resp[INET6_ADDRSTRLEN + 8];
             int n = snprintf(resp, sizeof(resp), "ADDR %s\n", ip);
             write(client_fd, resp, (size_t)n);
@@ -502,9 +522,11 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
          * granted literal IP. A literal IP that is neither (e.g. a raw
          * 1.2.3.4 SSRF attempt) is refused — there is no resolve to bless it. */
         if (bless_contains(ctx, target)) {
+            /* blessed by a prior RESOLVE — the hostname was recorded there */
             dial = target;
         } else if (host_decide(ctx, target)) {
             bless_add(ctx, target);
+            record_host(ctx, target);
             dial = target;
         } else {
             write(client_fd, "DENIED\n", 7);
@@ -527,6 +549,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
             close(client_fd);
             return;
         }
+        record_host(ctx, target);
         dial = resolved;
     }
 
@@ -771,6 +794,8 @@ void proxy_stop(ProxyContext *ctx) {
         free(ctx->sock_path);
         ctx->sock_path = NULL;
     }
+    for (int i = 0; i < ctx->contacted_count; i++) free(ctx->contacted[i]);
+    ctx->contacted_count = 0;
     ctx->hosts = NULL;          /* borrowed — not owned, do not free */
     ctx->host_count = 0;
     free(ctx->host_rules);      /* owned partition array (pointers are borrowed) */
@@ -785,4 +810,42 @@ void proxy_stop(ProxyContext *ctx) {
 
 const char *proxy_sock_path(const ProxyContext *ctx) {
     return ctx->sock_path;
+}
+
+/* Append one JSON-string-escaped byte. Hostnames are plain, but the preamble
+ * is written by the sandboxed child — escape defensively so the output is
+ * always valid JSON. */
+static void hosts_json_escape_ch(char *out, size_t *o, unsigned char c) {
+    if (c == '"' || c == '\\') { out[(*o)++] = '\\'; out[(*o)++] = (char)c; }
+    else if (c < 0x20) *o += (size_t)sprintf(out + *o, "\\u%04x", c);
+    else out[(*o)++] = (char)c;
+}
+
+char *proxy_hosts_json(ProxyContext *ctx) {
+    pthread_mutex_lock(&ctx->blessed_mu);
+    if (ctx->contacted_count == 0) {
+        pthread_mutex_unlock(&ctx->blessed_mu);
+        return NULL;
+    }
+    size_t cap = 3;  /* "[" + "]" + NUL */
+    for (int i = 0; i < ctx->contacted_count; i++)
+        cap += strlen(ctx->contacted[i]) * 6 + 3;  /* worst-case \uXXXX + quotes + comma */
+    char *out = malloc(cap);
+    if (!out) {
+        pthread_mutex_unlock(&ctx->blessed_mu);
+        return NULL;
+    }
+    size_t o = 0;
+    out[o++] = '[';
+    for (int i = 0; i < ctx->contacted_count; i++) {
+        if (i) out[o++] = ',';
+        out[o++] = '"';
+        for (const char *p = ctx->contacted[i]; *p; p++)
+            hosts_json_escape_ch(out, &o, (unsigned char)*p);
+        out[o++] = '"';
+    }
+    out[o++] = ']';
+    out[o] = '\0';
+    pthread_mutex_unlock(&ctx->blessed_mu);
+    return out;
 }

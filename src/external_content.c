@@ -1,17 +1,13 @@
 #define _POSIX_C_SOURCE 200809L
 #include "external_content.h"
-#include "unicode_normalize.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 #define MARKER_NAME "UNTRUSTED_EXTERNAL_CONTENT"
 #define END_MARKER_NAME "END_UNTRUSTED_EXTERNAL_CONTENT"
 #define MARKER_SANITIZED "[[MARKER_SANITIZED]]"
 #define END_MARKER_SANITIZED "[[END_MARKER_SANITIZED]]"
-#define BOUNDARY_ID_BYTES 8
 
 /* ── Growable buffer ─────────────────────────────────────────────── */
 
@@ -28,17 +24,6 @@ static void buf_append(Buf *b, const char *s, size_t n) {
     memcpy(b->data + b->len, s, n);
     b->len += n;
     b->data[b->len] = '\0';
-}
-
-/* ── Random hex boundary ─────────────────────────────────────────── */
-
-static void generate_boundary_id(char out[BOUNDARY_ID_BYTES * 2 + 1]) {
-    unsigned char bytes[BOUNDARY_ID_BYTES];
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd >= 0) { read(fd, bytes, sizeof(bytes)); close(fd); }
-    else memset(bytes, 0x42, sizeof(bytes)); /* fallback */
-    for (int i = 0; i < BOUNDARY_ID_BYTES; i++)
-        sprintf(out + i * 2, "%02x", bytes[i]);
 }
 
 /* ── Unicode homoglyph detection ─────────────────────────────────── */
@@ -150,31 +135,3 @@ char *sanitize_markers(const char *content, size_t len) {
     return out.data;
 }
 
-char *wrap_external_content(const char *content, size_t len, const char *source) {
-    size_t stripped_len = len;
-    char *stripped = unicode_strip_invisible(content, len, &stripped_len);
-    char *sanitized = sanitize_markers(stripped ? stripped : content,
-                                       stripped ? stripped_len : len);
-    free(stripped);
-    if (!sanitized) return NULL;
-
-    char boundary[BOUNDARY_ID_BYTES * 2 + 1];
-    generate_boundary_id(boundary);
-
-    size_t san_len = strlen(sanitized);
-    size_t src_len = strlen(source);
-    /* <<<MARKER id="HEX">>>\nSource: SRC\n---\nCONTENT\n<<<END_MARKER id="HEX">>> */
-    size_t total = 3 + strlen(MARKER_NAME) + 5 + 16 + 4 +
-                   8 + src_len + 5 + san_len + 1 +
-                   3 + strlen(END_MARKER_NAME) + 5 + 16 + 4;
-    char *result = malloc(total + 1);
-    if (!result) { free(sanitized); return NULL; }
-
-    int wrote = snprintf(result, total + 1,
-        "<<<" MARKER_NAME " id=\"%s\">>>\nSource: %s\n---\n%s\n<<<" END_MARKER_NAME " id=\"%s\">>>",
-        boundary, source, sanitized, boundary);
-    result[wrote] = '\0';
-
-    free(sanitized);
-    return result;
-}

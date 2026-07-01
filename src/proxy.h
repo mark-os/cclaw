@@ -27,6 +27,9 @@
  * DNS (no portable getaddrinfo_a on musl/ARMv5TE targets). */
 #define PROXY_MAX_PENDING 128
 
+/* Cap on distinct contacted hosts remembered per call (network_hosts tag). */
+#define PROXY_CONTACTED_MAX 64
+
 /* A resolution-blessed address: an IP that passed the allowlist + SSRF check
  * via a prior RESOLVE, or an explicitly granted literal IP. A numeric CONNECT
  * is permitted only if its address is present here and unexpired — this binds
@@ -57,6 +60,8 @@ typedef struct {
     pthread_mutex_t blessed_mu; /* guards blessed[]/blessed_count/relay_count */
     int conn_active;            /* in-flight conn_threads (guarded by blessed_mu) */
     pthread_cond_t conn_cond;   /* signalled when conn_active reaches 0 */
+    char *contacted[PROXY_CONTACTED_MAX]; /* dedup'd allowed targets (owned) */
+    int contacted_count;                  /* guarded by blessed_mu */
 } ProxyContext;
 
 /* Bind + listen on a per-call UDS at <dir>/.proxy.<pid>.sock (dir = the agent
@@ -82,5 +87,10 @@ void proxy_stop(ProxyContext *ctx);
 /* Get the socket path (for setting CCLAW_PROXY_SOCK in shell children).
  * Returns NULL if proxy not started. */
 const char *proxy_sock_path(const ProxyContext *ctx);
+
+/* JSON array of the hosts this call was allowed to contact (e.g.
+ * ["api.github.com"]), malloc'd; NULL if nothing was contacted. Call before
+ * proxy_stop() — stop frees the collected list. */
+char *proxy_hosts_json(ProxyContext *ctx);
 
 #endif

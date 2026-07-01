@@ -43,6 +43,8 @@
 #include "secret_scan.h"
 #include "tool_policy.h"
 #include "secret_interp.h"
+#include "external_content.h"
+#include "unicode_normalize.h"
 #include "run_tool.h"
 #include "tool_file.h"
 #include "resolve.h"
@@ -79,6 +81,14 @@ typedef struct {
     int result_pipe;        /* read end of pipe for tool output */
     char *outbuf;           /* Accumulator for tool output (grows with realloc) */
     size_t outbuf_len;      /* Bytes currently in outbuf */
+    /* fd-3 frame parse state: [4-byte meta_len (network order)][hosts JSON]
+     * [result to EOF]. The pipe is non-blocking and poll-driven, so header
+     * and meta can arrive fragmented across drains. */
+    size_t frame_hdr_read;      /* bytes of the 4-byte header consumed */
+    unsigned char frame_hdr[4];
+    size_t frame_meta_len;      /* parsed meta length (valid once hdr_read==4) */
+    size_t frame_meta_read;     /* meta bytes consumed so far */
+    char *hosts_json;           /* meta payload; NULL if absent/oversized */
     /* Channel fields */
     char channel_name[64];
     char binary_path[512];
@@ -108,6 +118,8 @@ static void child_remove(ChildProc *c) {
     free(c->outbuf);
     c->outbuf = NULL;
     c->outbuf_len = 0;
+    free(c->hosts_json);
+    c->hosts_json = NULL;
     free(c->tool_args);
     c->tool_args = NULL;
     g_children[idx] = g_children[g_child_count - 1];
@@ -841,8 +853,13 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
 
 /* ── Pipe draining helpers ─────────────────────────────────────── */
 
-/* Drain a tool child's result pipe (nonblocking) into c->outbuf, kept
- * NUL-terminated. Bytes beyond TOOL_MAX_OUTPUT are read and discarded so
+/* Largest hosts-JSON meta accepted from a child; larger metas are drained and
+ * discarded (hosts_json stays NULL) so a misbehaving child can't balloon us. */
+#define FRAME_META_MAX (64 * 1024)
+
+/* Drain a tool child's result pipe (nonblocking): parse the frame header +
+ * hosts meta, then accumulate the result body into c->outbuf, kept
+ * NUL-terminated. Body bytes beyond TOOL_MAX_OUTPUT are read and discarded so
  * the child never blocks on a full pipe. Closes the fd on EOF or error;
  * leaves it open on EAGAIN (more data may come). */
 static void child_drain_pipe(ChildProc *c) {
@@ -851,13 +868,42 @@ static void child_drain_pipe(ChildProc *c) {
     char buf[4096];
     ssize_t n;
     while ((n = read(c->result_pipe, buf, sizeof(buf))) > 0) {
-        size_t to_copy = (size_t)n;
+        size_t off = 0;
+
+        /* Frame header: 4-byte network-order meta length, may arrive split. */
+        while (c->frame_hdr_read < 4 && off < (size_t)n)
+            c->frame_hdr[c->frame_hdr_read++] = (unsigned char)buf[off++];
+        if (c->frame_hdr_read == 4 && c->frame_meta_read == 0 && !c->hosts_json) {
+            c->frame_meta_len = ((size_t)c->frame_hdr[0] << 24) |
+                                ((size_t)c->frame_hdr[1] << 16) |
+                                ((size_t)c->frame_hdr[2] << 8)  |
+                                 (size_t)c->frame_hdr[3];
+            if (c->frame_meta_len > 0 && c->frame_meta_len <= FRAME_META_MAX &&
+                !c->hosts_json)
+                c->hosts_json = calloc(1, c->frame_meta_len + 1);
+        }
+        if (c->frame_hdr_read < 4) continue;
+
+        /* Meta bytes (hosts JSON); oversized meta is consumed but dropped. */
+        while (c->frame_meta_read < c->frame_meta_len && off < (size_t)n) {
+            size_t want = c->frame_meta_len - c->frame_meta_read;
+            size_t avail = (size_t)n - off;
+            size_t take = want < avail ? want : avail;
+            if (c->hosts_json)
+                memcpy(c->hosts_json + c->frame_meta_read, buf + off, take);
+            c->frame_meta_read += take;
+            off += take;
+        }
+        if (off >= (size_t)n) continue;
+
+        /* Result body. */
+        size_t to_copy = (size_t)n - off;
         if (c->outbuf_len + to_copy > TOOL_MAX_OUTPUT)
             to_copy = TOOL_MAX_OUTPUT - c->outbuf_len;
         if (to_copy == 0) continue; /* at cap: keep draining, discard */
         char *tmp = realloc(c->outbuf, c->outbuf_len + to_copy + 1);
         if (!tmp) continue; /* OOM: drop chunk, keep child unblocked */
-        memcpy(tmp + c->outbuf_len, buf, to_copy);
+        memcpy(tmp + c->outbuf_len, buf + off, to_copy);
         c->outbuf = tmp;
         c->outbuf_len += to_copy;
         c->outbuf[c->outbuf_len] = '\0';
@@ -933,9 +979,9 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
         char *const argv[] = {"cclaw", "--run-tool", NULL};
         char *const envp[] = {NULL};
         execve("/proc/self/exe", argv, envp);
-        /* execve failed — write static error to fd 3 and die */
-        const char *err = "error: execve failed";
-        (void)write(FD_REQUEST, err, 20);
+        /* execve failed — write a framed static error (4-byte zero meta_len
+         * header, then the message) to fd 3 and die */
+        (void)write(FD_REQUEST, "\0\0\0\0error: execve failed", 24);
         _exit(127);
     }
 
@@ -1680,6 +1726,24 @@ static void reap_children(void) {
             size_t out_len = output ? strlen(output) : 0;
             if (!output) output = strdup("error: OOM");
 
+            /* Network provenance: a non-empty hosts tag marks the result as
+             * untrusted external content. Sanitize NOW (strip invisible
+             * Unicode, neutralize boundary-marker lookalikes) so the
+             * query-time wrap in llm_payload can't be broken out of. */
+            char *hosts = c->hosts_json;
+            if (hosts && (hosts[0] == '\0' || strcmp(hosts, "[]") == 0))
+                hosts = NULL;
+            if (hosts && c->frame_meta_read == c->frame_meta_len) {
+                size_t slen = out_len;
+                char *st = unicode_strip_invisible(output, slen, &slen);
+                if (st) { free(output); output = st; }
+                char *sn = sanitize_markers(output, slen);
+                if (sn) { free(output); output = sn; }
+                out_len = strlen(output);
+            } else {
+                hosts = NULL;  /* truncated meta: don't trust a partial tag */
+            }
+
             /* Secret postprocess: deinterpolate + scan */
             { char *pp = tool_result_postprocess(output,
                   g_tool_setup ? g_tool_setup->secrets : NULL,
@@ -1703,6 +1767,8 @@ static void reap_children(void) {
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = "", .is_error = is_err};
             int64_t rid = entry_append_with_turn(g_db, session_id, &msg, c->turn_id);
+            if (hosts && rid > 0)
+                db_entry_set_network_hosts(g_db, rid, hosts);
             db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, rid);
             /* §8 observer hook (after execution; side-effect only) */
             if (g_tool_setup)

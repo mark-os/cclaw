@@ -60,17 +60,13 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyStr(ctx, result, "status", JS_NewInt32(ctx, r.status));
 
     if (r.body && sanitize) {
+        /* sanitize=true strips HTML tags only; untrusted-content wrapping
+         * happens at query time via the entry's network_hosts tag. */
         size_t cap = r.body_len + 1;
         char *text = malloc(cap);
         if (text) {
             size_t tlen = html_strip_tags(r.body, text, cap);
-            char *wrapped = wrap_external_content(text, tlen, "http_request");
-            if (wrapped) {
-                JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, wrapped, strlen(wrapped)));
-                free(wrapped);
-            } else {
-                JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, text, tlen));
-            }
+            JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, text, tlen));
             free(text);
         } else {
             JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, r.body, r.body_len));

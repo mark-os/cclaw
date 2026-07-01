@@ -114,7 +114,17 @@ static char *run_tool_request(const char *tool_name, const char *arguments) {
 
     int status;
     waitpid(pid, &status, 0);
-    return buf;
+
+    /* Strip the fd-3 frame: [4-byte meta_len (network order)][meta][result] */
+    if (len < 4) { free(buf); return strdup("error: short frame"); }
+    size_t meta_len = ((size_t)(unsigned char)buf[0] << 24) |
+                      ((size_t)(unsigned char)buf[1] << 16) |
+                      ((size_t)(unsigned char)buf[2] << 8) |
+                       (size_t)(unsigned char)buf[3];
+    if (4 + meta_len > len) { free(buf); return strdup("error: bad frame"); }
+    char *result = strdup(buf + 4 + meta_len);
+    free(buf);
+    return result;
 }
 
 /* Detect namespace availability */

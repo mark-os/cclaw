@@ -362,6 +362,81 @@ static void test_compaction_entry_in_payload(void) {
     printf("  PASS test_compaction_entry_in_payload\n");
 }
 
+/* A tool_result whose entry carries a network_hosts tag is wrapped in
+ * UNTRUSTED_EXTERNAL_CONTENT boundaries at query time; untagged results
+ * pass through bare. Both endpoints. */
+static void test_network_hosts_query_time_wrap(void) {
+    unlink(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+    assert(sid > 0);
+    Message m1 = {.role = ROLE_USER, .content = "fetch something"};
+    entry_append_with_turn(db, sid, &m1, 1);
+    Message asst = {.role = ROLE_ASSISTANT, .content = "fetching"};
+    entry_append_with_turn(db, sid, &asst, 1);
+
+    ToolResult tr1 = {.tool_call_id = "call_net", .content = "external page body"};
+    Message r1 = {.role = ROLE_TOOL, .tool_result = &tr1, .tool_name = "web_fetch"};
+    int64_t rid1 = entry_append_with_turn(db, sid, &r1, 1);
+    assert(rid1 > 0);
+    assert(db_entry_set_network_hosts(db, rid1, "[\"example.com\"]") == 0);
+
+    ToolResult tr2 = {.tool_call_id = "call_local", .content = "local file body"};
+    Message r2 = {.role = ROLE_TOOL, .tool_result = &tr2, .tool_name = "file_read"};
+    int64_t rid2 = entry_append_with_turn(db, sid, &r2, 1);
+    assert(rid2 > 0);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.provider.context_window = 128000;
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+    assert(strstr(payload.body, "<<<UNTRUSTED_EXTERNAL_CONTENT>>>") != NULL);
+    assert(strstr(payload.body, "<<<END_UNTRUSTED_EXTERNAL_CONTENT>>>") != NULL);
+    assert(strstr(payload.body, "Contacted hosts: [\\\"example.com\\\"]") != NULL);
+    assert(strstr(payload.body, "external page body") != NULL);
+    /* the untagged result is NOT wrapped: exactly one wrapped message */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.messages'))"
+        " WHERE json_extract(value,'$.role')='tool'"
+        "   AND json_extract(value,'$.content') LIKE '%UNTRUSTED_EXTERNAL_CONTENT%'",
+        -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
+    sqlite3_prepare_v2(db,
+        "SELECT json_extract(value,'$.content')"
+        " FROM json_each(json_extract(?1,'$.messages'))"
+        " WHERE json_extract(value,'$.tool_call_id')='call_local'",
+        -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "local file body") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    /* Gemini: same wrap inside functionResponse content */
+    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+    assert(strstr(payload.body, "<<<UNTRUSTED_EXTERNAL_CONTENT>>>") != NULL);
+    assert(strstr(payload.body, "external page body") != NULL);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    db_close(db); unlink(DB_PATH);
+    printf("  PASS test_network_hosts_query_time_wrap\n");
+}
+
 int main(void) {
     printf("test_llm_payload:\n");
     test_openai_payload();
@@ -370,6 +445,7 @@ int main(void) {
     test_recall_tail_user_message();
     test_payload_with_tools();
     test_compaction_entry_in_payload();
+    test_network_hosts_query_time_wrap();
     printf("All payload tests passed.\n");
     return 0;
 }

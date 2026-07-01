@@ -239,6 +239,10 @@ void agent_row_free(AgentRow *row);
 int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
                  int64_t requesting_session_id);
 
+/* Tag an entry with the JSON array of network hosts its tool run contacted
+ * (provenance for query-time untrusted-content wrapping). Returns 0 on ok. */
+int db_entry_set_network_hosts(sqlite3 *db, int64_t entry_id, const char *hosts_json);
+
 /* tool_calls status helpers */
 typedef struct {
     char *call_id;

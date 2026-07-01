@@ -1171,6 +1171,18 @@ int session_set_parent_tool_call_id(sqlite3 *db, int64_t session_id, const char 
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+int db_entry_set_network_hosts(sqlite3 *db, int64_t entry_id, const char *hosts_json) {
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db,
+        "UPDATE entries SET network_hosts=? WHERE id=?",
+        -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, hosts_json, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, entry_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
 /* V18: Inbox primitives */
 
 int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const char *payload) {

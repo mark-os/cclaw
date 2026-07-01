@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS entries (
   content_bytes INTEGER,
   tool_call_count INTEGER NOT NULL DEFAULT 0,
   data TEXT,
+  network_hosts TEXT,  -- NULL or JSON array of hosts the tool run contacted
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_entries_session ON entries(session_id, id);

@@ -413,14 +413,18 @@ static void serve_network_child(const TierDescriptor *desc, ParsedReq *q,
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
 
-        SandboxConfig cfg;
-        SandboxMountReq *extra = NULL;
-        size_t n_extra = 0;
-        build_sandbox_cfg(q, desc->skip_pid_ns, psock, &cfg, &extra, &n_extra);
+        /* Host mode (sandbox=0): no namespace, no proxy (proxy_active is
+         * already gated on q->sandbox) — run_fn / exec runs on the bare host. */
+        if (q->sandbox) {
+            SandboxConfig cfg;
+            SandboxMountReq *extra = NULL;
+            size_t n_extra = 0;
+            build_sandbox_cfg(q, desc->skip_pid_ns, psock, &cfg, &extra, &n_extra);
 
-        if (sandbox_child_setup(&cfg) != 0) {
-            fprintf(stderr, "error: namespace sandbox failed\n");
-            _exit(126);
+            if (sandbox_child_setup(&cfg) != 0) {
+                fprintf(stderr, "error: namespace sandbox failed\n");
+                _exit(126);
+            }
         }
 
         if (desc->inner_exec) {
@@ -603,17 +607,18 @@ int run_tool_main(void) {
     /* Non-network tier (file): sandbox THIS process, run the handler in-process. */
     if (!q.workspace) die("error: missing workspace");
 
-    SandboxConfig cfg;
-    SandboxMountReq *extra = NULL;
-    size_t n_extra = 0;
-    /* file tier currently always sandboxes here (host mode falls through to the
-     * legacy fork path in the daemon); net_mode forced to "no network". */
-    q.sandbox = 1;
+    /* net_mode forced to "no network"; host mode (sandbox=0) runs the handler
+     * on the bare host — the app-level workspace clamp still applies. */
     q.net_mode = 1;
-    build_sandbox_cfg(&q, desc->skip_pid_ns, NULL, &cfg, &extra, &n_extra);
+    if (q.sandbox) {
+        SandboxConfig cfg;
+        SandboxMountReq *extra = NULL;
+        size_t n_extra = 0;
+        build_sandbox_cfg(&q, desc->skip_pid_ns, NULL, &cfg, &extra, &n_extra);
 
-    if (sandbox_child_setup(&cfg) != 0)
-        die("error: namespace sandbox setup failed");
+        if (sandbox_child_setup(&cfg) != 0)
+            die("error: namespace sandbox setup failed");
+    }
 
     char *result = desc->run_fn(&q);
     if (!result) result = strdup("");

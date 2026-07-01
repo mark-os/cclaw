@@ -60,7 +60,7 @@ static char *run_tool_request(const char *tool_name, const char *arguments) {
     RunToolReq req = {
         .tier = RUNTOOL_TIER_FILE,
         .tool_name = tool_name, .arguments = arguments,
-        .workspace = workspace,
+        .workspace = workspace, .sandbox = 1,
         .env_mode = 1, .nproc = 64, .as_mb = 512, .cpu_sec = 60,
     };
     char *blob = run_tool_serialize_request(&req, &blob_len);

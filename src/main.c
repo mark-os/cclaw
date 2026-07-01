@@ -1762,12 +1762,17 @@ static void print_usage(void) {
            "options:\n"
            "  -p <prompt>        single-turn: send prompt, print response, exit\n"
            "  -s <id>            session id\n"
-           "  -y                 host mode: no sandbox, all tools and hosts allowed\n"
+           "  -y                 host mode: no kernel sandbox, all hosts allowed\n"
+           "                     (agent tool allowlist still applies; CLI only,\n"
+           "                     ignored by --daemon)\n"
            "  --new              create a new session\n"
            "  --log-level=LEVEL  set log level (error|info|debug|trace)\n"
            "  -v, --debug        debug logging (timing, context stats)\n"
            "  -vv, --trace       trace logging (full req/resp JSON)\n"
-           "  --help             show this help\n");
+           "  --help             show this help\n"
+           "\n"
+           "note: running as root weakens mount-based read-only enforcement\n"
+           "within sandboxed children (namespace root maps to real root).\n");
 }
 
 /* Session picker (preserved from old main.c) */
@@ -2110,8 +2115,9 @@ static int run_cli(char *db_path, const char *prompt,
     setenv("CCLAW_AGENT_NAME", g_agent_name, 1);
     free(agent_sel);
 
-    /* Inject agent config env vars (for forked children) */
-    if (!host_mode) {
+    /* Inject agent config env vars (for forked children). -y skips kernel
+     * isolation only — the agent's tool allowlist still applies. */
+    {
         AgentConfig *ac = agent_config_load_db(g_db, g_agent_name);
         if (ac) {
             if (ac->tool_count > 0) {
@@ -2451,6 +2457,10 @@ int main(int argc, char *argv[]) {
         else if (strncmp(argv[i], "--session-id=", 13) == 0) session_id = atoll(argv[i]+13);
         else { fprintf(stderr, "unknown option: %s\n", argv[i]); return 1; }
     }
+
+    if (host_mode && daemon_mode)
+        fprintf(stderr, "warning: -y is ignored by --daemon; daemon agents "
+                "sandbox per their trust_level\n");
 
     {   const char *v = getenv("CCLAW_LLM_THREADS");
         if (v && atoi(v) > 0) g_llm_threads = atoi(v);

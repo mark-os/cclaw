@@ -275,9 +275,22 @@ int main(void) {
     printf("  PASS: UDS request -> onRequest -> reply + emit + JS auth\n");
 
     kill(pid, SIGTERM);
-    waitpid(pid, NULL, 0);
+    int wstatus = 0;
+    waitpid(pid, &wstatus, 0);
     db_close(db);
     mock_server_stop();
+
+    /* The runner must exit cleanly (0) after SIGTERM — a GC assertion
+     * failure would show as signal 6 (SIGABRT) / exit code 134. */
+    if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
+        if (WIFSIGNALED(wstatus))
+            fprintf(stderr, "  runner killed by signal %d\n", WTERMSIG(wstatus));
+        else
+            fprintf(stderr, "  runner exited with status %d\n", WEXITSTATUS(wstatus));
+        FAIL("channel runner did not exit 0 after SIGTERM");
+    }
+    printf("  PASS: clean shutdown after SIGTERM (exit 0)\n");
+
     unlink(DB_PATH);
     unlink(JS_PATH);
     rmdir("/tmp/test_integ_cr_ext");

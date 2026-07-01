@@ -300,7 +300,8 @@ static void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row) {
     JS_SetPropertyStr(ctx, obj, "payload",
         JS_NewString(ctx, row->payload ? row->payload : ""));
     JS_SetPropertyStr(ctx, global, "__cr_outbox_item", obj);
-    eval_js(ctx, "onOutbox(__cr_outbox_item)", "onOutbox");
+    JSValue ret = eval_js(ctx, "onOutbox(__cr_outbox_item)", "onOutbox");
+    JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, global);
 }
 
@@ -522,6 +523,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
         return 1;
     }
     poll_shape_update(ctx, init_ret);
+    JS_FreeValue(ctx, init_ret);
 
     cclaw_log_write(LOG_NOTICE, "channel_runner: started: channel=%s poll=%s requests=%s",
             channel_name, g_poll.url ? "yes" : "no", uds_fd >= 0 ? "yes" : "no");

@@ -217,11 +217,41 @@ static CURL *g_send_easy;
 static RespBuf g_send_resp;
 static struct curl_slist *g_send_hdrs;
 
+/* Pin channel_runner's outbound HTTP to the channel's own configured
+ * base_url — a channel is semantically "talks to one external service," not
+ * arbitrary web access, so unlike shell/web_fetch/js tools it gets no
+ * allowlist, just this single-endpoint check. Uses curl's own URL parser
+ * (not a hand-rolled host extractor) so the validated host is exactly what
+ * curl will later dial. Exact-host-equality only — no suffix matching. */
+static int url_host_allowed(const char *url) {
+    char *base = channel_get_config(g_ctx, "base_url");
+    if (!base) return 0;  /* fail-closed: no config → no send */
+    CURLU *bu = curl_url(), *tu = curl_url();
+    char *bh = NULL, *th = NULL;
+    int ok = 0;
+    if (bu && tu &&
+        curl_url_set(bu, CURLUPART_URL, base, 0) == CURLUE_OK &&
+        curl_url_set(tu, CURLUPART_URL, url, 0) == CURLUE_OK &&
+        curl_url_get(bu, CURLUPART_HOST, &bh, 0) == CURLUE_OK &&
+        curl_url_get(tu, CURLUPART_HOST, &th, 0) == CURLUE_OK)
+        ok = (strcasecmp(bh, th) == 0);
+    curl_free(bh); curl_free(th);
+    if (bu) curl_url_cleanup(bu);
+    if (tu) curl_url_cleanup(tu);
+    free(base);
+    return ok;
+}
+
 static CURL *make_easy(const char *method, const char *url, const char *body,
                        char **headers, int n_headers, long timeout,
                        RespBuf *resp, struct curl_slist **out_hdrs) {
     CURL *c = curl_easy_init();
     if (!c) return NULL;
+    if (!url_host_allowed(url)) {
+        curl_easy_cleanup(c);
+        cclaw_log_write(LOG_WARNING, "channel_runner: url host mismatch, refusing: %s", url);
+        return NULL;
+    }
     free(resp->data);
     memset(resp, 0, sizeof(*resp));
     curl_easy_setopt(c, CURLOPT_URL, url);
@@ -269,7 +299,15 @@ static void poll_start(void) {
     curl_slist_free_all(g_poll.hdrs); g_poll.hdrs = NULL;
     g_poll.easy = make_easy(g_poll.method, g_poll.url, g_poll.body,
                             NULL, 0, CR_POLL_TIMEOUT, &g_poll.resp, &g_poll.hdrs);
-    if (!g_poll.easy) return;
+    if (!g_poll.easy) {
+        /* Back off like any other poll failure — without this, a poll shape
+         * that ever points off-base-url would hot-loop retrying (and
+         * re-logging the refusal) every cycle forever. */
+        g_poll.errors++;
+        int delay = g_poll.errors < 6 ? (1 << g_poll.errors) : 60;
+        g_poll.next_at = time(NULL) + delay;
+        return;
+    }
     curl_multi_add_handle(g_multi, g_poll.easy);
     g_poll.active = 1;
 }

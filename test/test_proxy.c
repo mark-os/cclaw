@@ -199,9 +199,10 @@ static void test_connect_bad_preamble(void) {
     printf("  PASS: connect bad preamble\n");
 }
 
-static void test_connect_literal_ip_denied(void) {
-    /* A raw literal IP that was never RESOLVE'd and is not explicitly granted
-     * is refused — the anti-SSRF rule for direct numeric connects. */
+static void test_connect_literal_private_ip_denied(void) {
+    /* A raw literal private IP that was never RESOLVE'd and is not explicitly
+     * granted is refused — the anti-SSRF rule for direct numeric connects to
+     * private space. */
     ProxyContext ctx;
     int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
@@ -209,7 +210,7 @@ static void test_connect_literal_ip_denied(void) {
     int fd = uds_connect(proxy_sock_path(&ctx));
     assert(fd >= 0);
 
-    const char *req = "1.2.3.4:80\n";
+    const char *req = "10.9.9.9:80\n";
     write(fd, req, strlen(req));
 
     char resp[128];
@@ -219,7 +220,37 @@ static void test_connect_literal_ip_denied(void) {
     close(fd);
 
     proxy_stop(&ctx);
-    printf("  PASS: connect literal IP denied (unblessed)\n");
+    printf("  PASS: connect literal private IP denied (unblessed)\n");
+}
+
+static void test_connect_literal_public_ip_allowed(void) {
+    /* A raw literal public IP is now judged the same way as a resolved public
+     * IP (addr_permitted parity, host_decide) — it's admitted without needing
+     * an explicit grant. Exercised via RESOLVE rather than a numeric CONNECT:
+     * both preambles route through the same host_decide() gate, but RESOLVE
+     * on a numeric literal never leaves the process (getaddrinfo of a literal
+     * is a pure parse, see test_resolve_blessed) whereas CONNECT would hand
+     * the (unreachable, real) address to dial_ip()'s untimed connect() —
+     * proxy_stop() waits for that thread to finish, so a real dial here could
+     * block the test for minutes. Same policy code path, no real-network risk. */
+    ProxyContext ctx;
+    int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
+    assert(rc == 0);
+
+    int fd = uds_connect(proxy_sock_path(&ctx));
+    assert(fd >= 0);
+
+    const char *req = "RESOLVE 1.2.3.4\n";
+    write(fd, req, strlen(req));
+
+    char resp[128];
+    int n = read_line(fd, resp, sizeof(resp));
+    assert(n > 0);
+    assert(strncmp(resp, "ADDR 1.2.3.4", 12) == 0);
+    close(fd);
+
+    proxy_stop(&ctx);
+    printf("  PASS: literal public IP allowed past allowlist (host_decide parity)\n");
 }
 
 /* A throwaway loopback listener that accepts and holds connections open, so the
@@ -298,6 +329,53 @@ static void test_relay_cap(void) {
     printf("  PASS: relay cap enforced (refuse past PROXY_MAX_RELAYS)\n");
 }
 
+static void test_pending_cap(void) {
+    /* Occupy PROXY_MAX_PENDING conn_active slots by opening connections that
+     * never send a preamble line — each conn_thread blocks in
+     * proxy_read_line() before ever reaching host_decide/dial_ip, exactly
+     * like a hostname whose DNS never responds. The next connection must be
+     * refused cleanly (accept-then-close, no response line) without wedging
+     * the broker; releasing a few slots lets the broker admit fresh work. */
+    ProxyContext ctx;
+    assert(proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT) == 0);
+
+    int pending[PROXY_MAX_PENDING];
+    for (int i = 0; i < PROXY_MAX_PENDING; i++) {
+        int fd = uds_connect(proxy_sock_path(&ctx));
+        assert(fd >= 0);
+        pending[i] = fd;  /* held open, no preamble written */
+    }
+    /* Give the accept loop a moment to drain its backlog and register all
+     * conn_active slots before probing the cap. */
+    nanosleep(&(struct timespec){.tv_nsec = 200000000}, NULL);
+
+    /* One past the cap: silently dropped at the TCP/UDS level — accepted
+     * then immediately closed, no DENIED/ERROR line to read. */
+    int over = uds_connect(proxy_sock_path(&ctx));
+    assert(over >= 0);
+    char buf[8];
+    ssize_t n = read(over, buf, sizeof(buf));
+    assert(n == 0);
+    close(over);
+
+    /* Free some slots and confirm the broker still serves normally. */
+    for (int i = 0; i < 10; i++) close(pending[i]);
+    nanosleep(&(struct timespec){.tv_nsec = 200000000}, NULL);
+
+    int again = uds_connect(proxy_sock_path(&ctx));
+    assert(again >= 0);
+    const char *req = "badpreamble\n";
+    write(again, req, strlen(req));
+    char resp[64];
+    assert(read_line(again, resp, sizeof(resp)) > 0);
+    assert(strncmp(resp, "ERROR", 5) == 0);
+    close(again);
+
+    for (int i = 10; i < PROXY_MAX_PENDING; i++) close(pending[i]);
+    proxy_stop(&ctx);
+    printf("  PASS: pending cap enforced (refuse past PROXY_MAX_PENDING)\n");
+}
+
 int main(void) {
     alarm(10);
     setup_tmpdir();
@@ -308,9 +386,11 @@ int main(void) {
     test_resolve_denied();
     test_resolve_private_rejected();
     test_connect_denied();
-    test_connect_literal_ip_denied();
+    test_connect_literal_private_ip_denied();
+    test_connect_literal_public_ip_allowed();
     test_connect_bad_preamble();
     test_relay_cap();
+    test_pending_cap();
 
     cleanup_tmpdir();
     printf("All proxy tests passed.\n");

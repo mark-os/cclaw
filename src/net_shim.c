@@ -65,7 +65,10 @@ static int uds_connect(const char *path) {
     return fd;
 }
 
-/* Bidirectional byte splice until either side closes. No interpretation. */
+/* Bidirectional byte splice until either side closes. No interpretation.
+ * proxy.c's relay() is a near-identical loop — deliberately NOT shared; see
+ * this file's header comment for why net_shim must stay a separate,
+ * policy-free translation unit. */
 static void splice_both(int c, int u) {
     struct pollfd fds[2] = { {c, POLLIN, 0}, {u, POLLIN, 0} };
     char buf[RELAY_BUF];

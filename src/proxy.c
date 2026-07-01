@@ -47,10 +47,12 @@ static int in_metadata_range(int family, const unsigned char *addr) {
 }
 
 /* Check if host is allowed via the partitioned rules: hostname rules go through
- * host_match (exact + suffix), numeric IPs go through cidr_match (containment).
- * Default-deny — empty/NULL rules deny everything.
- * For numeric IPs in the metadata range, the carve-out applies: only an exact
- * literal grant (/32 or /128) authorizes access — a covering CIDR does not. */
+ * host_match (exact + suffix), numeric IPs are judged by the same three-step
+ * pipeline as addr_permitted (resolve path) — metadata carve-out, then
+ * public-IP-allow, then private-IP-requires-grant. Default-deny — empty/NULL
+ * rules deny everything. Keeping this in parity with addr_permitted matters:
+ * a literal public IP is exactly as trustworthy as the same IP reached via
+ * DNS, since resolution already allows it unconditionally. */
 static int ip_to_bin(const char *ip, int *fam, unsigned char *buf16);
 static int host_decide(const ProxyContext *ctx, const char *host) {
     /* Try hostname rules (exact/suffix match) */
@@ -64,6 +66,9 @@ static int host_decide(const ProxyContext *ctx, const char *host) {
          * See egress-filter.md §4. */
         if (in_metadata_range(fam, bin))
             return granted_exact(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin);
+        /* Public IPs are always permitted, mirroring addr_permitted. */
+        if (!http_is_private_ip(host)) return 1;
+        /* Private IP: allowed only if covered by a granted CIDR. */
         if (cidr_match(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin)) return 1;
     }
     return 0;
@@ -260,7 +265,12 @@ static void relay_release(ProxyContext *ctx) {
     pthread_mutex_unlock(&ctx->blessed_mu);
 }
 
-/* Relay data bidirectionally between two fds until one closes. */
+/* Relay data bidirectionally between two fds until one closes.
+ * net_shim.c's splice_both() is a near-identical loop — deliberately NOT
+ * shared. net_shim is a separate translation unit specifically so it links
+ * no policy/resolver/secret/DB symbols (see its file header); merging this
+ * into a shared helper module risks that isolation growing over time. Leave
+ * the duplication. */
 static void relay(int fd1, int fd2) {
     struct pollfd fds[2];
     fds[0].fd = fd1;
@@ -303,6 +313,143 @@ static int proxy_read_line(int fd, char *buf, int max) {
     }
     buf[pos] = '\0';
     return pos;
+}
+
+/* sni_check()'s bounded ClientHello walk — result codes. */
+#define SNI_PARSE_INCOMPLETE (-1) /* need more peeked bytes */
+#define SNI_PARSE_FAIL_OPEN  0    /* not TLS / not ClientHello / no SNI ext */
+#define SNI_PARSE_FOUND      1    /* sni_out filled */
+
+/* Hand-rolled, bounded walk of a single-record TLS ClientHello looking for
+ * the server_name (SNI) extension. `have` bytes have been peeked so far (may
+ * grow across calls as more of the record arrives). Every length read is
+ * checked against both `have` (what's actually been peeked) and `end` (the
+ * handshake body's own declared length) before being dereferenced or used to
+ * skip ahead — a malformed/adversarial length can't walk past either bound.
+ * Multi-record ClientHellos (split across TLS records) are not supported —
+ * treated as SNI_PARSE_FAIL_OPEN once inconsistent with the single-record
+ * assumption, which only narrows an already-passing hostname grant. */
+static int parse_client_hello_sni(const unsigned char *buf, size_t have,
+                                  char *sni_out, size_t sni_cap) {
+    if (have < 5) return SNI_PARSE_INCOMPLETE;
+    if (buf[0] != 0x16) return SNI_PARSE_FAIL_OPEN;        /* not a handshake record */
+    if (buf[1] != 0x03) return SNI_PARSE_FAIL_OPEN;        /* not TLS 1.x */
+
+    if (have < 9) return SNI_PARSE_INCOMPLETE;
+    if (buf[5] != 0x01) return SNI_PARSE_FAIL_OPEN;        /* not a ClientHello */
+    size_t hs_len = ((size_t)buf[6] << 16) | ((size_t)buf[7] << 8) | buf[8];
+    size_t end = 9 + hs_len;                                /* end of handshake body */
+
+    size_t pos = 9;
+#define SNI_NEED(n) \
+    do { \
+        if (pos + (n) > end) return SNI_PARSE_FAIL_OPEN; \
+        if (pos + (n) > have) return SNI_PARSE_INCOMPLETE; \
+    } while (0)
+
+    SNI_NEED(2); pos += 2;                                  /* client_version */
+    SNI_NEED(32); pos += 32;                                /* random */
+
+    SNI_NEED(1);
+    size_t session_id_len = buf[pos]; pos += 1;
+    SNI_NEED(session_id_len); pos += session_id_len;
+
+    SNI_NEED(2);
+    size_t cipher_len = ((size_t)buf[pos] << 8) | buf[pos + 1]; pos += 2;
+    SNI_NEED(cipher_len); pos += cipher_len;
+
+    SNI_NEED(1);
+    size_t comp_len = buf[pos]; pos += 1;
+    SNI_NEED(comp_len); pos += comp_len;
+
+    if (pos >= end) return SNI_PARSE_FAIL_OPEN;             /* no extensions block */
+
+    SNI_NEED(2);
+    size_t ext_total = ((size_t)buf[pos] << 8) | buf[pos + 1]; pos += 2;
+    size_t ext_end = pos + ext_total;
+    if (ext_end > end) return SNI_PARSE_FAIL_OPEN;
+
+    while (pos < ext_end) {
+        SNI_NEED(4);
+        unsigned ext_type = ((unsigned)buf[pos] << 8) | buf[pos + 1];
+        size_t ext_len = ((size_t)buf[pos + 2] << 8) | buf[pos + 3];
+        pos += 4;
+        SNI_NEED(ext_len);
+
+        if (ext_type == 0x0000) {                           /* server_name */
+            size_t sp = pos;
+            size_t sp_end = sp + ext_len;
+            if (sp + 2 > sp_end) return SNI_PARSE_FAIL_OPEN;
+            size_t list_len = ((size_t)buf[sp] << 8) | buf[sp + 1];
+            sp += 2;
+            if (sp + list_len > sp_end) return SNI_PARSE_FAIL_OPEN;
+            if (sp + 3 > sp_end) return SNI_PARSE_FAIL_OPEN;
+            unsigned name_type = buf[sp];
+            size_t name_len = ((size_t)buf[sp + 1] << 8) | buf[sp + 2];
+            sp += 3;
+            if (sp + name_len > sp_end) return SNI_PARSE_FAIL_OPEN;
+            if (name_type != 0 || name_len == 0 || name_len >= sni_cap)
+                return SNI_PARSE_FAIL_OPEN;
+            memcpy(sni_out, buf + sp, name_len);
+            sni_out[name_len] = '\0';
+            return SNI_PARSE_FOUND;
+        }
+        pos += ext_len;
+    }
+#undef SNI_NEED
+    return SNI_PARSE_FAIL_OPEN;                             /* no SNI extension present */
+}
+
+#define SNI_PEEK_MAX 2048
+#define SNI_PEEK_BUDGET_MS 2000
+
+/* Peek (never consume — relay() still needs to see these bytes) at the start
+ * of the client's byte stream, looking for a TLS ClientHello's SNI hostname.
+ * Only called for connections authorized via a hostname rule (Q6 gate): once
+ * an allowlisted hostname blesses an IP, a second CONNECT to that same IP is
+ * otherwise admitted regardless of what vhost it actually targets — on
+ * shared-IP CDN hosting this reaches unauthorized tenants sharing the IP.
+ * Fail-open (return 1) when no SNI is found or the bytes aren't parseable as
+ * a single-record ClientHello within the peek budget — a hostname grant
+ * doesn't imply the protocol is HTTPS, so this only narrows an
+ * already-passing grant, never blocks something that worked before. When SNI
+ * *is* parsed, checked against the full granted host-rule set (not just the
+ * specific rule that authorized this connection) — mirrors how
+ * bless_contains() already works at the IP level. */
+static int sni_check(const ProxyContext *ctx, int client_fd) {
+    unsigned char buf[SNI_PEEK_MAX];
+    size_t have = 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long deadline_ms = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L + SNI_PEEK_BUDGET_MS;
+
+    char sni[256];
+    for (;;) {
+        ssize_t n = recv(client_fd, buf, sizeof(buf), MSG_PEEK);
+        if (n > 0) have = (size_t)n;
+
+        int rc = parse_client_hello_sni(buf, have, sni, sizeof(sni));
+        if (rc == SNI_PARSE_FOUND)
+            return host_match(ctx->host_rules, ctx->host_rule_count, sni);
+        if (rc == SNI_PARSE_FAIL_OPEN)
+            return 1;
+
+        /* SNI_PARSE_INCOMPLETE: wait for more bytes, bounded by the budget. */
+        if (have >= sizeof(buf)) return 1;   /* full budget peeked, still incomplete */
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        long now_ms = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+        long remaining = deadline_ms - now_ms;
+        if (remaining <= 0) return 1;
+
+        /* poll() returns immediately if the already-peeked bytes are still
+         * unread (level-triggered), so this doesn't block waiting for new
+         * data specifically — it's a scheduling slice. The top-of-loop
+         * deadline check is what actually bounds total wall-clock spent
+         * here when a truncated ClientHello never grows. */
+        struct pollfd pfd = { .fd = client_fd, .events = POLLIN };
+        int slice = remaining < 20 ? (int)remaining : 20;
+        poll(&pfd, 1, slice);
+    }
 }
 
 /* Handle a single client connection from a shell child. One unified policy
@@ -349,6 +496,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     const char *dial;
     int fam;
     unsigned char bin[16];
+    int via_hostname = 0;
     if (ip_to_bin(target, &fam, bin) == 0) {
         /* Numeric target: must be blessed by a prior RESOLVE, or an explicitly
          * granted literal IP. A literal IP that is neither (e.g. a raw
@@ -364,12 +512,16 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
             return;
         }
     } else {
-        /* Hostname target: allowlist, then resolve + SSRF-filter + bless. */
+        /* Hostname target: allowlist, then resolve + SSRF-filter + bless.
+         * ip_to_bin() failing above means only host_match (via host_decide)
+         * can have authorized this branch — CIDR/exact-grant checks are
+         * unreachable for non-numeric input. */
         if (!host_decide(ctx, target)) {
             write(client_fd, "DENIED\n", 7);
             close(client_fd);
             return;
         }
+        via_hostname = 1;
         if (resolve_and_bless(ctx, target, resolved, sizeof(resolved)) != 0) {
             write(client_fd, "ERROR resolve\n", 14);
             close(client_fd);
@@ -394,6 +546,19 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     }
 
     write(client_fd, "OK\n", 3);
+
+    /* Shared-IP CDN check (Q6): a hostname-rule-authorized connection is only
+     * as trustworthy as the SNI it actually presents once the IP is shared
+     * across unrelated vhosts. Fail-open when unparseable/absent — this is a
+     * narrowing of an already-passing grant, not a new way to block traffic
+     * that worked before (a hostname grant doesn't imply HTTPS). */
+    if (via_hostname && !sni_check(ctx, client_fd)) {
+        close(remote_fd);
+        close(client_fd);
+        relay_release(ctx);
+        return;
+    }
+
     relay(client_fd, remote_fd);
     close(remote_fd);
     close(client_fd);
@@ -431,15 +596,32 @@ static void *proxy_loop(void *arg) {
         int client = accept(ctx->listen_fd, NULL, NULL);
         if (client < 0) continue;
 
-        /* Spawn per-connection thread (detached) */
-        struct conn_args *ca = malloc(sizeof(*ca));
-        if (!ca) { close(client); continue; }
-        ca->ctx = ctx;
-        ca->fd = client;
-
+        /* Cap total in-flight conn_threads (resolving + relaying) — bounds a
+         * hostname whose DNS never responds from piling up unbounded blocked
+         * threads. There is no thread yet to write a DENIED response, so this
+         * is a silent TCP-level drop, not a proxy-protocol refusal. */
         pthread_mutex_lock(&ctx->blessed_mu);
+        if (ctx->conn_active >= PROXY_MAX_PENDING) {
+            pthread_mutex_unlock(&ctx->blessed_mu);
+            close(client);
+            continue;
+        }
         ctx->conn_active++;
         pthread_mutex_unlock(&ctx->blessed_mu);
+
+        /* Spawn per-connection thread (detached) */
+        struct conn_args *ca = malloc(sizeof(*ca));
+        if (!ca) {
+            close(client);
+            pthread_mutex_lock(&ctx->blessed_mu);
+            ctx->conn_active--;
+            if (ctx->conn_active == 0)
+                pthread_cond_broadcast(&ctx->conn_cond);
+            pthread_mutex_unlock(&ctx->blessed_mu);
+            continue;
+        }
+        ca->ctx = ctx;
+        ca->fd = client;
 
         pthread_t t;
         pthread_attr_t attr;

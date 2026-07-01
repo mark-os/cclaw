@@ -132,14 +132,20 @@ Ordered from most to least critical:
 |---|-------|-------|------------------|---------------------|
 | 1 | `setrlimit` | Agent + children | Yes | No |
 | 2 | Namespace sandbox | Shell/qjs children | Yes | No (separate process) |
-| 3 | Credential proxy | Shell children network | Yes (iptables) | No (separate netns) |
-| 4 | `http_check_policy()` | Agent outbound HTTP | No (app-level) | Only via code bug |
-| 5 | Env stripping (V47) | Shell children | No (app-level) | Only via code bug |
-| 6 | `prctl(PR_SET_PDEATHSIG)` | Orphan cleanup | Yes | No |
+| 3 | Credential proxy (`proxy.c` `decide()`) | Shell/web/js children network | Yes (netns) | No (separate netns) |
+| 4 | Env stripping (V47) | Shell children | No (app-level) | Only via code bug |
+| 5 | `prctl(PR_SET_PDEATHSIG)` | Orphan cleanup | Yes | No |
 
 Layers 1–3 are hard boundaries (kernel-enforced, separate address space).
-Layers 4–5 are soft boundaries (correct code required).
-Layer 6 is bonus hardening (unavailable on some targets).
+Layer 4 is a soft boundary (correct code required).
+Layer 5 is bonus hardening (unavailable on some targets).
+
+(The former layer 4 here was `http_check_policy()` — a pre-flight URL check
+for `web_fetch`. It's been removed: `web_fetch`/`js_eval` now run inside the
+same sandboxed-proxy model as `shell_exec`, so egress for all three tools is
+decided by layer 3's `decide()` on every hop, including redirects, which a
+single pre-flight check could never see. See `shell-networking.md` and
+`egress-filter.md` §8.)
 
 ## Sub-Agent Privilege Reduction (V123)
 

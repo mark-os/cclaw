@@ -21,6 +21,12 @@
  * broker's setrlimit fd cap. */
 #define PROXY_MAX_RELAYS 64
 
+/* Cap on total in-flight conn_threads (resolving + relaying), independent of
+ * PROXY_MAX_RELAYS which only bounds post-resolve relays. Bounds the blast
+ * radius of a hostname whose DNS never responds — cheaper than adding async
+ * DNS (no portable getaddrinfo_a on musl/ARMv5TE targets). */
+#define PROXY_MAX_PENDING 128
+
 /* A resolution-blessed address: an IP that passed the allowlist + SSRF check
  * via a prior RESOLVE, or an explicitly granted literal IP. A numeric CONNECT
  * is permitted only if its address is present here and unexpired — this binds

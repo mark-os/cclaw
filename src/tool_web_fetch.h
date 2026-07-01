@@ -2,7 +2,6 @@
 #define CCLAW_TOOL_WEB_FETCH_H
 
 #include "tools.h"
-#include "http_policy.h"
 #include "sandbox.h"
 
 /* Sandbox-profile context for web_fetch (SBX_WEB tier). Mirrors the shell/file

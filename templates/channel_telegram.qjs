@@ -81,13 +81,19 @@ function processUpdates(body) {
 
     for (var i = 0; i < data.result.length; i++) {
         var update = data.result[i];
-        if (update.update_id >= offset) offset = update.update_id + 1;
 
-        if (update.message) processMessage(update.message, update.update_id);
+        var ok = true;
+        if (update.message) ok = processMessage(update.message, update.update_id);
         if (update.callback_query) processCallback(update.callback_query);
+
+        if (!ok) {
+            channel.log("emit failed for update " + update.update_id + ", halting batch");
+            break;
+        }
+        if (update.update_id >= offset) offset = update.update_id + 1;
     }
 
-    // Persist offset
+    // Persist offset only for successfully processed updates
     if (offset > 0) channel.setConfig("tg_offset", "" + offset);
 }
 
@@ -117,22 +123,22 @@ function onOutbox(item) {
 function processMessage(msg, updateId) {
     var chat = msg.chat;
     var text = msg.text;
-    if (!chat || !text) return;
+    if (!chat || !text) return true;
 
     var chatId = "" + chat.id;
 
     // Check for pending dialog reply
     if (dialogs[chatId]) {
         handleDialogReply(chatId, text, msg.message_id);
-        return;
+        return true;
     }
 
     // Admin commands
     if (text.indexOf("/key") === 0 || text.indexOf("/config") === 0 ||
         text.indexOf("/whitelist") === 0) {
-        if (!channel.admin.isAdmin(chatId)) return;
+        if (!channel.admin.isAdmin(chatId)) return true;
         dispatchAdminCommand(chatId, text);
-        return;
+        return true;
     }
 
     // Regular message → emit to daemon
@@ -141,7 +147,7 @@ function processMessage(msg, updateId) {
         text: text,
         from: msg.from ? msg.from.first_name || "" : ""
     });
-    channel.emit("message", payload, "tg_" + updateId);
+    return channel.emit("message", payload, "tg_" + updateId) === 0;
 }
 
 function processCallback(cbq) {

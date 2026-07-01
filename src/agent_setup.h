@@ -13,7 +13,6 @@
 #include "tool_extension.h"
 #include "tool_cron.h"
 #include "tool_web_fetch.h"
-#include "http_policy.h"
 #include "proxy.h"
 #include "extension.h"
 #include "config.h"
@@ -30,7 +29,6 @@ typedef struct {
     /* Contexts that tools reference (must stay alive across the turn loop) */
     FileReadCtx file_read_ctx;
     JsEvalCtx js_eval_ctx;
-    HttpPolicy web_policy;
     WebFetchCtx web_ctx;
     ToolMemoryCtx mem_ctx;
     /* Daemon-mode only contexts */

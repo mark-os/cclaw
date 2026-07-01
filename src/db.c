@@ -116,7 +116,12 @@ int process_gc_dead(sqlite3 *db, int ttl_sec) {
         const char *id = (const char *)sqlite3_column_text(sel, 0);
         int pid = sqlite3_column_int(sel, 1);
         if (pid > 0 && kill(pid, 0) == -1 && errno == ESRCH) {
-            if (n >= cap) { cap = cap ? cap * 2 : 8; dead = realloc(dead, (size_t)cap * sizeof(*dead)); }
+            if (n >= cap) {
+                cap = cap ? cap * 2 : 8;
+                char **tmp = realloc(dead, (size_t)cap * sizeof(*dead));
+                if (!tmp) { for (int i = 0; i < n; i++) free(dead[i]); free(dead); sqlite3_finalize(sel); return -1; }
+                dead = tmp;
+            }
             dead[n++] = strdup(id ? id : "");
         }
     }

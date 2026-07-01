@@ -320,7 +320,7 @@ void qjs_register_channel_host_functions(JSContext *ctx) {
     JS_SetPropertyStr(ctx, admin, "listProviders", JS_NewCFunction(ctx, js_admin_list_providers, "listProviders", 0));
     JS_SetPropertyStr(ctx, admin, "listAgents", JS_NewCFunction(ctx, js_admin_list_agents, "listAgents", 0));
     JS_SetPropertyStr(ctx, admin, "isAdmin", JS_NewCFunction(ctx, js_admin_is_admin, "isAdmin", 1));
-    JS_SetPropertyStr(ctx, global, "admin", admin);
+    JS_SetPropertyStr(ctx, ch, "admin", admin);
 
     /* Date.now() — already available via JS_AddIntrinsicDate in full context */
     JS_FreeValue(ctx, global);

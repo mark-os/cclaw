@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,10 +16,18 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+/* Private wrapper to tag shim-allocated addrinfo without repurposing ai_canonname */
+#define CCLAW_ADDRINFO_MAGIC 0x63637277u  /* "ccrw" */
+struct tagged_addrinfo {
+    unsigned magic;
+    struct addrinfo ai;
+};
+
 /* Real libc functions resolved via dlsym */
 static int (*real_connect)(int, const struct sockaddr *, socklen_t);
 static int (*real_getaddrinfo)(const char *, const char *,
                                const struct addrinfo *, struct addrinfo **);
+static void (*real_freeaddrinfo)(struct addrinfo *);
 
 static const char *proxy_sock_path;
 
@@ -26,6 +35,7 @@ __attribute__((constructor))
 static void preload_init(void) {
     real_connect = dlsym(RTLD_NEXT, "connect");
     real_getaddrinfo = dlsym(RTLD_NEXT, "getaddrinfo");
+    real_freeaddrinfo = dlsym(RTLD_NEXT, "freeaddrinfo");
     proxy_sock_path = getenv("CCLAW_PROXY_SOCK");
 }
 
@@ -215,15 +225,16 @@ int getaddrinfo(const char *node, const char *service,
         sa4->sin_family = AF_INET;
         sa4->sin_port = htons(port);
 
-        struct addrinfo *ai = calloc(1, sizeof(*ai));
-        if (!ai) { free(sa4); return EAI_MEMORY; }
-        ai->ai_family = AF_INET;
-        ai->ai_socktype = SOCK_STREAM;
-        ai->ai_protocol = 0;
-        ai->ai_addrlen = sizeof(*sa4);
-        ai->ai_addr = (struct sockaddr *)sa4;
-        ai->ai_next = NULL;
-        *res = ai;
+        struct tagged_addrinfo *t = calloc(1, sizeof(*t));
+        if (!t) { free(sa4); return EAI_MEMORY; }
+        t->magic = CCLAW_ADDRINFO_MAGIC;
+        t->ai.ai_family = AF_INET;
+        t->ai.ai_socktype = SOCK_STREAM;
+        t->ai.ai_protocol = 0;
+        t->ai.ai_addrlen = sizeof(*sa4);
+        t->ai.ai_addr = (struct sockaddr *)sa4;
+        t->ai.ai_next = NULL;
+        *res = &t->ai;
         return 0;
     }
 
@@ -236,15 +247,16 @@ int getaddrinfo(const char *node, const char *service,
         sa6->sin6_family = AF_INET6;
         sa6->sin6_port = htons(port);
 
-        struct addrinfo *ai = calloc(1, sizeof(*ai));
-        if (!ai) { free(sa6); return EAI_MEMORY; }
-        ai->ai_family = AF_INET6;
-        ai->ai_socktype = SOCK_STREAM;
-        ai->ai_protocol = 0;
-        ai->ai_addrlen = sizeof(*sa6);
-        ai->ai_addr = (struct sockaddr *)sa6;
-        ai->ai_next = NULL;
-        *res = ai;
+        struct tagged_addrinfo *t = calloc(1, sizeof(*t));
+        if (!t) { free(sa6); return EAI_MEMORY; }
+        t->magic = CCLAW_ADDRINFO_MAGIC;
+        t->ai.ai_family = AF_INET6;
+        t->ai.ai_socktype = SOCK_STREAM;
+        t->ai.ai_protocol = 0;
+        t->ai.ai_addrlen = sizeof(*sa6);
+        t->ai.ai_addr = (struct sockaddr *)sa6;
+        t->ai.ai_next = NULL;
+        *res = &t->ai;
         return 0;
     }
 
@@ -253,11 +265,19 @@ int getaddrinfo(const char *node, const char *service,
 }
 
 void freeaddrinfo(struct addrinfo *res) {
-    /* Only free our custom-allocated results */
+    if (!res) return;
+    /* Recover wrapper and check magic to determine if shim-allocated */
+    struct tagged_addrinfo *t = (struct tagged_addrinfo *)((char *)res - offsetof(struct tagged_addrinfo, ai));
+    if (t->magic != CCLAW_ADDRINFO_MAGIC) {
+        if (real_freeaddrinfo)
+            real_freeaddrinfo(res);
+        return;
+    }
     while (res) {
         struct addrinfo *next = res->ai_next;
-        free(res->ai_addr);
-        free(res);
+        struct tagged_addrinfo *cur = (struct tagged_addrinfo *)((char *)res - offsetof(struct tagged_addrinfo, ai));
+        free(cur->ai.ai_addr);
+        free(cur);
         res = next;
     }
 }

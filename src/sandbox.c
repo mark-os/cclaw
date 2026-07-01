@@ -569,6 +569,14 @@ void sandbox_policy_from_trust(const char *trust_level, SandboxConfig *cfg) {
     }
 }
 
+/* Delegates trust-level branching to sandbox_policy_from_trust() — the only
+ * duplication here is this manual field-by-field copy from SandboxConfig into
+ * SandboxProfile. The two structs deliberately have different shapes
+ * (SandboxProfile adds read_paths/write_paths; SandboxConfig adds mount/path
+ * fields), so a memcpy shortcut would be fragile — it'd silently break on
+ * field reordering instead of failing to compile. This field list must be
+ * kept in sync with SandboxConfig's policy fields by hand whenever either
+ * struct's policy fields change. */
 void sandbox_profile_from_trust(const char *trust_level, SandboxProfile *p) {
     SandboxConfig c = {0};
     sandbox_policy_from_trust(trust_level, &c);

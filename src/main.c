@@ -1142,7 +1142,12 @@ static void session_sweep_inbox(void) {
     int cap = 0, n = 0;
     int64_t *ids = NULL;
     while (sqlite3_step(st) == SQLITE_ROW) {
-        if (n >= cap) { cap = cap ? cap * 2 : 16; ids = realloc(ids, (size_t)cap * sizeof(*ids)); }
+        if (n >= cap) {
+            cap = cap ? cap * 2 : 16;
+            int64_t *tmp = realloc(ids, (size_t)cap * sizeof(*ids));
+            if (!tmp) { free(ids); sqlite3_finalize(st); return; }
+            ids = tmp;
+        }
         ids[n++] = sqlite3_column_int64(st, 0);
     }
     sqlite3_finalize(st);
@@ -1876,6 +1881,17 @@ static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
         sqlite3_bind_text(ins, 1, tg_dir, -1, SQLITE_STATIC);
         sqlite3_step(ins);
         sqlite3_finalize(ins);
+    }
+
+    /* Seed base_url so channel_runner's url_host_allowed() pin (which fails
+     * closed on missing config) has a source of truth in the DB — the JS
+     * template's hardcoded fallback is belt-and-suspenders, not authoritative. */
+    const char *csql = "INSERT OR IGNORE INTO channel_state(channel_name, key, value)"
+                       " VALUES('telegram', 'base_url', 'https://api.telegram.org');";
+    sqlite3_stmt *cins;
+    if (sqlite3_prepare_v2(db, csql, -1, &cins, NULL) == SQLITE_OK) {
+        sqlite3_step(cins);
+        sqlite3_finalize(cins);
     }
 }
 

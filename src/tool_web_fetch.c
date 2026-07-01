@@ -2,7 +2,6 @@
 #include "tool_web_fetch.h"
 #include "external_content.h"
 #include "http.h"
-#include "http_policy.h"
 #include "tool_parse.h"
 #include <stdlib.h>
 #include <string.h>

@@ -166,6 +166,29 @@ static void test_traversal_escape(void) {
     free(r);
 }
 
+/* 3.2b: absolute path outside the mount set must fail */
+static void test_absolute_escape(void) {
+    if (!ns_available) { printf("  SKIP test_absolute_escape\n"); return; }
+    char *r = run_tool_request("file_read", "{\"path\":\"/root/.bashrc\"}");
+    assert(r);
+    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
+    printf("  PASS test_absolute_escape\n");
+    free(r);
+}
+
+/* 3.2c: write traversal outside the workspace must fail */
+static void test_write_escape(void) {
+    if (!ns_available) { printf("  SKIP test_write_escape\n"); return; }
+    char *r = run_tool_request("file_write",
+        "{\"path\":\"../../etc/cclaw_evil.txt\",\"content\":\"bad\"}");
+    assert(r);
+    /* /etc is read-only in the sandbox; the write must not succeed */
+    assert(strstr(r, "error") != NULL || strstr(r, "cannot") != NULL);
+    assert(access("/etc/cclaw_evil.txt", F_OK) != 0);
+    printf("  PASS test_write_escape\n");
+    free(r);
+}
+
 /* 3.3: /proc absence — /proc must not be accessible */
 static void test_proc_absent(void) {
     if (!ns_available) { printf("  SKIP test_proc_absent\n"); return; }
@@ -193,6 +216,8 @@ int main(void) {
     test_ns_detect();
     test_symlink_escape();
     test_traversal_escape();
+    test_absolute_escape();
+    test_write_escape();
     test_proc_absent();
     cleanup();
     printf("  ALL PASSED\n");

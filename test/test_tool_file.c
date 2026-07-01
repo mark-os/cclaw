@@ -11,8 +11,6 @@ static char tmpdir[256];
 static FileReadCtx file_ctx;
 
 /* Sandboxed context for escape tests — uses forked namespace path */
-static FileReadCtx sandbox_ctx;
-static int ns_available = 1;
 
 static void setup(void) {
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cclaw_test_file_XXXXXX");
@@ -21,11 +19,6 @@ static void setup(void) {
     /* In-process (host) context — for roundtrip tests */
     memset(&file_ctx, 0, sizeof(file_ctx));
     file_ctx.workspace = tmpdir;
-
-    /* Sandboxed context — for escape/isolation tests */
-    memset(&sandbox_ctx, 0, sizeof(sandbox_ctx));
-    sandbox_ctx.workspace = tmpdir;
-    sandbox_ctx.sb.sandbox = 1;
 
     /* Create a test file */
     char path[512];
@@ -52,16 +45,6 @@ static void cleanup(void) {
     system(cmd);
 }
 
-/* Detect if namespaces work */
-static void test_namespace_detect(void) {
-    char *r = tool_file_read_handler("{\"path\":\"hello.txt\"}", (void *)&sandbox_ctx);
-    assert(r != NULL);
-    if (strstr(r, "namespace sandbox unavailable")) {
-        ns_available = 0;
-        printf("  NOTE: namespaces unavailable — escape tests will SKIP\n");
-    }
-    free(r);
-}
 
 static void test_basic_read(void) {
     char args[256];
@@ -83,26 +66,7 @@ static void test_nested_read(void) {
     printf("  PASS test_nested_read\n");
 }
 
-static void test_path_traversal_blocked(void) {
-    if (!ns_available) { printf("  SKIP test_path_traversal_blocked (no userns)\n"); return; }
-    /* Target a path that doesn't exist in the namespace (only workspace + system
-     * dirs are bind-mounted; /home is not) */
-    char *r = tool_file_read_handler("{\"path\":\"../../../home/nonexistent_user/secret\"}", (void *)&sandbox_ctx);
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    free(r);
-    printf("  PASS test_path_traversal_blocked\n");
-}
 
-static void test_absolute_path_outside(void) {
-    if (!ns_available) { printf("  SKIP test_absolute_path_outside (no userns)\n"); return; }
-    /* /root is not bind-mounted in the sandbox — this must fail */
-    char *r = tool_file_read_handler("{\"path\":\"/root/.bashrc\"}", (void *)&sandbox_ctx);
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    free(r);
-    printf("  PASS test_absolute_path_outside\n");
-}
 
 static void test_missing_file(void) {
     char *r = tool_file_read_handler("{\"path\":\"nonexistent.txt\"}", (void *)&file_ctx);
@@ -174,25 +138,7 @@ static void test_write_nested(void) {
     printf("  PASS test_write_nested\n");
 }
 
-static void test_write_traversal_blocked(void) {
-    if (!ns_available) { printf("  SKIP test_write_traversal_blocked (no userns)\n"); return; }
-    /* /etc is ro in the sandbox — writing there must fail */
-    char *r = tool_file_write_handler("{\"path\":\"../../etc/evil.txt\",\"content\":\"bad\"}", (void *)&sandbox_ctx);
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    free(r);
-    printf("  PASS test_write_traversal_blocked\n");
-}
 
-static void test_write_absolute_outside(void) {
-    if (!ns_available) { printf("  SKIP test_write_absolute_outside (no userns)\n"); return; }
-    /* /etc is ro bind-mount — cannot write there */
-    char *r = tool_file_write_handler("{\"path\":\"/etc/evil.txt\",\"content\":\"bad\"}", (void *)&sandbox_ctx);
-    assert(r != NULL);
-    assert(strstr(r, "error") != NULL || strstr(r, "cannot open") != NULL);
-    free(r);
-    printf("  PASS test_write_absolute_outside\n");
-}
 
 static void test_write_missing_content(void) {
     char *r = tool_file_write_handler("{\"path\":\"foo.txt\"}", (void *)&file_ctx);
@@ -231,18 +177,6 @@ static void test_list_default_path(void) {
     printf("  PASS test_list_default_path\n");
 }
 
-static void test_list_outside_blocked(void) {
-    if (!ns_available) { printf("  SKIP test_list_outside_blocked (no userns)\n"); return; }
-    char *r = tool_file_list_handler("{\"path\":\"/etc\"}", (void *)&sandbox_ctx);
-    assert(r != NULL);
-    /* In the sandbox, /etc is ro-mounted — listing might succeed (it's a valid
-     * system dir in the namespace). The key security property is that the agent
-     * cannot WRITE outside workspace nor read files outside the bind-mounts.
-     * We accept either: the listing shows limited sys files, or an error. */
-    (void)r;
-    free(r);
-    printf("  PASS test_list_outside_blocked (sandbox confines access)\n");
-}
 
 static void test_find_recursive(void) {
     char *r = tool_file_find_handler("{\"pattern\":\"*.txt\"}", (void *)&file_ctx);
@@ -391,24 +325,18 @@ static void test_grep_no_match(void) {
 int main(void) {
     printf("test_tool_file:\n");
     setup();
-    test_namespace_detect();
     test_basic_read();
     test_nested_read();
-    test_path_traversal_blocked();
-    test_absolute_path_outside();
     test_missing_file();
     test_invalid_json();
     test_register();
     test_write_new_file();
     test_write_overwrite();
     test_write_nested();
-    test_write_traversal_blocked();
-    test_write_absolute_outside();
     test_write_missing_content();
     test_write_register();
     test_list_basic();
     test_list_default_path();
-    test_list_outside_blocked();
     test_find_recursive();
     test_find_globstar_path();
     test_find_no_match();

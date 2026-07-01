@@ -20,118 +20,15 @@
 #define FIND_DEFAULT_LIMIT 1000
 #define FIND_MAX_DEPTH 32
 
-/* ── Forked sandbox runner ────────────────────────────────────────────── */
+/* ── Sandbox dispatch ─────────────────────────────────────────────────── */
 
-/* Run handler in a forked child under the kernel sandbox. If sandbox==0
- * (host trust or no workspace), run in-process directly. */
+/* Run the handler in-process. Kernel isolation is the broker's job: the
+ * --run-tool child enters the namespace (run_tool_main) before dispatching
+ * here with sb.sandbox=0, so this wrapper never sets up a sandbox itself.
+ * It stays as the single seam through which all six file tools route. */
 char *file_sandbox_run(FileReadCtx *ctx, char *(*handler)(const char *, void *),
                        const char *arguments) {
-    if (!ctx->sb.sandbox || !ctx->workspace) {
-        /* Host mode / unit tests: run in-process */
-        return handler(arguments, ctx);
-    }
-
-    int pipefd[2];
-    if (pipe(pipefd) != 0)
-        return strdup("error: pipe() failed");
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return strdup("error: fork() failed");
-    }
-
-    if (pid == 0) {
-        /* Child */
-        close(pipefd[0]);
-
-        SandboxConfig cfg = {0};
-        cfg.workspace    = ctx->workspace;
-        cfg.cwd_path     = ctx->cwd_path;
-        cfg.db_path      = ctx->db_path;
-        cfg.sandbox      = 1;
-        cfg.workspace_ro = ctx->sb.workspace_ro;
-        cfg.mount_cwd    = ctx->sb.mount_cwd;
-        cfg.env_mode     = ctx->sb.env_mode;
-        cfg.net_mode     = 1;  /* file ops never need network */
-        cfg.proxy_sock   = NULL;
-        cfg.rlimits.nproc   = ctx->sb.rlimits.nproc;
-        cfg.rlimits.as_mb   = ctx->sb.rlimits.as_mb;
-        cfg.rlimits.cpu_sec = ctx->sb.rlimits.cpu_sec;
-
-        /* Layer 2: build extra_mounts from read/write path grants */
-        size_t n_extra = ctx->sb.read_path_count + ctx->sb.write_path_count;
-        if (n_extra > 0) {
-            cfg.extra_mounts = malloc(n_extra * sizeof(*cfg.extra_mounts));
-            if (cfg.extra_mounts) {
-                size_t j = 0;
-                for (size_t i = 0; i < ctx->sb.read_path_count; i++) {
-                    cfg.extra_mounts[j].path = ctx->sb.read_paths[i];
-                    cfg.extra_mounts[j].ro = 1;
-                    j++;
-                }
-                for (size_t i = 0; i < ctx->sb.write_path_count; i++) {
-                    cfg.extra_mounts[j].path = ctx->sb.write_paths[i];
-                    cfg.extra_mounts[j].ro = 0;
-                    j++;
-                }
-                cfg.extra_mount_count = n_extra;
-            }
-        }
-
-        if (sandbox_child_setup(&cfg) != 0) {
-            const char *msg = "error: namespace sandbox unavailable";
-            (void)write(pipefd[1], msg, strlen(msg));
-            _exit(126);
-        }
-
-        char *result = handler(arguments, ctx);
-        if (result) {
-            size_t len = strlen(result);
-            size_t written = 0;
-            while (written < len) {
-                ssize_t n = write(pipefd[1], result + written, len - written);
-                if (n <= 0) break;
-                written += (size_t)n;
-            }
-            free(result);
-        }
-        close(pipefd[1]);
-        _exit(0);
-    }
-
-    /* Parent: read entire pipe into growable buffer */
-    close(pipefd[1]);
-    size_t cap = 4096, len = 0;
-    char *buf = malloc(cap);
-    if (!buf) {
-        close(pipefd[0]);
-        waitpid(pid, NULL, 0);
-        return strdup("error: OOM");
-    }
-    for (;;) {
-        if (len + 4096 > cap) {
-            cap = cap * 2;
-            char *nb = realloc(buf, cap);
-            if (!nb) { free(buf); close(pipefd[0]); waitpid(pid, NULL, 0); return strdup("error: OOM"); }
-            buf = nb;
-        }
-        ssize_t n = read(pipefd[0], buf + len, cap - len);
-        if (n <= 0) break;
-        len += (size_t)n;
-    }
-    close(pipefd[0]);
-
-    int status = 0;
-    waitpid(pid, &status, 0);
-    buf[len] = '\0';
-
-    if (len == 0) {
-        free(buf);
-        return strdup("error: empty response from sandbox child");
-    }
-    return buf;
+    return handler(arguments, ctx);
 }
 
 /* ── Wrappers: dispatch through sandbox runner ────────────────────────── */

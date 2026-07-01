@@ -147,6 +147,15 @@ decided by layer 3's `decide()` on every hop, including redirects, which a
 single pre-flight check could never see. See `shell-networking.md` and
 `egress-filter.md` §8.)
 
+**Don't run cclaw as root.** The namespace sandbox maps the invoking uid to
+root inside the child's user namespace (uid_map `0 <uid> 1`, `sandbox.c`).
+When the invoking uid is already 0, the child holds *real* root over any
+filesystem objects the host uid 0 owns that leak into its mount view, and
+read-only bind remounts lose much of their bite (root can often remount or
+bypass DAC where an unprivileged mapped uid cannot). Layer 2 degrades from a
+hard boundary to a soft one. Run cclaw as an unprivileged user; root is only
+appropriate for throwaway containers/VMs where the whole host is disposable.
+
 ## Sub-Agent Privilege Reduction (V123)
 
 When an agent spawns a sub-agent, privileges can only decrease:
@@ -228,6 +237,8 @@ If CClaw ever becomes multi-user, the trust model changes fundamentally:
 ## Secret Storage
 
 Secrets are stored encrypted in cclaw.db (`kv` table, keys prefixed `secret.`) using ChaCha20-Poly1305 AEAD. The 32-byte encryption key lives in `.cclaw_key` on disk, loaded once at daemon startup via `db_set_secret_key()`, never written to the DB. `db_kv_get_secret()` / `db_kv_set_secret()` are the only entry points; no other code touches the raw ciphertext.
+
+Provider API keys resolve env → encrypted kv: `config_load()` reads the provider's `api_key_env` variable first and falls back to the encrypted kv under the same name (admin `set key` and `configure_provider` write there). cclaw has **no `.env` parser** — a `.env` file is user-managed dev convenience that the user's own shell sources before launching cclaw.
 
 **Key-protection ceiling.** The DB store is encrypted at rest, but the key sits on the *same disk* as the ciphertext. Whole-disk theft yields both → plaintext. So the built-in store protects against *exfiltration of `cclaw.db` alone* (a leaked backup, a mis-scoped file copy) — **not** against full-disk capture or the running host. Closing that gap means deriving the key from a user passphrase (KDF) or binding it to hardware (TPM / Secure Enclave) — which is exactly what a keychain storage provider gets for free (see [Storage providers](#storage-providers)). For a single-user box a chmod-600 key file is a reasonable default; it is not a substitute for a hardware-backed vault, and users who care should use the keychain provider.
 

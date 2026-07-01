@@ -4,8 +4,8 @@
 #include "tools.h"
 #include "sandbox.h"
 
-/* Context for file tools — workspace + shared sandbox profile for forked
- * execution. The profile's workspace_ro doubles as the write-refusal flag. */
+/* Context for file tools — workspace + trust-derived sandbox profile.
+ * The profile's workspace_ro doubles as the write-refusal flag. */
 typedef struct {
     const char *workspace;
     const char *cwd_path;       /* CWD rw mount (CLI mode, NULL in daemon) */
@@ -45,8 +45,8 @@ char *tool_file_edit_handler(const char *arguments, void *user_data);
 int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx);
 char *tool_file_grep_handler(const char *arguments, void *user_data);
 
-/* Run a file handler in a forked sandbox child. Used by the tool dispatch
- * layer. If ctx->sandbox==0, runs handler in-process. Returns heap result. */
+/* Dispatch seam for all six file tools: runs the handler in-process.
+ * Kernel isolation happens in the --run-tool broker child, not here. */
 char *file_sandbox_run(FileReadCtx *ctx, char *(*handler)(const char *, void *),
                        const char *arguments);
 

@@ -41,6 +41,12 @@ static int command_uses_secret_env(const char *command, const char *name) {
     return 0;
 }
 
+/* LEGACY: this handler is registered but never called in production.
+ * dispatch_tool() in main.c checks recipe.vehicle == EXEC_SANDBOX and routes
+ * shell_exec through spawn_run_tool_child() → the --run-tool broker. The
+ * handler is kept only for the test_register assertion; all shell tests now
+ * exercise the --run-tool path. Consider deleting once the registry supports
+ * NULL handlers for EXEC_SANDBOX tools. */
 char *tool_shell_handler(const char *arguments, void *user_data) {
     ShellConfig *sc = (ShellConfig *)user_data;
     int default_timeout = (sc && sc->timeout > 0) ? sc->timeout

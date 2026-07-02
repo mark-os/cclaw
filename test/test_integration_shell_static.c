@@ -1,9 +1,9 @@
 /* test_integration_shell_static.c — Stage 3: static-binary egress via the
  * in-sandbox loopback shim.
  *
- * Drives the whole path: tool_shell_handler stands up the per-call broker, the
- * sandbox brings up lo and forks net_shim, the shim accepts an HTTP CONNECT and
- * forwards host:port to the broker over the same per-call UDS, the broker
+ * Drives the whole path: the --run-tool broker stands up the per-call proxy,
+ * the sandbox brings up lo and forks net_shim, the shim accepts an HTTP CONNECT
+ * and forwards host:port to the broker over the same per-call UDS, the broker
  * (sole policy authority) allowlist-checks + dials a host-loopback mock.
  *
  * We approximate a static binary with `curl --proxytunnel` run with LD_PRELOAD
@@ -15,7 +15,7 @@
  * ns-gated: skips when unprivileged user namespaces are unavailable.
  */
 #define _GNU_SOURCE
-#include "tool_shell.h"
+#include "test_run_tool_shell.h"
 #include <arpa/inet.h>
 #include <assert.h>
 #include <netinet/in.h>
@@ -32,7 +32,7 @@ static char workspace[256];
 static int ns_available = 1;
 
 /* Broker allowlist: the loopback literal, so the broker permits the mock. */
-static char *allow_loopback[] = {"127.0.0.1"};
+static const char *allow_loopback[] = {"127.0.0.1"};
 
 static void setup_workspace(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_static_%d", getpid());
@@ -91,10 +91,7 @@ static void check_prerequisites(void) {
         printf("  SKIP: libcclaw_net.so / net_shim not built\n");
         exit(0);
     }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
-    char *r = tool_shell_handler("{\"command\":\"echo ns_check\"}", &sc);
-    if (r && strstr(r, "namespace sandbox unavailable")) ns_available = 0;
-    free(r);
+    ns_available = run_tool_ns_available(workspace);
 }
 
 /* Allowed host tunnels through the shim and relays the upstream response. */
@@ -114,18 +111,19 @@ static void test_static_tunnel_allowed(void) {
      * $HTTP_PROXY for the proxy address (also proves it was injected). */
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-        "{\"command\":\"unset LD_PRELOAD; export NO_PROXY= no_proxy=; "
-        "curl -s --max-time 5 -x \\\"$HTTP_PROXY\\\" --proxytunnel "
-        "http://127.0.0.1:%u/test\"}", port);
+        "unset LD_PRELOAD; export NO_PROXY= no_proxy=; "
+        "curl -s --max-time 5 -x \"$HTTP_PROXY\" --proxytunnel "
+        "http://127.0.0.1:%u/test", port);
 
-    ShellConfig sc = {
-        .timeout = 15,
-        .workspace = workspace,
-        .allowed_hosts = allow_loopback,
-        .allowed_host_count = 1,
-        .sb.sandbox = 1,
-    };
-    char *result = tool_shell_handler(cmd, &sc);
+    ShellToolReq r = SHELL_REQ_DEFAULTS;
+    r.command = cmd;
+    r.workspace = workspace;
+    r.timeout = 15;
+    r.sandbox = 1;
+    r.host_rules = allow_loopback;
+    r.host_count = 1;
+
+    char *result = run_tool_shell(&r);
     pthread_join(thr, NULL);
     close(listen_fd);
 
@@ -152,18 +150,19 @@ static void test_static_tunnel_denied(void) {
 
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-        "{\"command\":\"unset LD_PRELOAD; export NO_PROXY= no_proxy=; "
-        "curl -s --max-time 5 -x \\\"$HTTP_PROXY\\\" --proxytunnel "
-        "http://denied.test:%u/test\"}", port);
+        "unset LD_PRELOAD; export NO_PROXY= no_proxy=; "
+        "curl -s --max-time 5 -x \"$HTTP_PROXY\" --proxytunnel "
+        "http://denied.test:%u/test", port);
 
-    ShellConfig sc = {
-        .timeout = 15,
-        .workspace = workspace,
-        .allowed_hosts = allow_loopback,  /* only 127.0.0.1 — denied.test is not granted */
-        .allowed_host_count = 1,
-        .sb.sandbox = 1,
-    };
-    char *result = tool_shell_handler(cmd, &sc);
+    ShellToolReq r = SHELL_REQ_DEFAULTS;
+    r.command = cmd;
+    r.workspace = workspace;
+    r.timeout = 15;
+    r.sandbox = 1;
+    r.host_rules = allow_loopback;  /* only 127.0.0.1 — denied.test is not granted */
+    r.host_count = 1;
+
+    char *result = run_tool_shell(&r);
     close(listen_fd);
 
     assert(result != NULL);

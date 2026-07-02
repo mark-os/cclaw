@@ -2,12 +2,12 @@
  * server via HTTP_PROXY → shim → broker, with LD_PRELOAD=libcclaw_net.so still
  * loaded. The target is loopback, so the preload now passes the client→shim hop
  * straight through (P0) rather than hijacking it; curl proxies through the shim,
- * which forwards host:port to the broker. Verifies the response is relayed. */
+ * which forwards host:port to the broker. Verifies the response is relayed.
+ *
+ * Uses the --run-tool broker path (fork+execve) matching production behavior. */
 #define _GNU_SOURCE
-#include "proxy.h"
-#include "tool_shell.h"
+#include "test_run_tool_shell.h"
 #include <arpa/inet.h>
-#include <assert.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
@@ -25,7 +25,7 @@ static int ns_available = 1;
  * the test passes it directly — no grant DB. Grant the loopback literal so the
  * proxy permits the mock server: a private IP is reachable only when explicitly
  * granted as a literal; a hostname resolving to loopback is still rejected. */
-static char *allow_loopback[] = {"127.0.0.1"};
+static const char *allow_loopback[] = {"127.0.0.1"};
 
 static void setup_workspace(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_proxy_integ_%d", getpid());
@@ -99,12 +99,7 @@ static void check_prerequisites(void) {
         exit(0);
     }
 
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
-    char *r = tool_shell_handler("{\"command\":\"echo ns_check\"}", &sc);
-    if (r && strstr(r, "namespace sandbox unavailable")) {
-        ns_available = 0;
-    }
-    free(r);
+    ns_available = run_tool_ns_available(workspace);
 }
 
 /* T215: shell child connects to mock TCP server through proxy */
@@ -134,20 +129,23 @@ static void test_shell_curl_through_proxy(void) {
      * curl reaches the shim, which forwards host:port to the broker. NO_PROXY is
      * cleared so curl proxies the loopback target; --proxytunnel forces CONNECT
      * (the shim is CONNECT-only). */
-    char cmd_json[2048];
-    snprintf(cmd_json, sizeof(cmd_json),
-        "{\"command\":\"export NO_PROXY= no_proxy=; "
-        "curl -s --max-time 5 -x \\\"$HTTP_PROXY\\\" --proxytunnel "
-        "http://127.0.0.1:%u/test\"}", port);
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+        "export NO_PROXY= no_proxy=; "
+        "curl -s --max-time 5 -x \"$HTTP_PROXY\" --proxytunnel "
+        "http://127.0.0.1:%u/test", port);
 
-    ShellConfig sc = {
-        .timeout = 10,
-        .workspace = workspace,
-        .allowed_hosts = allow_loopback,
-        .allowed_host_count = 1,
-        .sb.sandbox = 1,
-    };
-    char *result = tool_shell_handler(cmd_json, &sc);
+    ShellToolReq r = SHELL_REQ_DEFAULTS;
+    r.command = cmd;
+    r.workspace = workspace;
+    r.agent_dir = workspace;
+    r.timeout = 10;
+    r.sandbox = 1;
+    r.net_mode = 0;
+    r.host_rules = allow_loopback;
+    r.host_count = 1;
+
+    char *result = run_tool_shell(&r);
 
     pthread_join(thr, NULL);
     close(listen_fd);
@@ -187,20 +185,23 @@ static void test_proxy_relay_integrity(void) {
     pthread_t thr;
     pthread_create(&thr, NULL, mock_http_thread, &ma);
 
-    char cmd_json[2048];
-    snprintf(cmd_json, sizeof(cmd_json),
-        "{\"command\":\"export NO_PROXY= no_proxy=; "
-        "curl -s --max-time 5 -x \\\"$HTTP_PROXY\\\" --proxytunnel "
-        "http://127.0.0.1:%u/\"}", port);
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+        "export NO_PROXY= no_proxy=; "
+        "curl -s --max-time 5 -x \"$HTTP_PROXY\" --proxytunnel "
+        "http://127.0.0.1:%u/", port);
 
-    ShellConfig sc = {
-        .timeout = 10,
-        .workspace = workspace,
-        .allowed_hosts = allow_loopback,
-        .allowed_host_count = 1,
-        .sb.sandbox = 1,
-    };
-    char *result = tool_shell_handler(cmd_json, &sc);
+    ShellToolReq r = SHELL_REQ_DEFAULTS;
+    r.command = cmd;
+    r.workspace = workspace;
+    r.agent_dir = workspace;
+    r.timeout = 10;
+    r.sandbox = 1;
+    r.net_mode = 0;
+    r.host_rules = allow_loopback;
+    r.host_count = 1;
+
+    char *result = run_tool_shell(&r);
 
     pthread_join(thr, NULL);
     close(listen_fd);
@@ -221,6 +222,7 @@ static void test_proxy_relay_integrity(void) {
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_integration_shell_proxy (T215):\n");
 
     setup_workspace();

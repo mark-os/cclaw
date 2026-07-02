@@ -16,9 +16,12 @@
  * survivor crossed the PID namespace — a real defect to report, not paper over.
  *
  * ns-gated: skips when unprivileged user namespaces are unavailable.
+ *
+ * Uses the --run-tool broker path (fork+execve of the real binary), not the
+ * in-process tool_shell_handler().
  */
 #define _GNU_SOURCE
-#include "tool_shell.h"
+#include "test_run_tool_shell.h"
 #include <assert.h>
 #include <signal.h>
 #include <stdio.h>
@@ -33,7 +36,7 @@ static int ns_available = 1;
 
 /* Allow loopback so the per-call broker + net_shim are stood up (keeps the shim
  * in the process tree, which is part of what we're checking gets reaped). */
-static char *allow_loopback[] = {"127.0.0.1"};
+static const char *host_rules[] = {"127.0.0.1"};
 
 static void setup_workspace(void) {
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_timeout_%d", getpid());
@@ -52,10 +55,11 @@ static void check_prerequisites(void) {
         printf("  SKIP: libcclaw_net.so / net_shim not built\n");
         exit(0);
     }
-    ShellConfig sc = {.timeout = 5, .workspace = workspace, .sb.sandbox = 1};
-    char *r = tool_shell_handler("{\"command\":\"echo ns_check\"}", &sc);
-    if (r && strstr(r, "namespace sandbox unavailable")) ns_available = 0;
-    free(r);
+    if (stat(SHELL_BINARY, &st) != 0) {
+        printf("  SKIP: %s not built\n", SHELL_BINARY);
+        exit(0);
+    }
+    ns_available = run_tool_ns_available(workspace);
 }
 
 static long file_size(const char *path) {
@@ -76,21 +80,17 @@ static void test_timeout_reaps_namespace(void) {
 
     /* Background heartbeat writer + a hung foreground. The writer is a child of
      * PID 1 (the command's /bin/sh) inside the new PID namespace. */
-    const char *cmd =
-        "{\"command\":\"(while :; do echo x >> ./hb; sleep 0.2; done) & "
-        "echo STARTED; sleep 30\"}";
+    ShellToolReq r = SHELL_REQ_DEFAULTS;
+    r.command = "(while :; do echo x >> ./hb; sleep 0.2; done) & "
+                "echo STARTED; sleep 30";
+    r.workspace = workspace;
+    r.timeout = 2;
+    r.host_rules = host_rules;
+    r.host_count = 1;
 
-    ShellConfig sc = {
-        .timeout = 2,
-        .workspace = workspace,
-        .allowed_hosts = allow_loopback,
-        .allowed_host_count = 1,
-        .sb.sandbox = 1,
-    };
-
-    char *result = tool_shell_handler(cmd, &sc);
+    char *result = run_tool_shell(&r);
     assert(result != NULL);
-    /* The handler only returns after kill(-pid)+waitpid, i.e. cleanup is done. */
+    /* The broker only returns after kill(-pid)+waitpid, i.e. cleanup is done. */
     assert(strstr(result, "[timeout") && "command should have timed out");
     assert(strstr(result, "STARTED") && "command should have started");
     free(result);

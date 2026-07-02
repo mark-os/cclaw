@@ -2,6 +2,10 @@ CC      ?= cc
 CFLAGS  := -std=c11 -Wall -Wextra -Werror -Isrc -Ivendor/sqlite3 -Ivendor/civetweb -Ivendor/quickjs -Ivendor/monocypher -Ivendor/jsmn
 LDFLAGS := -lcurl -lm -lpthread -ldl
 
+VERSION_COMMIT := $(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_DATE     := $(shell date -u +%Y-%m-%d)
+CFLAGS += -DVERSION_COMMIT='"$(VERSION_COMMIT)"' -DBUILD_DATE='"$(BUILD_DATE)"'
+
 BUILDDIR := build
 TEMPLATES := $(wildcard templates/*)
 SRC      := $(filter-out src/preload_net.c src/net_shim.c,$(wildcard src/*.c))
@@ -17,7 +21,8 @@ VENDOR_OBJ := $(BUILDDIR)/sqlite3.o $(BUILDDIR)/civetweb.o \
               $(BUILDDIR)/quickjs.o $(BUILDDIR)/qjs_cutils.o \
               $(BUILDDIR)/qjs_dtoa.o $(BUILDDIR)/qjs_libunicode.o \
               $(BUILDDIR)/qjs_libregexp.o \
-              $(BUILDDIR)/monocypher.o
+              $(BUILDDIR)/monocypher.o \
+              $(BUILDDIR)/templates.o
 
 INTEG_SRC := $(wildcard test/test_integration_*.c)
 E2E_SRC   := $(wildcard test/test_e2e_*.c)
@@ -46,8 +51,11 @@ debug: clean
 $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(BUILDDIR)/templates.h: $(TEMPLATES) scripts/gen_templates.sh | $(BUILDDIR)/
-	./scripts/gen_templates.sh $@ templates
+$(BUILDDIR)/templates.h $(BUILDDIR)/templates.c: $(TEMPLATES) scripts/gen_templates.sh | $(BUILDDIR)/
+	./scripts/gen_templates.sh $(BUILDDIR)/templates.h templates
+
+$(BUILDDIR)/templates.o: $(BUILDDIR)/templates.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
+	$(CC) -std=c11 -O2 -I$(BUILDDIR) -c -o $@ $<
 
 $(BUILDDIR)/%.o: src/%.c $(BUILDDIR)/templates.h | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -c -o $@ $<
@@ -187,12 +195,14 @@ test-all: test test-integration check-gen
 
 LIB_OBJ := $(filter-out $(BUILDDIR)/main.o,$(OBJ))
 $(BUILDDIR)/libcclaw.a: $(LIB_OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/
+	rm -f $@
 	$(AR) rcs $@ $^
 
 $(BUILDDIR)/mock_server.o: test/mock_server.c | $(BUILDDIR)/
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(BUILDDIR)/libtest.a: $(BUILDDIR)/mock_server.o
+	rm -f $@
 	$(AR) rcs $@ $^
 
 $(BUILDDIR)/test_%: test/test_%.c $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libtest.a | $(BUILDDIR)/

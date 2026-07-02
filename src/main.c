@@ -2519,6 +2519,10 @@ int main(int argc, char *argv[]) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0) { print_usage(); return 0; }
+        else if (strcmp(argv[i], "--version") == 0) {
+            printf("cclaw %s (%s)\n", VERSION_COMMIT, BUILD_DATE);
+            return 0;
+        }
         else if (strcmp(argv[i], "--daemon") == 0) daemon_mode = 1;
         else if (strcmp(argv[i], "--channel") == 0) { if (++i >= argc) { fprintf(stderr, "--channel requires name\n"); return 1; } channel_mode = argv[i]; }
         else if (strncmp(argv[i], "--log-level=", 12) == 0) { log_level_override = log_level_parse(argv[i]+12); log_level_set = 1; }

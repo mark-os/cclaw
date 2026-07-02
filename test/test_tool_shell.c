@@ -123,7 +123,8 @@ static void test_register(void) {
     assert(rc == 0);
     ToolEntry *e = tools_lookup(&reg, "shell_exec");
     assert(e != NULL);
-    assert(e->handler == tool_shell_handler);
+    assert(e->recipe.vehicle == EXEC_SANDBOX);
+    assert(e->recipe.tier == SBX_SHELL);
     tools_free(&reg);
     printf("  PASS test_register\n");
 }

@@ -20,9 +20,8 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* Load capabilities from grants table */
     agent_caps_load(db, agent_name, &setup->caps);
 
-    /* The shell egress proxy is no longer a process-lifetime singleton here —
-     * each shell_exec stands up its own proxy in the per-call broker (see
-     * tool_shell_handler). The daemon holds no proxy/dial socket. */
+    /* The shell egress proxy is per-call: each shell_exec stands up its own
+     * proxy in the --run-tool broker child. The daemon holds no proxy socket. */
 
     /* V88: Collect secrets from env, clear from process env */
     setup->secrets = shell_secrets_collect(&setup->secret_count);

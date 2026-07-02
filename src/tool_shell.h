@@ -26,14 +26,9 @@ typedef struct {
 } ShellConfig;
 
 /* Register shell_exec tool into registry.
- * workspace: agent workspace path (namespace sandbox restricts fs). */
+ * workspace: agent workspace path (namespace sandbox restricts fs).
+ * Execution is via --run-tool broker (EXEC_SANDBOX); no in-process handler. */
 int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *workspace);
-
-/* Handler: parse JSON args {"command":"...", "timeout":N}, run command,
- * capture stdout+stderr, enforce timeout via process group SIGKILL.
- * Child runs in namespace sandbox (isolated fs + network).
- * Returns heap-allocated result. */
-char *tool_shell_handler(const char *arguments, void *user_data);
 
 /* V88: Collect CCLAW_SECRET_* env vars into array, clear from env.
  * Caller owns returned array (free with shell_secrets_free). */

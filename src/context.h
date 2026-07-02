@@ -13,6 +13,7 @@ typedef struct {
     StopReason stop_reason;
     int token_estimate;     /* chars/4 heuristic from length(data) */
     int tool_call_count;    /* number of tool_calls in assistant msg (0 otherwise) */
+    char include;           /* in the request: past the cut, or pinned (data.pin) */
 } PlanEntry;
 
 /* V41: Result of context_plan() — ordered entry IDs + cut point. */

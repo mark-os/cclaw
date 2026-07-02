@@ -19,8 +19,10 @@ static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
     if (sqlite3_prepare_v2(db, "INSERT INTO _plan(pos,entry_id) VALUES(?,?);",
                            -1, &ins, NULL) != SQLITE_OK)
         return -1;
-    for (int i = plan->cut; i < plan->count; i++) {
-        sqlite3_bind_int(ins, 1, i - plan->cut);
+    int pos = 0;
+    for (int i = 0; i < plan->count; i++) {
+        if (!plan->entries[i].include) continue;  /* cut-excluded, not pinned */
+        sqlite3_bind_int(ins, 1, pos++);
         sqlite3_bind_int64(ins, 2, plan->entries[i].id);
         sqlite3_step(ins);
         sqlite3_reset(ins);
@@ -76,6 +78,12 @@ static const char SQL_OPENAI_MESSAGES[] =
     "    END AS msg"
     "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
     "  WHERE e.type NOT IN ('tool_call','reasoning')"
+    /* Ephemeral hook injects ride at the tail of history (before recall, which
+     * SQL_OPENAI_FULL appends after) — preserves prompt-prefix caching. */
+    "  UNION ALL"
+    "  SELECT 1000000+hd.id AS pos,"
+    "    json_object('role', hd.role, 'content', hd.content) AS msg"
+    "  FROM hook_directives hd WHERE hd.session_id = ?1 AND hd.kind = 'inject'"
     ") sub WHERE msg IS NOT NULL;";
 
 /* launch_agent's description carries a live roster of delegable agents,
@@ -163,6 +171,14 @@ static const char SQL_GEMINI_CONTENTS[] =
     "  WHERE e.type != 'system'"
     "  GROUP BY CASE WHEN e.type IN ('assistant_message','tool_call','reasoning')"
     "    THEN e.turn_id ELSE e.id END"
+    /* Ephemeral hook injects: Gemini has no system role mid-contents, so a
+     * system inject becomes a '[system] '-prefixed user part at history tail. */
+    "  UNION ALL"
+    "  SELECT 1000000+hd.id AS min_pos,"
+    "    json_object('role','user','parts',json_array(json_object('text',"
+    "      CASE WHEN hd.role='system' THEN '[system] ' || hd.content"
+    "           ELSE hd.content END))) AS content_obj"
+    "  FROM hook_directives hd WHERE hd.session_id = ?1 AND hd.kind = 'inject'"
     ") sub WHERE content_obj IS NOT NULL;";
 
 static const char SQL_GEMINI_TOOLS[] =

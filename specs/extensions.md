@@ -178,21 +178,28 @@ by C before execution — never visible to the model or written to the handler.
 ## Hook Handler Contract
 
 A hook handler is a JS file run **in the agent process** in a fresh QuickJS context
-per dispatch (isolation between extensions; no cross-call leakage). The injected
-turn data is the handler's input; its return value (when the event allows) replaces
-or augments that data.
+per dispatch (isolation between extensions; no cross-call leakage). The handler
+receives a small structured `input` object (never the full messages array) and
+returns a JSON object of **commands** that C validates and applies — see
+[specs/hooks.md](hooks.md) for the full command contracts.
 
-| Event | Signature | Can modify | Notes |
-|-------|-----------|-----------|-------|
-| `turnStart` | `fn()` | — | Informational, at turn-loop entry. |
-| `beforeRequest` | `fn(messages) → messages\|void` | messages array | Chained in load order. |
-| `afterResponse` | `fn(response)` | — | Read-only inspect of parsed LLM response. |
-| `beforeToolCall` | `fn({name, args}) → {block, reason}\|void` | args (in place) | First `{block:true}` wins. |
-| `afterToolCall` | `fn({name, args, result}) → {result}\|void` | result replacement | Chained; each sees the previous result. |
-| `turnEnd` | `fn()` | — | Informational, before agent exit. |
+| Event | Signature | Commands honored | Notes |
+|-------|-----------|-----------------|-------|
+| `preAdvance` | `fn(input) → cmds\|void` | `inject` (system/user, ephemeral or persistent, capped), `suppress` (this request only; never the latest user entry), `pin` (survives the context cut), `set_data` (json_patch onto `entries.data`) | Chained in load order; commands accumulate. Pin wins over suppress. |
+| `postAdvance` | `fn(input) → cmds\|void` | `transform_content` (rewrites the assistant entry; first original kept in `data.original_content`), `annotate` (merges into `data`) | Chained; later hooks see the transformed `input.content`. Last transform wins, annotate merges. |
+| `beforeToolCall` | `fn({name, args}) → {deny\|ask, reason}\|void` | restrict-only gate | Most-restrictive across hooks wins; a hook can veto, never authorize. |
+| `afterToolCall` | `fn({name, args, result}) → {result, annotate}\|void` | result replacement + `annotate` | Chained; each sees the previous result. Runs after the secret scanner, before the entry write. |
+| `turnStart` / `turnEnd` | `fn()` | — | Declared, not yet dispatched. |
 
-A hook that throws during dispatch is skipped (logged to stderr); one broken hook
-must not kill the turn.
+Deferred for now: `inject_next` and `notify` (postAdvance commands), and the
+`db.query`/`kv`/`console.log` hook globals — hooks act on their `input` JSON only.
+
+A hook that throws during dispatch is skipped (logged); one broken hook must not
+kill the turn.
+
+Caveat: `suppress` is not sequence-checked — hiding an individual `tool_result`
+entry while its `tool_call` stays in context can produce a provider-invalid
+message sequence. Suppress whole turns, not single tool results.
 
 ## Channel Component
 

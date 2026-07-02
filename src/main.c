@@ -171,6 +171,8 @@ static void set_nonblock(int fd) {
 
 /* ── dispatch_llm_req ────────────────────────────────────────────── */
 
+static AgentSetup *g_tool_setup;  /* Initialized once for tool dispatch */
+
 /* Dispatch LLM request via worker thread pool */
 static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iteration) {
     if (child_has_session(session_id)) return -1;
@@ -199,6 +201,19 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
     if (g_cfg->token_rate_limit > 0 && !rate_limit_check(g_db, NULL)) {
         session_set_state(g_db, session_id, "rate_limited");
         return -1;
+    }
+
+    /* preAdvance hooks: run main-thread after the max-iter and rate-limit
+     * gates (never fire for an unsent request); their commands cross to the
+     * worker's payload build as DB state (hook_directives / entries.data). A
+     * worker-submit failure below leaves directives behind for the retried
+     * request — acceptable, llm_req clears them on every exit. */
+    if (g_tool_setup) {
+        char *cmds = hook_dispatch_pre_advance(&g_tool_setup->ext_ctx, g_db, session_id);
+        if (cmds) {
+            hook_apply_pre_advance(g_db, session_id, cmds);
+            free(cmds);
+        }
     }
 
     session_set_state(g_db, session_id, "llm_running");
@@ -232,8 +247,6 @@ static int tool_needs_interpolation(const char *name) {
            strcmp(name, "web_fetch") == 0 ||
            strcmp(name, "js_eval") == 0;
 }
-
-static AgentSetup *g_tool_setup;  /* Initialized once for tool dispatch */
 
 /* ── CLI terminal output ─────────────────────────────────────────────
  * The CLI runs in the terminal's canonical mode: the kernel echoes input
@@ -471,6 +484,16 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
               g_tool_setup ? g_tool_setup->secret_count : 0);
           if (pp) { free(result); result = pp; } }
 
+        /* afterToolCall hooks: chained result replacement, after the secret
+         * scanner (security boundary stays first), before the entry write so
+         * the replacement is what the context sees. */
+        char *hook_annotate = NULL;
+        if (g_tool_setup) {
+            char *rep = hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx,
+                            g_db, tc->name, tc->arguments, result, &hook_annotate);
+            if (rep) { free(result); result = rep; }
+        }
+
         /* CLI progress */
         if (g_mode == 0) {
             cli_print_tool_call(tc->name, tc->arguments);
@@ -490,10 +513,10 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
                        .tool_name = tc->name, .is_error = is_err};
         int64_t rid = entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
         db_tool_call_complete_with_result(g_db, tc->entry_id, tc->call_id, rid);
-        /* §8 observer hook (after execution; side-effect only) */
-        if (g_tool_setup)
-            hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx, g_db,
-                                            tc->name, tc->arguments, result);
+        if (hook_annotate) {
+            if (rid > 0) hook_entry_data_patch(g_db, rid, hook_annotate);
+            free(hook_annotate);
+        }
         free(stored);
         free(result);
         return 1; /* Handled inline */
@@ -1450,11 +1473,45 @@ static void handle_approval_park(int64_t session_id) {
 
 static void reap_children(void);
 
+/* postAdvance hooks: fire on the worker-completion wake, before run_advance
+ * consumes the llm_running state. The state guard filters compaction
+ * completions riding the same pipe; error entries are skipped (nothing for a
+ * redact/annotate hook to act on, and V28 drops them from context anyway). */
+static void maybe_dispatch_post_advance(int64_t session_id) {
+    if (!g_tool_setup ||
+        g_tool_setup->ext_ctx.hooks[HOOK_POST_ADVANCE].count == 0)
+        return;
+
+    int64_t entry_id = -1;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT e.id FROM entries e"
+            " WHERE e.id = (SELECT MAX(id) FROM entries"
+            "                WHERE session_id=?1 AND type='assistant_message')"
+            "   AND e.stop_reason != 4"  /* STOP_REASON_ERROR */
+            "   AND (SELECT state FROM sessions WHERE id=?1) = 'llm_running';",
+            -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(s, 1, session_id);
+    if (sqlite3_step(s) == SQLITE_ROW)
+        entry_id = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    if (entry_id < 0) return;
+
+    char *cmds = hook_dispatch_post_advance(&g_tool_setup->ext_ctx, g_db,
+                                            session_id, entry_id);
+    if (cmds) {
+        hook_apply_post_advance(g_db, session_id, entry_id, cmds);
+        free(cmds);
+    }
+}
+
 static void event_step_worker(int worker_fd) {
     (void)worker_fd;
     int64_t completed_sid;
     while (llm_worker_read(&completed_sid) == 0) {
         if (completed_sid == -1) continue;
+        maybe_dispatch_post_advance(completed_sid);
         run_advance(completed_sid);
     }
 }
@@ -1689,6 +1746,16 @@ static void reap_children(void) {
                   g_tool_setup ? g_tool_setup->secret_count : 0);
               if (pp) { free(output); output = pp; out_len = strlen(output); } }
 
+            /* afterToolCall hooks: chained result replacement, post-scanner,
+             * pre-write (same contract as the inline dispatch path). */
+            char *hook_annotate = NULL;
+            if (g_tool_setup) {
+                char *rep = hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx,
+                                g_db, c->tool_name, c->tool_args, output,
+                                &hook_annotate);
+                if (rep) { free(output); output = rep; out_len = strlen(output); }
+            }
+
             /* CLI progress */
             if (g_mode == 0) {
                 if (out_len <= 80)
@@ -1709,10 +1776,10 @@ static void reap_children(void) {
             if (hosts && rid > 0)
                 db_entry_set_network_hosts(g_db, rid, hosts);
             db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, rid);
-            /* §8 observer hook (after execution; side-effect only) */
-            if (g_tool_setup)
-                hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx, g_db,
-                                                c->tool_name, c->tool_args, output);
+            if (hook_annotate) {
+                if (rid > 0) hook_entry_data_patch(g_db, rid, hook_annotate);
+                free(hook_annotate);
+            }
             free(stored);
             free(output);
             c->outbuf = NULL;

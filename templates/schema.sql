@@ -306,6 +306,21 @@ CREATE TABLE IF NOT EXISTS hooks (
   PRIMARY KEY (extension_name, event, path)
 );
 
+-- Per-request hook directives: preAdvance commands that must cross the
+-- main-thread → worker-thread boundary as DB state. 'inject' (ephemeral) and
+-- 'suppress' rows live for exactly one LLM request — written at dispatch on
+-- the poll thread, read by the worker's payload build, deleted at llm_req exit.
+CREATE TABLE IF NOT EXISTS hook_directives (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,              -- 'inject' | 'suppress'
+  role TEXT,                       -- inject: 'system' | 'user'
+  content TEXT,                    -- inject payload
+  entry_id INTEGER,                -- suppress target
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_hook_directives_session ON hook_directives(session_id);
+
 -- ═══ Memory ═══
 CREATE TABLE IF NOT EXISTS memory_blocks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

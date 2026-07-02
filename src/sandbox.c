@@ -378,17 +378,31 @@ static void sandbox_scrub_env(int env_mode) {
     }
 }
 
+/* ASan reserves terabytes of virtual address space for shadow memory and its
+ * allocator mmaps freely at runtime — an RLIMIT_AS cap makes the instrumented
+ * process abort with "Failed to mmap". Sanitizer builds are dev-only, so skip
+ * just the AS cap there (nproc/cpu still apply). */
+#if defined(__SANITIZE_ADDRESS__)
+#define CCLAW_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define CCLAW_ASAN 1
+#endif
+#endif
+
 /* Trust-level: apply resource limits before exec */
 static void sandbox_apply_rlimits(const SandboxConfig *cfg) {
     if (cfg->rlimits.nproc > 0) {
         struct rlimit rl = {(rlim_t)cfg->rlimits.nproc, (rlim_t)cfg->rlimits.nproc};
         setrlimit(RLIMIT_NPROC, &rl);
     }
+#ifndef CCLAW_ASAN
     if (cfg->rlimits.as_mb > 0) {
         rlim_t bytes = (rlim_t)cfg->rlimits.as_mb * 1024 * 1024;
         struct rlimit rl = {bytes, bytes};
         setrlimit(RLIMIT_AS, &rl);
     }
+#endif
     if (cfg->rlimits.cpu_sec > 0) {
         struct rlimit rl = {(rlim_t)cfg->rlimits.cpu_sec, (rlim_t)cfg->rlimits.cpu_sec};
         setrlimit(RLIMIT_CPU, &rl);

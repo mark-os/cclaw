@@ -225,6 +225,73 @@ static void test_plan_no_content_access(void) {
     PASS();
 }
 
+/* Hook suppress directive: entry dropped from the plan before budgeting */
+static void test_hook_suppress_excluded(void) {
+    TEST(hook_suppress_excluded);
+    sqlite3 *db = test_db_open(":memory:");
+    if (!db) FAIL("db_open");
+
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    append_msg(db, sid, ROLE_USER, "keep one", STOP_REASON_NONE, NULL, 0);
+    append_msg(db, sid, ROLE_ASSISTANT, "suppress me", STOP_REASON_STOP, NULL, 0);
+    append_msg(db, sid, ROLE_USER, "keep two", STOP_REASON_NONE, NULL, 0);
+
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "INSERT INTO hook_directives(session_id, kind, entry_id)"
+        " SELECT ?1, 'suppress', id FROM entries"
+        " WHERE session_id=?1 AND content='suppress me';", -1, &s, NULL);
+    sqlite3_bind_int64(s, 1, sid);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+
+    Config cfg = {0};
+    cfg.provider.context_window = 128000;
+    ContextPlan plan = {0};
+    if (context_plan(db, sid, &cfg, 0, &plan) != 0) FAIL("context_plan returned error");
+    if (plan.count != 2) FAIL("suppressed entry still in plan");
+    if (plan.entries[0].role != ROLE_USER || plan.entries[1].role != ROLE_USER)
+        FAIL("wrong entries survived");
+
+    context_plan_free(&plan);
+    db_close(db);
+    PASS();
+}
+
+/* Pinned entry (data.pin=1) is included even when the cut would drop it */
+static void test_hook_pin_overrides_cut(void) {
+    TEST(hook_pin_overrides_cut);
+    sqlite3 *db = test_db_open(":memory:");
+    if (!db) FAIL("db_open");
+
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    for (int i = 0; i < 20; i++) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Message number %d with some padding text to use tokens", i);
+        append_msg(db, sid, (i % 2 == 0) ? ROLE_USER : ROLE_ASSISTANT, buf,
+                   (i % 2 == 1) ? STOP_REASON_STOP : STOP_REASON_NONE, NULL, 0);
+    }
+    /* Pin the very first (oldest) entry — guaranteed pre-cut with this budget */
+    sqlite3_exec(db,
+        "UPDATE entries SET data='{\"pin\":true}'"
+        " WHERE id=(SELECT MIN(id) FROM entries);", NULL, NULL, NULL);
+
+    Config cfg = {0};
+    cfg.provider.context_window = 200; /* tiny: forces a cut */
+    ContextPlan plan = {0};
+    if (context_plan(db, sid, &cfg, 0, &plan) != 0) FAIL("context_plan returned error");
+    if (plan.cut <= 0) FAIL("expected a cut");
+    if (!plan.entries[0].include) FAIL("pinned pre-cut entry not included");
+    /* Unpinned pre-cut entries stay excluded; post-cut all included */
+    if (plan.cut > 1 && plan.entries[1].include) FAIL("unpinned pre-cut entry included");
+    for (int i = plan.cut; i < plan.count; i++)
+        if (!plan.entries[i].include) FAIL("post-cut entry not included");
+
+    context_plan_free(&plan);
+    db_close(db);
+    PASS();
+}
+
 int main(void) {
     printf("test_context_plan:\n");
     test_basic_plan();
@@ -232,6 +299,8 @@ int main(void) {
     test_cut_point();
     test_v8_tool_call_group();
     test_plan_no_content_access();
+    test_hook_suppress_excluded();
+    test_hook_pin_overrides_cut();
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

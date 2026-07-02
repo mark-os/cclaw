@@ -5,6 +5,9 @@ LDFLAGS := -lcurl -lm -lpthread -ldl
 VERSION_COMMIT := $(shell git -C $(dir $(firstword $(MAKEFILE_LIST))) rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_DATE     := $(shell date -u +%Y-%m-%d)
 CFLAGS += -DVERSION_COMMIT='"$(VERSION_COMMIT)"' -DBUILD_DATE='"$(BUILD_DATE)"'
+# debug passes its extra flags here — re-passing CFLAGS="$(CFLAGS)" through the
+# recursive $(MAKE) would strip the nested quotes off the -D defines above.
+CFLAGS += $(EXTRA_CFLAGS)
 
 BUILDDIR := build
 TEMPLATES := $(wildcard templates/*)
@@ -45,7 +48,7 @@ all: $(BUILDDIR)/cclaw $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libcclaw_net.so $(BUIL
 # Development build: debug symbols, no optimization, sanitizers (clang preferred for better traces)
 debug: clean
 	$(MAKE) all CC=clang \
-	            CFLAGS="$(CFLAGS) -O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined" \
+	            EXTRA_CFLAGS="-O0 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined" \
 	            LDFLAGS="$(LDFLAGS) -fsanitize=address,undefined"
 
 $(BUILDDIR)/cclaw: $(OBJ) $(VENDOR_OBJ) | $(BUILDDIR)/

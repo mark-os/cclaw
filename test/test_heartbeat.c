@@ -63,7 +63,7 @@ static void test_heartbeat_injects_inbox(void) {
     assert(n == sizeof(signaled_sid));
     assert(signaled_sid == sid);
 
-    free(items);
+    inbox_items_free(items, count);
     wake_close();
     db_close(db);
     printf("  PASS: heartbeat injects into inbox + signals daemon\n");
@@ -96,7 +96,7 @@ static void test_heartbeat_skips_non_idle(void) {
     int count = 0;
     InboxItem *items = inbox_peek(db, sid, 10, &count);
     assert(count == 0);
-    free(items);
+    inbox_items_free(items, count);
 
     wake_close();
     db_close(db);

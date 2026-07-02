@@ -162,6 +162,28 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
     }
     free(raw);
 
+    /* Hook suppress directives (this request only): drop suppressed entries
+     * before budgeting so they don't eat the cut. Pin conflicts were already
+     * resolved at apply time (hook_apply_pre_advance never inserts a suppress
+     * for a pinned entry). */
+    {
+        sqlite3_stmt *ss;
+        if (sqlite3_prepare_v2(db,
+                "SELECT entry_id FROM hook_directives"
+                " WHERE session_id=?1 AND kind='suppress' AND entry_id IS NOT NULL;",
+                -1, &ss, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(ss, 1, session_id);
+            while (sqlite3_step(ss) == SQLITE_ROW) {
+                int64_t sup = sqlite3_column_int64(ss, 0);
+                int w = 0;
+                for (int i = 0; i < fcount; i++)
+                    if (filtered[i].id != sup) filtered[w++] = filtered[i];
+                fcount = w;
+            }
+            sqlite3_finalize(ss);
+        }
+    }
+
     /* V7,V91: compute budget from context_threshold */
     int budget = cfg->max_history_tokens > 0
         ? cfg->max_history_tokens
@@ -174,6 +196,28 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
     if (effective < 256) effective = 256;
 
     int cut = plan_find_cut(filtered, fcount, effective);
+
+    /* Include = past the cut, or pinned (entries.data $.pin=1 — hook `pin`
+     * command). Pinned entries survive the cut but still count nothing toward
+     * it; only the cut boundary honors pin — compaction's keep_from walk
+     * ignores it (known gap, accepted). */
+    for (int i = 0; i < fcount; i++)
+        filtered[i].include = (i >= cut);
+    if (cut > 0) {
+        sqlite3_stmt *ps;
+        if (sqlite3_prepare_v2(db,
+                "SELECT id FROM entries WHERE session_id=?1"
+                " AND json_extract(data,'$.pin')=1;",
+                -1, &ps, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(ps, 1, session_id);
+            while (sqlite3_step(ps) == SQLITE_ROW) {
+                int64_t pid = sqlite3_column_int64(ps, 0);
+                for (int i = 0; i < cut; i++)
+                    if (filtered[i].id == pid) { filtered[i].include = 1; break; }
+            }
+            sqlite3_finalize(ps);
+        }
+    }
 
     out->entries = filtered;
     out->count = fcount;

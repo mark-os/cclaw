@@ -92,8 +92,8 @@ static char *read_file(const char *path, size_t *out_len) {
 
 int hook_event_from_name(const char *name) {
     if (!name) return -1;
-    if (strcmp(name, "beforeRequest") == 0) return HOOK_BEFORE_REQUEST;
-    if (strcmp(name, "afterResponse") == 0) return HOOK_AFTER_RESPONSE;
+    if (strcmp(name, "preAdvance") == 0) return HOOK_PRE_ADVANCE;
+    if (strcmp(name, "postAdvance") == 0) return HOOK_POST_ADVANCE;
     if (strcmp(name, "beforeToolCall") == 0) return HOOK_BEFORE_TOOL_CALL;
     if (strcmp(name, "afterToolCall") == 0) return HOOK_AFTER_TOOL_CALL;
     if (strcmp(name, "turnStart") == 0) return HOOK_TURN_START;

@@ -24,7 +24,7 @@ static void test_agent_list_one(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
-    int rc = db_agent_upsert(db, "default", NULL, NULL, NULL);
+    int rc = db_agent_upsert(db, "default", NULL, NULL);
     assert(rc == 0);
 
     int count = 0;
@@ -43,9 +43,9 @@ static void test_agent_list_multiple_sorted(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
 
-    db_agent_upsert(db, "zebra", NULL, NULL, NULL);
-    db_agent_upsert(db, "alpha", NULL, NULL, NULL);
-    db_agent_upsert(db, "middle", NULL, NULL, NULL);
+    db_agent_upsert(db, "zebra", NULL, NULL);
+    db_agent_upsert(db, "alpha", NULL, NULL);
+    db_agent_upsert(db, "middle", NULL, NULL);
 
     int count = 0;
     char **agents = db_agent_list(db, &count);
@@ -71,7 +71,7 @@ static void test_default_agent_kv(void) {
     char **agents = db_agent_list(db, &count);
     assert(!agents && count == 0);
 
-    db_agent_upsert(db, "default", NULL, NULL, NULL);
+    db_agent_upsert(db, "default", NULL, NULL);
     db_kv_set(db, "default_agent", "default");
 
     char *def = db_kv_get(db, "default_agent");

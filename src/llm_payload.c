@@ -78,10 +78,19 @@ static const char SQL_OPENAI_MESSAGES[] =
     "  WHERE e.type NOT IN ('tool_call','reasoning')"
     ") sub WHERE msg IS NOT NULL;";
 
+/* launch_agent's description carries a live roster of delegable agents,
+ * recomputed every turn — no refresh plumbing when agents come and go. */
+#define SQL_TOOL_DESCRIPTION \
+    "CASE WHEN t.name='launch_agent' THEN" \
+    "  t.description || COALESCE(' Available agents: ' ||" \
+    "    (SELECT group_concat(a.name || ' — ' ||" \
+    "       COALESCE(a.description,'(no description)'), '; ') FROM agents a), '')" \
+    " ELSE t.description END"
+
 static const char SQL_OPENAI_TOOLS[] =
     "SELECT json_group_array("
     "  json_object('type','function','function',"
-    "    json_object('name',t.name,'description',t.description,"
+    "    json_object('name',t.name,'description'," SQL_TOOL_DESCRIPTION ","
     "      'parameters',json(t.parameters_json)))"
     ") FROM tools t"
     " WHERE t.enabled=1"
@@ -159,7 +168,7 @@ static const char SQL_GEMINI_CONTENTS[] =
 static const char SQL_GEMINI_TOOLS[] =
     "SELECT json_array(json_object('functionDeclarations',"
     "  (SELECT json_group_array("
-    "    json_object('name',t.name,'description',t.description,"
+    "    json_object('name',t.name,'description'," SQL_TOOL_DESCRIPTION ","
     "      'parameters',json(t.parameters_json))"
     "  ) FROM tools t"
     "   WHERE t.enabled=1"
@@ -190,6 +199,41 @@ static const char SQL_GEMINI_FULL[] =
     "));";
 
 /* ── Helpers ───────────────────────────────────────────────────── */
+
+/* Session's spawn-frozen tool filter, or NULL when unrestricted. */
+static char *session_tool_filter(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "SELECT tool_filter FROM sessions WHERE id=?",
+                           -1, &s, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(s, 1, session_id);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t) r = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return r;
+}
+
+/* Intersection of two JSON string arrays, as a JSON array ("[]" if none). */
+static char *json_intersect(sqlite3 *db, const char *a, const char *b) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_group_array(value) FROM json_each(?1)"
+            " WHERE value IN (SELECT value FROM json_each(?2))",
+            -1, &s, NULL) != SQLITE_OK)
+        return strdup("[]");
+    sqlite3_bind_text(s, 1, a, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, b, -1, SQLITE_STATIC);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t) r = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return r ? r : strdup("[]");
+}
 
 static char *query_text(sqlite3 *db, const char *sql, int64_t session_id) {
     sqlite3_stmt *s;
@@ -233,15 +277,23 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     int gemini = (cfg->provider.endpoint_type == ENDPOINT_GEMINI);
     if (populate_plan(db, plan) != 0) return -1;
 
-    /* Get agent allowed_tools filter */
+    /* Effective tool scope = grants ∩ session tool_filter. An agent with an
+     * empty grant set keeps "[]" (sees zero tools) — only a NULL agent is
+     * unrestricted. The filter (frozen at spawn for workers) can only narrow;
+     * dispatch_tool re-checks both, so this is advisory for the model. */
     char *agent_name = session_get_agent_name(db, session_id);
-    char *allowed_tools = NULL;
-    if (agent_name) {
-        allowed_tools = grants_json(db, agent_name, "tool");
-        if (allowed_tools && strcmp(allowed_tools, "[]") == 0) {
+    char *allowed_tools = agent_name ? grants_json(db, agent_name, "tool") : NULL;
+    char *tool_filter = session_tool_filter(db, session_id);
+    if (tool_filter) {
+        if (allowed_tools) {
+            char *isect = json_intersect(db, allowed_tools, tool_filter);
             free(allowed_tools);
-            allowed_tools = NULL;
+            allowed_tools = isect;
+            free(tool_filter);
+        } else {
+            allowed_tools = tool_filter;
         }
+        tool_filter = NULL;
     }
 
     if (gemini) {

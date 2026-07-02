@@ -27,7 +27,7 @@ static sqlite3 *fresh_db(void) {
 
 static void test_create_and_pending(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
     assert(sid > 0);
 
@@ -52,7 +52,7 @@ static void test_create_and_pending(void) {
 
 static void test_approve(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_2", "request_config",
@@ -76,7 +76,7 @@ static void test_approve(void) {
 
 static void test_deny(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_3", "request_config",
@@ -100,7 +100,7 @@ static void test_deny(void) {
 
 static void test_approve_and_deny_states(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id1 = approval_create(db, sid, "c1", "request_config",
@@ -138,7 +138,7 @@ static void test_approve_and_deny_states(void) {
 
 static void test_session_set_state_awaiting_approval(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     /* idle → llm_running (legal) */
@@ -172,7 +172,7 @@ static void test_session_set_state_awaiting_approval(void) {
 static void test_fail_closed_denied(void) {
     /* A denied approval leaves no pending row — fail-closed behavior */
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_x", "request_config",
@@ -199,7 +199,7 @@ static void test_fail_closed_denied(void) {
 
 static void test_grant_caps_load(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
 
     /* Grant with no expiry — should load */
     agent_config_grant(db, "bot", "host", "tmp.io", 0);
@@ -223,7 +223,7 @@ static void test_grant_caps_load(void) {
 
 static void test_approval_list_expired(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     /* Create a pending approval (expires_at is in the future by default) */
@@ -264,7 +264,7 @@ static void test_approval_list_expired(void) {
 
 static void test_tool_mode(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
 
     /* Ungranted tool → silent (run-freely default). */
     assert(agent_tool_mode(db, "bot", "email_send") == TOOL_MODE_SILENT);
@@ -299,7 +299,7 @@ static void test_tool_mode(void) {
 
 static void test_get_for_tool_call(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     /* No approval yet for this call. */
@@ -332,7 +332,7 @@ static void test_get_for_tool_call(void) {
 
 static void test_consume(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_c", "email_send", "email_send",

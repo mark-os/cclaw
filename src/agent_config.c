@@ -572,7 +572,7 @@ char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db) {
 
     /* Seed DB row only — no directory creation */
     if (db) {
-        db_agent_upsert(db, name, NULL, NULL, NULL);
+        db_agent_upsert(db, name, NULL, NULL);
     }
 
     return strdup(name);

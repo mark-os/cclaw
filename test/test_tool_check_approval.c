@@ -27,7 +27,7 @@ static sqlite3 *fresh_db(void) {
 
 static void test_status_lists_approvals(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
     assert(sid > 0);
 
@@ -49,7 +49,7 @@ static void test_status_lists_approvals(void) {
 
 static void test_rerequest_decided(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
     assert(sid > 0);
 
@@ -82,7 +82,7 @@ static void test_rerequest_decided(void) {
 
 static void test_rerequest_pending_errors(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
     assert(sid > 0);
 
@@ -105,7 +105,7 @@ static void test_rerequest_pending_errors(void) {
 
 static void test_rerequest_bogus_id_errors(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
     int64_t sid = session_create(db, "test", "bot", -1, 0);
     assert(sid > 0);
 

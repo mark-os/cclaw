@@ -195,7 +195,8 @@ int tool_configure_channel_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
 
 static const char *CREATE_AGENT_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
-    "\"name\":{\"type\":\"string\",\"description\":\"Agent name (alphanumeric + hyphens)\"},"
+    "\"name\":{\"type\":\"string\",\"description\":\"Agent name (PascalCase: uppercase first letter, letters and digits only)\"},"
+    "\"description\":{\"type\":\"string\",\"description\":\"One-line hint: when to delegate to this agent\"},"
     "\"model\":{\"type\":\"string\",\"description\":\"LLM model identifier\"},"
     "\"system_prompt\":{\"type\":\"string\",\"description\":\"Agent persona/system prompt\"},"
     "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Tool whitelist (omit for defaults)\"},"

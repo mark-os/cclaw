@@ -40,7 +40,7 @@ static void force_state(sqlite3 *db, int64_t sid, const char *state, const char 
 
 static void test_recovery_scoping(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
 
     /* Instance A: register (live) */
     char id_a[64];

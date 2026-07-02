@@ -170,7 +170,7 @@ static void test_prompt_injection(void) {
     assert(db);
 
     /* Seed agent with system prompt */
-    db_agent_upsert(db, "Testagent", "{}", "You are a test agent.", NULL);
+    db_agent_upsert(db, "Testagent", NULL, "You are a test agent.");
 
     /* Create memory blocks (containers) and add numbered entries */
     memory_block_create(db, "Testagent", "persona", "Agent identity", "", 5000);

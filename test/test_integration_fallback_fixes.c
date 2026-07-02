@@ -31,7 +31,7 @@ int main(void) {
     setenv("CCLAW_AGENT_NAME", "default", 1);
     setenv("CCLAW_STREAM", "0", 1);
 
-    db_agent_upsert(db, "default", NULL, NULL, NULL);
+    db_agent_upsert(db, "default", NULL, NULL);
     int64_t sid = session_create(db, "test", "default", -1, 0);
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
     entry_append_with_turn(db, sid, &sys, 1);

@@ -30,7 +30,7 @@ static int test_basic_turn(void) {
     setenv("CCLAW_STREAM", "0", 1);
 
     /* Create session with user message */
-    db_agent_upsert(db, "default", NULL, NULL, NULL);
+    db_agent_upsert(db, "default", NULL, NULL);
     int64_t sid = session_create(db, "test", "default", -1, 0);
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
     entry_append_with_turn(db, sid, &sys, 1);

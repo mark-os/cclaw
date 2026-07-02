@@ -26,7 +26,7 @@ static sqlite3 *fresh_db(void) {
 
 static void test_postwindow_outcomes(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
 
     /* One session per outcome to avoid inbox cross-contamination */
     struct {

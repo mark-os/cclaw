@@ -135,7 +135,7 @@ static void test_set_model_fallback(void) {
 
 static void test_host_management(void) {
     sqlite3 *db = setup_db();
-    db_agent_upsert(db, "testagent", NULL, NULL, NULL);
+    db_agent_upsert(db, "testagent", NULL, NULL);
 
     assert(admin_add_host(db, "testagent", "example.com") == 0);
     assert(admin_add_host(db, "testagent", "api.openai.com") == 0);

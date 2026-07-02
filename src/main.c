@@ -337,6 +337,15 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "not_granted");
             return 1;
         }
+        /* Session scope: a spawn-frozen tool_filter narrows the grant set for
+         * this session only (grants ∩ filter). Checked after grants so the
+         * filter can never widen authority, only shrink it. */
+        if (!session_tool_allowed(g_db, session_id, tc->name)) {
+            char err[160];
+            snprintf(err, sizeof(err),
+                     "error: %s blocked by this session's tool filter", tc->name);
+            return tool_inline_error(session_id, tc, err, "tool_filter");
+        }
         ToolApprovalMode mode = agent_tool_mode(g_db, agent_name, tc->name);
         HookGate gate = (mode == TOOL_MODE_SILENT) ? HOOK_GATE_ALLOW : HOOK_GATE_ASK;
 

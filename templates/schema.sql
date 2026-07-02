@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS agents (
   model TEXT,
   provider TEXT,
   system_prompt TEXT,
+  description TEXT,
   max_iterations INTEGER DEFAULT 25,
   max_output_tokens INTEGER,
   shell_timeout INTEGER DEFAULT 30,
@@ -143,6 +144,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   parent_session_id INTEGER DEFAULT -1,
   parent_tool_call_id TEXT,
   depth INTEGER NOT NULL DEFAULT 0,
+  tool_filter TEXT,                         -- JSON array of tool names; NULL = unrestricted.
+                                            -- Positive scope frozen at spawn, intersected with
+                                            -- grants per turn — never grants anything itself.
   state TEXT NOT NULL DEFAULT 'idle',
   owner_instance TEXT,                      -- live owner (processes.instance_id); NULL ⟺ state='idle'
   turn_iteration INTEGER NOT NULL DEFAULT 0,

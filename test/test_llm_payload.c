@@ -262,11 +262,13 @@ static void test_payload_with_tools(void) {
     int64_t sid;
     setup_session(db, &sid);
 
-    /* Seed a tool in the tools table */
+    /* Seed a tool in the tools table + a grant — an agent's payload shows
+     * only granted tools (zero grants = zero tools) */
     sqlite3_exec(db,
         "INSERT INTO tools(name,description,parameters_json) VALUES("
         "'file_read','Read a file',"
-        "'{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}')",
+        "'{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}');"
+        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','file_read');",
         NULL, NULL, NULL);
 
     Config cfg = {0};

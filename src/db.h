@@ -40,6 +40,17 @@ void db_close(sqlite3 *db);
 int64_t session_create(sqlite3 *db, const char *name, const char *agent_name,
                        int64_t parent_session_id, int depth);
 
+/* As session_create, but freezes a per-session tool scope. tool_filter is a
+ * JSON array of tool names (NULL = unrestricted); anything else fails the
+ * insert. Effective tools = grants ∩ filter — the filter never grants. */
+int64_t session_create_filtered(sqlite3 *db, const char *name, const char *agent_name,
+                                int64_t parent_session_id, int depth,
+                                const char *tool_filter);
+
+/* 1 if session's tool_filter is NULL or contains tool_name; 0 otherwise
+ * (including unknown session — fail closed). */
+int session_tool_allowed(sqlite3 *db, int64_t session_id, const char *tool_name);
+
 /* List all sessions. Caller must free returned array and each session's name.
  * Sets *count. Returns NULL on error or empty. */
 Session *session_list(sqlite3 *db, int *count);
@@ -206,13 +217,10 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit);
 
 /* T119: agents table — DB-authoritative agent identity */
 typedef struct {
-    int64_t id;
     char *name;
-    char *config;         /* JSON string */
     char *system_prompt;
-    char *heartbeat;
+    char *description;
     int64_t created_at;
-    int64_t updated_at;
 } AgentRow;
 
 /* Get agent row by name. Returns NULL if not found. Caller frees with agent_row_free. */
@@ -224,8 +232,8 @@ AgentRow *db_agent_get(sqlite3 *db, const char *name);
 char **db_agent_list(sqlite3 *db, int *count);
 
 /* Insert or update agent row. Returns 0 on success, -1 on error. */
-int db_agent_upsert(sqlite3 *db, const char *name, const char *config,
-                    const char *system_prompt, const char *heartbeat);
+int db_agent_upsert(sqlite3 *db, const char *name, const char *description,
+                    const char *system_prompt);
 
 /* Seed agent from disk if not in DB. Loads agent.json + system.md from agents_dir.
  * Returns agent row (from DB after potential seed). Caller frees with agent_row_free. */

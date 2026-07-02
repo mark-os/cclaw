@@ -331,9 +331,15 @@ char *db_scalar_text(sqlite3 *db, const char *sql, int64_t arg) {
     return result;
 }
 
-int64_t session_create(sqlite3 *db, const char *name, const char *agent_name,
-                       int64_t parent_session_id, int depth) {
-    const char *sql = "INSERT INTO sessions (name, agent_name, parent_session_id, depth) VALUES (?, ?, ?, ?);";
+int64_t session_create_filtered(sqlite3 *db, const char *name, const char *agent_name,
+                                int64_t parent_session_id, int depth,
+                                const char *tool_filter) {
+    /* tool_filter must be a JSON array or NULL — reject anything else rather
+     * than storing garbage that downstream json_each would misread. */
+    const char *sql =
+        "INSERT INTO sessions (name, agent_name, parent_session_id, depth, tool_filter)"
+        " SELECT ?1, ?2, ?3, ?4, ?5"
+        " WHERE ?5 IS NULL OR (json_valid(?5) AND json_type(?5)='array');";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -341,13 +347,39 @@ int64_t session_create(sqlite3 *db, const char *name, const char *agent_name,
     if (agent_name) sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC); else sqlite3_bind_null(stmt, 2);
     sqlite3_bind_int64(stmt, 3, parent_session_id > 0 ? parent_session_id : -1);
     sqlite3_bind_int(stmt, 4, depth);
-    if (sqlite3_step(stmt) != SQLITE_DONE) {
+    if (tool_filter) sqlite3_bind_text(stmt, 5, tool_filter, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(stmt, 5);
+    if (sqlite3_step(stmt) != SQLITE_DONE || sqlite3_changes(db) == 0) {
         sqlite3_finalize(stmt);
         return -1;
     }
     int64_t id = sqlite3_last_insert_rowid(db);
     sqlite3_finalize(stmt);
     return id;
+}
+
+int64_t session_create(sqlite3 *db, const char *name, const char *agent_name,
+                       int64_t parent_session_id, int depth) {
+    return session_create_filtered(db, name, agent_name, parent_session_id,
+                                   depth, NULL);
+}
+
+int session_tool_allowed(sqlite3 *db, int64_t session_id, const char *tool_name) {
+    if (!db || !tool_name) return 0;
+    /* Fail closed on a missing session; NULL filter = unrestricted. */
+    const char *sql =
+        "SELECT tool_filter IS NULL"
+        " OR EXISTS(SELECT 1 FROM json_each(tool_filter) WHERE value=?2)"
+        " FROM sessions WHERE id=?1;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, tool_name, -1, SQLITE_STATIC);
+    int allowed = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        allowed = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return allowed;
 }
 
 Session *session_list(sqlite3 *db, int *count) {
@@ -1387,7 +1419,7 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
 
 AgentRow *db_agent_get(sqlite3 *db, const char *name) {
     if (!db || !name) return NULL;
-    const char *sql = "SELECT name, system_prompt, created_at FROM agents WHERE name = ?";
+    const char *sql = "SELECT name, system_prompt, description, created_at FROM agents WHERE name = ?";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
@@ -1400,11 +1432,9 @@ AgentRow *db_agent_get(sqlite3 *db, const char *name) {
             row->name = v ? strdup(v) : NULL;
             v = (const char *)sqlite3_column_text(stmt, 1);
             row->system_prompt = v ? strdup(v) : NULL;
-            row->created_at = sqlite3_column_int64(stmt, 2);
-            row->id = 0;
-            row->config = NULL;
-            row->heartbeat = NULL;
-            row->updated_at = row->created_at;
+            v = (const char *)sqlite3_column_text(stmt, 2);
+            row->description = v ? strdup(v) : NULL;
+            row->created_at = sqlite3_column_int64(stmt, 3);
         }
     }
     sqlite3_finalize(stmt);
@@ -1444,19 +1474,20 @@ char **db_agent_list(sqlite3 *db, int *count) {
     return names;
 }
 
-int db_agent_upsert(sqlite3 *db, const char *name, const char *config,
-                    const char *system_prompt, const char *heartbeat) {
-    (void)config; (void)heartbeat;
+int db_agent_upsert(sqlite3 *db, const char *name, const char *description,
+                    const char *system_prompt) {
     if (!db || !name) return -1;
     const char *sql =
-        "INSERT INTO agents (name, system_prompt) "
-        "VALUES (?, ?) "
+        "INSERT INTO agents (name, description, system_prompt) "
+        "VALUES (?, ?, ?) "
         "ON CONFLICT(name) DO UPDATE SET "
+        "description=COALESCE(excluded.description, agents.description),"
         "system_prompt=COALESCE(excluded.system_prompt, agents.system_prompt)";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, system_prompt, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, description, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, system_prompt, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? 0 : -1;
@@ -1522,8 +1553,6 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
     AgentRow *existing = db_agent_get(db, name);
     if (existing) {
         /* T152: seed memory blocks even if agent row exists (blocks may be new) */
-        if (existing->config)
-            memory_blocks_seed(db, name, existing->config);
         return existing;
     }
 
@@ -1531,6 +1560,7 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
     char path[1024];
     char *config_json = NULL;
     char *sys_prompt = NULL;
+    char *description = NULL;
 
     if (agents_dir) {
         snprintf(path, sizeof(path), "%s/%s/agent.json", agents_dir, name);
@@ -1538,14 +1568,29 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
 
         snprintf(path, sizeof(path), "%s/%s/system.md", agents_dir, name);
         sys_prompt = read_file_str(path);
+
+        /* Extract description from agent.json via SQLite JSON */
+        if (config_json) {
+            sqlite3_stmt *jstmt;
+            const char *jsql = "SELECT json_extract(?1, '$.description')";
+            if (sqlite3_prepare_v2(db, jsql, -1, &jstmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(jstmt, 1, config_json, -1, SQLITE_STATIC);
+                if (sqlite3_step(jstmt) == SQLITE_ROW) {
+                    const char *v = (const char *)sqlite3_column_text(jstmt, 0);
+                    if (v) description = strdup(v);
+                }
+                sqlite3_finalize(jstmt);
+            }
+        }
     }
 
-    db_agent_upsert(db, name, config_json, sys_prompt, NULL);
+    db_agent_upsert(db, name, description, sys_prompt);
 
     /* T152: seed memory blocks from agent.json */
     if (config_json)
         memory_blocks_seed(db, name, config_json);
 
+    free(description);
     free(config_json);
     free(sys_prompt);
 
@@ -1555,9 +1600,8 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
 void agent_row_free(AgentRow *row) {
     if (!row) return;
     free(row->name);
-    free(row->config);
+    free(row->description);
     free(row->system_prompt);
-    free(row->heartbeat);
     free(row);
 }
 

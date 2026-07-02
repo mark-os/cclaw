@@ -25,7 +25,7 @@ static void teardown(sqlite3 *db) {
 static void test_upsert_and_get(void) {
     sqlite3 *db = setup();
 
-    int rc = db_agent_upsert(db, "coder", "{\"model\":\"gpt-4\"}", "You are a coder.", NULL);
+    int rc = db_agent_upsert(db, "coder", NULL, "You are a coder.");
     assert(rc == 0);
 
     AgentRow *row = db_agent_get(db, "coder");
@@ -38,7 +38,7 @@ static void test_upsert_and_get(void) {
     agent_row_free(row);
 
     /* Update existing */
-    rc = db_agent_upsert(db, "coder", "{\"model\":\"gpt-5\"}", "Updated prompt.", "check logs");
+    rc = db_agent_upsert(db, "coder", NULL, "Updated prompt.");
     assert(rc == 0);
 
     row = db_agent_get(db, "coder");
@@ -86,7 +86,7 @@ static void test_seed_from_disk(void) {
     agent_row_free(row);
 
     /* Modify DB directly — DB is authoritative */
-    db_agent_upsert(db, "Mybot", "{\"model\":\"changed\"}", "DB prompt.", NULL);
+    db_agent_upsert(db, "Mybot", NULL, "DB prompt.");
 
     /* Second call returns DB version, not disk */
     row = db_agent_seed(db, AGENTS_DIR, "Mybot");
@@ -109,7 +109,7 @@ static void test_seed_no_dir(void) {
     AgentRow *row = db_agent_seed(db, "/nonexistent/path", "Ghost");
     assert(row != NULL);
     assert(strcmp(row->name, "Ghost") == 0);
-    assert(row->config == NULL);
+    assert(row->description == NULL);
     assert(row->system_prompt == NULL);
     agent_row_free(row);
     teardown(db);

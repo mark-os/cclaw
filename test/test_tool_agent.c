@@ -55,7 +55,7 @@ static void test_depth_limit(void) {
 
 static void test_per_parent_limit(void) {
     sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
+    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
     assert(parent_sid > 0);
 
     /* Create 3 running child sessions for this parent */
@@ -85,7 +85,7 @@ static void test_system_wide_limit(void) {
         session_set_state(db, csid, "llm_running");
     }
 
-    int64_t my_sid = session_create(db, "me", NULL, -1, 0);
+    int64_t my_sid = session_create(db, "me", "default", -1, 0);
     AgentLaunchCtx ctx = {.db = db, .session_id = my_sid};
     char *r = tool_launch_agent_handler("{\"task\":\"overflow\"}", &ctx);
     assert(r != NULL);
@@ -97,7 +97,7 @@ static void test_system_wide_limit(void) {
 
 static void test_spawn_background(void) {
     sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
+    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
     assert(parent_sid > 0);
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
@@ -112,7 +112,7 @@ static void test_spawn_background(void) {
 
 static void test_spawn_blocking(void) {
     sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
+    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
     assert(parent_sid > 0);
 
     /* Blocking launch returns NULL (no inline result — the child writes the
@@ -168,7 +168,7 @@ static void test_register(void) {
 
 static void test_unknown_agent_rejected(void) {
     sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
+    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     /* Trust policy comes from the agents row; an unregistered name must be
      * refused, not spawned (it would run with no row to derive policy from) */
@@ -183,7 +183,7 @@ static void test_unknown_agent_rejected(void) {
 
 static void test_check_agent_not_found(void) {
     sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
+    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     char *r = tool_check_session_handler("{\"session_id\":9999}", &ctx);
     assert(strstr(r, "not found") != NULL);
@@ -194,7 +194,7 @@ static void test_check_agent_not_found(void) {
 
 static void test_check_agent_idle_with_result(void) {
     sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
+    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
     int64_t child_sid = session_create(db, "child", NULL, parent_sid, 1);
 
     /* Add an assistant entry to child session */
@@ -215,7 +215,7 @@ static void test_check_agent_idle_with_result(void) {
 
 static void test_session_count_children(void) {
     sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", NULL, -1, 0);
+    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
 
     /* No children yet */
     assert(session_count_children(db, parent_sid) == 0);

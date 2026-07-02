@@ -26,7 +26,7 @@ static sqlite3 *fresh_db(void) {
 
 static void test_block_window_timing(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
 
     /* Register our instance so the session is owned by us */
     char my_id[64];
@@ -72,7 +72,7 @@ static void test_block_window_timing(void) {
 
 static void test_block_window_owner_filter(void) {
     sqlite3 *db = fresh_db();
-    db_agent_upsert(db, "bot", NULL, NULL, NULL);
+    db_agent_upsert(db, "bot", NULL, NULL);
 
     /* Register instance A (the one we query as "me") */
     char id_a[64];

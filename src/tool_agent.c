@@ -11,7 +11,8 @@
 static const char *SPAWN_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"task\":{\"type\":\"string\",\"description\":\"Task description for the sub-agent\"},"
-    "\"name\":{\"type\":\"string\",\"description\":\"Name of existing agent to launch (omit for default)\"},"
+    "\"name\":{\"type\":\"string\",\"description\":\"Agent to launch — a name from the roster; omit to spawn a copy of yourself (worker)\"},"
+    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Self-spawn only: restrict the worker to these tools (intersected with your grants; default: the worker_tools config)\"},"
     "\"background\":{\"type\":\"boolean\",\"description\":\"Run in background (default: false, blocks until done)\"}"
     "},\"required\":[\"task\"]}";
 
@@ -51,22 +52,63 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         tool_parse_free(&ta); return strdup("error: max system-wide agents reached");
     }
 
-    /* Create child session */
+    /* Create child session. Omitted name = self-spawn: a worker running as
+     * the calling agent, scoped down by a frozen session tool_filter
+     * (explicit `tools` arg → kv worker_tools → unrestricted). The filter is
+     * intersection-only against grants — it can never add authority. */
     const char *agent = targ_str(&ta, "name");
-    if (!agent || !agent[0]) agent = "default";
+    int self_spawn = (!agent || !agent[0]);
     int background = targ_bool(&ta, "background", 0);
+
+    const char *tools_raw = NULL;
+    size_t tools_len = 0;
+    if (targ_raw(&ta, "tools", &tools_raw, &tools_len) == 0) {
+        if (!self_spawn) {
+            tool_parse_free(&ta);
+            return strdup("error: 'tools' filter is only valid for self-spawn (omit 'name')");
+        }
+        if (tools_len == 0 || tools_raw[0] != '[') {
+            tool_parse_free(&ta);
+            return strdup("error: 'tools' must be a JSON array of tool names");
+        }
+    }
+
+    char *self_name = NULL;
+    if (self_spawn) {
+        self_name = session_get_agent_name(ctx->db, ctx->session_id);
+        if (!self_name) {
+            tool_parse_free(&ta);
+            return strdup("error: cannot self-spawn — calling session has no agent");
+        }
+        agent = self_name;
+    }
 
     AgentRow *row = db_agent_get(ctx->db, agent);
     if (!row) {
         char err[128];
         snprintf(err, sizeof(err), "error: unknown agent '%.64s'", agent);
+        free(self_name);
         tool_parse_free(&ta);
         return strdup(err);
     }
     agent_row_free(row);
 
-    int64_t child_sid = session_create(ctx->db, "agent", agent,
-                                       ctx->session_id, depth + 1);
+    /* Resolve the worker's tool filter, frozen into the session row. */
+    char *filter = NULL;
+    if (self_spawn) {
+        if (tools_raw) {
+            filter = malloc(tools_len + 1);
+            if (filter) { memcpy(filter, tools_raw, tools_len); filter[tools_len] = '\0'; }
+        } else {
+            filter = db_kv_get(ctx->db, "worker_tools");
+        }
+    }
+
+    int64_t child_sid = session_create_filtered(ctx->db, "agent", agent,
+                                                ctx->session_id, depth + 1,
+                                                filter);
+    free(filter);
+    free(self_name);
     if (child_sid < 0) {
         tool_parse_free(&ta);
         return strdup("error: failed to create child session");

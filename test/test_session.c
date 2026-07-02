@@ -335,7 +335,59 @@ static void test_session_picker_query(void) {
     printf("  PASS test_session_picker_query\n");
 }
 
+/* session_tool_allowed tests */
+static void test_tool_allowed_null_filter(void) {
+    sqlite3 *db = setup();
+    /* session_create uses NULL filter by default → unrestricted */
+    int64_t sid = session_create(db, "open", NULL, -1, 0);
+    assert(sid > 0);
+    assert(session_tool_allowed(db, sid, "file_read") == 1);
+    assert(session_tool_allowed(db, sid, "shell_exec") == 1);
+    assert(session_tool_allowed(db, sid, "anything_goes") == 1);
+    teardown(db);
+    printf("  PASS test_tool_allowed_null_filter\n");
+}
+
+static void test_tool_allowed_explicit_filter(void) {
+    sqlite3 *db = setup();
+    int64_t sid = session_create_filtered(db, "scoped", NULL, -1, 0,
+                                          "[\"file_read\",\"shell_exec\"]");
+    assert(sid > 0);
+    assert(session_tool_allowed(db, sid, "file_read") == 1);
+    assert(session_tool_allowed(db, sid, "shell_exec") == 1);
+    assert(session_tool_allowed(db, sid, "memory_create") == 0);
+    teardown(db);
+    printf("  PASS test_tool_allowed_explicit_filter\n");
+}
+
+static void test_tool_allowed_unknown_session(void) {
+    sqlite3 *db = setup();
+    /* Non-existent session → fail closed (0) */
+    assert(session_tool_allowed(db, 99999, "file_read") == 0);
+    teardown(db);
+    printf("  PASS test_tool_allowed_unknown_session\n");
+}
+
+static void test_create_filtered_invalid_filter(void) {
+    sqlite3 *db = setup();
+    /* Non-array JSON must be rejected */
+    int64_t sid = session_create_filtered(db, "bad", NULL, -1, 0, "not-json");
+    assert(sid == -1);
+
+    /* JSON object (not array) must also be rejected */
+    sid = session_create_filtered(db, "bad2", NULL, -1, 0, "{\"x\":1}");
+    assert(sid == -1);
+
+    /* Plain string is also invalid */
+    sid = session_create_filtered(db, "bad3", NULL, -1, 0, "\"hello\"");
+    assert(sid == -1);
+
+    teardown(db);
+    printf("  PASS test_create_filtered_invalid_filter\n");
+}
+
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_session:\n");
     test_session_create();
     test_session_list();
@@ -349,6 +401,10 @@ int main(void) {
     test_entry_tool_calls_roundtrip();
     test_original_parent_id();
     test_session_picker_query();
+    test_tool_allowed_null_filter();
+    test_tool_allowed_explicit_filter();
+    test_tool_allowed_unknown_session();
+    test_create_filtered_invalid_filter();
     printf("All session tests passed.\n");
     return 0;
 }

@@ -158,25 +158,41 @@ appropriate for throwaway containers/VMs where the whole host is disposable.
 
 ## Sub-Agent Privilege Reduction (V123)
 
-When an agent spawns a sub-agent, privileges can only decrease:
+Two orthogonal mechanisms, both per-turn DB queries:
 
-```
-Parent: tools=[file_read,file_write,shell_exec,web_fetch], hosts=[api.github.com,pypi.org]
-                        │
-                        ▼ spawn_agent(task="check release")
-Child:  tools=[file_read,web_fetch], hosts=[api.github.com]
-```
+- **Grants** (`grants` table) = what an agent may *ever* use. Authority, keyed
+  by agent identity. Only the approval gate adds rows.
+- **Session `tool_filter`** (`sessions.tool_filter`) = what *one session* will
+  use. A positive JSON array of tool names, frozen at spawn; `NULL` =
+  unrestricted. Effective tools = **grants ∩ filter** — intersection-only.
+  Listing an ungranted tool in a filter is a no-op; a filter can never grant.
 
-**Mechanism**: daemon reads parent's effective config (agent_config + env inheritance); child's own agent_config is intersected with parent's at fork time. Injection:
-- `CCLAW_TOOLS` = intersection(child.tools, parent.tools)
-- `CCLAW_ALLOWED_HOSTS` = intersection(child.allowed_hosts, parent.allowed_hosts)
-- `CCLAW_MAX_ITERATIONS` = min(child.max_iterations, parent.max_iterations)
+**Enforcement** happens at both existing gates, re-read from the session row
+every turn (no cached state to drift):
+- *Payload* (`llm_build_payload`): the tool array shown to the model is
+  grants ∩ filter. An agent with zero grants sees zero tools.
+- *Dispatch* (`dispatch_tool`): after the grant check, `session_tool_allowed()`
+  denies filtered tools with "blocked by this session's tool filter"
+  (fail-closed: unknown session ⇒ deny).
 
-**Why intersection, not union**: prevents privilege escalation via sub-agent. A restricted agent cannot grant itself more permissions by spawning a child with a broader config.
+**Self-spawn** (`launch_agent` with no `name`): child runs as the *calling*
+agent — same grants, fresh session, task in inbox. Filter resolution:
+explicit `tools` arg → kv `worker_tools` (conservative default: file tools,
+shell_exec, web_fetch, js_eval, check_session, check_approval, search_config;
+no memory mutators, no config/agent/extension tools, no launch_agent) →
+unrestricted. Passing `tools` with a `name` is an error.
 
-**Unnamed spawn** (no name arg): child session in same cclaw.db, same agent, same config. Process isolation only (own fork, setrlimit). No privilege boundary — it's the same agent doing parallel work.
+**Named spawn** (launch existing agent): child runs under the target agent's
+own grants, unfiltered. The target must already exist (not created at spawn
+time); the model picks from a live roster embedded in `launch_agent`'s
+description (`agents.name` + `agents.description`, recomputed each turn).
 
-**Named spawn** (launch existing agent): runs in target agent's own DB with target's own config, but daemon enforces parent ceiling. Target agent's config is a *request*, parent's config is the *ceiling*. Agent must already exist (not created at spawn time).
+**Lifting a filter** is a manual operation, deliberately outside the agent's
+reach: `UPDATE sessions SET tool_filter=NULL WHERE id=?`.
+
+Filters are tools-only in v1 (bare tool names, not `kind:value`); host/path
+narrowing may extend the same column later. Depth/concurrency caps apply to
+self-spawn unchanged.
 
 ## Attack Scenarios
 

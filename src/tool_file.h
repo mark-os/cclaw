@@ -3,6 +3,7 @@
 
 #include "tools.h"
 #include "sandbox.h"
+#include "run_tool.h"
 
 /* Context for file tools — workspace + trust-derived sandbox profile.
  * The profile's workspace_ro doubles as the write-refusal flag. */
@@ -49,5 +50,9 @@ char *tool_file_grep_handler(const char *arguments, void *user_data);
  * Kernel isolation happens in the --run-tool broker child, not here. */
 char *file_sandbox_run(FileReadCtx *ctx, char *(*handler)(const char *, void *),
                        const char *arguments);
+
+/* --run-tool tier leaf: dispatch a file tool by name and run its handler
+ * in-process. Called by the broker after the sandbox is applied. */
+char *tool_file_tier_run(const RunToolParsed *q);
 
 #endif

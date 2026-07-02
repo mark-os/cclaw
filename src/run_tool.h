@@ -1,6 +1,8 @@
 #ifndef CCLAW_RUN_TOOL_H
 #define CCLAW_RUN_TOOL_H
 
+#include "sandbox.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -59,6 +61,34 @@ typedef struct {
     int timeout;
     const RunToolSecret *secrets; size_t secret_count;
 } RunToolReq;
+
+/* Child-side parsed request (owned strings). Mirrors RunToolReq's wire order.
+ * Strings/arrays are heap-owned by the --run-tool process for its (short)
+ * lifetime; never freed before _exit. This is the one type the per-tool tier
+ * leaves (tool_*_tier_run / tool_shell_tier_exec) consume. */
+typedef struct {
+    int   tier;
+    char *tool_name;
+    char *arguments;
+    int   env_mode, nproc, as_mb, cpu_sec;
+    int   sandbox, net_mode;
+    char *workspace, *cwd_path;
+    int   workspace_ro, mount_cwd;
+    char **read_paths;  size_t read_count;
+    char **write_paths; size_t write_count;
+    char *agent_dir;
+    char **host_rules;  size_t host_count;
+    char *command;
+    int   timeout;
+    struct { char *name; char *value; } *secrets;
+    size_t secret_count;
+} RunToolParsed;
+
+/* Zero req; set tier/tool_name/arguments plus all SandboxProfile-derived
+ * fields and workspace/cwd_path. Callers set tier-specific fields after. */
+void run_tool_req_init(RunToolReq *req, int tier, const char *tool_name,
+                       const char *arguments, const SandboxProfile *sb,
+                       const char *workspace, const char *cwd_path);
 
 /* Serialize a request into a length-prefixed blob. Returns malloc'd buffer;
  * *out_len = total size. NULL on OOM or if the blob exceeds

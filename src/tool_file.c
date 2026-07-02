@@ -816,3 +816,37 @@ int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx) {
         tools_set_recipe(reg, "file_grep", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
     return rc;
 }
+
+/* Dispatch file tool by name. ctx->sandbox==0 so handlers run in-process. */
+static char *dispatch_file(const char *tool_name, const char *arguments, FileReadCtx *ctx) {
+    typedef char *(*handler_fn)(const char *, void *);
+    struct { const char *name; handler_fn fn; } tools[] = {
+        {"file_read",  tool_file_read_handler},
+        {"file_write", tool_file_write_handler},
+        {"file_edit",  tool_file_edit_handler},
+        {"file_list",  tool_file_list_handler},
+        {"file_find",  tool_file_find_handler},
+        {"file_grep",  tool_file_grep_handler},
+    };
+    for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++)
+        if (strcmp(tool_name, tools[i].name) == 0)
+            return tools[i].fn(arguments, ctx);
+    return strdup("error: unknown file tool");
+}
+
+char *tool_file_tier_run(const RunToolParsed *q) {
+    /* Sandbox is already applied on this process; sandbox=0 so the file
+     * handler runs directly (the kernel mount view IS the boundary). */
+    FileReadCtx fctx = {0};
+    fctx.workspace    = q->workspace;
+    fctx.cwd_path     = q->cwd_path;
+    fctx.sb.sandbox      = 0;
+    fctx.sb.workspace_ro = q->workspace_ro;
+    fctx.sb.mount_cwd    = q->mount_cwd;
+    fctx.sb.read_paths   = q->read_paths;
+    fctx.sb.read_path_count = q->read_count;
+    fctx.sb.write_paths  = q->write_paths;
+    fctx.sb.write_path_count = q->write_count;
+    char *r = dispatch_file(q->tool_name, q->arguments, &fctx);
+    return r ? r : strdup("");
+}

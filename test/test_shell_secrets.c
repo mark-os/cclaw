@@ -115,6 +115,59 @@ static void test_collect_and_free(void) {
     shell_secrets_free(s, count);
 }
 
+/* --- shell_filter_secrets(): word-boundary minimal-set filter --- */
+
+static void test_filter_referenced_included(void) {
+    ShellSecret all[] = {{"FOO", "v1"}, {"BAR", "v2"}};
+    size_t count = 0;
+    RunToolSecret *min = shell_filter_secrets(
+        "curl -H \"Bearer: $CCLAW_SECRET_FOO\"", all, 2, &count);
+    assert(count == 1);
+    assert(min != NULL);
+    assert(strcmp(min[0].name, "FOO") == 0);
+    assert(strcmp(min[0].value, "v1") == 0);   /* borrowed pointer */
+    assert(min[0].value == all[0].value);
+    free(min);
+}
+
+static void test_filter_ident_char_before_excluded(void) {
+    /* MY_CCLAW_SECRET_FOO is not a reference to CCLAW_SECRET_FOO */
+    ShellSecret all[] = {{"FOO", "v1"}};
+    size_t count = 99;
+    RunToolSecret *min = shell_filter_secrets("echo $MY_CCLAW_SECRET_FOO", all, 1, &count);
+    assert(count == 0);
+    assert(min == NULL);
+}
+
+static void test_filter_ident_char_after_excluded(void) {
+    /* CCLAW_SECRET_FOOBAR is not a reference to CCLAW_SECRET_FOO */
+    ShellSecret all[] = {{"FOO", "v1"}};
+    size_t count = 99;
+    RunToolSecret *min = shell_filter_secrets("echo $CCLAW_SECRET_FOOBAR", all, 1, &count);
+    assert(count == 0);
+    assert(min == NULL);
+}
+
+static void test_filter_unreferenced_excluded(void) {
+    ShellSecret all[] = {{"FOO", "v1"}};
+    size_t count = 99;
+    RunToolSecret *min = shell_filter_secrets("echo hello", all, 1, &count);
+    assert(count == 0);
+    assert(min == NULL);
+}
+
+static void test_filter_empty_inputs(void) {
+    ShellSecret all[] = {{"FOO", "v1"}};
+    size_t count = 99;
+    assert(shell_filter_secrets(NULL, all, 1, &count) == NULL && count == 0);
+    count = 99;
+    assert(shell_filter_secrets("", all, 1, &count) == NULL && count == 0);
+    count = 99;
+    assert(shell_filter_secrets("echo $CCLAW_SECRET_FOO", NULL, 0, &count) == NULL && count == 0);
+    count = 99;
+    assert(shell_filter_secrets("echo $CCLAW_SECRET_FOO", all, 0, &count) == NULL && count == 0);
+}
+
 /* --- Tests using --run-tool broker path --- */
 
 static char workspace[256];
@@ -219,6 +272,11 @@ int main(void) {
     test_mask_url_encoded();
     test_mask_all_variants();
     test_collect_and_free();
+    test_filter_referenced_included();
+    test_filter_ident_char_before_excluded();
+    test_filter_ident_char_after_excluded();
+    test_filter_unreferenced_excluded();
+    test_filter_empty_inputs();
 
     /* Broker-path tests */
     setup_workspace();

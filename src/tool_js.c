@@ -215,3 +215,12 @@ void js_runtime_set_hosts(JsSessionRuntime *rt, char **hosts, size_t count) {
     (void)rt; (void)hosts; (void)count;
     /* Hosts are passed via env to forked child, not needed in session runtime */
 }
+
+char *tool_js_tier_run(const RunToolParsed *q) {
+    /* qjs runs in-process in the inner fork (web's twin): netns + proxy + mounts
+     * are already applied. tool_js_eval_handler parses {code|filename,args} and
+     * evals via qjs_eval_run; http_request's curl honors HTTP_PROXY → decide().
+     * fs.* paths are real bind-mounts from the blob's read/write paths. */
+    char *r = tool_js_eval_handler(q->arguments, NULL);
+    return r ? r : strdup("error: js_eval returned null");
+}

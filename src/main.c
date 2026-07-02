@@ -517,20 +517,9 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
              * up no namespace and run_file_tier runs the handler in-process,
              * exactly as the (now-deleted) generic fork path did. */
             size_t blob_len = 0;
-            RunToolReq req = {
-                .tier = RUNTOOL_TIER_FILE,
-                .tool_name = tc->name, .arguments = tc->arguments,
-                .env_mode = fctx->sb.env_mode,
-                .nproc = fctx->sb.rlimits.nproc, .as_mb = fctx->sb.rlimits.as_mb,
-                .cpu_sec = fctx->sb.rlimits.cpu_sec,
-                .sandbox = fctx->sb.sandbox,
-                .workspace = fctx->workspace, .cwd_path = fctx->cwd_path,
-                .workspace_ro = fctx->sb.workspace_ro, .mount_cwd = fctx->sb.mount_cwd,
-                .read_paths = (const char **)fctx->sb.read_paths,
-                .read_count = fctx->sb.read_path_count,
-                .write_paths = (const char **)fctx->sb.write_paths,
-                .write_count = fctx->sb.write_path_count,
-            };
+            RunToolReq req;
+            run_tool_req_init(&req, RUNTOOL_TIER_FILE, tc->name, tc->arguments,
+                              &fctx->sb, fctx->workspace, fctx->cwd_path);
             char *blob = run_tool_serialize_request(&req, &blob_len);
             if (!blob)
                 return tool_inline_error(session_id, tc,
@@ -581,65 +570,25 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             const char *resolved_cmd = interp_cmd ? interp_cmd : command;
 
             /* Filter secrets to minimal set (only those referenced by command) */
-            RunToolSecret *min_secrets = NULL;
             size_t min_count = 0;
-            if (sc->secrets && sc->secret_count > 0) {
-                min_secrets = malloc(sc->secret_count * sizeof(RunToolSecret));
-                if (min_secrets) {
-                    for (size_t i = 0; i < sc->secret_count; i++) {
-                        /* Check if command references $CCLAW_SECRET_<name> */
-                        char tok[256];
-                        int tlen = snprintf(tok, sizeof(tok), "CCLAW_SECRET_%s", sc->secrets[i].name);
-                        if (tlen <= 0 || tlen >= (int)sizeof(tok)) continue;
-                        int found = 0;
-                        for (const char *p = resolved_cmd; (p = strstr(p, tok)) != NULL; p += tlen) {
-                            /* Require a word boundary on BOTH sides: a bare
-                             * substring of a larger identifier (e.g. the env
-                             * name MY_CCLAW_SECRET_FOO) is not a reference to
-                             * CCLAW_SECRET_FOO and must not pull that secret in. */
-                            char before = (p == resolved_cmd) ? '\0' : p[-1];
-                            char after = p[tlen];
-                            int before_ident = (before >= 'A' && before <= 'Z') ||
-                                                (before >= 'a' && before <= 'z') ||
-                                                (before >= '0' && before <= '9') || before == '_';
-                            int after_ident = (after >= 'A' && after <= 'Z') ||
-                                               (after >= 'a' && after <= 'z') ||
-                                               (after >= '0' && after <= '9') || after == '_';
-                            if (!before_ident && !after_ident) { found = 1; break; }
-                        }
-                        if (found) {
-                            min_secrets[min_count].name = sc->secrets[i].name;
-                            min_secrets[min_count].value = sc->secrets[i].value;
-                            min_count++;
-                        }
-                    }
-                }
-            }
+            RunToolSecret *min_secrets = shell_filter_secrets(
+                resolved_cmd, sc->secrets, sc->secret_count, &min_count);
 
             /* Resolve agent_dir for proxy socket */
             char agent_dir[PATH_MAX];
             agent_dir_resolve(sc->workspace, sc->db_path, agent_dir, sizeof(agent_dir));
 
             size_t blob_len = 0;
-            RunToolReq req = {
-                .tier = RUNTOOL_TIER_SHELL,
-                .tool_name = tc->name, .arguments = tc->arguments,
-                .env_mode = sc->sb.env_mode,
-                .nproc = sc->sb.rlimits.nproc, .as_mb = sc->sb.rlimits.as_mb,
-                .cpu_sec = sc->sb.rlimits.cpu_sec,
-                .sandbox = sc->sb.sandbox, .net_mode = sc->sb.net_mode,
-                .workspace = sc->workspace, .cwd_path = sc->cwd_path,
-                .workspace_ro = sc->sb.workspace_ro, .mount_cwd = sc->sb.mount_cwd,
-                .read_paths = (const char **)sc->sb.read_paths,
-                .read_count = sc->sb.read_path_count,
-                .write_paths = (const char **)sc->sb.write_paths,
-                .write_count = sc->sb.write_path_count,
-                .agent_dir = agent_dir,
-                .host_rules = (const char **)sc->allowed_hosts,
-                .host_count = sc->allowed_host_count,
-                .command = resolved_cmd, .timeout = cmd_timeout,
-                .secrets = min_secrets, .secret_count = min_count,
-            };
+            RunToolReq req;
+            run_tool_req_init(&req, RUNTOOL_TIER_SHELL, tc->name, tc->arguments,
+                              &sc->sb, sc->workspace, sc->cwd_path);
+            req.agent_dir = agent_dir;
+            req.host_rules = (const char **)sc->allowed_hosts;
+            req.host_count = sc->allowed_host_count;
+            req.command = resolved_cmd;
+            req.timeout = cmd_timeout;
+            req.secrets = min_secrets;
+            req.secret_count = min_count;
             char *blob = run_tool_serialize_request(&req, &blob_len);
 
             /* Wipe interpolated command (contains secret plaintext) */
@@ -691,24 +640,13 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         agent_dir_resolve(wc->workspace, wc->db_path, agent_dir, sizeof(agent_dir));
 
         size_t blob_len = 0;
-        RunToolReq req = {
-            .tier = RUNTOOL_TIER_WEB,
-            .tool_name = tc->name, .arguments = resolved_args,
-            .env_mode = wc->sb.env_mode,
-            .nproc = wc->sb.rlimits.nproc, .as_mb = wc->sb.rlimits.as_mb,
-            .cpu_sec = wc->sb.rlimits.cpu_sec,
-            .sandbox = wc->sb.sandbox, .net_mode = wc->sb.net_mode,
-            .workspace = wc->workspace, .cwd_path = wc->cwd_path,
-            .workspace_ro = wc->sb.workspace_ro, .mount_cwd = wc->sb.mount_cwd,
-            .read_paths = (const char **)wc->sb.read_paths,
-            .read_count = wc->sb.read_path_count,
-            .write_paths = (const char **)wc->sb.write_paths,
-            .write_count = wc->sb.write_path_count,
-            .agent_dir = agent_dir,
-            .host_rules = (const char **)wc->allowed_hosts,
-            .host_count = wc->allowed_host_count,
-            .timeout = 60,
-        };
+        RunToolReq req;
+        run_tool_req_init(&req, RUNTOOL_TIER_WEB, tc->name, resolved_args,
+                          &wc->sb, wc->workspace, wc->cwd_path);
+        req.agent_dir = agent_dir;
+        req.host_rules = (const char **)wc->allowed_hosts;
+        req.host_count = wc->allowed_host_count;
+        req.timeout = 60;
         char *blob = run_tool_serialize_request(&req, &blob_len);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
         if (!blob)
@@ -785,23 +723,15 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         }
 
         size_t blob_len = 0;
-        RunToolReq req = {
-            .tier = RUNTOOL_TIER_JS,
-            .tool_name = "js_eval", .arguments = resolved_args,
-            .env_mode = jc->sb.env_mode,
-            .nproc = jc->sb.rlimits.nproc, .as_mb = jc->sb.rlimits.as_mb,
-            .cpu_sec = jc->sb.rlimits.cpu_sec,
-            .sandbox = jc->sb.sandbox, .net_mode = jc->sb.net_mode,
-            .workspace = jc->workspace, .cwd_path = jc->cwd_path,
-            .workspace_ro = jc->sb.workspace_ro, .mount_cwd = jc->sb.mount_cwd,
-            .read_paths = read_paths, .read_count = rc_count,
-            .write_paths = (const char **)jc->sb.write_paths,
-            .write_count = jc->sb.write_path_count,
-            .agent_dir = agent_dir,
-            .host_rules = (const char **)jc->allowed_hosts,
-            .host_count = jc->allowed_hosts_count,
-            .timeout = 120,
-        };
+        RunToolReq req;
+        run_tool_req_init(&req, RUNTOOL_TIER_JS, "js_eval", resolved_args,
+                          &jc->sb, jc->workspace, jc->cwd_path);
+        req.read_paths = read_paths;  /* transient override: + extension store */
+        req.read_count = rc_count;
+        req.agent_dir = agent_dir;
+        req.host_rules = (const char **)jc->allowed_hosts;
+        req.host_count = jc->allowed_hosts_count;
+        req.timeout = 120;
         char *blob = run_tool_serialize_request(&req, &blob_len);
         free(read_paths);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }

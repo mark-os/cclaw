@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "run_tool.h"
 #include "tool_file.h"
+#include "tool_shell.h"
 #include "tool_web_fetch.h"
 #include "tool_js.h"
 #include "proxy.h"
@@ -108,6 +109,29 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     return (char *)blob;
 }
 
+void run_tool_req_init(RunToolReq *req, int tier, const char *tool_name,
+                       const char *arguments, const SandboxProfile *sb,
+                       const char *workspace, const char *cwd_path) {
+    memset(req, 0, sizeof(*req));
+    req->tier = tier;
+    req->tool_name = tool_name;
+    req->arguments = arguments;
+    req->env_mode = sb->env_mode;
+    req->nproc   = sb->rlimits.nproc;
+    req->as_mb   = sb->rlimits.as_mb;
+    req->cpu_sec = sb->rlimits.cpu_sec;
+    req->sandbox  = sb->sandbox;
+    req->net_mode = sb->net_mode;
+    req->workspace = workspace;
+    req->cwd_path  = cwd_path;
+    req->workspace_ro = sb->workspace_ro;
+    req->mount_cwd    = sb->mount_cwd;
+    req->read_paths = (const char **)sb->read_paths;
+    req->read_count = sb->read_path_count;
+    req->write_paths = (const char **)sb->write_paths;
+    req->write_count = sb->write_path_count;
+}
+
 /* ── Reader (child side) ── */
 typedef struct { const unsigned char *p; size_t rem; int err; } Rbuf;
 
@@ -149,28 +173,9 @@ static char **r_str_array(Rbuf *r, size_t *count) {
     return a;
 }
 
-/* ── Child-side parsed request (owned strings) ──────────────────────────
- * Mirrors RunToolReq's wire order. Strings/arrays are heap-owned by the
- * --run-tool process for its (short) lifetime; never freed before _exit. */
-typedef struct {
-    int   tier;
-    char *tool_name;
-    char *arguments;
-    int   env_mode, nproc, as_mb, cpu_sec;
-    int   sandbox, net_mode;
-    char *workspace, *cwd_path;
-    int   workspace_ro, mount_cwd;
-    char **read_paths;  size_t read_count;
-    char **write_paths; size_t write_count;
-    char *agent_dir;
-    char **host_rules;  size_t host_count;
-    char *command;
-    int   timeout;
-    struct { char *name; char *value; } *secrets;
-    size_t secret_count;
-} ParsedReq;
-
-static int parse_request(Rbuf *r, ParsedReq *q) {
+/* Decode the wire body into RunToolParsed (run_tool.h) — heap-owned strings,
+ * mirrors RunToolReq's wire order. */
+static int parse_request(Rbuf *r, RunToolParsed *q) {
     memset(q, 0, sizeof(*q));
     q->tier = r_u8(r);
     q->tool_name = r_str(r);
@@ -266,7 +271,7 @@ static SandboxMountReq *build_extra_mounts(char **read_paths, size_t read_count,
 
 /* Fill a SandboxConfig from the parsed request + descriptor. proxy_sock may be
  * NULL. extra_mounts must be freed by the caller after sandbox_child_setup. */
-static void build_sandbox_cfg(const ParsedReq *q, int skip_pid_ns,
+static void build_sandbox_cfg(const RunToolParsed *q, int skip_pid_ns,
                               const char *proxy_sock, SandboxConfig *cfg,
                               SandboxMountReq **extra, size_t *n_extra) {
     memset(cfg, 0, sizeof(*cfg));
@@ -290,61 +295,12 @@ static void build_sandbox_cfg(const ParsedReq *q, int skip_pid_ns,
     cfg->extra_mount_count = *n_extra;
 }
 
-/* Dispatch file tool by name. ctx->sandbox==0 so handlers run in-process. */
-static char *dispatch_file(const char *tool_name, const char *arguments, FileReadCtx *ctx) {
-    typedef char *(*handler_fn)(const char *, void *);
-    struct { const char *name; handler_fn fn; } tools[] = {
-        {"file_read",  tool_file_read_handler},
-        {"file_write", tool_file_write_handler},
-        {"file_edit",  tool_file_edit_handler},
-        {"file_list",  tool_file_list_handler},
-        {"file_find",  tool_file_find_handler},
-        {"file_grep",  tool_file_grep_handler},
-    };
-    for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++)
-        if (strcmp(tool_name, tools[i].name) == 0)
-            return tools[i].fn(arguments, ctx);
-    return strdup("error: unknown file tool");
-}
-
 /* ── Tier leaf run_fns ──────────────────────────────────────────────────
- * In-process tiers (file, and later web/js) compute a result string. Shell is
- * inner_exec (run_fn == NULL) — serve_network_child execs /bin/sh directly. */
-typedef char *(*RunFn)(const ParsedReq *q);
-
-static char *run_file_tier(const ParsedReq *q) {
-    /* Sandbox is already applied on this process; sandbox=0 so the file
-     * handler runs directly (the kernel mount view IS the boundary). */
-    FileReadCtx fctx = {0};
-    fctx.workspace    = q->workspace;
-    fctx.cwd_path     = q->cwd_path;
-    fctx.sb.sandbox      = 0;
-    fctx.sb.workspace_ro = q->workspace_ro;
-    fctx.sb.mount_cwd    = q->mount_cwd;
-    fctx.sb.read_paths   = q->read_paths;
-    fctx.sb.read_path_count = q->read_count;
-    fctx.sb.write_paths  = q->write_paths;
-    fctx.sb.write_path_count = q->write_count;
-    char *r = dispatch_file(q->tool_name, q->arguments, &fctx);
-    return r ? r : strdup("");
-}
-
-static char *run_web_tier(const ParsedReq *q) {
-    /* Runs in the inner fork, inside the netns + proxy. Our libcurl honors the
-     * HTTP_PROXY set by sandbox_child_setup → net_shim → broker → decide() on
-     * every hop. user_data unused (egress is the proxy's job, not a preflight). */
-    char *r = tool_web_fetch_handler(q->arguments, NULL);
-    return r ? r : strdup("error: web_fetch returned null");
-}
-
-static char *run_js_tier(const ParsedReq *q) {
-    /* qjs runs in-process in the inner fork (web's twin): netns + proxy + mounts
-     * are already applied. tool_js_eval_handler parses {code|filename,args} and
-     * evals via qjs_eval_run; http_request's curl honors HTTP_PROXY → decide().
-     * fs.* paths are real bind-mounts from the blob's read/write paths. */
-    char *r = tool_js_eval_handler(q->arguments, NULL);
-    return r ? r : strdup("error: js_eval returned null");
-}
+ * Each leaf is owned by its tool's own file (tool_file.c / tool_web_fetch.c /
+ * tool_js.c) — the broker holds only these pointers and zero per-tool
+ * knowledge. In-process tiers compute a result string. Shell is inner_exec
+ * (run_fn == NULL) — the sandbox child calls tool_shell_tier_exec directly. */
+typedef char *(*RunFn)(const RunToolParsed *q);
 
 /* ── Tier descriptor (single source of truth) ────────────────────────────
  * Decode the tier byte ONCE into this; pass it down. "What makes web differ
@@ -358,10 +314,10 @@ typedef struct {
 
 static const TierDescriptor *tier_descriptor(int tier) {
     static const TierDescriptor table[] = {
-        [RUNTOOL_TIER_FILE]  = { .skip_pid_ns = 1, .needs_proxy = 0, .inner_exec = 0, .run_fn = run_file_tier },
+        [RUNTOOL_TIER_FILE]  = { .skip_pid_ns = 1, .needs_proxy = 0, .inner_exec = 0, .run_fn = tool_file_tier_run },
         [RUNTOOL_TIER_SHELL] = { .skip_pid_ns = 0, .needs_proxy = 1, .inner_exec = 1, .run_fn = NULL },
-        [RUNTOOL_TIER_WEB]   = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = run_web_tier },
-        [RUNTOOL_TIER_JS]    = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = run_js_tier },
+        [RUNTOOL_TIER_WEB]   = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = tool_web_tier_run },
+        [RUNTOOL_TIER_JS]    = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = tool_js_tier_run },
     };
     if (tier < 0 || tier >= (int)(sizeof(table) / sizeof(table[0])))
         return NULL;
@@ -389,7 +345,128 @@ static void run_tool_verify_clean(void) {
 
 #define NET_MAX_OUTPUT (256 * 1024)
 
-static void serve_network_child(const TierDescriptor *desc, ParsedReq *q,
+/* The pid==0 body of serve_network_child's fork: wire stdout/stderr to the
+ * pipe, apply the sandbox, then exec (shell) or run the tier leaf in-process. */
+__attribute__((noreturn))
+static void sandbox_child_main(const TierDescriptor *desc, RunToolParsed *q,
+                               const char *psock, int pipefd[2]) {
+    setpgid(0, 0);
+    /* Die if the broker dies (daemon SIGKILLs on backstop deadline):
+     * the broker can no longer kill our group, so tie our lifetime to it.
+     * sandbox_apply_namespace re-arms this on the inner PID-ns init. */
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    close(pipefd[0]);
+    dup2(pipefd[1], STDOUT_FILENO);
+    dup2(pipefd[1], STDERR_FILENO);
+    close(pipefd[1]);
+
+    /* Host mode (sandbox=0): no namespace, no proxy (proxy_active is
+     * already gated on q->sandbox) — run_fn / exec runs on the bare host. */
+    if (q->sandbox) {
+        SandboxConfig cfg;
+        SandboxMountReq *extra = NULL;
+        size_t n_extra = 0;
+        build_sandbox_cfg(q, desc->skip_pid_ns, psock, &cfg, &extra, &n_extra);
+
+        if (sandbox_child_setup(&cfg) != 0) {
+            fprintf(stderr, "error: namespace sandbox failed\n");
+            _exit(126);
+        }
+    }
+
+    if (desc->inner_exec)
+        tool_shell_tier_exec(q);  /* execs /bin/sh, or _exit(127); never returns */
+
+    /* In-process tier (web/js): compute result, write to stdout (the pipe). */
+    char *result = desc->run_fn(q);
+    if (result) { write_all(STDOUT_FILENO, result, strlen(result)); free(result); }
+    _exit(0);
+}
+
+/* Drain child output into `output` until the deadline, the pipe closes, or the
+ * cap is hit; then reap. Closes fd. Returns 1 iff the deadline expired (child
+ * group SIGKILLed). *status is the waitpid status when not timed out. */
+static int drain_child(pid_t pid, int fd, int timeout, char *output,
+                       size_t *out_len, int *status) {
+    size_t len = 0;
+    int timed_out = 0;
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout;
+
+    while (1) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec > deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+            timed_out = 1; break;
+        }
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+        int sel = select(fd + 1, &rfds, NULL, NULL, &tv);
+        if (sel > 0) {
+            ssize_t n = read(fd, output + len, NET_MAX_OUTPUT - len);
+            if (n <= 0) break;
+            len += (size_t)n;
+            if (len >= NET_MAX_OUTPUT) break;
+        } else if (sel < 0 && errno != EINTR) break;
+        int wr = waitpid(pid, status, WNOHANG);
+        if (wr > 0) {
+            while (len < NET_MAX_OUTPUT) {
+                ssize_t n = read(fd, output + len, NET_MAX_OUTPUT - len);
+                if (n <= 0) break;
+                len += (size_t)n;
+            }
+            close(fd);
+            *out_len = len;
+            return 0;
+        }
+    }
+    close(fd);
+
+    if (timed_out) {
+        kill(-pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+    } else {
+        waitpid(pid, status, 0);
+    }
+    *out_len = len;
+    return timed_out;
+}
+
+/* Wrap the drained output for the fd-3 frame. Takes ownership of `output`
+ * (NUL-terminated at out_len); returns the malloc'd result. */
+static char *format_tier_result(const TierDescriptor *desc, char *output,
+                                size_t out_len, int timed_out, int status,
+                                int timeout) {
+    char *result;
+    if (desc->inner_exec) {
+        /* Shell: prefix the captured stdout/stderr with the exit status. */
+        size_t needed = out_len + 128;
+        result = malloc(needed);
+        if (timed_out)
+            snprintf(result, needed, "[timeout after %ds]\n%s", timeout, output);
+        else
+            snprintf(result, needed, "[exit %d]\n%s",
+                     WIFEXITED(status) ? WEXITSTATUS(status) : -1, output);
+        free(output);
+    } else {
+        /* In-process tier: the child already produced the final result. */
+        if (timed_out) {
+            size_t needed = out_len + 64;
+            result = malloc(needed);
+            snprintf(result, needed, "error: tool timed out (%ds)\n%s", timeout, output);
+            free(output);
+        } else {
+            result = output;  /* hand off ownership */
+        }
+    }
+    return result;
+}
+
+static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
                                 unsigned char *body, size_t body_len) {
     if (q->timeout <= 0) q->timeout = 30;
 
@@ -413,56 +490,8 @@ static void serve_network_child(const TierDescriptor *desc, ParsedReq *q,
         die("error: net: fork failed");
     }
 
-    if (pid == 0) {
-        /* SANDBOX CHILD */
-        setpgid(0, 0);
-        /* Die if the broker dies (daemon SIGKILLs on backstop deadline):
-         * the broker can no longer kill our group, so tie our lifetime to it.
-         * sandbox_apply_namespace re-arms this on the inner PID-ns init. */
-        prctl(PR_SET_PDEATHSIG, SIGKILL);
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
-
-        /* Host mode (sandbox=0): no namespace, no proxy (proxy_active is
-         * already gated on q->sandbox) — run_fn / exec runs on the bare host. */
-        if (q->sandbox) {
-            SandboxConfig cfg;
-            SandboxMountReq *extra = NULL;
-            size_t n_extra = 0;
-            build_sandbox_cfg(q, desc->skip_pid_ns, psock, &cfg, &extra, &n_extra);
-
-            if (sandbox_child_setup(&cfg) != 0) {
-                fprintf(stderr, "error: namespace sandbox failed\n");
-                _exit(126);
-            }
-        }
-
-        if (desc->inner_exec) {
-            /* Inject secrets into env — only after env scrub (ordering matters).
-             * These are the minimal set pre-filtered by the parent. */
-            for (size_t i = 0; i < q->secret_count; i++) {
-                if (q->secrets[i].name && q->secrets[i].value) {
-                    char envname[256];
-                    snprintf(envname, sizeof(envname), "CCLAW_SECRET_%s", q->secrets[i].name);
-                    setenv(envname, q->secrets[i].value, 1);
-                }
-            }
-            for (size_t i = 0; i < q->secret_count; i++)
-                if (q->secrets[i].value) explicit_bzero(q->secrets[i].value, strlen(q->secrets[i].value));
-            /* The one inner exec — shell is the only tier with a foreign
-             * program. command carries interpolated secrets; exec replaces the
-             * address space so they don't persist after execl. */
-            execl("/bin/sh", "sh", "-c", q->command, (char *)NULL);
-            _exit(127);
-        }
-
-        /* In-process tier (web/js): compute result, write to stdout (the pipe). */
-        char *result = desc->run_fn(q);
-        if (result) { write_all(STDOUT_FILENO, result, strlen(result)); free(result); }
-        _exit(0);
-    }
+    if (pid == 0)
+        sandbox_child_main(desc, q, psock, pipefd);  /* never returns */
 
     /* ── BROKER (parent of sandbox child) ── */
     setpgid(pid, pid);
@@ -489,77 +518,15 @@ static void serve_network_child(const TierDescriptor *desc, ParsedReq *q,
         die("error: net: OOM");
     }
     size_t out_len = 0;
-    int timed_out = 0, status = 0;
-    struct timespec deadline;
-    clock_gettime(CLOCK_MONOTONIC, &deadline);
-    deadline.tv_sec += q->timeout;
+    int status = 0;
+    int timed_out = drain_child(pid, pipefd[0], q->timeout, output, &out_len, &status);
 
-    while (1) {
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        if (now.tv_sec > deadline.tv_sec ||
-            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
-            timed_out = 1; break;
-        }
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(pipefd[0], &rfds);
-        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-        int sel = select(pipefd[0] + 1, &rfds, NULL, NULL, &tv);
-        if (sel > 0) {
-            ssize_t n = read(pipefd[0], output + out_len, NET_MAX_OUTPUT - out_len);
-            if (n <= 0) break;
-            out_len += (size_t)n;
-            if (out_len >= NET_MAX_OUTPUT) break;
-        } else if (sel < 0 && errno != EINTR) break;
-        int wr = waitpid(pid, &status, WNOHANG);
-        if (wr > 0) {
-            while (out_len < NET_MAX_OUTPUT) {
-                ssize_t n = read(pipefd[0], output + out_len, NET_MAX_OUTPUT - out_len);
-                if (n <= 0) break;
-                out_len += (size_t)n;
-            }
-            close(pipefd[0]);
-            goto net_format;
-        }
-    }
-    close(pipefd[0]);
-
-    if (timed_out) {
-        kill(-pid, SIGKILL);
-        waitpid(pid, NULL, 0);
-    } else {
-        waitpid(pid, &status, 0);
-    }
-
-net_format:;
     /* Capture the contacted-hosts tag before proxy_stop frees the list. */
     char *hosts_json = proxy_active ? proxy_hosts_json(&proxy) : NULL;
     if (proxy_active) proxy_stop(&proxy);
     output[out_len] = '\0';
 
-    char *result;
-    if (desc->inner_exec) {
-        /* Shell: prefix the captured stdout/stderr with the exit status. */
-        size_t needed = out_len + 128;
-        result = malloc(needed);
-        if (timed_out)
-            snprintf(result, needed, "[timeout after %ds]\n%s", q->timeout, output);
-        else
-            snprintf(result, needed, "[exit %d]\n%s",
-                     WIFEXITED(status) ? WEXITSTATUS(status) : -1, output);
-        free(output);
-    } else {
-        /* In-process tier: the child already produced the final result. */
-        if (timed_out) {
-            size_t needed = out_len + 64;
-            result = malloc(needed);
-            snprintf(result, needed, "error: tool timed out (%ds)\n%s", q->timeout, output);
-            free(output);
-        } else {
-            result = output;  /* hand off ownership */
-        }
-    }
+    char *result = format_tier_result(desc, output, out_len, timed_out, status, q->timeout);
 
     write_framed(FD_REQUEST, hosts_json, result);
     free(hosts_json);
@@ -606,7 +573,7 @@ int run_tool_main(void) {
         die("error: short read on request body");
 
     Rbuf r = { .p = body, .rem = body_len, .err = 0 };
-    ParsedReq q;
+    RunToolParsed q;
     if (parse_request(&r, &q) != 0)
         die("error: malformed request");
     if (!q.tool_name) die("error: missing tool_name");

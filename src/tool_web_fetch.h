@@ -3,6 +3,7 @@
 
 #include "tools.h"
 #include "sandbox.h"
+#include "run_tool.h"
 
 /* Sandbox-profile context for web_fetch (SBX_WEB tier). Mirrors the shell/file
  * profile: web runs in the same fork+execve --run-tool broker, its curl reaching
@@ -28,5 +29,9 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data);
 
 /* Strip HTML tags from src, write plain text to dst. Returns bytes written. */
 size_t html_strip_tags(const char *src, char *dst, size_t dst_cap);
+
+/* --run-tool tier leaf: run web_fetch in-process inside the broker's inner
+ * fork (netns + proxy already applied). */
+char *tool_web_tier_run(const RunToolParsed *q);
 
 #endif

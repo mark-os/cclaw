@@ -331,3 +331,11 @@ int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx) {
         tools_set_recipe(reg, "web_fetch", (ToolRecipe){EXEC_SANDBOX, SBX_WEB, NULL});
     return rc;
 }
+
+char *tool_web_tier_run(const RunToolParsed *q) {
+    /* Runs in the inner fork, inside the netns + proxy. Our libcurl honors the
+     * HTTP_PROXY set by sandbox_child_setup → net_shim → broker → decide() on
+     * every hop. user_data unused (egress is the proxy's job, not a preflight). */
+    char *r = tool_web_fetch_handler(q->arguments, NULL);
+    return r ? r : strdup("error: web_fetch returned null");
+}

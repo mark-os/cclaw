@@ -3,6 +3,7 @@
 
 #include "tools.h"
 #include "sandbox.h"
+#include "run_tool.h"
 #include <sqlite3.h>
 #include <stdint.h>
 
@@ -66,5 +67,9 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
  * (caller frees), *out_ctx borrows the entry's profile. */
 int js_tool_resolve_request(const ToolEntry *te, const char *arguments,
                             JsEvalCtx **out_ctx, char **out_args);
+
+/* --run-tool tier leaf: eval qjs in-process inside the broker's inner fork
+ * (netns + proxy + mounts already applied). */
+char *tool_js_tier_run(const RunToolParsed *q);
 
 #endif

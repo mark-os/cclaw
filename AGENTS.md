@@ -159,6 +159,7 @@ Tests must never hang. Follow these rules:
 # (plus the tail of the log on failure). `make test | tail -20` is fine.
 make test               # unit tests
 make test-integration   # mock-server tests
+make test-asan          # unit tests under ASan/UBSan — run before committing
 
 # Single test binary — redirect to file, read after
 ./build/test_foo > /tmp/t.txt 2>&1; echo $?
@@ -177,6 +178,7 @@ make              # native build (ARM64 or x86_64)
 make debug        # clean + clang build with -O0 -g3 + ASan/UBSan
 make smoke        # curated fast unit subset (~10 suites, a few seconds)
 make test         # unit tests (fast, no network)
+make test-asan    # clean + full unit suite fully instrumented (ASan/UBSan)
 make test-integration  # mock-server tests
 make test-e2e     # live LLM tests (needs API key)
 make clean        # remove build/
@@ -184,7 +186,8 @@ make clean        # remove build/
 
 - **`make debug` uses clang, not gcc.** GCC-only `#pragma GCC diagnostic` directives must be guarded with `#if defined(__GNUC__) && !defined(__clang__)` — under `-Werror` clang turns an unknown warning group (e.g. `-Wformat-truncation`) into a hard error.
 - **`make test` builds `build/cclaw` first.** `test_tool_js` / `test_js_http_fetch` fork the main binary via `CCLAW_QJS_EXE` (the `--qjs_eval` subprocess), so the `test` target depends on `$(BUILDDIR)/cclaw` — it's always rebuilt before the suite runs, even after `make clean`. (`make smoke` deliberately omits the dep: its curated subset has no fork-the-binary tests.)
-- **Don't mix sanitizer and release objects in `build/`.** A `make debug` followed by a plain `make test` link-fails on undefined `__asan_*`/`__ubsan_*` symbols (stale instrumented `.o` in `libcclaw.a`). `make clean` between the two.
+- **Don't mix sanitizer and release objects in `build/`.** A `make debug` followed by a plain `make test` link-fails on undefined `__asan_*`/`__ubsan_*` symbols (stale instrumented `.o` in `libcclaw.a`). `make clean` between the two — or just use `make test-asan`, which cleans first and runs the whole suite instrumented. Note `make debug` alone only instruments the *binary*; the sanitizer check that actually covers the code is `make test-asan`.
+- **Sanitizer builds skip `RLIMIT_AS`** (`src/sandbox.c`, compile-time guard): ASan reserves terabytes of shadow VA and its allocator mmaps at runtime, so an address-space cap aborts the instrumented child with "Failed to mmap". Release builds enforce the cap unchanged.
 
 ## Running
 

@@ -65,40 +65,40 @@ static void test_get_missing(void) {
 static void test_seed_from_disk(void) {
     /* Create agent dir with files */
     mkdir(AGENTS_DIR, 0755);
-    mkdir(AGENTS_DIR "/mybot", 0755);
+    mkdir(AGENTS_DIR "/Mybot", 0755);
 
-    FILE *f = fopen(AGENTS_DIR "/mybot/agent.json", "w");
+    FILE *f = fopen(AGENTS_DIR "/Mybot/agent.json", "w");
     fprintf(f, "{\"model\":\"deepseek\",\"max_iterations\":10}");
     fclose(f);
 
-    f = fopen(AGENTS_DIR "/mybot/system.md", "w");
-    fprintf(f, "You are mybot.");
+    f = fopen(AGENTS_DIR "/Mybot/system.md", "w");
+    fprintf(f, "You are Mybot.");
     fclose(f);
 
     sqlite3 *db = setup();
 
     /* First call seeds from disk */
-    AgentRow *row = db_agent_seed(db, AGENTS_DIR, "mybot");
+    AgentRow *row = db_agent_seed(db, AGENTS_DIR, "Mybot");
     assert(row != NULL);
-    assert(strcmp(row->name, "mybot") == 0);
+    assert(strcmp(row->name, "Mybot") == 0);
     /* config column removed */
-    assert(strcmp(row->system_prompt, "You are mybot.") == 0);
+    assert(strcmp(row->system_prompt, "You are Mybot.") == 0);
     agent_row_free(row);
 
     /* Modify DB directly — DB is authoritative */
-    db_agent_upsert(db, "mybot", "{\"model\":\"changed\"}", "DB prompt.", NULL);
+    db_agent_upsert(db, "Mybot", "{\"model\":\"changed\"}", "DB prompt.", NULL);
 
     /* Second call returns DB version, not disk */
-    row = db_agent_seed(db, AGENTS_DIR, "mybot");
+    row = db_agent_seed(db, AGENTS_DIR, "Mybot");
     assert(row != NULL);
     /* config column removed */
     assert(strcmp(row->system_prompt, "DB prompt.") == 0);
     agent_row_free(row);
 
     teardown(db);
-    unlink(AGENTS_DIR "/mybot/agent.json");
-    unlink(AGENTS_DIR "/mybot/system.md");
-    rmdir(AGENTS_DIR "/mybot");
+    unlink(AGENTS_DIR "/Mybot/agent.json");
+    unlink(AGENTS_DIR "/Mybot/system.md");
+    rmdir(AGENTS_DIR "/Mybot");
     rmdir(AGENTS_DIR);
     printf("  PASS test_seed_from_disk\n");
 }
@@ -106,9 +106,9 @@ static void test_seed_from_disk(void) {
 /* T119: seed with no agents_dir still creates row */
 static void test_seed_no_dir(void) {
     sqlite3 *db = setup();
-    AgentRow *row = db_agent_seed(db, "/nonexistent/path", "ghost");
+    AgentRow *row = db_agent_seed(db, "/nonexistent/path", "Ghost");
     assert(row != NULL);
-    assert(strcmp(row->name, "ghost") == 0);
+    assert(strcmp(row->name, "Ghost") == 0);
     assert(row->config == NULL);
     assert(row->system_prompt == NULL);
     agent_row_free(row);

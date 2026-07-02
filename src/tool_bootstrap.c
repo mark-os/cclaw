@@ -2,6 +2,7 @@
 #include "tool_bootstrap.h"
 #include "db.h"
 #include "tool_parse.h"
+#include "validate.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -218,9 +219,9 @@ static char *tool_create_agent_handler(const char *arguments, void *user_data) {
     }
 
     /* Reject invalid names */
-    if (strchr(n, '/') || strchr(n, '\\') || strcmp(n, "..") == 0) {
+    if (!is_valid_agent_name(n)) {
         tool_parse_free(&ta);
-        return strdup("error: invalid agent name (no path separators)");
+        return strdup("error: agent name must be PascalCase: start with an uppercase letter, letters and digits only, max 63 chars");
     }
 
     tool_parse_free(&ta);

@@ -8,7 +8,7 @@ INSERT OR IGNORE INTO config(key, value) VALUES
   ('max_iterations',        '25'),
   ('shell_timeout',         '30'),
   ('web_port',              '8080'),
-  ('default_allowed_tools', '["file_read","file_write","js_eval","request_config"]'),
+  ('agent_default_tools',   '["file_read","file_write","js_eval","request_config","search_config","memory_create","memory_add","memory_edit","memory_delete","configure_provider","configure_channel","create_agent","extension_promote","extension_publish","extension_attach","extension_list","launch_agent","check_session","check_approval"]'),
   ('health_5xx_threshold',  '3'),
   ('health_429_threshold',  '10'),
   ('health_window_sec',     '300'),

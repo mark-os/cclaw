@@ -268,14 +268,14 @@ static int test_create_agent_basic(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
     tools_init(&reg);
-    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "bootstrap"};
+    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "Bootstrap"};
     assert(tool_create_agent_register(&reg, &ctx) == 0);
 
     ToolEntry *e = tools_lookup(&reg, "create_agent");
     assert(e != NULL);
 
     char *result = e->handler(
-        "{\"name\":\"helper\",\"model\":\"deepseek/deepseek-v4-flash\","
+        "{\"name\":\"Helper\",\"model\":\"deepseek/deepseek-v4-flash\","
         "\"system_prompt\":\"You are a helpful assistant.\","
         "\"tools\":[\"shell_exec\",\"file_read\",\"file_write\"],"
         "\"allowed_hosts\":[\"api.example.com\"]}",
@@ -292,23 +292,31 @@ static int test_create_agent_basic(void) {
     return 0;
 }
 
-/* T192: create_agent rejects path separators in name */
+/* T192: create_agent rejects non-PascalCase names */
 static int test_create_agent_invalid_name(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
     tools_init(&reg);
-    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "bootstrap"};
+    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "Bootstrap"};
     tool_create_agent_register(&reg, &ctx);
 
     ToolEntry *e = tools_lookup(&reg, "create_agent");
     char *result = e->handler("{\"name\":\"../evil\"}", e->user_data);
     assert(result != NULL);
     assert(strstr(result, "error") != NULL);
+    assert(strstr(result, "agent name must be PascalCase") != NULL);
     free(result);
 
     result = e->handler("{\"name\":\"a/b\"}", e->user_data);
     assert(result != NULL);
     assert(strstr(result, "error") != NULL);
+    assert(strstr(result, "agent name must be PascalCase") != NULL);
+    free(result);
+
+    result = e->handler("{\"name\":\"lowercase\"}", e->user_data);
+    assert(result != NULL);
+    assert(strstr(result, "error") != NULL);
+    assert(strstr(result, "agent name must be PascalCase") != NULL);
     free(result);
 
     tools_free(&reg);
@@ -323,7 +331,7 @@ static int test_create_agent_missing_name(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
     tools_init(&reg);
-    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "bootstrap"};
+    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "Bootstrap"};
     tool_create_agent_register(&reg, &ctx);
 
     ToolEntry *e = tools_lookup(&reg, "create_agent");

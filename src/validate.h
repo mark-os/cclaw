@@ -17,4 +17,19 @@ static inline int is_valid_name(const char *name) {
     return 1;
 }
 
+/* Validate agent name: PascalCase — ^[A-Z][a-zA-Z0-9]*$, max 63 chars. */
+static inline int is_valid_agent_name(const char *name) {
+    if (!name || !name[0]) return 0;
+    if (!(name[0] >= 'A' && name[0] <= 'Z')) return 0;
+    size_t len = strlen(name);
+    if (len > 63) return 0;
+    for (size_t i = 1; i < len; i++) {
+        char c = name[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9')))
+            return 0;
+    }
+    return 1;
+}
+
 #endif

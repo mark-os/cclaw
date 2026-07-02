@@ -103,7 +103,7 @@ static char *handler(const char *arguments, void *user_data) {
         const char *new_name = targ_str(&ta, "name");
         const char *preamble = targ_str(&ta, "preamble");
         if (!new_name || !new_name[0]) { tool_parse_free(&ta); return strdup("error: 'name' required"); }
-        if (!is_valid_name(new_name)) { tool_parse_free(&ta); return strdup("error: invalid name (use A-Za-z0-9_- only)"); }
+        if (!is_valid_agent_name(new_name)) { tool_parse_free(&ta); return strdup("error: agent name must be PascalCase: start with an uppercase letter, letters and digits only, max 63 chars"); }
         char *args = build_args_json(ctx->db, "rename_agent", "name", new_name, preamble);
         int64_t aid = approval_create(ctx->db, ctx->session_id,
             ctx->current_tool_call_id, "request_config", "rename_agent", args, "apply");

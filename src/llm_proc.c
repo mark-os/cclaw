@@ -114,7 +114,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     if (!cfg) { fprintf(stderr, "llm_req: config load failed\n"); return -1; }
 
     char *agent_name_alloc = session_get_agent_name(db, session_id);
-    const char *agent_name = agent_name_alloc ? agent_name_alloc : "default";
+    const char *agent_name = agent_name_alloc ? agent_name_alloc : "Assistant";
 
     /* Estimate tool overhead for context budget */
     int tool_overhead = 0;

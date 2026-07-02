@@ -1513,6 +1513,10 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
 
 AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
     if (!db || !name) return NULL;
+    if (!is_valid_agent_name(name)) {
+        fprintf(stderr, "db_agent_seed: skipping invalid agent name '%s' (must be PascalCase)\n", name);
+        return NULL;
+    }
 
     /* Check DB first — authoritative after seed */
     AgentRow *existing = db_agent_get(db, name);
@@ -1560,7 +1564,7 @@ void agent_row_free(AgentRow *row) {
 int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
                  int64_t requesting_session_id) {
     if (!db || !old_name || !new_name) return -3;
-    if (!is_valid_name(new_name)) return -3;
+    if (!is_valid_agent_name(new_name)) return -3;
 
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
         return -1;

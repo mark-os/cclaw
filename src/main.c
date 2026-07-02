@@ -1979,7 +1979,7 @@ static int run_daemon(char *db_path) {
      * just seeds the caps/contexts; agents_dir backs rename support. */
     char daemon_agent[64];
     { char *def = db_kv_get(g_db, "default_agent");
-      snprintf(daemon_agent, sizeof(daemon_agent), "%s", def ? def : "default");
+      snprintf(daemon_agent, sizeof(daemon_agent), "%s", def ? def : "Assistant");
       free(def); }
     snprintf(g_agent_name, sizeof(g_agent_name), "%s", daemon_agent);
     char daemon_agents_dir[PATH_MAX];
@@ -2127,12 +2127,12 @@ static int run_cli(char *db_path, const char *prompt,
     /* Ensure default agent exists — bootstrap on first run */
     { int ac = 0; char **al = db_agent_list(g_db, &ac);
       if (!al || ac == 0) {
-          char ws[PATH_MAX]; snprintf(ws, sizeof(ws), "%s/agents/default/workspace/.keep", base_dir);
+          char ws[PATH_MAX]; snprintf(ws, sizeof(ws), "%s/agents/Assistant/workspace/.keep", base_dir);
           ensure_parent_dir(ws);
           /* Create default agent */
           const char *agent_sql =
               "INSERT OR IGNORE INTO agents(name, system_prompt, trust_level)"
-              " VALUES('default', ?, 'trusted');"
+              " VALUES('Assistant', ?, 'trusted');"
               ;
           sqlite3_stmt *bs;
           if (sqlite3_prepare_v2(g_db, agent_sql, -1, &bs, NULL) == SQLITE_OK) {
@@ -2140,18 +2140,18 @@ static int run_cli(char *db_path, const char *prompt,
               sqlite3_step(bs); sqlite3_finalize(bs);
           }
           /* Seed default tools as grants */
-          agent_grant_defaults(g_db, "default");
-          db_kv_set(g_db, "default_agent", "default");
+          agent_grant_defaults(g_db, "Assistant");
+          db_kv_set(g_db, "default_agent", "Assistant");
           /* Seed default memory blocks */
-          memory_block_create(g_db, "default", "AGENT",
+          memory_block_create(g_db, "Assistant", "AGENT",
               "Your identity, capabilities, and operational notes. Update as you learn about yourself.",
               NULL, 5000);
-          memory_block_create(g_db, "default", "USER",
+          memory_block_create(g_db, "Assistant", "USER",
               "Information about the user: preferences, context, working style. Update as you learn.",
               NULL, 5000);
-          memory_entry_add(g_db, "default", "AGENT",
+          memory_entry_add(g_db, "Assistant", "AGENT",
               "You are CClaw. You do not have a name yet — ask the user what they would like to call you, then save it here with memory_edit.");
-          memory_entry_add(g_db, "default", "USER",
+          memory_entry_add(g_db, "Assistant", "USER",
               "Record what you learn about the user here: their name, preferences, and how they like you to work.");
       }
       if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
@@ -2161,7 +2161,7 @@ static int run_cli(char *db_path, const char *prompt,
     char *agent_sel = NULL;
     if (prompt || !isatty(STDIN_FILENO)) {
         char *def = db_kv_get(g_db, "default_agent");
-        agent_sel = def ? def : strdup("default");
+        agent_sel = def ? def : strdup("Assistant");
     } else {
         int ac = 0; char **al = db_agent_list(g_db, &ac);
         if (ac == 1) { agent_sel = strdup(al[0]); }

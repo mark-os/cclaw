@@ -101,7 +101,7 @@ static char *render_template(const char *tmpl, int64_t session_id,
     char date_buf[11];
     strftime(date_buf, sizeof(date_buf), "%Y-%m-%d", &tm);
 
-    const char *aname = agent_name ? agent_name : "default";
+    const char *aname = agent_name ? agent_name : "Assistant";
 
     size_t out_cap = tmpl_len + 128;
     char *out = malloc(out_cap);
@@ -436,9 +436,28 @@ int grants_contains(sqlite3 *db, const char *agent, const char *kind,
 
 void agent_grant_defaults(sqlite3 *db, const char *agent) {
     if (!db || !agent) return;
-    /* Safe baseline toolset. High-privilege tools (shell_exec, web_fetch,
-     * db_query) are deliberately omitted — the agent must request them via
-     * request_config, which routes through the approval gate. */
+
+    /* Try DB-driven list first (agent_default_tools kv = JSON array). */
+    char *kv = db_kv_get(db, "agent_default_tools");
+    if (kv && kv[0]) {
+        /* Bulk-insert via json_each — same semantics as agent_config_grant
+         * with expires_at=0 (NULL in the row). */
+        const char *sql =
+            "INSERT OR IGNORE INTO grants (agent_name, kind, value, expires_at)"
+            " SELECT ?1, 'tool', value, NULL FROM json_each(?2);";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, kv, -1, SQLITE_STATIC);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+        free(kv);
+        return;
+    }
+    free(kv);
+
+    /* Fallback: static list when kv is absent (fresh DB without seed). */
     static const char *default_tools[] = {
         "file_read", "file_write", "js_eval", "request_config",
         "search_config", "memory_create", "memory_add", "memory_edit",

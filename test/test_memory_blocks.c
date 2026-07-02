@@ -14,13 +14,13 @@ static void test_create_and_get(void) {
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
-    int64_t id = memory_block_create(db, "test_agent", "persona",
+    int64_t id = memory_block_create(db, "TestAgent", "persona",
                                      "Agent identity", "I am helpful", 5000);
     assert(id > 0);
 
-    MemoryBlock *mb = memory_block_get(db, "test_agent", "persona");
+    MemoryBlock *mb = memory_block_get(db, "TestAgent", "persona");
     assert(mb);
-    assert(strcmp(mb->agent_name, "test_agent") == 0);
+    assert(strcmp(mb->agent_name, "TestAgent") == 0);
     assert(strcmp(mb->label, "persona") == 0);
     assert(strcmp(mb->value, "I am helpful") == 0);
     assert(strcmp(mb->description, "Agent identity") == 0);
@@ -29,11 +29,11 @@ static void test_create_and_get(void) {
     memory_block_free(mb);
 
     /* Duplicate label fails */
-    int64_t dup = memory_block_create(db, "test_agent", "persona", "dup", "dup", 5000);
+    int64_t dup = memory_block_create(db, "TestAgent", "persona", "dup", "dup", 5000);
     assert(dup == -1);
 
     /* Different agent same label OK */
-    int64_t id2 = memory_block_create(db, "other_agent", "persona", "desc", "val", 3000);
+    int64_t id2 = memory_block_create(db, "OtherAgent", "persona", "desc", "val", 3000);
     assert(id2 > 0);
 
     db_close(db);
@@ -45,22 +45,22 @@ static void test_list(void) {
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
-    memory_block_create(db, "agent1", "a", "d1", "v1", 5000);
-    memory_block_create(db, "agent1", "b", "d2", "v2", 5000);
-    memory_block_create(db, "agent2", "c", "d3", "v3", 5000);
+    memory_block_create(db, "Agent1", "a", "d1", "v1", 5000);
+    memory_block_create(db, "Agent1", "b", "d2", "v2", 5000);
+    memory_block_create(db, "Agent2", "c", "d3", "v3", 5000);
 
     int count = 0;
-    MemoryBlock *list = memory_block_list(db, "agent1", &count);
+    MemoryBlock *list = memory_block_list(db, "Agent1", &count);
     assert(count == 2);
     assert(strcmp(list[0].label, "a") == 0);
     assert(strcmp(list[1].label, "b") == 0);
     memory_block_list_free(list, count);
 
-    list = memory_block_list(db, "agent2", &count);
+    list = memory_block_list(db, "Agent2", &count);
     assert(count == 1);
     memory_block_list_free(list, count);
 
-    list = memory_block_list(db, "nonexistent", &count);
+    list = memory_block_list(db, "Nonexistent", &count);
     assert(count == 0);
     assert(list == NULL);
 
@@ -73,26 +73,26 @@ static void test_set_value(void) {
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
-    memory_block_create(db, "agent", "notes", "my notes", "", 20);
+    memory_block_create(db, "Agent", "notes", "my notes", "", 20);
 
     /* Normal update */
-    int rc = memory_block_set_value(db, "agent", "notes", "short");
+    int rc = memory_block_set_value(db, "Agent", "notes", "short");
     assert(rc == 0);
-    MemoryBlock *mb = memory_block_get(db, "agent", "notes");
+    MemoryBlock *mb = memory_block_get(db, "Agent", "notes");
     assert(strcmp(mb->value, "short") == 0);
     memory_block_free(mb);
 
     /* V55: exceeds char_limit → rejected */
-    rc = memory_block_set_value(db, "agent", "notes", "this string is way too long for the limit");
+    rc = memory_block_set_value(db, "Agent", "notes", "this string is way too long for the limit");
     assert(rc == -1);
 
     /* Value unchanged after rejection */
-    mb = memory_block_get(db, "agent", "notes");
+    mb = memory_block_get(db, "Agent", "notes");
     assert(strcmp(mb->value, "short") == 0);
     memory_block_free(mb);
 
     /* Nonexistent block → error */
-    rc = memory_block_set_value(db, "agent", "nope", "val");
+    rc = memory_block_set_value(db, "Agent", "nope", "val");
     assert(rc == -1);
 
     db_close(db);
@@ -104,7 +104,7 @@ static void test_read_only(void) {
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
-    int64_t id = memory_block_create(db, "agent", "instructions", "standing orders", "do X", 5000);
+    int64_t id = memory_block_create(db, "Agent", "instructions", "standing orders", "do X", 5000);
     assert(id > 0);
 
     /* Set read_only directly */
@@ -115,10 +115,10 @@ static void test_read_only(void) {
     sqlite3_finalize(stmt);
 
     /* V55: read_only blocks reject edits */
-    int rc = memory_block_set_value(db, "agent", "instructions", "new value");
+    int rc = memory_block_set_value(db, "Agent", "instructions", "new value");
     assert(rc == -1);
 
-    MemoryBlock *mb = memory_block_get(db, "agent", "instructions");
+    MemoryBlock *mb = memory_block_get(db, "Agent", "instructions");
     assert(strcmp(mb->value, "do X") == 0);
     memory_block_free(mb);
 
@@ -137,16 +137,16 @@ static void test_seed(void) {
         "{\"label\":\"human\",\"description\":\"user facts\",\"char_limit\":5000}"
         "]}";
 
-    memory_blocks_seed(db, "myagent", json);
+    memory_blocks_seed(db, "Myagent", json);
 
-    MemoryBlock *mb = memory_block_get(db, "myagent", "persona");
+    MemoryBlock *mb = memory_block_get(db, "Myagent", "persona");
     assert(mb);
     assert(strcmp(mb->value, "I am X") == 0);
     assert(mb->char_limit == 3000);
     assert(mb->read_only == 1);
     memory_block_free(mb);
 
-    mb = memory_block_get(db, "myagent", "human");
+    mb = memory_block_get(db, "Myagent", "human");
     assert(mb);
     assert(strcmp(mb->value, "") == 0);
     assert(mb->char_limit == 5000);
@@ -154,9 +154,9 @@ static void test_seed(void) {
     memory_block_free(mb);
 
     /* Re-seed doesn't overwrite (DB authoritative) */
-    memory_block_set_value(db, "myagent", "human", "likes cats");
-    memory_blocks_seed(db, "myagent", json);
-    mb = memory_block_get(db, "myagent", "human");
+    memory_block_set_value(db, "Myagent", "human", "likes cats");
+    memory_blocks_seed(db, "Myagent", json);
+    mb = memory_block_get(db, "Myagent", "human");
     assert(strcmp(mb->value, "likes cats") == 0);
     memory_block_free(mb);
 
@@ -170,18 +170,18 @@ static void test_prompt_injection(void) {
     assert(db);
 
     /* Seed agent with system prompt */
-    db_agent_upsert(db, "testagent", "{}", "You are a test agent.", NULL);
+    db_agent_upsert(db, "Testagent", "{}", "You are a test agent.", NULL);
 
     /* Create memory blocks (containers) and add numbered entries */
-    memory_block_create(db, "testagent", "persona", "Agent identity", "", 5000);
-    memory_block_create(db, "testagent", "human", "User facts", "", 3000);
-    memory_entry_add(db, "testagent", "persona", "I am helpful"); /* 12 chars */
-    memory_entry_add(db, "testagent", "human", "Likes cats");     /* 10 chars */
+    memory_block_create(db, "Testagent", "persona", "Agent identity", "", 5000);
+    memory_block_create(db, "Testagent", "human", "User facts", "", 3000);
+    memory_entry_add(db, "Testagent", "persona", "I am helpful"); /* 12 chars */
+    memory_entry_add(db, "Testagent", "human", "Likes cats");     /* 10 chars */
 
     /* Build system prompt — no agents_dir needed, agent already in DB */
     Config cfg = {0};
     cfg.provider.context_window = 128000;
-    char *prompt = agent_build_system_prompt(db, "testagent", 1, NULL, &cfg);
+    char *prompt = agent_build_system_prompt(db, "Testagent", 1, NULL, &cfg);
     assert(prompt);
 
     /* Verify memory blocks render as numbered entries */

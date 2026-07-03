@@ -34,6 +34,8 @@
 #include "templates.h"
 #include "db_response.h"
 #include "shutdown.h"
+#include "crash.h"
+#include "doctor.h"
 #include "wake.h"
 #include "advance.h"
 #include "channel.h"
@@ -1872,6 +1874,7 @@ static void print_usage(void) {
            "  --log-level=LEVEL  set log level (error|info|debug|trace)\n"
            "  -v, --debug        debug logging (timing, context stats)\n"
            "  -vv, --trace       trace logging (full req/resp JSON)\n"
+           "  --doctor           print redacted diagnostic report and exit\n"
            "  --help             show this help\n"
            "\n"
            "note: running as root weakens mount-based read-only enforcement\n"
@@ -2538,6 +2541,10 @@ int main(int argc, char *argv[]) {
      * no config. The child reads its request from fd 3. */
     if (argc >= 2 && strcmp(argv[1], "--run-tool") == 0) return run_tool_main();
 
+    /* --doctor: one-shot diagnostic bundle. Runs its own DB/config path so a
+     * broken DB open is itself a finding — never bail on failures. */
+    if (argc >= 2 && strcmp(argv[1], "--doctor") == 0) return doctor_main();
+
     int daemon_mode = 0, new_session = 0, host_mode = 0;
     const char *channel_mode = NULL;
     LogLevel log_level_override = LOG_LEVEL_INFO;
@@ -2584,6 +2591,7 @@ int main(int argc, char *argv[]) {
                                       : log_level_parse(getenv("CCLAW_LOG_LEVEL")));
 
     shutdown_init();
+    crash_handler_init();
 
     /* ── Open DB ─────────────────────────────────────────────────── */
     db_configure_logging();   /* before the first db_open (sqlite3_initialize) */

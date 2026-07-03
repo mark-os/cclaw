@@ -64,8 +64,11 @@ static int pool_push(const WorkItem *item) {
         pthread_attr_t attr;
         pthread_attr_init(&attr);
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        if (pthread_create(&t, &attr, worker_fn, NULL) != 0)
+        if (pthread_create(&t, &attr, worker_fn, NULL) != 0) {
             g_pool.active--;   /* rollback: no thread reached the exit point */
+            cclaw_log_write(LOG_NOTICE, "llm_worker thread_spawn_fail active=%d max=%d",
+                            g_pool.active, g_pool.max);
+        }
         pthread_attr_destroy(&attr);
     }
     pthread_cond_signal(&g_pool.cond);

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
 #include "cclaw.h"
+#include "log.h"
 #include "secret_scan.h"
 #include "unicode_normalize.h"
 #include "agent_config.h"
@@ -1248,6 +1249,8 @@ int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source
         return id;
     }
     /* Findings present — copy and redact */
+    cclaw_log_write(LOG_NOTICE, "secret_scan hit source=%s rule=%s count=%d",
+                    source ? source : "?", f[0].rule_id ? f[0].rule_id : "?", n);
     size_t cap = len + 1 + (size_t)n * 80;
     char *buf = malloc(cap);
     if (!buf) {

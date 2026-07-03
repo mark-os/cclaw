@@ -89,7 +89,10 @@ static void model_stat_error(sqlite3 *db, const char *model_id, int status) {
     if (sqlite3_prepare_v2(db, degrade_sql, -1, &ds, NULL) == SQLITE_OK) {
         sqlite3_bind_text(ds, 1, model_id, -1, SQLITE_STATIC);
         sqlite3_bind_int(ds, 2, status);
-        sqlite3_step(ds); sqlite3_finalize(ds);
+        sqlite3_step(ds);
+        if (sqlite3_changes(db) > 0)
+            cclaw_log_write(LOG_NOTICE, "model degraded model=%s status=%d", model_id, status);
+        sqlite3_finalize(ds);
     }
 }
 
@@ -308,10 +311,13 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             }
             /* Prompt-specific errors: skip this model */
             if (status == 400 && llm_is_context_overflow(resp.data)) {
+                LOG_DEBUG_(cfg, "llm_req model_skip model=%s reason=context_overflow", m->model);
                 http_response_free(&resp);
                 skip_mask |= (1u << mi); break;
             }
             if (status == 401 || status == 403 || status == 404) {
+                LOG_DEBUG_(cfg, "llm_req model_skip model=%s reason=%s", m->model,
+                           status == 404 ? "not_found" : "auth_failed");
                 http_response_free(&resp);
                 skip_mask |= (1u << mi); break;
             }
@@ -332,6 +338,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
              * no forensic trail. Archive it (with the request we sent) and retry
              * the same model with backoff before giving up. */
             if (!resp.data || !resp.data[0]) {
+                LOG_INFO_(cfg, "llm_req empty_body model=%s retry=%d", m->model, retry);
                 db_archive_response(db, session_id, turn_id, m->id, "empty",
                                     resp.data, req_body);
                 http_response_free(&resp);

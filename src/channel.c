@@ -130,6 +130,8 @@ int channel_reap(pid_t pid, sqlite3 *db) {
     int delay = 1 << c->restart_count;
     if (delay > CHANNEL_MAX_BACKOFF) delay = CHANNEL_MAX_BACKOFF;
     c->next_restart_at = now + delay;
+    cclaw_log_write(LOG_NOTICE, "channel died name=%s pid=%d restart_count=%d delay=%ds",
+                    c->name, (int)pid, c->restart_count, delay);
     return 1;
 }
 
@@ -146,6 +148,8 @@ void channel_tick(sqlite3 *db) {
                 c->pid = pid;
                 c->started_at = now;
                 update_pid(db, c->name, pid);
+                cclaw_log_write(LOG_NOTICE, "channel respawn name=%s pid=%d",
+                                c->name, (int)pid);
             }
         }
 

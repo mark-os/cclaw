@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "http.h"
 #include "buf.h"
+#include "log.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -167,6 +168,7 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     if (rc != CURLE_OK && resp->err_detail[0] == '\0') {
         const char *msg = errbuf[0] ? errbuf : curl_easy_strerror(rc);
         snprintf(resp->err_detail, sizeof(resp->err_detail), "%s", msg);
+        cclaw_log_write(LOG_DEBUG, "http_do fail curl_code=%d err=%s", (int)rc, msg);
     }
 
     curl_slist_free_all(hlist);

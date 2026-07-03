@@ -2,6 +2,7 @@
 #include "proxy.h"
 #include "host_match.h"
 #include "http_policy.h"
+#include "log.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -484,6 +485,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     if (strncmp(preamble, "RESOLVE ", 8) == 0) {
         const char *host = preamble + 8;
         if (!host_decide(ctx, host)) {
+            cclaw_log_write(LOG_NOTICE, "proxy deny host=%s reason=policy", host);
             write(client_fd, "ERROR denied\n", 13);
             close(client_fd);
             return;
@@ -495,6 +497,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
             int n = snprintf(resp, sizeof(resp), "ADDR %s\n", ip);
             write(client_fd, resp, (size_t)n);
         } else {
+            cclaw_log_write(LOG_NOTICE, "proxy deny host=%s reason=resolve_failed", host);
             write(client_fd, "ERROR resolve\n", 14);
         }
         close(client_fd);
@@ -529,6 +532,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
             record_host(ctx, target);
             dial = target;
         } else {
+            cclaw_log_write(LOG_NOTICE, "proxy deny host=%s reason=policy", target);
             write(client_fd, "DENIED\n", 7);
             close(client_fd);
             return;
@@ -539,12 +543,14 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
          * can have authorized this branch — CIDR/exact-grant checks are
          * unreachable for non-numeric input. */
         if (!host_decide(ctx, target)) {
+            cclaw_log_write(LOG_NOTICE, "proxy deny host=%s reason=policy", target);
             write(client_fd, "DENIED\n", 7);
             close(client_fd);
             return;
         }
         via_hostname = 1;
         if (resolve_and_bless(ctx, target, resolved, sizeof(resolved)) != 0) {
+            cclaw_log_write(LOG_NOTICE, "proxy deny host=%s reason=resolve_failed", target);
             write(client_fd, "ERROR resolve\n", 14);
             close(client_fd);
             return;
@@ -555,6 +561,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
 
     /* Bound simultaneous relays per call — refuse cleanly when at the cap. */
     if (!relay_acquire(ctx)) {
+        cclaw_log_write(LOG_NOTICE, "proxy relay_full host=%s", target);
         write(client_fd, "DENIED\n", 7);
         close(client_fd);
         return;

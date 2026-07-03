@@ -22,6 +22,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "sandbox.h"
+#include "log.h"
 #include "preload_blob.h"
 #include "net_shim_blob.h"
 
@@ -505,9 +506,11 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
 
     /* V82/V37: namespace sandbox — fail closed if requested but unavailable */
     if (cfg->sandbox && sandbox_apply_namespace(ws, cwd, cfg->db_path, cfg) != 0) {
+        int e = errno;  /* log call below may clobber it */
+        cclaw_log_write(LOG_NOTICE, "sandbox namespace_fail errno=%d action=abort", e);
         fprintf(stderr, "error: namespace sandbox unavailable (errno=%d); "
                 "this trust level requires it — enable unprivileged user "
-                "namespaces or set the agent's trust_level to 'host'\n", errno);
+                "namespaces or set the agent's trust_level to 'host'\n", e);
         return -1;
     }
 
@@ -544,9 +547,12 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
             if (pfd >= 0) close(pfd);
             if (wr == (ssize_t)preload_net_blob_len)
                 setenv("LD_PRELOAD", "/tmp/libcclaw_net.so", 1);
-            else
+            else {
+                int e = errno;  /* log call below may clobber it */
+                cclaw_log_write(LOG_NOTICE, "sandbox preload_fail errno=%d effect=no_network", e);
                 fprintf(stderr, "[cclaw] warning: proxy preload setup failed "
-                        "(errno=%d); child has no network\n", errno);
+                        "(errno=%d); child has no network\n", e);
+            }
         }
 
         /* net_shim: a loopback HTTP CONNECT proxy forwarding to the broker UDS.

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "secret_interp.h"
 #include "buf.h"
+#include "log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -37,6 +38,13 @@ char *secret_interpolate(const char *text, const ShellSecret *secrets, size_t co
                     buf_append_str(&b, value);
                     p = end + SUFFIX_LEN;
                     continue;
+                }
+                /* No matching secret — placeholder passes through literally */
+                char miss_name[128];
+                if (name_len < sizeof(miss_name)) {
+                    memcpy(miss_name, name_start, name_len);
+                    miss_name[name_len] = '\0';
+                    cclaw_log_write(LOG_DEBUG, "secret_interp miss name=%s", miss_name);
                 }
             }
         }

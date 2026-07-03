@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "cron.h"
 #include "db.h"
+#include "log.h"
 #include "wake.h"
 #include "db.h"
 #include <stdio.h>
@@ -194,9 +195,11 @@ void cron_list_free(CronJob *jobs, int count) {
 }
 
 /* Insert cron task into inbox and signal daemon to process */
-static void execute_job(sqlite3 *db, const char *agent_name, int64_t session_id, const char *task) {
-    (void)agent_name;
+static void execute_job(sqlite3 *db, int64_t job_id, const char *agent_name,
+                        int64_t session_id, const char *task) {
     inbox_insert_scanned(db, session_id, "cron", task);
+    cclaw_log_write(LOG_NOTICE, "cron fire job=%lld agent=%s",
+                    (long long)job_id, agent_name ? agent_name : "");
     wake_session(session_id);
 }
 
@@ -248,7 +251,7 @@ static void run_due_jobs(sqlite3 *db) {
     /* Execute each due job */
     for (int i = 0; i < count; i++) {
         if (due[i].task)
-            execute_job(db, due[i].agent_name, due[i].session_id, due[i].task);
+            execute_job(db, due[i].id, due[i].agent_name, due[i].session_id, due[i].task);
 
         /* Update last_run_at and next_run_at */
         int64_t next = cron_next_run(due[i].expr, now);

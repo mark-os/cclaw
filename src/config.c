@@ -405,11 +405,10 @@ Config *config_load(sqlite3 *db) {
     env_override_int(&cfg->auto_recall, "CCLAW_AUTO_RECALL");
     env_override_int(&cfg->recall_max_tokens, "CCLAW_RECALL_MAX_TOKENS");
 
-    /* Log level: env override (inherited by worker child) */
-    {
-        const char *v = getenv("CCLAW_LOG_LEVEL");
-        if (v) cfg->log_level = log_level_parse(v);
-    }
+    /* Log level: info default, env override (inherited by worker child).
+     * Mirrors config_load_from_env — without this the daemon sat on the
+     * calloc'd 0 (= error) and its info lines never reached the journal. */
+    cfg->log_level = log_level_parse(getenv("CCLAW_LOG_LEVEL"));
 
     /* Workspace: DB kv → default, env override (mirrors config_load_from_env).
      * Without this the file tools, proxy mount, and workspace_init all see a

@@ -91,7 +91,7 @@ static void model_stat_error(sqlite3 *db, const char *model_id, int status) {
         sqlite3_bind_int(ds, 2, status);
         sqlite3_step(ds);
         if (sqlite3_changes(db) > 0)
-            cclaw_log_write(LOG_NOTICE, "model degraded model=%s status=%d", model_id, status);
+            LOG_INFO_("model degraded model=%s status=%d", model_id, status);
         sqlite3_finalize(ds);
     }
 }
@@ -115,7 +115,7 @@ static void model_stat_success(sqlite3 *db, const char *model_id,
 
 int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     Config *cfg = config_load(db);
-    if (!cfg) { fprintf(stderr, "llm_req: config load failed\n"); return -1; }
+    if (!cfg) { LOG_ERROR_("llm_req: config load failed"); return -1; }
 
     char *agent_name_alloc = session_get_agent_name(db, session_id);
     const char *agent_name = agent_name_alloc ? agent_name_alloc : "Assistant";
@@ -142,10 +142,10 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     /* Context planning */
     ContextPlan plan = {0};
     if (context_plan(db, session_id, cfg, tool_overhead, &plan) != 0) {
-        LOG_DEBUG_(cfg, "llm_req: context_plan failed");
+        LOG_DEBUG_("llm_req: context_plan failed");
         goto err;
     }
-    LOG_DEBUG_(cfg, "llm_req: %d entries, cut=%d", plan.count, plan.cut);
+    LOG_DEBUG_("llm_req: %d entries, cut=%d", plan.count, plan.cut);
 
     /* Auto-recall */
     char *recall_text = NULL;
@@ -276,10 +276,10 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
             long elapsed = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
             last_status = status;
-            LOG_DEBUG_(cfg, "llm_req: %ldms status=%d model=%s", elapsed, status, m->model);
+            LOG_DEBUG_("llm_req: %ldms status=%d model=%s", elapsed, status, m->model);
 
             if (cfg->log_level >= LOG_LEVEL_TRACE && resp.data)
-                LOG_TRACE_(cfg, "RESP %s", resp.data);
+                LOG_TRACE_("RESP %s", resp.data);
 
             /* Archive every non-2xx / network response (2xx bodies are archived
              * by db_ingest_response below). */
@@ -311,12 +311,12 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             }
             /* Prompt-specific errors: skip this model */
             if (status == 400 && llm_is_context_overflow(resp.data)) {
-                LOG_DEBUG_(cfg, "llm_req model_skip model=%s reason=context_overflow", m->model);
+                LOG_DEBUG_("llm_req model_skip model=%s reason=context_overflow", m->model);
                 http_response_free(&resp);
                 skip_mask |= (1u << mi); break;
             }
             if (status == 401 || status == 403 || status == 404) {
-                LOG_DEBUG_(cfg, "llm_req model_skip model=%s reason=%s", m->model,
+                LOG_DEBUG_("llm_req model_skip model=%s reason=%s", m->model,
                            status == 404 ? "not_found" : "auth_failed");
                 http_response_free(&resp);
                 skip_mask |= (1u << mi); break;
@@ -338,7 +338,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
              * no forensic trail. Archive it (with the request we sent) and retry
              * the same model with backoff before giving up. */
             if (!resp.data || !resp.data[0]) {
-                LOG_INFO_(cfg, "llm_req empty_body model=%s retry=%d", m->model, retry);
+                LOG_INFO_("llm_req empty_body model=%s retry=%d", m->model, retry);
                 db_archive_response(db, session_id, turn_id, m->id, "empty",
                                     resp.data, req_body);
                 http_response_free(&resp);
@@ -406,7 +406,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
          * when archiving is on; resp #0 means it isn't, so this line is the only
          * trail). Metadata only: the body can be large and may carry secrets. */
         if (had_dberr)
-            LOG_ERROR_(cfg, "llm_req: response ingest failed (DB contention) "
+            LOG_ERROR_("llm_req: response ingest failed (DB contention) "
                        "session=%lld turn=%lld resp=#%lld — response discarded",
                        (long long)session_id, (long long)turn_id, (long long)resp_id);
         char err_buf[160];

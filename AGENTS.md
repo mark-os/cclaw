@@ -159,7 +159,7 @@ Tests must never hang. Follow these rules:
 # (plus the tail of the log on failure). `make test | tail -20` is fine.
 make test               # unit tests
 make test-integration   # mock-server tests
-make test-asan          # unit tests under ASan/UBSan — run before committing
+make test-asan          # unit tests under ASan/UBSan — heavy; only when explicitly asked
 
 # Single test binary — redirect to file, read after
 ./build/test_foo > /tmp/t.txt 2>&1; echo $?
@@ -183,7 +183,12 @@ make test-e2e     # live LLM tests (needs API key)
 make clean        # remove build/
 ```
 
-Keep the day-to-day loop on `make smoke`/`make test` — they're fast. `make test-asan` (full suite under ASan/UBSan) is a longer pass; save it for the end of a workstream, right before committing (see Testing Guidelines), not as a routine build step.
+**Escalate, don't default to the top.** `make smoke` (~8s) is 10x faster than `make test` (~90s) because it's a *smaller test set*, not a build-cache effect — `test`'s time is almost all execution, not compilation, so there's no free lunch by rerunning it.
+
+- While actively editing: `make smoke` after each change.
+- Before a commit: `make test` — cheap enough to run every time.
+- Before a commit that touches channels, LLM proc, retries, or shell proxy (mock-server-exercised paths): also `make test-integration` (~66s). Skip it for changes clearly orthogonal to those areas.
+- `make test-asan` (full suite under ASan/UBSan, ~200s clean-instrumented rebuild): never unprompted — only when explicitly asked.
 
 - **`make debug` uses clang, not gcc.** GCC-only `#pragma GCC diagnostic` directives must be guarded with `#if defined(__GNUC__) && !defined(__clang__)` — under `-Werror` clang turns an unknown warning group (e.g. `-Wformat-truncation`) into a hard error.
 - **`make test` builds `build/cclaw` first.** `test_tool_js` / `test_js_http_fetch` fork the main binary via `CCLAW_QJS_EXE` (the `--qjs_eval` subprocess), so the `test` target depends on `$(BUILDDIR)/cclaw` — it's always rebuilt before the suite runs, even after `make clean`. (`make smoke` deliberately omits the dep: its curated subset has no fork-the-binary tests.)

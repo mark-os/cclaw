@@ -114,8 +114,8 @@ int channel_reap(pid_t pid, sqlite3 *db) {
     /* Flap detection: 3+ crashes in 5 minutes → broken */
     if (c->restart_count >= CHANNEL_MAX_RESTARTS &&
         (now - c->first_crash) < CHANNEL_FLAP_WINDOW) {
-        fprintf(stderr, "channel '%s': flapping (%d crashes in %lds), marking broken\n",
-                c->name, c->restart_count, (long)(now - c->first_crash));
+        LOG_ERROR_("channel flapping name=%s crashes=%d window=%lds status=broken",
+                   c->name, c->restart_count, (long)(now - c->first_crash));
         const char *sql = "UPDATE channels SET status='broken' WHERE name=?;";
         sqlite3_stmt *s;
         if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
@@ -130,8 +130,8 @@ int channel_reap(pid_t pid, sqlite3 *db) {
     int delay = 1 << c->restart_count;
     if (delay > CHANNEL_MAX_BACKOFF) delay = CHANNEL_MAX_BACKOFF;
     c->next_restart_at = now + delay;
-    cclaw_log_write(LOG_NOTICE, "channel died name=%s pid=%d restart_count=%d delay=%ds",
-                    c->name, (int)pid, c->restart_count, delay);
+    LOG_INFO_("channel died name=%s pid=%d restart_count=%d delay=%ds",
+              c->name, (int)pid, c->restart_count, delay);
     return 1;
 }
 
@@ -148,8 +148,8 @@ void channel_tick(sqlite3 *db) {
                 c->pid = pid;
                 c->started_at = now;
                 update_pid(db, c->name, pid);
-                cclaw_log_write(LOG_NOTICE, "channel respawn name=%s pid=%d",
-                                c->name, (int)pid);
+                LOG_INFO_("channel respawn name=%s pid=%d",
+                          c->name, (int)pid);
             }
         }
 
@@ -220,8 +220,8 @@ void channel_consume_events(sqlite3 *db) {
             if (sid <= 0) {
                 sid = session_create(db, ch_name, agent, -1, 0);
                 if (sid > 0) {
-                    cclaw_log_write(LOG_NOTICE, "channel new_session ch=%s sid=%lld agent=%s",
-                                    ch_name, (long long)sid, agent);
+                    LOG_INFO_("channel new_session ch=%s sid=%lld agent=%s",
+                              ch_name, (long long)sid, agent);
                     /* Store channel_name + channel_id on session */
                     const char *usql = "UPDATE sessions SET channel_name=?, channel_id=? WHERE id=?;";
                     sqlite3_stmt *us;
@@ -234,8 +234,8 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
             if (sid > 0) {
-                cclaw_log_write(LOG_NOTICE, "channel event ch=%s sid=%lld type=%s",
-                                ch_name, (long long)sid, etype);
+                LOG_INFO_("channel event ch=%s sid=%lld type=%s",
+                          ch_name, (long long)sid, etype);
                 processed++;
                 /* Check if session is awaiting approval — route as decision */
                 Approval *pa = approval_get_pending(db, sid);
@@ -290,7 +290,7 @@ del:;
     }
     sqlite3_finalize(stmt);
     if (processed > 0)
-        cclaw_log_write(LOG_NOTICE, "channel consume_done count=%d", processed);
+        LOG_INFO_("channel consume_done count=%d", processed);
 }
 
 time_t channel_next_deadline(void) {

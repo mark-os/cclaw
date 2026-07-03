@@ -81,8 +81,8 @@ int extension_load_hooks(ExtensionCtx *ctx, sqlite3 *db, const char *agent_name)
         if (ev < 0 || !path) continue;
         char *src = read_file(path, NULL);
         if (!src) {
-            cclaw_log_write(LOG_DEBUG, "extension hook_load_fail agent=%s event=%s path=%s",
-                            agent_name, event, path);
+            LOG_DEBUG_("extension hook_load_fail agent=%s event=%s path=%s",
+                       agent_name, event, path);
             continue;
         }
         HookList *hl = &ctx->hooks[ev];

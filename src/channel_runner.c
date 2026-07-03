@@ -95,7 +95,7 @@ static JSValue eval_js(JSContext *ctx, const char *code, const char *tag) {
     if (JS_IsException(v)) {
         JSValue exc = JS_GetException(ctx);
         const char *msg = JS_ToCString(ctx, exc);
-        cclaw_log_write(LOG_ERR, "channel_runner: JS error in %s: %s", tag, msg ? msg : "?");
+        LOG_ERROR_("channel_runner: JS error in %s: %s", tag, msg ? msg : "?");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, exc);
         return JS_UNDEFINED;
@@ -235,7 +235,7 @@ static CURL *make_easy(const char *method, const char *url, const char *body,
     if (!c) return NULL;
     if (!url_host_allowed(url)) {
         curl_easy_cleanup(c);
-        cclaw_log_write(LOG_WARNING, "channel_runner: url host mismatch, refusing: %s", url);
+        LOG_WARN_("channel_runner: url host mismatch, refusing: %s", url);
         return NULL;
     }
     buf_free(resp);
@@ -467,7 +467,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     signal(SIGPIPE, SIG_IGN);
 
     g_ctx = channel_ctx_open(db_path, channel_name);
-    if (!g_ctx) { cclaw_log_write(LOG_ERR, "channel_runner: DB open failed"); return 1; }
+    if (!g_ctx) { LOG_ERROR_("channel_runner: DB open failed"); return 1; }
 
     /* Load the secret key so admin.setKey can write to the encrypted kv. */
     {
@@ -499,22 +499,22 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
         }
     }
     if (!js_path[0]) {
-        cclaw_log_write(LOG_ERR, "channel_runner: no extension path for channel '%s'", channel_name);
+        LOG_ERROR_("channel_runner: no extension path for channel '%s'", channel_name);
         channel_ctx_free(g_ctx);
         return 1;
     }
 
     int outbox_fd = channel_outbox_fifo_open(db_path, channel_name);
     if (outbox_fd < 0)
-        cclaw_log_write(LOG_WARNING, "channel_runner: outbox FIFO unavailable");
+        LOG_WARN_("channel_runner: outbox FIFO unavailable");
 
     int uds_fd = uds_listen_open(db_path, channel_name);
     if (uds_fd < 0)
-        cclaw_log_write(LOG_WARNING, "channel_runner: request socket unavailable");
+        LOG_WARN_("channel_runner: request socket unavailable");
 
     char *js_src = read_file(js_path);
     if (!js_src) {
-        cclaw_log_write(LOG_ERR, "channel_runner: cannot read %s", js_path);
+        LOG_ERROR_("channel_runner: cannot read %s", js_path);
         channel_ctx_free(g_ctx);
         return 1;
     }
@@ -533,7 +533,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     if (JS_IsException(load_val)) {
         JSValue exc = JS_GetException(ctx);
         const char *msg = JS_ToCString(ctx, exc);
-        cclaw_log_write(LOG_ERR, "channel_runner: JS load error: %s", msg ? msg : "?");
+        LOG_ERROR_("channel_runner: JS load error: %s", msg ? msg : "?");
         if (msg) JS_FreeCString(ctx, msg);
         JS_FreeValue(ctx, exc);
         JS_FreeContext(ctx); qjs_runtime_destroy(g_qrt); channel_ctx_free(g_ctx);
@@ -547,7 +547,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     /* onInit: required; may set a poll shape and queue sends */
     JSValue init_ret = eval_js(ctx, "onInit()", "<init>");
     if (JS_IsUndefined(init_ret)) {
-        cclaw_log_write(LOG_ERR, "channel_runner: onInit failed");
+        LOG_ERROR_("channel_runner: onInit failed");
         curl_multi_cleanup(g_multi); curl_global_cleanup();
         JS_FreeContext(ctx); qjs_runtime_destroy(g_qrt); channel_ctx_free(g_ctx);
         return 1;
@@ -555,7 +555,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     poll_shape_update(ctx, init_ret);
     JS_FreeValue(ctx, init_ret);
 
-    cclaw_log_write(LOG_NOTICE, "channel_runner: started: channel=%s poll=%s requests=%s",
+    LOG_INFO_("channel_runner: started: channel=%s poll=%s requests=%s",
             channel_name, g_poll.url ? "yes" : "no", uds_fd >= 0 ? "yes" : "no");
 
     /* Recover rows a crashed predecessor left mid-send, then deliver
@@ -683,6 +683,6 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     JS_FreeContext(ctx);
     qjs_runtime_destroy(g_qrt);
     channel_ctx_free(g_ctx);
-    cclaw_log_write(LOG_NOTICE, "channel_runner: stopped");
+    LOG_INFO_("channel_runner: stopped");
     return 0;
 }

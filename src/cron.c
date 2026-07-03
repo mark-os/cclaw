@@ -198,8 +198,8 @@ void cron_list_free(CronJob *jobs, int count) {
 static void execute_job(sqlite3 *db, int64_t job_id, const char *agent_name,
                         int64_t session_id, const char *task) {
     inbox_insert_scanned(db, session_id, "cron", task);
-    cclaw_log_write(LOG_NOTICE, "cron fire job=%lld agent=%s",
-                    (long long)job_id, agent_name ? agent_name : "");
+    LOG_INFO_("cron fire job=%lld agent=%s",
+             (long long)job_id, agent_name ? agent_name : "");
     wake_session(session_id);
 }
 

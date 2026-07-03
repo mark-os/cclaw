@@ -27,7 +27,8 @@ typedef enum {
 /* V97: log levels (increasing verbosity) */
 typedef enum {
     LOG_LEVEL_ERROR = 0,    /* errors only */
-    LOG_LEVEL_INFO,         /* + turn boundaries, warnings */
+    LOG_LEVEL_WARN,         /* + degraded-but-continuing conditions */
+    LOG_LEVEL_INFO,         /* + turn boundaries */
     LOG_LEVEL_DEBUG,        /* + timing, retry decisions, response shapes, context stats */
     LOG_LEVEL_TRACE         /* + full req/resp JSON */
 } LogLevel;
@@ -131,7 +132,7 @@ typedef struct {
     float compaction_target;  /* V91: compact down to this × context_window (default 0.3) */
     int compaction;           /* V91: 1=summarize via LLM (default), 0=truncate only */
     int token_rate_limit;   /* V71: max tokens/hr (default 1000000, 0=unlimited) */
-    LogLevel log_level;     /* V97: info|debug|trace */
+    LogLevel log_level;     /* V97: error|warn|info|debug|trace */
     int save_reasoning;     /* store reasoning/thinking tokens in entry metadata */
     int save_usage;         /* store token usage in entry metadata */
     int save_logprobs;      /* store logprobs in entry metadata */

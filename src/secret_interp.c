@@ -44,7 +44,7 @@ char *secret_interpolate(const char *text, const ShellSecret *secrets, size_t co
                 if (name_len < sizeof(miss_name)) {
                     memcpy(miss_name, name_start, name_len);
                     miss_name[name_len] = '\0';
-                    cclaw_log_write(LOG_DEBUG, "secret_interp miss name=%s", miss_name);
+                    LOG_DEBUG_("secret_interp miss name=%s", miss_name);
                 }
             }
         }

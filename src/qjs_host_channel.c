@@ -7,6 +7,7 @@
 #include "channel_api.h"
 #include "admin_api.h"
 #include "db.h"
+#include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,7 +126,9 @@ static JSValue js_ch_log(JSContext *ctx, JSValueConst this_val,
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
     const char *msg = JS_ToCString(ctx, argv[0]);
-    if (msg) { fprintf(stderr, "[%s] %s\n", g_ctx->channel_name, msg); JS_FreeCString(ctx, msg); }
+    /* Syslog, not stderr: the channel runner is daemon-forked, so its stderr
+     * goes nowhere — journald is the only place these lines are visible. */
+    if (msg) { LOG_INFO_("channel_js name=%s msg=%s", g_ctx->channel_name, msg); JS_FreeCString(ctx, msg); }
     return JS_UNDEFINED;
 }
 

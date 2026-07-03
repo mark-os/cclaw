@@ -558,8 +558,8 @@ int run_tool_main(void) {
 
     /* Syslog for this process family (proxy denials, sandbox failures) —
      * after the blanket close (openlog opens a socket fd). The parent passes
-     * only CCLAW_LOG_LEVEL in the env; without the mask every LOG_DEBUG
-     * write here would emit unconditionally. */
+     * only CCLAW_LOG_LEVEL in the env; without setting the level the child
+     * would sit on log.c's compiled-in default, not the configured one. */
     cclaw_log_init(0);
     cclaw_log_set_level(log_level_parse(getenv("CCLAW_LOG_LEVEL")));
 

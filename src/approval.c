@@ -72,8 +72,8 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
     int64_t id = sqlite3_last_insert_rowid(db);
-    cclaw_log_write(LOG_NOTICE, "approval create id=%lld session=%lld tool=%s",
-                    (long long)id, (long long)session_id, tool_name ? tool_name : "?");
+    LOG_INFO_("approval create id=%lld session=%lld tool=%s",
+             (long long)id, (long long)session_id, tool_name ? tool_name : "?");
     return id;
 }
 
@@ -144,8 +144,8 @@ Approval *approval_resolve(sqlite3 *db, int64_t id, int approved, const char *de
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE || sqlite3_changes(db) != 1)
         return NULL;
-    cclaw_log_write(LOG_NOTICE, "approval resolve id=%lld decision=%s",
-                    (long long)id, new_state);
+    LOG_INFO_("approval resolve id=%lld decision=%s",
+             (long long)id, new_state);
 
     /* Return the resolved row */
     const char *sel =

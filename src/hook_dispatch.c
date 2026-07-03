@@ -169,18 +169,18 @@ static int apply_inject(sqlite3 *db, int64_t session_id, const char *cmds_json) 
         const char *content = (const char *)sqlite3_column_text(s, 1);
         int ephemeral = sqlite3_column_int(s, 2);
         if (!role || (strcmp(role, "system") != 0 && strcmp(role, "user") != 0)) {
-            cclaw_log_write(LOG_WARNING, "hook inject dropped: bad role");
+            LOG_WARN_("hook inject dropped: bad role");
             continue;
         }
         if (!content || !content[0]) {
-            cclaw_log_write(LOG_WARNING, "hook inject dropped: empty content");
+            LOG_WARN_("hook inject dropped: empty content");
             continue;
         }
         size_t clen = strlen(content);
         if (count >= HOOK_INJECT_MAX_ENTRIES || total + clen > HOOK_INJECT_MAX_CHARS) {
-            cclaw_log_write(LOG_WARNING, "hook inject dropped: cap exceeded"
-                            " (%d entries / %d chars per dispatch)",
-                            HOOK_INJECT_MAX_ENTRIES, HOOK_INJECT_MAX_CHARS);
+            LOG_WARN_("hook inject dropped: cap exceeded"
+                     " (%d entries / %d chars per dispatch)",
+                     HOOK_INJECT_MAX_ENTRIES, HOOK_INJECT_MAX_CHARS);
             continue;
         }
         count++;

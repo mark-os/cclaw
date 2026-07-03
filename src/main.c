@@ -521,7 +521,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         }
         free(stored);
         free(result);
-        LOG_INFO_(g_cfg, "tool done tool=%s inline=1", tc->name);
+        LOG_INFO_("tool done tool=%s inline=1", tc->name);
         return 1; /* Handled inline */
     }
 
@@ -558,7 +558,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
                 return tool_inline_error(session_id, tc,
                     "error: spawn_run_tool_child failed", "fork_failed");
             db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
-            LOG_INFO_(g_cfg, "tool fork tool=%s", tc->name);
+            LOG_INFO_("tool fork tool=%s", tc->name);
             return 0; /* async serial — wait for reap */
         }
     }
@@ -641,7 +641,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
                 return tool_inline_error(session_id, tc,
                     "error: spawn_run_tool_child failed", "fork_failed");
             db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
-            LOG_INFO_(g_cfg, "tool fork tool=%s", tc->name);
+            LOG_INFO_("tool fork tool=%s", tc->name);
             return 0;
         }
     }
@@ -689,7 +689,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             return tool_inline_error(session_id, tc,
                 "error: spawn_run_tool_child failed", "fork_failed");
         db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
-        LOG_INFO_(g_cfg, "tool fork tool=%s", tc->name);
+        LOG_INFO_("tool fork tool=%s", tc->name);
         return 0;
     }
 
@@ -777,7 +777,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             return tool_inline_error(session_id, tc,
                 "error: spawn_run_tool_child failed", "fork_failed");
         db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
-        LOG_INFO_(g_cfg, "tool fork tool=%s", tc->name);
+        LOG_INFO_("tool fork tool=%s", tc->name);
         return 0;
     }
 
@@ -1570,7 +1570,7 @@ static void run_advance(int64_t session_id) {
      * support logs tie back to the conversation and its llm_responses rows. */
     cclaw_log_set_ctx(session_id, -1, NULL);
     AdvanceOutput out = advance_session(g_db, session_id, max_iter);
-    LOG_INFO_(g_cfg, "advance action=%s iter=%d",
+    LOG_INFO_("advance action=%s iter=%d",
               advance_action_name(out.action), out.iteration);
     cclaw_log_set_ctx(session_id, -1, out.agent_name);
 
@@ -1644,7 +1644,7 @@ static void run_advance(int64_t session_id) {
     case ADVANCE_ERROR:
         /* In daemon mode this used to vanish silently — log it so a stuck
          * session leaves a trail the user can send. */
-        LOG_ERROR_(g_cfg, "advance_session failed");
+        LOG_ERROR_("advance_session failed");
         if (g_mode == 0) {
             fprintf(stderr, "error: session advance failed\n");
             if (session_id == g_cli_session) g_cli_turn_active = 0;
@@ -1806,7 +1806,7 @@ static void reap_children(void) {
             if (hosts && rid > 0)
                 db_entry_set_network_hosts(g_db, rid, hosts);
             db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, rid);
-            LOG_INFO_(g_cfg, "tool done tool=%s is_err=%d", c->tool_name, is_err);
+            LOG_INFO_("tool done tool=%s is_err=%d", c->tool_name, is_err);
             if (hook_annotate) {
                 if (rid > 0) hook_entry_data_patch(g_db, rid, hook_annotate);
                 free(hook_annotate);
@@ -2035,7 +2035,7 @@ static int run_daemon(char *db_path) {
 
     /* Start LLM worker threads */
     if (llm_worker_start(db_path, g_llm_threads) != 0) {
-        LOG_ERROR_(g_cfg, "daemon: failed to start LLM worker");
+        LOG_ERROR_("daemon: failed to start LLM worker");
         config_free(g_cfg); db_close(g_db); free(db_path); return 1;
     }
     int daemon_worker_fd = llm_worker_fd();
@@ -2043,7 +2043,7 @@ static int run_daemon(char *db_path) {
 
     /* Fire-and-forget tool threads (EXEC_THREAD vehicle) */
     if (tool_thread_start(db_path, 0) != 0) {
-        LOG_ERROR_(g_cfg, "daemon: failed to start tool threads");
+        LOG_ERROR_("daemon: failed to start tool threads");
         llm_worker_stop();
         config_free(g_cfg); db_close(g_db); free(db_path); return 1;
     }
@@ -2073,7 +2073,7 @@ static int run_daemon(char *db_path) {
     /* Register in the liveness table so this daemon's in-flight sessions are
      * owner-stamped and never reclaimed by a peer's recovery. */
     if (process_register(g_db, "daemon", getpid(), g_instance_id, sizeof(g_instance_id)) != 0)
-        LOG_ERROR_(g_cfg, "daemon: process registration failed");
+        LOG_ERROR_("daemon: process registration failed");
     db_set_instance_id(g_instance_id);
 
     /* Daemon event loop */
@@ -2262,7 +2262,7 @@ static int run_cli(char *db_path, const char *prompt,
     /* Register in the liveness table before touching session state, so our
      * transitions stamp owner_instance and recovery won't reclaim them. */
     if (process_register(g_db, "cli", getpid(), g_instance_id, sizeof(g_instance_id)) != 0)
-        fprintf(stderr, "warning: process registration failed\n");
+        LOG_WARN_("process registration failed kind=cli");
     db_set_instance_id(g_instance_id);
 
     /* Refuse to drive a session another live process is mid-turn on — two
@@ -2330,7 +2330,7 @@ static int run_cli(char *db_path, const char *prompt,
         worker_fd = llm_worker_fd();
         set_nonblock(worker_fd);
     } else {
-        fprintf(stderr, "error: failed to start LLM worker\n");
+        LOG_ERROR_("llm worker start failed");
         agent_setup_destroy(&setup); free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path); return 1;
     }
 
@@ -2440,13 +2440,13 @@ static int run_cli(char *db_path, const char *prompt,
         }
         if (stdin_idx >= 0 && (cli_pfds[stdin_idx].revents & (POLLERR | POLLNVAL))) {
             /* stdin fd broken/closed — exit instead of spinning on POLLNVAL */
-            LOG_ERROR_(g_cfg, "stdin: poll error (revents=0x%x), exiting",
+            LOG_ERROR_("stdin: poll error (revents=0x%x), exiting",
                        cli_pfds[stdin_idx].revents);
             goto done;
         }
         if (stdin_idx >= 0 && (cli_pfds[stdin_idx].revents & POLLIN)) {
             if (g_cli_turn_active) {
-                LOG_DEBUG_(g_cfg, "stdin: POLLIN but turn active, skipping");
+                LOG_DEBUG_("stdin: POLLIN but turn active, skipping");
                 continue;
             }
 
@@ -2460,7 +2460,7 @@ static int run_cli(char *db_path, const char *prompt,
             char *nl = strchr(linebuf, '\n');
             if (!nl) continue; /* partial line, wait for more */
             *nl = '\0';
-            LOG_DEBUG_(g_cfg, "stdin: read line [%s]", linebuf);
+            LOG_DEBUG_("stdin: read line [%s]", linebuf);
 
             if (!linebuf[0]) { linepos = 0; cli_prompt(); continue; }
             if (strcmp(linebuf, "exit") == 0 || strcmp(linebuf, "quit") == 0) goto done;
@@ -2577,6 +2577,11 @@ int main(int argc, char *argv[]) {
      * daemon and channel-runner children log strictly to syslog/journald. */
     int cli_tty = (!daemon_mode && channel_mode == NULL);
     cclaw_log_init(cli_tty);
+    /* Provisional level so writes between here and the post-config
+     * cclaw_log_set_level below aren't wide open (DB open, schema, seeding
+     * all log). Refined once config resolves. */
+    cclaw_log_set_level(log_level_set ? log_level_override
+                                      : log_level_parse(getenv("CCLAW_LOG_LEVEL")));
 
     shutdown_init();
 
@@ -2619,10 +2624,7 @@ int main(int argc, char *argv[]) {
     if (!g_cfg) { fprintf(stderr, "config load failed\n"); db_close(g_db); return 1; }
     if (log_level_set) {
         g_cfg->log_level = log_level_override;
-        const char *lvl_str = log_level_override == LOG_LEVEL_TRACE ? "trace" :
-                              log_level_override == LOG_LEVEL_DEBUG ? "debug" :
-                              log_level_override == LOG_LEVEL_ERROR ? "error" : "info";
-        setenv("CCLAW_LOG_LEVEL", lvl_str, 1);
+        setenv("CCLAW_LOG_LEVEL", log_level_name(log_level_override), 1);
     } else if (cli_tty && !getenv("CCLAW_LOG_LEVEL")) {
         /* Interactive CLI defaults to errors-only on the tty so logs don't
          * clutter the conversation; -v/-vv or CCLAW_LOG_LEVEL opt back in.
@@ -2631,9 +2633,7 @@ int main(int argc, char *argv[]) {
     }
     cclaw_log_set_level(g_cfg->log_level);
     snprintf(g_log_level_env, sizeof g_log_level_env, "CCLAW_LOG_LEVEL=%s",
-             g_cfg->log_level >= LOG_LEVEL_TRACE ? "trace" :
-             g_cfg->log_level == LOG_LEVEL_DEBUG ? "debug" :
-             g_cfg->log_level == LOG_LEVEL_ERROR ? "error" : "info");
+             log_level_name(g_cfg->log_level));
 
     /* Enable SQLite query profiling at debug level and above */
     if (g_cfg->log_level >= LOG_LEVEL_DEBUG)
@@ -2658,7 +2658,7 @@ int main(int argc, char *argv[]) {
      * sessions. Owner-scoped, so it's also safe on the periodic path. ── */
     process_gc_dead(g_db, PROCESS_TTL_SEC);
     if (db_recover_stale_sessions(g_db) != 0)
-        fprintf(stderr, "warning: startup recovery failed\n");
+        LOG_WARN_("startup recovery failed");
 
     if (daemon_mode) return run_daemon(db_path);
     return run_cli(db_path, prompt, session_id, new_session, host_mode);

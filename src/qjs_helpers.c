@@ -147,6 +147,8 @@ JSValue qjs_resolve(JSContext *ctx, JSValue val) {
         if (err == 0) break;
         if (err < 0) {
             char *msg = qjs_get_exception_string(ctx);
+            /* stderr on purpose: in the qjs_eval child stderr is captured into
+             * the tool result, so the model sees the job error. */
             if (msg) { fprintf(stderr, "[qjs] job error: %s\n", msg); free(msg); }
         }
     }

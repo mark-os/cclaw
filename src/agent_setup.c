@@ -8,6 +8,7 @@
 #include "tool_request_config.h"
 #include "sandbox.h"
 #include "log.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>

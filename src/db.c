@@ -180,10 +180,10 @@ void db_enable_trace(sqlite3 *db) {
 /* Process-global SQLite log hook (SQLITE_CONFIG_LOG). SQLite invokes this for
  * every internal error/warning — BUSY, WAL recovery, malformed schema, etc. —
  * that would otherwise be silently swallowed inside a library call. May fire on
- * any thread, so keep it to a single fprintf. */
+ * any thread; cclaw_log_write is thread-safe (syslog + thread-local ctx). */
 static void sqlite_log_cb(void *arg, int rc, const char *msg) {
     (void)arg;
-    fprintf(stderr, "sqlite[%d %s]: %s\n", rc, sqlite3_errstr(rc), msg ? msg : "");
+    LOG_INFO_("sqlite rc=%d err=%s msg=%s", rc, sqlite3_errstr(rc), msg ? msg : "");
 }
 
 void db_configure_logging(void) {
@@ -195,8 +195,8 @@ sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(path, &db);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "db_open: %s (extended=%d)\n",
-                sqlite3_errmsg(db), sqlite3_extended_errcode(db));
+        LOG_ERROR_("db_open failed err=%s extended=%d",
+                   sqlite3_errmsg(db), sqlite3_extended_errcode(db));
         sqlite3_close(db);
         return NULL;
     }
@@ -214,7 +214,7 @@ int db_ensure_schema(sqlite3 *db) {
     char *err = NULL;
     int rc = sqlite3_exec(db, SCHEMA_SQL, NULL, NULL, &err);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "db_ensure_schema: %s\n", err);
+        LOG_ERROR_("db_ensure_schema failed err=%s", err);
         sqlite3_free(err);
         return -1;
     }
@@ -242,7 +242,7 @@ int db_ensure_schema(sqlite3 *db) {
             "INSERT INTO entries_fts(entries_fts) VALUES('rebuild');",
             NULL, NULL, &err);
         if (rc != SQLITE_OK) {
-            fprintf(stderr, "db_ensure_schema: fts rebuild: %s\n", err);
+            LOG_WARN_("db_ensure_schema fts rebuild failed err=%s", err);
             sqlite3_free(err);  /* non-fatal — recall degrades, chat still works */
         }
     }
@@ -297,7 +297,7 @@ int db_seed_defaults(sqlite3 *db) {
     char *err = NULL;
     int rc = sqlite3_exec(db, TPL_SEED_SQL, NULL, NULL, &err);
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "db_seed_defaults: %s\n", err);
+        LOG_ERROR_("db_seed_defaults failed err=%s", err);
         sqlite3_free(err);
         return -1;
     }
@@ -1249,7 +1249,7 @@ int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source
         return id;
     }
     /* Findings present — copy and redact */
-    cclaw_log_write(LOG_NOTICE, "secret_scan hit source=%s rule=%s count=%d",
+    LOG_INFO_("secret_scan hit source=%s rule=%s count=%d",
                     source ? source : "?", f[0].rule_id ? f[0].rule_id : "?", n);
     size_t cap = len + 1 + (size_t)n * 80;
     char *buf = malloc(cap);

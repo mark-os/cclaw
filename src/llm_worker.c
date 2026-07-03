@@ -66,8 +66,8 @@ static int pool_push(const WorkItem *item) {
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
         if (pthread_create(&t, &attr, worker_fn, NULL) != 0) {
             g_pool.active--;   /* rollback: no thread reached the exit point */
-            cclaw_log_write(LOG_NOTICE, "llm_worker thread_spawn_fail active=%d max=%d",
-                            g_pool.active, g_pool.max);
+            LOG_INFO_("llm_worker thread_spawn_fail active=%d max=%d",
+                 g_pool.active, g_pool.max);
         }
         pthread_attr_destroy(&attr);
     }
@@ -113,7 +113,7 @@ static void *worker_fn(void *arg) {
     (void)arg;
     sqlite3 *db = db_open(g_pool.db_path);
     if (!db) {
-        cclaw_log_write(LOG_ERR, "worker: db_open failed");
+        LOG_ERROR_("worker: db_open failed");
         pthread_mutex_lock(&g_pool.mtx);
         g_pool.active--;
         if (g_pool.active == 0)
@@ -142,21 +142,21 @@ static void *worker_fn(void *arg) {
          * session and agent for the duration of the job. */
         cclaw_log_set_ctx(item.session_id, -1, item.agent_name);
 
-        cclaw_log_write(LOG_NOTICE, "llm_job start job=%lld type=%s",
-                        (long long)item.job_id, job_type == 1 ? "compaction" : "turn");
+        LOG_INFO_("llm_job start job=%lld type=%s",
+                 (long long)item.job_id, job_type == 1 ? "compaction" : "turn");
 
         if (job_type == 1) {
             /* Compaction job */
-            cclaw_log_write(LOG_DEBUG, "worker: compaction start");
+            LOG_DEBUG_("worker: compaction start");
             llm_compaction(db, curl, item.session_id, item.agent_name);
         } else {
             /* LLM turn job */
-            cclaw_log_write(LOG_DEBUG, "worker: model start");
+            LOG_DEBUG_("worker: model start");
             llm_req(db, curl, item.session_id, item.recall);
         }
 
-        cclaw_log_write(LOG_NOTICE, "llm_job done job=%lld type=%s",
-                        (long long)item.job_id, job_type == 1 ? "compaction" : "turn");
+        LOG_INFO_("llm_job done job=%lld type=%s",
+                 (long long)item.job_id, job_type == 1 ? "compaction" : "turn");
 
         cclaw_log_clear_ctx();
 
@@ -223,7 +223,7 @@ int llm_worker_start(const char *db_path, int max_threads) {
     }
 
     g_started = 1;
-    cclaw_log_write(LOG_NOTICE, "llm_worker pool start max_threads=%d", g_pool.max);
+    LOG_INFO_("llm_worker pool start max_threads=%d", g_pool.max);
     return 0;
 }
 
@@ -265,7 +265,7 @@ int llm_worker_read(int64_t *session_id) {
 
 void llm_worker_stop(void) {
     if (!g_started) return;
-    cclaw_log_write(LOG_NOTICE, "llm_worker pool stop");
+    LOG_INFO_("llm_worker pool stop");
     pthread_mutex_lock(&g_pool.mtx);
     g_pool.shutdown = 1;
     pthread_cond_broadcast(&g_pool.cond);

@@ -152,7 +152,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   turn_iteration INTEGER NOT NULL DEFAULT 0,
   leaf_id INTEGER DEFAULT -1,
   last_route TEXT,
-  cache_break_after INTEGER DEFAULT -1,
   last_interaction_id TEXT,
   last_synced_entry_id INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),

@@ -14,7 +14,7 @@ code. Current state:
 |------|--------|-----------|
 | `beforeToolCall` (gate) | ✅ Landed | restrict only (deny/ask/allow) |
 | `afterToolCall` (observe) | ✅ Landed | nothing (side-effect only) |
-| `beforeRequest` | ❌ Dead code (never wired) | was: full messages array |
+| `beforeRequest` | 🗑️ Deleted (was dead code, never wired) | was: full messages array |
 | `afterResponse` | ❌ Spec'd in extensions.md, not built | — |
 | `turnStart` / `turnEnd` | ❌ Spec'd, not built | — |
 
@@ -298,8 +298,8 @@ turn start. The `HookEvent` enum gains `HOOK_PRE_ADVANCE` and
 
 ## 10. Migration from Dead Code
 
-1. Delete `hook_dispatch_before_request()` and `build_messages_json()` helper.
-2. Delete `test_hook_dispatch.c` tests that exercise `before_request`.
+1. ~~Delete `hook_dispatch_before_request()` and `build_messages_json()` helper.~~ Done.
+2. ~~Delete `test_hook_dispatch.c` tests that exercise `before_request`.~~ Done.
 3. Add `HOOK_PRE_ADVANCE` and `HOOK_POST_ADVANCE` to `HookEvent` enum.
 4. Implement `hook_dispatch_pre_advance()` and `hook_dispatch_post_advance()`
    following the command-return pattern.

@@ -35,12 +35,6 @@ typedef struct {
     JsSessionRuntime *rt;
 } ExtensionCtx;
 
-/* Discover *draft* extensions in workspace/extensions/ (authoring working
- * copies, not yet promoted). Returns a sorted array of absolute file paths;
- * caller frees via extension_list_free(). Used for listing drafts. */
-char **extension_discover(const char *workspace, size_t *count);
-void extension_list_free(char **paths, size_t count);
-
 /* Load this agent's hooks from the DB `hooks` table (join of attached, enabled,
  * visible extensions) into ext_ctx->hooks[event]. Each handler file's source is
  * read and stored for fresh-context dispatch. No JS is evaluated here. Returns

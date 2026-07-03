@@ -108,8 +108,4 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
                                 int64_t session_id, const char *agents_dir,
                                 const Config *fallback_cfg);
 
-/* T186: Create an ephemeral agent directory with workspace.
- * Returns heap-allocated agent name on success (caller frees), NULL on failure. */
-char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db);
-
 #endif

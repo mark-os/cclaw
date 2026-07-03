@@ -2,6 +2,7 @@
  * Tests UDS accept, RESOLVE, CONNECT preamble, allowed_hosts enforcement. */
 #define _POSIX_C_SOURCE 200809L
 #include "proxy.h"
+#include "test_proxy_util.h"
 #include <arpa/inet.h>
 #include <assert.h>
 #include <netinet/in.h>

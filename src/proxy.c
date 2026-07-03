@@ -762,18 +762,6 @@ int proxy_serve(ProxyContext *ctx) {
     return 0;
 }
 
-/* Convenience: bind + serve in one call (single-threaded callers and tests). */
-int proxy_start(ProxyContext *ctx, const char *dir,
-                char **hosts, size_t host_count) {
-    if (proxy_bind(ctx, dir, hosts, host_count) != 0)
-        return -1;
-    if (proxy_serve(ctx) != 0) {
-        proxy_stop(ctx);
-        return -1;
-    }
-    return 0;
-}
-
 void proxy_stop(ProxyContext *ctx) {
     ctx->running = 0;
     if (ctx->thread_started) {

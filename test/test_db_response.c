@@ -34,15 +34,6 @@ static int count_rows(sqlite3 *db, const char *sql) {
     return n;
 }
 
-static int64_t tc_entry_id(sqlite3 *db, const char *call_id) {
-    sqlite3_stmt *s;
-    sqlite3_prepare_v2(db, "SELECT entry_id FROM tool_calls WHERE call_id=?;", -1, &s, NULL);
-    sqlite3_bind_text(s, 1, call_id, -1, SQLITE_STATIC);
-    int64_t id = (sqlite3_step(s) == SQLITE_ROW) ? sqlite3_column_int64(s, 0) : -1;
-    sqlite3_finalize(s);
-    return id;
-}
-
 /* Test: db_ingest_response writes entries + tool_calls from an OpenAI body */
 static void test_ingest_response(void) {
     printf("  test_ingest_response...");
@@ -199,49 +190,6 @@ static void test_archive_retention(void) {
     printf(" OK\n");
 }
 
-/* Test: tool_call_complete marks status */
-static void test_tool_call_complete(void) {
-    printf("  test_tool_call_complete...");
-    sqlite3 *db = test_db();
-    int64_t sid = session_create(db, "test", NULL, -1, 0);
-
-    Message msg = {.role = ROLE_USER, .content = "do it"};
-    entry_append_with_turn(db, sid, &msg, 1);
-
-    const char *body =
-        "{\"choices\":[{\"message\":{\"content\":null,"
-        "\"tool_calls\":[{\"id\":\"call_x\",\"type\":\"function\","
-        "\"function\":{\"name\":\"shell_exec\",\"arguments\":\"{\\\"cmd\\\":\\\"echo hi\\\"}\"}}]},"
-        "\"finish_reason\":\"tool_calls\"}],"
-        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
-
-    TypedIngestResult result;
-    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, body, &result);
-    assert(st == LLM_RESP_OK);
-
-    int64_t eid = tc_entry_id(db, "call_x");
-    assert(eid > 0);
-
-    /* Mark complete */
-    int rc = db_tool_call_complete(db, eid, "call_x");
-    assert(rc == 0);
-
-    /* Verify status changed */
-    sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, "SELECT status FROM tool_calls WHERE call_id='call_x';",
-                       -1, &stmt, NULL);
-    assert(sqlite3_step(stmt) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "done") == 0);
-    sqlite3_finalize(stmt);
-
-    /* Non-existent call_id returns -1 */
-    rc = db_tool_call_complete(db, eid, "no_such");
-    assert(rc == -1);
-
-    db_close(db);
-    printf(" OK\n");
-}
-
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_db_response:\n");
@@ -249,7 +197,6 @@ int main(void) {
     test_ingest_malformed();
     test_ingest_archive();
     test_archive_retention();
-    test_tool_call_complete();
     printf("  ALL PASSED\n");
     return 0;
 }

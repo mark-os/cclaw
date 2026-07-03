@@ -41,7 +41,8 @@ typedef struct {
 /* General-purpose HTTP request. Returns HTTP status, -1 on curl error, -2 on timeout. */
 int http_do(const HttpRequestOpts *opts, HttpResponse *resp);
 
-/* POST JSON body to url with given headers (NULL-terminated array).
+/* Test-only utility (e2e suites) — not a production path; use http_do.
+ * POST JSON body to url with given headers (NULL-terminated array).
  * Returns HTTP status code, or -1 on curl error. */
 int http_post(const char *url, const char **headers, const char *body,
               HttpResponse *resp);

@@ -313,19 +313,4 @@ done:
     return messages_json;
 }
 
-int session_set_cache_break(sqlite3 *db, int64_t session_id, int64_t entry_id) {
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db,
-            "UPDATE sessions SET cache_break_after=? WHERE id=?;",
-            -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, entry_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
-    sqlite3_finalize(stmt);
-    return rc;
-}
 
-int64_t session_get_cache_break(sqlite3 *db, int64_t session_id) {
-    return db_scalar_i64(db, "SELECT cache_break_after FROM sessions WHERE id=?;", session_id, -1);
-}

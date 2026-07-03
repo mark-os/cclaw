@@ -13,27 +13,6 @@ static sqlite3 *test_db(void) {
     return db;
 }
 
-/* Test: session cache_break_after column */
-static void test_session_cache_break_col(void) {
-    printf("  test_session_cache_break_col...");
-    sqlite3 *db = test_db();
-    int64_t sid = session_create(db, "test", NULL, -1, 0);
-
-    /* Default is -1 */
-    assert(session_get_cache_break(db, sid) == -1);
-
-    /* Set and get */
-    assert(session_set_cache_break(db, sid, 42) == 0);
-    assert(session_get_cache_break(db, sid) == 42);
-
-    /* Update */
-    assert(session_set_cache_break(db, sid, 100) == 0);
-    assert(session_get_cache_break(db, sid) == 100);
-
-    db_close(db);
-    printf(" OK\n");
-}
-
 /* Test: db_build_request_typed OpenAI format */
 static void test_typed_openai_basic(void) {
     printf("  test_typed_openai_basic...");
@@ -115,7 +94,6 @@ static void test_typed_openai_tool_calls(void) {
 
 int main(void) {
     printf("test_db_request:\n");
-    test_session_cache_break_col();
     test_typed_openai_basic();
     test_typed_openai_tool_calls();
     printf("All tests passed.\n");

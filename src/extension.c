@@ -11,68 +11,10 @@
 #include "extension.h"
 #include <sqlite3.h>
 #include "log.h"
-#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
-static int cmp_str(const void *a, const void *b) {
-    return strcmp(*(const char **)a, *(const char **)b);
-}
-
-char **extension_discover(const char *workspace, size_t *count) {
-    *count = 0;
-    if (!workspace) return NULL;
-
-    size_t cap = 8;
-    char **paths = malloc(cap * sizeof(char *));
-    if (!paths) return NULL;
-
-    /* Scan workspace/extensions/ for local drafts (index.qjs or *.qjs) */
-    char ext_dir[1024];
-    snprintf(ext_dir, sizeof(ext_dir), "%s/extensions", workspace);
-
-    DIR *d = opendir(ext_dir);
-    if (d) {
-        struct dirent *ent;
-        while ((ent = readdir(d)) != NULL) {
-            if (ent->d_name[0] == '.') continue;
-            char full[2048];
-            snprintf(full, sizeof(full), "%s/%s", ext_dir, ent->d_name);
-            struct stat st;
-            if (stat(full, &st) != 0) continue;
-
-            const char *to_add = NULL;
-            char idx_path[2080];
-            if (S_ISREG(st.st_mode)) {
-                size_t len = strlen(ent->d_name);
-                if (len > 4 && strcmp(ent->d_name + len - 4, ".qjs") == 0)
-                    to_add = full;
-            } else if (S_ISDIR(st.st_mode)) {
-                snprintf(idx_path, sizeof(idx_path), "%s/index.qjs", full);
-                if (stat(idx_path, &st) == 0 && S_ISREG(st.st_mode))
-                    to_add = idx_path;
-            }
-            if (to_add) {
-                if (*count >= cap) { cap *= 2; paths = realloc(paths, cap * sizeof(char *)); }
-                paths[*count] = strdup(to_add);
-                if (paths[*count]) (*count)++;
-            }
-        }
-        closedir(d);
-    }
-
-    if (*count > 1)
-        qsort(paths, *count, sizeof(char *), cmp_str);
-    return paths;
-}
-
-void extension_list_free(char **paths, size_t count) {
-    if (!paths) return;
-    for (size_t i = 0; i < count; i++) free(paths[i]);
-    free(paths);
-}
 
 static char *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "r");

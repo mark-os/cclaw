@@ -9,9 +9,6 @@
  * Uses json_object()/json_group_array() to produce complete LLM request
  * body directly from the entries table — no C-level JSON escaping. */
 
-/* Set cache_break_after on a session. Returns 0 on success. */
-int session_set_cache_break(sqlite3 *db, int64_t session_id, int64_t entry_id);
-
 /* Build messages JSON array from flat typed entries (new event-sourced format).
  * Returns just the messages/contents JSON — caller wraps with model/tools.
  * replay_reasoning: 1 = include reasoning as reasoning_content on assistant msgs.
@@ -20,8 +17,5 @@ char *db_build_request_typed(sqlite3 *db, int64_t session_id,
                              const int64_t *entry_ids, int entry_count,
                              EndpointType endpoint_type,
                              int replay_reasoning);
-
-/* Get cache_break_after for a session. Returns entry_id or -1. */
-int64_t session_get_cache_break(sqlite3 *db, int64_t session_id);
 
 #endif

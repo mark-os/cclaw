@@ -5,6 +5,7 @@
  * loopback. */
 #define _POSIX_C_SOURCE 200809L
 #include "proxy.h"
+#include "test_proxy_util.h"
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>

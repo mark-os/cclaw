@@ -14,9 +14,6 @@ typedef struct {
     int tool_call_count;    /* number of tool_calls rows inserted */
 } IngestResult;
 
-/* Mark a tool_call row as completed (status = 'done'). */
-int db_tool_call_complete(sqlite3 *db, int64_t entry_id, const char *call_id);
-
 /* Mark a tool_call row as completed and record the result entry. */
 int db_tool_call_complete_with_result(sqlite3 *db, int64_t entry_id,
                                       const char *call_id, int64_t result_entry_id);

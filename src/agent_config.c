@@ -546,34 +546,4 @@ void agent_caps_refresh(sqlite3 *db, const char *agent, AgentCaps *caps) {
     agent_caps_load(db, agent, caps);
 }
 
-/* T186/T196: Create ephemeral agent (V65, V62) — config in cclaw.db */
-#include <sys/random.h>
-#include <limits.h>
 
-char *agent_create_ephemeral(const char *agents_dir, sqlite3 *db) {
-    (void)agents_dir;
-
-    /* Generate UUID v4 */
-    uint8_t bytes[16];
-    if (getrandom(bytes, 16, 0) != 16) return NULL;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    char uuid[37];
-    snprintf(uuid, sizeof(uuid),
-        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15]);
-
-    char name[64];
-    snprintf(name, sizeof(name), "ephemeral-%s", uuid);
-
-    /* Seed DB row only — no directory creation */
-    if (db) {
-        db_agent_upsert(db, name, NULL, NULL);
-    }
-
-    return strdup(name);
-}

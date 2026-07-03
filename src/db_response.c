@@ -9,22 +9,6 @@
 /* T296: SQL response ingress.
  * Tool call arguments validated with json() — invalid args stored verbatim. */
 
-int db_tool_call_complete(sqlite3 *db, int64_t entry_id, const char *call_id) {
-    if (!db || !call_id) return -1;
-
-    const char *sql =
-        "UPDATE tool_calls SET status='done' WHERE entry_id=? AND call_id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-
-    sqlite3_bind_int64(stmt, 1, entry_id);
-    sqlite3_bind_text(stmt, 2, call_id, -1, SQLITE_STATIC);
-    int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
-    sqlite3_finalize(stmt);
-    return rc;
-}
-
 int db_tool_call_complete_with_result(sqlite3 *db, int64_t entry_id,
                                       const char *call_id, int64_t result_entry_id) {
     if (!db || !call_id) return -1;

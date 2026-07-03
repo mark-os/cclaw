@@ -2,6 +2,7 @@
 #define _DEFAULT_SOURCE
 #include "channel.h"
 #include "approval.h"
+#include "log.h"
 #include "db.h"
 #include "secret_scan.h"
 #include "wake.h"
@@ -163,6 +164,7 @@ void channel_consume_events(sqlite3 *db) {
                       " FROM channel_events ORDER BY id ASC;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+    int processed = 0;
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         int64_t eid = sqlite3_column_int64(stmt, 0);
@@ -213,8 +215,10 @@ void channel_consume_events(sqlite3 *db) {
             }
             if (sid <= 0) {
                 sid = session_create(db, ch_name, agent, -1, 0);
-                /* Store channel_name + channel_id on session */
                 if (sid > 0) {
+                    cclaw_log_write(LOG_NOTICE, "channel new_session ch=%s sid=%lld agent=%s",
+                                    ch_name, (long long)sid, agent);
+                    /* Store channel_name + channel_id on session */
                     const char *usql = "UPDATE sessions SET channel_name=?, channel_id=? WHERE id=?;";
                     sqlite3_stmt *us;
                     if (sqlite3_prepare_v2(db, usql, -1, &us, NULL) == SQLITE_OK) {
@@ -226,6 +230,9 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
             if (sid > 0) {
+                cclaw_log_write(LOG_NOTICE, "channel event ch=%s sid=%lld type=%s",
+                                ch_name, (long long)sid, etype);
+                processed++;
                 /* Check if session is awaiting approval — route as decision */
                 Approval *pa = approval_get_pending(db, sid);
                 if (pa) {
@@ -278,6 +285,8 @@ del:;
         }
     }
     sqlite3_finalize(stmt);
+    if (processed > 0)
+        cclaw_log_write(LOG_NOTICE, "channel consume_done count=%d", processed);
 }
 
 time_t channel_next_deadline(void) {

@@ -139,6 +139,9 @@ static void *worker_fn(void *arg) {
          * session and agent for the duration of the job. */
         cclaw_log_set_ctx(item.session_id, -1, item.agent_name);
 
+        cclaw_log_write(LOG_NOTICE, "llm_job start job=%lld type=%s",
+                        (long long)item.job_id, job_type == 1 ? "compaction" : "turn");
+
         if (job_type == 1) {
             /* Compaction job */
             cclaw_log_write(LOG_DEBUG, "worker: compaction start");
@@ -148,6 +151,9 @@ static void *worker_fn(void *arg) {
             cclaw_log_write(LOG_DEBUG, "worker: model start");
             llm_req(db, curl, item.session_id, item.recall);
         }
+
+        cclaw_log_write(LOG_NOTICE, "llm_job done job=%lld type=%s",
+                        (long long)item.job_id, job_type == 1 ? "compaction" : "turn");
 
         cclaw_log_clear_ctx();
 
@@ -214,6 +220,7 @@ int llm_worker_start(const char *db_path, int max_threads) {
     }
 
     g_started = 1;
+    cclaw_log_write(LOG_NOTICE, "llm_worker pool start max_threads=%d", g_pool.max);
     return 0;
 }
 
@@ -255,6 +262,7 @@ int llm_worker_read(int64_t *session_id) {
 
 void llm_worker_stop(void) {
     if (!g_started) return;
+    cclaw_log_write(LOG_NOTICE, "llm_worker pool stop");
     pthread_mutex_lock(&g_pool.mtx);
     g_pool.shutdown = 1;
     pthread_cond_broadcast(&g_pool.cond);

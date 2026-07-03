@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "advance.h"
+#include "log.h"
 #include "wake.h"
 #include <stdio.h>
 #include <string.h>
@@ -32,6 +33,8 @@ static void notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
     if (!result_text)
         result_text = strdup(is_error ? "error: sub-agent terminated abnormally"
                                       : "(no response)");
+
+    cclaw_log_write(LOG_NOTICE, "advance notify_parent session=%lld parent=%lld is_error=%d", (long long)session_id, (long long)pi.parent_session_id, is_error);
 
     int txn_ok = (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
     if (txn_ok) {
@@ -130,6 +133,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         if (consumed > 0) {
             session_set_iteration(db, session_id, 0);
             session_set_state(db, session_id, "llm_running");
+            cclaw_log_write(LOG_NOTICE, "advance state=idle next=llm_running inbox=%d", consumed);
         }
         if (consumed < 0) {
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
@@ -183,6 +187,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         if (tc_count > 0) {
             /* Has pending tool calls */
             session_set_state(db, session_id, "tool_running");
+            cclaw_log_write(LOG_NOTICE, "advance state=llm_running next=tool_running tools=%d", tc_count);
             AdvanceOutput out = make_output(ADVANCE_DISPATCH_TOOLS, session_id, agent, iter);
             out.tc_count = tc_count;
             out.calls = calls;
@@ -209,6 +214,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
 
         if (is_error) {
             session_set_state(db, session_id, "idle");
+            cclaw_log_write(LOG_NOTICE, "advance state=llm_running next=idle reason=error");
             /* Abnormal stop: still notify a waiting parent so a blocking
              * launch_agent gets an error result instead of hanging. */
             notify_parent(db, session_id, 1);
@@ -219,6 +225,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
 
         /* Normal stop — turn complete */
         session_set_state(db, session_id, "idle");
+        cclaw_log_write(LOG_NOTICE, "advance state=llm_running next=idle reason=done");
 
         /* Notify parent session if this is a sub-agent */
         notify_parent(db, session_id, 0);
@@ -256,6 +263,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         int new_iter = session_bump_iteration(db, session_id);
         if (new_iter >= max_iterations) {
             /* Hit iteration cap */
+            cclaw_log_write(LOG_NOTICE, "advance state=tool_running next=idle reason=max_iterations iter=%d max=%d", new_iter, max_iterations);
             Message msg = { .role = ROLE_ASSISTANT,
                             .content = "error: max iterations reached",
                             .stop_reason = STOP_REASON_ERROR };
@@ -268,6 +276,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             return out;
         }
         session_set_state(db, session_id, "llm_running");
+        cclaw_log_write(LOG_NOTICE, "advance state=tool_running next=llm_running iter=%d", new_iter);
         AdvanceOutput out = make_output(ADVANCE_DISPATCH_LLM, session_id, agent, new_iter);
         free(agent);
         return out;
@@ -304,6 +313,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         if (consumed > 0) {
             session_set_iteration(db, session_id, 0);
             session_set_state(db, session_id, "llm_running");
+            cclaw_log_write(LOG_NOTICE, "advance state=compacting next=llm_running inbox=%d", consumed);
         }
         if (consumed < 0) {
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
@@ -320,6 +330,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             free(agent);
             return out;
         }
+        cclaw_log_write(LOG_NOTICE, "advance state=compacting next=idle reason=done");
         AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, 0);
         free(agent);
         return out;
@@ -327,6 +338,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
 
     if (strcmp(state, "rate_limited") == 0) {
         session_set_state(db, session_id, "idle");
+        cclaw_log_write(LOG_NOTICE, "advance state=rate_limited next=idle");
         AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, iter);
         free(agent);
         return out;

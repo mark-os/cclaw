@@ -10,6 +10,25 @@ CFLAGS += -DVERSION_COMMIT='"$(VERSION_COMMIT)"' -DBUILD_DATE='"$(BUILD_DATE)"'
 CFLAGS += $(EXTRA_CFLAGS)
 
 BUILDDIR := build
+
+# Build-mode guard: build/ holds objects compiled with one CC/EXTRA_CFLAGS
+# combo (e.g. plain `cc` vs. clang+sanitizers from `debug`/`test-asan`).
+# Linking objects from two different combos fails with cryptic undefined
+# __asan_*/__ubsan_* references. `debug` and `test-asan` clean first, but any
+# other invocation (a bare `make test`, or `make build/test_foo` for a single
+# binary) does not — so if the mode changed since the last build, wipe build/
+# before anything compiles. Runs at parse time (not as a recipe prerequisite)
+# so it can't lose an ordering race with rules that also touch build/.
+BUILD_TAG := $(CC)|$(EXTRA_CFLAGS)
+BUILD_TAGFILE := $(BUILDDIR)/.buildtag
+ifneq ($(wildcard $(BUILD_TAGFILE)),)
+ifneq ($(shell cat $(BUILD_TAGFILE)),$(BUILD_TAG))
+$(info build mode changed — cleaning $(BUILDDIR)/)
+$(shell rm -rf $(BUILDDIR))
+endif
+endif
+$(shell mkdir -p $(BUILDDIR) && echo "$(BUILD_TAG)" > $(BUILD_TAGFILE))
+
 TEMPLATES := $(wildcard templates/*)
 SRC      := $(filter-out src/preload_net.c src/net_shim.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
@@ -222,10 +241,17 @@ $(BUILDDIR)/test_%: test/test_%.c $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libtest.a |
 
 compile_commands.json: $(BUILDDIR)/templates.h
 	@echo "[" > $@
+	@# CFLAGS has -D...='"x"' — quoting meant for clangd to re-tokenize later,
+	@# same as a real shell would. So the stored JSON must keep those quotes,
+	@# only escaped for JSON (" -> \"), NOT resolved now. $(subst) works on
+	@# raw text (no shell involved), so it can't have the collision below.
+	@# It emits \\\" (4 chars) per quote because the printf line still wraps
+	@# this in "..." — the shell's own \" unescape then collapses it to the
+	@# \" (2 chars) that's actually valid JSON.
 	@first=1; for f in $(SRC); do \
 		[ $$first -eq 0 ] && printf ",\n" >> $@; first=0; \
 		printf '  {"directory":"%s","file":"%s","command":"%s %s -I%s -c %s"}' \
-			"$(CURDIR)" "$$f" "$(CC)" "$(CFLAGS)" "$(BUILDDIR)" "$$f" >> $@; \
+			"$(CURDIR)" "$$f" "$(CC)" "$(subst ",\\\",$(CFLAGS))" "$(BUILDDIR)" "$$f" >> $@; \
 	done
 	@printf "\n]\n" >> $@
 	@echo "Generated $@ ($(words $(SRC)) entries)"

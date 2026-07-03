@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "secret_interp.h"
+#include "buf.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -15,13 +16,7 @@ char *secret_interpolate(const char *text, const ShellSecret *secrets, size_t co
     if (!text) return NULL;
     if (!secrets || count == 0) return strdup(text);
 
-    size_t text_len = strlen(text);
-    /* Worst case: every placeholder expands to max secret length */
-    size_t cap = text_len * 2 + 1;
-    char *out = malloc(cap);
-    if (!out) return strdup(text);
-
-    size_t oi = 0;
+    Buf b = {0};
     const char *p = text;
     while (*p) {
         if (strncmp(p, PREFIX, PREFIX_LEN) == 0) {
@@ -39,32 +34,19 @@ char *secret_interpolate(const char *text, const ShellSecret *secrets, size_t co
                     }
                 }
                 if (value) {
-                    size_t vlen = strlen(value);
-                    /* Grow buffer if needed */
-                    while (oi + vlen + 1 > cap) {
-                        cap *= 2;
-                        char *tmp = realloc(out, cap);
-                        if (!tmp) { free(out); return strdup(text); }
-                        out = tmp;
-                    }
-                    memcpy(out + oi, value, vlen);
-                    oi += vlen;
+                    buf_append_str(&b, value);
                     p = end + SUFFIX_LEN;
                     continue;
                 }
             }
         }
-        /* Grow buffer if needed */
-        if (oi + 2 > cap) {
-            cap *= 2;
-            char *tmp = realloc(out, cap);
-            if (!tmp) { free(out); return strdup(text); }
-            out = tmp;
-        }
-        out[oi++] = *p++;
+        buf_append_char(&b, *p++);
     }
-    out[oi] = '\0';
-    return out;
+
+    /* OOM: fall back to uninterpolated copy (matches old behavior) */
+    char *result = buf_take(&b);
+    if (!result) return strdup(text);
+    return result;
 }
 
 static const ShellSecret *s_deinterp_secrets; /* qsort context */

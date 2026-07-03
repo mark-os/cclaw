@@ -3,6 +3,7 @@
 #include "tool_parse.h"
 #include "db.h"
 #include "approval.h"
+#include "buf.h"
 #include "wake.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -258,16 +259,13 @@ char *tool_check_approval_handler(const char *arguments, void *user_data) {
         sqlite3_bind_int64(st, 1, ctx->session_id);
         sqlite3_bind_int(st, 2, block_sec);
 
-        size_t cap = 1024, len = 0;
-        char *out = malloc(cap);
-        if (!out) { sqlite3_finalize(st); return strdup("error: OOM"); }
-        len += (size_t)snprintf(out, cap, "approvals for session %lld:\n",
-                                (long long)ctx->session_id);
+        Buf out = {0};
+        buf_appendf(&out, "approvals for session %lld:\n",
+                    (long long)ctx->session_id);
         int rows = 0;
         while (sqlite3_step(st) == SQLITE_ROW) {
             rows++;
-            char line[256];
-            int n = snprintf(line, sizeof(line),
+            buf_appendf(&out,
                 "  #%lld %s — %s%s%s (block_until=%lld, expires_at=%lld)\n",
                 (long long)sqlite3_column_int64(st, 0),
                 (const char *)sqlite3_column_text(st, 1),
@@ -276,23 +274,14 @@ char *tool_check_approval_handler(const char *arguments, void *user_data) {
                 (const char *)sqlite3_column_text(st, 3),
                 (long long)sqlite3_column_int64(st, 4),
                 (long long)sqlite3_column_int64(st, 5));
-            if (n < 0) continue;
-            if (len + (size_t)n + 1 > cap) {
-                cap = (len + (size_t)n + 1) * 2;
-                char *tmp = realloc(out, cap);
-                if (!tmp) break;
-                out = tmp;
-            }
-            memcpy(out + len, line, (size_t)n);
-            len += (size_t)n;
-            out[len] = '\0';
         }
         sqlite3_finalize(st);
         if (rows == 0) {
-            free(out);
+            buf_free(&out);
             return strdup("no approvals for this session");
         }
-        return out;
+        char *result = buf_take(&out);
+        return result ? result : strdup("error: OOM");
     }
 
     if (strcmp(action, "rerequest") == 0) {

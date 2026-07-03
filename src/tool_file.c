@@ -2,6 +2,7 @@
 #define _DEFAULT_SOURCE
 #include "tool_file.h"
 #include "tool_parse.h"
+#include "buf.h"
 #include "jsmn_util.h"
 #include <dirent.h>
 #include <fnmatch.h>
@@ -270,32 +271,22 @@ static char *file_list_inner(const char *arguments, void *user_data) {
     int limited = (n > (size_t)limit);
     size_t shown = limited ? (size_t)limit : n;
 
-    size_t cap = 4096, len = 0;
-    char *out = malloc(cap);
-    if (out) out[0] = '\0';
-    for (size_t i = 0; out && i < shown; i++) {
+    Buf b = {0};
+    for (size_t i = 0; i < shown; i++) {
         const char *suffix = entries[i].is_dir ? "/" : entries[i].is_link ? "@" : "";
-        size_t need = len + strlen(entries[i].name) + 2;
-        if (need + 1 > cap) {
-            cap = need * 2;
-            char *nb = realloc(out, cap);
-            if (!nb) { free(out); out = NULL; break; }
-            out = nb;
-        }
-        len += (size_t)snprintf(out + len, cap - len, "%s%s\n", entries[i].name, suffix);
+        buf_appendf(&b, "%s%s\n", entries[i].name, suffix);
     }
     for (size_t i = 0; i < n; i++) free(entries[i].name);
     free(entries);
 
-    if (!out) return strdup("error: OOM");
-    if (len == 0) { free(out); return strdup("(empty directory)"); }
-    if (out[len - 1] == '\n') out[len - 1] = '\0';
-    if (limited) {
-        size_t need = len + 48;
-        char *nb = realloc(out, need);
-        if (nb) { out = nb; snprintf(out + len, need - len, "\n\n[%d entries limit reached]", limit); }
-    }
-    return out;
+    if (b.len == 0) { buf_free(&b); return strdup("(empty directory)"); }
+    /* Strip trailing newline */
+    b.data[--b.len] = '\0';
+    if (limited)
+        buf_appendf(&b, "\n\n[%d entries limit reached]", limit);
+
+    char *out = buf_take(&b);
+    return out ? out : strdup("error: OOM");
 }
 
 int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx) {
@@ -346,8 +337,7 @@ static int glob_match(const char *pat, const char *str) {
 }
 
 typedef struct {
-    char *buf;
-    size_t cap, len;
+    Buf b;
     int count;
     int limit;
     const char *pattern;
@@ -382,14 +372,7 @@ static void find_walk(const char *absdir, const char *reldir, int depth, FindAcc
                                : (fnmatch(a->pattern, ent->d_name, 0) == 0);
         if (!hit) continue;
 
-        size_t need = a->len + strlen(relfull) + 2;
-        if (need + 1 > a->cap) {
-            size_t nc = need * 2;
-            char *nb = realloc(a->buf, nc);
-            if (!nb) { closedir(d); return; }
-            a->buf = nb; a->cap = nc;
-        }
-        a->len += (size_t)snprintf(a->buf + a->len, a->cap - a->len, "%s\n", relfull);
+        buf_appendf(&a->b, "%s\n", relfull);
         a->count++;
     }
     closedir(d);
@@ -427,21 +410,19 @@ static char *file_find_inner(const char *arguments, void *user_data) {
         snprintf(resolved, sizeof(resolved), "%s/%s", workspace, req_path);
     tool_parse_free(&ta);
 
-    FindAcc a = {.buf = malloc(4096), .cap = 4096, .len = 0, .count = 0,
+    FindAcc a = {.b = {0}, .count = 0,
                  .limit = limit, .pattern = eff, .path_mode = path_mode};
-    if (!a.buf) return strdup("error: OOM");
-    a.buf[0] = '\0';
 
     find_walk(resolved, "", 0, &a);
 
-    if (a.len == 0) { free(a.buf); return strdup("No files found matching pattern"); }
-    if (a.buf[a.len - 1] == '\n') a.buf[--a.len] = '\0';
-    if (a.count >= limit) {
-        size_t need = a.len + 48;
-        char *nb = realloc(a.buf, need);
-        if (nb) { a.buf = nb; snprintf(a.buf + a.len, need - a.len, "\n\n[%d results limit reached]", limit); }
-    }
-    return a.buf;
+    if (a.b.len == 0) { buf_free(&a.b); return strdup("No files found matching pattern"); }
+    /* Strip trailing newline */
+    a.b.data[--a.b.len] = '\0';
+    if (a.count >= limit)
+        buf_appendf(&a.b, "\n\n[%d results limit reached]", limit);
+
+    char *out = buf_take(&a.b);
+    return out ? out : strdup("error: OOM");
 }
 
 int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
@@ -663,8 +644,7 @@ static const char *GREP_PARAMS_JSON =
     "},\"required\":[\"pattern\"]}";
 
 typedef struct {
-    char *buf;
-    size_t cap, len;
+    Buf b;
     int count;
     int limit;
     regex_t re;
@@ -696,24 +676,9 @@ static void grep_file(const char *abspath, const char *relpath, GrepAcc *a) {
             size_t ll = strlen(line);
             while (ll > 0 && (line[ll - 1] == '\n' || line[ll - 1] == '\r'))
                 ll--;
-            char hdr[PATH_MAX + 256];
-            int hlen = snprintf(hdr, sizeof(hdr), "%s:%d:", relpath, lineno);
-            if (hlen < 0) continue;
-            if ((size_t)hlen >= sizeof(hdr)) hlen = (int)sizeof(hdr) - 1;
-            size_t total = (size_t)hlen + ll;
-            size_t need = a->len + total + 2;
-            if (need > a->cap) {
-                size_t nc = need * 2;
-                char *nb = realloc(a->buf, nc);
-                if (!nb) break;
-                a->buf = nb; a->cap = nc;
-            }
-            memcpy(a->buf + a->len, hdr, (size_t)hlen);
-            a->len += (size_t)hlen;
-            memcpy(a->buf + a->len, line, ll);
-            a->len += ll;
-            a->buf[a->len++] = '\n';
-            a->buf[a->len] = '\0';
+            buf_appendf(&a->b, "%s:%d:", relpath, lineno);
+            buf_append(&a->b, line, ll);
+            buf_append_char(&a->b, '\n');
             a->count++;
         }
     }
@@ -788,22 +753,20 @@ static char *file_grep_inner(const char *arguments, void *user_data) {
         snprintf(resolved, sizeof(resolved), "%s/%s", workspace, req_path);
     tool_parse_free(&ta);
 
-    GrepAcc a = {.buf = malloc(4096), .cap = 4096, .len = 0, .count = 0,
+    GrepAcc a = {.b = {0}, .count = 0,
                  .limit = limit, .re = re, .glob = glob_buf[0] ? glob_buf : NULL};
-    if (!a.buf) { regfree(&re); return strdup("error: OOM"); }
-    a.buf[0] = '\0';
 
     grep_walk(resolved, "", 0, &a);
     regfree(&re);
 
-    if (a.len == 0) { free(a.buf); return strdup("No matches found"); }
-    if (a.buf[a.len - 1] == '\n') a.buf[--a.len] = '\0';
-    if (a.count >= limit) {
-        size_t need = a.len + 48;
-        char *nb = realloc(a.buf, need);
-        if (nb) { a.buf = nb; snprintf(a.buf + a.len, need - a.len, "\n\n[%d results limit reached]", limit); }
-    }
-    return a.buf;
+    if (a.b.len == 0) { buf_free(&a.b); return strdup("No matches found"); }
+    /* Strip trailing newline */
+    a.b.data[--a.b.len] = '\0';
+    if (a.count >= limit)
+        buf_appendf(&a.b, "\n\n[%d results limit reached]", limit);
+
+    char *out = buf_take(&a.b);
+    return out ? out : strdup("error: OOM");
 }
 
 int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx) {

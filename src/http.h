@@ -4,12 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Growable response buffer */
+/* HTTP response. data stays NULL when the transfer produced no body. */
 typedef struct {
     char *data;
     size_t len;
-    size_t cap;
-    size_t max_bytes;       /* 0 = unlimited, else abort write_cb when exceeded */
     int retry_after;        /* Retry-After header value in seconds, 0 if absent */
     char content_type[128]; /* Content-Type header value, empty if absent */
     char err_detail[256];   /* curl error description on failure */

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "http.h"
+#include "buf.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,27 +19,22 @@ static void resp_strip_leading_ws(HttpResponse *resp) {
     memmove(resp->data, resp->data + skip, resp->len + 1);
 }
 
+/* Context passed to curl write callback — keeps the Buf and size cap together */
+typedef struct {
+    Buf *buf;
+    size_t max_bytes;
+} WriteCbCtx;
+
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t bytes = size * nmemb;
-    HttpResponse *resp = userdata;
+    WriteCbCtx *ctx = userdata;
+    Buf *b = ctx->buf;
 
-    if (resp->max_bytes > 0 && resp->len + bytes > resp->max_bytes)
+    if (ctx->max_bytes > 0 && b->len + bytes > ctx->max_bytes)
         return 0;
 
-    if (resp->len + bytes + 1 > resp->cap) {
-        size_t new_cap = (resp->cap == 0) ? 4096 : resp->cap;
-        while (new_cap < resp->len + bytes + 1)
-            new_cap *= 2;
-        char *tmp = realloc(resp->data, new_cap);
-        if (!tmp) return 0;
-        resp->data = tmp;
-        resp->cap = new_cap;
-    }
-
-    memcpy(resp->data + resp->len, ptr, bytes);
-    resp->len += bytes;
-    resp->data[resp->len] = '\0';
-    return bytes;
+    buf_append(b, (const char *)ptr, bytes);
+    return b->oom ? 0 : bytes;
 }
 
 /* V2: capture Retry-After and Content-Type headers */
@@ -84,7 +80,8 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     memset(resp, 0, sizeof(*resp));
     if (!opts || !opts->url) return -1;
 
-    resp->max_bytes = opts->max_response_bytes;
+    Buf body = {0};
+    WriteCbCtx wctx = { .buf = &body, .max_bytes = opts->max_response_bytes };
 
     int own_curl = 0;
     CURL *curl = opts->curl_handle;
@@ -147,7 +144,7 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
         curl_easy_setopt(curl, CURLOPT_USERAGENT, opts->user_agent);
 
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, resp);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wctx);
 
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
@@ -175,6 +172,17 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     curl_slist_free_all(hlist);
     if (own_curl) curl_easy_cleanup(curl);
 
+    /* Move accumulated body into resp's caller-visible fields. A transfer
+     * that produced no bytes keeps data NULL (not "") so callers can fall
+     * back to err_detail; OOM mid-body likewise surfaces as NULL. */
+    if (body.len > 0) {
+        resp->len = body.len;
+        resp->data = buf_take(&body);
+        if (!resp->data) resp->len = 0;
+    } else {
+        buf_free(&body);
+    }
+
     resp_strip_leading_ws(resp);
 
     return (int)status;
@@ -196,5 +204,4 @@ void http_response_free(HttpResponse *resp) {
     free(resp->data);
     resp->data = NULL;
     resp->len = 0;
-    resp->cap = 0;
 }

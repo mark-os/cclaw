@@ -9,7 +9,6 @@ static void test_response_free_empty(void) {
     http_response_free(&resp);
     assert(resp.data == NULL);
     assert(resp.len == 0);
-    assert(resp.cap == 0);
 }
 
 static void test_post_bad_url(void) {

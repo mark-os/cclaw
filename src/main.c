@@ -911,6 +911,11 @@ static void drain_ready_result_pipes(const struct pollfd *pfds, int base, int nf
 
 /* ── spawn_run_tool_child: fork+exec a --run-tool child ──────────── */
 
+/* The --run-tool child gets a minimal env: just the log level, so its
+ * syslog output (proxy denials, sandbox failures) honors the configured
+ * verbosity. Prebuilt at startup — the fork child is async-signal-safe. */
+static char g_log_level_env[32] = "CCLAW_LOG_LEVEL=info";
+
 #define FD_REQUEST RUNTOOL_FD_REQUEST  /* the socketpair fd in the child */
 
 /* Spawn a sandboxed tool child via fork+execve. The request blob is sent
@@ -946,7 +951,7 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
         }
         /* execve self as --run-tool. Minimal env (inherits nothing sensitive). */
         char *const argv[] = {"cclaw", "--run-tool", NULL};
-        char *const envp[] = {NULL};
+        char *const envp[] = {g_log_level_env, NULL};
         execve("/proc/self/exe", argv, envp);
         /* execve failed — write a framed static error (4-byte zero meta_len
          * header, then the message) to fd 3 and die */
@@ -1545,14 +1550,28 @@ static void event_step_chld(void) {
 
 /* ── run_advance: call advance_session and execute the decision ── */
 
+static const char *advance_action_name(AdvanceResult a) {
+    switch (a) {
+    case ADVANCE_NOOP:           return "noop";
+    case ADVANCE_DISPATCH_LLM:   return "dispatch_llm";
+    case ADVANCE_DISPATCH_TOOLS: return "dispatch_tools";
+    case ADVANCE_DONE:           return "done";
+    case ADVANCE_WAITING:        return "waiting";
+    case ADVANCE_ERROR:          return "error";
+    }
+    return "?";
+}
+
 static void run_advance(int64_t session_id) {
     int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations : DEFAULT_MAX_ITERATIONS;
-    AdvanceOutput out = advance_session(g_db, session_id, max_iter);
-    LOG_INFO_(g_cfg, "advance action=%d iter=%d", out.action, out.iteration);
-
-    /* Tag every log line from here — and from the dispatch/deliver calls below,
-     * which run on this thread — with the advancing session and agent, so
+    /* Tag every log line from here — including advance_session's own state
+     * transitions and the dispatch/deliver calls below, which run on this
+     * thread — with the advancing session (and, once known, agent), so
      * support logs tie back to the conversation and its llm_responses rows. */
+    cclaw_log_set_ctx(session_id, -1, NULL);
+    AdvanceOutput out = advance_session(g_db, session_id, max_iter);
+    LOG_INFO_(g_cfg, "advance action=%s iter=%d",
+              advance_action_name(out.action), out.iteration);
     cclaw_log_set_ctx(session_id, -1, out.agent_name);
 
     switch (out.action) {
@@ -2611,8 +2630,12 @@ int main(int argc, char *argv[]) {
         g_cfg->log_level = LOG_LEVEL_ERROR;
     }
     cclaw_log_set_level(g_cfg->log_level);
+    snprintf(g_log_level_env, sizeof g_log_level_env, "CCLAW_LOG_LEVEL=%s",
+             g_cfg->log_level >= LOG_LEVEL_TRACE ? "trace" :
+             g_cfg->log_level == LOG_LEVEL_DEBUG ? "debug" :
+             g_cfg->log_level == LOG_LEVEL_ERROR ? "error" : "info");
 
-    /* Enable SQLite query profiling at trace level */
+    /* Enable SQLite query profiling at debug level and above */
     if (g_cfg->log_level >= LOG_LEVEL_DEBUG)
         db_enable_trace(g_db);
 

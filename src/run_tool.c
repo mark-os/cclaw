@@ -7,6 +7,7 @@
 #include "proxy.h"
 #include "sandbox.h"
 #include "db.h"
+#include "log.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -554,6 +555,13 @@ int run_tool_main(void) {
         for (int fd = 4; fd < (int)maxfd; fd++)
             close(fd);
     }
+
+    /* Syslog for this process family (proxy denials, sandbox failures) —
+     * after the blanket close (openlog opens a socket fd). The parent passes
+     * only CCLAW_LOG_LEVEL in the env; without the mask every LOG_DEBUG
+     * write here would emit unconditionally. */
+    cclaw_log_init(0);
+    cclaw_log_set_level(log_level_parse(getenv("CCLAW_LOG_LEVEL")));
 
     /* Verify process is clean (no master key) */
     run_tool_verify_clean();

@@ -30,6 +30,18 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
 /* Get the pending approval for a session. Returns heap-allocated Approval or NULL. */
 Approval *approval_get_pending(sqlite3 *db, int64_t session_id);
 
+/* Get the oldest pending approval anywhere in the session subtree rooted at
+ * root_session_id (the session itself plus every descendant reachable via
+ * parent_session_id, e.g. a launch_agent sub-agent). Lets one CLI approver
+ * answer a sub-agent's park, not just the root session's own. Returns
+ * heap-allocated Approval or NULL. */
+Approval *approval_get_pending_subtree(sqlite3 *db, int64_t root_session_id);
+
+/* True if session_id is root_session_id itself or a descendant of it
+ * (via parent_session_id, transitively). Used to decide whether a park
+ * notification belongs to the CLI's own session tree. */
+int approval_session_in_subtree(sqlite3 *db, int64_t root_session_id, int64_t session_id);
+
 /* Get the most recent approval for a (session_id, tool_call_id) pair (any
  * state). Used by the dispatch gate's re-entrancy check (§7a). Scoped to the
  * session because tool_call_ids are model-supplied and not globally unique.

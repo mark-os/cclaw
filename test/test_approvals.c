@@ -359,6 +359,57 @@ static void test_consume(void) {
     printf("  PASS: test_consume\n");
 }
 
+static void test_pending_subtree(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "root", NULL, NULL);
+    db_agent_upsert(db, "sub", NULL, NULL);
+    db_agent_upsert(db, "other", NULL, NULL);
+
+    int64_t root = session_create(db, "root", "root", -1, 0);
+    int64_t child = session_create(db, "child", "sub", root, 1);
+    int64_t grandchild = session_create(db, "grandchild", "sub", child, 2);
+    int64_t unrelated = session_create(db, "unrelated", "other", -1, 0);
+    assert(root > 0 && child > 0 && grandchild > 0 && unrelated > 0);
+
+    /* Nothing pending anywhere yet. */
+    assert(approval_get_pending_subtree(db, root) == NULL);
+
+    /* An approval parked on an unrelated tree must not be found. */
+    int64_t unrelated_id = approval_create(db, unrelated, "call_u", "shell_exec",
+                                           "shell_exec", "{}", "rerun");
+    assert(unrelated_id > 0);
+    assert(approval_get_pending_subtree(db, root) == NULL);
+    assert(!approval_session_in_subtree(db, root, unrelated));
+
+    /* A grandchild's park is found via the root — the whole-subtree fix. */
+    int64_t gc_id = approval_create(db, grandchild, "call_g", "request_config",
+                                    "grant_host", "{\"host\":\"api.example.com\"}", "apply");
+    assert(gc_id > 0);
+    assert(approval_session_in_subtree(db, root, grandchild));
+    assert(approval_session_in_subtree(db, root, child));
+    assert(approval_session_in_subtree(db, root, root));
+
+    Approval *found = approval_get_pending_subtree(db, root);
+    assert(found != NULL);
+    assert(found->id == gc_id);
+    assert(found->session_id == grandchild);
+    approval_free(found);
+
+    /* Oldest-first: a later park on the child itself must not shadow the
+     * grandchild's earlier one. */
+    int64_t child_id = approval_create(db, child, "call_c", "shell_exec",
+                                       "shell_exec", "{}", "rerun");
+    assert(child_id > 0);
+    found = approval_get_pending_subtree(db, root);
+    assert(found != NULL);
+    assert(found->id == gc_id);
+    approval_free(found);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_pending_subtree\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_approvals:\n");
@@ -373,6 +424,7 @@ int main(void) {
     test_tool_mode();
     test_get_for_tool_call();
     test_consume();
+    test_pending_subtree();
     printf("all approval tests passed\n");
     return 0;
 }

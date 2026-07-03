@@ -1464,8 +1464,16 @@ static void handle_approval_park(int64_t session_id) {
             approval_free(a);
             return;
         }
-        /* Interactive: prompt user */
+        /* Interactive: prompt user. Name the asking session when it's a
+         * sub-agent (session_id != g_cli_session) — otherwise a launch_agent
+         * child's approval request is indistinguishable from the root's. */
         fprintf(stdout, "\n\033[1mApproval required:\033[0m %s", a->action);
+        if (session_id != g_cli_session) {
+            char *sub_agent = session_get_agent_name(g_db, session_id);
+            fprintf(stdout, " (sub-agent %s, session %lld)",
+                    sub_agent ? sub_agent : "?", (long long)session_id);
+            free(sub_agent);
+        }
         if (a->args_json) fprintf(stdout, " %s", a->args_json);
         if (a->resolve && strcmp(a->resolve, "apply") == 0)
             fprintf(stdout, "\nGrant? (y/n): ");
@@ -2504,9 +2512,11 @@ static int run_cli(char *db_path, const char *prompt,
             if (!linebuf[0]) { linepos = 0; cli_prompt(); continue; }
             if (strcmp(linebuf, "exit") == 0 || strcmp(linebuf, "quit") == 0) goto done;
 
-            /* Check if we're waiting for an approval decision */
+            /* Check if we're waiting for an approval decision — anywhere in
+             * the CLI's session subtree, not just the root (a sub-agent's
+             * request_config parks the same way and needs the same y/n). */
             {
-                Approval *pa = approval_get_pending(g_db, g_cli_session);
+                Approval *pa = approval_get_pending_subtree(g_db, g_cli_session);
                 if (pa) {
                     ApprovalDecision d;
                     if (strcasecmp(linebuf, "once") == 0 || strcasecmp(linebuf, "o") == 0)

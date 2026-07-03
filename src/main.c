@@ -519,6 +519,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         }
         free(stored);
         free(result);
+        LOG_INFO_(g_cfg, "tool done tool=%s inline=1", tc->name);
         return 1; /* Handled inline */
     }
 
@@ -555,6 +556,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
                 return tool_inline_error(session_id, tc,
                     "error: spawn_run_tool_child failed", "fork_failed");
             db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+            LOG_INFO_(g_cfg, "tool fork tool=%s", tc->name);
             return 0; /* async serial — wait for reap */
         }
     }
@@ -637,6 +639,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
                 return tool_inline_error(session_id, tc,
                     "error: spawn_run_tool_child failed", "fork_failed");
             db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+            LOG_INFO_(g_cfg, "tool fork tool=%s", tc->name);
             return 0;
         }
     }
@@ -684,6 +687,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             return tool_inline_error(session_id, tc,
                 "error: spawn_run_tool_child failed", "fork_failed");
         db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+        LOG_INFO_(g_cfg, "tool fork tool=%s", tc->name);
         return 0;
     }
 
@@ -771,6 +775,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             return tool_inline_error(session_id, tc,
                 "error: spawn_run_tool_child failed", "fork_failed");
         db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+        LOG_INFO_(g_cfg, "tool fork tool=%s", tc->name);
         return 0;
     }
 
@@ -1538,6 +1543,7 @@ static void event_step_chld(void) {
 static void run_advance(int64_t session_id) {
     int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations : DEFAULT_MAX_ITERATIONS;
     AdvanceOutput out = advance_session(g_db, session_id, max_iter);
+    LOG_INFO_(g_cfg, "advance action=%d iter=%d", out.action, out.iteration);
 
     /* Tag every log line from here — and from the dispatch/deliver calls below,
      * which run on this thread — with the advancing session and agent, so
@@ -1776,6 +1782,7 @@ static void reap_children(void) {
             if (hosts && rid > 0)
                 db_entry_set_network_hosts(g_db, rid, hosts);
             db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, rid);
+            LOG_INFO_(g_cfg, "tool done tool=%s is_err=%d", c->tool_name, is_err);
             if (hook_annotate) {
                 if (rid > 0) hook_entry_data_patch(g_db, rid, hook_annotate);
                 free(hook_annotate);

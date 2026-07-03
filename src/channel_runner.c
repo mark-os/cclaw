@@ -23,6 +23,7 @@
 #include "channel_api.h"
 #include "channel_runner.h"
 #include "admin_api.h"
+#include "buf.h"
 #include "db.h"
 #include "log.h"
 #include "qjs_helpers.h"
@@ -176,27 +177,11 @@ static void send_queue_drop_outbox(int64_t outbox_id) {
 
 /* ── HTTP transfers (poll + sends) on one curl_multi ───────────── */
 
-typedef struct {
-    char *data;
-    size_t len;
-    size_t cap;
-} RespBuf;
-
 static size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
     size_t bytes = size * nmemb;
-    RespBuf *b = (RespBuf *)ud;
-    if (b->len + bytes + 1 > b->cap) {
-        size_t nc = b->cap ? b->cap * 2 : 4096;
-        while (nc < b->len + bytes + 1) nc *= 2;
-        char *tmp = realloc(b->data, nc);
-        if (!tmp) return 0;
-        b->data = tmp;
-        b->cap = nc;
-    }
-    memcpy(b->data + b->len, ptr, bytes);
-    b->len += bytes;
-    b->data[b->len] = '\0';
-    return bytes;
+    Buf *b = (Buf *)ud;
+    buf_append(b, (const char *)ptr, bytes);
+    return b->oom ? 0 : bytes;
 }
 
 static CURLM *g_multi;
@@ -204,7 +189,7 @@ static CURLM *g_multi;
 /* Poller: the recurring long-poll request (shape owned here) */
 static struct {
     CURL *easy;
-    RespBuf resp;
+    Buf resp;
     char *method, *url, *body;
     struct curl_slist *hdrs;
     int active;
@@ -215,7 +200,7 @@ static struct {
 /* One in-flight send at a time preserves per-channel ordering */
 static SendReq *g_send_active;
 static CURL *g_send_easy;
-static RespBuf g_send_resp;
+static Buf g_send_resp;
 static struct curl_slist *g_send_hdrs;
 
 /* Pin channel_runner's outbound HTTP to the channel's own configured
@@ -245,7 +230,7 @@ static int url_host_allowed(const char *url) {
 
 static CURL *make_easy(const char *method, const char *url, const char *body,
                        char **headers, int n_headers, long timeout,
-                       RespBuf *resp, struct curl_slist **out_hdrs) {
+                       Buf *resp, struct curl_slist **out_hdrs) {
     CURL *c = curl_easy_init();
     if (!c) return NULL;
     if (!url_host_allowed(url)) {
@@ -253,8 +238,7 @@ static CURL *make_easy(const char *method, const char *url, const char *body,
         cclaw_log_write(LOG_WARNING, "channel_runner: url host mismatch, refusing: %s", url);
         return NULL;
     }
-    free(resp->data);
-    memset(resp, 0, sizeof(*resp));
+    buf_free(resp);
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, resp);
@@ -679,11 +663,11 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     if (g_poll.easy) { curl_multi_remove_handle(g_multi, g_poll.easy); curl_easy_cleanup(g_poll.easy); }
     curl_slist_free_all(g_poll.hdrs);
     free(g_poll.method); free(g_poll.url); free(g_poll.body);
-    free(g_poll.resp.data);
+    buf_free(&g_poll.resp);
     if (g_send_easy) { curl_multi_remove_handle(g_multi, g_send_easy); curl_easy_cleanup(g_send_easy); }
     curl_slist_free_all(g_send_hdrs);
     send_req_free(g_send_active);
-    free(g_send_resp.data);
+    buf_free(&g_send_resp);
     SendReq *r;
     while ((r = send_queue_pop()) != NULL) send_req_free(r);
     curl_multi_cleanup(g_multi);

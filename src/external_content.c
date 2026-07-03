@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "external_content.h"
+#include "buf.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -8,23 +9,6 @@
 #define END_MARKER_NAME "END_UNTRUSTED_EXTERNAL_CONTENT"
 #define MARKER_SANITIZED "[[MARKER_SANITIZED]]"
 #define END_MARKER_SANITIZED "[[END_MARKER_SANITIZED]]"
-
-/* ── Growable buffer ─────────────────────────────────────────────── */
-
-typedef struct { char *data; size_t len, cap; } Buf;
-
-static void buf_append(Buf *b, const char *s, size_t n) {
-    if (b->len + n + 1 > b->cap) {
-        size_t nc = b->cap ? b->cap * 2 : 256;
-        while (nc < b->len + n + 1) nc *= 2;
-        char *tmp = realloc(b->data, nc);
-        if (!tmp) return;
-        b->data = tmp; b->cap = nc;
-    }
-    memcpy(b->data + b->len, s, n);
-    b->len += n;
-    b->data[b->len] = '\0';
-}
 
 /* ── Unicode homoglyph detection ─────────────────────────────────── */
 
@@ -131,7 +115,6 @@ char *sanitize_markers(const char *content, size_t len) {
         buf_append(&out, content + pos, 1);
         pos++;
     }
-    if (!out.data) return strdup("");
-    return out.data;
+    return buf_take(&out);
 }
 

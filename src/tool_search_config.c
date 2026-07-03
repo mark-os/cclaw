@@ -2,7 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_search_config.h"
 #include "tool_parse.h"
-#include <stdarg.h>
+#include "buf.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,23 +11,6 @@ static const char *PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"query\":{\"type\":\"string\",\"description\":\"Optional substring to filter tools by name/description\"}"
     "}}";
-
-/* Append formatted text to a growable buffer. */
-static int buf_appendf(char **buf, size_t *len, size_t *cap, const char *fmt, ...) {
-    va_list ap;
-    for (;;) {
-        size_t avail = *cap - *len;
-        va_start(ap, fmt);
-        int n = vsnprintf(*buf + *len, avail, fmt, ap);
-        va_end(ap);
-        if (n < 0) return -1;
-        if ((size_t)n < avail) { *len += (size_t)n; return 0; }
-        *cap = *cap * 2 + (size_t)n;
-        char *tmp = realloc(*buf, *cap);
-        if (!tmp) return -1;
-        *buf = tmp;
-    }
-}
 
 static char *handler(const char *arguments, void *user_data) {
     SearchConfigCtx *ctx = (SearchConfigCtx *)user_data;
@@ -40,10 +23,7 @@ static char *handler(const char *arguments, void *user_data) {
     /* Treat empty string as no filter */
     if (query && !query[0]) query = NULL;
 
-    size_t cap = 1024, len = 0;
-    char *out = malloc(cap);
-    if (!out) { tool_parse_free(&ta); return strdup("error: out of memory"); }
-    out[0] = '\0';
+    Buf out = {0};
 
     /* Section 1: current grants */
     sqlite3_stmt *st = NULL;
@@ -53,7 +33,7 @@ static char *handler(const char *arguments, void *user_data) {
         sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
             const char *trust = (const char *)sqlite3_column_text(st, 0);
-            buf_appendf(&out, &len, &cap,
+            buf_appendf(&out,
                 "## Your current grants (agent: %s)\n"
                 "trust_level: %s\n",
                 ctx->agent_name,
@@ -74,14 +54,14 @@ static char *handler(const char *arguments, void *user_data) {
             sqlite3_bind_text(st, 2, kinds[ki], -1, SQLITE_STATIC);
             if (sqlite3_step(st) == SQLITE_ROW) {
                 const char *v = (const char *)sqlite3_column_text(st, 0);
-                buf_appendf(&out, &len, &cap, "%ss: %s\n", kinds[ki], v ? v : "(none)");
+                buf_appendf(&out, "%ss: %s\n", kinds[ki], v ? v : "(none)");
             }
             sqlite3_finalize(st);
         }
     }
 
     /* Section 2: tools list */
-    buf_appendf(&out, &len, &cap, "\n## Tools you can use or request\n");
+    buf_appendf(&out, "\n## Tools you can use or request\n");
     rc = sqlite3_prepare_v2(ctx->db,
         "SELECT name, description FROM tools"
         " WHERE (?1 IS NULL OR name LIKE '%'||?1||'%' OR description LIKE '%'||?1||'%')"
@@ -94,13 +74,13 @@ static char *handler(const char *arguments, void *user_data) {
         while (sqlite3_step(st) == SQLITE_ROW) {
             const char *name = (const char *)sqlite3_column_text(st, 0);
             const char *desc = (const char *)sqlite3_column_text(st, 1);
-            buf_appendf(&out, &len, &cap, "%s — %s\n", name, desc ? desc : "");
+            buf_appendf(&out, "%s — %s\n", name, desc ? desc : "");
         }
         sqlite3_finalize(st);
     }
 
     /* Section 3: usage hint */
-    buf_appendf(&out, &len, &cap,
+    buf_appendf(&out,
         "\n## Requesting changes (use the request_config tool)\n"
         "- grant a tool:  {\"action\":\"grant_tool\",\"tool\":\"<name>\"}\n"
         "- allow a host:  {\"action\":\"grant_host\",\"host\":\"<hostname>\"}\n"
@@ -109,7 +89,8 @@ static char *handler(const char *arguments, void *user_data) {
         "All gated actions require human approval before taking effect.\n");
 
     tool_parse_free(&ta);
-    return out;
+    char *result = buf_take(&out);
+    return result ? result : strdup("error: out of memory");
 }
 
 /* EXEC_THREAD shim: rebuild SearchConfigCtx around the thread's own db. */

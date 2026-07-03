@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "web.h"
+#include "buf.h"
 #include "cclaw.h"
 #include "channel_api.h"
 #include "civetweb.h"
@@ -169,16 +170,12 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
     time_t now = time(NULL);
     long uptime = (long)(now - s_start_time);
 
-    size_t cap = 4096, pos = 0;
-    char *buf = malloc(cap);
-    if (!buf) { mg_printf(conn, "HTTP/1.1 500\r\n\r\n"); return 500; }
+    Buf b = {0};
 
-    pos += (size_t)snprintf(buf + pos, cap - pos,
-        "version: %s\nuptime: %lds\n", CCLAW_VERSION, uptime);
+    buf_appendf(&b, "version: %s\nuptime: %lds\n", CCLAW_VERSION, uptime);
 
     if (s_db) {
-        pos += (size_t)snprintf(buf + pos, cap - pos,
-            "\nsessions:\nid|name|state|updated_at|inbox_depth\n");
+        buf_appendf(&b, "\nsessions:\nid|name|state|updated_at|inbox_depth\n");
 
         sqlite3_stmt *stmt;
         const char *sql =
@@ -192,9 +189,7 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
                 const char *state = (const char *)sqlite3_column_text(stmt, 2);
                 int64_t updated = sqlite3_column_int64(stmt, 3);
                 int inbox = sqlite3_column_int(stmt, 4);
-                while (pos + 256 > cap) { cap *= 2; buf = realloc(buf, cap); }
-                pos += (size_t)snprintf(buf + pos, cap - pos,
-                    "%lld|%s|%s|%lld|%d\n",
+                buf_appendf(&b, "%lld|%s|%s|%lld|%d\n",
                     (long long)id, name ? name : "", state ? state : "idle",
                     (long long)updated, inbox);
             }
@@ -205,25 +200,27 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
         sqlite3_stmt *mstmt;
         const char *msql = "SELECT state, COUNT(*) FROM sessions GROUP BY state;";
         if (sqlite3_prepare_v2(s_db, msql, -1, &mstmt, NULL) == SQLITE_OK) {
-            pos += (size_t)snprintf(buf + pos, cap - pos, "\nstate_metrics:\n");
+            buf_appendf(&b, "\nstate_metrics:\n");
             while (sqlite3_step(mstmt) == SQLITE_ROW) {
                 const char *st = (const char *)sqlite3_column_text(mstmt, 0);
                 int cnt = sqlite3_column_int(mstmt, 1);
-                while (pos + 64 > cap) { cap *= 2; buf = realloc(buf, cap); }
-                if (st) pos += (size_t)snprintf(buf + pos, cap - pos, "%s: %d\n", st, cnt);
+                if (st) buf_appendf(&b, "%s: %d\n", st, cnt);
             }
             sqlite3_finalize(mstmt);
         }
     }
+
+    char *out = buf_take(&b);
+    if (!out) { mg_printf(conn, "HTTP/1.1 500\r\n\r\n"); return 500; }
 
     mg_printf(conn,
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/plain\r\n"
         "Content-Length: %d\r\n"
         "\r\n"
-        "%s", (int)pos, buf);
+        "%s", (int)strlen(out), out);
 
-    free(buf);
+    free(out);
     return 200;
 }
 

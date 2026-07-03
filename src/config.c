@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config.h"
 #include "agent_config.h"
+#include "buf.h"
 #include "db.h"
 #include "log.h"
 #include "templates.h"
@@ -118,67 +119,13 @@ char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
     char sid_buf[21];
     snprintf(sid_buf, sizeof(sid_buf), "%lld", (long long)session_id);
 
-    /* Build output with template expansion */
-    size_t tmpl_len = strlen(tmpl);
-    size_t out_cap = tmpl_len + 256;
-    char *out = malloc(out_cap);
-    if (!out) return str_dup(tmpl);
-
-    size_t oi = 0;
-    for (size_t i = 0; i < tmpl_len; ) {
-        if (tmpl[i] == '{') {
-            if (strncmp(tmpl + i, "{session_id}", 12) == 0) {
-                size_t slen = strlen(sid_buf);
-                while (oi + slen >= out_cap) {
-                    out_cap *= 2;
-                    char *tmp = realloc(out, out_cap);
-                    if (!tmp) { free(out); return str_dup(tmpl); }
-                    out = tmp;
-                }
-                memcpy(out + oi, sid_buf, slen);
-                oi += slen;
-                i += 12;
-                continue;
-            }
-            if (strncmp(tmpl + i, "{date}", 6) == 0) {
-                size_t dlen = strlen(date_buf);
-                while (oi + dlen >= out_cap) {
-                    out_cap *= 2;
-                    char *tmp = realloc(out, out_cap);
-                    if (!tmp) { free(out); return str_dup(tmpl); }
-                    out = tmp;
-                }
-                memcpy(out + oi, date_buf, dlen);
-                oi += dlen;
-                i += 6;
-                continue;
-            }
-            if (strncmp(tmpl + i, "{workspace}", 11) == 0) {
-                const char *ws = cfg->workspace ? cfg->workspace : ".";
-                size_t wlen = strlen(ws);
-                while (oi + wlen >= out_cap) {
-                    out_cap *= 2;
-                    char *tmp = realloc(out, out_cap);
-                    if (!tmp) { free(out); return str_dup(tmpl); }
-                    out = tmp;
-                }
-                memcpy(out + oi, ws, wlen);
-                oi += wlen;
-                i += 11;
-                continue;
-            }
-        }
-        if (oi + 1 >= out_cap) {
-            out_cap *= 2;
-            char *tmp = realloc(out, out_cap);
-            if (!tmp) { free(out); return str_dup(tmpl); }
-            out = tmp;
-        }
-        out[oi++] = tmpl[i++];
-    }
-
-    out[oi] = '\0';
-    return out;
+    TemplateVar vars[] = {
+        {"{session_id}", sid_buf},
+        {"{date}", date_buf},
+        {"{workspace}", cfg->workspace ? cfg->workspace : "."},
+    };
+    char *out = template_render(tmpl, vars, 3);
+    return out ? out : str_dup(tmpl);
 }
 
 void config_free(Config *cfg) {

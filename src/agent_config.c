@@ -1,6 +1,7 @@
 #define _DEFAULT_SOURCE        /* realpath() declaration */
 #define _POSIX_C_SOURCE 200809L
 #include "agent_config.h"
+#include "buf.h"
 #include "config.h"
 #include "db.h"
 #include <dirent.h>
@@ -90,7 +91,6 @@ char *agent_load_skills(const char *agents_dir, const char *name) {
 static char *render_template(const char *tmpl, int64_t session_id,
                              const char *agent_name) {
     if (!tmpl) return NULL;
-    size_t tmpl_len = strlen(tmpl);
 
     char sid_buf[21];
     snprintf(sid_buf, sizeof(sid_buf), "%lld", (long long)session_id);
@@ -103,46 +103,12 @@ static char *render_template(const char *tmpl, int64_t session_id,
 
     const char *aname = agent_name ? agent_name : "Assistant";
 
-    size_t out_cap = tmpl_len + 128;
-    char *out = malloc(out_cap);
-    if (!out) return NULL;
-
-    size_t oi = 0;
-    for (size_t i = 0; i < tmpl_len; ) {
-        if (tmpl[i] == '{') {
-            const char *rep = NULL;
-            size_t skip = 0;
-            if (strncmp(tmpl + i, "{session_id}", 12) == 0) {
-                rep = sid_buf; skip = 12;
-            } else if (strncmp(tmpl + i, "{date}", 6) == 0) {
-                rep = date_buf; skip = 6;
-            } else if (strncmp(tmpl + i, "{agent_name}", 12) == 0) {
-                rep = aname; skip = 12;
-            }
-            if (rep) {
-                size_t rlen = strlen(rep);
-                while (oi + rlen >= out_cap) {
-                    out_cap *= 2;
-                    char *tmp = realloc(out, out_cap);
-                    if (!tmp) { free(out); return NULL; }
-                    out = tmp;
-                }
-                memcpy(out + oi, rep, rlen);
-                oi += rlen;
-                i += skip;
-                continue;
-            }
-        }
-        if (oi + 1 >= out_cap) {
-            out_cap *= 2;
-            char *tmp = realloc(out, out_cap);
-            if (!tmp) { free(out); return NULL; }
-            out = tmp;
-        }
-        out[oi++] = tmpl[i++];
-    }
-    out[oi] = '\0';
-    return out;
+    TemplateVar vars[] = {
+        {"{session_id}", sid_buf},
+        {"{date}", date_buf},
+        {"{agent_name}", aname},
+    };
+    return template_render(tmpl, vars, 3);
 }
 
 /* T122: Assemble system prompt from DB agent row */
@@ -510,7 +476,18 @@ static void caps_load_kind(sqlite3 *db, const char *agent, const char *kind,
     while (arr && sqlite3_step(js) == SQLITE_ROW) {
         const char *item = (const char *)sqlite3_column_text(js, 0);
         if (!item) continue;
-        if (count >= cap) { cap *= 2; arr = realloc(arr, cap * sizeof(char *)); }
+        if (count >= cap) {
+            cap *= 2;
+            char **tmp = realloc(arr, cap * sizeof(char *));
+            if (!tmp) {
+                for (size_t i = 0; i < count; i++) free(arr[i]);
+                free(arr);
+                arr = NULL;
+                count = 0;
+                break;
+            }
+            arr = tmp;
+        }
         arr[count++] = strdup(item);
     }
     sqlite3_finalize(js);

@@ -1723,7 +1723,12 @@ PendingToolCall *db_tool_call_get_pending(sqlite3 *db, int64_t session_id, int *
     PendingToolCall *list = malloc((size_t)cap * sizeof(PendingToolCall));
     if (!list) { sqlite3_finalize(stmt); return NULL; }
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (count >= cap) { cap *= 2; list = realloc(list, (size_t)cap * sizeof(PendingToolCall)); }
+        if (count >= cap) {
+            cap *= 2;
+            PendingToolCall *tmp = realloc(list, (size_t)cap * sizeof(PendingToolCall));
+            if (!tmp) { db_tool_call_free_pending(list, count); sqlite3_finalize(stmt); return NULL; }
+            list = tmp;
+        }
         const char *s;
         s = (const char *)sqlite3_column_text(stmt, 0);
         list[count].call_id = s ? strdup(s) : strdup("");
@@ -1822,7 +1827,12 @@ MemoryBlock *memory_block_list(sqlite3 *db, const char *agent_name, int *count) 
     int cap = 8;
     MemoryBlock *list = calloc((size_t)cap, sizeof(MemoryBlock));
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (*count >= cap) { cap *= 2; list = realloc(list, (size_t)cap * sizeof(MemoryBlock)); }
+        if (*count >= cap) {
+            cap *= 2;
+            MemoryBlock *tmp = realloc(list, (size_t)cap * sizeof(MemoryBlock));
+            if (!tmp) { memory_block_list_free(list, *count); sqlite3_finalize(stmt); *count = 0; return NULL; }
+            list = tmp;
+        }
         MemoryBlock *mb = &list[*count];
         mb->id = sqlite3_column_int64(stmt, 0);
         const char *s;
@@ -1870,7 +1880,12 @@ MemoryEntry *memory_entries_list(sqlite3 *db, const char *agent_name,
     int cap = 8;
     MemoryEntry *list = calloc((size_t)cap, sizeof(MemoryEntry));
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (*count >= cap) { cap *= 2; list = realloc(list, (size_t)cap * sizeof(MemoryEntry)); }
+        if (*count >= cap) {
+            cap *= 2;
+            MemoryEntry *tmp = realloc(list, (size_t)cap * sizeof(MemoryEntry));
+            if (!tmp) { memory_entries_free(list, *count); sqlite3_finalize(stmt); *count = 0; return NULL; }
+            list = tmp;
+        }
         MemoryEntry *e = &list[*count];
         e->pos = sqlite3_column_int(stmt, 0);
         const char *s = (const char *)sqlite3_column_text(stmt, 1);

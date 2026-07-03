@@ -3,6 +3,7 @@
 #include "external_content.h"
 #include "http.h"
 #include "tool_parse.h"
+#include "buf.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -26,30 +27,6 @@ static const char *FETCH_USER_AGENT =
 
 /* ── HTML to Markdown converter ──────────────────────────────────── */
 
-typedef struct {
-    char *data;
-    size_t len;
-    size_t cap;
-} MdBuf;
-
-static void mdbuf_append(MdBuf *buf, const char *str, size_t len) {
-    if (buf->len + len + 1 > buf->cap) {
-        size_t nc = buf->cap ? buf->cap * 2 : 4096;
-        while (nc < buf->len + len + 1) nc *= 2;
-        char *tmp = realloc(buf->data, nc);
-        if (!tmp) return;
-        buf->data = tmp;
-        buf->cap = nc;
-    }
-    memcpy(buf->data + buf->len, str, len);
-    buf->len += len;
-    buf->data[buf->len] = '\0';
-}
-
-static void mdbuf_append_char(MdBuf *buf, char c) {
-    mdbuf_append(buf, &c, 1);
-}
-
 static char *extract_href(const char *tag_content, size_t tag_len) {
     const char *p = tag_content;
     while (p + 6 <= tag_content + tag_len) {
@@ -69,7 +46,7 @@ static char *extract_href(const char *tag_content, size_t tag_len) {
 }
 
 static char *html_to_markdown(const char *html, size_t html_len) {
-    MdBuf buf = {0};
+    Buf buf = {0};
     size_t i = 0;
     int in_script = 0, in_style = 0, last_was_newline = 0, consec_nl = 0;
     char *active_href = NULL;
@@ -109,9 +86,9 @@ static char *html_to_markdown(const char *html, size_t html_len) {
                 else if (tname_len == 5 && strncasecmp(tname_start, "style", 5) == 0) in_style = 0;
                 else if (tname_len == 1 && tolower((unsigned char)tname_start[0]) == 'a') {
                     if (active_href) {
-                        mdbuf_append(&buf, "](", 2);
-                        mdbuf_append(&buf, active_href, strlen(active_href));
-                        mdbuf_append_char(&buf, ')');
+                        buf_append(&buf, "](", 2);
+                        buf_append(&buf, active_href, strlen(active_href));
+                        buf_append_char(&buf, ')');
                         free(active_href);
                         active_href = NULL;
                         last_was_newline = 0; consec_nl = 0;
@@ -132,32 +109,32 @@ static char *html_to_markdown(const char *html, size_t html_len) {
                 }
             }
             if (is_block && !last_was_newline && buf.len > 0 && consec_nl < 2) {
-                mdbuf_append_char(&buf, '\n'); consec_nl++; last_was_newline = 1;
+                buf_append_char(&buf, '\n'); consec_nl++; last_was_newline = 1;
             }
 
             /* Markdown transforms */
             if (tname_len == 2 && tolower((unsigned char)tname_start[0]) == 'h' &&
                 tname_start[1] >= '1' && tname_start[1] <= '6') {
-                if (!last_was_newline && buf.len > 0 && consec_nl < 2) { mdbuf_append_char(&buf, '\n'); consec_nl++; }
+                if (!last_was_newline && buf.len > 0 && consec_nl < 2) { buf_append_char(&buf, '\n'); consec_nl++; }
                 int level = tname_start[1] - '0';
-                for (int k = 0; k < level; k++) mdbuf_append_char(&buf, '#');
-                mdbuf_append_char(&buf, ' ');
+                for (int k = 0; k < level; k++) buf_append_char(&buf, '#');
+                buf_append_char(&buf, ' ');
                 last_was_newline = 0; consec_nl = 0;
             } else if (tname_len == 2 && strncasecmp(tname_start, "li", 2) == 0) {
-                if (!last_was_newline && buf.len > 0 && consec_nl < 2) { mdbuf_append_char(&buf, '\n'); consec_nl++; }
-                mdbuf_append(&buf, "- ", 2);
+                if (!last_was_newline && buf.len > 0 && consec_nl < 2) { buf_append_char(&buf, '\n'); consec_nl++; }
+                buf_append(&buf, "- ", 2);
                 last_was_newline = 0; consec_nl = 0;
             } else if (tname_len == 2 && strncasecmp(tname_start, "br", 2) == 0) {
-                if (consec_nl < 2) { mdbuf_append_char(&buf, '\n'); consec_nl++; }
+                if (consec_nl < 2) { buf_append_char(&buf, '\n'); consec_nl++; }
                 last_was_newline = 1;
             } else if (tname_len == 2 && strncasecmp(tname_start, "hr", 2) == 0) {
-                if (!last_was_newline && consec_nl < 2) { mdbuf_append_char(&buf, '\n'); consec_nl++; }
-                mdbuf_append(&buf, "---\n", 4);
+                if (!last_was_newline && consec_nl < 2) { buf_append_char(&buf, '\n'); consec_nl++; }
+                buf_append(&buf, "---\n", 4);
                 last_was_newline = 1; consec_nl = 1;
             } else if (tname_len == 1 && tolower((unsigned char)tname_start[0]) == 'a') {
                 if (!active_href) {
                     active_href = extract_href(tag_content, tag_content_len);
-                    if (active_href) mdbuf_append_char(&buf, '[');
+                    if (active_href) buf_append_char(&buf, '[');
                 }
             }
 
@@ -176,7 +153,7 @@ static char *html_to_markdown(const char *html, size_t html_len) {
             else if (rem >= 6 && strncmp(html + i, "&apos;", 6) == 0) { dec = '\''; cons = 6; }
             else if (rem >= 6 && strncmp(html + i, "&nbsp;", 6) == 0) { dec = ' '; cons = 6; }
             if (cons > 0) {
-                mdbuf_append_char(&buf, dec);
+                buf_append_char(&buf, dec);
                 last_was_newline = 0; consec_nl = 0;
                 i += cons; continue;
             }
@@ -186,12 +163,12 @@ static char *html_to_markdown(const char *html, size_t html_len) {
         char c = html[i];
         if (c == '\n' || c == '\r') {
             if (!last_was_newline && buf.len > 0 && buf.data[buf.len - 1] != ' ')
-                mdbuf_append_char(&buf, ' ');
+                buf_append_char(&buf, ' ');
         } else if (c == ' ' || c == '\t') {
             if (buf.len > 0 && buf.data[buf.len - 1] != ' ' && !last_was_newline)
-                mdbuf_append_char(&buf, ' ');
+                buf_append_char(&buf, ' ');
         } else {
-            mdbuf_append_char(&buf, c);
+            buf_append_char(&buf, c);
             last_was_newline = 0; consec_nl = 0;
         }
         i++;
@@ -202,8 +179,7 @@ static char *html_to_markdown(const char *html, size_t html_len) {
     }
 
     free(active_href);
-    if (!buf.data) return strdup("");
-    return buf.data;
+    return buf_take(&buf);
 }
 
 /* ── Legacy html_strip_tags (kept for backward compat / tests) ─── */

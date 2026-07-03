@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_db_query.h"
+#include "buf.h"
 #include "tool_parse.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -49,19 +50,16 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     }
 
     int col_count = sqlite3_column_count(stmt);
-    size_t cap = 4096, pos = 0;
-    char *buf = malloc(cap);
-    if (!buf) { sqlite3_finalize(stmt); tool_parse_free(&ta); return strdup("error: OOM"); }
+    Buf b = {0};
 
     /* Header row */
     for (int i = 0; i < col_count; i++) {
         const char *name = sqlite3_column_name(stmt, i);
         size_t nlen = strlen(name);
-        while (pos + nlen + 2 > cap) { cap *= 2; buf = realloc(buf, cap); }
-        if (i > 0) buf[pos++] = '|';
-        memcpy(buf + pos, name, nlen); pos += nlen;
+        if (i > 0) buf_append_char(&b, '|');
+        buf_append(&b, name, nlen);
     }
-    buf[pos++] = '\n';
+    buf_append_char(&b, '\n');
 
     int rows = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && rows < MAX_ROWS) {
@@ -91,24 +89,19 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
                 if (!val) val = "";
             }
             size_t vlen = strlen(val);
-            while (pos + vlen + 2 > cap) { cap *= 2; buf = realloc(buf, cap); }
-            if (i > 0) buf[pos++] = '|';
-            memcpy(buf + pos, val, vlen); pos += vlen;
+            if (i > 0) buf_append_char(&b, '|');
+            buf_append(&b, val, vlen);
         }
-        buf[pos++] = '\n';
+        buf_append_char(&b, '\n');
         rows++;
     }
 
     sqlite3_finalize(stmt);
     tool_parse_free(&ta);
 
-    if (rows == 0 && pos > 0) {
-        /* Just header, no data rows */
-        buf[pos] = '\0';
-        return buf;
-    }
-    buf[pos] = '\0';
-    return buf;
+    char *out = buf_take(&b);
+    if (!out) return strdup("error: OOM");
+    return out;
 }
 
 /* EXEC_THREAD shim: db_query's "ctx" is just a db handle — use the thread's. */

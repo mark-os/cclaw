@@ -164,7 +164,14 @@ static int64_t *drain_ids(sqlite3_stmt *stmt, int *out_count) {
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         if (n >= cap) {
             cap = cap ? cap * 2 : 8;
-            ids = realloc(ids, (size_t)cap * sizeof(*ids));
+            int64_t *tmp = realloc(ids, (size_t)cap * sizeof(*ids));
+            if (!tmp) {
+                free(ids);
+                sqlite3_finalize(stmt);
+                *out_count = 0;
+                return NULL;
+            }
+            ids = tmp;
         }
         ids[n++] = sqlite3_column_int64(stmt, 0);
     }

@@ -316,8 +316,10 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
     ToolEntry *te = g_tool_setup ? tools_lookup(&g_tool_setup->reg, tc->name) : NULL;
     if (!te) {
         /* Unknown tool — write error result directly */
-        char err[128];
-        snprintf(err, sizeof(err), "error: unknown tool '%s'", tc->name);
+        char err[192];
+        snprintf(err, sizeof(err),
+                 "error: unknown tool '%s' — use search_config to see available tools",
+                 tc->name);
         ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
         Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                        .tool_name = tc->name, .is_error = 1};
@@ -1201,7 +1203,10 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
     } else if (strcmp(a->action, "grant_path") == 0) {
         ToolArgs ta; tool_parse(a->args_json, &ta);
         const char *v = targ_str(&ta, "path");
-        if (v) agent_config_grant(g_db, agent, "write_path", v, 0);
+        const char *m = targ_str(&ta, "mode");
+        /* Default read: least privilege — write is opt-in via mode:"write" */
+        const char *kind = (m && strcmp(m, "write") == 0) ? "write_path" : "read_path";
+        if (v) agent_config_grant(g_db, agent, kind, v, 0);
         tool_parse_free(&ta);
     } else if (strcmp(a->action, "rename_agent") == 0) {
         ToolArgs ta; tool_parse(a->args_json, &ta);

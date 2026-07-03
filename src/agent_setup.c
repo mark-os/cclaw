@@ -101,6 +101,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->web_ctx.db_path = cfg->db_path;
     setup->web_ctx.allowed_hosts = setup->caps.hosts;
     setup->web_ctx.allowed_host_count = setup->caps.host_count;
+    setup->web_ctx.host_mode = (trust_level && strcmp(trust_level, "host") == 0) ? 1 : 0;
     setup->web_ctx.sb = profile;
     tool_web_fetch_register(&setup->reg, &setup->web_ctx);
 

@@ -152,6 +152,31 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
     }
 
     if (strcmp(state, "llm_running") == 0) {
+        /* A wake while llm_running is only a *completion* once the job row is
+         * gone — the worker deletes it (llm_worker.c) before notifying. A
+         * redundant wake (e.g. resolve_approval's explicit run_advance racing
+         * its own wake_session ping through the CLI's wake-pipe drain) can
+         * land here before the just-submitted job has even run; tc_count==0
+         * at that point means "no tool calls yet", not "plain-text answer",
+         * so without this check the turn is misdiagnosed as done and the
+         * final response is dropped. Stay parked and wait for the real
+         * signal, matching the "compacting" branch below. */
+        int job_in_flight = 0;
+        {   sqlite3_stmt *js;
+            if (sqlite3_prepare_v2(db,
+                    "SELECT 1 FROM llm_jobs WHERE session_id=? AND job_type=0 LIMIT 1",
+                    -1, &js, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(js, 1, session_id);
+                if (sqlite3_step(js) == SQLITE_ROW) job_in_flight = 1;
+                sqlite3_finalize(js);
+            }
+        }
+        if (job_in_flight) {
+            AdvanceOutput out = make_output(ADVANCE_WAITING, session_id, agent, iter);
+            free(agent);
+            return out;
+        }
+
         /* LLM finished — check what to do next */
         int tc_count = 0;
         PendingToolCall *calls = db_tool_call_get_pending(db, session_id, &tc_count);

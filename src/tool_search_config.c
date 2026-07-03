@@ -60,21 +60,40 @@ static char *handler(const char *arguments, void *user_data) {
         }
     }
 
-    /* Section 2: tools list */
+    /* Section 2: tools list with grant status */
     buf_appendf(&out, "\n## Tools you can use or request\n");
     rc = sqlite3_prepare_v2(ctx->db,
-        "SELECT name, description FROM tools"
-        " WHERE (?1 IS NULL OR name LIKE '%'||?1||'%' OR description LIKE '%'||?1||'%')"
-        " ORDER BY name", -1, &st, NULL);
+        "SELECT t.name, t.description,"
+        "       (g.agent_name IS NOT NULL) AS granted,"
+        "       g.approval_mode"
+        " FROM tools t"
+        " LEFT JOIN grants g ON g.agent_name=?2 AND g.kind='tool' AND g.value=t.name"
+        "      AND (g.expires_at IS NULL OR g.expires_at > unixepoch())"
+        " WHERE (?1 IS NULL OR t.name LIKE '%'||?1||'%' OR t.description LIKE '%'||?1||'%')"
+        " ORDER BY t.name", -1, &st, NULL);
     if (rc == SQLITE_OK) {
         if (query)
             sqlite3_bind_text(st, 1, query, -1, SQLITE_STATIC);
         else
             sqlite3_bind_null(st, 1);
+        sqlite3_bind_text(st, 2, ctx->agent_name, -1, SQLITE_STATIC);
         while (sqlite3_step(st) == SQLITE_ROW) {
             const char *name = (const char *)sqlite3_column_text(st, 0);
             const char *desc = (const char *)sqlite3_column_text(st, 1);
-            buf_appendf(&out, "%s — %s\n", name, desc ? desc : "");
+            int granted = sqlite3_column_int(st, 2);
+            const char *approval = (const char *)sqlite3_column_text(st, 3);
+            if (granted) {
+                if (approval && (strcmp(approval, "always") == 0 ||
+                                 strcmp(approval, "tool_decides") == 0))
+                    buf_appendf(&out, "[granted, approval: %s] %s — %s\n",
+                                approval, name, desc ? desc : "");
+                else
+                    buf_appendf(&out, "[granted] %s — %s\n",
+                                name, desc ? desc : "");
+            } else {
+                buf_appendf(&out, "[requestable] %s — %s\n",
+                            name, desc ? desc : "");
+            }
         }
         sqlite3_finalize(st);
     }
@@ -84,8 +103,10 @@ static char *handler(const char *arguments, void *user_data) {
         "\n## Requesting changes (use the request_config tool)\n"
         "- grant a tool:  {\"action\":\"grant_tool\",\"tool\":\"<name>\"}\n"
         "- allow a host:  {\"action\":\"grant_host\",\"host\":\"<hostname>\"}\n"
-        "- grant a path:  {\"action\":\"grant_path\",\"path\":\"/absolute/path\"}\n"
+        "- grant a path:  {\"action\":\"grant_path\",\"path\":\"/absolute/path\",\"mode\":\"read\"}"
+        " (mode: read|write, default read)\n"
         "- rename agent:  {\"action\":\"rename_agent\",\"name\":\"<new_name>\"}\n"
+        "Add an optional \"reason\" field — it is shown to the human approver.\n"
         "All gated actions require human approval before taking effect.\n");
 
     tool_parse_free(&ta);

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_web_fetch.h"
 #include "external_content.h"
+#include "host_match.h"
 #include "http.h"
 #include "tool_parse.h"
 #include "buf.h"
@@ -195,10 +196,58 @@ size_t html_strip_tags(const char *src, char *dst, size_t dst_cap) {
     return len;
 }
 
+/* ── Actionable denial hint ──────────────────────────────────────── */
+
+/* Extract the hostname from an http(s) URL (strips userinfo, port, and
+ * IPv6 brackets). Returns 0 on success. */
+static int url_parse_host(const char *url, char *out, size_t cap) {
+    const char *p = strstr(url, "://");
+    if (!p) return -1;
+    p += 3;
+    const char *end = p + strcspn(p, "/?#");
+    const char *at = memchr(p, '@', (size_t)(end - p));
+    if (at) p = at + 1;
+    if (*p == '[') {
+        p++;
+        const char *rb = memchr(p, ']', (size_t)(end - p));
+        if (!rb) return -1;
+        end = rb;
+    } else {
+        const char *colon = memchr(p, ':', (size_t)(end - p));
+        if (colon) end = colon;
+    }
+    size_t len = (size_t)(end - p);
+    if (len == 0 || len >= cap) return -1;
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return 0;
+}
+
+/* After a fetch failure: if egress enforcement is active and the URL's host
+ * is not allowlisted, tell the model which grant to request. Message only —
+ * the per-hop proxy remains the enforcement (a redirect-hop denial still
+ * yields the generic error). Returns malloc'd hint or NULL. */
+char *web_fetch_host_hint(const char *url, char **rules, size_t n, int host_mode) {
+    if (host_mode) return NULL; /* no enforcement — a hint would mislead */
+    char host[256];
+    if (url_parse_host(url, host, sizeof(host)) != 0) return NULL;
+    if (host_match(rules, n, host)) return NULL;
+    size_t cap = 2 * strlen(host) + 128;
+    char *msg = malloc(cap);
+    if (!msg) return NULL;
+    snprintf(msg, cap,
+             "error: host '%s' is not in your allowed hosts — request it with "
+             "request_config {\"action\":\"grant_host\",\"host\":\"%s\"}",
+             host, host);
+    return msg;
+}
+
 /* ── Tool handler ────────────────────────────────────────────────── */
 
 char *tool_web_fetch_handler(const char *arguments, void *user_data) {
-    (void)user_data;  /* egress is enforced by the per-hop proxy, not a preflight */
+    /* Egress is enforced by the per-hop proxy, not a preflight; user_data
+     * (WebFetchCtx, may be NULL) is consulted only to phrase denials. */
+    WebFetchCtx *ctx = (WebFetchCtx *)user_data;
 
     ToolArgs ta;
     if (tool_parse(arguments, &ta) != 0)
@@ -241,9 +290,16 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     };
     HttpResponse resp = {0};
     int status = http_do(&opts, &resp);
-    tool_parse_free(&ta);
 
     if (status < 0) {
+        /* An ungranted host fails as opaque curl/proxy noise — swap in the
+         * grant hint when that's what happened. */
+        char *hint = ctx ? web_fetch_host_hint(url, ctx->allowed_hosts,
+                                               ctx->allowed_host_count,
+                                               ctx->host_mode)
+                         : NULL;
+        tool_parse_free(&ta);
+        if (hint) { http_response_free(&resp); return hint; }
         char *msg = malloc(512);
         if (msg) {
             if (resp.err_detail[0])
@@ -254,6 +310,7 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
         http_response_free(&resp);
         return msg ? msg : strdup("error: HTTP request failed");
     }
+    tool_parse_free(&ta);
 
     if (status >= 400) {
         char *msg = malloc(64);
@@ -311,7 +368,12 @@ int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx) {
 char *tool_web_tier_run(const RunToolParsed *q) {
     /* Runs in the inner fork, inside the netns + proxy. Our libcurl honors the
      * HTTP_PROXY set by sandbox_child_setup → net_shim → broker → decide() on
-     * every hop. user_data unused (egress is the proxy's job, not a preflight). */
-    char *r = tool_web_fetch_handler(q->arguments, NULL);
+     * every hop. The rebuilt ctx only phrases denials (host grant hint) —
+     * egress stays the proxy's job. */
+    WebFetchCtx ctx = {0};
+    ctx.allowed_hosts = q->host_rules;
+    ctx.allowed_host_count = q->host_count;
+    ctx.host_mode = q->sandbox ? 0 : 1;
+    char *r = tool_web_fetch_handler(q->arguments, &ctx);
     return r ? r : strdup("error: web_fetch returned null");
 }

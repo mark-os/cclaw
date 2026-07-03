@@ -322,6 +322,92 @@ static void test_grep_no_match(void) {
     printf("  PASS test_grep_no_match\n");
 }
 
+/* ── path_grant_hint tests ─────────────────────────────────────────────── */
+
+static void test_hint_outside_granted(void) {
+    FileReadCtx hctx = {0};
+    hctx.workspace = tmpdir;
+    hctx.sb.sandbox = 1;
+    char *r = tool_file_read_handler("{\"path\":\"/definitely/not/granted/file.txt\"}", &hctx);
+    assert(r != NULL);
+    assert(strstr(r, "outside your granted areas") != NULL);
+    assert(strstr(r, "\"action\":\"grant_path\"") != NULL);
+    assert(strstr(r, "\"path\":\"/definitely/not/granted\"") != NULL);
+    assert(strstr(r, "\"mode\":\"read\"") != NULL);
+    free(r);
+    printf("  PASS test_hint_outside_granted\n");
+}
+
+static void test_no_hint_inside_workspace(void) {
+    FileReadCtx hctx = {0};
+    hctx.workspace = tmpdir;
+    hctx.sb.sandbox = 1;
+    char args[512];
+    snprintf(args, sizeof(args), "{\"path\":\"%s/missing.txt\"}", tmpdir);
+    char *r = tool_file_read_handler(args, &hctx);
+    assert(r != NULL);
+    assert(strcmp(r, "error: cannot open file") == 0);
+    free(r);
+    printf("  PASS test_no_hint_inside_workspace\n");
+}
+
+static void test_no_hint_when_unsandboxed(void) {
+    FileReadCtx hctx2 = {0};
+    hctx2.workspace = tmpdir;
+    hctx2.sb.sandbox = 0;
+    char *r = tool_file_read_handler("{\"path\":\"/definitely/not/granted/file.txt\"}", &hctx2);
+    assert(r != NULL);
+    assert(strcmp(r, "error: cannot open file") == 0);
+    free(r);
+    printf("  PASS test_no_hint_when_unsandboxed\n");
+}
+
+static void test_hint_read_path_grant(void) {
+    FileReadCtx hctx = {0};
+    hctx.workspace = tmpdir;
+    hctx.sb.sandbox = 1;
+    static char *rp[] = { "/granted/read" };
+    hctx.sb.read_paths = rp;
+    hctx.sb.read_path_count = 1;
+
+    /* Inside granted read path — genuinely missing file, plain error */
+    char *r = tool_file_read_handler("{\"path\":\"/granted/read/missing.txt\"}", &hctx);
+    assert(r != NULL);
+    assert(strcmp(r, "error: cannot open file") == 0);
+    free(r);
+
+    /* Component-boundary mismatch — "/granted/readother" is NOT under "/granted/read" */
+    r = tool_file_read_handler("{\"path\":\"/granted/readother/x.txt\"}", &hctx);
+    assert(r != NULL);
+    assert(strstr(r, "outside your granted areas") != NULL);
+    free(r);
+
+    printf("  PASS test_hint_read_path_grant\n");
+}
+
+static void test_hint_write_mode(void) {
+    FileReadCtx hctx = {0};
+    hctx.workspace = tmpdir;
+    hctx.sb.sandbox = 1;
+
+    /* Write to ungranted path — hint with mode "write" */
+    char *r = tool_file_write_handler("{\"path\":\"/nope/out.txt\",\"content\":\"x\"}", &hctx);
+    assert(r != NULL);
+    assert(strstr(r, "outside your granted areas") != NULL);
+    assert(strstr(r, "\"mode\":\"write\"") != NULL);
+    free(r);
+
+    /* List ungranted dir — hint suggests the dir itself with mode "read" */
+    r = tool_file_list_handler("{\"path\":\"/nope\"}", &hctx);
+    assert(r != NULL);
+    assert(strstr(r, "outside your granted areas") != NULL);
+    assert(strstr(r, "\"path\":\"/nope\"") != NULL);
+    assert(strstr(r, "\"mode\":\"read\"") != NULL);
+    free(r);
+
+    printf("  PASS test_hint_write_mode\n");
+}
+
 int main(void) {
     printf("test_tool_file:\n");
     setup();
@@ -350,6 +436,11 @@ int main(void) {
     test_grep_recursive();
     test_grep_invalid_regex();
     test_grep_no_match();
+    test_hint_outside_granted();
+    test_no_hint_inside_workspace();
+    test_no_hint_when_unsandboxed();
+    test_hint_read_path_grant();
+    test_hint_write_mode();
     cleanup();
     printf("All file tool tests passed.\n");
     return 0;

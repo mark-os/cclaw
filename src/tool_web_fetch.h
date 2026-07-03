@@ -16,6 +16,7 @@ typedef struct {
     const char *db_path;
     char **allowed_hosts;        /* egress allowlist for the per-call proxy */
     size_t allowed_host_count;
+    int host_mode;               /* 1 = host trust, no egress enforcement */
     SandboxProfile sb;           /* trust-derived policy + grant paths */
 } WebFetchCtx;
 
@@ -29,6 +30,11 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data);
 
 /* Strip HTML tags from src, write plain text to dst. Returns bytes written. */
 size_t html_strip_tags(const char *src, char *dst, size_t dst_cap);
+
+/* Actionable-denial hint: if enforcement is active (host_mode==0) and url's
+ * host is not matched by rules, return a malloc'd "request grant_host" error
+ * message; NULL otherwise. Pure — unit-testable without network. */
+char *web_fetch_host_hint(const char *url, char **rules, size_t n, int host_mode);
 
 /* --run-tool tier leaf: run web_fetch in-process inside the broker's inner
  * fork (netns + proxy already applied). */

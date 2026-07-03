@@ -79,6 +79,53 @@ char *tool_file_grep_handler(const char *arguments, void *user_data) {
     return file_sandbox_run(ctx, file_grep_inner, arguments);
 }
 
+/* ── Actionable denials ───────────────────────────────────────────────── */
+
+/* Component-boundary prefix test: path equals base or lies under it. */
+static int path_under(const char *base, const char *path) {
+    if (!base || !base[0]) return 0;
+    size_t blen = strlen(base);
+    while (blen > 1 && base[blen - 1] == '/') blen--;
+    if (strncmp(path, base, blen) != 0) return 0;
+    return path[blen] == '\0' || path[blen] == '/';
+}
+
+/* Inside the mount sandbox an ungranted path is indistinguishable from a
+ * missing file. When an open fails on a path outside every mounted area,
+ * tell the model which grant to request instead of a bare "cannot open".
+ * suggest_parent: propose granting the containing directory (file targets)
+ * rather than the path itself (directory targets). Returns malloc'd hint or
+ * NULL (path is within the granted set, or no mount enforcement is active). */
+static char *path_grant_hint(const FileReadCtx *ctx, const char *fullpath,
+                             int want_write, int suggest_parent) {
+    if (!ctx->sb.sandbox) return NULL; /* host trust / direct call: nothing hidden */
+    if (path_under(ctx->workspace, fullpath) &&
+        !(want_write && ctx->sb.workspace_ro))
+        return NULL;
+    if (ctx->sb.mount_cwd && ctx->cwd_path && path_under(ctx->cwd_path, fullpath))
+        return NULL;
+    for (size_t i = 0; i < ctx->sb.write_path_count; i++)
+        if (path_under(ctx->sb.write_paths[i], fullpath)) return NULL;
+    if (!want_write)
+        for (size_t i = 0; i < ctx->sb.read_path_count; i++)
+            if (path_under(ctx->sb.read_paths[i], fullpath)) return NULL;
+
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", fullpath);
+    if (suggest_parent) {
+        char *sl = strrchr(dir, '/');
+        if (sl) { if (sl == dir) sl[1] = '\0'; else *sl = '\0'; }
+    }
+    size_t cap = strlen(fullpath) + strlen(dir) + 160;
+    char *msg = malloc(cap);
+    if (!msg) return NULL;
+    snprintf(msg, cap,
+             "error: '%s' is outside your granted areas — request access with "
+             "request_config {\"action\":\"grant_path\",\"path\":\"%s\",\"mode\":\"%s\"}",
+             fullpath, dir, want_write ? "write" : "read");
+    return msg;
+}
+
 /* ── file_read ────────────────────────────────────────────────────────── */
 
 static const char *FILE_READ_PARAMS_JSON =
@@ -108,7 +155,10 @@ static char *file_read_inner(const char *arguments, void *user_data) {
     tool_parse_free(&ta);
 
     FILE *f = fopen(fullpath, "rb");
-    if (!f) return strdup("error: cannot open file");
+    if (!f) {
+        char *hint = path_grant_hint(ctx, fullpath, 0, 1);
+        return hint ? hint : strdup("error: cannot open file");
+    }
 
     char *buf = malloc(FILE_READ_MAX + 1);
     if (!buf) { fclose(f); return strdup("error: out of memory"); }
@@ -175,7 +225,8 @@ static char *file_write_inner(const char *arguments, void *user_data) {
     FILE *f = fopen(fullpath, "wb");
     if (!f) {
         tool_parse_free(&ta);
-        return strdup("error: cannot open file for writing");
+        char *hint = path_grant_hint(ctx, fullpath, 1, 1);
+        return hint ? hint : strdup("error: cannot open file for writing");
     }
 
     size_t content_len = strlen(content);
@@ -241,7 +292,10 @@ static char *file_list_inner(const char *arguments, void *user_data) {
     tool_parse_free(&ta);
 
     DIR *d = opendir(resolved);
-    if (!d) return strdup("error: not a directory or cannot open");
+    if (!d) {
+        char *hint = path_grant_hint(ctx, resolved, 0, 0);
+        return hint ? hint : strdup("error: not a directory or cannot open");
+    }
 
     LsEntry *entries = NULL;
     size_t n = 0, ecap = 0;
@@ -532,7 +586,10 @@ static char *file_edit_inner(const char *arguments, void *user_data) {
     else snprintf(fullpath, sizeof(fullpath), "%s/%s", ctx->workspace, req_path);
 
     FILE *f = fopen(fullpath, "rb");
-    if (!f) return strdup("error: cannot open file");
+    if (!f) {
+        char *hint = path_grant_hint(ctx, fullpath, 1, 1);
+        return hint ? hint : strdup("error: cannot open file");
+    }
     fseek(f, 0, SEEK_END);
     long fsz = ftell(f);
     if (fsz < 0 || fsz > FILE_EDIT_MAX_FILE) { fclose(f); return strdup("error: file too large"); }
@@ -606,7 +663,11 @@ static char *file_edit_inner(const char *arguments, void *user_data) {
     free(orig);
 
     f = fopen(fullpath, "wb");
-    if (!f) { free(out); return strdup("error: cannot open file for writing"); }
+    if (!f) {
+        free(out);
+        char *hint = path_grant_hint(ctx, fullpath, 1, 1);
+        return hint ? hint : strdup("error: cannot open file for writing");
+    }
     size_t written = fwrite(out, 1, w, f);
     fclose(f);
     free(out);
@@ -798,12 +859,13 @@ static char *dispatch_file(const char *tool_name, const char *arguments, FileRea
 }
 
 char *tool_file_tier_run(const RunToolParsed *q) {
-    /* Sandbox is already applied on this process; sandbox=0 so the file
-     * handler runs directly (the kernel mount view IS the boundary). */
+    /* Sandbox is already applied on this process; the handlers never set one
+     * up themselves. sb.sandbox carries "mount enforcement is active" so
+     * open failures outside the granted mounts produce a grant hint. */
     FileReadCtx fctx = {0};
     fctx.workspace    = q->workspace;
     fctx.cwd_path     = q->cwd_path;
-    fctx.sb.sandbox      = 0;
+    fctx.sb.sandbox      = q->sandbox;
     fctx.sb.workspace_ro = q->workspace_ro;
     fctx.sb.mount_cwd    = q->mount_cwd;
     fctx.sb.read_paths   = q->read_paths;

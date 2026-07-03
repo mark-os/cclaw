@@ -120,6 +120,80 @@ static void test_handler_with_offset_and_max_chars(void) {
     printf("  PASS: handler_with_offset_and_max_chars\n");
 }
 
+static void test_host_hint_allowed_exact(void) {
+    static char *rules[] = { "api.example.com" };
+    char *h = web_fetch_host_hint("https://api.example.com/v1/x", rules, 1, 0);
+    assert(h == NULL);
+    printf("  PASS: host_hint_allowed_exact\n");
+}
+
+static void test_host_hint_denied(void) {
+    static char *rules[] = { "api.example.com" };
+    char *h = web_fetch_host_hint("https://evil.example.com/x", rules, 1, 0);
+    assert(h != NULL);
+    assert(strstr(h, "host 'evil.example.com'") != NULL);
+    assert(strstr(h, "\"action\":\"grant_host\"") != NULL);
+    assert(strstr(h, "\"host\":\"evil.example.com\"") != NULL);
+    free(h);
+    printf("  PASS: host_hint_denied\n");
+}
+
+static void test_host_hint_host_mode_suppresses(void) {
+    static char *rules[] = { "api.example.com" };
+    char *h = web_fetch_host_hint("https://evil.example.com/x", rules, 1, 1);
+    assert(h == NULL);
+    printf("  PASS: host_hint_host_mode_suppresses\n");
+}
+
+static void test_host_hint_suffix_rule(void) {
+    static char *rules[] = { ".github.com" };
+    char *h;
+
+    h = web_fetch_host_hint("https://api.github.com/repos", rules, 1, 0);
+    assert(h == NULL);
+
+    h = web_fetch_host_hint("https://github.com/", rules, 1, 0);
+    assert(h == NULL);
+
+    h = web_fetch_host_hint("https://evilgithub.com/", rules, 1, 0);
+    assert(h != NULL);
+    free(h);
+
+    printf("  PASS: host_hint_suffix_rule\n");
+}
+
+static void test_host_hint_port_userinfo_stripped(void) {
+    static char *rules[] = { "h.example.com" };
+    char *h;
+
+    h = web_fetch_host_hint("http://user:pw@h.example.com:8080/path?q=1", rules, 1, 0);
+    assert(h == NULL);
+
+    h = web_fetch_host_hint("http://u@x.example.com:99/p", rules, 1, 0);
+    assert(h != NULL);
+    assert(strstr(h, "host 'x.example.com'") != NULL);
+    /* Must not contain port or userinfo */
+    assert(strstr(h, ":99") == NULL);
+    assert(strstr(h, "u@") == NULL);
+    free(h);
+
+    printf("  PASS: host_hint_port_userinfo_stripped\n");
+}
+
+static void test_host_hint_unparseable(void) {
+    static char *rules[] = { "a.example.com" };
+    char *h;
+
+    h = web_fetch_host_hint("not-a-url", rules, 1, 0);
+    assert(h == NULL);
+
+    h = web_fetch_host_hint("https://a.example.com/", NULL, 0, 0);
+    assert(h != NULL);
+    free(h);
+
+    printf("  PASS: host_hint_unparseable\n");
+}
+
 int main(void) {
     printf("test_tool_web_fetch:\n");
     test_html_strip_basic();
@@ -135,6 +209,12 @@ int main(void) {
     test_handler_with_offset();
     test_handler_with_max_chars();
     test_handler_with_offset_and_max_chars();
+    test_host_hint_allowed_exact();
+    test_host_hint_denied();
+    test_host_hint_host_mode_suppresses();
+    test_host_hint_suffix_rule();
+    test_host_hint_port_userinfo_stripped();
+    test_host_hint_unparseable();
     printf("all tests passed\n");
     return 0;
 }

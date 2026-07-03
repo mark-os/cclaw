@@ -26,4 +26,6 @@ You may request additional tools via `request_config`:
 
 Call `request_config` with `{"action":"grant_tool","tool":"<name>"}` to request access.
 For network access, use `{"action":"grant_host","host":"<hostname>"}`.
+For file access outside your workspace, use `{"action":"grant_path","path":"/absolute/dir","mode":"read"}` (mode: `read` or `write`, default read).
+Add a short `"reason"` field to any request — it is shown to the human approver.
 Use the `search_config` tool to see your current grants and the full list of tools you can request.

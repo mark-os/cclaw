@@ -52,7 +52,7 @@ static void test_pure_reasoning(void) {
     /* Use trace to see stop_reason; no tools that would trigger tool_calls */
     snprintf(cmd, sizeof(cmd),
         "CCLAW_TOOLS=memory_create,memory_append,memory_replace "
-        "timeout 120 %s -y --new --log-level=trace "
+        "timeout 120 %s --trust-host --new --log-level=trace "
         "-p \"Explain in one sentence why the sky is blue.\" > %s 2>&1",
         BINARY, out);
     int rc = system(cmd);

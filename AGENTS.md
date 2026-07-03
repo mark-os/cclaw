@@ -102,7 +102,7 @@ See [specs/security.md](specs/security.md) for full details.
 
 | Level | Use for |
 |-------|---------|
-| `host` | Dev / hosts without unprivileged userns — **no sandbox at all** (`-y` forces this) |
+| `host` | Dev / hosts without unprivileged userns — **no sandbox at all** (`--trust-host` forces this) |
 | `trusted` | Default agent, bootstrap — full env access, CWD mounted |
 | `standard` | Most agents — clean env, network via proxy, workspace rw |
 | `restricted` | Observer/audit agents — no network, workspace read-only, tight limits |

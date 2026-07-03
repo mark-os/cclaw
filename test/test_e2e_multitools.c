@@ -53,7 +53,7 @@ static void test_multi_tool_chain(void) {
     const char *out = "/tmp/cclaw_e2e_t285_multitools.txt";
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-        "timeout 120 %s -y --new --log-level=trace "
+        "timeout 120 %s --trust-host --new --log-level=trace "
         "-p \"Write a Python script to /tmp/cclaw_hello.py that prints 'hello from cclaw', "
         "then run it with python3 and show me the output\" > %s 2>&1",
         BINARY, out);

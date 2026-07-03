@@ -51,7 +51,7 @@ static void test_nonstream_mode(void) {
     const char *out = "/tmp/cclaw_e2e_t284_nonstream.txt";
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-        "CCLAW_STREAM=0 timeout 120 %s -y --new --log-level=trace "
+        "CCLAW_STREAM=0 timeout 120 %s --trust-host --new --log-level=trace "
         "-p \"What is 3+5? Answer with just the number.\" > %s 2>&1",
         BINARY, out);
     int rc = system(cmd);

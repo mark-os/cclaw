@@ -15,7 +15,7 @@ Every sandboxed `shell_exec` child already gets (src/tool_shell.c):
 - env hardening: PATH=/bin:/usr/bin, HOME unset, `CCLAW_*` unset, generic
   credential scrub (names containing API_KEY/APIKEY/TOKEN/SECRET/PASSWORD/
   CREDENTIALS); `CCLAW_SECRET_*` re-injected as the deliberate channel
-- `-y` forces `trust_level=host` for the session (no sandbox at all)
+- `--trust-host` forces `trust_level=host` for the session (no sandbox at all)
 
 Per-agent knobs that exist today:
 
@@ -54,12 +54,12 @@ Resolve policy in ONE place (agent_setup_init → ShellConfig), not scattered.
 shell child prints an error and exits 126 instead of degrading — a runtime
 failure must not grant what only `host` may grant. `host` never attempts the
 sandbox; it is the explicit opt-out (per-agent via `agents.trust_level`, or
-session-wide via `-y`, which sets `CCLAW_TRUST_LEVEL=host`). The former
+session-wide via `--trust-host`, which sets `CCLAW_TRUST_LEVEL=host`). The former
 `CCLAW_SANDBOX`/yolo knobs are gone — sandbox on/off is derived from the level.
 
 - `trusted` = today's behavior (current default agent keeps working;
   `bootstrap` maps to `trusted`)
-- `host` = trusted policy without the namespace — for dev (`-y`) and hosts
+- `host` = trusted policy without the namespace — for dev (`--trust-host`) and hosts
   where unprivileged user namespaces are unavailable
 - **clean allowlist env**: `clearenv()`, then set only PATH, TMPDIR,
   CCLAW_PROXY_SOCK, and `CCLAW_SECRET_*` injections (~10 lines in the

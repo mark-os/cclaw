@@ -49,7 +49,7 @@ static void test_js_eval_fibonacci(void) {
     const char *out = "/tmp/cclaw_e2e_t286_jseval.txt";
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-        "timeout 60 %s -y --new --log-level=trace "
+        "timeout 60 %s --trust-host --new --log-level=trace "
         "-p \"Use js_eval to calculate the first 10 Fibonacci numbers and return them as a JSON array\" "
         "> %s 2>&1",
         BINARY, out);

@@ -1,5 +1,5 @@
 /* T287: e2e web_fetch — fetch httpbin.org, verify content extraction.
- * Cites: V46 (http_policy allows in host mode (-y)). Requires OPENROUTER_API_KEY. */
+ * Cites: V46 (http_policy allows in host mode (--trust-host)). Requires OPENROUTER_API_KEY. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,7 +49,7 @@ static void test_web_fetch_httpbin(void) {
     const char *out = "/tmp/cclaw_e2e_t287_webfetch.txt";
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-        "timeout 120 %s -y --new --log-level=trace "
+        "timeout 120 %s --trust-host --new --log-level=trace "
         "-p \"Fetch https://httpbin.org/json and tell me what's in the response\" "
         "> %s 2>&1",
         BINARY, out);

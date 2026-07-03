@@ -156,6 +156,7 @@ static int64_t g_cli_session;
 static char g_agent_name[64];
 static int g_cli_turn_active;   /* 1 while CLI is waiting for a turn to finish */
 static int g_cli_done;          /* 1 = exit after turn completes (for -p mode) */
+static int g_auto_approve;      /* 1 = --auto-approve: answer parks without prompting (CLI only) */
 
 /* SIGCHLD self-pipe */
 static int g_chld_pipe[2] = {-1, -1};
@@ -1063,8 +1064,17 @@ static void approval_sweep_expired(void) {
     int n = 0;
     int64_t *ids = approval_list_expired(g_db, g_instance_id, &n);
     for (int i = 0; i < n; i++)
-        resolve_approval(ids[i], APPROVAL_DENY, "auto:expired");
+        resolve_approval(ids[i], APPROVAL_DENY, "auto:expired", 0);
     free(ids);
+}
+
+/* approval_timeout_sec (KV, default 3600) — the same deadline approval.c uses
+ * to park-expire; reused by --auto-approve to bound its self-expiring grants. */
+static int approval_timeout_seconds(void) {
+    int timeout = 3600;
+    char *tv = db_kv_get(g_db, "approval_timeout_sec");
+    if (tv) { long v = strtol(tv, NULL, 10); if (v > 0) timeout = (int)v; free(tv); }
+    return timeout;
 }
 
 /* approval_block_sec (KV, default 60), clamped to approval_timeout_sec so the
@@ -1198,19 +1208,22 @@ static void db_periodic(void) {
  * Extracted from resolve_approval so both the in-window path and the
  * post-window inbox path apply grants identically. Called only for an approved
  * (APPROVAL_ALWAYS) apply approval. Sets *rename_failed if a rename's disk step
- * failed (DB change rolled back); refreshes live caps on success. */
-static void apply_grant(const Approval *a, const char *agent, int *rename_failed) {
+ * failed (DB change rolled back); refreshes live caps on success.
+ * grant_expires_at: 0 for a permanent grant, else a future unix timestamp
+ * (--auto-approve path — see resolve.h). */
+static void apply_grant(const Approval *a, const char *agent, int *rename_failed,
+                        int64_t grant_expires_at) {
     *rename_failed = 0;
     const char *refresh_agent = agent;
     if (strcmp(a->action, "grant_tool") == 0) {
         ToolArgs ta; tool_parse(a->args_json, &ta);
         const char *v = targ_str(&ta, "tool");
-        if (v) agent_config_grant(g_db, agent, "tool", v, 0);
+        if (v) agent_config_grant(g_db, agent, "tool", v, grant_expires_at);
         tool_parse_free(&ta);
     } else if (strcmp(a->action, "grant_host") == 0) {
         ToolArgs ta; tool_parse(a->args_json, &ta);
         const char *v = targ_str(&ta, "host");
-        if (v) agent_config_grant(g_db, agent, "host", v, 0);
+        if (v) agent_config_grant(g_db, agent, "host", v, grant_expires_at);
         tool_parse_free(&ta);
     } else if (strcmp(a->action, "grant_path") == 0) {
         ToolArgs ta; tool_parse(a->args_json, &ta);
@@ -1218,7 +1231,7 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         const char *m = targ_str(&ta, "mode");
         /* Default read: least privilege — write is opt-in via mode:"write" */
         const char *kind = (m && strcmp(m, "write") == 0) ? "write_path" : "read_path";
-        if (v) agent_config_grant(g_db, agent, kind, v, 0);
+        if (v) agent_config_grant(g_db, agent, kind, v, grant_expires_at);
         tool_parse_free(&ta);
     } else if (strcmp(a->action, "rename_agent") == 0) {
         ToolArgs ta; tool_parse(a->args_json, &ta);
@@ -1298,14 +1311,15 @@ static int approval_is_post_window(int64_t session_id, const char *tool_call_id)
  * apply grants here too, but never mutate the (already-answered) turn state or
  * re-run a frozen call out of context. */
 static void resolve_approval_post_window(const Approval *a, const char *agent,
-                                         ApprovalDecision decision, const char *decided_via) {
+                                         ApprovalDecision decision, const char *decided_via,
+                                         int64_t grant_expires_at) {
     int approved = (decision != APPROVAL_DENY);
     int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
     int expired = decided_via && strncmp(decided_via, "auto:", 5) == 0;
     if (is_apply) {
         if (approved && decision == APPROVAL_ALWAYS) {
             int rename_failed = 0;
-            apply_grant(a, agent, &rename_failed);
+            apply_grant(a, agent, &rename_failed, grant_expires_at);
             approval_deliver_postwindow(g_db, a,
                 rename_failed ? APPROVAL_PW_APPLY_DENIED : APPROVAL_PW_APPLY_GRANTED);
         } else {
@@ -1323,7 +1337,8 @@ static void resolve_approval_post_window(const Approval *a, const char *agent,
 
 /* ── resolve_approval: approve/deny a parked approval ────────── */
 
-void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via) {
+void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via,
+                      int64_t grant_expires_at) {
     int approved = (decision != APPROVAL_DENY);
     Approval *a = approval_resolve(g_db, approval_id, approved, decided_via);
     if (!a) return;
@@ -1333,7 +1348,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
 
     /* Block window already lapsed → deliver async, leave the turn untouched. */
     if (approval_is_post_window(session_id, a->tool_call_id)) {
-        resolve_approval_post_window(a, agent, decision, decided_via);
+        resolve_approval_post_window(a, agent, decision, decided_via, grant_expires_at);
         free((char *)agent);
         approval_free(a);
         wake_session(session_id);
@@ -1390,7 +1405,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
 
     int rename_failed = 0;
     if (decision == APPROVAL_ALWAYS)
-        apply_grant(a, agent, &rename_failed);
+        apply_grant(a, agent, &rename_failed, grant_expires_at);
 
     /* Build tool result message */
     char result_buf[256];
@@ -1426,9 +1441,26 @@ static void handle_approval_park(int64_t session_id) {
 
     if (g_mode == 0) {
         /* CLI mode */
+        if (g_auto_approve) {
+            /* --auto-approve: answer immediately, never prompt. "rerun"
+             * approvals get a single-use ONCE; "apply" grants (ambient
+             * capabilities have no once semantics — see resolve_approval)
+             * get ALWAYS with a self-expiring deadline so no durable config
+             * is left behind. Applies to any session in the CLI tree,
+             * including sub-agents. */
+            int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
+            if (is_apply) {
+                int64_t expires = time(NULL) + approval_timeout_seconds();
+                resolve_approval(a->id, APPROVAL_ALWAYS, "cli:auto-approve", expires);
+            } else {
+                resolve_approval(a->id, APPROVAL_ONCE, "cli:auto-approve", 0);
+            }
+            approval_free(a);
+            return;
+        }
         if (!isatty(STDIN_FILENO)) {
             /* Non-interactive (-p mode): auto-deny */
-            resolve_approval(a->id, APPROVAL_DENY, "auto:no-approver");
+            resolve_approval(a->id, APPROVAL_DENY, "auto:no-approver", 0);
             approval_free(a);
             return;
         }
@@ -1479,7 +1511,7 @@ static void handle_approval_park(int64_t session_id) {
     }
     if (!has_channel) {
         /* No channel binding — fail-closed: auto-deny */
-        resolve_approval(a->id, APPROVAL_DENY, "auto:no-approver");
+        resolve_approval(a->id, APPROVAL_DENY, "auto:no-approver", 0);
     }
     approval_free(a);
 }
@@ -1867,9 +1899,12 @@ static void print_usage(void) {
            "options:\n"
            "  -p <prompt>        single-turn: send prompt, print response, exit\n"
            "  -s <id>            session id\n"
-           "  -y                 host mode: no kernel sandbox, all hosts allowed\n"
-           "                     (agent tool allowlist still applies; CLI only,\n"
-           "                     ignored by --daemon)\n"
+           "  --trust-host       no kernel sandbox, no rlimits, no egress proxy,\n"
+           "                     full env — tool allowlist still applies (CLI\n"
+           "                     only, ignored by --daemon)\n"
+           "  --auto-approve     answer parked approvals without prompting;\n"
+           "                     single-use (rerun tools run once, capability\n"
+           "                     grants expire — nothing durable is left behind)\n"
            "  --new              create a new session\n"
            "  --log-level=LEVEL  set log level (error|info|debug|trace)\n"
            "  -v, --debug        debug logging (timing, context stats)\n"
@@ -2150,9 +2185,10 @@ static int run_daemon(char *db_path) {
 }
 
 static int run_cli(char *db_path, const char *prompt,
-                   int64_t session_id, int new_session, int host_mode) {
+                   int64_t session_id, int new_session, int host_mode, int auto_approve) {
     /* ── CLI mode ────────────────────────────────────────────────── */
     g_mode = 0;
+    g_auto_approve = auto_approve;
     g_next_db_poll = time(NULL);
 
     if (!g_cfg->provider.api_key || !g_cfg->provider.api_key[0]) {
@@ -2483,7 +2519,7 @@ static int run_cli(char *db_path, const char *prompt,
                         d = APPROVAL_ALWAYS;
                     else
                         d = APPROVAL_DENY;
-                    resolve_approval(pa->id, d, "cli:interactive");
+                    resolve_approval(pa->id, d, "cli:interactive", 0);
                     approval_free(pa);
                     /* Shift and continue */
                     size_t consumed = (size_t)(nl - linebuf) + 1;
@@ -2545,7 +2581,7 @@ int main(int argc, char *argv[]) {
      * broken DB open is itself a finding — never bail on failures. */
     if (argc >= 2 && strcmp(argv[1], "--doctor") == 0) return doctor_main();
 
-    int daemon_mode = 0, new_session = 0, host_mode = 0;
+    int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
     const char *channel_mode = NULL;
     LogLevel log_level_override = LOG_LEVEL_INFO;
     int log_level_set = 0;
@@ -2564,7 +2600,8 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-v") == 0) { log_level_override = LOG_LEVEL_DEBUG; log_level_set = 1; }
         else if (strcmp(argv[i], "--trace") == 0 || strcmp(argv[i], "-vv") == 0) { log_level_override = LOG_LEVEL_TRACE; log_level_set = 1; }
         else if (strcmp(argv[i], "--new") == 0) new_session = 1;
-        else if (strcmp(argv[i], "-y") == 0) host_mode = 1;
+        else if (strcmp(argv[i], "--trust-host") == 0) host_mode = 1;
+        else if (strcmp(argv[i], "--auto-approve") == 0) auto_approve = 1;
         else if (strncmp(argv[i], "--llm-threads=", 14) == 0) g_llm_threads = atoi(argv[i]+14);
         else if (strcmp(argv[i], "-p") == 0) { if (++i >= argc) { fprintf(stderr, "-p requires arg\n"); return 1; } prompt = argv[i]; }
         else if (strcmp(argv[i], "-s") == 0) { if (++i >= argc) { fprintf(stderr, "-s requires arg\n"); return 1; } session_id = atoll(argv[i]); }
@@ -2573,7 +2610,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (host_mode && daemon_mode)
-        fprintf(stderr, "warning: -y is ignored by --daemon; daemon agents "
+        fprintf(stderr, "warning: --trust-host is ignored by --daemon; daemon agents "
                 "sandbox per their trust_level\n");
 
     {   const char *v = getenv("CCLAW_LLM_THREADS");
@@ -2669,5 +2706,5 @@ int main(int argc, char *argv[]) {
         LOG_WARN_("startup recovery failed");
 
     if (daemon_mode) return run_daemon(db_path);
-    return run_cli(db_path, prompt, session_id, new_session, host_mode);
+    return run_cli(db_path, prompt, session_id, new_session, host_mode, auto_approve);
 }

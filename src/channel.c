@@ -266,7 +266,7 @@ void channel_consume_events(sqlite3 *db) {
                     }
                     char decided[128];
                     snprintf(decided, sizeof(decided), "channel:%s", ch_name);
-                    resolve_approval(pa->id, d, decided);
+                    resolve_approval(pa->id, d, decided, 0);
                     approval_free(pa);
                     wake_session(sid);
                 } else {

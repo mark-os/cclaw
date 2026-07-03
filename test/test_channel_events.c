@@ -27,7 +27,9 @@ static ApprovalDecision g_resolve_decision;
 static char g_resolve_decided_via[128];
 static int g_resolve_calls;
 
-void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via) {
+void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via,
+                      int64_t grant_expires_at) {
+    (void)grant_expires_at;
     g_resolve_calls++;
     g_resolve_approval_id = approval_id;
     g_resolve_decision = decision;

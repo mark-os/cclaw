@@ -78,7 +78,7 @@ All injected at startup. Config loaded via `config_load()`.
 | `CCLAW_SAVE_REASONING` | cclaw.db kv | 0 | bool: persist reasoning |
 | `CCLAW_SAVE_USAGE` | cclaw.db kv | 0 | bool: persist usage stats |
 | `CCLAW_PATH` | CLI sets | (none) | CWD for ro file_read |
-| `CCLAW_TRUST_LEVEL` | CLI `-y` flag | (none) | overrides `agents.trust_level`; `-y` sets `host` |
+| `CCLAW_TRUST_LEVEL` | CLI `--trust-host` flag | (none) | overrides `agents.trust_level`; `--trust-host` sets `host` |
 | `CCLAW_SECRET_<NAME>` | cclaw.db kv (encrypted) | — | decrypted at fork, cleared after read |
 
 ## providers

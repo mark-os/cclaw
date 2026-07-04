@@ -1590,6 +1590,110 @@ int db_secret_host_unbind(sqlite3 *db, const char *secret_name, const char *host
         secret_name, host);
 }
 
+/* Secret store (specs/security.md): DB-backed secrets, encrypted at rest. */
+
+int db_secret_set(sqlite3 *db, const char *name, const char *value,
+                  const char *source, const char *status) {
+    if (!db || !name || !name[0] || !value) return -1;
+    if (!s_secret_key_loaded) return -1;
+    char *enc = secret_encrypt(s_secret_key, value);
+    if (!enc) return -1;
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_prepare_v2(db,
+        "INSERT INTO secrets(name, value, source, status) VALUES(?1, ?2, ?3, ?4) "
+        "ON CONFLICT(name) DO UPDATE SET value=excluded.value, source=excluded.source, "
+        "status=excluded.status",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) { free(enc); return -1; }
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, enc, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, source ? source : "operator", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, status ? status : "active", -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    free(enc);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_secret_rm(sqlite3 *db, const char *name) {
+    if (!db || !name || !name[0]) return -1;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "DELETE FROM secrets WHERE name=?1", -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_secret_exists(sqlite3 *db, const char *name) {
+    if (!db || !name || !name[0]) return 0;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM secrets WHERE name=?1", -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    int exists = (sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+    return exists;
+}
+
+ShellSecret *db_secrets_load(sqlite3 *db, size_t *count) {
+    *count = 0;
+    if (!db || !s_secret_key_loaded) return NULL;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT name, value FROM secrets ORDER BY name",
+                          -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    size_t cap = 8, n = 0;
+    ShellSecret *out = calloc(cap, sizeof(ShellSecret));
+    if (!out) { sqlite3_finalize(stmt); return NULL; }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *nm = (const char *)sqlite3_column_text(stmt, 0);
+        const char *enc = (const char *)sqlite3_column_text(stmt, 1);
+        if (!nm || !enc) continue;
+        char *plaintext = secret_decrypt(s_secret_key, enc);
+        if (!plaintext) continue;  /* tamper/corruption: skip, don't fail the whole load */
+        if (n == cap) {
+            cap *= 2;
+            ShellSecret *tmp = realloc(out, cap * sizeof(ShellSecret));
+            if (!tmp) { crypto_wipe(plaintext, strlen(plaintext)); free(plaintext); break; }
+            out = tmp;
+        }
+        out[n].name = strdup(nm);
+        out[n].value = plaintext;
+        n++;
+    }
+    sqlite3_finalize(stmt);
+    *count = n;
+    if (n == 0) { free(out); return NULL; }
+    return out;
+}
+
+int db_secret_pending_count(sqlite3 *db) {
+    if (!db) return 0;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM secrets WHERE status='pending'",
+                          -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+    int n = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) n = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return n;
+}
+
+int db_secret_set_status(sqlite3 *db, const char *name, const char *status) {
+    if (!db || !name || !name[0] || !status) return -1;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "UPDATE secrets SET status=?1 WHERE name=?2",
+                          -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(stmt, 1, status, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
 int db_agent_upsert(sqlite3 *db, const char *name, const char *description,
                     const char *system_prompt) {
     if (!db || !name) return -1;

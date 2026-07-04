@@ -3,6 +3,7 @@
 
 #include "sqlite3.h"
 #include "types.h"
+#include "tool_shell.h"   /* ShellSecret */
 #include <sys/types.h>
 
 /* Install the process-global SQLite error log handler. Must be called once,
@@ -249,6 +250,24 @@ int db_sensitive_host_rm(sqlite3 *db, const char *host);
 char **db_secret_hosts(sqlite3 *db, const char *secret_name, int *count);
 int db_secret_host_bind(sqlite3 *db, const char *secret_name, const char *host);
 int db_secret_host_unbind(sqlite3 *db, const char *secret_name, const char *host);
+
+/* Secret store (specs/security.md): DB-backed secrets, encrypted at rest with
+ * the process-wide master key (db_set_secret_key). All fail -1 if the key
+ * isn't loaded (db_secret_key_loaded() == 0).
+ * db_secret_set: insert or replace name -> value (source/status as given).
+ * db_secret_rm: delete by name (0 even if absent).
+ * db_secret_exists: 1 if a row with this name exists, 0 otherwise/on error.
+ * db_secrets_load: decrypt every row into a heap ShellSecret array (caller
+ * frees with shell_secrets_free); *count=0/NULL if none or key not loaded.
+ * db_secret_pending_count: rows with status='pending' (quarantine spam guard).
+ * db_secret_set_status: flip status (e.g. 'pending' -> 'active' on bind). */
+int db_secret_set(sqlite3 *db, const char *name, const char *value,
+                  const char *source, const char *status);
+int db_secret_rm(sqlite3 *db, const char *name);
+int db_secret_exists(sqlite3 *db, const char *name);
+ShellSecret *db_secrets_load(sqlite3 *db, size_t *count);
+int db_secret_pending_count(sqlite3 *db);
+int db_secret_set_status(sqlite3 *db, const char *name, const char *status);
 
 /* Seed agent from disk if not in DB. Loads agent.json + system.md from agents_dir.
  * Returns agent row (from DB after potential seed). Caller frees with agent_row_free. */

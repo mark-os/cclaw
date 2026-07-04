@@ -409,6 +409,19 @@ CREATE TABLE IF NOT EXISTS secret_hosts (
   PRIMARY KEY (secret_name, host)
 );
 
+-- Secret store (specs/security.md): DB-backed secrets, born via the
+-- `cclaw secret set` operator verb or the secret_create tool. value is always
+-- "enc:<hex(...)>" (never plaintext). status='pending' is provenance/UX only —
+-- enforcement comes free from secret_hosts having zero rows for a new secret
+-- (first use always parks; ALWAYS-approval binds and flips it to 'active').
+CREATE TABLE IF NOT EXISTS secrets (
+  name       TEXT PRIMARY KEY,                    -- ^[A-Z][A-Z0-9_]*$
+  value      TEXT NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'active',       -- 'active' | 'pending'
+  source     TEXT NOT NULL DEFAULT 'operator',      -- 'operator'|'generated'|'quarantine'
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
 -- ═══ Process registry (liveness) ═══
 -- One row per live cclaw process (daemon or cli) sharing this DB. Sessions stamp
 -- their owner_instance here; owner-scoped recovery reclaims only sessions whose

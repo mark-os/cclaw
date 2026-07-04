@@ -31,6 +31,7 @@
 #include "tool_request_config.h"
 #include "context.h"
 #include "db.h"
+#include "secret_store.h"
 #include "templates.h"
 #include "db_response.h"
 #include "shutdown.h"
@@ -44,6 +45,7 @@
 #include "channel_api.h"
 #include "channel_runner.h"
 #include "secret.h"
+#include "validate.h"
 #include "secret_scan.h"
 #include "tool_policy.h"
 #include "secret_interp.h"
@@ -316,17 +318,18 @@ static int tool_inline_error(int64_t session_id, PendingToolCall *tc,
 
 /* Placeholder names in args that reference a LOADED secret. Unknown names
  * interpolate to nothing (nothing is submitted) — not checked or narrowed. */
-static char **used_secret_names(const char *args, size_t *out_n) {
+static char **used_secret_names(const char *args, const ShellSecret *secrets,
+                                size_t secret_count, size_t *out_n) {
     *out_n = 0;
-    if (!g_tool_setup || g_tool_setup->secret_count == 0) return NULL;
+    if (secret_count == 0) return NULL;
     size_t all_n = 0;
     char **all = secret_placeholder_names(args, &all_n);
     if (!all) return NULL;
     size_t k = 0;
     for (size_t i = 0; i < all_n; i++) {
         int loaded = 0;
-        for (size_t j = 0; j < g_tool_setup->secret_count; j++)
-            if (strcmp(all[i], g_tool_setup->secrets[j].name) == 0) { loaded = 1; break; }
+        for (size_t j = 0; j < secret_count; j++)
+            if (strcmp(all[i], secrets[j].name) == 0) { loaded = 1; break; }
         if (loaded) all[k++] = all[i]; else free(all[i]);
     }
     *out_n = k;
@@ -379,7 +382,8 @@ typedef struct {
 
 static void call_egress_build(CallEgress *ce, const char *args, int skip_bind,
                               const char *sens_exception,
-                              char **base_hosts, size_t base_n) {
+                              char **base_hosts, size_t base_n,
+                              const ShellSecret *secrets, size_t secret_count) {
     memset(ce, 0, sizeof(*ce));
     int n = 0;
     char **all = db_sensitive_hosts(g_db, &n);
@@ -398,7 +402,7 @@ static void call_egress_build(CallEgress *ce, const char *args, int skip_bind,
     size_t hosts_n = base_n;
     if (!skip_bind && args) {
         size_t un = 0;
-        char **names = used_secret_names(args, &un);
+        char **names = used_secret_names(args, secrets, secret_count, &un);
         if (names) {
             char **u = NULL; size_t uc = 0, ucap = 0;
             for (size_t i = 0; i < un; i++) {
@@ -449,8 +453,9 @@ static void call_egress_free(CallEgress *ce) {
     memset(ce, 0, sizeof(*ce));
 }
 
-static int dispatch_tool(int64_t session_id, const char *agent_name,
-                         PendingToolCall *tc) {
+static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
+                               PendingToolCall *tc,
+                               const ShellSecret *secrets, size_t secret_count) {
     if (g_child_count >= CHILD_MAX) return -1;
 
     ToolEntry *te = g_tool_setup ? tools_lookup(&g_tool_setup->reg, tc->name) : NULL;
@@ -570,7 +575,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
          * is the egress narrowing in call_egress_build below. */
         {
             size_t un = 0;
-            char **names = used_secret_names(tc->arguments, &un);
+            char **names = used_secret_names(tc->arguments, secrets, secret_count, &un);
             if (names) {
                 char url_host[254] = "";
                 int have_url = (te->recipe.tier == SBX_WEB) &&
@@ -638,8 +643,8 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
     if (te->recipe.vehicle == EXEC_INLINE) {
         /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
         char *interp_args = NULL;
-        if (tool_needs_interpolation(tc->name) && g_tool_setup && g_tool_setup->secret_count > 0)
-            interp_args = secret_interpolate(tc->arguments, g_tool_setup->secrets, g_tool_setup->secret_count);
+        if (tool_needs_interpolation(tc->name) && secret_count > 0)
+            interp_args = secret_interpolate(tc->arguments, secrets, secret_count);
         /* Thread the live session + tool_call_id into the per-tool context.
          * g_tool_setup is a single shared instance, so the session_id captured
          * at agent_setup_init time is stale (0 in CLI) — the dispatching session
@@ -680,8 +685,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         /* Postprocess: deinterpolate + secret scan (scan runs even with no
          * secrets loaded — inline js_eval output can carry leaked credentials) */
         { char *pp = tool_result_postprocess(result,
-              g_tool_setup ? g_tool_setup->secrets : NULL,
-              g_tool_setup ? g_tool_setup->secret_count : 0);
+              secrets, secret_count);
           if (pp) { free(result); result = pp; } }
 
         /* afterToolCall hooks: chained result replacement, after the secret
@@ -789,9 +793,8 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
 
             /* Parent-side secret interpolation (daemon holds the key) */
             char *interp_cmd = NULL;
-            if (g_tool_setup && g_tool_setup->secret_count > 0)
-                interp_cmd = secret_interpolate(command, g_tool_setup->secrets,
-                                                g_tool_setup->secret_count);
+            if (secret_count > 0)
+                interp_cmd = secret_interpolate(command, secrets, secret_count);
             const char *resolved_cmd = interp_cmd ? interp_cmd : command;
 
             /* Filter secrets to minimal set (only those referenced by command) */
@@ -811,7 +814,8 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             CallEgress se;
             call_egress_build(&se, tc->arguments, bind_once,
                               sens_once ? sens_host : NULL,
-                              sc->allowed_hosts, sc->allowed_host_count);
+                              sc->allowed_hosts, sc->allowed_host_count,
+                              secrets, secret_count);
             req.host_rules = se.hosts;
             req.host_count = se.hosts_n;
             req.deny_rules = (const char **)se.deny;
@@ -864,9 +868,8 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
 
         /* Interpolate {{SECRET:X}} (a URL may carry a token). */
         char *interp_args = NULL;
-        if (g_tool_setup && g_tool_setup->secret_count > 0)
-            interp_args = secret_interpolate(tc->arguments, g_tool_setup->secrets,
-                                             g_tool_setup->secret_count);
+        if (secret_count > 0)
+            interp_args = secret_interpolate(tc->arguments, secrets, secret_count);
         const char *resolved_args = interp_args ? interp_args : tc->arguments;
 
         char agent_dir[PATH_MAX];
@@ -880,7 +883,8 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         CallEgress se;
         call_egress_build(&se, tc->arguments, bind_once,
                           sens_once ? sens_host : NULL,
-                          wc->allowed_hosts, wc->allowed_host_count);
+                          wc->allowed_hosts, wc->allowed_host_count,
+                          secrets, secret_count);
         req.host_rules = se.hosts;
         req.host_count = se.hosts_n;
         req.deny_rules = (const char **)se.deny;
@@ -925,9 +929,8 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
 
         /* Interpolate {{SECRET:X}} (args may carry a token for http_request). */
         char *interp_args = NULL;
-        if (g_tool_setup && g_tool_setup->secret_count > 0)
-            interp_args = secret_interpolate(eval_args, g_tool_setup->secrets,
-                                             g_tool_setup->secret_count);
+        if (secret_count > 0)
+            interp_args = secret_interpolate(eval_args, secrets, secret_count);
         const char *resolved_args = interp_args ? interp_args : eval_args;
 
         char agent_dir[PATH_MAX];
@@ -975,7 +978,8 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
          * (file + args) is what gets interpolated — narrow on what runs. */
         call_egress_build(&se, eval_args, bind_once,
                           sens_once ? sens_host : NULL,
-                          jc->allowed_hosts, jc->allowed_hosts_count);
+                          jc->allowed_hosts, jc->allowed_hosts_count,
+                          secrets, secret_count);
         req.host_rules = se.hosts;
         req.host_count = se.hosts_n;
         req.deny_rules = (const char **)se.deny;
@@ -1039,6 +1043,23 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
      * advances instead of hanging on a pending tool_call. */
     return tool_inline_error(session_id, tc,
         "error: tool has no execution recipe", NULL);
+}
+
+/* Per-call secret snapshot wrapper: env base (g_tool_setup->secrets, immutable
+ * for the process lifetime) merged with a fresh read of the DB-backed secret
+ * store, so a secret born mid-session (operator `secret set`, secret_create)
+ * is visible on its very next dispatch. Scoped to this one call — never
+ * shared with async work that outlives it (EXEC_THREAD re-snapshots itself
+ * with its own db handle; see tool_thread.c). */
+static int dispatch_tool(int64_t session_id, const char *agent_name,
+                         PendingToolCall *tc) {
+    size_t snap_n = 0;
+    ShellSecret *snap = secrets_snapshot(g_db,
+        g_tool_setup ? g_tool_setup->secrets : NULL,
+        g_tool_setup ? g_tool_setup->secret_count : 0, &snap_n);
+    int rc = dispatch_tool_inner(session_id, agent_name, tc, snap, snap_n);
+    secrets_snapshot_free(snap, snap_n);
+    return rc;
 }
 
 /* ── Pipe draining helpers ─────────────────────────────────────── */
@@ -2060,10 +2081,15 @@ static void reap_children(void) {
                 hosts = NULL;  /* truncated meta: don't trust a partial tag */
             }
 
-            /* Secret postprocess: deinterpolate + scan */
-            { char *pp = tool_result_postprocess(output,
+            /* Secret postprocess: deinterpolate + scan. Fresh per-call snapshot
+             * (same rationale as dispatch_tool) — a secret born mid-session
+             * must be maskable in a reaped sandboxed child's output too. */
+            { size_t snap_n = 0;
+              ShellSecret *snap = secrets_snapshot(g_db,
                   g_tool_setup ? g_tool_setup->secrets : NULL,
-                  g_tool_setup ? g_tool_setup->secret_count : 0);
+                  g_tool_setup ? g_tool_setup->secret_count : 0, &snap_n);
+              char *pp = tool_result_postprocess(output, snap, snap_n);
+              secrets_snapshot_free(snap, snap_n);
               if (pp) { free(output); output = pp; out_len = strlen(output); } }
 
             /* afterToolCall hooks: chained result replacement, post-scanner,
@@ -2159,6 +2185,10 @@ static void print_usage(void) {
            "                                   submitting the secret elsewhere parks, and a\n"
            "                                   secret-carrying shell/js call can reach ONLY\n"
            "                                   its bound hosts\n"
+           "       cclaw secret set <NAME> [value] | rm <NAME> | list\n"
+           "                                   mint/remove a DB-backed secret (no value arg\n"
+           "                                   reads one line from stdin); born with zero host\n"
+           "                                   bindings, so its first use always parks\n"
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
@@ -2942,6 +2972,83 @@ static int secret_bind_main(int argc, char *argv[]) {
     return rc;
 }
 
+/* `cclaw secret set <NAME> [value] | rm <NAME> | list` — operator verb for
+ * the DB-backed secret store (specs/security.md). `set` with no value arg
+ * reads one line from stdin, keeping the plaintext out of shell history.
+ * `list` never prints values. A newly set secret has zero secret_hosts rows
+ * (unless pre-seeded with `cclaw secret-bind`), so its first use always
+ * parks — the same fail-closed rule as env-collected secrets. */
+static int secret_main(int argc, char *argv[]) {
+    char *db_path = resolve_db_path();
+    if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return 1; }
+    sqlite3 *db = verb_db_open();
+    if (!db) { free(db_path); return 1; }
+    { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
+    free(db_path);
+
+    int rc = 0;
+    if (argc >= 3 && strcmp(argv[2], "list") == 0) {
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT name, status, source, created_at FROM secrets ORDER BY name",
+                -1, &st, NULL) == SQLITE_OK) {
+            int any = 0;
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                printf("%s  status=%s  source=%s  created=%lld\n",
+                       sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
+                       sqlite3_column_text(st, 2),
+                       (long long)sqlite3_column_int64(st, 3));
+                any = 1;
+            }
+            sqlite3_finalize(st);
+            if (!any) printf("(no secrets)\n");
+        }
+    } else if (argc >= 4 && strcmp(argv[2], "rm") == 0) {
+        rc = db_secret_rm(db, argv[3]) == 0 ? 0 : 1;
+        if (rc == 0) printf("secret removed: %s\n", argv[3]);
+        else fprintf(stderr, "error: rm failed\n");
+    } else if (argc >= 3 && strcmp(argv[2], "set") == 0) {
+        const char *name = (argc >= 4) ? argv[3] : NULL;
+        if (!name || !is_valid_secret_name(name)) {
+            fprintf(stderr, "error: invalid secret name (expected ^[A-Z][A-Z0-9_]*$)\n");
+            rc = 2;
+        } else {
+            char *value = NULL;
+            if (argc >= 5) {
+                value = strdup(argv[4]);
+            } else {
+                char line[4096];
+                if (fgets(line, sizeof(line), stdin)) {
+                    size_t len = strlen(line);
+                    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+                        line[--len] = '\0';
+                    value = strdup(line);
+                }
+            }
+            if (!value || !value[0]) {
+                fprintf(stderr, "error: no value provided\n");
+                rc = 2;
+            } else if (!db_secret_key_loaded()) {
+                fprintf(stderr, "error: master key unavailable\n");
+                rc = 1;
+            } else {
+                rc = db_secret_set(db, name, value, "operator", "active") == 0 ? 0 : 1;
+                if (rc == 0) printf("secret set: %s\n", name);
+                else fprintf(stderr, "error: set failed\n");
+            }
+            if (value) { explicit_bzero(value, strlen(value)); free(value); }
+        }
+    } else {
+        fprintf(stderr, "usage: cclaw secret set <NAME> [value] | rm <NAME> | list\n"
+                        "  set with no value reads one line from stdin\n"
+                        "  name: ^[A-Z][A-Z0-9_]*$\n");
+        rc = 2;
+    }
+    db_wipe_secret_key();
+    sqlite3_close(db);
+    return rc;
+}
+
 int main(int argc, char *argv[]) {
     /* --run-tool: early intercept for sandboxed file tool child. No DB, no key,
      * no config. The child reads its request from fd 3. */
@@ -2961,6 +3068,7 @@ int main(int argc, char *argv[]) {
      * (specs/trust.md). Deliberately CLI-only — no agent tool sets these. */
     if (argc >= 2 && strcmp(argv[1], "sensitive") == 0) return sensitive_main(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "secret-bind") == 0) return secret_bind_main(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "secret") == 0) return secret_main(argc, argv);
 
     int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
     int channel_check = 0, channel_activate_flag = 0;

@@ -397,6 +397,18 @@ CREATE TABLE IF NOT EXISTS sensitive_targets (
   PRIMARY KEY (kind, value)
 );
 
+-- Fail-closed credential rule (specs/trust.md): a secret may only be
+-- submitted to hosts it is bound to. First use of a loaded secret with no
+-- bindings always parks; ALWAYS on that approval records the binding
+-- ("approve & bind"). For shell/js calls carrying a secret, the call's
+-- egress allow-list IS the union of the used secrets' bound hosts.
+CREATE TABLE IF NOT EXISTS secret_hosts (
+  secret_name TEXT NOT NULL,
+  host        TEXT NOT NULL,                 -- exact host or '.suffix' rule
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (secret_name, host)
+);
+
 -- ═══ Process registry (liveness) ═══
 -- One row per live cclaw process (daemon or cli) sharing this DB. Sessions stamp
 -- their owner_instance here; owner-scoped recovery reclaims only sessions whose

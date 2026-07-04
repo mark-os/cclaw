@@ -314,50 +314,139 @@ static int tool_inline_error(int64_t session_id, PendingToolCall *tc,
     return 1;
 }
 
-/* Sensitivity per-call egress state for one network-tier dispatch: the deny
- * labels for req.deny_rules, plus (after an approved sensitivity park) the
- * matched host appended to the allow rules. approved_host!=NULL drops the
- * labels covering it from the deny list — a per-call exception, label-wide
- * for exactly one human-approved call, gone when the call ends. */
-typedef struct {
-    char **deny; size_t deny_n;          /* heap labels for req.deny_rules */
-    const char **hosts; size_t hosts_n;  /* extended allow list (or borrowed) */
-    const char **hosts_owned;            /* non-NULL if hosts was allocated */
-} SensCallEgress;
+/* Placeholder names in args that reference a LOADED secret. Unknown names
+ * interpolate to nothing (nothing is submitted) — not checked or narrowed. */
+static char **used_secret_names(const char *args, size_t *out_n) {
+    *out_n = 0;
+    if (!g_tool_setup || g_tool_setup->secret_count == 0) return NULL;
+    size_t all_n = 0;
+    char **all = secret_placeholder_names(args, &all_n);
+    if (!all) return NULL;
+    size_t k = 0;
+    for (size_t i = 0; i < all_n; i++) {
+        int loaded = 0;
+        for (size_t j = 0; j < g_tool_setup->secret_count; j++)
+            if (strcmp(all[i], g_tool_setup->secrets[j].name) == 0) { loaded = 1; break; }
+        if (loaded) all[k++] = all[i]; else free(all[i]);
+    }
+    *out_n = k;
+    if (k == 0) { free(all); return NULL; }
+    return all;
+}
 
-static void sens_egress_build(SensCallEgress *se, const char *approved_host,
+/* Host of a call's "url" argument: scheme-strip + authority slice, mirroring
+ * what the proxy/http layer accepts — deliberately not a full URL parser. */
+static int web_args_url_host(const char *args, char *out, size_t cap) {
+    ToolArgs ta;
+    if (!args || tool_parse(args, &ta) != 0) return 0;
+    const char *url = targ_str(&ta, "url");
+    int ok = 0;
+    if (url) {
+        const char *p = strstr(url, "://");
+        p = p ? p + 3 : url;
+        const char *end = p + strcspn(p, "/?#");
+        const char *at = memchr(p, '@', (size_t)(end - p));
+        if (at) p = at + 1;
+        if (*p == '[') {  /* v6 literal: [::1]:port */
+            const char *rb = memchr(p, ']', (size_t)(end - p));
+            if (rb) { p++; end = rb; }
+        } else {
+            const char *colon = memchr(p, ':', (size_t)(end - p));
+            if (colon) end = colon;
+        }
+        size_t len = (size_t)(end - p);
+        if (len > 0 && len < cap) { memcpy(out, p, len); out[len] = '\0'; ok = 1; }
+    }
+    tool_parse_free(&ta);
+    return ok;
+}
+
+/* Per-call egress state for one network-tier dispatch (specs/trust.md):
+ *  - deny: sensitivity labels for req.deny_rules, minus labels covering an
+ *    approved sensitive host (per-call exception, label-wide for exactly one
+ *    human-approved call, gone when the call ends).
+ *  - credential narrowing: a call whose args carry loaded secrets talks ONLY
+ *    to the union of those secrets' bound hosts. Fail-closed: an unbound
+ *    secret yields an empty allow list (deny-all); the only way past is a
+ *    human approval of this exact frozen call (skip_bind). */
+typedef struct {
+    char **deny; size_t deny_n;          /* owned labels for req.deny_rules */
+    char **bound; size_t bound_n;        /* owned union of bound hosts */
+    int narrowed;
+    const char **ext; size_t ext_n;      /* owned array, borrowed strings */
+    const char **hosts; size_t hosts_n;  /* what the req should carry */
+} CallEgress;
+
+static void call_egress_build(CallEgress *ce, const char *args, int skip_bind,
+                              const char *sens_exception,
                               char **base_hosts, size_t base_n) {
-    memset(se, 0, sizeof(*se));
-    se->hosts = (const char **)base_hosts;
-    se->hosts_n = base_n;
+    memset(ce, 0, sizeof(*ce));
     int n = 0;
     char **all = db_sensitive_hosts(g_db, &n);
     if (all) {
         size_t k = 0;
         for (int i = 0; i < n; i++) {
-            if (approved_host && approved_host[0] &&
-                host_covered(&all[i], 1, approved_host)) { free(all[i]); continue; }
+            if (sens_exception && sens_exception[0] &&
+                host_covered(&all[i], 1, sens_exception)) { free(all[i]); continue; }
             all[k++] = all[i];
         }
-        se->deny = all; se->deny_n = k;
-        if (k == 0) { free(all); se->deny = NULL; }
+        ce->deny = all; ce->deny_n = k;
+        if (k == 0) { free(all); ce->deny = NULL; }
     }
-    if (approved_host && approved_host[0]) {
-        const char **ext = malloc((base_n + 1) * sizeof(*ext));
-        if (ext) {
-            for (size_t i = 0; i < base_n; i++) ext[i] = base_hosts[i];
-            ext[base_n] = approved_host;
-            se->hosts = ext; se->hosts_n = base_n + 1;
-            se->hosts_owned = ext;
+
+    const char **hosts = (const char **)base_hosts;
+    size_t hosts_n = base_n;
+    if (!skip_bind && args) {
+        size_t un = 0;
+        char **names = used_secret_names(args, &un);
+        if (names) {
+            char **u = NULL; size_t uc = 0, ucap = 0;
+            for (size_t i = 0; i < un; i++) {
+                int bn = 0;
+                char **bh = db_secret_hosts(g_db, names[i], &bn);
+                for (int j = 0; j < bn; j++) {
+                    int dup = 0;
+                    for (size_t d = 0; d < uc; d++)
+                        if (strcasecmp(u[d], bh[j]) == 0) { dup = 1; break; }
+                    if (dup) { free(bh[j]); continue; }
+                    if (uc == ucap) {
+                        size_t nc = ucap ? ucap * 2 : 4;
+                        char **tmp = realloc(u, nc * sizeof(char *));
+                        if (!tmp) { free(bh[j]); continue; } /* drop: narrower, fail-closed */
+                        u = tmp; ucap = nc;
+                    }
+                    u[uc++] = bh[j];
+                }
+                free(bh);
+            }
+            secret_names_free(names, un);
+            ce->bound = u; ce->bound_n = uc;
+            ce->narrowed = 1;
+            hosts = (const char **)u;   /* uc==0 → NULL/0 → proxy deny-all */
+            hosts_n = uc;
         }
     }
+
+    if (sens_exception && sens_exception[0]) {
+        const char **ext = malloc((hosts_n + 1) * sizeof(*ext));
+        if (ext) {
+            for (size_t i = 0; i < hosts_n; i++) ext[i] = hosts[i];
+            ext[hosts_n] = sens_exception;
+            ce->ext = ext; ce->ext_n = hosts_n + 1;
+            hosts = ext; hosts_n += 1;
+        }
+    }
+    ce->hosts = hosts;
+    ce->hosts_n = hosts_n;
 }
 
-static void sens_egress_free(SensCallEgress *se) {
-    for (size_t i = 0; i < se->deny_n; i++) free(se->deny[i]);
-    free(se->deny);
-    free((void *)se->hosts_owned);
-    memset(se, 0, sizeof(*se));
+static void call_egress_free(CallEgress *ce) {
+    for (size_t i = 0; i < ce->deny_n; i++) free(ce->deny[i]);
+    free(ce->deny);
+    for (size_t i = 0; i < ce->bound_n; i++) free(ce->bound[i]);
+    free(ce->bound);
+    free((void *)ce->ext);
+    memset(ce, 0, sizeof(*ce));
 }
 
 static int dispatch_tool(int64_t session_id, const char *agent_name,
@@ -386,6 +475,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
      * in the network-tier sections below. */
     char sens_host[254] = "";
     int sens_hit = 0, sens_once = 0;
+    int bind_hit = 0, bind_once = 0;
 
     /* §4+§8 dispatch gate (fixed order: capability ceiling → gating hook →
      * approval gate). The gating hook may only *raise* restriction
@@ -473,6 +563,34 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             }
             if (sens_hit && gate < HOOK_GATE_ASK) gate = HOOK_GATE_ASK;
         }
+        /* Fail-closed credential rule (specs/trust.md): submitting a loaded
+         * secret is gated by its host bindings. First use (no bindings) parks;
+         * a web call whose url host isn't covered by every used secret's
+         * bindings parks. shell/js have no static target — their enforcement
+         * is the egress narrowing in call_egress_build below. */
+        {
+            size_t un = 0;
+            char **names = used_secret_names(tc->arguments, &un);
+            if (names) {
+                char url_host[254] = "";
+                int have_url = (te->recipe.tier == SBX_WEB) &&
+                    web_args_url_host(tc->arguments, url_host, sizeof(url_host));
+                for (size_t i = 0; i < un && !bind_hit; i++) {
+                    int bn = 0;
+                    char **bh = db_secret_hosts(g_db, names[i], &bn);
+                    if (!bh) {
+                        bind_hit = 1;   /* first use: no bindings yet */
+                    } else {
+                        if (have_url && !host_covered(bh, (size_t)bn, url_host))
+                            bind_hit = 1;
+                        for (int j = 0; j < bn; j++) free(bh[j]);
+                        free(bh);
+                    }
+                }
+                secret_names_free(names, un);
+            }
+            if (bind_hit && gate < HOOK_GATE_ASK) gate = HOOK_GATE_ASK;
+        }
         if (gate == HOOK_GATE_ASK) {
             Approval *ap = approval_get_for_tool_call(g_db, session_id, tc->call_id);
             int approved = ap && ap->state && strcmp(ap->state, "approved") == 0;
@@ -495,7 +613,8 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
                  * resolve path can refuse to mint anything standing from it. */
                 if (!pending)
                     approval_create(g_db, session_id, tc->call_id, tc->name,
-                                    sens_hit ? "sensitive" : tc->name,
+                                    sens_hit ? "sensitive"
+                                             : (bind_hit ? "secret_bind" : tc->name),
                                     tc->arguments, "rerun");
                 session_set_state(g_db, session_id, "awaiting_approval");
                 approval_free(ap);
@@ -509,6 +628,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
              * re-using the same grant. A consumed sensitivity approval opens a
              * per-call exception for the matched host (network tiers below). */
             sens_once = sens_hit;
+            bind_once = bind_hit;
             approval_consume(g_db, ap->id);
             approval_free(ap);
         }
@@ -688,8 +808,9 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             run_tool_req_init(&req, RUNTOOL_TIER_SHELL, tc->name, tc->arguments,
                               &sc->sb, sc->workspace, sc->cwd_path);
             req.agent_dir = agent_dir;
-            SensCallEgress se;
-            sens_egress_build(&se, sens_once ? sens_host : NULL,
+            CallEgress se;
+            call_egress_build(&se, tc->arguments, bind_once,
+                              sens_once ? sens_host : NULL,
                               sc->allowed_hosts, sc->allowed_host_count);
             req.host_rules = se.hosts;
             req.host_count = se.hosts_n;
@@ -700,7 +821,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             req.secrets = min_secrets;
             req.secret_count = min_count;
             char *blob = run_tool_serialize_request(&req, &blob_len);
-            sens_egress_free(&se);
+            call_egress_free(&se);
 
             /* Wipe interpolated command (contains secret plaintext) */
             if (interp_cmd) { explicit_bzero(interp_cmd, strlen(interp_cmd)); free(interp_cmd); }
@@ -756,8 +877,9 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         run_tool_req_init(&req, RUNTOOL_TIER_WEB, tc->name, resolved_args,
                           &wc->sb, wc->workspace, wc->cwd_path);
         req.agent_dir = agent_dir;
-        SensCallEgress se;
-        sens_egress_build(&se, sens_once ? sens_host : NULL,
+        CallEgress se;
+        call_egress_build(&se, tc->arguments, bind_once,
+                          sens_once ? sens_host : NULL,
                           wc->allowed_hosts, wc->allowed_host_count);
         req.host_rules = se.hosts;
         req.host_count = se.hosts_n;
@@ -765,7 +887,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         req.deny_count = se.deny_n;
         req.timeout = 60;
         char *blob = run_tool_serialize_request(&req, &blob_len);
-        sens_egress_free(&se);
+        call_egress_free(&se);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
         if (!blob)
             return tool_inline_error(session_id, tc,
@@ -848,8 +970,11 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         req.read_paths = read_paths;  /* transient override: + extension store */
         req.read_count = rc_count;
         req.agent_dir = agent_dir;
-        SensCallEgress se;
-        sens_egress_build(&se, sens_once ? sens_host : NULL,
+        CallEgress se;
+        /* eval_args, not tc->arguments: for extension tools the handler blob
+         * (file + args) is what gets interpolated — narrow on what runs. */
+        call_egress_build(&se, eval_args, bind_once,
+                          sens_once ? sens_host : NULL,
                           jc->allowed_hosts, jc->allowed_hosts_count);
         req.host_rules = se.hosts;
         req.host_count = se.hosts_n;
@@ -857,7 +982,7 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         req.deny_count = se.deny_n;
         req.timeout = 120;
         char *blob = run_tool_serialize_request(&req, &blob_len);
-        sens_egress_free(&se);
+        call_egress_free(&se);
         free(read_paths);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
         free(eval_args);
@@ -1469,6 +1594,27 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                  * to the same target parks again. */
                 LOG_INFO_("approval always coerced to once reason=sensitive tool=%s",
                           a->tool_name ? a->tool_name : "?");
+            } else if (a->action && strcmp(a->action, "secret_bind") == 0) {
+                /* Approve & bind: a durable binding needs a static target —
+                 * only a url-carrying call has one. shell/js calls coerce to
+                 * ONCE (nothing standing is minted from an unattributable
+                 * target); pre-seed those with `cclaw secret-bind`. */
+                char host[254];
+                if (a->tool_name && strcmp(a->tool_name, "web_fetch") == 0 &&
+                    a->args_json &&
+                    web_args_url_host(a->args_json, host, sizeof(host))) {
+                    size_t un = 0;
+                    char **names = secret_placeholder_names(a->args_json, &un);
+                    for (size_t i = 0; i < un; i++) {
+                        if (db_secret_host_bind(g_db, names[i], host) == 0)
+                            LOG_INFO_("secret binding recorded name=%s host=%s via=approval",
+                                      names[i], host);
+                    }
+                    secret_names_free(names, un);
+                } else {
+                    LOG_INFO_("approval always coerced to once reason=secret_bind_no_static_target tool=%s",
+                              a->tool_name ? a->tool_name : "?");
+                }
             } else {
                 /* "Allow and stop asking" — flip the standing mode to silent. */
                 agent_config_set_tool_mode(g_db, agent, a->action, "silent");
@@ -2008,6 +2154,11 @@ static void print_usage(void) {
            "                                   label a target sensitive: every tool call\n"
            "                                   touching it parks for approval, no standing\n"
            "                                   grant applies, and the proxy denies it ambiently\n"
+           "       cclaw secret-bind <name> <host> | rm <name> <host> | list\n"
+           "                                   bind a secret to its legitimate hosts; a call\n"
+           "                                   submitting the secret elsewhere parks, and a\n"
+           "                                   secret-carrying shell/js call can reach ONLY\n"
+           "                                   its bound hosts\n"
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
@@ -2734,6 +2885,49 @@ static int sensitive_main(int argc, char *argv[]) {
     return rc;
 }
 
+/* `cclaw secret-bind <name> <host> | rm <name> <host> | list` — operator verb
+ * for the fail-closed credential rule (specs/trust.md): pre-seed or revoke
+ * secret→host bindings. Bindings also accrete from ALWAYS approvals of
+ * url-carrying calls ("approve & bind"). */
+static int secret_bind_main(int argc, char *argv[]) {
+    char *db_path = resolve_db_path();
+    if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return 1; }
+    sqlite3 *db = db_open(db_path);
+    free(db_path);
+    if (!db) { fprintf(stderr, "error: cannot open DB\n"); return 1; }
+    int rc = 0;
+    if (argc >= 3 && strcmp(argv[2], "list") == 0) {
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT secret_name, host FROM secret_hosts"
+                " ORDER BY secret_name, host", -1, &st, NULL) == SQLITE_OK) {
+            int any = 0;
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                printf("%s -> %s\n", sqlite3_column_text(st, 0),
+                       sqlite3_column_text(st, 1));
+                any = 1;
+            }
+            sqlite3_finalize(st);
+            if (!any) printf("(no secret bindings)\n");
+        }
+    } else if (argc >= 5 && strcmp(argv[2], "rm") == 0) {
+        rc = db_secret_host_unbind(db, argv[3], argv[4]) == 0 ? 0 : 1;
+        if (rc == 0) printf("binding removed: %s -> %s\n", argv[3], argv[4]);
+        else fprintf(stderr, "error: rm failed\n");
+    } else if (argc >= 4 && strcmp(argv[2], "rm") != 0) {
+        rc = db_secret_host_bind(db, argv[2], argv[3]) == 0 ? 0 : 1;
+        if (rc == 0) printf("binding added: %s -> %s\n", argv[2], argv[3]);
+        else fprintf(stderr, "error: bind failed\n");
+    } else {
+        fprintf(stderr, "usage: cclaw secret-bind <name> <host> | rm <name> <host> | list\n"
+                        "  host: exact (\"api.github.com\") or suffix (\".github.com\");\n"
+                        "  bare domains cover their subdomains\n");
+        rc = 2;
+    }
+    sqlite3_close(db);
+    return rc;
+}
+
 int main(int argc, char *argv[]) {
     /* --run-tool: early intercept for sandboxed file tool child. No DB, no key,
      * no config. The child reads its request from fd 3. */
@@ -2749,8 +2943,10 @@ int main(int argc, char *argv[]) {
     if (argc >= 2 && strcmp(argv[1], "install") == 0) return install_main(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "uninstall") == 0) return uninstall_main(argc, argv);
 
-    /* sensitive: operator verb for sensitivity labels (specs/trust.md). */
+    /* sensitive / secret-bind: operator verbs for the two escalation rules
+     * (specs/trust.md). Deliberately CLI-only — no agent tool sets these. */
     if (argc >= 2 && strcmp(argv[1], "sensitive") == 0) return sensitive_main(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "secret-bind") == 0) return secret_bind_main(argc, argv);
 
     int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
     int channel_check = 0, channel_activate_flag = 0;

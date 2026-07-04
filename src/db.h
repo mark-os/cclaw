@@ -243,6 +243,13 @@ char **db_sensitive_hosts(sqlite3 *db, int *count);
 int db_sensitive_host_add(sqlite3 *db, const char *host);
 int db_sensitive_host_rm(sqlite3 *db, const char *host);
 
+/* Secret-to-host bindings (specs/trust.md fail-closed credential rule).
+ * db_secret_hosts returns the hosts bound to one secret name (heap array of
+ * heap strings, NULL if none; caller frees). bind/unbind return 0/-1. */
+char **db_secret_hosts(sqlite3 *db, const char *secret_name, int *count);
+int db_secret_host_bind(sqlite3 *db, const char *secret_name, const char *host);
+int db_secret_host_unbind(sqlite3 *db, const char *secret_name, const char *host);
+
 /* Seed agent from disk if not in DB. Loads agent.json + system.md from agents_dir.
  * Returns agent row (from DB after potential seed). Caller frees with agent_row_free. */
 AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name);

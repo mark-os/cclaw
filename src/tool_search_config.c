@@ -75,6 +75,21 @@ static char *handler(const char *arguments, void *user_data) {
         sqlite3_finalize(st);
     }
 
+    /* Secret-host bindings: which hosts each secret may be submitted to.
+     * A {{SECRET:X}} aimed anywhere else parks for approval. */
+    rc = sqlite3_prepare_v2(ctx->db,
+        "SELECT COALESCE(group_concat(secret_name || '->' || host, ', '), '(none)')"
+        " FROM secret_hosts", -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            buf_appendf(&out,
+                "secret_bindings: %s (a secret submitted to an unbound host"
+                " parks for approval)\n", v ? v : "(none)");
+        }
+        sqlite3_finalize(st);
+    }
+
     /* Section 2: tools list with grant status */
     buf_appendf(&out, "\n## Tools you can use or request\n");
     rc = sqlite3_prepare_v2(ctx->db,

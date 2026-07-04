@@ -3,6 +3,7 @@
 #include "cclaw.h"
 #include "log.h"
 #include "secret_scan.h"
+#include "secret_quarantine.h"
 #include "unicode_normalize.h"
 #include "agent_config.h"
 #include "secret.h"
@@ -1241,28 +1242,14 @@ int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source
     char *clean = unicode_strip_invisible(payload, len, &len);
     const char *scanned = clean ? clean : payload;
     if (!clean) len = strlen(payload);
-    ScanFinding f[SCAN_MAX_FINDINGS];
-    int n = secret_scan(scanned, len, f, SCAN_MAX_FINDINGS);
-    if (n == 0) {
-        int64_t id = inbox_insert(db, session_id, source, scanned);
-        free(clean);
-        return id;
-    }
-    /* Findings present — copy and redact */
-    LOG_INFO_("secret_scan hit source=%s rule=%s count=%d",
-                    source ? source : "?", f[0].rule_id ? f[0].rule_id : "?", n);
-    size_t cap = len + 1 + (size_t)n * 80;
-    char *buf = malloc(cap);
-    if (!buf) {
-        int64_t id = inbox_insert(db, session_id, source, scanned);
-        free(clean);
-        return id;
-    }
-    memcpy(buf, scanned, len + 1);
+
+    /* The classic capture case (a user pastes a live key in chat): quarantine
+     * into the secret store instead of shredding, so it becomes a pending
+     * secret behind a {{SECRET:...}} placeholder rather than being destroyed. */
+    char *quarantined = tool_result_postprocess_q(db, scanned, NULL, 0);
+    int64_t id = inbox_insert(db, session_id, source, quarantined ? quarantined : scanned);
     free(clean);
-    secret_scan_redact(buf, &len, cap);
-    int64_t id = inbox_insert(db, session_id, source, buf);
-    free(buf);
+    free(quarantined);
     return id;
 }
 

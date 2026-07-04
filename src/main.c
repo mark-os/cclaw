@@ -32,6 +32,7 @@
 #include "context.h"
 #include "db.h"
 #include "secret_store.h"
+#include "secret_quarantine.h"
 #include "templates.h"
 #include "db_response.h"
 #include "shutdown.h"
@@ -682,10 +683,11 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         }
         if (!result) result = strdup("error: tool returned null");
 
-        /* Postprocess: deinterpolate + secret scan (scan runs even with no
-         * secrets loaded — inline js_eval output can carry leaked credentials) */
-        { char *pp = tool_result_postprocess(result,
-              secrets, secret_count);
+        /* Postprocess: deinterpolate + secret scan/quarantine (scan runs even
+         * with no secrets loaded — inline js_eval output can carry leaked
+         * credentials). Quarantine (not shred): a detected credential becomes
+         * a pending secret behind a placeholder instead of being destroyed. */
+        { char *pp = tool_result_postprocess_q(g_db, result, secrets, secret_count);
           if (pp) { free(result); result = pp; } }
 
         /* afterToolCall hooks: chained result replacement, after the secret
@@ -1630,6 +1632,12 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                         if (db_secret_host_bind(g_db, names[i], host) == 0)
                             LOG_INFO_("secret binding recorded name=%s host=%s via=approval",
                                       names[i], host);
+                        /* A DB-backed secret (operator `secret set`, secret_create,
+                         * or a quarantined capture) is born status='pending' —
+                         * provenance/UX only, since enforcement already comes
+                         * free from having zero bindings. Its first bind is the
+                         * natural point to flip it to 'active'. */
+                        db_secret_set_status(g_db, names[i], "active");
                     }
                     secret_names_free(names, un);
                 } else {
@@ -2081,14 +2089,15 @@ static void reap_children(void) {
                 hosts = NULL;  /* truncated meta: don't trust a partial tag */
             }
 
-            /* Secret postprocess: deinterpolate + scan. Fresh per-call snapshot
-             * (same rationale as dispatch_tool) — a secret born mid-session
-             * must be maskable in a reaped sandboxed child's output too. */
+            /* Secret postprocess: deinterpolate + scan/quarantine. Fresh
+             * per-call snapshot (same rationale as dispatch_tool) — a secret
+             * born mid-session must be maskable in a reaped sandboxed
+             * child's output too. */
             { size_t snap_n = 0;
               ShellSecret *snap = secrets_snapshot(g_db,
                   g_tool_setup ? g_tool_setup->secrets : NULL,
                   g_tool_setup ? g_tool_setup->secret_count : 0, &snap_n);
-              char *pp = tool_result_postprocess(output, snap, snap_n);
+              char *pp = tool_result_postprocess_q(g_db, output, snap, snap_n);
               secrets_snapshot_free(snap, snap_n);
               if (pp) { free(output); output = pp; out_len = strlen(output); } }
 

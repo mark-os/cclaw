@@ -2,6 +2,7 @@
 #include "tool_thread.h"
 #include "db.h"
 #include "secret_store.h"
+#include "secret_quarantine.h"
 #include "db_response.h"
 #include "context.h"
 #include "types.h"
@@ -65,18 +66,18 @@ static void *tool_thread_fn(void *arg) {
     if (!result)
         result = strdup(db ? "error: tool returned null" : "error: tool thread db_open failed");
 
-    /* Postprocess: deinterpolate {{SECRET}} + secret scan (scan runs even with
-     * no secrets — tool output can carry leaked credentials). job->secrets is
-     * the immutable env-only base; merge in a fresh DB read through THIS
-     * thread's own db handle so a secret born mid-session is maskable here
-     * too (never share the dispatch-scoped snapshot — it wouldn't outlive
-     * the async thread). */
+    /* Postprocess: deinterpolate {{SECRET}} + secret scan/quarantine (scan
+     * runs even with no secrets — tool output can carry leaked credentials).
+     * job->secrets is the immutable env-only base; merge in a fresh DB read
+     * through THIS thread's own db handle so a secret born mid-session is
+     * maskable here too (never share the dispatch-scoped snapshot — it
+     * wouldn't outlive the async thread). */
     if (result) {
         size_t snap_n = 0;
         ShellSecret *snap = db ? secrets_snapshot(db, job->secrets, job->secret_count, &snap_n)
                                : NULL;
-        char *pp = tool_result_postprocess(result, snap ? snap : job->secrets,
-                                           snap ? snap_n : job->secret_count);
+        char *pp = tool_result_postprocess_q(db, result, snap ? snap : job->secrets,
+                                             snap ? snap_n : job->secret_count);
         if (snap) secrets_snapshot_free(snap, snap_n);
         if (pp) { free(result); result = pp; }
     }

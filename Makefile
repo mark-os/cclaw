@@ -60,6 +60,7 @@ SMOKE := test_db test_config test_advance_session test_llm_payload test_tools \
          test_session_state test_tool_file test_context_plan test_secret_scan \
          test_agent_setup test_processes test_recovery_scoping test_sandbox_profile \
          test_sensitive test_secret_bind test_secret_store test_tool_secret_create \
+         test_secret_quarantine \
          test_approval_block_window test_approval_postwindow test_tool_check_approval
 SMOKE_BIN := $(patsubst %,$(BUILDDIR)/%,$(SMOKE))
 

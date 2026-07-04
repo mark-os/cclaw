@@ -158,6 +158,11 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->cron_ctx.agent_name = agent_name;
     tool_cron_register(&setup->reg, &setup->cron_ctx);
 
+    /* secret_create — inline in parent process (needs the db handle to write
+     * the secrets table directly; the value never crosses into args/result). */
+    setup->secret_create_ctx.db = db;
+    tool_secret_create_register(&setup->reg, &setup->secret_create_ctx);
+
     /* Agent launch + status check. Available in both CLI and daemon: both run
      * the same event loop with a wake pipe, so a spawned child advances and a
      * parent waiting on it resumes in either. launch_agent is gated by depth

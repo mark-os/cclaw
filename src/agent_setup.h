@@ -13,6 +13,7 @@
 #include "tool_extension.h"
 #include "tool_cron.h"
 #include "tool_web_fetch.h"
+#include "tool_secret_create.h"
 #include "proxy.h"
 #include "extension.h"
 #include "config.h"
@@ -38,6 +39,7 @@ typedef struct {
     SearchConfigCtx search_cfg_ctx;
     ToolExtensionCtx ext_tool_ctx;
     ToolCronCtx cron_ctx;
+    ToolSecretCreateCtx secret_create_ctx;
     /* V88: secrets for shell injection + masking */
     ShellSecret *secrets;
     size_t secret_count;

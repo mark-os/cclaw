@@ -8,8 +8,8 @@ INSERT OR IGNORE INTO config(key, value) VALUES
   ('max_iterations',        '25'),
   ('shell_timeout',         '30'),
   ('web_port',              '8080'),
-  ('worker_tools',          '["file_read","file_write","shell_exec","web_fetch","js_eval","check_session","check_approval","search_config"]'),
-  ('agent_default_tools',   '["file_read","file_write","js_eval","request_config","search_config","memory_create","memory_add","memory_edit","memory_delete","configure_provider","configure_channel","create_agent","extension_promote","extension_publish","extension_attach","extension_list","launch_agent","check_session","check_approval"]'),
+  ('worker_tools',          '["file_read","file_write","shell_exec","web_fetch","js_eval","check_session","check_approval","search_config","secret_create"]'),
+  ('agent_default_tools',   '["file_read","file_write","js_eval","request_config","search_config","memory_create","memory_add","memory_edit","memory_delete","configure_provider","configure_channel","create_agent","extension_promote","extension_publish","extension_attach","extension_list","launch_agent","check_session","check_approval","secret_create"]'),
   ('health_5xx_threshold',  '3'),
   ('health_429_threshold',  '10'),
   ('health_window_sec',     '300'),
@@ -38,4 +38,5 @@ INSERT OR IGNORE INTO tools(name, description) VALUES
   ('request_config', 'Request a configuration change from the user'),
   ('search_config', 'Discover current config, available tools, and how to request changes'),
   ('launch_agent', 'Launch a sub-agent to perform a task'),
-  ('check_agent', 'Check a background sub-agent status and result');
+  ('check_agent', 'Check a background sub-agent status and result'),
+  ('secret_create', 'Mint a new random credential, stored encrypted; returns only its placeholder');

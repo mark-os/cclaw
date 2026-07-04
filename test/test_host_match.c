@@ -54,6 +54,58 @@ static void test_empty_rules_deny_all(void) {
     PASS();
 }
 
+/* ─── host_in_text ─── */
+
+static void test_hit_exact_and_subdomain(void) {
+    TEST("hit_exact_and_subdomain");
+    char *labels[] = {"chase.com"};
+    char got[254];
+    if (!host_in_text(labels, 1, "{\"url\":\"https://chase.com/login\"}", got, sizeof(got)))
+        FAIL("exact label in url should hit");
+    if (strcmp(got, "chase.com") != 0) FAIL("wrong token for exact");
+    if (!host_in_text(labels, 1, "curl -s api.chase.com/transfer", got, sizeof(got)))
+        FAIL("subdomain should hit (registered-domain semantics)");
+    if (strcmp(got, "api.chase.com") != 0) FAIL("wrong token for subdomain");
+    PASS();
+}
+
+static void test_lookalikes_do_not_hit(void) {
+    TEST("lookalikes_do_not_hit");
+    char *labels[] = {"chase.com"};
+    if (host_in_text(labels, 1, "visit mychase.com now", NULL, 0))
+        FAIL("prefix lookalike must NOT hit");
+    if (host_in_text(labels, 1, "https://chase.com.evil.co/x", NULL, 0))
+        FAIL("suffix lookalike must NOT hit");
+    if (host_in_text(labels, 1, "chasexcom or chase-com", NULL, 0))
+        FAIL("non-host text must NOT hit");
+    PASS();
+}
+
+static void test_text_punctuation_boundaries(void) {
+    TEST("text_punctuation_boundaries");
+    char *labels[] = {"bank.example"};
+    char got[64];
+    /* Token embedded in JSON quotes, trailing dot prose, case */
+    if (!host_in_text(labels, 1, "go to BANK.EXAMPLE.", got, sizeof(got)))
+        FAIL("case-insensitive + trailing dot should hit");
+    if (strcmp(got, "BANK.EXAMPLE") != 0) FAIL("token should be trimmed of edge dot");
+    if (host_in_text(labels, 1, "", NULL, 0)) FAIL("empty text");
+    if (host_in_text(NULL, 0, "bank.example", NULL, 0)) FAIL("no labels = no hit");
+    PASS();
+}
+
+static void test_suffix_label_form(void) {
+    TEST("suffix_label_form");
+    char *labels[] = {".pay.example.com"};
+    if (!host_in_text(labels, 1, "POST https://api.pay.example.com/v1", NULL, 0))
+        FAIL("suffix-form label should cover subdomain");
+    if (!host_in_text(labels, 1, "pay.example.com", NULL, 0))
+        FAIL("suffix-form label should cover base");
+    if (host_in_text(labels, 1, "prepay.example.com", NULL, 0))
+        FAIL("dot boundary must hold for suffix-form label");
+    PASS();
+}
+
 /* ─── cidr_parse ─── */
 
 static void test_parse_v4_cidr(void) {
@@ -251,6 +303,12 @@ int main(void) {
     test_suffix_match_bare();
     test_suffix_no_false_positive();
     test_empty_rules_deny_all();
+
+    /* host_in_text */
+    test_hit_exact_and_subdomain();
+    test_lookalikes_do_not_hit();
+    test_text_punctuation_boundaries();
+    test_suffix_label_form();
 
     /* cidr_parse */
     test_parse_v4_cidr();

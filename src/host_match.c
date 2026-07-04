@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "host_match.h"
 #include <arpa/inet.h>
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -89,6 +90,68 @@ int host_match(char **rules, size_t n, const char *host) {
         } else {
             /* Exact match */
             if (strcasecmp(host, r) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
+/* True if `token` is covered by `label` under registered-domain+subdomain
+ * semantics: exact, or subdomain of it. A label already written as a suffix
+ * rule (".x.y") keeps host_match's suffix behavior unchanged. */
+static int label_covers(const char *label, const char *token) {
+    char *one[1] = {(char *)label};
+    if (host_match(one, 1, token)) return 1;
+    if (label[0] != '.') {
+        char suffixed[256];
+        int n = snprintf(suffixed, sizeof(suffixed), ".%s", label);
+        if (n > 0 && (size_t)n < sizeof(suffixed)) {
+            char *sone[1] = {suffixed};
+            if (host_match(sone, 1, token)) return 1;
+        }
+    }
+    return 0;
+}
+
+int host_covered(char **labels, size_t n, const char *host) {
+    if (!labels || !host) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (labels[i] && label_covers(labels[i], host)) return 1;
+    return 0;
+}
+
+static int is_host_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '.' || c == '-';
+}
+
+int host_in_text(char **labels, size_t n, const char *text,
+                 char *out_host, size_t out_cap) {
+    if (out_host && out_cap) out_host[0] = '\0';
+    if (!labels || n == 0 || !text) return 0;
+    const char *p = text;
+    while (*p) {
+        if (!is_host_char(*p)) { p++; continue; }
+        const char *start = p;
+        while (*p && is_host_char(*p)) p++;
+        /* Trim edge dots/hyphens (JSON/prose punctuation, "-x" flags) */
+        const char *s = start, *e = p;
+        while (s < e && (*s == '.' || *s == '-')) s++;
+        while (e > s && (e[-1] == '.' || e[-1] == '-')) e--;
+        size_t len = (size_t)(e - s);
+        if (len == 0 || len >= 254) continue;
+        char token[254];
+        memcpy(token, s, len);
+        token[len] = '\0';
+        for (size_t i = 0; i < n; i++) {
+            if (!labels[i]) continue;
+            if (label_covers(labels[i], token)) {
+                if (out_host && out_cap) {
+                    size_t c = len < out_cap - 1 ? len : out_cap - 1;
+                    memcpy(out_host, token, c);
+                    out_host[c] = '\0';
+                }
+                return 1;
+            }
         }
     }
     return 0;

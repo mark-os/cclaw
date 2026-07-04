@@ -22,6 +22,23 @@ int cidr_parse(const char *s, Cidr *out);
  * TODO Q3: wildcard-label (*.x) — not implemented this cut. */
 int host_match(char **rules, size_t n, const char *host);
 
+/* True if `host` is covered by any label in `labels[0..n)` under
+ * registered-domain+subdomain semantics: exact match, subdomain of it, or
+ * explicit ".suffix" label. Labels use the same semantics as host_in_text
+ * (bare "x.y" implies both exact and ".x.y" suffix). Case-insensitive. */
+int host_covered(char **labels, size_t n, const char *host);
+
+/* Scan free-form text (tool-call args JSON, a shell command) for a host token
+ * covered by any label. Tokens are maximal [A-Za-z0-9.-] runs, trimmed of
+ * edge dots/hyphens. Labels use registered-domain+subdomain semantics: label
+ * "chase.com" covers "chase.com" and "api.chase.com" but never
+ * "mychase.com" or "chase.com.evil.co" (dot-boundary via host_match; a bare
+ * label is treated as itself plus its ".label" suffix rule). Case-insensitive.
+ * Returns 1 and copies the matched token into out_host (if non-NULL, always
+ * NUL-terminated, truncated to out_cap) on first hit; 0 if clean. */
+int host_in_text(char **labels, size_t n, const char *text,
+                 char *out_host, size_t out_cap);
+
 /* CIDR containment: true if (family, addr_bytes) falls within any rule. */
 int cidr_match(const Cidr *rules, size_t n, int family,
                const unsigned char *addr);

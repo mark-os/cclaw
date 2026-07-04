@@ -18,4 +18,11 @@ char *secret_deinterpolate(const char *text, const ShellSecret *secrets, size_t 
  * Returns new heap-allocated string if modified, or NULL if unchanged. */
 char *tool_result_postprocess(const char *result, const ShellSecret *secrets, size_t count);
 
+/* List the distinct {{SECRET:name}} placeholder names in text (parse only —
+ * no values touched, no secret store consulted; unknown names are listed too).
+ * Returns a heap array of heap strings, *out_count entries (NULL if none or
+ * OOM, *out_count 0). Free with secret_names_free(). */
+char **secret_placeholder_names(const char *text, size_t *out_count);
+void secret_names_free(char **names, size_t count);
+
 #endif /* CCLAW_SECRET_INTERP_H */

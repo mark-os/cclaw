@@ -96,6 +96,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     w_str_array(&b, req->write_paths, req->write_count);
     w_str(&b, req->agent_dir);
     w_str_array(&b, req->host_rules, req->host_count);
+    w_str_array(&b, req->deny_rules, req->deny_count);
     w_str(&b, req->command);
     w_u32(&b, (uint32_t)req->timeout);
     w_u32(&b, (uint32_t)req->secret_count);
@@ -195,6 +196,7 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     q->write_paths = r_str_array(r, &q->write_count);
     q->agent_dir = r_str(r);
     q->host_rules = r_str_array(r, &q->host_count);
+    q->deny_rules = r_str_array(r, &q->deny_count);
     q->command = r_str(r);
     q->timeout = (int)r_u32(r);
     uint32_t sc = r_u32(r);
@@ -480,7 +482,8 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
     ProxyContext proxy;
     int proxy_active = 0;
     if (q->agent_dir && !q->net_mode && q->sandbox) {
-        if (proxy_bind(&proxy, q->agent_dir, q->host_rules, q->host_count) == 0)
+        if (proxy_bind(&proxy, q->agent_dir, q->host_rules, q->host_count,
+                       q->deny_rules, q->deny_count) == 0)
             proxy_active = 1;
     }
     const char *psock = proxy_active ? proxy_sock_path(&proxy) : NULL;

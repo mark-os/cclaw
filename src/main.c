@@ -314,6 +314,52 @@ static int tool_inline_error(int64_t session_id, PendingToolCall *tc,
     return 1;
 }
 
+/* Sensitivity per-call egress state for one network-tier dispatch: the deny
+ * labels for req.deny_rules, plus (after an approved sensitivity park) the
+ * matched host appended to the allow rules. approved_host!=NULL drops the
+ * labels covering it from the deny list — a per-call exception, label-wide
+ * for exactly one human-approved call, gone when the call ends. */
+typedef struct {
+    char **deny; size_t deny_n;          /* heap labels for req.deny_rules */
+    const char **hosts; size_t hosts_n;  /* extended allow list (or borrowed) */
+    const char **hosts_owned;            /* non-NULL if hosts was allocated */
+} SensCallEgress;
+
+static void sens_egress_build(SensCallEgress *se, const char *approved_host,
+                              char **base_hosts, size_t base_n) {
+    memset(se, 0, sizeof(*se));
+    se->hosts = (const char **)base_hosts;
+    se->hosts_n = base_n;
+    int n = 0;
+    char **all = db_sensitive_hosts(g_db, &n);
+    if (all) {
+        size_t k = 0;
+        for (int i = 0; i < n; i++) {
+            if (approved_host && approved_host[0] &&
+                host_covered(&all[i], 1, approved_host)) { free(all[i]); continue; }
+            all[k++] = all[i];
+        }
+        se->deny = all; se->deny_n = k;
+        if (k == 0) { free(all); se->deny = NULL; }
+    }
+    if (approved_host && approved_host[0]) {
+        const char **ext = malloc((base_n + 1) * sizeof(*ext));
+        if (ext) {
+            for (size_t i = 0; i < base_n; i++) ext[i] = base_hosts[i];
+            ext[base_n] = approved_host;
+            se->hosts = ext; se->hosts_n = base_n + 1;
+            se->hosts_owned = ext;
+        }
+    }
+}
+
+static void sens_egress_free(SensCallEgress *se) {
+    for (size_t i = 0; i < se->deny_n; i++) free(se->deny[i]);
+    free(se->deny);
+    free((void *)se->hosts_owned);
+    memset(se, 0, sizeof(*se));
+}
+
 static int dispatch_tool(int64_t session_id, const char *agent_name,
                          PendingToolCall *tc) {
     if (g_child_count >= CHILD_MAX) return -1;
@@ -332,6 +378,14 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         db_tool_call_set_status(g_db, session_id, tc->call_id, "done", NULL);
         return 1; /* Signal: handled inline, check for more */
     }
+
+    /* Sensitivity axis (specs/trust.md): a sensitive-labeled target always
+     * escalates, and no standing grant/mode/approval-ALWAYS satisfies it.
+     * sens_host survives the gate block: an approved (consumed, once-only)
+     * sensitivity park grants that host to THIS call via a per-call exception
+     * in the network-tier sections below. */
+    char sens_host[254] = "";
+    int sens_hit = 0, sens_once = 0;
 
     /* §4+§8 dispatch gate (fixed order: capability ceiling → gating hook →
      * approval gate). The gating hook may only *raise* restriction
@@ -405,6 +459,20 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             }
             free(reason);
         }
+        /* Sensitivity scan (restrict-only, after hooks): any labeled host in
+         * the raw args forces ASK. The label list is read fresh per call —
+         * SQLite is the single home for it, no cached copy to drift. */
+        {
+            int sn = 0;
+            char **sens = db_sensitive_hosts(g_db, &sn);
+            if (sens) {
+                sens_hit = host_in_text(sens, (size_t)sn, tc->arguments,
+                                        sens_host, sizeof(sens_host));
+                for (int i = 0; i < sn; i++) free(sens[i]);
+                free(sens);
+            }
+            if (sens_hit && gate < HOOK_GATE_ASK) gate = HOOK_GATE_ASK;
+        }
         if (gate == HOOK_GATE_ASK) {
             Approval *ap = approval_get_for_tool_call(g_db, session_id, tc->call_id);
             int approved = ap && ap->state && strcmp(ap->state, "approved") == 0;
@@ -422,10 +490,13 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
                 return 1;
             }
             if (!approved) {
-                /* none → create + park; pending → re-park idempotently. */
+                /* none → create + park; pending → re-park idempotently.
+                 * A sensitivity hit is recorded as action='sensitive' so the
+                 * resolve path can refuse to mint anything standing from it. */
                 if (!pending)
                     approval_create(g_db, session_id, tc->call_id, tc->name,
-                                    tc->name, tc->arguments, "rerun");
+                                    sens_hit ? "sensitive" : tc->name,
+                                    tc->arguments, "rerun");
                 session_set_state(g_db, session_id, "awaiting_approval");
                 approval_free(ap);
                 handle_approval_park(session_id);
@@ -435,7 +506,9 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
              * frozen call. An ALWAYS decision flips the tool mode to silent so
              * it never reaches the gate again; only a "once" approval lands
              * here, and consuming it stops a replayed tool_call_id from
-             * re-using the same grant. */
+             * re-using the same grant. A consumed sensitivity approval opens a
+             * per-call exception for the matched host (network tiers below). */
+            sens_once = sens_hit;
             approval_consume(g_db, ap->id);
             approval_free(ap);
         }
@@ -615,13 +688,19 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
             run_tool_req_init(&req, RUNTOOL_TIER_SHELL, tc->name, tc->arguments,
                               &sc->sb, sc->workspace, sc->cwd_path);
             req.agent_dir = agent_dir;
-            req.host_rules = (const char **)sc->allowed_hosts;
-            req.host_count = sc->allowed_host_count;
+            SensCallEgress se;
+            sens_egress_build(&se, sens_once ? sens_host : NULL,
+                              sc->allowed_hosts, sc->allowed_host_count);
+            req.host_rules = se.hosts;
+            req.host_count = se.hosts_n;
+            req.deny_rules = (const char **)se.deny;
+            req.deny_count = se.deny_n;
             req.command = resolved_cmd;
             req.timeout = cmd_timeout;
             req.secrets = min_secrets;
             req.secret_count = min_count;
             char *blob = run_tool_serialize_request(&req, &blob_len);
+            sens_egress_free(&se);
 
             /* Wipe interpolated command (contains secret plaintext) */
             if (interp_cmd) { explicit_bzero(interp_cmd, strlen(interp_cmd)); free(interp_cmd); }
@@ -677,10 +756,16 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         run_tool_req_init(&req, RUNTOOL_TIER_WEB, tc->name, resolved_args,
                           &wc->sb, wc->workspace, wc->cwd_path);
         req.agent_dir = agent_dir;
-        req.host_rules = (const char **)wc->allowed_hosts;
-        req.host_count = wc->allowed_host_count;
+        SensCallEgress se;
+        sens_egress_build(&se, sens_once ? sens_host : NULL,
+                          wc->allowed_hosts, wc->allowed_host_count);
+        req.host_rules = se.hosts;
+        req.host_count = se.hosts_n;
+        req.deny_rules = (const char **)se.deny;
+        req.deny_count = se.deny_n;
         req.timeout = 60;
         char *blob = run_tool_serialize_request(&req, &blob_len);
+        sens_egress_free(&se);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
         if (!blob)
             return tool_inline_error(session_id, tc,
@@ -763,10 +848,16 @@ static int dispatch_tool(int64_t session_id, const char *agent_name,
         req.read_paths = read_paths;  /* transient override: + extension store */
         req.read_count = rc_count;
         req.agent_dir = agent_dir;
-        req.host_rules = (const char **)jc->allowed_hosts;
-        req.host_count = jc->allowed_hosts_count;
+        SensCallEgress se;
+        sens_egress_build(&se, sens_once ? sens_host : NULL,
+                          jc->allowed_hosts, jc->allowed_hosts_count);
+        req.host_rules = se.hosts;
+        req.host_count = se.hosts_n;
+        req.deny_rules = (const char **)se.deny;
+        req.deny_count = se.deny_n;
         req.timeout = 120;
         char *blob = run_tool_serialize_request(&req, &blob_len);
+        sens_egress_free(&se);
         free(read_paths);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
         free(eval_args);
@@ -1371,8 +1462,17 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                 db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
             }
         } else if (decision == APPROVAL_ALWAYS && agent) {
-            /* "Allow and stop asking" — flip the standing mode to silent. */
-            agent_config_set_tool_mode(g_db, agent, a->action, "silent");
+            if (a->action && strcmp(a->action, "sensitive") == 0) {
+                /* Sensitivity axis: no standing grant may satisfy a sensitive
+                 * target — ALWAYS is coerced to ONCE (specs/trust.md). The
+                 * approval still passes this one frozen call; the next call
+                 * to the same target parks again. */
+                LOG_INFO_("approval always coerced to once reason=sensitive tool=%s",
+                          a->tool_name ? a->tool_name : "?");
+            } else {
+                /* "Allow and stop asking" — flip the standing mode to silent. */
+                agent_config_set_tool_mode(g_db, agent, a->action, "silent");
+            }
         }
         session_set_state(g_db, session_id, "tool_running");
         free((char *)agent);
@@ -1904,6 +2004,10 @@ static void print_usage(void) {
     printf("usage: cclaw [options]\n"
            "       cclaw install [--system]    set up a long-lived daemon (systemd unit)\n"
            "       cclaw uninstall [--system]  stop + remove that unit\n"
+           "       cclaw sensitive add|rm <host> | list\n"
+           "                                   label a target sensitive: every tool call\n"
+           "                                   touching it parks for approval, no standing\n"
+           "                                   grant applies, and the proxy denies it ambiently\n"
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
@@ -2593,6 +2697,43 @@ done:
     return rc;
 }
 
+/* `cclaw sensitive add|rm|list [host]` — operator verb for the sensitivity
+ * axis (specs/trust.md). Labels are global target properties, deliberately
+ * NOT settable via any agent tool: only a human at the CLI (or sqlite3)
+ * can label or unlabel a target. */
+static int sensitive_main(int argc, char *argv[]) {
+    const char *sub = (argc >= 3) ? argv[2] : NULL;
+    const char *host = (argc >= 4) ? argv[3] : NULL;
+    char *db_path = resolve_db_path();
+    if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return 1; }
+    sqlite3 *db = db_open(db_path);
+    free(db_path);
+    if (!db) { fprintf(stderr, "error: cannot open DB\n"); return 1; }
+    int rc = 0;
+    if (sub && strcmp(sub, "list") == 0) {
+        int n = 0;
+        char **hosts = db_sensitive_hosts(db, &n);
+        if (!hosts) printf("(no sensitive hosts)\n");
+        for (int i = 0; i < n; i++) { printf("%s\n", hosts[i]); free(hosts[i]); }
+        free(hosts);
+    } else if (sub && host && strcmp(sub, "add") == 0) {
+        rc = db_sensitive_host_add(db, host) == 0 ? 0 : 1;
+        if (rc == 0) printf("sensitive host added: %s\n", host);
+        else fprintf(stderr, "error: add failed\n");
+    } else if (sub && host && strcmp(sub, "rm") == 0) {
+        rc = db_sensitive_host_rm(db, host) == 0 ? 0 : 1;
+        if (rc == 0) printf("sensitive host removed: %s\n", host);
+        else fprintf(stderr, "error: rm failed\n");
+    } else {
+        fprintf(stderr, "usage: cclaw sensitive add|rm <host> | list\n"
+                        "  host: exact (\"pay.example.com\") or suffix (\".example.com\");\n"
+                        "  bare domains cover their subdomains\n");
+        rc = 2;
+    }
+    sqlite3_close(db);
+    return rc;
+}
+
 int main(int argc, char *argv[]) {
     /* --run-tool: early intercept for sandboxed file tool child. No DB, no key,
      * no config. The child reads its request from fd 3. */
@@ -2607,6 +2748,9 @@ int main(int argc, char *argv[]) {
      * filesystem + systemd. */
     if (argc >= 2 && strcmp(argv[1], "install") == 0) return install_main(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "uninstall") == 0) return uninstall_main(argc, argv);
+
+    /* sensitive: operator verb for sensitivity labels (specs/trust.md). */
+    if (argc >= 2 && strcmp(argv[1], "sensitive") == 0) return sensitive_main(argc, argv);
 
     int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
     int channel_check = 0, channel_activate_flag = 0;

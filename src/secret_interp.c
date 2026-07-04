@@ -57,6 +57,44 @@ char *secret_interpolate(const char *text, const ShellSecret *secrets, size_t co
     return result;
 }
 
+char **secret_placeholder_names(const char *text, size_t *out_count) {
+    *out_count = 0;
+    if (!text) return NULL;
+    char **names = NULL;
+    size_t count = 0, cap = 0;
+    const char *p = text;
+    while ((p = strstr(p, PREFIX)) != NULL) {
+        const char *name_start = p + PREFIX_LEN;
+        const char *end = strstr(name_start, SUFFIX);
+        if (!end) break;
+        size_t name_len = (size_t)(end - name_start);
+        p = end + SUFFIX_LEN;
+        if (name_len == 0 || name_len >= 128) continue;
+        int dup = 0;
+        for (size_t i = 0; i < count; i++)
+            if (strlen(names[i]) == name_len &&
+                strncmp(names[i], name_start, name_len) == 0) { dup = 1; break; }
+        if (dup) continue;
+        if (count == cap) {
+            size_t ncap = cap ? cap * 2 : 4;
+            char **tmp = realloc(names, ncap * sizeof(char *));
+            if (!tmp) { secret_names_free(names, count); *out_count = 0; return NULL; }
+            names = tmp; cap = ncap;
+        }
+        names[count] = strndup(name_start, name_len);
+        if (!names[count]) { secret_names_free(names, count); *out_count = 0; return NULL; }
+        count++;
+    }
+    *out_count = count;
+    return names;
+}
+
+void secret_names_free(char **names, size_t count) {
+    if (!names) return;
+    for (size_t i = 0; i < count; i++) free(names[i]);
+    free(names);
+}
+
 static const ShellSecret *s_deinterp_secrets; /* qsort context */
 
 static int cmp_secret_len_desc(const void *a, const void *b) {

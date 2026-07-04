@@ -385,6 +385,18 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 CREATE INDEX IF NOT EXISTS approvals_pending ON approvals(session_id, state) WHERE state='pending';
 
+-- ═══ Sensitivity axis (specs/trust.md) ═══
+-- Operator-owned labels on TARGETS, global (not per-agent). The one place a
+-- label subtracts from authority: a sensitive host always escalates, and no
+-- standing grant satisfies it — the proxy deny-checks these before any allow
+-- rule, and dispatch parks every matching call (ALWAYS coerced to ONCE).
+CREATE TABLE IF NOT EXISTS sensitive_targets (
+  kind  TEXT NOT NULL DEFAULT 'host',        -- only 'host' in v1
+  value TEXT NOT NULL,                       -- exact host or '.suffix' rule
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (kind, value)
+);
+
 -- ═══ Process registry (liveness) ═══
 -- One row per live cclaw process (daemon or cli) sharing this DB. Sessions stamp
 -- their owner_instance here; owner-scoped recovery reclaims only sessions whose

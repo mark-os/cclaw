@@ -118,6 +118,36 @@ static void test_interpolate_roundtrip(void) {
     PASS("interpolate_roundtrip");
 }
 
+static void test_placeholder_names_basic(void) {
+    size_t n = 0;
+    char **names = secret_placeholder_names(
+        "curl -H 'Authorization: Bearer {{SECRET:GH_TOKEN}}' "
+        "-u user:{{SECRET:NPM_TOKEN}} https://x", &n);
+    assert(n == 2 && names);
+    assert(strcmp(names[0], "GH_TOKEN") == 0);
+    assert(strcmp(names[1], "NPM_TOKEN") == 0);
+    secret_names_free(names, n);
+    PASS("placeholder_names_basic");
+}
+
+static void test_placeholder_names_dedup_and_none(void) {
+    size_t n = 99;
+    char **names = secret_placeholder_names(
+        "{{SECRET:A}} then {{SECRET:A}} again", &n);
+    assert(n == 1 && names && strcmp(names[0], "A") == 0);
+    secret_names_free(names, n);
+    names = secret_placeholder_names("no placeholders here", &n);
+    assert(n == 0 && names == NULL);
+    /* Unterminated placeholder: parse stops, nothing invented */
+    names = secret_placeholder_names("{{SECRET:BROKEN", &n);
+    assert(n == 0 && names == NULL);
+    /* Empty name skipped, later valid one still found */
+    names = secret_placeholder_names("{{SECRET:}} {{SECRET:B}}", &n);
+    assert(n == 1 && names && strcmp(names[0], "B") == 0);
+    secret_names_free(names, n);
+    PASS("placeholder_names_dedup_and_none");
+}
+
 int main(void) {
     alarm(5);  /* Hard kill if anything infinite-loops */
     printf("test_secret_interp:\n");
@@ -131,6 +161,8 @@ int main(void) {
     test_postprocess_noop();
     test_postprocess_scans_without_secrets();
     test_interpolate_roundtrip();
+    test_placeholder_names_basic();
+    test_placeholder_names_dedup_and_none();
     printf("  all tests passed\n");
     return 0;
 }

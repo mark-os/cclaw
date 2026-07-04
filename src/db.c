@@ -1477,6 +1477,60 @@ char **db_agent_list(sqlite3 *db, int *count) {
     return names;
 }
 
+char **db_sensitive_hosts(sqlite3 *db, int *count) {
+    *count = 0;
+    if (!db) return NULL;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db,
+            "SELECT value FROM sensitive_targets WHERE kind='host' ORDER BY value",
+            -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    int cap = 8;
+    char **hosts = malloc((size_t)cap * sizeof(char *));
+    if (!hosts) { sqlite3_finalize(stmt); return NULL; }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(stmt, 0);
+        if (!v) continue;
+        if (*count >= cap) {
+            cap *= 2;
+            char **tmp = realloc(hosts, (size_t)cap * sizeof(char *));
+            if (!tmp) {
+                for (int i = 0; i < *count; i++) free(hosts[i]);
+                free(hosts);
+                *count = 0;
+                sqlite3_finalize(stmt);
+                return NULL;
+            }
+            hosts = tmp;
+        }
+        hosts[*count] = strdup(v);
+        (*count)++;
+    }
+    sqlite3_finalize(stmt);
+    if (*count == 0) { free(hosts); return NULL; }
+    return hosts;
+}
+
+static int sensitive_host_write(sqlite3 *db, const char *sql, const char *host) {
+    if (!db || !host || !host[0]) return -1;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, host, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_sensitive_host_add(sqlite3 *db, const char *host) {
+    return sensitive_host_write(db,
+        "INSERT OR IGNORE INTO sensitive_targets(kind, value) VALUES('host', ?1)", host);
+}
+
+int db_sensitive_host_rm(sqlite3 *db, const char *host) {
+    return sensitive_host_write(db,
+        "DELETE FROM sensitive_targets WHERE kind='host' AND value=?1", host);
+}
+
 int db_agent_upsert(sqlite3 *db, const char *name, const char *description,
                     const char *system_prompt) {
     if (!db || !name) return -1;

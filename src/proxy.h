@@ -49,6 +49,8 @@ typedef struct {
     size_t host_rule_count;
     Cidr *cidr_rules;       /* partitioned: CIDR + literal-IP rules (owned) */
     size_t cidr_rule_count;
+    char **deny_rules;      /* borrowed: sensitive-host deny labels (checked before allow) */
+    size_t deny_count;
     char *sock_path;        /* heap-allocated path to .proxy.sock */
     int listen_fd;          /* listening socket fd (-1 if not started) */
     int running;            /* set to 0 to stop */
@@ -68,9 +70,12 @@ typedef struct {
  * folder) without starting the accept thread. Lets the broker create the socket
  * single-threaded, fork the sandbox, then serve. The egress allowlist
  * (`hosts`/`host_count`) is borrowed — it must outlive the proxy; the broker
- * holds no DB handle. Returns 0 on success. */
+ * holds no DB handle. `deny_rules`/`deny_count` are sensitive-host labels
+ * (borrowed) checked before any allow logic — deny wins unconditionally.
+ * Returns 0 on success. */
 int proxy_bind(ProxyContext *ctx, const char *dir,
-               char **hosts, size_t host_count);
+               char **hosts, size_t host_count,
+               char **deny_rules, size_t deny_count);
 
 /* Start the accept-loop thread for a bound context. Returns 0 on success. */
 int proxy_serve(ProxyContext *ctx);

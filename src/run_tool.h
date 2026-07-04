@@ -56,6 +56,7 @@ typedef struct {
     /* network tiers (shell/web/js) */
     const char *agent_dir;
     const char **host_rules;  size_t host_count;
+    const char **deny_rules;  size_t deny_count;
     /* shell only */
     const char *command;
     int timeout;
@@ -78,6 +79,7 @@ typedef struct {
     char **write_paths; size_t write_count;
     char *agent_dir;
     char **host_rules;  size_t host_count;
+    char **deny_rules;  size_t deny_count;
     char *command;
     int   timeout;
     struct { char *name; char *value; } *secrets;

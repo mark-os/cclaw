@@ -56,6 +56,15 @@ static int in_metadata_range(int family, const unsigned char *addr) {
  * DNS, since resolution already allows it unconditionally. */
 static int ip_to_bin(const char *ip, int *fam, unsigned char *buf16);
 static int host_decide(const ProxyContext *ctx, const char *host) {
+    /* Sensitive-host deny list: checked FIRST, before any allow logic.
+     * Hostname-level deny is sufficient for numeric CONNECT too: a denied
+     * hostname never passes RESOLVE, so its IP is never blessed, and
+     * unblessed numeric CONNECT is already denied by the default-deny path. */
+    if (ctx->deny_rules && host_covered(ctx->deny_rules, ctx->deny_count, host)) {
+        LOG_INFO_("proxy deny host=%s reason=sensitive", host);
+        return 0;
+    }
+
     /* Try hostname rules (exact/suffix match) */
     if (host_match(ctx->host_rules, ctx->host_rule_count, host)) return 1;
     /* Try as a numeric IP against CIDR rules */
@@ -678,13 +687,16 @@ static void *proxy_loop(void *arg) {
  * — no fork-in-threaded-process hazard), and only then start the accept thread.
  * Returns 0 on success. */
 int proxy_bind(ProxyContext *ctx, const char *dir,
-               char **hosts, size_t host_count) {
+               char **hosts, size_t host_count,
+               char **deny_rules, size_t deny_count) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->listen_fd = -1;
     pthread_mutex_init(&ctx->blessed_mu, NULL);
     pthread_cond_init(&ctx->conn_cond, NULL);
     ctx->hosts = hosts;          /* borrowed — must outlive the proxy */
     ctx->host_count = host_count;
+    ctx->deny_rules = deny_rules;  /* borrowed — hostname labels only */
+    ctx->deny_count = deny_count;
 
     /* Partition grants into hostname rules vs CIDR/IP rules.
      * A grant containing '/' is a CIDR. A bare IP (parseable by inet_pton)
@@ -793,6 +805,8 @@ void proxy_stop(ProxyContext *ctx) {
     ctx->contacted_count = 0;
     ctx->hosts = NULL;          /* borrowed — not owned, do not free */
     ctx->host_count = 0;
+    ctx->deny_rules = NULL;     /* borrowed — not owned, do not free */
+    ctx->deny_count = 0;
     free(ctx->host_rules);      /* owned partition array (pointers are borrowed) */
     ctx->host_rules = NULL;
     ctx->host_rule_count = 0;

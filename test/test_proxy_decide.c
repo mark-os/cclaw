@@ -261,6 +261,76 @@ static void test_empty_rules_deny(void) {
     printf("  PASS: empty rules → deny all\n");
 }
 
+/* ─── Sensitive-host DENY list (deny-before-allow) ─── */
+
+static void test_deny_overrides_allow(void) {
+    /* Host is in both allow and deny → denied (deny wins unconditionally). */
+    char *hosts[] = {".github.com"};
+    char *deny[]  = {"github.com"};
+    ProxyContext ctx;
+    assert(proxy_start_with_deny(&ctx, tmpdir, hosts, 1, deny, 1) == 0);
+
+    char resp[128];
+    proxy_req(proxy_sock_path(&ctx), "RESOLVE api.github.com\n", resp, sizeof(resp));
+    assert(strncmp(resp, "ERROR denied", 12) == 0);
+
+    proxy_stop(&ctx);
+    printf("  PASS: deny overrides allow: github.com denied despite .github.com allow\n");
+}
+
+static void test_deny_subdomain_blocked(void) {
+    /* Broad allow suffix covers the host, but deny label blocks subdomain. */
+    char *hosts[] = {".example.com"};
+    char *deny[]  = {"secret.example.com"};
+    ProxyContext ctx;
+    assert(proxy_start_with_deny(&ctx, tmpdir, hosts, 1, deny, 1) == 0);
+
+    char resp[128];
+    /* api.secret.example.com is a subdomain of the denied label */
+    proxy_req(proxy_sock_path(&ctx), "RESOLVE api.secret.example.com\n", resp, sizeof(resp));
+    assert(strncmp(resp, "ERROR denied", 12) == 0);
+
+    /* The exact denied host too */
+    proxy_req(proxy_sock_path(&ctx), "RESOLVE secret.example.com\n", resp, sizeof(resp));
+    assert(strncmp(resp, "ERROR denied", 12) == 0);
+
+    proxy_stop(&ctx);
+    printf("  PASS: deny subdomain: secret.example.com blocks itself and sub-subdomains\n");
+}
+
+static void test_deny_unrelated_host_unaffected(void) {
+    /* Deny list for one host does not interfere with other allowed targets.
+     * Numeric IP grant + RESOLVE keeps this DNS-free (no real network in
+     * unit tests — a hostname that passes the allow check would hit the
+     * resolver). */
+    char *hosts[] = {".github.com", "127.0.0.1"};
+    char *deny[]  = {"github.com"};
+    ProxyContext ctx;
+    assert(proxy_start_with_deny(&ctx, tmpdir, hosts, 2, deny, 1) == 0);
+
+    char resp[128];
+    proxy_req(proxy_sock_path(&ctx), "RESOLVE 127.0.0.1\n", resp, sizeof(resp));
+    assert(strncmp(resp, "ERROR denied", 12) != 0);
+
+    proxy_stop(&ctx);
+    printf("  PASS: deny unrelated: 127.0.0.1 unaffected by github.com deny\n");
+}
+
+static void test_deny_empty_changes_nothing(void) {
+    /* Empty deny list (NULL, 0) — allow logic unchanged. Numeric IP grant
+     * keeps this DNS-free (no real network in unit tests). */
+    char *hosts[] = {"127.0.0.1"};
+    ProxyContext ctx;
+    assert(proxy_start_with_deny(&ctx, tmpdir, hosts, 1, NULL, 0) == 0);
+
+    char resp[128];
+    proxy_req(proxy_sock_path(&ctx), "RESOLVE 127.0.0.1\n", resp, sizeof(resp));
+    assert(strncmp(resp, "ERROR denied", 12) != 0);
+
+    proxy_stop(&ctx);
+    printf("  PASS: empty deny list changes nothing\n");
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * PATH-SPECIFIC METADATA CARVE-OUT TESTS (2.1–2.5)
  * Each test explicitly exercises one path (RESOLVE or numeric CONNECT)
@@ -387,7 +457,10 @@ static void test_path_mapped_v6_metadata_deny(void) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    alarm(10);
+    /* Each proxy start/stop cycle costs ~0.5s (accept-loop wake latency), and
+     * the suite runs ~20 of them — keep the alarm under the Makefile's 20s
+     * timeout wrapper but with headroom for the whole set. */
+    alarm(18);
     setup_tmpdir();
     printf("test_proxy_decide:\n");
 
@@ -410,6 +483,12 @@ int main(void) {
 
     /* Default deny */
     test_empty_rules_deny();
+
+    /* Sensitive-host deny list */
+    test_deny_overrides_allow();
+    test_deny_subdomain_blocked();
+    test_deny_unrelated_host_unaffected();
+    test_deny_empty_changes_nothing();
 
     /* Path-specific metadata carve-out (2.1–2.5) */
     test_path_resolve_covering_cidr_deny();

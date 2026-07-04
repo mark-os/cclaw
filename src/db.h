@@ -235,6 +235,14 @@ char **db_agent_list(sqlite3 *db, int *count);
 int db_agent_upsert(sqlite3 *db, const char *name, const char *description,
                     const char *system_prompt);
 
+/* Sensitivity axis (specs/trust.md): operator-owned host labels, global.
+ * db_sensitive_hosts returns the kind='host' values as a heap array of heap
+ * strings (NULL if none). Caller frees each entry and the array. add/rm
+ * return 0 on success, -1 on error (rm: 0 even if absent). */
+char **db_sensitive_hosts(sqlite3 *db, int *count);
+int db_sensitive_host_add(sqlite3 *db, const char *host);
+int db_sensitive_host_rm(sqlite3 *db, const char *host);
+
 /* Seed agent from disk if not in DB. Loads agent.json + system.md from agents_dir.
  * Returns agent row (from DB after potential seed). Caller frees with agent_row_free. */
 AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name);

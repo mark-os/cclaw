@@ -60,6 +60,21 @@ static char *handler(const char *arguments, void *user_data) {
         }
     }
 
+    /* Sensitivity labels (global, operator-owned): shown so the model knows
+     * why calls touching these targets park regardless of grants. */
+    rc = sqlite3_prepare_v2(ctx->db,
+        "SELECT COALESCE(group_concat(value, ', '), '(none)')"
+        " FROM sensitive_targets WHERE kind='host'", -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            buf_appendf(&out,
+                "sensitive_hosts: %s (every call touching these parks for"
+                " approval; grants never bypass this)\n", v ? v : "(none)");
+        }
+        sqlite3_finalize(st);
+    }
+
     /* Section 2: tools list with grant status */
     buf_appendf(&out, "\n## Tools you can use or request\n");
     rc = sqlite3_prepare_v2(ctx->db,

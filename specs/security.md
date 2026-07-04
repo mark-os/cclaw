@@ -330,7 +330,7 @@ If CClaw ever becomes multi-user, the trust model changes fundamentally:
 
 ## Secret Storage
 
-Secrets are stored encrypted in cclaw.db (`config` table) using ChaCha20-Poly1305 AEAD. The 32-byte encryption key lives in `.cclaw_key` on disk, loaded once at daemon startup via `db_set_secret_key()`, never written to the DB. `db_kv_get_secret()` / `db_kv_set_secret()` are the only entry points; no other code touches the raw ciphertext. Keys are not uniformly prefixed — any key in the `config` table can hold an encrypted value if written via `db_kv_set_secret()`.
+Secrets are stored encrypted using ChaCha20-Poly1305 AEAD, in two tables: the `config` table (provider API keys, via `db_kv_get_secret()`/`db_kv_set_secret()`) and the dedicated `secrets` table (user/agent-minted credentials — see [Secret Store](#secret-store) below). The 32-byte encryption key lives in `.cclaw_key` on disk, loaded once at daemon startup via `db_set_secret_key()`, never written to the DB. No code outside `src/db.c` touches the raw ciphertext in either table.
 
 Provider API keys resolve env → encrypted kv: `config_load()` reads the provider's `api_key_env` variable first and falls back to the encrypted kv under the same name (admin `set key` and `configure_provider` write there). cclaw has **no `.env` parser** — a `.env` file is user-managed dev convenience that the user's own shell sources before launching cclaw.
 
@@ -356,11 +356,25 @@ cclaw is a **secret broker**, not a password manager — but it *is* a secret st
 
 So "trust the agent to manage my passwords" is half-right: cclaw will *broker* them safely (the value never enters the context window), but it should not *be your vault* unless you accept the key-on-disk ceiling above. Users who care should point cclaw at a keychain provider and let the OS own key protection and lifecycle.
 
+### Secret Store
+
+Secrets are no longer only `CCLAW_SECRET_*` env vars collected at process startup — a DB-backed `secrets` table (name, encrypted value, `status`, `source`, `created_at`) lets a secret be born *mid-session*, closing the "sign up for a new service" gap: an agent can mint a fresh credential without ever seeing the plaintext, and an operator can hand one to a running agent without a restart.
+
+Three ways a secret enters the `secrets` table:
+
+1. **Operator verb** — `cclaw secret set <NAME> [value] | rm <NAME> | list` (no value arg reads one line from stdin, keeping it out of shell history). `list` never prints values. Mirrors the existing `sensitive`/`secret-bind` CLI-only verbs.
+2. **`secret_create` tool** — the agent mints a random credential (`getrandom()`, rejection-sampled into an `alnum`/`hex`/`full` charset, 8–128 chars) for a service that needs a *new* password (e.g. signing up for Trello). The generated value is written straight to the DB and never appears in the tool's arguments or result — only its `{{SECRET:name}}` placeholder does.
+3. **DLP quarantine** (see below) — a credential the scanner catches in the wild (a user pastes one in chat, a tool result leaks one) is captured into the store instead of shredded.
+
+**Per-call snapshot, not a cached array.** `secrets_snapshot(db, env_base, env_count)` (`src/secret_store.c`) merges the immutable env-collected base (`g_tool_setup->secrets`, fixed for the process lifetime) with a *fresh* `db_secrets_load()` read on every dispatch call — env wins on a name collision. This is why a secret created mid-turn is usable on the agent's very next tool call: nothing caches the DB read, and nothing mutates the borrowed env array (`tool_thread.h`'s "immutable post-setup" contract for `AgentSetup.secrets` holds). `EXEC_THREAD` tools re-snapshot on their own thread's db handle rather than receiving the dispatch-scoped snapshot, which wouldn't outlive the async thread.
+
+**`status='pending'` is provenance/UX only.** A freshly minted or quarantined secret starts `pending`; a `secret set`-by-operator one starts `active`. Neither status gates anything — enforcement is already the existing fail-closed binding rule below: a secret with zero `secret_hosts` rows always parks on first use, regardless of status. `resolve_approval` flips `pending` → `active` the moment an ALWAYS-approval records the secret's first binding (specs/trust.md).
+
 ### Secret scoping (design — not yet implemented)
 
 Each secret has a scope: `"*"` (all agents) or a comma-separated agent name list. Daemon enforces scope at injection time — an agent only receives secrets it is scoped for. Sub-agents inherit the intersection of their own scope and the parent's (same privilege-reduction rule as tools and hosts).
 
-**Today**, secrets reach tool children solely via `CCLAW_SECRET_*` env vars collected by `shell_secrets_collect()` (`src/tool_shell.c:43`) at process startup. There is no per-agent scope enforcement yet — all secrets in the environment are available to all agents in the same process.
+**Today**, secrets reach tool children via `CCLAW_SECRET_*` env vars collected by `shell_secrets_collect()` (`src/tool_shell.c:43`) at process startup, merged per-call with the DB-backed `secrets` table (see [Secret Store](#secret-store)). There is no per-agent scope enforcement yet — all secrets available to the process are available to all agents in it.
 
 **Three orthogonal axes.** Secret access is *scope* — do not collapse it into sandbox_profile:
 
@@ -378,28 +392,28 @@ The planned interface is a thin provider abstraction — `secret_resolve(name)` 
 
 | Provider | Status | Key protection |
 |----------|--------|----------------|
-| cclaw.db ChaCha20 | #1, default | key file on disk (chmod 600) — see [key-protection ceiling](#secret-storage) |
+| cclaw.db ChaCha20 (`config` kv + `secrets` table) | #1, default | key file on disk (chmod 600) — see [key-protection ceiling](#secret-storage) |
 | OS keychain (libsecret / macOS Keychain / Windows CredMan) | future | OS-managed, hardware-backed where available |
 | User's existing password manager | future | owned by the PM |
 
 A keychain or PM provider slots in **without touching the DLP layer** — the broker calls the same two functions. One unavoidable constraint holds for every provider: even a hardware-backed secret must be pulled into process memory transiently for injection and masking. "Value never lives in cclaw" can only mean *never persisted by cclaw, held only for the duration of a turn.*
 
-### Future: Secret Agent (design — not yet implemented)
+### DLP Quarantine (built) vs. Future Secret Agent (still not implemented)
 
-When a user pastes a raw credential into the conversation (e.g. "here's my token: ghp_abc123..."), the AC scanner fires on the user message. Rather than storing the plaintext in the session, the intended flow is:
+When a user pastes a raw credential into the conversation (e.g. "here's my token: ghp_abc123..."), or a tool result carries one, the AC scanner fires. The storage half of the originally-planned flow is now built as **quarantine**, replacing outright redaction:
 
 ```
-User pastes token → AC scanner detects pattern
-  → route to Secret Agent (ZDR model endpoint)
-  → Secret Agent extracts name + value, writes to encrypted store
-  → Main session sees: "Stored as {{SECRET:GITHUB_TOKEN}}"
+Text crosses a trust boundary → AC scanner detects pattern
+  → tool_result_postprocess_q (src/secret_quarantine.c) captures it:
+      db_secret_set(name="PENDING_<RULEID>_<n>", source='quarantine', status='pending')
+  → text the model/session sees carries {{SECRET:PENDING_<RULEID>_<n>}}, never the raw value
 ```
 
-The secret agent runs against a zero-data-retention model endpoint (Anthropic ZDR, Azure OpenAI with data-at-rest off, or a local model) so the plaintext never touches a provider's logs. Its context is never persisted to the `entries` table. It has access to a single privileged tool: `secret_store_write`, gated on a dedicated grant (`grants` table, `kind='tool'`, `value='secret_store_write'`) — not on sandbox_profile.
+`inbox_insert_scanned` (`src/db.c`) — the classic "user pastes a key in chat" path — and all three tool-result postprocess sites (inline dispatch, sandboxed-child reap, tool-thread) route through this same wrapper. A value repeated within one scanned result, or matching an already-known secret's value, reuses that secret's name instead of minting a duplicate. A spam guard (pending count ≥ 32) falls back to the old `secret_scan_redact` shred, so a hostile page can't fill the store with junk rows.
 
-This is not yet implemented. Until it is, the AC scanner redacts detected secrets from user messages before storage, and the user is prompted to add them via `db_kv_set_secret` directly (CLI or bootstrap agent).
+**Still not implemented**: naming and routing intelligence. The auto-generated `PENDING_<RULEID>_<n>` name is a placeholder an operator/agent can rename later (`cclaw secret set <NEW_NAME>` + `cclaw secret rm PENDING_...`, or vice versa) — there is no LLM inferring "this looks like a GITHUB_TOKEN" and no dedicated ZDR-routed Secret Agent extracting name+value out-of-band. The original design (route the raw text to a zero-data-retention model endpoint so the plaintext never touches a provider's logs, with a single privileged `secret_store_write` tool gated on its own grant) remains a possible follow-up if auto-naming quality matters enough to justify it.
 
-Open questions deferred: secret TTL/rotation, audit trail of per-agent access, multi-secret OAuth transactions, user confirmation flow before auto-store.
+Open questions deferred: secret TTL/rotation, audit trail of per-agent access, multi-secret OAuth transactions, smarter auto-naming.
 
 ## DLP Pipeline: Resolve / Inject / Mask
 
@@ -517,7 +531,7 @@ All three credential tools run via the `--run-tool` broker (re-exec'd child, nam
 | JS eval output | — | — | yes | yes |
 | inbox message (channel inbound) | — | — | yes | yes |
 
-The rule: **anything heading into entries goes through both mask passes (via `tool_result_postprocess`); anything heading into a tool exec goes through inject.**
+The rule: **anything heading into entries goes through both mask passes (via `tool_result_postprocess_q`, the quarantining variant — see [Secret Store](#secret-store)); anything heading into a tool exec goes through inject.**
 
 ## Secret Scanner (AC-based Content DLP)
 
@@ -531,7 +545,7 @@ The AC scanner is the second masking pass — it catches secrets the known-value
 4. **Case re-check** — case-sensitive rules (e.g. Twilio `SK`) re-verify exact bytes via `strncmp` after the case-insensitive AC prefilter. The AC table is a prefilter only; it never loosens a case-sensitive rule.
 5. **Contextual detection** — for generic keywords (`token`, `password`, `api_key`), check for assignment pattern within 30 chars and entropy > 3.5 bits/byte.
 6. **Entropy** — Shannon entropy `H = -Σ p(x) log₂ p(x)` over the matched tail. Separates `AKIAIOSFODNN7EXAMPLE` (high entropy, random-looking) from `mypassword` (low entropy, English-like). Entropy is capped at `log₂(tail_max)` — a rule can't demand more bits than the tail length allows distinct symbols.
-7. **Redaction** — matched regions replaced with `[SECRET_DETECTED:<rule_id>]`.
+7. **Redaction** — `secret_scan_redact()` replaces matched regions with `[SECRET_DETECTED:<rule_id>]`. This is still what a bare `secret_scan()` consumer gets; the tool-result/inbox paths instead go through `tool_result_postprocess_q` (see [Secret Store](#secret-store)), which quarantines a finding into the `secrets` table behind a `{{SECRET:PENDING_...}}` placeholder and only falls back to this shred once the pending-secret cap is hit.
 
 ### Why AC can't replace known-value masking
 

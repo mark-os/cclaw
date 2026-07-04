@@ -213,6 +213,22 @@ Fail-closed credential rule (specs/trust.md): a secret may only be submitted to 
 
 ---
 
+## secrets
+
+Secret store (specs/security.md): DB-backed secrets, encrypted at rest with the same master key as `config`'s secret-kv rows. Feeds the per-call snapshot (`secrets_snapshot()`) that merges these with the env-collected `CCLAW_SECRET_*` base — env wins on a name collision. `status='pending'` is provenance/UX only; enforcement is `secret_hosts` having zero rows for the name (fail-closed, same as any other secret).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `name` | TEXT PRIMARY KEY | `^[A-Z][A-Z0-9_]*$` — becomes `CCLAW_SECRET_<name>` / `{{SECRET:name}}` |
+| `value` | TEXT NOT NULL | `enc:<hex(...)>`, never plaintext |
+| `status` | TEXT NOT NULL DEFAULT 'active' | `active` \| `pending` |
+| `source` | TEXT NOT NULL DEFAULT 'operator' | `operator` (`cclaw secret set`) \| `generated` (`secret_create` tool) \| `quarantine` (DLP capture) |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+Written by: `cclaw secret set\|rm\|list` (operator verb), the `secret_create` tool, and `tool_result_postprocess_q`/`inbox_insert_scanned` (DLP quarantine, auto-named `PENDING_<RULEID>_<n>`). `resolve_approval` flips `pending` → `active` when a `secret_bind` ALWAYS-approval records the name's first `secret_hosts` binding.
+
+---
+
 ## agent_extensions
 
 Links agents to their enabled extensions.

@@ -42,6 +42,14 @@ pair (known-sensitive vs unknown-plus-credential); neither may be
    ALWAYS on a url-carrying park records the binding; shell/js ALWAYS
    coerces to ONCE (no standing binding without an attributable target).
 
+**Every secret birth path composes with rule 2 for free.** Whether a secret
+arrives as a `CCLAW_SECRET_*` env var at startup, via `cclaw secret set`, via
+the `secret_create` tool, or via DLP quarantine capturing a leaked credential
+(specs/security.md), it lands with zero `secret_hosts` rows — so its very
+first use always parks, no matter how it was born. No secret-store-specific
+enforcement exists or is needed; `db_secret_set`'s `status='pending'` is
+provenance/UX only, not a gate.
+
 ## The invariant
 
 **Only sandbox setup reads `sandbox_profile`. Every authority decision reads

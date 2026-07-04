@@ -1,151 +1,499 @@
 # Schema & Data Model
 
-Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` ≥ 5000ms). Parent (CLI/daemon) is primary writer. Agent child opens same file via `CCLAW_DB` env var.
+Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
 
 Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`).
 
 ---
 
-## agents
+## config
+
+Global settings and encrypted secrets. Daemon-only write access.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `name` | TEXT NOT NULL UNIQUE | |
-| `config` | TEXT | legacy/unused |
-| `system_prompt` | TEXT | inline prompt override |
-| `heartbeat` | TEXT | heartbeat prompt |
-| `created_at` | INTEGER DEFAULT (unixepoch()) | |
-| `updated_at` | INTEGER DEFAULT (unixepoch()) | |
+| `key` | TEXT PRIMARY KEY | dotted namespace: `provider.api_key`, `telegram_token`, etc. |
+| `value` | TEXT | plaintext or `enc:<hex(nonce‖ct‖tag)>` for secrets |
 
-## agent_config
-
-Replaces config files. Loaded at startup, injected as `CCLAW_*` env vars to tool children.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `agent_name` | TEXT NOT NULL | |
-| `key` | TEXT NOT NULL | |
-| `value` | TEXT NOT NULL | |
-| PRIMARY KEY | (agent_name, key) | |
-
-**Absent-key semantics** (V124): missing key = conservative system default, NOT unlimited. Always inject `CCLAW_TOOLS` and `CCLAW_ALLOWED_HOSTS` env vars — even when no agent_config rows exist.
-
-| Key | Absent default | Notes |
-|-----|----------------|-------|
-| `model` | global provider model | from cclaw.db kv `provider.model` |
-| `workspace` | `agents/<name>/workspace` | auto-derived from agent name |
-| `tools` | `["file_read","file_write","js_eval","memory_create","memory_append","memory_replace","request_config"]` | V119 minimum set |
-| `allowed_hosts` | `[]` (empty — no network) | must be explicitly granted |
-| `read_access` | `[]` (none) | |
-| `max_iterations` | 25 | |
-| `shell_timeout` | 30 | seconds |
-| `memory_limit` | 268435456 (256MB) | bytes; 0 = unlimited |
-| `cpu_limit` | 300 | seconds; 0 = unlimited |
-| `daemon_db_read` | 0 | |
-| `sandbox` | `sandbox` | `"sandbox"` = namespace isolation (V22a); `"none"` = no isolation |
-
-**Sub-agent inheritance** (V123): child config = intersection(child's own agent_config, parent's agent_config). Child ⊥ exceed parent.
-
-## Full config env var reference
-
-All injected at startup. Config loaded via `config_load()`.
-
-| Env var | Source | Default | Notes |
-|---------|--------|---------|-------|
-| `CCLAW_AGENT_NAME` | daemon derives | "default" | agent identity |
-| `CCLAW_DB` | daemon derives | `.cclaw/cclaw.db` | path to DB |
-| `CCLAW_WORKSPACE` | agent_config `workspace` | `agents/<name>/workspace` | rw directory |
-| `CCLAW_MODEL` | agent_config `model` | global provider model | LLM model name |
-| `CCLAW_TOOLS` | agent_config `tools` | V119 default set | comma-separated whitelist |
-| `CCLAW_ALLOWED_HOSTS` | agent_config `allowed_hosts` | (empty) | comma-separated hostnames |
-| `CCLAW_MAX_ITERATIONS` | agent_config `max_iterations` | 25 | tool loop cap |
-| `CCLAW_SHELL_TIMEOUT` | agent_config `shell_timeout` | 30 | seconds |
-| `CCLAW_MEMORY_LIMIT` | agent_config `memory_limit` | 268435456 | bytes; 0=unlimited |
-| `CCLAW_CPU_LIMIT` | agent_config `cpu_limit` | 300 | seconds; 0=unlimited |
-| `CCLAW_PROVIDER_BASE_URL` | cclaw.db kv / provider | `https://openrouter.ai/api/v1` | |
-| `CCLAW_MAX_TOKENS` | cclaw.db kv | 4096 | max output tokens |
-| `CCLAW_CONTEXT_WINDOW` | cclaw.db kv | 65536 | model context size |
-| `CCLAW_CONTEXT_THRESHOLD` | cclaw.db kv | 0.6 | triggers compaction/truncation |
-| `CCLAW_COMPACTION_TARGET` | cclaw.db kv | 0.3 | post-compaction target |
-| `CCLAW_COMPACTION` | cclaw.db kv | 1 | bool: enable compaction |
-| `CCLAW_AUTO_RECALL` | cclaw.db kv | 1 | bool: FTS5 auto-recall |
-| `CCLAW_RECALL_MAX_TOKENS` | cclaw.db kv | 500 | max recalled context |
-| `CCLAW_STREAM` | CLI sets | 0 | bool: SSE streaming |
-| `CCLAW_MODE` | parent sets | (none) | `cli` or `daemon` |
-| `CCLAW_LOG_LEVEL` | cclaw.db kv | info | error\|info\|debug\|trace |
-| `CCLAW_TOKEN_RATE_LIMIT` | cclaw.db kv | 1000000 | hourly token cap |
-| `CCLAW_SAVE_REASONING` | cclaw.db kv | 0 | bool: persist reasoning |
-| `CCLAW_SAVE_USAGE` | cclaw.db kv | 0 | bool: persist usage stats |
-| `CCLAW_PATH` | CLI sets | (none) | CWD for ro file_read |
-| `CCLAW_TRUST_LEVEL` | CLI `--trust-host` flag | (none) | overrides `agents.trust_level`; `--trust-host` sets `host` |
-| `CCLAW_SECRET_<NAME>` | cclaw.db kv (encrypted) | — | decrypted at fork, cleared after read |
+---
 
 ## providers
+
+LLM API endpoints. Multiple providers enable fallback routing.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
 | `base_url` | TEXT NOT NULL | |
-| `endpoint_type` | TEXT NOT NULL DEFAULT 'openai' | openai\|gemini\|anthropic |
-| `api_key_env` | TEXT NOT NULL DEFAULT '' | env var name for API key |
-| `default_model_id` | TEXT | |
+| `endpoint_type` | TEXT NOT NULL DEFAULT 'openai' | openai / gemini / anthropic |
+| `api_key_env` | TEXT NOT NULL DEFAULT '' | env var name holding the key |
+| `default_model` | TEXT | |
 | `context_window` | INTEGER DEFAULT 128000 | |
-| `token_rate_limit` | INTEGER DEFAULT 0 | |
+| `priority` | INTEGER NOT NULL DEFAULT 0 | lower = preferred |
+| `status` | TEXT NOT NULL DEFAULT 'healthy' | healthy / degraded / down |
 
-## kv
+---
 
-Global config + encrypted secrets. Daemon-only write access.
+## models
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `key` | TEXT PRIMARY KEY | dotted namespace: `provider.api_key`, `telegram_token`, etc. |
-| `value` | TEXT NOT NULL | plaintext or `enc:<hex(nonce\|\|ct\|\|tag)>` for secrets |
-
-## channel_bindings
+Per-model routing metadata + lifetime stats. The router picks by `(priority, status)`.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `channel_type` | TEXT NOT NULL | telegram, cli, webhook |
-| `channel_id` | TEXT NOT NULL | |
-| `agent_name` | TEXT NOT NULL | |
-| `created_at` | INTEGER DEFAULT (unixepoch()) | |
-| `updated_at` | INTEGER DEFAULT (unixepoch()) | |
-| PRIMARY KEY | (channel_type, channel_id) | |
+| `id` | TEXT PRIMARY KEY | routing key (e.g. `openrouter/deepseek-v4-flash`) |
+| `provider_name` | TEXT NOT NULL | FK-ish to `providers.name` |
+| `model` | TEXT NOT NULL | wire model id sent to the provider |
+| `sub_provider` | TEXT | provider-specific routing hint (OpenRouter upstream) |
+| `context_window` | INTEGER DEFAULT 128000 | |
+| `max_output_tokens` | INTEGER | |
+| `capabilities` | TEXT DEFAULT '[]' | JSON array of capability tags |
+| `priority` | INTEGER NOT NULL DEFAULT 0 | lower = preferred |
+| `status` | TEXT NOT NULL DEFAULT 'healthy' | healthy / degraded / down |
+| `degraded_until` | INTEGER | unixepoch; auto-heal after this time |
+| `total_requests` | INTEGER DEFAULT 0 | lifetime counter |
+| `total_tokens_in` | INTEGER DEFAULT 0 | |
+| `total_tokens_out` | INTEGER DEFAULT 0 | |
+| `total_cost_nano` | INTEGER DEFAULT 0 | nanodollars |
+| `error_count_5xx` | INTEGER DEFAULT 0 | |
+| `error_count_429` | INTEGER DEFAULT 0 | |
+| `last_success_at` | INTEGER | |
+| `last_error_at` | INTEGER | |
+| `synced_at` | INTEGER | last remote metadata sync |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-## tg_chat_sessions
+Index: `idx_models_routing ON models(priority, status)`.
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `chat_id` | INTEGER PRIMARY KEY | |
-| `session_id` | INTEGER NOT NULL | |
-| `agent_name` | TEXT NOT NULL DEFAULT '' | |
+---
 
-## cron_jobs
+## llm_jobs
+
+Transient work queue. The daemon poll loop writes one row per LLM request; a worker thread claims it, runs the request, deletes on completion.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `agent_name` | TEXT NOT NULL DEFAULT '' | |
-| `name` | TEXT NOT NULL | |
-| `cron_expr` | TEXT NOT NULL | |
 | `session_id` | INTEGER NOT NULL | |
-| `task` | TEXT NOT NULL | |
-| `enabled` | INTEGER DEFAULT 1 | |
-| `next_run_at` | INTEGER DEFAULT 0 | |
-| `last_run_at` | INTEGER | |
-| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+| `agent_name` | TEXT NOT NULL DEFAULT 'default' | |
+| `recall` | INTEGER NOT NULL DEFAULT 0 | whether to run FTS recall before this request |
+| `job_type` | INTEGER NOT NULL DEFAULT 0 | 0 = normal turn, others reserved |
+| `status` | TEXT NOT NULL DEFAULT 'pending' | pending / claimed / done |
+| `claimed_at` | INTEGER | timestamp when worker started |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-## channels
+Index: `idx_llm_jobs_pending ON llm_jobs(status) WHERE status='pending'`.
+
+---
+
+## llm_responses
+
+Raw LLM response archive for forensics and debugging. One row per HTTP response (success or failure).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | |
+| `turn_id` | INTEGER NOT NULL | joins back to entries |
+| `model` | TEXT | |
+| `status` | TEXT NOT NULL | ok / empty / malformed / http_<code> / timeout / network_error |
+| `provider_id` | TEXT | provider's own response id (`$.id`), NULL if absent |
+| `body` | BLOB | JSONB when parseable, raw text otherwise |
+| `request_body` | BLOB | JSONB of sent payload (failures only); NULL on success |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+Retention controlled by config key `llm_response_archive_max`: >0 keeps most recent N, 0 disables, <0 keeps all.
+
+Index: `idx_llm_responses_turn ON llm_responses(session_id, turn_id)`.
+
+---
+
+## extensions
+
+Shared extension registry. Each extension is a directory in `~/.cclaw/extensions/<name>` containing JS files for tools, hooks, and channels.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
-| `type` | TEXT NOT NULL | telegram, webhook, custom |
-| `binary_path` | TEXT NOT NULL | path to channel process binary |
-| `status` | TEXT NOT NULL DEFAULT 'active' | active\|failed |
-| `pid` | INTEGER | daemon tracks running process |
+| `path` | TEXT NOT NULL | directory path |
+| `version` | TEXT DEFAULT '0.0.0' | |
+| `owner_agent` | TEXT | who promoted it (NULL for builtin) |
+| `published` | INTEGER NOT NULL DEFAULT 0 | single publish flag |
+| `builtin` | INTEGER NOT NULL DEFAULT 0 | |
+| `enabled` | INTEGER NOT NULL DEFAULT 1 | |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+---
+
+## agents
+
+Agent identity and per-agent config. Name is the primary key — no integer id.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `name` | TEXT PRIMARY KEY | |
+| `model` | TEXT | override; NULL uses global default |
+| `provider` | TEXT | override; NULL uses global default |
+| `system_prompt` | TEXT | inline prompt override |
+| `description` | TEXT | |
+| `max_iterations` | INTEGER DEFAULT 25 | tool loop cap per turn |
+| `max_output_tokens` | INTEGER | per-request cap |
+| `shell_timeout` | INTEGER DEFAULT 30 | seconds |
+| `trust_level` | TEXT DEFAULT 'standard' | host / trusted / standard / restricted |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+---
+
+## grants
+
+Normalized capability grants for agents. Replaces the old `agent_config` key-value approach with typed rows.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `agent_name` | TEXT NOT NULL | |
+| `kind` | TEXT NOT NULL | capability axis: `tool`, `host`, `read_path`, `write_path` |
+| `value` | TEXT NOT NULL | the granted name/pattern |
+| `approval_mode` | TEXT NOT NULL DEFAULT 'silent' | only for kind='tool' (see below) |
+| `expires_at` | INTEGER | unixepoch; NULL = permanent. Row is dead after this time. |
 | `created_at` | INTEGER DEFAULT (unixepoch()) | |
+| PRIMARY KEY | (agent_name, kind, value) | |
+
+`approval_mode` values (Axis B of authority, kind='tool' only):
+- `silent` — tool runs freely (default).
+- `always` — every call parks the session for human approval.
+- `tool_decides` — a predicate decides; absent a predicate, fails closed to `always`.
+
+---
+
+## approvals
+
+Audit log for tool-call approvals. When a tool call is parked (`sessions.state` = `awaiting_approval`), a row is inserted here; resolution unparks the session.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | |
+| `tool_call_id` | TEXT | |
+| `tool_name` | TEXT | |
+| `action` | TEXT | |
+| `args_json` | TEXT | |
+| `resolve` | TEXT NOT NULL DEFAULT 'rerun' | `rerun` = re-issue the frozen tool call on approval; `apply` = apply a capability grant (request_config) |
+| `state` | TEXT NOT NULL DEFAULT 'pending' | pending / approved / denied |
+| `decided_via` | TEXT | who/what resolved it |
+| `requested_at` | INTEGER DEFAULT (unixepoch()) | |
+| `expires_at` | INTEGER | park deadline; fail-closed deny if reached |
+
+Index: `approvals_pending ON approvals(session_id, state) WHERE state='pending'`.
+
+---
+
+## agent_extensions
+
+Links agents to their enabled extensions.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `agent_name` | TEXT | NULL = global |
+| `extension_name` | TEXT NOT NULL | FK-ish to `extensions.name` |
+| `config` | TEXT | JSON config blob |
+| `enabled` | INTEGER NOT NULL DEFAULT 1 | |
+| PRIMARY KEY | (agent_name, extension_name) | |
+
+---
+
+## channels
+
+Channel processes managed by the daemon. The extension system writes these rows.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `name` | TEXT PRIMARY KEY | |
+| `extension_name` | TEXT NOT NULL DEFAULT '' | |
+| `type` | TEXT NOT NULL DEFAULT '' | telegram / webhook / custom |
+| `binary_path` | TEXT NOT NULL DEFAULT '' | path to channel process |
+| `status` | TEXT NOT NULL DEFAULT 'draft' | see lifecycle below |
+| `pid` | INTEGER | daemon tracks the running process |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+Status lifecycle: `draft` → `validated` → `active` → `broken`.
+- `extension_install()` inserts as `draft`.
+- `cclaw --channel <name> --check` validates config → `validated`.
+- `--activate` promotes → `active`; `channel_launch_all()` only execs channels in this state.
+- `channel_reap()` crash-loop flap detection writes `broken`; another `--check` retries the cycle.
+
+---
+
+## channel_state
+
+Channel-private persistent key-value store (offsets, cursors, tokens).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `channel_name` | TEXT NOT NULL | |
+| `key` | TEXT NOT NULL | |
+| `value` | TEXT | |
+| PRIMARY KEY | (channel_name, key) | |
+
+---
+
+## channel_routes
+
+Routes inbound channel messages to agents/sessions. Replaces the old `channel_bindings` and `tg_chat_sessions` tables.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `channel_name` | TEXT NOT NULL | |
+| `channel_id` | TEXT NOT NULL DEFAULT '*' | `*` = default route for the channel |
+| `agent_name` | TEXT | target agent |
+| `session_id` | INTEGER | pin to a specific session (optional) |
+| PRIMARY KEY | (channel_name, channel_id) | |
+
+---
+
+## sessions
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `name` | TEXT | human label |
+| `agent_name` | TEXT | scopes session to agent |
+| `channel_name` | TEXT | originating channel |
+| `channel_id` | TEXT | originating channel id |
+| `parent_session_id` | INTEGER DEFAULT -1 | sub-agent parent (-1 = top-level) |
+| `parent_tool_call_id` | TEXT | the tool_call that spawned this sub-session |
+| `depth` | INTEGER NOT NULL DEFAULT 0 | sub-agent nesting depth |
+| `tool_filter` | TEXT | JSON array of tool names (see below) |
+| `state` | TEXT NOT NULL DEFAULT 'idle' | see state machine below |
+| `owner_instance` | TEXT | FK to `processes.instance_id`; NULL ⟺ idle |
+| `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
+| `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
+| `last_route` | TEXT | delivery target |
+| `last_interaction_id` | TEXT | |
+| `last_synced_entry_id` | INTEGER | |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+| `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+Index: `idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS NOT NULL`.
+
+### sessions.state values
+
+| State | Meaning |
+|-------|---------|
+| `idle` | No work in progress; `owner_instance` is NULL |
+| `llm_running` | LLM request in flight on a worker thread |
+| `tool_running` | Tool execution in progress |
+| `compacting` | Context compaction running |
+| `rate_limited` | Parked waiting for rate-limit window |
+| `awaiting_agent` | Parked for a sub-agent to complete |
+| `awaiting_approval` | Parked for human approval of a tool call |
+
+Transitions are guarded by a CAS in `session_set_state()` (`src/db.c`): idle clears `owner_instance`, any busy state stamps it. `turn_iteration` resets to 0 on transition to idle.
+
+### sessions.tool_filter
+
+A JSON array of tool names frozen at sub-agent spawn time (`src/main.c`). Acts as a **positive scope** intersected with grants per turn — it can never widen authority, only shrink it. NULL means unrestricted (uses grants alone).
+
+---
+
+## entries
+
+Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c` builds the wire JSON directly from columns via `json_object()`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | |
+| `parent_id` | INTEGER NOT NULL DEFAULT -1 | tree structure (Pi model); -1 = root |
+| `original_parent_id` | INTEGER | set on reparent (compaction) |
+| `turn_id` | INTEGER | groups entries within a turn |
+| `type` | TEXT NOT NULL DEFAULT 'user_message' | entry type discriminator |
+| `part_index` | INTEGER NOT NULL DEFAULT 0 | ordering within multi-part entries |
+| `role` | INTEGER NOT NULL DEFAULT 1 | 0=system, 1=user, 2=assistant, 3=tool, 4=compaction |
+| `content` | TEXT | |
+| `tool_calls` | TEXT | JSON array, NULL if none |
+| `tool_call_id` | TEXT | for role=tool only |
+| `tool_name` | TEXT | for role=tool only |
+| `is_error` | INTEGER NOT NULL DEFAULT 0 | for role=tool |
+| `stop_reason` | INTEGER NOT NULL DEFAULT 0 | see StopReason below |
+| `model` | TEXT | which model produced this |
+| `usage_in` | INTEGER | input tokens |
+| `usage_out` | INTEGER | output tokens |
+| `cost_nano` | INTEGER | nanodollars |
+| `token_estimate` | INTEGER | chars/4 heuristic |
+| `content_bytes` | INTEGER | byte length of content + tool_calls |
+| `tool_call_count` | INTEGER NOT NULL DEFAULT 0 | denormalized for plan pass |
+| `data` | TEXT | legacy/debug (nullable) |
+| `network_hosts` | TEXT | JSON array of hosts the tool run contacted (proxy-observed) |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+### entries.network_hosts
+
+NULL or a JSON array of hostnames the credential-proxy observed during a shell tool execution. Stored for auditing and grant enforcement replay.
+
+### StopReason enum
+
+| Value | Int | Provider sources |
+|-------|-----|------------------|
+| stop | 1 | `"stop"`, `"end"`, `"end_turn"`, `null` |
+| length | 2 | `"length"`, `"max_tokens"` |
+| tool_use | 3 | `"tool_calls"`, `"function_call"`, `"tool_use"` |
+| error | 4 | `"content_filter"`, `"network_error"`, unknown, missing |
+| aborted | 5 | internal — SIGTERM, user cancel, timeout |
+
+### tool_calls JSON format
+
+Provider-neutral; `args` stored as object (not stringified):
+
+```json
+[{"id":"tc_1","name":"shell_exec","args":{"cmd":"ls"}}]
+```
+
+### FTS5
+
+```sql
+CREATE VIRTUAL TABLE entries_fts USING fts5(
+  content, content=entries, content_rowid=id,
+  tokenize='porter unicode61'
+);
+```
+
+The AFTER INSERT trigger keys on `entries.type` (not `role`): for `tool_call` and `tool_result` types, the FTS content is prefixed with `tool_name` for better recall. Compaction entries (`type='compaction'`) are excluded from FTS entirely. A separate trigger atomically advances `sessions.leaf_id` on every insert except compaction entries (compaction inserts mid-branch).
+
+### Indexes
+
+```
+idx_entries_session       (session_id, id)
+idx_entries_parent        (parent_id)
+idx_entries_session_role  (session_id, role)
+idx_entries_turn          (session_id, turn_id)
+idx_entries_turn_type     (session_id, turn_id, type, part_index)
+idx_entries_stop_reason   (session_id, stop_reason) WHERE stop_reason != 0
+idx_entries_plan          (parent_id, session_id, id, role, stop_reason, token_estimate, tool_call_count)
+```
+
+---
+
+## tool_calls
+
+Denormalized tool-call tracking. Links the JSON `tool_calls` array in an assistant entry to the corresponding tool-result entry.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | |
+| `entry_id` | INTEGER NOT NULL | the assistant entry containing this call |
+| `call_id` | TEXT NOT NULL | matches `tool_calls[].id` in the entry |
+| `name` | TEXT NOT NULL | tool name |
+| `arguments` | TEXT | JSON |
+| `result_entry_id` | INTEGER | links to the tool_result entry |
+| `status` | TEXT NOT NULL DEFAULT 'pending' | pending / completed / failed / done |
+| `resolved_by` | TEXT | |
+| `resolved_at` | INTEGER | |
+
+Indexes: `idx_tool_calls_entry(entry_id)`, `idx_tool_calls_session(session_id, status)`.
+
+---
+
+## tools
+
+Tool registry. Built-in C tools have `builtin=1` and NULL `extension_name`/`path`; JS tools point to a handler file in the shared extension store.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `name` | TEXT PRIMARY KEY | |
+| `extension_name` | TEXT | NULL for built-in C tools |
+| `description` | TEXT | |
+| `parameters_json` | TEXT | JSON Schema for arguments |
+| `path` | TEXT | handler file in extension store |
+| `builtin` | INTEGER NOT NULL DEFAULT 0 | |
+| `agent_name` | TEXT | owner scope; NULL = global |
+| `enabled` | INTEGER NOT NULL DEFAULT 1 | |
+| `policy` | TEXT | JSON restrict-only argument policy |
+
+---
+
+## hooks
+
+Extension-provided hooks. Same provenance model as tools — the DB holds config + a path, never code.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `extension_name` | TEXT NOT NULL | |
+| `event` | TEXT NOT NULL | one of the six hook lifecycle events |
+| `path` | TEXT NOT NULL | handler file in extension store |
+| `enabled` | INTEGER NOT NULL DEFAULT 1 | |
+| PRIMARY KEY | (extension_name, event, path) | |
+
+---
+
+## hook_directives
+
+Per-request ephemeral directives that cross the main-thread → worker-thread boundary as DB state. Written at dispatch on the poll thread, read by the worker's payload build, deleted at LLM request exit.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | |
+| `kind` | TEXT NOT NULL | `inject` or `suppress` |
+| `role` | TEXT | inject: `system` or `user` |
+| `content` | TEXT | inject payload |
+| `entry_id` | INTEGER | suppress target entry |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+Index: `idx_hook_directives_session ON hook_directives(session_id)`.
+
+---
+
+## memory_blocks
+
+Agent-scoped named memory blocks. Each block has a label, char limit, and optional read-only flag.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `agent_name` | TEXT | NULL = global |
+| `label` | TEXT NOT NULL | |
+| `value` | TEXT NOT NULL DEFAULT '' | |
+| `description` | TEXT | tells agent what block is for |
+| `char_limit` | INTEGER NOT NULL DEFAULT 5000 | |
+| `read_only` | INTEGER NOT NULL DEFAULT 0 | |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+| `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+| UNIQUE | (agent_name, label) | |
+
+---
+
+## memory_entries
+
+Numbered entries within a memory block (the block is the container; entries are the content lines).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `agent_name` | TEXT NOT NULL | |
+| `block_label` | TEXT NOT NULL | |
+| `pos` | INTEGER NOT NULL | ordering position |
+| `text` | TEXT NOT NULL | |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+Index: `idx_memory_entries_block ON memory_entries(agent_name, block_label, pos)`.
+
+---
+
+## inbox
+
+Durable inbound message queue. Survives crashes; atomic consumption via `BEGIN EXCLUSIVE`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | |
+| `source` | TEXT NOT NULL DEFAULT 'cli' | channel origin |
+| `payload` | TEXT NOT NULL | |
+| `consumed` | INTEGER NOT NULL DEFAULT 0 | |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+Index: `idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0`.
+
+---
 
 ## channel_events
 
@@ -155,9 +503,13 @@ Inbound events from channel processes → daemon. Consumed in FIFO order.
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `channel_name` | TEXT NOT NULL | |
-| `event_type` | TEXT NOT NULL | message, callback, etc. |
+| `event_type` | TEXT NOT NULL DEFAULT 'message' | |
 | `payload` | TEXT NOT NULL | JSON |
-| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+| `external_id` | TEXT | dedup key |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+| UNIQUE | (channel_name, external_id) | prevents duplicate events |
+
+---
 
 ## channel_outbox
 
@@ -169,177 +521,58 @@ Daemon → channel process delivery queue.
 | `channel_name` | TEXT NOT NULL | |
 | `session_id` | INTEGER NOT NULL | |
 | `payload` | TEXT NOT NULL | JSON |
-| `status` | TEXT NOT NULL DEFAULT 'pending' | pending\|delivered\|failed |
-| `created_at` | INTEGER DEFAULT (unixepoch()) | |
+| `status` | TEXT NOT NULL DEFAULT 'pending' | pending / delivered / failed |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `acked_at` | INTEGER | |
 
-Index: `idx_channel_outbox_pending ON channel_outbox(channel_name, status) WHERE status='pending'`
-
-## channel_state
-
-Channel-private persistent kv (offsets, cursors, tokens).
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `channel_name` | TEXT NOT NULL | |
-| `key` | TEXT NOT NULL | |
-| `value` | TEXT NOT NULL | |
-| PRIMARY KEY | (channel_name, key) | |
+Index: `idx_channel_outbox_pending ON channel_outbox(channel_name, status) WHERE status='pending'`.
 
 ---
 
-## sessions
+## cron_jobs
+
+Daemon-scheduled periodic tasks.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `name` | TEXT | |
-| `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
-| `agent_name` | TEXT | scopes session to agent |
-| `parent_session_id` | INTEGER DEFAULT -1 | sub-agent parent (-1 = top-level) |
-| `depth` | INTEGER DEFAULT 0 | sub-agent depth |
-| `state` | TEXT DEFAULT 'idle' | idle\|running\|waiting |
-| `last_route` | TEXT | delivery target |
-| `cache_break_after` | INTEGER DEFAULT -1 | entry ID after which cache breaks |
-| `last_interaction_id` | TEXT | |
-| `last_synced_entry_id` | INTEGER | |
-| `created_at` | INTEGER DEFAULT (unixepoch()) | |
-| `updated_at` | INTEGER DEFAULT (unixepoch()) | |
-
-## entries
-
-Split-column format — no JSON parsing on LLM request hot path (V60).
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `agent_name` | TEXT | |
+| `name` | TEXT NOT NULL | |
+| `cron_expr` | TEXT NOT NULL | |
 | `session_id` | INTEGER NOT NULL | |
-| `parent_id` | INTEGER DEFAULT -1 | tree structure (Pi model) |
-| `original_parent_id` | INTEGER | nullable, set on reparent |
-| `turn_id` | INTEGER | groups entries within a turn |
-| `type` | TEXT DEFAULT 'user_message' | entry type discriminator |
-| `part_index` | INTEGER DEFAULT 0 | ordering within multi-part entries |
-| `role` | INTEGER DEFAULT 1 | 0=system, 1=user, 2=assistant, 3=tool, 4=compaction |
-| `content` | TEXT | raw text |
-| `tool_calls` | TEXT | JSON array, NULL if none |
-| `tool_call_id` | TEXT | for role=tool only |
-| `tool_name` | TEXT | for role=tool only |
-| `is_error` | INTEGER DEFAULT 0 | for role=tool |
-| `stop_reason` | INTEGER DEFAULT 0 | 0=none, 1=stop, 2=length, 3=tool_use, 4=error, 5=aborted |
-| `model` | TEXT | which model produced this |
-| `usage_in` | INTEGER | input tokens |
-| `usage_out` | INTEGER | output tokens |
-| `cost_nano` | INTEGER | cost in nanodollars |
-| `token_estimate` | INTEGER | chars/4 heuristic |
-| `content_bytes` | INTEGER | byte length of content + tool_calls |
-| `tool_call_count` | INTEGER DEFAULT 0 | denormalized for plan pass |
-| `data` | TEXT | legacy/debug (nullable) |
-| `created_at` | INTEGER DEFAULT (unixepoch()) | |
-
-### StopReason enum
-
-| Value | Int | Provider sources |
-|-------|-----|------------------|
-| stop | 1 | `"stop"`, `"end"`, `"end_turn"`, `null` |
-| length | 2 | `"length"`, `"max_tokens"` |
-| tool_use | 3 | `"tool_calls"`, `"function_call"`, `"tool_use"` |
-| error | 4 | `"content_filter"`, `"network_error"`, unknown, missing |
-| aborted | 5 | (internal — SIGTERM, user cancel, timeout) |
-
-### tool_calls format
-
-Provider-neutral, `args` stored as object (not stringified):
-
-```json
-[{"id":"tc_1","name":"shell_exec","args":{"cmd":"ls"}}]
-```
-
-Wire emission per-provider at stream time (V60):
-- **OpenAI**: stringify `args` → `"arguments":"..."`
-- **Anthropic**: `args` as `input` object
-- **Google**: `args` as `functionCall.args` object
-
-### FTS5
-
-```sql
-CREATE VIRTUAL TABLE entries_fts USING fts5(content, content=entries, content_rowid=id);
--- AFTER INSERT trigger copies content → entries_fts (role-aware: tool entries prefix with tool_name)
-```
-
-## tool_calls (table)
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `session_id` | INTEGER NOT NULL | |
-| `entry_id` | INTEGER NOT NULL | |
-| `call_id` | TEXT NOT NULL | matches tool_call JSON id |
-| `name` | TEXT NOT NULL | tool name |
-| `arguments` | TEXT | JSON |
-| `result_entry_id` | INTEGER | links to tool_result entry |
-| `status` | TEXT DEFAULT 'pending' | pending\|completed\|failed |
-| `resolved_by` | TEXT | |
-| `resolved_at` | INTEGER | |
-
-Indexes: `idx_tool_calls_entry(entry_id)`, `idx_tool_calls_session(session_id, status)`
-
-## inbox
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `session_id` | INTEGER NOT NULL | |
-| `source` | TEXT NOT NULL | channel origin |
-| `payload` | TEXT NOT NULL | message content |
-| `created_at` | INTEGER DEFAULT (unixepoch()) | |
-| `consumed` | INTEGER DEFAULT 0 | |
-
-Index: `idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0`
-
-## memory_blocks
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `agent_name` | TEXT NOT NULL | scopes block to agent |
-| `label` | TEXT NOT NULL | |
-| `value` | TEXT DEFAULT '' | |
-| `description` | TEXT | tells agent what block is for |
-| `char_limit` | INTEGER DEFAULT 5000 | |
-| `read_only` | INTEGER DEFAULT 0 | |
-| `created_at` | INTEGER DEFAULT (unixepoch()) | |
-| `updated_at` | INTEGER DEFAULT (unixepoch()) | |
-| UNIQUE | (agent_name, label) | |
+| `task` | TEXT NOT NULL | |
+| `enabled` | INTEGER NOT NULL DEFAULT 1 | |
+| `next_run_at` | INTEGER NOT NULL DEFAULT 0 | |
+| `last_run_at` | INTEGER | |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 ---
 
-## Indexes
+## processes
 
-```sql
-CREATE INDEX idx_entries_session ON entries(session_id, id);
-CREATE INDEX idx_entries_parent ON entries(parent_id);
-CREATE INDEX idx_entries_session_role ON entries(session_id, role);
-CREATE INDEX idx_entries_turn ON entries(session_id, turn_id);
-CREATE INDEX idx_entries_turn_type ON entries(session_id, turn_id, type, part_index);
-CREATE INDEX idx_entries_stop_reason ON entries(session_id, stop_reason) WHERE stop_reason != 0;
-CREATE INDEX idx_entries_plan ON entries(parent_id, session_id, id, role, stop_reason, token_estimate, tool_call_count);
-CREATE INDEX idx_tool_calls_entry ON tool_calls(entry_id);
-CREATE INDEX idx_tool_calls_session ON tool_calls(session_id, status);
-CREATE INDEX idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0;
-CREATE INDEX idx_channel_outbox_pending ON channel_outbox(channel_name, status) WHERE status='pending';
-```
+Process registry for liveness detection. One row per live cclaw process (daemon or CLI) sharing this DB.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `instance_id` | TEXT PRIMARY KEY | unique per process start |
+| `pid` | INTEGER NOT NULL | OS pid |
+| `mode` | TEXT NOT NULL | `daemon` or `cli` |
+| `started_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+| `heartbeat_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+Sessions stamp `owner_instance` here; owner-scoped recovery reclaims only sessions whose owner is absent (crashed) or stale (no heartbeat within `PROCESS_TTL_SEC`).
 
 ---
 
 ## Design decisions
 
-1. **Single DB** — all state in one `cclaw.db`; WAL mode allows concurrent readers; parent serializes writes; simplifies deployment (one file to back up/move)
-2. **DB-driven state machine** — `advance_session()` reads DB state, decides next action; worker threads notify via pipe; no shared-memory IPC
-3. **agent_config in DB** — loaded at startup, injected as env vars; single source of truth for policy
-4. **Split columns over JSON** — SQLite `json_object()` builds wire JSON directly from columns (V60); metadata columns enable plan pass without overflow page loads (V56)
-5. **INTEGER ids** — faster joins, smaller indexes, natural ordering
-6. **parent_id tree** — supports branching (Pi model); walk leaf→root via recursive CTE
-7. **Inbox as table** — durable queue; survives crashes; atomic consumption via `BEGIN EXCLUSIVE`
-8. **WAL mode** — multiple readers never block; writers serialize briefly on commit
-9. **Agent scoping** — `agent_name` column on sessions + memory_blocks scopes data per-agent within the shared DB; no filesystem isolation needed for data separation
-10. **CLI standalone** — opens cclaw.db directly; config from env vars or defaults; no daemon needed
+1. **Single DB** — all state in one `cclaw.db`; WAL mode allows concurrent readers; writes serialize briefly on commit; one file to back up/move.
+2. **DB-driven state machine** — `advance_session()` reads DB state, decides next action; worker threads notify via pipe; no shared-memory IPC.
+3. **Owner-scoped recovery** — `sessions.owner_instance` + `processes` table lets peers coexist safely; a crash orphans only that process's sessions.
+4. **Split columns over JSON** — SQLite `json_object()` builds wire JSON directly from columns; metadata columns enable plan-pass queries without overflow page loads.
+5. **INTEGER ids** — faster joins, smaller indexes, natural ordering.
+6. **parent_id tree** — supports branching (Pi model); walk leaf→root via recursive CTE.
+7. **Inbox/outbox as tables** — durable queues; survive crashes; atomic consumption.
+8. **Agent scoping** — `agent_name` column on sessions, memory_blocks, grants scopes data per-agent within the shared DB.
+9. **Grants not config** — typed grant rows with expiry replace the old key-value `agent_config` approach; `approval_mode` + `expires_at` enable fine-grained time-bounded authority.
+10. **Extensions as paths** — DB stores definition + path, never code; JS lives in files.

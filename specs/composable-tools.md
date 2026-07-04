@@ -34,20 +34,28 @@ constructs and executes the shell command internally.
 
 ```
 LLM calls tool
-  → main process dispatches
-  → js_tool_register_ext forks a child
-  → child evaluates handler string with args as JSON
-  → handler can use: http_fetch, fs.*, console.log
-  → handler CANNOT use: shell_exec, callTool
-  → child returns result string, exits
+  → main process dispatches (SBX_JS tier)
+  → secret interpolation in parent (pre-serialization)
+  → serialize RunToolReq blob → fork+execve cclaw --run-tool
+  → broker: verify_clean, parse blob, tier_descriptor(RUNTOOL_TIER_JS)
+  → serve_network_child: proxy_bind, fork inner child
+    → inner child: namespace sandbox, tool_js_tier_run(q)
+      → tool_js_eval_handler: QuickJS eval of handler file
+      → handler can use: http_request (curl via HTTP_PROXY → proxy), fs.*
+      → handler CANNOT use: shell_exec, callTool
+    → inner child writes result to pipe, _exit
+  → broker drains output, reaps child, writes result back
+  → daemon collects result, stores in DB
 ```
 
-The JS child runs in the same forked-process model as shell_exec itself, but
-it has no mechanism to invoke a shell command from within its execution context.
+JS tools (both `js_eval` and JS-defined extension tools) run through the same
+`--run-tool` broker path as shell and web. The dispatch in `src/main.c` routes
+via `te->recipe.tier == SBX_JS`; `tool_js_tier_run` (`src/tool_js.c`) is the
+in-process leaf in the inner fork.
 
 ## Design
 
-### New primitive: `cclaw.exec(command, opts)`
+### New primitive: `cclaw.exec(command, opts)` (not yet implemented)
 
 Add a `cclaw.exec` global to the JS tool handler environment. This is the
 bridge from JS to the sandbox shell.
@@ -69,7 +77,7 @@ This is NOT re-entrant into the agent — it's a direct fork+exec from the
 already-forked JS child. No IPC back to the parent. The JS child is already
 sandboxed at the same trust level, so the nested shell inherits that sandbox.
 
-### New primitive: `cclaw.callTool(name, args)`
+### New primitive: `cclaw.callTool(name, args)` (not yet implemented)
 
 For tools that want to compose other *registered* tools (JS or C), add a
 synchronous `cclaw.callTool` that dispatches back to the tool registry in the
@@ -124,11 +132,12 @@ code into. See "Reconciling with the approval model" below.
 
 **The DB is the source of truth for tool definitions; the `.qjs` file is only the
 implementation, referenced by `path`.** This is the AGENTS.md contract ("the DB
-stores the definition and a path; it never stores code"), and it inverts the
-current flow, where `registerTool` is harvested at every startup
-(`process_registered_tools`) into the in-memory registry and the `tools` table is a
-downstream *mirror* written from it (`tools_persist`). That harvest is **deleted**;
-definitions flow the other way.
+stores the definition and a path; it never stores code"). Definitions live in the
+`tools` table; loading is a pure DB read via `tools_load_extension_tools`
+(`src/tools.c`) which joins `tools` → `agent_extensions` → `extensions` to build
+the per-agent registry at startup. No JS is evaluated at load time — only `path` is
+recorded on the `ToolEntry`; the handler file is read and evaluated per-invocation
+in the forked child.
 
 Every tool — builtin or JS — is **one row in `tools`**
 (`name, description, parameters_json, path, policy, agent_name, enabled, builtin`).
@@ -158,30 +167,36 @@ the **light audit**:
   sub-agent draft cannot self-promote to a global tool (AGENTS.md promotion boundary)
 - load the file once in the audited sandbox; confirm each declared handler (and
   policy fn) exists and is a function
-- compute and store a **content hash** of the code file (`extensions.hash`)
 
-On success it writes the rows — `extensions(name, path, version, hash)`, `tools(...)`,
+On success it writes the rows — `extensions(name, path, version)`, `tools(...)`,
 and the tool-to-agent binding (see "Where policy is stored") — and never evaluates
 the file for config again.
 
+> **Content-hash pre-fork check (not yet implemented).** The design calls for
+> computing and storing a content hash of the code file on `extensions` at install,
+> then verifying it before each fork (failing closed on mismatch — a tool whose
+> code drifted from what was audited never runs). The `extensions.hash` column does
+> not exist yet; this is a future hardening step.
+
 **Load — every startup, pure DB read, zero JS eval.** Build the registry from
-`SELECT … FROM tools WHERE enabled` joined to the agent's bindings. Schema, policy,
-and `path` come from the row; the handler is **not** loaded — only `path` is recorded
-on the `ToolEntry`. `extension.c`'s `extension_load` / `process_registered_tools`
-harvest is removed.
+`tools_load_extension_tools`: `SELECT … FROM tools JOIN agent_extensions JOIN
+extensions WHERE enabled` filtered per-agent. Schema, policy, and `path` come
+from the row; the handler is **not** loaded at this stage — only `path` is
+recorded on the `ToolEntry`. Registration into the DB happens via
+`extension_install` writing the rows (tool definition + agent binding).
 
 **Call — per invocation, fork + dispatch.** The trusted parent reads the file at
-`path` (it holds the path anyway), **hashes it and compares to `extensions.hash`,
-failing closed on mismatch** — a tool whose code drifted from what was audited never
-runs, before the sandboxed child starts. It then forks `--qjs_tool <path> <name>
-<args>`: the child evals the whole file (real function objects in its own engine,
-helpers in scope), looks up the handler by name, and calls it with `args`. No
-stringified handler bodies, no author-written IIFE (the loader already wraps the
-file in `(function(cclaw){…})(__cclaw_api)`), no per-handler island.
+`path` (it holds the path anyway), forks `--run-tool` with the `RUNTOOL_TIER_JS`
+blob: the inner child evals the whole file (real function objects in its own
+engine, helpers in scope), looks up the handler by name, and calls it with `args`.
+No stringified handler bodies, no author-written IIFE (the loader already wraps
+the file in `(function(cclaw){…})(__cclaw_api)`), no per-handler island.
 
 > The `registerTool({handler: "<string body>"})` examples elsewhere in this doc
-> predate this model and are superseded: authored files export real functions and a
-> `manifest.json`; the harvest-at-load path is gone.
+> are historical: the shipped model uses authored files that export real functions,
+> a `manifest.json`, and DB rows written by `extension_install`. There is no
+> harvest-at-load path. The examples are retained for illustration of policy
+> schemas only.
 
 ### Policy: authored on the tool, evaluated pre-fork
 
@@ -302,15 +317,14 @@ principle is "an agent cannot loosen its own policy," not "there is only one lev
 ### Tool registration with policy (JS API)
 
 > **Convention:** pass `parameters` and `policy` as **plain objects**, not
-> `JSON.stringify(...)` strings — the harvester (`process_registered_tools`)
-> stringifies them, so pre-stringifying double-encodes. (Some examples below still
-> show `JSON.stringify`; treat the object form as canonical.)
+> `JSON.stringify(...)` strings — the DB stores them as JSON text, so
+> pre-stringifying double-encodes.
 
 ```javascript
 cclaw.registerTool({
     name: "github",
     description: "GitHub CLI operations",
-    parameters: JSON.stringify({
+    parameters: {
         type: "object",
         properties: {
             action: {
@@ -322,14 +336,14 @@ cclaw.registerTool({
             // ... action-specific params
         },
         required: ["action"]
-    }),
-    policy: JSON.stringify({
+    },
+    policy: {
         rules: [
             {match: {action: "pr_merge"}, effect: "deny"},
             {match: {action: "repo_clone"}, effect: "allow"},
             {match: {}, effect: "allow"}
         ]
-    }),
+    },
     handler: "var cmd = build_gh_command(args);\n"
            + "var result = cclaw.exec(cmd, {timeout: 30});\n"
            + "return result.stdout || result.stderr;"
@@ -411,7 +425,7 @@ before any fork. (Used during development to validate the gate; not a shipping t
         description: "Interact with GitHub via the gh CLI. "
             + "Actions: pr_list, pr_create, pr_merge, pr_view, "
             + "issue_list, issue_create, issue_comment, repo_clone, repo_view",
-        parameters: JSON.stringify({
+        parameters: {
             type: "object",
             properties: {
                 action: {
@@ -438,15 +452,15 @@ before any fork. (Used during development to validate the gate; not a shipping t
                 auto_merge: { type: "boolean" }
             },
             required: ["action"]
-        }),
-        policy: JSON.stringify({
+        },
+        policy: {
             rules: [
                 {match: {action: "pr_merge"}, effect: "deny"},
                 {match: {action: "pr_create"}, effect: "allow"},
                 {match: {action: "issue_create"}, effect: "allow"},
                 {match: {}, effect: "allow"}
             ]
-        }),
+        },
         handler: [
             "var a = args.action;",
             "var repo = args.repo ? ' -R ' + args.repo : '';",
@@ -583,7 +597,7 @@ to settle before `email` — or any send-capable tool — ships.
 
 ## Implementation Phases
 
-### Phase 1: `cclaw.exec` (minimal, unblocks composable tools)
+### Phase 1: `cclaw.exec` (not yet implemented — unblocks composable tools)
 
 - Add `cclaw_exec` native function to the JS tool child environment
 - Implementation: `fork()` + `exec("/bin/sh", "-c", cmd)` from the JS child
@@ -592,20 +606,23 @@ to settle before `email` — or any send-capable tool — ships.
 - Return `{stdout, stderr, exit_code}` as JS object
 - Scope: only available in tool handler context (not js_eval, not channels)
 
-### Phase 2: Policy layer
+### Phase 2: Policy layer ✅ (landed)
 
-- Add the authored `policy` column to the `tools` table (per-tool, not on
-  `extensions`); carry it on `ToolEntry.policy_json`, sourced from
-  `registerTool({policy})` for JS tools and `tools.policy` for builtin/promoted
-- Policy evaluation in C (jsmn parse of policy JSON, match args), before the fork,
-  reading `ToolEntry.policy_json` (no per-dispatch DB query)
-- `deny` → error to LLM (no fork); `allow`/`ask` → fall through to the existing
-  per-tool mode gate, with `ask` taking the shipped `approval_create(..., "rerun")`
-  + park path (human picks once/always/deny)
-- Wire JS tool dispatch into `tool_needs_interpolation()` (or a `tools`-table flag)
-  so `{{SECRET:name}}` resolves in `cclaw.exec` args
+- The `policy` column exists on the `tools` table; carried on
+  `ToolEntry.policy_json`, sourced from `tools_load_extension_tools` for JS
+  tools and seeded rows for builtins
+- Policy evaluation in C (`policy_eval` in `src/tool_policy.c`): jsmn parse of
+  policy JSON, match args against rules — runs in the dispatch gate
+  (`src/main.c`) before any fork
+- Semantics: NULL/empty policy → ALLOW (tool already in the allowed set);
+  malformed policy → ALLOW (fail-open); first matching rule wins
+- Effects: `deny` → error to LLM (no fork); `allow` → fall through to normal
+  per-tool mode gate; `ask` → set gate to ASK, taking the shipped
+  `approval_create(..., "rerun")` + park path (human picks once/always/deny)
+- Secret interpolation wired for JS dispatch: `{{SECRET:name}}` resolves in
+  parent before blob serialization (`src/main.c` JS-tier path)
 
-### Phase 3: `cclaw.callTool` (optional, deferred)
+### Phase 3: `cclaw.callTool` (not yet implemented, deferred)
 
 - Socketpair between parent and JS child
 - Request/response protocol: `{tool, args}` → `{result}`
@@ -632,12 +649,15 @@ host, a path, or a trust level. It is just files in the agent's own workspace.
   handler or `cclaw.exec`, so an JS tool cannot mutate capability/trust config
   (see "Config & Authority Boundary"). It can only create `resolve="rerun"`
   approvals, never `resolve="apply"`.
-- **Secret interpolation requires wiring `cclaw.exec` into the interpolation set.**
-  `{{SECRET:name}}` resolution is gated by a per-tool allowlist in `src/main.c`
-  (currently `shell_exec`, `web_fetch`, `js_eval`). A forked JS tool's args are
-  **not** interpolated unless JS tool dispatch is added to that allowlist — or the
-  property becomes a flag on the `tools` table. This is a required implementation
-  step for the GitHub-via-`gh` example to work, not automatic.
+- **Secret interpolation is wired for all SBX dispatch tiers.**
+  `{{SECRET:name}}` resolution happens in the daemon parent's per-tier dispatch
+  path (`src/main.c`) *before* the RunToolReq blob is serialized — shell
+  interpolates `command`, web and js interpolate `arguments`. The interpolated
+  values cross to the broker in the blob; the broker/child never holds the
+  master key. For inline-dispatched tools (the legacy non-SBX path), the
+  per-tool allowlist (`shell_exec`, `web_fetch`, `js_eval`) still applies.
+  A JS-defined extension tool's args are interpolated via the SBX_JS tier path
+  — no additional allowlist entry needed.
 - Handler code is workspace-scoped (agent authored) — same trust as a draft extension
 - Network from cclaw.exec goes through the same proxy/allowed_hosts gate
 - **`cclaw.callTool` (if built) must denylist config/authority tools** —

@@ -41,6 +41,7 @@ program:
 |-------|---------------------|------------|------------------------------|-------|
 | file  | yes → `--run-tool`  | none       | none                         | **1** |
 | web   | yes → `--run-tool`  | yes (fork) | none — child runs OUR curl   | **1** |
+| js    | yes → `--run-tool`  | yes (fork) | none — child runs OUR qjs    | **1** |
 | shell | yes → `--run-tool`  | yes (fork) | yes — `execl /bin/sh`        | **2** |
 
 Key consequences:
@@ -50,10 +51,11 @@ Key consequences:
   `--broker` or `--web-fetch` mode** — the "broker" is a *role the `--run-tool`
   process plays for network tiers*, a code branch, NOT a process image. Becoming
   the broker costs **zero** extra execs.
-- **web's sandbox child is a plain `fork`, not fork+exec.** It runs first-party C
-  (`http_do` + `html_to_markdown`) and forks from the already-sterile
-  `--run-tool` process (single-threaded, clean locks), so the child fork is the
-  safe single-threaded-fork case. No exec needed to run our own function.
+- **web and js sandbox children are plain `fork`s, not fork+exec.** They run
+  first-party C (web: `http_do` + `html_to_markdown`; js: `tool_js_eval_handler`
+  via QuickJS) and fork from the already-sterile `--run-tool` process
+  (single-threaded, clean locks), so the child fork is the safe
+  single-threaded-fork case. No exec needed to run our own functions.
 - **shell is the ONLY tier with a second exec**, and only because `/bin/sh` is a
   foreign program. That exec is irreducible and lives in exactly one place.
 
@@ -67,12 +69,12 @@ daemon poll loop
        run_tool_main():
          verify_clean()                ← shared: no key, fd-set=={0,1,2,3}, no DB
          read + parse request blob from fd 3
-         desc = tier_descriptor(blob.tier)   ← {ns_flags, needs_proxy, run_fn}
+         desc = tier_descriptor(blob.tier)   ← {skip_pid_ns, needs_proxy, inner_exec, run_fn}
          if !desc.needs_proxy:               // FILE
-             setup_ns(desc.ns_flags)         // skip_pid, no_net, scoped mount set
-             result = run_file_handler(blob) // in-process, this image
+             setup_ns(desc.skip_pid_ns)      // no_net, scoped mount set
+             result = desc.run_fn(blob)      // in-process, this image
              write result → fd 3; _exit
-         else:                               // WEB, SHELL
+         else:                               // WEB, JS, SHELL
              serve_network_child(desc, blob) // shared helper, see §4
              write result → fd 3; _exit
   └─ daemon tracks ONE pid (the --run-tool process) via g_children[],
@@ -87,19 +89,23 @@ what makes "no key, no DB" true by construction; `verify_clean` then proves it.
 
 ## 4. The shared network helper (the de-dup)
 
-web and shell differ on only three small axes; everything else is shared. The
-shared logic — today buried inside `tool_shell_handler` — moves into one helper:
+The three network tiers (web, js, shell) differ on only a few small axes;
+everything else is shared in one helper (`serve_network_child`):
 
 ```
-serve_network_child(TierDescriptor desc, Blob blob):
+serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
+                    unsigned char *body, size_t body_len):
     proxy_bind(&proxy, agent_dir, blob.host_rules, blob.cidr_rules)
         // bind while single-threaded, BEFORE the fork below
     pid = fork()                         // safe: this image is sterile/1-thread
     if child:
         setpgid(0,0)
         wire stdout/stderr → pipe
-        setup_ns(desc.ns_flags)          // fail-closed; _exit on sandbox failure
-        desc.run_fn(blob)                // ← the ONLY per-tier difference at the leaf
+        setup_ns(desc.skip_pid_ns, ...)  // fail-closed; _exit on sandbox failure
+        if desc.inner_exec:
+            tool_shell_tier_exec(q)      // execs /bin/sh, never returns
+        else:
+            desc.run_fn(q)               // ← in-process leaf (web/js)
         _exit(...)
     // parent (the --run-tool/broker process):
     proxy_serve(&proxy)                  // start accept thread AFTER the fork
@@ -111,22 +117,23 @@ serve_network_child(TierDescriptor desc, Blob blob):
 
 Per-tier inputs to the helper:
 
-| Axis        | file            | web                          | shell                        |
-|-------------|-----------------|------------------------------|------------------------------|
-| ns_flags    | USER\|NS, skip_pid, no_net | USER\|NS\|NET, skip_pid | USER\|NS\|NET\|PID           |
-| needs_proxy | no              | yes                          | yes                          |
-| run_fn      | (file handler, not via helper) | curl + html_to_markdown, **in-process** | `execl /bin/sh` (**inner exec**) |
-| /proc       | absent          | absent                       | present (PID ns backs it)    |
-| proxy reach | n/a             | net_shim + HTTP_PROXY only (curl is ours; no preload) | net_shim + LD_PRELOAD (untrusted subprocess tree) |
+| Axis        | file            | web                          | js                           | shell                        |
+|-------------|-----------------|------------------------------|------------------------------|------------------------------|
+| skip_pid_ns | 1               | 1                            | 1                            | 0 (PID ns)                   |
+| needs_proxy | no              | yes                          | yes                          | yes                          |
+| inner_exec  | 0               | 0                            | 0                            | 1                            |
+| run_fn      | tool_file_tier_run (not via helper) | tool_web_tier_run (curl + html_to_markdown, **in-process**) | tool_js_tier_run (qjs eval, **in-process**) | NULL (`execl /bin/sh`, **inner exec**) |
+| /proc       | absent          | absent                       | absent                       | present (PID ns backs it)    |
+| proxy reach | n/a             | net_shim + HTTP_PROXY only (curl is ours; no preload) | net_shim + HTTP_PROXY (qjs http_request uses curl) | net_shim + LD_PRELOAD (untrusted subprocess tree) |
 
 Invariant restated: **/proc present IFF PID namespace present.** Mount set
 contains the proxy socket IFF the tier runs untrusted subprocesses that dial
-network themselves (shell only — web's own curl uses HTTP_PROXY to the shim, no
-socket in the mount set required beyond what reachability needs; confirm during
-impl whether web needs the bind-mount or can rely solely on net_shim/HTTP_PROXY).
+network themselves (shell only — web's own curl and js's qjs `http_request` use
+HTTP_PROXY to the shim, no socket in the mount set required beyond what
+reachability needs).
 
-Adding a future network tier = a new `(ns_flags, run_fn)` pair. No new process
-mode, no new exec, no new drain/proxy code.
+Adding a future network tier = a new `(skip_pid_ns, run_fn)` pair plugged into
+the table. No new process mode, no new exec, no new drain/proxy code.
 
 ---
 
@@ -136,29 +143,41 @@ Decode `blob.tier` ONCE in `run_tool_main` into a small struct; pass it down.
 Do not scatter `if tier=="shell"` across call sites.
 
 ```c
+typedef char *(*RunFn)(const RunToolParsed *q);
+
 typedef struct {
-    int   ns_flags;        // unshare flags (incl. skip_pid as a flag)
-    int   net_mode;        // 0 = no network, 1 = network via proxy
-    int   needs_proxy;     // bind/serve a proxy + inner fork
-    RunFn run_fn;          // leaf: in-process handler | execl
+    int   skip_pid_ns;   /* 1 = no CLONE_NEWPID (file/web/js); 0 = PID ns (shell) */
+    int   needs_proxy;   /* 1 = bind/serve proxy + inner fork (network tiers) */
+    int   inner_exec;    /* 1 = run_fn execs a foreign program (shell) */
+    RunFn run_fn;        /* leaf result producer; NULL iff inner_exec */
 } TierDescriptor;
 ```
 
-`tier_descriptor(tier)` is a small table mapping file/web/shell → the three
-axes. "What makes web different from shell" lives in this one table.
+`tier_descriptor(tier)` is a compile-time table mapping the four tiers to their
+axes. "What makes web different from shell" lives in this one table:
+
+```c
+static const TierDescriptor table[] = {
+    [RUNTOOL_TIER_FILE]  = { .skip_pid_ns = 1, .needs_proxy = 0, .inner_exec = 0, .run_fn = tool_file_tier_run },
+    [RUNTOOL_TIER_SHELL] = { .skip_pid_ns = 0, .needs_proxy = 1, .inner_exec = 1, .run_fn = NULL },
+    [RUNTOOL_TIER_WEB]   = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = tool_web_tier_run },
+    [RUNTOOL_TIER_JS]    = { .skip_pid_ns = 1, .needs_proxy = 1, .inner_exec = 0, .run_fn = tool_js_tier_run },
+};
+```
 
 ---
 
 ## 6. Request blob (fd 3) — extends the file-tier protocol
 
 4-byte LE body-length prefix + a flat little-endian binary body, cap
-`RUNTOOL_REQUEST_MAX` (32 KB), fail-closed over cap on the write path. **Not
-JSON**: both ends are the same binary, so the format is a fixed-order sequence
-of primitives — `u32` (4-byte LE) and `str` (`u32` length + raw bytes, length 0
-= NULL). No escaping, no key scan; secret values cross as raw bytes with no
-escape/unescape round-trip. The body opens with a tier byte (`0`=file,
-`1`=shell); `run_tool.c` is the canonical field order. Fields by tier (additive
-over file):
+`RUNTOOL_REQUEST_MAX` (32 KB), fail-closed over cap on the serialize path
+(`run_tool_serialize_request` returns NULL when `w_finalize` finds the body
+exceeds the cap). **Not JSON**: both ends are the same binary, so the format is
+a fixed-order sequence of primitives — `u32` (4-byte LE) and `str` (`u32`
+length + raw bytes, length 0 = NULL). No escaping, no key scan; secret values
+cross as raw bytes with no escape/unescape round-trip. The body opens with a
+tier byte (`0`=file, `1`=shell, `2`=web, `3`=js); `run_tool.c` is the canonical
+field order. Fields by tier (additive over file):
 
 - all: `tier`, `tool_name`, `arguments`, `env_mode`, `rlimits{nproc,as_mb,cpu_sec}`
 - file: `workspace`, `read_paths[]`, `write_paths[]`, `workspace_ro`, `mount_cwd`, `cwd_path`
@@ -215,20 +234,22 @@ and no DB. Only the proxy config + request blob cross fd 3.
    replaces the post-fork bzero dance. The `serve_network_child` consolidation
    (§4) is deferred to Phase 2 so file and shell share the helper instead of
    separate code paths.
-2. **Add web as a second `(ns_flags, run_fn)` pair** on the same helper. web's
-   run_fn = curl + html_to_markdown in-process (no inner exec). Delete web's
-   pre-flight `http_check_policy` (subsumed by per-hop `decide()`). Extract
-   `serve_network_child` to de-dup with shell at this point.
-3. file tier already on the exec'd path; confirm it shares `verify_clean` and
-   the tier-descriptor dispatch rather than a parallel code path.
+2. ✅ **Add web as a second `(skip_pid_ns, run_fn)` pair** on the same helper
+   (2026-06). `tool_web_tier_run` (curl + html_to_markdown) runs in-process in
+   the inner fork (no inner exec). `serve_network_child` is the shared path for
+   all network tiers; shell's pre-flight `http_check_policy` is subsumed by
+   per-hop `decide()`.
+3. ✅ **Add js as the third network-tier pair** (2026-06).
+   `tool_js_tier_run` (QuickJS eval, `http_request` via curl + HTTP_PROXY) on
+   the same `serve_network_child` path. Dispatch in `src/main.c` for both
+   `js_eval` and JS-defined extension tools routes through the `SBX_JS` tier.
+4. file tier already on the exec'd path; shares `verify_clean` and the
+   tier-descriptor dispatch (no separate code path).
 
 ---
 
 ## 10. Open items
 
-- web proxy reachability: confirm net_shim + `HTTP_PROXY` alone suffices for
-  web's single curl (no socket bind-mount, no preload), or whether the
-  socket bind is still needed. (§4 table.)
 - shell `kill(-pgrp)` across the PID-ns boundary on timeout — verify it reaches
   the inner tree.
 - Global egress floor (Q2 from egress-filter.md) + PSL-aware suffix matching

@@ -25,6 +25,7 @@
 #include "admin_api.h"
 #include "buf.h"
 #include "db.h"
+#include "extension_manifest.h"
 #include "log.h"
 #include "qjs_helpers.h"
 #include "secret.h"
@@ -87,7 +88,7 @@ int get_int_prop(JSContext *ctx, JSValue obj, const char *name, int dflt) {
 /* Eval JS, logging any exception. Drains microtasks and awaits/unwraps a
  * returned promise. A sync throw or a rejected promise lands on the same path:
  * log and return JS_UNDEFINED (channel handlers are fire-and-forget). */
-static JSValue eval_js(JSContext *ctx, const char *code, const char *tag) {
+JSValue eval_js(JSContext *ctx, const char *code, const char *tag) {
     qjs_reset_instructions(g_qrt);
     JSValue v = JS_Eval(ctx, code, strlen(code), tag, JS_EVAL_TYPE_GLOBAL);
     if (!JS_IsException(v))
@@ -103,37 +104,27 @@ static JSValue eval_js(JSContext *ctx, const char *code, const char *tag) {
     return v;
 }
 
-static void set_global_str(JSContext *ctx, const char *name, const char *val) {
+void set_global_str(JSContext *ctx, const char *name, const char *val) {
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, name,
                       val ? JS_NewString(ctx, val) : JS_NULL);
     JS_FreeValue(ctx, global);
 }
 
-static void set_global_int(JSContext *ctx, const char *name, int val) {
+void set_global_int(JSContext *ctx, const char *name, int val) {
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, name, JS_NewInt32(ctx, val));
     JS_FreeValue(ctx, global);
 }
 
-/* ── Send queue (filled by cclaw.send, drained by the curl loop) ── */
-
-typedef struct SendReq {
-    char *method;
-    char *url;
-    char *body;
-    char *tag;
-    char **headers;
-    int n_headers;
-    int64_t outbox_id;   /* 0 = not outbox-bound */
-    int is_final;        /* last send for this outbox row */
-    long timeout;
-    struct SendReq *next;
-} SendReq;
+/* ── Send queue (filled by cclaw.send, drained by the curl loop) ──
+ * SendReq itself is declared in channel_runner.h — shared with
+ * channel_harness.c, which drains this same queue but matches fixtures
+ * instead of making real curl calls. */
 
 static SendReq *g_send_head, *g_send_tail;
 
-static void send_req_free(SendReq *r) {
+void send_req_free(SendReq *r) {
     if (!r) return;
     free(r->method); free(r->url); free(r->body); free(r->tag);
     for (int i = 0; i < r->n_headers; i++) free(r->headers[i]);
@@ -148,7 +139,7 @@ void send_queue_push(SendReq *r) {
     g_send_tail = r;
 }
 
-static SendReq *send_queue_pop(void) {
+SendReq *send_queue_pop(void) {
     SendReq *r = g_send_head;
     if (r) {
         g_send_head = r->next;
@@ -315,7 +306,7 @@ static void send_start_next(void) {
 
 /* ── JS handler call sites ─────────────────────────────────────── */
 
-static void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row) {
+void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row) {
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "id", JS_NewInt32(ctx, (int32_t)row->id));
@@ -352,7 +343,7 @@ static void call_on_poll_done(JSContext *ctx, int status, const char *body,
     JS_FreeValue(ctx, ret);
 }
 
-static void call_on_result(JSContext *ctx, const char *tag, int status,
+void call_on_result(JSContext *ctx, const char *tag, int status,
                            const char *body, const char *error) {
     set_global_str(ctx, "__cr_tag", tag);
     set_global_int(ctx, "__cr_status", status);
@@ -460,6 +451,31 @@ static char *read_file(const char *path) {
     return buf;
 }
 
+/* Resolve js_path from extensions table, shared by the live runner and
+ * --check. A channel row's extension path is a directory (channel.qjs
+ * inside) unless it points straight at a file. */
+int resolve_js_path(sqlite3 *db, const char *channel_name, char *out, size_t outlen) {
+    out[0] = '\0';
+    const char *sql = "SELECT e.path FROM channels c"
+                      " JOIN extensions e ON c.extension_name=e.name"
+                      " WHERE c.name=?;";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *p = (const char *)sqlite3_column_text(s, 0);
+        if (p) {
+            struct stat st;
+            if (stat(p, &st) == 0 && S_ISREG(st.st_mode))
+                snprintf(out, outlen, "%s", p);
+            else
+                snprintf(out, outlen, "%s/channel.qjs", p);
+        }
+    }
+    sqlite3_finalize(s);
+    return out[0] ? 0 : -1;
+}
+
 int channel_runner_main(const char *db_path, const char *channel_name) {
     /* Logging is already initialized by main() before the --channel branch. */
     signal(SIGTERM, handle_signal);
@@ -476,29 +492,8 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
             db_set_secret_key(sk);
     }
 
-    /* Resolve js_path from extensions table */
-    char js_path[1024] = {0};
-    {
-        const char *sql = "SELECT e.path FROM channels c"
-                          " JOIN extensions e ON c.extension_name=e.name"
-                          " WHERE c.name=?;";
-        sqlite3_stmt *s;
-        if (sqlite3_prepare_v2(g_ctx->db, sql, -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
-            if (sqlite3_step(s) == SQLITE_ROW) {
-                const char *p = (const char *)sqlite3_column_text(s, 0);
-                if (p) {
-                    struct stat st;
-                    if (stat(p, &st) == 0 && S_ISREG(st.st_mode))
-                        snprintf(js_path, sizeof(js_path), "%s", p);
-                    else
-                        snprintf(js_path, sizeof(js_path), "%s/channel.qjs", p);
-                }
-            }
-            sqlite3_finalize(s);
-        }
-    }
-    if (!js_path[0]) {
+    char js_path[1024];
+    if (resolve_js_path(g_ctx->db, channel_name, js_path, sizeof(js_path)) != 0) {
         LOG_ERROR_("channel_runner: no extension path for channel '%s'", channel_name);
         channel_ctx_free(g_ctx);
         return 1;
@@ -685,4 +680,121 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     channel_ctx_free(g_ctx);
     LOG_INFO_("channel_runner: stopped");
     return 0;
+}
+
+/* ── --check: static validation gate ──────────────────────────────
+ * Reuses the manifest check + JS-load + onInit() sequence from
+ * channel_runner_main, but never opens the outbox FIFO / request UDS and
+ * never enters the event loop — nothing onInit queues actually goes out.
+ * The caller (main.c) performs the draft/broken → validated DB transition
+ * on success; this function only reports pass/fail. */
+int channel_runner_check(const char *db_path, const char *channel_name, char **err_out) {
+    if (err_out) *err_out = NULL;
+
+    g_ctx = channel_ctx_open(db_path, channel_name);
+    if (!g_ctx) { if (err_out) *err_out = strdup("DB open failed"); return -1; }
+
+    /* extension_install copies extension.json alongside channel.qjs into the
+     * store dir, so e.path doubles as the bundle_dir manifest validation wants. */
+    char store_dir[1024] = {0};
+    {
+        const char *sql = "SELECT e.path FROM channels c"
+                          " JOIN extensions e ON c.extension_name=e.name"
+                          " WHERE c.name=?;";
+        sqlite3_stmt *s;
+        if (sqlite3_prepare_v2(g_ctx->db, sql, -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
+            if (sqlite3_step(s) == SQLITE_ROW) {
+                const char *p = (const char *)sqlite3_column_text(s, 0);
+                if (p) snprintf(store_dir, sizeof(store_dir), "%s", p);
+            }
+            sqlite3_finalize(s);
+        }
+    }
+    if (!store_dir[0]) {
+        if (err_out) *err_out = strdup("no extension registered for this channel");
+        channel_ctx_free(g_ctx); g_ctx = NULL;
+        return -1;
+    }
+    if (extension_manifest_validate(store_dir, err_out) != 0) {
+        channel_ctx_free(g_ctx); g_ctx = NULL;
+        return -1;
+    }
+
+    char js_path[1024];
+    if (resolve_js_path(g_ctx->db, channel_name, js_path, sizeof(js_path)) != 0) {
+        if (err_out) *err_out = strdup("no channel.qjs resolved");
+        channel_ctx_free(g_ctx); g_ctx = NULL;
+        return -1;
+    }
+
+    char *js_src = read_file(js_path);
+    if (!js_src) {
+        if (err_out) {
+            char b[1200];
+            snprintf(b, sizeof(b), "cannot read %s", js_path);
+            *err_out = strdup(b);
+        }
+        channel_ctx_free(g_ctx); g_ctx = NULL;
+        return -1;
+    }
+
+    /* Secret key so admin.setKey doesn't fail if onInit touches it. */
+    { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
+
+    g_qrt = qjs_runtime_create(CR_HEAP_SIZE);
+    if (!g_qrt) {
+        free(js_src);
+        if (err_out) *err_out = strdup("qjs runtime init failed");
+        channel_ctx_free(g_ctx); g_ctx = NULL;
+        return -1;
+    }
+    qjs_set_interrupt_limit(g_qrt, CR_MAX_INSTRUCTIONS);
+    JSContext *ctx = qjs_context_create(g_qrt, QJS_PROFILE_CHANNEL);
+    if (!ctx) {
+        free(js_src);
+        qjs_runtime_destroy(g_qrt); g_qrt = NULL;
+        if (err_out) *err_out = strdup("qjs context init failed");
+        channel_ctx_free(g_ctx); g_ctx = NULL;
+        return -1;
+    }
+    qjs_register_channel_host_functions(ctx);
+
+    JSValue load_val = JS_Eval(ctx, js_src, strlen(js_src), js_path, JS_EVAL_TYPE_GLOBAL);
+    free(js_src);
+    int rc = 0;
+    if (JS_IsException(load_val)) {
+        JSValue exc = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, exc);
+        if (err_out) {
+            char b[512];
+            snprintf(b, sizeof(b), "JS load error: %s", msg ? msg : "?");
+            *err_out = strdup(b);
+        }
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, exc);
+        rc = -1;
+    } else {
+        JS_FreeValue(ctx, load_val);
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+        g_multi = curl_multi_init();
+        JSValue init_ret = eval_js(ctx, "onInit()", "<check-init>");
+        if (JS_IsUndefined(init_ret)) {
+            if (err_out) *err_out = strdup("onInit() failed or threw");
+            rc = -1;
+        } else {
+            JS_FreeValue(ctx, init_ret);
+        }
+        /* Never enters the event loop — drop anything onInit queued so
+         * nothing actually goes out over the network. */
+        SendReq *r;
+        while ((r = send_queue_pop()) != NULL) send_req_free(r);
+        curl_multi_cleanup(g_multi); g_multi = NULL;
+        curl_global_cleanup();
+    }
+
+    JS_FreeContext(ctx);
+    qjs_runtime_destroy(g_qrt); g_qrt = NULL;
+    channel_ctx_free(g_ctx); g_ctx = NULL;
+    return rc;
 }

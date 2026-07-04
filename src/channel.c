@@ -52,6 +52,44 @@ static void update_pid(sqlite3 *db, const char *name, pid_t pid) {
 }
 
 
+int channel_mark_validated(sqlite3 *db, const char *name) {
+    const char *sql = "UPDATE channels SET status='validated'"
+                      " WHERE name=? AND status IN ('draft','broken');";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    int changed = sqlite3_changes(db);
+    sqlite3_finalize(s);
+    return changed > 0 ? 0 : -1;
+}
+
+int channel_activate(sqlite3 *db, const char *name) {
+    const char *sql = "UPDATE channels SET status='active'"
+                      " WHERE name=? AND status='validated';";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    int changed = sqlite3_changes(db);
+    sqlite3_finalize(s);
+    return changed > 0 ? 0 : -1;
+}
+
+char *channel_get_status(sqlite3 *db, const char *name) {
+    const char *sql = "SELECT status FROM channels WHERE name=?;";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    char *status = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(s, 0);
+        if (v) status = strdup(v);
+    }
+    sqlite3_finalize(s);
+    return status;
+}
+
 int channel_launch_all(sqlite3 *db) {
     const char *sql = "SELECT c.name, e.path FROM channels c"
                       " JOIN extensions e ON c.extension_name=e.name"

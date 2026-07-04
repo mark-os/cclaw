@@ -354,10 +354,14 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
     {
         char *ch = json_text(db, manifest, "'$.channel'");
         if (ch && ch[0]) {
+            /* Always lands in 'draft', even on a re-promote of a channel that
+             * was 'active' — the running process keeps going on the old code
+             * until --check/--activate (or a daemon restart) picks up the
+             * new version. See templates/schema.sql's lifecycle comment. */
             rc |= run_ingest(db,
-                "INSERT OR REPLACE INTO channels(name, extension_name, type, binary_path) "
+                "INSERT OR REPLACE INTO channels(name, extension_name, type, binary_path, status) "
                 "VALUES(:name, :name, json_extract(:m,'$.channel.type'), "
-                "       :store || '/' || json_extract(:m,'$.channel.handler'))",
+                "       :store || '/' || json_extract(:m,'$.channel.handler'), 'draft')",
                 manifest, name, store, owner_agent);
         }
         free(ch);

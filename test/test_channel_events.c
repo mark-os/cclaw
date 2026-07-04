@@ -366,7 +366,8 @@ static void test_channels_table(void) {
     assert(sqlite3_step(stmt) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "telegram") == 0);
     assert(strcmp((const char *)sqlite3_column_text(stmt, 1), "telegram") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(stmt, 3), "active") == 0);
+    /* Lifecycle default is 'draft' — only --check/--activate reach 'active'. */
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 3), "draft") == 0);
     sqlite3_finalize(stmt);
 
     /* Update pid (simulating channel_update_pid) */

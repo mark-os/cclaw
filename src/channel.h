@@ -23,6 +23,18 @@ typedef struct {
 int channel_launch_all(sqlite3 *db);
 void channel_shutdown_all(void);
 
+/* draft|broken → validated (on a passing --check). Returns 0 on success,
+ * -1 if the channel doesn't exist or isn't in an allowed source state. */
+int channel_mark_validated(sqlite3 *db, const char *name);
+
+/* validated → active (on --activate). Returns 0 on success, -1 if the
+ * channel doesn't exist or isn't 'validated'. */
+int channel_activate(sqlite3 *db, const char *name);
+
+/* Current lifecycle status ("draft"/"validated"/"active"/"broken"), or NULL
+ * if the channel doesn't exist. Caller frees. */
+char *channel_get_status(sqlite3 *db, const char *name);
+
 /* Reap — returns 1 if pid belonged to a channel, 0 otherwise */
 int channel_reap(pid_t pid, sqlite3 *db);
 

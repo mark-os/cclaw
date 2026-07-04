@@ -24,7 +24,9 @@ static void test_channels_table(void) {
     assert(strcmp((const char *)sqlite3_column_text(st, 0), "telegram") == 0);
     assert(strcmp((const char *)sqlite3_column_text(st, 1), "telegram") == 0);
     assert(strcmp((const char *)sqlite3_column_text(st, 2), "/usr/local/bin/channel_telegram") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(st, 3), "active") == 0);
+    /* Lifecycle default is 'draft' (extension_install sets it explicitly too) —
+     * only --check/--activate can move a channel to 'active'. */
+    assert(strcmp((const char *)sqlite3_column_text(st, 3), "draft") == 0);
     sqlite3_finalize(st);
     db_close(db);
 }

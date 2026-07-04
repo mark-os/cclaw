@@ -109,12 +109,17 @@ CREATE TABLE IF NOT EXISTS agent_extensions (
 );
 
 -- ═══ Channels ═══
+-- status lifecycle: draft → validated → active → broken. extension_install()
+-- inserts 'draft'; only `cclaw --channel <name> --check` (→validated) then
+-- `--activate` (→active) can reach 'active' — channel_launch_all() only execs
+-- that state. channel_reap()'s flap detection writes 'broken' on crash-loop;
+-- another --check retries validated→active.
 CREATE TABLE IF NOT EXISTS channels (
   name TEXT PRIMARY KEY,
   extension_name TEXT NOT NULL DEFAULT '',
   type TEXT NOT NULL DEFAULT '',
   binary_path TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL DEFAULT 'active',
+  status TEXT NOT NULL DEFAULT 'draft',
   pid INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );

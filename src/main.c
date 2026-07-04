@@ -35,6 +35,7 @@
 #include "db_response.h"
 #include "shutdown.h"
 #include "crash.h"
+#include "channel_harness.h"
 #include "doctor.h"
 #include "install.h"
 #include "wake.h"
@@ -1906,6 +1907,13 @@ static void print_usage(void) {
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
+           "  --channel <name>   run one channel's event loop in this process\n"
+           "                     (normally fork+exec'd by the daemon, not run by hand)\n"
+           "  --channel <name> --check     validate: manifest + JS load + onInit(),\n"
+           "                                no event loop; draft/broken -> validated on pass\n"
+           "  --channel <name> --activate  validated -> active (daemon execs it next tick)\n"
+           "  --channel <name> --harness <scenario.json>  offline fixture-replay test\n"
+           "                                against a scratch DB (no real network/DB touched)\n"
            "\n"
            "options:\n"
            "  -p <prompt>        single-turn: send prompt, print response, exit\n"
@@ -2601,7 +2609,9 @@ int main(int argc, char *argv[]) {
     if (argc >= 2 && strcmp(argv[1], "uninstall") == 0) return uninstall_main(argc, argv);
 
     int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
+    int channel_check = 0, channel_activate_flag = 0;
     const char *channel_mode = NULL;
+    const char *channel_harness_scenario = NULL;
     LogLevel log_level_override = LOG_LEVEL_INFO;
     int log_level_set = 0;
     int64_t session_id = -1;
@@ -2615,6 +2625,9 @@ int main(int argc, char *argv[]) {
         }
         else if (strcmp(argv[i], "--daemon") == 0) daemon_mode = 1;
         else if (strcmp(argv[i], "--channel") == 0) { if (++i >= argc) { fprintf(stderr, "--channel requires name\n"); return 1; } channel_mode = argv[i]; }
+        else if (strcmp(argv[i], "--check") == 0) channel_check = 1;
+        else if (strcmp(argv[i], "--activate") == 0) channel_activate_flag = 1;
+        else if (strcmp(argv[i], "--harness") == 0) { if (++i >= argc) { fprintf(stderr, "--harness requires a scenario path\n"); return 1; } channel_harness_scenario = argv[i]; }
         else if (strncmp(argv[i], "--log-level=", 12) == 0) { log_level_override = log_level_parse(argv[i]+12); log_level_set = 1; }
         else if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-v") == 0) { log_level_override = LOG_LEVEL_DEBUG; log_level_set = 1; }
         else if (strcmp(argv[i], "--trace") == 0 || strcmp(argv[i], "-vv") == 0) { log_level_override = LOG_LEVEL_TRACE; log_level_set = 1; }
@@ -2631,6 +2644,15 @@ int main(int argc, char *argv[]) {
     if (host_mode && daemon_mode)
         fprintf(stderr, "warning: --trust-host is ignored by --daemon; daemon agents "
                 "sandbox per their trust_level\n");
+
+    if ((channel_check || channel_activate_flag || channel_harness_scenario) && !channel_mode) {
+        fprintf(stderr, "--check / --activate / --harness require --channel <name>\n");
+        return 1;
+    }
+    if ((channel_check ? 1 : 0) + (channel_activate_flag ? 1 : 0) + (channel_harness_scenario ? 1 : 0) > 1) {
+        fprintf(stderr, "--check, --activate, and --harness are mutually exclusive\n");
+        return 1;
+    }
 
     {   const char *v = getenv("CCLAW_LLM_THREADS");
         if (v && atoi(v) > 0) g_llm_threads = atoi(v);
@@ -2702,6 +2724,52 @@ int main(int argc, char *argv[]) {
     /* Enable SQLite query profiling at debug level and above */
     if (g_cfg->log_level >= LOG_LEVEL_DEBUG)
         db_enable_trace(g_db);
+
+    /* ── Channel lifecycle gate ──────────────────────────────────────
+     * --activate (validated→active) is a pure DB transition, no JS touched —
+     * reuses the already-open g_db. --check runs the same JS-load + onInit()
+     * sequence the live runner does (via channel_runner_check), then this
+     * process (not the runner) applies the draft/broken→validated transition
+     * on success — keeping "did it pass" and "did we record that" separate. */
+    if (channel_mode && channel_activate_flag) {
+        int rc = channel_activate(g_db, channel_mode);
+        if (rc == 0) {
+            printf("channel '%s': validated -> active\n", channel_mode);
+        } else {
+            char *cur = channel_get_status(g_db, channel_mode);
+            fprintf(stderr, "error: cannot activate '%s' (status=%s, need 'validated')\n",
+                    channel_mode, cur ? cur : "unknown/missing");
+            free(cur);
+        }
+        config_free(g_cfg); db_close(g_db); free(db_path);
+        return rc == 0 ? 0 : 1;
+    }
+    if (channel_mode && channel_check) {
+        config_free(g_cfg); db_close(g_db);
+        char *err = NULL;
+        int rc = channel_runner_check(db_path, channel_mode, &err);
+        if (rc == 0) {
+            sqlite3 *cdb = db_open(db_path);
+            int trc = cdb ? channel_mark_validated(cdb, channel_mode) : -1;
+            if (cdb) db_close(cdb);
+            if (trc == 0)
+                printf("channel '%s': check passed, draft/broken -> validated\n", channel_mode);
+            else
+                fprintf(stderr, "channel '%s': check passed but the DB transition failed "
+                                "(was it in 'draft' or 'broken'?)\n", channel_mode);
+        } else {
+            fprintf(stderr, "channel '%s': check FAILED: %s\n", channel_mode, err ? err : "?");
+        }
+        free(err);
+        free(db_path);
+        return rc == 0 ? 0 : 1;
+    }
+    if (channel_mode && channel_harness_scenario) {
+        config_free(g_cfg); db_close(g_db);
+        int rc = channel_harness_run(db_path, channel_mode, channel_harness_scenario);
+        free(db_path);
+        return rc;
+    }
 
     /* ── Channel mode ─────────────────────────────────────────────── */
     /* The daemon fork+execs `cclaw --channel <name>` (do_fork) for a clean

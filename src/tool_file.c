@@ -50,7 +50,7 @@ char *tool_file_read_handler(const char *arguments, void *user_data) {
 char *tool_file_write_handler(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
     if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
-    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted trust level)");
+    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted sandbox profile)");
     return file_sandbox_run(ctx, file_write_inner, arguments);
 }
 
@@ -69,7 +69,7 @@ char *tool_file_find_handler(const char *arguments, void *user_data) {
 char *tool_file_edit_handler(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
     if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
-    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted trust level)");
+    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted sandbox profile)");
     return file_sandbox_run(ctx, file_edit_inner, arguments);
 }
 
@@ -189,7 +189,7 @@ static const char *FILE_WRITE_PARAMS_JSON =
 
 static char *file_write_inner(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted trust level)");
+    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted sandbox profile)");
     const char *workspace = ctx->workspace;
 
     ToolArgs ta;
@@ -556,7 +556,7 @@ static void edits_free(EditOp *e, int n) {
 
 static char *file_edit_inner(const char *arguments, void *user_data) {
     FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted trust level)");
+    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted sandbox profile)");
     if (!arguments) return strdup("error: invalid JSON arguments");
 
     jsmntok_t toks[FILE_EDIT_MAX_TOKENS];

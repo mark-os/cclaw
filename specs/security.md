@@ -329,7 +329,7 @@ Provider API keys resolve env → encrypted kv: `config_load()` reads the provid
 
 **The key file is masked from every sandboxed shell child.** `.cclaw_key` lives next to `cclaw.db` (`<dir of db_path>/.cclaw_key`). That directory is *not* in the workspace, so `standard`/`restricted` agents — which bind only the workspace — never see it by construction. But `trusted` binds the **CWD rw**, and in CLI mode the CWD *is* the dir holding the key and the DB, which would otherwise expose both to a shell child (key + ciphertext = full secret compromise). To close that, `shell_apply_namespace()` **bind-masks** the key and the DB family (`cclaw.db`, `-wal`, `-shm`) inside the new mount namespace: after the CWD/workspace binds and before `pivot_root`, an empty read-only file is bound over each. Files not reachable in the child's mount tree are skipped — they are already invisible by omission.
 
-The one remaining exposure is **`host`** (`--trust-host` / no-userns dev mode): it runs with *no* sandbox, so a shell child reads the host filesystem directly, key included. That is the documented price of `host` — never run untrusted-derived work at `host` on a box whose `.cclaw_key` matters. See [Trust-Level Policy Bundles](#trust-level-policy-bundles).
+The one remaining exposure is **`host`** (`--trust-host` / no-userns dev mode): it runs with *no* sandbox, so a shell child reads the host filesystem directly, key included. That is the documented price of `host` — never run untrusted-derived work at `host` on a box whose `.cclaw_key` matters. See [Sandbox Profile Policy Bundles](#sandbox-profile-policy-bundles).
 
 ### All secrets are injectable
 
@@ -353,7 +353,7 @@ Each secret has a scope: `"*"` (all agents) or a comma-separated agent name list
 
 **Today**, secrets reach tool children solely via `CCLAW_SECRET_*` env vars collected by `shell_secrets_collect()` (`src/tool_shell.c:43`) at process startup. There is no per-agent scope enforcement yet — all secrets in the environment are available to all agents in the same process.
 
-**Three orthogonal axes.** Secret access is *scope* — do not collapse it into trust_level:
+**Three orthogonal axes.** Secret access is *scope* — do not collapse it into sandbox_profile:
 
 | Axis | Mechanism | Question it answers |
 |------|-----------|---------------------|
@@ -361,7 +361,7 @@ Each secret has a scope: `"*"` (all agents) or a comma-separated agent name list
 | Scoped | `scope: "*"` or agent list | which agents *receive* it at injection? |
 | Disclosed | system-prompt authoring | which agents are *told the name*? |
 
-trust_level governs sandbox strictness (env scrub, network, rlimits) — what a compromised agent can *do*, not which secrets it sees. The axes compose (a `restricted` agent with empty scope sees nothing and can reach nothing) but must stay independent: never gate secret access on trust_level by accident.
+sandbox_profile governs sandbox strictness (env scrub, network, rlimits) — what a compromised agent can *do*, not which secrets it sees. The axes compose (a `restricted` agent with empty scope sees nothing and can reach nothing) but must stay independent: never gate secret access on sandbox_profile by accident.
 
 ### Storage providers (design — not yet implemented)
 
@@ -386,7 +386,7 @@ User pastes token → AC scanner detects pattern
   → Main session sees: "Stored as {{SECRET:GITHUB_TOKEN}}"
 ```
 
-The secret agent runs against a zero-data-retention model endpoint (Anthropic ZDR, Azure OpenAI with data-at-rest off, or a local model) so the plaintext never touches a provider's logs. Its context is never persisted to the `entries` table. It has access to a single privileged tool: `secret_store_write`, gated on a dedicated grant (`grants` table, `kind='tool'`, `value='secret_store_write'`) — not on trust_level.
+The secret agent runs against a zero-data-retention model endpoint (Anthropic ZDR, Azure OpenAI with data-at-rest off, or a local model) so the plaintext never touches a provider's logs. Its context is never persisted to the `entries` table. It has access to a single privileged tool: `secret_store_write`, gated on a dedicated grant (`grants` table, `kind='tool'`, `value='secret_store_write'`) — not on sandbox_profile.
 
 This is not yet implemented. Until it is, the AC scanner redacts detected secrets from user messages before storage, and the user is prompted to add them via `db_kv_set_secret` directly (CLI or bootstrap agent).
 
@@ -620,9 +620,9 @@ HMAC is load-bearing: HS256-JWT and TOTP become thin wrappers, and AWS SigV4 is 
 
 Some auth fundamentally needs the raw key in the compute context — the algorithm consuming the secret lives in the JS, not in a header-interpolator (HMAC/SigV4/JWT signing, TOTP), or the use isn't a request at all (local decryption, a JS DB driver, deriving a child key). The handle + C-primitive model covers the common members of that set without revealing the root; `.reveal()` covers the rest, deliberately and visibly. The goal is not "secrets never touch JS" — it is "value-in-JS is opt-in and audited, not the default."
 
-## Trust-Level Policy Bundles
+## Sandbox Profile Policy Bundles
 
-The `agents.trust_level` column maps to a shell sandbox profile:
+The `agents.sandbox_profile` column maps to a shell sandbox profile:
 
 | Policy | host | trusted | standard (default) | restricted |
 |--------|------|---------|-------------------|------------|
@@ -636,6 +636,6 @@ The `agents.trust_level` column maps to a shell sandbox profile:
 | RLIMIT_CPU | none | none | 60s | 10s |
 
 - `secret_agent` (future) maps to `standard` with additional restriction: only `secret_store_write` tool grant, no shell
-- Unknown values (including any legacy values like `bootstrap`) fall through to `standard` in `sandbox_policy_from_trust()` (`src/sandbox.c`)
-- Resolved once in `agent_setup_init()` via `sandbox_profile_from_trust()`, stored in `SandboxProfile`
+- Unknown values (including any legacy values like `bootstrap`) fall through to `standard` in `sandbox_policy_from_profile()` (`src/sandbox.c`)
+- Resolved once in `agent_setup_init()` via `sandbox_profile_resolve()`, stored in `SandboxProfile`
 - **`.cclaw_key` and the DB family are bind-masked** inside every sandboxed child, so even the CWD-mounting `trusted` level can't read the secret key or DB ciphertext. Only `host` (no sandbox) is exposed. See [Secret Storage](#secret-storage).

@@ -11,14 +11,14 @@
 /* A requested extra bind-mount (read_path/write_path grant). path is borrowed. */
 typedef struct { const char *path; int ro; } SandboxMountReq;
 
-/* Trust-derived sandbox policy + grant-path bundle, shared by the file/shell/
- * web/js tool contexts. Filled once per agent in agent_setup (policy from
- * trust_level via sandbox_profile_from_trust; paths from the agent's grants) and
- * embedded in each tool ctx — one definition instead of four identical copies.
- * The policy half maps 1:1 to the matching SandboxConfig fields. Path pointers
+/* Sandbox policy + grant-path bundle, shared by the file/shell/web/js tool
+ * contexts. Filled once per agent in agent_setup (policy from sandbox_profile
+ * via sandbox_profile_resolve; paths from the agent's grants) and embedded in
+ * each tool ctx — one definition instead of four identical copies. The policy
+ * half maps 1:1 to the matching SandboxConfig fields. Path pointers
  * borrow AgentCaps and are rebound on cap refresh. */
 typedef struct {
-    int sandbox;            /* 1 = namespace required, 0 = none (host trust level) */
+    int sandbox;            /* 1 = namespace required, 0 = none (host sandbox_profile) */
     int env_mode;           /* 0 = inherit-present-env + scrub, 1 = clean allowlist */
     int net_mode;           /* 0 = proxy available, 1 = no network */
     int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
@@ -39,7 +39,7 @@ typedef struct {
     const char *cwd_path;   /* CWD rw bind-mount in CLI mode (NULL in daemon) */
     const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key — bind-masked */
     const char *proxy_sock; /* path to .proxy.sock (NULL if proxy not started) */
-    int sandbox;            /* 1 = namespace required, 0 = none (host trust level) */
+    int sandbox;            /* 1 = namespace required, 0 = none (host sandbox_profile) */
     int workspace_ro;       /* 0 = rw, 1 = read-only remount */
     int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
     int net_mode;           /* 0 = proxy available, 1 = no network */
@@ -62,15 +62,15 @@ typedef struct {
  * unconfined. The proxy preload failing is a soft warning (returns 0). */
 int sandbox_child_setup(const SandboxConfig *cfg);
 
-/* Single source of truth: trust_level string → sandbox policy fields.
+/* Single source of truth: sandbox_profile string → sandbox policy fields.
  * Fills cfg->sandbox, env_mode, net_mode, mount_cwd, workspace_ro, rlimits.
  * Does NOT touch workspace/db_path/proxy_sock/cwd_path (caller sets those). */
-void sandbox_policy_from_trust(const char *trust_level, SandboxConfig *cfg);
+void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg);
 
 /* Fill the policy half of a SandboxProfile (sandbox/env_mode/net_mode/mount_cwd/
- * workspace_ro/rlimits) from trust_level. The caller sets the grant-path fields
- * separately (they come from AgentCaps, not the trust level). */
-void sandbox_profile_from_trust(const char *trust_level, SandboxProfile *p);
+ * workspace_ro/rlimits) from sandbox_profile. The caller sets the grant-path
+ * fields separately (they come from AgentCaps, not the sandbox profile). */
+void sandbox_profile_resolve(const char *sandbox_profile, SandboxProfile *p);
 
 /* Resolve extra-mount requests into a bind plan: canonicalize each path (drop
  * those whose realpath() fails), dedup by canonical path (rw wins over ro — a

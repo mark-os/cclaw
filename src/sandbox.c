@@ -33,12 +33,12 @@
 
 /* Bind-mask the secret key + DB ciphertext from the child's view.
  *
- * The key lives at <dir of db_path>/.cclaw_key, next to cclaw.db. trusted /
- * bootstrap agents get the CWD bind-mounted rw, and in CLI mode that CWD is
- * the dir holding both files — so a child could read the key and decrypt
- * every stored secret. We bind an empty, unreadable file over each sensitive
- * path *inside the new root*. Files not reachable in the child's mount tree
- * (the standard/restricted case) never materialize under newroot, so the stat
+ * The key lives at <dir of db_path>/.cclaw_key, next to cclaw.db. trusted (and
+ * host) profiles mount the CWD rw, and in CLI mode that CWD is the dir
+ * holding both files — so a child could read the key and decrypt every stored
+ * secret. We bind an empty, unreadable file over each sensitive path *inside
+ * the new root*. Files not reachable in the child's mount tree (the
+ * standard/restricted case) never materialize under newroot, so the stat
  * fails and we skip them — they are already invisible by omission. */
 static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     if (!db_path || !db_path[0]) return;
@@ -500,7 +500,7 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     const char *cwd = cfg->cwd_path;
     const char *psock = cfg->proxy_sock;
 
-    /* Trust-level: suppress CWD mount / proxy per policy */
+    /* Sandbox profile: suppress CWD mount / proxy per policy */
     if (!cfg->mount_cwd) cwd = NULL;
     if (cfg->net_mode) psock = NULL;
 
@@ -509,12 +509,12 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
         int e = errno;  /* log call below may clobber it */
         LOG_INFO_("sandbox namespace_fail errno=%d action=abort", e);
         fprintf(stderr, "error: namespace sandbox unavailable (errno=%d); "
-                "this trust level requires it — enable unprivileged user "
-                "namespaces or set the agent's trust_level to 'host'\n", e);
+                "this sandbox profile requires it — enable unprivileged user "
+                "namespaces or set the agent's sandbox_profile to 'host'\n", e);
         return -1;
     }
 
-    /* Trust-level: remount workspace read-only after pivot_root */
+    /* Sandbox profile: remount workspace read-only after pivot_root */
     if (cfg->sandbox && cfg->workspace_ro && ws) {
         char ws_real[PATH_MAX];
         if (realpath(ws, ws_real) == NULL ||
@@ -564,16 +564,16 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     return 0;
 }
 
-void sandbox_policy_from_trust(const char *trust_level, SandboxConfig *cfg) {
-    if (trust_level && strcmp(trust_level, "host") == 0) {
+void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg) {
+    if (sandbox_profile && strcmp(sandbox_profile, "host") == 0) {
         cfg->sandbox = 0;
         cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1; cfg->workspace_ro = 0;
         cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
-    } else if (trust_level && strcmp(trust_level, "trusted") == 0) {
+    } else if (sandbox_profile && strcmp(sandbox_profile, "trusted") == 0) {
         cfg->sandbox = 1;
         cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1; cfg->workspace_ro = 0;
         cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
-    } else if (trust_level && strcmp(trust_level, "restricted") == 0) {
+    } else if (sandbox_profile && strcmp(sandbox_profile, "restricted") == 0) {
         cfg->sandbox = 1;
         cfg->env_mode = 1; cfg->net_mode = 1; cfg->mount_cwd = 0; cfg->workspace_ro = 1;
         cfg->rlimits.nproc = 8; cfg->rlimits.as_mb = 128; cfg->rlimits.cpu_sec = 10;
@@ -584,17 +584,17 @@ void sandbox_policy_from_trust(const char *trust_level, SandboxConfig *cfg) {
     }
 }
 
-/* Delegates trust-level branching to sandbox_policy_from_trust() — the only
- * duplication here is this manual field-by-field copy from SandboxConfig into
- * SandboxProfile. The two structs deliberately have different shapes
+/* Delegates sandbox-profile branching to sandbox_policy_from_profile() — the
+ * only duplication here is this manual field-by-field copy from SandboxConfig
+ * into SandboxProfile. The two structs deliberately have different shapes
  * (SandboxProfile adds read_paths/write_paths; SandboxConfig adds mount/path
  * fields), so a memcpy shortcut would be fragile — it'd silently break on
  * field reordering instead of failing to compile. This field list must be
  * kept in sync with SandboxConfig's policy fields by hand whenever either
  * struct's policy fields change. */
-void sandbox_profile_from_trust(const char *trust_level, SandboxProfile *p) {
+void sandbox_profile_resolve(const char *sandbox_profile, SandboxProfile *p) {
     SandboxConfig c = {0};
-    sandbox_policy_from_trust(trust_level, &c);
+    sandbox_policy_from_profile(sandbox_profile, &c);
     p->sandbox      = c.sandbox;
     p->env_mode     = c.env_mode;
     p->net_mode     = c.net_mode;

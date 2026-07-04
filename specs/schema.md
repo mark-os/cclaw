@@ -137,7 +137,7 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 | `max_iterations` | INTEGER DEFAULT 25 | tool loop cap per turn |
 | `max_output_tokens` | INTEGER | per-request cap |
 | `shell_timeout` | INTEGER DEFAULT 30 | seconds |
-| `trust_level` | TEXT DEFAULT 'standard' | host / trusted / standard / restricted |
+| `sandbox_profile` | TEXT DEFAULT 'standard' | host / trusted / standard / restricted |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 ---

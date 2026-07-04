@@ -28,14 +28,14 @@ static char *handler(const char *arguments, void *user_data) {
     /* Section 1: current grants */
     sqlite3_stmt *st = NULL;
     int rc = sqlite3_prepare_v2(ctx->db,
-        "SELECT trust_level FROM agents WHERE name=?1", -1, &st, NULL);
+        "SELECT sandbox_profile FROM agents WHERE name=?1", -1, &st, NULL);
     if (rc == SQLITE_OK) {
         sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
             const char *trust = (const char *)sqlite3_column_text(st, 0);
             buf_appendf(&out,
                 "## Your current grants (agent: %s)\n"
-                "trust_level: %s\n",
+                "sandbox_profile: %s\n",
                 ctx->agent_name,
                 trust ? trust : "(unknown)");
         }
@@ -124,7 +124,7 @@ static char *search_config_thread_run(sqlite3 *db, const char *agent_name,
 
 int tool_search_config_register(ToolRegistry *reg, SearchConfigCtx *ctx) {
     int rc = tools_register(reg, "search_config",
-        "Discover your current configuration and what you can request: your trust level, "
+        "Discover your current configuration and what you can request: your sandbox profile, "
         "granted tools and hosts, the full list of available tools, and how to request more "
         "via request_config. Optional 'query' filters the tool list.",
         PARAMS_JSON, handler, ctx);

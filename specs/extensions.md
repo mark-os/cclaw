@@ -335,7 +335,7 @@ it; promote writes it.
   read-only — a single mount serves every agent, instead of cross-agent workspace
   mounts that publishing-from-workspace would require.
 - **Trust level unchanged.** Extension tools run at the same sandbox trust as the
-  agent's other tools (`agents.trust_level`); they get no extra privilege. Per-tool
+  agent's other tools (`agents.sandbox_profile`); they get no extra privilege. Per-tool
   `policy` and `grants` gate *callability* — a statically-declared tool can still be
   approval-gated or denied. Conditional availability is a policy concern, not a
   registration-time concern.

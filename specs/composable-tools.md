@@ -18,7 +18,7 @@ Today, to use `gh` CLI the agent calls `shell_exec` with a raw command string:
 shell_exec({"command": "gh pr merge 123 --auto"})
 ```
 
-The only gating is trust_level (sandbox yes/no) and allowed_hosts (network).
+The only gating is sandbox_profile (sandbox yes/no) and allowed_hosts (network).
 There's no way to say "allow pr list but deny pr merge" without regexing the
 command string at a hook level.
 
@@ -70,7 +70,7 @@ var result = cclaw.exec("gh pr list --json number,title", {
 
 **Implementation**: the JS child (already forked) fork+execs `/bin/sh -c`
 with the same namespace sandbox applied to normal shell_exec calls. The JS
-child's trust_level determines the sandbox profile. The call is synchronous
+child's sandbox_profile determines the sandbox profile. The call is synchronous
 (blocks the JS handler until the shell command completes or times out).
 
 This is NOT re-entrant into the agent — it's a direct fork+exec from the
@@ -159,11 +159,11 @@ representation in data *and* code.
 `index.qjs` (handlers + policy code) plus a `manifest.json` that *declares the
 extent* of each tool: its arg schema, the bound of its policy (which args it may
 gate, the maximum effect it may reach, whether the policy fn is pure), and its
-requirements (`trust_level`, `bins`, `secrets`). `register_extension`/promote runs
+requirements (`sandbox_profile`, `bins`, `secrets`). `register_extension`/promote runs
 the **light audit**:
 - manifest well-formed; each `parameters` is valid JSON Schema; the declared policy
   stays within its stated extent
-- requested `trust_level`/`bins`/`secrets` are within the installer's authority — a
+- requested `sandbox_profile`/`bins`/`secrets` are within the installer's authority — a
   sub-agent draft cannot self-promote to a global tool (AGENTS.md promotion boundary)
 - load the file once in the audited sandbox; confirm each declared handler (and
   policy fn) exists and is a function
@@ -601,7 +601,7 @@ to settle before `email` — or any send-capable tool — ships.
 
 - Add `cclaw_exec` native function to the JS tool child environment
 - Implementation: `fork()` + `exec("/bin/sh", "-c", cmd)` from the JS child
-- Apply same sandbox as shell_exec (inherit trust_level from agent)
+- Apply same sandbox as shell_exec (inherit sandbox_profile from agent)
 - Timeout via alarm/waitpid
 - Return `{stdout, stderr, exit_code}` as JS object
 - Scope: only available in tool handler context (not js_eval, not channels)
@@ -643,7 +643,7 @@ host, a path, or a trust level. It is just files in the agent's own workspace.
 
 ## Security Considerations
 
-- `cclaw.exec` inherits the agent's trust_level sandbox — no privilege escalation
+- `cclaw.exec` inherits the agent's sandbox_profile sandbox — no privilege escalation
 - Policy evaluation is in C, before JS runs — can't be bypassed from handler
 - **The forked child has no DB handle** — config rows are unreachable from a
   handler or `cclaw.exec`, so an JS tool cannot mutate capability/trust config

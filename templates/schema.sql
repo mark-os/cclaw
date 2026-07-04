@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS agents (
   max_iterations INTEGER DEFAULT 25,
   max_output_tokens INTEGER,
   shell_timeout INTEGER DEFAULT 30,
-  trust_level TEXT DEFAULT 'standard',
+  sandbox_profile TEXT DEFAULT 'standard',
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 

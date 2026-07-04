@@ -28,8 +28,8 @@ typedef struct {
 typedef struct {
     char **allowed_hosts;        /* egress allowlist for the per-call proxy */
     size_t allowed_hosts_count;
-    int host_mode;               /* 1 = trust_level host (sandbox=0), 0 = sandboxed */
-    const char *trust_level;
+    int host_mode;               /* 1 = sandbox_profile host (sandbox=0), 0 = sandboxed */
+    const char *sandbox_profile;
     const char *workspace;
     const char *cwd_path;
     const char *db_path;         /* for the shared extension-store mount */

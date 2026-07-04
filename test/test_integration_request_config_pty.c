@@ -153,7 +153,7 @@ int main(void) {
         setenv("OPENROUTER_API_KEY", "test-key", 1);
         setenv("CCLAW_MODEL", "test-model", 1);
         setenv("CCLAW_STREAM", "0", 1);
-        unsetenv("CCLAW_TRUST_LEVEL");
+        unsetenv("CCLAW_SANDBOX_PROFILE");
         execl(exe, exe, (char *)NULL);
         _exit(113);
     }

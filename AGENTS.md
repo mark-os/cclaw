@@ -89,21 +89,21 @@ This is what CClaw *is for*, not an add-on. Agents extend themselves at runtime 
 
 ## Security Model
 
-See [specs/security.md](specs/security.md) for full details.
+See [specs/security.md](specs/security.md) for full details and [specs/trust.md](specs/trust.md) for the axis model (containment / authority / escalation / sensitivity).
 
 - **Agent process**: trusted binary. `setrlimit` (kernel-enforced); tool egress enforced at the credential proxy (`host_decide()`, default-deny).
 - **Shell children**: untrusted. Namespace sandbox + transparent credential proxy. See [specs/shell-networking.md](specs/shell-networking.md).
 - **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted at runtime, injected to tool children via env, never exposed to the model or logged.
 - **Secret scanner**: AC-based DLP scans all tool results and user messages for leaked credentials before they enter the context window. See [specs/security.md](specs/security.md#secret-scanner-ac-based-content-dlp).
 - **Secret interpolation**: LLMs reference secrets via `{{SECRET:name}}` — cclaw interpolates the real value before tool execution, the context never sees it.
-- **Trust levels**: `agents.trust_level` controls shell sandbox strictness (`host`, `trusted`, `standard`, `restricted`). Every level except `host` *requires* the namespace sandbox — if it can't be established, the shell refuses to run (fail-closed). See [specs/shell-trust-levels.md](specs/shell-trust-levels.md).
+- **Sandbox profiles**: `agents.sandbox_profile` controls containment only (`host`, `trusted`, `standard`, `restricted`) — authority always lives in `grants`, never on the profile. Every profile except `host` *requires* the namespace sandbox — if it can't be established, the shell refuses to run (fail-closed). See [specs/sandbox-profiles.md](specs/sandbox-profiles.md).
 
-### Choosing a trust_level for new agents
+### Choosing a sandbox_profile for new agents
 
-| Level | Use for |
+| Profile | Use for |
 |-------|---------|
 | `host` | Dev / hosts without unprivileged userns — **no sandbox at all** (`--trust-host` forces this) |
-| `trusted` | Default agent, bootstrap — full env access, CWD mounted |
+| `trusted` | Default agent — full env access, CWD mounted |
 | `standard` | Most agents — clean env, network via proxy, workspace rw |
 | `restricted` | Observer/audit agents — no network, workspace read-only, tight limits |
 

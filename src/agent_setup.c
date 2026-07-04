@@ -27,24 +27,24 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* V88: Collect secrets from env, clear from process env */
     setup->secrets = shell_secrets_collect(&setup->secret_count);
 
-    /* Trust level: env override (-y sets CCLAW_TRUST_LEVEL=host), else agents table */
-    const char *trust_level = getenv("CCLAW_TRUST_LEVEL");
+    /* Sandbox profile: env override (-y sets CCLAW_SANDBOX_PROFILE=host), else agents table */
+    const char *sandbox_profile = getenv("CCLAW_SANDBOX_PROFILE");
     char trust_buf[32] = {0};
-    if (!trust_level) {
+    if (!sandbox_profile) {
         sqlite3_stmt *tl_stmt;
         if (sqlite3_prepare_v2(db,
-                "SELECT trust_level FROM agents WHERE name=?", -1, &tl_stmt, NULL) == SQLITE_OK) {
+                "SELECT sandbox_profile FROM agents WHERE name=?", -1, &tl_stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_text(tl_stmt, 1, agent_name, -1, SQLITE_STATIC);
             if (sqlite3_step(tl_stmt) == SQLITE_ROW) {
                 const char *v = (const char *)sqlite3_column_text(tl_stmt, 0);
-                if (v) { snprintf(trust_buf, sizeof(trust_buf), "%s", v); trust_level = trust_buf; }
+                if (v) { snprintf(trust_buf, sizeof(trust_buf), "%s", v); sandbox_profile = trust_buf; }
             }
             sqlite3_finalize(tl_stmt);
         }
     }
     /* Export so forked children (js_eval) inherit it */
-    if (trust_level)
-        setenv("CCLAW_TRUST_LEVEL", trust_level, 1);
+    if (sandbox_profile)
+        setenv("CCLAW_SANDBOX_PROFILE", sandbox_profile, 1);
 
     /* Shell — pass proxy socket path */
     tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace);
@@ -52,7 +52,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* Trust-derived sandbox profile, filled once and embedded in every tool ctx.
      * The grant-path fields are bound just below (and rebound on cap refresh). */
     SandboxProfile profile = {0};
-    sandbox_profile_from_trust(trust_level, &profile);
+    sandbox_profile_resolve(sandbox_profile, &profile);
     profile.read_paths = setup->caps.read_paths;
     profile.read_path_count = setup->caps.read_count;
     profile.write_paths = setup->caps.write_paths;
@@ -87,8 +87,8 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
      * fork+execve --run-tool child, egress via per-hop proxy decide(). */
     setup->js_eval_ctx.allowed_hosts = setup->caps.hosts;
     setup->js_eval_ctx.allowed_hosts_count = setup->caps.host_count;
-    setup->js_eval_ctx.host_mode = (trust_level && strcmp(trust_level, "host") == 0) ? 1 : 0;
-    setup->js_eval_ctx.trust_level = trust_level;
+    setup->js_eval_ctx.host_mode = (sandbox_profile && strcmp(sandbox_profile, "host") == 0) ? 1 : 0;
+    setup->js_eval_ctx.sandbox_profile = sandbox_profile;
     setup->js_eval_ctx.workspace = cfg->workspace;
     setup->js_eval_ctx.cwd_path = getenv("CCLAW_PATH");
     setup->js_eval_ctx.db_path = cfg->db_path;
@@ -102,7 +102,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->web_ctx.db_path = cfg->db_path;
     setup->web_ctx.allowed_hosts = setup->caps.hosts;
     setup->web_ctx.allowed_host_count = setup->caps.host_count;
-    setup->web_ctx.host_mode = (trust_level && strcmp(trust_level, "host") == 0) ? 1 : 0;
+    setup->web_ctx.host_mode = (sandbox_profile && strcmp(sandbox_profile, "host") == 0) ? 1 : 0;
     setup->web_ctx.sb = profile;
     tool_web_fetch_register(&setup->reg, &setup->web_ctx);
 

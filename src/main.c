@@ -2226,7 +2226,7 @@ static int run_cli(char *db_path, const char *prompt,
           ensure_parent_dir(ws);
           /* Create default agent */
           const char *agent_sql =
-              "INSERT OR IGNORE INTO agents(name, system_prompt, trust_level)"
+              "INSERT OR IGNORE INTO agents(name, system_prompt, sandbox_profile)"
               " VALUES('Assistant', ?, 'trusted');"
               ;
           sqlite3_stmt *bs;
@@ -2290,7 +2290,7 @@ static int run_cli(char *db_path, const char *prompt,
             agent_config_free(ac);
         }
     }
-    if (host_mode) setenv("CCLAW_TRUST_LEVEL", "host", 1);
+    if (host_mode) setenv("CCLAW_SANDBOX_PROFILE", "host", 1);
     setenv("CCLAW_MODE", "cli", 1);
     workspace_init(g_cfg);
     /* Make the workspace the process cwd so relative paths, shell children, and
@@ -2643,7 +2643,7 @@ int main(int argc, char *argv[]) {
 
     if (host_mode && daemon_mode)
         fprintf(stderr, "warning: --trust-host is ignored by --daemon; daemon agents "
-                "sandbox per their trust_level\n");
+                "sandbox per their sandbox_profile\n");
 
     if ((channel_check || channel_activate_flag || channel_harness_scenario) && !channel_mode) {
         fprintf(stderr, "--check / --activate / --harness require --channel <name>\n");

@@ -36,6 +36,7 @@
 #include "shutdown.h"
 #include "crash.h"
 #include "doctor.h"
+#include "install.h"
 #include "wake.h"
 #include "advance.h"
 #include "channel.h"
@@ -1900,6 +1901,8 @@ static char *resolve_db_path(void) {
 
 static void print_usage(void) {
     printf("usage: cclaw [options]\n"
+           "       cclaw install [--system]    set up a long-lived daemon (systemd unit)\n"
+           "       cclaw uninstall [--system]  stop + remove that unit\n"
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
@@ -2590,6 +2593,12 @@ int main(int argc, char *argv[]) {
     /* --doctor: one-shot diagnostic bundle. Runs its own DB/config path so a
      * broken DB open is itself a finding — never bail on failures. */
     if (argc >= 2 && strcmp(argv[1], "--doctor") == 0) return doctor_main();
+
+    /* install / uninstall: bare words (not flags) — the onboarding verb, not
+     * a mode switch. No DB/config touched; writes go straight to the
+     * filesystem + systemd. */
+    if (argc >= 2 && strcmp(argv[1], "install") == 0) return install_main(argc, argv);
+    if (argc >= 2 && strcmp(argv[1], "uninstall") == 0) return uninstall_main(argc, argv);
 
     int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
     const char *channel_mode = NULL;

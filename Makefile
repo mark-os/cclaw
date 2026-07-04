@@ -142,16 +142,8 @@ $(BUILDDIR)/net_shim_blob.h: $(BUILDDIR)/net_shim
 	xxd -i < $< >> $@
 	printf '};\nstatic const unsigned int net_shim_blob_len = sizeof(net_shim_blob);\n' >> $@
 
-# Everything a production box needs: the cclaw binary (channels run as
-# `cclaw --channel <name>`, fork+exec'd by the daemon — no separate runner),
-# env file, and the systemd unit.
-install: $(BUILDDIR)/cclaw
-	install -d /usr/local/bin /etc/cclaw
-	install -m 755 $(BUILDDIR)/cclaw /usr/local/bin/cclaw
-	test -f /etc/cclaw/env || install -m 600 cclaw.env.example /etc/cclaw/env
-	install -m 644 cclaw.service /etc/systemd/system/cclaw.service
-	systemctl daemon-reload
-	@echo "Installed. Edit /etc/cclaw/env then: systemctl enable --now cclaw"
+# `make install` is retired — `cclaw install` (src/install.c) replaces it:
+# a user systemd unit by default, `--system` for the old root-install flow.
 
 $(BUILDDIR)/:
 	mkdir -p $(BUILDDIR)

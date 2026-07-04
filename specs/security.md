@@ -213,7 +213,16 @@ When a tool call arrives from the model, dispatch (`src/main.c:369`) evaluates t
 3. **approval_mode** — `agent_tool_mode()` reads `grants.approval_mode` for this tool. `'silent'` → ALLOW, `'always'`/`'tool_decides'` → ASK.
 4. **tools.policy** — `policy_eval(args, policy_json)`. Per-argument restrict rules on the tool definition; DENY or ASK.
 5. **Hooks** — `hook_dispatch_gate_tool_call()`. Extension hooks run (veto-only: can escalate to ASK or DENY, never relax).
-6. **Approval park** — if gate == ASK: look up existing approval; if none or pending, park session (`awaiting_approval`). Resume on approve/deny.
+6. **Sensitivity scan** — `host_in_text()` over the raw args against `sensitive_targets` (registered-domain+subdomain, lookalike-robust). Match → ASK, approval tagged `action='sensitive'`.
+7. **Credential-binding check** — `secret_placeholder_names()` filtered to loaded secrets. Any used secret with zero `secret_hosts` bindings → ASK; a url-carrying call whose url host isn't covered by every used secret's bindings → ASK. Approval tagged `action='secret_bind'`.
+8. **Approval park** — if gate == ASK: look up existing approval; if none or pending, park session (`awaiting_approval`). Resume on approve/deny.
+
+### The two sensitivity-axis rules (specs/trust.md)
+
+Beyond the gate, both rules have a proxy-level enforcement half (the load-bearing one — the arg scan sees what the model wrote, the proxy sees what actually connects):
+
+- **Sensitive targets**: labels ride every network-tier `RunToolReq` as `deny_rules`; `host_decide()` checks deny **before** allow, so no grant makes a sensitive host ambiently reachable. `resolve_approval` coerces ALWAYS→ONCE for `sensitive` approvals; an approved call gets a per-call exception (matched host allowed, its covering labels dropped from the deny list, for that one consumed call).
+- **Secret bindings**: a shell/js call carrying loaded secrets has `host_rules` replaced by the union of the secrets' bound hosts (`call_egress_build`, `src/main.c`) — unbound ⇒ empty ⇒ deny-all. ALWAYS on a url-carrying `secret_bind` park records the binding ("approve & bind"); shell/js ALWAYS coerces to ONCE. Operator pre-seeding: `cclaw sensitive add|rm|list`, `cclaw secret-bind <name> <host>|rm|list` — deliberately CLI-only, no agent tool writes these tables.
 
 ### grants.approval_mode
 

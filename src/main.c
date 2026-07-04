@@ -2848,6 +2848,26 @@ done:
     return rc;
 }
 
+/* Shared opener for the operator verbs (sensitive / secret-bind): open the
+ * real DB with the schema-generation guard + ensure-schema, so the verbs
+ * work on a fresh box before any agent run has initialized the DB. */
+static sqlite3 *verb_db_open(void) {
+    char *db_path = resolve_db_path();
+    if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return NULL; }
+    sqlite3 *db = db_open(db_path);
+    if (!db) { fprintf(stderr, "error: cannot open %s\n", db_path); free(db_path); return NULL; }
+    if (!db_schema_compat(db)) {
+        fprintf(stderr, "error: %s was created by a different cclaw schema — delete it\n", db_path);
+        sqlite3_close(db); free(db_path); return NULL;
+    }
+    free(db_path);
+    if (db_ensure_schema(db) != 0) {
+        fprintf(stderr, "error: schema init failed\n");
+        sqlite3_close(db); return NULL;
+    }
+    return db;
+}
+
 /* `cclaw sensitive add|rm|list [host]` — operator verb for the sensitivity
  * axis (specs/trust.md). Labels are global target properties, deliberately
  * NOT settable via any agent tool: only a human at the CLI (or sqlite3)
@@ -2855,11 +2875,8 @@ done:
 static int sensitive_main(int argc, char *argv[]) {
     const char *sub = (argc >= 3) ? argv[2] : NULL;
     const char *host = (argc >= 4) ? argv[3] : NULL;
-    char *db_path = resolve_db_path();
-    if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return 1; }
-    sqlite3 *db = db_open(db_path);
-    free(db_path);
-    if (!db) { fprintf(stderr, "error: cannot open DB\n"); return 1; }
+    sqlite3 *db = verb_db_open();
+    if (!db) return 1;
     int rc = 0;
     if (sub && strcmp(sub, "list") == 0) {
         int n = 0;
@@ -2890,11 +2907,8 @@ static int sensitive_main(int argc, char *argv[]) {
  * secret→host bindings. Bindings also accrete from ALWAYS approvals of
  * url-carrying calls ("approve & bind"). */
 static int secret_bind_main(int argc, char *argv[]) {
-    char *db_path = resolve_db_path();
-    if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return 1; }
-    sqlite3 *db = db_open(db_path);
-    free(db_path);
-    if (!db) { fprintf(stderr, "error: cannot open DB\n"); return 1; }
+    sqlite3 *db = verb_db_open();
+    if (!db) return 1;
     int rc = 0;
     if (argc >= 3 && strcmp(argv[2], "list") == 0) {
         sqlite3_stmt *st;

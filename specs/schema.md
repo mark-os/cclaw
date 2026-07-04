@@ -183,6 +183,34 @@ Audit log for tool-call approvals. When a tool call is parked (`sessions.state` 
 
 Index: `approvals_pending ON approvals(session_id, state) WHERE state='pending'`.
 
+`approvals.action` values beyond tool names: `sensitive` (sensitivity-axis park — ALWAYS is coerced to ONCE at resolve) and `secret_bind` (credential-binding park — ALWAYS on a url-carrying call records the binding).
+
+---
+
+## sensitive_targets
+
+Sensitivity axis (specs/trust.md): operator-owned labels on targets, global — not per-agent. The one place a label subtracts from authority: labeled hosts ride every network-tier call as proxy deny-before-allow rules, and dispatch parks any call whose args reference one. Written only by `cclaw sensitive add|rm` (no agent tool).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `kind` | TEXT NOT NULL DEFAULT 'host' | only `host` in v1 |
+| `value` | TEXT NOT NULL | exact host or `.suffix` rule; bare domains cover subdomains |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+| PRIMARY KEY | (kind, value) | |
+
+---
+
+## secret_hosts
+
+Fail-closed credential rule (specs/trust.md): a secret may only be submitted to hosts it is bound to. Zero bindings → first use parks; shell/js calls carrying a secret get their egress narrowed to the union of bound hosts. Rows come from `cclaw secret-bind` or from ALWAYS approvals of url-carrying parks ("approve & bind").
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `secret_name` | TEXT NOT NULL | matches the `{{SECRET:name}}` placeholder |
+| `host` | TEXT NOT NULL | exact host or `.suffix` rule |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+| PRIMARY KEY | (secret_name, host) | |
+
 ---
 
 ## agent_extensions

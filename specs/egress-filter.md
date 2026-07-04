@@ -290,8 +290,13 @@ same `decide()` across every redirect hop. Therefore:
   with the structural guarantee (§6) in code. Confirm the seed/extend path
   is not reachable by any agent-facing write path (`config-write`,
   write-capable `db_query`), so an agent cannot widen its own egress floor.
-- **Q3 — Agent denylist** (Stage 3). Not yet wired in; `ProxyContext` gains
-  `host_deny[]` alongside `hosts[]` when this lands.
+- **Q3 — Agent denylist** (Stage 3). ~~Not yet wired in~~ **Landed 2026-07 as
+  the sensitivity axis's proxy half** (specs/trust.md): `ProxyContext.deny_rules`
+  (borrowed, hostname labels) is checked in `host_decide()` *before* any allow
+  logic. The rules come from the global `sensitive_targets` table via
+  `RunToolReq.deny_rules`, not from a per-agent `grants` kind — sensitivity
+  is a property of the target, not the agent. A per-agent `host_deny` grant
+  kind remains unbuilt (revive only with a concrete need).
 - **Q4 — Port pinning** (Stage 4a). Per-rule (`api.github.com:443`) or a
   global default-allowed-ports floor?
 - **Q5 — Wildcard-label rules.** Needed, or does suffix cover every real

@@ -16,15 +16,31 @@ prevent.
 | **Containment** | What can a tool child touch if it misbehaves? | `agents.sandbox_profile` → policy bundle | kernel (namespaces, rlimits, netns+proxy) |
 | **Authority** | What is this agent allowed to do? | `grants` rows (kind/value, `approval_mode`, `expires_at`) | dispatch gate in the trusted process |
 | **Escalation** | Does this call need a human right now? | `approvals` park/resolve (`rerun`/`apply`), `request_config` | dispatch gate + channel/CLI approver |
-| **Sensitivity** *(future)* | Is this *target* special regardless of grants? | label on targets; `sensitive ⇒ always escalate` | dispatch gate |
+| **Sensitivity** | Is this *target* special regardless of grants? | `sensitive_targets` labels + `secret_hosts` bindings | dispatch gate + proxy deny |
 
 Containment is kernel-enforced and coarse. Authority is additive: absence of a
-grant is the denial. Escalation is per-call. Sensitivity (when built) is the
-one place a label *subtracts* from standing authority — no standing grant
-satisfies a sensitive-labeled target. It comes with exactly one sibling rule,
-the fail-closed action default: *unrecognized target + credential about to be
-submitted ⇒ escalate*. The two rules are a pair (known-sensitive vs
-unknown-plus-credential); neither may be "simplified" away without the other.
+grant is the denial. Escalation is per-call. Sensitivity is the one place a
+label *subtracts* from standing authority, and it is exactly two rules — a
+pair (known-sensitive vs unknown-plus-credential); neither may be
+"simplified" away without the other:
+
+1. **Sensitive targets always escalate** (`sensitive_targets`, operator-set
+   via `cclaw sensitive`). Enforced twice, both fail-closed: the labels ride
+   every network-tier call as proxy *deny-before-allow* rules (`host_decide`),
+   so no grant makes a sensitive host ambiently reachable; and the dispatch
+   gate scans raw tool args (`host_in_text`, registered-domain+subdomain,
+   lookalike-robust) and parks any match (`action='sensitive'`). An approval
+   is consumed per call — ALWAYS is coerced to ONCE in `resolve_approval`,
+   and an approved call gets only a per-call egress exception.
+2. **Unrecognized target + credential ⇒ escalate** (`secret_hosts`, seeded
+   via `cclaw secret-bind` or accreted by "approve & bind"). A loaded secret
+   with no bindings parks on first use; a url-carrying call parks unless the
+   url host is covered by every used secret's bindings; and a shell/js call
+   carrying secrets has its egress *narrowed to the union of the bound
+   hosts* — the proxy enforces the binding at the actual connection, so an
+   unbound secret means deny-all unless a human approved that exact call.
+   ALWAYS on a url-carrying park records the binding; shell/js ALWAYS
+   coerces to ONCE (no standing binding without an attributable target).
 
 ## The invariant
 
@@ -38,6 +54,12 @@ it as a grant. Concretely:
 
 - Gating a privileged tool (e.g. a future `secret_store_write`) is a
   `grants` row, never a profile check or a magic profile value.
+- `js_eval` today has exactly `web_fetch`'s reach (same proxy, same host
+  rules, same sensitivity deny and credential narrowing), so its grant cost
+  already tracks its reach. When `cclaw.exec` lands (JS→shell bridge), that
+  stops being true — **`cclaw.exec` must require the agent to also hold the
+  `shell_exec` grant**, so granting `js_eval` never silently grants the
+  union. Grant cost tracks actual reach, always.
 - A future `create_agent` caps the child on both axes independently: child
   `sandbox_profile` ≤ parent's (the four values are ordered
   `host > trusted > standard > restricted` by looseness) AND child grants ⊆
@@ -96,7 +118,8 @@ layer. The kernel cannot enforce intent.
 | File / context separation | mount ns (workspace + path grants only) | normally-running agent |
 | Downloaded malware run as tool | sandbox | contained iff via the sandboxed tool path |
 | Secrets at rest | ChaCha20 in DB; key on disk (ceiling), enclave/keychain provider (future) | DB-file exfiltration; not full-disk capture |
-| Unwanted / sensitive actions | grants + approval gate (+ sensitivity, future) | agent mistakes, injection |
+| Unwanted / sensitive actions | grants + approval gate + sensitivity labels | agent mistakes, injection |
+| Credential to wrong host | secret_hosts bindings (park + egress narrowing) | injection-driven exfil, lookalike targets |
 | System mutation (`sudo`, `-g` installs) | escalation gate (setup-time, human-present) | routine/injected host-touching attempts |
 | Native code exploit at daemon privilege | prevention only | nothing post-compromise |
 
@@ -106,10 +129,16 @@ layer. The kernel cannot enforce intent.
    mistakes and injection, not a subverted binary on a root box. Moving it to
    a separate lower-trust process is a real architectural cost, deliberately
    deferred.
-2. **Lookalike-target phishing is mitigated, not solved.** The future
-   fail-closed credential rule raises the bar; a convincing lookalike the user
-   personally approves is beyond the system's reach.
-3. **Monitor agents (if added) are defense-in-depth, not a boundary.** Veto or
+2. **Lookalike-target phishing is mitigated, not solved.** The fail-closed
+   credential rule raises the bar (a lookalike host is never bound, so the
+   call parks); a convincing lookalike the user personally approves is beyond
+   the system's reach.
+3. **The sensitivity arg-scan sees what the model wrote, not what runs.** A
+   shell command that computes a hostname at runtime evades `host_in_text` —
+   and then hits the proxy deny layer, which is why that layer is the
+   load-bearing one. The scan is the early, legible half; the proxy is the
+   boundary.
+4. **Monitor agents (if added) are defense-in-depth, not a boundary.** Veto or
    escalate only, never grant — an injectable LLM must not hand out
    permissions. Useful against injection, useless against native compromise.
 

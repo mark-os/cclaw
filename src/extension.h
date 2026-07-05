@@ -7,7 +7,7 @@
 #include "config.h"
 #include <stddef.h>
 
-/* V111: Hook event types. preAdvance/postAdvance replace the dead
+/* Hook event types. preAdvance/postAdvance replace the dead
  * beforeRequest/afterResponse (specs/hooks.md); turnStart/turnEnd are declared
  * but not yet dispatched. */
 typedef enum {

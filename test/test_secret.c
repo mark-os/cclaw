@@ -148,7 +148,7 @@ static void test_key_file_create_and_load(void) {
     printf("  PASS: key file create and load\n");
 }
 
-/* T172: Verify startup integration — load_or_create + set_key → secrets work */
+/* Verify startup integration — load_or_create + set_key → secrets work */
 static void test_startup_integration(void) {
     char tmpdir[] = "/tmp/cclaw_t172_XXXXXX";
     assert(mkdtemp(tmpdir) != NULL);

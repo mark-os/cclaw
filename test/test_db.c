@@ -81,7 +81,7 @@ static void test_busy_timeout(void) {
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
-    /* V4: busy_timeout >= 5000 */
+    /* busy_timeout >= 5000 */
     int timeout = get_pragma_int(db, "busy_timeout");
     assert(timeout >= 5000);
 

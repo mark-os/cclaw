@@ -1,7 +1,7 @@
-/* T176: integration test — secrets round-trip.
+/* integration test — secrets round-trip.
  * kv_set_secret stores enc: prefix; kv_get_secret returns plaintext;
  * delete key file → decrypt fails gracefully; no network.
- * Cites V52, T171. */
+ * Cites the AEAD encryption design. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>

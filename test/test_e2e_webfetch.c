@@ -1,5 +1,5 @@
-/* T287: e2e web_fetch — fetch httpbin.org, verify content extraction.
- * Cites: V46 (http_policy allows in host mode (--trust-host)). Requires OPENROUTER_API_KEY. */
+/* e2e web_fetch — fetch httpbin.org, verify content extraction.
+ * Requires OPENROUTER_API_KEY. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,7 +65,7 @@ static void test_web_fetch_httpbin(void) {
 }
 
 int main(void) {
-    printf("--- test_e2e_webfetch (T287) ---\n");
+    printf("--- test_e2e_webfetch ---\n");
     test_web_fetch_httpbin();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

@@ -1,4 +1,4 @@
-/* T271: Unit test for CLI agent picker DB operations */
+/* Unit test for CLI agent picker DB operations */
 #include "db.h"
 #include "test_util.h"
 #include <stdio.h>
@@ -90,7 +90,7 @@ static void test_default_agent_kv(void) {
 }
 
 int main(void) {
-    printf("test_agent_picker (T271):\n");
+    printf("test_agent_picker:\n");
     test_agent_list_empty();
     test_agent_list_one();
     test_agent_list_multiple_sorted();

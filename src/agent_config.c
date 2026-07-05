@@ -33,7 +33,7 @@ void agent_config_free(AgentConfig *ac) {
     free(ac);
 }
 
-/* T80: scan agents/<name>/skills/ for .md files, concatenate into single string */
+/* scan agents/<name>/skills/ for .md files, concatenate into single string */
 char *agent_load_skills(const char *agents_dir, const char *name) {
     if (!agents_dir || !name) return NULL;
 
@@ -87,7 +87,7 @@ char *agent_load_skills(const char *agents_dir, const char *name) {
     return out;
 }
 
-/* T122: helper — render template vars in a string */
+/* helper — render template vars in a string */
 static char *render_template(const char *tmpl, int64_t session_id,
                              const char *agent_name) {
     if (!tmpl) return NULL;
@@ -111,7 +111,7 @@ static char *render_template(const char *tmpl, int64_t session_id,
     return template_render(tmpl, vars, 3);
 }
 
-/* T122: Assemble system prompt from DB agent row */
+/* Assemble system prompt from DB agent row */
 char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
                                 int64_t session_id, const char *agents_dir,
                                 const Config *fallback_cfg) {

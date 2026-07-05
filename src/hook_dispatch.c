@@ -1,5 +1,5 @@
-/* T258: Hook dispatch — fresh QuickJS context per invocation.
- * V112: Long-lived runtime (in ExtensionCtx->rt), fresh context per hook call.
+/* Hook dispatch — fresh QuickJS context per invocation.
+ * Long-lived runtime (in ExtensionCtx->rt), fresh context per hook call.
  * Command hooks (specs/hooks.md): the hook sees a small `input` JSON object and
  * returns targeted commands; C validates and applies them via SQL. Hooks never
  * see or rebuild the full messages array. */

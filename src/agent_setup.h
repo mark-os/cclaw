@@ -20,7 +20,7 @@
 #include "agent_config.h"
 #include "db.h"
 
-/* T206: Shared agent tool setup context — holds all tool contexts that need
+/* Shared agent tool setup context — holds all tool contexts that need
  * to outlive the setup call (caller owns lifetime). */
 typedef struct {
     ToolRegistry reg;
@@ -40,10 +40,10 @@ typedef struct {
     ToolExtensionCtx ext_tool_ctx;
     ToolCronCtx cron_ctx;
     ToolSecretCreateCtx secret_create_ctx;
-    /* V88: secrets for shell injection + masking */
+    /* secrets for shell injection + masking */
     ShellSecret *secrets;
     size_t secret_count;
-    /* T256: extension hooks context */
+    /* extension hooks context */
     ExtensionCtx ext_ctx;
 } AgentSetup;
 

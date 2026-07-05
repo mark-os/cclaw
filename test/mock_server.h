@@ -34,7 +34,7 @@ int mock_server_request_count(void);
 /* Return the body of the last request received (NULL if none). Caller must NOT free. */
 const char *mock_server_last_request_body(void);
 
-/* ── T129: Telegram mock endpoints ─────────────────────────────── */
+/* ── Telegram mock endpoints ────────────────────────────────────── */
 
 /* Queue a canned response for Telegram getUpdates (FIFO, separate from LLM queue). */
 void mock_tg_enqueue_updates(const char *body);

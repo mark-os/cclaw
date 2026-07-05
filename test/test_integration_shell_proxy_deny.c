@@ -1,4 +1,4 @@
-/* test_integration_shell_proxy_deny.c — T216: shell cannot reach unlisted host.
+/* test_integration_shell_proxy_deny.c — shell cannot reach unlisted host.
  * Starts mock TCP server, shell child attempts connect to 127.0.0.1 (not in
  * host_rules) via proxy.  Verifies proxy denies the connection.
  * Uses the real --run-tool broker path (fork+execve). */
@@ -63,7 +63,7 @@ static void check_prerequisites(void) {
     ns_available = run_tool_ns_available(workspace);
 }
 
-/* T216: proxy denies connection to unlisted host */
+/* proxy denies connection to unlisted host */
 static void test_shell_denied_unlisted_host(void) {
     if (!ns_available) {
         printf("  SKIP test_shell_denied_unlisted_host (namespaces unavailable)\n");
@@ -145,7 +145,7 @@ static void test_shell_allowed_vs_denied(void) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    printf("test_integration_shell_proxy_deny (T216):\n");
+    printf("test_integration_shell_proxy_deny:\n");
 
     setup_workspace();
     check_prerequisites();

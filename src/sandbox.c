@@ -158,7 +158,7 @@ static void bind_dir_into(const char *newroot, const char *abspath, int ro) {
     if (ro) sandbox_remount_ro(dst);
 }
 
-/* V82/V37/V22a: Apply namespace sandbox in the child.
+/* Apply namespace sandbox in the child.
  * unshare(USER|MNT|PID|NET), write uid/gid maps, pivot_root into minimal fs.
  * System dirs mounted ro, workspace rw, cwd_path rw (CLI mode).
  * Returns 0 on success, -1 on failure. */
@@ -340,7 +340,7 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
     return 0;
 }
 
-/* V47: scrub the environment before exec. env_mode==1 wipes everything and
+/* scrub the environment before exec. env_mode==1 wipes everything and
  * sets only PATH+TMPDIR; otherwise inherit minus known secret-bearing vars. */
 static void sandbox_scrub_env(int env_mode) {
     extern char **environ;
@@ -504,7 +504,7 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     if (!cfg->mount_cwd) cwd = NULL;
     if (cfg->net_mode) psock = NULL;
 
-    /* V82/V37: namespace sandbox — fail closed if requested but unavailable */
+    /* namespace sandbox — fail closed if requested but unavailable */
     if (cfg->sandbox && sandbox_apply_namespace(ws, cwd, cfg->db_path, cfg) != 0) {
         int e = errno;  /* log call below may clobber it */
         LOG_INFO_("sandbox namespace_fail errno=%d action=abort", e);
@@ -527,7 +527,7 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
 
     sandbox_scrub_env(cfg->env_mode);
 
-    /* V83: the proxy UDS is reachable at a fixed in-sandbox path (bound from the
+    /* the proxy UDS is reachable at a fixed in-sandbox path (bound from the
      * broker's agent-folder socket in sandbox_apply_namespace). */
     if (psock) setenv("CCLAW_PROXY_SOCK", SANDBOX_PROXY_SOCK_PATH, 1);
 

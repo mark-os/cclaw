@@ -1,7 +1,6 @@
-/* T179: integration test — db_query secret filtering.
- * Seed kv w/ enc: values, run db_query("SELECT * FROM config") tool,
- * verify no enc: rows in result; no network.
- * Cites V52, T173. */
+/* integration test — db_query secret filtering.
+ * Seed config w/ enc: values, run db_query("SELECT * FROM config") tool,
+ * verify no enc: rows in result; no network. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>

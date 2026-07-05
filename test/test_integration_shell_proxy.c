@@ -1,4 +1,4 @@
-/* test_integration_shell_proxy.c — T215: dynamic client (curl) reaching a mock
+/* test_integration_shell_proxy.c — dynamic client (curl) reaching a mock
  * server via HTTP_PROXY → shim → broker, with LD_PRELOAD=libcclaw_net.so still
  * loaded. The target is loopback, so the preload now passes the client→shim hop
  * straight through (P0) rather than hijacking it; curl proxies through the shim,
@@ -102,7 +102,7 @@ static void check_prerequisites(void) {
     ns_available = run_tool_ns_available(workspace);
 }
 
-/* T215: shell child connects to mock TCP server through proxy */
+/* shell child connects to mock TCP server through proxy */
 static void test_shell_curl_through_proxy(void) {
     if (!ns_available) {
         printf("  SKIP test_shell_curl_through_proxy (namespaces unavailable)\n");
@@ -223,7 +223,7 @@ static void test_proxy_relay_integrity(void) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    printf("test_integration_shell_proxy (T215):\n");
+    printf("test_integration_shell_proxy:\n");
 
     setup_workspace();
     check_prerequisites();

@@ -63,7 +63,7 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
 
     int rows = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && rows < MAX_ROWS) {
-        /* V52,T173: skip rows containing encrypted secret values */
+        /* skip rows containing encrypted secret values */
         int has_secret = 0;
         for (int i = 0; i < col_count; i++) {
             if (sqlite3_column_type(stmt, i) == SQLITE_TEXT) {

@@ -14,7 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* V5: 1MB heap cap, 10M instruction limit */
+/* 1MB heap cap, 10M instruction limit */
 #define JS_HEAP_SIZE (1024 * 1024)
 #define JS_MAX_INSTRUCTIONS 10000000
 

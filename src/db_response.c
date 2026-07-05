@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* T296: SQL response ingress.
+/* SQL response ingress.
  * Tool call arguments validated with json() — invalid args stored verbatim. */
 
 int db_tool_call_complete_with_result(sqlite3 *db, int64_t entry_id,

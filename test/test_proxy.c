@@ -1,4 +1,4 @@
-/* test_proxy.c — unit test for credential proxy thread (V83, V86).
+/* test_proxy.c — unit test for credential proxy thread.
  * Tests UDS accept, RESOLVE, CONNECT preamble, allowed_hosts enforcement. */
 #define _POSIX_C_SOURCE 200809L
 #include "proxy.h"

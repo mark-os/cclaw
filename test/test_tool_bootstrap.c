@@ -31,7 +31,7 @@ static sqlite3 *setup_db(void) {
     return db;
 }
 
-/* T190: configure_provider applies config (providers row + encrypted kv) */
+/* configure_provider applies config (providers row + encrypted kv) */
 static int test_configure_openrouter(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -73,7 +73,7 @@ static int test_configure_openrouter(void) {
     return 0;
 }
 
-/* T190: configure_provider with custom provider requires base_url */
+/* configure_provider with custom provider requires base_url */
 static int test_configure_custom_requires_base_url(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -97,7 +97,7 @@ static int test_configure_custom_requires_base_url(void) {
     return 0;
 }
 
-/* T190: configure_provider with custom provider + base_url applies config */
+/* configure_provider with custom provider + base_url applies config */
 static int test_configure_custom_with_url(void) {
     sqlite3 *db = setup_db();
     db_seed_defaults(db);
@@ -141,7 +141,7 @@ static int test_configure_custom_with_url(void) {
     return 0;
 }
 
-/* T190: missing api_key returns error */
+/* missing api_key returns error */
 static int test_configure_missing_key(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -162,7 +162,7 @@ static int test_configure_missing_key(void) {
     return 0;
 }
 
-/* T191: configure_channel telegram returns sentinel */
+/* configure_channel telegram returns sentinel */
 static int test_configure_channel_telegram(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -181,7 +181,7 @@ static int test_configure_channel_telegram(void) {
     assert(strstr(result, "configure_channel") != NULL);
     free(result);
 
-    /* V76: Tool does NOT write token — value still empty default */
+    /* Tool does NOT write token — value still empty default */
 
     tools_free(&reg);
     db_close(db);
@@ -190,7 +190,7 @@ static int test_configure_channel_telegram(void) {
     return 0;
 }
 
-/* T191: configure_channel telegram requires bot_token */
+/* configure_channel telegram requires bot_token */
 static int test_configure_channel_telegram_no_token(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -212,7 +212,7 @@ static int test_configure_channel_telegram_no_token(void) {
     return 0;
 }
 
-/* T191: configure_channel cli returns sentinel */
+/* configure_channel cli returns sentinel */
 static int test_configure_channel_cli(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -234,7 +234,7 @@ static int test_configure_channel_cli(void) {
     return 0;
 }
 
-/* T191: configure_channel unknown type returns error */
+/* configure_channel unknown type returns error */
 static int test_configure_channel_unknown(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -263,7 +263,7 @@ static int test_configure_channel_unknown(void) {
     return 0;
 }
 
-/* T192/T201: create_agent returns sentinel (daemon handles after reap) */
+/* create_agent returns sentinel (daemon handles after reap) */
 static int test_create_agent_basic(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -292,7 +292,7 @@ static int test_create_agent_basic(void) {
     return 0;
 }
 
-/* T192: create_agent rejects non-PascalCase names */
+/* create_agent rejects non-PascalCase names */
 static int test_create_agent_invalid_name(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -326,7 +326,7 @@ static int test_create_agent_invalid_name(void) {
     return 0;
 }
 
-/* T192: create_agent requires name field */
+/* create_agent requires name field */
 static int test_create_agent_missing_name(void) {
     sqlite3 *db = setup_db();
     ToolRegistry reg;
@@ -349,7 +349,7 @@ static int test_create_agent_missing_name(void) {
 }
 
 int main(void) {
-    printf("test_tool_bootstrap (T190, T191, T192, T205):\n");
+    printf("test_tool_bootstrap:\n");
     int rc = 0;
     rc |= test_configure_openrouter();
     rc |= test_configure_custom_requires_base_url();

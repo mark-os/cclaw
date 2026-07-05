@@ -17,7 +17,7 @@ static sqlite3 *hb_db;
     "Read HEARTBEAT.md if present. Follow it. " \
     "If nothing needs attention, reply HEARTBEAT_OK."
 
-/* V42/V25: Insert heartbeat prompt into inbox for idle sessions, signal daemon */
+/* Insert heartbeat prompt into inbox for idle sessions, signal daemon */
 static void inject_heartbeat(void) {
     int interval = hb_cfg->heartbeat_interval;
     char sql[256];

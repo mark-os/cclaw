@@ -1,4 +1,4 @@
-/* T244/T245: Test channel launcher tracking + channel_events consumer.
+/* Test channel launcher tracking + channel_events consumer.
  * Verifies: channel_consume_events() itself — binding resolution (incl.
  * wildcard fallback), session find-or-create, approval-decision routing
  * vs. plain inbox delivery, and unconditional event-row deletion. */
@@ -108,7 +108,7 @@ static void setup(void) {
     resolve_spy_reset();
 }
 
-/* T297: consumer helpers (session_create etc.) resolve paths relative to CWD */
+/* consumer helpers (session_create etc.) resolve paths relative to CWD */
 static char s_old_cwd[512];
 static void chdir_work(void) {
     getcwd(s_old_cwd, sizeof(s_old_cwd));
@@ -118,7 +118,7 @@ static void chdir_restore(void) {
     chdir(s_old_cwd);
 }
 
-/* T245: direct call into channel_consume_events() — binding resolves,
+/* direct call into channel_consume_events() — binding resolves,
  * session is created + stamped, event routes to inbox, event row is deleted. */
 static void test_channel_events_routing(void) {
     setup();
@@ -321,7 +321,7 @@ static void test_channel_events_approval_routing(void) {
     printf("PASS\n");
 }
 
-/* T245: Verify default binding fallback */
+/* Verify default binding fallback */
 static void test_channel_events_default_binding(void) {
     setup();
 
@@ -346,7 +346,7 @@ static void test_channel_events_default_binding(void) {
     printf("PASS\n");
 }
 
-/* T244: Verify channels table schema works */
+/* Verify channels table schema works */
 static void test_channels_table(void) {
     setup();
 
@@ -393,7 +393,7 @@ static void test_channels_table(void) {
 int main(void) {
     alarm(10);
 
-    printf("test_channel_events (T244/T245):\n");
+    printf("test_channel_events:\n");
 
     printf("  channel_events_routing... ");
     test_channel_events_routing();

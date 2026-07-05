@@ -1,4 +1,4 @@
-/* T145: admin command tests (migrated to admin_api)
+/* admin command tests (migrated to admin_api)
  * admin_set_key stores encrypted in kv, never plaintext
  * Config reload picks up changes */
 #define _POSIX_C_SOURCE 200809L

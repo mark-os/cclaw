@@ -104,7 +104,7 @@ int workspace_init(const Config *cfg) {
     return mkdir_p(cfg->workspace);
 }
 
-/* T46: render system prompt with template vars and workspace context */
+/* render system prompt with template vars and workspace context */
 char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
     const char *tmpl = cfg->system_prompt ? cfg->system_prompt : DEFAULT_SYSTEM_PROMPT;
 
@@ -145,7 +145,7 @@ void config_free(Config *cfg) {
     free(cfg);
 }
 
-/* V74,T198: Build Config purely from CCLAW_* env vars.
+/* Build Config purely from CCLAW_* env vars.
  * Agent process path — daemon injects all config at fork. */
 Config *config_load_from_env(void) {
     Config *cfg = calloc(1, sizeof(Config));
@@ -176,14 +176,14 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_CONTEXT_WINDOW");
     cfg->provider.context_window = v ? atoi(v) : 65536;
 
-    /* T290: endpoint type */
+    /* endpoint type */
     v = getenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
     if (v && strcmp(v, "gemini") == 0)
         cfg->provider.endpoint_type = ENDPOINT_GEMINI;
     else
         cfg->provider.endpoint_type = ENDPOINT_OPENAI;
 
-    /* T223: Workspace — default under ~/.cclaw/agents/default/ for zero-config CLI */
+    /* Workspace — default under ~/.cclaw/agents/default/ for zero-config CLI */
     v = getenv("CCLAW_WORKSPACE");
     cfg->workspace = v ? str_dup(v) : default_workspace();
 
@@ -231,7 +231,7 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_RECALL_MAX_TOKENS");
     cfg->recall_max_tokens = v ? atoi(v) : 500;
 
-    /* T292: cache_hints */
+    /* cache_hints */
     v = getenv("CCLAW_CACHE_HINTS");
     if (v) {
         if (strcmp(v, "on") == 0) cfg->provider.cache_hints = CACHE_HINTS_ON;
@@ -348,7 +348,7 @@ Config *config_load(sqlite3 *db) {
     KV_INT("token_rate_limit", 1000000);
     cfg->token_rate_limit = int_val;
 
-    /* V91: compaction configs */
+    /* compaction configs */
     {
         char *v = db_kv_get(db, "context_threshold");
         cfg->context_threshold = v ? (float)atof(v) : 0.6f;
@@ -364,7 +364,7 @@ Config *config_load(sqlite3 *db) {
     #undef KV_STR
     #undef KV_INT
 
-    /* Env var overrides (highest priority per V61) */
+    /* Env var overrides (highest priority) */
     env_override_str(&cfg->provider.api_key, "OPENROUTER_API_KEY");
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER_BASE_URL");
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER");
@@ -383,14 +383,14 @@ Config *config_load(sqlite3 *db) {
     env_override_int(&cfg->save_logprobs, "CCLAW_SAVE_LOGPROBS");
     env_override_int(&cfg->token_rate_limit, "CCLAW_TOKEN_RATE_LIMIT");
 
-    /* T290: endpoint_type env override */
+    /* endpoint_type env override */
     {
         const char *v = getenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
         if (v && strcmp(v, "gemini") == 0)
             cfg->provider.endpoint_type = ENDPOINT_GEMINI;
     }
 
-    /* V91: compaction env overrides */
+    /* compaction env overrides */
     {
         const char *v = getenv("CCLAW_CONTEXT_THRESHOLD");
         if (v) cfg->context_threshold = (float)atof(v);
@@ -400,7 +400,7 @@ Config *config_load(sqlite3 *db) {
         if (v) cfg->compaction = atoi(v);
     }
 
-    /* T269: auto-recall defaults + env overrides */
+    /* auto-recall defaults + env overrides */
     if (cfg->recall_max_tokens == 0) cfg->recall_max_tokens = 500;
     env_override_int(&cfg->auto_recall, "CCLAW_AUTO_RECALL");
     env_override_int(&cfg->recall_max_tokens, "CCLAW_RECALL_MAX_TOKENS");

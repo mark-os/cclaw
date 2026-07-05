@@ -1,4 +1,4 @@
-/* Test: templates.h generated correctly (T138) */
+/* Test: templates.h generated correctly */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -7,7 +7,7 @@
 int main(void) {
     printf("test_templates:\n");
 
-    /* T297: unified schema template contains expected tables */
+    /* unified schema template contains expected tables */
     assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS agents"));
     assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS config"));
     assert(strstr(TPL_SCHEMA_SQL, "CREATE TABLE IF NOT EXISTS sessions"));

@@ -13,7 +13,7 @@ typedef struct {
     void *ctx;   /* JSContext* */
 } JsSessionRuntime;
 
-/* V38/V116: Host context passed via env to forked QuickJS child. */
+/* Host context passed via env to forked QuickJS child. */
 typedef struct {
     int instruction_count;
     int instruction_limit;

@@ -7,7 +7,7 @@
 
 static const char *DB_PATH = "/tmp/test_cclaw_inbox_rollback.sqlite";
 
-/* V18: rollback on missing session (leaf_id lookup fails) */
+/* rollback on missing session (leaf_id lookup fails) */
 static void test_rollback_missing_session(void) {
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
@@ -45,7 +45,7 @@ static int progress_abort(void *data) {
     return 0;
 }
 
-/* V18: mid-transaction abort via progress handler → full rollback */
+/* mid-transaction abort via progress handler → full rollback */
 static void test_rollback_mid_consumption(void) {
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
@@ -109,7 +109,7 @@ static void test_rollback_mid_consumption(void) {
     printf("  PASS test_rollback_mid_consumption\n");
 }
 
-/* V18: successful consume then verify no double-consume on retry */
+/* successful consume then verify no double-consume on retry */
 static void test_no_double_consume_after_success(void) {
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);

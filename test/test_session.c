@@ -108,7 +108,7 @@ static void test_session_get_branch(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "branch", NULL, -1, 0);
 
-    /* Build chain: e1 → e2 → e3 (V14: parent_id linking) */
+    /* Build chain: e1 → e2 → e3 (parent_id linking) */
     int64_t e1 = insert_entry(db, sid, -1, ROLE_USER, "hello");
     int64_t e2 = insert_entry(db, sid, e1, ROLE_ASSISTANT, "hi");
     int64_t e3 = insert_entry(db, sid, e2, ROLE_USER, "bye");
@@ -150,7 +150,7 @@ static void test_session_get_branch_empty(void) {
     printf("  PASS test_session_get_branch_empty\n");
 }
 
-/* T7: entry_append — linear chain via current leaf */
+/* entry_append — linear chain via current leaf */
 static void test_entry_append(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "append", NULL, -1, 0);
@@ -184,7 +184,7 @@ static void test_entry_append(void) {
 }
 
 
-/* T7: entry_append on invalid session */
+/* entry_append on invalid session */
 static void test_entry_append_invalid_session(void) {
     sqlite3 *db = setup();
     Message m = { .role = ROLE_USER, .content = "nope" };
@@ -195,7 +195,7 @@ static void test_entry_append_invalid_session(void) {
     printf("  PASS test_entry_append_invalid_session\n");
 }
 
-/* T16: round-trip tool_calls and tool_result through DB */
+/* round-trip tool_calls and tool_result through DB */
 static void test_entry_tool_calls_roundtrip(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "tools", NULL, -1, 0);
@@ -249,7 +249,7 @@ static void test_entry_tool_calls_roundtrip(void) {
     printf("  PASS test_entry_tool_calls_roundtrip\n");
 }
 
-/* T159/V59: original_parent_id — NULL in DB maps to -1, set on reparent */
+/* original_parent_id — NULL in DB maps to -1, set on reparent */
 static void test_original_parent_id(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "reparent", NULL, -1, 0);
@@ -284,7 +284,7 @@ static void test_original_parent_id(void) {
     printf("  PASS test_original_parent_id\n");
 }
 
-/* T272: session picker query — verify first/last prompt retrieval */
+/* session picker query — verify first/last prompt retrieval */
 static void test_session_picker_query(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "picker", NULL, -1, 0);

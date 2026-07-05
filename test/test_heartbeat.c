@@ -41,7 +41,7 @@ static void test_heartbeat_injects_inbox(void) {
     sleep(2);
     heartbeat_stop();
 
-    /* V42: Check that heartbeat prompt was inserted into inbox */
+    /* Check that heartbeat prompt was inserted into inbox */
     int count = 0;
     InboxItem *items = inbox_peek(db, sid, 10, &count);
     assert(count >= 1);

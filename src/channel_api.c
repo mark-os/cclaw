@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* ── T243/V99: Channel API library ──────────────────────────────── */
+/* ── Channel API library ─────────────────────────────────────────── */
 
 ChannelCtx *channel_ctx_open(const char *db_path, const char *channel_name) {
     if (!db_path || !channel_name) return NULL;
@@ -33,7 +33,7 @@ void channel_ctx_free(ChannelCtx *ctx) {
     free(ctx);
 }
 
-/* V100/V105: Insert event + wake daemon */
+/* Insert event + wake daemon */
 int channel_emit(ChannelCtx *ctx, const char *event_type, const char *payload,
                  const char *external_id) {
     if (!ctx || !event_type || !payload) return -1;
@@ -57,7 +57,7 @@ int channel_emit(ChannelCtx *ctx, const char *event_type, const char *payload,
     return 0;
 }
 
-/* V102: Read channel_state */
+/* Read channel_state */
 char *channel_get_config(ChannelCtx *ctx, const char *key) {
     if (!ctx || !key) return NULL;
     const char *sql =
@@ -76,7 +76,7 @@ char *channel_get_config(ChannelCtx *ctx, const char *key) {
     return result;
 }
 
-/* V102: Write channel_state */
+/* Write channel_state */
 int channel_set_config(ChannelCtx *ctx, const char *key, const char *value) {
     if (!ctx || !key || !value) return -1;
     const char *sql =
@@ -93,7 +93,7 @@ int channel_set_config(ChannelCtx *ctx, const char *key, const char *value) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* V101: Get oldest pending outbox row */
+/* Get oldest pending outbox row */
 ChannelOutboxRow *channel_next_outbox(ChannelCtx *ctx) {
     if (!ctx) return NULL;
     const char *sql =
@@ -158,7 +158,7 @@ int channel_reset_outbox(ChannelCtx *ctx) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* V101: Mark delivered */
+/* Mark delivered */
 int channel_ack_outbox(ChannelCtx *ctx, int64_t id) {
     if (!ctx) return -1;
     const char *sql =
@@ -174,7 +174,7 @@ int channel_ack_outbox(ChannelCtx *ctx, int64_t id) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* V101: Mark failed */
+/* Mark failed */
 int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error) {
     if (!ctx) return -1;
     const char *sql =

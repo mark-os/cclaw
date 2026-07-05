@@ -24,7 +24,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* The shell egress proxy is per-call: each shell_exec stands up its own
      * proxy in the --run-tool broker child. The daemon holds no proxy socket. */
 
-    /* V88: Collect secrets from env, clear from process env */
+    /* Collect secrets from env, clear from process env */
     setup->secrets = shell_secrets_collect(&setup->secret_count);
 
     /* Sandbox profile: env override (-y sets CCLAW_SANDBOX_PROFILE=host), else agents table */
@@ -66,7 +66,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         sc->allowed_host_count = setup->caps.host_count;
         sc->secrets = setup->secrets;
         sc->secret_count = setup->secret_count;
-        sc->cwd_path = getenv("CCLAW_PATH");  /* T276/V22a: CWD rw in CLI mode */
+        sc->cwd_path = getenv("CCLAW_PATH");  /* CWD rw in CLI mode */
         sc->db_path = cfg->db_path;           /* mask .cclaw_key + db ciphertext from shell children */
         sc->sb = profile;
     }
@@ -125,7 +125,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     extension_ctx_init(&setup->ext_ctx, setup->js_rt);
     extension_load_hooks(&setup->ext_ctx, db, agent_name);
 
-    /* T274/V120: request_config — CLI inline tool/host/rename */
+    /* request_config — CLI inline tool/host/rename */
     setup->req_cfg_ctx.db = db;
     setup->req_cfg_ctx.agent_name = agent_name;
     setup->req_cfg_ctx.session_id = session_id;

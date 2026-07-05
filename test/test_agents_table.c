@@ -21,7 +21,7 @@ static void teardown(sqlite3 *db) {
     unlink(TEST_DB);
 }
 
-/* T119: agents table exists and basic CRUD works */
+/* agents table exists and basic CRUD works */
 static void test_upsert_and_get(void) {
     sqlite3 *db = setup();
 
@@ -52,7 +52,7 @@ static void test_upsert_and_get(void) {
     printf("  PASS test_upsert_and_get\n");
 }
 
-/* T119: get returns NULL for nonexistent agent */
+/* get returns NULL for nonexistent agent */
 static void test_get_missing(void) {
     sqlite3 *db = setup();
     AgentRow *row = db_agent_get(db, "nonexistent");
@@ -61,7 +61,7 @@ static void test_get_missing(void) {
     printf("  PASS test_get_missing\n");
 }
 
-/* T119: seed from disk on first reference, DB authoritative after */
+/* seed from disk on first reference, DB authoritative after */
 static void test_seed_from_disk(void) {
     /* Create agent dir with files */
     mkdir(AGENTS_DIR, 0755);
@@ -103,7 +103,7 @@ static void test_seed_from_disk(void) {
     printf("  PASS test_seed_from_disk\n");
 }
 
-/* T119: seed with no agents_dir still creates row */
+/* seed with no agents_dir still creates row */
 static void test_seed_no_dir(void) {
     sqlite3 *db = setup();
     AgentRow *row = db_agent_seed(db, "/nonexistent/path", "Ghost");

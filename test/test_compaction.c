@@ -17,7 +17,7 @@ static void teardown(sqlite3 *db) {
     unlink(TEST_DB);
 }
 
-/* V58: CTE from leaf stops at compaction node */
+/* CTE from leaf stops at compaction node */
 static void test_compaction_cte_stops(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "compact_test", NULL, -1, 0);
@@ -56,7 +56,7 @@ static void test_compaction_cte_stops(void) {
     printf("  PASS test_compaction_cte_stops\n");
 }
 
-/* V59: original_parent_id populated on reparent */
+/* original_parent_id populated on reparent */
 static void test_compaction_original_parent(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "compact_orig", NULL, -1, 0);
@@ -88,7 +88,7 @@ static void test_compaction_original_parent(void) {
     printf("  PASS test_compaction_original_parent\n");
 }
 
-/* V58: old entries reachable via forward walk from branch point */
+/* old entries reachable via forward walk from branch point */
 static void test_compaction_forward_walk(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "compact_fwd", NULL, -1, 0);
@@ -137,7 +137,7 @@ static void test_compaction_forward_walk(void) {
     printf("  PASS test_compaction_forward_walk\n");
 }
 
-/* V58: old entries still reachable via FTS5 */
+/* old entries still reachable via FTS5 */
 static void test_compaction_fts_indexes_old(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "compact_fts", NULL, -1, 0);

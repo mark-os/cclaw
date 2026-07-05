@@ -1,4 +1,4 @@
-/* test_preload_net.c — unit test for libcclaw_net.so (V82, V83).
+/* test_preload_net.c — unit test for libcclaw_net.so.
  * Creates a mock UDS proxy, sets CCLAW_PROXY_SOCK, loads the .so via
  * dlopen, and verifies connect() interception + getaddrinfo() forwarding. */
 #define _GNU_SOURCE

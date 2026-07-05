@@ -5,7 +5,7 @@
 #include "types.h"
 #include "sqlite3.h"
 
-/* T295: SQL-based request builder.
+/* SQL-based request builder.
  * Uses json_object()/json_group_array() to produce complete LLM request
  * body directly from the entries table — no C-level JSON escaping. */
 

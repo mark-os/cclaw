@@ -24,7 +24,7 @@ typedef struct {
 int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx);
 
 /* Handler: parse JSON args {"url":"..."}, HTTP GET, strip HTML, wrap in
- * external input protection boundary markers (V15). Runs INSIDE the sandbox
+ * external input protection boundary markers. Runs INSIDE the sandbox
  * broker child; egress is enforced by the proxy, so user_data is unused. */
 char *tool_web_fetch_handler(const char *arguments, void *user_data);
 

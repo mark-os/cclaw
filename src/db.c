@@ -276,7 +276,7 @@ int db_schema_compat(sqlite3 *db) {
     return (uv == 0 && !has_tables);                /* fresh DB: schema stamps it */
 }
 
-/* V57: mmap + reduced cache + relaxed sync for child processes (short-lived). */
+/* mmap + reduced cache + relaxed sync for child processes (short-lived). */
 void db_set_child_pragmas(sqlite3 *db) {
     sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA mmap_size=67108864;", NULL, NULL, NULL);
@@ -572,7 +572,7 @@ static void read_entry_from_columns(sqlite3 *db, sqlite3_stmt *stmt, int col_rol
         }
     }
 }
-/* V14: walk parent_id chain from leaf→root, return in root→leaf order */
+/* walk parent_id chain from leaf→root, return in root→leaf order */
 Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
     *count = 0;
 
@@ -592,7 +592,7 @@ Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count) {
     if (leaf_id < 0) return NULL; /* no entries yet */
 
     /* Walk chain using recursive CTE — read split columns.
-     * V58: use level counter for ordering (not ORDER BY id) since compaction
+     * Use level counter for ordering (not ORDER BY id) since compaction
      * entries may have higher ids than entries they precede in the path.
      * Depth capped at 10000 to prevent infinite loops from data corruption. */
     const char *branch_sql =
@@ -661,7 +661,7 @@ void entry_branch_free(Entry *entries, int count) {
     free(entries);
 }
 
-/* T263: Get latest assistant response text from session branch.
+/* Get latest assistant response text from session branch.
  * Walks parent chain from leaf; returns first non-empty assistant content,
  * stops at user boundary. No full-branch materialization.
  * Returns heap-allocated string or NULL if no deliverable content. */
@@ -727,7 +727,7 @@ static const char *type_from_role(const Message *msg) {
     return "user_message";
 }
 
-/* V58,V59: Insert compaction summary entry and reparent.
+/* Insert compaction summary entry and reparent.
  * - Inserts role=COMPACTION entry with parent_id = last_kept_id
  * - Reparents first_after_id to point to the new summary node
  * - Sets original_parent_id on reparented entry
@@ -757,7 +757,7 @@ int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
 
     int64_t compact_id = sqlite3_last_insert_rowid(db);
 
-    /* Reparent first_after_id → compact_id, save original_parent_id (V59) */
+    /* Reparent first_after_id → compact_id, save original_parent_id */
     const char *reparent_sql =
         "UPDATE entries SET original_parent_id = parent_id, parent_id = ?"
         " WHERE id = ? AND session_id = ?;";
@@ -775,7 +775,7 @@ int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
 }
 
 
-/* V7: FTS5 search over message content */
+/* FTS5 search over message content */
 Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *count) {
     *count = 0;
     const char *sql =
@@ -821,7 +821,7 @@ Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *cou
     return entries;
 }
 
-/* T268: Sum cost_nano for all entries in a session */
+/* Sum cost_nano for all entries in a session */
 int64_t session_cost(sqlite3 *db, int64_t session_id) {
     return db_scalar_i64(db, "SELECT COALESCE(SUM(cost_nano),0) FROM entries WHERE session_id=?;", session_id, 0);
 }
@@ -854,7 +854,7 @@ int db_kv_set(sqlite3 *db, const char *key, const char *value) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* V52,T171: Secret key for kv encryption. Set via db_set_secret_key(). */
+/* Secret key for config encryption. Set via db_set_secret_key(). */
 static uint8_t s_secret_key[32];
 static int s_secret_key_loaded = 0;
 
@@ -876,7 +876,7 @@ int db_secret_key_loaded(void) {
     return s_secret_key_loaded;
 }
 
-/* V52,T171: Secret-aware kv access with ChaCha20-Poly1305 AEAD. */
+/* Secret-aware config access with ChaCha20-Poly1305 AEAD. */
 char *db_kv_get_secret(sqlite3 *db, const char *key) {
     char *raw = db_kv_get(db, key);
     if (!raw) return NULL;
@@ -896,7 +896,7 @@ int db_kv_set_secret(sqlite3 *db, const char *key, const char *value) {
     return rc;
 }
 
-/* T193/V69: Channel→agent binding */
+/* Channel→agent binding */
 
 char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *channel_id) {
     const char *sql = "SELECT agent_name FROM channel_routes WHERE channel_name=? AND channel_id=?;";
@@ -914,7 +914,7 @@ char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *
 }
 
 
-/* V3: sub-agent limits — count active child sessions */
+/* sub-agent limits — count active child sessions */
 
 int session_count_children(sqlite3 *db, int64_t parent_session_id) {
     return (int)db_scalar_i64(db,
@@ -935,7 +935,7 @@ int session_count_active_agents(sqlite3 *db) {
     return count;
 }
 
-/* V17: next turn_id for a session */
+/* next turn_id for a session */
 int64_t db_next_turn_id(sqlite3 *db, int64_t session_id) {
     return db_scalar_i64(db, "SELECT COALESCE(MAX(turn_id), 0) + 1 FROM entries WHERE session_id=?;", session_id, 1);
 }
@@ -953,7 +953,7 @@ int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id) {
     return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
 }
 
-/* V17: append entry with explicit turn_id */
+/* append entry with explicit turn_id */
 int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *msg, int64_t turn_id) {
     /* parent_id and turn_id computed as subqueries — atomic with the INSERT
      * via the entries_leaf_ai trigger (no separate SELECT + set_leaf). */
@@ -1217,7 +1217,7 @@ int db_entry_set_network_hosts(sqlite3 *db, int64_t entry_id, const char *hosts_
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* V18: Inbox primitives */
+/* Inbox primitives */
 
 int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const char *payload) {
     sqlite3_stmt *stmt;
@@ -1296,7 +1296,7 @@ int inbox_count(sqlite3 *db, int64_t session_id) {
     return (int)db_scalar_i64(db, "SELECT COUNT(*) FROM inbox WHERE session_id=? AND consumed=0", session_id, -1);
 }
 
-/* V18: Atomically consume inbox items into session entries */
+/* Atomically consume inbox items into session entries */
 int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit) {
     /* Peek unconsumed items */
     sqlite3_stmt *sel;
@@ -1405,7 +1405,7 @@ int inbox_consume_into_entries(sqlite3 *db, int64_t session_id, int limit) {
     return rc;
 }
 
-/* T119: agents table operations */
+/* agents table operations */
 
 AgentRow *db_agent_get(sqlite3 *db, const char *name) {
     if (!db || !name) return NULL;
@@ -1431,7 +1431,7 @@ AgentRow *db_agent_get(sqlite3 *db, const char *name) {
     return row;
 }
 
-/* T271: List all agent names from agents table */
+/* List all agent names from agents table */
 char **db_agent_list(sqlite3 *db, int *count) {
     *count = 0;
     if (!db) return NULL;
@@ -1759,7 +1759,7 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
     /* Check DB first — authoritative after seed */
     AgentRow *existing = db_agent_get(db, name);
     if (existing) {
-        /* T152: seed memory blocks even if agent row exists (blocks may be new) */
+        /* seed memory blocks even if agent row exists (blocks may be new) */
         return existing;
     }
 
@@ -1793,7 +1793,7 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
 
     db_agent_upsert(db, name, description, sys_prompt);
 
-    /* T152: seed memory blocks from agent.json */
+    /* seed memory blocks from agent.json */
     if (config_json)
         memory_blocks_seed(db, name, config_json);
 
@@ -1962,7 +1962,7 @@ void db_tool_call_free_pending(PendingToolCall *list, int count) {
     }
     free(list);
 }
-/* T152: memory_blocks CRUD (V55) */
+/* memory_blocks CRUD */
 
 void memory_block_free(MemoryBlock *mb) {
     if (!mb) return;

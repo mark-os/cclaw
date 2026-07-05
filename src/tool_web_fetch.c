@@ -331,7 +331,7 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
 
     if (!text) return strdup("error: out of memory");
 
-    /* V15: sanitize and wrap with randomized boundaries */
+    /* sanitize and wrap with randomized boundaries */
     /* Truncation with metadata */
     size_t total_len = strlen(text);
     size_t off = ((size_t)offset < total_len) ? (size_t)offset : total_len;

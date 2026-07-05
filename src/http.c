@@ -38,7 +38,7 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     return b->oom ? 0 : bytes;
 }
 
-/* V2: capture Retry-After and Content-Type headers */
+/* capture Retry-After and Content-Type headers */
 static size_t header_cb(char *buf, size_t size, size_t nmemb, void *userdata) {
     size_t bytes = size * nmemb;
     HttpResponse *resp = userdata;

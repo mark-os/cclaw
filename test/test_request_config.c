@@ -1,4 +1,4 @@
-/* T274: Unit test for request_config tool + agent_config_grant */
+/* Unit test for request_config tool + agent_config_grant */
 #include "db.h"
 #include "test_util.h"
 #include "tools.h"
@@ -231,7 +231,7 @@ static void test_denied_dedup(void) {
 }
 
 int main(void) {
-    printf("test_request_config (T274):\n");
+    printf("test_request_config:\n");
     test_register();
     test_handler_returns_error();
     test_missing_tool_field();

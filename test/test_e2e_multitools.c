@@ -1,4 +1,4 @@
-/* T285: e2e multi-tool chain — file_write → shell_exec (python3) → verify output
+/* e2e multi-tool chain — file_write → shell_exec (python3) → verify output
  * Verifies: tool dispatch chain works, file_write creates file, shell_exec runs it,
  * no ASAN/UBSan errors, exit 0. Requires OPENROUTER_API_KEY. */
 #define _POSIX_C_SOURCE 200809L
@@ -76,7 +76,7 @@ static void test_multi_tool_chain(void) {
 }
 
 int main(void) {
-    printf("--- test_e2e_multitools (T285) ---\n");
+    printf("--- test_e2e_multitools ---\n");
     test_multi_tool_chain();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

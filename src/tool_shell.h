@@ -7,7 +7,7 @@
 
 #define TOOL_SHELL_DEFAULT_TIMEOUT 30
 
-/* V88: Secret name/value pair for shell injection + output masking */
+/* Secret name/value pair for shell injection + output masking */
 typedef struct {
     char *name;   /* e.g. "GITHUB_TOKEN" (without CCLAW_SECRET_ prefix) */
     char *value;  /* plaintext secret value */
@@ -17,11 +17,11 @@ typedef struct {
 typedef struct {
     int timeout;
     const char *workspace;  /* agent workspace (namespace sandbox restricts access) */
-    const char *cwd_path;   /* V22a/T276: CWD rw bind-mount in CLI mode (NULL in daemon) */
+    const char *cwd_path;   /* CWD rw bind-mount in CLI mode (NULL in daemon) */
     const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key — bind-masked inside the ns */
     char **allowed_hosts;   /* borrowed egress allowlist for the per-call proxy */
     size_t allowed_host_count;
-    ShellSecret *secrets;   /* V88: array of secrets to inject + mask */
+    ShellSecret *secrets;   /* array of secrets to inject + mask */
     size_t secret_count;
     SandboxProfile sb;      /* trust-derived policy + grant paths */
 } ShellConfig;
@@ -31,7 +31,7 @@ typedef struct {
  * Execution is via --run-tool broker (EXEC_SANDBOX); no in-process handler. */
 int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *workspace);
 
-/* V88: Collect CCLAW_SECRET_* env vars into array, clear from env.
+/* Collect CCLAW_SECRET_* env vars into array, clear from env.
  * Caller owns returned array (free with shell_secrets_free). */
 ShellSecret *shell_secrets_collect(size_t *count);
 

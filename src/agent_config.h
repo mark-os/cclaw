@@ -6,12 +6,12 @@
 #include <sqlite3.h>
 #include "types.h"
 
-/* V124: system defaults — single source of truth for agent creation,
+/* system defaults — single source of truth for agent creation,
  * CLI zero-config, and absent-key resolution in daemon fork */
 #define AGENT_DEFAULT_MAX_ITERATIONS 25
 #define AGENT_DEFAULT_SHELL_TIMEOUT  30
 
-/* V119: default tool whitelist */
+/* default tool whitelist */
 #define AGENT_DEFAULT_TOOLS \
     "file_read", "file_write", "js_eval", \
     "memory_create", "memory_append", "memory_replace", \
@@ -25,9 +25,9 @@ typedef struct {
     char *model;            /* model override (NULL = use global) */
     char **tools;           /* tool whitelist (NULL = all tools) */
     size_t tool_count;
-    char **allowed_hosts;   /* V38: hostnames for http_fetch */
+    char **allowed_hosts;   /* hostnames for http_fetch */
     size_t allowed_hosts_count;
-    char **read_access;     /* V66: extra dirs granted read-only in namespace sandbox */
+    char **read_access;     /* extra dirs granted read-only in namespace sandbox */
     size_t read_access_count;
     int max_iterations;     /* 0 = use global */
 } AgentConfig;
@@ -97,12 +97,12 @@ int agent_config_set_tool_mode(sqlite3 *db, const char *agent,
 /* Returns malloc'd JSON array string (e.g. '["a","b"]'). Caller frees. */
 char *grants_json(sqlite3 *db, const char *agent, const char *kind);
 
-/* T80: Load all skills from agents/<name>/skills/ (.md files), concatenate content.
+/* Load all skills from agents/<name>/skills/ (.md files), concatenate content.
  * Returns heap-allocated string (newline-separated skill contents).
  * Returns NULL if no skills dir or no .md files found. */
 char *agent_load_skills(const char *agents_dir, const char *name);
 
-/* T122: Assemble system prompt from DB agent row (template + soul + memory + skills).
+/* Assemble system prompt from DB agent row (template + soul + memory + skills).
  * Returns heap-allocated string. Caller must free. */
 char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
                                 int64_t session_id, const char *agents_dir,

@@ -157,7 +157,7 @@ static char *asst_content(int64_t sid) {
     return r;
 }
 
-/* T52: live call with simple prompt, verify content response */
+/* live call with simple prompt, verify content response */
 static void test_live_content_response(void) {
     TEST(live_content_response);
     const char *key = get_api_key();
@@ -183,7 +183,7 @@ static void test_live_content_response(void) {
     PASS();
 }
 
-/* T52: live call with tool, verify tool_calls round-trip */
+/* live call with tool, verify tool_calls round-trip */
 static void test_live_tool_call_roundtrip(void) {
     TEST(live_tool_call_roundtrip);
     const char *key = get_api_key();

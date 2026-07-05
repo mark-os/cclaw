@@ -2,7 +2,7 @@
 #include "test_run_tool_shell.h"
 #include <sys/stat.h>
 
-/* T209: Verify namespace sandbox restricts filesystem writes outside workspace.
+/* Verify namespace sandbox restricts filesystem writes outside workspace.
  * Drives shell_exec via the --run-tool re-exec path (production behavior). */
 
 static char workspace[256];
@@ -118,7 +118,7 @@ static void test_agent_db_inaccessible(void) {
     printf("  PASS test_agent_db_inaccessible\n");
 }
 
-/* T217: Verify /etc/shadow inaccessible from shell child */
+/* Verify /etc/shadow inaccessible from shell child */
 static void test_etc_shadow_inaccessible(void) {
     if (!ns_available) { printf("  SKIP test_etc_shadow_inaccessible\n"); return; }
     ShellToolReq r = SHELL_REQ_DEFAULTS;
@@ -132,7 +132,7 @@ static void test_etc_shadow_inaccessible(void) {
     printf("  PASS test_etc_shadow_inaccessible\n");
 }
 
-/* T217: Verify agent.db path inaccessible from shell child */
+/* Verify agent.db path inaccessible from shell child */
 static void test_agent_db_path_blocked(void) {
     if (!ns_available) { printf("  SKIP test_agent_db_path_blocked\n"); return; }
     ShellToolReq r = SHELL_REQ_DEFAULTS;
@@ -145,7 +145,7 @@ static void test_agent_db_path_blocked(void) {
     printf("  PASS test_agent_db_path_blocked\n");
 }
 
-/* T217: Verify cclaw.db path inaccessible from shell child */
+/* Verify cclaw.db path inaccessible from shell child */
 static void test_daemon_db_path_blocked(void) {
     if (!ns_available) { printf("  SKIP test_daemon_db_path_blocked\n"); return; }
     ShellToolReq r = SHELL_REQ_DEFAULTS;
@@ -158,7 +158,7 @@ static void test_daemon_db_path_blocked(void) {
     printf("  PASS test_daemon_db_path_blocked\n");
 }
 
-/* T276/V22a: CWD rw bind-mount in CLI mode — cwd_path accessible rw alongside workspace */
+/* CWD rw bind-mount in CLI mode — cwd_path accessible rw alongside workspace */
 static void test_cwd_path_rw(void) {
     if (!ns_available) { printf("  SKIP test_cwd_path_rw\n"); return; }
 
@@ -206,7 +206,7 @@ static void test_cwd_path_rw(void) {
     printf("  PASS test_cwd_path_rw\n");
 }
 
-/* T276: Without cwd_path (daemon mode), CWD dir is NOT accessible */
+/* Without cwd_path (daemon mode), CWD dir is NOT accessible */
 static void test_no_cwd_path_blocked(void) {
     if (!ns_available) { printf("  SKIP test_no_cwd_path_blocked\n"); return; }
 
@@ -257,7 +257,7 @@ static void test_key_masked_in_mounted_cwd(void) {
     printf("  SKIP test_key_masked_in_mounted_cwd (broker sets db_path=NULL; mask unavailable)\n");
 }
 
-/* T301: sandbox=0 (host mode) — namespace NOT applied, child runs unsandboxed */
+/* sandbox=0 (host mode) — namespace NOT applied, child runs unsandboxed */
 static void test_sandbox_none_skips_namespace(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.workspace = workspace;
@@ -283,7 +283,7 @@ static void test_sandbox_none_skips_namespace(void) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    printf("test_shell_namespace (T209/T217/T276):\n");
+    printf("test_shell_namespace:\n");
     setup_workspace();
     test_namespace_active();
     test_write_inside_workspace();

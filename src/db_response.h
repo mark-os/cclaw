@@ -5,7 +5,7 @@
 #include "sqlite3.h"
 #include <stdint.h>
 
-/* T296: SQL response ingress — write LLM response into entries + tool_calls tables.
+/* SQL response ingress — write LLM response into entries + tool_calls tables.
  * Tool call arguments validated with json() before storage. */
 
 /* Ingested response result */

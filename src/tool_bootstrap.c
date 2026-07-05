@@ -7,7 +7,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* T190: Known provider defaults */
+/* Known provider defaults */
 static const struct {
     const char *name;
     const char *base_url;
@@ -129,7 +129,7 @@ int tool_configure_provider_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
     return rc;
 }
 
-/* ── T251: configure_channel ─────────────────────────────────────── */
+/* ── configure_channel ────────────────────────────────────────────── */
 
 static const char *CONFIGURE_CHANNEL_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
@@ -174,7 +174,7 @@ static char *tool_configure_channel_handler(const char *arguments, void *user_da
 
     tool_parse_free(&ta);
 
-    /* V76/V79: Don't write cclaw.db — return sentinel, daemon applies on reap */
+    /* Don't write cclaw.db — return sentinel, daemon applies on reap */
     return strdup("config applied: configure_channel");
 }
 
@@ -191,7 +191,7 @@ int tool_configure_channel_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
     return rc;
 }
 
-/* ── T192: create_agent ──────────────────────────────────────────── */
+/* ── create_agent ─────────────────────────────────────────────────── */
 
 static const char *CREATE_AGENT_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
@@ -227,7 +227,7 @@ static char *tool_create_agent_handler(const char *arguments, void *user_data) {
 
     tool_parse_free(&ta);
 
-    /* T201/V79: Return sentinel — daemon reads args from tool_call entry */
+    /* Return sentinel — daemon reads args from tool_call entry */
     return strdup("config applied: create_agent");
 }
 

@@ -4,7 +4,7 @@
 #include "sqlite3.h"
 #include <stdint.h>
 
-/* T243/V99: Channel API — limited interface for channel processes.
+/* Channel API — limited interface for channel processes.
  * Channel processes use this to communicate with daemon via cclaw.db. */
 
 typedef struct {
@@ -24,17 +24,17 @@ typedef struct {
 ChannelCtx *channel_ctx_open(const char *db_path, const char *channel_name);
 void channel_ctx_free(ChannelCtx *ctx);
 
-/* V100: Insert channel_events row + wake the daemon via the FIFO. */
+/* Insert channel_events row + wake the daemon via the FIFO. */
 int channel_emit(ChannelCtx *ctx, const char *event_type, const char *payload,
                  const char *external_id);
 
-/* V102: Read from channel_state kv. Caller frees returned string. */
+/* Read from channel_state kv. Caller frees returned string. */
 char *channel_get_config(ChannelCtx *ctx, const char *key);
 
-/* V102: Write to channel_state kv. */
+/* Write to channel_state kv. */
 int channel_set_config(ChannelCtx *ctx, const char *key, const char *value);
 
-/* V101: Get oldest pending outbox row for this channel. Caller frees via channel_outbox_row_free. */
+/* Get oldest pending outbox row for this channel. Caller frees via channel_outbox_row_free. */
 ChannelOutboxRow *channel_next_outbox(ChannelCtx *ctx);
 void channel_outbox_row_free(ChannelOutboxRow *row);
 
@@ -44,10 +44,10 @@ int channel_dispatch_outbox(ChannelCtx *ctx, int64_t id);
 /* Startup recovery: 'sending' rows (crashed mid-send) back to 'pending'. */
 int channel_reset_outbox(ChannelCtx *ctx);
 
-/* V101: Mark outbox row as delivered. */
+/* Mark outbox row as delivered. */
 int channel_ack_outbox(ChannelCtx *ctx, int64_t id);
 
-/* V101: Mark outbox row as failed. */
+/* Mark outbox row as failed. */
 int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error);
 
 /* Per-channel request UDS path (daemon proxies inbound HTTP here).

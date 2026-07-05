@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include "tool_file.h"
 
-/* V42/T111: HEARTBEAT.md is optional workspace file read by agent during heartbeat */
+/* HEARTBEAT.md is optional workspace file read by agent during heartbeat */
 
 static char tmpdir[256];
 static FileReadCtx file_ctx;
@@ -52,7 +52,7 @@ static void test_heartbeat_md_missing_graceful(void) {
 }
 
 static void test_heartbeat_md_not_auto_created(void) {
-    /* V42: HEARTBEAT.md is optional — workspace_init must NOT create it */
+    /* HEARTBEAT.md is optional — workspace_init must NOT create it */
     char path[512];
     snprintf(path, sizeof(path), "%s/HEARTBEAT.md", tmpdir);
     struct stat st;

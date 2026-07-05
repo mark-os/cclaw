@@ -129,7 +129,7 @@ static void test_register(void) {
     printf("  PASS test_register\n");
 }
 
-/* V47: Verify env vars set in test process don't reach the sandboxed child */
+/* Verify env vars set in test process don't reach the sandboxed child */
 static void test_env_hardened(void) {
     if (!run_tool_ns_available(workspace)) {
         printf("  SKIP test_env_hardened (namespaces unavailable)\n");
@@ -161,7 +161,7 @@ static void test_env_hardened(void) {
     printf("  PASS test_env_hardened\n");
 }
 
-/* V47: Verify cclaw binary is unreachable via PATH */
+/* Verify cclaw binary is unreachable via PATH */
 static void test_cclaw_unreachable(void) {
     if (!run_tool_ns_available(workspace)) {
         printf("  SKIP test_cclaw_unreachable (namespaces unavailable)\n");

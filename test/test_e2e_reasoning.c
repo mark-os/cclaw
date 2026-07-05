@@ -1,4 +1,4 @@
-/* T288: e2e pure reasoning (no tools)
+/* e2e pure reasoning (no tools)
  * Verifies: thinking + content, finish_reason=stop, no tool calls dispatched.
  * Requires OPENROUTER_API_KEY. */
 #define _POSIX_C_SOURCE 200809L
@@ -67,7 +67,7 @@ static void test_pure_reasoning(void) {
     /* No tool calls should be dispatched */
     if (file_contains(out, "[tool]"))
         FAIL("tool call dispatched in pure reasoning prompt");
-    /* finish_reason should be 'stop' (V35 normalization) */
+    /* finish_reason should be 'stop' (normalized) */
     if (!file_contains(out, "finish=stop"))
         FAIL("expected finish=stop in trace output");
 
@@ -75,7 +75,7 @@ static void test_pure_reasoning(void) {
 }
 
 int main(void) {
-    printf("--- test_e2e_reasoning (T288) ---\n");
+    printf("--- test_e2e_reasoning ---\n");
     test_pure_reasoning();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

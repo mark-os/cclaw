@@ -19,7 +19,7 @@ typedef struct {
 /* Execute any due cron jobs now. Called from the main event loop (daemon). */
 void cron_run_due(sqlite3 *db);
 
-/* CRUD — daemon-only management (T204, V76) */
+/* CRUD — daemon-only management */
 int64_t cron_add(sqlite3 *db, const char *agent_name, const char *name,
                  const char *cron_expr, int64_t session_id, const char *task);
 CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count);

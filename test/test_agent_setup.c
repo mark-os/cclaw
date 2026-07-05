@@ -1,4 +1,4 @@
-/* T206: Test agent_setup — verify CLI mode excludes daemon tools,
+/* Test agent_setup — verify CLI mode excludes daemon tools,
  * daemon mode includes all tools. */
 #include <stdio.h>
 #include <string.h>

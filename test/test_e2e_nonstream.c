@@ -1,4 +1,4 @@
-/* T284: e2e non-streaming mode
+/* e2e non-streaming mode
  * Verifies: CCLAW_STREAM=0 omits "stream":true from request,
  * response is full JSON (not SSE), no ASAN/UBSan, exit 0.
  * Requires OPENROUTER_API_KEY. */
@@ -72,7 +72,7 @@ static void test_nonstream_mode(void) {
 }
 
 int main(void) {
-    printf("--- test_e2e_nonstream (T284) ---\n");
+    printf("--- test_e2e_nonstream ---\n");
     test_nonstream_mode();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

@@ -113,7 +113,7 @@ static void test_cut_point(void) {
     if (rc != 0) FAIL("context_plan returned error");
     if (plan.count != 20) FAIL("wrong total count");
     if (plan.cut <= 0) FAIL("should have truncated (cut > 0)");
-    /* Cut should be at a user message boundary (V8) */
+    /* Cut should be at a user message boundary */
     if (plan.entries[plan.cut].role != ROLE_USER &&
         plan.entries[plan.cut].role != ROLE_SYSTEM)
         FAIL("cut not at valid boundary");
@@ -170,7 +170,7 @@ static void test_plan_no_content_access(void) {
     append_msg(db, sid, ROLE_USER, big, STOP_REASON_NONE, NULL, 0);
     append_msg(db, sid, ROLE_ASSISTANT, big, STOP_REASON_STOP, NULL, 0);
 
-    /* V56: context_plan must work correctly without loading content/tool_calls.
+    /* context_plan must work correctly without loading content/tool_calls.
      * Verify the plan query only selects integer metadata columns. */
     Config cfg = {0};
     cfg.provider.context_window = 128000;
@@ -182,7 +182,7 @@ static void test_plan_no_content_access(void) {
     if (plan.entries[0].token_estimate < 100) FAIL("entry 0 token_estimate too small for 8KB content");
     if (plan.entries[1].token_estimate < 100) FAIL("entry 1 token_estimate too small for 8KB content");
 
-    /* V56: Verify query plan has no redundant JOIN back to entries table.
+    /* Verify query plan has no redundant JOIN back to entries table.
      * The CTE carries all needed columns inline — final SELECT reads from CTE only. */
     sqlite3_stmt *stmt;
     int64_t leaf_id = plan.entries[plan.count - 1].id;

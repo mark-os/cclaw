@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include "host_match.h"
 
-/* V83: Credential proxy thread for shell children.
+/* Credential proxy thread for shell children.
  * Listens on a per-call pathname UDS at <agent-folder>/.proxy.<pid>.sock — the
  * agent folder, never the agent-visible workspace. The sandbox bind-mounts the
  * socket to a fixed in-netns path so the in-sandbox preload/shim can reach it.

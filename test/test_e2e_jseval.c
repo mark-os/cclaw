@@ -1,5 +1,5 @@
-/* T286: e2e js_eval — Fibonacci via QuickJS, verify result correct, no crash.
- * Cites: V5 (QuickJS limits). Requires OPENROUTER_API_KEY. */
+/* e2e js_eval — Fibonacci via QuickJS, verify result correct, no crash.
+ * Requires OPENROUTER_API_KEY. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,7 +65,7 @@ static void test_js_eval_fibonacci(void) {
 }
 
 int main(void) {
-    printf("--- test_e2e_jseval (T286) ---\n");
+    printf("--- test_e2e_jseval ---\n");
     test_js_eval_fibonacci();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

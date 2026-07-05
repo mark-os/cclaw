@@ -1,7 +1,7 @@
 #include "llm.h"
 #include <string.h>
 
-/* V35: sole normalization point for provider finish_reason → StopReason */
+/* sole normalization point for provider finish_reason → StopReason */
 StopReason map_stop_reason(const char *finish_reason) {
     if (!finish_reason)
         return STOP_REASON_STOP;

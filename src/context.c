@@ -15,7 +15,7 @@
 #define TRUNCATE_MAX_BYTES  (50 * 1024)
 #define TRUNCATE_MAX_LINES  2000
 
-/* V41: helpers for context_plan — integer column mapping */
+/* helpers for context_plan — integer column mapping */
 static Role plan_int_to_role(int i) {
     switch (i) {
         case 0: return ROLE_SYSTEM;
@@ -38,7 +38,7 @@ static StopReason plan_int_to_stop_reason(int i) {
     return STOP_REASON_NONE;
 }
 
-/* V41,V8: Find cut point in PlanEntry array — same logic as find_cut_point but on PlanEntry. */
+/* Find cut point in PlanEntry array — same logic as find_cut_point but on PlanEntry. */
 static int plan_find_cut(const PlanEntry *entries, int count, int budget) {
     int total = 0;
     int cut = 0;
@@ -68,7 +68,7 @@ static int plan_find_cut(const PlanEntry *entries, int count, int budget) {
         i = group_start - 1;
     }
 
-    /* V8: ensure cut is at valid boundary — before user/system msg */
+    /* ensure cut is at valid boundary — before user/system msg */
     while (cut < count && entries[cut].role != ROLE_USER
            && entries[cut].role != ROLE_SYSTEM)
         cut++;
@@ -94,10 +94,10 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
     sqlite3_finalize(stmt);
     if (leaf_id < 0) return -1;
 
-    /* V56: Query branch metadata — covering index only, no main table access.
+    /* Query branch metadata — covering index only, no main table access.
      * CTE walks leaf→root via parent_id; selects all plan columns inline
      * so the final SELECT needs no JOIN back to entries.
-     * V58: use level counter for path ordering (compaction entries may have higher ids). */
+     * Use level counter for path ordering (compaction entries may have higher ids). */
     const char *plan_sql =
         "WITH RECURSIVE branch(id, parent_id, role, stop_reason, token_estimate, tool_call_count, lvl) AS ("
         "  SELECT id, parent_id, role, stop_reason, token_estimate, tool_call_count, 0"
@@ -144,7 +144,7 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
 
     if (raw_count == 0) { free(raw); return -1; }
 
-    /* V28: filter out error/aborted assistant entries + their following tool_results */
+    /* filter out error/aborted assistant entries + their following tool_results */
     PlanEntry *filtered = malloc((size_t)raw_count * sizeof(PlanEntry));
     if (!filtered) { free(raw); return -1; }
     int fcount = 0;
@@ -184,7 +184,7 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
         }
     }
 
-    /* V7,V91: compute budget from context_threshold */
+    /* compute budget from context_threshold */
     int budget = cfg->max_history_tokens > 0
         ? cfg->max_history_tokens
         : (int)((cfg->context_threshold > 0 ? cfg->context_threshold : 0.6f)
@@ -233,7 +233,7 @@ void context_plan_free(ContextPlan *plan) {
     plan->count = 0;
 }
 
-/* ── T118: Write-time truncation with spill to temp file ─────────── */
+/* ── Write-time truncation with spill to temp file ────────────────── */
 
 void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz) {
     /* Spill into the agent workspace (natural lifetime, no symlink-prone
@@ -329,7 +329,7 @@ char *truncate_and_spill(const char *src, int64_t session_id, const char *tool_c
     return result;
 }
 
-/* T269: Auto-recall — FTS5 search across sessions for relevant context. */
+/* Auto-recall — FTS5 search across sessions for relevant context. */
 char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
                           int max_tokens) {
     if (!db || !user_msg || !user_msg[0]) return NULL;
@@ -460,7 +460,7 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
     return out;
 }
 
-/* V58,T161: Compaction trigger — recovered from f4b50e0's dead-code purge,
+/* Compaction trigger — recovered from f4b50e0's dead-code purge,
  * now driven post-turn by the worker-job path instead of synchronously. */
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg) {
     if (!db || !cfg || !cfg->compaction) return 0;

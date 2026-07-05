@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* V52: ChaCha20-Poly1305 AEAD encryption for kv secrets.
+/* ChaCha20-Poly1305 AEAD encryption for config secrets.
  * Format: enc:<hex(nonce[24] || ciphertext || tag[16])>
  * Key: 32 bytes from <db_dir>/.cclaw_key */
 

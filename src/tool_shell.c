@@ -39,7 +39,7 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     return rc;
 }
 
-/* V88: Collect CCLAW_SECRET_* env vars, clear from environment */
+/* Collect CCLAW_SECRET_* env vars, clear from environment */
 ShellSecret *shell_secrets_collect(size_t *count) {
     extern char **environ;
     *count = 0;

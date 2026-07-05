@@ -1,4 +1,4 @@
-/* libcclaw_net.so — LD_PRELOAD shared library for shell children (V82, V83).
+/* libcclaw_net.so — LD_PRELOAD shared library for shell children.
  * Intercepts connect() and getaddrinfo() for AF_INET/AF_INET6 TCP,
  * routes through UDS to agent proxy thread at $CCLAW_PROXY_SOCK.
  * Graceful passthrough if proxy socket path unset or unreachable. */

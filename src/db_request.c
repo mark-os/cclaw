@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* T295: SQL request builder — produce complete LLM request JSON from entries table.
+/* SQL request builder — produce complete LLM request JSON from entries table.
  *
  * Strategy: insert plan entry IDs into a temp table (preserving order),
  * then use a single SQL query with json_object()/json_group_array() to

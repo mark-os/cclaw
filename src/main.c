@@ -1810,7 +1810,7 @@ static void reap_children(void);
 /* postAdvance hooks: fire on the worker-completion wake, before run_advance
  * consumes the llm_running state. The state guard filters compaction
  * completions riding the same pipe; error entries are skipped (nothing for a
- * redact/annotate hook to act on, and V28 drops them from context anyway). */
+ * redact/annotate hook to act on, and error filtering drops them from context anyway). */
 static void maybe_dispatch_post_advance(int64_t session_id) {
     if (!g_tool_setup ||
         g_tool_setup->ext_ctx.hooks[HOOK_POST_ADVANCE].count == 0)

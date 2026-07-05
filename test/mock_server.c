@@ -22,7 +22,7 @@ static pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int s_request_count;
 static char *s_last_body;
 
-/* T129: Telegram mock state */
+/* Telegram mock state */
 static MockResponse *s_tg_updates_head;
 static MockResponse *s_tg_updates_tail;
 static MockResponse *s_tg_send_head;
@@ -148,9 +148,9 @@ int mock_server_start(void) {
     if (!s_ctx) return -1;
 
     mg_set_request_handler(s_ctx, "/v1/chat/completions", handle_completions, NULL);
-    /* T290: Gemini endpoint pattern */
+    /* Gemini endpoint pattern */
     mg_set_request_handler(s_ctx, "/models/", handle_completions, NULL);
-    /* T291: Gemini cachedContents endpoint */
+    /* Gemini cachedContents endpoint */
     mg_set_request_handler(s_ctx, "/cachedContents", handle_completions, NULL);
 
     /* Get assigned port */
@@ -250,7 +250,7 @@ const char *mock_server_last_request_body(void) {
     return s_last_body;
 }
 
-/* ── T129: Telegram mock implementation ────────────────────────── */
+/* ── Telegram mock implementation ──────────────────────────────── */
 
 void mock_tg_enqueue_updates(const char *body) {
     MockResponse *r = calloc(1, sizeof(MockResponse));

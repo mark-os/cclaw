@@ -82,7 +82,7 @@ static void test_set_value(void) {
     assert(strcmp(mb->value, "short") == 0);
     memory_block_free(mb);
 
-    /* V55: exceeds char_limit → rejected */
+    /* exceeds char_limit → rejected */
     rc = memory_block_set_value(db, "Agent", "notes", "this string is way too long for the limit");
     assert(rc == -1);
 
@@ -114,7 +114,7 @@ static void test_read_only(void) {
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    /* V55: read_only blocks reject edits */
+    /* read_only blocks reject edits */
     int rc = memory_block_set_value(db, "Agent", "instructions", "new value");
     assert(rc == -1);
 

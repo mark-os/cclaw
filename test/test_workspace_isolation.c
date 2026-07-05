@@ -9,7 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* T50: per-agent workspace isolation (V1, V12)
+/* per-agent workspace isolation
  * Two agents with different workspaces cannot access each other's files.
  *
  * Isolation is enforced by the kernel namespace set up in the --run-tool
@@ -137,7 +137,7 @@ static void test_namespace_detect(void) {
     free(r);
 }
 
-/* V1,V12: agent A cannot read agent B's file via absolute path */
+/* agent A cannot read agent B's file via absolute path */
 static void test_read_cross_workspace_absolute(void) {
     if (!ns_available) { printf("  SKIP test_read_cross_workspace_absolute\n"); return; }
     char args[512];
@@ -149,7 +149,7 @@ static void test_read_cross_workspace_absolute(void) {
     printf("  PASS test_read_cross_workspace_absolute\n");
 }
 
-/* V1,V12: agent B cannot read agent A's file via absolute path */
+/* agent B cannot read agent A's file via absolute path */
 static void test_read_cross_workspace_reverse(void) {
     if (!ns_available) { printf("  SKIP test_read_cross_workspace_reverse\n"); return; }
     char args[512];
@@ -161,7 +161,7 @@ static void test_read_cross_workspace_reverse(void) {
     printf("  PASS test_read_cross_workspace_reverse\n");
 }
 
-/* V1,V12: agent A cannot write into agent B's workspace */
+/* agent A cannot write into agent B's workspace */
 static void test_write_cross_workspace(void) {
     if (!ns_available) { printf("  SKIP test_write_cross_workspace\n"); return; }
     char args[512];
@@ -177,7 +177,7 @@ static void test_write_cross_workspace(void) {
     printf("  PASS test_write_cross_workspace\n");
 }
 
-/* V1,V12: relative traversal from A into B blocked */
+/* relative traversal from A into B blocked */
 static void test_read_traversal_to_other_workspace(void) {
     if (!ns_available) { printf("  SKIP test_read_traversal_to_other_workspace\n"); return; }
     const char *b_name = strrchr(ws_b, '/');
@@ -191,7 +191,7 @@ static void test_read_traversal_to_other_workspace(void) {
     printf("  PASS test_read_traversal_to_other_workspace\n");
 }
 
-/* V1,V12: write via relative traversal to other workspace blocked */
+/* write via relative traversal to other workspace blocked */
 static void test_write_traversal_to_other_workspace(void) {
     if (!ns_available) { printf("  SKIP test_write_traversal_to_other_workspace\n"); return; }
     const char *b_name = strrchr(ws_b, '/');
@@ -205,7 +205,7 @@ static void test_write_traversal_to_other_workspace(void) {
     printf("  PASS test_write_traversal_to_other_workspace\n");
 }
 
-/* V1: each agent CAN access its own workspace (positive case) */
+/* each agent CAN access its own workspace (positive case) */
 static void test_read_own_workspace(void) {
     if (!ns_available) { printf("  SKIP test_read_own_workspace\n"); return; }
     char *r = run_tool_request(ws_a, "file_read", "{\"path\":\"secret_a.txt\"}");
@@ -220,7 +220,7 @@ static void test_read_own_workspace(void) {
     printf("  PASS test_read_own_workspace\n");
 }
 
-/* V12: workspace fallback path pattern (./workspace/{agent_id}) */
+/* workspace fallback path pattern (./workspace/{agent_id}) */
 static void test_workspace_fallback_path(void) {
     if (!ns_available) { printf("  SKIP test_workspace_fallback_path\n"); return; }
 

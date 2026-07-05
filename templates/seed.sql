@@ -22,7 +22,7 @@ INSERT OR IGNORE INTO models(id, provider_name, model, context_window, priority)
 INSERT OR IGNORE INTO tools(name, description) VALUES
   ('file_read', 'Read a file (path relative or absolute)'),
   ('file_write', 'Write content to a file (path relative or absolute)'),
-  ('shell_exec', 'Execute a shell command and return stdout+stderr. Writes are confined to the workspace; network egress is limited to your allowed hosts.'),
+  ('shell_exec', 'Execute a shell command and return stdout+stderr'),
   ('js_eval', 'Run JavaScript in QuickJS (ES2025). http_request(url[, opts]) is synchronous HTTP.'),
   ('web_fetch', 'Fetch a URL via HTTP GET and return content as markdown'),
   ('memory_create', 'Create a new memory block (a named container of numbered notes). Args: label, description.'),

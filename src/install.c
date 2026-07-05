@@ -221,6 +221,22 @@ static int install_system(void) {
         return 1;
     }
 
+    /* The daemon runs as the dedicated 'cclaw' user (User= in the unit,
+     * setpriv in the init script) — it never needs root at runtime, and the
+     * parent process is the one parsing untrusted input. */
+    if (!getpwnam("cclaw")) {
+        int urc = run_argv((char *const[]){"useradd", "--system", "-m",
+                                           "-d", "/home/cclaw",
+                                           "-s", "/usr/sbin/nologin",
+                                           "-U", "cclaw", NULL});
+        if (urc != 0) {
+            fprintf(stderr, "error: useradd cclaw failed (exit %d)\n", urc);
+            free(exe);
+            return 1;
+        }
+        printf("  created user cclaw (home /home/cclaw)\n");
+    }
+
     mkdir_p("/usr/local/bin");
     mkdir_p("/etc/cclaw");
 

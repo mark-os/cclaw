@@ -14,9 +14,15 @@ ENVFILE=/etc/cclaw/env
 RESPAWN_DELAY=5
 RESPAWN_MAX=10
 NAME=cclaw
+RUNAS=cclaw
 
 [ -f "$ENVFILE" ] && . "$ENVFILE"
 export OPENROUTER_API_KEY CCLAW_PROVIDER CCLAW_MODEL CCLAW_TELEGRAM_TOKEN CCLAW_DB_PATH CCLAW_WEB_PORT
+
+# Drop root before launching: setpriv execs in place (unlike su, which forks),
+# so $! is the daemon's real pid and check_pid's comm check still matches.
+RUNAS_HOME=$(getent passwd "$RUNAS" | cut -d: -f6)
+export HOME="$RUNAS_HOME" USER="$RUNAS" LOGNAME="$RUNAS"
 
 check_pid() {
     if [ -f "$PIDFILE" ]; then
@@ -49,7 +55,7 @@ wait_network() {
 respawn_loop() {
     count=0
     while [ $count -lt $RESPAWN_MAX ]; do
-        $DAEMON --daemon &
+        setpriv --reuid="$RUNAS" --regid="$RUNAS" --init-groups $DAEMON --daemon &
         pid=$!
         echo "$pid" > "$PIDFILE"
         wait "$pid"

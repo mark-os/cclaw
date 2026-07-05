@@ -4,6 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
+User=cclaw
+Group=cclaw
 ExecStart=/usr/local/bin/cclaw --daemon
 EnvironmentFile=/etc/cclaw/env
 Restart=on-failure

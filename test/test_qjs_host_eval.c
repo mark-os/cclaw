@@ -203,12 +203,17 @@ static void test_prelude_module_exports_set(void) {
     expect_error("prelude_module_exports_set", "\"module.exports = 1\"", "module.exports not available");
 }
 
-static void test_prelude_map(void) {
-    expect_error("prelude_map", "\"new Map()\"", "Map not available");
+/* ── Modern dialect: QuickJS is ES2023-class, not ES5 ──────────────── */
+
+static void test_modern_syntax(void) {
+    expect_eq("modern_syntax",
+        "\"const f = (x) => `v=${x * 2}`; f(21)\"", "v=42");
 }
 
-static void test_prelude_set(void) {
-    expect_error("prelude_set", "\"new Set()\"", "Set not available");
+static void test_modern_collections(void) {
+    expect_eq("modern_collections",
+        "\"let m = new Map([[1,'a']]); let s = new Set([1,1,2]); "
+        "let [h, ...t] = [3,4,5]; m.get(1) + s.size + h + t.length\"", "a232");
 }
 
 int main(void) {
@@ -240,8 +245,8 @@ int main(void) {
     test_prelude_process_platform();
     test_prelude_module_exports_get();
     test_prelude_module_exports_set();
-    test_prelude_map();
-    test_prelude_set();
+    test_modern_syntax();
+    test_modern_collections();
 
     cleanup();
     printf("%d/%d passed\n", tests_passed, tests_run);

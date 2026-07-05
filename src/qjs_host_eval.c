@@ -379,22 +379,16 @@ static const char *QJS_EVAL_PRELUDE =
     "  get: function() { throw new TypeError('module.exports not available.'); },\n"
     "  set: function() { throw new TypeError('module.exports not available. Return your value as the last expression.'); }\n"
     "});\n"
-    "var Map = function() { throw new TypeError('Map not available. Use plain objects.'); };\n"
-    "var Set = function() { throw new TypeError('Set not available. Use: var s = {}; s[x] = true;'); };\n"
     "var print = console.log;\n";
 
+/* The engine is modern QuickJS; the surviving gaps are environmental —
+ * no module loader, no event loop, no top-level await in global eval. */
 static const char *qjs_syntax_hint(const char *code) {
     if (!code) return "";
-    if (strstr(code, "const ") || strstr(code, "let "))
-        return " — hint: this engine is ES5; use 'var' instead of 'const'/'let'";
-    if (strstr(code, "=>"))
-        return " — hint: arrow functions are unsupported; use function(x){ return ...; }";
-    if (strstr(code, "`"))
-        return " — hint: template literals are unsupported; concatenate with 'a' + b";
     if (strstr(code, "require(") || strstr(code, "import "))
         return " — hint: no modules; 'fs' and 'http_request' are globals (e.g. fs.readdir('.'))";
-    if (strstr(code, "await ") || strstr(code, ".then("))
-        return " — hint: this engine is synchronous; assign directly: var r = http_request(url); then use r.body / r.json()";
+    if (strstr(code, "await "))
+        return " — hint: no top-level await; http_request is synchronous — var r = http_request(url); then r.body / r.json()";
     return "";
 }
 

@@ -232,12 +232,16 @@ registration (see design notes).
 
 ### JS dialect & globals
 
-JavaScript runs in **QuickJS** (bellard/quickjs), built minimal: the dialect is
-**ES5** — `var` (not `let`/`const`), `function` (not arrows), string
-concatenation (not template literals), no `Map`/`Set`, no modules
-(`require`/`import`). Failed evals return targeted syntax hints
-(`qjs_syntax_hint`, src/qjs_host_eval.c). The in-process hooks profile is the
-same minimal engine without `Promise`. Globals available to tool handlers (the
+JavaScript runs in **QuickJS** (bellard/quickjs) — a modern, ES2023-class
+dialect: `let`/`const`, arrows, template literals, classes, destructuring,
+`Map`/`Set`, optional chaining all work. The restrictions are environmental,
+not syntactic: **no modules** (`require`/`import` — there is no module
+loader), **no event loop** (no `setTimeout`; `http_request` is synchronous),
+and **no top-level `await`** (async functions and `.then` chains work — the
+host drains the microtask queue and unwraps a returned promise). Failed
+evals return targeted hints for these gaps (`qjs_syntax_hint`,
+src/qjs_host_eval.c). The in-process hooks profile is a reduced-intrinsics
+context (no `Promise`). Globals available to tool handlers (the
 `qjs_register_eval_host_functions` environment):
 
 | Global | Description |

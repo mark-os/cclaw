@@ -402,7 +402,7 @@ before any fork. (Used during development to validate the gate; not a shipping t
         { match: {},                   effect: "allow" }  // reads fall through
       ]
     },
-    // handler MUST be a string (function body receiving `args`); ES5 only.
+    // handler MUST be a string (function body receiving `args`).
     handler: [
       "var dir = fs.cwd() + '/.notes/';",
       "var a = args.action;",

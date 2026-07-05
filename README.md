@@ -89,12 +89,12 @@ Every agent starts with a core toolset (more can be added at runtime — see [Ex
 | `file_find` | Find files by glob (`*.c`, `src/**/*.spec.ts`) |
 | `file_grep` | Search file contents by POSIX regex, returns `path:line:match` |
 | `shell_exec` | Run a shell command in the namespace sandbox |
-| `js_eval` | Run JavaScript in the sandboxed ES5 engine |
+| `js_eval` | Run JavaScript in the sandboxed QuickJS engine |
 | `web_fetch` | Fetch a URL (host-allowlisted) |
 | `db_query` | Query the agent's own SQLite database |
 | `memory_create` / `memory_append` / `memory_replace` | Edit persistent memory blocks |
 
-File tools are workspace-scoped (no traversal); `file_find`/`file_grep` skip `.git` and `node_modules`. `js_eval` runs an **ES5** dialect (`var`, not `const`/`let`; no `require`/`import`) with filesystem globals `fs.readDir/readFile/writeFile/stat/cwd` plus `http_fetch` — see [specs/extensions.md](specs/extensions.md#js-runtime-dialect--globals).
+File tools are workspace-scoped (no traversal); `file_find`/`file_grep` skip `.git` and `node_modules`. `js_eval` runs modern JavaScript (QuickJS — ES2023-class; no modules, no event loop, no top-level `await`) with filesystem globals `fs.readDir/readFile/writeFile/stat/cwd` plus `http_fetch` — see [specs/extensions.md](specs/extensions.md#js-runtime-dialect--globals).
 
 Daemon mode adds orchestration tools (`create_agent`, `launch_agent`, `configure_provider`, `configure_channel`, `cron_*`); any agent can request more via `request_config`.
 

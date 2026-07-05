@@ -23,7 +23,7 @@ INSERT OR IGNORE INTO tools(name, description) VALUES
   ('file_read', 'Read a file (path relative or absolute)'),
   ('file_write', 'Write content to a file (path relative or absolute)'),
   ('shell_exec', 'Execute a shell command and return stdout+stderr'),
-  ('js_eval', 'Run JavaScript in QuickJS (ES2025). http_request(url[, opts]) is synchronous HTTP.'),
+  ('js_eval', 'Run JavaScript in QuickJS (modern JS; no modules, no top-level await). http_request(url[, opts]) is synchronous HTTP.'),
   ('web_fetch', 'Fetch a URL via HTTP GET and return content as markdown'),
   ('memory_create', 'Create a new memory block (a named container of numbered notes). Args: label, description.'),
   ('memory_add', 'Add a numbered note to a memory block. Args: block (label), text.'),

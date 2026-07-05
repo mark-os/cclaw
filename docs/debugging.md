@@ -83,8 +83,8 @@ sqlite3 "$DB" "SELECT id, state FROM sessions WHERE state NOT IN ('done','idle')
 # What tools exist and their policy/recipe metadata.
 sqlite3 "$DB" "SELECT name, builtin, agent_name FROM tools ORDER BY name;"
 
-# An agent's grants (hosts, tools, paths) and trust level.
-sqlite3 "$DB" "SELECT trust_level FROM agents WHERE name = 'default';"
+# An agent's grants (hosts, tools, paths) and sandbox profile.
+sqlite3 "$DB" "SELECT sandbox_profile FROM agents WHERE name = 'default';"
 sqlite3 "$DB" "SELECT kind, value FROM grants WHERE agent_name = 'default';"
 
 # Pending / unresolved approvals.

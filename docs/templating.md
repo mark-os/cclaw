@@ -12,8 +12,8 @@ At build time, `gen_templates.sh` converts each file into a `static const char T
 
 ```
 templates/default_system_prompt.md  →  TPL_DEFAULT_SYSTEM_PROMPT_MD
-templates/cutoff_notice.txt         →  TPL_CUTOFF_NOTICE_TXT
-templates/schema_agent.sql          →  TPL_SCHEMA_AGENT_SQL
+templates/schema.sql                →  TPL_SCHEMA_SQL
+templates/seed.sql                  →  TPL_SEED_SQL
 ```
 
 Source files `#include "templates.h"` (from `build/`) and reference the constants directly.
@@ -23,10 +23,14 @@ Source files `#include "templates.h"` (from `build/`) and reference the constant
 | File | Used by | Purpose |
 |------|---------|---------|
 | `default_system_prompt.md` | `config.c` | Default system prompt when no agent-specific prompt exists |
-| `cutoff_notice.txt` | `context.c` | Prepended when conversation history is truncated |
-| `incomplete_turn_notice.txt` | `context.c` | Injected when a previous turn was interrupted |
-| `incomplete_tool_content.txt` | `context.c` | Placeholder for tool results from interrupted turns |
 | `schema.sql` | `db.c` | DDL for cclaw.db (unified schema) |
+| `seed.sql` | `db.c` | Default provider/model/tool-description rows for a fresh DB |
+| `channel_telegram.json` / `channel_telegram.qjs` | `main.c` | Telegram channel extension written out by `configure_channel` |
+| `cclaw.env.example` / `cclaw.service` | `install.c` | Installed alongside the binary for daemon deployment |
+
+Every file in `templates/` must have a consumer in `src/` — an embedded-but-
+unused template is dead weight in the binary (this has happened; delete on
+sight).
 
 ## Template Variables
 
@@ -49,7 +53,7 @@ Templates are **not configurable at runtime**. To change them, edit the file in 
 
 For user-customizable text, use:
 - `agents/<name>/system.md` — per-agent system prompt (overrides the default template entirely)
-- `agents/<name>/skills/*.md` — additional skill instructions appended to the system prompt
+- `agents/<name>/skills/` — per-agent skills; an index (name + description + path) is injected into the prompt and bodies are loaded on demand (see specs/skills.md)
 - Memory blocks — agent-managed persistent context injected into the prompt
 
 ## Adding a New Template

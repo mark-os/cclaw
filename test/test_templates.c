@@ -19,12 +19,6 @@ int main(void) {
     assert(strstr(TPL_DEFAULT_SYSTEM_PROMPT_MD, "{workspace}"));
     printf("  system_prompt_template_vars... PASS\n");
 
-    /* Notices are non-empty */
-    assert(strlen(TPL_CUTOFF_NOTICE_TXT) > 10);
-    assert(strlen(TPL_INCOMPLETE_TURN_NOTICE_TXT) > 10);
-    assert(strlen(TPL_INCOMPLETE_TOOL_CONTENT_TXT) > 5);
-    printf("  notices_non_empty... PASS\n");
-
-    printf("3/3 passed\n");
+    printf("2/2 passed\n");
     return 0;
 }

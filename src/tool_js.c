@@ -70,7 +70,7 @@ char *tool_js_eval_handler(const char *arguments, void *user_data) {
 
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
     int rc = tools_register(reg, "js_eval",
-                          "Run JavaScript in QuickJS (ES2025). "
+                          "Run JavaScript in QuickJS (modern JS; no modules, no top-level await). "
                           "http_request(url[, opts]) is synchronous HTTP. "
                           "File globals: fs.readdir(path[,cb]), fs.readFile(path[,cb]), fs.writeFile(path, data[,cb]), "
                           "fs.stat(path[,cb]), fs.lstat(path[,cb]), fs.cwd(). Only allow-listed hosts work. "

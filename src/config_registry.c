@@ -62,6 +62,11 @@ static const ConfigDef s_defs[] = {
       "llm_responses rows kept (0 = archiving off, negative = keep all)" },
     { "workspace",          "",
       "Workspace directory (empty = ~/.cclaw/agents/default/workspace)" },
+    { "skills_dirs",
+      "[\"~/.cclaw/skills\",\"~/.agents/skills\"]",
+      "Skill discovery directories (JSON array, ~ expanded; SKILL.md convention"
+      " shared with pi/OpenClaw/Claude Code). Per-agent agents/<name>/skills/"
+      " is always scanned too." },
 };
 
 const char *config_default(const char *key) {

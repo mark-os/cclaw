@@ -173,7 +173,7 @@ TTFB breakdown (OpenRouter, DeepSeek V4 Flash):
 
 ## Documentation
 
-- [specs/](specs/) — reference docs (schema, daemon, memory, providers, security)
+- [specs/](specs/) — reference docs (schema, daemon, memory, providers, security, skills)
 - [AGENTS.md](AGENTS.md) — project ethos, coding conventions, build instructions
 
 ## LOC

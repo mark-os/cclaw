@@ -21,6 +21,7 @@
 #include "tool_js.h"
 #include "qjs_helpers.h"
 #include "agent_config.h"
+#include "skills.h"
 #include "agent_setup.h"
 #include "hook_dispatch.h"
 #include "approval.h"
@@ -751,7 +752,34 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             RunToolReq req;
             run_tool_req_init(&req, RUNTOOL_TIER_FILE, tc->name, tc->arguments,
                               &fctx->sb, fctx->workspace, fctx->cwd_path);
+
+            /* Mount skill discovery dirs read-only (same transient-override
+             * pattern as the extension store on the JS path) so the model can
+             * file_read a SKILL.md the prompt index pointed it at. */
+            size_t skd_n = 0;
+            char agents_dir_buf[PATH_MAX];
+            agent_dir_resolve(fctx->workspace, g_cfg ? g_cfg->db_path : NULL,
+                              agents_dir_buf, sizeof(agents_dir_buf));
+            char **skill_dirs = skills_dirs_resolve(g_db, agents_dir_buf,
+                                                    agent_name, &skd_n);
+            const char **read_paths = NULL;
+            size_t rp_count = fctx->sb.read_path_count + skd_n;
+            if (rp_count > 0) {
+                read_paths = malloc(rp_count * sizeof(*read_paths));
+                if (read_paths) {
+                    size_t k = 0;
+                    for (size_t i = 0; i < fctx->sb.read_path_count; i++)
+                        read_paths[k++] = fctx->sb.read_paths[i];
+                    for (size_t i = 0; i < skd_n; i++)
+                        read_paths[k++] = skill_dirs[i];
+                    req.read_paths = read_paths;
+                    req.read_count = rp_count;
+                }
+            }
+
             char *blob = run_tool_serialize_request(&req, &blob_len);
+            free(read_paths);
+            skills_dirs_free(skill_dirs, skd_n);
             if (!blob)
                 return tool_inline_error(session_id, tc,
                     "error: file tool request exceeds 32KB cap", NULL);

@@ -4,8 +4,8 @@
 #include "buf.h"
 #include "config.h"
 #include "config_registry.h"
+#include "skills.h"
 #include "db.h"
-#include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -13,13 +13,6 @@
 #include <errno.h>
 #include <limits.h>
 #include <unistd.h>
-
-static int str_ends_with(const char *s, const char *suffix) {
-    size_t slen = strlen(s);
-    size_t suflen = strlen(suffix);
-    if (suflen > slen) return 0;
-    return strcmp(s + slen - suflen, suffix) == 0;
-}
 
 void agent_config_free(AgentConfig *ac) {
     if (!ac) return;
@@ -32,60 +25,6 @@ void agent_config_free(AgentConfig *ac) {
     for (size_t i = 0; i < ac->read_access_count; i++) free(ac->read_access[i]);
     free(ac->read_access);
     free(ac);
-}
-
-/* scan agents/<name>/skills/ for .md files, concatenate into single string */
-char *agent_load_skills(const char *agents_dir, const char *name) {
-    if (!agents_dir || !name) return NULL;
-
-    char dir_path[1024];
-    int n = snprintf(dir_path, sizeof(dir_path), "%s/%s/skills", agents_dir, name);
-    if (n < 0 || (size_t)n >= sizeof(dir_path)) return NULL;
-
-    DIR *d = opendir(dir_path);
-    if (!d) return NULL;
-
-    size_t out_cap = 4096;
-    size_t out_len = 0;
-    char *out = malloc(out_cap);
-    if (!out) { closedir(d); return NULL; }
-    out[0] = '\0';
-
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (!str_ends_with(ent->d_name, ".md")) continue;
-
-        char fpath[1024];
-        int pn = snprintf(fpath, sizeof(fpath), "%s/%s", dir_path, ent->d_name);
-        if (pn < 0 || (size_t)pn >= sizeof(fpath)) continue;
-
-        FILE *f = fopen(fpath, "rb");
-        if (!f) continue;
-
-        fseek(f, 0, SEEK_END);
-        long flen = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        if (flen <= 0) { fclose(f); continue; }
-
-        /* Grow buffer: existing + newline separator + file content */
-        size_t need = out_len + (out_len > 0 ? 1 : 0) + (size_t)flen;
-        while (need >= out_cap) { out_cap *= 2; }
-        char *tmp = realloc(out, out_cap);
-        if (!tmp) { fclose(f); break; }
-        out = tmp;
-
-        if (out_len > 0) out[out_len++] = '\n';
-        /* Advance by bytes actually read, not ftell's flen: a short read would
-         * otherwise bake uninitialized heap into the prompt. */
-        size_t got = fread(out + out_len, 1, (size_t)flen, f);
-        out_len += got;
-        out[out_len] = '\0';
-        fclose(f);
-    }
-    closedir(d);
-
-    if (out_len == 0) { free(out); return NULL; }
-    return out;
 }
 
 /* helper — render template vars in a string */
@@ -140,8 +79,9 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
         return NULL;
     }
 
-    /* Load skills from disk (skills stay on filesystem per §D) */
-    char *skills = agents_dir ? agent_load_skills(agents_dir, agent_name) : NULL;
+    /* Skill index (progressive disclosure): names+descriptions+locations
+     * only — the model file_reads a skill body when a task matches. */
+    char *skills = skills_index_build(db, agents_dir, agent_name);
 
     /* Render memory blocks section — single query (S7/group 5c) */
     char *mb_section = NULL;
@@ -204,9 +144,7 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     }
 
     if (skills_len > 0) {
-        const char *hdr = "\n\n## Skills\n";
-        size_t hlen = strlen(hdr);
-        memcpy(out + oi, hdr, hlen); oi += hlen;
+        /* skills_index_build includes its own "## Skills" header */
         memcpy(out + oi, skills, skills_len); oi += skills_len;
     }
 

@@ -85,12 +85,8 @@ int agent_config_set_tool_mode(sqlite3 *db, const char *agent,
 /* Returns malloc'd JSON array string (e.g. '["a","b"]'). Caller frees. */
 char *grants_json(sqlite3 *db, const char *agent, const char *kind);
 
-/* Load all skills from agents/<name>/skills/ (.md files), concatenate content.
- * Returns heap-allocated string (newline-separated skill contents).
- * Returns NULL if no skills dir or no .md files found. */
-char *agent_load_skills(const char *agents_dir, const char *name);
-
-/* Assemble system prompt from DB agent row (template + soul + memory + skills).
+/* Assemble system prompt from DB agent row (template + soul + memory + skills
+ * index — see src/skills.h for the progressive-disclosure skill model).
  * Returns heap-allocated string. Caller must free. */
 char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
                                 int64_t session_id, const char *agents_dir,

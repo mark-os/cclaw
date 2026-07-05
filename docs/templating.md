@@ -26,7 +26,7 @@ Source files `#include "templates.h"` (from `build/`) and reference the constant
 | `schema.sql` | `db.c` | DDL for cclaw.db (unified schema) |
 | `seed.sql` | `db.c` | Default provider/model/tool-description rows for a fresh DB |
 | `channel_telegram.json` / `channel_telegram.qjs` | `main.c` | Telegram channel extension written out by `configure_channel` |
-| `cclaw.env.example` / `cclaw.service` | `install.c` | Installed alongside the binary for daemon deployment |
+| `cclaw.env.example` / `cclaw.service` / `cclaw.init` | `install.c` | Installed for daemon deployment (systemd unit, or SysV init script on non-systemd hosts) |
 
 Every file in `templates/` must have a consumer in `src/` — an embedded-but-
 unused template is dead weight in the binary (this has happened; delete on

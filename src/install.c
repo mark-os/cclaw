@@ -239,15 +239,31 @@ static int install_system(void) {
     }
     printf(env_rc ? "  wrote  /etc/cclaw/env\n" : "  kept   /etc/cclaw/env (already exists)\n");
 
-    if (write_file("/etc/systemd/system/cclaw.service", TPL_CCLAW_SERVICE, 0644) != 0) {
-        fprintf(stderr, "error: writing /etc/systemd/system/cclaw.service failed: %s\n", strerror(errno));
-        return 1;
+    /* systemd if the host runs it, SysV init otherwise (e.g. Pogoplug's
+     * Debian armel). /run/systemd/system existing is the documented way to
+     * detect a running systemd (sd_booted(3)). */
+    if (access("/run/systemd/system", F_OK) == 0) {
+        if (write_file("/etc/systemd/system/cclaw.service", TPL_CCLAW_SERVICE, 0644) != 0) {
+            fprintf(stderr, "error: writing /etc/systemd/system/cclaw.service failed: %s\n", strerror(errno));
+            return 1;
+        }
+        printf("  wrote  /etc/systemd/system/cclaw.service\n");
+
+        run_argv((char *const[]){"systemctl", "daemon-reload", NULL});
+
+        printf("\nInstalled. Edit /etc/cclaw/env then: systemctl enable --now cclaw\n");
+    } else {
+        if (write_file("/etc/init.d/cclaw", TPL_CCLAW_INIT, 0755) != 0) {
+            fprintf(stderr, "error: writing /etc/init.d/cclaw failed: %s\n", strerror(errno));
+            return 1;
+        }
+        printf("  wrote  /etc/init.d/cclaw\n");
+
+        if (run_argv((char *const[]){"update-rc.d", "cclaw", "defaults", NULL}) != 0)
+            fprintf(stderr, "warning: update-rc.d failed — enable manually for your init system\n");
+
+        printf("\nInstalled. Edit /etc/cclaw/env then: /etc/init.d/cclaw start\n");
     }
-    printf("  wrote  /etc/systemd/system/cclaw.service\n");
-
-    run_argv((char *const[]){"systemctl", "daemon-reload", NULL});
-
-    printf("\nInstalled. Edit /etc/cclaw/env then: systemctl enable --now cclaw\n");
     return 0;
 }
 
@@ -271,10 +287,18 @@ static int uninstall_system(void) {
         fprintf(stderr, "error: --system uninstall requires root\n");
         return 1;
     }
-    run_argv((char *const[]){"systemctl", "disable", "--now", "cclaw", NULL});
-    if (unlink("/etc/systemd/system/cclaw.service") == 0)
-        printf("  removed /etc/systemd/system/cclaw.service\n");
-    run_argv((char *const[]){"systemctl", "daemon-reload", NULL});
+    if (access("/run/systemd/system", F_OK) == 0) {
+        run_argv((char *const[]){"systemctl", "disable", "--now", "cclaw", NULL});
+        if (unlink("/etc/systemd/system/cclaw.service") == 0)
+            printf("  removed /etc/systemd/system/cclaw.service\n");
+        run_argv((char *const[]){"systemctl", "daemon-reload", NULL});
+    } else {
+        run_argv((char *const[]){"/etc/init.d/cclaw", "stop", NULL});
+        if (unlink("/etc/init.d/cclaw") == 0) {
+            printf("  removed /etc/init.d/cclaw\n");
+            run_argv((char *const[]){"update-rc.d", "cclaw", "remove", NULL});
+        }
+    }
     printf("Uninstalled the system unit. /etc/cclaw/env and /usr/local/bin/cclaw were left in place.\n");
     return 0;
 }

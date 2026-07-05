@@ -49,7 +49,7 @@ wait_network() {
 respawn_loop() {
     count=0
     while [ $count -lt $RESPAWN_MAX ]; do
-        $DAEMON &
+        $DAEMON --daemon &
         pid=$!
         echo "$pid" > "$PIDFILE"
         wait "$pid"

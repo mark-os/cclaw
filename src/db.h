@@ -97,17 +97,8 @@ void entry_branch_free(Entry *entries, int count);
  * Returns matching entries ranked by relevance (max 50). Caller frees with entry_branch_free. */
 Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *count);
 
-/* Key-value store. db_kv_get returns malloc'd string or NULL. Caller frees. */
-char *db_kv_get(sqlite3 *db, const char *key);
-int db_kv_set(sqlite3 *db, const char *key, const char *value);
-
-/* Secret-aware config access. kv_get_secret decrypts enc: prefix values.
- * kv_set_secret encrypts before storing. */
-char *db_kv_get_secret(sqlite3 *db, const char *key);
-int db_kv_set_secret(sqlite3 *db, const char *key, const char *value);
-
-/* Set the 32-byte encryption key for secret config operations.
- * Must be called before db_kv_get_secret/db_kv_set_secret. */
+/* Set the 32-byte encryption key for secrets-table operations.
+ * Must be called before any db_secret_* read/write. */
 void db_set_secret_key(const uint8_t key[32]);
 
 /* Wipe the master key from this process's memory. Used in the forked tool-exec
@@ -254,18 +245,23 @@ int db_secret_host_unbind(sqlite3 *db, const char *secret_name, const char *host
 /* Secret store (specs/security.md): DB-backed secrets, encrypted at rest with
  * the process-wide master key (db_set_secret_key). All fail -1 if the key
  * isn't loaded (db_secret_key_loaded() == 0).
- * db_secret_set: insert or replace name -> value (source/status as given).
+ * db_secret_set: insert or replace name -> value (source/status/scope as
+ * given; NULL scope = 'agent'). scope='system' rows are daemon-consumed
+ * provider keys — excluded from db_secrets_load and thus from interpolation.
  * db_secret_rm: delete by name (0 even if absent).
  * db_secret_exists: 1 if a row with this name exists, 0 otherwise/on error.
- * db_secrets_load: decrypt every row into a heap ShellSecret array (caller
- * frees with shell_secrets_free); *count=0/NULL if none or key not loaded.
+ * db_secrets_load: decrypt every scope='agent' row into a heap ShellSecret
+ * array (caller frees with shell_secrets_free); *count=0/NULL if none or key
+ * not loaded.
+ * db_secret_get_system: decrypted value of one scope='system' secret.
  * db_secret_pending_count: rows with status='pending' (quarantine spam guard).
  * db_secret_set_status: flip status (e.g. 'pending' -> 'active' on bind). */
 int db_secret_set(sqlite3 *db, const char *name, const char *value,
-                  const char *source, const char *status);
+                  const char *source, const char *status, const char *scope);
 int db_secret_rm(sqlite3 *db, const char *name);
 int db_secret_exists(sqlite3 *db, const char *name);
 ShellSecret *db_secrets_load(sqlite3 *db, size_t *count);
+char *db_secret_get_system(sqlite3 *db, const char *name);
 int db_secret_pending_count(sqlite3 *db);
 int db_secret_set_status(sqlite3 *db, const char *name, const char *status);
 

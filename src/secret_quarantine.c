@@ -99,7 +99,7 @@ char *tool_result_postprocess_q(sqlite3 *db, const char *result,
                 for (int j = 0; !taken && j < local_n; j++)
                     if (strcmp(local_names[j], name_buf) == 0) taken = 1;
             } while (taken && suffix < 10000);
-            db_secret_set(db, name_buf, value, "quarantine", "pending");
+            db_secret_set(db, name_buf, value, "quarantine", "pending", "agent");
             if (local_n < SCAN_MAX_FINDINGS) {
                 local_values[local_n] = strdup(value);
                 local_names[local_n] = strdup(name_buf);

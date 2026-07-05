@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db_response.h"
+#include "config_registry.h"
 #include "db.h"
 #include "llm.h"
 #include <stdlib.h>
@@ -72,10 +73,6 @@ static const char TC_GEMINI[] =
     " FROM json_each(?1,'$.candidates[0].content.parts')"
     " WHERE json_extract(value,'$.functionCall') IS NOT NULL";
 
-/* Default ring-buffer size for llm_responses; overridden by the config key
- * 'llm_response_archive_max'. A negative cap disables pruning (keep all rows). */
-#define LLM_RESPONSE_ARCHIVE_MAX 500
-
 /* Archive one raw response for forensics. When is_jsonb, body/blen is the
  * parsed JSONB blob (and we can pull the provider's $.id out of it); otherwise
  * body is NUL-terminated text that wasn't valid JSON. Best-effort: errors here
@@ -88,10 +85,11 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
      *   > 0  keep the most recent N rows
      *   == 0 archiving off — write nothing
      *   < 0  keep everything (no pruning) */
-    int cap = LLM_RESPONSE_ARCHIVE_MAX;
+    int cap = config_default_int("llm_response_archive_max");
     sqlite3_stmt *c;
     if (sqlite3_prepare_v2(db,
-            "SELECT CAST(value AS INTEGER) FROM config WHERE key='llm_response_archive_max'",
+            "SELECT CAST(COALESCE(value, default_value) AS INTEGER) FROM config"
+            " WHERE key='llm_response_archive_max'",
             -1, &c, NULL) == SQLITE_OK) {
         if (sqlite3_step(c) == SQLITE_ROW && sqlite3_column_type(c, 0) != SQLITE_NULL)
             cap = sqlite3_column_int(c, 0);

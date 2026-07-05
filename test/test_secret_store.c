@@ -38,7 +38,7 @@ static sqlite3 *fresh_db(void) {
 static void test_set_load_rm_roundtrip(void) {
     sqlite3 *db = fresh_db();
     assert(db_secret_exists(db, "GH_TOKEN") == 0);
-    assert(db_secret_set(db, "GH_TOKEN", "ghp_abc123", "operator", "active") == 0);
+    assert(db_secret_set(db, "GH_TOKEN", "ghp_abc123", "operator", "active", NULL) == 0);
     assert(db_secret_exists(db, "GH_TOKEN") == 1);
 
     size_t n = 0;
@@ -49,7 +49,7 @@ static void test_set_load_rm_roundtrip(void) {
     shell_secrets_free(loaded, n);
 
     /* Overwrite (upsert) */
-    assert(db_secret_set(db, "GH_TOKEN", "ghp_new", "operator", "active") == 0);
+    assert(db_secret_set(db, "GH_TOKEN", "ghp_new", "operator", "active", NULL) == 0);
     loaded = db_secrets_load(db, &n);
     assert(n == 1 && strcmp(loaded[0].value, "ghp_new") == 0);
     shell_secrets_free(loaded, n);
@@ -69,15 +69,15 @@ static void test_set_fails_without_key(void) {
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db != NULL);
     assert(db_secret_key_loaded() == 0);
-    assert(db_secret_set(db, "X", "value", "operator", "active") == -1);
+    assert(db_secret_set(db, "X", "value", "operator", "active", NULL) == -1);
     sqlite3_close(db);
     printf("  PASS: set_fails_without_key\n");
 }
 
 static void test_pending_status(void) {
     sqlite3 *db = fresh_db();
-    assert(db_secret_set(db, "PENDING_ONE", "v1", "quarantine", "pending") == 0);
-    assert(db_secret_set(db, "ACTIVE_ONE", "v2", "operator", "active") == 0);
+    assert(db_secret_set(db, "PENDING_ONE", "v1", "quarantine", "pending", NULL) == 0);
+    assert(db_secret_set(db, "ACTIVE_ONE", "v2", "operator", "active", NULL) == 0);
     assert(db_secret_pending_count(db) == 1);
     assert(db_secret_set_status(db, "PENDING_ONE", "active") == 0);
     assert(db_secret_pending_count(db) == 0);
@@ -88,8 +88,8 @@ static void test_pending_status(void) {
 
 static void test_snapshot_env_wins(void) {
     sqlite3 *db = fresh_db();
-    assert(db_secret_set(db, "SHARED", "from_db", "operator", "active") == 0);
-    assert(db_secret_set(db, "DB_ONLY", "db_value", "operator", "active") == 0);
+    assert(db_secret_set(db, "SHARED", "from_db", "operator", "active", NULL) == 0);
+    assert(db_secret_set(db, "DB_ONLY", "db_value", "operator", "active", NULL) == 0);
 
     ShellSecret env[1] = { { .name = strdup("SHARED"), .value = strdup("from_env") } };
     size_t snap_n = 0;

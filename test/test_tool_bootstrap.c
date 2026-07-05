@@ -50,16 +50,20 @@ static int test_configure_openrouter(void) {
     assert(strstr(result, "configure_provider") != NULL);
     free(result);
 
-    /* Key stored encrypted in kv under the canonical env-var name */
-    char *key = db_kv_get_secret(db, "OPENROUTER_API_KEY");
+    /* Key stored encrypted in secrets table under the canonical env-var name */
+    char *key = db_secret_get_system(db, "OPENROUTER_API_KEY");
     assert(key && strcmp(key, "sk-or-test-key-123") == 0);
     free(key);
-    char *raw = db_kv_get(db, "OPENROUTER_API_KEY");
+
+    /* Raw value in secrets table has enc: prefix */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT value FROM secrets WHERE name='OPENROUTER_API_KEY'", -1, &s, NULL);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    const char *raw = (const char *)sqlite3_column_text(s, 0);
     assert(raw && strncmp(raw, "enc:", 4) == 0);
-    free(raw);
+    sqlite3_finalize(s);
 
     /* Provider row upserted with defaults */
-    sqlite3_stmt *s;
     sqlite3_prepare_v2(db, "SELECT base_url, api_key_env FROM providers WHERE name='openrouter'", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "https://openrouter.ai/api/v1") == 0);
@@ -130,7 +134,7 @@ static int test_configure_custom_with_url(void) {
     assert(strcmp((const char *)sqlite3_column_text(s, 2), "CUSTOM_API_KEY") == 0);
     sqlite3_finalize(s);
 
-    char *key = db_kv_get_secret(db, "CUSTOM_API_KEY");
+    char *key = db_secret_get_system(db, "CUSTOM_API_KEY");
     assert(key && strcmp(key, "mykey") == 0);
     free(key);
 

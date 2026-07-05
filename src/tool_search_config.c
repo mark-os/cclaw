@@ -128,7 +128,33 @@ static char *handler(const char *arguments, void *user_data) {
         sqlite3_finalize(st);
     }
 
-    /* Section 3: usage hint */
+    /* Section 3: global config registry — every key is self-describing
+     * (default + description synced from code), so the agent sees the full
+     * knob inventory and which values are overrides. */
+    buf_appendf(&out, "\n## Global config (value [override|default] — description)\n");
+    rc = sqlite3_prepare_v2(ctx->db,
+        "SELECT key, COALESCE(value, default_value),"
+        "       (value IS NOT NULL), COALESCE(description,'')"
+        " FROM config"
+        " WHERE (?1 IS NULL OR key LIKE '%'||?1||'%' OR description LIKE '%'||?1||'%')"
+        " ORDER BY key", -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        if (query)
+            sqlite3_bind_text(st, 1, query, -1, SQLITE_STATIC);
+        else
+            sqlite3_bind_null(st, 1);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            const char *key = (const char *)sqlite3_column_text(st, 0);
+            const char *val = (const char *)sqlite3_column_text(st, 1);
+            int overridden = sqlite3_column_int(st, 2);
+            const char *desc = (const char *)sqlite3_column_text(st, 3);
+            buf_appendf(&out, "%s = %s [%s] — %s\n", key, val ? val : "",
+                        overridden ? "override" : "default", desc);
+        }
+        sqlite3_finalize(st);
+    }
+
+    /* Section 4: usage hint */
     buf_appendf(&out,
         "\n## Requesting changes (use the request_config tool)\n"
         "- grant a tool:  {\"action\":\"grant_tool\",\"tool\":\"<name>\"}\n"

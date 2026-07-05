@@ -1,4 +1,5 @@
 #include "db.h"
+#include "config_registry.h"
 #include "test_util.h"
 #include <assert.h>
 #include <stdio.h>
@@ -233,26 +234,25 @@ static void test_session_state_waiting_to_idle(void) {
     printf("  PASS test_session_state_waiting_to_idle\n");
 }
 
-static void test_kv_get_nonexistent(void) {
+static void test_config_get_nonexistent(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
-    char *val = db_kv_get(db, "nonexistent_key");
+    /* Unregistered key with no row returns NULL */
+    char *val = config_get(db, "nonexistent_key");
     assert(val == NULL);
     db_close(db);
-    printf("  PASS test_kv_get_nonexistent\n");
+    printf("  PASS test_config_get_nonexistent\n");
 }
 
-static void test_kv_overwrite(void) {
+static void test_config_set_overwrite(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
-    db_kv_set(db, "key1", "val1");
-    db_kv_set(db, "key1", "val2");
-    char *val = db_kv_get(db, "key1");
-    assert(val != NULL);
-    assert(strcmp(val, "val2") == 0);
-    free(val);
+    /* Set a registered key twice — keeps last value */
+    config_set(db, "max_iterations", "50");
+    config_set(db, "max_iterations", "99");
+    assert(config_get_int(db, "max_iterations") == 99);
     db_close(db);
-    printf("  PASS test_kv_overwrite\n");
+    printf("  PASS test_config_set_overwrite\n");
 }
 
 int main(void) {
@@ -269,8 +269,8 @@ int main(void) {
     test_entry_append_multiple_tool_calls();
     test_entry_append_tool_result_with_name();
     test_session_state_waiting_to_idle();
-    test_kv_get_nonexistent();
-    test_kv_overwrite();
+    test_config_get_nonexistent();
+    test_config_set_overwrite();
     printf("All db_edge tests passed.\n");
     return 0;
 }

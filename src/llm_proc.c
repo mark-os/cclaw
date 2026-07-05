@@ -78,13 +78,13 @@ static void model_stat_error(sqlite3 *db, const char *model_id, int status) {
     /* Check degradation threshold */
     const char *degrade_sql =
         "UPDATE models SET status='degraded',"
-        " degraded_until=unixepoch()+(SELECT CAST(COALESCE(value,'300') AS INTEGER) FROM config WHERE key='health_cooldown_sec')"
+        " degraded_until=unixepoch()+(SELECT CAST(COALESCE(value, default_value, '300') AS INTEGER) FROM config WHERE key='health_cooldown_sec')"
         " WHERE id=?1 AND status='healthy'"
         " AND (CASE WHEN ?2=429"
-        "   THEN error_count_429 >= (SELECT CAST(COALESCE(value,'10') AS INTEGER) FROM config WHERE key='health_429_threshold')"
-        "   ELSE error_count_5xx >= (SELECT CAST(COALESCE(value,'3') AS INTEGER) FROM config WHERE key='health_5xx_threshold')"
+        "   THEN error_count_429 >= (SELECT CAST(COALESCE(value, default_value, '10') AS INTEGER) FROM config WHERE key='health_429_threshold')"
+        "   ELSE error_count_5xx >= (SELECT CAST(COALESCE(value, default_value, '3') AS INTEGER) FROM config WHERE key='health_5xx_threshold')"
         " END)"
-        " AND last_error_at >= unixepoch()-(SELECT CAST(COALESCE(value,'300') AS INTEGER) FROM config WHERE key='health_window_sec');";
+        " AND last_error_at >= unixepoch()-(SELECT CAST(COALESCE(value, default_value, '300') AS INTEGER) FROM config WHERE key='health_window_sec');";
     sqlite3_stmt *ds;
     if (sqlite3_prepare_v2(db, degrade_sql, -1, &ds, NULL) == SQLITE_OK) {
         sqlite3_bind_text(ds, 1, model_id, -1, SQLITE_STATIC);
@@ -234,7 +234,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
          * which worker threads share) picks up keys set after startup. */
         const char *key = m->api_key_env[0] ? getenv(m->api_key_env) : cfg->provider.api_key;
         char *key_buf = (key && key[0]) ? strdup(key)
-                      : m->api_key_env[0] ? db_kv_get_secret(db, m->api_key_env)
+                      : m->api_key_env[0] ? db_secret_get_system(db, m->api_key_env)
                       : NULL;
         if (!key_buf) key_buf = strdup("");
         route_prov.api_key = key_buf;

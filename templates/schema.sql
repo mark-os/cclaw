@@ -4,9 +4,14 @@
 -- owner-scoped so a live peer's in-flight sessions are never stomped.
 
 -- ═══ Global settings ═══
+-- Registry-backed (src/config_registry.c): default_value + description are
+-- code-owned and resynced every startup; value is the operator/agent override
+-- (NULL = use default). Effective value = COALESCE(value, default_value).
 CREATE TABLE IF NOT EXISTS config (
-  key TEXT PRIMARY KEY,
-  value TEXT
+  key           TEXT PRIMARY KEY,
+  value         TEXT,
+  default_value TEXT,
+  description   TEXT
 );
 
 -- ═══ Providers ═══
@@ -414,11 +419,16 @@ CREATE TABLE IF NOT EXISTS secret_hosts (
 -- "enc:<hex(...)>" (never plaintext). status='pending' is provenance/UX only —
 -- enforcement comes free from secret_hosts having zero rows for a new secret
 -- (first use always parks; ALWAYS-approval binds and flips it to 'active').
+-- scope: 'agent' secrets feed {{SECRET:name}} interpolation + child injection;
+-- 'system' secrets (provider API keys) are daemon-consumed only and are never
+-- loaded into the agent-facing snapshot — an agent cannot interpolate them.
 CREATE TABLE IF NOT EXISTS secrets (
   name       TEXT PRIMARY KEY,                    -- ^[A-Z][A-Z0-9_]*$
   value      TEXT NOT NULL,
   status     TEXT NOT NULL DEFAULT 'active',       -- 'active' | 'pending'
   source     TEXT NOT NULL DEFAULT 'operator',      -- 'operator'|'generated'|'quarantine'
+  scope      TEXT NOT NULL DEFAULT 'agent'
+             CHECK (scope IN ('agent','system')),
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 

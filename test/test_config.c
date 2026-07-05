@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config.h"
+#include "config_registry.h"
 #include "db.h"
 #include "test_util.h"
 #include <assert.h>
@@ -51,7 +52,7 @@ static void test_kv_values(void) {
     /* Remove auto-seeded provider, set our own */
     sqlite3_exec(db, "INSERT OR REPLACE INTO providers(name,base_url,endpoint_type,api_key_env,default_model,priority)"
         " VALUES('test','http://localhost:8000/v1','openai','OPENROUTER_API_KEY','gpt-4',0);", NULL, NULL, NULL);
-    db_kv_set(db, "web_port", "9090");
+    config_set(db, "web_port", "9090");
 
     Config *cfg = config_load(db);
     assert(cfg != NULL);
@@ -66,7 +67,6 @@ static void test_kv_values(void) {
 static void test_env_overrides_kv(void) {
     sqlite3 *db = fresh_db();
     assert(db);
-    db_kv_set(db, "provider.model", "gpt-4");
 
     setenv("OPENROUTER_API_KEY", "env-key", 1);
     setenv("CCLAW_MODEL", "claude-4", 1);
@@ -85,14 +85,14 @@ static void test_env_overrides_kv(void) {
 }
 
 static void test_kv_secret_fallback(void) {
-    /* Third-priority key source: env unset → encrypted kv */
+    /* Third-priority key source: env unset → encrypted secret in secrets table */
     unsetenv("OPENROUTER_API_KEY");
     static const uint8_t k[32] = {9, 8, 7, 6, 5, 4, 3, 2, 1};
 
     sqlite3 *db = fresh_db();
     assert(db);
     db_set_secret_key(k);
-    assert(db_kv_set_secret(db, "OPENROUTER_API_KEY", "sk-from-kv") == 0);
+    assert(db_secret_set(db, "OPENROUTER_API_KEY", "sk-from-kv", "operator", "active", "system") == 0);
 
     Config *cfg = config_load(db);
     assert(cfg != NULL);
@@ -132,7 +132,7 @@ static void test_stale_lock_timeout(void) {
 
     sqlite3 *db = fresh_db();
     assert(db);
-    db_kv_set(db, "stale_lock_timeout", "120");
+    config_set(db, "stale_lock_timeout", "120");
 
     Config *cfg = config_load(db);
     assert(cfg != NULL);

@@ -1,5 +1,6 @@
 /* Unit test for CLI agent picker DB operations */
 #include "db.h"
+#include "config_registry.h"
 #include "test_util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,9 +73,9 @@ static void test_default_agent_kv(void) {
     assert(!agents && count == 0);
 
     db_agent_upsert(db, "default", NULL, NULL);
-    db_kv_set(db, "default_agent", "default");
+    config_set(db, "default_agent", "default");
 
-    char *def = db_kv_get(db, "default_agent");
+    char *def = config_get(db, "default_agent");
     assert(def);
     assert(strcmp(def, "default") == 0);
     free(def);

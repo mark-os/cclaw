@@ -77,7 +77,7 @@ static void test_dedup_same_value_within_call(void) {
 
 static void test_dedup_reuses_existing_secret_name(void) {
     sqlite3 *db = fresh_db();
-    assert(db_secret_set(db, "MY_AWS_KEY", AWS_KEY, "operator", "active") == 0);
+    assert(db_secret_set(db, "MY_AWS_KEY", AWS_KEY, "operator", "active", NULL) == 0);
 
     size_t n = 0;
     ShellSecret *snap = db_secrets_load(db, &n);
@@ -102,7 +102,7 @@ static void test_cap_falls_back_to_redact(void) {
     for (int i = 0; i < 32; i++) {
         char name[32];
         snprintf(name, sizeof(name), "FILLER_%d", i);
-        assert(db_secret_set(db, name, "x", "quarantine", "pending") == 0);
+        assert(db_secret_set(db, name, "x", "quarantine", "pending", NULL) == 0);
     }
     assert(db_secret_pending_count(db) == 32);
 

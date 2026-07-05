@@ -101,29 +101,32 @@ static void test_different_encryptions_differ(void) {
     printf("  PASS: different encryptions differ (random nonce)\n");
 }
 
-static void test_db_kv_secret_roundtrip(void) {
+static void test_db_secret_roundtrip(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db != NULL);
 
     db_set_secret_key(TEST_KEY);
 
-    assert(db_kv_set_secret(db, "test.secret", "my-api-key") == 0);
+    assert(db_secret_set(db, "TEST_SECRET", "my-api-key", "operator", "active", "system") == 0);
 
-    /* Raw value should be encrypted */
-    char *raw = db_kv_get(db, "test.secret");
+    /* Raw value in secrets table should be encrypted */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT value FROM secrets WHERE name='TEST_SECRET'", -1, &s, NULL);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    const char *raw = (const char *)sqlite3_column_text(s, 0);
     assert(raw != NULL);
     assert(strncmp(raw, "enc:", 4) == 0);
-    assert(strcmp(raw, "my-api-key") != 0);
-    free(raw);
+    assert(strstr(raw, "my-api-key") == NULL);
+    sqlite3_finalize(s);
 
-    /* Secret getter should decrypt */
-    char *dec = db_kv_get_secret(db, "test.secret");
+    /* db_secret_get_system should decrypt */
+    char *dec = db_secret_get_system(db, "TEST_SECRET");
     assert(dec != NULL);
     assert(strcmp(dec, "my-api-key") == 0);
     free(dec);
 
     db_close(db);
-    printf("  PASS: db_kv_secret roundtrip\n");
+    printf("  PASS: db_secret roundtrip\n");
 }
 
 static void test_key_file_create_and_load(void) {
@@ -165,8 +168,8 @@ static void test_startup_integration(void) {
     db_set_secret_key(key);
 
     /* Store and retrieve a secret */
-    assert(db_kv_set_secret(db, "provider.api_key", "sk-test-123") == 0);
-    char *val = db_kv_get_secret(db, "provider.api_key");
+    assert(db_secret_set(db, "PROVIDER_API_KEY", "sk-test-123", "operator", "active", "system") == 0);
+    char *val = db_secret_get_system(db, "PROVIDER_API_KEY");
     assert(val != NULL);
     assert(strcmp(val, "sk-test-123") == 0);
     free(val);
@@ -182,7 +185,7 @@ static void test_startup_integration(void) {
     assert(memcmp(key, key2, 32) == 0);
     db_set_secret_key(key2);
 
-    char *val2 = db_kv_get_secret(db, "provider.api_key");
+    char *val2 = db_secret_get_system(db, "PROVIDER_API_KEY");
     assert(val2 != NULL);
     assert(strcmp(val2, "sk-test-123") == 0);
     free(val2);
@@ -212,7 +215,7 @@ int main(void) {
     test_tampered_ciphertext_fails();
     test_invalid_input();
     test_different_encryptions_differ();
-    test_db_kv_secret_roundtrip();
+    test_db_secret_roundtrip();
     test_key_file_create_and_load();
     test_startup_integration();
     printf("All secret tests passed.\n");

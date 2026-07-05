@@ -183,7 +183,7 @@ every turn (no cached state to drift):
 
 **Self-spawn** (`launch_agent` with no `name`): child runs as the *calling*
 agent — same grants, fresh session, task in inbox. Filter resolution:
-explicit `tools` arg → kv `worker_tools` (conservative default: file tools,
+explicit `tools` arg → config `worker_tools` (conservative default: file tools,
 shell_exec, web_fetch, js_eval, check_session, check_approval, search_config;
 no memory mutators, no config/agent/extension tools, no launch_agent) →
 unrestricted. Passing `tools` with a `name` is an error.
@@ -330,9 +330,9 @@ If CClaw ever becomes multi-user, the trust model changes fundamentally:
 
 ## Secret Storage
 
-Secrets are stored encrypted using ChaCha20-Poly1305 AEAD, in two tables: the `config` table (provider API keys, via `db_kv_get_secret()`/`db_kv_set_secret()`) and the dedicated `secrets` table (user/agent-minted credentials — see [Secret Store](#secret-store) below). The 32-byte encryption key lives in `.cclaw_key` on disk, loaded once at daemon startup via `db_set_secret_key()`, never written to the DB. No code outside `src/db.c` touches the raw ciphertext in either table.
+Secrets are stored encrypted using ChaCha20-Poly1305 AEAD, in one table: `secrets`. The `scope` column splits its two audiences — `agent` rows (user/agent-minted credentials, see [Secret Store](#secret-store) below) feed interpolation and child injection; `system` rows (provider API keys, via `db_secret_get_system()`) are daemon-consumed only and never enter the agent-facing snapshot, so `{{SECRET:OPENROUTER_API_KEY}}` does not resolve. The `config` table holds no ciphertext at all. The 32-byte encryption key lives in `.cclaw_key` on disk, loaded once at daemon startup via `db_set_secret_key()`, never written to the DB. No code outside `src/db.c` touches the raw ciphertext in either table.
 
-Provider API keys resolve env → encrypted kv: `config_load()` reads the provider's `api_key_env` variable first and falls back to the encrypted kv under the same name (admin `set key` and `configure_provider` write there). cclaw has **no `.env` parser** — a `.env` file is user-managed dev convenience that the user's own shell sources before launching cclaw.
+Provider API keys resolve env → system-scope secret: `config_load()` reads the provider's `api_key_env` variable first and falls back to the encrypted `secrets` row (scope `system`) under the same name (admin `set key` and `configure_provider` write there). cclaw has **no `.env` parser** — a `.env` file is user-managed dev convenience that the user's own shell sources before launching cclaw.
 
 **Key-protection ceiling.** The DB store is encrypted at rest, but the key sits on the *same disk* as the ciphertext. Whole-disk theft yields both → plaintext. So the built-in store protects against *exfiltration of `cclaw.db` alone* (a leaked backup, a mis-scoped file copy) — **not** against full-disk capture or the running host. Closing that gap means deriving the key from a user passphrase (KDF) or binding it to hardware (TPM / Secure Enclave) — which is exactly what a keychain storage provider gets for free (see [Storage providers](#storage-providers)). For a single-user box a chmod-600 key file is a reasonable default; it is not a substitute for a hardware-backed vault, and users who care should use the keychain provider.
 
@@ -358,7 +358,7 @@ So "trust the agent to manage my passwords" is half-right: cclaw will *broker* t
 
 ### Secret Store
 
-Secrets are no longer only `CCLAW_SECRET_*` env vars collected at process startup — a DB-backed `secrets` table (name, encrypted value, `status`, `source`, `created_at`) lets a secret be born *mid-session*, closing the "sign up for a new service" gap: an agent can mint a fresh credential without ever seeing the plaintext, and an operator can hand one to a running agent without a restart.
+Secrets are no longer only `CCLAW_SECRET_*` env vars collected at process startup — a DB-backed `secrets` table (name, encrypted value, `status`, `source`, `scope`, `created_at`) lets a secret be born *mid-session*, closing the "sign up for a new service" gap: an agent can mint a fresh credential without ever seeing the plaintext, and an operator can hand one to a running agent without a restart.
 
 Three ways a secret enters the `secrets` table:
 
@@ -388,11 +388,11 @@ sandbox_profile governs sandbox strictness (env scrub, network, rlimits) — wha
 
 ### Storage providers (design — not yet implemented)
 
-The planned interface is a thin provider abstraction — `secret_resolve(name)` / `secret_list()` — so the broker (resolve / inject / mask / scope) never knows where a value came from. Today, secrets are stored directly in cclaw.db's `config` table via `db_kv_get_secret()` / `db_kv_set_secret()`, and reach tool children as `CCLAW_SECRET_*` env vars.
+The planned interface is a thin provider abstraction — `secret_resolve(name)` / `secret_list()` — so the broker (resolve / inject / mask / scope) never knows where a value came from. Today, secrets are stored in cclaw.db's `secrets` table via `db_secret_set()` / `db_secrets_load()` / `db_secret_get_system()`, and reach tool children as `CCLAW_SECRET_*` env vars.
 
 | Provider | Status | Key protection |
 |----------|--------|----------------|
-| cclaw.db ChaCha20 (`config` kv + `secrets` table) | #1, default | key file on disk (chmod 600) — see [key-protection ceiling](#secret-storage) |
+| cclaw.db ChaCha20 (`secrets` table) | #1, default | key file on disk (chmod 600) — see [key-protection ceiling](#secret-storage) |
 | OS keychain (libsecret / macOS Keychain / Windows CredMan) | future | OS-managed, hardware-backed where available |
 | User's existing password manager | future | owned by the PM |
 

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config.h"
+#include "config_registry.h"
 #include "agent_config.h"
 #include "buf.h"
 #include "db.h"
@@ -165,16 +166,16 @@ Config *config_load_from_env(void) {
 
     v = getenv("CCLAW_PROVIDER_BASE_URL");
     if (!v || !v[0]) v = getenv("CCLAW_PROVIDER");
-    cfg->provider.base_url = str_dup(v ? v : "https://openrouter.ai/api/v1");
+    cfg->provider.base_url = str_dup(v ? v : CCLAW_DEF_BASE_URL);
 
     v = getenv("CCLAW_MODEL");
-    cfg->provider.model = str_dup(v ? v : "deepseek/deepseek-v4-flash");
+    cfg->provider.model = str_dup(v ? v : CCLAW_DEF_MODEL);
 
     v = getenv("CCLAW_MAX_TOKENS");
-    cfg->provider.max_tokens = v ? atoi(v) : 4096;
+    cfg->provider.max_tokens = v ? atoi(v) : CCLAW_DEF_MAX_TOKENS;
 
     v = getenv("CCLAW_CONTEXT_WINDOW");
-    cfg->provider.context_window = v ? atoi(v) : 128000;
+    cfg->provider.context_window = v ? atoi(v) : CCLAW_DEF_CONTEXT_WINDOW;
 
     /* endpoint type */
     v = getenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
@@ -191,18 +192,19 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_DB");
     cfg->db_path = str_dup(v ? v : "cclaw.db");
 
-    /* Scalars */
+    /* Scalars — defaults come from the config registry so the env-only
+     * loader can never drift from the DB loader. */
     v = getenv("CCLAW_MAX_ITERATIONS");
-    cfg->max_iterations = v ? atoi(v) : AGENT_DEFAULT_MAX_ITERATIONS;
+    cfg->max_iterations = v ? atoi(v) : config_default_int("max_iterations");
 
     v = getenv("CCLAW_MAX_HISTORY_TOKENS");
-    cfg->max_history_tokens = v ? atoi(v) : 0;
+    cfg->max_history_tokens = v ? atoi(v) : config_default_int("max_history_tokens");
 
     v = getenv("CCLAW_SHELL_TIMEOUT");
-    cfg->shell_timeout = v ? atoi(v) : AGENT_DEFAULT_SHELL_TIMEOUT;
+    cfg->shell_timeout = v ? atoi(v) : config_default_int("shell_timeout");
 
     v = getenv("CCLAW_TOKEN_RATE_LIMIT");
-    cfg->token_rate_limit = v ? atoi(v) : 1000000;
+    cfg->token_rate_limit = v ? atoi(v) : config_default_int("token_rate_limit");
 
     v = getenv("CCLAW_SAVE_REASONING");
     cfg->save_reasoning = v ? atoi(v) : 0;
@@ -217,19 +219,21 @@ Config *config_load_from_env(void) {
     cfg->log_level = log_level_parse(v);
 
     v = getenv("CCLAW_CONTEXT_THRESHOLD");
-    cfg->context_threshold = v ? (float)atof(v) : 0.6f;
+    cfg->context_threshold = v ? (float)atof(v)
+                               : (float)config_default_double("context_threshold");
 
     v = getenv("CCLAW_COMPACTION_TARGET");
-    cfg->compaction_target = v ? (float)atof(v) : 0.3f;
+    cfg->compaction_target = v ? (float)atof(v)
+                               : (float)config_default_double("compaction_target");
 
     v = getenv("CCLAW_COMPACTION");
-    cfg->compaction = v ? atoi(v) : 1;
+    cfg->compaction = v ? atoi(v) : config_default_int("compaction");
 
     v = getenv("CCLAW_AUTO_RECALL");
-    cfg->auto_recall = v ? atoi(v) : 0;
+    cfg->auto_recall = v ? atoi(v) : config_default_int("auto_recall");
 
     v = getenv("CCLAW_RECALL_MAX_TOKENS");
-    cfg->recall_max_tokens = v ? atoi(v) : 500;
+    cfg->recall_max_tokens = v ? atoi(v) : config_default_int("recall_max_tokens");
 
     /* cache_hints */
     v = getenv("CCLAW_CACHE_HINTS");
@@ -243,29 +247,12 @@ Config *config_load_from_env(void) {
 }
 
 /* Build Config for parent processes (CLI/daemon).
- * Priority: env var > kv value > hardcoded default. */
+ * Priority: env var > config value > registry default. */
 Config *config_load(sqlite3 *db) {
     if (!db) return NULL;
 
     Config *cfg = calloc(1, sizeof(Config));
     if (!cfg) return NULL;
-
-    /* Helper: read kv string, fallback to default */
-    #define KV_STR(key, def) do { \
-        char *v = db_kv_get(db, key); \
-        if (v) { cfg_val = v; } else { cfg_val = str_dup(def); } \
-    } while(0)
-
-    #define KV_INT(key, def) do { \
-        char *v = db_kv_get(db, key); \
-        int_val = v ? atoi(v) : (def); \
-        free(v); \
-    } while(0)
-
-    char *cfg_val; (void)cfg_val;
-    int int_val;
-
-
 
     /* Load providers from providers table (ordered by priority) */
     {
@@ -299,7 +286,7 @@ Config *config_load(sqlite3 *db) {
                     const char *key_val = getenv(v);
                     /* env first (user's shell may source a .env), then encrypted kv */
                     p->api_key = (key_val && key_val[0]) ? strdup(key_val)
-                                                         : db_kv_get_secret(db, v);
+                                                         : db_secret_get_system(db, v);
                 }
                 v = (const char *)sqlite3_column_text(ps, 4);
                 p->model = v ? strdup(v) : strdup("deepseek/deepseek-v4-flash");
@@ -323,46 +310,22 @@ Config *config_load(sqlite3 *db) {
             const char *key = getenv("OPENROUTER_API_KEY");
             cfg->provider.api_key = (key && key[0])
                 ? strdup(key)
-                : db_kv_get_secret(db, "OPENROUTER_API_KEY");
+                : db_secret_get_system(db, "OPENROUTER_API_KEY");
         }
     }
 
-    KV_INT("web_port", 8080);
-    cfg->web_port = int_val;
-
-    KV_INT("max_iterations", AGENT_DEFAULT_MAX_ITERATIONS);
-    cfg->max_iterations = int_val;
-
-    KV_INT("max_history_tokens", 0);
-    cfg->max_history_tokens = int_val;
-
-    KV_INT("heartbeat_interval", 0);
-    cfg->heartbeat_interval = int_val;
-
-    KV_INT("shell_timeout", AGENT_DEFAULT_SHELL_TIMEOUT);
-    cfg->shell_timeout = int_val;
-
-    KV_INT("stale_lock_timeout", 300);
-    cfg->stale_lock_timeout = int_val;
-
-    KV_INT("token_rate_limit", 1000000);
-    cfg->token_rate_limit = int_val;
-
-    /* compaction configs */
-    {
-        char *v = db_kv_get(db, "context_threshold");
-        cfg->context_threshold = v ? (float)atof(v) : 0.6f;
-        free(v);
-        v = db_kv_get(db, "compaction_target");
-        cfg->compaction_target = v ? (float)atof(v) : 0.3f;
-        free(v);
-        v = db_kv_get(db, "compaction");
-        cfg->compaction = v ? atoi(v) : 1;
-        free(v);
-    }
-
-    #undef KV_STR
-    #undef KV_INT
+    cfg->web_port = config_get_int(db, "web_port");
+    cfg->max_iterations = config_get_int(db, "max_iterations");
+    cfg->max_history_tokens = config_get_int(db, "max_history_tokens");
+    cfg->heartbeat_interval = config_get_int(db, "heartbeat_interval");
+    cfg->shell_timeout = config_get_int(db, "shell_timeout");
+    cfg->stale_lock_timeout = config_get_int(db, "stale_lock_timeout");
+    cfg->token_rate_limit = config_get_int(db, "token_rate_limit");
+    cfg->context_threshold = (float)config_get_double(db, "context_threshold");
+    cfg->compaction_target = (float)config_get_double(db, "compaction_target");
+    cfg->compaction = config_get_int(db, "compaction");
+    cfg->auto_recall = config_get_int(db, "auto_recall");
+    cfg->recall_max_tokens = config_get_int(db, "recall_max_tokens");
 
     /* Env var overrides (highest priority) */
     env_override_str(&cfg->provider.api_key, "OPENROUTER_API_KEY");
@@ -400,8 +363,7 @@ Config *config_load(sqlite3 *db) {
         if (v) cfg->compaction = atoi(v);
     }
 
-    /* auto-recall defaults + env overrides */
-    if (cfg->recall_max_tokens == 0) cfg->recall_max_tokens = 500;
+    /* auto-recall env overrides */
     env_override_int(&cfg->auto_recall, "CCLAW_AUTO_RECALL");
     env_override_int(&cfg->recall_max_tokens, "CCLAW_RECALL_MAX_TOKENS");
 
@@ -414,8 +376,9 @@ Config *config_load(sqlite3 *db) {
      * Without this the file tools, proxy mount, and workspace_init all see a
      * NULL workspace and fail with "no workspace configured". */
     {
-        char *v = db_kv_get(db, "workspace");
-        cfg->workspace = v ? v : default_workspace();
+        char *v = config_get(db, "workspace");
+        if (v && v[0]) cfg->workspace = v;
+        else { free(v); cfg->workspace = default_workspace(); }
     }
     env_override_str(&cfg->workspace, "CCLAW_WORKSPACE");
 

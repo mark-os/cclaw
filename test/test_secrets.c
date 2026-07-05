@@ -1,5 +1,5 @@
 /* integration test — secrets round-trip.
- * kv_set_secret stores enc: prefix; kv_get_secret returns plaintext;
+ * db_secret_set stores enc: prefix; db_secret_get_system returns plaintext;
  * delete key file → decrypt fails gracefully; no network.
  * Cites the AEAD encryption design. */
 #define _POSIX_C_SOURCE 200809L
@@ -53,18 +53,21 @@ static void test_roundtrip(void) {
     db_set_secret_key(key);
 
     /* Store */
-    if (db_kv_set_secret(db, "provider.api_key", "sk-or-v1-realkey") != 0) { db_close(db); FAIL("kv_set_secret"); }
+    if (db_secret_set(db, "PROVIDER_API_KEY", "sk-or-v1-realkey", "operator", "active", "system") != 0) { db_close(db); FAIL("db_secret_set"); }
 
     /* Raw value must be encrypted */
-    char *raw = db_kv_get(db, "provider.api_key");
-    if (!raw) { db_close(db); FAIL("kv_get raw NULL"); }
-    if (strncmp(raw, "enc:", 4) != 0) { free(raw); db_close(db); FAIL("missing enc: prefix"); }
-    if (strcmp(raw, "sk-or-v1-realkey") == 0) { free(raw); db_close(db); FAIL("stored plaintext!"); }
-    free(raw);
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT value FROM secrets WHERE name='PROVIDER_API_KEY'", -1, &s, NULL);
+    if (sqlite3_step(s) != SQLITE_ROW) { sqlite3_finalize(s); db_close(db); FAIL("no row"); }
+    const char *raw = (const char *)sqlite3_column_text(s, 0);
+    if (!raw) { sqlite3_finalize(s); db_close(db); FAIL("raw NULL"); }
+    if (strncmp(raw, "enc:", 4) != 0) { sqlite3_finalize(s); db_close(db); FAIL("missing enc: prefix"); }
+    if (strstr(raw, "sk-or-v1-realkey") != NULL) { sqlite3_finalize(s); db_close(db); FAIL("stored plaintext!"); }
+    sqlite3_finalize(s);
 
     /* Decrypt returns original */
-    char *dec = db_kv_get_secret(db, "provider.api_key");
-    if (!dec) { db_close(db); FAIL("kv_get_secret NULL"); }
+    char *dec = db_secret_get_system(db, "PROVIDER_API_KEY");
+    if (!dec) { db_close(db); FAIL("db_secret_get_system NULL"); }
     if (strcmp(dec, "sk-or-v1-realkey") != 0) { free(dec); db_close(db); FAIL("decrypt mismatch"); }
     free(dec);
 
@@ -83,7 +86,7 @@ static void test_deleted_key_file(void) {
     uint8_t key[32];
     if (secret_key_load_or_create(db_path, key) != 0) { db_close(db); FAIL("key_load_or_create"); }
     db_set_secret_key(key);
-    db_kv_set_secret(db, "test.key", "secret-value");
+    db_secret_set(db, "TEST_KEY", "secret-value", "operator", "active", "system");
     db_close(db);
 
     /* Delete the key file */
@@ -101,7 +104,7 @@ static void test_deleted_key_file(void) {
     if (memcmp(key, new_key, 32) == 0) { db_close(db); FAIL("key should differ after recreate"); }
 
     /* Decrypt with wrong key fails gracefully (NULL, no crash) */
-    char *dec = db_kv_get_secret(db, "test.key");
+    char *dec = db_secret_get_system(db, "TEST_KEY");
     if (dec != NULL) { free(dec); db_close(db); FAIL("expected NULL on wrong key"); }
 
     db_close(db);
@@ -119,17 +122,17 @@ static void test_multiple_secrets(void) {
     if (secret_key_load_or_create(db_path, key) != 0) { db_close(db); FAIL("key_load_or_create"); }
     db_set_secret_key(key);
 
-    db_kv_set_secret(db, "key.one", "value-one");
-    db_kv_set_secret(db, "key.two", "value-two");
-    db_kv_set_secret(db, "key.three", "value-three");
+    db_secret_set(db, "KEY_ONE", "value-one", "operator", "active", "system");
+    db_secret_set(db, "KEY_TWO", "value-two", "operator", "active", "system");
+    db_secret_set(db, "KEY_THREE", "value-three", "operator", "active", "system");
 
-    char *v1 = db_kv_get_secret(db, "key.one");
-    char *v2 = db_kv_get_secret(db, "key.two");
-    char *v3 = db_kv_get_secret(db, "key.three");
+    char *v1 = db_secret_get_system(db, "KEY_ONE");
+    char *v2 = db_secret_get_system(db, "KEY_TWO");
+    char *v3 = db_secret_get_system(db, "KEY_THREE");
 
-    if (!v1 || strcmp(v1, "value-one") != 0) { free(v1); free(v2); free(v3); db_close(db); FAIL("key.one"); }
-    if (!v2 || strcmp(v2, "value-two") != 0) { free(v1); free(v2); free(v3); db_close(db); FAIL("key.two"); }
-    if (!v3 || strcmp(v3, "value-three") != 0) { free(v1); free(v2); free(v3); db_close(db); FAIL("key.three"); }
+    if (!v1 || strcmp(v1, "value-one") != 0) { free(v1); free(v2); free(v3); db_close(db); FAIL("KEY_ONE"); }
+    if (!v2 || strcmp(v2, "value-two") != 0) { free(v1); free(v2); free(v3); db_close(db); FAIL("KEY_TWO"); }
+    if (!v3 || strcmp(v3, "value-three") != 0) { free(v1); free(v2); free(v3); db_close(db); FAIL("KEY_THREE"); }
 
     free(v1); free(v2); free(v3);
     db_close(db);
@@ -147,10 +150,10 @@ static void test_overwrite_secret(void) {
     if (secret_key_load_or_create(db_path, key) != 0) { db_close(db); FAIL("key_load_or_create"); }
     db_set_secret_key(key);
 
-    db_kv_set_secret(db, "overwrite.key", "original");
-    db_kv_set_secret(db, "overwrite.key", "updated");
+    db_secret_set(db, "OVERWRITE_KEY", "original", "operator", "active", "system");
+    db_secret_set(db, "OVERWRITE_KEY", "updated", "operator", "active", "system");
 
-    char *dec = db_kv_get_secret(db, "overwrite.key");
+    char *dec = db_secret_get_system(db, "OVERWRITE_KEY");
     if (!dec || strcmp(dec, "updated") != 0) { free(dec); db_close(db); FAIL("overwrite mismatch"); }
     free(dec);
 

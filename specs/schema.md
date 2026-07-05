@@ -8,12 +8,16 @@ Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_S
 
 ## config
 
-Global settings and encrypted secrets. Daemon-only write access.
+Registry-backed global settings (`src/config_registry.c`). Every key is declared in a static C table with a default and a description; `config_registry_sync()` mirrors those into `default_value`/`description` at startup (code-owned columns, always overwritten). `value` is the operator/agent override — `NULL` means "use default", and the effective value is always `COALESCE(value, default_value)`. `config_set()` rejects unregistered keys: no anonymous writes, so every row in this table is self-describing. Holds **no secrets** — encrypted values live in `secrets` (scope `system` for provider keys).
+
+`SELECT key, value, default_value, description FROM config` gives an agent the complete knob inventory: what exists, what it does, what it's set to, and whether it's an override.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `key` | TEXT PRIMARY KEY | dotted namespace: `provider.api_key`, `telegram_token`, etc. |
-| `value` | TEXT | plaintext or `enc:<hex(nonce‖ct‖tag)>` for secrets |
+| `key` | TEXT PRIMARY KEY | must exist in the C registry |
+| `value` | TEXT | override; NULL = use default |
+| `default_value` | TEXT | code-owned, resynced every startup |
+| `description` | TEXT | code-owned, resynced every startup |
 
 ---
 
@@ -215,7 +219,7 @@ Fail-closed credential rule (specs/trust.md): a secret may only be submitted to 
 
 ## secrets
 
-Secret store (specs/security.md): DB-backed secrets, encrypted at rest with the same master key as `config`'s secret-kv rows. Feeds the per-call snapshot (`secrets_snapshot()`) that merges these with the env-collected `CCLAW_SECRET_*` base — env wins on a name collision. `status='pending'` is provenance/UX only; enforcement is `secret_hosts` having zero rows for the name (fail-closed, same as any other secret).
+Secret store (specs/security.md): the single home for every encrypted value, all AEAD-sealed with the master key. `scope` splits two audiences: `agent` secrets feed the per-call snapshot (`secrets_snapshot()` merges them with the env-collected `CCLAW_SECRET_*` base — env wins on a name collision) and are usable via `{{SECRET:name}}`; `system` secrets are provider API keys consumed by the daemon (`db_secret_get_system()`) and are **excluded from the snapshot**, so an agent can never interpolate them. `status='pending'` is provenance/UX only; enforcement is `secret_hosts` having zero rows for the name (fail-closed, same as any other secret).
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -223,9 +227,10 @@ Secret store (specs/security.md): DB-backed secrets, encrypted at rest with the 
 | `value` | TEXT NOT NULL | `enc:<hex(...)>`, never plaintext |
 | `status` | TEXT NOT NULL DEFAULT 'active' | `active` \| `pending` |
 | `source` | TEXT NOT NULL DEFAULT 'operator' | `operator` (`cclaw secret set`) \| `generated` (`secret_create` tool) \| `quarantine` (DLP capture) |
+| `scope` | TEXT NOT NULL DEFAULT 'agent' | `agent` (interpolatable/injectable) \| `system` (provider keys, daemon-only) |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-Written by: `cclaw secret set\|rm\|list` (operator verb), the `secret_create` tool, and `tool_result_postprocess_q`/`inbox_insert_scanned` (DLP quarantine, auto-named `PENDING_<RULEID>_<n>`). `resolve_approval` flips `pending` → `active` when a `secret_bind` ALWAYS-approval records the name's first `secret_hosts` binding.
+Written by: `cclaw secret set\|rm\|list` (operator verb), the `secret_create` tool, `configure_provider`/`admin_set_key` (scope `system`), and `tool_result_postprocess_q`/`inbox_insert_scanned` (DLP quarantine, auto-named `PENDING_<RULEID>_<n>`). `resolve_approval` flips `pending` → `active` when a `secret_bind` ALWAYS-approval records the name's first `secret_hosts` binding.
 
 ---
 

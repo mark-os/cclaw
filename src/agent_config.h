@@ -6,11 +6,6 @@
 #include <sqlite3.h>
 #include "types.h"
 
-/* system defaults — single source of truth for agent creation,
- * CLI zero-config, and absent-key resolution in daemon fork */
-#define AGENT_DEFAULT_MAX_ITERATIONS 25
-#define AGENT_DEFAULT_SHELL_TIMEOUT  30
-
 /* Per-agent config loaded from agents table in cclaw.db.
  * Fields override global Config when non-NULL/non-zero. */
 typedef struct {

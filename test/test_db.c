@@ -1,4 +1,5 @@
 #include "db.h"
+#include "config_registry.h"
 #include "test_util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -163,43 +164,30 @@ static void test_fts5_search(void) {
     printf("  PASS test_fts5_search\n");
 }
 
-static void test_kv(void) {
-    const char *path = "/tmp/test_cclaw_kv.sqlite";
+static void test_config_registry(void) {
+    const char *path = "/tmp/test_cclaw_registry.sqlite";
     unlink(path);
 
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
-    /* Get missing key returns NULL */
-    char *val = db_kv_get(db, "nope");
-    assert(val == NULL);
+    /* Unset registered key returns its default */
+    assert(config_get_int(db, "web_port") == 8080);
 
-    /* Set and get */
-    assert(db_kv_set(db, "tg_offset", "12345") == 0);
-    val = db_kv_get(db, "tg_offset");
-    assert(val != NULL);
-    assert(strcmp(val, "12345") == 0);
-    free(val);
+    /* Set override and read back */
+    assert(config_set(db, "web_port", "9090") == 0);
+    assert(config_get_int(db, "web_port") == 9090);
 
-    /* Overwrite */
-    assert(db_kv_set(db, "tg_offset", "99999") == 0);
-    val = db_kv_get(db, "tg_offset");
-    assert(val != NULL);
-    assert(strcmp(val, "99999") == 0);
-    free(val);
+    /* Clear override (NULL) resets to default */
+    assert(config_set(db, "web_port", NULL) == 0);
+    assert(config_get_int(db, "web_port") == 8080);
 
-    /* Survives reopen */
-    db_close(db);
-    db = test_db_open(path);
-    assert(db != NULL);
-    val = db_kv_get(db, "tg_offset");
-    assert(val != NULL);
-    assert(strcmp(val, "99999") == 0);
-    free(val);
+    /* Unregistered key rejected */
+    assert(config_set(db, "tg_offset", "1") == -1);
 
     db_close(db);
     unlink(path);
-    printf("  PASS test_kv\n");
+    printf("  PASS test_config_registry\n");
 }
 
 static void test_agent_pragmas(void) {
@@ -236,7 +224,7 @@ int main(void) {
     test_tables_created();
     test_reopen_idempotent();
     test_fts5_search();
-    test_kv();
+    test_config_registry();
     test_agent_pragmas();
     printf("All db tests passed.\n");
     return 0;

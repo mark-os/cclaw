@@ -1,12 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include "advance.h"
+#include "config_registry.h"
 #include "log.h"
 #include "wake.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-
-#define DEFAULT_MAX_ITER 25
 
 static AdvanceOutput make_output(AdvanceResult action, int64_t sid,
                                  const char *agent, int iter) {
@@ -89,7 +88,7 @@ static void notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
 }
 
 AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iterations) {
-    if (max_iterations <= 0) max_iterations = DEFAULT_MAX_ITER;
+    if (max_iterations <= 0) max_iterations = config_default_int("max_iterations");
 
     /* Read agent_name, state, turn_iteration in one query */
     sqlite3_stmt *stmt;

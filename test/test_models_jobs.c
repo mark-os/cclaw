@@ -1,4 +1,5 @@
 #include "db.h"
+#include "config_registry.h"
 #include "test_util.h"
 #include <assert.h>
 #include <stdio.h>
@@ -25,13 +26,10 @@ static void test_models_table(void) {
     assert(strcmp((const char *)sqlite3_column_text(s, 3), "healthy") == 0);
     sqlite3_finalize(s);
 
-    /* Verify health config defaults */
-    char *v = db_kv_get(db, "health_5xx_threshold");
-    assert(v && strcmp(v, "3") == 0); free(v);
-    v = db_kv_get(db, "health_429_threshold");
-    assert(v && strcmp(v, "10") == 0); free(v);
-    v = db_kv_get(db, "health_cooldown_sec");
-    assert(v && strcmp(v, "300") == 0); free(v);
+    /* Verify health config defaults via registry */
+    assert(config_get_int(db, "health_5xx_threshold") == 3);
+    assert(config_get_int(db, "health_429_threshold") == 10);
+    assert(config_get_int(db, "health_cooldown_sec") == 300);
 
     db_close(db); unlink(DB_PATH);
     printf("  PASS test_models_table\n");

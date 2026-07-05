@@ -283,11 +283,13 @@ void db_set_child_pragmas(sqlite3 *db) {
     sqlite3_exec(db, "PRAGMA cache_size=-512;", NULL, NULL, NULL);
 }
 
-/* Seed default config + provider on first run. Call once from main(). */
+/* Seed default provider/model/tool rows on first run. Call once from main().
+ * Keyed on the providers table — config rows come from config_registry_sync(),
+ * not seed data. */
 int db_seed_defaults(sqlite3 *db) {
     if (!db) return -1;
     sqlite3_stmt *cnt;
-    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM config", -1, &cnt, NULL) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM providers", -1, &cnt, NULL) != SQLITE_OK)
         return -1;
     int empty = 0;
     if (sqlite3_step(cnt) == SQLITE_ROW && sqlite3_column_int(cnt, 0) == 0)
@@ -826,35 +828,7 @@ int64_t session_cost(sqlite3 *db, int64_t session_id) {
     return db_scalar_i64(db, "SELECT COALESCE(SUM(cost_nano),0) FROM entries WHERE session_id=?;", session_id, 0);
 }
 
-/* Key-value store for persistent settings (e.g. Telegram offset) */
-char *db_kv_get(sqlite3 *db, const char *key) {
-    const char *sql = "SELECT value FROM config WHERE key=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
-    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
-    char *val = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *v = (const char *)sqlite3_column_text(stmt, 0);
-        if (v) val = strdup(v);
-    }
-    sqlite3_finalize(stmt);
-    return val;
-}
-
-int db_kv_set(sqlite3 *db, const char *key, const char *value) {
-    const char *sql = "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, value, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
-}
-
-/* Secret key for config encryption. Set via db_set_secret_key(). */
+/* Secret key for secrets-table encryption. Set via db_set_secret_key(). */
 static uint8_t s_secret_key[32];
 static int s_secret_key_loaded = 0;
 
@@ -874,26 +848,6 @@ void db_wipe_secret_key(void) {
 
 int db_secret_key_loaded(void) {
     return s_secret_key_loaded;
-}
-
-/* Secret-aware config access with ChaCha20-Poly1305 AEAD. */
-char *db_kv_get_secret(sqlite3 *db, const char *key) {
-    char *raw = db_kv_get(db, key);
-    if (!raw) return NULL;
-    if (strncmp(raw, "enc:", 4) != 0) return raw; /* plaintext legacy value */
-    if (!s_secret_key_loaded) { free(raw); return NULL; }
-    char *plaintext = secret_decrypt(s_secret_key, raw);
-    free(raw);
-    return plaintext;
-}
-
-int db_kv_set_secret(sqlite3 *db, const char *key, const char *value) {
-    if (!s_secret_key_loaded) return db_kv_set(db, key, value);
-    char *encrypted = secret_encrypt(s_secret_key, value);
-    if (!encrypted) return -1;
-    int rc = db_kv_set(db, key, encrypted);
-    free(encrypted);
-    return rc;
 }
 
 /* Channel→agent binding */
@@ -1580,26 +1534,46 @@ int db_secret_host_unbind(sqlite3 *db, const char *secret_name, const char *host
 /* Secret store (specs/security.md): DB-backed secrets, encrypted at rest. */
 
 int db_secret_set(sqlite3 *db, const char *name, const char *value,
-                  const char *source, const char *status) {
+                  const char *source, const char *status, const char *scope) {
     if (!db || !name || !name[0] || !value) return -1;
     if (!s_secret_key_loaded) return -1;
     char *enc = secret_encrypt(s_secret_key, value);
     if (!enc) return -1;
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db,
-        "INSERT INTO secrets(name, value, source, status) VALUES(?1, ?2, ?3, ?4) "
+        "INSERT INTO secrets(name, value, source, status, scope) VALUES(?1, ?2, ?3, ?4, ?5) "
         "ON CONFLICT(name) DO UPDATE SET value=excluded.value, source=excluded.source, "
-        "status=excluded.status",
+        "status=excluded.status, scope=excluded.scope",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) { free(enc); return -1; }
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, enc, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, source ? source : "operator", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, status ? status : "active", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, scope ? scope : "agent", -1, SQLITE_STATIC);
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     free(enc);
     return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/* Decrypted value of one scope='system' secret (provider API keys). NULL if
+ * absent, wrong scope, or the master key isn't loaded. */
+char *db_secret_get_system(sqlite3 *db, const char *name) {
+    if (!db || !name || !name[0] || !s_secret_key_loaded) return NULL;
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db,
+            "SELECT value FROM secrets WHERE name=?1 AND scope='system'",
+            -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    char *plain = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *enc = (const char *)sqlite3_column_text(stmt, 0);
+        if (enc) plain = secret_decrypt(s_secret_key, enc);
+    }
+    sqlite3_finalize(stmt);
+    return plain;
 }
 
 int db_secret_rm(sqlite3 *db, const char *name) {
@@ -1628,8 +1602,11 @@ ShellSecret *db_secrets_load(sqlite3 *db, size_t *count) {
     *count = 0;
     if (!db || !s_secret_key_loaded) return NULL;
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "SELECT name, value FROM secrets ORDER BY name",
-                          -1, &stmt, NULL) != SQLITE_OK)
+    /* agent scope only: system secrets (provider keys) must never enter the
+     * interpolation/injection snapshot. */
+    if (sqlite3_prepare_v2(db,
+            "SELECT name, value FROM secrets WHERE scope='agent' ORDER BY name",
+            -1, &stmt, NULL) != SQLITE_OK)
         return NULL;
     size_t cap = 8, n = 0;
     ShellSecret *out = calloc(cap, sizeof(ShellSecret));
@@ -1851,7 +1828,8 @@ int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
         "UPDATE sessions SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE cron_jobs SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE memory_blocks SET agent_name=?1 WHERE agent_name=?2",
-        "UPDATE config SET value=?1 WHERE key='default_agent' AND value=?2",
+        /* match effective value: a NULL override still means the default */
+        "UPDATE config SET value=?1 WHERE key='default_agent' AND COALESCE(value, default_value)=?2",
     };
     for (size_t i = 0; i < sizeof(updates)/sizeof(updates[0]); i++) {
         if (sqlite3_prepare_v2(db, updates[i], -1, &s, NULL) != SQLITE_OK)

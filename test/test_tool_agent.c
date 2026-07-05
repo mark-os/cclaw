@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "tool_agent.h"
+#include "config_registry.h"
 #include "db.h"
 #include "test_util.h"
 #include <assert.h>
@@ -42,7 +43,7 @@ static void test_missing_task(void) {
 static void test_depth_limit(void) {
     sqlite3 *db = setup_db();
     /* Create a session at max depth */
-    int64_t sid = session_create(db, "deep", NULL, 1, AGENT_MAX_DEPTH);
+    int64_t sid = session_create(db, "deep", NULL, 1, config_default_int("agent_max_depth"));
     assert(sid > 0);
     AgentLaunchCtx ctx = {.db = db, .session_id = sid};
     char *r = tool_launch_agent_handler("{\"task\":\"hello\"}", &ctx);
@@ -310,8 +311,8 @@ static void test_filter_explicit_tools(void) {
 
 static void test_filter_kv_worker_tools(void) {
     sqlite3 *db = setup_db();
-    /* Set worker_tools in kv config */
-    db_kv_set(db, "worker_tools", "[\"js_eval\"]");
+    /* Set worker_tools in config registry */
+    config_set(db, "worker_tools", "[\"js_eval\"]");
 
     int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
     assert(parent_sid > 0);
@@ -339,7 +340,8 @@ static void test_filter_neither(void) {
     assert(parent_sid > 0);
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    /* Self-spawn with neither explicit tools nor kv worker_tools → NULL filter */
+    /* Self-spawn with no explicit tools and no worker_tools override → the
+     * registry default applies (a worker is never unrestricted). */
     char *r = tool_launch_agent_handler(
         "{\"task\":\"work\",\"background\":true}", &ctx);
     assert(r != NULL);
@@ -347,7 +349,9 @@ static void test_filter_neither(void) {
     free(r);
 
     char *filter = child_tool_filter(db, parent_sid);
-    assert(filter == NULL); /* NULL = unrestricted */
+    assert(filter != NULL);
+    assert(strcmp(filter, config_default("worker_tools")) == 0);
+    free(filter);
 
     db_close(db);
     printf("  PASS test_filter_neither\n");

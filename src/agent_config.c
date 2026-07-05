@@ -3,6 +3,7 @@
 #include "agent_config.h"
 #include "buf.h"
 #include "config.h"
+#include "config_registry.h"
 #include "db.h"
 #include <dirent.h>
 #include <stdlib.h>
@@ -403,36 +404,23 @@ int grants_contains(sqlite3 *db, const char *agent, const char *kind,
 void agent_grant_defaults(sqlite3 *db, const char *agent) {
     if (!db || !agent) return;
 
-    /* Try DB-driven list first (agent_default_tools kv = JSON array). */
-    char *kv = db_kv_get(db, "agent_default_tools");
-    if (kv && kv[0]) {
-        /* Bulk-insert via json_each — same semantics as agent_config_grant
-         * with expires_at=0 (NULL in the row). */
-        const char *sql =
-            "INSERT OR IGNORE INTO grants (agent_name, kind, value, expires_at)"
-            " SELECT ?1, 'tool', value, NULL FROM json_each(?2);";
-        sqlite3_stmt *stmt;
-        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 2, kv, -1, SQLITE_STATIC);
-            sqlite3_step(stmt);
-            sqlite3_finalize(stmt);
-        }
-        free(kv);
-        return;
+    /* agent_default_tools (JSON array) from the config registry — config_get
+     * falls back to the registry default when there is no override, so no
+     * static fallback list is needed here. Bulk-insert via json_each — same
+     * semantics as agent_config_grant with expires_at=0 (NULL in the row). */
+    char *list = config_get(db, "agent_default_tools");
+    if (!list) return;
+    const char *sql =
+        "INSERT OR IGNORE INTO grants (agent_name, kind, value, expires_at)"
+        " SELECT ?1, 'tool', value, NULL FROM json_each(?2);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, agent, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, list, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
     }
-    free(kv);
-
-    /* Fallback: static list when kv is absent (fresh DB without seed). */
-    static const char *default_tools[] = {
-        "file_read", "file_write", "js_eval", "request_config",
-        "search_config", "memory_create", "memory_add", "memory_edit",
-        "memory_delete", "configure_provider", "configure_channel", "create_agent",
-        "extension_promote", "extension_publish", "extension_attach", "extension_list",
-        "launch_agent", "check_session", "check_approval", "secret_create"
-    };
-    for (size_t i = 0; i < sizeof(default_tools) / sizeof(default_tools[0]); i++)
-        agent_config_grant(db, agent, "tool", default_tools[i], 0);
+    free(list);
 }
 
 char *grants_json(sqlite3 *db, const char *agent, const char *kind) {

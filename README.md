@@ -138,7 +138,7 @@ cclaw --help             # all options
 Priority (highest first):
 
 1. `CCLAW_*` env vars
-2. `~/.cclaw/cclaw.db` kv table
+2. `~/.cclaw/cclaw.db` `config` table (registry-backed: every key ships a default + description; DB rows are overrides)
 3. `OPENROUTER_API_KEY` env var (convenience fallback)
 
 ```

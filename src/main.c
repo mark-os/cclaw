@@ -15,6 +15,7 @@
 
 #include "cclaw.h"
 #include "config.h"
+#include "config_registry.h"
 #include "log.h"
 #include "sandbox.h"
 #include "tool_js.h"
@@ -66,7 +67,6 @@ _Static_assert(sizeof(WakeMsg) <= PIPE_BUF,
 
 #define CHILD_MAX 48
 #define TOOL_MAX_OUTPUT (60 * 1024)  /* 60KB — fits in pipe buffer */
-#define DEFAULT_MAX_ITERATIONS 25
 
 /* ── Child types and tracking ───────────────────────────────────── */
 
@@ -191,7 +191,8 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
 
     if (!llm_worker_alive()) return -1;
 
-    int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations : DEFAULT_MAX_ITERATIONS;
+    int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations
+                                              : config_default_int("max_iterations");
     if (iteration >= max_iter) {
         Message msg = {.role = ROLE_ASSISTANT,
                        .content = "error: max iterations reached",
@@ -1309,24 +1310,19 @@ static void approval_sweep_expired(void) {
     free(ids);
 }
 
-/* approval_timeout_sec (KV, default 3600) — the same deadline approval.c uses
- * to park-expire; reused by --auto-approve to bound its self-expiring grants. */
+/* approval_timeout_sec — the same deadline approval.c uses to park-expire;
+ * reused by --auto-approve to bound its self-expiring grants. */
 static int approval_timeout_seconds(void) {
-    int timeout = 3600;
-    char *tv = db_kv_get(g_db, "approval_timeout_sec");
-    if (tv) { long v = strtol(tv, NULL, 10); if (v > 0) timeout = (int)v; free(tv); }
-    return timeout;
+    int timeout = config_get_int(g_db, "approval_timeout_sec");
+    return timeout > 0 ? timeout : config_default_int("approval_timeout_sec");
 }
 
-/* approval_block_sec (KV, default 60), clamped to approval_timeout_sec so the
- * short block never outlasts the final expiry deadline. */
+/* approval_block_sec, clamped to approval_timeout_sec so the short block
+ * never outlasts the final expiry deadline. */
 static int approval_block_seconds(void) {
-    int block = 60;
-    char *kv = db_kv_get(g_db, "approval_block_sec");
-    if (kv) { long v = strtol(kv, NULL, 10); if (v > 0) block = (int)v; free(kv); }
-    int timeout = 3600;
-    char *tv = db_kv_get(g_db, "approval_timeout_sec");
-    if (tv) { long v = strtol(tv, NULL, 10); if (v > 0) timeout = (int)v; free(tv); }
+    int block = config_get_int(g_db, "approval_block_sec");
+    if (block <= 0) block = config_default_int("approval_block_sec");
+    int timeout = approval_timeout_seconds();
     if (block > timeout) block = timeout;
     return block;
 }
@@ -1882,7 +1878,8 @@ static const char *advance_action_name(AdvanceResult a) {
 }
 
 static void run_advance(int64_t session_id) {
-    int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations : DEFAULT_MAX_ITERATIONS;
+    int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations
+                                              : config_default_int("max_iterations");
     /* Tag every log line from here — including advance_session's own state
      * transitions and the dispatch/deliver calls below, which run on this
      * thread — with the advancing session (and, once known, agent), so
@@ -2366,7 +2363,7 @@ static int run_daemon(char *db_path) {
      * session's agent before each dispatch (run_advance). The init agent name
      * just seeds the caps/contexts; agents_dir backs rename support. */
     char daemon_agent[64];
-    { char *def = db_kv_get(g_db, "default_agent");
+    { char *def = config_get(g_db, "default_agent");
       snprintf(daemon_agent, sizeof(daemon_agent), "%s", def ? def : "Assistant");
       free(def); }
     snprintf(g_agent_name, sizeof(g_agent_name), "%s", daemon_agent);
@@ -2530,7 +2527,7 @@ static int run_cli(char *db_path, const char *prompt,
           }
           /* Seed default tools as grants */
           agent_grant_defaults(g_db, "Assistant");
-          db_kv_set(g_db, "default_agent", "Assistant");
+          /* default_agent needs no write — 'Assistant' is the registry default */
           /* Seed default memory blocks */
           memory_block_create(g_db, "Assistant", "AGENT",
               "Your identity, capabilities, and operational notes. Update as you learn about yourself.",
@@ -2549,7 +2546,7 @@ static int run_cli(char *db_path, const char *prompt,
     /* Agent selection */
     char *agent_sel = NULL;
     if (prompt || !isatty(STDIN_FILENO)) {
-        char *def = db_kv_get(g_db, "default_agent");
+        char *def = config_get(g_db, "default_agent");
         agent_sel = def ? def : strdup("Assistant");
     } else {
         int ac = 0; char **al = db_agent_list(g_db, &ac);
@@ -2999,14 +2996,14 @@ static int secret_main(int argc, char *argv[]) {
     if (argc >= 3 && strcmp(argv[2], "list") == 0) {
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "SELECT name, status, source, created_at FROM secrets ORDER BY name",
+                "SELECT name, status, source, scope, created_at FROM secrets ORDER BY name",
                 -1, &st, NULL) == SQLITE_OK) {
             int any = 0;
             while (sqlite3_step(st) == SQLITE_ROW) {
-                printf("%s  status=%s  source=%s  created=%lld\n",
+                printf("%s  status=%s  source=%s  scope=%s  created=%lld\n",
                        sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
-                       sqlite3_column_text(st, 2),
-                       (long long)sqlite3_column_int64(st, 3));
+                       sqlite3_column_text(st, 2), sqlite3_column_text(st, 3),
+                       (long long)sqlite3_column_int64(st, 4));
                 any = 1;
             }
             sqlite3_finalize(st);
@@ -3041,7 +3038,7 @@ static int secret_main(int argc, char *argv[]) {
                 fprintf(stderr, "error: master key unavailable\n");
                 rc = 1;
             } else {
-                rc = db_secret_set(db, name, value, "operator", "active") == 0 ? 0 : 1;
+                rc = db_secret_set(db, name, value, "operator", "active", "agent") == 0 ? 0 : 1;
                 if (rc == 0) printf("secret set: %s\n", name);
                 else fprintf(stderr, "error: set failed\n");
             }
@@ -3168,6 +3165,7 @@ int main(int argc, char *argv[]) {
         db_close(g_db); free(db_path); return 1;
     }
     db_seed_defaults(g_db);
+    config_registry_sync(g_db);
     sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL);
 
     { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }

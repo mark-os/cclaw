@@ -1,20 +1,10 @@
 -- Default seed data for fresh cclaw.db installations.
--- Executed once when config table is empty.
-
--- ═══ Config defaults ═══
-INSERT OR IGNORE INTO config(key, value) VALUES
-  ('default_model',         'deepseek/deepseek-v4-flash'),
-  ('default_provider',      'openrouter'),
-  ('max_iterations',        '25'),
-  ('shell_timeout',         '30'),
-  ('web_port',              '8080'),
-  ('worker_tools',          '["file_read","file_write","shell_exec","web_fetch","js_eval","check_session","check_approval","search_config","secret_create"]'),
-  ('agent_default_tools',   '["file_read","file_write","js_eval","request_config","search_config","memory_create","memory_add","memory_edit","memory_delete","configure_provider","configure_channel","create_agent","extension_promote","extension_publish","extension_attach","extension_list","launch_agent","check_session","check_approval","secret_create"]'),
-  ('health_5xx_threshold',  '3'),
-  ('health_429_threshold',  '10'),
-  ('health_window_sec',     '300'),
-  ('health_cooldown_sec',   '300'),
-  ('approval_block_sec',    '60');
+-- Executed once when the providers table is empty.
+--
+-- No config rows here: every config key lives in the C registry
+-- (src/config_registry.c) with a default and description, synced into the
+-- config table at startup. Seed data is only for genuinely row-shaped data
+-- (providers, models, tool descriptions).
 
 -- ═══ Default provider ═══
 INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)

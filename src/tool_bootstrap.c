@@ -67,7 +67,7 @@ static char *tool_configure_provider_handler(const char *arguments, void *user_d
                        : ((*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9')) ? *c : '_';
     memcpy(env_name + en, "_API_KEY", 9);
 
-    if (db_kv_set_secret(ctx->db, env_name, api_key) != 0) {
+    if (db_secret_set(ctx->db, env_name, api_key, "operator", "active", "system") != 0) {
         tool_parse_free(&ta);
         return strdup("error: failed to store API key");
     }

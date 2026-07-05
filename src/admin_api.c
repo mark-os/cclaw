@@ -24,14 +24,14 @@ int admin_set_key(sqlite3 *db, const char *provider, const char *value) {
         if (!var) return -1;
         memcpy(var, value, name_len);
         var[name_len] = '\0';
-        int rc = db_kv_set_secret(db, var, eq + 1);
+        int rc = db_secret_set(db, var, eq + 1, "operator", "active", "system");
         free(var);
         return rc;
     }
 
     const char *var_name = admin_key_env_name(provider);
     if (!var_name) return -1;
-    return db_kv_set_secret(db, var_name, value);
+    return db_secret_set(db, var_name, value, "operator", "active", "system");
 }
 
 int admin_set_model(sqlite3 *db, int provider_index, const char *model) {

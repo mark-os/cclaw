@@ -91,7 +91,7 @@ Implemented via `LOG_*` macros in `include/log.h`. All output → stderr → pip
 | debug | `debug` | + tool dispatch, LLM timing, context plan stats, retry decisions, response shapes | stderr → syslog/terminal |
 | trace | `trace` | + full req/resp JSON | stderr → syslog/terminal |
 
-`CCLAW_LOG_LEVEL` env var, stored in cclaw.db kv as `log_level`, injected at fork.
+`CCLAW_LOG_LEVEL` env var, injected at fork (no DB key).
 CLI `--log-level=trace` enables full req/resp JSON. CLI `--verbose` tees stderr pipe to terminal.
 
 Format: `HH:MM:SS.mmm [LEVEL] message\n` — parseable by syslog and grep.

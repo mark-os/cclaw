@@ -210,7 +210,7 @@ Future: add a per-hook `timeout_ms` field in the manifest (kill context on
 exceed, skip hook, log warning).
 
 **DB access:** hooks get a read-only `db.query(sql, ...params)` global that
-can SELECT from `entries`, `sessions`, `kv`, `memory_blocks` (the agent's own
+can SELECT from `entries`, `sessions`, `config`, `memory_blocks` (the agent's own
 data). No writes through this path — mutations happen only via the returned
 command object, validated by C before application.
 
@@ -225,7 +225,7 @@ All hooks share a base set of globals (same fresh-context-per-dispatch model):
 | `input` | object | The hook's input JSON (§3) |
 | `db.query(sql, ...params)` | function → array | Read-only SELECT on agent-visible tables |
 | `console.log(...)` | function | Captured to stderr / syslog |
-| `kv.get(key)` / `kv.set(key, val)` | function | Per-extension persistent key-value (scoped to extension_name in `kv` table) |
+| `kv.get(key)` / `kv.set(key, val)` | function | Per-extension persistent key-value (future extension-scoped table — not the global `config` table, which is registry-only) |
 
 No `fs.*` (hooks run in-process, not sandboxed children — filesystem access is
 a tool concern). No `http_fetch` (hooks must not block on network; use `notify`

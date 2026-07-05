@@ -4,15 +4,14 @@
 #include "tools.h"
 #include "db.h"
 
-/* Agent launch limits (defaults — overridable via DB config key "agent_max_depth").
+/* Agent launch hard rails (depth is a registry config key, "agent_max_depth").
  * PER_PARENT bounds how many sub-agents one parent may have in flight at once;
  * with parallel dispatch a single assistant turn can launch several, so this is
  * also the concurrency ceiling per parent (no queue — calls past it are rejected). */
-#define AGENT_MAX_DEPTH 2
 #define AGENT_MAX_PER_PARENT 8
 #define AGENT_MAX_TOTAL 16
 
-/* Read agent_max_depth from DB kv, fallback to AGENT_MAX_DEPTH */
+/* Effective agent_max_depth from the config registry. */
 int agent_max_depth(sqlite3 *db);
 
 /* Context passed as user_data to launch_agent/check_session handlers */

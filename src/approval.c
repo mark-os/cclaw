@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "approval.h"
+#include "config_registry.h"
 #include "db.h"
 #include "log.h"
 #include <stdio.h>
@@ -45,14 +46,9 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
                         const char *args_json, const char *resolve) {
     if (!resolve) resolve = "rerun";
 
-    /* Deadline: kv "approval_timeout_sec" or default 3600 */
-    int64_t timeout = 3600;
-    char *kv = db_kv_get(db, "approval_timeout_sec");
-    if (kv) {
-        long v = strtol(kv, NULL, 10);
-        if (v > 0) timeout = v;
-        free(kv);
-    }
+    /* Deadline: approval_timeout_sec from the config registry */
+    int64_t timeout = config_get_int(db, "approval_timeout_sec");
+    if (timeout <= 0) timeout = config_default_int("approval_timeout_sec");
     int64_t expires_at = (int64_t)time(NULL) + timeout;
 
     const char *sql =

@@ -37,13 +37,18 @@ static void test_set_key_known_provider(void) {
     sqlite3 *db = setup_db();
     assert(admin_set_key(db, "openrouter", "sk-test-123") == 0);
 
-    /* Stored encrypted under the canonical env-var name */
-    char *val = db_kv_get_secret(db, "OPENROUTER_API_KEY");
+    /* Stored encrypted under the canonical env-var name in secrets table */
+    char *val = db_secret_get_system(db, "OPENROUTER_API_KEY");
     assert(val && strcmp(val, "sk-test-123") == 0);
     free(val);
-    char *raw = db_kv_get(db, "OPENROUTER_API_KEY");
+
+    /* Raw value in secrets table has enc: prefix */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db, "SELECT value FROM secrets WHERE name='OPENROUTER_API_KEY'", -1, &s, NULL);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    const char *raw = (const char *)sqlite3_column_text(s, 0);
     assert(raw && strncmp(raw, "enc:", 4) == 0);
-    free(raw);
+    sqlite3_finalize(s);
 
     db_close(db);
     unlink(DB_PATH);
@@ -54,7 +59,7 @@ static void test_set_key_custom(void) {
     sqlite3 *db = setup_db();
     assert(admin_set_key(db, "custom", "MY_VAR=secret") == 0);
 
-    char *val = db_kv_get_secret(db, "MY_VAR");
+    char *val = db_secret_get_system(db, "MY_VAR");
     assert(val && strcmp(val, "secret") == 0);
     free(val);
 

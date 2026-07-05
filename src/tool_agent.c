@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_agent.h"
+#include "config_registry.h"
 #include "tool_parse.h"
 #include "db.h"
 #include "approval.h"
@@ -18,11 +19,8 @@ static const char *SPAWN_PARAMS_JSON =
     "},\"required\":[\"task\"]}";
 
 int agent_max_depth(sqlite3 *db) {
-    char *v = db_kv_get(db, "agent_max_depth");
-    if (!v) return AGENT_MAX_DEPTH;
-    int d = atoi(v);
-    free(v);
-    return (d > 0) ? d : AGENT_MAX_DEPTH;
+    int d = config_get_int(db, "agent_max_depth");
+    return (d > 0) ? d : config_default_int("agent_max_depth");
 }
 char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     AgentLaunchCtx *ctx = (AgentLaunchCtx *)user_data;
@@ -101,7 +99,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
             filter = malloc(tools_len + 1);
             if (filter) { memcpy(filter, tools_raw, tools_len); filter[tools_len] = '\0'; }
         } else {
-            filter = db_kv_get(ctx->db, "worker_tools");
+            filter = config_get(ctx->db, "worker_tools");
         }
     }
 
@@ -244,9 +242,8 @@ char *tool_check_approval_handler(const char *arguments, void *user_data) {
     if (!action || !action[0]) { tool_parse_free(&ta); return strdup("error: missing action"); }
 
     if (strcmp(action, "status") == 0) {
-        int block_sec = 60;
-        char *kv = db_kv_get(ctx->db, "approval_block_sec");
-        if (kv) { long v = strtol(kv, NULL, 10); if (v > 0) block_sec = (int)v; free(kv); }
+        int block_sec = config_get_int(ctx->db, "approval_block_sec");
+        if (block_sec <= 0) block_sec = config_default_int("approval_block_sec");
         tool_parse_free(&ta);
 
         const char *sql =

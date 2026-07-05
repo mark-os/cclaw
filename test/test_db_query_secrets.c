@@ -1,5 +1,5 @@
 /* integration test — db_query secret filtering.
- * Seed config w/ enc: values, run db_query("SELECT * FROM config") tool,
+ * Seed secrets table w/ enc: values, run db_query("SELECT * FROM secrets") tool,
  * verify no enc: rows in result; no network. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -41,7 +41,7 @@ static void teardown(void) {
     rmdir(tmpdir);
 }
 
-/* Seed kv with plaintext + real encrypted secrets, verify db_query filters enc: rows */
+/* Seed secrets table with real encrypted secrets, verify db_query filters enc: rows */
 static void test_select_star_filters_secrets(void) {
     TEST(select_star_filters_secrets);
 
@@ -52,25 +52,15 @@ static void test_select_star_filters_secrets(void) {
     if (secret_key_load_or_create(db_path, key) != 0) { db_close(db); FAIL("key_load_or_create"); }
     db_set_secret_key(key);
 
-    /* Seed plaintext values */
-    db_kv_set(db, "provider.model", "deepseek/deepseek-v4-flash");
-    db_kv_set(db, "provider.base_url", "https://openrouter.ai/api/v1");
+    /* Seed encrypted secrets in secrets table */
+    db_secret_set(db, "PROVIDER_API_KEY", "sk-or-v1-secret123", "operator", "active", "system");
+    db_secret_set(db, "GEMINI_API_KEY", "AIzaSy-secret456", "operator", "active", "system");
 
-    /* Seed encrypted secrets */
-    db_kv_set_secret(db, "provider.api_key", "sk-or-v1-secret123");
-    db_kv_set_secret(db, "gemini.api_key", "AIzaSy-secret456");
-
-    /* Run db_query tool: SELECT * FROM config */
-    char *result = tool_db_query_handler("{\"sql\":\"SELECT * FROM config\"}", db);
+    /* Run db_query tool: SELECT * FROM secrets */
+    char *result = tool_db_query_handler("{\"sql\":\"SELECT * FROM secrets\"}", db);
     if (!result) { db_close(db); FAIL("handler returned NULL"); }
 
-    /* Plaintext rows visible */
-    if (!strstr(result, "provider.model")) { free(result); db_close(db); FAIL("missing provider.model"); }
-    if (!strstr(result, "provider.base_url")) { free(result); db_close(db); FAIL("missing provider.base_url"); }
-
-    /* Encrypted rows filtered — neither key nor enc: value appears */
-    if (strstr(result, "provider.api_key")) { free(result); db_close(db); FAIL("leaked provider.api_key row"); }
-    if (strstr(result, "gemini.api_key")) { free(result); db_close(db); FAIL("leaked gemini.api_key row"); }
+    /* Encrypted values filtered — neither enc: value nor plaintext appears */
     if (strstr(result, "enc:")) { free(result); db_close(db); FAIL("enc: prefix in result"); }
     if (strstr(result, "sk-or-v1")) { free(result); db_close(db); FAIL("plaintext secret leaked"); }
 
@@ -87,12 +77,12 @@ static void test_where_clause_secret_key(void) {
     if (!db) FAIL("db_open");
 
     char *result = tool_db_query_handler(
-        "{\"sql\":\"SELECT key, value FROM config WHERE key = 'provider.api_key'\"}", db);
+        "{\"sql\":\"SELECT name, value FROM secrets WHERE name = 'PROVIDER_API_KEY'\"}", db);
     if (!result) { db_close(db); FAIL("handler returned NULL"); }
 
-    /* Should be empty array — row filtered */
+    /* Should be empty or masked — row filtered */
     if (strstr(result, "enc:")) { free(result); db_close(db); FAIL("enc: in targeted query"); }
-    if (strstr(result, "provider.api_key")) { free(result); db_close(db); FAIL("secret key in targeted query"); }
+    if (strstr(result, "sk-or-v1")) { free(result); db_close(db); FAIL("plaintext in targeted query"); }
 
     free(result);
     db_close(db);
@@ -118,22 +108,21 @@ static void test_non_kv_table_unaffected(void) {
     PASS();
 }
 
-/* Verify COUNT(*) on kv excludes secret rows */
+/* Verify COUNT(*) on secrets excludes secret rows */
 static void test_count_excludes_secrets(void) {
     TEST(count_excludes_secrets);
 
     sqlite3 *db = test_db_open(db_path);
     if (!db) FAIL("db_open");
 
-    /* Count only plaintext rows — secrets filtered at row level */
-    char *result = tool_db_query_handler(
-        "{\"sql\":\"SELECT COUNT(*) AS cnt FROM config WHERE key LIKE 'provider.%' OR key LIKE 'gemini.%'\"}", db);
-    if (!result) { db_close(db); FAIL("handler returned NULL"); }
-
     /* COUNT(*) is computed by SQLite before filtering, so it includes all rows.
      * But the row itself doesn't contain enc: text (it's just a number).
      * The filter only skips rows with enc: in a TEXT column value.
      * A COUNT result is an integer, so it passes through. */
+    char *result = tool_db_query_handler(
+        "{\"sql\":\"SELECT COUNT(*) AS cnt FROM secrets\"}", db);
+    if (!result) { db_close(db); FAIL("handler returned NULL"); }
+
     if (!strstr(result, "cnt")) { free(result); db_close(db); FAIL("missing cnt"); }
 
     free(result);

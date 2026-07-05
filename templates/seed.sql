@@ -25,18 +25,26 @@ INSERT OR IGNORE INTO models(id, provider_name, model, context_window, priority)
   VALUES('openrouter/deepseek/deepseek-v4-flash', 'openrouter', 'deepseek/deepseek-v4-flash', 128000, 0);
 
 -- ═══ Built-in tools ═══
+-- Descriptions are a write-once seed: tools_sync_to_db() upserts with
+-- COALESCE(tools.description, excluded.description), so on a fresh DB these
+-- rows win and the C-registered description is never consulted again. Keep
+-- them in sync with the tools_register() call sites in src/tool_*.c.
 INSERT OR IGNORE INTO tools(name, description) VALUES
   ('file_read', 'Read a file (path relative or absolute)'),
   ('file_write', 'Write content to a file (path relative or absolute)'),
-  ('shell_exec', 'Execute a shell command in a sandboxed environment'),
-  ('js_eval', 'Evaluate JavaScript code using the embedded QuickJS engine'),
-  ('web_fetch', 'Fetch content from a URL'),
-  ('memory_create', 'Create a memory block (named container of numbered notes)'),
-  ('memory_add', 'Add a numbered note to a memory block'),
-  ('memory_edit', 'Edit notes in a memory block by number'),
-  ('memory_delete', 'Delete notes from a memory block by number'),
-  ('request_config', 'Request a configuration change from the user'),
-  ('search_config', 'Discover current config, available tools, and how to request changes'),
-  ('launch_agent', 'Launch a sub-agent to perform a task'),
-  ('check_agent', 'Check a background sub-agent status and result'),
-  ('secret_create', 'Mint a new random credential, stored encrypted; returns only its placeholder');
+  ('shell_exec', 'Execute a shell command and return stdout+stderr'),
+  ('js_eval', 'Run JavaScript in QuickJS (ES2025). http_request(url[, opts]) is synchronous HTTP.'),
+  ('web_fetch', 'Fetch a URL via HTTP GET and return content as markdown'),
+  ('memory_create', 'Create a new memory block (a named container of numbered notes). Args: label, description.'),
+  ('memory_add', 'Add a numbered note to a memory block. Args: block (label), text.'),
+  ('memory_edit', 'Replace the text of existing notes by number. Args: block, edits (array of {number, text}).'),
+  ('memory_delete', 'Delete notes by number (others renumber). Args: block, numbers (array of integers).'),
+  ('request_config', 'Request a configuration change (requires human approval).'),
+  ('search_config', 'Discover your current configuration and what you can request: your sandbox profile, granted tools and hosts, the full list of available tools, and how to request more via request_config.'),
+  ('launch_agent', 'Delegate a task to another agent'),
+  ('check_session', 'Check the status and result of a sub-agent session'),
+  ('check_approval', 'Inspect this session''s approvals, or re-raise a decided one'),
+  ('secret_create', 'Mint a new random credential, stored encrypted in the DB. Returns only its {{SECRET:name}} placeholder — never the value.'),
+  ('configure_provider', 'Set up LLM provider. Stores the API key encrypted in cclaw.db. Known providers: openrouter, gemini, anthropic.'),
+  ('configure_channel', 'Set up a communication channel. Supported: telegram (requires bot_token), cli, or custom (requires binary_path).'),
+  ('create_agent', 'Propose creation of a named agent. Requires admin approval. On approval, daemon creates agent directory, seeds DB, and binds to channel.');

@@ -174,7 +174,7 @@ Config *config_load_from_env(void) {
     cfg->provider.max_tokens = v ? atoi(v) : 4096;
 
     v = getenv("CCLAW_CONTEXT_WINDOW");
-    cfg->provider.context_window = v ? atoi(v) : 65536;
+    cfg->provider.context_window = v ? atoi(v) : 128000;
 
     /* endpoint type */
     v = getenv("CCLAW_PROVIDER_ENDPOINT_TYPE");

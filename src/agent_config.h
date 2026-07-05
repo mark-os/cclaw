@@ -11,13 +11,6 @@
 #define AGENT_DEFAULT_MAX_ITERATIONS 25
 #define AGENT_DEFAULT_SHELL_TIMEOUT  30
 
-/* default tool whitelist */
-#define AGENT_DEFAULT_TOOLS \
-    "file_read", "file_write", "js_eval", \
-    "memory_create", "memory_append", "memory_replace", \
-    "request_config"
-#define AGENT_DEFAULT_TOOLS_COUNT 7
-
 /* Per-agent config loaded from agents table in cclaw.db.
  * Fields override global Config when non-NULL/non-zero. */
 typedef struct {

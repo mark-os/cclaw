@@ -25,10 +25,6 @@ int main(void) {
     assert(strlen(TPL_INCOMPLETE_TOOL_CONTENT_TXT) > 5);
     printf("  notices_non_empty... PASS\n");
 
-    /* Skill shell template exists */
-    assert(strstr(TPL_SKILL_SHELL_MD, "shell_exec"));
-    printf("  skill_shell_content... PASS\n");
-
-    printf("4/4 passed\n");
+    printf("3/3 passed\n");
     return 0;
 }

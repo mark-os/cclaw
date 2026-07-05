@@ -689,7 +689,7 @@ OpenClaw exposes most capabilities as **skills**: a `SKILL.md` prompt plus a
 tool under one exec policy. That is the right default *when the agent already has
 shell* — a typed wrapper then adds maintenance for almost no security gain,
 because the agent can call the underlying binary through `shell_exec` anyway.
-CClaw can do the same; see `templates/skill_shell.md`. Fine-grained policy on a
+CClaw can do the same. Fine-grained policy on a
 tmux tool is pointless next to a general `shell_exec` grant: the agent just types
 `tmux …` into the shell.
 

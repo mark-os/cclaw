@@ -755,15 +755,32 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
             /* Mount skill discovery dirs read-only (same transient-override
              * pattern as the extension store on the JS path) so the model can
-             * file_read a SKILL.md the prompt index pointed it at. */
+             * file_read a SKILL.md the prompt index pointed it at. The shared
+             * extension store rides along for the same reason: attached
+             * extensions' declared skills live there. */
             size_t skd_n = 0;
             char agents_dir_buf[PATH_MAX];
             agent_dir_resolve(fctx->workspace, g_cfg ? g_cfg->db_path : NULL,
                               agents_dir_buf, sizeof(agents_dir_buf));
             char **skill_dirs = skills_dirs_resolve(g_db, agents_dir_buf,
                                                     agent_name, &skd_n);
+            char store_dir[PATH_MAX] = {0};
+            int have_store = 0;
+            if (g_cfg && g_cfg->db_path && g_cfg->db_path[0]) {
+                char tmp[PATH_MAX - 16];
+                snprintf(tmp, sizeof(tmp), "%s", g_cfg->db_path);
+                char *sl = strrchr(tmp, '/');
+                if (sl) {
+                    *sl = '\0';
+                    snprintf(store_dir, sizeof(store_dir), "%s/extensions", tmp);
+                    struct stat stsb;
+                    if (stat(store_dir, &stsb) == 0 && S_ISDIR(stsb.st_mode))
+                        have_store = 1;
+                }
+            }
             const char **read_paths = NULL;
-            size_t rp_count = fctx->sb.read_path_count + skd_n;
+            size_t rp_count = fctx->sb.read_path_count + skd_n +
+                              (have_store ? 1 : 0);
             if (rp_count > 0) {
                 read_paths = malloc(rp_count * sizeof(*read_paths));
                 if (read_paths) {
@@ -772,6 +789,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                         read_paths[k++] = fctx->sb.read_paths[i];
                     for (size_t i = 0; i < skd_n; i++)
                         read_paths[k++] = skill_dirs[i];
+                    if (have_store) read_paths[k++] = store_dir;
                     req.read_paths = read_paths;
                     req.read_count = rp_count;
                 }

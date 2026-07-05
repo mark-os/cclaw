@@ -10,11 +10,13 @@ Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_S
 
 Registry-backed global settings (`src/config_registry.c`). Every key is declared in a static C table with a default and a description; `config_registry_sync()` mirrors those into `default_value`/`description` at startup (code-owned columns, always overwritten). `value` is the operator/agent override — `NULL` means "use default", and the effective value is always `COALESCE(value, default_value)`. `config_set()` rejects unregistered keys: no anonymous writes, so every row in this table is self-describing. Holds **no secrets** — encrypted values live in `secrets` (scope `system` for provider keys).
 
+Extensions register keys too: `extension_install` ingests the manifest's `config[]` as rows keyed `<ext>.<key>` (dots are reserved as the namespace separator, so core keys — which never contain a dot — can't collide). Same ownership contract: install refreshes `default_value`/`description` and drops undeclared keys; `value` is untouched. `config_set()` accepts a key if it's in the C registry *or* has an extension-registered row.
+
 `SELECT key, value, default_value, description FROM config` gives an agent the complete knob inventory: what exists, what it does, what it's set to, and whether it's an override.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `key` | TEXT PRIMARY KEY | must exist in the C registry |
+| `key` | TEXT PRIMARY KEY | C-registry key, or extension-registered `<ext>.<key>` |
 | `value` | TEXT | override; NULL = use default |
 | `default_value` | TEXT | code-owned, resynced every startup |
 | `description` | TEXT | code-owned, resynced every startup |

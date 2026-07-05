@@ -12,7 +12,8 @@ of each:
 | Hooks | agent process, fresh QuickJS context per dispatch | per turn-event |
 | Channel | separate `cclaw --channel` process (daemon-managed) | long-lived, restarted on crash |
 | Scripts | forked child, on a cron schedule | per-run, isolated |
-| Skills (future) | — | — |
+| Skills | prompt index entry; body `file_read` on demand ([skills.md](skills.md)) | indexed at prompt build |
+| Config | rows in the config registry, namespaced `<ext>.<key>` | synced at install |
 
 The extension is the **unit** — the thing you install, enable, disable, uninstall,
 and publish. Every capability it provides carries its `extension_name`, so the set
@@ -56,6 +57,13 @@ directory.
 
   "scripts": [
     { "name": "morning_report", "handler": "report.js", "schedule": "0 7 * * *" }
+  ],
+
+  "skills": [ "skills/forecast-format" ],
+
+  "config": [
+    { "key": "api_base", "default": "https://api.weather.gov",
+      "description": "NWS API base URL" }
   ]
 }
 ```
@@ -68,9 +76,36 @@ directory.
 | `hooks[]` | Each: `{event, handler (file)}`. `event` is one of the six hook events below. |
 | `channel` | At most one: `{type, handler (file)}`. The channel runs as a separate process. |
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
+| `skills[]` | Bundle-relative paths, each a directory containing `SKILL.md` or a bare `.md` file ([skills.md](skills.md) format). Validated at promote: path must be bundle-relative and its frontmatter must parse with a `description`. |
+| `config[]` | Each: `{key, default?, description}`. `key` is `[A-Za-z0-9_]+` (no dots — `.` is the namespace separator); `description` is required. Install upserts config-registry rows keyed `<name>.<key>`. |
 
 The manifest carries **identity and declarations only** — never tool *code*. Code
 lives in the handler files. (DB holds config + path; files hold code.)
+
+### Extension config
+
+`config[]` entries land in the same registry-backed `config` table as core keys
+(see [schema.md](schema.md#config)), namespaced `<ext>.<key>` so extensions can
+never collide with core keys or each other. Install follows the
+`config_registry_sync` contract: `default_value` and `description` are
+code-owned and refreshed on every (re-)install; the operator/agent override in
+`value` is never touched; keys dropped from the manifest are deleted. The knobs
+are therefore self-describing (`search_config` lists them alongside core
+config), and `config_set` accepts them — an extension-registered key is a
+registered key, so "no anonymous config writes" still holds. Handlers read
+their config the same way anything else does; there is no separate extension
+config mechanism.
+
+### Extension skills
+
+`skills[]` entries are ordinary [SKILL.md skills](skills.md) that ship with the
+bundle. Promotion copies them into the shared store with everything else; no
+skill state enters the DB. At prompt build, skill discovery reads the store
+copy of `extension.json` for each **attached, enabled** extension and indexes
+its declared skills — undeclared `.md` files in a bundle are ignored (the
+manifest declares the contents; nothing registers itself by being present).
+Operator skill dirs and the agent's own skills shadow extension skills on name
+collision.
 
 ## Two Locations: Draft vs. Installed
 
@@ -116,6 +151,43 @@ draft must not auto-promote into a globally callable tool. Because promote copie
 the code out of the writable workspace, a tool that has been promoted is immutable
 from the agent's side — closing the promote-then-swap-the-handler hole.
 
+**The manifest is the promotion gate.** There is no way to register an
+individual tool, hook, or skill beyond agent level except through
+`extension_install` — the manifest is the *only* door from agent-level drafts
+to system-level registration. This is deliberate, not incidental: it gives
+promote a single choke point for static analysis (validate every declaration
+before anything registers), makes the promoted set enumerable ("this bundle
+adds 2 tools, 1 hook, 3 skills, 2 config keys"), and means the unit an agent
+promotes for itself is already the unit it can publish to other agents — and
+that a user can share with other cclaw installs. Agent-level remains
+free-form: drafts, personal skills (`agents/<name>/skills/`), and ad-hoc
+scripts need no manifest.
+
+## Authoring an Extension
+
+The workflow, from the authoring agent's point of view:
+
+1. **Draft.** Create `workspace/extensions/<name>/` with an `extension.json`
+   and the handler files it declares. Iterate freely — drafts are private and
+   unregistered.
+2. **Test the pieces.** Run a handler directly with `js_eval` in file mode
+   (same execution contract as a promoted tool). Keep a personal copy of a
+   skill under `agents/<name>/skills/` to see it in your own prompt index
+   before packaging it.
+3. **Promote** (`extension_promote`). Validates the whole manifest — missing
+   handlers, non-`.qjs` files, path escapes, config keys with bad names or no
+   description, skills without a frontmatter description all fail here, before
+   anything registers. On success the bundle is copied to
+   `~/.cclaw/extensions/<name>/` and its declarations are ingested. Everything
+   is still owner-only.
+4. **Iterate.** Edit the draft, re-promote. Re-install is idempotent: tools and
+   hooks are replaced, config defaults/descriptions refresh while operator
+   overrides survive, the `published` flag is preserved.
+5. **Publish** (`extension_publish`), then other agents **attach**
+   (`extension_attach`). Attachment brings the tools (still subject to that
+   agent's `grants` — attach never authorizes), the skills (indexed into that
+   agent's prompt), and visibility of the config knobs.
+
 ## Loading: the DB is the registry
 
 The in-memory tool registry is a **cache of a SQL query**, not a parallel truth.
@@ -160,11 +232,13 @@ registration (see design notes).
 
 ### JS dialect & globals
 
-JavaScript runs in **QuickJS** (bellard/quickjs). The eval/channel profiles have
-full modern JS (`let`/`const`, arrow functions, template literals, `async`/`await`,
-`Promise`); the in-process hooks profile is minimal (Base + Eval + JSON + RegExp,
-no `Promise`). Globals available to tool handlers (the `qjs_register_eval_host_functions`
-environment):
+JavaScript runs in **QuickJS** (bellard/quickjs), built minimal: the dialect is
+**ES5** — `var` (not `let`/`const`), `function` (not arrows), string
+concatenation (not template literals), no `Map`/`Set`, no modules
+(`require`/`import`). Failed evals return targeted syntax hints
+(`qjs_syntax_hint`, src/qjs_host_eval.c). The in-process hooks profile is the
+same minimal engine without `Promise`. Globals available to tool handlers (the
+`qjs_register_eval_host_functions` environment):
 
 | Global | Description |
 |--------|-------------|
@@ -391,4 +465,11 @@ promote/publish/attach operations. Hook dispatch loads from the manifest via
 `extension_load_hooks` (`src/extension.c`) — there is no `registerTool`/
 `registerHook` runtime scrape. The **channel component contract is also
 implemented** (`cclaw --channel`, the `channels`/`channel_*` tables, the
-`cclaw.*` channel API).
+`cclaw.*` channel API). The `skills[]` and `config[]` manifest sections are
+implemented (validation + ingest in `src/extension_manifest.c`; extension
+skill discovery in `src/skills.c`).
+
+Not yet implemented: approval-gating of `extension_promote` itself with the
+enumerated contents ("this bundle adds N tools / hooks / skills / config
+keys") surfaced in the approval prompt — today the enumeration exists in the
+DB after install but promote is not an approval-parked action.

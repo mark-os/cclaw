@@ -75,38 +75,12 @@ Parking lot for features explicitly out-of-scope right now.
 
 ## JS Extension System
 
-QuickJS is the extension language for CClaw. Current foundation: `js_define_tool` (runtime tool creation) and `js_eval` (one-shot execution). The full extension system will cover:
+**Largely built** — see [extensions.md](extensions.md) (manifest-declared tools/hooks/channel/scripts/skills/config, draft → promote → publish → attach lifecycle) and [skills.md](skills.md). Still future:
 
-### Planned Extension Points
-
-| Extension type | What it does | Example |
-|---------------|--------------|---------|
-| Tools | Register new tools callable by the agent | Custom API wrappers, data transforms |
-| Channel extensions | New input/output channels beyond Telegram/CLI | Discord, Slack, email, webhooks |
-| Agent loop hooks | Before/after LLM call, before/after tool dispatch | Logging, cost tracking, guardrails |
-| Skills | Prompt fragments loaded into system prompt | Domain knowledge, persona, instructions |
-| Prompt management | Dynamic system prompt composition | Context-aware prompt assembly |
-
-### Extension Loading
-
-Extensions are JS modules loaded at agent startup from `~/.cclaw/extensions/<name>/` once promoted (see specs/extensions.md); `agents/<name>/workspace/extensions/` holds unpromoted drafts only. Each declares what it hooks into. Loaded fresh each turn (no persistent state beyond what's in DB).
-
-### Reference: Pi Extension Model
-
-See `reference/pi-extensions.md` for Pi's approach:
-- Extensions declare lifecycle hooks (onMessage, onToolCall, beforeRequest, afterResponse)
-- Extensions can modify the message array before LLM call
-- Extensions can register tools dynamically
-- Extensions have scoped permissions
-
-CClaw adaptation: same concepts, implemented in QuickJS instead of TypeScript, with SQLite for state instead of in-memory.
-
-### Tool Authoring via quickjs (foundation ✓)
-
-`js_define_tool` lets agents create tools at runtime. Persists per-session. Remaining work:
 - Tool composition: JS tools calling other tools via `callTool(name, args)`
-- Schema inference vs explicit declaration
 - Workspace script auto-discovery (`workspace/tools/*.sh`)
+- Promote-approval enumeration: park `extension_promote` and surface the bundle's declared contents ("adds N tools / hooks / skills / config keys") in the approval prompt
+- Extension registry/marketplace: sharing bundles between cclaw installs (the manifest is already the portable unit)
 
 ### fetch() (foundation ✓)
 

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "extension_manifest.h"
 #include "cron.h"
+#include "skills.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -197,6 +198,82 @@ static int check_handlers(sqlite3 *db, const char *manifest, const char *bundle_
     return rc;
 }
 
+/* Verify every $.config[] entry has an identifier key (no dots — '.' is the
+ * namespace separator) and a description. Rows land in the config table as
+ * <ext>.<key>, so a bad key must not smuggle a foreign namespace. */
+static int check_config(sqlite3 *db, const char *manifest, char **err_out) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_extract(value,'$.key'), json_extract(value,'$.description') "
+            "FROM json_each(COALESCE(json_extract(?1,'$.config'),'[]'))",
+            -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+    int rc = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *k = (const char *)sqlite3_column_text(st, 0);
+        const char *d = (const char *)sqlite3_column_text(st, 1);
+        if (!k || !k[0]) { xerr(err_out, "config entry missing 'key'"); rc = -1; break; }
+        for (const char *p = k; *p; p++) {
+            if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                  (*p >= '0' && *p <= '9') || *p == '_')) {
+                xerr(err_out, "config key must be [A-Za-z0-9_]+ (namespaced as <ext>.<key>)");
+                rc = -1; break;
+            }
+        }
+        if (rc != 0) break;
+        if (!d || !d[0]) {
+            xerr(err_out, "config entry missing 'description' (self-describing knobs only)");
+            rc = -1; break;
+        }
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
+/* Verify every $.skills[] entry is a safe bundle-relative path to a skill:
+ * a directory containing SKILL.md, or a bare .md file — and that its
+ * frontmatter parses with a description (the index entry). */
+static int check_skills(sqlite3 *db, const char *manifest, const char *bundle_dir,
+                        char **err_out) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT value FROM json_each(COALESCE(json_extract(?1,'$.skills'),'[]'))",
+            -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+    int rc = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *s = (const char *)sqlite3_column_text(st, 0);
+        if (!s || !s[0] || s[0] == '/' || strstr(s, "..")) {
+            xerr(err_out, "skill path must be a bundle-relative path");
+            rc = -1; break;
+        }
+        char fp[PATH_MAX];
+        snprintf(fp, sizeof(fp), "%s/%s", bundle_dir, s);
+        struct stat sb;
+        if (stat(fp, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+            size_t l = strlen(fp);
+            snprintf(fp + l, sizeof(fp) - l, "/SKILL.md");
+        }
+        char *name = NULL, *desc = NULL;
+        if (skill_frontmatter_parse(fp, &name, &desc) != 0) {
+            if (err_out) {
+                char *m = malloc(strlen(s) + 80);
+                if (m) {
+                    snprintf(m, strlen(s) + 80,
+                             "skill '%s': missing SKILL.md or no frontmatter description", s);
+                    *err_out = m;
+                }
+            }
+            rc = -1; break;
+        }
+        free(name); free(desc);
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
 int extension_manifest_validate(const char *bundle_dir, char **err_out) {
     if (err_out) *err_out = NULL;
     if (!bundle_dir) { xerr(err_out, "no bundle dir"); return -1; }
@@ -239,6 +316,8 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
     if (check_handlers(jdb, manifest, bundle_dir, "'$.tools'", err_out) != 0) goto out;
     if (check_handlers(jdb, manifest, bundle_dir, "'$.hooks'", err_out) != 0) goto out;
     if (check_handlers(jdb, manifest, bundle_dir, "'$.scripts'", err_out) != 0) goto out;
+    if (check_config(jdb, manifest, err_out) != 0) goto out;
+    if (check_skills(jdb, manifest, bundle_dir, err_out) != 0) goto out;
     /* channel is a single object, not an array — wrap so check_handlers sees an array */
     {
         char *ch = json_text(jdb, manifest, "'$.channel'");
@@ -342,6 +421,26 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
         "       :store || '/' || json_extract(value,'$.handler'), 1 "
         "FROM json_each(COALESCE(json_extract(:m,'$.hooks'),'[]')) "
         "WHERE json_extract(value,'$.event') IS NOT NULL",
+        manifest, name, store, owner_agent);
+
+    /* config: registry rows namespaced <ext>.<key>. Same contract as
+     * config_registry_sync — default_value/description are code-owned and
+     * refreshed on every install; the operator/agent override in `value`
+     * is never touched. Keys no longer declared are dropped first. */
+    rc |= run_ingest(db,
+        "DELETE FROM config WHERE substr(key, 1, length(:name)+1) = :name || '.' "
+        "AND key NOT IN (SELECT :name || '.' || json_extract(value,'$.key') "
+        "  FROM json_each(COALESCE(json_extract(:m,'$.config'),'[]')))",
+        manifest, name, store, owner_agent);
+    rc |= run_ingest(db,
+        "INSERT INTO config(key, default_value, description) "
+        "SELECT :name || '.' || json_extract(value,'$.key'), "
+        "       COALESCE(json_extract(value,'$.default'), ''), "
+        "       json_extract(value,'$.description') "
+        "FROM json_each(COALESCE(json_extract(:m,'$.config'),'[]')) "
+        "WHERE json_extract(value,'$.key') IS NOT NULL "
+        "ON CONFLICT(key) DO UPDATE SET default_value=excluded.default_value, "
+        "  description=excluded.description",
         manifest, name, store, owner_agent);
 
     /* attach to the owner (published stays 0 until publish). */

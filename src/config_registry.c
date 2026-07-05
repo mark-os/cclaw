@@ -150,7 +150,22 @@ double config_get_double(sqlite3 *db, const char *key) {
 int config_set(sqlite3 *db, const char *key, const char *value) {
     if (!db || !key) return -1;
     const char *def = config_default(key);
-    if (!def) return -1;   /* unregistered key — no anonymous config writes */
+    if (!def) {
+        /* Not in the C registry — allowed only if an extension registered it
+         * (a config row with a code-owned default_value exists, keyed
+         * <ext>.<key> by extension_install). No anonymous config writes. */
+        sqlite3_stmt *up;
+        if (sqlite3_prepare_v2(db,
+                "UPDATE config SET value=?2 WHERE key=?1 AND default_value IS NOT NULL",
+                -1, &up, NULL) != SQLITE_OK)
+            return -1;
+        sqlite3_bind_text(up, 1, key, -1, SQLITE_STATIC);
+        if (value) sqlite3_bind_text(up, 2, value, -1, SQLITE_STATIC);
+        else sqlite3_bind_null(up, 2);
+        int urc = sqlite3_step(up);
+        sqlite3_finalize(up);
+        return (urc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
+    }
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db,
             "INSERT INTO config(key, value, default_value) VALUES(?1, ?2, ?3) "

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "extension_manifest.h"
+#include "config_registry.h"
 #include "db.h"
 #include "test_util.h"
 #include <assert.h>
@@ -43,7 +44,13 @@ static const char *MANIFEST =
     "  ],\n"
     "  \"scripts\": [\n"
     "    { \"name\": \"morning_report\", \"handler\": \"report.qjs\", \"schedule\": \"0 7 * * *\" }\n"
-    "  ]\n"
+    "  ],\n"
+    "  \"config\": [\n"
+    "    { \"key\": \"api_base\", \"default\": \"https://api.weather.gov\",\n"
+    "      \"description\": \"NWS API base URL\" },\n"
+    "    { \"key\": \"units\", \"default\": \"us\", \"description\": \"Unit system\" }\n"
+    "  ],\n"
+    "  \"skills\": [ \"skills/forecast-style\", \"notes.md\" ]\n"
     "}\n";
 
 /* Query a single text cell. Caller frees. */
@@ -79,6 +86,12 @@ static void setup_bundle(void) {
     write_file(BUNDLE "/forecast.qjs", "http_request('https://api.weather.gov/').body");
     write_file(BUNDLE "/guard.qjs", "(function(c){ return c.name==='shell_exec' ? {block:true} : undefined; })");
     write_file(BUNDLE "/report.qjs", "'report'");
+    mkdir(BUNDLE "/skills", 0755);
+    mkdir(BUNDLE "/skills/forecast-style", 0755);
+    write_file(BUNDLE "/skills/forecast-style/SKILL.md",
+               "---\ndescription: How to format forecast output\n---\nbody\n");
+    write_file(BUNDLE "/notes.md",
+               "---\ndescription: Note-taking conventions\n---\nbody\n");
 }
 
 static void test_install_ingests_rows(void) {
@@ -122,10 +135,21 @@ static void test_install_ingests_rows(void) {
     /* cron seeded for scheduled script */
     assert(qint(db, "SELECT count(*) FROM cron_jobs WHERE name='morning_report'") == 1);
 
+    /* config rows: namespaced <ext>.<key>, code-owned default + description */
+    assert(qint(db, "SELECT count(*) FROM config WHERE key LIKE 'nws.%'") == 2);
+    char *cdef = q1(db, "SELECT default_value FROM config WHERE key='nws.api_base'");
+    assert(cdef && strcmp(cdef, "https://api.weather.gov") == 0); free(cdef);
+    char *cdesc = q1(db, "SELECT description FROM config WHERE key='nws.units'");
+    assert(cdesc && strcmp(cdesc, "Unit system") == 0); free(cdesc);
+
+
     /* shared-store copy exists */
     struct stat sb;
     assert(stat(STORE "/forecast.qjs", &sb) == 0 && S_ISREG(sb.st_mode));
     assert(stat(STORE "/guard.qjs", &sb) == 0);
+    /* skills: copied into the store, no DB state */
+    assert(stat(STORE "/skills/forecast-style/SKILL.md", &sb) == 0);
+    assert(stat(STORE "/notes.md", &sb) == 0);
 
     db_close(db);
     printf("  PASS test_install_ingests_rows\n");
@@ -145,6 +169,76 @@ static void test_reinstall_is_idempotent(void) {
     assert(qint(db, "SELECT count(*) FROM tools WHERE name='get_forecast'") == 1);
     db_close(db);
     printf("  PASS test_reinstall_is_idempotent\n");
+}
+
+static void test_config_lifecycle(void) {
+    unlink(TEST_DB);
+    setup_bundle();
+    sqlite3 *db = test_db_open(TEST_DB);
+    char *err = NULL;
+    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+
+    /* config_set accepts an extension-registered key... */
+    assert(config_set(db, "nws.units", "metric") == 0);
+    char *v = config_get(db, "nws.units");
+    assert(v && strcmp(v, "metric") == 0); free(v);
+    /* ...and still rejects anonymous keys */
+    assert(config_set(db, "nws.nosuch", "x") == -1);
+    assert(config_set(db, "rogue.key", "x") == -1);
+
+    /* re-install: override preserved, defaults refreshed */
+    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    v = config_get(db, "nws.units");
+    assert(v && strcmp(v, "metric") == 0); free(v);
+
+    /* a key dropped from the manifest is deleted on re-install */
+    char patched[4096];
+    snprintf(patched, sizeof(patched), "%s", MANIFEST);
+    char *cut = strstr(patched, ",\n    { \"key\": \"units\"");
+    assert(cut);
+    char *end = strchr(cut + 1, '}');
+    assert(end);
+    memmove(cut, end + 1, strlen(end + 1) + 1);
+    write_file(BUNDLE "/extension.json", patched);
+    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(qint(db, "SELECT count(*) FROM config WHERE key='nws.units'") == 0);
+    assert(qint(db, "SELECT count(*) FROM config WHERE key='nws.api_base'") == 1);
+
+    db_close(db);
+    printf("  PASS test_config_lifecycle\n");
+}
+
+static void test_validate_rejects_bad_sections(void) {
+    rm_rf("/tmp/test_ext_badsec");
+    mkdir("/tmp/test_ext_badsec", 0755);
+    char *err = NULL;
+
+    /* config key with a dot (namespace escape) */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"config\":[{\"key\":\"a.b\",\"description\":\"d\"}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    free(err); err = NULL;
+
+    /* config entry without a description */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"config\":[{\"key\":\"ok\"}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    free(err); err = NULL;
+
+    /* skill path escaping the bundle */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"skills\":[\"../evil\"]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    free(err); err = NULL;
+
+    /* declared skill missing its SKILL.md */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"skills\":[\"skills/ghost\"]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    free(err); err = NULL;
+
+    rm_rf("/tmp/test_ext_badsec");
+    printf("  PASS test_validate_rejects_bad_sections\n");
 }
 
 static void test_validate_rejects_missing_handler(void) {
@@ -179,8 +273,10 @@ int main(void) {
     printf("test_extension_manifest:\n");
     test_install_ingests_rows();
     test_reinstall_is_idempotent();
+    test_config_lifecycle();
     test_validate_rejects_missing_handler();
     test_validate_rejects_bad_json();
+    test_validate_rejects_bad_sections();
     /* cleanup */
     unlink(TEST_DB);
     rm_rf("/tmp/test_ext_manifest_bundle");

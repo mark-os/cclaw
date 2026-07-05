@@ -203,10 +203,99 @@ static void index_try_file(SkillIndex *ix, const char *path,
     free(desc);
 }
 
+/* Read at most `cap` bytes of a file into a NUL-terminated heap buffer. */
+static char *read_head(const char *path, size_t cap) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    char *buf = malloc(cap + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, cap, f);
+    fclose(f);
+    buf[got] = '\0';
+    return buf;
+}
+
+static const char *path_basename(const char *p) {
+    const char *sl = strrchr(p, '/');
+    return sl ? sl + 1 : p;
+}
+
+/* Skills declared by the agent's attached extensions (manifest $.skills[],
+ * bundle-relative paths). Read from the shared-store copy of extension.json —
+ * the DB stores no skill state; the store is the source of truth. Runs after
+ * the dir scan, so operator/agent skills shadow extension skills. */
+static void index_extension_skills(SkillIndex *ix, sqlite3 *db, const char *agent) {
+    if (!db || !agent) return;
+    /* Collect store paths first — keep only one statement active at a time. */
+    size_t cap = 4, n = 0;
+    char **paths = calloc(cap, sizeof(char *));
+    if (!paths) return;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT e.path FROM extensions e "
+            "JOIN agent_extensions ae ON ae.extension_name = e.name "
+            "WHERE ae.agent_name=?1 AND ae.enabled=1 AND e.enabled=1 "
+            "AND (e.published=1 OR e.owner_agent=?1)",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            const char *p = (const char *)sqlite3_column_text(st, 0);
+            if (!p || !p[0]) continue;
+            if (n == cap) {
+                cap *= 2;
+                char **tmp = realloc(paths, cap * sizeof(char *));
+                if (!tmp) break;
+                paths = tmp;
+            }
+            paths[n++] = strdup(p);
+        }
+        sqlite3_finalize(st);
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        char mpath[PATH_MAX];
+        int pn = snprintf(mpath, sizeof(mpath), "%s/extension.json", paths[i]);
+        if (pn < 0 || (size_t)pn >= sizeof(mpath)) continue;
+        char *manifest = read_head(mpath, 65536);
+        if (!manifest) continue;
+        sqlite3_stmt *se;
+        if (sqlite3_prepare_v2(db,
+                "SELECT value FROM json_each(COALESCE(json_extract(?1,'$.skills'),'[]'))",
+                -1, &se, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(se, 1, manifest, -1, SQLITE_STATIC);
+            while (sqlite3_step(se) == SQLITE_ROW) {
+                const char *s = (const char *)sqlite3_column_text(se, 0);
+                if (!s || !s[0] || s[0] == '/' || strstr(s, "..")) continue;
+                char full[PATH_MAX];
+                pn = snprintf(full, sizeof(full), "%s/%s", paths[i], s);
+                if (pn < 0 || (size_t)pn >= sizeof(full)) continue;
+                struct stat sb;
+                if (stat(full, &sb) != 0) continue;
+                char fallback[256];
+                if (S_ISDIR(sb.st_mode)) {
+                    snprintf(fallback, sizeof(fallback), "%s", path_basename(full));
+                    size_t l = strlen(full);
+                    if (l + 10 >= sizeof(full)) continue;
+                    snprintf(full + l, sizeof(full) - l, "/SKILL.md");
+                } else {
+                    const char *bn = path_basename(full);
+                    size_t bl = strlen(bn);
+                    if (bl > 3 && strcmp(bn + bl - 3, ".md") == 0) bl -= 3;
+                    snprintf(fallback, sizeof(fallback), "%.*s", (int)bl, bn);
+                }
+                index_try_file(ix, full, fallback);
+            }
+            sqlite3_finalize(se);
+        }
+        free(manifest);
+    }
+    for (size_t i = 0; i < n; i++) free(paths[i]);
+    free(paths);
+}
+
 char *skills_index_build(sqlite3 *db, const char *agents_dir, const char *agent) {
     size_t dir_count = 0;
     char **dirs = skills_dirs_resolve(db, agents_dir, agent, &dir_count);
-    if (!dirs) return NULL;
 
     SkillIndex ix = {0};
     for (size_t i = 0; i < dir_count; i++) {
@@ -236,6 +325,7 @@ char *skills_index_build(sqlite3 *db, const char *agents_dir, const char *agent)
         closedir(d);
     }
     skills_dirs_free(dirs, dir_count);
+    index_extension_skills(&ix, db, agent);
     buf_free(&ix.names);
 
     if (ix.count == 0) { buf_free(&ix.out); return NULL; }

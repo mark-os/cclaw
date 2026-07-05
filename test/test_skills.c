@@ -111,6 +111,47 @@ static void test_index(sqlite3 *db) {
     printf("  PASS test_index\n");
 }
 
+/* Skills declared by an attached extension's manifest ($.skills[]) appear in
+ * the index; scanned dirs shadow them (first name wins). */
+static void test_extension_skills(sqlite3 *db) {
+    mkdir(ROOT "/store", 0755);
+    mkdir(ROOT "/store/pack", 0755);
+    mkdir(ROOT "/store/pack/skills", 0755);
+    mkdir(ROOT "/store/pack/skills/packaged", 0755);
+    write_file(ROOT "/store/pack/skills/packaged/SKILL.md",
+        "---\ndescription: Skill shipped by an extension\n---\nEXT-BODY\n");
+    mkdir(ROOT "/store/pack/skills/weather", 0755);
+    write_file(ROOT "/store/pack/skills/weather/SKILL.md",
+        "---\nname: weather\ndescription: extension weather (shadowed)\n---\nx\n");
+    write_file(ROOT "/store/pack/extension.json",
+        "{\"name\":\"pack\",\"skills\":[\"skills/packaged\",\"skills/weather\"]}");
+    char *sql = sqlite3_mprintf(
+        "INSERT INTO extensions(name, path, owner_agent, published) "
+        "VALUES('pack', '%q/store/pack', 'Ag', 0);"
+        "INSERT INTO agent_extensions(agent_name, extension_name, enabled) "
+        "VALUES('Ag', 'pack', 1);", ROOT);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_free(sql);
+
+    char *ix = skills_index_build(db, ROOT "/agents", "Ag");
+    assert(ix != NULL);
+    assert(strstr(ix, "<name>packaged</name>"));
+    assert(strstr(ix, ROOT "/store/pack/skills/packaged/SKILL.md"));
+    /* dir-scanned weather wins over the extension's weather */
+    assert(strstr(ix, "extension weather") == NULL);
+    free(ix);
+
+    /* unattached agents don't see it */
+    sqlite3_exec(db, "UPDATE agent_extensions SET enabled=0 WHERE extension_name='pack'",
+                 NULL, NULL, NULL);
+    ix = skills_index_build(db, ROOT "/agents", "Ag");
+    assert(ix && strstr(ix, "packaged") == NULL);
+    free(ix);
+    sqlite3_exec(db, "UPDATE agent_extensions SET enabled=1 WHERE extension_name='pack'",
+                 NULL, NULL, NULL);
+    printf("  PASS test_extension_skills\n");
+}
+
 static void test_no_skills(sqlite3 *db) {
     config_set(db, "skills_dirs", "[]");
     char *ix = skills_index_build(db, ROOT "/agents", "NoSuchAgent");
@@ -135,6 +176,7 @@ int main(void) {
     test_frontmatter();
     test_dirs_resolve(db);
     test_index(db);
+    test_extension_skills(db);
     test_no_skills(db);
 
     db_close(db);

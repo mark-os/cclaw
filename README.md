@@ -100,13 +100,13 @@ Daemon mode adds orchestration tools (`create_agent`, `launch_agent`, `configure
 
 ## Extensible
 
-The QuickJS plugin system lets agents load JavaScript extensions at runtime:
+Agents extend themselves at runtime. An **extension** is the unit of sharing: a directory with an `extension.json` manifest declaring any mix of tools, hooks, a channel, scripts, [skills](specs/skills.md), and config keys, plus the QuickJS handler files it points to. The lifecycle:
 
-- **Channel plugins** — JS files that implement polling/sending for messaging platforms (Telegram ships built-in, others addable)
-- **Runtime tools** — agents can define new tools via `js_define_tool`, expanding their own capabilities mid-session
-- **Custom logic** — extensions loaded from `agents/<name>/workspace/` at startup, scoped per-agent
+1. **Draft** — the agent writes the bundle in its private workspace (`workspace/extensions/<name>/`) and tests handlers with `js_eval`. Personal skills need no bundle at all — drop a `SKILL.md` in `agents/<name>/skills/`.
+2. **Promote** (`extension_promote`) — validates the manifest, copies the bundle into the agent-immutable shared store (`~/.cclaw/extensions/<name>/`), and registers its contents. Still visible only to the owning agent.
+3. **Publish** (`extension_publish`) / **attach** (`extension_attach`) — other agents opt in. Attach never grants authority: tools remain subject to each agent's own grants.
 
-Channels are self-contained JS programs that speak a simple protocol: poll for messages, emit events to the DB, read outbox for responses. The daemon manages their lifecycle (spawn, monitor, restart).
+The manifest is the only door from agent-level drafts to system-level registration — one choke point where everything is validated and enumerable before it registers. Channels are self-contained JS programs run as daemon-managed processes (Telegram ships built-in); extension config lands in the self-describing config registry as `<ext>.<key>`. See [specs/extensions.md](specs/extensions.md) for the authoring walkthrough.
 
 ## Self-Bootstrapping
 

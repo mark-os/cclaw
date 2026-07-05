@@ -60,7 +60,8 @@ The DB stores nothing about standalone skills; discovery rescans at prompt
 build (a few `readdir`s).
 
 To make locations readable, the file-tier dispatch (`src/main.c`) appends
-the resolved skill dirs to the child's read-only mounts — the same transient
+the resolved skill dirs — plus the shared extension store, where attached
+extensions' skills live — to the child's read-only mounts, the same transient
 override pattern the JS tier uses for the extension store.
 
 ## Discovery
@@ -71,21 +72,27 @@ override pattern the JS tier uses for the extension store.
    Point it at `~/.claude/skills` and existing Claude Code skills appear.
 2. The per-agent dir `agents/<name>/skills/` — agent-personal skills, the
    self-augmentation surface (an agent writes its own skill here).
+3. Skills declared by the agent's **attached, enabled** extensions
+   (`extension.json` `$.skills[]`, read from the shared-store copy of the
+   manifest — only *declared* skills are indexed; stray `.md` files in a
+   bundle are not). See [extensions.md](extensions.md#extension-skills).
 
 Within a dir: subdirectories containing `SKILL.md`, plus bare `*.md` files
 (filename = fallback name). **First name wins** on collision, so configured
-dirs shadow the per-agent dir.
+dirs shadow the per-agent dir, and both shadow extension skills.
 
 ## Trust notes
 
 - Skill descriptions and bodies are prompt content from disk. Agent-authored
   skills in the agent's own tree are self-authored context (same trust class
   as memory). The global dirs are operator-managed by definition.
-- Future (extensions as bundles): an extension manifest may ship `skills/`
-  dirs; promotion places them under the extension store and enumeration at
-  promote-approval must list them ("includes N skills — modifies system
-  prompt") alongside tools/hooks. Standalone and packaged skills are the
-  same artifact, differing only in discovery root.
+- Extension-bundled skills (implemented): the manifest's `skills[]` declares
+  them, promote validates them (bundle-relative path, parseable frontmatter
+  with a description), and the shared-store copy is what gets indexed —
+  agent-immutable after promote, like handler code. Standalone and packaged
+  skills are the same artifact, differing only in discovery root. Still
+  future: surfacing "includes N skills — modifies system prompt" in a
+  promote-approval prompt.
 - Deliberately not implemented: OpenClaw's eligibility gating
   (`requires.bins/env/os`) and install specs. The sandbox makes host-binary
   checks misleading (present on host ≠ present in the child namespace);

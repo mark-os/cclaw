@@ -384,11 +384,11 @@ heap shared and reused — one runtime, many short-lived contexts.
 
 ## Implementation Status
 
-This spec describes the **target** model. As of this writing the codebase still
-loads extensions via the `cclaw.registerTool`/`registerHook` scrape
-(`src/extension.c`, `CCLAW_API_INIT`) and `tools_sync_to_db` writes a display-only
-mirror. The **channel component contract above is implemented** (`cclaw --channel`,
-the `channels`/`channel_*` tables, the `cclaw.*` channel API). Migrating tools/hooks
-to the declarative model is the work this spec defines: the manifest loader, the
-shared store + promote copy, the `tools`/`hooks`/`extensions` schema deltas, the
-read-only mount, and the promote/publish/attach operations.
+This spec's declarative model is implemented: the manifest loader
+(`src/extension_manifest.c`), the shared store + promote copy, the
+`tools`/`hooks`/`extensions` schema, the read-only mount, and the
+promote/publish/attach operations. Hook dispatch loads from the manifest via
+`extension_load_hooks` (`src/extension.c`) — there is no `registerTool`/
+`registerHook` runtime scrape. The **channel component contract is also
+implemented** (`cclaw --channel`, the `channels`/`channel_*` tables, the
+`cclaw.*` channel API).

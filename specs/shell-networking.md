@@ -214,13 +214,13 @@ LLM is told: "You have these secrets available as env vars: `$CCLAW_SECRET_GITHU
 | Complexity | High (veth, iptables, MITM CA, SO_ORIGINAL_DST) | Low (~200 LOC preload lib + UDS proxy) |
 | Pogoplug/ARMv5 compat | Needs iptables-legacy binary | Just needs LD_PRELOAD support (universal) |
 
-## Implementation Tasks
+## Implementation Status (all shipped)
 
-- **T210**: `libcclaw_net.so` — LD_PRELOAD shared lib
-- **T211**: Proxy thread — UDS listener in agent process
-- **T212**: Secret env-var injection for shell children
-- **T214**: Output secret masking
-- **T215-T217**: Integration tests
+- LD_PRELOAD shared lib (`src/preload_net.c`)
+- Net shim / proxy bridge in the agent process (`src/net_shim.c`)
+- Secret env-var injection for shell children
+- Output secret masking (DLP scanner, see specs/security.md)
+- Integration tests (`test/test_integration_shell_proxy*.c`)
 
 ## Non-Goals
 

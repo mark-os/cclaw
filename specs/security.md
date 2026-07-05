@@ -44,7 +44,7 @@ The agent process is **your compiled code** — not a container running arbitrar
 
 | Failure mode | Impact | Mitigation |
 |--------------|--------|-----------|
-| Bug in policy enforcement | Agent reaches blocked host | Code review; integration tests (T116) |
+| Bug in policy enforcement | Agent reaches blocked host | Code review; integration tests |
 | Agent ignores config limit | Infinite loop, resource exhaustion | `setrlimit` is kernel-enforced (can't be bypassed from userspace) |
 | Memory corruption | Arbitrary behavior | `-Wall -Wextra -Werror`, ASAN in dev, arena allocator limits scope |
 | Agent leaks secret to LLM context | Key visible in session history | Never include provider-native env var (e.g. `OPENROUTER_API_KEY`) in any message/tool_result; grep for leaks in tests |
@@ -98,7 +98,7 @@ The main process (CLI or daemon) loads config via `config_load(db)` (`src/config
    char *api_key = strdup(key);  // copy to heap
    unsetenv(cfg->provider.api_key_env);  // remove from environ
    ```
-   Why: `shell_exec` children inherit env. V47 strips CCLAW_* before exec, but defense-in-depth says don't keep secrets in env longer than necessary.
+   Why: `shell_exec` children inherit env. Sandbox setup already strips CCLAW_*/API-key vars before exec (src/sandbox.c), but defense-in-depth says don't keep secrets in env longer than necessary.
 
 2. **Validate allowed_hosts before use**
    ```c
@@ -139,7 +139,7 @@ Ordered from most to least critical:
 | 1 | `setrlimit` | Agent + children | Yes | No |
 | 2 | Namespace sandbox | Shell/qjs children | Yes | No (separate process) |
 | 3 | Credential proxy (`proxy.c` `decide()`) | Shell/web/js children network | Yes (netns) | No (separate netns) |
-| 4 | Env stripping (V47) | Shell children | No (app-level) | Only via code bug |
+| 4 | Env stripping | Shell children | No (app-level) | Only via code bug |
 | 5 | `prctl(PR_SET_PDEATHSIG)` | Orphan cleanup | Yes | No |
 
 Layers 1–3 are hard boundaries (kernel-enforced, separate address space).
@@ -162,7 +162,7 @@ bypass DAC where an unprivileged mapped uid cannot). Layer 2 degrades from a
 hard boundary to a soft one. Run cclaw as an unprivileged user; root is only
 appropriate for throwaway containers/VMs where the whole host is disposable.
 
-## Sub-Agent Privilege Reduction (V123)
+## Sub-Agent Privilege Reduction
 
 Two orthogonal mechanisms, both per-turn DB queries:
 
@@ -289,8 +289,8 @@ Mitigations:
 LLM tries to read API key via `shell_exec("env")` or `file_read("/proc/self/environ")`.
 
 Mitigations:
-- V47: all CCLAW_* and API key vars unset before shell exec
-- `file_read` restricted to workspace (V1)
+- All CCLAW_* and API key vars unset before shell exec
+- `file_read` restricted to workspace
 - `/proc/self/environ` blocked by namespace (/ is read-only, /proc remounted minimal)
 - Agent clears provider-native env var (e.g. `OPENROUTER_API_KEY`) from own env after startup read
 
@@ -308,8 +308,8 @@ Attacker compromises cclaw.db, sets `allowed_hosts: ["evil.com"]`.
 
 Mitigations:
 - cclaw.db is mode 0600, owned by daemon user
-- Agent config changes require admin approval (V54)
-- Daemon validates config sanity before fork (V64)
+- Agent config changes require admin approval
+- Daemon validates config sanity before fork
 - This is a "game over" scenario — if cclaw.db is compromised, attacker has full control regardless
 
 ## Single-User Assumptions
@@ -320,7 +320,7 @@ CClaw is designed for one user. This simplifies the security model:
 - Admin approval = the operator approving via Telegram (not a separate security principal)
 - "Trusted binary" assumption holds because the operator compiles it himself
 - Secrets encrypted at rest protect against exfiltration of `cclaw.db` *alone* (leaked backup, mis-scoped copy) — **not** full-disk theft (the key file goes with it) or the running system. See [Secret Storage](#secret-storage) for the key-protection ceiling.
-- Rate limiting (V71) protects against runaway costs, not against malicious users
+- Rate limiting protects against runaway costs, not against malicious users
 
 If CClaw ever becomes multi-user, the trust model changes fundamentally:
 - Agent processes would need hard isolation (containers, VMs)

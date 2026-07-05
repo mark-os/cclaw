@@ -7,7 +7,7 @@ Design reference. Derived from Letta's persistent agent memory architecture, ada
 | Tier | CClaw Implementation | Access Pattern |
 |------|---------------------|----------------|
 | Core (in-context) | `memory_blocks` table in cclaw.db (scoped by `agent_name`) | Always in system prompt, bounded by `char_limit` |
-| Archival (long-term) | §F: `passages` table + embeddings | Semantic search, unlimited |
+| Archival (long-term) | Not yet implemented: `passages` table + embeddings | Semantic search, unlimited |
 | Recall (history) | `entries` table + FTS5 in cclaw.db | Keyword/semantic search over all past turns |
 
 ## Core Memory (memory_blocks)
@@ -16,9 +16,9 @@ Agent's working memory — injected into system prompt every turn. Lives in ccla
 
 - **Unit**: labeled block with character limit
 - **Default blocks**: created by agent via `memory_create` tool (or pre-seeded by daemon at agent creation)
-- **Agent-editable**: via `memory_append`, `memory_replace` tools
+- **Agent-editable**: via `memory_add`, `memory_edit`, `memory_delete` tools
 - **Read-only option**: `read_only=1` → visible but agent tools reject edits
-- **Scoped per-agent**: `agent_name` column ensures isolation; persists across all sessions for that agent
+- **Scoped per-agent**: `agent_name` column isolates blocks; persists across all sessions for that agent. `NULL` = global block, visible to every agent.
 - **Rendered in prompt**: with metadata (label, description, chars_used/limit)
 
 Key insight from Letta: memory management is a **tool-use problem**. The agent decides what to remember via tool calls, not system-level heuristics.
@@ -28,7 +28,7 @@ Key insight from Letta: memory management is a **tool-use problem**. The agent d
 ```sql
 CREATE TABLE memory_blocks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_name TEXT NOT NULL,
+    agent_name TEXT,                    -- NULL = global (shared across agents)
     label TEXT NOT NULL,
     value TEXT NOT NULL DEFAULT '',
     description TEXT,
@@ -46,12 +46,12 @@ All past messages searchable via `db_query` tool (read-only SQL) or auto-recall.
 
 - FTS5 indexes `content` column directly (split-column schema)
 - Agent can search own history: `SELECT content FROM entries_fts WHERE entries_fts MATCH ?`
-- Context window manager (V7) loads recent turns; older entries accessible via search
+- Context window manager loads recent turns; older entries accessible via search
 - All in cclaw.db — agent reads via `CCLAW_DB`
 
 ## Future: Archival (vector recall)
 
-From §F FUTURE:
+Not yet implemented:
 - `passages` table (text, embedding BLOB, source_type, source_id) — in cclaw.db
 - Hybrid search: FTS5 + vector similarity (RRF merge)
 - Agent tool: `memory_search(query)` for explicit recall
@@ -59,16 +59,16 @@ From §F FUTURE:
 
 ## Context Window Management
 
-- V7: load ≤ `context_threshold` × context_window tokens most recent turns
-- V8: never cut mid-tool-call; cut at valid turn boundary
+- Load ≤ `context_threshold` × context_window tokens of most recent turns
+- Never cut mid-tool-call; cut at valid turn boundary
 - Cutoff notice prepended when truncated
-- Compaction (V91-V93): summarize old entries, reparent tree
+- Compaction: summarize old entries, reparent tree
 
 ## Letta Patterns NOT Adopted
 
 | Letta Feature | CClaw Decision | Reason |
 |---------------|---------------|--------|
-| Shared blocks across agents | Not implemented | Single-user system; `agent_name` scoping sufficient |
+| Shared blocks across agents | Implemented (`agent_name IS NULL` = global block) | — |
 | Sleeptime background agent | Not implemented | Adds complexity; agent can manage own memory |
 | Stateless mode | Not needed | Sessions are cheap, tree structure handles branching |
 | PostgreSQL + pgvector | SQLite single-file | No server dependency, trivial deployment |

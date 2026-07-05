@@ -1,7 +1,6 @@
 # FUTURE — Deferred Ideas
 
-Parking lot for features explicitly out-of-scope in current SPEC.md.
-Move to §T when ready to implement.
+Parking lot for features explicitly out-of-scope right now.
 
 ## Auto-Recall: Diversity + Per-Hit Metadata
 - Cap hits per source session (1–2) so one session can't fill all recall slots
@@ -90,7 +89,7 @@ QuickJS is the extension language for CClaw. Current foundation: `js_define_tool
 
 ### Extension Loading
 
-Extensions are JS modules loaded at agent startup from `agents/<name>/workspace/extensions/`. Each declares what it hooks into. Loaded fresh each turn (no persistent state beyond what's in DB).
+Extensions are JS modules loaded at agent startup from `~/.cclaw/extensions/<name>/` once promoted (see specs/extensions.md); `agents/<name>/workspace/extensions/` holds unpromoted drafts only. Each declares what it hooks into. Loaded fresh each turn (no persistent state beyond what's in DB).
 
 ### Reference: Pi Extension Model
 
@@ -111,7 +110,7 @@ CClaw adaptation: same concepts, implemented in QuickJS instead of TypeScript, w
 
 ### fetch() (foundation ✓)
 
-Synchronous fetch via UDS proxy. Respects allowed_hosts. Remaining work:
+Synchronous fetch via `HTTP_PROXY` → net_shim loopback bridge. Respects allowed_hosts. Remaining work:
 - Response size caps (heap bounded)
 - Configurable timeout per request
 - Streaming for large responses
@@ -120,7 +119,7 @@ Synchronous fetch via UDS proxy. Respects allowed_hosts. Remaining work:
 
 ### fetch() ✓ (implemented)
 
-Synchronous (quickjs is blocking). Wraps libcurl via UDS proxy. Respects allowed_hosts.
+Synchronous (quickjs is blocking). Wraps libcurl via `HTTP_PROXY` → net_shim loopback bridge. Respects allowed_hosts.
 
 - URL allowlist? Or inherit agent's permissions?
 - Response size cap (heap is bounded)
@@ -128,7 +127,7 @@ Synchronous (quickjs is blocking). Wraps libcurl via UDS proxy. Respects allowed
 
 ### fs (readFile/writeFile)
 
-Same workspace restriction as `file_read`/`file_write` tools (V1). Injected as globals.
+Same workspace restriction as `file_read`/`file_write` tools. Injected as globals.
 
 - `fs.readFile(path)` → string
 - `fs.writeFile(path, content)` → boolean

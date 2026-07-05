@@ -107,7 +107,7 @@ remember — it is structurally impossible, enforced by two independent walls:
    *"This broker holds no DB handle"*. So `cclaw.exec` and the handler physically
    cannot reach config rows.
 2. **Self-granting is the one thing the security model exists to prevent.** Per
-   `specs/security.md` (intersection-not-union, V54): *a restricted agent cannot
+   `specs/security.md` (intersection-not-union): *a restricted agent cannot
    grant itself more permissions.* Capability changes go through human approval, by
    construction.
 

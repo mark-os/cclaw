@@ -2398,6 +2398,42 @@ static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
 }
 
 
+/* Bootstrap the default agent on a fresh DB. Shared by CLI and daemon —
+ * a headless install (daemon-only, e.g. a channel-driven deploy) must not
+ * depend on someone having run the CLI once to get a routable agent. */
+static void ensure_default_agent(const char *base_dir) {
+    int ac = 0; char **al = db_agent_list(g_db, &ac);
+    if (!al || ac == 0) {
+        char ws[PATH_MAX]; snprintf(ws, sizeof(ws), "%s/agents/Assistant/workspace/.keep", base_dir);
+        ensure_parent_dir(ws);
+        /* Create default agent */
+        const char *agent_sql =
+            "INSERT OR IGNORE INTO agents(name, system_prompt, sandbox_profile)"
+            " VALUES('Assistant', ?, 'trusted');"
+            ;
+        sqlite3_stmt *bs;
+        if (sqlite3_prepare_v2(g_db, agent_sql, -1, &bs, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(bs, 1, TPL_DEFAULT_SYSTEM_PROMPT_MD, -1, SQLITE_STATIC);
+            sqlite3_step(bs); sqlite3_finalize(bs);
+        }
+        /* Seed default tools as grants */
+        agent_grant_defaults(g_db, "Assistant");
+        /* default_agent needs no write — 'Assistant' is the registry default */
+        /* Seed default memory blocks */
+        memory_block_create(g_db, "Assistant", "AGENT",
+            "Your identity, capabilities, and operational notes. Update as you learn about yourself.",
+            NULL, 5000);
+        memory_block_create(g_db, "Assistant", "USER",
+            "Information about the user: preferences, context, working style. Update as you learn.",
+            NULL, 5000);
+        memory_entry_add(g_db, "Assistant", "AGENT",
+            "You are CClaw. You do not have a name yet — ask the user what they would like to call you, then save it here with memory_edit.");
+        memory_entry_add(g_db, "Assistant", "USER",
+            "Record what you learn about the user here: their name, preferences, and how they like you to work.");
+    }
+    if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
+}
+
 static int run_daemon(char *db_path) {
     g_mode = 1;
     g_next_db_poll = time(NULL);  /* run DB checks immediately on first iter */
@@ -2416,7 +2452,8 @@ static int run_daemon(char *db_path) {
     char daemon_agents_dir[PATH_MAX];
     { char base[PATH_MAX]; snprintf(base, sizeof(base), "%s", db_path);
       char *sl = strrchr(base, '/'); if (sl) *sl = '\0'; else snprintf(base, sizeof(base), ".");
-      snprintf(daemon_agents_dir, sizeof(daemon_agents_dir), "%s/agents", base); }
+      snprintf(daemon_agents_dir, sizeof(daemon_agents_dir), "%s/agents", base);
+      ensure_default_agent(base); }
     AgentSetup daemon_setup;
     agent_setup_init(&daemon_setup, g_db, 0, g_cfg, g_agent_name, AGENT_SETUP_DAEMON);
     daemon_setup.req_cfg_ctx.agents_dir = daemon_agents_dir;
@@ -2561,38 +2598,7 @@ static int run_cli(char *db_path, const char *prompt,
     char *base_dir = strdup(db_path);
     { char *sl = strrchr(base_dir, '/'); if (sl) *sl = '\0'; else { free(base_dir); base_dir = strdup("."); } }
 
-    /* Ensure default agent exists — bootstrap on first run */
-    { int ac = 0; char **al = db_agent_list(g_db, &ac);
-      if (!al || ac == 0) {
-          char ws[PATH_MAX]; snprintf(ws, sizeof(ws), "%s/agents/Assistant/workspace/.keep", base_dir);
-          ensure_parent_dir(ws);
-          /* Create default agent */
-          const char *agent_sql =
-              "INSERT OR IGNORE INTO agents(name, system_prompt, sandbox_profile)"
-              " VALUES('Assistant', ?, 'trusted');"
-              ;
-          sqlite3_stmt *bs;
-          if (sqlite3_prepare_v2(g_db, agent_sql, -1, &bs, NULL) == SQLITE_OK) {
-              sqlite3_bind_text(bs, 1, TPL_DEFAULT_SYSTEM_PROMPT_MD, -1, SQLITE_STATIC);
-              sqlite3_step(bs); sqlite3_finalize(bs);
-          }
-          /* Seed default tools as grants */
-          agent_grant_defaults(g_db, "Assistant");
-          /* default_agent needs no write — 'Assistant' is the registry default */
-          /* Seed default memory blocks */
-          memory_block_create(g_db, "Assistant", "AGENT",
-              "Your identity, capabilities, and operational notes. Update as you learn about yourself.",
-              NULL, 5000);
-          memory_block_create(g_db, "Assistant", "USER",
-              "Information about the user: preferences, context, working style. Update as you learn.",
-              NULL, 5000);
-          memory_entry_add(g_db, "Assistant", "AGENT",
-              "You are CClaw. You do not have a name yet — ask the user what they would like to call you, then save it here with memory_edit.");
-          memory_entry_add(g_db, "Assistant", "USER",
-              "Record what you learn about the user here: their name, preferences, and how they like you to work.");
-      }
-      if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
-    }
+    ensure_default_agent(base_dir);
 
     /* Agent selection */
     char *agent_sel = NULL;

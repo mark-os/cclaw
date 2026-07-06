@@ -189,8 +189,9 @@ static void test_channel_events_wildcard_fallback(void) {
     printf("PASS\n");
 }
 
-/* No binding at all for the channel: event is dropped (deleted, no
- * session/inbox side effects). */
+/* No binding at all for the channel: falls back to the default agent
+ * instead of silently dropping the message — a fresh DB has no
+ * channel_routes rows, and headless installs must still route. */
 static void test_channel_events_no_binding(void) {
     setup();
     sqlite3 *db = test_db_open(DB_PATH);
@@ -202,7 +203,9 @@ static void test_channel_events_no_binding(void) {
     channel_consume_events(db);
 
     assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_events;") == 0);
-    assert(test_scalar_count(db, "SELECT COUNT(*) FROM sessions;") == 0);
+    int64_t sid = test_session_find(db, "unbound", "user1", "Assistant");
+    assert(sid > 0);
+    assert(test_inbox_count(db, sid) == 1);
 
     chdir_restore();
     db_close(db);

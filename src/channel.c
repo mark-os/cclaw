@@ -264,6 +264,16 @@ void channel_consume_events(sqlite3 *db) {
             char *agent = db_channel_binding_get(db, ch_name, cid);
             if (!agent && strcmp(cid, "*") != 0)
                 agent = db_channel_binding_get(db, ch_name, "*");
+            if (!agent) {
+                /* No route: fall back to the default agent instead of
+                 * silently deleting the message — a fresh DB has no
+                 * channel_routes rows at all, and a dropped message with
+                 * no trace is indistinguishable from a dead channel. */
+                agent = config_get(db, "default_agent");
+                if (agent)
+                    LOG_WARN_("channel no route ch=%s cid=%s, using default_agent=%s",
+                              ch_name, cid, agent);
+            }
             if (!agent) goto del;
 
             /* Find or create session for this channel+channel_id */

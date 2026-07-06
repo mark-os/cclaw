@@ -1,7 +1,9 @@
 /* Test channel launcher tracking + channel_events consumer.
  * Verifies: channel_consume_events() itself — binding resolution (incl.
- * wildcard fallback), session find-or-create, approval-decision routing
- * vs. plain inbox delivery, and unconditional event-row deletion. */
+ * wildcard fallback), session find-or-create, the approval_decision event
+ * type resolving structurally (bypassing routing entirely), plain-message
+ * inbox delivery (never text-interpreted as a decision), and unconditional
+ * event-row deletion. */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include <stdio.h>
@@ -233,9 +235,12 @@ static void test_channel_events_non_message_type(void) {
     printf("PASS\n");
 }
 
-/* Session awaiting approval: a channel message routes to resolve_approval()
- * as a decision instead of landing in the inbox. */
-static void test_channel_events_approval_routing(void) {
+/* approval_decision is a distinct, channel-agnostic event type carrying its
+ * own approval_id — it resolves via resolve_approval() without touching
+ * channel_routes or session lookup at all. Plain chat text is never
+ * interpreted as a decision, even while an approval is pending: it always
+ * lands in the inbox, and the approval stays pending. */
+static void test_channel_events_approval_decision(void) {
     setup();
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
@@ -257,11 +262,14 @@ static void test_channel_events_approval_routing(void) {
         sqlite3_finalize(s);
     }
 
-    /* "y" -> APPROVAL_ALWAYS */
+    /* decision "yes" -> APPROVAL_ALWAYS */
     {
         int64_t aid = approval_create(db, sid, "tc1", "shell_exec", "run", "{}", "rerun");
         assert(aid > 0);
-        test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"user1\",\"text\":\"y\"}");
+        char payload[128];
+        snprintf(payload, sizeof(payload),
+                 "{\"approval_id\":%lld,\"decision\":\"yes\"}", (long long)aid);
+        test_event_insert(db, "mychannel", "approval_decision", payload);
         channel_consume_events(db);
 
         assert(g_resolve_calls == 1);
@@ -282,12 +290,15 @@ static void test_channel_events_approval_routing(void) {
         }
     }
 
-    /* "once" -> APPROVAL_ONCE */
+    /* decision "once" -> APPROVAL_ONCE */
     resolve_spy_reset();
     {
         int64_t aid = approval_create(db, sid, "tc2", "shell_exec", "run", "{}", "rerun");
         assert(aid > 0);
-        test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"user1\",\"text\":\"once\"}");
+        char payload[128];
+        snprintf(payload, sizeof(payload),
+                 "{\"approval_id\":%lld,\"decision\":\"once\"}", (long long)aid);
+        test_event_insert(db, "mychannel", "approval_decision", payload);
         channel_consume_events(db);
 
         assert(g_resolve_calls == 1);
@@ -303,12 +314,15 @@ static void test_channel_events_approval_routing(void) {
         sqlite3_finalize(s);
     }
 
-    /* anything else -> APPROVAL_DENY */
+    /* decision "no" (and anything not "yes"/"once") -> APPROVAL_DENY */
     resolve_spy_reset();
     {
         int64_t aid = approval_create(db, sid, "tc3", "shell_exec", "run", "{}", "rerun");
         assert(aid > 0);
-        test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"user1\",\"text\":\"nope\"}");
+        char payload[128];
+        snprintf(payload, sizeof(payload),
+                 "{\"approval_id\":%lld,\"decision\":\"no\"}", (long long)aid);
+        test_event_insert(db, "mychannel", "approval_decision", payload);
         channel_consume_events(db);
 
         assert(g_resolve_calls == 1);
@@ -317,6 +331,33 @@ static void test_channel_events_approval_routing(void) {
         assert(strcmp(g_resolve_decided_via, "channel:mychannel") == 0);
         assert(test_inbox_count(db, sid) == 0);
         assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_events;") == 0);
+
+        sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db, "UPDATE approvals SET state='denied' WHERE id=?;", -1, &s, NULL) == SQLITE_OK);
+        sqlite3_bind_int64(s, 1, aid);
+        assert(sqlite3_step(s) == SQLITE_DONE);
+        sqlite3_finalize(s);
+    }
+
+    /* Ordinary chat text while an approval is pending is NOT an implicit
+     * decision — it forwards to the inbox untouched, and the approval
+     * stays pending for a later structural decision (or expiry). */
+    resolve_spy_reset();
+    {
+        int64_t aid = approval_create(db, sid, "tc4", "shell_exec", "run", "{}", "rerun");
+        assert(aid > 0);
+        test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"user1\",\"text\":\"yes\"}");
+        channel_consume_events(db);
+
+        assert(g_resolve_calls == 0);
+        assert(test_inbox_count(db, sid) == 1);
+
+        sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db, "SELECT state FROM approvals WHERE id=?;", -1, &s, NULL) == SQLITE_OK);
+        sqlite3_bind_int64(s, 1, aid);
+        assert(sqlite3_step(s) == SQLITE_ROW);
+        assert(strcmp((const char *)sqlite3_column_text(s, 0), "pending") == 0);
+        sqlite3_finalize(s);
     }
 
     chdir_restore();
@@ -410,8 +451,8 @@ int main(void) {
     printf("  channel_events_non_message_type... ");
     test_channel_events_non_message_type();
 
-    printf("  channel_events_approval_routing... ");
-    test_channel_events_approval_routing();
+    printf("  channel_events_approval_decision... ");
+    test_channel_events_approval_decision();
 
     printf("  channel_events_default_binding... ");
     test_channel_events_default_binding();

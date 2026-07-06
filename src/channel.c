@@ -237,7 +237,46 @@ void channel_consume_events(sqlite3 *db) {
         sqlite3_finalize(stmt);
         cursor = eid;
 
-        if (!ch_name || !payload || !etype || strcmp(etype, "message") != 0)
+        if (!ch_name || !payload || !etype)
+            goto del;
+
+        /* Structural approval decision (inline-button tap, or any other
+         * channel-specific UI for a yes/once/no answer). Channel-agnostic:
+         * the daemon never interprets raw chat text as a decision — that's
+         * entirely the channel extension's concern (see channel_telegram.qjs
+         * processCallback). The approval carries its own session_id, so this
+         * skips channel_routes/session lookup entirely. */
+        if (strcmp(etype, "approval_decision") == 0) {
+            processed++;
+            int64_t approval_id = -1;
+            char decision_str[16] = {0};
+            const char *jsql =
+                "SELECT json_extract(?1,'$.approval_id'), json_extract(?1,'$.decision');";
+            sqlite3_stmt *js;
+            if (sqlite3_prepare_v2(db, jsql, -1, &js, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(js, 1, payload, -1, SQLITE_STATIC);
+                if (sqlite3_step(js) == SQLITE_ROW) {
+                    approval_id = sqlite3_column_int64(js, 0);
+                    const char *dv = (const char *)sqlite3_column_text(js, 1);
+                    if (dv) snprintf(decision_str, sizeof(decision_str), "%s", dv);
+                }
+                sqlite3_finalize(js);
+            }
+            if (approval_id > 0 && decision_str[0]) {
+                ApprovalDecision d = APPROVAL_DENY;
+                if (strcmp(decision_str, "yes") == 0) d = APPROVAL_ALWAYS;
+                else if (strcmp(decision_str, "once") == 0) d = APPROVAL_ONCE;
+                char decided[128];
+                snprintf(decided, sizeof(decided), "channel:%s", ch_name);
+                resolve_approval(approval_id, d, decided, 0);
+            } else {
+                LOG_ERROR_("channel approval_decision malformed ch=%s eid=%lld payload=%s",
+                           ch_name, (long long)eid, payload);
+            }
+            goto del;
+        }
+
+        if (strcmp(etype, "message") != 0)
             goto del;
 
         /* Resolve agent via channel_routes, find/create session */
@@ -308,69 +347,23 @@ void channel_consume_events(sqlite3 *db) {
                 LOG_INFO_("channel event ch=%s sid=%lld type=%s",
                           ch_name, (long long)sid, etype);
                 processed++;
-                /* Check if session is awaiting approval — route as decision
-                 * only when the text is a recognized yes/no/once token.
-                 * Anything else (e.g. "try NWS instead") is an unrelated
-                 * chat message, not an answer — forward it normally rather
-                 * than silently consuming it as an implicit deny. The
-                 * approval stays pending for a later reply (or expiry). */
-                Approval *pa = approval_get_pending(db, sid);
-                int handled_as_decision = 0;
-                if (pa) {
-                    const char *tsql = "SELECT json_extract(?, '$.text');";
-                    sqlite3_stmt *ts;
-                    char *text = NULL;
-                    if (sqlite3_prepare_v2(db, tsql, -1, &ts, NULL) == SQLITE_OK) {
-                        sqlite3_bind_text(ts, 1, payload, -1, SQLITE_STATIC);
-                        if (sqlite3_step(ts) == SQLITE_ROW) {
-                            const char *tv = (const char *)sqlite3_column_text(ts, 0);
-                            if (tv) text = strdup(tv);
-                        }
-                        sqlite3_finalize(ts);
-                    }
-                    ApprovalDecision d = APPROVAL_DENY;
-                    if (text) {
-                        if (strcasecmp(text, "once") == 0 || strcasecmp(text, "o") == 0) {
-                            d = APPROVAL_ONCE;
-                            handled_as_decision = 1;
-                        } else if (strcasecmp(text, "y") == 0 ||
-                                 strcasecmp(text, "yes") == 0 ||
-                                 strcasecmp(text, "ok") == 0 ||
-                                 strcasecmp(text, "okay") == 0 ||
-                                 strcasecmp(text, "approve") == 0) {
-                            d = APPROVAL_ALWAYS;
-                            handled_as_decision = 1;
-                        } else if (strcasecmp(text, "n") == 0 ||
-                                 strcasecmp(text, "no") == 0 ||
-                                 strcasecmp(text, "deny") == 0 ||
-                                 strcasecmp(text, "cancel") == 0) {
-                            d = APPROVAL_DENY;
-                            handled_as_decision = 1;
-                        }
-                        free(text);
-                    }
-                    if (handled_as_decision) {
-                        char decided[128];
-                        snprintf(decided, sizeof(decided), "channel:%s", ch_name);
-                        resolve_approval(pa->id, d, decided, 0);
-                        wake_session(sid);
-                    }
-                    approval_free(pa);
+                /* Every inbound chat message is forwarded as-is — approval
+                 * decisions arrive as their own structural event type
+                 * (approval_decision, above), never by interpreting chat
+                 * text. A pending approval simply stays pending until a
+                 * decision event resolves it (or it expires). */
+                int64_t irc = inbox_insert_scanned(db, sid, ch_name, payload);
+                if (irc < 0) {
+                    /* Leave the row in channel_events (skip the del: below)
+                     * so the next consume pass retries it — but log it, since
+                     * a silent retry-forever with no trace is undebuggable. */
+                    LOG_ERROR_("channel inbox_insert failed ch=%s sid=%lld eid=%lld, will retry",
+                               ch_name, (long long)sid, (long long)eid);
+                    free(agent);
+                    free(ch_name); free(etype); free(payload);
+                    continue;
                 }
-                if (!handled_as_decision) {
-                    int64_t irc = inbox_insert_scanned(db, sid, ch_name, payload);
-                    if (irc < 0) {
-                        /* Leave the row in channel_events (skip the del: below)
-                         * so the next consume pass retries it — but log it, since
-                         * a silent retry-forever with no trace is undebuggable. */
-                        LOG_ERROR_("channel inbox_insert failed ch=%s sid=%lld eid=%lld, will retry",
-                                   ch_name, (long long)sid, (long long)eid);
-                        free(agent);
-                        free(ch_name); free(etype); free(payload);
-                        continue;
-                    }
-                    wake_session(sid);
-                }
+                wake_session(sid);
             }
             free(agent);
         }

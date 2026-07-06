@@ -171,14 +171,17 @@ static void test_grant_path_default_mode_read(void) {
     printf("  PASS test_grant_path_default_mode_read\n");
 }
 
-static void test_denied_dedup(void) {
+static void test_denied_not_deduped(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
     db_agent_upsert(db, "test", NULL, NULL);
     int64_t sid = session_create(db, "t", "test", -1, 0);
     assert(sid > 0);
 
-    /* Pre-insert a denied approval for grant_host / blocked.example.com. */
+    /* Pre-insert a denied approval for grant_host / blocked.example.com. A
+     * prior denial must not permanently forbid re-asking — humans can
+     * reconsider via admin routing / the grants menu, so only a *pending*
+     * duplicate should be blocked. */
     sqlite3_stmt *ins;
     int rc = sqlite3_prepare_v2(db,
         "INSERT INTO approvals (session_id, tool_call_id, tool_name, action, args_json, resolve, state)"
@@ -201,14 +204,22 @@ static void test_denied_dedup(void) {
     tools_init(&reg);
     tool_request_config_register(&reg, &ctx);
 
-    /* Same host (different reason) — should hit dedup and return error. */
+    /* Same host, re-requested after denial — must park, not be dedup'd. */
     char *result = call_handler(&reg,
         "{\"action\":\"grant_host\",\"host\":\"blocked.example.com\",\"reason\":\"different reason\"}");
-    assert(result != NULL);
-    assert(strstr(result, "already denied in this session") != NULL);
-    free(result);
+    assert(result == NULL); /* parked */
 
-    /* Verify no new row was created — count should still be 1. */
+    /* A second, still-pending duplicate for that same new request must be
+     * blocked (this is the dedup that's still active). */
+    ctx.current_tool_call_id = "call_5";
+    char *dup = call_handler(&reg,
+        "{\"action\":\"grant_host\",\"host\":\"blocked.example.com\",\"reason\":\"yet another\"}");
+    assert(dup != NULL);
+    assert(strstr(dup, "still awaiting") != NULL);
+    free(dup);
+
+    /* Verify exactly 2 rows exist: the original denied one, and the new
+     * pending one from the re-request. */
     sqlite3_stmt *cnt;
     rc = sqlite3_prepare_v2(db,
         "SELECT count(*) FROM approvals WHERE session_id=?1",
@@ -216,18 +227,18 @@ static void test_denied_dedup(void) {
     assert(rc == SQLITE_OK);
     sqlite3_bind_int64(cnt, 1, sid);
     assert(sqlite3_step(cnt) == SQLITE_ROW);
-    assert(sqlite3_column_int(cnt, 0) == 1);
+    assert(sqlite3_column_int(cnt, 0) == 2);
     sqlite3_finalize(cnt);
 
     /* Different host should park successfully (dedup must not overmatch). */
-    ctx.current_tool_call_id = "call_5";
+    ctx.current_tool_call_id = "call_6";
     char *ok = call_handler(&reg,
         "{\"action\":\"grant_host\",\"host\":\"other.example.com\"}");
     assert(ok == NULL); /* parked */
 
     tools_free(&reg);
     db_close(db);
-    printf("  PASS test_denied_dedup\n");
+    printf("  PASS test_denied_not_deduped\n");
 }
 
 int main(void) {
@@ -238,7 +249,7 @@ int main(void) {
     test_add_tool_to_config();
     test_reason_in_args_json();
     test_grant_path_default_mode_read();
-    test_denied_dedup();
+    test_denied_not_deduped();
     printf("\nAll request_config tests passed.\n");
     return 0;
 }

@@ -1757,6 +1757,45 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     run_advance(session_id);
 }
 
+/* Render a human-readable one-line summary of an approval's action/args for
+ * a chat prompt — never the raw args_json blob. request_config's actions
+ * get field-accurate rendering (mirrors apply_grant's switch above); any
+ * other tool's own call arguments (shape unknown to us in general) surface
+ * their most common salient field so the reader isn't shown bare JSON. */
+static void format_approval_summary(const Approval *a, char *buf, size_t buflen) {
+    ToolArgs ta;
+    tool_parse(a->args_json ? a->args_json : "{}", &ta);
+    if (a->tool_name && strcmp(a->tool_name, "request_config") == 0) {
+        if (a->action && strcmp(a->action, "grant_tool") == 0) {
+            const char *v = targ_str(&ta, "tool");
+            snprintf(buf, buflen, "grant_tool: %s", v ? v : "?");
+        } else if (a->action && strcmp(a->action, "grant_host") == 0) {
+            const char *v = targ_str(&ta, "host");
+            snprintf(buf, buflen, "grant_host: %s", v ? v : "?");
+        } else if (a->action && strcmp(a->action, "grant_path") == 0) {
+            const char *v = targ_str(&ta, "path");
+            const char *m = targ_str(&ta, "mode");
+            snprintf(buf, buflen, "grant_path: %s (%s)", v ? v : "?",
+                     (m && strcmp(m, "write") == 0) ? "write" : "read");
+        } else if (a->action && strcmp(a->action, "rename_agent") == 0) {
+            const char *v = targ_str(&ta, "name");
+            snprintf(buf, buflen, "rename_agent: %s", v ? v : "?");
+        } else {
+            snprintf(buf, buflen, "%s", a->action ? a->action : "?");
+        }
+    } else {
+        const char *salient = targ_str(&ta, "command");
+        if (!salient) salient = targ_str(&ta, "url");
+        if (!salient) salient = targ_str(&ta, "path");
+        if (salient)
+            snprintf(buf, buflen, "%s: %s", a->tool_name ? a->tool_name : "?", salient);
+        else
+            snprintf(buf, buflen, "%s (%s)", a->tool_name ? a->tool_name : "?",
+                     a->action ? a->action : "?");
+    }
+    tool_parse_free(&ta);
+}
+
 /* ── handle_approval_park: prompt the approver ────────────────── */
 
 static void handle_approval_park(int64_t session_id) {
@@ -1833,22 +1872,70 @@ static void handle_approval_park(int64_t session_id) {
         sqlite3_finalize(stmt);
     }
     if (has_channel) {
-        /* Enqueue approval prompt to channel */
+        /* Route to the channel's configured admin destination(s), not the
+         * requesting session's own chat — a session may be exposed on a
+         * channel/chat where the human watching it isn't the one who should
+         * decide grants (e.g. a sub-agent surfaced on a groupchat). Falls
+         * back to the session's own channel_id when no admin_ids are
+         * configured, so the common 1:1 setup needs no extra config. */
+        char *admins = NULL;
+        {
+            const char *asql = "SELECT value FROM channel_state WHERE channel_name=?1 AND key='admin_ids';";
+            sqlite3_stmt *as;
+            if (sqlite3_prepare_v2(g_db, asql, -1, &as, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(as, 1, ch_name, -1, SQLITE_STATIC);
+                if (sqlite3_step(as) == SQLITE_ROW) {
+                    const char *v = (const char *)sqlite3_column_text(as, 0);
+                    if (v && v[0]) admins = strdup(v);
+                }
+                sqlite3_finalize(as);
+            }
+        }
+
+        char *agent = session_get_agent_name(g_db, session_id);
+        char summary[256];
+        format_approval_summary(a, summary, sizeof(summary));
         char prompt[512];
         snprintf(prompt, sizeof(prompt),
-                 "Approval required: %s %s. Reply yes/no.",
-                 a->action, a->args_json ? a->args_json : "");
+                 "Agent %s (session %lld, channel: %s) requests:\n%s",
+                 agent ? agent : "?", (long long)session_id, ch_name, summary);
+        free(agent);
+
+        char keyboard[256];
+        snprintf(keyboard, sizeof(keyboard),
+                 "[[{\"text\":\"Approve\",\"callback_data\":\"appr:%lld:yes\"},"
+                 "{\"text\":\"Once\",\"callback_data\":\"appr:%lld:once\"},"
+                 "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
+                 (long long)a->id, (long long)a->id, (long long)a->id);
+
         const char *ins_sql =
             "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-            " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4));";
-        sqlite3_stmt *ins;
-        if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(ins, 1, ch_name, -1, SQLITE_STATIC);
-            sqlite3_bind_int64(ins, 2, session_id);
-            sqlite3_bind_text(ins, 3, ch_id, -1, SQLITE_STATIC);
-            sqlite3_bind_text(ins, 4, prompt, -1, SQLITE_STATIC);
-            sqlite3_step(ins); sqlite3_finalize(ins);
+            " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4, 'keyboard', json(?5)));";
+        if (admins && admins[0]) {
+            char *save = NULL;
+            for (char *tok = strtok_r(admins, ", ", &save); tok; tok = strtok_r(NULL, ", ", &save)) {
+                sqlite3_stmt *ins;
+                if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(ins, 1, ch_name, -1, SQLITE_STATIC);
+                    sqlite3_bind_int64(ins, 2, session_id);
+                    sqlite3_bind_text(ins, 3, tok, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(ins, 4, prompt, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(ins, 5, keyboard, -1, SQLITE_STATIC);
+                    sqlite3_step(ins); sqlite3_finalize(ins);
+                }
+            }
+        } else {
+            sqlite3_stmt *ins;
+            if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(ins, 1, ch_name, -1, SQLITE_STATIC);
+                sqlite3_bind_int64(ins, 2, session_id);
+                sqlite3_bind_text(ins, 3, ch_id, -1, SQLITE_STATIC);
+                sqlite3_bind_text(ins, 4, prompt, -1, SQLITE_STATIC);
+                sqlite3_bind_text(ins, 5, keyboard, -1, SQLITE_STATIC);
+                sqlite3_step(ins); sqlite3_finalize(ins);
+            }
         }
+        free(admins);
         if (g_cfg && g_cfg->db_path) channel_outbox_wake(g_cfg->db_path, ch_name);
     }
     if (!has_channel) {

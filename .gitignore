@@ -1,6 +1,5 @@
 # Cloned reference repos (keep README and .md notes)
 reference/*/
-!reference/README.md
 !reference/*.md
 
 # Build artifacts

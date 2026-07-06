@@ -463,6 +463,14 @@ static void sandbox_setup_static_egress(const char *uds_path) {
     pid_t shim = fork();
     if (shim < 0) { close(mfd); close(lfd); return; }
     if (shim == 0) {
+        /* No PID namespace backs this tier (skip_pid_ns), so there's no
+         * kernel-enforced teardown when the tool process exits — without this,
+         * the shim orphans to init and lingers forever. PDEATHSIG doesn't
+         * survive fork(), so it must be set here, not inherited from the
+         * sandboxed process that forked us (same reasoning as the PID-ns
+         * init's re-arm, sandbox_apply_namespace above). */
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+
         /* Shim: drop stdout/stderr (they point at the tool result pipe — the
          * shim must not pollute tool output nor hold the pipe open), keep lfd,
          * exec the link-isolated binary with the listener fd + UDS path. */

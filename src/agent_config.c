@@ -103,7 +103,7 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
             "         FROM memory_entries e WHERE e.agent_name=b.agent_name AND e.block_label=b.label),"
             "      '(no entries yet)' || char(10)"
             "    ) AS block_text"
-            "  FROM memory_blocks b WHERE b.agent_name=?1 ORDER BY b.id"
+            "  FROM memory_blocks b WHERE b.agent_name=?1 AND b.placement='system' ORDER BY b.id"
             ")"
             "SELECT char(10) || char(10) || '## Memory Blocks' || char(10) ||"
             "       group_concat(block_text, '' ORDER BY id)"

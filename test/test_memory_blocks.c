@@ -15,7 +15,7 @@ static void test_create_and_get(void) {
     assert(db);
 
     int64_t id = memory_block_create(db, "TestAgent", "persona",
-                                     "Agent identity", "I am helpful", 5000);
+                                     "Agent identity", "I am helpful", 5000, NULL);
     assert(id > 0);
 
     MemoryBlock *mb = memory_block_get(db, "TestAgent", "persona");
@@ -29,11 +29,11 @@ static void test_create_and_get(void) {
     memory_block_free(mb);
 
     /* Duplicate label fails */
-    int64_t dup = memory_block_create(db, "TestAgent", "persona", "dup", "dup", 5000);
+    int64_t dup = memory_block_create(db, "TestAgent", "persona", "dup", "dup", 5000, NULL);
     assert(dup == -1);
 
     /* Different agent same label OK */
-    int64_t id2 = memory_block_create(db, "OtherAgent", "persona", "desc", "val", 3000);
+    int64_t id2 = memory_block_create(db, "OtherAgent", "persona", "desc", "val", 3000, NULL);
     assert(id2 > 0);
 
     db_close(db);
@@ -45,9 +45,9 @@ static void test_list(void) {
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
-    memory_block_create(db, "Agent1", "a", "d1", "v1", 5000);
-    memory_block_create(db, "Agent1", "b", "d2", "v2", 5000);
-    memory_block_create(db, "Agent2", "c", "d3", "v3", 5000);
+    memory_block_create(db, "Agent1", "a", "d1", "v1", 5000, NULL);
+    memory_block_create(db, "Agent1", "b", "d2", "v2", 5000, NULL);
+    memory_block_create(db, "Agent2", "c", "d3", "v3", 5000, NULL);
 
     int count = 0;
     MemoryBlock *list = memory_block_list(db, "Agent1", &count);
@@ -73,7 +73,7 @@ static void test_set_value(void) {
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
-    memory_block_create(db, "Agent", "notes", "my notes", "", 20);
+    memory_block_create(db, "Agent", "notes", "my notes", "", 20, NULL);
 
     /* Normal update */
     int rc = memory_block_set_value(db, "Agent", "notes", "short");
@@ -104,7 +104,7 @@ static void test_read_only(void) {
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
-    int64_t id = memory_block_create(db, "Agent", "instructions", "standing orders", "do X", 5000);
+    int64_t id = memory_block_create(db, "Agent", "instructions", "standing orders", "do X", 5000, NULL);
     assert(id > 0);
 
     /* Set read_only directly */
@@ -173,8 +173,8 @@ static void test_prompt_injection(void) {
     db_agent_upsert(db, "Testagent", NULL, "You are a test agent.");
 
     /* Create memory blocks (containers) and add numbered entries */
-    memory_block_create(db, "Testagent", "persona", "Agent identity", "", 5000);
-    memory_block_create(db, "Testagent", "human", "User facts", "", 3000);
+    memory_block_create(db, "Testagent", "persona", "Agent identity", "", 5000, NULL);
+    memory_block_create(db, "Testagent", "human", "User facts", "", 3000, NULL);
     memory_entry_add(db, "Testagent", "persona", "I am helpful"); /* 12 chars */
     memory_entry_add(db, "Testagent", "human", "Likes cats");     /* 10 chars */
 

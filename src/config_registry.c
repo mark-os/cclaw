@@ -40,7 +40,7 @@ static const ConfigDef s_defs[] = {
       "Max sub-agent nesting depth for launch_agent" },
     { "worker_tools",
       "[\"file_read\",\"file_write\",\"shell_exec\",\"web_fetch\",\"js_eval\","
-      "\"check_session\",\"check_approval\",\"search_config\",\"secret_create\"]",
+      "\"check_session\",\"search_config\",\"secret_create\"]",
       "Tools granted to self-spawned worker sub-agents (JSON array)" },
     { "agent_default_tools",
       "[\"file_read\",\"file_write\",\"js_eval\",\"request_config\","
@@ -48,7 +48,7 @@ static const ConfigDef s_defs[] = {
       "\"memory_delete\",\"configure_provider\",\"configure_channel\","
       "\"create_agent\",\"extension_promote\",\"extension_publish\","
       "\"extension_attach\",\"extension_list\",\"launch_agent\","
-      "\"check_session\",\"check_approval\",\"secret_create\"]",
+      "\"check_session\",\"secret_create\"]",
       "Baseline tool grants seeded for a newly created agent (JSON array)" },
     { "health_5xx_threshold", "3",
       "5xx errors within the window before a model is marked degraded" },

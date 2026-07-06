@@ -19,7 +19,7 @@ typedef void (*ToolFreeFn)(void *user_data);
  *
  * EXEC_INLINE   — run on the poll thread (control-flow holdouts that read live
  *                 session state or mutate the registry: launch_agent,
- *                 check_session, check_approval, request_config, extension_*).
+ *                 check_session, request_config, extension_*).
  * EXEC_THREAD   — fire-and-forget detached thread; DB/session-only tools.
  * EXEC_SANDBOX  — fork+execve --run-tool child (file/shell/web/js). */
 typedef enum { EXEC_INLINE, EXEC_THREAD, EXEC_SANDBOX } ExecVehicle;

@@ -320,14 +320,17 @@ typedef struct {
     char *description;
     int char_limit;
     int read_only;
+    char *placement;  /* 'system' (system prompt) or 'context' (per-turn session context) */
     int64_t created_at;
     int64_t updated_at;
 } MemoryBlock;
 
 /* Create a memory block. Returns row id (>0) or -1 on error.
- * Fails if UNIQUE(agent_name, label) violated. */
+ * Fails if UNIQUE(agent_name, label) violated. placement: NULL/"" defaults
+ * to 'system'. */
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
-                            const char *description, const char *value, int char_limit);
+                            const char *description, const char *value, int char_limit,
+                            const char *placement);
 
 /* Get a memory block by agent_name + label. Returns NULL if not found. Caller frees. */
 MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *label);

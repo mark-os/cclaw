@@ -33,7 +33,6 @@ INSERT OR IGNORE INTO tools(name, description) VALUES
   ('search_config', 'Discover your current configuration and what you can request: your sandbox profile, granted tools and hosts, the full list of available tools, and how to request more via request_config.'),
   ('launch_agent', 'Delegate a task to another agent'),
   ('check_session', 'Check the status and result of a sub-agent session'),
-  ('check_approval', 'Inspect this session''s approvals, or re-raise a decided one'),
   ('secret_create', 'Mint a new random credential, stored encrypted in the DB. Returns only its {{SECRET:name}} placeholder — never the value.'),
   ('configure_provider', 'Set up LLM provider. Stores the API key encrypted in cclaw.db. Known providers: openrouter, gemini, anthropic.'),
   ('configure_channel', 'Set up a communication channel. Supported: telegram (requires bot_token), cli, or custom (requires binary_path).'),

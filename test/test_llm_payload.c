@@ -198,10 +198,12 @@ static void test_gemini_payload(void) {
     printf("  PASS test_gemini_payload\n");
 }
 
-/* Recall must ride at the TAIL as a user message on both endpoints (keeps
- * the prompt prefix byte-stable for provider caching; never in the system
- * prompt / systemInstruction). */
-static void test_recall_tail_user_message(void) {
+/* Session context (recall + live state, wrapped in <RELEVANT_CONTEXT>) rides
+ * SECOND-TO-LAST — right before the newest real entry — on both endpoints,
+ * never in the system prompt / systemInstruction. This ordering lets the
+ * model see "here's context, here's what just happened" with the actual
+ * new turn as the true tail. */
+static void test_recall_in_session_context(void) {
     unlink(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
@@ -219,40 +221,116 @@ static void test_recall_tail_user_message(void) {
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
 
+    char *context_text = session_context_text(db, sid, recall);
+    assert(context_text);
+    assert(strstr(context_text, "<RELEVANT_CONTEXT>"));
+    assert(strstr(context_text, "<recall>"));
+    assert(strstr(context_text, recall));
+    assert(strstr(context_text, "</recall>"));
+    assert(strstr(context_text, "</RELEVANT_CONTEXT>"));
+
     LlmPayload payload;
-    assert(llm_build_payload(db, sid, &cfg, &plan, recall, "You are helpful.", &payload) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, context_text, "You are helpful.", &payload) == 0);
 
     sqlite3_stmt *s;
-    /* Last message: role=user, content=recall text */
+    /* Last message is the real newest entry (assistant reply); second-to-
+     * last is the session context block. */
     sqlite3_prepare_v2(db,
         "SELECT json_extract(?1,'$.messages[#-1].role'),"
-        " json_extract(?1,'$.messages[#-1].content')", -1, &s, NULL);
+        " json_extract(?1,'$.messages[#-1].content'),"
+        " json_extract(?1,'$.messages[#-2].role'),"
+        " json_extract(?1,'$.messages[#-2].content')", -1, &s, NULL);
     sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "user") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), recall) == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "assistant") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "Hi there!") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "user") == 0);
+    assert(strstr((const char *)sqlite3_column_text(s, 3), recall));
     sqlite3_finalize(s);
     llm_payload_release(&payload);
 
-    /* Gemini: recall appended as final user content, NOT in systemInstruction */
+    /* Gemini: same second-to-last placement, NOT in systemInstruction */
     cfg.provider.endpoint_type = ENDPOINT_GEMINI;
-    assert(llm_build_payload(db, sid, &cfg, &plan, recall, "You are helpful.", &payload) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, context_text, "You are helpful.", &payload) == 0);
 
     sqlite3_prepare_v2(db,
         "SELECT json_extract(?1,'$.contents[#-1].role'),"
         " json_extract(?1,'$.contents[#-1].parts[0].text'),"
+        " json_extract(?1,'$.contents[#-2].role'),"
+        " json_extract(?1,'$.contents[#-2].parts[0].text'),"
         " json_extract(?1,'$.systemInstruction.parts[0].text')", -1, &s, NULL);
     sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "user") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), recall) == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 2), "You are helpful.") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "model") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "Hi there!") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "user") == 0);
+    assert(strstr((const char *)sqlite3_column_text(s, 3), recall));
+    assert(strcmp((const char *)sqlite3_column_text(s, 4), "You are helpful.") == 0);
     sqlite3_finalize(s);
     llm_payload_release(&payload);
 
+    free(context_text);
     context_plan_free(&plan);
     db_close(db); unlink(DB_PATH);
-    printf("  PASS test_recall_tail_user_message\n");
+    printf("  PASS test_recall_in_session_context\n");
+}
+
+/* session_context_text: pending approvals and running sub-agents surface in
+ * the assembled payload; the block is entirely absent when there's nothing
+ * pending/running and no recall. */
+static void test_session_context_live_state(void) {
+    unlink(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+
+    int64_t sid;
+    setup_session(db, &sid);
+
+    /* Absent case: nothing pending, no recall */
+    char *empty = session_context_text(db, sid, NULL);
+    assert(empty == NULL);
+
+    /* Pending approval */
+    sqlite3_stmt *ins;
+    sqlite3_prepare_v2(db,
+        "INSERT INTO approvals(session_id,tool_name,action,state)"
+        " VALUES(?1,'grant_host','request_config','pending');",
+        -1, &ins, NULL);
+    sqlite3_bind_int64(ins, 1, sid);
+    assert(sqlite3_step(ins) == SQLITE_DONE);
+    sqlite3_finalize(ins);
+
+    /* Running sub-agent */
+    int64_t child = session_create(db, "worker-session", "worker", sid, 0);
+    assert(child > 0);
+    assert(session_set_state(db, child, "tool_running") == 0);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.provider.context_window = 128000;
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+
+    char *context_text = session_context_text(db, sid, NULL);
+    assert(context_text);
+    assert(strstr(context_text, "<pending_approvals>"));
+    assert(strstr(context_text, "grant_host"));
+    assert(strstr(context_text, "<running_sub_agents>"));
+    assert(strstr(context_text, "worker"));
+    assert(!strstr(context_text, "<recall>"));
+
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, context_text, "You are helpful.", &payload) == 0);
+    assert(strstr(payload.body, "grant_host"));
+    assert(strstr(payload.body, "worker"));
+    llm_payload_release(&payload);
+
+    free(context_text);
+    context_plan_free(&plan);
+    db_close(db); unlink(DB_PATH);
+    printf("  PASS test_session_context_live_state\n");
 }
 
 static void test_payload_with_tools(void) {
@@ -518,7 +596,8 @@ int main(void) {
     test_openai_payload();
     test_openai_payload_no_stream_omits_nulls();
     test_gemini_payload();
-    test_recall_tail_user_message();
+    test_recall_in_session_context();
+    test_session_context_live_state();
     test_payload_with_tools();
     test_compaction_entry_in_payload();
     test_network_hosts_query_time_wrap();

@@ -651,18 +651,20 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         /* Thread the live session + tool_call_id into the per-tool context.
          * g_tool_setup is a single shared instance, so the session_id captured
          * at agent_setup_init time is stale (0 in CLI) — the dispatching session
-         * varies per call (root or any sub-agent). launch_agent uses it as the
-         * child's parent, so without this the child gets parent -1 and its
-         * result can never route back. check_session shares the same ctx. */
-        if ((strcmp(tc->name, "launch_agent") == 0 ||
-             strcmp(tc->name, "check_session") == 0) && te->user_data) {
+         * varies per call (root or any sub-agent). Keyed on ctx *pointer
+         * identity*, not on an enumerated tool-name list: launch_agent and
+         * check_session share launch_ctx.
+         * Any future tool registered against these same shared ctx structs
+         * is covered automatically; a tool needing its own fresh ctx should
+         * get its own struct, not reuse one of these without adding it here. */
+        if (te->user_data == &g_tool_setup->launch_ctx) {
             AgentLaunchCtx *lc = (AgentLaunchCtx *)te->user_data;
             lc->session_id = session_id;
             lc->current_tool_call_id = tc->call_id;
-        }
-        if (strcmp(tc->name, "request_config") == 0 && te->user_data) {
-            ((RequestConfigCtx *)te->user_data)->session_id = session_id;
-            ((RequestConfigCtx *)te->user_data)->current_tool_call_id = tc->call_id;
+        } else if (te->user_data == &g_tool_setup->req_cfg_ctx) {
+            RequestConfigCtx *rctx = (RequestConfigCtx *)te->user_data;
+            rctx->session_id = session_id;
+            rctx->current_tool_call_id = tc->call_id;
         }
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
@@ -2434,10 +2436,10 @@ static void ensure_default_agent(const char *base_dir) {
         /* Seed default memory blocks */
         memory_block_create(g_db, "Assistant", "AGENT",
             "Your identity, capabilities, and operational notes. Update as you learn about yourself.",
-            NULL, 5000);
+            NULL, 5000, NULL);
         memory_block_create(g_db, "Assistant", "USER",
             "Information about the user: preferences, context, working style. Update as you learn.",
-            NULL, 5000);
+            NULL, 5000, NULL);
         memory_entry_add(g_db, "Assistant", "AGENT",
             "You are CClaw. You do not have a name yet — ask the user what they would like to call you, then save it here with memory_edit.");
         memory_entry_add(g_db, "Assistant", "USER",

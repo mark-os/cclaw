@@ -101,7 +101,7 @@ static void test_memory_char_limit(void) {
     tool_memory_register(&reg, &ctx);
 
     /* Create a block with a small char_limit and one existing entry */
-    memory_block_create(db, "test_agent", "tiny", "small block", "", 5);
+    memory_block_create(db, "test_agent", "tiny", "small block", "", 5, NULL);
     memory_entry_add(db, "test_agent", "tiny", "hi"); /* 2 chars */
 
     /* Adding 4 more chars (total 6 > 5) must be rejected */

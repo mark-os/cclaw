@@ -33,10 +33,6 @@ int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx);
 /* Handler: check session state + result */
 char *tool_check_session_handler(const char *arguments, void *user_data);
 
-/* Register check_approval tool (inspect/re-raise this session's approvals). */
-int tool_check_approval_register(ToolRegistry *reg, AgentLaunchCtx *ctx);
 
-/* Handler: list this session's approvals or re-request a decided one. */
-char *tool_check_approval_handler(const char *arguments, void *user_data);
 
 #endif

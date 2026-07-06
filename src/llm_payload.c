@@ -78,8 +78,16 @@ static const char SQL_OPENAI_MESSAGES[] =
     "    END AS msg"
     "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
     "  WHERE e.type NOT IN ('tool_call','reasoning')"
-    /* Ephemeral hook injects ride at the tail of history (before recall, which
-     * SQL_OPENAI_FULL appends after) — preserves prompt-prefix caching. */
+    /* Session context (recall + live state) rides second-to-last: right
+     * before the newest entry (the actual new user message or tool result),
+     * so the model sees "here's context, here's what just happened" in the
+     * order that best matches recency weighting. */
+    "  UNION ALL"
+    "  SELECT (SELECT MAX(pp.pos) FROM _plan pp) - 0.5 AS pos,"
+    "    json_object('role','user','content',?2) AS msg"
+    "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
+    /* Ephemeral hook injects ride at the absolute tail, after even the
+     * newest entry — orthogonal to session context, unaffected by it. */
     "  UNION ALL"
     "  SELECT 1000000+hd.id AS pos,"
     "    json_object('role', hd.role, 'content', hd.content) AS msg"
@@ -119,12 +127,10 @@ static const char SQL_OPENAI_FULL[] =
     "    SELECT 0 AS ord, 0 AS sub, json_object('role','system','content',?2) AS m"
     "      WHERE ?2 IS NOT NULL"
     "    UNION ALL"
+    /* ?3 (SQL_OPENAI_MESSAGES) already carries session context in the right
+     * spot — second-to-last, before the newest entry — so it needs no
+     * special-casing here. */
     "    SELECT 1, rowid, json(value) FROM json_each(?3)"
-    "    UNION ALL"
-    /* Auto-recall rides at the tail as a user message: keeps the prompt
-     * prefix byte-stable across turns so provider prompt caching works. */
-    "    SELECT 2, 0, json_object('role','user','content',?6)"
-    "      WHERE ?6 IS NOT NULL"
     "    ORDER BY ord, sub)),"
     "  'max_tokens', CASE WHEN ?4 > 0 THEN ?4 ELSE NULL END,"
     "  'tools', CASE WHEN json_array_length(?5) > 0 THEN json(?5) ELSE NULL END"
@@ -169,10 +175,23 @@ static const char SQL_GEMINI_CONTENTS[] =
     "    END AS content_obj"
     "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
     "  WHERE e.type != 'system'"
+    /* -turn_id vs id: both are always positive, so negating turn_id puts the
+     * two group-key domains in disjoint ranges. Without this, a user_message
+     * with id=N and an assistant/tool_call/reasoning entry with turn_id=N
+     * collide into one GROUP BY bucket — silently merging unrelated messages
+     * and dropping one (hits fresh/short sessions, where id is still small). */
     "  GROUP BY CASE WHEN e.type IN ('assistant_message','tool_call','reasoning')"
-    "    THEN e.turn_id ELSE e.id END"
+    "    THEN -e.turn_id ELSE e.id END"
+    /* Session context (recall + live state), second-to-last: right before
+     * the newest entry — see SQL_OPENAI_MESSAGES for rationale. */
+    "  UNION ALL"
+    "  SELECT (SELECT MAX(pp.pos) FROM _plan pp) - 0.5 AS min_pos,"
+    "    json_object('role','user','parts',"
+    "      json_array(json_object('text',?2))) AS content_obj"
+    "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
     /* Ephemeral hook injects: Gemini has no system role mid-contents, so a
-     * system inject becomes a '[system] '-prefixed user part at history tail. */
+     * system inject becomes a '[system] '-prefixed user part at absolute
+     * tail, after even the newest entry. */
     "  UNION ALL"
     "  SELECT 1000000+hd.id AS min_pos,"
     "    json_object('role','user','parts',json_array(json_object('text',"
@@ -201,13 +220,9 @@ static const char SQL_GEMINI_FULL[] =
     "  'systemInstruction', CASE WHEN ?1 IS NOT NULL AND ?1 != ''"
     "    THEN json_object('parts',json_array(json_object('text',?1)))"
     "    ELSE NULL END,"
-    /* Auto-recall (?5) appends as a trailing user content — never into
-     * systemInstruction, which would break prefix caching every turn. */
-    "  'contents', CASE WHEN ?5 IS NOT NULL"
-    "    THEN json_insert(json(?2),'$[#]',"
-    "      json_object('role','user','parts',"
-    "        json_array(json_object('text',?5))))"
-    "    ELSE json(?2) END,"
+    /* ?2 (SQL_GEMINI_CONTENTS) already carries session context in the right
+     * spot — second-to-last, before the newest entry. */
+    "  'contents', json(?2),"
     "  'tools', CASE WHEN json_array_length(json_extract(?3,'$[0].functionDeclarations')) > 0"
     "    THEN json(?3) ELSE NULL END,"
     "  'generationConfig', CASE WHEN ?4 > 0"
@@ -251,10 +266,16 @@ static char *json_intersect(sqlite3 *db, const char *a, const char *b) {
     return r ? r : strdup("[]");
 }
 
-static char *query_text(sqlite3 *db, const char *sql, int64_t session_id) {
+/* context_text: session context (recall + live state), or NULL. Used by the
+ * messages/contents builders, which bind it at ?2 alongside session_id (?1). */
+static char *query_text(sqlite3 *db, const char *sql, int64_t session_id,
+                        const char *context_text) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_int64(s, 1, session_id);
+    if (context_text && context_text[0])
+        sqlite3_bind_text(s, 2, context_text, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(s, 2);
     char *r = NULL;
     if (sqlite3_step(s) == SQLITE_ROW) {
         const char *t = (const char *)sqlite3_column_text(s, 0);
@@ -281,10 +302,67 @@ static char *query_tools(sqlite3 *db, const char *sql,
     return r;
 }
 
+/* The whole <RELEVANT_CONTEXT> block in one query: recall (?2, computed in
+ * C by context_auto_recall — the only piece not natively SQL) plus three
+ * live-state sections queried directly. Each section (and the outer
+ * wrapper) is COALESCE'd away entirely when empty — never an empty tag,
+ * never an empty block. */
+static const char SQL_SESSION_CONTEXT[] =
+    "WITH mb AS ("
+    "  SELECT group_concat("
+    "    char(10) || '### ' || COALESCE(b.label,'') || char(10) ||"
+    "    'description: ' || COALESCE(b.description,'') || char(10) ||"
+    "    COALESCE("
+    "      (SELECT group_concat(e.pos || '. ' || e.text, char(10) ORDER BY e.pos) || char(10)"
+    "         FROM memory_entries e WHERE e.agent_name=b.agent_name AND e.block_label=b.label),"
+    "      '(no entries yet)' || char(10)"
+    "    ), '' ORDER BY b.id) AS txt"
+    "  FROM memory_blocks b"
+    "  WHERE b.agent_name=(SELECT agent_name FROM sessions WHERE id=?1) AND b.placement='context'"
+    "), sub AS ("
+    "  SELECT group_concat("
+    "    'session #' || s.id || ' (' || COALESCE(s.agent_name,'?') || ') — ' || s.state,"
+    "    char(10)) AS txt"
+    "  FROM sessions s WHERE s.parent_session_id=?1 AND s.state != 'idle'"
+    "), appr AS ("
+    "  SELECT group_concat("
+    "    '#' || a.id || ': ' || COALESCE(a.tool_name, a.action, '?'), char(10)) AS txt"
+    "  FROM approvals a WHERE a.session_id=?1 AND a.state='pending'"
+    ")"
+    "SELECT CASE WHEN ?2 IS NULL AND mb.txt IS NULL AND sub.txt IS NULL AND appr.txt IS NULL"
+    "  THEN NULL"
+    "  ELSE '<RELEVANT_CONTEXT>' || char(10) ||"
+    "    COALESCE('<recall>' || char(10) || ?2 || char(10) || '</recall>' || char(10), '') ||"
+    "    COALESCE('<memory_blocks>' || mb.txt || '</memory_blocks>' || char(10), '') ||"
+    "    COALESCE('<running_sub_agents>' || char(10) || sub.txt || char(10) ||"
+    "      '</running_sub_agents>' || char(10), '') ||"
+    "    COALESCE('<pending_approvals>' || char(10) || appr.txt || char(10) ||"
+    "      '</pending_approvals>' || char(10), '') ||"
+    "    '</RELEVANT_CONTEXT>'"
+    "  END"
+    " FROM mb, sub, appr;";
+
 /* ── Public API ────────────────────────────────────────────────── */
 
+char *session_context_text(sqlite3 *db, int64_t session_id, const char *recall_text) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, SQL_SESSION_CONTEXT, -1, &st, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(st, 1, session_id);
+    if (recall_text && recall_text[0])
+        sqlite3_bind_text(st, 2, recall_text, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(st, 2);
+    char *r = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL) {
+        const char *t = (const char *)sqlite3_column_text(st, 0);
+        if (t) r = strdup(t);
+    }
+    sqlite3_finalize(st);
+    return r;
+}
+
 int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
-                      const ContextPlan *plan, const char *recall_text,
+                      const ContextPlan *plan, const char *context_text,
                       const char *system_prompt, LlmPayload *out) {
     if (!db || !cfg || !plan || !out) return -1;
     memset(out, 0, sizeof(*out));
@@ -313,7 +391,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     }
 
     if (gemini) {
-        char *contents = query_text(db, SQL_GEMINI_CONTENTS, session_id);
+        char *contents = query_text(db, SQL_GEMINI_CONTENTS, session_id, context_text);
         char *tools_json = query_tools(db, SQL_GEMINI_TOOLS, agent_name, allowed_tools);
 
         sqlite3_stmt *full;
@@ -328,9 +406,6 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_bind_text(full, 2, contents ? contents : "[]", -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(full, 3, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(full, 4, cfg->provider.max_tokens);
-        if (recall_text && recall_text[0])
-            sqlite3_bind_text(full, 5, recall_text, -1, SQLITE_STATIC);
-        else sqlite3_bind_null(full, 5);
 
         free(contents); free(tools_json);
 
@@ -343,7 +418,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             return -1;
         }
     } else {
-        char *messages = query_text(db, SQL_OPENAI_MESSAGES, session_id);
+        char *messages = query_text(db, SQL_OPENAI_MESSAGES, session_id, context_text);
         if (!messages) messages = strdup("[]");
         char *tools_json = query_tools(db, SQL_OPENAI_TOOLS, agent_name, allowed_tools);
 
@@ -361,9 +436,6 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_bind_text(full, 3, messages, -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(full, 4, cfg->provider.max_tokens);
         sqlite3_bind_text(full, 5, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
-        if (recall_text && recall_text[0])
-            sqlite3_bind_text(full, 6, recall_text, -1, SQLITE_STATIC);
-        else sqlite3_bind_null(full, 6);
 
         free(messages); free(tools_json);
 

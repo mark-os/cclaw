@@ -184,7 +184,7 @@ every turn (no cached state to drift):
 **Self-spawn** (`launch_agent` with no `name`): child runs as the *calling*
 agent — same grants, fresh session, task in inbox. Filter resolution:
 explicit `tools` arg → config `worker_tools` (conservative default: file tools,
-shell_exec, web_fetch, js_eval, check_session, check_approval, search_config;
+shell_exec, web_fetch, js_eval, check_session, search_config;
 no memory mutators, no config/agent/extension tools, no launch_agent) →
 unrestricted. Passing `tools` with a `name` is an error.
 

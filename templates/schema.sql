@@ -332,6 +332,9 @@ CREATE TABLE IF NOT EXISTS hook_directives (
 CREATE INDEX IF NOT EXISTS idx_hook_directives_session ON hook_directives(session_id);
 
 -- ═══ Memory ═══
+-- placement: 'system' blocks render into the system prompt once per session
+-- (agent_config.c); 'context' blocks render into the live <RELEVANT_CONTEXT>
+-- block instead, rebuilt fresh every turn (llm_payload.c session_context_text).
 CREATE TABLE IF NOT EXISTS memory_blocks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_name TEXT,
@@ -340,6 +343,7 @@ CREATE TABLE IF NOT EXISTS memory_blocks (
   description TEXT,
   char_limit INTEGER NOT NULL DEFAULT 5000,
   read_only INTEGER NOT NULL DEFAULT 0,
+  placement TEXT NOT NULL DEFAULT 'system',
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   UNIQUE(agent_name, label)

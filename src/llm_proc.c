@@ -139,6 +139,10 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     if (system_prompt)
         tool_overhead += (int)strlen(system_prompt) / 4;
 
+    /* Declared before any goto err so the err: label can safely free it,
+     * even on the early context_plan-failure path where it isn't set yet. */
+    char *context_text = NULL;
+
     /* Context planning */
     ContextPlan plan = {0};
     if (context_plan(db, session_id, cfg, tool_overhead, &plan) != 0) {
@@ -164,6 +168,13 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         }
     }
 
+    /* Session context: recall plus live per-turn state (context-placement
+     * memory blocks, running sub-agents, pending approvals) — never baked
+     * into the system prompt, rebuilt fresh every turn. Assembled entirely
+     * in SQL (recall_text is the one piece not natively SQL). */
+    context_text = session_context_text(db, session_id, recall_text);
+    free(recall_text);
+
     /* ── Mock mode ─────────────────────────────────────────────── */
     const char *mock_path = getenv("CCLAW_LLM_MOCK");
     if (mock_path) {
@@ -187,7 +198,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                                .stop_reason = STOP_REASON_ERROR, .model = cfg->provider.model};
             entry_append_with_turn(db, session_id, &err_msg, 0);
         }
-        free(recall_text); free(system_prompt); context_plan_free(&plan);
+        free(context_text); free(system_prompt); context_plan_free(&plan);
         hook_directives_clear(db, session_id);  /* "this request only" */
         config_free(cfg); free(agent_name_alloc);
         return (st == LLM_RESP_OK) ? 0 : -1;
@@ -242,7 +253,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
         /* Build payload (zero-copy — holds stmt open) */
         LlmPayload payload;
-        if (llm_build_payload(db, session_id, &route_cfg, &plan, recall_text, system_prompt, &payload) != 0) {
+        if (llm_build_payload(db, session_id, &route_cfg, &plan, context_text, system_prompt, &payload) != 0) {
             free(key_buf); continue;
         }
 
@@ -375,7 +386,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         free(key_buf);
     }
 
-    free(recall_text);
+    free(context_text);
     free(system_prompt); system_prompt = NULL;
     context_plan_free(&plan); memset(&plan, 0, sizeof(plan));
 
@@ -426,6 +437,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     return 0;
 
 err:
+    free(context_text);
     free(system_prompt);
     context_plan_free(&plan);
     hook_directives_clear(db, session_id);

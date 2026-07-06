@@ -1703,7 +1703,7 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
     const char *sql =
         "SELECT json_extract(value,'$.label'), json_extract(value,'$.description'),"
         " json_extract(value,'$.value'), json_extract(value,'$.char_limit'),"
-        " json_extract(value,'$.read_only')"
+        " json_extract(value,'$.read_only'), json_extract(value,'$.placement')"
         " FROM json_each(?1, '$.memory_blocks')";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
@@ -1721,7 +1721,8 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
         const char *val = (const char *)sqlite3_column_text(stmt, 2);
         int cl = sqlite3_column_type(stmt, 3) == SQLITE_INTEGER ? sqlite3_column_int(stmt, 3) : 5000;
         int ro = sqlite3_column_int(stmt, 4);
-        int64_t id = memory_block_create(db, agent_name, lbl, desc, val, cl);
+        const char *placement = (const char *)sqlite3_column_text(stmt, 5);
+        int64_t id = memory_block_create(db, agent_name, lbl, desc, val, cl, placement);
         if (id > 0 && ro) {
             const char *ro_sql = "UPDATE memory_blocks SET read_only=1 WHERE id=?;";
             sqlite3_stmt *rstmt;
@@ -1957,6 +1958,7 @@ void memory_block_free(MemoryBlock *mb) {
     free(mb->label);
     free(mb->value);
     free(mb->description);
+    free(mb->placement);
     free(mb);
 }
 
@@ -1967,15 +1969,17 @@ void memory_block_list_free(MemoryBlock *list, int count) {
         free(list[i].label);
         free(list[i].value);
         free(list[i].description);
+        free(list[i].placement);
     }
     free(list);
 }
 
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
-                            const char *description, const char *value, int char_limit) {
+                            const char *description, const char *value, int char_limit,
+                            const char *placement) {
     if (!label || !is_valid_name(label)) return -1;
-    const char *sql = "INSERT INTO memory_blocks(agent_name, label, description, value, char_limit)"
-                      " VALUES(?,?,?,?,?);";
+    const char *sql = "INSERT INTO memory_blocks(agent_name, label, description, value, char_limit, placement)"
+                      " VALUES(?,?,?,?,?,?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
@@ -1983,6 +1987,7 @@ int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *lab
     sqlite3_bind_text(stmt, 3, description ? description : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, value ? value : "", -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 5, char_limit > 0 ? char_limit : 5000);
+    sqlite3_bind_text(stmt, 6, placement && placement[0] ? placement : "system", -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE ? sqlite3_last_insert_rowid(db) : -1;
@@ -1990,7 +1995,7 @@ int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *lab
 
 MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *label) {
     const char *sql = "SELECT id, agent_name, label, value, description, char_limit, read_only,"
-                      " created_at, updated_at FROM memory_blocks WHERE agent_name=? AND label=?;";
+                      " placement, created_at, updated_at FROM memory_blocks WHERE agent_name=? AND label=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
@@ -2005,8 +2010,9 @@ MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *l
     s = (const char *)sqlite3_column_text(stmt, 4); mb->description = s ? strdup(s) : strdup("");
     mb->char_limit = sqlite3_column_int(stmt, 5);
     mb->read_only = sqlite3_column_int(stmt, 6);
-    mb->created_at = sqlite3_column_int64(stmt, 7);
-    mb->updated_at = sqlite3_column_int64(stmt, 8);
+    s = (const char *)sqlite3_column_text(stmt, 7); mb->placement = s ? strdup(s) : strdup("system");
+    mb->created_at = sqlite3_column_int64(stmt, 8);
+    mb->updated_at = sqlite3_column_int64(stmt, 9);
     sqlite3_finalize(stmt);
     return mb;
 }
@@ -2014,7 +2020,7 @@ MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *l
 MemoryBlock *memory_block_list(sqlite3 *db, const char *agent_name, int *count) {
     *count = 0;
     const char *sql = "SELECT id, agent_name, label, value, description, char_limit, read_only,"
-                      " created_at, updated_at FROM memory_blocks WHERE agent_name=? ORDER BY id;";
+                      " placement, created_at, updated_at FROM memory_blocks WHERE agent_name=? ORDER BY id;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
@@ -2036,8 +2042,9 @@ MemoryBlock *memory_block_list(sqlite3 *db, const char *agent_name, int *count) 
         s = (const char *)sqlite3_column_text(stmt, 4); mb->description = s ? strdup(s) : strdup("");
         mb->char_limit = sqlite3_column_int(stmt, 5);
         mb->read_only = sqlite3_column_int(stmt, 6);
-        mb->created_at = sqlite3_column_int64(stmt, 7);
-        mb->updated_at = sqlite3_column_int64(stmt, 8);
+        s = (const char *)sqlite3_column_text(stmt, 7); mb->placement = s ? strdup(s) : strdup("system");
+        mb->created_at = sqlite3_column_int64(stmt, 8);
+        mb->updated_at = sqlite3_column_int64(stmt, 9);
         (*count)++;
     }
     sqlite3_finalize(stmt);

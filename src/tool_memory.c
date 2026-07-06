@@ -83,7 +83,10 @@ static char *render_block(sqlite3 *db, const char *agent, const char *label) {
 static const char *MEMORY_CREATE_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
     "\"label\":{\"type\":\"string\",\"description\":\"Unique label for this memory block\"},"
-    "\"description\":{\"type\":\"string\",\"description\":\"What this block is for\"}"
+    "\"description\":{\"type\":\"string\",\"description\":\"What this block is for\"},"
+    "\"placement\":{\"type\":\"string\",\"enum\":[\"system\",\"context\"],"
+    "\"description\":\"'system' (default): rendered into the system prompt once per session."
+    " 'context': rendered fresh every turn in the live session context block instead\"}"
     "},\"required\":[\"label\",\"description\"]}";
 
 static const char *MEMORY_ADD_PARAMS =
@@ -117,6 +120,7 @@ static char *tool_memory_create_handler(const char *arguments, void *user_data) 
 
     const char *label = targ_str(&ta, "label");
     const char *desc = targ_str(&ta, "description");
+    const char *placement = targ_str(&ta, "placement");
     if (!label || !desc) {
         tool_parse_free(&ta);
         return strdup("error: 'label' and 'description' required");
@@ -125,8 +129,12 @@ static char *tool_memory_create_handler(const char *arguments, void *user_data) 
         tool_parse_free(&ta);
         return strdup("error: label must be alphanumeric (A-Z, a-z, 0-9, _, -)");
     }
+    if (placement && strcmp(placement, "system") != 0 && strcmp(placement, "context") != 0) {
+        tool_parse_free(&ta);
+        return strdup("error: placement must be 'system' or 'context'");
+    }
 
-    int64_t id = memory_block_create(ctx->db, ctx->agent_name, label, desc, "", 5000);
+    int64_t id = memory_block_create(ctx->db, ctx->agent_name, label, desc, "", 5000, placement);
     if (id < 0) {
         tool_parse_free(&ta);
         return strdup("error: failed to create block (label may already exist)");

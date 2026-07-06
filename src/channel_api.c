@@ -98,7 +98,7 @@ ChannelOutboxRow *channel_next_outbox(ChannelCtx *ctx) {
     if (!ctx) return NULL;
     const char *sql =
         "SELECT id, session_id, payload FROM channel_outbox"
-        " WHERE channel_name=? AND status='pending'"
+        " WHERE channel_name=? AND status='pending' AND next_attempt_at <= unixepoch()"
         " ORDER BY id ASC LIMIT 1;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -192,6 +192,42 @@ int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error) {
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/* Reschedule a failed send for retry: bump attempt count, return to
+ * pending with a future next_attempt_at. Non-blocking backoff. */
+int channel_retry_outbox(ChannelCtx *ctx, int64_t id, int delay_sec) {
+    if (!ctx) return -1;
+    const char *sql =
+        "UPDATE channel_outbox"
+        " SET status='pending', attempts=attempts+1, next_attempt_at=unixepoch()+?"
+        " WHERE id=? AND channel_name=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int(stmt, 1, delay_sec);
+    sqlite3_bind_int64(stmt, 2, id);
+    sqlite3_bind_text(stmt, 3, ctx->channel_name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/* Current retry attempt count for an outbox row, or 0 if unknown. */
+int channel_outbox_attempts(ChannelCtx *ctx, int64_t id) {
+    if (!ctx) return 0;
+    const char *sql =
+        "SELECT attempts FROM channel_outbox WHERE id=? AND channel_name=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(stmt, 1, id);
+    sqlite3_bind_text(stmt, 2, ctx->channel_name, -1, SQLITE_STATIC);
+    int val = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        val = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return val;
 }
 
 

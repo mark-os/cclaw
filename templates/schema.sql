@@ -278,6 +278,8 @@ CREATE TABLE IF NOT EXISTS channel_outbox (
   session_id INTEGER NOT NULL,
   payload TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   acked_at INTEGER
 );

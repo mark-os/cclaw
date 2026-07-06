@@ -233,14 +233,16 @@ int main(void) {
     }
     printf("  PASS: outbox wake -> shape send -> auto-ack\n");
 
-    /* 2b. base_url pin: an outbox item whose send URL points off the
-     * channel's configured base_url must be refused before any curl request
-     * is made — mock server's send count must not increase, and the outbox
-     * row must be failed via channel_fail_outbox. */
+    /* 2b. base_url pin: an outbox item whose send URL points at a DIFFERENT
+     * host than the channel's configured base_url must be refused before any
+     * curl request is made (url_host_allowed → make_easy NULL → synchronous
+     * channel_fail_outbox). The mock server's send count must not increase and
+     * the row must go terminally failed (a host mismatch is not transient, so
+     * it is not retried). 10.255.255.1 is a different host from 127.0.0.1. */
     int sends_before = mock_tg_send_count();
     sqlite3_exec(db,
         "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
-        "('test', 1, '{\"evil_url\":\"http://127.0.0.1:1/evil\",\"chat_id\":\"42\",\"text\":\"x\"}')",
+        "('test', 1, '{\"evil_url\":\"http://10.255.255.1:1/evil\",\"chat_id\":\"42\",\"text\":\"pinrow\"}')",
         NULL, NULL, NULL);
     channel_outbox_wake(DB_PATH, "test");
 
@@ -248,7 +250,7 @@ int main(void) {
     for (int attempt = 0; attempt < 40 && !failed; attempt++) {
         usleep(100000);
         const char *fc = "SELECT status FROM channel_outbox WHERE channel_name='test'"
-                         " AND payload LIKE '%evil_url%' LIMIT 1;";
+                         " AND payload LIKE '%pinrow%' LIMIT 1;";
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db, fc, -1, &stmt, NULL) == SQLITE_OK) {
             if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -261,14 +263,55 @@ int main(void) {
     if (!failed) {
         kill(pid, SIGTERM); waitpid(pid, NULL, 0);
         db_close(db); mock_server_stop();
-        FAIL("off-base_url outbox send was not failed");
+        FAIL("off-host outbox send was not failed");
     }
     if (mock_tg_send_count() != sends_before) {
         kill(pid, SIGTERM); waitpid(pid, NULL, 0);
         db_close(db); mock_server_stop();
-        FAIL("off-base_url outbox send reached the mock server");
+        FAIL("off-host outbox send reached the mock server");
     }
     printf("  PASS: base_url pin refuses off-host outbox send\n");
+
+    /* 2c. Transient failure → retry (not permanent fail). A send to the pinned
+     * host but an unreachable port (127.0.0.1:1, connection refused) is a
+     * transient error: the row must be rescheduled to 'pending' with attempts
+     * incremented (channel_retry_outbox), NOT dropped/failed on first try.
+     * The send never reaches the mock (wrong port), so send_count is unchanged. */
+    sends_before = mock_tg_send_count();
+    sqlite3_exec(db,
+        "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
+        "('test', 1, '{\"evil_url\":\"http://127.0.0.1:1/evil\",\"chat_id\":\"42\",\"text\":\"retryrow\"}')",
+        NULL, NULL, NULL);
+    channel_outbox_wake(DB_PATH, "test");
+
+    int retried = 0;
+    for (int attempt = 0; attempt < 40 && !retried; attempt++) {
+        usleep(100000);
+        const char *rc = "SELECT status, attempts FROM channel_outbox"
+                         " WHERE channel_name='test' AND payload LIKE '%retryrow%' LIMIT 1;";
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, rc, -1, &stmt, NULL) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *st = (const char *)sqlite3_column_text(stmt, 0);
+                int att = sqlite3_column_int(stmt, 1);
+                /* Retrying: bumped attempt count, back in 'pending' (a terminal
+                 * fail would take MAX_OUTBOX_ATTEMPTS ≈ 31s, impossible here). */
+                if (att >= 1 && st && strcmp(st, "pending") == 0) retried = 1;
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+    if (!retried) {
+        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        db_close(db); mock_server_stop();
+        FAIL("transient outbox failure was not retried");
+    }
+    if (mock_tg_send_count() != sends_before) {
+        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        db_close(db); mock_server_stop();
+        FAIL("retry-path outbox send reached the mock server");
+    }
+    printf("  PASS: transient outbox failure is retried with backoff\n");
 
     /* 3. Proxied request over UDS → onRequest → reply + emit */
     char *reply = uds_request(

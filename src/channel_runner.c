@@ -48,11 +48,27 @@
 #define CR_REQ_MAX (512 * 1024)   /* max proxied request envelope */
 #define CR_SEND_TIMEOUT 60L
 #define CR_POLL_TIMEOUT 35L       /* slightly longer than TG long-poll */
+#define MAX_OUTBOX_ATTEMPTS 5
 
 static volatile sig_atomic_t g_running = 1;
 ChannelCtx *g_ctx;
 
 static void handle_signal(int sig) { (void)sig; g_running = 0; }
+
+/* Telegram 429 bodies carry {"parameters":{"retry_after":N}}. Parse via
+ * SQLite JSON (hardened against malformed input -> NULL). 0 if absent. */
+static int outbox_retry_after(const char *body) {
+    if (!body || !g_ctx || !g_ctx->db) return 0;
+    int ra = 0;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(g_ctx->db,
+            "SELECT json_extract(?1,'$.parameters.retry_after')", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, body, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) ra = sqlite3_column_int(s, 0);
+        sqlite3_finalize(s);
+    }
+    return ra > 0 ? ra : 0;
+}
 
 /* ── QuickJS runtime for channel ───────────────────────────────── */
 static QjsRuntime *g_qrt;
@@ -585,6 +601,11 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
         int numfds = 0;
         curl_multi_poll(g_multi, extra, (unsigned)n_extra, 1000, &numfds);
 
+        /* Re-drain outbox every iteration: rescheduled rows become due when
+         * next_attempt_at passes. channel_next_outbox filters by time so this
+         * is a cheap no-op when nothing is ready. */
+        drain_outbox(ctx);
+
         if (outbox_fd >= 0 && (extra[0].revents & CURL_WAIT_POLLIN)) {
             char drain[64];
             while (read(outbox_fd, drain, sizeof(drain)) > 0) {}
@@ -631,11 +652,28 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                 int ok = (!cerr && status >= 200 && status < 300);
                 if (r->outbox_id > 0) {
                     if (!ok) {
-                        char err[256];
-                        snprintf(err, sizeof(err), "%s",
-                                 cerr ? cerr : (g_send_resp.data ? g_send_resp.data : "http error"));
-                        channel_fail_outbox(g_ctx, r->outbox_id, err);
+                        /* Transient = network/curl error (cerr set), 429, or 5xx. Everything
+                         * else (400/401/403/404) is terminal. */
+                        int transient = (cerr != NULL) || status == 429 || (status >= 500 && status < 600);
+                        int attempts = channel_outbox_attempts(g_ctx, r->outbox_id);
+                        /* Always clear remaining queued chunks for this row: on retry the row
+                         * is re-drained and re-chunked from scratch (accepting at-least-once
+                         * duplication of earlier chunks over permanent truncation). */
                         send_queue_drop_outbox(r->outbox_id);
+                        if (transient && attempts < MAX_OUTBOX_ATTEMPTS) {
+                            int delay = (status == 429) ? outbox_retry_after(g_send_resp.data) : 0;
+                            if (delay <= 0) { delay = 1 << attempts; if (delay > 60) delay = 60; }
+                            channel_retry_outbox(g_ctx, r->outbox_id, delay);
+                            LOG_WARN_("outbox retry id=%lld attempt=%d delay=%ds status=%ld",
+                                      (long long)r->outbox_id, attempts + 1, delay, status);
+                        } else {
+                            char err[256];
+                            snprintf(err, sizeof(err), "%s",
+                                     cerr ? cerr : (g_send_resp.data ? g_send_resp.data : "http error"));
+                            channel_fail_outbox(g_ctx, r->outbox_id, err);
+                            LOG_WARN_("outbox failed id=%lld attempts=%d status=%ld: %s",
+                                      (long long)r->outbox_id, attempts, status, err);
+                        }
                     } else if (r->is_final) {
                         channel_ack_outbox(g_ctx, r->outbox_id);
                     }

@@ -142,6 +142,24 @@ static int child_has_session(int64_t session_id) {
     return 0;
 }
 
+/* Sessions whose tool dispatch hit the CHILD_MAX ceiling (dispatch_tool
+ * returned -1). They sit in tool_running with pending, un-forked tool_calls —
+ * nothing was forked, so no reap re-advances them and they'd hang until owner-
+ * death recovery. When a tool slot frees (reap), re-advance them: advance_session
+ * re-reads the still-'pending' calls and re-dispatches (idempotent — dispatch_
+ * tool_inner bails at the ceiling check before touching call state). Ephemeral
+ * scheduling hint, never a source of truth; db_recover_stale_sessions is the
+ * durable backstop across a daemon restart. */
+static int64_t g_stalled[CHILD_MAX];
+static int g_stalled_count;
+
+static void stalled_add(int64_t session_id) {
+    for (int i = 0; i < g_stalled_count; i++)
+        if (g_stalled[i] == session_id) return;   /* dedup */
+    if (g_stalled_count < CHILD_MAX)
+        g_stalled[g_stalled_count++] = session_id;
+}
+
 /* ── Globals ────────────────────────────────────────────────────── */
 
 /* Forward declarations */
@@ -240,6 +258,19 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
 static void run_advance(int64_t session_id);
 static void handle_approval_park(int64_t session_id);
 /* resolve_approval declared in resolve.h (non-static) */
+
+/* Re-advance sessions stalled on the child ceiling. Called after a tool slot
+ * frees (reap). Snapshot-and-clear first: run_advance may re-stall a session
+ * if the ceiling is still hit, re-populating the set for the next reap. */
+static void stalled_drain(void) {
+    if (g_stalled_count == 0) return;
+    int64_t snap[CHILD_MAX];
+    int n = g_stalled_count;
+    memcpy(snap, g_stalled, (size_t)n * sizeof(*snap));
+    g_stalled_count = 0;
+    for (int i = 0; i < n; i++)
+        run_advance(snap[i]);
+}
 
 /* ── dispatch_tool ─────────────────────────────────────────────── */
 
@@ -2078,7 +2109,13 @@ static void run_advance(int64_t session_id) {
             case 1: break;                              /* inline done — next */
             case 3: async_in_flight = 1; break;         /* parallel async — next */
             case 0: async_in_flight = 1; stop = 1; break; /* serial async — wait */
-            default: stop = 1; break;                   /* parked or failure */
+            default:                                    /* parked (2) or failure */
+                /* -1 = child ceiling hit: the call is still 'pending' and un-
+                 * forked. Remember the session so a freed slot (reap) re-advances
+                 * it instead of leaving it stuck in tool_running forever. */
+                if (rc == -1) stalled_add(session_id);
+                stop = 1;
+                break;
             }
         }
         /* Only advance now if every call ran inline. If anything async is in
@@ -2301,6 +2338,8 @@ static void reap_children(void) {
             run_advance(session_id);
         }
     }
+    /* A tool slot may have freed — re-advance any ceiling-stalled sessions. */
+    stalled_drain();
 }
 
 /* ── Helpers ────────────────────────────────────────────────────── */

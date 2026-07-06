@@ -50,6 +50,13 @@ int channel_ack_outbox(ChannelCtx *ctx, int64_t id);
 /* Mark outbox row as failed. */
 int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error);
 
+/* Reschedule a failed send for retry: bump attempt count, return to
+ * pending with a future next_attempt_at. Non-blocking backoff. */
+int channel_retry_outbox(ChannelCtx *ctx, int64_t id, int delay_sec);
+
+/* Current retry attempt count for an outbox row, or 0 if unknown. */
+int channel_outbox_attempts(ChannelCtx *ctx, int64_t id);
+
 /* Per-channel request UDS path (daemon proxies inbound HTTP here).
  * Format: <db_path_without_.db>.<channel_name>.sock — caller frees. */
 char *channel_uds_path(const char *db_path, const char *channel_name);

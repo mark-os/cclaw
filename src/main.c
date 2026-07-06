@@ -660,8 +660,10 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             lc->session_id = session_id;
             lc->current_tool_call_id = tc->call_id;
         }
-        if (strcmp(tc->name, "request_config") == 0 && te->user_data)
+        if (strcmp(tc->name, "request_config") == 0 && te->user_data) {
+            ((RequestConfigCtx *)te->user_data)->session_id = session_id;
             ((RequestConfigCtx *)te->user_data)->current_tool_call_id = tc->call_id;
+        }
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
         /* A NULL result means the tool dispatched async work and left this
@@ -1806,10 +1808,15 @@ static void handle_approval_park(int64_t session_id) {
         return;
     }
 
-    /* Daemon mode: enqueue outbox prompt if session has channel, else auto-deny */
+    /* Daemon mode: enqueue outbox prompt if session has channel, else auto-deny.
+     * channel_name/channel_id are read and finalized *before* the outbox
+     * INSERT so this connection never holds an open SELECT across a write —
+     * see specs note on read->write snapshot upgrades (instant SQLITE_BUSY). */
     const char *sql = "SELECT channel_name, channel_id FROM sessions WHERE id=?;";
     sqlite3_stmt *stmt;
     int has_channel = 0;
+    char ch_name[64] = {0};
+    char ch_id[64] = {0};
     if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, session_id);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -1817,25 +1824,30 @@ static void handle_approval_park(int64_t session_id) {
             const char *cid = (const char *)sqlite3_column_text(stmt, 1);
             if (ch && ch[0]) {
                 has_channel = 1;
-                /* Enqueue approval prompt to channel */
-                char prompt[512];
-                snprintf(prompt, sizeof(prompt),
-                         "Approval required: %s %s. Reply yes/no.",
-                         a->action, a->args_json ? a->args_json : "");
-                const char *ins_sql =
-                    "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-                    " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4));";
-                sqlite3_stmt *ins;
-                if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
-                    sqlite3_bind_text(ins, 1, ch, -1, SQLITE_STATIC);
-                    sqlite3_bind_int64(ins, 2, session_id);
-                    sqlite3_bind_text(ins, 3, cid ? cid : "0", -1, SQLITE_STATIC);
-                    sqlite3_bind_text(ins, 4, prompt, -1, SQLITE_STATIC);
-                    sqlite3_step(ins); sqlite3_finalize(ins);
-                }
+                snprintf(ch_name, sizeof(ch_name), "%s", ch);
+                snprintf(ch_id, sizeof(ch_id), "%s", cid ? cid : "0");
             }
         }
         sqlite3_finalize(stmt);
+    }
+    if (has_channel) {
+        /* Enqueue approval prompt to channel */
+        char prompt[512];
+        snprintf(prompt, sizeof(prompt),
+                 "Approval required: %s %s. Reply yes/no.",
+                 a->action, a->args_json ? a->args_json : "");
+        const char *ins_sql =
+            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+            " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4));";
+        sqlite3_stmt *ins;
+        if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(ins, 1, ch_name, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(ins, 2, session_id);
+            sqlite3_bind_text(ins, 3, ch_id, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 4, prompt, -1, SQLITE_STATIC);
+            sqlite3_step(ins); sqlite3_finalize(ins);
+        }
+        if (g_cfg && g_cfg->db_path) channel_outbox_wake(g_cfg->db_path, ch_name);
     }
     if (!has_channel) {
         /* No channel binding — fail-closed: auto-deny */

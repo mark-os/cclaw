@@ -308,10 +308,15 @@ void channel_consume_events(sqlite3 *db) {
                 LOG_INFO_("channel event ch=%s sid=%lld type=%s",
                           ch_name, (long long)sid, etype);
                 processed++;
-                /* Check if session is awaiting approval — route as decision */
+                /* Check if session is awaiting approval — route as decision
+                 * only when the text is a recognized yes/no/once token.
+                 * Anything else (e.g. "try NWS instead") is an unrelated
+                 * chat message, not an answer — forward it normally rather
+                 * than silently consuming it as an implicit deny. The
+                 * approval stays pending for a later reply (or expiry). */
                 Approval *pa = approval_get_pending(db, sid);
+                int handled_as_decision = 0;
                 if (pa) {
-                    /* Extract text from payload */
                     const char *tsql = "SELECT json_extract(?, '$.text');";
                     sqlite3_stmt *ts;
                     char *text = NULL;
@@ -325,22 +330,34 @@ void channel_consume_events(sqlite3 *db) {
                     }
                     ApprovalDecision d = APPROVAL_DENY;
                     if (text) {
-                        if (strcasecmp(text, "once") == 0 || strcasecmp(text, "o") == 0)
+                        if (strcasecmp(text, "once") == 0 || strcasecmp(text, "o") == 0) {
                             d = APPROVAL_ONCE;
-                        else if (strcasecmp(text, "y") == 0 ||
+                            handled_as_decision = 1;
+                        } else if (strcasecmp(text, "y") == 0 ||
                                  strcasecmp(text, "yes") == 0 ||
                                  strcasecmp(text, "ok") == 0 ||
                                  strcasecmp(text, "okay") == 0 ||
-                                 strcasecmp(text, "approve") == 0)
+                                 strcasecmp(text, "approve") == 0) {
                             d = APPROVAL_ALWAYS;
+                            handled_as_decision = 1;
+                        } else if (strcasecmp(text, "n") == 0 ||
+                                 strcasecmp(text, "no") == 0 ||
+                                 strcasecmp(text, "deny") == 0 ||
+                                 strcasecmp(text, "cancel") == 0) {
+                            d = APPROVAL_DENY;
+                            handled_as_decision = 1;
+                        }
                         free(text);
                     }
-                    char decided[128];
-                    snprintf(decided, sizeof(decided), "channel:%s", ch_name);
-                    resolve_approval(pa->id, d, decided, 0);
+                    if (handled_as_decision) {
+                        char decided[128];
+                        snprintf(decided, sizeof(decided), "channel:%s", ch_name);
+                        resolve_approval(pa->id, d, decided, 0);
+                        wake_session(sid);
+                    }
                     approval_free(pa);
-                    wake_session(sid);
-                } else {
+                }
+                if (!handled_as_decision) {
                     int64_t irc = inbox_insert_scanned(db, sid, ch_name, payload);
                     if (irc < 0) {
                         /* Leave the row in channel_events (skip the del: below)

@@ -86,11 +86,16 @@ static char *gate_request(RequestConfigCtx *ctx, const char *action,
                           const char *key, const char *value,
                           const char *mode, const char *preamble,
                           const char *reason) {
-    /* Denial dedup: same (action, key=value) already denied this session? */
+    /* Dedup: same (action, key=value) already denied, or still pending,
+     * this session? A pending duplicate would otherwise queue a second
+     * "Approval required" prompt to the channel for the same grant while
+     * the first is still unanswered — confusing (two identical prompts,
+     * no way to tell which a reply answers) and it orphans the first
+     * approval until it expires. */
     sqlite3_stmt *chk;
     const char *dedup_sql =
-        "SELECT 1 FROM approvals WHERE session_id=?1 AND tool_name='request_config'"
-        " AND action=?2 AND state='denied'"
+        "SELECT state FROM approvals WHERE session_id=?1 AND tool_name='request_config'"
+        " AND action=?2 AND state IN ('denied','pending')"
         " AND json_extract(args_json,'$.'||?3)=?4";
     if (sqlite3_prepare_v2(ctx->db, dedup_sql, -1, &chk, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(chk, 1, ctx->session_id);
@@ -98,10 +103,15 @@ static char *gate_request(RequestConfigCtx *ctx, const char *action,
         sqlite3_bind_text(chk, 3, key, -1, SQLITE_STATIC);
         sqlite3_bind_text(chk, 4, value, -1, SQLITE_STATIC);
         if (sqlite3_step(chk) == SQLITE_ROW) {
+            const char *st = (const char *)sqlite3_column_text(chk, 0);
+            int is_pending = st && strcmp(st, "pending") == 0;
             sqlite3_finalize(chk);
-            return strdup("error: this request was already denied in this "
-                          "session — do not re-request; ask the user directly "
-                          "if you still believe it's needed");
+            return strdup(is_pending
+                ? "error: a request for this was already sent and is still "
+                  "awaiting the user's yes/no reply — do not re-request; wait"
+                : "error: this request was already denied in this "
+                  "session — do not re-request; ask the user directly "
+                  "if you still believe it's needed");
         }
         sqlite3_finalize(chk);
     }

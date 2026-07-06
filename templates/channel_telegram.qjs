@@ -10,6 +10,54 @@ var dialogs = {}; // chat_id -> {type, data}
 // Load telegram.json locale
 var locale = JSON.parse(channel.getConfig("locale") || "{}");
 
+// Single source of truth for admin slash commands — drives both the
+// Telegram "/" menu (setMyCommands) and dispatch, so the two can't drift.
+var COMMANDS = {
+    key: {
+        description: "Set an API key",
+        handler: function(chatId) {
+            sendKeyboard(chatId, msg("key_select_provider"),
+                locale.keyboards && locale.keyboards.key_providers || [
+                    [{"text": "OpenRouter", "callback_data": "key:openrouter"}],
+                    [{"text": "Gemini", "callback_data": "key:gemini"}],
+                    [{"text": "Custom", "callback_data": "key:custom"}]
+                ]);
+        }
+    },
+    config: {
+        description: "Configure model/endpoint",
+        handler: function(chatId, args) {
+            if (args === "model") sendProviderKeyboard(chatId, "cfg_model");
+            else if (args === "endpoint") sendProviderKeyboard(chatId, "cfg_ep");
+            else sendMessage(chatId, msg("config_usage"));
+        }
+    },
+    whitelist: {
+        description: "Manage host whitelist",
+        handler: function(chatId, args) {
+            sendAgentKeyboard(chatId, args === "remove" ? 1 : 0);
+        }
+    },
+    approvals: {
+        description: "Review pending approvals",
+        handler: function(chatId) { sendApprovalsMenu(chatId); }
+    },
+    grants: {
+        description: "Grant a previously denied request",
+        handler: function(chatId) { sendGrantsMenu(chatId); }
+    }
+};
+
+// "/cmd arg text" -> {name: "cmd", args: "arg text"} (lowercased name), or
+// null if text isn't a slash command at all.
+function parseCommand(text) {
+    if (text.charAt(0) !== "/") return null;
+    var sp = text.indexOf(" ");
+    var name = (sp === -1 ? text.substring(1) : text.substring(1, sp)).toLowerCase();
+    var args = sp === -1 ? "" : text.substring(sp + 1).trim();
+    return {name: name, args: args};
+}
+
 function onInit() {
     config.token = channel.getConfig("bot_token");
     config.base = channel.getConfig("base_url") || "https://api.telegram.org";
@@ -30,13 +78,9 @@ function onInit() {
     channel.log("telegram channel ready (mode=" + mode + ", offset=" + offset + ")");
 
     // Fix the stale command menu (leftover from a previous bot on this token).
-    tgCall("setMyCommands", JSON.stringify({commands: [
-        {command: "key", description: "Set an API key"},
-        {command: "config", description: "Configure model/endpoint"},
-        {command: "whitelist", description: "Manage host whitelist"},
-        {command: "approvals", description: "Review pending approvals"},
-        {command: "grants", description: "Grant a previously denied request"}
-    ]}));
+    var cmdList = [];
+    for (var name in COMMANDS) cmdList.push({command: name, description: COMMANDS[name].description});
+    tgCall("setMyCommands", JSON.stringify({commands: cmdList}));
 
     if (mode === "webhook") return {};
     return {poll: pollShape()};
@@ -149,12 +193,13 @@ function processMessage(msg, updateId) {
         return true;
     }
 
-    // Admin commands
-    if (text.indexOf("/key") === 0 || text.indexOf("/config") === 0 ||
-        text.indexOf("/whitelist") === 0 || text.indexOf("/approvals") === 0 ||
-        text.indexOf("/grants") === 0) {
+    // Admin commands. A non-admin sending a recognized command is silently
+    // dropped (not forwarded to the agent) — same as before this refactor.
+    // Unrecognized "/" text (including from an admin) falls through to chat.
+    var cmd = parseCommand(text);
+    if (cmd && COMMANDS[cmd.name]) {
         if (!channel.admin.isAdmin(chatId)) return true;
-        dispatchAdminCommand(chatId, text);
+        COMMANDS[cmd.name].handler(chatId, cmd.args);
         return true;
     }
 
@@ -218,8 +263,8 @@ function handleApprovalCallback(fromId, data, cbq) {
             chat_id: cbq.message.chat.id,
             message_id: cbq.message.message_id,
             text: outcome,
-            reply_markup: null
-        }));
+            reply_markup: {inline_keyboard: []}
+        }), {tag: "edit_" + cbq.id});
     }
 }
 
@@ -244,38 +289,12 @@ function handleGrantFromHistoryCallback(fromId, data, cbq) {
             chat_id: cbq.message.chat.id,
             message_id: cbq.message.message_id,
             text: outcome,
-            reply_markup: null
-        }));
+            reply_markup: {inline_keyboard: []}
+        }), {tag: "edit_" + cbq.id});
     }
 }
 
 // ── Admin command dispatch ───────────────────────────────────────
-
-function dispatchAdminCommand(chatId, text) {
-    if (text.indexOf("/key") === 0) {
-        sendKeyboard(chatId, msg("key_select_provider"),
-            locale.keyboards && locale.keyboards.key_providers || [
-                [{"text": "OpenRouter", "callback_data": "key:openrouter"}],
-                [{"text": "Gemini", "callback_data": "key:gemini"}],
-                [{"text": "Custom", "callback_data": "key:custom"}]
-            ]);
-    } else if (text.indexOf("/config") === 0) {
-        var args = text.substring(7).trim();
-        if (args === "model") sendProviderKeyboard(chatId, "cfg_model");
-        else if (args === "endpoint") sendProviderKeyboard(chatId, "cfg_ep");
-        else sendMessage(chatId, msg("config_usage"));
-    } else if (text.indexOf("/whitelist") === 0) {
-        var args2 = text.substring(10).trim();
-        var removing = args2 === "remove" ? 1 : 0;
-        sendAgentKeyboard(chatId, removing);
-    } else if (text.indexOf("/approvals") === 0) {
-        sendApprovalsMenu(chatId);
-    } else if (text.indexOf("/grants") === 0) {
-        sendGrantsMenu(chatId);
-    } else {
-        sendMessage(chatId, msg("unknown_command"));
-    }
-}
 
 // ── Key dialog ───────────────────────────────────────────────────
 
@@ -359,8 +378,20 @@ function tgCall(method, body, extra) {
     if (extra) {
         if (extra.outbox_id) req.outbox_id = extra.outbox_id;
         if (extra.final) req.final = 1;
+        if (extra.tag) req.tag = extra.tag;
     }
     channel.send(req);
+}
+
+// Calls made with a tag (no outbox_id) get no other failure tracking —
+// log anything that isn't a clean 2xx so a bad request body doesn't vanish
+// silently (bit us once: editMessageText with reply_markup:null 400'd with
+// no trace, see handleApprovalCallback).
+function onResult(r) {
+    if (r.error || r.status < 200 || r.status >= 300) {
+        channel.log("tgCall failed tag=" + r.tag + " status=" + r.status +
+                    " error=" + r.error + " body=" + (r.body || "").substring(0, 200));
+    }
 }
 
 function sendMessage(chatId, text) {

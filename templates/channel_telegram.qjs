@@ -113,7 +113,8 @@ function onRequest(req) {
         return {status: 400, body: "bad json"};
     }
     if (update.message) processMessage(update.message, update.update_id);
-    if (update.callback_query) processCallback(update.callback_query);
+    else if (update.callback_query) processCallback(update.callback_query);
+    else logUnhandledUpdate(update);
     return {status: 200, body: "ok"};
 }
 
@@ -132,7 +133,8 @@ function processUpdates(body) {
 
         var ok = true;
         if (update.message) ok = processMessage(update.message, update.update_id);
-        if (update.callback_query) processCallback(update.callback_query);
+        else if (update.callback_query) processCallback(update.callback_query);
+        else logUnhandledUpdate(update);
 
         if (!ok) {
             channel.log("emit failed for update " + update.update_id + ", halting batch");
@@ -174,10 +176,38 @@ function onOutbox(item) {
 
 // ── Message processing ──────────────────────────────────────────
 
+// Which non-text payload a message carries, for logging + the user reply.
+function messageKind(msg) {
+    var keys = ["photo", "document", "voice", "audio", "video", "video_note",
+                "sticker", "animation", "location", "contact", "poll", "dice",
+                "venue", "game"];
+    for (var i = 0; i < keys.length; i++) if (msg[keys[i]]) return keys[i];
+    return "non-text";
+}
+
+// Update types we deliberately don't act on: acknowledge (offset still
+// advances) and log rather than silently dropping. Edits/channel posts are
+// not reprocessed — replaying them as new messages would duplicate or loop.
+function logUnhandledUpdate(update) {
+    var id = update.update_id;
+    if (update.edited_message) channel.log("ignoring edited_message id=" + id);
+    else if (update.channel_post) channel.log("ignoring channel_post id=" + id);
+    else if (update.edited_channel_post) channel.log("ignoring edited_channel_post id=" + id);
+    else channel.log("ignoring unsupported update id=" + id);
+}
+
 function processMessage(msg, updateId) {
     var chat = msg.chat;
     var text = msg.text;
-    if (!chat || !text) return true;
+    if (!chat) return true;   // nothing addressable
+    if (!text) {
+        // Media (photo/voice/sticker/…): we're text-only. Tell the user and
+        // log the kind instead of silently swallowing the message.
+        var kind = messageKind(msg);
+        channel.log("dropping non-text message kind=" + kind + " chat=" + chat.id);
+        sendMessage("" + chat.id, "I can only read text right now (got a " + kind + ").");
+        return true;
+    }
 
     var chatId = "" + chat.id;
 

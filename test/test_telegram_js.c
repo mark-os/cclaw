@@ -88,6 +88,12 @@ int main(void) {
         "'' + findSplit('a'.repeat(100) + '\\n' + 'b'.repeat(5000), 0, 4096)",
         "101");
 
+    /* ── messageKind: non-text update classification ────────────────── */
+    expect("messageKind_photo", "messageKind({photo:[{}]})", "photo");
+    expect("messageKind_voice", "messageKind({voice:{}})", "voice");
+    expect("messageKind_sticker", "messageKind({sticker:{}})", "sticker");
+    expect("messageKind_none", "messageKind({})", "non-text");
+
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

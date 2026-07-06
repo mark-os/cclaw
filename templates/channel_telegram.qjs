@@ -641,6 +641,13 @@ function findSplit(text, start, maxLen) {
             (i3 === text.length || text[i3] === " " || text[i3] === "\n"))
             return i3 - start;
     }
+    // Hard cut. QuickJS strings are UTF-16: never slice through a surrogate
+    // pair, or the lone surrogate becomes invalid UTF-8 and Telegram 400s.
+    // If the boundary lands on a low surrogate (0xDC00–0xDFFF), its high half
+    // would be orphaned at this chunk's tail — back up one unit so the whole
+    // pair moves to the next chunk.
+    var boundary = text.charCodeAt(end);
+    if (boundary >= 0xDC00 && boundary <= 0xDFFF) return maxLen - 1;
     return maxLen;
 }
 

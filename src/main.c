@@ -2459,6 +2459,11 @@ static int run_daemon(char *db_path) {
     /* Launch channel processes */
     channel_launch_all(g_db);
 
+    /* Sweep events parked from a previous life. Consume is otherwise only
+     * triggered by a FIFO wake, so anything left in channel_events at crash
+     * or restart would wait for the *next* inbound message to be replayed. */
+    channel_consume_events(g_db);
+
     /* poll() setup — sized for fixed fds + all children with result pipes */
     int max_pfds = 6 + CHILD_MAX;  /* chld, wake, fifo, worker, tool-thread, result pipes */
     struct pollfd *pfds = malloc(max_pfds * sizeof(struct pollfd));

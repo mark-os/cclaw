@@ -202,17 +202,34 @@ void channel_tick(sqlite3 *db) {
 
 
 void channel_consume_events(sqlite3 *db) {
+    /* One event per pass, SELECT finalized before any write. Holding the
+     * SELECT open across the loop body's writes (inbox, sessions, the delete
+     * below) keeps a read snapshot open, and the write must then upgrade it.
+     * A concurrent runner commit — telegram writes tg_offset right after
+     * sending the wake byte — lands inside that snapshot and the upgrade
+     * fails with an *immediate* SQLITE_BUSY (busy_timeout does not apply to
+     * snapshot upgrades), parking the event until the next wake. The id
+     * cursor also lets a failed event be skipped for this pass instead of
+     * refetching it forever. */
     const char *sql = "SELECT id, channel_name, event_type, payload"
-                      " FROM channel_events ORDER BY id ASC;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+                      " FROM channel_events WHERE id > ? ORDER BY id ASC LIMIT 1;";
+    int64_t cursor = 0;
     int processed = 0;
 
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    for (;;) {
+        sqlite3_stmt *stmt;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) break;
+        sqlite3_bind_int64(stmt, 1, cursor);
+        if (sqlite3_step(stmt) != SQLITE_ROW) { sqlite3_finalize(stmt); break; }
         int64_t eid = sqlite3_column_int64(stmt, 0);
-        const char *ch_name = (const char *)sqlite3_column_text(stmt, 1);
-        const char *etype = (const char *)sqlite3_column_text(stmt, 2);
-        const char *payload = (const char *)sqlite3_column_text(stmt, 3);
+        const char *v = (const char *)sqlite3_column_text(stmt, 1);
+        char *ch_name = v ? strdup(v) : NULL;
+        v = (const char *)sqlite3_column_text(stmt, 2);
+        char *etype = v ? strdup(v) : NULL;
+        v = (const char *)sqlite3_column_text(stmt, 3);
+        char *payload = v ? strdup(v) : NULL;
+        sqlite3_finalize(stmt);
+        cursor = eid;
 
         if (!ch_name || !payload || !etype || strcmp(etype, "message") != 0)
             goto del;
@@ -310,7 +327,13 @@ void channel_consume_events(sqlite3 *db) {
                 } else {
                     int64_t irc = inbox_insert_scanned(db, sid, ch_name, payload);
                     if (irc < 0) {
+                        /* Leave the row in channel_events (skip the del: below)
+                         * so the next consume pass retries it — but log it, since
+                         * a silent retry-forever with no trace is undebuggable. */
+                        LOG_ERROR_("channel inbox_insert failed ch=%s sid=%lld eid=%lld, will retry",
+                                   ch_name, (long long)sid, (long long)eid);
                         free(agent);
+                        free(ch_name); free(etype); free(payload);
                         continue;
                     }
                     wake_session(sid);
@@ -319,6 +342,7 @@ void channel_consume_events(sqlite3 *db) {
             free(agent);
         }
 del:;
+        free(ch_name); free(etype); free(payload);
         const char *dsql = "DELETE FROM channel_events WHERE id=?;";
         sqlite3_stmt *ds;
         if (sqlite3_prepare_v2(db, dsql, -1, &ds, NULL) == SQLITE_OK) {
@@ -326,7 +350,6 @@ del:;
             sqlite3_step(ds); sqlite3_finalize(ds);
         }
     }
-    sqlite3_finalize(stmt);
     if (processed > 0)
         LOG_INFO_("channel consume_done count=%d", processed);
 }

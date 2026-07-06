@@ -40,3 +40,6 @@ compile_commands.json
 .cclaw/
 __pycache__/
 
+# Local, not-checked-in agent instructions
+CLAUDE.local.md
+

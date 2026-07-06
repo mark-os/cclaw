@@ -22,7 +22,7 @@ static int test_basic_turn(void) {
 
     /* Set env for llm_req */
     char url[64]; snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
-    setenv("CCLAW_DB", DB_PATH, 1);
+    setenv("CCLAW_DB_PATH", DB_PATH, 1);
     setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
     setenv("OPENROUTER_API_KEY", "test-key", 1);
     setenv("CCLAW_MODEL", "test-model", 1);

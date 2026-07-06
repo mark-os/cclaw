@@ -25,11 +25,9 @@ static char *str_dup(const char *s) {
 }
 
 /* Default workspace, anchored to the DB directory so it can't diverge from the
- * agent tree by launch location. main() exports CCLAW_DB as the resolved
- * absolute DB path before either config loader runs; fall back to a cwd-relative
- * path only when it is unavailable. Caller owns the returned string. */
-static char *default_workspace(void) {
-    const char *dbp = getenv("CCLAW_DB");
+ * agent tree by launch location. Falls back to a cwd-relative path only when
+ * no DB file path is available. Caller owns the returned string. */
+static char *default_workspace(const char *dbp) {
     const char *slash = dbp ? strrchr(dbp, '/') : NULL;
     if (slash) {
         char ws[PATH_MAX];
@@ -184,13 +182,14 @@ Config *config_load_from_env(void) {
     else
         cfg->provider.endpoint_type = ENDPOINT_OPENAI;
 
+    /* DB path — env-only loader has no open DB handle to ask, so this is the
+     * one place that still reads CCLAW_DB_PATH directly. */
+    const char *dbp = getenv("CCLAW_DB_PATH");
+    cfg->db_path = str_dup(dbp ? dbp : "cclaw.db");
+
     /* Workspace — default under ~/.cclaw/agents/default/ for zero-config CLI */
     v = getenv("CCLAW_WORKSPACE");
-    cfg->workspace = v ? str_dup(v) : default_workspace();
-
-    /* DB path — parent sets CCLAW_DB for children at fork */
-    v = getenv("CCLAW_DB");
-    cfg->db_path = str_dup(v ? v : "cclaw.db");
+    cfg->workspace = v ? str_dup(v) : default_workspace(cfg->db_path);
 
     /* Scalars — defaults come from the config registry so the env-only
      * loader can never drift from the DB loader. */
@@ -253,6 +252,14 @@ Config *config_load(sqlite3 *db) {
 
     Config *cfg = calloc(1, sizeof(Config));
     if (!cfg) return NULL;
+
+    /* DB path — ask SQLite for the file it actually opened, not an env var.
+     * Downstream consumers (sandbox_mask_state_files, agent_dir_resolve) rely
+     * on this being the real path even when CCLAW_DB_PATH was never set. */
+    {
+        const char *dbfile = sqlite3_db_filename(db, "main");
+        cfg->db_path = str_dup((dbfile && dbfile[0]) ? dbfile : "cclaw.db");
+    }
 
     /* Load providers from providers table (ordered by priority) */
     {
@@ -333,7 +340,6 @@ Config *config_load(sqlite3 *db) {
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER");
     env_override_str(&cfg->provider.model, "CCLAW_MODEL");
     env_override_int(&cfg->provider.context_window, "CCLAW_CONTEXT_WINDOW");
-    env_override_str(&cfg->db_path, "CCLAW_DB_PATH");
     env_override_str(&cfg->system_prompt, "CCLAW_SYSTEM_PROMPT");
     env_override_int(&cfg->web_port, "CCLAW_WEB_PORT");
     env_override_int(&cfg->max_iterations, "CCLAW_MAX_ITERATIONS");
@@ -378,7 +384,7 @@ Config *config_load(sqlite3 *db) {
     {
         char *v = config_get(db, "workspace");
         if (v && v[0]) cfg->workspace = v;
-        else { free(v); cfg->workspace = default_workspace(); }
+        else { free(v); cfg->workspace = default_workspace(cfg->db_path); }
     }
     env_override_str(&cfg->workspace, "CCLAW_WORKSPACE");
 

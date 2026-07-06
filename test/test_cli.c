@@ -58,7 +58,7 @@ static void test_cli_zero_config_startup(void) {
     if (chdir(".cclaw_test_zc") != 0) { FAIL("chdir"); return; }
 
     unsetenv("CCLAW_WORKSPACE");
-    unsetenv("CCLAW_DB");
+    unsetenv("CCLAW_DB_PATH");
     Config *cfg = config_load_from_env();
     if (!cfg) { chdir(cwd); system("rm -rf .cclaw_test_zc"); FAIL("config_load_from_env"); return; }
 

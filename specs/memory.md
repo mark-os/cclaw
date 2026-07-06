@@ -47,7 +47,7 @@ All past messages searchable via `db_query` tool (read-only SQL) or auto-recall.
 - FTS5 indexes `content` column directly (split-column schema)
 - Agent can search own history: `SELECT content FROM entries_fts WHERE entries_fts MATCH ?`
 - Context window manager loads recent turns; older entries accessible via search
-- All in cclaw.db — agent reads via `CCLAW_DB`
+- All in cclaw.db — agent reads via the `db_query` tool, not a direct file path
 
 ## Future: Archival (vector recall)
 

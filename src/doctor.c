@@ -340,9 +340,6 @@ int doctor_main(void) {
     sqlite3 *db = NULL;
     check_db(db_path, &db);
 
-    /* Set CCLAW_DB for config_load's default_workspace resolution */
-    if (db) setenv("CCLAW_DB", db_path, 1);
-
     Config *cfg = NULL;
     check_config(db, &cfg);
     check_provider(cfg);

@@ -2060,8 +2060,7 @@ static void deliver_response(int64_t session_id) {
         sqlite3_step(ins);
         sqlite3_finalize(ins);
 
-        const char *db_path = getenv("CCLAW_DB");
-        if (db_path) channel_outbox_wake(db_path, channel);
+        if (g_cfg && g_cfg->db_path) channel_outbox_wake(g_cfg->db_path, channel);
     }
 
     free(text);
@@ -3216,8 +3215,6 @@ int main(int argc, char *argv[]) {
     sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL);
 
     { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
-
-    setenv("CCLAW_DB", db_path, 1);
 
     /* extract_builtin_extensions is idempotent (IF NOT EXISTS checks) */
     extract_builtin_extensions(g_db, db_path);

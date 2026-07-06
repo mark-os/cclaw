@@ -17,7 +17,7 @@ static void clear_env(void) {
     unsetenv("CCLAW_MAX_TOKENS");
     unsetenv("CCLAW_CONTEXT_WINDOW");
     unsetenv("CCLAW_WORKSPACE");
-    unsetenv("CCLAW_DB");
+    unsetenv("CCLAW_DB_PATH");
     unsetenv("CCLAW_MAX_ITERATIONS");
     unsetenv("CCLAW_MAX_HISTORY_TOKENS");
     unsetenv("CCLAW_SHELL_TIMEOUT");
@@ -81,7 +81,7 @@ static void test_env_all_overrides(void) {
     setenv("CCLAW_MAX_TOKENS", "8192", 1);
     setenv("CCLAW_CONTEXT_WINDOW", "200000", 1);
     setenv("CCLAW_WORKSPACE", "/tmp/ws", 1);
-    setenv("CCLAW_DB", "/tmp/a.db", 1);
+    setenv("CCLAW_DB_PATH", "/tmp/a.db", 1);
     setenv("CCLAW_MAX_ITERATIONS", "50", 1);
     setenv("CCLAW_MAX_HISTORY_TOKENS", "10000", 1);
     setenv("CCLAW_SHELL_TIMEOUT", "60", 1);

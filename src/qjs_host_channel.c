@@ -213,30 +213,65 @@ static JSValue js_admin_set_endpoint(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt32(ctx, rc);
 }
 
-static JSValue js_admin_add_host(JSContext *ctx, JSValueConst this_val,
-                                 int argc, JSValueConst *argv) {
+static JSValue js_admin_list_grants(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
     (void)this_val;
-    if (argc < 2) return JS_ThrowTypeError(ctx, "admin.addHost(agent, host)");
+    if (argc < 1) return JS_ThrowTypeError(ctx, "admin.listGrants(agent)");
     const char *agent = JS_ToCString(ctx, argv[0]);
-    const char *host = JS_ToCString(ctx, argv[1]);
-    if (!agent || !host) { if (agent) JS_FreeCString(ctx, agent); if (host) JS_FreeCString(ctx, host); return JS_NewInt32(ctx, -1); }
-    int rc = admin_add_host(g_ctx->db, agent, host);
+    JSValue arr = JS_NewArray(ctx);
+    if (!agent) return arr;
+    AdminGrant *list = NULL;
+    size_t count = 0;
+    if (admin_list_grants(g_ctx->db, agent, &list, &count) == 0) {
+        for (size_t i = 0; i < count; i++) {
+            JSValue obj = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, obj, "id", JS_NewInt64(ctx, list[i].id));
+            JS_SetPropertyStr(ctx, obj, "kind", JS_NewString(ctx, list[i].kind ? list[i].kind : ""));
+            JS_SetPropertyStr(ctx, obj, "value", JS_NewString(ctx, list[i].value ? list[i].value : ""));
+            JS_SetPropertyUint32(ctx, arr, (uint32_t)i, obj);
+        }
+        admin_grants_free(list, count);
+    }
     JS_FreeCString(ctx, agent);
-    JS_FreeCString(ctx, host);
+    return arr;
+}
+
+static JSValue js_admin_revoke_grant(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "admin.revokeGrant(id)");
+    int64_t id = 0;
+    JS_ToInt64(ctx, &id, argv[0]);
+    return JS_NewInt32(ctx, admin_revoke_grant_by_id(g_ctx->db, id));
+}
+
+static JSValue js_admin_grant_capability(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 3) return JS_ThrowTypeError(ctx, "admin.grantCapability(agent, kind, value)");
+    const char *agent = JS_ToCString(ctx, argv[0]);
+    const char *kind = JS_ToCString(ctx, argv[1]);
+    const char *value = JS_ToCString(ctx, argv[2]);
+    int rc = -1;
+    if (agent && kind && value) rc = admin_grant_capability(g_ctx->db, agent, kind, value);
+    if (agent) JS_FreeCString(ctx, agent);
+    if (kind) JS_FreeCString(ctx, kind);
+    if (value) JS_FreeCString(ctx, value);
     return JS_NewInt32(ctx, rc);
 }
 
-static JSValue js_admin_remove_host(JSContext *ctx, JSValueConst this_val,
-                                    int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 2) return JS_ThrowTypeError(ctx, "admin.removeHost(agent, host)");
-    const char *agent = JS_ToCString(ctx, argv[0]);
-    const char *host = JS_ToCString(ctx, argv[1]);
-    if (!agent || !host) { if (agent) JS_FreeCString(ctx, agent); if (host) JS_FreeCString(ctx, host); return JS_NewInt32(ctx, -1); }
-    int rc = admin_remove_host(g_ctx->db, agent, host);
-    JS_FreeCString(ctx, agent);
-    JS_FreeCString(ctx, host);
-    return JS_NewInt32(ctx, rc);
+static JSValue js_admin_list_tools(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    char **names = NULL;
+    size_t count = 0;
+    JSValue arr = JS_NewArray(ctx);
+    if (admin_list_tool_names(g_ctx->db, &names, &count) == 0) {
+        for (size_t i = 0; i < count; i++)
+            JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewString(ctx, names[i] ? names[i] : ""));
+        admin_tool_names_free(names, count);
+    }
+    return arr;
 }
 
 static JSValue js_admin_list_providers(JSContext *ctx, JSValueConst this_val,
@@ -366,8 +401,10 @@ void qjs_register_channel_host_functions(JSContext *ctx) {
     JS_SetPropertyStr(ctx, admin, "setKey", JS_NewCFunction(ctx, js_admin_set_key, "setKey", 2));
     JS_SetPropertyStr(ctx, admin, "setModel", JS_NewCFunction(ctx, js_admin_set_model, "setModel", 2));
     JS_SetPropertyStr(ctx, admin, "setEndpoint", JS_NewCFunction(ctx, js_admin_set_endpoint, "setEndpoint", 2));
-    JS_SetPropertyStr(ctx, admin, "addHost", JS_NewCFunction(ctx, js_admin_add_host, "addHost", 2));
-    JS_SetPropertyStr(ctx, admin, "removeHost", JS_NewCFunction(ctx, js_admin_remove_host, "removeHost", 2));
+    JS_SetPropertyStr(ctx, admin, "listGrants", JS_NewCFunction(ctx, js_admin_list_grants, "listGrants", 1));
+    JS_SetPropertyStr(ctx, admin, "revokeGrant", JS_NewCFunction(ctx, js_admin_revoke_grant, "revokeGrant", 1));
+    JS_SetPropertyStr(ctx, admin, "grantCapability", JS_NewCFunction(ctx, js_admin_grant_capability, "grantCapability", 3));
+    JS_SetPropertyStr(ctx, admin, "listTools", JS_NewCFunction(ctx, js_admin_list_tools, "listTools", 0));
     JS_SetPropertyStr(ctx, admin, "listProviders", JS_NewCFunction(ctx, js_admin_list_providers, "listProviders", 0));
     JS_SetPropertyStr(ctx, admin, "listAgents", JS_NewCFunction(ctx, js_admin_list_agents, "listAgents", 0));
     JS_SetPropertyStr(ctx, admin, "isAdmin", JS_NewCFunction(ctx, js_admin_is_admin, "isAdmin", 1));

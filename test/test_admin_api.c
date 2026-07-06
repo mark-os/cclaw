@@ -138,27 +138,100 @@ static void test_set_model_fallback(void) {
     printf("  PASS: test_set_model_fallback\n");
 }
 
-static void test_host_management(void) {
+static void test_admin_grant_capability(void) {
     sqlite3 *db = setup_db();
     db_agent_upsert(db, "testagent", NULL, NULL);
 
-    assert(admin_add_host(db, "testagent", "example.com") == 0);
-    assert(admin_add_host(db, "testagent", "api.openai.com") == 0);
+    assert(admin_grant_capability(db, "testagent", "host", "example.com") == 0);
+    assert(admin_grant_capability(db, "testagent", "read_path", "/tmp") == 0);
 
     AgentCaps caps;
     agent_caps_load(db, "testagent", &caps);
-    assert(caps.host_count == 2);
-    agent_caps_free(&caps);
-
-    assert(admin_remove_host(db, "testagent", "example.com") == 0);
-    agent_caps_load(db, "testagent", &caps);
     assert(caps.host_count == 1);
-    assert(strcmp(caps.hosts[0], "api.openai.com") == 0);
+    assert(strcmp(caps.hosts[0], "example.com") == 0);
+    assert(caps.read_count == 1);
     agent_caps_free(&caps);
 
     db_close(db);
     unlink(DB_PATH);
-    printf("  PASS: test_host_management\n");
+    printf("  PASS: test_admin_grant_capability\n");
+}
+
+static void test_admin_list_grants(void) {
+    sqlite3 *db = setup_db();
+    db_agent_upsert(db, "testagent", NULL, NULL);
+    db_agent_upsert(db, "otheragent", NULL, NULL);
+
+    assert(admin_grant_capability(db, "testagent", "host", "example.com") == 0);
+    assert(admin_grant_capability(db, "testagent", "tool", "shell_exec") == 0);
+    assert(admin_grant_capability(db, "testagent", "read_path", "/tmp") == 0);
+    assert(admin_grant_capability(db, "otheragent", "host", "other.example") == 0);
+
+    AdminGrant *list = NULL;
+    size_t count = 0;
+    assert(admin_list_grants(db, "testagent", &list, &count) == 0);
+    assert(count == 3);
+    for (size_t i = 0; i < count; i++) {
+        assert(list[i].id > 0);
+        assert(list[i].kind && list[i].value);
+    }
+    admin_grants_free(list, count);
+
+    db_close(db);
+    unlink(DB_PATH);
+    printf("  PASS: test_admin_list_grants\n");
+}
+
+static void test_admin_revoke_grant_by_id(void) {
+    sqlite3 *db = setup_db();
+    db_agent_upsert(db, "testagent", NULL, NULL);
+    assert(admin_grant_capability(db, "testagent", "host", "example.com") == 0);
+    assert(admin_grant_capability(db, "testagent", "host", "api.openai.com") == 0);
+
+    AdminGrant *list = NULL;
+    size_t count = 0;
+    assert(admin_list_grants(db, "testagent", &list, &count) == 0);
+    assert(count == 2);
+    int64_t victim = list[0].id;
+    const char *survivor_value = strdup(list[1].value);
+    admin_grants_free(list, count);
+
+    assert(admin_revoke_grant_by_id(db, victim) == 0);
+
+    AgentCaps caps;
+    agent_caps_load(db, "testagent", &caps);
+    assert(caps.host_count == 1);
+    assert(strcmp(caps.hosts[0], survivor_value) == 0);
+    agent_caps_free(&caps);
+    free((void *)survivor_value);
+
+    /* A stale/unknown id fails without touching other rows */
+    assert(admin_revoke_grant_by_id(db, victim) != 0);
+    agent_caps_load(db, "testagent", &caps);
+    assert(caps.host_count == 1);
+    agent_caps_free(&caps);
+
+    db_close(db);
+    unlink(DB_PATH);
+    printf("  PASS: test_admin_revoke_grant_by_id\n");
+}
+
+static void test_admin_list_tool_names(void) {
+    sqlite3 *db = setup_db();
+    sqlite3_exec(db, "INSERT INTO tools(name,builtin) VALUES('zeta_tool',1);", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO tools(name,builtin) VALUES('alpha_tool',1);", NULL, NULL, NULL);
+
+    char **names = NULL;
+    size_t count = 0;
+    assert(admin_list_tool_names(db, &names, &count) == 0);
+    assert(count == 2);
+    assert(strcmp(names[0], "alpha_tool") == 0);
+    assert(strcmp(names[1], "zeta_tool") == 0);
+    admin_tool_names_free(names, count);
+
+    db_close(db);
+    unlink(DB_PATH);
+    printf("  PASS: test_admin_list_tool_names\n");
 }
 
 static void test_list_providers(void) {
@@ -310,7 +383,10 @@ int main(void) {
     test_set_model_primary();
     test_set_endpoint_primary();
     test_set_model_fallback();
-    test_host_management();
+    test_admin_grant_capability();
+    test_admin_list_grants();
+    test_admin_revoke_grant_by_id();
+    test_admin_list_tool_names();
     test_list_providers();
     test_list_pending_approvals();
     test_list_denied_approvals_grantable_only();

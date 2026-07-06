@@ -68,12 +68,118 @@ int admin_set_endpoint(sqlite3 *db, int provider_index, const char *url) {
     return rc;
 }
 
-int admin_add_host(sqlite3 *db, const char *agent_name, const char *host) {
-    return agent_config_grant(db, agent_name, "host", host, 0);
+int admin_list_grants(sqlite3 *db, const char *agent_name,
+                      AdminGrant **out, size_t *out_count) {
+    if (!db || !out || !out_count) return -1;
+    *out = NULL;
+    *out_count = 0;
+    if (!agent_name) return -1;
+
+    const char *sql =
+        "SELECT rowid, kind, value FROM grants WHERE agent_name=?1"
+        " AND (expires_at IS NULL OR expires_at > unixepoch())"
+        " ORDER BY kind, value;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+
+    size_t cap = 8, count = 0;
+    AdminGrant *list = calloc(cap, sizeof(AdminGrant));
+    if (!list) { sqlite3_finalize(stmt); return -1; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            AdminGrant *tmp = realloc(list, cap * sizeof(AdminGrant));
+            if (!tmp) { admin_grants_free(list, count); sqlite3_finalize(stmt); return -1; }
+            list = tmp;
+        }
+        const char *k = (const char *)sqlite3_column_text(stmt, 1);
+        const char *v = (const char *)sqlite3_column_text(stmt, 2);
+        list[count].id = sqlite3_column_int64(stmt, 0);
+        list[count].kind = k ? strdup(k) : NULL;
+        list[count].value = v ? strdup(v) : NULL;
+        count++;
+    }
+    sqlite3_finalize(stmt);
+
+    *out = list;
+    *out_count = count;
+    return 0;
 }
 
-int admin_remove_host(sqlite3 *db, const char *agent_name, const char *host) {
-    return agent_config_revoke(db, agent_name, "host", host);
+void admin_grants_free(AdminGrant *list, size_t count) {
+    if (!list) return;
+    for (size_t i = 0; i < count; i++) {
+        free(list[i].kind);
+        free(list[i].value);
+    }
+    free(list);
+}
+
+int admin_revoke_grant_by_id(sqlite3 *db, int64_t grant_id) {
+    if (!db) return -1;
+    const char *sql = "SELECT agent_name, kind, value FROM grants WHERE rowid=?1;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, grant_id);
+
+    char *agent = NULL, *kind = NULL, *value = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *a = (const char *)sqlite3_column_text(stmt, 0);
+        const char *k = (const char *)sqlite3_column_text(stmt, 1);
+        const char *v = (const char *)sqlite3_column_text(stmt, 2);
+        if (a) agent = strdup(a);
+        if (k) kind = strdup(k);
+        if (v) value = strdup(v);
+    }
+    sqlite3_finalize(stmt);
+
+    int rc = -1;
+    if (agent && kind && value) rc = agent_config_revoke(db, agent, kind, value);
+    free(agent); free(kind); free(value);
+    return rc;
+}
+
+int admin_grant_capability(sqlite3 *db, const char *agent_name,
+                           const char *kind, const char *value) {
+    return agent_config_grant(db, agent_name, kind, value, 0);
+}
+
+int admin_list_tool_names(sqlite3 *db, char ***out, size_t *out_count) {
+    if (!db || !out || !out_count) return -1;
+    *out = NULL;
+    *out_count = 0;
+
+    const char *sql = "SELECT name FROM tools ORDER BY name;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    size_t cap = 8, count = 0;
+    char **names = calloc(cap, sizeof(char *));
+    if (!names) { sqlite3_finalize(stmt); return -1; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            char **tmp = realloc(names, cap * sizeof(char *));
+            if (!tmp) { admin_tool_names_free(names, count); sqlite3_finalize(stmt); return -1; }
+            names = tmp;
+        }
+        const char *n = (const char *)sqlite3_column_text(stmt, 0);
+        names[count++] = n ? strdup(n) : NULL;
+    }
+    sqlite3_finalize(stmt);
+
+    *out = names;
+    *out_count = count;
+    return 0;
+}
+
+void admin_tool_names_free(char **names, size_t count) {
+    if (!names) return;
+    for (size_t i = 0; i < count; i++) free(names[i]);
+    free(names);
 }
 
 int admin_list_providers(sqlite3 *db, AdminProvider **out, size_t *out_count) {

@@ -1901,12 +1901,24 @@ static void handle_approval_park(int64_t session_id) {
                  agent ? agent : "?", (long long)session_id, ch_name, summary);
         free(agent);
 
+        /* "apply" approvals (request_config grants) have no once semantics —
+         * resolve_approval rejects APPROVAL_ONCE for them outright (see the
+         * apply-branch check above) — so don't offer a button that always
+         * dead-ends in an error. Plain tool-call ("rerun") approvals keep it. */
         char keyboard[256];
-        snprintf(keyboard, sizeof(keyboard),
-                 "[[{\"text\":\"Approve\",\"callback_data\":\"appr:%lld:yes\"},"
-                 "{\"text\":\"Once\",\"callback_data\":\"appr:%lld:once\"},"
-                 "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
-                 (long long)a->id, (long long)a->id, (long long)a->id);
+        int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
+        if (is_apply) {
+            snprintf(keyboard, sizeof(keyboard),
+                     "[[{\"text\":\"Grant\",\"callback_data\":\"appr:%lld:yes\"},"
+                     "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
+                     (long long)a->id, (long long)a->id);
+        } else {
+            snprintf(keyboard, sizeof(keyboard),
+                     "[[{\"text\":\"Approve\",\"callback_data\":\"appr:%lld:yes\"},"
+                     "{\"text\":\"Once\",\"callback_data\":\"appr:%lld:once\"},"
+                     "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
+                     (long long)a->id, (long long)a->id, (long long)a->id);
+        }
 
         const char *ins_sql =
             "INSERT INTO channel_outbox(channel_name, session_id, payload)"

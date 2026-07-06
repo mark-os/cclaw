@@ -32,19 +32,13 @@ var COMMANDS = {
             else sendMessage(chatId, msg("config_usage"));
         }
     },
-    whitelist: {
-        description: "Manage host whitelist",
-        handler: function(chatId, args) {
-            sendAgentKeyboard(chatId, args === "remove" ? 1 : 0);
-        }
-    },
     approvals: {
         description: "Review pending approvals",
         handler: function(chatId) { sendApprovalsMenu(chatId); }
     },
     grants: {
-        description: "Grant a previously denied request",
-        handler: function(chatId) { sendGrantsMenu(chatId); }
+        description: "Manage capability grants",
+        handler: function(chatId) { sendGrantsTopMenu(chatId); }
     }
 };
 
@@ -225,6 +219,15 @@ function processCallback(cbq) {
         handleGrantFromHistoryCallback(fromId, data, cbq);
         return;
     }
+    if (data.indexOf("gtm:") === 0) { handleGrantsTopCallback(fromId, data, cbq); return; }
+    if (data.indexOf("gpa:") === 0) { handleGrantsAgentCallback(fromId, data, cbq); return; }
+    if (data.indexOf("gpr:") === 0) { handleGrantsRevokeCallback(fromId, data, cbq); return; }
+    if (data.indexOf("gpe:") === 0) { handleGrantsEditCallback(fromId, data, cbq); return; }
+    if (data.indexOf("gpn:") === 0) { handleGrantsAddCallback(fromId, data, cbq); return; }
+    if (data.indexOf("gpb") === 0) { handleGrantsBackCallback(fromId, data, cbq); return; }
+    if (data.indexOf("gpk:") === 0) { handleGrantsKindCallback(fromId, data, cbq); return; }
+    if (data.indexOf("gpt:") === 0) { handleGrantsToolCallback(fromId, data, cbq); return; }
+    if (data.indexOf("gpm:") === 0) { handleGrantsModeCallback(fromId, data, cbq); return; }
 
     // Answer callback to dismiss loading
     if (cbq.id) {
@@ -234,7 +237,6 @@ function processCallback(cbq) {
     if (data.indexOf("key:") === 0) handleKeyCallback(fromId, data);
     else if (data.indexOf("cfg_model:") === 0) handleConfigModelCallback(fromId, data);
     else if (data.indexOf("cfg_ep:") === 0) handleConfigEndpointCallback(fromId, data);
-    else if (data.indexOf("wl:") === 0) handleWhitelistCallback(fromId, data);
 }
 
 // ── Approval callback ────────────────────────────────────────────
@@ -294,6 +296,209 @@ function handleGrantFromHistoryCallback(fromId, data, cbq) {
     }
 }
 
+// ── Grants CRUD (/grants "Manage Grants" flow) ────────────────────
+//
+// One message, edited in place via editMessageText as the admin navigates:
+// top menu -> agent picker -> grants list -> (add: kind -> tool|host|path
+// picker, or edit: free-text prompt). Agents/tools are referenced by index
+// into a freshly-fetched, name-ordered list; grants by their rowid — never
+// by raw name/value — so callback_data (64-byte cap) never risks overflow.
+
+function answerCbq(cbq, text) {
+    if (cbq.id) tgCall("answerCallbackQuery", JSON.stringify({callback_query_id: cbq.id, text: text || ""}));
+}
+
+function editGrantsMessage(cbq, text, keyboard) {
+    if (!cbq.message || !cbq.message.chat) return;
+    tgCall("editMessageText", JSON.stringify({
+        chat_id: cbq.message.chat.id,
+        message_id: cbq.message.message_id,
+        text: text,
+        reply_markup: {inline_keyboard: keyboard || []}
+    }), {tag: "edit_grants"});
+}
+
+function agentAtIndex(idx) {
+    var agents = channel.admin.listAgents();
+    return (agents && idx >= 0 && idx < agents.length) ? agents[idx] : null;
+}
+
+function sendGrantsTopMenu(chatId) {
+    sendKeyboard(chatId, "Grants", [
+        [{text: "Manage Grants", callback_data: "gtm:m"}],
+        [{text: "View Denied Requests", callback_data: "gtm:h"}]
+    ]);
+}
+
+function handleGrantsTopCallback(fromId, data, cbq) {
+    answerCbq(cbq);
+    if (data === "gtm:h") {
+        // Existing, untouched denial-history view — sends its own message
+        // rather than editing this one (channel-scoped, not agent-scoped).
+        if (cbq.message && cbq.message.chat) sendGrantsMenu("" + cbq.message.chat.id);
+        return;
+    }
+    renderAgentPicker(cbq);
+}
+
+function renderAgentPicker(cbq) {
+    var agents = channel.admin.listAgents();
+    if (!agents || agents.length === 0) {
+        editGrantsMessage(cbq, "No agents found.", []);
+        return;
+    }
+    var keyboard = [];
+    for (var i = 0; i < agents.length && i < 20; i++) {
+        keyboard.push([{text: agents[i], callback_data: "gpa:" + i}]);
+    }
+    editGrantsMessage(cbq, "Select agent:", keyboard);
+}
+
+function handleGrantsAgentCallback(fromId, data, cbq) {
+    answerCbq(cbq);
+    var agentIdx = parseInt(data.substring(4), 10);
+    renderGrantsList(cbq, agentIdx);
+}
+
+function renderGrantsList(cbq, agentIdx) {
+    var agent = agentAtIndex(agentIdx);
+    if (!agent) {
+        editGrantsMessage(cbq, "Agent no longer exists.", []);
+        return;
+    }
+
+    var grants = channel.admin.listGrants(agent);
+    var lines = [agent + " grants:"];
+    var keyboard = [];
+    if (!grants || grants.length === 0) lines.push("(none)");
+    for (var i = 0; i < grants.length; i++) {
+        var g = grants[i];
+        lines.push(g.kind + ": " + g.value);
+        var row = [{text: "Revoke " + g.kind, callback_data: "gpr:" + agentIdx + ":" + g.id}];
+        if (g.kind === "host" || g.kind === "read_path" || g.kind === "write_path")
+            row.push({text: "Edit " + g.kind, callback_data: "gpe:" + agentIdx + ":" + g.id});
+        keyboard.push(row);
+    }
+    keyboard.push([{text: "+ Add", callback_data: "gpn:" + agentIdx}]);
+    keyboard.push([{text: "Back", callback_data: "gpb"}]);
+    editGrantsMessage(cbq, lines.join("\n"), keyboard);
+}
+
+function handleGrantsBackCallback(fromId, data, cbq) {
+    answerCbq(cbq);
+    renderAgentPicker(cbq);
+}
+
+function handleGrantsRevokeCallback(fromId, data, cbq) {
+    // "gpr:<agentIdx>:<rowid>"
+    var parts = data.substring(4).split(":");
+    var agentIdx = parseInt(parts[0], 10);
+    var rowId = parseInt(parts[1], 10);
+    var rc = channel.admin.revokeGrant(rowId);
+    answerCbq(cbq, rc === 0 ? "Revoked" : "Revoke failed");
+    renderGrantsList(cbq, agentIdx);
+}
+
+function handleGrantsEditCallback(fromId, data, cbq) {
+    answerCbq(cbq);
+    // "gpe:<agentIdx>:<rowid>"
+    var parts = data.substring(4).split(":");
+    var agentIdx = parseInt(parts[0], 10);
+    var rowId = parseInt(parts[1], 10);
+    var agent = agentAtIndex(agentIdx);
+    if (!agent) { editGrantsMessage(cbq, "Agent no longer exists.", []); return; }
+
+    var grants = channel.admin.listGrants(agent);
+    var target = null;
+    for (var i = 0; i < grants.length; i++) {
+        if (grants[i].id === rowId) { target = grants[i]; break; }
+    }
+    if (!target) { renderGrantsList(cbq, agentIdx); return; }
+
+    dialogs[fromId] = {
+        type: "grant_value", agentIdx: agentIdx, kind: target.kind,
+        editRowId: rowId,
+        listMessageId: cbq.message.message_id, listChatId: cbq.message.chat.id
+    };
+    sendForceReply(fromId, "Editing " + target.kind + " grant (currently: " +
+        target.value + ") — reply with the new value, or /cancel");
+}
+
+function handleGrantsAddCallback(fromId, data, cbq) {
+    answerCbq(cbq);
+    var agentIdx = parseInt(data.substring(4), 10);
+    editGrantsMessage(cbq, "Add grant — select kind:", [
+        [{text: "Tool", callback_data: "gpk:" + agentIdx + ":tool"}],
+        [{text: "Host", callback_data: "gpk:" + agentIdx + ":host"}],
+        [{text: "Path", callback_data: "gpk:" + agentIdx + ":path"}]
+    ]);
+}
+
+function handleGrantsKindCallback(fromId, data, cbq) {
+    answerCbq(cbq);
+    // "gpk:<agentIdx>:tool|host|path"
+    var parts = data.substring(4).split(":");
+    var agentIdx = parseInt(parts[0], 10);
+    var kind = parts[1];
+
+    if (kind === "tool") {
+        renderToolPicker(cbq, agentIdx);
+    } else if (kind === "host") {
+        dialogs[fromId] = {
+            type: "grant_value", agentIdx: agentIdx, kind: "host",
+            listMessageId: cbq.message.message_id, listChatId: cbq.message.chat.id
+        };
+        sendForceReply(fromId, "Enter hostname to grant, or /cancel:");
+    } else if (kind === "path") {
+        editGrantsMessage(cbq, "Path access mode:", [
+            [{text: "Read", callback_data: "gpm:" + agentIdx + ":read"}],
+            [{text: "Write", callback_data: "gpm:" + agentIdx + ":write"}]
+        ]);
+    }
+}
+
+function renderToolPicker(cbq, agentIdx) {
+    var tools = channel.admin.listTools();
+    if (!tools || tools.length === 0) {
+        editGrantsMessage(cbq, "No tools found.", []);
+        return;
+    }
+    var keyboard = [];
+    for (var i = 0; i < tools.length && i < 30; i++) {
+        keyboard.push([{text: tools[i], callback_data: "gpt:" + agentIdx + ":" + i}]);
+    }
+    editGrantsMessage(cbq, "Select tool to grant:", keyboard);
+}
+
+function handleGrantsToolCallback(fromId, data, cbq) {
+    // "gpt:<agentIdx>:<toolIdx>" — grants immediately, no free text.
+    var parts = data.substring(4).split(":");
+    var agentIdx = parseInt(parts[0], 10);
+    var toolIdx = parseInt(parts[1], 10);
+    var agent = agentAtIndex(agentIdx);
+    var tools = channel.admin.listTools();
+    var toolName = (tools && toolIdx >= 0 && toolIdx < tools.length) ? tools[toolIdx] : null;
+
+    var rc = -1;
+    if (agent && toolName) rc = channel.admin.grantCapability(agent, "tool", toolName);
+    answerCbq(cbq, rc === 0 ? "Granted" : "Grant failed");
+    renderGrantsList(cbq, agentIdx);
+}
+
+function handleGrantsModeCallback(fromId, data, cbq) {
+    answerCbq(cbq);
+    // "gpm:<agentIdx>:read|write"
+    var parts = data.substring(4).split(":");
+    var agentIdx = parseInt(parts[0], 10);
+    var mode = parts[1];
+    dialogs[fromId] = {
+        type: "grant_value", agentIdx: agentIdx,
+        kind: mode === "write" ? "write_path" : "read_path",
+        listMessageId: cbq.message.message_id, listChatId: cbq.message.chat.id
+    };
+    sendForceReply(fromId, "Enter path to grant " + mode + " access to, or /cancel:");
+}
+
 // ── Admin command dispatch ───────────────────────────────────────
 
 // ── Key dialog ───────────────────────────────────────────────────
@@ -323,23 +528,21 @@ function handleConfigEndpointCallback(chatId, data) {
     sendForceReply(chatId, msg("config_enter_endpoint"));
 }
 
-// ── Whitelist dialog ─────────────────────────────────────────────
-
-function handleWhitelistCallback(chatId, data) {
-    // Parse "wl:<agent>:<removing>"
-    var parts = data.substring(3);
-    var lastColon = parts.lastIndexOf(":");
-    var agent = parts.substring(0, lastColon);
-    var removing = parseInt(parts.substring(lastColon + 1), 10);
-    dialogs[chatId] = {type: "whitelist", agent: agent, removing: removing};
-    sendForceReply(chatId, removing ? msg("wl_enter_host_remove") : msg("wl_enter_host_add"));
-}
-
 // ── Dialog reply handler ─────────────────────────────────────────
 
 function handleDialogReply(chatId, text, messageId) {
     var d = dialogs[chatId];
     delete dialogs[chatId];
+
+    if (d.type === "grant_value" && text === "/cancel") {
+        if (messageId) {
+            tgCall("deleteMessage", JSON.stringify({chat_id: parseInt(chatId, 10), message_id: messageId}));
+        }
+        if (d.listChatId && d.listMessageId) {
+            renderGrantsList({message: {chat: {id: d.listChatId}, message_id: d.listMessageId}}, d.agentIdx);
+        }
+        return;
+    }
 
     if (d.type === "key") {
         if (messageId) {
@@ -357,13 +560,21 @@ function handleDialogReply(chatId, text, messageId) {
         }
         var rc3 = channel.admin.setEndpoint(d.index, text);
         sendMessage(chatId, rc3 === 0 ? msg("config_endpoint_updated") + text : "Failed to update endpoint.");
-    } else if (d.type === "whitelist") {
-        var rc4 = d.removing ?
-            channel.admin.removeHost(d.agent, text) :
-            channel.admin.addHost(d.agent, text);
-        sendMessage(chatId, rc4 === 0 ?
-            (d.removing ? msg("wl_host_removed") : msg("wl_host_added")) :
-            msg("wl_failed"));
+    } else if (d.type === "grant_value") {
+        if (messageId) {
+            tgCall("deleteMessage", JSON.stringify({chat_id: parseInt(chatId, 10), message_id: messageId}));
+        }
+        var agent = agentAtIndex(d.agentIdx);
+        var rc5 = -1;
+        if (agent) {
+            if (d.editRowId) channel.admin.revokeGrant(d.editRowId);
+            rc5 = channel.admin.grantCapability(agent, d.kind, text);
+        }
+        if (d.listChatId && d.listMessageId) {
+            var fakeCbq = {message: {chat: {id: d.listChatId}, message_id: d.listMessageId}};
+            if (rc5 === 0) renderGrantsList(fakeCbq, d.agentIdx);
+            else editGrantsMessage(fakeCbq, "Grant failed.", []);
+        }
     }
 }
 
@@ -459,19 +670,6 @@ function sendProviderKeyboard(chatId, prefix) {
     }
     var title = prefix === "cfg_model" ? msg("config_select_provider") : msg("config_select_endpoint");
     sendKeyboard(chatId, title, keyboard);
-}
-
-function sendAgentKeyboard(chatId, removing) {
-    var agents = channel.admin.listAgents();
-    if (!agents || agents.length === 0) {
-        sendMessage(chatId, "No agents found.");
-        return;
-    }
-    var keyboard = [];
-    for (var i = 0; i < agents.length && i < 10; i++) {
-        keyboard.push([{text: agents[i], callback_data: "wl:" + agents[i] + ":" + removing}]);
-    }
-    sendKeyboard(chatId, msg("wl_select_agent"), keyboard);
 }
 
 function sendApprovalsMenu(chatId) {

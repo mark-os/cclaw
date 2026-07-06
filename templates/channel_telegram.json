@@ -1,8 +1,7 @@
 {
   "commands": {
     "/key": { "description": "Set API key for a provider", "admin": true },
-    "/config": { "description": "Change model or endpoint", "admin": true, "subcommands": ["model", "endpoint"] },
-    "/whitelist": { "description": "Manage agent host whitelist", "admin": true, "subcommands": ["add", "remove"] }
+    "/config": { "description": "Change model or endpoint", "admin": true, "subcommands": ["model", "endpoint"] }
   },
   "keyboards": {
     "key_providers": [
@@ -27,12 +26,6 @@
     "config_endpoint_updated": "Endpoint updated to: ",
     "config_endpoint_invalid": "URL must start with http:// or https://",
     "config_usage": "Usage: /config model | /config endpoint",
-    "wl_select_agent": "Select agent:",
-    "wl_enter_host_add": "Enter hostname to add:",
-    "wl_enter_host_remove": "Enter hostname to remove:",
-    "wl_host_added": "Host added.",
-    "wl_host_removed": "Host removed.",
-    "wl_failed": "Failed to update allowed_hosts.",
     "unknown_command": "Unknown admin command."
   }
 }

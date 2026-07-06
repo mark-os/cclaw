@@ -22,9 +22,29 @@ int admin_set_model(sqlite3 *db, int provider_index, const char *model);
 /* Set base_url for provider at index. Returns 0 on success. */
 int admin_set_endpoint(sqlite3 *db, int provider_index, const char *url);
 
-/* Host whitelist management (delegates to agent_config). */
-int admin_add_host(sqlite3 *db, const char *agent_name, const char *host);
-int admin_remove_host(sqlite3 *db, const char *agent_name, const char *host);
+/* Grants CRUD (delegates to agent_config) — covers all kinds ("tool",
+ * "host", "read_path", "write_path"), keyed by the grants table's implicit
+ * rowid so callback-data references never embed an unbounded name/value. */
+typedef struct {
+    int64_t id;
+    char *kind;
+    char *value;
+} AdminGrant;
+
+int admin_list_grants(sqlite3 *db, const char *agent_name,
+                      AdminGrant **out, size_t *out_count);
+void admin_grants_free(AdminGrant *list, size_t count);
+
+/* Look up (agent_name, kind, value) by rowid, then revoke via agent_config_revoke. */
+int admin_revoke_grant_by_id(sqlite3 *db, int64_t grant_id);
+
+/* Thin wrapper over agent_config_grant(db, agent, kind, value, 0). */
+int admin_grant_capability(sqlite3 *db, const char *agent_name,
+                           const char *kind, const char *value);
+
+/* Tool names for the "add tool grant" picker. */
+int admin_list_tool_names(sqlite3 *db, char ***out, size_t *out_count);
+void admin_tool_names_free(char **names, size_t count);
 
 /* List providers: returns count. out_models[i] is heap-allocated (caller frees). */
 typedef struct {

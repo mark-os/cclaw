@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
 #include "cclaw.h"
+#include "config_registry.h"
 #include "log.h"
 #include "secret_scan.h"
 #include "secret_quarantine.h"
@@ -2356,4 +2357,34 @@ free_rollback:
 rollback:
     sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
     return -1;
+}
+
+
+/* ── Periodic pruning: inbox ──────────────────────────────────────────── */
+void db_prune_inbox(sqlite3 *db) {
+    int ret = config_default_int("inbox_retention_sec");
+    if (ret <= 0) return;
+    const char *sql =
+        "DELETE FROM inbox WHERE consumed=1"
+        " AND created_at < (unixepoch() - ?1);";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(s, 1, (int64_t)ret);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+}
+
+/* ── Periodic pruning: channel_outbox ─────────────────────────────────── */
+void db_prune_outbox(sqlite3 *db) {
+    int ret = config_default_int("outbox_retention_sec");
+    if (ret <= 0) return;
+    const char *sql =
+        "DELETE FROM channel_outbox"
+        " WHERE (status='delivered' OR status LIKE 'failed%')"
+        " AND COALESCE(acked_at, created_at) < (unixepoch() - ?1);";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(s, 1, (int64_t)ret);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
 }

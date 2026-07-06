@@ -1517,6 +1517,8 @@ static void db_periodic(void) {
     db_recover_stale_sessions(g_db);   /* owner-scoped, safe to repeat */
     approval_sweep_block_window();
     approval_sweep_expired();
+    db_prune_inbox(g_db);
+    db_prune_outbox(g_db);
     if (g_mode == 1) {
         session_sweep_inbox();
         cron_run_due(g_db);

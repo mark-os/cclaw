@@ -398,6 +398,12 @@ int rate_limit_check(sqlite3 *db, const char *provider_name);
  * Returns 0 on success. */
 int db_recover_stale_sessions(sqlite3 *db);
 
+/* Prune consumed inbox rows older than config 'inbox_retention_sec'. */
+void db_prune_inbox(sqlite3 *db);
+
+/* Prune terminal channel_outbox rows older than config 'outbox_retention_sec'. */
+void db_prune_outbox(sqlite3 *db);
+
 /* Scalar query helpers — single int64 bind on param 1, read column 0.
  * db_scalar_i64: returns column 0 as int64 or dflt if no row / prepare fails.
  * db_scalar_text: returns strdup of column 0 text or NULL. Caller frees. */

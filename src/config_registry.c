@@ -64,6 +64,8 @@ static const ConfigDef s_defs[] = {
       "Seconds to keep consumed inbox rows (0 = keep forever)" },
     { "outbox_retention_sec", "604800",
       "Seconds to keep terminal channel_outbox rows (0 = keep forever)" },
+    { "disk_min_free_mb", "20",
+      "Free-space floor in MB below which the daemon refuses new LLM dispatch (0 = disabled)" },
     { "workspace",          "",
       "Workspace directory (empty = ~/.cclaw/agents/default/workspace)" },
     { "skills_dirs",

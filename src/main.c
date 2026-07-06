@@ -231,6 +231,21 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
         return -1;
     }
 
+    /* Disk floor: an LLM turn writes a full response body + entries + archive.
+     * Refuse before that write when free space is under the floor, so a full
+     * disk degrades loudly instead of corrupting. Revert to idle like a
+     * rejected worker-submit — a later poke retries once space frees. */
+    int disk_floor_mb = config_default_int("disk_min_free_mb");
+    if (disk_floor_mb > 0) {
+        long free_mb = db_free_mb(g_db);
+        if (free_mb >= 0 && free_mb < disk_floor_mb) {
+            LOG_WARN_("disk_low free_mb=%ld floor_mb=%d deferring llm dispatch",
+                      free_mb, disk_floor_mb);
+            session_set_state(g_db, session_id, "idle");
+            return -1;
+        }
+    }
+
     /* preAdvance hooks: run main-thread after the max-iter and rate-limit
      * gates (never fire for an unsent request); their commands cross to the
      * worker's payload build as DB state (hook_directives / entries.data). A
@@ -1520,6 +1535,24 @@ static void db_periodic(void) {
     db_prune_inbox(g_db);
     db_prune_outbox(g_db);
     db_wal_checkpoint(g_db);   /* truncate WAL — passive checkpoint can stall on a long reader */
+
+    /* Disk floor monitoring: log loudly on crossing the threshold (edge-
+     * triggered so it doesn't spam every poll). The dispatch_llm gate does the
+     * actual refusing; this makes the low-disk state visible in the journal. */
+    static int disk_low = 0;
+    int disk_floor_mb = config_default_int("disk_min_free_mb");
+    long free_mb = db_free_mb(g_db);
+    if (free_mb >= 0 && disk_floor_mb > 0) {
+        if (free_mb < disk_floor_mb && !disk_low) {
+            LOG_WARN_("disk_low free_mb=%ld floor_mb=%d refusing new llm dispatch",
+                      free_mb, disk_floor_mb);
+            disk_low = 1;
+        } else if (free_mb >= disk_floor_mb && disk_low) {
+            LOG_INFO_("disk_recovered free_mb=%ld floor_mb=%d", free_mb, disk_floor_mb);
+            disk_low = 0;
+        }
+    }
+
     if (g_mode == 1) {
         session_sweep_inbox();
         cron_run_due(g_db);

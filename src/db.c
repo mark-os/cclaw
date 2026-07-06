@@ -19,6 +19,8 @@
 #include <signal.h>
 #include <errno.h>
 #include <time.h>
+#include <stdint.h>
+#include <sys/statvfs.h>
 
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
@@ -2397,4 +2399,17 @@ void db_prune_outbox(sqlite3 *db) {
 void db_wal_checkpoint(sqlite3 *db) {
     if (!db) return;
     sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL);
+}
+
+/* ── Disk free space ─────────────────────────────────────────────────── */
+/* Megabytes available (to an unprivileged process) on the filesystem holding
+   the main DB file, or -1 if it can't be measured. 64-bit math so the
+   block-count product doesn't overflow on 32-bit targets (ARMv5TE). */
+long db_free_mb(sqlite3 *db) {
+    if (!db) return -1;
+    const char *path = sqlite3_db_filename(db, "main");
+    if (!path || !*path) return -1;   /* temp/in-memory DB — nothing to stat */
+    struct statvfs vfs;
+    if (statvfs(path, &vfs) != 0) return -1;
+    return (long)(((uint64_t)vfs.f_bavail * vfs.f_frsize) >> 20);
 }

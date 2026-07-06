@@ -216,6 +216,81 @@ static void test_agent_pragmas(void) {
     printf("  PASS test_agent_pragmas\n");
 }
 
+static int count_rows(sqlite3 *db, const char *table) {
+    char sql[64];
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM %s;", table);
+    sqlite3_stmt *s;
+    int n = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
+        if (sqlite3_step(s) == SQLITE_ROW) n = sqlite3_column_int(s, 0);
+        sqlite3_finalize(s);
+    }
+    return n;
+}
+
+static void test_prune_inbox(void) {
+    const char *path = "/tmp/test_cclaw_prune_inbox.sqlite";
+    unlink(path);
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+
+    /* default inbox_retention_sec = 604800 (7 days). "old" is well beyond it. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO inbox(session_id,source,payload,consumed,created_at) VALUES"
+        " (1,'cli','a',1,unixepoch()-800000),"   /* consumed + old   → pruned */
+        " (1,'cli','b',1,unixepoch()),"          /* consumed + fresh → kept   */
+        " (1,'cli','c',0,unixepoch()-800000);",  /* old but unconsumed → kept */
+        NULL, NULL, NULL) == SQLITE_OK);
+    assert(count_rows(db, "inbox") == 3);
+
+    db_prune_inbox(db);
+    assert(count_rows(db, "inbox") == 2);
+
+    db_close(db);
+    unlink(path);
+    printf("  PASS test_prune_inbox\n");
+}
+
+static void test_prune_outbox(void) {
+    const char *path = "/tmp/test_cclaw_prune_outbox.sqlite";
+    unlink(path);
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+
+    /* terminal = 'delivered' or 'failed%'; aged from COALESCE(acked_at,created_at). */
+    assert(sqlite3_exec(db,
+        "INSERT INTO channel_outbox(channel_name,session_id,payload,status,created_at,acked_at) VALUES"
+        " ('t',1,'a','delivered',unixepoch()-800000,unixepoch()-800000)," /* terminal+old → pruned */
+        " ('t',1,'b','failed: 400',unixepoch()-800000,NULL),"             /* failed%+old  → pruned */
+        " ('t',1,'c','pending',unixepoch()-800000,NULL),"                 /* not terminal → kept   */
+        " ('t',1,'d','delivered',unixepoch(),unixepoch());",              /* terminal+fresh→ kept  */
+        NULL, NULL, NULL) == SQLITE_OK);
+    assert(count_rows(db, "channel_outbox") == 4);
+
+    db_prune_outbox(db);
+    assert(count_rows(db, "channel_outbox") == 2);
+
+    db_close(db);
+    unlink(path);
+    printf("  PASS test_prune_outbox\n");
+}
+
+static void test_free_mb(void) {
+    const char *path = "/tmp/test_cclaw_free_mb.sqlite";
+    unlink(path);
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+
+    /* On-disk DB on /tmp: measurable and positive. */
+    assert(db_free_mb(db) > 0);
+    /* NULL handle is unmeasurable, not a crash. */
+    assert(db_free_mb(NULL) == -1);
+
+    db_close(db);
+    unlink(path);
+    printf("  PASS test_free_mb\n");
+}
+
 int main(void) {
     printf("test_db:\n");
     test_open_close();
@@ -226,6 +301,9 @@ int main(void) {
     test_fts5_search();
     test_config_registry();
     test_agent_pragmas();
+    test_prune_inbox();
+    test_prune_outbox();
+    test_free_mb();
     printf("All db tests passed.\n");
     return 0;
 }

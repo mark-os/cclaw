@@ -253,7 +253,7 @@ The model acquires new capabilities at runtime via `request_config` (`src/tool_r
 
 All actions use `resolve='apply'` approvals (ambient capability grants, not one-shot reruns).
 
-**Session-scoped denial dedup**: if the same `(action, key=value)` was already denied in this session, `request_config` returns an immediate error instead of re-parking — prevents the model from spam-requesting a denied capability.
+**Session-scoped pending dedup**: if the same `(action, key=value)` is already pending in this session, `request_config` returns an immediate error instead of queuing a second identical prompt. A prior *denial* does not permanently forbid re-asking — the model may re-request later (e.g. if told to by the user); a human can also reconsider a past denial directly via the channel's `/grants` menu (below).
 
 ### read_path / write_path grants → sandbox bind-mounts
 

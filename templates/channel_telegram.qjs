@@ -33,7 +33,9 @@ function onInit() {
     tgCall("setMyCommands", JSON.stringify({commands: [
         {command: "key", description: "Set an API key"},
         {command: "config", description: "Configure model/endpoint"},
-        {command: "whitelist", description: "Manage host whitelist"}
+        {command: "whitelist", description: "Manage host whitelist"},
+        {command: "approvals", description: "Review pending approvals"},
+        {command: "grants", description: "Grant a previously denied request"}
     ]}));
 
     if (mode === "webhook") return {};
@@ -149,7 +151,8 @@ function processMessage(msg, updateId) {
 
     // Admin commands
     if (text.indexOf("/key") === 0 || text.indexOf("/config") === 0 ||
-        text.indexOf("/whitelist") === 0) {
+        text.indexOf("/whitelist") === 0 || text.indexOf("/approvals") === 0 ||
+        text.indexOf("/grants") === 0) {
         if (!channel.admin.isAdmin(chatId)) return true;
         dispatchAdminCommand(chatId, text);
         return true;
@@ -171,6 +174,10 @@ function processCallback(cbq) {
     var data = cbq.data || "";
     if (data.indexOf("appr:") === 0) {
         handleApprovalCallback(fromId, data, cbq);
+        return;
+    }
+    if (data.indexOf("greg:") === 0) {
+        handleGrantFromHistoryCallback(fromId, data, cbq);
         return;
     }
 
@@ -216,6 +223,32 @@ function handleApprovalCallback(fromId, data, cbq) {
     }
 }
 
+// ── Grant-from-history callback ───────────────────────────────────
+
+function handleGrantFromHistoryCallback(fromId, data, cbq) {
+    // "greg:<approval_id>:yes" — a denied approval is terminal, so this
+    // applies a fresh grant directly rather than resolving the old row.
+    var parts = data.substring(5).split(":");
+    var approvalId = parts[0];
+
+    var rc = channel.admin.grantFromHistory(parseInt(approvalId, 10));
+    var toast = rc === 0 ? "Granted" : "Grant failed";
+    if (cbq.id) {
+        tgCall("answerCallbackQuery", JSON.stringify({callback_query_id: cbq.id, text: toast}));
+    }
+
+    if (cbq.message && cbq.message.chat) {
+        var who = (cbq.from && cbq.from.first_name) || fromId;
+        var outcome = (cbq.message.text || "Request") + "\n\n" + toast + " by " + who;
+        tgCall("editMessageText", JSON.stringify({
+            chat_id: cbq.message.chat.id,
+            message_id: cbq.message.message_id,
+            text: outcome,
+            reply_markup: null
+        }));
+    }
+}
+
 // ── Admin command dispatch ───────────────────────────────────────
 
 function dispatchAdminCommand(chatId, text) {
@@ -235,6 +268,10 @@ function dispatchAdminCommand(chatId, text) {
         var args2 = text.substring(10).trim();
         var removing = args2 === "remove" ? 1 : 0;
         sendAgentKeyboard(chatId, removing);
+    } else if (text.indexOf("/approvals") === 0) {
+        sendApprovalsMenu(chatId);
+    } else if (text.indexOf("/grants") === 0) {
+        sendGrantsMenu(chatId);
     } else {
         sendMessage(chatId, msg("unknown_command"));
     }
@@ -404,6 +441,41 @@ function sendAgentKeyboard(chatId, removing) {
         keyboard.push([{text: agents[i], callback_data: "wl:" + agents[i] + ":" + removing}]);
     }
     sendKeyboard(chatId, msg("wl_select_agent"), keyboard);
+}
+
+function sendApprovalsMenu(chatId) {
+    var list = channel.admin.listPendingApprovals();
+    if (!list || list.length === 0) {
+        sendMessage(chatId, "No pending approvals.");
+        return;
+    }
+    var lines = [];
+    var keyboard = [];
+    for (var i = 0; i < list.length; i++) {
+        var a = list[i];
+        lines.push("#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.action);
+        keyboard.push([
+            {text: "Approve #" + a.id, callback_data: "appr:" + a.id + ":yes"},
+            {text: "Deny #" + a.id, callback_data: "appr:" + a.id + ":no"}
+        ]);
+    }
+    sendKeyboard(chatId, lines.join("\n"), keyboard);
+}
+
+function sendGrantsMenu(chatId) {
+    var list = channel.admin.listDeniedApprovals(10);
+    if (!list || list.length === 0) {
+        sendMessage(chatId, "No recently denied requests.");
+        return;
+    }
+    var lines = [];
+    var keyboard = [];
+    for (var i = 0; i < list.length; i++) {
+        var a = list[i];
+        lines.push("#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.action);
+        keyboard.push([{text: "Grant #" + a.id, callback_data: "greg:" + a.id + ":yes"}]);
+    }
+    sendKeyboard(chatId, lines.join("\n"), keyboard);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────

@@ -270,6 +270,57 @@ static JSValue js_admin_list_agents(JSContext *ctx, JSValueConst this_val,
     return arr;
 }
 
+/* Shared array-builder for admin.listPendingApprovals / listDeniedApprovals */
+static JSValue admin_approvals_to_js(JSContext *ctx, const AdminApproval *list, size_t count) {
+    JSValue arr = JS_NewArray(ctx);
+    for (size_t i = 0; i < count; i++) {
+        JSValue obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, obj, "id", JS_NewInt64(ctx, list[i].id));
+        JS_SetPropertyStr(ctx, obj, "session_id", JS_NewInt64(ctx, list[i].session_id));
+        JS_SetPropertyStr(ctx, obj, "agent", JS_NewString(ctx, list[i].agent_name ? list[i].agent_name : ""));
+        JS_SetPropertyStr(ctx, obj, "tool_name", JS_NewString(ctx, list[i].tool_name ? list[i].tool_name : ""));
+        JS_SetPropertyStr(ctx, obj, "action", JS_NewString(ctx, list[i].action ? list[i].action : ""));
+        JS_SetPropertyStr(ctx, obj, "args_json", JS_NewString(ctx, list[i].args_json ? list[i].args_json : "{}"));
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, obj);
+    }
+    return arr;
+}
+
+static JSValue js_admin_list_pending_approvals(JSContext *ctx, JSValueConst this_val,
+                                               int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    AdminApproval *list = NULL;
+    size_t count = 0;
+    if (admin_list_pending_approvals(g_ctx->db, g_ctx->channel_name, &list, &count) != 0)
+        return JS_NewArray(ctx);
+    JSValue arr = admin_approvals_to_js(ctx, list, count);
+    admin_approvals_free(list, count);
+    return arr;
+}
+
+static JSValue js_admin_list_denied_approvals(JSContext *ctx, JSValueConst this_val,
+                                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    int limit = 10;
+    if (argc >= 1) JS_ToInt32(ctx, &limit, argv[0]);
+    AdminApproval *list = NULL;
+    size_t count = 0;
+    if (admin_list_denied_approvals(g_ctx->db, g_ctx->channel_name, limit, &list, &count) != 0)
+        return JS_NewArray(ctx);
+    JSValue arr = admin_approvals_to_js(ctx, list, count);
+    admin_approvals_free(list, count);
+    return arr;
+}
+
+static JSValue js_admin_grant_from_history(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "admin.grantFromHistory(approvalId)");
+    int64_t id = 0;
+    JS_ToInt64(ctx, &id, argv[0]);
+    return JS_NewInt32(ctx, admin_grant_from_history(g_ctx->db, id));
+}
+
 static JSValue js_admin_is_admin(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
     (void)this_val;
@@ -320,6 +371,9 @@ void qjs_register_channel_host_functions(JSContext *ctx) {
     JS_SetPropertyStr(ctx, admin, "listProviders", JS_NewCFunction(ctx, js_admin_list_providers, "listProviders", 0));
     JS_SetPropertyStr(ctx, admin, "listAgents", JS_NewCFunction(ctx, js_admin_list_agents, "listAgents", 0));
     JS_SetPropertyStr(ctx, admin, "isAdmin", JS_NewCFunction(ctx, js_admin_is_admin, "isAdmin", 1));
+    JS_SetPropertyStr(ctx, admin, "listPendingApprovals", JS_NewCFunction(ctx, js_admin_list_pending_approvals, "listPendingApprovals", 0));
+    JS_SetPropertyStr(ctx, admin, "listDeniedApprovals", JS_NewCFunction(ctx, js_admin_list_denied_approvals, "listDeniedApprovals", 1));
+    JS_SetPropertyStr(ctx, admin, "grantFromHistory", JS_NewCFunction(ctx, js_admin_grant_from_history, "grantFromHistory", 1));
     JS_SetPropertyStr(ctx, ch, "admin", admin);
 
     /* Date.now() — already available via JS_AddIntrinsicDate in full context */

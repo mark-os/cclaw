@@ -5,6 +5,7 @@ reference/*/
 
 # Build artifacts
 /build/
+/build-*/
 *.db
 *.db-wal
 *.db-shm

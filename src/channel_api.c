@@ -230,7 +230,11 @@ int channel_outbox_fifo_open(const char *db_path, const char *channel_name) {
     if (!path) return -1;
     unlink(path);
     if (mkfifo(path, 0600) != 0 && errno != EEXIST) { free(path); return -1; }
-    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    /* O_RDWR, not O_RDONLY: same as wake_fifo_open — once the daemon's
+     * first open-write-close cycle ends, a read-only fd sits at perpetual
+     * EOF and curl_multi_wait returns immediately forever (busy-loop).
+     * Holding our own write end keeps the FIFO out of zero-writer state. */
+    int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
     free(path);
     return fd;
 }

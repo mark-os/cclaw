@@ -57,7 +57,12 @@ int wake_fifo_open(const char *db_path) {
     if (!path) return -1;
     unlink(path);
     if (mkfifo(path, 0600) != 0 && errno != EEXIST) { free(path); return -1; }
-    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    /* O_RDWR (not O_RDONLY): a FIFO reader with no writer of its own sees
+     * a perpetual EOF once any external writer has ever opened-and-closed
+     * it, which poll() reports as endlessly "readable" — a busy-loop that
+     * pins a CPU core and hammers the DB on every iteration. Holding our
+     * own write end means the reader never observes a zero-writer state. */
+    int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
     free(path);
     return fd;
 }

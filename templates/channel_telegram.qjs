@@ -52,6 +52,13 @@ function parseCommand(text) {
     return {name: name, args: args};
 }
 
+// Dialog state is durable: persist to channel_state (same store as tg_offset)
+// on every mutation so an interrupted /key or grant flow resumes after a
+// daemon restart instead of misrouting the pending reply as regular chat.
+function saveDialogs() { channel.setConfig("dialogs", JSON.stringify(dialogs)); }
+function setDialog(key, val) { dialogs[key] = val; saveDialogs(); }
+function clearDialog(key) { delete dialogs[key]; saveDialogs(); }
+
 function onInit() {
     config.token = channel.getConfig("bot_token");
     config.base = channel.getConfig("base_url") || "https://api.telegram.org";
@@ -65,6 +72,12 @@ function onInit() {
     // Restore offset
     var saved = channel.getConfig("tg_offset");
     if (saved) offset = parseInt(saved, 10) || 0;
+
+    // Restore in-flight dialog state so a /key or grant flow survives a
+    // restart (in-memory only, a crash mid-flow would misroute the reply as
+    // regular chat). Persisted on every mutation via setDialog/clearDialog.
+    try { dialogs = JSON.parse(channel.getConfig("dialogs") || "{}"); }
+    catch (e) { dialogs = {}; }
 
     // webhook mode: platform POSTs to the daemon, proxied to onRequest.
     // Default: long-poll getUpdates.
@@ -221,9 +234,13 @@ function processMessage(msg, updateId) {
     // Admin commands. A non-admin sending a recognized command is silently
     // dropped (not forwarded to the agent) — same as before this refactor.
     // Unrecognized "/" text (including from an admin) falls through to chat.
+    // Gate on the *sender* (from.id), not the chat: in a group chat.id is the
+    // group id, so an in-group admin would otherwise fail this check while
+    // passing the from.id check in processCallback (inconsistent).
     var cmd = parseCommand(text);
     if (cmd && COMMANDS[cmd.name]) {
-        if (!channel.admin.isAdmin(chatId)) return true;
+        var fromId = msg.from ? "" + msg.from.id : "";
+        if (!channel.admin.isAdmin(fromId)) return true;
         COMMANDS[cmd.name].handler(chatId, cmd.args);
         return true;
     }
@@ -446,11 +463,11 @@ function handleGrantsEditCallback(fromId, data, cbq) {
     }
     if (!target) { renderGrantsList(cbq, agentIdx); return; }
 
-    dialogs[fromId] = {
+    setDialog(fromId, {
         type: "grant_value", agentIdx: agentIdx, kind: target.kind,
         editRowId: rowId,
         listMessageId: cbq.message.message_id, listChatId: cbq.message.chat.id
-    };
+    });
     sendForceReply(fromId, "Editing " + target.kind + " grant (currently: " +
         target.value + ") — reply with the new value, or /cancel");
 }
@@ -475,10 +492,10 @@ function handleGrantsKindCallback(fromId, data, cbq) {
     if (kind === "tool") {
         renderToolPicker(cbq, agentIdx);
     } else if (kind === "host") {
-        dialogs[fromId] = {
+        setDialog(fromId, {
             type: "grant_value", agentIdx: agentIdx, kind: "host",
             listMessageId: cbq.message.message_id, listChatId: cbq.message.chat.id
-        };
+        });
         sendForceReply(fromId, "Enter hostname to grant, or /cancel:");
     } else if (kind === "path") {
         editGrantsMessage(cbq, "Path access mode:", [
@@ -522,11 +539,11 @@ function handleGrantsModeCallback(fromId, data, cbq) {
     var parts = data.substring(4).split(":");
     var agentIdx = parseInt(parts[0], 10);
     var mode = parts[1];
-    dialogs[fromId] = {
+    setDialog(fromId, {
         type: "grant_value", agentIdx: agentIdx,
         kind: mode === "write" ? "write_path" : "read_path",
         listMessageId: cbq.message.message_id, listChatId: cbq.message.chat.id
-    };
+    });
     sendForceReply(fromId, "Enter path to grant " + mode + " access to, or /cancel:");
 }
 
@@ -536,7 +553,7 @@ function handleGrantsModeCallback(fromId, data, cbq) {
 
 function handleKeyCallback(chatId, data) {
     var provider = data.substring(4);
-    dialogs[chatId] = {type: "key", provider: provider};
+    setDialog(chatId, {type: "key", provider: provider});
 
     var prompt = provider === "custom" ? msg("key_prompt_custom") :
         msg("key_prompt_" + provider) || ("Send the API key for " + provider + ":");
@@ -547,7 +564,7 @@ function handleKeyCallback(chatId, data) {
 
 function handleConfigModelCallback(chatId, data) {
     var idx = parseInt(data.substring(10), 10);
-    dialogs[chatId] = {type: "config_model", index: idx};
+    setDialog(chatId, {type: "config_model", index: idx});
     sendForceReply(chatId, msg("config_enter_model"));
 }
 
@@ -555,7 +572,7 @@ function handleConfigModelCallback(chatId, data) {
 
 function handleConfigEndpointCallback(chatId, data) {
     var idx = parseInt(data.substring(7), 10);
-    dialogs[chatId] = {type: "config_endpoint", index: idx};
+    setDialog(chatId, {type: "config_endpoint", index: idx});
     sendForceReply(chatId, msg("config_enter_endpoint"));
 }
 
@@ -563,7 +580,7 @@ function handleConfigEndpointCallback(chatId, data) {
 
 function handleDialogReply(chatId, text, messageId) {
     var d = dialogs[chatId];
-    delete dialogs[chatId];
+    clearDialog(chatId);
 
     if (d.type === "grant_value" && text === "/cancel") {
         if (messageId) {
@@ -576,9 +593,7 @@ function handleDialogReply(chatId, text, messageId) {
     }
 
     if (d.type === "key") {
-        if (messageId) {
-            tgCall("deleteMessage", JSON.stringify({chat_id: parseInt(chatId, 10), message_id: messageId}));
-        }
+        if (messageId) deleteSensitiveMessage(chatId, messageId, 1);
         var rc = channel.admin.setKey(d.provider, text);
         sendMessage(chatId, rc === 0 ? msg("key_saved") : msg("key_failed"));
     } else if (d.type === "config_model") {
@@ -592,9 +607,7 @@ function handleDialogReply(chatId, text, messageId) {
         var rc3 = channel.admin.setEndpoint(d.index, text);
         sendMessage(chatId, rc3 === 0 ? msg("config_endpoint_updated") + text : "Failed to update endpoint.");
     } else if (d.type === "grant_value") {
-        if (messageId) {
-            tgCall("deleteMessage", JSON.stringify({chat_id: parseInt(chatId, 10), message_id: messageId}));
-        }
+        if (messageId) deleteSensitiveMessage(chatId, messageId, 1);
         var agent = agentAtIndex(d.agentIdx);
         var rc5 = -1;
         if (agent) {
@@ -630,7 +643,28 @@ function tgCall(method, body, extra) {
 // silently (bit us once: editMessageText with reply_markup:null 400'd with
 // no trace, see handleApprovalCallback).
 function onResult(r) {
-    if (r.error || r.status < 200 || r.status >= 300) {
+    var failed = r.error || r.status < 200 || r.status >= 300;
+
+    // Tracked secret-scrub delete (see deleteSensitiveMessage). Retry once,
+    // then warn the user to delete it manually.
+    if (r.tag && r.tag.indexOf("del:") === 0) {
+        if (!failed) return;                                       // gone, good
+        // Already removed (double-delete / user beat us to it): nothing to warn.
+        if ((r.body || "").indexOf("message to delete not found") !== -1) return;
+        var p = r.tag.substring(4).split(":");
+        var delChat = p[0], delMsg = parseInt(p[1], 10), attempt = parseInt(p[2], 10);
+        if (attempt < 2) {
+            deleteSensitiveMessage(delChat, delMsg, attempt + 1);
+        } else {
+            channel.log("deleteMessage gave up chat=" + delChat + " msg=" + delMsg +
+                        " status=" + r.status + " body=" + (r.body || "").substring(0, 120));
+            sendMessage(delChat, "⚠️ I couldn't delete your previous message. " +
+                "It may contain a secret — please delete it manually from this chat.");
+        }
+        return;
+    }
+
+    if (failed) {
         channel.log("tgCall failed tag=" + r.tag + " status=" + r.status +
                     " error=" + r.error + " body=" + (r.body || "").substring(0, 200));
     }
@@ -638,6 +672,16 @@ function onResult(r) {
 
 function sendMessage(chatId, text) {
     tgCall("sendMessage", JSON.stringify({chat_id: parseInt(chatId, 10), text: text}));
+}
+
+// Delete a message that contains captured-secret plaintext (an API key, a
+// grant value). Tracked with a "del:<chatId>:<messageId>:<attempt>" tag so
+// onResult can retry once and, failing that, warn the user to remove it by
+// hand — a secret left in chat history forever is the security hazard here.
+function deleteSensitiveMessage(chatId, messageId, attempt) {
+    tgCall("deleteMessage",
+        JSON.stringify({chat_id: parseInt(chatId, 10), message_id: messageId}),
+        {tag: "del:" + chatId + ":" + messageId + ":" + (attempt || 1)});
 }
 
 // Chunk on the PLAIN text (Telegram's 4096 limit counts parsed text, so HTML

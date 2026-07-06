@@ -39,9 +39,11 @@ static char *json_escape(const char *src) {
 /* Eval `channel-stub + real template + ; + expr`; return the result string. */
 static char *eval_expr(const char *expr) {
     const char *stub =
-        "var __sent=[];\n"
-        "var channel={getConfig:function(){return null;},log:function(){},"
-        "send:function(r){__sent.push(r);},emit:function(){return 0;}};\n";
+        "var __sent=[];var __cfg={};var __adminArg=null;\n"
+        "var channel={getConfig:function(k){return __cfg[k]!==undefined?__cfg[k]:null;},"
+        "setConfig:function(k,v){__cfg[k]=v;},log:function(){},"
+        "send:function(r){__sent.push(r);},emit:function(){return 0;},"
+        "admin:{isAdmin:function(id){__adminArg=id;return false;}}};\n";
     size_t n = strlen(stub) + strlen(TPL_CHANNEL_TELEGRAM_QJS) + strlen(expr) + 8;
     char *code = malloc(n);
     snprintf(code, n, "%s%s\n;%s", stub, TPL_CHANNEL_TELEGRAM_QJS, expr);
@@ -155,6 +157,50 @@ int main(void) {
         "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),plain:true}),"
         "__sent[0].body",
         "parse_mode");
+
+    /* ── P4a: dialog state persists to channel_state ─────────────────── */
+    /* setDialog writes the whole dialogs map to the "dialogs" config key so a
+     * restart's onInit can restore it (round-trip is the mechanism onInit uses). */
+    expect_has("dialog_persist_set",
+        "setDialog('7', {type:'key', provider:'openrouter'}), channel.getConfig('dialogs')",
+        "\"type\":\"key\"");
+    expect("dialog_persist_clear",
+        "setDialog('7', {type:'key'}), clearDialog('7'), channel.getConfig('dialogs')",
+        "{}");
+
+    /* ── P4c: admin gate keys on from.id, not chat.id ────────────────── */
+    /* Group chat: chat.id is the group (-100), sender is 42 → isAdmin sees 42. */
+    expect("admin_gate_uses_from_id",
+        "processMessage({chat:{id:-100}, from:{id:42}, text:'/grants'}, 1), '' + __adminArg",
+        "42");
+
+    /* ── P4b: tracked secret-scrub delete + onResult retry/warn ──────── */
+    expect("del_tracked_tag",
+        "deleteSensitiveMessage('9', 123, 1), __sent[0].tag",
+        "del:9:123:1");
+    expect_has("del_is_deleteMessage",
+        "deleteSensitiveMessage('9', 123, 1), __sent[0].url",
+        "deleteMessage");
+    /* Attempt 1 fails → retry as attempt 2. */
+    expect("del_retry_once",
+        "deleteSensitiveMessage('9',123,1),"
+        "onResult({tag:'del:9:123:1',status:400,body:'no rights'}), __sent[1].tag",
+        "del:9:123:2");
+    /* Attempt 2 fails → warn the user (a tagless sendMessage), no third delete. */
+    expect_has("del_warn_on_give_up",
+        "onResult({tag:'del:9:123:2',status:400,body:'no rights'}), __sent[0].body",
+        "manually");
+    /* Success → no retry, no warn. */
+    expect("del_success_no_followup",
+        "deleteSensitiveMessage('9',123,1),"
+        "onResult({tag:'del:9:123:1',status:200,body:'ok'}), '' + __sent.length",
+        "1");
+    /* 'message to delete not found' → already gone, no warn. */
+    expect("del_not_found_no_warn",
+        "deleteSensitiveMessage('9',123,2),"
+        "onResult({tag:'del:9:123:2',status:400,body:'Bad Request: message to delete not found'}),"
+        "'' + __sent.length",
+        "1");
 
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

@@ -46,8 +46,25 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     if (sandbox_profile)
         setenv("CCLAW_SANDBOX_PROFILE", sandbox_profile, 1);
 
+    /* Shell interpreter: env override, else agents table, else /bin/sh
+     * (tool_shell.c's default). setenv+getenv (not a stack buffer) so the
+     * pointer ShellConfig retains stays valid for the setup's lifetime. */
+    const char *shell_path = getenv("CCLAW_SHELL_PATH");
+    if (!shell_path) {
+        sqlite3_stmt *sp_stmt;
+        if (sqlite3_prepare_v2(db,
+                "SELECT shell_path FROM agents WHERE name=?", -1, &sp_stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(sp_stmt, 1, agent_name, -1, SQLITE_STATIC);
+            if (sqlite3_step(sp_stmt) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(sp_stmt, 0);
+                if (v && v[0]) { setenv("CCLAW_SHELL_PATH", v, 1); shell_path = getenv("CCLAW_SHELL_PATH"); }
+            }
+            sqlite3_finalize(sp_stmt);
+        }
+    }
+
     /* Shell — pass proxy socket path */
-    tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace);
+    tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace, shell_path);
 
     /* Trust-derived sandbox profile, filled once and embedded in every tool ctx.
      * The grant-path fields are bound just below (and rebound on cap refresh). */

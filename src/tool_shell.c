@@ -12,10 +12,12 @@ static const char *SHELL_PARAMS_JSON =
     "\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in seconds (default 30)\"}"
     "},\"required\":[\"command\"]}";
 
-int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *workspace) {
+int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *workspace,
+                        const char *shell_path) {
     ShellConfig *sc = malloc(sizeof(ShellConfig));
     if (!sc) return -1;
     sc->timeout = (default_timeout > 0) ? default_timeout : TOOL_SHELL_DEFAULT_TIMEOUT;
+    sc->shell_path = (shell_path && shell_path[0]) ? shell_path : NULL;
     sc->workspace = workspace;
     sc->cwd_path = NULL;
     sc->db_path = NULL;
@@ -149,7 +151,10 @@ void tool_shell_tier_exec(RunToolParsed *q) {
         if (q->secrets[i].value) explicit_bzero(q->secrets[i].value, strlen(q->secrets[i].value));
     /* The one inner exec — shell is the only tier with a foreign program.
      * command carries interpolated secrets; exec replaces the address space so
-     * they don't persist after execl. */
-    execl("/bin/sh", "sh", "-c", q->command, (char *)NULL);
+     * they don't persist after execl. shell_path is operator/agent config
+     * (see agent_setup.c), not model input — the command string is what's
+     * untrusted, not the interpreter running it. */
+    const char *shell = (q->shell_path && q->shell_path[0]) ? q->shell_path : "/bin/sh";
+    execl(shell, shell, "-c", q->command, (char *)NULL);
     _exit(127);
 }

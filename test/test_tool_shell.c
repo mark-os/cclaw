@@ -36,6 +36,34 @@ static void test_basic_command(void) {
     printf("  PASS test_basic_command\n");
 }
 
+static void test_default_shell_is_sh(void) {
+    /* dash (the typical /bin/sh) rejects [[ ]] as a syntax error; bash
+     * accepts it. Default (shell_path unset) must behave like /bin/sh. */
+    ShellToolReq r = SHELL_REQ_DEFAULTS;
+    r.command = "[ -x /bin/bash ] || exit 99; [[ 1 -eq 1 ]] && echo yes";
+    r.workspace = workspace;
+    char *res = run_tool_shell(&r);
+    assert(res != NULL);
+    if (strstr(res, "[exit 99]")) { free(res); printf("  SKIP test_default_shell_is_sh (no /bin/bash)\n"); return; }
+    assert(strstr(res, "[exit 0]") == NULL);
+    free(res);
+    printf("  PASS test_default_shell_is_sh\n");
+}
+
+static void test_configurable_shell_path(void) {
+    ShellToolReq r = SHELL_REQ_DEFAULTS;
+    r.command = "[[ 1 -eq 1 ]] && echo yes";
+    r.shell_path = "/bin/bash";
+    r.workspace = workspace;
+    if (access("/bin/bash", X_OK) != 0) { printf("  SKIP test_configurable_shell_path (no /bin/bash)\n"); return; }
+    char *res = run_tool_shell(&r);
+    assert(res != NULL);
+    assert(strstr(res, "[exit 0]") != NULL);
+    assert(strstr(res, "yes") != NULL);
+    free(res);
+    printf("  PASS test_configurable_shell_path\n");
+}
+
 static void test_stderr_captured(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.command = "echo err >&2";
@@ -119,7 +147,7 @@ static void test_configurable_default_timeout(void) {
 static void test_register(void) {
     ToolRegistry reg;
     tools_init(&reg);
-    int rc = tool_shell_register(&reg, 0, NULL);
+    int rc = tool_shell_register(&reg, 0, NULL, NULL);
     assert(rc == 0);
     ToolEntry *e = tools_lookup(&reg, "shell_exec");
     assert(e != NULL);
@@ -192,6 +220,8 @@ int main(void) {
         printf("  SKIP test_timeout (namespaces unavailable)\n");
         printf("  SKIP test_timeout_kills_process_group (namespaces unavailable)\n");
         printf("  SKIP test_configurable_default_timeout (namespaces unavailable)\n");
+        printf("  SKIP test_default_shell_is_sh (namespaces unavailable)\n");
+        printf("  SKIP test_configurable_shell_path (namespaces unavailable)\n");
     } else {
         test_basic_command();
         test_stderr_captured();
@@ -199,6 +229,8 @@ int main(void) {
         test_timeout();
         test_timeout_kills_process_group();
         test_configurable_default_timeout();
+        test_default_shell_is_sh();
+        test_configurable_shell_path();
     }
 
     /* Registry test — no subprocess needed */

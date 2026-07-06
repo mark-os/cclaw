@@ -98,6 +98,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     w_str_array(&b, req->host_rules, req->host_count);
     w_str_array(&b, req->deny_rules, req->deny_count);
     w_str(&b, req->command);
+    w_str(&b, req->shell_path);
     w_u32(&b, (uint32_t)req->timeout);
     w_u32(&b, (uint32_t)req->secret_count);
     for (size_t i = 0; i < req->secret_count; i++) {
@@ -198,6 +199,7 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     q->host_rules = r_str_array(r, &q->host_count);
     q->deny_rules = r_str_array(r, &q->deny_count);
     q->command = r_str(r);
+    q->shell_path = r_str(r);
     q->timeout = (int)r_u32(r);
     uint32_t sc = r_u32(r);
     if (!r->err && sc > 0 && sc <= RUNTOOL_REQUEST_MAX / 4) {

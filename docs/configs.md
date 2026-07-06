@@ -29,7 +29,9 @@ There is no per-agent key/value table. Per-agent state lives in:
 
 - **`agents` table columns** — `sandbox_profile` (containment tier: `host`,
   `trusted`, `standard`, `restricted`), model/provider overrides, system
-  prompt, `max_iterations`, `max_output_tokens`, `shell_timeout`.
+  prompt, `max_iterations`, `max_output_tokens`, `shell_timeout`, `shell_path`
+  (interpreter for `shell_exec`'s `-c`; NULL = `/bin/sh`; `CCLAW_SHELL_PATH`
+  env overrides both, e.g. `/bin/bash`).
 - **`grants` table rows** — authority: which tools, hosts, and paths the
   agent may use. Missing grant = not allowed; agents request more via
   `request_config` (human-approved).

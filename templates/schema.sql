@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS agents (
   max_iterations INTEGER DEFAULT 25,
   max_output_tokens INTEGER,
   shell_timeout INTEGER DEFAULT 30,
+  shell_path TEXT,               -- interpreter for shell_exec's -c; NULL = /bin/sh
   sandbox_profile TEXT DEFAULT 'standard',
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );

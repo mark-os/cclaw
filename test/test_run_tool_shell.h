@@ -28,6 +28,7 @@
  * what shell tests need. Initialize with SHELL_REQ_DEFAULTS for sane values. */
 typedef struct {
     const char *command;
+    const char *shell_path;     /* NULL = /bin/sh */
     const char *workspace;
     const char *agent_dir;      /* dir for proxy UDS (NULL = use workspace) */
     const char *cwd_path;       /* CWD rw bind-mount (NULL = none) */
@@ -50,7 +51,7 @@ typedef struct {
 } ShellToolReq;
 
 #define SHELL_REQ_DEFAULTS { \
-    .command = NULL, .workspace = NULL, .agent_dir = NULL, \
+    .command = NULL, .shell_path = NULL, .workspace = NULL, .agent_dir = NULL, \
     .cwd_path = NULL, .db_path = NULL, \
     .timeout = 5, .sandbox = 1, .env_mode = 1, \
     .workspace_ro = 0, .mount_cwd = 0, .net_mode = 0, \
@@ -89,6 +90,7 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
         .host_rules = r->host_rules,
         .host_count = r->host_count,
         .command = r->command,
+        .shell_path = r->shell_path,
         .timeout = r->timeout,
         .secrets = r->secrets,
         .secret_count = r->secret_count,
@@ -185,6 +187,7 @@ static inline char *run_tool_shell_with_hosts(const ShellToolReq *r, char **out_
         .host_rules = r->host_rules,
         .host_count = r->host_count,
         .command = r->command,
+        .shell_path = r->shell_path,
         .timeout = r->timeout,
         .secrets = r->secrets,
         .secret_count = r->secret_count,

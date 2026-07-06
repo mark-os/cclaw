@@ -58,6 +58,9 @@ Key consequences:
   single-threaded-fork case. No exec needed to run our own functions.
 - **shell is the ONLY tier with a second exec**, and only because `/bin/sh` is a
   foreign program. That exec is irreducible and lives in exactly one place.
+  The interpreter is configurable (`agents.shell_path` / `CCLAW_SHELL_PATH`,
+  see docs/configs.md) but defaults to `/bin/sh`; either way it's still one
+  foreign-program exec.
 
 ---
 

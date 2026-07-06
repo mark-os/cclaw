@@ -870,6 +870,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             req.deny_rules = (const char **)se.deny;
             req.deny_count = se.deny_n;
             req.command = resolved_cmd;
+            req.shell_path = sc->shell_path;
             req.timeout = cmd_timeout;
             req.secrets = min_secrets;
             req.secret_count = min_count;

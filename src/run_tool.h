@@ -59,6 +59,7 @@ typedef struct {
     const char **deny_rules;  size_t deny_count;
     /* shell only */
     const char *command;
+    const char *shell_path;  /* interpreter to run `command` with; NULL = /bin/sh */
     int timeout;
     const RunToolSecret *secrets; size_t secret_count;
 } RunToolReq;
@@ -81,6 +82,7 @@ typedef struct {
     char **host_rules;  size_t host_count;
     char **deny_rules;  size_t deny_count;
     char *command;
+    char *shell_path;
     int   timeout;
     struct { char *name; char *value; } *secrets;
     size_t secret_count;

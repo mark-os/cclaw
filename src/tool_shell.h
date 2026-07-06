@@ -16,6 +16,7 @@ typedef struct {
 /* Config passed as user_data to shell handler */
 typedef struct {
     int timeout;
+    const char *shell_path;  /* interpreter for -c; NULL = /bin/sh (agent_setup.c resolves) */
     const char *workspace;  /* agent workspace (namespace sandbox restricts access) */
     const char *cwd_path;   /* CWD rw bind-mount in CLI mode (NULL in daemon) */
     const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key — bind-masked inside the ns */
@@ -28,8 +29,10 @@ typedef struct {
 
 /* Register shell_exec tool into registry.
  * workspace: agent workspace path (namespace sandbox restricts fs).
+ * shell_path: interpreter for -c (NULL = /bin/sh).
  * Execution is via --run-tool broker (EXEC_SANDBOX); no in-process handler. */
-int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *workspace);
+int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *workspace,
+                        const char *shell_path);
 
 /* Collect CCLAW_SECRET_* env vars into array, clear from env.
  * Caller owns returned array (free with shell_secrets_free). */

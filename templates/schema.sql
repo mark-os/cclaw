@@ -280,6 +280,9 @@ CREATE TABLE IF NOT EXISTS channel_outbox (
   status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  -- Set when a rich-formatted send is rejected by the platform (e.g. Telegram
+  -- "can't parse entities" 400): the row is re-delivered as plain text.
+  deliver_plain INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   acked_at INTEGER
 );

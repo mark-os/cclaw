@@ -329,6 +329,7 @@ void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row) {
     JS_SetPropertyStr(ctx, obj, "session_id", JS_NewInt32(ctx, (int32_t)row->session_id));
     JS_SetPropertyStr(ctx, obj, "payload",
         JS_NewString(ctx, row->payload ? row->payload : ""));
+    JS_SetPropertyStr(ctx, obj, "plain", JS_NewBool(ctx, row->deliver_plain));
     JS_SetPropertyStr(ctx, global, "__cr_outbox_item", obj);
     JSValue ret = eval_js(ctx, "onOutbox(__cr_outbox_item)", "onOutbox");
     JS_FreeValue(ctx, ret);
@@ -651,7 +652,18 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                 SendReq *r = g_send_active;
                 int ok = (!cerr && status >= 200 && status < 300);
                 if (r->outbox_id > 0) {
-                    if (!ok) {
+                    /* A rich-format rejection ("can't parse entities" 400) means the
+                     * HTML render was bad. Re-deliver the whole row as plain text once
+                     * — a plain send never hits this error, so no loop. Checked before
+                     * the transient/terminal split since it's a 400 (otherwise terminal). */
+                    int parse_err = (status == 400 && g_send_resp.data &&
+                                     strstr(g_send_resp.data, "can't parse entities") != NULL);
+                    if (!ok && parse_err) {
+                        send_queue_drop_outbox(r->outbox_id);
+                        channel_retry_outbox_plain(g_ctx, r->outbox_id);
+                        LOG_WARN_("outbox parse-entities 400 id=%lld -> retry plain",
+                                  (long long)r->outbox_id);
+                    } else if (!ok) {
                         /* Transient = network/curl error (cerr set), 429, or 5xx. Everything
                          * else (400/401/403/404) is terminal. */
                         int transient = (cerr != NULL) || status == 429 || (status >= 500 && status < 600);

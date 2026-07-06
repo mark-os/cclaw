@@ -131,6 +131,36 @@ static void test_channel_outbox(void) {
     channel_ctx_free(ctx);
 }
 
+/* channel_retry_outbox_plain flips deliver_plain and re-pends the row. */
+static void test_channel_outbox_plain(void) {
+    cleanup();
+    ChannelCtx *ctx = channel_ctx_open(TEST_DB, "telegram");
+    assert(ctx);
+
+    sqlite3_exec(ctx->db,
+        "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+        " VALUES('telegram', 1, '{\"text\":\"hi\"}')", NULL, NULL, NULL);
+
+    ChannelOutboxRow *row = channel_next_outbox(ctx);
+    assert(row);
+    assert(row->deliver_plain == 0);   /* first delivery: rich */
+    int64_t id = row->id;
+    channel_outbox_row_free(row);
+
+    /* Simulate a parse-entities rejection → re-deliver plain. */
+    channel_dispatch_outbox(ctx, id);              /* 'sending' */
+    int rc = channel_retry_outbox_plain(ctx, id);  /* back to pending, plain */
+    assert(rc == 0);
+
+    row = channel_next_outbox(ctx);
+    assert(row);
+    assert(row->id == id);
+    assert(row->deliver_plain == 1);   /* re-delivery: plain */
+    channel_outbox_row_free(row);
+
+    channel_ctx_free(ctx);
+}
+
 static void test_wake_external(void) {
     cleanup();
     /* No FIFO — should return -1 gracefully */
@@ -167,6 +197,10 @@ int main(void) {
 
     printf("test_channel_outbox...");
     test_channel_outbox();
+    printf(" OK\n");
+
+    printf("test_channel_outbox_plain...");
+    test_channel_outbox_plain();
     printf(" OK\n");
 
     printf("test_wake_external...");

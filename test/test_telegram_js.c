@@ -39,8 +39,9 @@ static char *json_escape(const char *src) {
 /* Eval `channel-stub + real template + ; + expr`; return the result string. */
 static char *eval_expr(const char *expr) {
     const char *stub =
+        "var __sent=[];\n"
         "var channel={getConfig:function(){return null;},log:function(){},"
-        "send:function(){},emit:function(){return 0;}};\n";
+        "send:function(r){__sent.push(r);},emit:function(){return 0;}};\n";
     size_t n = strlen(stub) + strlen(TPL_CHANNEL_TELEGRAM_QJS) + strlen(expr) + 8;
     char *code = malloc(n);
     snprintf(code, n, "%s%s\n;%s", stub, TPL_CHANNEL_TELEGRAM_QJS, expr);
@@ -61,6 +62,32 @@ static void expect(const char *name, const char *expr, const char *want) {
     char *r = eval_expr(expr);
     if (!r || strcmp(r, want) != 0) {
         printf("FAIL: got '%s' want '%s'\n", r ? r : "NULL", want);
+    } else {
+        tests_passed++;
+        printf("PASS\n");
+    }
+    free(r);
+}
+
+static void expect_has(const char *name, const char *expr, const char *needle) {
+    tests_run++;
+    printf("  %s... ", name);
+    char *r = eval_expr(expr);
+    if (!r || !strstr(r, needle)) {
+        printf("FAIL: '%s' missing '%s'\n", r ? r : "NULL", needle);
+    } else {
+        tests_passed++;
+        printf("PASS\n");
+    }
+    free(r);
+}
+
+static void expect_lacks(const char *name, const char *expr, const char *needle) {
+    tests_run++;
+    printf("  %s... ", name);
+    char *r = eval_expr(expr);
+    if (!r || strstr(r, needle)) {
+        printf("FAIL: '%s' should not contain '%s'\n", r ? r : "NULL", needle);
     } else {
         tests_passed++;
         printf("PASS\n");
@@ -93,6 +120,41 @@ int main(void) {
     expect("messageKind_voice", "messageKind({voice:{}})", "voice");
     expect("messageKind_sticker", "messageKind({sticker:{}})", "sticker");
     expect("messageKind_none", "messageKind({})", "non-text");
+
+    /* ── markdownToTelegramHtml ─────────────────────────────────────── */
+    expect("md_bold",    "markdownToTelegramHtml('a **b** c')", "a <b>b</b> c");
+    expect("md_italic",  "markdownToTelegramHtml('a *b* c')",   "a <i>b</i> c");
+    expect("md_code",    "markdownToTelegramHtml('run `ls` now')", "run <code>ls</code> now");
+    expect("md_link",    "markdownToTelegramHtml('[x](http://y.z)')", "<a href=\"http://y.z\">x</a>");
+    /* &<> escaped in plain text */
+    expect("md_escape",  "markdownToTelegramHtml('1 < 2 & 3 > 0')", "1 &lt; 2 &amp; 3 &gt; 0");
+    /* code content with < is escaped, not treated as a tag */
+    expect("md_code_escapes", "markdownToTelegramHtml('`a<b>`')", "<code>a&lt;b&gt;</code>");
+    /* unbalanced marker (chunk-split bold) degrades to literal text */
+    expect("md_unbalanced", "markdownToTelegramHtml('a **b c')", "a **b c");
+    /* digits in text must not be mistaken for stash placeholders */
+    expect("md_digits_safe", "markdownToTelegramHtml('order 66 and `x`')",
+           "order 66 and <code>x</code>");
+
+    /* ── onOutbox end-to-end: real onOutbox→sendChunked→tgCall→send ─── */
+    /* Rich (default): body carries HTML + parse_mode. */
+    expect_has("onOutbox_rich_html",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),plain:false}),"
+        "__sent[0].body",
+        "<b>hi</b>");
+    expect_has("onOutbox_rich_parsemode",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),plain:false}),"
+        "__sent[0].body",
+        "\"parse_mode\":\"HTML\"");
+    /* Plain (fallback): raw text, no parse_mode. */
+    expect_has("onOutbox_plain_text",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),plain:true}),"
+        "__sent[0].body",
+        "**hi**");
+    expect_lacks("onOutbox_plain_no_parsemode",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),plain:true}),"
+        "__sent[0].body",
+        "parse_mode");
 
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

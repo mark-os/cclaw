@@ -18,6 +18,7 @@ typedef struct {
     int64_t id;
     int64_t session_id;
     char *payload;
+    int deliver_plain;   /* re-delivery after a rich-format rejection: send plain */
 } ChannelOutboxRow;
 
 /* Create context. Caller owns returned ctx (free with channel_ctx_free). */
@@ -53,6 +54,11 @@ int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error);
 /* Reschedule a failed send for retry: bump attempt count, return to
  * pending with a future next_attempt_at. Non-blocking backoff. */
 int channel_retry_outbox(ChannelCtx *ctx, int64_t id, int delay_sec);
+
+/* Re-deliver a row immediately as plain text after a rich-format rejection.
+ * Sets deliver_plain=1 + status='pending' without bumping attempts. A plain
+ * send never triggers the parse error, so this can't loop. */
+int channel_retry_outbox_plain(ChannelCtx *ctx, int64_t id);
 
 /* Current retry attempt count for an outbox row, or 0 if unknown. */
 int channel_outbox_attempts(ChannelCtx *ctx, int64_t id);

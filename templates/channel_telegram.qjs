@@ -170,8 +170,9 @@ function onOutbox(item) {
     }
 
     // Queue all chunks; the C loop sends them in order and acks the
-    // outbox row when the final chunk gets a 2xx.
-    sendChunked(chatId, text, item.id);
+    // outbox row when the final chunk gets a 2xx. item.plain is set by the C
+    // loop when a prior HTML attempt was rejected — re-deliver as plain text.
+    sendChunked(chatId, text, item.id, item.plain);
 }
 
 // ── Message processing ──────────────────────────────────────────
@@ -639,7 +640,12 @@ function sendMessage(chatId, text) {
     tgCall("sendMessage", JSON.stringify({chat_id: parseInt(chatId, 10), text: text}));
 }
 
-function sendChunked(chatId, text, outboxId) {
+// Chunk on the PLAIN text (Telegram's 4096 limit counts parsed text, so HTML
+// tags are free), then render each chunk to HTML independently — a self-
+// contained chunk can never split a tag or entity. `plain` forces raw text
+// (the C loop sets it after a "can't parse entities" 400, so a converter bug
+// degrades to plain instead of stalling the reply).
+function sendChunked(chatId, text, outboxId, plain) {
     var total = text.length;
     var pos = 0;
     while (pos < total) {
@@ -647,10 +653,43 @@ function sendChunked(chatId, text, outboxId) {
         var chunkLen = remaining <= TG_MAX_MSG_LEN ? remaining : findSplit(text, pos, TG_MAX_MSG_LEN);
         var chunk = text.substring(pos, pos + chunkLen);
         pos += chunkLen;
-        tgCall("sendMessage",
-            JSON.stringify({chat_id: parseInt(chatId, 10), text: chunk}),
+        var body = {chat_id: parseInt(chatId, 10), text: chunk};
+        if (!plain) {
+            body.text = markdownToTelegramHtml(chunk);
+            body.parse_mode = "HTML";
+        }
+        tgCall("sendMessage", JSON.stringify(body),
             {outbox_id: outboxId, final: pos >= total});
     }
+}
+
+// Minimal Markdown → Telegram HTML. Escapes &<> first (Markdown markers
+// aren't among them), stashes code/link output so inline formatting can't
+// corrupt it, then converts balanced inline markers. Unbalanced markers (e.g.
+// a bold span split across chunks) pass through as literal text — safe.
+function markdownToTelegramHtml(md) {
+    // keep()/restore wrap stash indices in U+E000..U+E001 (private-use, so
+    // they never occur in real text and aren't Markdown markers — the inline
+    // regexes skip over placeholders). They render invisibly; that's expected.
+    var stash = [];
+    function keep(html) { return "" + (stash.push(html) - 1) + ""; }
+
+    var s = md.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    // Fenced code ```...``` and inline code `...` — stashed verbatim.
+    s = s.replace(/```[^\n]*\n?([\s\S]*?)```/g, function(_, c) { return keep("<pre>" + c + "</pre>"); });
+    s = s.replace(/`([^`\n]+)`/g, function(_, c) { return keep("<code>" + c + "</code>"); });
+    // Links [text](url)
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function(_, t, u) {
+        return keep('<a href="' + u + '">' + t + '</a>');
+    });
+    // Bold, then italic (bold consumes ** / __ first so lone markers remain).
+    s = s.replace(/\*\*([^\n]+?)\*\*/g, "<b>$1</b>").replace(/__([^\n]+?)__/g, "<b>$1</b>");
+    s = s.replace(/\*([^\n*]+?)\*/g, "<i>$1</i>").replace(/_([^\n_]+?)_/g, "<i>$1</i>");
+    // Headers → bold line (Telegram has no headings).
+    s = s.replace(/^#{1,6}[ \t]+([^\n]+)$/gm, "<b>$1</b>");
+
+    return s.replace(/(\d+)/g, function(_, i) { return stash[parseInt(i, 10)]; });
 }
 
 function findSplit(text, start, maxLen) {

@@ -14,7 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -329,6 +331,30 @@ static void check_channels(sqlite3 *db) {
         printf("  (none registered)\n");
 }
 
+/* ── Check 8: Syslog listener ───────────────────────────────────── */
+
+static void check_syslog(void) {
+    printf("\n[syslog]\n");
+
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        print_fail("socket", strerror(errno));
+        return;
+    }
+
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "/dev/log");
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+        print_ok("listener", "/dev/log accepting connections");
+    } else {
+        printf("  WARN syslog: no daemon listening on /dev/log (%s)\n", strerror(errno));
+        printf("       daemon logs will be lost — install busybox-syslogd or rsyslog\n");
+    }
+
+    close(fd);
+}
+
 /* ── Main ────────────────────────────────────────────────────────── */
 
 int doctor_main(void) {
@@ -346,6 +372,7 @@ int doctor_main(void) {
     check_userns();
     check_workspace(cfg);
     check_channels(db);
+    check_syslog();
 
     printf("\ndone.\n");
 

@@ -1519,6 +1519,7 @@ static void db_periodic(void) {
     approval_sweep_expired();
     db_prune_inbox(g_db);
     db_prune_outbox(g_db);
+    db_wal_checkpoint(g_db);   /* truncate WAL — passive checkpoint can stall on a long reader */
     if (g_mode == 1) {
         session_sweep_inbox();
         cron_run_due(g_db);

@@ -206,6 +206,7 @@ sqlite3 *db_open(const char *path) {
      * surfaces as e.g. SQLITE_BUSY_SNAPSHOT (the read→write upgrade case). */
     sqlite3_extended_result_codes(db, 1);
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+    sqlite3_exec(db, "PRAGMA wal_autocheckpoint=1000;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA busy_timeout=5000;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL);
     return db;
@@ -2387,4 +2388,13 @@ void db_prune_outbox(sqlite3 *db) {
     sqlite3_bind_int64(s, 1, (int64_t)ret);
     sqlite3_step(s);
     sqlite3_finalize(s);
+}
+
+/* ── WAL checkpoint ──────────────────────────────────────────────────── */
+/* Best-effort WAL truncate checkpoint.  TRUNCATE resets the -wal file to
+   zero bytes after checkpointing, so a long-lived reader that stalled the
+   passive auto-checkpoint can't leave the WAL growing unbounded. */
+void db_wal_checkpoint(sqlite3 *db) {
+    if (!db) return;
+    sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL);
 }

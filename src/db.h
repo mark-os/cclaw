@@ -404,6 +404,9 @@ void db_prune_inbox(sqlite3 *db);
 /* Prune terminal channel_outbox rows older than config 'outbox_retention_sec'. */
 void db_prune_outbox(sqlite3 *db);
 
+/* Best-effort WAL truncate checkpoint (call periodically from housekeeping). */
+void db_wal_checkpoint(sqlite3 *db);
+
 /* Scalar query helpers — single int64 bind on param 1, read column 0.
  * db_scalar_i64: returns column 0 as int64 or dflt if no row / prepare fails.
  * db_scalar_text: returns strdup of column 0 text or NULL. Caller frees. */

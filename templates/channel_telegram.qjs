@@ -28,6 +28,14 @@ function onInit() {
     // Default: long-poll getUpdates.
     var mode = channel.getConfig("mode") || "poll";
     channel.log("telegram channel ready (mode=" + mode + ", offset=" + offset + ")");
+
+    // Fix the stale command menu (leftover from a previous bot on this token).
+    tgCall("setMyCommands", JSON.stringify({commands: [
+        {command: "key", description: "Set an API key"},
+        {command: "config", description: "Configure model/endpoint"},
+        {command: "whitelist", description: "Manage host whitelist"}
+    ]}));
+
     if (mode === "webhook") return {};
     return {poll: pollShape()};
 }
@@ -113,6 +121,12 @@ function onOutbox(item) {
         return;
     }
 
+    if (payload.keyboard) {
+        // Buttoned prompts (e.g. approvals) are short — never chunked.
+        sendKeyboard(chatId, text, payload.keyboard, {outbox_id: item.id, final: 1});
+        return;
+    }
+
     // Queue all chunks; the C loop sends them in order and acks the
     // outbox row when the final chunk gets a 2xx.
     sendChunked(chatId, text, item.id);
@@ -154,16 +168,52 @@ function processCallback(cbq) {
     var fromId = cbq.from ? "" + cbq.from.id : "";
     if (!channel.admin.isAdmin(fromId)) return;
 
+    var data = cbq.data || "";
+    if (data.indexOf("appr:") === 0) {
+        handleApprovalCallback(fromId, data, cbq);
+        return;
+    }
+
     // Answer callback to dismiss loading
     if (cbq.id) {
         tgCall("answerCallbackQuery", JSON.stringify({callback_query_id: cbq.id}));
     }
 
-    var data = cbq.data || "";
     if (data.indexOf("key:") === 0) handleKeyCallback(fromId, data);
     else if (data.indexOf("cfg_model:") === 0) handleConfigModelCallback(fromId, data);
     else if (data.indexOf("cfg_ep:") === 0) handleConfigEndpointCallback(fromId, data);
     else if (data.indexOf("wl:") === 0) handleWhitelistCallback(fromId, data);
+}
+
+// ── Approval callback ────────────────────────────────────────────
+
+function handleApprovalCallback(fromId, data, cbq) {
+    // "appr:<approval_id>:<yes|once|no>"
+    var parts = data.substring(5).split(":");
+    var approvalId = parts[0];
+    var decision = parts[1];
+
+    var toast = decision === "yes" ? "Approved" :
+                decision === "once" ? "Approved once" : "Denied";
+    if (cbq.id) {
+        tgCall("answerCallbackQuery", JSON.stringify({callback_query_id: cbq.id, text: toast}));
+    }
+
+    channel.emit("approval_decision",
+        JSON.stringify({approval_id: parseInt(approvalId, 10), decision: decision}),
+        "appr_" + cbq.id);
+
+    // Resolve the prompt in place so stale buttons can't be clicked twice.
+    if (cbq.message && cbq.message.chat) {
+        var who = (cbq.from && cbq.from.first_name) || fromId;
+        var outcome = (cbq.message.text || "Approval") + "\n\n" + toast + " by " + who;
+        tgCall("editMessageText", JSON.stringify({
+            chat_id: cbq.message.chat.id,
+            message_id: cbq.message.message_id,
+            text: outcome,
+            reply_markup: null
+        }));
+    }
 }
 
 // ── Admin command dispatch ───────────────────────────────────────
@@ -315,12 +365,12 @@ function findSplit(text, start, maxLen) {
     return maxLen;
 }
 
-function sendKeyboard(chatId, text, keyboard) {
+function sendKeyboard(chatId, text, keyboard, extra) {
     tgCall("sendMessage", JSON.stringify({
         chat_id: parseInt(chatId, 10),
         text: text,
         reply_markup: {inline_keyboard: keyboard}
-    }));
+    }), extra);
 }
 
 function sendForceReply(chatId, text) {

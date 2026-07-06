@@ -480,6 +480,11 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
                 "WHERE json_extract(value,'$.schedule') IS NOT NULL",
                 -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+            /* WAL safety: this loop writes (cron_add INSERT) mid-iteration of
+             * `st`, but safe because json_each() over a bound parameter takes
+             * no read snapshot.  If this query ever JOINs a real table,
+             * restructure to collect-then-write — see channel_consume_events
+             * in src/channel.c. */
             while (sqlite3_step(st) == SQLITE_ROW) {
                 const char *sname = (const char *)sqlite3_column_text(st, 0);
                 const char *sched = (const char *)sqlite3_column_text(st, 1);

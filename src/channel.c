@@ -7,6 +7,7 @@
 #include "secret_scan.h"
 #include "wake.h"
 #include "resolve.h"
+#include "config_registry.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,22 +92,28 @@ char *channel_get_status(sqlite3 *db, const char *name) {
 }
 
 int channel_launch_all(sqlite3 *db) {
-    const char *sql = "SELECT c.name, e.path FROM channels c"
+    /* Collect names first, finalize, then fork + update_pid: writing (or
+     * forking) with the SELECT still open pins a read snapshot, and the
+     * update_pid write would fail with an immediate SQLITE_BUSY if any other
+     * process committed meanwhile (snapshot upgrades skip busy_timeout). */
+    const char *sql = "SELECT c.name FROM channels c"
                       " JOIN extensions e ON c.extension_name=e.name"
                       " WHERE c.status='active';";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
-    int launched = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW && g_count < CHANNEL_MAX) {
+    char names[CHANNEL_MAX][64];  /* matches ChannelProc.name */
+    int n = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && g_count + n < CHANNEL_MAX) {
         const char *name = (const char *)sqlite3_column_text(stmt, 0);
-        const char *ext_path = (const char *)sqlite3_column_text(stmt, 1);
-        if (!name || !ext_path) continue;
+        if (!name) continue;
+        snprintf(names[n], sizeof(names[n]), "%s", name);
+        n++;
+    }
+    sqlite3_finalize(stmt);
 
-        /* Build js_path: <ext_path>/channel.qjs */
-        char js_path[1024];
-        snprintf(js_path, sizeof(js_path), "%s/channel.qjs", ext_path);
-
-        pid_t pid = do_fork(name);
+    int launched = 0;
+    for (int i = 0; i < n; i++) {
+        pid_t pid = do_fork(names[i]);
         if (pid > 0) {
             ChannelProc *c = &g_channels[g_count++];
             c->pid = pid;
@@ -114,12 +121,11 @@ int channel_launch_all(sqlite3 *db) {
             c->first_crash = 0;
             c->next_restart_at = 0;
             c->started_at = time(NULL);
-            snprintf(c->name, sizeof(c->name), "%s", name);
-            update_pid(db, name, pid);
+            snprintf(c->name, sizeof(c->name), "%s", names[i]);
+            update_pid(db, names[i], pid);
             launched++;
         }
     }
-    sqlite3_finalize(stmt);
     return launched;
 }
 

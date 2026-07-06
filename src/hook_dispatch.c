@@ -164,6 +164,10 @@ static int apply_inject(sqlite3 *db, int64_t session_id, const char *cmds_json) 
     int count = 0;
     size_t total = 0;
     int rc = 0;
+    /* WAL safety: this loop writes (INSERT entries/hook_directives) mid-iteration
+     * of `s`, but safe because json_each() over a bound parameter takes no read
+     * snapshot.  If this query ever JOINs a real table, restructure to
+     * collect-then-write — see channel_consume_events in src/channel.c. */
     while (sqlite3_step(s) == SQLITE_ROW) {
         const char *role = (const char *)sqlite3_column_text(s, 0);
         const char *content = (const char *)sqlite3_column_text(s, 1);

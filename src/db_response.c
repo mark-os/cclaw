@@ -268,6 +268,10 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
         sqlite3_prepare_v2(db, tc_ins_sql, -1, &ins, NULL);
 
         int idx = 0;
+        /* WAL safety: this loop writes (INSERT tool_calls) mid-iteration of
+         * `tc`, but safe because json_each() over a bound parameter takes no
+         * read snapshot.  If this query ever JOINs a real table, restructure
+         * to collect-then-write — see channel_consume_events in src/channel.c. */
         while (sqlite3_step(tc) == SQLITE_ROW) {
             const char *id   = (const char *)sqlite3_column_text(tc, 0);
             const char *name = (const char *)sqlite3_column_text(tc, 1);

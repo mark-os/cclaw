@@ -1250,7 +1250,12 @@ int inbox_count(sqlite3 *db, int64_t session_id) {
     return (int)db_scalar_i64(db, "SELECT COUNT(*) FROM inbox WHERE session_id=? AND consumed=0", session_id, -1);
 }
 
-/* Atomically consume inbox items into session entries */
+/* Atomically consume inbox items into session entries.
+ * _locked contract: caller MUST hold BEGIN IMMEDIATE. The loop below writes
+ * while the SELECT is still open, which is only safe because the write lock
+ * was taken up front — without it, a concurrent commit would make the
+ * read→write snapshot upgrade fail with an immediate SQLITE_BUSY
+ * (busy_timeout does not apply; see channel_consume_events). */
 int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit) {
     /* Peek unconsumed items */
     sqlite3_stmt *sel;
@@ -1703,6 +1708,10 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
     sqlite3_bind_text(stmt, 1, agent_json_str, -1, SQLITE_STATIC);
+    /* Writes mid-iteration are safe only because json_each over a bound
+     * parameter opens no b-tree cursor, so this SELECT pins no read snapshot.
+     * If the query ever touches a real table, restructure to collect-then-
+     * write (see channel_consume_events). */
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *lbl = (const char *)sqlite3_column_text(stmt, 0);
         if (!lbl) continue;

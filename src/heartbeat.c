@@ -17,7 +17,11 @@ static sqlite3 *hb_db;
     "Read HEARTBEAT.md if present. Follow it. " \
     "If nothing needs attention, reply HEARTBEAT_OK."
 
-/* Insert heartbeat prompt into inbox for idle sessions, signal daemon */
+/* Insert heartbeat prompt into inbox for idle sessions, signal daemon.
+ * Collect session ids first, then finalize the reader before writing —
+ * an open SELECT pins a WAL read snapshot and any write that requires a
+ * snapshot upgrade gets an immediate SQLITE_BUSY (busy_timeout won't help). */
+#define HB_MAX_SESSIONS 256
 static void inject_heartbeat(void) {
     int interval = hb_cfg->heartbeat_interval;
     char sql[256];
@@ -28,19 +32,17 @@ static void inject_heartbeat(void) {
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(hb_db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
 
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        int64_t sid = sqlite3_column_int64(stmt, 0);
-        char *aname = session_get_agent_name(hb_db, sid);
-        if (aname) {
-            inbox_insert(hb_db, sid, "heartbeat", HEARTBEAT_PROMPT);
-            wake_session(sid);
-            free(aname);
-        } else {
-            inbox_insert(hb_db, sid, "heartbeat", HEARTBEAT_PROMPT);
-            wake_session(sid);
-        }
+    int64_t sids[HB_MAX_SESSIONS];
+    int n = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && n < HB_MAX_SESSIONS) {
+        sids[n++] = sqlite3_column_int64(stmt, 0);
     }
     sqlite3_finalize(stmt);
+
+    for (int i = 0; i < n; i++) {
+        inbox_insert(hb_db, sids[i], "heartbeat", HEARTBEAT_PROMPT);
+        wake_session(sids[i]);
+    }
 }
 
 static void *heartbeat_loop(void *arg) {

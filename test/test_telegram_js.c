@@ -137,6 +137,16 @@ int main(void) {
     /* digits in text must not be mistaken for stash placeholders */
     expect("md_digits_safe", "markdownToTelegramHtml('order 66 and `x`')",
            "order 66 and <code>x</code>");
+    /* GFM table wrapped verbatim in <pre> (monospace keeps columns aligned) */
+    expect("md_table",
+           "markdownToTelegramHtml('| a | b |\\n|---|---|\\n| 1 | 2 |')",
+           "<pre>| a | b |\n|---|---|\n| 1 | 2 |</pre>");
+    /* table with surrounding prose keeps the prose, wraps only the block */
+    expect("md_table_prose",
+           "markdownToTelegramHtml('before\\n| a | b |\\n| - | - |\\n| 1 | 2 |\\nafter')",
+           "before\n<pre>| a | b |\n| - | - |\n| 1 | 2 |</pre>\nafter");
+    /* a lone dashes line (no pipe) is not a table delimiter */
+    expect("md_not_table", "markdownToTelegramHtml('a | b\\n---')", "a | b\n---");
 
     /* ── onOutbox end-to-end: real onOutbox→sendChunked→tgCall→send ─── */
     /* Rich (default): body carries HTML + parse_mode. */

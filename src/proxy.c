@@ -47,22 +47,39 @@ static int in_metadata_range(int family, const unsigned char *addr) {
     return cidr_match(METADATA_RANGES, METADATA_RANGE_COUNT, family, addr);
 }
 
-/* Check if host is allowed via the partitioned rules: numeric IPs are judged
- * FIRST by the CIDR pipeline (metadata carve-out, then any-IP-requires-grant)
- * — before hostname rules are even consulted, so a hostname wildcard ("*")
- * can never leak into the metadata carve-out; only an exact CIDR grant
- * authorizes a metadata address. Non-numeric hosts fall through to host_match
- * (exact + suffix + "*"). Default-deny — empty/NULL rules deny everything.
+/* Shared core of the two numeric-address checks below: metadata carve-out
+ * (exact grant only — a covering CIDR is never enough), then either
+ * public-IP-allow or a CIDR-grant requirement. Kept as ONE function so the
+ * metadata carve-out — the single most security-critical check in this file
+ * — has exactly one implementation instead of two hand-kept-in-parity copies
+ * that can silently drift (that drift is exactly how the host_decide/
+ * addr_permitted asymmetry went unnoticed: see egress-filter.md Q7).
  *
- * Deliberately NOT symmetric with addr_permitted (the RESOLVE-path check):
- * addr_permitted allows any public IP unconditionally because by the time it
- * runs, the *hostname* that resolved to that IP already passed host_match —
- * the grant was already spent. host_decide's numeric branch is reached with
- * NO hostname ever vetted (a raw IP literal in a tool call skips host_match
- * entirely), so a "public IP always allowed" rule here would let any agent
- * reach arbitrary public hosts by IP with zero grants, bypassing the
- * allowlist outright. A public IP therefore needs a CIDR grant (e.g.
- * 0.0.0.0/0 + ::/0 for "any public IP") exactly like a private one does. */
+ * allow_public distinguishes the two callers' trust contexts, not a
+ * duplicated policy choice:
+ *   - addr_permitted (allow_public=1): runs only AFTER a hostname already
+ *     passed host_match — the grant was already spent, and this is purely a
+ *     DNS-rebind recheck. Allowing the resolved public IP is exactly the
+ *     grant paying off.
+ *   - host_decide's numeric branch (allow_public=0): reached with NO
+ *     hostname ever vetted (a raw IP literal skips host_match entirely), so
+ *     a public IP needs its own CIDR grant (e.g. 0.0.0.0/0 + ::/0 for "any
+ *     public IP") — otherwise any tool call phrasing its target as a literal
+ *     IP bypasses the allowlist outright. */
+static int numeric_ip_permitted(const ProxyContext *ctx, const char *ip,
+                                int fam, const unsigned char *bin,
+                                int allow_public) {
+    if (in_metadata_range(fam, bin))
+        return granted_exact(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin);
+    if (allow_public && !http_is_private_ip(ip)) return 1;
+    return cidr_match(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin);
+}
+
+/* Check if host is allowed via the partitioned rules: numeric IPs are judged
+ * FIRST by numeric_ip_permitted() — before hostname rules are even
+ * consulted, so a hostname wildcard ("*") can never leak into the metadata
+ * carve-out. Non-numeric hosts fall through to host_match (exact + suffix +
+ * "*"). Default-deny — empty/NULL rules deny everything. */
 static int ip_to_bin(const char *ip, int *fam, unsigned char *buf16);
 static int host_decide(const ProxyContext *ctx, const char *host) {
     /* Sensitive-host deny list: checked FIRST, before any allow logic.
@@ -74,21 +91,13 @@ static int host_decide(const ProxyContext *ctx, const char *host) {
         return 0;
     }
 
-    /* Numeric IP: CIDR pipeline only. Must run before host_match — see the
-     * function comment above on why a hostname wildcard must never reach here. */
+    /* Numeric IP: CIDR pipeline only, no public-IP carve-out. Must run
+     * before host_match — see numeric_ip_permitted's comment for why a
+     * hostname wildcard must never reach here. */
     int fam;
     unsigned char bin[16];
-    if (ip_to_bin(host, &fam, bin) == 0) {
-        /* Metadata carve-out: numeric IP in metadata range requires exact grant.
-         * Also enforced in addr_permitted (resolve path); both paths required.
-         * See egress-filter.md §4. */
-        if (in_metadata_range(fam, bin))
-            return granted_exact(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin);
-        /* Any other literal IP, public or private: requires a covering CIDR
-         * grant. See the function comment for why this differs from
-         * addr_permitted's unconditional public-IP allow. */
-        return cidr_match(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin);
-    }
+    if (ip_to_bin(host, &fam, bin) == 0)
+        return numeric_ip_permitted(ctx, host, fam, bin, /*allow_public=*/0);
 
     /* Hostname rules (exact/suffix/"*") */
     return host_match(ctx->host_rules, ctx->host_rule_count, host);
@@ -206,7 +215,8 @@ static void record_host(ProxyContext *ctx, const char *host) {
 
 /* A resolved address is permitted per the egress-filter.md §4 pipeline:
  *   1. Metadata range → exact grant only (CIDR grants cannot reach metadata)
- *   2. Public IP → ALLOW
+ *   2. Public IP → ALLOW (the hostname that resolved here already spent its
+ *      grant via host_match — see numeric_ip_permitted's comment)
  *   3. Private IP in granted CIDR → ALLOW
  *   4. Otherwise → DENY
  * Ordering is security-critical: metadata check MUST precede CIDR check. */
@@ -214,20 +224,7 @@ static int addr_permitted(const ProxyContext *ctx, const char *ip) {
     int fam;
     unsigned char bin[16];
     if (ip_to_bin(ip, &fam, bin) != 0) return 0;
-
-    /* Metadata range: only an exact literal grant authorizes access.
-     * A covering CIDR (e.g. 169.254.0.0/16 or 0.0.0.0/0) is not enough.
-     * Also enforced in host_decide (numeric CONNECT path); both paths required.
-     * See egress-filter.md §4. */
-    if (in_metadata_range(fam, bin))
-        return granted_exact(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin);
-
-    /* Public IPs are always permitted (no private range match). */
-    if (!http_is_private_ip(ip)) return 1;
-
-    /* Private IP: allowed only if covered by a granted CIDR (includes exact
-     * literal grants since those are stored as /32 or /128 rules). */
-    return cidr_match(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin);
+    return numeric_ip_permitted(ctx, ip, fam, bin, /*allow_public=*/1);
 }
 
 /* Resolve host (allowlist already checked by the caller), drop disallowed

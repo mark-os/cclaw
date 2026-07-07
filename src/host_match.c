@@ -73,6 +73,7 @@ int host_match(char **rules, size_t n, const char *host) {
     for (size_t i = 0; i < n; i++) {
         const char *r = rules[i];
         if (!r) continue;
+        if (r[0] == '*' && r[1] == '\0') return 1;  /* bare "*" matches any host */
         if (r[0] == '.') {
             /* Suffix rule: ".github.com" matches "github.com" and
              * "api.github.com" but NOT "evilgithub.com" */

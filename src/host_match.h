@@ -16,10 +16,16 @@ typedef struct {
  * Returns 0 on success, -1 on parse failure. */
 int cidr_parse(const char *s, Cidr *out);
 
-/* Host-string matcher: exact or suffix (rule starting with '.').
- * Suffix ".github.com" matches "github.com" and "api.github.com"
- * but NOT "evilgithub.com" (dot-boundary enforced).
- * TODO Q3: wildcard-label (*.x) — not implemented this cut. */
+/* Host-string matcher: exact, suffix (rule starting with '.'), or a bare "*"
+ * (matches any host — the standard allow-all sentinel, as in CORS/CSP).
+ * Suffix ".github.com" matches "github.com" and "api.github.com" but NOT
+ * "evilgithub.com" (dot-boundary enforced).
+ * "*" must only ever be evaluated against non-numeric hosts: callers with a
+ * metadata carve-out (proxy.c's host_decide) MUST resolve numeric/IP targets
+ * via the CIDR path before this matcher ever sees them, so "*" can't bypass
+ * the requirement that only an exact CIDR grant authorizes a metadata address.
+ * TODO Q3: per-label wildcard (*.x) — not implemented; suffix rules already
+ * cover arbitrary-depth subdomains, so this is low priority. */
 int host_match(char **rules, size_t n, const char *host);
 
 /* True if `host` is covered by any label in `labels[0..n)` under

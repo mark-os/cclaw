@@ -455,6 +455,28 @@ static void test_path_mapped_v6_metadata_deny(void) {
     printf("  PASS: 2.6 mapped IPv4-in-IPv6 cannot launder metadata past ::/0\n");
 }
 
+/* 2.7: "*" host grant allows an ordinary hostname RESOLVE (the wildcard's
+ * actual purpose) but still cannot launder the metadata IP — the numeric
+ * CIDR pipeline in host_decide runs before host_match ever sees "*". */
+static void test_path_wildcard_allows_host_denies_metadata(void) {
+    char *hosts[] = {"*"};
+    ProxyContext ctx;
+    assert(proxy_start(&ctx, tmpdir, hosts, 1) == 0);
+
+    char resp[128];
+    proxy_req(proxy_sock_path(&ctx), "RESOLVE example.com\n", resp, sizeof(resp));
+    assert(strncmp(resp, "ADDR", 4) == 0);
+
+    proxy_req(proxy_sock_path(&ctx), "169.254.169.254:80\n", resp, sizeof(resp));
+    assert(strncmp(resp, "DENIED", 6) == 0);
+
+    proxy_req(proxy_sock_path(&ctx), "RESOLVE 169.254.169.254\n", resp, sizeof(resp));
+    assert(strncmp(resp, "ERROR denied", 12) == 0);
+
+    proxy_stop(&ctx);
+    printf("  PASS: 2.7 \"*\" grant ALLOWS hostname RESOLVE, still DENIES metadata\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     /* Each proxy start/stop cycle costs ~0.5s (accept-loop wake latency), and
@@ -497,6 +519,7 @@ int main(void) {
     test_path_exact_grant_resolve_allow();
     test_path_bless_shortcut_probe();
     test_path_mapped_v6_metadata_deny();
+    test_path_wildcard_allows_host_denies_metadata();
 
     cleanup_tmpdir();
     printf("All proxy_decide tests passed.\n");

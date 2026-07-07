@@ -257,15 +257,31 @@ same `decide()` across every redirect hop. Therefore:
 - **CIDR grants for private ranges** (patterns 1 and 2 from §4): working.
 - **Stage 2** (agent allowlist) is the sole implemented stage. Stages 1, 3,
   4a are deferred.
-- **Q7 resolved — `host_decide()` now mirrors `addr_permitted()`.** A literal
-  public IP in a numeric CONNECT is admitted the same way a resolved public
-  IP is: metadata carve-out first, then unconditional allow for any IP that
-  isn't in `http_is_private_ip()`'s private ranges, then CIDR-grant for
-  private IPs. Resolved in favor of parity — the stricter literal-IP bar
-  wasn't buying anything, since resolving the same IP via DNS already
-  allowed it unconditionally; treating the literal spelling as less
-  trustworthy than the resolved one was security theater, not a real
-  barrier to a fabricated-IP LLM output.
+- **Q7 reversed (2026-07-07) — `host_decide()` deliberately does NOT mirror
+  `addr_permitted()` for public IPs.** The original resolution (below,
+  preserved for history) argued a literal public IP is exactly as trustworthy
+  as the same IP reached via DNS, "since resolving the same IP via DNS already
+  allowed it unconditionally." That's only true for an agent that *already
+  holds* a hostname grant resolving to that IP — `addr_permitted()` only ever
+  runs after `host_decide()` already spent a hostname grant via `host_match()`.
+  For an agent with **no** hostname grants (fresh `standard`/`restricted`
+  agents), the parity gave literal-IP targets a strictly *weaker* bar than
+  hostnames: `web_fetch("https://espn.com")` correctly denied with zero
+  grants, but `web_fetch("http://<espn's IP>")` sailed through unconditionally
+  — any tool call phrasing a target as a raw IP bypassed the entire Stage-2
+  allowlist. Fixed: `host_decide()`'s numeric branch now requires a covering
+  CIDR grant for *any* literal IP, public or private (metadata still needs an
+  *exact* grant, unchanged). `addr_permitted()` is untouched — its
+  unconditional public-IP allow remains correct there, since by the time it
+  runs the hostname was already vetted and rebinding-safety is its actual job.
+  ~~A literal public IP in a numeric CONNECT is admitted the same way a
+  resolved public IP is: metadata carve-out first, then unconditional allow
+  for any IP that isn't in `http_is_private_ip()`'s private ranges, then
+  CIDR-grant for private IPs. Resolved in favor of parity — the stricter
+  literal-IP bar wasn't buying anything, since resolving the same IP via DNS
+  already allowed it unconditionally; treating the literal spelling as less
+  trustworthy than the resolved one was security theater, not a real barrier
+  to a fabricated-IP LLM output.~~
 - **Q6 resolved — SNI-aware relay check (`sni_check()` in `src/proxy.c`).**
   A hostname-rule-authorized numeric CONNECT now gets a bounded `MSG_PEEK`
   (2048B cap, ~2s budget) hand-rolled ClientHello walk before the blind

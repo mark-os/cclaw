@@ -54,6 +54,25 @@ static void test_empty_rules_deny_all(void) {
     PASS();
 }
 
+static void test_wildcard_matches_any_host(void) {
+    TEST("wildcard_matches_any_host");
+    char *rules[] = {"*"};
+    if (!host_match(rules, 1, "anything.example")) FAIL("* should match arbitrary host");
+    if (!host_match(rules, 1, "a")) FAIL("* should match single-label host");
+    PASS();
+}
+
+static void test_wildcard_is_bare_only(void) {
+    TEST("wildcard_is_bare_only");
+    /* "*.example.com" is NOT the wildcard sentinel — it's an unimplemented
+     * per-label glob (TODO Q3), so it must be treated as a literal (and thus
+     * useless) exact-match rule, never silently promoted to allow-all. */
+    char *rules[] = {"*.example.com"};
+    if (host_match(rules, 1, "api.example.com")) FAIL("*.example.com must not glob-match");
+    if (host_match(rules, 1, "example.com")) FAIL("*.example.com must not match the base either");
+    PASS();
+}
+
 /* ─── host_in_text ─── */
 
 static void test_hit_exact_and_subdomain(void) {
@@ -303,6 +322,8 @@ int main(void) {
     test_suffix_match_bare();
     test_suffix_no_false_positive();
     test_empty_rules_deny_all();
+    test_wildcard_matches_any_host();
+    test_wildcard_is_bare_only();
 
     /* host_in_text */
     test_hit_exact_and_subdomain();

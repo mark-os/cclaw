@@ -224,16 +224,24 @@ static void test_connect_literal_private_ip_denied(void) {
     printf("  PASS: connect literal private IP denied (unblessed)\n");
 }
 
-static void test_connect_literal_public_ip_allowed(void) {
-    /* A raw literal public IP is now judged the same way as a resolved public
-     * IP (addr_permitted parity, host_decide) — it's admitted without needing
-     * an explicit grant. Exercised via RESOLVE rather than a numeric CONNECT:
-     * both preambles route through the same host_decide() gate, but RESOLVE
-     * on a numeric literal never leaves the process (getaddrinfo of a literal
-     * is a pure parse, see test_resolve_blessed) whereas CONNECT would hand
-     * the (unreachable, real) address to dial_ip()'s untimed connect() —
-     * proxy_stop() waits for that thread to finish, so a real dial here could
-     * block the test for minutes. Same policy code path, no real-network risk. */
+static void test_connect_literal_ungranted_public_ip_denied(void) {
+    /* A raw literal public IP with no covering CIDR grant is DENIED — a
+     * hostname grant (e.g. "8.8.8.8" or "example.com" in grant_hosts) never
+     * authorizes an unrelated literal IP. host_decide's numeric branch is
+     * deliberately NOT symmetric with addr_permitted (the RESOLVE-completion
+     * check): addr_permitted only ever runs after a hostname already passed
+     * host_match, so unconditionally allowing the resulting public IP is
+     * spending a grant that was already earned. A raw literal skips that
+     * vetting entirely, so it needs its own CIDR grant — otherwise any tool
+     * call could reach an arbitrary public host by IP with zero grants,
+     * defeating the allowlist. Exercised via RESOLVE rather than a numeric
+     * CONNECT: both preambles route through the same host_decide() gate, but
+     * RESOLVE on a numeric literal never leaves the process (getaddrinfo of a
+     * literal is a pure parse, see test_resolve_blessed) whereas CONNECT
+     * would hand the (unreachable, real) address to dial_ip()'s untimed
+     * connect() — proxy_stop() waits for that thread to finish, so a real
+     * dial here could block the test for minutes. Same policy code path, no
+     * real-network risk. */
     ProxyContext ctx;
     int rc = proxy_start(&ctx, tmpdir, grant_hosts, GRANT_HOST_COUNT);
     assert(rc == 0);
@@ -247,11 +255,11 @@ static void test_connect_literal_public_ip_allowed(void) {
     char resp[128];
     int n = read_line(fd, resp, sizeof(resp));
     assert(n > 0);
-    assert(strncmp(resp, "ADDR 1.2.3.4", 12) == 0);
+    assert(strncmp(resp, "ERROR denied", 12) == 0);
     close(fd);
 
     proxy_stop(&ctx);
-    printf("  PASS: literal public IP allowed past allowlist (host_decide parity)\n");
+    printf("  PASS: literal ungranted public IP denied (no allowlist bypass by IP)\n");
 }
 
 /* A throwaway loopback listener that accepts and holds connections open, so the
@@ -388,7 +396,7 @@ int main(void) {
     test_resolve_private_rejected();
     test_connect_denied();
     test_connect_literal_private_ip_denied();
-    test_connect_literal_public_ip_allowed();
+    test_connect_literal_ungranted_public_ip_denied();
     test_connect_bad_preamble();
     test_relay_cap();
     test_pending_cap();

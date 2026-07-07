@@ -1,11 +1,15 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_web_fetch.h"
 #include "external_content.h"
+#include "mock_server.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <unistd.h>
 
 static void test_html_strip_basic(void) {
     const char *html = "<html><body><p>Hello <b>world</b></p></body></html>";
@@ -194,8 +198,66 @@ static void test_host_hint_unparseable(void) {
     printf("  PASS: host_hint_unparseable\n");
 }
 
+/* A truncated fetch writes the full document under workspace/.tool_results
+ * and points at it in the result. */
+static void test_truncated_saves_full_to_workspace(void) {
+    int port = mock_server_start();
+    assert(port > 0);
+
+    size_t big = 30000;  /* > default 20000 max_chars → truncated */
+    char *body = malloc(big + 1);
+    assert(body);
+    memset(body, 'a', big);
+    body[big] = '\0';
+    mock_server_enqueue(200, body);
+    free(body);
+
+    char ws[] = "/tmp/cclaw_wf_ws_XXXXXX";
+    assert(mkdtemp(ws) != NULL);
+
+    WebFetchCtx ctx = {0};
+    ctx.workspace = ws;
+    ctx.host_mode = 1;  /* no egress enforcement in-test */
+
+    char args[256];
+    snprintf(args, sizeof(args),
+             "{\"url\":\"http://127.0.0.1:%d/v1/chat/completions\"}", port);
+    char *result = tool_web_fetch_handler(args, &ctx);
+    assert(result);
+    assert(strstr(result, "truncated") != NULL);
+    assert(strstr(result, "saved to ") != NULL);
+
+    /* The full copy exists under .tool_results and is the whole doc, not 20k */
+    char rdir[600];
+    snprintf(rdir, sizeof(rdir), "%s/.tool_results", ws);
+    DIR *d = opendir(rdir);
+    assert(d != NULL);
+    char fpath[900];
+    fpath[0] = '\0';
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        snprintf(fpath, sizeof(fpath), "%s/%s", rdir, de->d_name);
+        break;
+    }
+    closedir(d);
+    assert(fpath[0]);
+
+    struct stat st;
+    assert(stat(fpath, &st) == 0);
+    assert(st.st_size >= 20000);  /* full document, not just the returned slice */
+
+    free(result);
+    remove(fpath);
+    rmdir(rdir);
+    rmdir(ws);
+    mock_server_stop();
+    printf("  PASS: truncated_saves_full_to_workspace\n");
+}
+
 int main(void) {
     printf("test_tool_web_fetch:\n");
+    test_truncated_saves_full_to_workspace();
     test_html_strip_basic();
     test_html_strip_script();
     test_html_strip_style();

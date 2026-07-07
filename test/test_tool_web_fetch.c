@@ -255,9 +255,53 @@ static void test_truncated_saves_full_to_workspace(void) {
     printf("  PASS: truncated_saves_full_to_workspace\n");
 }
 
+/* An empty challenge shell (202, no body) triggers one retry with the plain
+ * UA, and the retry's real content is what gets returned. */
+static void test_retry_on_empty_challenge(void) {
+    int port = mock_server_start();
+    assert(port > 0);
+    mock_server_enqueue(202, "");                              /* challenge */
+    mock_server_enqueue(200, "<p>ranking Argentina one</p>");  /* real page */
+
+    WebFetchCtx ctx = {0};
+    ctx.host_mode = 1;
+    char args[256];
+    snprintf(args, sizeof(args),
+             "{\"url\":\"http://127.0.0.1:%d/v1/chat/completions\"}", port);
+    char *r = tool_web_fetch_handler(args, &ctx);
+    assert(r);
+    assert(strstr(r, "ranking Argentina one") != NULL);  /* retry's body won */
+    assert(mock_server_request_count() == 2);            /* exactly one retry */
+    free(r);
+    mock_server_stop();
+    printf("  PASS: retry_on_empty_challenge\n");
+}
+
+/* A non-empty first response is used as-is — no second request. */
+static void test_no_retry_when_body_present(void) {
+    int port = mock_server_start();
+    assert(port > 0);
+    mock_server_enqueue(200, "<p>full content here</p>");
+
+    WebFetchCtx ctx = {0};
+    ctx.host_mode = 1;
+    char args[256];
+    snprintf(args, sizeof(args),
+             "{\"url\":\"http://127.0.0.1:%d/v1/chat/completions\"}", port);
+    char *r = tool_web_fetch_handler(args, &ctx);
+    assert(r);
+    assert(strstr(r, "full content here") != NULL);
+    assert(mock_server_request_count() == 1);  /* no retry */
+    free(r);
+    mock_server_stop();
+    printf("  PASS: no_retry_when_body_present\n");
+}
+
 int main(void) {
     printf("test_tool_web_fetch:\n");
     test_truncated_saves_full_to_workspace();
+    test_retry_on_empty_challenge();
+    test_no_retry_when_body_present();
     test_html_strip_basic();
     test_html_strip_script();
     test_html_strip_style();

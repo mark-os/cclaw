@@ -31,6 +31,11 @@ static const char *FETCH_USER_AGENT =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
+/* Honest fallback UA. Some CDNs challenge browser-like UAs with an empty shell
+ * but serve a plain client the real page (the inverse of sites that block bots),
+ * so this is only used to retry a fetch that first came back empty. */
+static const char *PLAIN_USER_AGENT = "cclaw/1.0";
+
 /* ── HTML to Markdown converter ──────────────────────────────────── */
 
 static char *extract_href(const char *tag_content, size_t tag_len) {
@@ -336,6 +341,18 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     };
     HttpResponse resp = {0};
     int status = http_do(&opts, &resp);
+
+    /* Anti-bot fallback: some CDNs (e.g. ESPN behind CloudFront) hand a
+     * browser-like UA an empty challenge shell (a 202, or a 2xx with no body)
+     * while serving a plain UA the real page. If the first attempt came back
+     * empty, retry once as cclaw/1.0. A page that is legitimately empty just
+     * comes back empty again — the retry is one cheap extra GET, never a loop. */
+    if (status >= 200 && status < 400 && resp.len == 0 &&
+        opts.user_agent != PLAIN_USER_AGENT) {
+        http_response_free(&resp);
+        opts.user_agent = PLAIN_USER_AGENT;
+        status = http_do(&opts, &resp);
+    }
 
     if (status < 0) {
         /* An ungranted host fails as opaque curl/proxy noise — swap in the

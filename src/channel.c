@@ -310,8 +310,11 @@ void channel_consume_events(sqlite3 *db) {
                  * no trace is indistinguishable from a dead channel. */
                 agent = config_get(db, "default_agent");
                 if (agent)
-                    LOG_WARN_("channel no route ch=%s cid=%s, using default_agent=%s",
+                    LOG_INFO_("channel no route ch=%s cid=%s, using default_agent=%s",
                               ch_name, cid, agent);
+                else
+                    LOG_WARN_("channel no route ch=%s cid=%s and no default_agent"
+                              " — dropping message", ch_name, cid);
             }
             if (!agent) goto del;
 

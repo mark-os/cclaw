@@ -27,13 +27,20 @@ static const char *WEB_FETCH_PARAMS_JSON =
     "},\"required\":[\"url\"]}";
 
 /* Browser-like request headers */
+/* Browser-like UA to satisfy sites that 403 non-browser clients. Deliberately
+ * Firefox, NOT Chrome: some CDNs (ESPN/CloudFront) sinkhole any UA containing
+ * the literal "Chrome/" token with an empty 202 challenge — verified 2026-07-06
+ * that a "Chrome/" UA gets 202/0 while Firefox, Safari, curl and empty all get
+ * 200. A spoofed "Chrome/" without Chrome's TLS/JS fingerprint is the cheapest
+ * bot tell, so it's the most-challenged token; avoiding it sidesteps the trap. */
 static const char *FETCH_USER_AGENT =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) "
+    "Gecko/20100101 Firefox/133.0";
 
-/* Honest fallback UA. Some CDNs challenge browser-like UAs with an empty shell
- * but serve a plain client the real page (the inverse of sites that block bots),
- * so this is only used to retry a fetch that first came back empty. */
+/* Honest fallback UA, used only to retry a fetch that first came back empty.
+ * The Firefox default sidesteps the known "Chrome/" sinkhole, but this is the
+ * backstop for any other CDN that empty-shells our default UA yet serves a
+ * plain client the real page (the inverse of sites that block bots). */
 static const char *PLAIN_USER_AGENT = "cclaw/1.0";
 
 /* ── HTML to Markdown converter ──────────────────────────────────── */

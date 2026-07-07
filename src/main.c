@@ -2429,6 +2429,10 @@ static void print_usage(void) {
            "                                   mint/remove a DB-backed secret (no value arg\n"
            "                                   reads one line from stdin); born with zero host\n"
            "                                   bindings, so its first use always parks\n"
+           "       cclaw route add <channel> <chat_id> <agent> | rm <channel> <chat_id> | list\n"
+           "                                   bind a channel+chat to an agent; chat_id '*' is\n"
+           "                                   the channel-wide default (else falls back to\n"
+           "                                   default_agent)\n"
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
@@ -2614,10 +2618,12 @@ static void ensure_default_agent(const char *base_dir) {
         memory_block_create(g_db, "Assistant", "USER",
             "Information about the user: preferences, context, working style. Update as you learn.",
             NULL, 5000, NULL);
+        /* AGENT gets one functional starter entry (it drives the self-naming
+         * flow). USER starts empty — its description already states the block's
+         * purpose, so a placeholder entry would just be noise the model has to
+         * carry until it edits it away. */
         memory_entry_add(g_db, "Assistant", "AGENT",
             "You are CClaw. You do not have a name yet — ask the user what they would like to call you, then save it here with memory_edit.");
-        memory_entry_add(g_db, "Assistant", "USER",
-            "Record what you learn about the user here: their name, preferences, and how they like you to work.");
     }
     if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
 }
@@ -3300,6 +3306,81 @@ static int secret_main(int argc, char *argv[]) {
     return rc;
 }
 
+/* `cclaw route add <channel> <chat_id> <agent> | rm <channel> <chat_id> | list`
+ * — operator verb binding a channel+chat to an agent (channel_routes). A
+ * chat_id of '*' is the channel-wide default. Resolution at dispatch is exact
+ * (channel,chat_id) -> (channel,'*') -> config default_agent, so with no rows
+ * every chat falls back to the default. Deliberately CLI-only: re-pointing a
+ * chat at another agent is an authority change, not agent self-service. */
+static int route_main(int argc, char *argv[]) {
+    const char *sub = (argc >= 3) ? argv[2] : NULL;
+    sqlite3 *db = verb_db_open();
+    if (!db) return 1;
+    int rc = 0;
+    if (sub && strcmp(sub, "list") == 0) {
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT channel_name, channel_id, agent_name FROM channel_routes"
+                " ORDER BY channel_name, channel_id", -1, &st, NULL) == SQLITE_OK) {
+            int any = 0;
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                printf("%s %s -> %s\n", sqlite3_column_text(st, 0),
+                       sqlite3_column_text(st, 1), sqlite3_column_text(st, 2));
+                any = 1;
+            }
+            sqlite3_finalize(st);
+            if (!any) printf("(no routes — all chats fall back to default_agent)\n");
+        }
+    } else if (sub && strcmp(sub, "add") == 0 && argc >= 6) {
+        const char *ch = argv[3], *cid = argv[4], *agent = argv[5];
+        /* Warn (don't refuse) if the agent isn't registered yet — the operator
+         * may create it later; a route to a missing agent just drops until then. */
+        sqlite3_stmt *ck;
+        int exists = 0;
+        if (sqlite3_prepare_v2(db, "SELECT 1 FROM agents WHERE name=?", -1, &ck, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(ck, 1, agent, -1, SQLITE_STATIC);
+            exists = (sqlite3_step(ck) == SQLITE_ROW);
+            sqlite3_finalize(ck);
+        }
+        if (!exists) fprintf(stderr, "warning: agent '%s' not found in agents table\n", agent);
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "INSERT INTO channel_routes(channel_name, channel_id, agent_name) VALUES(?,?,?)"
+                " ON CONFLICT(channel_name, channel_id) DO UPDATE SET agent_name=excluded.agent_name",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
+            sqlite3_bind_text(st, 2, cid, -1, SQLITE_STATIC);
+            sqlite3_bind_text(st, 3, agent, -1, SQLITE_STATIC);
+            rc = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
+            sqlite3_finalize(st);
+        } else rc = 1;
+        if (rc == 0) printf("route set: %s %s -> %s\n", ch, cid, agent);
+        else fprintf(stderr, "error: add failed\n");
+    } else if (sub && strcmp(sub, "rm") == 0 && argc >= 5) {
+        const char *ch = argv[3], *cid = argv[4];
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "DELETE FROM channel_routes WHERE channel_name=? AND channel_id=?",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
+            sqlite3_bind_text(st, 2, cid, -1, SQLITE_STATIC);
+            rc = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
+            int changed = sqlite3_changes(db);
+            sqlite3_finalize(st);
+            if (rc == 0) printf(changed ? "route removed: %s %s\n" : "no such route: %s %s\n", ch, cid);
+        } else rc = 1;
+    } else {
+        fprintf(stderr, "usage: cclaw route add <channel> <chat_id> <agent>\n"
+                        "       cclaw route rm  <channel> <chat_id>\n"
+                        "       cclaw route list\n"
+                        "  chat_id '*' is the channel-wide default;\n"
+                        "  resolution: exact (channel,chat_id) -> (channel,'*') -> default_agent\n");
+        rc = 2;
+    }
+    sqlite3_close(db);
+    return rc;
+}
+
 int main(int argc, char *argv[]) {
     /* --run-tool: early intercept for sandboxed file tool child. No DB, no key,
      * no config. The child reads its request from fd 3. */
@@ -3320,6 +3401,10 @@ int main(int argc, char *argv[]) {
     if (argc >= 2 && strcmp(argv[1], "sensitive") == 0) return sensitive_main(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "secret-bind") == 0) return secret_bind_main(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "secret") == 0) return secret_main(argc, argv);
+
+    /* route: operator verb binding a channel+chat to an agent (channel_routes).
+     * CLI-only, same rationale as sensitive/secret-bind — an authority change. */
+    if (argc >= 2 && strcmp(argv[1], "route") == 0) return route_main(argc, argv);
 
     int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
     int channel_check = 0, channel_activate_flag = 0;

@@ -15,8 +15,9 @@ typedef struct {
  * (HTTP_PROXY → net_shim → decide()), NOT a pre-flight allowlist — a single
  * check can't see redirects. Returns result struct; caller frees with
  * js_http_result_free(). */
+/* headers: NULL, or a NULL-terminated array of "Name: Value" strings. */
 JsHttpResult js_http_fetch_exec(const char *url, const char *method,
-                                const char *body);
+                                const char *body, const char **headers);
 
 void js_http_result_free(JsHttpResult *r);
 

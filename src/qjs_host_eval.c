@@ -31,6 +31,9 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
 
     const char *method = NULL, *body = NULL;
     int sanitize = 0;
+    char **hdr_lines = NULL;       /* owned "Name: Value" strings */
+    const char **hdr_ptrs = NULL;  /* NULL-terminated view handed to fetch */
+    size_t hdr_n = 0;
 
     if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1])) {
         JSValue m = JS_GetPropertyStr(ctx, argv[1], "method");
@@ -42,22 +45,62 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JSValue s = JS_GetPropertyStr(ctx, argv[1], "sanitize");
         if (JS_ToBool(ctx, s)) sanitize = 1;
         JS_FreeValue(ctx, s);
+
+        /* headers: {Name: Value, ...} → NULL-terminated "Name: Value" array */
+        JSValue h = JS_GetPropertyStr(ctx, argv[1], "headers");
+        if (JS_IsObject(h)) {
+            JSPropertyEnum *tab = NULL;
+            uint32_t n = 0;
+            if (JS_GetOwnPropertyNames(ctx, &tab, &n, h,
+                                       JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+                hdr_lines = calloc(n, sizeof(*hdr_lines));
+                hdr_ptrs = calloc((size_t)n + 1, sizeof(*hdr_ptrs));
+                for (uint32_t i = 0; i < n && hdr_lines && hdr_ptrs; i++) {
+                    const char *key = JS_AtomToCString(ctx, tab[i].atom);
+                    JSValue v = JS_GetProperty(ctx, h, tab[i].atom);
+                    const char *val = JS_ToCString(ctx, v);
+                    if (key && val) {
+                        size_t len = strlen(key) + strlen(val) + 3;
+                        char *line = malloc(len);
+                        if (line) {
+                            snprintf(line, len, "%s: %s", key, val);
+                            hdr_lines[hdr_n] = line;
+                            hdr_ptrs[hdr_n] = line;
+                            hdr_n++;
+                        }
+                    }
+                    if (key) JS_FreeCString(ctx, key);
+                    if (val) JS_FreeCString(ctx, val);
+                    JS_FreeValue(ctx, v);
+                }
+                if (hdr_ptrs) hdr_ptrs[hdr_n] = NULL;
+                JS_FreePropertyEnum(ctx, tab, n);
+            }
+        }
+        JS_FreeValue(ctx, h);
     }
 
-    JsHttpResult r = js_http_fetch_exec(url, method, body);
+    JsHttpResult r = js_http_fetch_exec(url, method, body, hdr_ptrs);
     JS_FreeCString(ctx, url);
     if (method) JS_FreeCString(ctx, method);
     if (body) JS_FreeCString(ctx, body);
-
-    if (r.status < 0) {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "http_request: %s", r.error ? r.error : "unknown error");
-        js_http_result_free(&r);
-        return JS_ThrowTypeError(ctx, "%s", msg);
-    }
+    for (size_t i = 0; i < hdr_n; i++) free(hdr_lines[i]);
+    free(hdr_lines);
+    free(hdr_ptrs);
 
     JSValue result = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, result, "status", JS_NewInt32(ctx, r.status));
+
+    if (r.status < 0) {
+        /* Network/transport failure: return {status:-1, body:"", error} instead
+         * of throwing, so callers branch on r.error/r.status without try/catch
+         * and .body is always a string (no "not a function" on a missing body). */
+        JS_SetPropertyStr(ctx, result, "error",
+            JS_NewString(ctx, r.error ? r.error : "http_request failed"));
+        JS_SetPropertyStr(ctx, result, "body", JS_NewString(ctx, ""));
+        js_http_result_free(&r);
+        return result;
+    }
 
     if (r.body && sanitize) {
         /* sanitize=true strips HTML tags only; untrusted-content wrapping

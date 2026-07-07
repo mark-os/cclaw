@@ -19,7 +19,7 @@ static int tests_passed = 0;
  * The only validation left here is the scheme guard: http:// or https:// only. */
 static void test_invalid_scheme(void) {
     TEST("invalid_scheme");
-    JsHttpResult r = js_http_fetch_exec("ftp://example.com/file", "GET", NULL);
+    JsHttpResult r = js_http_fetch_exec("ftp://example.com/file", "GET", NULL, NULL);
     if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
     if (!r.error || !strstr(r.error, "http://")) {
         FAIL(r.error ? r.error : "NULL"); js_http_result_free(&r); return;
@@ -30,7 +30,7 @@ static void test_invalid_scheme(void) {
 
 static void test_null_url(void) {
     TEST("null_url");
-    JsHttpResult r = js_http_fetch_exec(NULL, "GET", NULL);
+    JsHttpResult r = js_http_fetch_exec(NULL, "GET", NULL, NULL);
     if (r.status != -1) { FAIL("expected error"); js_http_result_free(&r); return; }
     if (!r.error) { FAIL("expected error message"); js_http_result_free(&r); return; }
     js_http_result_free(&r);

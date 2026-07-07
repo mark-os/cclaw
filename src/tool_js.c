@@ -71,7 +71,10 @@ char *tool_js_eval_handler(const char *arguments, void *user_data) {
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
     int rc = tools_register(reg, "js_eval",
                           "Run JavaScript in QuickJS (modern JS; no modules, no top-level await). "
-                          "http_request(url[, opts]) is synchronous HTTP. "
+                          "http_request(url[, {method, body, headers:{Name:Value}, sanitize}]) "
+                          "is synchronous HTTP; returns {status, body} (body is a string, "
+                          "'' on error with an extra {error}). Use .body — e.g. "
+                          "http_request(url).body.match(/re/). Large bodies are truncated. "
                           "File globals: fs.readdir(path[,cb]), fs.readFile(path[,cb]), fs.writeFile(path, data[,cb]), "
                           "fs.stat(path[,cb]), fs.lstat(path[,cb]), fs.cwd(). Only allow-listed hosts work. "
                           "Returns the last expression value (or printed output). "

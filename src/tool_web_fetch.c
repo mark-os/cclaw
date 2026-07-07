@@ -11,7 +11,9 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#define WEB_FETCH_MAX (512 * 1024)
+/* Cap on bytes pulled per fetch. Oversized pages are truncated here (not
+ * hard-errored) and the agent pages the captured text via offset/max_chars. */
+#define WEB_FETCH_MAX (2 * 1024 * 1024)
 #define WEB_FETCH_DEFAULT_MAX_CHARS 20000
 
 static const char *WEB_FETCH_PARAMS_JSON =
@@ -327,6 +329,7 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     } else {
         text = html_to_markdown(resp.data, resp.len);
     }
+    int capped = resp.truncated;  /* source larger than WEB_FETCH_MAX; tail dropped */
     http_response_free(&resp);
 
     if (!text) return strdup("error: out of memory");
@@ -340,9 +343,11 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     int truncated = (off + slice_len < total_len);
 
     /* Build metadata + slice */
-    char meta[128];
-    snprintf(meta, sizeof(meta), "[offset=%zu max_chars=%d total=%zu%s]\n",
-             off, max_chars, total_len, truncated ? " truncated" : "");
+    char meta[160];
+    snprintf(meta, sizeof(meta), "[offset=%zu max_chars=%d total=%zu%s%s]\n",
+             off, max_chars, total_len,
+             truncated ? " truncated" : "",
+             capped ? " capped(source exceeded fetch limit)" : "");
     size_t meta_len = strlen(meta);
 
     /* No storage-time wrapping: the entry is tagged with network_hosts by the

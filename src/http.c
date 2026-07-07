@@ -24,6 +24,7 @@ static void resp_strip_leading_ws(HttpResponse *resp) {
 typedef struct {
     Buf *buf;
     size_t max_bytes;
+    int truncated;          /* set when the cap was hit and the transfer aborted */
 } WriteCbCtx;
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
@@ -31,8 +32,16 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     WriteCbCtx *ctx = userdata;
     Buf *b = ctx->buf;
 
-    if (ctx->max_bytes > 0 && b->len + bytes > ctx->max_bytes)
+    if (ctx->max_bytes > 0 && b->len + bytes > ctx->max_bytes) {
+        /* Keep what fits, flag truncation, and abort by returning 0. curl reads
+         * that as CURLE_WRITE_ERROR, which http_do recognizes (via the flag) as
+         * a clean stop — an oversized page yields its first max_bytes instead of
+         * a hard "Failure writing output to destination" that discards the lot. */
+        size_t room = ctx->max_bytes - b->len;
+        if (room) buf_append(b, (const char *)ptr, room);
+        ctx->truncated = 1;
         return 0;
+    }
 
     buf_append(b, (const char *)ptr, bytes);
     return b->oom ? 0 : bytes;
@@ -151,6 +160,15 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
 
     CURLcode rc = curl_easy_perform(curl);
+
+    /* A write callback that hit the response cap aborts with WRITE_ERROR by
+     * design (ctx.truncated distinguishes it from a genuine write/OOM error);
+     * recover it as a successful, truncated transfer so the partial body and
+     * the real HTTP status survive. */
+    if (rc == CURLE_WRITE_ERROR && wctx.truncated) {
+        rc = CURLE_OK;
+        resp->truncated = 1;
+    }
 
     long status = -1;
     if (rc == CURLE_OK) {

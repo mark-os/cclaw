@@ -6,7 +6,7 @@
 #include <stdio.h>
 
 JsHttpResult js_http_fetch_exec(const char *url, const char *method,
-                                const char *req_body) {
+                                const char *req_body, const char **headers) {
     JsHttpResult r = {.status = -1, .body = NULL, .body_len = 0, .error = NULL};
 
     /* Scheme guard only — egress (host/IP/redirect gating) is enforced per-hop
@@ -22,10 +22,11 @@ JsHttpResult js_http_fetch_exec(const char *url, const char *method,
         .url = url,
         .method = method,
         .body = (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0) ? (req_body ? req_body : "") : NULL,
+        .headers = headers,
         .timeout = 30,
         .follow_redirects = 1,
         .max_redirects = 5,
-        .max_response_bytes = 512 * 1024,
+        .max_response_bytes = 2 * 1024 * 1024,
         .user_agent = "cclaw/1.0",
     };
 

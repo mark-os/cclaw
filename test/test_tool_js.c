@@ -94,10 +94,25 @@ static void test_register(void) {
     PASS();
 }
 
+/* A failed http_request returns {status:-1, body:"", error} — not a thrown
+ * exception. body is always a string so grep-via-JS (.body.match) is safe. */
+static void test_http_request_error_returns_object(void) {
+    TEST("http_request_error_object");
+    char *r = tool_js_eval_handler(
+        "{\"code\":\"var x=http_request('http://127.0.0.1:1/');"
+        "JSON.stringify([typeof x,x.body,typeof x.body,!!x.error])\"}", NULL);
+    /* not a thrown error, and shape is {object, body:'', string, hasError} */
+    if (!r || strncmp(r, "error:", 6) == 0) { FAIL(r ? r : "NULL"); free(r); return; }
+    if (!strstr(r, "[\"object\",\"\",\"string\",true]")) { FAIL(r); free(r); return; }
+    free(r);
+    PASS();
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_tool_js:\n");
     test_basic_eval();
+    test_http_request_error_returns_object();
     test_string_result();
     test_json_stringify();
     test_syntax_error();

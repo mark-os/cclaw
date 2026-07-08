@@ -145,16 +145,15 @@ static void test_tool_calls_result_entry_id(void) {
         "{\"x\":1}", "call_1", "test_tool", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
     assert(tc_entry > 0);
 
-    /* Insert into tool_calls table */
+    /* Insert into tool_calls table (workflow state only — args in entries.content) */
     sqlite3_stmt *stmt;
-    const char *ins = "INSERT INTO tool_calls(session_id, entry_id, call_id, name, arguments)"
-                      " VALUES(?,?,?,?,?);";
+    const char *ins = "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
+                      " VALUES(?,?,?,?);";
     assert(sqlite3_prepare_v2(db, ins, -1, &stmt, NULL) == SQLITE_OK);
     sqlite3_bind_int64(stmt, 1, sid);
     sqlite3_bind_int64(stmt, 2, tc_entry);
     sqlite3_bind_text(stmt, 3, "call_1", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, "test_tool", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 5, "{\"x\":1}", -1, SQLITE_STATIC);
     assert(sqlite3_step(stmt) == SQLITE_DONE);
     sqlite3_finalize(stmt);
 

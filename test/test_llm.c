@@ -83,7 +83,8 @@ static void test_tool_calls_response(void) {
 
     sqlite3_stmt *s;
     sqlite3_prepare_v2(db,
-        "SELECT call_id, name, arguments FROM tool_calls WHERE session_id=?;", -1, &s, NULL);
+        "SELECT tc.call_id, tc.name, e.content FROM tool_calls tc"
+        " JOIN entries e ON e.id=tc.entry_id WHERE tc.session_id=?;", -1, &s, NULL);
     sqlite3_bind_int64(s, 1, sid);
     if (sqlite3_step(s) != SQLITE_ROW) { sqlite3_finalize(s); FAIL("no tool_call row"); }
     if (strcmp((const char *)sqlite3_column_text(s, 0), "call_abc") != 0) { sqlite3_finalize(s); FAIL("wrong tc id"); }

@@ -24,16 +24,16 @@ static void test_get_pending_empty(void) {
 
 static void test_insert_and_get_pending(void) {
     sqlite3 *db = setup();
-    /* Create session + entry for tool_calls to reference */
+    /* Create session + tool_call entry (args live in entries.content) */
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
-    Message msg = {.role = ROLE_ASSISTANT, .content = "hello"};
-    int64_t eid = entry_append_with_turn(db, sid, &msg, 1);
+    int64_t eid = entry_append_typed(db, sid, 1, "tool_call", 0,
+        "{\"path\":\"x.txt\"}", "call_1", "file_read", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
     assert(eid > 0);
 
-    /* Insert tool_call rows */
-    const char *sql = "INSERT INTO tool_calls(session_id, entry_id, call_id, name, arguments)"
-                      " VALUES(?, ?, 'call_1', 'file_read', '{\"path\":\"x.txt\"}');";
+    /* Insert tool_calls workflow row (no arguments column) */
+    const char *sql = "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
+                      " VALUES(?, ?, 'call_1', 'file_read');";
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, sid);
@@ -57,11 +57,11 @@ static void test_insert_and_get_pending(void) {
 static void test_set_status(void) {
     sqlite3 *db = setup();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
-    Message msg = {.role = ROLE_ASSISTANT, .content = "hi"};
-    int64_t eid = entry_append_with_turn(db, sid, &msg, 1);
+    int64_t eid = entry_append_typed(db, sid, 1, "tool_call", 0,
+        "{}", "call_2", "web_fetch", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
 
-    const char *sql = "INSERT INTO tool_calls(session_id, entry_id, call_id, name, arguments)"
-                      " VALUES(?, ?, 'call_2', 'web_fetch', '{}');";
+    const char *sql = "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
+                      " VALUES(?, ?, 'call_2', 'web_fetch');";
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, sid);

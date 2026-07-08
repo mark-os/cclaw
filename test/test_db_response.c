@@ -59,10 +59,10 @@ static void test_ingest_response(void) {
     assert(result.completion_tokens == 50);
     assert(result.cost_nano == 1500);
 
-    /* Verify tool_calls table */
+    /* Verify tool_calls table (workflow state only — args in entries.content) */
     sqlite3_stmt *stmt;
     sqlite3_prepare_v2(db,
-        "SELECT call_id, name, arguments FROM tool_calls WHERE call_id='call_typed';",
+        "SELECT call_id, name FROM tool_calls WHERE call_id='call_typed';",
         -1, &stmt, NULL);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "call_typed") == 0);

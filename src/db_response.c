@@ -8,7 +8,9 @@
 #include <stdio.h>
 
 /* SQL response ingress.
- * Tool call arguments validated with json() — invalid args stored verbatim. */
+ * Tool call arguments validated with json() — stored in entries.content as
+ * normalized text (single source of truth). Invalid args get an immediate error
+ * tool_result. tool_calls table holds only workflow state, no arguments. */
 
 int db_tool_call_complete_with_result(sqlite3 *db, int64_t entry_id,
                                       const char *call_id, int64_t result_entry_id) {
@@ -259,19 +261,22 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
         return LLM_RESP_DBERR;
     }
 
-    /* ── Tool call entries + tool_calls table rows ── */
+    /* ── Tool call entries + tool_calls workflow rows ──
+     * Arguments are validated with json() and stored in entries.content (single
+     * source of truth). tool_calls holds only workflow state — no arguments.
+     * Invalid JSON → immediate error tool_result so the model sees feedback. */
     if (tc && tc_count > 0) {
         const char *tc_ins_sql =
-            "INSERT INTO tool_calls(session_id, entry_id, call_id, name, arguments)"
-            " VALUES(?1,?2,?3,?4,CASE WHEN json_valid(?5) THEN json(?5) ELSE ?5 END);";
+            "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
+            " VALUES(?1,?2,?3,?4);";
         sqlite3_stmt *ins = NULL;
         sqlite3_prepare_v2(db, tc_ins_sql, -1, &ins, NULL);
 
+        /* Validator: json() normalizes valid JSON, returns NULL on invalid. */
+        sqlite3_stmt *jval = NULL;
+        sqlite3_prepare_v2(db, "SELECT json(?1)", -1, &jval, NULL);
+
         int idx = 0;
-        /* WAL safety: this loop writes (INSERT tool_calls) mid-iteration of
-         * `tc`, but safe because json_each() over a bound parameter takes no
-         * read snapshot.  If this query ever JOINs a real table, restructure
-         * to collect-then-write — see channel_consume_events in src/channel.c. */
         while (sqlite3_step(tc) == SQLITE_ROW) {
             const char *id   = (const char *)sqlite3_column_text(tc, 0);
             const char *name = (const char *)sqlite3_column_text(tc, 1);
@@ -283,20 +288,43 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
             }
             const char *args_val = (args && args[0]) ? args : "{}";
 
+            /* Validate + normalize arguments JSON */
+            const char *normalized = NULL;
+            if (jval) {
+                sqlite3_bind_text(jval, 1, args_val, -1, SQLITE_STATIC);
+                if (sqlite3_step(jval) == SQLITE_ROW)
+                    normalized = (const char *)sqlite3_column_text(jval, 0);
+            }
+
+            if (!normalized) {
+                /* Invalid JSON from model — emit error tool_result directly */
+                entry_append_typed(db, session_id, turn_id, "tool_call", part++,
+                                   "{}", id, name,
+                                   0, STOP_REASON_NONE, NULL, 0, 0, 0);
+                entry_append_typed(db, session_id, turn_id, "tool_result", part++,
+                                   "error: invalid JSON in tool call arguments",
+                                   id, name, 1, STOP_REASON_NONE, NULL, 0, 0, 0);
+                if (jval) sqlite3_reset(jval);
+                idx++;
+                continue;
+            }
+
             int64_t tc_entry = entry_append_typed(db, session_id, turn_id, "tool_call", part++,
-                                                  args_val, id, name,
+                                                  normalized, id, name,
                                                   0, STOP_REASON_NONE, NULL, 0, 0, 0);
+            if (jval) sqlite3_reset(jval);
+
             if (tc_entry > 0 && ins) {
                 sqlite3_bind_int64(ins, 1, session_id);
                 sqlite3_bind_int64(ins, 2, tc_entry);
                 sqlite3_bind_text(ins, 3, id, -1, SQLITE_STATIC);
                 sqlite3_bind_text(ins, 4, name ? name : "", -1, SQLITE_STATIC);
-                sqlite3_bind_text(ins, 5, args_val, -1, SQLITE_STATIC);
                 sqlite3_step(ins);
                 sqlite3_reset(ins);
             }
             idx++;
         }
+        if (jval) sqlite3_finalize(jval);
         if (ins) sqlite3_finalize(ins);
     }
     if (tc) sqlite3_finalize(tc);

@@ -1896,7 +1896,7 @@ int db_tool_call_any_running(sqlite3 *db, int64_t session_id) {
 PendingToolCall *db_tool_call_get_pending(sqlite3 *db, int64_t session_id, int *out_count) {
     *out_count = 0;
     const char *sql =
-        "SELECT tc.call_id, tc.name, tc.arguments, tc.entry_id, e.turn_id"
+        "SELECT tc.call_id, tc.name, e.content, tc.entry_id, e.turn_id"
         " FROM tool_calls tc JOIN entries e ON e.id=tc.entry_id"
         " WHERE tc.session_id=? AND tc.status='pending'"
         " ORDER BY tc.rowid;";

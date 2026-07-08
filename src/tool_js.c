@@ -71,12 +71,19 @@ char *tool_js_eval_handler(const char *arguments, void *user_data) {
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
     int rc = tools_register(reg, "js_eval",
                           "Run JavaScript in QuickJS (modern JS; no modules, no top-level await). "
+                          "Examples:\n"
+                          "  var data = JSON.parse(fs.readFile('file.json'));\n"
+                          "  var r = http_request('https://api.example.com/data'); var obj = JSON.parse(r.body);\n"
+                          "  fs.writeFile('out.txt', result); // returns bytes written\n"
                           "http_request(url[, {method, body, headers:{Name:Value}, sanitize}]) "
-                          "is synchronous HTTP; returns {status, body} (body is a string, "
-                          "'' on error with an extra {error}). Use .body — e.g. "
-                          "http_request(url).body.match(/re/). Large bodies are truncated. "
-                          "File globals: fs.readdir(path[,cb]), fs.readFile(path[,cb]), fs.writeFile(path, data[,cb]), "
-                          "fs.stat(path[,cb]), fs.lstat(path[,cb]), fs.cwd(). Only allow-listed hosts work. "
+                          "is synchronous; returns {status, body, error}. "
+                          "File globals: fs.readFile(path) returns string, "
+                          "fs.writeFile(path, data) returns bytes written, "
+                          "fs.readdir(path) returns [{name,type},...], "
+                          "fs.stat(path) returns {size,isDir,mtime}, fs.cwd() returns string. "
+                          "All throw on error; all accept optional callback(err, result) as last arg. "
+                          "Heap is 4MB — JSON.parse works up to ~1MB source; larger data will OOM. "
+                          "Only allow-listed hosts work. "
                           "Returns the last expression value (or printed output). "
                           "When using 'filename', must be a .qjs file.",
                           JSEVAL_PARAMS_JSON, tool_js_eval_handler, ctx);

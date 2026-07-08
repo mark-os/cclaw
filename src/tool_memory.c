@@ -1,16 +1,54 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_memory.h"
 #include "db.h"
-#include "tool_parse.h"
-#include "jsmn_util.h"
-#include "json_escape.h"
 #include "validate.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MEM_TOK_CAP 512
 #define MEM_MAX_ENTRIES 64
+
+/* --- Argument parsing (via SQLite's JSON1, not jsmn) ---
+ * This tool always runs in-process with a live db handle (EXEC_THREAD,
+ * never forked into the DB-less --run-tool child), so there's no reason to
+ * hand-tokenize "arguments" — SQLite already owns JSON parsing for data we
+ * hold a db connection for. See AGENTS.md: jsmn is for untrusted/streaming
+ * JSON with no db behind it; this isn't that. */
+
+/* Top-level string field, or NULL if absent/wrong-type/malformed JSON. */
+static char *arg_str(sqlite3 *db, const char *args_json, const char *path) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT CASE WHEN json_type(?1,?2)='text' THEN json_extract(?1,?2) END",
+            -1, &st, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(st, 1, args_json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, path, -1, SQLITE_STATIC);
+    char *out = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) out = strdup(v);
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+/* True iff args_json's field at path is a JSON array (false if absent,
+ * a different type, or args_json itself isn't valid JSON). */
+static int arg_is_array(sqlite3 *db, const char *args_json, const char *path) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "SELECT json_type(?1,?2)", -1, &st, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(st, 1, args_json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, path, -1, SQLITE_STATIC);
+    int is_arr = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(st, 0);
+        is_arr = t && strcmp(t, "array") == 0;
+    }
+    sqlite3_finalize(st);
+    return is_arr;
+}
 
 /* --- Render helper --- */
 
@@ -97,34 +135,32 @@ static char *tool_memory_create_handler(const char *arguments, void *user_data) 
     if (!ctx || !ctx->db || !ctx->agent_name)
         return strdup("error: memory tools unavailable (no agent context)");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
-
-    const char *label = targ_str(&ta, "label");
-    const char *desc = targ_str(&ta, "description");
-    const char *placement = targ_str(&ta, "placement");
+    char *label = arg_str(ctx->db, arguments, "$.label");
+    char *desc = arg_str(ctx->db, arguments, "$.description");
+    char *placement = arg_str(ctx->db, arguments, "$.placement");
     if (!label || !desc) {
-        tool_parse_free(&ta);
+        free(label); free(desc); free(placement);
         return strdup("error: 'label' and 'description' required");
     }
     if (!is_valid_name(label)) {
-        tool_parse_free(&ta);
+        free(label); free(desc); free(placement);
         return strdup("error: label must be alphanumeric (A-Z, a-z, 0-9, _, -)");
     }
     if (placement && strcmp(placement, "system") != 0 && strcmp(placement, "context") != 0) {
-        tool_parse_free(&ta);
+        free(label); free(desc); free(placement);
         return strdup("error: placement must be 'system' or 'context'");
     }
 
     int64_t id = memory_block_create(ctx->db, ctx->agent_name, label, desc, "", 5000, placement);
+    free(desc); free(placement);
     if (id < 0) {
-        tool_parse_free(&ta);
+        free(label);
         return strdup("error: failed to create block (label may already exist)");
     }
 
     char buf[128];
     snprintf(buf, sizeof(buf), "ok: memory block '%s' created", label);
-    tool_parse_free(&ta);  /* frees label — build the message first */
+    free(label);
     return strdup(buf);
 }
 
@@ -133,28 +169,25 @@ static char *tool_memory_add_handler(const char *arguments, void *user_data) {
     if (!ctx || !ctx->db || !ctx->agent_name)
         return strdup("error: memory tools unavailable (no agent context)");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
-
-    const char *block = targ_str(&ta, "block");
-    const char *text = targ_str(&ta, "text");
+    char *block = arg_str(ctx->db, arguments, "$.block");
+    char *text = arg_str(ctx->db, arguments, "$.text");
     if (!block || !text) {
-        tool_parse_free(&ta);
+        free(block); free(text);
         return strdup("error: 'block' and 'text' required");
     }
 
     MemoryBlock *mb = memory_block_get(ctx->db, ctx->agent_name, block);
-    if (!mb) { tool_parse_free(&ta); return strdup("error: block not found"); }
-    if (mb->read_only) { memory_block_free(mb); tool_parse_free(&ta); return strdup("error: block is read-only"); }
+    if (!mb) { free(block); free(text); return strdup("error: block not found"); }
+    if (mb->read_only) { memory_block_free(mb); free(block); free(text); return strdup("error: block is read-only"); }
     memory_block_free(mb);
 
     int rc = memory_entry_add_guarded(ctx->db, ctx->agent_name, block, text);
-    if (rc == 0) { tool_parse_free(&ta); return strdup("error: would exceed char_limit"); }
-    if (rc < 0) { tool_parse_free(&ta); return strdup("error: failed to add entry"); }
+    free(text);
+    if (rc == 0) { free(block); return strdup("error: would exceed char_limit"); }
+    if (rc < 0) { free(block); return strdup("error: failed to add entry"); }
 
-    /* Render while `block` (owned by ta) is still valid, then free ta. */
     char *out = render_block(ctx->db, ctx->agent_name, block);
-    tool_parse_free(&ta);
+    free(block);
     return out;
 }
 
@@ -163,75 +196,55 @@ static char *tool_memory_edit_handler(const char *arguments, void *user_data) {
     if (!ctx || !ctx->db || !ctx->agent_name)
         return strdup("error: memory tools unavailable (no agent context)");
 
-    jsmntok_t toks[MEM_TOK_CAP];
-    jsmn_parser parser;
-    jsmn_init(&parser);
-    int ntoks = jsmn_parse(&parser, arguments, strlen(arguments), toks, MEM_TOK_CAP);
-    if (ntoks < 1 || toks[0].type != JSMN_OBJECT)
-        return strdup("error: invalid JSON arguments");
-
-    int bvi = jtok_find(toks, ntoks, arguments, "block");
-    int evi = jtok_find(toks, ntoks, arguments, "edits");
-    if (bvi < 0 || toks[bvi].type != JSMN_STRING)
-        return strdup("error: missing or invalid 'block'");
-    if (evi < 0 || toks[evi].type != JSMN_ARRAY)
+    char *block = arg_str(ctx->db, arguments, "$.block");
+    if (!block) return strdup("error: missing or invalid 'block'");
+    if (!arg_is_array(ctx->db, arguments, "$.edits")) {
+        free(block);
         return strdup("error: missing or invalid 'edits'");
-
-    /* Extract block label */
-    size_t blen = (size_t)(toks[bvi].end - toks[bvi].start);
-    char *block = malloc(blen + 1);
-    blen = json_unescape(block, blen + 1, arguments + toks[bvi].start, blen);
-    block[blen] = '\0';
+    }
 
     MemoryBlock *mb = memory_block_get(ctx->db, ctx->agent_name, block);
     if (!mb) { free(block); return strdup("error: block not found"); }
     if (mb->read_only) { memory_block_free(mb); free(block); return strdup("error: block is read-only"); }
     memory_block_free(mb);
 
-    int n_edits = toks[evi].size;
+    sqlite3_stmt *cnt;
+    int n_edits = 0;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.edits'))",
+            -1, &cnt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(cnt, 1, arguments, -1, SQLITE_STATIC);
+        if (sqlite3_step(cnt) == SQLITE_ROW) n_edits = sqlite3_column_int(cnt, 0);
+        sqlite3_finalize(cnt);
+    }
     if (n_edits > MEM_MAX_ENTRIES) { free(block); return strdup("error: too many edits"); }
 
     int succeeded = 0, failed = 0;
     char failed_nums[256] = "";
     size_t fpos = 0;
 
-    int ei = evi + 1;
-    for (int i = 0; i < n_edits; i++) {
-        if (toks[ei].type != JSMN_OBJECT) { ei = jsmn_skip(toks, ei, ntoks); continue; }
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT json_extract(value,'$.number'), json_extract(value,'$.text')"
+            " FROM json_each(json_extract(?1,'$.edits'))",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, arguments, -1, SQLITE_STATIC);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            int number = (sqlite3_column_type(st, 0) == SQLITE_INTEGER)
+                             ? sqlite3_column_int(st, 0) : -1;
+            const char *text = (const char *)sqlite3_column_text(st, 1);
+            if (number < 1 || !text) continue;
 
-        int number = -1;
-        const char *tp = NULL;
-        size_t tl = 0;
-
-        int fj = ei + 1;
-        for (int k = 0; k < toks[ei].size; k++) {
-            const jsmntok_t *kt = &toks[fj];
-            const jsmntok_t *vt = &toks[fj + 1];
-            if (jtok_key_eq(kt, arguments, "number") && vt->type == JSMN_PRIMITIVE) {
-                number = atoi(arguments + vt->start);
-            } else if (jtok_key_eq(kt, arguments, "text") && vt->type == JSMN_STRING) {
-                tp = arguments + vt->start;
-                tl = (size_t)(vt->end - vt->start);
+            int rc = memory_entry_set(ctx->db, ctx->agent_name, block, number, text);
+            if (rc == 0) {
+                succeeded++;
+            } else {
+                failed++;
+                fpos += (size_t)snprintf(failed_nums + fpos, sizeof(failed_nums) - fpos,
+                                         "%s#%d", fpos > 0 ? ", " : "", number);
             }
-            fj = jsmn_skip(toks, fj + 1, ntoks);
         }
-        ei = jsmn_skip(toks, ei, ntoks);
-
-        if (number < 1 || !tp) continue;
-
-        char *text = malloc(tl + 1);
-        tl = json_unescape(text, tl + 1, tp, tl);
-        text[tl] = '\0';
-
-        int rc = memory_entry_set(ctx->db, ctx->agent_name, block, number, text);
-        free(text);
-        if (rc == 0) {
-            succeeded++;
-        } else {
-            failed++;
-            fpos += (size_t)snprintf(failed_nums + fpos, sizeof(failed_nums) - fpos,
-                                     "%s#%d", fpos > 0 ? ", " : "", number);
-        }
+        sqlite3_finalize(st);
     }
 
     char *rendered = render_block(ctx->db, ctx->agent_name, block);
@@ -259,42 +272,42 @@ static char *tool_memory_delete_handler(const char *arguments, void *user_data) 
     if (!ctx || !ctx->db || !ctx->agent_name)
         return strdup("error: memory tools unavailable (no agent context)");
 
-    jsmntok_t toks[MEM_TOK_CAP];
-    jsmn_parser parser;
-    jsmn_init(&parser);
-    int ntoks = jsmn_parse(&parser, arguments, strlen(arguments), toks, MEM_TOK_CAP);
-    if (ntoks < 1 || toks[0].type != JSMN_OBJECT)
-        return strdup("error: invalid JSON arguments");
-
-    int bvi = jtok_find(toks, ntoks, arguments, "block");
-    int nvi = jtok_find(toks, ntoks, arguments, "numbers");
-    if (bvi < 0 || toks[bvi].type != JSMN_STRING)
-        return strdup("error: missing or invalid 'block'");
-    if (nvi < 0 || toks[nvi].type != JSMN_ARRAY)
+    char *block = arg_str(ctx->db, arguments, "$.block");
+    if (!block) return strdup("error: missing or invalid 'block'");
+    if (!arg_is_array(ctx->db, arguments, "$.numbers")) {
+        free(block);
         return strdup("error: missing or invalid 'numbers'");
-
-    /* Extract block label */
-    size_t blen = (size_t)(toks[bvi].end - toks[bvi].start);
-    char *block = malloc(blen + 1);
-    blen = json_unescape(block, blen + 1, arguments + toks[bvi].start, blen);
-    block[blen] = '\0';
+    }
 
     MemoryBlock *mb = memory_block_get(ctx->db, ctx->agent_name, block);
     if (!mb) { free(block); return strdup("error: block not found"); }
     if (mb->read_only) { memory_block_free(mb); free(block); return strdup("error: block is read-only"); }
     memory_block_free(mb);
 
-    int n = toks[nvi].size;
+    sqlite3_stmt *cnt;
+    int n = 0;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.numbers'))",
+            -1, &cnt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(cnt, 1, arguments, -1, SQLITE_STATIC);
+        if (sqlite3_step(cnt) == SQLITE_ROW) n = sqlite3_column_int(cnt, 0);
+        sqlite3_finalize(cnt);
+    }
     if (n > MEM_MAX_ENTRIES) { free(block); return strdup("error: too many numbers"); }
 
     int nums[MEM_MAX_ENTRIES];
-    int ni = nvi + 1;
-    for (int i = 0; i < n; i++) {
-        nums[i] = atoi(arguments + toks[ni].start);
-        ni++;
+    int idx = 0;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT value FROM json_each(json_extract(?1,'$.numbers'))",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, arguments, -1, SQLITE_STATIC);
+        while (idx < MEM_MAX_ENTRIES && sqlite3_step(st) == SQLITE_ROW)
+            nums[idx++] = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
     }
 
-    int deleted = memory_entries_delete(ctx->db, ctx->agent_name, block, nums, n);
+    int deleted = memory_entries_delete(ctx->db, ctx->agent_name, block, nums, idx);
 
     char *rendered = render_block(ctx->db, ctx->agent_name, block);
     free(block);

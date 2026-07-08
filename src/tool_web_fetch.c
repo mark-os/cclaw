@@ -23,7 +23,8 @@ static const char *WEB_FETCH_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"url\":{\"type\":\"string\",\"description\":\"URL to fetch (HTTP GET)\"},"
     "\"offset\":{\"type\":\"integer\",\"description\":\"Character offset to start from (default 0)\"},"
-    "\"max_chars\":{\"type\":\"integer\",\"description\":\"Max characters to return (default 20000)\"}"
+    "\"max_chars\":{\"type\":\"integer\",\"description\":\"Max characters to return (default 20000)\"},"
+    "\"raw\":{\"type\":\"boolean\",\"description\":\"Return raw response without HTML-to-markdown conversion (auto-skipped for JSON responses)\"}"
     "},\"required\":[\"url\"]}";
 
 /* Browser-like request headers */
@@ -308,6 +309,7 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     if (offset < 0) offset = 0;
     int max_chars = targ_int(&ta, "max_chars", WEB_FETCH_DEFAULT_MAX_CHARS);
     if (max_chars <= 0) max_chars = WEB_FETCH_DEFAULT_MAX_CHARS;
+    int raw = targ_bool(&ta, "raw", 0);
 
     /* Capture a save key from the URL now, before ta (and url) are freed — used
      * only if the result turns out truncated (see web_fetch_save_full). */
@@ -389,9 +391,12 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
         return msg ? msg : strdup("error: HTTP error");
     }
 
-    /* If server returned markdown, use body as-is; otherwise convert HTML */
+    /* If server returned markdown or JSON, or raw requested, use body as-is */
     char *text;
-    if (strncasecmp(resp.content_type, "text/markdown", 13) == 0) {
+    int skip_convert = raw
+        || strncasecmp(resp.content_type, "text/markdown", 13) == 0
+        || strncasecmp(resp.content_type, "application/json", 16) == 0;
+    if (skip_convert) {
         text = resp.data;
         resp.data = NULL; /* take ownership */
     } else {
@@ -449,9 +454,13 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
 int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx) {
     int rc = tools_register(reg, "web_fetch",
                           "Fetch a URL via HTTP GET and return content as markdown. "
+                          "Use raw:true to skip HTML-to-markdown (auto-skipped for JSON responses). "
                           "Truncated pages: page via offset+max_chars, or read/grep "
                           "the full copy saved under workspace .tool_results/ (path "
-                          "given in the result).",
+                          "given in the result). Examples:\n"
+                          "  {\"url\":\"https://api.example.com/data\"} — JSON auto-detected, returned raw\n"
+                          "  {\"url\":\"https://example.com\",\"max_chars\":5000} — first 5000 chars of markdown\n"
+                          "  {\"url\":\"https://example.com\",\"raw\":true} — skip HTML-to-markdown conversion",
                           WEB_FETCH_PARAMS_JSON, tool_web_fetch_handler, ctx);
     if (rc == 0)  /* sandboxed broker; egress via per-hop proxy decide() */
         tools_set_recipe(reg, "web_fetch", (ToolRecipe){EXEC_SANDBOX, SBX_WEB, NULL});

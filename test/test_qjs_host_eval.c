@@ -68,16 +68,15 @@ static void test_fs_write_read_roundtrip(void) {
     snprintf(code, sizeof(code),
         "\"var w = fs.writeFile('%s', 'hello'); "
         "var r = fs.readFile('%s'); "
-        "w[0] + '|' + w[1] + '|' + r[0] + '|' + r[1]\"", path, path);
-    snprintf(want, sizeof(want), "5|0|hello|0");
+        "w + '|' + r\"", path, path);
+    snprintf(want, sizeof(want), "5|hello");
     expect_eq("fs_write_read_roundtrip", code, want);
 }
 
 static void test_fs_read_missing(void) {
-    /* ENOENT is 2 on every target this project ships to (Linux/glibc+musl). */
-    expect_eq("fs_read_missing",
-        "\"var r = fs.readFile('/tmp/test_qjs_host_eval_missing_xyz'); r[0] + '|' + r[1]\"",
-        "null|2");
+    expect_error("fs_read_missing",
+        "\"fs.readFile('/tmp/test_qjs_host_eval_missing_xyz')\"",
+        "No such file");
 }
 
 static void test_fs_readdir(void) {
@@ -89,15 +88,15 @@ static void test_fs_readdir(void) {
     f = fopen(f2, "w"); fputs("y", f); fclose(f);
     snprintf(code, sizeof(code),
         "\"var r = fs.readdir('%s'); "
-        "var names = []; for (var i = 0; i < r[0].length; i++) names.push(r[0][i].name + ':' + r[0][i].type); "
-        "names.sort(); names.join(',') + '|' + r[1]\"", rd);
-    expect_eq("fs_readdir", code, "a.txt:file,b.txt:file,subdir:dir|0");
+        "var names = []; for (var i = 0; i < r.length; i++) names.push(r[i].name + ':' + r[i].type); "
+        "names.sort(); names.join(',')\"", rd);
+    expect_eq("fs_readdir", code, "a.txt:file,b.txt:file,subdir:dir");
 }
 
 static void test_fs_readdir_missing(void) {
-    expect_eq("fs_readdir_missing",
-        "\"var r = fs.readdir('/tmp/test_qjs_host_eval_missing_dir'); r[0] + '|' + r[1]\"",
-        "null|2");
+    expect_error("fs_readdir_missing",
+        "\"fs.readdir('/tmp/test_qjs_host_eval_missing_dir')\"",
+        "No such file");
 }
 
 static void test_fs_stat(void) {
@@ -105,16 +104,16 @@ static void test_fs_stat(void) {
     snprintf(path, sizeof(path), "%s/hello.txt", WORK_DIR);
     FILE *f = fopen(path, "w"); fputs("hello", f); fclose(f);
     snprintf(code, sizeof(code),
-        "\"var r = fs.stat('%s'); r[0].size + '|' + r[0].isDir + '|' + r[1]\"", path);
-    snprintf(want, sizeof(want), "5|false|0");
+        "\"var r = fs.stat('%s'); r.size + '|' + r.isDir\"", path);
+    snprintf(want, sizeof(want), "5|false");
     expect_eq("fs_stat_file", code, want);
 }
 
 static void test_fs_stat_dir(void) {
     char code[768];
     snprintf(code, sizeof(code),
-        "\"var r = fs.stat('%s'); r[0].isDir + '|' + r[1]\"", WORK_DIR);
-    expect_eq("fs_stat_dir", code, "true|0");
+        "\"var r = fs.stat('%s'); r.isDir\"", WORK_DIR);
+    expect_eq("fs_stat_dir", code, "true");
 }
 
 static void test_fs_lstat_symlink(void) {
@@ -123,8 +122,8 @@ static void test_fs_lstat_symlink(void) {
     snprintf(link, sizeof(link), "%s/hello.link", WORK_DIR);
     if (symlink(target, link) != 0) { TEST("fs_lstat_symlink"); FAIL("symlink() setup failed"); return; }
     snprintf(code, sizeof(code),
-        "\"var r = fs.lstat('%s'); r[0].isLink + '|' + r[1]\"", link);
-    expect_eq("fs_lstat_symlink", code, "true|0");
+        "\"var r = fs.lstat('%s'); r.isLink\"", link);
+    expect_eq("fs_lstat_symlink", code, "true");
 }
 
 static void test_fs_cwd(void) {
@@ -134,10 +133,20 @@ static void test_fs_cwd(void) {
     /* WORK_DIR may itself be a symlink (e.g. macOS /tmp) — compare against
      * what getcwd() resolves to, not the literal WORK_DIR string. */
     getcwd(cur_cwd, sizeof(cur_cwd));
-    snprintf(code, sizeof(code), "\"var r = fs.cwd(); r[0] + '|' + r[1]\"");
-    snprintf(want, sizeof(want), "%s|0", cur_cwd);
+    snprintf(code, sizeof(code), "\"fs.cwd()\"");
+    snprintf(want, sizeof(want), "%s", cur_cwd);
     expect_eq("fs_cwd", code, want);
     chdir(old_cwd);
+}
+
+/* ── Heap limit: verify large JSON parse works with 4MB heap ───── */
+
+static void test_large_json_parse(void) {
+    /* ~500KB generated JSON string — would OOM on the old 1MB heap */
+    expect_eq("large_json_parse",
+        "\"var s = '['; for(var i=0;i<10000;i++) s += '{\\\"x\\\":'+i+'},'; "
+        "s = s.slice(0,-1) + ']'; JSON.parse(s).length\"",
+        "10000");
 }
 
 /* ── console.log / print capture ─────────────────────────────────── */
@@ -229,6 +238,8 @@ int main(void) {
     test_fs_stat_dir();
     test_fs_lstat_symlink();
     test_fs_cwd();
+
+    test_large_json_parse();
 
     test_console_log_single();
     test_console_log_multi_args();

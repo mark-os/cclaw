@@ -113,8 +113,40 @@ Same workspace restriction as `file_read`/`file_write` tools. Injected as global
 
 - HTTP response + parsed JSON + processing = easily 2-4MB
 - Make heap configurable per-agent in config.json
-- Default 1MB for `js_eval`, 4-8MB for tools with I/O
+- Default 4MB for `js_eval` (raised from 1MB after pogoplug session)
 - Legacy ARM targets (128MB RAM): keep it tight, maybe 2MB max
+
+### JSON.query — jsmn-backed field extraction
+
+`JSON.parse` materializes the entire object tree in the JS heap (~3-4x source
+size). For large API responses where the agent only needs a few fields, this
+wastes the entire heap budget on throw-away data.
+
+Proposed: expose a `json_query(source, path)` global backed by the vendored jsmn
+tokenizer. jsmn tokenizes the source string in-place with a flat token array
+(outside the JS heap), walks to the requested JSON path, and returns only the
+extracted value as a JS string or parsed primitive.
+
+```javascript
+// source can be a string or a file path
+var name = json_query(bigJsonString, "events.0.name");       // → "Egypt at Argentina"
+var count = json_query(bigJsonString, "events.#");           // → 2 (array length)
+var slice = json_query(bigJsonString, "events.0");           // → JSON substring (as string)
+```
+
+Memory model:
+- Source string: already in JS heap (from `fs.readFile` or `http_request().body`)
+- jsmn token array: C malloc, outside JS heap (~16 bytes × num_tokens)
+- Result: only the extracted substring enters the JS heap
+
+This lets an agent extract fields from a 1.5MB response without blowing the 4MB
+heap — only the source string + small result are in the JS budget.
+
+Alternative: file-path mode that reads + tokenizes without ever loading the full
+content into JS heap:
+```javascript
+var name = json_query_file("/path/to/big.json", "events.0.name");
+```
 
 ## Self-Reflection / Introspection
 

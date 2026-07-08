@@ -143,18 +143,12 @@ static JSValue fs_return(JSContext *ctx, JSValueConst cb, JSValue result, int er
         JS_FreeValue(ctx, ret);
         return JS_UNDEFINED;
     }
-    /* Tuple mode */
+    /* Direct mode: return value on success, throw on error */
     if (err) {
         JS_FreeValue(ctx, result);
-        JSValue arr = JS_NewArray(ctx);
-        JS_SetPropertyUint32(ctx, arr, 0, JS_NULL);
-        JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, err));
-        return arr;
+        return JS_ThrowTypeError(ctx, "fs error: %s", strerror(err));
     }
-    JSValue arr = JS_NewArray(ctx);
-    JS_SetPropertyUint32(ctx, arr, 0, result);
-    JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, 0));
-    return arr;
+    return result;
 }
 
 /* Detect callback: last arg if it's a function */
@@ -390,7 +384,7 @@ void qjs_register_eval_host_functions(JSContext *ctx) {
 
 /* ── In-process eval driver (qjs_eval_run) ──────────────────────────────── */
 
-#define QJS_EVAL_HEAP_SIZE       (1024 * 1024)
+#define QJS_EVAL_HEAP_SIZE       (4 * 1024 * 1024)
 #define QJS_EVAL_MAX_INSTRUCTIONS 10000000
 #define QJS_EVAL_MAX_FILE        (1024 * 1024)
 
@@ -511,7 +505,9 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
     if (JS_IsException(val)) {
         char *msg = qjs_get_exception_string(ctx);
         if (msg) {
-            const char *hint = strstr(msg, "SyntaxError") ? qjs_syntax_hint(eval_code) : "";
+            const char *hint = strstr(msg, "SyntaxError") ? qjs_syntax_hint(eval_code)
+                             : strstr(msg, "out of memory") ? " — heap limit is 4MB; avoid JSON.parse on data over ~1MB, use smaller responses or extract fields manually"
+                             : "";
             size_t len = strlen(msg) + strlen(hint) + 16;
             result = malloc(len);
             if (result) snprintf(result, len, "error: %s%s", msg, hint);

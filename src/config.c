@@ -6,11 +6,10 @@
 #include "db.h"
 #include "log.h"
 #include "templates.h"
+#include "util.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <errno.h>
-#include <sys/stat.h>
 #include <limits.h>
 #include <time.h>
 #include <unistd.h>
@@ -80,27 +79,11 @@ static void env_override_int(int *field, const char *env_name) {
     if (val) *field = atoi(val);
 }
 
-/* Read file into malloc'd string. Returns NULL if file doesn't exist or on error. */
 static const char *DEFAULT_SYSTEM_PROMPT = TPL_DEFAULT_SYSTEM_PROMPT_MD;
-
-static int mkdir_p(const char *path) {
-    char buf[PATH_MAX];
-    size_t len = strlen(path);
-    if (len == 0 || len >= sizeof(buf)) return -1;
-    memcpy(buf, path, len + 1);
-    for (char *p = buf + 1; *p; p++) {
-        if (*p != '/') continue;
-        *p = '\0';
-        if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
-        *p = '/';
-    }
-    if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
-    return 0;
-}
 
 int workspace_init(const Config *cfg) {
     if (!cfg || !cfg->workspace) return -1;
-    return mkdir_p(cfg->workspace);
+    return util_mkdir_p(cfg->workspace);
 }
 
 /* render system prompt with template vars and workspace context */

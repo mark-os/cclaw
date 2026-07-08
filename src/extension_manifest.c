@@ -2,6 +2,7 @@
 #include "extension_manifest.h"
 #include "cron.h"
 #include "skills.h"
+#include "util.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -19,63 +20,9 @@ static char *xerr(char **out, const char *msg) {
     return NULL;
 }
 
-static char *read_file(const char *path, size_t *out_len) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    if (len < 0) { fclose(f); return NULL; }
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return NULL; }
-    size_t rd = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[rd] = '\0';
-    if (out_len) *out_len = rd;
-    return buf;
-}
-
-static int mkdir_p(const char *path) {
-    char buf[PATH_MAX];
-    size_t len = strlen(path);
-    if (len == 0 || len >= sizeof(buf)) return -1;
-    memcpy(buf, path, len + 1);
-    for (char *p = buf + 1; *p; p++) {
-        if (*p != '/') continue;
-        *p = '\0';
-        if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
-        *p = '/';
-    }
-    if (mkdir(buf, 0755) != 0 && errno != EEXIST) return -1;
-    return 0;
-}
-
-static int copy_file(const char *src, const char *dst) {
-    int in = open(src, O_RDONLY);
-    if (in < 0) return -1;
-    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (out < 0) { close(in); return -1; }
-    char buf[8192];
-    ssize_t n;
-    int rc = 0;
-    while ((n = read(in, buf, sizeof(buf))) > 0) {
-        ssize_t off = 0;
-        while (off < n) {
-            ssize_t w = write(out, buf + off, (size_t)(n - off));
-            if (w <= 0) { rc = -1; goto done; }
-            off += w;
-        }
-    }
-    if (n < 0) rc = -1;
-done:
-    close(in);
-    close(out);
-    return rc;
-}
-
 /* Recursively copy a directory tree (regular files + subdirs only). */
 static int copy_tree(const char *src, const char *dst) {
-    if (mkdir_p(dst) != 0) return -1;
+    if (util_mkdir_p(dst) != 0) return -1;
     DIR *d = opendir(src);
     if (!d) return -1;
     int rc = 0;
@@ -91,7 +38,7 @@ static int copy_tree(const char *src, const char *dst) {
         if (S_ISDIR(st.st_mode)) {
             if (copy_tree(sp, dp) != 0) { rc = -1; break; }
         } else if (S_ISREG(st.st_mode)) {
-            if (copy_file(sp, dp) != 0) { rc = -1; break; }
+            if (util_copy_file(sp, dp, 0644) != 0) { rc = -1; break; }
         }
         /* symlinks and other types are skipped */
     }
@@ -281,7 +228,7 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
     char mpath[PATH_MAX];
     snprintf(mpath, sizeof(mpath), "%s/extension.json", bundle_dir);
     size_t mlen = 0;
-    char *manifest = read_file(mpath, &mlen);
+    char *manifest = util_read_file(mpath, &mlen);
     if (!manifest) { xerr(err_out, "extension.json not found or unreadable"); return -1; }
 
     /* Use an in-memory DB purely as a JSON1 engine — no schema needed. */
@@ -368,7 +315,7 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
 
     char mpath[PATH_MAX];
     snprintf(mpath, sizeof(mpath), "%s/extension.json", bundle_dir);
-    char *manifest = read_file(mpath, NULL);
+    char *manifest = util_read_file(mpath, NULL);
     if (!manifest) { xerr(err_out, "extension.json unreadable"); return -1; }
 
     char *name = json_text(db, manifest, "'$.name'");

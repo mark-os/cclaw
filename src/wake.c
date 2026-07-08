@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "wake.h"
+#include "util.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -9,17 +10,12 @@
 
 static int g_pipe[2] = {-1, -1};
 
-static void set_nonblock(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
 int wake_init(void) {
     if (pipe(g_pipe) != 0) return -1;
     fcntl(g_pipe[0], F_SETFD, FD_CLOEXEC);
     fcntl(g_pipe[1], F_SETFD, FD_CLOEXEC);
-    set_nonblock(g_pipe[0]);
-    set_nonblock(g_pipe[1]);
+    util_set_nonblock(g_pipe[0]);
+    util_set_nonblock(g_pipe[1]);
     return 0;
 }
 

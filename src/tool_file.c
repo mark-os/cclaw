@@ -513,22 +513,6 @@ typedef struct {
     size_t off;
 } EditOp;
 
-static int jtok_key_eq(const jsmntok_t *t, const char *json, const char *key) {
-    size_t klen = strlen(key);
-    return t->type == JSMN_STRING && (size_t)(t->end - t->start) == klen &&
-           memcmp(json + t->start, key, klen) == 0;
-}
-
-static int jtok_find(const jsmntok_t *t, int ntok, const char *json, const char *key) {
-    int j = 1;
-    for (int k = 0; k < t[0].size; k++) {
-        int vi = j + 1;
-        if (jtok_key_eq(&t[j], json, key)) return vi;
-        j = jsmn_skip(t, vi, ntok);
-    }
-    return -1;
-}
-
 static int mem_count(const char *hay, size_t hlen, const char *ned, size_t nlen) {
     if (nlen == 0 || nlen > hlen) return 0;
     int c = 0;

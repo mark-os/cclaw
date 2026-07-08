@@ -60,6 +60,7 @@
 #include "web.h"
 #include "heartbeat.h"
 #include "cron.h"
+#include "util.h"
 
 _Static_assert(sizeof(WakeMsg) <= PIPE_BUF,
     "WakeMsg must fit in PIPE_BUF so wake-pipe writes stay atomic");
@@ -189,11 +190,6 @@ static void sigchld_handler(int sig) {
     (void)sig;
     char c = 1;
     (void)write(g_chld_pipe[1], &c, 1);
-}
-
-static void set_nonblock(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 /* ── dispatch_llm_req ────────────────────────────────────────────── */
@@ -1317,7 +1313,7 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
     }
 
     /* Switch to nonblocking for result reads in poll loop */
-    set_nonblock(sp[0]);
+    util_set_nonblock(sp[0]);
 
     /* Register child — mirrors dispatch_tool bookkeeping */
     ChildProc *c = &g_children[g_child_count++];
@@ -2380,26 +2376,6 @@ static void reap_children(void) {
 
 /* ── Helpers ────────────────────────────────────────────────────── */
 
-static void ensure_parent_dir(const char *path) {
-    char *dup = strdup(path);
-    if (!dup) return;
-    char *slash = strrchr(dup, '/');
-    if (slash && slash != dup) {
-        *slash = '\0';
-        /* mkdir(2) each component — no shell, no injection */
-        for (char *p = dup + 1; ; p++) {
-            if (*p == '/' || *p == '\0') {
-                char saved = *p;
-                *p = '\0';
-                if (mkdir(dup, 0755) != 0 && errno != EEXIST) break;
-                *p = saved;
-                if (saved == '\0') break;
-            }
-        }
-    }
-    free(dup);
-}
-
 static char *resolve_db_path(void) {
     const char *env = getenv("CCLAW_DB_PATH");
     if (env) return strdup(env);
@@ -2553,7 +2529,7 @@ static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
     snprintf(tg_dir, sizeof(tg_dir), "%s/extensions/telegram", base);
     char mkdir_cmd[2*PATH_MAX];
     snprintf(mkdir_cmd, sizeof(mkdir_cmd), "%s/extensions/telegram/.keep", base);
-    ensure_parent_dir(mkdir_cmd);
+    util_ensure_parent_dir(mkdir_cmd);
 
     /* Write channel.qjs */
     char js_path[2*PATH_MAX];
@@ -2597,7 +2573,7 @@ static void ensure_default_agent(const char *base_dir) {
     int ac = 0; char **al = db_agent_list(g_db, &ac);
     if (!al || ac == 0) {
         char ws[PATH_MAX]; snprintf(ws, sizeof(ws), "%s/agents/Assistant/workspace/.keep", base_dir);
-        ensure_parent_dir(ws);
+        util_ensure_parent_dir(ws);
         /* Create default agent */
         const char *agent_sql =
             "INSERT OR IGNORE INTO agents(name, system_prompt, sandbox_profile)"
@@ -2664,7 +2640,7 @@ static int run_daemon(char *db_path) {
         config_free(g_cfg); db_close(g_db); free(db_path); return 1;
     }
     int daemon_worker_fd = llm_worker_fd();
-    set_nonblock(daemon_worker_fd);
+    util_set_nonblock(daemon_worker_fd);
 
     /* Fire-and-forget tool threads (EXEC_THREAD vehicle) */
     if (tool_thread_start(db_path, 0) != 0) {
@@ -2682,7 +2658,7 @@ static int run_daemon(char *db_path) {
     if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
     fcntl(g_chld_pipe[0], F_SETFD, FD_CLOEXEC);
     fcntl(g_chld_pipe[1], F_SETFD, FD_CLOEXEC);
-    set_nonblock(g_chld_pipe[0]); set_nonblock(g_chld_pipe[1]);
+    util_set_nonblock(g_chld_pipe[0]); util_set_nonblock(g_chld_pipe[1]);
     { struct sigaction sa = {0}; sa.sa_handler = sigchld_handler;
       sigemptyset(&sa.sa_mask); sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
       sigaction(SIGCHLD, &sa, NULL); }
@@ -2911,8 +2887,8 @@ static int run_cli(char *db_path, const char *prompt,
     if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
     fcntl(g_chld_pipe[0], F_SETFD, FD_CLOEXEC);
     fcntl(g_chld_pipe[1], F_SETFD, FD_CLOEXEC);
-    set_nonblock(g_chld_pipe[0]);
-    set_nonblock(g_chld_pipe[1]);
+    util_set_nonblock(g_chld_pipe[0]);
+    util_set_nonblock(g_chld_pipe[1]);
     { struct sigaction sa = {0}; sa.sa_handler = sigchld_handler;
       sigemptyset(&sa.sa_mask); sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
       sigaction(SIGCHLD, &sa, NULL); }
@@ -2928,7 +2904,7 @@ static int run_cli(char *db_path, const char *prompt,
     int worker_idx = -1;  /* slot index, recomputed each loop iteration */
     if (llm_worker_start(db_path, g_llm_threads) == 0) {
         worker_fd = llm_worker_fd();
-        set_nonblock(worker_fd);
+        util_set_nonblock(worker_fd);
     } else {
         LOG_ERROR_("llm worker start failed");
         agent_setup_destroy(&setup); free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path); return 1;
@@ -2951,7 +2927,7 @@ static int run_cli(char *db_path, const char *prompt,
     int use_stdin = 0;
     int stdin_idx = -1;   /* slot index, recomputed each loop iteration */
     if (!prompt && isatty(STDIN_FILENO)) {
-        set_nonblock(STDIN_FILENO);
+        util_set_nonblock(STDIN_FILENO);
         use_stdin = 1;
         printf("cclaw cli (type 'exit' or Ctrl-D to quit)\n> ");
         fflush(stdout);
@@ -3472,7 +3448,7 @@ int main(int argc, char *argv[]) {
     /* ── Open DB ─────────────────────────────────────────────────── */
     db_configure_logging();   /* before the first db_open (sqlite3_initialize) */
     char *db_path = resolve_db_path();
-    ensure_parent_dir(db_path);
+    util_ensure_parent_dir(db_path);
     g_db = db_open(db_path);
     if (!g_db) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
 

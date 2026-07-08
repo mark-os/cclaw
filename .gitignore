@@ -36,6 +36,7 @@ src/src-map.txt
 # Runtime workspace (agent-created)
 workspace/
 .kiro/settings/
+.kiro/skills/
 compile_commands.json
 .cclaw/
 __pycache__/

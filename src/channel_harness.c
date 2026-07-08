@@ -26,6 +26,7 @@
 #include "log.h"
 #include "qjs_helpers.h"
 #include "secret.h"
+#include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,23 +61,6 @@ extern ChannelCtx *g_ctx;  /* channel_runner.c's global — this TU binds it too
  * see AGENTS.md: jsmn for untrusted/streaming JSON, SQLite JSON for data we
  * own) ── */
 
-static int jtok_key_eq(const jsmntok_t *t, const char *json, const char *key) {
-    size_t klen = strlen(key);
-    return t->type == JSMN_STRING && (size_t)(t->end - t->start) == klen &&
-           memcmp(json + t->start, key, klen) == 0;
-}
-
-static int jtok_find(const jsmntok_t *t, int ntok, const char *json, const char *key) {
-    if (t[0].type != JSMN_OBJECT) return -1;
-    int j = 1;
-    for (int k = 0; k < t[0].size; k++) {
-        int vi = j + 1;
-        if (jtok_key_eq(&t[j], json, key)) return vi;
-        j = jsmn_skip(t, vi, ntok);
-    }
-    return -1;
-}
-
 static char *jtok_dup(const jsmntok_t *t, const char *json) {
     if (!t || t->type != JSMN_STRING) return NULL;
     size_t len = (size_t)(t->end - t->start);
@@ -90,21 +74,6 @@ static char *jtok_dup(const jsmntok_t *t, const char *json) {
 static int jtok_int(const jsmntok_t *t, const char *json, int dflt) {
     if (!t || t->type != JSMN_PRIMITIVE) return dflt;
     return atoi(json + t->start);
-}
-
-static char *read_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    if (len < 0) { fclose(f); return NULL; }
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return NULL; }
-    size_t n = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[n] = '\0';
-    return buf;
 }
 
 /* ── scenario parsing ─────────────────────────────────────────────── */
@@ -263,7 +232,7 @@ static int channel_event_contains(sqlite3 *db, const char *channel_name, const c
 }
 
 int channel_harness_run(const char *db_path, const char *channel_name, const char *scenario_path) {
-    char *scenario_json = read_file(scenario_path);
+    char *scenario_json = util_read_file(scenario_path, NULL);
     if (!scenario_json) {
         fprintf(stderr, "harness: cannot read scenario '%s'\n", scenario_path);
         return 1;
@@ -289,7 +258,7 @@ int channel_harness_run(const char *db_path, const char *channel_name, const cha
         scenario_free(&sc);
         return 1;
     }
-    char *js_src = read_file(js_path);
+    char *js_src = util_read_file(js_path, NULL);
     if (!js_src) {
         fprintf(stderr, "harness: cannot read %s\n", js_path);
         scenario_free(&sc);

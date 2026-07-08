@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "install.h"
 #include "templates.h"
+#include "util.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -13,25 +14,6 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-/* mkdir -p, no shell. Mirrors main.c's ensure_parent_dir but for the full
- * path itself (not just its parent). */
-static int mkdir_p(const char *path) {
-    char *dup = strdup(path);
-    if (!dup) return -1;
-    int rc = 0;
-    for (char *p = dup + 1; ; p++) {
-        if (*p == '/' || *p == '\0') {
-            char saved = *p;
-            *p = '\0';
-            if (mkdir(dup, 0755) != 0 && errno != EEXIST) { rc = -1; *p = saved; break; }
-            *p = saved;
-            if (saved == '\0') break;
-        }
-    }
-    free(dup);
-    return rc;
-}
 
 /* Run argv[0] with args, no shell — every arg here is a fixed literal or a
  * path we built ourselves, but fork+execvp is the Unix-native way regardless
@@ -83,23 +65,6 @@ static int write_file(const char *path, const char *content, mode_t mode) {
     return (written == (ssize_t)len) ? 0 : -1;
 }
 
-static int copy_file(const char *src, const char *dst, mode_t mode) {
-    FILE *in = fopen(src, "rb");
-    if (!in) return -1;
-    int fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, mode);
-    if (fd < 0) { fclose(in); return -1; }
-    char buf[65536];
-    size_t n;
-    int rc = 0;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (write(fd, buf, n) != (ssize_t)n) { rc = -1; break; }
-    }
-    if (ferror(in)) rc = -1;
-    fclose(in);
-    close(fd);
-    return rc;
-}
-
 /* ── User-mode install (default) ────────────────────────────────── */
 
 /* PATH_MAX-sized buffers make gcc's -Wformat-truncation flag these snprintfs
@@ -130,12 +95,12 @@ static int install_user(void) {
     snprintf(unit_dir, sizeof(unit_dir), "%s/.config/systemd/user", home);
     snprintf(unit_path, sizeof(unit_path), "%s/cclaw.service", unit_dir);
 
-    if (mkdir_p(cclaw_dir) != 0) {
+    if (util_mkdir_p(cclaw_dir) != 0) {
         fprintf(stderr, "error: mkdir %s failed: %s\n", cclaw_dir, strerror(errno));
         free(exe);
         return 1;
     }
-    if (mkdir_p(unit_dir) != 0) {
+    if (util_mkdir_p(unit_dir) != 0) {
         fprintf(stderr, "error: mkdir %s failed: %s\n", unit_dir, strerror(errno));
         free(exe);
         return 1;
@@ -237,10 +202,10 @@ static int install_system(void) {
         printf("  created user cclaw (home /home/cclaw)\n");
     }
 
-    mkdir_p("/usr/local/bin");
-    mkdir_p("/etc/cclaw");
+    util_mkdir_p("/usr/local/bin");
+    util_mkdir_p("/etc/cclaw");
 
-    if (copy_file(exe, "/usr/local/bin/cclaw", 0755) != 0) {
+    if (util_copy_file(exe, "/usr/local/bin/cclaw", 0755) != 0) {
         fprintf(stderr, "error: copying %s to /usr/local/bin/cclaw failed: %s\n", exe, strerror(errno));
         free(exe);
         return 1;

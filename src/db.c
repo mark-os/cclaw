@@ -11,6 +11,7 @@
 #include "validate.h"
 #include "templates.h"
 #include "monocypher.h"
+#include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1686,22 +1687,6 @@ int db_agent_upsert(sqlite3 *db, const char *name, const char *description,
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* Read file contents, return heap-allocated string or NULL */
-static char *read_file_str(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (len <= 0) { fclose(f); return NULL; }
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return NULL; }
-    fread(buf, 1, (size_t)len, f);
-    buf[len] = '\0';
-    fclose(f);
-    return buf;
-}
-
 void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str) {
     if (!agent_json_str || !agent_name) return;
     const char *sql =
@@ -1762,10 +1747,10 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
 
     if (agents_dir) {
         snprintf(path, sizeof(path), "%s/%s/agent.json", agents_dir, name);
-        config_json = read_file_str(path);
+        config_json = util_read_file(path, NULL);
 
         snprintf(path, sizeof(path), "%s/%s/system.md", agents_dir, name);
-        sys_prompt = read_file_str(path);
+        sys_prompt = util_read_file(path, NULL);
 
         /* Extract description from agent.json via SQLite JSON */
         if (config_json) {

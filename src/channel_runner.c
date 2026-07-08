@@ -29,6 +29,7 @@
 #include "log.h"
 #include "qjs_helpers.h"
 #include "secret.h"
+#include "util.h"
 #include <curl/curl.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -453,21 +454,6 @@ static void uds_handle_conn(JSContext *ctx, int cfd) {
 
 /* ── Main ──────────────────────────────────────────────────────── */
 
-static char *read_file(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    if (len <= 0) { fclose(f); return NULL; }
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return NULL; }
-    size_t n = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[n] = '\0';
-    return buf;
-}
-
 /* Resolve js_path from extensions table, shared by the live runner and
  * --check. A channel row's extension path is a directory (channel.qjs
  * inside) unless it points straight at a file. */
@@ -524,7 +510,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     if (uds_fd < 0)
         LOG_WARN_("channel_runner: request socket unavailable");
 
-    char *js_src = read_file(js_path);
+    char *js_src = util_read_file(js_path, NULL);
     if (!js_src) {
         LOG_ERROR_("channel_runner: cannot read %s", js_path);
         channel_ctx_free(g_ctx);
@@ -778,7 +764,7 @@ int channel_runner_check(const char *db_path, const char *channel_name, char **e
         return -1;
     }
 
-    char *js_src = read_file(js_path);
+    char *js_src = util_read_file(js_path, NULL);
     if (!js_src) {
         if (err_out) {
             char b[1200];

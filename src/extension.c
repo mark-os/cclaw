@@ -11,26 +11,10 @@
 #include "extension.h"
 #include <sqlite3.h>
 #include "log.h"
+#include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-
-static char *read_file(const char *path, size_t *out_len) {
-    FILE *f = fopen(path, "r");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    if (len <= 0) { fclose(f); return NULL; }
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return NULL; }
-    size_t rd = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[rd] = '\0';
-    if (out_len) *out_len = rd;
-    return buf;
-}
 
 int hook_event_from_name(const char *name) {
     if (!name) return -1;
@@ -79,7 +63,7 @@ int extension_load_hooks(ExtensionCtx *ctx, sqlite3 *db, const char *agent_name)
         const char *path = (const char *)sqlite3_column_text(st, 1);
         int ev = hook_event_from_name(event);
         if (ev < 0 || !path) continue;
-        char *src = read_file(path, NULL);
+        char *src = util_read_file(path, NULL);
         if (!src) {
             LOG_DEBUG_("extension hook_load_fail agent=%s event=%s path=%s",
                        agent_name, event, path);

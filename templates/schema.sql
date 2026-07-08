@@ -227,14 +227,13 @@ BEGIN
   UPDATE sessions SET leaf_id = NEW.id, updated_at = unixepoch() WHERE id = NEW.session_id;
 END;
 
--- ═══ Tool calls ═══
+-- ═══ Tool calls (workflow state — arguments live in entries.content) ═══
 CREATE TABLE IF NOT EXISTS tool_calls (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,
   entry_id INTEGER NOT NULL,
   call_id TEXT NOT NULL,
   name TEXT NOT NULL,
-  arguments TEXT,
   result_entry_id INTEGER,
   status TEXT NOT NULL DEFAULT 'pending',
   resolved_by TEXT,

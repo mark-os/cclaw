@@ -359,10 +359,10 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `type` | TEXT NOT NULL DEFAULT 'user_message' | entry type discriminator |
 | `part_index` | INTEGER NOT NULL DEFAULT 0 | ordering within multi-part entries |
 | `role` | INTEGER NOT NULL DEFAULT 1 | 0=system, 1=user, 2=assistant, 3=tool, 4=compaction |
-| `content` | TEXT | |
-| `tool_calls` | TEXT | JSON array, NULL if none |
-| `tool_call_id` | TEXT | for role=tool only |
-| `tool_name` | TEXT | for role=tool only |
+| `content` | TEXT | see below |
+| `tool_calls` | TEXT | JSON array, NULL if none (legacy) |
+| `tool_call_id` | TEXT | for type=tool_call and tool_result |
+| `tool_name` | TEXT | for type=tool_call and tool_result |
 | `is_error` | INTEGER NOT NULL DEFAULT 0 | for role=tool |
 | `stop_reason` | INTEGER NOT NULL DEFAULT 0 | see StopReason below |
 | `model` | TEXT | which model produced this |
@@ -375,6 +375,18 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `data` | TEXT | legacy/debug (nullable) |
 | `network_hosts` | TEXT | JSON array of hosts the tool run contacted (proxy-observed) |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+### entries.content by type
+
+| type | content holds |
+|------|---------------|
+| `system` | System prompt text |
+| `user_message` | User's message text |
+| `assistant_message` | Assistant's text response (may be NULL if tool_calls only) |
+| `tool_call` | **Validated JSON arguments** (normalized via `json()` at ingest; single source of truth for tool call args) |
+| `tool_result` | Tool execution output (text) |
+| `reasoning` | Model reasoning/thinking text |
+| `compaction` | Compressed summary text |
 
 ### entries.network_hosts
 
@@ -425,18 +437,17 @@ idx_entries_plan          (parent_id, session_id, id, role, stop_reason, token_e
 
 ## tool_calls
 
-Denormalized tool-call tracking. Links the JSON `tool_calls` array in an assistant entry to the corresponding tool-result entry.
+Workflow state table for tool-call tracking. Links a `type='tool_call'` entry to its result and tracks execution status. Arguments live in `entries.content` (validated JSON, single source of truth) — this table holds no data copy.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `session_id` | INTEGER NOT NULL | |
-| `entry_id` | INTEGER NOT NULL | the assistant entry containing this call |
-| `call_id` | TEXT NOT NULL | matches `tool_calls[].id` in the entry |
-| `name` | TEXT NOT NULL | tool name |
-| `arguments` | TEXT | JSON |
+| `entry_id` | INTEGER NOT NULL | the tool_call entry (args in its `content`) |
+| `call_id` | TEXT NOT NULL | provider's tool_call_id |
+| `name` | TEXT NOT NULL | tool name (denormalized for fast queries) |
 | `result_entry_id` | INTEGER | links to the tool_result entry |
-| `status` | TEXT NOT NULL DEFAULT 'pending' | pending / completed / failed / done |
+| `status` | TEXT NOT NULL DEFAULT 'pending' | pending / running / done / awaiting_approval |
 | `resolved_by` | TEXT | |
 | `resolved_at` | INTEGER | |
 

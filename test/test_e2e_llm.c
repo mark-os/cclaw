@@ -213,7 +213,8 @@ static void test_live_tool_call_roundtrip(void) {
 
     sqlite3_stmt *s;
     sqlite3_prepare_v2(g_db,
-        "SELECT call_id, name, arguments FROM tool_calls WHERE session_id=? ORDER BY rowid LIMIT 1;",
+        "SELECT tc.call_id, tc.name, e.content FROM tool_calls tc"
+        " JOIN entries e ON e.id=tc.entry_id WHERE tc.session_id=? ORDER BY tc.rowid LIMIT 1;",
         -1, &s, NULL);
     sqlite3_bind_int64(s, 1, sid);
     if (sqlite3_step(s) != SQLITE_ROW) { sqlite3_finalize(s); FAIL("no tool_calls returned"); }

@@ -3,6 +3,7 @@
 #include "agent_config.h"
 #include "db.h"
 #include "tool_parse.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -228,6 +229,140 @@ void admin_providers_free(AdminProvider *providers, size_t count) {
         free(providers[i].base_url);
     }
     free(providers);
+}
+
+int admin_list_models(sqlite3 *db, AdminModel **out, size_t *out_count) {
+    if (!db || !out || !out_count) return -1;
+    *out = NULL;
+    *out_count = 0;
+
+    const char *sql =
+        "SELECT m.id, m.model, m.provider_name, p.base_url, p.api_key_env,"
+        "       m.status, COALESCE(m.context_window, 0),"
+        "       MAX(0, COALESCE(m.degraded_until, 0) - unixepoch()),"
+        "       COALESCE(m.total_requests, 0),"
+        "       COALESCE(m.error_count_5xx, 0), COALESCE(m.error_count_429, 0)"
+        " FROM models m JOIN providers p ON m.provider_name = p.name"
+        " ORDER BY m.priority;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+
+    size_t cap = 4, count = 0;
+    AdminModel *list = calloc(cap, sizeof(AdminModel));
+    if (!list) { sqlite3_finalize(stmt); return -1; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            AdminModel *tmp = realloc(list, cap * sizeof(AdminModel));
+            if (!tmp) {
+                admin_models_free(list, count);
+                sqlite3_finalize(stmt);
+                return -1;
+            }
+            list = tmp;
+        }
+        AdminModel *m = &list[count];
+        memset(m, 0, sizeof(*m));
+        const char *v;
+        v = (const char *)sqlite3_column_text(stmt, 0); m->id = v ? strdup(v) : NULL;
+        v = (const char *)sqlite3_column_text(stmt, 1); m->model = v ? strdup(v) : NULL;
+        v = (const char *)sqlite3_column_text(stmt, 2); m->provider = v ? strdup(v) : NULL;
+        v = (const char *)sqlite3_column_text(stmt, 3); m->base_url = v ? strdup(v) : NULL;
+        v = (const char *)sqlite3_column_text(stmt, 4); m->api_key_env = v ? strdup(v) : NULL;
+        v = (const char *)sqlite3_column_text(stmt, 5); m->status = v ? strdup(v) : NULL;
+        m->context_window = sqlite3_column_int(stmt, 6);
+        m->degraded_left = sqlite3_column_int(stmt, 7);
+        m->total_requests = sqlite3_column_int64(stmt, 8);
+        m->err_5xx = sqlite3_column_int64(stmt, 9);
+        m->err_429 = sqlite3_column_int64(stmt, 10);
+
+        /* Key presence: env first, encrypted kv second — same resolution
+         * order llm_req uses at request time. */
+        if (m->api_key_env && m->api_key_env[0]) {
+            const char *env = getenv(m->api_key_env);
+            if (env && env[0]) {
+                m->has_key = 1;
+            } else {
+                char *sec = db_secret_get_system(db, m->api_key_env);
+                if (sec) { m->has_key = 1; free(sec); }
+            }
+        }
+        count++;
+    }
+    sqlite3_finalize(stmt);
+
+    *out = list;
+    *out_count = count;
+    return 0;
+}
+
+void admin_models_free(AdminModel *list, size_t count) {
+    if (!list) return;
+    for (size_t i = 0; i < count; i++) {
+        free(list[i].id);
+        free(list[i].model);
+        free(list[i].provider);
+        free(list[i].base_url);
+        free(list[i].api_key_env);
+        free(list[i].status);
+    }
+    free(list);
+}
+
+int admin_switch_model(sqlite3 *db, const char *model_id, char *prev, size_t prev_sz) {
+    if (!db || !model_id) return -1;
+    if (prev && prev_sz) prev[0] = '\0';
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM models WHERE id=?1", -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
+    int found = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    if (!found) return -1;
+
+    /* Previous routing head — becomes the first fallback */
+    char prev_id[128] = "";
+    if (sqlite3_prepare_v2(db,
+            "SELECT id FROM models WHERE id != ?1 AND status != 'disabled'"
+            " ORDER BY priority LIMIT 1", -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(stmt, 0);
+            if (v) snprintf(prev_id, sizeof(prev_id), "%s", v);
+        }
+        sqlite3_finalize(stmt);
+    }
+    if (prev && prev_sz) snprintf(prev, prev_sz, "%s", prev_id);
+
+    /* Shift everyone down one, put the chosen model at the head with fresh
+     * health — stale degradation must not sideline an explicit switch. */
+    sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+    sqlite3_exec(db, "UPDATE models SET priority = priority + 1;", NULL, NULL, NULL);
+    int rc = -1;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE models SET priority=0, status='healthy', degraded_until=NULL,"
+            " error_count_5xx=0, error_count_429=0 WHERE id=?1;",
+            -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
+        rc = sqlite3_step(stmt) == SQLITE_DONE ? 0 : -1;
+        sqlite3_finalize(stmt);
+    }
+    /* Context-window resolution (agents.model → models) follows the switch:
+     * repoint agents that tracked the old head or had no explicit preference. */
+    if (rc == 0 && sqlite3_prepare_v2(db,
+            "UPDATE agents SET model=?1 WHERE model IS NULL OR model=?2"
+            " OR model=(SELECT model FROM models WHERE id=?2);",
+            -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, prev_id, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_exec(db, rc == 0 ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+    return rc;
 }
 
 static int admin_list_approvals_by_state(sqlite3 *db, const char *channel_name,

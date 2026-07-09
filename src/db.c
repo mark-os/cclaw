@@ -22,6 +22,7 @@
 #include <time.h>
 #include <stdint.h>
 #include <sys/statvfs.h>
+#include <sys/stat.h>
 
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
@@ -354,9 +355,54 @@ DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
     return DB_SCHEMA_UPGRADABLE;
 }
 
+/* Insurance copy before the first patch mutates the only copy of durable
+ * state. VACUUM INTO writes a consistent single-file snapshot (committed WAL
+ * content included) and refuses to overwrite — a leftover backup from a
+ * previous failed upgrade attempt IS the pristine pre-upgrade copy, keep it. */
+static int db_backup_before_upgrade(sqlite3 *db, int from_version) {
+    const char *path = sqlite3_db_filename(db, "main");
+    if (!path || !path[0]) return 0;           /* :memory: — nothing to back up */
+
+    char bak[1024];
+    snprintf(bak, sizeof(bak), "%s.v%d.bak", path, from_version);
+
+    struct stat st;
+    if (stat(bak, &st) == 0) {
+        LOG_INFO_("schema backup already present: %s", bak);
+        return 0;
+    }
+
+    char *sql = sqlite3_mprintf("VACUUM INTO %Q", bak);
+    char *err = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR_("schema backup failed: %s — upgrade refused", err ? err : "?");
+        sqlite3_free(err);
+        unlink(bak);                           /* don't leave a partial snapshot */
+        return -1;                             /* no insurance, no surgery */
+    }
+    LOG_INFO_("schema backup written: %s", bak);
+    return 0;
+}
+
+/* After a successful upgrade the fresh backup supersedes older ones. The
+ * version space is small and known — just unlink every candidate name. */
+static void db_backup_prune(sqlite3 *db, int keep_version) {
+    const char *path = sqlite3_db_filename(db, "main");
+    if (!path || !path[0]) return;
+    for (int v = CCLAW_SCHEMA_MIN; v < CCLAW_SCHEMA_VERSION; v++) {
+        if (v == keep_version) continue;
+        char bak[1024];
+        snprintf(bak, sizeof(bak), "%s.v%d.bak", path, v);
+        unlink(bak);                           /* ENOENT is the normal case */
+    }
+}
+
 /* Upgrade an existing DB from its current user_version to CCLAW_SCHEMA_VERSION.
  * Returns 1 on success (DB is now current), 0 on failure (patch failed, DB
- * unchanged from the failed patch onward). */
+ * unchanged from the failed patch onward; restore story: mv the .bak over the
+ * DB, remove -wal/-shm siblings, restart). */
 static int db_schema_upgrade(sqlite3 *db) {
     int uv = 0;
     switch (db_schema_state(db, &uv)) {
@@ -366,6 +412,8 @@ static int db_schema_upgrade(sqlite3 *db) {
         case DB_SCHEMA_TOO_OLD:    return 0;
         case DB_SCHEMA_UPGRADABLE: break;
     }
+
+    if (db_backup_before_upgrade(db, uv) != 0) return 0;
 
     int n_patches = (int)(sizeof(schema_patches) / sizeof(schema_patches[0]));
     for (int i = 0; i < n_patches; i++) {
@@ -388,6 +436,7 @@ static int db_schema_upgrade(sqlite3 *db) {
         sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
         LOG_INFO_("schema upgraded to v%d", schema_patches[i].version);
     }
+    db_backup_prune(db, uv);
     return 1;
 }
 

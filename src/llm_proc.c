@@ -10,6 +10,7 @@
 #include "http.h"
 #include "llm.h"
 #include "llm_payload.h"
+#include "channel_api.h"
 #include "llm_transport.h"
 #include "log.h"
 #include <stdio.h>
@@ -64,7 +65,20 @@ static int load_candidates(sqlite3 *db, ModelCandidate *out, int max) {
 
 /* ── Stats + degradation ───────────────────────────────────────── */
 
-static void model_stat_error(sqlite3 *db, const char *model_id, int status) {
+/* Tell the operator (via the session's channel chat) that routing changed.
+ * Best-effort — a CLI session or notify failure never blocks the turn. */
+static void notify_degraded(sqlite3 *db, const char *db_path, int64_t session_id,
+                            const char *model_id, int status, const char *why) {
+    char text[256];
+    snprintf(text, sizeof(text),
+             "⚠ model %s degraded (%s, http %d) — requests fall back to the "
+             "next candidate until it recovers. /model shows the routing order.",
+             model_id, why, status);
+    channel_notify_session(db, db_path, session_id, text);
+}
+
+static void model_stat_error(sqlite3 *db, const char *db_path, int64_t session_id,
+                             const char *model_id, int status) {
     const char *col = (status == 429) ? "error_count_429" : "error_count_5xx";
     char sql[256];
     snprintf(sql, sizeof(sql),
@@ -75,7 +89,8 @@ static void model_stat_error(sqlite3 *db, const char *model_id, int status) {
     sqlite3_bind_text(s, 1, model_id, -1, SQLITE_STATIC);
     sqlite3_step(s); sqlite3_finalize(s);
 
-    /* Check degradation threshold */
+    /* Check degradation threshold. status='healthy' guard makes this fire on
+     * the transition only (model_stat_success restores 'healthy'). */
     const char *degrade_sql =
         "UPDATE models SET status='degraded',"
         " degraded_until=unixepoch()+(SELECT CAST(COALESCE(value, default_value, '300') AS INTEGER) FROM config WHERE key='health_cooldown_sec')"
@@ -90,18 +105,58 @@ static void model_stat_error(sqlite3 *db, const char *model_id, int status) {
         sqlite3_bind_text(ds, 1, model_id, -1, SQLITE_STATIC);
         sqlite3_bind_int(ds, 2, status);
         sqlite3_step(ds);
-        if (sqlite3_changes(db) > 0)
+        if (sqlite3_changes(db) > 0) {
             LOG_INFO_("model degraded model=%s status=%d", model_id, status);
+            notify_degraded(db, db_path, session_id, model_id, status,
+                            status == 429 ? "rate limited" : "repeated errors");
+        }
         sqlite3_finalize(ds);
+    }
+}
+
+/* Auth/not-found failures (401/403/404) don't self-heal within a turn:
+ * sideline the model for a cooldown so it isn't retried every request, and
+ * tell the operator once (on the healthy→degraded transition). The cooldown
+ * still re-probes periodically in case the key/model was fixed. */
+static void model_degrade_unavailable(sqlite3 *db, const char *db_path,
+                                      int64_t session_id, const char *model_id,
+                                      int status) {
+    const char *sql =
+        "UPDATE models SET status='degraded', last_error_at=unixepoch(),"
+        " degraded_until=unixepoch()+(SELECT CAST(COALESCE(value, default_value, '300') AS INTEGER) FROM config WHERE key='health_cooldown_sec')"
+        " WHERE id=?1;";
+    /* Transition check first — the UPDATE below always extends the cooldown. */
+    int was_healthy = 0;
+    sqlite3_stmt *cs;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM models WHERE id=?1 AND status='healthy'",
+                           -1, &cs, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(cs, 1, model_id, -1, SQLITE_STATIC);
+        was_healthy = sqlite3_step(cs) == SQLITE_ROW;
+        sqlite3_finalize(cs);
+    }
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(s, 1, model_id, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    int changed = sqlite3_changes(db);
+    sqlite3_finalize(s);
+    if (changed > 0 && was_healthy) {
+        LOG_INFO_("model degraded model=%s status=%d reason=unavailable", model_id, status);
+        notify_degraded(db, db_path, session_id, model_id, status,
+                        status == 404 ? "model not found" : "auth failed — check its key");
     }
 }
 
 static void model_stat_success(sqlite3 *db, const char *model_id,
                                int tokens_in, int tokens_out, int64_t cost_nano) {
+    /* Success is recovery: restore 'healthy' so the degradation guard in
+     * model_stat_error can fire again on the next real outage. */
     const char *sql = "UPDATE models SET total_requests=total_requests+1,"
         " total_tokens_in=total_tokens_in+?, total_tokens_out=total_tokens_out+?,"
         " total_cost_nano=total_cost_nano+?, last_success_at=unixepoch(),"
-        " error_count_5xx=0, error_count_429=0 WHERE id=?";
+        " error_count_5xx=0, error_count_429=0,"
+        " status='healthy', degraded_until=NULL"
+        " WHERE id=? AND status != 'disabled'";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return;
     sqlite3_bind_int(s, 1, tokens_in);
@@ -315,7 +370,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             if (status == 429) {
                 int wait = resp.retry_after > 0 ? resp.retry_after : (1 << retry);
                 http_response_free(&resp);
-                model_stat_error(db, m->id, 429);
+                model_stat_error(db, cfg->db_path, session_id, m->id, 429);
                 if (retry < MAX_429_RETRIES) { sleep((unsigned)wait); continue; }
                 break;
             }
@@ -323,7 +378,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             if (status >= 500 && status < 600) {
                 int wait = resp.retry_after > 0 ? resp.retry_after : (1 << retry);
                 http_response_free(&resp);
-                model_stat_error(db, m->id, status);
+                model_stat_error(db, cfg->db_path, session_id, m->id, status);
                 if (retry < MAX_429_RETRIES) { sleep((unsigned)wait); continue; }
                 break;
             }
@@ -337,6 +392,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 LOG_DEBUG_("llm_req model_skip model=%s reason=%s", m->model,
                            status == 404 ? "not_found" : "auth_failed");
                 http_response_free(&resp);
+                model_degrade_unavailable(db, cfg->db_path, session_id, m->id, status);
                 skip_mask |= (1u << mi); break;
             }
             /* Network/timeout error */
@@ -360,7 +416,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 db_archive_response(db, session_id, turn_id, m->id, "empty",
                                     resp.data, req_body);
                 http_response_free(&resp);
-                model_stat_error(db, m->id, status);
+                model_stat_error(db, cfg->db_path, session_id, m->id, status);
                 if (retry < MAX_429_RETRIES) { sleep(1u << retry); continue; }
                 break;
             }

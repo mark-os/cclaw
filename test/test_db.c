@@ -408,8 +408,21 @@ static void test_schema_upgrade_from_v11(void) {
     /* Re-running is a no-op, not an error */
     assert(db_schema_compat(db) == 1);
 
+    /* Insurance snapshot taken before the surgery: still v11-shaped */
+    char bak[160];
+    snprintf(bak, sizeof(bak), "%s.v11.bak", path);
+    sqlite3 *bdb = db_open(bak);
+    assert(bdb != NULL);
+    int buv = -1;
+    db_schema_state(bdb, &buv);
+    assert(buv == 11);
+    assert(column_exists(bdb, "providers", "context_window"));
+    v = query_text(bdb, "SELECT approval_mode FROM grants WHERE value='extension_promote'");
+    assert(v && strcmp(v, "silent") == 0); free(v);
+    db_close(bdb);
+
     db_close(db);
-    unlink(path); unlink(wal); unlink(shm);
+    unlink(path); unlink(wal); unlink(shm); unlink(bak);
     printf("  PASS test_schema_upgrade_from_v11\n");
 }
 

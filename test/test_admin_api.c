@@ -375,6 +375,88 @@ static void test_grant_from_history(void) {
     printf("  PASS: test_grant_from_history\n");
 }
 
+static void test_list_models(void) {
+    sqlite3 *db = setup_db();
+    unsetenv("TEST_MODELS_KEY");
+    sqlite3_exec(db,
+        "INSERT INTO providers(name,base_url,api_key_env,priority)"
+        " VALUES('p1','https://p1.example/v1','TEST_MODELS_KEY',0);"
+        "INSERT INTO models(id,provider_name,model,context_window,priority,status,"
+        "                   error_count_5xx,degraded_until) VALUES"
+        " ('p1/alpha','p1','alpha',NULL,0,'healthy',0,NULL),"
+        " ('p1/beta','p1','beta',200000,1,'degraded',3,unixepoch()+120);",
+        NULL, NULL, NULL);
+
+    AdminModel *list = NULL;
+    size_t count = 0;
+    assert(admin_list_models(db, &list, &count) == 0);
+    assert(count == 2);
+    assert(strcmp(list[0].id, "p1/alpha") == 0);
+    assert(list[0].context_window == 0);          /* NULL → 0 = default */
+    assert(list[0].has_key == 0);                  /* no env, no secret */
+    assert(list[0].degraded_left == 0);
+    assert(strcmp(list[1].id, "p1/beta") == 0);
+    assert(list[1].context_window == 200000);
+    assert(list[1].degraded_left > 0 && list[1].degraded_left <= 120);
+    assert(list[1].err_5xx == 3);
+    admin_models_free(list, count);
+
+    /* Key presence via encrypted kv */
+    assert(db_secret_set(db, "TEST_MODELS_KEY", "sk-test", "operator", "active", "system") == 0);
+    assert(admin_list_models(db, &list, &count) == 0);
+    assert(count == 2 && list[0].has_key == 1);
+    admin_models_free(list, count);
+
+    db_close(db);
+    unlink(DB_PATH);
+    printf("  PASS: test_list_models\n");
+}
+
+static void test_switch_model(void) {
+    sqlite3 *db = setup_db();
+    sqlite3_exec(db,
+        "INSERT INTO providers(name,base_url,api_key_env,priority)"
+        " VALUES('p1','https://p1.example/v1','K1',0);"
+        "INSERT INTO models(id,provider_name,model,priority,status,degraded_until,error_count_5xx)"
+        " VALUES ('p1/alpha','p1','alpha',0,'healthy',NULL,0),"
+        "        ('p1/beta','p1','beta',1,'degraded',unixepoch()+300,5);"
+        "INSERT INTO agents(name,model) VALUES('tracker','p1/alpha'),('pinned','other/x');",
+        NULL, NULL, NULL);
+
+    char prev[128];
+    assert(admin_switch_model(db, "p1/beta", prev, sizeof(prev)) == 0);
+    assert(strcmp(prev, "p1/alpha") == 0);
+
+    /* beta now heads the routing order with fresh health */
+    AdminModel *list = NULL;
+    size_t count = 0;
+    assert(admin_list_models(db, &list, &count) == 0);
+    assert(count == 2);
+    assert(strcmp(list[0].id, "p1/beta") == 0);
+    assert(strcmp(list[0].status, "healthy") == 0);
+    assert(list[0].degraded_left == 0 && list[0].err_5xx == 0);
+    assert(strcmp(list[1].id, "p1/alpha") == 0);   /* previous head = first fallback */
+    admin_models_free(list, count);
+
+    /* Agents tracking the old head follow; explicit other pins don't */
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db, "SELECT model FROM agents WHERE name='tracker'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "p1/beta") == 0);
+    sqlite3_finalize(s);
+    assert(sqlite3_prepare_v2(db, "SELECT model FROM agents WHERE name='pinned'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "other/x") == 0);
+    sqlite3_finalize(s);
+
+    /* Unknown model refused */
+    assert(admin_switch_model(db, "no/such", prev, sizeof(prev)) == -1);
+
+    db_close(db);
+    unlink(DB_PATH);
+    printf("  PASS: test_switch_model\n");
+}
+
 int main(void) {
     printf("test_admin_api:\n");
     test_key_env_name();
@@ -388,6 +470,8 @@ int main(void) {
     test_admin_revoke_grant_by_id();
     test_admin_list_tool_names();
     test_list_providers();
+    test_list_models();
+    test_switch_model();
     test_list_pending_approvals();
     test_list_denied_approvals_grantable_only();
     test_grant_from_history();

@@ -87,7 +87,7 @@ static int host_decide(const ProxyContext *ctx, const char *host) {
      * hostname never passes RESOLVE, so its IP is never blessed, and
      * unblessed numeric CONNECT is already denied by the default-deny path. */
     if (ctx->deny_rules && host_covered(ctx->deny_rules, ctx->deny_count, host)) {
-        LOG_INFO_("proxy deny host=%s reason=sensitive", host);
+        LOG_WARN_("proxy deny host=%s reason=sensitive", host);
         return 0;
     }
 
@@ -519,7 +519,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     if (strncmp(preamble, "RESOLVE ", 8) == 0) {
         const char *host = preamble + 8;
         if (!host_decide(ctx, host)) {
-            LOG_INFO_("proxy deny host=%s reason=policy", host);
+            LOG_WARN_("proxy deny host=%s reason=policy", host);
             record_denied(ctx, host);
             write(client_fd, "ERROR denied\n", 13);
             close(client_fd);
@@ -532,7 +532,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
             int n = snprintf(resp, sizeof(resp), "ADDR %s\n", ip);
             write(client_fd, resp, (size_t)n);
         } else {
-            LOG_INFO_("proxy deny host=%s reason=resolve_failed", host);
+            LOG_WARN_("proxy deny host=%s reason=resolve_failed", host);
             record_denied(ctx, host);
             write(client_fd, "ERROR resolve\n", 14);
         }
@@ -568,7 +568,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
             record_host(ctx, target);
             dial = target;
         } else {
-            LOG_INFO_("proxy deny host=%s reason=policy", target);
+            LOG_WARN_("proxy deny host=%s reason=policy", target);
             record_denied(ctx, target);
             write(client_fd, "DENIED\n", 7);
             close(client_fd);
@@ -580,7 +580,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
          * can have authorized this branch — CIDR/exact-grant checks are
          * unreachable for non-numeric input. */
         if (!host_decide(ctx, target)) {
-            LOG_INFO_("proxy deny host=%s reason=policy", target);
+            LOG_WARN_("proxy deny host=%s reason=policy", target);
             record_denied(ctx, target);
             write(client_fd, "DENIED\n", 7);
             close(client_fd);
@@ -588,7 +588,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
         }
         via_hostname = 1;
         if (resolve_and_bless(ctx, target, resolved, sizeof(resolved)) != 0) {
-            LOG_INFO_("proxy deny host=%s reason=resolve_failed", target);
+            LOG_WARN_("proxy deny host=%s reason=resolve_failed", target);
             record_denied(ctx, target);
             write(client_fd, "ERROR resolve\n", 14);
             close(client_fd);

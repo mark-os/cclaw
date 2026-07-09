@@ -156,7 +156,7 @@ Config *config_load_from_env(void) {
     cfg->provider.max_tokens = v ? atoi(v) : CCLAW_DEF_MAX_TOKENS;
 
     v = getenv("CCLAW_CONTEXT_WINDOW");
-    cfg->provider.context_window = v ? atoi(v) : CCLAW_DEF_CONTEXT_WINDOW;
+    cfg->context_window = v ? atoi(v) : CCLAW_DEF_CONTEXT_WINDOW;
 
     /* endpoint type */
     v = getenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
@@ -248,7 +248,7 @@ Config *config_load(sqlite3 *db) {
     {
         int idx = 0;
         const char *prov_sql = "SELECT name, base_url, endpoint_type, api_key_env,"
-                               " default_model, context_window FROM providers ORDER BY priority;";
+                               " default_model FROM providers ORDER BY priority;";
         sqlite3_stmt *ps;
         if (sqlite3_prepare_v2(db, prov_sql, -1, &ps, NULL) == SQLITE_OK) {
             size_t fb_cap = 4;
@@ -280,8 +280,6 @@ Config *config_load(sqlite3 *db) {
                 }
                 v = (const char *)sqlite3_column_text(ps, 4);
                 p->model = v ? strdup(v) : strdup("deepseek/deepseek-v4-flash");
-                p->context_window = sqlite3_column_int(ps, 5);
-                if (p->context_window <= 0) p->context_window = 128000;
                 p->max_tokens = 4096;
                 p->cache_hints = CACHE_HINTS_AUTO;
                 if (idx > 0) cfg->fallback_count++;
@@ -294,7 +292,6 @@ Config *config_load(sqlite3 *db) {
             cfg->provider.base_url = strdup("https://openrouter.ai/api/v1");
             cfg->provider.model = strdup("deepseek/deepseek-v4-flash");
             cfg->provider.max_tokens = 4096;
-            cfg->provider.context_window = 128000;
             cfg->provider.endpoint_type = ENDPOINT_OPENAI;
             cfg->provider.cache_hints = CACHE_HINTS_AUTO;
             const char *key = getenv("OPENROUTER_API_KEY");
@@ -305,6 +302,7 @@ Config *config_load(sqlite3 *db) {
     }
 
     cfg->web_port = config_get_int(db, "web_port");
+    cfg->context_window = config_get_int(db, "context_window");
     cfg->max_iterations = config_get_int(db, "max_iterations");
     cfg->max_history_tokens = config_get_int(db, "max_history_tokens");
     cfg->heartbeat_interval = config_get_int(db, "heartbeat_interval");
@@ -322,7 +320,7 @@ Config *config_load(sqlite3 *db) {
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER_BASE_URL");
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER");
     env_override_str(&cfg->provider.model, "CCLAW_MODEL");
-    env_override_int(&cfg->provider.context_window, "CCLAW_CONTEXT_WINDOW");
+    env_override_int(&cfg->context_window, "CCLAW_CONTEXT_WINDOW");
     env_override_str(&cfg->system_prompt, "CCLAW_SYSTEM_PROMPT");
     env_override_int(&cfg->web_port, "CCLAW_WEB_PORT");
     env_override_int(&cfg->max_iterations, "CCLAW_MAX_ITERATIONS");

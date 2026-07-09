@@ -16,6 +16,59 @@ static AdvanceOutput make_output(AdvanceResult action, int64_t sid,
     return out;
 }
 
+/* Build a richer max-iterations error message by concatenating the last few
+ * substantive assistant content blocks (tool_use responses with real text)
+ * before appending the error notice. Returns heap-allocated string. */
+static char *rich_max_iter_message(sqlite3 *db, int64_t session_id) {
+    /* Walk recent assistant entries with content, stop_reason=tool_use (3) */
+    const char *sql =
+        "WITH RECURSIVE branch(id, parent_id, role, stop_reason, content, lvl) AS ("
+        "  SELECT id, parent_id, role, stop_reason, content, 0"
+        "    FROM entries WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1) AND session_id=?1"
+        "  UNION ALL"
+        "  SELECT e.id, e.parent_id, e.role, e.stop_reason, e.content, b.lvl+1"
+        "    FROM entries e JOIN branch b ON e.id=b.parent_id WHERE b.lvl < 50"
+        ") SELECT content FROM branch"
+        "  WHERE role=2 AND stop_reason=3 AND content IS NOT NULL AND content != ''"
+        "  ORDER BY lvl ASC LIMIT 3;";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK)
+        return strdup("error: max iterations reached");
+    sqlite3_bind_int64(s, 1, session_id);
+
+    /* Collect up to 3 chunks */
+    char *chunks[3] = {NULL, NULL, NULL};
+    int n = 0;
+    while (n < 3 && sqlite3_step(s) == SQLITE_ROW) {
+        const char *c = (const char *)sqlite3_column_text(s, 0);
+        if (c && c[0]) chunks[n++] = strdup(c);
+    }
+    sqlite3_finalize(s);
+
+    if (n == 0) return strdup("error: max iterations reached");
+
+    /* Concatenate: chunk1\n\n---\n\nchunk2\n\n---\n\nerror: ... */
+    const char *sep = "\n\n---\n\n";
+    const char *tail = "\n\n---\n\nerror: max iterations reached";
+    size_t len = strlen(tail) + 1;
+    for (int i = 0; i < n; i++)
+        len += strlen(chunks[i]) + (i > 0 ? strlen(sep) : 0);
+
+    char *buf = malloc(len);
+    if (!buf) {
+        for (int i = 0; i < n; i++) free(chunks[i]);
+        return strdup("error: max iterations reached");
+    }
+    buf[0] = '\0';
+    for (int i = 0; i < n; i++) {
+        if (i > 0) strcat(buf, sep);
+        strcat(buf, chunks[i]);
+        free(chunks[i]);
+    }
+    strcat(buf, tail);
+    return buf;
+}
+
 /* Notify a sub-agent's parent that the child finished. Blocking mode writes a
  * ToolResult for the parent's launch_agent call; background mode posts to the
  * parent inbox. Called on every terminal path (normal stop, error, max-iter) so
@@ -263,10 +316,12 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         if (new_iter >= max_iterations) {
             /* Hit iteration cap */
             LOG_INFO_("advance state=tool_running next=idle reason=max_iterations iter=%d max=%d", new_iter, max_iterations);
+            char *rich_msg = rich_max_iter_message(db, session_id);
             Message msg = { .role = ROLE_ASSISTANT,
-                            .content = "error: max iterations reached",
+                            .content = rich_msg,
                             .stop_reason = STOP_REASON_ERROR };
             entry_append_with_turn(db, session_id, &msg, 0);
+            free(rich_msg);
             session_set_state(db, session_id, "idle");
             /* Max-iter is a terminal error for a sub-agent too — notify parent. */
             notify_parent(db, session_id, 1);

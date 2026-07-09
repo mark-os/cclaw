@@ -48,7 +48,7 @@ static void test_openai_payload(void) {
     cfg.provider.model = "test-model";
     cfg.provider.max_tokens = 1024;
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
@@ -119,7 +119,7 @@ static void test_openai_payload_no_stream_omits_nulls(void) {
     cfg.provider.model = "test-model";
     cfg.provider.max_tokens = 0;
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
@@ -157,7 +157,7 @@ static void test_gemini_payload(void) {
     cfg.provider.model = "gemini-2.5-flash";
     cfg.provider.max_tokens = 2048;
     cfg.provider.endpoint_type = ENDPOINT_GEMINI;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
@@ -216,7 +216,7 @@ static void test_recall_in_session_context(void) {
     Config cfg = {0};
     cfg.provider.model = "test-model";
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
@@ -308,7 +308,7 @@ static void test_session_context_live_state(void) {
     Config cfg = {0};
     cfg.provider.model = "test-model";
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
@@ -353,7 +353,7 @@ static void test_payload_with_tools(void) {
     Config cfg = {0};
     cfg.provider.model = "test-model";
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
@@ -410,7 +410,7 @@ static void test_compaction_entry_in_payload(void) {
     cfg.provider.model = "test-model";
     cfg.provider.max_tokens = 1024;
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
@@ -473,7 +473,7 @@ static void test_network_hosts_query_time_wrap(void) {
     cfg.provider.model = "test-model";
     cfg.provider.max_tokens = 1024;
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
@@ -540,7 +540,7 @@ static void test_hook_inject_directive(void) {
     Config cfg = {0};
     cfg.provider.model = "test-model";
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     ContextPlan plan = {0};
     assert(context_plan(db, sid, &cfg, 0, &plan) == 0);

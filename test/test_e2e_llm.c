@@ -168,7 +168,7 @@ static void test_live_content_response(void) {
     cfg.provider.api_key = (char *)key;
     cfg.provider.model = "deepseek/deepseek-v4-flash";
     cfg.provider.max_tokens = 64;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     Message msgs[1] = {{ .role = ROLE_USER, .content = "Reply with exactly: hello" }};
 
@@ -194,7 +194,7 @@ static void test_live_tool_call_roundtrip(void) {
     cfg.provider.api_key = (char *)key;
     cfg.provider.model = "deepseek/deepseek-v4-flash";
     cfg.provider.max_tokens = 256;
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
 
     Message msgs[2] = {
         { .role = ROLE_SYSTEM, .content = "You must use the get_weather tool to answer weather questions. Always call the tool." },

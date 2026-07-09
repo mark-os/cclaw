@@ -21,7 +21,6 @@ CREATE TABLE IF NOT EXISTS providers (
   endpoint_type TEXT NOT NULL DEFAULT 'openai',
   api_key_env TEXT NOT NULL DEFAULT '',
   default_model TEXT,
-  context_window INTEGER DEFAULT 128000,
   priority INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'healthy'
 );
@@ -32,7 +31,7 @@ CREATE TABLE IF NOT EXISTS models (
   provider_name TEXT NOT NULL,
   model TEXT NOT NULL,
   sub_provider TEXT,
-  context_window INTEGER DEFAULT 128000,
+  context_window INTEGER,
   max_output_tokens INTEGER,
   capabilities TEXT DEFAULT '[]',
   priority INTEGER NOT NULL DEFAULT 0,

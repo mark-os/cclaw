@@ -11,8 +11,8 @@ INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, defa
   VALUES('openrouter', 'https://openrouter.ai/api/v1', 'openai', 'OPENROUTER_API_KEY', 'deepseek/deepseek-v4-flash', 0);
 
 -- ═══ Default model ═══
-INSERT OR IGNORE INTO models(id, provider_name, model, context_window, priority)
-  VALUES('openrouter/deepseek/deepseek-v4-flash', 'openrouter', 'deepseek/deepseek-v4-flash', 128000, 0);
+INSERT OR IGNORE INTO models(id, provider_name, model, priority)
+  VALUES('openrouter/deepseek/deepseek-v4-flash', 'openrouter', 'deepseek/deepseek-v4-flash', 0);
 
 -- ═══ Built-in tools ═══
 -- Descriptions are a write-once seed: tools_sync_to_db() upserts with

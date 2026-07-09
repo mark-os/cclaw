@@ -24,6 +24,8 @@ static const ConfigDef s_defs[] = {
       "Max LLM tokens per hour (0 = unlimited)" },
     { "context_threshold",  "0.6",
       "Context fill ratio that triggers compaction" },
+    { "context_window",     "128000",
+      "Global default context window in tokens (overridden per-model in models table)" },
     { "compaction_target",  "0.3",
       "Target context fill ratio after compaction" },
     { "compaction",         "1",
@@ -50,6 +52,10 @@ static const ConfigDef s_defs[] = {
       "\"extension_attach\",\"extension_list\",\"launch_agent\","
       "\"check_session\",\"secret_create\"]",
       "Baseline tool grants seeded for a newly created agent (JSON array)" },
+    { "agent_approval_tools",
+      "[\"extension_promote\",\"extension_publish\",\"configure_provider\","
+      "\"configure_channel\",\"create_agent\"]",
+      "Tools that require human approval (approval_mode='always') when granted" },
     { "health_5xx_threshold", "3",
       "5xx errors within the window before a model is marked degraded" },
     { "health_429_threshold", "10",

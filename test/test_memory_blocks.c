@@ -180,7 +180,7 @@ static void test_prompt_injection(void) {
 
     /* Build system prompt — no agents_dir needed, agent already in DB */
     Config cfg = {0};
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
     char *prompt = agent_build_system_prompt(db, "Testagent", 1, NULL, &cfg);
     assert(prompt);
 

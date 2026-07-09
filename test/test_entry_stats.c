@@ -65,7 +65,7 @@ static void test_context_plan_uses_stored_stats(void) {
     entry_append_with_turn(db, sid, &m2, 1);
 
     Config cfg = {0};
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
     ContextPlan plan = {0};
     int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan failed");

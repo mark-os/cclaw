@@ -173,14 +173,20 @@ static int db_trace_cb(unsigned mask, void *ctx, void *p, void *x) {
          * hardware but never diagnostically interesting. */
         if (sql && strncmp(sql, "UPDATE processes SET heartbeat_at", 33) == 0)
             return 0;
-        if (ns > 1000000) /* only log queries > 1ms */
-            syslog(LOG_DEBUG, "sql: %ldms %s",
-                   (long)(ns / 1000000), sql ? sql : "?");
+        /* Slow query warning: anything over 100ms is a problem worth flagging
+         * regardless of log level config (WARN is always visible). */
+        if (ns > 100000000)
+            LOG_WARN_("sql slow: %ldms %s", (long)(ns / 1000000), sql ? sql : "?");
+        /* All statements with timing at TRACE (flow tracing) */
+        else
+            LOG_TRACE_("sql: %ldms %s", (long)(ns / 1000000), sql ? sql : "?");
     }
     return 0;
 }
 
-/* Enable sqlite3_trace_v2 on a connection (call when log_level >= trace). */
+/* Enable sqlite3_trace_v2 on a connection. Called at DEBUG+ — the callback
+ * internally routes slow queries to WARN (always visible) and normal flow
+ * to TRACE. */
 void db_enable_trace(sqlite3 *db) {
     sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, db_trace_cb, NULL);
 }
@@ -192,7 +198,14 @@ void db_enable_trace(sqlite3 *db) {
  * any thread; cclaw_log_write is thread-safe (syslog + thread-local ctx). */
 static void sqlite_log_cb(void *arg, int rc, const char *msg) {
     (void)arg;
-    LOG_INFO_("sqlite rc=%d err=%s msg=%s", rc, sqlite3_errstr(rc), msg ? msg : "");
+    /* SQLITE_OK/SQLITE_ROW/SQLITE_DONE are not errors — SQLite fires the log
+     * hook for some non-error conditions too (e.g. WAL checkpoint info). */
+    if (rc == SQLITE_OK || rc == SQLITE_ROW || rc == SQLITE_DONE)
+        return;
+    /* BUSY is the classic read→write upgrade failure — always a warning,
+     * often the precursor to subtle state bugs. Log extended code for
+     * specificity (BUSY_SNAPSHOT vs BUSY_RECOVERY). */
+    LOG_WARN_("sqlite rc=%d(%s) msg=%s", rc, sqlite3_errstr(rc), msg ? msg : "");
 }
 
 void db_configure_logging(void) {

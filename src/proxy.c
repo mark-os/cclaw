@@ -213,6 +213,24 @@ static void record_host(ProxyContext *ctx, const char *host) {
     pthread_mutex_unlock(&ctx->blessed_mu);
 }
 
+/* Remember a denied target for the tool result summary. Same dedup/cap pattern
+ * as record_host — the list is best-effort metadata, not policy. */
+static void record_denied(ProxyContext *ctx, const char *host) {
+    if (!host || !host[0]) return;
+    pthread_mutex_lock(&ctx->blessed_mu);
+    for (int i = 0; i < ctx->denied_count; i++) {
+        if (strcmp(ctx->denied[i], host) == 0) {
+            pthread_mutex_unlock(&ctx->blessed_mu);
+            return;
+        }
+    }
+    if (ctx->denied_count < PROXY_CONTACTED_MAX) {
+        char *dup = strdup(host);
+        if (dup) ctx->denied[ctx->denied_count++] = dup;
+    }
+    pthread_mutex_unlock(&ctx->blessed_mu);
+}
+
 /* A resolved address is permitted per the egress-filter.md §4 pipeline:
  *   1. Metadata range → exact grant only (CIDR grants cannot reach metadata)
  *   2. Public IP → ALLOW (the hostname that resolved here already spent its
@@ -502,6 +520,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
         const char *host = preamble + 8;
         if (!host_decide(ctx, host)) {
             LOG_INFO_("proxy deny host=%s reason=policy", host);
+            record_denied(ctx, host);
             write(client_fd, "ERROR denied\n", 13);
             close(client_fd);
             return;
@@ -514,6 +533,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
             write(client_fd, resp, (size_t)n);
         } else {
             LOG_INFO_("proxy deny host=%s reason=resolve_failed", host);
+            record_denied(ctx, host);
             write(client_fd, "ERROR resolve\n", 14);
         }
         close(client_fd);
@@ -549,6 +569,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
             dial = target;
         } else {
             LOG_INFO_("proxy deny host=%s reason=policy", target);
+            record_denied(ctx, target);
             write(client_fd, "DENIED\n", 7);
             close(client_fd);
             return;
@@ -560,6 +581,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
          * unreachable for non-numeric input. */
         if (!host_decide(ctx, target)) {
             LOG_INFO_("proxy deny host=%s reason=policy", target);
+            record_denied(ctx, target);
             write(client_fd, "DENIED\n", 7);
             close(client_fd);
             return;
@@ -567,6 +589,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
         via_hostname = 1;
         if (resolve_and_bless(ctx, target, resolved, sizeof(resolved)) != 0) {
             LOG_INFO_("proxy deny host=%s reason=resolve_failed", target);
+            record_denied(ctx, target);
             write(client_fd, "ERROR resolve\n", 14);
             close(client_fd);
             return;
@@ -810,6 +833,8 @@ void proxy_stop(ProxyContext *ctx) {
     }
     for (int i = 0; i < ctx->contacted_count; i++) free(ctx->contacted[i]);
     ctx->contacted_count = 0;
+    for (int i = 0; i < ctx->denied_count; i++) free(ctx->denied[i]);
+    ctx->denied_count = 0;
     ctx->hosts = NULL;          /* borrowed — not owned, do not free */
     ctx->host_count = 0;
     ctx->deny_rules = NULL;     /* borrowed — not owned, do not free */
@@ -862,6 +887,30 @@ char *proxy_hosts_json(ProxyContext *ctx) {
     }
     out[o++] = ']';
     out[o] = '\0';
+    pthread_mutex_unlock(&ctx->blessed_mu);
+    return out;
+}
+
+char *proxy_denied_summary(ProxyContext *ctx) {
+    pthread_mutex_lock(&ctx->blessed_mu);
+    if (ctx->denied_count == 0) {
+        pthread_mutex_unlock(&ctx->blessed_mu);
+        return NULL;
+    }
+    /* Build: "\ncclaw: proxy blocked host(s) not in allowlist: foo.com, bar.com\n" */
+    size_t cap = 128;
+    for (int i = 0; i < ctx->denied_count; i++)
+        cap += strlen(ctx->denied[i]) + 4;
+    char *out = malloc(cap);
+    if (!out) { pthread_mutex_unlock(&ctx->blessed_mu); return NULL; }
+    size_t o = 0;
+    o += (size_t)snprintf(out + o, cap - o,
+        "\ncclaw: proxy blocked host(s) not in allowlist: ");
+    for (int i = 0; i < ctx->denied_count; i++) {
+        if (i > 0) o += (size_t)snprintf(out + o, cap - o, ", ");
+        o += (size_t)snprintf(out + o, cap - o, "%s", ctx->denied[i]);
+    }
+    o += (size_t)snprintf(out + o, cap - o, "\n");
     pthread_mutex_unlock(&ctx->blessed_mu);
     return out;
 }

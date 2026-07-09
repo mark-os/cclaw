@@ -502,6 +502,7 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
         val = qjs_resolve(ctx, val);
 
     char *result = NULL;
+    int result_is_undefined = 0;
     if (JS_IsException(val)) {
         char *msg = qjs_get_exception_string(ctx);
         if (msg) {
@@ -516,16 +517,8 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
         if (!result) result = strdup("error: exception (no message)");
     } else if (JS_IsUndefined(val)) {
         JS_FreeValue(ctx, val);
-        const char *check = "__console_buf.length > 0 ? __console_buf.join('\\n') : undefined";
-        JSValue buf_val = JS_Eval(ctx, check, strlen(check), "<console>", JS_EVAL_TYPE_GLOBAL);
-        if (!JS_IsUndefined(buf_val) && !JS_IsException(buf_val)) {
-            const char *str = JS_ToCString(ctx, buf_val);
-            result = str ? strdup(str) : strdup("undefined");
-            if (str) JS_FreeCString(ctx, str);
-        } else {
-            result = strdup("undefined");
-        }
-        JS_FreeValue(ctx, buf_val);
+        result_is_undefined = 1;
+        result = strdup("undefined");
     } else if (JS_IsNull(val)) {
         JS_FreeValue(ctx, val);
         result = strdup("null");
@@ -534,6 +527,40 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
         result = str ? strdup(str) : strdup("error: cannot convert result to string");
         if (str) JS_FreeCString(ctx, str);
         JS_FreeValue(ctx, val);
+    }
+
+    /* Console output (print/console.log): if the eval returned undefined, the
+     * console buffer IS the result (replaces "undefined"). If a real value was
+     * returned, prepend console output so script-side warnings are never
+     * silently swallowed (e.g. a script that catches HTTP errors and returns
+     * "Done!" while logging "network failed"). */
+    {
+        const char *check = "__console_buf.length > 0 ? __console_buf.join('\\n') : undefined";
+        JSValue buf_val = JS_Eval(ctx, check, strlen(check), "<console>", JS_EVAL_TYPE_GLOBAL);
+        if (!JS_IsUndefined(buf_val) && !JS_IsException(buf_val)) {
+            const char *cstr = JS_ToCString(ctx, buf_val);
+            if (cstr && cstr[0]) {
+                if (result_is_undefined) {
+                    /* Console output replaces "undefined" */
+                    free(result);
+                    result = strdup(cstr);
+                } else if (result) {
+                    /* Prepend console output to the actual result */
+                    size_t clen = strlen(cstr);
+                    size_t rlen = strlen(result);
+                    char *combined = malloc(clen + 1 + rlen + 1);
+                    if (combined) {
+                        memcpy(combined, cstr, clen);
+                        combined[clen] = '\n';
+                        memcpy(combined + clen + 1, result, rlen + 1);
+                        free(result);
+                        result = combined;
+                    }
+                }
+            }
+            if (cstr) JS_FreeCString(ctx, cstr);
+        }
+        JS_FreeValue(ctx, buf_val);
     }
 
     if (free_eval) free(eval_code);

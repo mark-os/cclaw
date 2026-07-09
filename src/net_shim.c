@@ -132,7 +132,7 @@ static void handle(int client, const char *uds) {
         if (write(client, ok, strlen(ok)) > 0)
             splice_both(client, up);
     } else {
-        const char *r = "HTTP/1.1 403 Forbidden\r\n\r\n";
+        const char *r = "HTTP/1.1 407 Proxy Denied\r\n\r\n";
         (void)!write(client, r, strlen(r));
     }
     close(up);

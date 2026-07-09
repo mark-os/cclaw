@@ -4,7 +4,7 @@
  * to a UDS we provide, so we can exercise the real binary directly. We stand up
  * a mock "broker" UDS that speaks the existing host:port/OK protocol, bind a
  * loopback TCP listener, hand both to net_shim, then drive HTTP CONNECT clients
- * against it and assert: allowed → 200 + bytes splice; denied → 403; non-CONNECT
+ * against it and assert: allowed → 200 + bytes splice; denied → 407; non-CONNECT
  * → 405. Builds nothing real over the network — UDS + loopback only.
  *
  * Skips cleanly if ./build/net_shim is absent (make test does not build it).
@@ -190,7 +190,7 @@ int main(void) {
         printf("  PASS allowed CONNECT tunnels + splices\n");
     }
 
-    /* 2. Denied CONNECT → 403. */
+    /* 2. Denied CONNECT → 407 (proxy denied). */
     {
         int c = shim_connect(port);
         assert(c >= 0);
@@ -198,9 +198,9 @@ int main(void) {
         assert(write(c, req, strlen(req)) > 0);
         char buf[512];
         read_some(c, buf, sizeof(buf));
-        assert(strstr(buf, "HTTP/1.1 403") != NULL);
+        assert(strstr(buf, "HTTP/1.1 407") != NULL);
         close(c);
-        printf("  PASS denied CONNECT → 403\n");
+        printf("  PASS denied CONNECT → 407\n");
     }
 
     /* 3. Non-CONNECT method → 405 (CONNECT-only). */

@@ -209,6 +209,8 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
     int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations
                                               : config_default_int("max_iterations");
     if (iteration >= max_iter) {
+        /* The advance_session check normally catches this; this is a fallback.
+         * Use a simple message — the main path in advance.c builds the rich one. */
         Message msg = {.role = ROLE_ASSISTANT,
                        .content = "error: max iterations reached",
                        .stop_reason = STOP_REASON_ERROR};
@@ -1339,7 +1341,7 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
 
 /* ── compute_timeout_ms: dynamic poll() timeout ─────────────── */
 
-#define POLL_DB_INTERVAL 5   /* seconds between DB polls (approvals, future cron) */
+#define POLL_DB_INTERVAL 30  /* seconds between DB polls (heartbeat, recovery, approvals) */
 #define POLL_MAX_SLEEP   30  /* upper bound on poll() sleep */
 
 static time_t g_next_db_poll;  /* next time DB periodic work is due */
@@ -2103,6 +2105,21 @@ static const char *advance_action_name(AdvanceResult a) {
 static void run_advance(int64_t session_id) {
     int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations
                                               : config_default_int("max_iterations");
+    /* Per-agent override: agents.max_iterations takes precedence if set */
+    {
+        sqlite3_stmt *ams;
+        if (sqlite3_prepare_v2(g_db,
+                "SELECT a.max_iterations FROM agents a"
+                " JOIN sessions s ON s.agent_name = a.name"
+                " WHERE s.id = ?", -1, &ams, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(ams, 1, session_id);
+            if (sqlite3_step(ams) == SQLITE_ROW) {
+                int ami = sqlite3_column_int(ams, 0);
+                if (ami > 0) max_iter = ami;
+            }
+            sqlite3_finalize(ams);
+        }
+    }
     /* Tag every log line from here — including advance_session's own state
      * transitions and the dispatch/deliver calls below, which run on this
      * thread — with the advancing session (and, once known, agent), so
@@ -3456,8 +3473,8 @@ int main(int argc, char *argv[]) {
 
     if (!db_schema_compat(g_db)) {
         fprintf(stderr,
-            "error: %s was created by a different cclaw schema (this build expects v%d).\n"
-            "No migrations yet — delete it (and its -wal/-shm siblings) and restart:\n"
+            "error: %s cannot be upgraded to schema v%d.\n"
+            "The DB may be from a future build or too old. Delete it and restart:\n"
             "  rm %s %s-wal %s-shm\n",
             db_path, CCLAW_SCHEMA_VERSION, db_path, db_path, db_path);
         db_close(g_db); free(db_path); return 1;

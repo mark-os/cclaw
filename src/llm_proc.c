@@ -143,9 +143,14 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
      * even on the early context_plan-failure path where it isn't set yet. */
     char *context_text = NULL;
 
-    /* Context planning */
+    /* Resolve effective context window for this agent's model */
+    int effective_window = model_context_window(db, agent_name, cfg->context_window);
+
+    /* Context planning — use a stack-local config with the resolved window */
+    Config plan_cfg = *cfg;
+    plan_cfg.context_window = effective_window;
     ContextPlan plan = {0};
-    if (context_plan(db, session_id, cfg, tool_overhead, &plan) != 0) {
+    if (context_plan(db, session_id, &plan_cfg, tool_overhead, &plan) != 0) {
         LOG_DEBUG_("llm_req: context_plan failed");
         goto err;
     }
@@ -216,7 +221,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         snprintf(m->base_url, sizeof(m->base_url), "%s", cfg->provider.base_url ? cfg->provider.base_url : "");
         m->api_key_env[0] = '\0'; /* key already in cfg */
         m->endpoint_type = cfg->provider.endpoint_type;
-        m->context_window = cfg->provider.context_window;
+        m->context_window = cfg->context_window;
         nmodels = 1;
     }
 
@@ -239,7 +244,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         ProviderConfig route_prov = cfg->provider;
         route_prov.base_url = m->base_url;
         route_prov.model = m->model;
-        route_prov.context_window = m->context_window;
         route_prov.endpoint_type = m->endpoint_type;
         /* env → encrypted kv → cfg. Re-reading kv here (not mutating cfg,
          * which worker threads share) picks up keys set after startup. */
@@ -288,6 +292,9 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             long elapsed = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
             last_status = status;
             LOG_DEBUG_("llm_req: %ldms status=%d model=%s", elapsed, status, m->model);
+            LOG_DEBUG_("llm_req: ttfb=%.0fms tls=%.0fms bytes=%zu reuse=%d",
+                       resp.ttfb * 1000.0, resp.tls_time * 1000.0,
+                       resp.len, resp.conn_reused);
 
             if (cfg->log_level >= LOG_LEVEL_TRACE && resp.data)
                 LOG_TRACE_("RESP %s", resp.data);
@@ -470,9 +477,11 @@ static char *extract_content(sqlite3 *db, EndpointType ep, const char *body) {
 }
 
 int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agent_name) {
-    (void)agent_name;  /* unused */
     Config *cfg = config_load(db);
     if (!cfg || !cfg->compaction) return -1;
+
+    /* Resolve effective context window for this agent's model */
+    int effective_window = model_context_window(db, agent_name, cfg->context_window);
 
     /* Re-check the trigger: a crash-recovered or queued-up job may run after
      * the branch was already compacted */
@@ -483,12 +492,14 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
 
     /* Compute target — keep tail entries that fit in target × context_window */
     float target_ratio = cfg->compaction_target > 0 ? cfg->compaction_target : 0.3f;
-    int target_tokens = (int)(target_ratio * (float)cfg->provider.context_window);
+    int target_tokens = (int)(target_ratio * (float)effective_window);
     if (target_tokens <= 0) target_tokens = 4000;
 
-    /* Plan branch */
+    /* Plan branch — use resolved window */
+    Config plan_cfg = *cfg;
+    plan_cfg.context_window = effective_window;
     ContextPlan plan = {0};
-    if (context_plan(db, session_id, cfg, 0, &plan) != 0) {
+    if (context_plan(db, session_id, &plan_cfg, 0, &plan) != 0) {
         config_free(cfg);
         return -1;
     }

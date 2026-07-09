@@ -246,6 +246,7 @@ sqlite3 *db_open(const char *path) {
      * surfaces as e.g. SQLITE_BUSY_SNAPSHOT (the read→write upgrade case). */
     sqlite3_extended_result_codes(db, 1);
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
+    sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA wal_autocheckpoint=1000;", NULL, NULL, NULL);
     sqlite3_busy_handler(db, db_busy_handler, NULL);
     sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL);
@@ -298,24 +299,73 @@ int db_ensure_schema(sqlite3 *db) {
     return 0;
 }
 
-/* Gate startup on schema compatibility. Returns 1 if the DB is safe to use
- * (fresh/empty, or stamped with the current generation), 0 if it predates or
- * postdates this build and must be deleted (no migrations). */
-int db_schema_compat(sqlite3 *db) {
-    int uv = 0, has_tables = 0;
+/* ── Schema migration: forward patches from user_version to current ───────── */
+
+/* Each patch brings the DB from (version-1) to (version). SQL may contain
+ * multiple statements separated by semicolons. Run in order, one transaction
+ * per patch. */
+static const struct { int version; const char *sql; } schema_patches[] = {
+    { 12,
+      "ALTER TABLE providers DROP COLUMN context_window;"
+      "UPDATE models SET context_window = NULL WHERE context_window = 128000;" },
+};
+
+/* Upgrade an existing DB from its current user_version to CCLAW_SCHEMA_VERSION.
+ * Returns 1 on success (DB is now current), 0 on failure (patch failed, DB
+ * unchanged from the failed patch onward). Only called for DBs at version >= 11
+ * (the first tracked version). */
+static int db_schema_upgrade(sqlite3 *db) {
+    int uv = 0;
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &s, NULL) == SQLITE_OK) {
         if (sqlite3_step(s) == SQLITE_ROW) uv = sqlite3_column_int(s, 0);
         sqlite3_finalize(s);
     }
-    if (uv == CCLAW_SCHEMA_VERSION) return 1;       /* current */
-    if (sqlite3_prepare_v2(db,
-            "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1",
-            -1, &s, NULL) == SQLITE_OK) {
-        if (sqlite3_step(s) == SQLITE_ROW) has_tables = 1;
-        sqlite3_finalize(s);
+    if (uv == CCLAW_SCHEMA_VERSION) return 1;  /* already current */
+
+    /* Fresh DB (no tables, version 0) — handled by db_ensure_schema, not patches */
+    if (uv == 0) {
+        int has_tables = 0;
+        if (sqlite3_prepare_v2(db,
+                "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1",
+                -1, &s, NULL) == SQLITE_OK) {
+            if (sqlite3_step(s) == SQLITE_ROW) has_tables = 1;
+            sqlite3_finalize(s);
+        }
+        if (!has_tables) return 1;  /* fresh — schema init will stamp it */
     }
-    return (uv == 0 && !has_tables);                /* fresh DB: schema stamps it */
+
+    /* Refuse DBs from the future or too old (pre-tracking) */
+    if (uv > CCLAW_SCHEMA_VERSION || uv < 11) return 0;
+
+    int n_patches = (int)(sizeof(schema_patches) / sizeof(schema_patches[0]));
+    for (int i = 0; i < n_patches; i++) {
+        if (schema_patches[i].version <= uv) continue;
+        if (schema_patches[i].version > CCLAW_SCHEMA_VERSION) break;
+
+        char *err = NULL;
+        sqlite3_exec(db, "BEGIN EXCLUSIVE", NULL, NULL, NULL);
+        int rc = sqlite3_exec(db, schema_patches[i].sql, NULL, NULL, &err);
+        if (rc != SQLITE_OK) {
+            LOG_ERROR_("schema patch v%d failed: %s", schema_patches[i].version,
+                       err ? err : "unknown");
+            sqlite3_free(err);
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            return 0;
+        }
+        char pragma[48];
+        snprintf(pragma, sizeof(pragma), "PRAGMA user_version=%d", schema_patches[i].version);
+        sqlite3_exec(db, pragma, NULL, NULL, NULL);
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+        LOG_INFO_("schema upgraded to v%d", schema_patches[i].version);
+    }
+    return 1;
+}
+
+/* Gate startup on schema compatibility. Returns 1 if the DB is safe to use
+ * (fresh/empty, current, or successfully upgraded), 0 if it cannot be used. */
+int db_schema_compat(sqlite3 *db) {
+    return db_schema_upgrade(db);
 }
 
 /* mmap + reduced cache + relaxed sync for child processes (short-lived). */
@@ -722,15 +772,17 @@ char *get_response_text(sqlite3 *db, int64_t session_id) {
     if (leaf_id < 0) return NULL;
 
     const char *sql =
-        "WITH RECURSIVE branch(id, parent_id, role, content, lvl) AS ("
-        "  SELECT id, parent_id, role, content, 0"
+        "WITH RECURSIVE branch(id, parent_id, role, content, type, lvl) AS ("
+        "  SELECT id, parent_id, role, content, type, 0"
         "    FROM entries WHERE id=? AND session_id=?"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.role, e.content, b.lvl+1"
+        "  SELECT e.id, e.parent_id, e.role, e.content, e.type, b.lvl+1"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
         "    WHERE b.lvl < 10000"
         ") SELECT role, content FROM branch"
-        "  WHERE (role=2 AND content IS NOT NULL AND content != '') OR role=1"
+        "  WHERE (role=2 AND content IS NOT NULL AND content != ''"
+        "         AND type NOT IN ('tool_call','reasoning'))"
+        "     OR role=1"
         "  ORDER BY lvl ASC LIMIT 1;";
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)

@@ -27,6 +27,7 @@ typedef struct {
 /* Plan which entries to include in LLM request (pass 1).
  * Queries SQLite for branch metadata without loading content.
  * overhead: estimated tokens consumed by tool definitions + other fixed content.
+ * context_window: effective context window for this request (0 = use cfg default).
  * Returns 0 on success, -1 on error. Caller frees with context_plan_free(). */
 int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhead, ContextPlan *out);
 
@@ -45,6 +46,11 @@ void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz);
  * Returns heap-allocated text (caller frees) or NULL if nothing recalled. */
 /* Compaction trigger: branch token sum exceeds context_threshold x window. */
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg);
+
+/* Resolve the effective context window for an agent's model.
+ * Priority: models.context_window (non-NULL) → global_default.
+ * Returns global_default if agent has no model or model has NULL window. */
+int model_context_window(sqlite3 *db, const char *agent_name, int global_default);
 
 char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
                           int max_tokens);

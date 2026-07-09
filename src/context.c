@@ -188,7 +188,7 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
     int budget = cfg->max_history_tokens > 0
         ? cfg->max_history_tokens
         : (int)((cfg->context_threshold > 0 ? cfg->context_threshold : 0.6f)
-                * (float)cfg->provider.context_window);
+                * (float)cfg->context_window);
     if (budget <= 0) budget = 8000;
 
     /* Subtract fixed overhead (tool definitions, max_tokens reply reservation) */
@@ -460,12 +460,40 @@ char *context_auto_recall(sqlite3 *db, int64_t session_id, const char *user_msg,
     return out;
 }
 
+/* Resolve the effective context window for an agent's model.
+ * Looks up the agent's model preference, finds the matching models row,
+ * returns its context_window if non-NULL. Falls back to global_default. */
+int model_context_window(sqlite3 *db, const char *agent_name, int global_default) {
+    if (!db || !agent_name || !agent_name[0]) return global_default;
+
+    /* Agent's model preference → matching models row's context_window */
+    const char *sql =
+        "SELECT m.context_window FROM models m"
+        " JOIN agents a ON (a.model = m.id OR a.model = m.model)"
+        " WHERE a.name = ? AND m.status != 'disabled'"
+        " ORDER BY m.priority LIMIT 1;";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK)
+        return global_default;
+    sqlite3_bind_text(s, 1, agent_name, -1, SQLITE_STATIC);
+    int result = global_default;
+    if (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_type(s, 0) != SQLITE_NULL)
+        result = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    return result > 0 ? result : global_default;
+}
+
 /* Compaction trigger — recovered from f4b50e0's dead-code purge,
  * now driven post-turn by the worker-job path instead of synchronously. */
 int session_needs_compaction(sqlite3 *db, int64_t session_id, const Config *cfg) {
     if (!db || !cfg || !cfg->compaction) return 0;
     float threshold = cfg->context_threshold > 0 ? cfg->context_threshold : 0.6f;
-    int token_limit = (int)(threshold * (float)cfg->provider.context_window);
+
+    /* Resolve effective context window from the session's agent model */
+    char *agent = session_get_agent_name(db, session_id);
+    int window = model_context_window(db, agent, cfg->context_window);
+    free(agent);
+    int token_limit = (int)(threshold * (float)window);
     if (token_limit <= 0) token_limit = 8000;
 
     const char *sql =

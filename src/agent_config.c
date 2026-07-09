@@ -359,6 +359,22 @@ void agent_grant_defaults(sqlite3 *db, const char *agent) {
         sqlite3_finalize(stmt);
     }
     free(list);
+
+    /* Mark approval-required tools */
+    char *approval_list = config_get(db, "agent_approval_tools");
+    if (approval_list) {
+        const char *asql =
+            "UPDATE grants SET approval_mode='always'"
+            " WHERE agent_name=?1 AND kind='tool' AND value IN (SELECT value FROM json_each(?2));";
+        sqlite3_stmt *ast;
+        if (sqlite3_prepare_v2(db, asql, -1, &ast, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(ast, 1, agent, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ast, 2, approval_list, -1, SQLITE_STATIC);
+            sqlite3_step(ast);
+            sqlite3_finalize(ast);
+        }
+        free(approval_list);
+    }
 }
 
 char *grants_json(sqlite3 *db, const char *agent, const char *kind) {

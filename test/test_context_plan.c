@@ -42,7 +42,7 @@ static void test_basic_plan(void) {
     append_msg(db, sid, ROLE_ASSISTANT, "Hi!", STOP_REASON_STOP, NULL, 0);
 
     Config cfg = {0};
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
     ContextPlan plan = {0};
     int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan returned error");
@@ -73,7 +73,7 @@ static void test_v28_filtering(void) {
     append_msg(db, sid, ROLE_ASSISTANT, "OK", STOP_REASON_STOP, NULL, 0);
 
     Config cfg = {0};
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
     ContextPlan plan = {0};
     int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan returned error");
@@ -107,7 +107,7 @@ static void test_cut_point(void) {
     }
 
     Config cfg = {0};
-    cfg.provider.context_window = 200; /* tiny: 120 token budget */
+    cfg.context_window = 200; /* tiny: 120 token budget */
     ContextPlan plan = {0};
     int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan returned error");
@@ -173,7 +173,7 @@ static void test_plan_no_content_access(void) {
     /* context_plan must work correctly without loading content/tool_calls.
      * Verify the plan query only selects integer metadata columns. */
     Config cfg = {0};
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
     ContextPlan plan = {0};
     int rc = context_plan(db, sid, &cfg, 0, &plan);
     if (rc != 0) FAIL("context_plan returned error");
@@ -246,7 +246,7 @@ static void test_hook_suppress_excluded(void) {
     sqlite3_finalize(s);
 
     Config cfg = {0};
-    cfg.provider.context_window = 128000;
+    cfg.context_window = 128000;
     ContextPlan plan = {0};
     if (context_plan(db, sid, &cfg, 0, &plan) != 0) FAIL("context_plan returned error");
     if (plan.count != 2) FAIL("suppressed entry still in plan");
@@ -277,7 +277,7 @@ static void test_hook_pin_overrides_cut(void) {
         " WHERE id=(SELECT MIN(id) FROM entries);", NULL, NULL, NULL);
 
     Config cfg = {0};
-    cfg.provider.context_window = 200; /* tiny: forces a cut */
+    cfg.context_window = 200; /* tiny: forces a cut */
     ContextPlan plan = {0};
     if (context_plan(db, sid, &cfg, 0, &plan) != 0) FAIL("context_plan returned error");
     if (plan.cut <= 0) FAIL("expected a cut");

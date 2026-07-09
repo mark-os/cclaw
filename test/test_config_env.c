@@ -37,7 +37,7 @@ static void test_env_defaults(void) {
     assert(strcmp(cfg->provider.base_url, "https://openrouter.ai/api/v1") == 0);
     assert(strcmp(cfg->provider.model, "deepseek/deepseek-v4-flash") == 0);
     assert(cfg->provider.max_tokens == 4096);
-    assert(cfg->provider.context_window == 128000);
+    assert(cfg->context_window == 128000);
     assert(strcmp(cfg->workspace, ".cclaw/agents/default/workspace") == 0);
     assert(strcmp(cfg->db_path, "cclaw.db") == 0);
     assert(cfg->max_iterations == 25);
@@ -97,7 +97,7 @@ static void test_env_all_overrides(void) {
     assert(strcmp(cfg->provider.base_url, "http://local:8000/v1") == 0);
     assert(strcmp(cfg->provider.model, "gpt-5") == 0);
     assert(cfg->provider.max_tokens == 8192);
-    assert(cfg->provider.context_window == 200000);
+    assert(cfg->context_window == 200000);
     assert(strcmp(cfg->workspace, "/tmp/ws") == 0);
     assert(strcmp(cfg->db_path, "/tmp/a.db") == 0);
     assert(cfg->max_iterations == 50);

@@ -105,7 +105,6 @@ typedef struct {
     char *api_key;
     char *model;
     int max_tokens;         /* max response tokens */
-    int context_window;     /* model context window size */
     CacheHints cache_hints; /* prompt cache control */
     EndpointType endpoint_type; /* wire format (openai or gemini) */
 } ProviderConfig;
@@ -123,6 +122,7 @@ typedef struct {
     size_t admin_chat_id_count;
     char *system_prompt;    /* per-agent system prompt, supports {session_id} {date} */
     int web_port;
+    int context_window;     /* global default context window (overridden per-model in models table) */
     int max_iterations;     /* agent loop iteration cap */
     int max_history_tokens; /* token budget for context (0 = 60% of context_window) */
     int heartbeat_interval; /* seconds between heartbeat system msgs (0=disabled) */

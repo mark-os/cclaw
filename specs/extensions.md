@@ -127,7 +127,7 @@ state:
 
 "Migrating to `~/.cclaw`" means exactly this: **promotion copies the bundle from
 the workspace into the shared store, and ingests its declarations into the DB.**
-(File copy, not a schema migration — no conflict with the no-migrations rule.)
+(File copy, not a schema migration — unrelated to `schema_patches[]`.)
 
 ## Lifecycle
 

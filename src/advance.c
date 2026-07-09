@@ -47,7 +47,8 @@ static char *rich_max_iter_message(sqlite3 *db, int64_t session_id) {
 
     if (n == 0) return strdup("error: max iterations reached");
 
-    /* Concatenate: chunk1\n\n---\n\nchunk2\n\n---\n\nerror: ... */
+    /* Concatenate oldest→newest (the branch walk collects leaf-first, so
+     * iterate chunks in reverse): chunk3\n\n---\n\nchunk2\n\n---\n\n...error */
     const char *sep = "\n\n---\n\n";
     const char *tail = "\n\n---\n\nerror: max iterations reached";
     size_t len = strlen(tail) + 1;
@@ -60,8 +61,8 @@ static char *rich_max_iter_message(sqlite3 *db, int64_t session_id) {
         return strdup("error: max iterations reached");
     }
     buf[0] = '\0';
-    for (int i = 0; i < n; i++) {
-        if (i > 0) strcat(buf, sep);
+    for (int i = n - 1; i >= 0; i--) {
+        if (i < n - 1) strcat(buf, sep);
         strcat(buf, chunks[i]);
         free(chunks[i]);
     }

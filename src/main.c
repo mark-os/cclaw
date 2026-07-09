@@ -2357,6 +2357,8 @@ static void reap_children(void) {
                 db_entry_set_network_hosts(g_db, rid, hosts);
             db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, rid);
             LOG_INFO_("tool done tool=%s is_err=%d", c->tool_name, is_err);
+            LOG_TRACE_("tool result tool=%s len=%zu content=%s",
+                       c->tool_name, out_len, output);
             if (hook_annotate) {
                 if (rid > 0) hook_entry_data_patch(g_db, rid, hook_annotate);
                 free(hook_annotate);

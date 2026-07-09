@@ -213,6 +213,26 @@ void db_configure_logging(void) {
     sqlite3_config(SQLITE_CONFIG_LOG, sqlite_log_cb, NULL);
 }
 
+/* Custom busy handler: replaces PRAGMA busy_timeout so we can log contention.
+ * Progressive backoff (mirrors SQLite's internal delay table), caps at 50
+ * retries (~4.3s total sleep). Logs WARN on first retry and on timeout. */
+static int db_busy_handler(void *arg, int count) {
+    (void)arg;
+    if (count == 0)
+        LOG_WARN_("sqlite busy: lock contention, retrying");
+    if (count >= 50) {
+        LOG_WARN_("sqlite busy: giving up after %d retries", count);
+        return 0;  /* give up → SQLITE_BUSY returned to caller */
+    }
+    /* Progressive backoff: 1,2,5,10,15,20,25,25,50,50,100,100,... ms */
+    static const int delays[] = {1,2,5,10,15,20,25,25,50,50,100};
+    int ndelay = (int)(sizeof(delays) / sizeof(delays[0]));
+    int delay = delays[count < ndelay ? count : ndelay - 1];
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = delay * 1000000L };
+    nanosleep(&ts, NULL);
+    return 1;  /* retry */
+}
+
 sqlite3 *db_open(const char *path) {
     sqlite3 *db = NULL;
     int rc = sqlite3_open(path, &db);
@@ -227,7 +247,7 @@ sqlite3 *db_open(const char *path) {
     sqlite3_extended_result_codes(db, 1);
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA wal_autocheckpoint=1000;", NULL, NULL, NULL);
-    sqlite3_exec(db, "PRAGMA busy_timeout=5000;", NULL, NULL, NULL);
+    sqlite3_busy_handler(db, db_busy_handler, NULL);
     sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL);
     return db;
 }

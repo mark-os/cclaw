@@ -169,6 +169,10 @@ static int db_trace_cb(unsigned mask, void *ctx, void *p, void *x) {
         sqlite3_stmt *stmt = p;
         int64_t ns = *(int64_t *)x;
         const char *sql = sqlite3_sql(stmt);
+        /* Skip db_periodic housekeeping (heartbeat, GC) — always >1ms on slow
+         * hardware but never diagnostically interesting. */
+        if (sql && strncmp(sql, "UPDATE processes SET heartbeat_at", 33) == 0)
+            return 0;
         if (ns > 1000000) /* only log queries > 1ms */
             syslog(LOG_DEBUG, "sql: %ldms %s",
                    (long)(ns / 1000000), sql ? sql : "?");

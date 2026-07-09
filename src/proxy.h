@@ -64,6 +64,8 @@ typedef struct {
     pthread_cond_t conn_cond;   /* signalled when conn_active reaches 0 */
     char *contacted[PROXY_CONTACTED_MAX]; /* dedup'd allowed targets (owned) */
     int contacted_count;                  /* guarded by blessed_mu */
+    char *denied[PROXY_CONTACTED_MAX];    /* dedup'd denied targets (owned) */
+    int denied_count;                     /* guarded by blessed_mu */
 } ProxyContext;
 
 /* Bind + listen on a per-call UDS at <dir>/.proxy.<pid>.sock (dir = the agent
@@ -91,5 +93,10 @@ const char *proxy_sock_path(const ProxyContext *ctx);
  * ["api.github.com"]), malloc'd; NULL if nothing was contacted. Call before
  * proxy_stop() — stop frees the collected list. */
 char *proxy_hosts_json(ProxyContext *ctx);
+
+/* Human-readable summary of hosts denied during this call, malloc'd; NULL if
+ * none were denied. Intended for appending to tool results so the model knows
+ * which hosts were blocked by the proxy. Call before proxy_stop(). */
+char *proxy_denied_summary(ProxyContext *ctx);
 
 #endif

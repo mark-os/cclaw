@@ -85,6 +85,29 @@ static size_t header_cb(char *buf, size_t size, size_t nmemb, void *userdata) {
     return bytes;
 }
 
+/* CURLOPT_DEBUGFUNCTION callback: logs headers and info text at TRACE level.
+ * Skips CURLINFO_DATA_IN/OUT (body bytes) to avoid flooding the log with
+ * multi-MB LLM responses. */
+static int http_debug_cb(CURL *handle, curl_infotype type, char *data,
+                         size_t size, void *userptr) {
+    (void)handle; (void)userptr;
+    if (type == CURLINFO_DATA_IN || type == CURLINFO_DATA_OUT)
+        return 0;  /* skip body */
+    if (type == CURLINFO_SSL_DATA_IN || type == CURLINFO_SSL_DATA_OUT)
+        return 0;  /* skip raw TLS bytes */
+
+    /* Trim trailing newline for cleaner log lines */
+    while (size > 0 && (data[size - 1] == '\n' || data[size - 1] == '\r'))
+        size--;
+    if (size == 0) return 0;
+
+    const char *tag = (type == CURLINFO_TEXT)      ? "info" :
+                      (type == CURLINFO_HEADER_OUT) ? "req" :
+                      (type == CURLINFO_HEADER_IN)  ? "resp" : "?";
+    LOG_TRACE_("curl %s: %.*s", tag, (int)size, data);
+    return 0;
+}
+
 /* General-purpose HTTP request */
 int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
     memset(resp, 0, sizeof(*resp));
@@ -158,6 +181,15 @@ int http_do(const HttpRequestOpts *opts, HttpResponse *resp) {
 
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, resp);
+
+    /* Wire-level debug: headers, TLS info, timing — gated on TRACE so it costs
+     * nothing at lower levels. Skips DATA_IN/DATA_OUT (body) to avoid logging
+     * multi-MB LLM responses. */
+    if (cclaw_log_level() >= LOG_LEVEL_TRACE) {
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, http_debug_cb);
+        curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
+    }
 
     CURLcode rc = curl_easy_perform(curl);
 

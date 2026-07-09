@@ -529,10 +529,23 @@ static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
 
     /* Capture the contacted-hosts tag before proxy_stop frees the list. */
     char *hosts_json = proxy_active ? proxy_hosts_json(&proxy) : NULL;
+    char *denied = proxy_active ? proxy_denied_summary(&proxy) : NULL;
     if (proxy_active) proxy_stop(&proxy);
     output[out_len] = '\0';
 
     char *result = format_tier_result(desc, output, out_len, timed_out, status, q->timeout);
+
+    /* Append proxy-deny summary so the model knows which hosts were blocked. */
+    if (denied && result) {
+        size_t rlen = strlen(result);
+        size_t dlen = strlen(denied);
+        char *combined = realloc(result, rlen + dlen + 1);
+        if (combined) {
+            memcpy(combined + rlen, denied, dlen + 1);
+            result = combined;
+        }
+    }
+    free(denied);
 
     write_framed(FD_REQUEST, hosts_json, result);
     free(hosts_json);

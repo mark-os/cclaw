@@ -17,10 +17,22 @@ sqlite3 *db_open(const char *path);
 /* Apply schema (CREATE TABLE IF NOT EXISTS). Call once from main process. */
 int db_ensure_schema(sqlite3 *db);
 
-/* 1 if the DB's schema generation is compatible with this build (fresh/empty
- * or current), 0 if it's stale/foreign and must be deleted. Check before
- * db_ensure_schema — a stale DB silently misbehaves otherwise. */
+/* 1 if the DB's schema generation is compatible with this build (fresh/empty,
+ * current, or successfully patched forward), 0 if it can't be used and must be
+ * deleted. Check before db_ensure_schema — a stale DB silently misbehaves
+ * otherwise. Applies pending schema patches as a side effect. */
 int db_schema_compat(sqlite3 *db);
+
+/* Read-only schema inspection — reports where a DB stands relative to this
+ * build without applying patches (unlike db_schema_compat). For --doctor. */
+typedef enum {
+    DB_SCHEMA_FRESH,      /* empty — initialized at the current version on first run */
+    DB_SCHEMA_CURRENT,    /* stamped with this build's version */
+    DB_SCHEMA_UPGRADABLE, /* older, in patch range — auto-upgraded at next startup */
+    DB_SCHEMA_FUTURE,     /* stamped by a newer build — refused */
+    DB_SCHEMA_TOO_OLD     /* predates migration tracking — refused, delete it */
+} DbSchemaState;
+DbSchemaState db_schema_state(sqlite3 *db, int *user_version);
 
 /* Seed default config + provider. Call once from main() on first run. */
 int db_seed_defaults(sqlite3 *db);
@@ -28,8 +40,12 @@ int db_seed_defaults(sqlite3 *db);
 /* Set mmap + reduced cache pragmas for child processes (short-lived). */
 void db_set_child_pragmas(sqlite3 *db);
 
-/* Enable sqlite3_trace_v2 profiling (logs queries > 1ms via syslog). */
+/* Enable sqlite3_trace_v2 profiling (slow queries → WARN, all → TRACE). */
 void db_enable_trace(sqlite3 *db);
+
+/* Slow-query WARN threshold in ms (config key sql_slow_ms, default 100).
+ * 0 disables the warning; statements still show at TRACE. */
+void db_set_slow_query_ms(int ms);
 
 /* Close DB handle. */
 void db_close(sqlite3 *db);

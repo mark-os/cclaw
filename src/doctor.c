@@ -2,6 +2,7 @@
 #include "doctor.h"
 #include "cclaw.h"
 #include "config.h"
+#include "config_registry.h"
 #include "db.h"
 #include "http.h"
 #include "log.h"
@@ -95,15 +96,14 @@ static void check_db(const char *db_path, sqlite3 **out_db) {
     snprintf(detail, sizeof(detail), "size=%lld bytes", (long long)st.st_size);
     print_ok("exists", detail);
 
-    /* Check for WAL/SHM siblings */
+    /* WAL/SHM siblings with sizes — a large -wal means checkpointing lags */
     char wal[1024], shm[1024];
     snprintf(wal, sizeof(wal), "%s-wal", db_path);
     snprintf(shm, sizeof(shm), "%s-shm", db_path);
-    int has_wal = (stat(wal, &st) == 0);
-    int has_shm = (stat(shm, &st) == 0);
-    if (has_wal || has_shm)
-        printf("  note: WAL siblings present (wal=%s shm=%s)\n",
-               has_wal ? "yes" : "no", has_shm ? "yes" : "no");
+    long long wal_sz = (stat(wal, &st) == 0) ? (long long)st.st_size : -1;
+    long long shm_sz = (stat(shm, &st) == 0) ? (long long)st.st_size : -1;
+    if (wal_sz >= 0 || shm_sz >= 0)
+        printf("  wal: %lld bytes, shm: %lld bytes\n", wal_sz, shm_sz);
 
     /* Try to open */
     sqlite3 *db = db_open(db_path);
@@ -113,20 +113,104 @@ static void check_db(const char *db_path, sqlite3 **out_db) {
     }
     print_ok("open", NULL);
 
-    /* Schema compat */
-    if (db_schema_compat(db)) {
-        char sv[64];
-        snprintf(sv, sizeof(sv), "schema_version=%d (current)", CCLAW_SCHEMA_VERSION);
+    /* Journal mode (expect wal) */
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &s, NULL) == SQLITE_OK) {
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *mode = (const char *)sqlite3_column_text(s, 0);
+            printf("  journal_mode: %s\n", mode ? mode : "?");
+        }
+        sqlite3_finalize(s);
+    }
+
+    /* Schema state — read-only report; doctor diagnoses, startup migrates */
+    int uv = 0;
+    char sv[96];
+    switch (db_schema_state(db, &uv)) {
+    case DB_SCHEMA_CURRENT:
+        snprintf(sv, sizeof(sv), "v%d (current)", uv);
         print_ok("schema", sv);
-    } else {
-        char sv[64];
-        snprintf(sv, sizeof(sv), "stale (this build expects v%d)", CCLAW_SCHEMA_VERSION);
+        break;
+    case DB_SCHEMA_FRESH:
+        snprintf(sv, sizeof(sv), "empty (initialized at v%d on first run)",
+                 CCLAW_SCHEMA_VERSION);
+        print_ok("schema", sv);
+        break;
+    case DB_SCHEMA_UPGRADABLE:
+        snprintf(sv, sizeof(sv), "v%d (auto-upgrades to v%d at next startup)",
+                 uv, CCLAW_SCHEMA_VERSION);
+        print_ok("schema", sv);
+        break;
+    case DB_SCHEMA_FUTURE:
+        snprintf(sv, sizeof(sv), "v%d — from a newer build (this one expects v%d)",
+                 uv, CCLAW_SCHEMA_VERSION);
+        print_fail("schema", sv);
+        db_close(db);
+        return;
+    case DB_SCHEMA_TOO_OLD:
+        snprintf(sv, sizeof(sv), "v%d — predates migration tracking, delete the DB", uv);
         print_fail("schema", sv);
         db_close(db);
         return;
     }
 
+    /* Row counts (tables may not exist yet on a fresh DB) */
+    static const char *count_tables[] = { "agents", "sessions", "entries" };
+    printf(" ");
+    for (size_t i = 0; i < sizeof(count_tables) / sizeof(count_tables[0]); i++) {
+        char csql[64];
+        snprintf(csql, sizeof(csql), "SELECT COUNT(*) FROM %s", count_tables[i]);
+        if (sqlite3_prepare_v2(db, csql, -1, &s, NULL) == SQLITE_OK) {
+            if (sqlite3_step(s) == SQLITE_ROW)
+                printf(" %s=%lld", count_tables[i],
+                       (long long)sqlite3_column_int64(s, 0));
+            sqlite3_finalize(s);
+        } else {
+            printf(" %s=n/a", count_tables[i]);
+        }
+    }
+    printf("\n");
+
     *out_db = db;
+}
+
+/* ── Check: Models ──────────────────────────────────────────────── */
+
+static void check_models(sqlite3 *db) {
+    printf("\n[models]\n");
+    if (!db) {
+        printf("  skipped: no DB handle\n");
+        return;
+    }
+
+    char *win = config_get(db, "context_window");
+    printf("  default context_window: %s\n", win ? win : "(unset)");
+    free(win);
+
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT id, provider_name, context_window, status"
+            " FROM models ORDER BY priority", -1, &s, NULL) != SQLITE_OK) {
+        printf("  (no models table)\n");
+        return;
+    }
+    int count = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        const char *id     = (const char *)sqlite3_column_text(s, 0);
+        const char *prov   = (const char *)sqlite3_column_text(s, 1);
+        const char *status = (const char *)sqlite3_column_text(s, 3);
+        char ctx[24];
+        if (sqlite3_column_type(s, 2) == SQLITE_NULL)
+            snprintf(ctx, sizeof(ctx), "default");
+        else
+            snprintf(ctx, sizeof(ctx), "%d", sqlite3_column_int(s, 2));
+        printf("  %s: provider=%s ctx=%s status=%s\n",
+               id ? id : "?", prov ? prov : "?", ctx, status ? status : "?");
+        count++;
+    }
+    sqlite3_finalize(s);
+    if (count == 0)
+        printf("  (none — falls back to config provider)\n");
 }
 
 /* ── Check 3: Config (redacted) ─────────────────────────────────── */
@@ -368,6 +452,7 @@ int doctor_main(void) {
 
     Config *cfg = NULL;
     check_config(db, &cfg);
+    check_models(db);
     check_provider(cfg);
     check_userns();
     check_workspace(cfg);

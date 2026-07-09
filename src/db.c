@@ -163,6 +163,14 @@ int process_is_live(sqlite3 *db, const char *id, int ttl_sec) {
 
 /* ── sqlite3_trace_v2 callback ─────────────────────────────────── */
 
+/* Slow-query WARN threshold. 100ms suits the pogoplug; EC2-class boxes may
+ * want it lower, so it's the sql_slow_ms config key. 0 disables the WARN. */
+static int g_slow_query_ms = 100;
+
+void db_set_slow_query_ms(int ms) {
+    g_slow_query_ms = ms < 0 ? 0 : ms;
+}
+
 static int db_trace_cb(unsigned mask, void *ctx, void *p, void *x) {
     (void)ctx;
     if (mask == SQLITE_TRACE_PROFILE) {
@@ -173,9 +181,9 @@ static int db_trace_cb(unsigned mask, void *ctx, void *p, void *x) {
          * hardware but never diagnostically interesting. */
         if (sql && strncmp(sql, "UPDATE processes SET heartbeat_at", 33) == 0)
             return 0;
-        /* Slow query warning: anything over 100ms is a problem worth flagging
-         * regardless of log level config (WARN is always visible). */
-        if (ns > 100000000)
+        /* Slow query warning: worth flagging regardless of log level config
+         * (WARN is always visible). Threshold via sql_slow_ms config key. */
+        if (g_slow_query_ms > 0 && ns > (int64_t)g_slow_query_ms * 1000000)
             LOG_WARN_("sql slow: %ldms %s", (long)(ns / 1000000), sql ? sql : "?");
         /* All statements with timing at TRACE (flow tracing) */
         else
@@ -191,7 +199,7 @@ void db_enable_trace(sqlite3 *db) {
     sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, db_trace_cb, NULL);
 }
 
-/* Open DB with WAL + busy_timeout. No schema applied. */
+/* Open DB with WAL + custom busy handler. No schema applied. */
 /* Process-global SQLite log hook (SQLITE_CONFIG_LOG). SQLite invokes this for
  * every internal error/warning — BUSY, WAL recovery, malformed schema, etc. —
  * that would otherwise be silently swallowed inside a library call. May fire on
@@ -308,23 +316,30 @@ static const struct { int version; const char *sql; } schema_patches[] = {
     { 12,
       "ALTER TABLE providers DROP COLUMN context_window;"
       "UPDATE models SET context_window = NULL WHERE context_window = 128000;" },
+    { 13,
+      /* Retro-apply approval gating: agents created before agent_approval_tools
+       * existed carry these grants at the 'silent' default. List is a snapshot
+       * of that config key's default — one-time, so later operator edits via
+       * /grants aren't clobbered on every startup. */
+      "UPDATE grants SET approval_mode='always' WHERE kind='tool' AND value IN"
+      " ('extension_promote','extension_publish','configure_provider',"
+      "'configure_channel','create_agent');" },
 };
 
-/* Upgrade an existing DB from its current user_version to CCLAW_SCHEMA_VERSION.
- * Returns 1 on success (DB is now current), 0 on failure (patch failed, DB
- * unchanged from the failed patch onward). Only called for DBs at version >= 11
- * (the first tracked version). */
-static int db_schema_upgrade(sqlite3 *db) {
+#define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */
+
+DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
     int uv = 0;
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &s, NULL) == SQLITE_OK) {
         if (sqlite3_step(s) == SQLITE_ROW) uv = sqlite3_column_int(s, 0);
         sqlite3_finalize(s);
     }
-    if (uv == CCLAW_SCHEMA_VERSION) return 1;  /* already current */
-
-    /* Fresh DB (no tables, version 0) — handled by db_ensure_schema, not patches */
+    if (user_version) *user_version = uv;
+    if (uv == CCLAW_SCHEMA_VERSION) return DB_SCHEMA_CURRENT;
     if (uv == 0) {
+        /* Version 0 with tables = pre-tracking DB; without = fresh (schema
+         * init stamps it) */
         int has_tables = 0;
         if (sqlite3_prepare_v2(db,
                 "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1",
@@ -332,11 +347,25 @@ static int db_schema_upgrade(sqlite3 *db) {
             if (sqlite3_step(s) == SQLITE_ROW) has_tables = 1;
             sqlite3_finalize(s);
         }
-        if (!has_tables) return 1;  /* fresh — schema init will stamp it */
+        return has_tables ? DB_SCHEMA_TOO_OLD : DB_SCHEMA_FRESH;
     }
+    if (uv > CCLAW_SCHEMA_VERSION) return DB_SCHEMA_FUTURE;
+    if (uv < CCLAW_SCHEMA_MIN) return DB_SCHEMA_TOO_OLD;
+    return DB_SCHEMA_UPGRADABLE;
+}
 
-    /* Refuse DBs from the future or too old (pre-tracking) */
-    if (uv > CCLAW_SCHEMA_VERSION || uv < 11) return 0;
+/* Upgrade an existing DB from its current user_version to CCLAW_SCHEMA_VERSION.
+ * Returns 1 on success (DB is now current), 0 on failure (patch failed, DB
+ * unchanged from the failed patch onward). */
+static int db_schema_upgrade(sqlite3 *db) {
+    int uv = 0;
+    switch (db_schema_state(db, &uv)) {
+        case DB_SCHEMA_CURRENT:
+        case DB_SCHEMA_FRESH:      return 1;
+        case DB_SCHEMA_FUTURE:
+        case DB_SCHEMA_TOO_OLD:    return 0;
+        case DB_SCHEMA_UPGRADABLE: break;
+    }
 
     int n_patches = (int)(sizeof(schema_patches) / sizeof(schema_patches[0]));
     for (int i = 0; i < n_patches; i++) {

@@ -121,7 +121,6 @@ static void test_install_ingests_rows(void) {
     assert(qint(db, "SELECT count(*) FROM tools WHERE name='get_forecast'") == 1);
     char *en = q1(db, "SELECT extension_name FROM tools WHERE name='get_forecast'");
     assert(en && strcmp(en, "nws") == 0); free(en);
-    assert(qint(db, "SELECT builtin FROM tools WHERE name='get_forecast'") == 0);
     char *path = q1(db, "SELECT path FROM tools WHERE name='get_forecast'");
     assert(path && strstr(path, "/extensions/nws/forecast.qjs")); free(path);
     char *params = q1(db, "SELECT parameters_json FROM tools WHERE name='get_forecast'");
@@ -271,9 +270,10 @@ static void test_validate_rejects_bad_json(void) {
     printf("  PASS test_validate_rejects_bad_json\n");
 }
 
-/* extension_fork: a manifest-less builtin bundle (like telegram's) forks into
- * a workspace draft with a synthesized, renamed manifest that then passes a
- * real extension_install — the full fork → edit → promote roundtrip. */
+/* extension_fork: a system-owned extension (like telegram's) forks into a
+ * workspace draft with its manifest renamed, that then passes a real
+ * extension_install under a different name — the full fork → edit → promote
+ * roundtrip. */
 static void test_extension_fork_roundtrip(void) {
     unlink(TEST_DB);
     rm_rf("/tmp/test_fork_src");
@@ -281,13 +281,16 @@ static void test_extension_fork_roundtrip(void) {
     rm_rf("/tmp/extensions");
     sqlite3 *db = test_db_open(TEST_DB);
 
-    /* Fake builtin: handler + locale json, no extension.json — exactly how
-     * extract_builtin_extensions registers the telegram bundle. */
+    /* System-owned extension: handler + real extension.json — exactly how
+     * extension_install_builtin registers the telegram bundle. */
     mkdir("/tmp/test_fork_src", 0755);
     write_file("/tmp/test_fork_src/channel.qjs", "function onInit() { return {}; }\n");
-    write_file("/tmp/test_fork_src/tg.json", "{\"messages\":{}}\n");
+    write_file("/tmp/test_fork_src/extension.json",
+        "{\"name\":\"tg\",\"version\":\"0.1.0\","
+        "\"channel\":{\"type\":\"telegram\",\"handler\":\"channel.qjs\"}}\n");
     assert(sqlite3_exec(db,
-        "INSERT INTO extensions(name, path, builtin) VALUES('tg','/tmp/test_fork_src',1);"
+        "INSERT INTO extensions(name, path, owner_agent, published)"
+        " VALUES('tg','/tmp/test_fork_src','system',1);"
         "INSERT INTO channels(name, extension_name, type, binary_path, status)"
         " VALUES('tg','tg','telegram','/tmp/test_fork_src/channel.qjs','active');",
         NULL, NULL, NULL) == SQLITE_OK);
@@ -304,7 +307,7 @@ static void test_extension_fork_roundtrip(void) {
     assert(r && strstr(r, "forked extension 'tg'"));
     free(r);
 
-    /* Draft materialized: handler copied, manifest synthesized + renamed */
+    /* Draft materialized: handler copied, manifest renamed */
     struct stat st;
     assert(stat("/tmp/test_fork_ws/extensions/tg-ng/channel.qjs", &st) == 0);
     size_t mlen = 0;
@@ -312,10 +315,10 @@ static void test_extension_fork_roundtrip(void) {
     assert(manifest);
     assert(strstr(manifest, "\"tg-ng\""));
     assert(strstr(manifest, "\"channel.qjs\""));
-    assert(strstr(manifest, "\"telegram\""));   /* channel type recovered */
+    assert(strstr(manifest, "\"telegram\""));
     free(manifest);
 
-    /* The synthesized manifest passes a real promote */
+    /* The renamed manifest passes a real promote, under a new owner */
     char *err = NULL;
     assert(extension_install(db, "/tmp/test_fork_ws/extensions/tg-ng", "default", &err) == 0);
     free(err);
@@ -332,8 +335,8 @@ static void test_extension_fork_roundtrip(void) {
     r = t->handler("{\"name\":\"nope\"}", t->user_data);
     assert(r && strstr(r, "not registered")); free(r);
     assert(sqlite3_exec(db,
-        "INSERT INTO extensions(name, path, builtin, published, owner_agent)"
-        " VALUES('private','/tmp/test_fork_src',0,0,'someone-else');",
+        "INSERT INTO extensions(name, path, published, owner_agent)"
+        " VALUES('private','/tmp/test_fork_src',0,'someone-else');",
         NULL, NULL, NULL) == SQLITE_OK);
     r = t->handler("{\"name\":\"private\"}", t->user_data);
     assert(r && strstr(r, "not visible")); free(r);
@@ -343,6 +346,62 @@ static void test_extension_fork_roundtrip(void) {
     rm_rf("/tmp/test_fork_src");
     rm_rf("/tmp/test_fork_ws");
     printf("  PASS test_extension_fork_roundtrip\n");
+}
+
+/* First-come name ownership: a promote may never change the owner of an
+ * existing name; re-installing under the same owner still works. */
+static void test_install_refuses_owner_takeover(void) {
+    unlink(TEST_DB);
+    setup_bundle();
+    sqlite3 *db = test_db_open(TEST_DB);
+    char *err = NULL;
+    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    free(err); err = NULL;
+
+    /* same owner: refresh succeeds */
+    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    free(err); err = NULL;
+
+    /* different owner: refused, existing row untouched */
+    assert(extension_install(db, BUNDLE, "intruder", &err) == -1);
+    assert(err && strstr(err, "owned by 'default'"));
+    free(err); err = NULL;
+    char *owner = q1(db, "SELECT owner_agent FROM extensions WHERE name='nws'");
+    assert(owner && strcmp(owner, "default") == 0); free(owner);
+
+    db_close(db);
+    printf("  PASS test_install_refuses_owner_takeover\n");
+}
+
+/* extension_install_builtin on a fresh scratch DB: telegram lands owner=system
+ * published=1 with a manifest on disk; the channel row exists ('draft'); a
+ * second run preserves an 'active' status. */
+static void test_install_builtin(void) {
+    unlink(TEST_DB);
+    rm_rf("/tmp/extensions/telegram");
+    sqlite3 *db = test_db_open(TEST_DB);
+    assert(db);
+
+    assert(extension_install_builtin(db, TEST_DB) == 0);
+    char *owner = q1(db, "SELECT owner_agent FROM extensions WHERE name='telegram'");
+    assert(owner && strcmp(owner, "system") == 0); free(owner);
+    assert(qint(db, "SELECT published FROM extensions WHERE name='telegram'") == 1);
+    struct stat st;
+    assert(stat("/tmp/extensions/telegram/extension.json", &st) == 0);
+    assert(stat("/tmp/extensions/telegram/channel.qjs", &st) == 0);
+    char *status = q1(db, "SELECT status FROM channels WHERE name='telegram'");
+    assert(status && strcmp(status, "draft") == 0); free(status);
+
+    /* Simulate an operator activation, then rerun: status must survive. */
+    assert(sqlite3_exec(db, "UPDATE channels SET status='active' WHERE name='telegram'",
+                         NULL, NULL, NULL) == SQLITE_OK);
+    assert(extension_install_builtin(db, TEST_DB) == 0);
+    status = q1(db, "SELECT status FROM channels WHERE name='telegram'");
+    assert(status && strcmp(status, "active") == 0); free(status);
+
+    db_close(db);
+    rm_rf("/tmp/extensions/telegram");
+    printf("  PASS test_install_builtin\n");
 }
 
 int main(void) {
@@ -355,6 +414,8 @@ int main(void) {
     test_validate_rejects_bad_json();
     test_validate_rejects_bad_sections();
     test_extension_fork_roundtrip();
+    test_install_refuses_owner_takeover();
+    test_install_builtin();
     /* cleanup */
     unlink(TEST_DB);
     rm_rf("/tmp/test_ext_manifest_bundle");

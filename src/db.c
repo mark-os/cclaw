@@ -332,6 +332,14 @@ static const struct { int version; const char *sql; } schema_patches[] = {
        * 2=plain). Old plain=1 rows map to mode 2 — same semantics. */
       "ALTER TABLE channel_outbox RENAME COLUMN deliver_plain TO deliver_mode;"
       "UPDATE channel_outbox SET deliver_mode=2 WHERE deliver_mode=1;" },
+    { 16,
+      /* builtin tagging dropped: extensions shipped in the binary become
+       * normal published extensions owned by the reserved name 'system'
+       * (agent names are PascalCase-enforced, so no collision). tools.builtin
+       * had zero readers — C-tool provenance is extension_name IS NULL. */
+      "UPDATE extensions SET owner_agent='system', published=1 WHERE builtin=1;"
+      "ALTER TABLE extensions DROP COLUMN builtin;"
+      "ALTER TABLE tools DROP COLUMN builtin;" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

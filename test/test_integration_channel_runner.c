@@ -93,8 +93,8 @@ static sqlite3 *setup_db(int port) {
     char base_url[128];
     snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
 
-    sqlite3_exec(db, "INSERT OR REPLACE INTO extensions(name,path,builtin)"
-        " VALUES('test','/tmp/test_integ_cr_ext','0');", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT OR REPLACE INTO extensions(name,path)"
+        " VALUES('test','/tmp/test_integ_cr_ext');", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT OR REPLACE INTO channels(name,extension_name)"
         " VALUES('test','test');", NULL, NULL, NULL);
 

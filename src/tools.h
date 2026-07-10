@@ -72,8 +72,8 @@ void tools_set_recipe(ToolRegistry *reg, const char *name, ToolRecipe recipe);
 size_t tools_schemas(ToolRegistry *reg, ToolSchema *out, size_t out_cap);
 
 
-/* Sync built-in tool schemas to the DB `tools` table (builtin=1,
- * extension_name=NULL). parameters_json is code-owned: force-overwrite it from
+/* Sync built-in tool schemas to the DB `tools` table (extension_name=NULL).
+ * parameters_json is code-owned: force-overwrite it from
  * the registry. description is DB-editable: fill only if the row is
  * missing/NULL, never clobber. Call with a registry holding only builtins
  * (before loading extension tools), so extension rows are never clobbered. */

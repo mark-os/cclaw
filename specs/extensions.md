@@ -361,9 +361,8 @@ CREATE TABLE extensions (
   name        TEXT PRIMARY KEY,
   path        TEXT NOT NULL,            -- shared store dir: ~/.cclaw/extensions/<name>
   version     TEXT DEFAULT '0.0.0',
-  owner_agent TEXT,                     -- who promoted it (NULL for builtin)
+  owner_agent TEXT,                     -- who promoted it ('system' for extensions shipped in the binary)
   published   INTEGER NOT NULL DEFAULT 0,  -- the single publish flag
-  builtin     INTEGER NOT NULL DEFAULT 0,
   enabled     INTEGER NOT NULL DEFAULT 1,
   created_at  INTEGER NOT NULL DEFAULT (unixepoch())
 );
@@ -386,7 +385,6 @@ CREATE TABLE tools (
   path            TEXT,                 -- handler file (in the shared store)
   agent_name      TEXT,                 -- owner scope, NULL = global
   policy          TEXT,
-  builtin         INTEGER NOT NULL DEFAULT 0,
   enabled         INTEGER NOT NULL DEFAULT 1
 );
 
@@ -401,14 +399,45 @@ CREATE TABLE hooks (
 ```
 
 The `tools` table becomes the source of truth (it was previously written by
-`tools_sync_to_db` with `builtin=1` and no path — a display mirror). Loading reads
-it; promote writes it.
+`tools_sync_to_db` with no extension_name/path — a display mirror for C tools).
+Loading reads it; promote writes it.
+
+There is **one extension model**, not two. Extensions shipped in the binary
+(currently: the telegram channel) are installed at every daemon start via
+`extension_install_builtin()`, which stages the embedded templates and runs
+them through the same `extension_install()` path as an agent's promote, under
+the reserved owner name `'system'` (agent names are PascalCase-enforced, so
+`'system'` can never collide with one). They carry a real `extension.json`
+like any other bundle — no manifest synthesis, no `builtin` flag.
+
+**Name ownership is first-come (npm-style), not shadowing.** A promote may
+never change the owner of an existing extension name — `extension_install()`
+refuses the ingest if the name is already owned by someone else, even for the
+system-owned `telegram` name. This closes a takeover hole: without the guard,
+any agent could `extension_promote` a bundle named `telegram` and silently
+redirect the daemon's channel routing. Overriding what code fronts a channel
+is a deliberate operator/CLI verb (`cclaw channel swap`), never a side effect
+of promoting under a taken name.
+
+**Two acquisition flows**, both one-way (there is no export tool back into
+the shared store):
+- **Local**: `extension_fork` copies any visible extension (published, or
+  owned by the calling agent) into `workspace/extensions/<as>` with its
+  manifest renamed, ready to edit and `extension_promote` under a new name.
+- **Remote**: fetch an archive with `web_fetch` (an egress grant is required),
+  unzip it into `workspace/extensions/<name>`, then `extension_promote`.
+
+Adoption by the system — which extension's code actually fronts a channel —
+stays a deliberate operator/CLI verb (`cclaw channel swap`/`activate`), not
+something a promote or fork can trigger.
 
 ## Security & Trust
 
 - **Promotion is the trust boundary.** Drafts are private and untrusted; an
   installed extension's code is copied out of the agent-writable workspace so it is
   immutable from the agent's side. No promote-then-swap.
+- **Name ownership never changes hands on promote.** See above — first-come,
+  operator-verb-only override.
 - **One read-only mount.** Tool children get `~/.cclaw/extensions/` mounted
   read-only — a single mount serves every agent, instead of cross-agent workspace
   mounts that publishing-from-workspace would require.

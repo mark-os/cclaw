@@ -177,8 +177,8 @@ static void test_launch_all_gate_query(void) {
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
     /* Second channel, never checked/activated — stays 'draft'. */
     assert(sqlite3_exec(db,
-        "INSERT INTO extensions(name, path, version, owner_agent, published, builtin, enabled) "
-        "VALUES('other', '/tmp/extensions/other', '0.0.0', 'default', 0, 0, 1);",
+        "INSERT INTO extensions(name, path, version, owner_agent, published, enabled) "
+        "VALUES('other', '/tmp/extensions/other', '0.0.0', 'default', 0, 1);",
         NULL, NULL, NULL) == SQLITE_OK);
     assert(sqlite3_exec(db,
         "INSERT INTO channels(name, extension_name, type, binary_path, status) "
@@ -231,8 +231,8 @@ static void test_swap_and_revert(void) {
     char *err = NULL;
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
     assert(sqlite3_exec(db,
-        "INSERT INTO extensions(name, path, version, owner_agent, published, builtin, enabled) "
-        "VALUES('echo-ng', '/tmp/extensions/echo-ng', '0.0.0', 'default', 0, 0, 1);",
+        "INSERT INTO extensions(name, path, version, owner_agent, published, enabled) "
+        "VALUES('echo-ng', '/tmp/extensions/echo-ng', '0.0.0', 'default', 0, 1);",
         NULL, NULL, NULL) == SQLITE_OK);
 
     assert(channel_swap(db, "echo", "no-such-extension") == -2);

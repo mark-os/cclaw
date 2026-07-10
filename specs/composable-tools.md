@@ -140,7 +140,7 @@ recorded on the `ToolEntry`; the handler file is read and evaluated per-invocati
 in the forked child.
 
 Every tool — builtin or JS — is **one row in `tools`**
-(`name, description, parameters_json, path, policy, agent_name, enabled, builtin`).
+(`name, description, parameters_json, path, policy, agent_name, enabled`).
 The row *is* the definition the model is shown: `llm_payload.c` already builds the
 request's tool list straight from this table, per-agent-filtered
 (`WHERE enabled=1 AND (agent_name IS NULL OR agent_name=?1)`). The only thing that
@@ -148,8 +148,8 @@ differs between tool kinds is how the handler resolves:
 
 | | Definition | Handler |
 |---|---|---|
-| **Builtin** | `tools` row, `builtin=1`, `path=NULL`, seeded in `seed.sql` | C function, looked up by name |
-| **JS tool** | `tools` row, `builtin=0`, `path=<file>` | function in the `.qjs` at `path`, called by name |
+| **Builtin** | `tools` row, `extension_name=NULL`, `path=NULL` | C function, looked up by name |
+| **JS tool** | `tools` row, `extension_name=<ext>`, `path=<file>` | function in the `.qjs` at `path`, called by name |
 
 So C tools stop defining their schema inline and instead seed a row + provide a
 named handler — the same shape as JS tools providing a handler by path. Predictable

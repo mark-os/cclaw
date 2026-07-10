@@ -32,4 +32,11 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out);
 int extension_install(sqlite3 *db, const char *bundle_dir,
                       const char *owner_agent, char **err_out);
 
+/* Install the extensions shipped in the binary (currently: the telegram
+ * channel) as normal system-owned published extensions. Runs on every start:
+ * stages the embedded templates, installs under the reserved owner 'system',
+ * and preserves an existing channel status across the reinstall. Returns 0
+ * on success. */
+int extension_install_builtin(sqlite3 *db, const char *db_path);
+
 #endif /* CCLAW_EXTENSION_MANIFEST_H */

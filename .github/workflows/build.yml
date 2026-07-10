@@ -1,0 +1,129 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch: {}
+
+jobs:
+  linux-x64:
+    name: linux-x64 (native)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev xxd
+
+      - name: Build
+        run: make all
+
+      - name: Unit tests
+        run: make test
+
+      - name: Integration tests
+        run: make test-integration
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp build/cclaw dist/cclaw-linux-x64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cclaw-linux-x64
+          path: dist/cclaw-linux-x64
+
+  linux-x86:
+    name: linux-x86 (i386, libcurl4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and smoke-test in i386 container
+        run: |
+          docker run --rm --platform linux/386 -v "$PWD":/src -w /src \
+            i386/debian:bookworm bash -c '
+              set -e
+              apt-get update
+              apt-get install -y build-essential libcurl4-openssl-dev xxd git
+              git config --global --add safe.directory /src
+              make all
+              make smoke
+            '
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp build/cclaw dist/cclaw-linux-x86
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cclaw-linux-x86
+          path: dist/cclaw-linux-x86
+
+  linux-armv5te:
+    name: linux-armv5te (Pogoplug, armel, libcurl4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Build and smoke-test in armel container
+        run: |
+          docker run --rm --platform linux/arm/v5 -v "$PWD":/src -w /src \
+            arm32v5/debian:bookworm bash -c '
+              set -e
+              apt-get update
+              apt-get install -y build-essential libcurl4-openssl-dev xxd git
+              git config --global --add safe.directory /src
+              # ARMv5TE has no hardware CAS instruction; 8-byte atomic
+              # builtins (sqlite, quickjs) need libatomic pulled in explicitly.
+              make all LDFLAGS="-lcurl -lm -lpthread -ldl -latomic"
+              make smoke LDFLAGS="-lcurl -lm -lpthread -ldl -latomic"
+            '
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp build/cclaw dist/cclaw-linux-armv5te
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cclaw-linux-armv5te
+          path: dist/cclaw-linux-armv5te
+
+  release:
+    name: Publish release
+    needs: [linux-x64, linux-x86, linux-armv5te]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            dist/cclaw-linux-x64/cclaw-linux-x64 \
+            dist/cclaw-linux-x86/cclaw-linux-x86 \
+            dist/cclaw-linux-armv5te/cclaw-linux-armv5te \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

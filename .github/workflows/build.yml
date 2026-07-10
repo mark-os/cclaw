@@ -37,14 +37,18 @@ jobs:
         run: make test-integration
 
       - name: Package
+        # Zip so every target unpacks to the same binary name — install is
+        # "download, unzip, ./cclaw" regardless of which target you pulled.
         run: |
           mkdir -p dist
-          cp build/cclaw dist/cclaw-linux-x64
+          cp build/cclaw dist/cclaw
+          chmod +x dist/cclaw
+          (cd dist && zip -q cclaw-linux-x64.zip cclaw && rm cclaw)
 
       - uses: actions/upload-artifact@v4
         with:
           name: cclaw-linux-x64
-          path: dist/cclaw-linux-x64
+          path: dist/cclaw-linux-x64.zip
 
   linux-x86:
     name: linux-x86 (i386, libcurl4)
@@ -68,12 +72,14 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          cp build/cclaw dist/cclaw-linux-x86
+          cp build/cclaw dist/cclaw
+          chmod +x dist/cclaw
+          (cd dist && zip -q cclaw-linux-x86.zip cclaw && rm cclaw)
 
       - uses: actions/upload-artifact@v4
         with:
           name: cclaw-linux-x86
-          path: dist/cclaw-linux-x86
+          path: dist/cclaw-linux-x86.zip
 
   linux-armv5te:
     name: linux-armv5te (Pogoplug, armel, libcurl4)
@@ -117,12 +123,14 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          cp build/cclaw dist/cclaw-linux-armv5te
+          cp build/cclaw dist/cclaw
+          chmod +x dist/cclaw
+          (cd dist && zip -q cclaw-linux-armv5te.zip cclaw && rm cclaw)
 
       - uses: actions/upload-artifact@v4
         with:
           name: cclaw-linux-armv5te
-          path: dist/cclaw-linux-armv5te
+          path: dist/cclaw-linux-armv5te.zip
 
   release:
     name: Publish release
@@ -141,10 +149,28 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            dist/cclaw-linux-x64/cclaw-linux-x64 \
-            dist/cclaw-linux-x86/cclaw-linux-x86 \
-            dist/cclaw-linux-armv5te/cclaw-linux-armv5te \
-            --title "${{ github.ref_name }}" \
-            --generate-notes
+          notes=$(mktemp)
+          cat <<EOF | sed 's/^[[:space:]]*//' > "$notes"
+          ## Install
+
+          Same \`cclaw\` binary name in every zip — pick your target, download, unzip, run:
+
+          \`\`\`sh
+          curl -LO https://github.com/$REPO/releases/download/$TAG/cclaw-linux-x64.zip
+          unzip cclaw-linux-x64.zip
+          ./cclaw --version
+          \`\`\`
+
+          Swap \`cclaw-linux-x64.zip\` for \`cclaw-linux-x86.zip\` (32-bit x86) or
+          \`cclaw-linux-armv5te.zip\` (ARMv5TE, e.g. Pogoplug V4) as needed — same
+          three commands either way.
+          EOF
+          gh release create "$TAG" \
+            dist/cclaw-linux-x64/cclaw-linux-x64.zip \
+            dist/cclaw-linux-x86/cclaw-linux-x86.zip \
+            dist/cclaw-linux-armv5te/cclaw-linux-armv5te.zip \
+            --title "$TAG" \
+            --notes-file "$notes"

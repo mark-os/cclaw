@@ -81,9 +81,13 @@ static const char SQL_OPENAI_MESSAGES[] =
     /* Session context (recall + live state) rides second-to-last: right
      * before the newest entry (the actual new user message or tool result),
      * so the model sees "here's context, here's what just happened" in the
-     * order that best matches recency weighting. */
+     * order that best matches recency weighting. Positioned before the most
+     * recent turn (the last user_message in the plan) — never between an
+     * assistant's tool_calls and its tool_results. */
     "  UNION ALL"
-    "  SELECT (SELECT MAX(pp.pos) FROM _plan pp) - 0.5 AS pos,"
+    "  SELECT (SELECT MAX(pp2.pos) FROM _plan pp2 JOIN entries ue"
+    "            ON ue.id=pp2.entry_id AND ue.session_id=?1"
+    "            WHERE ue.type='user_message') - 0.5 AS pos,"
     "    json_object('role','user','content',?2) AS msg"
     "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
     /* Ephemeral hook injects ride at the absolute tail, after even the
@@ -185,7 +189,9 @@ static const char SQL_GEMINI_CONTENTS[] =
     /* Session context (recall + live state), second-to-last: right before
      * the newest entry — see SQL_OPENAI_MESSAGES for rationale. */
     "  UNION ALL"
-    "  SELECT (SELECT MAX(pp.pos) FROM _plan pp) - 0.5 AS min_pos,"
+    "  SELECT (SELECT MAX(pp.pos) FROM _plan pp JOIN entries ue"
+    "            ON ue.id=pp.entry_id AND ue.session_id=?1"
+    "            WHERE ue.type='user_message') - 0.5 AS min_pos,"
     "    json_object('role','user','parts',"
     "      json_array(json_object('text',?2))) AS content_obj"
     "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"

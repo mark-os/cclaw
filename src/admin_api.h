@@ -96,7 +96,8 @@ typedef struct {
     char *args_json;
 } AdminApproval;
 
-/* Currently pending approvals for sessions on this channel. */
+/* Currently pending approvals for sessions on this channel
+ * (channel_name NULL = all channels, e.g. the dashboard). */
 int admin_list_pending_approvals(sqlite3 *db, const char *channel_name,
                                  AdminApproval **out, size_t *out_count);
 /* Most recently denied approvals for sessions on this channel (newest first,

@@ -370,7 +370,7 @@ static int admin_list_approvals_by_state(sqlite3 *db, const char *channel_name,
                                          int limit, AdminApproval **out, size_t *out_count) {
     *out = NULL;
     *out_count = 0;
-    if (!db || !channel_name || !state) return -1;
+    if (!db || !state) return -1;
 
     /* grantable_only restricts to request_config's own actions (grant_tool/
      * grant_host/grant_path) — the only ones admin_grant_from_history can
@@ -379,16 +379,18 @@ static int admin_list_approvals_by_state(sqlite3 *db, const char *channel_name,
     const char *sql = grantable_only ?
         "SELECT a.id, a.session_id, s.agent_name, a.tool_name, a.action, a.args_json"
         " FROM approvals a JOIN sessions s ON s.id = a.session_id"
-        " WHERE a.state=?1 AND s.channel_name=?2 AND a.tool_name='request_config'"
+        " WHERE a.state=?1 AND (?2 IS NULL OR s.channel_name=?2)"
+        " AND a.tool_name='request_config'"
         " ORDER BY a.id DESC LIMIT ?3;" :
         "SELECT a.id, a.session_id, s.agent_name, a.tool_name, a.action, a.args_json"
         " FROM approvals a JOIN sessions s ON s.id = a.session_id"
-        " WHERE a.state=?1 AND s.channel_name=?2"
+        " WHERE a.state=?1 AND (?2 IS NULL OR s.channel_name=?2)"
         " ORDER BY a.id DESC LIMIT ?3;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, state, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, channel_name, -1, SQLITE_STATIC);
+    if (channel_name) sqlite3_bind_text(stmt, 2, channel_name, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(stmt, 2);
     sqlite3_bind_int(stmt, 3, limit > 0 ? limit : -1);
 
     size_t cap = 4, count = 0;

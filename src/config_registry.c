@@ -14,6 +14,8 @@ static const ConfigDef s_defs[] = {
       "shell_exec timeout in seconds" },
     { "web_port",           "8080",
       "Embedded web server port" },
+    { "web_admin_token",    "",
+      "Admin dashboard auth token (auto-generated at daemon start; cclaw dashboard prints the URL)" },
     { "max_history_tokens", "0",
       "History token cap per request (0 = derive from context window)" },
     { "heartbeat_interval", "0",

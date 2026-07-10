@@ -65,15 +65,15 @@ void tools_free(ToolRegistry *reg) {
 void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db) {
     if (!reg || !db) return;
     /* Builtins only: the registry passed here holds C tools (extension tools are
-     * loaded after this call). Write honest provenance — builtin=1, no
-     * extension_name, no handler path. */
+     * loaded after this call). Write honest provenance — no extension_name, no
+     * handler path (that's what distinguishes a C tool from a JS one). */
     static const char *sql =
-        "INSERT INTO tools(name, extension_name, description, parameters_json, path, builtin) "
-        "VALUES(?1, NULL, ?2, ?3, NULL, 1) "
+        "INSERT INTO tools(name, extension_name, description, parameters_json, path) "
+        "VALUES(?1, NULL, ?2, ?3, NULL) "
         "ON CONFLICT(name) DO UPDATE SET "
         "parameters_json = excluded.parameters_json, "
         "description = COALESCE(tools.description, excluded.description), "
-        "builtin = 1, extension_name = NULL";
+        "extension_name = NULL";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
     for (size_t i = 0; i < reg->count; i++) {

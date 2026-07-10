@@ -41,6 +41,7 @@
 #include "shutdown.h"
 #include "crash.h"
 #include "channel_harness.h"
+#include "extension_manifest.h"
 #include "doctor.h"
 #include "install.h"
 #include "wake.h"
@@ -2538,71 +2539,13 @@ static void cli_start_turn(const char *input) {
 
 /* ── main ───────────────────────────────────────────────────────── */
 
-/* Extract builtin extension templates to ~/.cclaw/extensions/ on first run */
+/* PATH_MAX-sized buffers make gcc's -Wformat-truncation flag snprintfs in the
+ * functions below as possibly truncating, even though the inputs never
+ * approach that length; clang doesn't have this warning at all. */
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 #endif
-static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
-    /* Builtin extension code ships in the binary; the files on disk are a
-     * cache. Rewrite them on every start so a binary upgrade can't leave a
-     * stale template running against a newer C loop (the deliver_mode
-     * contract, for one). An operator fork (builtin=0 row named 'telegram')
-     * is left untouched. */
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, "SELECT builtin FROM extensions WHERE name='telegram'",
-                           -1, &s, NULL) != SQLITE_OK) return;
-    int forked = 0;
-    if (sqlite3_step(s) == SQLITE_ROW) forked = !sqlite3_column_int(s, 0);
-    sqlite3_finalize(s);
-    if (forked) return;
-
-    /* Derive base dir from db_path (strip /cclaw.db) */
-    char base[PATH_MAX];
-    snprintf(base, sizeof(base), "%s", db_path);
-    char *sl = strrchr(base, '/');
-    if (sl) *sl = '\0'; else return;
-
-    /* Create extensions/telegram/ directory */
-    char tg_dir[2*PATH_MAX];
-    snprintf(tg_dir, sizeof(tg_dir), "%s/extensions/telegram", base);
-    char mkdir_cmd[2*PATH_MAX];
-    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "%s/extensions/telegram/.keep", base);
-    util_ensure_parent_dir(mkdir_cmd);
-
-    /* Write channel.qjs */
-    char js_path[2*PATH_MAX];
-    snprintf(js_path, sizeof(js_path), "%s/channel.qjs", tg_dir);
-    FILE *f = fopen(js_path, "w");
-    if (f) { fputs(TPL_CHANNEL_TELEGRAM_QJS, f); fclose(f); }
-
-    /* Write telegram.json */
-    char json_path[2*PATH_MAX];
-    snprintf(json_path, sizeof(json_path), "%s/telegram.json", tg_dir);
-    f = fopen(json_path, "w");
-    if (f) { fputs(TPL_CHANNEL_TELEGRAM_JSON, f); fclose(f); }
-
-    /* Register in extensions table */
-    const char *isql = "INSERT OR IGNORE INTO extensions(name, path, builtin)"
-                       " VALUES('telegram', ?, 1);";
-    sqlite3_stmt *ins;
-    if (sqlite3_prepare_v2(db, isql, -1, &ins, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(ins, 1, tg_dir, -1, SQLITE_STATIC);
-        sqlite3_step(ins);
-        sqlite3_finalize(ins);
-    }
-
-    /* Seed base_url so channel_runner's url_host_allowed() pin (which fails
-     * closed on missing config) has a source of truth in the DB — the JS
-     * template's hardcoded fallback is belt-and-suspenders, not authoritative. */
-    const char *csql = "INSERT OR IGNORE INTO channel_state(channel_name, key, value)"
-                       " VALUES('telegram', 'base_url', 'https://api.telegram.org');";
-    sqlite3_stmt *cins;
-    if (sqlite3_prepare_v2(db, csql, -1, &cins, NULL) == SQLITE_OK) {
-        sqlite3_step(cins);
-        sqlite3_finalize(cins);
-    }
-}
 
 
 /* Bootstrap the default agent on a fresh DB. Shared by CLI and daemon —
@@ -3679,8 +3622,9 @@ int main(int argc, char *argv[]) {
 
     { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
 
-    /* extract_builtin_extensions is idempotent (IF NOT EXISTS checks) */
-    extract_builtin_extensions(g_db, db_path);
+    /* Reinstalls the shipped bundles on every start (files are a cache of
+     * the binary's templates); idempotent against a current DB. */
+    extension_install_builtin(g_db, db_path);
 
     g_cfg = config_load(g_db);
     if (!g_cfg) { fprintf(stderr, "config load failed\n"); db_close(g_db); return 1; }

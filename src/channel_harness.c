@@ -282,8 +282,8 @@ int channel_harness_run(const char *db_path, const char *channel_name, const cha
     {
         sqlite3_stmt *s;
         sqlite3_prepare_v2(sdb,
-            "INSERT INTO extensions(name, path, version, owner_agent, published, builtin, enabled)"
-            " VALUES(?,?,'0.0.0','harness',0,0,1);", -1, &s, NULL);
+            "INSERT INTO extensions(name, path, version, owner_agent, published, enabled)"
+            " VALUES(?,?,'0.0.0','harness',0,1);", -1, &s, NULL);
         sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
         sqlite3_bind_text(s, 2, js_path, -1, SQLITE_STATIC);
         sqlite3_step(s); sqlite3_finalize(s);

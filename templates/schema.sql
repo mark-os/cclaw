@@ -68,9 +68,8 @@ CREATE TABLE IF NOT EXISTS extensions (
   name TEXT PRIMARY KEY,
   path TEXT NOT NULL,                       -- shared store dir: ~/.cclaw/extensions/<name>
   version TEXT DEFAULT '0.0.0',
-  owner_agent TEXT,                         -- who promoted it (NULL for builtin)
+  owner_agent TEXT,                         -- who promoted it ('system' for extensions shipped in the binary)
   published INTEGER NOT NULL DEFAULT 0,     -- the single publish flag
-  builtin INTEGER NOT NULL DEFAULT 0,
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
@@ -309,7 +308,6 @@ CREATE TABLE IF NOT EXISTS tools (
   description TEXT,
   parameters_json TEXT,
   path TEXT,                                 -- handler file (in the shared store)
-  builtin INTEGER NOT NULL DEFAULT 0,
   agent_name TEXT,                           -- owner scope, NULL = global
   enabled INTEGER NOT NULL DEFAULT 1,
   policy TEXT

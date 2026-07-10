@@ -62,8 +62,8 @@ static void setup_db_and_channel(void) {
     assert(db);
     sqlite3_stmt *s;
     sqlite3_prepare_v2(db,
-        "INSERT INTO extensions(name, path, version, owner_agent, published, builtin, enabled)"
-        " VALUES('echo', ?, '0.1.0', 'default', 0, 0, 1);", -1, &s, NULL);
+        "INSERT INTO extensions(name, path, version, owner_agent, published, enabled)"
+        " VALUES('echo', ?, '0.1.0', 'default', 0, 1);", -1, &s, NULL);
     sqlite3_bind_text(s, 1, EXT_DIR, -1, SQLITE_STATIC);
     sqlite3_step(s); sqlite3_finalize(s);
     sqlite3_prepare_v2(db,

@@ -127,9 +127,8 @@ Shared extension registry. Each extension is a directory in `~/.cclaw/extensions
 | `name` | TEXT PRIMARY KEY | |
 | `path` | TEXT NOT NULL | directory path |
 | `version` | TEXT DEFAULT '0.0.0' | |
-| `owner_agent` | TEXT | who promoted it (NULL for builtin) |
+| `owner_agent` | TEXT | who promoted it ('system' for extensions shipped in the binary) |
 | `published` | INTEGER NOT NULL DEFAULT 0 | single publish flag |
-| `builtin` | INTEGER NOT NULL DEFAULT 0 | |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
@@ -463,7 +462,7 @@ Indexes: `idx_tool_calls_entry(entry_id)`, `idx_tool_calls_session(session_id, s
 
 ## tools
 
-Tool registry. Built-in C tools have `builtin=1` and NULL `extension_name`/`path`; JS tools point to a handler file in the shared extension store.
+Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools point to a handler file in the shared extension store.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -472,7 +471,6 @@ Tool registry. Built-in C tools have `builtin=1` and NULL `extension_name`/`path
 | `description` | TEXT | |
 | `parameters_json` | TEXT | JSON Schema for arguments |
 | `path` | TEXT | handler file in extension store |
-| `builtin` | INTEGER NOT NULL DEFAULT 0 | |
 | `agent_name` | TEXT | owner scope; NULL = global |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `policy` | TEXT | JSON restrict-only argument policy |

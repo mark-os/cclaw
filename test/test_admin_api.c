@@ -218,8 +218,8 @@ static void test_admin_revoke_grant_by_id(void) {
 
 static void test_admin_list_tool_names(void) {
     sqlite3 *db = setup_db();
-    sqlite3_exec(db, "INSERT INTO tools(name,builtin) VALUES('zeta_tool',1);", NULL, NULL, NULL);
-    sqlite3_exec(db, "INSERT INTO tools(name,builtin) VALUES('alpha_tool',1);", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO tools(name) VALUES('zeta_tool');", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO tools(name) VALUES('alpha_tool');", NULL, NULL, NULL);
 
     char **names = NULL;
     size_t count = 0;

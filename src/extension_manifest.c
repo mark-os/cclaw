@@ -1,7 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 #include "extension_manifest.h"
 #include "cron.h"
+#include "log.h"
 #include "skills.h"
+#include "templates.h"
 #include "util.h"
 #include <dirent.h>
 #include <errno.h>
@@ -328,6 +330,38 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
         return -1;
     }
 
+    /* First-come name ownership (npm-style): a promote may never change the
+     * owner of an existing name. Overriding what code fronts a channel is an
+     * explicit operator verb (channel swap), never a name seizure. */
+    {
+        sqlite3_stmt *st;
+        char *cur_owner = NULL;
+        if (sqlite3_prepare_v2(db,
+                "SELECT COALESCE(owner_agent,'') FROM extensions WHERE name=?1",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(st, 0);
+                cur_owner = strdup(v ? v : "");
+            }
+            sqlite3_finalize(st);
+        }
+        if (cur_owner && strcmp(cur_owner, owner_agent ? owner_agent : "") != 0) {
+            if (err_out) {
+                size_t n = strlen(name) + strlen(cur_owner) + 80;
+                char *m = malloc(n);
+                if (m) {
+                    snprintf(m, n, "extension name '%s' is owned by '%s'; "
+                             "promote under a different name", name, cur_owner);
+                    *err_out = m;
+                }
+            }
+            free(cur_owner); free(manifest); free(name);
+            return -1;
+        }
+        free(cur_owner);
+    }
+
     /* Copy bundle into the shared, agent-immutable store. */
     if (copy_tree(bundle_dir, store) != 0) {
         free(manifest); free(name);
@@ -342,21 +376,22 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
     rc |= run_ingest(db, "DELETE FROM tools WHERE extension_name=:name", manifest, name, store, owner_agent);
     rc |= run_ingest(db, "DELETE FROM hooks WHERE extension_name=:name", manifest, name, store, owner_agent);
 
-    /* extensions: upsert, preserving an existing published flag. */
+    /* extensions: upsert, preserving an existing published flag; the owner
+     * can never change (takeover is refused above). */
     rc |= run_ingest(db,
-        "INSERT INTO extensions(name, path, version, owner_agent, published, builtin, enabled) "
-        "VALUES(:name, :store, COALESCE(json_extract(:m,'$.version'),'0.0.0'), :owner, 0, 0, 1) "
+        "INSERT INTO extensions(name, path, version, owner_agent, published, enabled) "
+        "VALUES(:name, :store, COALESCE(json_extract(:m,'$.version'),'0.0.0'), :owner, 0, 1) "
         "ON CONFLICT(name) DO UPDATE SET "
-        "  path=excluded.path, version=excluded.version, owner_agent=excluded.owner_agent",
+        "  path=excluded.path, version=excluded.version",
         manifest, name, store, owner_agent);
 
     /* tools: one row per $.tools[] entry; path = <store>/<handler>. */
     rc |= run_ingest(db,
         "INSERT INTO tools(name, extension_name, description, parameters_json, path, "
-        "                  builtin, agent_name, enabled, policy) "
+        "                  agent_name, enabled, policy) "
         "SELECT json_extract(value,'$.name'), :name, json_extract(value,'$.description'), "
         "       json_extract(value,'$.parameters'), :store || '/' || json_extract(value,'$.handler'), "
-        "       0, NULL, 1, json_extract(value,'$.policy') "
+        "       NULL, 1, json_extract(value,'$.policy') "
         "FROM json_each(COALESCE(json_extract(:m,'$.tools'),'[]')) "
         "WHERE json_extract(value,'$.name') IS NOT NULL",
         manifest, name, store, owner_agent);
@@ -454,3 +489,124 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
     free(name);
     return rc;
 }
+
+/* ── builtin (system-owned) extensions ──────────────────────────── */
+
+static int write_text_file(const char *path, const char *content) {
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    int rc = (fputs(content, f) >= 0) ? 0 : -1;
+    if (fclose(f) != 0) rc = -1;
+    return rc;
+}
+
+/* PATH_MAX-sized buffers make gcc's -Wformat-truncation flag these snprintfs
+ * as possibly truncating; the inputs never approach that length. Same guard
+ * as install.c; clang doesn't have this warning at all. */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
+int extension_install_builtin(sqlite3 *db, const char *db_path) {
+    if (!db || !db_path) return -1;
+
+    /* Belt-and-suspenders: the takeover guard in extension_install already
+     * refuses this (unreachable in practice), but never fight a row named
+     * 'telegram' that isn't ours. */
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE(owner_agent,'') FROM extensions WHERE name='telegram'",
+            -1, &s, NULL) == SQLITE_OK) {
+        int foreign = 0;
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *o = (const char *)sqlite3_column_text(s, 0);
+            foreign = (o && strcmp(o, "system") != 0);
+        }
+        sqlite3_finalize(s);
+        if (foreign) return 0;
+    }
+
+    /* Capture channel status + revert target so a restart doesn't demote an
+     * active channel — install's INSERT OR REPLACE deliberately lands 'draft'
+     * for the agent re-promote path; only this wrapper restores. */
+    char *status = NULL, *prev = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT status, prev_extension_name FROM channels WHERE name='telegram'",
+            -1, &s, NULL) == SQLITE_OK) {
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(s, 0);
+            status = strdup(v ? v : "draft");
+            v = (const char *)sqlite3_column_text(s, 1);
+            if (v) prev = strdup(v);
+        }
+        sqlite3_finalize(s);
+    }
+
+    char base[PATH_MAX];
+    snprintf(base, sizeof(base), "%s", db_path);
+    char *sl = strrchr(base, '/');
+    if (sl) *sl = '\0';
+    else { free(status); free(prev); return -1; }
+
+    /* Stage the bundle, then install: the store dir is the bundle's final
+     * home, so installing from a sibling staging dir avoids copy_tree
+     * src==dst. Bundle code ships in the binary; the files on disk are a
+     * cache, rewritten on every start so a binary upgrade can't leave a
+     * stale template running against a newer C loop. */
+    char staging[2*PATH_MAX];
+    snprintf(staging, sizeof(staging), "%s/extensions/.telegram.staging", base);
+    if (util_mkdir_p(staging) != 0) { free(status); free(prev); return -1; }
+
+    char fp_js[3*PATH_MAX], fp_json[3*PATH_MAX], fp_manifest[3*PATH_MAX];
+    snprintf(fp_js, sizeof(fp_js), "%s/channel.qjs", staging);
+    snprintf(fp_json, sizeof(fp_json), "%s/telegram.json", staging);
+    snprintf(fp_manifest, sizeof(fp_manifest), "%s/extension.json", staging);
+    int rc = 0;
+    rc |= write_text_file(fp_js, TPL_CHANNEL_TELEGRAM_QJS);
+    rc |= write_text_file(fp_json, TPL_CHANNEL_TELEGRAM_JSON);
+    rc |= write_text_file(fp_manifest, TPL_CHANNEL_TELEGRAM_MANIFEST_JSON);
+
+    char *err = NULL;
+    if (rc == 0) rc = extension_install(db, staging, "system", &err);
+    if (rc != 0)
+        LOG_ERROR_("builtin extension install failed: %s", err ? err : "write failed");
+    free(err);
+    unlink(fp_js); unlink(fp_json); unlink(fp_manifest);
+    rmdir(staging);
+
+    if (rc == 0) {
+        sqlite3_exec(db, "UPDATE extensions SET published=1 WHERE name='telegram'",
+                     NULL, NULL, NULL);
+        if (status && sqlite3_prepare_v2(db,
+                "UPDATE channels SET status=?1, prev_extension_name=?2 "
+                "WHERE name='telegram'", -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, status, -1, SQLITE_STATIC);
+            if (prev) sqlite3_bind_text(s, 2, prev, -1, SQLITE_STATIC);
+            sqlite3_step(s);
+            sqlite3_finalize(s);
+        }
+        /* Seed base_url so channel_runner's url_host_allowed() pin (which
+         * fails closed on missing config) has a source of truth in the DB —
+         * the JS template's hardcoded fallback is belt-and-suspenders, not
+         * authoritative. */
+        sqlite3_exec(db,
+            "INSERT OR IGNORE INTO channel_state(channel_name, key, value)"
+            " VALUES('telegram', 'base_url', 'https://api.telegram.org')",
+            NULL, NULL, NULL);
+        /* Env-provided bot token seeds channel_state once (never overwrites
+         * an operator-set value). */
+        const char *tok = getenv("CCLAW_TELEGRAM_TOKEN");
+        if (tok && tok[0] && sqlite3_prepare_v2(db,
+                "INSERT OR IGNORE INTO channel_state(channel_name, key, value)"
+                " VALUES('telegram', 'bot_token', ?1)", -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, tok, -1, SQLITE_STATIC);
+            sqlite3_step(s);
+            sqlite3_finalize(s);
+        }
+    }
+    free(status); free(prev);
+    return rc;
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif

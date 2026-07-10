@@ -450,7 +450,10 @@ char *dashboard_url(sqlite3 *db) {
         free(tok);
         return NULL;
     }
-    int port = config_get_int(db, "web_port");
+    /* Config precedence is env > DB (the daemon resolves web_port the same way). */
+    const char *env_port = getenv("CCLAW_WEB_PORT");
+    int port = (env_port && env_port[0]) ? atoi(env_port)
+                                         : config_get_int(db, "web_port");
     char host[INET_ADDRSTRLEN] = "127.0.0.1";
     struct ifaddrs *ifa = NULL;
     if (getifaddrs(&ifa) == 0) {

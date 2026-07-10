@@ -233,23 +233,25 @@ static void test_recall_in_session_context(void) {
     assert(llm_build_payload(db, sid, &cfg, &plan, context_text, "You are helpful.", &payload) == 0);
 
     sqlite3_stmt *s;
-    /* Last message is the real newest entry (assistant reply); second-to-
-     * last is the session context block. */
+    /* Context goes before the most recent turn (the last user_message).
+     * In this single-turn session: [system, context, user, assistant]. */
     sqlite3_prepare_v2(db,
         "SELECT json_extract(?1,'$.messages[#-1].role'),"
         " json_extract(?1,'$.messages[#-1].content'),"
         " json_extract(?1,'$.messages[#-2].role'),"
-        " json_extract(?1,'$.messages[#-2].content')", -1, &s, NULL);
+        " json_extract(?1,'$.messages[#-3].role'),"
+        " json_extract(?1,'$.messages[#-3].content')", -1, &s, NULL);
     sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "assistant") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "Hi there!") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 2), "user") == 0);
-    assert(strstr((const char *)sqlite3_column_text(s, 3), recall));
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "user") == 0);  /* the real user msg */
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "user") == 0);  /* context block */
+    assert(strstr((const char *)sqlite3_column_text(s, 4), recall));
     sqlite3_finalize(s);
     llm_payload_release(&payload);
 
-    /* Gemini: same second-to-last placement, NOT in systemInstruction */
+    /* Gemini: context before the most recent turn, NOT in systemInstruction */
     cfg.provider.endpoint_type = ENDPOINT_GEMINI;
     assert(llm_build_payload(db, sid, &cfg, &plan, context_text, "You are helpful.", &payload) == 0);
 
@@ -257,15 +259,17 @@ static void test_recall_in_session_context(void) {
         "SELECT json_extract(?1,'$.contents[#-1].role'),"
         " json_extract(?1,'$.contents[#-1].parts[0].text'),"
         " json_extract(?1,'$.contents[#-2].role'),"
-        " json_extract(?1,'$.contents[#-2].parts[0].text'),"
+        " json_extract(?1,'$.contents[#-3].role'),"
+        " json_extract(?1,'$.contents[#-3].parts[0].text'),"
         " json_extract(?1,'$.systemInstruction.parts[0].text')", -1, &s, NULL);
     sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "model") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "Hi there!") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 2), "user") == 0);
-    assert(strstr((const char *)sqlite3_column_text(s, 3), recall));
-    assert(strcmp((const char *)sqlite3_column_text(s, 4), "You are helpful.") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "user") == 0);  /* real user msg */
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "user") == 0);  /* context block */
+    assert(strstr((const char *)sqlite3_column_text(s, 4), recall));
+    assert(strcmp((const char *)sqlite3_column_text(s, 5), "You are helpful.") == 0);
     sqlite3_finalize(s);
     llm_payload_release(&payload);
 

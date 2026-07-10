@@ -56,7 +56,7 @@ static void test_content_response(void) {
         "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}";
 
     TypedIngestResult ir;
-    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, &ir);
+    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, NULL, &ir);
     if (st != LLM_RESP_OK) FAIL("ingest failed");
     if (ir.prompt_tokens != 10 || ir.completion_tokens != 5) FAIL("wrong usage");
     char *c = asst_content(db, sid);
@@ -78,7 +78,7 @@ static void test_tool_calls_response(void) {
         "\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":10,\"total_tokens\":30}}";
 
     TypedIngestResult ir;
-    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, &ir);
+    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, NULL, &ir);
     if (st != LLM_RESP_OK) FAIL("ingest failed");
 
     sqlite3_stmt *s;
@@ -99,11 +99,11 @@ static void test_malformed(void) {
     TEST(malformed);
     int64_t sid; sqlite3 *db = fresh_db(&sid);
     TypedIngestResult ir;
-    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "not json", &ir) != LLM_RESP_MALFORMED)
+    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "not json", NULL, &ir) != LLM_RESP_MALFORMED)
         FAIL("should fail on invalid JSON");
-    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, NULL, &ir) != LLM_RESP_MALFORMED)
+    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, NULL, NULL, &ir) != LLM_RESP_MALFORMED)
         FAIL("should fail on NULL");
-    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "{\"choices\":[]}", &ir) != LLM_RESP_MALFORMED)
+    if (db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "{\"choices\":[]}", NULL, &ir) != LLM_RESP_MALFORMED)
         FAIL("should fail on empty choices");
     db_close(db);
     PASS();
@@ -119,7 +119,7 @@ static void test_cost_field(void) {
         "\"cost\":0.000072112}}";
 
     TypedIngestResult ir;
-    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, &ir);
+    LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, json, NULL, &ir);
     if (st != LLM_RESP_OK) FAIL("ingest failed");
     if (ir.cost_nano != 72112) {
         char buf[64]; snprintf(buf, sizeof(buf), "expected 72112, got %lld", (long long)ir.cost_nano);

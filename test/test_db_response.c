@@ -52,7 +52,7 @@ static void test_ingest_response(void) {
 
     TypedIngestResult result;
     LlmRespStatus st = db_ingest_response(db, sid, 1, "deepseek-v4", ENDPOINT_OPENAI,
-                                          body, &result);
+                                          body, NULL, &result);
     assert(st == LLM_RESP_OK);
     assert(result.assistant_entry_id > 0);
     assert(result.prompt_tokens == 100);
@@ -81,13 +81,13 @@ static void test_ingest_malformed(void) {
 
     TypedIngestResult result;
     LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI,
-                                          "{\"error\":\"nope\"}", &result);
+                                          "{\"error\":\"nope\"}", NULL, &result);
     assert(st == LLM_RESP_MALFORMED);
 
-    st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "not json", &result);
+    st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "not json", NULL, &result);
     assert(st == LLM_RESP_MALFORMED);
 
-    st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "{\"choices\":[]}", &result);
+    st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "{\"choices\":[]}", NULL, &result);
     assert(st == LLM_RESP_MALFORMED);
 
     db_close(db);
@@ -104,7 +104,7 @@ static void test_ingest_archive(void) {
         "{\"id\":\"resp_abc\",\"choices\":[{\"message\":{\"content\":\"hi\"},"
         "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
     TypedIngestResult ir;
-    assert(db_ingest_response(db, sid, 7, "m", ENDPOINT_OPENAI, body, &ir) == LLM_RESP_OK);
+    assert(db_ingest_response(db, sid, 7, "m", ENDPOINT_OPENAI, body, NULL, &ir) == LLM_RESP_OK);
 
     /* Row archived: status, provider id, turn_id, and a re-queryable JSONB body. */
     sqlite3_stmt *s;
@@ -122,7 +122,7 @@ static void test_ingest_archive(void) {
     sqlite3_finalize(s);
 
     /* Not-JSON body archives as status='malformed' with the raw text. */
-    assert(db_ingest_response(db, sid, 8, "m", ENDPOINT_OPENAI, "<html>nope", &ir) == LLM_RESP_MALFORMED);
+    assert(db_ingest_response(db, sid, 8, "m", ENDPOINT_OPENAI, "<html>nope", NULL, &ir) == LLM_RESP_MALFORMED);
     sqlite3_prepare_v2(db,
         "SELECT status, typeof(body), body FROM llm_responses WHERE turn_id=8;", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
@@ -165,26 +165,36 @@ static void test_archive_retention(void) {
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "text") == 0);   /* raw text */
     sqlite3_finalize(s);
 
-    /* Cap = 2: pruning keeps only the most recent rows. */
+    /* Cap = 2, per status class: a stream of 'ok' rows prunes older 'ok' rows
+     * but never pushes out the failures that error entries cite ("[resp #N]").
+     * The two failures above (http_500, timeout) must both survive. */
     sqlite3_exec(db, "INSERT OR REPLACE INTO config(key,value) VALUES('llm_response_archive_max','2');",
                  NULL, NULL, NULL);
     for (int i = 0; i < 5; i++)
         db_archive_response(db, sid, 100 + i, "m", "ok", "{\"x\":1}", NULL);
-    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 2);
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE status='ok';") == 2);
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE status!='ok';") == 2);
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE turn_id IN (1,2);") == 2);
+
+    /* Failures prune within their own class too: two more push out the first two. */
+    db_archive_response(db, sid, 110, "m", "http_502", "oops", NULL);
+    db_archive_response(db, sid, 111, "m", "network_error", NULL, NULL);
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE status!='ok';") == 2);
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE turn_id IN (1,2);") == 0);
 
     /* Cap = -1: pruning disabled, rows accumulate. */
     sqlite3_exec(db, "UPDATE config SET value='-1' WHERE key='llm_response_archive_max';",
                  NULL, NULL, NULL);
     for (int i = 0; i < 5; i++)
         db_archive_response(db, sid, 200 + i, "m", "ok", "{\"x\":1}", NULL);
-    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 7);
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 9);
 
     /* Cap = 0: archiving off — nothing written (no churn, count unchanged). */
     sqlite3_exec(db, "UPDATE config SET value='0' WHERE key='llm_response_archive_max';",
                  NULL, NULL, NULL);
     for (int i = 0; i < 3; i++)
         db_archive_response(db, sid, 300 + i, "m", "ok", "{\"x\":1}", NULL);
-    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 7);
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses;") == 9);
 
     db_close(db);
     printf(" OK\n");

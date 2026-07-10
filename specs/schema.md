@@ -106,7 +106,13 @@ Raw LLM response archive for forensics and debugging. One row per HTTP response 
 | `request_body` | BLOB | JSONB of sent payload (failures only); NULL on success |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-Retention controlled by config key `llm_response_archive_max`: >0 keeps most recent N, 0 disables, <0 keeps all.
+Retention controlled by config key `llm_response_archive_max`: >0 keeps the most
+recent N 'ok' rows **plus** the most recent N failures (so `[resp #N]` citations in
+error entries outlive routine traffic), 0 disables, <0 keeps all.
+
+Read rows with `cclaw resp [<id> [req] | list [n]]` — bodies are JSONB, which
+system sqlite3 CLIs older than 3.45 (Debian bookworm ships 3.40) cannot decode;
+the vendored SQLite in the binary is the guaranteed reader.
 
 Index: `idx_llm_responses_turn ON llm_responses(session_id, turn_id)`.
 

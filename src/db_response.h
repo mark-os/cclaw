@@ -38,10 +38,14 @@ typedef struct {
  * entries + tool_calls rows. Zero-copy: the JSON body is bound once and the
  * extracted column pointers bind directly into the inserts — no intermediate
  * heap copies. Creates: reasoning (optional) + assistant_message + N tool_call
- * entries, all sharing turn_id. On LLM_RESP_OK, *out carries usage/cost. */
+ * entries, all sharing turn_id. On LLM_RESP_OK, *out carries usage/cost.
+ * request_body (may be NULL) is archived alongside the body on the failure
+ * paths (empty/malformed/ingest_error) so `cclaw resp <id> req` can replay
+ * what we sent; success archives stay response-only. */
 LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
                                  const char *model, EndpointType ep,
-                                 const char *body, TypedIngestResult *out);
+                                 const char *body, const char *request_body,
+                                 TypedIngestResult *out);
 
 /* Archive a raw response body for forensics regardless of HTTP outcome. Parses
  * to JSONB when valid, stores raw text otherwise. status is a free-form label

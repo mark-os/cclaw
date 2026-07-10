@@ -67,7 +67,7 @@ static const ConfigDef s_defs[] = {
     { "health_cooldown_sec", "300",
       "Seconds a degraded model is skipped before retry" },
     { "llm_response_archive_max", "500",
-      "llm_responses rows kept (0 = archiving off, negative = keep all)" },
+      "llm_responses rows kept, ok and failures counted separately (0 = archiving off, negative = keep all)" },
     { "inbox_retention_sec", "604800",
       "Seconds to keep consumed inbox rows (0 = keep forever)" },
     { "outbox_retention_sec", "604800",

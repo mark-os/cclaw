@@ -20,8 +20,8 @@
 #include <unistd.h>
 
 #define MAX_MODELS 16
-#define MAX_429_RETRIES 3
-#define MAX_PARSE_RETRIES 3
+#define MAX_RETRIES 3          /* transient failures: attempts per model */
+#define MAX_TIMEOUT_RETRIES 1  /* timeouts burn minutes per attempt — one retry */
 
 
 
@@ -69,11 +69,14 @@ static int load_candidates(sqlite3 *db, ModelCandidate *out, int max) {
  * Best-effort — a CLI session or notify failure never blocks the turn. */
 static void notify_degraded(sqlite3 *db, const char *db_path, int64_t session_id,
                             const char *model_id, int status, const char *why) {
+    char detail[24];
+    if (status > 0) snprintf(detail, sizeof(detail), "http %d", status);
+    else snprintf(detail, sizeof(detail), "no response");
     char text[256];
     snprintf(text, sizeof(text),
-             "⚠ model %s degraded (%s, http %d) — requests fall back to the "
+             "⚠ model %s degraded (%s, %s) — requests fall back to the "
              "next candidate until it recovers. /model shows the routing order.",
-             model_id, why, status);
+             model_id, why, detail);
     channel_notify_session(db, db_path, session_id, text);
 }
 
@@ -250,7 +253,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         TypedIngestResult ir;
         LlmRespStatus st = db_ingest_response(db, session_id, turn_id,
                                cfg->provider.model, cfg->provider.endpoint_type,
-                               mock_data, &ir);
+                               mock_data, NULL, &ir);
         free(mock_data);
 
         if (st != LLM_RESP_OK) {
@@ -280,18 +283,19 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         nmodels = 1;
     }
 
-    uint32_t skip_mask = 0;
-    int last_status = -1;
     int llm_ok = 0;
     int had_dberr = 0;  /* set if any model hit LLM_RESP_DBERR (our-side DB failure) */
+    /* Most recent failure, phrased for the error entry. Every failure path in
+     * the loop below sets this; the init value only survives if no attempt was
+     * ever made (payload/url build failed for every candidate). */
+    const char *fail_text = "error: LLM request failed";
 
     /* One turn id for this user-turn: every raw response archived below (the
      * failed attempts and the final ingest) shares it. db_next_turn_id is a
      * pure read, so it stays stable until the success path inserts entries. */
     int64_t turn_id = db_next_turn_id(db, session_id);
 
-    for (int mi = 0; mi < nmodels && !llm_ok; mi++) {
-        if (skip_mask & (1u << mi)) continue;
+    for (int mi = 0; mi < nmodels && !llm_ok && !had_dberr; mi++) {
         ModelCandidate *m = &models[mi];
 
         /* Build config for this model */
@@ -332,8 +336,23 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         snprintf(session_hdr, sizeof(session_hdr), "x-session-id: cclaw-%lld", (long long)session_id);
         const char *headers[] = { "Content-Type: application/json", auth, session_hdr, NULL };
 
-        /* Inner loop: 429 retry */
-        for (int retry = 0; retry <= MAX_429_RETRIES; retry++) {
+        /* Inner loop: same-model retry. The whole failure policy lives here:
+         *
+         *   transient → backoff retry this model, then the next candidate:
+         *     429 / 5xx              (Retry-After honored)
+         *     network error          (-1)
+         *     timeout                (-2 — single retry, attempts cost minutes)
+         *     2xx empty body         (gateway hiccup)
+         *     2xx empty completion   (zero-usage "stop" with no content)
+         *     2xx malformed body
+         *   permanent for this model → next candidate immediately:
+         *     401/403/404            (degraded with cooldown)
+         *     400 context overflow   (prompt-specific, no degrade)
+         *     other 4xx              (request rejected — resending can't help)
+         *   our-side fatal → abort the turn, no further candidates:
+         *     DB error during ingest (paying another provider won't fix our DB)
+         */
+        for (int retry = 0; retry <= MAX_RETRIES; retry++) {
             HttpResponse resp = {0};
             struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
 
@@ -345,7 +364,6 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
             struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
             long elapsed = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
-            last_status = status;
             LOG_DEBUG_("llm_req: %ldms status=%d model=%s", elapsed, status, m->model);
             LOG_DEBUG_("llm_req: ttfb=%.0fms tls=%.0fms bytes=%zu reuse=%d",
                        resp.ttfb * 1000.0, resp.tls_time * 1000.0,
@@ -366,58 +384,69 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                                     req_body);
             }
 
-            /* 429: retry with backoff */
-            if (status == 429) {
+            /* 429 / 5xx: transient — backoff retry */
+            if (status == 429 || (status >= 500 && status < 600)) {
                 int wait = resp.retry_after > 0 ? resp.retry_after : (1 << retry);
-                http_response_free(&resp);
-                model_stat_error(db, cfg->db_path, session_id, m->id, 429);
-                if (retry < MAX_429_RETRIES) { sleep((unsigned)wait); continue; }
-                break;
-            }
-            /* 5xx: retry with backoff, degrade after exhaustion */
-            if (status >= 500 && status < 600) {
-                int wait = resp.retry_after > 0 ? resp.retry_after : (1 << retry);
+                fail_text = status == 429 ? "error: rate limited"
+                                          : "error: provider server error";
                 http_response_free(&resp);
                 model_stat_error(db, cfg->db_path, session_id, m->id, status);
-                if (retry < MAX_429_RETRIES) { sleep((unsigned)wait); continue; }
+                if (retry < MAX_RETRIES) { sleep((unsigned)wait); continue; }
                 break;
             }
             /* Prompt-specific errors: skip this model */
             if (status == 400 && llm_is_context_overflow(resp.data)) {
                 LOG_DEBUG_("llm_req model_skip model=%s reason=context_overflow", m->model);
+                fail_text = "error: prompt too large for the model's context window";
                 http_response_free(&resp);
-                skip_mask |= (1u << mi); break;
+                break;
             }
             if (status == 401 || status == 403 || status == 404) {
                 LOG_DEBUG_("llm_req model_skip model=%s reason=%s", m->model,
                            status == 404 ? "not_found" : "auth_failed");
+                fail_text = status == 404 ? "error: model not available"
+                                          : "error: authentication failed";
                 http_response_free(&resp);
                 model_degrade_unavailable(db, cfg->db_path, session_id, m->id, status);
-                skip_mask |= (1u << mi); break;
-            }
-            /* Network/timeout error */
-            if (status < 0) {
-                http_response_free(&resp);
                 break;
             }
-            /* Non-2xx */
+            /* Timeout: transient but each attempt burns minutes — one retry,
+             * no extra backoff (the failed attempt was the wait). */
+            if (status == -2) {
+                fail_text = "error: request timed out";
+                http_response_free(&resp);
+                model_stat_error(db, cfg->db_path, session_id, m->id, status);
+                if (retry < MAX_TIMEOUT_RETRIES) continue;
+                break;
+            }
+            /* Network error: transient — backoff retry */
+            if (status < 0) {
+                fail_text = "error: network error";
+                http_response_free(&resp);
+                model_stat_error(db, cfg->db_path, session_id, m->id, status);
+                if (retry < MAX_RETRIES) { sleep(1u << retry); continue; }
+                break;
+            }
+            /* Other 4xx: the request itself was rejected — resending it to the
+             * same model can't change the answer; another candidate might. */
             if (status < 200 || status >= 300) {
+                fail_text = "error: provider rejected the request";
                 http_response_free(&resp);
                 break;
             }
 
             /* A 2xx with an empty body is a provider/gateway hiccup (often a slow
              * near-timeout response). db_ingest_response would bail on the NULL
-             * body *before* archiving, leaving an opaque "LLM request failed" with
-             * no forensic trail. Archive it (with the request we sent) and retry
-             * the same model with backoff before giving up. */
+             * body *before* archiving, leaving an opaque error with no forensic
+             * trail. Archive it (with the request we sent) and retry. */
             if (!resp.data || !resp.data[0]) {
                 LOG_INFO_("llm_req empty_body model=%s retry=%d", m->model, retry);
                 db_archive_response(db, session_id, turn_id, m->id, "empty",
                                     resp.data, req_body);
+                fail_text = "error: provider returned an empty response";
                 http_response_free(&resp);
                 model_stat_error(db, cfg->db_path, session_id, m->id, status);
-                if (retry < MAX_429_RETRIES) { sleep(1u << retry); continue; }
+                if (retry < MAX_RETRIES) { sleep(1u << retry); continue; }
                 break;
             }
 
@@ -425,7 +454,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             TypedIngestResult ir;
             LlmRespStatus st = db_ingest_response(db, session_id, turn_id,
                                    m->id, route_cfg.provider.endpoint_type,
-                                   resp.data, &ir);
+                                   resp.data, req_body, &ir);
             http_response_free(&resp);
 
             if (st == LLM_RESP_OK) {
@@ -433,14 +462,20 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 llm_ok = 1;
                 break;
             }
-            if (st == LLM_RESP_EMPTY) { skip_mask |= (1u << mi); break; }
             /* LLM_RESP_DBERR: our DB failed (SQLITE_BUSY) — body was valid.
-             * Don't retry same model (issue is our-side, not provider-side).
              * Diagnostics already logged by db_ingest_response. */
             if (st == LLM_RESP_DBERR) { had_dberr = 1; break; }
-            /* LLM_RESP_MALFORMED: bad body from provider (E6). Retry on same
-             * model up to MAX_PARSE_RETRIES before trying next model. */
-            if (retry < MAX_PARSE_RETRIES) continue;
+            /* EMPTY (zero-usage stop, archived 'empty') and MALFORMED (bad
+             * body, archived 'malformed') are both provider glitches wrapped
+             * in a 2xx: transient, same as an empty body. */
+            LOG_INFO_("llm_req %s model=%s retry=%d",
+                      st == LLM_RESP_EMPTY ? "empty_completion" : "malformed_body",
+                      m->model, retry);
+            fail_text = st == LLM_RESP_EMPTY
+                ? "error: provider returned an empty response"
+                : "error: provider returned a malformed response";
+            model_stat_error(db, cfg->db_path, session_id, m->id, status);
+            if (retry < MAX_RETRIES) { sleep(1u << retry); continue; }
             break;
         }
 
@@ -454,17 +489,11 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     context_plan_free(&plan); memset(&plan, 0, sizeof(plan));
 
     if (!llm_ok) {
-        const char *err_text =
-            had_dberr ? "error: DB contention during response ingest (SQLITE_BUSY) — check logs"
-            : last_status == -2 ? "error: request timed out"
-            : last_status == -1 ? "error: network error"
-            : last_status == 401 || last_status == 403 ? "error: authentication failed"
-            : last_status == 404 ? "error: model not available"
-            : last_status == 429 ? "error: rate limited"
-            : last_status >= 500 ? "error: provider server error"
-            : "error: LLM request failed";
+        const char *err_text = had_dberr
+            ? "error: DB contention during response ingest (SQLITE_BUSY) — check logs"
+            : fail_text;
         /* Cite the archived llm_responses row so the operator can pull the exact
-         * request + provider reply with `cclaw --last-error` (or a db_query). */
+         * request + provider reply with `cclaw resp <id>`. */
         int64_t resp_id = 0;
         sqlite3_stmt *rs;
         if (sqlite3_prepare_v2(db,

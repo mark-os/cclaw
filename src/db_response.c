@@ -84,7 +84,7 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
                           const void *body, int blen, int is_jsonb,
                           const char *request_body) {
     /* Retention cap (config 'llm_response_archive_max'):
-     *   > 0  keep the most recent N rows
+     *   > 0  keep the most recent N 'ok' rows and the most recent N failures
      *   == 0 archiving off — write nothing
      *   < 0  keep everything (no pruning) */
     int cap = config_default_int("llm_response_archive_max");
@@ -121,9 +121,17 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
     }
 
     if (cap > 0) {
-        char prune[160];
+        /* Prune successes and failures independently: failure rows are what
+         * error entries cite ("[resp #N]") and are rare — a busy session's
+         * steady stream of 'ok' rows must not push them out before the
+         * operator gets to look. */
+        char prune[512];
         snprintf(prune, sizeof(prune),
-            "DELETE FROM llm_responses WHERE id <= (SELECT MAX(id)-%d FROM llm_responses);", cap);
+            "DELETE FROM llm_responses WHERE status='ok' AND id NOT IN"
+            " (SELECT id FROM llm_responses WHERE status='ok' ORDER BY id DESC LIMIT %d);"
+            "DELETE FROM llm_responses WHERE status!='ok' AND id NOT IN"
+            " (SELECT id FROM llm_responses WHERE status!='ok' ORDER BY id DESC LIMIT %d);",
+            cap, cap);
         sqlite3_exec(db, prune, NULL, NULL, NULL);
     }
 }
@@ -153,7 +161,8 @@ void db_archive_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
 
 LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
                                  const char *model, EndpointType ep,
-                                 const char *body, TypedIngestResult *out) {
+                                 const char *body, const char *request_body,
+                                 TypedIngestResult *out) {
     if (out) memset(out, 0, sizeof(*out));
     if (!db || !body) return LLM_RESP_MALFORMED;
 
@@ -166,14 +175,14 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
     if (sqlite3_prepare_v2(db, "SELECT jsonb(?1)", -1, &j, NULL) != SQLITE_OK) {
         /* Our-side failure (e.g. SQLITE_BUSY), not a bad response — archive the
          * raw body so a valid reply lost to DB contention is still recoverable. */
-        archive_store(db, session_id, turn_id, model, "ingest_error", body, -1, 0, NULL);
+        archive_store(db, session_id, turn_id, model, "ingest_error", body, -1, 0, request_body);
         return LLM_RESP_DBERR;
     }
     sqlite3_bind_text(j, 1, body, -1, SQLITE_STATIC);
     if (sqlite3_step(j) != SQLITE_ROW) {
         /* Not valid JSON at all — archive the raw text for forensics. */
         sqlite3_finalize(j);
-        archive_store(db, session_id, turn_id, model, "malformed", body, -1, 0, NULL);
+        archive_store(db, session_id, turn_id, model, "malformed", body, -1, 0, request_body);
         return LLM_RESP_MALFORMED;
     }
     const void *blob = sqlite3_column_blob(j, 0);
@@ -184,14 +193,14 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, gemini ? SCALAR_GEMINI : SCALAR_OPENAI, -1, &s, NULL) != SQLITE_OK) {
         /* Our-side failure — archive the (valid) body for forensics + recovery. */
-        archive_store(db, session_id, turn_id, model, "ingest_error", blob, blen, 1, NULL);
+        archive_store(db, session_id, turn_id, model, "ingest_error", blob, blen, 1, request_body);
         sqlite3_finalize(j);
         return LLM_RESP_DBERR;
     }
     sqlite3_bind_blob(s, 1, blob, blen, SQLITE_STATIC);
     if (sqlite3_step(s) != SQLITE_ROW) {
         sqlite3_finalize(s);
-        archive_store(db, session_id, turn_id, model, "malformed", blob, blen, 1, NULL);
+        archive_store(db, session_id, turn_id, model, "malformed", blob, blen, 1, request_body);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
@@ -199,7 +208,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
     /* Shape check: choices/candidates array present and non-empty. */
     if (sqlite3_column_type(s, 7) == SQLITE_NULL || sqlite3_column_int(s, 7) == 0) {
         sqlite3_finalize(s);
-        archive_store(db, session_id, turn_id, model, "malformed", blob, blen, 1, NULL);
+        archive_store(db, session_id, turn_id, model, "malformed", blob, blen, 1, request_body);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
@@ -232,7 +241,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
         finish && strcmp(finish, "stop") == 0) {
         sqlite3_finalize(s);
         if (tc) sqlite3_finalize(tc);
-        archive_store(db, session_id, turn_id, model, "empty", blob, blen, 1, NULL);
+        archive_store(db, session_id, turn_id, model, "empty", blob, blen, 1, request_body);
         sqlite3_finalize(j);
         return LLM_RESP_EMPTY;
     }

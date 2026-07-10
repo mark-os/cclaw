@@ -88,21 +88,30 @@ jobs:
           platforms: arm
 
       - name: Build in armel container
-        # Build-only: qemu-arm user-mode emulation has known syscall
-        # translation flakiness (e.g. readdir) unrelated to cclaw's actual
-        # correctness on real ARMv5TE hardware — test_tool_file/test_skills
-        # pass natively on both the x64 and x86 jobs. Build+link success here
-        # already proves the target (libcurl4, -latomic) works.
+        # Build the target, then run the actual binary (not the unit-test
+        # harness) under qemu-arm as a live smoke check: --version proves
+        # dynamic linking against the emulated armel libcurl.so works,
+        # --doctor exercises DB/config/workspace/sandbox-probe end to end.
+        # Neither touches readdir()-heavy paths, so this avoids the
+        # getdents64 translation flakiness that broke `make smoke` here.
         run: |
           docker run --rm --platform linux/arm/v5 -v "$PWD":/src -w /src \
             arm32v5/debian:bookworm bash -c '
               set -e
+              # Skip docs/man pages and recommended-but-unneeded packages —
+              # dpkg unpacking + man-db trigger processing is the slowest,
+              # most hang-prone part of this job under qemu-arm emulation,
+              # and neither is needed for a CI build.
+              mkdir -p /etc/dpkg/dpkg.cfg.d
+              printf "path-exclude /usr/share/doc/*\npath-exclude /usr/share/man/*\npath-exclude /usr/share/groff/*\npath-exclude /usr/share/info/*\n" > /etc/dpkg/dpkg.cfg.d/01_nodoc
               apt-get update
-              apt-get install -y build-essential libcurl4-openssl-dev xxd git
+              apt-get install -y --no-install-recommends build-essential libcurl4-openssl-dev xxd git
               git config --global --add safe.directory /src
               # ARMv5TE has no hardware CAS instruction; 8-byte atomic
               # builtins (sqlite, quickjs) need libatomic pulled in explicitly.
               make all LDFLAGS="-lcurl -lm -lpthread -ldl -latomic"
+              ./build/cclaw --version
+              ./build/cclaw --doctor
             '
 
       - name: Package

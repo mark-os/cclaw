@@ -350,11 +350,11 @@ int admin_switch_model(sqlite3 *db, const char *model_id, char *prev, size_t pre
         rc = sqlite3_step(stmt) == SQLITE_DONE ? 0 : -1;
         sqlite3_finalize(stmt);
     }
-    /* Context-window resolution (agents.model → models) follows the switch:
+    /* Context-window resolution (agents.primary_model → models) follows the switch:
      * repoint agents that tracked the old head or had no explicit preference. */
     if (rc == 0 && sqlite3_prepare_v2(db,
-            "UPDATE agents SET model=?1 WHERE model IS NULL OR model=?2"
-            " OR model=(SELECT model FROM models WHERE id=?2);",
+            "UPDATE agents SET primary_model=?1 WHERE primary_model IS NULL OR primary_model=?2"
+            " OR primary_model=(SELECT model FROM models WHERE id=?2);",
             -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
         sqlite3_bind_text(stmt, 2, prev_id, -1, SQLITE_STATIC);
@@ -442,6 +442,352 @@ void admin_approvals_free(AdminApproval *list, size_t count) {
         free(list[i].args_json);
     }
     free(list);
+}
+
+/* ── Provider CRUD ─────────────────────────────────────────────── */
+
+int admin_add_provider(sqlite3 *db, const char *name, const char *base_url,
+                       const char *endpoint_type, const char *api_key_env) {
+    if (!db || !name || !name[0] || !base_url || !base_url[0]) return -1;
+    const char *sql =
+        "INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, priority)"
+        " VALUES(?1, ?2, ?3, ?4, (SELECT COALESCE(MAX(priority),0)+1 FROM providers));";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, base_url, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, endpoint_type ? endpoint_type : "openai", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, api_key_env ? api_key_env : "", -1, SQLITE_STATIC);
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int admin_remove_provider(sqlite3 *db, const char *name) {
+    if (!db || !name) return -1;
+    sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+    sqlite3_stmt *stmt;
+    int rc = -1;
+    if (sqlite3_prepare_v2(db, "DELETE FROM models WHERE provider_name=?1",
+                           -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+    if (sqlite3_prepare_v2(db, "DELETE FROM providers WHERE name=?1",
+                           -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+        rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_exec(db, rc == 0 ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+    return rc;
+}
+
+/* ── Model CRUD ────────────────────────────────────────────────── */
+
+int admin_add_model(sqlite3 *db, const char *provider_name, const char *model,
+                    int context_window) {
+    if (!db || !provider_name || !model || !model[0]) return -1;
+    /* id = "model@provider" */
+    size_t id_len = strlen(model) + 1 + strlen(provider_name) + 1;
+    char *id = malloc(id_len);
+    if (!id) return -1;
+    snprintf(id, id_len, "%s@%s", model, provider_name);
+
+    const char *sql =
+        "INSERT OR IGNORE INTO models(id, provider_name, model, context_window, priority)"
+        " VALUES(?1, ?2, ?3, ?4, (SELECT COALESCE(MAX(priority),0)+1 FROM models));";
+    sqlite3_stmt *stmt;
+    int rc = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, id, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, provider_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, model, -1, SQLITE_STATIC);
+        if (context_window > 0)
+            sqlite3_bind_int(stmt, 4, context_window);
+        else
+            sqlite3_bind_null(stmt, 4);
+        rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+        sqlite3_finalize(stmt);
+    }
+    free(id);
+    return rc;
+}
+
+int admin_remove_model(sqlite3 *db, const char *model_id) {
+    if (!db || !model_id) return -1;
+    const char *sql = "DELETE FROM models WHERE id=?1;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int admin_toggle_model(sqlite3 *db, const char *model_id) {
+    if (!db || !model_id) return -1;
+    const char *sql =
+        "UPDATE models SET status = CASE WHEN status='disabled' THEN 'healthy' ELSE 'disabled' END"
+        " WHERE id=?1;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, model_id, -1, SQLITE_STATIC);
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+/* ── Agent listing ─────────────────────────────────────────────── */
+
+int admin_list_agents(sqlite3 *db, AdminAgent **out, size_t *out_count) {
+    if (!db || !out || !out_count) return -1;
+    *out = NULL;
+    *out_count = 0;
+
+    const char *sql = "SELECT name, primary_model, secondary_model, max_iterations, sandbox_profile FROM agents ORDER BY name;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    size_t cap = 4, count = 0;
+    AdminAgent *list = calloc(cap, sizeof(AdminAgent));
+    if (!list) { sqlite3_finalize(stmt); return -1; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            AdminAgent *tmp = realloc(list, cap * sizeof(AdminAgent));
+            if (!tmp) { admin_agents_free(list, count); sqlite3_finalize(stmt); return -1; }
+            list = tmp;
+        }
+        const char *n = (const char *)sqlite3_column_text(stmt, 0);
+        const char *pm = (const char *)sqlite3_column_text(stmt, 1);
+        const char *sm = (const char *)sqlite3_column_text(stmt, 2);
+        const char *sp = (const char *)sqlite3_column_text(stmt, 4);
+        list[count].name = n ? strdup(n) : NULL;
+        list[count].primary_model = pm ? strdup(pm) : NULL;
+        list[count].secondary_model = sm ? strdup(sm) : NULL;
+        list[count].max_iterations = sqlite3_column_int(stmt, 3);
+        list[count].sandbox_profile = sp ? strdup(sp) : NULL;
+        count++;
+    }
+    sqlite3_finalize(stmt);
+
+    *out = list;
+    *out_count = count;
+    return 0;
+}
+
+void admin_agents_free(AdminAgent *list, size_t count) {
+    if (!list) return;
+    for (size_t i = 0; i < count; i++) {
+        free(list[i].name);
+        free(list[i].primary_model);
+        free(list[i].secondary_model);
+        free(list[i].sandbox_profile);
+    }
+    free(list);
+}
+
+int admin_set_agent_model(sqlite3 *db, const char *agent_name,
+                          const char *primary_model, const char *secondary_model) {
+    if (!db || !agent_name) return -1;
+    const char *sql = "UPDATE agents SET primary_model=?2, secondary_model=?3 WHERE name=?1;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+    if (primary_model && primary_model[0])
+        sqlite3_bind_text(stmt, 2, primary_model, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 2);
+    if (secondary_model && secondary_model[0])
+        sqlite3_bind_text(stmt, 3, secondary_model, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 3);
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int64_t admin_create_session(sqlite3 *db, const char *agent_name) {
+    if (!db || !agent_name) return -1;
+    return session_create(db, NULL, agent_name, -1, 0);
+}
+
+/* ── Session listing ───────────────────────────────────────────── */
+
+int admin_list_sessions(sqlite3 *db, int limit, AdminSession **out, size_t *out_count) {
+    if (!db || !out || !out_count) return -1;
+    *out = NULL;
+    *out_count = 0;
+
+    const char *sql =
+        "SELECT id, agent_name, channel_name, channel_id, state,"
+        "       datetime(created_at, 'unixepoch')"
+        " FROM sessions ORDER BY id DESC LIMIT ?1;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int(stmt, 1, limit > 0 ? limit : 50);
+
+    size_t cap = 8, count = 0;
+    AdminSession *list = calloc(cap, sizeof(AdminSession));
+    if (!list) { sqlite3_finalize(stmt); return -1; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            AdminSession *tmp = realloc(list, cap * sizeof(AdminSession));
+            if (!tmp) { admin_sessions_free(list, count); sqlite3_finalize(stmt); return -1; }
+            list = tmp;
+        }
+        const char *an = (const char *)sqlite3_column_text(stmt, 1);
+        const char *cn = (const char *)sqlite3_column_text(stmt, 2);
+        const char *ci = (const char *)sqlite3_column_text(stmt, 3);
+        const char *st = (const char *)sqlite3_column_text(stmt, 4);
+        const char *ca = (const char *)sqlite3_column_text(stmt, 5);
+        list[count].id = sqlite3_column_int64(stmt, 0);
+        list[count].agent_name = an ? strdup(an) : NULL;
+        list[count].channel_name = cn ? strdup(cn) : NULL;
+        list[count].channel_id = ci ? strdup(ci) : NULL;
+        list[count].state = st ? strdup(st) : NULL;
+        list[count].created_at = ca ? strdup(ca) : NULL;
+        count++;
+    }
+    sqlite3_finalize(stmt);
+
+    *out = list;
+    *out_count = count;
+    return 0;
+}
+
+void admin_sessions_free(AdminSession *list, size_t count) {
+    if (!list) return;
+    for (size_t i = 0; i < count; i++) {
+        free(list[i].agent_name);
+        free(list[i].channel_name);
+        free(list[i].channel_id);
+        free(list[i].state);
+        free(list[i].created_at);
+    }
+    free(list);
+}
+
+int admin_attach_session_channel(sqlite3 *db, int64_t session_id,
+                                 const char *channel_name, const char *channel_id) {
+    if (!db || !channel_name || session_id <= 0) return -1;
+    if (!channel_id || !channel_id[0]) channel_id = "*";
+
+    /* Get agent_name from session */
+    char *agent = session_get_agent_name(db, session_id);
+    if (!agent) return -1;
+
+    const char *sql =
+        "INSERT OR REPLACE INTO channel_routes(channel_name, channel_id, agent_name, session_id)"
+        " VALUES(?1, ?2, ?3, ?4);";
+    sqlite3_stmt *stmt;
+    int rc = -1;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, channel_id, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, agent, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt, 4, session_id);
+        rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+        sqlite3_finalize(stmt);
+    }
+
+    /* Also update the session itself */
+    if (rc == 0) {
+        const char *usql =
+            "UPDATE sessions SET channel_name=?1, channel_id=?2 WHERE id=?3;";
+        if (sqlite3_prepare_v2(db, usql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, channel_id, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(stmt, 3, session_id);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+    }
+    free(agent);
+    return rc;
+}
+
+/* ── Channel listing ───────────────────────────────────────────── */
+
+int admin_list_channels(sqlite3 *db, AdminChannel **out, size_t *out_count) {
+    if (!db || !out || !out_count) return -1;
+    *out = NULL;
+    *out_count = 0;
+
+    const char *sql =
+        "SELECT c.name, c.extension_name, c.type, c.status,"
+        "       r.agent_name, r.session_id"
+        " FROM channels c"
+        " LEFT JOIN channel_routes r ON r.channel_name = c.name AND r.channel_id = '*'"
+        " ORDER BY c.name;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+
+    size_t cap = 4, count = 0;
+    AdminChannel *list = calloc(cap, sizeof(AdminChannel));
+    if (!list) { sqlite3_finalize(stmt); return -1; }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (count >= cap) {
+            cap *= 2;
+            AdminChannel *tmp = realloc(list, cap * sizeof(AdminChannel));
+            if (!tmp) { admin_channels_free(list, count); sqlite3_finalize(stmt); return -1; }
+            list = tmp;
+        }
+        const char *n = (const char *)sqlite3_column_text(stmt, 0);
+        const char *en = (const char *)sqlite3_column_text(stmt, 1);
+        const char *t = (const char *)sqlite3_column_text(stmt, 2);
+        const char *s = (const char *)sqlite3_column_text(stmt, 3);
+        const char *ra = (const char *)sqlite3_column_text(stmt, 4);
+        list[count].name = n ? strdup(n) : NULL;
+        list[count].extension_name = en ? strdup(en) : NULL;
+        list[count].type = t ? strdup(t) : NULL;
+        list[count].status = s ? strdup(s) : NULL;
+        list[count].route_agent = ra ? strdup(ra) : NULL;
+        list[count].route_session = sqlite3_column_type(stmt, 5) != SQLITE_NULL
+                                    ? sqlite3_column_int64(stmt, 5) : 0;
+        count++;
+    }
+    sqlite3_finalize(stmt);
+
+    *out = list;
+    *out_count = count;
+    return 0;
+}
+
+void admin_channels_free(AdminChannel *list, size_t count) {
+    if (!list) return;
+    for (size_t i = 0; i < count; i++) {
+        free(list[i].name);
+        free(list[i].extension_name);
+        free(list[i].type);
+        free(list[i].status);
+        free(list[i].route_agent);
+    }
+    free(list);
+}
+
+int admin_set_channel_route(sqlite3 *db, const char *channel_name,
+                            const char *agent_name) {
+    if (!db || !channel_name) return -1;
+    const char *sql =
+        "INSERT OR REPLACE INTO channel_routes(channel_name, channel_id, agent_name)"
+        " VALUES(?1, '*', ?2);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
+    if (agent_name && agent_name[0])
+        sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(stmt, 2);
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    sqlite3_finalize(stmt);
+    return rc;
 }
 
 int admin_grant_from_history(sqlite3 *db, int64_t approval_id) {

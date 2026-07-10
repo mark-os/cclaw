@@ -296,7 +296,7 @@ static void test_admin_dashboard(void) {
     assert(dash_get(curl, url, page, sizeof(page)) == 200);
     assert(strstr(page, "cclaw admin"));
     assert(strstr(page, "m1"));
-    assert(strstr(page, "(primary)"));
+    assert(strstr(page, "primary model"));
     assert(strstr(page, "shell_exec"));         /* pending approval row */
 
     /* Cookie now carries auth on its own */

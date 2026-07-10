@@ -2,6 +2,7 @@
 #include "llm_proc.h"
 #include "agent_config.h"
 #include "config.h"
+#include "config_registry.h"
 #include "context.h"
 #include "db.h"
 #include "db_response.h"
@@ -36,7 +37,77 @@ typedef struct {
     int context_window;
 } ModelCandidate;
 
-static int load_candidates(sqlite3 *db, ModelCandidate *out, int max) {
+static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *out, int max) {
+    if (max <= 0) return 0;
+    int n = 0;
+
+    /* Helper: load a single candidate by model id/name if healthy.
+     * Returns 1 if loaded, 0 otherwise. */
+    #define TRY_MODEL(model_ref) do { \
+        const char *_mr = (model_ref); \
+        if (_mr && _mr[0] && n < max) { \
+            int dup = 0; \
+            for (int _d = 0; _d < n; _d++) \
+                if (strcmp(out[_d].id, _mr) == 0) { dup = 1; break; } \
+            if (!dup) { \
+                const char *lsql = \
+                    "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type, m.context_window" \
+                    " FROM models m JOIN providers p ON m.provider_name = p.name" \
+                    " WHERE (m.id = ?1 OR m.model = ?1)" \
+                    " AND m.status != 'disabled'" \
+                    " AND (m.degraded_until IS NULL OR m.degraded_until < unixepoch())" \
+                    " LIMIT 1;"; \
+                sqlite3_stmt *ls; \
+                if (sqlite3_prepare_v2(db, lsql, -1, &ls, NULL) == SQLITE_OK) { \
+                    sqlite3_bind_text(ls, 1, _mr, -1, SQLITE_STATIC); \
+                    if (sqlite3_step(ls) == SQLITE_ROW) { \
+                        ModelCandidate *c = &out[n]; \
+                        const char *v; \
+                        v = (const char *)sqlite3_column_text(ls, 0); snprintf(c->id, sizeof(c->id), "%s", v ? v : ""); \
+                        v = (const char *)sqlite3_column_text(ls, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : ""); \
+                        v = (const char *)sqlite3_column_text(ls, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : ""); \
+                        v = (const char *)sqlite3_column_text(ls, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : ""); \
+                        v = (const char *)sqlite3_column_text(ls, 4); \
+                        c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI; \
+                        c->context_window = sqlite3_column_int(ls, 5); \
+                        if (c->context_window <= 0) c->context_window = 128000; \
+                        n++; \
+                    } \
+                    sqlite3_finalize(ls); \
+                } \
+            } \
+        } \
+    } while (0)
+
+    /* 1. Agent's primary and secondary models */
+    char agent_primary[128] = "", agent_secondary[128] = "";
+    if (agent_name && agent_name[0]) {
+        sqlite3_stmt *as;
+        if (sqlite3_prepare_v2(db,
+                "SELECT primary_model, secondary_model FROM agents WHERE name=?;",
+                -1, &as, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(as, 1, agent_name, -1, SQLITE_STATIC);
+            if (sqlite3_step(as) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(as, 0);
+                if (v) snprintf(agent_primary, sizeof(agent_primary), "%s", v);
+                v = (const char *)sqlite3_column_text(as, 1);
+                if (v) snprintf(agent_secondary, sizeof(agent_secondary), "%s", v);
+            }
+            sqlite3_finalize(as);
+        }
+    }
+    TRY_MODEL(agent_primary);
+    TRY_MODEL(agent_secondary);
+
+    /* 2. System default primary/secondary from config */
+    char *cfg_primary = config_get(db, "default_primary_model");
+    char *cfg_secondary = config_get(db, "default_secondary_model");
+    TRY_MODEL(cfg_primary);
+    TRY_MODEL(cfg_secondary);
+    free(cfg_primary);
+    free(cfg_secondary);
+
+    /* 3. Remaining healthy models by priority, skipping already-added */
     const char *sql =
         "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type, m.context_window"
         " FROM models m JOIN providers p ON m.provider_name = p.name"
@@ -44,22 +115,32 @@ static int load_candidates(sqlite3 *db, ModelCandidate *out, int max) {
         " AND (m.degraded_until IS NULL OR m.degraded_until < unixepoch())"
         " ORDER BY m.priority";
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
-    int n = 0;
-    while (n < max && sqlite3_step(s) == SQLITE_ROW) {
-        ModelCandidate *c = &out[n];
-        const char *v;
-        v = (const char *)sqlite3_column_text(s, 0); snprintf(c->id, sizeof(c->id), "%s", v ? v : "");
-        v = (const char *)sqlite3_column_text(s, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : "");
-        v = (const char *)sqlite3_column_text(s, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : "");
-        v = (const char *)sqlite3_column_text(s, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : "");
-        v = (const char *)sqlite3_column_text(s, 4);
-        c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
-        c->context_window = sqlite3_column_int(s, 5);
-        if (c->context_window <= 0) c->context_window = 128000;
-        n++;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
+        while (n < max && sqlite3_step(s) == SQLITE_ROW) {
+            const char *rid = (const char *)sqlite3_column_text(s, 0);
+            if (!rid) continue;
+            /* skip duplicates */
+            int dup = 0;
+            for (int d = 0; d < n; d++)
+                if (strcmp(out[d].id, rid) == 0) { dup = 1; break; }
+            if (dup) continue;
+
+            ModelCandidate *c = &out[n];
+            const char *v;
+            snprintf(c->id, sizeof(c->id), "%s", rid);
+            v = (const char *)sqlite3_column_text(s, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : "");
+            v = (const char *)sqlite3_column_text(s, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : "");
+            v = (const char *)sqlite3_column_text(s, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : "");
+            v = (const char *)sqlite3_column_text(s, 4);
+            c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
+            c->context_window = sqlite3_column_int(s, 5);
+            if (c->context_window <= 0) c->context_window = 128000;
+            n++;
+        }
+        sqlite3_finalize(s);
     }
-    sqlite3_finalize(s);
+
+    #undef TRY_MODEL
     return n;
 }
 
@@ -269,7 +350,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
     /* ── Routing state machine ─────────────────────────────────── */
     ModelCandidate models[MAX_MODELS];
-    int nmodels = load_candidates(db, models, MAX_MODELS);
+    int nmodels = load_candidates(db, agent_name, models, MAX_MODELS);
 
     /* Fallback: if no models in DB, use config provider directly */
     if (nmodels == 0) {

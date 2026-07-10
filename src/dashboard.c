@@ -5,6 +5,7 @@
 #include "buf.h"
 #include "civetweb.h"
 #include "config_registry.h"
+#include "db.h"
 #include "resolve.h"
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -110,72 +111,284 @@ static int resp_303(struct mg_connection *conn, const char *location,
 
 /* ── page sections ───────────────────────────────────────────── */
 
-static void render_models(Buf *b) {
-    AdminModel *list = NULL;
-    size_t n = 0;
-    admin_list_models(s_db, &list, &n);
-    buf_appendf(b, "<h2>Models</h2><table><tr><th>id</th><th>provider</th>"
-                   "<th>model</th><th>status</th><th>key</th><th>ctx</th>"
-                   "<th>5xx/429</th><th></th><th>API key</th></tr>");
-    for (size_t i = 0; i < n; i++) {
-        AdminModel *m = &list[i];
-        buf_appendf(b, "<tr><td>");
-        buf_html(b, m->id);
-        buf_appendf(b, "%s</td><td>", i == 0 ? " <b>(primary)</b>" : "");
-        buf_html(b, m->provider);
-        buf_appendf(b, "</td><td>");
-        buf_html(b, m->model);
-        buf_appendf(b, "</td><td>");
-        buf_html(b, m->status);
-        if (m->degraded_left > 0)
-            buf_appendf(b, " (%ds)", m->degraded_left);
-        buf_appendf(b, "</td><td>%s</td><td>%d</td><td>%lld/%lld</td><td>",
-                    m->has_key ? "&#10003;" : "&#10007;", m->context_window,
-                    (long long)m->err_5xx, (long long)m->err_429);
-        if (i > 0) {
-            buf_appendf(b, "<form class=i method=post action=/admin/act>"
-                           "<input type=hidden name=action value=switch_model>"
-                           "<input type=hidden name=model_id value=\"");
-            buf_html(b, m->id);
-            buf_appendf(b, "\"><button>make primary</button></form>");
+static void render_providers_models(Buf *b) {
+    AdminModel *models = NULL;
+    size_t nm = 0;
+    admin_list_models(s_db, &models, &nm);
+
+    buf_appendf(b, "<h2>Providers &amp; Models</h2>");
+
+    /* Query providers directly for full detail */
+    sqlite3_stmt *pst;
+    const char *psql = "SELECT name, base_url, endpoint_type, api_key_env"
+                       " FROM providers ORDER BY priority;";
+    if (sqlite3_prepare_v2(s_db, psql, -1, &pst, NULL) != SQLITE_OK) {
+        admin_models_free(models, nm);
+        return;
+    }
+
+    while (sqlite3_step(pst) == SQLITE_ROW) {
+        const char *prov_name = (const char *)sqlite3_column_text(pst, 0);
+        const char *base_url = (const char *)sqlite3_column_text(pst, 1);
+        const char *endpoint_type = (const char *)sqlite3_column_text(pst, 2);
+        const char *api_key_env = (const char *)sqlite3_column_text(pst, 3);
+        if (!prov_name) continue;
+
+        /* Resolve key presence */
+        int has_key = 0;
+        if (api_key_env && api_key_env[0]) {
+            const char *env = getenv(api_key_env);
+            if (env && env[0]) {
+                has_key = 1;
+            } else {
+                char *sec = db_secret_get_system(s_db, api_key_env);
+                if (sec) { has_key = 1; free(sec); }
+            }
         }
-        buf_appendf(b, "</td><td><form class=i method=post action=/admin/act>"
+
+        /* Provider header row */
+        buf_appendf(b, "<table><tr style=\"background:#eee\"><td colspan=6><b>");
+        buf_html(b, prov_name);
+        buf_appendf(b, "</b> &mdash; ");
+        buf_html(b, base_url);
+        buf_appendf(b, " [");
+        buf_html(b, endpoint_type);
+        buf_appendf(b, "] key: %s", has_key ? "&#10003;" : "&#10007;");
+        /* Set key form */
+        buf_appendf(b, " <form class=i method=post action=/admin/act>"
                        "<input type=hidden name=action value=set_key>"
                        "<input type=hidden name=provider value=\"");
-        buf_html(b, m->provider);
-        buf_appendf(b, "\"><input type=password name=key size=24 placeholder=\"");
-        buf_html(b, m->api_key_env ? m->api_key_env : "key");
-        buf_appendf(b, "\"><button>set</button></form></td></tr>");
+        buf_html(b, prov_name);
+        buf_appendf(b, "\"><input type=password name=key size=20 placeholder=\"");
+        buf_html(b, api_key_env ? api_key_env : "key");
+        buf_appendf(b, "\"><button>set</button></form>");
+        /* Remove button */
+        buf_appendf(b, " <form class=i method=post action=/admin/act>"
+                       "<input type=hidden name=action value=remove_provider>"
+                       "<input type=hidden name=provider value=\"");
+        buf_html(b, prov_name);
+        buf_appendf(b, "\"><button>remove</button></form>");
+        buf_appendf(b, "</td></tr>");
+
+        /* Model header */
+        buf_appendf(b, "<tr><th>model</th><th>status</th><th>ctx</th>"
+                       "<th>5xx/429</th><th></th></tr>");
+
+        /* Models for this provider */
+        for (size_t mi = 0; mi < nm; mi++) {
+            if (!models[mi].provider || strcmp(models[mi].provider, prov_name) != 0)
+                continue;
+            AdminModel *m = &models[mi];
+            buf_appendf(b, "<tr><td>");
+            buf_html(b, m->model);
+            buf_appendf(b, "</td><td>");
+            buf_html(b, m->status);
+            if (m->degraded_left > 0)
+                buf_appendf(b, " (%ds)", m->degraded_left);
+            buf_appendf(b, "</td><td>%d</td><td>%lld/%lld</td><td>",
+                        m->context_window, (long long)m->err_5xx, (long long)m->err_429);
+            /* Set as default button */
+            buf_appendf(b, "<form class=i method=post action=/admin/act>"
+                           "<input type=hidden name=action value=set_default_model>"
+                           "<input type=hidden name=model_id value=\"");
+            buf_html(b, m->id);
+            buf_appendf(b, "\"><button>set as default</button></form> ");
+            /* Disable/enable button */
+            buf_appendf(b, "<form class=i method=post action=/admin/act>"
+                           "<input type=hidden name=action value=toggle_model>"
+                           "<input type=hidden name=model_id value=\"");
+            buf_html(b, m->id);
+            buf_appendf(b, "\"><button>%s</button></form>",
+                        (m->status && strcmp(m->status, "disabled") == 0)
+                        ? "enable" : "disable");
+            buf_appendf(b, "</td></tr>");
+        }
+
+        /* Add model form within this provider */
+        buf_appendf(b, "<tr><td colspan=6>"
+                       "<form class=i method=post action=/admin/act>"
+                       "<input type=hidden name=action value=add_model>"
+                       "<input type=hidden name=provider value=\"");
+        buf_html(b, prov_name);
+        buf_appendf(b, "\"><input name=model size=28 placeholder=\"model string\">"
+                       " <input name=context_window size=8 placeholder=\"ctx\">"
+                       " <button>add model</button></form></td></tr>");
+        buf_appendf(b, "</table>");
     }
-    buf_appendf(b, "</table>");
-    admin_models_free(list, n);
+    sqlite3_finalize(pst);
+
+    /* Add provider form */
+    buf_appendf(b, "<h3>Add provider</h3>"
+                   "<form method=post action=/admin/act>"
+                   "<input type=hidden name=action value=add_provider>"
+                   "<input name=name size=16 placeholder=\"name\" required>"
+                   " <input name=base_url size=36 placeholder=\"https://...\" required>"
+                   " <select name=endpoint_type>"
+                   "<option value=openai>openai</option>"
+                   "<option value=gemini>gemini</option>"
+                   "<option value=responses>responses</option>"
+                   "<option value=gemini_interactions>gemini_interactions</option>"
+                   "</select>"
+                   " <input name=api_key_env size=20 placeholder=\"API_KEY_ENV\">"
+                   " <button>add</button></form>");
+
+    admin_models_free(models, nm);
 }
 
-static void render_providers(Buf *b) {
-    AdminProvider *list = NULL;
-    size_t n = 0;
-    admin_list_providers(s_db, &list, &n);
-    buf_appendf(b, "<h2>Providers</h2><table><tr><th>#</th><th>model</th>"
-                   "<th>endpoint</th></tr>");
-    for (size_t i = 0; i < n; i++) {
-        AdminProvider *p = &list[i];
-        buf_appendf(b, "<tr><td>%d%s</td><td>"
+static void render_agents(Buf *b) {
+    AdminAgent *agents = NULL;
+    size_t na = 0;
+    admin_list_agents(s_db, &agents, &na);
+    AdminModel *models = NULL;
+    size_t nm = 0;
+    admin_list_models(s_db, &models, &nm);
+
+    buf_appendf(b, "<h2>Agents</h2><table><tr><th>name</th><th>primary model</th>"
+                   "<th>secondary model</th><th>max_iter</th><th>sandbox</th><th></th></tr>");
+    for (size_t i = 0; i < na; i++) {
+        AdminAgent *a = &agents[i];
+        buf_appendf(b, "<tr><td>");
+        buf_html(b, a->name);
+        buf_appendf(b, "</td><td colspan=2>"
                        "<form class=i method=post action=/admin/act>"
-                       "<input type=hidden name=action value=set_model>"
-                       "<input type=hidden name=idx value=%d>"
-                       "<input name=model size=32 value=\"",
-                    p->index, p->index == 0 ? " (primary)" : "", p->index);
-        buf_html(b, p->model);
-        buf_appendf(b, "\"><button>set</button></form></td><td>"
+                       "<input type=hidden name=action value=set_agent_model>"
+                       "<input type=hidden name=agent value=\"");
+        buf_html(b, a->name);
+        buf_appendf(b, "\"><select name=primary_model><option value=\"\">(default)</option>");
+        for (size_t mi = 0; mi < nm; mi++) {
+            buf_appendf(b, "<option value=\"");
+            buf_html(b, models[mi].id);
+            buf_appendf(b, "\"%s>",
+                        (a->primary_model && models[mi].id && strcmp(a->primary_model, models[mi].id) == 0)
+                        ? " selected" : "");
+            buf_html(b, models[mi].model);
+            buf_appendf(b, " @ ");
+            buf_html(b, models[mi].provider);
+            buf_appendf(b, "</option>");
+        }
+        buf_appendf(b, "</select> <select name=secondary_model><option value=\"\">(none)</option>");
+        for (size_t mi = 0; mi < nm; mi++) {
+            buf_appendf(b, "<option value=\"");
+            buf_html(b, models[mi].id);
+            buf_appendf(b, "\"%s>",
+                        (a->secondary_model && models[mi].id && strcmp(a->secondary_model, models[mi].id) == 0)
+                        ? " selected" : "");
+            buf_html(b, models[mi].model);
+            buf_appendf(b, " @ ");
+            buf_html(b, models[mi].provider);
+            buf_appendf(b, "</option>");
+        }
+        buf_appendf(b, "</select> <button>assign</button></form>");
+        buf_appendf(b, "</td><td>%d</td><td>", a->max_iterations);
+        buf_html(b, a->sandbox_profile);
+        buf_appendf(b, "</td><td>"
                        "<form class=i method=post action=/admin/act>"
-                       "<input type=hidden name=action value=set_endpoint>"
-                       "<input type=hidden name=idx value=%d>"
-                       "<input name=url size=40 value=\"", p->index);
-        buf_html(b, p->base_url);
-        buf_appendf(b, "\"><button>set</button></form></td></tr>");
+                       "<input type=hidden name=action value=create_session>"
+                       "<input type=hidden name=agent value=\"");
+        buf_html(b, a->name);
+        buf_appendf(b, "\"><button>new session</button></form></td></tr>");
     }
     buf_appendf(b, "</table>");
-    admin_providers_free(list, n);
+
+    admin_agents_free(agents, na);
+    admin_models_free(models, nm);
+}
+
+static void render_sessions(Buf *b) {
+    AdminSession *sessions = NULL;
+    size_t ns = 0;
+    admin_list_sessions(s_db, 30, &sessions, &ns);
+    AdminChannel *channels = NULL;
+    size_t nc = 0;
+    admin_list_channels(s_db, &channels, &nc);
+
+    buf_appendf(b, "<h2>Sessions</h2><table><tr><th>id</th><th>agent</th>"
+                   "<th>channel</th><th>channel_id</th><th>state</th>"
+                   "<th>created</th><th></th></tr>");
+    for (size_t i = 0; i < ns; i++) {
+        AdminSession *s = &sessions[i];
+        buf_appendf(b, "<tr><td>%lld</td><td>", (long long)s->id);
+        buf_html(b, s->agent_name);
+        buf_appendf(b, "</td><td>");
+        buf_html(b, s->channel_name);
+        buf_appendf(b, "</td><td>");
+        buf_html(b, s->channel_id);
+        buf_appendf(b, "</td><td>");
+        buf_html(b, s->state);
+        buf_appendf(b, "</td><td>");
+        buf_html(b, s->created_at);
+        buf_appendf(b, "</td><td>"
+                       "<form class=i method=post action=/admin/act>"
+                       "<input type=hidden name=action value=attach_channel>"
+                       "<input type=hidden name=session_id value=%lld>"
+                       "<select name=channel_name><option value=\"\">--</option>",
+                    (long long)s->id);
+        for (size_t ci = 0; ci < nc; ci++) {
+            buf_appendf(b, "<option value=\"");
+            buf_html(b, channels[ci].name);
+            buf_appendf(b, "\">");
+            buf_html(b, channels[ci].name);
+            buf_appendf(b, "</option>");
+        }
+        buf_appendf(b, "</select>"
+                       "<input name=channel_id size=12 placeholder=\"channel_id\">"
+                       " <button>attach</button></form></td></tr>");
+    }
+    buf_appendf(b, "</table>");
+
+    admin_sessions_free(sessions, ns);
+    admin_channels_free(channels, nc);
+}
+
+static void render_channels(Buf *b) {
+    AdminChannel *channels = NULL;
+    size_t nc = 0;
+    admin_list_channels(s_db, &channels, &nc);
+    AdminAgent *agents = NULL;
+    size_t na = 0;
+    admin_list_agents(s_db, &agents, &na);
+
+    buf_appendf(b, "<h2>Channels</h2><table><tr><th>name</th><th>extension</th>"
+                   "<th>type</th><th>status</th><th>route</th><th></th></tr>");
+    for (size_t i = 0; i < nc; i++) {
+        AdminChannel *c = &channels[i];
+        buf_appendf(b, "<tr><td>");
+        buf_html(b, c->name);
+        buf_appendf(b, "</td><td>");
+        buf_html(b, c->extension_name);
+        buf_appendf(b, "</td><td>");
+        buf_html(b, c->type);
+        buf_appendf(b, "</td><td>");
+        buf_html(b, c->status);
+        buf_appendf(b, "</td><td>");
+        if (c->route_agent) {
+            buf_html(b, c->route_agent);
+            if (c->route_session > 0)
+                buf_appendf(b, " (#%lld)", (long long)c->route_session);
+        } else {
+            buf_appendf(b, "<em>none</em>");
+        }
+        buf_appendf(b, "</td><td>"
+                       "<form class=i method=post action=/admin/act>"
+                       "<input type=hidden name=action value=set_channel_route>"
+                       "<input type=hidden name=channel_name value=\"");
+        buf_html(b, c->name);
+        buf_appendf(b, "\"><select name=agent_name><option value=\"\">(none)</option>");
+        for (size_t ai = 0; ai < na; ai++) {
+            buf_appendf(b, "<option value=\"");
+            buf_html(b, agents[ai].name);
+            buf_appendf(b, "\"%s>",
+                        (c->route_agent && agents[ai].name &&
+                         strcmp(c->route_agent, agents[ai].name) == 0) ? " selected" : "");
+            buf_html(b, agents[ai].name);
+            buf_appendf(b, "</option>");
+        }
+        buf_appendf(b, "</select> <button>route</button></form></td></tr>");
+    }
+    buf_appendf(b, "</table>");
+
+    admin_channels_free(channels, nc);
+    admin_agents_free(agents, na);
 }
 
 static void render_grants(Buf *b, const char *agent) {
@@ -323,8 +536,10 @@ static int render_page(struct mg_connection *conn) {
         "td.args{max-width:28em;overflow-wrap:anywhere;font-family:monospace;"
         "font-size:.85em}"
         "</style></head><body><h1>cclaw admin</h1>");
-    render_models(&b);
-    render_providers(&b);
+    render_providers_models(&b);
+    render_agents(&b);
+    render_sessions(&b);
+    render_channels(&b);
     render_grants(&b, agent);
     render_approvals(&b);
     buf_appendf(&b, "</body></html>");
@@ -358,7 +573,7 @@ static int handle_act(struct mg_connection *conn) {
     mg_get_var(body, blen, "agent", agent, sizeof(agent));
 
     int rc = -1;
-    char v1[512] = "", v2[512] = "";
+    char v1[512] = "", v2[512] = "", v3[512] = "", v4[512] = "";
     if (strcmp(action, "set_key") == 0) {
         if (mg_get_var(body, blen, "provider", v1, sizeof(v1)) > 0 &&
             mg_get_var(body, blen, "key", v2, sizeof(v2)) > 0)
@@ -374,6 +589,53 @@ static int handle_act(struct mg_connection *conn) {
     } else if (strcmp(action, "switch_model") == 0) {
         if (mg_get_var(body, blen, "model_id", v1, sizeof(v1)) > 0)
             rc = admin_switch_model(s_db, v1, v2, sizeof(v2));
+    } else if (strcmp(action, "toggle_model") == 0) {
+        if (mg_get_var(body, blen, "model_id", v1, sizeof(v1)) > 0)
+            rc = admin_toggle_model(s_db, v1);
+    } else if (strcmp(action, "set_default_model") == 0) {
+        if (mg_get_var(body, blen, "model_id", v1, sizeof(v1)) > 0)
+            rc = config_set(s_db, "default_primary_model", v1);
+    } else if (strcmp(action, "add_provider") == 0) {
+        if (mg_get_var(body, blen, "name", v1, sizeof(v1)) > 0 &&
+            mg_get_var(body, blen, "base_url", v2, sizeof(v2)) > 0) {
+            mg_get_var(body, blen, "endpoint_type", v3, sizeof(v3));
+            mg_get_var(body, blen, "api_key_env", v4, sizeof(v4));
+            rc = admin_add_provider(s_db, v1, v2, v3[0] ? v3 : "openai", v4);
+        }
+    } else if (strcmp(action, "remove_provider") == 0) {
+        if (mg_get_var(body, blen, "provider", v1, sizeof(v1)) > 0)
+            rc = admin_remove_provider(s_db, v1);
+    } else if (strcmp(action, "add_model") == 0) {
+        if (mg_get_var(body, blen, "provider", v1, sizeof(v1)) > 0 &&
+            mg_get_var(body, blen, "model", v2, sizeof(v2)) > 0) {
+            mg_get_var(body, blen, "context_window", v3, sizeof(v3));
+            rc = admin_add_model(s_db, v1, v2, v3[0] ? atoi(v3) : 0);
+        }
+    } else if (strcmp(action, "remove_model") == 0) {
+        if (mg_get_var(body, blen, "model_id", v1, sizeof(v1)) > 0)
+            rc = admin_remove_model(s_db, v1);
+    } else if (strcmp(action, "set_agent_model") == 0) {
+        if (agent[0]) {
+            mg_get_var(body, blen, "primary_model", v1, sizeof(v1));
+            mg_get_var(body, blen, "secondary_model", v2, sizeof(v2));
+            rc = admin_set_agent_model(s_db, agent, v1[0] ? v1 : NULL, v2[0] ? v2 : NULL);
+        }
+    } else if (strcmp(action, "create_session") == 0) {
+        if (agent[0]) {
+            int64_t sid = admin_create_session(s_db, agent);
+            rc = (sid > 0) ? 0 : -1;
+        }
+    } else if (strcmp(action, "attach_channel") == 0) {
+        if (mg_get_var(body, blen, "session_id", v1, sizeof(v1)) > 0 &&
+            mg_get_var(body, blen, "channel_name", v2, sizeof(v2)) > 0 && v2[0]) {
+            mg_get_var(body, blen, "channel_id", v3, sizeof(v3));
+            rc = admin_attach_session_channel(s_db, atoll(v1), v2, v3[0] ? v3 : "*");
+        }
+    } else if (strcmp(action, "set_channel_route") == 0) {
+        if (mg_get_var(body, blen, "channel_name", v1, sizeof(v1)) > 0) {
+            mg_get_var(body, blen, "agent_name", v2, sizeof(v2));
+            rc = admin_set_channel_route(s_db, v1, v2[0] ? v2 : NULL);
+        }
     } else if (strcmp(action, "grant") == 0) {
         if (agent[0] &&
             mg_get_var(body, blen, "kind", v1, sizeof(v1)) > 0 &&

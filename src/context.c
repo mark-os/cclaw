@@ -469,7 +469,7 @@ int model_context_window(sqlite3 *db, const char *agent_name, int global_default
     /* Agent's model preference → matching models row's context_window */
     const char *sql =
         "SELECT m.context_window FROM models m"
-        " JOIN agents a ON (a.model = m.id OR a.model = m.model)"
+        " JOIN agents a ON (a.primary_model = m.id OR a.primary_model = m.model)"
         " WHERE a.name = ? AND m.status != 'disabled'"
         " ORDER BY m.priority LIMIT 1;";
     sqlite3_stmt *s;

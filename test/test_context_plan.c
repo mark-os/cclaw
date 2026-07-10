@@ -298,7 +298,7 @@ static void test_model_context_window(void) {
     if (!db) FAIL("db_open");
 
     sqlite3_exec(db,
-        "INSERT INTO agents(name, model) VALUES"
+        "INSERT INTO agents(name, primary_model) VALUES"
         "  ('a-id','m-big'),"           /* matches models.id */
         "  ('a-name','vendor/big'),"    /* matches models.model */
         "  ('a-null','m-null');"        /* model row has NULL window */

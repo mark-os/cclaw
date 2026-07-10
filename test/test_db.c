@@ -376,14 +376,18 @@ static void test_schema_upgrade_from_v11(void) {
     assert(db != NULL);
 
     /* Reshape a current DB back to v11: re-add the column patch v12 drops,
-     * drop the one patch v14 adds, re-add the ones patch v16 drops, seed rows
-     * that each patch must rewrite. */
+     * drop the one patch v14 adds, re-add the ones patch v16 drops, re-add
+     * model/provider that v17 drops, seed rows that each patch must rewrite. */
     assert(sqlite3_exec(db,
         "ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 128000;"
         "ALTER TABLE channels DROP COLUMN prev_extension_name;"
         "ALTER TABLE channel_outbox RENAME COLUMN deliver_mode TO deliver_plain;"
         "ALTER TABLE extensions ADD COLUMN builtin INTEGER NOT NULL DEFAULT 0;"
         "ALTER TABLE tools ADD COLUMN builtin INTEGER NOT NULL DEFAULT 0;"
+        "ALTER TABLE agents ADD COLUMN model TEXT;"
+        "ALTER TABLE agents ADD COLUMN provider TEXT;"
+        "ALTER TABLE agents DROP COLUMN primary_model;"
+        "ALTER TABLE agents DROP COLUMN secondary_model;"
         "INSERT INTO models(id, provider_name, model, context_window) VALUES"
         "  ('m-def','p','vendor/def',128000),"      /* old default → NULLed */
         "  ('m-big','p','vendor/big',200000);"      /* explicit → kept */
@@ -394,7 +398,8 @@ static void test_schema_upgrade_from_v11(void) {
         "  ('tg', 1, '{}', 0),"                         /* auto → mode 0 */
         "  ('tg', 2, '{}', 1);"                         /* plain → mode 2 */
         "INSERT INTO extensions(name, path, owner_agent, published, builtin) VALUES"
-        "  ('telegram','/x','',0,1);",                  /* builtin → owner=system, published */
+        "  ('telegram','/x','',0,1);"                   /* builtin → owner=system, published */
+        "INSERT INTO agents(name, model) VALUES('v17agent','m-big');",
         NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 11);
     assert(db_schema_state(db, NULL) == DB_SCHEMA_UPGRADABLE);
@@ -424,6 +429,13 @@ static void test_schema_upgrade_from_v11(void) {
     assert(v && strcmp(v, "system") == 0); free(v);
     v = query_text(db, "SELECT published FROM extensions WHERE name='telegram'");
     assert(v && strcmp(v, "1") == 0); free(v);
+    /* v17: agents.model → primary_model, provider dropped */
+    assert(!column_exists(db, "agents", "model"));
+    assert(!column_exists(db, "agents", "provider"));
+    assert(column_exists(db, "agents", "primary_model"));
+    assert(column_exists(db, "agents", "secondary_model"));
+    v = query_text(db, "SELECT primary_model FROM agents WHERE name='v17agent'");
+    assert(v && strcmp(v, "m-big") == 0); free(v);
 
     /* Re-running is a no-op, not an error */
     assert(db_schema_compat(db) == 1);

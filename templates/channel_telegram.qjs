@@ -1,52 +1,29 @@
 // Telegram channel extension for channel_runner
 // Reactive handlers: onInit, onPoll, onRequest, onOutbox.
 // All outbound HTTP goes through channel.send() — nothing here blocks.
+// Admin config (keys, models, grants) lives on the web dashboard (/admin
+// prints the URL); chat keeps only conversation, /approvals and the push
+// approval prompts.
 
 var TG_MAX_MSG_LEN = 4096;
 var TG_RICH_MAX_BYTES = 32768;   // sendRichMessage UTF-8 byte limit
 var config = {};
 var offset = 0;
-var dialogs = {}; // chat_id -> {type, data}
-
-// Load telegram.json locale
-var locale = JSON.parse(channel.getConfig("locale") || "{}");
 
 // Single source of truth for admin slash commands — drives both the
 // Telegram "/" menu (setMyCommands) and dispatch, so the two can't drift.
 var COMMANDS = {
-    key: {
-        description: "Set an API key",
-        handler: function(chatId) {
-            sendKeyboard(chatId, msg("key_select_provider"),
-                locale.keyboards && locale.keyboards.key_providers || [
-                    [{"text": "OpenRouter", "callback_data": "key:openrouter"}],
-                    [{"text": "Gemini", "callback_data": "key:gemini"}],
-                    [{"text": "Custom", "callback_data": "key:custom"}]
-                ]);
-        }
-    },
-    config: {
-        description: "Configure model/endpoint",
-        handler: function(chatId, args) {
-            if (args === "model") sendProviderKeyboard(chatId, "cfg_model");
-            else if (args === "endpoint") sendProviderKeyboard(chatId, "cfg_ep");
-            else sendKeyboard(chatId, "What do you want to configure?", [
-                [{text: "Provider model", callback_data: "cfgmenu:model"}],
-                [{text: "Provider endpoint", callback_data: "cfgmenu:ep"}]
-            ]);
-        }
-    },
-    model: {
-        description: "Show routing / switch the primary model",
-        handler: function(chatId) { sendModelMenu(chatId); }
-    },
     approvals: {
         description: "Review pending approvals",
         handler: function(chatId) { sendApprovalsMenu(chatId); }
     },
-    grants: {
-        description: "Manage capability grants",
-        handler: function(chatId) { sendGrantsTopMenu(chatId); }
+    admin: {
+        description: "Get the admin dashboard link",
+        handler: function(chatId) {
+            var url = channel.admin.dashboardUrl();
+            sendMessage(chatId, url ? "Admin dashboard:\n" + url :
+                "Dashboard unavailable — no token minted yet (is the daemon's web server running?).");
+        }
     }
 };
 
@@ -59,13 +36,6 @@ function parseCommand(text) {
     var args = sp === -1 ? "" : text.substring(sp + 1).trim();
     return {name: name, args: args};
 }
-
-// Dialog state is durable: persist to channel_state (same store as tg_offset)
-// on every mutation so an interrupted /key or grant flow resumes after a
-// daemon restart instead of misrouting the pending reply as regular chat.
-function saveDialogs() { channel.setConfig("dialogs", JSON.stringify(dialogs)); }
-function setDialog(key, val) { dialogs[key] = val; saveDialogs(); }
-function clearDialog(key) { delete dialogs[key]; saveDialogs(); }
 
 function onInit() {
     config.token = channel.getConfig("bot_token");
@@ -80,12 +50,6 @@ function onInit() {
     // Restore offset
     var saved = channel.getConfig("tg_offset");
     if (saved) offset = parseInt(saved, 10) || 0;
-
-    // Restore in-flight dialog state so a /key or grant flow survives a
-    // restart (in-memory only, a crash mid-flow would misroute the reply as
-    // regular chat). Persisted on every mutation via setDialog/clearDialog.
-    try { dialogs = JSON.parse(channel.getConfig("dialogs") || "{}"); }
-    catch (e) { dialogs = {}; }
 
     // webhook mode: platform POSTs to the daemon, proxied to onRequest.
     // Default: long-poll getUpdates.
@@ -264,12 +228,6 @@ function processMessage(msg, updateId) {
 
     var chatId = "" + chat.id;
 
-    // Check for pending dialog reply
-    if (dialogs[chatId]) {
-        handleDialogReply(chatId, text, msg.message_id);
-        return true;
-    }
-
     // Admin commands. A non-admin sending a recognized command is silently
     // dropped (not forwarded to the agent) — same as before this refactor.
     // Unrecognized "/" text (including from an admin) falls through to chat.
@@ -302,34 +260,12 @@ function processCallback(cbq) {
         handleApprovalCallback(fromId, data, cbq);
         return;
     }
-    if (data.indexOf("greg:") === 0) {
-        handleGrantFromHistoryCallback(fromId, data, cbq);
-        return;
-    }
-    if (data.indexOf("gtm:") === 0) { handleGrantsTopCallback(fromId, data, cbq); return; }
-    if (data.indexOf("gpa:") === 0) { handleGrantsAgentCallback(fromId, data, cbq); return; }
-    if (data.indexOf("gpr:") === 0) { handleGrantsRevokeCallback(fromId, data, cbq); return; }
-    if (data.indexOf("gpe:") === 0) { handleGrantsEditCallback(fromId, data, cbq); return; }
-    if (data.indexOf("gpn:") === 0) { handleGrantsAddCallback(fromId, data, cbq); return; }
-    if (data.indexOf("gpb") === 0) { handleGrantsBackCallback(fromId, data, cbq); return; }
-    if (data.indexOf("gpk:") === 0) { handleGrantsKindCallback(fromId, data, cbq); return; }
-    if (data.indexOf("gpt:") === 0) { handleGrantsToolCallback(fromId, data, cbq); return; }
-    if (data.indexOf("gpm:") === 0) { handleGrantsModeCallback(fromId, data, cbq); return; }
 
-    // Answer callback to dismiss loading
+    // Anything else (including buttons from menus that no longer exist):
+    // answer the callback so the client's loading spinner clears.
     if (cbq.id) {
         tgCall("answerCallbackQuery", JSON.stringify({callback_query_id: cbq.id}));
     }
-
-    if (data.indexOf("key:") === 0) handleKeyCallback(fromId, data);
-    else if (data.indexOf("cfg_model:") === 0) handleConfigModelCallback(fromId, data);
-    else if (data.indexOf("cfg_ep:") === 0) handleConfigEndpointCallback(fromId, data);
-    else if (data.indexOf("cfgmenu:") === 0)
-        sendProviderKeyboard(fromId, data.substring(8) === "model" ? "cfg_model" : "cfg_ep");
-    else if (data.indexOf("mdl:") === 0) handleModelDetailsCallback(fromId, data);
-    else if (data.indexOf("mdlgo:") === 0) handleModelSwitchCallback(fromId, data);
-    else if (data.indexOf("mdlkey:") === 0) handleModelKeyCallback(fromId, data);
-    else if (data === "mdlback") sendModelMenu(fromId);
 }
 
 // ── Approval callback ────────────────────────────────────────────
@@ -363,396 +299,6 @@ function handleApprovalCallback(fromId, data, cbq) {
     }
 }
 
-// ── Grant-from-history callback ───────────────────────────────────
-
-function handleGrantFromHistoryCallback(fromId, data, cbq) {
-    // "greg:<approval_id>:yes" — a denied approval is terminal, so this
-    // applies a fresh grant directly rather than resolving the old row.
-    var parts = data.substring(5).split(":");
-    var approvalId = parts[0];
-
-    var rc = channel.admin.grantFromHistory(parseInt(approvalId, 10));
-    var toast = rc === 0 ? "Granted" : "Grant failed";
-    if (cbq.id) {
-        tgCall("answerCallbackQuery", JSON.stringify({callback_query_id: cbq.id, text: toast}));
-    }
-
-    if (cbq.message && cbq.message.chat) {
-        var who = (cbq.from && cbq.from.first_name) || fromId;
-        var outcome = (cbq.message.text || "Request") + "\n\n" + toast + " by " + who;
-        tgCall("editMessageText", JSON.stringify({
-            chat_id: cbq.message.chat.id,
-            message_id: cbq.message.message_id,
-            text: outcome,
-            reply_markup: {inline_keyboard: []}
-        }), {tag: "edit_" + cbq.id});
-    }
-}
-
-// ── Grants CRUD (/grants "Manage Grants" flow) ────────────────────
-//
-// One message, edited in place via editMessageText as the admin navigates:
-// top menu -> agent picker -> grants list -> (add: kind -> tool|host|path
-// picker, or edit: free-text prompt). Agents/tools are referenced by index
-// into a freshly-fetched, name-ordered list; grants by their rowid — never
-// by raw name/value — so callback_data (64-byte cap) never risks overflow.
-
-function answerCbq(cbq, text) {
-    if (cbq.id) tgCall("answerCallbackQuery", JSON.stringify({callback_query_id: cbq.id, text: text || ""}));
-}
-
-function editGrantsMessage(cbq, text, keyboard) {
-    if (!cbq.message || !cbq.message.chat) return;
-    tgCall("editMessageText", JSON.stringify({
-        chat_id: cbq.message.chat.id,
-        message_id: cbq.message.message_id,
-        text: text,
-        reply_markup: {inline_keyboard: keyboard || []}
-    }), {tag: "edit_grants"});
-}
-
-function agentAtIndex(idx) {
-    var agents = channel.admin.listAgents();
-    return (agents && idx >= 0 && idx < agents.length) ? agents[idx] : null;
-}
-
-function sendGrantsTopMenu(chatId) {
-    sendKeyboard(chatId, "Grants", [
-        [{text: "Manage Grants", callback_data: "gtm:m"}],
-        [{text: "View Denied Requests", callback_data: "gtm:h"}]
-    ]);
-}
-
-function handleGrantsTopCallback(fromId, data, cbq) {
-    answerCbq(cbq);
-    if (data === "gtm:h") {
-        // Existing, untouched denial-history view — sends its own message
-        // rather than editing this one (channel-scoped, not agent-scoped).
-        if (cbq.message && cbq.message.chat) sendGrantsMenu("" + cbq.message.chat.id);
-        return;
-    }
-    renderAgentPicker(cbq);
-}
-
-function renderAgentPicker(cbq) {
-    var agents = channel.admin.listAgents();
-    if (!agents || agents.length === 0) {
-        editGrantsMessage(cbq, "No agents found.", []);
-        return;
-    }
-    var keyboard = [];
-    for (var i = 0; i < agents.length && i < 20; i++) {
-        keyboard.push([{text: agents[i], callback_data: "gpa:" + i}]);
-    }
-    editGrantsMessage(cbq, "Select agent:", keyboard);
-}
-
-function handleGrantsAgentCallback(fromId, data, cbq) {
-    answerCbq(cbq);
-    var agentIdx = parseInt(data.substring(4), 10);
-    renderGrantsList(cbq, agentIdx);
-}
-
-function renderGrantsList(cbq, agentIdx) {
-    var agent = agentAtIndex(agentIdx);
-    if (!agent) {
-        editGrantsMessage(cbq, "Agent no longer exists.", []);
-        return;
-    }
-
-    var grants = channel.admin.listGrants(agent);
-    var lines = [agent + " grants:"];
-    var keyboard = [];
-    if (!grants || grants.length === 0) lines.push("(none)");
-    for (var i = 0; i < grants.length; i++) {
-        var g = grants[i];
-        lines.push(g.kind + ": " + g.value);
-        var row = [{text: "Revoke " + g.kind, callback_data: "gpr:" + agentIdx + ":" + g.id}];
-        if (g.kind === "host" || g.kind === "read_path" || g.kind === "write_path")
-            row.push({text: "Edit " + g.kind, callback_data: "gpe:" + agentIdx + ":" + g.id});
-        keyboard.push(row);
-    }
-    keyboard.push([{text: "+ Add", callback_data: "gpn:" + agentIdx}]);
-    keyboard.push([{text: "Back", callback_data: "gpb"}]);
-    editGrantsMessage(cbq, lines.join("\n"), keyboard);
-}
-
-function handleGrantsBackCallback(fromId, data, cbq) {
-    answerCbq(cbq);
-    renderAgentPicker(cbq);
-}
-
-function handleGrantsRevokeCallback(fromId, data, cbq) {
-    // "gpr:<agentIdx>:<rowid>"
-    var parts = data.substring(4).split(":");
-    var agentIdx = parseInt(parts[0], 10);
-    var rowId = parseInt(parts[1], 10);
-    var rc = channel.admin.revokeGrant(rowId);
-    answerCbq(cbq, rc === 0 ? "Revoked" : "Revoke failed");
-    renderGrantsList(cbq, agentIdx);
-}
-
-function handleGrantsEditCallback(fromId, data, cbq) {
-    answerCbq(cbq);
-    // "gpe:<agentIdx>:<rowid>"
-    var parts = data.substring(4).split(":");
-    var agentIdx = parseInt(parts[0], 10);
-    var rowId = parseInt(parts[1], 10);
-    var agent = agentAtIndex(agentIdx);
-    if (!agent) { editGrantsMessage(cbq, "Agent no longer exists.", []); return; }
-
-    var grants = channel.admin.listGrants(agent);
-    var target = null;
-    for (var i = 0; i < grants.length; i++) {
-        if (grants[i].id === rowId) { target = grants[i]; break; }
-    }
-    if (!target) { renderGrantsList(cbq, agentIdx); return; }
-
-    setDialog(fromId, {
-        type: "grant_value", agentIdx: agentIdx, kind: target.kind,
-        editRowId: rowId,
-        listMessageId: cbq.message.message_id, listChatId: cbq.message.chat.id
-    });
-    sendForceReply(fromId, "Editing " + target.kind + " grant (currently: " +
-        target.value + ") — reply with the new value, or /cancel");
-}
-
-function handleGrantsAddCallback(fromId, data, cbq) {
-    answerCbq(cbq);
-    var agentIdx = parseInt(data.substring(4), 10);
-    editGrantsMessage(cbq, "Add grant — select kind:", [
-        [{text: "Tool", callback_data: "gpk:" + agentIdx + ":tool"}],
-        [{text: "Host", callback_data: "gpk:" + agentIdx + ":host"}],
-        [{text: "Path", callback_data: "gpk:" + agentIdx + ":path"}]
-    ]);
-}
-
-function handleGrantsKindCallback(fromId, data, cbq) {
-    answerCbq(cbq);
-    // "gpk:<agentIdx>:tool|host|path"
-    var parts = data.substring(4).split(":");
-    var agentIdx = parseInt(parts[0], 10);
-    var kind = parts[1];
-
-    if (kind === "tool") {
-        renderToolPicker(cbq, agentIdx);
-    } else if (kind === "host") {
-        setDialog(fromId, {
-            type: "grant_value", agentIdx: agentIdx, kind: "host",
-            listMessageId: cbq.message.message_id, listChatId: cbq.message.chat.id
-        });
-        sendForceReply(fromId, "Enter hostname to grant, or /cancel:");
-    } else if (kind === "path") {
-        editGrantsMessage(cbq, "Path access mode:", [
-            [{text: "Read", callback_data: "gpm:" + agentIdx + ":read"}],
-            [{text: "Write", callback_data: "gpm:" + agentIdx + ":write"}]
-        ]);
-    }
-}
-
-function renderToolPicker(cbq, agentIdx) {
-    var tools = channel.admin.listTools();
-    if (!tools || tools.length === 0) {
-        editGrantsMessage(cbq, "No tools found.", []);
-        return;
-    }
-    var keyboard = [];
-    for (var i = 0; i < tools.length && i < 30; i++) {
-        keyboard.push([{text: tools[i], callback_data: "gpt:" + agentIdx + ":" + i}]);
-    }
-    editGrantsMessage(cbq, "Select tool to grant:", keyboard);
-}
-
-function handleGrantsToolCallback(fromId, data, cbq) {
-    // "gpt:<agentIdx>:<toolIdx>" — grants immediately, no free text.
-    var parts = data.substring(4).split(":");
-    var agentIdx = parseInt(parts[0], 10);
-    var toolIdx = parseInt(parts[1], 10);
-    var agent = agentAtIndex(agentIdx);
-    var tools = channel.admin.listTools();
-    var toolName = (tools && toolIdx >= 0 && toolIdx < tools.length) ? tools[toolIdx] : null;
-
-    var rc = -1;
-    if (agent && toolName) rc = channel.admin.grantCapability(agent, "tool", toolName);
-    answerCbq(cbq, rc === 0 ? "Granted" : "Grant failed");
-    renderGrantsList(cbq, agentIdx);
-}
-
-function handleGrantsModeCallback(fromId, data, cbq) {
-    answerCbq(cbq);
-    // "gpm:<agentIdx>:read|write"
-    var parts = data.substring(4).split(":");
-    var agentIdx = parseInt(parts[0], 10);
-    var mode = parts[1];
-    setDialog(fromId, {
-        type: "grant_value", agentIdx: agentIdx,
-        kind: mode === "write" ? "write_path" : "read_path",
-        listMessageId: cbq.message.message_id, listChatId: cbq.message.chat.id
-    });
-    sendForceReply(fromId, "Enter path to grant " + mode + " access to, or /cancel:");
-}
-
-// ── Admin command dispatch ───────────────────────────────────────
-
-// ── Key dialog ───────────────────────────────────────────────────
-
-function handleKeyCallback(chatId, data) {
-    var provider = data.substring(4);
-    setDialog(chatId, {type: "key", provider: provider});
-
-    var prompt = provider === "custom" ? msg("key_prompt_custom") :
-        msg("key_prompt_" + provider) || ("Send the API key for " + provider + ":");
-    sendForceReply(chatId, prompt);
-}
-
-// ── Model routing (/model) ───────────────────────────────────────
-
-function modelSummaryLine(m, i) {
-    var s = (i + 1) + ". " + m.id + " — " + m.status;
-    if (m.degraded_left > 0) s += " (retry in " + m.degraded_left + "s)";
-    s += ", key " + (m.has_key ? "✓" : "MISSING");
-    s += ", ctx " + (m.context_window > 0 ? m.context_window : "default");
-    return s;
-}
-
-function sendModelMenu(chatId) {
-    var list = channel.admin.listModels();
-    if (!list || list.length === 0) {
-        sendMessage(chatId, "No models registered — the config provider is serving requests. The agent can add models via configure_provider.");
-        return;
-    }
-    var lines = ["Routing order (first healthy model serves each request):"];
-    var keyboard = [];
-    for (var i = 0; i < list.length; i++) {
-        lines.push(modelSummaryLine(list[i], i));
-        keyboard.push([{text: (i === 0 ? "★ " : "") + list[i].id, callback_data: "mdl:" + i}]);
-    }
-    lines.push("");
-    lines.push("Tap a model for details / to make it primary.");
-    sendKeyboard(chatId, lines.join("\n"), keyboard);
-}
-
-function handleModelDetailsCallback(chatId, data) {
-    var idx = parseInt(data.substring(4), 10);
-    var list = channel.admin.listModels();
-    var m = list[idx];
-    if (!m) { sendMessage(chatId, "Model list changed — run /model again."); return; }
-
-    var lines = [
-        "Model: " + m.model,
-        "Id: " + m.id,
-        "Provider: " + m.provider + " (" + m.base_url + ")",
-        "Context window: " + (m.context_window > 0 ? m.context_window : "default"),
-        "Key (" + m.api_key_env + "): " + (m.has_key ? "present" : "MISSING"),
-        "Status: " + m.status + (m.degraded_left > 0 ? " (retry in " + m.degraded_left + "s)" : ""),
-        "Requests: " + m.total_requests + " (errors 5xx: " + m.err_5xx + ", 429: " + m.err_429 + ")"
-    ];
-    var keyboard = [];
-    if (idx !== 0) {
-        lines.push("");
-        lines.push("Switching keeps the current primary as first fallback: on repeated errors or a bad key, requests fall back automatically and you get a notice here.");
-        if (!m.has_key)
-            lines.push("⚠ No key found for " + m.api_key_env + " — set it first or the switch will immediately fall back.");
-        keyboard.push([{text: "Make primary", callback_data: "mdlgo:" + idx}]);
-    }
-    if (!m.has_key)
-        keyboard.push([{text: "Set key " + m.api_key_env, callback_data: "mdlkey:" + idx}]);
-    keyboard.push([{text: "« Back", callback_data: "mdlback"}]);
-    sendKeyboard(chatId, lines.join("\n"), keyboard);
-}
-
-function handleModelSwitchCallback(chatId, data) {
-    var idx = parseInt(data.substring(6), 10);
-    var list = channel.admin.listModels();
-    var m = list[idx];
-    if (!m) { sendMessage(chatId, "Model list changed — run /model again."); return; }
-
-    var prev = channel.admin.switchModel(m.id);
-    if (prev === null) {
-        sendMessage(chatId, "Switch failed — model " + m.id + " not found.");
-        return;
-    }
-    var text = "Primary model is now " + m.id + ".";
-    if (prev) text += "\nPrevious primary " + prev + " stays as first fallback — " +
-                      "if " + m.id + " fails repeatedly you'll be notified here and " +
-                      "requests fall back automatically.";
-    sendMessage(chatId, text);
-}
-
-function handleModelKeyCallback(chatId, data) {
-    var idx = parseInt(data.substring(7), 10);
-    var list = channel.admin.listModels();
-    var m = list[idx];
-    if (!m || !m.api_key_env) { sendMessage(chatId, "Model list changed — run /model again."); return; }
-    setDialog(chatId, {type: "key", provider: "custom", var_name: m.api_key_env});
-    sendForceReply(chatId, "Send the API key value for " + m.api_key_env + " (message is deleted after saving):");
-}
-
-// ── Config model dialog ──────────────────────────────────────────
-
-function handleConfigModelCallback(chatId, data) {
-    var idx = parseInt(data.substring(10), 10);
-    setDialog(chatId, {type: "config_model", index: idx});
-    sendForceReply(chatId, msg("config_enter_model"));
-}
-
-// ── Config endpoint dialog ───────────────────────────────────────
-
-function handleConfigEndpointCallback(chatId, data) {
-    var idx = parseInt(data.substring(7), 10);
-    setDialog(chatId, {type: "config_endpoint", index: idx});
-    sendForceReply(chatId, msg("config_enter_endpoint"));
-}
-
-// ── Dialog reply handler ─────────────────────────────────────────
-
-function handleDialogReply(chatId, text, messageId) {
-    var d = dialogs[chatId];
-    clearDialog(chatId);
-
-    if (d.type === "grant_value" && text === "/cancel") {
-        if (messageId) {
-            tgCall("deleteMessage", JSON.stringify({chat_id: parseInt(chatId, 10), message_id: messageId}));
-        }
-        if (d.listChatId && d.listMessageId) {
-            renderGrantsList({message: {chat: {id: d.listChatId}, message_id: d.listMessageId}}, d.agentIdx);
-        }
-        return;
-    }
-
-    if (d.type === "key") {
-        if (messageId) deleteSensitiveMessage(chatId, messageId, 1);
-        // var_name set (e.g. from /model "Set key"): user sends the bare value,
-        // we prepend the env var name the custom-provider path expects.
-        var keyVal = d.var_name ? d.var_name + "=" + text : text;
-        var rc = channel.admin.setKey(d.provider, keyVal);
-        sendMessage(chatId, rc === 0 ? msg("key_saved") : msg("key_failed"));
-    } else if (d.type === "config_model") {
-        var rc2 = channel.admin.setModel(d.index, text);
-        sendMessage(chatId, rc2 === 0 ? msg("config_model_updated") + text : "Failed to update model.");
-    } else if (d.type === "config_endpoint") {
-        if (text.indexOf("http://") !== 0 && text.indexOf("https://") !== 0) {
-            sendMessage(chatId, msg("config_endpoint_invalid"));
-            return;
-        }
-        var rc3 = channel.admin.setEndpoint(d.index, text);
-        sendMessage(chatId, rc3 === 0 ? msg("config_endpoint_updated") + text : "Failed to update endpoint.");
-    } else if (d.type === "grant_value") {
-        if (messageId) deleteSensitiveMessage(chatId, messageId, 1);
-        var agent = agentAtIndex(d.agentIdx);
-        var rc5 = -1;
-        if (agent) {
-            if (d.editRowId) channel.admin.revokeGrant(d.editRowId);
-            rc5 = channel.admin.grantCapability(agent, d.kind, text);
-        }
-        if (d.listChatId && d.listMessageId) {
-            var fakeCbq = {message: {chat: {id: d.listChatId}, message_id: d.listMessageId}};
-            if (rc5 === 0) renderGrantsList(fakeCbq, d.agentIdx);
-            else editGrantsMessage(fakeCbq, "Grant failed.", []);
-        }
-    }
-}
-
 // ── Telegram API helpers (queue shapes; the C loop executes) ─────
 
 function tgCall(method, body, extra) {
@@ -775,26 +321,6 @@ function tgCall(method, body, extra) {
 // no trace, see handleApprovalCallback).
 function onResult(r) {
     var failed = r.error || r.status < 200 || r.status >= 300;
-
-    // Tracked secret-scrub delete (see deleteSensitiveMessage). Retry once,
-    // then warn the user to delete it manually.
-    if (r.tag && r.tag.indexOf("del:") === 0) {
-        if (!failed) return;                                       // gone, good
-        // Already removed (double-delete / user beat us to it): nothing to warn.
-        if ((r.body || "").indexOf("message to delete not found") !== -1) return;
-        var p = r.tag.substring(4).split(":");
-        var delChat = p[0], delMsg = parseInt(p[1], 10), attempt = parseInt(p[2], 10);
-        if (attempt < 2) {
-            deleteSensitiveMessage(delChat, delMsg, attempt + 1);
-        } else {
-            channel.log("deleteMessage gave up chat=" + delChat + " msg=" + delMsg +
-                        " status=" + r.status + " body=" + (r.body || "").substring(0, 120));
-            sendMessage(delChat, "⚠️ I couldn't delete your previous message. " +
-                "It may contain a secret — please delete it manually from this chat.");
-        }
-        return;
-    }
-
     if (failed) {
         channel.log("tgCall failed tag=" + r.tag + " status=" + r.status +
                     " error=" + r.error + " body=" + (r.body || "").substring(0, 200));
@@ -803,16 +329,6 @@ function onResult(r) {
 
 function sendMessage(chatId, text) {
     tgCall("sendMessage", JSON.stringify({chat_id: parseInt(chatId, 10), text: text}));
-}
-
-// Delete a message that contains captured-secret plaintext (an API key, a
-// grant value). Tracked with a "del:<chatId>:<messageId>:<attempt>" tag so
-// onResult can retry once and, failing that, warn the user to remove it by
-// hand — a secret left in chat history forever is the security hazard here.
-function deleteSensitiveMessage(chatId, messageId, attempt) {
-    tgCall("deleteMessage",
-        JSON.stringify({chat_id: parseInt(chatId, 10), message_id: messageId}),
-        {tag: "del:" + chatId + ":" + messageId + ":" + (attempt || 1)});
 }
 
 // Chunk on the PLAIN text (Telegram's 4096 limit counts parsed text, so HTML
@@ -847,7 +363,7 @@ function markdownToTelegramHtml(md) {
     // they never occur in real text and aren't Markdown markers — the inline
     // regexes skip over placeholders). They render invisibly; that's expected.
     var stash = [];
-    function keep(html) { return "" + (stash.push(html) - 1) + ""; }
+    function keep(html) { return "\uE000" + (stash.push(html) - 1) + "\uE001"; }
 
     var s = md.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -886,7 +402,7 @@ function markdownToTelegramHtml(md) {
     // Headers → bold line (Telegram has no headings).
     s = s.replace(/^#{1,6}[ \t]+([^\n]+)$/gm, "<b>$1</b>");
 
-    return s.replace(/(\d+)/g, function(_, i) { return stash[parseInt(i, 10)]; });
+    return s.replace(/\uE000(\d+)\uE001/g, function(_, i) { return stash[parseInt(i, 10)]; });
 }
 
 function findSplit(text, start, maxLen) {
@@ -925,26 +441,6 @@ function sendKeyboard(chatId, text, keyboard, extra) {
     }), extra);
 }
 
-function sendForceReply(chatId, text) {
-    tgCall("sendMessage", JSON.stringify({
-        chat_id: parseInt(chatId, 10),
-        text: text,
-        reply_markup: {force_reply: true, selective: true}
-    }));
-}
-
-function sendProviderKeyboard(chatId, prefix) {
-    var providers = channel.admin.listProviders();
-    var keyboard = [];
-    for (var i = 0; i < providers.length; i++) {
-        var p = providers[i];
-        var label = (i === 0 ? "Primary: " : "Fallback " + i + ": ") + (p.model || "(none)");
-        keyboard.push([{text: label, callback_data: prefix + ":" + i}]);
-    }
-    var title = prefix === "cfg_model" ? msg("config_select_provider") : msg("config_select_endpoint");
-    sendKeyboard(chatId, title, keyboard);
-}
-
 function sendApprovalsMenu(chatId) {
     var list = channel.admin.listPendingApprovals();
     if (!list || list.length === 0) {
@@ -962,26 +458,4 @@ function sendApprovalsMenu(chatId) {
         ]);
     }
     sendKeyboard(chatId, lines.join("\n"), keyboard);
-}
-
-function sendGrantsMenu(chatId) {
-    var list = channel.admin.listDeniedApprovals(10);
-    if (!list || list.length === 0) {
-        sendMessage(chatId, "No recently denied requests.");
-        return;
-    }
-    var lines = [];
-    var keyboard = [];
-    for (var i = 0; i < list.length; i++) {
-        var a = list[i];
-        lines.push("#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.action);
-        keyboard.push([{text: "Grant #" + a.id, callback_data: "greg:" + a.id + ":yes"}]);
-    }
-    sendKeyboard(chatId, lines.join("\n"), keyboard);
-}
-
-// ── Helpers ──────────────────────────────────────────────────────
-
-function msg(key) {
-    return (locale.messages && locale.messages[key]) || key;
 }

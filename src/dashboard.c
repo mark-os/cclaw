@@ -6,7 +6,10 @@
 #include "civetweb.h"
 #include "config_registry.h"
 #include "resolve.h"
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -439,6 +442,32 @@ static int handle_admin(struct mg_connection *conn, void *cbdata) {
         return rc;
     }
     return render_page(conn);
+}
+
+char *dashboard_url(sqlite3 *db) {
+    char *tok = config_get(db, "web_admin_token");
+    if (!tok || !tok[0]) {
+        free(tok);
+        return NULL;
+    }
+    int port = config_get_int(db, "web_port");
+    char host[INET_ADDRSTRLEN] = "127.0.0.1";
+    struct ifaddrs *ifa = NULL;
+    if (getifaddrs(&ifa) == 0) {
+        for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
+            if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+            struct sockaddr_in *sin = (struct sockaddr_in *)(void *)p->ifa_addr;
+            if ((ntohl(sin->sin_addr.s_addr) >> 24) == 127) continue;
+            inet_ntop(AF_INET, &sin->sin_addr, host, sizeof(host));
+            break;
+        }
+        freeifaddrs(ifa);
+    }
+    size_t n = strlen(tok) + sizeof(host) + 48;
+    char *url = malloc(n);
+    if (url) snprintf(url, n, "http://%s:%d/admin?token=%s", host, port, tok);
+    free(tok);
+    return url;
 }
 
 int dashboard_register(struct mg_context *ctx, sqlite3 *db) {

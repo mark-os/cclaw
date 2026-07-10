@@ -11,7 +11,22 @@
 #include <curl/curl.h>
 #include "web.h"
 #include "db.h"
+#include "resolve.h"
 #include "test_util.h"
+
+/* dashboard.o (pulled in via web.o) references resolve_approval, normally
+ * defined in main.c — stub it and capture the call, same pattern as
+ * test_channel_events.c. */
+static int64_t g_ra_id = -1;
+static ApprovalDecision g_ra_decision;
+static char g_ra_via[32];
+void resolve_approval(int64_t approval_id, ApprovalDecision decision,
+                      const char *decided_via, int64_t grant_expires_at) {
+    (void)grant_expires_at;
+    g_ra_id = approval_id;
+    g_ra_decision = decision;
+    snprintf(g_ra_via, sizeof(g_ra_via), "%s", decided_via ? decided_via : "");
+}
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
@@ -179,9 +194,168 @@ static void test_hook_proxy(void) {
     printf("PASS: test_hook_proxy\n");
 }
 
+/* ── admin dashboard ────────────────────────────────────────────── */
+
+struct page_buf { char *buf; size_t cap; };
+
+static size_t page_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t total = size * nmemb;
+    struct page_buf *b = (struct page_buf *)userdata;
+    size_t cur = strlen(b->buf);
+    if (cur + total < b->cap) {
+        memcpy(b->buf + cur, ptr, total);
+        b->buf[cur + total] = '\0';
+    }
+    return total;
+}
+
+static char *query_text(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *st;
+    char *out = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) out = strdup(v);
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+/* GET url into page (cleared first); returns final HTTP code. */
+static long dash_get(CURL *curl, const char *url, char *page, size_t cap) {
+    struct page_buf pb = {page, cap};
+    page[0] = '\0';
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, page_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &pb);
+    assert(curl_easy_perform(curl) == CURLE_OK);
+    long code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    return code;
+}
+
+/* POST form to /admin/act without following the 303; returns HTTP code. */
+static long dash_post(CURL *curl, const char *url, const char *form,
+                      char *page, size_t cap) {
+    struct page_buf pb = {page, cap};
+    page[0] = '\0';
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, form);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, page_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &pb);
+    assert(curl_easy_perform(curl) == CURLE_OK);
+    long code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    return code;
+}
+
+static void test_admin_dashboard(void) {
+    Config cfg = {0};
+    cfg.web_port = 19878;
+    cfg.db_path = "test_web_admin.db";
+
+    sqlite3 *db = test_db_open(cfg.db_path);
+    assert(db);
+    assert(sqlite3_exec(db,
+        "INSERT OR REPLACE INTO providers(name, base_url, api_key_env) VALUES"
+        "  ('openrouter','https://openrouter.example/v1','OPENROUTER_API_KEY');"
+        "INSERT OR REPLACE INTO models(id, provider_name, model, priority) VALUES"
+        "  ('m1','openrouter','vendor/one',0), ('m2','openrouter','vendor/two',1);"
+        "INSERT OR IGNORE INTO agents(name) VALUES('Assistant'), ('ev<il&name');"
+        "INSERT INTO sessions(name, agent_name, channel_name)"
+        "  VALUES('s','Assistant','telegram');"
+        "INSERT INTO approvals(session_id, tool_name, action, args_json, state)"
+        "  VALUES(1, 'shell_exec', 'exec', '{\"cmd\":\"ls\"}', 'pending');",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    assert(web_start(&cfg, db, cfg.db_path) == 0);
+    usleep(50000);
+
+    /* web_start minted a token */
+    char *token = query_text(db, "SELECT value FROM config WHERE key='web_admin_token'");
+    assert(token && strlen(token) == 32);
+
+    static char page[65536];
+    CURL *curl = curl_easy_init();
+    assert(curl);
+    curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");  /* enable cookie engine */
+
+    /* No token → 403 */
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 403);
+
+    /* Bad token → 403 */
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin?token=00000000000000000000000000000000",
+                    page, sizeof(page)) == 403);
+
+    /* Good token → 303 sets cookie, follow lands on the page */
+    char url[160];
+    snprintf(url, sizeof(url), "http://127.0.0.1:19878/admin?token=%s", token);
+    assert(dash_get(curl, url, page, sizeof(page)) == 200);
+    assert(strstr(page, "cclaw admin"));
+    assert(strstr(page, "m1"));
+    assert(strstr(page, "(primary)"));
+    assert(strstr(page, "shell_exec"));         /* pending approval row */
+
+    /* Cookie now carries auth on its own */
+    assert(dash_get(curl, "http://127.0.0.1:19878/admin", page, sizeof(page)) == 200);
+
+    /* Hostile agent name is HTML-escaped everywhere */
+    assert(strstr(page, "ev&lt;il&amp;name"));
+    assert(strstr(page, "ev<il&name") == NULL);
+
+    /* switch_model makes m2 the routing head */
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
+                     "action=switch_model&model_id=m2", page, sizeof(page)) == 303);
+    char *head = query_text(db, "SELECT id FROM models ORDER BY priority LIMIT 1");
+    assert(head && strcmp(head, "m2") == 0);
+    free(head);
+
+    /* grant → row exists; revoke by rowid → gone */
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
+                     "action=grant&agent=Assistant&kind=tool&value=web_fetch",
+                     page, sizeof(page)) == 303);
+    char *gid = query_text(db,
+        "SELECT rowid FROM grants WHERE agent_name='Assistant' AND value='web_fetch'");
+    assert(gid);
+    char form[128];
+    snprintf(form, sizeof(form), "action=revoke&agent=Assistant&grant_id=%s", gid);
+    free(gid);
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act", form,
+                     page, sizeof(page)) == 303);
+    char *gone = query_text(db,
+        "SELECT rowid FROM grants WHERE agent_name='Assistant' AND value='web_fetch'");
+    assert(gone == NULL);
+
+    /* approve routes through resolve_approval with decided_via="dashboard" */
+    assert(dash_post(curl, "http://127.0.0.1:19878/admin/act",
+                     "action=approve&approval_id=1&decision=always",
+                     page, sizeof(page)) == 303);
+    assert(g_ra_id == 1);
+    assert(g_ra_decision == APPROVAL_ALWAYS);
+    assert(strcmp(g_ra_via, "dashboard") == 0);
+
+    /* POST without the cookie → 403 (query token is GET-only) */
+    CURL *bare = curl_easy_init();
+    assert(bare);
+    assert(dash_post(bare, "http://127.0.0.1:19878/admin/act",
+                     "action=switch_model&model_id=m1", page, sizeof(page)) == 403);
+    curl_easy_cleanup(bare);
+
+    free(token);
+    curl_easy_cleanup(curl);
+    web_stop();
+    db_close(db);
+    remove("test_web_admin.db");
+    printf("PASS: test_admin_dashboard\n");
+}
+
 int main(void) {
     test_status_page();
     test_hook_proxy();
+    test_admin_dashboard();
     printf("All web tests passed.\n");
     return 0;
 }

@@ -5,6 +5,7 @@
 #include "cclaw.h"
 #include "channel_api.h"
 #include "civetweb.h"
+#include "dashboard.h"
 #include "json_escape.h"
 #include <errno.h>
 #include <stdio.h>
@@ -244,6 +245,11 @@ int web_start(Config *cfg, sqlite3 *db, const char *db_path) {
     if (!s_ctx) return -1;
 
     mg_set_request_handler(s_ctx, "/hook/", handle_hook, NULL);
+    if (dashboard_register(s_ctx, db) != 0) {
+        mg_stop(s_ctx);
+        s_ctx = NULL;
+        return -1;
+    }
     mg_set_request_handler(s_ctx, "/", handle_status, NULL);
     return 0;
 }

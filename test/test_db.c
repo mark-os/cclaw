@@ -376,9 +376,10 @@ static void test_schema_upgrade_from_v11(void) {
     assert(db != NULL);
 
     /* Reshape a current DB back to v11: re-add the column patch v12 drops,
-     * seed rows that each patch must rewrite. */
+     * drop the one patch v14 adds, seed rows that each patch must rewrite. */
     assert(sqlite3_exec(db,
         "ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 128000;"
+        "ALTER TABLE channels DROP COLUMN prev_extension_name;"
         "INSERT INTO models(id, provider_name, model, context_window) VALUES"
         "  ('m-def','p','vendor/def',128000),"      /* old default → NULLed */
         "  ('m-big','p','vendor/big',200000);"      /* explicit → kept */

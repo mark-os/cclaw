@@ -2432,6 +2432,10 @@ static void print_usage(void) {
            "                                   bind a channel+chat to an agent; chat_id '*' is\n"
            "                                   the channel-wide default (else falls back to\n"
            "                                   default_agent)\n"
+           "       cclaw channel [list] | swap <channel> <ext> | revert <channel> | restart <channel>\n"
+           "                                   hot-swap the extension behind a live channel\n"
+           "                                   (previous kept as revert target; a swap that\n"
+           "                                   crash-loops auto-reverts and notifies admins)\n"
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
@@ -3311,6 +3315,60 @@ static int secret_main(int argc, char *argv[]) {
  * (channel,chat_id) -> (channel,'*') -> config default_agent, so with no rows
  * every chat falls back to the default. Deliberately CLI-only: re-pointing a
  * chat at another agent is an authority change, not agent self-service. */
+/* `cclaw channel <list|swap|revert|restart>` — operator verbs for the channel
+ * hot-swap flow. Deliberately CLI-only, same rationale as route/sensitive: an
+ * authority change over what code fronts a channel. The daemon's reconcile in
+ * channel_tick picks up pointer/status changes; bounce covers a live process. */
+static int channel_cli_main(int argc, char *argv[]) {
+    const char *sub = (argc >= 3) ? argv[2] : NULL;
+    sqlite3 *db = verb_db_open();
+    if (!db) return 1;
+    int rc = 0;
+    if (!sub || strcmp(sub, "list") == 0) {
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT name, status, extension_name,"
+                "       COALESCE(prev_extension_name, ''), COALESCE(pid, 0)"
+                " FROM channels ORDER BY name", -1, &st, NULL) == SQLITE_OK) {
+            int any = 0;
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                const char *prev = (const char *)sqlite3_column_text(st, 3);
+                printf("%s: status=%s extension=%s pid=%d%s%s\n",
+                       sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
+                       sqlite3_column_text(st, 2), sqlite3_column_int(st, 4),
+                       prev && prev[0] ? " revert-target=" : "",
+                       prev ? prev : "");
+                any = 1;
+            }
+            sqlite3_finalize(st);
+            if (!any) printf("(no channels registered)\n");
+        }
+    } else if (strcmp(sub, "swap") == 0 && argc >= 5) {
+        int r = channel_swap(db, argv[3], argv[4]);
+        if (r == -2) { fprintf(stderr, "error: extension '%s' not registered\n", argv[4]); rc = 1; }
+        else if (r != 0) { fprintf(stderr, "error: channel '%s' not found\n", argv[3]); rc = 1; }
+        else printf("channel %s now runs extension '%s' (previous kept as revert "
+                    "target; daemon respawns the process within seconds)\n",
+                    argv[3], argv[4]);
+    } else if (strcmp(sub, "revert") == 0 && argc >= 4) {
+        if (channel_revert(db, argv[3]) != 0) {
+            fprintf(stderr, "error: nothing to revert for '%s'\n", argv[3]);
+            rc = 1;
+        } else printf("channel %s reverted to its previous extension\n", argv[3]);
+    } else if (strcmp(sub, "restart") == 0 && argc >= 4) {
+        if (channel_bounce(db, argv[3]) != 0) {
+            fprintf(stderr, "error: channel '%s' not found\n", argv[3]);
+            rc = 1;
+        } else printf("channel %s restarting (daemon respawns it within seconds)\n", argv[3]);
+    } else {
+        fprintf(stderr, "usage: cclaw channel [list] | swap <channel> <extension>"
+                        " | revert <channel> | restart <channel>\n");
+        rc = 1;
+    }
+    db_close(db);
+    return rc;
+}
+
 static int route_main(int argc, char *argv[]) {
     const char *sub = (argc >= 3) ? argv[2] : NULL;
     sqlite3 *db = verb_db_open();
@@ -3404,6 +3462,10 @@ int main(int argc, char *argv[]) {
     /* route: operator verb binding a channel+chat to an agent (channel_routes).
      * CLI-only, same rationale as sensitive/secret-bind — an authority change. */
     if (argc >= 2 && strcmp(argv[1], "route") == 0) return route_main(argc, argv);
+
+    /* channel: operator verbs for the extension hot-swap flow (list/swap/
+     * revert/restart). CLI-only — swapping channel code is an authority change. */
+    if (argc >= 2 && strcmp(argv[1], "channel") == 0) return channel_cli_main(argc, argv);
 
     int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
     int channel_check = 0, channel_activate_flag = 0;

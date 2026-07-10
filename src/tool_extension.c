@@ -2,7 +2,10 @@
 #include "tool_extension.h"
 #include "extension_manifest.h"
 #include "tool_parse.h"
+#include "util.h"
+#include <dirent.h>
 #include <limits.h>
+#include <sys/stat.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -165,11 +168,165 @@ static char *tool_extension_list_handler(const char *arguments, void *user_data)
     return out ? out : strdup("[]");
 }
 
+/* ── extension_fork ─────────────────────────────────────────────────── */
+
+/* Read <bundle>/extension.json if present, else NULL. */
+static char *read_manifest(const char *bundle) {
+    char mpath[2*PATH_MAX];
+    snprintf(mpath, sizeof(mpath), "%s/extension.json", bundle);
+    size_t len = 0;
+    return util_read_file(mpath, &len);
+}
+
+/* One-row/one-text-column SQL helper (JSON1 as the JSON builder). */
+static char *sql_text(sqlite3 *db, const char *sql, const char *a1,
+                      const char *a2, const char *a3) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
+    if (a1) sqlite3_bind_text(s, 1, a1, -1, SQLITE_STATIC);
+    if (a2) sqlite3_bind_text(s, 2, a2, -1, SQLITE_STATIC);
+    if (a3) sqlite3_bind_text(s, 3, a3, -1, SQLITE_STATIC);
+    char *out = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(s, 0);
+        if (v) out = strdup(v);
+    }
+    sqlite3_finalize(s);
+    return out;
+}
+
+/* Copy a registered extension's bundle into the agent's workspace as a draft
+ * (workspace/extensions/<as>), so builtins like telegram can be developed
+ * without touching the shared store — that stays the pristine copy the binary
+ * guarantees. The manifest name is rewritten to the fork's name (synthesized
+ * when the source has no manifest — builtins are registered without one), so
+ * a later extension_promote registers the fork as its own extension instead
+ * of colliding with the original. */
+static char *tool_extension_fork_handler(const char *arguments, void *user_data) {
+    ToolExtensionCtx *ctx = (ToolExtensionCtx *)user_data;
+    if (!ctx || !ctx->db) return strdup("error: extension_fork unavailable");
+
+    ToolArgs ta;
+    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
+    const char *name = targ_str(&ta, "name");
+    const char *as = targ_str(&ta, "as");
+    char asbuf[128];
+    if (!as || !as[0]) {
+        snprintf(asbuf, sizeof(asbuf), "%s-fork", name ? name : "");
+        as = asbuf;
+    }
+    if (!valid_name(name) || !valid_name(as)) {
+        tool_parse_free(&ta);
+        return strdup("error: 'name' (and optional 'as') must be plain names, no path separators");
+    }
+
+    /* Resolve + visibility: builtin, published, or owned by this agent. */
+    sqlite3_stmt *s;
+    char src[PATH_MAX] = "";
+    int builtin = 0, published = 0, visible = 0;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT path, builtin, published, COALESCE(owner_agent,'')"
+            " FROM extensions WHERE name=?;", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *p = (const char *)sqlite3_column_text(s, 0);
+            if (p) snprintf(src, sizeof(src), "%s", p);
+            builtin = sqlite3_column_int(s, 1);
+            published = sqlite3_column_int(s, 2);
+            const char *owner = (const char *)sqlite3_column_text(s, 3);
+            visible = builtin || published ||
+                      (owner && ctx->agent_name && strcmp(owner, ctx->agent_name) == 0);
+        }
+        sqlite3_finalize(s);
+    }
+    char namebuf[128], destname[128];
+    snprintf(namebuf, sizeof(namebuf), "%s", name);
+    snprintf(destname, sizeof(destname), "%s", as);
+    tool_parse_free(&ta);
+    if (!src[0]) return msgf("error: extension '%s' is not registered", namebuf);
+    if (!visible) return msgf("error: extension '%s' is not visible to you "
+                              "(not builtin, published, or yours)", namebuf);
+
+    const char *ws = (ctx->workspace && ctx->workspace[0]) ? ctx->workspace : ".";
+    char dest[PATH_MAX];
+    snprintf(dest, sizeof(dest), "%s/extensions/%s", ws, destname);
+    struct stat st;
+    if (stat(dest, &st) == 0)
+        return msgf("error: draft '%s' already exists at extensions/%s", destname, destname);
+    if (util_mkdir_p(dest) != 0)
+        return msgf("error: cannot create %s", dest);
+
+    /* Flat copy of regular files (bundles are flat: handler .qjs + json). */
+    DIR *d = opendir(src);
+    if (!d) return msgf("error: cannot read source bundle %s", src);
+    int copied = 0;
+    char first_qjs[256] = "";
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        char sp[2*PATH_MAX], dp[2*PATH_MAX];
+        snprintf(sp, sizeof(sp), "%s/%s", src, de->d_name);
+        snprintf(dp, sizeof(dp), "%s/%s", dest, de->d_name);
+        if (stat(sp, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (util_copy_file(sp, dp, 0644) == 0) {
+            copied++;
+            size_t l = strlen(de->d_name);
+            if (!first_qjs[0] && l > 4 && strcmp(de->d_name + l - 4, ".qjs") == 0)
+                snprintf(first_qjs, sizeof(first_qjs), "%s", de->d_name);
+        }
+    }
+    closedir(d);
+    if (copied == 0) return msgf("error: source bundle %s had no files", src);
+
+    /* Manifest: rewrite the name, or synthesize one for manifest-less
+     * builtins (channel type recovered from the channels row). */
+    char *manifest = read_manifest(dest);
+    char *rewritten = NULL;
+    if (manifest) {
+        rewritten = sql_text(ctx->db, "SELECT json_set(?1,'$.name',?2);",
+                             manifest, destname, NULL);
+        free(manifest);
+    } else {
+        char *ch_type = sql_text(ctx->db,
+            "SELECT type FROM channels WHERE extension_name=?;", namebuf, NULL, NULL);
+        if (ch_type && first_qjs[0]) {
+            rewritten = sql_text(ctx->db,
+                "SELECT json_object('name',?1,'version','0.0.0',"
+                "'channel',json_object('type',?2,'handler',?3));",
+                destname, ch_type, first_qjs);
+        } else {
+            rewritten = sql_text(ctx->db,
+                "SELECT json_object('name',?1,'version','0.0.0');",
+                destname, NULL, NULL);
+        }
+        free(ch_type);
+    }
+    if (rewritten) {
+        char mpath[2*PATH_MAX];
+        snprintf(mpath, sizeof(mpath), "%s/extension.json", dest);
+        FILE *f = fopen(mpath, "w");
+        if (f) { fputs(rewritten, f); fclose(f); }
+        free(rewritten);
+    }
+
+    return msgf("forked extension '%s' into workspace draft extensions/%s "
+                "(%d files). Edit it there; test a channel fork offline with "
+                "`cclaw --channel <name> --harness <scenario.json>`; then "
+                "extension_promote name='%s' registers it under your ownership.",
+                namebuf, destname, copied, destname);
+}
+
 /* ── registration ───────────────────────────────────────────────────── */
 
 static const char *NAME_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
     "\"name\":{\"type\":\"string\",\"description\":\"Extension name\"}"
+    "},\"required\":[\"name\"]}";
+
+static const char *FORK_PARAMS =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"name\":{\"type\":\"string\",\"description\":\"Registered extension to fork (builtin, published, or yours)\"},"
+    "\"as\":{\"type\":\"string\",\"description\":\"Draft name for the fork (default <name>-fork)\"}"
     "},\"required\":[\"name\"]}";
 
 static const char *EMPTY_PARAMS =
@@ -194,10 +351,17 @@ int tool_extension_register(ToolRegistry *reg, ToolExtensionCtx *ctx) {
         "List extensions visible to you (owned or published), with owner, publish "
         "state, and whether you have each attached. Returns a JSON array.",
         EMPTY_PARAMS, tool_extension_list_handler, ctx);
+    rc |= tools_register(reg, "extension_fork",
+        "Copy a registered extension's bundle (builtin, published, or yours) into "
+        "your workspace as a draft (extensions/<as>) for development. The manifest "
+        "is renamed to the fork, so promoting it later registers a separate "
+        "extension — the original stays untouched.",
+        FORK_PARAMS, tool_extension_fork_handler, ctx);
     /* Inline tools: apply in-process via ctx->db. */
     tools_set_recipe(reg, "extension_promote", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
     tools_set_recipe(reg, "extension_publish", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
     tools_set_recipe(reg, "extension_attach",  (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
     tools_set_recipe(reg, "extension_list",    (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    tools_set_recipe(reg, "extension_fork",    (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
     return rc;
 }

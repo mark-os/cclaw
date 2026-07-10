@@ -12,41 +12,36 @@ LLM API calls fail in many ways. This doc classifies failure modes, defines reco
 
 ## Error Classification Table
 
-| id | category | detection | retry? | max attempts | fallback? | entry written? | user message |
-|----|----------|-----------|--------|--------------|-----------|----------------|--------------|
-| E1 | zero-usage empty stop | HTTP 200 + `usage.total_tokens == 0` + content null/empty + `finish_reason == "stop"` | yes | 2x primary + 1x fallback | yes | only on final failure | "model returned empty response — provider glitch, try again" |
-| E2 | HTTP 429 rate limit | status == 429 | yes | 3x w/ backoff (respect `Retry-After`) | no (same provider) | only on exhaust | "rate limited by provider, retrying..." |
-| E3 | HTTP 5xx server error | status ∈ [500,599] | yes | 3x w/ backoff | yes (fallback chain) | only on exhaust | "provider server error" |
-| E4 | network failure | status == -1 (curl error) | no | — | yes (fallback chain) | on exhaust | "network error: could not reach provider" |
-| E5 | context overflow | HTTP 400 + error text contains "context" / "too long" / "maximum" | no | — | no | yes (error entry) | agent returns -2, caller handles (compaction or truncation) |
-| E6 | JSON parse failure | valid HTTP 200 but body ⊥ valid JSON | yes | 3x | no | only on exhaust | "malformed response from provider" |
-| E7 | missing finish_reason | valid JSON, choices present, but no `finish_reason` | yes | 3x | no | only on exhaust | "incomplete response from provider" |
-| E8 | token limit exhaustion | `finish_reason == "length"` | no | — | no | yes (partial content preserved) | (deliver partial content as-is) |
-| E9 | content filter | `finish_reason == "content_filter"` | no | — | no | yes (stop_reason=error) | "response filtered by provider safety policy" |
-| E10 | timeout | curl timeout (CURLE_OPERATION_TIMEDOUT) | no | — | yes (fallback chain) | on exhaust | "request timed out" |
-| E11 | auth failure | HTTP 401/403 | no | — | yes (fallback chain) | on exhaust | "authentication failed — check API key" |
-| E12 | model not found | HTTP 404 / error mentions model | no | — | yes (fallback chain) | on exhaust | "model not available" |
+The whole policy lives in one loop in `llm_req()` (`src/llm_proc.c`). Three
+outcomes exist:
 
-## Zero-Usage Retry Flow (E1)
+- **transient** — backoff retry on the same model (1s/2s/4s, `Retry-After`
+  honored), then fall through to the next candidate in the routing order.
+- **permanent for this model** — no resend can change the answer; skip to the
+  next candidate immediately.
+- **our-side fatal** — abort the turn; paying another provider won't fix our DB.
 
-```
-advance_session turn-loop iteration:
-  1. context_plan() → entry IDs
-  2. llm_call_with_fallback_stream() → HTTP 200
-  3. llm_parse_response() → success
-  4. CHECK: usage.total_tokens == 0 && content null/empty && finish_reason == "stop"
-     → if yes AND retries_remaining > 0:
-        - ⊥ write entry to DB
-        - ⊥ manipulate session state
-        - decrement retry counter
-        - continue (re-plan, re-stream same context)
-     → if yes AND retries_remaining == 0 AND fallback configured:
-        - try 1x with fallback model
-        - if fallback also fails → write error entry
-     → if no: proceed normally
-```
+| id | category | detection | retry same model? | next model? | counts toward degrade? | user message |
+|----|----------|-----------|-------------------|-------------|------------------------|--------------|
+| E1 | empty completion | HTTP 2xx + zero usage + content null/empty + `finish_reason == "stop"` (also: 2xx with empty body) | yes, 3x w/ backoff | yes | yes | "provider returned an empty response" |
+| E2 | HTTP 429 rate limit | status == 429 | yes, 3x w/ backoff (respect `Retry-After`) | yes | yes (429 threshold) | "rate limited" |
+| E3 | HTTP 5xx server error | status in [500,599] | yes, 3x w/ backoff | yes | yes | "provider server error" |
+| E4 | network failure | status == -1 (curl error) | yes, 3x w/ backoff | yes | yes | "network error" |
+| E5 | context overflow | HTTP 400 + `llm_is_context_overflow()` | no | yes (a bigger-window model may fit) | no (prompt-specific) | "prompt too large for the model's context window" |
+| E6 | malformed body | 2xx but body not valid JSON, or no/empty choices | yes, 3x w/ backoff | yes | yes | "provider returned a malformed response" |
+| E8 | token limit exhaustion | `finish_reason == "length"` | no | — | no | (deliver partial content as-is) |
+| E9 | content filter | `finish_reason == "content_filter"` | no | — | no | (stop_reason mapped; content delivered) |
+| E10 | timeout | status == -2 (curl timeout) | yes, 1x (attempts cost minutes; no sleep between) | yes | yes | "request timed out" |
+| E11 | auth failure | HTTP 401/403 | no | yes + degrade w/ cooldown | — | "authentication failed" |
+| E12 | model not found | HTTP 404 | no | yes + degrade w/ cooldown | — | "model not available" |
+| E13 | other 4xx | remaining non-2xx | no | yes | no | "provider rejected the request" |
+| E14 | DB error during ingest | SQLITE_BUSY on our side | no | **no — turn aborts** | no | "DB contention during response ingest (SQLITE_BUSY) — check logs" |
 
-Key: `rs_reset()` allows re-streaming same request body. No inbox drain, no state change. Pure retry.
+Every failed attempt is archived to `llm_responses` (response body + the request
+we sent). The final error entry cites the last archived row as `[resp #N]`;
+read it with `cclaw resp <N>` (or `cclaw resp <N> req` for the request). With a
+single-model route there is no fallback — after same-model retries exhaust, the
+turn fails with the message above.
 
 ## Response Resolution
 
@@ -66,7 +61,7 @@ Note: OpenClaw concatenates ALL non-empty assistant texts from turn as fallback;
 | tool_calls response | yes | tool_use | NULL (tool_calls in separate column) |
 | partial (length) | yes | stop (length mapped) | partial content preserved |
 | error after retries | yes | error | error description for user |
-| zero-usage retry (not exhausted) | NO | — | — |
+| transient-failure retry (not exhausted) | NO | — | — |
 | shutdown signal | yes | aborted | "error: agent terminated by shutdown signal" |
 | content filter | yes | error | filter message |
 
@@ -78,7 +73,7 @@ Agent turn lifecycle:
 
 The agent always writes a final entry before completion. The delivery layer reads from DB. There is no in-flight state to lose — everything is persisted before advancing.
 
-Exception: zero-usage retry happens WITHIN llm_req (no re-dispatch). The worker simply retries internally. From the main loop's perspective, the turn just takes longer.
+Exception: transient-failure retries (E1–E4, E6, E10) happen WITHIN llm_req (no re-dispatch). The worker simply retries internally. From the main loop's perspective, the turn just takes longer.
 
 ## Log Levels & Observability
 

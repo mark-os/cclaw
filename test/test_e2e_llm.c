@@ -173,7 +173,7 @@ static void test_live_content_response(void) {
     Message msgs[1] = {{ .role = ROLE_USER, .content = "Reply with exactly: hello" }};
 
     TypedIngestResult ir;
-    int64_t sid = call_llm(&cfg, msgs, 1, NULL, 0, &ir);
+    int64_t sid = call_llm(&cfg, msgs, 1, NULL, 0, NULL, &ir);
     if (sid < 0) FAIL("LLM call failed");
     char *c = asst_content(sid);
     if (!c || strlen(c) == 0) { free(c); FAIL("empty content"); }

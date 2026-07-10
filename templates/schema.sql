@@ -244,9 +244,12 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, stat
 
 -- ═══ Raw LLM responses (forensics / shape archive) ═══
 -- One row per LLM response (any HTTP outcome). Retention is set by config key
--- 'llm_response_archive_max': >0 keeps the most recent N, 0 disables archiving,
--- <0 keeps all. body holds the parsed JSONB blob when the response is valid
--- JSON, or the raw text when it isn't; turn_id joins back to entries.
+-- 'llm_response_archive_max': >0 keeps the most recent N 'ok' rows plus the most
+-- recent N failures (cited "[resp #N]" rows outlive routine traffic), 0 disables
+-- archiving, <0 keeps all. body holds the parsed JSONB blob when the response is
+-- valid JSON, or the raw text when it isn't; turn_id joins back to entries.
+-- Read bodies with `cclaw resp <id>` — JSONB needs SQLite >= 3.45 and target
+-- boxes ship older system CLIs, so the binary that wrote it is the reader.
 CREATE TABLE IF NOT EXISTS llm_responses (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,

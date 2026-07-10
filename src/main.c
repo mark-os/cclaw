@@ -2436,6 +2436,10 @@ static void print_usage(void) {
            "                                   hot-swap the extension behind a live channel\n"
            "                                   (previous kept as revert target; a swap that\n"
            "                                   crash-loops auto-reverts and notifies admins)\n"
+           "       cclaw resp [<id> [req] | list [n]]\n"
+           "                                   read the raw LLM response archive; bare form\n"
+           "                                   shows the last failure (what \"[resp #N]\" in an\n"
+           "                                   error message cites)\n"
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
@@ -3438,6 +3442,87 @@ static int route_main(int argc, char *argv[]) {
     return rc;
 }
 
+/* Print one llm_responses row: header + body rendered as JSON. Bodies are
+ * stored as JSONB, which system sqlite3 CLIs older than 3.45 (e.g. Debian
+ * bookworm's 3.40) can't decode — the vendored SQLite in this binary is the
+ * one guaranteed reader. `which` is "body" or "request_body". */
+static int resp_print(sqlite3 *db, const char *where, int64_t id, const char *which) {
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+        "SELECT id, status, model, session_id, turn_id,"
+        "       datetime(created_at,'unixepoch','localtime'),"
+        "       CASE WHEN %s IS NULL THEN NULL"
+        "            WHEN json_valid(%s, 8) THEN json_pretty(%s)"
+        "            ELSE CAST(%s AS TEXT) END"
+        " FROM llm_responses WHERE %s ORDER BY id DESC LIMIT 1",
+        which, which, which, which, where);
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    if (sqlite3_bind_parameter_count(st) > 0) sqlite3_bind_int64(st, 1, id);
+    int found = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        found = 1;
+        printf("resp #%lld status=%s model=%s session=%lld turn=%lld at %s\n",
+               (long long)sqlite3_column_int64(st, 0), sqlite3_column_text(st, 1),
+               sqlite3_column_text(st, 2), (long long)sqlite3_column_int64(st, 3),
+               (long long)sqlite3_column_int64(st, 4), sqlite3_column_text(st, 5));
+        const char *body = (const char *)sqlite3_column_text(st, 6);
+        printf("%s\n", body ? body : strcmp(which, "body") == 0
+               ? "(no body — provider sent nothing)"
+               : "(no request archived — only failed attempts keep the request)");
+    }
+    sqlite3_finalize(st);
+    return found ? 0 : 1;
+}
+
+/* `cclaw resp` — read the llm_responses forensic archive. What "[resp #N]" in
+ * an error message cites. */
+static int resp_main(int argc, char *argv[]) {
+    const char *sub = (argc >= 3) ? argv[2] : NULL;
+    sqlite3 *db = verb_db_open();
+    if (!db) return 1;
+    int rc = 0;
+    if (sub && strcmp(sub, "list") == 0) {
+        int n = (argc >= 4) ? atoi(argv[3]) : 20;
+        if (n <= 0) n = 20;
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT id, status, model, session_id, turn_id,"
+                "       datetime(created_at,'unixepoch','localtime'), COALESCE(length(body),0)"
+                " FROM llm_responses ORDER BY id DESC LIMIT ?", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_int(st, 1, n);
+            int any = 0;
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                printf("#%-5lld %-13s %s session=%lld turn=%lld %s %d bytes\n",
+                       (long long)sqlite3_column_int64(st, 0), sqlite3_column_text(st, 1),
+                       sqlite3_column_text(st, 2), (long long)sqlite3_column_int64(st, 3),
+                       (long long)sqlite3_column_int64(st, 4), sqlite3_column_text(st, 5),
+                       sqlite3_column_int(st, 6));
+                any = 1;
+            }
+            sqlite3_finalize(st);
+            if (!any) printf("(archive empty — see config llm_response_archive_max)\n");
+        }
+    } else if (!sub) {
+        /* Bare `cclaw resp`: the most recent failure. */
+        int r = resp_print(db, "status != 'ok'", 0, "body");
+        if (r == 1) { printf("(no archived failures)\n"); }
+        else if (r < 0) rc = 1;
+    } else if (atoll(sub) > 0) {
+        const char *which = (argc >= 4 && strcmp(argv[3], "req") == 0) ? "request_body" : "body";
+        int r = resp_print(db, "id = ?1", atoll(sub), which);
+        if (r == 1) { fprintf(stderr, "error: no archived response #%s (pruned? see `cclaw resp list`)\n", sub); rc = 1; }
+        else if (r < 0) rc = 1;
+    } else {
+        fprintf(stderr, "usage: cclaw resp             # most recent failure (what \"[resp #N]\" cites)\n"
+                        "       cclaw resp <id> [req]  # one archived row; `req` prints the request we sent\n"
+                        "       cclaw resp list [n]    # recent archive rows, newest first\n");
+        rc = 2;
+    }
+    sqlite3_close(db);
+    return rc;
+}
+
 int main(int argc, char *argv[]) {
     /* --run-tool: early intercept for sandboxed file tool child. No DB, no key,
      * no config. The child reads its request from fd 3. */
@@ -3466,6 +3551,11 @@ int main(int argc, char *argv[]) {
     /* channel: operator verbs for the extension hot-swap flow (list/swap/
      * revert/restart). CLI-only — swapping channel code is an authority change. */
     if (argc >= 2 && strcmp(argv[1], "channel") == 0) return channel_cli_main(argc, argv);
+
+    /* resp: read the llm_responses forensic archive ("[resp #N]" in error
+     * messages). Read-only; exists because JSONB bodies need SQLite >= 3.45
+     * and target boxes ship older system CLIs. */
+    if (argc >= 2 && strcmp(argv[1], "resp") == 0) return resp_main(argc, argv);
 
     int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
     int channel_check = 0, channel_activate_flag = 0;

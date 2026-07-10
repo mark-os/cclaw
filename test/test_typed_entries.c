@@ -199,7 +199,7 @@ static void test_ingest_typed(void) {
 
     TypedIngestResult res;
     LlmRespStatus st = db_ingest_response(db, sid, turn, "gpt-4o", ENDPOINT_OPENAI,
-                                          body, &res);
+                                          body, NULL, &res);
     assert(st == LLM_RESP_OK);
     assert(res.assistant_entry_id > 0);
     assert(res.prompt_tokens == 100);

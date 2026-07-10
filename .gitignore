@@ -43,4 +43,5 @@ __pycache__/
 
 # Local, not-checked-in agent instructions
 CLAUDE.local.md
+.claude/
 

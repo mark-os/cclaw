@@ -213,6 +213,22 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 
 Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 
+### Debugging a failed turn
+
+- **Follow the citation.** Error entries end with `[resp #N]` — read that row with
+  `cclaw resp` (bare = most recent failure; `resp <id> [req]` for one row or the
+  request we sent; `resp list [n]`).
+- **Never SELECT `llm_responses.body` with a system sqlite3 older than 3.45** — it's
+  JSONB and dumps as binary garbage (that's the format, not corruption). `cclaw resp`
+  reads it with the vendored SQLite. Metadata columns (`status`, `model`, `turn_id`,
+  `length(body)`) are safe to query anywhere.
+- **Verbosity**: `-v` (debug: timing, retry decisions) / `-vv` (trace: full req/resp
+  JSON), or `--log-level=LEVEL`.
+- **Policy reference**: [specs/error-handling.md](specs/error-handling.md) — failure
+  taxonomy E1–E14, retry/backoff/fallback, model degradation. The session's DB trail
+  is `entries` (roles 0=system 1=user 2=assistant 3=tool 4=compaction); a stuck
+  session shows a non-idle `sessions.state` with a dead `owner_instance`.
+
 > **Workspace must be set in `config_load()`, not only `config_load_from_env()`.** `main()` loads config via `config_load(db)`; if `cfg->workspace` is left NULL there, file tools, the proxy mount, and `workspace_init()` all fail with "no workspace configured" even though the env path looks fine. Both loaders set the same default.
 
 ## Dependencies

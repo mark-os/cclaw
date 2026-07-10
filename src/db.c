@@ -340,6 +340,12 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "UPDATE extensions SET owner_agent='system', published=1 WHERE builtin=1;"
       "ALTER TABLE extensions DROP COLUMN builtin;"
       "ALTER TABLE tools DROP COLUMN builtin;" },
+    { 17,
+      "ALTER TABLE agents ADD COLUMN primary_model TEXT;"
+      "ALTER TABLE agents ADD COLUMN secondary_model TEXT;"
+      "UPDATE agents SET primary_model = model WHERE model IS NOT NULL AND model != '';"
+      "ALTER TABLE agents DROP COLUMN model;"
+      "ALTER TABLE agents DROP COLUMN provider;" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

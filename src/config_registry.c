@@ -83,6 +83,10 @@ static const ConfigDef s_defs[] = {
       "Skill discovery directories (JSON array, ~ expanded; SKILL.md convention"
       " shared with pi/OpenClaw/Claude Code). Per-agent agents/<name>/skills/"
       " is always scanned too." },
+    { "default_primary_model", "",
+      "Default primary model for agents without an explicit assignment" },
+    { "default_secondary_model", "",
+      "Default secondary (fallback) model for agents without an explicit assignment" },
 };
 
 const char *config_default(const char *key) {

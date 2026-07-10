@@ -420,7 +420,7 @@ static void test_switch_model(void) {
         "INSERT INTO models(id,provider_name,model,priority,status,degraded_until,error_count_5xx)"
         " VALUES ('p1/alpha','p1','alpha',0,'healthy',NULL,0),"
         "        ('p1/beta','p1','beta',1,'degraded',unixepoch()+300,5);"
-        "INSERT INTO agents(name,model) VALUES('tracker','p1/alpha'),('pinned','other/x');",
+        "INSERT INTO agents(name,primary_model) VALUES('tracker','p1/alpha'),('pinned','other/x');",
         NULL, NULL, NULL);
 
     char prev[128];
@@ -440,11 +440,11 @@ static void test_switch_model(void) {
 
     /* Agents tracking the old head follow; explicit other pins don't */
     sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db, "SELECT model FROM agents WHERE name='tracker'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_prepare_v2(db, "SELECT primary_model FROM agents WHERE name='tracker'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "p1/beta") == 0);
     sqlite3_finalize(s);
-    assert(sqlite3_prepare_v2(db, "SELECT model FROM agents WHERE name='pinned'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_prepare_v2(db, "SELECT primary_model FROM agents WHERE name='pinned'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "other/x") == 0);
     sqlite3_finalize(s);

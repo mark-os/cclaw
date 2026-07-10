@@ -77,8 +77,8 @@ CREATE TABLE IF NOT EXISTS extensions (
 -- ═══ Agents ═══
 CREATE TABLE IF NOT EXISTS agents (
   name TEXT PRIMARY KEY,
-  model TEXT,
-  provider TEXT,
+  primary_model TEXT,
+  secondary_model TEXT,
   system_prompt TEXT,
   description TEXT,
   max_iterations INTEGER DEFAULT 25,

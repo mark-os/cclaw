@@ -85,6 +85,83 @@ void admin_models_free(AdminModel *list, size_t count);
  * Returns 0 on success, -1 if model_id doesn't exist. */
 int admin_switch_model(sqlite3 *db, const char *model_id, char *prev, size_t prev_sz);
 
+/* ── Provider CRUD ─────────────────────────────────────────────── */
+
+/* Add a provider. Returns 0 on success. */
+int admin_add_provider(sqlite3 *db, const char *name, const char *base_url,
+                       const char *endpoint_type, const char *api_key_env);
+
+/* Remove a provider and its models. Returns 0 on success. */
+int admin_remove_provider(sqlite3 *db, const char *name);
+
+/* ── Model CRUD ────────────────────────────────────────────────── */
+
+/* Add a model under a provider. Returns 0 on success. */
+int admin_add_model(sqlite3 *db, const char *provider_name, const char *model,
+                    int context_window);
+
+/* Remove a model by id. Returns 0 on success. */
+int admin_remove_model(sqlite3 *db, const char *model_id);
+
+/* Disable or enable a model. Returns 0 on success. */
+int admin_toggle_model(sqlite3 *db, const char *model_id);
+
+/* ── Agent listing ─────────────────────────────────────────────── */
+
+typedef struct {
+    char *name;
+    char *primary_model;    /* models.id (may be NULL) */
+    char *secondary_model;  /* models.id (may be NULL) */
+    int max_iterations;
+    char *sandbox_profile;
+} AdminAgent;
+
+int admin_list_agents(sqlite3 *db, AdminAgent **out, size_t *out_count);
+void admin_agents_free(AdminAgent *list, size_t count);
+
+/* Set agent's model assignment. Returns 0 on success. */
+int admin_set_agent_model(sqlite3 *db, const char *agent_name,
+                          const char *primary_model, const char *secondary_model);
+
+/* Create a new session for an agent. Returns session_id or -1. */
+int64_t admin_create_session(sqlite3 *db, const char *agent_name);
+
+/* ── Session listing ───────────────────────────────────────────── */
+
+typedef struct {
+    int64_t id;
+    char *agent_name;
+    char *channel_name;
+    char *channel_id;
+    char *state;
+    char *created_at;
+} AdminSession;
+
+int admin_list_sessions(sqlite3 *db, int limit, AdminSession **out, size_t *out_count);
+void admin_sessions_free(AdminSession *list, size_t count);
+
+/* Attach a session to a channel route. Returns 0 on success. */
+int admin_attach_session_channel(sqlite3 *db, int64_t session_id,
+                                 const char *channel_name, const char *channel_id);
+
+/* ── Channel listing ───────────────────────────────────────────── */
+
+typedef struct {
+    char *name;
+    char *extension_name;
+    char *type;
+    char *status;
+    char *route_agent;   /* current routed agent (may be NULL) */
+    int64_t route_session; /* current routed session (0 if none) */
+} AdminChannel;
+
+int admin_list_channels(sqlite3 *db, AdminChannel **out, size_t *out_count);
+void admin_channels_free(AdminChannel *list, size_t count);
+
+/* Re-route a channel's default ('*') route to a different agent. */
+int admin_set_channel_route(sqlite3 *db, const char *channel_name,
+                            const char *agent_name);
+
 /* Approvals visible to a channel's admin(s) — scoped to sessions routed to
  * that channel (see handle_approval_park's admin routing). */
 typedef struct {

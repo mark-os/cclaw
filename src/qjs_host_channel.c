@@ -6,7 +6,7 @@
 #include "qjs_helpers.h"
 #include "channel_api.h"
 #include "admin_api.h"
-#include "db.h"
+#include "dashboard.h"
 #include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -176,178 +176,6 @@ static JSValue js_ch_send(JSContext *ctx, JSValueConst this_val,
 
 /* ── admin.* functions ─────────────────────────────────────────── */
 
-static JSValue js_admin_set_key(JSContext *ctx, JSValueConst this_val,
-                                int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 2) return JS_ThrowTypeError(ctx, "admin.setKey(provider, value)");
-    const char *provider = JS_ToCString(ctx, argv[0]);
-    const char *value = JS_ToCString(ctx, argv[1]);
-    if (!provider || !value) { if (provider) JS_FreeCString(ctx, provider); if (value) JS_FreeCString(ctx, value); return JS_NewInt32(ctx, -1); }
-    int rc = admin_set_key(g_ctx->db, provider, value);
-    JS_FreeCString(ctx, provider);
-    JS_FreeCString(ctx, value);
-    return JS_NewInt32(ctx, rc);
-}
-
-static JSValue js_admin_set_model(JSContext *ctx, JSValueConst this_val,
-                                  int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 2) return JS_ThrowTypeError(ctx, "admin.setModel(index, model)");
-    int idx = 0; JS_ToInt32(ctx, &idx, argv[0]);
-    const char *model = JS_ToCString(ctx, argv[1]);
-    if (!model) return JS_NewInt32(ctx, -1);
-    int rc = admin_set_model(g_ctx->db, idx, model);
-    JS_FreeCString(ctx, model);
-    return JS_NewInt32(ctx, rc);
-}
-
-static JSValue js_admin_set_endpoint(JSContext *ctx, JSValueConst this_val,
-                                     int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 2) return JS_ThrowTypeError(ctx, "admin.setEndpoint(index, url)");
-    int idx = 0; JS_ToInt32(ctx, &idx, argv[0]);
-    const char *url = JS_ToCString(ctx, argv[1]);
-    if (!url) return JS_NewInt32(ctx, -1);
-    int rc = admin_set_endpoint(g_ctx->db, idx, url);
-    JS_FreeCString(ctx, url);
-    return JS_NewInt32(ctx, rc);
-}
-
-static JSValue js_admin_list_grants(JSContext *ctx, JSValueConst this_val,
-                                    int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_ThrowTypeError(ctx, "admin.listGrants(agent)");
-    const char *agent = JS_ToCString(ctx, argv[0]);
-    JSValue arr = JS_NewArray(ctx);
-    if (!agent) return arr;
-    AdminGrant *list = NULL;
-    size_t count = 0;
-    if (admin_list_grants(g_ctx->db, agent, &list, &count) == 0) {
-        for (size_t i = 0; i < count; i++) {
-            JSValue obj = JS_NewObject(ctx);
-            JS_SetPropertyStr(ctx, obj, "id", JS_NewInt64(ctx, list[i].id));
-            JS_SetPropertyStr(ctx, obj, "kind", JS_NewString(ctx, list[i].kind ? list[i].kind : ""));
-            JS_SetPropertyStr(ctx, obj, "value", JS_NewString(ctx, list[i].value ? list[i].value : ""));
-            JS_SetPropertyUint32(ctx, arr, (uint32_t)i, obj);
-        }
-        admin_grants_free(list, count);
-    }
-    JS_FreeCString(ctx, agent);
-    return arr;
-}
-
-static JSValue js_admin_revoke_grant(JSContext *ctx, JSValueConst this_val,
-                                     int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_ThrowTypeError(ctx, "admin.revokeGrant(id)");
-    int64_t id = 0;
-    JS_ToInt64(ctx, &id, argv[0]);
-    return JS_NewInt32(ctx, admin_revoke_grant_by_id(g_ctx->db, id));
-}
-
-static JSValue js_admin_grant_capability(JSContext *ctx, JSValueConst this_val,
-                                         int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 3) return JS_ThrowTypeError(ctx, "admin.grantCapability(agent, kind, value)");
-    const char *agent = JS_ToCString(ctx, argv[0]);
-    const char *kind = JS_ToCString(ctx, argv[1]);
-    const char *value = JS_ToCString(ctx, argv[2]);
-    int rc = -1;
-    if (agent && kind && value) rc = admin_grant_capability(g_ctx->db, agent, kind, value);
-    if (agent) JS_FreeCString(ctx, agent);
-    if (kind) JS_FreeCString(ctx, kind);
-    if (value) JS_FreeCString(ctx, value);
-    return JS_NewInt32(ctx, rc);
-}
-
-static JSValue js_admin_list_tools(JSContext *ctx, JSValueConst this_val,
-                                   int argc, JSValueConst *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    char **names = NULL;
-    size_t count = 0;
-    JSValue arr = JS_NewArray(ctx);
-    if (admin_list_tool_names(g_ctx->db, &names, &count) == 0) {
-        for (size_t i = 0; i < count; i++)
-            JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewString(ctx, names[i] ? names[i] : ""));
-        admin_tool_names_free(names, count);
-    }
-    return arr;
-}
-
-static JSValue js_admin_list_providers(JSContext *ctx, JSValueConst this_val,
-                                       int argc, JSValueConst *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    AdminProvider *providers = NULL;
-    size_t count = 0;
-    if (admin_list_providers(g_ctx->db, &providers, &count) != 0)
-        return JS_NewArray(ctx);
-    JSValue arr = JS_NewArray(ctx);
-    for (size_t i = 0; i < count; i++) {
-        JSValue obj = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, obj, "index", JS_NewInt32(ctx, providers[i].index));
-        JS_SetPropertyStr(ctx, obj, "model", JS_NewString(ctx, providers[i].model ? providers[i].model : ""));
-        JS_SetPropertyStr(ctx, obj, "base_url", JS_NewString(ctx, providers[i].base_url ? providers[i].base_url : ""));
-        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, obj);
-    }
-    admin_providers_free(providers, count);
-    return arr;
-}
-
-static JSValue js_admin_list_models(JSContext *ctx, JSValueConst this_val,
-                                    int argc, JSValueConst *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    AdminModel *list = NULL;
-    size_t count = 0;
-    JSValue arr = JS_NewArray(ctx);
-    if (admin_list_models(g_ctx->db, &list, &count) != 0)
-        return arr;
-    for (size_t i = 0; i < count; i++) {
-        AdminModel *m = &list[i];
-        JSValue obj = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, obj, "id", JS_NewString(ctx, m->id ? m->id : ""));
-        JS_SetPropertyStr(ctx, obj, "model", JS_NewString(ctx, m->model ? m->model : ""));
-        JS_SetPropertyStr(ctx, obj, "provider", JS_NewString(ctx, m->provider ? m->provider : ""));
-        JS_SetPropertyStr(ctx, obj, "base_url", JS_NewString(ctx, m->base_url ? m->base_url : ""));
-        JS_SetPropertyStr(ctx, obj, "api_key_env", JS_NewString(ctx, m->api_key_env ? m->api_key_env : ""));
-        JS_SetPropertyStr(ctx, obj, "status", JS_NewString(ctx, m->status ? m->status : ""));
-        JS_SetPropertyStr(ctx, obj, "has_key", JS_NewBool(ctx, m->has_key));
-        JS_SetPropertyStr(ctx, obj, "context_window", JS_NewInt32(ctx, m->context_window));
-        JS_SetPropertyStr(ctx, obj, "degraded_left", JS_NewInt32(ctx, m->degraded_left));
-        JS_SetPropertyStr(ctx, obj, "total_requests", JS_NewInt64(ctx, m->total_requests));
-        JS_SetPropertyStr(ctx, obj, "err_5xx", JS_NewInt64(ctx, m->err_5xx));
-        JS_SetPropertyStr(ctx, obj, "err_429", JS_NewInt64(ctx, m->err_429));
-        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, obj);
-    }
-    admin_models_free(list, count);
-    return arr;
-}
-
-static JSValue js_admin_switch_model(JSContext *ctx, JSValueConst this_val,
-                                     int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_ThrowTypeError(ctx, "admin.switchModel(modelId)");
-    const char *id = JS_ToCString(ctx, argv[0]);
-    if (!id) return JS_NULL;
-    char prev[128] = "";
-    int rc = admin_switch_model(g_ctx->db, id, prev, sizeof(prev));
-    JS_FreeCString(ctx, id);
-    if (rc != 0) return JS_NULL;
-    return JS_NewString(ctx, prev);   /* previous routing head ("" if none) */
-}
-
-static JSValue js_admin_list_agents(JSContext *ctx, JSValueConst this_val,
-                                    int argc, JSValueConst *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    int count = 0;
-    char **names = db_agent_list(g_ctx->db, &count);
-    JSValue arr = JS_NewArray(ctx);
-    for (int i = 0; i < count; i++)
-        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewString(ctx, names[i]));
-    if (names) { for (int i = 0; i < count; i++) free(names[i]); free(names); }
-    return arr;
-}
-
-/* Shared array-builder for admin.listPendingApprovals / listDeniedApprovals */
 static JSValue admin_approvals_to_js(JSContext *ctx, const AdminApproval *list, size_t count) {
     JSValue arr = JS_NewArray(ctx);
     for (size_t i = 0; i < count; i++) {
@@ -375,27 +203,16 @@ static JSValue js_admin_list_pending_approvals(JSContext *ctx, JSValueConst this
     return arr;
 }
 
-static JSValue js_admin_list_denied_approvals(JSContext *ctx, JSValueConst this_val,
-                                              int argc, JSValueConst *argv) {
-    (void)this_val;
-    int limit = 10;
-    if (argc >= 1) JS_ToInt32(ctx, &limit, argv[0]);
-    AdminApproval *list = NULL;
-    size_t count = 0;
-    if (admin_list_denied_approvals(g_ctx->db, g_ctx->channel_name, limit, &list, &count) != 0)
-        return JS_NewArray(ctx);
-    JSValue arr = admin_approvals_to_js(ctx, list, count);
-    admin_approvals_free(list, count);
-    return arr;
-}
-
-static JSValue js_admin_grant_from_history(JSContext *ctx, JSValueConst this_val,
-                                           int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_ThrowTypeError(ctx, "admin.grantFromHistory(approvalId)");
-    int64_t id = 0;
-    JS_ToInt64(ctx, &id, argv[0]);
-    return JS_NewInt32(ctx, admin_grant_from_history(g_ctx->db, id));
+/* admin.dashboardUrl() — tokenized /admin URL for the /admin chat command
+ * (same trust as the old /key flow, which passed API keys through chat). */
+static JSValue js_admin_dashboard_url(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    char *url = dashboard_url(g_ctx->db);
+    if (!url) return JS_NULL;
+    JSValue r = JS_NewString(ctx, url);
+    free(url);
+    return r;
 }
 
 static JSValue js_admin_is_admin(JSContext *ctx, JSValueConst this_val,
@@ -440,21 +257,9 @@ void qjs_register_channel_host_functions(JSContext *ctx) {
 
     /* admin object */
     JSValue admin = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, admin, "setKey", JS_NewCFunction(ctx, js_admin_set_key, "setKey", 2));
-    JS_SetPropertyStr(ctx, admin, "setModel", JS_NewCFunction(ctx, js_admin_set_model, "setModel", 2));
-    JS_SetPropertyStr(ctx, admin, "setEndpoint", JS_NewCFunction(ctx, js_admin_set_endpoint, "setEndpoint", 2));
-    JS_SetPropertyStr(ctx, admin, "listGrants", JS_NewCFunction(ctx, js_admin_list_grants, "listGrants", 1));
-    JS_SetPropertyStr(ctx, admin, "revokeGrant", JS_NewCFunction(ctx, js_admin_revoke_grant, "revokeGrant", 1));
-    JS_SetPropertyStr(ctx, admin, "grantCapability", JS_NewCFunction(ctx, js_admin_grant_capability, "grantCapability", 3));
-    JS_SetPropertyStr(ctx, admin, "listTools", JS_NewCFunction(ctx, js_admin_list_tools, "listTools", 0));
-    JS_SetPropertyStr(ctx, admin, "listProviders", JS_NewCFunction(ctx, js_admin_list_providers, "listProviders", 0));
-    JS_SetPropertyStr(ctx, admin, "listModels", JS_NewCFunction(ctx, js_admin_list_models, "listModels", 0));
-    JS_SetPropertyStr(ctx, admin, "switchModel", JS_NewCFunction(ctx, js_admin_switch_model, "switchModel", 1));
-    JS_SetPropertyStr(ctx, admin, "listAgents", JS_NewCFunction(ctx, js_admin_list_agents, "listAgents", 0));
     JS_SetPropertyStr(ctx, admin, "isAdmin", JS_NewCFunction(ctx, js_admin_is_admin, "isAdmin", 1));
     JS_SetPropertyStr(ctx, admin, "listPendingApprovals", JS_NewCFunction(ctx, js_admin_list_pending_approvals, "listPendingApprovals", 0));
-    JS_SetPropertyStr(ctx, admin, "listDeniedApprovals", JS_NewCFunction(ctx, js_admin_list_denied_approvals, "listDeniedApprovals", 1));
-    JS_SetPropertyStr(ctx, admin, "grantFromHistory", JS_NewCFunction(ctx, js_admin_grant_from_history, "grantFromHistory", 1));
+    JS_SetPropertyStr(ctx, admin, "dashboardUrl", JS_NewCFunction(ctx, js_admin_dashboard_url, "dashboardUrl", 0));
     JS_SetPropertyStr(ctx, ch, "admin", admin);
 
     /* Date.now() — already available via JS_AddIntrinsicDate in full context */

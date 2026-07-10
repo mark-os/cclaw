@@ -8,9 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <poll.h>
-#include <arpa/inet.h>
-#include <ifaddrs.h>
-#include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -19,6 +16,7 @@
 #include "cclaw.h"
 #include "config.h"
 #include "config_registry.h"
+#include "dashboard.h"
 #include "log.h"
 #include "sandbox.h"
 #include "tool_js.h"
@@ -3486,28 +3484,14 @@ static int resp_print(sqlite3 *db, const char *where, int64_t id, const char *wh
 static int dashboard_main(void) {
     sqlite3 *db = verb_db_open();
     if (!db) return 1;
-    char *tok = config_get(db, "web_admin_token");
-    int port = config_get_int(db, "web_port");
+    char *url = dashboard_url(db);
     sqlite3_close(db);
-    if (!tok || !tok[0]) {
+    if (!url) {
         fprintf(stderr, "no admin token yet — run the daemon once (cclaw --daemon)\n");
-        free(tok);
         return 1;
     }
-    char host[INET_ADDRSTRLEN] = "127.0.0.1";
-    struct ifaddrs *ifa = NULL;
-    if (getifaddrs(&ifa) == 0) {
-        for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
-            if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
-            struct sockaddr_in *sin = (struct sockaddr_in *)(void *)p->ifa_addr;
-            if ((ntohl(sin->sin_addr.s_addr) >> 24) == 127) continue;
-            inet_ntop(AF_INET, &sin->sin_addr, host, sizeof(host));
-            break;
-        }
-        freeifaddrs(ifa);
-    }
-    printf("http://%s:%d/admin?token=%s\n", host, port, tok);
-    free(tok);
+    printf("%s\n", url);
+    free(url);
     return 0;
 }
 

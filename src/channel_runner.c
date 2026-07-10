@@ -488,7 +488,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     g_ctx = channel_ctx_open(db_path, channel_name);
     if (!g_ctx) { LOG_ERROR_("channel_runner: DB open failed"); return 1; }
 
-    /* Load the secret key so admin.setKey can write to the encrypted kv. */
+    /* Load the secret key so extension JS touching the encrypted kv works. */
     {
         uint8_t sk[32];
         if (secret_key_load_or_create(db_path, sk) == 0)
@@ -799,7 +799,7 @@ int channel_runner_check(const char *db_path, const char *channel_name, char **e
         return -1;
     }
 
-    /* Secret key so admin.setKey doesn't fail if onInit touches it. */
+    /* Secret key so encrypted-kv access doesn't fail if onInit touches it. */
     { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
 
     g_qrt = qjs_runtime_create(CR_HEAP_SIZE);

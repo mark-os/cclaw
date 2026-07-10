@@ -10,4 +10,9 @@ struct mg_context;
  * start; `cclaw dashboard` prints the tokenized URL). Returns 0 on success. */
 int dashboard_register(struct mg_context *ctx, sqlite3 *db);
 
+/* Malloc'd "http://<first non-loopback IPv4>:<web_port>/admin?token=…", or
+ * NULL before the daemon has minted a token. Shared by `cclaw dashboard`
+ * and the Telegram /admin command. */
+char *dashboard_url(sqlite3 *db);
+
 #endif

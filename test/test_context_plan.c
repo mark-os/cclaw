@@ -292,6 +292,36 @@ static void test_hook_pin_overrides_cut(void) {
     PASS();
 }
 
+static void test_model_context_window(void) {
+    TEST(model_context_window);
+    sqlite3 *db = test_db_open(":memory:");
+    if (!db) FAIL("db_open");
+
+    sqlite3_exec(db,
+        "INSERT INTO agents(name, model) VALUES"
+        "  ('a-id','m-big'),"           /* matches models.id */
+        "  ('a-name','vendor/big'),"    /* matches models.model */
+        "  ('a-null','m-null');"        /* model row has NULL window */
+        "INSERT INTO models(id, provider_name, model, context_window) VALUES"
+        "  ('m-big','p','vendor/big',200000),"
+        "  ('m-null','p','vendor/null',NULL);",
+        NULL, NULL, NULL);
+
+    if (model_context_window(db, "a-id", 128000) != 200000)
+        FAIL("window not resolved via models.id");
+    if (model_context_window(db, "a-name", 128000) != 200000)
+        FAIL("window not resolved via models.model");
+    if (model_context_window(db, "a-null", 128000) != 128000)
+        FAIL("NULL window should fall back to default");
+    if (model_context_window(db, "ghost", 128000) != 128000)
+        FAIL("unknown agent should fall back to default");
+    if (model_context_window(db, NULL, 111) != 111)
+        FAIL("NULL agent should fall back to default");
+
+    db_close(db);
+    PASS();
+}
+
 int main(void) {
     printf("test_context_plan:\n");
     test_basic_plan();
@@ -301,6 +331,7 @@ int main(void) {
     test_plan_no_content_access();
     test_hook_suppress_excluded();
     test_hook_pin_overrides_cut();
+    test_model_context_window();
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

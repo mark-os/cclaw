@@ -35,10 +35,31 @@ int channel_activate(sqlite3 *db, const char *name);
  * if the channel doesn't exist. Caller frees. */
 char *channel_get_status(sqlite3 *db, const char *name);
 
+/* Swap the extension behind a channel. Records the current extension as the
+ * revert target (only on a real change), repoints, and bounces the process —
+ * the daemon's supervision respawns it with the new pointer. Returns 0,
+ * -1 unknown channel, -2 unknown extension. */
+int channel_swap(sqlite3 *db, const char *name, const char *extension);
+
+/* Swap back to the recorded previous extension (clears it) and bounce.
+ * Returns 0, or -1 if there is nothing to revert to. */
+int channel_revert(sqlite3 *db, const char *name);
+
+/* SIGTERM the channel's process (pid from the channels table); supervision
+ * respawns it, re-reading its extension pointer. 0 on success, -1 unknown. */
+int channel_bounce(sqlite3 *db, const char *name);
+
+/* prev_extension_name for a channel, or NULL. Caller frees. */
+char *channel_prev_extension(sqlite3 *db, const char *name);
+
+/* Queue text to every admin chat of a channel (channel_state admin_ids). */
+void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *text);
+
 /* Reap — returns 1 if pid belonged to a channel, 0 otherwise */
 int channel_reap(pid_t pid, sqlite3 *db);
 
-/* Tick — restart channels whose backoff expired, reset healthy ones */
+/* Tick — reconcile with the channels table (launch newly-active, stop
+ * deactivated), restart crashed channels whose backoff expired. */
 void channel_tick(sqlite3 *db);
 
 /* Channel events — process pending channel_events rows */

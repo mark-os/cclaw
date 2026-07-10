@@ -207,6 +207,98 @@ static void test_launch_all_gate_query(void) {
     printf("  PASS test_launch_all_gate_query\n");
 }
 
+static char *chan_col(sqlite3 *db, const char *col, const char *name) {
+    char sql[128];
+    snprintf(sql, sizeof(sql), "SELECT COALESCE(%s,'') FROM channels WHERE name=?;", col);
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    char *out = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW)
+        out = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    assert(out);
+    return out;
+}
+
+/* swap records the revert target; revert restores it; re-swap to the same
+ * extension (a restart) never clobbers the rollback pointer. No processes
+ * are involved: pid is NULL so channel_bounce has nothing to signal. */
+static void test_swap_and_revert(void) {
+    unlink(TEST_DB);
+    setup_bundle();
+    sqlite3 *db = test_db_open(TEST_DB);
+    char *err = NULL;
+    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(sqlite3_exec(db,
+        "INSERT INTO extensions(name, path, version, owner_agent, published, builtin, enabled) "
+        "VALUES('echo-ng', '/tmp/extensions/echo-ng', '0.0.0', 'default', 0, 0, 1);",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    assert(channel_swap(db, "echo", "no-such-extension") == -2);
+    assert(channel_swap(db, "no-such-channel", "echo-ng") == -1);
+
+    assert(channel_swap(db, "echo", "echo-ng") == 0);
+    char *v = chan_col(db, "extension_name", "echo");
+    assert(strcmp(v, "echo-ng") == 0); free(v);
+    v = chan_col(db, "prev_extension_name", "echo");
+    assert(strcmp(v, "echo") == 0); free(v);
+
+    /* Same-extension swap = restart; revert target untouched */
+    assert(channel_swap(db, "echo", "echo-ng") == 0);
+    v = chan_col(db, "prev_extension_name", "echo");
+    assert(strcmp(v, "echo") == 0); free(v);
+
+    char *prev = channel_prev_extension(db, "echo");
+    assert(prev && strcmp(prev, "echo") == 0); free(prev);
+
+    assert(channel_revert(db, "echo") == 0);
+    v = chan_col(db, "extension_name", "echo");
+    assert(strcmp(v, "echo") == 0); free(v);
+    v = chan_col(db, "prev_extension_name", "echo");
+    assert(v[0] == '\0'); free(v);
+    assert(channel_prev_extension(db, "echo") == NULL);
+
+    /* Nothing left to revert to */
+    assert(channel_revert(db, "echo") == -1);
+
+    db_close(db);
+    printf("  PASS test_swap_and_revert\n");
+}
+
+/* Admin notices land one outbox row per admin id from channel_state. */
+static void test_notify_admins(void) {
+    unlink(TEST_DB);
+    setup_bundle();
+    sqlite3 *db = test_db_open(TEST_DB);
+    char *err = NULL;
+    assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    assert(sqlite3_exec(db,
+        "INSERT INTO channel_state(channel_name, key, value)"
+        " VALUES('echo', 'admin_ids', '111, 222');",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    channel_notify_admins(db, "echo", "reverted");
+
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='echo'"
+        " AND json_extract(payload,'$.text')='reverted';", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 2);
+    sqlite3_finalize(s);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM channel_outbox"
+        " WHERE json_extract(payload,'$.chat_id') IN ('111','222');", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 2);
+    sqlite3_finalize(s);
+
+    /* Channel without admin_ids: silent no-op */
+    channel_notify_admins(db, "ghost", "x");
+
+    db_close(db);
+    printf("  PASS test_notify_admins\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_channel_lifecycle:\n");
@@ -214,6 +306,8 @@ int main(void) {
     test_check_then_activate();
     test_check_reports_js_error();
     test_launch_all_gate_query();
+    test_swap_and_revert();
+    test_notify_admins();
     printf("all channel lifecycle tests passed\n");
     return 0;
 }

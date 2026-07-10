@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS agent_extensions (
 CREATE TABLE IF NOT EXISTS channels (
   name TEXT PRIMARY KEY,
   extension_name TEXT NOT NULL DEFAULT '',
+  prev_extension_name TEXT,                 -- revert target recorded by channel swap
   type TEXT NOT NULL DEFAULT '',
   binary_path TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'draft',

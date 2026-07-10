@@ -197,6 +197,28 @@ static void sigchld_handler(int sig) {
 static AgentSetup *g_tool_setup;  /* Initialized once for tool dispatch */
 
 /* Dispatch LLM request via worker thread pool */
+/* Effective iteration cap for a session: agents.max_iterations (if > 0)
+ * overrides global config. run_advance and the dispatch_llm_req fallback must
+ * resolve this identically — a global-only fallback caps a raised per-agent
+ * limit and kills the turn early. */
+static int session_max_iter(int64_t session_id) {
+    int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations
+                                              : config_default_int("max_iterations");
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT a.max_iterations FROM agents a"
+            " JOIN sessions s ON s.agent_name = a.name"
+            " WHERE s.id = ?", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(s, 1, session_id);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            int ami = sqlite3_column_int(s, 0);
+            if (ami > 0) max_iter = ami;
+        }
+        sqlite3_finalize(s);
+    }
+    return max_iter;
+}
+
 static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iteration) {
     if (child_has_session(session_id)) return -1;
 
@@ -206,9 +228,7 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
 
     if (!llm_worker_alive()) return -1;
 
-    int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations
-                                              : config_default_int("max_iterations");
-    if (iteration >= max_iter) {
+    if (iteration >= session_max_iter(session_id)) {
         /* The advance_session check normally catches this; this is a fallback.
          * Use a simple message — the main path in advance.c builds the rich one. */
         Message msg = {.role = ROLE_ASSISTANT,
@@ -2103,23 +2123,7 @@ static const char *advance_action_name(AdvanceResult a) {
 }
 
 static void run_advance(int64_t session_id) {
-    int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations
-                                              : config_default_int("max_iterations");
-    /* Per-agent override: agents.max_iterations takes precedence if set */
-    {
-        sqlite3_stmt *ams;
-        if (sqlite3_prepare_v2(g_db,
-                "SELECT a.max_iterations FROM agents a"
-                " JOIN sessions s ON s.agent_name = a.name"
-                " WHERE s.id = ?", -1, &ams, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(ams, 1, session_id);
-            if (sqlite3_step(ams) == SQLITE_ROW) {
-                int ami = sqlite3_column_int(ams, 0);
-                if (ami > 0) max_iter = ami;
-            }
-            sqlite3_finalize(ams);
-        }
-    }
+    int max_iter = session_max_iter(session_id);
     /* Tag every log line from here — including advance_session's own state
      * transitions and the dispatch/deliver calls below, which run on this
      * thread — with the advancing session (and, once known, agent), so
@@ -2428,6 +2432,10 @@ static void print_usage(void) {
            "                                   bind a channel+chat to an agent; chat_id '*' is\n"
            "                                   the channel-wide default (else falls back to\n"
            "                                   default_agent)\n"
+           "       cclaw channel [list] | swap <channel> <ext> | revert <channel> | restart <channel>\n"
+           "                                   hot-swap the extension behind a live channel\n"
+           "                                   (previous kept as revert target; a swap that\n"
+           "                                   crash-loops auto-reverts and notifies admins)\n"
            "\n"
            "modes (default: interactive CLI):\n"
            "  --daemon           run as daemon (telegram, web, cron)\n"
@@ -3307,6 +3315,60 @@ static int secret_main(int argc, char *argv[]) {
  * (channel,chat_id) -> (channel,'*') -> config default_agent, so with no rows
  * every chat falls back to the default. Deliberately CLI-only: re-pointing a
  * chat at another agent is an authority change, not agent self-service. */
+/* `cclaw channel <list|swap|revert|restart>` — operator verbs for the channel
+ * hot-swap flow. Deliberately CLI-only, same rationale as route/sensitive: an
+ * authority change over what code fronts a channel. The daemon's reconcile in
+ * channel_tick picks up pointer/status changes; bounce covers a live process. */
+static int channel_cli_main(int argc, char *argv[]) {
+    const char *sub = (argc >= 3) ? argv[2] : NULL;
+    sqlite3 *db = verb_db_open();
+    if (!db) return 1;
+    int rc = 0;
+    if (!sub || strcmp(sub, "list") == 0) {
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT name, status, extension_name,"
+                "       COALESCE(prev_extension_name, ''), COALESCE(pid, 0)"
+                " FROM channels ORDER BY name", -1, &st, NULL) == SQLITE_OK) {
+            int any = 0;
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                const char *prev = (const char *)sqlite3_column_text(st, 3);
+                printf("%s: status=%s extension=%s pid=%d%s%s\n",
+                       sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
+                       sqlite3_column_text(st, 2), sqlite3_column_int(st, 4),
+                       prev && prev[0] ? " revert-target=" : "",
+                       prev ? prev : "");
+                any = 1;
+            }
+            sqlite3_finalize(st);
+            if (!any) printf("(no channels registered)\n");
+        }
+    } else if (strcmp(sub, "swap") == 0 && argc >= 5) {
+        int r = channel_swap(db, argv[3], argv[4]);
+        if (r == -2) { fprintf(stderr, "error: extension '%s' not registered\n", argv[4]); rc = 1; }
+        else if (r != 0) { fprintf(stderr, "error: channel '%s' not found\n", argv[3]); rc = 1; }
+        else printf("channel %s now runs extension '%s' (previous kept as revert "
+                    "target; daemon respawns the process within seconds)\n",
+                    argv[3], argv[4]);
+    } else if (strcmp(sub, "revert") == 0 && argc >= 4) {
+        if (channel_revert(db, argv[3]) != 0) {
+            fprintf(stderr, "error: nothing to revert for '%s'\n", argv[3]);
+            rc = 1;
+        } else printf("channel %s reverted to its previous extension\n", argv[3]);
+    } else if (strcmp(sub, "restart") == 0 && argc >= 4) {
+        if (channel_bounce(db, argv[3]) != 0) {
+            fprintf(stderr, "error: channel '%s' not found\n", argv[3]);
+            rc = 1;
+        } else printf("channel %s restarting (daemon respawns it within seconds)\n", argv[3]);
+    } else {
+        fprintf(stderr, "usage: cclaw channel [list] | swap <channel> <extension>"
+                        " | revert <channel> | restart <channel>\n");
+        rc = 1;
+    }
+    db_close(db);
+    return rc;
+}
+
 static int route_main(int argc, char *argv[]) {
     const char *sub = (argc >= 3) ? argv[2] : NULL;
     sqlite3 *db = verb_db_open();
@@ -3401,6 +3463,10 @@ int main(int argc, char *argv[]) {
      * CLI-only, same rationale as sensitive/secret-bind — an authority change. */
     if (argc >= 2 && strcmp(argv[1], "route") == 0) return route_main(argc, argv);
 
+    /* channel: operator verbs for the extension hot-swap flow (list/swap/
+     * revert/restart). CLI-only — swapping channel code is an authority change. */
+    if (argc >= 2 && strcmp(argv[1], "channel") == 0) return channel_cli_main(argc, argv);
+
     int daemon_mode = 0, new_session = 0, host_mode = 0, auto_approve = 0;
     int channel_check = 0, channel_activate_flag = 0;
     const char *channel_mode = NULL;
@@ -3482,7 +3548,7 @@ int main(int argc, char *argv[]) {
 
     /* Schema + seed in one exclusive transaction. When multiple processes
      * start concurrently (daemon + CLI), the first grabs the write lock and
-     * does all DDL + seeding atomically; the others wait (busy_timeout) then
+     * does all DDL + seeding atomically; the others wait (busy handler) then
      * find everything already done (IF NOT EXISTS / COUNT>0 checks). */
     sqlite3_exec(g_db, "BEGIN EXCLUSIVE", NULL, NULL, NULL);
     if (db_ensure_schema(g_db) != 0) {
@@ -3514,6 +3580,7 @@ int main(int argc, char *argv[]) {
              log_level_name(g_cfg->log_level));
 
     /* Enable SQLite query profiling at debug level and above */
+    db_set_slow_query_ms(config_get_int(g_db, "sql_slow_ms"));
     if (g_cfg->log_level >= LOG_LEVEL_DEBUG)
         db_enable_trace(g_db);
 

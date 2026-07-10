@@ -35,7 +35,7 @@ CClaw shamelessly borrows ideas from these projects:
 - Single-file SQLite backbone — cclaw.db (all state: sessions, entries, config, memory, channels).
 - Self-augmenting via QuickJS plugin system — agents load JS extensions from workspace at startup.
 - One tool at a time during development. Prove each layer works before adding the next.
-- No backward compatibility. No migrations. No users yet — move fast, break things.
+- No backward compatibility in code — delete old code, don't version it. DB schema changes are the one exception: they ship as forward-only patches (see Running).
 
 ## Working With the Grain
 
@@ -58,7 +58,7 @@ These look odd at a glance but are deliberate. Understand them before touching t
 
 - **A SQL query emits the LLM request JSON.** `src/llm_payload.c` returns the request body zero-copy from an open statement. This is intentional and fast — do not replace it with a C JSON builder.
 - **Forked tool children, threaded LLM calls.** LLM requests run on a worker thread pool in the long-lived process; only untrusted/blocking tools fork. (This replaced an earlier fork-per-turn design — don't reintroduce it.)
-- **No config files in agent logic, no migrations, no compat shims.** Config comes from env at startup; there are no users, so delete old code instead of versioning it.
+- **No config files in agent logic, no compat shims.** Config comes from env at startup; delete old code instead of versioning it. The one sanctioned versioning mechanism is the DB schema patch list (`schema_patches[]` in `src/db.c`).
 - **One binary for every process mode — no per-subsystem "thin" child.** The forked C-tool broker and the re-exec'd `cclaw --qjs_eval` JS child reuse the full image. COW fork + demand paging already keep the subsystems a child never calls (civetweb, QuickJS, most of SQLite) out of its resident set; `qjs_eval_main` is intercepted before any DB/config init so the JS child never even starts them. Splitting out a minimal child binary would buy nothing and is not worth the build/maintenance cost.
 
 ## Target Platforms
@@ -144,7 +144,7 @@ Tests must never hang. Follow these rules:
 
 - **No real network** — unit tests (`make test`) must not connect to real hosts. Use UDS-based mocks or loopback.
 - **Timeout on `accept()`** — any mock server thread must set `SO_RCVTIMEO` on the listening socket so it doesn't block forever if the client crashes before connecting.
-- **No backward-compatible code** — there are no users yet. No migrations, no deprecation shims, no version checks. Delete old code, don't wrap it.
+- **No backward-compatible code** — no deprecation shims, no version checks. Delete old code, don't wrap it. (DB schema changes are the exception: they need a forward patch in `schema_patches[]`, not a shim — see Running.)
 - **Subprocess tests** — if forking a child that execs something (python, sh), use `waitpid` with awareness that the child may die.
 - **Makefile enforces timeouts** — `make test` wraps each binary in `timeout 20`, `make test-integration` in `timeout 45`. A hung test is killed. Per-test output goes to `/tmp/cclaw_<testname>.txt`. `alarm()` only needed in tests with intentional sleeps (retry backoff) — set below the wrapper timeout. Most tests need no alarm.
 - **Line-buffer test stdout** — `setvbuf(stdout, NULL, _IOLBF, 0)` first thing in main. When the timeout wrapper kills a hung test, fully-buffered stdout vanishes and the /tmp log shows only stderr — you debug blind. (Running a binary manually, `stdbuf -oL -eL` does the same.)
@@ -208,7 +208,7 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 ```
 
 - **The real DB is `~/.cclaw/cclaw.db`, not `./cclaw.db`.** `resolve_db_path()` returns `$HOME/.cclaw/cclaw.db` when `$HOME` is set (override with `CCLAW_DB_PATH`). "Delete the db" means that path — and its `-wal`/`-shm` siblings.
-- **No migrations means: delete the DB after a schema change.** Running a new binary against a DB created by an older `templates/schema.sql` does *not* migrate — it hits missing columns/tables, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang. Always start a freshly-changed binary against a fresh DB.
+- **Schema changes need a forward patch.** When `templates/schema.sql` changes shape, bump `CCLAW_SCHEMA_VERSION` (`src/cclaw.h`) and append a matching entry to `schema_patches[]` (`src/db.c`) that brings a live DB from the previous version to the new one. Startup auto-applies pending patches; DBs newer than the build, or older than v11 (pre-tracking), are refused with a delete-and-restart message. A schema.sql change *without* the bump + patch leaves existing DBs stamped current but shaped old — missing columns, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang.
 - **`-p` with piped/non-tty stdin auto-selects the most recent session**; `-s <id>` pins one. Useful for scripted multi-turn testing (turn 1 creates the session, reuse its id for turn 2+).
 
 Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.

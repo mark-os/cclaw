@@ -20,6 +20,8 @@ static const ConfigDef s_defs[] = {
       "Daemon heartbeat interval in seconds (0 = disabled)" },
     { "stale_lock_timeout", "300",
       "Seconds before a dead process's session locks are reclaimed" },
+    { "sql_slow_ms",        "100",
+      "Slow-query WARN threshold in ms for the SQL trace (0 = disabled)" },
     { "token_rate_limit",   "1000000",
       "Max LLM tokens per hour (0 = unlimited)" },
     { "context_threshold",  "0.6",
@@ -49,7 +51,7 @@ static const ConfigDef s_defs[] = {
       "\"search_config\",\"memory_create\",\"memory_add\",\"memory_edit\","
       "\"memory_delete\",\"configure_provider\",\"configure_channel\","
       "\"create_agent\",\"extension_promote\",\"extension_publish\","
-      "\"extension_attach\",\"extension_list\",\"launch_agent\","
+      "\"extension_attach\",\"extension_list\",\"extension_fork\",\"launch_agent\","
       "\"check_session\",\"secret_create\"]",
       "Baseline tool grants seeded for a newly created agent (JSON array)" },
     { "agent_approval_tools",

@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+#include "cclaw.h"
 #include "db.h"
 #include "config_registry.h"
 #include "test_util.h"
@@ -295,6 +297,136 @@ static void test_free_mb(void) {
     printf("  PASS test_free_mb\n");
 }
 
+static void set_user_version(sqlite3 *db, int v) {
+    char sql[48];
+    snprintf(sql, sizeof(sql), "PRAGMA user_version=%d;", v);
+    sqlite3_exec(db, sql, NULL, NULL, NULL);
+}
+
+static int column_exists(sqlite3 *db, const char *table, const char *col) {
+    char sql[128];
+    snprintf(sql, sizeof(sql), "PRAGMA table_info(%s);", table);
+    sqlite3_stmt *stmt;
+    int found = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *n = (const char *)sqlite3_column_text(stmt, 1);
+            if (n && strcmp(n, col) == 0) { found = 1; break; }
+        }
+        sqlite3_finalize(stmt);
+    }
+    return found;
+}
+
+static char *query_text(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *stmt;
+    char *out = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(stmt, 0);
+            if (v) out = strdup(v);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return out;
+}
+
+static void test_schema_state(void) {
+    const char *path = "/tmp/test_cclaw_schema_state.sqlite";
+    char wal[128], shm[128];
+    snprintf(wal, sizeof(wal), "%s-wal", path);
+    snprintf(shm, sizeof(shm), "%s-shm", path);
+    unlink(path); unlink(wal); unlink(shm);
+
+    sqlite3 *db = db_open(path);   /* no schema applied */
+    assert(db != NULL);
+    int uv = -1;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_FRESH && uv == 0);
+    assert(db_schema_compat(db) == 1);   /* fresh is usable */
+
+    assert(db_ensure_schema(db) == 0);
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT);
+    assert(uv == CCLAW_SCHEMA_VERSION);
+
+    set_user_version(db, CCLAW_SCHEMA_VERSION + 1);
+    assert(db_schema_state(db, NULL) == DB_SCHEMA_FUTURE);
+    assert(db_schema_compat(db) == 0);   /* refused, not "upgraded" */
+
+    set_user_version(db, 10);            /* pre-tracking version */
+    assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
+    assert(db_schema_compat(db) == 0);
+
+    set_user_version(db, 0);             /* v0 but tables exist → pre-tracking */
+    assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
+    assert(db_schema_compat(db) == 0);
+
+    db_close(db);
+    unlink(path); unlink(wal); unlink(shm);
+    printf("  PASS test_schema_state\n");
+}
+
+static void test_schema_upgrade_from_v11(void) {
+    const char *path = "/tmp/test_cclaw_schema_upgrade.sqlite";
+    char wal[128], shm[128];
+    snprintf(wal, sizeof(wal), "%s-wal", path);
+    snprintf(shm, sizeof(shm), "%s-shm", path);
+    unlink(path); unlink(wal); unlink(shm);
+
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+
+    /* Reshape a current DB back to v11: re-add the column patch v12 drops,
+     * drop the one patch v14 adds, seed rows that each patch must rewrite. */
+    assert(sqlite3_exec(db,
+        "ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 128000;"
+        "ALTER TABLE channels DROP COLUMN prev_extension_name;"
+        "INSERT INTO models(id, provider_name, model, context_window) VALUES"
+        "  ('m-def','p','vendor/def',128000),"      /* old default → NULLed */
+        "  ('m-big','p','vendor/big',200000);"      /* explicit → kept */
+        "INSERT INTO grants(agent_name, kind, value, approval_mode) VALUES"
+        "  ('a1','tool','extension_promote','silent')," /* dangerous → 'always' */
+        "  ('a1','tool','shell_exec','silent');",       /* ordinary → untouched */
+        NULL, NULL, NULL) == SQLITE_OK);
+    set_user_version(db, 11);
+    assert(db_schema_state(db, NULL) == DB_SCHEMA_UPGRADABLE);
+
+    assert(db_schema_compat(db) == 1);   /* applies v12..current patches */
+
+    int uv = -1;
+    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT);
+    assert(uv == CCLAW_SCHEMA_VERSION);
+    assert(!column_exists(db, "providers", "context_window"));
+
+    char *v = query_text(db, "SELECT COALESCE(context_window,'null') FROM models WHERE id='m-def'");
+    assert(v && strcmp(v, "null") == 0); free(v);
+    v = query_text(db, "SELECT context_window FROM models WHERE id='m-big'");
+    assert(v && strcmp(v, "200000") == 0); free(v);
+    v = query_text(db, "SELECT approval_mode FROM grants WHERE value='extension_promote'");
+    assert(v && strcmp(v, "always") == 0); free(v);
+    v = query_text(db, "SELECT approval_mode FROM grants WHERE value='shell_exec'");
+    assert(v && strcmp(v, "silent") == 0); free(v);
+
+    /* Re-running is a no-op, not an error */
+    assert(db_schema_compat(db) == 1);
+
+    /* Insurance snapshot taken before the surgery: still v11-shaped */
+    char bak[160];
+    snprintf(bak, sizeof(bak), "%s.v11.bak", path);
+    sqlite3 *bdb = db_open(bak);
+    assert(bdb != NULL);
+    int buv = -1;
+    db_schema_state(bdb, &buv);
+    assert(buv == 11);
+    assert(column_exists(bdb, "providers", "context_window"));
+    v = query_text(bdb, "SELECT approval_mode FROM grants WHERE value='extension_promote'");
+    assert(v && strcmp(v, "silent") == 0); free(v);
+    db_close(bdb);
+
+    db_close(db);
+    unlink(path); unlink(wal); unlink(shm); unlink(bak);
+    printf("  PASS test_schema_upgrade_from_v11\n");
+}
+
 int main(void) {
     printf("test_db:\n");
     test_open_close();
@@ -308,6 +440,8 @@ int main(void) {
     test_prune_inbox();
     test_prune_outbox();
     test_free_mb();
+    test_schema_state();
+    test_schema_upgrade_from_v11();
     printf("All db tests passed.\n");
     return 0;
 }

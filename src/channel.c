@@ -25,6 +25,12 @@ static ChannelProc *find_by_pid(pid_t pid) {
     return NULL;
 }
 
+static ChannelProc *find_by_name(const char *name) {
+    for (int i = 0; i < g_count; i++)
+        if (strcmp(g_channels[i].name, name) == 0) return &g_channels[i];
+    return NULL;
+}
+
 static void remove_channel(ChannelProc *c) {
     *c = g_channels[--g_count];
 }
@@ -77,6 +83,121 @@ int channel_activate(sqlite3 *db, const char *name) {
     return changed > 0 ? 0 : -1;
 }
 
+char *channel_prev_extension(sqlite3 *db, const char *name) {
+    const char *sql = "SELECT prev_extension_name FROM channels WHERE name=?;";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    char *prev = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(s, 0);
+        if (v && v[0]) prev = strdup(v);
+    }
+    sqlite3_finalize(s);
+    return prev;
+}
+
+/* Queue a notice to every admin chat of a channel (channel_state admin_ids,
+ * comma/space separated). Rows sit in channel_outbox until a process for the
+ * channel delivers them — after an auto-revert that's the respawned, reverted
+ * process, so the notice arrives through the channel it is about. */
+void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *text) {
+    const char *gsql = "SELECT value FROM channel_state"
+                       " WHERE channel_name=? AND key='admin_ids';";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, gsql, -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
+    char *admins = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(s, 0);
+        if (v) admins = strdup(v);
+    }
+    sqlite3_finalize(s);
+    if (!admins) return;
+
+    const char *isql =
+        "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+        " VALUES(?1, 0, json_object('chat_id', ?2, 'text', ?3));";
+    char *p = admins;
+    while (*p) {
+        while (*p == ',' || *p == ' ') p++;
+        if (!*p) break;
+        char *end = p;
+        while (*end && *end != ',' && *end != ' ') end++;
+        char saved = *end;
+        *end = '\0';
+        sqlite3_stmt *ins;
+        if (sqlite3_prepare_v2(db, isql, -1, &ins, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(ins, 1, channel_name, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 2, p, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 3, text, -1, SQLITE_STATIC);
+            sqlite3_step(ins);
+            sqlite3_finalize(ins);
+        }
+        *end = saved;
+        p = end;
+    }
+    free(admins);
+}
+
+int channel_bounce(sqlite3 *db, const char *name) {
+    const char *sql = "SELECT pid FROM channels WHERE name=?;";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    pid_t pid = 0;
+    int found = 0;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        found = 1;
+        pid = (pid_t)sqlite3_column_int(s, 0);
+    }
+    sqlite3_finalize(s);
+    if (!found) return -1;
+    /* SIGTERM only — the daemon's supervision reaps and respawns with a fresh
+     * read of the channels row (new extension pointer included). A pid of 0
+     * means not running; the reconcile in channel_tick launches it if active. */
+    if (pid > 0) kill(pid, SIGTERM);
+    return 0;
+}
+
+int channel_swap(sqlite3 *db, const char *name, const char *extension) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM extensions WHERE name=?;",
+                           -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, extension, -1, SQLITE_STATIC);
+    int have_ext = sqlite3_step(s) == SQLITE_ROW;
+    sqlite3_finalize(s);
+    if (!have_ext) return -2;
+
+    /* Record the current extension as the revert target — but only on a real
+     * change, so re-swapping to the same extension (a restart) can't clobber
+     * the rollback pointer with itself. */
+    const char *sql =
+        "UPDATE channels SET prev_extension_name=extension_name, extension_name=?2"
+        " WHERE name=?1 AND extension_name != ?2;";
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, extension, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+
+    return channel_bounce(db, name);
+}
+
+int channel_revert(sqlite3 *db, const char *name) {
+    const char *sql =
+        "UPDATE channels SET extension_name=prev_extension_name, prev_extension_name=NULL"
+        " WHERE name=?1 AND prev_extension_name IS NOT NULL;";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    int changed = sqlite3_changes(db);
+    sqlite3_finalize(s);
+    if (changed == 0) return -1;   /* nothing to revert to */
+    return channel_bounce(db, name);
+}
+
 char *channel_get_status(sqlite3 *db, const char *name) {
     const char *sql = "SELECT status FROM channels WHERE name=?;";
     sqlite3_stmt *s;
@@ -91,41 +212,49 @@ char *channel_get_status(sqlite3 *db, const char *name) {
     return status;
 }
 
-int channel_launch_all(sqlite3 *db) {
-    /* Collect names first, finalize, then fork + update_pid: writing (or
-     * forking) with the SELECT still open pins a read snapshot, and the
-     * update_pid write would fail with an immediate SQLITE_BUSY if any other
-     * process committed meanwhile (snapshot upgrades skip busy_timeout). */
+/* Snapshot the active-channel names. Collect first, finalize, then write:
+ * forking or writing with the SELECT still open pins a read snapshot, and a
+ * later write would fail with an immediate SQLITE_BUSY if another process
+ * committed meanwhile (snapshot upgrades skip the busy handler). */
+static int active_channel_names(sqlite3 *db, char names[][64], int max) {
     const char *sql = "SELECT c.name FROM channels c"
                       " JOIN extensions e ON c.extension_name=e.name"
                       " WHERE c.status='active';";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
-    char names[CHANNEL_MAX][64];  /* matches ChannelProc.name */
     int n = 0;
-    while (sqlite3_step(stmt) == SQLITE_ROW && g_count + n < CHANNEL_MAX) {
+    while (sqlite3_step(stmt) == SQLITE_ROW && n < max) {
         const char *name = (const char *)sqlite3_column_text(stmt, 0);
         if (!name) continue;
-        snprintf(names[n], sizeof(names[n]), "%s", name);
+        snprintf(names[n], 64, "%s", name);
         n++;
     }
     sqlite3_finalize(stmt);
+    return n;
+}
 
+/* Fork one channel process and start tracking it. */
+static int start_channel(sqlite3 *db, const char *name) {
+    if (g_count >= CHANNEL_MAX) return -1;
+    pid_t pid = do_fork(name);
+    if (pid <= 0) return -1;
+    ChannelProc *c = &g_channels[g_count++];
+    c->pid = pid;
+    c->restart_count = 0;
+    c->first_crash = 0;
+    c->next_restart_at = 0;
+    c->started_at = time(NULL);
+    snprintf(c->name, sizeof(c->name), "%s", name);
+    update_pid(db, name, pid);
+    return 0;
+}
+
+int channel_launch_all(sqlite3 *db) {
+    char names[CHANNEL_MAX][64];  /* matches ChannelProc.name */
+    int n = active_channel_names(db, names, CHANNEL_MAX - g_count);
     int launched = 0;
-    for (int i = 0; i < n; i++) {
-        pid_t pid = do_fork(names[i]);
-        if (pid > 0) {
-            ChannelProc *c = &g_channels[g_count++];
-            c->pid = pid;
-            c->restart_count = 0;
-            c->first_crash = 0;
-            c->next_restart_at = 0;
-            c->started_at = time(NULL);
-            snprintf(c->name, sizeof(c->name), "%s", names[i]);
-            update_pid(db, names[i], pid);
-            launched++;
-        }
-    }
+    for (int i = 0; i < n; i++)
+        if (start_channel(db, names[i]) == 0) launched++;
     return launched;
 }
 
@@ -158,6 +287,36 @@ int channel_reap(pid_t pid, sqlite3 *db) {
     /* Flap detection: 3+ crashes in 5 minutes → broken */
     if (c->restart_count >= CHANNEL_MAX_RESTARTS &&
         (now - c->first_crash) < CHANNEL_FLAP_WINDOW) {
+        /* Auto-revert first: a swapped-in extension that flaps goes back to
+         * its predecessor instead of taking the channel down — a broken
+         * channel is exactly the one the operator can't be reached through.
+         * prev is cleared by the revert, so a flap of the reverted code
+         * (second pass through here) falls through to 'broken'. */
+        char *prev = channel_prev_extension(db, c->name);
+        if (prev) {
+            const char *sql =
+                "UPDATE channels SET extension_name=prev_extension_name,"
+                " prev_extension_name=NULL WHERE name=?;";
+            sqlite3_stmt *s;
+            if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(s, 1, c->name, -1, SQLITE_STATIC);
+                sqlite3_step(s); sqlite3_finalize(s);
+            }
+            LOG_ERROR_("channel flapping name=%s crashes=%d — reverted to extension=%s",
+                       c->name, c->restart_count, prev);
+            char note[256];
+            snprintf(note, sizeof(note),
+                     "⚠ channel %s crashed %d times and was reverted to extension "
+                     "'%s'. The failed extension is still registered — fix and "
+                     "re-swap when ready.", c->name, c->restart_count, prev);
+            channel_notify_admins(db, c->name, note);
+            free(prev);
+            c->restart_count = 0;
+            c->first_crash = 0;
+            c->next_restart_at = now + 2;   /* respawn runs the reverted code */
+            return 1;
+        }
+
         LOG_ERROR_("channel flapping name=%s crashes=%d window=%lds status=broken",
                    c->name, c->restart_count, (long)(now - c->first_crash));
         const char *sql = "UPDATE channels SET status='broken' WHERE name=?;";
@@ -181,6 +340,34 @@ int channel_reap(pid_t pid, sqlite3 *db) {
 
 void channel_tick(sqlite3 *db) {
     time_t now = time(NULL);
+
+    /* Reconcile: the channels table is the desired state, g_channels the
+     * running set. Launch newly-activated channels and stop deactivated ones,
+     * so --activate / channel swap take effect on a live daemon instead of
+     * waiting for a restart. */
+    char desired[CHANNEL_MAX][64];
+    int nd = active_channel_names(db, desired, CHANNEL_MAX);
+
+    for (int i = 0; i < nd; i++) {
+        if (find_by_name(desired[i])) continue;
+        if (start_channel(db, desired[i]) == 0)
+            LOG_INFO_("channel launch name=%s reason=activated", desired[i]);
+    }
+
+    for (int i = 0; i < g_count; ) {
+        ChannelProc *c = &g_channels[i];
+        int wanted = 0;
+        for (int j = 0; j < nd; j++)
+            if (strcmp(c->name, desired[j]) == 0) { wanted = 1; break; }
+        if (wanted) { i++; continue; }
+        /* Untrack before killing: channel_reap only reschedules processes it
+         * finds in g_channels, so an intentional stop never respawns. */
+        LOG_INFO_("channel stop name=%s reason=deactivated", c->name);
+        if (c->pid > 0) kill(c->pid, SIGTERM);
+        update_pid(db, c->name, 0);
+        remove_channel(c);   /* swaps the last entry into slot i — revisit i */
+    }
+
     for (int i = 0; i < g_count; i++) {
         ChannelProc *c = &g_channels[i];
 

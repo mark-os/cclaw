@@ -434,6 +434,31 @@ static void test_channels_table(void) {
     printf("PASS\n");
 }
 
+/* channel_notify_session: outbox row lands for channel-bound sessions,
+ * silently no-ops for channel-less ones (CLI, sub-agents). */
+static void test_notify_session(void) {
+    setup();
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+
+    int64_t bound = session_create(db, "s-bound", "testagent", -1, 0);
+    sqlite3_exec(db, "UPDATE sessions SET channel_name='mychannel', channel_id='42'"
+                     " WHERE name='s-bound';", NULL, NULL, NULL);
+    int64_t bare = session_create(db, "s-bare", "testagent", -1, 0);
+
+    assert(channel_notify_session(db, NULL, bound, "model degraded") == 0);
+    assert(channel_notify_session(db, NULL, bare, "model degraded") == 0);
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_outbox;") == 1);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='mychannel'"
+        " AND json_extract(payload,'$.chat_id')='42'"
+        " AND json_extract(payload,'$.text')='model degraded';") == 1);
+
+    db_close(db);
+    cleanup();
+    printf("PASS\n");
+}
+
 int main(void) {
     alarm(10);
 
@@ -459,6 +484,9 @@ int main(void) {
 
     printf("  channels_table... ");
     test_channels_table();
+
+    printf("  notify_session... ");
+    test_notify_session();
 
     cleanup();
     printf("all channel_events tests passed\n");

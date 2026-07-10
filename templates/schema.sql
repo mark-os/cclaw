@@ -282,9 +282,11 @@ CREATE TABLE IF NOT EXISTS channel_outbox (
   status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER NOT NULL DEFAULT 0,
-  -- Set when a rich-formatted send is rejected by the platform (e.g. Telegram
-  -- "can't parse entities" 400): the row is re-delivered as plain text.
-  deliver_plain INTEGER NOT NULL DEFAULT 0,
+  -- Delivery degradation ladder: 0=auto (rich markdown if the platform
+  -- supports it), 1=html, 2=plain. Bumped by the C loop when the platform
+  -- rejects a format (e.g. Telegram sendRichMessage 400 → html, "can't
+  -- parse entities" 400 → plain) so re-delivery degrades, never loops.
+  deliver_mode INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   acked_at INTEGER
 );

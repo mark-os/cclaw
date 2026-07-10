@@ -148,23 +148,50 @@ int main(void) {
     /* a lone dashes line (no pipe) is not a table delimiter */
     expect("md_not_table", "markdownToTelegramHtml('a | b\\n---')", "a | b\n---");
 
-    /* ── onOutbox end-to-end: real onOutbox→sendChunked→tgCall→send ─── */
-    /* Rich (default): body carries HTML + parse_mode. */
-    expect_has("onOutbox_rich_html",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),plain:false}),"
+    /* ── utf8ByteLen: UTF-8 byte counting on UTF-16 strings ─────────── */
+    expect("utf8len_ascii", "'' + utf8ByteLen('abc')", "3");
+    expect("utf8len_2byte", "'' + utf8ByteLen('\\u00e9')", "2");       /* é */
+    expect("utf8len_3byte", "'' + utf8ByteLen('\\u20ac')", "3");       /* € */
+    expect("utf8len_astral",
+        "'' + utf8ByteLen(String.fromCharCode(0xD83D,0xDE00))", "4");  /* 😀 */
+
+    /* ── onOutbox end-to-end: mode ladder rich → html → plain ───────── */
+    /* Mode 0 (auto): one sendRichMessage carrying the RAW markdown. */
+    expect_has("onOutbox_rich_method",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:0}),"
+        "__sent[0].url",
+        "sendRichMessage");
+    expect_has("onOutbox_rich_raw_markdown",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:0}),"
+        "__sent[0].body",
+        "\"rich_message\":{\"markdown\":\"**hi**\"}");
+    /* rich_disabled latch → straight to chunked HTML. */
+    expect_has("onOutbox_rich_disabled_falls_to_html",
+        "channel.setConfig('rich_disabled','1'),"
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:0}),"
         "__sent[0].body",
         "<b>hi</b>");
-    expect_has("onOutbox_rich_parsemode",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),plain:false}),"
+    /* Over the 32KB byte limit → no rich attempt, chunked HTML. */
+    expect_lacks("onOutbox_oversize_no_rich",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'x'.repeat(33000)}),mode:0}),"
+        "__sent[0].url",
+        "sendRichMessage");
+    /* Mode 1 (html): body carries HTML + parse_mode. */
+    expect_has("onOutbox_html",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:1}),"
+        "__sent[0].body",
+        "<b>hi</b>");
+    expect_has("onOutbox_html_parsemode",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:1}),"
         "__sent[0].body",
         "\"parse_mode\":\"HTML\"");
-    /* Plain (fallback): raw text, no parse_mode. */
+    /* Mode 2 (plain): raw text, no parse_mode. */
     expect_has("onOutbox_plain_text",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),plain:true}),"
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:2}),"
         "__sent[0].body",
         "**hi**");
     expect_lacks("onOutbox_plain_no_parsemode",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),plain:true}),"
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:2}),"
         "__sent[0].body",
         "parse_mode");
 

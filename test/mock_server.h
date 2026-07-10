@@ -48,6 +48,16 @@ int mock_tg_send_count(void);
 /* Return body of last sendMessage request (NULL if none). Caller must NOT free. */
 const char *mock_tg_last_send_body(void);
 
+/* Queue a canned response for Telegram sendRichMessage. Unlike sendMessage,
+ * the HTTP status is honored (400/404 drive the delivery degradation path). */
+void mock_tg_enqueue_rich(int http_status, const char *body);
+
+/* Return number of sendRichMessage calls received. */
+int mock_tg_rich_count(void);
+
+/* Return body of last sendRichMessage request (NULL if none). Caller must NOT free. */
+const char *mock_tg_last_rich_body(void);
+
 /* Enable Telegram route handlers (call after mock_server_start).
  * token is the bot token used in URL matching (e.g. "test-token"). */
 void mock_tg_enable(const char *token);

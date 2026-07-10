@@ -327,6 +327,11 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "'configure_channel','create_agent');" },
     { 14,
       "ALTER TABLE channels ADD COLUMN prev_extension_name TEXT;" },
+    { 15,
+      /* deliver_plain (bool) becomes deliver_mode (0=auto/rich, 1=html,
+       * 2=plain). Old plain=1 rows map to mode 2 — same semantics. */
+      "ALTER TABLE channel_outbox RENAME COLUMN deliver_plain TO deliver_mode;"
+      "UPDATE channel_outbox SET deliver_mode=2 WHERE deliver_mode=1;" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

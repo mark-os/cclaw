@@ -37,11 +37,11 @@ jobs:
         run: make test-integration
 
       - name: Package
-        # Zip so every target unpacks to the same binary name — install is
-        # "download, unzip, ./cclaw" regardless of which target you pulled.
+        # Strip + zip so every target unpacks to the same binary name —
+        # install is "download, unzip, ./cclaw" regardless of target.
         run: |
           mkdir -p dist
-          cp build/cclaw dist/cclaw
+          strip -o dist/cclaw build/cclaw
           chmod +x dist/cclaw
           (cd dist && zip -q cclaw-linux-x64.zip cclaw && rm cclaw)
 
@@ -72,7 +72,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          cp build/cclaw dist/cclaw
+          strip -o dist/cclaw build/cclaw
           chmod +x dist/cclaw
           (cd dist && zip -q cclaw-linux-x86.zip cclaw && rm cclaw)
 
@@ -116,6 +116,7 @@ jobs:
               # ARMv5TE has no hardware CAS instruction; 8-byte atomic
               # builtins (sqlite, quickjs) need libatomic pulled in explicitly.
               make all LDFLAGS="-lcurl -lm -lpthread -ldl -latomic"
+              strip build/cclaw
               ./build/cclaw --version
               ./build/cclaw --doctor
             '

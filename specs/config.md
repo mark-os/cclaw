@@ -19,7 +19,7 @@ nothing else.
 - **Runtime state** — sessions, entries, `tg_offset`, cron bookkeeping.
   Machine-generated; the whole point of "delete the DB" is to reset it.
 
-The no-migrations rule is a policy about runtime state, but a wipe destroys
+"Delete the DB" as a reset is a policy about runtime state, but a wipe destroys
 operator intent as collateral. Concretely, the Telegram channel needs three
 operator inputs, and none has an external home:
 

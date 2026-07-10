@@ -313,3 +313,37 @@ int channel_outbox_wake(const char *db_path, const char *channel_name) {
 
 /* ── Outbox insert (daemon side) ───────────────────────────────── */
 
+int channel_notify_session(sqlite3 *db, const char *db_path, int64_t session_id,
+                           const char *text) {
+    if (!db || !text) return -1;
+
+    /* INSERT..SELECT: no-op for channel-less sessions (CLI, sub-agents) */
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+            " SELECT channel_name, id, json_object('chat_id', channel_id, 'text', ?2)"
+            " FROM sessions WHERE id=?1"
+            " AND channel_name IS NOT NULL AND channel_id IS NOT NULL;",
+            -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(s, 1, session_id);
+    sqlite3_bind_text(s, 2, text, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s) == SQLITE_DONE ? 0 : -1;
+    sqlite3_finalize(s);
+    if (rc != 0 || sqlite3_changes(db) == 0) return rc;
+
+    if (db_path) {
+        sqlite3_stmt *cs;
+        if (sqlite3_prepare_v2(db, "SELECT channel_name FROM sessions WHERE id=?1",
+                               -1, &cs, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(cs, 1, session_id);
+            if (sqlite3_step(cs) == SQLITE_ROW) {
+                const char *ch = (const char *)sqlite3_column_text(cs, 0);
+                if (ch) channel_outbox_wake(db_path, ch);
+            }
+            sqlite3_finalize(cs);
+        }
+    }
+    return 0;
+}
+

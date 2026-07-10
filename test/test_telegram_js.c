@@ -212,6 +212,45 @@ int main(void) {
         "'' + __sent.length",
         "1");
 
+    /* ── /model menu + switch flow (admin.* stubbed) ────────────────── */
+    #define MODELS_STUB \
+        "channel.admin.listModels=function(){return [" \
+        "{id:'p/a',model:'a',provider:'p',base_url:'https://p/v1',api_key_env:'KA'," \
+        " status:'healthy',has_key:true,context_window:0,degraded_left:0," \
+        " total_requests:5,err_5xx:0,err_429:0}," \
+        "{id:'p/b',model:'b',provider:'p',base_url:'https://p/v1',api_key_env:'KB'," \
+        " status:'degraded',has_key:false,context_window:200000,degraded_left:60," \
+        " total_requests:2,err_5xx:3,err_429:0}];};"
+
+    expect_has("model_command_registered",
+        "Object.keys(COMMANDS).join(',')", "model");
+    expect_has("model_menu_lists_routing",
+        MODELS_STUB "sendModelMenu('1'); __sent[0].body",
+        "2. p/b — degraded (retry in 60s), key MISSING, ctx 200000");
+    expect_has("model_details_warns_missing_key",
+        MODELS_STUB "handleModelDetailsCallback('1','mdl:1'); __sent[0].body",
+        "No key found for KB");
+    expect_has("model_details_offers_switch",
+        MODELS_STUB "handleModelDetailsCallback('1','mdl:1'); __sent[0].body",
+        "mdlgo:1");
+    expect_lacks("model_details_primary_no_switch_button",
+        MODELS_STUB "handleModelDetailsCallback('1','mdl:0'); __sent[0].body",
+        "mdlgo:");
+    expect_has("model_switch_reports_fallback",
+        MODELS_STUB
+        "channel.admin.switchModel=function(id){return id==='p/b'?'p/a':null;};"
+        "handleModelSwitchCallback('1','mdlgo:1'); __sent[0].body",
+        "Previous primary p/a stays as first fallback");
+    expect("model_key_dialog_prefixes_var",
+        MODELS_STUB
+        "var __key=null; channel.admin.setKey=function(p,v){__key=v; return 0;};"
+        "handleModelKeyCallback('1','mdlkey:1');"
+        "handleDialogReply('1','sk-abc',null); __key",
+        "KB=sk-abc");
+    expect_has("config_bare_shows_menu",
+        "COMMANDS.config.handler('1',''); __sent[0].body",
+        "cfgmenu:model");
+
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

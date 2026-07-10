@@ -3,6 +3,9 @@
 #include "config_registry.h"
 #include "db.h"
 #include "test_util.h"
+#include "tool_extension.h"
+#include "tools.h"
+#include "util.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -268,6 +271,80 @@ static void test_validate_rejects_bad_json(void) {
     printf("  PASS test_validate_rejects_bad_json\n");
 }
 
+/* extension_fork: a manifest-less builtin bundle (like telegram's) forks into
+ * a workspace draft with a synthesized, renamed manifest that then passes a
+ * real extension_install — the full fork → edit → promote roundtrip. */
+static void test_extension_fork_roundtrip(void) {
+    unlink(TEST_DB);
+    rm_rf("/tmp/test_fork_src");
+    rm_rf("/tmp/test_fork_ws");
+    rm_rf("/tmp/extensions");
+    sqlite3 *db = test_db_open(TEST_DB);
+
+    /* Fake builtin: handler + locale json, no extension.json — exactly how
+     * extract_builtin_extensions registers the telegram bundle. */
+    mkdir("/tmp/test_fork_src", 0755);
+    write_file("/tmp/test_fork_src/channel.qjs", "function onInit() { return {}; }\n");
+    write_file("/tmp/test_fork_src/tg.json", "{\"messages\":{}}\n");
+    assert(sqlite3_exec(db,
+        "INSERT INTO extensions(name, path, builtin) VALUES('tg','/tmp/test_fork_src',1);"
+        "INSERT INTO channels(name, extension_name, type, binary_path, status)"
+        " VALUES('tg','tg','telegram','/tmp/test_fork_src/channel.qjs','active');",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    ToolRegistry reg;
+    tools_init(&reg);
+    ToolExtensionCtx ctx = { .db = db, .agent_name = "default",
+                             .workspace = "/tmp/test_fork_ws" };
+    assert(tool_extension_register(&reg, &ctx) == 0);
+    ToolEntry *t = tools_lookup(&reg, "extension_fork");
+    assert(t);
+
+    char *r = t->handler("{\"name\":\"tg\",\"as\":\"tg-ng\"}", t->user_data);
+    assert(r && strstr(r, "forked extension 'tg'"));
+    free(r);
+
+    /* Draft materialized: handler copied, manifest synthesized + renamed */
+    struct stat st;
+    assert(stat("/tmp/test_fork_ws/extensions/tg-ng/channel.qjs", &st) == 0);
+    size_t mlen = 0;
+    char *manifest = util_read_file("/tmp/test_fork_ws/extensions/tg-ng/extension.json", &mlen);
+    assert(manifest);
+    assert(strstr(manifest, "\"tg-ng\""));
+    assert(strstr(manifest, "\"channel.qjs\""));
+    assert(strstr(manifest, "\"telegram\""));   /* channel type recovered */
+    free(manifest);
+
+    /* The synthesized manifest passes a real promote */
+    char *err = NULL;
+    assert(extension_install(db, "/tmp/test_fork_ws/extensions/tg-ng", "default", &err) == 0);
+    free(err);
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT status FROM channels WHERE name='tg-ng';", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "draft") == 0);
+    sqlite3_finalize(s);
+
+    /* Refusals: existing draft, unknown source, invisible source */
+    r = t->handler("{\"name\":\"tg\",\"as\":\"tg-ng\"}", t->user_data);
+    assert(r && strstr(r, "already exists")); free(r);
+    r = t->handler("{\"name\":\"nope\"}", t->user_data);
+    assert(r && strstr(r, "not registered")); free(r);
+    assert(sqlite3_exec(db,
+        "INSERT INTO extensions(name, path, builtin, published, owner_agent)"
+        " VALUES('private','/tmp/test_fork_src',0,0,'someone-else');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    r = t->handler("{\"name\":\"private\"}", t->user_data);
+    assert(r && strstr(r, "not visible")); free(r);
+
+    tools_free(&reg);
+    db_close(db);
+    rm_rf("/tmp/test_fork_src");
+    rm_rf("/tmp/test_fork_ws");
+    printf("  PASS test_extension_fork_roundtrip\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_extension_manifest:\n");
@@ -277,6 +354,7 @@ int main(void) {
     test_validate_rejects_missing_handler();
     test_validate_rejects_bad_json();
     test_validate_rejects_bad_sections();
+    test_extension_fork_roundtrip();
     /* cleanup */
     unlink(TEST_DB);
     rm_rf("/tmp/test_ext_manifest_bundle");

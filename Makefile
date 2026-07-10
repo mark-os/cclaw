@@ -11,6 +11,11 @@ CFLAGS += $(EXTRA_CFLAGS)
 
 BUILDDIR := build
 
+# Delete a target whose recipe fails partway. Without this, a multi-command
+# recipe (e.g. the printf/xxd/printf blob headers) that dies mid-way leaves a
+# truncated target that the next run treats as up to date.
+.DELETE_ON_ERROR:
+
 # Build-mode guard: build/ holds objects compiled with one CC/EXTRA_CFLAGS
 # combo (e.g. plain `cc` vs. clang+sanitizers from `debug`/`test-asan`).
 # Linking objects from two different combos fails with cryptic undefined

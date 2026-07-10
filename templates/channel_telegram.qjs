@@ -29,8 +29,15 @@ var COMMANDS = {
         handler: function(chatId, args) {
             if (args === "model") sendProviderKeyboard(chatId, "cfg_model");
             else if (args === "endpoint") sendProviderKeyboard(chatId, "cfg_ep");
-            else sendMessage(chatId, msg("config_usage"));
+            else sendKeyboard(chatId, "What do you want to configure?", [
+                [{text: "Provider model", callback_data: "cfgmenu:model"}],
+                [{text: "Provider endpoint", callback_data: "cfgmenu:ep"}]
+            ]);
         }
+    },
+    model: {
+        description: "Show routing / switch the primary model",
+        handler: function(chatId) { sendModelMenu(chatId); }
     },
     approvals: {
         description: "Review pending approvals",
@@ -285,6 +292,12 @@ function processCallback(cbq) {
     if (data.indexOf("key:") === 0) handleKeyCallback(fromId, data);
     else if (data.indexOf("cfg_model:") === 0) handleConfigModelCallback(fromId, data);
     else if (data.indexOf("cfg_ep:") === 0) handleConfigEndpointCallback(fromId, data);
+    else if (data.indexOf("cfgmenu:") === 0)
+        sendProviderKeyboard(fromId, data.substring(8) === "model" ? "cfg_model" : "cfg_ep");
+    else if (data.indexOf("mdl:") === 0) handleModelDetailsCallback(fromId, data);
+    else if (data.indexOf("mdlgo:") === 0) handleModelSwitchCallback(fromId, data);
+    else if (data.indexOf("mdlkey:") === 0) handleModelKeyCallback(fromId, data);
+    else if (data === "mdlback") sendModelMenu(fromId);
 }
 
 // ── Approval callback ────────────────────────────────────────────
@@ -560,6 +573,89 @@ function handleKeyCallback(chatId, data) {
     sendForceReply(chatId, prompt);
 }
 
+// ── Model routing (/model) ───────────────────────────────────────
+
+function modelSummaryLine(m, i) {
+    var s = (i + 1) + ". " + m.id + " — " + m.status;
+    if (m.degraded_left > 0) s += " (retry in " + m.degraded_left + "s)";
+    s += ", key " + (m.has_key ? "✓" : "MISSING");
+    s += ", ctx " + (m.context_window > 0 ? m.context_window : "default");
+    return s;
+}
+
+function sendModelMenu(chatId) {
+    var list = channel.admin.listModels();
+    if (!list || list.length === 0) {
+        sendMessage(chatId, "No models registered — the config provider is serving requests. The agent can add models via configure_provider.");
+        return;
+    }
+    var lines = ["Routing order (first healthy model serves each request):"];
+    var keyboard = [];
+    for (var i = 0; i < list.length; i++) {
+        lines.push(modelSummaryLine(list[i], i));
+        keyboard.push([{text: (i === 0 ? "★ " : "") + list[i].id, callback_data: "mdl:" + i}]);
+    }
+    lines.push("");
+    lines.push("Tap a model for details / to make it primary.");
+    sendKeyboard(chatId, lines.join("\n"), keyboard);
+}
+
+function handleModelDetailsCallback(chatId, data) {
+    var idx = parseInt(data.substring(4), 10);
+    var list = channel.admin.listModels();
+    var m = list[idx];
+    if (!m) { sendMessage(chatId, "Model list changed — run /model again."); return; }
+
+    var lines = [
+        "Model: " + m.model,
+        "Id: " + m.id,
+        "Provider: " + m.provider + " (" + m.base_url + ")",
+        "Context window: " + (m.context_window > 0 ? m.context_window : "default"),
+        "Key (" + m.api_key_env + "): " + (m.has_key ? "present" : "MISSING"),
+        "Status: " + m.status + (m.degraded_left > 0 ? " (retry in " + m.degraded_left + "s)" : ""),
+        "Requests: " + m.total_requests + " (errors 5xx: " + m.err_5xx + ", 429: " + m.err_429 + ")"
+    ];
+    var keyboard = [];
+    if (idx !== 0) {
+        lines.push("");
+        lines.push("Switching keeps the current primary as first fallback: on repeated errors or a bad key, requests fall back automatically and you get a notice here.");
+        if (!m.has_key)
+            lines.push("⚠ No key found for " + m.api_key_env + " — set it first or the switch will immediately fall back.");
+        keyboard.push([{text: "Make primary", callback_data: "mdlgo:" + idx}]);
+    }
+    if (!m.has_key)
+        keyboard.push([{text: "Set key " + m.api_key_env, callback_data: "mdlkey:" + idx}]);
+    keyboard.push([{text: "« Back", callback_data: "mdlback"}]);
+    sendKeyboard(chatId, lines.join("\n"), keyboard);
+}
+
+function handleModelSwitchCallback(chatId, data) {
+    var idx = parseInt(data.substring(6), 10);
+    var list = channel.admin.listModels();
+    var m = list[idx];
+    if (!m) { sendMessage(chatId, "Model list changed — run /model again."); return; }
+
+    var prev = channel.admin.switchModel(m.id);
+    if (prev === null) {
+        sendMessage(chatId, "Switch failed — model " + m.id + " not found.");
+        return;
+    }
+    var text = "Primary model is now " + m.id + ".";
+    if (prev) text += "\nPrevious primary " + prev + " stays as first fallback — " +
+                      "if " + m.id + " fails repeatedly you'll be notified here and " +
+                      "requests fall back automatically.";
+    sendMessage(chatId, text);
+}
+
+function handleModelKeyCallback(chatId, data) {
+    var idx = parseInt(data.substring(7), 10);
+    var list = channel.admin.listModels();
+    var m = list[idx];
+    if (!m || !m.api_key_env) { sendMessage(chatId, "Model list changed — run /model again."); return; }
+    setDialog(chatId, {type: "key", provider: "custom", var_name: m.api_key_env});
+    sendForceReply(chatId, "Send the API key value for " + m.api_key_env + " (message is deleted after saving):");
+}
+
 // ── Config model dialog ──────────────────────────────────────────
 
 function handleConfigModelCallback(chatId, data) {
@@ -594,7 +690,10 @@ function handleDialogReply(chatId, text, messageId) {
 
     if (d.type === "key") {
         if (messageId) deleteSensitiveMessage(chatId, messageId, 1);
-        var rc = channel.admin.setKey(d.provider, text);
+        // var_name set (e.g. from /model "Set key"): user sends the bare value,
+        // we prepend the env var name the custom-provider path expects.
+        var keyVal = d.var_name ? d.var_name + "=" + text : text;
+        var rc = channel.admin.setKey(d.provider, keyVal);
         sendMessage(chatId, rc === 0 ? msg("key_saved") : msg("key_failed"));
     } else if (d.type === "config_model") {
         var rc2 = channel.admin.setModel(d.index, text);

@@ -2544,13 +2544,18 @@ static void cli_start_turn(const char *input) {
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 #endif
 static void extract_builtin_extensions(sqlite3 *db, const char *db_path) {
-    /* Check if any extensions are registered */
+    /* Builtin extension code ships in the binary; the files on disk are a
+     * cache. Rewrite them on every start so a binary upgrade can't leave a
+     * stale template running against a newer C loop (the deliver_mode
+     * contract, for one). An operator fork (builtin=0 row named 'telegram')
+     * is left untouched. */
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM extensions", -1, &s, NULL) != SQLITE_OK) return;
-    int has_ext = 0;
-    if (sqlite3_step(s) == SQLITE_ROW) has_ext = sqlite3_column_int(s, 0);
+    if (sqlite3_prepare_v2(db, "SELECT builtin FROM extensions WHERE name='telegram'",
+                           -1, &s, NULL) != SQLITE_OK) return;
+    int forked = 0;
+    if (sqlite3_step(s) == SQLITE_ROW) forked = !sqlite3_column_int(s, 0);
     sqlite3_finalize(s);
-    if (has_ext > 0) return;
+    if (forked) return;
 
     /* Derive base dir from db_path (strip /cclaw.db) */
     char base[PATH_MAX];

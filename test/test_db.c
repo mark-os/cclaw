@@ -380,12 +380,16 @@ static void test_schema_upgrade_from_v11(void) {
     assert(sqlite3_exec(db,
         "ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 128000;"
         "ALTER TABLE channels DROP COLUMN prev_extension_name;"
+        "ALTER TABLE channel_outbox RENAME COLUMN deliver_mode TO deliver_plain;"
         "INSERT INTO models(id, provider_name, model, context_window) VALUES"
         "  ('m-def','p','vendor/def',128000),"      /* old default → NULLed */
         "  ('m-big','p','vendor/big',200000);"      /* explicit → kept */
         "INSERT INTO grants(agent_name, kind, value, approval_mode) VALUES"
         "  ('a1','tool','extension_promote','silent')," /* dangerous → 'always' */
-        "  ('a1','tool','shell_exec','silent');",       /* ordinary → untouched */
+        "  ('a1','tool','shell_exec','silent');"        /* ordinary → untouched */
+        "INSERT INTO channel_outbox(channel_name, session_id, payload, deliver_plain) VALUES"
+        "  ('tg', 1, '{}', 0),"                         /* auto → mode 0 */
+        "  ('tg', 2, '{}', 1);",                        /* plain → mode 2 */
         NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 11);
     assert(db_schema_state(db, NULL) == DB_SCHEMA_UPGRADABLE);
@@ -405,6 +409,10 @@ static void test_schema_upgrade_from_v11(void) {
     assert(v && strcmp(v, "always") == 0); free(v);
     v = query_text(db, "SELECT approval_mode FROM grants WHERE value='shell_exec'");
     assert(v && strcmp(v, "silent") == 0); free(v);
+    v = query_text(db, "SELECT deliver_mode FROM channel_outbox WHERE session_id=1");
+    assert(v && strcmp(v, "0") == 0); free(v);
+    v = query_text(db, "SELECT deliver_mode FROM channel_outbox WHERE session_id=2");
+    assert(v && strcmp(v, "2") == 0); free(v);
 
     /* Re-running is a no-op, not an error */
     assert(db_schema_compat(db) == 1);

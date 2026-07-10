@@ -97,7 +97,7 @@ int channel_set_config(ChannelCtx *ctx, const char *key, const char *value) {
 ChannelOutboxRow *channel_next_outbox(ChannelCtx *ctx) {
     if (!ctx) return NULL;
     const char *sql =
-        "SELECT id, session_id, payload, deliver_plain FROM channel_outbox"
+        "SELECT id, session_id, payload, deliver_mode FROM channel_outbox"
         " WHERE channel_name=? AND status='pending' AND next_attempt_at <= unixepoch()"
         " ORDER BY id ASC LIMIT 1;";
     sqlite3_stmt *stmt;
@@ -112,7 +112,7 @@ ChannelOutboxRow *channel_next_outbox(ChannelCtx *ctx) {
             row->session_id = sqlite3_column_int64(stmt, 1);
             const char *p = (const char *)sqlite3_column_text(stmt, 2);
             row->payload = p ? strdup(p) : NULL;
-            row->deliver_plain = sqlite3_column_int(stmt, 3);
+            row->deliver_mode = sqlite3_column_int(stmt, 3);
         }
     }
     sqlite3_finalize(stmt);
@@ -214,18 +214,19 @@ int channel_retry_outbox(ChannelCtx *ctx, int64_t id, int delay_sec) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* Re-deliver immediately as plain text after a rich-format rejection. */
-int channel_retry_outbox_plain(ChannelCtx *ctx, int64_t id) {
+/* Re-deliver immediately at a degraded mode after a format rejection. */
+int channel_retry_outbox_mode(ChannelCtx *ctx, int64_t id, int mode) {
     if (!ctx) return -1;
     const char *sql =
         "UPDATE channel_outbox"
-        " SET status='pending', deliver_plain=1, next_attempt_at=0"
+        " SET status='pending', deliver_mode=?, next_attempt_at=0"
         " WHERE id=? AND channel_name=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
-    sqlite3_bind_int64(stmt, 1, id);
-    sqlite3_bind_text(stmt, 2, ctx->channel_name, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 1, mode);
+    sqlite3_bind_int64(stmt, 2, id);
+    sqlite3_bind_text(stmt, 3, ctx->channel_name, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? 0 : -1;

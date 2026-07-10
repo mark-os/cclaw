@@ -330,7 +330,7 @@ void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row) {
     JS_SetPropertyStr(ctx, obj, "session_id", JS_NewInt32(ctx, (int32_t)row->session_id));
     JS_SetPropertyStr(ctx, obj, "payload",
         JS_NewString(ctx, row->payload ? row->payload : ""));
-    JS_SetPropertyStr(ctx, obj, "plain", JS_NewBool(ctx, row->deliver_plain));
+    JS_SetPropertyStr(ctx, obj, "mode", JS_NewInt32(ctx, row->deliver_mode));
     JS_SetPropertyStr(ctx, global, "__cr_outbox_item", obj);
     JSValue ret = eval_js(ctx, "onOutbox(__cr_outbox_item)", "onOutbox");
     JS_FreeValue(ctx, ret);
@@ -638,15 +638,39 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                 SendReq *r = g_send_active;
                 int ok = (!cerr && status >= 200 && status < 300);
                 if (r->outbox_id > 0) {
-                    /* A rich-format rejection ("can't parse entities" 400) means the
-                     * HTML render was bad. Re-deliver the whole row as plain text once
-                     * — a plain send never hits this error, so no loop. Checked before
-                     * the transient/terminal split since it's a 400 (otherwise terminal). */
+                    /* Format rejections degrade the delivery mode and re-deliver;
+                     * both are checked before the transient/terminal split since
+                     * they're 4xx (otherwise terminal). The ladder only descends
+                     * (rich → html → plain), so neither branch can loop.
+                     *
+                     * 1. sendRichMessage rejected (400 = bad markdown/limits, 404 =
+                     *    method unknown to this Bot API) → re-deliver as HTML. A 404
+                     *    or an explicit "method not found" body means the server
+                     *    doesn't speak the method at all — latch rich_disabled so
+                     *    later rows skip straight to HTML. cerr==NULL here (status
+                     *    is only read on a completed transfer), so a transient curl
+                     *    failure never trips this. */
+                    int rich_reject = (!cerr && (status == 400 || status == 404) &&
+                                       r->url && strstr(r->url, "/sendRichMessage") != NULL);
+                    /* 2. HTML render rejected ("can't parse entities" 400) → plain. */
                     int parse_err = (status == 400 && g_send_resp.data &&
                                      strstr(g_send_resp.data, "can't parse entities") != NULL);
-                    if (!ok && parse_err) {
+                    if (!ok && rich_reject) {
                         send_queue_drop_outbox(r->outbox_id);
-                        channel_retry_outbox_plain(g_ctx, r->outbox_id);
+                        channel_retry_outbox_mode(g_ctx, r->outbox_id, 1);
+                        if (status == 404 ||
+                            (g_send_resp.data &&
+                             (strstr(g_send_resp.data, "method not found") != NULL ||
+                              strstr(g_send_resp.data, "METHOD_NOT_FOUND") != NULL))) {
+                            channel_set_config(g_ctx, "rich_disabled", "1");
+                            LOG_WARN_("outbox sendRichMessage unsupported (status=%ld)"
+                                      " -> rich_disabled latched", status);
+                        }
+                        LOG_WARN_("outbox rich rejected %ld id=%lld -> retry html",
+                                  status, (long long)r->outbox_id);
+                    } else if (!ok && parse_err) {
+                        send_queue_drop_outbox(r->outbox_id);
+                        channel_retry_outbox_mode(g_ctx, r->outbox_id, 2);
                         LOG_WARN_("outbox parse-entities 400 id=%lld -> retry plain",
                                   (long long)r->outbox_id);
                     } else if (!ok) {

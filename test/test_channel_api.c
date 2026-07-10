@@ -131,8 +131,8 @@ static void test_channel_outbox(void) {
     channel_ctx_free(ctx);
 }
 
-/* channel_retry_outbox_plain flips deliver_plain and re-pends the row. */
-static void test_channel_outbox_plain(void) {
+/* channel_retry_outbox_mode degrades deliver_mode and re-pends the row. */
+static void test_channel_outbox_mode(void) {
     cleanup();
     ChannelCtx *ctx = channel_ctx_open(TEST_DB, "telegram");
     assert(ctx);
@@ -143,19 +143,30 @@ static void test_channel_outbox_plain(void) {
 
     ChannelOutboxRow *row = channel_next_outbox(ctx);
     assert(row);
-    assert(row->deliver_plain == 0);   /* first delivery: rich */
+    assert(row->deliver_mode == 0);   /* first delivery: auto/rich */
     int64_t id = row->id;
     channel_outbox_row_free(row);
 
-    /* Simulate a parse-entities rejection → re-deliver plain. */
-    channel_dispatch_outbox(ctx, id);              /* 'sending' */
-    int rc = channel_retry_outbox_plain(ctx, id);  /* back to pending, plain */
+    /* Simulate a rich rejection → re-deliver as html. */
+    channel_dispatch_outbox(ctx, id);                  /* 'sending' */
+    int rc = channel_retry_outbox_mode(ctx, id, 1);    /* back to pending, html */
     assert(rc == 0);
 
     row = channel_next_outbox(ctx);
     assert(row);
     assert(row->id == id);
-    assert(row->deliver_plain == 1);   /* re-delivery: plain */
+    assert(row->deliver_mode == 1);   /* re-delivery: html */
+    channel_outbox_row_free(row);
+
+    /* Then a parse-entities rejection → plain. */
+    channel_dispatch_outbox(ctx, id);
+    rc = channel_retry_outbox_mode(ctx, id, 2);
+    assert(rc == 0);
+
+    row = channel_next_outbox(ctx);
+    assert(row);
+    assert(row->id == id);
+    assert(row->deliver_mode == 2);   /* re-delivery: plain */
     channel_outbox_row_free(row);
 
     channel_ctx_free(ctx);
@@ -199,8 +210,8 @@ int main(void) {
     test_channel_outbox();
     printf(" OK\n");
 
-    printf("test_channel_outbox_plain...");
-    test_channel_outbox_plain();
+    printf("test_channel_outbox_mode...");
+    test_channel_outbox_mode();
     printf(" OK\n");
 
     printf("test_wake_external...");

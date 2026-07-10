@@ -3,6 +3,7 @@
 // All outbound HTTP goes through channel.send() — nothing here blocks.
 
 var TG_MAX_MSG_LEN = 4096;
+var TG_RICH_MAX_BYTES = 32768;   // sendRichMessage UTF-8 byte limit
 var config = {};
 var offset = 0;
 var dialogs = {}; // chat_id -> {type, data}
@@ -189,10 +190,41 @@ function onOutbox(item) {
         return;
     }
 
+    // item.mode is the delivery ladder position, bumped by the C loop when
+    // the platform rejects a format: 0=auto (rich), 1=html, 2=plain.
+    var mode = item.mode || 0;
+
+    // Rich path (Bot API 10.1 sendRichMessage): one request with the RAW
+    // markdown — no escaping, no chunking. Over the 32KB byte limit, or once
+    // the rich_disabled latch is set (server doesn't speak the method), fall
+    // through to the chunked HTML renderer. A rich 400/404 comes back through
+    // the C loop as mode=1.
+    if (mode === 0 && channel.getConfig("rich_disabled") !== "1" &&
+        utf8ByteLen(text) <= TG_RICH_MAX_BYTES) {
+        tgCall("sendRichMessage", JSON.stringify({
+            chat_id: parseInt(chatId, 10),
+            rich_message: {markdown: text}
+        }), {outbox_id: item.id, final: 1});
+        return;
+    }
+
     // Queue all chunks; the C loop sends them in order and acks the
-    // outbox row when the final chunk gets a 2xx. item.plain is set by the C
-    // loop when a prior HTML attempt was rejected — re-deliver as plain text.
-    sendChunked(chatId, text, item.id, item.plain);
+    // outbox row when the final chunk gets a 2xx.
+    sendChunked(chatId, text, item.id, mode === 2);
+}
+
+// UTF-8 byte length of a JS (UTF-16) string. QuickJS has no TextEncoder;
+// astral chars are a surrogate pair (2 units) encoding 4 UTF-8 bytes.
+function utf8ByteLen(s) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+        var c = s.charCodeAt(i);
+        if (c < 0x80) n += 1;
+        else if (c < 0x800) n += 2;
+        else if (c >= 0xD800 && c <= 0xDBFF) { n += 4; i++; }
+        else n += 3;
+    }
+    return n;
 }
 
 // ── Message processing ──────────────────────────────────────────

@@ -325,6 +325,8 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "UPDATE grants SET approval_mode='always' WHERE kind='tool' AND value IN"
       " ('extension_promote','extension_publish','configure_provider',"
       "'configure_channel','create_agent');" },
+    { 14,
+      "ALTER TABLE channels ADD COLUMN prev_extension_name TEXT;" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

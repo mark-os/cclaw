@@ -52,3 +52,38 @@ char *unicode_strip_invisible(const char *s, size_t len, size_t *out_len) {
     if (out_len) *out_len = o;
     return out;
 }
+
+char *utf8_sanitize(const char *s, size_t len) {
+    if (!s) return NULL;
+    /* Worst case: every byte is invalid → each becomes 3-byte U+FFFD */
+    char *out = malloc(len * 3 + 1);
+    if (!out) return NULL;
+    size_t o = 0, pos = 0;
+    while (pos < len) {
+        unsigned cp;
+        size_t n = decode_utf8_strict((const unsigned char *)s + pos, len - pos, &cp);
+        if (n == 0) {
+            /* Invalid byte: replace with U+FFFD (ef bf bd) */
+            out[o++] = (char)0xEF;
+            out[o++] = (char)0xBF;
+            out[o++] = (char)0xBD;
+            pos++;
+        } else {
+            /* Also reject surrogates and overlong NULs */
+            if (cp >= 0xD800 && cp <= 0xDFFF) {
+                out[o++] = (char)0xEF;
+                out[o++] = (char)0xBF;
+                out[o++] = (char)0xBD;
+                pos += n;
+            } else {
+                memcpy(out + o, s + pos, n);
+                o += n;
+                pos += n;
+            }
+        }
+    }
+    out[o] = '\0';
+    /* Shrink to fit */
+    char *trimmed = realloc(out, o + 1);
+    return trimmed ? trimmed : out;
+}

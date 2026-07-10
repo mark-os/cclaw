@@ -783,6 +783,10 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             fflush(stdout);
         }
 
+        /* Ensure valid UTF-8 before DB storage */
+        { char *clean = utf8_sanitize(result, strlen(result));
+          if (clean) { free(result); result = clean; } }
+
         char *stored = truncate_and_spill(result, session_id, tc->call_id);
         ToolResult tr = {.tool_call_id = tc->call_id,
                          .content = stored ? stored : result};
@@ -2367,6 +2371,11 @@ static void reap_children(void) {
                     fprintf(stdout, "\033[2m→ %.77s...\033[0m\n", output);
                 fflush(stdout);
             }
+
+            /* Ensure valid UTF-8 before DB storage (binary tool output like
+             * gzip would poison JSON serialization of the payload later). */
+            { char *clean = utf8_sanitize(output, out_len);
+              if (clean) { free(output); output = clean; out_len = strlen(output); } }
 
             /* Write result to DB */
             char *stored = truncate_and_spill(output, session_id, c->tool_call_id);

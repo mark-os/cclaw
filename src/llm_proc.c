@@ -482,6 +482,15 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 http_response_free(&resp);
                 break;
             }
+            /* Other 400: persistent rejection (bad payload shape, encoding
+             * issues) — degrade so we don't retry every turn. */
+            if (status == 400) {
+                LOG_DEBUG_("llm_req model_skip model=%s reason=bad_request", m->model);
+                fail_text = "error: provider rejected the request";
+                http_response_free(&resp);
+                model_degrade_unavailable(db, cfg->db_path, session_id, m->id, status);
+                break;
+            }
             if (status == 401 || status == 403 || status == 404) {
                 LOG_DEBUG_("llm_req model_skip model=%s reason=%s", m->model,
                            status == 404 ? "not_found" : "auth_failed");

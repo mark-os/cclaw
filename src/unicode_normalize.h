@@ -13,4 +13,9 @@
  * receives the resulting byte length. NULL on OOM or NULL input. */
 char *unicode_strip_invisible(const char *s, size_t len, size_t *out_len);
 
+/* Replace invalid UTF-8 bytes with U+FFFD (replacement character). Ensures
+ * the result is valid UTF-8 suitable for JSON serialization. Returns a
+ * malloc'd NUL-terminated copy, or NULL on OOM/NULL input. */
+char *utf8_sanitize(const char *s, size_t len);
+
 #endif

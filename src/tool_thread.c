@@ -6,6 +6,7 @@
 #include "db_response.h"
 #include "context.h"
 #include "types.h"
+#include "unicode_normalize.h"
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -91,6 +92,10 @@ static void *tool_thread_fn(void *arg) {
     }
 
     if (db) {
+        /* Ensure valid UTF-8 before DB storage */
+        { char *clean = utf8_sanitize(result, strlen(result));
+          if (clean) { free(result); result = clean; } }
+
         char *stored = truncate_and_spill(result, job->session_id, job->tool_call_id);
         ToolResult tr = {.tool_call_id = job->tool_call_id,
                          .content = stored ? stored : result};

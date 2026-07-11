@@ -119,6 +119,13 @@ VTYPE_PREFIX  = 0   # Fixed prefix: validate tail charset + length
 VTYPE_KEYWORD = 1   # Contextual keyword: check assignment pattern + entropy
 VTYPE_LITERAL = 2   # Strong literal marker: flag on the anchor alone
 VTYPE_BASE64  = 3   # Base64 tail: decode + require printable ':' (HTTP Basic)
+VTYPE_SPAN    = 4   # Multi-line block: anchor .. end marker (PEM private key)
+
+# Rules whose match must span from the anchor to an end marker rather than a
+# single charset run. Flagging the anchor alone (the old LITERAL fallback)
+# left the key body in cleartext. The C-side validator (validate_span) owns
+# the marker logic; the generator just pins the vtype.
+SPAN_RULE_IDS = {'private-key'}
 
 # Charset classes (must match secret_scan.c charset_ok)
 CHARSET_ANY         = 0
@@ -181,7 +188,20 @@ def extract_tail_params(rule):
     # Common patterns: [A-Z2-7]{16}, [a-z0-9]{36}, [a-zA-Z0-9_-]{93}, [\w-]{17,}
     m = re.search(r'\[([A-Za-z0-9\-_\\/+=.]+)\]\{(\d+)(?:,(\d+)?)?\}', regex)
     if not m:
-        return None
+        # Bare \w{n} tail (e.g. github_pat_\w{82}): \w = [A-Za-z0-9_] ⊂ ALNUM.
+        # Without this the rule degenerated to a LITERAL anchor that redacted
+        # only the prefix and left the token body in cleartext.
+        m = re.search(r'\\w\{(\d+)(?:,(\d+)?)?\}', regex)
+        if not m:
+            return None
+        min_len = int(m.group(1))
+        if m.group(2):
+            max_len = int(m.group(2))
+        elif ',' in m.group(0):
+            max_len = max(min_len, OPEN_TAIL_CAP)
+        else:
+            max_len = min_len
+        return min_len, max_len, CHARSET_ALNUM
     charset_str = m.group(1)
     # [\s..]/[\S..] match arbitrary bytes (incl. newlines) — not a tail we can
     # validate with one charset run; let the caller fall back to literal/drop.
@@ -352,7 +372,8 @@ def emit_headers(keywords, rules_meta, goto, failure, accept, state_count):
         f.write("#define SCAN_VTYPE_PREFIX  0\n")
         f.write("#define SCAN_VTYPE_KEYWORD 1\n")
         f.write("#define SCAN_VTYPE_LITERAL 2\n")
-        f.write("#define SCAN_VTYPE_BASE64  3\n\n")
+        f.write("#define SCAN_VTYPE_BASE64  3\n")
+        f.write("#define SCAN_VTYPE_SPAN    4\n\n")
         f.write("/* Charset classes */\n")
         f.write("#define SCAN_CHARSET_ANY         0\n")
         f.write("#define SCAN_CHARSET_UPPER_ALNUM 1\n")
@@ -427,7 +448,10 @@ def main():
             kw_canonical = kw_lower   # case used for the C-side exact re-check
             nocase = 1                # default: case-insensitive (AC table is folded)
 
-            if vtype == VTYPE_KEYWORD:
+            if rule['id'] in SPAN_RULE_IDS:
+                kw_vtype = VTYPE_SPAN
+                tail_min, tail_max, charset = 0, 0, CHARSET_ANY
+            elif vtype == VTYPE_KEYWORD:
                 kw_vtype = VTYPE_KEYWORD
                 tail_min, tail_max, charset = 10, 150, CHARSET_ALNUM
             elif vtype == VTYPE_BASE64:

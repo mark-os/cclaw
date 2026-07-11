@@ -97,6 +97,10 @@ static int validate_prefix(const char *text, size_t text_len, int offset,
 static int validate_keyword(const char *text, size_t text_len, int offset,
                             const ScanRule *rule, int *out_start, int *out_len) {
     int kw_len = (int)strlen(rule->keyword);
+    /* Word boundary: "api" inside "espn_api.qjs" or "rapid" is not a keyword
+     * hit. Prefix rules already enforce this via boundary_ok; keyword rules
+     * historically didn't, which made them fire all over ordinary code. */
+    if (!boundary_ok(text, offset, rule)) return 0;
     /* Search forward from keyword for assignment operator within 30 chars */
     int search_end = offset + kw_len + 30;
     if (search_end > (int)text_len) search_end = (int)text_len;
@@ -119,12 +123,13 @@ static int validate_keyword(const char *text, size_t text_len, int offset,
 
     if (val_start >= (int)text_len) return 0;
 
-    /* Extract value: run of non-whitespace, non-quote chars */
+    /* Extract value: run of chars in the rule's charset. Enforcing the
+     * charset (not just "non-whitespace") is what keeps code expressions —
+     * JSON.parse(r.body), channel.getConfig(x) — from passing as values:
+     * no real API key contains parens or braces. */
     int val_end = val_start;
     while (val_end < (int)text_len && val_end - val_start < rule->tail_max) {
-        char c = text[val_end];
-        if (c == '"' || c == '\'' || c == '`' || c == ';' ||
-            c == '\n' || c == '\r' || c == ' ' || c == '\t')
+        if (!charset_ok((unsigned char)text[val_end], rule->charset))
             break;
         val_end++;
     }
@@ -207,6 +212,90 @@ static int validate_base64(const char *text, size_t text_len, int offset,
     return 1;
 }
 
+/* Case-insensitive bounded substring search. Returns offset of needle in
+ * hay[0..n) or -1. needle must be lowercase. */
+static int find_nocase(const char *hay, size_t n, const char *needle) {
+    size_t nl = strlen(needle);
+    if (nl == 0 || nl > n) return -1;
+    for (size_t i = 0; i + nl <= n; i++) {
+        size_t j = 0;
+        while (j < nl && (char)tolower((unsigned char)hay[i + j]) == needle[j]) j++;
+        if (j == nl) return (int)i;
+    }
+    return -1;
+}
+
+#define SPAN_MAX_BLOCK 16384  /* PEM blocks: RSA-4096 ≈ 3.4KB; generous cap */
+
+/* Validate a span-type match (private-key): the anchor "-----begin" must open
+ * a PRIVATE KEY header (not a certificate/public key), and the match extends
+ * through the closing "-----end ... -----" marker so the key *body* is
+ * covered — flagging the header alone left the key material in cleartext. */
+static int validate_span(const char *text, size_t text_len, int offset,
+                         const ScanRule *rule, int *out_len) {
+    int kw_len = (int)strlen(rule->keyword);
+    int start = offset + kw_len;
+    if (start >= (int)text_len) return 0;
+
+    /* Header must name a private key within the BEGIN line (gitleaks allows
+     * up to ~100 chars of algorithm naming between BEGIN and PRIVATE KEY). */
+    size_t hdr_avail = text_len - (size_t)start;
+    if (hdr_avail > 116) hdr_avail = 116;
+    int pk = find_nocase(text + start, hdr_avail, "private key");
+    if (pk < 0) return 0;
+    int nl = find_nocase(text + start, hdr_avail, "\n");
+    if (nl >= 0 && nl < pk) return 0;   /* "private key" on a later line */
+
+    size_t cap = text_len - (size_t)offset;
+    if (cap > SPAN_MAX_BLOCK) cap = SPAN_MAX_BLOCK;
+    int end_m = find_nocase(text + offset, cap, "-----end");
+    if (end_m >= 0) {
+        /* Extend through the closing dashes of the END line. */
+        size_t rest_off = (size_t)(end_m + 8);
+        int close = find_nocase(text + offset + rest_off, cap - rest_off, "-----");
+        if (close >= 0)
+            *out_len = (int)rest_off + close + 5;
+        else
+            *out_len = (int)cap;
+    } else {
+        /* Truncated block (END marker cut off): redact to the cap — the body
+         * that IS present must still be removed. */
+        *out_len = (int)cap;
+    }
+    return 1;
+}
+
+/* Placeholder spans ({{SECRET:NAME}}) are already-masked regions — a finding
+ * inside one is the scanner reacting to our own masking output, which is how
+ * nested {{SECRET:{{SECRET:... garbage was minted. Drop such findings. */
+static int in_placeholder(const char *text, size_t len, int off, int mlen) {
+    const char *p = text;
+    size_t remain = len;
+    for (;;) {
+        int s = find_nocase(p, remain, "{{secret:");
+        if (s < 0) return 0;
+        size_t ph_start = (size_t)(p - text) + (size_t)s;
+        size_t i = ph_start + 9;
+        while (i + 1 < len &&
+               (((text[i] >= 'A' && text[i] <= 'Z') ||
+                 (text[i] >= '0' && text[i] <= '9') || text[i] == '_')))
+            i++;
+        if (i + 1 < len && text[i] == '}' && text[i + 1] == '}') {
+            size_t ph_end = i + 2;
+            if ((size_t)off < ph_end && (size_t)(off + mlen) > ph_start)
+                return 1;
+            if ((size_t)off >= ph_end) {  /* finding is past this placeholder */
+                p = text + ph_end;
+                remain = len - ph_end;
+                continue;
+            }
+            return 0;  /* finding ends before this placeholder starts */
+        }
+        p = text + ph_start + 9;
+        remain = len - (ph_start + 9);
+    }
+}
+
 int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings) {
     int count = 0;
     int state = 0;
@@ -255,6 +344,16 @@ int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings
                         count++;
                     } else { saturated = 1; }
                 }
+            } else if (rule->vtype == SCAN_VTYPE_SPAN) {
+                int span_len;
+                if (validate_span(text, len, match_offset, rule, &span_len)) {
+                    if (count < max_findings) {
+                        out[count].rule_id = rule->id;
+                        out[count].offset = match_offset;
+                        out[count].match_len = span_len;
+                        count++;
+                    } else { saturated = 1; }
+                }
             } else if (rule->vtype == SCAN_VTYPE_BASE64) {
                 int val_start, val_len;
                 if (validate_base64(text, len, match_offset, rule, &val_start, &val_len)) {
@@ -278,7 +377,15 @@ int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings
             }
         }
     }
-    return saturated ? max_findings + 1 : count;
+    if (saturated) return max_findings + 1;
+
+    /* Drop findings inside {{SECRET:...}} placeholders — already masked. */
+    int kept = 0;
+    for (int i = 0; i < count; i++) {
+        if (!in_placeholder(text, len, out[i].offset, out[i].match_len))
+            out[kept++] = out[i];
+    }
+    return kept;
 }
 
 /* In-place replacement helper (same as tool_shell.c mask_replace) */

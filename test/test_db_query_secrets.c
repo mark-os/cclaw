@@ -53,8 +53,8 @@ static void test_select_star_filters_secrets(void) {
     db_set_secret_key(key);
 
     /* Seed encrypted secrets in secrets table */
-    db_secret_set(db, "PROVIDER_API_KEY", "sk-or-v1-secret123", "operator", "active", "system");
-    db_secret_set(db, "GEMINI_API_KEY", "AIzaSy-secret456", "operator", "active", "system");
+    db_secret_set(db, "PROVIDER_API_KEY", "sk-or-v1-secret123", "operator", "system");
+    db_secret_set(db, "GEMINI_API_KEY", "AIzaSy-secret456", "operator", "system");
 
     /* Run db_query tool: SELECT * FROM secrets */
     char *result = tool_db_query_handler("{\"sql\":\"SELECT * FROM secrets\"}", db);

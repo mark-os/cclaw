@@ -448,18 +448,17 @@ CREATE TABLE IF NOT EXISTS secret_hosts (
 );
 
 -- Secret store (specs/security.md): DB-backed secrets, born via the
--- `cclaw secret set` operator verb or the secret_create tool. value is always
--- "enc:<hex(...)>" (never plaintext). status='pending' is provenance/UX only —
--- enforcement comes free from secret_hosts having zero rows for a new secret
--- (first use always parks; ALWAYS-approval binds and flips it to 'active').
+-- `cclaw secret set` operator verb, the secret_create tool, or a save_secret
+-- capture. value is always "enc:<hex(...)>" (never plaintext). Enforcement
+-- comes free from secret_hosts having zero rows for a new secret (first use
+-- always parks; ALWAYS-approval on a url-carrying call records the binding).
 -- scope: 'agent' secrets feed {{SECRET:name}} interpolation + child injection;
 -- 'system' secrets (provider API keys) are daemon-consumed only and are never
 -- loaded into the agent-facing snapshot — an agent cannot interpolate them.
 CREATE TABLE IF NOT EXISTS secrets (
   name       TEXT PRIMARY KEY,                    -- ^[A-Z][A-Z0-9_]*$
   value      TEXT NOT NULL,
-  status     TEXT NOT NULL DEFAULT 'active',       -- 'active' | 'pending'
-  source     TEXT NOT NULL DEFAULT 'operator',      -- 'operator'|'generated'|'quarantine'
+  source     TEXT NOT NULL DEFAULT 'operator',      -- 'operator'|'generated'|'captured'
   scope      TEXT NOT NULL DEFAULT 'agent'
              CHECK (scope IN ('agent','system')),
   created_at INTEGER NOT NULL DEFAULT (unixepoch())

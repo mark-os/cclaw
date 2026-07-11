@@ -38,7 +38,7 @@ static sqlite3 *fresh_db(void) {
 static void test_set_load_rm_roundtrip(void) {
     sqlite3 *db = fresh_db();
     assert(db_secret_exists(db, "GH_TOKEN") == 0);
-    assert(db_secret_set(db, "GH_TOKEN", "ghp_abc123", "operator", "active", NULL) == 0);
+    assert(db_secret_set(db, "GH_TOKEN", "ghp_abc123", "operator", NULL) == 0);
     assert(db_secret_exists(db, "GH_TOKEN") == 1);
 
     size_t n = 0;
@@ -49,7 +49,7 @@ static void test_set_load_rm_roundtrip(void) {
     shell_secrets_free(loaded, n);
 
     /* Overwrite (upsert) */
-    assert(db_secret_set(db, "GH_TOKEN", "ghp_new", "operator", "active", NULL) == 0);
+    assert(db_secret_set(db, "GH_TOKEN", "ghp_new", "operator", NULL) == 0);
     loaded = db_secrets_load(db, &n);
     assert(n == 1 && strcmp(loaded[0].value, "ghp_new") == 0);
     shell_secrets_free(loaded, n);
@@ -69,27 +69,30 @@ static void test_set_fails_without_key(void) {
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db != NULL);
     assert(db_secret_key_loaded() == 0);
-    assert(db_secret_set(db, "X", "value", "operator", "active", NULL) == -1);
+    assert(db_secret_set(db, "X", "value", "operator", NULL) == -1);
     sqlite3_close(db);
     printf("  PASS: set_fails_without_key\n");
 }
 
-static void test_pending_status(void) {
+static void test_captured_loads(void) {
+    /* A save_secret capture ('captured' source) is a first-class secret: it
+     * loads into the snapshot exactly like an operator-set one. */
     sqlite3 *db = fresh_db();
-    assert(db_secret_set(db, "PENDING_ONE", "v1", "quarantine", "pending", NULL) == 0);
-    assert(db_secret_set(db, "ACTIVE_ONE", "v2", "operator", "active", NULL) == 0);
-    assert(db_secret_pending_count(db) == 1);
-    assert(db_secret_set_status(db, "PENDING_ONE", "active") == 0);
-    assert(db_secret_pending_count(db) == 0);
+    assert(db_secret_set(db, "CAPTURED_ONE", "v1", "captured", NULL) == 0);
+    assert(db_secret_set(db, "ACTIVE_ONE", "v2", "operator", NULL) == 0);
+    size_t n = 0;
+    ShellSecret *s = db_secrets_load(db, &n);
+    assert(n == 2 && s);
+    shell_secrets_free(s, n);
     db_wipe_secret_key();
     sqlite3_close(db);
-    printf("  PASS: pending_status\n");
+    printf("  PASS: captured_loads\n");
 }
 
 static void test_snapshot_env_wins(void) {
     sqlite3 *db = fresh_db();
-    assert(db_secret_set(db, "SHARED", "from_db", "operator", "active", NULL) == 0);
-    assert(db_secret_set(db, "DB_ONLY", "db_value", "operator", "active", NULL) == 0);
+    assert(db_secret_set(db, "SHARED", "from_db", "operator", NULL) == 0);
+    assert(db_secret_set(db, "DB_ONLY", "db_value", "operator", NULL) == 0);
 
     ShellSecret env[1] = { { .name = strdup("SHARED"), .value = strdup("from_env") } };
     size_t snap_n = 0;
@@ -139,7 +142,7 @@ int main(void) {
     printf("test_secret_store:\n");
     test_set_load_rm_roundtrip();
     test_set_fails_without_key();
-    test_pending_status();
+    test_captured_loads();
     test_snapshot_env_wins();
     test_snapshot_empty();
     test_name_validation();

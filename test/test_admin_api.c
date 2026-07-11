@@ -402,7 +402,7 @@ static void test_list_models(void) {
     admin_models_free(list, count);
 
     /* Key presence via encrypted kv */
-    assert(db_secret_set(db, "TEST_MODELS_KEY", "sk-test", "operator", "active", "system") == 0);
+    assert(db_secret_set(db, "TEST_MODELS_KEY", "sk-test", "operator", "system") == 0);
     assert(admin_list_models(db, &list, &count) == 0);
     assert(count == 2 && list[0].has_key == 1);
     admin_models_free(list, count);

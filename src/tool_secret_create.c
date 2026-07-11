@@ -97,7 +97,7 @@ static char *tool_secret_create_handler(const char *arguments, void *user_data) 
         return strdup("error: failed to generate random value");
     }
 
-    int rc = db_secret_set(ctx->db, name, value, "generated", "active", "agent");
+    int rc = db_secret_set(ctx->db, name, value, "generated", "agent");
     explicit_bzero(value, sizeof(value));
 
     char name_buf[64];

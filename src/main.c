@@ -53,6 +53,7 @@
 #include "secret_scan.h"
 #include "tool_policy.h"
 #include "secret_interp.h"
+#include "secret_capture.h"
 #include "external_content.h"
 #include "unicode_normalize.h"
 #include "run_tool.h"
@@ -754,9 +755,11 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         }
         if (!result) result = strdup("error: tool returned null");
 
-        /* Postprocess: deinterpolate + secret scan/redact (scan runs even
-         * with no secrets loaded — inline js_eval output can carry leaked
-         * credentials). Deliberate capture is save_secret, not the scanner. */
+        /* Explicit capture first (needs the RAW result), then postprocess:
+         * deinterpolate + secret scan/redact (scan runs even with no secrets
+         * loaded — inline js_eval output can carry leaked credentials). */
+        { char *cap = secret_capture_apply(g_db, tc->arguments, result);
+          if (cap) { free(result); result = cap; } }
         { char *pp = tool_result_postprocess(result, secrets, secret_count);
           if (pp) { free(result); result = pp; } }
 
@@ -2333,10 +2336,12 @@ static void reap_children(void) {
                 hosts = NULL;  /* truncated meta: don't trust a partial tag */
             }
 
-            /* Secret postprocess: deinterpolate + scan/redact. Fresh
-             * per-call snapshot (same rationale as dispatch_tool) — a secret
-             * born mid-session must be maskable in a reaped sandboxed
-             * child's output too. */
+            /* Explicit capture first (raw result), then postprocess:
+             * deinterpolate + scan/redact. Fresh per-call snapshot (same
+             * rationale as dispatch_tool) — a secret born mid-session must
+             * be maskable in a reaped sandboxed child's output too. */
+            { char *cap = secret_capture_apply(g_db, c->tool_args, output);
+              if (cap) { free(output); output = cap; out_len = strlen(output); } }
             { size_t snap_n = 0;
               ShellSecret *snap = secrets_snapshot(g_db,
                   g_tool_setup ? g_tool_setup->secrets : NULL,

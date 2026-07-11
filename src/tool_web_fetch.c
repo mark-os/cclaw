@@ -24,7 +24,9 @@ static const char *WEB_FETCH_PARAMS_JSON =
     "\"url\":{\"type\":\"string\",\"description\":\"URL to fetch (HTTP GET)\"},"
     "\"offset\":{\"type\":\"integer\",\"description\":\"Character offset to start from (default 0)\"},"
     "\"max_chars\":{\"type\":\"integer\",\"description\":\"Max characters to return (default 20000)\"},"
-    "\"raw\":{\"type\":\"boolean\",\"description\":\"Return raw response without HTML-to-markdown conversion (auto-skipped for JSON responses)\"}"
+    "\"raw\":{\"type\":\"boolean\",\"description\":\"Return raw response without HTML-to-markdown conversion (auto-skipped for JSON responses)\"},"
+    "\"save_secret\":{\"type\":\"string\",\"description\":\"Capture a credential from this response: NAME (^[A-Z][A-Z0-9_]*$) stores it encrypted and masks it to {{SECRET:NAME}} — the raw value never enters context\"},"
+    "\"save_secret_path\":{\"type\":\"string\",\"description\":\"With save_secret: JSON path (e.g. $.token) selecting the credential field; omit to capture the whole trimmed response\"}"
     "},\"required\":[\"url\"]}";
 
 /* Browser-like request headers */

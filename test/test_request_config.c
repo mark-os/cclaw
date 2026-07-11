@@ -241,6 +241,68 @@ static void test_denied_not_deduped(void) {
     printf("  PASS test_denied_not_deduped\n");
 }
 
+static void test_set_config(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+    assert(sid > 0);
+
+    RequestConfigCtx ctx = {
+        .db = db,
+        .agent_name = "test",
+        .session_id = sid,
+        .agents_dir = NULL,
+        .current_tool_call_id = "call_7"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+
+    /* Unknown key fails eagerly, nothing parks. */
+    char *err = call_handler(&reg,
+        "{\"action\":\"set_config\",\"key\":\"no_such_key\",\"value\":\"1\"}");
+    assert(err != NULL && strstr(err, "unknown config key") != NULL);
+    free(err);
+
+    /* Missing value fails. */
+    err = call_handler(&reg, "{\"action\":\"set_config\",\"key\":\"web_port\"}");
+    assert(err != NULL && strstr(err, "'value' required") != NULL);
+    free(err);
+
+    /* Registry key parks with key+value in args_json. */
+    char *ok = call_handler(&reg,
+        "{\"action\":\"set_config\",\"key\":\"web_port\",\"value\":\"9090\",\"reason\":\"move port\"}");
+    assert(ok == NULL); /* parked */
+
+    sqlite3_stmt *s;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT json_extract(args_json,'$.key'), json_extract(args_json,'$.value')"
+        " FROM approvals WHERE session_id=?1 AND action='set_config'"
+        " ORDER BY id DESC LIMIT 1", -1, &s, NULL);
+    assert(rc == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    const char *k = (const char *)sqlite3_column_text(s, 0);
+    const char *v = (const char *)sqlite3_column_text(s, 1);
+    assert(k && strcmp(k, "web_port") == 0);
+    assert(v && strcmp(v, "9090") == 0);
+    sqlite3_finalize(s);
+
+    /* Extension-registered key (config row with code-owned default) works. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO config(key, default_value, description)"
+        " VALUES('myext.knob','0','ext knob')", NULL, NULL, NULL) == SQLITE_OK);
+    ctx.current_tool_call_id = "call_8";
+    ok = call_handler(&reg,
+        "{\"action\":\"set_config\",\"key\":\"myext.knob\",\"value\":\"5\"}");
+    assert(ok == NULL); /* parked */
+
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_set_config\n");
+}
+
 int main(void) {
     printf("test_request_config:\n");
     test_register();
@@ -250,6 +312,7 @@ int main(void) {
     test_reason_in_args_json();
     test_grant_path_default_mode_read();
     test_denied_not_deduped();
+    test_set_config();
     printf("\nAll request_config tests passed.\n");
     return 0;
 }

@@ -168,6 +168,8 @@ static char *handler(const char *arguments, void *user_data) {
         "- grant a path:  {\"action\":\"grant_path\",\"path\":\"/absolute/path\",\"mode\":\"read\"}"
         " (mode: read|write, default read)\n"
         "- rename agent:  {\"action\":\"rename_agent\",\"name\":\"<new_name>\"}\n"
+        "- set config:    {\"action\":\"set_config\",\"key\":\"<key>\",\"value\":\"<value>\"}"
+        " (key must be a registered key listed above)\n"
         "Add an optional \"reason\" field — it is shown to the human approver.\n"
         "All gated actions require human approval before taking effect.\n");
 

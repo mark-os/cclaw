@@ -79,7 +79,6 @@ Parking lot for features explicitly out-of-scope right now.
 
 - Tool composition: JS tools calling other tools via `callTool(name, args)`
 - Workspace script auto-discovery (`workspace/tools/*.sh`)
-- Promote-approval enumeration: park `extension_promote` and surface the bundle's declared contents ("adds N tools / hooks / skills / config keys") in the approval prompt
 - Extension registry/marketplace: sharing bundles between cclaw installs (the manifest is already the portable unit)
 
 ### fetch() (foundation ✓)

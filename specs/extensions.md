@@ -78,6 +78,7 @@ directory.
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
 | `skills[]` | Bundle-relative paths, each a directory containing `SKILL.md` or a bare `.md` file ([skills.md](skills.md) format). Validated at promote: path must be bundle-relative and its frontmatter must parse with a `description`. |
 | `config[]` | Each: `{key, default?, description}`. `key` is `[A-Za-z0-9_]+` (no dots — `.` is the namespace separator); `description` is required. Install upserts config-registry rows keyed `<name>.<key>`. |
+| `agents[]` | Each: an agent-definition object ([self-configuration.md](self-configuration.md)); `system_prompt_file` (bundle-relative) may replace `system_prompt`. Install applies via `agent_definition_apply` with creator = owner agent (creation caps enforced); name collision with an existing agent refuses the install. Uninstall never deletes agents. |
 
 The manifest carries **identity and declarations only** — never tool *code*. Code
 lives in the handler files. (DB holds config + path; files hold code.)
@@ -508,7 +509,7 @@ implemented** (`cclaw --channel`, the `channels`/`channel_*` tables, the
 implemented (validation + ingest in `src/extension_manifest.c`; extension
 skill discovery in `src/skills.c`).
 
-Not yet implemented: approval-gating of `extension_promote` itself with the
-enumerated contents ("this bundle adds N tools / hooks / skills / config
-keys") surfaced in the approval prompt — today the enumeration exists in the
-DB after install but promote is not an approval-parked action.
+Approval-gating of `extension_promote` with the enumerated contents ("adds
+N tools / hooks / skills / config keys / agents") in the approval prompt,
+and the `agents[]` component, are specified in
+[self-configuration.md](self-configuration.md) (phase 3 of that effort).

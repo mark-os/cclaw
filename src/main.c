@@ -1613,6 +1613,13 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         const char *kind = (m && strcmp(m, "write") == 0) ? "write_path" : "read_path";
         if (v) agent_config_grant(g_db, agent, kind, v, grant_expires_at);
         tool_parse_free(&ta);
+    } else if (strcmp(a->action, "set_config") == 0) {
+        ToolArgs ta; tool_parse(a->args_json, &ta);
+        const char *k = targ_str(&ta, "key");
+        const char *v = targ_str(&ta, "value");
+        if (k && v && config_set(g_db, k, v) != 0)
+            LOG_WARN_("set_config apply failed key=%s", k);
+        tool_parse_free(&ta);
     } else if (strcmp(a->action, "rename_agent") == 0) {
         ToolArgs ta; tool_parse(a->args_json, &ta);
         const char *nn = targ_str(&ta, "name");
@@ -1866,6 +1873,10 @@ static void format_approval_summary(const Approval *a, char *buf, size_t buflen)
         } else if (a->action && strcmp(a->action, "rename_agent") == 0) {
             const char *v = targ_str(&ta, "name");
             snprintf(buf, buflen, "rename_agent: %s", v ? v : "?");
+        } else if (a->action && strcmp(a->action, "set_config") == 0) {
+            const char *k = targ_str(&ta, "key");
+            const char *v = targ_str(&ta, "value");
+            snprintf(buf, buflen, "set_config: %s = %s", k ? k : "?", v ? v : "?");
         } else {
             snprintf(buf, buflen, "%s", a->action ? a->action : "?");
         }

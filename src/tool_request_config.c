@@ -5,6 +5,7 @@
 #include "tool_request_config.h"
 #include "agent_config.h"
 #include "approval.h"
+#include "config_registry.h"
 #include "db.h"
 #include "validate.h"
 #include "tool_parse.h"
@@ -17,8 +18,10 @@
 
 static const char *PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
-    "\"action\":{\"type\":\"string\",\"enum\":[\"grant_tool\",\"grant_host\",\"grant_path\",\"rename_agent\"],"
+    "\"action\":{\"type\":\"string\",\"enum\":[\"grant_tool\",\"grant_host\",\"grant_path\",\"rename_agent\",\"set_config\"],"
     "\"description\":\"Type of config request\"},"
+    "\"key\":{\"type\":\"string\",\"description\":\"Config key (for set_config; must be a registered key — see search_config)\"},"
+    "\"value\":{\"type\":\"string\",\"description\":\"New value (for set_config)\"},"
     "\"tool\":{\"type\":\"string\",\"description\":\"Tool name (for grant_tool)\"},"
     "\"host\":{\"type\":\"string\",\"description\":\"Hostname to allow (for grant_host). Prefix with '.' to cover all subdomains: '.example.com' covers example.com AND sub.example.com\"},"
     "\"path\":{\"type\":\"string\",\"description\":\"Absolute path to grant (for grant_path)\"},"
@@ -30,16 +33,18 @@ static const char *PARAMS_JSON =
 
 /* Build canonical args JSON for the approval row using SQLite json_object
  * for safe escaping of model-controlled text.  Accepts optional mode,
- * preamble, reason (any may be NULL).  Caller frees. */
+ * preamble, cfg_value ('value' field for set_config), reason (any may be
+ * NULL).  Caller frees. */
 static char *build_args_json(sqlite3 *db, const char *action, const char *key,
                              const char *value, const char *mode,
-                             const char *preamble, const char *reason) {
+                             const char *preamble, const char *cfg_value,
+                             const char *reason) {
     /* Compose SQL with sequential placeholders for non-NULL optionals. */
     char sql[256];
     int off = snprintf(sql, sizeof(sql),
                        "SELECT json_object('action',?1,?2,?3");
     int next = 4;
-    int mode_pos = 0, preamble_pos = 0, reason_pos = 0;
+    int mode_pos = 0, preamble_pos = 0, value_pos = 0, reason_pos = 0;
     if (mode) {
         mode_pos = next++;
         off += snprintf(sql + off, sizeof(sql) - (size_t)off,
@@ -49,6 +54,11 @@ static char *build_args_json(sqlite3 *db, const char *action, const char *key,
         preamble_pos = next++;
         off += snprintf(sql + off, sizeof(sql) - (size_t)off,
                         ",'preamble',?%d", preamble_pos);
+    }
+    if (cfg_value) {
+        value_pos = next++;
+        off += snprintf(sql + off, sizeof(sql) - (size_t)off,
+                        ",'value',?%d", value_pos);
     }
     if (reason) {
         reason_pos = next++;
@@ -67,6 +77,8 @@ static char *build_args_json(sqlite3 *db, const char *action, const char *key,
         sqlite3_bind_text(s, mode_pos, mode, -1, SQLITE_STATIC);
     if (preamble_pos)
         sqlite3_bind_text(s, preamble_pos, preamble, -1, SQLITE_STATIC);
+    if (value_pos)
+        sqlite3_bind_text(s, value_pos, cfg_value, -1, SQLITE_STATIC);
     if (reason_pos)
         sqlite3_bind_text(s, reason_pos, reason, -1, SQLITE_STATIC);
 
@@ -85,7 +97,7 @@ static char *build_args_json(sqlite3 *db, const char *action, const char *key,
 static char *gate_request(RequestConfigCtx *ctx, const char *action,
                           const char *key, const char *value,
                           const char *mode, const char *preamble,
-                          const char *reason) {
+                          const char *cfg_value, const char *reason) {
     /* Dedup: same (action, key=value) still pending in this session? A live
      * duplicate would otherwise queue a second "Approval required" prompt
      * for the same grant while the first is unanswered — confusing (two
@@ -114,7 +126,7 @@ static char *gate_request(RequestConfigCtx *ctx, const char *action,
     }
 
     char *args = build_args_json(ctx->db, action, key, value,
-                                 mode, preamble, reason);
+                                 mode, preamble, cfg_value, reason);
     if (!args)
         return strdup("error: failed to build args JSON");
 
@@ -137,7 +149,7 @@ static char *handler(const char *arguments, void *user_data) {
     if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON");
 
     const char *act = targ_str(&ta, "action");
-    if (!act) { tool_parse_free(&ta); return strdup("error: 'action' required (one of: grant_tool, grant_host, grant_path, rename_agent)"); }
+    if (!act) { tool_parse_free(&ta); return strdup("error: 'action' required (one of: grant_tool, grant_host, grant_path, rename_agent, set_config)"); }
 
     /* Optional reason — treat empty string as absent. */
     const char *reason = targ_str(&ta, "reason");
@@ -149,13 +161,13 @@ static char *handler(const char *arguments, void *user_data) {
         const char *tool = targ_str(&ta, "tool");
         if (!tool || !tool[0]) { tool_parse_free(&ta); return strdup("error: 'tool' required for grant_tool"); }
         result = gate_request(ctx, "grant_tool", "tool", tool,
-                              NULL, NULL, reason);
+                              NULL, NULL, NULL, reason);
 
     } else if (strcmp(act, "grant_host") == 0) {
         const char *host = targ_str(&ta, "host");
         if (!host || !host[0]) { tool_parse_free(&ta); return strdup("error: 'host' required for grant_host"); }
         result = gate_request(ctx, "grant_host", "host", host,
-                              NULL, NULL, reason);
+                              NULL, NULL, NULL, reason);
 
     } else if (strcmp(act, "grant_path") == 0) {
         const char *path = targ_str(&ta, "path");
@@ -168,7 +180,7 @@ static char *handler(const char *arguments, void *user_data) {
             return strdup("error: mode must be \"read\" or \"write\"");
         }
         result = gate_request(ctx, "grant_path", "path", path,
-                              mode, NULL, reason);
+                              mode, NULL, NULL, reason);
 
     } else if (strcmp(act, "rename_agent") == 0) {
         const char *new_name = targ_str(&ta, "name");
@@ -176,11 +188,37 @@ static char *handler(const char *arguments, void *user_data) {
         if (!new_name || !new_name[0]) { tool_parse_free(&ta); return strdup("error: 'name' required"); }
         if (!is_valid_agent_name(new_name)) { tool_parse_free(&ta); return strdup("error: agent name must be PascalCase: start with an uppercase letter, letters and digits only, max 63 chars"); }
         result = gate_request(ctx, "rename_agent", "name", new_name,
-                              NULL, preamble, reason);
+                              NULL, preamble, NULL, reason);
+
+    } else if (strcmp(act, "set_config") == 0) {
+        const char *key = targ_str(&ta, "key");
+        const char *value = targ_str(&ta, "value");
+        if (!key || !key[0]) { tool_parse_free(&ta); return strdup("error: 'key' required for set_config"); }
+        if (!value) { tool_parse_free(&ta); return strdup("error: 'value' required for set_config"); }
+        /* Eager validation: the key must be registered — in the C registry
+         * or extension-registered (config row with a code-owned default).
+         * Unknown keys fail now, not at approval time. */
+        if (!config_default(key)) {
+            sqlite3_stmt *ck;
+            int known = 0;
+            if (sqlite3_prepare_v2(ctx->db,
+                    "SELECT 1 FROM config WHERE key=?1 AND default_value IS NOT NULL",
+                    -1, &ck, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(ck, 1, key, -1, SQLITE_STATIC);
+                known = (sqlite3_step(ck) == SQLITE_ROW);
+                sqlite3_finalize(ck);
+            }
+            if (!known) {
+                tool_parse_free(&ta);
+                return strdup("error: unknown config key — use search_config to list registered keys");
+            }
+        }
+        result = gate_request(ctx, "set_config", "key", key,
+                              NULL, NULL, value, reason);
 
     } else {
         tool_parse_free(&ta);
-        return strdup("error: action must be grant_tool, grant_host, grant_path, or rename_agent");
+        return strdup("error: action must be grant_tool, grant_host, grant_path, rename_agent, or set_config");
     }
 
     tool_parse_free(&ta);
@@ -196,8 +234,9 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "api.github.com), grant_path (grant "
         "read or write access to an absolute path; mode: read|write, "
         "default read), rename_agent (rename this agent, with optional "
-        "preamble). All actions accept an optional 'reason' shown to the "
-        "approver.",
+        "preamble), set_config (set a registered config key to a value — "
+        "discover keys with search_config). All actions accept an optional "
+        "'reason' shown to the approver.",
         PARAMS_JSON, handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "request_config", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});

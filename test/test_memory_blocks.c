@@ -26,6 +26,9 @@ static void test_create_and_get(void) {
     assert(strcmp(mb->description, "Agent identity") == 0);
     assert(mb->char_limit == 5000);
     assert(mb->read_only == 0);
+    /* NULL placement defaults to 'context' — new memory rides in the
+     * per-turn session context block, not the system prompt. */
+    assert(strcmp(mb->placement, "context") == 0);
     memory_block_free(mb);
 
     /* Duplicate label fails */
@@ -151,6 +154,7 @@ static void test_seed(void) {
     assert(strcmp(mb->value, "") == 0);
     assert(mb->char_limit == 5000);
     assert(mb->read_only == 0);
+    assert(strcmp(mb->placement, "context") == 0);  /* unspecified → context */
     memory_block_free(mb);
 
     /* Re-seed doesn't overwrite (DB authoritative) */
@@ -172,9 +176,11 @@ static void test_prompt_injection(void) {
     /* Seed agent with system prompt */
     db_agent_upsert(db, "Testagent", NULL, "You are a test agent.");
 
-    /* Create memory blocks (containers) and add numbered entries */
-    memory_block_create(db, "Testagent", "persona", "Agent identity", "", 5000, NULL);
-    memory_block_create(db, "Testagent", "human", "User facts", "", 3000, NULL);
+    /* Create memory blocks (containers) and add numbered entries. System
+     * placement — this test covers system-prompt rendering; context-placement
+     * rendering is covered in test_llm_payload. */
+    memory_block_create(db, "Testagent", "persona", "Agent identity", "", 5000, "system");
+    memory_block_create(db, "Testagent", "human", "User facts", "", 3000, "system");
     memory_entry_add(db, "Testagent", "persona", "I am helpful"); /* 12 chars */
     memory_entry_add(db, "Testagent", "human", "Likes cats");     /* 10 chars */
 

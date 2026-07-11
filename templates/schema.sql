@@ -344,8 +344,11 @@ CREATE INDEX IF NOT EXISTS idx_hook_directives_session ON hook_directives(sessio
 
 -- ═══ Memory ═══
 -- placement: 'system' blocks render into the system prompt once per session
--- (agent_config.c); 'context' blocks render into the live <RELEVANT_CONTEXT>
--- block instead, rebuilt fresh every turn (llm_payload.c session_context_text).
+-- (agent_config.c); 'context' blocks render into the <RELEVANT_CONTEXT>
+-- block, materialized at each turn start (llm_payload.c session_context_text).
+-- New blocks default to 'context' — the API default in memory_block_create,
+-- which every insert path goes through; the column DEFAULT below is inert.
+-- Only the Assistant's seeded AGENT/USER identity blocks ask for 'system'.
 CREATE TABLE IF NOT EXISTS memory_blocks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_name TEXT,

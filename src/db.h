@@ -349,7 +349,9 @@ typedef struct {
 
 /* Create a memory block. Returns row id (>0) or -1 on error.
  * Fails if UNIQUE(agent_name, label) violated. placement: NULL/"" defaults
- * to 'system'. */
+ * to 'context' — new memory rides in the per-turn session context block;
+ * pass "system" only for stable identity content worth baking into the
+ * (cached, once-per-session) system prompt. */
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
                             const char *description, const char *value, int char_limit,
                             const char *placement);

@@ -14,6 +14,15 @@ INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, defa
 INSERT OR IGNORE INTO models(id, provider_name, model, priority)
   VALUES('openrouter/deepseek/deepseek-v4-flash', 'openrouter', 'deepseek/deepseek-v4-flash', 0);
 
+-- ═══ Media preprocessing model (capability-routed, e.g. voice transcription) ═══
+-- Native Gemini endpoint (llm_build_url appends /models/<model>:generateContent).
+-- Low routing priority: chat routing never picks it unless nothing else is
+-- healthy; the audio capability is what selects it (model_pick_by_capability).
+INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)
+  VALUES('gemini', 'https://generativelanguage.googleapis.com/v1beta', 'gemini', 'GEMINI_API_KEY', 'gemini-2.5-flash-lite', 50);
+INSERT OR IGNORE INTO models(id, provider_name, model, capabilities, priority)
+  VALUES('gemini/gemini-2.5-flash-lite', 'gemini', 'gemini-2.5-flash-lite', '["text","image","audio"]', 50);
+
 -- ═══ Built-in tools ═══
 -- Descriptions are a write-once seed: tools_sync_to_db() upserts with
 -- COALESCE(tools.description, excluded.description), so on a fresh DB these

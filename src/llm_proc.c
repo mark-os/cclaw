@@ -26,16 +26,7 @@
 
 
 
-/* ── Model candidate (loaded from DB) ──────────────────────────── */
-
-typedef struct {
-    char id[128];
-    char model[128];
-    char base_url[256];
-    char api_key_env[64];
-    int endpoint_type;
-    int context_window;
-} ModelCandidate;
+/* ── Model candidates (loaded from DB; struct in llm_proc.h) ───── */
 
 static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *out, int max) {
     if (max <= 0) return 0;
@@ -141,6 +132,37 @@ static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *
     }
 
     #undef TRY_MODEL
+    return n;
+}
+
+int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, int max) {
+    if (max <= 0) return 0;
+    int n = 0;
+    const char *sql =
+        "SELECT m.id, m.model, p.base_url, p.api_key_env, p.endpoint_type, m.context_window"
+        " FROM models m JOIN providers p ON m.provider_name = p.name"
+        " WHERE m.status != 'disabled'"
+        " AND (m.degraded_until IS NULL OR m.degraded_until < unixepoch())"
+        " AND m.capabilities IS NOT NULL AND json_valid(m.capabilities)"
+        " AND EXISTS (SELECT 1 FROM json_each(m.capabilities) WHERE value = ?1)"
+        " ORDER BY m.priority";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(s, 1, cap, -1, SQLITE_STATIC);
+    while (n < max && sqlite3_step(s) == SQLITE_ROW) {
+        ModelCandidate *c = &out[n];
+        const char *v;
+        v = (const char *)sqlite3_column_text(s, 0); snprintf(c->id, sizeof(c->id), "%s", v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 2); snprintf(c->base_url, sizeof(c->base_url), "%s", v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 3); snprintf(c->api_key_env, sizeof(c->api_key_env), "%s", v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 4);
+        c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
+        c->context_window = sqlite3_column_int(s, 5);
+        if (c->context_window <= 0) c->context_window = 128000;
+        n++;
+    }
+    sqlite3_finalize(s);
     return n;
 }
 
@@ -831,3 +853,208 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
 }
 
 
+/* ── Transcription: capability-routed media preprocessing ───────
+ *
+ * A media_jobs row holds the full channel-emitted message JSON (with
+ * media.data_b64). One audio-capable model turns it into text; only that
+ * text enters the session — the audio bytes never reach entries. */
+
+#define TRANSCRIBE_MAX_ATTEMPTS 3
+#define TRANSCRIBE_RETRIES 1
+
+static const char *TRANSCRIBE_PROMPT =
+    "Transcribe this audio message verbatim, in its original language. "
+    "Output only the transcript text, nothing else.";
+
+char *transcribe_build_body(sqlite3 *db, EndpointType ep, const char *model,
+                            int64_t job_id) {
+    /* Body assembled by SQLite JSON1 straight from the stored payload — the
+     * base64 audio is never materialized separately in C. */
+    const char *sql = (ep == ENDPOINT_GEMINI)
+        ? "SELECT json_object('contents', json_array(json_object("
+          "  'role','user','parts', json_array("
+          "    json_object('text', ?2),"
+          "    json_object('inlineData', json_object("
+          "      'mimeType', COALESCE(json_extract(payload,'$.media.mime'),'audio/ogg'),"
+          "      'data', json_extract(payload,'$.media.data_b64'))))))) "
+          "FROM media_jobs WHERE id=?1"
+        : "SELECT json_object('model', ?3, 'messages', json_array(json_object("
+          "  'role','user','content', json_array("
+          "    json_object('type','text','text', ?2),"
+          "    json_object('type','input_audio','input_audio', json_object("
+          "      'data', json_extract(payload,'$.media.data_b64'),"
+          "      'format','ogg')))))) "
+          "FROM media_jobs WHERE id=?1";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_int64(s, 1, job_id);
+    sqlite3_bind_text(s, 2, TRANSCRIBE_PROMPT, -1, SQLITE_STATIC);
+    if (ep != ENDPOINT_GEMINI)
+        sqlite3_bind_text(s, 3, model ? model : "", -1, SQLITE_STATIC);
+    char *body = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t) body = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return body;
+}
+
+/* Resolve the job: write `text` (with the original caption prepended, if any)
+ * as a normal text-only inbox message for the job's session, then delete the
+ * job row. Returns 0 on success; on inbox failure the row is kept so a
+ * daemon-restart resubmit can retry. */
+static int transcribe_resolve(sqlite3 *db, int64_t job_id, const char *text) {
+    const char *sql =
+        "SELECT session_id, source, json_object("
+        "  'channel_id', json_extract(payload,'$.channel_id'),"
+        "  'from', COALESCE(json_extract(payload,'$.from'),''),"
+        "  'text', CASE WHEN COALESCE(json_extract(payload,'$.text'),'') <> ''"
+        "    THEN json_extract(payload,'$.text') || char(10) || ?2 ELSE ?2 END)"
+        " FROM media_jobs WHERE id=?1";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(s, 1, job_id);
+    sqlite3_bind_text(s, 2, text, -1, SQLITE_STATIC);
+    int64_t session_id = -1;
+    char *source = NULL, *payload = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        session_id = sqlite3_column_int64(s, 0);
+        const char *v = (const char *)sqlite3_column_text(s, 1);
+        source = strdup(v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 2);
+        payload = v ? strdup(v) : NULL;
+    }
+    sqlite3_finalize(s);
+    if (session_id < 0 || !payload) { free(source); free(payload); return -1; }
+
+    int64_t irc = inbox_insert_scanned(db, session_id, source, payload);
+    free(source); free(payload);
+    if (irc < 0) {
+        LOG_ERROR_("transcribe: inbox insert failed job=%lld — keeping job",
+                   (long long)job_id);
+        return -1;
+    }
+    sqlite3_stmt *del;
+    if (sqlite3_prepare_v2(db, "DELETE FROM media_jobs WHERE id=?", -1, &del, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(del, 1, job_id);
+        sqlite3_step(del); sqlite3_finalize(del);
+    }
+    return 0;
+}
+
+int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
+    int64_t session_id = -1;
+    int attempts = 0;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT session_id, attempts FROM media_jobs WHERE id=?",
+            -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(s, 1, job_id);
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        session_id = sqlite3_column_int64(s, 0);
+        attempts = sqlite3_column_int(s, 1);
+    }
+    sqlite3_finalize(s);
+    if (session_id < 0) return -1;   /* row gone — nothing to do */
+
+    /* Crash-loop guard: a resubmitted job that keeps dying goes terminal. */
+    if (attempts >= TRANSCRIBE_MAX_ATTEMPTS)
+        return transcribe_resolve(db, job_id,
+            "[voice message received but transcription failed]");
+    sqlite3_stmt *up;
+    if (sqlite3_prepare_v2(db, "UPDATE media_jobs SET attempts=attempts+1 WHERE id=?",
+                           -1, &up, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(up, 1, job_id);
+        sqlite3_step(up); sqlite3_finalize(up);
+    }
+
+    const char *db_path = sqlite3_db_filename(db, "main");
+    ModelCandidate models[MAX_MODELS];
+    int nmodels = model_pick_by_capability(db, "audio", models, MAX_MODELS);
+    if (nmodels == 0)
+        LOG_WARN_("transcribe: no healthy audio-capable model job=%lld",
+                  (long long)job_id);
+
+    char *transcript = NULL;
+    for (int mi = 0; mi < nmodels && !transcript; mi++) {
+        ModelCandidate *m = &models[mi];
+
+        const char *key = m->api_key_env[0] ? getenv(m->api_key_env) : NULL;
+        char *key_buf = (key && key[0]) ? strdup(key)
+                      : m->api_key_env[0] ? db_secret_get_system(db, m->api_key_env)
+                      : NULL;
+        if (!key_buf) key_buf = strdup("");
+
+        char *body = transcribe_build_body(db, (EndpointType)m->endpoint_type,
+                                           m->model, job_id);
+        Config tcfg = {0};
+        tcfg.provider.base_url = m->base_url;
+        tcfg.provider.model = m->model;
+        tcfg.provider.endpoint_type = (EndpointType)m->endpoint_type;
+        tcfg.provider.api_key = key_buf;
+        char *url = llm_build_url(&tcfg);
+        char *auth = llm_build_auth_header(&tcfg);
+        if (!body || !url || !auth) {
+            free(body); free(url); free(auth); free(key_buf);
+            continue;
+        }
+        const char *headers[] = { "Content-Type: application/json", auth, NULL };
+
+        for (int retry = 0; retry <= TRANSCRIBE_RETRIES && !transcript; retry++) {
+            HttpResponse resp = {0};
+            HttpRequestOpts opts = {
+                .url = url, .method = "POST", .headers = headers,
+                .body = body, .curl_handle = curl,
+            };
+            int status = http_do(&opts, &resp);
+            LOG_DEBUG_("transcribe: status=%d model=%s job=%lld",
+                       status, m->model, (long long)job_id);
+
+            if (status >= 200 && status < 300) {
+                transcript = extract_content(db, (EndpointType)m->endpoint_type,
+                                             resp.data);
+                http_response_free(&resp);
+                if (transcript && !transcript[0]) { free(transcript); transcript = NULL; }
+                if (transcript) {
+                    model_stat_success(db, m->id, 0, 0, 0);
+                    break;
+                }
+                /* 2xx with no text: provider glitch — same transient class
+                 * as an empty chat completion. */
+                model_stat_error(db, db_path, session_id, m->id, status);
+                if (retry < TRANSCRIBE_RETRIES) { sleep(1); continue; }
+                break;
+            }
+            /* Persistent rejections: sideline the model, next candidate. */
+            if (status == 400 || status == 401 || status == 403 || status == 404) {
+                http_response_free(&resp);
+                model_degrade_unavailable(db, db_path, session_id, m->id, status);
+                break;
+            }
+            /* 429/5xx/timeout/network: transient — one retry, then next. */
+            http_response_free(&resp);
+            model_stat_error(db, db_path, session_id, m->id, status);
+            if (retry < TRANSCRIBE_RETRIES) { sleep(1u << retry); continue; }
+            break;
+        }
+
+        free(body); free(url); free(auth); free(key_buf);
+    }
+
+    if (transcript) {
+        size_t need = strlen(transcript) + 32;
+        char *text = malloc(need);
+        int rc = -1;
+        if (text) {
+            snprintf(text, need, "[voice message] %s", transcript);
+            rc = transcribe_resolve(db, job_id, text);
+            free(text);
+        }
+        free(transcript);
+        return rc;
+    }
+    return transcribe_resolve(db, job_id,
+        "[voice message received but transcription failed]");
+}

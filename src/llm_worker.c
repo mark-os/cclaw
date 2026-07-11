@@ -21,10 +21,11 @@
 /* ── Work item ─────────────────────────────────────────────────── */
 
 typedef struct {
-    int64_t job_id;
+    int64_t job_id;          /* llm_jobs.id, or media_jobs.id when kind==1 */
     int64_t session_id;
     char agent_name[64];
     int recall;
+    int kind;                /* 0 = llm_jobs-backed (turn/compaction), 1 = media transcribe */
 } WorkItem;
 
 /* ── Thread pool ───────────────────────────────────────────────── */
@@ -127,6 +128,18 @@ static void *worker_fn(void *arg) {
 
     WorkItem item;
     while (pool_pop(&item) == 0) {
+        /* Media transcription: media_jobs is the persistence — llm_transcribe
+         * deletes its own row on resolution, so skip the llm_jobs bookkeeping. */
+        if (item.kind == 1) {
+            cclaw_log_set_ctx(item.session_id, -1, item.agent_name);
+            LOG_INFO_("llm_job start job=%lld type=transcribe", (long long)item.job_id);
+            llm_transcribe(db, curl, item.job_id);
+            LOG_INFO_("llm_job done job=%lld type=transcribe", (long long)item.job_id);
+            cclaw_log_clear_ctx();
+            (void)write(g_pool.notify_fd, &item.session_id, sizeof(item.session_id));
+            continue;
+        }
+
         /* Determine job type from DB */
         int job_type = 0;
         sqlite3_stmt *qstmt;
@@ -308,6 +321,41 @@ int llm_worker_submit_compact(sqlite3 *db, int64_t session_id, const char *agent
     snprintf(item.agent_name, sizeof(item.agent_name), "%s",
              agent_name ? agent_name : "Assistant");
     return pool_push(&item);
+}
+
+int llm_worker_submit_transcribe(sqlite3 *db, int64_t media_job_id,
+                                 int64_t session_id, const char *agent_name) {
+    (void)db;   /* the media_jobs row (already inserted) is the persistence */
+    if (!g_started) return -1;
+    WorkItem item = {
+        .job_id = media_job_id,
+        .session_id = session_id,
+        .kind = 1,
+    };
+    snprintf(item.agent_name, sizeof(item.agent_name), "%s",
+             agent_name ? agent_name : "Assistant");
+    return pool_push(&item);
+}
+
+int llm_worker_resubmit_media(sqlite3 *db) {
+    if (!g_started) return 0;
+    int n = 0;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT m.id, m.session_id, COALESCE(s.agent_name,'Assistant')"
+            " FROM media_jobs m LEFT JOIN sessions s ON s.id = m.session_id"
+            " ORDER BY m.id;", -1, &s, NULL) != SQLITE_OK)
+        return 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        int64_t jid = sqlite3_column_int64(s, 0);
+        int64_t sid = sqlite3_column_int64(s, 1);
+        const char *agent = (const char *)sqlite3_column_text(s, 2);
+        if (llm_worker_submit_transcribe(db, jid, sid, agent) == 0) n++;
+    }
+    sqlite3_finalize(s);
+    if (n > 0)
+        LOG_INFO_("llm_worker resubmitted %d orphaned media job(s)", n);
+    return n;
 }
 
 int llm_worker_alive(void) { return g_started; }

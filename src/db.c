@@ -346,6 +346,21 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "UPDATE agents SET primary_model = model WHERE model IS NOT NULL AND model != '';"
       "ALTER TABLE agents DROP COLUMN model;"
       "ALTER TABLE agents DROP COLUMN provider;" },
+    { 18,
+      /* Capability-routed media preprocessing (voice transcription): the
+       * transient media_jobs queue plus the Gemini transcription candidate.
+       * Seed rows mirror templates/seed.sql for fresh DBs. */
+      "CREATE TABLE IF NOT EXISTS media_jobs ("
+      "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "  session_id INTEGER NOT NULL,"
+      "  source TEXT NOT NULL DEFAULT '',"
+      "  payload TEXT NOT NULL,"
+      "  attempts INTEGER NOT NULL DEFAULT 0,"
+      "  created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+      "INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)"
+      "  VALUES('gemini', 'https://generativelanguage.googleapis.com/v1beta', 'gemini', 'GEMINI_API_KEY', 'gemini-2.5-flash-lite', 50);"
+      "INSERT OR IGNORE INTO models(id, provider_name, model, capabilities, priority)"
+      "  VALUES('gemini/gemini-2.5-flash-lite', 'gemini', 'gemini-2.5-flash-lite', '[\"text\",\"image\",\"audio\"]', 50);" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

@@ -39,10 +39,11 @@ static char *json_escape(const char *src) {
 /* Eval `channel-stub + real template + ; + expr`; return the result string. */
 static char *eval_expr(const char *expr) {
     const char *stub =
-        "var __sent=[];var __cfg={};var __adminArg=null;\n"
+        "var __sent=[];var __emits=[];var __cfg={};var __adminArg=null;\n"
         "var channel={getConfig:function(k){return __cfg[k]!==undefined?__cfg[k]:null;},"
         "setConfig:function(k,v){__cfg[k]=v;},log:function(){},"
-        "send:function(r){__sent.push(r);},emit:function(){return 0;},"
+        "send:function(r){__sent.push(r);},"
+        "emit:function(t,p,e){__emits.push({type:t,payload:p,ext:e});return 0;},"
         "admin:{isAdmin:function(id){__adminArg=id;return false;},"
         "dashboardUrl:function(){return 'http://192.0.2.1:8080/admin?token=t0k';},"
         "listPendingApprovals:function(){return [];}}};\n";
@@ -196,6 +197,58 @@ int main(void) {
         "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:2}),"
         "__sent[0].body",
         "parse_mode");
+
+    /* ── voice messages: getFile → base64 download → media emit ─────── */
+    #define VOICE_SETUP "config.token='T';config.base='https://api.telegram.org';"
+    #define VOICE_MSG "{chat:{id:5}, from:{first_name:'Mark'}, voice:{file_id:'F1',duration:10,file_size:1000}}"
+    /* Inbound voice → getFile with the pending tag. */
+    expect_has("voice_calls_getfile",
+        VOICE_SETUP "processMessage(" VOICE_MSG ", 77), __sent[0].url",
+        "/getFile");
+    expect("voice_getfile_tag",
+        VOICE_SETUP "processMessage(" VOICE_MSG ", 77), __sent[0].tag", "vf_77");
+    expect_has("voice_getfile_file_id",
+        VOICE_SETUP "processMessage(" VOICE_MSG ", 77), __sent[0].body", "F1");
+    /* Oversize voice → polite rejection, no getFile. */
+    expect_has("voice_oversize_rejected",
+        VOICE_SETUP "processMessage({chat:{id:5}, from:{}, voice:{file_id:'F1',duration:300}}, 78),"
+        "__sent[0].url",
+        "/sendMessage");
+    expect_lacks("voice_oversize_no_getfile",
+        VOICE_SETUP "processMessage({chat:{id:5}, from:{}, voice:{file_id:'F1',file_size:9999999}}, 78),"
+        "__sent.map(function(s){return s.url;}).join(' ')",
+        "getFile");
+    /* getFile result → base64-flagged download of the file path. */
+    expect_has("voice_download_url",
+        VOICE_SETUP "processMessage(" VOICE_MSG ", 77);"
+        "onResult({tag:'vf_77',status:200,body:JSON.stringify({ok:true,result:{file_path:'voice/f.oga'}}),error:null});"
+        "__sent[1].url",
+        "/file/botT/voice/f.oga");
+    expect("voice_download_base64_flag",
+        VOICE_SETUP "processMessage(" VOICE_MSG ", 77);"
+        "onResult({tag:'vf_77',status:200,body:JSON.stringify({ok:true,result:{file_path:'voice/f.oga'}}),error:null});"
+        "'' + __sent[1].base64",
+        "1");
+    /* Download result → emit with media payload + tg_<updateId> dedup id. */
+    #define VOICE_FLOW \
+        VOICE_SETUP "processMessage(" VOICE_MSG ", 77);" \
+        "onResult({tag:'vf_77',status:200,body:JSON.stringify({ok:true,result:{file_path:'voice/f.oga'}}),error:null});" \
+        "onResult({tag:'vd_77',status:200,body:'T2dnUw==',error:null});"
+    expect("voice_emit_external_id", VOICE_FLOW "__emits[0].ext", "tg_77");
+    expect_has("voice_emit_media", VOICE_FLOW "__emits[0].payload",
+        "\"media\":{\"kind\":\"audio\",\"mime\":\"audio/ogg\",\"data_b64\":\"T2dnUw==\"}");
+    expect_has("voice_emit_channel_id", VOICE_FLOW "__emits[0].payload", "\"channel_id\":\"5\"");
+    /* Failed download → apology, no emit. */
+    expect_has("voice_download_fail_apologizes",
+        VOICE_SETUP "processMessage(" VOICE_MSG ", 77);"
+        "onResult({tag:'vd_77',status:404,body:'',error:null});"
+        "__sent[__sent.length-1].body",
+        "couldn't process that voice message");
+    expect("voice_download_fail_no_emit",
+        VOICE_SETUP "processMessage(" VOICE_MSG ", 77);"
+        "onResult({tag:'vd_77',status:404,body:'',error:null});"
+        "'' + __emits.length",
+        "0");
 
     /* ── admin gate keys on from.id, not chat.id ─────────────────────── */
     /* Group chat: chat.id is the group (-100), sender is 42 → isAdmin sees 42. */

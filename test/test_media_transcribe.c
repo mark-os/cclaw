@@ -1,0 +1,142 @@
+/* Test: capability-routed transcription plumbing —
+ * model_pick_by_capability (healthy/degraded/disabled/missing-cap filtering)
+ * and transcribe_build_body (gemini + openai request shapes). */
+#define _POSIX_C_SOURCE 200809L
+#include "llm_proc.h"
+#include "test_util.h"
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#define TEST_DB "/tmp/cclaw_test_media_transcribe.db"
+
+static int tests_run = 0, tests_passed = 0;
+#define TEST(name) do { tests_run++; printf("  %s... ", #name); } while (0)
+#define PASS() do { tests_passed++; printf("PASS\n"); } while (0)
+#define FAIL(msg) do { printf("FAIL: %s\n", msg); return; } while (0)
+
+static void exec_sql(sqlite3 *db, const char *sql) {
+    char *err = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+    if (rc != SQLITE_OK) { fprintf(stderr, "sql failed: %s\n", err ? err : "?"); exit(1); }
+}
+
+static void seed_models(sqlite3 *db) {
+    exec_sql(db,
+        "DELETE FROM models; DELETE FROM providers;"
+        "INSERT INTO providers(name, base_url, endpoint_type, api_key_env) VALUES"
+        " ('oai', 'https://oai.example/v1', 'openai', 'OAI_KEY'),"
+        " ('gem', 'https://gem.example/v1beta', 'gemini', 'GEM_KEY');"
+        "INSERT INTO models(id, provider_name, model, capabilities, priority, status, degraded_until) VALUES"
+        " ('oai/chat', 'oai', 'chat-model', '[\"text\"]', 0, 'healthy', NULL),"
+        " ('gem/audio', 'gem', 'gemini-lite', '[\"text\",\"image\",\"audio\"]', 10, 'healthy', NULL),"
+        " ('oai/audio2', 'oai', 'audio-two', '[\"audio\"]', 20, 'healthy', NULL),"
+        " ('oai/audio-degraded', 'oai', 'audio-deg', '[\"audio\"]', 1, 'degraded', unixepoch()+600),"
+        " ('oai/audio-disabled', 'oai', 'audio-dis', '[\"audio\"]', 2, 'disabled', NULL),"
+        " ('oai/caps-null', 'oai', 'caps-null', NULL, 3, 'healthy', NULL);");
+}
+
+static void test_picker_filters(sqlite3 *db) {
+    TEST(picker_filters);
+    ModelCandidate out[8];
+    int n = model_pick_by_capability(db, "audio", out, 8);
+    if (n != 2) { printf("FAIL: expected 2 candidates, got %d\n", n); return; }
+    /* priority order: gem/audio (10) before oai/audio2 (20); the degraded,
+     * disabled, missing-cap and NULL-cap models are all excluded */
+    if (strcmp(out[0].id, "gem/audio") != 0) FAIL("wrong first candidate");
+    if (out[0].endpoint_type != ENDPOINT_GEMINI) FAIL("gemini endpoint expected");
+    if (strcmp(out[0].api_key_env, "GEM_KEY") != 0) FAIL("wrong key env");
+    if (strcmp(out[1].id, "oai/audio2") != 0) FAIL("wrong second candidate");
+    if (out[1].endpoint_type != ENDPOINT_OPENAI) FAIL("openai endpoint expected");
+    PASS();
+}
+
+static void test_picker_no_match(sqlite3 *db) {
+    TEST(picker_no_match);
+    ModelCandidate out[8];
+    int n = model_pick_by_capability(db, "video", out, 8);
+    if (n != 0) FAIL("expected no candidates");
+    PASS();
+}
+
+static void test_picker_degraded_expired(sqlite3 *db) {
+    TEST(picker_degraded_expired);
+    /* An expired degradation window makes the model eligible again. */
+    exec_sql(db, "UPDATE models SET degraded_until=unixepoch()-10 WHERE id='oai/audio-degraded';");
+    ModelCandidate out[8];
+    int n = model_pick_by_capability(db, "audio", out, 8);
+    if (n != 3) { printf("FAIL: expected 3 candidates, got %d\n", n); return; }
+    if (strcmp(out[0].id, "oai/audio-degraded") != 0) FAIL("expired-degraded should lead (priority 1)");
+    exec_sql(db, "UPDATE models SET degraded_until=unixepoch()+600 WHERE id='oai/audio-degraded';");
+    PASS();
+}
+
+static int64_t insert_media_job(sqlite3 *db) {
+    exec_sql(db,
+        "INSERT INTO media_jobs(session_id, source, payload) VALUES(7, 'telegram',"
+        " json_object('channel_id','42','from','Mark','text','the caption',"
+        "   'media', json_object('kind','audio','mime','audio/ogg','data_b64','T2dnUw==')));");
+    return sqlite3_last_insert_rowid(db);
+}
+
+static void test_body_gemini(sqlite3 *db) {
+    TEST(body_gemini);
+    int64_t jid = insert_media_job(db);
+    char *body = transcribe_build_body(db, ENDPOINT_GEMINI, "gemini-lite", jid);
+    if (!body) FAIL("no body");
+    int ok = strstr(body, "\"contents\"") &&
+             strstr(body, "\"inlineData\"") &&
+             strstr(body, "\"mimeType\":\"audio/ogg\"") &&
+             strstr(body, "\"data\":\"T2dnUw==\"") &&
+             strstr(body, "Transcribe") &&
+             !strstr(body, "gemini-lite");   /* gemini puts the model in the URL */
+    if (!ok) { printf("FAIL: bad body: %s\n", body); free(body); return; }
+    free(body);
+    PASS();
+}
+
+static void test_body_openai(sqlite3 *db) {
+    TEST(body_openai);
+    int64_t jid = insert_media_job(db);
+    char *body = transcribe_build_body(db, ENDPOINT_OPENAI, "audio-two", jid);
+    if (!body) FAIL("no body");
+    int ok = strstr(body, "\"model\":\"audio-two\"") &&
+             strstr(body, "\"input_audio\"") &&
+             strstr(body, "\"format\":\"ogg\"") &&
+             strstr(body, "\"data\":\"T2dnUw==\"") &&
+             strstr(body, "Transcribe");
+    if (!ok) { printf("FAIL: bad body: %s\n", body); free(body); return; }
+    free(body);
+    PASS();
+}
+
+static void test_body_missing_job(sqlite3 *db) {
+    TEST(body_missing_job);
+    char *body = transcribe_build_body(db, ENDPOINT_GEMINI, "m", 999999);
+    if (body) { free(body); FAIL("expected NULL for missing job"); }
+    PASS();
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    printf("test_media_transcribe\n");
+
+    unlink(TEST_DB); unlink(TEST_DB "-wal"); unlink(TEST_DB "-shm");
+    sqlite3 *db = test_db_open(TEST_DB);
+    assert(db);
+    seed_models(db);
+
+    test_picker_filters(db);
+    test_picker_no_match(db);
+    test_picker_degraded_expired(db);
+    test_body_gemini(db);
+    test_body_openai(db);
+    test_body_missing_job(db);
+
+    db_close(db);
+    unlink(TEST_DB); unlink(TEST_DB "-wal"); unlink(TEST_DB "-shm");
+    printf("%d/%d tests passed\n", tests_passed, tests_run);
+    return tests_passed == tests_run ? 0 : 1;
+}

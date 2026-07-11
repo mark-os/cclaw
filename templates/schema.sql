@@ -291,6 +291,20 @@ CREATE TABLE IF NOT EXISTS channel_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_channel_outbox_pending ON channel_outbox(channel_name, status) WHERE status='pending';
 
+-- Inbound media awaiting capability-routed preprocessing (e.g. voice →
+-- transcript). payload is the full channel-emitted message JSON including
+-- media.data_b64 — transient by design: a worker turns it into a text-only
+-- inbox row and deletes it. Rows only survive a crash (resubmitted at daemon
+-- start); attempts caps crash-loop retries.
+CREATE TABLE IF NOT EXISTS media_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
 CREATE TABLE IF NOT EXISTS inbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,

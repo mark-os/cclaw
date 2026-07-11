@@ -4,6 +4,7 @@
 #include "approval.h"
 #include "log.h"
 #include "db.h"
+#include "llm_worker.h"
 #include "secret_scan.h"
 #include "wake.h"
 #include "resolve.h"
@@ -537,6 +538,48 @@ void channel_consume_events(sqlite3 *db) {
                 LOG_INFO_("channel event ch=%s sid=%lld type=%s",
                           ch_name, (long long)sid, etype);
                 processed++;
+                /* Media-bearing message (voice, …): the chat model can't take
+                 * it — park the full payload in media_jobs and hand it to a
+                 * capability-matched preprocessor (transcription). Only its
+                 * text output ever reaches inbox/entries. */
+                int has_media = 0;
+                {
+                    sqlite3_stmt *ms;
+                    if (sqlite3_prepare_v2(db,
+                            "SELECT json_extract(?1,'$.media') IS NOT NULL",
+                            -1, &ms, NULL) == SQLITE_OK) {
+                        sqlite3_bind_text(ms, 1, payload, -1, SQLITE_STATIC);
+                        if (sqlite3_step(ms) == SQLITE_ROW)
+                            has_media = sqlite3_column_int(ms, 0);
+                        sqlite3_finalize(ms);
+                    }
+                }
+                if (has_media) {
+                    sqlite3_stmt *mj;
+                    if (sqlite3_prepare_v2(db,
+                            "INSERT INTO media_jobs(session_id, source, payload)"
+                            " VALUES(?,?,?);", -1, &mj, NULL) == SQLITE_OK) {
+                        sqlite3_bind_int64(mj, 1, sid);
+                        sqlite3_bind_text(mj, 2, ch_name, -1, SQLITE_STATIC);
+                        sqlite3_bind_text(mj, 3, payload, -1, SQLITE_STATIC);
+                        int mrc = sqlite3_step(mj);
+                        int64_t jid = sqlite3_last_insert_rowid(db);
+                        sqlite3_finalize(mj);
+                        if (mrc == SQLITE_DONE) {
+                            /* Submit failure isn't fatal: the row survives and
+                             * a daemon restart resubmits it. */
+                            if (llm_worker_submit_transcribe(db, jid, sid, agent) != 0)
+                                LOG_ERROR_("channel media job submit failed"
+                                           " ch=%s sid=%lld job=%lld",
+                                           ch_name, (long long)sid, (long long)jid);
+                        } else {
+                            LOG_ERROR_("channel media job insert failed ch=%s sid=%lld",
+                                       ch_name, (long long)sid);
+                        }
+                    }
+                    free(agent);
+                    goto del;
+                }
                 /* Every inbound chat message is forwarded as-is — approval
                  * decisions arrive as their own structural event type
                  * (approval_decision, above), never by interpreting chat

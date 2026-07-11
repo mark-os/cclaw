@@ -119,26 +119,18 @@ static JSValue js_ch_log(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* ── cclaw.send(request) ───────────────────────────────────────── */
+/* ── cclaw.send(request) / cclaw.http(request) ─────────────────── */
 
-static JSValue js_ch_send(JSContext *ctx, JSValueConst this_val,
-                          int argc, JSValueConst *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_ThrowTypeError(ctx, "send(request)");
-    JSValueConst o = argv[0];
-
+/* Parse the fields common to send() and http() (url/method/body/timeout/
+ * headers) into a fresh SendReq. NULL if url is missing (caller throws). */
+static SendReq *send_req_from_js(JSContext *ctx, JSValueConst o) {
     char *url = get_str_prop(ctx, (JSValue)o, "url");
-    if (!url || !url[0]) { free(url); return JS_ThrowTypeError(ctx, "send: url required"); }
-
+    if (!url || !url[0]) { free(url); return NULL; }
     SendReq *r = calloc(1, sizeof(SendReq));
-    if (!r) { free(url); return JS_ThrowTypeError(ctx, "send: OOM"); }
+    if (!r) { free(url); return NULL; }
     r->url = url;
     r->method = get_str_prop(ctx, (JSValue)o, "method");
     r->body = get_str_prop(ctx, (JSValue)o, "body");
-    r->tag = get_str_prop(ctx, (JSValue)o, "tag");
-    r->outbox_id = get_int_prop(ctx, (JSValue)o, "outbox_id", 0);
-    r->is_final = get_int_prop(ctx, (JSValue)o, "final", 0);
-    r->base64 = get_int_prop(ctx, (JSValue)o, "base64", 0);
     r->timeout = get_int_prop(ctx, (JSValue)o, "timeout", 0);
 
     JSValue h = JS_GetPropertyStr(ctx, o, "headers");
@@ -157,9 +149,55 @@ static JSValue js_ch_send(JSContext *ctx, JSValueConst this_val,
         }
     }
     JS_FreeValue(ctx, h);
+    return r;
+}
 
+static JSValue js_ch_send(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "send(request)");
+    JSValueConst o = argv[0];
+    SendReq *r = send_req_from_js(ctx, o);
+    if (!r) return JS_ThrowTypeError(ctx, "send: url required");
+    r->tag = get_str_prop(ctx, (JSValue)o, "tag");
+    r->outbox_id = get_int_prop(ctx, (JSValue)o, "outbox_id", 0);
+    r->is_final = get_int_prop(ctx, (JSValue)o, "final", 0);
+    r->base64 = get_int_prop(ctx, (JSValue)o, "base64", 0);
     send_queue_push(r);
     return JS_NewInt32(ctx, 0);
+}
+
+/* channel.http(req) -> Promise<{status, body, path, bytes, error}>.
+ * The transfer runs on the runner's curl loop; the promise always resolves
+ * (transport failure = status 0 + error), never rejects. save_to streams the
+ * body to the channel's media spool and resolves with path instead of body —
+ * the payload never enters the JS heap. */
+static JSValue js_ch_http(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "http(request)");
+    JSValueConst o = argv[0];
+    SendReq *r = send_req_from_js(ctx, o);
+    if (!r) return JS_ThrowTypeError(ctx, "http: url required");
+
+    char *save = get_str_prop(ctx, (JSValue)o, "save_to");
+    if (save) {
+        r->save_to = channel_save_path(save);
+        free(save);
+        if (!r->save_to) {
+            send_req_free(r);
+            return JS_ThrowTypeError(ctx, "http: invalid save_to (plain filename, no '/' or leading '.')");
+        }
+    }
+
+    JSValue funcs[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, funcs);
+    if (JS_IsException(promise)) { send_req_free(r); return promise; }
+    r->js_ctx = ctx;
+    r->p_resolve = funcs[0];
+    r->p_reject = funcs[1];
+    send_queue_push(r);
+    return promise;
 }
 
 /* ── admin.* functions ─────────────────────────────────────────── */
@@ -236,6 +274,7 @@ void qjs_register_channel_host_functions(JSContext *ctx) {
     JSValue ch = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, ch, "emit", JS_NewCFunction(ctx, js_ch_emit, "emit", 3));
     JS_SetPropertyStr(ctx, ch, "send", JS_NewCFunction(ctx, js_ch_send, "send", 1));
+    JS_SetPropertyStr(ctx, ch, "http", JS_NewCFunction(ctx, js_ch_http, "http", 1));
     JS_SetPropertyStr(ctx, ch, "getConfig", JS_NewCFunction(ctx, js_ch_get_config, "getConfig", 1));
     JS_SetPropertyStr(ctx, ch, "setConfig", JS_NewCFunction(ctx, js_ch_set_config, "setConfig", 2));
     JS_SetPropertyStr(ctx, ch, "ackOutbox", JS_NewCFunction(ctx, js_ch_ack_outbox, "ackOutbox", 1));

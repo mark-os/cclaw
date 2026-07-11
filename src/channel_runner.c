@@ -145,9 +145,55 @@ static SendReq *g_send_head, *g_send_tail;
 void send_req_free(SendReq *r) {
     if (!r) return;
     free(r->method); free(r->url); free(r->body); free(r->tag);
+    free(r->save_to);
+    if (r->js_ctx) {
+        JS_FreeValue(r->js_ctx, r->p_resolve);
+        JS_FreeValue(r->js_ctx, r->p_reject);
+    }
     for (int i = 0; i < r->n_headers; i++) free(r->headers[i]);
     free(r->headers);
     free(r);
+}
+
+void send_req_settle(JSContext *ctx, SendReq *r, int status, const char *body,
+                     const char *path, long bytes, const char *error) {
+    if (!r->js_ctx) return;
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, status));
+    JS_SetPropertyStr(ctx, obj, "body", body ? JS_NewString(ctx, body) : JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "path", path ? JS_NewString(ctx, path) : JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "bytes", JS_NewInt64(ctx, bytes));
+    JS_SetPropertyStr(ctx, obj, "error", error ? JS_NewString(ctx, error) : JS_NULL);
+    qjs_reset_instructions(g_qrt);
+    JSValue ret = JS_Call(ctx, r->p_resolve, JS_UNDEFINED, 1, (JSValueConst *)&obj);
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, obj);
+    /* Run the awaiting continuation (and anything it chains) to its next
+     * suspension point. Job errors are logged inside qjs_resolve. */
+    JSValue u = qjs_resolve(ctx, JS_UNDEFINED);
+    JS_FreeValue(ctx, u);
+}
+
+char *channel_save_path(const char *name) {
+    if (!g_ctx || !name || !name[0] || name[0] == '.' ||
+        strchr(name, '/') || strlen(name) > 128)
+        return NULL;
+    /* Media spool lives next to the DB: <db_dir>/media/<channel>/<name>.
+     * Harness scratch DBs land it in /tmp, the real daemon in ~/.cclaw. */
+    const char *dbp = g_ctx->db_path ? g_ctx->db_path : ".";
+    const char *slash = strrchr(dbp, '/');
+    char dir[1024];
+    if (slash)
+        snprintf(dir, sizeof(dir), "%.*s/media", (int)(slash - dbp), dbp);
+    else
+        snprintf(dir, sizeof(dir), "media");
+    mkdir(dir, 0700);
+    size_t used = strlen(dir);
+    snprintf(dir + used, sizeof(dir) - used, "/%s", g_ctx->channel_name);
+    mkdir(dir, 0700);
+    char *out = NULL;
+    if (asprintf(&out, "%s/%s", dir, name) < 0) return NULL;
+    return out;
 }
 
 void send_queue_push(SendReq *r) {
@@ -211,6 +257,36 @@ static SendReq *g_send_active;
 static CURL *g_send_easy;
 static Buf g_send_resp;
 static struct curl_slist *g_send_hdrs;
+
+/* save_to download in flight: body streams to disk chunk by chunk — the full
+ * payload never exists in RAM (or the JS heap). Non-2xx bodies divert to
+ * g_send_resp so JS gets a readable error body instead of a junk file. */
+static struct {
+    FILE *f;
+    long written;
+    int checked, divert;
+} g_save;
+
+static size_t curl_write_save_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
+    (void)ud;
+    size_t bytes = size * nmemb;
+    if (!g_save.checked) {
+        /* No FOLLOWLOCATION on these handles, so the first body byte's
+         * status is the final status. */
+        long code = 0;
+        curl_easy_getinfo(g_send_easy, CURLINFO_RESPONSE_CODE, &code);
+        g_save.divert = (code < 200 || code >= 300);
+        g_save.checked = 1;
+    }
+    if (g_save.divert) {
+        buf_append(&g_send_resp, (const char *)ptr, bytes);
+        return g_send_resp.oom ? 0 : bytes;
+    }
+    if (g_save.written + (long)bytes > CR_BASE64_MAX) return 0; /* abort: too large */
+    if (fwrite(ptr, 1, bytes, g_save.f) != bytes) return 0;
+    g_save.written += (long)bytes;
+    return bytes;
+}
 
 /* Pin channel_runner's outbound HTTP to the channel's own configured
  * base_url — a channel is semantically "talks to one external service," not
@@ -306,7 +382,7 @@ static void poll_start(void) {
     g_poll.active = 1;
 }
 
-static void send_start_next(void) {
+static void send_start_next(JSContext *ctx) {
     if (g_send_active) return;
     SendReq *r = send_queue_pop();
     if (!r) return;
@@ -315,8 +391,24 @@ static void send_start_next(void) {
                             &g_send_resp, &g_send_hdrs);
     if (!g_send_easy) {
         if (r->outbox_id > 0) channel_fail_outbox(g_ctx, r->outbox_id, "curl init failed");
+        if (r->js_ctx) send_req_settle(ctx, r, 0, NULL, NULL, 0, "request refused");
         send_req_free(r);
         return;
+    }
+    if (r->save_to) {
+        memset(&g_save, 0, sizeof(g_save));
+        g_save.f = fopen(r->save_to, "wb");
+        if (!g_save.f) {
+            curl_easy_cleanup(g_send_easy); g_send_easy = NULL;
+            curl_slist_free_all(g_send_hdrs); g_send_hdrs = NULL;
+            send_req_settle(ctx, r, 0, NULL, NULL, 0, "cannot open save_to file");
+            send_req_free(r);
+            return;
+        }
+        curl_easy_setopt(g_send_easy, CURLOPT_WRITEFUNCTION, curl_write_save_cb);
+        curl_easy_setopt(g_send_easy, CURLOPT_WRITEDATA, NULL);
+        curl_easy_setopt(g_send_easy, CURLOPT_MAXFILESIZE, CR_BASE64_MAX);
+        curl_easy_setopt(g_send_easy, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)CR_BASE64_MAX);
     }
     if (r->base64) {
         /* Binary download: bound the transfer so a huge file can't balloon
@@ -573,7 +665,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     while (g_running) {
         int still = 0;
         curl_multi_perform(g_multi, &still);
-        send_start_next();
+        send_start_next(ctx);
         poll_start();
 
         struct curl_waitfd extra[2];
@@ -708,6 +800,28 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                         channel_ack_outbox(g_ctx, r->outbox_id);
                     }
                 }
+                if (r->js_ctx) {
+                    if (r->save_to) {
+                        if (g_save.f) { fclose(g_save.f); g_save.f = NULL; }
+                        int dl_ok = (!cerr && status >= 200 && status < 300 &&
+                                     !g_save.divert);
+                        if (dl_ok) {
+                            send_req_settle(ctx, r, (int)status, NULL,
+                                            r->save_to, g_save.written, NULL);
+                        } else {
+                            unlink(r->save_to);
+                            send_req_settle(ctx, r, (int)status,
+                                            g_send_resp.data ? g_send_resp.data : NULL,
+                                            NULL, 0,
+                                            cerr ? cerr :
+                                            (g_save.divert ? NULL : "download failed"));
+                        }
+                    } else {
+                        send_req_settle(ctx, r, (int)status,
+                                        g_send_resp.data ? g_send_resp.data : "",
+                                        NULL, 0, cerr);
+                    }
+                }
                 if (r->tag) {
                     if (r->base64 && !cerr && status >= 200 && status < 300) {
                         /* Binary body → base64 across the C-string JS bridge.
@@ -745,6 +859,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     buf_free(&g_poll.resp);
     if (g_send_easy) { curl_multi_remove_handle(g_multi, g_send_easy); curl_easy_cleanup(g_send_easy); }
     curl_slist_free_all(g_send_hdrs);
+    if (g_save.f) { fclose(g_save.f); g_save.f = NULL; }
     send_req_free(g_send_active);
     buf_free(&g_send_resp);
     SendReq *r;

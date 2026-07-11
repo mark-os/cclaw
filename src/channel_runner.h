@@ -22,6 +22,13 @@ typedef struct SendReq {
                             downloads — a raw body would truncate at the first
                             NUL crossing the C-string JS bridge) */
     long timeout;
+    /* channel.http(): promise-backed request. js_ctx non-NULL marks it; the
+       resolve/reject pair is owned by the request and freed in send_req_free.
+       save_to (absolute, pre-validated) streams the response body to a file —
+       the payload never enters the JS heap; JS gets {status, path, bytes}. */
+    JSContext *js_ctx;
+    JSValue p_resolve, p_reject;
+    char *save_to;
     struct SendReq *next;
 } SendReq;
 
@@ -36,6 +43,20 @@ void set_global_int(JSContext *ctx, const char *name, int val);
 void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row);
 void call_on_result(JSContext *ctx, const char *tag, int status,
                     const char *body, const char *error);
+
+/* Settle a promise-backed request (channel.http): resolve with
+ * {status, body, path, bytes, error} and drain the microtask queue so
+ * awaiting continuations run to their next suspension point. body and path
+ * are mutually exclusive (path = save_to download). Never rejects — transport
+ * failures resolve with status 0 + error, so channel JS needs no try/catch
+ * around plain calls. */
+void send_req_settle(JSContext *ctx, SendReq *r, int status, const char *body,
+                     const char *path, long bytes, const char *error);
+
+/* Resolve a save_to name to an absolute path in this channel's media spool
+ * (<db_dir>/media/<channel>/<name>), creating the directory. Rejects names
+ * with '/' or leading '.'. Returns malloc'd path or NULL. */
+char *channel_save_path(const char *name);
 
 /* Run the universal JS channel loop in-process — this is the `cclaw --channel
  * <name>` mode. The daemon fork+execs `cclaw --channel <name>` (do_fork in

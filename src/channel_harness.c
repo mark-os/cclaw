@@ -203,6 +203,28 @@ static void drain_sends(JSContext *ctx, const Scenario *sc) {
         if (fx) {
             printf("  http  %-6s %s -> %d\n", r->method ? r->method : "GET", r->url, fx->status);
             log_req(r->url, r->body, 1, fx->status);
+            if (r->js_ctx) {
+                /* channel.http(): settle the promise the way the live runner
+                 * would. save_to writes the fixture body to the real spool
+                 * path so JS (and any later C stage) sees an actual file.
+                 * Settling runs awaited continuations, which may push more
+                 * sends — the while loop picks them up. */
+                const char *body = fx->body ? fx->body : "";
+                if (r->save_to && fx->status >= 200 && fx->status < 300) {
+                    FILE *f = fopen(r->save_to, "wb");
+                    if (f) {
+                        long n = (long)fwrite(body, 1, strlen(body), f);
+                        fclose(f);
+                        send_req_settle(ctx, r, fx->status, NULL, r->save_to, n, NULL);
+                    } else {
+                        send_req_settle(ctx, r, 0, NULL, NULL, 0,
+                                        "harness: cannot open save_to file");
+                    }
+                } else {
+                    /* non-save_to, or non-2xx (error body stays readable text) */
+                    send_req_settle(ctx, r, fx->status, body, NULL, 0, NULL);
+                }
+            }
             if (r->tag) {
                 /* Same transform the live runner applies to base64-flagged
                  * sends: JS sees the fixture body encoded. */
@@ -220,6 +242,8 @@ static void drain_sends(JSContext *ctx, const Scenario *sc) {
                    r->method ? r->method : "GET", r->url);
             log_req(r->url, r->body, 0, 0);
             g_all_passed = 0;
+            if (r->js_ctx)
+                send_req_settle(ctx, r, 0, NULL, NULL, 0, "harness: no matching fixture");
             if (r->tag)
                 call_on_result(ctx, r->tag, 0, "", "harness: no matching fixture");
         }

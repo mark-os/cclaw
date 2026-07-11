@@ -105,8 +105,10 @@ static const char *MEMORY_CREATE_PARAMS =
     "\"label\":{\"type\":\"string\",\"description\":\"Unique label for this memory block\"},"
     "\"description\":{\"type\":\"string\",\"description\":\"What this block is for\"},"
     "\"placement\":{\"type\":\"string\",\"enum\":[\"system\",\"context\"],"
-    "\"description\":\"'system' (default): rendered into the system prompt once per session."
-    " 'context': rendered fresh every turn in the live session context block instead\"}"
+    "\"description\":\"'context' (default): rendered in the session context block,"
+    " re-materialized at each turn start."
+    " 'system': baked into the system prompt once per session — reserve for stable"
+    " identity content\"}"
     "},\"required\":[\"label\",\"description\"]}";
 
 static const char *MEMORY_ADD_PARAMS =

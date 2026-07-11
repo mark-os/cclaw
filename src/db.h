@@ -181,6 +181,12 @@ int session_get_iteration(sqlite3 *db, int64_t session_id);
 int session_set_iteration(sqlite3 *db, int64_t session_id, int iter);
 int session_bump_iteration(sqlite3 *db, int64_t session_id);
 
+/* Per-turn materialized <RELEVANT_CONTEXT> block. Written once at turn start
+ * (NULL/empty clears), read back verbatim by tool-loop iterations so the
+ * request prefix stays byte-stable across the turn (prompt caching). */
+int session_set_turn_context(sqlite3 *db, int64_t session_id, const char *text);
+char *session_get_turn_context(sqlite3 *db, int64_t session_id);  /* caller frees */
+
 /* Parent info for sub-agent completion wake */
 typedef struct {
     int64_t parent_session_id;
@@ -343,7 +349,9 @@ typedef struct {
 
 /* Create a memory block. Returns row id (>0) or -1 on error.
  * Fails if UNIQUE(agent_name, label) violated. placement: NULL/"" defaults
- * to 'system'. */
+ * to 'context' — new memory rides in the per-turn session context block;
+ * pass "system" only for stable identity content worth baking into the
+ * (cached, once-per-session) system prompt. */
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
                             const char *description, const char *value, int char_limit,
                             const char *placement);

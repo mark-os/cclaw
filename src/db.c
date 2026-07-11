@@ -340,6 +340,9 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "UPDATE extensions SET owner_agent='system', published=1 WHERE builtin=1;"
       "ALTER TABLE extensions DROP COLUMN builtin;"
       "ALTER TABLE tools DROP COLUMN builtin;" },
+    { 17,
+      /* Per-turn materialized <RELEVANT_CONTEXT> block (llm_proc.c). */
+      "ALTER TABLE sessions ADD COLUMN turn_context TEXT;" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */
@@ -1303,6 +1306,32 @@ int session_set_iteration(sqlite3 *db, int64_t session_id, int iter) {
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int session_set_turn_context(sqlite3 *db, int64_t session_id, const char *text) {
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "UPDATE sessions SET turn_context=? WHERE id=?",
+                           -1, &stmt, NULL) != SQLITE_OK) return -1;
+    if (text && text[0]) sqlite3_bind_text(stmt, 1, text, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(stmt, 1);
+    sqlite3_bind_int64(stmt, 2, session_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+char *session_get_turn_context(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, "SELECT turn_context FROM sessions WHERE id=?",
+                           -1, &stmt, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    char *r = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(stmt, 0);
+        if (t) r = strdup(t);
+    }
+    sqlite3_finalize(stmt);
+    return r;
 }
 
 int session_bump_iteration(sqlite3 *db, int64_t session_id) {

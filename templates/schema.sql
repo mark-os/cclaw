@@ -160,6 +160,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   state TEXT NOT NULL DEFAULT 'idle',
   owner_instance TEXT,                      -- live owner (processes.instance_id); NULL ⟺ state='idle'
   turn_iteration INTEGER NOT NULL DEFAULT 0,
+  turn_context TEXT,                        -- <RELEVANT_CONTEXT> block, materialized once at turn
+                                            -- start (llm_proc.c) and reused verbatim by every
+                                            -- tool-loop iteration so the request prefix stays
+                                            -- byte-stable for prompt caching. NULL = no block.
   leaf_id INTEGER DEFAULT -1,
   last_route TEXT,
   last_interaction_id TEXT,

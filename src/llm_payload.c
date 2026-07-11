@@ -78,12 +78,20 @@ static const char SQL_OPENAI_MESSAGES[] =
     "    END AS msg"
     "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
     "  WHERE e.type NOT IN ('tool_call','reasoning')"
-    /* Session context (recall + live state) rides second-to-last: right
-     * before the newest entry (the actual new user message or tool result),
-     * so the model sees "here's context, here's what just happened" in the
-     * order that best matches recency weighting. */
+    /* Session context (recall + live state) rides at the turn boundary:
+     * right before the newest user_message. The user's actual message stays
+     * the true tail on iteration 0 (recency weighting), tool-loop iterations
+     * never split an assistant tool_calls message from its tool result
+     * (strict providers 400 on non-adjacency), and the block's position —
+     * like its content, frozen per turn in llm_proc.c — never moves
+     * mid-turn, keeping the request prefix byte-stable for prompt caching.
+     * A plan with no user_message anchors before its first entry instead,
+     * which is equally adjacency-safe. */
     "  UNION ALL"
-    "  SELECT (SELECT MAX(pp.pos) FROM _plan pp) - 0.5 AS pos,"
+    "  SELECT COALESCE("
+    "      (SELECT MAX(pu.pos) FROM _plan pu JOIN entries eu"
+    "         ON eu.id = pu.entry_id AND eu.type = 'user_message'),"
+    "      (SELECT MIN(pp.pos) FROM _plan pp)) - 0.5 AS pos,"
     "    json_object('role','user','content',?2) AS msg"
     "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
     /* Ephemeral hook injects ride at the absolute tail, after even the
@@ -128,8 +136,8 @@ static const char SQL_OPENAI_FULL[] =
     "      WHERE ?2 IS NOT NULL"
     "    UNION ALL"
     /* ?3 (SQL_OPENAI_MESSAGES) already carries session context in the right
-     * spot — second-to-last, before the newest entry — so it needs no
-     * special-casing here. */
+     * spot — at the turn boundary, before the newest user_message — so it
+     * needs no special-casing here. */
     "    SELECT 1, rowid, json(value) FROM json_each(?3)"
     "    ORDER BY ord, sub)),"
     "  'max_tokens', CASE WHEN ?4 > 0 THEN ?4 ELSE NULL END,"
@@ -182,10 +190,15 @@ static const char SQL_GEMINI_CONTENTS[] =
      * and dropping one (hits fresh/short sessions, where id is still small). */
     "  GROUP BY CASE WHEN e.type IN ('assistant_message','tool_call','reasoning')"
     "    THEN -e.turn_id ELSE e.id END"
-    /* Session context (recall + live state), second-to-last: right before
-     * the newest entry — see SQL_OPENAI_MESSAGES for rationale. */
+    /* Session context (recall + live state) at the turn boundary: right
+     * before the newest user_message — see SQL_OPENAI_MESSAGES for
+     * rationale (tail recency, functionCall/functionResponse adjacency,
+     * position stability for prompt caching). */
     "  UNION ALL"
-    "  SELECT (SELECT MAX(pp.pos) FROM _plan pp) - 0.5 AS min_pos,"
+    "  SELECT COALESCE("
+    "      (SELECT MAX(pu.pos) FROM _plan pu JOIN entries eu"
+    "         ON eu.id = pu.entry_id AND eu.type = 'user_message'),"
+    "      (SELECT MIN(pp.pos) FROM _plan pp)) - 0.5 AS min_pos,"
     "    json_object('role','user','parts',"
     "      json_array(json_object('text',?2))) AS content_obj"
     "  WHERE ?2 IS NOT NULL AND EXISTS (SELECT 1 FROM _plan)"
@@ -221,7 +234,7 @@ static const char SQL_GEMINI_FULL[] =
     "    THEN json_object('parts',json_array(json_object('text',?1)))"
     "    ELSE NULL END,"
     /* ?2 (SQL_GEMINI_CONTENTS) already carries session context in the right
-     * spot — second-to-last, before the newest entry. */
+     * spot — at the turn boundary, before the newest user_message. */
     "  'contents', json(?2),"
     "  'tools', CASE WHEN json_array_length(json_extract(?3,'$[0].functionDeclarations')) > 0"
     "    THEN json(?3) ELSE NULL END,"

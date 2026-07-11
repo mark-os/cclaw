@@ -199,10 +199,10 @@ static void test_gemini_payload(void) {
 }
 
 /* Session context (recall + live state, wrapped in <RELEVANT_CONTEXT>) rides
- * SECOND-TO-LAST — right before the newest real entry — on both endpoints,
- * never in the system prompt / systemInstruction. This ordering lets the
- * model see "here's context, here's what just happened" with the actual
- * new turn as the true tail. */
+ * at the TURN BOUNDARY — right before the newest user_message — on both
+ * endpoints, never in the system prompt / systemInstruction. The user's
+ * actual message stays the true tail of its turn, and the block's position
+ * never moves as tool-loop iterations append entries after it. */
 static void test_recall_in_session_context(void) {
     unlink(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
@@ -233,39 +233,45 @@ static void test_recall_in_session_context(void) {
     assert(llm_build_payload(db, sid, &cfg, &plan, context_text, "You are helpful.", &payload) == 0);
 
     sqlite3_stmt *s;
-    /* Last message is the real newest entry (assistant reply); second-to-
-     * last is the session context block. */
+    /* Tail is the real conversation (user then assistant); the context
+     * block rides right BEFORE the newest user message. */
     sqlite3_prepare_v2(db,
         "SELECT json_extract(?1,'$.messages[#-1].role'),"
         " json_extract(?1,'$.messages[#-1].content'),"
         " json_extract(?1,'$.messages[#-2].role'),"
-        " json_extract(?1,'$.messages[#-2].content')", -1, &s, NULL);
+        " json_extract(?1,'$.messages[#-2].content'),"
+        " json_extract(?1,'$.messages[#-3].role'),"
+        " json_extract(?1,'$.messages[#-3].content')", -1, &s, NULL);
     sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "assistant") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "Hi there!") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 2), "user") == 0);
-    assert(strstr((const char *)sqlite3_column_text(s, 3), recall));
+    assert(strstr((const char *)sqlite3_column_text(s, 3), "Hello \"world\""));
+    assert(strcmp((const char *)sqlite3_column_text(s, 4), "user") == 0);
+    assert(strstr((const char *)sqlite3_column_text(s, 5), recall));
     sqlite3_finalize(s);
     llm_payload_release(&payload);
 
-    /* Gemini: same second-to-last placement, NOT in systemInstruction */
+    /* Gemini: same turn-boundary placement, NOT in systemInstruction */
     cfg.provider.endpoint_type = ENDPOINT_GEMINI;
     assert(llm_build_payload(db, sid, &cfg, &plan, context_text, "You are helpful.", &payload) == 0);
 
     sqlite3_prepare_v2(db,
         "SELECT json_extract(?1,'$.contents[#-1].role'),"
         " json_extract(?1,'$.contents[#-1].parts[0].text'),"
-        " json_extract(?1,'$.contents[#-2].role'),"
         " json_extract(?1,'$.contents[#-2].parts[0].text'),"
+        " json_extract(?1,'$.contents[#-3].role'),"
+        " json_extract(?1,'$.contents[#-3].parts[0].text'),"
         " json_extract(?1,'$.systemInstruction.parts[0].text')", -1, &s, NULL);
     sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "model") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "Hi there!") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 2), "user") == 0);
-    assert(strstr((const char *)sqlite3_column_text(s, 3), recall));
-    assert(strcmp((const char *)sqlite3_column_text(s, 4), "You are helpful.") == 0);
+    assert(strstr((const char *)sqlite3_column_text(s, 2), "Hello \"world\""));
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "user") == 0);
+    assert(strstr((const char *)sqlite3_column_text(s, 4), recall));
+    assert(strcmp((const char *)sqlite3_column_text(s, 5), "You are helpful.") == 0);
     sqlite3_finalize(s);
     llm_payload_release(&payload);
 
@@ -331,6 +337,115 @@ static void test_session_context_live_state(void) {
     context_plan_free(&plan);
     db_close(db); unlink(DB_PATH);
     printf("  PASS test_session_context_live_state\n");
+}
+
+/* Turn-boundary placement under a tool loop: the block must never split an
+ * assistant tool_calls message from its tool result (strict providers 400
+ * on non-adjacency), and its index must not move as iterations append
+ * entries — that position stability is what lets all iterations of a turn
+ * share one prompt-cache prefix. Also covers the per-turn freeze store
+ * (session_set/get_turn_context). */
+static void test_session_context_tool_loop(void) {
+    unlink(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+    assert(sid > 0);
+
+    /* Frozen-per-turn store round-trip */
+    assert(session_get_turn_context(db, sid) == NULL);
+    assert(session_set_turn_context(db, sid, "frozen") == 0);
+    char *tc = session_get_turn_context(db, sid);
+    assert(tc && strcmp(tc, "frozen") == 0);
+    free(tc);
+    assert(session_set_turn_context(db, sid, NULL) == 0);
+    assert(session_get_turn_context(db, sid) == NULL);
+
+    const char *ctx = "<RELEVANT_CONTEXT>sentinel</RELEVANT_CONTEXT>";
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.context_window = 128000;
+
+    /* Iteration 0: just the user message. Block lands right before it. */
+    assert(entry_append_typed(db, sid, 1, "user_message", 0, "list files",
+                              NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0) > 0);
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, ctx, "sys", &payload) == 0);
+
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "SELECT json_extract(?1,'$.messages[1].content'),"
+        " json_extract(?1,'$.messages[#-1].role'),"
+        " json_extract(?1,'$.messages[#-1].content')", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), ctx) == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "user") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "list files") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    /* Iteration 1: assistant tool_calls + tool result appended. The block
+     * keeps index 1 (position stable) and the tool message still directly
+     * follows its assistant tool_calls message (adjacency preserved). */
+    assert(entry_append_typed(db, sid, 1, "assistant_message", 0, "Sure.",
+                              NULL, NULL, 0, STOP_REASON_TOOL_USE, NULL, 0, 0, 0) > 0);
+    assert(entry_append_typed(db, sid, 1, "tool_call", 1, "{\"cmd\":\"ls\"}",
+                              "call_1", "shell_exec", 0, STOP_REASON_NONE, NULL, 0, 0, 0) > 0);
+    assert(entry_append_typed(db, sid, 1, "tool_result", 0, "file1\nfile2",
+                              "call_1", "shell_exec", 0, STOP_REASON_NONE, NULL, 0, 0, 0) > 0);
+
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, ctx, "sys", &payload) == 0);
+
+    sqlite3_prepare_v2(db,
+        "SELECT json_extract(?1,'$.messages[1].content'),"
+        " json_extract(?1,'$.messages[#-1].role'),"
+        " json_extract(?1,'$.messages[#-2].role'),"
+        " json_extract(?1,'$.messages[#-2].tool_calls[0].id'),"
+        " json_extract(?1,'$.messages[#-3].role'),"
+        " json_extract(?1,'$.messages[#-3].content')", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), ctx) == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "tool") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "assistant") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "call_1") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 4), "user") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 5), "list files") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+
+    /* Gemini: functionResponse still directly follows the functionCall
+     * turn; the block leads the contents, before the user message. */
+    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
+    assert(llm_build_payload(db, sid, &cfg, &plan, ctx, "sys", &payload) == 0);
+
+    sqlite3_prepare_v2(db,
+        "SELECT json_extract(?1,'$.contents[0].parts[0].text'),"
+        " json_extract(?1,'$.contents[1].parts[0].text'),"
+        " json_extract(?1,'$.contents[#-1].parts[0].functionResponse.name'),"
+        " json_extract(?1,'$.contents[#-2].role'),"
+        " json_extract(?1,'$.contents[#-2].parts[1].functionCall.name')", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), ctx) == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "list files") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "shell_exec") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "model") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 4), "shell_exec") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    db_close(db); unlink(DB_PATH);
+    printf("  PASS test_session_context_tool_loop\n");
 }
 
 static void test_payload_with_tools(void) {
@@ -598,6 +713,7 @@ int main(void) {
     test_gemini_payload();
     test_recall_in_session_context();
     test_session_context_live_state();
+    test_session_context_tool_loop();
     test_payload_with_tools();
     test_compaction_entry_in_payload();
     test_network_hosts_query_time_wrap();

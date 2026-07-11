@@ -44,11 +44,10 @@ pair (known-sensitive vs unknown-plus-credential); neither may be
 
 **Every secret birth path composes with rule 2 for free.** Whether a secret
 arrives as a `CCLAW_SECRET_*` env var at startup, via `cclaw secret set`, via
-the `secret_create` tool, or via DLP quarantine capturing a leaked credential
+the `secret_create` tool, or via a `save_secret` capture on a tool call
 (specs/security.md), it lands with zero `secret_hosts` rows — so its very
 first use always parks, no matter how it was born. No secret-store-specific
-enforcement exists or is needed; `db_secret_set`'s `status='pending'` is
-provenance/UX only, not a gate.
+enforcement exists or is needed.
 
 ## The invariant
 

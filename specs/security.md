@@ -358,17 +358,17 @@ So "trust the agent to manage my passwords" is half-right: cclaw will *broker* t
 
 ### Secret Store
 
-Secrets are no longer only `CCLAW_SECRET_*` env vars collected at process startup — a DB-backed `secrets` table (name, encrypted value, `status`, `source`, `scope`, `created_at`) lets a secret be born *mid-session*, closing the "sign up for a new service" gap: an agent can mint a fresh credential without ever seeing the plaintext, and an operator can hand one to a running agent without a restart.
+Secrets are no longer only `CCLAW_SECRET_*` env vars collected at process startup — a DB-backed `secrets` table (name, encrypted value, `source`, `scope`, `created_at`) lets a secret be born *mid-session*, closing the "sign up for a new service" gap: an agent can mint a fresh credential without ever seeing the plaintext, and an operator can hand one to a running agent without a restart.
 
-Three ways a secret enters the `secrets` table:
+Three ways a secret enters the `secrets` table — every one intentional and named up front; the DLP scanner never writes here (see [DLP is flag + redact only](#dlp-is-flag--redact-only-no-quarantine)):
 
 1. **Operator verb** — `cclaw secret set <NAME> [value] | rm <NAME> | list` (no value arg reads one line from stdin, keeping it out of shell history). `list` never prints values. Mirrors the existing `sensitive`/`secret-bind` CLI-only verbs.
 2. **`secret_create` tool** — the agent mints a random credential (`getrandom()`, rejection-sampled into an `alnum`/`hex`/`full` charset, 8–128 chars) for a service that needs a *new* password (e.g. signing up for Trello). The generated value is written straight to the DB and never appears in the tool's arguments or result — only its `{{SECRET:name}}` placeholder does.
-3. **DLP quarantine** (see below) — a credential the scanner catches in the wild (a user pastes one in chat, a tool result leaks one) is captured into the store instead of shredded.
+3. **`save_secret` capture** (`src/secret_capture.c`) — a tool call that will *return* a credential (generating a GitHub API key, reading a token endpoint) names it on the call: `web_fetch`/`shell_exec`/`js_eval` accept `save_secret: "NAME"` plus optional `save_secret_path: "$.token"` (JSON path via `json_extract`; omitted = whole trimmed result). The value is extracted from the RAW result before any masking, stored encrypted (`source='captured'`), and every occurrence in the result is masked to `{{SECRET:NAME}}` — the plaintext never enters the context window. Existing names are refused (no clobbering), error results are skipped, extractions over 8KB are rejected with a note.
 
 **Per-call snapshot, not a cached array.** `secrets_snapshot(db, env_base, env_count)` (`src/secret_store.c`) merges the immutable env-collected base (`g_tool_setup->secrets`, fixed for the process lifetime) with a *fresh* `db_secrets_load()` read on every dispatch call — env wins on a name collision. This is why a secret created mid-turn is usable on the agent's very next tool call: nothing caches the DB read, and nothing mutates the borrowed env array (`tool_thread.h`'s "immutable post-setup" contract for `AgentSetup.secrets` holds). `EXEC_THREAD` tools re-snapshot on their own thread's db handle rather than receiving the dispatch-scoped snapshot, which wouldn't outlive the async thread.
 
-**`status='pending'` is provenance/UX only.** A freshly minted or quarantined secret starts `pending`; a `secret set`-by-operator one starts `active`. Neither status gates anything — enforcement is already the existing fail-closed binding rule below: a secret with zero `secret_hosts` rows always parks on first use, regardless of status. `resolve_approval` flips `pending` → `active` the moment an ALWAYS-approval records the secret's first binding (specs/trust.md).
+**No status column.** Every row in the store is a real secret someone meant to put there, and all of them participate equally in interpolation and masking. Enforcement is the fail-closed binding rule below: a secret with zero `secret_hosts` rows always parks on first use, however it was born. (A `status='pending'` column once marked scanner-quarantined captures; it was dropped in schema v20 when quarantine was removed — pending rows fed the deinterpolation mask and false positives corrupted every later tool result.)
 
 ### Secret scoping (design — not yet implemented)
 
@@ -398,22 +398,13 @@ The planned interface is a thin provider abstraction — `secret_resolve(name)` 
 
 A keychain or PM provider slots in **without touching the DLP layer** — the broker calls the same two functions. One unavoidable constraint holds for every provider: even a hardware-backed secret must be pulled into process memory transiently for injection and masking. "Value never lives in cclaw" can only mean *never persisted by cclaw, held only for the duration of a turn.*
 
-### DLP Quarantine (built) vs. Future Secret Agent (still not implemented)
+### DLP is flag + redact only (no quarantine)
 
-When a user pastes a raw credential into the conversation (e.g. "here's my token: ghp_abc123..."), or a tool result carries one, the AC scanner fires. The storage half of the originally-planned flow is now built as **quarantine**, replacing outright redaction:
+When a credential appears where it shouldn't — a user pastes one in chat, a tool result leaks one — the AC scanner **redacts** it to `[SECRET_DETECTED:<rule_id>]` and appends a one-line note naming the sanctioned capture paths (`save_secret` for the agent, `cclaw secret set` for the operator). The scanner never writes to the secret store.
 
-```
-Text crosses a trust boundary → AC scanner detects pattern
-  → tool_result_postprocess_q (src/secret_quarantine.c) captures it:
-      db_secret_set(name="PENDING_<RULEID>_<n>", source='quarantine', status='pending')
-  → text the model/session sees carries {{SECRET:PENDING_<RULEID>_<n>}}, never the raw value
-```
+An earlier design ("quarantine") captured scanner hits into the store as `PENDING_<RULEID>_<n>` secrets instead of shredding them. It was removed (2026-07-11) after a false-positive cascade in production: the heuristic scanner minted "secrets" from ordinary source-code fragments, every minted row became a trusted masking pattern applied to all future text, and each masking pass created new scanner bait (`{{SECRET:{{SECRET:...`). The structural lesson stands: **a pattern-matcher must never gain write access to the trust anchor it feeds.** Capture is now always explicit and named — `save_secret` covers the "agent retrieves a key" flow better than ambush-capture did (real name, no junk rows), and a paste-in-chat is redacted with instructions rather than silently stored.
 
-`inbox_insert_scanned` (`src/db.c`) — the classic "user pastes a key in chat" path — and all three tool-result postprocess sites (inline dispatch, sandboxed-child reap, tool-thread) route through this same wrapper. A value repeated within one scanned result, or matching an already-known secret's value, reuses that secret's name instead of minting a duplicate. A spam guard (pending count ≥ 32) falls back to the old `secret_scan_redact` shred, so a hostile page can't fill the store with junk rows.
-
-**Still not implemented**: naming and routing intelligence. The auto-generated `PENDING_<RULEID>_<n>` name is a placeholder an operator/agent can rename later (`cclaw secret set <NEW_NAME>` + `cclaw secret rm PENDING_...`, or vice versa) — there is no LLM inferring "this looks like a GITHUB_TOKEN" and no dedicated ZDR-routed Secret Agent extracting name+value out-of-band. The original design (route the raw text to a zero-data-retention model endpoint so the plaintext never touches a provider's logs, with a single privileged `secret_store_write` tool gated on its own grant) remains a possible follow-up if auto-naming quality matters enough to justify it.
-
-Open questions deferred: secret TTL/rotation, audit trail of per-agent access, multi-secret OAuth transactions, smarter auto-naming.
+Open questions deferred: secret TTL/rotation, audit trail of per-agent access, multi-secret OAuth transactions.
 
 ## DLP Pipeline: Resolve / Inject / Mask
 
@@ -530,8 +521,9 @@ All three credential tools run via the `--run-tool` broker (re-exec'd child, nam
 | Tool result (forked shell) | — | — | yes | yes |
 | JS eval output | — | — | yes | yes |
 | inbox message (channel inbound) | — | — | yes | yes |
+| Hook inject (persistent + ephemeral) | — | — | yes | yes |
 
-The rule: **anything heading into entries goes through both mask passes (via `tool_result_postprocess_q`, the quarantining variant — see [Secret Store](#secret-store)); anything heading into a tool exec goes through inject.**
+The rule: **anything heading into entries goes through both mask passes (`tool_result_postprocess`, `src/secret_interp.c`); anything heading into a tool exec goes through inject.** Sanitize-on-write is the invariant — the LLM payload is assembled straight from `entries` with no outbound scan, so every write path into entries must either run the mask passes or be derived from content that already did (model output, compaction summaries, sub-agent results are clean by induction).
 
 ## Secret Scanner (AC-based Content DLP)
 
@@ -545,7 +537,7 @@ The AC scanner is the second masking pass — it catches secrets the known-value
 4. **Case re-check** — case-sensitive rules (e.g. Twilio `SK`) re-verify exact bytes via `strncmp` after the case-insensitive AC prefilter. The AC table is a prefilter only; it never loosens a case-sensitive rule.
 5. **Contextual detection** — for generic keywords (`token`, `password`, `api_key`), check for assignment pattern within 30 chars and entropy > 3.5 bits/byte.
 6. **Entropy** — Shannon entropy `H = -Σ p(x) log₂ p(x)` over the matched tail. Separates `AKIAIOSFODNN7EXAMPLE` (high entropy, random-looking) from `mypassword` (low entropy, English-like). Entropy is capped at `log₂(tail_max)` — a rule can't demand more bits than the tail length allows distinct symbols.
-7. **Redaction** — `secret_scan_redact()` replaces matched regions with `[SECRET_DETECTED:<rule_id>]`. This is still what a bare `secret_scan()` consumer gets; the tool-result/inbox paths instead go through `tool_result_postprocess_q` (see [Secret Store](#secret-store)), which quarantines a finding into the `secrets` table behind a `{{SECRET:PENDING_...}}` placeholder and only falls back to this shred once the pending-secret cap is hit.
+7. **Redaction** — `secret_scan_redact()` replaces matched regions with `[SECRET_DETECTED:<rule_id>]`; `tool_result_postprocess` appends a one-line note pointing at the sanctioned capture paths (`save_secret` / `cclaw secret set`). Findings inside `{{SECRET:...}}` placeholders are dropped — already-masked regions are never re-scanned into nested garbage.
 
 ### Why AC can't replace known-value masking
 

@@ -9,6 +9,8 @@
 #include "hook_dispatch.h"
 #include "db.h"
 #include "qjs_helpers.h"
+#include "secret_interp.h"
+#include "secret_store.h"
 #include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -160,6 +162,11 @@ static int apply_inject(sqlite3 *db, int64_t session_id, const char *cmds_json) 
         return -1;
     sqlite3_bind_text(s, 1, cmds_json, -1, SQLITE_STATIC);
 
+    /* Known-value mask set for the injected content (DB-backed secrets;
+     * env-collected ones aren't reachable from here). */
+    size_t snap_n = 0;
+    ShellSecret *snap = secrets_snapshot(db, NULL, 0, &snap_n);
+
     sqlite3_stmt *ins = NULL;
     int count = 0;
     size_t total = 0;
@@ -189,6 +196,11 @@ static int apply_inject(sqlite3 *db, int64_t session_id, const char *cmds_json) 
         }
         count++;
         total += clen;
+        /* Hook JS computes over tool results and config — externally
+         * influenced content crossing into the context window. Same mask +
+         * scan every other entries write gets. */
+        char *masked = tool_result_postprocess(content, snap, snap_n);
+        if (masked) content = masked;
         if (ephemeral) {
             if (!ins && sqlite3_prepare_v2(db,
                     "INSERT INTO hook_directives(session_id, kind, role, content)"
@@ -198,7 +210,7 @@ static int apply_inject(sqlite3 *db, int64_t session_id, const char *cmds_json) 
             }
             sqlite3_bind_int64(ins, 1, session_id);
             sqlite3_bind_text(ins, 2, role, -1, SQLITE_STATIC);
-            sqlite3_bind_text(ins, 3, content, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 3, content, -1, SQLITE_TRANSIENT);
             if (sqlite3_step(ins) != SQLITE_DONE) rc = -1;
             sqlite3_reset(ins);
         } else {
@@ -206,9 +218,11 @@ static int apply_inject(sqlite3 *db, int64_t session_id, const char *cmds_json) 
                          .content = (char *)content};
             if (entry_append_with_turn(db, session_id, &m, 0) < 0) rc = -1;
         }
+        free(masked);
     }
     if (ins) sqlite3_finalize(ins);
     sqlite3_finalize(s);
+    secrets_snapshot_free(snap, snap_n);
     return rc;
 }
 

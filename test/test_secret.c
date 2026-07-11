@@ -107,7 +107,7 @@ static void test_db_secret_roundtrip(void) {
 
     db_set_secret_key(TEST_KEY);
 
-    assert(db_secret_set(db, "TEST_SECRET", "my-api-key", "operator", "active", "system") == 0);
+    assert(db_secret_set(db, "TEST_SECRET", "my-api-key", "operator", "system") == 0);
 
     /* Raw value in secrets table should be encrypted */
     sqlite3_stmt *s;
@@ -168,7 +168,7 @@ static void test_startup_integration(void) {
     db_set_secret_key(key);
 
     /* Store and retrieve a secret */
-    assert(db_secret_set(db, "PROVIDER_API_KEY", "sk-test-123", "operator", "active", "system") == 0);
+    assert(db_secret_set(db, "PROVIDER_API_KEY", "sk-test-123", "operator", "system") == 0);
     char *val = db_secret_get_system(db, "PROVIDER_API_KEY");
     assert(val != NULL);
     assert(strcmp(val, "sk-test-123") == 0);

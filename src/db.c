@@ -4,7 +4,8 @@
 #include "config_registry.h"
 #include "log.h"
 #include "secret_scan.h"
-#include "secret_quarantine.h"
+#include "secret_interp.h"
+#include "secret_store.h"
 #include "unicode_normalize.h"
 #include "agent_config.h"
 #include "secret.h"
@@ -364,6 +365,13 @@ static const struct { int version; const char *sql; } schema_patches[] = {
     { 19,
       /* Per-turn materialized <RELEVANT_CONTEXT> block (llm_proc.c). */
       "ALTER TABLE sessions ADD COLUMN turn_context TEXT;" },
+    { 20,
+      /* Scanner quarantine removed: the DLP scanner redacts instead of
+       * minting secrets, so status ('pending'|'active') has no readers.
+       * Sweep quarantine junk first — false-positive captures actively
+       * corrupted deinterpolation on DBs that hit the old flow. */
+      "DELETE FROM secrets WHERE status='pending';"
+      "ALTER TABLE secrets DROP COLUMN status;" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */
@@ -1434,13 +1442,16 @@ int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source
     const char *scanned = clean ? clean : payload;
     if (!clean) len = strlen(payload);
 
-    /* The classic capture case (a user pastes a live key in chat): quarantine
-     * into the secret store instead of shredding, so it becomes a pending
-     * secret behind a {{SECRET:...}} placeholder rather than being destroyed. */
-    char *quarantined = tool_result_postprocess_q(db, scanned, NULL, 0);
-    int64_t id = inbox_insert(db, session_id, source, quarantined ? quarantined : scanned);
+    /* Mask known secret values (a user re-pasting a stored key) and redact
+     * scanner hits. A redaction note tells the model the sanctioned capture
+     * paths — the scanner itself never writes to the secret store. */
+    size_t snap_n = 0;
+    ShellSecret *snap = secrets_snapshot(db, NULL, 0, &snap_n);
+    char *masked = tool_result_postprocess(scanned, snap, snap_n);
+    secrets_snapshot_free(snap, snap_n);
+    int64_t id = inbox_insert(db, session_id, source, masked ? masked : scanned);
     free(clean);
-    free(quarantined);
+    free(masked);
     return id;
 }
 
@@ -1776,23 +1787,22 @@ int db_secret_host_unbind(sqlite3 *db, const char *secret_name, const char *host
 /* Secret store (specs/security.md): DB-backed secrets, encrypted at rest. */
 
 int db_secret_set(sqlite3 *db, const char *name, const char *value,
-                  const char *source, const char *status, const char *scope) {
+                  const char *source, const char *scope) {
     if (!db || !name || !name[0] || !value) return -1;
     if (!s_secret_key_loaded) return -1;
     char *enc = secret_encrypt(s_secret_key, value);
     if (!enc) return -1;
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db,
-        "INSERT INTO secrets(name, value, source, status, scope) VALUES(?1, ?2, ?3, ?4, ?5) "
+        "INSERT INTO secrets(name, value, source, scope) VALUES(?1, ?2, ?3, ?4) "
         "ON CONFLICT(name) DO UPDATE SET value=excluded.value, source=excluded.source, "
-        "status=excluded.status, scope=excluded.scope",
+        "scope=excluded.scope",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) { free(enc); return -1; }
     sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, enc, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, source ? source : "operator", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, status ? status : "active", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 5, scope ? scope : "agent", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, scope ? scope : "agent", -1, SQLITE_STATIC);
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     free(enc);
@@ -1873,31 +1883,6 @@ ShellSecret *db_secrets_load(sqlite3 *db, size_t *count) {
     *count = n;
     if (n == 0) { free(out); return NULL; }
     return out;
-}
-
-int db_secret_pending_count(sqlite3 *db) {
-    if (!db) return 0;
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM secrets WHERE status='pending'",
-                          -1, &stmt, NULL) != SQLITE_OK)
-        return 0;
-    int n = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW) n = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-    return n;
-}
-
-int db_secret_set_status(sqlite3 *db, const char *name, const char *status) {
-    if (!db || !name || !name[0] || !status) return -1;
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, "UPDATE secrets SET status=?1 WHERE name=?2",
-                          -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_text(stmt, 1, status, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
 int db_agent_upsert(sqlite3 *db, const char *name, const char *description,

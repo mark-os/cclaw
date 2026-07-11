@@ -53,7 +53,7 @@ static void test_roundtrip(void) {
     db_set_secret_key(key);
 
     /* Store */
-    if (db_secret_set(db, "PROVIDER_API_KEY", "sk-or-v1-realkey", "operator", "active", "system") != 0) { db_close(db); FAIL("db_secret_set"); }
+    if (db_secret_set(db, "PROVIDER_API_KEY", "sk-or-v1-realkey", "operator", "system") != 0) { db_close(db); FAIL("db_secret_set"); }
 
     /* Raw value must be encrypted */
     sqlite3_stmt *s;
@@ -86,7 +86,7 @@ static void test_deleted_key_file(void) {
     uint8_t key[32];
     if (secret_key_load_or_create(db_path, key) != 0) { db_close(db); FAIL("key_load_or_create"); }
     db_set_secret_key(key);
-    db_secret_set(db, "TEST_KEY", "secret-value", "operator", "active", "system");
+    db_secret_set(db, "TEST_KEY", "secret-value", "operator", "system");
     db_close(db);
 
     /* Delete the key file */
@@ -122,9 +122,9 @@ static void test_multiple_secrets(void) {
     if (secret_key_load_or_create(db_path, key) != 0) { db_close(db); FAIL("key_load_or_create"); }
     db_set_secret_key(key);
 
-    db_secret_set(db, "KEY_ONE", "value-one", "operator", "active", "system");
-    db_secret_set(db, "KEY_TWO", "value-two", "operator", "active", "system");
-    db_secret_set(db, "KEY_THREE", "value-three", "operator", "active", "system");
+    db_secret_set(db, "KEY_ONE", "value-one", "operator", "system");
+    db_secret_set(db, "KEY_TWO", "value-two", "operator", "system");
+    db_secret_set(db, "KEY_THREE", "value-three", "operator", "system");
 
     char *v1 = db_secret_get_system(db, "KEY_ONE");
     char *v2 = db_secret_get_system(db, "KEY_TWO");
@@ -150,8 +150,8 @@ static void test_overwrite_secret(void) {
     if (secret_key_load_or_create(db_path, key) != 0) { db_close(db); FAIL("key_load_or_create"); }
     db_set_secret_key(key);
 
-    db_secret_set(db, "OVERWRITE_KEY", "original", "operator", "active", "system");
-    db_secret_set(db, "OVERWRITE_KEY", "updated", "operator", "active", "system");
+    db_secret_set(db, "OVERWRITE_KEY", "original", "operator", "system");
+    db_secret_set(db, "OVERWRITE_KEY", "updated", "operator", "system");
 
     char *dec = db_secret_get_system(db, "OVERWRITE_KEY");
     if (!dec || strcmp(dec, "updated") != 0) { free(dec); db_close(db); FAIL("overwrite mismatch"); }

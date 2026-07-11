@@ -92,7 +92,7 @@ static void test_kv_secret_fallback(void) {
     sqlite3 *db = fresh_db();
     assert(db);
     db_set_secret_key(k);
-    assert(db_secret_set(db, "OPENROUTER_API_KEY", "sk-from-kv", "operator", "active", "system") == 0);
+    assert(db_secret_set(db, "OPENROUTER_API_KEY", "sk-from-kv", "operator", "system") == 0);
 
     Config *cfg = config_load(db);
     assert(cfg != NULL);

@@ -216,6 +216,13 @@ char *secret_deinterpolate(const char *text, const ShellSecret *secrets, size_t 
     return cur;
 }
 
+/* Appended once after any redaction so the agent knows the mangling was
+ * deliberate and what the sanctioned capture paths are. */
+#define SCAN_REDACT_HINT \
+    "\n[cclaw: credential-like text was redacted. To capture a credential " \
+    "for use, pass save_secret on the retrieving call; an operator can " \
+    "store one with `cclaw secret set <NAME>`.]"
+
 char *tool_result_postprocess(const char *result, const ShellSecret *secrets, size_t count) {
     if (!result) return NULL;
     char *cur = NULL;
@@ -233,11 +240,17 @@ char *tool_result_postprocess(const char *result, const ShellSecret *secrets, si
     ScanFinding f[SCAN_MAX_FINDINGS];
     int n = secret_scan(to_scan, len, f, SCAN_MAX_FINDINGS);
     if (n > 0) {
-        size_t cap = len + 1 + (size_t)n * 80;  /* redact tag is capped at 80 */
+        size_t cap = len + 1 + (size_t)n * 80   /* redact tag is capped at 80 */
+                     + sizeof(SCAN_REDACT_HINT);
         char *scanned = malloc(cap);
         if (scanned) {
             memcpy(scanned, to_scan, len + 1);
             secret_scan_redact(scanned, &len, cap);
+            size_t hlen = sizeof(SCAN_REDACT_HINT) - 1;
+            if (len + hlen < cap) {
+                memcpy(scanned + len, SCAN_REDACT_HINT, hlen + 1);
+                len += hlen;
+            }
             free(cur);
             return scanned;
         }

@@ -377,11 +377,16 @@ static void test_schema_upgrade_from_v11(void) {
 
     /* Reshape a current DB back to v11: re-add the column patch v12 drops,
      * drop the ones patches v14/v17/v19 add, re-add the ones patch v16 drops,
-     * re-add model/provider that v17 drops, seed rows that each patch must rewrite. */
+     * re-add model/provider that v17 drops, re-add status that v20 drops,
+     * seed rows that each patch must rewrite. */
     assert(sqlite3_exec(db,
         "ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 128000;"
         "ALTER TABLE channels DROP COLUMN prev_extension_name;"
         "ALTER TABLE sessions DROP COLUMN turn_context;"
+        "ALTER TABLE secrets ADD COLUMN status TEXT NOT NULL DEFAULT 'active';"
+        "INSERT INTO secrets(name, value, status, source) VALUES"
+        "  ('REAL_KEY','enc:00','active','operator'),"          /* survives sweep */
+        "  ('PENDING_JUNK_1','enc:00','pending','quarantine');" /* v20: swept */
         "ALTER TABLE channel_outbox RENAME COLUMN deliver_mode TO deliver_plain;"
         "ALTER TABLE extensions ADD COLUMN builtin INTEGER NOT NULL DEFAULT 0;"
         "ALTER TABLE tools ADD COLUMN builtin INTEGER NOT NULL DEFAULT 0;"
@@ -437,6 +442,12 @@ static void test_schema_upgrade_from_v11(void) {
     assert(column_exists(db, "agents", "secondary_model"));
     v = query_text(db, "SELECT primary_model FROM agents WHERE name='v17agent'");
     assert(v && strcmp(v, "m-big") == 0); free(v);
+    /* v20: quarantine pending rows swept, status column dropped */
+    assert(!column_exists(db, "secrets", "status"));
+    v = query_text(db, "SELECT COUNT(*) FROM secrets WHERE name='PENDING_JUNK_1'");
+    assert(v && strcmp(v, "0") == 0); free(v);
+    v = query_text(db, "SELECT COUNT(*) FROM secrets WHERE name='REAL_KEY'");
+    assert(v && strcmp(v, "1") == 0); free(v);
 
     /* Re-running is a no-op, not an error */
     assert(db_schema_compat(db) == 1);

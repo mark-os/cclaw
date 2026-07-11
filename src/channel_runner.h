@@ -13,14 +13,10 @@ typedef struct SendReq {
     char *method;
     char *url;
     char *body;
-    char *tag;
     char **headers;
     int n_headers;
     int64_t outbox_id;   /* 0 = not outbox-bound */
     int is_final;        /* last send for this outbox row */
-    int base64;          /* deliver the response body base64-encoded (binary
-                            downloads — a raw body would truncate at the first
-                            NUL crossing the C-string JS bridge) */
     long timeout;
     /* channel.http(): promise-backed request. js_ctx non-NULL marks it; the
        resolve/reject pair is owned by the request and freed in send_req_free.
@@ -41,8 +37,6 @@ JSValue eval_js(JSContext *ctx, const char *code, const char *tag);
 void set_global_str(JSContext *ctx, const char *name, const char *val);
 void set_global_int(JSContext *ctx, const char *name, int val);
 void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row);
-void call_on_result(JSContext *ctx, const char *tag, int status,
-                    const char *body, const char *error);
 
 /* Settle a promise-backed request (channel.http): resolve with
  * {status, body, path, bytes, error} and drain the microtask queue so

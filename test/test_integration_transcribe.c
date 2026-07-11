@@ -2,8 +2,9 @@
  * Verifies the media_jobs → transcription → text-only inbox flow:
  * 1. capability-picks the audio model and POSTs the inlineData request
  * 2. success: inbox row carries "[voice message] <transcript>" (+ caption),
- *    media_jobs row deleted, audio bytes never in the inbox payload
- * 3. terminal failure: inbox row tells the agent, job still deleted */
+ *    media_jobs row deleted, spool file unlinked, audio bytes never in inbox
+ * 3. terminal failure: inbox row tells the agent, job still deleted, spool
+ *    file unlinked */
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdio.h>
@@ -34,6 +35,19 @@ static void exec_sql(sqlite3 *db, const char *sql) {
     }
 }
 
+/* Write a small spool file with known bytes ("OggS" header → base64 "T2dnUw==") */
+static char *write_spool_file(const char *tag) {
+    static char path[256];
+    snprintf(path, sizeof(path), "/tmp/cclaw_integ_spool_%s_%d.ogg",
+             tag, (int)getpid());
+    FILE *f = fopen(path, "wb");
+    assert(f);
+    const unsigned char ogg_hdr[] = {0x4F, 0x67, 0x67, 0x53};
+    fwrite(ogg_hdr, 1, sizeof(ogg_hdr), f);
+    fclose(f);
+    return path;
+}
+
 /* Point the models table at the mock server: one audio-capable gemini model.
  * llm_build_url appends /models/<model>:generateContent, which the mock
  * server serves via its /models/ handler. */
@@ -48,15 +62,17 @@ static void seed_audio_model(sqlite3 *db) {
     exec_sql(db, sql);
 }
 
-static int64_t seed_media_job(sqlite3 *db, int64_t sid, const char *caption) {
+static int64_t seed_media_job(sqlite3 *db, int64_t sid, const char *caption,
+                              const char *spool_file) {
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db,
         "INSERT INTO media_jobs(session_id, source, payload) VALUES(?1, 'telegram',"
         " json_object('channel_id','42','from','Mark','text',?2,"
-        "   'media', json_object('kind','audio','mime','audio/ogg','data_b64','T2dnUw==')));",
+        "   'media', json_object('kind','audio','mime','audio/ogg','path',?3)));",
         -1, &s, NULL) == SQLITE_OK);
     sqlite3_bind_int64(s, 1, sid);
     sqlite3_bind_text(s, 2, caption ? caption : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, spool_file, -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_DONE);
     sqlite3_finalize(s);
     return sqlite3_last_insert_rowid(db);
@@ -101,8 +117,9 @@ static void test_transcribe_success(void) {
     seed_audio_model(db);
     setenv("MOCKGEM_KEY", "test-key", 1);
 
+    char *spool = write_spool_file("success");
     int64_t sid = session_create(db, "telegram", NULL, -1, 0);
-    int64_t jid = seed_media_job(db, sid, "");
+    int64_t jid = seed_media_job(db, sid, "", spool);
 
     int rc = llm_transcribe(db, NULL, jid);
     if (rc != 0) { db_close(db); unlink(db_path); FAIL("expected rc==0"); }
@@ -120,9 +137,14 @@ static void test_transcribe_success(void) {
              strstr(payload, "T2dnUw==") == NULL;   /* audio never enters context */
     free(payload);
     int jobs_left = media_jobs_count(db);
+
+    /* Spool file must be deleted after successful transcription */
+    int spool_gone = (access(spool, F_OK) != 0);
+
     db_close(db); unlink(db_path);
     if (!ok) FAIL("bad inbox payload");
     if (jobs_left != 0) FAIL("media_jobs row not deleted");
+    if (!spool_gone) FAIL("spool file not deleted after success");
     PASS();
 }
 
@@ -139,8 +161,9 @@ static void test_transcribe_caption_prepended(void) {
     seed_audio_model(db);
     setenv("MOCKGEM_KEY", "test-key", 1);
 
+    char *spool = write_spool_file("caption");
     int64_t sid = session_create(db, "telegram", NULL, -1, 0);
-    int64_t jid = seed_media_job(db, sid, "the caption");
+    int64_t jid = seed_media_job(db, sid, "the caption", spool);
 
     int rc = llm_transcribe(db, NULL, jid);
     if (rc != 0) { db_close(db); unlink(db_path); FAIL("expected rc==0"); }
@@ -150,8 +173,13 @@ static void test_transcribe_caption_prepended(void) {
     int ok = strstr(payload, "the caption\\n[voice message] hello from voice") != NULL;
     if (!ok) printf("(payload: %s) ", payload);
     free(payload);
+
+    /* Spool file must be deleted */
+    int spool_gone = (access(spool, F_OK) != 0);
+
     db_close(db); unlink(db_path);
     if (!ok) FAIL("caption not prepended");
+    if (!spool_gone) FAIL("spool file not deleted after caption test");
     PASS();
 }
 
@@ -169,8 +197,9 @@ static void test_transcribe_terminal_failure(void) {
     seed_audio_model(db);
     setenv("MOCKGEM_KEY", "test-key", 1);
 
+    char *spool = write_spool_file("failure");
     int64_t sid = session_create(db, "telegram", NULL, -1, 0);
-    int64_t jid = seed_media_job(db, sid, "");
+    int64_t jid = seed_media_job(db, sid, "", spool);
 
     int rc = llm_transcribe(db, NULL, jid);
     if (rc != 0) { db_close(db); unlink(db_path); FAIL("expected rc==0 (resolved as failure)"); }
@@ -180,9 +209,14 @@ static void test_transcribe_terminal_failure(void) {
     int ok = strstr(payload, "[voice message received but transcription failed]") != NULL;
     free(payload);
     int jobs_left = media_jobs_count(db);
+
+    /* Spool file must be deleted even on terminal failure */
+    int spool_gone = (access(spool, F_OK) != 0);
+
     db_close(db); unlink(db_path);
     if (!ok) FAIL("missing failure text");
     if (jobs_left != 0) FAIL("media_jobs row not deleted");
+    if (!spool_gone) FAIL("spool file not deleted after terminal failure");
     PASS();
 }
 
@@ -203,16 +237,22 @@ static void test_transcribe_no_audio_model(void) {
         "INSERT INTO models(id, provider_name, model, capabilities)"
         " VALUES('p/chat', 'p', 'chat', '[\"text\"]');");
 
+    char *spool = write_spool_file("nomodel");
     int64_t sid = session_create(db, "telegram", NULL, -1, 0);
-    int64_t jid = seed_media_job(db, sid, "");
+    int64_t jid = seed_media_job(db, sid, "", spool);
 
     int rc = llm_transcribe(db, NULL, jid);
     char *payload = inbox_payload(db, sid);
     int ok = rc == 0 && payload &&
              strstr(payload, "transcription failed") != NULL;
     free(payload);
+
+    /* Spool file must be deleted even when no model is available */
+    int spool_gone = (access(spool, F_OK) != 0);
+
     db_close(db); unlink(db_path);
     if (!ok) FAIL("expected terminal failure without network traffic");
+    if (!spool_gone) FAIL("spool file not deleted in no-model path");
     PASS();
 }
 

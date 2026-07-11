@@ -1,6 +1,9 @@
 // Telegram channel extension for channel_runner
 // Reactive handlers: onInit, onPoll, onRequest, onOutbox.
-// All outbound HTTP goes through channel.send() — nothing here blocks.
+// Outbound HTTP: channel.http(req) -> Promise for API calls and media
+// downloads (await never blocks the loop — the transfer runs on the runner's
+// curl loop and resumes this continuation on completion); channel.send() only
+// for outbox-tracked deliveries, where C owns retry/ack.
 // Admin config (keys, models, grants) lives on the web dashboard (/admin
 // prints the URL); chat keeps only conversation, /approvals and the push
 // approval prompts.
@@ -9,14 +12,9 @@ var TG_MAX_MSG_LEN = 4096;
 var TG_RICH_MAX_BYTES = 32768;   // sendRichMessage UTF-8 byte limit
 var VOICE_MAX_SECONDS = 120;     // reject longer voice notes up front
 var VOICE_MAX_BYTES = 1536 * 1024;
+var PHOTO_MAX_BYTES = 3 * 1024 * 1024;  // matches the runner's download cap
 var config = {};
 var offset = 0;
-
-// Voice notes in flight: updateId -> {chatId, from, caption}, parked between
-// the getFile call (vf_<id>) and the file download (vd_<id>). Entries are
-// deleted on every outcome; a runner restart simply drops in-flight ones
-// (the update was already acked).
-var pendingVoice = {};
 
 // Single source of truth for admin slash commands — drives both the
 // Telegram "/" menu (setMyCommands) and dispatch, so the two can't drift.
@@ -67,7 +65,7 @@ function onInit() {
     // Fix the stale command menu (leftover from a previous bot on this token).
     var cmdList = [];
     for (var name in COMMANDS) cmdList.push({command: name, description: COMMANDS[name].description});
-    tgCall("setMyCommands", JSON.stringify({commands: cmdList}));
+    tgCast("setMyCommands", {commands: cmdList});
 
     if (mode === "webhook") return {};
     return {poll: pollShape()};
@@ -173,10 +171,10 @@ function onOutbox(item) {
     // the C loop as mode=1.
     if (mode === 0 && channel.getConfig("rich_disabled") !== "1" &&
         utf8ByteLen(text) <= TG_RICH_MAX_BYTES) {
-        tgCall("sendRichMessage", JSON.stringify({
+        tgOutbox("sendRichMessage", {
             chat_id: parseInt(chatId, 10),
             rich_message: {markdown: text}
-        }), {outbox_id: item.id, final: 1});
+        }, item.id, 1);
         return;
     }
 
@@ -226,9 +224,12 @@ function processMessage(msg, updateId) {
     var text = msg.text;
     if (!chat) return true;   // nothing addressable
     if (!text) {
-        // Voice notes are transcribed (capability-routed in the daemon);
-        // other media kinds are still text-only.
-        if (msg.voice) return processVoice(msg, updateId);
+        // Voice notes and photos are turned into text by the daemon's
+        // capability-routed media preprocessing; other kinds are dropped.
+        // Media fetches are async fire-and-forget: the update is acked now,
+        // dedup safety is the tg_<updateId> external_id at emit time.
+        if (msg.voice) { processVoice(msg, updateId); return true; }
+        if (msg.photo) { processPhoto(msg, updateId); return true; }
         var kind = messageKind(msg);
         channel.log("dropping non-text message kind=" + kind + " chat=" + chat.id);
         sendMessage("" + chat.id, "I can only read text right now (got a " + kind + ").");
@@ -260,77 +261,73 @@ function processMessage(msg, updateId) {
     return channel.emit("message", payload, "tg_" + updateId) === 0;
 }
 
-// ── Voice messages ───────────────────────────────────────────────
-// getFile → download (base64, same host — the runner's host pin holds) →
-// emit with media payload; the daemon routes it to a transcription model.
-// Always returns true: the update is acked here, dedup safety is the
-// tg_<updateId> external_id at emit time.
+// ── Media messages (voice, photo) ───────────────────────────────
+// getFile → download to the runner's media spool (save_to: the bytes stream
+// to disk in C and never enter the JS heap) → emit with media {kind, mime,
+// path}; the daemon routes it to a capability-matched preprocessing model
+// (transcription / description) and only its text output reaches the agent.
 
-function processVoice(msg, updateId) {
+async function processVoice(msg, updateId) {
     var chatId = "" + msg.chat.id;
     var v = msg.voice;
     if ((v.duration || 0) > VOICE_MAX_SECONDS || (v.file_size || 0) > VOICE_MAX_BYTES) {
         channel.log("rejecting oversize voice chat=" + chatId +
                     " duration=" + v.duration + " size=" + v.file_size);
         sendMessage(chatId, "That voice message is too long for me — please keep it under 2 minutes.");
-        return true;
+        return;
     }
-    pendingVoice[updateId] = {
-        chatId: chatId,
-        from: msg.from ? msg.from.first_name || "" : "",
-        caption: msg.caption || ""
-    };
-    tgCall("getFile", JSON.stringify({file_id: v.file_id}), {tag: "vf_" + updateId});
-    return true;
+    await fetchMedia(msg, updateId, chatId, v.file_id,
+                     {kind: "audio", mime: v.mime_type || "audio/ogg"},
+                     "voice message");
 }
 
-function voiceFail(updateId, why) {
-    var p = pendingVoice[updateId];
-    delete pendingVoice[updateId];
-    channel.log("voice failed update=" + updateId + ": " + why);
-    if (p) sendMessage(p.chatId, "Sorry — I couldn't process that voice message.");
+async function processPhoto(msg, updateId) {
+    var chatId = "" + msg.chat.id;
+    // photo[] is ordered by size ascending; pick the largest under the cap.
+    var i = msg.photo.length - 1;
+    while (i > 0 && (msg.photo[i].file_size || 0) > PHOTO_MAX_BYTES) i--;
+    var p = msg.photo[i];
+    if ((p.file_size || 0) > PHOTO_MAX_BYTES) {
+        channel.log("rejecting oversize photo chat=" + chatId + " size=" + p.file_size);
+        sendMessage(chatId, "That photo is too large for me.");
+        return;
+    }
+    await fetchMedia(msg, updateId, chatId, p.file_id,
+                     {kind: "image", mime: "image/jpeg"}, "photo");
 }
 
-// vf_<id>: getFile result → queue the binary download.
-function onVoiceFile(updateId, r, failed) {
-    if (!pendingVoice[updateId]) return;
-    var filePath = null;
-    if (!failed) {
-        try {
-            var d = JSON.parse(r.body);
+async function fetchMedia(msg, updateId, chatId, fileId, media, what) {
+    try {
+        var fr = await tgCall("getFile", {file_id: fileId});
+        var filePath = null;
+        if (!fr.error && fr.status >= 200 && fr.status < 300) {
+            var d = JSON.parse(fr.body);
             if (d.ok && d.result) filePath = d.result.file_path;
-        } catch (e) {}
-    }
-    if (!filePath) {
-        voiceFail(updateId, "getFile status=" + r.status + " error=" + r.error);
-        return;
-    }
-    channel.send({
-        method: "GET",
-        url: config.base + "/file/bot" + config.token + "/" + filePath,
-        base64: 1,
-        tag: "vd_" + updateId
-    });
-}
+        }
+        if (!filePath) throw "getFile status=" + fr.status + " error=" + fr.error;
 
-// vd_<id>: downloaded audio (base64) → emit the media message.
-function onVoiceDownload(updateId, r, failed) {
-    var p = pendingVoice[updateId];
-    if (!p) return;
-    if (failed || !r.body) {
-        voiceFail(updateId, "download status=" + r.status + " error=" + r.error);
-        return;
-    }
-    delete pendingVoice[updateId];
-    var payload = JSON.stringify({
-        channel_id: p.chatId,
-        from: p.from,
-        text: p.caption,
-        media: {kind: "audio", mime: "audio/ogg", data_b64: r.body}
-    });
-    if (channel.emit("message", payload, "tg_" + updateId) !== 0) {
-        channel.log("voice emit failed update=" + updateId);
-        sendMessage(p.chatId, "Sorry — I couldn't process that voice message.");
+        var dot = filePath.lastIndexOf(".");
+        var ext = dot > filePath.lastIndexOf("/") ? filePath.substring(dot) : "";
+        var dl = await channel.http({
+            method: "GET",
+            url: config.base + "/file/bot" + config.token + "/" + filePath,
+            save_to: "tg_" + updateId + ext
+        });
+        if (dl.error || dl.status < 200 || dl.status >= 300 || !dl.path)
+            throw "download status=" + dl.status + " error=" + dl.error;
+
+        media.path = dl.path;
+        var payload = JSON.stringify({
+            channel_id: chatId,
+            from: msg.from ? msg.from.first_name || "" : "",
+            text: msg.caption || "",
+            media: media
+        });
+        if (channel.emit("message", payload, "tg_" + updateId) !== 0)
+            throw "emit failed";
+    } catch (e) {
+        channel.log(what + " failed update=" + updateId + ": " + e);
+        sendMessage(chatId, "Sorry — I couldn't process that " + what + ".");
     }
 }
 
@@ -347,7 +344,7 @@ function processCallback(cbq) {
     // Anything else (including buttons from menus that no longer exist):
     // answer the callback so the client's loading spinner clears.
     if (cbq.id) {
-        tgCall("answerCallbackQuery", JSON.stringify({callback_query_id: cbq.id}));
+        tgCast("answerCallbackQuery", {callback_query_id: cbq.id});
     }
 }
 
@@ -362,7 +359,7 @@ function handleApprovalCallback(fromId, data, cbq) {
     var toast = decision === "yes" ? "Approved" :
                 decision === "once" ? "Approved once" : "Denied";
     if (cbq.id) {
-        tgCall("answerCallbackQuery", JSON.stringify({callback_query_id: cbq.id, text: toast}));
+        tgCast("answerCallbackQuery", {callback_query_id: cbq.id, text: toast});
     }
 
     channel.emit("approval_decision",
@@ -373,47 +370,51 @@ function handleApprovalCallback(fromId, data, cbq) {
     if (cbq.message && cbq.message.chat) {
         var who = (cbq.from && cbq.from.first_name) || fromId;
         var outcome = (cbq.message.text || "Approval") + "\n\n" + toast + " by " + who;
-        tgCall("editMessageText", JSON.stringify({
+        tgCast("editMessageText", {
             chat_id: cbq.message.chat.id,
             message_id: cbq.message.message_id,
             text: outcome,
             reply_markup: {inline_keyboard: []}
-        }), {tag: "edit_" + cbq.id});
+        });
     }
 }
 
-// ── Telegram API helpers (queue shapes; the C loop executes) ─────
+// ── Telegram API helpers ─────────────────────────────────────────
 
-function tgCall(method, body, extra) {
-    var req = {
+// POST a Bot API method; resolves {status, body, error} (never rejects).
+function tgCall(method, bodyObj) {
+    return channel.http({
         method: "POST",
         url: config.base + "/bot" + config.token + "/" + method,
-        body: body
-    };
-    if (extra) {
-        if (extra.outbox_id) req.outbox_id = extra.outbox_id;
-        if (extra.final) req.final = 1;
-        if (extra.tag) req.tag = extra.tag;
-    }
-    channel.send(req);
+        body: JSON.stringify(bodyObj)
+    });
 }
 
-// Calls made with a tag (no outbox_id) get no other failure tracking —
-// log anything that isn't a clean 2xx so a bad request body doesn't vanish
-// silently (bit us once: editMessageText with reply_markup:null 400'd with
-// no trace, see handleApprovalCallback).
-function onResult(r) {
-    var failed = r.error || r.status < 200 || r.status >= 300;
-    if (r.tag && r.tag.indexOf("vf_") === 0) { onVoiceFile(r.tag.substring(3), r, failed); return; }
-    if (r.tag && r.tag.indexOf("vd_") === 0) { onVoiceDownload(r.tag.substring(3), r, failed); return; }
-    if (failed) {
-        channel.log("tgCall failed tag=" + r.tag + " status=" + r.status +
-                    " error=" + r.error + " body=" + (r.body || "").substring(0, 200));
-    }
+// Fire-and-forget tgCall: log anything that isn't a clean 2xx so a bad
+// request body doesn't vanish silently (bit us once: editMessageText with
+// reply_markup:null 400'd with no trace, see handleApprovalCallback).
+function tgCast(method, bodyObj) {
+    tgCall(method, bodyObj).then(function(r) {
+        if (r.error || r.status < 200 || r.status >= 300)
+            channel.log(method + " failed status=" + r.status + " error=" + r.error +
+                        " body=" + (r.body || "").substring(0, 200));
+    });
+}
+
+// Outbox-tracked delivery via channel.send: the C loop acks/fails/retries
+// the outbox row on completion — that lifecycle must stay in C.
+function tgOutbox(method, bodyObj, outboxId, isFinal) {
+    channel.send({
+        method: "POST",
+        url: config.base + "/bot" + config.token + "/" + method,
+        body: JSON.stringify(bodyObj),
+        outbox_id: outboxId,
+        final: isFinal ? 1 : 0
+    });
 }
 
 function sendMessage(chatId, text) {
-    tgCall("sendMessage", JSON.stringify({chat_id: parseInt(chatId, 10), text: text}));
+    tgCast("sendMessage", {chat_id: parseInt(chatId, 10), text: text});
 }
 
 // Chunk on the PLAIN text (Telegram's 4096 limit counts parsed text, so HTML
@@ -434,8 +435,7 @@ function sendChunked(chatId, text, outboxId, plain) {
             body.text = markdownToTelegramHtml(chunk);
             body.parse_mode = "HTML";
         }
-        tgCall("sendMessage", JSON.stringify(body),
-            {outbox_id: outboxId, final: pos >= total});
+        tgOutbox("sendMessage", body, outboxId, pos >= total);
     }
 }
 
@@ -519,11 +519,13 @@ function findSplit(text, start, maxLen) {
 }
 
 function sendKeyboard(chatId, text, keyboard, extra) {
-    tgCall("sendMessage", JSON.stringify({
+    var body = {
         chat_id: parseInt(chatId, 10),
         text: text,
         reply_markup: {inline_keyboard: keyboard}
-    }), extra);
+    };
+    if (extra && extra.outbox_id) tgOutbox("sendMessage", body, extra.outbox_id, extra.final);
+    else tgCast("sendMessage", body);
 }
 
 function sendApprovalsMenu(chatId) {

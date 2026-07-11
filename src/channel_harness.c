@@ -225,18 +225,6 @@ static void drain_sends(JSContext *ctx, const Scenario *sc) {
                     send_req_settle(ctx, r, fx->status, body, NULL, 0, NULL);
                 }
             }
-            if (r->tag) {
-                /* Same transform the live runner applies to base64-flagged
-                 * sends: JS sees the fixture body encoded. */
-                char *b64 = NULL;
-                const char *body = fx->body ? fx->body : "";
-                if (r->base64 && fx->status >= 200 && fx->status < 300) {
-                    b64 = base64_encode((const unsigned char *)body, strlen(body));
-                    body = b64 ? b64 : "";
-                }
-                call_on_result(ctx, r->tag, fx->status, body, NULL);
-                free(b64);
-            }
         } else {
             printf("  http  %-6s %s -> UNMATCHED (no fixture; scenario fails)\n",
                    r->method ? r->method : "GET", r->url);
@@ -244,8 +232,6 @@ static void drain_sends(JSContext *ctx, const Scenario *sc) {
             g_all_passed = 0;
             if (r->js_ctx)
                 send_req_settle(ctx, r, 0, NULL, NULL, 0, "harness: no matching fixture");
-            if (r->tag)
-                call_on_result(ctx, r->tag, 0, "", "harness: no matching fixture");
         }
         send_req_free(r);
     }
@@ -266,6 +252,12 @@ static int channel_event_contains(sqlite3 *db, const char *channel_name, const c
 }
 
 int channel_harness_run(const char *db_path, const char *channel_name, const char *scenario_path) {
+    /* Reset per-run state: a prior scenario in this process (tests call this
+     * repeatedly) must not leak its verdict or request log into this one. */
+    g_all_passed = 1;
+    for (int i = 0; i < g_log_count; i++) { free(g_log[i].url); free(g_log[i].body); }
+    g_log_count = 0;
+
     char *scenario_json = util_read_file(scenario_path, NULL);
     if (!scenario_json) {
         fprintf(stderr, "harness: cannot read scenario '%s'\n", scenario_path);

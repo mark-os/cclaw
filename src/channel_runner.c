@@ -8,13 +8,19 @@
  * JS contract (all handlers optional except onInit):
  *   onInit() -> {poll?: Req}                 start; optional first poll shape
  *   onPoll({status,body,error}) -> {poll?: Req}   poll completed; next shape
+ *     (must return the shape synchronously — an async onPoll's pending
+ *      promise carries no .poll, which would stop polling)
  *   onRequest(req) -> {status?, body?}       proxied HTTP request from daemon
  *   onOutbox({id,session_id,payload})        agent message to deliver
- *   onResult({tag,status,body,error})        tagged cclaw.send completed
  *
  *   Req = {method?, url, body?, headers?: ["Name: v"], timeout?}
- *   cclaw.send(Req + {tag?, outbox_id?, final?}) queues an outbound request.
- *   A send carrying outbox_id is acked on final 2xx, failed otherwise.
+ *   channel.http(Req + {save_to?}) -> Promise<{status,body,path,bytes,error}>
+ *     — channel-initiated API calls and downloads. Always resolves (transport
+ *     failure = status 0 + error). save_to streams the body to the channel's
+ *     media spool; JS gets a path, the payload never enters the JS heap.
+ *   channel.send(Req + {outbox_id?, final?}) — outbox-tracked delivery (and
+ *     fire-and-forget without outbox_id); an outbox send is acked on final
+ *     2xx, failed/retried otherwise.
  *
  * argv: channel_runner <db_path> <channel_name> */
 #ifndef _GNU_SOURCE
@@ -49,7 +55,7 @@
 #define CR_REQ_MAX (512 * 1024)   /* max proxied request envelope */
 #define CR_SEND_TIMEOUT 60L
 #define CR_POLL_TIMEOUT 35L       /* slightly longer than TG long-poll */
-#define CR_BASE64_MAX (3L * 1024 * 1024)  /* binary download cap (small-RAM boxes) */
+#define CR_DOWNLOAD_MAX (3L * 1024 * 1024)  /* binary download cap (small-RAM boxes) */
 #define MAX_OUTBOX_ATTEMPTS 5
 
 static volatile sig_atomic_t g_running = 1;
@@ -144,7 +150,7 @@ static SendReq *g_send_head, *g_send_tail;
 
 void send_req_free(SendReq *r) {
     if (!r) return;
-    free(r->method); free(r->url); free(r->body); free(r->tag);
+    free(r->method); free(r->url); free(r->body);
     free(r->save_to);
     if (r->js_ctx) {
         JS_FreeValue(r->js_ctx, r->p_resolve);
@@ -282,7 +288,7 @@ static size_t curl_write_save_cb(void *ptr, size_t size, size_t nmemb, void *ud)
         buf_append(&g_send_resp, (const char *)ptr, bytes);
         return g_send_resp.oom ? 0 : bytes;
     }
-    if (g_save.written + (long)bytes > CR_BASE64_MAX) return 0; /* abort: too large */
+    if (g_save.written + (long)bytes > CR_DOWNLOAD_MAX) return 0; /* abort: too large */
     if (fwrite(ptr, 1, bytes, g_save.f) != bytes) return 0;
     g_save.written += (long)bytes;
     return bytes;
@@ -407,15 +413,8 @@ static void send_start_next(JSContext *ctx) {
         }
         curl_easy_setopt(g_send_easy, CURLOPT_WRITEFUNCTION, curl_write_save_cb);
         curl_easy_setopt(g_send_easy, CURLOPT_WRITEDATA, NULL);
-        curl_easy_setopt(g_send_easy, CURLOPT_MAXFILESIZE, CR_BASE64_MAX);
-        curl_easy_setopt(g_send_easy, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)CR_BASE64_MAX);
-    }
-    if (r->base64) {
-        /* Binary download: bound the transfer so a huge file can't balloon
-         * the base64 copy in RAM. MAXFILESIZE covers declared lengths; the
-         * completion path re-checks the actual size for chunked bodies. */
-        curl_easy_setopt(g_send_easy, CURLOPT_MAXFILESIZE, CR_BASE64_MAX);
-        curl_easy_setopt(g_send_easy, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)CR_BASE64_MAX);
+        curl_easy_setopt(g_send_easy, CURLOPT_MAXFILESIZE, CR_DOWNLOAD_MAX);
+        curl_easy_setopt(g_send_easy, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)CR_DOWNLOAD_MAX);
     }
     curl_multi_add_handle(g_multi, g_send_easy);
     g_send_active = r;
@@ -458,20 +457,6 @@ static void call_on_poll_done(JSContext *ctx, int status, const char *body,
         " ? onPoll({status: __cr_status, body: __cr_body, error: __cr_err}) : null",
         "onPoll");
     poll_shape_update(ctx, ret);
-    JS_FreeValue(ctx, ret);
-}
-
-void call_on_result(JSContext *ctx, const char *tag, int status,
-                           const char *body, const char *error) {
-    set_global_str(ctx, "__cr_tag", tag);
-    set_global_int(ctx, "__cr_status", status);
-    set_global_str(ctx, "__cr_body", body);
-    set_global_str(ctx, "__cr_err", error);
-    JSValue ret = eval_js(ctx,
-        "(typeof onResult === 'function')"
-        " ? onResult({tag: __cr_tag, status: __cr_status, body: __cr_body,"
-        "             error: __cr_err}) : null",
-        "onResult");
     JS_FreeValue(ctx, ret);
 }
 
@@ -820,25 +805,6 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                         send_req_settle(ctx, r, (int)status,
                                         g_send_resp.data ? g_send_resp.data : "",
                                         NULL, 0, cerr);
-                    }
-                }
-                if (r->tag) {
-                    if (r->base64 && !cerr && status >= 200 && status < 300) {
-                        /* Binary body → base64 across the C-string JS bridge.
-                         * Encode only success bodies; error bodies are text
-                         * the JS wants readable. */
-                        char *b64 = (g_send_resp.len <= (size_t)CR_BASE64_MAX)
-                            ? base64_encode((const unsigned char *)
-                                            (g_send_resp.data ? g_send_resp.data : ""),
-                                            g_send_resp.len)
-                            : NULL;
-                        call_on_result(ctx, r->tag, (int)status,
-                                       b64 ? b64 : "",
-                                       b64 ? NULL : "download too large");
-                        free(b64);
-                    } else {
-                        call_on_result(ctx, r->tag, (int)status,
-                                       g_send_resp.data ? g_send_resp.data : "", cerr);
                     }
                 }
                 curl_multi_remove_handle(g_multi, g_send_easy);

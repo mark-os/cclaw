@@ -227,18 +227,17 @@ Fail-closed credential rule (specs/trust.md): a secret may only be submitted to 
 
 ## secrets
 
-Secret store (specs/security.md): the single home for every encrypted value, all AEAD-sealed with the master key. `scope` splits two audiences: `agent` secrets feed the per-call snapshot (`secrets_snapshot()` merges them with the env-collected `CCLAW_SECRET_*` base — env wins on a name collision) and are usable via `{{SECRET:name}}`; `system` secrets are provider API keys consumed by the daemon (`db_secret_get_system()`) and are **excluded from the snapshot**, so an agent can never interpolate them. `status='pending'` is provenance/UX only; enforcement is `secret_hosts` having zero rows for the name (fail-closed, same as any other secret).
+Secret store (specs/security.md): the single home for every encrypted value, all AEAD-sealed with the master key. `scope` splits two audiences: `agent` secrets feed the per-call snapshot (`secrets_snapshot()` merges them with the env-collected `CCLAW_SECRET_*` base — env wins on a name collision) and are usable via `{{SECRET:name}}`; `system` secrets are provider API keys consumed by the daemon (`db_secret_get_system()`) and are **excluded from the snapshot**, so an agent can never interpolate them. Enforcement is `secret_hosts` having zero rows for the name (fail-closed, same as any other secret).
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | `^[A-Z][A-Z0-9_]*$` — becomes `CCLAW_SECRET_<name>` / `{{SECRET:name}}` |
 | `value` | TEXT NOT NULL | `enc:<hex(...)>`, never plaintext |
-| `status` | TEXT NOT NULL DEFAULT 'active' | `active` \| `pending` |
-| `source` | TEXT NOT NULL DEFAULT 'operator' | `operator` (`cclaw secret set`) \| `generated` (`secret_create` tool) \| `quarantine` (DLP capture) |
+| `source` | TEXT NOT NULL DEFAULT 'operator' | `operator` (`cclaw secret set`) \| `generated` (`secret_create` tool) \| `captured` (`save_secret` on a tool call) |
 | `scope` | TEXT NOT NULL DEFAULT 'agent' | `agent` (interpolatable/injectable) \| `system` (provider keys, daemon-only) |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-Written by: `cclaw secret set\|rm\|list` (operator verb), the `secret_create` tool, `configure_provider`/`admin_set_key` (scope `system`), and `tool_result_postprocess_q`/`inbox_insert_scanned` (DLP quarantine, auto-named `PENDING_<RULEID>_<n>`). `resolve_approval` flips `pending` → `active` when a `secret_bind` ALWAYS-approval records the name's first `secret_hosts` binding.
+Written by: `cclaw secret set\|rm\|list` (operator verb), the `secret_create` tool, `configure_provider`/`admin_set_key` (scope `system`), and `secret_capture_apply` (`save_secret` on web_fetch/shell_exec/js_eval). The DLP scanner never writes here — it redacts. (A `status` column marked scanner-quarantined rows until schema v20 removed quarantine.)
 
 ---
 

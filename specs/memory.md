@@ -6,13 +6,17 @@ Design reference. Derived from Letta's persistent agent memory architecture, ada
 
 | Tier | CClaw Implementation | Access Pattern |
 |------|---------------------|----------------|
-| Core (in-context) | `memory_blocks` table in cclaw.db (scoped by `agent_name`) | Always in system prompt, bounded by `char_limit` |
+| Core (in-context) | `memory_blocks` table in cclaw.db (scoped by `agent_name`) | Always in context, bounded by `char_limit`; `placement` picks system prompt or per-turn context block |
 | Archival (long-term) | Not yet implemented: `passages` table + embeddings | Semantic search, unlimited |
 | Recall (history) | `entries` table + FTS5 in cclaw.db | Keyword/semantic search over all past turns |
 
 ## Core Memory (memory_blocks)
 
-Agent's working memory — injected into system prompt every turn. Lives in cclaw.db, scoped by `agent_name` column.
+Agent's working memory — always in context. Lives in cclaw.db, scoped by `agent_name` column.
+
+Where a block renders is its `placement`:
+- `system` (default): baked into the system prompt once per session (`agent_config.c`). For stable content — the system prompt stays byte-identical across turns, so provider prompt caching keeps working.
+- `context`: rendered into the `<RELEVANT_CONTEXT>` block (`llm_payload.c`), which rides at the **turn boundary** — a user message right before the newest user_message, never in the system prompt. The block (recall + context-placement blocks + running sub-agents + pending approvals) is **materialized once at turn start** (`sessions.turn_context`, `llm_proc.c`) and reused verbatim by every tool-loop iteration, so both its content and position stay stable for the whole turn and each iteration extends the prompt-cache prefix instead of invalidating it. Live state is thus a turn-start snapshot; mid-turn changes reach the model as tool results.
 
 - **Unit**: labeled block with character limit
 - **Default blocks**: created by agent via `memory_create` tool (or pre-seeded by daemon at agent creation)
@@ -34,6 +38,7 @@ CREATE TABLE memory_blocks (
     description TEXT,
     char_limit INTEGER NOT NULL DEFAULT 5000,
     read_only INTEGER NOT NULL DEFAULT 0,
+    placement TEXT NOT NULL DEFAULT 'system',  -- 'system' | 'context'
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
     UNIQUE(agent_name, label)
@@ -55,7 +60,7 @@ Not yet implemented:
 - `passages` table (text, embedding BLOB, source_type, source_id) — in cclaw.db
 - Hybrid search: FTS5 + vector similarity (RRF merge)
 - Agent tool: `memory_search(query)` for explicit recall
-- Auto-recall: inject top hits into system prompt at context build time
+- Auto-recall (implemented, FTS5-only today): top hits ride in the `<RELEVANT_CONTEXT>` block at the turn boundary — see Core Memory above
 
 ## Context Window Management
 

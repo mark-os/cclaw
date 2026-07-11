@@ -538,10 +538,12 @@ void channel_consume_events(sqlite3 *db) {
                 LOG_INFO_("channel event ch=%s sid=%lld type=%s",
                           ch_name, (long long)sid, etype);
                 processed++;
-                /* Media-bearing message (voice, …): the chat model can't take
-                 * it — park the full payload in media_jobs and hand it to a
-                 * capability-matched preprocessor (transcription). Only its
-                 * text output ever reaches inbox/entries. */
+                /* Media-bearing message (voice, photo, …): the chat model
+                 * can't take it — park the envelope in media_jobs (the bytes
+                 * stay in the channel's media spool file it references) and
+                 * hand it to a capability-matched preprocessor (transcription
+                 * / description). Only its text output ever reaches
+                 * inbox/entries; the spool file is deleted on resolve. */
                 int has_media = 0;
                 {
                     sqlite3_stmt *ms;

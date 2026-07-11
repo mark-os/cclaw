@@ -14,6 +14,7 @@
 #include "channel_api.h"
 #include "llm_transport.h"
 #include "log.h"
+#include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -853,11 +854,13 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
 }
 
 
-/* ── Transcription: capability-routed media preprocessing ───────
+/* ── Media preprocessing: capability-routed transcription/description ─
  *
- * A media_jobs row holds the full channel-emitted message JSON (with
- * media.data_b64). One audio-capable model turns it into text; only that
- * text enters the session — the audio bytes never reach entries. */
+ * A media_jobs row holds the channel-emitted message JSON with media
+ * {kind, mime, path}: the payload bytes live in the channel's media spool
+ * file, never in the DB or the LLM context. One capability-matched model
+ * turns them into text; only that text enters the session, and the spool
+ * file is deleted when the job resolves. */
 
 #define TRANSCRIBE_MAX_ATTEMPTS 3
 #define TRANSCRIBE_RETRIES 1
@@ -865,38 +868,124 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
 static const char *TRANSCRIBE_PROMPT =
     "Transcribe this audio message verbatim, in its original language. "
     "Output only the transcript text, nothing else.";
+static const char *DESCRIBE_PROMPT =
+    "Describe this image for someone who cannot see it: subject, any visible "
+    "text verbatim, and relevant detail. Output only the description.";
+
+typedef struct {
+    char kind[16];     /* "audio" (default) or "image" */
+    char mime[64];
+    char path[1024];   /* media spool file; empty = malformed job */
+    /* derived from kind: */
+    const char *cap, *prompt, *label, *fail_text;
+} MediaJobInfo;
+
+static int media_job_info(sqlite3 *db, int64_t job_id, MediaJobInfo *mi) {
+    memset(mi, 0, sizeof(*mi));
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE(json_extract(payload,'$.media.kind'),'audio'),"
+            "       COALESCE(json_extract(payload,'$.media.mime'),''),"
+            "       COALESCE(json_extract(payload,'$.media.path'),'')"
+            " FROM media_jobs WHERE id=?1", -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(s, 1, job_id);
+    int found = 0;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        found = 1;
+        const char *v = (const char *)sqlite3_column_text(s, 0);
+        snprintf(mi->kind, sizeof(mi->kind), "%s", v ? v : "audio");
+        v = (const char *)sqlite3_column_text(s, 1);
+        snprintf(mi->mime, sizeof(mi->mime), "%s", v ? v : "");
+        v = (const char *)sqlite3_column_text(s, 2);
+        snprintf(mi->path, sizeof(mi->path), "%s", v ? v : "");
+    }
+    sqlite3_finalize(s);
+    if (!found) return -1;
+    if (strcmp(mi->kind, "image") == 0) {
+        mi->cap = "image";
+        mi->prompt = DESCRIBE_PROMPT;
+        mi->label = "[image]";
+        mi->fail_text = "[image received but description failed]";
+        if (!mi->mime[0]) snprintf(mi->mime, sizeof(mi->mime), "image/jpeg");
+    } else {
+        mi->cap = "audio";
+        mi->prompt = TRANSCRIBE_PROMPT;
+        mi->label = "[voice message]";
+        mi->fail_text = "[voice message received but transcription failed]";
+        if (!mi->mime[0]) snprintf(mi->mime, sizeof(mi->mime), "audio/ogg");
+    }
+    return 0;
+}
+
+/* OpenAI input_audio wants a format token, not a mime type. */
+static const char *audio_format_from_mime(const char *mime) {
+    if (strstr(mime, "mpeg") || strstr(mime, "mp3")) return "mp3";
+    if (strstr(mime, "mp4") || strstr(mime, "m4a")) return "m4a";
+    if (strstr(mime, "wav")) return "wav";
+    if (strstr(mime, "webm")) return "webm";
+    if (strstr(mime, "flac")) return "flac";
+    return "ogg";
+}
 
 char *transcribe_build_body(sqlite3 *db, EndpointType ep, const char *model,
                             int64_t job_id) {
-    /* Body assembled by SQLite JSON1 straight from the stored payload — the
-     * base64 audio is never materialized separately in C. */
-    const char *sql = (ep == ENDPOINT_GEMINI)
-        ? "SELECT json_object('contents', json_array(json_object("
-          "  'role','user','parts', json_array("
-          "    json_object('text', ?2),"
-          "    json_object('inlineData', json_object("
-          "      'mimeType', COALESCE(json_extract(payload,'$.media.mime'),'audio/ogg'),"
-          "      'data', json_extract(payload,'$.media.data_b64'))))))) "
-          "FROM media_jobs WHERE id=?1"
-        : "SELECT json_object('model', ?3, 'messages', json_array(json_object("
-          "  'role','user','content', json_array("
-          "    json_object('type','text','text', ?2),"
-          "    json_object('type','input_audio','input_audio', json_object("
-          "      'data', json_extract(payload,'$.media.data_b64'),"
-          "      'format','ogg')))))) "
-          "FROM media_jobs WHERE id=?1";
+    MediaJobInfo mi;
+    if (media_job_info(db, job_id, &mi) != 0 || !mi.path[0]) return NULL;
+
+    /* The spool file is read and encoded here, at request-build time — the
+     * only point in the daemon where the payload is materialized. */
+    size_t len = 0;
+    char *raw = util_read_file(mi.path, &len);
+    if (!raw) {
+        LOG_WARN_("media: cannot read spool file job=%lld path=%s",
+                  (long long)job_id, mi.path);
+        return NULL;
+    }
+    char *b64 = base64_encode((const unsigned char *)raw, len);
+    free(raw);
+    if (!b64) return NULL;
+
+    int is_image = (strcmp(mi.kind, "image") == 0);
+    /* ?1 prompt, ?2 mime (gemini/image) or format (openai audio), ?3 data,
+     * ?4 model */
+    const char *sql;
+    if (ep == ENDPOINT_GEMINI)
+        sql = "SELECT json_object('contents', json_array(json_object("
+              "  'role','user','parts', json_array("
+              "    json_object('text', ?1),"
+              "    json_object('inlineData', json_object("
+              "      'mimeType', ?2, 'data', ?3))))))";
+    else if (is_image)
+        sql = "SELECT json_object('model', ?4, 'messages', json_array(json_object("
+              "  'role','user','content', json_array("
+              "    json_object('type','text','text', ?1),"
+              "    json_object('type','image_url','image_url', json_object("
+              "      'url', 'data:' || ?2 || ';base64,' || ?3))))))";
+    else
+        sql = "SELECT json_object('model', ?4, 'messages', json_array(json_object("
+              "  'role','user','content', json_array("
+              "    json_object('type','text','text', ?1),"
+              "    json_object('type','input_audio','input_audio', json_object("
+              "      'data', ?3, 'format', ?2))))))";
+
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_int64(s, 1, job_id);
-    sqlite3_bind_text(s, 2, TRANSCRIBE_PROMPT, -1, SQLITE_STATIC);
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) { free(b64); return NULL; }
+    sqlite3_bind_text(s, 1, mi.prompt, -1, SQLITE_STATIC);
+    if (ep == ENDPOINT_GEMINI || is_image)
+        sqlite3_bind_text(s, 2, mi.mime, -1, SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_text(s, 2, audio_format_from_mime(mi.mime), -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, b64, -1, SQLITE_STATIC);
     if (ep != ENDPOINT_GEMINI)
-        sqlite3_bind_text(s, 3, model ? model : "", -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 4, model ? model : "", -1, SQLITE_STATIC);
     char *body = NULL;
     if (sqlite3_step(s) == SQLITE_ROW) {
         const char *t = (const char *)sqlite3_column_text(s, 0);
         if (t) body = strdup(t);
     }
     sqlite3_finalize(s);
+    free(b64);
     return body;
 }
 
@@ -910,7 +999,8 @@ static int transcribe_resolve(sqlite3 *db, int64_t job_id, const char *text) {
         "  'channel_id', json_extract(payload,'$.channel_id'),"
         "  'from', COALESCE(json_extract(payload,'$.from'),''),"
         "  'text', CASE WHEN COALESCE(json_extract(payload,'$.text'),'') <> ''"
-        "    THEN json_extract(payload,'$.text') || char(10) || ?2 ELSE ?2 END)"
+        "    THEN json_extract(payload,'$.text') || char(10) || ?2 ELSE ?2 END),"
+        "  COALESCE(json_extract(payload,'$.media.path'),'')"
         " FROM media_jobs WHERE id=?1";
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
@@ -918,12 +1008,15 @@ static int transcribe_resolve(sqlite3 *db, int64_t job_id, const char *text) {
     sqlite3_bind_text(s, 2, text, -1, SQLITE_STATIC);
     int64_t session_id = -1;
     char *source = NULL, *payload = NULL;
+    char media_path[1024] = "";
     if (sqlite3_step(s) == SQLITE_ROW) {
         session_id = sqlite3_column_int64(s, 0);
         const char *v = (const char *)sqlite3_column_text(s, 1);
         source = strdup(v ? v : "");
         v = (const char *)sqlite3_column_text(s, 2);
         payload = v ? strdup(v) : NULL;
+        v = (const char *)sqlite3_column_text(s, 3);
+        if (v) snprintf(media_path, sizeof(media_path), "%s", v);
     }
     sqlite3_finalize(s);
     if (session_id < 0 || !payload) { free(source); free(payload); return -1; }
@@ -940,6 +1033,8 @@ static int transcribe_resolve(sqlite3 *db, int64_t job_id, const char *text) {
         sqlite3_bind_int64(del, 1, job_id);
         sqlite3_step(del); sqlite3_finalize(del);
     }
+    /* Job resolved (success or failure text): the spool file is done. */
+    if (media_path[0]) unlink(media_path);
     return 0;
 }
 
@@ -959,10 +1054,12 @@ int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
     sqlite3_finalize(s);
     if (session_id < 0) return -1;   /* row gone — nothing to do */
 
+    MediaJobInfo mj;
+    if (media_job_info(db, job_id, &mj) != 0) return -1;
+
     /* Crash-loop guard: a resubmitted job that keeps dying goes terminal. */
     if (attempts >= TRANSCRIBE_MAX_ATTEMPTS)
-        return transcribe_resolve(db, job_id,
-            "[voice message received but transcription failed]");
+        return transcribe_resolve(db, job_id, mj.fail_text);
     sqlite3_stmt *up;
     if (sqlite3_prepare_v2(db, "UPDATE media_jobs SET attempts=attempts+1 WHERE id=?",
                            -1, &up, NULL) == SQLITE_OK) {
@@ -972,10 +1069,10 @@ int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
 
     const char *db_path = sqlite3_db_filename(db, "main");
     ModelCandidate models[MAX_MODELS];
-    int nmodels = model_pick_by_capability(db, "audio", models, MAX_MODELS);
+    int nmodels = model_pick_by_capability(db, mj.cap, models, MAX_MODELS);
     if (nmodels == 0)
-        LOG_WARN_("transcribe: no healthy audio-capable model job=%lld",
-                  (long long)job_id);
+        LOG_WARN_("media: no healthy %s-capable model job=%lld",
+                  mj.cap, (long long)job_id);
 
     char *transcript = NULL;
     for (int mi = 0; mi < nmodels && !transcript; mi++) {
@@ -1044,17 +1141,16 @@ int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
     }
 
     if (transcript) {
-        size_t need = strlen(transcript) + 32;
+        size_t need = strlen(transcript) + strlen(mj.label) + 8;
         char *text = malloc(need);
         int rc = -1;
         if (text) {
-            snprintf(text, need, "[voice message] %s", transcript);
+            snprintf(text, need, "%s %s", mj.label, transcript);
             rc = transcribe_resolve(db, job_id, text);
             free(text);
         }
         free(transcript);
         return rc;
     }
-    return transcribe_resolve(db, job_id,
-        "[voice message received but transcription failed]");
+    return transcribe_resolve(db, job_id, mj.fail_text);
 }

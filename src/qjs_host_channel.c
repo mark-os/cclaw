@@ -159,10 +159,8 @@ static JSValue js_ch_send(JSContext *ctx, JSValueConst this_val,
     JSValueConst o = argv[0];
     SendReq *r = send_req_from_js(ctx, o);
     if (!r) return JS_ThrowTypeError(ctx, "send: url required");
-    r->tag = get_str_prop(ctx, (JSValue)o, "tag");
     r->outbox_id = get_int_prop(ctx, (JSValue)o, "outbox_id", 0);
     r->is_final = get_int_prop(ctx, (JSValue)o, "final", 0);
-    r->base64 = get_int_prop(ctx, (JSValue)o, "base64", 0);
     send_queue_push(r);
     return JS_NewInt32(ctx, 0);
 }

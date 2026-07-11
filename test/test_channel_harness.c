@@ -31,11 +31,12 @@ static const char *CHANNEL_JS =
     "function onInit() { return {}; }\n"
     "function onOutbox(item) {\n"
     "  channel.emit('message', 'saw:' + item.payload);\n"
-    "  channel.send({method:'POST', url:'https://api.example.com/sendMessage',"
-    "                body: item.payload, tag: 'send1'});\n"
+    "  channel.http({method:'POST', url:'https://api.example.com/sendMessage',"
+    "                body: item.payload}).then(function(r){"
+    "    channel.emit('result', 'status:' + r.status);"
+    "  });\n"
     "  return {};\n"
-    "}\n"
-    "function onResult(r) { channel.emit('result', 'status:' + r.status); }\n";
+    "}\n";
 
 static void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "wb");
@@ -121,10 +122,41 @@ static void test_harness_unknown_channel(void) {
     printf("  PASS test_harness_unknown_channel\n");
 }
 
+/* save_to scenario: channel.http with save_to resolves {status, path, bytes}. */
+static const char *CHANNEL_JS_SAVETO =
+    "function onInit() { return {}; }\n"
+    "function onOutbox(item) {\n"
+    "  channel.http({method:'GET', url:'https://api.example.com/file',"
+    "                save_to:'f.bin'}).then(function(r){"
+    "    channel.emit('result','path:'+(r.path?'yes':'no')+' bytes:'+r.bytes);"
+    "  });\n"
+    "  return {};\n"
+    "}\n";
+
+static void test_harness_save_to(void) {
+    /* Reuse setup but overwrite the channel JS with the save_to variant. */
+    setup_db_and_channel();
+    write_file(EXT_DIR "/channel.qjs", CHANNEL_JS_SAVETO);
+
+    const char *scenario_path = "/tmp/test_channel_harness_scenario_saveto.json";
+    write_scenario(scenario_path,
+        "{ \"fixtures\": [ {\"match\": {\"method\":\"GET\",\"url_substr\":\"file\"},"
+        "                   \"respond\": {\"status\":200,\"body\":\"OGGDATA\"}} ],"
+        "  \"steps\": [ {\"inject_outbox\": \"go\"},"
+        "               {\"expect_http\": {\"url_substr\": \"file\"}},"
+        "               {\"expect_event\": {\"contains\": \"path:yes bytes:7\"}} ] }");
+
+    int rc = channel_harness_run(TEST_DB, "echo", scenario_path);
+    assert(rc == 0);
+    unlink(scenario_path);
+    printf("  PASS test_harness_save_to\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_channel_harness:\n");
     test_harness_pass();
+    test_harness_save_to();
     test_harness_unmatched_request_fails();
     test_harness_unknown_channel();
     unlink(TEST_DB); unlink(TEST_DB "-wal"); unlink(TEST_DB "-shm");

@@ -5,7 +5,9 @@
 #include "db.h"
 #include "log.h"
 #include <curl/curl.h>
+#include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -337,8 +339,61 @@ int llm_worker_submit_transcribe(sqlite3 *db, int64_t media_job_id,
     return pool_push(&item);
 }
 
+/* Delete spool files no media_jobs row references — leftovers from a crash
+ * between download and job insert, or a resolve that died mid-cleanup. Runs
+ * once at daemon start, before resubmit; live jobs keep their files. */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
+static void media_spool_sweep(sqlite3 *db) {
+    const char *dbp = sqlite3_db_filename(db, "main");
+    if (!dbp || !dbp[0]) return;
+    const char *slash = strrchr(dbp, '/');
+    char root[1024];
+    if (slash) snprintf(root, sizeof(root), "%.*s/media", (int)(slash - dbp), dbp);
+    else snprintf(root, sizeof(root), "media");
+
+    DIR *rd = opendir(root);
+    if (!rd) return;   /* no spool yet — nothing to sweep */
+    sqlite3_stmt *chk = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM media_jobs WHERE json_extract(payload,'$.media.path') = ?1",
+            -1, &chk, NULL) != SQLITE_OK) { closedir(rd); return; }
+
+    struct dirent *ch;
+    int removed = 0;
+    while ((ch = readdir(rd)) != NULL) {
+        if (ch->d_name[0] == '.') continue;
+        char chan_dir[PATH_MAX];
+        snprintf(chan_dir, sizeof(chan_dir), "%s/%s", root, ch->d_name);
+        DIR *cd = opendir(chan_dir);
+        if (!cd) continue;
+        struct dirent *fe;
+        while ((fe = readdir(cd)) != NULL) {
+            if (fe->d_name[0] == '.') continue;
+            char full[PATH_MAX];
+            snprintf(full, sizeof(full), "%s/%s", chan_dir, fe->d_name);
+            sqlite3_reset(chk);
+            sqlite3_bind_text(chk, 1, full, -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(chk) != SQLITE_ROW) {
+                if (unlink(full) == 0) removed++;
+            }
+        }
+        closedir(cd);
+    }
+    closedir(rd);
+    sqlite3_finalize(chk);
+    if (removed > 0)
+        LOG_INFO_("media spool sweep removed %d orphaned file(s)", removed);
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
 int llm_worker_resubmit_media(sqlite3 *db) {
     if (!g_started) return 0;
+    media_spool_sweep(db);
     int n = 0;
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,

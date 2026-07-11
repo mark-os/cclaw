@@ -303,7 +303,10 @@ All handlers optional except `onInit`. A request shape is
 | `onPoll({status, body, error})` | long-poll completed | `{poll?: Req}` next shape; `{poll: null}` stops |
 | `onRequest(req)` | daemon proxies an inbound HTTP request over UDS | `{status?, body?}` (or a body string) |
 | `onOutbox({id, session_id, payload})` | agent message ready to deliver | nothing — send via `cclaw.send` |
-| `onResult({tag, status, body, error})` | a tagged `cclaw.send` completed | nothing |
+
+`onPoll` must return the next poll shape synchronously — an async `onPoll`'s
+pending promise carries no `.poll`, which would stop polling. Handlers may
+otherwise be async; media flows typically are.
 
 `onRequest` is where **verification lives** — signature checks, challenge echoes,
 auth — because verification is code, not config. The daemon's `/hook/<channel>`
@@ -313,7 +316,8 @@ endpoint is a dumb proxy. Returning `{status: 401}` rejects a forged webhook.
 
 | Function | Description |
 |----------|-------------|
-| `cclaw.send(req)` | Queue an outbound request. Extra: `tag` (→ `onResult`), `outbox_id` + `final` (auto-ack the row when the final send is 2xx). |
+| `cclaw.http(req)` | Channel-initiated HTTP → `Promise<{status, body, path, bytes, error}>`. Always resolves (transport failure = status 0 + error). `save_to: "name.ext"` streams the body to the channel's media spool (`<db_dir>/media/<channel>/`) and resolves with `path` instead of `body` — payload bytes never enter the JS heap. |
+| `cclaw.send(req)` | Queue an outbound request, fire-and-forget. Extra: `outbox_id` + `final` (auto-ack the row when the final send is 2xx). |
 | `cclaw.emit(type, payload_json)` | Insert `channel_events` + `daemon_wake()`. Daemon routes to the agent inbox. |
 | `cclaw.getConfig(key)` / `setConfig(key, value)` | `channel_state` kv (scoped to this channel). |
 | `cclaw.ackOutbox(id)` / `failOutbox(id, error)` | Manual outbox resolution. |
@@ -321,7 +325,9 @@ endpoint is a dumb proxy. Returning `{status: 401}` rejects a forged webhook.
 | `cclaw.admin.*` | Admin operations (keys, models, hosts) for admin-gated chat commands. |
 
 There is **no blocking fetch** in channel JS; `http_request` is unavailable —
-channels use `cclaw.send`.
+channels use `await cclaw.http(...)` (the transfer runs on the runner's curl
+loop; the await suspends the JS continuation, never the thread) or
+`cclaw.send` for outbox delivery.
 
 ### Event flow
 

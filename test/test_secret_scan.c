@@ -29,12 +29,60 @@ static void test_github_pat(void) {
 }
 
 static void test_private_key(void) {
-    const char *text = "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----";
+    const char *text = "cat key.pem:\n-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEow7fake8key8body8line\nQhs8second8line\n"
+        "-----END RSA PRIVATE KEY-----\ndone";
     ScanFinding f[8];
     int n = secret_scan(text, strlen(text), f, 8);
     assert(n >= 1);
     assert(strcmp(f[0].rule_id, "private-key") == 0);
-    PASS("private-key detected");
+    /* Span must cover the key BODY through the END marker, not just the
+     * BEGIN header (which left the key material in cleartext). */
+    const char *end = strstr(text, "KEY-----\ndone");
+    assert(f[0].offset == 13);
+    assert(f[0].offset + f[0].match_len == (int)(end - text) + 8);
+    PASS("private-key spans body through END marker");
+}
+
+static void test_private_key_truncated(void) {
+    /* END marker cut off: everything from BEGIN onward is redacted. */
+    const char *text = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk";
+    ScanFinding f[8];
+    int n = secret_scan(text, strlen(text), f, 8);
+    assert(n >= 1);
+    assert(strcmp(f[0].rule_id, "private-key") == 0);
+    assert(f[0].offset == 0);
+    assert(f[0].match_len == (int)strlen(text));
+    PASS("private-key truncated block redacts to end");
+}
+
+static void test_certificate_not_private_key(void) {
+    const char *text = "-----BEGIN CERTIFICATE-----\nMIIC...\n-----END CERTIFICATE-----";
+    ScanFinding f[8];
+    int n = secret_scan(text, strlen(text), f, 8);
+    for (int i = 0; i < n; i++)
+        assert(strcmp(f[i].rule_id, "private-key") != 0);
+    PASS("certificate header does not match private-key");
+}
+
+static void test_fine_grained_pat_full(void) {
+    /* github_pat_ + 82 word chars: the whole token must be covered — the old
+     * LITERAL rule matched only the prefix and leaked the 82-char tail. */
+    char buf[160] = "t: github_pat_";
+    size_t plen = strlen(buf);
+    for (int i = 0; i < 82; i++) buf[plen + (size_t)i] = "aB3kL9mX_p7"[i % 11];
+    buf[plen + 82] = '\0';
+    ScanFinding f[8];
+    int n = secret_scan(buf, strlen(buf), f, 8);
+    int found = 0;
+    for (int i = 0; i < n; i++)
+        if (strcmp(f[i].rule_id, "github-fine-grained-pat") == 0) {
+            found = 1;
+            assert(f[i].offset == 3);
+            assert(f[i].match_len == 11 + 82);
+        }
+    assert(found);
+    PASS("fine-grained PAT covers full token");
 }
 
 static void test_anthropic_key(void) {
@@ -243,6 +291,54 @@ static void test_saturation_full_redact(void) {
     PASS("saturation full redact");
 }
 
+static void test_keyword_boundary_and_charset(void) {
+    /* Regression (pogoplug 2026-07-11): keyword rules fired all over source
+     * code because they lacked the word-boundary check and accepted any
+     * non-whitespace run as a "value". */
+    const char *code[] = {
+        /* "api" glued inside an identifier + directory-listing colon */
+        "espn_api.qjs: 1234 bytes, modified yesterday snapshot",
+        /* code expression as value: parens are outside the charset */
+        "config.token = channel.getConfig(\"telegram\").token2",
+        "  return JSON.parse(r.body).access; // token: JSON.parse(r.body)",
+        /* SQL from cclaw's own source */
+        "UPDATE sessions SET total_tokens_in=total_tokens_in+?1 WHERE id=?2",
+    };
+    for (size_t t = 0; t < sizeof(code) / sizeof(code[0]); t++) {
+        ScanFinding f[8];
+        int n = secret_scan(code[t], strlen(code[t]), f, 8);
+        for (int i = 0; i < n; i++)
+            printf("    unexpected: %s in \"%s\"\n", f[i].rule_id, code[t]);
+        assert(n == 0);
+    }
+    /* Still catches a real assignment. */
+    const char *real = "export API_TOKEN=aB3kL9mXp7qR2wNv4jH8";
+    ScanFinding f[8];
+    int n = secret_scan(real, strlen(real), f, 8);
+    int found = 0;
+    for (int i = 0; i < n; i++)
+        if (strcmp(f[i].rule_id, "generic-api-key") == 0) found = 1;
+    assert(found);
+    PASS("keyword boundary + charset reject code, keep real keys");
+}
+
+static void test_placeholder_skip(void) {
+    /* The scanner must never fire inside an already-masked {{SECRET:...}}
+     * placeholder — that's how nested {{SECRET:{{SECRET:... was minted. */
+    const char *text = "result: {{SECRET:GITHUB_API_KEY_9}} used for the call";
+    ScanFinding f[8];
+    int n = secret_scan(text, strlen(text), f, 8);
+    for (int i = 0; i < n; i++)
+        printf("    unexpected: %s at %d\n", f[i].rule_id, f[i].offset);
+    assert(n == 0);
+    /* A secret NEXT to a placeholder is still caught. */
+    const char *mixed = "{{SECRET:A_B2}} and AKIAIOSFODNN7EXAMPLE";
+    n = secret_scan(mixed, strlen(mixed), f, 8);
+    assert(n == 1);
+    assert(strcmp(f[0].rule_id, "aws-access-token") == 0);
+    PASS("placeholder regions skipped");
+}
+
 static void test_keyword_newline_stop(void) {
     /* Operator on next line — must NOT match */
     const char *cross = "api_key\n=aB3kL9mXp7qR2wNv4jH8sT5uY1cF6";
@@ -338,6 +434,11 @@ int main(void) {
     test_aws_key();
     test_github_pat();
     test_private_key();
+    test_private_key_truncated();
+    test_certificate_not_private_key();
+    test_fine_grained_pat_full();
+    test_keyword_boundary_and_charset();
+    test_placeholder_skip();
     test_anthropic_key();
     test_generic_api_key();
     test_reject_low_entropy();

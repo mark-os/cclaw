@@ -7,6 +7,7 @@
 #define SCAN_VTYPE_KEYWORD 1
 #define SCAN_VTYPE_LITERAL 2
 #define SCAN_VTYPE_BASE64  3
+#define SCAN_VTYPE_SPAN    4
 
 /* Charset classes */
 #define SCAN_CHARSET_ANY         0
@@ -57,7 +58,7 @@ static const ScanRule scan_rules[73] = {
     {"generic-api-key", "token", 1, 10, 150, 3, 1, 3.5f},
     {"github-app-token", "ghu_", 0, 36, 36, 3, 1, 3.0f},
     {"github-app-token", "ghs_", 0, 36, 36, 3, 1, 3.0f},
-    {"github-fine-grained-pat", "github_pat_", 2, 0, 0, 0, 1, 3.0f},
+    {"github-fine-grained-pat", "github_pat_", 0, 82, 82, 3, 1, 3.0f},
     {"github-oauth", "gho_", 0, 36, 36, 3, 1, 3.0f},
     {"github-pat", "ghp_", 0, 36, 36, 3, 1, 3.0f},
     {"github-refresh-token", "ghr_", 0, 36, 36, 3, 1, 3.0f},
@@ -73,7 +74,7 @@ static const ScanRule scan_rules[73] = {
     {"npm-access-token", "npm_", 0, 36, 36, 2, 1, 2.0f},
     {"openai-api-key", "t3blbkfj", 0, 74, 74, 3, 1, 3.0f},
     {"perplexity-api-key", "pplx-", 0, 48, 48, 3, 1, 4.0f},
-    {"private-key", "-----begin", 2, 0, 0, 0, 1, 0.0f},
+    {"private-key", "-----begin", 4, 0, 0, 0, 1, 0.0f},
     {"pypi-upload-token", "pypi-ageichlwas5vcmc", 0, 50, 1000, 3, 1, 3.0f},
     {"sendgrid-api-token", "sg.", 0, 66, 66, 3, 1, 2.0f},
     {"shopify-access-token", "shpat_", 0, 32, 32, 4, 1, 2.0f},

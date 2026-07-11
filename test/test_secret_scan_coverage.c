@@ -114,6 +114,21 @@ static int test_literal(int rule_idx) {
     return 0;
 }
 
+/* Test a SPAN rule: full block from anchor through the END marker */
+static int test_span(int rule_idx) {
+    const ScanRule *r = &scan_rules[rule_idx];
+    char buf[512];
+    int off = snprintf(buf, sizeof(buf),
+                       "file: %s RSA PRIVATE KEY-----\nMIIEfakebody\n"
+                       "-----END RSA PRIVATE KEY-----\n", r->keyword);
+
+    ScanFinding f[SCAN_MAX_FINDINGS];
+    int n = secret_scan(buf, (size_t)off, f, SCAN_MAX_FINDINGS);
+    for (int i = 0; i < n; i++)
+        if (strcmp(f[i].rule_id, r->id) == 0) return 1;
+    return 0;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_secret_scan_coverage:\n");
@@ -139,6 +154,7 @@ int main(void) {
         case SCAN_VTYPE_KEYWORD: ok = test_keyword(i); break;
         case SCAN_VTYPE_LITERAL: ok = test_literal(i); break;
         case SCAN_VTYPE_BASE64:  ok = test_base64(i); break;
+        case SCAN_VTYPE_SPAN:    ok = test_span(i); break;
         }
 
         if (ok) {

@@ -27,6 +27,15 @@ void llm_worker_stop(void);
  * Returns 0 on success, -1 on error. */
 int llm_worker_submit_compact(sqlite3 *db, int64_t session_id, const char *agent_name);
 
+/* Submit a media_jobs row for transcription. The media_jobs row itself is the
+ * crash-recovery record (no llm_jobs row). Returns 0 on success, -1 on error. */
+int llm_worker_submit_transcribe(sqlite3 *db, int64_t media_job_id,
+                                 int64_t session_id, const char *agent_name);
+
+/* Resubmit media_jobs rows left over from a crashed run (daemon start).
+ * Returns the number of jobs resubmitted. */
+int llm_worker_resubmit_media(sqlite3 *db);
+
 /* Check if worker pool is running */
 int llm_worker_alive(void);
 

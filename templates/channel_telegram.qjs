@@ -7,8 +7,16 @@
 
 var TG_MAX_MSG_LEN = 4096;
 var TG_RICH_MAX_BYTES = 32768;   // sendRichMessage UTF-8 byte limit
+var VOICE_MAX_SECONDS = 120;     // reject longer voice notes up front
+var VOICE_MAX_BYTES = 1536 * 1024;
 var config = {};
 var offset = 0;
+
+// Voice notes in flight: updateId -> {chatId, from, caption}, parked between
+// the getFile call (vf_<id>) and the file download (vd_<id>). Entries are
+// deleted on every outcome; a runner restart simply drops in-flight ones
+// (the update was already acked).
+var pendingVoice = {};
 
 // Single source of truth for admin slash commands — drives both the
 // Telegram "/" menu (setMyCommands) and dispatch, so the two can't drift.
@@ -218,8 +226,9 @@ function processMessage(msg, updateId) {
     var text = msg.text;
     if (!chat) return true;   // nothing addressable
     if (!text) {
-        // Media (photo/voice/sticker/…): we're text-only. Tell the user and
-        // log the kind instead of silently swallowing the message.
+        // Voice notes are transcribed (capability-routed in the daemon);
+        // other media kinds are still text-only.
+        if (msg.voice) return processVoice(msg, updateId);
         var kind = messageKind(msg);
         channel.log("dropping non-text message kind=" + kind + " chat=" + chat.id);
         sendMessage("" + chat.id, "I can only read text right now (got a " + kind + ").");
@@ -249,6 +258,80 @@ function processMessage(msg, updateId) {
         from: msg.from ? msg.from.first_name || "" : ""
     });
     return channel.emit("message", payload, "tg_" + updateId) === 0;
+}
+
+// ── Voice messages ───────────────────────────────────────────────
+// getFile → download (base64, same host — the runner's host pin holds) →
+// emit with media payload; the daemon routes it to a transcription model.
+// Always returns true: the update is acked here, dedup safety is the
+// tg_<updateId> external_id at emit time.
+
+function processVoice(msg, updateId) {
+    var chatId = "" + msg.chat.id;
+    var v = msg.voice;
+    if ((v.duration || 0) > VOICE_MAX_SECONDS || (v.file_size || 0) > VOICE_MAX_BYTES) {
+        channel.log("rejecting oversize voice chat=" + chatId +
+                    " duration=" + v.duration + " size=" + v.file_size);
+        sendMessage(chatId, "That voice message is too long for me — please keep it under 2 minutes.");
+        return true;
+    }
+    pendingVoice[updateId] = {
+        chatId: chatId,
+        from: msg.from ? msg.from.first_name || "" : "",
+        caption: msg.caption || ""
+    };
+    tgCall("getFile", JSON.stringify({file_id: v.file_id}), {tag: "vf_" + updateId});
+    return true;
+}
+
+function voiceFail(updateId, why) {
+    var p = pendingVoice[updateId];
+    delete pendingVoice[updateId];
+    channel.log("voice failed update=" + updateId + ": " + why);
+    if (p) sendMessage(p.chatId, "Sorry — I couldn't process that voice message.");
+}
+
+// vf_<id>: getFile result → queue the binary download.
+function onVoiceFile(updateId, r, failed) {
+    if (!pendingVoice[updateId]) return;
+    var filePath = null;
+    if (!failed) {
+        try {
+            var d = JSON.parse(r.body);
+            if (d.ok && d.result) filePath = d.result.file_path;
+        } catch (e) {}
+    }
+    if (!filePath) {
+        voiceFail(updateId, "getFile status=" + r.status + " error=" + r.error);
+        return;
+    }
+    channel.send({
+        method: "GET",
+        url: config.base + "/file/bot" + config.token + "/" + filePath,
+        base64: 1,
+        tag: "vd_" + updateId
+    });
+}
+
+// vd_<id>: downloaded audio (base64) → emit the media message.
+function onVoiceDownload(updateId, r, failed) {
+    var p = pendingVoice[updateId];
+    if (!p) return;
+    if (failed || !r.body) {
+        voiceFail(updateId, "download status=" + r.status + " error=" + r.error);
+        return;
+    }
+    delete pendingVoice[updateId];
+    var payload = JSON.stringify({
+        channel_id: p.chatId,
+        from: p.from,
+        text: p.caption,
+        media: {kind: "audio", mime: "audio/ogg", data_b64: r.body}
+    });
+    if (channel.emit("message", payload, "tg_" + updateId) !== 0) {
+        channel.log("voice emit failed update=" + updateId);
+        sendMessage(p.chatId, "Sorry — I couldn't process that voice message.");
+    }
 }
 
 function processCallback(cbq) {
@@ -321,6 +404,8 @@ function tgCall(method, body, extra) {
 // no trace, see handleApprovalCallback).
 function onResult(r) {
     var failed = r.error || r.status < 200 || r.status >= 300;
+    if (r.tag && r.tag.indexOf("vf_") === 0) { onVoiceFile(r.tag.substring(3), r, failed); return; }
+    if (r.tag && r.tag.indexOf("vd_") === 0) { onVoiceDownload(r.tag.substring(3), r, failed); return; }
     if (failed) {
         channel.log("tgCall failed tag=" + r.tag + " status=" + r.status +
                     " error=" + r.error + " body=" + (r.body || "").substring(0, 200));

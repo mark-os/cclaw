@@ -18,6 +18,9 @@ typedef struct SendReq {
     int n_headers;
     int64_t outbox_id;   /* 0 = not outbox-bound */
     int is_final;        /* last send for this outbox row */
+    int base64;          /* deliver the response body base64-encoded (binary
+                            downloads — a raw body would truncate at the first
+                            NUL crossing the C-string JS bridge) */
     long timeout;
     struct SendReq *next;
 } SendReq;

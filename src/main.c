@@ -2633,6 +2633,11 @@ static int run_daemon(char *db_path) {
     int daemon_worker_fd = llm_worker_fd();
     util_set_nonblock(daemon_worker_fd);
 
+    /* Re-run media jobs (voice transcriptions) a crashed run left behind —
+     * same crash-recovery idea as llm_jobs, except these rows are re-runnable
+     * (input is in the row), so resubmit instead of delete. */
+    llm_worker_resubmit_media(g_db);
+
     /* Fire-and-forget tool threads (EXEC_THREAD vehicle) */
     if (tool_thread_start(db_path, 0) != 0) {
         LOG_ERROR_("daemon: failed to start tool threads");

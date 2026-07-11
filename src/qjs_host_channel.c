@@ -5,6 +5,7 @@
 #endif
 #include "qjs_helpers.h"
 #include "channel_api.h"
+#include "channel_runner.h"
 #include "admin_api.h"
 #include "dashboard.h"
 #include "log.h"
@@ -19,20 +20,6 @@ extern ChannelCtx *g_ctx;
 extern char *get_str_prop(JSContext *ctx, JSValue obj, const char *name);
 extern int get_int_prop(JSContext *ctx, JSValue obj, const char *name, int dflt);
 
-/* Send queue (defined in channel_runner.c) */
-typedef struct SendReq {
-    char *method;
-    char *url;
-    char *body;
-    char *tag;
-    char **headers;
-    int n_headers;
-    int64_t outbox_id;
-    int is_final;
-    long timeout;
-    struct SendReq *next;
-} SendReq;
-extern void send_queue_push(SendReq *r);
 
 /* ── cclaw.emit(type, payload[, external_id]) ──────────────────── */
 
@@ -151,6 +138,7 @@ static JSValue js_ch_send(JSContext *ctx, JSValueConst this_val,
     r->tag = get_str_prop(ctx, (JSValue)o, "tag");
     r->outbox_id = get_int_prop(ctx, (JSValue)o, "outbox_id", 0);
     r->is_final = get_int_prop(ctx, (JSValue)o, "final", 0);
+    r->base64 = get_int_prop(ctx, (JSValue)o, "base64", 0);
     r->timeout = get_int_prop(ctx, (JSValue)o, "timeout", 0);
 
     JSValue h = JS_GetPropertyStr(ctx, o, "headers");

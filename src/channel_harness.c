@@ -203,8 +203,18 @@ static void drain_sends(JSContext *ctx, const Scenario *sc) {
         if (fx) {
             printf("  http  %-6s %s -> %d\n", r->method ? r->method : "GET", r->url, fx->status);
             log_req(r->url, r->body, 1, fx->status);
-            if (r->tag)
-                call_on_result(ctx, r->tag, fx->status, fx->body ? fx->body : "", NULL);
+            if (r->tag) {
+                /* Same transform the live runner applies to base64-flagged
+                 * sends: JS sees the fixture body encoded. */
+                char *b64 = NULL;
+                const char *body = fx->body ? fx->body : "";
+                if (r->base64 && fx->status >= 200 && fx->status < 300) {
+                    b64 = base64_encode((const unsigned char *)body, strlen(body));
+                    body = b64 ? b64 : "";
+                }
+                call_on_result(ctx, r->tag, fx->status, body, NULL);
+                free(b64);
+            }
         } else {
             printf("  http  %-6s %s -> UNMATCHED (no fixture; scenario fails)\n",
                    r->method ? r->method : "GET", r->url);

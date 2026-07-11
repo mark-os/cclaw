@@ -72,3 +72,30 @@ int util_copy_file(const char *src, const char *dst, mode_t mode) {
     close(fd);
     return rc;
 }
+
+char *base64_encode(const unsigned char *buf, size_t len) {
+    static const char tbl[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t olen = ((len + 2) / 3) * 4;
+    char *out = malloc(olen + 1);
+    if (!out) return NULL;
+    char *p = out;
+    size_t i = 0;
+    for (; i + 3 <= len; i += 3) {
+        unsigned v = (unsigned)buf[i] << 16 | (unsigned)buf[i + 1] << 8 | buf[i + 2];
+        *p++ = tbl[v >> 18];
+        *p++ = tbl[(v >> 12) & 63];
+        *p++ = tbl[(v >> 6) & 63];
+        *p++ = tbl[v & 63];
+    }
+    if (i < len) {
+        unsigned v = (unsigned)buf[i] << 16;
+        if (i + 1 < len) v |= (unsigned)buf[i + 1] << 8;
+        *p++ = tbl[v >> 18];
+        *p++ = tbl[(v >> 12) & 63];
+        *p++ = (i + 1 < len) ? tbl[(v >> 6) & 63] : '=';
+        *p++ = '=';
+    }
+    *p = '\0';
+    return out;
+}

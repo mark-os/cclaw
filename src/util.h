@@ -23,4 +23,8 @@ int util_copy_file(const char *src, const char *dst, mode_t mode);
 /* Set O_NONBLOCK on fd. Best-effort — a failed fcntl leaves fd untouched. */
 void util_set_nonblock(int fd);
 
+/* Standard base64 (RFC 4648, with padding) into a malloc'd NUL-terminated
+ * string. Returns NULL on OOM. len==0 yields an empty string. */
+char *base64_encode(const unsigned char *buf, size_t len);
+
 #endif

@@ -49,6 +49,7 @@
 #define CR_REQ_MAX (512 * 1024)   /* max proxied request envelope */
 #define CR_SEND_TIMEOUT 60L
 #define CR_POLL_TIMEOUT 35L       /* slightly longer than TG long-poll */
+#define CR_BASE64_MAX (3L * 1024 * 1024)  /* binary download cap (small-RAM boxes) */
 #define MAX_OUTBOX_ATTEMPTS 5
 
 static volatile sig_atomic_t g_running = 1;
@@ -316,6 +317,13 @@ static void send_start_next(void) {
         if (r->outbox_id > 0) channel_fail_outbox(g_ctx, r->outbox_id, "curl init failed");
         send_req_free(r);
         return;
+    }
+    if (r->base64) {
+        /* Binary download: bound the transfer so a huge file can't balloon
+         * the base64 copy in RAM. MAXFILESIZE covers declared lengths; the
+         * completion path re-checks the actual size for chunked bodies. */
+        curl_easy_setopt(g_send_easy, CURLOPT_MAXFILESIZE, CR_BASE64_MAX);
+        curl_easy_setopt(g_send_easy, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)CR_BASE64_MAX);
     }
     curl_multi_add_handle(g_multi, g_send_easy);
     g_send_active = r;
@@ -700,9 +708,25 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                         channel_ack_outbox(g_ctx, r->outbox_id);
                     }
                 }
-                if (r->tag)
-                    call_on_result(ctx, r->tag, (int)status,
-                                   g_send_resp.data ? g_send_resp.data : "", cerr);
+                if (r->tag) {
+                    if (r->base64 && !cerr && status >= 200 && status < 300) {
+                        /* Binary body → base64 across the C-string JS bridge.
+                         * Encode only success bodies; error bodies are text
+                         * the JS wants readable. */
+                        char *b64 = (g_send_resp.len <= (size_t)CR_BASE64_MAX)
+                            ? base64_encode((const unsigned char *)
+                                            (g_send_resp.data ? g_send_resp.data : ""),
+                                            g_send_resp.len)
+                            : NULL;
+                        call_on_result(ctx, r->tag, (int)status,
+                                       b64 ? b64 : "",
+                                       b64 ? NULL : "download too large");
+                        free(b64);
+                    } else {
+                        call_on_result(ctx, r->tag, (int)status,
+                                       g_send_resp.data ? g_send_resp.data : "", cerr);
+                    }
+                }
                 curl_multi_remove_handle(g_multi, g_send_easy);
                 curl_easy_cleanup(g_send_easy);
                 curl_slist_free_all(g_send_hdrs);

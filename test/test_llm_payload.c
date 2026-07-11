@@ -311,6 +311,11 @@ static void test_session_context_live_state(void) {
     assert(child > 0);
     assert(session_set_state(db, child, "tool_running") == 0);
 
+    /* Memory block created with NULL placement — defaults to 'context',
+     * so it surfaces here rather than in the system prompt */
+    assert(memory_block_create(db, "default", "scratch", "working notes", "", 5000, NULL) > 0);
+    assert(memory_entry_add(db, "default", "scratch", "remember the milk") >= 1);
+
     Config cfg = {0};
     cfg.provider.model = "test-model";
     cfg.provider.endpoint_type = ENDPOINT_OPENAI;
@@ -325,6 +330,8 @@ static void test_session_context_live_state(void) {
     assert(strstr(context_text, "grant_host"));
     assert(strstr(context_text, "<running_sub_agents>"));
     assert(strstr(context_text, "worker"));
+    assert(strstr(context_text, "<memory_blocks>"));
+    assert(strstr(context_text, "remember the milk"));
     assert(!strstr(context_text, "<recall>"));
 
     LlmPayload payload;

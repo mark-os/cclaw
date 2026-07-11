@@ -2187,7 +2187,7 @@ int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *lab
     sqlite3_bind_text(stmt, 3, description ? description : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, value ? value : "", -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 5, char_limit > 0 ? char_limit : 5000);
-    sqlite3_bind_text(stmt, 6, placement && placement[0] ? placement : "system", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, placement && placement[0] ? placement : "context", -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE ? sqlite3_last_insert_rowid(db) : -1;

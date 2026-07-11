@@ -1,6 +1,6 @@
 # Config Resolution (design)
 
-**Status: proposed, not implemented.**
+**Status: being implemented (phase 4 of [self-configuration.md](self-configuration.md)).**
 
 How operator-provided configuration gets into cclaw, expressed as one uniform
 resolution rule instead of the current three ad-hoc mechanisms. Motivating

@@ -22,7 +22,9 @@ static const char *JSEVAL_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"code\":{\"type\":\"string\",\"description\":\"JavaScript code to execute (inline)\"},"
     "\"filename\":{\"type\":\"string\",\"description\":\"Workspace-relative .qjs file to execute\"},"
-    "\"args\":{\"type\":\"object\",\"description\":\"Arguments object passed to file (only with filename)\"}"
+    "\"args\":{\"type\":\"object\",\"description\":\"Arguments object passed to file (only with filename)\"},"
+    "\"save_secret\":{\"type\":\"string\",\"description\":\"Capture a credential from this eval's result: NAME (^[A-Z][A-Z0-9_]*$) stores it encrypted and masks it to {{SECRET:NAME}} — the raw value never enters context\"},"
+    "\"save_secret_path\":{\"type\":\"string\",\"description\":\"With save_secret: JSON path (e.g. $.token) selecting the credential in a JSON result; omit to capture the whole trimmed result\"}"
     "}}";
 
 #define JSEVAL_MAX_OUTPUT (64 * 1024)

@@ -3,6 +3,7 @@
 #include "db.h"
 #include "secret_store.h"
 #include "secret_interp.h"
+#include "secret_capture.h"
 #include "db_response.h"
 #include "context.h"
 #include "types.h"
@@ -73,6 +74,10 @@ static void *tool_thread_fn(void *arg) {
      * through THIS thread's own db handle so a secret born mid-session is
      * maskable here too (never share the dispatch-scoped snapshot — it
      * wouldn't outlive the async thread). */
+    if (result && db) {
+        char *cap = secret_capture_apply(db, job->args, result);
+        if (cap) { free(result); result = cap; }
+    }
     if (result) {
         size_t snap_n = 0;
         ShellSecret *snap = db ? secrets_snapshot(db, job->secrets, job->secret_count, &snap_n)

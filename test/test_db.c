@@ -376,11 +376,12 @@ static void test_schema_upgrade_from_v11(void) {
     assert(db != NULL);
 
     /* Reshape a current DB back to v11: re-add the column patch v12 drops,
-     * drop the one patch v14 adds, re-add the ones patch v16 drops, re-add
-     * model/provider that v17 drops, seed rows that each patch must rewrite. */
+     * drop the ones patches v14/v17/v19 add, re-add the ones patch v16 drops,
+     * re-add model/provider that v17 drops, seed rows that each patch must rewrite. */
     assert(sqlite3_exec(db,
         "ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 128000;"
         "ALTER TABLE channels DROP COLUMN prev_extension_name;"
+        "ALTER TABLE sessions DROP COLUMN turn_context;"
         "ALTER TABLE channel_outbox RENAME COLUMN deliver_mode TO deliver_plain;"
         "ALTER TABLE extensions ADD COLUMN builtin INTEGER NOT NULL DEFAULT 0;"
         "ALTER TABLE tools ADD COLUMN builtin INTEGER NOT NULL DEFAULT 0;"

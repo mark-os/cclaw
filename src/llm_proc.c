@@ -318,29 +318,37 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
     }
     LOG_DEBUG_("llm_req: %d entries, cut=%d", plan.count, plan.cut);
 
-    /* Auto-recall */
-    char *recall_text = NULL;
-    if (cfg->auto_recall && recall) {
-        sqlite3_stmt *ust;
-        if (sqlite3_prepare_v2(db,
-                "SELECT content FROM entries WHERE session_id=? AND role=1 ORDER BY id DESC LIMIT 1",
-                -1, &ust, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(ust, 1, session_id);
-            if (sqlite3_step(ust) == SQLITE_ROW) {
-                const char *umsg = (const char *)sqlite3_column_text(ust, 0);
-                if (umsg)
-                    recall_text = context_auto_recall(db, session_id, umsg, cfg->recall_max_tokens);
-            }
-            sqlite3_finalize(ust);
-        }
-    }
-
     /* Session context: recall plus live per-turn state (context-placement
      * memory blocks, running sub-agents, pending approvals) — never baked
-     * into the system prompt, rebuilt fresh every turn. Assembled entirely
-     * in SQL (recall_text is the one piece not natively SQL). */
-    context_text = session_context_text(db, session_id, recall_text);
-    free(recall_text);
+     * into the system prompt. Materialized ONCE at turn start (recall != 0
+     * ⟺ iteration 0) and persisted on the session row; tool-loop iterations
+     * read the frozen text back verbatim. Content and position (turn
+     * boundary, see llm_payload.c) thus stay byte-stable across the whole
+     * turn, so every iteration extends the provider's prompt-cache prefix
+     * instead of invalidating it. Live state is a turn-start snapshot by
+     * design — mid-turn changes surface as tool results, not here. */
+    if (recall) {
+        char *recall_text = NULL;
+        if (cfg->auto_recall) {
+            sqlite3_stmt *ust;
+            if (sqlite3_prepare_v2(db,
+                    "SELECT content FROM entries WHERE session_id=? AND role=1 ORDER BY id DESC LIMIT 1",
+                    -1, &ust, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(ust, 1, session_id);
+                if (sqlite3_step(ust) == SQLITE_ROW) {
+                    const char *umsg = (const char *)sqlite3_column_text(ust, 0);
+                    if (umsg)
+                        recall_text = context_auto_recall(db, session_id, umsg, cfg->recall_max_tokens);
+                }
+                sqlite3_finalize(ust);
+            }
+        }
+        context_text = session_context_text(db, session_id, recall_text);
+        free(recall_text);
+        session_set_turn_context(db, session_id, context_text);
+    } else {
+        context_text = session_get_turn_context(db, session_id);
+    }
 
     /* ── Mock mode ─────────────────────────────────────────────── */
     const char *mock_path = getenv("CCLAW_LLM_MOCK");

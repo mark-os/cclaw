@@ -160,6 +160,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   state TEXT NOT NULL DEFAULT 'idle',
   owner_instance TEXT,                      -- live owner (processes.instance_id); NULL ⟺ state='idle'
   turn_iteration INTEGER NOT NULL DEFAULT 0,
+  turn_context TEXT,                        -- <RELEVANT_CONTEXT> block, materialized once at turn
+                                            -- start (llm_proc.c) and reused verbatim by every
+                                            -- tool-loop iteration so the request prefix stays
+                                            -- byte-stable for prompt caching. NULL = no block.
   leaf_id INTEGER DEFAULT -1,
   last_route TEXT,
   last_interaction_id TEXT,
@@ -354,8 +358,11 @@ CREATE INDEX IF NOT EXISTS idx_hook_directives_session ON hook_directives(sessio
 
 -- ═══ Memory ═══
 -- placement: 'system' blocks render into the system prompt once per session
--- (agent_config.c); 'context' blocks render into the live <RELEVANT_CONTEXT>
--- block instead, rebuilt fresh every turn (llm_payload.c session_context_text).
+-- (agent_config.c); 'context' blocks render into the <RELEVANT_CONTEXT>
+-- block, materialized at each turn start (llm_payload.c session_context_text).
+-- New blocks default to 'context' — the API default in memory_block_create,
+-- which every insert path goes through; the column DEFAULT below is inert.
+-- Only the Assistant's seeded AGENT/USER identity blocks ask for 'system'.
 CREATE TABLE IF NOT EXISTS memory_blocks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_name TEXT,

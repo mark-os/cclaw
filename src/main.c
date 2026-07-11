@@ -2578,13 +2578,16 @@ static void ensure_default_agent(const char *base_dir) {
         /* Seed default tools as grants */
         agent_grant_defaults(g_db, "Assistant");
         /* default_agent needs no write — 'Assistant' is the registry default */
-        /* Seed default memory blocks */
+        /* Seed default memory blocks. Explicitly 'system' placement: identity
+         * (who am I / who is the user) belongs in the system prompt, where it
+         * changes rarely and stays in the cached prefix — unlike new blocks,
+         * which default to the per-turn 'context' placement. */
         memory_block_create(g_db, "Assistant", "AGENT",
             "Your identity, capabilities, and operational notes. Update as you learn about yourself.",
-            NULL, 5000, NULL);
+            NULL, 5000, "system");
         memory_block_create(g_db, "Assistant", "USER",
             "Information about the user: preferences, context, working style. Update as you learn.",
-            NULL, 5000, NULL);
+            NULL, 5000, "system");
         /* AGENT gets one functional starter entry (it drives the self-naming
          * flow). USER starts empty — its description already states the block's
          * purpose, so a placeholder entry would just be noise the model has to

@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_extension.h"
+#include "approval.h"
+#include "db.h"
 #include "extension_manifest.h"
 #include "tool_parse.h"
 #include "util.h"
@@ -29,7 +31,36 @@ static char *msgf(const char *fmt, ...) {
     return strdup(buf);
 }
 
+static char *sql_text(sqlite3 *db, const char *sql, const char *a1,
+                      const char *a2, const char *a3);
+
 /* ── extension_promote ──────────────────────────────────────────────── */
+
+/* Enumerate a validated bundle's declared contents for the approval prompt:
+ * "adds N tools, M hooks, ..." plus agent names/profiles. Heap; caller frees. */
+char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
+    char mpath[2*PATH_MAX];
+    snprintf(mpath, sizeof(mpath), "%s/extension.json", bundle_dir);
+    char *manifest = util_read_file(mpath, NULL);
+    if (!manifest) return strdup("(unreadable manifest)");
+    char *out = sql_text(db,
+        "SELECT 'adds '"
+        " || json_array_length(COALESCE(json_extract(?1,'$.tools'),'[]')) || ' tools, '"
+        " || json_array_length(COALESCE(json_extract(?1,'$.hooks'),'[]')) || ' hooks, '"
+        " || json_array_length(COALESCE(json_extract(?1,'$.scripts'),'[]')) || ' scripts, '"
+        " || json_array_length(COALESCE(json_extract(?1,'$.skills'),'[]')) || ' skills, '"
+        " || json_array_length(COALESCE(json_extract(?1,'$.config'),'[]')) || ' config keys, '"
+        " || json_array_length(COALESCE(json_extract(?1,'$.agents'),'[]')) || ' agents'"
+        " || COALESCE((SELECT ' (' || group_concat("
+        "      json_extract(value,'$.name') || ':' ||"
+        "      COALESCE(json_extract(value,'$.sandbox_profile'),'standard'), ', ') || ')'"
+        "    FROM json_each(json_extract(?1,'$.agents'))), '')"
+        " || CASE WHEN json_extract(?1,'$.channel') IS NOT NULL"
+        "         THEN ', 1 channel' ELSE '' END",
+        manifest, NULL, NULL);
+    free(manifest);
+    return out ? out : strdup("(enumeration failed)");
+}
 
 static char *tool_extension_promote_handler(const char *arguments, void *user_data) {
     ToolExtensionCtx *ctx = (ToolExtensionCtx *)user_data;
@@ -44,22 +75,36 @@ static char *tool_extension_promote_handler(const char *arguments, void *user_da
     }
 
     const char *ws = (ctx->workspace && ctx->workspace[0]) ? ctx->workspace : ".";
-    char bundle[PATH_MAX];
+    char bundle[PATH_MAX], namebuf[256];
     snprintf(bundle, sizeof(bundle), "%s/extensions/%s", ws, name);
-    char namebuf[256];
     snprintf(namebuf, sizeof(namebuf), "%s", name);
     tool_parse_free(&ta);
 
+    /* Eager validation: a bundle that can't install never parks. */
     char *err = NULL;
-    if (extension_install(ctx->db, bundle, ctx->agent_name, &err) != 0) {
+    if (extension_manifest_validate(bundle, &err) != 0) {
         char *m = msgf("error: promote failed: %s", err ? err : "unknown");
         free(err);
         return m;
     }
     free(err);
-    return msgf("promoted extension '%s' into the shared store; its tools are now "
-                "registered and owned by '%s'. Re-promote to pick up draft edits.",
-                namebuf, ctx->agent_name);
+
+    /* Park an apply-approval carrying the bundle path + enumerated contents
+     * so the approver sees what registers before any code does. */
+    char *summary = extension_manifest_enumerate(ctx->db, bundle);
+    char *args = sql_text(ctx->db,
+        "SELECT json_object('name',?1,'bundle',?2,'summary',?3)",
+        namebuf, bundle, summary);
+    free(summary);
+    if (!args) return strdup("error: failed to build approval args");
+
+    int64_t aid = approval_create(ctx->db, ctx->session_id,
+        ctx->current_tool_call_id, "extension_promote", "extension_promote",
+        args, "apply");
+    free(args);
+    if (aid < 0) return strdup("error: failed to create approval");
+    session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
+    return NULL; /* park */
 }
 
 /* ── extension_publish ──────────────────────────────────────────────── */
@@ -314,8 +359,9 @@ int tool_extension_register(ToolRegistry *reg, ToolExtensionCtx *ctx) {
     int rc = 0;
     rc |= tools_register(reg, "extension_promote",
         "Promote a draft extension from your workspace (workspace/extensions/<name>) "
-        "into the shared store. Validates the manifest, copies the bundle, and "
-        "registers its tools/hooks as a real extension owned by you.",
+        "into the shared store (requires human approval — the approver sees the "
+        "bundle's enumerated contents). On approval the manifest's tools/hooks/"
+        "skills/config/agents register as a real extension owned by you.",
         NAME_PARAMS, tool_extension_promote_handler, ctx);
     rc |= tools_register(reg, "extension_publish",
         "Publish an extension you own so other agents can attach it. Sets the "

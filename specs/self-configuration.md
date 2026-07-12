@@ -133,8 +133,9 @@ checks name shape, profile value, and grants shape; caps are enforced at
 install time against the promoting agent (`creator = owner_agent`; builtin
 bundles install as `system` = operator, uncapped).
 
-Name collision with an existing agent refuses the whole install —
-first-come, mirroring extension-name ownership.
+An `agents[]` name that already exists is **skipped, never overwritten** —
+first-come, mirroring extension-name ownership, and it keeps re-promoting the
+same bundle idempotent (its own agents exist by then).
 
 ### Promote approval enumeration
 

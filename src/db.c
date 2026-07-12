@@ -379,10 +379,11 @@ static const struct { int version; const char *sql; } schema_patches[] = {
        * and any occurrence in the registry-list overrides. */
       "DELETE FROM tools WHERE name='configure_channel';"
       "DELETE FROM grants WHERE kind='tool' AND value='configure_channel';"
-      /* create_agent now parks its own apply-approval (like request_config);
-       * a standing approval_mode='always' would double-prompt. */
+      /* create_agent and extension_promote now park their own apply-approval
+       * (like request_config); a standing approval_mode='always' would
+       * double-prompt. */
       "UPDATE grants SET approval_mode='silent'"
-      " WHERE kind='tool' AND value='create_agent';"
+      " WHERE kind='tool' AND value IN ('create_agent','extension_promote');"
       "UPDATE config SET value = (SELECT json_group_array(j.value)"
       "  FROM json_each(config.value) j WHERE j.value <> 'configure_channel')"
       " WHERE key IN ('agent_default_tools','agent_approval_tools')"

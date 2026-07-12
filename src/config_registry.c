@@ -57,7 +57,7 @@ static const ConfigDef s_defs[] = {
       "\"check_session\",\"secret_create\"]",
       "Baseline tool grants seeded for a newly created agent (JSON array)" },
     { "agent_approval_tools",
-      "[\"extension_promote\",\"extension_publish\",\"configure_provider\"]",
+      "[\"extension_publish\",\"configure_provider\"]",
       "Tools that require human approval (approval_mode='always') when granted" },
     { "health_5xx_threshold", "3",
       "5xx errors within the window before a model is marked degraded" },

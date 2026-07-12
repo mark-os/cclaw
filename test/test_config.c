@@ -221,9 +221,53 @@ static void test_agent_dir_resolve(void) {
     printf("  PASS: test_agent_dir_resolve\n");
 }
 
+/* specs/config.md: env(CCLAW_<KEY>) ?? value ?? default; secret keys resolve
+ * env → secrets table, reject config_set. */
+static void test_resolution_rule(void) {
+    unsetenv("CCLAW_WEB_PORT");
+    sqlite3 *db = fresh_db();
+    assert(db);
+
+    /* default */
+    char *v = config_get(db, "web_port");
+    assert(v && strcmp(v, "8080") == 0); free(v);
+    /* value overrides default */
+    assert(config_set(db, "web_port", "9090") == 0);
+    v = config_get(db, "web_port");
+    assert(v && strcmp(v, "9090") == 0); free(v);
+    /* env outranks value, read live, never persisted */
+    setenv("CCLAW_WEB_PORT", "7000", 1);
+    v = config_get(db, "web_port");
+    assert(v && strcmp(v, "7000") == 0); free(v);
+    unsetenv("CCLAW_WEB_PORT");
+    v = config_get(db, "web_port");
+    assert(v && strcmp(v, "9090") == 0); free(v);
+
+    /* env-name mapping for namespaced keys */
+    char envn[64];
+    config_env_name("telegram.bot_token", envn, sizeof(envn));
+    assert(strcmp(envn, "CCLAW_TELEGRAM_BOT_TOKEN") == 0);
+
+    /* secret key: config_set rejected; env resolves; config.value never read */
+    sqlite3_exec(db,
+        "INSERT INTO config(key, default_value, description, secret, required)"
+        " VALUES('tg.tok','','token',1,1)", NULL, NULL, NULL);
+    assert(config_set(db, "tg.tok", "leak") != 0);
+    v = config_get(db, "tg.tok");
+    assert(v == NULL);
+    setenv("CCLAW_TG_TOK", "s3cret", 1);
+    v = config_get(db, "tg.tok");
+    assert(v && strcmp(v, "s3cret") == 0); free(v);
+    unsetenv("CCLAW_TG_TOK");
+
+    db_close(db);
+    printf("  PASS: test_resolution_rule\n");
+}
+
 int main(void) {
     printf("test_config:\n");
     test_agent_dir_resolve();
+    test_resolution_rule();
     test_defaults();
     test_kv_values();
     test_env_overrides_kv();

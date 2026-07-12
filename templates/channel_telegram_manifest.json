@@ -1,5 +1,19 @@
 {
   "name": "telegram",
   "version": "0.1.0",
-  "channel": { "type": "telegram", "handler": "channel.qjs" }
+  "channel": { "type": "telegram", "handler": "channel.qjs" },
+  "config": [
+    { "key": "enabled", "default": "0",
+      "description": "Run the telegram channel (1 = on)" },
+    { "key": "bot_token", "secret": true, "required": true,
+      "description": "Telegram bot API token" },
+    { "key": "admin_ids", "default": "",
+      "description": "Comma-separated Telegram user ids with admin commands" },
+    { "key": "base_url", "default": "https://api.telegram.org",
+      "description": "Bot API base URL (egress pin source of truth)" },
+    { "key": "webhook_secret", "secret": true, "default": "",
+      "description": "X-Telegram-Bot-Api-Secret-Token for webhook mode" },
+    { "key": "mode", "default": "poll",
+      "description": "Update delivery: poll or webhook" }
+  ]
 }

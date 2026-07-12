@@ -41,7 +41,7 @@ static char *eval_expr(const char *expr) {
     const char *stub =
         "var __sent=[];var __emits=[];var __cfg={};var __adminArg=null;var __res=[];\n"
         "var channel={getConfig:function(k){return __cfg[k]!==undefined?__cfg[k]:null;},"
-        "setConfig:function(k,v){__cfg[k]=v;},log:function(){},"
+        "setState:function(k,v){__cfg[k]=v;},getState:function(k){return __cfg[k]!==undefined?__cfg[k]:null;},log:function(){},"
         "send:function(r){__sent.push(r);},"
         "http:function(r){__sent.push(r);return new Promise(function(res){__res.push(res);});},"
         "emit:function(t,p,e){__emits.push({type:t,payload:p,ext:e});return 0;},"
@@ -171,7 +171,7 @@ int main(void) {
         "\"rich_message\":{\"markdown\":\"**hi**\"}");
     /* rich_disabled latch → straight to chunked HTML. */
     expect_has("onOutbox_rich_disabled_falls_to_html",
-        "channel.setConfig('rich_disabled','1'),"
+        "channel.setState('rich_disabled','1'),"
         "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:0}),"
         "__sent[0].body",
         "<b>hi</b>");

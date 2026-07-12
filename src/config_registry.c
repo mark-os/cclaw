@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "config_registry.h"
+#include "db.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -127,22 +129,48 @@ int config_registry_sync(sqlite3 *db) {
     return rc;
 }
 
+void config_env_name(const char *key, char *buf, size_t cap) {
+    size_t n = 0;
+    if (cap == 0) return;
+    n = (size_t)snprintf(buf, cap, "CCLAW_");
+    for (const char *p = key; p && *p && n + 1 < cap; p++, n++)
+        buf[n] = (*p == '.') ? '_'
+               : (*p >= 'a' && *p <= 'z') ? (char)(*p - 32) : *p;
+    buf[n] = '\0';
+}
+
 char *config_get(sqlite3 *db, const char *key) {
-    if (db && key) {
+    if (!key) return NULL;
+
+    /* Env layer: read live, never persisted (specs/config.md). */
+    char envn[160];
+    config_env_name(key, envn, sizeof(envn));
+    const char *e = getenv(envn);
+    if (e) return strdup(e);
+
+    if (db) {
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(db,
-                "SELECT COALESCE(value, default_value) FROM config WHERE key=?1",
+                "SELECT COALESCE(value, default_value), COALESCE(secret,0)"
+                " FROM config WHERE key=?1",
                 -1, &stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC);
             char *val = NULL;
-            int row = 0;
+            int row = 0, secret = 0;
             if (sqlite3_step(stmt) == SQLITE_ROW) {
                 row = 1;
-                const char *v = (const char *)sqlite3_column_text(stmt, 0);
-                if (v) val = strdup(v);
+                secret = sqlite3_column_int(stmt, 1);
+                if (!secret) {
+                    const char *v = (const char *)sqlite3_column_text(stmt, 0);
+                    if (v) val = strdup(v);
+                }
             }
             sqlite3_finalize(stmt);
             if (row) {
+                /* Secret keys never resolve from config.value — the DB
+                 * fallback is the encrypted secrets table under the
+                 * canonical env name. */
+                if (secret) return db_secret_get_system(db, envn);
                 if (val) return val;
                 /* row exists but both columns NULL — fall through to registry */
             }
@@ -168,6 +196,19 @@ double config_get_double(sqlite3 *db, const char *key) {
 
 int config_set(sqlite3 *db, const char *key, const char *value) {
     if (!db || !key) return -1;
+    /* Secret keys never land in config.value (specs/config.md). */
+    {
+        sqlite3_stmt *sk;
+        int secret = 0;
+        if (sqlite3_prepare_v2(db,
+                "SELECT COALESCE(secret,0) FROM config WHERE key=?1",
+                -1, &sk, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(sk, 1, key, -1, SQLITE_STATIC);
+            if (sqlite3_step(sk) == SQLITE_ROW) secret = sqlite3_column_int(sk, 0);
+            sqlite3_finalize(sk);
+        }
+        if (secret) return -1;
+    }
     const char *def = config_default(key);
     if (!def) {
         /* Not in the C registry — allowed only if an extension registered it

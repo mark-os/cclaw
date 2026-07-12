@@ -383,6 +383,8 @@ static void test_schema_upgrade_from_v11(void) {
         "ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 128000;"
         "ALTER TABLE channels DROP COLUMN prev_extension_name;"
         "ALTER TABLE sessions DROP COLUMN turn_context;"
+        "ALTER TABLE config DROP COLUMN secret;"    /* v22 adds */
+        "ALTER TABLE config DROP COLUMN required;"  /* v22 adds */
         "ALTER TABLE secrets ADD COLUMN status TEXT NOT NULL DEFAULT 'active';"
         "INSERT INTO secrets(name, value, status, source) VALUES"
         "  ('REAL_KEY','enc:00','active','operator'),"          /* survives sweep */

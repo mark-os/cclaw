@@ -49,12 +49,12 @@ function onInit() {
     config.webhook_secret = channel.getConfig("webhook_secret") || "";
 
     if (!config.token) {
-        channel.log("ERROR: no bot_token in channel_state");
+        channel.log("ERROR: bot_token unresolved (set CCLAW_TELEGRAM_BOT_TOKEN or the encrypted secret)");
         throw new Error("no bot_token");
     }
 
     // Restore offset
-    var saved = channel.getConfig("tg_offset");
+    var saved = channel.getState("tg_offset");
     if (saved) offset = parseInt(saved, 10) || 0;
 
     // webhook mode: platform POSTs to the daemon, proxied to onRequest.
@@ -135,7 +135,7 @@ function processUpdates(body) {
     }
 
     // Persist offset only for successfully processed updates
-    if (offset > 0) channel.setConfig("tg_offset", "" + offset);
+    if (offset > 0) channel.setState("tg_offset", "" + offset);
 }
 
 // ── Outbox delivery ──────────────────────────────────────────────
@@ -169,7 +169,7 @@ function onOutbox(item) {
     // the rich_disabled latch is set (server doesn't speak the method), fall
     // through to the chunked HTML renderer. A rich 400/404 comes back through
     // the C loop as mode=1.
-    if (mode === 0 && channel.getConfig("rich_disabled") !== "1" &&
+    if (mode === 0 && channel.getState("rich_disabled") !== "1" &&
         utf8ByteLen(text) <= TG_RICH_MAX_BYTES) {
         tgOutbox("sendRichMessage", {
             chat_id: parseInt(chatId, 10),

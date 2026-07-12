@@ -26,6 +26,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "channel.h"
 #include "channel_api.h"
 #include "channel_runner.h"
 #include "admin_api.h"
@@ -301,8 +302,8 @@ static size_t curl_write_save_cb(void *ptr, size_t size, size_t nmemb, void *ud)
  * (not a hand-rolled host extractor) so the validated host is exactly what
  * curl will later dial. Exact-host-equality only — no suffix matching. */
 static int url_host_allowed(const char *url) {
-    char *base = channel_get_config(g_ctx, "base_url");
-    if (!base) return 0;  /* fail-closed: no config → no send */
+    char *base = channel_config_get(g_ctx->db, g_ctx->channel_name, "base_url");
+    if (!base || !base[0]) { free(base); return 0; }  /* fail-closed: no config → no send */
     CURLU *bu = curl_url(), *tu = curl_url();
     char *bh = NULL, *th = NULL;
     int ok = 0;

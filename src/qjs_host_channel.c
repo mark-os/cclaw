@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #endif
 #include "qjs_helpers.h"
+#include "channel.h"
 #include "channel_api.h"
 #include "channel_runner.h"
 #include "admin_api.h"
@@ -45,12 +46,29 @@ static JSValue js_ch_emit(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt32(ctx, rc);
 }
 
-/* ── cclaw.getConfig(key) ──────────────────────────────────────── */
+/* ── cclaw.getConfig(key) — registry key <ext>.<key>, read-only ── */
 
 static JSValue js_ch_get_config(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
     (void)this_val;
     if (argc < 1) return JS_ThrowTypeError(ctx, "getConfig(key)");
+    const char *key = JS_ToCString(ctx, argv[0]);
+    if (!key) return JS_NULL;
+    char *val = channel_config_get(g_ctx->db, g_ctx->channel_name, key);
+    JS_FreeCString(ctx, key);
+    if (!val) return JS_NULL;
+    JSValue r = JS_NewString(ctx, val);
+    free(val);
+    return r;
+}
+
+/* ── cclaw.getState(key) / cclaw.setState(key, value) — channel_state
+ *    runtime scratch (tg_offset, webhook registration, ...) ─────── */
+
+static JSValue js_ch_get_state(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "getState(key)");
     const char *key = JS_ToCString(ctx, argv[0]);
     if (!key) return JS_NULL;
     char *val = channel_get_config(g_ctx, key);
@@ -61,18 +79,16 @@ static JSValue js_ch_get_config(JSContext *ctx, JSValueConst this_val,
     return r;
 }
 
-/* ── cclaw.setConfig(key, value) ───────────────────────────────── */
-
-static JSValue js_ch_set_config(JSContext *ctx, JSValueConst this_val,
-                                int argc, JSValueConst *argv) {
+static JSValue js_ch_set_state(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
     (void)this_val;
-    if (argc < 2) return JS_ThrowTypeError(ctx, "setConfig(key, value)");
+    if (argc < 2) return JS_ThrowTypeError(ctx, "setState(key, value)");
     const char *key = JS_ToCString(ctx, argv[0]);
     const char *val = JS_ToCString(ctx, argv[1]);
     if (!key || !val) {
         if (key) JS_FreeCString(ctx, key);
         if (val) JS_FreeCString(ctx, val);
-        return JS_ThrowTypeError(ctx, "setConfig: string args required");
+        return JS_ThrowTypeError(ctx, "setState: string args required");
     }
     int rc = channel_set_config(g_ctx, key, val);
     JS_FreeCString(ctx, key);
@@ -245,7 +261,7 @@ static JSValue js_admin_is_admin(JSContext *ctx, JSValueConst this_val,
     if (argc < 1) return JS_NewBool(ctx, 0);
     const char *channel_id = JS_ToCString(ctx, argv[0]);
     if (!channel_id) return JS_NewBool(ctx, 0);
-    char *admins = channel_get_config(g_ctx, "admin_ids");
+    char *admins = channel_config_get(g_ctx->db, g_ctx->channel_name, "admin_ids");
     if (!admins) { JS_FreeCString(ctx, channel_id); return JS_NewBool(ctx, 0); }
     size_t cid_len = strlen(channel_id);
     int found = 0;
@@ -274,7 +290,8 @@ void qjs_register_channel_host_functions(JSContext *ctx) {
     JS_SetPropertyStr(ctx, ch, "send", JS_NewCFunction(ctx, js_ch_send, "send", 1));
     JS_SetPropertyStr(ctx, ch, "http", JS_NewCFunction(ctx, js_ch_http, "http", 1));
     JS_SetPropertyStr(ctx, ch, "getConfig", JS_NewCFunction(ctx, js_ch_get_config, "getConfig", 1));
-    JS_SetPropertyStr(ctx, ch, "setConfig", JS_NewCFunction(ctx, js_ch_set_config, "setConfig", 2));
+    JS_SetPropertyStr(ctx, ch, "getState", JS_NewCFunction(ctx, js_ch_get_state, "getState", 1));
+    JS_SetPropertyStr(ctx, ch, "setState", JS_NewCFunction(ctx, js_ch_set_state, "setState", 2));
     JS_SetPropertyStr(ctx, ch, "ackOutbox", JS_NewCFunction(ctx, js_ch_ack_outbox, "ackOutbox", 1));
     JS_SetPropertyStr(ctx, ch, "failOutbox", JS_NewCFunction(ctx, js_ch_fail_outbox, "failOutbox", 2));
     JS_SetPropertyStr(ctx, ch, "log", JS_NewCFunction(ctx, js_ch_log, "log", 1));

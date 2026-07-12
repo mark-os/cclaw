@@ -536,7 +536,7 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
                 snprintf(task, sizeof(task),
                          "Run the scheduled extension script '%s': call js_eval with "
                          "filename '%s/%s'.", sname, store, handler);
-                cron_add(db, owner_agent, sname, sched, 0, task);
+                cron_add(db, owner_agent, sname, sched, 0, 0, 0, task);
             }
             sqlite3_finalize(st);
         }

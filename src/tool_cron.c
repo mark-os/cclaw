@@ -36,7 +36,7 @@ char *tool_cron_set_handler(const char *arguments, void *user_data) {
     }
 
     int64_t id = cron_add(ctx->db, ctx->agent_name, name,
-                          expr, ctx->session_id, task);
+                          expr, 0, 0, ctx->session_id, task);
 
     if (id < 0) {
         tool_parse_free(&ta);

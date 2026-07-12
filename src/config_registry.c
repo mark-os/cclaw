@@ -58,6 +58,9 @@ static const ConfigDef s_defs[] = {
       "\"extension_attach\",\"extension_list\",\"extension_fork\",\"launch_agent\","
       "\"check_session\",\"secret_create\"]",
       "Baseline tool grants seeded for a newly created agent (JSON array)" },
+    { "agent_default_extensions",
+      "[\"cclaw-docs\"]",
+      "Extensions attached to every newly created agent (JSON array)" },
     { "agent_approval_tools",
       "[\"extension_publish\",\"configure_provider\"]",
       "Tools that require human approval (approval_mode='always') when granted" },

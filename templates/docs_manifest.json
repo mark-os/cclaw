@@ -1,0 +1,12 @@
+{
+  "name": "cclaw-docs",
+  "version": "0.1.0",
+  "description": "Built-in self-documentation: skills describing how to configure and extend CClaw",
+  "skills": [
+    "skills/configuring-cclaw",
+    "skills/extending-cclaw",
+    "skills/cclaw-agents",
+    "skills/cclaw-channels",
+    "skills/cclaw-secrets-memory"
+  ]
+}

@@ -388,10 +388,31 @@ static void test_install_refuses_owner_takeover(void) {
 static void test_install_builtin(void) {
     unlink(TEST_DB);
     rm_rf("/tmp/extensions/telegram");
+    rm_rf("/tmp/extensions/cclaw-docs");
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
+    /* Pre-existing agent: the docs install must backfill its attachment. */
+    db_agent_upsert(db, "OldTimer", NULL, NULL);
 
     assert(extension_install_builtin(db, TEST_DB) == 0);
+
+    /* cclaw-docs: skills-only, system-owned, published, backfilled. */
+    char *downer = q1(db, "SELECT owner_agent FROM extensions WHERE name='cclaw-docs'");
+    assert(downer && strcmp(downer, "system") == 0); free(downer);
+    assert(qint(db, "SELECT published FROM extensions WHERE name='cclaw-docs'") == 1);
+    struct stat dst;
+    assert(stat("/tmp/extensions/cclaw-docs/skills/configuring-cclaw/SKILL.md", &dst) == 0);
+    assert(stat("/tmp/extensions/cclaw-docs/skills/cclaw-agents/SKILL.md", &dst) == 0);
+    assert(qint(db, "SELECT count(*) FROM agent_extensions"
+                    " WHERE agent_name='OldTimer' AND extension_name='cclaw-docs'"
+                    " AND enabled=1") == 1);
+    /* An explicit opt-out (enabled=0) survives reinstall. */
+    sqlite3_exec(db, "UPDATE agent_extensions SET enabled=0"
+                     " WHERE agent_name='OldTimer' AND extension_name='cclaw-docs'",
+                 NULL, NULL, NULL);
+    assert(extension_install_builtin(db, TEST_DB) == 0);
+    assert(qint(db, "SELECT enabled FROM agent_extensions"
+                    " WHERE agent_name='OldTimer' AND extension_name='cclaw-docs'") == 0);
     char *owner = q1(db, "SELECT owner_agent FROM extensions WHERE name='telegram'");
     assert(owner && strcmp(owner, "system") == 0); free(owner);
     assert(qint(db, "SELECT published FROM extensions WHERE name='telegram'") == 1);
@@ -430,6 +451,7 @@ static void test_install_builtin(void) {
 
     db_close(db);
     rm_rf("/tmp/extensions/telegram");
+    rm_rf("/tmp/extensions/cclaw-docs");
     printf("  PASS test_install_builtin\n");
 }
 

@@ -597,20 +597,50 @@ Index: `idx_channel_outbox_pending ON channel_outbox(channel_name, status) WHERE
 
 ## cron_jobs
 
-Daemon-scheduled periodic tasks.
+The one scheduler: every future wake — recurring task, one-shot commitment,
+or the agent-level heartbeat pulse — is a durable row here, fired by
+`run_due_jobs()` off the daemon's existing 30s `db_periodic` tick. There is
+no separate heartbeat thread; heartbeat is a seeded row with `kind='heartbeat'`.
+
+A job's schedule is exactly one of `cron_expr` (recurring, 5-field),
+`run_at` (one-shot unix timestamp), or `interval_s` (fixed period in
+seconds) — the unused fields are `''` / NULL / NULL respectively
+(`cron_list()` reads the NULLs back as 0). `kind` is orthogonal to
+schedule and controls payload/targeting.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `agent_name` | TEXT | |
 | `name` | TEXT NOT NULL | |
-| `cron_expr` | TEXT NOT NULL | |
-| `session_id` | INTEGER NOT NULL | |
-| `task` | TEXT NOT NULL | |
+| `cron_expr` | TEXT NOT NULL | `''` sentinel when `run_at` or `interval_s` is used instead (kept NOT NULL — SQLite can't relax it without a table rebuild) |
+| `run_at` | INTEGER | one-shot fire time; row is deleted (not rescheduled) once fired |
+| `interval_s` | INTEGER | fixed-period cadence; not exposed on the model-facing `cron_set` schema today (heartbeat rows use it internally) |
+| `kind` | TEXT NOT NULL DEFAULT 'task' | `'task'` or `'heartbeat'` |
+| `session_id` | INTEGER NOT NULL | `0` = resolve to the agent's most recently active session at fire time (`kind='task'`) or most recently active *idle* session (`kind='heartbeat'`, which ignores this column entirely) |
+| `task` | TEXT NOT NULL | injected message; unused for `kind='heartbeat'` (fires the constant `HEARTBEAT_PROMPT` instead) |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `next_run_at` | INTEGER NOT NULL DEFAULT 0 | |
 | `last_run_at` | INTEGER | |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+Firing rules (`src/cron.c`):
+- `kind='task'`, one-shot (`run_at`): inject `task` into the resolved session, then **delete the row**.
+- `kind='task'`, interval or recurring: inject `task`, reschedule `next_run_at`. A recurring job whose expression fails to parse at reschedule time is disabled, never retried hourly.
+- `kind='heartbeat'`: skip silently if the agent has no idle session, or if that session already has an unconsumed `source='heartbeat'` inbox row (never stack pulses).
+
+Guardrails, both in the `config` registry: `cron_min_interval_seconds`
+(default 300, enforced in `cron_add()` fire-to-fire — not just at the
+`cron_set` tool boundary, since `extension_promote` is a second
+model-reachable caller) and `cron_max_jobs_per_session` (default 10,
+enforced in the `cron_set` tool handler only — manifest/heartbeat rows use
+`session_id=0` and are legitimately operator-shaped).
+
+Every agent gets a seeded, **disabled** heartbeat row (`name='heartbeat'`,
+`interval_s=1800`) at creation — `cron_seed_heartbeat()`, called from both
+`agent_definition_apply` and the daemon's `ensure_default_agent` — and, for
+pre-existing agents, via the v23 schema patch. Enabling it is a deliberate
+operator/agent act — heartbeats cost an LLM call per fire.
 
 ---
 

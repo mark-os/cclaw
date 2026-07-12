@@ -639,91 +639,176 @@ static int write_text_file(const char *path, const char *content) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 #endif
-int extension_install_builtin(sqlite3 *db, const char *db_path) {
-    if (!db || !db_path) return -1;
+typedef struct { const char *rel; const char *body; } BuiltinFile;
 
-    /* Belt-and-suspenders: the takeover guard in extension_install already
-     * refuses this (unreachable in practice), but never fight a row named
-     * 'telegram' that isn't ours. */
+typedef struct {
+    const char *name;
+    const BuiltinFile *files;
+    size_t nfiles;
+} BuiltinBundle;
+
+/* True when an extensions row of this name exists and is NOT system-owned —
+ * belt-and-suspenders: the takeover guard in extension_install already
+ * refuses this (unreachable in practice), but never fight a foreign row. */
+static int builtin_row_foreign(sqlite3 *db, const char *name) {
     sqlite3_stmt *s;
+    int foreign = 0;
     if (sqlite3_prepare_v2(db,
-            "SELECT COALESCE(owner_agent,'') FROM extensions WHERE name='telegram'",
+            "SELECT COALESCE(owner_agent,'') FROM extensions WHERE name=?1",
             -1, &s, NULL) == SQLITE_OK) {
-        int foreign = 0;
+        sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
         if (sqlite3_step(s) == SQLITE_ROW) {
             const char *o = (const char *)sqlite3_column_text(s, 0);
             foreign = (o && strcmp(o, "system") != 0);
         }
         sqlite3_finalize(s);
-        if (foreign) return 0;
+    }
+    return foreign;
+}
+
+/* Stage a builtin bundle beside the store and install it as 'system'.
+ * The store dir is the bundle's final home, so installing from a sibling
+ * staging dir avoids copy_tree src==dst. Bundle code ships in the binary;
+ * the files on disk are a cache, rewritten on every start so a binary
+ * upgrade can't leave a stale template running against a newer C loop. */
+static int builtin_stage_install(sqlite3 *db, const char *base,
+                                 const BuiltinBundle *b) {
+    char staging[2*PATH_MAX];
+    snprintf(staging, sizeof(staging), "%s/extensions/.%s.staging",
+             base, b->name);
+    if (util_mkdir_p(staging) != 0) return -1;
+
+    int rc = 0;
+    for (size_t i = 0; i < b->nfiles && rc == 0; i++) {
+        char fp[3*PATH_MAX];
+        snprintf(fp, sizeof(fp), "%s/%s", staging, b->files[i].rel);
+        char *sl = strrchr(fp, '/');
+        *sl = '\0';
+        rc |= util_mkdir_p(fp);
+        *sl = '/';
+        rc |= write_text_file(fp, b->files[i].body);
     }
 
-    /* Capture channel status + revert target so a restart doesn't demote an
-     * active channel — install's INSERT OR REPLACE deliberately lands 'draft'
-     * for the agent re-promote path; only this wrapper restores. */
-    char *status = NULL, *prev = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT status, prev_extension_name FROM channels WHERE name='telegram'",
-            -1, &s, NULL) == SQLITE_OK) {
-        if (sqlite3_step(s) == SQLITE_ROW) {
-            const char *v = (const char *)sqlite3_column_text(s, 0);
-            status = strdup(v ? v : "draft");
-            v = (const char *)sqlite3_column_text(s, 1);
-            if (v) prev = strdup(v);
+    char *err = NULL;
+    if (rc == 0) rc = extension_install(db, staging, "system", &err);
+    if (rc != 0)
+        LOG_ERROR_("builtin extension '%s' install failed: %s",
+                   b->name, err ? err : "write failed");
+    free(err);
+
+    /* Cleanup: unlink each file, then walk its parent dirs up to the
+     * staging root (rmdir fails harmlessly on non-empty). */
+    for (size_t i = 0; i < b->nfiles; i++) {
+        char fp[3*PATH_MAX];
+        snprintf(fp, sizeof(fp), "%s/%s", staging, b->files[i].rel);
+        unlink(fp);
+        char *sl;
+        while ((sl = strrchr(fp, '/')) && (size_t)(sl - fp) > strlen(staging)) {
+            *sl = '\0';
+            rmdir(fp);
         }
-        sqlite3_finalize(s);
     }
+    rmdir(staging);
+
+    if (rc == 0) {
+        sqlite3_stmt *s;
+        if (sqlite3_prepare_v2(db,
+                "UPDATE extensions SET published=1 WHERE name=?1",
+                -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, b->name, -1, SQLITE_STATIC);
+            sqlite3_step(s);
+            sqlite3_finalize(s);
+        }
+    }
+    return rc;
+}
+
+int extension_install_builtin(sqlite3 *db, const char *db_path) {
+    if (!db || !db_path) return -1;
 
     char base[PATH_MAX];
     snprintf(base, sizeof(base), "%s", db_path);
     char *sl = strrchr(base, '/');
     if (sl) *sl = '\0';
-    else { free(status); free(prev); return -1; }
+    else return -1;
 
-    /* Stage the bundle, then install: the store dir is the bundle's final
-     * home, so installing from a sibling staging dir avoids copy_tree
-     * src==dst. Bundle code ships in the binary; the files on disk are a
-     * cache, rewritten on every start so a binary upgrade can't leave a
-     * stale template running against a newer C loop. */
-    char staging[2*PATH_MAX];
-    snprintf(staging, sizeof(staging), "%s/extensions/.telegram.staging", base);
-    if (util_mkdir_p(staging) != 0) { free(status); free(prev); return -1; }
+    static const BuiltinFile telegram_files[] = {
+        { "channel.qjs",    TPL_CHANNEL_TELEGRAM_QJS },
+        { "telegram.json",  TPL_CHANNEL_TELEGRAM_JSON },
+        { "extension.json", TPL_CHANNEL_TELEGRAM_MANIFEST_JSON },
+    };
+    static const BuiltinFile docs_files[] = {
+        { "extension.json", TPL_DOCS_MANIFEST_JSON },
+        { "skills/configuring-cclaw/SKILL.md",    TPL_DOCS_CONFIGURING_CCLAW_MD },
+        { "skills/extending-cclaw/SKILL.md",      TPL_DOCS_EXTENDING_CCLAW_MD },
+        { "skills/cclaw-agents/SKILL.md",         TPL_DOCS_CCLAW_AGENTS_MD },
+        { "skills/cclaw-channels/SKILL.md",       TPL_DOCS_CCLAW_CHANNELS_MD },
+        { "skills/cclaw-secrets-memory/SKILL.md", TPL_DOCS_CCLAW_SECRETS_MEMORY_MD },
+    };
 
-    char fp_js[3*PATH_MAX], fp_json[3*PATH_MAX], fp_manifest[3*PATH_MAX];
-    snprintf(fp_js, sizeof(fp_js), "%s/channel.qjs", staging);
-    snprintf(fp_json, sizeof(fp_json), "%s/telegram.json", staging);
-    snprintf(fp_manifest, sizeof(fp_manifest), "%s/extension.json", staging);
     int rc = 0;
-    rc |= write_text_file(fp_js, TPL_CHANNEL_TELEGRAM_QJS);
-    rc |= write_text_file(fp_json, TPL_CHANNEL_TELEGRAM_JSON);
-    rc |= write_text_file(fp_manifest, TPL_CHANNEL_TELEGRAM_MANIFEST_JSON);
+    sqlite3_stmt *s;
 
-    char *err = NULL;
-    if (rc == 0) rc = extension_install(db, staging, "system", &err);
-    if (rc != 0)
-        LOG_ERROR_("builtin extension install failed: %s", err ? err : "write failed");
-    free(err);
-    unlink(fp_js); unlink(fp_json); unlink(fp_manifest);
-    rmdir(staging);
-
-    if (rc == 0) {
-        sqlite3_exec(db, "UPDATE extensions SET published=1 WHERE name='telegram'",
-                     NULL, NULL, NULL);
-        /* Builtin bundles are shipped code, already past the trust gate:
-         * a fresh install is born trust-'active'. Whether it *runs* is the
-         * separate telegram.enabled config key (specs/config.md) — trust
-         * says "may this code run", never "should it". A restart restores
-         * whatever status the channel had before the reinstall. */
+    /* ── telegram (channel: needs the status save/restore dance) ── */
+    if (!builtin_row_foreign(db, "telegram")) {
+        /* Capture channel status + revert target so a restart doesn't demote
+         * an active channel — install's INSERT OR REPLACE deliberately lands
+         * 'draft' for the agent re-promote path; only this wrapper restores. */
+        char *status = NULL, *prev = NULL;
         if (sqlite3_prepare_v2(db,
-                "UPDATE channels SET status=?1, prev_extension_name=?2 "
-                "WHERE name='telegram'", -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, status ? status : "active", -1, SQLITE_STATIC);
-            if (prev) sqlite3_bind_text(s, 2, prev, -1, SQLITE_STATIC);
-            sqlite3_step(s);
+                "SELECT status, prev_extension_name FROM channels WHERE name='telegram'",
+                -1, &s, NULL) == SQLITE_OK) {
+            if (sqlite3_step(s) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(s, 0);
+                status = strdup(v ? v : "draft");
+                v = (const char *)sqlite3_column_text(s, 1);
+                if (v) prev = strdup(v);
+            }
             sqlite3_finalize(s);
         }
+
+        BuiltinBundle tg = { "telegram", telegram_files,
+                             sizeof(telegram_files)/sizeof(*telegram_files) };
+        int trc = builtin_stage_install(db, base, &tg);
+        if (trc == 0) {
+            /* Builtin bundles are shipped code, already past the trust gate:
+             * a fresh install is born trust-'active'. Whether it *runs* is the
+             * separate telegram.enabled config key (specs/config.md) — trust
+             * says "may this code run", never "should it". A restart restores
+             * whatever status the channel had before the reinstall. */
+            if (sqlite3_prepare_v2(db,
+                    "UPDATE channels SET status=?1, prev_extension_name=?2 "
+                    "WHERE name='telegram'", -1, &s, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(s, 1, status ? status : "active", -1, SQLITE_STATIC);
+                if (prev) sqlite3_bind_text(s, 2, prev, -1, SQLITE_STATIC);
+                sqlite3_step(s);
+                sqlite3_finalize(s);
+            }
+        }
+        free(status); free(prev);
+        rc |= trc;
     }
-    free(status); free(prev);
+
+    /* ── cclaw-docs (skills-only self-documentation) ── */
+    if (!builtin_row_foreign(db, "cclaw-docs")) {
+        BuiltinBundle docs = { "cclaw-docs", docs_files,
+                               sizeof(docs_files)/sizeof(*docs_files) };
+        int drc = builtin_stage_install(db, base, &docs);
+        if (drc == 0) {
+            /* Backfill: agents created before this build get the docs too;
+             * agent_definition_apply handles new agents via
+             * agent_default_extensions. Detachable per-agent like any
+             * extension — but a detach is a DELETE, which this INSERT OR
+             * IGNORE would undo on restart, so respect an explicit opt-out
+             * recorded as enabled=0 instead. */
+            sqlite3_exec(db,
+                "INSERT OR IGNORE INTO agent_extensions(agent_name, extension_name, enabled)"
+                " SELECT name, 'cclaw-docs', 1 FROM agents",
+                NULL, NULL, NULL);
+        }
+        rc |= drc;
+    }
+
     return rc;
 }
 #if defined(__GNUC__) && !defined(__clang__)

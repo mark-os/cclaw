@@ -511,5 +511,5 @@ skill discovery in `src/skills.c`).
 
 Approval-gating of `extension_promote` with the enumerated contents ("adds
 N tools / hooks / skills / config keys / agents") in the approval prompt,
-and the `agents[]` component, are specified in
-[self-configuration.md](self-configuration.md) (phase 3 of that effort).
+and the `agents[]` component, are implemented — see
+[self-configuration.md](self-configuration.md).

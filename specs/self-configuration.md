@@ -187,11 +187,13 @@ extensions** (attached + enabled) and **Agent roster** (name + description)
 
 ## Implementation status
 
-Phased; each phase lands complete with tests:
+All five phases are implemented:
 
-1. `set_config` action — implemented with this spec.
-2. `agent_definition_apply` + real `create_agent`; `configure_channel`
-   deleted.
-3. `agents[]` manifest component + promote enumeration.
-4. config.md implementation.
-5. `cclaw-docs` builtin + navigation sections.
+1. `set_config` action (`src/tool_request_config.c`).
+2. `agent_definition_apply` (`src/agent_define.c`) + real `create_agent`;
+   `configure_channel` deleted.
+3. `agents[]` manifest component + promote enumeration
+   (`src/extension_manifest.c`, `src/tool_extension.c`).
+4. config.md implementation (env layer, secret keys, launch gate).
+5. `cclaw-docs` builtin skills extension (`templates/docs_*.md`, installed by
+   `extension_install_builtin`) + search_config extension/roster sections.

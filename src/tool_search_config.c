@@ -140,7 +140,7 @@ static char *handler(const char *arguments, void *user_data) {
     buf_appendf(&out, "\n## Global config (value [override|default] — description)\n");
     rc = sqlite3_prepare_v2(ctx->db,
         "SELECT key, COALESCE(value, default_value),"
-        "       (value IS NOT NULL), COALESCE(description,'')"
+        "       (value IS NOT NULL), COALESCE(description,''), COALESCE(secret,0)"
         " FROM config"
         " WHERE (?1 IS NULL OR key LIKE '%'||?1||'%' OR description LIKE '%'||?1||'%')"
         " ORDER BY key", -1, &st, NULL);
@@ -154,13 +154,54 @@ static char *handler(const char *arguments, void *user_data) {
             const char *val = (const char *)sqlite3_column_text(st, 1);
             int overridden = sqlite3_column_int(st, 2);
             const char *desc = (const char *)sqlite3_column_text(st, 3);
+            if (sqlite3_column_int(st, 4)) {
+                buf_appendf(&out, "%s = (secret, env/secret-store only) — %s\n",
+                            key, desc);
+                continue;
+            }
             buf_appendf(&out, "%s = %s [%s] — %s\n", key, val ? val : "",
                         overridden ? "override" : "default", desc);
         }
         sqlite3_finalize(st);
     }
 
-    /* Section 4: usage hint */
+    /* Section 4: attached extensions — what this agent has loaded. */
+    buf_appendf(&out, "\n## Your extensions (attached)\n");
+    rc = sqlite3_prepare_v2(ctx->db,
+        "SELECT e.name, ae.enabled, COALESCE(e.published,0)"
+        " FROM agent_extensions ae JOIN extensions e ON e.name=ae.extension_name"
+        " WHERE ae.agent_name=?1 ORDER BY e.name", -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
+        int any = 0;
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            any = 1;
+            buf_appendf(&out, "%s [%s%s]\n",
+                        sqlite3_column_text(st, 0),
+                        sqlite3_column_int(st, 1) ? "enabled" : "disabled",
+                        sqlite3_column_int(st, 2) ? ", published" : "");
+        }
+        sqlite3_finalize(st);
+        if (!any) buf_appendf(&out, "(none)\n");
+    }
+
+    /* Section 5: agent roster — who exists, for launch_agent/create_agent
+     * decisions (check before creating a duplicate). */
+    buf_appendf(&out, "\n## Agent roster\n");
+    rc = sqlite3_prepare_v2(ctx->db,
+        "SELECT name, sandbox_profile, COALESCE(description,'')"
+        " FROM agents ORDER BY name", -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            buf_appendf(&out, "%s [%s] — %s\n",
+                        sqlite3_column_text(st, 0),
+                        sqlite3_column_text(st, 1),
+                        sqlite3_column_text(st, 2));
+        }
+        sqlite3_finalize(st);
+    }
+
+    /* Section 6: usage hint */
     buf_appendf(&out,
         "\n## Requesting changes (use the request_config tool)\n"
         "- grant a tool:  {\"action\":\"grant_tool\",\"tool\":\"<name>\"}\n"

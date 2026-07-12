@@ -112,9 +112,10 @@ promoted by an agent), the child is capped on both axes independently:
 
 `creator == NULL` means operator (disk seed, CLI): no caps.
 
-Approval is still required on top of the caps: `create_agent` sits in
-`agent_approval_tools` (approval_mode `always`), parks like `request_config`,
-and the approval summary enumerates what is being created: profile, N tools,
+Approval is still required on top of the caps: `create_agent` parks its own
+apply-approval like `request_config` (it is deliberately *not* in
+`agent_approval_tools` — a standing approval_mode would double-prompt), and
+the approval summary enumerates what is being created: profile, N tools,
 M hosts, extensions, whether cloned. Eager validation happens at request
 time — a definition that would fail caps or parse never parks.
 

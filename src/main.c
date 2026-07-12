@@ -22,6 +22,7 @@
 #include "tool_js.h"
 #include "qjs_helpers.h"
 #include "agent_config.h"
+#include "agent_define.h"
 #include "skills.h"
 #include "agent_setup.h"
 #include "hook_dispatch.h"
@@ -731,6 +732,10 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             RequestConfigCtx *rctx = (RequestConfigCtx *)te->user_data;
             rctx->session_id = session_id;
             rctx->current_tool_call_id = tc->call_id;
+        } else if (te->user_data == &g_tool_setup->bootstrap_ctx) {
+            ToolBootstrapCtx *bctx = (ToolBootstrapCtx *)te->user_data;
+            bctx->session_id = session_id;
+            bctx->current_tool_call_id = tc->call_id;
         }
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
@@ -747,7 +752,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
              * a serial tool would stop and wait (0). */
             return tool_is_parallel_safe(tc->name) ? 3 : 0;
         }
-        if (!result && strcmp(tc->name, "request_config") == 0) {
+        if (!result && (strcmp(tc->name, "request_config") == 0 ||
+                        strcmp(tc->name, "create_agent") == 0)) {
             /* Approval gate: the session is parked in awaiting_approval; the
              * tool_call stays pending until resolve_approval writes the result. */
             handle_approval_park(session_id);
@@ -1620,6 +1626,14 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         if (k && v && config_set(g_db, k, v) != 0)
             LOG_WARN_("set_config apply failed key=%s", k);
         tool_parse_free(&ta);
+    } else if (strcmp(a->action, "create_agent") == 0) {
+        char *cerr = NULL;
+        const char *adir = g_tool_setup ? g_tool_setup->req_cfg_ctx.agents_dir : NULL;
+        if (agent_definition_apply(g_db, a->args_json, agent, adir, &cerr) != 0) {
+            LOG_WARN_("create_agent apply failed: %s", cerr ? cerr : "?");
+            *rename_failed = 1; /* generic apply-failed: error result, no grant */
+        }
+        free(cerr);
     } else if (strcmp(a->action, "rename_agent") == 0) {
         ToolArgs ta; tool_parse(a->args_json, &ta);
         const char *nn = targ_str(&ta, "name");
@@ -1827,7 +1841,8 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     /* Build tool result message */
     char result_buf[256];
     if (rename_failed)
-        snprintf(result_buf, sizeof(result_buf), "error: rename failed, rolled back");
+        snprintf(result_buf, sizeof(result_buf), "error: %s failed, rolled back",
+                 a->action ? a->action : "apply");
     else if (decision == APPROVAL_ALWAYS)
         snprintf(result_buf, sizeof(result_buf), "approved: %s", a->action);
     else
@@ -1880,6 +1895,36 @@ static void format_approval_summary(const Approval *a, char *buf, size_t buflen)
         } else {
             snprintf(buf, buflen, "%s", a->action ? a->action : "?");
         }
+    } else if (a->tool_name && strcmp(a->tool_name, "create_agent") == 0) {
+        /* Enumerate what the definition creates so the approver sees the
+         * blast radius, not raw JSON. */
+        const char *nm = targ_str(&ta, "name");
+        const char *prof = targ_str(&ta, "sandbox_profile");
+        const char *clone = targ_str(&ta, "clone_from");
+        int ntools = 0, nhosts = 0, npaths = 0, nexts = 0;
+        sqlite3_stmt *cs;
+        if (a->args_json && sqlite3_prepare_v2(g_db,
+                "SELECT COALESCE(json_array_length(?1,'$.grants.tools'),0),"
+                "       COALESCE(json_array_length(?1,'$.grants.hosts'),0),"
+                "       COALESCE(json_array_length(?1,'$.grants.read_paths'),0)"
+                "        + COALESCE(json_array_length(?1,'$.grants.write_paths'),0),"
+                "       COALESCE(json_array_length(?1,'$.extensions'),0)",
+                -1, &cs, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(cs, 1, a->args_json, -1, SQLITE_STATIC);
+            if (sqlite3_step(cs) == SQLITE_ROW) {
+                ntools = sqlite3_column_int(cs, 0);
+                nhosts = sqlite3_column_int(cs, 1);
+                npaths = sqlite3_column_int(cs, 2);
+                nexts = sqlite3_column_int(cs, 3);
+            }
+            sqlite3_finalize(cs);
+        }
+        snprintf(buf, buflen,
+                 "create_agent: %s (profile %s%s%s, +%d tools, %d hosts, "
+                 "%d paths, %d extensions)",
+                 nm ? nm : "?", prof ? prof : "default",
+                 clone ? ", clone of " : "", clone ? clone : "",
+                 ntools, nhosts, npaths, nexts);
     } else {
         const char *salient = targ_str(&ta, "command");
         if (!salient) salient = targ_str(&ta, "url");

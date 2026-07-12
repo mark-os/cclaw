@@ -166,133 +166,47 @@ static int test_configure_missing_key(void) {
     return 0;
 }
 
-/* configure_channel telegram returns sentinel */
-static int test_configure_channel_telegram(void) {
+/* create_agent parks an approval carrying the full definition */
+static int test_create_agent_parks(void) {
     sqlite3 *db = setup_db();
+    db_agent_upsert(db, "Bootstrap", NULL, NULL);
+    int64_t sid = session_create(db, "t", "Bootstrap", -1, 0);
+    assert(sid > 0);
     ToolRegistry reg;
     tools_init(&reg);
-    ToolBootstrapCtx ctx = {.db = db};
-    assert(tool_configure_channel_register(&reg, &ctx) == 0);
-
-    ToolEntry *e = tools_lookup(&reg, "configure_channel");
-    assert(e != NULL);
-
-    char *result = e->handler(
-        "{\"channel_type\":\"telegram\",\"bot_token\":\"123456:ABC-DEF\"}",
-        e->user_data);
-    assert(result != NULL);
-    assert(strstr(result, "config applied:") != NULL);
-    assert(strstr(result, "configure_channel") != NULL);
-    free(result);
-
-    /* Tool does NOT write token — value still empty default */
-
-    tools_free(&reg);
-    db_close(db);
-    cleanup();
-    printf("  PASS: test_configure_channel_telegram\n");
-    return 0;
-}
-
-/* configure_channel telegram requires bot_token */
-static int test_configure_channel_telegram_no_token(void) {
-    sqlite3 *db = setup_db();
-    ToolRegistry reg;
-    tools_init(&reg);
-    ToolBootstrapCtx ctx = {.db = db};
-    tool_configure_channel_register(&reg, &ctx);
-
-    ToolEntry *e = tools_lookup(&reg, "configure_channel");
-    char *result = e->handler("{\"channel_type\":\"telegram\"}", e->user_data);
-    assert(result != NULL);
-    assert(strstr(result, "error") != NULL);
-    assert(strstr(result, "bot_token") != NULL);
-    free(result);
-
-    tools_free(&reg);
-    db_close(db);
-    cleanup();
-    printf("  PASS: test_configure_channel_telegram_no_token\n");
-    return 0;
-}
-
-/* configure_channel cli returns sentinel */
-static int test_configure_channel_cli(void) {
-    sqlite3 *db = setup_db();
-    ToolRegistry reg;
-    tools_init(&reg);
-    ToolBootstrapCtx ctx = {.db = db};
-    tool_configure_channel_register(&reg, &ctx);
-
-    ToolEntry *e = tools_lookup(&reg, "configure_channel");
-    char *result = e->handler("{\"channel_type\":\"cli\"}", e->user_data);
-    assert(result != NULL);
-    assert(strstr(result, "config applied:") != NULL);
-    assert(strstr(result, "configure_channel") != NULL);
-    free(result);
-
-    tools_free(&reg);
-    db_close(db);
-    cleanup();
-    printf("  PASS: test_configure_channel_cli\n");
-    return 0;
-}
-
-/* configure_channel unknown type returns error */
-static int test_configure_channel_unknown(void) {
-    sqlite3 *db = setup_db();
-    ToolRegistry reg;
-    tools_init(&reg);
-    ToolBootstrapCtx ctx = {.db = db};
-    tool_configure_channel_register(&reg, &ctx);
-
-    /* Custom type without binary_path → error */
-    ToolEntry *e = tools_lookup(&reg, "configure_channel");
-    char *result = e->handler("{\"channel_type\":\"whatsapp\"}", e->user_data);
-    assert(result != NULL);
-    assert(strstr(result, "error") != NULL);
-    assert(strstr(result, "binary_path") != NULL);
-    free(result);
-
-    /* Custom type with binary_path → sentinel (success) */
-    result = e->handler("{\"channel_type\":\"whatsapp\",\"binary_path\":\"/usr/bin/wa\"}", e->user_data);
-    assert(result != NULL);
-    assert(strstr(result, "config applied:") != NULL);
-    free(result);
-
-    tools_free(&reg);
-    db_close(db);
-    cleanup();
-    printf("  PASS: test_configure_channel_unknown\n");
-    return 0;
-}
-
-/* create_agent returns sentinel (daemon handles after reap) */
-static int test_create_agent_basic(void) {
-    sqlite3 *db = setup_db();
-    ToolRegistry reg;
-    tools_init(&reg);
-    ToolBootstrapCtx ctx = {.db = db, .session_id = 1, .agent_name = "Bootstrap"};
+    ToolBootstrapCtx ctx = {.db = db, .session_id = sid, .agent_name = "Bootstrap",
+                            .current_tool_call_id = "call_1"};
     assert(tool_create_agent_register(&reg, &ctx) == 0);
 
     ToolEntry *e = tools_lookup(&reg, "create_agent");
     assert(e != NULL);
 
     char *result = e->handler(
-        "{\"name\":\"Helper\",\"model\":\"deepseek/deepseek-v4-flash\","
-        "\"system_prompt\":\"You are a helpful assistant.\","
-        "\"tools\":[\"shell_exec\",\"file_read\",\"file_write\"],"
-        "\"allowed_hosts\":[\"api.example.com\"]}",
+        "{\"name\":\"Helper\",\"description\":\"helps\","
+        "\"system_prompt\":\"You are a helpful assistant.\"}",
         e->user_data);
-    assert(result != NULL);
-    assert(strstr(result, "config applied:") != NULL);
-    assert(strstr(result, "create_agent") != NULL);
-    free(result);
+    assert(result == NULL); /* parked */
+
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT json_extract(args_json,'$.name') FROM approvals"
+        " WHERE session_id=?1 AND tool_name='create_agent' AND state='pending'",
+        -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "Helper") == 0);
+    sqlite3_finalize(s);
+
+    /* Agent must NOT exist yet — creation happens only on approval. */
+    assert(sqlite3_prepare_v2(db, "SELECT 1 FROM agents WHERE name='Helper'",
+                              -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_DONE);
+    sqlite3_finalize(s);
 
     tools_free(&reg);
     db_close(db);
     cleanup();
-    printf("  PASS: test_create_agent_basic\n");
+    printf("  PASS: test_create_agent_parks\n");
     return 0;
 }
 
@@ -359,11 +273,7 @@ int main(void) {
     rc |= test_configure_custom_requires_base_url();
     rc |= test_configure_custom_with_url();
     rc |= test_configure_missing_key();
-    rc |= test_configure_channel_telegram();
-    rc |= test_configure_channel_telegram_no_token();
-    rc |= test_configure_channel_cli();
-    rc |= test_configure_channel_unknown();
-    rc |= test_create_agent_basic();
+    rc |= test_create_agent_parks();
     rc |= test_create_agent_invalid_name();
     rc |= test_create_agent_missing_name();
     return rc;

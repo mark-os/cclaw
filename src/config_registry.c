@@ -51,14 +51,13 @@ static const ConfigDef s_defs[] = {
     { "agent_default_tools",
       "[\"file_read\",\"file_write\",\"js_eval\",\"request_config\","
       "\"search_config\",\"memory_create\",\"memory_add\",\"memory_edit\","
-      "\"memory_delete\",\"configure_provider\",\"configure_channel\","
+      "\"memory_delete\",\"configure_provider\","
       "\"create_agent\",\"extension_promote\",\"extension_publish\","
       "\"extension_attach\",\"extension_list\",\"extension_fork\",\"launch_agent\","
       "\"check_session\",\"secret_create\"]",
       "Baseline tool grants seeded for a newly created agent (JSON array)" },
     { "agent_approval_tools",
-      "[\"extension_promote\",\"extension_publish\",\"configure_provider\","
-      "\"configure_channel\",\"create_agent\"]",
+      "[\"extension_promote\",\"extension_publish\",\"configure_provider\"]",
       "Tools that require human approval (approval_mode='always') when granted" },
     { "health_5xx_threshold", "3",
       "5xx errors within the window before a model is marked degraded" },

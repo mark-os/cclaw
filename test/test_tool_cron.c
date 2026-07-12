@@ -74,8 +74,8 @@ static void test_cron_list_with_jobs(void) {
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
-    cron_add(db, "test_agent", "j1", "0 * * * *", sid, "task1");
-    cron_add(db, "test_agent", "j2", "30 2 * * *", sid, "task2");
+    cron_add(db, "test_agent", "j1", "0 * * * *", 0, 0, sid, "task1");
+    cron_add(db, "test_agent", "j2", "30 2 * * *", 0, 0, sid, "task2");
 
     ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
     char *result = tool_cron_list_handler("{}", &ctx);
@@ -93,7 +93,7 @@ static void test_cron_remove_valid(void) {
     assert(db);
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
-    int64_t jid = cron_add(db, "test_agent", "rm_me", "0 * * * *", sid, "bye");
+    int64_t jid = cron_add(db, "test_agent", "rm_me", "0 * * * *", 0, 0, sid, "bye");
     assert(jid > 0);
 
     ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};

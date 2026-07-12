@@ -4,11 +4,15 @@
 #include <stdint.h>
 #include "sqlite3.h"
 
-/* Cron job record */
+/* Cron job record. Schedule is exactly one of cron_expr (recurring), run_at
+ * (one-shot), interval_s (fixed period). kind: "task" | "heartbeat". */
 typedef struct {
     int64_t id;
     char *name;
-    char *cron_expr;    /* "M H D Mo DoW" — standard 5-field cron */
+    char *cron_expr;    /* "M H D Mo DoW" — standard 5-field cron; "" if unused */
+    int64_t run_at;     /* one-shot fire time (unix ts); 0 if unused */
+    int64_t interval_s; /* fixed period in seconds; 0 if unused */
+    char *kind;         /* "task" | "heartbeat" */
     int64_t session_id;
     char *task;         /* user message to inject */
     int enabled;
@@ -19,9 +23,13 @@ typedef struct {
 /* Execute any due cron jobs now. Called from the main event loop (daemon). */
 void cron_run_due(sqlite3 *db);
 
-/* CRUD — daemon-only management */
+/* CRUD — daemon-only management. Schedule is exactly one of cron_expr
+ * (non-empty), run_at (>0), or interval_s (>0); anything else returns -1.
+ * A min-interval floor (config cron_min_interval_seconds, default 300) is
+ * enforced here on all three schedule types. Always creates kind='task'. */
 int64_t cron_add(sqlite3 *db, const char *agent_name, const char *name,
-                 const char *cron_expr, int64_t session_id, const char *task);
+                 const char *cron_expr, int64_t run_at, int64_t interval_s,
+                 int64_t session_id, const char *task);
 CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count);
 int cron_remove(sqlite3 *db, int64_t job_id);
 void cron_list_free(CronJob *jobs, int count);

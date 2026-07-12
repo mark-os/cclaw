@@ -1,17 +1,20 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_cron.h"
+#include "config_registry.h"
 #include "cron.h"
 #include "tool_parse.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static const char *CRON_SET_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
     "\"name\":{\"type\":\"string\",\"description\":\"Job name\"},"
-    "\"cron_expr\":{\"type\":\"string\",\"description\":\"5-field cron expression (M H D Mo DoW)\"},"
-    "\"task\":{\"type\":\"string\",\"description\":\"Message to inject when triggered\"}"
-    "},\"required\":[\"name\",\"cron_expr\",\"task\"]}";
+    "\"cron_expr\":{\"type\":\"string\",\"description\":\"5-field cron expression (M H D Mo DoW) for a recurring job. Omit if using in_seconds.\"},"
+    "\"in_seconds\":{\"type\":\"integer\",\"description\":\"Delay in seconds from now for a one-shot job that fires once and is then removed. Omit if using cron_expr.\"},"
+    "\"task\":{\"type\":\"string\",\"description\":\"Message to inject into this session when triggered\"}"
+    "},\"required\":[\"name\",\"task\"]}";
 
 static const char *CRON_LIST_PARAMS =
     "{\"type\":\"object\",\"properties\":{}}";
@@ -21,6 +24,17 @@ static const char *CRON_REMOVE_PARAMS =
     "\"id\":{\"type\":\"integer\",\"description\":\"Job ID to remove\"}"
     "},\"required\":[\"id\"]}";
 
+/* Number of jobs a session currently owns (per-session cap check). */
+static int session_job_count(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM cron_jobs WHERE session_id=?",
+                           -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(st, 1, session_id);
+    int n = (sqlite3_step(st) == SQLITE_ROW) ? sqlite3_column_int(st, 0) : -1;
+    sqlite3_finalize(st);
+    return n;
+}
+
 char *tool_cron_set_handler(const char *arguments, void *user_data) {
     ToolCronCtx *ctx = (ToolCronCtx *)user_data;
     ToolArgs ta;
@@ -29,18 +43,49 @@ char *tool_cron_set_handler(const char *arguments, void *user_data) {
     const char *name = targ_str(&ta, "name");
     const char *expr = targ_str(&ta, "cron_expr");
     const char *task = targ_str(&ta, "task");
+    int in_seconds   = targ_int(&ta, "in_seconds", 0);
 
-    if (!name || !expr || !task) {
+    if (!name || !task) {
         tool_parse_free(&ta);
-        return strdup("error: missing required fields (name, cron_expr, task)");
+        return strdup("error: missing required fields (name, task)");
     }
 
+    /* Exactly one schedule. in_seconds!=0 counts as provided (a non-positive
+     * value is provided-but-invalid; the model must supply a relative delay,
+     * not a raw epoch — the handler computes run_at). */
+    int has_expr    = (expr && expr[0]);
+    int has_seconds = (in_seconds != 0);
+    if (has_expr == has_seconds) {   /* both, or neither */
+        tool_parse_free(&ta);
+        return strdup("error: provide exactly one of cron_expr or in_seconds");
+    }
+    if (has_seconds && in_seconds <= 0) {
+        tool_parse_free(&ta);
+        return strdup("error: in_seconds must be positive");
+    }
+
+    /* Per-session cap — stays at the tool boundary (manifest/heartbeat rows
+     * use session_id=0 and are legitimately operator-shaped). */
+    int cap = config_get_int(ctx->db, "cron_max_jobs_per_session");
+    if (cap > 0) {
+        int n = session_job_count(ctx->db, ctx->session_id);
+        if (n >= cap) {
+            tool_parse_free(&ta);
+            char *e = malloc(96);
+            if (!e) return strdup("error: OOM");
+            snprintf(e, 96, "error: session cron job limit reached (max %d)", cap);
+            return e;
+        }
+    }
+
+    int64_t run_at = has_seconds ? (int64_t)time(NULL) + in_seconds : 0;
     int64_t id = cron_add(ctx->db, ctx->agent_name, name,
-                          expr, 0, 0, ctx->session_id, task);
+                          has_expr ? expr : "", run_at, 0, ctx->session_id, task);
 
     if (id < 0) {
         tool_parse_free(&ta);
-        return strdup("error: invalid cron expression or DB error");
+        return strdup("error: invalid schedule "
+                      "(bad cron_expr, or below the min-interval floor)");
     }
 
     char *result = malloc(128);
@@ -64,14 +109,16 @@ char *tool_cron_list_handler(const char *arguments, void *user_data) {
     if (!buf) { cron_list_free(jobs, count); return strdup("error: OOM"); }
     size_t pos = 0;
 
-    /* Header */
+    /* Header. A blank cron_expr with a future next_run_at reads as a one-shot;
+     * kind surfaces heartbeat rows. */
     pos += (size_t)snprintf(buf + pos, cap - pos,
-        "id|name|cron_expr|task|enabled|next_run_at\n");
+        "id|name|kind|cron_expr|task|enabled|next_run_at\n");
 
     for (int i = 0; i < count; i++) {
-        int n = snprintf(buf + pos, cap - pos, "%lld|%s|%s|%s|%s|%lld\n",
+        int n = snprintf(buf + pos, cap - pos, "%lld|%s|%s|%s|%s|%s|%lld\n",
             (long long)jobs[i].id,
             jobs[i].name ? jobs[i].name : "",
+            jobs[i].kind ? jobs[i].kind : "task",
             jobs[i].cron_expr ? jobs[i].cron_expr : "",
             jobs[i].task ? jobs[i].task : "",
             jobs[i].enabled ? "true" : "false",
@@ -121,7 +168,8 @@ static char *cron_remove_thread_run(sqlite3 *db, const char *agent_name,
 }
 
 int tool_cron_register(ToolRegistry *reg, ToolCronCtx *ctx) {
-    if (tools_register(reg, "cron_set", "Create a scheduled cron job",
+    if (tools_register(reg, "cron_set",
+                       "Schedule a job: recurring (cron_expr) or one-shot (in_seconds)",
                        CRON_SET_PARAMS, tool_cron_set_handler, ctx) != 0)
         return -1;
     if (tools_register(reg, "cron_list", "List cron jobs for this session",

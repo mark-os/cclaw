@@ -2639,6 +2639,8 @@ static void ensure_default_agent(const char *base_dir) {
         }
         /* Seed default tools as grants */
         agent_grant_defaults(g_db, "Assistant");
+        /* Disabled heartbeat pulse row — visible/enable-able in cron_list. */
+        cron_seed_heartbeat(g_db, "Assistant");
         /* default_agent needs no write — 'Assistant' is the registry default */
         /* Seed default memory blocks. Explicitly 'system' placement: identity
          * (who am I / who is the user) belongs in the system prompt, where it

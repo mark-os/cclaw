@@ -395,6 +395,22 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "ALTER TABLE config ADD COLUMN secret INTEGER NOT NULL DEFAULT 0;"
       "ALTER TABLE config ADD COLUMN required INTEGER NOT NULL DEFAULT 0;"
       "DELETE FROM channel_state WHERE key='base_url';" },
+    { 23,
+      /* One scheduler: cron_jobs absorbs one-shots (run_at), fixed periods
+       * (interval_s), and the heartbeat pulse (kind='heartbeat'). heartbeat.c
+       * and its config key are retired — the pulse is now a durable, visible
+       * cron row instead of an invisible thread whose interval lived in a
+       * config string. */
+      "ALTER TABLE cron_jobs ADD COLUMN run_at INTEGER;"
+      "ALTER TABLE cron_jobs ADD COLUMN interval_s INTEGER;"
+      "ALTER TABLE cron_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'task';"
+      /* Seed one disabled heartbeat row per existing agent (cadence 1800s
+       * pre-filled; enabling stays a deliberate act — parity with the old
+       * heartbeat_interval=0 default, but now inspectable in cron_list). */
+      "INSERT INTO cron_jobs (agent_name, name, kind, cron_expr, interval_s,"
+      "                       session_id, task, enabled, next_run_at)"
+      "  SELECT name, 'heartbeat', 'heartbeat', '', 1800, 0, '', 0, 0 FROM agents;"
+      "DELETE FROM config WHERE key='heartbeat_interval';" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

@@ -20,8 +20,6 @@ static const ConfigDef s_defs[] = {
       "Admin dashboard auth token (auto-generated at daemon start; cclaw dashboard prints the URL)" },
     { "max_history_tokens", "0",
       "History token cap per request (0 = derive from context window)" },
-    { "heartbeat_interval", "0",
-      "Daemon heartbeat interval in seconds (0 = disabled)" },
     { "stale_lock_timeout", "300",
       "Seconds before a dead process's session locks are reclaimed" },
     { "cron_min_interval_seconds", "300",

@@ -305,7 +305,6 @@ Config *config_load(sqlite3 *db) {
     cfg->context_window = config_get_int(db, "context_window");
     cfg->max_iterations = config_get_int(db, "max_iterations");
     cfg->max_history_tokens = config_get_int(db, "max_history_tokens");
-    cfg->heartbeat_interval = config_get_int(db, "heartbeat_interval");
     cfg->shell_timeout = config_get_int(db, "shell_timeout");
     cfg->stale_lock_timeout = config_get_int(db, "stale_lock_timeout");
     cfg->token_rate_limit = config_get_int(db, "token_rate_limit");
@@ -325,7 +324,6 @@ Config *config_load(sqlite3 *db) {
     env_override_int(&cfg->web_port, "CCLAW_WEB_PORT");
     env_override_int(&cfg->max_iterations, "CCLAW_MAX_ITERATIONS");
     env_override_int(&cfg->max_history_tokens, "CCLAW_MAX_HISTORY_TOKENS");
-    env_override_int(&cfg->heartbeat_interval, "CCLAW_HEARTBEAT_INTERVAL");
     env_override_int(&cfg->shell_timeout, "CCLAW_SHELL_TIMEOUT");
     env_override_int(&cfg->stale_lock_timeout, "CCLAW_STALE_LOCK_TIMEOUT");
     env_override_int(&cfg->save_reasoning, "CCLAW_SAVE_REASONING");

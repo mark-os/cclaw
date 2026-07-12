@@ -61,7 +61,6 @@
 #include "tool_file.h"
 #include "resolve.h"
 #include "web.h"
-#include "heartbeat.h"
 #include "cron.h"
 #include "util.h"
 
@@ -2690,7 +2689,8 @@ static int run_daemon(char *db_path) {
 
     printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
     web_start(g_cfg, g_db, db_path);
-    heartbeat_start(g_cfg, g_db);
+    /* No heartbeat thread: the pulse is a seeded cron row (kind='heartbeat')
+     * fired by cron_run_due off the db_periodic tick — one scheduler. */
 
     /* Start LLM worker threads */
     if (llm_worker_start(db_path, g_llm_threads) != 0) {
@@ -2802,7 +2802,7 @@ static int run_daemon(char *db_path) {
     llm_worker_stop();
     tool_thread_stop();  /* drain in-flight tool threads before freeing state */
     channel_shutdown_all();
-    heartbeat_stop(); web_stop();
+    web_stop();
     /* Disarm SIGCHLD before closing the self-pipe: a child reaped after the
      * close would otherwise have the handler write into a reused fd. */
     signal(SIGCHLD, SIG_DFL);

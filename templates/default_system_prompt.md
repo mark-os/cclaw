@@ -12,6 +12,11 @@ file_edit: oldText must match exactly and uniquely. Multiple edits in one call a
 ## Execution Bias
 Act in this turn. Continue until done or genuinely blocked.
 Do not finish with a plan when tools can move it forward.
+If you say you will do something later ("I'll check back", "let me look into
+this and get back to you"), that promise means nothing unless you make it
+real: either do it now with a tool, or call cron_set with in_seconds/cron_expr
+so it actually happens. A turn that ends with unstarted intentions and no tool
+call is indistinguishable from doing nothing.
 
 ## Workspace Context
 Current date: {date}

@@ -404,6 +404,75 @@ static void test_install_builtin(void) {
     printf("  PASS test_install_builtin\n");
 }
 
+/* agents[] component: validation, install-creates-agent, skip-existing,
+ * caps refusal (specs/self-configuration.md). */
+static void test_manifest_agents(void) {
+    unlink(TEST_DB);
+    setup_bundle();
+    write_file(BUNDLE "/scout.md", "You scout the weather.\n");
+    write_file(BUNDLE "/extension.json",
+        "{ \"name\": \"nws\","
+        "  \"agents\": [ { \"name\": \"WxScout\", \"description\": \"weather agent\","
+        "    \"sandbox_profile\": \"restricted\","
+        "    \"system_prompt_file\": \"scout.md\","
+        "    \"grants\": { \"tools\": [\"web_fetch\"] } } ] }");
+    sqlite3 *db = test_db_open(TEST_DB);
+    assert(db);
+    db_agent_upsert(db, "Owner", NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value)"
+                     " VALUES('Owner','tool','web_fetch')", NULL, NULL, NULL);
+
+    /* Validation failures: bad name, bad profile, missing prompt file. */
+    char *err = NULL;
+    write_file(BUNDLE "/extension.json",
+        "{\"name\":\"nws\",\"agents\":[{\"name\":\"lower\"}]}");
+    assert(extension_manifest_validate(BUNDLE, &err) != 0);
+    assert(err && strstr(err, "PascalCase")); free(err); err = NULL;
+    write_file(BUNDLE "/extension.json",
+        "{\"name\":\"nws\",\"agents\":[{\"name\":\"Ok\",\"sandbox_profile\":\"ultra\"}]}");
+    assert(extension_manifest_validate(BUNDLE, &err) != 0);
+    assert(err && strstr(err, "sandbox_profile")); free(err); err = NULL;
+    write_file(BUNDLE "/extension.json",
+        "{\"name\":\"nws\",\"agents\":[{\"name\":\"Ok\",\"system_prompt_file\":\"ghost.md\"}]}");
+    assert(extension_manifest_validate(BUNDLE, &err) != 0);
+    assert(err && strstr(err, "system_prompt_file")); free(err); err = NULL;
+
+    /* Caps refusal: owner lacks shell_exec. */
+    write_file(BUNDLE "/extension.json",
+        "{ \"name\": \"nws\", \"agents\": [ { \"name\": \"WxScout\","
+        "  \"grants\": { \"tools\": [\"shell_exec\"] } } ] }");
+    assert(extension_install(db, BUNDLE, "Owner", &err) != 0);
+    assert(err && strstr(err, "exceeds creator")); free(err); err = NULL;
+
+    /* Good install creates the agent with resolved prompt + capped grants. */
+    write_file(BUNDLE "/extension.json",
+        "{ \"name\": \"nws\","
+        "  \"agents\": [ { \"name\": \"WxScout\", \"description\": \"weather agent\","
+        "    \"sandbox_profile\": \"restricted\","
+        "    \"system_prompt_file\": \"scout.md\","
+        "    \"grants\": { \"tools\": [\"web_fetch\"] } } ] }");
+    int rc = extension_install(db, BUNDLE, "Owner", &err);
+    if (rc != 0) fprintf(stderr, "install error: %s\n", err ? err : "?");
+    assert(rc == 0);
+    char *v = q1(db, "SELECT system_prompt FROM agents WHERE name='WxScout'");
+    assert(v && strstr(v, "You scout the weather")); free(v);
+    v = q1(db, "SELECT sandbox_profile FROM agents WHERE name='WxScout'");
+    assert(v && strcmp(v, "restricted") == 0); free(v);
+    assert(qint(db, "SELECT COUNT(*) FROM grants WHERE agent_name='WxScout'"
+                    " AND kind='tool' AND value='web_fetch'") == 1);
+
+    /* Re-install: existing agent skipped, not overwritten. */
+    sqlite3_exec(db, "UPDATE agents SET description='operator edit'"
+                     " WHERE name='WxScout'", NULL, NULL, NULL);
+    assert(extension_install(db, BUNDLE, "Owner", &err) == 0);
+    v = q1(db, "SELECT description FROM agents WHERE name='WxScout'");
+    assert(v && strcmp(v, "operator edit") == 0); free(v);
+    assert(qint(db, "SELECT COUNT(*) FROM agents WHERE name='WxScout'") == 1);
+
+    db_close(db);
+    printf("  PASS test_manifest_agents\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_extension_manifest:\n");
@@ -416,6 +485,7 @@ int main(void) {
     test_extension_fork_roundtrip();
     test_install_refuses_owner_takeover();
     test_install_builtin();
+    test_manifest_agents();
     /* cleanup */
     unlink(TEST_DB);
     rm_rf("/tmp/test_ext_manifest_bundle");

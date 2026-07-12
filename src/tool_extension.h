@@ -18,10 +18,16 @@ typedef struct {
     sqlite3 *db;
     const char *agent_name;   /* promoter/owner / attaching agent */
     const char *workspace;    /* drafts live in <workspace>/extensions/<name> */
+    int64_t session_id;                /* set by dispatcher before each call */
+    const char *current_tool_call_id;  /* set by dispatcher before each call */
 } ToolExtensionCtx;
 
 /* Register extension_promote / extension_publish / extension_attach /
  * extension_list against reg. Returns 0 on success. */
 int tool_extension_register(ToolRegistry *reg, ToolExtensionCtx *ctx);
+
+/* "adds N tools, M hooks, ..." enumeration of a bundle's manifest for the
+ * promote approval prompt. Heap; caller frees. */
+char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir);
 
 #endif

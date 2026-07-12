@@ -398,7 +398,7 @@ static void test_schema_upgrade_from_v11(void) {
         "  ('m-def','p','vendor/def',128000),"      /* old default → NULLed */
         "  ('m-big','p','vendor/big',200000);"      /* explicit → kept */
         "INSERT INTO grants(agent_name, kind, value, approval_mode) VALUES"
-        "  ('a1','tool','extension_promote','silent')," /* dangerous → 'always' */
+        "  ('a1','tool','extension_promote','silent')," /* v13 → 'always', v21 → back to 'silent' (self-parking tool) */
         "  ('a1','tool','shell_exec','silent');"        /* ordinary → untouched */
         "INSERT INTO channel_outbox(channel_name, session_id, payload, deliver_plain) VALUES"
         "  ('tg', 1, '{}', 0),"                         /* auto → mode 0 */
@@ -421,8 +421,9 @@ static void test_schema_upgrade_from_v11(void) {
     assert(v && strcmp(v, "null") == 0); free(v);
     v = query_text(db, "SELECT context_window FROM models WHERE id='m-big'");
     assert(v && strcmp(v, "200000") == 0); free(v);
+    /* v13 flipped it to 'always'; v21 flips back — promote parks itself now */
     v = query_text(db, "SELECT approval_mode FROM grants WHERE value='extension_promote'");
-    assert(v && strcmp(v, "always") == 0); free(v);
+    assert(v && strcmp(v, "silent") == 0); free(v);
     v = query_text(db, "SELECT approval_mode FROM grants WHERE value='shell_exec'");
     assert(v && strcmp(v, "silent") == 0); free(v);
     v = query_text(db, "SELECT deliver_mode FROM channel_outbox WHERE session_id=1");

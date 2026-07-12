@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "extension_manifest.h"
+#include "agent_define.h"
 #include "cron.h"
+#include "validate.h"
 #include "log.h"
 #include "skills.h"
 #include "templates.h"
@@ -223,6 +225,53 @@ static int check_skills(sqlite3 *db, const char *manifest, const char *bundle_di
     return rc;
 }
 
+/* Verify every $.agents[] entry is a plausible agent definition: PascalCase
+ * name, known sandbox_profile, and an existing bundle-relative
+ * system_prompt_file if declared. DB-dependent caps (grants subset, extension
+ * visibility) are enforced at install time by agent_definition_validate. */
+static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_dir,
+                        char **err_out) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_extract(value,'$.name'),"
+            "       json_extract(value,'$.sandbox_profile'),"
+            "       json_extract(value,'$.system_prompt_file') "
+            "FROM json_each(COALESCE(json_extract(?1,'$.agents'),'[]'))",
+            -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+    int rc = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *n = (const char *)sqlite3_column_text(st, 0);
+        const char *p = (const char *)sqlite3_column_text(st, 1);
+        const char *f = (const char *)sqlite3_column_text(st, 2);
+        if (!n || !is_valid_agent_name(n)) {
+            xerr(err_out, "agents[] entry needs a PascalCase 'name'");
+            rc = -1; break;
+        }
+        if (p && strcmp(p, "host") != 0 && strcmp(p, "trusted") != 0 &&
+            strcmp(p, "standard") != 0 && strcmp(p, "restricted") != 0) {
+            xerr(err_out, "agents[] sandbox_profile must be host|trusted|standard|restricted");
+            rc = -1; break;
+        }
+        if (f && f[0]) {
+            if (f[0] == '/' || strstr(f, "..")) {
+                xerr(err_out, "system_prompt_file must be a bundle-relative path");
+                rc = -1; break;
+            }
+            char fp[PATH_MAX];
+            snprintf(fp, sizeof(fp), "%s/%s", bundle_dir, f);
+            struct stat sb;
+            if (stat(fp, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+                xerr(err_out, "agents[] system_prompt_file missing from bundle");
+                rc = -1; break;
+            }
+        }
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
 int extension_manifest_validate(const char *bundle_dir, char **err_out) {
     if (err_out) *err_out = NULL;
     if (!bundle_dir) { xerr(err_out, "no bundle dir"); return -1; }
@@ -267,6 +316,7 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
     if (check_handlers(jdb, manifest, bundle_dir, "'$.scripts'", err_out) != 0) goto out;
     if (check_config(jdb, manifest, err_out) != 0) goto out;
     if (check_skills(jdb, manifest, bundle_dir, err_out) != 0) goto out;
+    if (check_agents(jdb, manifest, bundle_dir, err_out) != 0) goto out;
     /* channel is a single object, not an array — wrap so check_handlers sees an array */
     {
         char *ch = json_text(jdb, manifest, "'$.channel'");
@@ -477,6 +527,78 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
                          "Run the scheduled extension script '%s': call js_eval with "
                          "filename '%s/%s'.", sname, store, handler);
                 cron_add(db, owner_agent, sname, sched, 0, task);
+            }
+            sqlite3_finalize(st);
+        }
+    }
+
+    /* agents[]: apply each definition through the shared path
+     * (specs/self-configuration.md). Caps are enforced against the promoting
+     * agent; the builtin owner 'system' is the operator (no caps). An agent
+     * name that already exists is skipped, never overwritten — first-come,
+     * which also keeps re-promote idempotent. Runs outside the txn because
+     * agent_definition_apply owns its own transaction. */
+    if (rc == 0) {
+        const char *creator =
+            (owner_agent && strcmp(owner_agent, "system") != 0) ? owner_agent : NULL;
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT json(value), json_extract(value,'$.name'), "
+                "       json_extract(value,'$.system_prompt_file') "
+                "FROM json_each(COALESCE(json_extract(?1,'$.agents'),'[]'))",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+            while (rc == 0 && sqlite3_step(st) == SQLITE_ROW) {
+                const char *def = (const char *)sqlite3_column_text(st, 0);
+                const char *aname = (const char *)sqlite3_column_text(st, 1);
+                const char *pfile = (const char *)sqlite3_column_text(st, 2);
+                if (!def || !aname) continue;
+                sqlite3_stmt *ck;
+                int exists = 0;
+                if (sqlite3_prepare_v2(db, "SELECT 1 FROM agents WHERE name=?1",
+                                       -1, &ck, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(ck, 1, aname, -1, SQLITE_STATIC);
+                    exists = (sqlite3_step(ck) == SQLITE_ROW);
+                    sqlite3_finalize(ck);
+                }
+                if (exists) continue;
+                /* Resolve system_prompt_file from the installed store copy. */
+                char *resolved = NULL;
+                if (pfile && pfile[0]) {
+                    char fp[2*PATH_MAX];
+                    snprintf(fp, sizeof(fp), "%s/%s", store, pfile);
+                    char *prompt = util_read_file(fp, NULL);
+                    sqlite3_stmt *js;
+                    if (prompt && sqlite3_prepare_v2(db,
+                            "SELECT json_remove(json_set(?1,'$.system_prompt',"
+                            " COALESCE(json_extract(?1,'$.system_prompt'),?2)),"
+                            " '$.system_prompt_file')", -1, &js, NULL) == SQLITE_OK) {
+                        sqlite3_bind_text(js, 1, def, -1, SQLITE_STATIC);
+                        sqlite3_bind_text(js, 2, prompt, -1, SQLITE_STATIC);
+                        if (sqlite3_step(js) == SQLITE_ROW) {
+                            const char *v = (const char *)sqlite3_column_text(js, 0);
+                            if (v) resolved = strdup(v);
+                        }
+                        sqlite3_finalize(js);
+                    }
+                    free(prompt);
+                }
+                char *aerr = NULL;
+                if (agent_definition_apply(db, resolved ? resolved : def,
+                                           creator, NULL, &aerr) != 0) {
+                    if (err_out && !*err_out) {
+                        size_t n = strlen(aname) + (aerr ? strlen(aerr) : 8) + 32;
+                        char *m = malloc(n);
+                        if (m) {
+                            snprintf(m, n, "agent '%s': %s", aname,
+                                     aerr ? aerr : "apply failed");
+                            *err_out = m;
+                        }
+                    }
+                    rc = -1;
+                }
+                free(aerr);
+                free(resolved);
             }
             sqlite3_finalize(st);
         }

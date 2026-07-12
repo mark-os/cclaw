@@ -736,6 +736,10 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             ToolBootstrapCtx *bctx = (ToolBootstrapCtx *)te->user_data;
             bctx->session_id = session_id;
             bctx->current_tool_call_id = tc->call_id;
+        } else if (te->user_data == &g_tool_setup->ext_tool_ctx) {
+            ToolExtensionCtx *ectx = (ToolExtensionCtx *)te->user_data;
+            ectx->session_id = session_id;
+            ectx->current_tool_call_id = tc->call_id;
         }
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
@@ -753,7 +757,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             return tool_is_parallel_safe(tc->name) ? 3 : 0;
         }
         if (!result && (strcmp(tc->name, "request_config") == 0 ||
-                        strcmp(tc->name, "create_agent") == 0)) {
+                        strcmp(tc->name, "create_agent") == 0 ||
+                        strcmp(tc->name, "extension_promote") == 0)) {
             /* Approval gate: the session is parked in awaiting_approval; the
              * tool_call stays pending until resolve_approval writes the result. */
             handle_approval_park(session_id);
@@ -1626,6 +1631,16 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         if (k && v && config_set(g_db, k, v) != 0)
             LOG_WARN_("set_config apply failed key=%s", k);
         tool_parse_free(&ta);
+    } else if (strcmp(a->action, "extension_promote") == 0) {
+        ToolArgs ta; tool_parse(a->args_json, &ta);
+        const char *bundle = targ_str(&ta, "bundle");
+        char *ierr = NULL;
+        if (!bundle || extension_install(g_db, bundle, agent, &ierr) != 0) {
+            LOG_WARN_("extension_promote apply failed: %s", ierr ? ierr : "no bundle");
+            *rename_failed = 1;
+        }
+        free(ierr);
+        tool_parse_free(&ta);
     } else if (strcmp(a->action, "create_agent") == 0) {
         char *cerr = NULL;
         const char *adir = g_tool_setup ? g_tool_setup->req_cfg_ctx.agents_dir : NULL;
@@ -1895,6 +1910,11 @@ static void format_approval_summary(const Approval *a, char *buf, size_t buflen)
         } else {
             snprintf(buf, buflen, "%s", a->action ? a->action : "?");
         }
+    } else if (a->tool_name && strcmp(a->tool_name, "extension_promote") == 0) {
+        const char *nm = targ_str(&ta, "name");
+        const char *sum = targ_str(&ta, "summary");
+        snprintf(buf, buflen, "promote '%s': %s", nm ? nm : "?",
+                 sum ? sum : "(no summary)");
     } else if (a->tool_name && strcmp(a->tool_name, "create_agent") == 0) {
         /* Enumerate what the definition creates so the approver sees the
          * blast radius, not raw JSON. */

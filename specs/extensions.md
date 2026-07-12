@@ -78,7 +78,7 @@ directory.
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
 | `skills[]` | Bundle-relative paths, each a directory containing `SKILL.md` or a bare `.md` file ([skills.md](skills.md) format). Validated at promote: path must be bundle-relative and its frontmatter must parse with a `description`. |
 | `config[]` | Each: `{key, default?, description}`. `key` is `[A-Za-z0-9_]+` (no dots — `.` is the namespace separator); `description` is required. Install upserts config-registry rows keyed `<name>.<key>`. |
-| `agents[]` | Each: an agent-definition object ([self-configuration.md](self-configuration.md)); `system_prompt_file` (bundle-relative) may replace `system_prompt`. Install applies via `agent_definition_apply` with creator = owner agent (creation caps enforced); name collision with an existing agent refuses the install. Uninstall never deletes agents. |
+| `agents[]` | Each: an agent-definition object ([self-configuration.md](self-configuration.md)); `system_prompt_file` (bundle-relative) may replace `system_prompt`. Install applies via `agent_definition_apply` with creator = owner agent (creation caps enforced); an existing agent name is skipped, never overwritten. Uninstall never deletes agents. |
 
 The manifest carries **identity and declarations only** — never tool *code*. Code
 lives in the handler files. (DB holds config + path; files hold code.)

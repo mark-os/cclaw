@@ -44,5 +44,4 @@ INSERT OR IGNORE INTO tools(name, description) VALUES
   ('check_session', 'Check the status and result of a sub-agent session'),
   ('secret_create', 'Mint a new random credential, stored encrypted in the DB. Returns only its {{SECRET:name}} placeholder — never the value.'),
   ('configure_provider', 'Set up LLM provider. Stores the API key encrypted in cclaw.db. Known providers: openrouter, gemini, anthropic.'),
-  ('configure_channel', 'Set up a communication channel. Supported: telegram (requires bot_token), cli, or custom (requires binary_path).'),
-  ('create_agent', 'Propose creation of a named agent. Requires admin approval. On approval, daemon creates agent directory, seeds DB, and binds to channel.');
+  ('create_agent', 'Propose creation of a named agent (requires human approval). Takes an agent definition; the new agent is capped by the creator''s profile and grants.');

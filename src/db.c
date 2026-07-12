@@ -8,6 +8,7 @@
 #include "secret_store.h"
 #include "unicode_normalize.h"
 #include "agent_config.h"
+#include "agent_define.h"
 #include "secret.h"
 #include "validate.h"
 #include "templates.h"
@@ -372,6 +373,20 @@ static const struct { int version; const char *sql; } schema_patches[] = {
        * corrupted deinterpolation on DBs that hit the old flow. */
       "DELETE FROM secrets WHERE status='pending';"
       "ALTER TABLE secrets DROP COLUMN status;" },
+    { 21,
+      /* configure_channel deleted (specs/self-configuration.md): channel
+       * setup is extension attach + config keys. Drop its tool row, grants,
+       * and any occurrence in the registry-list overrides. */
+      "DELETE FROM tools WHERE name='configure_channel';"
+      "DELETE FROM grants WHERE kind='tool' AND value='configure_channel';"
+      /* create_agent now parks its own apply-approval (like request_config);
+       * a standing approval_mode='always' would double-prompt. */
+      "UPDATE grants SET approval_mode='silent'"
+      " WHERE kind='tool' AND value='create_agent';"
+      "UPDATE config SET value = (SELECT json_group_array(j.value)"
+      "  FROM json_each(config.value) j WHERE j.value <> 'configure_channel')"
+      " WHERE key IN ('agent_default_tools','agent_approval_tools')"
+      "  AND value IS NOT NULL;" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */
@@ -1956,11 +1971,12 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
         return existing;
     }
 
-    /* Not in DB — seed from disk */
+    /* Not in DB — seed from disk. agent.json is a full agent-definition
+     * (specs/self-configuration.md) applied with creator=NULL (operator, no
+     * caps) via the same path as create_agent and manifest agents[]. */
     char path[1024];
     char *config_json = NULL;
     char *sys_prompt = NULL;
-    char *description = NULL;
 
     if (agents_dir) {
         snprintf(path, sizeof(path), "%s/%s/agent.json", agents_dir, name);
@@ -1968,29 +1984,40 @@ AgentRow *db_agent_seed(sqlite3 *db, const char *agents_dir, const char *name) {
 
         snprintf(path, sizeof(path), "%s/%s/system.md", agents_dir, name);
         sys_prompt = util_read_file(path, NULL);
-
-        /* Extract description from agent.json via SQLite JSON */
-        if (config_json) {
-            sqlite3_stmt *jstmt;
-            const char *jsql = "SELECT json_extract(?1, '$.description')";
-            if (sqlite3_prepare_v2(db, jsql, -1, &jstmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(jstmt, 1, config_json, -1, SQLITE_STATIC);
-                if (sqlite3_step(jstmt) == SQLITE_ROW) {
-                    const char *v = (const char *)sqlite3_column_text(jstmt, 0);
-                    if (v) description = strdup(v);
-                }
-                sqlite3_finalize(jstmt);
-            }
-        }
     }
 
-    db_agent_upsert(db, name, description, sys_prompt);
+    if (config_json) {
+        /* Inject name + system.md (JSON's own system_prompt wins). */
+        char *merged = NULL;
+        sqlite3_stmt *jstmt;
+        if (sqlite3_prepare_v2(db,
+                "SELECT json_set(?1, '$.name', ?2, '$.system_prompt',"
+                " COALESCE(json_extract(?1,'$.system_prompt'), ?3))",
+                -1, &jstmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(jstmt, 1, config_json, -1, SQLITE_STATIC);
+            sqlite3_bind_text(jstmt, 2, name, -1, SQLITE_STATIC);
+            if (sys_prompt) sqlite3_bind_text(jstmt, 3, sys_prompt, -1, SQLITE_STATIC);
+            else sqlite3_bind_null(jstmt, 3);
+            if (sqlite3_step(jstmt) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(jstmt, 0);
+                if (v) merged = strdup(v);
+            }
+            sqlite3_finalize(jstmt);
+        }
+        char *err = NULL;
+        if (!merged ||
+            agent_definition_apply(db, merged, NULL, agents_dir, &err) != 0) {
+            fprintf(stderr, "db_agent_seed: %s: %s\n", name,
+                    err ? err : "definition apply failed");
+            /* Fall back to a bare row so the agent still exists. */
+            db_agent_upsert(db, name, NULL, sys_prompt);
+        }
+        free(err);
+        free(merged);
+    } else {
+        db_agent_upsert(db, name, NULL, sys_prompt);
+    }
 
-    /* seed memory blocks from agent.json */
-    if (config_json)
-        memory_blocks_seed(db, name, config_json);
-
-    free(description);
     free(config_json);
     free(sys_prompt);
 

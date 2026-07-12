@@ -393,11 +393,18 @@ CREATE INDEX IF NOT EXISTS idx_memory_entries_block
   ON memory_entries(agent_name, block_label, pos);
 
 -- ═══ Cron ═══
+-- A job's schedule is exactly one of: cron_expr (recurring 5-field),
+-- run_at (one-shot unix ts), or interval_s (fixed period seconds). Non-cron
+-- jobs carry cron_expr='' (empty sentinel, never NULL — SQLite can't relax
+-- the NOT NULL via ALTER). kind is orthogonal: 'task' | 'heartbeat'.
 CREATE TABLE IF NOT EXISTS cron_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_name TEXT,
   name TEXT NOT NULL,
   cron_expr TEXT NOT NULL,
+  run_at INTEGER,                            -- one-shot: fire once at this time
+  interval_s INTEGER,                        -- fixed period: refire every N seconds
+  kind TEXT NOT NULL DEFAULT 'task',         -- 'task' | 'heartbeat'
   session_id INTEGER NOT NULL,
   task TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,

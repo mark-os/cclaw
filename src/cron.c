@@ -173,6 +173,25 @@ CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count) {
     return jobs;
 }
 
+int cron_seed_heartbeat(sqlite3 *db, const char *agent_name) {
+    if (!db || !agent_name) return -1;
+    /* Idempotent: insert only if this agent has no heartbeat row yet.
+     * Seeded disabled (enabled=0) — heartbeats cost an LLM call per fire, so
+     * turning the pulse on stays a deliberate operator/tool act. */
+    const char *sql =
+        "INSERT INTO cron_jobs (agent_name, name, kind, cron_expr, interval_s,"
+        "                       session_id, task, enabled, next_run_at)"
+        " SELECT ?1, 'heartbeat', 'heartbeat', '', 1800, 0, '', 0, 0"
+        " WHERE NOT EXISTS (SELECT 1 FROM cron_jobs"
+        "                   WHERE agent_name=?1 AND kind='heartbeat');";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
 int cron_remove(sqlite3 *db, int64_t job_id) {
     const char *sql = "DELETE FROM cron_jobs WHERE id=?;";
     sqlite3_stmt *stmt;

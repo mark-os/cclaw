@@ -383,6 +383,9 @@ static void test_schema_upgrade_from_v11(void) {
         "ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 128000;"
         "ALTER TABLE channels DROP COLUMN prev_extension_name;"
         "ALTER TABLE sessions DROP COLUMN turn_context;"
+        "ALTER TABLE cron_jobs DROP COLUMN run_at;"     /* v23 adds */
+        "ALTER TABLE cron_jobs DROP COLUMN interval_s;" /* v23 adds */
+        "ALTER TABLE cron_jobs DROP COLUMN kind;"       /* v23 adds */
         "ALTER TABLE config DROP COLUMN secret;"    /* v22 adds */
         "ALTER TABLE config DROP COLUMN required;"  /* v22 adds */
         "ALTER TABLE secrets ADD COLUMN status TEXT NOT NULL DEFAULT 'active';"
@@ -407,7 +410,8 @@ static void test_schema_upgrade_from_v11(void) {
         "  ('tg', 2, '{}', 1);"                         /* plain → mode 2 */
         "INSERT INTO extensions(name, path, owner_agent, published, builtin) VALUES"
         "  ('telegram','/x','',0,1);"                   /* builtin → owner=system, published */
-        "INSERT INTO agents(name, model) VALUES('v17agent','m-big');",
+        "INSERT INTO agents(name, model) VALUES('v17agent','m-big');"
+        "INSERT INTO config(key, value) VALUES('heartbeat_interval','1800');", /* v23: retired */
         NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(db, 11);
     assert(db_schema_state(db, NULL) == DB_SCHEMA_UPGRADABLE);
@@ -451,6 +455,17 @@ static void test_schema_upgrade_from_v11(void) {
     assert(v && strcmp(v, "0") == 0); free(v);
     v = query_text(db, "SELECT COUNT(*) FROM secrets WHERE name='REAL_KEY'");
     assert(v && strcmp(v, "1") == 0); free(v);
+    /* v23: cron_jobs gains run_at/interval_s/kind; a disabled heartbeat pulse
+     * is seeded per agent; the heartbeat_interval config key is retired. */
+    assert(column_exists(db, "cron_jobs", "run_at"));
+    assert(column_exists(db, "cron_jobs", "interval_s"));
+    assert(column_exists(db, "cron_jobs", "kind"));
+    v = query_text(db, "SELECT COUNT(*) FROM cron_jobs"
+                       " WHERE agent_name='v17agent' AND kind='heartbeat'"
+                       " AND enabled=0 AND interval_s=1800");
+    assert(v && strcmp(v, "1") == 0); free(v);
+    v = query_text(db, "SELECT COUNT(*) FROM config WHERE key='heartbeat_interval'");
+    assert(v && strcmp(v, "0") == 0); free(v);
 
     /* Re-running is a no-op, not an error */
     assert(db_schema_compat(db) == 1);

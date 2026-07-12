@@ -26,6 +26,12 @@ CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count);
 int cron_remove(sqlite3 *db, int64_t job_id);
 void cron_list_free(CronJob *jobs, int count);
 
+/* Seed a disabled heartbeat pulse row (kind='heartbeat', 1800s cadence) for
+ * an agent, idempotent — a no-op if the agent already has one. Called at
+ * agent creation so every agent has an inspectable, enable-able pulse.
+ * Returns 0 on success (including the already-present no-op), -1 on DB error. */
+int cron_seed_heartbeat(sqlite3 *db, const char *agent_name);
+
 /* Parse 5-field cron expression, compute next run time after `after`.
  * Returns unix timestamp or -1 on parse error. */
 int64_t cron_next_run(const char *cron_expr, int64_t after);

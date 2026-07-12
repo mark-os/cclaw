@@ -35,16 +35,27 @@ double config_default_double(const char *key);
  * Never touches `value`. Returns 0 on success. */
 int config_registry_sync(sqlite3 *db);
 
-/* Effective value: COALESCE(value, default_value) from the DB, falling back
- * to the registry default if the row is missing (pre-sync DB). Returns
- * malloc'd string, or NULL if the key is unregistered and has no row. */
+/* Canonical env-var name for a key: CCLAW_ + uppercase, '.' → '_'
+ * (web_port → CCLAW_WEB_PORT, telegram.bot_token → CCLAW_TELEGRAM_BOT_TOKEN).
+ * See specs/config.md. */
+void config_env_name(const char *key, char *buf, size_t cap);
+
+/* Effective value under the uniform resolution rule (specs/config.md):
+ *   env(CCLAW_<KEY>)  — read live, never persisted
+ *   ?? config.value   — operator/agent override
+ *   ?? default_value  — code/manifest-owned (registry fallback pre-sync)
+ * Secret-flagged keys never read config.value: env first, then the encrypted
+ * secrets table under the canonical env name. Returns malloc'd string, or
+ * NULL if the key is unregistered and has no row. */
 char *config_get(sqlite3 *db, const char *key);
 int config_get_int(sqlite3 *db, const char *key);
 double config_get_double(sqlite3 *db, const char *key);
 
 /* Set (or clear, with value == NULL) the override for a registered key.
  * Fails with -1 if the key is not in the registry — there are no anonymous
- * config writes; a key gets in only with a default and a description. */
+ * config writes; a key gets in only with a default and a description.
+ * Secret-flagged keys are rejected: their values live in env or the
+ * encrypted secrets table, never in config.value. */
 int config_set(sqlite3 *db, const char *key, const char *value);
 
 #endif

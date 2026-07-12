@@ -52,8 +52,18 @@ int channel_bounce(sqlite3 *db, const char *name);
 /* prev_extension_name for a channel, or NULL. Caller frees. */
 char *channel_prev_extension(sqlite3 *db, const char *name);
 
-/* Queue text to every admin chat of a channel (channel_state admin_ids). */
+/* Queue text to every admin chat of a channel (registry key
+ * <ext>.admin_ids, comma/space separated). */
 void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *text);
+
+/* Resolve a channel's registry config key <extension>.<key> through the
+ * uniform resolution rule (specs/config.md). Heap or NULL; caller frees. */
+char *channel_config_get(sqlite3 *db, const char *channel_name, const char *key);
+
+/* Launch gate (specs/config.md): trust status 'active' AND <ext>.enabled
+ * resolves truthy AND every required config key resolves non-empty.
+ * Returns 1 to launch; 0 writes the blocking reason into why. */
+int channel_should_launch(sqlite3 *db, const char *name, char *why, size_t cap);
 
 /* Reap — returns 1 if pid belonged to a channel, 0 otherwise */
 int channel_reap(pid_t pid, sqlite3 *db);

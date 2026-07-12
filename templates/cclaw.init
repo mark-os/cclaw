@@ -17,7 +17,8 @@ NAME=cclaw
 RUNAS=cclaw
 
 [ -f "$ENVFILE" ] && . "$ENVFILE"
-export OPENROUTER_API_KEY CCLAW_PROVIDER CCLAW_MODEL CCLAW_TELEGRAM_TOKEN CCLAW_DB_PATH CCLAW_WEB_PORT
+export OPENROUTER_API_KEY CCLAW_PROVIDER CCLAW_MODEL CCLAW_DB_PATH CCLAW_WEB_PORT \
+       CCLAW_TELEGRAM_ENABLED CCLAW_TELEGRAM_BOT_TOKEN CCLAW_TELEGRAM_ADMIN_IDS CCLAW_LOG_LEVEL
 
 # Drop root before launching: setpriv execs in place (unlike su, which forks),
 # so $! is the daemon's real pid and check_pid's comm check still matches.

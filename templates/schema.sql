@@ -6,12 +6,15 @@
 -- ═══ Global settings ═══
 -- Registry-backed (src/config_registry.c): default_value + description are
 -- code-owned and resynced every startup; value is the operator/agent override
--- (NULL = use default). Effective value = COALESCE(value, default_value).
+-- (NULL = use default). Effective value = env CCLAW_<KEY> ?? value ??
+-- default_value (specs/config.md).
 CREATE TABLE IF NOT EXISTS config (
   key           TEXT PRIMARY KEY,
   value         TEXT,
   default_value TEXT,
-  description   TEXT
+  description   TEXT,
+  secret        INTEGER NOT NULL DEFAULT 0,  -- resolves env → secrets table, never value
+  required      INTEGER NOT NULL DEFAULT 0   -- channel launch gate: must resolve non-empty
 );
 
 -- ═══ Providers ═══

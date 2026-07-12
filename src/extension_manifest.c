@@ -465,14 +465,17 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
         "  FROM json_each(COALESCE(json_extract(:m,'$.config'),'[]')))",
         manifest, name, store, owner_agent);
     rc |= run_ingest(db,
-        "INSERT INTO config(key, default_value, description) "
+        "INSERT INTO config(key, default_value, description, secret, required) "
         "SELECT :name || '.' || json_extract(value,'$.key'), "
         "       COALESCE(json_extract(value,'$.default'), ''), "
-        "       json_extract(value,'$.description') "
+        "       json_extract(value,'$.description'), "
+        "       COALESCE(json_extract(value,'$.secret'), 0), "
+        "       COALESCE(json_extract(value,'$.required'), 0) "
         "FROM json_each(COALESCE(json_extract(:m,'$.config'),'[]')) "
         "WHERE json_extract(value,'$.key') IS NOT NULL "
         "ON CONFLICT(key) DO UPDATE SET default_value=excluded.default_value, "
-        "  description=excluded.description",
+        "  description=excluded.description, secret=excluded.secret, "
+        "  required=excluded.required",
         manifest, name, store, owner_agent);
 
     /* attach to the owner (published stays 0 until publish). */
@@ -493,6 +496,13 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
                 "INSERT OR REPLACE INTO channels(name, extension_name, type, binary_path, status) "
                 "VALUES(:name, :name, json_extract(:m,'$.channel.type'), "
                 "       :store || '/' || json_extract(:m,'$.channel.handler'), 'draft')",
+                manifest, name, store, owner_agent);
+            /* Every channel extension has an 'enabled' key, default off —
+             * the launch gate reads it (specs/config.md). Declared keys win
+             * (INSERT OR IGNORE after the config ingest above). */
+            rc |= run_ingest(db,
+                "INSERT OR IGNORE INTO config(key, default_value, description) "
+                "VALUES(:name || '.enabled', '0', 'Run the ' || :name || ' channel (1 = on)')",
                 manifest, name, store, owner_agent);
         }
         free(ch);
@@ -699,29 +709,16 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
     if (rc == 0) {
         sqlite3_exec(db, "UPDATE extensions SET published=1 WHERE name='telegram'",
                      NULL, NULL, NULL);
-        if (status && sqlite3_prepare_v2(db,
+        /* Builtin bundles are shipped code, already past the trust gate:
+         * a fresh install is born trust-'active'. Whether it *runs* is the
+         * separate telegram.enabled config key (specs/config.md) — trust
+         * says "may this code run", never "should it". A restart restores
+         * whatever status the channel had before the reinstall. */
+        if (sqlite3_prepare_v2(db,
                 "UPDATE channels SET status=?1, prev_extension_name=?2 "
                 "WHERE name='telegram'", -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, status, -1, SQLITE_STATIC);
+            sqlite3_bind_text(s, 1, status ? status : "active", -1, SQLITE_STATIC);
             if (prev) sqlite3_bind_text(s, 2, prev, -1, SQLITE_STATIC);
-            sqlite3_step(s);
-            sqlite3_finalize(s);
-        }
-        /* Seed base_url so channel_runner's url_host_allowed() pin (which
-         * fails closed on missing config) has a source of truth in the DB —
-         * the JS template's hardcoded fallback is belt-and-suspenders, not
-         * authoritative. */
-        sqlite3_exec(db,
-            "INSERT OR IGNORE INTO channel_state(channel_name, key, value)"
-            " VALUES('telegram', 'base_url', 'https://api.telegram.org')",
-            NULL, NULL, NULL);
-        /* Env-provided bot token seeds channel_state once (never overwrites
-         * an operator-set value). */
-        const char *tok = getenv("CCLAW_TELEGRAM_TOKEN");
-        if (tok && tok[0] && sqlite3_prepare_v2(db,
-                "INSERT OR IGNORE INTO channel_state(channel_name, key, value)"
-                " VALUES('telegram', 'bot_token', ?1)", -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, tok, -1, SQLITE_STATIC);
             sqlite3_step(s);
             sqlite3_finalize(s);
         }

@@ -64,7 +64,7 @@ static void write_test_js(void) {
          * Length check is chars, not bytes — byte-exactness is the template's
          * job (test_telegram_js); this exercises the C loop's mode plumbing. */
         "  var mode = item.mode || 0;\n"
-        "  if (mode === 0 && channel.getConfig('rich_disabled') !== '1' &&\n"
+        "  if (mode === 0 && channel.getState('rich_disabled') !== '1' &&\n"
         "      p.text.length <= 32768) {\n"
         "    channel.send({method: 'POST', url: base + '/bot' + token + '/sendRichMessage',\n"
         "      body: JSON.stringify({chat_id: parseInt(p.chat_id,10),\n"
@@ -98,16 +98,15 @@ static sqlite3 *setup_db(int port) {
     sqlite3_exec(db, "INSERT OR REPLACE INTO channels(name,extension_name)"
         " VALUES('test','test');", NULL, NULL, NULL);
 
-    const char *sql = "INSERT OR REPLACE INTO channel_state(channel_name,key,value) VALUES(?,?,?);";
+    /* Channel config now lives in the registry as <ext>.<key> rows. */
+    const char *sql = "INSERT OR REPLACE INTO config(key,value,description) VALUES(?,?,'test');";
     sqlite3_stmt *s;
     sqlite3_prepare_v2(db, sql, -1, &s, NULL);
-    sqlite3_bind_text(s, 1, "test", -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 2, "bot_token", -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 3, "test-token", -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 1, "test.bot_token", -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, "test-token", -1, SQLITE_STATIC);
     sqlite3_step(s); sqlite3_reset(s);
-    sqlite3_bind_text(s, 1, "test", -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 2, "base_url", -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 3, base_url, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 1, "test.base_url", -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, base_url, -1, SQLITE_STATIC);
     sqlite3_step(s);
     sqlite3_finalize(s);
     return db;

@@ -273,9 +273,11 @@ static void test_notify_admins(void) {
     sqlite3 *db = test_db_open(TEST_DB);
     char *err = NULL;
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
+    /* admin_ids is a registry key (<ext>.admin_ids) since specs/config.md. */
     assert(sqlite3_exec(db,
-        "INSERT INTO channel_state(channel_name, key, value)"
-        " VALUES('echo', 'admin_ids', '111, 222');",
+        "INSERT INTO config(key, value, default_value, description)"
+        " VALUES('echo.admin_ids', '111, 222', '', 'admins')"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
         NULL, NULL, NULL) == SQLITE_OK);
 
     channel_notify_admins(db, "echo", "reverted");

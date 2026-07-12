@@ -2040,19 +2040,8 @@ static void handle_approval_park(int64_t session_id) {
          * decide grants (e.g. a sub-agent surfaced on a groupchat). Falls
          * back to the session's own channel_id when no admin_ids are
          * configured, so the common 1:1 setup needs no extra config. */
-        char *admins = NULL;
-        {
-            const char *asql = "SELECT value FROM channel_state WHERE channel_name=?1 AND key='admin_ids';";
-            sqlite3_stmt *as;
-            if (sqlite3_prepare_v2(g_db, asql, -1, &as, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(as, 1, ch_name, -1, SQLITE_STATIC);
-                if (sqlite3_step(as) == SQLITE_ROW) {
-                    const char *v = (const char *)sqlite3_column_text(as, 0);
-                    if (v && v[0]) admins = strdup(v);
-                }
-                sqlite3_finalize(as);
-            }
-        }
+        char *admins = channel_config_get(g_db, ch_name, "admin_ids");
+        if (admins && !admins[0]) { free(admins); admins = NULL; }
 
         char *agent = session_get_agent_name(g_db, session_id);
         char summary[256];

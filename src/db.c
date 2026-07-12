@@ -388,6 +388,13 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "  FROM json_each(config.value) j WHERE j.value <> 'configure_channel')"
       " WHERE key IN ('agent_default_tools','agent_approval_tools')"
       "  AND value IS NOT NULL;" },
+    { 22,
+      /* specs/config.md: secret/required flags on config keys; channel
+       * config moves from channel_state to the registry (the stale
+       * hand-seeded base_url row has no readers now). */
+      "ALTER TABLE config ADD COLUMN secret INTEGER NOT NULL DEFAULT 0;"
+      "ALTER TABLE config ADD COLUMN required INTEGER NOT NULL DEFAULT 0;"
+      "DELETE FROM channel_state WHERE key='base_url';" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

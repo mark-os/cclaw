@@ -103,18 +103,8 @@ char *channel_prev_extension(sqlite3 *db, const char *name) {
  * channel delivers them — after an auto-revert that's the respawned, reverted
  * process, so the notice arrives through the channel it is about. */
 void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *text) {
-    const char *gsql = "SELECT value FROM channel_state"
-                       " WHERE channel_name=? AND key='admin_ids';";
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, gsql, -1, &s, NULL) != SQLITE_OK) return;
-    sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
-    char *admins = NULL;
-    if (sqlite3_step(s) == SQLITE_ROW) {
-        const char *v = (const char *)sqlite3_column_text(s, 0);
-        if (v) admins = strdup(v);
-    }
-    sqlite3_finalize(s);
-    if (!admins) return;
+    char *admins = channel_config_get(db, channel_name, "admin_ids");
+    if (!admins || !admins[0]) { free(admins); return; }
 
     const char *isql =
         "INSERT INTO channel_outbox(channel_name, session_id, payload)"
@@ -250,12 +240,96 @@ static int start_channel(sqlite3 *db, const char *name) {
     return 0;
 }
 
+char *channel_config_get(sqlite3 *db, const char *channel_name, const char *key) {
+    if (!db || !channel_name || !key) return NULL;
+    sqlite3_stmt *s;
+    char ext[128] = "";
+    if (sqlite3_prepare_v2(db,
+            "SELECT extension_name FROM channels WHERE name=?1",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(s, 0);
+            if (v) snprintf(ext, sizeof(ext), "%s", v);
+        }
+        sqlite3_finalize(s);
+    }
+    if (!ext[0]) return NULL;
+    char full[192];
+    snprintf(full, sizeof(full), "%s.%s", ext, key);
+    return config_get(db, full);
+}
+
+int channel_should_launch(sqlite3 *db, const char *name, char *why, size_t cap) {
+    if (why && cap) why[0] = '\0';
+
+    char *status = channel_get_status(db, name);
+    if (!status || strcmp(status, "active") != 0) {
+        if (why) snprintf(why, cap, "trust status %s", status ? status : "missing");
+        free(status);
+        return 0;
+    }
+    free(status);
+
+    char *enabled = channel_config_get(db, name, "enabled");
+    int on = enabled && enabled[0] && strcmp(enabled, "0") != 0;
+    free(enabled);
+    if (!on) {
+        if (why) snprintf(why, cap, "not enabled (set <ext>.enabled=1)");
+        return 0;
+    }
+
+    /* Every required config key must resolve non-empty. Collect keys first,
+     * then resolve — config_get reads the same table. */
+    char ext[128] = "";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT extension_name FROM channels WHERE name=?1",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(s, 0);
+            if (v) snprintf(ext, sizeof(ext), "%s", v);
+        }
+        sqlite3_finalize(s);
+    }
+    char keys[16][192];
+    int nkeys = 0;
+    if (ext[0] && sqlite3_prepare_v2(db,
+            "SELECT key FROM config WHERE required=1"
+            " AND substr(key, 1, length(?1)+1) = ?1 || '.'",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, ext, -1, SQLITE_STATIC);
+        while (sqlite3_step(s) == SQLITE_ROW && nkeys < 16) {
+            const char *k = (const char *)sqlite3_column_text(s, 0);
+            if (k) snprintf(keys[nkeys++], sizeof(keys[0]), "%s", k);
+        }
+        sqlite3_finalize(s);
+    }
+    for (int i = 0; i < nkeys; i++) {
+        char *v = config_get(db, keys[i]);
+        int ok = v && v[0];
+        free(v);
+        if (!ok) {
+            if (why) snprintf(why, cap, "required config %s unresolved", keys[i]);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 int channel_launch_all(sqlite3 *db) {
     char names[CHANNEL_MAX][64];  /* matches ChannelProc.name */
     int n = active_channel_names(db, names, CHANNEL_MAX - g_count);
     int launched = 0;
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
+        char why[192];
+        if (!channel_should_launch(db, names[i], why, sizeof(why))) {
+            LOG_INFO_("channel skipped name=%s reason=\"%s\"", names[i], why);
+            continue;
+        }
         if (start_channel(db, names[i]) == 0) launched++;
+    }
     return launched;
 }
 

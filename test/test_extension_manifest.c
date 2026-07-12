@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "extension_manifest.h"
+#include "channel.h"
 #include "config_registry.h"
 #include "db.h"
 #include "test_util.h"
@@ -12,6 +13,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* channel.o (channel_should_launch) references resolve_approval, defined in
+ * main.c which isn't in libcclaw.a — stub it so the link closes. */
+#include "resolve.h"
+void resolve_approval(int64_t approval_id, ApprovalDecision decision,
+                      const char *decided_via, int64_t grant_expires_at) {
+    (void)approval_id; (void)decision; (void)decided_via; (void)grant_expires_at;
+}
 
 #define TEST_DB "/tmp/test_extension_manifest.sqlite"
 #define BUNDLE  "/tmp/test_ext_manifest_bundle/nws"
@@ -389,15 +398,35 @@ static void test_install_builtin(void) {
     struct stat st;
     assert(stat("/tmp/extensions/telegram/extension.json", &st) == 0);
     assert(stat("/tmp/extensions/telegram/channel.qjs", &st) == 0);
+    /* Builtin bundles are born trust-active (specs/config.md); running is
+     * gated separately by telegram.enabled. */
     char *status = q1(db, "SELECT status FROM channels WHERE name='telegram'");
-    assert(status && strcmp(status, "draft") == 0); free(status);
+    assert(status && strcmp(status, "active") == 0); free(status);
 
-    /* Simulate an operator activation, then rerun: status must survive. */
-    assert(sqlite3_exec(db, "UPDATE channels SET status='active' WHERE name='telegram'",
+    /* Simulate an operator demotion, then rerun: status must survive. */
+    assert(sqlite3_exec(db, "UPDATE channels SET status='draft' WHERE name='telegram'",
                          NULL, NULL, NULL) == SQLITE_OK);
     assert(extension_install_builtin(db, TEST_DB) == 0);
     status = q1(db, "SELECT status FROM channels WHERE name='telegram'");
-    assert(status && strcmp(status, "active") == 0); free(status);
+    assert(status && strcmp(status, "draft") == 0); free(status);
+
+    /* Launch gate (specs/config.md): trust AND enabled AND required keys. */
+    unsetenv("CCLAW_TELEGRAM_ENABLED");
+    unsetenv("CCLAW_TELEGRAM_BOT_TOKEN");
+    char why[192];
+    assert(channel_should_launch(db, "telegram", why, sizeof(why)) == 0);
+    assert(strstr(why, "trust status draft"));
+    sqlite3_exec(db, "UPDATE channels SET status='active' WHERE name='telegram'",
+                 NULL, NULL, NULL);
+    assert(channel_should_launch(db, "telegram", why, sizeof(why)) == 0);
+    assert(strstr(why, "not enabled"));
+    setenv("CCLAW_TELEGRAM_ENABLED", "1", 1);
+    assert(channel_should_launch(db, "telegram", why, sizeof(why)) == 0);
+    assert(strstr(why, "telegram.bot_token"));
+    setenv("CCLAW_TELEGRAM_BOT_TOKEN", "123456:ABC", 1);
+    assert(channel_should_launch(db, "telegram", why, sizeof(why)) == 1);
+    unsetenv("CCLAW_TELEGRAM_ENABLED");
+    unsetenv("CCLAW_TELEGRAM_BOT_TOKEN");
 
     db_close(db);
     rm_rf("/tmp/extensions/telegram");

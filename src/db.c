@@ -3,7 +3,6 @@
 #include "cclaw.h"
 #include "config_registry.h"
 #include "log.h"
-#include "secret_scan.h"
 #include "secret_interp.h"
 #include "secret_store.h"
 #include "unicode_normalize.h"
@@ -700,7 +699,6 @@ void session_list_free(Session *sessions, int count) {
     free(sessions);
 }
 
-/* Serialize tool_calls array to JSON string. Caller must free. Returns NULL if none. */
 static int role_to_int(Role r) {
     switch (r) {
         case ROLE_SYSTEM:    return 0;

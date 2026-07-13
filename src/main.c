@@ -121,7 +121,6 @@ static ChildProc *child_find(pid_t pid) {
 static void child_remove(ChildProc *c) {
     int idx = (int)(c - g_children);
     if (idx < 0 || idx >= g_child_count) return;
-    /* Clean up pipe and buffer before removal */
     if (c->result_pipe >= 0) {
         close(c->result_pipe);
         c->result_pipe = -1;
@@ -938,7 +937,6 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 cli_print_tool_call(tc->name, tc->arguments);
             session_set_state(g_db, session_id, "tool_running");
 
-            /* Parse arguments to extract command + timeout */
             ToolArgs ta;
             if (tool_parse(tc->arguments, &ta) != 0)
                 return tool_inline_error(session_id, tc,
@@ -2133,8 +2131,6 @@ static void handle_approval_park(int64_t session_id) {
     }
     approval_free(a);
 }
-
-/* ── run_advance: call advance_session and execute the decision ── */
 
 /* ── event_step: shared event handling for both daemon and CLI loops ── */
 

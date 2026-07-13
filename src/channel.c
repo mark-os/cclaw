@@ -658,12 +658,30 @@ void channel_consume_events(sqlite3 *db) {
             }
             if (!agent) goto del;
 
-            /* Find or create session for this channel+channel_id */
+            /* Resolve the session: a route with a non-NULL session_id pins
+             * the chat to that session (exact route first, then the '*'
+             * wildcard); otherwise find-latest for this channel+channel_id. */
             int64_t sid = -1;
+            {
+                const char *psql =
+                    "SELECT r.session_id FROM channel_routes r"
+                    " JOIN sessions s ON s.id = r.session_id"
+                    " WHERE r.channel_name=?1 AND r.channel_id IN (?2,'*')"
+                    "   AND r.session_id IS NOT NULL"
+                    " ORDER BY r.channel_id=?2 DESC LIMIT 1;";
+                sqlite3_stmt *ps;
+                if (sqlite3_prepare_v2(db, psql, -1, &ps, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(ps, 1, ch_name, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(ps, 2, cid, -1, SQLITE_STATIC);
+                    if (sqlite3_step(ps) == SQLITE_ROW)
+                        sid = sqlite3_column_int64(ps, 0);
+                    sqlite3_finalize(ps);
+                }
+            }
             const char *ssql = "SELECT id FROM sessions WHERE channel_name=? AND channel_id=?"
                                " ORDER BY id DESC LIMIT 1;";
             sqlite3_stmt *ss;
-            if (sqlite3_prepare_v2(db, ssql, -1, &ss, NULL) == SQLITE_OK) {
+            if (sid <= 0 && sqlite3_prepare_v2(db, ssql, -1, &ss, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(ss, 1, ch_name, -1, SQLITE_STATIC);
                 sqlite3_bind_text(ss, 2, cid, -1, SQLITE_STATIC);
                 if (sqlite3_step(ss) == SQLITE_ROW)

@@ -2332,6 +2332,28 @@ static void deliver_response(int64_t session_id) {
     sqlite3_finalize(stmt);
     if (!channel) return;
 
+    /* Delivery mode lives on the route (exact beats '*'; no route = auto):
+     * 'explicit' keeps turn output in the session — the agent speaks only
+     * via channel_send. Group listen-and-decide depends on this. */
+    {
+        const char *msql =
+            "SELECT delivery_mode FROM channel_routes"
+            " WHERE channel_name=?1 AND channel_id IN (?2,'*')"
+            " ORDER BY channel_id=?2 DESC LIMIT 1;";
+        sqlite3_stmt *ms;
+        int explicit_mode = 0;
+        if (sqlite3_prepare_v2(g_db, msql, -1, &ms, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(ms, 1, channel, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ms, 2, channel_id ? channel_id : "0", -1, SQLITE_STATIC);
+            if (sqlite3_step(ms) == SQLITE_ROW) {
+                const char *m = (const char *)sqlite3_column_text(ms, 0);
+                explicit_mode = m && strcmp(m, "explicit") == 0;
+            }
+            sqlite3_finalize(ms);
+        }
+        if (explicit_mode) { free(channel); free(channel_id); return; }
+    }
+
     char *text = get_response_text(g_db, session_id);
     if (!text) { free(channel); free(channel_id); return; }
 
@@ -3433,19 +3455,50 @@ static int route_main(int argc, char *argv[]) {
     if (sub && strcmp(sub, "list") == 0) {
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "SELECT channel_name, channel_id, agent_name FROM channel_routes"
-                " ORDER BY channel_name, channel_id", -1, &st, NULL) == SQLITE_OK) {
+                "SELECT channel_name, channel_id, agent_name, delivery_mode, session_id"
+                " FROM channel_routes ORDER BY channel_name, channel_id",
+                -1, &st, NULL) == SQLITE_OK) {
             int any = 0;
             while (sqlite3_step(st) == SQLITE_ROW) {
-                printf("%s %s -> %s\n", sqlite3_column_text(st, 0),
-                       sqlite3_column_text(st, 1), sqlite3_column_text(st, 2));
+                printf("%s %s -> %s (mode %s", sqlite3_column_text(st, 0),
+                       sqlite3_column_text(st, 1), sqlite3_column_text(st, 2),
+                       sqlite3_column_text(st, 3));
+                if (sqlite3_column_type(st, 4) != SQLITE_NULL)
+                    printf(", session %lld", (long long)sqlite3_column_int64(st, 4));
+                printf(")\n");
                 any = 1;
             }
             sqlite3_finalize(st);
-            if (!any) printf("(no routes — all chats fall back to default_agent)\n");
+            if (!any) printf("(no routes — unrouted senders are dropped unless"
+                             " admin or <ext>.allow_unknown=1)\n");
         }
     } else if (sub && strcmp(sub, "add") == 0 && argc >= 6) {
         const char *ch = argv[3], *cid = argv[4], *agent = argv[5];
+        const char *mode = NULL;
+        int64_t pin_session = 0;
+        int bad = 0;
+        for (int i = 6; i < argc; i++) {
+            if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+                mode = argv[++i];
+                if (strcmp(mode, "auto") != 0 && strcmp(mode, "explicit") != 0) {
+                    fprintf(stderr, "error: --mode must be auto or explicit\n");
+                    bad = 1;
+                }
+            } else if (strcmp(argv[i], "--session") == 0 && i + 1 < argc) {
+                pin_session = atoll(argv[++i]);
+                if (pin_session <= 0) {
+                    fprintf(stderr, "error: --session needs a positive session id\n");
+                    bad = 1;
+                }
+            } else {
+                fprintf(stderr, "error: unknown route add option '%s'\n", argv[i]);
+                bad = 1;
+            }
+        }
+        if (bad) { sqlite3_close(db); return 1; }
+        /* Group-shaped ids (negative — Telegram groups) default to explicit:
+         * silent-by-default listen-and-decide until the operator says auto. */
+        if (!mode) mode = (cid[0] == '-') ? "explicit" : "auto";
         /* Warn (don't refuse) if the agent isn't registered yet — the operator
          * may create it later; a route to a missing agent just drops until then. */
         sqlite3_stmt *ck;
@@ -3456,19 +3509,39 @@ static int route_main(int argc, char *argv[]) {
             sqlite3_finalize(ck);
         }
         if (!exists) fprintf(stderr, "warning: agent '%s' not found in agents table\n", agent);
+        if (pin_session > 0) {
+            sqlite3_stmt *sk;
+            int sess_ok = 0;
+            if (sqlite3_prepare_v2(db, "SELECT 1 FROM sessions WHERE id=?", -1, &sk, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(sk, 1, pin_session);
+                sess_ok = (sqlite3_step(sk) == SQLITE_ROW);
+                sqlite3_finalize(sk);
+            }
+            if (!sess_ok)
+                fprintf(stderr, "warning: session %lld not found — pin ignored until it exists\n",
+                        (long long)pin_session);
+        }
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "INSERT INTO channel_routes(channel_name, channel_id, agent_name) VALUES(?,?,?)"
-                " ON CONFLICT(channel_name, channel_id) DO UPDATE SET agent_name=excluded.agent_name",
+                "INSERT INTO channel_routes(channel_name, channel_id, agent_name, session_id, delivery_mode)"
+                " VALUES(?1,?2,?3,CASE WHEN ?4>0 THEN ?4 END,?5)"
+                " ON CONFLICT(channel_name, channel_id) DO UPDATE SET"
+                "  agent_name=excluded.agent_name, session_id=excluded.session_id,"
+                "  delivery_mode=excluded.delivery_mode",
                 -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
             sqlite3_bind_text(st, 2, cid, -1, SQLITE_STATIC);
             sqlite3_bind_text(st, 3, agent, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(st, 4, pin_session);
+            sqlite3_bind_text(st, 5, mode, -1, SQLITE_STATIC);
             rc = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
             sqlite3_finalize(st);
         } else rc = 1;
-        if (rc == 0) printf("route set: %s %s -> %s\n", ch, cid, agent);
-        else fprintf(stderr, "error: add failed\n");
+        if (rc == 0) {
+            printf("route set: %s %s -> %s (mode %s", ch, cid, agent, mode);
+            if (pin_session > 0) printf(", session %lld", (long long)pin_session);
+            printf(")\n");
+        } else fprintf(stderr, "error: add failed\n");
     } else if (sub && strcmp(sub, "rm") == 0 && argc >= 5) {
         const char *ch = argv[3], *cid = argv[4];
         sqlite3_stmt *st;
@@ -3483,11 +3556,15 @@ static int route_main(int argc, char *argv[]) {
             if (rc == 0) printf(changed ? "route removed: %s %s\n" : "no such route: %s %s\n", ch, cid);
         } else rc = 1;
     } else {
-        fprintf(stderr, "usage: cclaw route add <channel> <chat_id> <agent>\n"
+        fprintf(stderr, "usage: cclaw route add <channel> <chat_id> <agent>"
+                        " [--mode auto|explicit] [--session <id>]\n"
                         "       cclaw route rm  <channel> <chat_id>\n"
                         "       cclaw route list\n"
                         "  chat_id '*' is the channel-wide default;\n"
-                        "  resolution: exact (channel,chat_id) -> (channel,'*') -> default_agent\n");
+                        "  resolution: exact (channel,chat_id) -> (channel,'*') -> gate\n"
+                        "  (unrouted senders drop unless admin or allow_unknown=1)\n"
+                        "  --mode default: explicit for group ids (negative), else auto\n"
+                        "  --session pins the chat to one session\n");
         rc = 2;
     }
     sqlite3_close(db);

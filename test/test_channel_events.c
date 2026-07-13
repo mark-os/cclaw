@@ -297,6 +297,51 @@ static void test_channel_events_gate(void) {
     printf("PASS\n");
 }
 
+/* Route-to-session: a route with non-NULL session_id pins the chat to that
+ * session even when a newer session exists for the same channel_id; a pin to
+ * a deleted session falls back to find-latest. */
+static void test_channel_events_session_pin(void) {
+    setup();
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    test_binding_set(db, "mychannel", "u7", "testagent");
+
+    /* Two sessions for the chat; pin the older one on the route. */
+    test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"u7\",\"text\":\"one\"}");
+    channel_consume_events(db);
+    int64_t old_sid = test_session_find(db, "mychannel", "u7", "testagent");
+    assert(old_sid > 0);
+    assert(sqlite3_exec(db,
+        "INSERT INTO sessions(name, agent_name, channel_name, channel_id)"
+        " VALUES('newer','testagent','mychannel','u7');", NULL, NULL, NULL) == SQLITE_OK);
+    int64_t new_sid = test_session_find(db, "mychannel", "u7", "testagent");
+    assert(new_sid > old_sid);
+
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+        "UPDATE channel_routes SET session_id=%lld"
+        " WHERE channel_name='mychannel' AND channel_id='u7';", (long long)old_sid);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+
+    test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"u7\",\"text\":\"two\"}");
+    channel_consume_events(db);
+    assert(test_inbox_count(db, old_sid) == 2);   /* pinned, not the newer one */
+    assert(test_inbox_count(db, new_sid) == 0);
+
+    /* Dangling pin: delete the pinned session — find-latest takes over. */
+    snprintf(sql, sizeof(sql), "DELETE FROM sessions WHERE id=%lld;", (long long)old_sid);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+    test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"u7\",\"text\":\"three\"}");
+    channel_consume_events(db);
+    assert(test_inbox_count(db, new_sid) == 1);
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
 /* F19: the entry content handed to the inbox is extracted plain text, never
  * the raw JSON envelope — bare text for DMs, sender-prefixed for groups.
  * Payloads without $.text (custom channels) pass through unchanged. */
@@ -606,6 +651,9 @@ int main(void) {
 
     printf("  channel_events_gate... ");
     test_channel_events_gate();
+
+    printf("  channel_events_session_pin... ");
+    test_channel_events_session_pin();
 
     printf("  channel_events_plain_text_content... ");
     test_channel_events_plain_text_content();

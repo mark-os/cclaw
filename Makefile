@@ -58,7 +58,7 @@ TEST_BIN  := $(patsubst test/%.c,$(BUILDDIR)/%,$(TEST_SRC))
 INTEG_BIN := $(patsubst test/%.c,$(BUILDDIR)/%,$(INTEG_SRC))
 E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
 
-.PHONY: all clean test smoke test-integration test-e2e test-all check-gen install debug test-asan
+.PHONY: all clean test smoke test-integration test-e2e test-all check-gen debug test-asan
 
 # Curated fast unit subset — no network, no fork. Target: a few seconds.
 SMOKE := test_db test_config test_advance_session test_llm_payload test_tools \

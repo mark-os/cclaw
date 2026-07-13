@@ -132,6 +132,11 @@ PolicyEffect policy_eval(const char *args_json, const char *policy_json) {
     int args_ntok = 0;
     if (args_json && args_json[0]) {
         args_ntok = jsmn_parse(&ap, args_json, strlen(args_json), args_toks, MAX_TOKS);
+        /* Oversize args (> MAX_TOKS tokens) are not "empty" — treating them
+         * as such would let a padded argument blob slip past a keyed deny
+         * rule. Fail closed but recoverable: park for approval. */
+        if (args_ntok == JSMN_ERROR_NOMEM)
+            return POLICY_ASK;
         if (args_ntok < 1 || args_toks[0].type != JSMN_OBJECT)
             args_ntok = 0;
     }

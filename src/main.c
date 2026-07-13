@@ -754,6 +754,13 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             ToolExtensionCtx *ectx = (ToolExtensionCtx *)te->user_data;
             ectx->session_id = session_id;
             ectx->current_tool_call_id = tc->call_id;
+        } else if (te->user_data == &g_tool_setup->chan_send_ctx) {
+            ToolChannelSendCtx *cctx = (ToolChannelSendCtx *)te->user_data;
+            cctx->session_id = session_id;
+            /* Route allowlist must key on the advancing agent, not the
+             * setup's init agent. */
+            snprintf(cctx->agent_name, sizeof(cctx->agent_name), "%s",
+                     agent_name ? agent_name : "");
         }
         char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
         if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }

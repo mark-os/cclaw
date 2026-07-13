@@ -180,6 +180,16 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->secret_create_ctx.db = db;
     tool_secret_create_register(&setup->reg, &setup->secret_create_ctx);
 
+    /* channel_send — outbox insert only (the daemon's runners drain it), so
+     * registerable in both modes. Ships ungranted: routes are the allowlist,
+     * the grant is the operator's call. Dispatch threads session + agent. */
+    setup->chan_send_ctx.db = db;
+    setup->chan_send_ctx.db_path = cfg->db_path;
+    setup->chan_send_ctx.session_id = session_id;
+    snprintf(setup->chan_send_ctx.agent_name, sizeof(setup->chan_send_ctx.agent_name),
+             "%s", agent_name ? agent_name : "");
+    tool_channel_send_register(&setup->reg, &setup->chan_send_ctx);
+
     /* Agent launch + status check. Available in both CLI and daemon: both run
      * the same event loop with a wake pipe, so a spawned child advances and a
      * parent waiting on it resumes in either. launch_agent is gated by depth

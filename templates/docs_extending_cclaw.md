@@ -19,7 +19,8 @@ stores only definitions and paths.
    ("adds 2 tools, 1 skill…"). On approval it is installed into the shared
    store and its components registered. Your drafts never auto-promote.
 3. **Publish** (`extension_publish`) — makes an installed extension attachable
-   by other agents (requires approval).
+   by other agents. No approval needed — you must own the extension, and
+   attaching never grants authority by itself.
 4. **Attach** — rows in `agent_extensions` link agents to extensions; attached
    extensions load at agent startup (tools registered, skills indexed).
 

@@ -590,6 +590,28 @@ void channel_consume_events(sqlite3 *db) {
                 sqlite3_finalize(js);
             }
             if (approval_id > 0 && decision_str[0]) {
+                /* Scope check: only the channel the approval's session is
+                 * bound to may decide it — otherwise any channel could
+                 * approve another channel's (or the CLI's) pending action
+                 * by forging an approval_id. Mismatch or unbound session →
+                 * ignore the event, approval stays pending. */
+                int in_scope = 0;
+                sqlite3_stmt *sc;
+                if (sqlite3_prepare_v2(db,
+                        "SELECT 1 FROM approvals a JOIN sessions s ON s.id=a.session_id"
+                        " WHERE a.id=?1 AND s.channel_name=?2",
+                        -1, &sc, NULL) == SQLITE_OK) {
+                    sqlite3_bind_int64(sc, 1, approval_id);
+                    sqlite3_bind_text(sc, 2, ch_name, -1, SQLITE_STATIC);
+                    if (sqlite3_step(sc) == SQLITE_ROW) in_scope = 1;
+                    sqlite3_finalize(sc);
+                }
+                if (!in_scope) {
+                    LOG_WARN_("channel approval_decision out of scope ch=%s"
+                              " approval=%lld — ignored",
+                              ch_name, (long long)approval_id);
+                    goto del;
+                }
                 ApprovalDecision d = APPROVAL_DENY;
                 if (strcmp(decision_str, "yes") == 0) d = APPROVAL_ALWAYS;
                 else if (strcmp(decision_str, "once") == 0) d = APPROVAL_ONCE;

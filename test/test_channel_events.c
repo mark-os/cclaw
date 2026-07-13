@@ -536,6 +536,30 @@ static void test_channel_events_approval_decision(void) {
         sqlite3_finalize(s);
     }
 
+    /* Cross-channel forgery (review-2 F1): approval bound to channel A, a
+     * decision event arriving from channel B is ignored — resolve never
+     * fires, the approval stays pending, the event is consumed. */
+    resolve_spy_reset();
+    {
+        int64_t aid = approval_create(db, sid, "tc5", "shell_exec", "run", "{}", "rerun");
+        assert(aid > 0);
+        char payload[128];
+        snprintf(payload, sizeof(payload),
+                 "{\"approval_id\":%lld,\"decision\":\"yes\"}", (long long)aid);
+        test_event_insert(db, "otherchannel", "approval_decision", payload);
+        channel_consume_events(db);
+
+        assert(g_resolve_calls == 0);
+        assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_events;") == 0);
+
+        sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db, "SELECT state FROM approvals WHERE id=?;", -1, &s, NULL) == SQLITE_OK);
+        sqlite3_bind_int64(s, 1, aid);
+        assert(sqlite3_step(s) == SQLITE_ROW);
+        assert(strcmp((const char *)sqlite3_column_text(s, 0), "pending") == 0);
+        sqlite3_finalize(s);
+    }
+
     chdir_restore();
     db_close(db);
     printf("PASS\n");

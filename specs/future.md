@@ -276,6 +276,36 @@ couple of cheaper ones, scored on task completion and number of stuck turns.
 The tool schemas and system prompts are the real thing under test; treat
 low scores as a prompt/schema bug, not a model excuse.
 
+## Channel Chat Commands (session + ops levers in the chat itself)
+
+Today the telegram channel exposes only `/approvals` and `/admin`. OpenClaw/
+Hermes ship a small command set that turns out to be the daily-driver session
+lever: `/new` (fresh session for this chat — today a chat is bound to one
+ever-compacting session with no user-facing reset), `/status` (model, session
+id, pending work), `/usage` (see Usage Visibility below), `/model`. The
+COMMANDS table in `channel_telegram.qjs` is already the single dispatch point,
+so each command is a small handler; `/new` needs a daemon-side "detach session"
+primitive (clear `sessions.channel_name/channel_id` or bump a route) rather
+than channel-JS SQL.
+
+## Usage Visibility (token/cost accounting has writers, no readers)
+
+`agents.total_tokens_in/out` are updated on every LLM call
+(`llm_proc.c` stats update) and `llm_responses` keeps per-call metadata, but
+nothing surfaces them — no dashboard panel, no doctor line, no `/usage`.
+Minimal slice: a dashboard/doctor table (per-agent totals, last-24h from
+`llm_responses`) + a `/usage` chat command. Cost estimates need per-model
+pricing the `models` table doesn't carry — start with raw tokens.
+
+## Channel UX Niceties (studied in reference/telegram-notes.md, not adopted)
+
+Edit-in-place streaming preview (`editMessageText`), ack reaction (👀) on
+receipt, `disable_notification` for non-final messages, typing indicator
+cadence, text batching of rapid-fire messages. All are per-channel JS
+concerns (no C changes) and belong in the telegram extension when they earn
+their place; the outbox/`channel.http` machinery already supports them.
+Message chunking (4096-byte split) is already implemented.
+
 ## Extension Packaging & Community Registry (the ecosystem bet)
 
 The long game: CClaw doesn't have to get every skill, tool, or prompt right

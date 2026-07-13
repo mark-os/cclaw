@@ -112,6 +112,9 @@ void tools_load_extension_tools(ToolRegistry *reg, sqlite3 *db,
         const char *path = (const char *)sqlite3_column_text(st, 3);
         const char *policy = (const char *)sqlite3_column_text(st, 4);
         if (!name || !path) continue;
+        /* Idempotent: dispatch re-runs this query on a lookup miss (extension
+         * promoted mid-process), so skip names already materialized. */
+        if (tools_lookup(reg, name)) continue;
         js_tool_register_ext(reg, name, desc, params ? params : "{}", path,
                              (JsEvalCtx *)ectx, policy);
     }

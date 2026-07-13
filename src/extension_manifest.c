@@ -484,6 +484,16 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
         "VALUES(:owner, :name, 1)",
         manifest, name, store, owner_agent);
 
+    /* Grants are the single authorization currency (D1): the promote approval
+     * already enumerated these tools, so seed the owner's tool grants here.
+     * Attach alone never authorizes — other agents go through request_config. */
+    rc |= run_ingest(db,
+        "INSERT OR IGNORE INTO grants(agent_name, kind, value, expires_at) "
+        "SELECT :owner, 'tool', json_extract(value,'$.name'), NULL "
+        "FROM json_each(COALESCE(json_extract(:m,'$.tools'),'[]')) "
+        "WHERE json_extract(value,'$.name') IS NOT NULL",
+        manifest, name, store, owner_agent);
+
     /* channel (at most one): joined to the extension by name. */
     {
         char *ch = json_text(db, manifest, "'$.channel'");

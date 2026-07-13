@@ -210,10 +210,18 @@ entire eval-and-scrape subsystem (`__cclaw_api`, `__cclaw_tools[]` accumulation,
 `process_registered_tools`/`process_registered_hooks`).
 
 Because the registry is derived from the DB, a tool promoted **mid-session** becomes
-callable the same session by re-running the query and appending to the live
-registry — no restart, no parallel in-memory state. This mirrors
-`agent_setup_refresh_caps()`, which already re-reads grants and rebinds live tool
-contexts.
+callable the same session: on a registry lookup miss, dispatch re-runs this query
+for the *advancing* agent and retries (`dispatch_tool_inner`, src/main.c) —
+no restart, no parallel in-memory state. The reload is idempotent
+(already-registered names are skipped) and touches the registry only on the
+event-loop thread. This mirrors `agent_setup_refresh_caps()`, which already
+re-reads grants and rebinds live tool contexts.
+
+Visibility ≠ authorization, and shown ≡ granted: the LLM payload lists exactly the
+tools the agent has `grants` rows for. `extension_promote` seeds the owner's tool
+grants inside the install transaction (the promote approval enumerated them);
+`extension_attach` never grants — an attaching agent requests the tools via
+`request_config`.
 
 ## Tool Handler Contract
 

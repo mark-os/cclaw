@@ -1,8 +1,11 @@
 #include "tools.h"
+#include "db.h"
+#include "test_util.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static char *dummy_handler(const char *arguments, void *user_data) {
     (void)arguments;
@@ -106,6 +109,55 @@ static void test_handler_dispatch(void) {
     printf("  PASS test_handler_dispatch\n");
 }
 
+static const char *TOOLS_DB_PATH = "/tmp/test_cclaw_tools_ext.db";
+
+/* tools_load_extension_tools: loads extension tools into the registry from
+ * the DB, and calling it twice is idempotent (no duplicate entries). Also
+ * verifies that a second agent with no attachments registers nothing. */
+static void test_load_extension_tools_idempotent(void) {
+    unlink(TOOLS_DB_PATH);
+    sqlite3 *db = test_db_open(TOOLS_DB_PATH);
+    assert(db);
+
+    /* Seed the required DB rows: extensions, agent_extensions, tools. */
+    int rc = sqlite3_exec(db,
+        "INSERT INTO extensions(name, path, owner_agent, published, enabled)"
+        " VALUES('weather','/tmp/ext/weather','Alice',1,1);"
+        "INSERT INTO agent_extensions(agent_name, extension_name, enabled)"
+        " VALUES('Alice','weather',1);"
+        "INSERT INTO tools(name, extension_name, description, parameters_json, path, enabled)"
+        " VALUES('get_forecast','weather','Get forecast',"
+        "'{\"type\":\"object\",\"properties\":{\"lat\":{\"type\":\"number\"}}}','/tmp/ext/weather/forecast.qjs',1);"
+        "INSERT INTO tools(name, extension_name, description, parameters_json, path, enabled)"
+        " VALUES('get_alerts','weather','Get alerts',"
+        "'{\"type\":\"object\"}','/tmp/ext/weather/alerts.qjs',1);",
+        NULL, NULL, NULL);
+    assert(rc == SQLITE_OK);
+
+    ToolRegistry reg;
+    tools_init(&reg);
+    assert(reg.count == 0);
+
+    /* First load: both extension tools should appear. */
+    tools_load_extension_tools(&reg, db, "Alice", NULL);
+    assert(reg.count == 2);
+    assert(tools_lookup(&reg, "get_forecast") != NULL);
+    assert(tools_lookup(&reg, "get_alerts") != NULL);
+
+    /* Second load (idempotent): count must not grow. */
+    tools_load_extension_tools(&reg, db, "Alice", NULL);
+    assert(reg.count == 2);
+
+    /* A different agent with no attachments registers nothing. */
+    tools_load_extension_tools(&reg, db, "Bob", NULL);
+    assert(reg.count == 2);
+
+    tools_free(&reg);
+    db_close(db);
+    unlink(TOOLS_DB_PATH);
+    printf("  PASS test_load_extension_tools_idempotent\n");
+}
+
 int main(void) {
     printf("test_tools:\n");
     test_init();
@@ -114,6 +166,7 @@ int main(void) {
     test_schemas();
     test_register_full();
     test_handler_dispatch();
+    test_load_extension_tools_idempotent();
     printf("All tool registry tests passed.\n");
     return 0;
 }

@@ -79,6 +79,12 @@ static void test_recovery_scoping(void) {
                                       "grant_host", "{\"host\":\"x.com\"}", "apply");
     assert(appr_id > 0);
 
+    /* Session owned by B in a stale state but with NO orphaned tool_call —
+     * recovered silently, no resume nudge (D6). */
+    int64_t sid_c = session_create(db, "sc", "bot", -1, 0);
+    assert(sid_c > 0);
+    force_state(db, sid_c, "llm_running", id_b);
+
     /* Run recovery */
     assert(db_recover_stale_sessions(db) == 0);
 
@@ -115,6 +121,21 @@ static void test_recovery_scoping(void) {
         "SELECT COUNT(*) FROM entries WHERE session_id=? AND type='tool_result'"
         " AND tool_call_id='call_orphan_b';", sid_b, 0);
     assert(rcnt == 1);
+
+    /* mid-work session got exactly one resume nudge in its inbox (review-5
+     * F8 / D6): unconsumed, source 'system' */
+    int64_t ncnt = db_scalar_i64(db,
+        "SELECT COUNT(*) FROM inbox WHERE session_id=? AND consumed=0"
+        " AND source='system';", sid_b, 0);
+    assert(ncnt == 1);
+
+    /* session recovered without reconciled tool_calls stays silent */
+    st = db_scalar_text(db, "SELECT state FROM sessions WHERE id=?;", sid_c);
+    assert(st && strcmp(st, "idle") == 0);
+    free(st);
+    ncnt = db_scalar_i64(db,
+        "SELECT COUNT(*) FROM inbox WHERE session_id=?;", sid_c, 0);
+    assert(ncnt == 0);
 
     /* approval state='denied' */
     sqlite3_prepare_v2(db,

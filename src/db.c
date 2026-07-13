@@ -2511,6 +2511,10 @@ int db_recover_stale_sessions(sqlite3 *db) {
     if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
         return -1;
 
+    /* Sessions that get a resume nudge in step (e) — filled in step (a). */
+    int nudge_count = 0;
+    int64_t *nudge_ids = NULL;
+
     /* a) Collect orphaned tool_calls for dead-owned sessions — anything that
      * hadn't produced a result when the owner died. 'pending' = never
      * dispatched; 'running' = a forked tool or sub-agent was in flight. Both
@@ -2560,8 +2564,24 @@ int db_recover_stale_sessions(sqlite3 *db) {
             goto free_rollback;
     }
 
+    /* Distinct sessions that were provably mid-work (had a reconciled tool
+     * call) — they get a resume nudge after the reset in step (d). Sessions
+     * recovered without orphaned tool_calls stay silent (D6). */
+    if (count) {
+        nudge_ids = malloc((size_t)count * sizeof(int64_t));
+        if (!nudge_ids) goto free_rollback;
+    }
+    for (int i = 0; i < count; i++) {
+        int seen = 0;
+        for (int j = 0; j < nudge_count; j++)
+            if (nudge_ids[j] == rows[i].session_id) { seen = 1; break; }
+        if (!seen) nudge_ids[nudge_count++] = rows[i].session_id;
+    }
+
     for (int i = 0; i < count; i++) { free(rows[i].call_id); free(rows[i].name); }
     free(rows);
+    rows = NULL;
+    count = 0;
 
     /* b) Drop inert llm_jobs for dead-owned sessions. A crashed process's job
      * rows are dead-letters (jobs only ever enter via in-process pool_push, and
@@ -2591,6 +2611,18 @@ int db_recover_stale_sessions(sqlite3 *db) {
     if (sqlite3_exec(db, reset_sql, NULL, NULL, NULL) != SQLITE_OK)
         goto rollback;
 
+    /* e) Nudge each session that was provably mid-work (D6 option 2): one
+     * inbox row so session_sweep_inbox re-dispatches it on the next
+     * db_periodic tick and the model can review the interrupted turn. */
+    for (int i = 0; i < nudge_count; i++) {
+        if (inbox_insert(db, nudge_ids[i], "system",
+                "daemon restarted mid-task — a tool call was interrupted;"
+                " review the work above and resume if needed") < 0)
+            goto rollback;
+    }
+    free(nudge_ids);
+    nudge_ids = NULL;
+
     if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
         return -1;
     return 0;
@@ -2599,6 +2631,7 @@ free_rollback:
     for (int i = 0; i < count; i++) { free(rows[i].call_id); free(rows[i].name); }
     free(rows);
 rollback:
+    free(nudge_ids);
     sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
     return -1;
 }

@@ -230,12 +230,14 @@ int cron_seed_heartbeat(sqlite3 *db, const char *agent_name) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-int cron_remove(sqlite3 *db, int64_t job_id) {
-    const char *sql = "DELETE FROM cron_jobs WHERE id=?;";
+int cron_remove(sqlite3 *db, int64_t job_id, const char *agent_name) {
+    /* Agent-scoped: an agent can only delete its own jobs (review-2 F2). */
+    const char *sql = "DELETE FROM cron_jobs WHERE id=? AND agent_name=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_int64(stmt, 1, job_id);
+    sqlite3_bind_text(stmt, 2, agent_name ? agent_name : "", -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;

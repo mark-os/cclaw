@@ -73,11 +73,17 @@ static void test_cron_crud(void) {
     assert(jobs[0].next_run_at > 0);
     cron_list_free(jobs, count);
 
-    assert(cron_remove(db, jid) == 0);
+    /* Agent scoping (review-2 F2): another agent cannot delete this job */
+    assert(cron_remove(db, jid, "other_agent") == -1);
+    jobs = cron_list(db, "test_agent", &count);
+    assert(count == 1);
+    cron_list_free(jobs, count);
+
+    assert(cron_remove(db, jid, "test_agent") == 0);
     jobs = cron_list(db, "test_agent", &count);
     assert(count == 0 && jobs == NULL);
 
-    assert(cron_remove(db, 999) == -1);
+    assert(cron_remove(db, 999, "test_agent") == -1);
     assert(cron_add(db, "test_agent", "bad", "invalid", 0, 0, sid, "x") == -1);
 
     db_close(db);

@@ -220,6 +220,37 @@ static void test_cron_remove_nonexistent(void) {
     printf("  PASS: cron_remove nonexistent\n");
 }
 
+/* review-2 F2: an agent cannot remove another agent's job via the tool */
+static void test_cron_remove_cross_agent(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+
+    int64_t jid = cron_add(db, "agent_a", "a_job", "0 * * * *", 0, 0, sid, "hi");
+    assert(jid > 0);
+
+    ToolCronCtx ctx_b = {.db = db, .session_id = sid, .agent_name = "agent_b"};
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"id\":%lld}", (long long)jid);
+    char *result = tool_cron_remove_handler(buf, &ctx_b);
+    assert(result && strstr(result, "error"));
+    free(result);
+
+    /* A's job survives; A can remove it */
+    int count = 0;
+    CronJob *jobs = cron_list(db, "agent_a", &count);
+    assert(count == 1);
+    cron_list_free(jobs, count);
+
+    ToolCronCtx ctx_a = {.db = db, .session_id = sid, .agent_name = "agent_a"};
+    result = tool_cron_remove_handler(buf, &ctx_a);
+    assert(result && strstr(result, "removed cron job"));
+    free(result);
+
+    db_close(db);
+    printf("  PASS: cron_remove cross-agent scoped\n");
+}
+
 static void test_cron_register(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
@@ -251,6 +282,7 @@ int main(void) {
     test_cron_list_with_jobs();
     test_cron_remove_valid();
     test_cron_remove_nonexistent();
+    test_cron_remove_cross_agent();
     test_cron_register();
     printf("ALL PASSED\n");
     return 0;

@@ -386,6 +386,7 @@ static void test_schema_upgrade_from_v11(void) {
         "ALTER TABLE cron_jobs DROP COLUMN run_at;"     /* v23 adds */
         "ALTER TABLE cron_jobs DROP COLUMN interval_s;" /* v23 adds */
         "ALTER TABLE cron_jobs DROP COLUMN kind;"       /* v23 adds */
+        "ALTER TABLE channel_routes DROP COLUMN delivery_mode;" /* v24 adds */
         "ALTER TABLE config DROP COLUMN secret;"    /* v22 adds */
         "ALTER TABLE config DROP COLUMN required;"  /* v22 adds */
         "ALTER TABLE secrets ADD COLUMN status TEXT NOT NULL DEFAULT 'active';"

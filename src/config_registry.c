@@ -53,9 +53,13 @@ static const ConfigDef s_defs[] = {
       "\"check_session\",\"search_config\",\"secret_create\"]",
       "Tools granted to self-spawned worker sub-agents (JSON array)" },
     { "agent_default_tools",
-      "[\"file_read\",\"file_write\",\"js_eval\",\"request_config\","
+      /* D2 widening (review-1 F12): file navigation + cron self-scheduling
+       * are baseline, not escalations. cron_remove stays out — the ownership
+       * gap (any agent could remove any job) needs closing first. */
+      "[\"file_read\",\"file_write\",\"file_list\",\"file_find\",\"file_grep\","
+      "\"file_edit\",\"js_eval\",\"request_config\","
       "\"search_config\",\"memory_create\",\"memory_add\",\"memory_edit\","
-      "\"memory_delete\",\"configure_provider\","
+      "\"memory_delete\",\"configure_provider\",\"cron_set\",\"cron_list\","
       "\"create_agent\",\"extension_promote\",\"extension_publish\","
       "\"extension_attach\",\"extension_list\",\"extension_fork\",\"launch_agent\","
       "\"check_session\",\"secret_create\"]",

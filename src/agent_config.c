@@ -27,9 +27,11 @@ void agent_config_free(AgentConfig *ac) {
     free(ac);
 }
 
-/* helper — render template vars in a string */
+/* helper — render template vars in a string. {date} stays date-only on
+ * purpose: anything finer would bust the provider prompt cache every render
+ * (review-1 F22); time-of-day belongs in session_context_text(). */
 static char *render_template(const char *tmpl, int64_t session_id,
-                             const char *agent_name) {
+                             const char *agent_name, const char *agents_dir) {
     if (!tmpl) return NULL;
 
     char sid_buf[21];
@@ -43,12 +45,17 @@ static char *render_template(const char *tmpl, int64_t session_id,
 
     const char *aname = agent_name ? agent_name : "Assistant";
 
+    char ws_buf[PATH_MAX];
+    snprintf(ws_buf, sizeof(ws_buf), "%s/%s/workspace",
+             agents_dir ? agents_dir : "agents", aname);
+
     TemplateVar vars[] = {
         {"{session_id}", sid_buf},
         {"{date}", date_buf},
         {"{agent_name}", aname},
+        {"{workspace}", ws_buf},
     };
-    return template_render(tmpl, vars, 3);
+    return template_render(tmpl, vars, 4);
 }
 
 /* Assemble system prompt from DB agent row */
@@ -72,11 +79,52 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
      * A NULL render is a hard failure — don't continue with an empty body. */
     const char *tmpl = row->system_prompt;
     char *rendered = (tmpl && tmpl[0])
-        ? render_template(tmpl, session_id, agent_name)
+        ? render_template(tmpl, session_id, agent_name, agents_dir)
         : config_render_system_prompt(fallback_cfg, session_id);
     if (!rendered) {
         agent_row_free(row);
         return NULL;
+    }
+
+    /* Generated tool sections, straight from grants ∩ tools (one query).
+     * Deterministic rendering (ORDER BY name) is the cache discipline: the
+     * prompt is rebuilt every llm_req, byte-stable until a grant changes —
+     * and a mid-session change busting the provider cache once is correct.
+     * "Requestable" = registered-but-ungranted; shown ≡ granted holds for
+     * the payload, this section is how the agent learns what to ask for. */
+    char *tool_section = NULL;
+    size_t tool_len = 0;
+    {
+        const char *tsql =
+            "WITH visible AS ("
+            "  SELECT t.name, COALESCE(t.description,'') AS description,"
+            "    EXISTS (SELECT 1 FROM grants g WHERE g.agent_name=?1"
+            "            AND g.kind='tool' AND g.value=t.name"
+            "            AND (g.expires_at IS NULL OR g.expires_at > unixepoch()))"
+            "      AS granted"
+            "  FROM tools t"
+            "  WHERE t.enabled=1 AND (t.agent_name IS NULL OR t.agent_name=?1)"
+            ")"
+            "SELECT COALESCE((SELECT char(10)||char(10)||'## Your Tools'||char(10)||"
+            "    group_concat('- '||name||' — '||description, char(10) ORDER BY name)"
+            "  FROM visible WHERE granted), '')"
+            " || COALESCE((SELECT char(10)||char(10)||'## Requestable Tools'||char(10)||"
+            "    'Registered but not granted to you. Ask with request_config'"
+            "    ||' (action grant_tool) and a reason; an operator approves.'||char(10)||"
+            "    group_concat('- '||name||' — '||description, char(10) ORDER BY name)"
+            "  FROM visible WHERE NOT granted), '');";
+        sqlite3_stmt *ts;
+        if (sqlite3_prepare_v2(db, tsql, -1, &ts, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(ts, 1, agent_name, -1, SQLITE_STATIC);
+            if (sqlite3_step(ts) == SQLITE_ROW) {
+                const char *txt = (const char *)sqlite3_column_text(ts, 0);
+                if (txt && txt[0]) {
+                    tool_section = strdup(txt);
+                    tool_len = tool_section ? strlen(tool_section) : 0;
+                }
+            }
+            sqlite3_finalize(ts);
+        }
     }
 
     /* Skill index (progressive disclosure): names+descriptions+locations
@@ -122,11 +170,12 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     /* Calculate total size */
     size_t rlen = rendered ? strlen(rendered) : 0;
     size_t skills_len = skills ? strlen(skills) : 0;
-    size_t total = rlen + skills_len + mb_len + 128;
+    size_t total = rlen + tool_len + skills_len + mb_len + 128;
 
     char *out = malloc(total);
     if (!out) {
         free(rendered);
+        free(tool_section);
         free(skills);
         free(mb_section);
         agent_row_free(row);
@@ -137,6 +186,10 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
     if (rendered) {
         memcpy(out, rendered, rlen);
         oi = rlen;
+    }
+
+    if (tool_len > 0) {
+        memcpy(out + oi, tool_section, tool_len); oi += tool_len;
     }
 
     if (mb_len > 0) {
@@ -150,6 +203,7 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
 
     out[oi] = '\0';
     free(rendered);
+    free(tool_section);
     free(skills);
     free(mb_section);
     agent_row_free(row);

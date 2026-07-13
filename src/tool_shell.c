@@ -29,7 +29,9 @@ int tool_shell_register(ToolRegistry *reg, int default_timeout, const char *work
     sc->secret_count = 0;
     sc->sb.sandbox = 1;
     int rc = tools_register(reg, "shell_exec",
-                            "Execute a shell command and return stdout+stderr",
+                            "Execute a shell command and return stdout+stderr. "
+                            "For file exploration prefer file_read/file_list/"
+                            "file_find/file_grep — cheaper and sandbox-friendly.",
                             SHELL_PARAMS_JSON, NULL, sc);
     if (rc == 0) {
         ToolEntry *e = tools_lookup(reg, "shell_exec");

@@ -180,7 +180,8 @@ static char *tool_extension_attach_handler(const char *arguments, void *user_dat
     int step = sqlite3_step(st);
     sqlite3_finalize(st);
     if (step != SQLITE_DONE) return strdup("error: attach failed (db)");
-    return msgf("attached extension '%s' to agent '%s'; its tools load on the next turn.",
+    return msgf("attached extension '%s' to agent '%s'; its tools are callable "
+                "once granted (attach does not grant — use request_config).",
                 namebuf, ctx->agent_name);
 }
 
@@ -368,8 +369,8 @@ int tool_extension_register(ToolRegistry *reg, ToolExtensionCtx *ctx) {
         "single publish flag; you must be the owner.",
         NAME_PARAMS, tool_extension_publish_handler, ctx);
     rc |= tools_register(reg, "extension_attach",
-        "Attach a visible extension (published, or owned by you) to yourself so "
-        "its tools become available on your next turn.",
+        "Attach a visible extension (published, or owned by you) to yourself. "
+        "Attach does not grant its tools — request them via request_config.",
         NAME_PARAMS, tool_extension_attach_handler, ctx);
     rc |= tools_register(reg, "extension_list",
         "List extensions visible to you (owned or published), with owner, publish "

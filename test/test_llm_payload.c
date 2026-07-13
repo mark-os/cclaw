@@ -713,6 +713,92 @@ static void test_hook_inject_directive(void) {
     printf("  PASS test_hook_inject_directive\n");
 }
 
+/* An extension tool attached via agent_extensions but NOT present in the
+ * agent's grants must NOT appear in the payload tools array; once its name
+ * IS in the granted list, it DOES appear. This exercises the SQL_OPENAI_TOOLS
+ * grant-only filter (no attachment OR-branch). */
+static void test_extension_tool_grant_filtering(void) {
+    unlink(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+
+    int64_t sid;
+    setup_session(db, &sid);
+
+    /* Seed an extension tool that the session's agent ('default') has attached
+     * but NOT yet granted. Also seed a builtin tool that IS granted (control). */
+    sqlite3_exec(db,
+        "INSERT INTO extensions(name, path, owner_agent, published, enabled)"
+        " VALUES('nws','/tmp/ext/nws','default',1,1);"
+        "INSERT INTO agent_extensions(agent_name, extension_name, enabled)"
+        " VALUES('default','nws',1);"
+        "INSERT INTO tools(name, extension_name, description, parameters_json, path, enabled)"
+        " VALUES('get_forecast','nws','Get forecast',"
+        "'{\"type\":\"object\",\"properties\":{\"lat\":{\"type\":\"number\"}}}','/tmp/ext/nws/forecast.qjs',1);"
+        "INSERT INTO tools(name, description, parameters_json, enabled)"
+        " VALUES('file_read','Read a file',"
+        "'{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}',1);"
+        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','file_read');",
+        NULL, NULL, NULL);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.context_window = 128000;
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+
+    /* Build payload WITHOUT the extension tool granted. */
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+
+    sqlite3_stmt *s;
+    /* Only the granted builtin should appear (count=1). */
+    sqlite3_prepare_v2(db, "SELECT json_array_length(json_extract(?1,'$.tools'))", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
+
+    /* The one tool must be file_read, not get_forecast. */
+    json_get_str(db, payload.body, "$.tools[0].function.name", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "file_read") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    /* Now grant the extension tool to 'default'. */
+    sqlite3_exec(db,
+        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','get_forecast');",
+        NULL, NULL, NULL);
+
+    /* Rebuild payload — both tools should now appear. */
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+
+    sqlite3_prepare_v2(db, "SELECT json_array_length(json_extract(?1,'$.tools'))", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 2);
+    sqlite3_finalize(s);
+
+    /* Verify get_forecast is among them. */
+    sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.tools'))"
+        " WHERE json_extract(value,'$.function.name')='get_forecast'",
+        -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 1);
+    sqlite3_finalize(s);
+
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+    db_close(db); unlink(DB_PATH);
+    printf("  PASS test_extension_tool_grant_filtering\n");
+}
+
 int main(void) {
     printf("test_llm_payload:\n");
     test_openai_payload();
@@ -725,6 +811,7 @@ int main(void) {
     test_compaction_entry_in_payload();
     test_network_hosts_query_time_wrap();
     test_hook_inject_directive();
+    test_extension_tool_grant_filtering();
     printf("All payload tests passed.\n");
     return 0;
 }

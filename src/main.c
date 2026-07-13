@@ -528,6 +528,21 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     if (g_child_count >= CHILD_MAX) return -1;
 
     ToolEntry *te = g_tool_setup ? tools_lookup(&g_tool_setup->reg, tc->name) : NULL;
+    if (!te && g_tool_setup) {
+        /* Registry is a cache of the extension-tool query; a miss may just
+         * mean an extension was promoted/attached after startup, or that this
+         * is a non-default agent whose tools were never materialized. Refresh
+         * for the *advancing* agent and retry. Safe unlocked: the registry is
+         * only touched on the event-loop thread. On TOOLS_MAX overflow the
+         * register fails, the second lookup misses, and we fall through to the
+         * unknown-tool error instead of corrupting the registry. */
+        tools_load_extension_tools(&g_tool_setup->reg, g_db, agent_name,
+                                   &g_tool_setup->js_eval_ctx);
+        te = tools_lookup(&g_tool_setup->reg, tc->name);
+        if (!te)
+            LOG_WARN_("tool '%s' not registered after extension reload (agent=%s)",
+                      tc->name, agent_name);
+    }
     if (!te) {
         /* Unknown tool — write error result directly */
         char err[192];
@@ -1857,6 +1872,11 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     if (rename_failed)
         snprintf(result_buf, sizeof(result_buf), "error: %s failed, rolled back",
                  a->action ? a->action : "apply");
+    else if (decision == APPROVAL_ALWAYS && a->action &&
+             strcmp(a->action, "extension_promote") == 0)
+        snprintf(result_buf, sizeof(result_buf),
+                 "approved: extension_promote — registered; its tools are "
+                 "granted to you and callable immediately");
     else if (decision == APPROVAL_ALWAYS)
         snprintf(result_buf, sizeof(result_buf), "approved: %s", a->action);
     else

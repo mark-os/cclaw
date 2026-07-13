@@ -524,10 +524,48 @@ static void test_manifest_agents(void) {
     printf("  PASS test_manifest_agents\n");
 }
 
+/* extension_install seeds tool grants for the owner agent: one grant row
+ * per $.tools[] entry (kind='tool', value=tool name). Re-install must be
+ * idempotent (INSERT OR IGNORE — grant count unchanged). */
+static void test_install_seeds_grants(void) {
+    unlink(TEST_DB);
+    setup_bundle();
+    sqlite3 *db = test_db_open(TEST_DB);
+    assert(db);
+
+    char *err = NULL;
+    int rc = extension_install(db, BUNDLE, "grantee", &err);
+    assert(rc == 0 && err == NULL);
+
+    /* The fixture manifest declares one tool: "get_forecast". Verify that a
+     * grants row was seeded for the owner 'grantee'. */
+    assert(qint(db, "SELECT count(*) FROM grants WHERE agent_name='grantee'"
+                    " AND kind='tool' AND value='get_forecast'") == 1);
+    /* Verify grant attributes: expires_at must be NULL (permanent). */
+    assert(qint(db, "SELECT count(*) FROM grants WHERE agent_name='grantee'"
+                    " AND kind='tool' AND value='get_forecast'"
+                    " AND expires_at IS NULL") == 1);
+
+    /* Total tool grants for this owner = exactly the manifest tool count (1). */
+    int grant_count = qint(db, "SELECT count(*) FROM grants WHERE agent_name='grantee'"
+                               " AND kind='tool'");
+    assert(grant_count == 1);
+
+    /* Re-install: idempotent — grant count unchanged (INSERT OR IGNORE). */
+    assert(extension_install(db, BUNDLE, "grantee", &err) == 0);
+    int grant_count2 = qint(db, "SELECT count(*) FROM grants WHERE agent_name='grantee'"
+                                " AND kind='tool'");
+    assert(grant_count2 == grant_count);
+
+    db_close(db);
+    printf("  PASS test_install_seeds_grants\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_extension_manifest:\n");
     test_install_ingests_rows();
+    test_install_seeds_grants();
     test_reinstall_is_idempotent();
     test_config_lifecycle();
     test_validate_rejects_missing_handler();

@@ -2361,6 +2361,25 @@ static void deliver_response(int64_t session_id) {
         if (explicit_mode) { free(channel); free(channel_id); return; }
     }
 
+    /* Ingestion-only channel (handler defines no onOutbox, recorded in
+     * channel_state at load time): nothing would ever drain the row. */
+    {
+        const char *osql =
+            "SELECT value FROM channel_state"
+            " WHERE channel_name=?1 AND key='has_outbox';";
+        sqlite3_stmt *os;
+        int ingest_only = 0;
+        if (sqlite3_prepare_v2(g_db, osql, -1, &os, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(os, 1, channel, -1, SQLITE_STATIC);
+            if (sqlite3_step(os) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(os, 0);
+                ingest_only = v && strcmp(v, "0") == 0;
+            }
+            sqlite3_finalize(os);
+        }
+        if (ingest_only) { free(channel); free(channel_id); return; }
+    }
+
     char *text = get_response_text(g_db, session_id);
     if (!text) { free(channel); free(channel_id); return; }
 

@@ -129,6 +129,20 @@ JSValue eval_js(JSContext *ctx, const char *code, const char *tag) {
     return v;
 }
 
+/* Ingestion-only detection: a handler with no onOutbox is a pure source.
+ * Recorded in channel_state at load time (runner startup and --check) so the
+ * daemon can skip outbox inserts for its sessions instead of queueing rows
+ * nothing will ever drain. */
+static void record_outbox_capability(JSContext *ctx) {
+    JSValue v = eval_js(ctx, "typeof onOutbox === 'function' ? '1' : '0'", "<cap>");
+    const char *s = JS_IsUndefined(v) ? NULL : JS_ToCString(ctx, v);
+    if (s) {
+        channel_set_config(g_ctx, "has_outbox", s);
+        JS_FreeCString(ctx, s);
+    }
+    JS_FreeValue(ctx, v);
+}
+
 void set_global_str(JSContext *ctx, const char *name, const char *val) {
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, name,
@@ -624,6 +638,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
         return 1;
     }
     JS_FreeValue(ctx, load_val);
+    record_outbox_capability(ctx);
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
     g_multi = curl_multi_init();
@@ -942,6 +957,7 @@ int channel_runner_check(const char *db_path, const char *channel_name, char **e
         rc = -1;
     } else {
         JS_FreeValue(ctx, load_val);
+        record_outbox_capability(ctx);
         curl_global_init(CURL_GLOBAL_DEFAULT);
         g_multi = curl_multi_init();
         JSValue init_ret = eval_js(ctx, "onInit()", "<check-init>");

@@ -131,6 +131,71 @@ void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *te
     free(admins);
 }
 
+/* Is this channel_id one of the channel's admin_ids? Same comma/space
+ * parse as channel_notify_admins above. */
+int channel_cid_is_admin(sqlite3 *db, const char *channel_name, const char *cid) {
+    char *admins = channel_config_get(db, channel_name, "admin_ids");
+    if (!admins || !admins[0]) { free(admins); return 0; }
+    int hit = 0;
+    size_t cid_len = strlen(cid);
+    char *p = admins;
+    while (*p) {
+        while (*p == ',' || *p == ' ') p++;
+        if (!*p) break;
+        char *end = p;
+        while (*end && *end != ',' && *end != ' ') end++;
+        if ((size_t)(end - p) == cid_len && strncmp(p, cid, cid_len) == 0) {
+            hit = 1;
+            break;
+        }
+        p = end;
+    }
+    free(admins);
+    return hit;
+}
+
+/* One-time admin notification for a dropped unrouted sender. The dedup set is
+ * in-memory, per-process — ephemeral politeness state, not authority: a
+ * re-notify after a daemon restart is acceptable and not worth a table. */
+#define GATE_NOTIFIED_MAX 256
+static char *g_gate_notified[GATE_NOTIFIED_MAX];
+static int g_gate_notified_n;
+
+static void gate_notify_unknown(sqlite3 *db, const char *ch_name,
+                                const char *cid, const char *payload) {
+    char key[192];
+    snprintf(key, sizeof(key), "%s\x1f%s", ch_name, cid);
+    for (int i = 0; i < g_gate_notified_n; i++)
+        if (strcmp(g_gate_notified[i], key) == 0) return;
+    if (g_gate_notified_n < GATE_NOTIFIED_MAX)
+        g_gate_notified[g_gate_notified_n++] = strdup(key);
+
+    /* Sender facts for the operator, rendered from the envelope in SQL. */
+    char *note = NULL;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 'unrouted message from '"
+            " || COALESCE(NULLIF(json_extract(?1,'$.sender_name'),''),'(unknown)')"
+            " || ' (sender id ' || COALESCE(json_extract(?1,'$.sender_id'),'?')"
+            " || ', chat ' || ?2 || ') on channel ' || ?3"
+            " || ' — dropped. To accept: cclaw route add ' || ?3 || ' ' || ?2"
+            " || ' <Agent>'",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, payload, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, cid, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 3, ch_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            if (v) note = strdup(v);
+        }
+        sqlite3_finalize(st);
+    }
+    if (note) {
+        channel_notify_admins(db, ch_name, note);
+        free(note);
+    }
+}
+
 int channel_bounce(sqlite3 *db, const char *name) {
     const char *sql = "SELECT pid FROM channels WHERE name=?;";
     sqlite3_stmt *s;
@@ -566,17 +631,30 @@ void channel_consume_events(sqlite3 *db) {
             if (!agent && strcmp(cid, "*") != 0)
                 agent = db_channel_binding_get(db, ch_name, "*");
             if (!agent) {
-                /* No route: fall back to the default agent instead of
-                 * silently deleting the message — a fresh DB has no
-                 * channel_routes rows at all, and a dropped message with
-                 * no trace is indistinguishable from a dead channel. */
-                agent = config_get(db, "default_agent");
-                if (agent)
-                    LOG_INFO_("channel no route ch=%s cid=%s, using default_agent=%s",
-                              ch_name, cid, agent);
-                else
-                    LOG_WARN_("channel no route ch=%s cid=%s and no default_agent"
-                              " — dropping message", ch_name, cid);
+                /* Unrouted sender — the gate (specs/channels.md). Chat
+                 * membership is not authority: only an admin, or a channel
+                 * with <ext>.allow_unknown=1, reaches the default agent.
+                 * Everyone else is dropped with a log line + a one-time admin
+                 * notification carrying enough to `cclaw route add` them. */
+                int accept = channel_cid_is_admin(db, ch_name, cid);
+                if (!accept) {
+                    char *au = channel_config_get(db, ch_name, "allow_unknown");
+                    accept = au && strcmp(au, "1") == 0;
+                    free(au);
+                }
+                if (accept) {
+                    agent = config_get(db, "default_agent");
+                    if (agent)
+                        LOG_INFO_("channel no route ch=%s cid=%s, using default_agent=%s",
+                                  ch_name, cid, agent);
+                    else
+                        LOG_WARN_("channel no route ch=%s cid=%s and no default_agent"
+                                  " — dropping message", ch_name, cid);
+                } else {
+                    LOG_WARN_("channel unrouted sender dropped ch=%s cid=%s",
+                              ch_name, cid);
+                    gate_notify_unknown(db, ch_name, cid, payload);
+                }
             }
             if (!agent) goto del;
 
@@ -661,7 +739,33 @@ void channel_consume_events(sqlite3 *db) {
                  * (approval_decision, above), never by interpreting chat
                  * text. A pending approval simply stays pending until a
                  * decision event resolves it (or it expires). */
-                int64_t irc = inbox_insert_scanned(db, sid, ch_name, payload);
+                /* The raw envelope never reaches entries (F19): hand the inbox
+                 * extracted plain text — bare text for DMs, sender-prefixed
+                 * for groups (attribution is load-bearing in explicit-mode
+                 * groups). A payload with no $.text (custom channel emitting
+                 * its own shape) passes through unchanged. */
+                char *content = NULL;
+                {
+                    const char *fsql =
+                        "SELECT CASE"
+                        " WHEN json_extract(?1,'$.text') IS NULL THEN ?1"
+                        " WHEN json_extract(?1,'$.chat_type')='group'"
+                        "  AND COALESCE(json_extract(?1,'$.sender_name'),'')<>''"
+                        " THEN json_extract(?1,'$.sender_name')||': '||json_extract(?1,'$.text')"
+                        " ELSE json_extract(?1,'$.text') END;";
+                    sqlite3_stmt *fs;
+                    if (sqlite3_prepare_v2(db, fsql, -1, &fs, NULL) == SQLITE_OK) {
+                        sqlite3_bind_text(fs, 1, payload, -1, SQLITE_STATIC);
+                        if (sqlite3_step(fs) == SQLITE_ROW) {
+                            const char *v = (const char *)sqlite3_column_text(fs, 0);
+                            if (v) content = strdup(v);
+                        }
+                        sqlite3_finalize(fs);
+                    }
+                }
+                int64_t irc = inbox_insert_scanned(db, sid, ch_name,
+                                                   content ? content : payload);
+                free(content);
                 if (irc < 0) {
                     /* Leave the row in channel_events (skip the del: below)
                      * so the next consume pass retries it — but log it, since

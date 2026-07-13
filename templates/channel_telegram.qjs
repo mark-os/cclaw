@@ -67,6 +67,22 @@ function onInit() {
     for (var name in COMMANDS) cmdList.push({command: name, description: COMMANDS[name].description});
     tgCast("setMyCommands", {commands: cmdList});
 
+    // Bot identity feeds the envelope's mentioned/reply_to_me facts.
+    // Fire-and-forget: until it resolves both report false — in privacy-mode
+    // groups Telegram mostly delivers mentions/replies anyway, so the window
+    // is tiny and the fields are advisory, not authority.
+    tgCall("getMe", {}).then(function(r) {
+        if (r.error || r.status < 200 || r.status >= 300) {
+            channel.log("getMe failed status=" + r.status + " error=" + r.error);
+            return;
+        }
+        var d = JSON.parse(r.body);
+        if (d.ok && d.result) {
+            config.bot_id = "" + d.result.id;
+            config.bot_username = d.result.username || "";
+        }
+    });
+
     if (mode === "webhook") return {};
     return {poll: pollShape()};
 }
@@ -219,6 +235,29 @@ function logUnhandledUpdate(update) {
     else channel.log("ignoring unsupported update id=" + id);
 }
 
+// Structured platform facts for channel.emit — the handler reports facts,
+// never authority decisions (routing/gating happen in C against the DB).
+// chat.id vs from.id: in a group the chat id is the (negative) group id and
+// the sender id is the person; in a DM they coincide.
+function envelopeFields(msg) {
+    var chat = msg.chat || {};
+    var from = msg.from || {};
+    var text = msg.text || "";
+    var mentioned = !!(config.bot_username &&
+        text.indexOf("@" + config.bot_username) !== -1);
+    var replyFrom = msg.reply_to_message && msg.reply_to_message.from;
+    var reply_to_me = !!(config.bot_id && replyFrom &&
+        ("" + replyFrom.id) === config.bot_id);
+    return {
+        channel_id: "" + chat.id,
+        sender_id: from.id !== undefined ? "" + from.id : "",
+        sender_name: from.first_name || "",
+        chat_type: chat.type === "private" ? "dm" : "group",
+        mentioned: mentioned,
+        reply_to_me: reply_to_me
+    };
+}
+
 function processMessage(msg, updateId) {
     var chat = msg.chat;
     var text = msg.text;
@@ -253,12 +292,9 @@ function processMessage(msg, updateId) {
     }
 
     // Regular message → emit to daemon
-    var payload = JSON.stringify({
-        channel_id: chatId,
-        text: text,
-        from: msg.from ? msg.from.first_name || "" : ""
-    });
-    return channel.emit("message", payload, "tg_" + updateId) === 0;
+    var env = envelopeFields(msg);
+    env.text = text;
+    return channel.emit("message", JSON.stringify(env), "tg_" + updateId) === 0;
 }
 
 // ── Media messages (voice, photo) ───────────────────────────────
@@ -317,13 +353,10 @@ async function fetchMedia(msg, updateId, chatId, fileId, media, what) {
             throw "download status=" + dl.status + " error=" + dl.error;
 
         media.path = dl.path;
-        var payload = JSON.stringify({
-            channel_id: chatId,
-            from: msg.from ? msg.from.first_name || "" : "",
-            text: msg.caption || "",
-            media: media
-        });
-        if (channel.emit("message", payload, "tg_" + updateId) !== 0)
+        var env = envelopeFields(msg);
+        env.text = msg.caption || "";
+        env.media = media;
+        if (channel.emit("message", JSON.stringify(env), "tg_" + updateId) !== 0)
             throw "emit failed";
     } catch (e) {
         channel.log(what + " failed update=" + updateId + ": " + e);

@@ -191,9 +191,9 @@ static void test_channel_events_wildcard_fallback(void) {
     printf("PASS\n");
 }
 
-/* No binding at all for the channel: falls back to the default agent
- * instead of silently dropping the message — a fresh DB has no
- * channel_routes rows, and headless installs must still route. */
+/* No binding at all: the gate drops the message (unknown sender, no
+ * admin_ids match, allow_unknown off) — chat membership is not authority.
+ * The event row is still consumed. */
 static void test_channel_events_no_binding(void) {
     setup();
     sqlite3 *db = test_db_open(DB_PATH);
@@ -205,9 +205,140 @@ static void test_channel_events_no_binding(void) {
     channel_consume_events(db);
 
     assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_events;") == 0);
-    int64_t sid = test_session_find(db, "unbound", "user1", "Assistant");
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM sessions;") == 0);
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM inbox;") == 0);
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
+/* Seed a channels row + registry keys so channel_config_get resolves for the
+ * gate tests: channel `name` runs extension `name` with the given admin_ids. */
+static void test_gate_channel_seed(sqlite3 *db, const char *name, const char *admin_ids) {
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+        "INSERT OR REPLACE INTO channels(name, extension_name, type, binary_path, status)"
+        " VALUES('%s','%s','test','/x','active');"
+        "INSERT INTO config(key, value, default_value, description)"
+        " VALUES('%s.admin_ids','%s','','admins')"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        name, name, name, admin_ids);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+}
+
+/* Routing gate: unknown sender dropped + exactly one admin notification
+ * (deduped per process); admin sender accepted via default_agent;
+ * allow_unknown=1 restores the open fallback. */
+static void test_channel_events_gate(void) {
+    setup();
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    test_gate_channel_seed(db, "gated", "777");
+
+    /* Unknown sender: dropped, one notification row to the admin chat. */
+    test_event_insert(db, "gated", "message",
+        "{\"channel_id\":\"555\",\"text\":\"let me in\","
+        "\"sender_id\":\"555\",\"sender_name\":\"Eve\",\"chat_type\":\"dm\"}");
+    channel_consume_events(db);
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM sessions;") == 0);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='gated'"
+        " AND json_extract(payload,'$.chat_id')='777';") == 1);
+    char *note = NULL;
+    {
+        sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db,
+            "SELECT json_extract(payload,'$.text') FROM channel_outbox"
+            " WHERE channel_name='gated' LIMIT 1;", -1, &s, NULL) == SQLITE_OK);
+        assert(sqlite3_step(s) == SQLITE_ROW);
+        note = strdup((const char *)sqlite3_column_text(s, 0));
+        sqlite3_finalize(s);
+    }
+    assert(note && strstr(note, "Eve") && strstr(note, "555")
+           && strstr(note, "route add gated 555"));
+    free(note);
+
+    /* Same unknown sender again: still dropped, NO second notification. */
+    test_event_insert(db, "gated", "message",
+        "{\"channel_id\":\"555\",\"text\":\"hello?\",\"sender_id\":\"555\","
+        "\"sender_name\":\"Eve\",\"chat_type\":\"dm\"}");
+    channel_consume_events(db);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='gated';") == 1);
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM sessions;") == 0);
+
+    /* Admin sender (channel_id in admin_ids): accepted via default agent. */
+    test_event_insert(db, "gated", "message",
+        "{\"channel_id\":\"777\",\"text\":\"hi\",\"sender_id\":\"777\","
+        "\"sender_name\":\"Op\",\"chat_type\":\"dm\"}");
+    channel_consume_events(db);
+    int64_t sid = test_session_find(db, "gated", "777", "Assistant");
     assert(sid > 0);
     assert(test_inbox_count(db, sid) == 1);
+
+    /* allow_unknown=1: unrouted stranger reaches the default agent again. */
+    test_gate_channel_seed(db, "open", "");
+    assert(sqlite3_exec(db,
+        "INSERT INTO config(key, value, default_value, description)"
+        " VALUES('open.allow_unknown','1','0','')"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        NULL, NULL, NULL) == SQLITE_OK);
+    test_event_insert(db, "open", "message",
+        "{\"channel_id\":\"999\",\"text\":\"yo\",\"sender_id\":\"999\","
+        "\"sender_name\":\"Sam\",\"chat_type\":\"dm\"}");
+    channel_consume_events(db);
+    assert(test_session_find(db, "open", "999", "Assistant") > 0);
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
+/* F19: the entry content handed to the inbox is extracted plain text, never
+ * the raw JSON envelope — bare text for DMs, sender-prefixed for groups.
+ * Payloads without $.text (custom channels) pass through unchanged. */
+static void test_channel_events_plain_text_content(void) {
+    setup();
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    test_binding_set(db, "mychannel", "dm1", "testagent");
+    test_binding_set(db, "mychannel", "grp1", "testagent");
+    test_binding_set(db, "mychannel", "raw1", "testagent");
+
+    test_event_insert(db, "mychannel", "message",
+        "{\"channel_id\":\"dm1\",\"text\":\"hello there\",\"sender_id\":\"1\","
+        "\"sender_name\":\"Mark\",\"chat_type\":\"dm\"}");
+    test_event_insert(db, "mychannel", "message",
+        "{\"channel_id\":\"grp1\",\"text\":\"group hi\",\"sender_id\":\"1\","
+        "\"sender_name\":\"Mark\",\"chat_type\":\"group\"}");
+    test_event_insert(db, "mychannel", "message",
+        "{\"channel_id\":\"raw1\",\"note\":\"custom shape\"}");
+    channel_consume_events(db);
+
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT i.payload FROM inbox i JOIN sessions se ON se.id=i.session_id"
+        " WHERE se.channel_id=?1;", -1, &s, NULL) == SQLITE_OK);
+
+    sqlite3_bind_text(s, 1, "dm1", -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "hello there") == 0);
+    sqlite3_reset(s);
+
+    sqlite3_bind_text(s, 1, "grp1", -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "Mark: group hi") == 0);
+    sqlite3_reset(s);
+
+    sqlite3_bind_text(s, 1, "raw1", -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strstr((const char *)sqlite3_column_text(s, 0), "custom shape"));
+    sqlite3_finalize(s);
 
     chdir_restore();
     db_close(db);
@@ -472,6 +603,12 @@ int main(void) {
 
     printf("  channel_events_no_binding... ");
     test_channel_events_no_binding();
+
+    printf("  channel_events_gate... ");
+    test_channel_events_gate();
+
+    printf("  channel_events_plain_text_content... ");
+    test_channel_events_plain_text_content();
 
     printf("  channel_events_non_message_type... ");
     test_channel_events_non_message_type();

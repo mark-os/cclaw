@@ -407,8 +407,13 @@ char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *
 /* Sum cost_nano for all entries in a session. Returns total nanodollars. */
 int64_t session_cost(sqlite3 *db, int64_t session_id);
 
-/* Rate limiting — returns 1 if under limit (ok to proceed), 0 if exceeded */
-int rate_limit_check(sqlite3 *db, const char *provider_name);
+/* Token rate limiting — returns 1 if under limit (ok to proceed), 0 if
+ * exceeded. Sums usage over the last hour across all models; limit is
+ * typically cfg->token_rate_limit (<=0 = unlimited). */
+int rate_limit_check(sqlite3 *db, int limit);
+
+/* Rolling 24h spend across all sessions, in nanodollars. */
+int64_t db_cost_last_24h(sqlite3 *db);
 
 /* Crash recovery, owner-scoped: reclaims only dead-owned stale sessions (owner
  * absent from the processes registry) — any live instance may call it (startup

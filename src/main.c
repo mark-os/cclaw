@@ -245,9 +245,25 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
     }
 
     /* Rate limit check */
-    if (g_cfg->token_rate_limit > 0 && !rate_limit_check(g_db, NULL)) {
+    if (!rate_limit_check(g_db, g_cfg->token_rate_limit)) {
+        LOG_WARN_("token_rate_limit hit, session %lld rate_limited",
+                  (long long)session_id);
         session_set_state(g_db, session_id, "rate_limited");
         return -1;
+    }
+
+    /* Daily cost ceiling — rolling 24h. Unpriced models record cost 0, so the
+     * token cap above stays the always-available brake. */
+    if (g_cfg->daily_cost_limit_nano > 0) {
+        int64_t spent = db_cost_last_24h(g_db);
+        if (spent >= g_cfg->daily_cost_limit_nano) {
+            LOG_WARN_("daily_cost_limit hit spent_nano=%lld limit_nano=%lld,"
+                      " session %lld rate_limited",
+                      (long long)spent, (long long)g_cfg->daily_cost_limit_nano,
+                      (long long)session_id);
+            session_set_state(g_db, session_id, "rate_limited");
+            return -1;
+        }
     }
 
     /* Disk floor: an LLM turn writes a full response body + entries + archive.

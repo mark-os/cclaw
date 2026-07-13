@@ -490,6 +490,41 @@ static void test_schema_upgrade_from_v11(void) {
     printf("  PASS test_schema_upgrade_from_v11\n");
 }
 
+static void test_rate_limit_and_cost(void) {
+    const char *path = "/tmp/test_cclaw_db_budget.sqlite";
+    unlink(path);
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+
+    /* Recent entry inside both windows: 600 tokens, $1.50 */
+    assert(sqlite3_exec(db,
+        "INSERT INTO entries(session_id, role, content, usage_in, usage_out,"
+        " cost_nano, created_at) VALUES"
+        " (1, 2, 'recent', 400, 200, 1500000000, unixepoch()-60);",
+        NULL, NULL, NULL) == SQLITE_OK);
+    /* Old entry outside both windows (25h > 24h cost, > 1h token window) */
+    assert(sqlite3_exec(db,
+        "INSERT INTO entries(session_id, role, content, usage_in, usage_out,"
+        " cost_nano, created_at) VALUES"
+        " (1, 2, 'old', 5000, 5000, 9000000000, unixepoch()-90000);",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    /* Global limit enforced (was dead code: NULL provider always passed) */
+    assert(rate_limit_check(db, 500) == 0);  /* 600 used >= 500 */
+    assert(rate_limit_check(db, 1000) == 1); /* 600 used < 1000 */
+    assert(rate_limit_check(db, 0) == 1);    /* 0 = unlimited */
+
+    /* Cost sum covers only the rolling 24h window */
+    assert(db_cost_last_24h(db) == 1500000000LL);
+
+    db_close(db);
+    char wal[160], shm[160];
+    snprintf(wal, sizeof(wal), "%s-wal", path);
+    snprintf(shm, sizeof(shm), "%s-shm", path);
+    unlink(path); unlink(wal); unlink(shm);
+    printf("  PASS test_rate_limit_and_cost\n");
+}
+
 int main(void) {
     printf("test_db:\n");
     test_open_close();
@@ -505,6 +540,7 @@ int main(void) {
     test_free_mb();
     test_schema_state();
     test_schema_upgrade_from_v11();
+    test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;
 }

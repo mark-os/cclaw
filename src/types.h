@@ -131,6 +131,7 @@ typedef struct {
     float compaction_target;  /* compact down to this × context_window (default 0.3) */
     int compaction;           /* 1=summarize via LLM (default), 0=truncate only */
     int token_rate_limit;   /* max tokens/hr (default 1000000, 0=unlimited) */
+    int64_t daily_cost_limit_nano; /* max spend/24h in nanodollars (0=unlimited) */
     LogLevel log_level;     /* error|warn|info|debug|trace */
     int save_reasoning;     /* store reasoning/thinking tokens in entry metadata */
     int save_usage;         /* store token usage in entry metadata */

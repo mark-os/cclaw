@@ -262,6 +262,20 @@ int main(void) {
     }
     printf("  PASS: incoming message -> channel_events\n");
 
+    /* The runner records outbox capability at load: the test JS defines
+     * onOutbox, so channel_state.has_outbox must be '1'. */
+    {
+        char *cap = state_value(db, "has_outbox");
+        if (!cap || strcmp(cap, "1") != 0) {
+            free(cap);
+            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+            db_close(db); mock_server_stop();
+            FAIL("has_outbox not recorded as '1'");
+        }
+        free(cap);
+        printf("  PASS: has_outbox capability recorded\n");
+    }
+
     /* 2. Outbox mode 0 → one sendRichMessage carrying the raw markdown → auto-ack */
     sqlite3_exec(db,
         "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"

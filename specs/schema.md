@@ -428,14 +428,15 @@ The AFTER INSERT trigger keys on `entries.type` (not `role`): for `tool_call` an
 ### Indexes
 
 ```
-idx_entries_session       (session_id, id)
-idx_entries_parent        (parent_id)
-idx_entries_session_role  (session_id, role)
-idx_entries_turn          (session_id, turn_id)
-idx_entries_turn_type     (session_id, turn_id, type, part_index)
-idx_entries_stop_reason   (session_id, stop_reason) WHERE stop_reason != 0
-idx_entries_plan          (parent_id, session_id, id, role, stop_reason, token_estimate, tool_call_count)
+idx_entries_session    (session_id, id)                         -- per-session scans in entry order
+idx_entries_turn_type  (session_id, turn_id, type, part_index)  -- covering: payload builder's sibling-part lookup
+idx_entries_created    (created_at)                             -- budget gate time-window sums
 ```
+
+One index per access shape, nothing speculative (schema v27 dropped four
+others). Branch walks (leaf→root recursive CTEs) join on `e.id` — rowid
+seeks on the table b-tree, no index needed. Narrower per-session filters
+(`role=`, `stop_reason=`) seek `idx_entries_session` and read a few rows.
 
 ---
 

@@ -422,6 +422,15 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       /* Budget gate (rate_limit_check / db_cost_last_24h) range-scans
        * created_at once per LLM dispatch — without this it's a full scan. */
       "CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at);" },
+    { 27,
+      /* Index diet: turn was a prefix of turn_type; parent and plan had no
+       * readers (branch CTEs walk by rowid, not parent_id); role and
+       * stop_reason filters just seek the session and read a few rows. */
+      "DROP INDEX IF EXISTS idx_entries_turn;"
+      "DROP INDEX IF EXISTS idx_entries_parent;"
+      "DROP INDEX IF EXISTS idx_entries_plan;"
+      "DROP INDEX IF EXISTS idx_entries_session_role;"
+      "DROP INDEX IF EXISTS idx_entries_stop_reason;" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

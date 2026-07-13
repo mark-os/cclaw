@@ -418,6 +418,10 @@ static const struct { int version; const char *sql; } schema_patches[] = {
        * tool_filter (JSON array of tool names) that sessions created for it
        * freeze at creation — same semantics as sub-agent filters. */
       "ALTER TABLE channel_routes ADD COLUMN tool_filter TEXT;" },
+    { 26,
+      /* Budget gate (rate_limit_check / db_cost_last_24h) range-scans
+       * created_at once per LLM dispatch — without this it's a full scan. */
+      "CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at);" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

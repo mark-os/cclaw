@@ -411,6 +411,11 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "                       session_id, task, enabled, next_run_at)"
       "  SELECT name, 'heartbeat', 'heartbeat', '', 1800, 0, '', 0, 0 FROM agents;"
       "DELETE FROM config WHERE key='heartbeat_interval';" },
+    { 24,
+      /* Channel routing contract (specs/channels.md): a route carries how
+       * turn output reaches the chat — 'auto' (outbox insert per turn, the
+       * old behavior) or 'explicit' (only via the channel_send tool). */
+      "ALTER TABLE channel_routes ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'auto';" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

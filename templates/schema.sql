@@ -144,6 +144,8 @@ CREATE TABLE IF NOT EXISTS channel_routes (
   channel_id TEXT NOT NULL DEFAULT '*',
   agent_name TEXT,
   session_id INTEGER,
+  delivery_mode TEXT NOT NULL DEFAULT 'auto',  -- 'auto' = turn output auto-delivers to the
+                                               -- origin chat; 'explicit' = only channel_send
   PRIMARY KEY (channel_name, channel_id)
 );
 

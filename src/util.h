@@ -27,4 +27,10 @@ void util_set_nonblock(int fd);
  * string. Returns NULL on OOM. len==0 yields an empty string. */
 char *base64_encode(const unsigned char *buf, size_t len);
 
+/* ASCII-only case-insensitive compare — unlike strcasecmp/strncasecmp these
+ * ignore the process locale, so security checks (host matching, SQL keyword
+ * gating) can't be bent by a locale where e.g. 'I'/'i' don't fold (tr_TR). */
+int ascii_strcasecmp(const char *a, const char *b);
+int ascii_strncasecmp(const char *a, const char *b, size_t n);
+
 #endif

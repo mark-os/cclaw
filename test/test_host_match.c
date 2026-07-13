@@ -46,6 +46,15 @@ static void test_suffix_no_false_positive(void) {
     PASS();
 }
 
+static void test_case_insensitive_ascii(void) {
+    TEST("case_insensitive_ascii");
+    /* ASCII fold must hold regardless of process locale (review-3 F2) */
+    char *rules[] = {"GitHub.com", ".Example.COM"};
+    if (!host_match(rules, 2, "github.com")) FAIL("exact should fold case");
+    if (!host_match(rules, 2, "API.EXAMPLE.com")) FAIL("suffix should fold case");
+    PASS();
+}
+
 static void test_empty_rules_deny_all(void) {
     TEST("empty_rules_deny_all");
     if (host_match(NULL, 0, "anything.com")) FAIL("NULL rules should deny");
@@ -321,6 +330,7 @@ int main(void) {
     test_suffix_match_subdomain();
     test_suffix_match_bare();
     test_suffix_no_false_positive();
+    test_case_insensitive_ascii();
     test_empty_rules_deny_all();
     test_wildcard_matches_any_host();
     test_wildcard_is_bare_only();

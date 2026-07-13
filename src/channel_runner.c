@@ -326,7 +326,7 @@ static int url_host_allowed(const char *url) {
         curl_url_set(tu, CURLUPART_URL, url, 0) == CURLUE_OK &&
         curl_url_get(bu, CURLUPART_HOST, &bh, 0) == CURLUE_OK &&
         curl_url_get(tu, CURLUPART_HOST, &th, 0) == CURLUE_OK)
-        ok = (strcasecmp(bh, th) == 0);
+        ok = (ascii_strcasecmp(bh, th) == 0);
     curl_free(bh); curl_free(th);
     if (bu) curl_url_cleanup(bu);
     if (tu) curl_url_cleanup(tu);

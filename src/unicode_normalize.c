@@ -1,4 +1,5 @@
 #include "unicode_normalize.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -56,6 +57,7 @@ char *unicode_strip_invisible(const char *s, size_t len, size_t *out_len) {
 char *utf8_sanitize(const char *s, size_t len) {
     if (!s) return NULL;
     /* Worst case: every byte is invalid → each becomes 3-byte U+FFFD */
+    if (len > (SIZE_MAX - 1) / 3) return NULL;
     char *out = malloc(len * 3 + 1);
     if (!out) return NULL;
     size_t o = 0, pos = 0;

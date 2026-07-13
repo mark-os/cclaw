@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "host_match.h"
+#include "util.h"
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <string.h>
@@ -80,17 +81,17 @@ int host_match(char **rules, size_t n, const char *host) {
             size_t rlen = strlen(r);         /* includes leading dot */
             size_t base = rlen - 1;          /* "github.com" length */
             /* Exact match with the base (host == rule+1) */
-            if (hlen == base && strcasecmp(host, r + 1) == 0) return 1;
+            if (hlen == base && ascii_strcasecmp(host, r + 1) == 0) return 1;
             /* Suffix match: host ends with rule AND the match is at a dot boundary
              * (the rule itself starts with '.', so host ending with rule means
              * the char before the suffix in host IS the dot from rule) */
             if (hlen > rlen) {
                 const char *tail = host + (hlen - rlen);
-                if (strcasecmp(tail, r) == 0) return 1;
+                if (ascii_strcasecmp(tail, r) == 0) return 1;
             }
         } else {
             /* Exact match */
-            if (strcasecmp(host, r) == 0) return 1;
+            if (ascii_strcasecmp(host, r) == 0) return 1;
         }
     }
     return 0;

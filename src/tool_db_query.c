@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_db_query.h"
+#include "util.h"
 #include "buf.h"
 #include "tool_parse.h"
 #include <ctype.h>
@@ -17,7 +18,7 @@ static const char *DB_QUERY_PARAMS_JSON =
 
 static int is_select_only(const char *sql) {
     while (*sql && isspace((unsigned char)*sql)) sql++;
-    return (strncasecmp(sql, "SELECT", 6) == 0 &&
+    return (ascii_strncasecmp(sql, "SELECT", 6) == 0 &&
             (sql[6] == '\0' || isspace((unsigned char)sql[6])));
 }
 

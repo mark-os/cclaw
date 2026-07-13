@@ -99,3 +99,22 @@ char *base64_encode(const unsigned char *buf, size_t len) {
     *p = '\0';
     return out;
 }
+
+static int ascii_lower(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+}
+
+int ascii_strcasecmp(const char *a, const char *b) {
+    while (*a && ascii_lower((unsigned char)*a) == ascii_lower((unsigned char)*b)) {
+        a++; b++;
+    }
+    return ascii_lower((unsigned char)*a) - ascii_lower((unsigned char)*b);
+}
+
+int ascii_strncasecmp(const char *a, const char *b, size_t n) {
+    for (; n > 0; n--, a++, b++) {
+        int d = ascii_lower((unsigned char)*a) - ascii_lower((unsigned char)*b);
+        if (d != 0 || *a == '\0') return d;
+    }
+    return 0;
+}

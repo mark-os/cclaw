@@ -1,12 +1,14 @@
 #define _POSIX_C_SOURCE 200809L
 #include "buf.h"
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 void buf_append(Buf *b, const char *s, size_t n) {
     if (b->oom) return;
+    if (n > SIZE_MAX - b->len - 1) { b->oom = 1; return; }
     if (b->len + n + 1 > b->cap) {
         size_t nc = b->cap ? b->cap * 2 : 256;
         while (nc < b->len + n + 1) nc *= 2;

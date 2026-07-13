@@ -321,22 +321,36 @@ otherwise be async; media flows typically are.
 auth — because verification is code, not config. The daemon's `/hook/<channel>`
 endpoint is a dumb proxy. Returning `{status: 401}` rejects a forged webhook.
 
-### Channel JS API (`cclaw.*`)
+### Channel JS API (`channel.*` global)
 
-| Function | Description |
-|----------|-------------|
-| `cclaw.http(req)` | Channel-initiated HTTP → `Promise<{status, body, path, bytes, error}>`. Always resolves (transport failure = status 0 + error). `save_to: "name.ext"` streams the body to the channel's media spool (`<db_dir>/media/<channel>/`) and resolves with `path` instead of `body` — payload bytes never enter the JS heap. |
-| `cclaw.send(req)` | Queue an outbound request, fire-and-forget. Extra: `outbox_id` + `final` (auto-ack the row when the final send is 2xx). |
-| `cclaw.emit(type, payload_json)` | Insert `channel_events` + `daemon_wake()`. Daemon routes to the agent inbox. |
-| `cclaw.getConfig(key)` / `setConfig(key, value)` | `channel_state` kv (scoped to this channel). |
-| `cclaw.ackOutbox(id)` / `failOutbox(id, error)` | Manual outbox resolution. |
-| `cclaw.log(msg)` | stderr line, prefixed with channel name. |
-| `cclaw.admin.*` | Admin operations (keys, models, hosts) for admin-gated chat commands. |
-
-There is **no blocking fetch** in channel JS; `http_request` is unavailable —
-channels use `await cclaw.http(...)` (the transfer runs on the runner's curl
+The runner registers a `channel` global object and a `channel.admin`
+sub-object (src/qjs_host_channel.c, `qjs_register_channel_host_functions`).
+There is **no blocking fetch** in channel JS — `http_request` is unavailable.
+Channels use `await channel.http(...)` (the transfer runs on the runner's curl
 loop; the await suspends the JS continuation, never the thread) or
-`cclaw.send` for outbox delivery.
+`channel.send` for outbox delivery.
+
+#### `channel.*` functions
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `channel.emit` | `(type, payload_json [, external_id])` | Insert a `channel_events` row + `daemon_wake()`. The daemon's routing gate delivers the event to the appropriate agent inbox. |
+| `channel.send` | `(request)` | Queue an outbound HTTP request (fire-and-forget). The request object supports `{url, method?, body?, headers?, timeout?, outbox_id?, final?}`. When `final` is truthy and the send succeeds (2xx), the outbox row is auto-acked. |
+| `channel.http` | `(request)` → `Promise<{status, body, path, bytes, error}>` | Channel-initiated HTTP. Always resolves (transport failure = status 0 + error, never rejects). Request shape: `{url, method?, body?, headers?, timeout?, save_to?}`. `save_to: "name.ext"` streams the response body to the channel's media spool (`<db_dir>/media/<channel>/`) and resolves with `path` instead of `body` — payload bytes never enter the JS heap. |
+| `channel.getConfig` | `(key)` → `string \| null` | Read a config-registry key. Resolution is `<ext>.<key>` (e.g. calling `getConfig("bot_token")` on the `telegram` extension reads the registry key `telegram.bot_token`). Read-only. |
+| `channel.getState` | `(key)` → `string \| null` | Read a `channel_state` row (runtime scratch scoped to this channel — poll offsets, webhook latch, etc.). |
+| `channel.setState` | `(key, value)` | Write a `channel_state` row. |
+| `channel.ackOutbox` | `(id)` | Mark an outbox row as delivered (manual resolution when `final` isn't used). |
+| `channel.failOutbox` | `(id, error)` | Mark an outbox row as failed with an error string. |
+| `channel.log` | `(msg)` | Emit a syslog line prefixed with the channel name (the runner is daemon-forked — stderr goes nowhere; syslog/journald is the only destination). |
+
+#### `channel.admin.*` functions
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `channel.admin.isAdmin` | `(channel_id)` → `bool` | Check whether `channel_id` appears in the channel's `<ext>.admin_ids` config value (comma-separated list). Used by handlers to gate `/admin`-style chat commands. |
+| `channel.admin.listPendingApprovals` | `()` → `[{id, session_id, agent, tool_name, action, args_json}]` | Return pending approval requests scoped to this channel. Enables admin notification flows in chat. |
+| `channel.admin.dashboardUrl` | `()` → `string \| null` | Generate a tokenized `/admin` URL for the web dashboard (same trust model as passing credentials through admin chat commands). |
 
 ### Event flow
 

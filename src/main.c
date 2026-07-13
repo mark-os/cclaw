@@ -1569,10 +1569,18 @@ static void approval_sweep_block_window(void) {
  * double-dispatch: the loser consumes nothing and NOOPs. Daemon only — a
  * transient CLI is scoped to its own session and must not adopt orphans. */
 static void session_sweep_inbox(void) {
+    /* Besides queued inbox rows, also pick up sessions whose leaf entry is an
+     * unanswered user entry: a refused dispatch (rate limit, disk floor, full
+     * pool) consumed the inbox then parked the session idle/rate_limited, so
+     * no inbox row remains to trigger a retry. Advancing them re-runs the
+     * dispatch gates once pressure clears (rate_limited flips to idle on the
+     * first advance, dispatches on the next tick). */
     const char *sql =
-        "SELECT s.id FROM sessions s WHERE s.state='idle'"
-        "  AND EXISTS (SELECT 1 FROM inbox i"
-        "              WHERE i.session_id=s.id AND i.consumed=0)"
+        "SELECT s.id FROM sessions s WHERE s.state IN ('idle','rate_limited')"
+        "  AND (EXISTS (SELECT 1 FROM inbox i"
+        "               WHERE i.session_id=s.id AND i.consumed=0)"
+        "    OR EXISTS (SELECT 1 FROM entries e"
+        "               WHERE e.id=s.leaf_id AND e.session_id=s.id AND e.role=1))"
         " LIMIT 64;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK) return;

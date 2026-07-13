@@ -183,10 +183,29 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             return make_output(ADVANCE_ERROR, session_id, NULL, 0);
         }
         int consumed = inbox_consume_into_entries_locked(db, session_id, 100);
+        if (consumed == 0) {
+            /* Empty inbox, but the leaf may be an unanswered user entry: a
+             * refused dispatch (rate limit, disk floor, full worker pool)
+             * consumes the inbox into entries first, then parks the session
+             * idle — without this check that turn is stranded forever. */
+            sqlite3_stmt *ls;
+            if (sqlite3_prepare_v2(db,
+                    "SELECT 1 FROM entries"
+                    " WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1)"
+                    "  AND session_id=?1 AND role=1",
+                    -1, &ls, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(ls, 1, session_id);
+                if (sqlite3_step(ls) == SQLITE_ROW) consumed = 1;
+                sqlite3_finalize(ls);
+            }
+            if (consumed > 0)
+                LOG_INFO_("advance state=idle next=llm_running reason=unanswered_leaf");
+        } else if (consumed > 0) {
+            LOG_INFO_("advance state=idle next=llm_running inbox=%d", consumed);
+        }
         if (consumed > 0) {
             session_set_iteration(db, session_id, 0);
             session_set_state(db, session_id, "llm_running");
-            LOG_INFO_("advance state=idle next=llm_running inbox=%d", consumed);
         }
         if (consumed < 0) {
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);

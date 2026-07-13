@@ -112,11 +112,52 @@ static void test_waiting(void) {
     printf("  PASS test_waiting\n");
 }
 
+static void test_idle_unanswered_user_leaf(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+
+    /* Simulate a refused dispatch: inbox already consumed into entries (leaf
+     * is a user entry), session parked idle, inbox empty — the turn must be
+     * re-dispatched, not stranded. */
+    Message msg = { .role = ROLE_USER, .content = "hello" };
+    entry_append_with_turn(db, sid, &msg, db_next_turn_id(db, sid));
+    session_set_iteration(db, sid, 5);
+
+    AdvanceOutput out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_DISPATCH_LLM);
+    assert(out.iteration == 0);
+    assert(session_get_iteration(db, sid) == 0);
+
+    db_close(db);
+    printf("  PASS test_idle_unanswered_user_leaf\n");
+}
+
+static void test_idle_answered_leaf_noop(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+
+    /* Completed turn: assistant entry is the leaf — idle stays NOOP. */
+    Message umsg = { .role = ROLE_USER, .content = "hello" };
+    int64_t turn_id = db_next_turn_id(db, sid);
+    entry_append_with_turn(db, sid, &umsg, turn_id);
+    Message amsg = { .role = ROLE_ASSISTANT, .content = "hi",
+                     .stop_reason = STOP_REASON_STOP };
+    entry_append_with_turn(db, sid, &amsg, turn_id);
+
+    AdvanceOutput out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_NOOP);
+
+    db_close(db);
+    printf("  PASS test_idle_answered_leaf_noop\n");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     printf("test_advance_session:\n");
     test_idle_no_inbox();
     test_idle_with_inbox();
+    test_idle_unanswered_user_leaf();
+    test_idle_answered_leaf_noop();
     test_llm_complete_stop();
     test_tool_running_all_done();
     test_max_iterations();

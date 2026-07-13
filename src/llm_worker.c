@@ -30,7 +30,12 @@ typedef struct {
     int kind;                /* 0 = llm_jobs-backed (turn/compaction), 1 = media transcribe */
 } WorkItem;
 
-/* ── Thread pool ───────────────────────────────────────────────── */
+/* ── Thread pool ───────────────────────────────────────────────────
+ * LLM requests run on threads in the long-lived daemon — not forked
+ * children — on purpose: a request is a blocking curl call plus DB writes,
+ * all trusted code, so isolation buys nothing and fork would cost a process
+ * per turn. Only untrusted/sandboxed tool children fork (see run_tool.c).
+ * This replaced an earlier fork-per-turn design; don't reintroduce it. */
 
 static struct {
     WorkItem items[QUEUE_CAP];

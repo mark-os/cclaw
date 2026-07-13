@@ -8,6 +8,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* A SQL query emits the LLM request JSON — on purpose. The entries table
+ * already holds every message; json_object()/json_group_array() over it *is*
+ * the serializer, returned zero-copy from the open statement. Rewriting this
+ * as a C JSON builder would add allocation, escaping, and drift risk for no
+ * gain. See AGENTS.md "Counterintuitive on purpose". */
+
 /* ── Populate temp plan table with entry IDs in order ──────────── */
 
 static int populate_plan(sqlite3 *db, const ContextPlan *plan) {

@@ -139,6 +139,10 @@ struct sink_arg {
 
 static void *sink_once(void *arg) {
     struct sink_arg *sa = (struct sink_arg *)arg;
+    /* Testing rule: listener must time out rather than block forever if the
+     * client side dies before connecting. */
+    struct timeval ltv = { .tv_sec = 10, .tv_usec = 0 };
+    setsockopt(sa->lfd, SOL_SOCKET, SO_RCVTIMEO, &ltv, sizeof(ltv));
     int c = accept(sa->lfd, NULL, NULL);
     if (c < 0) return NULL;
     sa->res->accepted = 1;

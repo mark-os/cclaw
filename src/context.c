@@ -94,9 +94,9 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
     sqlite3_finalize(stmt);
     if (leaf_id < 0) return -1;
 
-    /* Query branch metadata — covering index only, no main table access.
-     * CTE walks leaf→root via parent_id; selects all plan columns inline
-     * so the final SELECT needs no JOIN back to entries.
+    /* Query branch metadata — CTE walks leaf→root by rowid seeks and
+     * selects all plan columns inline so the final SELECT needs no JOIN
+     * back to entries.
      * Use level counter for path ordering (compaction entries may have higher ids). */
     const char *plan_sql =
         "WITH RECURSIVE branch(id, parent_id, role, stop_reason, token_estimate, tool_call_count, lvl) AS ("

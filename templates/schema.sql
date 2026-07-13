@@ -209,13 +209,12 @@ CREATE TABLE IF NOT EXISTS entries (
   network_hosts TEXT,  -- NULL or JSON array of hosts the tool run contacted
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+-- Three indexes only, one per access shape: per-session scans, the payload
+-- builder's covering sibling lookup, and time-window budget sums. Branch
+-- walks (leaf→root CTEs) join on e.id = rowid — no parent_id index helps
+-- them; narrower filters (role, stop_reason) seek the session then read.
 CREATE INDEX IF NOT EXISTS idx_entries_session ON entries(session_id, id);
-CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_id);
-CREATE INDEX IF NOT EXISTS idx_entries_session_role ON entries(session_id, role);
-CREATE INDEX IF NOT EXISTS idx_entries_turn ON entries(session_id, turn_id);
 CREATE INDEX IF NOT EXISTS idx_entries_turn_type ON entries(session_id, turn_id, type, part_index);
-CREATE INDEX IF NOT EXISTS idx_entries_stop_reason ON entries(session_id, stop_reason) WHERE stop_reason != 0;
-CREATE INDEX IF NOT EXISTS idx_entries_plan ON entries(parent_id, session_id, id, role, stop_reason, token_estimate, tool_call_count);
 CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(

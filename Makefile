@@ -160,8 +160,9 @@ $(BUILDDIR)/:
 # This keeps `make test | tail/grep/head` safe: leaked mock-server children
 # hold the file fd, not the pipe, so readers always see EOF; and only make's
 # own one-liners can take a SIGPIPE.
-# test_tool_js / test_js_http_fetch fork build/cclaw via CCLAW_QJS_EXE, so the
-# binary must be fresh — depend on it so a stale build/cclaw can't slip in.
+# Several unit tests (test_run_tool_escape, test_sandbox_mounts, ...) fork
+# build/cclaw via --run-tool, so the binary must be fresh — depend on it so a
+# stale build/cclaw can't slip in.
 test: $(TEST_BIN) $(BUILDDIR)/cclaw
 	@fail=0; for t in $(TEST_BIN); do \
 		out="/tmp/cclaw_$$(basename $$t).txt"; \

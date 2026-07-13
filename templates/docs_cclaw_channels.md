@@ -54,16 +54,41 @@ Chat membership is never authority. `admin_ids` is the only admin source.
 ### Adding routes
 
 ```
-cclaw route add <channel> <chat_id> <agent> [--mode auto|explicit] [--session <id>]
+cclaw route add <channel> <chat_id> <agent> [--mode auto|explicit] [--session <id>] [--tools name,name,...]
 cclaw route rm  <channel> <chat_id>
 cclaw route list
 ```
 
 Group-shaped (negative) chat ids default to `--mode explicit`.
+`--tools` attaches a tool filter to the route (see Authority attenuation below).
 
 A route with a `--session <id>` **pins** that chat to a specific session.
 Otherwise: find-latest session for `(channel_name, channel_id)`, create one
 under the route's agent if none exists.
+
+### Authority attenuation
+
+A route may carry a **tool filter** — a JSON array of tool names stored in
+`channel_routes.tool_filter` (NULL = unrestricted). When a channel message
+creates a new session for a routed sender, the route's filter is copied onto
+`sessions.tool_filter`, frozen at session creation (same semantics as
+sub-agent spawns).
+
+Each turn, the effective tool set is **grants ∩ filter** — the filter can
+only shrink authority, never widen it. Filtering to a tool the agent isn't
+granted exposes nothing: the intersection is empty.
+
+Changing a route's filter later does **not** propagate to existing sessions;
+a new session is needed to pick up the new filter. Unrouted admin-accepted
+senders get no filter (full grant set applies).
+
+`route list` displays the active filter per route. Example:
+
+```
+cclaw route add telegram 12345 researcher --tools web_fetch,js_eval
+cclaw route list
+# telegram 12345 -> researcher (mode auto, tools ["web_fetch","js_eval"])
+```
 
 ## Delivery modes
 

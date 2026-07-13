@@ -635,6 +635,185 @@ static void test_notify_session(void) {
     printf("PASS\n");
 }
 
+/* ───── tool_filter tests ───── */
+
+/* Helper: insert a route with an optional tool_filter (NULL = unrestricted). */
+static int test_binding_set_filtered(sqlite3 *db, const char *type, const char *id,
+                                     const char *agent, const char *tool_filter) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO channel_routes(channel_name,channel_id,agent_name,tool_filter)"
+            " VALUES(?,?,?,?)", -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, type, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, agent, -1, SQLITE_STATIC);
+    if (tool_filter)
+        sqlite3_bind_text(s, 4, tool_filter, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(s, 4);
+    int rc = sqlite3_step(s); sqlite3_finalize(s);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+/* Helper: read sessions.tool_filter for a given session id.  Returns a
+ * malloc'd string (caller frees) or NULL if the column is SQL NULL. */
+static char *test_session_tool_filter(sqlite3 *db, int64_t sid) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT tool_filter FROM sessions WHERE id=?;", -1, &s, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(s, 1, sid);
+    char *out = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_type(s, 0) != SQLITE_NULL)
+        out = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    return out;
+}
+
+/* 1. Exact route with tool_filter → new session inherits that filter. */
+static void test_tool_filter_exact_route(void) {
+    setup();
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    assert(test_binding_set_filtered(db, "fch", "u1", "testagent",
+                                     "[\"file_read\",\"web_fetch\"]") == 0);
+    test_event_insert(db, "fch", "message", "{\"channel_id\":\"u1\",\"text\":\"hi\"}");
+    channel_consume_events(db);
+
+    int64_t sid = test_session_find(db, "fch", "u1", "testagent");
+    assert(sid > 0);
+    char *f = test_session_tool_filter(db, sid);
+    assert(f);
+    assert(strcmp(f, "[\"file_read\",\"web_fetch\"]") == 0);
+    free(f);
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
+/* 2a. Wildcard route with filter, no exact route → new session gets the
+ *     wildcard's filter.
+ * 2b. Exact route with NULL filter + wildcard with a filter → exact wins,
+ *     session filter is NULL. */
+static void test_tool_filter_wildcard_precedence(void) {
+    setup();
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    /* 2a: wildcard-only — session gets the wildcard filter. */
+    assert(test_binding_set_filtered(db, "fch", "*", "testagent",
+                                     "[\"shell_exec\"]") == 0);
+    test_event_insert(db, "fch", "message", "{\"channel_id\":\"u2\",\"text\":\"hi\"}");
+    channel_consume_events(db);
+
+    int64_t sid_a = test_session_find(db, "fch", "u2", "testagent");
+    assert(sid_a > 0);
+    char *fa = test_session_tool_filter(db, sid_a);
+    assert(fa);
+    assert(strcmp(fa, "[\"shell_exec\"]") == 0);
+    free(fa);
+
+    /* 2b: add exact route with NULL filter — exact wins, filter is NULL. */
+    assert(test_binding_set_filtered(db, "fch", "u3", "testagent", NULL) == 0);
+    test_event_insert(db, "fch", "message", "{\"channel_id\":\"u3\",\"text\":\"yo\"}");
+    channel_consume_events(db);
+
+    int64_t sid_b = test_session_find(db, "fch", "u3", "testagent");
+    assert(sid_b > 0);
+    char *fb = test_session_tool_filter(db, sid_b);
+    assert(fb == NULL);  /* exact route's NULL filter wins over wildcard's */
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
+/* 3. Admin/allow_unknown sender (no route row) → session tool_filter is NULL. */
+static void test_tool_filter_admin_unrouted(void) {
+    setup();
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    /* Seed channel with admin_ids + allow_unknown, no route row. */
+    test_gate_channel_seed(db, "adm", "888");
+    assert(sqlite3_exec(db,
+        "INSERT INTO config(key, value, default_value, description)"
+        " VALUES('adm.allow_unknown','1','0','')"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    /* Admin sender (in admin_ids, no route row). */
+    test_event_insert(db, "adm", "message",
+        "{\"channel_id\":\"888\",\"text\":\"hi\",\"sender_id\":\"888\","
+        "\"sender_name\":\"Boss\",\"chat_type\":\"dm\"}");
+    channel_consume_events(db);
+
+    int64_t sid_admin = test_session_find(db, "adm", "888", "Assistant");
+    assert(sid_admin > 0);
+    char *f1 = test_session_tool_filter(db, sid_admin);
+    assert(f1 == NULL);  /* no route row → unrestricted */
+
+    /* allow_unknown stranger (no route row). */
+    test_event_insert(db, "adm", "message",
+        "{\"channel_id\":\"999\",\"text\":\"hey\",\"sender_id\":\"999\","
+        "\"sender_name\":\"Rando\",\"chat_type\":\"dm\"}");
+    channel_consume_events(db);
+
+    int64_t sid_stranger = test_session_find(db, "adm", "999", "Assistant");
+    assert(sid_stranger > 0);
+    char *f2 = test_session_tool_filter(db, sid_stranger);
+    assert(f2 == NULL);  /* no route row → unrestricted */
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
+/* 4. Pre-existing session: changing route's tool_filter after session creation
+ *    does NOT retro-apply to the existing session. */
+static void test_tool_filter_no_retro_apply(void) {
+    setup();
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    /* Route without filter → session created with NULL tool_filter. */
+    assert(test_binding_set_filtered(db, "fch", "u5", "testagent", NULL) == 0);
+    test_event_insert(db, "fch", "message", "{\"channel_id\":\"u5\",\"text\":\"first\"}");
+    channel_consume_events(db);
+
+    int64_t sid = test_session_find(db, "fch", "u5", "testagent");
+    assert(sid > 0);
+    char *f1 = test_session_tool_filter(db, sid);
+    assert(f1 == NULL);  /* starts unrestricted */
+
+    /* Now update the route with a filter. */
+    assert(test_binding_set_filtered(db, "fch", "u5", "testagent",
+                                     "[\"file_read\"]") == 0);
+
+    /* Send another event — reuses the existing session. */
+    test_event_insert(db, "fch", "message", "{\"channel_id\":\"u5\",\"text\":\"second\"}");
+    channel_consume_events(db);
+
+    /* Still one session, and its filter is still NULL (not retro-applied). */
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM sessions WHERE channel_name='fch' AND channel_id='u5';") == 1);
+    char *f2 = test_session_tool_filter(db, sid);
+    assert(f2 == NULL);  /* unchanged */
+
+    /* But the inbox did get the second message (session is alive). */
+    assert(test_inbox_count(db, sid) == 2);
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
 int main(void) {
     alarm(10);
 
@@ -672,6 +851,18 @@ int main(void) {
 
     printf("  notify_session... ");
     test_notify_session();
+
+    printf("  tool_filter_exact_route... ");
+    test_tool_filter_exact_route();
+
+    printf("  tool_filter_wildcard_precedence... ");
+    test_tool_filter_wildcard_precedence();
+
+    printf("  tool_filter_admin_unrouted... ");
+    test_tool_filter_admin_unrouted();
+
+    printf("  tool_filter_no_retro_apply... ");
+    test_tool_filter_no_retro_apply();
 
     cleanup();
     printf("all channel_events tests passed\n");

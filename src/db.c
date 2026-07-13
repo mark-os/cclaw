@@ -416,6 +416,11 @@ static const struct { int version; const char *sql; } schema_patches[] = {
        * turn output reaches the chat — 'auto' (outbox insert per turn, the
        * old behavior) or 'explicit' (only via the channel_send tool). */
       "ALTER TABLE channel_routes ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'auto';" },
+    { 25,
+      /* Authority attenuation for routed senders: a route may carry a
+       * tool_filter (JSON array of tool names) that sessions created for it
+       * freeze at creation — same semantics as sub-agent filters. */
+      "ALTER TABLE channel_routes ADD COLUMN tool_filter TEXT;" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

@@ -91,6 +91,23 @@ session" rule; the session names its agent thereafter.
 
 No route = `auto` (covers admin/allow_unknown flows).
 
+## Authority attenuation
+
+Routes control *who gets in*; without attenuation a routed sender wields the
+target agent's full authority. A route may carry a `tool_filter` (JSON array
+of tool names, `--tools` at `route add`; NULL = unrestricted). When a channel
+event **creates** a session for that route, the filter is copied onto
+`sessions.tool_filter` — the same frozen-at-spawn semantics as sub-agent
+filters. Per turn the effective tool set is grants ∩ filter, enforced in
+payload assembly and dispatch; the filter can only shrink authority, never
+widen it.
+
+Frozen means frozen: editing the route's filter later does not retro-apply to
+existing sessions — a new session must be created for the change to take
+effect. Exact route beats wildcard when resolving the filter (an exact route
+with no filter deliberately overrides a filtered `'*'` route). Unrouted
+admin-accepted senders get no filter (admin = operator; no attenuation).
+
 ## channel_send (outbound tool)
 
 Fixed schema `{channel, chat_id, message}` (+ `action: "list"` to enumerate
@@ -114,7 +131,7 @@ would sit pending forever. Absent key = assume duplex.
 ## Operator surface
 
 ```
-cclaw route add <channel> <chat_id> <agent> [--mode auto|explicit] [--session <id>]
+cclaw route add <channel> <chat_id> <agent> [--mode auto|explicit] [--session <id>] [--tools name,name,...]
 cclaw route rm  <channel> <chat_id>
 cclaw route list
 ```

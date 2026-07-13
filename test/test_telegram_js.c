@@ -370,6 +370,40 @@ int main(void) {
         "processMessage({chat:{id:-100}, from:{id:42}, text:'/approvals'}, 1), '' + __adminArg",
         "42");
 
+    /* ── envelope facts (routing contract): structured fields, no authority ── */
+    expect_has("envelope_sender_fields",
+        "processMessage({chat:{id:5,type:'private'}, from:{id:42,first_name:'Mark'}, text:'hi'}, 2),"
+        "__emits[0].payload",
+        "\"sender_id\":\"42\"");
+    expect_has("envelope_sender_name",
+        "processMessage({chat:{id:5,type:'private'}, from:{id:42,first_name:'Mark'}, text:'hi'}, 2),"
+        "__emits[0].payload",
+        "\"sender_name\":\"Mark\"");
+    expect_has("envelope_dm_chat_type",
+        "processMessage({chat:{id:5,type:'private'}, from:{id:42,first_name:'Mark'}, text:'hi'}, 2),"
+        "__emits[0].payload",
+        "\"chat_type\":\"dm\"");
+    expect_has("envelope_group_chat_type",
+        "processMessage({chat:{id:-100,type:'supergroup'}, from:{id:42,first_name:'Mark'}, text:'hi'}, 2),"
+        "__emits[0].payload",
+        "\"chat_type\":\"group\"");
+    /* mentioned/reply_to_me key off the getMe-learned identity. */
+    expect_has("envelope_mentioned",
+        "config.bot_username='mybot',"
+        "processMessage({chat:{id:-100,type:'supergroup'}, from:{id:42}, text:'hey @mybot'}, 3),"
+        "__emits[0].payload",
+        "\"mentioned\":true");
+    expect_has("envelope_reply_to_me",
+        "config.bot_id='900',"
+        "processMessage({chat:{id:-100,type:'supergroup'}, from:{id:42}, text:'yes',"
+        " reply_to_message:{from:{id:900}}}, 4),"
+        "__emits[0].payload",
+        "\"reply_to_me\":true");
+    expect_has("envelope_no_identity_defaults_false",
+        "processMessage({chat:{id:-100,type:'supergroup'}, from:{id:42}, text:'@mybot hi'}, 5),"
+        "__emits[0].payload",
+        "\"mentioned\":false");
+
     /* ── slash-command surface: approvals + admin only ──────────────── */
     expect("commands_are_approvals_admin",
         "Object.keys(COMMANDS).sort().join(',')", "admin,approvals");

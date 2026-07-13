@@ -689,7 +689,29 @@ void channel_consume_events(sqlite3 *db) {
                 sqlite3_finalize(ss);
             }
             if (sid <= 0) {
-                sid = session_create(db, ch_name, agent, -1, 0);
+                /* Route-scoped authority attenuation: a route may carry a
+                 * tool_filter (JSON array), frozen onto the session at
+                 * creation — same semantics as sub-agent spawns. Later route
+                 * edits don't retro-apply to existing sessions. Unrouted
+                 * admin acceptance has no route row, so filter stays NULL. */
+                char *filter = NULL;
+                {
+                    sqlite3_stmt *fs;
+                    if (sqlite3_prepare_v2(db,
+                            "SELECT tool_filter FROM channel_routes"
+                            " WHERE channel_name=?1 AND channel_id IN (?2,'*')"
+                            " ORDER BY channel_id=?2 DESC LIMIT 1;",
+                            -1, &fs, NULL) == SQLITE_OK) {
+                        sqlite3_bind_text(fs, 1, ch_name, -1, SQLITE_STATIC);
+                        sqlite3_bind_text(fs, 2, cid, -1, SQLITE_STATIC);
+                        if (sqlite3_step(fs) == SQLITE_ROW &&
+                            sqlite3_column_type(fs, 0) != SQLITE_NULL)
+                            filter = strdup((const char *)sqlite3_column_text(fs, 0));
+                        sqlite3_finalize(fs);
+                    }
+                }
+                sid = session_create_filtered(db, ch_name, agent, -1, 0, filter);
+                free(filter);
                 if (sid > 0) {
                     LOG_INFO_("channel new_session ch=%s sid=%lld agent=%s",
                               ch_name, (long long)sid, agent);

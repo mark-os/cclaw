@@ -15,6 +15,16 @@ Parking lot for features explicitly out-of-scope right now.
   additive penalty — bias toward recent sessions when relevance is close
 - Keep pure BM25 for large score gaps (genuinely better match wins regardless)
 
+## Multi-Speaker Sessions (per-speaker authority)
+Multiple speakers already share one session in group chats, and sender
+attribution exists (F19 message prefix). Unsolved: per-speaker *authority*
+within a session — the tool_filter is per-session, so it can't distinguish an
+admin from a stranger speaking into the same chat. Current answer: the
+route's tool_filter is the floor for **all** speakers on the session, plus
+admin-gated approvals for anything above it. A real fix needs per-turn
+authority derived from the speaker, which conflicts with frozen-at-spawn
+simplicity — parked.
+
 ## WhatsApp Business API Channel
 - Webhook endpoint via civetweb: `POST /webhook/whatsapp`
 - Verify endpoint: `GET /webhook/whatsapp?hub.verify_token=...`

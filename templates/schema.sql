@@ -146,6 +146,10 @@ CREATE TABLE IF NOT EXISTS channel_routes (
   session_id INTEGER,
   delivery_mode TEXT NOT NULL DEFAULT 'auto',  -- 'auto' = turn output auto-delivers to the
                                                -- origin chat; 'explicit' = only channel_send
+  tool_filter TEXT,                            -- JSON array of tool names; NULL = unrestricted.
+                                               -- Copied onto sessions.tool_filter at session
+                                               -- creation only — frozen like sub-agent filters;
+                                               -- later route edits don't retro-apply.
   PRIMARY KEY (channel_name, channel_id)
 );
 

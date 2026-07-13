@@ -3481,7 +3481,8 @@ static int route_main(int argc, char *argv[]) {
     if (sub && strcmp(sub, "list") == 0) {
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "SELECT channel_name, channel_id, agent_name, delivery_mode, session_id"
+                "SELECT channel_name, channel_id, agent_name, delivery_mode, session_id,"
+                "       tool_filter"
                 " FROM channel_routes ORDER BY channel_name, channel_id",
                 -1, &st, NULL) == SQLITE_OK) {
             int any = 0;
@@ -3491,6 +3492,8 @@ static int route_main(int argc, char *argv[]) {
                        sqlite3_column_text(st, 3));
                 if (sqlite3_column_type(st, 4) != SQLITE_NULL)
                     printf(", session %lld", (long long)sqlite3_column_int64(st, 4));
+                if (sqlite3_column_type(st, 5) != SQLITE_NULL)
+                    printf(", tools %s", sqlite3_column_text(st, 5));
                 printf(")\n");
                 any = 1;
             }
@@ -3501,10 +3504,13 @@ static int route_main(int argc, char *argv[]) {
     } else if (sub && strcmp(sub, "add") == 0 && argc >= 6) {
         const char *ch = argv[3], *cid = argv[4], *agent = argv[5];
         const char *mode = NULL;
+        const char *tools = NULL;
         int64_t pin_session = 0;
         int bad = 0;
         for (int i = 6; i < argc; i++) {
-            if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+            if (strcmp(argv[i], "--tools") == 0 && i + 1 < argc) {
+                tools = argv[++i];
+            } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
                 mode = argv[++i];
                 if (strcmp(mode, "auto") != 0 && strcmp(mode, "explicit") != 0) {
                     fprintf(stderr, "error: --mode must be auto or explicit\n");
@@ -3522,6 +3528,31 @@ static int route_main(int argc, char *argv[]) {
             }
         }
         if (bad) { sqlite3_close(db); return 1; }
+        /* --tools name,name,... -> JSON array for channel_routes.tool_filter.
+         * Built with json_group_array so quoting is SQLite's problem. */
+        char *filter_json = NULL;
+        if (tools) {
+            sqlite3_stmt *fj;
+            if (sqlite3_prepare_v2(db,
+                    "SELECT json_group_array(trim(value))"
+                    " FROM json_each('[\"' || replace(?1, ',', '\",\"') || '\"]')"
+                    " WHERE trim(value) <> ''",
+                    -1, &fj, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(fj, 1, tools, -1, SQLITE_STATIC);
+                if (sqlite3_step(fj) == SQLITE_ROW &&
+                    sqlite3_column_type(fj, 0) != SQLITE_NULL) {
+                    const char *j = (const char *)sqlite3_column_text(fj, 0);
+                    if (j && strcmp(j, "[]") != 0) filter_json = strdup(j);
+                }
+                sqlite3_finalize(fj);
+            }
+            if (!filter_json || strchr(tools, '"') || strchr(tools, '\\')) {
+                fprintf(stderr, "error: --tools needs a comma-separated list of tool names\n");
+                free(filter_json);
+                sqlite3_close(db);
+                return 1;
+            }
+        }
         /* Group-shaped ids (negative — Telegram groups) default to explicit:
          * silent-by-default listen-and-decide until the operator says auto. */
         if (!mode) mode = (cid[0] == '-') ? "explicit" : "auto";
@@ -3535,6 +3566,21 @@ static int route_main(int argc, char *argv[]) {
             sqlite3_finalize(ck);
         }
         if (!exists) fprintf(stderr, "warning: agent '%s' not found in agents table\n", agent);
+        /* Friction note: routing a specific external chat to an agent that
+         * holds grants, with no --tools, hands the sender full authority. */
+        if (!tools && strcmp(cid, "*") != 0) {
+            sqlite3_stmt *gk;
+            int has_grants = 0;
+            if (sqlite3_prepare_v2(db, "SELECT 1 FROM grants WHERE agent_name=? LIMIT 1",
+                                   -1, &gk, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(gk, 1, agent, -1, SQLITE_STATIC);
+                has_grants = (sqlite3_step(gk) == SQLITE_ROW);
+                sqlite3_finalize(gk);
+            }
+            if (has_grants)
+                fprintf(stderr, "note: route grants full '%s' authority to this chat;"
+                                " consider --tools to attenuate\n", agent);
+        }
         if (pin_session > 0) {
             sqlite3_stmt *sk;
             int sess_ok = 0;
@@ -3549,25 +3595,28 @@ static int route_main(int argc, char *argv[]) {
         }
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "INSERT INTO channel_routes(channel_name, channel_id, agent_name, session_id, delivery_mode)"
-                " VALUES(?1,?2,?3,CASE WHEN ?4>0 THEN ?4 END,?5)"
+                "INSERT INTO channel_routes(channel_name, channel_id, agent_name, session_id, delivery_mode, tool_filter)"
+                " VALUES(?1,?2,?3,CASE WHEN ?4>0 THEN ?4 END,?5,?6)"
                 " ON CONFLICT(channel_name, channel_id) DO UPDATE SET"
                 "  agent_name=excluded.agent_name, session_id=excluded.session_id,"
-                "  delivery_mode=excluded.delivery_mode",
+                "  delivery_mode=excluded.delivery_mode, tool_filter=excluded.tool_filter",
                 -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
             sqlite3_bind_text(st, 2, cid, -1, SQLITE_STATIC);
             sqlite3_bind_text(st, 3, agent, -1, SQLITE_STATIC);
             sqlite3_bind_int64(st, 4, pin_session);
             sqlite3_bind_text(st, 5, mode, -1, SQLITE_STATIC);
+            if (filter_json) sqlite3_bind_text(st, 6, filter_json, -1, SQLITE_STATIC);
             rc = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
             sqlite3_finalize(st);
         } else rc = 1;
         if (rc == 0) {
             printf("route set: %s %s -> %s (mode %s", ch, cid, agent, mode);
             if (pin_session > 0) printf(", session %lld", (long long)pin_session);
+            if (filter_json) printf(", tools %s", filter_json);
             printf(")\n");
         } else fprintf(stderr, "error: add failed\n");
+        free(filter_json);
     } else if (sub && strcmp(sub, "rm") == 0 && argc >= 5) {
         const char *ch = argv[3], *cid = argv[4];
         sqlite3_stmt *st;
@@ -3583,14 +3632,16 @@ static int route_main(int argc, char *argv[]) {
         } else rc = 1;
     } else {
         fprintf(stderr, "usage: cclaw route add <channel> <chat_id> <agent>"
-                        " [--mode auto|explicit] [--session <id>]\n"
+                        " [--mode auto|explicit] [--session <id>] [--tools name,name,...]\n"
                         "       cclaw route rm  <channel> <chat_id>\n"
                         "       cclaw route list\n"
                         "  chat_id '*' is the channel-wide default;\n"
                         "  resolution: exact (channel,chat_id) -> (channel,'*') -> gate\n"
                         "  (unrouted senders drop unless admin or allow_unknown=1)\n"
                         "  --mode default: explicit for group ids (negative), else auto\n"
-                        "  --session pins the chat to one session\n");
+                        "  --session pins the chat to one session\n"
+                        "  --tools limits sessions created for this route to those tools\n"
+                        "  (frozen at session creation; a route edit needs a new session)\n");
         rc = 2;
     }
     sqlite3_close(db);

@@ -216,6 +216,7 @@ CREATE INDEX IF NOT EXISTS idx_entries_turn ON entries(session_id, turn_id);
 CREATE INDEX IF NOT EXISTS idx_entries_turn_type ON entries(session_id, turn_id, type, part_index);
 CREATE INDEX IF NOT EXISTS idx_entries_stop_reason ON entries(session_id, stop_reason) WHERE stop_reason != 0;
 CREATE INDEX IF NOT EXISTS idx_entries_plan ON entries(parent_id, session_id, id, role, stop_reason, token_estimate, tool_call_count);
+CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
   content, content=entries, content_rowid=id,

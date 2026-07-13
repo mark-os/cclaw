@@ -47,7 +47,9 @@ retries:
 
 Host API: `channel.getConfig(key)` (registry, read-only),
 `channel.getState/setState(key, value)` (runtime scratch), `channel.emit`,
-`channel.send`, `channel.log`, `channel.isAdmin(id)`.
+`channel.send`, `channel.http`, `channel.log`, `channel.ackOutbox/failOutbox`,
+and `channel.admin.isAdmin(id)` / `channel.admin.listPendingApprovals()` /
+`channel.admin.dashboardUrl()`.
 
 ## Message flow
 

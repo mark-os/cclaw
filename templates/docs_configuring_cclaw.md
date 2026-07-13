@@ -38,8 +38,8 @@ operator. Actions:
 - `grant_tool {tool}` — request access to a tool you don't have.
 - `grant_host {host}` — request network egress to a host (shell/web tools are
   default-deny).
-- `grant_path {path, write}` — request filesystem access outside your
-  workspace.
+- `grant_path {path, mode}` — request filesystem access outside your
+  workspace (`mode`: `read` or `write`, default `read`).
 - `rename_agent {name}` — request a new agent name.
 
 Give a concrete `reason` — the operator sees it in the approval prompt. If the

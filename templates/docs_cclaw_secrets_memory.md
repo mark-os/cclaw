@@ -22,8 +22,10 @@ curl -H "Authorization: Bearer {{SECRET:GITHUB_TOKEN}}" https://api.github.com/u
 
 **Capturing a secret** (explicit, never automatic):
 
-- `save_secret {name, from_tool_call}` — capture a credential a previous tool
-  call produced (e.g. a token you just minted), without it entering context.
+- `save_secret` is an *argument*, not a tool: when a call will RETURN a
+  credential (minting a token, reading a key), add `save_secret: "NAME"` —
+  plus `save_secret_path: "$.field"` if the result is JSON — to that same
+  call. The value is stored encrypted without entering your context.
 - `secret_create {name}` — mint a new random credential (stored encrypted;
   you get only the `{{SECRET:name}}` placeholder back).
 

@@ -72,6 +72,19 @@ int main(void) {
     CHECK(policy_eval("{\"action\":\"read\"}", wildcard_policy) == POLICY_ALLOW,
           "wildcard: name absent -> ALLOW (catch-all)");
 
+    /* Oversize args (> 128 jsmn tokens) must not bypass a keyed deny rule
+     * by being treated as empty — fail closed to ASK (review-2 F10). */
+    {
+        char big[8192];
+        int pos = snprintf(big, sizeof(big), "{\"action\":\"delete\"");
+        for (int i = 0; i < 100; i++)
+            pos += snprintf(big + pos, sizeof(big) - (size_t)pos,
+                            ",\"pad%d\":\"x\"", i);
+        snprintf(big + pos, sizeof(big) - (size_t)pos, "}");
+        CHECK(policy_eval(big, notes_policy) == POLICY_ASK,
+              "oversize args -> ASK (fail closed)");
+    }
+
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASSED", failures);
     return failures ? 1 : 0;
 }

@@ -313,6 +313,40 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
 
     if (check_handlers(jdb, manifest, bundle_dir, "'$.tools'", err_out) != 0) goto out;
     if (check_handlers(jdb, manifest, bundle_dir, "'$.hooks'", err_out) != 0) goto out;
+    /* Hook events must be ones the daemon actually dispatches — accepting
+     * turnStart/turnEnd (declared in specs/hooks.md, never wired) would
+     * register a hook that silently never fires (review-1 F13). */
+    {
+        sqlite3_stmt *st;
+        char *bad = NULL;
+        if (sqlite3_prepare_v2(jdb,
+                "SELECT json_extract(value,'$.event')"
+                " FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]'))"
+                " WHERE COALESCE(json_extract(value,'$.event'),'') NOT IN"
+                "   ('preAdvance','postAdvance','beforeToolCall','afterToolCall')"
+                " LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(st, 0);
+                bad = strdup(v ? v : "(missing)");
+            }
+            sqlite3_finalize(st);
+        }
+        if (bad) {
+            if (err_out) {
+                size_t n = strlen(bad) + 128;
+                char *m = malloc(n);
+                if (m) {
+                    snprintf(m, n, "hook event '%s' is not dispatched — use "
+                             "preAdvance, postAdvance, beforeToolCall, or "
+                             "afterToolCall", bad);
+                    *err_out = m;
+                }
+            }
+            free(bad);
+            goto out;
+        }
+    }
     if (check_handlers(jdb, manifest, bundle_dir, "'$.scripts'", err_out) != 0) goto out;
     if (check_config(jdb, manifest, err_out) != 0) goto out;
     if (check_skills(jdb, manifest, bundle_dir, err_out) != 0) goto out;

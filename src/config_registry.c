@@ -30,6 +30,9 @@ static const ConfigDef s_defs[] = {
       "Slow-query WARN threshold in ms for the SQL trace (0 = disabled)" },
     { "token_rate_limit",   "1000000",
       "Max LLM tokens per hour (0 = unlimited)" },
+    { "daily_cost_limit",   "5.00",
+      "Max LLM spend in USD over a rolling 24h window (0 = unlimited;"
+      " unpriced models cost 0 — token_rate_limit is the universal brake)" },
     { "context_threshold",  "0.6",
       "Context fill ratio that triggers compaction" },
     { "context_window",     "128000",

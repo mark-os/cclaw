@@ -188,6 +188,10 @@ Config *config_load_from_env(void) {
     v = getenv("CCLAW_TOKEN_RATE_LIMIT");
     cfg->token_rate_limit = v ? atoi(v) : config_default_int("token_rate_limit");
 
+    v = getenv("CCLAW_DAILY_COST_LIMIT");
+    cfg->daily_cost_limit_nano = (int64_t)((v ? atof(v)
+        : config_default_double("daily_cost_limit")) * 1e9 + 0.5);
+
     v = getenv("CCLAW_SAVE_REASONING");
     cfg->save_reasoning = v ? atoi(v) : 0;
 
@@ -308,6 +312,9 @@ Config *config_load(sqlite3 *db) {
     cfg->shell_timeout = config_get_int(db, "shell_timeout");
     cfg->stale_lock_timeout = config_get_int(db, "stale_lock_timeout");
     cfg->token_rate_limit = config_get_int(db, "token_rate_limit");
+    /* config_get_double reads the env layer too, so no separate override */
+    cfg->daily_cost_limit_nano =
+        (int64_t)(config_get_double(db, "daily_cost_limit") * 1e9 + 0.5);
     cfg->context_threshold = (float)config_get_double(db, "context_threshold");
     cfg->compaction_target = (float)config_get_double(db, "compaction_target");
     cfg->compaction = config_get_int(db, "compaction");

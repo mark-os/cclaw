@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -268,6 +269,10 @@ static int g_sink_fds[PROXY_MAX_RELAYS + 8];
 static int g_sink_n;
 static void *sink_accept(void *arg) {
     int lfd = *(int *)arg;
+    /* Testing rule: listener must time out rather than block forever if the
+     * client side dies before connecting. */
+    struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+    setsockopt(lfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     for (;;) {
         int c = accept(lfd, NULL, NULL);
         if (c < 0) return NULL;

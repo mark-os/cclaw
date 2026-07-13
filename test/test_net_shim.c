@@ -139,7 +139,7 @@ static int read_some(int fd, char *buf, int cap) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
-    alarm(20);
+    alarm(18);  /* below the make-test timeout-20 wrapper, so SIGALRM wins the race */
     signal(SIGPIPE, SIG_IGN);
 
     const char *exe = getenv("CCLAW_NET_SHIM_EXE");

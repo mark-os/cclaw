@@ -22,9 +22,11 @@ Parking lot for features explicitly out-of-scope right now.
 - phone_number → session_id mapping
 
 ## Web Dashboard (Full)
-- Session list, message viewer, sub-agent status, cron jobs
+Shipped: server-rendered session/agent/model/channel/grant/approval views
+(`dashboard.c`, token-gated, plain HTML — no JS framework). Still future:
+- Message/conversation viewer
 - Web-based chat interface
-- Simple HTML — no JS framework, server-rendered or minimal vanilla JS
+- Sub-agent status + cron job views
 
 ## Branching UI
 - Visual tree in web interface w/ user-selectable branching
@@ -38,12 +40,15 @@ Parking lot for features explicitly out-of-scope right now.
 - Runs as sub-agent on schedule (cron)
 
 ## Cross-compile for Legacy Embedded Targets
-- Target: ARMv5TE and similar (128MB RAM)
-- musl static link or armel dynamic
-- Reduced feature set (no quickjs? smaller arena?)
+armel dynamic cross-compile works in practice (Pogoplug V4 runs it, via
+env-var `CC`/`BUILDDIR` overrides). Still future:
+- A declared Makefile cross target instead of ad-hoc env overrides
+- musl static link option
+- Reduced feature set for 128MB targets (build without QuickJS? smaller JS heap)
 
 ## Multi-model Routing
-- Different models for different tasks (cheap for compaction, expensive for reasoning)
+Per-agent routing shipped (`agents.primary_model`/`secondary_model`, fallback
+in `llm_proc.c`). Still future:
 - Per-session model override stored in DB
 
 ## Search & Long-term Memory
@@ -56,7 +61,8 @@ Parking lot for features explicitly out-of-scope right now.
 ### Cross-agent search
 - Agent can search other agents' sessions (with permission)
 - Use case: coordinator agent reviewing sub-agent work
-- Requires read access to other agent DBs (daemon-mediated or namespace bind-mount)
+- All sessions already share one cclaw.db (scoped by agent_name) — needs a
+  daemon-mediated tool that relaxes the scope, not new storage
 
 ### Long-term memory ideas
 - Semantic search over past conversations (embedding-based, not just keyword FTS5)
@@ -79,40 +85,24 @@ Parking lot for features explicitly out-of-scope right now.
 
 - Tool composition: JS tools calling other tools via `callTool(name, args)`
 - Workspace script auto-discovery (`workspace/tools/*.sh`)
-- Extension registry/marketplace: sharing bundles between cclaw installs (the manifest is already the portable unit)
+- Extension registry/marketplace: see "Extension Packaging & Community
+  Registry" below
 
 ### fetch() (foundation ✓)
 
-Synchronous fetch via `HTTP_PROXY` → net_shim loopback bridge. Respects allowed_hosts. Remaining work:
-- Response size caps (heap bounded)
-- Configurable timeout per request
+Synchronous fetch via `HTTP_PROXY` → net_shim loopback bridge, shipped with
+host grants enforced at the proxy and a 2MB response cap
+(`js_http_fetch.c`). Remaining:
+- Configurable timeout per request (hardcoded 30s today)
 - Streaming for large responses
 
 ## JS Runtime Capabilities
 
-### fetch() ✓ (implemented)
-
-Synchronous (quickjs is blocking). Wraps libcurl via `HTTP_PROXY` → net_shim loopback bridge. Respects allowed_hosts.
-
-- URL allowlist? Or inherit agent's permissions?
-- Response size cap (heap is bounded)
-- Timeout per request
-
-### fs (readFile/writeFile)
-
-Same workspace restriction as `file_read`/`file_write` tools. Injected as globals.
-
-- `fs.readFile(path)` → string
-- `fs.writeFile(path, content)` → boolean
-- Path resolution relative to agent workspace
-
 ### Heap Size
 
-1MB is fine for pure computation. With fetch/fs:
-
-- HTTP response + parsed JSON + processing = easily 2-4MB
-- Make heap configurable per-agent in config.json
-- Default 4MB for `js_eval` (raised from 1MB after pogoplug session)
+4MB default for `js_eval` shipped (raised from 1MB after pogoplug session).
+Still future:
+- Make heap configurable per-agent
 - Legacy ARM targets (128MB RAM): keep it tight, maybe 2MB max
 
 ### JSON.query — jsmn-backed field extraction
@@ -179,30 +169,6 @@ agent.depth       // sub-agent depth (0 = root)
 
 Enables JS tools that behave differently based on context (e.g., a tool that's more conservative at depth > 0).
 
-## Extension System (OpenClaw/Pi Patterns)
-
-### OpenClaw Model
-
-- Extensions are TypeScript modules with a standard interface
-- Each extension declares: name, description, schema, handler
-- Extensions can subscribe to events (message received, tool called, etc.)
-- Extensions have scoped permissions (which APIs they can access)
-
-### Pi Model
-
-- Session tree with branching
-- Tools defined in TypeScript, hot-reloaded
-- Sub-agents as first-class concept
-- Clean separation: agent loop / tool dispatch / session management
-
-### CClaw Adaptation
-
-- C is the core (agent loop, DB, HTTP, tool dispatch)
-- quickjs is the extension language (replaces TypeScript role)
-- Shell scripts are the escape hatch (replaces "any language" flexibility)
-- SQLite is the coordination layer (replaces message queues / IPC)
-- No hot-reload needed — JS tools are eval'd fresh each call (or replayed from DB)
-
 ## HTTP Transport Abstraction
 
 Extract curl out of the agent process behind a swappable `HttpTransport` interface:
@@ -228,31 +194,22 @@ Benefits:
 
 Pattern mirrors existing shell networking proxy (shell→agent UDS) but one level up (agent→parent UDS).
 
-### ~~LLM Broker (collapse dual mode)~~ ✅ DONE
-
-Fork-per-call mode removed. Worker thread pool is the only LLM dispatch path.
-`g_llm_fork` and `pid = -1` sentinels deleted.
-
 ## Alternative Proxy Mechanisms for Static/Go/Rust Binaries
 
-Current proxy relies on `LD_PRELOAD=libcclaw_net.so` to intercept libc
-`connect()`/`getaddrinfo()`. This works for dynamically-linked programs
-(curl, git, python, node) but not for statically-linked or Go/Rust binaries
-that make raw syscalls. Those get zero network (`CLONE_NEWNET` hard backstop).
+Two mechanisms shipped: `LD_PRELOAD=libcclaw_net.so` intercepts libc
+`connect()`/`getaddrinfo()` for dynamically-linked programs, and `net_shim.c`
+runs a loopback HTTP CONNECT listener *inside* the netns (reached via
+`HTTP_PROXY` env) for static/Go/Rust binaries that honor proxy env vars.
+Anything that ignores both gets zero network (`CLONE_NEWNET` hard backstop).
+Still future:
 
 ### seccomp-unotify (kernel ≥5.9)
 Intercept the `connect()` syscall in the parent process via seccomp user
 notification (`SECCOMP_RET_USER_NOTIF`). The parent reads the target address
 from the child's memory, performs the proxy logic, and injects the connected
-fd back. Works for everything regardless of linking — no .so needed. Requires
-kernel ≥5.9 and is significantly more complex (~500 LOC).
-
-### Application-level proxy env vars
-Set `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` pointing to a proxy endpoint.
-Problem: inside `CLONE_NEWNET` there's no TCP loopback, so the proxy would
-need to listen on a UDS and programs would need native UDS proxy support
-(most don't). Go's net/http respects `HTTP_PROXY` but not over a Unix socket
-natively.
+fd back. Works for everything regardless of linking — no .so, no proxy-env
+cooperation needed. Requires kernel ≥5.9 and is significantly more complex
+(~500 LOC). Currently listed as a non-goal in specs/sandbox-profiles.md.
 
 ### Helper-script wrapper
 Provide a `cclaw-fetch` binary in `/bin/` inside the namespace that speaks
@@ -276,3 +233,80 @@ binary-quantized index, full-precision rerank of top-N, RRF fusion with BM25 and
 recency term. Embedding at write time via cheap API (async, `needs_embedding`
 flag, broker sweep). FTS5-only remains the offline fallback. Guide users through
 local-model setup when they want it.
+
+## Agent-to-Agent Escalation Approval (incl. multi-model councils)
+
+Today every escalation resolves to a *human* (channel admin or CLI approver).
+Idea: let a designated agent — or a quorum of agents — resolve another agent's
+escalation, so autonomy doesn't always block on a person.
+
+- **Delegated approver**: an operator names an agent as the approver for a
+  scoped class of requests (e.g. a "supervisor" agent approves `grant_host`
+  for hosts on a pre-set list). The requesting agent parks as usual; the
+  approver receives the parked request via inbox and resolves it.
+- **Multi-model council**: instead of one approver, a quorum of N agents backed
+  by *deliberately different models/providers* votes; the escalation resolves
+  only on consensus (or supermajority). Model diversity is the point — it
+  decorrelates prompt injection, so one poisoned council member can't grant.
+
+**Hard tension to resolve first — do not build past this without a design
+that answers it.** `specs/trust.md` states the rule plainly: *an injectable
+LLM must not hand out permissions* — monitor/approver agents may **veto or
+escalate, never grant**. Direct agent-approves-agent granting violates that
+rule as written. The council is the interesting escape hatch (diversity +
+quorum raises the bar against injection), but it is still LLMs conferring
+authority, so it needs: a bounded grant surface no council can exceed (a
+ceiling the operator sets, never widenable by vote); coerce-to-ONCE for
+anything sensitive (rule 1 in trust.md still applies per-call); an
+attributable audit trail of who voted how; and an honest statement that this
+defends against injection, not against a subverted binary. Until that design
+exists, the human stays in the loop for grants; councils may at most
+pre-screen and *recommend*.
+
+## LLM-in-the-Loop Evaluation (self-augmentation actually works)
+
+The static reviews (code/security/UB) can't answer the question the whole
+project rests on: can a *real model* drive draft → promote → use end-to-end,
+create a bespoke agent + tools on request, and recover when a tool call fails —
+without hand-holding? That needs an eval harness against live models
+(`make test-e2e`-tier), not a code read. Deferred deliberately, but named so it
+isn't a silent omission: build a scenario suite (define-a-tool, spin-up-a-
+bespoke-agent, self-configure-a-grant) run against the default model plus a
+couple of cheaper ones, scored on task completion and number of stuck turns.
+The tool schemas and system prompts are the real thing under test; treat
+low scores as a prompt/schema bug, not a model excuse.
+
+## Extension Packaging & Community Registry (the ecosystem bet)
+
+The long game: CClaw doesn't have to get every skill, tool, or prompt right
+the first time — the platform wins if *other people* can improve it over time.
+OpenClaw and Hermes are great in large part because of their communities
+building skills and tools. The extension manifest already bundles the right
+unit — tools + hooks + channel + scripts + skills + config + an agent to run
+them all — so the missing piece is **distribution**, not a new format.
+
+- **Package = extension bundle.** One directory + `extension.json`, exactly
+  what `extension_promote` ingests today. No parallel package format; if the
+  manifest can't express something a package needs (version, author,
+  dependency on another extension), extend the manifest.
+- **Registry**: npm-like distribution, or something better — at minimum
+  install-from-URL/git with a pinned ref; ideally something fun and
+  community-oriented (curated index, social discovery) rather than another
+  faceless tarball server. Keep the client dumb per the ethos: fetch → verify
+  → drop into `workspace/extensions/` as a **draft**. The existing
+  draft → promote lifecycle is the install flow *and* the trust gate — a
+  downloaded package gets zero authority until promotion approval, same as an
+  agent-written draft.
+- **Trust**: third-party authors are hostile until proven otherwise. The
+  promotion gate, sandbox profiles, and grants already model exactly this; a
+  registry adds provenance (checksums, maybe signing) on top, not a new trust
+  system. Skills are the lowest-risk contribution tier (prose the model
+  reads), JS tools/channels the highest — the tiering should be visible at
+  install time.
+- **Versioning**: updates re-enter as drafts and re-pass promotion. No
+  auto-update — an unattended personal agent must not have its tools swapped
+  under it by a remote publish.
+
+Prompt-surface quality (system prompts, tool descriptions, skills) is the
+cheapest layer for community contribution — which is another reason to treat
+prompts and skills as first-class reviewable artifacts, not polish.

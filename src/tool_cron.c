@@ -11,7 +11,7 @@
 static const char *CRON_SET_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
     "\"name\":{\"type\":\"string\",\"description\":\"Job name\"},"
-    "\"cron_expr\":{\"type\":\"string\",\"description\":\"5-field cron expression (M H D Mo DoW) for a recurring job. Omit if using in_seconds.\"},"
+    "\"cron_expr\":{\"type\":\"string\",\"description\":\"5-field cron expression (M H D Mo DoW), evaluated in UTC, for a recurring job. Omit if using in_seconds.\"},"
     "\"in_seconds\":{\"type\":\"integer\",\"description\":\"Delay in seconds from now for a one-shot job that fires once and is then removed. Omit if using cron_expr.\"},"
     "\"task\":{\"type\":\"string\",\"description\":\"Message to inject into this session when triggered\"}"
     "},\"required\":[\"name\",\"task\"]}";

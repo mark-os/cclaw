@@ -154,7 +154,6 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
 /* This process's instance id (stamped into sessions.owner_instance by the
  * session_set_state CAS). Set once after process_register; "" until then. */
 void db_set_instance_id(const char *id);
-const char *db_get_instance_id(void);
 
 /* Insert a registry row with a fresh random instance id (lower-hex of 16
  * random bytes). Writes the id into out_id. Returns 0 on success, -1 on error. */

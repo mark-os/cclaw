@@ -43,8 +43,6 @@ void db_set_instance_id(const char *id) {
     snprintf(g_owner_instance, sizeof(g_owner_instance), "%s", id);
 }
 
-const char *db_get_instance_id(void) { return g_owner_instance; }
-
 int process_register(sqlite3 *db, const char *mode, int pid, char *out_id, size_t out_sz) {
     if (!db || !out_id || out_sz == 0) return -1;
     /* id = lower(hex(randomblob(16))) — a 32-char hex token */

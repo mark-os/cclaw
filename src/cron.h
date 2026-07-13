@@ -31,7 +31,8 @@ int64_t cron_add(sqlite3 *db, const char *agent_name, const char *name,
                  const char *cron_expr, int64_t run_at, int64_t interval_s,
                  int64_t session_id, const char *task);
 CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count);
-int cron_remove(sqlite3 *db, int64_t job_id);
+/* Agent-scoped delete: only removes the job if agent_name owns it. */
+int cron_remove(sqlite3 *db, int64_t job_id, const char *agent_name);
 void cron_list_free(CronJob *jobs, int count);
 
 /* Seed a disabled heartbeat pulse row (kind='heartbeat', 1800s cadence) for

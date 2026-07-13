@@ -140,7 +140,7 @@ char *tool_cron_remove_handler(const char *arguments, void *user_data) {
     if (id < 0)
         return strdup("error: missing required field 'id'");
 
-    if (cron_remove(ctx->db, (int64_t)id) != 0)
+    if (cron_remove(ctx->db, (int64_t)id, ctx->agent_name) != 0)
         return strdup("error: job not found or DB error");
 
     char *result = malloc(64);

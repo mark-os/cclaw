@@ -306,6 +306,42 @@ concerns (no C changes) and belong in the telegram extension when they earn
 their place; the outbox/`channel.http` machinery already supports them.
 Message chunking (4096-byte split) is already implemented.
 
+## Message & Turn Timestamps (optional — review-1 F20, 2026-07-12)
+
+No entry — channel, cron, CLI, or assistant — carries a timestamp into the
+LLM request (`llm_payload.c`'s `SQL_OPENAI_MESSAGES`/`SQL_GEMINI_CONTENTS`
+project only `role`+`content`; `entries.created_at` exists but is never read
+into the payload). Raised as "does the agent know what time it is between
+messages," but kiro's research into `reference/openclaw` and
+`reference/hermes` found neither reference project does full per-message
+timestamping either — so treat this as a possible future enhancement, not a
+parity gap:
+
+- **OpenClaw**: `HistoryEntry.timestamp` (`src/auto-reply/reply/history.types.ts:4`)
+  is metadata on the entry object; whether it becomes visible text depends on
+  each channel plugin's `formatEntry` callback (`history.ts:363`) — no default
+  formatter injects a visible timestamp. Interactive system prompts carry no
+  date/time at all (the model calls a `session_status` tool on demand,
+  `system-prompt.ts:~1123`); the exception is cron/heartbeat-triggered turns,
+  which get a rich line via `resolveCronStyleNow()`
+  (`agents/current-time.ts:22-30`): `"Current time: Wednesday, January 22nd,
+  2025 - 14:32 (America/New_York)\nReference UTC: ..."`.
+- **Hermes**: no per-message timestamps; multi-user shared sessions get a
+  `[SenderName]` prefix only (no time). System prompt gets a date-only line,
+  injected once per session and deliberately never per-turn
+  (`agent/system_prompt.py:383-390`, comment: "Date-only (not minute-
+  precision) so the system prompt is byte-stable for the full day").
+- **Neither** project surfaces elapsed time between messages ("3 hours since
+  your last reply").
+
+If this gets built, the shape most consistent with both references: don't
+stamp every message (sender-name extraction into plain text already landed
+with the channel-routing-contract envelope fix, 2026-07-13); consider a
+cron/heartbeat-turn-only rich time line (mirroring OpenClaw) rather than
+adding time to every interactive turn — see `dynamic-system-prompt`'s
+system-prompt-vs-additional-context split for why time-of-day can't just go
+in the static system prompt.
+
 ## Extension Packaging & Community Registry (the ecosystem bet)
 
 The long game: CClaw doesn't have to get every skill, tool, or prompt right

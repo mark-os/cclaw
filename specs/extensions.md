@@ -73,7 +73,7 @@ directory.
 | `name` | Extension identity. Primary key in `extensions`. |
 | `version` | Free-form version string (display / update tracking). |
 | `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), policy?}`. |
-| `hooks[]` | Each: `{event, handler (file)}`. `event` is one of the six hook events below. |
+| `hooks[]` | Each: `{event, handler (file)}`. `event` must be a *dispatched* hook event (`preAdvance`, `postAdvance`, `beforeToolCall`, `afterToolCall`) — validate rejects others, incl. the not-yet-wired `turnStart`/`turnEnd`. |
 | `channel` | At most one: `{type, handler (file)}`. The channel runs as a separate process. |
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
 | `skills[]` | Bundle-relative paths, each a directory containing `SKILL.md` or a bare `.md` file ([skills.md](skills.md) format). Validated at promote: path must be bundle-relative and its frontmatter must parse with a `description`. |
@@ -420,7 +420,7 @@ CREATE TABLE tools (
 -- hooks: same provenance model as tools (replaces the __cclaw_hooks scrape)
 CREATE TABLE hooks (
   extension_name TEXT NOT NULL,
-  event          TEXT NOT NULL,         -- one of the six hook events
+  event          TEXT NOT NULL,         -- a dispatched hook event
   path           TEXT NOT NULL,         -- handler file (in the shared store)
   enabled        INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (extension_name, event, path)

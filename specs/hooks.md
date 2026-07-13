@@ -33,8 +33,11 @@ context.
 
 ## 2. Hook Events (revised)
 
-Six events. Each hook handler is a JS file evaluated in a fresh QJS context per
-dispatch. A handler that throws is skipped (logged); one broken hook never kills
+Six events are specified; **four are dispatched** (`preAdvance`, `postAdvance`,
+`beforeToolCall`, `afterToolCall`). `turnStart`/`turnEnd` are design headroom —
+not yet wired, and `extension_manifest_validate` **rejects** manifests that
+declare them (a registered hook that never fires is a silent lie). Each hook
+handler is a JS file evaluated in a fresh QJS context per dispatch. A handler that throws is skipped (logged); one broken hook never kills
 the turn.
 
 | Event | When it fires | Input (JSON) | Output (JSON) | Chaining |

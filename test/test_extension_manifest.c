@@ -248,6 +248,25 @@ static void test_validate_rejects_bad_sections(void) {
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
     free(err); err = NULL;
 
+    /* undispatched hook events (F13): turnStart/turnEnd are spec'd but never
+     * fire — registering them would be a silent no-op */
+    write_file("/tmp/test_ext_badsec/h.qjs", "({})");
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"hooks\":[{\"event\":\"turnStart\",\"handler\":\"h.qjs\"}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "not dispatched"));
+    free(err); err = NULL;
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"hooks\":[{\"event\":\"bogusEvent\",\"handler\":\"h.qjs\"}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "not dispatched"));
+    free(err); err = NULL;
+    /* a dispatched event passes */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"hooks\":[{\"event\":\"afterToolCall\",\"handler\":\"h.qjs\"}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
+    free(err); err = NULL;
+
     rm_rf("/tmp/test_ext_badsec");
     printf("  PASS test_validate_rejects_bad_sections\n");
 }

@@ -208,10 +208,15 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     q->command = r_str(r);
     q->shell_path = r_str(r);
     q->timeout = (int)r_u32(r);
+    /* An out-of-bounds count or a failed calloc must latch r->err, never
+     * skip the section — skipping would decode every later field from the
+     * wrong offset (silent misparse instead of a hard failure). */
     uint32_t sc = r_u32(r);
-    if (!r->err && sc > 0 && sc <= RUNTOOL_REQUEST_MAX / 4) {
-        q->secrets = calloc(sc, sizeof(*q->secrets));
-        if (q->secrets) {
+    if (!r->err && sc > 0) {
+        if (sc > RUNTOOL_REQUEST_MAX / 4 ||
+            !(q->secrets = calloc(sc, sizeof(*q->secrets)))) {
+            r->err = 1;
+        } else {
             for (uint32_t i = 0; i < sc; i++) {
                 q->secrets[i].name  = r_str(r);
                 q->secrets[i].value = r_str(r);
@@ -220,9 +225,11 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
         }
     }
     uint32_t pc = r_u32(r);
-    if (!r->err && pc > 0 && pc <= RUNTOOL_REQUEST_MAX / 8) {
-        q->params = calloc(pc, sizeof(*q->params));
-        if (q->params) {
+    if (!r->err && pc > 0) {
+        if (pc > RUNTOOL_REQUEST_MAX / 8 ||
+            !(q->params = calloc(pc, sizeof(*q->params)))) {
+            r->err = 1;
+        } else {
             for (uint32_t i = 0; i < pc; i++) {
                 q->params[i].key = r_str(r);
                 q->params[i].kind = (int)r_u8(r);

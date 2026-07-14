@@ -2581,19 +2581,25 @@ static void reap_children(void) {
             /* Network provenance: a non-empty hosts tag marks the result as
              * untrusted external content. Sanitize NOW (strip invisible
              * Unicode, neutralize boundary-marker lookalikes) so the
-             * query-time wrap in llm_payload can't be broken out of. */
+             * query-time wrap in llm_payload can't be broken out of.
+             * Fail closed on a damaged signal: a truncated or oversized-
+             * dropped meta means we can't prove the result had no network
+             * exposure — sanitize as if it did, and record no hosts tag
+             * (never a partial one). Only an explicit zero-length meta
+             * (non-network tier / error frame) skips sanitization. */
             char *hosts = c->hosts_json;
-            if (hosts && (hosts[0] == '\0' || strcmp(hosts, "[]") == 0))
+            int meta_damaged = c->frame_meta_len > 0 &&
+                (!c->hosts_json || c->frame_meta_read != c->frame_meta_len);
+            if (meta_damaged ||
+                (hosts && (hosts[0] == '\0' || strcmp(hosts, "[]") == 0)))
                 hosts = NULL;
-            if (hosts && c->frame_meta_read == c->frame_meta_len) {
+            if (hosts || meta_damaged) {
                 size_t slen = out_len;
                 char *st = unicode_strip_invisible(output, slen, &slen);
                 if (st) { free(output); output = st; }
                 char *sn = sanitize_markers(output, slen);
                 if (sn) { free(output); output = sn; }
                 out_len = strlen(output);
-            } else {
-                hosts = NULL;  /* truncated meta: don't trust a partial tag */
             }
 
             /* Explicit capture first (raw result), then postprocess:

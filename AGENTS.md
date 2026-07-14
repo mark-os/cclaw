@@ -50,7 +50,7 @@ CClaw follows the **principle of least surprise**: pick the boring, obvious solu
 
 **State has one home.** Durable state is `cclaw.db`. Memory holds only the active session branch and per-turn scratch. Do **not** introduce parallel state (globals, caches, sidecar files) that can drift from the DB — state management is the part that churned the most before stabilizing, so changes here have wide blast radius. `advance_session()` is the load-bearing wall: re-read it before changing how a turn progresses.
 
-**jsmn vs SQLite JSON — use the right one.** jsmn tokenizes *untrusted/streaming* JSON you don't own (SSE chunks, tool-call arguments from the model). SQLite JSON handles *structured data you own* in the DB. They are not interchangeable; don't swap one for the other to "unify."
+**jsmn vs SQLite JSON — use the right one.** SQLite JSON1 is the parser everywhere a db handle exists — including model-generated tool-call arguments, which the trusted parent validates and decomposes once at dispatch (`tool_args.c`); sandboxed `--run-tool` children receive pre-extracted params over the flat wire and parse no JSON at all. jsmn survives only where genuinely no db is in reach (the channel-harness scenario reader). Don't reintroduce a second JSON parser on a path that has a db handle.
 
 ### Counterintuitive on purpose — don't "fix" these
 
@@ -235,7 +235,7 @@ Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 
 | Dep | Purpose | Vendored? |
 |-----|---------|-----------|
-| jsmn | JSON tokenizer (SSE parsing, tool args) | Yes |
+| jsmn | JSON tokenizer (db-less corners, e.g. channel-harness scenarios) | Yes |
 | SQLite 3.53 | Persistence, FTS5, JSON functions | Yes |
 | libcurl | HTTP client (LLM API, Telegram) | System (dynamic link) |
 | civetweb | Embedded HTTP server (webhooks, dashboard) | Yes |

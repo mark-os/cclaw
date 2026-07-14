@@ -680,7 +680,18 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
         /* Per-argument policy pre-filter (restrict-only, before hooks) */
         if (te->policy_json) {
-            PolicyEffect pe = policy_eval(tc->arguments, te->policy_json);
+            PolicyEffect pe = policy_eval(g_db, tc->arguments, te->policy_json);
+            if (pe == POLICY_ERROR) {
+                /* Unparseable policy (args were gate-validated above): the
+                 * call is blocked — never allowed past a policy we can't
+                 * read. Model-visible error; operator sees the warn. */
+                LOG_WARN_("policy unparseable tool=%s — call blocked", tc->name);
+                char err[160];
+                snprintf(err, sizeof(err),
+                         "error: %s blocked — its policy is unparseable; "
+                         "report this to the operator", tc->name);
+                return tool_inline_error(session_id, tc, err, "policy:error");
+            }
             if (pe == POLICY_DENY) {
                 char err[128];
                 snprintf(err, sizeof(err), "error: %s denied by policy", tc->name);

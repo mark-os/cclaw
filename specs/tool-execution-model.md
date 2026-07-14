@@ -182,10 +182,22 @@ cross as raw bytes with no escape/unescape round-trip. The body opens with a
 tier byte (`0`=file, `1`=shell, `2`=web, `3`=js); `run_tool.c` is the canonical
 field order. Fields by tier (additive over file):
 
-- all: `tier`, `tool_name`, `arguments`, `env_mode`, `rlimits{nproc,as_mb,cpu_sec}`
+- all: `tier`, `tool_name`, `env_mode`, `rlimits{nproc,as_mb,cpu_sec}`
 - file: `workspace`, `read_paths[]`, `write_paths[]`, `workspace_ro`, `mount_cwd`, `cwd_path`
 - web/shell: `host_rules[]` (exact/suffix), `agent_dir` (for proxy socket; the broker partitions grants into host/CIDR rules at `proxy_bind`)
 - shell: `command` (with secrets already interpolated by the daemon parent), `timeout`, `secrets[]` (minimal name/value set for env injection)
+- file/web/js: `params[]` — the tool's arguments, pre-extracted by the parent
+  (`tool_args_extract`, SQLite JSON1 over the tool's schema) as
+  `(key, kind, value)` where kind is text, opaque-JSON (js_eval's `args`,
+  which QuickJS parses natively), or string-list (file_edit's edits,
+  flattened to oldText/newText pairs). The raw arguments JSON never crosses
+  the boundary and the child parses no JSON.
+
+**Arguments**: validated (`json_valid`, object) at the dispatch gate and
+decomposed once in the trusted parent; malformed arguments become an error
+tool-result and never dispatch. Per-argument policy (`policy_eval`) matches on
+the same SQLite parse — an unparseable policy blocks the call
+(`POLICY_ERROR`), never fails open.
 
 **Secrets**: resolved by the **daemon parent** before the blob is written. The
 sterile `--run-tool`/broker holds no key and never interpolates. This replaces

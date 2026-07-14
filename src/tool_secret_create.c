@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "tool_secret_create.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include "validate.h"
 #include "db.h"
 #include <stdlib.h>
@@ -63,37 +63,34 @@ static const char *SECRET_CREATE_PARAMS_JSON =
 
 static char *tool_secret_create_handler(const char *arguments, void *user_data) {
     ToolSecretCreateCtx *ctx = (ToolSecretCreateCtx *)user_data;
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid secret_create arguments");
 
-    const char *name = targ_str(&ta, "name");
-    int length = targ_int(&ta, "length", 32);
-    const char *charset_name = targ_str(&ta, "charset");
+    char *name = tool_args_str(ctx->db, arguments, "name");
+    int length = tool_args_int(ctx->db, arguments, "length", 32);
+    char *charset_name = tool_args_str(ctx->db, arguments, "charset");
 
     if (length < 8) length = 8;
     if (length > 128) length = 128;
 
     if (!name || !is_valid_secret_name(name)) {
-        tool_parse_free(&ta);
+        free(name); free(charset_name);
         return strdup("error: invalid secret name (expected ^[A-Z][A-Z0-9_]*$)");
     }
     if (db_secret_exists(ctx->db, name)) {
         char err[128];
         snprintf(err, sizeof(err), "error: secret %s already exists", name);
-        tool_parse_free(&ta);
+        free(name); free(charset_name);
         return strdup(err);
     }
     size_t clen = 0;
     const char *charset = charset_for(charset_name, &clen);
     if (!charset) {
-        tool_parse_free(&ta);
+        free(name); free(charset_name);
         return strdup("error: charset must be 'alnum', 'hex', or 'full'");
     }
 
     char value[129];
     if (random_from_charset(value, (size_t)length, charset, clen) != 0) {
-        tool_parse_free(&ta);
+        free(name); free(charset_name);
         return strdup("error: failed to generate random value");
     }
 
@@ -104,7 +101,7 @@ static char *tool_secret_create_handler(const char *arguments, void *user_data) 
     snprintf(name_buf, sizeof(name_buf), "%s", name);
     char charset_buf[16];
     snprintf(charset_buf, sizeof(charset_buf), "%s", charset_name ? charset_name : "alnum");
-    tool_parse_free(&ta);
+    free(name); free(charset_name);
 
     if (rc != 0)
         return strdup("error: failed to store secret");

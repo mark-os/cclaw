@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "tool_channel_send.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include "channel_api.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -64,25 +64,23 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
     ToolChannelSendCtx *ctx = (ToolChannelSendCtx *)user_data;
     if (!ctx || !ctx->db) return strdup("error: channel_send unavailable");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid channel_send arguments");
-    const char *action = targ_str(&ta, "action");
+    char *action = tool_args_str(ctx->db, arguments, "action");
 
     if (action && strcmp(action, "list") == 0) {
-        tool_parse_free(&ta);
+        free(action);
         return list_targets(ctx->db, ctx->agent_name);
     }
     if (action && strcmp(action, "send") != 0) {
-        tool_parse_free(&ta);
+        free(action);
         return strdup("error: action must be 'send' or 'list'");
     }
+    free(action);
 
-    const char *channel = targ_str(&ta, "channel");
-    const char *chat_id = targ_str(&ta, "chat_id");
-    const char *message = targ_str(&ta, "message");
+    char *channel = tool_args_str(ctx->db, arguments, "channel");
+    char *chat_id = tool_args_str(ctx->db, arguments, "chat_id");
+    char *message = tool_args_str(ctx->db, arguments, "message");
     if (!channel || !chat_id || !message || !message[0]) {
-        tool_parse_free(&ta);
+        free(channel); free(chat_id); free(message);
         return strdup("error: channel, chat_id, and message are required");
     }
 
@@ -93,7 +91,7 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
                        "channel_send targets need an operator route "
                        "(cclaw route add). Use action='list' to see yours.",
                        channel, chat_id);
-        tool_parse_free(&ta);
+        free(channel); free(chat_id); free(message);
         return m;
     }
 
@@ -116,7 +114,7 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
             sqlite3_finalize(st);
         }
         if (dup) {
-            tool_parse_free(&ta);
+            free(channel); free(chat_id); free(message);
             return strdup("not sent: this chat is your session's origin and the "
                           "route is in auto mode — your reply already delivers "
                           "there.");
@@ -137,9 +135,12 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
             oid = sqlite3_last_insert_rowid(ctx->db);
         sqlite3_finalize(st);
     }
-    tool_parse_free(&ta);
-    if (oid < 0) return strdup("error: send failed (db)");
+    if (oid < 0) {
+        free(channel); free(chat_id); free(message);
+        return strdup("error: send failed (db)");
+    }
     if (ctx->db_path) channel_outbox_wake(ctx->db_path, channel);
+    free(channel); free(chat_id); free(message);
     return msgf("queued, outbox id %lld", (long long)oid);
 }
 

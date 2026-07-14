@@ -2,7 +2,7 @@
 #include "tool_cron.h"
 #include "config_registry.h"
 #include "cron.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,16 +37,14 @@ static int session_job_count(sqlite3 *db, int64_t session_id) {
 
 char *tool_cron_set_handler(const char *arguments, void *user_data) {
     ToolCronCtx *ctx = (ToolCronCtx *)user_data;
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON");
 
-    const char *name = targ_str(&ta, "name");
-    const char *expr = targ_str(&ta, "cron_expr");
-    const char *task = targ_str(&ta, "task");
-    int in_seconds   = targ_int(&ta, "in_seconds", 0);
+    char *name = tool_args_str(ctx->db, arguments, "name");
+    char *expr = tool_args_str(ctx->db, arguments, "cron_expr");
+    char *task = tool_args_str(ctx->db, arguments, "task");
+    int in_seconds = tool_args_int(ctx->db, arguments, "in_seconds", 0);
 
     if (!name || !task) {
-        tool_parse_free(&ta);
+        free(name); free(expr); free(task);
         return strdup("error: missing required fields (name, task)");
     }
 
@@ -56,11 +54,11 @@ char *tool_cron_set_handler(const char *arguments, void *user_data) {
     int has_expr    = (expr && expr[0]);
     int has_seconds = (in_seconds != 0);
     if (has_expr == has_seconds) {   /* both, or neither */
-        tool_parse_free(&ta);
+        free(name); free(expr); free(task);
         return strdup("error: provide exactly one of cron_expr or in_seconds");
     }
     if (has_seconds && in_seconds <= 0) {
-        tool_parse_free(&ta);
+        free(name); free(expr); free(task);
         return strdup("error: in_seconds must be positive");
     }
 
@@ -70,7 +68,7 @@ char *tool_cron_set_handler(const char *arguments, void *user_data) {
     if (cap > 0) {
         int n = session_job_count(ctx->db, ctx->session_id);
         if (n >= cap) {
-            tool_parse_free(&ta);
+            free(name); free(expr); free(task);
             char *e = malloc(96);
             if (!e) return strdup("error: OOM");
             snprintf(e, 96, "error: session cron job limit reached (max %d)", cap);
@@ -83,16 +81,16 @@ char *tool_cron_set_handler(const char *arguments, void *user_data) {
                           has_expr ? expr : "", run_at, 0, ctx->session_id, task);
 
     if (id < 0) {
-        tool_parse_free(&ta);
+        free(name); free(expr); free(task);
         return strdup("error: invalid schedule "
                       "(bad cron_expr, or below the min-interval floor)");
     }
 
     char *result = malloc(128);
-    if (!result) { tool_parse_free(&ta); return strdup("error: OOM"); }
+    if (!result) { free(name); free(expr); free(task); return strdup("error: OOM"); }
     snprintf(result, 128, "created cron job id=%lld name=\"%s\"",
              (long long)id, name);
-    tool_parse_free(&ta);
+    free(name); free(expr); free(task);
     return result;
 }
 
@@ -131,11 +129,8 @@ char *tool_cron_list_handler(const char *arguments, void *user_data) {
 
 char *tool_cron_remove_handler(const char *arguments, void *user_data) {
     ToolCronCtx *ctx = (ToolCronCtx *)user_data;
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON");
 
-    int id = targ_int(&ta, "id", -1);
-    tool_parse_free(&ta);
+    int id = tool_args_int(ctx->db, arguments, "id", -1);
 
     if (id < 0)
         return strdup("error: missing required field 'id'");

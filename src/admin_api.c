@@ -2,7 +2,7 @@
 #include "admin_api.h"
 #include "agent_config.h"
 #include "db.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -819,21 +819,22 @@ int admin_grant_from_history(sqlite3 *db, int64_t approval_id) {
         char *agent = session_get_agent_name(db, session_id);
         if (!agent) goto done;
 
-        ToolArgs ta;
-        tool_parse(args_json, &ta);
         if (strcmp(action, "grant_tool") == 0) {
-            const char *v = targ_str(&ta, "tool");
+            char *v = tool_args_str(db, args_json, "tool");
             if (v) rc = agent_config_grant(db, agent, "tool", v, 0);
+            free(v);
         } else if (strcmp(action, "grant_host") == 0) {
-            const char *v = targ_str(&ta, "host");
+            char *v = tool_args_str(db, args_json, "host");
             if (v) rc = agent_config_grant(db, agent, "host", v, 0);
+            free(v);
         } else if (strcmp(action, "grant_path") == 0) {
-            const char *v = targ_str(&ta, "path");
-            const char *m = targ_str(&ta, "mode");
+            char *v = tool_args_str(db, args_json, "path");
+            char *m = tool_args_str(db, args_json, "mode");
             const char *kind = (m && strcmp(m, "write") == 0) ? "write_path" : "read_path";
             if (v) rc = agent_config_grant(db, agent, kind, v, 0);
+            free(v);
+            free(m);
         }
-        tool_parse_free(&ta);
         free(agent);
     }
 

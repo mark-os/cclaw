@@ -8,7 +8,7 @@
 #include "config_registry.h"
 #include "db.h"
 #include "validate.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -160,55 +160,56 @@ static char *handler(const char *arguments, void *user_data) {
     if (!ctx || !ctx->db || !ctx->agent_name)
         return strdup("error: request_config unavailable");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON");
-
-    const char *act = targ_str(&ta, "action");
-    if (!act) { tool_parse_free(&ta); return strdup("error: 'action' required (one of: grant_tool, grant_host, grant_path, rename_agent, set_config, set_provider)"); }
+    char *act = tool_args_str(ctx->db, arguments, "action");
+    if (!act) return strdup("error: 'action' required (one of: grant_tool, grant_host, grant_path, rename_agent, set_config, set_provider)");
 
     /* Optional reason — treat empty string as absent. */
-    const char *reason = targ_str(&ta, "reason");
-    if (reason && !reason[0]) reason = NULL;
+    char *reason = tool_args_str(ctx->db, arguments, "reason");
+    if (reason && !reason[0]) { free(reason); reason = NULL; }
 
     char *result = NULL;
     ArgsOpt opt = { .reason = reason };
 
     if (strcmp(act, "grant_tool") == 0) {
-        const char *tool = targ_str(&ta, "tool");
-        if (!tool || !tool[0]) { tool_parse_free(&ta); return strdup("error: 'tool' required for grant_tool"); }
+        char *tool = tool_args_str(ctx->db, arguments, "tool");
+        if (!tool || !tool[0]) { free(tool); free(act); free(reason); return strdup("error: 'tool' required for grant_tool"); }
         result = gate_request(ctx, "grant_tool", "tool", tool, &opt);
+        free(tool);
 
     } else if (strcmp(act, "grant_host") == 0) {
-        const char *host = targ_str(&ta, "host");
-        if (!host || !host[0]) { tool_parse_free(&ta); return strdup("error: 'host' required for grant_host"); }
+        char *host = tool_args_str(ctx->db, arguments, "host");
+        if (!host || !host[0]) { free(host); free(act); free(reason); return strdup("error: 'host' required for grant_host"); }
         result = gate_request(ctx, "grant_host", "host", host, &opt);
+        free(host);
 
     } else if (strcmp(act, "grant_path") == 0) {
-        const char *path = targ_str(&ta, "path");
-        if (!path || !path[0]) { tool_parse_free(&ta); return strdup("error: 'path' required for grant_path"); }
-        if (path[0] != '/') { tool_parse_free(&ta); return strdup("error: path must be absolute (start with '/')"); }
-        const char *mode = targ_str(&ta, "mode");
-        if (!mode || !mode[0]) mode = "read";
-        if (strcmp(mode, "read") != 0 && strcmp(mode, "write") != 0) {
-            tool_parse_free(&ta);
+        char *path = tool_args_str(ctx->db, arguments, "path");
+        if (!path || !path[0]) { free(path); free(act); free(reason); return strdup("error: 'path' required for grant_path"); }
+        if (path[0] != '/') { free(path); free(act); free(reason); return strdup("error: path must be absolute (start with '/')"); }
+        char *mode = tool_args_str(ctx->db, arguments, "mode");
+        const char *mode_val = (mode && mode[0]) ? mode : "read";
+        if (strcmp(mode_val, "read") != 0 && strcmp(mode_val, "write") != 0) {
+            free(mode); free(path); free(act); free(reason);
             return strdup("error: mode must be \"read\" or \"write\"");
         }
-        opt.mode = mode;
+        opt.mode = mode_val;
         result = gate_request(ctx, "grant_path", "path", path, &opt);
+        free(mode); free(path);
 
     } else if (strcmp(act, "rename_agent") == 0) {
-        const char *new_name = targ_str(&ta, "name");
-        const char *preamble = targ_str(&ta, "preamble");
-        if (!new_name || !new_name[0]) { tool_parse_free(&ta); return strdup("error: 'name' required"); }
-        if (!is_valid_agent_name(new_name)) { tool_parse_free(&ta); return strdup("error: agent name must be PascalCase: start with an uppercase letter, letters and digits only, max 63 chars"); }
+        char *new_name = tool_args_str(ctx->db, arguments, "name");
+        char *preamble = tool_args_str(ctx->db, arguments, "preamble");
+        if (!new_name || !new_name[0]) { free(new_name); free(preamble); free(act); free(reason); return strdup("error: 'name' required"); }
+        if (!is_valid_agent_name(new_name)) { free(new_name); free(preamble); free(act); free(reason); return strdup("error: agent name must be PascalCase: start with an uppercase letter, letters and digits only, max 63 chars"); }
         opt.preamble = preamble;
         result = gate_request(ctx, "rename_agent", "name", new_name, &opt);
+        free(new_name); free(preamble);
 
     } else if (strcmp(act, "set_config") == 0) {
-        const char *key = targ_str(&ta, "key");
-        const char *value = targ_str(&ta, "value");
-        if (!key || !key[0]) { tool_parse_free(&ta); return strdup("error: 'key' required for set_config"); }
-        if (!value) { tool_parse_free(&ta); return strdup("error: 'value' required for set_config"); }
+        char *key = tool_args_str(ctx->db, arguments, "key");
+        char *value = tool_args_str(ctx->db, arguments, "value");
+        if (!key || !key[0]) { free(key); free(value); free(act); free(reason); return strdup("error: 'key' required for set_config"); }
+        if (!value) { free(key); free(act); free(reason); return strdup("error: 'value' required for set_config"); }
         /* Eager validation: the key must be registered — in the C registry
          * or extension-registered (config row with a code-owned default).
          * Unknown keys fail now, not at approval time. */
@@ -223,65 +224,69 @@ static char *handler(const char *arguments, void *user_data) {
                 sqlite3_finalize(ck);
             }
             if (!known) {
-                tool_parse_free(&ta);
+                free(key); free(value); free(act); free(reason);
                 return strdup("error: unknown config key — use search_config to list registered keys");
             }
         }
         opt.cfg_value = value;
         result = gate_request(ctx, "set_config", "key", key, &opt);
+        free(key); free(value);
 
     } else if (strcmp(act, "set_provider") == 0) {
-        const char *prov = targ_str(&ta, "provider");
-        const char *base_url = targ_str(&ta, "base_url");
-        const char *model = targ_str(&ta, "model");
-        const char *key_env = targ_str(&ta, "api_key_env");
-        if (!prov || !prov[0]) { tool_parse_free(&ta); return strdup("error: 'provider' required for set_provider"); }
+        char *prov = tool_args_str(ctx->db, arguments, "provider");
+        char *base_url = tool_args_str(ctx->db, arguments, "base_url");
+        char *model = tool_args_str(ctx->db, arguments, "model");
+        char *key_env = tool_args_str(ctx->db, arguments, "api_key_env");
+        if (!prov || !prov[0]) { free(prov); free(base_url); free(model); free(key_env); free(act); free(reason); return strdup("error: 'provider' required for set_provider"); }
         /* Eager validation + default fill: known providers get default
          * base_url/model; unknown ones must supply base_url. Park clean. */
         int known = -1;
         for (size_t i = 0; i < PROVIDER_COUNT; i++)
             if (strcmp(prov, PROVIDERS[i].name) == 0) { known = (int)i; break; }
         if (known < 0 && (!base_url || !base_url[0])) {
-            tool_parse_free(&ta);
+            free(prov); free(base_url); free(model); free(key_env); free(act); free(reason);
             return strdup("error: 'base_url' required for unknown providers");
         }
-        if (!base_url || !base_url[0]) base_url = PROVIDERS[known].base_url;
-        if (strncmp(base_url, "https://", 8) != 0 &&
-            strncmp(base_url, "http://", 7) != 0) {
-            tool_parse_free(&ta);
+        const char *url_val = (base_url && base_url[0]) ? base_url : PROVIDERS[known].base_url;
+        if (strncmp(url_val, "https://", 8) != 0 &&
+            strncmp(url_val, "http://", 7) != 0) {
+            free(prov); free(base_url); free(model); free(key_env); free(act); free(reason);
             return strdup("error: base_url must start with http:// or https://");
         }
-        if (!model || !model[0]) model = (known >= 0) ? PROVIDERS[known].model : NULL;
+        const char *model_val = (model && model[0]) ? model : ((known >= 0) ? PROVIDERS[known].model : NULL);
         /* api_key_env is a secret NAME, never key material. Default derives
          * <PROVIDER>_API_KEY so config_load's env → kv fallback resolves it. */
         char env_buf[96];
+        const char *env_val = NULL;
         if (key_env && key_env[0]) {
             int ok = (key_env[0] >= 'A' && key_env[0] <= 'Z');
             for (const char *c = key_env; ok && *c; c++)
                 ok = (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_';
             if (!ok) {
-                tool_parse_free(&ta);
+                free(prov); free(base_url); free(model); free(key_env); free(act); free(reason);
                 return strdup("error: api_key_env must match [A-Z][A-Z0-9_]* — it is the secret's NAME, not the key value");
             }
+            env_val = key_env;
         } else {
             size_t en = 0;
             for (const char *c = prov; *c && en < sizeof(env_buf) - 12; c++)
                 env_buf[en++] = (*c >= 'a' && *c <= 'z') ? (char)(*c - 32)
                               : ((*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9')) ? *c : '_';
             memcpy(env_buf + en, "_API_KEY", 9);
-            key_env = env_buf;
+            env_val = env_buf;
         }
-        opt.base_url = base_url;
-        opt.model = model;
-        opt.api_key_env = key_env;
+        opt.base_url = url_val;
+        opt.model = model_val;
+        opt.api_key_env = env_val;
         result = gate_request(ctx, "set_provider", "provider", prov, &opt);
+        free(prov); free(base_url); free(model); free(key_env);
 
     } else {
-        tool_parse_free(&ta);
+        free(act); free(reason);
         return strdup("error: action must be grant_tool, grant_host, grant_path, rename_agent, set_config, or set_provider");
     }
 
-    tool_parse_free(&ta);
+    free(act); free(reason);
     return result;
 }
 

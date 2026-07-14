@@ -31,7 +31,7 @@
 #include "llm_worker.h"
 #include "tool_thread.h"
 #include "tools.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include "tool_request_config.h"
 #include "context.h"
 #include "db.h"
@@ -463,9 +463,7 @@ static char **used_secret_names(const char *args, const ShellSecret *secrets,
 /* Host of a call's "url" argument: scheme-strip + authority slice, mirroring
  * what the proxy/http layer accepts — deliberately not a full URL parser. */
 static int web_args_url_host(const char *args, char *out, size_t cap) {
-    ToolArgs ta;
-    if (!args || tool_parse(args, &ta) != 0) return 0;
-    const char *url = targ_str(&ta, "url");
+    char *url = tool_args_str(g_db, args, "url");
     int ok = 0;
     if (url) {
         const char *p = strstr(url, "://");
@@ -483,7 +481,7 @@ static int web_args_url_host(const char *args, char *out, size_t cap) {
         size_t len = (size_t)(end - p);
         if (len > 0 && len < cap) { memcpy(out, p, len); out[len] = '\0'; ok = 1; }
     }
-    tool_parse_free(&ta);
+    free(url);
     return ok;
 }
 
@@ -652,6 +650,17 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             snprintf(err, sizeof(err),
                      "error: %s blocked by this session's tool filter", tc->name);
             return tool_inline_error(session_id, tc, err, "tool_filter");
+        }
+        /* Malformed arguments fail closed at the gate: the model gets an
+         * error tool-result and can retry. Nothing downstream (policy, hooks,
+         * handlers, the child wire) ever sees invalid JSON, so no code path
+         * can substitute an empty param set for unparseable args. */
+        if (!tool_args_valid_object(g_db, tc->arguments)) {
+            char err[160];
+            snprintf(err, sizeof(err),
+                     "error: %s: arguments are not a valid JSON object — "
+                     "retry the call with well-formed JSON", tc->name);
+            return tool_inline_error(session_id, tc, err, "bad_args");
         }
         ToolApprovalMode mode = agent_tool_mode(g_db, agent_name, tc->name);
         HookGate gate = (mode == TOOL_MODE_SILENT) ? HOOK_GATE_ALLOW : HOOK_GATE_ASK;
@@ -992,12 +1001,11 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 cli_print_tool_call(tc->name, tc->arguments);
             session_set_state(g_db, session_id, "tool_running");
 
-            ToolArgs ta;
-            if (tool_parse(tc->arguments, &ta) != 0)
+            char *command = tool_args_str(g_db, tc->arguments, "command");
+            if (!command)
                 return tool_inline_error(session_id, tc,
-                    "error: invalid shell_exec arguments", NULL);
-            const char *command = targ_str(&ta, "command");
-            int cmd_timeout = targ_int(&ta, "timeout", sc->timeout);
+                    "error: shell_exec requires a 'command' string argument", NULL);
+            int cmd_timeout = tool_args_int(g_db, tc->arguments, "timeout", sc->timeout);
             if (cmd_timeout <= 0) cmd_timeout = sc->timeout;
 
             /* Parent-side secret interpolation (daemon holds the key) */
@@ -1040,7 +1048,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             /* Wipe interpolated command (contains secret plaintext) */
             if (interp_cmd) { explicit_bzero(interp_cmd, strlen(interp_cmd)); free(interp_cmd); }
             free(min_secrets);
-            tool_parse_free(&ta);
+            free(command);
 
             if (!blob)
                 return tool_inline_error(session_id, tc,
@@ -1689,30 +1697,26 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
     *rename_failed = 0;
     const char *refresh_agent = agent;
     if (strcmp(a->action, "grant_tool") == 0) {
-        ToolArgs ta; tool_parse(a->args_json, &ta);
-        const char *v = targ_str(&ta, "tool");
+        char *v = tool_args_str(g_db, a->args_json, "tool");
         if (v) agent_config_grant(g_db, agent, "tool", v, grant_expires_at);
-        tool_parse_free(&ta);
+        free(v);
     } else if (strcmp(a->action, "grant_host") == 0) {
-        ToolArgs ta; tool_parse(a->args_json, &ta);
-        const char *v = targ_str(&ta, "host");
+        char *v = tool_args_str(g_db, a->args_json, "host");
         if (v) agent_config_grant(g_db, agent, "host", v, grant_expires_at);
-        tool_parse_free(&ta);
+        free(v);
     } else if (strcmp(a->action, "grant_path") == 0) {
-        ToolArgs ta; tool_parse(a->args_json, &ta);
-        const char *v = targ_str(&ta, "path");
-        const char *m = targ_str(&ta, "mode");
+        char *v = tool_args_str(g_db, a->args_json, "path");
+        char *m = tool_args_str(g_db, a->args_json, "mode");
         /* Default read: least privilege — write is opt-in via mode:"write" */
         const char *kind = (m && strcmp(m, "write") == 0) ? "write_path" : "read_path";
         if (v) agent_config_grant(g_db, agent, kind, v, grant_expires_at);
-        tool_parse_free(&ta);
+        free(v); free(m);
     } else if (strcmp(a->action, "set_config") == 0) {
-        ToolArgs ta; tool_parse(a->args_json, &ta);
-        const char *k = targ_str(&ta, "key");
-        const char *v = targ_str(&ta, "value");
+        char *k = tool_args_str(g_db, a->args_json, "key");
+        char *v = tool_args_str(g_db, a->args_json, "value");
         if (k && v && config_set(g_db, k, v) != 0)
             LOG_WARN_("set_config apply failed key=%s", k);
-        tool_parse_free(&ta);
+        free(k); free(v);
     } else if (strcmp(a->action, "set_provider") == 0) {
         /* Providers upsert straight from the parked args JSON. The API key is
          * NOT here — args carry only the secret's name (api_key_env); a
@@ -1737,15 +1741,14 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         if (rc != 0)
             LOG_WARN_("set_provider apply failed");
     } else if (strcmp(a->action, "extension_promote") == 0) {
-        ToolArgs ta; tool_parse(a->args_json, &ta);
-        const char *bundle = targ_str(&ta, "bundle");
+        char *bundle = tool_args_str(g_db, a->args_json, "bundle");
         char *ierr = NULL;
         if (!bundle || extension_install(g_db, bundle, agent, &ierr) != 0) {
             LOG_WARN_("extension_promote apply failed: %s", ierr ? ierr : "no bundle");
             *rename_failed = 1;
         }
         free(ierr);
-        tool_parse_free(&ta);
+        free(bundle);
     } else if (strcmp(a->action, "create_agent") == 0) {
         char *cerr = NULL;
         const char *adir = g_tool_setup ? g_tool_setup->req_cfg_ctx.agents_dir : NULL;
@@ -1755,9 +1758,8 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         }
         free(cerr);
     } else if (strcmp(a->action, "rename_agent") == 0) {
-        ToolArgs ta; tool_parse(a->args_json, &ta);
-        const char *nn = targ_str(&ta, "name");
-        const char *pr = targ_str(&ta, "preamble");
+        char *nn = tool_args_str(g_db, a->args_json, "name");
+        char *pr = tool_args_str(g_db, a->args_json, "preamble");
         if (nn) {
             int rc = agent_rename(g_db, agent, nn, a->session_id);
             if (rc == 0 && g_tool_setup) {
@@ -1794,7 +1796,7 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
             }
         }
 rename_done:
-        tool_parse_free(&ta);
+        free(nn); free(pr);
     }
     /* Only rebind the shared setup when the grant target is the bound agent
      * (CLI root). A grant applied to a sub-agent must not leave root's setup
@@ -1996,47 +1998,49 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
  * other tool's own call arguments (shape unknown to us in general) surface
  * their most common salient field so the reader isn't shown bare JSON. */
 static void format_approval_summary(const Approval *a, char *buf, size_t buflen) {
-    ToolArgs ta;
-    tool_parse(a->args_json ? a->args_json : "{}", &ta);
+    const char *args = a->args_json ? a->args_json : "{}";
+    /* Collected extracted fields — freed in one sweep at the end. */
+    char *f[4] = {0};
     if (a->tool_name && strcmp(a->tool_name, "request_config") == 0) {
         if (a->action && strcmp(a->action, "grant_tool") == 0) {
-            const char *v = targ_str(&ta, "tool");
-            snprintf(buf, buflen, "grant_tool: %s", v ? v : "?");
+            f[0] = tool_args_str(g_db, args, "tool");
+            snprintf(buf, buflen, "grant_tool: %s", f[0] ? f[0] : "?");
         } else if (a->action && strcmp(a->action, "grant_host") == 0) {
-            const char *v = targ_str(&ta, "host");
-            snprintf(buf, buflen, "grant_host: %s", v ? v : "?");
+            f[0] = tool_args_str(g_db, args, "host");
+            snprintf(buf, buflen, "grant_host: %s", f[0] ? f[0] : "?");
         } else if (a->action && strcmp(a->action, "grant_path") == 0) {
-            const char *v = targ_str(&ta, "path");
-            const char *m = targ_str(&ta, "mode");
-            snprintf(buf, buflen, "grant_path: %s (%s)", v ? v : "?",
-                     (m && strcmp(m, "write") == 0) ? "write" : "read");
+            f[0] = tool_args_str(g_db, args, "path");
+            f[1] = tool_args_str(g_db, args, "mode");
+            snprintf(buf, buflen, "grant_path: %s (%s)", f[0] ? f[0] : "?",
+                     (f[1] && strcmp(f[1], "write") == 0) ? "write" : "read");
         } else if (a->action && strcmp(a->action, "rename_agent") == 0) {
-            const char *v = targ_str(&ta, "name");
-            snprintf(buf, buflen, "rename_agent: %s", v ? v : "?");
+            f[0] = tool_args_str(g_db, args, "name");
+            snprintf(buf, buflen, "rename_agent: %s", f[0] ? f[0] : "?");
         } else if (a->action && strcmp(a->action, "set_config") == 0) {
-            const char *k = targ_str(&ta, "key");
-            const char *v = targ_str(&ta, "value");
-            snprintf(buf, buflen, "set_config: %s = %s", k ? k : "?", v ? v : "?");
+            f[0] = tool_args_str(g_db, args, "key");
+            f[1] = tool_args_str(g_db, args, "value");
+            snprintf(buf, buflen, "set_config: %s = %s",
+                     f[0] ? f[0] : "?", f[1] ? f[1] : "?");
         } else if (a->action && strcmp(a->action, "set_provider") == 0) {
-            const char *p = targ_str(&ta, "provider");
-            const char *u = targ_str(&ta, "base_url");
-            const char *ke = targ_str(&ta, "api_key_env");
+            f[0] = tool_args_str(g_db, args, "provider");
+            f[1] = tool_args_str(g_db, args, "base_url");
+            f[2] = tool_args_str(g_db, args, "api_key_env");
             snprintf(buf, buflen, "set_provider: %s (%s, key from secret %s)",
-                     p ? p : "?", u ? u : "?", ke ? ke : "?");
+                     f[0] ? f[0] : "?", f[1] ? f[1] : "?", f[2] ? f[2] : "?");
         } else {
             snprintf(buf, buflen, "%s", a->action ? a->action : "?");
         }
     } else if (a->tool_name && strcmp(a->tool_name, "extension_promote") == 0) {
-        const char *nm = targ_str(&ta, "name");
-        const char *sum = targ_str(&ta, "summary");
-        snprintf(buf, buflen, "promote '%s': %s", nm ? nm : "?",
-                 sum ? sum : "(no summary)");
+        f[0] = tool_args_str(g_db, args, "name");
+        f[1] = tool_args_str(g_db, args, "summary");
+        snprintf(buf, buflen, "promote '%s': %s", f[0] ? f[0] : "?",
+                 f[1] ? f[1] : "(no summary)");
     } else if (a->tool_name && strcmp(a->tool_name, "create_agent") == 0) {
         /* Enumerate what the definition creates so the approver sees the
          * blast radius, not raw JSON. */
-        const char *nm = targ_str(&ta, "name");
-        const char *prof = targ_str(&ta, "sandbox_profile");
-        const char *clone = targ_str(&ta, "clone_from");
+        f[0] = tool_args_str(g_db, args, "name");
+        f[1] = tool_args_str(g_db, args, "sandbox_profile");
+        f[2] = tool_args_str(g_db, args, "clone_from");
         int ntools = 0, nhosts = 0, npaths = 0, nexts = 0;
         sqlite3_stmt *cs;
         if (a->args_json && sqlite3_prepare_v2(g_db,
@@ -2058,20 +2062,21 @@ static void format_approval_summary(const Approval *a, char *buf, size_t buflen)
         snprintf(buf, buflen,
                  "create_agent: %s (profile %s%s%s, +%d tools, %d hosts, "
                  "%d paths, %d extensions)",
-                 nm ? nm : "?", prof ? prof : "default",
-                 clone ? ", clone of " : "", clone ? clone : "",
+                 f[0] ? f[0] : "?", f[1] ? f[1] : "default",
+                 f[2] ? ", clone of " : "", f[2] ? f[2] : "",
                  ntools, nhosts, npaths, nexts);
     } else {
-        const char *salient = targ_str(&ta, "command");
-        if (!salient) salient = targ_str(&ta, "url");
-        if (!salient) salient = targ_str(&ta, "path");
+        char *salient = tool_args_str(g_db, args, "command");
+        if (!salient) salient = tool_args_str(g_db, args, "url");
+        if (!salient) salient = tool_args_str(g_db, args, "path");
+        f[0] = salient;
         if (salient)
             snprintf(buf, buflen, "%s: %s", a->tool_name ? a->tool_name : "?", salient);
         else
             snprintf(buf, buflen, "%s (%s)", a->tool_name ? a->tool_name : "?",
                      a->action ? a->action : "?");
     }
-    tool_parse_free(&ta);
+    for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) free(f[i]);
 }
 
 /* ── handle_approval_park: prompt the approver ────────────────── */

@@ -485,6 +485,19 @@ static int web_args_url_host(const char *args, char *out, size_t cap) {
     return ok;
 }
 
+/* Interpolate {{SECRET:name}} into extracted wire-param values (TEXT/JSON
+ * kinds; LIST params are file_edit's — never secret-bearing). After this the
+ * array carries plaintext: free with tool_wire_args_wipe_free. */
+static void wire_params_interpolate(ToolWireArg *params, size_t n,
+                                    const ShellSecret *secrets, size_t count) {
+    if (!params || count == 0) return;
+    for (size_t i = 0; i < n; i++) {
+        if (params[i].kind == TOOL_ARG_LIST || !params[i].value) continue;
+        char *ip = secret_interpolate(params[i].value, secrets, count);
+        if (ip) { free(params[i].value); params[i].value = ip; }
+    }
+}
+
 /* Per-call egress state for one network-tier dispatch (specs/trust.md):
  *  - deny: sensitivity labels for req.deny_rules, minus labels covering an
  *    approved sensitive host (per-call exception, label-wide for exactly one
@@ -918,10 +931,21 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             /* Host mode (sandbox=0) rides the SAME broker path: the child sets
              * up no namespace and run_file_tier runs the handler in-process,
              * exactly as the (now-deleted) generic fork path did. */
+            /* Decompose arguments HERE (trusted parent, SQLite JSON1) — the
+             * child receives pre-extracted params and parses no JSON. */
+            ToolWireArg *params = NULL;
+            size_t param_n = 0;
+            if (tool_args_extract(g_db, tc->name, te->parameters_json,
+                                  tc->arguments, &params, &param_n) != 0)
+                return tool_inline_error(session_id, tc,
+                    "error: invalid tool arguments", "bad_args");
+
             size_t blob_len = 0;
             RunToolReq req;
-            run_tool_req_init(&req, RUNTOOL_TIER_FILE, tc->name, tc->arguments,
+            run_tool_req_init(&req, RUNTOOL_TIER_FILE, tc->name,
                               &fctx->sb, fctx->workspace, fctx->cwd_path);
+            req.params = params;
+            req.param_count = param_n;
 
             /* Mount skill discovery dirs read-only (same transient-override
              * pattern as the extension store on the JS path) so the model can
@@ -968,6 +992,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             char *blob = run_tool_serialize_request(&req, &blob_len);
             free(read_paths);
             skills_dirs_free(skill_dirs, skd_n);
+            tool_wire_args_free(params, param_n);
             if (!blob)
                 return tool_inline_error(session_id, tc,
                     "error: file tool request exceeds 32KB cap", NULL);
@@ -1025,7 +1050,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
             size_t blob_len = 0;
             RunToolReq req;
-            run_tool_req_init(&req, RUNTOOL_TIER_SHELL, tc->name, tc->arguments,
+            run_tool_req_init(&req, RUNTOOL_TIER_SHELL, tc->name,
                               &sc->sb, sc->workspace, sc->cwd_path);
             req.agent_dir = agent_dir;
             CallEgress se;
@@ -1084,19 +1109,25 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             cli_print_tool_call(tc->name, tc->arguments);
         session_set_state(g_db, session_id, "tool_running");
 
-        /* Interpolate {{SECRET:X}} (a URL may carry a token). */
-        char *interp_args = NULL;
-        if (secret_count > 0)
-            interp_args = secret_interpolate(tc->arguments, secrets, secret_count);
-        const char *resolved_args = interp_args ? interp_args : tc->arguments;
+        /* Decompose arguments in the parent, then interpolate {{SECRET:X}}
+         * per extracted value (a URL may carry a token). */
+        ToolWireArg *params = NULL;
+        size_t param_n = 0;
+        if (tool_args_extract(g_db, tc->name, te->parameters_json,
+                              tc->arguments, &params, &param_n) != 0)
+            return tool_inline_error(session_id, tc,
+                "error: invalid tool arguments", "bad_args");
+        wire_params_interpolate(params, param_n, secrets, secret_count);
 
         char agent_dir[PATH_MAX];
         agent_dir_resolve(wc->workspace, wc->db_path, agent_dir, sizeof(agent_dir));
 
         size_t blob_len = 0;
         RunToolReq req;
-        run_tool_req_init(&req, RUNTOOL_TIER_WEB, tc->name, resolved_args,
+        run_tool_req_init(&req, RUNTOOL_TIER_WEB, tc->name,
                           &wc->sb, wc->workspace, wc->cwd_path);
+        req.params = params;
+        req.param_count = param_n;
         req.agent_dir = agent_dir;
         CallEgress se;
         call_egress_build(&se, tc->arguments, bind_once,
@@ -1110,7 +1141,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         req.timeout = 60;
         char *blob = run_tool_serialize_request(&req, &blob_len);
         call_egress_free(&se);
-        if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
+        tool_wire_args_wipe_free(params, param_n);
         if (!blob)
             return tool_inline_error(session_id, tc,
                 "error: web request exceeds 32KB cap", NULL);
@@ -1136,8 +1167,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_JS &&
         te->user_data) {
         JsEvalCtx *jc = NULL;
-        char *eval_args = NULL;
-        if (js_tool_resolve_request(te, tc->arguments, &jc, &eval_args) != 0 || !jc)
+        const char *handler_path = NULL;
+        if (js_tool_resolve_request(te, &jc, &handler_path) != 0 || !jc)
             return tool_inline_error(session_id, tc,
                 "error: js tool request resolution failed", NULL);
 
@@ -1145,11 +1176,38 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             cli_print_tool_call(tc->name, tc->arguments);
         session_set_state(g_db, session_id, "tool_running");
 
-        /* Interpolate {{SECRET:X}} (args may carry a token for http_request). */
-        char *interp_args = NULL;
-        if (secret_count > 0)
-            interp_args = secret_interpolate(eval_args, secrets, secret_count);
-        const char *resolved_args = interp_args ? interp_args : eval_args;
+        /* Params: js_eval ships its own schema-extracted code/filename/args;
+         * an extension tool ships filename=<handler .qjs path> plus the raw
+         * call arguments as the opaque `args` blob QuickJS parses natively —
+         * no JSON wrapping/escaping round-trip. Then interpolate {{SECRET:X}}
+         * per value (args may carry a token for http_request). */
+        ToolWireArg *params = NULL;
+        size_t param_n = 0;
+        if (!handler_path) {
+            if (tool_args_extract(g_db, tc->name, te->parameters_json,
+                                  tc->arguments, &params, &param_n) != 0)
+                return tool_inline_error(session_id, tc,
+                    "error: invalid tool arguments", "bad_args");
+        } else {
+            params = calloc(2, sizeof(*params));
+            if (params) {
+                params[0].key = strdup("filename");
+                params[0].kind = TOOL_ARG_TEXT;
+                params[0].value = strdup(handler_path);
+                params[1].key = strdup("args");
+                params[1].kind = TOOL_ARG_JSON;
+                params[1].value = strdup(tc->arguments && tc->arguments[0]
+                                             ? tc->arguments : "{}");
+                param_n = 2;
+            }
+            if (!params || !params[0].key || !params[0].value ||
+                !params[1].key || !params[1].value) {
+                tool_wire_args_free(params, param_n);
+                return tool_inline_error(session_id, tc,
+                    "error: OOM building js request", NULL);
+            }
+        }
+        wire_params_interpolate(params, param_n, secrets, secret_count);
 
         char agent_dir[PATH_MAX];
         agent_dir_resolve(jc->workspace, jc->db_path, agent_dir, sizeof(agent_dir));
@@ -1186,15 +1244,15 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
         size_t blob_len = 0;
         RunToolReq req;
-        run_tool_req_init(&req, RUNTOOL_TIER_JS, "js_eval", resolved_args,
+        run_tool_req_init(&req, RUNTOOL_TIER_JS, "js_eval",
                           &jc->sb, jc->workspace, jc->cwd_path);
+        req.params = params;
+        req.param_count = param_n;
         req.read_paths = read_paths;  /* transient override: + extension store */
         req.read_count = rc_count;
         req.agent_dir = agent_dir;
         CallEgress se;
-        /* eval_args, not tc->arguments: for extension tools the handler blob
-         * (file + args) is what gets interpolated — narrow on what runs. */
-        call_egress_build(&se, eval_args, bind_once,
+        call_egress_build(&se, tc->arguments, bind_once,
                           sens_once ? sens_host : NULL,
                           jc->allowed_hosts, jc->allowed_hosts_count,
                           secrets, secret_count);
@@ -1206,8 +1264,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         char *blob = run_tool_serialize_request(&req, &blob_len);
         call_egress_free(&se);
         free(read_paths);
-        if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
-        free(eval_args);
+        tool_wire_args_wipe_free(params, param_n);
         if (!blob)
             return tool_inline_error(session_id, tc,
                 "error: js request exceeds 32KB cap", NULL);

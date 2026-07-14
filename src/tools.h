@@ -90,4 +90,10 @@ void tools_load_extension_tools(ToolRegistry *reg, sqlite3 *db,
 /* Free all heap strings in the registry */
 void tools_free(ToolRegistry *reg);
 
+/* Registered as the handler for sandboxed-tier tools: the dispatcher never
+ * runs those in-process (EXEC_SANDBOX goes through the --run-tool broker,
+ * which consumes pre-extracted wire params), so any call here is a wiring
+ * bug — fail loudly rather than parse arguments. */
+char *tool_sandboxed_stub(const char *arguments, void *user_data);
+
 #endif

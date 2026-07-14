@@ -37,4 +37,38 @@ int tool_args_bool(sqlite3 *db, const char *args, const char *key, int def);
  * For variable-shape sub-blobs (e.g. file_edit's edits array). */
 char *tool_args_json(sqlite3 *db, const char *args, const char *key);
 
+/* ── Wire extraction for sandboxed --run-tool children ──────────────────
+ * The child has no db handle and parses no JSON: the parent extracts every
+ * parameter the tool's schema declares and ships (key, kind, value) over
+ * the flat wire. Scalars become text (bools as "1"/"0", numbers as their
+ * decimal text); objects/arrays ship as opaque JSON text only where the
+ * consumer parses JSON natively (js_eval's args → QuickJS); file_edit's
+ * edits array is flattened to an oldText/newText string list so the file
+ * tier never parses JSON at all. */
+
+enum { TOOL_ARG_TEXT = 0, TOOL_ARG_JSON = 1, TOOL_ARG_LIST = 2 };
+
+typedef struct {
+    char *key;
+    int kind;              /* TOOL_ARG_* */
+    char *value;           /* TEXT / JSON */
+    char **list;           /* LIST */
+    size_t list_n;
+} ToolWireArg;
+
+/* Extract the params declared in schema_json ('$.properties' keys) that are
+ * present in args (NULL schema_json = ship every top-level key — tests and
+ * schemaless tools). tool_name selects the per-tool flattening shim (file_edit).
+ * Returns 0 and a malloc'd array (may be empty) on success; -1 on malformed
+ * args/schema — the caller must fail the call, never dispatch without params. */
+int tool_args_extract(sqlite3 *db, const char *tool_name,
+                      const char *schema_json, const char *args,
+                      ToolWireArg **out, size_t *out_n);
+
+void tool_wire_args_free(ToolWireArg *a, size_t n);
+
+/* As tool_wire_args_free, but zeroes every value first — for params that
+ * carried interpolated {{SECRET:name}} plaintext to the wire. */
+void tool_wire_args_wipe_free(ToolWireArg *a, size_t n);
+
 #endif

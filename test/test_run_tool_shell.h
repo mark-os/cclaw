@@ -71,7 +71,6 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
     RunToolReq req = {
         .tier = RUNTOOL_TIER_SHELL,
         .tool_name = "shell_exec",
-        .arguments = "{}",  /* unused for shell — command is in the blob */
         .env_mode = r->env_mode,
         .nproc = r->nproc,
         .as_mb = r->as_mb,
@@ -168,7 +167,6 @@ static inline char *run_tool_shell_with_hosts(const ShellToolReq *r, char **out_
     RunToolReq req = {
         .tier = RUNTOOL_TIER_SHELL,
         .tool_name = "shell_exec",
-        .arguments = "{}",
         .env_mode = r->env_mode,
         .nproc = r->nproc,
         .as_mb = r->as_mb,

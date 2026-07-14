@@ -640,7 +640,7 @@ enforced in the `cron_set` tool handler only — manifest/heartbeat rows use
 Every agent gets a seeded, **disabled** heartbeat row (`name='heartbeat'`,
 `interval_s=1800`) at creation — `cron_seed_heartbeat()`, called from both
 `agent_definition_apply` and the daemon's `ensure_default_agent` — and, for
-pre-existing agents, via the v23 schema patch. Enabling it is a deliberate
+pre-existing agents, via the (since-retired) v23 schema patch. Enabling it is a deliberate
 operator/agent act — heartbeats cost an LLM call per fire.
 
 ---

@@ -30,7 +30,7 @@ typedef enum {
     DB_SCHEMA_CURRENT,    /* stamped with this build's version */
     DB_SCHEMA_UPGRADABLE, /* older, in patch range — auto-upgraded at next startup */
     DB_SCHEMA_FUTURE,     /* stamped by a newer build — refused */
-    DB_SCHEMA_TOO_OLD     /* predates migration tracking — refused, delete it */
+    DB_SCHEMA_TOO_OLD     /* below the schema floor (v29 freeze) — refused, delete it */
 } DbSchemaState;
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version);
 

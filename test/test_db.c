@@ -303,34 +303,6 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
-static int column_exists(sqlite3 *db, const char *table, const char *col) {
-    char sql[128];
-    snprintf(sql, sizeof(sql), "PRAGMA table_info(%s);", table);
-    sqlite3_stmt *stmt;
-    int found = 0;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char *n = (const char *)sqlite3_column_text(stmt, 1);
-            if (n && strcmp(n, col) == 0) { found = 1; break; }
-        }
-        sqlite3_finalize(stmt);
-    }
-    return found;
-}
-
-static char *query_text(sqlite3 *db, const char *sql) {
-    sqlite3_stmt *stmt;
-    char *out = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char *v = (const char *)sqlite3_column_text(stmt, 0);
-            if (v) out = strdup(v);
-        }
-        sqlite3_finalize(stmt);
-    }
-    return out;
-}
-
 static void test_schema_state(void) {
     const char *path = "/tmp/test_cclaw_schema_state.sqlite";
     char wal[128], shm[128];
@@ -352,164 +324,21 @@ static void test_schema_state(void) {
     assert(db_schema_state(db, NULL) == DB_SCHEMA_FUTURE);
     assert(db_schema_compat(db) == 0);   /* refused, not "upgraded" */
 
-    set_user_version(db, 10);            /* pre-tracking version */
+    set_user_version(db, 10);            /* below the v29 floor */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
     assert(db_schema_compat(db) == 0);
 
-    set_user_version(db, 0);             /* v0 but tables exist → pre-tracking */
+    set_user_version(db, CCLAW_SCHEMA_VERSION - 1);  /* one below the floor — refused */
+    assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
+    assert(db_schema_compat(db) == 0);
+
+    set_user_version(db, 0);             /* v0 but tables exist → pre-freeze */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
     assert(db_schema_compat(db) == 0);
 
     db_close(db);
     unlink(path); unlink(wal); unlink(shm);
     printf("  PASS test_schema_state\n");
-}
-
-static void test_schema_upgrade_from_v11(void) {
-    const char *path = "/tmp/test_cclaw_schema_upgrade.sqlite";
-    char wal[128], shm[128];
-    snprintf(wal, sizeof(wal), "%s-wal", path);
-    snprintf(shm, sizeof(shm), "%s-shm", path);
-    unlink(path); unlink(wal); unlink(shm);
-
-    sqlite3 *db = test_db_open(path);
-    assert(db != NULL);
-
-    /* Reshape a current DB back to v11: re-add the column patch v12 drops,
-     * drop the ones patches v14/v17/v19 add, re-add the ones patch v16 drops,
-     * re-add model/provider that v17 drops, re-add status that v20 drops,
-     * seed rows that each patch must rewrite. */
-    assert(sqlite3_exec(db,
-        "ALTER TABLE providers ADD COLUMN context_window INTEGER DEFAULT 128000;"
-        "ALTER TABLE channels DROP COLUMN prev_extension_name;"
-        "ALTER TABLE sessions DROP COLUMN turn_context;"
-        "ALTER TABLE cron_jobs DROP COLUMN run_at;"     /* v23 adds */
-        "ALTER TABLE cron_jobs DROP COLUMN interval_s;" /* v23 adds */
-        "ALTER TABLE cron_jobs DROP COLUMN kind;"       /* v23 adds */
-        "ALTER TABLE channel_routes DROP COLUMN delivery_mode;" /* v24 adds */
-        "ALTER TABLE channel_routes DROP COLUMN tool_filter;"   /* v25 adds */
-        /* v29 heal re-adds: schema.sql edits that shipped without a patch
-         * (real v24–v28 DBs in the wild lack these — reproduce that shape). */
-        "ALTER TABLE agent_extensions DROP COLUMN config;"
-        "ALTER TABLE channel_routes DROP COLUMN session_id;"
-        "ALTER TABLE entries DROP COLUMN content_bytes;"
-        "ALTER TABLE extensions DROP COLUMN version;"
-        "ALTER TABLE llm_responses DROP COLUMN provider_id;"
-        "ALTER TABLE models DROP COLUMN sub_provider;"
-        "ALTER TABLE models DROP COLUMN synced_at;"
-        "ALTER TABLE sessions DROP COLUMN last_route;"
-        "ALTER TABLE sessions DROP COLUMN last_interaction_id;"
-        "ALTER TABLE config DROP COLUMN secret;"    /* v22 adds */
-        "ALTER TABLE config DROP COLUMN required;"  /* v22 adds */
-        "ALTER TABLE secrets ADD COLUMN status TEXT NOT NULL DEFAULT 'active';"
-        "INSERT INTO secrets(name, value, status, source) VALUES"
-        "  ('REAL_KEY','enc:00','active','operator'),"          /* survives sweep */
-        "  ('PENDING_JUNK_1','enc:00','pending','quarantine');" /* v20: swept */
-        "ALTER TABLE channel_outbox RENAME COLUMN deliver_mode TO deliver_plain;"
-        "ALTER TABLE extensions ADD COLUMN builtin INTEGER NOT NULL DEFAULT 0;"
-        "ALTER TABLE tools ADD COLUMN builtin INTEGER NOT NULL DEFAULT 0;"
-        "ALTER TABLE agents ADD COLUMN model TEXT;"
-        "ALTER TABLE agents ADD COLUMN provider TEXT;"
-        "ALTER TABLE agents DROP COLUMN primary_model;"
-        "ALTER TABLE agents DROP COLUMN secondary_model;"
-        "INSERT INTO models(id, provider_name, model, context_window) VALUES"
-        "  ('m-def','p','vendor/def',128000),"      /* old default → NULLed */
-        "  ('m-big','p','vendor/big',200000);"      /* explicit → kept */
-        "INSERT INTO grants(agent_name, kind, value, approval_mode) VALUES"
-        "  ('a1','tool','extension_promote','silent')," /* v13 → 'always', v21 → back to 'silent' (self-parking tool) */
-        "  ('a1','tool','shell_exec','silent');"        /* ordinary → untouched */
-        "INSERT INTO channel_outbox(channel_name, session_id, payload, deliver_plain) VALUES"
-        "  ('tg', 1, '{}', 0),"                         /* auto → mode 0 */
-        "  ('tg', 2, '{}', 1);"                         /* plain → mode 2 */
-        "INSERT INTO extensions(name, path, owner_agent, published, builtin) VALUES"
-        "  ('telegram','/x','',0,1);"                   /* builtin → owner=system, published */
-        "INSERT INTO agents(name, model) VALUES('v17agent','m-big');"
-        "INSERT INTO config(key, value) VALUES('heartbeat_interval','1800');", /* v23: retired */
-        NULL, NULL, NULL) == SQLITE_OK);
-    set_user_version(db, 11);
-    assert(db_schema_state(db, NULL) == DB_SCHEMA_UPGRADABLE);
-
-    assert(db_schema_compat(db) == 1);   /* applies v12..current patches */
-
-    int uv = -1;
-    assert(db_schema_state(db, &uv) == DB_SCHEMA_CURRENT);
-    assert(uv == CCLAW_SCHEMA_VERSION);
-    assert(!column_exists(db, "providers", "context_window"));
-
-    char *v = query_text(db, "SELECT COALESCE(context_window,'null') FROM models WHERE id='m-def'");
-    assert(v && strcmp(v, "null") == 0); free(v);
-    v = query_text(db, "SELECT context_window FROM models WHERE id='m-big'");
-    assert(v && strcmp(v, "200000") == 0); free(v);
-    /* v13 flipped it to 'always'; v21 flips back — promote parks itself now */
-    v = query_text(db, "SELECT approval_mode FROM grants WHERE value='extension_promote'");
-    assert(v && strcmp(v, "silent") == 0); free(v);
-    v = query_text(db, "SELECT approval_mode FROM grants WHERE value='shell_exec'");
-    assert(v && strcmp(v, "silent") == 0); free(v);
-    v = query_text(db, "SELECT deliver_mode FROM channel_outbox WHERE session_id=1");
-    assert(v && strcmp(v, "0") == 0); free(v);
-    v = query_text(db, "SELECT deliver_mode FROM channel_outbox WHERE session_id=2");
-    assert(v && strcmp(v, "2") == 0); free(v);
-    assert(!column_exists(db, "extensions", "builtin"));
-    assert(!column_exists(db, "tools", "builtin"));
-    v = query_text(db, "SELECT owner_agent FROM extensions WHERE name='telegram'");
-    assert(v && strcmp(v, "system") == 0); free(v);
-    v = query_text(db, "SELECT published FROM extensions WHERE name='telegram'");
-    assert(v && strcmp(v, "1") == 0); free(v);
-    /* v17: agents.model → primary_model, provider dropped */
-    assert(!column_exists(db, "agents", "model"));
-    assert(!column_exists(db, "agents", "provider"));
-    assert(column_exists(db, "agents", "primary_model"));
-    assert(column_exists(db, "agents", "secondary_model"));
-    v = query_text(db, "SELECT primary_model FROM agents WHERE name='v17agent'");
-    assert(v && strcmp(v, "m-big") == 0); free(v);
-    /* v20: quarantine pending rows swept, status column dropped */
-    assert(!column_exists(db, "secrets", "status"));
-    v = query_text(db, "SELECT COUNT(*) FROM secrets WHERE name='PENDING_JUNK_1'");
-    assert(v && strcmp(v, "0") == 0); free(v);
-    v = query_text(db, "SELECT COUNT(*) FROM secrets WHERE name='REAL_KEY'");
-    assert(v && strcmp(v, "1") == 0); free(v);
-    /* v23: cron_jobs gains run_at/interval_s/kind; a disabled heartbeat pulse
-     * is seeded per agent; the heartbeat_interval config key is retired. */
-    assert(column_exists(db, "cron_jobs", "run_at"));
-    assert(column_exists(db, "cron_jobs", "interval_s"));
-    assert(column_exists(db, "cron_jobs", "kind"));
-    v = query_text(db, "SELECT COUNT(*) FROM cron_jobs"
-                       " WHERE agent_name='v17agent' AND kind='heartbeat'"
-                       " AND enabled=0 AND interval_s=1800");
-    assert(v && strcmp(v, "1") == 0); free(v);
-    v = query_text(db, "SELECT COUNT(*) FROM config WHERE key='heartbeat_interval'");
-    assert(v && strcmp(v, "0") == 0); free(v);
-    /* v29 heal: every drift column is back (added only where missing — the
-     * cron/route columns patches 23-25 already re-added are left alone). */
-    assert(column_exists(db, "agent_extensions", "config"));
-    assert(column_exists(db, "channel_routes", "session_id"));
-    assert(column_exists(db, "entries", "content_bytes"));
-    assert(column_exists(db, "extensions", "version"));
-    assert(column_exists(db, "llm_responses", "provider_id"));
-    assert(column_exists(db, "models", "sub_provider"));
-    assert(column_exists(db, "models", "synced_at"));
-    assert(column_exists(db, "sessions", "last_route"));
-    assert(column_exists(db, "sessions", "last_interaction_id"));
-
-    /* Re-running is a no-op, not an error */
-    assert(db_schema_compat(db) == 1);
-
-    /* Insurance snapshot taken before the surgery: still v11-shaped */
-    char bak[160];
-    snprintf(bak, sizeof(bak), "%s.v11.bak", path);
-    sqlite3 *bdb = db_open(bak);
-    assert(bdb != NULL);
-    int buv = -1;
-    db_schema_state(bdb, &buv);
-    assert(buv == 11);
-    assert(column_exists(bdb, "providers", "context_window"));
-    v = query_text(bdb, "SELECT approval_mode FROM grants WHERE value='extension_promote'");
-    assert(v && strcmp(v, "silent") == 0); free(v);
-    db_close(bdb);
-
-    db_close(db);
-    unlink(path); unlink(wal); unlink(shm); unlink(bak);
-    printf("  PASS test_schema_upgrade_from_v11\n");
 }
 
 static void test_rate_limit_and_cost(void) {
@@ -561,7 +390,6 @@ int main(void) {
     test_prune_outbox();
     test_free_mb();
     test_schema_state();
-    test_schema_upgrade_from_v11();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;

@@ -220,12 +220,43 @@ static int session_max_iter(int64_t session_id) {
     return max_iter;
 }
 
+/* One-shot user notice for a deferred (not failed) turn — rate limit or cost
+ * ceiling. No assistant entry: the leaf must stay the user entry so
+ * session_sweep_inbox keeps retrying until the window clears. Daemon mode
+ * posts to the session's channel; CLI prints and releases the prompt. */
+static void notify_deferred(int64_t session_id, const char *text) {
+    if (g_mode == 0) {
+        fprintf(stderr, "\n%s\n", text);
+        if (session_id == g_cli_session) g_cli_turn_active = 0;
+        return;
+    }
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(g_db,
+            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+            " SELECT channel_name, id,"
+            "        json_object('chat_id', COALESCE(channel_id,'0'), 'text', ?2)"
+            "   FROM sessions WHERE id=?1 AND channel_name IS NOT NULL;",
+            -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(s, 1, session_id);
+    sqlite3_bind_text(s, 2, text, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+    if (sqlite3_changes(g_db) > 0 && g_cfg && g_cfg->db_path) {
+        char *ch = db_scalar_text(g_db,
+            "SELECT channel_name FROM sessions WHERE id=?1;", session_id);
+        if (ch) { channel_outbox_wake(g_cfg->db_path, ch); free(ch); }
+    }
+}
+
 static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iteration) {
     if (child_has_session(session_id)) return -1;
 
-    /* Turn start: move queued inbox into entries */
+    /* Turn start: move queued inbox into entries. consumed>0 marks a fresh
+     * user message (sweep retries of a parked session consume nothing) —
+     * the dedup signal for the one-shot deferral notices below. */
+    int consumed = 0;
     if (iteration == 0)
-        inbox_consume_into_entries(g_db, session_id, 100);
+        consumed = inbox_consume_into_entries(g_db, session_id, 100);
 
     if (!llm_worker_alive()) return -1;
 
@@ -249,6 +280,10 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
         LOG_WARN_("token_rate_limit hit, session %lld rate_limited",
                   (long long)session_id);
         session_set_state(g_db, session_id, "rate_limited");
+        if (consumed > 0)
+            notify_deferred(session_id,
+                "rate limited: hourly token cap reached — your message is"
+                " queued and will be answered when the limit clears");
         return -1;
     }
 
@@ -262,6 +297,10 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
                       (long long)spent, (long long)g_cfg->daily_cost_limit_nano,
                       (long long)session_id);
             session_set_state(g_db, session_id, "rate_limited");
+            if (consumed > 0)
+                notify_deferred(session_id,
+                    "budget limit: daily cost ceiling reached — your message is"
+                    " queued and will be answered when spend drops below it");
             return -1;
         }
     }

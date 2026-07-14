@@ -5,7 +5,7 @@
  * / COMMANDS defs); no handler is invoked — then we call the pure function
  * under test and assert on its string result. */
 #define _GNU_SOURCE
-#include "tool_js.h"
+#include "test_util.h"
 #include "templates.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,7 +57,7 @@ static char *eval_expr(const char *expr) {
     char *args = malloc(an);
     snprintf(args, an, "{\"code\":\"%s\"}", esc);
     free(esc);
-    char *r = tool_js_eval_handler(args, NULL);
+    char *r = test_js_eval_run_json(args);
     free(args);
     return r;
 }

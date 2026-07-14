@@ -2,7 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "tool_js.h"
-#include "tool_parse.h"
+#include "run_tool.h"
 #include "qjs_helpers.h"
 #include <errno.h>
 #include <signal.h>
@@ -36,38 +36,12 @@ static const char *JSEVAL_PARAMS_JSON =
  * never calls it for an EXEC_SANDBOX recipe. It remains as (a) the identity
  * marker js_tool_resolve_request keys on and (b) a host-mode, in-process
  * evaluator for unit tests. No fork, no re-exec — the fork-bomb hazard is gone. */
+/* js_eval is an SBX_JS tool: the daemon dispatch ships pre-extracted params
+ * and the --run-tool broker evals in-process via qjs_eval_run inside the
+ * sandbox. This function is never executed — it exists as the identity
+ * marker js_tool_resolve_request keys on (js_eval vs extension tool). */
 char *tool_js_eval_handler(const char *arguments, void *user_data) {
-    (void)user_data;
-
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
-
-    const char *code = targ_str(&ta, "code");
-    const char *filename = targ_str(&ta, "filename");
-    if ((!code || !code[0]) && (!filename || !filename[0])) {
-        tool_parse_free(&ta);
-        return strdup("error: must provide 'code' or 'filename'");
-    }
-    if (filename && filename[0]) {
-        size_t flen = strlen(filename);
-        if (flen < 5 || strcmp(filename + flen - 4, ".qjs") != 0) {
-            tool_parse_free(&ta);
-            return strdup("error: filename must end in .qjs");
-        }
-    }
-
-    char *args_str = NULL;
-    const char *args_raw = NULL;
-    size_t args_raw_len = 0;
-    if (filename && targ_raw(&ta, "args", &args_raw, &args_raw_len) == 0) {
-        args_str = malloc(args_raw_len + 1);
-        if (args_str) { memcpy(args_str, args_raw, args_raw_len); args_str[args_raw_len] = '\0'; }
-    }
-
-    char *result = qjs_eval_run(code, filename, args_str);
-    free(args_str);
-    tool_parse_free(&ta);
-    return result;
+    return tool_sandboxed_stub(arguments, user_data);
 }
 
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx) {
@@ -105,25 +79,9 @@ typedef struct {
  * as js_eval: build {"filename": <path>, "args": <call args>} and reuse the
  * file-eval path. The handler file evaluates with `args` in scope; its last
  * expression (or printed output) is the result. */
+/* Identity marker for extension tools (never executed — see above). */
 static char *js_defined_tool_handler(const char *arguments, void *user_data) {
-    JsToolData *td = (JsToolData *)user_data;
-    if (!td || !td->path) return strdup("error: no handler path for this tool");
-    const char *args_str = (arguments && arguments[0]) ? arguments : "{}";
-
-    size_t esc_cap = strlen(td->path) * 2 + 8;
-    char *esc = malloc(esc_cap);
-    if (!esc) return strdup("error: OOM");
-    size_t esc_len = json_escape(esc, esc_cap, td->path, strlen(td->path));
-
-    size_t blob_len = esc_len + strlen(args_str) + 32;
-    char *blob = malloc(blob_len);
-    if (!blob) { free(esc); return strdup("error: OOM"); }
-    snprintf(blob, blob_len, "{\"filename\":\"%s\",\"args\":%s}", esc, args_str);
-    free(esc);
-
-    char *result = tool_js_eval_handler(blob, td->ectx);
-    free(blob);
-    return result;
+    return tool_sandboxed_stub(arguments, user_data);
 }
 
 static void js_tool_data_free(void *user_data) {
@@ -169,36 +127,22 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
     return rc;
 }
 
-/* Resolve a JS-tier entry into its profile + the eval-request JSON for the blob.
- * js_eval (handler == tool_js_eval_handler): args pass through, profile is the
- * JsEvalCtx user_data. Extension tool (handler == js_defined_tool_handler):
- * wrap as {"filename":<path>,"args":<args>}, profile is td->ectx. */
-int js_tool_resolve_request(const ToolEntry *te, const char *arguments,
-                            JsEvalCtx **out_ctx, char **out_args) {
-    if (!te || !out_ctx || !out_args) return -1;
-    const char *args = (arguments && arguments[0]) ? arguments : "{}";
-
+/* Resolve a JS-tier entry: which JsEvalCtx to sandbox with, and — for an
+ * extension tool — the handler .qjs path the child must run. js_eval itself
+ * returns *out_path=NULL (the model's own code/filename params drive the
+ * eval). No JSON is built here: the dispatch site ships wire params. */
+int js_tool_resolve_request(const ToolEntry *te, JsEvalCtx **out_ctx,
+                            const char **out_path) {
+    if (!te || !out_ctx || !out_path) return -1;
     if (te->handler == tool_js_eval_handler) {
         *out_ctx = (JsEvalCtx *)te->user_data;
-        *out_args = strdup(args);
-        return *out_args ? 0 : -1;
+        *out_path = NULL;
+        return 0;
     }
-
-    /* Extension tool: te->user_data is JsToolData {path, ectx}. */
     JsToolData *td = (JsToolData *)te->user_data;
     if (!td || !td->path) return -1;
     *out_ctx = td->ectx;
-
-    size_t esc_cap = strlen(td->path) * 2 + 8;
-    char *esc = malloc(esc_cap);
-    if (!esc) return -1;
-    size_t esc_len = json_escape(esc, esc_cap, td->path, strlen(td->path));
-    size_t blen = esc_len + strlen(args) + 32;
-    char *blob = malloc(blen);
-    if (!blob) { free(esc); return -1; }
-    snprintf(blob, blen, "{\"filename\":\"%s\",\"args\":%s}", esc, args);
-    free(esc);
-    *out_args = blob;
+    *out_path = td->path;
     return 0;
 }
 
@@ -229,10 +173,21 @@ void js_runtime_set_hosts(JsSessionRuntime *rt, char **hosts, size_t count) {
 }
 
 char *tool_js_tier_run(const RunToolParsed *q) {
-    /* qjs runs in-process in the inner fork (web's twin): netns + proxy + mounts
-     * are already applied. tool_js_eval_handler parses {code|filename,args} and
-     * evals via qjs_eval_run; http_request's curl honors HTTP_PROXY → decide().
-     * fs.* paths are real bind-mounts from the blob's read/write paths. */
-    char *r = tool_js_eval_handler(q->arguments, NULL);
+    /* qjs runs in-process in the inner fork (web's twin): netns + proxy +
+     * mounts are already applied. code/filename/args arrive as pre-extracted
+     * wire params; args is an opaque JSON blob QuickJS itself parses.
+     * http_request's curl honors HTTP_PROXY → decide(); fs.* paths are real
+     * bind-mounts from the blob's read/write paths. */
+    const char *code = run_tool_param_str(q, "code");
+    const char *filename = run_tool_param_str(q, "filename");
+    if ((!code || !code[0]) && (!filename || !filename[0]))
+        return strdup("error: must provide 'code' or 'filename'");
+    if (filename && filename[0]) {
+        size_t flen = strlen(filename);
+        if (flen < 5 || strcmp(filename + flen - 4, ".qjs") != 0)
+            return strdup("error: filename must end in .qjs");
+    }
+    const char *args = filename ? run_tool_param_json(q, "args") : NULL;
+    char *r = qjs_eval_run(code, filename, args);
     return r ? r : strdup("error: js_eval returned null");
 }

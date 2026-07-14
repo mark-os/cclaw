@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include "tool_js.h"
+#include "test_util.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -41,7 +41,7 @@ static void expect_error(const char *name, const char *code, const char *needle)
     tests_run++; printf("  %s... ", name);
     char args[512];
     snprintf(args, sizeof(args), "{\"code\":%s}", code);
-    char *r = tool_js_eval_handler(args, NULL);
+    char *r = test_js_eval_run_json(args);
     if (!r || strncmp(r, "error:", 6) != 0 || !strstr(r, needle)) {
         FAIL(r ? r : "NULL"); free(r); return;
     }
@@ -54,7 +54,7 @@ static void expect_eq(const char *name, const char *code, const char *want) {
     tests_run++; printf("  %s... ", name);
     char args[1024];
     snprintf(args, sizeof(args), "{\"code\":%s}", code);
-    char *r = tool_js_eval_handler(args, NULL);
+    char *r = test_js_eval_run_json(args);
     if (!r || strcmp(r, want) != 0) { FAIL(r ? r : "NULL"); free(r); return; }
     free(r);
     PASS();

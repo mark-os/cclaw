@@ -2,6 +2,7 @@
 #define CCLAW_RUN_TOOL_H
 
 #include "sandbox.h"
+#include "tool_args.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -45,7 +46,6 @@ typedef struct {
 typedef struct {
     int tier;                     /* RUNTOOL_TIER_* */
     const char *tool_name;
-    const char *arguments;
     int env_mode, nproc, as_mb, cpu_sec;
     int sandbox, net_mode;
     /* file/all */
@@ -62,6 +62,9 @@ typedef struct {
     const char *shell_path;  /* interpreter to run `command` with; NULL = /bin/sh */
     int timeout;
     const RunToolSecret *secrets; size_t secret_count;
+    /* Pre-extracted tool params (tool_args_extract in the parent) — the
+     * child never parses argument JSON. file/web/js tiers. */
+    const ToolWireArg *params; size_t param_count;
 } RunToolReq;
 
 /* Child-side parsed request (owned strings). Mirrors RunToolReq's wire order.
@@ -71,7 +74,6 @@ typedef struct {
 typedef struct {
     int   tier;
     char *tool_name;
-    char *arguments;
     int   env_mode, nproc, as_mb, cpu_sec;
     int   sandbox, net_mode;
     char *workspace, *cwd_path;
@@ -86,12 +88,26 @@ typedef struct {
     int   timeout;
     struct { char *name; char *value; } *secrets;
     size_t secret_count;
+    struct RunToolParam { char *key; int kind; char *value;
+                          char **list; size_t list_n; } *params;
+    size_t param_count;
 } RunToolParsed;
 
-/* Zero req; set tier/tool_name/arguments plus all SandboxProfile-derived
- * fields and workspace/cwd_path. Callers set tier-specific fields after. */
+/* Child-side param lookup (pre-extracted by the parent). *_str returns the
+ * TEXT value (numbers/bools arrive as decimal text), NULL if absent. */
+const char *run_tool_param_str(const RunToolParsed *q, const char *key);
+int run_tool_param_int(const RunToolParsed *q, const char *key, int def);
+int run_tool_param_bool(const RunToolParsed *q, const char *key, int def);
+/* Opaque JSON sub-blob (TOOL_ARG_JSON), NULL if absent. */
+const char *run_tool_param_json(const RunToolParsed *q, const char *key);
+/* Flattened string list (TOOL_ARG_LIST); NULL + *n=0 if absent. */
+char **run_tool_param_list(const RunToolParsed *q, const char *key, size_t *n);
+
+/* Zero req; set tier/tool_name plus all SandboxProfile-derived fields and
+ * workspace/cwd_path. Callers set tier-specific fields (params, command,
+ * egress rules) after. */
 void run_tool_req_init(RunToolReq *req, int tier, const char *tool_name,
-                       const char *arguments, const SandboxProfile *sb,
+                       const SandboxProfile *sb,
                        const char *workspace, const char *cwd_path);
 
 /* Serialize a request into a length-prefixed blob. Returns malloc'd buffer;

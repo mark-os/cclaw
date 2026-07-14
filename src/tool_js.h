@@ -61,12 +61,10 @@ int js_tool_register_ext(ToolRegistry *reg, const char *name,
                          const char *policy_json);
 
 /* Resolve a JS-tier tool entry (js_eval OR an extension tool) into its sandbox
- * profile and the JSON eval request to ship in the SBX_JS blob. For js_eval the
- * args pass through; for an extension tool they are wrapped as
- * {"filename":<path>,"args":<args>}. Returns 0 on success; *out_args is malloc'd
- * (caller frees), *out_ctx borrows the entry's profile. */
-int js_tool_resolve_request(const ToolEntry *te, const char *arguments,
-                            JsEvalCtx **out_ctx, char **out_args);
+ * profile and — for extension tools — the handler .qjs path the child runs
+ * (*out_path=NULL for js_eval). Both outputs borrow the entry's storage. */
+int js_tool_resolve_request(const ToolEntry *te, JsEvalCtx **out_ctx,
+                            const char **out_path);
 
 /* --run-tool tier leaf: eval qjs in-process inside the broker's inner fork
  * (netns + proxy + mounts already applied). */

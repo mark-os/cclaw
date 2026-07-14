@@ -3,7 +3,7 @@
 #include "external_content.h"
 #include "host_match.h"
 #include "http.h"
-#include "tool_parse.h"
+#include "run_tool.h"
 #include "buf.h"
 #include <stdlib.h>
 #include <string.h>
@@ -292,26 +292,19 @@ static char *web_fetch_save_full(const char *workspace, const char *host,
 
 /* ── Tool handler ────────────────────────────────────────────────── */
 
-char *tool_web_fetch_handler(const char *arguments, void *user_data) {
-    /* Egress is enforced by the per-hop proxy, not a preflight; user_data
-     * (WebFetchCtx, may be NULL) is consulted only to phrase denials. */
-    WebFetchCtx *ctx = (WebFetchCtx *)user_data;
-
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid JSON arguments");
-
-    const char *url = targ_str(&ta, "url");
-    if (!url || !url[0]) {
-        tool_parse_free(&ta);
+static char *web_fetch_run(const RunToolParsed *q, WebFetchCtx *ctx) {
+    /* Egress is enforced by the per-hop proxy, not a preflight; ctx (may be
+     * NULL) is consulted only to phrase denials. Params are pre-extracted by
+     * the parent — no JSON is parsed in this process. */
+    const char *url = run_tool_param_str(q, "url");
+    if (!url || !url[0])
         return strdup("error: missing or empty 'url' field");
-    }
 
-    int offset = targ_int(&ta, "offset", 0);
+    int offset = run_tool_param_int(q, "offset", 0);
     if (offset < 0) offset = 0;
-    int max_chars = targ_int(&ta, "max_chars", WEB_FETCH_DEFAULT_MAX_CHARS);
+    int max_chars = run_tool_param_int(q, "max_chars", WEB_FETCH_DEFAULT_MAX_CHARS);
     if (max_chars <= 0) max_chars = WEB_FETCH_DEFAULT_MAX_CHARS;
-    int raw = targ_bool(&ta, "raw", 0);
+    int raw = run_tool_param_bool(q, "raw", 0);
 
     /* Capture a save key from the URL now, before ta (and url) are freed — used
      * only if the result turns out truncated (see web_fetch_save_full). */
@@ -329,10 +322,8 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
     /* Egress is decided per-hop by the broker proxy (decide()) — no pre-flight
      * http_check_policy here: a single check can't see redirects (SSRF). */
 
-    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
-        tool_parse_free(&ta);
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)
         return strdup("error: url must start with http:// or https://");
-    }
 
     /* Browser-like request with markdown preference */
     const char *hdrs[] = {
@@ -372,7 +363,6 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
                                                ctx->allowed_host_count,
                                                ctx->host_mode)
                          : NULL;
-        tool_parse_free(&ta);
         if (hint) { http_response_free(&resp); return hint; }
         char *msg = malloc(512);
         if (msg) {
@@ -384,7 +374,6 @@ char *tool_web_fetch_handler(const char *arguments, void *user_data) {
         http_response_free(&resp);
         return msg ? msg : strdup("error: HTTP request failed");
     }
-    tool_parse_free(&ta);
 
     if (status >= 400) {
         char *msg = malloc(64);
@@ -463,7 +452,7 @@ int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx) {
                           "  {\"url\":\"https://api.example.com/data\"} — JSON auto-detected, returned raw\n"
                           "  {\"url\":\"https://example.com\",\"max_chars\":5000} — first 5000 chars of markdown\n"
                           "  {\"url\":\"https://example.com\",\"raw\":true} — skip HTML-to-markdown conversion",
-                          WEB_FETCH_PARAMS_JSON, tool_web_fetch_handler, ctx);
+                          WEB_FETCH_PARAMS_JSON, tool_sandboxed_stub, ctx);
     if (rc == 0)  /* sandboxed broker; egress via per-hop proxy decide() */
         tools_set_recipe(reg, "web_fetch", (ToolRecipe){EXEC_SANDBOX, SBX_WEB, NULL});
     return rc;
@@ -480,6 +469,6 @@ char *tool_web_tier_run(const RunToolParsed *q) {
     ctx.allowed_hosts = q->host_rules;
     ctx.allowed_host_count = q->host_count;
     ctx.host_mode = q->sandbox ? 0 : 1;
-    char *r = tool_web_fetch_handler(q->arguments, &ctx);
+    char *r = web_fetch_run(q, &ctx);
     return r ? r : strdup("error: web_fetch returned null");
 }

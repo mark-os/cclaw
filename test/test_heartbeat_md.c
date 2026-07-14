@@ -5,7 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include "tool_file.h"
+#include "test_util.h"
 
 /* HEARTBEAT.md is optional workspace file read by agent during heartbeat */
 
@@ -33,8 +33,8 @@ static void test_heartbeat_md_readable(void) {
     fprintf(f, "# Heartbeat Tasks\n- Check disk usage\n- Prune old logs\n");
     fclose(f);
 
-    /* Read via file_read handler (same path agent uses) */
-    char *result = tool_file_read_handler("{\"path\":\"HEARTBEAT.md\"}", (void *)&file_ctx);
+    /* Read via file_read tool (same path agent uses) */
+    char *result = test_file_tool_run("file_read", "{\"path\":\"HEARTBEAT.md\"}", &file_ctx);
     assert(result);
     assert(strstr(result, "# Heartbeat Tasks"));
     assert(strstr(result, "Check disk usage"));
@@ -44,9 +44,9 @@ static void test_heartbeat_md_readable(void) {
 
 static void test_heartbeat_md_missing_graceful(void) {
     /* No HEARTBEAT.md — file_read returns error, agent handles gracefully */
-    char *result = tool_file_read_handler("{\"path\":\"HEARTBEAT.md\"}", (void *)&file_ctx);
+    char *result = test_file_tool_run("file_read", "{\"path\":\"HEARTBEAT.md\"}", &file_ctx);
     assert(result);
-    assert(strstr(result, "error:"));
+    assert(strstr(result, "error"));
     free(result);
     printf("  PASS: missing HEARTBEAT.md returns error (agent handles gracefully)\n");
 }

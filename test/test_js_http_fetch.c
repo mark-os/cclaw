@@ -4,8 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "js_http_fetch.h"
-#include "tool_js.h"
-#include "tools.h"
+#include "test_util.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -52,7 +51,7 @@ static void test_runtime_set_hosts(void) {
  * fork, no re-exec, no network. */
 static void test_js_eval_compute(void) {
     TEST("js_eval_compute");
-    char *r = tool_js_eval_handler("{\"code\":\"6 * 7\"}", NULL);
+    char *r = test_js_eval_run_json("{\"code\":\"6 * 7\"}");
     if (!r) { FAIL("NULL result"); return; }
     if (strcmp(r, "42") != 0) { FAIL(r); free(r); return; }
     free(r);
@@ -62,7 +61,7 @@ static void test_js_eval_compute(void) {
 /* In-process js_eval: console.log output is captured. */
 static void test_js_eval_console(void) {
     TEST("js_eval_console");
-    char *r = tool_js_eval_handler("{\"code\":\"console.log('hi'); undefined\"}", NULL);
+    char *r = test_js_eval_run_json("{\"code\":\"console.log('hi'); undefined\"}");
     if (!r) { FAIL("NULL result"); return; }
     if (!strstr(r, "hi")) { FAIL(r); free(r); return; }
     free(r);
@@ -72,7 +71,7 @@ static void test_js_eval_console(void) {
 /* js_eval requires code or filename. */
 static void test_js_eval_requires_arg(void) {
     TEST("js_eval_requires_arg");
-    char *r = tool_js_eval_handler("{}", NULL);
+    char *r = test_js_eval_run_json("{}");
     if (!r) { FAIL("NULL result"); return; }
     if (!strstr(r, "error")) { FAIL(r); free(r); return; }
     free(r);

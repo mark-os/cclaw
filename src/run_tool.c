@@ -81,7 +81,6 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
 
     w_u8(&b, (unsigned char)req->tier);
     w_str(&b, req->tool_name);
-    w_str(&b, req->arguments ? req->arguments : "{}");
     w_u32(&b, (uint32_t)req->env_mode);
     w_u32(&b, (uint32_t)req->nproc);
     w_u32(&b, (uint32_t)req->as_mb);
@@ -105,6 +104,16 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
         w_str(&b, req->secrets[i].name);
         w_str(&b, req->secrets[i].value);
     }
+    w_u32(&b, (uint32_t)req->param_count);
+    for (size_t i = 0; i < req->param_count; i++) {
+        const ToolWireArg *p = &req->params[i];
+        w_str(&b, p->key);
+        w_u8(&b, (unsigned char)p->kind);
+        if (p->kind == TOOL_ARG_LIST)
+            w_str_array(&b, (const char **)p->list, p->list_n);
+        else
+            w_str(&b, p->value);
+    }
 
     size_t total = w_finalize(&b);
     if (total == 0) { free(blob); return NULL; }
@@ -113,12 +122,11 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
 }
 
 void run_tool_req_init(RunToolReq *req, int tier, const char *tool_name,
-                       const char *arguments, const SandboxProfile *sb,
+                       const SandboxProfile *sb,
                        const char *workspace, const char *cwd_path) {
     memset(req, 0, sizeof(*req));
     req->tier = tier;
     req->tool_name = tool_name;
-    req->arguments = arguments;
     req->env_mode = sb->env_mode;
     req->nproc   = sb->rlimits.nproc;
     req->as_mb   = sb->rlimits.as_mb;
@@ -182,7 +190,6 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     memset(q, 0, sizeof(*q));
     q->tier = r_u8(r);
     q->tool_name = r_str(r);
-    q->arguments = r_str(r);
     q->env_mode  = (int)r_u32(r);
     q->nproc     = (int)r_u32(r);
     q->as_mb     = (int)r_u32(r);
@@ -212,7 +219,65 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
             q->secret_count = sc;
         }
     }
+    uint32_t pc = r_u32(r);
+    if (!r->err && pc > 0 && pc <= RUNTOOL_REQUEST_MAX / 8) {
+        q->params = calloc(pc, sizeof(*q->params));
+        if (q->params) {
+            for (uint32_t i = 0; i < pc; i++) {
+                q->params[i].key = r_str(r);
+                q->params[i].kind = (int)r_u8(r);
+                if (q->params[i].kind == TOOL_ARG_LIST) {
+                    q->params[i].list = r_str_array(r, &q->params[i].list_n);
+                } else {
+                    /* A present param always has a value: the wire's
+                     * length-0 = NULL convention must not turn an empty
+                     * string (e.g. file_write content:"") into absent. */
+                    q->params[i].value = r_str(r);
+                    if (!q->params[i].value && !r->err)
+                        q->params[i].value = strdup("");
+                }
+            }
+            q->param_count = pc;
+        }
+    }
     return r->err ? -1 : 0;
+}
+
+/* ── Child-side param lookup ── */
+
+static const struct RunToolParam *param_find(const RunToolParsed *q,
+                                             const char *key, int kind) {
+    for (size_t i = 0; i < q->param_count; i++)
+        if (q->params[i].kind == kind && q->params[i].key &&
+            strcmp(q->params[i].key, key) == 0)
+            return &q->params[i];
+    return NULL;
+}
+
+const char *run_tool_param_str(const RunToolParsed *q, const char *key) {
+    const struct RunToolParam *p = param_find(q, key, TOOL_ARG_TEXT);
+    return p ? p->value : NULL;
+}
+
+int run_tool_param_int(const RunToolParsed *q, const char *key, int def) {
+    const char *v = run_tool_param_str(q, key);
+    return v ? atoi(v) : def;
+}
+
+int run_tool_param_bool(const RunToolParsed *q, const char *key, int def) {
+    const char *v = run_tool_param_str(q, key);
+    return v ? (v[0] == '1') : def;
+}
+
+const char *run_tool_param_json(const RunToolParsed *q, const char *key) {
+    const struct RunToolParam *p = param_find(q, key, TOOL_ARG_JSON);
+    return p ? p->value : NULL;
+}
+
+char **run_tool_param_list(const RunToolParsed *q, const char *key, size_t *n) {
+    const struct RunToolParam *p = param_find(q, key, TOOL_ARG_LIST);
+    *n = p ? p->list_n : 0;
+    return p ? p->list : NULL;
 }
 
 /* ── Child side (runs in the re-exec'd --run-tool process) ──────────── */
@@ -603,7 +668,6 @@ int run_tool_main(void) {
     if (parse_request(&r, &q) != 0)
         die("error: malformed request");
     if (!q.tool_name) die("error: missing tool_name");
-    if (!q.arguments) q.arguments = strdup("{}");
 
     const TierDescriptor *desc = tier_descriptor(q.tier);
     if (!desc) die("error: unsupported tier");

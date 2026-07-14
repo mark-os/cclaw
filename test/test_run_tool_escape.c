@@ -1,5 +1,6 @@
 #define _DEFAULT_SOURCE
 #include "run_tool.h"
+#include "db.h"
 #include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -56,14 +57,26 @@ static void cleanup(void) {
 /* Send a file-tier request via the real re-exec path.
  * Returns the tool result (malloc'd) or NULL on spawn failure. */
 static char *run_tool_request(const char *tool_name, const char *arguments) {
+    /* Extract wire params exactly as the dispatching parent does. */
+    sqlite3 *mdb = db_open(":memory:");
+    ToolWireArg *wa = NULL;
+    size_t wn = 0;
+    if (!mdb || tool_args_extract(mdb, tool_name, NULL, arguments, &wa, &wn) != 0) {
+        if (mdb) sqlite3_close(mdb);
+        return strdup("error: extract failed");
+    }
+    sqlite3_close(mdb);
+
     size_t blob_len = 0;
     RunToolReq req = {
         .tier = RUNTOOL_TIER_FILE,
-        .tool_name = tool_name, .arguments = arguments,
+        .tool_name = tool_name,
+        .params = wa, .param_count = wn,
         .workspace = workspace, .sandbox = 1,
         .env_mode = 1, .nproc = 64, .as_mb = 512, .cpu_sec = 60,
     };
     char *blob = run_tool_serialize_request(&req, &blob_len);
+    tool_wire_args_free(wa, wn);
     if (!blob) return strdup("error: serialize failed");
 
     int sp[2];

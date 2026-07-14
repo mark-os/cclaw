@@ -1,9 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "tool_file.h"
-#include "tool_parse.h"
 #include "buf.h"
-#include "jsmn_util.h"
+#include "run_tool.h"
 #include <dirent.h>
 #include <fnmatch.h>
 #include <limits.h>
@@ -21,63 +20,16 @@
 #define FIND_DEFAULT_LIMIT 1000
 #define FIND_MAX_DEPTH 32
 
-/* ── Sandbox dispatch ─────────────────────────────────────────────────── */
+/* All six file tools are EXEC_SANDBOX: they run only inside the --run-tool
+ * child, on pre-extracted wire params (run_tool_param_*) — no JSON is parsed
+ * in this process. The registry entries carry tool_sandboxed_stub. */
 
-/* Run the handler in-process. Kernel isolation is the broker's job: the
- * --run-tool child enters the namespace (run_tool_main) before dispatching
- * here with sb.sandbox=0, so this wrapper never sets up a sandbox itself.
- * It stays as the single seam through which all six file tools route. */
-char *file_sandbox_run(FileReadCtx *ctx, char *(*handler)(const char *, void *),
-                       const char *arguments) {
-    return handler(arguments, ctx);
-}
-
-/* ── Wrappers: dispatch through sandbox runner ────────────────────────── */
-
-static char *file_read_inner(const char *arguments, void *user_data);
-static char *file_write_inner(const char *arguments, void *user_data);
-static char *file_list_inner(const char *arguments, void *user_data);
-static char *file_find_inner(const char *arguments, void *user_data);
-static char *file_edit_inner(const char *arguments, void *user_data);
-static char *file_grep_inner(const char *arguments, void *user_data);
-
-char *tool_file_read_handler(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
-    return file_sandbox_run(ctx, file_read_inner, arguments);
-}
-
-char *tool_file_write_handler(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
-    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted sandbox profile)");
-    return file_sandbox_run(ctx, file_write_inner, arguments);
-}
-
-char *tool_file_list_handler(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
-    return file_sandbox_run(ctx, file_list_inner, arguments);
-}
-
-char *tool_file_find_handler(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
-    return file_sandbox_run(ctx, file_find_inner, arguments);
-}
-
-char *tool_file_edit_handler(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
-    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted sandbox profile)");
-    return file_sandbox_run(ctx, file_edit_inner, arguments);
-}
-
-char *tool_file_grep_handler(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
-    if (!ctx || !ctx->workspace) return strdup("error: no workspace configured");
-    return file_sandbox_run(ctx, file_grep_inner, arguments);
-}
+static char *file_read_run(const RunToolParsed *q, FileReadCtx *ctx);
+static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx);
+static char *file_list_run(const RunToolParsed *q, FileReadCtx *ctx);
+static char *file_find_run(const RunToolParsed *q, FileReadCtx *ctx);
+static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx);
+static char *file_grep_run(const RunToolParsed *q, FileReadCtx *ctx);
 
 /* ── Actionable denials ───────────────────────────────────────────────── */
 
@@ -133,26 +85,18 @@ static const char *FILE_READ_PARAMS_JSON =
     "\"path\":{\"type\":\"string\",\"description\":\"File path to read (relative or absolute)\"}"
     "},\"required\":[\"path\"]}";
 
-static char *file_read_inner(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
+static char *file_read_run(const RunToolParsed *q, FileReadCtx *ctx) {
     const char *workspace = ctx->workspace;
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid JSON arguments");
-
-    const char *req_path = targ_str(&ta, "path");
-    if (!req_path || !req_path[0]) {
-        tool_parse_free(&ta);
+    const char *req_path = run_tool_param_str(q, "path");
+    if (!req_path || !req_path[0])
         return strdup("error: missing or empty 'path' field");
-    }
 
     char fullpath[PATH_MAX];
     if (req_path[0] == '/')
         snprintf(fullpath, sizeof(fullpath), "%s", req_path);
     else
         snprintf(fullpath, sizeof(fullpath), "%s/%s", workspace, req_path);
-    tool_parse_free(&ta);
 
     FILE *f = fopen(fullpath, "rb");
     if (!f) {
@@ -172,7 +116,7 @@ static char *file_read_inner(const char *arguments, void *user_data) {
 int tool_file_read_register(ToolRegistry *reg, FileReadCtx *ctx) {
     int rc = tools_register(reg, "file_read",
                           "Read a file (path relative or absolute)",
-                          FILE_READ_PARAMS_JSON, tool_file_read_handler,
+                          FILE_READ_PARAMS_JSON, tool_sandboxed_stub,
                           (void *)ctx);
     if (rc == 0)
         tools_set_recipe(reg, "file_read", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
@@ -187,34 +131,23 @@ static const char *FILE_WRITE_PARAMS_JSON =
     "\"content\":{\"type\":\"string\",\"description\":\"Content to write\"}"
     "},\"required\":[\"path\",\"content\"]}";
 
-static char *file_write_inner(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
+static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx) {
     if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted sandbox profile)");
     const char *workspace = ctx->workspace;
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid JSON arguments");
-
-    const char *req_path = targ_str(&ta, "path");
-    if (!req_path || !req_path[0]) {
-        tool_parse_free(&ta);
+    const char *req_path = run_tool_param_str(q, "path");
+    if (!req_path || !req_path[0])
         return strdup("error: missing or empty 'path' field");
-    }
 
     /* Reject memory-file names */
     const char *bn = strrchr(req_path, '/');
     bn = bn ? bn + 1 : req_path;
-    if (strcasecmp(bn, "MEMORY.md") == 0 || strcasecmp(bn, "SOUL.md") == 0) {
-        tool_parse_free(&ta);
+    if (strcasecmp(bn, "MEMORY.md") == 0 || strcasecmp(bn, "SOUL.md") == 0)
         return strdup("error: memories are not files — use the memory tools (memory_add/memory_edit) instead of writing MEMORY.md");
-    }
 
-    const char *content = targ_str(&ta, "content");
-    if (!content) {
-        tool_parse_free(&ta);
+    const char *content = run_tool_param_str(q, "content");
+    if (!content)
         return strdup("error: missing 'content' field");
-    }
 
     char fullpath[PATH_MAX];
     if (req_path[0] == '/')
@@ -224,7 +157,6 @@ static char *file_write_inner(const char *arguments, void *user_data) {
 
     FILE *f = fopen(fullpath, "wb");
     if (!f) {
-        tool_parse_free(&ta);
         char *hint = path_grant_hint(ctx, fullpath, 1, 1);
         return hint ? hint : strdup("error: cannot open file for writing");
     }
@@ -232,7 +164,6 @@ static char *file_write_inner(const char *arguments, void *user_data) {
     size_t content_len = strlen(content);
     size_t written = fwrite(content, 1, content_len, f);
     fclose(f);
-    tool_parse_free(&ta);
 
     if (written != content_len)
         return strdup("error: incomplete write");
@@ -246,7 +177,7 @@ static char *file_write_inner(const char *arguments, void *user_data) {
 int tool_file_write_register(ToolRegistry *reg, FileReadCtx *ctx) {
     int rc = tools_register(reg, "file_write",
                           "Write content to a file (path relative or absolute)",
-                          FILE_WRITE_PARAMS_JSON, tool_file_write_handler,
+                          FILE_WRITE_PARAMS_JSON, tool_sandboxed_stub,
                           (void *)ctx);
     if (rc == 0)
         tools_set_recipe(reg, "file_write", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
@@ -272,16 +203,12 @@ static int ls_entry_cmp(const void *a, const void *b) {
     return strcasecmp(((const LsEntry *)a)->name, ((const LsEntry *)b)->name);
 }
 
-static char *file_list_inner(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
+static char *file_list_run(const RunToolParsed *q, FileReadCtx *ctx) {
     const char *workspace = ctx->workspace;
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid JSON arguments");
-    const char *req_path = targ_str(&ta, "path");
+    const char *req_path = run_tool_param_str(q, "path");
     if (!req_path || !req_path[0]) req_path = ".";
-    int limit = targ_int(&ta, "limit", FILE_LIST_DEFAULT_LIMIT);
+    int limit = run_tool_param_int(q, "limit", FILE_LIST_DEFAULT_LIMIT);
     if (limit < 1) limit = FILE_LIST_DEFAULT_LIMIT;
 
     char resolved[PATH_MAX];
@@ -289,7 +216,6 @@ static char *file_list_inner(const char *arguments, void *user_data) {
         snprintf(resolved, sizeof(resolved), "%s", req_path);
     else
         snprintf(resolved, sizeof(resolved), "%s/%s", workspace, req_path);
-    tool_parse_free(&ta);
 
     DIR *d = opendir(resolved);
     if (!d) {
@@ -348,7 +274,7 @@ int tool_file_list_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "List directory contents. Returns entries sorted "
                           "alphabetically, with a '/' suffix for directories. Includes dotfiles. "
                           "Use this to see what files exist.",
-                          FILE_LIST_PARAMS_JSON, tool_file_list_handler, (void *)ctx);
+                          FILE_LIST_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
         tools_set_recipe(reg, "file_list", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
     return rc;
@@ -432,21 +358,15 @@ static void find_walk(const char *absdir, const char *reldir, int depth, FindAcc
     closedir(d);
 }
 
-static char *file_find_inner(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
+static char *file_find_run(const RunToolParsed *q, FileReadCtx *ctx) {
     const char *workspace = ctx->workspace;
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid JSON arguments");
-    const char *pattern = targ_str(&ta, "pattern");
-    if (!pattern || !pattern[0]) {
-        tool_parse_free(&ta);
+    const char *pattern = run_tool_param_str(q, "pattern");
+    if (!pattern || !pattern[0])
         return strdup("error: missing or empty 'pattern' field");
-    }
-    const char *req_path = targ_str(&ta, "path");
+    const char *req_path = run_tool_param_str(q, "path");
     if (!req_path || !req_path[0]) req_path = ".";
-    int limit = targ_int(&ta, "limit", FIND_DEFAULT_LIMIT);
+    int limit = run_tool_param_int(q, "limit", FIND_DEFAULT_LIMIT);
     if (limit < 1) limit = FIND_DEFAULT_LIMIT;
 
     char eff[300];
@@ -462,7 +382,6 @@ static char *file_find_inner(const char *arguments, void *user_data) {
         snprintf(resolved, sizeof(resolved), "%s", req_path);
     else
         snprintf(resolved, sizeof(resolved), "%s/%s", workspace, req_path);
-    tool_parse_free(&ta);
 
     FindAcc a = {.b = {0}, .count = 0,
                  .limit = limit, .pattern = eff, .path_mode = path_mode};
@@ -485,7 +404,7 @@ int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "file paths relative to the search directory. A pattern without '/' (e.g. "
                           "'*.c') matches a file's name at any depth; use '**' to cross directories "
                           "(e.g. 'src/**/*.spec.ts'). Skips .git and node_modules.",
-                          FIND_PARAMS_JSON, tool_file_find_handler, (void *)ctx);
+                          FIND_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
         tools_set_recipe(reg, "file_find", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
     return rc;
@@ -494,7 +413,6 @@ int tool_file_find_register(ToolRegistry *reg, FileReadCtx *ctx) {
 /* ── file_edit (search/replace) ───────────────────────────────────────── */
 
 #define FILE_EDIT_MAX_EDITS 32
-#define FILE_EDIT_MAX_TOKENS 512
 #define FILE_EDIT_MAX_FILE (1024 * 1024)
 
 static const char *FILE_EDIT_PARAMS_JSON =
@@ -538,32 +456,20 @@ static void edits_free(EditOp *e, int n) {
     for (int i = 0; i < n; i++) { free(e[i].old_text); free(e[i].new_text); }
 }
 
-static char *file_edit_inner(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
+static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx) {
     if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted sandbox profile)");
-    if (!arguments) return strdup("error: invalid JSON arguments");
 
-    jsmntok_t toks[FILE_EDIT_MAX_TOKENS];
-    jsmn_parser p;
-    jsmn_init(&p);
-    int nt = jsmn_parse(&p, arguments, strlen(arguments), toks, FILE_EDIT_MAX_TOKENS);
-    if (nt < 1 || toks[0].type != JSMN_OBJECT)
-        return strdup("error: invalid JSON arguments (or too many edits)");
-
-    int pvi = jtok_find(toks, nt, arguments, "path");
-    int avi = jtok_find(toks, nt, arguments, "edits");
-    if (pvi < 0 || toks[pvi].type != JSMN_STRING)
+    const char *req_path = run_tool_param_str(q, "path");
+    if (!req_path || !req_path[0])
         return strdup("error: missing or invalid 'path'");
-    if (avi < 0 || toks[avi].type != JSMN_ARRAY)
+    /* edits arrive flattened by the parent (tool_args_extract) as
+     * [old1,new1,old2,new2,...] — no JSON in this process. */
+    size_t pn = 0;
+    char **pairs = run_tool_param_list(q, "edits", &pn);
+    if (!pairs || pn < 2 || (pn % 2) != 0)
         return strdup("error: missing or invalid 'edits' array");
-    if (toks[avi].size < 1) return strdup("error: 'edits' is empty");
-    if (toks[avi].size > FILE_EDIT_MAX_EDITS) return strdup("error: too many edits");
-
-    char req_path[PATH_MAX];
-    size_t plen = (size_t)(toks[pvi].end - toks[pvi].start);
-    if (plen >= sizeof(req_path)) return strdup("error: path too long");
-    plen = json_unescape(req_path, sizeof(req_path), arguments + toks[pvi].start, plen);
-    req_path[plen] = '\0';
+    size_t nreq = pn / 2;
+    if (nreq > FILE_EDIT_MAX_EDITS) return strdup("error: too many edits");
 
     char fullpath[PATH_MAX * 2];
     if (req_path[0] == '/') snprintf(fullpath, sizeof(fullpath), "%s", req_path);
@@ -586,31 +492,18 @@ static char *file_edit_inner(const char *arguments, void *user_data) {
 
     EditOp ops[FILE_EDIT_MAX_EDITS];
     int nedits = 0;
-    int ei = avi + 1;
     char *errmsg = NULL;
-    for (int e = 0; e < toks[avi].size; e++) {
-        if (toks[ei].type != JSMN_OBJECT) { errmsg = "error: edit is not an object"; break; }
-        int npairs = toks[ei].size, fj = ei + 1;
-        const char *op = NULL, *np = NULL; size_t ol = 0, nl = 0; int have_old = 0, have_new = 0;
-        for (int pp = 0; pp < npairs; pp++) {
-            const jsmntok_t *kt = &toks[fj];
-            const jsmntok_t *vt = &toks[fj + 1];
-            if (jtok_key_eq(kt, arguments, "oldText") && vt->type == JSMN_STRING) {
-                op = arguments + vt->start; ol = (size_t)(vt->end - vt->start); have_old = 1;
-            } else if (jtok_key_eq(kt, arguments, "newText") && vt->type == JSMN_STRING) {
-                np = arguments + vt->start; nl = (size_t)(vt->end - vt->start); have_new = 1;
-            }
-            fj = jsmn_skip(toks, fj + 1, nt);
-        }
-        ei = jsmn_skip(toks, ei, nt);
-        if (!have_old || !have_new) { errmsg = "error: each edit needs oldText and newText"; break; }
+    for (size_t e = 0; e < nreq; e++) {
+        /* The wire's length-0 = NULL convention: an empty newText (pure
+         * deletion) arrives as NULL. oldText must be non-empty anyway. */
+        const char *op = pairs[e * 2] ? pairs[e * 2] : "";
+        const char *np = pairs[e * 2 + 1] ? pairs[e * 2 + 1] : "";
 
         EditOp *o = &ops[nedits];
-        o->old_text = malloc(ol + 1); o->new_text = malloc(nl + 1);
+        o->old_text = strdup(op); o->new_text = strdup(np);
         if (!o->old_text || !o->new_text) { free(o->old_text); free(o->new_text); errmsg = "error: OOM"; break; }
-        o->old_len = json_unescape(o->old_text, ol + 1, op, ol);
-        o->new_len = json_unescape(o->new_text, nl + 1, np, nl);
-        o->old_text[o->old_len] = '\0'; o->new_text[o->new_len] = '\0';
+        o->old_len = strlen(o->old_text);
+        o->new_len = strlen(o->new_text);
 
         if (o->old_len == 0) { free(o->old_text); free(o->new_text); errmsg = "error: oldText is empty"; break; }
         int matches = mem_count(orig, olen, o->old_text, o->old_len);
@@ -669,7 +562,7 @@ int tool_file_edit_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "rewriting the whole file. Each edit's 'oldText' must occur exactly once in "
                           "the file; all edits are matched against the original content and must not "
                           "overlap. Use file_write to create a file or replace it entirely.",
-                          FILE_EDIT_PARAMS_JSON, tool_file_edit_handler, (void *)ctx);
+                          FILE_EDIT_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
         tools_set_recipe(reg, "file_edit", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
     return rc;
@@ -762,41 +655,32 @@ static void grep_walk(const char *absdir, const char *reldir, int depth, GrepAcc
     closedir(d);
 }
 
-static char *file_grep_inner(const char *arguments, void *user_data) {
-    FileReadCtx *ctx = (FileReadCtx *)user_data;
+static char *file_grep_run(const RunToolParsed *q, FileReadCtx *ctx) {
     const char *workspace = ctx->workspace;
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid JSON arguments");
-    const char *pattern = targ_str(&ta, "pattern");
-    if (!pattern || !pattern[0]) {
-        tool_parse_free(&ta);
+    const char *pattern = run_tool_param_str(q, "pattern");
+    if (!pattern || !pattern[0])
         return strdup("error: missing or empty 'pattern' field");
-    }
-    const char *req_path = targ_str(&ta, "path");
+    const char *req_path = run_tool_param_str(q, "path");
     if (!req_path || !req_path[0]) req_path = ".";
-    const char *glob_arg = targ_str(&ta, "glob");
+    const char *glob_arg = run_tool_param_str(q, "glob");
     char glob_buf[256];
     if (glob_arg && glob_arg[0])
         snprintf(glob_buf, sizeof(glob_buf), "%s", glob_arg);
     else
         glob_buf[0] = '\0';
-    int limit = targ_int(&ta, "limit", GREP_DEFAULT_LIMIT);
+    int limit = run_tool_param_int(q, "limit", GREP_DEFAULT_LIMIT);
     if (limit < 1) limit = GREP_DEFAULT_LIMIT;
 
     regex_t re;
-    if (regcomp(&re, pattern, REG_EXTENDED | REG_NEWLINE) != 0) {
-        tool_parse_free(&ta);
+    if (regcomp(&re, pattern, REG_EXTENDED | REG_NEWLINE) != 0)
         return strdup("error: invalid regex");
-    }
 
     char resolved[PATH_MAX];
     if (req_path[0] == '/')
         snprintf(resolved, sizeof(resolved), "%s", req_path);
     else
         snprintf(resolved, sizeof(resolved), "%s/%s", workspace, req_path);
-    tool_parse_free(&ta);
 
     GrepAcc a = {.b = {0}, .count = 0,
                  .limit = limit, .re = re, .glob = glob_buf[0] ? glob_buf : NULL};
@@ -819,31 +703,31 @@ int tool_file_grep_register(ToolRegistry *reg, FileReadCtx *ctx) {
                           "Search file contents for lines matching a POSIX extended regex. "
                           "Returns matching lines as path:lineno:line. Searches recursively "
                           "under the given directory. Skips binary files, .git, and node_modules.",
-                          GREP_PARAMS_JSON, tool_file_grep_handler, (void *)ctx);
+                          GREP_PARAMS_JSON, tool_sandboxed_stub, (void *)ctx);
     if (rc == 0)
         tools_set_recipe(reg, "file_grep", (ToolRecipe){EXEC_SANDBOX, SBX_FILE, NULL});
     return rc;
 }
 
-/* Dispatch file tool by name. ctx->sandbox==0 so handlers run in-process. */
-static char *dispatch_file(const char *tool_name, const char *arguments, FileReadCtx *ctx) {
-    typedef char *(*handler_fn)(const char *, void *);
-    struct { const char *name; handler_fn fn; } tools[] = {
-        {"file_read",  tool_file_read_handler},
-        {"file_write", tool_file_write_handler},
-        {"file_edit",  tool_file_edit_handler},
-        {"file_list",  tool_file_list_handler},
-        {"file_find",  tool_file_find_handler},
-        {"file_grep",  tool_file_grep_handler},
+/* Dispatch file tool by name on pre-extracted wire params. */
+static char *dispatch_file(const RunToolParsed *q, FileReadCtx *ctx) {
+    typedef char *(*run_fn)(const RunToolParsed *, FileReadCtx *);
+    struct { const char *name; run_fn fn; } tools[] = {
+        {"file_read",  file_read_run},
+        {"file_write", file_write_run},
+        {"file_edit",  file_edit_run},
+        {"file_list",  file_list_run},
+        {"file_find",  file_find_run},
+        {"file_grep",  file_grep_run},
     };
     for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++)
-        if (strcmp(tool_name, tools[i].name) == 0)
-            return tools[i].fn(arguments, ctx);
+        if (strcmp(q->tool_name, tools[i].name) == 0)
+            return tools[i].fn(q, ctx);
     return strdup("error: unknown file tool");
 }
 
 char *tool_file_tier_run(const RunToolParsed *q) {
-    /* Sandbox is already applied on this process; the handlers never set one
+    /* Sandbox is already applied on this process; the run fns never set one
      * up themselves. sb.sandbox carries "mount enforcement is active" so
      * open failures outside the granted mounts produce a grant hint. */
     FileReadCtx fctx = {0};
@@ -856,6 +740,7 @@ char *tool_file_tier_run(const RunToolParsed *q) {
     fctx.sb.read_path_count = q->read_count;
     fctx.sb.write_paths  = q->write_paths;
     fctx.sb.write_path_count = q->write_count;
-    char *r = dispatch_file(q->tool_name, q->arguments, &fctx);
+    if (!fctx.workspace) return strdup("error: no workspace configured");
+    char *r = dispatch_file(q, &fctx);
     return r ? r : strdup("");
 }

@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
-#include "tool_web_fetch.h"
+#include "test_util.h"
 #include "external_content.h"
 #include "mock_server.h"
 #include <assert.h>
@@ -66,22 +66,22 @@ static void test_sanitize_markers_empty(void) {
 }
 
 static void test_handler_invalid_url(void) {
-    char *result = tool_web_fetch_handler("{\"url\":\"ftp://bad\"}", NULL);
+    char *result = test_web_fetch_run("{\"url\":\"ftp://bad\"}", NULL);
     assert(strstr(result, "error") != NULL);
     free(result);
     printf("  PASS: handler_invalid_url\n");
 }
 
 static void test_handler_missing_url(void) {
-    char *result = tool_web_fetch_handler("{}", NULL);
+    char *result = test_web_fetch_run("{}", NULL);
     assert(strstr(result, "error") != NULL);
     free(result);
     printf("  PASS: handler_missing_url\n");
 }
 
 static void test_handler_bad_json(void) {
-    char *result = tool_web_fetch_handler("not json", NULL);
-    assert(strstr(result, "error") != NULL);
+    char *result = test_web_fetch_run("not json", NULL);
+    assert(strcmp(result, "error: invalid tool arguments") == 0);
     free(result);
     printf("  PASS: handler_bad_json\n");
 }
@@ -101,7 +101,7 @@ static void test_register(void) {
 
 static void test_handler_with_offset(void) {
     /* offset param should be accepted without breaking error handling */
-    char *result = tool_web_fetch_handler("{\"url\":\"ftp://bad\",\"offset\":100}", NULL);
+    char *result = test_web_fetch_run("{\"url\":\"ftp://bad\",\"offset\":100}", NULL);
     assert(strstr(result, "error") != NULL);
     free(result);
     printf("  PASS: handler_with_offset\n");
@@ -109,7 +109,7 @@ static void test_handler_with_offset(void) {
 
 static void test_handler_with_max_chars(void) {
     /* max_chars param should be accepted */
-    char *result = tool_web_fetch_handler("{\"url\":\"ftp://bad\",\"max_chars\":5000}", NULL);
+    char *result = test_web_fetch_run("{\"url\":\"ftp://bad\",\"max_chars\":5000}", NULL);
     assert(strstr(result, "error") != NULL);
     free(result);
     printf("  PASS: handler_with_max_chars\n");
@@ -117,7 +117,7 @@ static void test_handler_with_max_chars(void) {
 
 static void test_handler_with_offset_and_max_chars(void) {
     /* Both params together */
-    char *result = tool_web_fetch_handler(
+    char *result = test_web_fetch_run(
         "{\"url\":\"ftp://bad\",\"offset\":1000,\"max_chars\":500}", NULL);
     assert(strstr(result, "error") != NULL);
     free(result);
@@ -222,7 +222,7 @@ static void test_truncated_saves_full_to_workspace(void) {
     char args[256];
     snprintf(args, sizeof(args),
              "{\"url\":\"http://127.0.0.1:%d/v1/chat/completions\"}", port);
-    char *result = tool_web_fetch_handler(args, &ctx);
+    char *result = test_web_fetch_run(args, &ctx);
     assert(result);
     assert(strstr(result, "truncated") != NULL);
     assert(strstr(result, "saved to ") != NULL);
@@ -268,7 +268,7 @@ static void test_retry_on_empty_challenge(void) {
     char args[256];
     snprintf(args, sizeof(args),
              "{\"url\":\"http://127.0.0.1:%d/v1/chat/completions\"}", port);
-    char *r = tool_web_fetch_handler(args, &ctx);
+    char *r = test_web_fetch_run(args, &ctx);
     assert(r);
     assert(strstr(r, "ranking Argentina one") != NULL);  /* retry's body won */
     assert(mock_server_request_count() == 2);            /* exactly one retry */
@@ -288,7 +288,7 @@ static void test_no_retry_when_body_present(void) {
     char args[256];
     snprintf(args, sizeof(args),
              "{\"url\":\"http://127.0.0.1:%d/v1/chat/completions\"}", port);
-    char *r = tool_web_fetch_handler(args, &ctx);
+    char *r = test_web_fetch_run(args, &ctx);
     assert(r);
     assert(strstr(r, "full content here") != NULL);
     assert(mock_server_request_count() == 1);  /* no retry */

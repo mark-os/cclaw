@@ -24,6 +24,11 @@ int tools_register(ToolRegistry *reg, const char *name, const char *description,
     return 0;
 }
 
+char *tool_sandboxed_stub(const char *arguments, void *user_data) {
+    (void)arguments; (void)user_data;
+    return strdup("error: sandboxed tool dispatched in-process (wiring bug)");
+}
+
 void tools_set_recipe(ToolRegistry *reg, const char *name, ToolRecipe recipe) {
     ToolEntry *e = tools_lookup(reg, name);
     if (e) e->recipe = recipe;

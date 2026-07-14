@@ -237,7 +237,7 @@ Secret store (specs/security.md): the single home for every encrypted value, all
 | `scope` | TEXT NOT NULL DEFAULT 'agent' | `agent` (interpolatable/injectable) \| `system` (provider keys, daemon-only) |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
-Written by: `cclaw secret set\|rm\|list` (operator verb), the `secret_create` tool, `configure_provider`/`admin_set_key` (scope `system`), and `secret_capture_apply` (`save_secret` on web_fetch/shell_exec/js_eval). The DLP scanner never writes here — it redacts. (A `status` column marked scanner-quarantined rows until schema v20 removed quarantine.)
+Written by: `cclaw secret set\|rm\|list` (operator verb), the `secret_create` tool, `admin_set_key` (scope `system`), and `secret_capture_apply` (`save_secret` on web_fetch/shell_exec/js_eval). The DLP scanner never writes here — it redacts. (A `status` column marked scanner-quarantined rows until schema v20 removed quarantine.)
 
 ---
 

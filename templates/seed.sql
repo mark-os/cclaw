@@ -43,5 +43,4 @@ INSERT OR IGNORE INTO tools(name, description) VALUES
   ('launch_agent', 'Delegate a task to another agent'),
   ('check_session', 'Check the status and result of a sub-agent session'),
   ('secret_create', 'Mint a new random credential, stored encrypted in the DB. Returns only its {{SECRET:name}} placeholder — never the value.'),
-  ('configure_provider', 'Set up LLM provider. Stores the API key encrypted in cclaw.db. Known providers: openrouter, gemini, anthropic.'),
   ('create_agent', 'Propose creation of a named agent (requires human approval). Takes an agent definition; the new agent is capped by the creator''s profile and grants.');

@@ -40,6 +40,19 @@ static const char *RESP_TOOL_CALL =
     "\"finish_reason\":\"tool_calls\"}],"
     "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
 
+/* Second call: repoint the LLM provider — must park and, on approve, upsert
+ * the providers row from the parked args (apply_grant set_provider branch).
+ * args carry only the secret NAME (api_key_env), never key material. */
+static const char *RESP_TOOL_CALL2 =
+    "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,"
+    "\"tool_calls\":[{\"id\":\"call_pty2\",\"type\":\"function\",\"function\":"
+    "{\"name\":\"request_config\",\"arguments\":"
+    "\"{\\\"action\\\":\\\"set_provider\\\",\\\"provider\\\":\\\"myllm\\\","
+    "\\\"base_url\\\":\\\"https://myllm.example.com/v1\\\","
+    "\\\"model\\\":\\\"m7b\\\",\\\"reason\\\":\\\"pty provider test\\\"}\"}}]},"
+    "\"finish_reason\":\"tool_calls\"}],"
+    "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
+
 static const char *RESP_FINAL =
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"grant received\"},"
     "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
@@ -100,6 +113,7 @@ int main(void) {
     int port = mock_server_start();
     if (port < 0) FAIL("mock_server_start");
     mock_server_enqueue(200, RESP_TOOL_CALL);
+    mock_server_enqueue(200, RESP_TOOL_CALL2);
     mock_server_enqueue(200, RESP_FINAL);
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
@@ -164,6 +178,8 @@ int main(void) {
     if (send_line(mfd, "please get access") != 0) goto done;
     if (expect(mfd, "Grant? (y/n):", 15000) != 0) goto done;
     if (send_line(mfd, "y") != 0) goto done;
+    if (expect(mfd, "Grant? (y/n):", 15000) != 0) goto done;
+    if (send_line(mfd, "y") != 0) goto done;
     if (expect(mfd, "grant received", 15000) != 0) goto done;
     if (send_line(mfd, "exit") != 0) goto done;
 
@@ -210,12 +226,25 @@ int main(void) {
             ok = (sqlite3_step(s) == SQLITE_ROW);
             sqlite3_finalize(s);
         }
+        if (!ok) { fprintf(stderr, "FAIL: frozen tool_call not resolved\n"); sqlite3_close(db); goto done; }
+
+        /* set_provider applied: providers row upserted from parked args,
+         * api_key_env defaulted to the derived secret name. */
+        ok = 0;
+        if (sqlite3_prepare_v2(db,
+                "SELECT 1 FROM providers WHERE name='myllm'"
+                " AND base_url='https://myllm.example.com/v1'"
+                " AND default_model='m7b' AND api_key_env='MYLLM_API_KEY'",
+                -1, &s, NULL) == SQLITE_OK) {
+            ok = (sqlite3_step(s) == SQLITE_ROW);
+            sqlite3_finalize(s);
+        }
         sqlite3_close(db);
-        if (!ok) { fprintf(stderr, "FAIL: frozen tool_call not resolved\n"); goto done; }
+        if (!ok) { fprintf(stderr, "FAIL: set_provider providers row missing\n"); goto done; }
     }
 
-    if (mock_server_request_count() != 2) {
-        fprintf(stderr, "FAIL: expected 2 LLM requests, got %d\n",
+    if (mock_server_request_count() != 3) {
+        fprintf(stderr, "FAIL: expected 3 LLM requests, got %d\n",
                 mock_server_request_count());
         goto done;
     }

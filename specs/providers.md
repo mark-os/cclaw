@@ -18,7 +18,7 @@ Agents ⊥ store provider keys. Keys decrypted at runtime, injected to worker th
 | OpenAI | `OPENAI_API_KEY` | Direct. |
 | Anthropic | `ANTHROPIC_API_KEY` | Direct. Different wire format (content blocks). |
 
-Bootstrap: the env var works directly on first run; `configure_provider`/admin `set key` persist it encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name.
+Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `set_provider` (or operator SQL).
 
 ## Provider Fallback Chain
 
@@ -45,7 +45,7 @@ CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI 
 - Agent uses key for LLM calls, key lives only in process memory
 - `shell_exec` children have provider-native env vars (e.g. `OPENROUTER_API_KEY`) unset before exec
 - Agent ⊥ has access to `.cclaw_key` file (daemon-only, not exposed to agents)
-- `configure_provider` tool applies directly in-process (providers upsert + encrypted system-scope `secrets` write) — no fork/exit-code round trip
+- Provider changes are approval-gated: `request_config` action `set_provider` parks for human approval; the upsert happens in the trusted parent on approve. The approval args carry only the secret's *name* (`api_key_env`) — never key material. (The old `configure_provider` tool applied inline, letting a granted agent silently repoint `base_url` at an attacker — deleted, schema v28.)
 
 ## Future: OAuth (Device Code)
 

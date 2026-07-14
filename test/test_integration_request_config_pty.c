@@ -3,10 +3,10 @@
  * -p mode auto-denies all approvals, so the interactive approve loop (park →
  * y/n prompt → resolve_approval → apply_grant) is unreachable by unit tests
  * and by the other integration tests. Run build/cclaw under a PTY so
- * isatty(stdin) is true, script a grant_path tool call from the mock LLM,
- * answer 'y' at the prompt, and assert the grant landed as kind 'read_path'
- * (the apply_grant read/write mapping is static in main.c — this is the only
- * place it's exercised end to end). */
+ * isatty(stdin) is true, script a request_changes tool call from the mock
+ * LLM, answer 'y' at the prompt, and assert the grant landed as kind
+ * 'read_path' (the request_config_changes_apply path is the only place it's
+ * exercised end to end). */
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 600
 #include "db.h"
@@ -35,21 +35,24 @@ static const char *RESP_TOOL_CALL =
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,"
     "\"tool_calls\":[{\"id\":\"call_pty1\",\"type\":\"function\",\"function\":"
     "{\"name\":\"request_config\",\"arguments\":"
-    "\"{\\\"action\\\":\\\"grant_path\\\",\\\"path\\\":\\\"" GRANT_DIR "\\\","
-    "\\\"mode\\\":\\\"read\\\",\\\"reason\\\":\\\"pty integration test\\\"}\"}}]},"
+    "\"{\\\"action\\\":\\\"request_changes\\\","
+    "\\\"changes\\\":{\\\"grants\\\":{\\\"read_paths\\\":[\\\"" GRANT_DIR "\\\"]}},"
+    "\\\"reason\\\":\\\"pty integration test\\\"}\"}}]},"
     "\"finish_reason\":\"tool_calls\"}],"
     "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
 
 /* Second call: repoint the LLM provider — must park and, on approve, upsert
- * the providers row from the parked args (apply_grant set_provider branch).
+ * the providers row from the parked args (request_config_changes_apply).
  * args carry only the secret NAME (api_key_env), never key material. */
 static const char *RESP_TOOL_CALL2 =
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,"
     "\"tool_calls\":[{\"id\":\"call_pty2\",\"type\":\"function\",\"function\":"
     "{\"name\":\"request_config\",\"arguments\":"
-    "\"{\\\"action\\\":\\\"set_provider\\\",\\\"provider\\\":\\\"myllm\\\","
+    "\"{\\\"action\\\":\\\"request_changes\\\","
+    "\\\"changes\\\":{\\\"provider\\\":{\\\"provider\\\":\\\"myllm\\\","
     "\\\"base_url\\\":\\\"https://myllm.example.com/v1\\\","
-    "\\\"model\\\":\\\"m7b\\\",\\\"reason\\\":\\\"pty provider test\\\"}\"}}]},"
+    "\\\"model\\\":\\\"m7b\\\",\\\"api_key_env\\\":\\\"MYLLM_API_KEY\\\"}},"
+    "\\\"reason\\\":\\\"pty provider test\\\"}\"}}]},"
     "\"finish_reason\":\"tool_calls\"}],"
     "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
 
@@ -221,14 +224,13 @@ int main(void) {
 
         ok = 0;
         if (sqlite3_prepare_v2(db,
-                "SELECT 1 FROM approvals WHERE action='grant_path' AND state='approved'"
-                " AND json_extract(args_json,'$.mode')='read'"
+                "SELECT 1 FROM approvals WHERE action='request_changes' AND state='approved'"
                 " AND json_extract(args_json,'$.reason')='pty integration test'",
                 -1, &s, NULL) == SQLITE_OK) {
             ok = (sqlite3_step(s) == SQLITE_ROW);
             sqlite3_finalize(s);
         }
-        if (!ok) { fprintf(stderr, "FAIL: approved approval with mode+reason missing\n"); sqlite3_close(db); goto done; }
+        if (!ok) { fprintf(stderr, "FAIL: approved approval with reason missing\n"); sqlite3_close(db); goto done; }
 
         ok = 0;
         if (sqlite3_prepare_v2(db,
@@ -239,8 +241,8 @@ int main(void) {
         }
         if (!ok) { fprintf(stderr, "FAIL: frozen tool_call not resolved\n"); sqlite3_close(db); goto done; }
 
-        /* set_provider applied: providers row upserted from parked args,
-         * api_key_env defaulted to the derived secret name. */
+        /* request_changes (provider) applied: providers row upserted from
+         * parked args, api_key_env explicitly supplied. */
         ok = 0;
         if (sqlite3_prepare_v2(db,
                 "SELECT 1 FROM providers WHERE name='myllm'"
@@ -251,7 +253,7 @@ int main(void) {
             sqlite3_finalize(s);
         }
         sqlite3_close(db);
-        if (!ok) { fprintf(stderr, "FAIL: set_provider providers row missing\n"); goto done; }
+        if (!ok) { fprintf(stderr, "FAIL: request_changes providers row missing\n"); goto done; }
 
         /* Malformed-args call: gate wrote an error tool-result, the call is
          * done with decided_via bad_args, and no approval was created. */

@@ -17,7 +17,7 @@ Companion specs: [trust.md](trust.md) (axis model), [config.md](config.md)
 | Surface | Direction | Mechanism | Gate |
 |---------|-----------|-----------|------|
 | **Read** | agent → config | `search_config` (curated view), `db_query` (arbitrary SELECT) | tool grant |
-| **Write (single)** | agent → config | `request_config` actions: `grant_tool`, `grant_host`, `grant_path`, `rename_agent`, `set_config` | human approval (park → apply) |
+| **Write (single)** | agent → config | `request_config` action `request_changes` — one JSON document batching grants, config values, and/or a provider definition; `rename_agent` | human approval (park → apply, all-or-nothing) |
 | **Write (bulk/structured)** | agent → system | extension manifests via `extension_promote` — tools, hooks, channels, scripts, skills, config keys, **agents** | human approval with enumerated contents |
 | **Docs** | system → agent | builtin `cclaw-docs` skills extension (progressive disclosure via the skills index) | none (read-only knowledge) |
 
@@ -31,19 +31,27 @@ Design invariants (from the architecture review, SELF-CONFIGURATION-REVIEW.md):
   extension-registered keys). Approval is the existing park/apply machinery,
   not a config-specific system.
 
-## `set_config`
+## `request_changes`
 
-`request_config` gains action `set_config {key, value, reason?}`:
+`request_config` action `request_changes` takes a single `changes` JSON document — one human approval covers the whole batch (grants, config values, and/or a provider definition). The document uses the **same grants dialect** as `extension.json`'s `$.agents[].grants` — two routes, one shape: extension manifests declare new named things; `request_changes` mutates the calling agent's own live state.
 
-- **Request-time validation**: the key must exist — in the C registry
-  (`config_default()`) or as an extension-registered row (a `config` row
-  with a code-owned `default_value`). Unknown keys fail immediately with an
-  error naming `search_config` as the way to discover keys. Secret-flagged
-  keys are rejected (`config_set` refuses them; see config.md).
-- **Park/apply**: same gate as the grant actions. The approval summary shows
-  `set_config: <key> = <value>`.
-- **Apply**: `apply_grant()` calls `config_set()`; failure surfaces as a
-  tool error result.
+```json
+{"action":"request_changes","changes":{
+   "grants":{"tools":["name"],"hosts":[".example.com"],"read_paths":["/abs"],"write_paths":["/abs"]},
+   "config":{"registered.key":"value-string"},
+   "provider":{"provider":"openrouter","model":"deepseek/deepseek-v4-flash"}
+ },"reason":"shown to approver"}
+```
+
+- **Eager validation (typo-hostile)**: unknown sections/keys are errors, never
+  dropped. Config keys must be registered (`search_config` lists them);
+  secret-flagged keys are rejected (`save_secret` is the path for those).
+  Provider defaults are filled at park time so the approver sees the final values.
+  Paths must be absolute. A document that can't apply never parks.
+- **All-or-nothing apply**: on approval, the entire document is applied inside a
+  savepoint. If any line fails, the whole document rolls back.
+- **Approval summary**: enumerates every requested line (hosts, paths, tools,
+  config k=v, provider) so the approver sees the full scope at a glance.
 
 ## Agent-definition schema
 
@@ -157,7 +165,7 @@ config keys, channel activation as config, and the builtin telegram bundle's
 real manifest. Once landed, "configure a channel" = attach/enable the
 extension + set its config keys — which is why the `configure_channel` tool
 is deleted rather than implemented: it was a stub whose job decomposed into
-existing primitives (`extension_attach` + `set_config` + secrets).
+existing primitives (`extension_attach` + `request_changes` config section + secrets).
 
 ## Docs: self-knowledge as skills
 
@@ -169,7 +177,7 @@ builtin, containing operational how-tos distilled from specs/:
 
 | Skill | Covers |
 |-------|--------|
-| `configuring-cclaw` | config registry, search_config, request_config actions incl. set_config, env precedence |
+| `configuring-cclaw` | config registry, search_config, request_config request_changes document, env precedence |
 | `extending-cclaw` | manifest format, draft→promote→publish→attach, handler contracts, JS dialect limits |
 | `cclaw-agents` | agent-definition schema, create_agent / launch_agent / check_session, grants model, when to *offer* creating an agent |
 | `cclaw-channels` | channel component, activation via config, outbox/inbox flow |
@@ -189,7 +197,7 @@ extensions** (attached + enabled) and **Agent roster** (name + description)
 
 All five phases are implemented:
 
-1. `set_config` action (`src/tool_request_config.c`).
+1. `request_changes` action (`src/tool_request_config.c`).
 2. `agent_definition_apply` (`src/agent_define.c`) + real `create_agent`;
    `configure_channel` deleted.
 3. `agents[]` manifest component + promote enumeration

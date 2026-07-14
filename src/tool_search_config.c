@@ -202,13 +202,13 @@ static char *handler(const char *arguments, void *user_data) {
     /* Section 6: usage hint */
     buf_appendf(&out,
         "\n## Requesting changes (use the request_config tool)\n"
-        "- grant a tool:  {\"action\":\"grant_tool\",\"tool\":\"<name>\"}\n"
-        "- allow a host:  {\"action\":\"grant_host\",\"host\":\"<hostname>\"}\n"
-        "- grant a path:  {\"action\":\"grant_path\",\"path\":\"/absolute/path\",\"mode\":\"read\"}"
-        " (mode: read|write, default read)\n"
-        "- rename agent:  {\"action\":\"rename_agent\",\"name\":\"<new_name>\"}\n"
-        "- set config:    {\"action\":\"set_config\",\"key\":\"<key>\",\"value\":\"<value>\"}"
-        " (key must be a registered key listed above)\n"
+        "One request_changes document batches everything — one approval covers it all:\n"
+        "  {\"action\":\"request_changes\",\"changes\":{\n"
+        "    \"grants\":{\"tools\":[\"<name>\"],\"hosts\":[\"<hostname>\"],"
+        "\"read_paths\":[\"/abs/path\"],\"write_paths\":[\"/abs/path\"]},\n"
+        "    \"config\":{\"<key>\":\"<value>\"}}}\n"
+        "(any subset; config keys must be registered keys listed above)\n"
+        "- rename agent: {\"action\":\"rename_agent\",\"name\":\"<new_name>\"}\n"
         "Add an optional \"reason\" field — it is shown to the human approver.\n"
         "All gated actions require human approval before taking effect.\n");
 

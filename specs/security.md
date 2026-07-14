@@ -242,18 +242,29 @@ Grant rows may carry an `expires_at` unix timestamp. `grants_json()` (`src/agent
 
 ### request_config tool
 
-The model acquires new capabilities at runtime via `request_config` (`src/tool_request_config.c`). Actions:
+The model acquires new capabilities at runtime via `request_config` (`src/tool_request_config.c`). Two actions:
 
-| Action | Key | Effect on approval |
-|--------|-----|--------------------|
-| `grant_tool` | tool name | Parks → on approve, inserts `grants` row (kind='tool') |
-| `grant_host` | hostname | Parks → on approve, inserts `grants` row (kind='host') |
-| `grant_path` | absolute path | Parks → on approve, inserts `grants` row (kind='read_path' or 'write_path' per `mode`) |
-| `rename_agent` | new name | Parks → on approve, renames agent |
+| Action | Payload | Effect on approval |
+|--------|---------|--------------------|
+| `request_changes` | `changes` JSON document (any subset of `grants`, `config`, `provider`) | Parks → on approve, applies the whole document in a savepoint (all-or-nothing) |
+| `rename_agent` | new name (+ optional preamble) | Parks → on approve, renames agent |
 
-All actions use `resolve='apply'` approvals (ambient capability grants, not one-shot reruns).
+The `request_changes` document batches everything an agent needs into one approval:
 
-**Session-scoped pending dedup**: if the same `(action, key=value)` is already pending in this session, `request_config` returns an immediate error instead of queuing a second identical prompt. A prior *denial* does not permanently forbid re-asking — the model may re-request later (e.g. if told to by the user); a human can also reconsider a past denial directly via the channel's `/grants` menu (below).
+| Section | Content | On apply |
+|---------|---------|----------|
+| `grants.tools` | array of tool names | inserts `grants` rows (kind='tool') |
+| `grants.hosts` | array of hostnames (prefix `.` covers subdomains) | inserts `grants` rows (kind='host') |
+| `grants.read_paths` | array of absolute paths | inserts `grants` rows (kind='read_path') |
+| `grants.write_paths` | array of absolute paths | inserts `grants` rows (kind='write_path') |
+| `config` | object of key→value-string | calls `config_set()` per key |
+| `provider` | provider definition (provider, base_url, model, api_key_env) | upserts `providers` row |
+
+All actions use `resolve='apply'` approvals (ambient capability grants, not one-shot reruns). Apply is savepoint-wrapped: if any line fails, the entire document rolls back.
+
+**Eager validation**: unknown sections, unknown grant kinds, unregistered config keys, secret-flagged config keys, relative paths, and malformed provider definitions are rejected at request time — a document that can't apply never parks.
+
+**Session-scoped pending dedup**: if an identical `changes` document is already pending in this session, `request_config` returns an immediate error instead of queuing a second identical prompt. A prior *denial* does not permanently forbid re-asking — the model may re-request later (e.g. if told to by the user); a human can also reconsider a past denial directly via the channel's `/grants` menu (below).
 
 ### read_path / write_path grants → sandbox bind-mounts
 

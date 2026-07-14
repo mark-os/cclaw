@@ -76,7 +76,9 @@ static void test_recovery_scoping(void) {
 
     /* Insert a pending approval for sid_b */
     int64_t appr_id = approval_create(db, sid_b, "call_orphan_b", "shell_exec",
-                                      "grant_host", "{\"host\":\"x.com\"}", "apply");
+                                      "request_changes",
+                                      "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"x.com\"]}}}",
+                                      "apply");
     assert(appr_id > 0);
 
     /* Session owned by B in a stale state but with NO orphaned tool_call —

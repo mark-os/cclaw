@@ -15,4 +15,12 @@ typedef struct {
 
 int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx);
 
+/* Apply an approved request_changes document (args_json holds the parked
+ * approval args; the document lives at $.changes). Applies grants, config
+ * values, and the provider upsert inside one savepoint — all-or-nothing.
+ * Shared by apply_grant (main.c) and admin grant-from-history (admin_api.c).
+ * Returns 0 iff every line applied. */
+int request_config_changes_apply(sqlite3 *db, const char *agent,
+                                 const char *args_json, int64_t expires_at);
+
 #endif

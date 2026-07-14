@@ -38,7 +38,7 @@ INSERT OR IGNORE INTO tools(name, description) VALUES
   ('memory_add', 'Add a numbered note to a memory block. Args: block (label), text.'),
   ('memory_edit', 'Replace the text of existing notes by number. Args: block, edits (array of {number, text}).'),
   ('memory_delete', 'Delete notes by number (others renumber). Args: block, numbers (array of integers).'),
-  ('request_config', 'Request a configuration change (requires human approval).'),
+  ('request_config', 'Request configuration changes — one batched request_changes document per approval (requires human approval).'),
   ('search_config', 'Discover your current configuration and what you can request: your sandbox profile, granted tools and hosts, the full list of available tools, and how to request more via request_config.'),
   ('launch_agent', 'Delegate a task to another agent'),
   ('check_session', 'Check the status and result of a sub-agent session'),

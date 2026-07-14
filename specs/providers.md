@@ -18,7 +18,7 @@ Agents ⊥ store provider keys. Keys decrypted at runtime, injected to worker th
 | OpenAI | `OPENAI_API_KEY` | Direct. |
 | Anthropic | `ANTHROPIC_API_KEY` | Direct. Different wire format (content blocks). |
 
-Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `set_provider` (or operator SQL).
+Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `request_changes` (the `provider` section of the changes document) or operator SQL.
 
 ## Provider Fallback Chain
 
@@ -45,7 +45,7 @@ CClaw stores `args` as object in `tool_calls` column (provider-neutral). OpenAI 
 - Agent uses key for LLM calls, key lives only in process memory
 - `shell_exec` children have provider-native env vars (e.g. `OPENROUTER_API_KEY`) unset before exec
 - Agent ⊥ has access to `.cclaw_key` file (daemon-only, not exposed to agents)
-- Provider changes are approval-gated: `request_config` action `set_provider` parks for human approval; the upsert happens in the trusted parent on approve. The approval args carry only the secret's *name* (`api_key_env`) — never key material. (The old `configure_provider` tool applied inline, letting a granted agent silently repoint `base_url` at an attacker — deleted, schema v28.)
+- Provider changes are approval-gated: the `provider` section of `request_config` action `request_changes` parks for human approval; the upsert happens in the trusted parent on approve (savepoint-wrapped, all-or-nothing with any co-batched grants/config). The approval args carry only the secret's *name* (`api_key_env`) — never key material. (The old `configure_provider` tool applied inline, letting a granted agent silently repoint `base_url` at an attacker — deleted, schema v28.)
 
 ## Future: OAuth (Device Code)
 

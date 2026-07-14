@@ -300,7 +300,7 @@ static void test_session_context_live_state(void) {
     sqlite3_stmt *ins;
     sqlite3_prepare_v2(db,
         "INSERT INTO approvals(session_id,tool_name,action,state)"
-        " VALUES(?1,'grant_host','request_config','pending');",
+        " VALUES(?1,'request_config','request_changes','pending');",
         -1, &ins, NULL);
     sqlite3_bind_int64(ins, 1, sid);
     assert(sqlite3_step(ins) == SQLITE_DONE);
@@ -327,7 +327,8 @@ static void test_session_context_live_state(void) {
     char *context_text = session_context_text(db, sid, NULL);
     assert(context_text);
     assert(strstr(context_text, "<pending_approvals>"));
-    assert(strstr(context_text, "grant_host"));
+    /* the renderer shows COALESCE(tool_name, action) — tool_name wins */
+    assert(strstr(context_text, "request_config"));
     assert(strstr(context_text, "<running_sub_agents>"));
     assert(strstr(context_text, "worker"));
     assert(strstr(context_text, "<memory_blocks>"));
@@ -336,7 +337,7 @@ static void test_session_context_live_state(void) {
 
     LlmPayload payload;
     assert(llm_build_payload(db, sid, &cfg, &plan, context_text, "You are helpful.", &payload) == 0);
-    assert(strstr(payload.body, "grant_host"));
+    assert(strstr(payload.body, "request_config"));
     assert(strstr(payload.body, "worker"));
     llm_payload_release(&payload);
 

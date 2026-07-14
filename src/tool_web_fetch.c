@@ -252,12 +252,13 @@ char *web_fetch_host_hint(const char *url, char **rules, size_t n, int host_mode
     char host[256];
     if (url_parse_host(url, host, sizeof(host)) != 0) return NULL;
     if (host_match(rules, n, host)) return NULL;
-    size_t cap = 2 * strlen(host) + 128;
+    size_t cap = 2 * strlen(host) + 192;
     char *msg = malloc(cap);
     if (!msg) return NULL;
     snprintf(msg, cap,
              "error: host '%s' is not in your allowed hosts — request it with "
-             "request_config {\"action\":\"grant_host\",\"host\":\"%s\"}",
+             "request_config {\"action\":\"request_changes\","
+             "\"changes\":{\"grants\":{\"hosts\":[\"%s\"]}}}",
              host, host);
     return msg;
 }

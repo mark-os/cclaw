@@ -3,6 +3,7 @@
 #include "agent_config.h"
 #include "db.h"
 #include "tool_args.h"
+#include "tool_request_config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -372,10 +373,10 @@ static int admin_list_approvals_by_state(sqlite3 *db, const char *channel_name,
     *out_count = 0;
     if (!db || !state) return -1;
 
-    /* grantable_only restricts to request_config's own actions (grant_tool/
-     * grant_host/grant_path) — the only ones admin_grant_from_history can
-     * actually apply. Used for the denial-history/"Grant now" listing;
-     * pending approvals (any tool) are never filtered this way. */
+    /* grantable_only restricts to request_config approvals — the only ones
+     * admin_grant_from_history can actually apply (the request_changes
+     * document). Used for the denial-history/"Grant now" listing; pending
+     * approvals (any tool) are never filtered this way. */
     const char *sql = grantable_only ?
         "SELECT a.id, a.session_id, s.agent_name, a.tool_name, a.action, a.args_json"
         " FROM approvals a JOIN sessions s ON s.id = a.session_id"
@@ -819,22 +820,10 @@ int admin_grant_from_history(sqlite3 *db, int64_t approval_id) {
         char *agent = session_get_agent_name(db, session_id);
         if (!agent) goto done;
 
-        if (strcmp(action, "grant_tool") == 0) {
-            char *v = tool_args_str(db, args_json, "tool");
-            if (v) rc = agent_config_grant(db, agent, "tool", v, 0);
-            free(v);
-        } else if (strcmp(action, "grant_host") == 0) {
-            char *v = tool_args_str(db, args_json, "host");
-            if (v) rc = agent_config_grant(db, agent, "host", v, 0);
-            free(v);
-        } else if (strcmp(action, "grant_path") == 0) {
-            char *v = tool_args_str(db, args_json, "path");
-            char *m = tool_args_str(db, args_json, "mode");
-            const char *kind = (m && strcmp(m, "write") == 0) ? "write_path" : "read_path";
-            if (v) rc = agent_config_grant(db, agent, kind, v, 0);
-            free(v);
-            free(m);
-        }
+        /* Same all-or-nothing apply as apply_grant (main.c) — one code path
+         * for the document, no drift between the two grant routes. */
+        if (strcmp(action, "request_changes") == 0)
+            rc = request_config_changes_apply(db, agent, args_json, 0);
         free(agent);
     }
 

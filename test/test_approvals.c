@@ -32,7 +32,9 @@ static void test_create_and_pending(void) {
     assert(sid > 0);
 
     int64_t id = approval_create(db, sid, "call_1", "request_config",
-                                 "grant_host", "{\"host\":\"api.example.com\"}", "apply");
+                                 "request_changes",
+                                 "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"api.example.com\"]}}}",
+                                 "apply");
     assert(id > 0);
 
     Approval *a = approval_get_pending(db, sid);
@@ -41,7 +43,7 @@ static void test_create_and_pending(void) {
     assert(a->session_id == sid);
     assert(strcmp(a->tool_call_id, "call_1") == 0);
     assert(strcmp(a->tool_name, "request_config") == 0);
-    assert(strcmp(a->action, "grant_host") == 0);
+    assert(strcmp(a->action, "request_changes") == 0);
     assert(strcmp(a->state, "pending") == 0);
     approval_free(a);
 
@@ -56,7 +58,9 @@ static void test_approve(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_2", "request_config",
-                                 "grant_tool", "{\"tool\":\"shell_exec\"}", "apply");
+                                 "request_changes",
+                                 "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"tools\":[\"shell_exec\"]}}}",
+                                 "apply");
     assert(id > 0);
 
     Approval *a = approval_resolve(db, id, 1, "cli:user");
@@ -80,7 +84,9 @@ static void test_deny(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_3", "request_config",
-                                 "grant_host", "{\"host\":\"evil.com\"}", "apply");
+                                 "request_changes",
+                                 "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"evil.com\"]}}}",
+                                 "apply");
     assert(id > 0);
 
     Approval *a = approval_resolve(db, id, 0, "auto:no-approver");
@@ -104,9 +110,13 @@ static void test_approve_and_deny_states(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id1 = approval_create(db, sid, "c1", "request_config",
-                                  "grant_host", "{\"host\":\"tmp.com\"}", "apply");
+                                  "request_changes",
+                                  "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"tmp.com\"]}}}",
+                                  "apply");
     int64_t id2 = approval_create(db, sid, "c2", "request_config",
-                                  "grant_host", "{\"host\":\"perm.com\"}", "apply");
+                                  "request_changes",
+                                  "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"perm.com\"]}}}",
+                                  "apply");
     assert(id1 > 0 && id2 > 0);
 
     /* Approve first, deny second */
@@ -176,7 +186,9 @@ static void test_fail_closed_denied(void) {
     int64_t sid = session_create(db, "test", "bot", -1, 0);
 
     int64_t id = approval_create(db, sid, "call_x", "request_config",
-                                 "grant_host", "{\"host\":\"bad.com\"}", "apply");
+                                 "request_changes",
+                                 "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"bad.com\"]}}}",
+                                 "apply");
     assert(id > 0);
 
     Approval *a = approval_resolve(db, id, 0, "auto:no-approver");
@@ -228,7 +240,9 @@ static void test_approval_list_expired(void) {
 
     /* Create a pending approval (expires_at is in the future by default) */
     int64_t id = approval_create(db, sid, "call_e", "request_config",
-                                 "grant_host", "{\"host\":\"exp.com\"}", "apply");
+                                 "request_changes",
+                                 "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"exp.com\"]}}}",
+                                 "apply");
     assert(id > 0);
 
     /* Not expired yet */
@@ -250,7 +264,9 @@ static void test_approval_list_expired(void) {
 
     /* A fresh (future) approval should NOT be returned */
     int64_t id2 = approval_create(db, sid, "call_f", "request_config",
-                                  "grant_host", "{\"host\":\"fresh.com\"}", "apply");
+                                  "request_changes",
+                                  "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"fresh.com\"]}}}",
+                                  "apply");
     assert(id2 > 0);
     ids = approval_list_expired(db, NULL, &count);
     assert(count == 1);
@@ -383,7 +399,9 @@ static void test_pending_subtree(void) {
 
     /* A grandchild's park is found via the root — the whole-subtree fix. */
     int64_t gc_id = approval_create(db, grandchild, "call_g", "request_config",
-                                    "grant_host", "{\"host\":\"api.example.com\"}", "apply");
+                                    "request_changes",
+                                    "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"api.example.com\"]}}}",
+                                    "apply");
     assert(gc_id > 0);
     assert(approval_session_in_subtree(db, root, grandchild));
     assert(approval_session_in_subtree(db, root, child));

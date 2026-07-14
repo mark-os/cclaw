@@ -303,6 +303,93 @@ static void test_set_config(void) {
     printf("  PASS test_set_config\n");
 }
 
+static void test_set_provider(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+    assert(sid > 0);
+
+    RequestConfigCtx ctx = {
+        .db = db,
+        .agent_name = "test",
+        .session_id = sid,
+        .agents_dir = NULL,
+        .current_tool_call_id = "call_p1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+
+    /* Unknown provider without base_url fails eagerly. */
+    char *err = call_handler(&reg,
+        "{\"action\":\"set_provider\",\"provider\":\"myllm\"}");
+    assert(err != NULL && strstr(err, "base_url") != NULL);
+    free(err);
+
+    /* Non-http base_url fails eagerly. */
+    err = call_handler(&reg,
+        "{\"action\":\"set_provider\",\"provider\":\"myllm\",\"base_url\":\"ftp://x\"}");
+    assert(err != NULL && strstr(err, "http") != NULL);
+    free(err);
+
+    /* api_key_env must be a NAME, never key material. */
+    err = call_handler(&reg,
+        "{\"action\":\"set_provider\",\"provider\":\"openrouter\","
+        "\"api_key_env\":\"sk-or-v1-secretsecret\"}");
+    assert(err != NULL && strstr(err, "api_key_env") != NULL);
+    free(err);
+
+    /* Known provider parks with defaults filled; args carry the secret's
+     * derived NAME and no key material. */
+    char *ok = call_handler(&reg, "{\"action\":\"set_provider\",\"provider\":\"openrouter\"}");
+    assert(ok == NULL); /* parked */
+
+    sqlite3_stmt *s;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT json_extract(args_json,'$.provider'),"
+        "       json_extract(args_json,'$.base_url'),"
+        "       json_extract(args_json,'$.model'),"
+        "       json_extract(args_json,'$.api_key_env')"
+        " FROM approvals WHERE session_id=?1 AND action='set_provider'"
+        " ORDER BY id DESC LIMIT 1", -1, &s, NULL);
+    assert(rc == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "openrouter") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "https://openrouter.ai/api/v1") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "deepseek/deepseek-v4-flash") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "OPENROUTER_API_KEY") == 0);
+    sqlite3_finalize(s);
+
+    /* Session is parked awaiting approval; nothing wrote to providers. */
+    rc = sqlite3_prepare_v2(db,
+        "SELECT 1 FROM providers WHERE name='openrouter'", -1, &s, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_DONE);
+    sqlite3_finalize(s);
+
+    /* Custom provider with explicit env name + model parks with them. */
+    ctx.current_tool_call_id = "call_p2";
+    ok = call_handler(&reg,
+        "{\"action\":\"set_provider\",\"provider\":\"myllm\","
+        "\"base_url\":\"https://my.example.com/v1\",\"model\":\"m7b\","
+        "\"api_key_env\":\"MYLLM_KEY\"}");
+    assert(ok == NULL); /* parked */
+    rc = sqlite3_prepare_v2(db,
+        "SELECT 1 FROM approvals WHERE session_id=?1 AND action='set_provider'"
+        " AND json_extract(args_json,'$.api_key_env')='MYLLM_KEY'"
+        " AND json_extract(args_json,'$.model')='m7b'", -1, &s, NULL);
+    assert(rc == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    sqlite3_finalize(s);
+
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_set_provider\n");
+}
+
 int main(void) {
     printf("test_request_config:\n");
     test_register();
@@ -313,6 +400,7 @@ int main(void) {
     test_grant_path_default_mode_read();
     test_denied_not_deduped();
     test_set_config();
+    test_set_provider();
     printf("\nAll request_config tests passed.\n");
     return 0;
 }

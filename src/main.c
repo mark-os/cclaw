@@ -1713,6 +1713,29 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         if (k && v && config_set(g_db, k, v) != 0)
             LOG_WARN_("set_config apply failed key=%s", k);
         tool_parse_free(&ta);
+    } else if (strcmp(a->action, "set_provider") == 0) {
+        /* Providers upsert straight from the parked args JSON. The API key is
+         * NOT here — args carry only the secret's name (api_key_env); a
+         * missing secret is fine (either-order capture: key can land via
+         * save_secret or env before or after this grant). */
+        const char *sql =
+            "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)"
+            " SELECT json_extract(?1,'$.provider'), json_extract(?1,'$.base_url'), 'openai',"
+            "        json_extract(?1,'$.api_key_env'), json_extract(?1,'$.model'),"
+            "        COALESCE((SELECT MAX(priority)+1 FROM providers), 0)"
+            " WHERE json_extract(?1,'$.provider') IS NOT NULL"
+            " ON CONFLICT(name) DO UPDATE SET base_url=excluded.base_url,"
+            "   api_key_env=excluded.api_key_env,"
+            "   default_model=COALESCE(excluded.default_model, default_model);";
+        sqlite3_stmt *s;
+        int rc = -1;
+        if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, a->args_json, -1, SQLITE_STATIC);
+            rc = (sqlite3_step(s) == SQLITE_DONE) ? 0 : -1;
+            sqlite3_finalize(s);
+        }
+        if (rc != 0)
+            LOG_WARN_("set_provider apply failed");
     } else if (strcmp(a->action, "extension_promote") == 0) {
         ToolArgs ta; tool_parse(a->args_json, &ta);
         const char *bundle = targ_str(&ta, "bundle");
@@ -1994,6 +2017,12 @@ static void format_approval_summary(const Approval *a, char *buf, size_t buflen)
             const char *k = targ_str(&ta, "key");
             const char *v = targ_str(&ta, "value");
             snprintf(buf, buflen, "set_config: %s = %s", k ? k : "?", v ? v : "?");
+        } else if (a->action && strcmp(a->action, "set_provider") == 0) {
+            const char *p = targ_str(&ta, "provider");
+            const char *u = targ_str(&ta, "base_url");
+            const char *ke = targ_str(&ta, "api_key_env");
+            snprintf(buf, buflen, "set_provider: %s (%s, key from secret %s)",
+                     p ? p : "?", u ? u : "?", ke ? ke : "?");
         } else {
             snprintf(buf, buflen, "%s", a->action ? a->action : "?");
         }

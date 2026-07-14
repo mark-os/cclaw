@@ -431,6 +431,12 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "DROP INDEX IF EXISTS idx_entries_plan;"
       "DROP INDEX IF EXISTS idx_entries_session_role;"
       "DROP INDEX IF EXISTS idx_entries_stop_reason;" },
+    { 28,
+      /* configure_provider deleted: provider changes now park for approval
+       * as request_config set_provider (review-2 F9 — a granted agent could
+       * silently repoint base_url at an attacker). */
+      "DELETE FROM grants WHERE kind='tool' AND value='configure_provider';"
+      "DELETE FROM tools WHERE name='configure_provider';" },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */

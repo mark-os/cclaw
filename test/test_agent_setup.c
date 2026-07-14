@@ -45,8 +45,8 @@ static void test_cli_mode_includes_agent_tools(void) {
     if (tools_lookup(&setup.reg, "check_session") == NULL) {
         FAIL("check_session should be in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
-    if (tools_lookup(&setup.reg, "configure_provider") == NULL) {
-        FAIL("configure_provider should be available in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
+    if (tools_lookup(&setup.reg, "create_agent") == NULL) {
+        FAIL("create_agent should be available in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
     if (tools_lookup(&setup.reg, "search_config") == NULL) {
         FAIL("search_config should be available in CLI mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
@@ -105,8 +105,8 @@ static void test_daemon_mode_includes_all_tools(void) {
     if (tools_lookup(&setup.reg, "launch_agent") == NULL) {
         FAIL("launch_agent missing in daemon mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
-    if (tools_lookup(&setup.reg, "configure_provider") == NULL) {
-        FAIL("configure_provider missing in daemon mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
+    if (tools_lookup(&setup.reg, "create_agent") == NULL) {
+        FAIL("create_agent missing in daemon mode"); agent_setup_destroy(&setup); db_close(db); unlink(dbpath); return;
     }
     /* Plus core tools */
     if (tools_lookup(&setup.reg, "shell_exec") == NULL) {

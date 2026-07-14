@@ -159,7 +159,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->bootstrap_ctx.session_id = session_id;
     setup->bootstrap_ctx.agent_name = (char *)agent_name;
     setup->bootstrap_ctx.current_tool_call_id = NULL;
-    tool_configure_provider_register(&setup->reg, &setup->bootstrap_ctx);
     tool_create_agent_register(&setup->reg, &setup->bootstrap_ctx);
 
     /* Extension lifecycle — inline tools (apply in-process via ctx->db), so

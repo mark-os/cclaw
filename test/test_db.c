@@ -388,6 +388,17 @@ static void test_schema_upgrade_from_v11(void) {
         "ALTER TABLE cron_jobs DROP COLUMN kind;"       /* v23 adds */
         "ALTER TABLE channel_routes DROP COLUMN delivery_mode;" /* v24 adds */
         "ALTER TABLE channel_routes DROP COLUMN tool_filter;"   /* v25 adds */
+        /* v29 heal re-adds: schema.sql edits that shipped without a patch
+         * (real v24–v28 DBs in the wild lack these — reproduce that shape). */
+        "ALTER TABLE agent_extensions DROP COLUMN config;"
+        "ALTER TABLE channel_routes DROP COLUMN session_id;"
+        "ALTER TABLE entries DROP COLUMN content_bytes;"
+        "ALTER TABLE extensions DROP COLUMN version;"
+        "ALTER TABLE llm_responses DROP COLUMN provider_id;"
+        "ALTER TABLE models DROP COLUMN sub_provider;"
+        "ALTER TABLE models DROP COLUMN synced_at;"
+        "ALTER TABLE sessions DROP COLUMN last_route;"
+        "ALTER TABLE sessions DROP COLUMN last_interaction_id;"
         "ALTER TABLE config DROP COLUMN secret;"    /* v22 adds */
         "ALTER TABLE config DROP COLUMN required;"  /* v22 adds */
         "ALTER TABLE secrets ADD COLUMN status TEXT NOT NULL DEFAULT 'active';"
@@ -468,6 +479,17 @@ static void test_schema_upgrade_from_v11(void) {
     assert(v && strcmp(v, "1") == 0); free(v);
     v = query_text(db, "SELECT COUNT(*) FROM config WHERE key='heartbeat_interval'");
     assert(v && strcmp(v, "0") == 0); free(v);
+    /* v29 heal: every drift column is back (added only where missing — the
+     * cron/route columns patches 23-25 already re-added are left alone). */
+    assert(column_exists(db, "agent_extensions", "config"));
+    assert(column_exists(db, "channel_routes", "session_id"));
+    assert(column_exists(db, "entries", "content_bytes"));
+    assert(column_exists(db, "extensions", "version"));
+    assert(column_exists(db, "llm_responses", "provider_id"));
+    assert(column_exists(db, "models", "sub_provider"));
+    assert(column_exists(db, "models", "synced_at"));
+    assert(column_exists(db, "sessions", "last_route"));
+    assert(column_exists(db, "sessions", "last_interaction_id"));
 
     /* Re-running is a no-op, not an error */
     assert(db_schema_compat(db) == 1);

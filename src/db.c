@@ -309,14 +309,64 @@ int db_ensure_schema(sqlite3 *db) {
 
 /* ── Schema migration: forward patches from user_version to current ───────── */
 
+/* v29 heal: several past schema.sql edits shipped WITHOUT a forward patch
+ * (extensions.version in the channel-runner redesign is the oldest), so DBs
+ * stamped v24–v28 exist in the wild with different column sets — "stamped
+ * current but shaped old". A plain ALTER patch can't fix an ambiguous shape
+ * (duplicate-column error on DBs that already have it), so this patch is a
+ * C function: add each column only if pragma_table_info says it's missing.
+ * The decls mirror templates/schema.sql exactly. */
+static int db_patch_v29_heal(sqlite3 *db) {
+    static const struct { const char *table, *column, *decl; } NEED[] = {
+        { "agent_extensions", "config",              "TEXT" },
+        { "channel_routes",   "session_id",          "INTEGER" },
+        { "channel_routes",   "delivery_mode",       "TEXT NOT NULL DEFAULT 'auto'" },
+        { "channel_routes",   "tool_filter",         "TEXT" },
+        { "entries",          "content_bytes",       "INTEGER" },
+        { "extensions",       "version",             "TEXT DEFAULT '0.0.0'" },
+        { "llm_responses",    "provider_id",         "TEXT" },
+        { "models",           "sub_provider",        "TEXT" },
+        { "models",           "synced_at",           "INTEGER" },
+        { "sessions",         "last_route",          "TEXT" },
+        { "sessions",         "last_interaction_id", "TEXT" },
+        { "cron_jobs",        "run_at",              "INTEGER" },
+        { "cron_jobs",        "interval_s",          "INTEGER" },
+        { "cron_jobs",        "kind",                "TEXT NOT NULL DEFAULT 'task'" },
+    };
+    for (size_t i = 0; i < sizeof(NEED) / sizeof(NEED[0]); i++) {
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT 1 FROM pragma_table_info(?1) WHERE name=?2",
+                -1, &st, NULL) != SQLITE_OK)
+            return -1;
+        sqlite3_bind_text(st, 1, NEED[i].table, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, NEED[i].column, -1, SQLITE_STATIC);
+        int have = (sqlite3_step(st) == SQLITE_ROW);
+        sqlite3_finalize(st);
+        if (have) continue;
+        char sql[192];
+        snprintf(sql, sizeof(sql), "ALTER TABLE %s ADD COLUMN %s %s",
+                 NEED[i].table, NEED[i].column, NEED[i].decl);
+        char *err = NULL;
+        if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
+            LOG_ERROR_("v29 heal: %s: %s", sql, err ? err : "?");
+            sqlite3_free(err);
+            return -1;
+        }
+        LOG_INFO_("v29 heal: added %s.%s", NEED[i].table, NEED[i].column);
+    }
+    return 0;
+}
+
 /* Each patch brings the DB from (version-1) to (version). SQL may contain
  * multiple statements separated by semicolons. Run in order, one transaction
- * per patch. */
-static const struct { int version; const char *sql; } schema_patches[] = {
-    { 12,
+ * per patch. A patch may instead be a C function (fn) for shapes SQL can't
+ * express idempotently — exactly one of sql/fn is set. */
+static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
+    { .version = 12, .sql =
       "ALTER TABLE providers DROP COLUMN context_window;"
       "UPDATE models SET context_window = NULL WHERE context_window = 128000;" },
-    { 13,
+    { .version = 13, .sql =
       /* Retro-apply approval gating: agents created before agent_approval_tools
        * existed carry these grants at the 'silent' default. List is a snapshot
        * of that config key's default — one-time, so later operator edits via
@@ -324,14 +374,14 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "UPDATE grants SET approval_mode='always' WHERE kind='tool' AND value IN"
       " ('extension_promote','extension_publish','configure_provider',"
       "'configure_channel','create_agent');" },
-    { 14,
+    { .version = 14, .sql =
       "ALTER TABLE channels ADD COLUMN prev_extension_name TEXT;" },
-    { 15,
+    { .version = 15, .sql =
       /* deliver_plain (bool) becomes deliver_mode (0=auto/rich, 1=html,
        * 2=plain). Old plain=1 rows map to mode 2 — same semantics. */
       "ALTER TABLE channel_outbox RENAME COLUMN deliver_plain TO deliver_mode;"
       "UPDATE channel_outbox SET deliver_mode=2 WHERE deliver_mode=1;" },
-    { 16,
+    { .version = 16, .sql =
       /* builtin tagging dropped: extensions shipped in the binary become
        * normal published extensions owned by the reserved name 'system'
        * (agent names are PascalCase-enforced, so no collision). tools.builtin
@@ -339,13 +389,13 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "UPDATE extensions SET owner_agent='system', published=1 WHERE builtin=1;"
       "ALTER TABLE extensions DROP COLUMN builtin;"
       "ALTER TABLE tools DROP COLUMN builtin;" },
-    { 17,
+    { .version = 17, .sql =
       "ALTER TABLE agents ADD COLUMN primary_model TEXT;"
       "ALTER TABLE agents ADD COLUMN secondary_model TEXT;"
       "UPDATE agents SET primary_model = model WHERE model IS NOT NULL AND model != '';"
       "ALTER TABLE agents DROP COLUMN model;"
       "ALTER TABLE agents DROP COLUMN provider;" },
-    { 18,
+    { .version = 18, .sql =
       /* Capability-routed media preprocessing (voice transcription): the
        * transient media_jobs queue plus the Gemini transcription candidate.
        * Seed rows mirror templates/seed.sql for fresh DBs. */
@@ -360,17 +410,17 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "  VALUES('gemini', 'https://generativelanguage.googleapis.com/v1beta', 'gemini', 'GEMINI_API_KEY', 'gemini-2.5-flash-lite', 50);"
       "INSERT OR IGNORE INTO models(id, provider_name, model, capabilities, priority)"
       "  VALUES('gemini/gemini-2.5-flash-lite', 'gemini', 'gemini-2.5-flash-lite', '[\"text\",\"image\",\"audio\"]', 50);" },
-    { 19,
+    { .version = 19, .sql =
       /* Per-turn materialized <RELEVANT_CONTEXT> block (llm_proc.c). */
       "ALTER TABLE sessions ADD COLUMN turn_context TEXT;" },
-    { 20,
+    { .version = 20, .sql =
       /* Scanner quarantine removed: the DLP scanner redacts instead of
        * minting secrets, so status ('pending'|'active') has no readers.
        * Sweep quarantine junk first — false-positive captures actively
        * corrupted deinterpolation on DBs that hit the old flow. */
       "DELETE FROM secrets WHERE status='pending';"
       "ALTER TABLE secrets DROP COLUMN status;" },
-    { 21,
+    { .version = 21, .sql =
       /* configure_channel deleted (specs/self-configuration.md): channel
        * setup is extension attach + config keys. Drop its tool row, grants,
        * and any occurrence in the registry-list overrides. */
@@ -385,14 +435,14 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "  FROM json_each(config.value) j WHERE j.value <> 'configure_channel')"
       " WHERE key IN ('agent_default_tools','agent_approval_tools')"
       "  AND value IS NOT NULL;" },
-    { 22,
+    { .version = 22, .sql =
       /* specs/config.md: secret/required flags on config keys; channel
        * config moves from channel_state to the registry (the stale
        * hand-seeded base_url row has no readers now). */
       "ALTER TABLE config ADD COLUMN secret INTEGER NOT NULL DEFAULT 0;"
       "ALTER TABLE config ADD COLUMN required INTEGER NOT NULL DEFAULT 0;"
       "DELETE FROM channel_state WHERE key='base_url';" },
-    { 23,
+    { .version = 23, .sql =
       /* One scheduler: cron_jobs absorbs one-shots (run_at), fixed periods
        * (interval_s), and the heartbeat pulse (kind='heartbeat'). heartbeat.c
        * and its config key are retired — the pulse is now a durable, visible
@@ -408,21 +458,21 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "                       session_id, task, enabled, next_run_at)"
       "  SELECT name, 'heartbeat', 'heartbeat', '', 1800, 0, '', 0, 0 FROM agents;"
       "DELETE FROM config WHERE key='heartbeat_interval';" },
-    { 24,
+    { .version = 24, .sql =
       /* Channel routing contract (specs/channels.md): a route carries how
        * turn output reaches the chat — 'auto' (outbox insert per turn, the
        * old behavior) or 'explicit' (only via the channel_send tool). */
       "ALTER TABLE channel_routes ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'auto';" },
-    { 25,
+    { .version = 25, .sql =
       /* Authority attenuation for routed senders: a route may carry a
        * tool_filter (JSON array of tool names) that sessions created for it
        * freeze at creation — same semantics as sub-agent filters. */
       "ALTER TABLE channel_routes ADD COLUMN tool_filter TEXT;" },
-    { 26,
+    { .version = 26, .sql =
       /* Budget gate (rate_limit_check / db_cost_last_24h) range-scans
        * created_at once per LLM dispatch — without this it's a full scan. */
       "CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at);" },
-    { 27,
+    { .version = 27, .sql =
       /* Index diet: turn was a prefix of turn_type; parent and plan had no
        * readers (branch CTEs walk by rowid, not parent_id); role and
        * stop_reason filters just seek the session and read a few rows. */
@@ -431,12 +481,14 @@ static const struct { int version; const char *sql; } schema_patches[] = {
       "DROP INDEX IF EXISTS idx_entries_plan;"
       "DROP INDEX IF EXISTS idx_entries_session_role;"
       "DROP INDEX IF EXISTS idx_entries_stop_reason;" },
-    { 28,
+    { .version = 28, .sql =
       /* configure_provider deleted: provider changes now park for approval
        * via request_config (review-2 F9 — a granted agent could silently
        * repoint base_url at an attacker). */
       "DELETE FROM grants WHERE kind='tool' AND value='configure_provider';"
       "DELETE FROM tools WHERE name='configure_provider';" },
+    /* Shape heal — see db_patch_v29_heal above. */
+    { .version = 29, .fn = db_patch_v29_heal },
 };
 
 #define CCLAW_SCHEMA_MIN 11   /* first version with migration tracking */
@@ -534,7 +586,9 @@ static int db_schema_upgrade(sqlite3 *db) {
 
         char *err = NULL;
         sqlite3_exec(db, "BEGIN EXCLUSIVE", NULL, NULL, NULL);
-        int rc = sqlite3_exec(db, schema_patches[i].sql, NULL, NULL, &err);
+        int rc = schema_patches[i].fn
+                     ? (schema_patches[i].fn(db) == 0 ? SQLITE_OK : SQLITE_ERROR)
+                     : sqlite3_exec(db, schema_patches[i].sql, NULL, NULL, &err);
         if (rc != SQLITE_OK) {
             LOG_ERROR_("schema patch v%d failed: %s", schema_patches[i].version,
                        err ? err : "unknown");

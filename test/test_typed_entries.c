@@ -198,7 +198,7 @@ static void test_ingest_typed(void) {
 
     TypedIngestResult res;
     LlmRespStatus st = db_ingest_response(db, sid, turn, "gpt-4o", ENDPOINT_OPENAI,
-                                          body, NULL, &res);
+                                          body, NULL, 1, &res);
     assert(st == LLM_RESP_OK);
     assert(res.assistant_entry_id > 0);
     assert(res.prompt_tokens == 100);
@@ -243,6 +243,20 @@ static void test_ingest_typed(void) {
     assert(strcmp((const char *)sqlite3_column_text(stmt, 2), "pending") == 0);
     assert(sqlite3_step(stmt) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "call_2") == 0);
+    sqlite3_finalize(stmt);
+
+    /* save_reasoning=0: same body ingests without a reasoning entry */
+    int64_t turn2 = db_next_turn_id(db, sid);
+    st = db_ingest_response(db, sid, turn2, "gpt-4o", ENDPOINT_OPENAI,
+                            body, NULL, 0, &res);
+    assert(st == LLM_RESP_OK);
+    const char *nr_sql = "SELECT COUNT(*) FROM entries"
+                         " WHERE session_id=? AND turn_id=? AND type='reasoning';";
+    assert(sqlite3_prepare_v2(db, nr_sql, -1, &stmt, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(stmt, 1, sid);
+    sqlite3_bind_int64(stmt, 2, turn2);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_column_int(stmt, 0) == 0);
     sqlite3_finalize(stmt);
 
     db_close(db);

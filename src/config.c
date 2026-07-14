@@ -193,13 +193,7 @@ Config *config_load_from_env(void) {
         : config_default_double("daily_cost_limit")) * 1e9 + 0.5);
 
     v = getenv("CCLAW_SAVE_REASONING");
-    cfg->save_reasoning = v ? atoi(v) : 0;
-
-    v = getenv("CCLAW_SAVE_USAGE");
-    cfg->save_usage = v ? atoi(v) : 0;
-
-    v = getenv("CCLAW_SAVE_LOGPROBS");
-    cfg->save_logprobs = v ? atoi(v) : 0;
+    cfg->save_reasoning = v ? atoi(v) : config_default_int("save_reasoning");
 
     v = getenv("CCLAW_LOG_LEVEL");
     cfg->log_level = log_level_parse(v);
@@ -312,6 +306,7 @@ Config *config_load(sqlite3 *db) {
     cfg->shell_timeout = config_get_int(db, "shell_timeout");
     cfg->stale_lock_timeout = config_get_int(db, "stale_lock_timeout");
     cfg->token_rate_limit = config_get_int(db, "token_rate_limit");
+    cfg->save_reasoning = config_get_int(db, "save_reasoning");
     /* config_get_double reads the env layer too, so no separate override */
     cfg->daily_cost_limit_nano =
         (int64_t)(config_get_double(db, "daily_cost_limit") * 1e9 + 0.5);
@@ -333,9 +328,6 @@ Config *config_load(sqlite3 *db) {
     env_override_int(&cfg->max_history_tokens, "CCLAW_MAX_HISTORY_TOKENS");
     env_override_int(&cfg->shell_timeout, "CCLAW_SHELL_TIMEOUT");
     env_override_int(&cfg->stale_lock_timeout, "CCLAW_STALE_LOCK_TIMEOUT");
-    env_override_int(&cfg->save_reasoning, "CCLAW_SAVE_REASONING");
-    env_override_int(&cfg->save_usage, "CCLAW_SAVE_USAGE");
-    env_override_int(&cfg->save_logprobs, "CCLAW_SAVE_LOGPROBS");
     env_override_int(&cfg->token_rate_limit, "CCLAW_TOKEN_RATE_LIMIT");
 
     /* endpoint_type env override */

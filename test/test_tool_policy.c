@@ -59,9 +59,26 @@ int main(void) {
      * implementation returned ALLOW here, review-3 F1). */
     CHECK(policy_eval(db, "{\"action\":\"delete\"}", "not json at all") == POLICY_ERROR,
           "malformed policy -> ERROR (blocked)");
-    /* Valid object without a rules array is a semantically empty policy. */
+    /* Valid object without a rules key is a semantically empty policy. */
     CHECK(policy_eval(db, "{\"action\":\"delete\"}", "{\"no_rules\":true}") == POLICY_ALLOW,
-          "no rules array -> ALLOW");
+          "no rules key -> ALLOW");
+
+    /* Mis-shaped policies are ERROR, never a silent allow: rules of the
+     * wrong type, a rule without a match object, an unknown effect. Each of
+     * these previously fell through to ALLOW (skipped rule / has_rules=0),
+     * turning a typo'd deny policy into no policy at all. */
+    CHECK(policy_eval(db, "{\"action\":\"delete\"}",
+                      "{\"rules\":{\"match\":{},\"effect\":\"deny\"}}") == POLICY_ERROR,
+          "rules-as-object -> ERROR (blocked)");
+    CHECK(policy_eval(db, "{\"action\":\"delete\"}",
+                      "{\"rules\":[{\"effect\":\"deny\"}]}") == POLICY_ERROR,
+          "rule without match -> ERROR (blocked)");
+    CHECK(policy_eval(db, "{\"action\":\"delete\"}",
+                      "{\"rules\":[{\"match\":{},\"effect\":\"denny\"}]}") == POLICY_ERROR,
+          "unknown effect -> ERROR (blocked)");
+    CHECK(policy_eval(db, "{\"action\":\"delete\"}",
+                      "{\"rules\":[{\"match\":\"*\",\"effect\":\"deny\"}]}") == POLICY_ERROR,
+          "non-object match -> ERROR (blocked)");
 
     /* Malformed args with a keyed deny -> ERROR, never ALLOW. */
     CHECK(policy_eval(db, "not json", notes_policy) == POLICY_ERROR,

@@ -19,7 +19,8 @@ PolicyEffect policy_eval(sqlite3 *db, const char *args_json,
      *   "literal"  — args value is text and equals it
      *   [...]      — args value is text and equals one of the text elements
      * A key absent from args fails the rule. Empty match {} is a catch-all.
-     * Rules without a match object are skipped (never match). */
+     * Every rule has a match object and a known effect — the pre-check below
+     * errors out otherwise (the WHERE filter here is belt-and-braces). */
     static const char *SQL =
         "SELECT CASE json_extract(r.value,'$.effect')"
         "         WHEN 'deny' THEN 1 WHEN 'ask' THEN 2 ELSE 0 END"
@@ -41,26 +42,40 @@ PolicyEffect policy_eval(sqlite3 *db, const char *args_json,
         "       ELSE 0 END)"
         " ORDER BY r.id LIMIT 1";
 
-    /* Pre-checks: malformed policy/args error out; a policy without a rules
-     * array is semantically empty (ALLOW), matching the old contract. */
+    /* Pre-checks: malformed policy/args error out. A policy with NO rules
+     * key is semantically empty (ALLOW) — but a mis-shaped one is ERROR,
+     * never ALLOW: rules of the wrong type, a rule without a match object,
+     * or an unknown effect are exactly the typos that would otherwise turn
+     * a deny policy into a silent allow. (Promote-time validation rejects
+     * these shapes; this is the backstop for hand-edited rows.) */
     sqlite3_stmt *chk;
     if (sqlite3_prepare_v2(db,
             "SELECT json_valid(?1) AND json_type(?1)='object',"
             "       json_valid(?2) AND json_type(?2)='object',"
-            "       json_type(?1,'$.rules')='array'",
+            "       json_type(?1,'$.rules') IS NULL,"
+            "       json_type(?1,'$.rules')='array',"
+            "       EXISTS(SELECT 1 FROM json_each(?1,'$.rules') r"
+            /* IS NOT: an absent match makes json_type NULL, and != would
+             * three-valued-logic the row out of the EXISTS. */
+            "              WHERE json_type(r.value,'$.match') IS NOT 'object'"
+            "                 OR COALESCE(json_extract(r.value,'$.effect'),'')"
+            "                    NOT IN ('allow','ask','deny'))",
             -1, &chk, NULL) != SQLITE_OK)
         return POLICY_ERROR;
     sqlite3_bind_text(chk, 1, policy_json, -1, SQLITE_STATIC);
     sqlite3_bind_text(chk, 2, args_json, -1, SQLITE_STATIC);
-    int pol_ok = 0, args_ok = 0, has_rules = 0;
+    int pol_ok = 0, args_ok = 0, no_rules = 0, rules_array = 0, bad_rule = 0;
     if (sqlite3_step(chk) == SQLITE_ROW) {
         pol_ok = sqlite3_column_int(chk, 0);
         args_ok = sqlite3_column_int(chk, 1);
-        has_rules = sqlite3_column_int(chk, 2);
+        no_rules = sqlite3_column_int(chk, 2);
+        rules_array = sqlite3_column_int(chk, 3);
+        bad_rule = sqlite3_column_int(chk, 4);
     }
     sqlite3_finalize(chk);
     if (!pol_ok || !args_ok) return POLICY_ERROR;
-    if (!has_rules) return POLICY_ALLOW;
+    if (no_rules) return POLICY_ALLOW;
+    if (!rules_array || bad_rule) return POLICY_ERROR;
 
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, SQL, -1, &st, NULL) != SQLITE_OK)

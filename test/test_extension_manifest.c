@@ -267,6 +267,53 @@ static void test_validate_rejects_bad_sections(void) {
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
     free(err); err = NULL;
 
+    /* Tool policies are shape-checked at promote: policy_eval fails closed
+     * (POLICY_ERROR) on these at runtime, so a bad policy must be rejected
+     * here — not shipped as a tool bricked on first call. */
+    /* policy as a string */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"tools\":[{\"name\":\"t\",\"handler\":\"h.qjs\","
+        "\"policy\":\"deny all\"}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "invalid policy"));
+    free(err); err = NULL;
+    /* rules as object, not array (silent-ALLOW typo pre-fix) */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"tools\":[{\"name\":\"t\",\"handler\":\"h.qjs\","
+        "\"policy\":{\"rules\":{\"match\":{},\"effect\":\"deny\"}}}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "invalid policy"));
+    free(err); err = NULL;
+    /* rule missing its match object */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"tools\":[{\"name\":\"t\",\"handler\":\"h.qjs\","
+        "\"policy\":{\"rules\":[{\"effect\":\"deny\"}]}}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "invalid policy"));
+    free(err); err = NULL;
+    /* unknown effect */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"tools\":[{\"name\":\"t\",\"handler\":\"h.qjs\","
+        "\"policy\":{\"rules\":[{\"match\":{},\"effect\":\"denny\"}]}}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "invalid policy"));
+    free(err); err = NULL;
+    /* non-text array element in a match value */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"tools\":[{\"name\":\"t\",\"handler\":\"h.qjs\","
+        "\"policy\":{\"rules\":[{\"match\":{\"a\":[\"x\",7]},\"effect\":\"deny\"}]}}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "invalid policy"));
+    free(err); err = NULL;
+    /* a well-formed policy passes */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"tools\":[{\"name\":\"t\",\"handler\":\"h.qjs\","
+        "\"policy\":{\"rules\":[{\"match\":{\"action\":[\"rm\",\"mv\"]},\"effect\":\"deny\"},"
+        "{\"match\":{\"path\":\"*\"},\"effect\":\"ask\"},"
+        "{\"match\":{},\"effect\":\"allow\"}]}}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
+    free(err); err = NULL;
+
     rm_rf("/tmp/test_ext_badsec");
     printf("  PASS test_validate_rejects_bad_sections\n");
 }

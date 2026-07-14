@@ -149,6 +149,54 @@ static int check_handlers(sqlite3 *db, const char *manifest, const char *bundle_
     return rc;
 }
 
+/* Verify every $.tools[] policy is a shape policy_eval can enforce: an
+ * object whose rules (if present) are an array of {match: object, effect:
+ * allow|ask|deny}, match values text or array-of-text. policy_eval fails
+ * closed on these shapes at runtime (POLICY_ERROR blocks the call), so a
+ * bad policy must be rejected HERE, where the author can fix it — not
+ * discovered as a bricked tool on its first call. */
+static int check_policies(sqlite3 *db, const char *manifest, char **err_out) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE(json_extract(t.value,'$.name'),'(unnamed)')"
+            " FROM json_each(COALESCE(json_extract(?1,'$.tools'),'[]')) t"
+            " WHERE json_extract(t.value,'$.policy') IS NOT NULL AND ("
+            "   json_type(t.value,'$.policy')!='object'"
+            "   OR (json_type(t.value,'$.policy.rules') IS NOT NULL"
+            "       AND json_type(t.value,'$.policy.rules')!='array')"
+            "   OR EXISTS (SELECT 1 FROM json_each(t.value,'$.policy.rules') r"
+            /* IS NOT (null-safe): an absent match must fail the rule. */
+            "       WHERE json_type(r.value,'$.match') IS NOT 'object'"
+            "          OR COALESCE(json_extract(r.value,'$.effect'),'')"
+            "             NOT IN ('allow','ask','deny')"
+            "          OR EXISTS (SELECT 1 FROM json_each(r.value,'$.match') m"
+            "              WHERE m.type NOT IN ('text','array')"
+            "                 OR (m.type='array' AND EXISTS ("
+            "                     SELECT 1 FROM json_each(m.value) e"
+            "                     WHERE e.type!='text'))))"
+            " ) LIMIT 1", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+    int rc = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *n = (const char *)sqlite3_column_text(st, 0);
+        if (err_out) {
+            size_t len = (n ? strlen(n) : 1) + 160;
+            char *m = malloc(len);
+            if (m) {
+                snprintf(m, len, "tool '%s': invalid policy — needs an object "
+                         "whose rules are [{match: object, effect: "
+                         "allow|ask|deny}], match values text or [text]",
+                         n ? n : "?");
+                *err_out = m;
+            }
+        }
+        rc = -1;
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
 /* Verify every $.config[] entry has an identifier key (no dots — '.' is the
  * namespace separator) and a description. Rows land in the config table as
  * <ext>.<key>, so a bad key must not smuggle a foreign namespace. */
@@ -348,6 +396,7 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
         }
     }
     if (check_handlers(jdb, manifest, bundle_dir, "'$.scripts'", err_out) != 0) goto out;
+    if (check_policies(jdb, manifest, err_out) != 0) goto out;
     if (check_config(jdb, manifest, err_out) != 0) goto out;
     if (check_skills(jdb, manifest, bundle_dir, err_out) != 0) goto out;
     if (check_agents(jdb, manifest, bundle_dir, err_out) != 0) goto out;

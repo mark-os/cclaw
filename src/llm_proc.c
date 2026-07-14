@@ -365,7 +365,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         TypedIngestResult ir;
         LlmRespStatus st = db_ingest_response(db, session_id, turn_id,
                                cfg->provider.model, cfg->provider.endpoint_type,
-                               mock_data, NULL, &ir);
+                               mock_data, NULL, cfg->save_reasoning, &ir);
         free(mock_data);
 
         if (st != LLM_RESP_OK) {
@@ -575,7 +575,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             TypedIngestResult ir;
             LlmRespStatus st = db_ingest_response(db, session_id, turn_id,
                                    m->id, route_cfg.provider.endpoint_type,
-                                   resp.data, req_body, &ir);
+                                   resp.data, req_body, route_cfg.save_reasoning, &ir);
             http_response_free(&resp);
 
             if (st == LLM_RESP_OK) {

@@ -162,7 +162,7 @@ void db_archive_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
 LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
                                  const char *model, EndpointType ep,
                                  const char *body, const char *request_body,
-                                 TypedIngestResult *out) {
+                                 int save_reasoning, TypedIngestResult *out) {
     if (out) memset(out, 0, sizeof(*out));
     if (!db || !body) return LLM_RESP_MALFORMED;
 
@@ -255,8 +255,9 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
 
     int part = 0;
 
-    /* Reasoning entry (scalar pointers still valid — s untouched). */
-    if (reasoning && reasoning[0])
+    /* Reasoning entry (scalar pointers still valid — s untouched). Stored
+     * for inspection only — payload builders never replay it to the model. */
+    if (save_reasoning && reasoning && reasoning[0])
         entry_append_typed(db, session_id, turn_id, "reasoning", part++,
                            reasoning, NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
 

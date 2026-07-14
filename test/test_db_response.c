@@ -52,7 +52,7 @@ static void test_ingest_response(void) {
 
     TypedIngestResult result;
     LlmRespStatus st = db_ingest_response(db, sid, 1, "deepseek-v4", ENDPOINT_OPENAI,
-                                          body, NULL, &result);
+                                          body, NULL, 1, &result);
     assert(st == LLM_RESP_OK);
     assert(result.assistant_entry_id > 0);
     assert(result.prompt_tokens == 100);
@@ -81,13 +81,13 @@ static void test_ingest_malformed(void) {
 
     TypedIngestResult result;
     LlmRespStatus st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI,
-                                          "{\"error\":\"nope\"}", NULL, &result);
+                                          "{\"error\":\"nope\"}", NULL, 1, &result);
     assert(st == LLM_RESP_MALFORMED);
 
-    st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "not json", NULL, &result);
+    st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "not json", NULL, 1, &result);
     assert(st == LLM_RESP_MALFORMED);
 
-    st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "{\"choices\":[]}", NULL, &result);
+    st = db_ingest_response(db, sid, 1, "m", ENDPOINT_OPENAI, "{\"choices\":[]}", NULL, 1, &result);
     assert(st == LLM_RESP_MALFORMED);
 
     db_close(db);
@@ -104,7 +104,7 @@ static void test_ingest_archive(void) {
         "{\"id\":\"resp_abc\",\"choices\":[{\"message\":{\"content\":\"hi\"},"
         "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
     TypedIngestResult ir;
-    assert(db_ingest_response(db, sid, 7, "m", ENDPOINT_OPENAI, body, NULL, &ir) == LLM_RESP_OK);
+    assert(db_ingest_response(db, sid, 7, "m", ENDPOINT_OPENAI, body, NULL, 1, &ir) == LLM_RESP_OK);
 
     /* Row archived: status, provider id, turn_id, and a re-queryable JSONB body. */
     sqlite3_stmt *s;
@@ -122,7 +122,7 @@ static void test_ingest_archive(void) {
     sqlite3_finalize(s);
 
     /* Not-JSON body archives as status='malformed' with the raw text. */
-    assert(db_ingest_response(db, sid, 8, "m", ENDPOINT_OPENAI, "<html>nope", NULL, &ir) == LLM_RESP_MALFORMED);
+    assert(db_ingest_response(db, sid, 8, "m", ENDPOINT_OPENAI, "<html>nope", NULL, 1, &ir) == LLM_RESP_MALFORMED);
     sqlite3_prepare_v2(db,
         "SELECT status, typeof(body), body FROM llm_responses WHERE turn_id=8;", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);

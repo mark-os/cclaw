@@ -131,9 +131,7 @@ typedef struct {
     int token_rate_limit;   /* max tokens/hr (default 1000000, 0=unlimited) */
     int64_t daily_cost_limit_nano; /* max spend/24h in nanodollars (0=unlimited) */
     LogLevel log_level;     /* error|warn|info|debug|trace */
-    int save_reasoning;     /* store reasoning/thinking tokens in entry metadata */
-    int save_usage;         /* store token usage in entry metadata */
-    int save_logprobs;      /* store logprobs in entry metadata */
+    int save_reasoning;     /* store reasoning text as entries (default 0 = discard) */
     int auto_recall;        /* FTS5 auto-recall (default 1) */
     int recall_max_tokens;  /* max tokens for recalled context (default 500) */
 } Config;

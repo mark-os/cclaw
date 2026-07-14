@@ -119,7 +119,8 @@ returns an **error string telling the agent to call `request_config`**:
 var r = cclaw.exec("gh ...");
 if (/blocked|DENIED|ENETUNREACH/.test(r.stderr))
     return "error: host not allowed. Ask for access: "
-         + "request_config({action:'grant_host', host:'api.github.com'})";
+         + "request_config({action:'request_changes', changes:"
+         + "{grants:{hosts:['api.github.com']}}})";
 ```
 
 The **agent** then calls `request_config`; a human approves; the capability lands

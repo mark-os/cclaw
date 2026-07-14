@@ -292,7 +292,8 @@ static void test_list_pending_approvals(void) {
     set_session_channel(db, sid_other, "other-channel");
 
     int64_t aid = insert_approval(db, sid, "shell_exec", "run", "{}", "pending");
-    insert_approval(db, sid, "request_config", "grant_host", "{\"host\":\"denied.example\"}", "denied");
+    insert_approval(db, sid, "request_config", "request_changes",
+        "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"denied.example\"]}}}", "denied");
     insert_approval(db, sid_other, "shell_exec", "run", "{}", "pending");
 
     AdminApproval *list = NULL;
@@ -317,8 +318,8 @@ static void test_list_denied_approvals_grantable_only(void) {
 
     /* Only the request_config denial is "grantable"; a denied plain tool
      * call (shell_exec) has no standing capability to re-apply. */
-    int64_t grantable = insert_approval(db, sid, "request_config", "grant_host",
-        "{\"action\":\"grant_host\",\"host\":\"denied.example\"}", "denied");
+    int64_t grantable = insert_approval(db, sid, "request_config", "request_changes",
+        "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"denied.example\"]}}}", "denied");
     insert_approval(db, sid, "shell_exec", "run", "{}", "denied");
 
     AdminApproval *list = NULL;
@@ -339,8 +340,8 @@ static void test_grant_from_history(void) {
     int64_t sid = session_create(db, "s1", "testagent", -1, 0);
     set_session_channel(db, sid, "telegram");
 
-    int64_t aid = insert_approval(db, sid, "request_config", "grant_host",
-        "{\"action\":\"grant_host\",\"host\":\"reconsidered.example\"}", "denied");
+    int64_t aid = insert_approval(db, sid, "request_config", "request_changes",
+        "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"reconsidered.example\"]}}}", "denied");
 
     assert(admin_grant_from_history(db, aid) == 0);
 

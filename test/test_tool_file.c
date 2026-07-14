@@ -331,9 +331,8 @@ static void test_hint_outside_granted(void) {
     char *r = test_file_tool_run("file_read", "{\"path\":\"/definitely/not/granted/file.txt\"}", &hctx);
     assert(r != NULL);
     assert(strstr(r, "outside your granted areas") != NULL);
-    assert(strstr(r, "\"action\":\"grant_path\"") != NULL);
-    assert(strstr(r, "\"path\":\"/definitely/not/granted\"") != NULL);
-    assert(strstr(r, "\"mode\":\"read\"") != NULL);
+    assert(strstr(r, "\"action\":\"request_changes\"") != NULL);
+    assert(strstr(r, "\"read_paths\"") != NULL);
     free(r);
     printf("  PASS test_hint_outside_granted\n");
 }
@@ -390,19 +389,18 @@ static void test_hint_write_mode(void) {
     hctx.workspace = tmpdir;
     hctx.sb.sandbox = 1;
 
-    /* Write to ungranted path — hint with mode "write" */
+    /* Write to ungranted path — hint requests write_paths */
     char *r = test_file_tool_run("file_write", "{\"path\":\"/nope/out.txt\",\"content\":\"x\"}", &hctx);
     assert(r != NULL);
     assert(strstr(r, "outside your granted areas") != NULL);
-    assert(strstr(r, "\"mode\":\"write\"") != NULL);
+    assert(strstr(r, "\"write_paths\":[\"/nope\"]") != NULL);
     free(r);
 
-    /* List ungranted dir — hint suggests the dir itself with mode "read" */
+    /* List ungranted dir — hint suggests the dir itself under read_paths */
     r = test_file_tool_run("file_list", "{\"path\":\"/nope\"}", &hctx);
     assert(r != NULL);
     assert(strstr(r, "outside your granted areas") != NULL);
-    assert(strstr(r, "\"path\":\"/nope\"") != NULL);
-    assert(strstr(r, "\"mode\":\"read\"") != NULL);
+    assert(strstr(r, "\"read_paths\":[\"/nope\"]") != NULL);
     free(r);
 
     printf("  PASS test_hint_write_mode\n");

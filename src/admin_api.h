@@ -184,10 +184,10 @@ int admin_list_denied_approvals(sqlite3 *db, const char *channel_name, int limit
 void admin_approvals_free(AdminApproval *list, size_t count);
 
 /* Apply a grant directly from a past approval's action/args (request_config's
- * grant_tool/grant_host/grant_path only — a rename isn't a standing
- * capability grant, so it's not eligible here). No agent involvement, no new
- * pending approval created. Records a fresh 'approved' row for audit trail;
- * the looked-up approval row itself is left untouched. Returns 0 on success,
+ * request_changes document only — a rename isn't a standing capability
+ * grant, so it's not eligible here). No agent involvement, no new pending
+ * approval created. Records a fresh 'approved' row for audit trail; the
+ * looked-up approval row itself is left untouched. Returns 0 on success,
  * -1 if the approval doesn't exist or isn't a grantable action. */
 int admin_grant_from_history(sqlite3 *db, int64_t approval_id);
 

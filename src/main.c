@@ -1764,50 +1764,15 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
                         int64_t grant_expires_at) {
     *rename_failed = 0;
     const char *refresh_agent = agent;
-    if (strcmp(a->action, "grant_tool") == 0) {
-        char *v = tool_args_str(g_db, a->args_json, "tool");
-        if (v) agent_config_grant(g_db, agent, "tool", v, grant_expires_at);
-        free(v);
-    } else if (strcmp(a->action, "grant_host") == 0) {
-        char *v = tool_args_str(g_db, a->args_json, "host");
-        if (v) agent_config_grant(g_db, agent, "host", v, grant_expires_at);
-        free(v);
-    } else if (strcmp(a->action, "grant_path") == 0) {
-        char *v = tool_args_str(g_db, a->args_json, "path");
-        char *m = tool_args_str(g_db, a->args_json, "mode");
-        /* Default read: least privilege — write is opt-in via mode:"write" */
-        const char *kind = (m && strcmp(m, "write") == 0) ? "write_path" : "read_path";
-        if (v) agent_config_grant(g_db, agent, kind, v, grant_expires_at);
-        free(v); free(m);
-    } else if (strcmp(a->action, "set_config") == 0) {
-        char *k = tool_args_str(g_db, a->args_json, "key");
-        char *v = tool_args_str(g_db, a->args_json, "value");
-        if (k && v && config_set(g_db, k, v) != 0)
-            LOG_WARN_("set_config apply failed key=%s", k);
-        free(k); free(v);
-    } else if (strcmp(a->action, "set_provider") == 0) {
-        /* Providers upsert straight from the parked args JSON. The API key is
-         * NOT here — args carry only the secret's name (api_key_env); a
-         * missing secret is fine (either-order capture: key can land via
-         * save_secret or env before or after this grant). */
-        const char *sql =
-            "INSERT INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)"
-            " SELECT json_extract(?1,'$.provider'), json_extract(?1,'$.base_url'), 'openai',"
-            "        json_extract(?1,'$.api_key_env'), json_extract(?1,'$.model'),"
-            "        COALESCE((SELECT MAX(priority)+1 FROM providers), 0)"
-            " WHERE json_extract(?1,'$.provider') IS NOT NULL"
-            " ON CONFLICT(name) DO UPDATE SET base_url=excluded.base_url,"
-            "   api_key_env=excluded.api_key_env,"
-            "   default_model=COALESCE(excluded.default_model, default_model);";
-        sqlite3_stmt *s;
-        int rc = -1;
-        if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(s, 1, a->args_json, -1, SQLITE_STATIC);
-            rc = (sqlite3_step(s) == SQLITE_DONE) ? 0 : -1;
-            sqlite3_finalize(s);
+    if (strcmp(a->action, "request_changes") == 0) {
+        /* One savepoint applies the whole document — grants, config values,
+         * provider upsert (tool_request_config.c). Failure rolls everything
+         * back and surfaces as apply-denied, never a partial grant set. */
+        if (request_config_changes_apply(g_db, agent, a->args_json,
+                                         grant_expires_at) != 0) {
+            LOG_WARN_("request_changes apply failed");
+            *rename_failed = 1; /* generic apply-failed: error result, no grant */
         }
-        if (rc != 0)
-            LOG_WARN_("set_provider apply failed");
     } else if (strcmp(a->action, "extension_promote") == 0) {
         char *bundle = tool_args_str(g_db, a->args_json, "bundle");
         char *ierr = NULL;
@@ -2070,31 +2035,33 @@ static void format_approval_summary(const Approval *a, char *buf, size_t buflen)
     /* Collected extracted fields — freed in one sweep at the end. */
     char *f[4] = {0};
     if (a->tool_name && strcmp(a->tool_name, "request_config") == 0) {
-        if (a->action && strcmp(a->action, "grant_tool") == 0) {
-            f[0] = tool_args_str(g_db, args, "tool");
-            snprintf(buf, buflen, "grant_tool: %s", f[0] ? f[0] : "?");
-        } else if (a->action && strcmp(a->action, "grant_host") == 0) {
-            f[0] = tool_args_str(g_db, args, "host");
-            snprintf(buf, buflen, "grant_host: %s", f[0] ? f[0] : "?");
-        } else if (a->action && strcmp(a->action, "grant_path") == 0) {
-            f[0] = tool_args_str(g_db, args, "path");
-            f[1] = tool_args_str(g_db, args, "mode");
-            snprintf(buf, buflen, "grant_path: %s (%s)", f[0] ? f[0] : "?",
-                     (f[1] && strcmp(f[1], "write") == 0) ? "write" : "read");
+        if (a->action && strcmp(a->action, "request_changes") == 0) {
+            /* Enumerate every requested line — the approver must see the
+             * actual values (which hosts, which paths), never counts. A long
+             * document truncates via snprintf; better cut off than blind. */
+            sqlite3_stmt *es;
+            if (sqlite3_prepare_v2(g_db,
+                    "SELECT group_concat(part, ', ') FROM ("
+                    "  SELECT 'tool '||atom AS part FROM json_each(?1,'$.changes.grants.tools')"
+                    "  UNION ALL SELECT 'host '||atom FROM json_each(?1,'$.changes.grants.hosts')"
+                    "  UNION ALL SELECT 'read '||atom FROM json_each(?1,'$.changes.grants.read_paths')"
+                    "  UNION ALL SELECT 'write '||atom FROM json_each(?1,'$.changes.grants.write_paths')"
+                    "  UNION ALL SELECT key||'='||atom FROM json_each(?1,'$.changes.config')"
+                    "  UNION ALL SELECT 'provider '||json_extract(?1,'$.changes.provider.provider')"
+                    "             ||' (key from secret '||json_extract(?1,'$.changes.provider.api_key_env')||')'"
+                    "   WHERE json_extract(?1,'$.changes.provider.provider') IS NOT NULL)",
+                    -1, &es, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(es, 1, args, -1, SQLITE_STATIC);
+                if (sqlite3_step(es) == SQLITE_ROW) {
+                    const char *v = (const char *)sqlite3_column_text(es, 0);
+                    if (v) f[0] = strdup(v);
+                }
+                sqlite3_finalize(es);
+            }
+            snprintf(buf, buflen, "request_changes: %s", f[0] ? f[0] : "?");
         } else if (a->action && strcmp(a->action, "rename_agent") == 0) {
             f[0] = tool_args_str(g_db, args, "name");
             snprintf(buf, buflen, "rename_agent: %s", f[0] ? f[0] : "?");
-        } else if (a->action && strcmp(a->action, "set_config") == 0) {
-            f[0] = tool_args_str(g_db, args, "key");
-            f[1] = tool_args_str(g_db, args, "value");
-            snprintf(buf, buflen, "set_config: %s = %s",
-                     f[0] ? f[0] : "?", f[1] ? f[1] : "?");
-        } else if (a->action && strcmp(a->action, "set_provider") == 0) {
-            f[0] = tool_args_str(g_db, args, "provider");
-            f[1] = tool_args_str(g_db, args, "base_url");
-            f[2] = tool_args_str(g_db, args, "api_key_env");
-            snprintf(buf, buflen, "set_provider: %s (%s, key from secret %s)",
-                     f[0] ? f[0] : "?", f[1] ? f[1] : "?", f[2] ? f[2] : "?");
         } else {
             snprintf(buf, buflen, "%s", a->action ? a->action : "?");
         }
@@ -2233,9 +2200,9 @@ static void handle_approval_park(int64_t session_id) {
         if (admins && !admins[0]) { free(admins); admins = NULL; }
 
         char *agent = session_get_agent_name(g_db, session_id);
-        char summary[256];
+        char summary[512];
         format_approval_summary(a, summary, sizeof(summary));
-        char prompt[512];
+        char prompt[640];
         snprintf(prompt, sizeof(prompt),
                  "Agent %s (session %lld, channel: %s) requests:\n%s",
                  agent ? agent : "?", (long long)session_id, ch_name, summary);

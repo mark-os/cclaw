@@ -110,7 +110,7 @@ char *agent_build_system_prompt(sqlite3 *db, const char *agent_name,
             "  FROM visible WHERE granted), '')"
             " || COALESCE((SELECT char(10)||char(10)||'## Requestable Tools'||char(10)||"
             "    'Registered but not granted to you. Ask with request_config'"
-            "    ||' (action grant_tool) and a reason; an operator approves.'||char(10)||"
+            "    ||' (action request_changes, grants.tools) and a reason; an operator approves.'||char(10)||"
             "    group_concat('- '||name||' — '||description, char(10) ORDER BY name)"
             "  FROM visible WHERE NOT granted), '');";
         sqlite3_stmt *ts;

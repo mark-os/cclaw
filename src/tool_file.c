@@ -68,13 +68,14 @@ static char *path_grant_hint(const FileReadCtx *ctx, const char *fullpath,
         char *sl = strrchr(dir, '/');
         if (sl) { if (sl == dir) sl[1] = '\0'; else *sl = '\0'; }
     }
-    size_t cap = strlen(fullpath) + strlen(dir) + 160;
+    size_t cap = strlen(fullpath) + strlen(dir) + 192;
     char *msg = malloc(cap);
     if (!msg) return NULL;
     snprintf(msg, cap,
              "error: '%s' is outside your granted areas — request access with "
-             "request_config {\"action\":\"grant_path\",\"path\":\"%s\",\"mode\":\"%s\"}",
-             fullpath, dir, want_write ? "write" : "read");
+             "request_config {\"action\":\"request_changes\","
+             "\"changes\":{\"grants\":{\"%s\":[\"%s\"]}}}",
+             fullpath, want_write ? "write_paths" : "read_paths", dir);
     return msg;
 }
 

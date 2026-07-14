@@ -251,7 +251,7 @@ Idea: let a designated agent — or a quorum of agents — resolve another agent
 escalation, so autonomy doesn't always block on a person.
 
 - **Delegated approver**: an operator names an agent as the approver for a
-  scoped class of requests (e.g. a "supervisor" agent approves `grant_host`
+  scoped class of requests (e.g. a "supervisor" agent approves host grants
   for hosts on a pre-set list). The requesting agent parks as usual; the
   approver receives the parked request via inbox and resolves it.
 - **Multi-model council**: instead of one approver, a quorum of N agents backed

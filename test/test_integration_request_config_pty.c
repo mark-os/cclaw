@@ -53,6 +53,16 @@ static const char *RESP_TOOL_CALL2 =
     "\"finish_reason\":\"tool_calls\"}],"
     "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
 
+/* Third call: malformed arguments (valid JSON, not an object — raw garbage
+ * is already rejected at response ingestion) — the dispatch gate must fail
+ * closed with a model-visible error tool-result (no approval, no execution). */
+static const char *RESP_TOOL_CALL3 =
+    "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,"
+    "\"tool_calls\":[{\"id\":\"call_pty3\",\"type\":\"function\",\"function\":"
+    "{\"name\":\"request_config\",\"arguments\":\"[1,2]\"}}]},"
+    "\"finish_reason\":\"tool_calls\"}],"
+    "\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
+
 static const char *RESP_FINAL =
     "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"grant received\"},"
     "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
@@ -114,6 +124,7 @@ int main(void) {
     if (port < 0) FAIL("mock_server_start");
     mock_server_enqueue(200, RESP_TOOL_CALL);
     mock_server_enqueue(200, RESP_TOOL_CALL2);
+    mock_server_enqueue(200, RESP_TOOL_CALL3);
     mock_server_enqueue(200, RESP_FINAL);
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
@@ -241,10 +252,39 @@ int main(void) {
         }
         sqlite3_close(db);
         if (!ok) { fprintf(stderr, "FAIL: set_provider providers row missing\n"); goto done; }
+
+        /* Malformed-args call: gate wrote an error tool-result, the call is
+         * done with decided_via bad_args, and no approval was created. */
+        if (sqlite3_open(DB_PATH, &db) != SQLITE_OK) { fprintf(stderr, "FAIL: db reopen\n"); goto done; }
+        ok = 0;
+        if (sqlite3_prepare_v2(db,
+                "SELECT 1 FROM tool_calls WHERE call_id='call_pty3' AND status='done'",
+                -1, &s, NULL) == SQLITE_OK) {
+            ok = (sqlite3_step(s) == SQLITE_ROW);
+            sqlite3_finalize(s);
+        }
+        if (!ok) { fprintf(stderr, "FAIL: bad-args call not resolved\n"); sqlite3_close(db); goto done; }
+        ok = 0;
+        if (sqlite3_prepare_v2(db,
+                "SELECT 1 FROM entries WHERE role=3 AND content LIKE '%not a valid JSON object%'",
+                -1, &s, NULL) == SQLITE_OK) {
+            ok = (sqlite3_step(s) == SQLITE_ROW);
+            sqlite3_finalize(s);
+        }
+        if (!ok) { fprintf(stderr, "FAIL: bad-args error entry missing\n"); sqlite3_close(db); goto done; }
+        ok = 1;
+        if (sqlite3_prepare_v2(db,
+                "SELECT 1 FROM approvals WHERE tool_call_id='call_pty3'",
+                -1, &s, NULL) == SQLITE_OK) {
+            ok = (sqlite3_step(s) != SQLITE_ROW);
+            sqlite3_finalize(s);
+        }
+        sqlite3_close(db);
+        if (!ok) { fprintf(stderr, "FAIL: bad-args call parked an approval\n"); goto done; }
     }
 
-    if (mock_server_request_count() != 3) {
-        fprintf(stderr, "FAIL: expected 3 LLM requests, got %d\n",
+    if (mock_server_request_count() != 4) {
+        fprintf(stderr, "FAIL: expected 4 LLM requests, got %d\n",
                 mock_server_request_count());
         goto done;
     }

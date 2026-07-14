@@ -1,4 +1,5 @@
 #include "tool_policy.h"
+#include "test_util.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -33,58 +34,90 @@ static const char *wildcard_policy =
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
+    sqlite3 *db = test_db_open(":memory:");
+    if (!db) { printf("FAIL: db open\n"); return 1; }
 
     /* notes policy tests */
-    CHECK(policy_eval("{\"action\":\"delete\"}", notes_policy) == POLICY_DENY,
+    CHECK(policy_eval(db, "{\"action\":\"delete\"}", notes_policy) == POLICY_DENY,
           "delete -> DENY");
-    CHECK(policy_eval("{\"action\":\"write\"}", notes_policy) == POLICY_ASK,
+    CHECK(policy_eval(db, "{\"action\":\"write\"}", notes_policy) == POLICY_ASK,
           "write -> ASK");
-    CHECK(policy_eval("{\"action\":\"read\"}", notes_policy) == POLICY_ALLOW,
+    CHECK(policy_eval(db, "{\"action\":\"read\"}", notes_policy) == POLICY_ALLOW,
           "read -> ALLOW (catch-all)");
-    CHECK(policy_eval("{\"action\":\"list\"}", notes_policy) == POLICY_ALLOW,
+    CHECK(policy_eval(db, "{\"action\":\"list\"}", notes_policy) == POLICY_ALLOW,
           "list -> ALLOW (catch-all)");
 
     /* NULL policy -> ALLOW */
-    CHECK(policy_eval("{\"action\":\"delete\"}", NULL) == POLICY_ALLOW,
+    CHECK(policy_eval(db, "{\"action\":\"delete\"}", NULL) == POLICY_ALLOW,
           "NULL policy -> ALLOW");
 
     /* Empty string policy -> ALLOW */
-    CHECK(policy_eval("{\"action\":\"delete\"}", "") == POLICY_ALLOW,
+    CHECK(policy_eval(db, "{\"action\":\"delete\"}", "") == POLICY_ALLOW,
           "empty policy -> ALLOW");
 
-    /* Malformed policy -> ALLOW (fail-open) */
-    CHECK(policy_eval("{\"action\":\"delete\"}", "not json at all") == POLICY_ALLOW,
-          "malformed policy -> ALLOW");
-    CHECK(policy_eval("{\"action\":\"delete\"}", "{\"no_rules\":true}") == POLICY_ALLOW,
+    /* Malformed non-empty policy -> ERROR (fail closed — the old jsmn
+     * implementation returned ALLOW here, review-3 F1). */
+    CHECK(policy_eval(db, "{\"action\":\"delete\"}", "not json at all") == POLICY_ERROR,
+          "malformed policy -> ERROR (blocked)");
+    /* Valid object without a rules array is a semantically empty policy. */
+    CHECK(policy_eval(db, "{\"action\":\"delete\"}", "{\"no_rules\":true}") == POLICY_ALLOW,
           "no rules array -> ALLOW");
 
+    /* Malformed args with a keyed deny -> ERROR, never ALLOW. */
+    CHECK(policy_eval(db, "not json", notes_policy) == POLICY_ERROR,
+          "malformed args -> ERROR (blocked)");
+    CHECK(policy_eval(db, NULL, notes_policy) == POLICY_ERROR,
+          "NULL args -> ERROR (blocked)");
+
     /* Array match: action in [write, delete] -> DENY */
-    CHECK(policy_eval("{\"action\":\"write\"}", array_policy) == POLICY_DENY,
+    CHECK(policy_eval(db, "{\"action\":\"write\"}", array_policy) == POLICY_DENY,
           "array match: write -> DENY");
-    CHECK(policy_eval("{\"action\":\"delete\"}", array_policy) == POLICY_DENY,
+    CHECK(policy_eval(db, "{\"action\":\"delete\"}", array_policy) == POLICY_DENY,
           "array match: delete -> DENY");
-    CHECK(policy_eval("{\"action\":\"read\"}", array_policy) == POLICY_ALLOW,
+    CHECK(policy_eval(db, "{\"action\":\"read\"}", array_policy) == POLICY_ALLOW,
           "array match: read -> ALLOW (catch-all)");
 
     /* Wildcard: name present -> ASK, name absent -> ALLOW (catch-all) */
-    CHECK(policy_eval("{\"action\":\"read\",\"name\":\"foo.txt\"}", wildcard_policy) == POLICY_ASK,
+    CHECK(policy_eval(db, "{\"action\":\"read\",\"name\":\"foo.txt\"}", wildcard_policy) == POLICY_ASK,
           "wildcard: name present -> ASK");
-    CHECK(policy_eval("{\"action\":\"read\"}", wildcard_policy) == POLICY_ALLOW,
+    CHECK(policy_eval(db, "{\"action\":\"read\"}", wildcard_policy) == POLICY_ALLOW,
           "wildcard: name absent -> ALLOW (catch-all)");
 
-    /* Oversize args (> 128 jsmn tokens) must not bypass a keyed deny rule
-     * by being treated as empty — fail closed to ASK (review-2 F10). */
+    /* Padded/huge args parse fine and still hit the keyed deny — the jsmn
+     * 128-token bypass (review-2 F10) ceases to exist. */
     {
         char big[8192];
         int pos = snprintf(big, sizeof(big), "{\"action\":\"delete\"");
-        for (int i = 0; i < 100; i++)
+        for (int i = 0; i < 300; i++)
             pos += snprintf(big + pos, sizeof(big) - (size_t)pos,
                             ",\"pad%d\":\"x\"", i);
         snprintf(big + pos, sizeof(big) - (size_t)pos, "}");
-        CHECK(policy_eval(big, notes_policy) == POLICY_ASK,
-              "oversize args -> ASK (fail closed)");
+        CHECK(policy_eval(db, big, notes_policy) == POLICY_DENY,
+              "padded args still hit keyed deny");
     }
 
+    /* Deeply nested args (would blow a token budget) match normally. */
+    {
+        char nested[4096];
+        int pos = snprintf(nested, sizeof(nested), "{\"action\":\"write\",\"blob\":");
+        for (int i = 0; i < 40; i++)
+            pos += snprintf(nested + pos, sizeof(nested) - (size_t)pos, "{\"a\":");
+        pos += snprintf(nested + pos, sizeof(nested) - (size_t)pos, "1");
+        for (int i = 0; i < 40; i++)
+            pos += snprintf(nested + pos, sizeof(nested) - (size_t)pos, "}");
+        snprintf(nested + pos, sizeof(nested) - (size_t)pos, "}");
+        CHECK(policy_eval(db, nested, notes_policy) == POLICY_ASK,
+              "nested args still hit keyed ask");
+    }
+
+    /* Non-text arg value never string-matches a keyed rule (falls through
+     * to the catch-all), but wildcard presence still sees it. */
+    CHECK(policy_eval(db, "{\"action\":7}", notes_policy) == POLICY_ALLOW,
+          "non-text value doesn't string-match");
+    CHECK(policy_eval(db, "{\"name\":7}", wildcard_policy) == POLICY_ASK,
+          "wildcard sees non-text value");
+
+    db_close(db);
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASSED", failures);
     return failures ? 1 : 0;
 }

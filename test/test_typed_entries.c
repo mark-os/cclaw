@@ -1,7 +1,6 @@
 #include "db.h"
 #include "test_util.h"
 #include "db_response.h"
-#include "db_request.h"
 #include "types.h"
 #include <assert.h>
 #include <stdio.h>
@@ -250,144 +249,6 @@ static void test_ingest_typed(void) {
     printf("  ingest_typed... PASS\n");
 }
 
-static void test_openai_egress(void) {
-    sqlite3 *db = setup();
-    int64_t sid = 1;
-
-    /* Build a conversation: system + user + assistant(with tool calls) + tool_result */
-    int64_t t1 = 1;
-    int64_t id1 = entry_append_typed(db, sid, t1, "system", 0, "You are helpful.", NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t t2 = 2;
-    int64_t id2 = entry_append_typed(db, sid, t2, "user_message", 0, "List files", NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t t3 = 3;
-    int64_t id3 = entry_append_typed(db, sid, t3, "assistant_message", 1, "Let me check.", NULL, NULL, 0, STOP_REASON_TOOL_USE, "gpt-4o", 0, 0, 0);
-    int64_t id4 = entry_append_typed(db, sid, t3, "tool_call", 2, "{\"cmd\":\"ls\"}", "call_1", "shell_exec", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t t4 = 4;
-    int64_t id5 = entry_append_typed(db, sid, t4, "tool_result", 0, "file1.c\nfile2.c", "call_1", "shell_exec", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-
-    int64_t ids[] = {id1, id2, id3, id4, id5};
-    char *json = db_build_request_typed(db, sid, ids, 5, ENDPOINT_OPENAI, 0);
-    assert(json != NULL);
-
-    /* Verify structure */
-    assert(strstr(json, "\"role\":\"system\"") != NULL);
-    assert(strstr(json, "\"role\":\"user\"") != NULL);
-    assert(strstr(json, "\"role\":\"assistant\"") != NULL);
-    assert(strstr(json, "\"tool_calls\"") != NULL);
-    assert(strstr(json, "\"id\":\"call_1\"") != NULL);
-    assert(strstr(json, "\"name\":\"shell_exec\"") != NULL);
-    assert(strstr(json, "\"role\":\"tool\"") != NULL);
-    assert(strstr(json, "\"tool_call_id\":\"call_1\"") != NULL);
-    /* Reasoning should NOT appear */
-    assert(strstr(json, "reasoning") == NULL);
-
-    free(json);
-    db_close(db);
-    printf("  openai_egress... PASS\n");
-}
-
-static void test_responses_egress(void) {
-    sqlite3 *db = setup();
-    int64_t sid = 1;
-
-    int64_t id1 = entry_append_typed(db, sid, 1, "system", 0, "Be helpful.", NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t id2 = entry_append_typed(db, sid, 2, "user_message", 0, "Hello", NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t id3 = entry_append_typed(db, sid, 3, "assistant_message", 1, "Hi!", NULL, NULL, 0, STOP_REASON_STOP, NULL, 0, 0, 0);
-    int64_t id4 = entry_append_typed(db, sid, 3, "tool_call", 2, "{\"q\":\"test\"}", "call_x", "search", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t id5 = entry_append_typed(db, sid, 4, "tool_result", 0, "found it", "call_x", "search", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-
-    int64_t ids[] = {id1, id2, id3, id4, id5};
-    char *json = db_build_request_typed(db, sid, ids, 5, ENDPOINT_RESPONSES, 0);
-    assert(json != NULL);
-
-    /* Responses API uses type-based items */
-    assert(strstr(json, "\"type\":\"message\"") != NULL);
-    assert(strstr(json, "\"role\":\"developer\"") != NULL); /* system → developer */
-    assert(strstr(json, "\"role\":\"user\"") != NULL);
-    assert(strstr(json, "\"type\":\"function_call\"") != NULL);
-    assert(strstr(json, "\"call_id\":\"call_x\"") != NULL);
-    assert(strstr(json, "\"name\":\"search\"") != NULL);
-    assert(strstr(json, "\"type\":\"function_call_output\"") != NULL);
-    assert(strstr(json, "\"output\":\"found it\"") != NULL);
-
-    free(json);
-    db_close(db);
-    printf("  responses_egress... PASS\n");
-}
-
-static void test_gemini_egress(void) {
-    sqlite3 *db = setup();
-    int64_t sid = 1;
-
-    int64_t id1 = entry_append_typed(db, sid, 1, "system", 0, "You help.", NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    (void)id1; /* system entries handled separately by caller */
-    int64_t id2 = entry_append_typed(db, sid, 2, "user_message", 0, "Read /tmp", NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t id3 = entry_append_typed(db, sid, 3, "assistant_message", 1, "OK", NULL, NULL, 0, STOP_REASON_TOOL_USE, NULL, 0, 0, 0);
-    int64_t id4 = entry_append_typed(db, sid, 3, "tool_call", 2, "{\"path\":\"/tmp\"}", "call_g1", "file_read", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t id5 = entry_append_typed(db, sid, 4, "tool_result", 0, "contents", "call_g1", "file_read", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-
-    /* System is excluded from contents (caller handles systemInstruction) */
-    int64_t ids[] = {id2, id3, id4, id5};
-    char *json = db_build_request_typed(db, sid, ids, 4, ENDPOINT_GEMINI, 0);
-    assert(json != NULL);
-
-    /* Verify Gemini structure */
-    assert(strstr(json, "\"role\":\"user\"") != NULL);
-    assert(strstr(json, "\"role\":\"model\"") != NULL);
-    assert(strstr(json, "\"functionCall\"") != NULL);
-    assert(strstr(json, "\"name\":\"file_read\"") != NULL);
-    assert(strstr(json, "\"functionResponse\"") != NULL);
-    assert(strstr(json, "\"parts\"") != NULL);
-    /* Args should be an object, not a string */
-    assert(strstr(json, "\"args\":{\"path\":\"/tmp\"}") != NULL);
-
-    free(json);
-    db_close(db);
-    printf("  gemini_egress... PASS\n");
-}
-
-static void test_gemini_interactions_egress(void) {
-    sqlite3 *db = setup();
-    int64_t sid = 1;
-
-    /* First turn: user + assistant */
-    int64_t id1 = entry_append_typed(db, sid, 1, "user_message", 0, "Hello", NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t id2 = entry_append_typed(db, sid, 2, "assistant_message", 0, "Hi there!", NULL, NULL, 0, STOP_REASON_STOP, NULL, 0, 0, 0);
-
-    /* Full history (no last_synced_entry_id set) */
-    int64_t ids_all[] = {id1, id2};
-    char *json = db_build_request_typed(db, sid, ids_all, 2, ENDPOINT_GEMINI_INTERACTIONS, 0);
-    assert(json != NULL);
-    assert(strstr(json, "\"type\":\"user_input\"") != NULL);
-    assert(strstr(json, "\"type\":\"model_output\"") != NULL);
-    free(json);
-
-    /* Simulate storing interaction state: set last_synced_entry_id = id2 */
-    sqlite3_exec(db, "UPDATE sessions SET last_synced_entry_id=2 WHERE id=1;", NULL, NULL, NULL);
-
-    /* Second turn: new user + tool_call + tool_result */
-    int64_t id3 = entry_append_typed(db, sid, 3, "user_message", 0, "Do it", NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t id4 = entry_append_typed(db, sid, 4, "tool_call", 0, "{\"x\":1}", "call_i1", "test", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-    int64_t id5 = entry_append_typed(db, sid, 4, "tool_result", 1, "done", "call_i1", "test", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
-
-    /* Delta only (entries after id2) */
-    int64_t ids_delta[] = {id1, id2, id3, id4, id5};
-    json = db_build_request_typed(db, sid, ids_delta, 5, ENDPOINT_GEMINI_INTERACTIONS, 0);
-    assert(json != NULL);
-    /* Should NOT contain the first turn entries */
-    assert(strstr(json, "Hello") == NULL);
-    assert(strstr(json, "Hi there") == NULL);
-    /* Should contain the new entries */
-    assert(strstr(json, "\"type\":\"user_input\"") != NULL);
-    assert(strstr(json, "Do it") != NULL);
-    assert(strstr(json, "\"type\":\"function_call\"") != NULL);
-    assert(strstr(json, "\"type\":\"function_result\"") != NULL);
-    free(json);
-
-    db_close(db);
-    printf("  gemini_interactions_egress... PASS\n");
-}
-
 int main(void) {
     printf("test_typed_entries:\n");
     test_insert_typed_entries();
@@ -395,10 +256,6 @@ int main(void) {
     test_legacy_entry_gets_type();
     test_tool_calls_result_entry_id();
     test_ingest_typed();
-    test_openai_egress();
-    test_responses_egress();
-    test_gemini_egress();
-    test_gemini_interactions_egress();
-    printf("\n9/9 tests passed.\n");
+    printf("\n5/5 tests passed.\n");
     return 0;
 }

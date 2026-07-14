@@ -235,10 +235,7 @@ static void check_config(sqlite3 *db, Config **out_cfg) {
     printf("  provider.base_url: %s\n", cfg->provider.base_url ? cfg->provider.base_url : "(not set)");
     printf("  provider.model:    %s\n", cfg->provider.model ? cfg->provider.model : "(not set)");
     printf("  provider.endpoint: %s\n",
-           cfg->provider.endpoint_type == ENDPOINT_GEMINI ? "gemini" :
-           cfg->provider.endpoint_type == ENDPOINT_RESPONSES ? "responses" :
-           cfg->provider.endpoint_type == ENDPOINT_GEMINI_INTERACTIONS ? "gemini_interactions" :
-           "openai");
+           cfg->provider.endpoint_type == ENDPOINT_GEMINI ? "gemini" : "openai");
 
     char masked[128];
     mask_secret(cfg->provider.api_key, masked, sizeof(masked));

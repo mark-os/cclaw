@@ -1,7 +1,7 @@
 /* search_config tool — read-only introspection of agent config and available tools. */
 #define _POSIX_C_SOURCE 200809L
 #include "tool_search_config.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include "buf.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,11 +17,9 @@ static char *handler(const char *arguments, void *user_data) {
     if (!ctx || !ctx->db || !ctx->agent_name)
         return strdup("error: search_config unavailable");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON");
-    const char *query = targ_str(&ta, "query");
+    char *query = tool_args_str(ctx->db, arguments, "query");
     /* Treat empty string as no filter */
-    if (query && !query[0]) query = NULL;
+    if (query && !query[0]) { free(query); query = NULL; }
 
     Buf out = {0};
 
@@ -214,7 +212,7 @@ static char *handler(const char *arguments, void *user_data) {
         "Add an optional \"reason\" field — it is shown to the human approver.\n"
         "All gated actions require human approval before taking effect.\n");
 
-    tool_parse_free(&ta);
+    free(query);
     char *result = buf_take(&out);
     return result ? result : strdup("error: out of memory");
 }

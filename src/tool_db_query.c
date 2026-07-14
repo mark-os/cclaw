@@ -2,7 +2,7 @@
 #include "tool_db_query.h"
 #include "util.h"
 #include "buf.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,18 +26,14 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     sqlite3 *db = (sqlite3 *)user_data;
     if (!db) return strdup("error: no database connection");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid JSON arguments");
-
-    const char *sql = targ_str(&ta, "sql");
+    char *sql = tool_args_str(db, arguments, "sql");
     if (!sql || !sql[0]) {
-        tool_parse_free(&ta);
+        free(sql);
         return strdup("error: missing or empty 'sql' field");
     }
 
     if (!is_select_only(sql)) {
-        tool_parse_free(&ta);
+        free(sql);
         return strdup("error: only SELECT queries allowed");
     }
 
@@ -46,9 +42,10 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     if (rc != SQLITE_OK) {
         char *err = malloc(256);
         if (err) snprintf(err, 256, "error: %s", sqlite3_errmsg(db));
-        tool_parse_free(&ta);
+        free(sql);
         return err ? err : strdup("error: prepare failed");
     }
+    free(sql);
 
     int col_count = sqlite3_column_count(stmt);
     Buf b = {0};
@@ -98,7 +95,6 @@ char *tool_db_query_handler(const char *arguments, void *user_data) {
     }
 
     sqlite3_finalize(stmt);
-    tool_parse_free(&ta);
 
     char *out = buf_take(&b);
     if (!out) return strdup("error: OOM");

@@ -3,7 +3,7 @@
 #include "approval.h"
 #include "db.h"
 #include "extension_manifest.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include "util.h"
 #include <dirent.h>
 #include <limits.h>
@@ -66,11 +66,9 @@ static char *tool_extension_promote_handler(const char *arguments, void *user_da
     ToolExtensionCtx *ctx = (ToolExtensionCtx *)user_data;
     if (!ctx || !ctx->db) return strdup("error: extension_promote unavailable");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
-    const char *name = targ_str(&ta, "name");
+    char *name = tool_args_str(ctx->db, arguments, "name");
     if (!valid_name(name)) {
-        tool_parse_free(&ta);
+        free(name);
         return strdup("error: 'name' is required (no path separators)");
     }
 
@@ -78,7 +76,7 @@ static char *tool_extension_promote_handler(const char *arguments, void *user_da
     char bundle[PATH_MAX], namebuf[256];
     snprintf(bundle, sizeof(bundle), "%s/extensions/%s", ws, name);
     snprintf(namebuf, sizeof(namebuf), "%s", name);
-    tool_parse_free(&ta);
+    free(name);
 
     /* Eager validation: a bundle that can't install never parks. */
     char *err = NULL;
@@ -113,30 +111,32 @@ static char *tool_extension_publish_handler(const char *arguments, void *user_da
     ToolExtensionCtx *ctx = (ToolExtensionCtx *)user_data;
     if (!ctx || !ctx->db) return strdup("error: extension_publish unavailable");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
-    const char *name = targ_str(&ta, "name");
+    char *name = tool_args_str(ctx->db, arguments, "name");
     if (!valid_name(name)) {
-        tool_parse_free(&ta);
+        free(name);
         return strdup("error: 'name' is required");
     }
-    char namebuf[256];
-    snprintf(namebuf, sizeof(namebuf), "%s", name);
-    tool_parse_free(&ta);
 
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(ctx->db,
             "UPDATE extensions SET published=1 WHERE name=?1 AND owner_agent=?2",
-            -1, &st, NULL) != SQLITE_OK)
+            -1, &st, NULL) != SQLITE_OK) {
+        free(name);
         return strdup("error: publish failed (db)");
-    sqlite3_bind_text(st, 1, namebuf, -1, SQLITE_STATIC);
+    }
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 2, ctx->agent_name, -1, SQLITE_STATIC);
     int step = sqlite3_step(st);
     sqlite3_finalize(st);
-    if (step != SQLITE_DONE) return strdup("error: publish failed (db)");
-    if (sqlite3_changes(ctx->db) == 0)
-        return msgf("error: extension '%s' not found or not owned by you", namebuf);
-    return msgf("published extension '%s'; other agents can now attach it.", namebuf);
+    if (step != SQLITE_DONE) { free(name); return strdup("error: publish failed (db)"); }
+    if (sqlite3_changes(ctx->db) == 0) {
+        char *m = msgf("error: extension '%s' not found or not owned by you", name);
+        free(name);
+        return m;
+    }
+    char *m = msgf("published extension '%s'; other agents can now attach it.", name);
+    free(name);
+    return m;
 }
 
 /* ── extension_attach ───────────────────────────────────────────────── */
@@ -145,44 +145,48 @@ static char *tool_extension_attach_handler(const char *arguments, void *user_dat
     ToolExtensionCtx *ctx = (ToolExtensionCtx *)user_data;
     if (!ctx || !ctx->db) return strdup("error: extension_attach unavailable");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
-    const char *name = targ_str(&ta, "name");
+    char *name = tool_args_str(ctx->db, arguments, "name");
     if (!valid_name(name)) {
-        tool_parse_free(&ta);
+        free(name);
         return strdup("error: 'name' is required");
     }
-    char namebuf[256];
-    snprintf(namebuf, sizeof(namebuf), "%s", name);
-    tool_parse_free(&ta);
 
     /* Trust boundary: attach only a published extension, or one you own. */
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(ctx->db,
             "SELECT 1 FROM extensions WHERE name=?1 AND (published=1 OR owner_agent=?2)",
-            -1, &st, NULL) != SQLITE_OK)
+            -1, &st, NULL) != SQLITE_OK) {
+        free(name);
         return strdup("error: attach failed (db)");
-    sqlite3_bind_text(st, 1, namebuf, -1, SQLITE_STATIC);
+    }
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 2, ctx->agent_name, -1, SQLITE_STATIC);
     int visible = (sqlite3_step(st) == SQLITE_ROW);
     sqlite3_finalize(st);
-    if (!visible)
-        return msgf("error: extension '%s' is not published and not owned by you", namebuf);
+    if (!visible) {
+        char *m = msgf("error: extension '%s' is not published and not owned by you", name);
+        free(name);
+        return m;
+    }
 
     if (sqlite3_prepare_v2(ctx->db,
             "INSERT INTO agent_extensions(agent_name, extension_name, enabled) "
             "VALUES(?1, ?2, 1) "
             "ON CONFLICT(agent_name, extension_name) DO UPDATE SET enabled=1",
-            -1, &st, NULL) != SQLITE_OK)
+            -1, &st, NULL) != SQLITE_OK) {
+        free(name);
         return strdup("error: attach failed (db)");
+    }
     sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 2, namebuf, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, name, -1, SQLITE_STATIC);
     int step = sqlite3_step(st);
     sqlite3_finalize(st);
-    if (step != SQLITE_DONE) return strdup("error: attach failed (db)");
-    return msgf("attached extension '%s' to agent '%s'; its tools are callable "
+    if (step != SQLITE_DONE) { free(name); return strdup("error: attach failed (db)"); }
+    char *m = msgf("attached extension '%s' to agent '%s'; its tools are callable "
                 "once granted (attach does not grant — use request_config).",
-                namebuf, ctx->agent_name);
+                name, ctx->agent_name);
+    free(name);
+    return m;
 }
 
 /* ── extension_list ─────────────────────────────────────────────────── */
@@ -251,17 +255,16 @@ static char *tool_extension_fork_handler(const char *arguments, void *user_data)
     ToolExtensionCtx *ctx = (ToolExtensionCtx *)user_data;
     if (!ctx || !ctx->db) return strdup("error: extension_fork unavailable");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0) return strdup("error: invalid JSON arguments");
-    const char *name = targ_str(&ta, "name");
-    const char *as = targ_str(&ta, "as");
+    char *name = tool_args_str(ctx->db, arguments, "name");
+    char *as = tool_args_str(ctx->db, arguments, "as");
     char asbuf[128];
     if (!as || !as[0]) {
+        free(as);
         snprintf(asbuf, sizeof(asbuf), "%s-fork", name ? name : "");
-        as = asbuf;
+        as = strdup(asbuf);
     }
     if (!valid_name(name) || !valid_name(as)) {
-        tool_parse_free(&ta);
+        free(name); free(as);
         return strdup("error: 'name' (and optional 'as') must be plain names, no path separators");
     }
 
@@ -283,26 +286,40 @@ static char *tool_extension_fork_handler(const char *arguments, void *user_data)
         }
         sqlite3_finalize(s);
     }
-    char namebuf[128], destname[128];
-    snprintf(namebuf, sizeof(namebuf), "%s", name);
-    snprintf(destname, sizeof(destname), "%s", as);
-    tool_parse_free(&ta);
-    if (!src[0]) return msgf("error: extension '%s' is not registered", namebuf);
-    if (!visible) return msgf("error: extension '%s' is not visible to you "
-                              "(not published or yours)", namebuf);
+    if (!src[0]) {
+        char *m = msgf("error: extension '%s' is not registered", name);
+        free(name); free(as);
+        return m;
+    }
+    if (!visible) {
+        char *m = msgf("error: extension '%s' is not visible to you "
+                       "(not published or yours)", name);
+        free(name); free(as);
+        return m;
+    }
 
     const char *ws = (ctx->workspace && ctx->workspace[0]) ? ctx->workspace : ".";
     char dest[PATH_MAX];
-    snprintf(dest, sizeof(dest), "%s/extensions/%s", ws, destname);
+    snprintf(dest, sizeof(dest), "%s/extensions/%s", ws, as);
     struct stat st;
-    if (stat(dest, &st) == 0)
-        return msgf("error: draft '%s' already exists at extensions/%s", destname, destname);
-    if (util_mkdir_p(dest) != 0)
-        return msgf("error: cannot create %s", dest);
+    if (stat(dest, &st) == 0) {
+        char *m = msgf("error: draft '%s' already exists at extensions/%s", as, as);
+        free(name); free(as);
+        return m;
+    }
+    if (util_mkdir_p(dest) != 0) {
+        char *m = msgf("error: cannot create %s", dest);
+        free(name); free(as);
+        return m;
+    }
 
     /* Flat copy of regular files (bundles are flat: handler .qjs + json). */
     DIR *d = opendir(src);
-    if (!d) return msgf("error: cannot read source bundle %s", src);
+    if (!d) {
+        char *m = msgf("error: cannot read source bundle %s", src);
+        free(name); free(as);
+        return m;
+    }
     int copied = 0;
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
@@ -314,16 +331,23 @@ static char *tool_extension_fork_handler(const char *arguments, void *user_data)
         if (util_copy_file(sp, dp, 0644) == 0) copied++;
     }
     closedir(d);
-    if (copied == 0) return msgf("error: source bundle %s had no files", src);
+    if (copied == 0) {
+        char *m = msgf("error: source bundle %s had no files", src);
+        free(name); free(as);
+        return m;
+    }
 
     /* Manifest: rewrite the name so a later promote registers the fork as
      * its own extension. Every registered extension has a real manifest
      * (extension_install requires one), so a missing one is an error. */
     char *manifest = read_manifest(dest);
-    if (!manifest)
-        return msgf("error: source bundle %s has no extension.json", src);
+    if (!manifest) {
+        char *m = msgf("error: source bundle %s has no extension.json", src);
+        free(name); free(as);
+        return m;
+    }
     char *rewritten = sql_text(ctx->db, "SELECT json_set(?1,'$.name',?2);",
-                               manifest, destname, NULL);
+                               manifest, as, NULL);
     free(manifest);
     if (rewritten) {
         char mpath[2*PATH_MAX];
@@ -333,11 +357,14 @@ static char *tool_extension_fork_handler(const char *arguments, void *user_data)
         free(rewritten);
     }
 
-    return msgf("forked extension '%s' into workspace draft extensions/%s "
+    char *m = msgf("forked extension '%s' into workspace draft extensions/%s "
                 "(%d files). Edit it there; test a channel fork offline with "
                 "`cclaw --channel <name> --harness <scenario.json>`; then "
                 "extension_promote name='%s' registers it under your ownership.",
-                namebuf, destname, copied, destname);
+                name, as, copied, as);
+    free(name);
+    free(as);
+    return m;
 }
 
 /* ── registration ───────────────────────────────────────────────────── */

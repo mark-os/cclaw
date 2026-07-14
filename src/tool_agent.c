@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_agent.h"
 #include "config_registry.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include "db.h"
 #include "approval.h"
 #include "buf.h"
@@ -27,47 +27,42 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     if (!ctx || !ctx->db)
         return strdup("error: launch_agent not configured");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid JSON arguments");
-
-    const char *task = targ_str(&ta, "task");
+    char *task = tool_args_str(ctx->db, arguments, "task");
     if (!task || !task[0]) {
-        tool_parse_free(&ta);
+        free(task);
         return strdup("error: missing or empty 'task' field");
     }
 
     /* Depth + concurrency checks */
     int depth = session_get_depth(ctx->db, ctx->session_id);
     if (depth >= agent_max_depth(ctx->db)) {
-        tool_parse_free(&ta); return strdup("error: max agent depth reached");
+        free(task); return strdup("error: max agent depth reached");
     }
     int children = session_count_children(ctx->db, ctx->session_id);
     if (children >= AGENT_MAX_PER_PARENT) {
-        tool_parse_free(&ta); return strdup("error: max sub-agents per parent reached");
+        free(task); return strdup("error: max sub-agents per parent reached");
     }
     int total = session_count_active_agents(ctx->db);
     if (total >= AGENT_MAX_TOTAL) {
-        tool_parse_free(&ta); return strdup("error: max system-wide agents reached");
+        free(task); return strdup("error: max system-wide agents reached");
     }
 
     /* Create child session. Omitted name = self-spawn: a worker running as
      * the calling agent, scoped down by a frozen session tool_filter
      * (explicit `tools` arg → kv worker_tools → unrestricted). The filter is
      * intersection-only against grants — it can never add authority. */
-    const char *agent = targ_str(&ta, "name");
+    char *agent = tool_args_str(ctx->db, arguments, "name");
     int self_spawn = (!agent || !agent[0]);
-    int background = targ_bool(&ta, "background", 0);
+    int background = tool_args_bool(ctx->db, arguments, "background", 0);
 
-    const char *tools_raw = NULL;
-    size_t tools_len = 0;
-    if (targ_raw(&ta, "tools", &tools_raw, &tools_len) == 0) {
+    char *tools_json = tool_args_json(ctx->db, arguments, "tools");
+    if (tools_json) {
         if (!self_spawn) {
-            tool_parse_free(&ta);
+            free(task); free(agent); free(tools_json);
             return strdup("error: 'tools' filter is only valid for self-spawn (omit 'name')");
         }
-        if (tools_len == 0 || tools_raw[0] != '[') {
-            tool_parse_free(&ta);
+        if (tools_json[0] != '[') {
+            free(task); free(agent); free(tools_json);
             return strdup("error: 'tools' must be a JSON array of tool names");
         }
     }
@@ -76,18 +71,19 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     if (self_spawn) {
         self_name = session_get_agent_name(ctx->db, ctx->session_id);
         if (!self_name) {
-            tool_parse_free(&ta);
+            free(task); free(agent); free(tools_json);
             return strdup("error: cannot self-spawn — calling session has no agent");
         }
+        free(agent);
         agent = self_name;
+        self_name = NULL; /* ownership transferred to agent */
     }
 
     AgentRow *row = db_agent_get(ctx->db, agent);
     if (!row) {
         char err[128];
         snprintf(err, sizeof(err), "error: unknown agent '%.64s'", agent);
-        free(self_name);
-        tool_parse_free(&ta);
+        free(task); free(agent); free(tools_json);
         return strdup(err);
     }
     agent_row_free(row);
@@ -95,21 +91,21 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     /* Resolve the worker's tool filter, frozen into the session row. */
     char *filter = NULL;
     if (self_spawn) {
-        if (tools_raw) {
-            filter = malloc(tools_len + 1);
-            if (filter) { memcpy(filter, tools_raw, tools_len); filter[tools_len] = '\0'; }
+        if (tools_json) {
+            filter = tools_json;
+            tools_json = NULL; /* ownership transferred */
         } else {
             filter = config_get(ctx->db, "worker_tools");
         }
     }
+    free(tools_json);
 
     int64_t child_sid = session_create_filtered(ctx->db, "agent", agent,
                                                 ctx->session_id, depth + 1,
                                                 filter);
     free(filter);
-    free(self_name);
     if (child_sid < 0) {
-        tool_parse_free(&ta);
+        free(task); free(agent);
         return strdup("error: failed to create child session");
     }
 
@@ -123,7 +119,8 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
 
     /* Insert task into child's inbox and wake it */
     inbox_insert(ctx->db, child_sid, "spawn", task);
-    tool_parse_free(&ta);
+    free(task);
+    free(agent);
     wake_session(child_sid);
 
     if (background) {
@@ -165,12 +162,7 @@ char *tool_check_session_handler(const char *arguments, void *user_data) {
     if (!ctx || !ctx->db)
         return strdup("error: check_session not configured");
 
-    ToolArgs ta;
-    if (tool_parse(arguments, &ta) != 0)
-        return strdup("error: invalid JSON arguments");
-
-    int sid_val = targ_int(&ta, "session_id", -1);
-    tool_parse_free(&ta);
+    int sid_val = tool_args_int(ctx->db, arguments, "session_id", -1);
     if (sid_val < 0) return strdup("error: missing session_id");
     int64_t child_sid = (int64_t)sid_val;
 

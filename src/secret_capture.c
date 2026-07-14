@@ -1,6 +1,6 @@
 #define _GNU_SOURCE
 #include "secret_capture.h"
-#include "tool_parse.h"
+#include "tool_args.h"
 #include "secret_interp.h"
 #include "tool_shell.h"
 #include "validate.h"
@@ -56,11 +56,9 @@ char *secret_capture_apply(sqlite3 *db, const char *tool_args, const char *raw_r
     if (!db || !tool_args || !raw_result) return NULL;
     if (!strstr(tool_args, "save_secret")) return NULL;  /* cheap pre-check */
 
-    ToolArgs ta;
-    if (tool_parse(tool_args, &ta) != 0) return NULL;
-    const char *name = targ_str(&ta, "save_secret");
-    const char *path = targ_str(&ta, "save_secret_path");
-    if (!name) { tool_parse_free(&ta); return NULL; }
+    char *name = tool_args_str(db, tool_args, "save_secret");
+    char *path = tool_args_str(db, tool_args, "save_secret_path");
+    if (!name) { free(path); return NULL; }
 
     char *out = NULL;
     char *value = NULL;
@@ -106,7 +104,7 @@ char *secret_capture_apply(sqlite3 *db, const char *tool_args, const char *raw_r
 
     /* Mask every occurrence (raw + base64/url-encoded variants) so the
      * value never enters the context window. */
-    ShellSecret s = { .name = (char *)name, .value = value };
+    ShellSecret s = { .name = name, .value = value };
     char *masked = secret_deinterpolate(raw_result, &s, 1);
     char note[192];
     snprintf(note, sizeof(note),
@@ -118,6 +116,7 @@ char *secret_capture_apply(sqlite3 *db, const char *tool_args, const char *raw_r
 
 done:
     if (value) { explicit_bzero(value, strlen(value)); free(value); }
-    tool_parse_free(&ta);
+    free(name);
+    free(path);
     return out;
 }

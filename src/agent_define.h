@@ -24,4 +24,13 @@ int agent_definition_validate(sqlite3 *db, const char *json,
 int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
                            const char *agents_dir, char **err);
 
+/* Update an existing agent (update_agent tool). Authorization is
+ * creator-or-self via agents.created_by; caps (profile, grants) apply against
+ * the caller exactly as at creation. Fields overlay (absent = keep, unknown
+ * keys refused); grants are additive-only. */
+int agent_definition_update_validate(sqlite3 *db, const char *json,
+                                     const char *caller, char **err);
+int agent_definition_update_apply(sqlite3 *db, const char *json,
+                                  const char *caller, char **err);
+
 #endif

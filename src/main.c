@@ -867,6 +867,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         }
         if (!result && (strcmp(tc->name, "request_config") == 0 ||
                         strcmp(tc->name, "create_agent") == 0 ||
+                        strcmp(tc->name, "update_agent") == 0 ||
                         strcmp(tc->name, "extension_promote") == 0)) {
             /* Approval gate: the session is parked in awaiting_approval; the
              * tool_call stays pending until resolve_approval writes the result. */
@@ -1791,6 +1792,13 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
             *rename_failed = 1; /* generic apply-failed: error result, no grant */
         }
         free(cerr);
+    } else if (strcmp(a->action, "update_agent") == 0) {
+        char *cerr = NULL;
+        if (agent_definition_update_apply(g_db, a->args_json, agent, &cerr) != 0) {
+            LOG_WARN_("update_agent apply failed: %s", cerr ? cerr : "?");
+            *rename_failed = 1; /* generic apply-failed: error result, no grant */
+        }
+        free(cerr);
     } else if (strcmp(a->action, "rename_agent") == 0) {
         char *nn = tool_args_str(g_db, a->args_json, "name");
         char *pr = tool_args_str(g_db, a->args_json, "preamble");
@@ -2079,6 +2087,19 @@ static const char *SQL_CREATE_AGENT_LINES =
     " UNION ALL SELECT format('%-7s%d block(s)','memory',json_array_length(?1,'$.memory_blocks'))"
     "   WHERE json_array_length(?1,'$.memory_blocks') > 0";
 
+/* update_agent enumeration — grants add, scalar fields overwrite; long text
+ * (system_prompt) is clipped per line, the whole-summary truncation below is
+ * the backstop. */
+static const char *SQL_UPDATE_AGENT_LINES =
+    "SELECT format('%-7s%s','tool',atom) FROM json_each(?1,'$.grants.tools')"
+    " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.grants.hosts')"
+    " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.grants.read_paths')"
+    " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.grants.write_paths')"
+    " UNION ALL SELECT format('%s = %s', key,"
+    "     CASE WHEN length(atom) > 200 THEN substr(atom,1,200)||'...' ELSE atom END)"
+    "   FROM json_each(?1)"
+    "   WHERE key NOT IN ('name','grants','reason') AND type!='object'";
+
 /* Render a human-readable markdown summary of an approval — never the raw
  * args_json blob. Grant-shaped approvals enumerate every requested value in
  * fenced blocks grouped by scope; any other tool's call arguments (shape
@@ -2119,6 +2140,13 @@ static char *format_approval_summary(const Approval *a) {
                     f[2] ? ", clone of " : "", f[2] ? f[2] : "");
         append_enum_block(&out, "Capabilities (all within the creator's own):",
                           SQL_CREATE_AGENT_LINES, args);
+    } else if (a->tool_name && strcmp(a->tool_name, "update_agent") == 0) {
+        f[0] = tool_args_str(g_db, args, "name");
+        f[1] = tool_args_str(g_db, args, "reason");
+        buf_appendf(&out, "wants to update agent **%s**:\n", f[0] ? f[0] : "?");
+        append_enum_block(&out, "Changes (grants add; fields overwrite):",
+                          SQL_UPDATE_AGENT_LINES, args);
+        if (f[1] && f[1][0]) buf_appendf(&out, "Reason: %s\n", f[1]);
     } else {
         char *salient = tool_args_str(g_db, args, "command");
         if (!salient) salient = tool_args_str(g_db, args, "url");

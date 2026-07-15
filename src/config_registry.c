@@ -66,7 +66,7 @@ static const ConfigDef s_defs[] = {
       "\"file_edit\",\"js_eval\",\"request_config\","
       "\"search_config\",\"memory_create\",\"memory_add\",\"memory_edit\","
       "\"memory_delete\",\"cron_set\",\"cron_list\","
-      "\"create_agent\",\"extension_promote\",\"extension_publish\","
+      "\"create_agent\",\"update_agent\",\"extension_promote\",\"extension_publish\","
       "\"extension_attach\",\"extension_list\",\"extension_fork\",\"launch_agent\","
       "\"check_session\",\"secret_create\"]",
       "Baseline tool grants seeded for a newly created agent (JSON array)" },

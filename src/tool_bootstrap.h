@@ -4,7 +4,7 @@
 #include "tools.h"
 #include "sqlite3.h"
 
-/* Context for bootstrap tools (create_agent) */
+/* Context for bootstrap tools (create_agent, update_agent) */
 typedef struct {
     sqlite3 *db;
     int64_t session_id;
@@ -12,7 +12,8 @@ typedef struct {
     const char *current_tool_call_id;  /* set by dispatcher before each call */
 } ToolBootstrapCtx;
 
-/* Register create_agent tool. */
+/* Register create_agent / update_agent tools. */
 int tool_create_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx);
+int tool_update_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx);
 
 #endif

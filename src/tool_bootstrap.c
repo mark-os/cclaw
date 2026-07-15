@@ -61,6 +61,72 @@ static char *tool_create_agent_handler(const char *arguments, void *user_data) {
     return NULL; /* park */
 }
 
+/* ── update_agent ─────────────────────────────────────────────────── */
+
+static const char *UPDATE_AGENT_PARAMS =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"name\":{\"type\":\"string\",\"description\":\"Agent to update — yourself, or one you created\"},"
+    "\"description\":{\"type\":\"string\"},"
+    "\"system_prompt\":{\"type\":\"string\",\"description\":\"Replacement system prompt (full text, not a diff)\"},"
+    "\"primary_model\":{\"type\":\"string\",\"description\":\"Must resolve to a registered model ('model' or 'model@provider')\"},"
+    "\"secondary_model\":{\"type\":\"string\"},"
+    "\"sandbox_profile\":{\"type\":\"string\",\"enum\":[\"host\",\"trusted\",\"standard\",\"restricted\"],\"description\":\"Must not be looser than yours\"},"
+    "\"grants\":{\"type\":\"object\",\"properties\":{"
+      "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
+      "\"hosts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
+      "\"read_paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
+      "\"write_paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
+      "\"description\":\"Grants to ADD (never removes); each must be a grant you hold\"},"
+    "\"max_iterations\":{\"type\":\"integer\"},"
+    "\"shell_timeout\":{\"type\":\"integer\"},"
+    "\"reason\":{\"type\":\"string\",\"description\":\"Shown to the human approver\"}"
+    "},\"required\":[\"name\"]}";
+
+static char *tool_update_agent_handler(const char *arguments, void *user_data) {
+    ToolBootstrapCtx *ctx = (ToolBootstrapCtx *)user_data;
+    if (!ctx || !ctx->db)
+        return strdup("error: update_agent unavailable");
+
+    char *err = NULL;
+    if (agent_definition_update_validate(ctx->db, arguments,
+                                         ctx->agent_name, &err) != 0) {
+        char *msg;
+        if (err) {
+            size_t n = strlen(err) + 8;
+            msg = malloc(n);
+            if (msg) snprintf(msg, n, "error: %s", err);
+            free(err);
+        } else {
+            msg = strdup("error: invalid agent update");
+        }
+        return msg ? msg : strdup("error: invalid agent update");
+    }
+
+    int64_t aid = approval_create(ctx->db, ctx->session_id,
+        ctx->current_tool_call_id, "update_agent", "update_agent",
+        arguments, "apply");
+    if (aid < 0)
+        return strdup("error: failed to create approval");
+    session_set_state(ctx->db, ctx->session_id, "awaiting_approval");
+    return NULL; /* park */
+}
+
+int tool_update_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
+    int rc = tools_register(reg, "update_agent",
+                          "Propose changes to an existing agent — yourself, or one you "
+                          "created (requires human approval). Overlays the fields you set "
+                          "(description, system_prompt, models, sandbox_profile, "
+                          "max_iterations, shell_timeout) and ADDS grants; absent fields "
+                          "keep their value, grants are never removed. Capped by your own "
+                          "profile and grants, like create_agent.",
+                          UPDATE_AGENT_PARAMS,
+                          tool_update_agent_handler, ctx);
+    if (rc == 0)
+        tools_set_recipe(reg, "update_agent",
+                         (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});
+    return rc;
+}
+
 int tool_create_agent_register(ToolRegistry *reg, ToolBootstrapCtx *ctx) {
     int rc = tools_register(reg, "create_agent",
                           "Propose creation of a named agent (requires human approval). "

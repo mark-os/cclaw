@@ -96,6 +96,24 @@ will need, plus a provider definition and your own model switch. See the
 parks — then parks one operator approval enumerating every grant value, the
 profile, extensions, and models. Give the approver a good `description`.
 
+## Refining an agent you created
+
+`update_agent {name, ...fields}` revises an existing agent — yourself, or one
+you created (`agents.created_by`). Same approval gate and the same caps as
+creation, applied against you:
+
+- Fields overlay: `description`, `system_prompt` (full replacement text),
+  `primary_model` / `secondary_model` (must resolve to registered models),
+  `sandbox_profile` (never looser than yours), `max_iterations`,
+  `shell_timeout`. Absent fields keep their value; unknown keys are errors.
+- `grants` **adds** (each must be one you hold) — it never removes. Removing
+  a grant is an operator act, and expanding *your own* grants stays with
+  `request_config` (escalation, not delegation).
+
+So a first version doesn't have to be perfect: ship the Watcher, watch a few
+sessions, then `update_agent` the prompt. Include a `reason` — the approver
+sees old behavior only through you.
+
 ## Working with the new agent
 
 - `launch_agent {agent, prompt}` — start a session on it; returns a session id.

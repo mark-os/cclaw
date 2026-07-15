@@ -739,51 +739,27 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                 SendReq *r = g_send_active;
                 int ok = (!cerr && status >= 200 && status < 300);
                 if (r->outbox_id > 0) {
-                    /* Format rejections degrade the delivery mode and re-deliver;
-                     * both are checked before the transient/terminal split since
-                     * they're 4xx (otherwise terminal). The ladder only descends
-                     * (rich → html → plain), so neither branch can loop.
-                     *
-                     * 1. sendRichMessage rejected (400 = bad markdown/limits, 404 =
-                     *    method unknown to this Bot API) → re-deliver as HTML. A 404
-                     *    or an explicit "method not found" body means the server
-                     *    doesn't speak the method at all — latch rich_disabled so
-                     *    later rows skip straight to HTML. cerr==NULL here (status
-                     *    is only read on a completed transfer), so a transient curl
-                     *    failure never trips this. */
-                    int rich_reject = (!cerr && (status == 400 || status == 404) &&
-                                       r->url && strstr(r->url, "/sendRichMessage") != NULL);
-                    /* 2. HTML render rejected ("can't parse entities" 400) → plain. */
-                    int parse_err = (status == 400 && g_send_resp.data &&
-                                     strstr(g_send_resp.data, "can't parse entities") != NULL);
-                    if (!ok && rich_reject) {
-                        send_queue_drop_outbox(r->outbox_id);
-                        channel_retry_outbox_mode(g_ctx, r->outbox_id, 1);
-                        if (status == 404 ||
-                            (g_send_resp.data &&
-                             (strstr(g_send_resp.data, "method not found") != NULL ||
-                              strstr(g_send_resp.data, "METHOD_NOT_FOUND") != NULL))) {
-                            channel_set_config(g_ctx, "rich_disabled", "1");
-                            LOG_WARN_("outbox sendRichMessage unsupported (status=%ld)"
-                                      " -> rich_disabled latched", status);
-                        }
-                        LOG_WARN_("outbox rich rejected %ld id=%lld -> retry html",
-                                  status, (long long)r->outbox_id);
-                    } else if (!ok && parse_err) {
-                        send_queue_drop_outbox(r->outbox_id);
-                        channel_retry_outbox_mode(g_ctx, r->outbox_id, 2);
-                        LOG_WARN_("outbox parse-entities 400 id=%lld -> retry plain",
-                                  (long long)r->outbox_id);
-                    } else if (!ok) {
+                    if (!ok) {
                         /* Transient = network/curl error (cerr set), 429, or 5xx. Everything
-                         * else (400/401/403/404) is terminal. */
+                         * else (4xx) is terminal — with one generic exception below. */
                         int transient = (cerr != NULL) || status == 429 || (status >= 500 && status < 600);
                         int attempts = channel_outbox_attempts(g_ctx, r->outbox_id);
+                        int mode = channel_outbox_mode(g_ctx, r->outbox_id);
                         /* Always clear remaining queued chunks for this row: on retry the row
                          * is re-drained and re-chunked from scratch (accepting at-least-once
                          * duplication of earlier chunks over permanent truncation). */
                         send_queue_drop_outbox(r->outbox_id);
-                        if (transient && attempts < MAX_OUTBOX_ATTEMPTS) {
+                        if (!transient && mode == 0) {
+                            /* Terminal 4xx on a formatted (mode 0) delivery: re-deliver
+                             * once at plain before failing. C needs no platform knowledge
+                             * of WHY the format was rejected — the platform's renderer is
+                             * the channel handler's business (it sees item.mode). A 4xx
+                             * whose cause isn't the formatting wastes one plain retry and
+                             * then fails below. The ladder only descends, so no loop. */
+                            channel_retry_outbox_mode(g_ctx, r->outbox_id, 1);
+                            LOG_WARN_("outbox formatted delivery rejected %ld id=%lld"
+                                      " -> retry plain", status, (long long)r->outbox_id);
+                        } else if (transient && attempts < MAX_OUTBOX_ATTEMPTS) {
                             int delay = (status == 429) ? outbox_retry_after(g_send_resp.data) : 0;
                             if (delay <= 0) { delay = 1 << attempts; if (delay > 60) delay = 60; }
                             channel_retry_outbox(g_ctx, r->outbox_id, delay);

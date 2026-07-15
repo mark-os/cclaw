@@ -143,31 +143,22 @@ static void test_channel_outbox_mode(void) {
 
     ChannelOutboxRow *row = channel_next_outbox(ctx);
     assert(row);
-    assert(row->deliver_mode == 0);   /* first delivery: auto/rich */
+    assert(row->deliver_mode == 0);   /* first delivery: formatted */
     int64_t id = row->id;
     channel_outbox_row_free(row);
+    assert(channel_outbox_mode(ctx, id) == 0);
 
-    /* Simulate a rich rejection → re-deliver as html. */
+    /* Simulate a format rejection → re-deliver plain. */
     channel_dispatch_outbox(ctx, id);                  /* 'sending' */
-    int rc = channel_retry_outbox_mode(ctx, id, 1);    /* back to pending, html */
+    int rc = channel_retry_outbox_mode(ctx, id, 1);    /* back to pending, plain */
     assert(rc == 0);
 
     row = channel_next_outbox(ctx);
     assert(row);
     assert(row->id == id);
-    assert(row->deliver_mode == 1);   /* re-delivery: html */
+    assert(row->deliver_mode == 1);   /* re-delivery: plain */
     channel_outbox_row_free(row);
-
-    /* Then a parse-entities rejection → plain. */
-    channel_dispatch_outbox(ctx, id);
-    rc = channel_retry_outbox_mode(ctx, id, 2);
-    assert(rc == 0);
-
-    row = channel_next_outbox(ctx);
-    assert(row);
-    assert(row->id == id);
-    assert(row->deliver_mode == 2);   /* re-delivery: plain */
-    channel_outbox_row_free(row);
+    assert(channel_outbox_mode(ctx, id) == 1);
 
     channel_ctx_free(ctx);
 }

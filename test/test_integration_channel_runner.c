@@ -60,21 +60,13 @@ static void write_test_js(void) {
         "      outbox_id: item.id, final: 1});\n"
         "    return;\n"
         "  }\n"
-        /* Mode ladder mirroring channel_telegram.qjs: 0=rich, 1=html, 2=plain.
-         * Length check is chars, not bytes — byte-exactness is the template's
-         * job (test_telegram_js); this exercises the C loop's mode plumbing. */
-        "  var mode = item.mode || 0;\n"
-        "  if (mode === 0 && channel.getState('rich_disabled') !== '1' &&\n"
-        "      p.text.length <= 32768) {\n"
-        "    channel.send({method: 'POST', url: base + '/bot' + token + '/sendRichMessage',\n"
-        "      body: JSON.stringify({chat_id: parseInt(p.chat_id,10),\n"
-        "                            rich_message: {markdown: p.text}}),\n"
-        "      outbox_id: item.id, final: 1});\n"
-        "    return;\n"
-        "  }\n"
+        /* Mode ladder mirroring channel_telegram.qjs: 0=formatted, 1=plain.
+         * Rendering fidelity is the template's job (test_telegram_js); this
+         * exercises the C loop's mode plumbing. */
+        "  var plain = (item.mode || 0) >= 1;\n"
         "  channel.send({method: 'POST', url: base + '/bot' + token + '/sendMessage',\n"
         "    body: JSON.stringify({chat_id: parseInt(p.chat_id,10), text: p.text,\n"
-        "                          html: mode === 1}),\n"
+        "                          plain: plain}),\n"
         "    outbox_id: item.id, final: 1});\n"
         "}\n"
         "function onRequest(req) {\n"
@@ -219,7 +211,7 @@ int main(void) {
         "\"message\":{\"message_id\":1,\"chat\":{\"id\":42},\"text\":\"hello from test\"}}]}");
     mock_tg_enqueue_updates("{\"ok\":true,\"result\":[]}");
     mock_tg_enqueue_updates("{\"ok\":true,\"result\":[]}");
-    mock_tg_enqueue_send("{\"ok\":true,\"result\":{\"message_id\":2}}");
+    mock_tg_enqueue_send(200, "{\"ok\":true,\"result\":{\"message_id\":2}}");
 
     sqlite3 *db = setup_db(port);
     if (!db) { mock_server_stop(); FAIL("db_open"); }
@@ -276,7 +268,7 @@ int main(void) {
         printf("  PASS: has_outbox capability recorded\n");
     }
 
-    /* 2. Outbox mode 0 → one sendRichMessage carrying the raw markdown → auto-ack */
+    /* 2. Outbox mode 0 → one formatted sendMessage → auto-ack */
     sqlite3_exec(db,
         "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
         "('test', 1, '{\"chat_id\":\"42\",\"text\":\"**reply** from agent\"}')",
@@ -286,137 +278,81 @@ int main(void) {
     if (!wait_outbox_status(db, "reply", "delivered")) {
         kill(pid, SIGTERM); waitpid(pid, NULL, 0);
         db_close(db); mock_server_stop();
-        FAIL("rich outbox not auto-acked");
+        FAIL("outbox not auto-acked");
     }
-    if (mock_tg_rich_count() != 1) {
+    if (mock_tg_send_count() != 1) {
         kill(pid, SIGTERM); waitpid(pid, NULL, 0);
         db_close(db); mock_server_stop();
-        FAIL("expected exactly one sendRichMessage request");
-    }
-    {
-        const char *rb = mock_tg_last_rich_body();
-        if (!rb || !strstr(rb, "\"rich_message\":{\"markdown\":\"**reply** from agent\"}")) {
-            fprintf(stderr, "  rich body was: %s\n", rb ? rb : "(null)");
-            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
-            db_close(db); mock_server_stop();
-            FAIL("rich_message.markdown not raw markdown");
-        }
-    }
-    if (mock_tg_send_count() != 0) {
-        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
-        db_close(db); mock_server_stop();
-        FAIL("rich delivery must not also hit sendMessage");
-    }
-    printf("  PASS: outbox wake -> sendRichMessage raw markdown -> auto-ack\n");
-
-    /* 2a. Rich 400 → same row re-delivered as HTML (deliver_mode=1) */
-    mock_tg_enqueue_rich(400,
-        "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: rich message invalid\"}");
-    sqlite3_exec(db,
-        "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
-        "('test', 1, '{\"chat_id\":\"42\",\"text\":\"rich400row\"}')",
-        NULL, NULL, NULL);
-    channel_outbox_wake(DB_PATH, "test");
-
-    if (!wait_outbox_status(db, "rich400row", "delivered")) {
-        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
-        db_close(db); mock_server_stop();
-        FAIL("rich-400 row not re-delivered");
-    }
-    if (outbox_mode(db, "rich400row") != 1) {
-        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
-        db_close(db); mock_server_stop();
-        FAIL("rich-400 row did not degrade to deliver_mode=1");
+        FAIL("expected exactly one sendMessage request");
     }
     {
         const char *sb = mock_tg_last_send_body();
-        if (!sb || !strstr(sb, "rich400row") || !strstr(sb, "\"html\":true")) {
+        if (!sb || !strstr(sb, "\"plain\":false")) {
             fprintf(stderr, "  send body was: %s\n", sb ? sb : "(null)");
             kill(pid, SIGTERM); waitpid(pid, NULL, 0);
             db_close(db); mock_server_stop();
-            FAIL("rich-400 re-delivery did not arrive as HTML sendMessage");
+            FAIL("mode-0 delivery did not arrive formatted");
         }
     }
-    {
-        char *latch = state_value(db, "rich_disabled");
-        if (latch) {
-            free(latch);
-            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
-            db_close(db); mock_server_stop();
-            FAIL("a plain 400 must not latch rich_disabled");
-        }
-    }
-    printf("  PASS: rich 400 -> re-delivered as HTML, no latch\n");
+    printf("  PASS: outbox wake -> formatted sendMessage -> auto-ack\n");
 
-    /* 2b. >32KB text → no rich attempt, straight to sendMessage */
-    {
-        int rich_before = mock_tg_rich_count();
-        /* hex(zeroblob(16500)) = 33000 chars of '0' — over the 32768 cap */
-        sqlite3_exec(db,
-            "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
-            "('test', 1, json_object('chat_id','42','text', hex(zeroblob(16500)) || 'bigrow'))",
-            NULL, NULL, NULL);
-        channel_outbox_wake(DB_PATH, "test");
-
-        if (!wait_outbox_status(db, "bigrow", "delivered")) {
-            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
-            db_close(db); mock_server_stop();
-            FAIL("oversize row not delivered");
-        }
-        if (mock_tg_rich_count() != rich_before) {
-            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
-            db_close(db); mock_server_stop();
-            FAIL("oversize row must not attempt sendRichMessage");
-        }
-    }
-    printf("  PASS: >32KB text skips rich, delivered chunked\n");
-
-    /* 2c. Rich 404 "method not found" → HTML re-delivery + rich_disabled
-     * latch; the NEXT row skips rich entirely. */
-    mock_tg_enqueue_rich(404,
-        "{\"ok\":false,\"error_code\":404,\"description\":\"Not Found: method not found\"}");
+    /* 2a. Terminal 400 on a formatted row → re-delivered plain
+     * (deliver_mode=1). The C loop must not care WHY the 400 happened —
+     * the body carries no recognizable format-error text on purpose. */
+    mock_tg_enqueue_send(400,
+        "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: whatever\"}");
     sqlite3_exec(db,
         "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
-        "('test', 1, '{\"chat_id\":\"42\",\"text\":\"rich404row\"}')",
+        "('test', 1, '{\"chat_id\":\"42\",\"text\":\"fmt400row\"}')",
         NULL, NULL, NULL);
     channel_outbox_wake(DB_PATH, "test");
 
-    if (!wait_outbox_status(db, "rich404row", "delivered")) {
+    if (!wait_outbox_status(db, "fmt400row", "delivered")) {
         kill(pid, SIGTERM); waitpid(pid, NULL, 0);
         db_close(db); mock_server_stop();
-        FAIL("rich-404 row not re-delivered");
+        FAIL("formatted-400 row not re-delivered");
+    }
+    if (outbox_mode(db, "fmt400row") != 1) {
+        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        db_close(db); mock_server_stop();
+        FAIL("formatted-400 row did not degrade to deliver_mode=1");
     }
     {
-        char *latch = state_value(db, "rich_disabled");
-        int latched = latch && strcmp(latch, "1") == 0;
-        free(latch);
-        if (!latched) {
+        const char *sb = mock_tg_last_send_body();
+        if (!sb || !strstr(sb, "fmt400row") || !strstr(sb, "\"plain\":true")) {
+            fprintf(stderr, "  send body was: %s\n", sb ? sb : "(null)");
             kill(pid, SIGTERM); waitpid(pid, NULL, 0);
             db_close(db); mock_server_stop();
-            FAIL("rich 404 did not latch rich_disabled=1");
+            FAIL("formatted-400 re-delivery did not arrive plain");
         }
     }
-    {
-        int rich_before = mock_tg_rich_count();
-        sqlite3_exec(db,
-            "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
-            "('test', 1, '{\"chat_id\":\"42\",\"text\":\"afterlatch\"}')",
-            NULL, NULL, NULL);
-        channel_outbox_wake(DB_PATH, "test");
-        if (!wait_outbox_status(db, "afterlatch", "delivered")) {
-            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
-            db_close(db); mock_server_stop();
-            FAIL("post-latch row not delivered");
-        }
-        if (mock_tg_rich_count() != rich_before) {
-            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
-            db_close(db); mock_server_stop();
-            FAIL("post-latch row still attempted sendRichMessage");
-        }
-    }
-    printf("  PASS: rich 404 latches rich_disabled; later rows skip rich\n");
+    printf("  PASS: formatted 400 -> re-delivered plain\n");
 
-    /* 2b. base_url pin: an outbox item whose send URL points at a DIFFERENT
+    /* 2b. Terminal 400 on the plain re-delivery → row fails (ladder floor:
+     * a second format bump is impossible, and 400 is not transient). */
+    mock_tg_enqueue_send(400,
+        "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: chat not found\"}");
+    mock_tg_enqueue_send(400,
+        "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: chat not found\"}");
+    sqlite3_exec(db,
+        "INSERT INTO channel_outbox(channel_name, session_id, payload) VALUES"
+        "('test', 1, '{\"chat_id\":\"42\",\"text\":\"plain400row\"}')",
+        NULL, NULL, NULL);
+    channel_outbox_wake(DB_PATH, "test");
+
+    if (!wait_outbox_status(db, "plain400row", "failed")) {
+        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        db_close(db); mock_server_stop();
+        FAIL("400-at-plain row was not terminally failed");
+    }
+    if (outbox_mode(db, "plain400row") != 1) {
+        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        db_close(db); mock_server_stop();
+        FAIL("400-at-plain row should have failed at deliver_mode=1");
+    }
+    printf("  PASS: 400 at plain -> terminal fail (no loop)\n");
+
+    /* 2c. base_url pin: an outbox item whose send URL points at a DIFFERENT
      * host than the channel's configured base_url must be refused before any
      * curl request is made (url_host_allowed → make_easy NULL → synchronous
      * channel_fail_outbox). The mock server's send count must not increase and

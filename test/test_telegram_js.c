@@ -152,50 +152,48 @@ int main(void) {
     /* a lone dashes line (no pipe) is not a table delimiter */
     expect("md_not_table", "markdownToTelegramHtml('a | b\\n---')", "a | b\n---");
 
-    /* ── utf8ByteLen: UTF-8 byte counting on UTF-16 strings ─────────── */
-    expect("utf8len_ascii", "'' + utf8ByteLen('abc')", "3");
-    expect("utf8len_2byte", "'' + utf8ByteLen('\\u00e9')", "2");       /* é */
-    expect("utf8len_3byte", "'' + utf8ByteLen('\\u20ac')", "3");       /* € */
-    expect("utf8len_astral",
-        "'' + utf8ByteLen(String.fromCharCode(0xD83D,0xDE00))", "4");  /* 😀 */
-
-    /* ── onOutbox end-to-end: mode ladder rich → html → plain ───────── */
-    /* Mode 0 (auto): one sendRichMessage carrying the RAW markdown. */
-    expect_has("onOutbox_rich_method",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:0}),"
-        "__sent[0].url",
-        "sendRichMessage");
-    expect_has("onOutbox_rich_raw_markdown",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:0}),"
-        "__sent[0].body",
-        "\"rich_message\":{\"markdown\":\"**hi**\"}");
-    /* rich_disabled latch → straight to chunked HTML. */
-    expect_has("onOutbox_rich_disabled_falls_to_html",
-        "channel.setState('rich_disabled','1'),"
+    /* ── onOutbox end-to-end: mode ladder formatted → plain ─────────── */
+    /* Mode 0 (formatted): body carries HTML + parse_mode. */
+    expect_has("onOutbox_formatted_html",
         "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:0}),"
         "__sent[0].body",
         "<b>hi</b>");
-    /* Over the 32KB byte limit → no rich attempt, chunked HTML. */
-    expect_lacks("onOutbox_oversize_no_rich",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'x'.repeat(33000)}),mode:0}),"
-        "__sent[0].url",
-        "sendRichMessage");
-    /* Mode 1 (html): body carries HTML + parse_mode. */
-    expect_has("onOutbox_html",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:1}),"
-        "__sent[0].body",
-        "<b>hi</b>");
-    expect_has("onOutbox_html_parsemode",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:1}),"
+    expect_has("onOutbox_formatted_parsemode",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:0}),"
         "__sent[0].body",
         "\"parse_mode\":\"HTML\"");
-    /* Mode 2 (plain): raw text, no parse_mode. */
+    /* Mode 1 (plain): raw text, no parse_mode. */
     expect_has("onOutbox_plain_text",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:2}),"
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:1}),"
         "__sent[0].body",
         "**hi**");
     expect_lacks("onOutbox_plain_no_parsemode",
-        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:2}),"
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**'}),mode:1}),"
+        "__sent[0].body",
+        "parse_mode");
+
+    /* ── keyboard payloads (approval prompts) ride the same ladder ──── */
+    /* Formatted: fenced block renders to <pre>, parse_mode set, buttons kept. */
+    expect_has("onOutbox_keyboard_html",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,"
+        "text:'**Agent** requests:\\n```\\ntool  web_fetch\\n```',"
+        "keyboard:[[{text:'Grant',callback_data:'appr:9:yes'}]]}),mode:0}),"
+        "__sent[0].body",
+        "<pre>tool  web_fetch\\n</pre>");
+    expect_has("onOutbox_keyboard_parsemode",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**',"
+        "keyboard:[[{text:'Grant',callback_data:'appr:9:yes'}]]}),mode:0}),"
+        "__sent[0].body",
+        "\"parse_mode\":\"HTML\"");
+    expect_has("onOutbox_keyboard_buttons_kept",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**',"
+        "keyboard:[[{text:'Grant',callback_data:'appr:9:yes'}]]}),mode:0}),"
+        "__sent[0].body",
+        "\"callback_data\":\"appr:9:yes\"");
+    /* Plain re-delivery: raw text, no parse_mode, buttons kept. */
+    expect_lacks("onOutbox_keyboard_plain",
+        "onOutbox({id:1,payload:JSON.stringify({chat_id:5,text:'**hi**',"
+        "keyboard:[[{text:'Grant',callback_data:'appr:9:yes'}]]}),mode:1}),"
         "__sent[0].body",
         "parse_mode");
 

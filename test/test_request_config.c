@@ -515,6 +515,148 @@ static void test_batch_apply(void) {
 }
 
 
+/* 6b. agent + routes sections: eager validation and batch apply. */
+static void test_agent_routes_sections(void) {
+    sqlite3 *db = test_db_open(":memory:");
+    assert(db);
+    config_registry_sync(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    db_agent_upsert(db, "Other", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+
+    /* A live channel plus a route already owned by another agent. */
+    assert(sqlite3_exec(db,
+        "INSERT INTO extensions(name,path) VALUES('tgext','/x');"
+        "INSERT INTO channels(name,extension_name) VALUES('tg','tgext');"
+        "INSERT INTO channel_routes(channel_name,channel_id,agent_name)"
+        " VALUES('tg','-500','Other');", NULL, NULL, NULL) == SQLITE_OK);
+
+    RequestConfigCtx ctx = {
+        .db = db, .agent_name = "test", .session_id = sid,
+        .agents_dir = NULL, .current_tool_call_id = "ar1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+    assert(session_set_state(db, sid, "tool_running") == 0);
+
+    /* agent section: whitelist, integer bounds, model existence. */
+    char *r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"agent\":{\"sandbox_profile\":\"host\"}}}");
+    assert(r && strstr(r, "unknown agent key"));
+    free(r);
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"agent\":{\"max_iterations\":0}}}");
+    assert(r && strstr(r, "positive integer"));
+    free(r);
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"agent\":{\"primary_model\":\"ghost-model\"}}}");
+    assert(r && strstr(r, "unknown model"));
+    free(r);
+
+    /* routes section: shape, unknown channel, wildcard, foreign owner. */
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"routes\":[\"tg\"]}}");
+    assert(r && strstr(r, "'channel:chat_id'"));
+    free(r);
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"routes\":[\"nochan:1\"]}}");
+    assert(r && strstr(r, "unknown channel"));
+    free(r);
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"routes\":[\"tg:*\"]}}");
+    assert(r && strstr(r, "operator-only"));
+    free(r);
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{\"routes\":[\"tg:-500\"]}}");
+    assert(r && strstr(r, "already owned"));
+    free(r);
+
+    /* One document: define a provider, adopt its model as the agent's own
+     * primary (the 'model@provider' id the apply seeds), request a route. */
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{"
+        "\"provider\":{\"provider\":\"gemini\"},"
+        "\"agent\":{\"primary_model\":\"gemini-2.5-flash@gemini\","
+        "\"max_iterations\":40},"
+        "\"routes\":[\"tg:777\"]}}");
+    assert(r == NULL); /* parked */
+
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT args_json FROM approvals WHERE session_id=?1"
+        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    char *args_copy = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+
+    assert(request_config_changes_apply(db, "test", args_copy, 0) == 0);
+    free(args_copy);
+
+    /* models row seeded → the adopted id resolves. */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT provider_name, model FROM models"
+        " WHERE id='gemini-2.5-flash@gemini'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "gemini") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "gemini-2.5-flash") == 0);
+    sqlite3_finalize(s);
+
+    /* agents row updated, untouched columns kept. */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT primary_model, max_iterations, shell_timeout FROM agents"
+        " WHERE name='test'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0),
+                  "gemini-2.5-flash@gemini") == 0);
+    assert(sqlite3_column_int(s, 1) == 40);
+    assert(sqlite3_column_int(s, 2) == 30); /* default untouched */
+    sqlite3_finalize(s);
+
+    /* route landed for this agent, explicit delivery (send authority only). */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT agent_name, delivery_mode FROM channel_routes"
+        " WHERE channel_name='tg' AND channel_id='777'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "test") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "explicit") == 0);
+    sqlite3_finalize(s);
+
+    /* Route captured by another agent between park and apply → the whole
+     * document rolls back (savepoint), including the agent section. */
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":{"
+        "\"agent\":{\"max_iterations\":99},\"routes\":[\"tg:888\"]}}");
+    assert(r == NULL);
+    assert(sqlite3_exec(db,
+        "INSERT INTO channel_routes(channel_name,channel_id,agent_name)"
+        " VALUES('tg','888','Other');", NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT args_json FROM approvals WHERE session_id=?1"
+        " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    args_copy = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    assert(request_config_changes_apply(db, "test", args_copy, 0) == -1);
+    free(args_copy);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT max_iterations FROM agents WHERE name='test'",
+        -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 40); /* rolled back, not 99 */
+    sqlite3_finalize(s);
+
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_agent_routes_sections\n");
+}
+
+
 /* 7. Rollback: hand-craft args_json with an unregistered config key, call
  *    request_config_changes_apply, assert -1 AND none of the doc's grants
  *    landed. */
@@ -664,6 +806,7 @@ int main(void) {
     test_provider_defaults();
     test_dedup();
     test_batch_apply();
+    test_agent_routes_sections();
     test_apply_rollback();
     test_rename_agent();
     test_unknown_action();

@@ -834,6 +834,7 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
         { "extension.json", TPL_DOCS_MANIFEST_JSON },
         { "skills/configuring-cclaw/SKILL.md",    TPL_DOCS_CONFIGURING_CCLAW_MD },
         { "skills/extending-cclaw/SKILL.md",      TPL_DOCS_EXTENDING_CCLAW_MD },
+        { "skills/creating-agents/SKILL.md",      TPL_DOCS_CREATING_AGENTS_MD },
         { "skills/cclaw-agents/SKILL.md",         TPL_DOCS_CCLAW_AGENTS_MD },
         { "skills/cclaw-channels/SKILL.md",       TPL_DOCS_CCLAW_CHANNELS_MD },
         { "skills/cclaw-secrets-memory/SKILL.md", TPL_DOCS_CCLAW_SECRETS_MEMORY_MD },

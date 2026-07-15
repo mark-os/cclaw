@@ -33,25 +33,65 @@ Design invariants (from the architecture review, SELF-CONFIGURATION-REVIEW.md):
 
 ## `request_changes`
 
-`request_config` action `request_changes` takes a single `changes` JSON document — one human approval covers the whole batch (grants, config values, and/or a provider definition). The document uses the **same grants dialect** as `extension.json`'s `$.agents[].grants` — two routes, one shape: extension manifests declare new named things; `request_changes` mutates the calling agent's own live state.
+`request_config` action `request_changes` takes a single `changes` JSON document — one human approval covers the whole batch. The document uses the **same grants dialect** as `extension.json`'s `$.agents[].grants` — two routes, one shape: extension manifests declare new named things; `request_changes` mutates the calling agent's own live state.
 
 ```json
 {"action":"request_changes","changes":{
    "grants":{"tools":["name"],"hosts":[".example.com"],"read_paths":["/abs"],"write_paths":["/abs"]},
+   "agent":{"primary_model":"gemini-2.5-flash@gemini","max_iterations":40},
+   "routes":["telegram:12345"],
    "config":{"registered.key":"value-string"},
    "provider":{"provider":"openrouter","model":"deepseek/deepseek-v4-flash"}
  },"reason":"shown to approver"}
 ```
 
+Sections by scope — the approval prompt groups them the same way:
+
+| Section | Scope | Applies as |
+|---------|-------|-----------|
+| `grants` | agent | `grants` rows for the caller |
+| `agent` | agent | whitelisted columns on the caller's `agents` row (`primary_model`, `secondary_model`, `max_iterations`, `shell_timeout`) |
+| `routes` | agent | `channel_routes` rows (`channel:chat_id`, first-come, `explicit` delivery, wildcards operator-only) |
+| `config` | **system** | global `config` table |
+| `provider` | **system** | `providers` upsert + a `models` row for its default model |
+
 - **Eager validation (typo-hostile)**: unknown sections/keys are errors, never
   dropped. Config keys must be registered (`search_config` lists them);
   secret-flagged keys are rejected (`save_secret` is the path for those).
   Provider defaults are filled at park time so the approver sees the final values.
-  Paths must be absolute. A document that can't apply never parks.
+  Paths must be absolute. `agent` model references must resolve to a `models`
+  row (`model` or `model@provider`) — or to the model this same document's
+  `provider` section defines. Routes already owned by another agent are
+  refused. A document that can't apply never parks.
 - **All-or-nothing apply**: on approval, the entire document is applied inside a
-  savepoint. If any line fails, the whole document rolls back.
+  savepoint. If any line fails (including a route captured between park and
+  apply), the whole document rolls back.
 - **Approval summary**: enumerates every requested line (hosts, paths, tools,
-  config k=v, provider) so the approver sees the full scope at a glance.
+  routes, agent k=v, config k=v, provider) in fenced blocks grouped
+  **agent-scoped vs system-wide** so the approver sees the blast radius at a
+  glance — values, never counts.
+
+### Scoping model (why `config` is system-wide)
+
+Agent-level state lives on agent-keyed tables (`agents` columns, `grants`,
+`agent_extensions`, `channel_routes`, `memory_blocks`) and is mutated by the
+agent-scoped sections above. The `config` registry is deliberately global —
+one home for daemon-wide knobs, not a per-agent namespace. If a knob needs
+per-agent values, it becomes an `agents` column (whitelisted into the `agent`
+section), not a scoped config key.
+
+### Attachment model (one-liner each)
+
+- **provider → agent**: a provider is system-level; an agent *adopts* one by
+  setting `agent.primary_model` to a `model@provider` id. Providers are only
+  reachable through `models` rows (per-request routing joins models →
+  providers), which is why the provider apply seeds one.
+- **session → agent**: fixed at creation (`launch_agent`, channel routing);
+  never reassigned. Moving work = a new session, not a transfer.
+- **session → channel**: a session's `channel_name`/`channel_id` is its
+  origin, set at creation or attached by the operator — not agent-mutable.
+  What an agent requests is a **route** (send authority + inbound routing for
+  a chat), not a rebinding of an existing session.
 
 ## Agent-definition schema
 
@@ -177,9 +217,10 @@ builtin, containing operational how-tos distilled from specs/:
 
 | Skill | Covers |
 |-------|--------|
-| `configuring-cclaw` | config registry, search_config, request_config request_changes document, env precedence |
+| `configuring-cclaw` | config registry, search_config, request_config request_changes document (scoped sections), env precedence |
 | `extending-cclaw` | manifest format, draft→promote→publish→attach, handler contracts, JS dialect limits |
-| `cclaw-agents` | agent-definition schema, create_agent / launch_agent / check_session, grants model, when to *offer* creating an agent |
+| `creating-agents` | agent-definition schema, creation caps, clone_from, the escalate-then-delegate two-step, manifest `agents[]` packaging — top-level because agent creation is a headline capability |
+| `cclaw-agents` | roster, launch_agent / check_session delegation, session↔agent↔channel binding, when to *offer* creating an agent |
 | `cclaw-channels` | channel component, activation via config, outbox/inbox flow |
 | `cclaw-secrets-memory` | `{{SECRET:}}`, save_secret / secret_create, bindings; memory blocks and placement |
 

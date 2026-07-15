@@ -246,7 +246,7 @@ The model acquires new capabilities at runtime via `request_config` (`src/tool_r
 
 | Action | Payload | Effect on approval |
 |--------|---------|--------------------|
-| `request_changes` | `changes` JSON document (any subset of `grants`, `config`, `provider`) | Parks → on approve, applies the whole document in a savepoint (all-or-nothing) |
+| `request_changes` | `changes` JSON document (any subset of `grants`, `agent`, `routes`, `config`, `provider`) | Parks → on approve, applies the whole document in a savepoint (all-or-nothing) |
 | `rename_agent` | new name (+ optional preamble) | Parks → on approve, renames agent |
 
 The `request_changes` document batches everything an agent needs into one approval:
@@ -257,12 +257,14 @@ The `request_changes` document batches everything an agent needs into one approv
 | `grants.hosts` | array of hostnames (prefix `.` covers subdomains) | inserts `grants` rows (kind='host') |
 | `grants.read_paths` | array of absolute paths | inserts `grants` rows (kind='read_path') |
 | `grants.write_paths` | array of absolute paths | inserts `grants` rows (kind='write_path') |
+| `agent` | whitelisted own-row settings (primary_model, secondary_model, max_iterations, shell_timeout) | updates the caller's `agents` row |
+| `routes` | array of `channel:chat_id` strings | inserts `channel_routes` rows (caller-owned, `explicit`, first-come; wildcards operator-only) |
 | `config` | object of key→value-string | calls `config_set()` per key |
-| `provider` | provider definition (provider, base_url, model, api_key_env) | upserts `providers` row |
+| `provider` | provider definition (provider, base_url, model, api_key_env) | upserts `providers` row + seeds its default model into `models` |
 
-All actions use `resolve='apply'` approvals (ambient capability grants, not one-shot reruns). Apply is savepoint-wrapped: if any line fails, the entire document rolls back.
+All actions use `resolve='apply'` approvals (ambient capability grants, not one-shot reruns). Apply is savepoint-wrapped: if any line fails (including a route captured by another agent between park and apply), the entire document rolls back. The approval prompt groups lines **agent-scoped vs system-wide** so the approver sees the blast radius.
 
-**Eager validation**: unknown sections, unknown grant kinds, unregistered config keys, secret-flagged config keys, relative paths, and malformed provider definitions are rejected at request time — a document that can't apply never parks.
+**Eager validation**: unknown sections, unknown grant kinds, unknown agent keys, unresolvable model references, malformed or foreign-owned routes, unregistered config keys, secret-flagged config keys, relative paths, and malformed provider definitions are rejected at request time — a document that can't apply never parks.
 
 **Session-scoped pending dedup**: if an identical `changes` document is already pending in this session, `request_config` returns an immediate error instead of queuing a second identical prompt. A prior *denial* does not permanently forbid re-asking — the model may re-request later (e.g. if told to by the user); a human can also reconsider a past denial directly via the channel's `/grants` menu (below).
 

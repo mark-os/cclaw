@@ -18,7 +18,7 @@ Agents ⊥ store provider keys. Keys decrypted at runtime, injected to worker th
 | OpenAI | `OPENAI_API_KEY` | Direct. |
 | Anthropic | `ANTHROPIC_API_KEY` | Direct. Different wire format (content blocks). |
 
-Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `request_changes` (the `provider` section of the changes document) or operator SQL.
+Bootstrap: the env var works directly on first run; `save_secret`/admin `set key` persist the key encrypted into `secrets` (scope `system`). Resolution is env first, then the system secret under the same name. Provider rows themselves change only via the approval-gated `request_config` action `request_changes` (the `provider` section of the changes document) or operator SQL. Applying a provider section also seeds its default model into `models` (id `model@provider`, lowest routing priority) — per-request routing joins `models → providers`, so a provider row without a models row would otherwise be unreachable outside the empty-table fallback. An agent adopts the new provider by co-batching `agent.primary_model: "model@provider"` in the same document.
 
 ## Provider Fallback Chain
 

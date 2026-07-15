@@ -265,7 +265,10 @@ int64_t *approval_list_block_due(sqlite3 *db, int block_sec, const char *me, int
 int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPostWindow outcome) {
     if (!a) return -1;
     const char *what = a->action ? a->action : (a->tool_name ? a->tool_name : "tool");
-    char buf[320];
+    /* Denied/expired messages carry the next-step norm — the moment the model
+     * reads the outcome is the moment the norm matters, and the skill that
+     * documents it may never be loaded. */
+    char buf[512];
     switch (outcome) {
     case APPROVAL_PW_RERUN_APPROVED:
         snprintf(buf, sizeof(buf),
@@ -274,7 +277,10 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPost
                  (long long)a->id, what);
         break;
     case APPROVAL_PW_RERUN_DENIED:
-        snprintf(buf, sizeof(buf), "Approval #%lld for '%s' was denied.",
+        snprintf(buf, sizeof(buf),
+                 "Approval #%lld for '%s' was denied. Don't re-request the "
+                 "same thing — adjust your approach, or explain what you were "
+                 "trying to do and let the operator decide.",
                  (long long)a->id, what);
         break;
     case APPROVAL_PW_APPLY_GRANTED:
@@ -282,13 +288,17 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPost
                  (long long)a->id, what);
         break;
     case APPROVAL_PW_APPLY_DENIED:
-        snprintf(buf, sizeof(buf), "Approval #%lld denied: %s.",
+        snprintf(buf, sizeof(buf),
+                 "Approval #%lld denied: %s. Don't re-request the same change "
+                 "— adjust, or explain what you were trying to do.",
                  (long long)a->id, what);
         break;
     case APPROVAL_PW_EXPIRED:
     default:
         snprintf(buf, sizeof(buf),
-                 "Approval #%lld for '%s' expired without a decision.",
+                 "Approval #%lld for '%s' expired without a decision. Not a "
+                 "denial — re-request only if the task still needs it, and "
+                 "mention that it expired.",
                  (long long)a->id, what);
         break;
     }

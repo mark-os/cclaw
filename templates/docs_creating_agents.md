@@ -21,6 +21,26 @@ Don't create agents for one-off work; use your own session or `launch_agent`
 with no name (self-spawn worker). Check the roster in `search_config` first —
 don't duplicate an existing agent.
 
+## Before you build
+
+"Make me a weather agent" names an outcome, not a shape. An agent is durable —
+removal is an operator act — so pin down the shape before spending an approval
+on it. The sequence that works:
+
+1. **Ask once, with a proposal.** Batch what you need to know into one message
+   and lead with the defaults you'd pick: "I'll build a Watcher that polls
+   api.weather.gov each morning and messages this chat on warnings — want
+   anything different?" One word approves it; a specific request needs no
+   question at all.
+2. **Prototype in your own workspace.** Draft the tool as an extension,
+   request any grant you need *for yourself* (you'll bequeath it to the
+   child), and test the handler with `js_eval` until it works.
+3. **Then `create_agent`**, bundling the tested extension and proven grants —
+   the approval the operator sees is for something that already works.
+
+Each ask should arrive with work attached: a proposal, then a working
+prototype, then a definition.
+
 ## The definition schema
 
 One JSON schema everywhere an agent is defined (`create_agent` arguments,

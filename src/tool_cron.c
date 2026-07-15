@@ -164,7 +164,9 @@ static char *cron_remove_thread_run(sqlite3 *db, const char *agent_name,
 
 int tool_cron_register(ToolRegistry *reg, ToolCronCtx *ctx) {
     if (tools_register(reg, "cron_set",
-                       "Schedule a job: recurring (cron_expr) or one-shot (in_seconds)",
+                       "Schedule a prompt to yourself: recurring (cron_expr) or "
+                       "one-shot (in_seconds). This is how a follow-up promise "
+                       "becomes real — schedule it instead of saying 'later'.",
                        CRON_SET_PARAMS, tool_cron_set_handler, ctx) != 0)
         return -1;
     if (tools_register(reg, "cron_list", "List cron jobs for this session",

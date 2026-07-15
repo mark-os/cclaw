@@ -143,7 +143,12 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
 
 int tool_launch_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
     int rc = tools_register(reg, "launch_agent",
-                          "Delegate a task to another agent",
+                          "Delegate a task: start a session on a roster agent, or omit "
+                          "'name' to self-spawn a worker with your identity (optionally "
+                          "narrowed via 'tools'). Blocks until the child finishes unless "
+                          "background:true, which returns a session id for check_session. "
+                          "Prefer delegating to an existing specialist over doing "
+                          "everything inline — the roster is in search_config.",
                           SPAWN_PARAMS_JSON, tool_launch_agent_handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "launch_agent", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});

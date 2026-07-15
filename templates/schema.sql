@@ -294,10 +294,10 @@ CREATE TABLE IF NOT EXISTS channel_outbox (
   status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER NOT NULL DEFAULT 0,
-  -- Delivery degradation ladder: 0=auto (rich markdown if the platform
-  -- supports it), 1=html, 2=plain. Bumped by the C loop when the platform
-  -- rejects a format (e.g. Telegram sendRichMessage 400 → html, "can't
-  -- parse entities" 400 → plain) so re-delivery degrades, never loops.
+  -- Delivery degradation ladder: 0=formatted (platform rich text), 1=plain.
+  -- On a terminal 4xx for a formatted row the C loop re-delivers once at
+  -- plain — platform-agnostic: it never inspects WHY the format was
+  -- rejected. The ladder only descends, so re-delivery can't loop.
   deliver_mode INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   acked_at INTEGER

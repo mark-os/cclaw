@@ -9,7 +9,6 @@
 // approval prompts.
 
 var TG_MAX_MSG_LEN = 4096;
-var TG_RICH_MAX_BYTES = 32768;   // sendRichMessage UTF-8 byte limit
 var VOICE_MAX_SECONDS = 120;     // reject longer voice notes up front
 var VOICE_MAX_BYTES = 1536 * 1024;
 var PHOTO_MAX_BYTES = 3 * 1024 * 1024;  // matches the runner's download cap
@@ -170,47 +169,23 @@ function onOutbox(item) {
         return;
     }
 
+    // item.mode is the delivery ladder position: 0=formatted (markdown →
+    // Telegram HTML), 1=plain. The C loop re-delivers a formatted row at
+    // plain after a terminal 4xx, so a converter bug degrades the message
+    // instead of stalling the reply.
+    var plain = (item.mode || 0) >= 1;
+
     if (payload.keyboard) {
         // Buttoned prompts (e.g. approvals) are short — never chunked.
-        sendKeyboard(chatId, text, payload.keyboard, {outbox_id: item.id, final: 1});
-        return;
-    }
-
-    // item.mode is the delivery ladder position, bumped by the C loop when
-    // the platform rejects a format: 0=auto (rich), 1=html, 2=plain.
-    var mode = item.mode || 0;
-
-    // Rich path (Bot API 10.1 sendRichMessage): one request with the RAW
-    // markdown — no escaping, no chunking. Over the 32KB byte limit, or once
-    // the rich_disabled latch is set (server doesn't speak the method), fall
-    // through to the chunked HTML renderer. A rich 400/404 comes back through
-    // the C loop as mode=1.
-    if (mode === 0 && channel.getState("rich_disabled") !== "1" &&
-        utf8ByteLen(text) <= TG_RICH_MAX_BYTES) {
-        tgOutbox("sendRichMessage", {
-            chat_id: parseInt(chatId, 10),
-            rich_message: {markdown: text}
-        }, item.id, 1);
+        // They ride the same ladder: formatted first, plain on re-delivery.
+        sendKeyboard(chatId, text, payload.keyboard,
+                     {outbox_id: item.id, final: 1, plain: plain});
         return;
     }
 
     // Queue all chunks; the C loop sends them in order and acks the
     // outbox row when the final chunk gets a 2xx.
-    sendChunked(chatId, text, item.id, mode === 2);
-}
-
-// UTF-8 byte length of a JS (UTF-16) string. QuickJS has no TextEncoder;
-// astral chars are a surrogate pair (2 units) encoding 4 UTF-8 bytes.
-function utf8ByteLen(s) {
-    var n = 0;
-    for (var i = 0; i < s.length; i++) {
-        var c = s.charCodeAt(i);
-        if (c < 0x80) n += 1;
-        else if (c < 0x800) n += 2;
-        else if (c >= 0xD800 && c <= 0xDBFF) { n += 4; i++; }
-        else n += 3;
-    }
-    return n;
+    sendChunked(chatId, text, item.id, plain);
 }
 
 // ── Message processing ──────────────────────────────────────────
@@ -551,12 +526,18 @@ function findSplit(text, start, maxLen) {
     return maxLen;
 }
 
+// Buttoned message. Formatted (markdown → HTML) by default so approval
+// prompts render their fenced tables; extra.plain forces raw text — set on
+// ladder re-delivery, and for fire-and-forget menus that bypass the outbox
+// (no ladder behind them, so they must not risk a parse-entities 400).
 function sendKeyboard(chatId, text, keyboard, extra) {
+    var plain = !!(extra && extra.plain);
     var body = {
         chat_id: parseInt(chatId, 10),
-        text: text,
+        text: plain ? text : markdownToTelegramHtml(text),
         reply_markup: {inline_keyboard: keyboard}
     };
+    if (!plain) body.parse_mode = "HTML";
     if (extra && extra.outbox_id) tgOutbox("sendMessage", body, extra.outbox_id, extra.final);
     else tgCast("sendMessage", body);
 }
@@ -577,5 +558,5 @@ function sendApprovalsMenu(chatId) {
             {text: "Deny #" + a.id, callback_data: "appr:" + a.id + ":no"}
         ]);
     }
-    sendKeyboard(chatId, lines.join("\n"), keyboard);
+    sendKeyboard(chatId, lines.join("\n"), keyboard, {plain: true});
 }

@@ -214,7 +214,8 @@ int channel_retry_outbox(ChannelCtx *ctx, int64_t id, int delay_sec) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* Re-deliver immediately at a degraded mode after a format rejection. */
+/* Re-deliver immediately at a degraded mode after a format rejection.
+ * The ladder only descends (formatted → plain), so this can't loop. */
 int channel_retry_outbox_mode(ChannelCtx *ctx, int64_t id, int mode) {
     if (!ctx) return -1;
     const char *sql =
@@ -237,6 +238,23 @@ int channel_outbox_attempts(ChannelCtx *ctx, int64_t id) {
     if (!ctx) return 0;
     const char *sql =
         "SELECT attempts FROM channel_outbox WHERE id=? AND channel_name=?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(stmt, 1, id);
+    sqlite3_bind_text(stmt, 2, ctx->channel_name, -1, SQLITE_STATIC);
+    int val = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        val = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return val;
+}
+
+/* Current deliver_mode of an outbox row, or 0 if unknown. */
+int channel_outbox_mode(ChannelCtx *ctx, int64_t id) {
+    if (!ctx) return 0;
+    const char *sql =
+        "SELECT deliver_mode FROM channel_outbox WHERE id=? AND channel_name=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return 0;

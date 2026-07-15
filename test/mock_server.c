@@ -29,10 +29,6 @@ static MockResponse *s_tg_send_head;
 static MockResponse *s_tg_send_tail;
 static int s_tg_send_count;
 static char *s_tg_last_send_body;
-static MockResponse *s_tg_rich_head;
-static MockResponse *s_tg_rich_tail;
-static int s_tg_rich_count;
-static char *s_tg_last_rich_body;
 
 void mock_server_enqueue(int http_status, const char *body) {
     mock_server_enqueue_with_headers(http_status, body, NULL);
@@ -206,16 +202,6 @@ void mock_server_stop(void) {
     s_tg_send_count = 0;
     free(s_tg_last_send_body);
     s_tg_last_send_body = NULL;
-    while (s_tg_rich_head) {
-        MockResponse *r = s_tg_rich_head;
-        s_tg_rich_head = r->next;
-        free(r->body);
-        free(r);
-    }
-    s_tg_rich_tail = NULL;
-    s_tg_rich_count = 0;
-    free(s_tg_last_rich_body);
-    s_tg_last_rich_body = NULL;
 
     pthread_mutex_unlock(&s_mutex);
 }
@@ -250,16 +236,6 @@ void mock_server_reset(void) {
     s_tg_send_count = 0;
     free(s_tg_last_send_body);
     s_tg_last_send_body = NULL;
-    while (s_tg_rich_head) {
-        MockResponse *r = s_tg_rich_head;
-        s_tg_rich_head = r->next;
-        free(r->body);
-        free(r);
-    }
-    s_tg_rich_tail = NULL;
-    s_tg_rich_count = 0;
-    free(s_tg_last_rich_body);
-    s_tg_last_rich_body = NULL;
     pthread_mutex_unlock(&s_mutex);
 }
 
@@ -287,9 +263,9 @@ void mock_tg_enqueue_updates(const char *body) {
     pthread_mutex_unlock(&s_mutex);
 }
 
-void mock_tg_enqueue_send(const char *body) {
+void mock_tg_enqueue_send(int http_status, const char *body) {
     MockResponse *r = calloc(1, sizeof(MockResponse));
-    r->http_status = 200;
+    r->http_status = http_status;
     r->body = strdup(body);
     pthread_mutex_lock(&s_mutex);
     if (s_tg_send_tail) s_tg_send_tail->next = r;
@@ -307,28 +283,6 @@ int mock_tg_send_count(void) {
 
 const char *mock_tg_last_send_body(void) {
     return s_tg_last_send_body;
-}
-
-void mock_tg_enqueue_rich(int http_status, const char *body) {
-    MockResponse *r = calloc(1, sizeof(MockResponse));
-    r->http_status = http_status;
-    r->body = strdup(body);
-    pthread_mutex_lock(&s_mutex);
-    if (s_tg_rich_tail) s_tg_rich_tail->next = r;
-    else s_tg_rich_head = r;
-    s_tg_rich_tail = r;
-    pthread_mutex_unlock(&s_mutex);
-}
-
-int mock_tg_rich_count(void) {
-    pthread_mutex_lock(&s_mutex);
-    int c = s_tg_rich_count;
-    pthread_mutex_unlock(&s_mutex);
-    return c;
-}
-
-const char *mock_tg_last_rich_body(void) {
-    return s_tg_last_rich_body;
 }
 
 static int handle_tg_get_updates(struct mg_connection *conn, void *cbdata) {
@@ -389,46 +343,8 @@ static int handle_tg_send_message(struct mg_connection *conn, void *cbdata) {
     }
     pthread_mutex_unlock(&s_mutex);
 
-    const char *body;
-    char ok[] = "{\"ok\":true,\"result\":{\"message_id\":1}}";
-    if (r) { body = r->body; } else { body = ok; }
-
-    int len = (int)strlen(body);
-    mg_printf(conn,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: %d\r\n\r\n%s", len, body);
-
-    if (r) { free(r->body); free(r); }
-    return 200;
-}
-
-/* sendRichMessage: canned status matters here (400/404 drive the runner's
- * degradation ladder), unlike sendMessage which always answers 200. If the
- * queue is empty, answer 200 ok. */
-static int handle_tg_send_rich(struct mg_connection *conn, void *cbdata) {
-    (void)cbdata;
-    const struct mg_request_info *ri = mg_get_request_info(conn);
-    char *req_body = NULL;
-    int content_len = (int)(ri->content_length > 0 ? ri->content_length : 0);
-    if (content_len > 0) {
-        req_body = malloc((size_t)content_len + 1);
-        int nread = mg_read(conn, req_body, (size_t)content_len);
-        req_body[nread > 0 ? nread : 0] = '\0';
-    }
-
-    pthread_mutex_lock(&s_mutex);
-    s_tg_rich_count++;
-    free(s_tg_last_rich_body);
-    s_tg_last_rich_body = req_body;
-
-    MockResponse *r = s_tg_rich_head;
-    if (r) {
-        s_tg_rich_head = r->next;
-        if (!s_tg_rich_head) s_tg_rich_tail = NULL;
-    }
-    pthread_mutex_unlock(&s_mutex);
-
+    /* Canned status is honored (a 400 drives the runner's format-degradation
+     * re-delivery); empty queue answers 200 ok. */
     int status = r ? r->http_status : 200;
     const char *body = r ? r->body : "{\"ok\":true,\"result\":{\"message_id\":1}}";
 
@@ -448,8 +364,6 @@ void mock_tg_enable(const char *token) {
     mg_set_request_handler(s_ctx, route, handle_tg_get_updates, NULL);
     snprintf(route, sizeof(route), "/bot%s/sendMessage", token);
     mg_set_request_handler(s_ctx, route, handle_tg_send_message, NULL);
-    snprintf(route, sizeof(route), "/bot%s/sendRichMessage", token);
-    mg_set_request_handler(s_ctx, route, handle_tg_send_rich, NULL);
 }
 
 int mock_server_load(const char *path) {

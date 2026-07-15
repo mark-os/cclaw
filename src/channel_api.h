@@ -18,7 +18,7 @@ typedef struct {
     int64_t id;
     int64_t session_id;
     char *payload;
-    int deliver_mode;    /* 0=auto (rich if possible), 1=html, 2=plain */
+    int deliver_mode;    /* 0=formatted (platform rich text), 1=plain */
 } ChannelOutboxRow;
 
 /* Create context. Caller owns returned ctx (free with channel_ctx_free). */
@@ -57,11 +57,14 @@ int channel_retry_outbox(ChannelCtx *ctx, int64_t id, int delay_sec);
 
 /* Re-deliver a row immediately at a degraded mode after a format rejection.
  * Sets deliver_mode + status='pending' without bumping attempts. The mode
- * ladder only descends (rich → html → plain), so this can't loop. */
+ * ladder only descends (formatted → plain), so this can't loop. */
 int channel_retry_outbox_mode(ChannelCtx *ctx, int64_t id, int mode);
 
 /* Current retry attempt count for an outbox row, or 0 if unknown. */
 int channel_outbox_attempts(ChannelCtx *ctx, int64_t id);
+
+/* Current deliver_mode of an outbox row, or 0 if unknown. */
+int channel_outbox_mode(ChannelCtx *ctx, int64_t id);
 
 /* Per-channel request UDS path (daemon proxies inbound HTTP here).
  * Format: <db_path_without_.db>.<channel_name>.sock — caller frees. */

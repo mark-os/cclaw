@@ -290,12 +290,14 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
     sqlite3_stmt *st;
 
     if (clone && clone[0]) {
-        /* Copy row, grants, and extension attachments; overlay below. */
+        /* Copy row, grants, and extension attachments; overlay below.
+         * created_by is the creator, never the source's — provenance
+         * doesn't clone. */
         static const char *copies[] = {
-            ("INSERT INTO agents(name, primary_model, secondary_model, system_prompt,"
-             " description, max_iterations, max_output_tokens, shell_timeout,"
-             " shell_path, sandbox_profile)"
-             " SELECT ?1, primary_model, secondary_model, system_prompt, description,"
+            ("INSERT INTO agents(name, created_by, primary_model, secondary_model,"
+             " system_prompt, description, max_iterations, max_output_tokens,"
+             " shell_timeout, shell_path, sandbox_profile)"
+             " SELECT ?1, ?3, primary_model, secondary_model, system_prompt, description,"
              "  max_iterations, max_output_tokens, shell_timeout, shell_path,"
              "  sandbox_profile FROM agents WHERE name=?2"),
             ("INSERT OR IGNORE INTO grants(agent_name, kind, value, approval_mode, expires_at)"
@@ -308,13 +310,19 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
             if (sqlite3_prepare_v2(db, copies[i], -1, &st, NULL) != SQLITE_OK) { rc = -1; break; }
             sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
             sqlite3_bind_text(st, 2, clone, -1, SQLITE_STATIC);
+            if (i == 0) {
+                if (creator) sqlite3_bind_text(st, 3, creator, -1, SQLITE_STATIC);
+                else sqlite3_bind_null(st, 3);
+            }
             if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
             sqlite3_finalize(st);
         }
     } else {
-        if (sqlite3_prepare_v2(db, "INSERT INTO agents(name) VALUES(?1)",
+        if (sqlite3_prepare_v2(db, "INSERT INTO agents(name, created_by) VALUES(?1,?2)",
                                -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+            if (creator) sqlite3_bind_text(st, 2, creator, -1, SQLITE_STATIC);
+            else sqlite3_bind_null(st, 2);
             if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
             sqlite3_finalize(st);
         } else rc = -1;
@@ -415,6 +423,180 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
 
     if (rc != 0 && err && !*err) *err = strdup("agent definition apply failed");
     free(clone);
+    free(name);
+    return rc;
+}
+
+/* ── update: overlay an existing agent (specs/self-configuration.md) ──
+ * Same caps as creation, applied against the caller; authorization is
+ * creator-or-self (agents.created_by). Grants are additive-only — removing
+ * a child's grant is an operator act. Self grant expansion via this path is
+ * a no-op by construction (grants ⊆ caller's own), so escalation stays
+ * exclusively with request_changes. */
+
+/* Absent field = keep, so a typo'd key would silently no-op — reject
+ * anything outside the whitelist instead. */
+#define UPDATE_KEYS_SQL \
+    "('name','description','system_prompt','primary_model','secondary_model'," \
+    "'sandbox_profile','max_iterations','shell_timeout','grants','reason')"
+
+static int update_validate_inner(sqlite3 *db, const char *json,
+                                 const char *caller, char **err) {
+    if (!db || !json) return fail(err, "no update document");
+    if (!caller || !caller[0]) return fail(err, "no calling agent");
+
+    sqlite3_stmt *st;
+    int ok = 0;
+    if (sqlite3_prepare_v2(db, "SELECT json_valid(?1)", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) ok = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+    }
+    if (!ok) return fail(err, "update document is not valid JSON");
+
+    char *name = jext(db, json, "$.name");
+    if (!name || !name[0]) { free(name); return fail(err, "update missing 'name'"); }
+
+    /* Authorization: the target must exist and be the caller or its child. */
+    int authorized = -1;
+    if (sqlite3_prepare_v2(db,
+            "SELECT (name=?2 OR created_by=?2) FROM agents WHERE name=?1",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, caller, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) authorized = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+    }
+    if (authorized < 0) {
+        failf(err, "agent '%s' does not exist%s", name, "");
+        free(name); return -1;
+    }
+    if (!authorized) {
+        failf(err, "not authorized to update '%s' — only the agent itself "
+              "or its creator may%s", name, "");
+        free(name); return -1;
+    }
+    free(name);
+
+    /* Shape checks, one query each — typo-hostile like request_changes. */
+    static const struct { const char *sql; const char *msg; } checks[] = {
+        { "SELECT key FROM json_each(?1) WHERE key NOT IN " UPDATE_KEYS_SQL,
+          "unknown field '%s' — absent fields keep their value, so a typo "
+          "would silently change nothing%s" },
+        { "SELECT key FROM json_each(?1) WHERE key IN"
+          " ('max_iterations','shell_timeout')"
+          " AND (type!='integer' OR atom<=0)",
+          "'%s' must be a positive integer%s" },
+        { "SELECT key FROM json_each(?1) WHERE key IN"
+          " ('description','system_prompt','primary_model','secondary_model',"
+          "  'sandbox_profile','reason') AND type!='text'",
+          "'%s' must be a string%s" },
+        { "SELECT atom FROM json_each(?1) je WHERE key IN"
+          " ('primary_model','secondary_model')"
+          " AND NOT EXISTS (SELECT 1 FROM models m"
+          "                 WHERE m.id=je.atom OR m.model=je.atom)",
+          "model '%s' does not resolve to a registered model — define its "
+          "provider first (request_config request_changes)%s" },
+        { "SELECT 1 FROM json_each(?1)"
+          " WHERE key NOT IN ('name','reason') LIMIT 1",
+          NULL /* inverted: no row = nothing to update */ },
+    };
+    for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); i++) {
+        if (sqlite3_prepare_v2(db, checks[i].sql, -1, &st, NULL) != SQLITE_OK)
+            return fail(err, "update validation query failed");
+        sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+        int row = (sqlite3_step(st) == SQLITE_ROW);
+        char *offender = NULL;
+        if (row) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            if (v) offender = strdup(v);
+        }
+        sqlite3_finalize(st);
+        if (checks[i].msg == NULL) {
+            free(offender);
+            if (!row) return fail(err, "nothing to update — set at least one field");
+        } else if (row) {
+            failf(err, checks[i].msg, offender ? offender : "?", "");
+            free(offender);
+            return -1;
+        } else {
+            free(offender);
+        }
+    }
+
+    /* Caps, both applied against the caller (creator-or-self alike). */
+    char *profile = jext(db, json, "$.sandbox_profile");
+    int rc = profile_capped(db, profile, caller, err);
+    free(profile);
+    for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
+        rc = grants_walk(db, json, NULL, caller, 0, i, err);
+    return rc;
+}
+
+int agent_definition_update_validate(sqlite3 *db, const char *json,
+                                     const char *caller, char **err) {
+    if (err) *err = NULL;
+    return update_validate_inner(db, json, caller, err);
+}
+
+int agent_definition_update_apply(sqlite3 *db, const char *json,
+                                  const char *caller, char **err) {
+    if (err) *err = NULL;
+    /* Re-validate at apply: authorization or caps may have shifted between
+     * park and approval (rename, expired grants). */
+    if (update_validate_inner(db, json, caller, err) != 0)
+        return -1;
+
+    char *name = jext(db, json, "$.name");
+    if (!name) return fail(err, "update missing 'name'");
+
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+        free(name);
+        return fail(err, "cannot begin transaction");
+    }
+
+    int rc = 0;
+    sqlite3_stmt *st;
+    const char *osql =
+        "UPDATE agents SET"
+        " description   = COALESCE(json_extract(?2,'$.description'), description),"
+        " system_prompt = COALESCE(json_extract(?2,'$.system_prompt'), system_prompt),"
+        " primary_model = COALESCE(json_extract(?2,'$.primary_model'), primary_model),"
+        " secondary_model = COALESCE(json_extract(?2,'$.secondary_model'), secondary_model),"
+        " sandbox_profile = COALESCE(json_extract(?2,'$.sandbox_profile'), sandbox_profile),"
+        " max_iterations  = COALESCE(json_extract(?2,'$.max_iterations'), max_iterations),"
+        " shell_timeout   = COALESCE(json_extract(?2,'$.shell_timeout'), shell_timeout)"
+        " WHERE name=?1";
+    if (sqlite3_prepare_v2(db, osql, -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, json, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
+        sqlite3_finalize(st);
+    } else rc = -1;
+
+    for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
+        rc = grants_walk(db, json, name, NULL, 1, i, err);
+
+    /* A newly granted tool on the approval list keeps its gate. */
+    if (rc == 0) {
+        char *approval_list = config_get(db, "agent_approval_tools");
+        if (approval_list) {
+            if (sqlite3_prepare_v2(db,
+                    "UPDATE grants SET approval_mode='always' WHERE agent_name=?1"
+                    " AND kind='tool' AND value IN (SELECT value FROM json_each(?2))",
+                    -1, &st, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+                sqlite3_bind_text(st, 2, approval_list, -1, SQLITE_STATIC);
+                sqlite3_step(st);
+                sqlite3_finalize(st);
+            }
+            free(approval_list);
+        }
+    }
+
+    if (sqlite3_exec(db, rc == 0 ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
+        rc = -1;
+    if (rc != 0 && err && !*err) *err = strdup("agent update apply failed");
     free(name);
     return rc;
 }

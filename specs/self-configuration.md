@@ -138,6 +138,9 @@ blocks. In a manifest, `system_prompt_file` (bundle-relative path) may replace
 attachments first; the rest of the definition overlays. The clone source must
 exist.
 
+Creation stamps `agents.created_by` (NULL = operator) — the provenance that
+authorizes later updates.
+
 **Applied by one function**: `agent_definition_apply(db, json, creator, err)`
 (src/agent_define.c). All three declaration paths funnel through it, so caps,
 validation, and side effects (agents row, grants rows, `agent_extensions`,
@@ -166,6 +169,32 @@ apply-approval like `request_config` (it is deliberately *not* in
 the approval summary enumerates what is being created: profile, N tools,
 M hosts, extensions, whether cloned. Eager validation happens at request
 time — a definition that would fail caps or parse never parks.
+
+### Updating an existing agent
+
+`update_agent` (src/tool_bootstrap.c → `agent_definition_update_*`,
+src/agent_define.c) revises an agent after creation — the "refine it later"
+path that create-then-tune workflows need, since a definition is otherwise
+immutable to agents once applied.
+
+- **Authorization**: the caller must be the target itself or its creator
+  (`agents.created_by`). Pre-v30 agents have NULL `created_by` — operator-only,
+  the conservative reading of unknown provenance.
+- **Same caps as creation, against the caller**: `sandbox_profile` never
+  looser than the caller's; every added grant ⊆ the caller's live grants.
+  Grants are **additive-only** — removal is an operator act. A self-update's
+  grant adds are no-ops by construction, so authority *expansion* remains
+  exclusively `request_changes` (escalation) and the delegation/escalation
+  split survives.
+- **Overlay semantics, typo-hostile**: provided fields overwrite
+  (`description`, `system_prompt`, models — must resolve to `models` rows —
+  `sandbox_profile`, `max_iterations`, `shell_timeout`); absent fields keep
+  their value, so unknown keys are hard errors (a typo would otherwise
+  silently change nothing). An update with no updatable field is an error.
+- **Approval**: parks like `create_agent`; the summary enumerates every
+  changed field (long values clipped per line) and every added grant.
+  Validation re-runs at apply — authorization or caps that shifted between
+  park and approval fail the apply.
 
 ### Uninstall / deletion
 

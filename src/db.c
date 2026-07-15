@@ -316,11 +316,13 @@ int db_ensure_schema(sqlite3 *db) {
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
     /* Frozen at v29 (2026-07-14): the v12-v29 patch history was collapsed
      * into the floor (CCLAW_SCHEMA_MIN) — pre-v29 DBs are refused with a
-     * delete-and-restart message. Next patch starts here:
-     *   { .version = 30, .sql = "..." },  (or .fn for non-idempotent shapes)
-     * The {0} sentinel keeps the array non-empty for C11; the executor
-     * skips it. */
+     * delete-and-restart message. The {0} sentinel keeps the array non-empty
+     * for C11; the executor skips it. */
     { 0 },
+    /* v30: agents.created_by — who created the agent (NULL = operator).
+     * Pre-v30 agents stay NULL: only the operator can update them, which is
+     * the conservative reading of unknown provenance. */
+    { .version = 30, .sql = "ALTER TABLE agents ADD COLUMN created_by TEXT" },
 };
 
 #define CCLAW_SCHEMA_MIN 29   /* schema freeze 2026-07-14 — no patches below this */

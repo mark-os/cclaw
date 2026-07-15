@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS agents (
   shell_timeout INTEGER DEFAULT 30,
   shell_path TEXT,               -- interpreter for shell_exec's -c; NULL = /bin/sh
   sandbox_profile TEXT DEFAULT 'standard',
+  created_by TEXT,               -- creating agent (update_agent authorization); NULL = operator
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 

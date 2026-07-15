@@ -176,6 +176,112 @@ static void test_clone_from(void) {
     printf("  PASS test_clone_from\n");
 }
 
+static void test_update_agent(void) {
+    /* Provenance: created_by stamped for agent creators, NULL for operator. */
+    seed_creator("Mentor", "standard");
+    agent_config_grant(g_db, "Mentor", "tool", "web_fetch", 0);
+    agent_config_grant(g_db, "Mentor", "host", "api.weather.gov", 0);
+    char *err = NULL;
+    assert(agent_definition_apply(g_db,
+        "{\"name\":\"Pupil\",\"description\":\"orig\",\"system_prompt\":\"v1\","
+        "\"sandbox_profile\":\"restricted\",\"max_iterations\":9}",
+        "Mentor", NULL, &err) == 0);
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(g_db,
+        "SELECT created_by FROM agents WHERE name='Pupil'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "Mentor") == 0);
+    sqlite3_finalize(s);
+    assert(sqlite3_prepare_v2(g_db,
+        "SELECT created_by IS NULL FROM agents WHERE name='Scout'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 1); /* operator-created */
+    sqlite3_finalize(s);
+
+    /* Authorization: stranger refused; missing agent refused. */
+    seed_creator("Stranger", "standard");
+    err = NULL;
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Pupil\",\"description\":\"x\"}", "Stranger", &err) != 0);
+    assert(err && strstr(err, "not authorized"));
+    free(err);
+    err = NULL;
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Ghost\",\"description\":\"x\"}", "Mentor", &err) != 0);
+    assert(err && strstr(err, "does not exist"));
+    free(err);
+
+    /* Typo-hostility: unknown key, bad types, empty update. */
+    err = NULL;
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Pupil\",\"descripton\":\"typo\"}", "Mentor", &err) != 0);
+    assert(err && strstr(err, "unknown field"));
+    free(err);
+    err = NULL;
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Pupil\",\"max_iterations\":0}", "Mentor", &err) != 0);
+    assert(err && strstr(err, "positive integer"));
+    free(err);
+    err = NULL;
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Pupil\",\"description\":42}", "Mentor", &err) != 0);
+    assert(err && strstr(err, "must be a string"));
+    free(err);
+    err = NULL;
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Pupil\"}", "Mentor", &err) != 0);
+    assert(err && strstr(err, "nothing to update"));
+    free(err);
+
+    /* Models must resolve; caps apply against the caller. */
+    err = NULL;
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Pupil\",\"primary_model\":\"made-up-model\"}", "Mentor", &err) != 0);
+    assert(err && strstr(err, "does not resolve"));
+    free(err);
+    sqlite3_exec(g_db,
+        "INSERT INTO providers(name, base_url) VALUES('prov','http://x');"
+        "INSERT INTO models(id, provider_name, model, priority)"
+        " VALUES('good-model@prov','prov','good-model',9)", NULL, NULL, NULL);
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Pupil\",\"primary_model\":\"good-model@prov\"}", "Mentor", NULL) == 0);
+    err = NULL;
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Pupil\",\"sandbox_profile\":\"trusted\"}", "Mentor", &err) != 0);
+    assert(err && strstr(err, "looser"));
+    free(err);
+    err = NULL;
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Pupil\",\"grants\":{\"tools\":[\"shell_exec\"]}}", "Mentor", &err) != 0);
+    assert(err && strstr(err, "exceeds creator"));
+    free(err);
+
+    /* Apply: overlay the provided fields, add the grant, keep the rest. */
+    err = NULL;
+    int rc = agent_definition_update_apply(g_db,
+        "{\"name\":\"Pupil\",\"system_prompt\":\"v2 much better\","
+        "\"max_iterations\":40,"
+        "\"grants\":{\"hosts\":[\"api.weather.gov\"]},"
+        "\"reason\":\"first prompt was too vague\"}", "Mentor", &err);
+    if (rc != 0) fprintf(stderr, "err: %s\n", err ? err : "?");
+    assert(rc == 0);
+    assert(sqlite3_prepare_v2(g_db,
+        "SELECT system_prompt, max_iterations, description, sandbox_profile"
+        " FROM agents WHERE name='Pupil'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "v2 much better") == 0);
+    assert(sqlite3_column_int(s, 1) == 40);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "orig") == 0);       /* kept */
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "restricted") == 0); /* kept */
+    sqlite3_finalize(s);
+    assert(grants_contains(g_db, "Pupil", "host", "api.weather.gov"));
+
+    /* Self-update is authorized (grant self-adds are no-ops by construction). */
+    assert(agent_definition_update_validate(g_db,
+        "{\"name\":\"Mentor\",\"description\":\"self-described\"}", "Mentor", NULL) == 0);
+    printf("  PASS test_update_agent\n");
+}
+
 static void test_bad_input(void) {
     assert(agent_definition_validate(g_db, "not json", NULL, NULL) != 0);
     assert(agent_definition_validate(g_db, "{}", NULL, NULL) != 0);
@@ -195,6 +301,7 @@ int main(void) {
     test_grants_superset_refused();
     test_extension_gate();
     test_clone_from();
+    test_update_agent();
     test_bad_input();
     db_close(g_db);
     printf("\nAll agent_define tests passed.\n");

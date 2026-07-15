@@ -91,6 +91,19 @@ session" rule; the session names its agent thereafter.
 
 No route = `auto` (covers admin/allow_unknown flows).
 
+## Where routes come from
+
+Operator verbs (`cclaw route add`, dashboard `set_channel_route` /
+`attach_channel`) — or the agent itself: `request_config` action
+`request_changes` with a `routes` section (`["telegram:12345"]`,
+approval-gated like every self-config write). Agent-requested routes are
+**first-come** (a chat already routed to another agent is refused — an agent
+must not capture another agent's chat), land with `delivery_mode='explicit'`
+(the agent asked for send authority, not session mirroring) and no
+`tool_filter`. Note what the approver is granting: a route is send authority
+*and* inbound routing — new senders in that chat will reach this agent.
+Wildcard (`'*'`) routes are operator-only.
+
 ## Authority attenuation
 
 Routes control *who gets in*; without attenuation a routed sender wields the

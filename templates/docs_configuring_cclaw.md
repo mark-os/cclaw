@@ -37,22 +37,40 @@ one approval covers the whole document:
 {"action": "request_changes", "changes": {
    "grants": {"tools": ["shell_exec"], "hosts": [".example.com"],
               "read_paths": ["/abs/path"], "write_paths": ["/abs/path"]},
-   "config": {"registered.key": "value"}
+   "agent": {"primary_model": "gemini-2.5-flash@gemini", "max_iterations": 40},
+   "routes": ["telegram:12345"],
+   "config": {"registered.key": "value"},
+   "provider": {"provider": "gemini"}
  }, "reason": "why you need these"}
 ```
 
 - Any subset of the sections works. Validation is all-or-nothing and strict:
   unknown sections or keys are errors, never silently dropped.
-- `config` keys must exist in the registry; unknown keys fail immediately (no
-  approval is parked), so check `search_config` first. Values are strings.
-- Host grants: prefix `.` to cover subdomains (`.example.com` covers
-  `example.com` AND `api.example.com`). Shell/web egress is default-deny.
-- Path grants must be absolute; `read_paths` and `write_paths` are separate.
-- A `provider` section can define an LLM provider (`provider`, `base_url` for
-  custom names, optional `model`, `api_key_env` naming the secret that holds
-  the API key — store the key first with `save_secret`, never pass key
-  material).
-- `rename_agent {name}` — request a new agent name (separate action).
+
+**Agent-scoped sections** (change only you):
+
+- `grants`: host prefix `.` covers subdomains (`.example.com` covers
+  `example.com` AND `api.example.com`); shell/web egress is default-deny.
+  Paths must be absolute; `read_paths` and `write_paths` are separate.
+- `agent`: your own settings — `primary_model` / `secondary_model` (accepts
+  `model` or `model@provider`; must resolve to a registered model or the one
+  this document's `provider` section defines), `max_iterations`,
+  `shell_timeout`.
+- `routes`: `"channel:chat_id"` strings authorizing `channel_send` to that
+  chat. First-come: a chat routed to another agent is refused. Wildcards are
+  operator-only.
+
+**System-wide sections** (change the whole daemon — expect more scrutiny):
+
+- `config`: keys must exist in the registry; unknown keys fail immediately
+  (no approval is parked), so check `search_config` first. Values are strings.
+- `provider`: define an LLM provider (`provider`, `base_url` for custom
+  names, optional `model`, `api_key_env` naming the secret that holds the API
+  key — store the key first with `save_secret`, never pass key material).
+  Applying also registers the provider's model, so one document can define a
+  provider and adopt it via `agent.primary_model: "model@provider"`.
+
+`rename_agent {name}` — request a new agent name (separate action).
 
 Give a concrete `reason` — the operator sees it in the approval prompt. If the
 approval is denied, do not re-request the same thing; explain what you were

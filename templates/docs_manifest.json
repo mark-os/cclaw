@@ -5,6 +5,7 @@
   "skills": [
     "skills/configuring-cclaw",
     "skills/extending-cclaw",
+    "skills/creating-agents",
     "skills/cclaw-agents",
     "skills/cclaw-channels",
     "skills/cclaw-secrets-memory"

@@ -40,13 +40,18 @@ static const char *PARAMS_JSON =
     "\"description\":\"Type of config request\"},"
     "\"changes\":{\"type\":\"object\",\"description\":\"For request_changes: any subset of "
     "{grants:{tools:[names],hosts:[hostnames],read_paths:[abs paths],write_paths:[abs paths]}, "
+    "agent:{primary_model?,secondary_model?,max_iterations?,shell_timeout?}, "
+    "routes:['channel:chat_id',...], "
     "config:{key:value-string,...}, provider:{provider,base_url?,model?,api_key_env?}}. "
     "One human approval covers the whole document. Host prefix '.' covers subdomains "
-    "('.example.com' covers example.com AND sub.example.com). Config keys must be "
-    "registered (see search_config); values are strings. provider: openrouter, gemini, "
-    "anthropic, or a custom name with base_url; api_key_env is the secret NAME holding "
-    "the API key (defaults to <PROVIDER>_API_KEY) — store the key first with save_secret, "
-    "never pass key material\"},"
+    "('.example.com' covers example.com AND sub.example.com). agent updates YOUR OWN row "
+    "(models accept 'model' or 'model@provider'). routes let you send to a chat via "
+    "channel_send (wildcards are operator-only). Config keys must be registered (see "
+    "search_config); values are strings. provider: openrouter, gemini, anthropic, or a "
+    "custom name with base_url; api_key_env is the secret NAME holding the API key "
+    "(defaults to <PROVIDER>_API_KEY) — store the key first with save_secret, never pass "
+    "key material. Defining a provider also registers its model, so one document can "
+    "define a provider AND point your agent at it via agent.primary_model\"},"
     "\"name\":{\"type\":\"string\",\"description\":\"New agent name (for rename_agent)\"},"
     "\"preamble\":{\"type\":\"string\",\"description\":\"New system prompt preamble (for rename_agent, optional)\"},"
     "\"reason\":{\"type\":\"string\",\"description\":\"Short justification shown to the human approver (optional, recommended)\"}"
@@ -191,6 +196,125 @@ static char *validate_config(sqlite3 *db, const char *changes) {
     return err;
 }
 
+/* Validate $.agent — self-scoped settings on the calling agent's own row.
+ * Whitelisted keys only; models may be 'model' or 'model@provider' and must
+ * resolve to a models row, OR match the model the same document's provider
+ * section defines (one document can define a provider and adopt it).
+ * canon_provider is that section's canonical JSON, or NULL. */
+static char *validate_agent(sqlite3 *db, const char *changes,
+                            const char *canon_provider) {
+    if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.agent')='object'", changes))
+        return strdup("error: changes.agent must be an object");
+    char *bad = q1_text(db,
+        "SELECT key FROM json_each(?1,'$.agent')"
+        " WHERE key NOT IN ('primary_model','secondary_model',"
+        "                   'max_iterations','shell_timeout') LIMIT 1",
+        changes);
+    if (bad) {
+        char *m = errf("error: unknown agent key '%s' (use primary_model, "
+                       "secondary_model, max_iterations, shell_timeout)", bad);
+        free(bad);
+        return m;
+    }
+    bad = q1_text(db,
+        "SELECT key FROM json_each(?1,'$.agent')"
+        " WHERE key IN ('max_iterations','shell_timeout')"
+        " AND (type!='integer' OR CAST(atom AS INTEGER) < 1) LIMIT 1", changes);
+    if (bad) {
+        char *m = errf("error: agent.%s must be a positive integer", bad);
+        free(bad);
+        return m;
+    }
+    /* Model references resolve like llm_proc's candidate lookup: models.id
+     * ('model@provider') or bare models.model. */
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT atom FROM json_each(?1,'$.agent')"
+            " WHERE key IN ('primary_model','secondary_model')"
+            " AND (type!='text' OR atom=''"
+            "      OR (NOT EXISTS(SELECT 1 FROM models m"
+            "                     WHERE m.id=atom OR m.model=atom)"
+            /* NULL-proof: a NULL in a NOT IN list poisons the whole test
+             * (unknown → filtered → error suppressed), so absent provider
+             * fields collapse to '' which a validated atom can never be. */
+            "          AND atom NOT IN ("
+            "            COALESCE(json_extract(?2,'$.model'),''),"
+            "            COALESCE(json_extract(?2,'$.model'),'')"
+            "              ||'@'||COALESCE(json_extract(?2,'$.provider'),''))))"
+            " LIMIT 1", -1, &st, NULL) != SQLITE_OK)
+        return strdup("error: agent validation failed");
+    sqlite3_bind_text(st, 1, changes, -1, SQLITE_STATIC);
+    if (canon_provider)
+        sqlite3_bind_text(st, 2, canon_provider, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(st, 2);
+    char *err = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        err = errf("error: unknown model '%s' — use a registered model "
+                   "('model' or 'model@provider'; see search_config), or "
+                   "define it in this document's provider section", v);
+    }
+    sqlite3_finalize(st);
+    return err;
+}
+
+/* Validate $.routes — 'channel:chat_id' strings. The channel must exist,
+ * the chat_id must be literal (wildcard routes are operator-only), and a
+ * route already owned by another agent is refused: routes are first-come,
+ * like extension names — an agent must not capture another agent's chat. */
+static char *validate_routes(sqlite3 *db, const char *changes,
+                             const char *agent_name) {
+    if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.routes')='array'", changes))
+        return strdup("error: changes.routes must be an array of "
+                      "'channel:chat_id' strings");
+    char *bad = q1_text(db,
+        "SELECT atom FROM json_each(?1,'$.routes')"
+        " WHERE type!='text' OR instr(atom,':') < 2"
+        "    OR substr(atom, instr(atom,':')+1) = '' LIMIT 1", changes);
+    if (bad) {
+        char *m = errf("error: route '%s' must be 'channel:chat_id'", bad);
+        free(bad);
+        return m;
+    }
+    bad = q1_text(db,
+        "SELECT atom FROM json_each(?1,'$.routes')"
+        " WHERE substr(atom, instr(atom,':')+1) = '*' LIMIT 1", changes);
+    if (bad) {
+        free(bad);
+        return strdup("error: wildcard routes are operator-only — request a "
+                      "specific chat_id");
+    }
+    bad = q1_text(db,
+        "SELECT atom FROM json_each(?1,'$.routes')"
+        " WHERE NOT EXISTS(SELECT 1 FROM channels"
+        "                  WHERE name = substr(atom,1,instr(atom,':')-1))"
+        " LIMIT 1", changes);
+    if (bad) {
+        char *m = errf("error: route '%s' names an unknown channel", bad);
+        free(bad);
+        return m;
+    }
+    sqlite3_stmt *st;
+    char *err = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT atom FROM json_each(?1,'$.routes') j"
+            " WHERE EXISTS(SELECT 1 FROM channel_routes c"
+            "   WHERE c.channel_name = substr(j.atom,1,instr(j.atom,':')-1)"
+            "     AND c.channel_id   = substr(j.atom,instr(j.atom,':')+1)"
+            "     AND COALESCE(c.agent_name,'') != ?2) LIMIT 1",
+            -1, &st, NULL) != SQLITE_OK)
+        return strdup("error: route validation failed");
+    sqlite3_bind_text(st, 1, changes, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, agent_name, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        err = errf("error: route '%s' is already owned by another agent", v);
+    }
+    sqlite3_finalize(st);
+    return err;
+}
+
 /* Validate $.provider and build its canonical JSON (defaults filled) into
  * *canon_out. Returns a heap error string or NULL. */
 static char *validate_provider(sqlite3 *db, const char *changes, char **canon_out) {
@@ -281,31 +405,43 @@ out:
 }
 
 /* Validate the whole document; on success *canon_out is the canonical
- * changes JSON (grants/config passed through, provider defaults filled). */
-static char *validate_changes(sqlite3 *db, const char *changes, char **canon_out) {
+ * changes JSON (grants/config/agent/routes passed through, provider
+ * defaults filled). agent_name is the calling agent (route ownership). */
+static char *validate_changes(sqlite3 *db, const char *changes,
+                              const char *agent_name, char **canon_out) {
     *canon_out = NULL;
     if (!changes || !q1_true(db, "SELECT 1 WHERE json_type(?1)='object'", changes))
         return strdup("error: 'changes' must be a JSON object (see the tool schema)");
     char *bad = q1_text(db,
         "SELECT key FROM json_each(?1)"
-        " WHERE key NOT IN ('grants','config','provider') LIMIT 1", changes);
+        " WHERE key NOT IN ('grants','config','provider','agent','routes')"
+        " LIMIT 1", changes);
     if (bad) {
         char *m = errf("error: unknown changes section '%s' (use grants, "
-                       "config, provider)", bad);
+                       "agent, routes, config, provider)", bad);
         free(bad);
         return m;
     }
-    char *grants = NULL, *config = NULL, *provider = NULL, *err = NULL;
+    char *grants = NULL, *config = NULL, *provider = NULL;
+    char *agent = NULL, *routes = NULL, *err = NULL;
     int has_grants = q1_true(db,
         "SELECT 1 WHERE json_type(?1,'$.grants') IS NOT NULL", changes);
     int has_config = q1_true(db,
         "SELECT 1 WHERE json_type(?1,'$.config') IS NOT NULL", changes);
     int has_provider = q1_true(db,
         "SELECT 1 WHERE json_type(?1,'$.provider') IS NOT NULL", changes);
+    int has_agent = q1_true(db,
+        "SELECT 1 WHERE json_type(?1,'$.agent') IS NOT NULL", changes);
+    int has_routes = q1_true(db,
+        "SELECT 1 WHERE json_type(?1,'$.routes') IS NOT NULL", changes);
 
     if (has_grants && (err = validate_grants(db, changes))) goto out;
     if (has_config && (err = validate_config(db, changes))) goto out;
+    /* provider before agent: agent.primary_model may adopt the model this
+     * same document defines, checked against the canonical provider JSON. */
     if (has_provider && (err = validate_provider(db, changes, &provider))) goto out;
+    if (has_agent && (err = validate_agent(db, changes, provider))) goto out;
+    if (has_routes && (err = validate_routes(db, changes, agent_name))) goto out;
 
     /* Reject a document with nothing to apply (all sections absent/empty):
      * parking a no-op approval would only confuse the approver. */
@@ -313,7 +449,9 @@ static char *validate_changes(sqlite3 *db, const char *changes, char **canon_out
         char *n = q1_text(db,
             "SELECT (SELECT COALESCE(SUM(json_array_length(g.value)),0)"
             "          FROM json_each(?1,'$.grants') g)"
-            "     + (SELECT COUNT(*) FROM json_each(?1,'$.config'))", changes);
+            "     + (SELECT COUNT(*) FROM json_each(?1,'$.config'))"
+            "     + (SELECT COUNT(*) FROM json_each(?1,'$.agent'))"
+            "     + COALESCE(json_array_length(?1,'$.routes'),0)", changes);
         long total = n ? atol(n) : 0;
         free(n);
         if (total == 0 && !has_provider) {
@@ -324,15 +462,18 @@ static char *validate_changes(sqlite3 *db, const char *changes, char **canon_out
 
     if (has_grants) grants = tool_args_json(db, changes, "grants");
     if (has_config) config = tool_args_json(db, changes, "config");
+    if (has_agent)  agent  = tool_args_json(db, changes, "agent");
+    if (has_routes) routes = tool_args_json(db, changes, "routes");
 
     /* Canonical document: only present sections, minified by json(). */
     {
-        char sql[192];
+        char sql[256];
         int off = snprintf(sql, sizeof(sql), "SELECT json_object(");
         int next = 1, first = 1;
-        const char *sec[3][2] = {
-            {"grants", grants}, {"config", config}, {"provider", provider}};
-        for (int i = 0; i < 3; i++) {
+        const char *sec[5][2] = {
+            {"grants", grants}, {"agent", agent}, {"routes", routes},
+            {"config", config}, {"provider", provider}};
+        for (int i = 0; i < 5; i++) {
             if (!sec[i][1]) continue;
             off += snprintf(sql + off, sizeof(sql) - (size_t)off, "%s'%s',json(?%d)",
                             first ? "" : ",", sec[i][0], next++);
@@ -342,7 +483,7 @@ static char *validate_changes(sqlite3 *db, const char *changes, char **canon_out
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
             next = 1;
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < 5; i++)
                 if (sec[i][1])
                     sqlite3_bind_text(st, next++, sec[i][1], -1, SQLITE_STATIC);
             if (sqlite3_step(st) == SQLITE_ROW) {
@@ -354,7 +495,7 @@ static char *validate_changes(sqlite3 *db, const char *changes, char **canon_out
         if (!*canon_out) err = strdup("error: failed to build changes JSON");
     }
 out:
-    free(grants); free(config); free(provider);
+    free(grants); free(config); free(provider); free(agent); free(routes);
     return err;
 }
 
@@ -488,7 +629,7 @@ static char *handler(const char *arguments, void *user_data) {
                             "request_changes (see the tool schema)");
         } else {
             char *canon = NULL;
-            result = validate_changes(ctx->db, changes, &canon);
+            result = validate_changes(ctx->db, changes, ctx->agent_name, &canon);
             if (!result)
                 result = park_changes(ctx, canon, reason);
             free(canon);
@@ -601,6 +742,93 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
                 rc = -1;
             }
         }
+        /* Seed the provider's default model into `models` (id = model@name,
+         * lowest routing priority). Per-request routing joins models →
+         * providers, so a provider row without a models row is unreachable
+         * except through the empty-table fallback; this makes the parked
+         * definition actually routable and lets agent.primary_model adopt
+         * 'model@provider' in the same document. */
+        if (rc == 0) {
+            sqlite3_stmt *ms;
+            if (sqlite3_prepare_v2(db,
+                    "INSERT OR IGNORE INTO models(id, provider_name, model, priority)"
+                    " SELECT json_extract(?1,'$.changes.provider.model')"
+                    "          ||'@'||json_extract(?1,'$.changes.provider.provider'),"
+                    "        json_extract(?1,'$.changes.provider.provider'),"
+                    "        json_extract(?1,'$.changes.provider.model'),"
+                    "        (SELECT COALESCE(MAX(priority),0)+1 FROM models)"
+                    " WHERE json_extract(?1,'$.changes.provider.model') IS NOT NULL",
+                    -1, &ms, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(ms, 1, args_json, -1, SQLITE_STATIC);
+                if (sqlite3_step(ms) != SQLITE_DONE) rc = -1;
+                sqlite3_finalize(ms);
+            } else {
+                rc = -1;
+            }
+        }
+        /* Self-scoped agent settings — whitelisted columns on the caller's
+         * own agents row; absent keys keep their current values. */
+        if (rc == 0) {
+            sqlite3_stmt *as;
+            if (sqlite3_prepare_v2(db,
+                    "UPDATE agents SET"
+                    " primary_model   = COALESCE(json_extract(?1,'$.changes.agent.primary_model'), primary_model),"
+                    " secondary_model = COALESCE(json_extract(?1,'$.changes.agent.secondary_model'), secondary_model),"
+                    " max_iterations  = COALESCE(json_extract(?1,'$.changes.agent.max_iterations'), max_iterations),"
+                    " shell_timeout   = COALESCE(json_extract(?1,'$.changes.agent.shell_timeout'), shell_timeout)"
+                    " WHERE name=?2"
+                    " AND json_type(?1,'$.changes.agent')='object'",
+                    -1, &as, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(as, 1, args_json, -1, SQLITE_STATIC);
+                sqlite3_bind_text(as, 2, agent, -1, SQLITE_STATIC);
+                if (sqlite3_step(as) != SQLITE_DONE) rc = -1;
+                sqlite3_finalize(as);
+            } else {
+                rc = -1;
+            }
+        }
+        /* Routes: first-come ownership. A route captured by another agent
+         * between park and apply fails the whole document (savepoint). The
+         * agent asked for send authority, not session mirroring, so the
+         * route is 'explicit' — turn output does not auto-deliver there. */
+        if (rc == 0) {
+            sqlite3_stmt *rs;
+            if (sqlite3_prepare_v2(db,
+                    "SELECT 1 FROM json_each(?1,'$.changes.routes') j"
+                    " WHERE EXISTS(SELECT 1 FROM channel_routes c"
+                    "   WHERE c.channel_name = substr(j.atom,1,instr(j.atom,':')-1)"
+                    "     AND c.channel_id   = substr(j.atom,instr(j.atom,':')+1)"
+                    "     AND COALESCE(c.agent_name,'') != ?2) LIMIT 1",
+                    -1, &rs, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(rs, 1, args_json, -1, SQLITE_STATIC);
+                sqlite3_bind_text(rs, 2, agent, -1, SQLITE_STATIC);
+                if (sqlite3_step(rs) == SQLITE_ROW) {
+                    LOG_WARN_("request_changes apply: route already owned "
+                              "by another agent (agent=%s)", agent);
+                    rc = -1;
+                }
+                sqlite3_finalize(rs);
+            } else {
+                rc = -1;
+            }
+        }
+        if (rc == 0) {
+            sqlite3_stmt *ri;
+            if (sqlite3_prepare_v2(db,
+                    "INSERT OR IGNORE INTO channel_routes"
+                    " (channel_name, channel_id, agent_name, delivery_mode)"
+                    " SELECT substr(atom,1,instr(atom,':')-1),"
+                    "        substr(atom,instr(atom,':')+1), ?2, 'explicit'"
+                    " FROM json_each(?1,'$.changes.routes')",
+                    -1, &ri, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(ri, 1, args_json, -1, SQLITE_STATIC);
+                sqlite3_bind_text(ri, 2, agent, -1, SQLITE_STATIC);
+                if (sqlite3_step(ri) != SQLITE_DONE) rc = -1;
+                sqlite3_finalize(ri);
+            } else {
+                rc = -1;
+            }
+        }
         if (rc == 0)
             sqlite3_exec(db, "RELEASE req_changes", NULL, NULL, NULL);
         else
@@ -618,14 +846,18 @@ int tool_request_config_register(ToolRegistry *reg, RequestConfigCtx *ctx) {
         "Request configuration changes (requires human approval). Action "
         "request_changes takes ONE 'changes' document batching everything you "
         "need — tool grants, host grants (prefix '.' covers subdomains), path "
-        "grants (read_paths/write_paths, absolute), config values (registered "
-        "keys — discover with search_config), and/or an LLM provider "
-        "definition (openrouter, gemini, anthropic, or a custom name with "
-        "base_url; store the API key first via save_secret and reference its "
-        "NAME as api_key_env — never key material). One approval covers the "
-        "whole document, so batch related needs into a single request. Action "
-        "rename_agent renames this agent (optional preamble). All actions "
-        "accept an optional 'reason' shown to the approver.",
+        "grants (read_paths/write_paths, absolute), your own agent settings "
+        "(agent: primary_model/secondary_model/max_iterations/shell_timeout), "
+        "channel send routes (routes: ['channel:chat_id']), config values "
+        "(registered keys — discover with search_config), and/or an LLM "
+        "provider definition (openrouter, gemini, anthropic, or a custom name "
+        "with base_url; store the API key first via save_secret and reference "
+        "its NAME as api_key_env — never key material). One approval covers "
+        "the whole document, so batch related needs into a single request — "
+        "e.g. define a provider AND adopt it via agent.primary_model "
+        "('model@provider') in one document. Action rename_agent renames this "
+        "agent (optional preamble). All actions accept an optional 'reason' "
+        "shown to the approver.",
         PARAMS_JSON, handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "request_config", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});

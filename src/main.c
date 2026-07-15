@@ -27,6 +27,7 @@
 #include "agent_setup.h"
 #include "hook_dispatch.h"
 #include "approval.h"
+#include "buf.h"
 #include "llm_proc.h"
 #include "llm_worker.h"
 #include "tool_thread.h"
@@ -2025,93 +2026,130 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     run_advance(session_id);
 }
 
-/* Render a human-readable one-line summary of an approval's action/args for
- * a chat prompt — never the raw args_json blob. request_config's actions
- * get field-accurate rendering (mirrors apply_grant's switch above); any
- * other tool's own call arguments (shape unknown to us in general) surface
- * their most common salient field so the reader isn't shown bare JSON. */
-static void format_approval_summary(const Approval *a, char *buf, size_t buflen) {
+/* Append `header` plus a fenced block of the rows yielded by sql (single
+ * text column, one text bind) — or nothing when the query yields no rows.
+ * The fence renders as monospace <pre> on chat channels so columns stay
+ * aligned; in a terminal it reads fine as-is. */
+static void append_enum_block(Buf *out, const char *header, const char *sql,
+                              const char *bind) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(st, 1, bind, -1, SQLITE_STATIC);
+    int n = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (!v) continue;
+        if (n++ == 0) buf_appendf(out, "%s\n```\n", header);
+        buf_appendf(out, "%s\n", v);
+    }
+    if (n) buf_append_str(out, "```\n");
+    sqlite3_finalize(st);
+}
+
+/* request_changes enumerations, grouped by scope: the approver must see
+ * whether a line changes only the asking agent or the whole system. Every
+ * requested VALUE is listed (which hosts, which paths) — never counts. */
+static const char *SQL_CHANGES_AGENT_SCOPED =
+    "SELECT format('%-7s%s','tool',atom) FROM json_each(?1,'$.changes.grants.tools')"
+    " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.changes.grants.hosts')"
+    " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.changes.grants.read_paths')"
+    " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.changes.grants.write_paths')"
+    " UNION ALL SELECT format('%-7s%s','route',atom) FROM json_each(?1,'$.changes.routes')"
+    " UNION ALL SELECT format('%s = %s',key,atom) FROM json_each(?1,'$.changes.agent')";
+
+static const char *SQL_CHANGES_SYSTEM_WIDE =
+    "SELECT format('%s = %s',key,atom) FROM json_each(?1,'$.changes.config')"
+    " UNION ALL SELECT format('provider %s -> %s (key from secret %s)',"
+    "   json_extract(?1,'$.changes.provider.provider'),"
+    "   json_extract(?1,'$.changes.provider.base_url'),"
+    "   json_extract(?1,'$.changes.provider.api_key_env'))"
+    " WHERE json_extract(?1,'$.changes.provider.provider') IS NOT NULL";
+
+/* create_agent enumeration over the parked definition — values, not counts:
+ * this is the approval that mints a new autonomous actor, so it must be the
+ * most transparent one, not the least. */
+static const char *SQL_CREATE_AGENT_LINES =
+    "SELECT format('%-7s%s','tool',atom) FROM json_each(?1,'$.grants.tools')"
+    " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.grants.hosts')"
+    " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.grants.read_paths')"
+    " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.grants.write_paths')"
+    " UNION ALL SELECT format('%-7s%s','ext',atom) FROM json_each(?1,'$.extensions')"
+    " UNION ALL SELECT format('%-7s%s','model',json_extract(?1,'$.primary_model'))"
+    "   WHERE json_extract(?1,'$.primary_model') IS NOT NULL"
+    " UNION ALL SELECT format('%-7s%d block(s)','memory',json_array_length(?1,'$.memory_blocks'))"
+    "   WHERE json_array_length(?1,'$.memory_blocks') > 0";
+
+/* Render a human-readable markdown summary of an approval — never the raw
+ * args_json blob. Grant-shaped approvals enumerate every requested value in
+ * fenced blocks grouped by scope; any other tool's call arguments (shape
+ * unknown in general) surface their most common salient field. Returns a
+ * heap string, caller frees. */
+static char *format_approval_summary(const Approval *a) {
     const char *args = a->args_json ? a->args_json : "{}";
+    Buf out = {0};
     /* Collected extracted fields — freed in one sweep at the end. */
-    char *f[4] = {0};
-    if (a->tool_name && strcmp(a->tool_name, "request_config") == 0) {
-        if (a->action && strcmp(a->action, "request_changes") == 0) {
-            /* Enumerate every requested line — the approver must see the
-             * actual values (which hosts, which paths), never counts. A long
-             * document truncates via snprintf; better cut off than blind. */
-            sqlite3_stmt *es;
-            if (sqlite3_prepare_v2(g_db,
-                    "SELECT group_concat(part, ', ') FROM ("
-                    "  SELECT 'tool '||atom AS part FROM json_each(?1,'$.changes.grants.tools')"
-                    "  UNION ALL SELECT 'host '||atom FROM json_each(?1,'$.changes.grants.hosts')"
-                    "  UNION ALL SELECT 'read '||atom FROM json_each(?1,'$.changes.grants.read_paths')"
-                    "  UNION ALL SELECT 'write '||atom FROM json_each(?1,'$.changes.grants.write_paths')"
-                    "  UNION ALL SELECT key||'='||atom FROM json_each(?1,'$.changes.config')"
-                    "  UNION ALL SELECT 'provider '||json_extract(?1,'$.changes.provider.provider')"
-                    "             ||' (key from secret '||json_extract(?1,'$.changes.provider.api_key_env')||')'"
-                    "   WHERE json_extract(?1,'$.changes.provider.provider') IS NOT NULL)",
-                    -1, &es, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(es, 1, args, -1, SQLITE_STATIC);
-                if (sqlite3_step(es) == SQLITE_ROW) {
-                    const char *v = (const char *)sqlite3_column_text(es, 0);
-                    if (v) f[0] = strdup(v);
-                }
-                sqlite3_finalize(es);
-            }
-            snprintf(buf, buflen, "request_changes: %s", f[0] ? f[0] : "?");
-        } else if (a->action && strcmp(a->action, "rename_agent") == 0) {
-            f[0] = tool_args_str(g_db, args, "name");
-            snprintf(buf, buflen, "rename_agent: %s", f[0] ? f[0] : "?");
-        } else {
-            snprintf(buf, buflen, "%s", a->action ? a->action : "?");
-        }
+    char *f[3] = {0};
+    if (a->tool_name && strcmp(a->tool_name, "request_config") == 0 &&
+        a->action && strcmp(a->action, "request_changes") == 0) {
+        buf_append_str(&out, "requests these changes:\n");
+        append_enum_block(&out, "Agent-scoped (this agent only):",
+                          SQL_CHANGES_AGENT_SCOPED, args);
+        append_enum_block(&out, "System-wide:", SQL_CHANGES_SYSTEM_WIDE, args);
+        f[0] = tool_args_str(g_db, args, "reason");
+        if (f[0] && f[0][0]) buf_appendf(&out, "Reason: %s\n", f[0]);
+    } else if (a->tool_name && strcmp(a->tool_name, "request_config") == 0 &&
+               a->action && strcmp(a->action, "rename_agent") == 0) {
+        f[0] = tool_args_str(g_db, args, "name");
+        f[1] = tool_args_str(g_db, args, "reason");
+        buf_appendf(&out, "rename_agent: %s", f[0] ? f[0] : "?");
+        if (f[1] && f[1][0]) buf_appendf(&out, "\nReason: %s", f[1]);
+    } else if (a->tool_name && strcmp(a->tool_name, "request_config") == 0) {
+        buf_append_str(&out, a->action ? a->action : "?");
     } else if (a->tool_name && strcmp(a->tool_name, "extension_promote") == 0) {
         f[0] = tool_args_str(g_db, args, "name");
         f[1] = tool_args_str(g_db, args, "summary");
-        snprintf(buf, buflen, "promote '%s': %s", f[0] ? f[0] : "?",
-                 f[1] ? f[1] : "(no summary)");
+        buf_appendf(&out, "promote '%s': %s", f[0] ? f[0] : "?",
+                    f[1] ? f[1] : "(no summary)");
     } else if (a->tool_name && strcmp(a->tool_name, "create_agent") == 0) {
-        /* Enumerate what the definition creates so the approver sees the
-         * blast radius, not raw JSON. */
         f[0] = tool_args_str(g_db, args, "name");
         f[1] = tool_args_str(g_db, args, "sandbox_profile");
         f[2] = tool_args_str(g_db, args, "clone_from");
-        int ntools = 0, nhosts = 0, npaths = 0, nexts = 0;
-        sqlite3_stmt *cs;
-        if (a->args_json && sqlite3_prepare_v2(g_db,
-                "SELECT COALESCE(json_array_length(?1,'$.grants.tools'),0),"
-                "       COALESCE(json_array_length(?1,'$.grants.hosts'),0),"
-                "       COALESCE(json_array_length(?1,'$.grants.read_paths'),0)"
-                "        + COALESCE(json_array_length(?1,'$.grants.write_paths'),0),"
-                "       COALESCE(json_array_length(?1,'$.extensions'),0)",
-                -1, &cs, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(cs, 1, a->args_json, -1, SQLITE_STATIC);
-            if (sqlite3_step(cs) == SQLITE_ROW) {
-                ntools = sqlite3_column_int(cs, 0);
-                nhosts = sqlite3_column_int(cs, 1);
-                npaths = sqlite3_column_int(cs, 2);
-                nexts = sqlite3_column_int(cs, 3);
-            }
-            sqlite3_finalize(cs);
-        }
-        snprintf(buf, buflen,
-                 "create_agent: %s (profile %s%s%s, +%d tools, %d hosts, "
-                 "%d paths, %d extensions)",
-                 f[0] ? f[0] : "?", f[1] ? f[1] : "default",
-                 f[2] ? ", clone of " : "", f[2] ? f[2] : "",
-                 ntools, nhosts, npaths, nexts);
+        buf_appendf(&out, "wants to create agent **%s** (profile %s%s%s):\n",
+                    f[0] ? f[0] : "?", f[1] ? f[1] : "default",
+                    f[2] ? ", clone of " : "", f[2] ? f[2] : "");
+        append_enum_block(&out, "Capabilities (all within the creator's own):",
+                          SQL_CREATE_AGENT_LINES, args);
     } else {
         char *salient = tool_args_str(g_db, args, "command");
         if (!salient) salient = tool_args_str(g_db, args, "url");
         if (!salient) salient = tool_args_str(g_db, args, "path");
         f[0] = salient;
         if (salient)
-            snprintf(buf, buflen, "%s: %s", a->tool_name ? a->tool_name : "?", salient);
+            buf_appendf(&out, "%s: %s", a->tool_name ? a->tool_name : "?", salient);
         else
-            snprintf(buf, buflen, "%s (%s)", a->tool_name ? a->tool_name : "?",
-                     a->action ? a->action : "?");
+            buf_appendf(&out, "%s (%s)", a->tool_name ? a->tool_name : "?",
+                        a->action ? a->action : "?");
     }
     for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) free(f[i]);
+
+    char *s = buf_take(&out);
+    if (!s) return strdup("?");
+    /* Telegram counts parsed text against its 4096 limit and buttoned
+     * prompts are never chunked — truncate a huge document at a line break.
+     * The appended fence closes a cut-open block; if the cut landed outside
+     * a block the stray fence stays literal (unbalanced markers pass
+     * through the renderer untouched), which is safe. */
+    if (strlen(s) > 3500) {
+        size_t cut = 3400;
+        while (cut > 0 && s[cut] != '\n') cut--;
+        s[cut] = '\0';
+        Buf t = {0};
+        buf_appendf(&t, "%s\n```\n... (truncated)", s);
+        free(s);
+        s = buf_take(&t);
+        if (!s) return strdup("?");
+    }
+    return s;
 }
 
 /* ── handle_approval_park: prompt the approver ────────────────── */
@@ -2148,14 +2186,18 @@ static void handle_approval_park(int64_t session_id) {
         /* Interactive: prompt user. Name the asking session when it's a
          * sub-agent (session_id != g_cli_session) — otherwise a launch_agent
          * child's approval request is indistinguishable from the root's. */
-        fprintf(stdout, "\n\033[1mApproval required:\033[0m %s", a->action);
+        fprintf(stdout, "\n\033[1mApproval required\033[0m");
         if (session_id != g_cli_session) {
             char *sub_agent = session_get_agent_name(g_db, session_id);
             fprintf(stdout, " (sub-agent %s, session %lld)",
                     sub_agent ? sub_agent : "?", (long long)session_id);
             free(sub_agent);
         }
-        if (a->args_json) fprintf(stdout, " %s", a->args_json);
+        {
+            char *summary = format_approval_summary(a);
+            fprintf(stdout, ": %s", summary ? summary : "?");
+            free(summary);
+        }
         if (a->resolve && strcmp(a->resolve, "apply") == 0)
             fprintf(stdout, "\nGrant? (y/n): ");
         else
@@ -2200,13 +2242,15 @@ static void handle_approval_park(int64_t session_id) {
         if (admins && !admins[0]) { free(admins); admins = NULL; }
 
         char *agent = session_get_agent_name(g_db, session_id);
-        char summary[512];
-        format_approval_summary(a, summary, sizeof(summary));
-        char prompt[640];
-        snprintf(prompt, sizeof(prompt),
-                 "Agent %s (session %lld, channel: %s) requests:\n%s",
-                 agent ? agent : "?", (long long)session_id, ch_name, summary);
+        char *summary = format_approval_summary(a);
+        Buf pb = {0};
+        buf_appendf(&pb, "**Agent %s** (session %lld, channel %s):\n%s",
+                    agent ? agent : "?", (long long)session_id, ch_name,
+                    summary ? summary : "?");
         free(agent);
+        free(summary);
+        char *prompt = buf_take(&pb);
+        if (!prompt) prompt = strdup("approval requested");
 
         /* "apply" approvals (request_config grants) have no once semantics —
          * resolve_approval rejects APPROVAL_ONCE for them outright (see the
@@ -2255,6 +2299,7 @@ static void handle_approval_park(int64_t session_id) {
             }
         }
         free(admins);
+        free(prompt);
         if (g_cfg && g_cfg->db_path) channel_outbox_wake(g_cfg->db_path, ch_name);
     }
     if (!has_channel) {

@@ -77,7 +77,10 @@ void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db) {
         "VALUES(?1, NULL, ?2, ?3, NULL) "
         "ON CONFLICT(name) DO UPDATE SET "
         "parameters_json = excluded.parameters_json, "
-        "description = COALESCE(tools.description, excluded.description), "
+        /* Code owns builtin schema AND description — the model renders from
+         * this table (llm_payload), so a stale seeded description would keep
+         * advertising options the code no longer accepts. */
+        "description = COALESCE(excluded.description, tools.description), "
         "extension_name = NULL";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;

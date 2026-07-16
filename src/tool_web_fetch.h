@@ -23,8 +23,10 @@ typedef struct {
 /* Register web_fetch tool into registry. ctx carries the sandbox profile. */
 int tool_web_fetch_register(ToolRegistry *reg, WebFetchCtx *ctx);
 
-/* Strip HTML tags from src, write plain text to dst. Returns bytes written. */
-size_t html_strip_tags(const char *src, char *dst, size_t dst_cap);
+/* Convert HTML to markdown (script/style dropped, tags → markers, entities
+ * decoded). Returns a malloc'd string, caller frees. Non-HTML text passes
+ * through mostly unchanged. */
+char *html_to_markdown(const char *html, size_t html_len);
 
 /* Actionable-denial hint: if enforcement is active (host_mode==0) and url's
  * host is not matched by rules, return a malloc'd "request grant_host" error

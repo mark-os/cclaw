@@ -30,7 +30,7 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         return JS_ThrowTypeError(ctx, "http_request: url must be a string");
 
     const char *method = NULL, *body = NULL;
-    int sanitize = 0;
+    int markdownify = 0;
     char **hdr_lines = NULL;       /* owned "Name: Value" strings */
     const char **hdr_ptrs = NULL;  /* NULL-terminated view handed to fetch */
     size_t hdr_n = 0;
@@ -42,8 +42,8 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         JSValue b = JS_GetPropertyStr(ctx, argv[1], "body");
         if (!JS_IsUndefined(b) && !JS_IsNull(b)) body = JS_ToCString(ctx, b);
         JS_FreeValue(ctx, b);
-        JSValue s = JS_GetPropertyStr(ctx, argv[1], "sanitize");
-        if (JS_ToBool(ctx, s)) sanitize = 1;
+        JSValue s = JS_GetPropertyStr(ctx, argv[1], "markdownify");
+        if (JS_ToBool(ctx, s)) markdownify = 1;
         JS_FreeValue(ctx, s);
 
         /* headers: {Name: Value, ...} → NULL-terminated "Name: Value" array */
@@ -102,15 +102,14 @@ static JSValue js_http_request(JSContext *ctx, JSValueConst this_val,
         return result;
     }
 
-    if (r.body && sanitize) {
-        /* sanitize=true strips HTML tags only; untrusted-content wrapping
-         * happens at query time via the entry's network_hosts tag. */
-        size_t cap = r.body_len + 1;
-        char *text = malloc(cap);
-        if (text) {
-            size_t tlen = html_strip_tags(r.body, text, cap);
-            JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, text, tlen));
-            free(text);
+    if (r.body && markdownify) {
+        /* markdownify=true converts HTML to markdown for readability — it is
+         * NOT a security boundary; untrusted-content wrapping happens at
+         * query time via the entry's network_hosts tag. */
+        char *md = html_to_markdown(r.body, r.body_len);
+        if (md) {
+            JS_SetPropertyStr(ctx, result, "body", JS_NewString(ctx, md));
+            free(md);
         } else {
             JS_SetPropertyStr(ctx, result, "body", JS_NewStringLen(ctx, r.body, r.body_len));
         }

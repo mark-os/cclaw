@@ -32,7 +32,7 @@ INSERT OR IGNORE INTO tools(name, description) VALUES
   ('file_read', 'Read a file (path relative or absolute)'),
   ('file_write', 'Write content to a file (path relative or absolute)'),
   ('shell_exec', 'Execute a shell command and return stdout+stderr'),
-  ('js_eval', 'Run JavaScript in QuickJS (modern JS; no modules, no top-level await). http_request(url[, {method, body, headers:{Name:Value}, sanitize}]) is synchronous HTTP; returns {status, body} where body is a string ('''' on error, plus {error}). Use .body, e.g. http_request(url).body.match(/re/).'),
+  ('js_eval', 'Run JavaScript in QuickJS (modern JS; no modules, no top-level await). http_request(url[, {method, body, headers:{Name:Value}, markdownify}]) is synchronous HTTP; returns {status, body} where body is a string ('''' on error, plus {error}); markdownify:true converts an HTML body to markdown. Use .body, e.g. http_request(url).body.match(/re/).'),
   ('web_fetch', 'Fetch a URL via HTTP GET and return content as markdown. Large pages are truncated; page through with offset + max_chars, or read/grep the full copy saved under workspace .tool_results/ (path given in the result).'),
   ('memory_create', 'Create a new memory block (a named container of numbered notes). Args: label, description.'),
   ('memory_add', 'Add a numbered note to a memory block. Args: block (label), text.'),

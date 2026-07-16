@@ -237,11 +237,13 @@ void context_plan_free(ContextPlan *plan) {
 
 void session_tmp_dir(int64_t session_id, char *buf, size_t bufsz) {
     /* Spill into the agent workspace (natural lifetime, no symlink-prone
-     * world-writable /tmp). Fall back to /tmp when no workspace is set
-     * (CLI without a workspace, tests). */
+     * world-writable /tmp), under the same .tool_results/ home web_fetch
+     * uses for its full copies — one place to look for full tool output.
+     * Fall back to /tmp when no workspace is set (CLI without a workspace,
+     * tests). */
     const char *ws = getenv("CCLAW_WORKSPACE");
     if (ws && ws[0])
-        snprintf(buf, bufsz, "%s/spill/%lld", ws, (long long)session_id);
+        snprintf(buf, bufsz, "%s/.tool_results/%lld", ws, (long long)session_id);
     else
         snprintf(buf, bufsz, "/tmp/cclaw-%lld", (long long)session_id);
 }

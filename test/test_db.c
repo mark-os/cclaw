@@ -328,9 +328,15 @@ static void test_schema_state(void) {
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
     assert(db_schema_compat(db) == 0);
 
-    set_user_version(db, CCLAW_SCHEMA_VERSION - 1);  /* one below the floor — refused */
+    set_user_version(db, 28);            /* one below the v29 floor — refused */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
     assert(db_schema_compat(db) == 0);
+
+    set_user_version(db, 29);            /* at the floor — patchable, not refused.
+                                          * State only: this DB is already
+                                          * current-shaped, so actually running
+                                          * the patches would fail (dup column). */
+    assert(db_schema_state(db, NULL) == DB_SCHEMA_UPGRADABLE);
 
     set_user_version(db, 0);             /* v0 but tables exist → pre-freeze */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);

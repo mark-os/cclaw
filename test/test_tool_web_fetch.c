@@ -13,30 +13,33 @@
 
 static void test_html_strip_basic(void) {
     const char *html = "<html><body><p>Hello <b>world</b></p></body></html>";
-    char out[256];
-    html_strip_tags(html, out, sizeof(out));
+    char *out = html_to_markdown(html, strlen(html));
+    assert(out);
     assert(strstr(out, "Hello") != NULL);
     assert(strstr(out, "world") != NULL);
     assert(strchr(out, '<') == NULL);
+    free(out);
     printf("  PASS: html_strip_basic\n");
 }
 
 static void test_html_strip_script(void) {
     const char *html = "<p>before</p><script>var x=1;</script><p>after</p>";
-    char out[256];
-    html_strip_tags(html, out, sizeof(out));
+    char *out = html_to_markdown(html, strlen(html));
+    assert(out);
     assert(strstr(out, "before") != NULL);
     assert(strstr(out, "after") != NULL);
     assert(strstr(out, "var") == NULL);
+    free(out);
     printf("  PASS: html_strip_script\n");
 }
 
 static void test_html_strip_style(void) {
     const char *html = "<style>.x{color:red}</style><p>text</p>";
-    char out[256];
-    html_strip_tags(html, out, sizeof(out));
+    char *out = html_to_markdown(html, strlen(html));
+    assert(out);
     assert(strstr(out, "text") != NULL);
     assert(strstr(out, "color") == NULL);
+    free(out);
     printf("  PASS: html_strip_style\n");
 }
 

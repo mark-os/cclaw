@@ -54,10 +54,18 @@ already exists is skipped, never overwritten.
 
 Tool handlers are ES5-ish QuickJS scripts run in a sandboxed engine. A tool
 handler file defines `function handle(args)` and returns a string (the tool
-result). No Node APIs, no `require`; use the provided host bridges
-(`http_fetch` where granted). Keep handlers small and side-effect free where
-possible — network egress still goes through the credential proxy and host
-allow-list.
+result). No Node APIs, no `require`; use the provided host bridges:
+
+- `http_request(url[, {method, body, headers:{Name:Value}, markdownify}])` —
+  synchronous HTTP, returns `{status, body, error}` (`body` is always a
+  string, `""` on transport failure). `markdownify: true` converts an HTML
+  body to markdown for readability — it is a rendering aid, not a security
+  boundary (untrusted-content wrapping happens at storage time regardless).
+- `fs.readFile` / `fs.writeFile` / `fs.readdir` / `fs.stat` / `fs.cwd` —
+  workspace-scoped file access.
+
+Keep handlers small and side-effect free where possible — network egress
+still goes through the credential proxy and host allow-list.
 
 ## Skills
 

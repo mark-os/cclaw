@@ -66,7 +66,7 @@ static char *extract_href(const char *tag_content, size_t tag_len) {
     return NULL;
 }
 
-static char *html_to_markdown(const char *html, size_t html_len) {
+char *html_to_markdown(const char *html, size_t html_len) {
     Buf buf = {0};
     size_t i = 0;
     int in_script = 0, in_style = 0, last_was_newline = 0, consec_nl = 0;
@@ -201,19 +201,6 @@ static char *html_to_markdown(const char *html, size_t html_len) {
 
     free(active_href);
     return buf_take(&buf);
-}
-
-/* ── Legacy html_strip_tags (kept for backward compat / tests) ─── */
-
-size_t html_strip_tags(const char *src, char *dst, size_t dst_cap) {
-    char *md = html_to_markdown(src, strlen(src));
-    if (!md) { dst[0] = '\0'; return 0; }
-    size_t len = strlen(md);
-    if (len >= dst_cap) len = dst_cap - 1;
-    memcpy(dst, md, len);
-    dst[len] = '\0';
-    free(md);
-    return len;
 }
 
 /* ── Actionable denial hint ──────────────────────────────────────── */

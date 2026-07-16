@@ -259,10 +259,42 @@ static char *validate_agent(sqlite3 *db, const char *changes,
     return err;
 }
 
+/* First route under routes_path already owned by a different agent:
+ * 1 (conflict, *atom_out = offending route if requested), 0 (none),
+ * -1 (query failed). Shared by eager validation and the park→apply
+ * re-check — routes are first-come, an agent must not capture another
+ * agent's chat, and a capture between park and apply fails the apply. */
+static int route_owned_elsewhere(sqlite3 *db, const char *json,
+                                 const char *routes_path, const char *agent,
+                                 char **atom_out) {
+    if (atom_out) *atom_out = NULL;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT atom FROM json_each(?1,?3) j"
+            " WHERE EXISTS(SELECT 1 FROM channel_routes c"
+            "   WHERE c.channel_name = substr(j.atom,1,instr(j.atom,':')-1)"
+            "     AND c.channel_id   = substr(j.atom,instr(j.atom,':')+1)"
+            "     AND COALESCE(c.agent_name,'') != ?2) LIMIT 1",
+            -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, agent, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, routes_path, -1, SQLITE_STATIC);
+    int hit = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        hit = 1;
+        if (atom_out) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            if (v) *atom_out = strdup(v);
+        }
+    }
+    sqlite3_finalize(st);
+    return hit;
+}
+
 /* Validate $.routes — 'channel:chat_id' strings. The channel must exist,
  * the chat_id must be literal (wildcard routes are operator-only), and a
- * route already owned by another agent is refused: routes are first-come,
- * like extension names — an agent must not capture another agent's chat. */
+ * route already owned by another agent is refused. */
 static char *validate_routes(sqlite3 *db, const char *changes,
                              const char *agent_name) {
     if (!q1_true(db, "SELECT 1 WHERE json_type(?1,'$.routes')='array'", changes))
@@ -295,24 +327,17 @@ static char *validate_routes(sqlite3 *db, const char *changes,
         free(bad);
         return m;
     }
-    sqlite3_stmt *st;
-    char *err = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT atom FROM json_each(?1,'$.routes') j"
-            " WHERE EXISTS(SELECT 1 FROM channel_routes c"
-            "   WHERE c.channel_name = substr(j.atom,1,instr(j.atom,':')-1)"
-            "     AND c.channel_id   = substr(j.atom,instr(j.atom,':')+1)"
-            "     AND COALESCE(c.agent_name,'') != ?2) LIMIT 1",
-            -1, &st, NULL) != SQLITE_OK)
+    char *atom = NULL;
+    int owned = route_owned_elsewhere(db, changes, "$.routes", agent_name, &atom);
+    if (owned < 0)
         return strdup("error: route validation failed");
-    sqlite3_bind_text(st, 1, changes, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 2, agent_name, -1, SQLITE_STATIC);
-    if (sqlite3_step(st) == SQLITE_ROW) {
-        const char *v = (const char *)sqlite3_column_text(st, 0);
-        err = errf("error: route '%s' is already owned by another agent", v);
+    if (owned) {
+        char *m = errf("error: route '%s' is already owned by another agent",
+                       atom ? atom : "?");
+        free(atom);
+        return m;
     }
-    sqlite3_finalize(st);
-    return err;
+    return NULL;
 }
 
 /* Validate $.provider and build its canonical JSON (defaults filled) into
@@ -792,23 +817,12 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
          * agent asked for send authority, not session mirroring, so the
          * route is 'explicit' — turn output does not auto-deliver there. */
         if (rc == 0) {
-            sqlite3_stmt *rs;
-            if (sqlite3_prepare_v2(db,
-                    "SELECT 1 FROM json_each(?1,'$.changes.routes') j"
-                    " WHERE EXISTS(SELECT 1 FROM channel_routes c"
-                    "   WHERE c.channel_name = substr(j.atom,1,instr(j.atom,':')-1)"
-                    "     AND c.channel_id   = substr(j.atom,instr(j.atom,':')+1)"
-                    "     AND COALESCE(c.agent_name,'') != ?2) LIMIT 1",
-                    -1, &rs, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(rs, 1, args_json, -1, SQLITE_STATIC);
-                sqlite3_bind_text(rs, 2, agent, -1, SQLITE_STATIC);
-                if (sqlite3_step(rs) == SQLITE_ROW) {
+            int owned = route_owned_elsewhere(db, args_json, "$.changes.routes",
+                                              agent, NULL);
+            if (owned != 0) {
+                if (owned > 0)
                     LOG_WARN_("request_changes apply: route already owned "
                               "by another agent (agent=%s)", agent);
-                    rc = -1;
-                }
-                sqlite3_finalize(rs);
-            } else {
                 rc = -1;
             }
         }

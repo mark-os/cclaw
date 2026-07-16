@@ -273,6 +273,52 @@ int agent_definition_validate(sqlite3 *db, const char *json,
     return validate_inner(db, json, creator, NULL, err);
 }
 
+/* Shared apply tail (create and update): overlay declared scalar fields onto
+ * the agents row (absent = keep), add declared grants, and re-stamp the
+ * approval gate on approval-listed tools. */
+static int apply_fields_and_grants(sqlite3 *db, const char *name,
+                                   const char *json, char **err) {
+    sqlite3_stmt *st;
+    int rc = 0;
+    const char *osql =
+        "UPDATE agents SET"
+        " description   = COALESCE(json_extract(?2,'$.description'), description),"
+        " system_prompt = COALESCE(json_extract(?2,'$.system_prompt'), system_prompt),"
+        " primary_model = COALESCE(json_extract(?2,'$.primary_model'), primary_model),"
+        " secondary_model = COALESCE(json_extract(?2,'$.secondary_model'), secondary_model),"
+        " sandbox_profile = COALESCE(json_extract(?2,'$.sandbox_profile'), sandbox_profile),"
+        " max_iterations  = COALESCE(json_extract(?2,'$.max_iterations'), max_iterations),"
+        " shell_timeout   = COALESCE(json_extract(?2,'$.shell_timeout'), shell_timeout)"
+        " WHERE name=?1";
+    if (sqlite3_prepare_v2(db, osql, -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, json, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
+        sqlite3_finalize(st);
+    } else rc = -1;
+
+    for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
+        rc = grants_walk(db, json, name, NULL, 1, i, err);
+
+    /* Approval-required tools keep their gate however they were granted. */
+    if (rc == 0) {
+        char *approval_list = config_get(db, "agent_approval_tools");
+        if (approval_list) {
+            if (sqlite3_prepare_v2(db,
+                    "UPDATE grants SET approval_mode='always' WHERE agent_name=?1"
+                    " AND kind='tool' AND value IN (SELECT value FROM json_each(?2))",
+                    -1, &st, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+                sqlite3_bind_text(st, 2, approval_list, -1, SQLITE_STATIC);
+                sqlite3_step(st);
+                sqlite3_finalize(st);
+            }
+            free(approval_list);
+        }
+    }
+    return rc;
+}
+
 int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
                            const char *agents_dir, char **err) {
     if (err) *err = NULL;
@@ -328,49 +374,12 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
         } else rc = -1;
     }
 
-    /* Overlay declared fields (absent fields keep row/clone values). */
-    if (rc == 0) {
-        const char *osql =
-            "UPDATE agents SET"
-            " description   = COALESCE(json_extract(?2,'$.description'), description),"
-            " system_prompt = COALESCE(json_extract(?2,'$.system_prompt'), system_prompt),"
-            " primary_model = COALESCE(json_extract(?2,'$.primary_model'), primary_model),"
-            " secondary_model = COALESCE(json_extract(?2,'$.secondary_model'), secondary_model),"
-            " sandbox_profile = COALESCE(json_extract(?2,'$.sandbox_profile'), sandbox_profile),"
-            " max_iterations  = COALESCE(json_extract(?2,'$.max_iterations'), max_iterations),"
-            " shell_timeout   = COALESCE(json_extract(?2,'$.shell_timeout'), shell_timeout)"
-            " WHERE name=?1";
-        if (sqlite3_prepare_v2(db, osql, -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
-            sqlite3_bind_text(st, 2, json, -1, SQLITE_STATIC);
-            if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
-            sqlite3_finalize(st);
-        } else rc = -1;
-    }
-
     /* Baseline grants (skip for clones — the copied set is the baseline),
-     * then declared grants on top. */
+     * then declared fields + grants + approval gate. */
     if (rc == 0 && !(clone && clone[0]))
         agent_grant_defaults(db, name);
-    for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
-        rc = grants_walk(db, json, name, NULL, 1, i, err);
-
-    /* Approval-required tools keep their gate however they were granted. */
-    if (rc == 0) {
-        char *approval_list = config_get(db, "agent_approval_tools");
-        if (approval_list) {
-            if (sqlite3_prepare_v2(db,
-                    "UPDATE grants SET approval_mode='always' WHERE agent_name=?1"
-                    " AND kind='tool' AND value IN (SELECT value FROM json_each(?2))",
-                    -1, &st, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
-                sqlite3_bind_text(st, 2, approval_list, -1, SQLITE_STATIC);
-                sqlite3_step(st);
-                sqlite3_finalize(st);
-            }
-            free(approval_list);
-        }
-    }
+    if (rc == 0)
+        rc = apply_fields_and_grants(db, name, json, err);
 
     /* Declared + default extension attachments. */
     if (rc == 0) {
@@ -555,44 +564,7 @@ int agent_definition_update_apply(sqlite3 *db, const char *json,
         return fail(err, "cannot begin transaction");
     }
 
-    int rc = 0;
-    sqlite3_stmt *st;
-    const char *osql =
-        "UPDATE agents SET"
-        " description   = COALESCE(json_extract(?2,'$.description'), description),"
-        " system_prompt = COALESCE(json_extract(?2,'$.system_prompt'), system_prompt),"
-        " primary_model = COALESCE(json_extract(?2,'$.primary_model'), primary_model),"
-        " secondary_model = COALESCE(json_extract(?2,'$.secondary_model'), secondary_model),"
-        " sandbox_profile = COALESCE(json_extract(?2,'$.sandbox_profile'), sandbox_profile),"
-        " max_iterations  = COALESCE(json_extract(?2,'$.max_iterations'), max_iterations),"
-        " shell_timeout   = COALESCE(json_extract(?2,'$.shell_timeout'), shell_timeout)"
-        " WHERE name=?1";
-    if (sqlite3_prepare_v2(db, osql, -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(st, 2, json, -1, SQLITE_STATIC);
-        if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
-        sqlite3_finalize(st);
-    } else rc = -1;
-
-    for (size_t i = 0; rc == 0 && i < GRANT_KIND_COUNT; i++)
-        rc = grants_walk(db, json, name, NULL, 1, i, err);
-
-    /* A newly granted tool on the approval list keeps its gate. */
-    if (rc == 0) {
-        char *approval_list = config_get(db, "agent_approval_tools");
-        if (approval_list) {
-            if (sqlite3_prepare_v2(db,
-                    "UPDATE grants SET approval_mode='always' WHERE agent_name=?1"
-                    " AND kind='tool' AND value IN (SELECT value FROM json_each(?2))",
-                    -1, &st, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
-                sqlite3_bind_text(st, 2, approval_list, -1, SQLITE_STATIC);
-                sqlite3_step(st);
-                sqlite3_finalize(st);
-            }
-            free(approval_list);
-        }
-    }
+    int rc = apply_fields_and_grants(db, name, json, err);
 
     if (sqlite3_exec(db, rc == 0 ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
         rc = -1;

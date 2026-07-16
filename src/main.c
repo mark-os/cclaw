@@ -2170,6 +2170,13 @@ static char *format_approval_summary(const Approval *a) {
     if (strlen(s) > 3500) {
         size_t cut = 3400;
         while (cut > 0 && s[cut] != '\n') cut--;
+        if (cut == 0) {
+            /* No line break at all (e.g. one huge single-line field) — hard
+             * cut rather than emptying the summary; keep UTF-8 sequences
+             * whole so the platform doesn't reject the text. */
+            cut = 3400;
+            while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80) cut--;
+        }
         s[cut] = '\0';
         Buf t = {0};
         buf_appendf(&t, "%s\n```\n... (truncated)", s);

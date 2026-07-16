@@ -2003,6 +2003,9 @@ int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
     /* Cascade rename across all tables */
     const char *updates[] = {
         "UPDATE agents SET name=?1 WHERE name=?2",
+        /* provenance follows the rename: created_by authorizes update_agent */
+        "UPDATE agents SET created_by=?1 WHERE created_by=?2",
+        "UPDATE grants SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE agent_extensions SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE channel_routes SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE sessions SET agent_name=?1 WHERE agent_name=?2",

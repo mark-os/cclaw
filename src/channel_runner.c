@@ -744,12 +744,11 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                          * else (4xx) is terminal — with one generic exception below. */
                         int transient = (cerr != NULL) || status == 429 || (status >= 500 && status < 600);
                         int attempts = channel_outbox_attempts(g_ctx, r->outbox_id);
-                        int mode = channel_outbox_mode(g_ctx, r->outbox_id);
                         /* Always clear remaining queued chunks for this row: on retry the row
                          * is re-drained and re-chunked from scratch (accepting at-least-once
                          * duplication of earlier chunks over permanent truncation). */
                         send_queue_drop_outbox(r->outbox_id);
-                        if (!transient && mode == 0) {
+                        if (!transient && channel_outbox_mode(g_ctx, r->outbox_id) == 0) {
                             /* Terminal 4xx on a formatted (mode 0) delivery: re-deliver
                              * once at plain before failing. C needs no platform knowledge
                              * of WHY the format was rejected — the platform's renderer is

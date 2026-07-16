@@ -2011,6 +2011,7 @@ int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
         "UPDATE sessions SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE cron_jobs SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE memory_blocks SET agent_name=?1 WHERE agent_name=?2",
+        "UPDATE memory_entries SET agent_name=?1 WHERE agent_name=?2",
         /* match effective value: a NULL override still means the default */
         "UPDATE config SET value=?1 WHERE key='default_agent' AND COALESCE(value, default_value)=?2",
     };

@@ -2,11 +2,22 @@
 #include "tools.h"
 #include "tool_js.h"
 #include "sqlite3.h"
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 void tools_init(ToolRegistry *reg) {
     memset(reg, 0, sizeof(*reg));
+}
+
+char *tool_errf(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    return strdup(buf);
 }
 
 int tools_register(ToolRegistry *reg, const char *name, const char *description,

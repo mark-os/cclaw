@@ -104,7 +104,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
      * fork+execve --run-tool child, egress via per-hop proxy decide(). */
     setup->js_eval_ctx.allowed_hosts = setup->caps.hosts;
     setup->js_eval_ctx.allowed_hosts_count = setup->caps.host_count;
-    setup->js_eval_ctx.host_mode = (sandbox_profile && strcmp(sandbox_profile, "host") == 0) ? 1 : 0;
+    setup->js_eval_ctx.host_mode = profile.sandbox ? 0 : 1;
     setup->js_eval_ctx.sandbox_profile = sandbox_profile;
     setup->js_eval_ctx.workspace = cfg->workspace;
     setup->js_eval_ctx.cwd_path = getenv("CCLAW_PATH");
@@ -119,7 +119,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->web_ctx.db_path = cfg->db_path;
     setup->web_ctx.allowed_hosts = setup->caps.hosts;
     setup->web_ctx.allowed_host_count = setup->caps.host_count;
-    setup->web_ctx.host_mode = (sandbox_profile && strcmp(sandbox_profile, "host") == 0) ? 1 : 0;
+    setup->web_ctx.host_mode = profile.sandbox ? 0 : 1;
     setup->web_ctx.sb = profile;
     tool_web_fetch_register(&setup->reg, &setup->web_ctx);
 

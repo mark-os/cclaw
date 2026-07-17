@@ -34,8 +34,6 @@ void send_req_free(SendReq *r);
 
 /* JS-eval + callback-invocation helpers shared with the harness. */
 JSValue eval_js(JSContext *ctx, const char *code, const char *tag);
-void set_global_str(JSContext *ctx, const char *name, const char *val);
-void set_global_int(JSContext *ctx, const char *name, int val);
 void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row);
 
 /* Settle a promise-backed request (channel.http): resolve with

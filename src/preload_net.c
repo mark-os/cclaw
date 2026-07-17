@@ -214,9 +214,17 @@ int getaddrinfo(const char *node, const char *service,
     char *nl = strchr(ip, '\n');
     if (nl) *nl = '\0';
 
-    /* Build addrinfo result */
+    /* Build addrinfo result. Numeric service only — the shim never resolved
+     * service names (atoi returned 0 for them); now that's an explicit error
+     * instead of a silent port-0 connect. */
     uint16_t port = 0;
-    if (service) port = (uint16_t)atoi(service);
+    if (service) {
+        char *send_ = NULL;
+        long pval = strtol(service, &send_, 10);
+        if (send_ == service || *send_ != '\0' || pval < 1 || pval > 65535)
+            return EAI_SERVICE;
+        port = (uint16_t)pval;
+    }
 
     struct sockaddr_in *sa4 = calloc(1, sizeof(*sa4));
     if (!sa4) return EAI_MEMORY;

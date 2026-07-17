@@ -47,7 +47,5 @@ void extension_ctx_init(ExtensionCtx *ctx, JsSessionRuntime *rt);
 /* Free extension context resources. */
 void extension_ctx_destroy(ExtensionCtx *ctx);
 
-/* Map event name string to HookEvent enum. Returns -1 if unknown. */
-int hook_event_from_name(const char *name);
 
 #endif

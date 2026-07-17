@@ -243,17 +243,23 @@ char *tool_result_postprocess(const char *result, const ShellSecret *secrets, si
         size_t cap = len + 1 + (size_t)n * 80   /* redact tag is capped at 80 */
                      + sizeof(SCAN_REDACT_HINT);
         char *scanned = malloc(cap);
-        if (scanned) {
-            memcpy(scanned, to_scan, len + 1);
-            secret_scan_redact(scanned, &len, cap);
-            size_t hlen = sizeof(SCAN_REDACT_HINT) - 1;
-            if (len + hlen < cap) {
-                memcpy(scanned + len, SCAN_REDACT_HINT, hlen + 1);
-                len += hlen;
-            }
+        if (!scanned) {
+            /* Fail closed: callers treat a NULL return as "keep the original
+             * text", which here would pass the un-redacted findings through
+             * to the context. Withhold the result instead. */
             free(cur);
-            return scanned;
+            return strdup("[tool result withheld: secret scan found matches "
+                          "but redaction ran out of memory]");
         }
+        memcpy(scanned, to_scan, len + 1);
+        secret_scan_redact(scanned, &len, cap);
+        size_t hlen = sizeof(SCAN_REDACT_HINT) - 1;
+        if (len + hlen < cap) {
+            memcpy(scanned + len, SCAN_REDACT_HINT, hlen + 1);
+            len += hlen;
+        }
+        free(cur);
+        return scanned;
     }
 
     return cur;

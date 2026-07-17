@@ -14,7 +14,10 @@ char *util_read_file(const char *path, size_t *out_len) {
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
-    if (len <= 0) { fclose(f); return NULL; }
+    /* Cap bounds daemon OOM from an oversized workspace file (manifest, hook,
+     * skill, channel JS) or media spool entry — the largest legitimate load
+     * is a media file, well under this. */
+    if (len <= 0 || len > UTIL_READ_FILE_MAX) { fclose(f); return NULL; }
     fseek(f, 0, SEEK_SET);
     char *buf = malloc((size_t)len + 1);
     if (!buf) { fclose(f); return NULL; }
@@ -23,6 +26,18 @@ char *util_read_file(const char *path, size_t *out_len) {
     buf[rd] = '\0';
     if (out_len) *out_len = rd;
     return buf;
+}
+
+char *util_resolve_db_path(void) {
+    const char *env = getenv("CCLAW_DB_PATH");
+    if (env) return strdup(env);
+    const char *home = getenv("HOME");
+    if (home) {
+        size_t len = strlen(home);
+        char *p = malloc(len + sizeof("/.cclaw/cclaw.db"));
+        if (p) { sprintf(p, "%s/.cclaw/cclaw.db", home); return p; }
+    }
+    return strdup("cclaw.db");
 }
 
 int util_mkdir_p(const char *path) {

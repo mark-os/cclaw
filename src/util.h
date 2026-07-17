@@ -6,8 +6,13 @@
 
 /* Read a whole file into a malloc'd, NUL-terminated buffer. out_len (if
  * non-NULL) receives the byte count, excluding the NUL. Returns NULL on
- * any error (missing file, empty file, OOM). */
+ * any error (missing file, empty file, oversized file, OOM). */
+#define UTIL_READ_FILE_MAX (32L * 1024 * 1024)
 char *util_read_file(const char *path, size_t *out_len);
+
+/* The one db-path resolution rule: $CCLAW_DB_PATH > $HOME/.cclaw/cclaw.db >
+ * ./cclaw.db. Heap-allocated; caller frees. */
+char *util_resolve_db_path(void);
 
 /* mkdir -p for path itself (every path component gets created). */
 int util_mkdir_p(const char *path);

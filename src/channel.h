@@ -56,8 +56,6 @@ char *channel_prev_extension(sqlite3 *db, const char *name);
  * <ext>.admin_ids, comma/space separated). */
 void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *text);
 
-/* 1 if channel_id is listed in the channel's admin_ids config key. */
-int channel_cid_is_admin(sqlite3 *db, const char *channel_name, const char *cid);
 
 /* Resolve a channel's registry config key <extension>.<key> through the
  * uniform resolution rule (specs/config.md). Heap or NULL; caller frees. */

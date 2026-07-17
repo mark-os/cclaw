@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-int hook_event_from_name(const char *name) {
+static int hook_event_from_name(const char *name) {
     if (!name) return -1;
     if (strcmp(name, "preAdvance") == 0) return HOOK_PRE_ADVANCE;
     if (strcmp(name, "postAdvance") == 0) return HOOK_POST_ADVANCE;

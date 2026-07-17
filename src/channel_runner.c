@@ -143,14 +143,14 @@ static void record_outbox_capability(JSContext *ctx) {
     JS_FreeValue(ctx, v);
 }
 
-void set_global_str(JSContext *ctx, const char *name, const char *val) {
+static void set_global_str(JSContext *ctx, const char *name, const char *val) {
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, name,
                       val ? JS_NewString(ctx, val) : JS_NULL);
     JS_FreeValue(ctx, global);
 }
 
-void set_global_int(JSContext *ctx, const char *name, int val) {
+static void set_global_int(JSContext *ctx, const char *name, int val) {
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, name, JS_NewInt32(ctx, val));
     JS_FreeValue(ctx, global);
@@ -204,13 +204,22 @@ char *channel_save_path(const char *name) {
     const char *dbp = g_ctx->db_path ? g_ctx->db_path : ".";
     const char *slash = strrchr(dbp, '/');
     char dir[1024];
+    int wn;
     if (slash)
-        snprintf(dir, sizeof(dir), "%.*s/media", (int)(slash - dbp), dbp);
+        wn = snprintf(dir, sizeof(dir), "%.*s/media", (int)(slash - dbp), dbp);
     else
-        snprintf(dir, sizeof(dir), "media");
+        wn = snprintf(dir, sizeof(dir), "media");
+    if (wn < 0 || (size_t)wn >= sizeof(dir)) {
+        LOG_ERROR_("channel_runner: media dir path truncated (db_path too long)");
+        return NULL;
+    }
     mkdir(dir, 0700);
     size_t used = strlen(dir);
-    snprintf(dir + used, sizeof(dir) - used, "/%s", g_ctx->channel_name);
+    wn = snprintf(dir + used, sizeof(dir) - used, "/%s", g_ctx->channel_name);
+    if (wn < 0 || (size_t)wn >= sizeof(dir) - used) {
+        LOG_ERROR_("channel_runner: media dir path truncated (channel name too long)");
+        return NULL;
+    }
     mkdir(dir, 0700);
     char *out = NULL;
     if (asprintf(&out, "%s/%s", dir, name) < 0) return NULL;
@@ -486,7 +495,15 @@ static int uds_listen_open(const char *db_path, const char *name) {
     struct sockaddr_un sa;
     memset(&sa, 0, sizeof(sa));
     sa.sun_family = AF_UNIX;
-    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", path);
+    int wn = snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", path);
+    if (wn < 0 || (size_t)wn >= sizeof(sa.sun_path)) {
+        /* Truncated sun_path would bind a *different* socket and listen on it
+         * happily — fail loud instead of serving the wrong address. */
+        LOG_ERROR_("channel_runner: UDS path too long (%s)", path);
+        free(path);
+        close(fd);
+        return -1;
+    }
     free(path);
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(fd, 8) != 0) {
         close(fd);

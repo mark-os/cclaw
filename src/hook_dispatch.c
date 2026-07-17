@@ -8,6 +8,7 @@
 #endif
 #include "hook_dispatch.h"
 #include "db.h"
+#include "external_content.h"
 #include "qjs_helpers.h"
 #include "secret_interp.h"
 #include "secret_store.h"
@@ -585,6 +586,18 @@ char *hook_dispatch_observe_tool_call(ExtensionCtx *ext_ctx, sqlite3 *db,
             if (sr) JS_FreeCString(ctx, sr);
         }
         JS_FreeValue(ctx, rv);
+    }
+
+    /* Neutralize forged untrusted-content fence markers in the replacement.
+     * The hook transforms already-external tool output (e.g. reformats a
+     * network_hosts-tagged web_fetch result, which gets wrapped at query
+     * time); storage-time marker sanitization is load-bearing, so a hook
+     * return must not be a way to smuggle a fence past it. Runs here, at the
+     * producer, so no dispatch call site can forget it
+     * (external-input-provenance review). */
+    if (replacement) {
+        char *sm = sanitize_markers(replacement, strlen(replacement));
+        if (sm) { free(replacement); replacement = sm; }
     }
 
     if (annotate_out) {

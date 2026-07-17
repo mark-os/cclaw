@@ -1,6 +1,11 @@
 #ifndef CCLAW_APPROVAL_H
 #define CCLAW_APPROVAL_H
 
+/* Approval records and their lifecycle — the parked decisions a human (or
+ * --auto-approve) resolves. approval_create parks one; approval_resolve
+ * settles it. Owns the approvals table's row shape.
+ */
+
 #include <stdint.h>
 #include <sqlite3.h>
 

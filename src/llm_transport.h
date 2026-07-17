@@ -1,6 +1,11 @@
 #ifndef CCLAW_LLM_TRANSPORT_H
 #define CCLAW_LLM_TRANSPORT_H
 
+/* Assembles the outbound LLM API request — URL, auth header, and body
+ * shape — for both the OpenAI and Gemini endpoint families. Pure request
+ * construction; the transfer itself runs through http/llm_proc.
+ */
+
 #include "config.h"
 #include "http.h"
 #include <curl/curl.h>

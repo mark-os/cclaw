@@ -1,6 +1,11 @@
 #ifndef CCLAW_RUN_TOOL_H
 #define CCLAW_RUN_TOOL_H
 
+/* The --run-tool sandbox broker wire protocol: the flat binary request
+ * frame the parent sends and the child decodes. Both ends are the same
+ * binary, so the wire is a struct, not JSON (AGENTS.md).
+ */
+
 #include "sandbox.h"
 #include "tool_args.h"
 

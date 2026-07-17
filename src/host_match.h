@@ -1,6 +1,11 @@
 #ifndef CCLAW_HOST_MATCH_H
 #define CCLAW_HOST_MATCH_H
 
+/* Egress allowlist matching: hostname rules (exact/suffix) and CIDR/literal
+ * rules, plus the in-text host scan used for sensitivity escalation. The
+ * matching core the proxy's decide()/addr_permitted() sit on.
+ */
+
 #include <stddef.h>
 
 /* Parsed CIDR rule: covers both explicit CIDRs ("10.0.0.0/8") and literal IPs

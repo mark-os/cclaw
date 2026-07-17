@@ -1,6 +1,11 @@
 #ifndef CCLAW_SECRET_INTERP_H
 #define CCLAW_SECRET_INTERP_H
 
+/* Secret interpolation and result post-processing: expands {{SECRET:name}}
+ * before tool execution, deinterpolates values back out of results, and
+ * runs the DLP scan + marker sanitizer over every tool result.
+ */
+
 #include "types.h"  /* ShellSecret */
 #include <stddef.h>
 

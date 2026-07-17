@@ -1,6 +1,10 @@
 #ifndef CCLAW_LLM_H
 #define CCLAW_LLM_H
 
+/* Shared LLM value types — the tool-schema struct handed to the request
+ * builder and the sole provider finish_reason -> StopReason normalization.
+ */
+
 #include "types.h"
 #include <sqlite3.h>
 

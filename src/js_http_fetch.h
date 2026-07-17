@@ -1,6 +1,11 @@
 #ifndef CCLAW_JS_HTTP_FETCH_H
 #define CCLAW_JS_HTTP_FETCH_H
 
+/* The http_request() bridge for the JS tier: performs one bounded HTTP
+ * fetch on behalf of sandboxed QuickJS, returning status + body to the
+ * engine.
+ */
+
 #include <stddef.h>
 
 /* Result from js_http_fetch_exec. Caller must free body. */

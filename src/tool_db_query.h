@@ -1,6 +1,10 @@
 #ifndef CCLAW_TOOL_DB_QUERY_H
 #define CCLAW_TOOL_DB_QUERY_H
 
+/* The db_query tool: read-only SELECT access to cclaw.db for the agent,
+ * returning rows as JSON. Non-SELECT statements are refused.
+ */
+
 #include "tools.h"
 #include "sqlite3.h"
 

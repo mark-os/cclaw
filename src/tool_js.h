@@ -1,6 +1,11 @@
 #ifndef CCLAW_TOOL_JS_H
 #define CCLAW_TOOL_JS_H
 
+/* The js_eval tool and the per-session persistent JS runtime — one-off JS
+ * evaluation in the sandboxed engine (SBX_JS tier), sharing a context
+ * across extension loads.
+ */
+
 #include "tools.h"
 #include "sandbox.h"
 #include "run_tool.h"

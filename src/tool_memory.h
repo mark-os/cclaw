@@ -1,6 +1,10 @@
 #ifndef CCLAW_TOOL_MEMORY_H
 #define CCLAW_TOOL_MEMORY_H
 
+/* The memory-block tools — the agent's CRUD over its own long-term memory
+ * blocks. Runs inline (EXEC_THREAD) with a live db handle.
+ */
+
 #include "tools.h"
 #include "sqlite3.h"
 

@@ -1,6 +1,10 @@
 #ifndef CCLAW_JSON_ESCAPE_H
 #define CCLAW_JSON_ESCAPE_H
 
+/* JSON string escape/unescape helpers (\uXXXX + surrogate pairs). The
+ * db-less string codec for the corners SQLite JSON1 doesn't cover.
+ */
+
 #include <stddef.h>
 
 /* Unescape a JSON string (handles \n, \t, \\, \", \/, \uXXXX with surrogate pairs).

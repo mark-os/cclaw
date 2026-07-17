@@ -1,6 +1,11 @@
 #ifndef CCLAW_WAKE_H
 #define CCLAW_WAKE_H
 
+/* The wake pipe: how worker threads and external channel processes nudge
+ * the daemon's event loop to re-advance a session. Owns the FIFO path and
+ * the WakeMsg written across it.
+ */
+
 #include <stdint.h>
 
 /* Message written to the wake pipe by threads/externals. */

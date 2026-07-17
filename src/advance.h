@@ -1,6 +1,12 @@
 #ifndef CCLAW_ADVANCE_H
 #define CCLAW_ADVANCE_H
 
+/* The session advancement state machine: advance_session() reads a
+ * session's state + leaf entry and returns the single next action (dispatch
+ * an LLM call, dispatch tools, deliver, wait). The load-bearing wall — every
+ * turn moves through here.
+ */
+
 #include "db.h"
 #include "types.h"
 #include <stdint.h>

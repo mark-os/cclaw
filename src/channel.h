@@ -1,6 +1,11 @@
 #ifndef CCLAW_CHANNEL_H
 #define CCLAW_CHANNEL_H
 
+/* Channel supervisor: spawns, monitors, and restarts the per-channel JS
+ * runner processes, with flap detection. Owns the channels table and the
+ * daemon side of the channel lifecycle.
+ */
+
 #include <sqlite3.h>
 #include <sys/types.h>
 #include <time.h>

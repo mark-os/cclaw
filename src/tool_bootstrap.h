@@ -1,6 +1,10 @@
 #ifndef CCLAW_TOOL_BOOTSTRAP_H
 #define CCLAW_TOOL_BOOTSTRAP_H
 
+/* The create_agent / update_agent tools — agent self-configuration, run
+ * inline in the trusted parent (they write the agents table directly).
+ */
+
 #include "tools.h"
 #include "sqlite3.h"
 

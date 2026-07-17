@@ -1,6 +1,11 @@
 #ifndef CCLAW_LLM_PROC_H
 #define CCLAW_LLM_PROC_H
 
+/* The LLM request pipeline: builds the ranked model-candidate list from
+ * models JOIN providers, then runs a request with retry, timeout, and
+ * fallback across candidates. The transcribe path shares its candidate types.
+ */
+
 #include "sqlite3.h"
 #include "types.h"
 #include <curl/curl.h>

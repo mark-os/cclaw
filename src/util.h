@@ -1,6 +1,11 @@
 #ifndef CCLAW_UTIL_H
 #define CCLAW_UTIL_H
 
+/* Small standalone helpers with no home of their own: whole-file read (size
+ * capped), mkdir -p, the db-path resolution rule, base64, and locale-
+ * independent ASCII case compare.
+ */
+
 #include <stddef.h>
 #include <sys/types.h>
 

@@ -1,6 +1,11 @@
 #ifndef CCLAW_LLM_WORKER_H
 #define CCLAW_LLM_WORKER_H
 
+/* The in-process LLM worker thread pool: blocking curl calls run here (not
+ * on the event loop), writing results back to the DB and waking the poll
+ * loop. Reuses threads to amortize the TLS handshake.
+ */
+
 #include <stdint.h>
 #include <sys/types.h>
 #include "sqlite3.h"

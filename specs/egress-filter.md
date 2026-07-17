@@ -283,11 +283,16 @@ same `decide()` across every redirect hop. Therefore:
   trustworthy than the resolved one was security theater, not a real barrier
   to a fabricated-IP LLM output.~~
 - **Q6 resolved — SNI-aware relay check (`sni_check()` in `src/proxy.c`).**
-  A hostname-rule-authorized numeric CONNECT now gets a bounded `MSG_PEEK`
-  (2048B cap, ~2s budget) hand-rolled ClientHello walk before the blind
-  splice starts. Gate: only connections authorized via a hostname rule
-  (`via_hostname` in `handle_client()`) are checked — a CIDR/literal-IP grant
-  has no hostname claim to cross-check. Fallback: fails open (relay proceeds)
+  A hostname-authorized CONNECT now gets a bounded `MSG_PEEK` (2048B cap,
+  ~2s budget) hand-rolled ClientHello walk before the blind splice starts.
+  Gate (`sni_gate` in `handle_client()`): connections whose authority derives
+  from a hostname rule — a hostname CONNECT, or a numeric CONNECT to an IP
+  blessed by hostname resolution (`ProxyBlessedAddr.via_hostname`, the common
+  getaddrinfo-shim path of RESOLVE-then-dial). An **exact** literal-IP grant
+  is exempt (the operator vouched for the address itself — the same
+  exact-vs-covering distinction as the metadata carve-out); a covering CIDR
+  grant does not lift the gate, it authorizes reaching a range, not a
+  particular vhost identity. Fallback: fails open (relay proceeds)
   on absent/unparseable SNI — non-TLS traffic, a ClientHello that doesn't fit
   the peek budget, or non-SNI TLS all pass through unaffected, since a
   hostname grant never implied the protocol was HTTPS. Match rule: when SNI

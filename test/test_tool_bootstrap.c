@@ -12,9 +12,7 @@
 #define DB_PATH "/tmp/test_tool_bootstrap.db"
 
 static void cleanup(void) {
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
     unlink("/tmp/test_tool_bootstrap.db.key");
 }
 
@@ -132,6 +130,7 @@ static int test_create_agent_missing_name(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_tool_bootstrap:\n");
     int rc = 0;
     rc |= test_create_agent_parks();

@@ -79,7 +79,7 @@ static void test_js_eval_requires_arg(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_js_http_fetch:\n");
     test_invalid_scheme();
     test_null_url();

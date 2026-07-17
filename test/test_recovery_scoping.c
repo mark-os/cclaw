@@ -13,9 +13,7 @@
 #define DB_PATH "/tmp/cclaw_test_recovery_scoping.db"
 
 static void clean_db(void) {
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
 }
 
 static sqlite3 *fresh_db(void) {
@@ -155,7 +153,7 @@ static void test_recovery_scoping(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_recovery_scoping:\n");
     test_recovery_scoping();
     printf("all recovery scoping tests passed\n");

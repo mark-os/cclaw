@@ -13,9 +13,7 @@
 #define DB_PATH "/tmp/cclaw_test_tool_secret_create.db"
 
 static void clean_db(void) {
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
     char keypath[512];
     snprintf(keypath, sizeof(keypath), "%s", DB_PATH);
     char *slash = strrchr(keypath, '/');
@@ -155,7 +153,7 @@ static void test_charset_and_length(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_tool_secret_create:\n");
     test_register();
     test_creates_encrypted_row_and_hides_value();

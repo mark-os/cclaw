@@ -107,7 +107,7 @@ static int media_jobs_count(sqlite3 *db) {
 static void test_transcribe_success(void) {
     TEST(transcribe_success);
     const char *db_path = "/tmp/cclaw_transcribe_test.db";
-    unlink(db_path);
+    test_db_clean(db_path);
 
     mock_server_reset();
     mock_server_enqueue(200, GEMINI_TRANSCRIPT_RESPONSE);
@@ -122,16 +122,16 @@ static void test_transcribe_success(void) {
     int64_t jid = seed_media_job(db, sid, "", spool);
 
     int rc = llm_transcribe(db, NULL, jid);
-    if (rc != 0) { db_close(db); unlink(db_path); FAIL("expected rc==0"); }
+    if (rc != 0) { db_close(db); test_db_clean(db_path); FAIL("expected rc==0"); }
 
     /* The request that went out carried the audio inline */
     const char *req = mock_server_last_request_body();
     if (!req || !strstr(req, "\"inlineData\"") || !strstr(req, "T2dnUw==")) {
-        db_close(db); unlink(db_path); FAIL("request missing inlineData audio");
+        db_close(db); test_db_clean(db_path); FAIL("request missing inlineData audio");
     }
 
     char *payload = inbox_payload(db, sid);
-    if (!payload) { db_close(db); unlink(db_path); FAIL("no inbox row"); }
+    if (!payload) { db_close(db); test_db_clean(db_path); FAIL("no inbox row"); }
     int ok = strstr(payload, "[voice message] hello from voice") != NULL &&
              strstr(payload, "\"channel_id\":\"42\"") != NULL &&
              strstr(payload, "T2dnUw==") == NULL;   /* audio never enters context */
@@ -141,7 +141,7 @@ static void test_transcribe_success(void) {
     /* Spool file must be deleted after successful transcription */
     int spool_gone = (access(spool, F_OK) != 0);
 
-    db_close(db); unlink(db_path);
+    db_close(db); test_db_clean(db_path);
     if (!ok) FAIL("bad inbox payload");
     if (jobs_left != 0) FAIL("media_jobs row not deleted");
     if (!spool_gone) FAIL("spool file not deleted after success");
@@ -151,7 +151,7 @@ static void test_transcribe_success(void) {
 static void test_transcribe_caption_prepended(void) {
     TEST(transcribe_caption_prepended);
     const char *db_path = "/tmp/cclaw_transcribe_cap_test.db";
-    unlink(db_path);
+    test_db_clean(db_path);
 
     mock_server_reset();
     mock_server_enqueue(200, GEMINI_TRANSCRIPT_RESPONSE);
@@ -166,10 +166,10 @@ static void test_transcribe_caption_prepended(void) {
     int64_t jid = seed_media_job(db, sid, "the caption", spool);
 
     int rc = llm_transcribe(db, NULL, jid);
-    if (rc != 0) { db_close(db); unlink(db_path); FAIL("expected rc==0"); }
+    if (rc != 0) { db_close(db); test_db_clean(db_path); FAIL("expected rc==0"); }
 
     char *payload = inbox_payload(db, sid);
-    if (!payload) { db_close(db); unlink(db_path); FAIL("no inbox row"); }
+    if (!payload) { db_close(db); test_db_clean(db_path); FAIL("no inbox row"); }
     int ok = strstr(payload, "the caption\\n[voice message] hello from voice") != NULL;
     if (!ok) printf("(payload: %s) ", payload);
     free(payload);
@@ -177,7 +177,7 @@ static void test_transcribe_caption_prepended(void) {
     /* Spool file must be deleted */
     int spool_gone = (access(spool, F_OK) != 0);
 
-    db_close(db); unlink(db_path);
+    db_close(db); test_db_clean(db_path);
     if (!ok) FAIL("caption not prepended");
     if (!spool_gone) FAIL("spool file not deleted after caption test");
     PASS();
@@ -186,7 +186,7 @@ static void test_transcribe_caption_prepended(void) {
 static void test_transcribe_terminal_failure(void) {
     TEST(transcribe_terminal_failure);
     const char *db_path = "/tmp/cclaw_transcribe_fail_test.db";
-    unlink(db_path);
+    test_db_clean(db_path);
 
     /* Empty queue → the mock answers 500 to every attempt; the single
      * candidate exhausts its retry and the job goes terminal. */
@@ -202,10 +202,10 @@ static void test_transcribe_terminal_failure(void) {
     int64_t jid = seed_media_job(db, sid, "", spool);
 
     int rc = llm_transcribe(db, NULL, jid);
-    if (rc != 0) { db_close(db); unlink(db_path); FAIL("expected rc==0 (resolved as failure)"); }
+    if (rc != 0) { db_close(db); test_db_clean(db_path); FAIL("expected rc==0 (resolved as failure)"); }
 
     char *payload = inbox_payload(db, sid);
-    if (!payload) { db_close(db); unlink(db_path); FAIL("no inbox row"); }
+    if (!payload) { db_close(db); test_db_clean(db_path); FAIL("no inbox row"); }
     int ok = strstr(payload, "[voice message received but transcription failed]") != NULL;
     free(payload);
     int jobs_left = media_jobs_count(db);
@@ -213,7 +213,7 @@ static void test_transcribe_terminal_failure(void) {
     /* Spool file must be deleted even on terminal failure */
     int spool_gone = (access(spool, F_OK) != 0);
 
-    db_close(db); unlink(db_path);
+    db_close(db); test_db_clean(db_path);
     if (!ok) FAIL("missing failure text");
     if (jobs_left != 0) FAIL("media_jobs row not deleted");
     if (!spool_gone) FAIL("spool file not deleted after terminal failure");
@@ -223,7 +223,7 @@ static void test_transcribe_terminal_failure(void) {
 static void test_transcribe_no_audio_model(void) {
     TEST(transcribe_no_audio_model);
     const char *db_path = "/tmp/cclaw_transcribe_nomodel_test.db";
-    unlink(db_path);
+    test_db_clean(db_path);
 
     mock_server_reset();
 
@@ -250,14 +250,14 @@ static void test_transcribe_no_audio_model(void) {
     /* Spool file must be deleted even when no model is available */
     int spool_gone = (access(spool, F_OK) != 0);
 
-    db_close(db); unlink(db_path);
+    db_close(db); test_db_clean(db_path);
     if (!ok) FAIL("expected terminal failure without network traffic");
     if (!spool_gone) FAIL("spool file not deleted in no-model path");
     PASS();
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     s_port = mock_server_start();
     if (s_port <= 0) {
         fprintf(stderr, "FAIL: could not start mock server\n");

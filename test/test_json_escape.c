@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
+#include "test_util.h"
 
 /* ── json_unescape tests ─────────────────────────────────────────── */
 
@@ -68,6 +69,7 @@ static void test_unescape_back_to_back_pairs(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     test_unescape_surrogate_pair();
     test_unescape_surrogate_pair_then_char();
     test_unescape_isolated_high_surrogate();

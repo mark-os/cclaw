@@ -404,7 +404,7 @@ static void test_self_spawn_inherits_agent_name(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_tool_agent:\n");
     test_invalid_json();
     test_missing_task();

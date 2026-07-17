@@ -161,10 +161,10 @@ static void test_no_skills(sqlite3 *db) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     alarm(10);
     printf("test_skills:\n");
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     setup_tree();
 
     sqlite3 *db = test_db_open(DB_PATH);
@@ -180,7 +180,7 @@ int main(void) {
     test_no_skills(db);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     system("rm -rf " ROOT);
     printf("All skills tests passed.\n");
     return 0;

@@ -3,8 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 #include "templates.h"
+#include "test_util.h"
 
 int main(void) {
+    TEST_INIT();
     printf("test_templates:\n");
 
     /* unified schema template contains expected tables */

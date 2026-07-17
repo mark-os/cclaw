@@ -206,13 +206,13 @@ static void test_body_unreadable_path(sqlite3 *db) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_media_transcribe\n");
 
     snprintf(spool_path, sizeof(spool_path),
              "/tmp/cclaw_test_media_%d.ogg", (int)getpid());
 
-    unlink(TEST_DB); unlink(TEST_DB "-wal"); unlink(TEST_DB "-shm");
+    test_db_clean(TEST_DB);
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
     seed_models(db);
@@ -229,7 +229,7 @@ int main(void) {
     test_body_unreadable_path(db);
 
     db_close(db);
-    unlink(TEST_DB); unlink(TEST_DB "-wal"); unlink(TEST_DB "-shm");
+    test_db_clean(TEST_DB);
     unlink(spool_path);
     printf("%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

@@ -54,7 +54,7 @@ static void test_llm_req_stop(void) {
     TEST(llm_req_stop);
 
     const char *db_path = "/tmp/cclaw_llm_req_test.db";
-    unlink(db_path);
+    test_db_clean(db_path);
 
     mock_server_reset();
     mock_server_enqueue(200, STOP_RESPONSE);
@@ -71,23 +71,23 @@ static void test_llm_req_stop(void) {
     set_test_env(db_path);
 
     int rc = llm_req(db, NULL, sid, 0);
-    if (rc != 0) { db_close(db); unlink(db_path); FAIL("expected rc==0"); }
+    if (rc != 0) { db_close(db); test_db_clean(db_path); FAIL("expected rc==0"); }
 
     /* Verify entry was written */
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
     if (count != 3) {
         char msg[64]; snprintf(msg, sizeof(msg), "expected 3 entries, got %d", count);
-        entry_branch_free(branch, count); db_close(db); unlink(db_path); FAIL(msg);
+        entry_branch_free(branch, count); db_close(db); test_db_clean(db_path); FAIL(msg);
     }
     if (branch[2].message.role != ROLE_ASSISTANT ||
         !branch[2].message.content ||
         strcmp(branch[2].message.content, "Hello there!") != 0) {
-        entry_branch_free(branch, count); db_close(db); unlink(db_path);
+        entry_branch_free(branch, count); db_close(db); test_db_clean(db_path);
         FAIL("wrong assistant content");
     }
     entry_branch_free(branch, count);
-    db_close(db); unlink(db_path);
+    db_close(db); test_db_clean(db_path);
     PASS();
 }
 
@@ -96,7 +96,7 @@ static void test_llm_req_tool_calls(void) {
     TEST(llm_req_tool_calls);
 
     const char *db_path = "/tmp/cclaw_llm_req_tc_test.db";
-    unlink(db_path);
+    test_db_clean(db_path);
 
     mock_server_reset();
     mock_server_enqueue(200, TOOL_CALL_RESPONSE);
@@ -113,7 +113,7 @@ static void test_llm_req_tool_calls(void) {
     set_test_env(db_path);
 
     int rc = llm_req(db, NULL, sid, 0);
-    if (rc != 0) { db_close(db); unlink(db_path); FAIL("expected rc==0"); }
+    if (rc != 0) { db_close(db); test_db_clean(db_path); FAIL("expected rc==0"); }
 
     /* Verify tool_calls written */
     sqlite3_stmt *stmt;
@@ -125,7 +125,7 @@ static void test_llm_req_tool_calls(void) {
             tc_count = sqlite3_column_int(stmt, 0);
         sqlite3_finalize(stmt);
     }
-    db_close(db); unlink(db_path);
+    db_close(db); test_db_clean(db_path);
     if (tc_count != 1) {
         char msg[64]; snprintf(msg, sizeof(msg), "expected 1 tool_call, got %d", tc_count);
         FAIL(msg);
@@ -138,7 +138,7 @@ static void test_llm_req_error(void) {
     TEST(llm_req_error);
 
     const char *db_path = "/tmp/cclaw_llm_req_err_test.db";
-    unlink(db_path);
+    test_db_clean(db_path);
 
     mock_server_reset();
     mock_server_enqueue(500, "{\"error\":\"internal\"}");
@@ -157,15 +157,15 @@ static void test_llm_req_error(void) {
     int rc = llm_req(db, NULL, sid, 0);
     if (rc != -1) {
         char msg[64]; snprintf(msg, sizeof(msg), "expected rc==-1, got %d", rc);
-        db_close(db); unlink(db_path); FAIL(msg);
+        db_close(db); test_db_clean(db_path); FAIL(msg);
     }
 
-    db_close(db); unlink(db_path);
+    db_close(db); test_db_clean(db_path);
     PASS();
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     s_port = mock_server_start();
     if (s_port <= 0) {
         fprintf(stderr, "FAIL: could not start mock server\n");

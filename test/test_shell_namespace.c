@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "test_run_tool_shell.h"
 #include <sys/stat.h>
+#include "test_util.h"
 
 /* Verify namespace sandbox restricts filesystem writes outside workspace.
  * Drives shell_exec via the --run-tool re-exec path (production behavior). */
@@ -282,7 +283,7 @@ static void test_sandbox_none_skips_namespace(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_shell_namespace:\n");
     setup_workspace();
     test_namespace_active();

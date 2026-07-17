@@ -6,6 +6,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include "test_util.h"
 
 static char *dummy_handler(const char *arguments, void *user_data) {
     (void)arguments; (void)user_data;
@@ -63,6 +64,7 @@ static void test_schemas_null_reg(void) {
 
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
     printf("test_tools_edge:\n");
     test_free_fn_called_on_cleanup();

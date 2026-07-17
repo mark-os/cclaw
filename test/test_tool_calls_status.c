@@ -96,6 +96,7 @@ static void test_set_status(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_tool_calls_status:\n");
     test_get_pending_empty();
     test_insert_and_get_pending();

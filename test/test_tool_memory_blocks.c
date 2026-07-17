@@ -116,7 +116,7 @@ static void test_memory_char_limit(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_tool_memory_blocks:\n");
     test_memory_create();
     test_memory_read_only();

@@ -53,7 +53,7 @@ static void test_fifo_wake(void) {
 }
 
 static void test_outbox_insert(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -77,11 +77,12 @@ static void test_outbox_insert(void) {
     channel_ctx_free(ctx);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_outbox_insert\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_outbox_wake:\n");
     test_fifo_path();
     test_fifo_wake();

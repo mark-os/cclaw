@@ -12,13 +12,13 @@
 #define AGENTS_DIR "/tmp/test_agents_t119"
 
 static sqlite3 *setup(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     return test_db_open(TEST_DB);
 }
 
 static void teardown(sqlite3 *db) {
     db_close(db);
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
 }
 
 /* agents table exists and basic CRUD works */
@@ -117,6 +117,7 @@ static void test_seed_no_dir(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_agents_table:\n");
     test_upsert_and_get();
     test_get_missing();

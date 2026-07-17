@@ -292,7 +292,7 @@ static void test_bad_input(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_agent_define:\n");
     g_db = test_db_open(":memory:");
     assert(g_db);

@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <curl/curl.h>
 #include "mock_server.h"
+#include "test_util.h"
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
@@ -164,6 +165,7 @@ static void test_load_template(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     test_start_stop();
     test_enqueue_and_fetch();
     test_multiple_responses();

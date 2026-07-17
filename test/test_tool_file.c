@@ -407,6 +407,7 @@ static void test_hint_write_mode(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_tool_file:\n");
     setup();
     test_basic_read();

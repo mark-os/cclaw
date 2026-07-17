@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "test_util.h"
 
 /* per-agent workspace isolation
  * Two agents with different workspaces cannot access each other's files.
@@ -25,7 +26,6 @@ static char ws_b[256];
 static int ns_available = 1;
 
 static void setup(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
     snprintf(ws_a, sizeof(ws_a), "/tmp/cclaw_ws_a_XXXXXX");
     snprintf(ws_b, sizeof(ws_b), "/tmp/cclaw_ws_b_XXXXXX");
     assert(mkdtemp(ws_a) != NULL);
@@ -272,6 +272,7 @@ static void test_workspace_fallback_path(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_workspace_isolation:\n");
     setup();
     test_namespace_detect();

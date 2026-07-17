@@ -296,7 +296,7 @@ static void test_recovery_owner_scoped(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_session_state:\n");
     test_valid_transitions();
     test_invalid_transitions();

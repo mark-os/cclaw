@@ -102,7 +102,7 @@ static void expect_lacks(const char *name, const char *expr, const char *needle)
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_telegram_js:\n");
 
     /* ── findSplit: UTF-16 surrogate-safe hard cut ──────────────────── */

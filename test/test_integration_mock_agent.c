@@ -13,7 +13,7 @@ static const char *MOCK_RESPONSE =
     "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
 
 static int test_basic_turn(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     if (!db) FAIL("db_open");
 
@@ -64,12 +64,13 @@ static int test_basic_turn(void) {
     config_free(cfg);
     mock_server_stop();
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS test_basic_turn\n");
     return 0;
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_integration_mock_agent:\n");
     if (test_basic_turn()) return 1;
     printf("All mock agent tests passed.\n");

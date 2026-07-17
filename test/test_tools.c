@@ -115,7 +115,7 @@ static const char *TOOLS_DB_PATH = "/tmp/test_cclaw_tools_ext.db";
  * the DB, and calling it twice is idempotent (no duplicate entries). Also
  * verifies that a second agent with no attachments registers nothing. */
 static void test_load_extension_tools_idempotent(void) {
-    unlink(TOOLS_DB_PATH);
+    test_db_clean(TOOLS_DB_PATH);
     sqlite3 *db = test_db_open(TOOLS_DB_PATH);
     assert(db);
 
@@ -154,11 +154,12 @@ static void test_load_extension_tools_idempotent(void) {
 
     tools_free(&reg);
     db_close(db);
-    unlink(TOOLS_DB_PATH);
+    test_db_clean(TOOLS_DB_PATH);
     printf("  PASS test_load_extension_tools_idempotent\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_tools:\n");
     test_init();
     test_register_and_lookup();

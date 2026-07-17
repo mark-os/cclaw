@@ -109,7 +109,7 @@ static void test_http_request_error_returns_object(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_tool_js:\n");
     test_basic_eval();
     test_http_request_error_returns_object();

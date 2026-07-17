@@ -16,9 +16,7 @@
 #define DB_PATH "/tmp/cclaw_test_secret_store.db"
 
 static void clean_db(void) {
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
     char keypath[512];
     snprintf(keypath, sizeof(keypath), "%s", DB_PATH);
     char *slash = strrchr(keypath, '/');
@@ -139,7 +137,7 @@ static void test_name_validation(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_secret_store:\n");
     test_set_load_rm_roundtrip();
     test_set_fails_without_key();

@@ -9,8 +9,9 @@
 #define DB_PATH "/tmp/test_integ_error_class.db"
 
 int main(void) {
+    TEST_INIT();
     alarm(18);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -48,7 +49,7 @@ int main(void) {
     config_free(cfg);
     mock_server_stop();
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("PASS test_integration_error_classification\n");
     return 0;
 }

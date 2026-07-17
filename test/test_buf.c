@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "test_util.h"
 
 static void test_append_growth(void) {
     Buf b = {0};
@@ -104,6 +105,7 @@ static void test_template_render_repeated_var(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_buf:\n");
     test_append_growth();
     test_append_str_and_char();

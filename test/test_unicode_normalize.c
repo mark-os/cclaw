@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "test_util.h"
 
 /* Strip s (NUL-terminated) and assert the result equals expect. */
 static void check(const char *label, const char *s, const char *expect) {
@@ -101,7 +102,7 @@ static void test_embedded_nul(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_unicode_normalize:\n");
     test_ascii_passthrough();
     test_zero_width();

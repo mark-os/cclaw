@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include "test_util.h"
 
 static void test_is_valid_agent_name(void) {
     /* Accept: single uppercase letter */
@@ -54,7 +55,7 @@ static void test_is_valid_agent_name(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_validate:\n");
 
     /* Valid names */

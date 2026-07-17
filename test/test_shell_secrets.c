@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include "test_util.h"
 
 /* Masking is now a single chokepoint: secret_deinterpolate() replaces secret
  * values (raw + base64 + URL-encoded) with the re-referenceable {{SECRET:name}}
@@ -258,7 +259,7 @@ static void test_env_injection_scoped(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     alarm(10);
 
     /* Pure unit tests (no broker) */

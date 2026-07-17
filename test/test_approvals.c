@@ -13,9 +13,7 @@
 #define DB_PATH "/tmp/test_approvals.db"
 
 static void clean_db(void) {
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
 }
 
 static sqlite3 *fresh_db(void) {
@@ -429,7 +427,7 @@ static void test_pending_subtree(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_approvals:\n");
     test_create_and_pending();
     test_approve();

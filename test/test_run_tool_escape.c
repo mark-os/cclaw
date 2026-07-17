@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "test_util.h"
 
 /* Test the --run-tool re-exec path for escape resistance.
  * Exercises the REAL fork+execve path (not the in-process fallback).
@@ -21,7 +22,6 @@ static char workspace[256];
 static int ns_available = 1;
 
 static void setup(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_escape_%d", getpid());
     mkdir(workspace, 0755);
 
@@ -224,6 +224,7 @@ static void test_proc_absent(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_run_tool_escape:\n");
     setup();
     test_ns_detect();

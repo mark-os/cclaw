@@ -152,7 +152,7 @@ static void test_idle_answered_leaf_noop(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_advance_session:\n");
     test_idle_no_inbox();
     test_idle_with_inbox();

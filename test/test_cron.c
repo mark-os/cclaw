@@ -366,7 +366,7 @@ static void test_dispatch_heartbeat_no_stack(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_cron:\n");
     test_cron_table_created();
     test_cron_next_run_every_minute();

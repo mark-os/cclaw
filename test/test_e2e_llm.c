@@ -230,7 +230,7 @@ static void test_live_tool_call_roundtrip(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     curl_global_init(CURL_GLOBAL_DEFAULT);
     g_db = test_db_open(":memory:");
     printf("--- test_integration_llm ---\n");

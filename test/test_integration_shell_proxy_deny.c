@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "test_util.h"
 
 static char workspace[256];
 static int ns_available = 0;
@@ -144,7 +145,7 @@ static void test_shell_allowed_vs_denied(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_integration_shell_proxy_deny:\n");
 
     setup_workspace();

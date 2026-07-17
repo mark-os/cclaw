@@ -12,9 +12,7 @@
 #define DB_PATH "/tmp/cclaw_test_approval_block_window.db"
 
 static void clean_db(void) {
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
 }
 
 static sqlite3 *fresh_db(void) {
@@ -121,7 +119,7 @@ static void test_block_window_owner_filter(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_approval_block_window:\n");
     test_block_window_timing();
     test_block_window_owner_filter();

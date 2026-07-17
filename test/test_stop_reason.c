@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "llm.h"
+#include "test_util.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -45,6 +46,7 @@ static void test_error_variants(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("--- test_stop_reason ---\n");
     test_stop_variants();
     test_length_variants();

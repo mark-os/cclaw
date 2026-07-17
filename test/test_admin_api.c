@@ -18,7 +18,7 @@ static const uint8_t TEST_KEY[32] = {
 };
 
 static sqlite3 *setup_db(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     db_set_secret_key(TEST_KEY);
@@ -51,7 +51,7 @@ static void test_set_key_known_provider(void) {
     sqlite3_finalize(s);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_set_key_known_provider\n");
 }
 
@@ -68,7 +68,7 @@ static void test_set_key_custom(void) {
     assert(admin_set_key(db, "custom", "=leading-eq") == -1);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_set_key_custom\n");
 }
 
@@ -88,7 +88,7 @@ static void test_set_model_primary(void) {
     sqlite3_finalize(s);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_set_model_primary\n");
 }
 
@@ -111,7 +111,7 @@ static void test_set_endpoint_primary(void) {
     assert(admin_set_endpoint(db, 0, "ftp://bad.url") == -1);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_set_endpoint_primary\n");
 }
 
@@ -134,7 +134,7 @@ static void test_set_model_fallback(void) {
     sqlite3_finalize(s);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_set_model_fallback\n");
 }
 
@@ -153,7 +153,7 @@ static void test_admin_grant_capability(void) {
     agent_caps_free(&caps);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_admin_grant_capability\n");
 }
 
@@ -178,7 +178,7 @@ static void test_admin_list_grants(void) {
     admin_grants_free(list, count);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_admin_list_grants\n");
 }
 
@@ -212,7 +212,7 @@ static void test_admin_revoke_grant_by_id(void) {
     agent_caps_free(&caps);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_admin_revoke_grant_by_id\n");
 }
 
@@ -230,7 +230,7 @@ static void test_admin_list_tool_names(void) {
     admin_tool_names_free(names, count);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_admin_list_tool_names\n");
 }
 
@@ -252,7 +252,7 @@ static void test_list_providers(void) {
     admin_providers_free(providers, count);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_list_providers\n");
 }
 
@@ -306,7 +306,7 @@ static void test_list_pending_approvals(void) {
     admin_approvals_free(list, count);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_list_pending_approvals\n");
 }
 
@@ -330,7 +330,7 @@ static void test_list_denied_approvals_grantable_only(void) {
     admin_approvals_free(list, count);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_list_denied_approvals_grantable_only\n");
 }
 
@@ -372,7 +372,7 @@ static void test_grant_from_history(void) {
     assert(admin_grant_from_history(db, bad) == -1);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_grant_from_history\n");
 }
 
@@ -409,7 +409,7 @@ static void test_list_models(void) {
     admin_models_free(list, count);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_list_models\n");
 }
 
@@ -454,11 +454,12 @@ static void test_switch_model(void) {
     assert(admin_switch_model(db, "no/such", prev, sizeof(prev)) == -1);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_switch_model\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_admin_api:\n");
     test_key_env_name();
     test_set_key_known_provider();

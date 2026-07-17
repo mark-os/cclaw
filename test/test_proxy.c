@@ -17,6 +17,7 @@
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+#include "test_util.h"
 
 static char tmpdir[128];
 
@@ -391,6 +392,7 @@ static void test_pending_cap(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
     setup_tmpdir();
 

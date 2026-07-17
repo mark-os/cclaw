@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "test_util.h"
 
 /* Fork a child that installs the crash handler then triggers a fatal signal.
  * Parent captures stderr via pipe and checks for the expected output. */
@@ -72,7 +73,7 @@ static void test_signal(int sig, const char *expected_name) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_crash:\n");
 
     test_signal(SIGSEGV, "SIGSEGV");

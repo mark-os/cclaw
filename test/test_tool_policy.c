@@ -33,7 +33,7 @@ static const char *wildcard_policy =
     "]}";
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     sqlite3 *db = test_db_open(":memory:");
     if (!db) { printf("FAIL: db open\n"); return 1; }
 

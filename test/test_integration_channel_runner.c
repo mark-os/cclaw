@@ -78,7 +78,7 @@ static void write_test_js(void) {
 }
 
 static sqlite3 *setup_db(int port) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     if (!db) return NULL;
 
@@ -194,8 +194,7 @@ static char *uds_request(const char *envelope) {
 }
 
 int main(void) {
-    /* Line-buffer stdout: a timeout-killed run must not lose progress output */
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_integration_channel_runner:\n");
 
     /* Stale debris from a killed previous run (wal/shm/pipe/sock) makes
@@ -496,7 +495,7 @@ int main(void) {
     }
     printf("  PASS: clean shutdown after SIGTERM (exit 0)\n");
 
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     unlink(JS_PATH);
     rmdir("/tmp/test_integ_cr_ext");
 

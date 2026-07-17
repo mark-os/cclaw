@@ -130,7 +130,7 @@ static void test_cost_field(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("--- test_llm ---\n");
     test_content_response();
     test_tool_calls_response();

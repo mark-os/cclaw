@@ -13,8 +13,9 @@ static const char *ZERO_USAGE_RESPONSE =
     "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}";
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -56,7 +57,7 @@ int main(void) {
     config_free(cfg);
     mock_server_stop();
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("PASS test_integration_zero_usage\n");
     return 0;
 }

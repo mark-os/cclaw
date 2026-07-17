@@ -20,7 +20,7 @@ static const uint8_t TEST_KEY[32] = {
 /* admin_set_key stores the key encrypted in secrets table — never plaintext in the DB */
 static void test_key_encrypted_in_kv(void) {
     const char *db_path = "/tmp/cclaw_test_admin.db";
-    unlink(db_path);
+    test_db_clean(db_path);
 
     sqlite3 *db = test_db_open(db_path);
     assert(db);
@@ -52,13 +52,13 @@ static void test_key_encrypted_in_kv(void) {
     assert(admin_set_key(db, "unknown-provider", "sk-x") == -1);
 
     db_close(db);
-    unlink(db_path);
+    test_db_clean(db_path);
 }
 
 /* Admin operations update providers table correctly */
 static void test_config_reload(void) {
     const char *db_path = "/tmp/cclaw_test_admin_reload.db";
-    unlink(db_path);
+    test_db_clean(db_path);
 
     sqlite3 *db = test_db_open(db_path);
     assert(db);
@@ -82,10 +82,11 @@ static void test_config_reload(void) {
     sqlite3_finalize(s);
 
     db_close(db);
-    unlink(db_path);
+    test_db_clean(db_path);
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_key_encrypted_in_kv...");
     test_key_encrypted_in_kv();
     printf(" OK\n");

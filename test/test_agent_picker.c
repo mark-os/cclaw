@@ -91,6 +91,7 @@ static void test_default_agent_kv(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_agent_picker:\n");
     test_agent_list_empty();
     test_agent_list_one();

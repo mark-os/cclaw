@@ -61,6 +61,7 @@ static void test_heartbeat_md_not_auto_created(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_heartbeat_md:\n");
     setup_workspace();
     test_heartbeat_md_not_auto_created();

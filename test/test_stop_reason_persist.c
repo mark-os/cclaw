@@ -24,10 +24,10 @@ static void test_stop_reason_roundtrip(void) {
     close(fd);
 
     sqlite3 *db = test_db_open(path);
-    if (!db) { unlink(path); FAIL("db_open"); }
+    if (!db) { test_db_clean(path); FAIL("db_open"); }
 
     int64_t sid = session_create(db, "test_sr", NULL, -1, 0);
-    if (sid < 0) { db_close(db); unlink(path); FAIL("session_create"); }
+    if (sid < 0) { db_close(db); test_db_clean(path); FAIL("session_create"); }
 
     /* Append assistant message with stop_reason = STOP_REASON_TOOL_USE */
     Message msg = {.role = ROLE_ASSISTANT,
@@ -36,22 +36,22 @@ static void test_stop_reason_roundtrip(void) {
     int64_t turn_id = db_next_turn_id(db, sid);
     int64_t eid = entry_append_with_turn(db, sid, &msg, turn_id);
     free(msg.content);
-    if (eid < 0) { db_close(db); unlink(path); FAIL("entry_append"); }
+    if (eid < 0) { db_close(db); test_db_clean(path); FAIL("entry_append"); }
 
     /* Read back via session_get_branch */
     int count = 0;
     Entry *entries = session_get_branch(db, sid, &count);
-    if (!entries || count != 1) { db_close(db); unlink(path); FAIL("get_branch count"); }
+    if (!entries || count != 1) { db_close(db); test_db_clean(path); FAIL("get_branch count"); }
 
     if (entries[0].message.stop_reason != STOP_REASON_TOOL_USE) {
         entry_branch_free(entries, count);
-        db_close(db); unlink(path);
+        db_close(db); test_db_clean(path);
         FAIL("stop_reason mismatch");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     PASS();
 }
 
@@ -64,10 +64,10 @@ static void test_stop_reason_none_not_stored(void) {
     close(fd);
 
     sqlite3 *db = test_db_open(path);
-    if (!db) { unlink(path); FAIL("db_open"); }
+    if (!db) { test_db_clean(path); FAIL("db_open"); }
 
     int64_t sid = session_create(db, "test_sr2", NULL, -1, 0);
-    if (sid < 0) { db_close(db); unlink(path); FAIL("session_create"); }
+    if (sid < 0) { db_close(db); test_db_clean(path); FAIL("session_create"); }
 
     /* Append user message (no stop_reason) */
     Message msg = {.role = ROLE_USER, .content = strdup("hello")};
@@ -77,17 +77,17 @@ static void test_stop_reason_none_not_stored(void) {
 
     int count = 0;
     Entry *entries = session_get_branch(db, sid, &count);
-    if (!entries || count != 1) { db_close(db); unlink(path); FAIL("get_branch"); }
+    if (!entries || count != 1) { db_close(db); test_db_clean(path); FAIL("get_branch"); }
 
     if (entries[0].message.stop_reason != STOP_REASON_NONE) {
         entry_branch_free(entries, count);
-        db_close(db); unlink(path);
+        db_close(db); test_db_clean(path);
         FAIL("expected NONE");
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     PASS();
 }
 
@@ -100,10 +100,10 @@ static void test_all_stop_reasons(void) {
     close(fd);
 
     sqlite3 *db = test_db_open(path);
-    if (!db) { unlink(path); FAIL("db_open"); }
+    if (!db) { test_db_clean(path); FAIL("db_open"); }
 
     int64_t sid = session_create(db, "test_sr3", NULL, -1, 0);
-    if (sid < 0) { db_close(db); unlink(path); FAIL("session_create"); }
+    if (sid < 0) { db_close(db); test_db_clean(path); FAIL("session_create"); }
 
     StopReason reasons[] = {STOP_REASON_STOP, STOP_REASON_LENGTH,
                             STOP_REASON_TOOL_USE, STOP_REASON_ERROR,
@@ -121,23 +121,24 @@ static void test_all_stop_reasons(void) {
 
     int count = 0;
     Entry *entries = session_get_branch(db, sid, &count);
-    if (!entries || count != n) { db_close(db); unlink(path); FAIL("count mismatch"); }
+    if (!entries || count != n) { db_close(db); test_db_clean(path); FAIL("count mismatch"); }
 
     for (int i = 0; i < n; i++) {
         if (entries[i].message.stop_reason != reasons[i]) {
             entry_branch_free(entries, count);
-            db_close(db); unlink(path);
+            db_close(db); test_db_clean(path);
             FAIL("reason mismatch at index");
         }
     }
 
     entry_branch_free(entries, count);
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     PASS();
 }
 
 int main(void) {
+    TEST_INIT();
     printf("--- test_stop_reason_persist ---\n");
     test_stop_reason_roundtrip();
     test_stop_reason_none_not_stored();

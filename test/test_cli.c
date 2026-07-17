@@ -19,31 +19,31 @@ static int tests_passed = 0;
 static void test_cli_session_resume(void) {
     TEST(cli_session_resume);
     const char *dbpath = "test_cli_resume.db";
-    unlink(dbpath);
+    test_db_clean(dbpath);
     sqlite3 *db = test_db_open(dbpath);
     if (!db) { FAIL("db_open"); return; }
 
     int64_t s1 = session_create(db, "first", NULL, -1, 0);
     int64_t s2 = session_create(db, "second", NULL, -1, 0);
-    if (s1 < 0 || s2 < 0) { FAIL("session_create"); db_close(db); unlink(dbpath); return; }
+    if (s1 < 0 || s2 < 0) { FAIL("session_create"); db_close(db); test_db_clean(dbpath); return; }
 
     int count = 0;
     Session *sessions = session_list(db, &count);
-    if (count != 2) { FAIL("expected 2 sessions"); session_list_free(sessions, count); db_close(db); unlink(dbpath); return; }
-    if (sessions[0].id != s1 || sessions[1].id != s2) { FAIL("wrong session ids"); session_list_free(sessions, count); db_close(db); unlink(dbpath); return; }
+    if (count != 2) { FAIL("expected 2 sessions"); session_list_free(sessions, count); db_close(db); test_db_clean(dbpath); return; }
+    if (sessions[0].id != s1 || sessions[1].id != s2) { FAIL("wrong session ids"); session_list_free(sessions, count); db_close(db); test_db_clean(dbpath); return; }
 
     Message msg = {.role = ROLE_USER, .content = "hello"};
     entry_append_with_turn(db, s1, &msg, 1);
 
     int branch_count = 0;
     Entry *branch = session_get_branch(db, s1, &branch_count);
-    if (branch_count != 1) { FAIL("expected 1 entry on resume"); entry_branch_free(branch, branch_count); session_list_free(sessions, count); db_close(db); unlink(dbpath); return; }
-    if (strcmp(branch[0].message.content, "hello") != 0) { FAIL("wrong content"); entry_branch_free(branch, branch_count); session_list_free(sessions, count); db_close(db); unlink(dbpath); return; }
+    if (branch_count != 1) { FAIL("expected 1 entry on resume"); entry_branch_free(branch, branch_count); session_list_free(sessions, count); db_close(db); test_db_clean(dbpath); return; }
+    if (strcmp(branch[0].message.content, "hello") != 0) { FAIL("wrong content"); entry_branch_free(branch, branch_count); session_list_free(sessions, count); db_close(db); test_db_clean(dbpath); return; }
 
     entry_branch_free(branch, branch_count);
     session_list_free(sessions, count);
     db_close(db);
-    unlink(dbpath);
+    test_db_clean(dbpath);
     PASS();
 }
 
@@ -93,6 +93,7 @@ static void test_cli_zero_config_startup(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
     printf("test_cli:\n");
     test_cli_session_resume();

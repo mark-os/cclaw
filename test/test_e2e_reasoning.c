@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include "test_util.h"
 
 #define BINARY "./build/cclaw"
 
@@ -75,6 +76,7 @@ static void test_pure_reasoning(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("--- test_e2e_reasoning ---\n");
     test_pure_reasoning();
     printf("%d/%d passed\n", tests_passed, tests_run);

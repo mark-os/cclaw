@@ -207,7 +207,8 @@ static void test_inbox_count(void) {
 }
 
 int main(void) {
-    unlink(DB_PATH);
+    TEST_INIT();
+    test_db_clean(DB_PATH);
     printf("test_inbox:\n");
     test_inbox_insert();
     test_inbox_peek_empty();
@@ -218,7 +219,7 @@ int main(void) {
     test_inbox_consume_empty();
     test_inbox_consume_respects_limit();
     test_inbox_count();
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("All inbox tests passed.\n");
     return 0;
 }

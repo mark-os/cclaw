@@ -9,7 +9,7 @@
 #define DB_PATH "/tmp/test_agent_rename.db"
 
 static sqlite3 *setup(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     /* Seed an agent */
@@ -111,6 +111,7 @@ static void test_not_found(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_agent_rename:\n");
     test_successful_rename();
     test_busy_rejection();

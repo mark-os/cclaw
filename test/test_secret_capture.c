@@ -15,9 +15,7 @@
 #define DB_PATH "/tmp/cclaw_test_secret_capture.db"
 
 static void clean_db(void) {
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
     unlink("/tmp/.cclaw_key");
 }
 
@@ -124,7 +122,7 @@ static void test_capture_errors(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_secret_capture:\n");
     test_no_save_secret();
     test_whole_result_capture();

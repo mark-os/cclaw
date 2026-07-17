@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "sandbox.h"
+#include "test_util.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -104,7 +105,7 @@ static void test_profile_resolve_matches_policy(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_sandbox_profile:\n");
     test_host();
     test_trusted();

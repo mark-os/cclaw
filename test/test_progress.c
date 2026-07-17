@@ -13,10 +13,11 @@ static const char *MOCK_RESPONSE =
     "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1}}";
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
     printf("test_progress:\n");
 
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -65,7 +66,7 @@ int main(void) {
     config_free(cfg);
     mock_server_stop();
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS session not stuck in running\n");
     return 0;
 }

@@ -449,6 +449,11 @@ void db_wal_checkpoint(sqlite3 *db);
 /* Free MB on the filesystem holding the main DB, or -1 if unmeasurable. */
 long db_free_mb(sqlite3 *db);
 
+/* Write a consistent single-file snapshot to `dest` via VACUUM INTO. Refuses
+ * to overwrite; unlinks a partial on failure. Returns 0 (and sets *out_bytes,
+ * if non-NULL, to the snapshot size) on success, -1 on error (logged). */
+int db_backup_to(sqlite3 *db, const char *dest, long long *out_bytes);
+
 /* Scalar query helpers — single int64 bind on param 1, read column 0.
  * db_scalar_i64: returns column 0 as int64 or dflt if no row / prepare fails.
  * db_scalar_text: returns strdup of column 0 text or NULL. Caller frees. */

@@ -10,7 +10,7 @@
 #include <unistd.h>
 
 static void test_whitelist_add_remove(void) {
-    unlink("/tmp/test_agent_wl.db");
+    test_db_clean("/tmp/test_agent_wl.db");
     sqlite3 *db = test_db_open("/tmp/test_agent_wl.db");
     assert(db != NULL);
     db_agent_upsert(db, "bot", NULL, NULL);
@@ -42,12 +42,12 @@ static void test_whitelist_add_remove(void) {
     agent_caps_free(&caps);
 
     db_close(db);
-    unlink("/tmp/test_agent_wl.db");
+    test_db_clean("/tmp/test_agent_wl.db");
     printf("  PASS: test_whitelist_add_remove\n");
 }
 
 static void test_add_tool(void) {
-    unlink("/tmp/test_agent_tool.db");
+    test_db_clean("/tmp/test_agent_tool.db");
     sqlite3 *db = test_db_open("/tmp/test_agent_tool.db");
     assert(db);
     db_agent_upsert(db, "bot", NULL, NULL);
@@ -68,11 +68,12 @@ static void test_add_tool(void) {
     agent_caps_free(&caps);
 
     db_close(db);
-    unlink("/tmp/test_agent_tool.db");
+    test_db_clean("/tmp/test_agent_tool.db");
     printf("  PASS: test_add_tool\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_agent_config:\n");
     test_whitelist_add_remove();
     test_add_tool();

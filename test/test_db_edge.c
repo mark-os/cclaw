@@ -256,6 +256,7 @@ static void test_config_set_overwrite(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
     printf("test_db_edge:\n");
     test_next_turn_id_empty();

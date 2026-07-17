@@ -107,7 +107,7 @@ static void setup_bundle(void) {
 }
 
 static void test_install_ingests_rows(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
@@ -167,7 +167,7 @@ static void test_install_ingests_rows(void) {
 }
 
 static void test_reinstall_is_idempotent(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     sqlite3 *db = test_db_open(TEST_DB);
     char *err = NULL;
@@ -183,7 +183,7 @@ static void test_reinstall_is_idempotent(void) {
 }
 
 static void test_config_lifecycle(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     sqlite3 *db = test_db_open(TEST_DB);
     char *err = NULL;
@@ -350,7 +350,7 @@ static void test_validate_rejects_bad_json(void) {
  * extension_install under a different name — the full fork → edit → promote
  * roundtrip. */
 static void test_extension_fork_roundtrip(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     rm_rf("/tmp/test_fork_src");
     rm_rf("/tmp/test_fork_ws");
     rm_rf("/tmp/extensions");
@@ -426,7 +426,7 @@ static void test_extension_fork_roundtrip(void) {
 /* First-come name ownership: a promote may never change the owner of an
  * existing name; re-installing under the same owner still works. */
 static void test_install_refuses_owner_takeover(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     sqlite3 *db = test_db_open(TEST_DB);
     char *err = NULL;
@@ -452,7 +452,7 @@ static void test_install_refuses_owner_takeover(void) {
  * published=1 with a manifest on disk; the channel row exists ('draft'); a
  * second run preserves an 'active' status. */
 static void test_install_builtin(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     rm_rf("/tmp/extensions/telegram");
     rm_rf("/tmp/extensions/cclaw-docs");
     sqlite3 *db = test_db_open(TEST_DB);
@@ -524,7 +524,7 @@ static void test_install_builtin(void) {
 /* agents[] component: validation, install-creates-agent, skip-existing,
  * caps refusal (specs/self-configuration.md). */
 static void test_manifest_agents(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     write_file(BUNDLE "/scout.md", "You scout the weather.\n");
     write_file(BUNDLE "/extension.json",
@@ -594,7 +594,7 @@ static void test_manifest_agents(void) {
  * per $.tools[] entry (kind='tool', value=tool name). Re-install must be
  * idempotent (INSERT OR IGNORE — grant count unchanged). */
 static void test_install_seeds_grants(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
@@ -628,7 +628,7 @@ static void test_install_seeds_grants(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_extension_manifest:\n");
     test_install_ingests_rows();
     test_install_seeds_grants();
@@ -642,7 +642,7 @@ int main(void) {
     test_install_builtin();
     test_manifest_agents();
     /* cleanup */
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     rm_rf("/tmp/test_ext_manifest_bundle");
     rm_rf("/tmp/extensions");
     printf("test_extension_manifest: ALL PASS\n");

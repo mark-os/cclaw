@@ -99,6 +99,7 @@ static void test_multiple_entries_same_turn(void) {
 
 
 int main(void) {
+    TEST_INIT();
     printf("test_turn_tagging:\n");
     test_next_turn_id_empty_session();
     test_next_turn_id_increments();

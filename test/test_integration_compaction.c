@@ -19,13 +19,13 @@
 #define TEST_DB "/tmp/test_cclaw_integ_compact.sqlite"
 
 static sqlite3 *setup(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     return test_db_open(TEST_DB);
 }
 
 static void teardown(sqlite3 *db) {
     db_close(db);
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
 }
 
 /* Test: compaction job can be submitted and processed by worker */
@@ -286,6 +286,7 @@ void run_tests(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     int port = mock_server_start();
     test_compaction_job_submission();
     test_inbox_during_compacting();

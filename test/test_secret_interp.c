@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "secret_interp.h"
+#include "test_util.h"
 
 #define PASS(name) printf("  PASS: %s\n", name)
 
@@ -149,6 +150,7 @@ static void test_placeholder_names_dedup_and_none(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     alarm(5);  /* Hard kill if anything infinite-loops */
     printf("test_secret_interp:\n");
     test_deinterp_self_referential();

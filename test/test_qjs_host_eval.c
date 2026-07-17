@@ -226,7 +226,7 @@ static void test_modern_collections(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_qjs_host_eval:\n");
     setup();
 

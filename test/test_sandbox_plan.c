@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "sandbox.h"
+#include "test_util.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -91,7 +92,7 @@ static void test_skips_empty(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("--- test_sandbox_plan ---\n");
     if (setup_tree() != 0) { printf("FAIL: could not set up temp tree\n"); return 1; }
     test_dedup_and_canon();

@@ -75,13 +75,11 @@ static int send_line(int mfd, const char *s) {
 }
 
 static void cleanup_files(void) {
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     alarm(40);
 
     cleanup_files();

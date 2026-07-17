@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <curl/curl.h>
+#include "test_util.h"
 
 static void test_response_free_empty(void) {
     HttpResponse resp = {0};
@@ -64,6 +65,7 @@ static void test_within_cap_not_truncated(int port) {
 }
 
 int main(void) {
+    TEST_INIT();
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
     test_response_free_empty();

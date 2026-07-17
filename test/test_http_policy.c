@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "http_policy.h"
+#include "test_util.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -41,6 +42,7 @@ static void test_is_private_ip(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_http_policy:\n");
     test_is_private_ip();
     printf("%d/%d passed\n", tests_passed, tests_run);

@@ -8,13 +8,13 @@
 #define TEST_DB "/tmp/test_cclaw_session.sqlite"
 
 static sqlite3 *setup(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     return test_db_open(TEST_DB);
 }
 
 static void teardown(sqlite3 *db) {
     db_close(db);
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
 }
 
 static void test_session_create(void) {
@@ -387,7 +387,7 @@ static void test_create_filtered_invalid_filter(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_session:\n");
     test_session_create();
     test_session_list();

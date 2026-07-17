@@ -9,7 +9,7 @@ static const char *DB_PATH = "/tmp/test_cclaw_subagent_inbox.sqlite";
 
 /* sub-agent completion posts to parent inbox */
 static void test_subagent_completion_posts_to_parent_inbox(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -37,13 +37,13 @@ static void test_subagent_completion_posts_to_parent_inbox(void) {
     inbox_items_free(items, count);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS test_subagent_completion_posts_to_parent_inbox\n");
 }
 
 /* error sub-agent also posts to parent inbox */
 static void test_subagent_error_posts_to_parent_inbox(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -65,11 +65,12 @@ static void test_subagent_error_posts_to_parent_inbox(void) {
     inbox_items_free(items, count);
 
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  PASS test_subagent_error_posts_to_parent_inbox\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_subagent_inbox:\n");
     test_subagent_completion_posts_to_parent_inbox();
     test_subagent_error_posts_to_parent_inbox();

@@ -13,7 +13,7 @@
 #define DB_PATH "/tmp/test_kv_config.db"
 
 static void test_fresh_db_defaults(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     setenv("OPENROUTER_API_KEY", "sk-test", 1);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
@@ -48,11 +48,12 @@ static void test_fresh_db_defaults(void) {
 
     db_close(db);
     unsetenv("OPENROUTER_API_KEY");
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("  fresh_db_defaults... PASS\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_kv_config:\n");
     test_fresh_db_defaults();
     printf("all kv_config tests passed\n");

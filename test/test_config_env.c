@@ -7,6 +7,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include "test_util.h"
 
 static void clear_env(void) {
     unsetenv("CCLAW_PROVIDER_API_KEY_ENV");
@@ -165,6 +166,7 @@ static void test_cache_hints_env(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
     printf("test_config_env:\n");
     test_env_defaults();

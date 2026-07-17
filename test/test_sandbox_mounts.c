@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "test_run_tool_shell.h"
 #include <sys/stat.h>
+#include "test_util.h"
 
 /* Layer 2: Verify extra mounts bind rw and ro paths correctly via --run-tool */
 
@@ -102,7 +103,7 @@ static void test_write_ro_mount_fails(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_sandbox_mounts\n");
     setup();
     test_ns_available();

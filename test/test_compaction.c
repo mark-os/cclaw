@@ -8,13 +8,13 @@
 #define TEST_DB "/tmp/test_cclaw_compaction.sqlite"
 
 static sqlite3 *setup(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     return test_db_open(TEST_DB);
 }
 
 static void teardown(sqlite3 *db) {
     db_close(db);
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
 }
 
 /* CTE from leaf stops at compaction node */
@@ -170,6 +170,7 @@ static void test_compaction_fts_indexes_old(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_compaction:\n");
     test_compaction_cte_stops();
     test_compaction_forward_walk();

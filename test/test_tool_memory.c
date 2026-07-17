@@ -145,7 +145,7 @@ static void test_missing_fields(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     test_create_and_add();
     test_edit_batch();
     test_delete_renumber();

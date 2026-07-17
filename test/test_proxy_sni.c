@@ -21,6 +21,7 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include "test_util.h"
 
 static char tmpdir[128];
 
@@ -407,6 +408,7 @@ static void test_sni_numeric_exact_grant_exempt(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     alarm(30);
     setup_tmpdir();
 

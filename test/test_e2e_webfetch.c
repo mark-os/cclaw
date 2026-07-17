@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include "test_util.h"
 
 #define BINARY "./build/cclaw"
 
@@ -65,6 +66,7 @@ static void test_web_fetch_httpbin(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("--- test_e2e_webfetch ---\n");
     test_web_fetch_httpbin();
     printf("%d/%d passed\n", tests_passed, tests_run);

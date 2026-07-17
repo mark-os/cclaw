@@ -196,18 +196,13 @@ static void test_startup_integration(void) {
     char key_path[256];
     snprintf(key_path, sizeof(key_path), "%s/.cclaw_key", tmpdir);
     unlink(key_path);
-    unlink(db_path);
-    /* Remove WAL/SHM if present */
-    char wal_path[280], shm_path[280];
-    snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
-    snprintf(shm_path, sizeof(shm_path), "%s-shm", db_path);
-    unlink(wal_path);
-    unlink(shm_path);
+    test_db_clean(db_path);
     rmdir(tmpdir);
     printf("  PASS: startup integration (load_or_create + set_key + persist)\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_secret:\n");
     test_encrypt_decrypt_roundtrip();
     test_empty_string();

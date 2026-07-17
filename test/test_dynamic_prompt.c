@@ -22,9 +22,9 @@ static char *build(sqlite3 *db, const char *agent) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_dynamic_prompt:\n");
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
 
@@ -92,7 +92,7 @@ int main(void) {
     printf("PASS\n");
 
     db_close(db);
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     printf("all dynamic_prompt tests passed\n");
     return 0;
 }

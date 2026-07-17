@@ -12,6 +12,7 @@
 
 /* For test_register only */
 #include "tool_shell.h"
+#include "test_util.h"
 
 static char workspace[256];
 
@@ -211,7 +212,7 @@ static void test_cclaw_unreachable(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_tool_shell:\n");
 
     setup();

@@ -32,9 +32,9 @@ static char *call(ToolRegistry *reg, ToolChannelSendCtx *ctx,
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_tool_channel_send:\n");
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
 
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
@@ -138,7 +138,7 @@ int main(void) {
 
     tools_free(&reg);
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("all channel_send tests passed\n");
     return 0;
 }

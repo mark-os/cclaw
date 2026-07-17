@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "test_util.h"
 
 static void expect(const char *name, const unsigned char *in, size_t len,
                    const char *want) {
@@ -18,7 +19,7 @@ static void expect(const char *name, const unsigned char *in, size_t len,
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_base64\n");
 
     /* RFC 4648 §10 test vectors — every padding case */

@@ -16,7 +16,7 @@ static void add_user_msg(sqlite3 *db, int64_t sid, const char *text) {
 
 /* Porter stemming: "configure" must match "configured" from another session */
 static void test_stemming_match(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -34,14 +34,14 @@ static void test_stemming_match(void) {
     assert(strstr(r, "---End of context---"));
     free(r);
 
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_stemming_match\n");
 }
 
 /* Dynamic stopwords: words in >25%% of rows are dropped; recall goes silent
  * when every keyword is corpus-common. */
 static void test_dynamic_stopwords_silence(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -64,13 +64,13 @@ static void test_dynamic_stopwords_silence(void) {
     assert(!strstr(r, "good evening friend"));
     free(r);
 
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_dynamic_stopwords_silence\n");
 }
 
 /* No hits at all → NULL, never an empty wrapper */
 static void test_no_hits_silent(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -81,13 +81,13 @@ static void test_no_hits_silent(void) {
     char *r = context_auto_recall(db, s2, "zebra quantum xylophone", 500);
     assert(r == NULL);
 
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_no_hits_silent\n");
 }
 
 /* Current session is excluded from results */
 static void test_excludes_own_session(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -97,11 +97,12 @@ static void test_excludes_own_session(void) {
     char *r = context_auto_recall(db, s1, "telegram webhook", 500);
     assert(r == NULL);
 
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_excludes_own_session\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_auto_recall:\n");
     test_stemming_match();
     test_dynamic_stopwords_silence();

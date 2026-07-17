@@ -7,8 +7,26 @@
 #include "tool_js.h"
 #include "tool_web_fetch.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+/* First statement of every test main: line-buffer stdout so progress output
+ * survives the Makefile timeout-kill (see AGENTS.md Testing Guidelines). */
+#define TEST_INIT() setvbuf(stdout, NULL, _IOLBF, 0)
+
+/* Remove a test DB and all its derived artifacts: <base>, <base>-wal,
+ * <base>-shm. ENOENT is fine — stale debris from a killed run must not
+ * survive into the next one. */
+static inline void test_db_clean(const char *base) {
+    char sib[512];
+    unlink(base);
+    snprintf(sib, sizeof(sib), "%s-wal", base);
+    unlink(sib);
+    snprintf(sib, sizeof(sib), "%s-shm", base);
+    unlink(sib);
+}
 
 /* strdup without feature-macro dependence (tests include libc headers in
  * arbitrary order). */

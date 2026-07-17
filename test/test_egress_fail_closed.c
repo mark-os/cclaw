@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "test_util.h"
 
 /* Egress fail-closed: when the per-call proxy socket cannot be bound into the
  * sandbox (invalid/unbindable path), the child must be left NETWORKLESS —
@@ -100,7 +101,7 @@ static void run_case(const char *label, const char *proxy_sock) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_egress_fail_closed:\n");
 
     snprintf(workspace, sizeof(workspace), "/tmp/cclaw_egress_fc_%d", getpid());

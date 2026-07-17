@@ -15,9 +15,7 @@
 #define TEST_FIFO "test_channel_api.pipe"
 
 static void cleanup(void) {
-    unlink(TEST_DB);
-    unlink(TEST_DB "-wal");
-    unlink(TEST_DB "-shm");
+    test_db_clean(TEST_DB);
     unlink(TEST_FIFO);
     /* Re-create schema so channel_ctx_open has tables ready */
     sqlite3 *db = test_db_open(TEST_DB);
@@ -187,6 +185,7 @@ static void test_wake_external(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
 
     printf("test_channel_emit...");

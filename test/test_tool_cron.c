@@ -268,7 +268,7 @@ static void test_cron_register(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_tool_cron:\n");
     test_cron_set_valid();
     test_cron_set_invalid_expr();

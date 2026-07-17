@@ -301,6 +301,7 @@ static void test_no_retry_when_body_present(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_tool_web_fetch:\n");
     test_truncated_saves_full_to_workspace();
     test_retry_on_empty_challenge();

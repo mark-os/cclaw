@@ -14,13 +14,13 @@
 #define FAIL(msg) do { fprintf(stderr, "  FAIL %s: %s\n", __func__, msg); return; } while(0)
 
 static sqlite3 *setup(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     return test_db_open(TEST_DB);
 }
 
 static void teardown(sqlite3 *db) {
     db_close(db);
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
 }
 
 /* session_create stores agent_name, session_get_agent_name retrieves it */
@@ -70,6 +70,7 @@ static void test_list_includes_agent_name(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_session_agent:\n");
     test_create_with_agent_name();
     test_create_without_agent_name();

@@ -7,6 +7,7 @@
 #include <string.h>
 
 int main(void) {
+    TEST_INIT();
     printf("test_tool_args:\n");
     sqlite3 *db = test_db_open(":memory:");
     assert(db);

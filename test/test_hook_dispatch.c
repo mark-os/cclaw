@@ -77,7 +77,7 @@ typedef struct {
 } Fx;
 
 static int fx_open(Fx *fx, const char *db_path) {
-    unlink(db_path);
+    test_db_clean(db_path);
     fx->db = test_db_open(db_path);
     if (!fx->db) return -1;
     fx->rt = js_runtime_create();
@@ -96,7 +96,7 @@ static void fx_close(Fx *fx, const char *db_path) {
     js_runtime_destroy(fx->rt);
     db_close(fx->db);
     cleanup(STORE);
-    unlink(db_path);
+    test_db_clean(db_path);
 }
 
 static int64_t append_entry(sqlite3 *db, int64_t sid, Role role, const char *content,
@@ -579,7 +579,7 @@ static void test_observe_unchanged(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_hook_dispatch:\n");
     test_no_hooks();
     test_pre_input_and_dispatch();

@@ -30,6 +30,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include "test_util.h"
 
 static char workspace[256];
 static int ns_available = 1;
@@ -116,7 +117,7 @@ static void test_timeout_reaps_namespace(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     signal(SIGPIPE, SIG_IGN);
     printf("test_integration_shell_timeout (P5 #9):\n");
     setup_workspace();

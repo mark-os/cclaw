@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include "context.h"
+#include "test_util.h"
 
 static void test_session_tmp_dir(void) {
     char buf[64];
@@ -13,6 +14,7 @@ static void test_session_tmp_dir(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
     printf("test_context_edge:\n");
     test_session_tmp_dir();

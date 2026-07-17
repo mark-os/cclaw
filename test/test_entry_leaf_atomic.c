@@ -81,7 +81,7 @@ static void test_compaction_does_not_move_leaf(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_entry_leaf_atomic\n");
     test_leaf_tracks_last_insert();
     test_typed_advances_leaf();

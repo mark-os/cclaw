@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "qjs_helpers.h"
+#include "test_util.h"
 
 static int failures = 0;
 #define ASSERT(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); failures++; } } while(0)
@@ -176,7 +177,7 @@ static void test_interrupt_limit(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     test_runtime_create_destroy();
     test_context_profiles();
     test_eval_to_string();

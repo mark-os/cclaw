@@ -6,6 +6,7 @@
 #include <assert.h>
 #include "secret_scan.h"
 #include "secret_scan_rules.h"
+#include "test_util.h"
 
 #define PASS(name) printf("  PASS: %s\n", name)
 
@@ -130,7 +131,7 @@ static int test_span(int rule_idx) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_secret_scan_coverage:\n");
 
     int passed = 0, failed = 0, skipped = 0;

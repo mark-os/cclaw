@@ -323,6 +323,7 @@ static void test_model_context_window(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_context_plan:\n");
     test_basic_plan();
     test_v28_filtering();

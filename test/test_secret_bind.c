@@ -16,9 +16,7 @@
 #define DB_PATH "/tmp/cclaw_test_secret_bind.db"
 
 static void clean_db(void) {
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
 }
 
 static sqlite3 *fresh_db(void) {
@@ -104,7 +102,7 @@ static void test_invalid_args(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_secret_bind:\n");
     test_unbound_secret_has_no_hosts();
     test_bind_roundtrip_and_coverage();

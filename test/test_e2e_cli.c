@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include "test_util.h"
 
 #define BINARY "./build/cclaw"
 #define DB_PATH "/tmp/test_cclaw_cli_p.sqlite"
@@ -21,7 +22,7 @@ static void test_p_flag_produces_output(void) {
     TEST(p_flag_produces_output);
     if (!getenv("OPENROUTER_API_KEY")) SKIP("OPENROUTER_API_KEY not set");
 
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
         BINARY " --new -p 'Reply with exactly: PONG' 2>/dev/null");
@@ -59,10 +60,11 @@ static void test_p_flag_no_arg(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("--- test_integration_cli ---\n");
     test_p_flag_produces_output();
     test_p_flag_no_arg();
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

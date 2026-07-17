@@ -101,28 +101,29 @@ static void test_channel_state_table(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     printf("test_channels_table...");
     test_channels_table();
     printf(" OK\n");
 
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     printf("test_channel_events_table...");
     test_channel_events_table();
     printf(" OK\n");
 
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     printf("test_channel_outbox_table...");
     test_channel_outbox_table();
     printf(" OK\n");
 
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     printf("test_channel_state_table...");
     test_channel_state_table();
     printf(" OK\n");
 
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     printf("all channel_tables tests passed\n");
     return 0;
 }

@@ -53,8 +53,7 @@ static void rm_rf(const char *path) {
 }
 
 static void setup_db_and_channel(void) {
-    unlink(TEST_DB);
-    unlink(TEST_DB "-wal"); unlink(TEST_DB "-shm");
+    test_db_clean(TEST_DB);
     rm_rf(EXT_DIR);
     mkdir(EXT_DIR, 0755);
     write_file(EXT_DIR "/channel.qjs", CHANNEL_JS);
@@ -153,13 +152,13 @@ static void test_harness_save_to(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_channel_harness:\n");
     test_harness_pass();
     test_harness_save_to();
     test_harness_unmatched_request_fails();
     test_harness_unknown_channel();
-    unlink(TEST_DB); unlink(TEST_DB "-wal"); unlink(TEST_DB "-shm");
+    test_db_clean(TEST_DB);
     rm_rf(EXT_DIR);
     printf("all channel harness tests passed\n");
     return 0;

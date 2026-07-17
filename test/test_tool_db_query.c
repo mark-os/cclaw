@@ -144,6 +144,7 @@ static void test_register(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_tool_db_query:\n");
     test_select_returns_results();
     test_reject_insert();

@@ -12,7 +12,7 @@
 static const char *TEST_DB = "/tmp/cclaw_test_config.sqlite";
 
 static sqlite3 *fresh_db(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     return test_db_open(TEST_DB);
 }
 
@@ -265,6 +265,7 @@ static void test_resolution_rule(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_config:\n");
     test_agent_dir_resolve();
     test_resolution_rule();

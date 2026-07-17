@@ -132,6 +132,7 @@ static void test_split_columns_written(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_entry_stats:\n");
     test_entry_stats_populated();
     test_context_plan_uses_stored_stats();

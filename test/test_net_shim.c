@@ -23,6 +23,7 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "test_util.h"
 
 static char uds_path[128];
 static int mock_listen_fd = -1;
@@ -138,7 +139,7 @@ static int read_some(int fd, char *buf, int cap) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     alarm(18);  /* below the make-test timeout-20 wrapper, so SIGALRM wins the race */
     signal(SIGPIPE, SIG_IGN);
 

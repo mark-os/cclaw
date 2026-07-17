@@ -32,12 +32,7 @@ static void setup(void) {
 
 static void teardown(void) {
     unlink(key_path);
-    unlink(db_path);
-    char wal[160], shm[160];
-    snprintf(wal, sizeof(wal), "%s-wal", db_path);
-    snprintf(shm, sizeof(shm), "%s-shm", db_path);
-    unlink(wal);
-    unlink(shm);
+    test_db_clean(db_path);
     rmdir(tmpdir);
 }
 
@@ -131,6 +126,7 @@ static void test_count_excludes_secrets(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_integration_db_query_secrets:\n");
     setup();
     test_select_star_filters_secrets();

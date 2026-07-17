@@ -66,7 +66,7 @@ static void setup_bundle(void) {
 }
 
 static void test_install_lands_in_draft(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
@@ -85,7 +85,7 @@ static void test_install_lands_in_draft(void) {
 }
 
 static void test_check_then_activate(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     sqlite3 *db = test_db_open(TEST_DB);
     char *err = NULL;
@@ -137,7 +137,7 @@ static void test_check_then_activate(void) {
 }
 
 static void test_check_reports_js_error(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     rm_rf("/tmp/test_channel_lifecycle_bundle");
     rm_rf("/tmp/extensions");
     mkdir("/tmp/test_channel_lifecycle_bundle", 0755);
@@ -170,7 +170,7 @@ static void test_check_reports_js_error(void) {
  * the identical query rather than the real function, which forks a live
  * channel process (channel_runner_main) that a unit test shouldn't spawn. */
 static void test_launch_all_gate_query(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     sqlite3 *db = test_db_open(TEST_DB);
     char *err = NULL;
@@ -225,7 +225,7 @@ static char *chan_col(sqlite3 *db, const char *col, const char *name) {
  * extension (a restart) never clobbers the rollback pointer. No processes
  * are involved: pid is NULL so channel_bounce has nothing to signal. */
 static void test_swap_and_revert(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     sqlite3 *db = test_db_open(TEST_DB);
     char *err = NULL;
@@ -268,7 +268,7 @@ static void test_swap_and_revert(void) {
 
 /* Admin notices land one outbox row per admin id from channel_state. */
 static void test_notify_admins(void) {
-    unlink(TEST_DB);
+    test_db_clean(TEST_DB);
     setup_bundle();
     sqlite3 *db = test_db_open(TEST_DB);
     char *err = NULL;
@@ -302,7 +302,7 @@ static void test_notify_admins(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_channel_lifecycle:\n");
     test_install_lands_in_draft();
     test_check_then_activate();

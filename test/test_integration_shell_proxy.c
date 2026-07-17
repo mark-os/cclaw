@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "test_util.h"
 
 static char workspace[256];
 static int ns_available = 1;
@@ -222,7 +223,7 @@ static void test_proxy_relay_integrity(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_integration_shell_proxy:\n");
 
     setup_workspace();

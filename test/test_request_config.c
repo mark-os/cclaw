@@ -794,7 +794,7 @@ static void test_add_tool_to_config(void) {
 
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_request_config:\n");
     test_register();
     test_handler_unavailable();

@@ -81,7 +81,7 @@ static void test_rollback_mid_consumption(void) {
             sqlite3_exec(db, "UPDATE inbox SET consumed=0 WHERE session_id=?", NULL, NULL, NULL);
             /* Simpler: just recreate */
             db_close(db);
-            unlink(DB_PATH);
+            test_db_clean(DB_PATH);
             db = test_db_open(DB_PATH);
             sid = session_create(db, "rollback_mid", NULL, -1, 0);
             for (int i = 0; i < 5; i++) {
@@ -137,12 +137,13 @@ static void test_no_double_consume_after_success(void) {
 }
 
 int main(void) {
-    unlink(DB_PATH);
+    TEST_INIT();
+    test_db_clean(DB_PATH);
     printf("test_inbox_rollback:\n");
     test_rollback_missing_session();
     test_rollback_mid_consumption();
     test_no_double_consume_after_success();
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("All inbox rollback tests passed.\n");
     return 0;
 }

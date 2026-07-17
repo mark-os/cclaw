@@ -2,6 +2,7 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include "host_match.h"
+#include "test_util.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -322,7 +323,7 @@ static void test_metadata_carveout_exact_grant_allow(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_host_match\n");
 
     /* host_match */

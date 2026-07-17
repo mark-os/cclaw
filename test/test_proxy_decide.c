@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include "test_util.h"
 
 static char tmpdir[128];
 
@@ -478,7 +479,7 @@ static void test_path_wildcard_allows_host_denies_metadata(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     /* Each proxy start/stop cycle costs ~0.5s (accept-loop wake latency), and
      * the suite runs ~20 of them — keep the alarm under the Makefile's 20s
      * timeout wrapper but with headroom for the whole set. */

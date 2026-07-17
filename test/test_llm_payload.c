@@ -37,7 +37,7 @@ static const char *json_get_str(sqlite3 *db, const char *json, const char *path,
 }
 
 static void test_openai_payload(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -100,7 +100,7 @@ static void test_openai_payload(void) {
 
     llm_payload_release(&payload);
     context_plan_free(&plan);
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_openai_payload\n");
 }
 
@@ -108,7 +108,7 @@ static void test_openai_payload(void) {
  * json_object emits JSON null for SQL NULL; strict providers (DeepSeek) 400
  * on "stream":null. */
 static void test_openai_payload_no_stream_omits_nulls(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -141,12 +141,12 @@ static void test_openai_payload_no_stream_omits_nulls(void) {
 
     llm_payload_release(&payload);
     context_plan_free(&plan);
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_openai_payload_no_stream_omits_nulls\n");
 }
 
 static void test_gemini_payload(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -194,7 +194,7 @@ static void test_gemini_payload(void) {
 
     llm_payload_release(&payload);
     context_plan_free(&plan);
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_gemini_payload\n");
 }
 
@@ -204,7 +204,7 @@ static void test_gemini_payload(void) {
  * actual message stays the true tail of its turn, and the block's position
  * never moves as tool-loop iterations append entries after it. */
 static void test_recall_in_session_context(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -277,7 +277,7 @@ static void test_recall_in_session_context(void) {
 
     free(context_text);
     context_plan_free(&plan);
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_recall_in_session_context\n");
 }
 
@@ -285,7 +285,7 @@ static void test_recall_in_session_context(void) {
  * the assembled payload; the block is entirely absent when there's nothing
  * pending/running and no recall. */
 static void test_session_context_live_state(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -343,7 +343,7 @@ static void test_session_context_live_state(void) {
 
     free(context_text);
     context_plan_free(&plan);
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_session_context_live_state\n");
 }
 
@@ -354,7 +354,7 @@ static void test_session_context_live_state(void) {
  * share one prompt-cache prefix. Also covers the per-turn freeze store
  * (session_set/get_turn_context). */
 static void test_session_context_tool_loop(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -452,12 +452,12 @@ static void test_session_context_tool_loop(void) {
     llm_payload_release(&payload);
     context_plan_free(&plan);
 
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_session_context_tool_loop\n");
 }
 
 static void test_payload_with_tools(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -501,7 +501,7 @@ static void test_payload_with_tools(void) {
 
     llm_payload_release(&payload);
     context_plan_free(&plan);
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_payload_with_tools\n");
 }
 
@@ -509,7 +509,7 @@ static void test_payload_with_tools(void) {
  * message in OpenAI format, and as a user text part in Gemini format (which
  * filters type='system' because the prompt rides in systemInstruction). */
 static void test_compaction_entry_in_payload(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -570,7 +570,7 @@ static void test_compaction_entry_in_payload(void) {
  * UNTRUSTED_EXTERNAL_CONTENT boundaries at query time; untagged results
  * pass through bare. Both endpoints. */
 static void test_network_hosts_query_time_wrap(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -637,14 +637,14 @@ static void test_network_hosts_query_time_wrap(void) {
     llm_payload_release(&payload);
     context_plan_free(&plan);
 
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_network_hosts_query_time_wrap\n");
 }
 
 /* Ephemeral hook injects ride at the tail of history on both endpoints and
  * vanish once hook_directives_clear runs (llm_req exit semantics). */
 static void test_hook_inject_directive(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -710,7 +710,7 @@ static void test_hook_inject_directive(void) {
     llm_payload_release(&payload);
 
     context_plan_free(&plan);
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_hook_inject_directive\n");
 }
 
@@ -719,7 +719,7 @@ static void test_hook_inject_directive(void) {
  * IS in the granted list, it DOES appear. This exercises the SQL_OPENAI_TOOLS
  * grant-only filter (no attachment OR-branch). */
 static void test_extension_tool_grant_filtering(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -796,11 +796,12 @@ static void test_extension_tool_grant_filtering(void) {
 
     llm_payload_release(&payload);
     context_plan_free(&plan);
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_extension_tool_grant_filtering\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_llm_payload:\n");
     test_openai_payload();
     test_openai_payload_no_stream_omits_nulls();

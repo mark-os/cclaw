@@ -839,6 +839,7 @@ static void test_tool_filter_no_retro_apply(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
 
     printf("test_channel_events:\n");

@@ -15,8 +15,9 @@ static const char *SUCCESS_RESP =
     "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}";
 
 int main(void) {
+    TEST_INIT();
     alarm(10);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -64,7 +65,7 @@ int main(void) {
     config_free(cfg);
     mock_server_stop();
     db_close(db);
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     printf("PASS test_integration_fallback_fixes\n");
     return 0;
 }

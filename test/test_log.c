@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "test_util.h"
 
 static char g_logfile[] = "/tmp/cclaw_test_log_XXXXXX";
 
@@ -135,7 +136,7 @@ static void test_parse_and_name(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_log:\n");
 
     int fd = mkstemp(g_logfile);

@@ -264,6 +264,7 @@ static void test_ingest_typed(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_typed_entries:\n");
     test_insert_typed_entries();
     test_tool_result_typed();

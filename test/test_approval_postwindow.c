@@ -12,9 +12,7 @@
 #define DB_PATH "/tmp/cclaw_test_approval_postwindow.db"
 
 static void clean_db(void) {
-    unlink(DB_PATH);
-    unlink(DB_PATH "-wal");
-    unlink(DB_PATH "-shm");
+    test_db_clean(DB_PATH);
 }
 
 static sqlite3 *fresh_db(void) {
@@ -70,7 +68,7 @@ static void test_postwindow_outcomes(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_approval_postwindow:\n");
     test_postwindow_outcomes();
     printf("all approval postwindow tests passed\n");

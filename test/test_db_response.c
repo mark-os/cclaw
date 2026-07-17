@@ -201,7 +201,7 @@ static void test_archive_retention(void) {
 }
 
 int main(void) {
-    setvbuf(stdout, NULL, _IOLBF, 0);
+    TEST_INIT();
     printf("test_db_response:\n");
     test_ingest_response();
     test_ingest_malformed();

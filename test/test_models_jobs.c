@@ -10,7 +10,7 @@
 static const char *DB_PATH = "/tmp/test_cclaw_models.db";
 
 static void test_models_table(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     db_seed_defaults(db);
@@ -31,12 +31,12 @@ static void test_models_table(void) {
     assert(config_get_int(db, "health_429_threshold") == 10);
     assert(config_get_int(db, "health_cooldown_sec") == 300);
 
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_models_table\n");
 }
 
 static void test_llm_jobs_claim(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
 
@@ -69,12 +69,12 @@ static void test_llm_jobs_claim(void) {
     assert(sqlite3_step(claim) == SQLITE_DONE); /* no row */
     sqlite3_finalize(claim);
 
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_llm_jobs_claim\n");
 }
 
 static void test_providers_status_column(void) {
-    unlink(DB_PATH);
+    test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
     db_seed_defaults(db);
@@ -86,11 +86,12 @@ static void test_providers_status_column(void) {
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "healthy") == 0);
     sqlite3_finalize(s);
 
-    db_close(db); unlink(DB_PATH);
+    db_close(db); test_db_clean(DB_PATH);
     printf("  PASS test_providers_status_column\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_models_jobs:\n");
     test_models_table();
     test_llm_jobs_claim();

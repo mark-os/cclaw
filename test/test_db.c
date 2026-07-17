@@ -54,18 +54,18 @@ static int table_exists(sqlite3 *db, const char *name) {
 
 static void test_open_close(void) {
     const char *path = "/tmp/test_cclaw_db.sqlite";
-    unlink(path);
+    test_db_clean(path);
 
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_open_close\n");
 }
 
 static void test_wal_mode(void) {
     const char *path = "/tmp/test_cclaw_wal.sqlite";
-    unlink(path);
+    test_db_clean(path);
 
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
@@ -75,13 +75,13 @@ static void test_wal_mode(void) {
     assert(strcmp(mode, "wal") == 0);
 
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_wal_mode\n");
 }
 
 static void test_busy_timeout(void) {
     const char *path = "/tmp/test_cclaw_timeout.sqlite";
-    unlink(path);
+    test_db_clean(path);
 
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
@@ -94,13 +94,13 @@ static void test_busy_timeout(void) {
     assert(strcasecmp(mode, "wal") == 0);
 
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_busy_timeout\n");
 }
 
 static void test_tables_created(void) {
     const char *path = "/tmp/test_cclaw_tables.sqlite";
-    unlink(path);
+    test_db_clean(path);
 
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
@@ -109,13 +109,13 @@ static void test_tables_created(void) {
     assert(table_exists(db, "entries") == 1);
 
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_tables_created\n");
 }
 
 static void test_reopen_idempotent(void) {
     const char *path = "/tmp/test_cclaw_reopen.sqlite";
-    unlink(path);
+    test_db_clean(path);
 
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
@@ -126,13 +126,13 @@ static void test_reopen_idempotent(void) {
     assert(db != NULL);
     db_close(db);
 
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_reopen_idempotent\n");
 }
 
 static void test_fts5_search(void) {
     const char *path = "/tmp/test_cclaw_fts5.sqlite";
-    unlink(path);
+    test_db_clean(path);
 
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
@@ -167,13 +167,13 @@ static void test_fts5_search(void) {
     assert(results == NULL);
 
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_fts5_search\n");
 }
 
 static void test_config_registry(void) {
     const char *path = "/tmp/test_cclaw_registry.sqlite";
-    unlink(path);
+    test_db_clean(path);
 
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
@@ -193,13 +193,13 @@ static void test_config_registry(void) {
     assert(config_set(db, "tg_offset", "1") == -1);
 
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_config_registry\n");
 }
 
 static void test_agent_pragmas(void) {
     const char *path = "/tmp/test_cclaw_agent_pragmas.db";
-    unlink(path);
+    test_db_clean(path);
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
@@ -219,7 +219,7 @@ static void test_agent_pragmas(void) {
     assert(cache == -512);
 
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_agent_pragmas\n");
 }
 
@@ -237,7 +237,7 @@ static int count_rows(sqlite3 *db, const char *table) {
 
 static void test_prune_inbox(void) {
     const char *path = "/tmp/test_cclaw_prune_inbox.sqlite";
-    unlink(path);
+    test_db_clean(path);
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
@@ -254,13 +254,13 @@ static void test_prune_inbox(void) {
     assert(count_rows(db, "inbox") == 2);
 
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_prune_inbox\n");
 }
 
 static void test_prune_outbox(void) {
     const char *path = "/tmp/test_cclaw_prune_outbox.sqlite";
-    unlink(path);
+    test_db_clean(path);
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
@@ -278,13 +278,13 @@ static void test_prune_outbox(void) {
     assert(count_rows(db, "channel_outbox") == 2);
 
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_prune_outbox\n");
 }
 
 static void test_free_mb(void) {
     const char *path = "/tmp/test_cclaw_free_mb.sqlite";
-    unlink(path);
+    test_db_clean(path);
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
@@ -294,7 +294,7 @@ static void test_free_mb(void) {
     assert(db_free_mb(NULL) == -1);
 
     db_close(db);
-    unlink(path);
+    test_db_clean(path);
     printf("  PASS test_free_mb\n");
 }
 
@@ -306,10 +306,7 @@ static void set_user_version(sqlite3 *db, int v) {
 
 static void test_schema_state(void) {
     const char *path = "/tmp/test_cclaw_schema_state.sqlite";
-    char wal[128], shm[128];
-    snprintf(wal, sizeof(wal), "%s-wal", path);
-    snprintf(shm, sizeof(shm), "%s-shm", path);
-    unlink(path); unlink(wal); unlink(shm);
+    test_db_clean(path);
 
     sqlite3 *db = db_open(path);   /* no schema applied */
     assert(db != NULL);
@@ -344,7 +341,7 @@ static void test_schema_state(void) {
     assert(db_schema_compat(db) == 0);
 
     db_close(db);
-    unlink(path); unlink(wal); unlink(shm);
+    test_db_clean(path);
     printf("  PASS test_schema_state\n");
 }
 
@@ -422,7 +419,7 @@ static void test_schema_patch_application(void) {
 
 static void test_rate_limit_and_cost(void) {
     const char *path = "/tmp/test_cclaw_db_budget.sqlite";
-    unlink(path);
+    test_db_clean(path);
     sqlite3 *db = test_db_open(path);
     assert(db != NULL);
 
@@ -448,14 +445,12 @@ static void test_rate_limit_and_cost(void) {
     assert(db_cost_last_24h(db) == 1500000000LL);
 
     db_close(db);
-    char wal[160], shm[160];
-    snprintf(wal, sizeof(wal), "%s-wal", path);
-    snprintf(shm, sizeof(shm), "%s-shm", path);
-    unlink(path); unlink(wal); unlink(shm);
+    test_db_clean(path);
     printf("  PASS test_rate_limit_and_cost\n");
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_db:\n");
     test_open_close();
     test_wal_mode();

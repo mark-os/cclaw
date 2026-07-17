@@ -8,6 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include "test_util.h"
 
 #define BINARY "./build/cclaw"
 
@@ -72,6 +73,7 @@ static void test_nonstream_mode(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("--- test_e2e_nonstream ---\n");
     test_nonstream_mode();
     printf("%d/%d passed\n", tests_passed, tests_run);

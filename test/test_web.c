@@ -80,7 +80,7 @@ static void test_status_page(void) {
     curl_easy_cleanup(curl);
     web_stop();
     db_close(db);
-    remove("test_web.db");
+    test_db_clean("test_web.db");
     printf("PASS: test_status_page\n");
 }
 
@@ -189,7 +189,7 @@ static void test_hook_proxy(void) {
     curl_easy_cleanup(curl);
     web_stop();
     db_close(db);
-    remove("test_web_hook.db");
+    test_db_clean("test_web_hook.db");
     unlink("test_web_hook.tchan.sock");
     printf("PASS: test_hook_proxy\n");
 }
@@ -348,11 +348,12 @@ static void test_admin_dashboard(void) {
     curl_easy_cleanup(curl);
     web_stop();
     db_close(db);
-    remove("test_web_admin.db");
+    test_db_clean("test_web_admin.db");
     printf("PASS: test_admin_dashboard\n");
 }
 
 int main(void) {
+    TEST_INIT();
     test_status_page();
     test_hook_proxy();
     test_admin_dashboard();

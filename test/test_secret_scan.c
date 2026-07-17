@@ -2,6 +2,7 @@
 #include <string.h>
 #include <assert.h>
 #include "secret_scan.h"
+#include "test_util.h"
 
 #define PASS(name) printf("  PASS: %s\n", name)
 
@@ -430,6 +431,7 @@ static void test_slack_variants(void) {
 }
 
 int main(void) {
+    TEST_INIT();
     printf("test_secret_scan:\n");
     test_aws_key();
     test_github_pat();

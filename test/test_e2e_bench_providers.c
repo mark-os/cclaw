@@ -21,6 +21,7 @@
 #include "http.h"
 #include "db.h"
 #include <sqlite3.h>
+#include "test_util.h"
 
 static sqlite3 *g_bench_db;
 #define MAX_MODELS 10
@@ -142,6 +143,7 @@ static int do_turn(const char *api_key, const char *model,
 }
 
 int main(void) {
+    TEST_INIT();
     sqlite3_open(":memory:", &g_bench_db);
     const char *api_key = getenv("OPENROUTER_API_KEY");
     if (!api_key) {

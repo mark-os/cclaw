@@ -377,8 +377,9 @@ static int proxy_read_line(int fd, char *buf, int max) {
 
 /* sni_check()'s bounded ClientHello walk — result codes. */
 #define SNI_PARSE_INCOMPLETE (-1) /* need more peeked bytes */
-#define SNI_PARSE_FAIL_OPEN  0    /* not TLS / not ClientHello / no SNI ext */
+#define SNI_PARSE_FAIL_OPEN  0    /* not TLS / not ClientHello / malformed */
 #define SNI_PARSE_FOUND      1    /* sni_out filled */
+#define SNI_PARSE_NO_SNI     2    /* well-formed ClientHello, no SNI ext (D7) */
 
 /* Hand-rolled, bounded walk of a single-record TLS ClientHello looking for
  * the server_name (SNI) extension. `have` bytes have been peeked so far (may
@@ -422,7 +423,7 @@ static int parse_client_hello_sni(const unsigned char *buf, size_t have,
     size_t comp_len = buf[pos]; pos += 1;
     SNI_NEED(comp_len); pos += comp_len;
 
-    if (pos >= end) return SNI_PARSE_FAIL_OPEN;             /* no extensions block */
+    if (pos >= end) return SNI_PARSE_NO_SNI;                /* no extensions block */
 
     SNI_NEED(2);
     size_t ext_total = ((size_t)buf[pos] << 8) | buf[pos + 1]; pos += 2;
@@ -457,7 +458,7 @@ static int parse_client_hello_sni(const unsigned char *buf, size_t have,
         pos += ext_len;
     }
 #undef SNI_NEED
-    return SNI_PARSE_FAIL_OPEN;                             /* no SNI extension present */
+    return SNI_PARSE_NO_SNI;                                /* no SNI extension present */
 }
 
 #define SNI_PEEK_MAX 2048
@@ -470,14 +471,20 @@ static int parse_client_hello_sni(const unsigned char *buf, size_t have,
  * once an allowlisted hostname blesses an IP, a CONNECT to that same IP is
  * otherwise admitted regardless of what vhost it actually targets — on
  * shared-IP CDN hosting this reaches unauthorized tenants sharing the IP.
- * Fail-open (return 1) when no SNI is found or the bytes aren't parseable as
- * a single-record ClientHello within the peek budget — a hostname grant
- * doesn't imply the protocol is HTTPS, so this only narrows an
- * already-passing grant, never blocks something that worked before. When SNI
- * *is* parsed, checked against the full granted host-rule set (not just the
- * specific rule that authorized this connection) — mirrors how
- * bless_contains() already works at the IP level. */
-static int sni_check(const ProxyContext *ctx, int client_fd) {
+ * Fail-open (return 1) when the bytes aren't parseable as a single-record
+ * ClientHello within the peek budget — a hostname grant doesn't imply the
+ * protocol is HTTPS. One exception (D7): a *well-formed* ClientHello that
+ * omits the SNI extension is denied on sni_strict_port (443) — every modern
+ * HTTPS client sends SNI, so omitting it there is precisely the shape of a
+ * deliberate gate evasion, while ECH still presents an outer SNI and non-TLS
+ * protocols on 443 don't parse as a hello (still fail-open). RFC 6066
+ * IP-literal clients that legitimately skip SNI are covered by the exact-IP
+ * grant exemption upstream. When SNI *is* parsed, checked against the full
+ * granted host-rule set (not just the specific rule that authorized this
+ * connection) — mirrors how bless_contains() already works at the IP level.
+ * On deny (return 0) *deny_reason names the arm for the log line. */
+static int sni_check(const ProxyContext *ctx, int client_fd, uint16_t port,
+                     const char **deny_reason) {
     unsigned char buf[SNI_PEEK_MAX];
     size_t have = 0;
     struct timespec ts;
@@ -490,8 +497,18 @@ static int sni_check(const ProxyContext *ctx, int client_fd) {
         if (n > 0) have = (size_t)n;
 
         int rc = parse_client_hello_sni(buf, have, sni, sizeof(sni));
-        if (rc == SNI_PARSE_FOUND)
-            return host_match(ctx->host_rules, ctx->host_rule_count, sni);
+        if (rc == SNI_PARSE_FOUND) {
+            if (host_match(ctx->host_rules, ctx->host_rule_count, sni))
+                return 1;
+            *deny_reason = "sni_mismatch";
+            return 0;
+        }
+        if (rc == SNI_PARSE_NO_SNI) {
+            if (port != ctx->sni_strict_port)
+                return 1;
+            *deny_reason = "sni_absent";
+            return 0;
+        }
         if (rc == SNI_PARSE_FAIL_OPEN)
             return 1;
 
@@ -638,11 +655,12 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     /* Shared-IP CDN check (Q6): a hostname-authorized connection — whether
      * CONNECTed by name or by a hostname-blessed IP — is only as trustworthy
      * as the SNI it actually presents once the IP is shared across unrelated
-     * vhosts. Fail-open when unparseable/absent — this is a narrowing of an
-     * already-passing grant, not a new way to block traffic that worked
-     * before (a hostname grant doesn't imply HTTPS). */
-    if (sni_gate && !sni_check(ctx, client_fd)) {
-        LOG_WARN_("proxy deny host=%s reason=sni_mismatch", target);
+     * vhosts. Fail-open when unparseable — a hostname grant doesn't imply
+     * HTTPS — except a well-formed no-SNI hello on :443, denied per D7 (see
+     * sni_check). */
+    const char *sni_reason = NULL;
+    if (sni_gate && !sni_check(ctx, client_fd, port, &sni_reason)) {
+        LOG_WARN_("proxy deny host=%s reason=%s", target, sni_reason);
         close(remote_fd);
         close(client_fd);
         relay_release(ctx);
@@ -748,6 +766,7 @@ int proxy_bind(ProxyContext *ctx, const char *dir,
     ctx->host_count = host_count;
     ctx->deny_rules = deny_rules;  /* borrowed — hostname labels only */
     ctx->deny_count = deny_count;
+    ctx->sni_strict_port = 443;
 
     /* Partition grants into hostname rules vs CIDR/IP rules.
      * A grant containing '/' is a CIDR. A bare IP (parseable by inet_pton)

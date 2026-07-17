@@ -1,6 +1,11 @@
 #ifndef CCLAW_TOOL_SHELL_H
 #define CCLAW_TOOL_SHELL_H
 
+/* The shell_exec tool (SBX_SHELL tier): runs a command in the namespace
+ * sandbox via the --run-tool broker, with secret injection and the
+ * transparent credential proxy for egress.
+ */
+
 #include "types.h"      /* ShellSecret */
 #include "tools.h"
 #include "sandbox.h"

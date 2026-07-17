@@ -1,6 +1,11 @@
 #ifndef CCLAW_TYPES_H
 #define CCLAW_TYPES_H
 
+/* Foundational value types shared across modules: message roles, the
+ * Message/ToolCall/ToolResult shapes, StopReason, and ShellSecret. No
+ * behavior — just the vocabulary the rest of the code speaks.
+ */
+
 #include <stdint.h>
 #include <stddef.h>
 #include <time.h>

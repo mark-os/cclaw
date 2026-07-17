@@ -1,6 +1,11 @@
 #ifndef CCLAW_DB_H
 #define CCLAW_DB_H
 
+/* The cclaw.db data layer — sessions, entries, tool_calls, agents, and the
+ * rest of the durable state. State has one home (AGENTS.md); this is the
+ * API to it. Owns schema init + forward patching and the row-level helpers.
+ */
+
 #include "sqlite3.h"
 #include "types.h"
 #include <sys/types.h>

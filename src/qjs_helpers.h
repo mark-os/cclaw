@@ -1,6 +1,11 @@
 #ifndef CCLAW_QJS_HELPERS_H
 #define CCLAW_QJS_HELPERS_H
 
+/* Shared QuickJS runtime/context helpers: instruction-limit interrupts,
+ * promise resolution/microtask draining, and the warning-suppressed
+ * quickjs.h include. Common ground for every JS-hosting module.
+ */
+
 /* Suppress unused-parameter warnings from quickjs.h inline functions */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"

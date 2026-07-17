@@ -1,6 +1,11 @@
 #ifndef CCLAW_TOOLS_H
 #define CCLAW_TOOLS_H
 
+/* The tool registry — the dispatch table mapping tool name to handler,
+ * parameters schema, policy, and execution recipe (vehicle + sandbox tier).
+ * The spine every tool module registers into.
+ */
+
 #include "llm.h"
 #include "sqlite3.h"
 #include <stddef.h>

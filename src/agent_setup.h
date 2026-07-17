@@ -1,6 +1,11 @@
 #ifndef CCLAW_AGENT_SETUP_H
 #define CCLAW_AGENT_SETUP_H
 
+/* Assembles the per-agent runtime: builds the tool registry, the shared
+ * sandbox profile, secrets, and each tool's context, then tears them all
+ * down. One AgentSetup serves whichever agent is advancing.
+ */
+
 #include "tools.h"
 #include "tool_js.h"
 #include "tool_file.h"

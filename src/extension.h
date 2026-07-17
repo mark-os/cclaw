@@ -1,6 +1,11 @@
 #ifndef CCLAW_EXTENSION_H
 #define CCLAW_EXTENSION_H
 
+/* Extension support: draft discovery and DB-driven hook loading for the
+ * declarative extension model. Nothing registers by running — hooks load
+ * from the hooks table, evaluated in a fresh QuickJS context per dispatch.
+ */
+
 #include <sqlite3.h>
 #include "tool_js.h"
 #include "tools.h"

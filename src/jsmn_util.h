@@ -1,6 +1,10 @@
 #ifndef CCLAW_JSMN_UTIL_H
 #define CCLAW_JSMN_UTIL_H
 
+/* Inline jsmn token-walk helpers (skip-subtree, string compare). Used only
+ * in db-less corners — never on a path that has a db handle (AGENTS.md).
+ */
+
 #include "jsmn.h"
 #include <string.h>
 

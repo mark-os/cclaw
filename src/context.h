@@ -1,6 +1,11 @@
 #ifndef CCLAW_CONTEXT_H
 #define CCLAW_CONTEXT_H
 
+/* Request planning: decides which entries fit the model's context window
+ * and where to cut, using lightweight per-entry metadata (no content
+ * loaded). Feeds the payload builder.
+ */
+
 #include "types.h"
 #include "sqlite3.h"
 #include <stddef.h>

@@ -1,6 +1,10 @@
 #ifndef CCLAW_TOOL_CRON_H
 #define CCLAW_TOOL_CRON_H
 
+/* The cron_set / cron_list / cron_remove tools — an agent's interface to
+ * its own scheduled work, scoped to the calling agent.
+ */
+
 #include "tools.h"
 #include "sqlite3.h"
 #include <stdint.h>

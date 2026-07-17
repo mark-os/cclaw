@@ -1,6 +1,11 @@
 #ifndef CCLAW_TOOL_AGENT_H
 #define CCLAW_TOOL_AGENT_H
 
+/* The launch_agent tool: spawns sub-agents under hard depth/concurrency
+ * rails (agent_max_depth, per-parent in-flight ceiling). No queue — calls
+ * past the ceiling are rejected.
+ */
+
 #include "tools.h"
 #include "db.h"
 

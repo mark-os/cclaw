@@ -1,6 +1,11 @@
 #ifndef CCLAW_SECRET_SCAN_H
 #define CCLAW_SECRET_SCAN_H
 
+/* AC-based secret/DLP scanner: locates leaked credentials in tool output
+ * and user messages before they reach the context window, using the
+ * generated Aho-Corasick tables. Owns ScanFinding and the redactor.
+ */
+
 #include <stddef.h>
 
 #define SCAN_MAX_FINDINGS 32

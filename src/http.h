@@ -1,6 +1,10 @@
 #ifndef CCLAW_HTTP_H
 #define CCLAW_HTTP_H
 
+/* Blocking HTTP client — a thin libcurl wrapper used for LLM and channel
+ * requests. Owns the HttpResponse buffer and the response-size cap.
+ */
+
 #include <stddef.h>
 #include <stdint.h>
 

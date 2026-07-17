@@ -1,6 +1,11 @@
 #ifndef CCLAW_CRON_H
 #define CCLAW_CRON_H
 
+/* Cron schedule parsing and next-run computation — pure time math over the
+ * cron_jobs table's schedule columns (cron_expr / run_at / interval_s). No
+ * I/O; the daemon loop calls cron_next_run to decide when to fire.
+ */
+
 #include <stdint.h>
 #include "sqlite3.h"
 

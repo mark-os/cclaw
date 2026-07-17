@@ -35,7 +35,7 @@ void wake_close(void) {
 
 /* ── External FIFO ──────────────────────────────────────────────── */
 
-char *wake_fifo_path(const char *db_path) {
+static char *wake_fifo_path(const char *db_path) {
     if (!db_path) return NULL;
     size_t len = strlen(db_path);
     char *path = malloc(len + 6);

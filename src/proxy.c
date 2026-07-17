@@ -573,7 +573,14 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     }
     *colon = '\0';
     const char *target = preamble;
-    uint16_t port = (uint16_t)atoi(colon + 1);
+    char *pend = NULL;
+    long pval = strtol(colon + 1, &pend, 10);
+    if (pend == colon + 1 || *pend != '\0' || pval < 1 || pval > 65535) {
+        write(client_fd, "ERROR bad preamble\n", 19);
+        close(client_fd);
+        return;
+    }
+    uint16_t port = (uint16_t)pval;
 
     char resolved[INET6_ADDRSTRLEN];
     const char *dial;

@@ -26,8 +26,5 @@ typedef struct {
  * extension_list against reg. Returns 0 on success. */
 int tool_extension_register(ToolRegistry *reg, ToolExtensionCtx *ctx);
 
-/* "adds N tools, M hooks, ..." enumeration of a bundle's manifest for the
- * promote approval prompt. Heap; caller frees. */
-char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir);
 
 #endif

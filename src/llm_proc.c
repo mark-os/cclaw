@@ -24,6 +24,10 @@
 #define MAX_MODELS 16
 #define MAX_RETRIES 3          /* transient failures: attempts per model */
 #define MAX_TIMEOUT_RETRIES 1  /* timeouts burn minutes per attempt — one retry */
+/* Generous ceiling on any provider response body — a real completion is a few
+ * MB at most; this only bounds daemon OOM from a malicious/buggy provider
+ * (web_fetch/js_http already cap their own). */
+#define LLM_RESP_MAX (32u * 1024 * 1024)
 
 
 
@@ -471,6 +475,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             HttpRequestOpts opts = {
                 .url = url, .method = "POST", .headers = headers,
                 .body = req_body, .curl_handle = curl,
+                .max_response_bytes = LLM_RESP_MAX,
             };
             int status = http_do(&opts, &resp);
 
@@ -828,6 +833,7 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
     HttpRequestOpts opts = {
         .url = url, .method = "POST", .headers = headers,
         .body = body, .curl_handle = curl,
+        .max_response_bytes = LLM_RESP_MAX,
     };
     int status = http_do(&opts, &resp);
     free(body); free(url); free(auth);
@@ -1112,6 +1118,7 @@ int llm_transcribe(sqlite3 *db, CURL *curl, int64_t job_id) {
             HttpRequestOpts opts = {
                 .url = url, .method = "POST", .headers = headers,
                 .body = body, .curl_handle = curl,
+                .max_response_bytes = LLM_RESP_MAX,
             };
             int status = http_do(&opts, &resp);
             LOG_DEBUG_("transcribe: status=%d model=%s job=%lld",

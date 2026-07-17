@@ -5,6 +5,7 @@
 #include "db.h"
 #include "log.h"
 #include "wake.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,20 +29,28 @@ static int parse_field(const char *field, int min, int max, uint64_t *out) {
             p++;
             start = min; end = max;
         } else {
-            start = (int)strtol(p, (char **)&p, 10);
-            if (start < min || start > max) return -1;
+            /* Range-check the long before the int cast — on ERANGE strtol
+             * clamps to LONG_MIN/MAX and a blind cast is truncation. */
+            errno = 0;
+            long v = strtol(p, (char **)&p, 10);
+            if (errno == ERANGE || v < min || v > max) return -1;
+            start = (int)v;
             if (*p == '-') {
                 p++;
-                end = (int)strtol(p, (char **)&p, 10);
-                if (end < min || end > max) return -1;
+                errno = 0;
+                v = strtol(p, (char **)&p, 10);
+                if (errno == ERANGE || v < min || v > max) return -1;
+                end = (int)v;
             } else {
                 end = start;
             }
         }
         if (*p == '/') {
             p++;
-            step = (int)strtol(p, (char **)&p, 10);
-            if (step <= 0) return -1;
+            errno = 0;
+            long v = strtol(p, (char **)&p, 10);
+            if (errno == ERANGE || v <= 0 || v > max) return -1;
+            step = (int)v;
         }
         for (int i = start; i <= end; i += step)
             *out |= (1ULL << i);
@@ -75,7 +84,9 @@ int64_t cron_next_run(const char *cron_expr, int64_t after) {
     if (parse_field(fields[3], 1, 12, &months) != 0) return -1;
     if (parse_field(fields[4], 0, 6, &dows) != 0) return -1;
 
-    /* Start from after+60, rounded to minute boundary */
+    /* Start from after+60, rounded to minute boundary. The int64→time_t
+     * narrowing assumes 64-bit time_t — true on every target incl. armel
+     * (Debian Bookworm ships 64-bit time_t on 32-bit ARM). */
     time_t t = (time_t)(after + 60);
     t -= t % 60;
 

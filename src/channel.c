@@ -133,7 +133,7 @@ void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *te
 
 /* Is this channel_id one of the channel's admin_ids? Same comma/space
  * parse as channel_notify_admins above. */
-int channel_cid_is_admin(sqlite3 *db, const char *channel_name, const char *cid) {
+static int channel_cid_is_admin(sqlite3 *db, const char *channel_name, const char *cid) {
     char *admins = channel_config_get(db, channel_name, "admin_ids");
     if (!admins || !admins[0]) { free(admins); return 0; }
     int hit = 0;

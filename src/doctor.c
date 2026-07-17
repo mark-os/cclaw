@@ -7,6 +7,7 @@
 #include "http.h"
 #include "log.h"
 #include "types.h"
+#include "util.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -48,19 +49,6 @@ static void mask_secret(const char *secret, char *buf, size_t cap) {
     size_t len = strlen(secret);
     size_t show = len < 6 ? len : 6;
     snprintf(buf, cap, "%.*s...(len=%zu)", (int)show, secret, len);
-}
-
-/* resolve_db_path — duplicated from main.c (doctor runs before normal init) */
-static char *doctor_resolve_db_path(void) {
-    const char *env = getenv("CCLAW_DB_PATH");
-    if (env) return strdup(env);
-    const char *home = getenv("HOME");
-    if (home) {
-        size_t len = strlen(home);
-        char *p = malloc(len + sizeof("/.cclaw/cclaw.db"));
-        if (p) { sprintf(p, "%s/.cclaw/cclaw.db", home); return p; }
-    }
-    return strdup("cclaw.db");
 }
 
 /* ── Check 1: Version / Host ────────────────────────────────────── */
@@ -520,7 +508,7 @@ int doctor_main(void) {
 
     check_version();
 
-    char *db_path = doctor_resolve_db_path();
+    char *db_path = util_resolve_db_path();
     sqlite3 *db = NULL;
     check_db(db_path, &db);
 

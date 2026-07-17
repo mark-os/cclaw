@@ -96,4 +96,8 @@ void tools_free(ToolRegistry *reg);
  * bug — fail loudly rather than parse arguments. */
 char *tool_sandboxed_stub(const char *arguments, void *user_data);
 
+/* Formatted message for tool-handler returns (heap; caller frees). Truncates
+ * at 512 bytes — handler messages are short human-readable lines. */
+char *tool_errf(const char *fmt, ...);
+
 #endif

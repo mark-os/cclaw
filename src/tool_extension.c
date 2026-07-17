@@ -22,15 +22,6 @@ static int valid_name(const char *n) {
     return 1;
 }
 
-static char *msgf(const char *fmt, ...) {
-    char buf[512];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    return strdup(buf);
-}
-
 static char *sql_text(sqlite3 *db, const char *sql, const char *a1,
                       const char *a2, const char *a3);
 
@@ -38,7 +29,7 @@ static char *sql_text(sqlite3 *db, const char *sql, const char *a1,
 
 /* Enumerate a validated bundle's declared contents for the approval prompt:
  * "adds N tools, M hooks, ..." plus agent names/profiles. Heap; caller frees. */
-char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
+static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
     char mpath[2*PATH_MAX];
     snprintf(mpath, sizeof(mpath), "%s/extension.json", bundle_dir);
     char *manifest = util_read_file(mpath, NULL);
@@ -81,7 +72,7 @@ static char *tool_extension_promote_handler(const char *arguments, void *user_da
     /* Eager validation: a bundle that can't install never parks. */
     char *err = NULL;
     if (extension_manifest_validate(bundle, &err) != 0) {
-        char *m = msgf("error: promote failed: %s", err ? err : "unknown");
+        char *m = tool_errf("error: promote failed: %s", err ? err : "unknown");
         free(err);
         return m;
     }
@@ -130,11 +121,11 @@ static char *tool_extension_publish_handler(const char *arguments, void *user_da
     sqlite3_finalize(st);
     if (step != SQLITE_DONE) { free(name); return strdup("error: publish failed (db)"); }
     if (sqlite3_changes(ctx->db) == 0) {
-        char *m = msgf("error: extension '%s' not found or not owned by you", name);
+        char *m = tool_errf("error: extension '%s' not found or not owned by you", name);
         free(name);
         return m;
     }
-    char *m = msgf("published extension '%s'; other agents can now attach it.", name);
+    char *m = tool_errf("published extension '%s'; other agents can now attach it.", name);
     free(name);
     return m;
 }
@@ -164,7 +155,7 @@ static char *tool_extension_attach_handler(const char *arguments, void *user_dat
     int visible = (sqlite3_step(st) == SQLITE_ROW);
     sqlite3_finalize(st);
     if (!visible) {
-        char *m = msgf("error: extension '%s' is not published and not owned by you", name);
+        char *m = tool_errf("error: extension '%s' is not published and not owned by you", name);
         free(name);
         return m;
     }
@@ -182,7 +173,7 @@ static char *tool_extension_attach_handler(const char *arguments, void *user_dat
     int step = sqlite3_step(st);
     sqlite3_finalize(st);
     if (step != SQLITE_DONE) { free(name); return strdup("error: attach failed (db)"); }
-    char *m = msgf("attached extension '%s' to agent '%s'; its tools are callable "
+    char *m = tool_errf("attached extension '%s' to agent '%s'; its tools are callable "
                 "once granted (attach does not grant — use request_config).",
                 name, ctx->agent_name);
     free(name);
@@ -287,12 +278,12 @@ static char *tool_extension_fork_handler(const char *arguments, void *user_data)
         sqlite3_finalize(s);
     }
     if (!src[0]) {
-        char *m = msgf("error: extension '%s' is not registered", name);
+        char *m = tool_errf("error: extension '%s' is not registered", name);
         free(name); free(as);
         return m;
     }
     if (!visible) {
-        char *m = msgf("error: extension '%s' is not visible to you "
+        char *m = tool_errf("error: extension '%s' is not visible to you "
                        "(not published or yours)", name);
         free(name); free(as);
         return m;
@@ -303,12 +294,12 @@ static char *tool_extension_fork_handler(const char *arguments, void *user_data)
     snprintf(dest, sizeof(dest), "%s/extensions/%s", ws, as);
     struct stat st;
     if (stat(dest, &st) == 0) {
-        char *m = msgf("error: draft '%s' already exists at extensions/%s", as, as);
+        char *m = tool_errf("error: draft '%s' already exists at extensions/%s", as, as);
         free(name); free(as);
         return m;
     }
     if (util_mkdir_p(dest) != 0) {
-        char *m = msgf("error: cannot create %s", dest);
+        char *m = tool_errf("error: cannot create %s", dest);
         free(name); free(as);
         return m;
     }
@@ -316,7 +307,7 @@ static char *tool_extension_fork_handler(const char *arguments, void *user_data)
     /* Flat copy of regular files (bundles are flat: handler .qjs + json). */
     DIR *d = opendir(src);
     if (!d) {
-        char *m = msgf("error: cannot read source bundle %s", src);
+        char *m = tool_errf("error: cannot read source bundle %s", src);
         free(name); free(as);
         return m;
     }
@@ -332,7 +323,7 @@ static char *tool_extension_fork_handler(const char *arguments, void *user_data)
     }
     closedir(d);
     if (copied == 0) {
-        char *m = msgf("error: source bundle %s had no files", src);
+        char *m = tool_errf("error: source bundle %s had no files", src);
         free(name); free(as);
         return m;
     }
@@ -342,7 +333,7 @@ static char *tool_extension_fork_handler(const char *arguments, void *user_data)
      * (extension_install requires one), so a missing one is an error. */
     char *manifest = read_manifest(dest);
     if (!manifest) {
-        char *m = msgf("error: source bundle %s has no extension.json", src);
+        char *m = tool_errf("error: source bundle %s has no extension.json", src);
         free(name); free(as);
         return m;
     }
@@ -357,7 +348,7 @@ static char *tool_extension_fork_handler(const char *arguments, void *user_data)
         free(rewritten);
     }
 
-    char *m = msgf("forked extension '%s' into workspace draft extensions/%s "
+    char *m = tool_errf("forked extension '%s' into workspace draft extensions/%s "
                 "(%d files). Edit it there; test a channel fork offline with "
                 "`cclaw --channel <name> --harness <scenario.json>`; then "
                 "extension_promote name='%s' registers it under your ownership.",

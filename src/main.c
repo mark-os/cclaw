@@ -2753,18 +2753,6 @@ static void reap_children(void) {
 
 /* ── Helpers ────────────────────────────────────────────────────── */
 
-static char *resolve_db_path(void) {
-    const char *env = getenv("CCLAW_DB_PATH");
-    if (env) return strdup(env);
-    const char *home = getenv("HOME");
-    if (home) {
-        size_t len = strlen(home);
-        char *p = malloc(len + sizeof("/.cclaw/cclaw.db"));
-        if (p) { sprintf(p, "%s/.cclaw/cclaw.db", home); return p; }
-    }
-    return strdup("cclaw.db");
-}
-
 static void print_usage(void) {
     printf("usage: cclaw [options]\n"
            "       cclaw install [--system]    set up a long-lived daemon (systemd unit)\n"
@@ -3460,7 +3448,7 @@ done:
  * real DB with the schema-generation guard + ensure-schema, so the verbs
  * work on a fresh box before any agent run has initialized the DB. */
 static sqlite3 *verb_db_open(void) {
-    char *db_path = resolve_db_path();
+    char *db_path = util_resolve_db_path();
     if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return NULL; }
     sqlite3 *db = db_open(db_path);
     if (!db) { fprintf(stderr, "error: cannot open %s\n", db_path); free(db_path); return NULL; }
@@ -3557,7 +3545,7 @@ static int secret_bind_main(int argc, char *argv[]) {
  * (unless pre-seeded with `cclaw secret-bind`), so its first use always
  * parks — the same fail-closed rule as env-collected secrets. */
 static int secret_main(int argc, char *argv[]) {
-    char *db_path = resolve_db_path();
+    char *db_path = util_resolve_db_path();
     if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return 1; }
     sqlite3 *db = verb_db_open();
     if (!db) { free(db_path); return 1; }
@@ -4062,7 +4050,7 @@ int main(int argc, char *argv[]) {
 
     /* ── Open DB ─────────────────────────────────────────────────── */
     db_configure_logging();   /* before the first db_open (sqlite3_initialize) */
-    char *db_path = resolve_db_path();
+    char *db_path = util_resolve_db_path();
     util_ensure_parent_dir(db_path);
     g_db = db_open(db_path);
     if (!g_db) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }

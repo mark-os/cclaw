@@ -7,15 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static char *msgf(const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    char *s = NULL;
-    if (vasprintf(&s, fmt, ap) < 0) s = NULL;
-    va_end(ap);
-    return s ? s : strdup("error: out of memory");
-}
-
 /* Does a route for (channel, chat_id) resolve to this agent — directly by
  * agent_name, or through a pinned session owned by the agent? Exact chat_id
  * only: a '*' wildcard routes inbound traffic, it does not hand out
@@ -87,7 +78,7 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
     /* Routes are the allowlist — default-deny. Reaching a new target is a
      * privileged act: an operator `cclaw route add`, never implicit. */
     if (!send_target_allowed(ctx->db, ctx->agent_name, channel, chat_id)) {
-        char *m = msgf("error: no route for (%s, %s) resolves to you — "
+        char *m = tool_errf("error: no route for (%s, %s) resolves to you — "
                        "channel_send targets need an operator route "
                        "(cclaw route add). Use action='list' to see yours.",
                        channel, chat_id);
@@ -141,7 +132,7 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
     }
     if (ctx->db_path) channel_outbox_wake(ctx->db_path, channel);
     free(channel); free(chat_id); free(message);
-    return msgf("queued, outbox id %lld", (long long)oid);
+    return tool_errf("queued, outbox id %lld", (long long)oid);
 }
 
 static const char *CHANNEL_SEND_PARAMS =

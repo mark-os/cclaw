@@ -70,7 +70,7 @@ Key consequences:
 daemon poll loop
   └─ fork + execve  cclaw --run-tool   ← THE one mandatory exec (sterilize locks)
        run_tool_main():
-         verify_clean()                ← shared: no key, fd-set=={0,1,2,3}, no DB
+         run_tool_verify_clean()                ← shared: no key, fd-set=={0,1,2,3}, no DB
          read + parse request blob from fd 3
          desc = tier_descriptor(blob.tier)   ← {skip_pid_ns, needs_proxy, inner_exec, run_fn}
          if !desc.needs_proxy:               // FILE
@@ -85,8 +85,8 @@ daemon poll loop
 ```
 
 `--run-tool` intercept is at the **pre-init position** (top of `main`, before any
-DB/config/key init — the `--qjs_eval` site, NOT the `--channel` site). This is
-what makes "no key, no DB" true by construction; `verify_clean` then proves it.
+DB/config/key init — NOT the `--channel` site, which runs after init). This is
+what makes "no key, no DB" true by construction; `run_tool_verify_clean` then proves it.
 
 ---
 
@@ -214,7 +214,7 @@ Fail-closed (`_exit` on violation), production gate not debug-only:
 1. **FD-SET**: every fd above `{0,1,2,3}` is blanket-`close()`d (4..`OPEN_MAX`)
    immediately on entry — this *establishes* the invariant rather than auditing
    it, so a daemon fd that leaked past O_CLOEXEC is closed, not merely detected.
-2. **KEY-ABSENT**: `verify_clean()` asserts `db_secret_key_loaded() == 0`.
+2. **KEY-ABSENT**: `run_tool_verify_clean()` asserts `db_secret_key_loaded() == 0`.
 3. **NO-DB**: no DB handle open (true by construction at the pre-init intercept;
    the key-absent check is its observable proxy).
 
@@ -258,7 +258,7 @@ and no DB. Only the proxy config + request blob cross fd 3.
    `tool_js_tier_run` (QuickJS eval, `http_request` via curl + HTTP_PROXY) on
    the same `serve_network_child` path. Dispatch in `src/main.c` for both
    `js_eval` and JS-defined extension tools routes through the `SBX_JS` tier.
-4. file tier already on the exec'd path; shares `verify_clean` and the
+4. file tier already on the exec'd path; shares `run_tool_verify_clean` and the
    tier-descriptor dispatch (no separate code path).
 
 ---

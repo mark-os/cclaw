@@ -7,8 +7,10 @@ where every outbound connection — across every redirect hop and every
 federated-login fan-out — is decided.
 
 This note specifies the decision function behind the proxy's per-connection
-check. It **replaces** today's exact-string `host_allowed()` with a staged
-pipeline and a richer rule grammar. It does **not** change the proxy's
+check. It **replaced** the old exact-string `host_allowed()` (deleted; the
+staged pipeline landed as `host_decide()` in `src/proxy.c` over the
+`host_match()`/CIDR primitives in `src/host_match.c`) with a richer rule
+grammar. It does **not** change the proxy's
 architecture, lifetime, bless set, or resolve-then-dial-literal anti-TOCTOU
 behaviour — those are already correct and are reused as-is.
 
@@ -20,8 +22,8 @@ behaviour — those are already correct and are reused as-is.
   `(host, port)`.
 - Sole egress route: the netns gives sandboxed children no other path out, so
   a program cannot route around the decision.
-- The decision function (`decide()`) replaces the current `host_allowed()`
-  exact-match call sites.
+- The decision function (`host_decide()`, this note's `decide()`) replaced
+  the old `host_allowed()` exact-match call sites.
 
 What stays exactly as it is today:
 
@@ -33,7 +35,7 @@ What stays exactly as it is today:
   DNS-rebinding window and is **not** modified — the new pipeline feeds it.
 - **Per-call proxy lifetime, single-threaded bind-before-fork.** Untouched.
 - **The UDS preamble + net_shim CONNECT path.** Untouched — only the decision
-  behind `host_allowed()` changes.
+  function changed.
 
 ---
 

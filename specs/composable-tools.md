@@ -37,7 +37,7 @@ LLM calls tool
   → main process dispatches (SBX_JS tier)
   → secret interpolation in parent (pre-serialization)
   → serialize RunToolReq blob → fork+execve cclaw --run-tool
-  → broker: verify_clean, parse blob, tier_descriptor(RUNTOOL_TIER_JS)
+  → broker: run_tool_verify_clean, parse blob, tier_descriptor(RUNTOOL_TIER_JS)
   → serve_network_child: proxy_bind, fork inner child
     → inner child: namespace sandbox, tool_js_tier_run(q)
       → tool_js_eval_handler: QuickJS eval of handler file

@@ -1,7 +1,7 @@
 #ifndef CCLAW_SECRET_INTERP_H
 #define CCLAW_SECRET_INTERP_H
 
-#include "tool_shell.h"  /* ShellSecret */
+#include "types.h"  /* ShellSecret */
 #include <stddef.h>
 
 /* Replace {{SECRET:name}} placeholders with actual secret values.

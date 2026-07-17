@@ -2,6 +2,7 @@
  * store it encrypted, mask it out of the result the context sees. */
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "tool_shell.h"   /* shell_secrets_free */
 #include "secret.h"
 #include "secret_capture.h"
 #include "test_util.h"

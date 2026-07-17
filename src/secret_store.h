@@ -1,7 +1,7 @@
 #ifndef CCLAW_SECRET_STORE_H
 #define CCLAW_SECRET_STORE_H
 
-#include "tool_shell.h"   /* ShellSecret */
+#include "types.h"   /* ShellSecret */
 #include <sqlite3.h>
 #include <stddef.h>
 

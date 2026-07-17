@@ -1,17 +1,12 @@
 #ifndef CCLAW_TOOL_SHELL_H
 #define CCLAW_TOOL_SHELL_H
 
+#include "types.h"      /* ShellSecret */
 #include "tools.h"
 #include "sandbox.h"
 #include "run_tool.h"
 
 #define TOOL_SHELL_DEFAULT_TIMEOUT 30
-
-/* Secret name/value pair for shell injection + output masking */
-typedef struct {
-    char *name;   /* e.g. "GITHUB_TOKEN" (without CCLAW_SECRET_ prefix) */
-    char *value;  /* plaintext secret value */
-} ShellSecret;
 
 /* Config passed as user_data to shell handler */
 typedef struct {

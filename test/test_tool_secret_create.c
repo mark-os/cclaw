@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tool_secret_create.h"
 #include "db.h"
+#include "tool_shell.h"   /* shell_secrets_free */
 #include "secret.h"
 #include "test_util.h"
 #include <assert.h>

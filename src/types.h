@@ -33,6 +33,12 @@ typedef enum {
     LOG_LEVEL_TRACE         /* + full req/resp JSON */
 } LogLevel;
 
+/* Secret name/value pair for injection into tool children + output masking */
+typedef struct {
+    char *name;   /* e.g. "GITHUB_TOKEN" (without CCLAW_SECRET_ prefix) */
+    char *value;  /* plaintext secret value */
+} ShellSecret;
+
 /* Tool call within an assistant message */
 typedef struct {
     char *id;

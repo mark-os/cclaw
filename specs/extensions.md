@@ -226,7 +226,7 @@ grants inside the install transaction (the promote approval enumerated them);
 ## Tool Handler Contract
 
 A tool handler is a JS file. It runs in a **forked, sandboxed child** (`cclaw
---qjs_eval`) — one fork+exec per call, no shared process state. The child wraps the
+--run-tool`, JS tier) — one fork+exec per call, no shared process state. The child wraps the
 handler file as a **function body** with the call's `args` (a parsed object) in
 scope — roughly `(function(args){ <file> })(args)` — so the handler must `return`
 its result (a bare trailing expression evaluates to `undefined`). The returned
@@ -334,7 +334,7 @@ loop; the await suspends the JS continuation, never the thread) or
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `channel.emit` | `(type, payload_json [, external_id])` | Insert a `channel_events` row + `daemon_wake()`. The daemon's routing gate delivers the event to the appropriate agent inbox. |
+| `channel.emit` | `(type, payload_json [, external_id])` | Insert a `channel_events` row and wake the daemon (`channel_emit()` → wake FIFO). The daemon's routing gate delivers the event to the appropriate agent inbox. |
 | `channel.send` | `(request)` | Queue an outbound HTTP request (fire-and-forget). The request object supports `{url, method?, body?, headers?, timeout?, outbox_id?, final?}`. When `final` is truthy and the send succeeds (2xx), the outbox row is auto-acked. |
 | `channel.http` | `(request)` → `Promise<{status, body, path, bytes, error}>` | Channel-initiated HTTP. Always resolves (transport failure = status 0 + error, never rejects). Request shape: `{url, method?, body?, headers?, timeout?, save_to?}`. `save_to: "name.ext"` streams the response body to the channel's media spool (`<db_dir>/media/<channel>/`) and resolves with `path` instead of `body` — payload bytes never enter the JS heap. |
 | `channel.getConfig` | `(key)` → `string \| null` | Read a config-registry key. Resolution is `<ext>.<key>` (e.g. calling `getConfig("bot_token")` on the `telegram` extension reads the registry key `telegram.bot_token`). Read-only. |

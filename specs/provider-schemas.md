@@ -540,9 +540,13 @@ total = input + output + cacheRead + cacheWrite  (computed)
 ## 4. CClaw Parser Design
 
 ### Current State
-Single `sse_process_line()` with auto-detection (strstr-based, fragile).
+No streaming: LLM requests are blocking calls, and the complete response JSON
+is parsed with SQLite JSON1 in `src/llm_proc.c` (the old `sse_process_line()`
+SSE parser is gone). The refactor below predates that move and is kept for
+reference only — its jsmn-based approach is also superseded by the "one JSON
+parser where a db handle exists" rule (AGENTS.md).
 
-### Proposed Refactor
+### Proposed Refactor (historical)
 Per-provider parsers using jsmn token traversal:
 
 ```c

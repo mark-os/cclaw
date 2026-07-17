@@ -87,7 +87,7 @@ Implemented via `LOG_*` macros in `include/log.h`. All output → stderr → pip
 | trace | `trace` | + full req/resp JSON | stderr → syslog/terminal |
 
 `CCLAW_LOG_LEVEL` env var, injected at fork (no DB key).
-CLI `--log-level=trace` enables full req/resp JSON. CLI `--verbose` tees stderr pipe to terminal.
+CLI `--log-level=trace` enables full req/resp JSON. CLI `-v`/`--debug` tees stderr pipe to terminal.
 
 Format: `HH:MM:SS.mmm [LEVEL] message\n` — parseable by syslog and grep.
 
@@ -98,7 +98,7 @@ Format: `HH:MM:SS.mmm [LEVEL] message\n` — parseable by syslog and grep.
 - `pipe(stdout)` → /dev/null (response delivered from DB post-exit)
 
 **CLI mode:**
-- `pipe(stderr)` → parent drains → tee to terminal (if `--verbose` or log_level ≥ debug)
+- `pipe(stderr)` → parent drains → tee to terminal (if log_level ≥ debug, e.g. `-v`/`--debug`)
 - stdout: inherited by child (goes directly to terminal for streaming display)
 
 **Design principle:** stderr = structured logs (daemon persists via syslog). stdout = user content (display only).

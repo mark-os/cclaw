@@ -3,7 +3,6 @@
 
 #include "sqlite3.h"
 #include "types.h"
-#include "tool_shell.h"   /* ShellSecret */
 #include <sys/types.h>
 
 /* Install the process-global SQLite error log handler. Must be called once,

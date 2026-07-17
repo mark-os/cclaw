@@ -2,6 +2,7 @@
  * the per-call snapshot that merges them with the env-collected base. */
 #define _POSIX_C_SOURCE 200809L
 #include "db.h"
+#include "tool_shell.h"   /* shell_secrets_free */
 #include "secret.h"
 #include "secret_store.h"
 #include "validate.h"

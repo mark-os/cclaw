@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "secret_store.h"
 #include "db.h"
+#include "tool_shell.h"   /* shell_secrets_free */
 #include <stdlib.h>
 #include <string.h>
 

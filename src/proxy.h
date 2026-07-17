@@ -68,6 +68,11 @@ typedef struct {
     int contacted_count;                  /* guarded by blessed_mu */
     char *denied[PROXY_CONTACTED_MAX];    /* dedup'd denied targets (owned) */
     int denied_count;                     /* guarded by blessed_mu */
+    unsigned short sni_strict_port; /* port where a parsed ClientHello lacking
+                                       SNI is denied (D7: modern HTTPS always
+                                       sends SNI; omitting it is the trivial
+                                       gate evasion). 443 by default; tests
+                                       point it at a loopback sink port. */
 } ProxyContext;
 
 /* Bind + listen on a per-call UDS at <dir>/.proxy.<pid>.sock (dir = the agent

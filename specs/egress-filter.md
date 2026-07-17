@@ -294,10 +294,16 @@ same `decide()` across every redirect hop. Therefore:
   is exempt (the operator vouched for the address itself — the same
   exact-vs-covering distinction as the metadata carve-out); a covering CIDR
   grant does not lift the gate, it authorizes reaching a range, not a
-  particular vhost identity. Fallback: fails open (relay proceeds)
-  on absent/unparseable SNI — non-TLS traffic, a ClientHello that doesn't fit
-  the peek budget, or non-SNI TLS all pass through unaffected, since a
-  hostname grant never implied the protocol was HTTPS. Match rule: when SNI
+  particular vhost identity. Fallback: fails open (relay proceeds) on
+  unparseable SNI — non-TLS traffic or a ClientHello that doesn't fit the
+  peek budget passes through unaffected, since a hostname grant never implied
+  the protocol was HTTPS. One exception (D7, resolved 2026-07-17): a
+  **well-formed ClientHello that omits the SNI extension is denied on :443**
+  (`sni_strict_port`, log reason `sni_absent`) — every modern HTTPS client
+  sends SNI, so omitting it on 443 is exactly the trivial-evasion shape;
+  ECH still presents an outer SNI, and RFC 6066 IP-literal clients are
+  covered by the exact-IP grant exemption. Other ports keep failing open on
+  a no-SNI hello. Match rule: when SNI
   *is* parsed, checked against the full granted host-rule set via
   `host_match()`, not just the specific rule that authorized this connection
   — mirrors how `bless_contains()` already works at the IP level (a suffix

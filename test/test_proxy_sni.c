@@ -111,6 +111,40 @@ static size_t build_client_hello(const char *sni, unsigned char *out, size_t cap
     return (size_t)(p - out);
 }
 
+/* Build a well-formed single-record ClientHello with no SNI. with_ext=0
+ * omits the extensions block entirely; with_ext=1 includes one non-SNI
+ * extension (padding) — the two distinct no-SNI shapes the parser reports. */
+static size_t build_client_hello_no_sni(int with_ext, unsigned char *out, size_t cap) {
+    size_t ext_len = with_ext ? 4 + 4 : 0;   /* padding ext: type+len+4 zeros */
+    size_t body_len = 2 + 32 + 1 + (2 + 2) + (1 + 1) + (with_ext ? 2 + ext_len : 0);
+    size_t hs_len = 4 + body_len;
+    size_t rec_len = 5 + hs_len;
+    assert(rec_len <= cap);
+
+    unsigned char *p = out;
+    *p++ = 0x16; *p++ = 0x03; *p++ = 0x03;
+    put_u16(p, hs_len); p += 2;
+
+    *p++ = 0x01;
+    put_u24(p, body_len); p += 3;
+
+    *p++ = 0x03; *p++ = 0x03;
+    memset(p, 0, 32); p += 32;
+    *p++ = 0x00;                                    /* session_id_len = 0 */
+    put_u16(p, 2); p += 2;
+    *p++ = 0x00; *p++ = 0x2f;
+    *p++ = 0x01;
+    *p++ = 0x00;
+
+    if (with_ext) {
+        put_u16(p, ext_len); p += 2;                /* extensions total length */
+        put_u16(p, 0x0015); p += 2;                 /* extension type: padding */
+        put_u16(p, 4); p += 2;
+        memset(p, 0, 4); p += 4;
+    }
+    return (size_t)(p - out);
+}
+
 /* Loopback "remote" sink: accepts one connection, records whatever bytes
  * arrive (or none, if the proxy refuses the relay before splicing). */
 static int sink_listen(int *port_out) {
@@ -407,6 +441,133 @@ static void test_sni_numeric_exact_grant_exempt(void) {
     printf("  PASS: exact-IP grant exempt from the numeric SNI gate\n");
 }
 
+static void test_no_sni_hello_denied_on_strict_port(void) {
+    /* D7: a well-formed ClientHello that omits the SNI extension is denied on
+     * the strict port (443 in production; pointed at the sink here) — omitting
+     * SNI is the trivial evasion of the vhost check, and every modern HTTPS
+     * client sends it. No-extensions-block shape. */
+    int port;
+    int lfd = sink_listen(&port);
+    struct sink_result res = {0, 0};
+    struct sink_arg sarg = { lfd, &res };
+    pthread_t th;
+    pthread_create(&th, NULL, sink_once, &sarg);
+
+    char *hosts[] = {"localhost", "127.0.0.0/8"};
+    ProxyContext ctx;
+    assert(proxy_start(&ctx, tmpdir, hosts, 2) == 0);
+    ctx.sni_strict_port = (unsigned short)port;
+
+    int fd = uds_connect(proxy_sock_path(&ctx));
+    assert(fd >= 0);
+    char req[64];
+    int rn = snprintf(req, sizeof(req), "localhost:%d\n", port);
+    assert(write(fd, req, (size_t)rn) == rn);
+
+    char resp[64];
+    int n = read_line(fd, resp, sizeof(resp));
+    assert(n > 0);
+    assert(strncmp(resp, "OK", 2) == 0);
+
+    unsigned char hello[512];
+    size_t hlen = build_client_hello_no_sni(/*with_ext=*/0, hello, sizeof(hello));
+    write(fd, hello, hlen);
+
+    char buf[16];
+    ssize_t rd = read(fd, buf, sizeof(buf));
+    assert(rd == 0 || (rd < 0 && errno == ECONNRESET));
+    close(fd);
+
+    pthread_join(th, NULL);
+    assert(res.accepted == 1);
+    assert(res.got_bytes == 0);   /* refused before any relay */
+
+    proxy_stop(&ctx);
+    close(lfd);
+    printf("  PASS: no-SNI ClientHello denied on strict port (D7)\n");
+}
+
+static void test_no_sni_hello_failopen_off_strict_port(void) {
+    /* Off the strict port a no-SNI hello keeps failing open — the D7 rule is
+     * scoped to :443 where HTTPS-with-SNI is the only realistic traffic.
+     * Extensions-present-without-server_name shape (the other parser path). */
+    int port;
+    int lfd = sink_listen(&port);
+    struct sink_result res = {0, 0};
+    struct sink_arg sarg = { lfd, &res };
+    pthread_t th;
+    pthread_create(&th, NULL, sink_once, &sarg);
+
+    char *hosts[] = {"localhost", "127.0.0.0/8"};
+    ProxyContext ctx;
+    assert(proxy_start(&ctx, tmpdir, hosts, 2) == 0);
+    /* sni_strict_port stays 443 ≠ the ephemeral sink port */
+
+    int fd = uds_connect(proxy_sock_path(&ctx));
+    assert(fd >= 0);
+    char req[64];
+    int rn = snprintf(req, sizeof(req), "localhost:%d\n", port);
+    assert(write(fd, req, (size_t)rn) == rn);
+
+    char resp[64];
+    int n = read_line(fd, resp, sizeof(resp));
+    assert(n > 0);
+    assert(strncmp(resp, "OK", 2) == 0);
+
+    unsigned char hello[512];
+    size_t hlen = build_client_hello_no_sni(/*with_ext=*/1, hello, sizeof(hello));
+    assert(write(fd, hello, hlen) == (ssize_t)hlen);
+
+    pthread_join(th, NULL);
+    assert(res.accepted == 1);
+    assert(res.got_bytes == 1);   /* fail-open: relayed through */
+
+    close(fd);
+    proxy_stop(&ctx);
+    close(lfd);
+    printf("  PASS: no-SNI ClientHello fails open off the strict port\n");
+}
+
+static void test_non_tls_failopen_on_strict_port(void) {
+    /* D7 denies only a *well-formed hello* without SNI — bytes that don't
+     * parse as a ClientHello at all stay fail-open even on the strict port
+     * (a hostname grant doesn't imply the protocol is HTTPS). */
+    int port;
+    int lfd = sink_listen(&port);
+    struct sink_result res = {0, 0};
+    struct sink_arg sarg = { lfd, &res };
+    pthread_t th;
+    pthread_create(&th, NULL, sink_once, &sarg);
+
+    char *hosts[] = {"localhost", "127.0.0.0/8"};
+    ProxyContext ctx;
+    assert(proxy_start(&ctx, tmpdir, hosts, 2) == 0);
+    ctx.sni_strict_port = (unsigned short)port;
+
+    int fd = uds_connect(proxy_sock_path(&ctx));
+    assert(fd >= 0);
+    char req[64];
+    int rn = snprintf(req, sizeof(req), "localhost:%d\n", port);
+    assert(write(fd, req, (size_t)rn) == rn);
+
+    char resp[64];
+    int n = read_line(fd, resp, sizeof(resp));
+    assert(n > 0);
+    assert(strncmp(resp, "OK", 2) == 0);
+
+    const char *plain = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    assert(write(fd, plain, strlen(plain)) == (ssize_t)strlen(plain));
+
+    pthread_join(th, NULL);
+    assert(res.accepted == 1);
+    assert(res.got_bytes == 1);   /* fail-open: relayed through */
+
+    close(fd);
+    proxy_stop(&ctx);
+    close(lfd);
+    printf("  PASS: non-TLS bytes fail open even on the strict port\n");
+}
+
 int main(void) {
     TEST_INIT();
     alarm(30);
@@ -419,6 +580,9 @@ int main(void) {
     test_sni_numeric_blessed_gated();
     test_sni_numeric_blessed_match();
     test_sni_numeric_exact_grant_exempt();
+    test_no_sni_hello_denied_on_strict_port();
+    test_no_sni_hello_failopen_off_strict_port();
+    test_non_tls_failopen_on_strict_port();
 
     cleanup_tmpdir();
     printf("All proxy SNI tests passed.\n");

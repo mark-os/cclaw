@@ -2,6 +2,7 @@
 #include "cclaw.h"
 #include "db.h"
 #include "config_registry.h"
+#include "util.h"
 #include "test_util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -347,6 +348,78 @@ static void test_schema_state(void) {
     printf("  PASS test_schema_state\n");
 }
 
+/* Canonical table shape: "table.column:type" lines, sorted. Views/indexes
+ * excluded — the patch contract is about table shape. */
+static char *schema_shape(sqlite3 *db) {
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT group_concat(line, char(10) ORDER BY line) FROM ("
+        "  SELECT m.name || '.' || ti.name || ':' || ti.type AS line"
+        "  FROM sqlite_master m JOIN pragma_table_info(m.name) ti"
+        "  WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%')",
+        -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    char *shape = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    assert(shape != NULL);
+    return shape;
+}
+
+/* Apply schema_patches[] to a real v29-shaped DB (frozen fixture — never a
+ * current DB with columns dropped) and require the result to match a fresh
+ * current DB, table for table, column for column. */
+static void test_schema_patch_application(void) {
+    const char *old_path = "/tmp/test_cclaw_schema_patch_old.sqlite";
+    const char *new_path = "/tmp/test_cclaw_schema_patch_new.sqlite";
+    char junk[192];
+    const char *suffixes[] = { "", "-wal", "-shm", ".v29.bak" };
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", old_path, suffixes[i]); unlink(junk);
+        snprintf(junk, sizeof(junk), "%s%s", new_path, suffixes[i]); unlink(junk);
+    }
+
+    size_t sql_len = 0;
+    char *fixture = util_read_file("test/fixtures/schema_v29.sql", &sql_len);
+    assert(fixture != NULL && sql_len > 0);
+
+    sqlite3 *old_db = db_open(old_path);
+    assert(old_db != NULL);
+    char *err = NULL;
+    assert(sqlite3_exec(old_db, fixture, NULL, NULL, &err) == SQLITE_OK);
+    free(fixture);
+    set_user_version(old_db, 29);
+    assert(db_schema_state(old_db, NULL) == DB_SCHEMA_UPGRADABLE);
+
+    assert(db_schema_compat(old_db) == 1);   /* patches applied */
+    int uv = 0;
+    assert(db_schema_state(old_db, &uv) == DB_SCHEMA_CURRENT);
+    assert(uv == CCLAW_SCHEMA_VERSION);
+
+    /* insurance snapshot written before the first patch, kept after */
+    snprintf(junk, sizeof(junk), "%s.v29.bak", old_path);
+    assert(access(junk, F_OK) == 0);
+
+    sqlite3 *new_db = db_open(new_path);
+    assert(new_db != NULL && db_ensure_schema(new_db) == 0);
+
+    char *old_shape = schema_shape(old_db);
+    char *new_shape = schema_shape(new_db);
+    if (strcmp(old_shape, new_shape) != 0) {
+        fprintf(stderr, "patched v29 shape != fresh v%d shape\n-- patched:\n%s\n-- fresh:\n%s\n",
+                CCLAW_SCHEMA_VERSION, old_shape, new_shape);
+        assert(0);
+    }
+    free(old_shape); free(new_shape);
+
+    db_close(old_db);
+    db_close(new_db);
+    for (size_t i = 0; i < 4; i++) {
+        snprintf(junk, sizeof(junk), "%s%s", old_path, suffixes[i]); unlink(junk);
+        snprintf(junk, sizeof(junk), "%s%s", new_path, suffixes[i]); unlink(junk);
+    }
+    printf("  PASS test_schema_patch_application\n");
+}
+
 static void test_rate_limit_and_cost(void) {
     const char *path = "/tmp/test_cclaw_db_budget.sqlite";
     unlink(path);
@@ -396,6 +469,7 @@ int main(void) {
     test_prune_outbox();
     test_free_mb();
     test_schema_state();
+    test_schema_patch_application();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;

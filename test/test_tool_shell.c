@@ -39,6 +39,10 @@ static void test_basic_command(void) {
 static void test_default_shell_is_sh(void) {
     /* dash (the typical /bin/sh) rejects [[ ]] as a syntax error; bash
      * accepts it. Default (shell_path unset) must behave like /bin/sh. */
+    if (system("/bin/sh -c '[[ 1 -eq 1 ]]' 2>/dev/null") == 0) {
+        printf("  SKIP test_default_shell_is_sh (/bin/sh is bash — [[ ]] can't discriminate)\n");
+        return;
+    }
     ShellToolReq r = SHELL_REQ_DEFAULTS;
     r.command = "[ -x /bin/bash ] || exit 99; [[ 1 -eq 1 ]] && echo yes";
     r.workspace = workspace;

@@ -2041,8 +2041,15 @@ int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
         "UPDATE agents SET created_by=?1 WHERE created_by=?2",
         "UPDATE grants SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE agent_extensions SET agent_name=?1 WHERE agent_name=?2",
+        /* owned (per-agent) extension tools — else the payload's
+         * "agent_name IS NULL OR agent_name=?" lookup misses them after a
+         * rename and the agent's own tools vanish from its list. */
+        "UPDATE tools SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE channel_routes SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE sessions SET agent_name=?1 WHERE agent_name=?2",
+        /* a queued job (usually blocked by the non-idle-session check above,
+         * but don't rely on that coupling) */
+        "UPDATE llm_jobs SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE cron_jobs SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE memory_blocks SET agent_name=?1 WHERE agent_name=?2",
         "UPDATE memory_entries SET agent_name=?1 WHERE agent_name=?2",

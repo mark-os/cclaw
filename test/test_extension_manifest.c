@@ -469,6 +469,7 @@ static void test_install_builtin(void) {
     struct stat dst;
     assert(stat("/tmp/extensions/cclaw-docs/skills/configuring-cclaw/SKILL.md", &dst) == 0);
     assert(stat("/tmp/extensions/cclaw-docs/skills/cclaw-agents/SKILL.md", &dst) == 0);
+    assert(stat("/tmp/extensions/cclaw-docs/skills/backup-restore/SKILL.md", &dst) == 0);
     assert(qint(db, "SELECT count(*) FROM agent_extensions"
                     " WHERE agent_name='OldTimer' AND extension_name='cclaw-docs'"
                     " AND enabled=1") == 1);

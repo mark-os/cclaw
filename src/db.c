@@ -397,6 +397,40 @@ static void db_backup_prune(sqlite3 *db, int keep_version) {
     }
 }
 
+/* Write a consistent single-file snapshot of the DB to `dest` via VACUUM INTO
+ * (committed WAL content included, no torn write even under a busy writer —
+ * VACUUM INTO takes a read transaction). Fail-closed: refuses to overwrite an
+ * existing file, and unlinks a partial snapshot on error. Returns 0 on
+ * success (and sets *out_bytes, if non-NULL, to the snapshot size), -1 on any
+ * failure (logged). The caller-facing `cclaw backup` verb wraps this; the
+ * pre-upgrade insurance path (db_backup_before_upgrade) does not, because it
+ * deliberately keeps a pre-existing .bak rather than erroring on it. */
+int db_backup_to(sqlite3 *db, const char *dest, long long *out_bytes) {
+    if (out_bytes) *out_bytes = -1;
+    if (!db || !dest || !dest[0]) return -1;
+
+    struct stat st;
+    if (stat(dest, &st) == 0) {
+        LOG_ERROR_("backup refused: %s already exists", dest);
+        return -1;
+    }
+
+    char *sql = sqlite3_mprintf("VACUUM INTO %Q", dest);
+    if (!sql) return -1;
+    char *err = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR_("backup failed: %s", err ? err : "?");
+        sqlite3_free(err);
+        unlink(dest);                          /* don't leave a partial snapshot */
+        return -1;
+    }
+    if (out_bytes && stat(dest, &st) == 0) *out_bytes = (long long)st.st_size;
+    LOG_INFO_("backup written: %s", dest);
+    return 0;
+}
+
 /* Upgrade an existing DB from its current user_version to CCLAW_SCHEMA_VERSION.
  * Returns 1 on success (DB is now current), 0 on failure (patch failed, DB
  * unchanged from the failed patch onward; restore story: mv the .bak over the

@@ -8,6 +8,7 @@
     "skills/creating-agents",
     "skills/cclaw-agents",
     "skills/cclaw-channels",
-    "skills/cclaw-secrets-memory"
+    "skills/cclaw-secrets-memory",
+    "skills/backup-restore"
   ]
 }

@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "cclaw.h"
@@ -2806,6 +2807,9 @@ static void print_usage(void) {
            "                                   crash-loops auto-reverts and notifies admins)\n"
            "       cclaw dashboard             print the tokenized admin dashboard URL\n"
            "                                   (token minted on first daemon start)\n"
+           "       cclaw backup [dest]         VACUUM INTO snapshot (default\n"
+           "                                   <db>.backup.<timestamp>); safe on a live\n"
+           "                                   daemon, refuses to overwrite\n"
            "       cclaw resp [<id> [req] | list [n]]\n"
            "                                   read the raw LLM response archive; bare form\n"
            "                                   shows the last failure (what \"[resp #N]\" in an\n"
@@ -3926,6 +3930,59 @@ static int dashboard_main(void) {
     return 0;
 }
 
+/* `cclaw backup [dest]` — write a consistent single-file snapshot via
+ * VACUUM INTO. Default dest: <db>.backup.<yyyymmdd-HHMMSS>. Refuses to
+ * overwrite and respects the disk floor. Restore is a documented manual
+ * procedure (stop daemon → move snapshot over cclaw.db → delete -wal/-shm →
+ * restart); see specs/operations.md. Safe to run against a live daemon:
+ * VACUUM INTO takes a read snapshot, so a mid-turn session is captured
+ * consistently and recovery reconciles it on restart. */
+static int backup_main(int argc, char *argv[]) {
+    sqlite3 *db = verb_db_open();
+    if (!db) return 1;
+
+    char dest[1024];
+    if (argc >= 3 && argv[2][0]) {
+        snprintf(dest, sizeof(dest), "%s", argv[2]);
+    } else {
+        const char *path = sqlite3_db_filename(db, "main");
+        if (!path || !path[0]) {
+            fprintf(stderr, "error: cannot resolve DB path for default backup name\n");
+            sqlite3_close(db);
+            return 1;
+        }
+        char ts[32];
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", &tm);
+        snprintf(dest, sizeof(dest), "%s.backup.%s", path, ts);
+    }
+
+    /* Disk floor: a snapshot is roughly the DB's size — refuse under the floor
+     * so a backup can't be the write that fills an SD card. */
+    int floor_mb = config_default_int("disk_min_free_mb");
+    if (floor_mb > 0) {
+        long free_mb = db_free_mb(db);
+        if (free_mb >= 0 && free_mb < floor_mb) {
+            fprintf(stderr, "error: free space %ldMB below floor %dMB — backup refused\n",
+                    free_mb, floor_mb);
+            sqlite3_close(db);
+            return 1;
+        }
+    }
+
+    long long bytes = -1;
+    int rc = db_backup_to(db, dest, &bytes);
+    sqlite3_close(db);
+    if (rc != 0) {
+        fprintf(stderr, "error: backup failed (see log; likely %s exists or disk error)\n", dest);
+        return 1;
+    }
+    printf("%s (%lld bytes)\n", dest, bytes);
+    return 0;
+}
+
 /* `cclaw resp` — read the llm_responses forensic archive. What "[resp #N]" in
  * an error message cites. */
 static int resp_main(int argc, char *argv[]) {
@@ -4006,6 +4063,8 @@ int main(int argc, char *argv[]) {
     /* resp: read the llm_responses forensic archive ("[resp #N]" in error
      * messages). Read-only; exists because JSONB bodies need SQLite >= 3.45
      * and target boxes ship older system CLIs. */
+    if (argc >= 2 && strcmp(argv[1], "backup") == 0) return backup_main(argc, argv);
+
     if (argc >= 2 && strcmp(argv[1], "resp") == 0) return resp_main(argc, argv);
 
     /* dashboard: print the tokenized /admin URL (token minted at daemon start). */

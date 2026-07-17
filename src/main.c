@@ -902,7 +902,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
         /* afterToolCall hooks: chained result replacement, after the secret
          * scanner (security boundary stays first), before the entry write so
-         * the replacement is what the context sees. */
+         * the replacement is what the context sees. The replacement comes back
+         * already marker-sanitized (hook_dispatch owns that invariant). */
         char *hook_annotate = NULL;
         if (g_tool_setup) {
             char *rep = hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx,
@@ -2724,7 +2725,11 @@ static void reap_children(void) {
               if (pp) { free(output); output = pp; out_len = strlen(output); } }
 
             /* afterToolCall hooks: chained result replacement, post-scanner,
-             * pre-write (same contract as the inline dispatch path). */
+             * pre-write (same contract as the inline dispatch path). The
+             * replacement comes back already marker-sanitized (hook_dispatch
+             * owns that invariant) — this reap path carries the
+             * network_hosts-tagged results, so a transform hook must not be
+             * able to smuggle a forged fence past storage-time sanitization. */
             char *hook_annotate = NULL;
             if (g_tool_setup) {
                 char *rep = hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx,

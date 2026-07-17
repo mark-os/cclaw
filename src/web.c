@@ -175,7 +175,10 @@ static int handle_status(struct mg_connection *conn, void *cbdata) {
 
     buf_appendf(&b, "version: %s\nuptime: %lds\n", CCLAW_VERSION, uptime);
 
-    if (s_db) {
+    /* Unauthenticated `/` is liveness only — the session table (names,
+     * states, inbox depths) is operator data, gated behind the same
+     * web_admin_token as /admin (cookie or ?token=). */
+    if (s_db && dashboard_auth_check(conn, 1) != 0) {
         buf_appendf(&b, "\nsessions:\nid|name|state|updated_at|inbox_depth\n");
 
         sqlite3_stmt *stmt;

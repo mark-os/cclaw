@@ -68,7 +68,7 @@ static int ensure_token(sqlite3 *db) {
 }
 
 /* 0 = unauthenticated, 1 = valid cookie, 2 = valid ?token= (set cookie) */
-static int auth_check(struct mg_connection *conn, int allow_query) {
+int dashboard_auth_check(struct mg_connection *conn, int allow_query) {
     char *want = config_get(s_db, "web_admin_token");
     if (!want || !want[0]) { free(want); return 0; }
     int ok = 0;
@@ -559,7 +559,7 @@ static int render_page(struct mg_connection *conn) {
 static int handle_act(struct mg_connection *conn) {
     /* Cookie only: the token never rides in a form, and a cross-site page
      * can't read or guess the cookie's value to satisfy it. */
-    if (auth_check(conn, 0) != 1)
+    if (dashboard_auth_check(conn, 0) != 1)
         return resp_plain(conn, 403, "Forbidden", "forbidden\n");
 
     char body[FORM_MAX];
@@ -692,7 +692,7 @@ static int handle_admin(struct mg_connection *conn, void *cbdata) {
     if (strcmp(uri, "/admin") != 0 && strcmp(uri, "/admin/") != 0)
         return resp_plain(conn, 404, "Not Found", "not found\n");
 
-    int auth = auth_check(conn, 1);
+    int auth = dashboard_auth_check(conn, 1);
     if (auth == 0)
         return resp_plain(conn, 403, "Forbidden", "forbidden\n");
     if (auth == 2) {

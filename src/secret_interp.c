@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "secret_interp.h"
 #include "buf.h"
+#include "external_content.h"
 #include "log.h"
 #include <stdlib.h>
 #include <string.h>
@@ -231,6 +232,20 @@ char *tool_result_postprocess(const char *result, const ShellSecret *secrets, si
     if (secrets && count > 0) {
         cur = secret_deinterpolate(result, secrets, count);
         if (cur && strcmp(cur, result) == 0) { free(cur); cur = NULL; }
+    }
+
+    /* Neutralize forged untrusted-content fence markers in EVERY tool result
+     * (r2 F13): the only legitimate producer of the static markers is the
+     * query-time wrap in llm_payload, so marker-shaped text arriving inside
+     * a result body — network-tagged or not (a local file read can carry
+     * one) — is spoofing the trust boundary. */
+    {
+        const char *base = cur ? cur : result;
+        char *sm = sanitize_markers(base, strlen(base));
+        if (sm) {
+            if (strcmp(sm, base) == 0) free(sm);
+            else { free(cur); cur = sm; }
+        }
     }
 
     /* Secret scan: zero-alloc locate first; copy with tag headroom only on a

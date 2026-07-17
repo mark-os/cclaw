@@ -322,6 +322,41 @@ static void test_metadata_carveout_exact_grant_allow(void) {
     PASS();
 }
 
+static void test_url_host_normalize_percent(void) {
+    TEST("url_host_normalize: percent-encoded host decodes and matches");
+    char host[254] = "chase%2Ecom";
+    url_host_normalize(host, sizeof(host));
+    char *labels[1] = {"chase.com"};
+    if (strcmp(host, "chase.com") != 0) FAIL("decode failed");
+    if (!host_covered(labels, 1, host)) FAIL("decoded host should match");
+    PASS();
+}
+
+static void test_url_host_normalize_double_encoded(void) {
+    TEST("url_host_normalize: double-encoded host unwraps");
+    char host[254] = "chase%252Ecom";   /* %25 → '%', then %2E → '.' */
+    url_host_normalize(host, sizeof(host));
+    if (strcmp(host, "chase.com") != 0) FAIL("double decode failed");
+    PASS();
+}
+
+static void test_url_host_normalize_invisible(void) {
+    TEST("url_host_normalize: zero-width chars stripped");
+    char host[254] = "chase\xE2\x80\x8B.com";   /* U+200B inside the host */
+    url_host_normalize(host, sizeof(host));
+    char *labels[1] = {"chase.com"};
+    if (!host_covered(labels, 1, host)) FAIL("stripped host should match");
+    PASS();
+}
+
+static void test_url_host_normalize_plain_untouched(void) {
+    TEST("url_host_normalize: plain host unchanged");
+    char host[254] = "api.example.com";
+    url_host_normalize(host, sizeof(host));
+    if (strcmp(host, "api.example.com") != 0) FAIL("plain host modified");
+    PASS();
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_host_match\n");
@@ -365,6 +400,12 @@ int main(void) {
     /* metadata carve-out logic */
     test_metadata_carveout_covering_cidr_deny();
     test_metadata_carveout_exact_grant_allow();
+
+    /* url_host_normalize (r2 F11) */
+    test_url_host_normalize_percent();
+    test_url_host_normalize_double_encoded();
+    test_url_host_normalize_invisible();
+    test_url_host_normalize_plain_untouched();
 
     printf("%d/%d passed\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

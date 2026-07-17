@@ -95,12 +95,65 @@ static void test_set_status(void) {
     printf("  PASS test_set_status\n");
 }
 
+static void test_claim_cas(void) {
+    /* r5 F10: the dispatch claim is a CAS — a second dispatcher (co-pointed
+     * CLI vs daemon) must lose the claim, not double-dispatch. */
+    sqlite3 *db = setup();
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    int64_t eid = entry_append_typed(db, sid, 1, "tool_call", 0,
+        "{}", "call_3", "shell_exec", 0, STOP_REASON_NONE, NULL, 0, 0, 0);
+
+    const char *sql = "INSERT INTO tool_calls(session_id, entry_id, call_id, name)"
+                      " VALUES(?, ?, 'call_3', 'shell_exec');";
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_bind_int64(stmt, 1, sid);
+    sqlite3_bind_int64(stmt, 2, eid);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    /* First claim wins, second loses. */
+    assert(db_tool_call_claim(db, sid, "call_3") == 1);
+    assert(db_tool_call_claim(db, sid, "call_3") == 0);
+
+    /* Claimed call is no longer pending (the loser's get_pending misses it
+     * too — but the claim is what closes the read-then-dispatch race). */
+    int count = 0;
+    PendingToolCall *list = db_tool_call_get_pending(db, sid, &count);
+    assert(count == 0);
+    assert(list == NULL);
+
+    /* Unclaim (park path): back to pending, claimable again. */
+    db_tool_call_unclaim(db, sid, "call_3");
+    list = db_tool_call_get_pending(db, sid, &count);
+    assert(count == 1);
+    db_tool_call_free_pending(list, count);
+    assert(db_tool_call_claim(db, sid, "call_3") == 1);
+
+    /* Unclaim is a CAS too: a call that completed meanwhile stays done. */
+    assert(db_tool_call_set_status(db, sid, "call_3", "done", NULL) == 0);
+    db_tool_call_unclaim(db, sid, "call_3");
+    sqlite3_prepare_v2(db, "SELECT status FROM tool_calls WHERE call_id='call_3'",
+                       -1, &stmt, NULL);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    const char *st = (const char *)sqlite3_column_text(stmt, 0);
+    assert(st && strcmp(st, "done") == 0);
+    sqlite3_finalize(stmt);
+
+    /* Claiming a done call fails — a stale dispatcher can't resurrect it. */
+    assert(db_tool_call_claim(db, sid, "call_3") == 0);
+
+    db_close(db);
+    printf("  PASS test_claim_cas\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_tool_calls_status:\n");
     test_get_pending_empty();
     test_insert_and_get_pending();
     test_set_status();
+    test_claim_cas();
     printf("ALL PASSED\n");
     return 0;
 }

@@ -131,8 +131,10 @@ static int ip_to_bin(const char *ip, int *fam, unsigned char *buf16) {
     return -1;
 }
 
-/* True if `ip` is in the blessed set and not expired. */
-static int bless_contains(ProxyContext *ctx, const char *ip) {
+/* True if `ip` is in the blessed set and not expired. When found,
+ * *via_hostname_out (may be NULL) reports whether the bless came from
+ * hostname resolution. */
+static int bless_contains(ProxyContext *ctx, const char *ip, int *via_hostname_out) {
     int fam;
     unsigned char bin[16];
     if (ip_to_bin(ip, &fam, bin) != 0) return 0;
@@ -145,6 +147,7 @@ static int bless_contains(ProxyContext *ctx, const char *ip) {
         if (b->expiry <= now) continue;
         if (b->family == fam && memcmp(b->addr, bin, (size_t)len) == 0) {
             found = 1;
+            if (via_hostname_out) *via_hostname_out = b->via_hostname;
             break;
         }
     }
@@ -153,8 +156,9 @@ static int bless_contains(ProxyContext *ctx, const char *ip) {
 }
 
 /* Add `ip` to the blessed set with a fresh TTL. Prunes expired entries and
- * evicts the oldest if the set is full. Refreshes the TTL on a duplicate. */
-static void bless_add(ProxyContext *ctx, const char *ip) {
+ * evicts the oldest if the set is full. Refreshes the TTL on a duplicate
+ * (via_hostname is sticky — OR-merged on refresh). */
+static void bless_add(ProxyContext *ctx, const char *ip, int via_hostname) {
     int fam;
     unsigned char bin[16];
     if (ip_to_bin(ip, &fam, bin) != 0) return;
@@ -175,6 +179,7 @@ static void bless_add(ProxyContext *ctx, const char *ip) {
         if (ctx->blessed[i].family == fam &&
             memcmp(ctx->blessed[i].addr, bin, (size_t)len) == 0) {
             ctx->blessed[i].expiry = now + PROXY_BLESS_TTL_SECS;
+            ctx->blessed[i].via_hostname |= via_hostname;
             pthread_mutex_unlock(&ctx->blessed_mu);
             return;
         }
@@ -191,6 +196,7 @@ static void bless_add(ProxyContext *ctx, const char *ip) {
     memset(b->addr, 0, sizeof(b->addr));
     memcpy(b->addr, bin, (size_t)len);
     b->expiry = now + PROXY_BLESS_TTL_SECS;
+    b->via_hostname = via_hostname;
     pthread_mutex_unlock(&ctx->blessed_mu);
 }
 
@@ -266,7 +272,7 @@ static int resolve_and_bless(ProxyContext *ctx, const char *host,
             if (!inet_ntop(AF_INET6, &s->sin6_addr, ip, sizeof(ip))) continue;
         } else continue;
         if (!addr_permitted(ctx, ip)) continue;
-        bless_add(ctx, ip);
+        bless_add(ctx, ip, /*via_hostname=*/1);
         if (!got) {
             snprintf(ip_out, ip_cap, "%s", ip);
             got = 1;
@@ -459,8 +465,9 @@ static int parse_client_hello_sni(const unsigned char *buf, size_t have,
 
 /* Peek (never consume — relay() still needs to see these bytes) at the start
  * of the client's byte stream, looking for a TLS ClientHello's SNI hostname.
- * Only called for connections authorized via a hostname rule (Q6 gate): once
- * an allowlisted hostname blesses an IP, a second CONNECT to that same IP is
+ * Called for connections whose authority derives from a hostname rule — a
+ * hostname CONNECT, or a numeric CONNECT to a hostname-blessed IP (Q6 gate):
+ * once an allowlisted hostname blesses an IP, a CONNECT to that same IP is
  * otherwise admitted regardless of what vhost it actually targets — on
  * shared-IP CDN hosting this reaches unauthorized tenants sharing the IP.
  * Fail-open (return 1) when no SNI is found or the bytes aren't parseable as
@@ -555,16 +562,28 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
     const char *dial;
     int fam;
     unsigned char bin[16];
-    int via_hostname = 0;
+    int sni_gate = 0;
     if (ip_to_bin(target, &fam, bin) == 0) {
         /* Numeric target: must be blessed by a prior RESOLVE, or an explicitly
          * granted literal IP. A literal IP that is neither (e.g. a raw
          * 1.2.3.4 SSRF attempt) is refused — there is no resolve to bless it. */
-        if (bless_contains(ctx, target)) {
-            /* blessed by a prior RESOLVE — the hostname was recorded there */
+        int via_host_bless = 0;
+        if (bless_contains(ctx, target, &via_host_bless)) {
+            /* blessed by a prior RESOLVE — the hostname was recorded there.
+             * A hostname-derived bless carries the Q6 SNI gate along to the
+             * numeric CONNECT (the common path: getaddrinfo shim RESOLVEs,
+             * then the client dials the returned IP) — otherwise the gate on
+             * the hostname branch below is a fence with no side walls. An
+             * exact literal-IP grant is exempt: the operator vouched for the
+             * IP itself (same exact-vs-covering distinction as the metadata
+             * carve-out); a covering CIDR authorizes reaching a range, not
+             * any particular vhost identity behind one address. */
             dial = target;
+            if (via_host_bless &&
+                !granted_exact(ctx->cidr_rules, ctx->cidr_rule_count, fam, bin))
+                sni_gate = 1;
         } else if (host_decide(ctx, target)) {
-            bless_add(ctx, target);
+            bless_add(ctx, target, /*via_hostname=*/0);
             record_host(ctx, target);
             dial = target;
         } else {
@@ -586,7 +605,7 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
             close(client_fd);
             return;
         }
-        via_hostname = 1;
+        sni_gate = 1;
         if (resolve_and_bless(ctx, target, resolved, sizeof(resolved)) != 0) {
             LOG_WARN_("proxy deny host=%s reason=resolve_failed", target);
             record_denied(ctx, target);
@@ -616,12 +635,14 @@ static void handle_client(ProxyContext *ctx, int client_fd) {
 
     write(client_fd, "OK\n", 3);
 
-    /* Shared-IP CDN check (Q6): a hostname-rule-authorized connection is only
-     * as trustworthy as the SNI it actually presents once the IP is shared
-     * across unrelated vhosts. Fail-open when unparseable/absent — this is a
-     * narrowing of an already-passing grant, not a new way to block traffic
-     * that worked before (a hostname grant doesn't imply HTTPS). */
-    if (via_hostname && !sni_check(ctx, client_fd)) {
+    /* Shared-IP CDN check (Q6): a hostname-authorized connection — whether
+     * CONNECTed by name or by a hostname-blessed IP — is only as trustworthy
+     * as the SNI it actually presents once the IP is shared across unrelated
+     * vhosts. Fail-open when unparseable/absent — this is a narrowing of an
+     * already-passing grant, not a new way to block traffic that worked
+     * before (a hostname grant doesn't imply HTTPS). */
+    if (sni_gate && !sni_check(ctx, client_fd)) {
+        LOG_WARN_("proxy deny host=%s reason=sni_mismatch", target);
         close(remote_fd);
         close(client_fd);
         relay_release(ctx);

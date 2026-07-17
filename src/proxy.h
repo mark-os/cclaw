@@ -40,6 +40,8 @@ typedef struct {
     int family;                 /* AF_INET or AF_INET6 */
     unsigned char addr[16];     /* binary address (4 or 16 bytes used) */
     long expiry;                /* unix time when this bless expires */
+    int via_hostname;           /* blessed by hostname resolution — CONNECTs to
+                                   it get the Q6 SNI gate like the hostname path */
 } ProxyBlessedAddr;
 
 typedef struct {

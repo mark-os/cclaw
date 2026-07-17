@@ -19,8 +19,10 @@ security fixes since the pinned version — that's the main reason to bump.
 - Built with: `-DNO_SSL -DNO_CGI -DUSE_IPV6 -DNO_CACHING`
 - License: MIT
 - Last checked: 2026-07-17 — **CVE-2025-55763** (URI-parser heap overflow,
-  1.14–1.16, remote via crafted HTTP request, RCE potential; fixed in 1.17).
-  Affects the vendored version: upgrade to 1.17 is queued.
+  1.14–1.16, remote via crafted HTTP request, RCE potential). No 1.17
+  release exists; the upstream fix commit c584455 (PR #1347) is backported
+  into the vendored `civetweb.c` (see the CVE-marked block in the
+  directory-slash redirect path). Re-check on next refresh.
 
 ## QuickJS (2026-06-04)
 

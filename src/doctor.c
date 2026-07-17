@@ -20,6 +20,7 @@
 #include <sys/un.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
@@ -412,7 +413,83 @@ static void check_channels(sqlite3 *db) {
         printf("  (none registered)\n");
 }
 
-/* ── Check 8: Syslog listener ───────────────────────────────────── */
+/* ── Check 8: Denied tool calls (audit trail) ───────────────────── */
+
+/* Gate-refusal markers written to tool_calls.resolved_by. Approval denials
+ * are counted from approvals.state='denied' instead — a decided approval
+ * stores only its decided_via (cli/telegram/...) in resolved_by, same value
+ * for approve and deny. */
+#define DENIAL_SET "('not_granted','policy:deny','hook:deny','denied','block_window')"
+
+static void check_denials(sqlite3 *db) {
+    printf("\n[audit]\n");
+    if (!db) {
+        printf("  skipped: no DB handle\n");
+        return;
+    }
+
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT resolved_by, COUNT(*) FROM tool_calls"
+            " WHERE resolved_by IN " DENIAL_SET
+            " AND resolved_at >= unixepoch()-7*86400"
+            " GROUP BY resolved_by ORDER BY 2 DESC", -1, &s, NULL) != SQLITE_OK) {
+        printf("  (no tool_calls table)\n");
+        return;
+    }
+    printf("  gate denials (7d):");
+    int any = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        printf(" %s=%lld", sqlite3_column_text(s, 0),
+               (long long)sqlite3_column_int64(s, 1));
+        any = 1;
+    }
+    sqlite3_finalize(s);
+    printf(any ? "\n" : " none\n");
+
+    if (sqlite3_prepare_v2(db,
+            "SELECT COUNT(*) FROM approvals WHERE state='denied'"
+            " AND requested_at >= unixepoch()-7*86400", -1, &s, NULL) == SQLITE_OK) {
+        if (sqlite3_step(s) == SQLITE_ROW)
+            printf("  approval denials (7d): %lld\n",
+                   (long long)sqlite3_column_int64(s, 0));
+        sqlite3_finalize(s);
+    }
+
+    /* Most recent denials of either kind, agent + tool + how. */
+    if (sqlite3_prepare_v2(db,
+            "SELECT * FROM ("
+            "  SELECT tc.resolved_at AS t, s.agent_name AS agent, tc.name AS tool,"
+            "         tc.resolved_by AS via"
+            "  FROM tool_calls tc LEFT JOIN sessions s ON s.id=tc.session_id"
+            "  WHERE tc.resolved_by IN " DENIAL_SET
+            "  UNION ALL"
+            "  SELECT a.requested_at, s.agent_name, COALESCE(a.tool_name, a.action),"
+            "         'approval:' || COALESCE(a.decided_via,'?')"
+            "  FROM approvals a LEFT JOIN sessions s ON s.id=a.session_id"
+            "  WHERE a.state='denied'"
+            ") ORDER BY t DESC LIMIT 10", -1, &s, NULL) != SQLITE_OK)
+        return;
+    int shown = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        if (!shown) printf("  recent:\n");
+        time_t t = (time_t)sqlite3_column_int64(s, 0);
+        char when[32] = "?";
+        struct tm tm;
+        if (t > 0 && localtime_r(&t, &tm))
+            strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tm);
+        const char *agent = (const char *)sqlite3_column_text(s, 1);
+        const char *tool  = (const char *)sqlite3_column_text(s, 2);
+        const char *via   = (const char *)sqlite3_column_text(s, 3);
+        printf("    %s  agent=%s  tool=%s  via=%s\n", when,
+               agent ? agent : "(default)", tool ? tool : "?", via ? via : "?");
+        shown++;
+    }
+    sqlite3_finalize(s);
+    if (!shown) printf("  recent: none\n");
+}
+
+/* ── Check 9: Syslog listener ───────────────────────────────────── */
 
 static void check_syslog(void) {
     printf("\n[syslog]\n");
@@ -454,6 +531,7 @@ int doctor_main(void) {
     check_userns();
     check_workspace(cfg);
     check_channels(db);
+    check_denials(db);
     check_syslog();
 
     printf("\ndone.\n");

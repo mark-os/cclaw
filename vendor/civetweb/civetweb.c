@@ -15255,12 +15255,30 @@ handle_request(struct mg_connection *conn)
 			mg_send_http_error(conn, 500, "out or memory");
 		} else {
 			mg_get_request_link(conn, new_path, buflen - 1);
-			strcat(new_path, "/");
-			if (ri->query_string) {
-				/* Append ? and query string */
-				strcat(new_path, "?");
-				strcat(new_path, ri->query_string);
+
+			/* CVE-2025-55763 backport (upstream PR #1347, c584455): bounds-
+			 * checked appends instead of strcat — mg_get_request_link may
+			 * already have filled the buffer. */
+			size_t len = strlen(new_path);
+			if (len + 1 < buflen) {
+				new_path[len] = '/';
+				new_path[len + 1] = '\0';
+				len++;
 			}
+
+			if (ri->query_string) {
+				if (len + 1 < buflen) {
+					new_path[len] = '?';
+					new_path[len + 1] = '\0';
+					len++;
+				}
+
+				/* Append with size of space left for query string + null
+				 * terminator */
+				size_t max_append = buflen - len - 1;
+				strncat(new_path, ri->query_string, max_append);
+			}
+
 			mg_send_http_redirect(conn, new_path, 301);
 			mg_free(new_path);
 		}

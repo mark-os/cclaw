@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`).
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v30 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v29 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-14 freeze collapsed earlier patch history into it).
 
 ---
 
@@ -20,6 +20,8 @@ Extensions register keys too: `extension_install` ingests the manifest's `config
 | `value` | TEXT | override; NULL = use default |
 | `default_value` | TEXT | code-owned, resynced every startup |
 | `description` | TEXT | code-owned, resynced every startup |
+| `secret` | INTEGER NOT NULL DEFAULT 0 | key resolves env → `secrets` table, never `value` |
+| `required` | INTEGER NOT NULL DEFAULT 0 | channel launch gate: must resolve non-empty |
 
 ---
 
@@ -34,7 +36,6 @@ LLM API endpoints. Multiple providers enable fallback routing.
 | `endpoint_type` | TEXT NOT NULL DEFAULT 'openai' | openai / gemini / anthropic |
 | `api_key_env` | TEXT NOT NULL DEFAULT '' | env var name holding the key |
 | `default_model` | TEXT | |
-| `context_window` | INTEGER DEFAULT 128000 | |
 | `priority` | INTEGER NOT NULL DEFAULT 0 | lower = preferred |
 | `status` | TEXT NOT NULL DEFAULT 'healthy' | healthy / degraded / down |
 
@@ -50,7 +51,7 @@ Per-model routing metadata + lifetime stats. The router picks by `(priority, sta
 | `provider_name` | TEXT NOT NULL | FK-ish to `providers.name` |
 | `model` | TEXT NOT NULL | wire model id sent to the provider |
 | `sub_provider` | TEXT | provider-specific routing hint (OpenRouter upstream) |
-| `context_window` | INTEGER DEFAULT 128000 | |
+| `context_window` | INTEGER | |
 | `max_output_tokens` | INTEGER | |
 | `capabilities` | TEXT DEFAULT '[]' | JSON array of capability tags |
 | `priority` | INTEGER NOT NULL DEFAULT 0 | lower = preferred |
@@ -141,8 +142,8 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 | Column | Type | Notes |
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
-| `model` | TEXT | override; NULL uses global default |
-| `provider` | TEXT | override; NULL uses global default |
+| `primary_model` | TEXT | model override; NULL uses config `default_model` |
+| `secondary_model` | TEXT | fallback model; NULL uses config `default_secondary_model` |
 | `system_prompt` | TEXT | inline prompt override |
 | `description` | TEXT | |
 | `max_iterations` | INTEGER DEFAULT 25 | tool loop cap per turn |
@@ -150,6 +151,7 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 | `shell_timeout` | INTEGER DEFAULT 30 | seconds |
 | `shell_path` | TEXT | interpreter for shell_exec's `-c`; NULL = `/bin/sh` |
 | `sandbox_profile` | TEXT DEFAULT 'standard' | host / trusted / standard / restricted |
+| `created_by` | TEXT | creating agent (`update_agent` authorization); NULL = operator |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 ---
@@ -263,6 +265,7 @@ Channel processes managed by the daemon. The extension system writes these rows.
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
 | `extension_name` | TEXT NOT NULL DEFAULT '' | |
+| `prev_extension_name` | TEXT | revert target recorded by channel swap |
 | `type` | TEXT NOT NULL DEFAULT '' | telegram / webhook / custom |
 | `binary_path` | TEXT NOT NULL DEFAULT '' | path to channel process |
 | `status` | TEXT NOT NULL DEFAULT 'draft' | see lifecycle below |
@@ -300,6 +303,8 @@ Routes inbound channel messages to agents/sessions. Replaces the old `channel_bi
 | `channel_id` | TEXT NOT NULL DEFAULT '*' | `*` = default route for the channel |
 | `agent_name` | TEXT | target agent |
 | `session_id` | INTEGER | pin to a specific session (optional) |
+| `delivery_mode` | TEXT NOT NULL DEFAULT 'auto' | `auto` = turn output auto-delivers to the origin chat; `explicit` = only `channel_send` |
+| `tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Copied onto `sessions.tool_filter` at session creation only — frozen like sub-agent filters; later route edits don't retro-apply |
 | PRIMARY KEY | (channel_name, channel_id) | |
 
 ---
@@ -320,6 +325,7 @@ Routes inbound channel messages to agents/sessions. Replaces the old `channel_bi
 | `state` | TEXT NOT NULL DEFAULT 'idle' | see state machine below |
 | `owner_instance` | TEXT | FK to `processes.instance_id`; NULL ⟺ idle |
 | `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
+| `turn_context` | TEXT | `<RELEVANT_CONTEXT>` block, materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; NULL = no block |
 | `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
 | `last_route` | TEXT | delivery target |
 | `last_interaction_id` | TEXT | |
@@ -522,6 +528,7 @@ Agent-scoped named memory blocks. Each block has a label, char limit, and option
 | `description` | TEXT | tells agent what block is for |
 | `char_limit` | INTEGER NOT NULL DEFAULT 5000 | |
 | `read_only` | INTEGER NOT NULL DEFAULT 0 | |
+| `placement` | TEXT NOT NULL DEFAULT 'system' | `system` = rendered into the system prompt once per session (`agent_config.c`); `context` = rendered into the `<RELEVANT_CONTEXT>` block at each turn start. New blocks default to `context` via `memory_block_create` (the API default every insert path goes through — the column DEFAULT is inert); only the Assistant's seeded AGENT/USER identity blocks ask for `system` |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | UNIQUE | (agent_name, label) | |
@@ -589,10 +596,30 @@ Daemon → channel process delivery queue.
 | `session_id` | INTEGER NOT NULL | |
 | `payload` | TEXT NOT NULL | JSON |
 | `status` | TEXT NOT NULL DEFAULT 'pending' | pending / delivered / failed |
+| `attempts` | INTEGER NOT NULL DEFAULT 0 | delivery retry counter |
+| `next_attempt_at` | INTEGER NOT NULL DEFAULT 0 | retry backoff gate |
+| `deliver_mode` | INTEGER NOT NULL DEFAULT 0 | degradation ladder: 0 = formatted (platform rich text), 1 = plain (see below) |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `acked_at` | INTEGER | |
 
+Delivery degradation ladder (`deliver_mode`): on a terminal 4xx for a formatted row the C loop re-delivers once at plain — platform-agnostic, it never inspects *why* the format was rejected. The ladder only descends, so re-delivery can't loop.
+
 Index: `idx_channel_outbox_pending ON channel_outbox(channel_name, status) WHERE status='pending'`.
+
+---
+
+## media_jobs
+
+Inbound media awaiting capability-routed preprocessing (e.g. voice → transcript). Transient by design: a worker turns the row into a text-only `inbox` row and deletes it. Rows only survive a crash (resubmitted at daemon start); `attempts` caps crash-loop retries.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | |
+| `source` | TEXT NOT NULL DEFAULT '' | channel origin |
+| `payload` | TEXT NOT NULL | full channel-emitted message JSON including `media.data_b64` |
+| `attempts` | INTEGER NOT NULL DEFAULT 0 | caps crash-loop retries |
+| `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 ---
 

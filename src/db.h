@@ -310,6 +310,17 @@ typedef struct {
 int db_tool_call_set_status(sqlite3 *db, int64_t session_id, const char *call_id,
                             const char *status, const char *resolved_by);
 
+/* CAS dispatch claim: pending → running, so two co-pointed processes (daemon
+ * + CLI on the same session) can't both dispatch the same call. Returns 1 if
+ * this caller won the claim, 0 if another process already holds it, -1 on db
+ * error. */
+int db_tool_call_claim(sqlite3 *db, int64_t session_id, const char *call_id);
+
+/* Undo a claim for a call that did NOT dispatch (approval park, child
+ * ceiling): running → pending, so the later re-advance can re-dispatch it.
+ * CAS — a call that meanwhile completed ('done') is left alone. */
+void db_tool_call_unclaim(sqlite3 *db, int64_t session_id, const char *call_id);
+
 /* Mark a tool_call done and record the result entry, keyed by (session_id,
  * call_id). Like db_tool_call_complete_with_result but for callers that hold
  * the session_id rather than the assistant entry_id (sub-agent completion). */

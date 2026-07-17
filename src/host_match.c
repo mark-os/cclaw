@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "host_match.h"
+#include "unicode_normalize.h"
 #include "util.h"
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -157,6 +158,41 @@ int host_in_text(char **labels, size_t n, const char *text,
         }
     }
     return 0;
+}
+
+static int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+void url_host_normalize(char *host, size_t cap) {
+    if (!host || !cap) return;
+    /* Percent-decode, twice at most — unwraps one level of double-encoding
+     * without looping on adversarial %25%32%35... chains. */
+    for (int pass = 0; pass < 2 && strchr(host, '%'); pass++) {
+        char *r = host, *w = host;
+        while (*r) {
+            int hi, lo;
+            if (r[0] == '%' && (hi = hexval(r[1])) >= 0 &&
+                (lo = hexval(r[2])) >= 0) {
+                *w++ = (char)(hi * 16 + lo);
+                r += 3;
+            } else {
+                *w++ = *r++;
+            }
+        }
+        *w = '\0';
+    }
+    /* Strip invisible Unicode (zero-width, bidi, soft hyphen) that would
+     * split or disguise the host without changing where it resolves. */
+    size_t out_len = 0;
+    char *stripped = unicode_strip_invisible(host, strlen(host), &out_len);
+    if (stripped) {
+        snprintf(host, cap, "%s", stripped);
+        free(stripped);
+    }
 }
 
 static int cidr_contains(const Cidr *rule, int family,

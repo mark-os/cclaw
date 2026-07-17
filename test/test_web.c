@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <curl/curl.h>
 #include "web.h"
+#include "config_registry.h"
 #include "db.h"
 #include "resolve.h"
 #include "test_util.h"
@@ -55,6 +56,7 @@ static void test_status_page(void) {
     assert(web_start(&cfg, db, cfg.db_path) == 0);
     usleep(50000);
 
+    /* Unauthenticated `/` is liveness only — no session table (r2 F3). */
     CURL *curl = curl_easy_init();
     assert(curl);
     char response[4096] = {0};
@@ -63,6 +65,28 @@ static void test_status_page(void) {
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
     long http_code = 0;
     CURLcode res = curl_easy_perform(curl);
+    assert(res == CURLE_OK);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    assert(http_code == 200);
+    assert(strstr(response, "version:"));
+    assert(strstr(response, "uptime:"));
+    assert(strstr(response, "sessions:") == NULL);
+    assert(strstr(response, "test-session") == NULL);
+    curl_easy_cleanup(curl);
+
+    /* With the dashboard admin token (?token=), the full dump is served. */
+    char *tok = config_get(db, "web_admin_token");
+    assert(tok && tok[0]);
+    char url[256];
+    snprintf(url, sizeof(url), "http://127.0.0.1:19876/?token=%s", tok);
+    free(tok);
+    curl = curl_easy_init();
+    assert(curl);
+    response[0] = '\0';
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    res = curl_easy_perform(curl);
     assert(res == CURLE_OK);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     assert(http_code == 200);

@@ -45,6 +45,12 @@ int host_covered(char **labels, size_t n, const char *host);
 int host_in_text(char **labels, size_t n, const char *text,
                  char *out_host, size_t out_cap);
 
+/* Normalize a URL host for scanning, in place: percent-decode (two passes,
+ * to unwrap one level of double-encoding) then strip invisible Unicode —
+ * an encoded host tokenizes wrong in the raw-text scan, which would skip
+ * the sensitivity ASK escalation. `cap` is host's buffer size. */
+void url_host_normalize(char *host, size_t cap);
+
 /* CIDR containment: true if (family, addr_bytes) falls within any rule. */
 int cidr_match(const Cidr *rules, size_t n, int family,
                const unsigned char *addr);

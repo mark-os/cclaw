@@ -2056,6 +2056,32 @@ int db_tool_call_set_status(sqlite3 *db, int64_t session_id, const char *call_id
     return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
 }
 
+int db_tool_call_claim(sqlite3 *db, int64_t session_id, const char *call_id) {
+    const char *sql =
+        "UPDATE tool_calls SET status='running'"
+        " WHERE session_id=? AND call_id=? AND status='pending';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, call_id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return -1;
+    return sqlite3_changes(db) > 0 ? 1 : 0;
+}
+
+void db_tool_call_unclaim(sqlite3 *db, int64_t session_id, const char *call_id) {
+    const char *sql =
+        "UPDATE tool_calls SET status='pending'"
+        " WHERE session_id=? AND call_id=? AND status='running';";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(stmt, 1, session_id);
+    sqlite3_bind_text(stmt, 2, call_id, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
 int db_tool_call_complete_by_call(sqlite3 *db, int64_t session_id,
                                   const char *call_id, int64_t result_entry_id) {
     if (!db || !call_id) return -1;

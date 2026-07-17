@@ -735,6 +735,20 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             if (sens) {
                 sens_hit = host_in_text(sens, (size_t)sn, tc->arguments,
                                         sens_host, sizeof(sens_host));
+                /* Second chance on the *extracted, decoded* url host: a
+                 * percent- or invisible-Unicode-encoded host tokenizes wrong
+                 * in the raw-args scan above, which would skip the ASK
+                 * escalation (r2 F11). */
+                if (!sens_hit) {
+                    char uh[254];
+                    if (web_args_url_host(tc->arguments, uh, sizeof(uh))) {
+                        url_host_normalize(uh, sizeof(uh));
+                        if (host_covered(sens, (size_t)sn, uh)) {
+                            sens_hit = 1;
+                            snprintf(sens_host, sizeof(sens_host), "%s", uh);
+                        }
+                    }
+                }
                 for (int i = 0; i < sn; i++) free(sens[i]);
                 free(sens);
             }
@@ -855,12 +869,12 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         /* A NULL result means the tool dispatched async work and left this
          * tool_call without an inline result. Two distinct shapes: */
         if (!result && strcmp(tc->name, "launch_agent") == 0) {
-            /* Sub-agent launched. Mark this call 'running' so the turn-join
-             * (advance_session, tool_running) neither re-dispatches it nor
-             * proceeds to the LLM until the child completes and writes the
-             * result keyed by this call_id. The parent stays tool_running, so
-             * sibling launch_agent calls keep dispatching → real parallelism. */
-            db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+            /* Sub-agent launched. The call is already 'running' (claimed at
+             * dispatch), so the turn-join (advance_session, tool_running)
+             * neither re-dispatches it nor proceeds to the LLM until the child
+             * completes and writes the result keyed by this call_id. The
+             * parent stays tool_running, so sibling launch_agent calls keep
+             * dispatching → real parallelism. */
             /* parallel-safe tools let dispatch continue to siblings (3);
              * a serial tool would stop and wait (0). */
             return tool_is_parallel_safe(tc->name) ? 3 : 0;
@@ -870,7 +884,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                         strcmp(tc->name, "update_agent") == 0 ||
                         strcmp(tc->name, "extension_promote") == 0)) {
             /* Approval gate: the session is parked in awaiting_approval; the
-             * tool_call stays pending until resolve_approval writes the result. */
+             * dispatch loop releases this call's claim back to pending, where
+             * it stays until resolve_approval re-runs it or writes the result. */
             handle_approval_park(session_id);
             return 2; /* parked, don't advance */
         }
@@ -1016,7 +1031,6 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             if (rc != 0)
                 return tool_inline_error(session_id, tc,
                     "error: spawn_run_tool_child failed", "fork_failed");
-            db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
             LOG_INFO_("tool fork tool=%s", tc->name);
             return 0; /* async serial — wait for reap */
         }
@@ -1105,7 +1119,6 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             if (rc != 0)
                 return tool_inline_error(session_id, tc,
                     "error: spawn_run_tool_child failed", "fork_failed");
-            db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
             LOG_INFO_("tool fork tool=%s", tc->name);
             return 0;
         }
@@ -1166,7 +1179,6 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         if (rc != 0)
             return tool_inline_error(session_id, tc,
                 "error: spawn_run_tool_child failed", "fork_failed");
-        db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
         LOG_INFO_("tool fork tool=%s", tc->name);
         return 0;
     }
@@ -1289,7 +1301,6 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         if (rc != 0)
             return tool_inline_error(session_id, tc,
                 "error: spawn_run_tool_child failed", "fork_failed");
-        db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
         LOG_INFO_("tool fork tool=%s", tc->name);
         return 0;
     }
@@ -1318,9 +1329,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         job.secrets = g_tool_setup ? g_tool_setup->secrets : NULL;
         job.secret_count = g_tool_setup ? g_tool_setup->secret_count : 0;
 
-        /* Mark running BEFORE spawn so a re-advance landing while the thread
-         * runs can't double-dispatch; the thread flips it to done. */
-        db_tool_call_set_status(g_db, session_id, tc->call_id, "running", NULL);
+        /* Already 'running' (claimed at dispatch) so a re-advance landing
+         * while the thread runs can't double-dispatch; the thread flips it
+         * to done. */
         if (tool_thread_spawn(&job) != 0)
             return tool_inline_error(session_id, tc,
                 "error: failed to spawn tool thread", "thread_failed");
@@ -2457,13 +2468,29 @@ static void run_advance(int64_t session_id) {
         int async_in_flight = 0;
         int stop = 0;
         for (int i = 0; i < out.tc_count && !stop; i++) {
+            /* CAS claim (pending → running) before any tool logic runs, so a
+             * co-pointed process (daemon + CLI on the same session) can't
+             * double-dispatch the same call — the loser skips, the winner
+             * owns the call's lifecycle. Paths that don't dispatch after all
+             * (approval park, child ceiling) unclaim below so the approval /
+             * freed-slot re-advance can re-dispatch. */
+            int claim = db_tool_call_claim(g_db, session_id, out.calls[i].call_id);
+            if (claim == 0) {
+                LOG_INFO_("tool claim lost tool=%s (co-pointed dispatcher)",
+                          out.calls[i].name);
+                continue;
+            }
+            if (claim < 0) { stop = 1; break; }  /* db error — retry on re-advance */
             int rc = dispatch_tool(session_id, out.agent_name, &out.calls[i]);
             switch (rc) {
             case 1: break;                              /* inline done — next */
             case 3: async_in_flight = 1; break;         /* parallel async — next */
             case 0: async_in_flight = 1; stop = 1; break; /* serial async — wait */
             default:                                    /* parked (2) or failure */
-                /* -1 = child ceiling hit: the call is still 'pending' and un-
+                /* The call didn't dispatch: release the claim (a path that
+                 * already wrote a result + 'done' is left alone — CAS). */
+                db_tool_call_unclaim(g_db, session_id, out.calls[i].call_id);
+                /* -1 = child ceiling hit: the call is back to 'pending' and un-
                  * forked. Remember the session so a freed slot (reap) re-advances
                  * it instead of leaving it stuck in tool_running forever. */
                 if (rc == -1) stalled_add(session_id);
@@ -2659,14 +2686,13 @@ static void reap_children(void) {
             if (!output) output = strdup("error: OOM");
 
             /* Network provenance: a non-empty hosts tag marks the result as
-             * untrusted external content. Sanitize NOW (strip invisible
-             * Unicode, neutralize boundary-marker lookalikes) so the
+             * untrusted external content. Strip invisible Unicode NOW so the
              * query-time wrap in llm_payload can't be broken out of.
              * Fail closed on a damaged signal: a truncated or oversized-
              * dropped meta means we can't prove the result had no network
              * exposure — sanitize as if it did, and record no hosts tag
              * (never a partial one). Only an explicit zero-length meta
-             * (non-network tier / error frame) skips sanitization. */
+             * (non-network tier / error frame) skips the strip. */
             char *hosts = c->hosts_json;
             int meta_damaged = c->frame_meta_len > 0 &&
                 (!c->hosts_json || c->frame_meta_read != c->frame_meta_len);
@@ -2677,10 +2703,10 @@ static void reap_children(void) {
                 size_t slen = out_len;
                 char *st = unicode_strip_invisible(output, slen, &slen);
                 if (st) { free(output); output = st; }
-                char *sn = sanitize_markers(output, slen);
-                if (sn) { free(output); output = sn; }
                 out_len = strlen(output);
             }
+            /* (Forged fence markers are neutralized for ALL results —
+             * network-tagged or not — inside tool_result_postprocess.) */
 
             /* Explicit capture first (raw result), then postprocess:
              * deinterpolate + scan/redact. Fresh per-call snapshot (same

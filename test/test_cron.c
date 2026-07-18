@@ -9,6 +9,19 @@
 #include <string.h>
 #include <time.h>
 
+/* cron_jobs.agent_name / sessions.agent_name are enforced FKs (v31): seed
+ * every agent name this file schedules for before any child rows land. */
+static sqlite3 *open_seeded(const char *path) {
+    sqlite3 *db = test_db_open(path);
+    if (!db) return NULL;
+    static const char *agents[] = {
+        "test_agent", "agent_a", "agent_b", "A", "Res", "Ghost", "Hb", NULL
+    };
+    for (int i = 0; agents[i]; i++)
+        test_seed_agent(db, agents[i]);
+    return db;
+}
+
 static void test_cron_next_run_every_minute(void) {
     /* every minute */
     int64_t now = 1700000000;
@@ -53,7 +66,7 @@ static void test_cron_next_run_step(void) {
 }
 
 static void test_cron_crud(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db);
 
     int64_t sid = session_create(db, "cron_test", NULL, -1, 0);
@@ -91,7 +104,7 @@ static void test_cron_crud(void) {
 }
 
 static void test_cron_table_created(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db);
 
     sqlite3_stmt *stmt;
@@ -107,7 +120,7 @@ static void test_cron_table_created(void) {
 }
 
 static void test_cron_agent_isolation(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db);
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);
@@ -135,7 +148,7 @@ static void test_cron_agent_isolation(void) {
 /* ── Schedule validation (cron_add) ───────────────────────────────────── */
 
 static void test_cron_add_schedule_validation(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db);
     int64_t sid = session_create(db, "v", "A", -1, 0);
     int64_t now = (int64_t)time(NULL);
@@ -159,7 +172,7 @@ static void test_cron_add_schedule_validation(void) {
 }
 
 static void test_cron_add_floor_fire_to_fire(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db);
     int64_t sid = session_create(db, "f", "A", -1, 0);
 
@@ -235,7 +248,7 @@ static int inbox_match(sqlite3 *db, int64_t sid, const char *source,
 }
 
 static void test_dispatch_oneshot(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db && wake_init() == 0);
     int64_t sid = session_create(db, "s", "A", -1, 0);
     int64_t now = (int64_t)time(NULL);
@@ -256,7 +269,7 @@ static void test_dispatch_oneshot(void) {
 }
 
 static void test_dispatch_interval(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db && wake_init() == 0);
     int64_t sid = session_create(db, "s", "A", -1, 0);
     int64_t now = (int64_t)time(NULL);
@@ -274,7 +287,7 @@ static void test_dispatch_interval(void) {
 }
 
 static void test_dispatch_session_zero_resolves(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db && wake_init() == 0);
     int64_t sid = session_create(db, "s", "Res", -1, 0);
     int64_t now = (int64_t)time(NULL);
@@ -290,7 +303,7 @@ static void test_dispatch_session_zero_resolves(void) {
 }
 
 static void test_dispatch_session_zero_no_session(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db && wake_init() == 0);
     int64_t now = (int64_t)time(NULL);
 
@@ -306,7 +319,7 @@ static void test_dispatch_session_zero_no_session(void) {
 }
 
 static void test_dispatch_heartbeat_idle(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db && wake_init() == 0);
     int64_t sid = session_create(db, "s", "Hb", -1, 0);
     /* Touch updated_at so the session is recent (idle by default). */
@@ -325,7 +338,7 @@ static void test_dispatch_heartbeat_idle(void) {
 }
 
 static void test_dispatch_heartbeat_skips_busy(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db && wake_init() == 0);
     int64_t sid = session_create(db, "s", "Hb", -1, 0);
     char sql[128];
@@ -345,7 +358,7 @@ static void test_dispatch_heartbeat_skips_busy(void) {
 }
 
 static void test_dispatch_heartbeat_no_stack(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     assert(db && wake_init() == 0);
     int64_t sid = session_create(db, "s", "Hb", -1, 0);
     Message um = {.role = ROLE_USER, .content = "hi"};

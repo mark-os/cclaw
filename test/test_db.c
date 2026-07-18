@@ -322,19 +322,15 @@ static void test_schema_state(void) {
     assert(db_schema_state(db, NULL) == DB_SCHEMA_FUTURE);
     assert(db_schema_compat(db) == 0);   /* refused, not "upgraded" */
 
-    set_user_version(db, 10);            /* below the v29 floor */
+    set_user_version(db, 10);            /* far below the v31 floor */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
     assert(db_schema_compat(db) == 0);
 
-    set_user_version(db, 28);            /* one below the v29 floor — refused */
+    set_user_version(db, 30);            /* one below the v31 floor — refused */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
     assert(db_schema_compat(db) == 0);
-
-    set_user_version(db, 29);            /* at the floor — patchable, not refused.
-                                          * State only: this DB is already
-                                          * current-shaped, so actually running
-                                          * the patches would fail (dup column). */
-    assert(db_schema_state(db, NULL) == DB_SCHEMA_UPGRADABLE);
+    /* No UPGRADABLE probe: with the floor at the current version the
+     * upgradable band is empty until the next schema patch lands. */
 
     set_user_version(db, 0);             /* v0 but tables exist → pre-freeze */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
@@ -362,21 +358,23 @@ static char *schema_shape(sqlite3 *db) {
     return shape;
 }
 
-/* Apply schema_patches[] to a real v29-shaped DB (frozen fixture — never a
+/* Apply schema_patches[] to a floor-shaped DB (frozen fixture — never a
  * current DB with columns dropped) and require the result to match a fresh
- * current DB, table for table, column for column. */
+ * current DB, table for table, column for column. With an empty patch list
+ * (floor == current) this degenerates to "the frozen fixture IS the current
+ * shape"; it starts exercising patches again the moment one lands. */
 static void test_schema_patch_application(void) {
     const char *old_path = "/tmp/test_cclaw_schema_patch_old.sqlite";
     const char *new_path = "/tmp/test_cclaw_schema_patch_new.sqlite";
     char junk[192];
-    const char *suffixes[] = { "", "-wal", "-shm", ".v29.bak" };
+    const char *suffixes[] = { "", "-wal", "-shm", ".v31.bak" };
     for (size_t i = 0; i < 4; i++) {
         snprintf(junk, sizeof(junk), "%s%s", old_path, suffixes[i]); unlink(junk);
         snprintf(junk, sizeof(junk), "%s%s", new_path, suffixes[i]); unlink(junk);
     }
 
     size_t sql_len = 0;
-    char *fixture = util_read_file("test/fixtures/schema_v29.sql", &sql_len);
+    char *fixture = util_read_file("test/fixtures/schema_v31.sql", &sql_len);
     assert(fixture != NULL && sql_len > 0);
 
     sqlite3 *old_db = db_open(old_path);
@@ -384,17 +382,12 @@ static void test_schema_patch_application(void) {
     char *err = NULL;
     assert(sqlite3_exec(old_db, fixture, NULL, NULL, &err) == SQLITE_OK);
     free(fixture);
-    set_user_version(old_db, 29);
-    assert(db_schema_state(old_db, NULL) == DB_SCHEMA_UPGRADABLE);
+    set_user_version(old_db, 31);
 
-    assert(db_schema_compat(old_db) == 1);   /* patches applied */
+    assert(db_schema_compat(old_db) == 1);   /* patches applied (none pending) */
     int uv = 0;
     assert(db_schema_state(old_db, &uv) == DB_SCHEMA_CURRENT);
     assert(uv == CCLAW_SCHEMA_VERSION);
-
-    /* insurance snapshot written before the first patch, kept after */
-    snprintf(junk, sizeof(junk), "%s.v29.bak", old_path);
-    assert(access(junk, F_OK) == 0);
 
     sqlite3 *new_db = db_open(new_path);
     assert(new_db != NULL && db_ensure_schema(new_db) == 0);
@@ -402,7 +395,7 @@ static void test_schema_patch_application(void) {
     char *old_shape = schema_shape(old_db);
     char *new_shape = schema_shape(new_db);
     if (strcmp(old_shape, new_shape) != 0) {
-        fprintf(stderr, "patched v29 shape != fresh v%d shape\n-- patched:\n%s\n-- fresh:\n%s\n",
+        fprintf(stderr, "patched v31 shape != fresh v%d shape\n-- patched:\n%s\n-- fresh:\n%s\n",
                 CCLAW_SCHEMA_VERSION, old_shape, new_shape);
         assert(0);
     }

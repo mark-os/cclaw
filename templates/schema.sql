@@ -57,7 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_models_routing ON models(priority, status);
 CREATE TABLE IF NOT EXISTS llm_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,
-  agent_name TEXT NOT NULL DEFAULT 'default',
+  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,
   recall INTEGER NOT NULL DEFAULT 0,
   job_type INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending',
@@ -78,6 +78,11 @@ CREATE TABLE IF NOT EXISTS extensions (
 );
 
 -- ═══ Agents ═══
+-- name is the key everywhere (schema-string-keys decision, 2026-07-18): every
+-- agent_name column below is a real FK with ON UPDATE CASCADE, so agent_rename
+-- is one UPDATE here and SQLite cascades the rest. foreign_keys=ON (db_open).
+-- No ON DELETE clause anywhere: there is no agent-delete verb, so the default
+-- NO ACTION refuses deleting an in-use agent — fail-closed until one exists.
 CREATE TABLE IF NOT EXISTS agents (
   name TEXT PRIMARY KEY,
   primary_model TEXT,
@@ -89,7 +94,8 @@ CREATE TABLE IF NOT EXISTS agents (
   shell_timeout INTEGER DEFAULT 30,
   shell_path TEXT,               -- interpreter for shell_exec's -c; NULL = /bin/sh
   sandbox_profile TEXT DEFAULT 'standard',
-  created_by TEXT,               -- creating agent (update_agent authorization); NULL = operator
+  created_by TEXT REFERENCES agents(name) ON UPDATE CASCADE,
+                                 -- creating agent (update_agent authorization); NULL = operator
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -99,7 +105,7 @@ CREATE TABLE IF NOT EXISTS agents (
 --   'always'       — every call parks for approval
 --   'tool_decides' — predicate decides; absent a predicate, fail-closed to 'always'
 CREATE TABLE IF NOT EXISTS grants (
-  agent_name TEXT NOT NULL,
+  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,
   kind TEXT NOT NULL,
   value TEXT NOT NULL,
   approval_mode TEXT NOT NULL DEFAULT 'silent',
@@ -109,7 +115,7 @@ CREATE TABLE IF NOT EXISTS grants (
 );
 
 CREATE TABLE IF NOT EXISTS agent_extensions (
-  agent_name TEXT,
+  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
   extension_name TEXT NOT NULL,
   config TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
@@ -143,7 +149,7 @@ CREATE TABLE IF NOT EXISTS channel_state (
 CREATE TABLE IF NOT EXISTS channel_routes (
   channel_name TEXT NOT NULL,
   channel_id TEXT NOT NULL DEFAULT '*',
-  agent_name TEXT,
+  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
   session_id INTEGER,
   delivery_mode TEXT NOT NULL DEFAULT 'auto',  -- 'auto' = turn output auto-delivers to the
                                                -- origin chat; 'explicit' = only channel_send
@@ -158,7 +164,7 @@ CREATE TABLE IF NOT EXISTS channel_routes (
 CREATE TABLE IF NOT EXISTS sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT,
-  agent_name TEXT,
+  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
   channel_name TEXT,
   channel_id TEXT,
   parent_session_id INTEGER DEFAULT -1,
@@ -336,7 +342,8 @@ CREATE TABLE IF NOT EXISTS tools (
   description TEXT,
   parameters_json TEXT,
   path TEXT,                                 -- handler file (in the shared store)
-  agent_name TEXT,                           -- owner scope, NULL = global
+  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
+                                             -- owner scope, NULL = global
   enabled INTEGER NOT NULL DEFAULT 1,
   policy TEXT
 );
@@ -375,7 +382,7 @@ CREATE INDEX IF NOT EXISTS idx_hook_directives_session ON hook_directives(sessio
 -- Only the Assistant's seeded AGENT/USER identity blocks ask for 'system'.
 CREATE TABLE IF NOT EXISTS memory_blocks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_name TEXT,
+  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
   label TEXT NOT NULL,
   value TEXT NOT NULL DEFAULT '',
   description TEXT,
@@ -390,7 +397,7 @@ CREATE TABLE IF NOT EXISTS memory_blocks (
 -- Numbered entries within a memory block (block = container of entries)
 CREATE TABLE IF NOT EXISTS memory_entries (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_name TEXT NOT NULL,
+  agent_name TEXT NOT NULL REFERENCES agents(name) ON UPDATE CASCADE,
   block_label TEXT NOT NULL,
   pos INTEGER NOT NULL,
   text TEXT NOT NULL,
@@ -406,7 +413,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_entries_block
 -- the NOT NULL via ALTER). kind is orthogonal: 'task' | 'heartbeat'.
 CREATE TABLE IF NOT EXISTS cron_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  agent_name TEXT,
+  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
   name TEXT NOT NULL,
   cron_expr TEXT NOT NULL,
   run_at INTEGER,                            -- one-shot: fire once at this time

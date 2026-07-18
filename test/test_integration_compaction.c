@@ -20,7 +20,9 @@
 
 static sqlite3 *setup(void) {
     test_db_clean(TEST_DB);
-    return test_db_open(TEST_DB);
+    sqlite3 *db = test_db_open(TEST_DB);
+    if (db) test_seed_agent(db, "default");
+    return db;
 }
 
 static void teardown(sqlite3 *db) {

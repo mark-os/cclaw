@@ -31,6 +31,14 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
 #define TEST_DB "/tmp/test_channel_lifecycle.sqlite"
 #define BUNDLE  "/tmp/test_channel_lifecycle_bundle/echo"
 
+/* agent_extensions.agent_name is an enforced FK (v31): seed the owner agent
+ * before extension_install() ingests the manifest. */
+static sqlite3 *open_seeded(const char *path) {
+    sqlite3 *db = test_db_open(path);
+    if (db) test_seed_agent(db, "default");
+    return db;
+}
+
 static const char *MANIFEST =
     "{\n"
     "  \"name\": \"echo\",\n"
@@ -68,7 +76,7 @@ static void setup_bundle(void) {
 static void test_install_lands_in_draft(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded(TEST_DB);
     assert(db);
 
     char *err = NULL;
@@ -87,13 +95,13 @@ static void test_install_lands_in_draft(void) {
 static void test_check_then_activate(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded(TEST_DB);
     char *err = NULL;
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
     db_close(db);
 
     /* --activate before --check must fail: not yet 'validated'. */
-    db = test_db_open(TEST_DB);
+    db = open_seeded(TEST_DB);
     assert(channel_activate(db, "echo") == -1);
     char *status = channel_get_status(db, "echo");
     assert(status && strcmp(status, "draft") == 0);
@@ -109,7 +117,7 @@ static void test_check_then_activate(void) {
     assert(rc == 0);
     assert(err == NULL);
 
-    db = test_db_open(TEST_DB);
+    db = open_seeded(TEST_DB);
     status = channel_get_status(db, "echo");
     assert(status && strcmp(status, "draft") == 0);
     free(status);
@@ -147,7 +155,7 @@ static void test_check_reports_js_error(void) {
      * channels.status. */
     write_file(BUNDLE "/channel.qjs", "function onInit() { throw new Error('boom'); }\n");
 
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded(TEST_DB);
     char *err = NULL;
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
     db_close(db);
@@ -158,7 +166,7 @@ static void test_check_reports_js_error(void) {
     assert(err != NULL);
     free(err);
 
-    db = test_db_open(TEST_DB);
+    db = open_seeded(TEST_DB);
     char *status = channel_get_status(db, "echo");
     assert(status && strcmp(status, "draft") == 0);
     free(status);
@@ -172,7 +180,7 @@ static void test_check_reports_js_error(void) {
 static void test_launch_all_gate_query(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded(TEST_DB);
     char *err = NULL;
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
     /* Second channel, never checked/activated — stays 'draft'. */
@@ -227,7 +235,7 @@ static char *chan_col(sqlite3 *db, const char *col, const char *name) {
 static void test_swap_and_revert(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded(TEST_DB);
     char *err = NULL;
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
     assert(sqlite3_exec(db,
@@ -270,7 +278,7 @@ static void test_swap_and_revert(void) {
 static void test_notify_admins(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded(TEST_DB);
     char *err = NULL;
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
     /* admin_ids is a registry key (<ext>.admin_ids) since specs/config.md. */

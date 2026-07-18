@@ -187,6 +187,8 @@ int main(void) {
 
     g_db = test_db_open(TEST_DB);
     assert(g_db);
+    /* Acting agent: attach writes agent_extensions.agent_name='default'. */
+    test_seed_agent(g_db, "default");
     int64_t sid = session_create(g_db, "ext-test", NULL, -1, 0);
     assert(sid > 0);
 

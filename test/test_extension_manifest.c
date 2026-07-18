@@ -26,6 +26,19 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision,
 #define BUNDLE  "/tmp/test_ext_manifest_bundle/nws"
 #define STORE   "/tmp/extensions/nws"   /* <dirname(TEST_DB)>/extensions/nws */
 
+/* extension_install writes agent_extensions/grants/cron_jobs rows keyed by
+ * the owner's agent_name — an enforced FK (v31). Seed every owner name this
+ * file installs as before any child rows are written. */
+static sqlite3 *open_seeded(void) {
+    sqlite3 *db = test_db_open(TEST_DB);
+    assert(db);
+    test_seed_agent(db, "default");
+    test_seed_agent(db, "grantee");
+    test_seed_agent(db, "intruder");
+    test_seed_agent(db, "system");   /* extension_install_builtin owner */
+    return db;
+}
+
 static void write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "wb");
     assert(f);
@@ -109,7 +122,7 @@ static void setup_bundle(void) {
 static void test_install_ingests_rows(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded();
     assert(db);
 
     char *err = NULL;
@@ -169,7 +182,7 @@ static void test_install_ingests_rows(void) {
 static void test_reinstall_is_idempotent(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded();
     char *err = NULL;
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
     /* simulate a publish, then re-install: published must survive */
@@ -185,7 +198,7 @@ static void test_reinstall_is_idempotent(void) {
 static void test_config_lifecycle(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded();
     char *err = NULL;
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
 
@@ -354,7 +367,7 @@ static void test_extension_fork_roundtrip(void) {
     rm_rf("/tmp/test_fork_src");
     rm_rf("/tmp/test_fork_ws");
     rm_rf("/tmp/extensions");
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded();
 
     /* System-owned extension: handler + real extension.json — exactly how
      * extension_install_builtin registers the telegram bundle. */
@@ -428,7 +441,7 @@ static void test_extension_fork_roundtrip(void) {
 static void test_install_refuses_owner_takeover(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded();
     char *err = NULL;
     assert(extension_install(db, BUNDLE, "default", &err) == 0);
     free(err); err = NULL;
@@ -455,7 +468,7 @@ static void test_install_builtin(void) {
     test_db_clean(TEST_DB);
     rm_rf("/tmp/extensions/telegram");
     rm_rf("/tmp/extensions/cclaw-docs");
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded();
     assert(db);
     /* Pre-existing agent: the docs install must backfill its attachment. */
     db_agent_upsert(db, "OldTimer", NULL, NULL);
@@ -534,7 +547,7 @@ static void test_manifest_agents(void) {
         "    \"sandbox_profile\": \"restricted\","
         "    \"system_prompt_file\": \"scout.md\","
         "    \"grants\": { \"tools\": [\"web_fetch\"] } } ] }");
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded();
     assert(db);
     db_agent_upsert(db, "Owner", NULL, NULL);
     sqlite3_exec(db, "INSERT INTO grants(agent_name,kind,value)"
@@ -597,7 +610,7 @@ static void test_manifest_agents(void) {
 static void test_install_seeds_grants(void) {
     test_db_clean(TEST_DB);
     setup_bundle();
-    sqlite3 *db = test_db_open(TEST_DB);
+    sqlite3 *db = open_seeded();
     assert(db);
 
     char *err = NULL;

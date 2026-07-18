@@ -6,8 +6,15 @@
 #include <stdio.h>
 #include <string.h>
 
+/* agent_name is an enforced FK (v31): seed the parent row before sessions. */
+static sqlite3 *open_seeded(const char *path) {
+    sqlite3 *db = test_db_open(path);
+    if (db) test_seed_agent(db, "default");
+    return db;
+}
+
 static void test_idle_no_inbox(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
     assert(sid > 0);
 
@@ -20,7 +27,7 @@ static void test_idle_no_inbox(void) {
 }
 
 static void test_idle_with_inbox(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
     inbox_insert(db, sid, "cli", "hello");
 
@@ -38,7 +45,7 @@ static void test_idle_with_inbox(void) {
 }
 
 static void test_llm_complete_stop(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
 
     /* Simulate: session in llm_running, LLM wrote a stop entry */
@@ -56,7 +63,7 @@ static void test_llm_complete_stop(void) {
 }
 
 static void test_tool_running_all_done(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
 
     /* Session in tool_running, no pending tool_calls, iteration 2 */
@@ -74,7 +81,7 @@ static void test_tool_running_all_done(void) {
 }
 
 static void test_max_iterations(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
 
     /* Session at iteration 24 (max=25), tool_running with no pending calls */
@@ -91,7 +98,7 @@ static void test_max_iterations(void) {
 }
 
 static void test_waiting(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
     session_set_state(db, sid, "llm_running");
     session_set_state(db, sid, "tool_running");
@@ -113,7 +120,7 @@ static void test_waiting(void) {
 }
 
 static void test_idle_unanswered_user_leaf(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
 
     /* Simulate a refused dispatch: inbox already consumed into entries (leaf
@@ -133,7 +140,7 @@ static void test_idle_unanswered_user_leaf(void) {
 }
 
 static void test_idle_answered_leaf_noop(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = open_seeded(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
 
     /* Completed turn: assistant entry is the leaf — idle stays NOOP. */

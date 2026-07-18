@@ -257,7 +257,10 @@ sqlite3 *db_open(const char *path) {
     sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA wal_autocheckpoint=1000;", NULL, NULL, NULL);
     sqlite3_busy_handler(db, db_busy_handler, NULL);
-    sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL);
+    /* Enforced since v31: agent_name columns are real FKs (ON UPDATE CASCADE),
+     * so agent_rename is one UPDATE and rename orphans are structurally
+     * impossible (schema-string-keys decision, 2026-07-18). */
+    sqlite3_exec(db, "PRAGMA foreign_keys=ON;", NULL, NULL, NULL);
     return db;
 }
 
@@ -314,18 +317,15 @@ int db_ensure_schema(sqlite3 *db) {
  * per patch. A patch may instead be a C function (fn) for shapes SQL can't
  * express idempotently — exactly one of sql/fn is set. */
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
-    /* Frozen at v29 (2026-07-14): the v12-v29 patch history was collapsed
-     * into the floor (CCLAW_SCHEMA_MIN) — pre-v29 DBs are refused with a
-     * delete-and-restart message. The {0} sentinel keeps the array non-empty
+    /* Frozen at v31 (2026-07-18): agent_name FKs can't be ALTERed into
+     * existing tables, so the FK adoption shipped as a new floor — pre-v31
+     * DBs are refused with a delete-and-restart message (this also absorbed
+     * the v30 created_by patch). The {0} sentinel keeps the array non-empty
      * for C11; the executor skips it. */
     { 0 },
-    /* v30: agents.created_by — who created the agent (NULL = operator).
-     * Pre-v30 agents stay NULL: only the operator can update them, which is
-     * the conservative reading of unknown provenance. */
-    { .version = 30, .sql = "ALTER TABLE agents ADD COLUMN created_by TEXT" },
 };
 
-#define CCLAW_SCHEMA_MIN 29   /* schema freeze 2026-07-14 — no patches below this */
+#define CCLAW_SCHEMA_MIN 31   /* schema freeze 2026-07-18 — no patches below this */
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
     int uv = 0;
@@ -2034,25 +2034,12 @@ int agent_rename(sqlite3 *db, const char *old_name, const char *new_name,
     if (busy > 0) { sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL); return -1; }
     if (conflict) { sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL); return -2; }
 
-    /* Cascade rename across all tables */
+    /* Every agent_name column (and agents.created_by) is an FK with
+     * ON UPDATE CASCADE, so renaming the parent row cascades the whole DB.
+     * config.default_agent is a value in a key-value table — the one
+     * reference no FK can cover. */
     const char *updates[] = {
         "UPDATE agents SET name=?1 WHERE name=?2",
-        /* provenance follows the rename: created_by authorizes update_agent */
-        "UPDATE agents SET created_by=?1 WHERE created_by=?2",
-        "UPDATE grants SET agent_name=?1 WHERE agent_name=?2",
-        "UPDATE agent_extensions SET agent_name=?1 WHERE agent_name=?2",
-        /* owned (per-agent) extension tools — else the payload's
-         * "agent_name IS NULL OR agent_name=?" lookup misses them after a
-         * rename and the agent's own tools vanish from its list. */
-        "UPDATE tools SET agent_name=?1 WHERE agent_name=?2",
-        "UPDATE channel_routes SET agent_name=?1 WHERE agent_name=?2",
-        "UPDATE sessions SET agent_name=?1 WHERE agent_name=?2",
-        /* a queued job (usually blocked by the non-idle-session check above,
-         * but don't rely on that coupling) */
-        "UPDATE llm_jobs SET agent_name=?1 WHERE agent_name=?2",
-        "UPDATE cron_jobs SET agent_name=?1 WHERE agent_name=?2",
-        "UPDATE memory_blocks SET agent_name=?1 WHERE agent_name=?2",
-        "UPDATE memory_entries SET agent_name=?1 WHERE agent_name=?2",
         /* match effective value: a NULL override still means the default */
         "UPDATE config SET value=?1 WHERE key='default_agent' AND COALESCE(value, default_value)=?2",
     };

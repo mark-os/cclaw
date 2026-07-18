@@ -9,6 +9,13 @@
 
 static const char *DB_PATH = "/tmp/test_cclaw_recall.db";
 
+/* agent_name is an enforced FK (v31): seed the parent row before sessions. */
+static sqlite3 *open_seeded(const char *path) {
+    sqlite3 *db = test_db_open(path);
+    if (db) test_seed_agent(db, "default");
+    return db;
+}
+
 static void add_user_msg(sqlite3 *db, int64_t sid, const char *text) {
     Message m = {.role = ROLE_USER, .content = (char *)text};
     entry_append_with_turn(db, sid, &m, 1);
@@ -17,7 +24,7 @@ static void add_user_msg(sqlite3 *db, int64_t sid, const char *text) {
 /* Porter stemming: "configure" must match "configured" from another session */
 static void test_stemming_match(void) {
     test_db_clean(DB_PATH);
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
 
     int64_t s1 = session_create(db, "a", "default", -1, 0);
@@ -42,7 +49,7 @@ static void test_stemming_match(void) {
  * when every keyword is corpus-common. */
 static void test_dynamic_stopwords_silence(void) {
     test_db_clean(DB_PATH);
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
 
     int64_t s1 = session_create(db, "a", "default", -1, 0);
@@ -71,7 +78,7 @@ static void test_dynamic_stopwords_silence(void) {
 /* No hits at all → NULL, never an empty wrapper */
 static void test_no_hits_silent(void) {
     test_db_clean(DB_PATH);
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
 
     int64_t s1 = session_create(db, "a", "default", -1, 0);
@@ -88,7 +95,7 @@ static void test_no_hits_silent(void) {
 /* Current session is excluded from results */
 static void test_excludes_own_session(void) {
     test_db_clean(DB_PATH);
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
 
     int64_t s1 = session_create(db, "a", "default", -1, 0);

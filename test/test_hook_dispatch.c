@@ -80,6 +80,9 @@ static int fx_open(Fx *fx, const char *db_path) {
     test_db_clean(db_path);
     fx->db = test_db_open(db_path);
     if (!fx->db) return -1;
+    /* agent_extensions.agent_name is an enforced FK (v31): every seed_hook()
+     * in this file installs for agent "test" — create the parent row first. */
+    test_seed_agent(fx->db, "test");
     fx->rt = js_runtime_create();
     if (!fx->rt) return -1;
     extension_ctx_init(&fx->ext_ctx, fx->rt);

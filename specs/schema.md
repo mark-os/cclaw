@@ -2,7 +2,45 @@
 
 Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v30 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v29 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-14 freeze collapsed earlier patch history into it).
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v31 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v31 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-18 freeze collapsed earlier patch history into it).
+
+## String keys and the agent_name FKs (decided 2026-07-18)
+
+Names, not integer ids, are the join keys across the schema (`agent_name`,
+`extension_name`, `channel_name`) — a deliberate choice, revisited and kept
+after `agent_rename` was caught orphaning tables: names keep the DB readable
+and debuggable, and agents had integer ids once (dropped in the 2026-06-08
+redesign) without the ids paying their way. The rule that makes string keys
+safe: **an entity that has a rename verb gets real foreign keys; an entity
+that is create-and-swap-only doesn't need them.**
+
+Agents are the only entity with a rename verb, so as of v31 every
+`agent_name` column (plus `agents.created_by`) is a declared
+`REFERENCES agents(name) ON UPDATE CASCADE` FK and `db_open()` sets
+`PRAGMA foreign_keys=ON`. Consequences:
+
+- `agent_rename` is one `UPDATE agents SET name=…` — SQLite cascades every
+  child table atomically. The old hand-maintained cascade list (which twice
+  shipped missing tables) is gone. The only extra statement is
+  `config.default_agent`, a value in a key-value table no FK can reach.
+- Inserting a child row for a nonexistent agent now fails loudly —
+  referential integrity at write time, not just rename time.
+- **No `ON DELETE` clause anywhere**: there is no agent-delete verb, so the
+  default `NO ACTION` refuses deleting an in-use agent. When a delete verb is
+  designed, per-table delete semantics get decided then (note:
+  `tools.agent_name` NULL means *global*, so `SET NULL` there would silently
+  globalize a dead agent's tools — it must not be the default choice).
+- The FK adoption shipped as a new schema floor (v31, delete-and-restart),
+  not a `schema_patches[]` migration — SQLite can't `ALTER` an FK into an
+  existing table.
+- Guard: `test_fk_shape_audit` (test/test_agent_rename.c) fails if any table
+  with an `agent_name` column lacks the FK clause; a behavioral seed-and-
+  rename audit backs it up.
+- Outside the DB, two references stay name-keyed by hand: the workspace dir
+  `agents/<name>/` and `config.default_agent` — the rename verb owns both.
+- `extension_name`/`channel_name` remain convention (FK-less): no rename
+  verbs exist for them. If one grows a rename verb, it inherits this same
+  FK treatment first.
 
 ---
 
@@ -80,7 +118,7 @@ Transient work queue. The daemon poll loop writes one row per LLM request; a wor
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `session_id` | INTEGER NOT NULL | |
-| `agent_name` | TEXT NOT NULL DEFAULT 'default' | |
+| `agent_name` | TEXT NOT NULL | FK → `agents(name)` ON UPDATE CASCADE |
 | `recall` | INTEGER NOT NULL DEFAULT 0 | whether to run FTS recall before this request |
 | `job_type` | INTEGER NOT NULL DEFAULT 0 | 0 = normal turn, others reserved |
 | `status` | TEXT NOT NULL DEFAULT 'pending' | pending / claimed / done |
@@ -151,7 +189,7 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 | `shell_timeout` | INTEGER DEFAULT 30 | seconds |
 | `shell_path` | TEXT | interpreter for shell_exec's `-c`; NULL = `/bin/sh` |
 | `sandbox_profile` | TEXT DEFAULT 'standard' | host / trusted / standard / restricted |
-| `created_by` | TEXT | creating agent (`update_agent` authorization); NULL = operator |
+| `created_by` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; creating agent (`update_agent` authorization); NULL = operator |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 ---
@@ -162,7 +200,7 @@ Normalized capability grants for agents. Replaces the old `agent_config` key-val
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `agent_name` | TEXT NOT NULL | |
+| `agent_name` | TEXT NOT NULL | FK → `agents(name)` ON UPDATE CASCADE |
 | `kind` | TEXT NOT NULL | capability axis: `tool`, `host`, `read_path`, `write_path` |
 | `value` | TEXT NOT NULL | the granted name/pattern |
 | `approval_mode` | TEXT NOT NULL DEFAULT 'silent' | only for kind='tool' (see below) |
@@ -249,7 +287,7 @@ Links agents to their enabled extensions.
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `agent_name` | TEXT | NULL = global |
+| `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; NULL = global |
 | `extension_name` | TEXT NOT NULL | FK-ish to `extensions.name` |
 | `config` | TEXT | JSON config blob |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
@@ -301,7 +339,7 @@ Routes inbound channel messages to agents/sessions. Replaces the old `channel_bi
 |--------|------|-------|
 | `channel_name` | TEXT NOT NULL | |
 | `channel_id` | TEXT NOT NULL DEFAULT '*' | `*` = default route for the channel |
-| `agent_name` | TEXT | target agent |
+| `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; target agent |
 | `session_id` | INTEGER | pin to a specific session (optional) |
 | `delivery_mode` | TEXT NOT NULL DEFAULT 'auto' | `auto` = turn output auto-delivers to the origin chat; `explicit` = only `channel_send` |
 | `tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Copied onto `sessions.tool_filter` at session creation only — frozen like sub-agent filters; later route edits don't retro-apply |
@@ -315,7 +353,7 @@ Routes inbound channel messages to agents/sessions. Replaces the old `channel_bi
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `name` | TEXT | human label |
-| `agent_name` | TEXT | scopes session to agent |
+| `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; scopes session to agent |
 | `channel_name` | TEXT | originating channel |
 | `channel_id` | TEXT | originating channel id |
 | `parent_session_id` | INTEGER DEFAULT -1 | sub-agent parent (-1 = top-level) |
@@ -477,7 +515,7 @@ Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools poin
 | `description` | TEXT | |
 | `parameters_json` | TEXT | JSON Schema for arguments |
 | `path` | TEXT | handler file in extension store |
-| `agent_name` | TEXT | owner scope; NULL = global |
+| `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; owner scope; NULL = global |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `policy` | TEXT | JSON restrict-only argument policy |
 
@@ -522,7 +560,7 @@ Agent-scoped named memory blocks. Each block has a label, char limit, and option
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `agent_name` | TEXT | NULL = global |
+| `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; NULL = global |
 | `label` | TEXT NOT NULL | |
 | `value` | TEXT NOT NULL DEFAULT '' | |
 | `description` | TEXT | tells agent what block is for |
@@ -542,7 +580,7 @@ Numbered entries within a memory block (the block is the container; entries are 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `agent_name` | TEXT NOT NULL | |
+| `agent_name` | TEXT NOT NULL | FK → `agents(name)` ON UPDATE CASCADE |
 | `block_label` | TEXT NOT NULL | |
 | `pos` | INTEGER NOT NULL | ordering position |
 | `text` | TEXT NOT NULL | |
@@ -639,7 +677,7 @@ schedule and controls payload/targeting.
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
-| `agent_name` | TEXT | |
+| `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE |
 | `name` | TEXT NOT NULL | |
 | `cron_expr` | TEXT NOT NULL | `''` sentinel when `run_at` or `interval_s` is used instead (kept NOT NULL — SQLite can't relax it without a table rebuild) |
 | `run_at` | INTEGER | one-shot fire time; row is deleted (not rescheduled) once fired |

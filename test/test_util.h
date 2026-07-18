@@ -44,6 +44,17 @@ static inline sqlite3 *test_db_open(const char *path) {
     return db;
 }
 
+/* agent_name columns are enforced FKs (v31) — a test seeding rows for an
+ * agent must create the parent row first, like every runtime path does. */
+static inline void test_seed_agent(sqlite3 *db, const char *name) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO agents(name) VALUES(?)",
+                           -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+}
+
 /* Tier-leaf drivers for sandboxed tools: extract args_json into wire params
  * exactly as the dispatching parent does (tool_args_extract on a :memory:
  * db; NULL schema — every top-level key ships, file_edit's edits flatten),

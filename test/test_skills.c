@@ -169,6 +169,7 @@ int main(void) {
 
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
+    test_seed_agent(db, "Ag");  /* agent_extensions.agent_name FK parent */
     assert(config_registry_sync(db) == 0);
     /* point discovery at the test tree, not the real ~ dirs */
     assert(config_set(db, "skills_dirs", "[\"" ROOT "/global\"]") == 0);

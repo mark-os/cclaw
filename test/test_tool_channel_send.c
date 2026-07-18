@@ -38,6 +38,9 @@ int main(void) {
 
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
+    test_seed_agent(db, "Alice");
+    test_seed_agent(db, "Bob");
+    test_seed_agent(db, "Carol");
 
     assert(sqlite3_exec(db,
         "INSERT INTO sessions(id, agent_name, channel_name, channel_id)"

@@ -12,8 +12,10 @@ static sqlite3 *setup(void) {
     test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
-    /* Seed an agent */
+    /* Seed an agent, plus one it created (created_by is a self-FK and must
+     * follow the rename) */
     sqlite3_exec(db, "INSERT INTO agents(name) VALUES('OldAgent')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO agents(name,created_by) VALUES('Child','OldAgent')", NULL, NULL, NULL);
     /* Seed related rows */
     sqlite3_exec(db, "INSERT INTO sessions(name,agent_name,state) VALUES('s1','OldAgent','idle')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO agent_extensions(agent_name,extension_name) VALUES('OldAgent','telegram')", NULL, NULL, NULL);
@@ -47,6 +49,8 @@ static void test_successful_rename(void) {
     assert(count_rows(db, "SELECT COUNT(*) FROM cron_jobs WHERE agent_name='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM memory_blocks WHERE agent_name='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM config WHERE key='default_agent' AND value='NewAgent'") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE created_by='NewAgent'") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE created_by='OldAgent'") == 0);
 
     db_close(db);
     printf("  PASS: test_successful_rename\n");
@@ -110,12 +114,47 @@ static void test_not_found(void) {
     printf("  PASS: test_not_found\n");
 }
 
-/* Self-auditing cascade check (schema-string-keys project, step 4): the
- * rename cascade is a hardcoded list, so a new table with an agent_name
- * column added to schema.sql without a matching UPDATE silently orphans on
- * rename. Enumerate every agent_name table from the live schema, seed a row
- * in each generically, rename, and assert nothing survives under the old
- * name — turning the manual checklist into a failing test. */
+/* Schema-shape audit (schema-string-keys decision, 2026-07-18): the rename
+ * cascade is FK-driven, so the structural invariant is "every agent_name
+ * column carries a REFERENCES agents(name) ON UPDATE CASCADE clause". A new
+ * table that forgets the clause silently reintroduces rename orphans — this
+ * fails the build instead. */
+static void test_fk_shape_audit(void) {
+    test_db_clean(DB_PATH);
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT m.name FROM sqlite_master m"
+        " WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND m.name<>'agents'"
+        "   AND EXISTS(SELECT 1 FROM pragma_table_info(m.name) WHERE name='agent_name')"
+        "   AND NOT EXISTS(SELECT 1 FROM pragma_foreign_key_list(m.name)"
+        "                  WHERE \"from\"='agent_name' AND \"table\"='agents'"
+        "                    AND \"to\"='name' AND on_update='CASCADE')",
+        -1, &s, NULL) == SQLITE_OK);
+    int bad = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        printf("  MISSING FK: %s.agent_name lacks REFERENCES agents(name)"
+               " ON UPDATE CASCADE\n", (const char *)sqlite3_column_text(s, 0));
+        bad++;
+    }
+    sqlite3_finalize(s);
+    assert(bad == 0);
+
+    /* created_by is the same invariant on agents itself */
+    assert(count_rows(db,
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('agents')"
+        " WHERE \"from\"='created_by' AND \"table\"='agents'"
+        "   AND \"to\"='name' AND on_update='CASCADE'") == 1);
+
+    db_close(db);
+    printf("  PASS: test_fk_shape_audit\n");
+}
+
+/* Behavioral belt-and-braces for the shape audit above: enumerate every
+ * agent_name table from the live schema, seed a row in each generically,
+ * rename, and assert nothing survives under the old name. */
 static void seed_generic_row(sqlite3 *db, const char *table, const char *agent) {
     /* Build INSERT(cols) VALUES(vals) from pragma_table_info: agent_name gets
      * `agent`, other NOT-NULL-without-default non-autoincrement columns get a
@@ -198,7 +237,7 @@ static void test_rename_no_orphans_self_audit(void) {
         int orphans = count_rows(db, q);
         if (orphans != 0)
             printf("  ORPHAN: %d row(s) left in %s under OldAgent"
-                   " — add it to agent_rename's cascade\n", orphans, tables[i]);
+                   " — its agent_name FK isn't cascading\n", orphans, tables[i]);
         assert(orphans == 0);
     }
     assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE name='OldAgent'") == 0);
@@ -211,6 +250,7 @@ int main(void) {
     TEST_INIT();
     printf("test_agent_rename:\n");
     test_successful_rename();
+    test_fk_shape_audit();
     test_rename_no_orphans_self_audit();
     test_busy_rejection();
     test_busy_allows_requesting_session();

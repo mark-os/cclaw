@@ -92,6 +92,18 @@ static void test_event_insert(sqlite3 *db, const char *channel_name, const char 
     sqlite3_finalize(s);
 }
 
+/* agent_name columns (channel_routes, sessions) are enforced FKs (v31):
+ * seed every agent this file routes to before any child rows land.
+ * "Assistant" is the gate's default agent for admin/allow_unknown senders. */
+static sqlite3 *open_seeded(const char *path) {
+    sqlite3 *db = test_db_open(path);
+    if (db) {
+        test_seed_agent(db, "testagent");
+        test_seed_agent(db, "Assistant");
+    }
+    return db;
+}
+
 static const char *DB_PATH = "/tmp/test_channel_events_daemon.db";
 static const char *WORK_DIR = "/tmp/test_channel_events_work";
 
@@ -124,7 +136,7 @@ static void chdir_restore(void) {
  * session is created + stamped, event routes to inbox, event row is deleted. */
 static void test_channel_events_routing(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -172,7 +184,7 @@ static void test_channel_events_routing(void) {
  * event's actual channel_id, not "*". */
 static void test_channel_events_wildcard_fallback(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -196,7 +208,7 @@ static void test_channel_events_wildcard_fallback(void) {
  * The event row is still consumed. */
 static void test_channel_events_no_binding(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -232,7 +244,7 @@ static void test_gate_channel_seed(sqlite3 *db, const char *name, const char *ad
  * allow_unknown=1 restores the open fallback. */
 static void test_channel_events_gate(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -302,7 +314,7 @@ static void test_channel_events_gate(void) {
  * a deleted session falls back to find-latest. */
 static void test_channel_events_session_pin(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -347,7 +359,7 @@ static void test_channel_events_session_pin(void) {
  * Payloads without $.text (custom channels) pass through unchanged. */
 static void test_channel_events_plain_text_content(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -394,7 +406,7 @@ static void test_channel_events_plain_text_content(void) {
  * matching binding in place. */
 static void test_channel_events_non_message_type(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -418,7 +430,7 @@ static void test_channel_events_non_message_type(void) {
  * lands in the inbox, and the approval stays pending. */
 static void test_channel_events_approval_decision(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -569,7 +581,7 @@ static void test_channel_events_approval_decision(void) {
 static void test_channel_events_default_binding(void) {
     setup();
 
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
 
     /* Set up "default" binding for channel type */
@@ -594,7 +606,7 @@ static void test_channel_events_default_binding(void) {
 static void test_channels_table(void) {
     setup();
 
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
 
     /* Insert a channel row */
@@ -638,7 +650,7 @@ static void test_channels_table(void) {
  * silently no-ops for channel-less ones (CLI, sub-agents). */
 static void test_notify_session(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
 
     int64_t bound = session_create(db, "s-bound", "testagent", -1, 0);
@@ -697,7 +709,7 @@ static char *test_session_tool_filter(sqlite3 *db, int64_t sid) {
 /* 1. Exact route with tool_filter → new session inherits that filter. */
 static void test_tool_filter_exact_route(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -724,7 +736,7 @@ static void test_tool_filter_exact_route(void) {
  *     session filter is NULL. */
 static void test_tool_filter_wildcard_precedence(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -759,7 +771,7 @@ static void test_tool_filter_wildcard_precedence(void) {
 /* 3. Admin/allow_unknown sender (no route row) → session tool_filter is NULL. */
 static void test_tool_filter_admin_unrouted(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
@@ -802,7 +814,7 @@ static void test_tool_filter_admin_unrouted(void) {
  *    does NOT retro-apply to the existing session. */
 static void test_tool_filter_no_retro_apply(void) {
     setup();
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 

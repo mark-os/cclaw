@@ -10,9 +10,19 @@
 #include <string.h>
 #include <time.h>
 
-static void test_cron_set_valid(void) {
+/* Every agent name this file writes into cron_jobs/sessions rows. */
+static sqlite3 *open_seeded(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
+    test_seed_agent(db, "test_agent");
+    test_seed_agent(db, "A");
+    test_seed_agent(db, "agent_a");
+    test_seed_agent(db, "agent_b");
+    return db;
+}
+
+static void test_cron_set_valid(void) {
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     assert(sid > 0);
 
@@ -29,8 +39,7 @@ static void test_cron_set_valid(void) {
 }
 
 static void test_cron_set_invalid_expr(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
@@ -44,8 +53,7 @@ static void test_cron_set_invalid_expr(void) {
 }
 
 static void test_cron_set_missing_fields(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
@@ -58,8 +66,7 @@ static void test_cron_set_missing_fields(void) {
 }
 
 static void test_cron_set_oneshot_valid(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", "A", -1, 0);
     int64_t now = (int64_t)time(NULL);
 
@@ -89,8 +96,7 @@ static void test_cron_set_oneshot_valid(void) {
 }
 
 static void test_cron_set_neither_schedule(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", "A", -1, 0);
     ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "A"};
     char *result = tool_cron_set_handler("{\"name\":\"x\",\"task\":\"t\"}", &ctx);
@@ -101,8 +107,7 @@ static void test_cron_set_neither_schedule(void) {
 }
 
 static void test_cron_set_both_schedules(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", "A", -1, 0);
     ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "A"};
     char *result = tool_cron_set_handler(
@@ -115,8 +120,7 @@ static void test_cron_set_both_schedules(void) {
 }
 
 static void test_cron_set_negative_seconds(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", "A", -1, 0);
     ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "A"};
     char *result = tool_cron_set_handler(
@@ -128,8 +132,7 @@ static void test_cron_set_negative_seconds(void) {
 }
 
 static void test_cron_set_per_session_cap(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", "A", -1, 0);
     assert(config_set(db, "cron_max_jobs_per_session", "1") == 0);
 
@@ -149,8 +152,7 @@ static void test_cron_set_per_session_cap(void) {
 }
 
 static void test_cron_list_empty(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
@@ -163,8 +165,7 @@ static void test_cron_list_empty(void) {
 }
 
 static void test_cron_list_with_jobs(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     cron_add(db, "test_agent", "j1", "0 * * * *", 0, 0, sid, "task1");
@@ -182,8 +183,7 @@ static void test_cron_list_with_jobs(void) {
 }
 
 static void test_cron_remove_valid(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     int64_t jid = cron_add(db, "test_agent", "rm_me", "0 * * * *", 0, 0, sid, "bye");
@@ -207,8 +207,7 @@ static void test_cron_remove_valid(void) {
 }
 
 static void test_cron_remove_nonexistent(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     ToolCronCtx ctx = {.db = db, .session_id = sid, .agent_name = "test_agent"};
@@ -222,8 +221,7 @@ static void test_cron_remove_nonexistent(void) {
 
 /* review-2 F2: an agent cannot remove another agent's job via the tool */
 static void test_cron_remove_cross_agent(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     int64_t jid = cron_add(db, "agent_a", "a_job", "0 * * * *", 0, 0, sid, "hi");
@@ -252,8 +250,7 @@ static void test_cron_remove_cross_agent(void) {
 }
 
 static void test_cron_register(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
+    sqlite3 *db = open_seeded();
 
     ToolRegistry reg;
     tools_init(&reg);

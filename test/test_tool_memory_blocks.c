@@ -13,6 +13,7 @@
 static sqlite3 *setup_db(void) {
     sqlite3 *db = test_db_open(":memory:");
     if (!db) { FAIL("db_open"); }
+    test_seed_agent(db, "test_agent");
     return db;
 }
 

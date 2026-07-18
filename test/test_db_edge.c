@@ -66,6 +66,7 @@ static void test_entry_append_with_turn_stores_turn_id(void) {
 static void test_session_get_agent_name(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
+    test_seed_agent(db, "myagent");  /* sessions.agent_name FK (v31) */
     int64_t sid = session_create(db, "t", "myagent", -1, 0);
     char *name = session_get_agent_name(db, sid);
     assert(name != NULL);

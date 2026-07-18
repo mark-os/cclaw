@@ -10,9 +10,23 @@
 
 #define TEST_DB "/tmp/test_cclaw_memblocks.sqlite"
 
-static void test_create_and_get(void) {
+/* memory_blocks/memory_entries.agent_name are FKs (v31) — seed every agent
+ * name this file writes child rows for before any test body runs. */
+static sqlite3 *open_seeded(void) {
     sqlite3 *db = test_db_open(TEST_DB);
     assert(db);
+    test_seed_agent(db, "TestAgent");
+    test_seed_agent(db, "OtherAgent");
+    test_seed_agent(db, "Agent1");
+    test_seed_agent(db, "Agent2");
+    test_seed_agent(db, "Agent");
+    test_seed_agent(db, "Myagent");
+    test_seed_agent(db, "Testagent");
+    return db;
+}
+
+static void test_create_and_get(void) {
+    sqlite3 *db = open_seeded();
 
     int64_t id = memory_block_create(db, "TestAgent", "persona",
                                      "Agent identity", "I am helpful", 5000, NULL);
@@ -45,8 +59,7 @@ static void test_create_and_get(void) {
 }
 
 static void test_list(void) {
-    sqlite3 *db = test_db_open(TEST_DB);
-    assert(db);
+    sqlite3 *db = open_seeded();
 
     memory_block_create(db, "Agent1", "a", "d1", "v1", 5000, NULL);
     memory_block_create(db, "Agent1", "b", "d2", "v2", 5000, NULL);
@@ -73,8 +86,7 @@ static void test_list(void) {
 }
 
 static void test_set_value(void) {
-    sqlite3 *db = test_db_open(TEST_DB);
-    assert(db);
+    sqlite3 *db = open_seeded();
 
     memory_block_create(db, "Agent", "notes", "my notes", "", 20, NULL);
 
@@ -104,8 +116,7 @@ static void test_set_value(void) {
 }
 
 static void test_read_only(void) {
-    sqlite3 *db = test_db_open(TEST_DB);
-    assert(db);
+    sqlite3 *db = open_seeded();
 
     int64_t id = memory_block_create(db, "Agent", "instructions", "standing orders", "do X", 5000, NULL);
     assert(id > 0);
@@ -131,8 +142,7 @@ static void test_read_only(void) {
 }
 
 static void test_seed(void) {
-    sqlite3 *db = test_db_open(TEST_DB);
-    assert(db);
+    sqlite3 *db = open_seeded();
 
     const char *json =
         "{\"memory_blocks\":["
@@ -170,8 +180,7 @@ static void test_seed(void) {
 }
 
 static void test_prompt_injection(void) {
-    sqlite3 *db = test_db_open(TEST_DB);
-    assert(db);
+    sqlite3 *db = open_seeded();
 
     /* Seed agent with system prompt */
     db_agent_upsert(db, "Testagent", NULL, "You are a test agent.");

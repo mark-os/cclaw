@@ -118,6 +118,8 @@ static void test_load_extension_tools_idempotent(void) {
     test_db_clean(TOOLS_DB_PATH);
     sqlite3 *db = test_db_open(TOOLS_DB_PATH);
     assert(db);
+    /* agent_extensions.agent_name FK parent. */
+    test_seed_agent(db, "Alice");
 
     /* Seed the required DB rows: extensions, agent_extensions, tools. */
     int rc = sqlite3_exec(db,

@@ -39,6 +39,7 @@ static void test_llm_jobs_claim(void) {
     test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
+    test_seed_agent(db, "default");
 
     /* Insert a job */
     sqlite3_stmt *ins;

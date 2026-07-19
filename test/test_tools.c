@@ -89,6 +89,49 @@ static void test_handler_dispatch(void) {
     printf("  PASS test_handler_dispatch\n");
 }
 
+static int free_fn_called = 0;
+static void test_free_fn(void *data) {
+    (void)data;
+    free_fn_called = 1;
+}
+
+
+static void test_free_fn_called_on_cleanup(void) {
+    ToolRegistry reg;
+    tools_init(&reg);
+    tools_register(&reg, "test", NULL, NULL, dummy_handler, (void *)0x1);
+    reg.entries[0].free_fn = test_free_fn;
+
+    free_fn_called = 0;
+    tools_free(&reg);
+    assert(free_fn_called == 1);
+    printf("  PASS test_free_fn_called_on_cleanup\n");
+}
+
+static void test_register_null_name(void) {
+    ToolRegistry reg;
+    tools_init(&reg);
+    int rc = tools_register(&reg, NULL, "desc", NULL, dummy_handler, NULL);
+    assert(rc == -1);
+    assert(reg.count == 0);
+    printf("  PASS test_register_null_name\n");
+}
+
+static void test_register_null_reg(void) {
+    int rc = tools_register(NULL, "test", NULL, NULL, dummy_handler, NULL);
+    assert(rc == -1);
+    printf("  PASS test_register_null_reg\n");
+}
+
+static void test_lookup_null_args(void) {
+    ToolRegistry reg;
+    tools_init(&reg);
+    assert(tools_lookup(NULL, "x") == NULL);
+    assert(tools_lookup(&reg, NULL) == NULL);
+    printf("  PASS test_lookup_null_args\n");
+}
+
+
 static const char *TOOLS_DB_PATH = "/tmp/test_cclaw_tools_ext.db";
 
 /* tools_load_extension_tools: loads extension tools into the registry from
@@ -148,6 +191,10 @@ int main(void) {
     test_lookup_miss();
     test_register_full();
     test_handler_dispatch();
+    test_free_fn_called_on_cleanup();
+    test_register_null_name();
+    test_register_null_reg();
+    test_lookup_null_args();
     test_load_extension_tools_idempotent();
     printf("All tool registry tests passed.\n");
     return 0;

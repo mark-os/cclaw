@@ -201,6 +201,43 @@ static void test_startup_integration(void) {
     printf("  PASS: startup integration (load_or_create + set_key + persist)\n");
 }
 
+/* Delete key file → next load creates a NEW key; decrypt of old secrets
+ * fails gracefully (NULL, no crash). */
+static void test_deleted_key_file(void) {
+    char tmpdir[] = "/tmp/cclaw_t176_XXXXXX";
+    assert(mkdtemp(tmpdir) != NULL);
+
+    char db_path[256], key_path[256];
+    snprintf(db_path, sizeof(db_path), "%s/test.db", tmpdir);
+    snprintf(key_path, sizeof(key_path), "%s/.cclaw_key", tmpdir);
+
+    sqlite3 *db = test_db_open(db_path);
+    assert(db != NULL);
+    uint8_t key[32];
+    assert(secret_key_load_or_create(db_path, key) == 0);
+    db_set_secret_key(key);
+    assert(db_secret_set(db, "TEST_KEY", "secret-value", "operator", "system") == 0);
+    db_close(db);
+
+    unlink(key_path);
+
+    db = test_db_open(db_path);
+    assert(db != NULL);
+    uint8_t new_key[32];
+    assert(secret_key_load_or_create(db_path, new_key) == 0);
+    db_set_secret_key(new_key);
+    assert(memcmp(key, new_key, 32) != 0);      /* fresh random key */
+
+    char *dec = db_secret_get_system(db, "TEST_KEY");
+    assert(dec == NULL);                        /* wrong key: graceful NULL */
+    db_close(db);
+
+    unlink(key_path);
+    test_db_clean(db_path);
+    rmdir(tmpdir);
+    printf("  PASS: deleted key file fails gracefully\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_secret:\n");
@@ -213,6 +250,7 @@ int main(void) {
     test_db_secret_roundtrip();
     test_key_file_create_and_load();
     test_startup_integration();
+    test_deleted_key_file();
     printf("All secret tests passed.\n");
     return 0;
 }

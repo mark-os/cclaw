@@ -208,7 +208,7 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 ```
 
 - **The real DB is `~/.cclaw/cclaw.db`, not `./cclaw.db`.** `resolve_db_path()` returns `$HOME/.cclaw/cclaw.db` when `$HOME` is set (override with `CCLAW_DB_PATH`). "Delete the db" means that path — and its `-wal`/`-shm` siblings.
-- **Schema changes need a forward patch.** When `templates/schema.sql` changes shape, bump `CCLAW_SCHEMA_VERSION` (`src/cclaw.h`) and append a matching entry to `schema_patches[]` (`src/db.c`) that brings a live DB from the previous version to the new one. Startup auto-applies pending patches; DBs newer than the build, or older than the floor `CCLAW_SCHEMA_MIN` (v31 — the 2026-07-18 freeze collapsed prior patch history into it, so the patch list is currently empty), are refused with a delete-and-restart message. A schema.sql change *without* the bump + patch leaves existing DBs stamped current but shaped old — missing columns, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang.
+- **Schema changes need a forward patch.** When `templates/schema.sql` changes shape, bump `CCLAW_SCHEMA_VERSION` (`src/cclaw.h`) and append a matching entry to `schema_patches[]` (`src/db.c`) that brings a live DB from the previous version to the new one. Startup auto-applies pending patches; DBs newer than the build, or older than the floor `CCLAW_SCHEMA_MIN` (v31 — the 2026-07-18 freeze collapsed prior patch history into it), are refused with a delete-and-restart message. A schema.sql change *without* the bump + patch leaves existing DBs stamped current but shaped old — missing columns, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang.
 - **`-p` with piped/non-tty stdin auto-selects the most recent session**; `-s <id>` pins one. Useful for scripted multi-turn testing (turn 1 creates the session, reuse its id for turn 2+).
 
 Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
@@ -229,7 +229,7 @@ Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
   is `entries` (roles 0=system 1=user 2=assistant 3=tool 4=compaction); a stuck
   session shows a non-idle `sessions.state` with a dead `owner_instance`.
 
-> **Workspace must be set in `config_load()`, not only `config_load_from_env()`.** `main()` loads config via `config_load(db)`; if `cfg->workspace` is left NULL there, file tools, the proxy mount, and `workspace_init()` all fail with "no workspace configured" even though the env path looks fine. Both loaders set the same default.
+> **Workspace must always be set by `config_load()`.** If `cfg->workspace` is left NULL, file tools, the proxy mount, and `workspace_init()` all fail with "no workspace configured" even though the env path looks fine.
 
 ## Dependencies
 

@@ -41,7 +41,9 @@ void qjs_set_interrupt_limit(QjsRuntime *qrt, int max_instructions);
 JSContext *qjs_context_create(QjsRuntime *qrt, QjsProfile profile);
 
 /* Eval code and return result as a heap-allocated string. NULL on error.
- * Caller frees. */
+ * Caller frees. Test-only harness for qjs_resolve/qjs_get_exception_string
+ * (test_quickjs) — production eval paths need the raw JSValue and inline
+ * their own JS_Eval. */
 char *qjs_eval_to_string(JSContext *ctx, const char *code, const char *filename);
 
 /* Parse JSON string and set as a named global property. Returns 0 on success. */

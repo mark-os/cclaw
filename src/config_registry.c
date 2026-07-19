@@ -118,11 +118,6 @@ int config_default_int(const char *key) {
     return d ? atoi(d) : 0;
 }
 
-double config_default_double(const char *key) {
-    const char *d = config_default(key);
-    return d ? atof(d) : 0.0;
-}
-
 int config_registry_sync(sqlite3 *db) {
     if (!db) return -1;
     sqlite3_stmt *stmt;

@@ -72,11 +72,6 @@ ToolEntry *tools_lookup(ToolRegistry *reg, const char *name);
  * recipe is the single source of truth for how the dispatcher runs a tool. */
 void tools_set_recipe(ToolRegistry *reg, const char *name, ToolRecipe recipe);
 
-/* Get schema array for LLM request. Writes schemas into caller-provided array.
- * Returns number of schemas written (up to out_cap). */
-size_t tools_schemas(ToolRegistry *reg, ToolSchema *out, size_t out_cap);
-
-
 /* Sync built-in tool schemas to the DB `tools` table (extension_name=NULL).
  * parameters_json is code-owned: force-overwrite it from
  * the registry. description is DB-editable: fill only if the row is

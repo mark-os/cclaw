@@ -184,54 +184,6 @@ void admin_tool_names_free(char **names, size_t count) {
     free(names);
 }
 
-int admin_list_providers(sqlite3 *db, AdminProvider **out, size_t *out_count) {
-    if (!db || !out || !out_count) return -1;
-    *out = NULL;
-    *out_count = 0;
-
-    const char *sql = "SELECT name, default_model, base_url FROM providers ORDER BY priority;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-
-    size_t cap = 4, count = 0;
-    AdminProvider *providers = calloc(cap, sizeof(AdminProvider));
-    if (!providers) { sqlite3_finalize(stmt); return -1; }
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (count >= cap) {
-            cap *= 2;
-            AdminProvider *tmp = realloc(providers, cap * sizeof(AdminProvider));
-            if (!tmp) {
-                admin_providers_free(providers, count);
-                sqlite3_finalize(stmt);
-                return -1;
-            }
-            providers = tmp;
-        }
-        const char *m = (const char *)sqlite3_column_text(stmt, 1);
-        const char *u = (const char *)sqlite3_column_text(stmt, 2);
-        providers[count].index = (int)count;
-        providers[count].model = m ? strdup(m) : NULL;
-        providers[count].base_url = u ? strdup(u) : NULL;
-        count++;
-    }
-    sqlite3_finalize(stmt);
-
-    *out = providers;
-    *out_count = count;
-    return 0;
-}
-
-void admin_providers_free(AdminProvider *providers, size_t count) {
-    if (!providers) return;
-    for (size_t i = 0; i < count; i++) {
-        free(providers[i].model);
-        free(providers[i].base_url);
-    }
-    free(providers);
-}
-
 int admin_list_models(sqlite3 *db, AdminModel **out, size_t *out_count) {
     if (!db || !out || !out_count) return -1;
     *out = NULL;

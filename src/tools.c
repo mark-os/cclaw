@@ -54,17 +54,6 @@ ToolEntry *tools_lookup(ToolRegistry *reg, const char *name) {
     return NULL;
 }
 
-size_t tools_schemas(ToolRegistry *reg, ToolSchema *out, size_t out_cap) {
-    if (!reg || !out) return 0;
-    size_t n = reg->count < out_cap ? reg->count : out_cap;
-    for (size_t i = 0; i < n; i++) {
-        out[i].name = reg->entries[i].name;
-        out[i].description = reg->entries[i].description;
-        out[i].parameters_json = reg->entries[i].parameters_json;
-    }
-    return n;
-}
-
 void tools_free(ToolRegistry *reg) {
     if (!reg) return;
     for (size_t i = 0; i < reg->count; i++) {

@@ -234,28 +234,6 @@ static void test_admin_list_tool_names(void) {
     printf("  PASS: test_admin_list_tool_names\n");
 }
 
-static void test_list_providers(void) {
-    sqlite3 *db = setup_db();
-    sqlite3_exec(db, "INSERT OR REPLACE INTO providers(name,base_url,api_key_env,default_model,priority)"
-        " VALUES('openrouter','https://openrouter.ai/api/v1','OPENROUTER_API_KEY','deepseek-v4',0);",
-        NULL, NULL, NULL);
-    sqlite3_exec(db, "INSERT OR REPLACE INTO providers(name,base_url,api_key_env,default_model,priority)"
-        " VALUES('openai','https://api.openai.com/v1','OPENAI_API_KEY','gpt-4o',1);",
-        NULL, NULL, NULL);
-
-    AdminProvider *providers = NULL;
-    size_t count = 0;
-    assert(admin_list_providers(db, &providers, &count) == 0);
-    assert(count == 2);
-    assert(strcmp(providers[0].model, "deepseek-v4") == 0);
-    assert(strcmp(providers[1].model, "gpt-4o") == 0);
-    admin_providers_free(providers, count);
-
-    db_close(db);
-    test_db_clean(DB_PATH);
-    printf("  PASS: test_list_providers\n");
-}
-
 static int64_t insert_approval(sqlite3 *db, int64_t sid, const char *tool_name,
                                const char *action, const char *args_json, const char *state) {
     sqlite3_stmt *s;
@@ -471,7 +449,6 @@ int main(void) {
     test_admin_list_grants();
     test_admin_revoke_grant_by_id();
     test_admin_list_tool_names();
-    test_list_providers();
     test_list_models();
     test_switch_model();
     test_list_pending_approvals();

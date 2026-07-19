@@ -111,25 +111,6 @@ Approval *approval_get_pending_subtree(sqlite3 *db, int64_t root_session_id) {
     return a;
 }
 
-int approval_session_in_subtree(sqlite3 *db, int64_t root_session_id, int64_t session_id) {
-    if (session_id == root_session_id) return 1;
-    const char *sql =
-        "WITH RECURSIVE subtree(id) AS ("
-        "  SELECT ?1"
-        "  UNION ALL"
-        "  SELECT s.id FROM sessions s JOIN subtree t ON s.parent_session_id = t.id"
-        ")"
-        " SELECT 1 FROM subtree WHERE id=?2 LIMIT 1";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return 0;
-    sqlite3_bind_int64(stmt, 1, root_session_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    int found = (sqlite3_step(stmt) == SQLITE_ROW);
-    sqlite3_finalize(stmt);
-    return found;
-}
-
 Approval *approval_get_for_tool_call(sqlite3 *db, int64_t session_id,
                                      const char *tool_call_id) {
     if (!tool_call_id) return NULL;

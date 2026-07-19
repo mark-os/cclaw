@@ -29,7 +29,6 @@ typedef struct {
 /* Registry lookup (no DB). Returns NULL if key is not registered. */
 const char *config_default(const char *key);
 int config_default_int(const char *key);
-double config_default_double(const char *key);
 
 /* Upsert every registered key's default_value + description into config.
  * Never touches `value`. Returns 0 on success. */

@@ -55,13 +55,6 @@ static void test_lookup_null_args(void) {
     printf("  PASS test_lookup_null_args\n");
 }
 
-static void test_schemas_null_reg(void) {
-    ToolSchema schemas[TOOLS_MAX];
-    size_t count = tools_schemas(NULL, schemas, TOOLS_MAX);
-    assert(count == 0);
-    printf("  PASS test_schemas_null_reg\n");
-}
-
 
 int main(void) {
     TEST_INIT();
@@ -71,7 +64,6 @@ int main(void) {
     test_register_null_name();
     test_register_null_reg();
     test_lookup_null_args();
-    test_schemas_null_reg();
     printf("All tools_edge tests passed.\n");
     return 0;
 }

@@ -38,7 +38,7 @@ static void test_idle_with_inbox(void) {
     /* Inbox should be consumed */
     assert(inbox_count(db, sid) == 0);
     /* Iteration should be 0 */
-    assert(session_get_iteration(db, sid) == 0);
+    assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 0);
 
     db_close(db);
     printf("  PASS test_idle_with_inbox\n");
@@ -74,7 +74,7 @@ static void test_tool_running_all_done(void) {
     AdvanceOutput out = advance_session(db, sid, 25);
     assert(out.action == ADVANCE_DISPATCH_LLM);
     assert(out.iteration == 3); /* bumped from 2 */
-    assert(session_get_iteration(db, sid) == 3);
+    assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 3);
 
     db_close(db);
     printf("  PASS test_tool_running_all_done\n");
@@ -133,7 +133,7 @@ static void test_idle_unanswered_user_leaf(void) {
     AdvanceOutput out = advance_session(db, sid, 25);
     assert(out.action == ADVANCE_DISPATCH_LLM);
     assert(out.iteration == 0);
-    assert(session_get_iteration(db, sid) == 0);
+    assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 0);
 
     db_close(db);
     printf("  PASS test_idle_unanswered_user_leaf\n");

@@ -153,18 +153,21 @@ static void test_compaction_fts_indexes_old(void) {
     entry_compact(db, sid, e1, e3, "Summary");
     /* But we want to test that e1's content is still in FTS5 — it was never deleted */
 
-    int count = 0;
-    Entry *results = entry_search(db, "unique_searchable_word", sid, &count);
-    assert(count >= 1);
-    assert(results[0].id == e1);
-
-    entry_branch_free(results, count);
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT e.id FROM entries_fts f JOIN entries e ON e.id = f.rowid"
+        " WHERE entries_fts MATCH ?1 AND e.session_id = ?2 ORDER BY rank", -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, "unique_searchable_word", -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, sid);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int64(st, 0) == e1);
 
     /* Also verify compaction summary is searchable */
-    results = entry_search(db, "Summary", sid, &count);
-    assert(count >= 1);
-
-    entry_branch_free(results, count);
+    sqlite3_reset(st);
+    sqlite3_bind_text(st, 1, "Summary", -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, sid);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    sqlite3_finalize(st);
     teardown(db);
     printf("  PASS test_compaction_fts_indexes_old\n");
 }

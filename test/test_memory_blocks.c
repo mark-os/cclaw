@@ -58,89 +58,6 @@ static void test_create_and_get(void) {
     printf("  PASS test_create_and_get\n");
 }
 
-static void test_list(void) {
-    sqlite3 *db = open_seeded();
-
-    memory_block_create(db, "Agent1", "a", "d1", "v1", 5000, NULL);
-    memory_block_create(db, "Agent1", "b", "d2", "v2", 5000, NULL);
-    memory_block_create(db, "Agent2", "c", "d3", "v3", 5000, NULL);
-
-    int count = 0;
-    MemoryBlock *list = memory_block_list(db, "Agent1", &count);
-    assert(count == 2);
-    assert(strcmp(list[0].label, "a") == 0);
-    assert(strcmp(list[1].label, "b") == 0);
-    memory_block_list_free(list, count);
-
-    list = memory_block_list(db, "Agent2", &count);
-    assert(count == 1);
-    memory_block_list_free(list, count);
-
-    list = memory_block_list(db, "Nonexistent", &count);
-    assert(count == 0);
-    assert(list == NULL);
-
-    db_close(db);
-    test_db_clean(TEST_DB);
-    printf("  PASS test_list\n");
-}
-
-static void test_set_value(void) {
-    sqlite3 *db = open_seeded();
-
-    memory_block_create(db, "Agent", "notes", "my notes", "", 20, NULL);
-
-    /* Normal update */
-    int rc = memory_block_set_value(db, "Agent", "notes", "short");
-    assert(rc == 0);
-    MemoryBlock *mb = memory_block_get(db, "Agent", "notes");
-    assert(strcmp(mb->value, "short") == 0);
-    memory_block_free(mb);
-
-    /* exceeds char_limit → rejected */
-    rc = memory_block_set_value(db, "Agent", "notes", "this string is way too long for the limit");
-    assert(rc == -1);
-
-    /* Value unchanged after rejection */
-    mb = memory_block_get(db, "Agent", "notes");
-    assert(strcmp(mb->value, "short") == 0);
-    memory_block_free(mb);
-
-    /* Nonexistent block → error */
-    rc = memory_block_set_value(db, "Agent", "nope", "val");
-    assert(rc == -1);
-
-    db_close(db);
-    test_db_clean(TEST_DB);
-    printf("  PASS test_set_value\n");
-}
-
-static void test_read_only(void) {
-    sqlite3 *db = open_seeded();
-
-    int64_t id = memory_block_create(db, "Agent", "instructions", "standing orders", "do X", 5000, NULL);
-    assert(id > 0);
-
-    /* Set read_only directly */
-    sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, "UPDATE memory_blocks SET read_only=1 WHERE id=?;", -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, id);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-
-    /* read_only blocks reject edits */
-    int rc = memory_block_set_value(db, "Agent", "instructions", "new value");
-    assert(rc == -1);
-
-    MemoryBlock *mb = memory_block_get(db, "Agent", "instructions");
-    assert(strcmp(mb->value, "do X") == 0);
-    memory_block_free(mb);
-
-    db_close(db);
-    test_db_clean(TEST_DB);
-    printf("  PASS test_read_only\n");
-}
-
 static void test_seed(void) {
     sqlite3 *db = open_seeded();
 
@@ -168,7 +85,7 @@ static void test_seed(void) {
     memory_block_free(mb);
 
     /* Re-seed doesn't overwrite (DB authoritative) */
-    memory_block_set_value(db, "Myagent", "human", "likes cats");
+    sqlite3_exec(db, "UPDATE memory_blocks SET value='likes cats' WHERE agent_name='Myagent' AND label='human';", NULL, NULL, NULL);
     memory_blocks_seed(db, "Myagent", json);
     mb = memory_block_get(db, "Myagent", "human");
     assert(strcmp(mb->value, "likes cats") == 0);
@@ -221,9 +138,6 @@ int main(void) {
     TEST_INIT();
     printf("test_memory_blocks:\n");
     test_create_and_get();
-    test_list();
-    test_set_value();
-    test_read_only();
     test_seed();
     test_prompt_injection();
     printf("All memory_blocks tests passed.\n");

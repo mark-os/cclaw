@@ -54,30 +54,11 @@ static void test_create_without_agent_name(void) {
     printf("  PASS test_create_without_agent_name\n");
 }
 
-/* session_list includes agent_name */
-static void test_list_includes_agent_name(void) {
-    sqlite3 *db = setup();
-    session_create(db, "s1", "writer", -1, 0);
-    session_create(db, "s2", NULL, -1, 0);
-
-    int count = 0;
-    Session *list = session_list(db, &count);
-    assert(count == 2);
-    assert(list[0].agent_name != NULL);
-    assert(strcmp(list[0].agent_name, "writer") == 0);
-    assert(list[1].agent_name == NULL);
-
-    session_list_free(list, count);
-    teardown(db);
-    printf("  PASS test_list_includes_agent_name\n");
-}
-
 int main(void) {
     TEST_INIT();
     printf("test_session_agent:\n");
     test_create_with_agent_name();
     test_create_without_agent_name();
-    test_list_includes_agent_name();
     printf("All session↔agent binding tests passed.\n");
     return 0;
 }

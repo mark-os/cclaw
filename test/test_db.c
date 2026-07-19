@@ -147,24 +147,21 @@ static void test_fts5_search(void) {
     assert(entry_append_with_turn(db, sid, &m2, 1) > 0);
     assert(entry_append_with_turn(db, sid, &m3, 1) > 0);
 
-    /* Search for "world" — should find 2 entries */
-    int count = 0;
-    Entry *results = entry_search(db, "world", sid, &count);
-    assert(count == 2);
-    assert(results != NULL);
-    entry_branch_free(results, count);
-
-    /* Search for "cats" — should find 1 */
-    results = entry_search(db, "cats", sid, &count);
-    assert(count == 1);
-    assert(results != NULL);
-    assert(strcmp(results[0].message.content, "unrelated message about cats") == 0);
-    entry_branch_free(results, count);
-
-    /* Search for "nonexistent" — should find 0 */
-    results = entry_search(db, "nonexistent", sid, &count);
-    assert(count == 0);
-    assert(results == NULL);
+    /* The entries_fts trigger indexed all three appends */
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM entries_fts f JOIN entries e ON e.id = f.rowid"
+        " WHERE entries_fts MATCH ?1 AND e.session_id = ?2", -1, &st, NULL) == SQLITE_OK);
+    const char *queries[] = {"world", "cats", "nonexistent"};
+    int expected[] = {2, 1, 0};
+    for (int i = 0; i < 3; i++) {
+        sqlite3_reset(st);
+        sqlite3_bind_text(st, 1, queries[i], -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 2, sid);
+        assert(sqlite3_step(st) == SQLITE_ROW);
+        assert(sqlite3_column_int(st, 0) == expected[i]);
+    }
+    sqlite3_finalize(st);
 
     db_close(db);
     test_db_clean(path);

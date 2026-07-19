@@ -127,105 +127,6 @@ void config_free(Config *cfg) {
     free(cfg);
 }
 
-/* Build Config purely from CCLAW_* env vars.
- * Agent process path — daemon injects all config at fork. */
-Config *config_load_from_env(void) {
-    Config *cfg = calloc(1, sizeof(Config));
-    if (!cfg) return NULL;
-
-    const char *v;
-
-    /* Provider */
-    v = getenv("CCLAW_PROVIDER_API_KEY_ENV");
-    if (v && v[0]) {
-        const char *key = getenv(v);
-        cfg->provider.api_key = str_dup(key ? key : "");
-    } else {
-        v = getenv("OPENROUTER_API_KEY");
-        cfg->provider.api_key = str_dup(v ? v : "");
-    }
-
-    v = getenv("CCLAW_PROVIDER_BASE_URL");
-    if (!v || !v[0]) v = getenv("CCLAW_PROVIDER");
-    cfg->provider.base_url = str_dup(v ? v : CCLAW_DEF_BASE_URL);
-
-    v = getenv("CCLAW_MODEL");
-    cfg->provider.model = str_dup(v ? v : CCLAW_DEF_MODEL);
-
-    v = getenv("CCLAW_MAX_TOKENS");
-    cfg->provider.max_tokens = v ? atoi(v) : CCLAW_DEF_MAX_TOKENS;
-
-    v = getenv("CCLAW_CONTEXT_WINDOW");
-    cfg->context_window = v ? atoi(v) : CCLAW_DEF_CONTEXT_WINDOW;
-
-    /* endpoint type */
-    v = getenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
-    if (v && strcmp(v, "gemini") == 0)
-        cfg->provider.endpoint_type = ENDPOINT_GEMINI;
-    else
-        cfg->provider.endpoint_type = ENDPOINT_OPENAI;
-
-    /* DB path — env-only loader has no open DB handle to ask, so this is the
-     * one place that still reads CCLAW_DB_PATH directly. */
-    const char *dbp = getenv("CCLAW_DB_PATH");
-    cfg->db_path = str_dup(dbp ? dbp : "cclaw.db");
-
-    /* Workspace — default under ~/.cclaw/agents/default/ for zero-config CLI */
-    v = getenv("CCLAW_WORKSPACE");
-    cfg->workspace = v ? str_dup(v) : default_workspace(cfg->db_path);
-
-    /* Scalars — defaults come from the config registry so the env-only
-     * loader can never drift from the DB loader. */
-    v = getenv("CCLAW_MAX_ITERATIONS");
-    cfg->max_iterations = v ? atoi(v) : config_default_int("max_iterations");
-
-    v = getenv("CCLAW_MAX_HISTORY_TOKENS");
-    cfg->max_history_tokens = v ? atoi(v) : config_default_int("max_history_tokens");
-
-    v = getenv("CCLAW_SHELL_TIMEOUT");
-    cfg->shell_timeout = v ? atoi(v) : config_default_int("shell_timeout");
-
-    v = getenv("CCLAW_TOKEN_RATE_LIMIT");
-    cfg->token_rate_limit = v ? atoi(v) : config_default_int("token_rate_limit");
-
-    v = getenv("CCLAW_DAILY_COST_LIMIT");
-    cfg->daily_cost_limit_nano = (int64_t)((v ? atof(v)
-        : config_default_double("daily_cost_limit")) * 1e9 + 0.5);
-
-    v = getenv("CCLAW_SAVE_REASONING");
-    cfg->save_reasoning = v ? atoi(v) : config_default_int("save_reasoning");
-
-    v = getenv("CCLAW_LOG_LEVEL");
-    cfg->log_level = log_level_parse(v);
-
-    v = getenv("CCLAW_CONTEXT_THRESHOLD");
-    cfg->context_threshold = v ? (float)atof(v)
-                               : (float)config_default_double("context_threshold");
-
-    v = getenv("CCLAW_COMPACTION_TARGET");
-    cfg->compaction_target = v ? (float)atof(v)
-                               : (float)config_default_double("compaction_target");
-
-    v = getenv("CCLAW_COMPACTION");
-    cfg->compaction = v ? atoi(v) : config_default_int("compaction");
-
-    v = getenv("CCLAW_AUTO_RECALL");
-    cfg->auto_recall = v ? atoi(v) : config_default_int("auto_recall");
-
-    v = getenv("CCLAW_RECALL_MAX_TOKENS");
-    cfg->recall_max_tokens = v ? atoi(v) : config_default_int("recall_max_tokens");
-
-    /* cache_hints */
-    v = getenv("CCLAW_CACHE_HINTS");
-    if (v) {
-        if (strcmp(v, "on") == 0) cfg->provider.cache_hints = CACHE_HINTS_ON;
-        else if (strcmp(v, "off") == 0) cfg->provider.cache_hints = CACHE_HINTS_OFF;
-        else cfg->provider.cache_hints = CACHE_HINTS_AUTO;
-    }
-
-    return cfg;
-}
-
 /* Build Config for parent processes (CLI/daemon).
  * Priority: env var > config value > registry default. */
 Config *config_load(sqlite3 *db) {
@@ -352,11 +253,11 @@ Config *config_load(sqlite3 *db) {
     env_override_int(&cfg->recall_max_tokens, "CCLAW_RECALL_MAX_TOKENS");
 
     /* Log level: info default, env override (inherited by worker child).
-     * Mirrors config_load_from_env — without this the daemon sat on the
+     * Without this the daemon sat on the
      * calloc'd 0 (= error) and its info lines never reached the journal. */
     cfg->log_level = log_level_parse(getenv("CCLAW_LOG_LEVEL"));
 
-    /* Workspace: DB kv → default, env override (mirrors config_load_from_env).
+    /* Workspace: DB kv → default, env override.
      * Without this the file tools, proxy mount, and workspace_init all see a
      * NULL workspace and fail with "no workspace configured". */
     {

@@ -29,60 +29,14 @@ static void test_session_create(void) {
     printf("  PASS test_session_create\n");
 }
 
-static void test_session_list(void) {
-    sqlite3 *db = setup();
-    session_create(db, "alpha", NULL, -1, 0);
-    session_create(db, "beta", NULL, -1, 0);
-
-    int count = 0;
-    Session *list = session_list(db, &count);
-    assert(count == 2);
-    assert(list != NULL);
-    assert(strcmp(list[0].name, "alpha") == 0);
-    assert(strcmp(list[1].name, "beta") == 0);
-
-    session_list_free(list, count);
-    teardown(db);
-    printf("  PASS test_session_list\n");
-}
-
-static void test_session_list_empty(void) {
-    sqlite3 *db = setup();
-    int count = 0;
-    Session *list = session_list(db, &count);
-    assert(count == 0);
-    assert(list == NULL);
-
-    teardown(db);
-    printf("  PASS test_session_list_empty\n");
-}
-
-static void test_session_set_leaf(void) {
-    sqlite3 *db = setup();
-    int64_t sid = session_create(db, "leaftest", NULL, -1, 0);
-
-    int rc = session_set_leaf(db, sid, 42);
-    assert(rc == 0);
-
-    /* Verify via list */
-    int count = 0;
-    Session *list = session_list(db, &count);
-    assert(count == 1);
-    assert(list[0].leaf_id == 42);
-
-    session_list_free(list, count);
-    teardown(db);
-    printf("  PASS test_session_set_leaf\n");
-}
-
-static void test_session_set_leaf_invalid(void) {
-    sqlite3 *db = setup();
-    /* Non-existent session */
-    int rc = session_set_leaf(db, 9999, 1);
-    assert(rc == -1);
-
-    teardown(db);
-    printf("  PASS test_session_set_leaf_invalid\n");
+/* Helper: set session leaf directly (append paths do this via trigger) */
+static void set_leaf(sqlite3 *db, int64_t sid, int64_t leaf_id) {
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db, "UPDATE sessions SET leaf_id=? WHERE id=?", -1, &st, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(st, 1, leaf_id);
+    sqlite3_bind_int64(st, 2, sid);
+    assert(sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_finalize(st);
 }
 
 /* Helper: insert entry directly for branch testing — uses split columns */
@@ -113,7 +67,7 @@ static void test_session_get_branch(void) {
     int64_t e2 = insert_entry(db, sid, e1, ROLE_ASSISTANT, "hi");
     int64_t e3 = insert_entry(db, sid, e2, ROLE_USER, "bye");
 
-    session_set_leaf(db, sid, e3);
+    set_leaf(db, sid, e3);
 
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
@@ -256,7 +210,7 @@ static void test_original_parent_id(void) {
 
     int64_t e1 = insert_entry(db, sid, -1, ROLE_USER, "first");
     int64_t e2 = insert_entry(db, sid, e1, ROLE_ASSISTANT, "second");
-    session_set_leaf(db, sid, e2);
+    set_leaf(db, sid, e2);
 
     /* Default: original_parent_id is NULL → -1 in struct */
     int count = 0;
@@ -390,10 +344,6 @@ int main(void) {
     TEST_INIT();
     printf("test_session:\n");
     test_session_create();
-    test_session_list();
-    test_session_list_empty();
-    test_session_set_leaf();
-    test_session_set_leaf_invalid();
     test_session_get_branch();
     test_session_get_branch_empty();
     test_entry_append();

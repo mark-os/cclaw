@@ -52,10 +52,10 @@ effective(k) = env(CCLAW_<K>)          -- live getenv, never copied to DB
 
 `CCLAW_<K>` is mechanical: uppercase, `.` → `_`. So `web_port` →
 `CCLAW_WEB_PORT`, `telegram.bot_token` → `CCLAW_TELEGRAM_BOT_TOKEN`. This
-retroactively rationalizes the existing ad-hoc `CCLAW_*` overrides in
-`config_load_from_env` — they already follow the mapping; the rule just makes
-it hold for every key including extension keys, in one code path
-(`config_get`), instead of a hand-written `getenv` per core knob.
+retroactively rationalizes the ad-hoc `CCLAW_*` overrides — they already
+follow the mapping; the rule just makes it hold for every key including
+extension keys, in one code path (`config_get`), instead of a hand-written
+`getenv` per core knob.
 
 The env layer is **read live, never written to the DB**. There is no seeding
 step and therefore no staleness: edit `/etc/cclaw/env`, restart, done. A wiped
@@ -167,14 +167,6 @@ overrides still die with the DB — acceptable during the wipe era, and moot
 once the DB becomes durable. Post-durability, the env layer's remaining jobs
 are secrets (credentials shouldn't have the DB as their only home anyway) and
 first-boot seeding.
-
-## Known wrinkle (out of scope)
-
-`extract_builtin_extensions` rewrites `channel.qjs` with `fopen("w")` whenever
-the `extensions` table is empty — so a DB wipe clobbers agent modifications to
-the builtin bundle even though the file survived on disk. Fine while the
-template is canonical; needs a look (version check? skip-if-exists?) once
-agents customize builtins.
 
 ## Touch points when implemented
 

@@ -31,9 +31,10 @@ static char *handler(const char *arguments, void *user_data) {
         sqlite3_bind_text(st, 1, ctx->agent_name, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
             const char *trust = (const char *)sqlite3_column_text(st, 0);
-            /* agent_setup.c resolves CCLAW_SHELL_PATH (env override, else the
-             * agents.shell_path column) and setenv's it either way — reading
-             * it back here is the actual effective value, not a re-derivation. */
+            /* agent_setup.c re-resolves CCLAW_SHELL_PATH per tool dispatch
+             * (env override, else the agents.shell_path column) and exports
+             * it — reading it back here is the effective value as of the
+             * last dispatch, not a re-derivation. */
             const char *shell_path = getenv("CCLAW_SHELL_PATH");
             buf_appendf(&out,
                 "## Your current grants (agent: %s)\n"

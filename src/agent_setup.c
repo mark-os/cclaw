@@ -29,52 +29,27 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* Collect secrets from env, clear from process env */
     setup->secrets = shell_secrets_collect(&setup->secret_count);
 
-    /* Sandbox profile: env override (-y sets CCLAW_SANDBOX_PROFILE=host), else agents table */
-    const char *sandbox_profile = getenv("CCLAW_SANDBOX_PROFILE");
-    char trust_buf[32] = {0};
-    if (!sandbox_profile) {
-        sqlite3_stmt *tl_stmt;
-        if (sqlite3_prepare_v2(db,
-                "SELECT sandbox_profile FROM agents WHERE name=?", -1, &tl_stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(tl_stmt, 1, agent_name, -1, SQLITE_STATIC);
-            if (sqlite3_step(tl_stmt) == SQLITE_ROW) {
-                const char *v = (const char *)sqlite3_column_text(tl_stmt, 0);
-                if (v) { snprintf(trust_buf, sizeof(trust_buf), "%s", v); sandbox_profile = trust_buf; }
-            }
-            sqlite3_finalize(tl_stmt);
-        }
+    /* Containment config (sandbox_profile, shell_path) is not resolved here:
+     * agent_setup_refresh_caps re-reads it from the agents table before every
+     * tool batch, same as grants. Only capture whether an operator env
+     * override exists now (-y sets CCLAW_SANDBOX_PROFILE=host) — refresh
+     * setenv's for children, so a later getenv can't distinguish the two. */
+    const char *ev = getenv("CCLAW_SANDBOX_PROFILE");
+    if (ev) {
+        snprintf(setup->sandbox_profile_buf, sizeof(setup->sandbox_profile_buf), "%s", ev);
+        setup->sandbox_profile_env = 1;
     }
-    /* Export so forked children (js_eval) inherit it */
-    if (sandbox_profile)
-        setenv("CCLAW_SANDBOX_PROFILE", sandbox_profile, 1);
-
-    /* Shell interpreter: env override, else agents table, else /bin/sh
-     * (tool_shell.c's default). setenv+getenv (not a stack buffer) so the
-     * pointer ShellConfig retains stays valid for the setup's lifetime. */
-    const char *shell_path = getenv("CCLAW_SHELL_PATH");
-    if (!shell_path) {
-        sqlite3_stmt *sp_stmt;
-        if (sqlite3_prepare_v2(db,
-                "SELECT shell_path FROM agents WHERE name=?", -1, &sp_stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(sp_stmt, 1, agent_name, -1, SQLITE_STATIC);
-            if (sqlite3_step(sp_stmt) == SQLITE_ROW) {
-                const char *v = (const char *)sqlite3_column_text(sp_stmt, 0);
-                if (v && v[0]) { setenv("CCLAW_SHELL_PATH", v, 1); shell_path = getenv("CCLAW_SHELL_PATH"); }
-            }
-            sqlite3_finalize(sp_stmt);
-        }
+    ev = getenv("CCLAW_SHELL_PATH");
+    if (ev) {
+        snprintf(setup->shell_path_buf, sizeof(setup->shell_path_buf), "%s", ev);
+        setup->shell_path_env = 1;
     }
 
-    /* Shell — pass proxy socket path */
-    tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace, shell_path);
+    /* Shell — shell_path bound by refresh below, like the caps */
+    tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace, NULL);
 
-    /* Trust-derived sandbox profile, filled once and embedded in every tool ctx.
-     * The grant-path fields stay NULL here — agent_setup_refresh_caps binds
-     * them (and per-dispatch reloads keep them fresh). */
-    SandboxProfile profile = {0};
-    sandbox_profile_resolve(sandbox_profile, &profile);
-
-    /* Inject proxy sock path + secrets + the shared profile into shell config */
+    /* Inject secrets into shell config; the sandbox profile is bound by
+     * agent_setup_refresh_caps (and per-dispatch reloads keep it fresh) */
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
@@ -82,14 +57,12 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         sc->secret_count = setup->secret_count;
         sc->cwd_path = getenv("CCLAW_PATH");  /* CWD rw in CLI mode */
         sc->db_path = cfg->db_path;           /* mask .cclaw_key + db ciphertext from shell children */
-        sc->sb = profile;
     }
 
-    /* File tools — forked sandbox path shares the profile with shell */
+    /* File tools — forked sandbox path shares the refreshed profile with shell */
     setup->file_read_ctx.workspace = cfg->workspace;
     setup->file_read_ctx.cwd_path = getenv("CCLAW_PATH");
     setup->file_read_ctx.db_path = cfg->db_path;
-    setup->file_read_ctx.sb = profile;
     tool_file_read_register(&setup->reg, &setup->file_read_ctx);
     tool_file_write_register(&setup->reg, &setup->file_read_ctx);
     tool_file_list_register(&setup->reg, &setup->file_read_ctx);
@@ -99,12 +72,9 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
 
     /* JS eval (SBX_JS broker): mirrors web/shell — qjs runs in-process in the
      * fork+execve --run-tool child, egress via per-hop proxy decide(). */
-    setup->js_eval_ctx.host_mode = profile.sandbox ? 0 : 1;
-    setup->js_eval_ctx.sandbox_profile = sandbox_profile;
     setup->js_eval_ctx.workspace = cfg->workspace;
     setup->js_eval_ctx.cwd_path = getenv("CCLAW_PATH");
     setup->js_eval_ctx.db_path = cfg->db_path;
-    setup->js_eval_ctx.sb = profile;
     tool_js_eval_register(&setup->reg, &setup->js_eval_ctx);
 
     /* web_fetch — sandboxed broker (SBX_WEB), egress via per-hop proxy decide().
@@ -112,8 +82,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->web_ctx.workspace = cfg->workspace;
     setup->web_ctx.cwd_path = getenv("CCLAW_PATH");
     setup->web_ctx.db_path = cfg->db_path;
-    setup->web_ctx.host_mode = profile.sandbox ? 0 : 1;
-    setup->web_ctx.sb = profile;
     tool_web_fetch_register(&setup->reg, &setup->web_ctx);
 
     /* db_query */
@@ -199,9 +167,73 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     tools_sync_to_db(&setup->reg, db);
     tools_load_extension_tools(&setup->reg, db, agent_name, &setup->js_eval_ctx);
 
-    /* Initial caps load + bind — same path the dispatch loop re-runs per batch. */
+    /* Initial caps + containment load and bind — same path the dispatch loop
+     * re-runs per batch. */
     agent_setup_refresh_caps(setup, db, agent_name);
     return 0;
+}
+
+/* Copy an agents-table column into a setup-owned buffer (empty on no row /
+ * NULL) so ctx pointers into it stay valid between refreshes. */
+static void agents_column_read(sqlite3 *db, const char *agent, const char *sql,
+                               char *buf, size_t buf_sz) {
+    buf[0] = '\0';
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) snprintf(buf, buf_sz, "%s", v);
+    }
+    sqlite3_finalize(st);
+}
+
+/* Re-read containment config from the agents table (unless an operator env
+ * override was present at init) and rebind the resolved profile into every
+ * tool ctx. Same freshness contract as the caps: a mid-run update_agent or
+ * an agent switch takes effect on the next dispatch, not at restart. */
+static void containment_refresh(AgentSetup *setup, sqlite3 *db, const char *agent) {
+    if (!setup->sandbox_profile_env)
+        agents_column_read(db, agent,
+            "SELECT sandbox_profile FROM agents WHERE name=?",
+            setup->sandbox_profile_buf, sizeof(setup->sandbox_profile_buf));
+    if (!setup->shell_path_env)
+        agents_column_read(db, agent,
+            "SELECT shell_path FROM agents WHERE name=?",
+            setup->shell_path_buf, sizeof(setup->shell_path_buf));
+
+    const char *profile_str =
+        setup->sandbox_profile_buf[0] ? setup->sandbox_profile_buf : NULL;
+    const char *shell_path =
+        setup->shell_path_buf[0] ? setup->shell_path_buf : NULL;
+
+    /* Export so children forked this dispatch inherit the *current* values
+     * (js_eval; search_config also reads the shell env). */
+    if (profile_str) setenv("CCLAW_SANDBOX_PROFILE", profile_str, 1);
+    else unsetenv("CCLAW_SANDBOX_PROFILE");
+    if (shell_path) setenv("CCLAW_SHELL_PATH", shell_path, 1);
+    else unsetenv("CCLAW_SHELL_PATH");
+
+    /* Trust-derived policy, whole-struct copied into each ctx; the caps
+     * rebind that follows overwrites the grant-path half. */
+    SandboxProfile profile = {0};
+    sandbox_profile_resolve(profile_str, &profile);
+
+    setup->file_read_ctx.sb = profile;
+
+    setup->js_eval_ctx.sb = profile;
+    setup->js_eval_ctx.host_mode = profile.sandbox ? 0 : 1;
+    setup->js_eval_ctx.sandbox_profile = profile_str;
+
+    setup->web_ctx.sb = profile;
+    setup->web_ctx.host_mode = profile.sandbox ? 0 : 1;
+
+    ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
+    if (shell_entry && shell_entry->user_data) {
+        ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
+        sc->sb = profile;
+        sc->shell_path = shell_path;  /* NULL = /bin/sh (tool_shell.c default) */
+    }
 }
 
 /* Load the agent's grants into flat arrays and bind them into every tool ctx.
@@ -212,8 +244,10 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
 void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent) {
     agent_caps_refresh(db, agent, &setup->caps);
 
-    /* Only the grant-path half of each embedded profile changes here;
-     * the trust policy is fixed at init. */
+    /* Containment first: it whole-struct copies each embedded profile, then
+     * the grant-path half below is layered on top. Trust policy is a
+     * per-dispatch snapshot too — no longer fixed at init. */
+    containment_refresh(setup, db, agent);
     setup->file_read_ctx.sb.read_paths = setup->caps.read_paths;
     setup->file_read_ctx.sb.read_path_count = setup->caps.read_count;
     setup->file_read_ctx.sb.write_paths = setup->caps.write_paths;

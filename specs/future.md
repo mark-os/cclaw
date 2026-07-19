@@ -61,6 +61,26 @@ Per-agent routing shipped (`agents.primary_model`/`secondary_model`, fallback
 in `llm_proc.c`). Still future:
 - Per-session model override stored in DB
 
+## Additional Provider Wire Formats (Responses API, Gemini Interactions)
+
+Planned, not started. Both had premature adapters in `db_request.c` (deleted
+2026-07-13 — superseded architecture, never reachable; recover the research
+via `git log -S db_build_request_typed`, but a fresh build in `llm_payload.c`
+is less work than porting). Live formats today: OpenAI chat completions +
+Gemini generateContent (`endpoint_type` in `llm_proc.c`).
+
+- **OpenRouter Responses API** (`/api/v1/responses`, flat input items):
+  stateless, so mostly a new payload query shaping `entries` into the item
+  list + response-ingest mapping. New `endpoint_type`, no schema change.
+- **Gemini Interactions API** (stateful delta sync): send only entries since
+  the last sync instead of the whole branch each turn — biggest win on long
+  sessions over slow links (Pogoplug class). Needs a per-session sync cursor
+  column back (the v32-dropped `last_synced_entry_id`, reborn with an actual
+  reader), plus desync/expiry handling (cursor invalid → full resend).
+- Related: **reasoning replay** (TODO.md) — replaying stored `reasoning`
+  entries in tool loops (DeepSeek R1 `reasoning_content`, Anthropic thinking
+  blocks) belongs in `llm_payload.c` as a per-model capability flag.
+
 ## Search & Long-term Memory
 
 ### search_history tool
@@ -288,15 +308,12 @@ low scores as a prompt/schema bug, not a model excuse.
 
 ## Channel Chat Commands (session + ops levers in the chat itself)
 
-Today the telegram channel exposes only `/approvals` and `/admin`. OpenClaw/
-Hermes ship a small command set that turns out to be the daily-driver session
-lever: `/new` (fresh session for this chat — today a chat is bound to one
-ever-compacting session with no user-facing reset), `/status` (model, session
-id, pending work), `/usage` (see Usage Visibility below), `/model`. The
-COMMANDS table in `channel_telegram.qjs` is already the single dispatch point,
-so each command is a small handler; `/new` needs a daemon-side "detach session"
-primitive (clear `sessions.channel_name/chat_id` or re-point a route) rather
-than channel-JS SQL.
+Shipped 2026-07-19 (route-model unification, v33): `/new` (fresh session,
+pin re-pointed) and `/sessions [id]` (list / attach) — handled in C in
+`channel_consume_events` before dispatch, admin-only, working even when the
+pinned session is wedged. Still future, channel-JS side (`channel_telegram.qjs`
+COMMANDS table is the dispatch point): `/status` (model, session id, pending
+work), `/usage` (see Usage Visibility below), `/model`.
 
 ## Usage Visibility (token/cost accounting has writers, no readers)
 

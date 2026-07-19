@@ -33,7 +33,6 @@ CREATE TABLE IF NOT EXISTS models (
   id TEXT PRIMARY KEY,
   provider_name TEXT NOT NULL,
   model TEXT NOT NULL,
-  sub_provider TEXT,
   context_window INTEGER,
   max_output_tokens INTEGER,
   capabilities TEXT DEFAULT '[]',
@@ -61,7 +60,6 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
   recall INTEGER NOT NULL DEFAULT 0,
   job_type INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending',
-  claimed_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_llm_jobs_pending ON llm_jobs(status) WHERE status='pending';
@@ -181,9 +179,6 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- tool-loop iteration so the request prefix stays
                                             -- byte-stable for prompt caching. NULL = no block.
   leaf_id INTEGER DEFAULT -1,
-  last_route TEXT,
-  last_interaction_id TEXT,
-  last_synced_entry_id INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );

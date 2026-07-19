@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v31 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v31 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-18 freeze collapsed earlier patch history into it).
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v32 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v31 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-18 freeze collapsed earlier patch history into it).
 
 ## String keys and the agent_name FKs (decided 2026-07-18)
 
@@ -71,7 +71,7 @@ LLM API endpoints. Multiple providers enable fallback routing.
 |--------|------|-------|
 | `name` | TEXT PRIMARY KEY | |
 | `base_url` | TEXT NOT NULL | |
-| `endpoint_type` | TEXT NOT NULL DEFAULT 'openai' | openai / gemini / anthropic |
+| `endpoint_type` | TEXT NOT NULL DEFAULT 'openai' | openai / gemini |
 | `api_key_env` | TEXT NOT NULL DEFAULT '' | env var name holding the key |
 | `default_model` | TEXT | |
 | `priority` | INTEGER NOT NULL DEFAULT 0 | lower = preferred |
@@ -88,7 +88,6 @@ Per-model routing metadata + lifetime stats. The router picks by `(priority, sta
 | `id` | TEXT PRIMARY KEY | routing key (e.g. `openrouter/deepseek-v4-flash`) |
 | `provider_name` | TEXT NOT NULL | FK-ish to `providers.name` |
 | `model` | TEXT NOT NULL | wire model id sent to the provider |
-| `sub_provider` | TEXT | provider-specific routing hint (OpenRouter upstream) |
 | `context_window` | INTEGER | |
 | `max_output_tokens` | INTEGER | |
 | `capabilities` | TEXT DEFAULT '[]' | JSON array of capability tags |
@@ -122,7 +121,6 @@ Transient work queue. The daemon poll loop writes one row per LLM request; a wor
 | `recall` | INTEGER NOT NULL DEFAULT 0 | whether to run FTS recall before this request |
 | `job_type` | INTEGER NOT NULL DEFAULT 0 | 0 = normal turn, others reserved |
 | `status` | TEXT NOT NULL DEFAULT 'pending' | pending / claimed / done |
-| `claimed_at` | INTEGER | timestamp when worker started |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 Index: `idx_llm_jobs_pending ON llm_jobs(status) WHERE status='pending'`.
@@ -365,9 +363,6 @@ Routes inbound channel messages to agents/sessions. Replaces the old `channel_bi
 | `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
 | `turn_context` | TEXT | `<RELEVANT_CONTEXT>` block, materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; NULL = no block |
 | `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
-| `last_route` | TEXT | delivery target |
-| `last_interaction_id` | TEXT | |
-| `last_synced_entry_id` | INTEGER | |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 

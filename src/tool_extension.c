@@ -193,6 +193,7 @@ static char *tool_extension_list_handler(const char *arguments, void *user_data)
     if (sqlite3_prepare_v2(ctx->db,
             "SELECT json_group_array(json_object("
             "  'name', e.name, 'owner', e.owner_agent, 'published', e.published, "
+            "  'version', e.version, "
             "  'attached', EXISTS(SELECT 1 FROM agent_extensions ae "
             "      WHERE ae.extension_name=e.name AND ae.agent_name=?1 AND ae.enabled=1))) "
             "FROM extensions e "

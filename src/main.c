@@ -38,6 +38,7 @@
 #include "context.h"
 #include "db.h"
 #include "secret_store.h"
+#include "cli_verbs.h"
 #include "templates.h"
 #include "db_response.h"
 #include "shutdown.h"
@@ -589,50 +590,20 @@ static void call_egress_free(CallEgress *ce) {
     memset(ce, 0, sizeof(*ce));
 }
 
-static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
-                               PendingToolCall *tc,
-                               const ShellSecret *secrets, size_t secret_count) {
-    if (g_child_count >= CHILD_MAX) return -1;
-
-    ToolEntry *te = g_tool_setup ? tools_lookup(&g_tool_setup->reg, tc->name) : NULL;
-    if (!te && g_tool_setup) {
-        /* Registry is a cache of the extension-tool query; a miss may just
-         * mean an extension was promoted/attached after startup, or that this
-         * is a non-default agent whose tools were never materialized. Refresh
-         * for the *advancing* agent and retry. Safe unlocked: the registry is
-         * only touched on the event-loop thread. On TOOLS_MAX overflow the
-         * register fails, the second lookup misses, and we fall through to the
-         * unknown-tool error instead of corrupting the registry. */
-        tools_load_extension_tools(&g_tool_setup->reg, g_db, agent_name,
-                                   &g_tool_setup->js_eval_ctx);
-        te = tools_lookup(&g_tool_setup->reg, tc->name);
-        if (!te)
-            LOG_WARN_("tool '%s' not registered after extension reload (agent=%s)",
-                      tc->name, agent_name);
-    }
-    if (!te) {
-        /* Unknown tool — write error result directly */
-        char err[192];
-        snprintf(err, sizeof(err),
-                 "error: unknown tool '%s' — use search_config to see available tools",
-                 tc->name);
-        ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
-        Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
-                       .tool_name = tc->name, .is_error = 1};
-        entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
-        db_tool_call_set_status(g_db, session_id, tc->call_id, "done", NULL);
-        return 1; /* Signal: handled inline, check for more */
-    }
-
-    /* Sensitivity axis (specs/trust.md): a sensitive-labeled target always
-     * escalates, and no standing grant/mode/approval-ALWAYS satisfies it.
-     * sens_host survives the gate block: an approved (consumed, once-only)
-     * sensitivity park grants that host to THIS call via a per-call exception
-     * in the network-tier sections below. */
-    char sens_host[254] = "";
-    int sens_hit = 0, sens_once = 0;
-    int bind_hit = 0, bind_once = 0;
-
+/* §4+§8 dispatch gate, split from dispatch_tool_inner (2026-07-19).
+ * Capability ceiling → policy → gating hook → sensitivity/secret-bind scan →
+ * approval gate, in fixed restrict-only order. Returns 0 = proceed (an
+ * approved once-only sensitivity/bind park is reported via *sens_once /
+ * *bind_once and sens_host for the per-call egress exception), 1 = handled
+ * (error result written), 2 = parked awaiting approval. */
+static int dispatch_gate(int64_t session_id, const char *agent_name,
+                         PendingToolCall *tc, ToolEntry *te,
+                         const ShellSecret *secrets, size_t secret_count,
+                         char *sens_host, size_t sens_host_cap,
+                         int *sens_once, int *bind_once) {
+    int sens_hit = 0, bind_hit = 0;
+    *sens_once = 0; *bind_once = 0;
+    sens_host[0] = '\0';
     /* §4+§8 dispatch gate (fixed order: capability ceiling → gating hook →
      * approval gate). The gating hook may only *raise* restriction
      * (silent→ask, ask→deny) — a hook can veto, only a grant authorizes.
@@ -735,7 +706,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             char **sens = db_sensitive_hosts(g_db, &sn);
             if (sens) {
                 sens_hit = host_in_text(sens, (size_t)sn, tc->arguments,
-                                        sens_host, sizeof(sens_host));
+                                        sens_host, sens_host_cap);
                 /* Second chance on the *extracted, decoded* url host: a
                  * percent- or invisible-Unicode-encoded host tokenizes wrong
                  * in the raw-args scan above, which would skip the ASK
@@ -746,7 +717,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                         url_host_normalize(uh, sizeof(uh));
                         if (host_covered(sens, (size_t)sn, uh)) {
                             sens_hit = 1;
-                            snprintf(sens_host, sizeof(sens_host), "%s", uh);
+                            snprintf(sens_host, sens_host_cap, "%s", uh);
                         }
                     }
                 }
@@ -819,130 +790,191 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
              * here, and consuming it stops a replayed tool_call_id from
              * re-using the same grant. A consumed sensitivity approval opens a
              * per-call exception for the matched host (network tiers below). */
-            sens_once = sens_hit;
-            bind_once = bind_hit;
+            *sens_once = sens_hit;
+            *bind_once = bind_hit;
             approval_consume(g_db, ap->id);
             approval_free(ap);
         }
     }
+    return 0;
+}
 
-    /* Inline tools: execute in parent process */
-    if (te->recipe.vehicle == EXEC_INLINE) {
-        /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
-        char *interp_args = NULL;
-        if (tool_needs_interpolation(tc->name) && secret_count > 0)
-            interp_args = secret_interpolate(tc->arguments, secrets, secret_count);
-        /* Thread the live session + tool_call_id into the per-tool context.
-         * g_tool_setup is a single shared instance, so the session_id captured
-         * at agent_setup_init time is stale (0 in CLI) — the dispatching session
-         * varies per call (root or any sub-agent). Keyed on ctx *pointer
-         * identity*, not on an enumerated tool-name list: launch_agent and
-         * check_session share launch_ctx.
-         * Any future tool registered against these same shared ctx structs
-         * is covered automatically; a tool needing its own fresh ctx should
-         * get its own struct, not reuse one of these without adding it here. */
-        if (te->user_data == &g_tool_setup->launch_ctx) {
-            AgentLaunchCtx *lc = (AgentLaunchCtx *)te->user_data;
-            lc->session_id = session_id;
-            lc->current_tool_call_id = tc->call_id;
-        } else if (te->user_data == &g_tool_setup->req_cfg_ctx) {
-            RequestConfigCtx *rctx = (RequestConfigCtx *)te->user_data;
-            rctx->session_id = session_id;
-            rctx->current_tool_call_id = tc->call_id;
-        } else if (te->user_data == &g_tool_setup->bootstrap_ctx) {
-            ToolBootstrapCtx *bctx = (ToolBootstrapCtx *)te->user_data;
-            bctx->session_id = session_id;
-            bctx->current_tool_call_id = tc->call_id;
-        } else if (te->user_data == &g_tool_setup->ext_tool_ctx) {
-            ToolExtensionCtx *ectx = (ToolExtensionCtx *)te->user_data;
-            ectx->session_id = session_id;
-            ectx->current_tool_call_id = tc->call_id;
-        } else if (te->user_data == &g_tool_setup->chan_send_ctx) {
-            ToolChannelSendCtx *cctx = (ToolChannelSendCtx *)te->user_data;
-            cctx->session_id = session_id;
-            /* Route allowlist must key on the advancing agent, not the
-             * setup's init agent. */
-            snprintf(cctx->agent_name, sizeof(cctx->agent_name), "%s",
-                     agent_name ? agent_name : "");
-        }
-        char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
-        if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
-        /* A NULL result means the tool dispatched async work and left this
-         * tool_call without an inline result. Two distinct shapes: */
-        if (!result && strcmp(tc->name, "launch_agent") == 0) {
-            /* Sub-agent launched. The call is already 'running' (claimed at
-             * dispatch), so the turn-join (advance_session, tool_running)
-             * neither re-dispatches it nor proceeds to the LLM until the child
-             * completes and writes the result keyed by this call_id. The
-             * parent stays tool_running, so sibling launch_agent calls keep
-             * dispatching → real parallelism. */
-            /* parallel-safe tools let dispatch continue to siblings (3);
-             * a serial tool would stop and wait (0). */
-            return tool_is_parallel_safe(tc->name) ? 3 : 0;
-        }
-        if (!result && (strcmp(tc->name, "request_config") == 0 ||
-                        strcmp(tc->name, "create_agent") == 0 ||
-                        strcmp(tc->name, "update_agent") == 0 ||
-                        strcmp(tc->name, "extension_promote") == 0)) {
-            /* Approval gate: the session is parked in awaiting_approval; the
-             * dispatch loop releases this call's claim back to pending, where
-             * it stays until resolve_approval re-runs it or writes the result. */
-            handle_approval_park(session_id);
-            return 2; /* parked, don't advance */
-        }
-        if (!result) result = strdup("error: tool returned null");
-
-        /* Explicit capture first (needs the RAW result), then postprocess:
-         * deinterpolate + secret scan/redact (scan runs even with no secrets
-         * loaded — inline js_eval output can carry leaked credentials). */
-        { char *cap = secret_capture_apply(g_db, tc->arguments, result);
-          if (cap) { free(result); result = cap; } }
-        { char *pp = tool_result_postprocess(result, secrets, secret_count);
-          if (pp) { free(result); result = pp; } }
-
-        /* afterToolCall hooks: chained result replacement, after the secret
-         * scanner (security boundary stays first), before the entry write so
-         * the replacement is what the context sees. The replacement comes back
-         * already marker-sanitized (hook_dispatch owns that invariant). */
-        char *hook_annotate = NULL;
-        if (g_tool_setup) {
-            char *rep = hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx,
-                            g_db, tc->name, tc->arguments, result, &hook_annotate);
-            if (rep) { free(result); result = rep; }
-        }
-
-        /* CLI progress */
-        if (g_mode == 0) {
-            cli_print_tool_call(tc->name, tc->arguments);
-            size_t rlen = strlen(result);
-            if (rlen <= 80)
-                fprintf(stdout, "\033[2m→ %s\033[0m\n", result);
-            else
-                fprintf(stdout, "\033[2m→ %.77s...\033[0m\n", result);
-            fflush(stdout);
-        }
-
-        /* Ensure valid UTF-8 before DB storage */
-        { char *clean = utf8_sanitize(result, strlen(result));
-          if (clean) { free(result); result = clean; } }
-
-        char *stored = truncate_and_spill(result, session_id, tc->call_id);
-        ToolResult tr = {.tool_call_id = tc->call_id,
-                         .content = stored ? stored : result};
-        int is_err = (strncmp(result, "error:", 6) == 0);
-        Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
-                       .tool_name = tc->name, .is_error = is_err};
-        int64_t rid = entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
-        db_tool_call_complete_with_result(g_db, tc->entry_id, tc->call_id, rid);
-        if (hook_annotate) {
-            if (rid > 0) hook_entry_data_patch(g_db, rid, hook_annotate);
-            free(hook_annotate);
-        }
-        free(stored);
-        free(result);
-        LOG_INFO_("tool done tool=%s inline=1", tc->name);
-        return 1; /* Handled inline */
+/* EXEC_INLINE vehicle: run the handler on the event-loop thread, split
+ * from dispatch_tool_inner (2026-07-19). Return codes match dispatch:
+ * 0 wait, 1 handled, 2 parked, 3 parallel-safe async. */
+static int dispatch_inline(int64_t session_id, const char *agent_name,
+                           PendingToolCall *tc, ToolEntry *te,
+                           const ShellSecret *secrets, size_t secret_count) {
+    /* Interpolate {{SECRET:X}} only for tools that exec with credentials */
+    char *interp_args = NULL;
+    if (tool_needs_interpolation(tc->name) && secret_count > 0)
+        interp_args = secret_interpolate(tc->arguments, secrets, secret_count);
+    /* Thread the live session + tool_call_id into the per-tool context.
+     * g_tool_setup is a single shared instance, so the session_id captured
+     * at agent_setup_init time is stale (0 in CLI) — the dispatching session
+     * varies per call (root or any sub-agent). Keyed on ctx *pointer
+     * identity*, not on an enumerated tool-name list: launch_agent and
+     * check_session share launch_ctx.
+     * Any future tool registered against these same shared ctx structs
+     * is covered automatically; a tool needing its own fresh ctx should
+     * get its own struct, not reuse one of these without adding it here. */
+    if (te->user_data == &g_tool_setup->launch_ctx) {
+        AgentLaunchCtx *lc = (AgentLaunchCtx *)te->user_data;
+        lc->session_id = session_id;
+        lc->current_tool_call_id = tc->call_id;
+    } else if (te->user_data == &g_tool_setup->req_cfg_ctx) {
+        RequestConfigCtx *rctx = (RequestConfigCtx *)te->user_data;
+        rctx->session_id = session_id;
+        rctx->current_tool_call_id = tc->call_id;
+    } else if (te->user_data == &g_tool_setup->bootstrap_ctx) {
+        ToolBootstrapCtx *bctx = (ToolBootstrapCtx *)te->user_data;
+        bctx->session_id = session_id;
+        bctx->current_tool_call_id = tc->call_id;
+    } else if (te->user_data == &g_tool_setup->ext_tool_ctx) {
+        ToolExtensionCtx *ectx = (ToolExtensionCtx *)te->user_data;
+        ectx->session_id = session_id;
+        ectx->current_tool_call_id = tc->call_id;
+    } else if (te->user_data == &g_tool_setup->chan_send_ctx) {
+        ToolChannelSendCtx *cctx = (ToolChannelSendCtx *)te->user_data;
+        cctx->session_id = session_id;
+        /* Route allowlist must key on the advancing agent, not the
+         * setup's init agent. */
+        snprintf(cctx->agent_name, sizeof(cctx->agent_name), "%s",
+                 agent_name ? agent_name : "");
     }
+    char *result = te->handler(interp_args ? interp_args : tc->arguments, te->user_data);
+    if (interp_args) { explicit_bzero(interp_args, strlen(interp_args)); free(interp_args); }
+    /* A NULL result means the tool dispatched async work and left this
+     * tool_call without an inline result. Two distinct shapes: */
+    if (!result && strcmp(tc->name, "launch_agent") == 0) {
+        /* Sub-agent launched. The call is already 'running' (claimed at
+         * dispatch), so the turn-join (advance_session, tool_running)
+         * neither re-dispatches it nor proceeds to the LLM until the child
+         * completes and writes the result keyed by this call_id. The
+         * parent stays tool_running, so sibling launch_agent calls keep
+         * dispatching → real parallelism. */
+        /* parallel-safe tools let dispatch continue to siblings (3);
+         * a serial tool would stop and wait (0). */
+        return tool_is_parallel_safe(tc->name) ? 3 : 0;
+    }
+    if (!result && (strcmp(tc->name, "request_config") == 0 ||
+                    strcmp(tc->name, "create_agent") == 0 ||
+                    strcmp(tc->name, "update_agent") == 0 ||
+                    strcmp(tc->name, "extension_promote") == 0)) {
+        /* Approval gate: the session is parked in awaiting_approval; the
+         * dispatch loop releases this call's claim back to pending, where
+         * it stays until resolve_approval re-runs it or writes the result. */
+        handle_approval_park(session_id);
+        return 2; /* parked, don't advance */
+    }
+    if (!result) result = strdup("error: tool returned null");
+
+    /* Explicit capture first (needs the RAW result), then postprocess:
+     * deinterpolate + secret scan/redact (scan runs even with no secrets
+     * loaded — inline js_eval output can carry leaked credentials). */
+    { char *cap = secret_capture_apply(g_db, tc->arguments, result);
+      if (cap) { free(result); result = cap; } }
+    { char *pp = tool_result_postprocess(result, secrets, secret_count);
+      if (pp) { free(result); result = pp; } }
+
+    /* afterToolCall hooks: chained result replacement, after the secret
+     * scanner (security boundary stays first), before the entry write so
+     * the replacement is what the context sees. The replacement comes back
+     * already marker-sanitized (hook_dispatch owns that invariant). */
+    char *hook_annotate = NULL;
+    if (g_tool_setup) {
+        char *rep = hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx,
+                        g_db, tc->name, tc->arguments, result, &hook_annotate);
+        if (rep) { free(result); result = rep; }
+    }
+
+    /* CLI progress */
+    if (g_mode == 0) {
+        cli_print_tool_call(tc->name, tc->arguments);
+        size_t rlen = strlen(result);
+        if (rlen <= 80)
+            fprintf(stdout, "\033[2m→ %s\033[0m\n", result);
+        else
+            fprintf(stdout, "\033[2m→ %.77s...\033[0m\n", result);
+        fflush(stdout);
+    }
+
+    /* Ensure valid UTF-8 before DB storage */
+    { char *clean = utf8_sanitize(result, strlen(result));
+      if (clean) { free(result); result = clean; } }
+
+    char *stored = truncate_and_spill(result, session_id, tc->call_id);
+    ToolResult tr = {.tool_call_id = tc->call_id,
+                     .content = stored ? stored : result};
+    int is_err = (strncmp(result, "error:", 6) == 0);
+    Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                   .tool_name = tc->name, .is_error = is_err};
+    int64_t rid = entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+    db_tool_call_complete_with_result(g_db, tc->entry_id, tc->call_id, rid);
+    if (hook_annotate) {
+        if (rid > 0) hook_entry_data_patch(g_db, rid, hook_annotate);
+        free(hook_annotate);
+    }
+    free(stored);
+    free(result);
+    LOG_INFO_("tool done tool=%s inline=1", tc->name);
+    return 1; /* Handled inline */
+
+}
+
+static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
+                               PendingToolCall *tc,
+                               const ShellSecret *secrets, size_t secret_count) {
+    if (g_child_count >= CHILD_MAX) return -1;
+
+    ToolEntry *te = g_tool_setup ? tools_lookup(&g_tool_setup->reg, tc->name) : NULL;
+    if (!te && g_tool_setup) {
+        /* Registry is a cache of the extension-tool query; a miss may just
+         * mean an extension was promoted/attached after startup, or that this
+         * is a non-default agent whose tools were never materialized. Refresh
+         * for the *advancing* agent and retry. Safe unlocked: the registry is
+         * only touched on the event-loop thread. On TOOLS_MAX overflow the
+         * register fails, the second lookup misses, and we fall through to the
+         * unknown-tool error instead of corrupting the registry. */
+        tools_load_extension_tools(&g_tool_setup->reg, g_db, agent_name,
+                                   &g_tool_setup->js_eval_ctx);
+        te = tools_lookup(&g_tool_setup->reg, tc->name);
+        if (!te)
+            LOG_WARN_("tool '%s' not registered after extension reload (agent=%s)",
+                      tc->name, agent_name);
+    }
+    if (!te) {
+        /* Unknown tool — write error result directly */
+        char err[192];
+        snprintf(err, sizeof(err),
+                 "error: unknown tool '%s' — use search_config to see available tools",
+                 tc->name);
+        ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
+        Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
+                       .tool_name = tc->name, .is_error = 1};
+        entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+        db_tool_call_set_status(g_db, session_id, tc->call_id, "done", NULL);
+        return 1; /* Signal: handled inline, check for more */
+    }
+
+    /* Dispatch gate (capability → policy → hooks → sensitivity/bind →
+     * approval). sens_host survives the gate: an approved once-only
+     * sensitivity park grants that host to THIS call via a per-call
+     * exception in the network-tier sections below. */
+    char sens_host[254];
+    int sens_once = 0, bind_once = 0;
+    {
+        int g = dispatch_gate(session_id, agent_name, tc, te,
+                              secrets, secret_count,
+                              sens_host, sizeof(sens_host),
+                              &sens_once, &bind_once);
+        if (g != 0) return g;
+    }
+
+    if (te->recipe.vehicle == EXEC_INLINE)
+        return dispatch_inline(session_id, agent_name, tc, te,
+                               secrets, secret_count);
+
 
     /* ── File-tier re-exec path: fork+exec a clean --run-tool child ────
      * Replaces the fork-only path for file tools when sandbox is required.
@@ -3476,563 +3508,6 @@ done:
     process_unregister(g_db, g_instance_id);
     db_recover_stale_sessions(g_db);
     free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path);
-    return rc;
-}
-
-/* Shared opener for the operator verbs (sensitive / secret-bind): open the
- * real DB with the schema-generation guard + ensure-schema, so the verbs
- * work on a fresh box before any agent run has initialized the DB. */
-static sqlite3 *verb_db_open(void) {
-    char *db_path = util_resolve_db_path();
-    if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return NULL; }
-    sqlite3 *db = db_open(db_path);
-    if (!db) { fprintf(stderr, "error: cannot open %s\n", db_path); free(db_path); return NULL; }
-    if (!db_schema_compat(db)) {
-        fprintf(stderr, "error: %s was created by a different cclaw schema — delete it\n", db_path);
-        sqlite3_close(db); free(db_path); return NULL;
-    }
-    free(db_path);
-    if (db_ensure_schema(db) != 0) {
-        fprintf(stderr, "error: schema init failed\n");
-        sqlite3_close(db); return NULL;
-    }
-    return db;
-}
-
-/* `cclaw sensitive add|rm|list [host]` — operator verb for the sensitivity
- * axis (specs/trust.md). Labels are global target properties, deliberately
- * NOT settable via any agent tool: only a human at the CLI (or sqlite3)
- * can label or unlabel a target. */
-static int sensitive_main(int argc, char *argv[]) {
-    const char *sub = (argc >= 3) ? argv[2] : NULL;
-    const char *host = (argc >= 4) ? argv[3] : NULL;
-    sqlite3 *db = verb_db_open();
-    if (!db) return 1;
-    int rc = 0;
-    if (sub && strcmp(sub, "list") == 0) {
-        int n = 0;
-        char **hosts = db_sensitive_hosts(db, &n);
-        if (!hosts) printf("(no sensitive hosts)\n");
-        for (int i = 0; i < n; i++) { printf("%s\n", hosts[i]); free(hosts[i]); }
-        free(hosts);
-    } else if (sub && host && strcmp(sub, "add") == 0) {
-        rc = db_sensitive_host_add(db, host) == 0 ? 0 : 1;
-        if (rc == 0) printf("sensitive host added: %s\n", host);
-        else fprintf(stderr, "error: add failed\n");
-    } else if (sub && host && strcmp(sub, "rm") == 0) {
-        rc = db_sensitive_host_rm(db, host) == 0 ? 0 : 1;
-        if (rc == 0) printf("sensitive host removed: %s\n", host);
-        else fprintf(stderr, "error: rm failed\n");
-    } else {
-        fprintf(stderr, "usage: cclaw sensitive add|rm <host> | list\n"
-                        "  host: exact (\"pay.example.com\") or suffix (\".example.com\");\n"
-                        "  bare domains cover their subdomains\n");
-        rc = 2;
-    }
-    sqlite3_close(db);
-    return rc;
-}
-
-/* `cclaw secret-bind <name> <host> | rm <name> <host> | list` — operator verb
- * for the fail-closed credential rule (specs/trust.md): pre-seed or revoke
- * secret→host bindings. Bindings also accrete from ALWAYS approvals of
- * url-carrying calls ("approve & bind"). */
-static int secret_bind_main(int argc, char *argv[]) {
-    sqlite3 *db = verb_db_open();
-    if (!db) return 1;
-    int rc = 0;
-    if (argc >= 3 && strcmp(argv[2], "list") == 0) {
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "SELECT secret_name, host FROM secret_hosts"
-                " ORDER BY secret_name, host", -1, &st, NULL) == SQLITE_OK) {
-            int any = 0;
-            while (sqlite3_step(st) == SQLITE_ROW) {
-                printf("%s -> %s\n", sqlite3_column_text(st, 0),
-                       sqlite3_column_text(st, 1));
-                any = 1;
-            }
-            sqlite3_finalize(st);
-            if (!any) printf("(no secret bindings)\n");
-        }
-    } else if (argc >= 5 && strcmp(argv[2], "rm") == 0) {
-        rc = db_secret_host_unbind(db, argv[3], argv[4]) == 0 ? 0 : 1;
-        if (rc == 0) printf("binding removed: %s -> %s\n", argv[3], argv[4]);
-        else fprintf(stderr, "error: rm failed\n");
-    } else if (argc >= 4 && strcmp(argv[2], "rm") != 0) {
-        rc = db_secret_host_bind(db, argv[2], argv[3]) == 0 ? 0 : 1;
-        if (rc == 0) printf("binding added: %s -> %s\n", argv[2], argv[3]);
-        else fprintf(stderr, "error: bind failed\n");
-    } else {
-        fprintf(stderr, "usage: cclaw secret-bind <name> <host> | rm <name> <host> | list\n"
-                        "  host: exact (\"api.github.com\") or suffix (\".github.com\");\n"
-                        "  bare domains cover their subdomains\n");
-        rc = 2;
-    }
-    sqlite3_close(db);
-    return rc;
-}
-
-/* `cclaw secret set <NAME> [value] | rm <NAME> | list` — operator verb for
- * the DB-backed secret store (specs/security.md). `set` with no value arg
- * reads one line from stdin, keeping the plaintext out of shell history.
- * `list` never prints values. A newly set secret has zero secret_hosts rows
- * (unless pre-seeded with `cclaw secret-bind`), so its first use always
- * parks — the same fail-closed rule as env-collected secrets. */
-static int secret_main(int argc, char *argv[]) {
-    char *db_path = util_resolve_db_path();
-    if (!db_path) { fprintf(stderr, "error: cannot resolve DB path\n"); return 1; }
-    sqlite3 *db = verb_db_open();
-    if (!db) { free(db_path); return 1; }
-    { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
-    free(db_path);
-
-    int rc = 0;
-    if (argc >= 3 && strcmp(argv[2], "list") == 0) {
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "SELECT name, source, scope, created_at FROM secrets ORDER BY name",
-                -1, &st, NULL) == SQLITE_OK) {
-            int any = 0;
-            while (sqlite3_step(st) == SQLITE_ROW) {
-                printf("%s  source=%s  scope=%s  created=%lld\n",
-                       sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
-                       sqlite3_column_text(st, 2),
-                       (long long)sqlite3_column_int64(st, 3));
-                any = 1;
-            }
-            sqlite3_finalize(st);
-            if (!any) printf("(no secrets)\n");
-        }
-    } else if (argc >= 4 && strcmp(argv[2], "rm") == 0) {
-        rc = db_secret_rm(db, argv[3]) == 0 ? 0 : 1;
-        if (rc == 0) printf("secret removed: %s\n", argv[3]);
-        else fprintf(stderr, "error: rm failed\n");
-    } else if (argc >= 3 && strcmp(argv[2], "set") == 0) {
-        const char *name = (argc >= 4) ? argv[3] : NULL;
-        if (!name || !is_valid_secret_name(name)) {
-            fprintf(stderr, "error: invalid secret name (expected ^[A-Z][A-Z0-9_]*$)\n");
-            rc = 2;
-        } else {
-            char *value = NULL;
-            if (argc >= 5) {
-                value = strdup(argv[4]);
-            } else {
-                char line[4096];
-                if (fgets(line, sizeof(line), stdin)) {
-                    size_t len = strlen(line);
-                    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-                        line[--len] = '\0';
-                    value = strdup(line);
-                }
-            }
-            if (!value || !value[0]) {
-                fprintf(stderr, "error: no value provided\n");
-                rc = 2;
-            } else if (!db_secret_key_loaded()) {
-                fprintf(stderr, "error: master key unavailable\n");
-                rc = 1;
-            } else {
-                rc = db_secret_set(db, name, value, "operator", "agent") == 0 ? 0 : 1;
-                if (rc == 0) printf("secret set: %s\n", name);
-                else fprintf(stderr, "error: set failed\n");
-            }
-            if (value) { explicit_bzero(value, strlen(value)); free(value); }
-        }
-    } else {
-        fprintf(stderr, "usage: cclaw secret set <NAME> [value] | rm <NAME> | list\n"
-                        "  set with no value reads one line from stdin\n"
-                        "  name: ^[A-Z][A-Z0-9_]*$\n");
-        rc = 2;
-    }
-    db_wipe_secret_key();
-    sqlite3_close(db);
-    return rc;
-}
-
-/* `cclaw route add <channel> <chat_id> <agent> | rm <channel> <chat_id> | list`
- * — operator verb binding a channel+chat to an agent (channel_routes). A
- * chat_id of '*' is the channel-wide default. Resolution at dispatch is exact
- * (channel,chat_id) -> (channel,'*') -> config default_agent, so with no rows
- * every chat falls back to the default. Deliberately CLI-only: re-pointing a
- * chat at another agent is an authority change, not agent self-service. */
-/* `cclaw channel <list|swap|revert|restart>` — operator verbs for the channel
- * hot-swap flow. Deliberately CLI-only, same rationale as route/sensitive: an
- * authority change over what code fronts a channel. The daemon's reconcile in
- * channel_tick picks up pointer/status changes; bounce covers a live process. */
-static int channel_cli_main(int argc, char *argv[]) {
-    const char *sub = (argc >= 3) ? argv[2] : NULL;
-    sqlite3 *db = verb_db_open();
-    if (!db) return 1;
-    int rc = 0;
-    if (!sub || strcmp(sub, "list") == 0) {
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "SELECT name, status, extension_name,"
-                "       COALESCE(prev_extension_name, ''), COALESCE(pid, 0)"
-                " FROM channels ORDER BY name", -1, &st, NULL) == SQLITE_OK) {
-            int any = 0;
-            while (sqlite3_step(st) == SQLITE_ROW) {
-                const char *prev = (const char *)sqlite3_column_text(st, 3);
-                printf("%s: status=%s extension=%s pid=%d%s%s\n",
-                       sqlite3_column_text(st, 0), sqlite3_column_text(st, 1),
-                       sqlite3_column_text(st, 2), sqlite3_column_int(st, 4),
-                       prev && prev[0] ? " revert-target=" : "",
-                       prev ? prev : "");
-                any = 1;
-            }
-            sqlite3_finalize(st);
-            if (!any) printf("(no channels registered)\n");
-        }
-    } else if (strcmp(sub, "swap") == 0 && argc >= 5) {
-        int r = channel_swap(db, argv[3], argv[4]);
-        if (r == -2) { fprintf(stderr, "error: extension '%s' not registered\n", argv[4]); rc = 1; }
-        else if (r != 0) { fprintf(stderr, "error: channel '%s' not found\n", argv[3]); rc = 1; }
-        else printf("channel %s now runs extension '%s' (previous kept as revert "
-                    "target; daemon respawns the process within seconds)\n",
-                    argv[3], argv[4]);
-    } else if (strcmp(sub, "revert") == 0 && argc >= 4) {
-        if (channel_revert(db, argv[3]) != 0) {
-            fprintf(stderr, "error: nothing to revert for '%s'\n", argv[3]);
-            rc = 1;
-        } else printf("channel %s reverted to its previous extension\n", argv[3]);
-    } else if (strcmp(sub, "restart") == 0 && argc >= 4) {
-        if (channel_bounce(db, argv[3]) != 0) {
-            fprintf(stderr, "error: channel '%s' not found\n", argv[3]);
-            rc = 1;
-        } else printf("channel %s restarting (daemon respawns it within seconds)\n", argv[3]);
-    } else {
-        fprintf(stderr, "usage: cclaw channel [list] | swap <channel> <extension>"
-                        " | revert <channel> | restart <channel>\n");
-        rc = 1;
-    }
-    db_close(db);
-    return rc;
-}
-
-static int route_main(int argc, char *argv[]) {
-    const char *sub = (argc >= 3) ? argv[2] : NULL;
-    sqlite3 *db = verb_db_open();
-    if (!db) return 1;
-    int rc = 0;
-    if (sub && strcmp(sub, "list") == 0) {
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "SELECT channel_name, channel_id, agent_name, delivery_mode, session_id,"
-                "       tool_filter"
-                " FROM channel_routes ORDER BY channel_name, channel_id",
-                -1, &st, NULL) == SQLITE_OK) {
-            int any = 0;
-            while (sqlite3_step(st) == SQLITE_ROW) {
-                printf("%s %s -> %s (mode %s", sqlite3_column_text(st, 0),
-                       sqlite3_column_text(st, 1), sqlite3_column_text(st, 2),
-                       sqlite3_column_text(st, 3));
-                if (sqlite3_column_type(st, 4) != SQLITE_NULL)
-                    printf(", session %lld", (long long)sqlite3_column_int64(st, 4));
-                if (sqlite3_column_type(st, 5) != SQLITE_NULL)
-                    printf(", tools %s", sqlite3_column_text(st, 5));
-                printf(")\n");
-                any = 1;
-            }
-            sqlite3_finalize(st);
-            if (!any) printf("(no routes — unrouted senders are dropped unless"
-                             " admin or <ext>.allow_unknown=1)\n");
-        }
-    } else if (sub && strcmp(sub, "add") == 0 && argc >= 6) {
-        const char *ch = argv[3], *cid = argv[4], *agent = argv[5];
-        const char *mode = NULL;
-        const char *tools = NULL;
-        int64_t pin_session = 0;
-        int bad = 0;
-        for (int i = 6; i < argc; i++) {
-            if (strcmp(argv[i], "--tools") == 0 && i + 1 < argc) {
-                tools = argv[++i];
-            } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
-                mode = argv[++i];
-                if (strcmp(mode, "auto") != 0 && strcmp(mode, "explicit") != 0) {
-                    fprintf(stderr, "error: --mode must be auto or explicit\n");
-                    bad = 1;
-                }
-            } else if (strcmp(argv[i], "--session") == 0 && i + 1 < argc) {
-                pin_session = atoll(argv[++i]);
-                if (pin_session <= 0) {
-                    fprintf(stderr, "error: --session needs a positive session id\n");
-                    bad = 1;
-                }
-            } else {
-                fprintf(stderr, "error: unknown route add option '%s'\n", argv[i]);
-                bad = 1;
-            }
-        }
-        if (bad) { sqlite3_close(db); return 1; }
-        /* --tools name,name,... -> JSON array for channel_routes.tool_filter.
-         * Built with json_group_array so quoting is SQLite's problem. */
-        char *filter_json = NULL;
-        if (tools) {
-            sqlite3_stmt *fj;
-            if (sqlite3_prepare_v2(db,
-                    "SELECT json_group_array(trim(value))"
-                    " FROM json_each('[\"' || replace(?1, ',', '\",\"') || '\"]')"
-                    " WHERE trim(value) <> ''",
-                    -1, &fj, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(fj, 1, tools, -1, SQLITE_STATIC);
-                if (sqlite3_step(fj) == SQLITE_ROW &&
-                    sqlite3_column_type(fj, 0) != SQLITE_NULL) {
-                    const char *j = (const char *)sqlite3_column_text(fj, 0);
-                    if (j && strcmp(j, "[]") != 0) filter_json = strdup(j);
-                }
-                sqlite3_finalize(fj);
-            }
-            if (!filter_json || strchr(tools, '"') || strchr(tools, '\\')) {
-                fprintf(stderr, "error: --tools needs a comma-separated list of tool names\n");
-                free(filter_json);
-                sqlite3_close(db);
-                return 1;
-            }
-        }
-        /* Group-shaped ids (negative — Telegram groups) default to explicit:
-         * silent-by-default listen-and-decide until the operator says auto. */
-        if (!mode) mode = (cid[0] == '-') ? "explicit" : "auto";
-        /* Warn (don't refuse) if the agent isn't registered yet — the operator
-         * may create it later; a route to a missing agent just drops until then. */
-        sqlite3_stmt *ck;
-        int exists = 0;
-        if (sqlite3_prepare_v2(db, "SELECT 1 FROM agents WHERE name=?", -1, &ck, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(ck, 1, agent, -1, SQLITE_STATIC);
-            exists = (sqlite3_step(ck) == SQLITE_ROW);
-            sqlite3_finalize(ck);
-        }
-        if (!exists) fprintf(stderr, "warning: agent '%s' not found in agents table\n", agent);
-        /* Friction note: routing a specific external chat to an agent that
-         * holds grants, with no --tools, hands the sender full authority. */
-        if (!tools && strcmp(cid, "*") != 0) {
-            sqlite3_stmt *gk;
-            int has_grants = 0;
-            if (sqlite3_prepare_v2(db, "SELECT 1 FROM grants WHERE agent_name=? LIMIT 1",
-                                   -1, &gk, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(gk, 1, agent, -1, SQLITE_STATIC);
-                has_grants = (sqlite3_step(gk) == SQLITE_ROW);
-                sqlite3_finalize(gk);
-            }
-            if (has_grants)
-                fprintf(stderr, "note: route grants full '%s' authority to this chat;"
-                                " consider --tools to attenuate\n", agent);
-        }
-        if (pin_session > 0) {
-            sqlite3_stmt *sk;
-            int sess_ok = 0;
-            if (sqlite3_prepare_v2(db, "SELECT 1 FROM sessions WHERE id=?", -1, &sk, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(sk, 1, pin_session);
-                sess_ok = (sqlite3_step(sk) == SQLITE_ROW);
-                sqlite3_finalize(sk);
-            }
-            if (!sess_ok)
-                fprintf(stderr, "warning: session %lld not found — pin ignored until it exists\n",
-                        (long long)pin_session);
-        }
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "INSERT INTO channel_routes(channel_name, channel_id, agent_name, session_id, delivery_mode, tool_filter)"
-                " VALUES(?1,?2,?3,CASE WHEN ?4>0 THEN ?4 END,?5,?6)"
-                " ON CONFLICT(channel_name, channel_id) DO UPDATE SET"
-                "  agent_name=excluded.agent_name, session_id=excluded.session_id,"
-                "  delivery_mode=excluded.delivery_mode, tool_filter=excluded.tool_filter",
-                -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
-            sqlite3_bind_text(st, 2, cid, -1, SQLITE_STATIC);
-            sqlite3_bind_text(st, 3, agent, -1, SQLITE_STATIC);
-            sqlite3_bind_int64(st, 4, pin_session);
-            sqlite3_bind_text(st, 5, mode, -1, SQLITE_STATIC);
-            if (filter_json) sqlite3_bind_text(st, 6, filter_json, -1, SQLITE_STATIC);
-            rc = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
-            sqlite3_finalize(st);
-        } else rc = 1;
-        if (rc == 0) {
-            printf("route set: %s %s -> %s (mode %s", ch, cid, agent, mode);
-            if (pin_session > 0) printf(", session %lld", (long long)pin_session);
-            if (filter_json) printf(", tools %s", filter_json);
-            printf(")\n");
-        } else fprintf(stderr, "error: add failed\n");
-        free(filter_json);
-    } else if (sub && strcmp(sub, "rm") == 0 && argc >= 5) {
-        const char *ch = argv[3], *cid = argv[4];
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "DELETE FROM channel_routes WHERE channel_name=? AND channel_id=?",
-                -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
-            sqlite3_bind_text(st, 2, cid, -1, SQLITE_STATIC);
-            rc = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
-            int changed = sqlite3_changes(db);
-            sqlite3_finalize(st);
-            if (rc == 0) printf(changed ? "route removed: %s %s\n" : "no such route: %s %s\n", ch, cid);
-        } else rc = 1;
-    } else {
-        fprintf(stderr, "usage: cclaw route add <channel> <chat_id> <agent>"
-                        " [--mode auto|explicit] [--session <id>] [--tools name,name,...]\n"
-                        "       cclaw route rm  <channel> <chat_id>\n"
-                        "       cclaw route list\n"
-                        "  chat_id '*' is the channel-wide default;\n"
-                        "  resolution: exact (channel,chat_id) -> (channel,'*') -> gate\n"
-                        "  (unrouted senders drop unless admin or allow_unknown=1)\n"
-                        "  --mode default: explicit for group ids (negative), else auto\n"
-                        "  --session pins the chat to one session\n"
-                        "  --tools limits sessions created for this route to those tools\n"
-                        "  (frozen at session creation; a route edit needs a new session)\n");
-        rc = 2;
-    }
-    sqlite3_close(db);
-    return rc;
-}
-
-/* Print one llm_responses row: header + body rendered as JSON. Bodies are
- * stored as JSONB, which system sqlite3 CLIs older than 3.45 (e.g. Debian
- * bookworm's 3.40) can't decode — the vendored SQLite in this binary is the
- * one guaranteed reader. `which` is "body" or "request_body". */
-static int resp_print(sqlite3 *db, const char *where, int64_t id, const char *which) {
-    char sql[512];
-    snprintf(sql, sizeof(sql),
-        "SELECT id, status, model, session_id, turn_id,"
-        "       datetime(created_at,'unixepoch','localtime'),"
-        "       CASE WHEN %s IS NULL THEN NULL"
-        "            WHEN json_valid(%s, 8) THEN json_pretty(%s)"
-        "            ELSE CAST(%s AS TEXT) END"
-        " FROM llm_responses WHERE %s ORDER BY id DESC LIMIT 1",
-        which, which, which, which, where);
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
-    if (sqlite3_bind_parameter_count(st) > 0) sqlite3_bind_int64(st, 1, id);
-    int found = 0;
-    if (sqlite3_step(st) == SQLITE_ROW) {
-        found = 1;
-        printf("resp #%lld status=%s model=%s session=%lld turn=%lld at %s\n",
-               (long long)sqlite3_column_int64(st, 0), sqlite3_column_text(st, 1),
-               sqlite3_column_text(st, 2), (long long)sqlite3_column_int64(st, 3),
-               (long long)sqlite3_column_int64(st, 4), sqlite3_column_text(st, 5));
-        const char *body = (const char *)sqlite3_column_text(st, 6);
-        printf("%s\n", body ? body : strcmp(which, "body") == 0
-               ? "(no body — provider sent nothing)"
-               : "(no request archived — only failed attempts keep the request)");
-    }
-    sqlite3_finalize(st);
-    return found ? 0 : 1;
-}
-
-/* `cclaw dashboard` — print the tokenized admin dashboard URL. The token is
- * generated by the daemon's web_start; before the first daemon run there is
- * nothing to print. */
-static int dashboard_main(void) {
-    sqlite3 *db = verb_db_open();
-    if (!db) return 1;
-    char *url = dashboard_url(db);
-    sqlite3_close(db);
-    if (!url) {
-        fprintf(stderr, "no admin token yet — run the daemon once (cclaw --daemon)\n");
-        return 1;
-    }
-    printf("%s\n", url);
-    free(url);
-    return 0;
-}
-
-/* `cclaw backup [dest]` — write a consistent single-file snapshot via
- * VACUUM INTO. Default dest: <db>.backup.<yyyymmdd-HHMMSS>. Refuses to
- * overwrite and respects the disk floor. Restore is a documented manual
- * procedure (stop daemon → move snapshot over cclaw.db → delete -wal/-shm →
- * restart); see specs/operations.md. Safe to run against a live daemon:
- * VACUUM INTO takes a read snapshot, so a mid-turn session is captured
- * consistently and recovery reconciles it on restart. */
-static int backup_main(int argc, char *argv[]) {
-    sqlite3 *db = verb_db_open();
-    if (!db) return 1;
-
-    char dest[1024];
-    if (argc >= 3 && argv[2][0]) {
-        snprintf(dest, sizeof(dest), "%s", argv[2]);
-    } else {
-        const char *path = sqlite3_db_filename(db, "main");
-        if (!path || !path[0]) {
-            fprintf(stderr, "error: cannot resolve DB path for default backup name\n");
-            sqlite3_close(db);
-            return 1;
-        }
-        char ts[32];
-        time_t now = time(NULL);
-        struct tm tm;
-        localtime_r(&now, &tm);
-        strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", &tm);
-        snprintf(dest, sizeof(dest), "%s.backup.%s", path, ts);
-    }
-
-    /* Disk floor: a snapshot is roughly the DB's size — refuse under the floor
-     * so a backup can't be the write that fills an SD card. */
-    int floor_mb = config_default_int("disk_min_free_mb");
-    if (floor_mb > 0) {
-        long free_mb = db_free_mb(db);
-        if (free_mb >= 0 && free_mb < floor_mb) {
-            fprintf(stderr, "error: free space %ldMB below floor %dMB — backup refused\n",
-                    free_mb, floor_mb);
-            sqlite3_close(db);
-            return 1;
-        }
-    }
-
-    long long bytes = -1;
-    int rc = db_backup_to(db, dest, &bytes);
-    sqlite3_close(db);
-    if (rc != 0) {
-        fprintf(stderr, "error: backup failed (see log; likely %s exists or disk error)\n", dest);
-        return 1;
-    }
-    printf("%s (%lld bytes)\n", dest, bytes);
-    return 0;
-}
-
-/* `cclaw resp` — read the llm_responses forensic archive. What "[resp #N]" in
- * an error message cites. */
-static int resp_main(int argc, char *argv[]) {
-    const char *sub = (argc >= 3) ? argv[2] : NULL;
-    sqlite3 *db = verb_db_open();
-    if (!db) return 1;
-    int rc = 0;
-    if (sub && strcmp(sub, "list") == 0) {
-        int n = (argc >= 4) ? atoi(argv[3]) : 20;
-        if (n <= 0) n = 20;
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db,
-                "SELECT id, status, model, session_id, turn_id,"
-                "       datetime(created_at,'unixepoch','localtime'), COALESCE(length(body),0)"
-                " FROM llm_responses ORDER BY id DESC LIMIT ?", -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_int(st, 1, n);
-            int any = 0;
-            while (sqlite3_step(st) == SQLITE_ROW) {
-                printf("#%-5lld %-13s %s session=%lld turn=%lld %s %d bytes\n",
-                       (long long)sqlite3_column_int64(st, 0), sqlite3_column_text(st, 1),
-                       sqlite3_column_text(st, 2), (long long)sqlite3_column_int64(st, 3),
-                       (long long)sqlite3_column_int64(st, 4), sqlite3_column_text(st, 5),
-                       sqlite3_column_int(st, 6));
-                any = 1;
-            }
-            sqlite3_finalize(st);
-            if (!any) printf("(archive empty — see config llm_response_archive_max)\n");
-        }
-    } else if (!sub) {
-        /* Bare `cclaw resp`: the most recent failure. */
-        int r = resp_print(db, "status != 'ok'", 0, "body");
-        if (r == 1) { printf("(no archived failures)\n"); }
-        else if (r < 0) rc = 1;
-    } else if (atoll(sub) > 0) {
-        const char *which = (argc >= 4 && strcmp(argv[3], "req") == 0) ? "request_body" : "body";
-        int r = resp_print(db, "id = ?1", atoll(sub), which);
-        if (r == 1) { fprintf(stderr, "error: no archived response #%s (pruned? see `cclaw resp list`)\n", sub); rc = 1; }
-        else if (r < 0) rc = 1;
-    } else {
-        fprintf(stderr, "usage: cclaw resp             # most recent failure (what \"[resp #N]\" cites)\n"
-                        "       cclaw resp <id> [req]  # one archived row; `req` prints the request we sent\n"
-                        "       cclaw resp list [n]    # recent archive rows, newest first\n");
-        rc = 2;
-    }
-    sqlite3_close(db);
     return rc;
 }
 

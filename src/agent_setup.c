@@ -18,8 +18,10 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     memset(setup, 0, sizeof(*setup));
     tools_init(&setup->reg);
 
-    /* Load capabilities from grants table */
-    agent_caps_load(db, agent_name, &setup->caps);
+    /* Capability arrays (caps) are not loaded here: agent_setup_refresh_caps
+     * at the bottom loads them from the grants table, and the dispatch loop
+     * re-runs it before every tool batch — grants in the DB are the only
+     * durable authority; the arrays are a per-dispatch snapshot. */
 
     /* The shell egress proxy is per-call: each shell_exec stands up its own
      * proxy in the --run-tool broker child. The daemon holds no proxy socket. */
@@ -67,20 +69,15 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace, shell_path);
 
     /* Trust-derived sandbox profile, filled once and embedded in every tool ctx.
-     * The grant-path fields are bound just below (and rebound on cap refresh). */
+     * The grant-path fields stay NULL here — agent_setup_refresh_caps binds
+     * them (and per-dispatch reloads keep them fresh). */
     SandboxProfile profile = {0};
     sandbox_profile_resolve(sandbox_profile, &profile);
-    profile.read_paths = setup->caps.read_paths;
-    profile.read_path_count = setup->caps.read_count;
-    profile.write_paths = setup->caps.write_paths;
-    profile.write_path_count = setup->caps.write_count;
 
     /* Inject proxy sock path + secrets + the shared profile into shell config */
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data) {
         ShellConfig *sc = (ShellConfig *)shell_entry->user_data;
-        sc->allowed_hosts = setup->caps.hosts;       /* per-call egress proxy allowlist (data, no DB) */
-        sc->allowed_host_count = setup->caps.host_count;
         sc->secrets = setup->secrets;
         sc->secret_count = setup->secret_count;
         sc->cwd_path = getenv("CCLAW_PATH");  /* CWD rw in CLI mode */
@@ -102,8 +99,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
 
     /* JS eval (SBX_JS broker): mirrors web/shell — qjs runs in-process in the
      * fork+execve --run-tool child, egress via per-hop proxy decide(). */
-    setup->js_eval_ctx.allowed_hosts = setup->caps.hosts;
-    setup->js_eval_ctx.allowed_hosts_count = setup->caps.host_count;
     setup->js_eval_ctx.host_mode = profile.sandbox ? 0 : 1;
     setup->js_eval_ctx.sandbox_profile = sandbox_profile;
     setup->js_eval_ctx.workspace = cfg->workspace;
@@ -117,8 +112,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->web_ctx.workspace = cfg->workspace;
     setup->web_ctx.cwd_path = getenv("CCLAW_PATH");
     setup->web_ctx.db_path = cfg->db_path;
-    setup->web_ctx.allowed_hosts = setup->caps.hosts;
-    setup->web_ctx.allowed_host_count = setup->caps.host_count;
     setup->web_ctx.host_mode = profile.sandbox ? 0 : 1;
     setup->web_ctx.sb = profile;
     tool_web_fetch_register(&setup->reg, &setup->web_ctx);
@@ -133,8 +126,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
 
     /* JS persistent runtime */
     setup->js_rt = js_runtime_create();
-    if (setup->js_rt && setup->caps.host_count > 0)
-        js_runtime_set_hosts(setup->js_rt, setup->caps.hosts, setup->caps.host_count);
 
     /* Extension hook context + DB-driven hook load. Extension *tools* load from
      * the DB after tools_sync_to_db (below) so the builtin sync never clobbers
@@ -207,14 +198,22 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
      * builtins. */
     tools_sync_to_db(&setup->reg, db);
     tools_load_extension_tools(&setup->reg, db, agent_name, &setup->js_eval_ctx);
+
+    /* Initial caps load + bind — same path the dispatch loop re-runs per batch. */
+    agent_setup_refresh_caps(setup, db, agent_name);
     return 0;
 }
 
+/* Load the agent's grants into flat arrays and bind them into every tool ctx.
+ * Called by the dispatch loop before each tool batch, so the arrays are always
+ * a fresh snapshot of the grants table for the *advancing* agent — never a
+ * cache that can drift from the DB (expiry, revoke, agent switch). Handlers
+ * consume them synchronously in the parent; forked children copy at fork. */
 void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent) {
     agent_caps_refresh(db, agent, &setup->caps);
 
-    /* Rebind the grant-path pointers in every embedded profile to the new arrays.
-     * Only the path half changes on a cap refresh; the trust policy is fixed. */
+    /* Only the grant-path half of each embedded profile changes here;
+     * the trust policy is fixed at init. */
     setup->file_read_ctx.sb.read_paths = setup->caps.read_paths;
     setup->file_read_ctx.sb.read_path_count = setup->caps.read_count;
     setup->file_read_ctx.sb.write_paths = setup->caps.write_paths;
@@ -244,9 +243,6 @@ void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent)
     setup->web_ctx.sb.read_path_count = setup->caps.read_count;
     setup->web_ctx.sb.write_paths = setup->caps.write_paths;
     setup->web_ctx.sb.write_path_count = setup->caps.write_count;
-
-    if (setup->js_rt)
-        js_runtime_set_hosts(setup->js_rt, setup->caps.hosts, setup->caps.host_count);
 }
 
 void agent_setup_destroy(AgentSetup *setup) {

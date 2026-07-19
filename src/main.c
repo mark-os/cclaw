@@ -1810,7 +1810,6 @@ static void db_periodic(void) {
 static void apply_grant(const Approval *a, const char *agent, int *rename_failed,
                         int64_t grant_expires_at) {
     *rename_failed = 0;
-    const char *refresh_agent = agent;
     if (strcmp(a->action, "request_changes") == 0) {
         /* One savepoint applies the whole document — grants, config values,
          * provider upsert (tool_request_config.c). Failure rolls everything
@@ -1876,20 +1875,16 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
                         sqlite3_step(s); sqlite3_finalize(s);
                     }
                 }
-                /* Update live agent name — use nn for subsequent refresh */
+                /* Update live agent name */
                 snprintf((char *)rctx->agent_name, 64, "%s", nn);
                 setenv("CCLAW_AGENT_NAME", nn, 1);
-                refresh_agent = rctx->agent_name;
             }
         }
 rename_done:
         free(nn); free(pr);
     }
-    /* Only rebind the shared setup when the grant target is the bound agent
-     * (CLI root). A grant applied to a sub-agent must not leave root's setup
-     * carrying its caps; the dispatch path re-binds per call. */
-    if (g_tool_setup && !*rename_failed && strcmp(refresh_agent, g_agent_name) == 0)
-        agent_setup_refresh_caps(g_tool_setup, g_db, refresh_agent);
+    /* No caps rebind here: the dispatch loop reloads caps from grants before
+     * every tool batch, so the applied grants take effect on the next dispatch. */
 }
 
 /* Post-window iff the block sweep already advanced this turn: the frozen
@@ -2494,9 +2489,11 @@ static void run_advance(int64_t session_id) {
          * Parallel-safe calls are launched back-to-back; a serial async call
          * (or a park/failure) stops dispatch and we wait for its completion. */
         /* The shared setup serves whichever session is advancing — root or any
-         * sub-agent (in the daemon, many agents through one setup). Rebind caps
-         * to the advancing session's agent before forking so each tool runs
-         * under that agent's grants, not whoever dispatched last. */
+         * sub-agent (in the daemon, many agents through one setup). This is the
+         * ONLY caps binding point: every batch reloads the advancing agent's
+         * grants from the DB, so the in-memory arrays are a per-dispatch
+         * snapshot, never a cache that can go stale (expiry, revoke, rename,
+         * agent switch). */
         if (g_tool_setup)
             agent_setup_refresh_caps(g_tool_setup, g_db, out.agent_name);
         int async_in_flight = 0;
@@ -2540,12 +2537,6 @@ static void run_advance(int64_t session_id) {
         break;
     }
     case ADVANCE_DONE:
-        /* Refresh only when the completing agent is the one the shared setup is
-         * bound to (CLI root). A sub-agent completion must not leave root's
-         * setup carrying the sub-agent's grants; the dispatch path re-binds
-         * caps per call anyway. */
-        if (g_tool_setup && strcmp(out.agent_name, g_agent_name) == 0)
-            agent_setup_refresh_caps(g_tool_setup, g_db, out.agent_name);
         deliver_response(session_id);
         /* Attempt compaction if configured */
         if (g_cfg->compaction && llm_worker_alive() &&

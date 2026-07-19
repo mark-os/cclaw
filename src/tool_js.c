@@ -168,11 +168,6 @@ void js_runtime_destroy(JsSessionRuntime *rt) {
     free(rt);
 }
 
-void js_runtime_set_hosts(JsSessionRuntime *rt, char **hosts, size_t count) {
-    (void)rt; (void)hosts; (void)count;
-    /* Hosts are passed via env to forked child, not needed in session runtime */
-}
-
 char *tool_js_tier_run(const RunToolParsed *q) {
     /* qjs runs in-process in the inner fork (web's twin): netns + proxy +
      * mounts are already applied. code/filename/args arrive as pre-extracted

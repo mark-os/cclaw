@@ -134,6 +134,11 @@ CREATE TABLE IF NOT EXISTS channels (
   binary_path TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'draft',
   pid INTEGER,
+  default_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,
+                    -- Channel open-door policy: non-NULL = unknown chats are
+                    -- accepted and get a new session bound to this agent;
+                    -- NULL = fail-closed (unrouted chats drop + admin notify).
+                    -- Grants no send authority — channel_send needs a route.
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -144,18 +149,23 @@ CREATE TABLE IF NOT EXISTS channel_state (
   PRIMARY KEY (channel_name, key)
 );
 
+-- A route pins a chat (platform conversation id) to a session; the session
+-- names its agent (sessions.agent_name, immutable). Routes never name an
+-- agent directly — channel-wide default agent lives on channels.default_agent.
+-- chat_id: Telegram chat id, Discord text-channel/thread/DM id, etc.
+-- (FK to sessions is declared here before the sessions CREATE below —
+-- SQLite resolves FK targets at DML time, not CREATE time.)
 CREATE TABLE IF NOT EXISTS channel_routes (
   channel_name TEXT NOT NULL,
-  channel_id TEXT NOT NULL DEFAULT '*',
-  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
-  session_id INTEGER,
+  chat_id TEXT NOT NULL,
+  session_id INTEGER NOT NULL REFERENCES sessions(id),
   delivery_mode TEXT NOT NULL DEFAULT 'auto',  -- 'auto' = turn output auto-delivers to the
                                                -- origin chat; 'explicit' = only channel_send
   tool_filter TEXT,                            -- JSON array of tool names; NULL = unrestricted.
                                                -- Copied onto sessions.tool_filter at session
                                                -- creation only — frozen like sub-agent filters;
                                                -- later route edits don't retro-apply.
-  PRIMARY KEY (channel_name, channel_id)
+  PRIMARY KEY (channel_name, chat_id)
 );
 
 -- ═══ Sessions ═══
@@ -164,7 +174,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   name TEXT,
   agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
   channel_name TEXT,
-  channel_id TEXT,
+  chat_id TEXT,
   parent_session_id INTEGER DEFAULT -1,
   parent_tool_call_id TEXT,
   depth INTEGER NOT NULL DEFAULT 0,

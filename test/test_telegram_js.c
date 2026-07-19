@@ -260,7 +260,7 @@ int main(void) {
         "return __emits[0].payload;"
         "})()",
         "\"media\":{\"kind\":\"audio\",\"mime\":\"audio/ogg\",\"path\":\"/tmp/spool/tg_77.oga\"}");
-    expect_has("voice_emit_channel_id",
+    expect_has("voice_emit_chat_id",
         "(async function(){" VOICE_SETUP
         "processMessage(" VOICE_MSG ", 77);"
         "await 0;"
@@ -270,7 +270,7 @@ int main(void) {
         "await 0; await 0; await 0;"
         "return __emits[0].payload;"
         "})()",
-        "\"channel_id\":\"5\"");
+        "\"chat_id\":\"5\"");
 
     /* Oversize voice (duration) → polite rejection, no http call. */
     expect_has("voice_oversize_rejected",

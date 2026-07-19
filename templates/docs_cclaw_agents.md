@@ -26,7 +26,7 @@ should move to another agent is a new `launch_agent` session, not a transfer.
 
 ## Sessions and channels
 
-A session's channel binding (`channel_name`/`channel_id`) is its origin — set
+A session's channel binding (`channel_name`/`chat_id`) is its origin — set
 when an inbound channel message creates the session, or attached by the
 operator. It is where approval prompts and turn output go. Agents don't
 rebind sessions; what an agent *can* request is a **send route** to a chat

@@ -335,6 +335,48 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "ALTER TABLE models DROP COLUMN sub_provider;"
       "ALTER TABLE llm_jobs DROP COLUMN claimed_at;",
       NULL },
+    /* v33: route-model unification (plan/projects/route-model-unification.md).
+     * Routes pin sessions; sessions own agents. channel_id renamed chat_id
+     * (channel = bot/transport, chat = conversation). The '*' wildcard row
+     * becomes channels.default_agent (open-door policy). Exact rows that
+     * carried only an agent (agent-requested routes) get an eagerly created
+     * session; rows with neither survive nothing and are dropped. */
+    { 33,
+      "ALTER TABLE sessions RENAME COLUMN channel_id TO chat_id;"
+      "ALTER TABLE channels ADD COLUMN default_agent TEXT"
+      "  REFERENCES agents(name) ON UPDATE CASCADE;"
+      "UPDATE channels SET default_agent="
+      "  (SELECT r.agent_name FROM channel_routes r"
+      "    WHERE r.channel_name=channels.name AND r.channel_id='*');"
+      "DELETE FROM channel_routes WHERE channel_id='*';"
+      "INSERT INTO sessions(name, agent_name, channel_name, chat_id)"
+      "  SELECT 'route:'||channel_name||':'||channel_id, agent_name,"
+      "         channel_name, channel_id"
+      "  FROM channel_routes"
+      "  WHERE session_id IS NULL AND agent_name IS NOT NULL"
+      "    AND agent_name IN (SELECT name FROM agents);"
+      "UPDATE channel_routes SET session_id="
+      "  (SELECT MAX(s.id) FROM sessions s"
+      "    WHERE s.channel_name=channel_routes.channel_name"
+      "      AND s.chat_id=channel_routes.channel_id"
+      "      AND s.agent_name=channel_routes.agent_name)"
+      "  WHERE session_id IS NULL;"
+      "DELETE FROM channel_routes WHERE session_id IS NULL"
+      "  OR NOT EXISTS(SELECT 1 FROM sessions s WHERE s.id=channel_routes.session_id);"
+      "CREATE TABLE channel_routes_v33 ("
+      "  channel_name TEXT NOT NULL,"
+      "  chat_id TEXT NOT NULL,"
+      "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+      "  delivery_mode TEXT NOT NULL DEFAULT 'auto',"
+      "  tool_filter TEXT,"
+      "  PRIMARY KEY (channel_name, chat_id));"
+      "INSERT INTO channel_routes_v33(channel_name, chat_id, session_id,"
+      "                               delivery_mode, tool_filter)"
+      "  SELECT channel_name, channel_id, session_id, delivery_mode, tool_filter"
+      "  FROM channel_routes;"
+      "DROP TABLE channel_routes;"
+      "ALTER TABLE channel_routes_v33 RENAME TO channel_routes;",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 31   /* schema freeze 2026-07-18 — no patches below this */
@@ -973,14 +1015,16 @@ int db_secret_key_loaded(void) {
     return s_secret_key_loaded;
 }
 
-/* Channel→agent binding */
-
-char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *channel_id) {
-    const char *sql = "SELECT agent_name FROM channel_routes WHERE channel_name=? AND channel_id=?;";
+/* Chat→agent binding: the agent of the route's pinned session. Routes never
+ * name an agent directly — sessions do (route-model unification, v33). */
+char *db_channel_binding_get(sqlite3 *db, const char *channel_name, const char *chat_id) {
+    const char *sql = "SELECT s.agent_name FROM channel_routes r"
+                      " JOIN sessions s ON s.id = r.session_id"
+                      " WHERE r.channel_name=? AND r.chat_id=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_text(stmt, 1, channel_type, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, channel_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, chat_id, -1, SQLITE_STATIC);
     char *result = NULL;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *val = (const char *)sqlite3_column_text(stmt, 0);

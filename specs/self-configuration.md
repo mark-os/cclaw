@@ -51,7 +51,7 @@ Sections by scope — the approval prompt groups them the same way:
 |---------|-------|-----------|
 | `grants` | agent | `grants` rows for the caller |
 | `agent` | agent | whitelisted columns on the caller's `agents` row (`primary_model`, `secondary_model`, `max_iterations`, `shell_timeout`) |
-| `routes` | agent | `channel_routes` rows (`channel:chat_id`, first-come, `explicit` delivery, wildcards operator-only) |
+| `routes` | agent | session + `channel_routes` pin (`channel:chat_id`, first-come, `explicit` delivery; no wildcards — channel defaults are operator config) |
 | `config` | **system** | global `config` table |
 | `provider` | **system** | `providers` upsert + a `models` row for its default model |
 
@@ -88,7 +88,7 @@ section), not a scoped config key.
   providers), which is why the provider apply seeds one.
 - **session → agent**: fixed at creation (`launch_agent`, channel routing);
   never reassigned. Moving work = a new session, not a transfer.
-- **session → channel**: a session's `channel_name`/`channel_id` is its
+- **session → channel**: a session's `channel_name`/`chat_id` is its
   origin, set at creation or attached by the operator — not agent-mutable.
   What an agent requests is a **route** (send authority + inbound routing for
   a chat), not a rebinding of an existing session.

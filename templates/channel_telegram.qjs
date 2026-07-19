@@ -162,7 +162,7 @@ function onOutbox(item) {
         return;
     }
 
-    var chatId = payload.chat_id || payload.channel_id;
+    var chatId = payload.chat_id;
     var text = payload.text;
     if (!chatId || !text) {
         channel.failOutbox(item.id, "missing chat_id or text");
@@ -224,7 +224,7 @@ function envelopeFields(msg) {
     var reply_to_me = !!(config.bot_id && replyFrom &&
         ("" + replyFrom.id) === config.bot_id);
     return {
-        channel_id: "" + chat.id,
+        chat_id: "" + chat.id,
         sender_id: from.id !== undefined ? "" + from.id : "",
         sender_name: from.first_name || "",
         chat_type: chat.type === "private" ? "dm" : "group",

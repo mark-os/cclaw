@@ -90,7 +90,7 @@ static int64_t insert_media_job_file(sqlite3 *db, const char *kind,
     sqlite3_stmt *s;
     const char *sql =
         "INSERT INTO media_jobs(session_id, source, payload) VALUES(7, 'telegram',"
-        " json_object('channel_id','42','from','Mark','text','the caption',"
+        " json_object('chat_id','42','from','Mark','text','the caption',"
         "   'media', json_object('kind',?1,'mime',?2,'path',?3)));";
     assert(sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK);
     sqlite3_bind_text(s, 1, kind, -1, SQLITE_STATIC);

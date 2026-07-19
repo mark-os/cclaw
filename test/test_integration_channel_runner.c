@@ -46,7 +46,7 @@ static void write_test_js(void) {
         "      for (var i = 0; i < data.result.length; i++) {\n"
         "        var msg = data.result[i].message;\n"
         "        if (!msg || !msg.text) continue;\n"
-        "        channel.emit('message', JSON.stringify({channel_id: '' + msg.chat.id, text: msg.text}));\n"
+        "        channel.emit('message', JSON.stringify({chat_id: '' + msg.chat.id, text: msg.text}));\n"
         "      }\n"
         "    }\n"
         "  }\n"
@@ -71,7 +71,7 @@ static void write_test_js(void) {
         "}\n"
         "function onRequest(req) {\n"
         "  if ((req.headers['X-Test'] || '') !== '1') return {status: 401, body: 'no'};\n"
-        "  channel.emit('message', JSON.stringify({channel_id: 'uds', text: req.body}));\n"
+        "  channel.emit('message', JSON.stringify({chat_id: 'uds', text: req.body}));\n"
         "  return {status: 201, body: 'got-it'};\n"
         "}\n");
     fclose(f);

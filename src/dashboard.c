@@ -303,7 +303,7 @@ static void render_sessions(Buf *b) {
     admin_list_channels(s_db, &channels, &nc);
 
     buf_appendf(b, "<h2>Sessions</h2><table><tr><th>id</th><th>agent</th>"
-                   "<th>channel</th><th>channel_id</th><th>state</th>"
+                   "<th>channel</th><th>chat_id</th><th>state</th>"
                    "<th>created</th><th></th></tr>");
     for (size_t i = 0; i < ns; i++) {
         AdminSession *s = &sessions[i];
@@ -312,7 +312,7 @@ static void render_sessions(Buf *b) {
         buf_appendf(b, "</td><td>");
         buf_html(b, s->channel_name);
         buf_appendf(b, "</td><td>");
-        buf_html(b, s->channel_id);
+        buf_html(b, s->chat_id);
         buf_appendf(b, "</td><td>");
         buf_html(b, s->state);
         buf_appendf(b, "</td><td>");
@@ -628,8 +628,9 @@ static int handle_act(struct mg_connection *conn) {
     } else if (strcmp(action, "attach_channel") == 0) {
         if (mg_get_var(body, blen, "session_id", v1, sizeof(v1)) > 0 &&
             mg_get_var(body, blen, "channel_name", v2, sizeof(v2)) > 0 && v2[0]) {
-            mg_get_var(body, blen, "channel_id", v3, sizeof(v3));
-            rc = admin_attach_session_channel(s_db, atoll(v1), v2, v3[0] ? v3 : "*");
+            mg_get_var(body, blen, "chat_id", v3, sizeof(v3));
+            rc = v3[0] ? admin_attach_session_channel(s_db, atoll(v1), v2, v3)
+                       : -1;   /* a pin needs a real chat id */
         }
     } else if (strcmp(action, "set_channel_route") == 0) {
         if (mg_get_var(body, blen, "channel_name", v1, sizeof(v1)) > 0) {

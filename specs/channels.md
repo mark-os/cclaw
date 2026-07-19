@@ -30,13 +30,13 @@ The agent decides *when to speak* in listen-and-decide chats.
 ## Envelope schema (JS → C)
 
 `channel.emit` message payloads are JSON with these fields (additive-only for
-compatibility; all but `channel_id` optional):
+compatibility; all but `chat_id` optional):
 
 | Field | Meaning |
 |-------|---------|
-| `channel_id` | Chat/conversation id — the routing key |
+| `chat_id` | Chat/conversation id — the routing key |
 | `text` | The message text (or media caption) |
-| `sender_id` | Platform sender id (in a DM usually == channel_id; in a group the person, not the group) |
+| `sender_id` | Platform sender id (in a DM usually == chat_id; in a group the person, not the group) |
 | `sender_name` | Display name, attribution only |
 | `chat_type` | `dm` or `group` |
 | `mentioned` | bool — the bot was @-mentioned (telegram: needs getMe identity; false until learned) |
@@ -56,13 +56,13 @@ own shape) passes through unchanged.
 
 For each message event, in order (`channel_consume_events`, src/channel.c):
 
-1. **Routed** — `channel_routes` hit, exact `(channel, channel_id)` first,
-   then the `(channel, '*')` wildcard → deliver.
-2. **Unrouted, admin** — `channel_id ∈ <ext>.admin_ids` → accept via
-   `default_agent`, auto-creating a session (the operator always gets
-   through).
-3. **Unrouted, `<ext>.allow_unknown=1`** → accept via `default_agent` (the
-   pre-gate open behavior, off by default).
+1. **Routed** — exact `(channel, chat_id)` hit in `channel_routes` → deliver
+   to the pinned session (the session names its agent).
+2. **Unrouted, open door** — `channels.default_agent` set → accept: create a
+   session for that agent, pin the chat to it.
+3. **Unrouted, admin** — `chat_id ∈ <ext>.admin_ids` → accept via the global
+   `default_agent` config (the operator always gets through), same
+   create-and-pin.
 4. **Unrouted, unknown** → drop + log + a **one-time admin notification**
    carrying sender id/name and the `cclaw route add` recipe. The dedup set is
    in-memory per process — ephemeral politeness state, not authority; a
@@ -70,13 +70,21 @@ For each message event, in order (`channel_consume_events`, src/channel.c):
 
 Chat membership is never authority. `admin_ids` is the only admin source.
 
+Admin chats can issue `/new` (re-point the pin at a fresh session for the
+same agent) and `/sessions [id]` (list this chat's sessions / attach to
+one). Handled in C before any dispatch — authority actions that must work
+even when the pinned session is wedged. A non-admin's `/new` is an ordinary
+message.
+
 ## Session resolution
 
-A route with non-NULL `session_id` **pins** the chat to that session (exact
-route beats wildcard; a pin to a deleted session falls back). Otherwise:
-find-latest session for `(channel_name, channel_id)`, create one under the
-route's agent if none. Route→agent is only the "which agent gets a *new*
-session" rule; the session names its agent thereafter.
+The pin IS the binding: a route resolves to its `session_id`, and the
+session names its agent (`sessions.agent_name`, immutable after creation).
+First contact through the gate (open door / admin) creates the session and
+writes the pin back, so the invariant "every routed chat has exactly one
+current session" holds from then on. Re-pointing the pin (`/new`,
+`/sessions <id>`, `cclaw route add`) is the one way to move a chat between
+conversations; the FK refuses to delete a session a route still pins.
 
 ## Delivery modes
 
@@ -89,7 +97,7 @@ session" rule; the session names its agent thereafter.
   group listen-and-decide pattern — `mentioned`/`reply_to_me` are the engage
   signals; silence is the default.
 
-No route = `auto` (covers admin/allow_unknown flows).
+Gate-created pins start `auto` (the column default).
 
 ## Where routes come from
 

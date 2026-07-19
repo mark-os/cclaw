@@ -38,16 +38,20 @@ Messages from unknown senders are **dropped by default** — there is no
 unconditional `default_agent` fallback. The routing gate
 (`channel_consume_events`) evaluates each inbound event in order:
 
-1. **Routed** — exact `(channel, channel_id)` hit in `channel_routes`, or
-   the `(channel, '*')` wildcard → deliver to the route's agent/session.
-2. **Unrouted, admin** — sender's `channel_id` is in `<ext>.admin_ids` →
-   accept via `default_agent`, auto-creating a session (the operator always
-   gets through).
-3. **Unrouted, allow_unknown** — `<ext>.allow_unknown=1` → accept via
-   `default_agent` (the pre-gate open behavior; off by default).
+1. **Routed** — exact `(channel, chat_id)` hit in `channel_routes` → deliver
+   to the pinned session (the session names its agent).
+2. **Unrouted, open door** — the channel's `default_agent` is set → accept:
+   a session is created for that agent and the chat is pinned to it.
+3. **Unrouted, admin** — the chat is in `<ext>.admin_ids` → accept via the
+   global `default_agent` config (the operator always gets through), same
+   create-and-pin.
 4. **Unrouted, unknown** — drop the message + log + a **one-time admin
    notification** carrying the sender id/name and the `cclaw route add`
    recipe so the operator can opt them in.
+
+Admin chats can also issue `/new` (re-point the chat at a fresh session)
+and `/sessions [id]` (list this chat's sessions / attach to one) — handled
+in C before dispatch, so they work even when the current session is stuck.
 
 Chat membership is never authority. `admin_ids` is the only admin source.
 
@@ -59,35 +63,37 @@ cclaw route rm  <channel> <chat_id>
 cclaw route list
 ```
 
-Group-shaped (negative) chat ids default to `--mode explicit`.
-`--tools` attaches a tool filter to the route (see Authority attenuation below).
+A route **pins the chat to a session**: `add` creates the session (bound to
+`<agent>`) unless `--session <id>` pins an existing one — the session must
+belong to the named agent. Group-shaped (negative) chat ids default to
+`--mode explicit`. `--tools` freezes a tool filter onto the created session
+(see Authority attenuation below).
 
-A route with a `--session <id>` **pins** that chat to a specific session.
-Otherwise: find-latest session for `(channel_name, channel_id)`, create one
-under the route's agent if none exists.
+`chat_id '*'` is not a route — it sets/clears the channel's `default_agent`
+(open-door policy above).
 
 ### Authority attenuation
 
 A route may carry a **tool filter** — a JSON array of tool names stored in
-`channel_routes.tool_filter` (NULL = unrestricted). When a channel message
-creates a new session for a routed sender, the route's filter is copied onto
-`sessions.tool_filter`, frozen at session creation (same semantics as
-sub-agent spawns).
+`channel_routes.tool_filter` (NULL = unrestricted). `route add --tools`
+freezes the filter onto the session it creates (`sessions.tool_filter`),
+same semantics as sub-agent spawns.
 
 Each turn, the effective tool set is **grants ∩ filter** — the filter can
 only shrink authority, never widen it. Filtering to a tool the agent isn't
 granted exposes nothing: the intersection is empty.
 
-Changing a route's filter later does **not** propagate to existing sessions;
-a new session is needed to pick up the new filter. Unrouted admin-accepted
-senders get no filter (full grant set applies).
+Changing a route's filter later does **not** propagate to the pinned
+session; re-run `route add` (a fresh session) to apply a new filter.
+Gate-created sessions (open-door / admin acceptance) get no filter (full
+grant set applies).
 
 `route list` displays the active filter per route. Example:
 
 ```
 cclaw route add telegram 12345 researcher --tools web_fetch,js_eval
 cclaw route list
-# telegram 12345 -> researcher (mode auto, tools ["web_fetch","js_eval"])
+# telegram 12345 -> session 7 (researcher, mode auto, tools ["web_fetch","js_eval"])
 ```
 
 ## Delivery modes
@@ -102,18 +108,19 @@ chat:
   group listen-and-decide pattern — `mentioned` / `reply_to_me` envelope
   fields are the engage signals; silence is the default.
 
-Unrouted flows (admin / allow_unknown) use `auto`.
+Sessions created by the gate (open-door / admin acceptance) start `auto` —
+the pin row is written with the default mode.
 
 ## Envelope (handler → C)
 
 The handler calls `channel.emit("message", envelope_json [, external_id])`
-with a JSON payload containing these fields (all but `channel_id` optional):
+with a JSON payload containing these fields (all but `chat_id` optional):
 
 | Field | Meaning |
 |-------|---------|
-| `channel_id` | Chat/conversation id — the routing key |
+| `chat_id` | Chat/conversation id — the routing key |
 | `text` | Message text (or media caption) |
-| `sender_id` | Platform sender (in a DM usually == channel_id; in a group the person) |
+| `sender_id` | Platform sender (in a DM usually == chat_id; in a group the person) |
 | `sender_name` | Display name, attribution only |
 | `chat_type` | `dm` or `group` |
 | `mentioned` | bool — the bot was @-mentioned |
@@ -130,10 +137,10 @@ The agent can proactively send messages via the `channel_send` tool:
 
 - Schema: `{channel, chat_id, message}` (text-only v1).
 - `action: "list"` enumerates reachable targets.
-- **Routes are the allowlist (default-deny):** a target needs an exact
-  `(channel, chat_id)` route resolving to the sending agent. A `'*'` wildcard
-  route grants no send authority — reaching a new target requires
-  `cclaw route add`.
+- **Routes are the allowlist (default-deny):** a target needs a
+  `(channel, chat_id)` route whose pinned session belongs to the sending
+  agent. A channel `default_agent` grants no send authority — reaching a
+  new target requires `cclaw route add`.
 - Delivery is async: the tool inserts an outbox row and returns
   `queued, outbox id N`.
 - Sends to the session's own origin chat in `auto` mode short-circuit (the

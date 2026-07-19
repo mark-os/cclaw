@@ -122,7 +122,7 @@ typedef struct {
     int64_t id;
     char *agent_name;
     char *channel_name;
-    char *channel_id;
+    char *chat_id;
     char *state;
     char *created_at;
 } AdminSession;
@@ -132,7 +132,7 @@ void admin_sessions_free(AdminSession *list, size_t count);
 
 /* Attach a session to a channel route. Returns 0 on success. */
 int admin_attach_session_channel(sqlite3 *db, int64_t session_id,
-                                 const char *channel_name, const char *channel_id);
+                                 const char *channel_name, const char *chat_id);
 
 /* ── Channel listing ───────────────────────────────────────────── */
 

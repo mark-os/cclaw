@@ -1010,7 +1010,7 @@ char *transcribe_build_body(sqlite3 *db, EndpointType ep, const char *model,
 static int transcribe_resolve(sqlite3 *db, int64_t job_id, const char *text) {
     const char *sql =
         "SELECT session_id, source, json_object("
-        "  'channel_id', json_extract(payload,'$.channel_id'),"
+        "  'chat_id', json_extract(payload,'$.chat_id'),"
         "  'from', COALESCE(json_extract(payload,'$.from'),''),"
         "  'text', CASE WHEN COALESCE(json_extract(payload,'$.text'),'') <> ''"
         "    THEN json_extract(payload,'$.text') || char(10) || ?2 ELSE ?2 END),"

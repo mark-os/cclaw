@@ -19,7 +19,7 @@ static sqlite3 *setup(void) {
     /* Seed related rows */
     sqlite3_exec(db, "INSERT INTO sessions(name,agent_name,state) VALUES('s1','OldAgent','idle')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO agent_extensions(agent_name,extension_name) VALUES('OldAgent','telegram')", NULL, NULL, NULL);
-    sqlite3_exec(db, "INSERT INTO channel_routes(channel_name,channel_id,agent_name) VALUES('tg','*','OldAgent')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO channels(name,default_agent) VALUES('tg','OldAgent')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO cron_jobs(agent_name,name,cron_expr,session_id,task) VALUES('OldAgent','job1','* * * * *',1,'hi')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO memory_blocks(agent_name,label,value) VALUES('OldAgent','AGENT','hello')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO config(key,value) VALUES('default_agent','OldAgent')", NULL, NULL, NULL);
@@ -45,7 +45,7 @@ static void test_successful_rename(void) {
     assert(count_rows(db, "SELECT COUNT(*) FROM agents WHERE name='OldAgent'") == 0);
     assert(count_rows(db, "SELECT COUNT(*) FROM sessions WHERE agent_name='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM agent_extensions WHERE agent_name='NewAgent'") == 1);
-    assert(count_rows(db, "SELECT COUNT(*) FROM channel_routes WHERE agent_name='NewAgent'") == 1);
+    assert(count_rows(db, "SELECT COUNT(*) FROM channels WHERE default_agent='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM cron_jobs WHERE agent_name='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM memory_blocks WHERE agent_name='NewAgent'") == 1);
     assert(count_rows(db, "SELECT COUNT(*) FROM config WHERE key='default_agent' AND value='NewAgent'") == 1);

@@ -399,7 +399,7 @@ int memory_entries_delete(sqlite3 *db, const char *agent_name,
                           const char *block_label, const int *numbers, int n_numbers);
 
 /* Channel→agent binding. Returns heap-allocated agent_name or NULL. */
-char *db_channel_binding_get(sqlite3 *db, const char *channel_type, const char *channel_id);
+char *db_channel_binding_get(sqlite3 *db, const char *channel_name, const char *chat_id);
 
 /* Sum cost_nano for all entries in a session. Returns total nanodollars. */
 int64_t session_cost(sqlite3 *db, int64_t session_id);

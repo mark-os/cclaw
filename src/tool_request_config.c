@@ -272,9 +272,10 @@ static int route_owned_elsewhere(sqlite3 *db, const char *json,
     if (sqlite3_prepare_v2(db,
             "SELECT atom FROM json_each(?1,?3) j"
             " WHERE EXISTS(SELECT 1 FROM channel_routes c"
+            "   JOIN sessions s ON s.id = c.session_id"
             "   WHERE c.channel_name = substr(j.atom,1,instr(j.atom,':')-1)"
-            "     AND c.channel_id   = substr(j.atom,instr(j.atom,':')+1)"
-            "     AND COALESCE(c.agent_name,'') != ?2) LIMIT 1",
+            "     AND c.chat_id      = substr(j.atom,instr(j.atom,':')+1)"
+            "     AND s.agent_name != ?2) LIMIT 1",
             -1, &st, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
@@ -314,8 +315,9 @@ static char *validate_routes(sqlite3 *db, const char *changes,
         " WHERE substr(atom, instr(atom,':')+1) = '*' LIMIT 1", changes);
     if (bad) {
         free(bad);
-        return strdup("error: wildcard routes are operator-only — request a "
-                      "specific chat_id");
+        return strdup("error: there are no wildcard routes — a channel-wide "
+                      "default is operator config (channels.default_agent); "
+                      "request a specific chat_id");
     }
     bad = q1_text(db,
         "SELECT atom FROM json_each(?1,'$.routes')"
@@ -827,18 +829,49 @@ int request_config_changes_apply(sqlite3 *db, const char *agent,
             }
         }
         if (rc == 0) {
-            sqlite3_stmt *ri;
+            /* Eager session creation: a route always pins a session, and the
+             * session names the agent (route-model unification, v33). Atoms
+             * already routed are skipped — same-agent re-requests are no-ops,
+             * other-agent captures were refused just above. */
+            sqlite3_stmt *ra;
             if (sqlite3_prepare_v2(db,
-                    "INSERT OR IGNORE INTO channel_routes"
-                    " (channel_name, channel_id, agent_name, delivery_mode)"
-                    " SELECT substr(atom,1,instr(atom,':')-1),"
-                    "        substr(atom,instr(atom,':')+1), ?2, 'explicit'"
-                    " FROM json_each(?1,'$.changes.routes')",
-                    -1, &ri, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(ri, 1, args_json, -1, SQLITE_STATIC);
-                sqlite3_bind_text(ri, 2, agent, -1, SQLITE_STATIC);
-                if (sqlite3_step(ri) != SQLITE_DONE) rc = -1;
-                sqlite3_finalize(ri);
+                    "SELECT substr(atom,1,instr(atom,':')-1),"
+                    "       substr(atom,instr(atom,':')+1)"
+                    " FROM json_each(?1,'$.changes.routes')"
+                    " WHERE NOT EXISTS(SELECT 1 FROM channel_routes c"
+                    "   WHERE c.channel_name = substr(atom,1,instr(atom,':')-1)"
+                    "     AND c.chat_id      = substr(atom,instr(atom,':')+1))",
+                    -1, &ra, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(ra, 1, args_json, -1, SQLITE_STATIC);
+                while (rc == 0 && sqlite3_step(ra) == SQLITE_ROW) {
+                    const char *rch = (const char *)sqlite3_column_text(ra, 0);
+                    const char *rchat = (const char *)sqlite3_column_text(ra, 1);
+                    sqlite3_stmt *si;
+                    if (sqlite3_prepare_v2(db,
+                            "INSERT INTO sessions(name, agent_name,"
+                            "                     channel_name, chat_id)"
+                            " VALUES('route:'||?1||':'||?2, ?3, ?1, ?2)",
+                            -1, &si, NULL) != SQLITE_OK) { rc = -1; break; }
+                    sqlite3_bind_text(si, 1, rch, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(si, 2, rchat, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(si, 3, agent, -1, SQLITE_STATIC);
+                    if (sqlite3_step(si) != SQLITE_DONE) rc = -1;
+                    sqlite3_finalize(si);
+                    if (rc != 0) break;
+                    int64_t rsid = sqlite3_last_insert_rowid(db);
+                    sqlite3_stmt *ri;
+                    if (sqlite3_prepare_v2(db,
+                            "INSERT INTO channel_routes"
+                            " (channel_name, chat_id, session_id, delivery_mode)"
+                            " VALUES(?1, ?2, ?3, 'explicit')",
+                            -1, &ri, NULL) != SQLITE_OK) { rc = -1; break; }
+                    sqlite3_bind_text(ri, 1, rch, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(ri, 2, rchat, -1, SQLITE_STATIC);
+                    sqlite3_bind_int64(ri, 3, rsid);
+                    if (sqlite3_step(ri) != SQLITE_DONE) rc = -1;
+                    sqlite3_finalize(ri);
+                }
+                sqlite3_finalize(ra);
             } else {
                 rc = -1;
             }

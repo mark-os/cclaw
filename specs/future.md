@@ -295,7 +295,7 @@ ever-compacting session with no user-facing reset), `/status` (model, session
 id, pending work), `/usage` (see Usage Visibility below), `/model`. The
 COMMANDS table in `channel_telegram.qjs` is already the single dispatch point,
 so each command is a small handler; `/new` needs a daemon-side "detach session"
-primitive (clear `sessions.channel_name/channel_id` or bump a route) rather
+primitive (clear `sessions.channel_name/chat_id` or re-point a route) rather
 than channel-JS SQL.
 
 ## Usage Visibility (token/cost accounting has writers, no readers)

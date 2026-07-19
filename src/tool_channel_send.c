@@ -7,17 +7,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Does a route for (channel, chat_id) resolve to this agent — directly by
- * agent_name, or through a pinned session owned by the agent? Exact chat_id
- * only: a '*' wildcard routes inbound traffic, it does not hand out
- * channel-wide send authority. */
+/* Does the chat's route resolve to this agent? One rule: the pinned
+ * session's agent (routes never name an agent — channels.default_agent
+ * routes inbound traffic only, it hands out no send authority). */
 static int send_target_allowed(sqlite3 *db, const char *agent,
                                const char *channel, const char *chat_id) {
     const char *sql =
         "SELECT 1 FROM channel_routes r"
-        " WHERE r.channel_name=?1 AND r.channel_id=?2"
-        "   AND (r.agent_name=?3 OR EXISTS (SELECT 1 FROM sessions s"
-        "        WHERE s.id=r.session_id AND s.agent_name=?3));";
+        " JOIN sessions s ON s.id = r.session_id"
+        " WHERE r.channel_name=?1 AND r.chat_id=?2 AND s.agent_name=?3;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_text(st, 1, channel, -1, SQLITE_STATIC);
@@ -32,12 +30,11 @@ static int send_target_allowed(sqlite3 *db, const char *agent,
 static char *list_targets(sqlite3 *db, const char *agent) {
     const char *sql =
         "SELECT COALESCE(json_group_array(json_object("
-        "  'channel', r.channel_name, 'chat_id', r.channel_id,"
+        "  'channel', r.channel_name, 'chat_id', r.chat_id,"
         "  'delivery_mode', r.delivery_mode)), '[]')"
         " FROM channel_routes r"
-        " WHERE r.channel_id <> '*'"
-        "   AND (r.agent_name=?1 OR EXISTS (SELECT 1 FROM sessions s"
-        "        WHERE s.id=r.session_id AND s.agent_name=?1));";
+        " JOIN sessions s ON s.id = r.session_id"
+        " WHERE s.agent_name=?1;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
         return strdup("error: list failed (db)");
@@ -91,10 +88,9 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
     {
         const char *dsql =
             "SELECT 1 FROM sessions s"
-            " WHERE s.id=?1 AND s.channel_name=?2 AND s.channel_id=?3"
+            " WHERE s.id=?1 AND s.channel_name=?2 AND s.chat_id=?3"
             "   AND COALESCE((SELECT r.delivery_mode FROM channel_routes r"
-            "        WHERE r.channel_name=?2 AND r.channel_id IN (?3,'*')"
-            "        ORDER BY r.channel_id=?3 DESC LIMIT 1), 'auto') = 'auto';";
+            "        WHERE r.channel_name=?2 AND r.chat_id=?3), 'auto') = 'auto';";
         sqlite3_stmt *st;
         int dup = 0;
         if (sqlite3_prepare_v2(ctx->db, dsql, -1, &st, NULL) == SQLITE_OK) {

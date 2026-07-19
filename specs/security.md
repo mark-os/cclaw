@@ -256,7 +256,7 @@ The `request_changes` document batches everything an agent needs into one approv
 | `grants.read_paths` | array of absolute paths | inserts `grants` rows (kind='read_path') |
 | `grants.write_paths` | array of absolute paths | inserts `grants` rows (kind='write_path') |
 | `agent` | whitelisted own-row settings (primary_model, secondary_model, max_iterations, shell_timeout) | updates the caller's `agents` row |
-| `routes` | array of `channel:chat_id` strings | inserts `channel_routes` rows (caller-owned, `explicit`, first-come; wildcards operator-only) |
+| `routes` | array of `channel:chat_id` strings | creates a session bound to the caller + a `channel_routes` pin (`explicit`, first-come; no wildcards — channel defaults are operator config) |
 | `config` | object of key→value-string | calls `config_set()` per key |
 | `provider` | provider definition (provider, base_url, model, api_key_env) | upserts `providers` row + seeds its default model into `models` |
 

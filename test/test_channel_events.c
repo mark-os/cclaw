@@ -45,14 +45,18 @@ static void resolve_spy_reset(void) {
     g_resolve_decided_via[0] = '\0';
 }
 
+/* New-model route add: create a session bound to the agent, pin the chat. */
 static int test_binding_set(sqlite3 *db, const char *type, const char *id, const char *agent) {
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO channel_routes(channel_name,channel_id,agent_name) VALUES(?,?,?)", -1, &s, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(s, 1, type, -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 2, id, -1, SQLITE_STATIC);
-    sqlite3_bind_text(s, 3, agent, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(s); sqlite3_finalize(s);
-    return rc == SQLITE_DONE ? 0 : -1;
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+        "INSERT INTO sessions(name, agent_name, channel_name, chat_id)"
+        " VALUES('route:%s:%s','%s','%s','%s');"
+        "INSERT INTO channel_routes(channel_name, chat_id, session_id)"
+        " VALUES('%s','%s',last_insert_rowid())"
+        " ON CONFLICT(channel_name, chat_id)"
+        " DO UPDATE SET session_id=excluded.session_id;",
+        type, id, agent, type, id, type, id);
+    return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
 }
 static int test_inbox_count(sqlite3 *db, int64_t session_id) {
     sqlite3_stmt *s;
@@ -70,7 +74,7 @@ static int test_scalar_count(sqlite3 *db, const char *sql) {
 static int64_t test_session_find(sqlite3 *db, const char *channel_name, const char *channel_id, const char *agent_name) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
-            "SELECT id FROM sessions WHERE channel_name=? AND channel_id=? AND agent_name=?"
+            "SELECT id FROM sessions WHERE channel_name=? AND chat_id=? AND agent_name=?"
             " ORDER BY id DESC LIMIT 1;", -1, &s, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 2, channel_id, -1, SQLITE_STATIC);
@@ -141,7 +145,7 @@ static void test_channel_events_routing(void) {
     chdir_work();
 
     test_binding_set(db, "mychannel", "user1", "testagent");
-    test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"user1\",\"text\":\"hello\"}");
+    test_event_insert(db, "mychannel", "message", "{\"chat_id\":\"user1\",\"text\":\"hello\"}");
 
     channel_consume_events(db);
 
@@ -168,7 +172,7 @@ static void test_channel_events_routing(void) {
     }
 
     /* second event for the same channel_id reuses the same session */
-    test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"user1\",\"text\":\"again\"}");
+    test_event_insert(db, "mychannel", "message", "{\"chat_id\":\"user1\",\"text\":\"again\"}");
     channel_consume_events(db);
     assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_events;") == 0);
     assert(test_scalar_count(db, "SELECT COUNT(*) FROM sessions;") == 1);
@@ -179,17 +183,20 @@ static void test_channel_events_routing(void) {
     printf("PASS\n");
 }
 
-/* Wildcard binding fallback: no exact (channel, channel_id) route, but a
- * (channel, "*") route exists — the session still gets created for the
- * event's actual channel_id, not "*". */
+/* Open door: no route, but channels.default_agent is set — the chat is
+ * accepted, a session is created for its actual chat_id and pinned. */
 static void test_channel_events_wildcard_fallback(void) {
     setup();
     sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
-    test_binding_set(db, "mychannel", "*", "testagent");
-    test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"userX\",\"text\":\"hi\"}");
+    assert(sqlite3_exec(db,
+        "INSERT INTO channels(name, extension_name, type, binary_path,"
+        "                     status, default_agent)"
+        " VALUES('mychannel','mychannel','test','/x','active','testagent');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    test_event_insert(db, "mychannel", "message", "{\"chat_id\":\"userX\",\"text\":\"hi\"}");
 
     channel_consume_events(db);
 
@@ -197,6 +204,10 @@ static void test_channel_events_wildcard_fallback(void) {
     int64_t sid = test_session_find(db, "mychannel", "userX", "testagent");
     assert(sid > 0);
     assert(test_inbox_count(db, sid) == 1);
+    /* pin written back — the exact-route invariant holds from first contact */
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM channel_routes"
+        " WHERE channel_name='mychannel' AND chat_id='userX';") == 1);
 
     chdir_restore();
     db_close(db);
@@ -204,7 +215,7 @@ static void test_channel_events_wildcard_fallback(void) {
 }
 
 /* No binding at all: the gate drops the message (unknown sender, no
- * admin_ids match, allow_unknown off) — chat membership is not authority.
+ * admin_ids match, no channel default_agent) — membership is not authority.
  * The event row is still consumed. */
 static void test_channel_events_no_binding(void) {
     setup();
@@ -212,7 +223,7 @@ static void test_channel_events_no_binding(void) {
     assert(db);
     chdir_work();
 
-    test_event_insert(db, "unbound", "message", "{\"channel_id\":\"user1\",\"text\":\"hi\"}");
+    test_event_insert(db, "unbound", "message", "{\"chat_id\":\"user1\",\"text\":\"hi\"}");
 
     channel_consume_events(db);
 
@@ -240,8 +251,8 @@ static void test_gate_channel_seed(sqlite3 *db, const char *name, const char *ad
 }
 
 /* Routing gate: unknown sender dropped + exactly one admin notification
- * (deduped per process); admin sender accepted via default_agent;
- * allow_unknown=1 restores the open fallback. */
+ * (deduped per process); admin sender accepted via the global default_agent;
+ * channels.default_agent restores the open-door behavior. */
 static void test_channel_events_gate(void) {
     setup();
     sqlite3 *db = open_seeded(DB_PATH);
@@ -252,7 +263,7 @@ static void test_channel_events_gate(void) {
 
     /* Unknown sender: dropped, one notification row to the admin chat. */
     test_event_insert(db, "gated", "message",
-        "{\"channel_id\":\"555\",\"text\":\"let me in\","
+        "{\"chat_id\":\"555\",\"text\":\"let me in\","
         "\"sender_id\":\"555\",\"sender_name\":\"Eve\",\"chat_type\":\"dm\"}");
     channel_consume_events(db);
     assert(test_scalar_count(db, "SELECT COUNT(*) FROM sessions;") == 0);
@@ -275,7 +286,7 @@ static void test_channel_events_gate(void) {
 
     /* Same unknown sender again: still dropped, NO second notification. */
     test_event_insert(db, "gated", "message",
-        "{\"channel_id\":\"555\",\"text\":\"hello?\",\"sender_id\":\"555\","
+        "{\"chat_id\":\"555\",\"text\":\"hello?\",\"sender_id\":\"555\","
         "\"sender_name\":\"Eve\",\"chat_type\":\"dm\"}");
     channel_consume_events(db);
     assert(test_scalar_count(db,
@@ -284,22 +295,20 @@ static void test_channel_events_gate(void) {
 
     /* Admin sender (channel_id in admin_ids): accepted via default agent. */
     test_event_insert(db, "gated", "message",
-        "{\"channel_id\":\"777\",\"text\":\"hi\",\"sender_id\":\"777\","
+        "{\"chat_id\":\"777\",\"text\":\"hi\",\"sender_id\":\"777\","
         "\"sender_name\":\"Op\",\"chat_type\":\"dm\"}");
     channel_consume_events(db);
     int64_t sid = test_session_find(db, "gated", "777", "Assistant");
     assert(sid > 0);
     assert(test_inbox_count(db, sid) == 1);
 
-    /* allow_unknown=1: unrouted stranger reaches the default agent again. */
+    /* Open door: channels.default_agent set — unrouted stranger accepted. */
     test_gate_channel_seed(db, "open", "");
     assert(sqlite3_exec(db,
-        "INSERT INTO config(key, value, default_value, description)"
-        " VALUES('open.allow_unknown','1','0','')"
-        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        "UPDATE channels SET default_agent='Assistant' WHERE name='open';",
         NULL, NULL, NULL) == SQLITE_OK);
     test_event_insert(db, "open", "message",
-        "{\"channel_id\":\"999\",\"text\":\"yo\",\"sender_id\":\"999\","
+        "{\"chat_id\":\"999\",\"text\":\"yo\",\"sender_id\":\"999\","
         "\"sender_name\":\"Sam\",\"chat_type\":\"dm\"}");
     channel_consume_events(db);
     assert(test_session_find(db, "open", "999", "Assistant") > 0);
@@ -309,9 +318,9 @@ static void test_channel_events_gate(void) {
     printf("PASS\n");
 }
 
-/* Route-to-session: a route with non-NULL session_id pins the chat to that
- * session even when a newer session exists for the same channel_id; a pin to
- * a deleted session falls back to find-latest. */
+/* Route-to-session: the pin is the binding — a newer unpinned session for
+ * the same chat is ignored until the pin is re-pointed; the FK refuses to
+ * delete a session a route still pins. */
 static void test_channel_events_session_pin(void) {
     setup();
     sqlite3 *db = open_seeded(DB_PATH);
@@ -321,33 +330,34 @@ static void test_channel_events_session_pin(void) {
     test_binding_set(db, "mychannel", "u7", "testagent");
 
     /* Two sessions for the chat; pin the older one on the route. */
-    test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"u7\",\"text\":\"one\"}");
+    test_event_insert(db, "mychannel", "message", "{\"chat_id\":\"u7\",\"text\":\"one\"}");
     channel_consume_events(db);
     int64_t old_sid = test_session_find(db, "mychannel", "u7", "testagent");
     assert(old_sid > 0);
     assert(sqlite3_exec(db,
-        "INSERT INTO sessions(name, agent_name, channel_name, channel_id)"
+        "INSERT INTO sessions(name, agent_name, channel_name, chat_id)"
         " VALUES('newer','testagent','mychannel','u7');", NULL, NULL, NULL) == SQLITE_OK);
     int64_t new_sid = test_session_find(db, "mychannel", "u7", "testagent");
     assert(new_sid > old_sid);
 
-    char sql[256];
-    snprintf(sql, sizeof(sql),
-        "UPDATE channel_routes SET session_id=%lld"
-        " WHERE channel_name='mychannel' AND channel_id='u7';", (long long)old_sid);
-    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
-
-    test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"u7\",\"text\":\"two\"}");
+    test_event_insert(db, "mychannel", "message", "{\"chat_id\":\"u7\",\"text\":\"two\"}");
     channel_consume_events(db);
     assert(test_inbox_count(db, old_sid) == 2);   /* pinned, not the newer one */
     assert(test_inbox_count(db, new_sid) == 0);
 
-    /* Dangling pin: delete the pinned session — find-latest takes over. */
-    snprintf(sql, sizeof(sql), "DELETE FROM sessions WHERE id=%lld;", (long long)old_sid);
+    /* Re-point the pin — subsequent messages land in the new session. */
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+        "UPDATE channel_routes SET session_id=%lld"
+        " WHERE channel_name='mychannel' AND chat_id='u7';", (long long)new_sid);
     assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
-    test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"u7\",\"text\":\"three\"}");
+    test_event_insert(db, "mychannel", "message", "{\"chat_id\":\"u7\",\"text\":\"three\"}");
     channel_consume_events(db);
     assert(test_inbox_count(db, new_sid) == 1);
+
+    /* A pinned session cannot be deleted out from under its route (FK). */
+    snprintf(sql, sizeof(sql), "DELETE FROM sessions WHERE id=%lld;", (long long)new_sid);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK);
 
     chdir_restore();
     db_close(db);
@@ -368,19 +378,19 @@ static void test_channel_events_plain_text_content(void) {
     test_binding_set(db, "mychannel", "raw1", "testagent");
 
     test_event_insert(db, "mychannel", "message",
-        "{\"channel_id\":\"dm1\",\"text\":\"hello there\",\"sender_id\":\"1\","
+        "{\"chat_id\":\"dm1\",\"text\":\"hello there\",\"sender_id\":\"1\","
         "\"sender_name\":\"Mark\",\"chat_type\":\"dm\"}");
     test_event_insert(db, "mychannel", "message",
-        "{\"channel_id\":\"grp1\",\"text\":\"group hi\",\"sender_id\":\"1\","
+        "{\"chat_id\":\"grp1\",\"text\":\"group hi\",\"sender_id\":\"1\","
         "\"sender_name\":\"Mark\",\"chat_type\":\"group\"}");
     test_event_insert(db, "mychannel", "message",
-        "{\"channel_id\":\"raw1\",\"note\":\"custom shape\"}");
+        "{\"chat_id\":\"raw1\",\"note\":\"custom shape\"}");
     channel_consume_events(db);
 
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db,
         "SELECT i.payload FROM inbox i JOIN sessions se ON se.id=i.session_id"
-        " WHERE se.channel_id=?1;", -1, &s, NULL) == SQLITE_OK);
+        " WHERE se.chat_id=?1;", -1, &s, NULL) == SQLITE_OK);
 
     sqlite3_bind_text(s, 1, "dm1", -1, SQLITE_STATIC);
     assert(sqlite3_step(s) == SQLITE_ROW);
@@ -411,12 +421,14 @@ static void test_channel_events_non_message_type(void) {
     chdir_work();
 
     test_binding_set(db, "mychannel", "user1", "testagent");
-    test_event_insert(db, "mychannel", "status", "{\"channel_id\":\"user1\",\"text\":\"typing\"}");
+    test_event_insert(db, "mychannel", "status", "{\"chat_id\":\"user1\",\"text\":\"typing\"}");
 
     channel_consume_events(db);
 
     assert(test_scalar_count(db, "SELECT COUNT(*) FROM channel_events;") == 0);
-    assert(test_scalar_count(db, "SELECT COUNT(*) FROM sessions;") == 0);
+    /* binding_set pre-created the pinned session; nothing new, nothing routed */
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM sessions;") == 1);
+    assert(test_scalar_count(db, "SELECT COUNT(*) FROM inbox;") == 0);
 
     chdir_restore();
     db_close(db);
@@ -441,11 +453,22 @@ static void test_channel_events_approval_decision(void) {
     {
         sqlite3_stmt *s;
         assert(sqlite3_prepare_v2(db,
-            "UPDATE sessions SET channel_name=?, channel_id=? WHERE id=?;",
+            "UPDATE sessions SET channel_name=?, chat_id=? WHERE id=?;",
             -1, &s, NULL) == SQLITE_OK);
         sqlite3_bind_text(s, 1, "mychannel", -1, SQLITE_STATIC);
         sqlite3_bind_text(s, 2, "user1", -1, SQLITE_STATIC);
         sqlite3_bind_int64(s, 3, sid);
+        assert(sqlite3_step(s) == SQLITE_DONE);
+        sqlite3_finalize(s);
+    }
+    {
+        /* re-point the chat's pin at this session — the pin is the binding */
+        sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db,
+            "UPDATE channel_routes SET session_id=?"
+            " WHERE channel_name='mychannel' AND chat_id='user1';",
+            -1, &s, NULL) == SQLITE_OK);
+        sqlite3_bind_int64(s, 1, sid);
         assert(sqlite3_step(s) == SQLITE_DONE);
         sqlite3_finalize(s);
     }
@@ -534,7 +557,7 @@ static void test_channel_events_approval_decision(void) {
     {
         int64_t aid = approval_create(db, sid, "tc4", "shell_exec", "run", "{}", "rerun");
         assert(aid > 0);
-        test_event_insert(db, "mychannel", "message", "{\"channel_id\":\"user1\",\"text\":\"yes\"}");
+        test_event_insert(db, "mychannel", "message", "{\"chat_id\":\"user1\",\"text\":\"yes\"}");
         channel_consume_events(db);
 
         assert(g_resolve_calls == 0);
@@ -646,6 +669,77 @@ static void test_channels_table(void) {
     printf("PASS\n");
 }
 
+/* /new and /sessions chat commands: admin-only, consumed in C before
+ * dispatch; /new re-points the pin at a fresh session; /sessions lists;
+ * /sessions <id> attaches. A non-admin's /new is an ordinary message. */
+static void test_chat_commands(void) {
+    setup();
+    sqlite3 *db = open_seeded(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    test_gate_channel_seed(db, "cmdch", "9");
+    test_binding_set(db, "cmdch", "9", "testagent");
+    int64_t first = test_session_find(db, "cmdch", "9", "testagent");
+    assert(first > 0);
+
+    /* /new: fresh session, pin re-pointed, reply queued, event consumed. */
+    test_event_insert(db, "cmdch", "message", "{\"chat_id\":\"9\",\"text\":\"/new\"}");
+    channel_consume_events(db);
+    int64_t fresh = test_session_find(db, "cmdch", "9", "testagent");
+    assert(fresh > first);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='cmdch'"
+        " AND json_extract(payload,'$.text') LIKE 'new session%';") == 1);
+    assert(test_inbox_count(db, fresh) == 0);   /* command, not a message */
+
+    /* next ordinary message lands in the fresh session */
+    test_event_insert(db, "cmdch", "message", "{\"chat_id\":\"9\",\"text\":\"hi\"}");
+    channel_consume_events(db);
+    assert(test_inbox_count(db, fresh) == 1);
+    assert(test_inbox_count(db, first) == 0);
+
+    /* /sessions lists both, current pin starred */
+    test_event_insert(db, "cmdch", "message", "{\"chat_id\":\"9\",\"text\":\"/sessions\"}");
+    channel_consume_events(db);
+    {
+        sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db,
+            "SELECT json_extract(payload,'$.text') FROM channel_outbox"
+            " WHERE channel_name='cmdch' ORDER BY id DESC LIMIT 1;",
+            -1, &s, NULL) == SQLITE_OK);
+        assert(sqlite3_step(s) == SQLITE_ROW);
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        char star[32];
+        snprintf(star, sizeof(star), "* #%lld", (long long)fresh);
+        assert(t && strstr(t, star));
+        sqlite3_finalize(s);
+    }
+
+    /* /sessions <first>: re-attach the old session */
+    {
+        char cmd[96];
+        snprintf(cmd, sizeof(cmd),
+                 "{\"chat_id\":\"9\",\"text\":\"/sessions %lld\"}", (long long)first);
+        test_event_insert(db, "cmdch", "message", cmd);
+    }
+    channel_consume_events(db);
+    test_event_insert(db, "cmdch", "message", "{\"chat_id\":\"9\",\"text\":\"back\"}");
+    channel_consume_events(db);
+    assert(test_inbox_count(db, first) == 1);
+
+    /* non-admin /new: not a command — routed to the chat's session as text */
+    test_binding_set(db, "cmdch", "55", "testagent");
+    int64_t other = test_session_find(db, "cmdch", "55", "testagent");
+    test_event_insert(db, "cmdch", "message", "{\"chat_id\":\"55\",\"text\":\"/new\"}");
+    channel_consume_events(db);
+    assert(test_inbox_count(db, other) == 1);
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
 /* channel_notify_session: outbox row lands for channel-bound sessions,
  * silently no-ops for channel-less ones (CLI, sub-agents). */
 static void test_notify_session(void) {
@@ -654,7 +748,7 @@ static void test_notify_session(void) {
     assert(db);
 
     int64_t bound = session_create(db, "s-bound", "testagent", -1, 0);
-    sqlite3_exec(db, "UPDATE sessions SET channel_name='mychannel', channel_id='42'"
+    sqlite3_exec(db, "UPDATE sessions SET channel_name='mychannel', chat_id='42'"
                      " WHERE name='s-bound';", NULL, NULL, NULL);
     int64_t bare = session_create(db, "s-bare", "testagent", -1, 0);
 
@@ -673,13 +767,15 @@ static void test_notify_session(void) {
 
 /* ───── tool_filter tests ───── */
 
-/* Helper: insert a route with an optional tool_filter (NULL = unrestricted). */
+/* Helper: route add --tools equivalent — the filter freezes onto the
+ * session created for the pin (route keeps a copy for display). */
 static int test_binding_set_filtered(sqlite3 *db, const char *type, const char *id,
                                      const char *agent, const char *tool_filter) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
-            "INSERT OR REPLACE INTO channel_routes(channel_name,channel_id,agent_name,tool_filter)"
-            " VALUES(?,?,?,?)", -1, &s, NULL) != SQLITE_OK) return -1;
+            "INSERT INTO sessions(name, agent_name, channel_name, chat_id, tool_filter)"
+            " VALUES('route:'||?1||':'||?2, ?3, ?1, ?2, ?4)",
+            -1, &s, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(s, 1, type, -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 2, id, -1, SQLITE_STATIC);
     sqlite3_bind_text(s, 3, agent, -1, SQLITE_STATIC);
@@ -688,6 +784,22 @@ static int test_binding_set_filtered(sqlite3 *db, const char *type, const char *
     else
         sqlite3_bind_null(s, 4);
     int rc = sqlite3_step(s); sqlite3_finalize(s);
+    if (rc != SQLITE_DONE) return -1;
+    int64_t sid = sqlite3_last_insert_rowid(db);
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO channel_routes(channel_name, chat_id, session_id, tool_filter)"
+            " VALUES(?1,?2,?3,?4)"
+            " ON CONFLICT(channel_name, chat_id) DO UPDATE SET"
+            "  session_id=excluded.session_id, tool_filter=excluded.tool_filter",
+            -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, type, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, id, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(s, 3, sid);
+    if (tool_filter)
+        sqlite3_bind_text(s, 4, tool_filter, -1, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(s, 4);
+    rc = sqlite3_step(s); sqlite3_finalize(s);
     return rc == SQLITE_DONE ? 0 : -1;
 }
 
@@ -706,7 +818,7 @@ static char *test_session_tool_filter(sqlite3 *db, int64_t sid) {
     return out;
 }
 
-/* 1. Exact route with tool_filter → new session inherits that filter. */
+/* 1. Route with tool_filter → the pinned session carries that filter. */
 static void test_tool_filter_exact_route(void) {
     setup();
     sqlite3 *db = open_seeded(DB_PATH);
@@ -715,7 +827,7 @@ static void test_tool_filter_exact_route(void) {
 
     assert(test_binding_set_filtered(db, "fch", "u1", "testagent",
                                      "[\"file_read\",\"web_fetch\"]") == 0);
-    test_event_insert(db, "fch", "message", "{\"channel_id\":\"u1\",\"text\":\"hi\"}");
+    test_event_insert(db, "fch", "message", "{\"chat_id\":\"u1\",\"text\":\"hi\"}");
     channel_consume_events(db);
 
     int64_t sid = test_session_find(db, "fch", "u1", "testagent");
@@ -730,62 +842,23 @@ static void test_tool_filter_exact_route(void) {
     printf("PASS\n");
 }
 
-/* 2a. Wildcard route with filter, no exact route → new session gets the
- *     wildcard's filter.
- * 2b. Exact route with NULL filter + wildcard with a filter → exact wins,
- *     session filter is NULL. */
-static void test_tool_filter_wildcard_precedence(void) {
-    setup();
-    sqlite3 *db = open_seeded(DB_PATH);
-    assert(db);
-    chdir_work();
-
-    /* 2a: wildcard-only — session gets the wildcard filter. */
-    assert(test_binding_set_filtered(db, "fch", "*", "testagent",
-                                     "[\"shell_exec\"]") == 0);
-    test_event_insert(db, "fch", "message", "{\"channel_id\":\"u2\",\"text\":\"hi\"}");
-    channel_consume_events(db);
-
-    int64_t sid_a = test_session_find(db, "fch", "u2", "testagent");
-    assert(sid_a > 0);
-    char *fa = test_session_tool_filter(db, sid_a);
-    assert(fa);
-    assert(strcmp(fa, "[\"shell_exec\"]") == 0);
-    free(fa);
-
-    /* 2b: add exact route with NULL filter — exact wins, filter is NULL. */
-    assert(test_binding_set_filtered(db, "fch", "u3", "testagent", NULL) == 0);
-    test_event_insert(db, "fch", "message", "{\"channel_id\":\"u3\",\"text\":\"yo\"}");
-    channel_consume_events(db);
-
-    int64_t sid_b = test_session_find(db, "fch", "u3", "testagent");
-    assert(sid_b > 0);
-    char *fb = test_session_tool_filter(db, sid_b);
-    assert(fb == NULL);  /* exact route's NULL filter wins over wildcard's */
-
-    chdir_restore();
-    db_close(db);
-    printf("PASS\n");
-}
-
-/* 3. Admin/allow_unknown sender (no route row) → session tool_filter is NULL. */
+/* 3. Gate-accepted chats (admin / open door, no pre-made route) → session
+ *    tool_filter is NULL. */
 static void test_tool_filter_admin_unrouted(void) {
     setup();
     sqlite3 *db = open_seeded(DB_PATH);
     assert(db);
     chdir_work();
 
-    /* Seed channel with admin_ids + allow_unknown, no route row. */
+    /* Seed channel with admin_ids + open-door default_agent, no route row. */
     test_gate_channel_seed(db, "adm", "888");
     assert(sqlite3_exec(db,
-        "INSERT INTO config(key, value, default_value, description)"
-        " VALUES('adm.allow_unknown','1','0','')"
-        " ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        "UPDATE channels SET default_agent='Assistant' WHERE name='adm';",
         NULL, NULL, NULL) == SQLITE_OK);
 
     /* Admin sender (in admin_ids, no route row). */
     test_event_insert(db, "adm", "message",
-        "{\"channel_id\":\"888\",\"text\":\"hi\",\"sender_id\":\"888\","
+        "{\"chat_id\":\"888\",\"text\":\"hi\",\"sender_id\":\"888\","
         "\"sender_name\":\"Boss\",\"chat_type\":\"dm\"}");
     channel_consume_events(db);
 
@@ -794,9 +867,9 @@ static void test_tool_filter_admin_unrouted(void) {
     char *f1 = test_session_tool_filter(db, sid_admin);
     assert(f1 == NULL);  /* no route row → unrestricted */
 
-    /* allow_unknown stranger (no route row). */
+    /* open-door stranger (no pre-made route). */
     test_event_insert(db, "adm", "message",
-        "{\"channel_id\":\"999\",\"text\":\"hey\",\"sender_id\":\"999\","
+        "{\"chat_id\":\"999\",\"text\":\"hey\",\"sender_id\":\"999\","
         "\"sender_name\":\"Rando\",\"chat_type\":\"dm\"}");
     channel_consume_events(db);
 
@@ -820,7 +893,7 @@ static void test_tool_filter_no_retro_apply(void) {
 
     /* Route without filter → session created with NULL tool_filter. */
     assert(test_binding_set_filtered(db, "fch", "u5", "testagent", NULL) == 0);
-    test_event_insert(db, "fch", "message", "{\"channel_id\":\"u5\",\"text\":\"first\"}");
+    test_event_insert(db, "fch", "message", "{\"chat_id\":\"u5\",\"text\":\"first\"}");
     channel_consume_events(db);
 
     int64_t sid = test_session_find(db, "fch", "u5", "testagent");
@@ -828,17 +901,20 @@ static void test_tool_filter_no_retro_apply(void) {
     char *f1 = test_session_tool_filter(db, sid);
     assert(f1 == NULL);  /* starts unrestricted */
 
-    /* Now update the route with a filter. */
-    assert(test_binding_set_filtered(db, "fch", "u5", "testagent",
-                                     "[\"file_read\"]") == 0);
+    /* Now edit the filter on the route row only (a raw edit — route add
+     * would mint a new session; the point is no retro-apply to the pin). */
+    assert(sqlite3_exec(db,
+        "UPDATE channel_routes SET tool_filter='[\"file_read\"]'"
+        " WHERE channel_name='fch' AND chat_id='u5';",
+        NULL, NULL, NULL) == SQLITE_OK);
 
     /* Send another event — reuses the existing session. */
-    test_event_insert(db, "fch", "message", "{\"channel_id\":\"u5\",\"text\":\"second\"}");
+    test_event_insert(db, "fch", "message", "{\"chat_id\":\"u5\",\"text\":\"second\"}");
     channel_consume_events(db);
 
     /* Still one session, and its filter is still NULL (not retro-applied). */
     assert(test_scalar_count(db,
-        "SELECT COUNT(*) FROM sessions WHERE channel_name='fch' AND channel_id='u5';") == 1);
+        "SELECT COUNT(*) FROM sessions WHERE channel_name='fch' AND chat_id='u5';") == 1);
     char *f2 = test_session_tool_filter(db, sid);
     assert(f2 == NULL);  /* unchanged */
 
@@ -886,14 +962,15 @@ int main(void) {
     printf("  channels_table... ");
     test_channels_table();
 
+    printf("  chat_commands... ");
+    test_chat_commands();
+
     printf("  notify_session... ");
     test_notify_session();
 
     printf("  tool_filter_exact_route... ");
     test_tool_filter_exact_route();
 
-    printf("  tool_filter_wildcard_precedence... ");
-    test_tool_filter_wildcard_precedence();
 
     printf("  tool_filter_admin_unrouted... ");
     test_tool_filter_admin_unrouted();

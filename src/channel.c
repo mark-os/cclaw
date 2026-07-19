@@ -154,6 +154,177 @@ static int channel_cid_is_admin(sqlite3 *db, const char *channel_name, const cha
     return hit;
 }
 
+/* Channel open-door policy: channels.default_agent (NULL = fail-closed). */
+static char *channel_default_agent(sqlite3 *db, const char *channel_name) {
+    sqlite3_stmt *s;
+    char *agent = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT default_agent FROM channels WHERE name=?;",
+                           -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(s, 0);
+            if (v && v[0]) agent = strdup(v);
+        }
+        sqlite3_finalize(s);
+    }
+    return agent;
+}
+
+/* Queue a plain-text reply to one chat (command feedback — not agent output,
+ * so it goes straight to the outbox like admin notices do). */
+static void channel_chat_reply(sqlite3 *db, const char *channel_name,
+                               const char *chat_id, const char *text) {
+    sqlite3_stmt *ins;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+            " VALUES(?1, 0, json_object('chat_id', ?2, 'text', ?3));",
+            -1, &ins, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(ins, 1, channel_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(ins, 2, chat_id, -1, SQLITE_STATIC);
+        sqlite3_bind_text(ins, 3, text, -1, SQLITE_STATIC);
+        sqlite3_step(ins);
+        sqlite3_finalize(ins);
+    }
+}
+
+/* Re-point the chat's pin (upsert, preserving delivery_mode/tool_filter on
+ * an existing row) and stamp the session's origin. The pin is the binding —
+ * this is the one write that moves a chat between conversations. */
+static void channel_pin_session(sqlite3 *db, const char *channel_name,
+                                const char *chat_id, int64_t sid) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO channel_routes(channel_name, chat_id, session_id)"
+            " VALUES(?1,?2,?3)"
+            " ON CONFLICT(channel_name, chat_id)"
+            " DO UPDATE SET session_id=excluded.session_id;",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, channel_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 3, sid);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    }
+    if (sqlite3_prepare_v2(db,
+            "UPDATE sessions SET channel_name=?1, chat_id=?2 WHERE id=?3;",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, channel_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, chat_id, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 3, sid);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    }
+}
+
+/* Chat commands — /new and /sessions rebind the chat, so they are authority
+ * actions: admin_ids senders only, handled in C before any session dispatch
+ * (they must work even when the pinned session is wedged). A non-admin's
+ * /new is NOT swallowed — it falls through as an ordinary message for the
+ * agent to answer. Returns 1 when the event was consumed as a command. */
+static int channel_chat_command(sqlite3 *db, const char *ch_name,
+                                const char *cid, const char *payload) {
+    char *text = NULL;
+    sqlite3_stmt *js;
+    if (sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.text');",
+                           -1, &js, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(js, 1, payload, -1, SQLITE_STATIC);
+        if (sqlite3_step(js) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(js, 0);
+            if (v) text = strdup(v);
+        }
+        sqlite3_finalize(js);
+    }
+    if (!text) return 0;
+    int is_new = strcmp(text, "/new") == 0;
+    int is_list = strncmp(text, "/sessions", 9) == 0 &&
+                  (text[9] == '\0' || text[9] == ' ');
+    if ((!is_new && !is_list) || !channel_cid_is_admin(db, ch_name, cid)) {
+        free(text);
+        return 0;
+    }
+
+    if (is_new) {
+        /* Same agent as the current pin; open-door default, then the global
+         * default_agent, when the chat has never been routed. */
+        char *agent = db_channel_binding_get(db, ch_name, cid);
+        if (!agent) agent = channel_default_agent(db, ch_name);
+        if (!agent) agent = config_get(db, "default_agent");
+        if (!agent) {
+            channel_chat_reply(db, ch_name, cid, "no agent for this chat");
+            free(text);
+            return 1;
+        }
+        int64_t sid = session_create_filtered(db, ch_name, agent, -1, 0, NULL);
+        if (sid > 0) {
+            channel_pin_session(db, ch_name, cid, sid);
+            char msg[96];
+            snprintf(msg, sizeof(msg), "new session #%lld (%s)",
+                     (long long)sid, agent);
+            channel_chat_reply(db, ch_name, cid, msg);
+            LOG_INFO_("channel /new ch=%s chat=%s sid=%lld agent=%s",
+                      ch_name, cid, (long long)sid, agent);
+        } else {
+            channel_chat_reply(db, ch_name, cid, "session create failed");
+        }
+        free(agent);
+        free(text);
+        return 1;
+    }
+
+    /* "/sessions <id>" re-pins; bare "/sessions" lists this chat's history. */
+    int64_t pick = text[9] == ' ' ? strtoll(text + 10, NULL, 10) : 0;
+    if (pick > 0) {
+        sqlite3_stmt *chk;
+        int found = 0;
+        if (sqlite3_prepare_v2(db, "SELECT 1 FROM sessions WHERE id=?;",
+                               -1, &chk, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(chk, 1, pick);
+            if (sqlite3_step(chk) == SQLITE_ROW) found = 1;
+            sqlite3_finalize(chk);
+        }
+        if (found) {
+            channel_pin_session(db, ch_name, cid, pick);
+            char msg[64];
+            snprintf(msg, sizeof(msg), "attached session #%lld", (long long)pick);
+            channel_chat_reply(db, ch_name, cid, msg);
+            LOG_INFO_("channel /sessions attach ch=%s chat=%s sid=%lld",
+                      ch_name, cid, (long long)pick);
+        } else {
+            channel_chat_reply(db, ch_name, cid, "no such session");
+        }
+        free(text);
+        return 1;
+    }
+
+    /* List: this chat's sessions newest-first, current pin starred. */
+    char *listing = NULL;
+    sqlite3_stmt *ls;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE(group_concat("
+            "  CASE WHEN s.id = (SELECT session_id FROM channel_routes"
+            "                    WHERE channel_name=?1 AND chat_id=?2)"
+            "       THEN '* ' ELSE '  ' END"
+            "  || '#' || s.id || ' ' || s.agent_name || ' ' || s.state,"
+            "  char(10)), 'no sessions for this chat')"
+            " FROM (SELECT id, agent_name, state FROM sessions"
+            "       WHERE channel_name=?1 AND chat_id=?2"
+            "       ORDER BY id DESC LIMIT 10) s;",
+            -1, &ls, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(ls, 1, ch_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(ls, 2, cid, -1, SQLITE_STATIC);
+        if (sqlite3_step(ls) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(ls, 0);
+            if (v) listing = strdup(v);
+        }
+        sqlite3_finalize(ls);
+    }
+    channel_chat_reply(db, ch_name, cid,
+                       listing ? listing : "no sessions for this chat");
+    free(listing);
+    free(text);
+    return 1;
+}
+
 /* One-time admin notification for a dropped unrouted sender. The dedup set is
  * in-memory, per-process — ephemeral politeness state, not authority: a
  * re-notify after a daemon restart is acceptable and not worth a table. */
@@ -628,13 +799,13 @@ void channel_consume_events(sqlite3 *db) {
         if (strcmp(etype, "message") != 0)
             goto del;
 
-        /* Resolve agent via channel_routes, find/create session */
+        /* Resolve the chat's pinned session; first contact creates + pins */
         {
-            /* Extract channel_id from payload via SQLite json_extract */
-            const char *cid = "*";
+            /* Extract chat_id from payload via SQLite json_extract */
+            const char *cid = "0";
             char cid_buf[64] = {0};
             {
-                const char *jsql = "SELECT CAST(json_extract(?, '$.channel_id') AS TEXT);";
+                const char *jsql = "SELECT CAST(json_extract(?, '$.chat_id') AS TEXT);";
                 sqlite3_stmt *js;
                 if (sqlite3_prepare_v2(db, jsql, -1, &js, NULL) == SQLITE_OK) {
                     sqlite3_bind_text(js, 1, payload, -1, SQLITE_STATIC);
@@ -649,105 +820,65 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
 
-            char *agent = db_channel_binding_get(db, ch_name, cid);
-            if (!agent && strcmp(cid, "*") != 0)
-                agent = db_channel_binding_get(db, ch_name, "*");
-            if (!agent) {
-                /* Unrouted sender — the gate (specs/channels.md). Chat
-                 * membership is not authority: only an admin, or a channel
-                 * with <ext>.allow_unknown=1, reaches the default agent.
-                 * Everyone else is dropped with a log line + a one-time admin
-                 * notification carrying enough to `cclaw route add` them. */
-                int accept = channel_cid_is_admin(db, ch_name, cid);
-                if (!accept) {
-                    char *au = channel_config_get(db, ch_name, "allow_unknown");
-                    accept = au && strcmp(au, "1") == 0;
-                    free(au);
-                }
-                if (accept) {
-                    agent = config_get(db, "default_agent");
-                    if (agent)
-                        LOG_INFO_("channel no route ch=%s cid=%s, using default_agent=%s",
-                                  ch_name, cid, agent);
-                    else
-                        LOG_WARN_("channel no route ch=%s cid=%s and no default_agent"
-                                  " — dropping message", ch_name, cid);
-                } else {
-                    LOG_WARN_("channel unrouted sender dropped ch=%s cid=%s",
-                              ch_name, cid);
-                    gate_notify_unknown(db, ch_name, cid, payload);
-                }
+            if (channel_chat_command(db, ch_name, cid, payload)) {
+                processed++;
+                goto del;
             }
-            if (!agent) goto del;
 
-            /* Resolve the session: a route with a non-NULL session_id pins
-             * the chat to that session (exact route first, then the '*'
-             * wildcard); otherwise find-latest for this channel+channel_id. */
+            /* The pin IS the binding: route → session, session → agent
+             * (route-model unification, v33). No wildcard fallback — channel
+             * policy lives on channels.default_agent. */
             int64_t sid = -1;
+            char *agent = NULL;
             {
-                const char *psql =
-                    "SELECT r.session_id FROM channel_routes r"
-                    " JOIN sessions s ON s.id = r.session_id"
-                    " WHERE r.channel_name=?1 AND r.channel_id IN (?2,'*')"
-                    "   AND r.session_id IS NOT NULL"
-                    " ORDER BY r.channel_id=?2 DESC LIMIT 1;";
                 sqlite3_stmt *ps;
-                if (sqlite3_prepare_v2(db, psql, -1, &ps, NULL) == SQLITE_OK) {
+                if (sqlite3_prepare_v2(db,
+                        "SELECT r.session_id, s.agent_name FROM channel_routes r"
+                        " JOIN sessions s ON s.id = r.session_id"
+                        " WHERE r.channel_name=?1 AND r.chat_id=?2;",
+                        -1, &ps, NULL) == SQLITE_OK) {
                     sqlite3_bind_text(ps, 1, ch_name, -1, SQLITE_STATIC);
                     sqlite3_bind_text(ps, 2, cid, -1, SQLITE_STATIC);
-                    if (sqlite3_step(ps) == SQLITE_ROW)
+                    if (sqlite3_step(ps) == SQLITE_ROW) {
                         sid = sqlite3_column_int64(ps, 0);
+                        const char *a = (const char *)sqlite3_column_text(ps, 1);
+                        if (a) agent = strdup(a);
+                    }
                     sqlite3_finalize(ps);
                 }
             }
-            const char *ssql = "SELECT id FROM sessions WHERE channel_name=? AND channel_id=?"
-                               " ORDER BY id DESC LIMIT 1;";
-            sqlite3_stmt *ss;
-            if (sid <= 0 && sqlite3_prepare_v2(db, ssql, -1, &ss, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(ss, 1, ch_name, -1, SQLITE_STATIC);
-                sqlite3_bind_text(ss, 2, cid, -1, SQLITE_STATIC);
-                if (sqlite3_step(ss) == SQLITE_ROW)
-                    sid = sqlite3_column_int64(ss, 0);
-                sqlite3_finalize(ss);
-            }
             if (sid <= 0) {
-                /* Route-scoped authority attenuation: a route may carry a
-                 * tool_filter (JSON array), frozen onto the session at
-                 * creation — same semantics as sub-agent spawns. Later route
-                 * edits don't retro-apply to existing sessions. Unrouted
-                 * admin acceptance has no route row, so filter stays NULL. */
-                char *filter = NULL;
-                {
-                    sqlite3_stmt *fs;
-                    if (sqlite3_prepare_v2(db,
-                            "SELECT tool_filter FROM channel_routes"
-                            " WHERE channel_name=?1 AND channel_id IN (?2,'*')"
-                            " ORDER BY channel_id=?2 DESC LIMIT 1;",
-                            -1, &fs, NULL) == SQLITE_OK) {
-                        sqlite3_bind_text(fs, 1, ch_name, -1, SQLITE_STATIC);
-                        sqlite3_bind_text(fs, 2, cid, -1, SQLITE_STATIC);
-                        if (sqlite3_step(fs) == SQLITE_ROW &&
-                            sqlite3_column_type(fs, 0) != SQLITE_NULL)
-                            filter = strdup((const char *)sqlite3_column_text(fs, 0));
-                        sqlite3_finalize(fs);
+                /* Unrouted chat — the gate (specs/channels.md). Chat
+                 * membership is not authority: channels.default_agent set =
+                 * open door; an admin chat falls back to the global
+                 * default_agent; everyone else drops with a log line + a
+                 * one-time admin notification. */
+                int is_admin = channel_cid_is_admin(db, ch_name, cid);
+                agent = channel_default_agent(db, ch_name);
+                if (!agent && is_admin)
+                    agent = config_get(db, "default_agent");
+                if (!agent) {
+                    if (is_admin) {
+                        LOG_WARN_("channel admin chat but no default agent"
+                                  " ch=%s chat=%s — dropping", ch_name, cid);
+                    } else {
+                        LOG_WARN_("channel unrouted chat dropped ch=%s chat=%s",
+                                  ch_name, cid);
+                        gate_notify_unknown(db, ch_name, cid, payload);
                     }
+                    goto del;
                 }
-                sid = session_create_filtered(db, ch_name, agent, -1, 0, filter);
-                free(filter);
+                /* First contact: create the session and write the pin back,
+                 * so the exact-route invariant holds from here on. Sessions
+                 * born from channel policy carry no route tool_filter. */
+                sid = session_create_filtered(db, ch_name, agent, -1, 0, NULL);
                 if (sid > 0) {
-                    LOG_INFO_("channel new_session ch=%s sid=%lld agent=%s",
-                              ch_name, (long long)sid, agent);
-                    /* Store channel_name + channel_id on session */
-                    const char *usql = "UPDATE sessions SET channel_name=?, channel_id=? WHERE id=?;";
-                    sqlite3_stmt *us;
-                    if (sqlite3_prepare_v2(db, usql, -1, &us, NULL) == SQLITE_OK) {
-                        sqlite3_bind_text(us, 1, ch_name, -1, SQLITE_STATIC);
-                        sqlite3_bind_text(us, 2, cid, -1, SQLITE_STATIC);
-                        sqlite3_bind_int64(us, 3, sid);
-                        sqlite3_step(us); sqlite3_finalize(us);
-                    }
+                    channel_pin_session(db, ch_name, cid, sid);
+                    LOG_INFO_("channel new_session ch=%s chat=%s sid=%lld agent=%s",
+                              ch_name, cid, (long long)sid, agent);
                 }
             }
+            if (sid <= 0) { free(agent); goto del; }
             if (sid > 0) {
                 LOG_INFO_("channel event ch=%s sid=%lld type=%s",
                           ch_name, (long long)sid, etype);

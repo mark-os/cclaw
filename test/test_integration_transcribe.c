@@ -67,7 +67,7 @@ static int64_t seed_media_job(sqlite3 *db, int64_t sid, const char *caption,
     sqlite3_stmt *s;
     assert(sqlite3_prepare_v2(db,
         "INSERT INTO media_jobs(session_id, source, payload) VALUES(?1, 'telegram',"
-        " json_object('channel_id','42','from','Mark','text',?2,"
+        " json_object('chat_id','42','from','Mark','text',?2,"
         "   'media', json_object('kind','audio','mime','audio/ogg','path',?3)));",
         -1, &s, NULL) == SQLITE_OK);
     sqlite3_bind_int64(s, 1, sid);
@@ -133,7 +133,7 @@ static void test_transcribe_success(void) {
     char *payload = inbox_payload(db, sid);
     if (!payload) { db_close(db); test_db_clean(db_path); FAIL("no inbox row"); }
     int ok = strstr(payload, "[voice message] hello from voice") != NULL &&
-             strstr(payload, "\"channel_id\":\"42\"") != NULL &&
+             strstr(payload, "\"chat_id\":\"42\"") != NULL &&
              strstr(payload, "T2dnUw==") == NULL;   /* audio never enters context */
     free(payload);
     int jobs_left = media_jobs_count(db);

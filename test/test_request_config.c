@@ -528,8 +528,10 @@ static void test_agent_routes_sections(void) {
     assert(sqlite3_exec(db,
         "INSERT INTO extensions(name,path) VALUES('tgext','/x');"
         "INSERT INTO channels(name,extension_name) VALUES('tg','tgext');"
-        "INSERT INTO channel_routes(channel_name,channel_id,agent_name)"
-        " VALUES('tg','-500','Other');", NULL, NULL, NULL) == SQLITE_OK);
+        "INSERT INTO sessions(name,agent_name,channel_name,chat_id)"
+        " VALUES('o','Other','tg','-500');"
+        "INSERT INTO channel_routes(channel_name,chat_id,session_id)"
+        " VALUES('tg','-500',last_insert_rowid());", NULL, NULL, NULL) == SQLITE_OK);
 
     RequestConfigCtx ctx = {
         .db = db, .agent_name = "test", .session_id = sid,
@@ -568,7 +570,7 @@ static void test_agent_routes_sections(void) {
     free(r);
     r = call_handler(&reg,
         "{\"action\":\"request_changes\",\"changes\":{\"routes\":[\"tg:*\"]}}");
-    assert(r && strstr(r, "operator-only"));
+    assert(r && strstr(r, "no wildcard routes"));
     free(r);
     r = call_handler(&reg,
         "{\"action\":\"request_changes\",\"changes\":{\"routes\":[\"tg:-500\"]}}");
@@ -617,13 +619,17 @@ static void test_agent_routes_sections(void) {
     assert(sqlite3_column_int(s, 2) == 30); /* default untouched */
     sqlite3_finalize(s);
 
-    /* route landed for this agent, explicit delivery (send authority only). */
+    /* route landed: pinned to an eagerly created session owned by this
+     * agent, explicit delivery (send authority only). */
     assert(sqlite3_prepare_v2(db,
-        "SELECT agent_name, delivery_mode FROM channel_routes"
-        " WHERE channel_name='tg' AND channel_id='777'", -1, &s, NULL) == SQLITE_OK);
+        "SELECT se.agent_name, r.delivery_mode, se.channel_name, se.chat_id"
+        " FROM channel_routes r JOIN sessions se ON se.id=r.session_id"
+        " WHERE r.channel_name='tg' AND r.chat_id='777'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "test") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "explicit") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 2), "tg") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 3), "777") == 0);
     sqlite3_finalize(s);
 
     /* Route captured by another agent between park and apply → the whole
@@ -633,8 +639,10 @@ static void test_agent_routes_sections(void) {
         "\"agent\":{\"max_iterations\":99},\"routes\":[\"tg:888\"]}}");
     assert(r == NULL);
     assert(sqlite3_exec(db,
-        "INSERT INTO channel_routes(channel_name,channel_id,agent_name)"
-        " VALUES('tg','888','Other');", NULL, NULL, NULL) == SQLITE_OK);
+        "INSERT INTO sessions(name,agent_name,channel_name,chat_id)"
+        " VALUES('o2','Other','tg','888');"
+        "INSERT INTO channel_routes(channel_name,chat_id,session_id)"
+        " VALUES('tg','888',last_insert_rowid());", NULL, NULL, NULL) == SQLITE_OK);
     assert(sqlite3_prepare_v2(db,
         "SELECT args_json FROM approvals WHERE session_id=?1"
         " ORDER BY id DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK);

@@ -576,7 +576,7 @@ int admin_list_sessions(sqlite3 *db, int limit, AdminSession **out, size_t *out_
     *out_count = 0;
 
     const char *sql =
-        "SELECT id, agent_name, channel_name, channel_id, state,"
+        "SELECT id, agent_name, channel_name, chat_id, state,"
         "       datetime(created_at, 'unixepoch')"
         " FROM sessions ORDER BY id DESC LIMIT ?1;";
     sqlite3_stmt *stmt;
@@ -602,7 +602,7 @@ int admin_list_sessions(sqlite3 *db, int limit, AdminSession **out, size_t *out_
         list[count].id = sqlite3_column_int64(stmt, 0);
         list[count].agent_name = an ? strdup(an) : NULL;
         list[count].channel_name = cn ? strdup(cn) : NULL;
-        list[count].channel_id = ci ? strdup(ci) : NULL;
+        list[count].chat_id = ci ? strdup(ci) : NULL;
         list[count].state = st ? strdup(st) : NULL;
         list[count].created_at = ca ? strdup(ca) : NULL;
         count++;
@@ -619,7 +619,7 @@ void admin_sessions_free(AdminSession *list, size_t count) {
     for (size_t i = 0; i < count; i++) {
         free(list[i].agent_name);
         free(list[i].channel_name);
-        free(list[i].channel_id);
+        free(list[i].chat_id);
         free(list[i].state);
         free(list[i].created_at);
     }
@@ -627,24 +627,23 @@ void admin_sessions_free(AdminSession *list, size_t count) {
 }
 
 int admin_attach_session_channel(sqlite3 *db, int64_t session_id,
-                                 const char *channel_name, const char *channel_id) {
+                                 const char *channel_name, const char *chat_id) {
+    /* A pin needs a real chat — channel-wide defaults are
+     * channels.default_agent (admin_set_channel_default), not a route. */
     if (!db || !channel_name || session_id <= 0) return -1;
-    if (!channel_id || !channel_id[0]) channel_id = "*";
-
-    /* Get agent_name from session */
-    char *agent = session_get_agent_name(db, session_id);
-    if (!agent) return -1;
+    if (!chat_id || !chat_id[0]) return -1;
 
     const char *sql =
-        "INSERT OR REPLACE INTO channel_routes(channel_name, channel_id, agent_name, session_id)"
-        " VALUES(?1, ?2, ?3, ?4);";
+        "INSERT INTO channel_routes(channel_name, chat_id, session_id)"
+        " VALUES(?1, ?2, ?3)"
+        " ON CONFLICT(channel_name, chat_id)"
+        " DO UPDATE SET session_id=excluded.session_id;";
     sqlite3_stmt *stmt;
     int rc = -1;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 2, channel_id, -1, SQLITE_STATIC);
-        sqlite3_bind_text(stmt, 3, agent, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(stmt, 4, session_id);
+        sqlite3_bind_text(stmt, 2, chat_id, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt, 3, session_id);
         rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
         sqlite3_finalize(stmt);
     }
@@ -652,16 +651,15 @@ int admin_attach_session_channel(sqlite3 *db, int64_t session_id,
     /* Also update the session itself */
     if (rc == 0) {
         const char *usql =
-            "UPDATE sessions SET channel_name=?1, channel_id=?2 WHERE id=?3;";
+            "UPDATE sessions SET channel_name=?1, chat_id=?2 WHERE id=?3;";
         if (sqlite3_prepare_v2(db, usql, -1, &stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
-            sqlite3_bind_text(stmt, 2, channel_id, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, chat_id, -1, SQLITE_STATIC);
             sqlite3_bind_int64(stmt, 3, session_id);
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         }
     }
-    free(agent);
     return rc;
 }
 
@@ -674,9 +672,8 @@ int admin_list_channels(sqlite3 *db, AdminChannel **out, size_t *out_count) {
 
     const char *sql =
         "SELECT c.name, c.extension_name, c.type, c.status,"
-        "       r.agent_name, r.session_id"
+        "       c.default_agent, NULL"
         " FROM channels c"
-        " LEFT JOIN channel_routes r ON r.channel_name = c.name AND r.channel_id = '*'"
         " ORDER BY c.name;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
@@ -725,12 +722,12 @@ void admin_channels_free(AdminChannel *list, size_t count) {
     free(list);
 }
 
+/* Channel-wide default agent (open-door policy) — channels.default_agent,
+ * not a route: routes pin sessions, this decides who serves new chats. */
 int admin_set_channel_route(sqlite3 *db, const char *channel_name,
                             const char *agent_name) {
     if (!db || !channel_name) return -1;
-    const char *sql =
-        "INSERT OR REPLACE INTO channel_routes(channel_name, channel_id, agent_name)"
-        " VALUES(?1, '*', ?2);";
+    const char *sql = "UPDATE channels SET default_agent=?2 WHERE name=?1;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, channel_name, -1, SQLITE_STATIC);
@@ -738,7 +735,8 @@ int admin_set_channel_route(sqlite3 *db, const char *channel_name,
         sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC);
     else
         sqlite3_bind_null(stmt, 2);
-    int rc = (sqlite3_step(stmt) == SQLITE_DONE) ? 0 : -1;
+    int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0)
+             ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
 }

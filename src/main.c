@@ -237,7 +237,7 @@ static void notify_deferred(int64_t session_id, const char *text) {
     if (sqlite3_prepare_v2(g_db,
             "INSERT INTO channel_outbox(channel_name, session_id, payload)"
             " SELECT channel_name, id,"
-            "        json_object('chat_id', COALESCE(channel_id,'0'), 'text', ?2)"
+            "        json_object('chat_id', COALESCE(chat_id,'0'), 'text', ?2)"
             "   FROM sessions WHERE id=?1 AND channel_name IS NOT NULL;",
             -1, &s, NULL) != SQLITE_OK) return;
     sqlite3_bind_int64(s, 1, session_id);
@@ -2318,10 +2318,10 @@ static void handle_approval_park(int64_t session_id) {
     }
 
     /* Daemon mode: enqueue outbox prompt if session has channel, else auto-deny.
-     * channel_name/channel_id are read and finalized *before* the outbox
+     * channel_name/chat_id are read and finalized *before* the outbox
      * INSERT so this connection never holds an open SELECT across a write —
      * see specs note on read->write snapshot upgrades (instant SQLITE_BUSY). */
-    const char *sql = "SELECT channel_name, channel_id FROM sessions WHERE id=?;";
+    const char *sql = "SELECT channel_name, chat_id FROM sessions WHERE id=?;";
     sqlite3_stmt *stmt;
     int has_channel = 0;
     char ch_name[64] = {0};
@@ -2344,7 +2344,7 @@ static void handle_approval_park(int64_t session_id) {
          * requesting session's own chat — a session may be exposed on a
          * channel/chat where the human watching it isn't the one who should
          * decide grants (e.g. a sub-agent surfaced on a groupchat). Falls
-         * back to the session's own channel_id when no admin_ids are
+         * back to the session's own chat_id when no admin_ids are
          * configured, so the common 1:1 setup needs no extra config. */
         char *admins = channel_config_get(g_db, ch_name, "admin_ids");
         if (admins && !admins[0]) { free(admins); admins = NULL; }
@@ -2618,40 +2618,39 @@ static void deliver_response(int64_t session_id) {
     }
 
     /* Daemon mode: read channel from session, write outbox */
-    const char *src_sql = "SELECT channel_name, channel_id FROM sessions WHERE id=?;";
+    const char *src_sql = "SELECT channel_name, chat_id FROM sessions WHERE id=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_db, src_sql, -1, &stmt, NULL) != SQLITE_OK) return;
     sqlite3_bind_int64(stmt, 1, session_id);
-    char *channel = NULL, *channel_id = NULL;
+    char *channel = NULL, *chat_id = NULL;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *s = (const char *)sqlite3_column_text(stmt, 0);
         if (s) channel = strdup(s);
         s = (const char *)sqlite3_column_text(stmt, 1);
-        if (s) channel_id = strdup(s);
+        if (s) chat_id = strdup(s);
     }
     sqlite3_finalize(stmt);
     if (!channel) return;
 
-    /* Delivery mode lives on the route (exact beats '*'; no route = auto):
-     * 'explicit' keeps turn output in the session — the agent speaks only
-     * via channel_send. Group listen-and-decide depends on this. */
+    /* Delivery mode lives on the route (no route = auto): 'explicit' keeps
+     * turn output in the session — the agent speaks only via channel_send.
+     * Group listen-and-decide depends on this. */
     {
         const char *msql =
             "SELECT delivery_mode FROM channel_routes"
-            " WHERE channel_name=?1 AND channel_id IN (?2,'*')"
-            " ORDER BY channel_id=?2 DESC LIMIT 1;";
+            " WHERE channel_name=?1 AND chat_id=?2;";
         sqlite3_stmt *ms;
         int explicit_mode = 0;
         if (sqlite3_prepare_v2(g_db, msql, -1, &ms, NULL) == SQLITE_OK) {
             sqlite3_bind_text(ms, 1, channel, -1, SQLITE_STATIC);
-            sqlite3_bind_text(ms, 2, channel_id ? channel_id : "0", -1, SQLITE_STATIC);
+            sqlite3_bind_text(ms, 2, chat_id ? chat_id : "0", -1, SQLITE_STATIC);
             if (sqlite3_step(ms) == SQLITE_ROW) {
                 const char *m = (const char *)sqlite3_column_text(ms, 0);
                 explicit_mode = m && strcmp(m, "explicit") == 0;
             }
             sqlite3_finalize(ms);
         }
-        if (explicit_mode) { free(channel); free(channel_id); return; }
+        if (explicit_mode) { free(channel); free(chat_id); return; }
     }
 
     /* Ingestion-only channel (handler defines no onOutbox, recorded in
@@ -2670,11 +2669,11 @@ static void deliver_response(int64_t session_id) {
             }
             sqlite3_finalize(os);
         }
-        if (ingest_only) { free(channel); free(channel_id); return; }
+        if (ingest_only) { free(channel); free(chat_id); return; }
     }
 
     char *text = get_response_text(g_db, session_id);
-    if (!text) { free(channel); free(channel_id); return; }
+    if (!text) { free(channel); free(chat_id); return; }
 
     /* Build outbox payload via SQLite json_object (safe escaping) */
     const char *ins_sql =
@@ -2684,7 +2683,7 @@ static void deliver_response(int64_t session_id) {
     if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
         sqlite3_bind_text(ins, 1, channel, -1, SQLITE_STATIC);
         sqlite3_bind_int64(ins, 2, session_id);
-        sqlite3_bind_text(ins, 3, channel_id ? channel_id : "0", -1, SQLITE_STATIC);
+        sqlite3_bind_text(ins, 3, chat_id ? chat_id : "0", -1, SQLITE_STATIC);
         sqlite3_bind_text(ins, 4, text, -1, SQLITE_STATIC);
         sqlite3_step(ins);
         sqlite3_finalize(ins);
@@ -2694,7 +2693,7 @@ static void deliver_response(int64_t session_id) {
 
     free(text);
     free(channel);
-    free(channel_id);
+    free(chat_id);
 }
 
 static void reap_children(void) {

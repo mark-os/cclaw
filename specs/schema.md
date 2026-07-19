@@ -331,17 +331,18 @@ Channel-private persistent key-value store (offsets, cursors, tokens).
 
 ## channel_routes
 
-Routes inbound channel messages to agents/sessions. Replaces the old `channel_bindings` and `tg_chat_sessions` tables.
+Pins a chat (platform conversation id) to a session; the session names its
+agent (v33 route-model unification). Routes never name an agent — the
+channel-wide default lives on `channels.default_agent`.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `channel_name` | TEXT NOT NULL | |
-| `channel_id` | TEXT NOT NULL DEFAULT '*' | `*` = default route for the channel |
-| `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; target agent |
-| `session_id` | INTEGER | pin to a specific session (optional) |
+| `chat_id` | TEXT NOT NULL | Telegram chat id, Discord channel/DM id, … |
+| `session_id` | INTEGER NOT NULL | FK → `sessions(id)`; the pin IS the binding |
 | `delivery_mode` | TEXT NOT NULL DEFAULT 'auto' | `auto` = turn output auto-delivers to the origin chat; `explicit` = only `channel_send` |
-| `tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Copied onto `sessions.tool_filter` at session creation only — frozen like sub-agent filters; later route edits don't retro-apply |
-| PRIMARY KEY | (channel_name, channel_id) | |
+| `tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Frozen onto the pinned session at its creation (`route add --tools`); later route edits don't retro-apply |
+| PRIMARY KEY | (channel_name, chat_id) | |
 
 ---
 
@@ -353,7 +354,7 @@ Routes inbound channel messages to agents/sessions. Replaces the old `channel_bi
 | `name` | TEXT | human label |
 | `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; scopes session to agent |
 | `channel_name` | TEXT | originating channel |
-| `channel_id` | TEXT | originating channel id |
+| `chat_id` | TEXT | originating chat id |
 | `parent_session_id` | INTEGER DEFAULT -1 | sub-agent parent (-1 = top-level) |
 | `parent_tool_call_id` | TEXT | the tool_call that spawned this sub-session |
 | `depth` | INTEGER NOT NULL DEFAULT 0 | sub-agent nesting depth |

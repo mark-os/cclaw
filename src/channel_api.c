@@ -340,9 +340,9 @@ int channel_notify_session(sqlite3 *db, const char *db_path, int64_t session_id,
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
             "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-            " SELECT channel_name, id, json_object('chat_id', channel_id, 'text', ?2)"
+            " SELECT channel_name, id, json_object('chat_id', chat_id, 'text', ?2)"
             " FROM sessions WHERE id=?1"
-            " AND channel_name IS NOT NULL AND channel_id IS NOT NULL;",
+            " AND channel_name IS NOT NULL AND chat_id IS NOT NULL;",
             -1, &s, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_int64(s, 1, session_id);

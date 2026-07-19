@@ -43,17 +43,17 @@ int main(void) {
     test_seed_agent(db, "Carol");
 
     assert(sqlite3_exec(db,
-        "INSERT INTO sessions(id, agent_name, channel_name, channel_id)"
+        "INSERT INTO sessions(id, agent_name, channel_name, chat_id)"
         " VALUES(10,'Alice','telegram','42'),"
         "       (11,'Alice',NULL,NULL),"
         "       (12,'Bob','telegram','77');"
-        "INSERT INTO channel_routes(channel_name, channel_id, agent_name, delivery_mode)"
-        " VALUES('telegram','42','Alice','auto'),"
-        "       ('telegram','77','Bob','explicit'),"
-        "       ('telegram','*','Alice','auto');"
-        /* pinned-session route: resolves to Alice through session 11 */
-        "INSERT INTO channel_routes(channel_name, channel_id, agent_name, session_id, delivery_mode)"
-        " VALUES('telegram','-500','Carol',11,'explicit');",
+        /* open-door default_agent must grant NO send authority */
+        "INSERT INTO channels(name, default_agent) VALUES('telegram','Alice');"
+        "INSERT INTO channel_routes(channel_name, chat_id, session_id, delivery_mode)"
+        " VALUES('telegram','42',10,'auto'),"
+        "       ('telegram','77',12,'explicit'),"
+        /* group chat pinned to Alice's session 11 */
+        "       ('telegram','-500',11,'explicit');",
         NULL, NULL, NULL) == SQLITE_OK);
 
     ToolRegistry reg;
@@ -69,8 +69,8 @@ int main(void) {
     free(r);
     printf("PASS\n");
 
-    /* Wildcard route grants no send authority. */
-    printf("  deny_wildcard... ");
+    /* channels.default_agent grants no send authority. */
+    printf("  deny_default_agent... ");
     r = call(&reg, &ctx, "Alice", 11,
         "{\"channel\":\"telegram\",\"chat_id\":\"888\",\"message\":\"hi\"}");
     assert(r && strstr(r, "error: no route"));
@@ -124,7 +124,7 @@ int main(void) {
     free(r);
     printf("PASS\n");
 
-    /* action=list: Alice sees 42 (direct) and -500 (via pin), not 77 or '*'. */
+    /* action=list: Alice sees 42 and -500 (her pinned sessions), not 77. */
     printf("  list_targets... ");
     r = call(&reg, &ctx, "Alice", 11, "{\"action\":\"list\"}");
     assert(r && strstr(r, "\"42\"") && strstr(r, "\"-500\""));

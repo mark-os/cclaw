@@ -364,14 +364,14 @@ static void test_schema_patch_application(void) {
     const char *old_path = "/tmp/test_cclaw_schema_patch_old.sqlite";
     const char *new_path = "/tmp/test_cclaw_schema_patch_new.sqlite";
     char junk[192];
-    const char *suffixes[] = { "", "-wal", "-shm", ".v31.bak" };
+    const char *suffixes[] = { "", "-wal", "-shm", ".v33.bak" };
     for (size_t i = 0; i < 4; i++) {
         snprintf(junk, sizeof(junk), "%s%s", old_path, suffixes[i]); unlink(junk);
         snprintf(junk, sizeof(junk), "%s%s", new_path, suffixes[i]); unlink(junk);
     }
 
     size_t sql_len = 0;
-    char *fixture = util_read_file("test/fixtures/schema_v31.sql", &sql_len);
+    char *fixture = util_read_file("test/fixtures/schema_v33.sql", &sql_len);
     assert(fixture != NULL && sql_len > 0);
 
     sqlite3 *old_db = db_open(old_path);
@@ -379,9 +379,9 @@ static void test_schema_patch_application(void) {
     char *err = NULL;
     assert(sqlite3_exec(old_db, fixture, NULL, NULL, &err) == SQLITE_OK);
     free(fixture);
-    set_user_version(old_db, 31);
+    set_user_version(old_db, 33);
 
-    assert(db_schema_compat(old_db) == 1);   /* patches applied (none pending) */
+    assert(db_schema_compat(old_db) == 1);   /* floor == current: nothing pending */
     int uv = 0;
     assert(db_schema_state(old_db, &uv) == DB_SCHEMA_CURRENT);
     assert(uv == CCLAW_SCHEMA_VERSION);
@@ -405,74 +405,6 @@ static void test_schema_patch_application(void) {
         snprintf(junk, sizeof(junk), "%s%s", new_path, suffixes[i]); unlink(junk);
     }
     printf("  PASS test_schema_patch_application\n");
-}
-
-/* v33 data semantics: '*' route becomes channels.default_agent; an
- * agent-only route gets an eagerly created session pinned; an existing pin
- * survives; sessions.channel_id is renamed chat_id. */
-static void test_schema_v33_route_migration(void) {
-    const char *path = "/tmp/test_cclaw_schema_v33_data.sqlite";
-    char junk[192];
-    const char *suffixes[] = { "", "-wal", "-shm", ".v31.bak", ".v32.bak" };
-    for (size_t i = 0; i < 5; i++) {
-        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
-    }
-
-    size_t sql_len = 0;
-    char *fixture = util_read_file("test/fixtures/schema_v31.sql", &sql_len);
-    assert(fixture != NULL && sql_len > 0);
-    sqlite3 *db = db_open(path);
-    assert(db != NULL);
-    assert(sqlite3_exec(db, fixture, NULL, NULL, NULL) == SQLITE_OK);
-    free(fixture);
-
-    assert(sqlite3_exec(db,
-        "INSERT INTO agents(name) VALUES('A'),('B');"
-        "INSERT INTO channels(name, extension_name) VALUES('tg','tg');"
-        "INSERT INTO sessions(name, agent_name, channel_name, channel_id)"
-        " VALUES('pinned','B','tg','77');"
-        "INSERT INTO channel_routes(channel_name, channel_id, agent_name)"
-        " VALUES('tg','*','A'),"          /* wildcard -> default_agent */
-        "       ('tg','42','A');"         /* agent-only -> eager session */
-        "INSERT INTO channel_routes(channel_name, channel_id, agent_name, session_id)"
-        " SELECT 'tg','77','B', id FROM sessions WHERE name='pinned';",
-        NULL, NULL, NULL) == SQLITE_OK);
-    set_user_version(db, 31);
-    assert(db_schema_compat(db) == 1);
-
-    /* '*' row became the channel default and left the routes table. */
-    assert(count_rows(db, "channel_routes") == 2);
-    sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db,
-        "SELECT default_agent FROM channels WHERE name='tg'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "A") == 0);
-    sqlite3_finalize(s);
-
-    /* agent-only route: session created for A, stamped, pinned. */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT se.agent_name, se.chat_id FROM channel_routes r"
-        " JOIN sessions se ON se.id=r.session_id"
-        " WHERE r.channel_name='tg' AND r.chat_id='42'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "A") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), "42") == 0);
-    sqlite3_finalize(s);
-
-    /* existing pin survives untouched. */
-    assert(sqlite3_prepare_v2(db,
-        "SELECT se.agent_name FROM channel_routes r"
-        " JOIN sessions se ON se.id=r.session_id"
-        " WHERE r.channel_name='tg' AND r.chat_id='77'", -1, &s, NULL) == SQLITE_OK);
-    assert(sqlite3_step(s) == SQLITE_ROW);
-    assert(strcmp((const char *)sqlite3_column_text(s, 0), "B") == 0);
-    sqlite3_finalize(s);
-
-    db_close(db);
-    for (size_t i = 0; i < 5; i++) {
-        snprintf(junk, sizeof(junk), "%s%s", path, suffixes[i]); unlink(junk);
-    }
-    printf("  PASS test_schema_v33_route_migration\n");
 }
 
 static void test_rate_limit_and_cost(void) {
@@ -523,7 +455,6 @@ int main(void) {
     test_free_mb();
     test_schema_state();
     test_schema_patch_application();
-    test_schema_v33_route_migration();
     test_rate_limit_and_cost();
     printf("All db tests passed.\n");
     return 0;

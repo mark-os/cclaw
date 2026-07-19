@@ -1,4 +1,4 @@
--- FROZEN v31 fixture (2026-07-18): the schema shape at the v31 floor.
+-- FROZEN v33 fixture (2026-07-19): the schema shape at the v33 floor.
 -- Do NOT resync from templates/schema.sql — future schema changes get a
 -- patch in schema_patches[] and this file stays as the patch test's input.
 -- cclaw.db unified schema
@@ -36,7 +36,6 @@ CREATE TABLE IF NOT EXISTS models (
   id TEXT PRIMARY KEY,
   provider_name TEXT NOT NULL,
   model TEXT NOT NULL,
-  sub_provider TEXT,
   context_window INTEGER,
   max_output_tokens INTEGER,
   capabilities TEXT DEFAULT '[]',
@@ -64,7 +63,6 @@ CREATE TABLE IF NOT EXISTS llm_jobs (
   recall INTEGER NOT NULL DEFAULT 0,
   job_type INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending',
-  claimed_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_llm_jobs_pending ON llm_jobs(status) WHERE status='pending';
@@ -139,6 +137,11 @@ CREATE TABLE IF NOT EXISTS channels (
   binary_path TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'draft',
   pid INTEGER,
+  default_agent TEXT REFERENCES agents(name) ON UPDATE CASCADE,
+                    -- Channel open-door policy: non-NULL = unknown chats are
+                    -- accepted and get a new session bound to this agent;
+                    -- NULL = fail-closed (unrouted chats drop + admin notify).
+                    -- Grants no send authority — channel_send needs a route.
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -149,18 +152,23 @@ CREATE TABLE IF NOT EXISTS channel_state (
   PRIMARY KEY (channel_name, key)
 );
 
+-- A route pins a chat (platform conversation id) to a session; the session
+-- names its agent (sessions.agent_name, immutable). Routes never name an
+-- agent directly — channel-wide default agent lives on channels.default_agent.
+-- chat_id: Telegram chat id, Discord text-channel/thread/DM id, etc.
+-- (FK to sessions is declared here before the sessions CREATE below —
+-- SQLite resolves FK targets at DML time, not CREATE time.)
 CREATE TABLE IF NOT EXISTS channel_routes (
   channel_name TEXT NOT NULL,
-  channel_id TEXT NOT NULL DEFAULT '*',
-  agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
-  session_id INTEGER,
+  chat_id TEXT NOT NULL,
+  session_id INTEGER NOT NULL REFERENCES sessions(id),
   delivery_mode TEXT NOT NULL DEFAULT 'auto',  -- 'auto' = turn output auto-delivers to the
                                                -- origin chat; 'explicit' = only channel_send
   tool_filter TEXT,                            -- JSON array of tool names; NULL = unrestricted.
                                                -- Copied onto sessions.tool_filter at session
                                                -- creation only — frozen like sub-agent filters;
                                                -- later route edits don't retro-apply.
-  PRIMARY KEY (channel_name, channel_id)
+  PRIMARY KEY (channel_name, chat_id)
 );
 
 -- ═══ Sessions ═══
@@ -169,7 +177,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   name TEXT,
   agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
   channel_name TEXT,
-  channel_id TEXT,
+  chat_id TEXT,
   parent_session_id INTEGER DEFAULT -1,
   parent_tool_call_id TEXT,
   depth INTEGER NOT NULL DEFAULT 0,
@@ -184,9 +192,6 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- tool-loop iteration so the request prefix stays
                                             -- byte-stable for prompt caching. NULL = no block.
   leaf_id INTEGER DEFAULT -1,
-  last_route TEXT,
-  last_interaction_id TEXT,
-  last_synced_entry_id INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );

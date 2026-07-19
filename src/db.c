@@ -317,69 +317,17 @@ int db_ensure_schema(sqlite3 *db) {
  * per patch. A patch may instead be a C function (fn) for shapes SQL can't
  * express idempotently — exactly one of sql/fn is set. */
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
-    /* Frozen at v31 (2026-07-18): agent_name FKs can't be ALTERed into
-     * existing tables, so the FK adoption shipped as a new floor — pre-v31
-     * DBs are refused with a delete-and-restart message (this also absorbed
-     * the v30 created_by patch). The {0} sentinel keeps the array non-empty
-     * for C11; the executor skips it. */
+    /* Frozen at v33 (2026-07-19): the route-model unification (routes pin
+     * sessions, channel_id → chat_id, channels.default_agent) rebuilt
+     * channel_routes with a NOT NULL session FK — shipped as a new floor
+     * rather than migration code (Mark's call; this also absorbed the v32
+     * column drops). Pre-v33 DBs are refused with a delete-and-restart
+     * message. The {0} sentinel keeps the array non-empty for C11; the
+     * executor skips it. */
     { 0 },
-    /* v32: drop columns with no readers or writers anywhere in src/ —
-     * sessions.{last_route,last_interaction_id,last_synced_entry_id}
-     * (scrapped Gemini Interactions delta-sync), models.sub_provider
-     * (never wired into routing), llm_jobs.claimed_at (claiming uses
-     * status transitions). */
-    { 32,
-      "ALTER TABLE sessions DROP COLUMN last_route;"
-      "ALTER TABLE sessions DROP COLUMN last_interaction_id;"
-      "ALTER TABLE sessions DROP COLUMN last_synced_entry_id;"
-      "ALTER TABLE models DROP COLUMN sub_provider;"
-      "ALTER TABLE llm_jobs DROP COLUMN claimed_at;",
-      NULL },
-    /* v33: route-model unification (plan/projects/route-model-unification.md).
-     * Routes pin sessions; sessions own agents. channel_id renamed chat_id
-     * (channel = bot/transport, chat = conversation). The '*' wildcard row
-     * becomes channels.default_agent (open-door policy). Exact rows that
-     * carried only an agent (agent-requested routes) get an eagerly created
-     * session; rows with neither survive nothing and are dropped. */
-    { 33,
-      "ALTER TABLE sessions RENAME COLUMN channel_id TO chat_id;"
-      "ALTER TABLE channels ADD COLUMN default_agent TEXT"
-      "  REFERENCES agents(name) ON UPDATE CASCADE;"
-      "UPDATE channels SET default_agent="
-      "  (SELECT r.agent_name FROM channel_routes r"
-      "    WHERE r.channel_name=channels.name AND r.channel_id='*');"
-      "DELETE FROM channel_routes WHERE channel_id='*';"
-      "INSERT INTO sessions(name, agent_name, channel_name, chat_id)"
-      "  SELECT 'route:'||channel_name||':'||channel_id, agent_name,"
-      "         channel_name, channel_id"
-      "  FROM channel_routes"
-      "  WHERE session_id IS NULL AND agent_name IS NOT NULL"
-      "    AND agent_name IN (SELECT name FROM agents);"
-      "UPDATE channel_routes SET session_id="
-      "  (SELECT MAX(s.id) FROM sessions s"
-      "    WHERE s.channel_name=channel_routes.channel_name"
-      "      AND s.chat_id=channel_routes.channel_id"
-      "      AND s.agent_name=channel_routes.agent_name)"
-      "  WHERE session_id IS NULL;"
-      "DELETE FROM channel_routes WHERE session_id IS NULL"
-      "  OR NOT EXISTS(SELECT 1 FROM sessions s WHERE s.id=channel_routes.session_id);"
-      "CREATE TABLE channel_routes_v33 ("
-      "  channel_name TEXT NOT NULL,"
-      "  chat_id TEXT NOT NULL,"
-      "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
-      "  delivery_mode TEXT NOT NULL DEFAULT 'auto',"
-      "  tool_filter TEXT,"
-      "  PRIMARY KEY (channel_name, chat_id));"
-      "INSERT INTO channel_routes_v33(channel_name, chat_id, session_id,"
-      "                               delivery_mode, tool_filter)"
-      "  SELECT channel_name, channel_id, session_id, delivery_mode, tool_filter"
-      "  FROM channel_routes;"
-      "DROP TABLE channel_routes;"
-      "ALTER TABLE channel_routes_v33 RENAME TO channel_routes;",
-      NULL },
 };
 
-#define CCLAW_SCHEMA_MIN 31   /* schema freeze 2026-07-18 — no patches below this */
+#define CCLAW_SCHEMA_MIN 33   /* schema freeze 2026-07-19 — no patches below this */
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
     int uv = 0;

@@ -435,7 +435,7 @@ static int resp_print(sqlite3 *db, const char *where, int64_t id, const char *wh
     char sql[512];
     snprintf(sql, sizeof(sql),
         "SELECT id, status, model, session_id, turn_id,"
-        "       datetime(created_at,'unixepoch','localtime'),"
+        "       datetime(created_at,'unixepoch','localtime'), provider_id,"
         "       CASE WHEN %s IS NULL THEN NULL"
         "            WHEN json_valid(%s, 8) THEN json_pretty(%s)"
         "            ELSE CAST(%s AS TEXT) END"
@@ -447,11 +447,13 @@ static int resp_print(sqlite3 *db, const char *where, int64_t id, const char *wh
     int found = 0;
     if (sqlite3_step(st) == SQLITE_ROW) {
         found = 1;
-        printf("resp #%lld status=%s model=%s session=%lld turn=%lld at %s\n",
+        const char *provider_id = (const char *)sqlite3_column_text(st, 6);
+        printf("resp #%lld status=%s model=%s session=%lld turn=%lld at %s provider_id=%s\n",
                (long long)sqlite3_column_int64(st, 0), sqlite3_column_text(st, 1),
                sqlite3_column_text(st, 2), (long long)sqlite3_column_int64(st, 3),
-               (long long)sqlite3_column_int64(st, 4), sqlite3_column_text(st, 5));
-        const char *body = (const char *)sqlite3_column_text(st, 6);
+               (long long)sqlite3_column_int64(st, 4), sqlite3_column_text(st, 5),
+               provider_id ? provider_id : "-");
+        const char *body = (const char *)sqlite3_column_text(st, 7);
         printf("%s\n", body ? body : strcmp(which, "body") == 0
                ? "(no body — provider sent nothing)"
                : "(no request archived — only failed attempts keep the request)");
@@ -543,16 +545,18 @@ int resp_main(int argc, char *argv[]) {
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
                 "SELECT id, status, model, session_id, turn_id,"
-                "       datetime(created_at,'unixepoch','localtime'), COALESCE(length(body),0)"
+                "       datetime(created_at,'unixepoch','localtime'), COALESCE(length(body),0),"
+                "       provider_id"
                 " FROM llm_responses ORDER BY id DESC LIMIT ?", -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_int(st, 1, n);
             int any = 0;
             while (sqlite3_step(st) == SQLITE_ROW) {
-                printf("#%-5lld %-13s %s session=%lld turn=%lld %s %d bytes\n",
+                const char *provider_id = (const char *)sqlite3_column_text(st, 7);
+                printf("#%-5lld %-13s %s session=%lld turn=%lld %s %d bytes provider_id=%s\n",
                        (long long)sqlite3_column_int64(st, 0), sqlite3_column_text(st, 1),
                        sqlite3_column_text(st, 2), (long long)sqlite3_column_int64(st, 3),
                        (long long)sqlite3_column_int64(st, 4), sqlite3_column_text(st, 5),
-                       sqlite3_column_int(st, 6));
+                       sqlite3_column_int(st, 6), provider_id ? provider_id : "-");
                 any = 1;
             }
             sqlite3_finalize(st);

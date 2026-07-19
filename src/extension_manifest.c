@@ -64,6 +64,24 @@ static int store_dir_for(sqlite3 *db, const char *name, char *out, size_t cap) {
     return 0;
 }
 
+/* Minimal dotted-numeric version compare (a < b), good enough to flag a
+ * re-promote downgrade. Non-numeric/missing components compare as 0. */
+static int semver_lt(const char *a, const char *b) {
+    const char *pa = a, *pb = b;
+    while (1) {
+        long na = pa ? strtol(pa, (char **)&pa, 10) : 0;
+        long nb = pb ? strtol(pb, (char **)&pb, 10) : 0;
+        if (na != nb) return na < nb;
+        /* Advance past the dot; anything else (non-numeric junk, end of
+         * string) terminates its side — guards against an infinite loop on
+         * non-numeric versions. */
+        int adv = 0;
+        if (pa && *pa == '.') { pa++; adv = 1; } else pa = NULL;
+        if (pb && *pb == '.') { pb++; adv = 1; } else pb = NULL;
+        if (!adv) return 0;
+    }
+}
+
 /* ── JSON1 query helpers (open DB) ──────────────────────────────── */
 
 /* Run a single-row SELECT json_extract(?1, path); return malloc'd text or NULL. */
@@ -510,7 +528,30 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
     rc |= run_ingest(db, "DELETE FROM hooks WHERE extension_name=:name", manifest, name, store, owner_agent);
 
     /* extensions: upsert, preserving an existing published flag; the owner
-     * can never change (takeover is refused above). */
+     * can never change (takeover is refused above). Log old->new version on
+     * re-promote so the lifecycle is visible without a DB query. */
+    {
+        char *old_version = NULL;
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db, "SELECT version FROM extensions WHERE name=?1",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(st, 0);
+                old_version = v ? strdup(v) : NULL;
+            }
+            sqlite3_finalize(st);
+        }
+        char *new_version = json_text(db, manifest, "'$.version'");
+        const char *nv = new_version && new_version[0] ? new_version : "0.0.0";
+        if (old_version && strcmp(old_version, nv) != 0) {
+            LOG_INFO_("extension_promote: '%s' version %s -> %s", name, old_version, nv);
+            if (semver_lt(nv, old_version))
+                LOG_WARN_("extension_promote: '%s' downgraded (%s -> %s)", name, old_version, nv);
+        }
+        free(old_version);
+        free(new_version);
+    }
     rc |= run_ingest(db,
         "INSERT INTO extensions(name, path, version, owner_agent, published, enabled) "
         "VALUES(:name, :store, COALESCE(json_extract(:m,'$.version'),'0.0.0'), :owner, 0, 1) "

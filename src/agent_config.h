@@ -16,7 +16,9 @@ typedef struct {
     int max_iterations;     /* 0 = use global */
 } AgentConfig;
 
-/* Live-refreshable capability arrays from grants table. */
+/* Grants materialized as flat arrays for tool ctxs / sandboxed children.
+ * Not a cache: reloaded from the grants table before every tool dispatch
+ * batch (agent_setup_refresh_caps) — the DB is the only durable authority. */
 typedef struct {
     char **hosts;
     size_t host_count;

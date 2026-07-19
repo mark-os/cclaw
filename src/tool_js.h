@@ -41,9 +41,6 @@ typedef struct {
     SandboxProfile sb;           /* trust-derived policy + grant paths */
 } JsEvalCtx;
 
-/* Set allowed_hosts on a persistent JS runtime (unused — hosts passed via env). */
-void js_runtime_set_hosts(JsSessionRuntime *rt, char **hosts, size_t count);
-
 /* Register js_eval tool into registry. */
 int tool_js_eval_register(ToolRegistry *reg, JsEvalCtx *ctx);
 

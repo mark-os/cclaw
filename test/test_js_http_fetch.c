@@ -36,13 +36,11 @@ static void test_null_url(void) {
     PASS();
 }
 
-/* JS runtime set_hosts wiring (no-op now, hosts feed the proxy not the runtime) */
+/* Runtime create/destroy lifecycle (hosts feed the proxy, not the runtime) */
 static void test_runtime_set_hosts(void) {
     TEST("runtime_set_hosts");
     JsSessionRuntime *rt = js_runtime_create();
     if (!rt) { FAIL("create failed"); return; }
-    char *hosts[] = {"api.example.com", "data.example.com"};
-    js_runtime_set_hosts(rt, hosts, 2);
     js_runtime_destroy(rt);
     PASS();
 }

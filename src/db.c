@@ -323,6 +323,18 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
      * the v30 created_by patch). The {0} sentinel keeps the array non-empty
      * for C11; the executor skips it. */
     { 0 },
+    /* v32: drop columns with no readers or writers anywhere in src/ —
+     * sessions.{last_route,last_interaction_id,last_synced_entry_id}
+     * (scrapped Gemini Interactions delta-sync), models.sub_provider
+     * (never wired into routing), llm_jobs.claimed_at (claiming uses
+     * status transitions). */
+    { 32,
+      "ALTER TABLE sessions DROP COLUMN last_route;"
+      "ALTER TABLE sessions DROP COLUMN last_interaction_id;"
+      "ALTER TABLE sessions DROP COLUMN last_synced_entry_id;"
+      "ALTER TABLE models DROP COLUMN sub_provider;"
+      "ALTER TABLE llm_jobs DROP COLUMN claimed_at;",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 31   /* schema freeze 2026-07-18 — no patches below this */
@@ -588,54 +600,6 @@ int session_tool_allowed(sqlite3 *db, int64_t session_id, const char *tool_name)
         allowed = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
     return allowed;
-}
-
-Session *session_list(sqlite3 *db, int *count) {
-    *count = 0;
-    const char *sql = "SELECT id, name, leaf_id, agent_name, created_at, updated_at FROM sessions ORDER BY id;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
-
-    int cap = 8;
-    Session *list = malloc((size_t)cap * sizeof(Session));
-    if (!list) { sqlite3_finalize(stmt); return NULL; }
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (*count >= cap) {
-            cap *= 2;
-            Session *tmp = realloc(list, (size_t)cap * sizeof(Session));
-            if (!tmp) {
-                session_list_free(list, *count);
-                *count = 0;
-                sqlite3_finalize(stmt);
-                return NULL;
-            }
-            list = tmp;
-        }
-        Session *s = &list[*count];
-        s->id = sqlite3_column_int64(stmt, 0);
-        const char *n = (const char *)sqlite3_column_text(stmt, 1);
-        s->name = n ? strdup(n) : NULL;
-        s->leaf_id = sqlite3_column_int64(stmt, 2);
-        const char *an = (const char *)sqlite3_column_text(stmt, 3);
-        s->agent_name = an ? strdup(an) : NULL;
-        s->created_at = (time_t)sqlite3_column_int64(stmt, 4);
-        s->updated_at = (time_t)sqlite3_column_int64(stmt, 5);
-        (*count)++;
-    }
-    sqlite3_finalize(stmt);
-    if (*count == 0) { free(list); return NULL; }
-    return list;
-}
-
-void session_list_free(Session *sessions, int count) {
-    if (!sessions) return;
-    for (int i = 0; i < count; i++) {
-        free(sessions[i].name);
-        free(sessions[i].agent_name);
-    }
-    free(sessions);
 }
 
 static int role_to_int(Role r) {
@@ -982,52 +946,6 @@ int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
 }
 
 
-/* FTS5 search over message content */
-Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *count) {
-    *count = 0;
-    const char *sql =
-        "SELECT e.id, e.parent_id, e.session_id, e.created_at,"
-        " e.role, e.content, e.tool_calls, e.tool_call_id, e.stop_reason"
-        " FROM entries_fts f JOIN entries e ON e.id = f.rowid"
-        " WHERE entries_fts MATCH ? AND e.session_id = ?"
-        " ORDER BY rank LIMIT 50;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return NULL;
-    sqlite3_bind_text(stmt, 1, query, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 2, session_id);
-
-    int cap = 8;
-    Entry *entries = malloc((size_t)cap * sizeof(Entry));
-    if (!entries) { sqlite3_finalize(stmt); return NULL; }
-
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (*count >= cap) {
-            cap *= 2;
-            Entry *tmp = realloc(entries, (size_t)cap * sizeof(Entry));
-            if (!tmp) {
-                entry_branch_free(entries, *count);
-                *count = 0;
-                sqlite3_finalize(stmt);
-                return NULL;
-            }
-            entries = tmp;
-        }
-        Entry *e = &entries[*count];
-        e->id = sqlite3_column_int64(stmt, 0);
-        e->parent_id = sqlite3_column_int64(stmt, 1);
-        e->original_parent_id = -1; /* not loaded in search results */
-        e->session_id = sqlite3_column_int64(stmt, 2);
-        e->created_at = (time_t)sqlite3_column_int64(stmt, 3);
-        /* cols: 4=role, 5=content, 6=tool_calls, 7=tool_call_id, 8=stop_reason */
-        read_entry_from_columns(db, stmt, 4, 5, 6, 7, 8, &e->message);
-        (*count)++;
-    }
-    sqlite3_finalize(stmt);
-    if (*count == 0) { free(entries); return NULL; }
-    return entries;
-}
-
 /* Sum cost_nano for all entries in a session */
 int64_t session_cost(sqlite3 *db, int64_t session_id) {
     return db_scalar_i64(db, "SELECT COALESCE(SUM(cost_nano),0) FROM entries WHERE session_id=?;", session_id, 0);
@@ -1097,19 +1015,6 @@ int session_count_active_agents(sqlite3 *db) {
 /* next turn_id for a session */
 int64_t db_next_turn_id(sqlite3 *db, int64_t session_id) {
     return db_scalar_i64(db, "SELECT COALESCE(MAX(turn_id), 0) + 1 FROM entries WHERE session_id=?;", session_id, 1);
-}
-
-/* Retained for tests and callers outside append paths (trigger handles append) */
-int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id) {
-    const char *sql = "UPDATE sessions SET leaf_id=?, updated_at=unixepoch() WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_int64(stmt, 1, leaf_id);
-    sqlite3_bind_int64(stmt, 2, session_id);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
 }
 
 /* append entry with explicit turn_id */
@@ -1307,10 +1212,6 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
 }
 
 /* Turn iteration accessors */
-
-int session_get_iteration(sqlite3 *db, int64_t session_id) {
-    return (int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", session_id, -1);
-}
 
 int session_set_iteration(sqlite3 *db, int64_t session_id, int iter) {
     sqlite3_stmt *stmt;
@@ -2190,18 +2091,6 @@ void memory_block_free(MemoryBlock *mb) {
     free(mb);
 }
 
-void memory_block_list_free(MemoryBlock *list, int count) {
-    if (!list) return;
-    for (int i = 0; i < count; i++) {
-        free(list[i].agent_name);
-        free(list[i].label);
-        free(list[i].value);
-        free(list[i].description);
-        free(list[i].placement);
-    }
-    free(list);
-}
-
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
                             const char *description, const char *value, int char_limit,
                             const char *placement) {
@@ -2243,56 +2132,6 @@ MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *l
     mb->updated_at = sqlite3_column_int64(stmt, 9);
     sqlite3_finalize(stmt);
     return mb;
-}
-
-MemoryBlock *memory_block_list(sqlite3 *db, const char *agent_name, int *count) {
-    *count = 0;
-    const char *sql = "SELECT id, agent_name, label, value, description, char_limit, read_only,"
-                      " placement, created_at, updated_at FROM memory_blocks WHERE agent_name=? ORDER BY id;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
-    sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
-    int cap = 8;
-    MemoryBlock *list = calloc((size_t)cap, sizeof(MemoryBlock));
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (*count >= cap) {
-            cap *= 2;
-            MemoryBlock *tmp = realloc(list, (size_t)cap * sizeof(MemoryBlock));
-            if (!tmp) { memory_block_list_free(list, *count); sqlite3_finalize(stmt); *count = 0; return NULL; }
-            list = tmp;
-        }
-        MemoryBlock *mb = &list[*count];
-        mb->id = sqlite3_column_int64(stmt, 0);
-        const char *s;
-        s = (const char *)sqlite3_column_text(stmt, 1); mb->agent_name = s ? strdup(s) : strdup("");
-        s = (const char *)sqlite3_column_text(stmt, 2); mb->label = s ? strdup(s) : strdup("");
-        s = (const char *)sqlite3_column_text(stmt, 3); mb->value = s ? strdup(s) : strdup("");
-        s = (const char *)sqlite3_column_text(stmt, 4); mb->description = s ? strdup(s) : strdup("");
-        mb->char_limit = sqlite3_column_int(stmt, 5);
-        mb->read_only = sqlite3_column_int(stmt, 6);
-        s = (const char *)sqlite3_column_text(stmt, 7); mb->placement = s ? strdup(s) : strdup("system");
-        mb->created_at = sqlite3_column_int64(stmt, 8);
-        mb->updated_at = sqlite3_column_int64(stmt, 9);
-        (*count)++;
-    }
-    sqlite3_finalize(stmt);
-    if (*count == 0) { free(list); return NULL; }
-    return list;
-}
-
-int memory_block_set_value(sqlite3 *db, const char *agent_name, const char *label, const char *value) {
-    /* Guarded UPDATE: read_only + char_limit enforced in WHERE (TOCTOU-free). */
-    const char *sql = "UPDATE memory_blocks SET value=?1, updated_at=unixepoch()"
-                      " WHERE agent_name=?2 AND label=?3 AND read_only=0"
-                      " AND length(?1) <= char_limit;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
-    sqlite3_bind_text(stmt, 1, value ? value : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, agent_name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, label, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE && sqlite3_changes(db) == 1) ? 0 : -1;
 }
 
 /* memory_entries CRUD */

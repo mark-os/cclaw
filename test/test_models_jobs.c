@@ -50,7 +50,7 @@ static void test_llm_jobs_claim(void) {
 
     /* Atomic claim via UPDATE ... RETURNING */
     sqlite3_stmt *claim;
-    const char *sql = "UPDATE llm_jobs SET status='active', claimed_at=unixepoch()"
+    const char *sql = "UPDATE llm_jobs SET status='active'"
         " WHERE id = (SELECT id FROM llm_jobs WHERE status='pending' ORDER BY id LIMIT 1)"
         " RETURNING id, session_id, agent_name, recall";
     assert(sqlite3_prepare_v2(db, sql, -1, &claim, NULL) == SQLITE_OK);

@@ -40,6 +40,32 @@ static void test_defaults(void) {
     printf("  PASS: test_defaults\n");
 }
 
+/* Registry sync writes defaults+descriptions to the config table; a NULL
+ * config_set reverts to the registry default. (from test_kv_config) */
+static void test_registry_sync_and_revert(void) {
+    sqlite3 *db = fresh_db();
+    assert(db);
+    db_seed_defaults(db);
+    config_registry_sync(db);
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT default_value, description FROM config WHERE key='max_iterations'",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(st, 0), "25") == 0);
+    const char *desc = (const char *)sqlite3_column_text(st, 1);
+    assert(desc != NULL && strlen(desc) > 0);
+    sqlite3_finalize(st);
+
+    assert(config_get_int(db, "max_iterations") == 25);
+    config_set(db, "max_iterations", "50");
+    assert(config_get_int(db, "max_iterations") == 50);
+    config_set(db, "max_iterations", NULL);
+    assert(config_get_int(db, "max_iterations") == 25);
+    db_close(db);
+    printf("  PASS: test_registry_sync_and_revert\n");
+}
+
 static void test_kv_values(void) {
     unsetenv("OPENROUTER_API_KEY");
     unsetenv("CCLAW_PROVIDER");
@@ -270,6 +296,7 @@ int main(void) {
     test_agent_dir_resolve();
     test_resolution_rule();
     test_defaults();
+    test_registry_sync_and_revert();
     test_kv_values();
     test_env_overrides_kv();
     test_kv_secret_fallback();

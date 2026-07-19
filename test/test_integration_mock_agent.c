@@ -41,7 +41,7 @@ static int test_basic_turn(void) {
     mock_server_enqueue(200, MOCK_RESPONSE);
 
     /* Run */
-    Config *cfg = config_load_from_env();
+    Config *cfg = config_load(db);
     AgentSetup setup;
     agent_setup_init(&setup, db, sid, cfg, "default", AGENT_SETUP_CLI);
     int rc = test_run_session(db, sid, &setup);

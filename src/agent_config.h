@@ -13,10 +13,6 @@ typedef struct {
     char *model;            /* model override (NULL = use global) */
     char **tools;           /* tool whitelist (NULL = all tools) */
     size_t tool_count;
-    char **allowed_hosts;   /* hostnames for http_fetch */
-    size_t allowed_hosts_count;
-    char **read_access;     /* extra dirs granted read-only in namespace sandbox */
-    size_t read_access_count;
     int max_iterations;     /* 0 = use global */
 } AgentConfig;
 

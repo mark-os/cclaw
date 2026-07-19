@@ -393,7 +393,6 @@ static void test_pending_subtree(void) {
                                            "shell_exec", "{}", "rerun");
     assert(unrelated_id > 0);
     assert(approval_get_pending_subtree(db, root) == NULL);
-    assert(!approval_session_in_subtree(db, root, unrelated));
 
     /* A grandchild's park is found via the root — the whole-subtree fix. */
     int64_t gc_id = approval_create(db, grandchild, "call_g", "request_config",
@@ -401,9 +400,6 @@ static void test_pending_subtree(void) {
                                     "{\"action\":\"request_changes\",\"changes\":{\"grants\":{\"hosts\":[\"api.example.com\"]}}}",
                                     "apply");
     assert(gc_id > 0);
-    assert(approval_session_in_subtree(db, root, grandchild));
-    assert(approval_session_in_subtree(db, root, child));
-    assert(approval_session_in_subtree(db, root, root));
 
     Approval *found = approval_get_pending_subtree(db, root);
     assert(found != NULL);

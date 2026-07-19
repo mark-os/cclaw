@@ -60,12 +60,12 @@ The agent process is **your compiled code** — not a container running arbitrar
 
 ## Config Loading
 
-The main process (CLI or daemon) loads config via `config_load(db)` (`src/config.c:247`), which reads from cclaw.db's `config` table with env-var overrides. Re-exec'd `--run-tool` broker children load config via `config_load_from_env()` (`src/config.c:150`), which reads only `CCLAW_*` env vars injected by the parent at exec time.
+The main process (CLI or daemon) loads config via `config_load(db)` (`src/config.c`), which reads from cclaw.db's `config` table with env-var overrides. Re-exec'd `--run-tool` broker children never load a `Config` at all — they receive pre-extracted parameters over the flat wire (`src/run_tool.c`) and the sandbox descriptor carries everything they need.
 
 ### Principles
 
-1. **Two loaders, one model** — main process reads DB + env overrides; tool children read only env (they have no DB handle). Both produce the same `Config` struct, immutable after load.
-2. **Parse once, validate early** — `config_load_from_env()` runs at child startup, validates all values, fails fast on malformed input. `config_load(db)` does the same at main-process startup.
+1. **One loader** — the main process reads DB + env overrides into a `Config` struct, immutable after load. Tool children get pre-validated parameters, not a config.
+2. **Parse once, validate early** — `config_load(db)` runs at main-process startup, validates all values, fails fast on malformed input.
 3. **Immutable after load** — config struct is read-only for process lifetime; no runtime config reload
 4. **Fail closed** — missing required var (e.g. `CCLAW_DB_PATH`) → process exits immediately
 5. **Minimal surface** — tool children receive only what they need; daemon internals stay in the parent

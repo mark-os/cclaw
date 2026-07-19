@@ -72,7 +72,7 @@ static void run_one_turn(sqlite3 *db, int i) {
 
     mock_server_enqueue(200, MOCK_RESPONSE);
 
-    Config *cfg = config_load_from_env();
+    Config *cfg = config_load(db);
     AgentSetup setup;
     assert(agent_setup_init(&setup, db, sid, cfg, "Soak", AGENT_SETUP_CLI) == 0);
     int rc = test_run_session(db, sid, &setup);

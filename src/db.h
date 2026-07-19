@@ -72,12 +72,10 @@ int64_t session_create_filtered(sqlite3 *db, const char *name, const char *agent
  * (including unknown session — fail closed). */
 int session_tool_allowed(sqlite3 *db, int64_t session_id, const char *tool_name);
 
-/* List all sessions. Caller must free returned array and each session's name.
- * Sets *count. Returns NULL on error or empty. */
-Session *session_list(sqlite3 *db, int *count);
-
 /* Get branch from leaf→root for session. Returns entries in root→leaf order.
- * Caller must free returned array and entry string fields. Sets *count. */
+ * Caller must free returned array and entry string fields. Sets *count.
+ * Test-only: the standard read-back assertion helper across the suite —
+ * production reads branches via inline SQL (llm_payload.c, context.c). */
 Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count);
 
 /* Resolve deliverable response text from session branch.
@@ -107,15 +105,8 @@ int session_get_depth(sqlite3 *db, int64_t session_id);
 int64_t entry_compact(sqlite3 *db, int64_t session_id, int64_t last_kept_id,
                       int64_t first_after_id, const char *summary);
 
-/* Free a Session array returned by session_list. */
-void session_list_free(Session *sessions, int count);
-
 /* Free an Entry array returned by session_get_branch. */
 void entry_branch_free(Entry *entries, int count);
-
-/* FTS5 full-text search over message content within a session.
- * Returns matching entries ranked by relevance (max 50). Caller frees with entry_branch_free. */
-Entry *entry_search(sqlite3 *db, const char *query, int64_t session_id, int *count);
 
 /* Set the 32-byte encryption key for secrets-table operations.
  * Must be called before any db_secret_* read/write. */
@@ -177,10 +168,8 @@ int process_is_live(sqlite3 *db, const char *id, int ttl_sec);
 
 /* Set session state (idle, running, waiting, error). Returns 0 on success. */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state);
-int session_set_leaf(sqlite3 *db, int64_t session_id, int64_t leaf_id);
 
-/* Turn iteration tracking (advance_session uses this instead of in-memory counter) */
-int session_get_iteration(sqlite3 *db, int64_t session_id);
+/* Turn iteration tracking */
 int session_set_iteration(sqlite3 *db, int64_t session_id, int iter);
 int session_bump_iteration(sqlite3 *db, int64_t session_id);
 
@@ -215,7 +204,9 @@ int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const 
 /* Scan payload for secrets, redact findings, then insert. */
 int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source, const char *payload);
 
-/* Peek at unconsumed inbox items for a session (oldest first, max `limit`). */
+/* Peek at unconsumed inbox items for a session (oldest first, max `limit`).
+ * Test-only (with inbox_count): non-destructive inbox assertions — production
+ * drains via inbox_consume_into_entries. */
 InboxItem *inbox_peek(sqlite3 *db, int64_t session_id, int limit, int *count);
 
 /* Free an InboxItem array returned by inbox_peek. */
@@ -369,17 +360,8 @@ int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *lab
 /* Get a memory block by agent_name + label. Returns NULL if not found. Caller frees. */
 MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *label);
 
-/* List all memory blocks for an agent. Caller frees with memory_block_list_free. Sets *count. */
-MemoryBlock *memory_block_list(sqlite3 *db, const char *agent_name, int *count);
-
-/* Update block value. Enforces char_limit. Returns 0 on success, -1 on error. */
-int memory_block_set_value(sqlite3 *db, const char *agent_name, const char *label, const char *value);
-
 /* Free a single MemoryBlock. */
 void memory_block_free(MemoryBlock *mb);
-
-/* Free a MemoryBlock array. */
-void memory_block_list_free(MemoryBlock *list, int count);
 
 /* Seed memory blocks from agent JSON config (json_each over $.memory_blocks). */
 void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_json_str);

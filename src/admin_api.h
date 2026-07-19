@@ -46,16 +46,6 @@ int admin_grant_capability(sqlite3 *db, const char *agent_name,
 int admin_list_tool_names(sqlite3 *db, char ***out, size_t *out_count);
 void admin_tool_names_free(char **names, size_t count);
 
-/* List providers: returns count. out_models[i] is heap-allocated (caller frees). */
-typedef struct {
-    int index;
-    char *model;
-    char *base_url;
-} AdminProvider;
-
-int admin_list_providers(sqlite3 *db, AdminProvider **out, size_t *out_count);
-void admin_providers_free(AdminProvider *providers, size_t count);
-
 /* Model routing candidates in priority order (first healthy wins), joined
  * with provider metadata and key presence — drives the /model command. */
 typedef struct {

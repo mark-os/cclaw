@@ -78,7 +78,7 @@ int main(void) {
     entry_append_with_turn(db, sid, &user, 1);
     mock_server_enqueue(200, MOCK_RESPONSE);
 
-    Config *cfg = config_load_from_env();
+    Config *cfg = config_load(db);
     AgentSetup setup;
     assert(agent_setup_init(&setup, db, sid, cfg, "Backup", AGENT_SETUP_CLI) == 0);
     assert(test_run_session(db, sid, &setup) == 0);

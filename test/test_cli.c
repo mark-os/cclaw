@@ -27,21 +27,17 @@ static void test_cli_session_resume(void) {
     int64_t s2 = session_create(db, "second", NULL, -1, 0);
     if (s1 < 0 || s2 < 0) { FAIL("session_create"); db_close(db); test_db_clean(dbpath); return; }
 
-    int count = 0;
-    Session *sessions = session_list(db, &count);
-    if (count != 2) { FAIL("expected 2 sessions"); session_list_free(sessions, count); db_close(db); test_db_clean(dbpath); return; }
-    if (sessions[0].id != s1 || sessions[1].id != s2) { FAIL("wrong session ids"); session_list_free(sessions, count); db_close(db); test_db_clean(dbpath); return; }
+    if (db_scalar_i64(db, "SELECT COUNT(*) FROM sessions WHERE id>=?", s1, -1) != 2) { FAIL("expected 2 sessions"); db_close(db); test_db_clean(dbpath); return; }
 
     Message msg = {.role = ROLE_USER, .content = "hello"};
     entry_append_with_turn(db, s1, &msg, 1);
 
     int branch_count = 0;
     Entry *branch = session_get_branch(db, s1, &branch_count);
-    if (branch_count != 1) { FAIL("expected 1 entry on resume"); entry_branch_free(branch, branch_count); session_list_free(sessions, count); db_close(db); test_db_clean(dbpath); return; }
-    if (strcmp(branch[0].message.content, "hello") != 0) { FAIL("wrong content"); entry_branch_free(branch, branch_count); session_list_free(sessions, count); db_close(db); test_db_clean(dbpath); return; }
+    if (branch_count != 1) { FAIL("expected 1 entry on resume"); entry_branch_free(branch, branch_count); db_close(db); test_db_clean(dbpath); return; }
+    if (strcmp(branch[0].message.content, "hello") != 0) { FAIL("wrong content"); entry_branch_free(branch, branch_count); db_close(db); test_db_clean(dbpath); return; }
 
     entry_branch_free(branch, branch_count);
-    session_list_free(sessions, count);
     db_close(db);
     test_db_clean(dbpath);
     PASS();
@@ -59,21 +55,30 @@ static void test_cli_zero_config_startup(void) {
 
     unsetenv("CCLAW_WORKSPACE");
     unsetenv("CCLAW_DB_PATH");
-    Config *cfg = config_load_from_env();
-    if (!cfg) { chdir(cwd); system("rm -rf .cclaw_test_zc"); FAIL("config_load_from_env"); return; }
+    sqlite3 *cfgdb = test_db_open("cclaw.db");
+    if (!cfgdb) { chdir(cwd); system("rm -rf .cclaw_test_zc"); FAIL("db_open"); return; }
+    Config *cfg = config_load(cfgdb);
+    db_close(cfgdb);
+    if (!cfg) { chdir(cwd); system("rm -rf .cclaw_test_zc"); FAIL("config_load"); return; }
 
-    if (strcmp(cfg->workspace, ".cclaw/agents/default/workspace") != 0) {
+    /* db_path comes from the open handle; workspace defaults next to it */
+    const char *ws = cfg->workspace;
+    size_t wl = strlen(ws);
+    const char *want = "/agents/default/workspace";
+    if (wl < strlen(want) || strcmp(ws + wl - strlen(want), want) != 0) {
         chdir(cwd); system("rm -rf .cclaw_test_zc"); config_free(cfg);
         FAIL("workspace default wrong"); return;
     }
-    if (strcmp(cfg->db_path, "cclaw.db") != 0) {
+    const char *dp = cfg->db_path;
+    size_t dl = strlen(dp);
+    if (dl < 8 || strcmp(dp + dl - 8, "cclaw.db") != 0) {
         chdir(cwd); system("rm -rf .cclaw_test_zc"); config_free(cfg);
         FAIL("db_path default wrong"); return;
     }
 
     workspace_init(cfg);
     struct stat st;
-    if (stat(".cclaw/agents/default/workspace", &st) != 0 || !S_ISDIR(st.st_mode)) {
+    if (stat(cfg->workspace, &st) != 0 || !S_ISDIR(st.st_mode)) {
         chdir(cwd); system("rm -rf .cclaw_test_zc"); config_free(cfg);
         FAIL("workspace dir not created"); return;
     }

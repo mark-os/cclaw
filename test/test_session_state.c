@@ -84,21 +84,21 @@ static void test_turn_iteration(void) {
     assert(sid > 0);
 
     /* Starts at 0 */
-    assert(session_get_iteration(db, sid) == 0);
+    assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 0);
 
     /* Set to 5 */
     assert(session_set_iteration(db, sid, 5) == 0);
-    assert(session_get_iteration(db, sid) == 5);
+    assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 5);
 
     /* Bump returns new value */
     assert(session_bump_iteration(db, sid) == 6);
-    assert(session_get_iteration(db, sid) == 6);
+    assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 6);
 
     /* Transition to idle resets iteration */
     assert(session_set_state(db, sid, "llm_running") == 0);
     assert(session_set_iteration(db, sid, 10) == 0);
     assert(session_set_state(db, sid, "idle") == 0);
-    assert(session_get_iteration(db, sid) == 0);
+    assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", sid, -1) == 0);
 
     db_close(db);
     printf("  PASS test_turn_iteration\n");
@@ -174,7 +174,7 @@ static void test_startup_recovery(void) {
         char *st = db_scalar_text(db, "SELECT state FROM sessions WHERE id=?;", ids[i]);
         assert(st && strcmp(st, "idle") == 0);
         free(st);
-        assert(session_get_iteration(db, ids[i]) == 0);
+        assert((int)db_scalar_i64(db, "SELECT turn_iteration FROM sessions WHERE id=?", ids[i], -1) == 0);
     }
 
     /* The orphaned call no longer resurfaces as pending... */

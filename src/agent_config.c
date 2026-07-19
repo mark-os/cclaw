@@ -20,10 +20,6 @@ void agent_config_free(AgentConfig *ac) {
     free(ac->model);
     for (size_t i = 0; i < ac->tool_count; i++) free(ac->tools[i]);
     free(ac->tools);
-    for (size_t i = 0; i < ac->allowed_hosts_count; i++) free(ac->allowed_hosts[i]);
-    free(ac->allowed_hosts);
-    for (size_t i = 0; i < ac->read_access_count; i++) free(ac->read_access[i]);
-    free(ac->read_access);
     free(ac);
 }
 
@@ -260,30 +256,6 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
     }
     free(tools_json);
 
-    /* Load hosts from grants */
-    char *hosts_json = grants_json(db, name, "host");
-    if (hosts_json && strcmp(hosts_json, "[]") != 0) {
-        sqlite3_stmt *js;
-        if (sqlite3_prepare_v2(db, "SELECT value FROM json_each(?)",
-                               -1, &js, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(js, 1, hosts_json, -1, SQLITE_STATIC);
-            size_t cap = 8;
-            ac->allowed_hosts = malloc(cap * sizeof(char *));
-            while (ac->allowed_hosts && sqlite3_step(js) == SQLITE_ROW) {
-                const char *item = (const char *)sqlite3_column_text(js, 0);
-                if (!item) continue;
-                if (ac->allowed_hosts_count >= cap) {
-                    cap *= 2;
-                    char **tmp = realloc(ac->allowed_hosts, cap * sizeof(char *));
-                    if (!tmp) break;
-                    ac->allowed_hosts = tmp;
-                }
-                ac->allowed_hosts[ac->allowed_hosts_count++] = strdup(item);
-            }
-            sqlite3_finalize(js);
-        }
-    }
-    free(hosts_json);
 
     return ac;
 }

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "proxy.h"
 #include "host_match.h"
+#include "json_escape.h"
 #include "http_policy.h"
 #include "log.h"
 #include <arpa/inet.h>
@@ -900,15 +901,6 @@ const char *proxy_sock_path(const ProxyContext *ctx) {
     return ctx->sock_path;
 }
 
-/* Append one JSON-string-escaped byte. Hostnames are plain, but the preamble
- * is written by the sandboxed child — escape defensively so the output is
- * always valid JSON. */
-static void hosts_json_escape_ch(char *out, size_t *o, unsigned char c) {
-    if (c == '"' || c == '\\') { out[(*o)++] = '\\'; out[(*o)++] = (char)c; }
-    else if (c < 0x20) *o += (size_t)sprintf(out + *o, "\\u%04x", c);
-    else out[(*o)++] = (char)c;
-}
-
 char *proxy_hosts_json(ProxyContext *ctx) {
     pthread_mutex_lock(&ctx->blessed_mu);
     if (ctx->contacted_count == 0) {
@@ -928,8 +920,10 @@ char *proxy_hosts_json(ProxyContext *ctx) {
     for (int i = 0; i < ctx->contacted_count; i++) {
         if (i) out[o++] = ',';
         out[o++] = '"';
-        for (const char *p = ctx->contacted[i]; *p; p++)
-            hosts_json_escape_ch(out, &o, (unsigned char)*p);
+        /* Hostnames are plain, but the preamble is written by the sandboxed
+         * child — escape defensively so the output is always valid JSON. */
+        o += json_escape(out + o, cap - o, ctx->contacted[i],
+                         strlen(ctx->contacted[i]));
         out[o++] = '"';
     }
     out[o++] = ']';

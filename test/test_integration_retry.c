@@ -41,7 +41,7 @@ int main(void) {
     mock_server_enqueue(429, "{\"error\":{\"message\":\"rate limited\"}}");
     mock_server_enqueue(200, OK_RESPONSE);
 
-    Config *cfg = config_load_from_env();
+    Config *cfg = config_load(db);
     AgentSetup setup;
     agent_setup_init(&setup, db, sid, cfg, "default", AGENT_SETUP_CLI);
     int rc = test_run_session(db, sid, &setup);

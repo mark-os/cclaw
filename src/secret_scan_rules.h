@@ -10,7 +10,6 @@
 #define SCAN_VTYPE_SPAN    4
 
 /* Charset classes */
-#define SCAN_CHARSET_ANY         0
 #define SCAN_CHARSET_UPPER_ALNUM 1
 #define SCAN_CHARSET_LOWER_ALNUM 2
 #define SCAN_CHARSET_ALNUM       3

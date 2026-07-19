@@ -33,6 +33,14 @@ typedef struct {
     JsSessionRuntime *js_rt;
     /* Live-refreshable capability arrays from grants table */
     AgentCaps caps;
+    /* Per-dispatch containment snapshot from the agents table. Setup-owned
+     * buffers so ctx pointers stay valid across refreshes; the _env flags
+     * mark an operator override present at init (env beats agents table) —
+     * once refresh setenv's for children, getenv alone can't tell. */
+    char sandbox_profile_buf[32];
+    char shell_path_buf[256];
+    int sandbox_profile_env;
+    int shell_path_env;
     /* Contexts that tools reference (must stay alive across the turn loop) */
     FileReadCtx file_read_ctx;
     JsEvalCtx js_eval_ctx;
@@ -65,7 +73,8 @@ typedef struct {
 int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
                      const Config *cfg, const char *agent_name, int mode);
 
-/* Refresh caps from DB and rebind all consumer pointers atomically. */
+/* Refresh caps + containment (sandbox_profile, shell_path) from DB and
+ * rebind all consumer pointers atomically. */
 void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent);
 
 /* Destroy setup (free registry, JS runtime, caps). */

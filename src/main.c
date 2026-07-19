@@ -2490,10 +2490,10 @@ static void run_advance(int64_t session_id) {
          * (or a park/failure) stops dispatch and we wait for its completion. */
         /* The shared setup serves whichever session is advancing — root or any
          * sub-agent (in the daemon, many agents through one setup). This is the
-         * ONLY caps binding point: every batch reloads the advancing agent's
-         * grants from the DB, so the in-memory arrays are a per-dispatch
-         * snapshot, never a cache that can go stale (expiry, revoke, rename,
-         * agent switch). */
+         * ONLY caps/containment binding point: every batch reloads the
+         * advancing agent's grants, sandbox_profile, and shell_path from the
+         * DB, so the in-memory snapshot can never go stale (expiry, revoke,
+         * rename, update_agent, agent switch). */
         if (g_tool_setup)
             agent_setup_refresh_caps(g_tool_setup, g_db, out.agent_name);
         int async_in_flight = 0;

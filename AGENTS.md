@@ -211,6 +211,24 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 - **Schema changes need a forward patch.** When `templates/schema.sql` changes shape, bump `CCLAW_SCHEMA_VERSION` (`src/cclaw.h`) and append a matching entry to `schema_patches[]` (`src/db.c`) that brings a live DB from the previous version to the new one. Startup auto-applies pending patches; DBs newer than the build, or older than the floor `CCLAW_SCHEMA_MIN` (v33 — the 2026-07-19 freeze collapsed prior patch history into it), are refused with a delete-and-restart message. A schema.sql change *without* the bump + patch leaves existing DBs stamped current but shaped old — missing columns, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang.
 - **`-p` with piped/non-tty stdin auto-selects the most recent session**; `-s <id>` pins one. Useful for scripted multi-turn testing (turn 1 creates the session, reuse its id for turn 2+).
 
+### Scripted agent testing with `-p` (what to expect)
+
+- **Approvals park and expire between `-p` runs.** Single-turn mode has no
+  interactive approver: a `request_config` call parks, the process exits, and
+  the next run tells the agent "Approval #N expired without a decision" — the
+  agent then tends to loop re-requesting. Plan multi-turn scripts around this.
+- **`--auto-approve` approves whatever is parked, not what you meant.** It is
+  single-use and blind to which approval it answers — inspect
+  `select id, tool_call_id, args_json, state from approvals` before and after.
+- **Verify config changes in the DB, never from the agent's claims.** The
+  agent will assert success ("Gemini is now active") without checking; the
+  truth is `agents.primary_model`, `grants`, `approvals.state`.
+- **Debugging trail for a turn:** `entries` (role 2=assistant tool-call args,
+  3=tool results, 1 includes system approval notices), `tool_calls`
+  (pending/done per call_id), `approvals` (parked docs), `cclaw resp` (LLM
+  wire traffic). Approval args_json should match the tool call that parked it
+  — if they diverge, you're looking at a parking bug, not agent confusion.
+
 Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
 
 ### Debugging a failed turn

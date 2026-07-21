@@ -19,9 +19,22 @@ INSERT OR IGNORE INTO models(id, provider_name, model, priority)
 -- Low routing priority: chat routing never picks it unless nothing else is
 -- healthy; the audio capability is what selects it (model_pick_by_capability).
 INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority)
-  VALUES('gemini', 'https://generativelanguage.googleapis.com/v1beta', 'gemini', 'GEMINI_API_KEY', 'gemini-2.5-flash-lite', 50);
+  VALUES('gemini', 'https://generativelanguage.googleapis.com/v1beta', 'gemini', 'GEMINI_API_KEY', 'gemini-3.5-flash-lite', 50);
 INSERT OR IGNORE INTO models(id, provider_name, model, capabilities, priority)
-  VALUES('gemini/gemini-2.5-flash-lite', 'gemini', 'gemini-2.5-flash-lite', '["text","image","audio"]', 50);
+  VALUES('gemini/gemini-3.5-flash-lite', 'gemini', 'gemini-3.5-flash-lite', '["text","image","audio"]', 50);
+
+-- ═══ Known providers (no keys shipped — inert until their key exists) ═══
+-- Endpoints sourced from the OpenClaw and Hermes default provider catalogs
+-- (production OpenAI-compatible chat completions only). Low priority:
+-- config_load's key-availability scan promotes one only when its key
+-- resolves, and request_config's provider section uses these rows for
+-- default fill.
+INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, default_model, priority) VALUES
+  ('openai',   'https://api.openai.com/v1',      'openai', 'OPENAI_API_KEY',   'gpt-5.4',         100),
+  ('deepseek', 'https://api.deepseek.com/v1',    'openai', 'DEEPSEEK_API_KEY', 'deepseek-v4-pro', 110),
+  ('groq',     'https://api.groq.com/openai/v1', 'openai', 'GROQ_API_KEY',     'groq/compound',        120),
+  ('mistral',  'https://api.mistral.ai/v1',      'openai', 'MISTRAL_API_KEY',  'mistral-large-latest', 130),
+  ('cerebras', 'https://api.cerebras.ai/v1',     'openai', 'CEREBRAS_API_KEY', 'gemma-4-31b',          140);
 
 -- ═══ Built-in tools ═══
 -- Descriptions are a write-once seed: tools_sync_to_db() upserts with

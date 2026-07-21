@@ -19,17 +19,25 @@ static const uint8_t TEST_KEY[32] = {
 
 static sqlite3 *setup_db(void) {
     test_db_clean(DB_PATH);
-    sqlite3 *db = test_db_open(DB_PATH);
+    sqlite3 *db = test_db_open_seeded(DB_PATH);
     assert(db);
     db_set_secret_key(TEST_KEY);
     return db;
 }
 
 static void test_key_env_name(void) {
-    assert(strcmp(admin_key_env_name("openrouter"), "OPENROUTER_API_KEY") == 0);
-    assert(strcmp(admin_key_env_name("gemini"), "GEMINI_API_KEY") == 0);
-    assert(admin_key_env_name("unknown") == NULL);
-    assert(admin_key_env_name(NULL) == NULL);
+    sqlite3 *db = setup_db();
+    char *v = admin_key_env_name(db, "openrouter");
+    assert(v && strcmp(v, "OPENROUTER_API_KEY") == 0);
+    free(v);
+    v = admin_key_env_name(db, "gemini");
+    assert(v && strcmp(v, "GEMINI_API_KEY") == 0);
+    free(v);
+    assert(admin_key_env_name(db, "unknown") == NULL);
+    assert(admin_key_env_name(db, NULL) == NULL);
+    assert(admin_key_env_name(NULL, "openrouter") == NULL);
+    db_close(db);
+    test_db_clean(DB_PATH);
     printf("  PASS: test_key_env_name\n");
 }
 
@@ -218,6 +226,8 @@ static void test_admin_revoke_grant_by_id(void) {
 
 static void test_admin_list_tool_names(void) {
     sqlite3 *db = setup_db();
+    /* Drop seeded built-in tools — this test asserts an exact listing. */
+    sqlite3_exec(db, "DELETE FROM tools;", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO tools(name) VALUES('zeta_tool');", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO tools(name) VALUES('alpha_tool');", NULL, NULL, NULL);
 
@@ -357,6 +367,8 @@ static void test_grant_from_history(void) {
 static void test_list_models(void) {
     sqlite3 *db = setup_db();
     unsetenv("TEST_MODELS_KEY");
+    /* Drop seeded provider/model rows — this test asserts an exact listing. */
+    sqlite3_exec(db, "DELETE FROM models; DELETE FROM providers;", NULL, NULL, NULL);
     sqlite3_exec(db,
         "INSERT INTO providers(name,base_url,api_key_env,priority)"
         " VALUES('p1','https://p1.example/v1','TEST_MODELS_KEY',0);"
@@ -393,6 +405,7 @@ static void test_list_models(void) {
 
 static void test_switch_model(void) {
     sqlite3 *db = setup_db();
+    sqlite3_exec(db, "DELETE FROM models; DELETE FROM providers;", NULL, NULL, NULL);
     sqlite3_exec(db,
         "INSERT INTO providers(name,base_url,api_key_env,priority)"
         " VALUES('p1','https://p1.example/v1','K1',0);"

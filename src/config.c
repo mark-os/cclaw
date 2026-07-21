@@ -167,7 +167,7 @@ Config *config_load(sqlite3 *db) {
                 }
                 const char *v;
                 v = (const char *)sqlite3_column_text(ps, 1);
-                p->base_url = v ? strdup(v) : strdup("https://openrouter.ai/api/v1");
+                p->base_url = v ? strdup(v) : strdup(CCLAW_DEF_BASE_URL);
                 v = (const char *)sqlite3_column_text(ps, 2);
                 p->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
                 v = (const char *)sqlite3_column_text(ps, 3);
@@ -178,19 +178,33 @@ Config *config_load(sqlite3 *db) {
                                                          : db_secret_get_system(db, v);
                 }
                 v = (const char *)sqlite3_column_text(ps, 4);
-                p->model = v ? strdup(v) : strdup("deepseek/deepseek-v4-flash");
-                p->max_tokens = 4096;
+                p->model = v ? strdup(v) : strdup(CCLAW_DEF_MODEL);
+                p->max_tokens = CCLAW_DEF_MAX_TOKENS;
                 p->cache_hints = CACHE_HINTS_AUTO;
                 if (idx > 0) cfg->fallback_count++;
                 idx++;
             }
             sqlite3_finalize(ps);
         }
+        /* Key-availability scan: priority order is only a convention — the
+         * first provider whose key actually resolves (env or encrypted kv)
+         * becomes primary. A keyless head is swapped down into the fallback
+         * list so it can still serve if a key appears via request retry. */
+        if (!cfg->provider.api_key) {
+            for (size_t i = 0; i < cfg->fallback_count; i++) {
+                if (cfg->fallback_providers[i].api_key) {
+                    ProviderConfig tmp = cfg->provider;
+                    cfg->provider = cfg->fallback_providers[i];
+                    cfg->fallback_providers[i] = tmp;
+                    break;
+                }
+            }
+        }
         /* If no providers loaded (empty table OR stale schema), set defaults */
         if (idx == 0) {
-            cfg->provider.base_url = strdup("https://openrouter.ai/api/v1");
-            cfg->provider.model = strdup("deepseek/deepseek-v4-flash");
-            cfg->provider.max_tokens = 4096;
+            cfg->provider.base_url = strdup(CCLAW_DEF_BASE_URL);
+            cfg->provider.model = strdup(CCLAW_DEF_MODEL);
+            cfg->provider.max_tokens = CCLAW_DEF_MAX_TOKENS;
             cfg->provider.endpoint_type = ENDPOINT_OPENAI;
             cfg->provider.cache_hints = CACHE_HINTS_AUTO;
             const char *key = getenv("OPENROUTER_API_KEY");
@@ -217,8 +231,10 @@ Config *config_load(sqlite3 *db) {
     cfg->auto_recall = config_get_int(db, "auto_recall");
     cfg->recall_max_tokens = config_get_int(db, "recall_max_tokens");
 
-    /* Env var overrides (highest priority) */
-    env_override_str(&cfg->provider.api_key, "OPENROUTER_API_KEY");
+    /* Env var overrides (highest priority). No api_key override here: the
+     * provider loop already resolves each provider's own api_key_env from the
+     * environment first, and a blanket OPENROUTER_API_KEY override would stomp
+     * the key of whichever provider the availability scan selected. */
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER_BASE_URL");
     env_override_str(&cfg->provider.base_url, "CCLAW_PROVIDER");
     env_override_str(&cfg->provider.model, "CCLAW_MODEL");

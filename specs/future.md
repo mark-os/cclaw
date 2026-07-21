@@ -77,6 +77,20 @@ Gemini generateContent (`endpoint_type` in `llm_proc.c`).
   sessions over slow links (Pogoplug class). Needs a per-session sync cursor
   column back (the v32-dropped `last_synced_entry_id`, reborn with an actual
   reader), plus desync/expiry handling (cursor invalid → full resend).
+- **Anthropic Messages API** (native `endpoint_type`): we won't support
+  Anthropic's OpenAI-compat `/v1/chat/completions` layer (explicitly
+  non-production: no prompt caching, `strict`/`response_format` silently
+  ignored, system-message hoisting, no thinking output). Native Messages is
+  the only path; once that adapter lands, an `anthropic` provider row
+  (`ANTHROPIC_API_KEY`) joins seed.sql.
+- **OAuth provider auth**: the reference projects authenticate several
+  providers via OAuth rather than static keys — Hermes: Nous Portal
+  (device-code flow), OpenAI Codex / xAI / Qwen (external redirect),
+  MiniMax; nullclaw: qwen-portal. cclaw needs a device-code flow first
+  (fits a headless daemon: print code + URL, poll token endpoint, store
+  refresh token encrypted in `secrets`), **starting with OpenAI**, which
+  supports device-based auth. Token refresh belongs in the credential
+  layer next to `db_secret_get_system`, not in per-provider C.
 - Related: **reasoning replay** (TODO.md) — replaying stored `reasoning`
   entries in tool loops (DeepSeek R1 `reasoning_content`, Anthropic thinking
   blocks) belongs in `llm_payload.c` as a per-model capability flag.
@@ -403,3 +417,29 @@ them all — so the missing piece is **distribution**, not a new format.
 Prompt-surface quality (system prompts, tool descriptions, skills) is the
 cheapest layer for community contribution — which is another reason to treat
 prompts and skills as first-class reviewable artifacts, not polish.
+## Autonomy Ladder / Commitments (review-6 F10 — extension-bundle candidate)
+
+OpenClaw's standout daily-driver UX: users dial autonomy up incrementally —
+heartbeat (notice) → commitments (inferred, capped follow-ups the agent
+volunteers and delivers on later ticks) → standing orders → cron (own a
+recurring program). CClaw has both ends; the middle tier composes from
+primitives: one `commitments` table + a QJS extension that extracts/caps
+follow-ups from conversation + heartbeat delivery. Whether it needs even that
+much — vs a skill or heartbeat-prompt convention over memory — is an open
+research question (`plan/projects/commitments-research.md`); the table+QJS
+sketch above is one candidate answer, not the plan.
+
+## Seed Memories in Extension Bundles + Migration Importers (review-6, 2026-07-19)
+
+Extend `extension.json` with an optional seed-memories payload (inline array or
+a bundle file the manifest points at). `extension_promote` ingests it into the
+memory table alongside the tools/channels rows — after promotion the DB is
+still the one home; the file was just the installer payload. This inherits the
+draft→promote trust boundary for free: seed prose (which lands in the context
+window) can only enter through the approval gate, closing the
+bundle-injects-persona path by construction.
+
+This is also the substrate for importing from other systems (OpenClaw
+SOUL.md/MEMORY.md, Hermes MEMORY.md/USER.md): an importer is a script that
+reads their files and emits a CClaw extension bundle — no importer machinery
+in core, and migrations go through the same reviewed gate as any extension.

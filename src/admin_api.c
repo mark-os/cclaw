@@ -8,11 +8,21 @@
 #include <stdlib.h>
 #include <string.h>
 
-const char *admin_key_env_name(const char *provider) {
-    if (!provider) return NULL;
-    if (strcmp(provider, "openrouter") == 0) return "OPENROUTER_API_KEY";
-    if (strcmp(provider, "gemini") == 0) return "GEMINI_API_KEY";
-    return NULL;
+char *admin_key_env_name(sqlite3 *db, const char *provider) {
+    if (!db || !provider) return NULL;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT api_key_env FROM providers WHERE name=? AND api_key_env != ''",
+            -1, &s, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(s, 1, provider, -1, SQLITE_STATIC);
+    char *out = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(s, 0);
+        if (v) out = strdup(v);
+    }
+    sqlite3_finalize(s);
+    return out;
 }
 
 int admin_set_key(sqlite3 *db, const char *provider, const char *value) {
@@ -32,9 +42,11 @@ int admin_set_key(sqlite3 *db, const char *provider, const char *value) {
         return rc;
     }
 
-    const char *var_name = admin_key_env_name(provider);
+    char *var_name = admin_key_env_name(db, provider);
     if (!var_name) return -1;
-    return db_secret_set(db, var_name, value, "operator", "system");
+    int rc = db_secret_set(db, var_name, value, "operator", "system");
+    free(var_name);
+    return rc;
 }
 
 int admin_set_model(sqlite3 *db, int provider_index, const char *model) {

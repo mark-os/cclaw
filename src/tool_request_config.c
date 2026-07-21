@@ -21,19 +21,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* Known provider defaults — eager validation + default fill for the
- * provider section, so a definition that can't apply never parks. */
-static const struct {
-    const char *name;
-    const char *base_url;
-    const char *model;
-} PROVIDERS[] = {
-    {"openrouter", "https://openrouter.ai/api/v1", "deepseek/deepseek-v4-flash"},
-    {"gemini",     "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"},
-    {"anthropic",  "https://api.anthropic.com/v1", "claude-sonnet-4-20250514"},
-};
-#define PROVIDER_COUNT (sizeof(PROVIDERS) / sizeof(PROVIDERS[0]))
-
 static const char *PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"action\":{\"type\":\"string\",\"enum\":[\"request_changes\",\"rename_agent\"],"
@@ -368,24 +355,28 @@ static char *validate_provider(sqlite3 *db, const char *changes, char **canon_ou
     char *err = NULL;
     const char *url_val = NULL, *model_val = NULL, *env_val = NULL;
     char env_buf[96];
+    char *db_url = NULL, *db_model = NULL;
 
-    int known = -1;
     if (!prov || !prov[0]) {
         err = strdup("error: provider.provider (the name) is required");
         goto out;
     }
-    for (size_t i = 0; i < PROVIDER_COUNT; i++)
-        if (strcmp(prov, PROVIDERS[i].name) == 0) { known = (int)i; break; }
-    if (known < 0 && (!base_url || !base_url[0])) {
+    /* Known-provider defaults come from the providers table (seeded rows
+     * included) — the DB is the one home for provider shape, not a C array. */
+    db_url = q1_text(db,
+        "SELECT base_url FROM providers WHERE name=?1 AND base_url!=''", prov);
+    db_model = q1_text(db,
+        "SELECT default_model FROM providers WHERE name=?1 AND default_model!=''", prov);
+    if (!db_url && (!base_url || !base_url[0])) {
         err = strdup("error: 'base_url' required for unknown providers");
         goto out;
     }
-    url_val = (base_url && base_url[0]) ? base_url : PROVIDERS[known].base_url;
+    url_val = (base_url && base_url[0]) ? base_url : db_url;
     if (strncmp(url_val, "https://", 8) != 0 && strncmp(url_val, "http://", 7) != 0) {
         err = strdup("error: base_url must start with http:// or https://");
         goto out;
     }
-    model_val = (model && model[0]) ? model : ((known >= 0) ? PROVIDERS[known].model : NULL);
+    model_val = (model && model[0]) ? model : db_model;
     /* api_key_env is a secret NAME, never key material. Default derives
      * <PROVIDER>_API_KEY so config_load's env → kv fallback resolves it. */
     if (key_env && key_env[0]) {
@@ -428,6 +419,7 @@ static char *validate_provider(sqlite3 *db, const char *changes, char **canon_ou
     }
 out:
     free(prov); free(base_url); free(model); free(key_env);
+    free(db_url); free(db_model);
     return err;
 }
 

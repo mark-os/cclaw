@@ -37,7 +37,11 @@ $(shell mkdir -p $(BUILDDIR) && echo "$(BUILD_TAG)" > $(BUILD_TAGFILE))
 TEMPLATES := $(wildcard templates/*)
 SRC      := $(filter-out src/preload_net.c src/net_shim.c,$(wildcard src/*.c))
 OBJ      := $(patsubst src/%.c,$(BUILDDIR)/%.o,$(SRC))
-DEP      := $(OBJ:.o=.d)
+# Recursive (=): TEST_BIN/INTEG_BIN/E2E_BIN are defined below; expansion
+# happens at the -include site after all of them exist. Test binaries compile
+# their .c directly, so they need their own .d files — without them a header
+# edit (test_util.h) leaves stale test binaries.
+DEP      = $(OBJ:.o=.d) $(TEST_BIN:=.d) $(INTEG_BIN:=.d) $(E2E_BIN:=.d)
 
 VENDOR_SRC := vendor/sqlite3/sqlite3.c vendor/civetweb/civetweb.c \
               vendor/quickjs/quickjs.c vendor/quickjs/cutils.c \
@@ -58,7 +62,7 @@ TEST_BIN  := $(patsubst test/%.c,$(BUILDDIR)/%,$(TEST_SRC))
 INTEG_BIN := $(patsubst test/%.c,$(BUILDDIR)/%,$(INTEG_SRC))
 E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
 
-.PHONY: all clean test smoke test-integration test-e2e test-all check-gen debug test-asan
+.PHONY: all clean test smoke test-integration test-e2e test-all check-gen debug test-asan bench
 
 # Curated fast unit subset — no network, no fork. Target: a few seconds.
 SMOKE := test_db test_config test_advance_session test_llm_payload test_tools \
@@ -238,7 +242,15 @@ $(BUILDDIR)/libtest.a: $(BUILDDIR)/mock_server.o
 	$(AR) rcs $@ $^
 
 $(BUILDDIR)/test_%: test/test_%.c $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libtest.a | $(BUILDDIR)/
-	$(CC) $(CFLAGS) -I$(BUILDDIR) -o $@ $< $(BUILDDIR)/libtest.a $(BUILDDIR)/libcclaw.a $(LDFLAGS)
+	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -o $@ $< $(BUILDDIR)/libtest.a $(BUILDDIR)/libcclaw.a $(LDFLAGS)
+
+# Paid measurement tool, not a test — never picked up by any suite.
+# Usage: BENCH_MODELS="a,b,c" make bench (shortlist via scripts/find_providers.py)
+$(BUILDDIR)/bench_providers: test/bench_providers.c $(BUILDDIR)/libcclaw.a $(BUILDDIR)/libtest.a | $(BUILDDIR)/
+	$(CC) $(CFLAGS) -I$(BUILDDIR) -MMD -MP -o $@ $< $(BUILDDIR)/libtest.a $(BUILDDIR)/libcclaw.a $(LDFLAGS)
+
+bench: $(BUILDDIR)/bench_providers
+	./$(BUILDDIR)/bench_providers
 
 compile_commands.json: $(BUILDDIR)/templates.h
 	@echo "[" > $@

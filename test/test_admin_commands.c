@@ -22,7 +22,7 @@ static void test_key_encrypted_in_kv(void) {
     const char *db_path = "/tmp/cclaw_test_admin.db";
     test_db_clean(db_path);
 
-    sqlite3 *db = test_db_open(db_path);
+    sqlite3 *db = test_db_open_seeded(db_path);
     assert(db);
     db_set_secret_key(TEST_KEY);
 
@@ -60,7 +60,7 @@ static void test_config_reload(void) {
     const char *db_path = "/tmp/cclaw_test_admin_reload.db";
     test_db_clean(db_path);
 
-    sqlite3 *db = test_db_open(db_path);
+    sqlite3 *db = test_db_open_seeded(db_path);
     assert(db);
     db_seed_defaults(db);
 

@@ -44,6 +44,16 @@ static inline sqlite3 *test_db_open(const char *path) {
     return db;
 }
 
+/* Open + schema + seed.sql (matches main.c startup). For tests exercising
+ * provider-table-driven lookups (admin key mapping, request_config provider
+ * defaults). NOT the default: seeded models rows would make llm routing
+ * target real provider URLs instead of the mock server. */
+static inline sqlite3 *test_db_open_seeded(const char *path) {
+    sqlite3 *db = test_db_open(path);
+    if (db) db_seed_defaults(db);
+    return db;
+}
+
 /* agent_name columns are enforced FKs (v31) — a test seeding rows for an
  * agent must create the parent row first, like every runtime path does. */
 static inline void test_seed_agent(sqlite3 *db, const char *name) {

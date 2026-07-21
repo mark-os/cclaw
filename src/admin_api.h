@@ -8,13 +8,14 @@
 /* Generic admin operations — channel-agnostic, usable by CLI or any channel. */
 
 /* Store an API key in the encrypted kv (never a file). Returns 0 on success.
- * provider: "openrouter", "gemini", or NULL/"custom" (var_name=value format).
- * For known providers, the kv key is the canonical env var name, so the
+ * provider: any providers-table name, or NULL/"custom" (var_name=value format).
+ * For known providers, the kv key is the provider's api_key_env, so the
  * config loader's env → encrypted-kv fallback finds it. */
 int admin_set_key(sqlite3 *db, const char *provider, const char *value);
 
-/* Map provider name to env var. Returns NULL if unknown. */
-const char *admin_key_env_name(const char *provider);
+/* Map provider name to its api_key_env from the providers table.
+ * Returns a malloc'd string (caller frees), NULL if unknown/keyless. */
+char *admin_key_env_name(sqlite3 *db, const char *provider);
 
 /* Set model for provider at index (0=primary, 1+=fallback). Returns 0 on success. */
 int admin_set_model(sqlite3 *db, int provider_index, const char *model);

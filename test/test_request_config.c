@@ -65,7 +65,7 @@ static void test_handler_unavailable(void) {
 
 /* 1. Park a tools grant; verify approvals row and session state. */
 static void test_park_tools_grant(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -119,7 +119,7 @@ static void test_park_tools_grant(void) {
  *    grants key, non-array, relative path, unknown config key, provider
  *    errors. */
 static void test_error_missing_changes(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -186,7 +186,7 @@ static void test_error_missing_changes(void) {
 
 
 static void test_error_config_keys(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -230,7 +230,7 @@ static void test_error_config_keys(void) {
 }
 
 static void test_error_provider(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -281,7 +281,7 @@ static void test_error_provider(void) {
 
 /* 3. reason propagates to $.reason in the parked approval. */
 static void test_reason_propagates(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -320,7 +320,7 @@ static void test_reason_propagates(void) {
 /* 4. Provider defaults fill — openrouter with only the name gets the
  *    three canonical defaults in parked JSON. */
 static void test_provider_defaults(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -366,7 +366,7 @@ static void test_provider_defaults(void) {
  *    first denied, the same doc parks again; a different doc parks while
  *    first is pending. */
 static void test_dedup(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -422,7 +422,7 @@ static void test_dedup(void) {
  *    then call request_config_changes_apply and verify grants, config, and
  *    provider rows landed. */
 static void test_batch_apply(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -517,7 +517,7 @@ static void test_batch_apply(void) {
 
 /* 6b. agent + routes sections: eager validation and batch apply. */
 static void test_agent_routes_sections(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -582,7 +582,7 @@ static void test_agent_routes_sections(void) {
     r = call_handler(&reg,
         "{\"action\":\"request_changes\",\"changes\":{"
         "\"provider\":{\"provider\":\"gemini\"},"
-        "\"agent\":{\"primary_model\":\"gemini-2.5-flash@gemini\","
+        "\"agent\":{\"primary_model\":\"gemini-3.5-flash-lite@gemini\","
         "\"max_iterations\":40},"
         "\"routes\":[\"tg:777\"]}}");
     assert(r == NULL); /* parked */
@@ -602,10 +602,10 @@ static void test_agent_routes_sections(void) {
     /* models row seeded → the adopted id resolves. */
     assert(sqlite3_prepare_v2(db,
         "SELECT provider_name, model FROM models"
-        " WHERE id='gemini-2.5-flash@gemini'", -1, &s, NULL) == SQLITE_OK);
+        " WHERE id='gemini-3.5-flash-lite@gemini'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "gemini") == 0);
-    assert(strcmp((const char *)sqlite3_column_text(s, 1), "gemini-2.5-flash") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "gemini-3.5-flash-lite") == 0);
     sqlite3_finalize(s);
 
     /* agents row updated, untouched columns kept. */
@@ -614,7 +614,7 @@ static void test_agent_routes_sections(void) {
         " WHERE name='test'", -1, &s, NULL) == SQLITE_OK);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0),
-                  "gemini-2.5-flash@gemini") == 0);
+                  "gemini-3.5-flash-lite@gemini") == 0);
     assert(sqlite3_column_int(s, 1) == 40);
     assert(sqlite3_column_int(s, 2) == 30); /* default untouched */
     sqlite3_finalize(s);
@@ -669,7 +669,7 @@ static void test_agent_routes_sections(void) {
  *    request_config_changes_apply, assert -1 AND none of the doc's grants
  *    landed. */
 static void test_apply_rollback(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -697,7 +697,7 @@ static void test_apply_rollback(void) {
 
 /* 8. rename_agent tests (kept from old suite). */
 static void test_rename_agent(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -759,7 +759,7 @@ static void test_rename_agent(void) {
 
 /* Unknown action value. */
 static void test_unknown_action(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     config_registry_sync(db);
     db_agent_upsert(db, "test", NULL, NULL);
@@ -784,7 +784,7 @@ static void test_unknown_action(void) {
 
 /* Direct agent_config_grant still works (low-level API). */
 static void test_add_tool_to_config(void) {
-    sqlite3 *db = test_db_open(":memory:");
+    sqlite3 *db = test_db_open_seeded(":memory:");
     assert(db);
     db_agent_upsert(db, "test", NULL, NULL);
 

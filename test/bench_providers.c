@@ -2,14 +2,12 @@
  * Builds sessions with growing context, measures cache hits per turn.
  * Uses cclaw's LLM + HTTP functions directly with a temp DB.
  *
- * Usage: ./build/test_e2e_bench_providers
- * Requires: OPENROUTER_API_KEY
+ * Usage: BENCH_MODELS="model1,model2,..." make bench
+ * Requires: OPENROUTER_API_KEY, BENCH_MODELS
  *
- * Default models (override with BENCH_MODELS="model1,model2,..."):
- *   ibm-granite/granite-4.1-8b
- *   deepseek/deepseek-v4-flash
- *   openai/gpt-5-nano
- *   google/gemini-2.5-flash-lite
+ * Not part of any test suite — it's a paid measurement tool. Get a
+ * candidate shortlist from scripts/find_providers.py (metadata-only,
+ * free), then benchmark it here for real cache/latency/cost behavior.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -27,14 +25,6 @@ static sqlite3 *g_bench_db;
 #define MAX_MODELS 10
 #define TURNS 5
 #define BASE_URL "https://openrouter.ai/api/v1"
-
-static const char *DEFAULT_MODELS[] = {
-    "ibm-granite/granite-4.1-8b",
-    "deepseek/deepseek-v4-flash",
-    "openai/gpt-5-nano",
-    "google/gemini-2.5-flash-lite",
-};
-static const int DEFAULT_MODEL_COUNT = 4;
 
 typedef struct {
     int prompt_tokens;
@@ -155,19 +145,19 @@ int main(void) {
     const char *models[MAX_MODELS];
     int model_count = 0;
     const char *env_models = getenv("BENCH_MODELS");
-    if (env_models) {
-        char *buf = strdup(env_models);
-        char *tok = strtok(buf, ",");
-        while (tok && model_count < MAX_MODELS) {
-            models[model_count++] = strdup(tok);
-            tok = strtok(NULL, ",");
-        }
-        free(buf);
-    } else {
-        model_count = DEFAULT_MODEL_COUNT;
-        for (int i = 0; i < model_count; i++)
-            models[i] = DEFAULT_MODELS[i];
+    if (!env_models || !env_models[0]) {
+        fprintf(stderr,
+            "Set BENCH_MODELS=\"model1,model2,...\" (no built-in list).\n"
+            "Get a shortlist from scripts/find_providers.py first.\n");
+        return 1;
     }
+    char *buf = strdup(env_models);
+    char *tok = strtok(buf, ",");
+    while (tok && model_count < MAX_MODELS) {
+        models[model_count++] = strdup(tok);
+        tok = strtok(NULL, ",");
+    }
+    free(buf);
 
     printf("Provider Benchmark (%d turns per model, non-streaming)\n", TURNS);
     printf("═══════════════════════════════════════════════════════════════════════════════════\n\n");

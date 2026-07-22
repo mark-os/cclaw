@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
-                     const Config *cfg, const char *agent_name, int mode) {
+                     const Config *cfg, const char *agent_name) {
     memset(setup, 0, sizeof(*setup));
     tools_init(&setup->reg);
 
@@ -32,7 +32,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* Containment config (sandbox_profile, shell_path) is not resolved here:
      * agent_setup_refresh_caps re-reads it from the agents table before every
      * tool batch, same as grants. Only capture whether an operator env
-     * override exists now (-y sets CCLAW_SANDBOX_PROFILE=host) — refresh
+     * override exists now (--trust-host sets CCLAW_SANDBOX_PROFILE=host) — refresh
      * setenv's for children, so a later getenv can't distinguish the two. */
     const char *ev = getenv("CCLAW_SANDBOX_PROFILE");
     if (ev) {
@@ -153,7 +153,6 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
      * the same event loop with a wake pipe, so a spawned child advances and a
      * parent waiting on it resumes in either. launch_agent is gated by depth
      * (a leaf agent at the ceiling can't spawn). */
-    (void)mode;
     setup->launch_ctx.db = db;
     setup->launch_ctx.session_id = session_id;
     int depth = session_get_depth(db, session_id);

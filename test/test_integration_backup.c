@@ -80,7 +80,7 @@ int main(void) {
 
     Config *cfg = config_load(db);
     AgentSetup setup;
-    assert(agent_setup_init(&setup, db, sid, cfg, "Backup", AGENT_SETUP_CLI) == 0);
+    assert(agent_setup_init(&setup, db, sid, cfg, "Backup") == 0);
     assert(test_run_session(db, sid, &setup) == 0);
     agent_setup_destroy(&setup);
     config_free(cfg);

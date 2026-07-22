@@ -38,7 +38,7 @@ static StopReason plan_int_to_stop_reason(int i) {
     return STOP_REASON_NONE;
 }
 
-/* Find cut point in PlanEntry array — same logic as find_cut_point but on PlanEntry. */
+/* Find the cut point in a PlanEntry array (oldest entries dropped to fit budget). */
 static int plan_find_cut(const PlanEntry *entries, int count, int budget) {
     int total = 0;
     int cut = 0;

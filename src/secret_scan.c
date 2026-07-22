@@ -388,7 +388,7 @@ int secret_scan(const char *text, size_t len, ScanFinding *out, int max_findings
     return kept;
 }
 
-/* In-place replacement helper (same as tool_shell.c mask_replace) */
+/* In-place replacement helper: overwrite a matched span with a mask token. */
 static int scan_replace(char *buf, size_t *len, size_t cap,
                         int offset, int old_len,
                         const char *tag, int tag_len) {

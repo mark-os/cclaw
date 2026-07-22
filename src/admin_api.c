@@ -641,7 +641,7 @@ void admin_sessions_free(AdminSession *list, size_t count) {
 int admin_attach_session_channel(sqlite3 *db, int64_t session_id,
                                  const char *channel_name, const char *chat_id) {
     /* A pin needs a real chat — channel-wide defaults are
-     * channels.default_agent (admin_set_channel_default), not a route. */
+     * channels.default_agent (admin_set_channel_route), not a route. */
     if (!db || !channel_name || session_id <= 0) return -1;
     if (!chat_id || !chat_id[0]) return -1;
 

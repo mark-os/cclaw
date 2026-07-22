@@ -74,7 +74,7 @@ static void run_one_turn(sqlite3 *db, int i) {
 
     Config *cfg = config_load(db);
     AgentSetup setup;
-    assert(agent_setup_init(&setup, db, sid, cfg, "Soak", AGENT_SETUP_CLI) == 0);
+    assert(agent_setup_init(&setup, db, sid, cfg, "Soak") == 0);
     int rc = test_run_session(db, sid, &setup);
     assert(rc == 0);
     agent_setup_destroy(&setup);

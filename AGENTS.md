@@ -102,7 +102,7 @@ See [specs/security.md](specs/security.md) for full details and [specs/trust.md]
 
 | Profile | Use for |
 |-------|---------|
-| `host` | Dev / hosts without unprivileged userns — **no sandbox at all** (`--trust-host` forces this) |
+| `host` | **No sandbox at all** — skips *both* the namespace and the egress proxy (traffic goes direct, unfiltered). Use when the surrounding environment already provides isolation (inside a Docker container, behind a firewall) or on hosts where unprivileged userns is unavailable. `--trust-host` forces this. |
 | `trusted` | Default agent — full env access, CWD mounted |
 | `standard` | Most agents — clean env, network via proxy, workspace rw |
 | `restricted` | Observer/audit agents — no network, workspace read-only, tight limits |

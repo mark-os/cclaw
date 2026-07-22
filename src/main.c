@@ -2312,7 +2312,7 @@ static void handle_approval_park(int64_t session_id) {
             fprintf(stdout, "\nApprove? (y=always / o=once / n=no): ");
         fflush(stdout);
         g_cli_turn_active = 0;  /* unblock input loop for the y/n read */
-        /* The actual y/n is read in the CLI input loop — see cli_handle_approval */
+        /* The actual y/n is read back in the main CLI input loop. */
         approval_free(a);
         return;
     }
@@ -3042,7 +3042,7 @@ static int run_daemon(char *db_path) {
       snprintf(daemon_agents_dir, sizeof(daemon_agents_dir), "%s/agents", base);
       ensure_default_agent(base); }
     AgentSetup daemon_setup;
-    agent_setup_init(&daemon_setup, g_db, 0, g_cfg, g_agent_name, AGENT_SETUP_DAEMON);
+    agent_setup_init(&daemon_setup, g_db, 0, g_cfg, g_agent_name);
     daemon_setup.req_cfg_ctx.agents_dir = daemon_agents_dir;
     daemon_setup.req_cfg_ctx.agent_name = g_agent_name;
     g_tool_setup = &daemon_setup;
@@ -3244,7 +3244,7 @@ static int run_cli(char *db_path, const char *prompt,
 
     /* Set up tool schemas env for LLM proc children */
     AgentSetup setup;
-    agent_setup_init(&setup, g_db, 0, g_cfg, g_agent_name, AGENT_SETUP_CLI);
+    agent_setup_init(&setup, g_db, 0, g_cfg, g_agent_name);
     g_tool_setup = &setup;
     /* Set agents_dir for rename support; point agent_name at g_agent_name for live update */
     char agents_dir[PATH_MAX];

@@ -525,8 +525,8 @@ out:
 static char *park_changes(RequestConfigCtx *ctx, const char *canon,
                           const char *reason) {
     /* Dedup: an identical document still pending in this session would queue
-     * a second identical prompt (see gate_request's rationale). Both sides
-     * are canonically built, so minified-text equality is exact. */
+     * a second identical prompt. Both sides are canonically built, so
+     * minified-text equality is exact. */
     sqlite3_stmt *chk;
     if (sqlite3_prepare_v2(ctx->db,
             "SELECT 1 FROM approvals WHERE session_id=?1"

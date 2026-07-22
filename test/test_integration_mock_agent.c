@@ -43,7 +43,7 @@ static int test_basic_turn(void) {
     /* Run */
     Config *cfg = config_load(db);
     AgentSetup setup;
-    agent_setup_init(&setup, db, sid, cfg, "default", AGENT_SETUP_CLI);
+    agent_setup_init(&setup, db, sid, cfg, "default");
     int rc = test_run_session(db, sid, &setup);
     assert(rc == 0);
 

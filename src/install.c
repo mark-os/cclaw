@@ -69,8 +69,8 @@ static int write_file(const char *path, const char *content, mode_t mode) {
 
 /* PATH_MAX-sized buffers make gcc's -Wformat-truncation flag these snprintfs
  * as possibly truncating, even though the inputs (getenv("HOME"), our own
- * fixed suffixes) never approach that length. Same guard as main.c's
- * extract_builtin_extensions; clang doesn't have this warning at all. */
+ * fixed suffixes) never approach that length. Same guard as in main.c;
+ * clang doesn't have this warning at all. */
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-truncation"

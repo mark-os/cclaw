@@ -62,16 +62,12 @@ typedef struct {
     ExtensionCtx ext_ctx;
 } AgentSetup;
 
-/* Mode flags for agent_setup_init */
-#define AGENT_SETUP_CLI     0   /* standalone CLI: no daemon-dependent tools */
-#define AGENT_SETUP_DAEMON  1   /* daemon-forked agent: all tools */
-
-/* Initialize tool registry with appropriate tools for the mode.
- * cli_mode=AGENT_SETUP_CLI excludes spawn_agent, cron, approval, bootstrap.
- * cli_mode=AGENT_SETUP_DAEMON includes all tools.
+/* Initialize the tool registry for an agent. Every tool is registered the
+ * same way in CLI and daemon; per-tool availability is decided by session
+ * depth and grants (e.g. launch_agent is gated by depth), not by process mode.
  * Returns 0 on success. Caller must call agent_setup_destroy() when done. */
 int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
-                     const Config *cfg, const char *agent_name, int mode);
+                     const Config *cfg, const char *agent_name);
 
 /* Refresh caps + containment (sandbox_profile, shell_path) from DB and
  * rebind all consumer pointers atomically. */

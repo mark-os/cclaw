@@ -661,6 +661,11 @@ void channel_tick(sqlite3 *db) {
 
     for (int i = 0; i < nd; i++) {
         if (find_by_name(desired[i])) continue;
+        /* Same gate as channel_launch_all: trust-'active' says the code may
+         * run, but the enabled key + required config decide whether it does.
+         * Without this check the reconcile loop would exec a disabled channel
+         * (e.g. telegram with no bot_token), which then crash-loops. */
+        if (!channel_should_launch(db, desired[i], NULL, 0)) continue;
         if (start_channel(db, desired[i]) == 0)
             LOG_INFO_("channel launch name=%s reason=activated", desired[i]);
     }

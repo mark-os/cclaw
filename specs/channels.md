@@ -21,6 +21,8 @@ The agent decides *when to speak* in listen-and-decide chats.
   routes it (below) → `inbox` → session entry.
 - Outbound: `channel_outbox` rows (pending → sending → delivered/failed,
   crash-recovered at runner startup) drained by the runner's `onOutbox`.
+- Transports (how bytes reach the handler — poll, webhook, persistent stream):
+  [channel-transports.md](channel-transports.md).
 - Lifecycle: rows land in `channels.status='draft'` at install/promote;
   `--check` validates (manifest + JS load + onInit), activation is an operator
   or trust-flow act; `channel swap`/`revert` change which extension fronts a

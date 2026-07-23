@@ -214,6 +214,71 @@ static JSValue js_ch_http(JSContext *ctx, JSValueConst this_val,
     return promise;
 }
 
+/* ── channel.conn.* — persistent connection primitive ─────────────
+ * Thin JS→C shims over cr_conn_* (channel_runner.c owns the transport).
+ * See specs/channel-transports.md. */
+
+static JSValue js_ch_conn_open(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "conn.open(spec)");
+    JSValueConst o = argv[0];
+    char *url = get_str_prop(ctx, (JSValue)o, "url");
+    if (!url || !url[0]) { free(url); return JS_ThrowTypeError(ctx, "conn.open: url required"); }
+    char *framing = get_str_prop(ctx, (JSValue)o, "framing");
+    long timeout = get_int_prop(ctx, (JSValue)o, "timeout", 0);
+
+    char **headers = NULL;
+    int n_headers = 0;
+    JSValue h = JS_GetPropertyStr(ctx, o, "headers");
+    if (!JS_IsException(h) && !JS_IsUndefined(h) && !JS_IsNull(h)) {
+        int n = get_int_prop(ctx, h, "length", 0);
+        if (n > 0 && n <= 32) {
+            headers = calloc((size_t)n, sizeof(char *));
+            if (headers) {
+                for (int i = 0; i < n; i++) {
+                    JSValue hv = JS_GetPropertyUint32(ctx, h, (uint32_t)i);
+                    const char *hs = JS_ToCString(ctx, hv);
+                    JS_FreeValue(ctx, hv);
+                    if (hs) { headers[n_headers++] = strdup(hs); JS_FreeCString(ctx, hs); }
+                }
+            }
+        }
+    }
+    JS_FreeValue(ctx, h);
+
+    int id = cr_conn_open(url, framing, headers, n_headers, timeout);
+    free(url);
+    free(framing);
+    for (int i = 0; i < n_headers; i++) free(headers[i]);
+    free(headers);
+    if (id < 1) return JS_ThrowTypeError(ctx, "conn.open failed");
+    return JS_NewInt32(ctx, id);
+}
+
+static JSValue js_ch_conn_send(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "conn.send(id, text)");
+    int id = 0;
+    JS_ToInt32(ctx, &id, argv[0]);
+    const char *text = JS_ToCString(ctx, argv[1]);
+    if (!text) return JS_ThrowTypeError(ctx, "conn.send: text required");
+    int ok = cr_conn_send(id, text);
+    JS_FreeCString(ctx, text);
+    return JS_NewBool(ctx, ok);
+}
+
+static JSValue js_ch_conn_close(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    int id = 0;
+    JS_ToInt32(ctx, &id, argv[0]);
+    cr_conn_close(id);
+    return JS_UNDEFINED;
+}
+
 /* ── admin.* functions ─────────────────────────────────────────── */
 
 static JSValue admin_approvals_to_js(JSContext *ctx, const AdminApproval *list, size_t count) {
@@ -295,6 +360,14 @@ void qjs_register_channel_host_functions(JSContext *ctx) {
     JS_SetPropertyStr(ctx, ch, "ackOutbox", JS_NewCFunction(ctx, js_ch_ack_outbox, "ackOutbox", 1));
     JS_SetPropertyStr(ctx, ch, "failOutbox", JS_NewCFunction(ctx, js_ch_fail_outbox, "failOutbox", 2));
     JS_SetPropertyStr(ctx, ch, "log", JS_NewCFunction(ctx, js_ch_log, "log", 1));
+
+    /* channel.conn.* — persistent bidirectional connections (WS in v1) */
+    JSValue conn = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, conn, "open", JS_NewCFunction(ctx, js_ch_conn_open, "open", 1));
+    JS_SetPropertyStr(ctx, conn, "send", JS_NewCFunction(ctx, js_ch_conn_send, "send", 2));
+    JS_SetPropertyStr(ctx, conn, "close", JS_NewCFunction(ctx, js_ch_conn_close, "close", 1));
+    JS_SetPropertyStr(ctx, ch, "conn", conn);
+
     JS_SetPropertyStr(ctx, global, "channel", ch);
 
     /* admin object */

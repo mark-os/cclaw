@@ -33,6 +33,7 @@
 #include "buf.h"
 #include "db.h"
 #include "extension_manifest.h"
+#include "host_match.h"
 #include "log.h"
 #include "qjs_helpers.h"
 #include "secret.h"
@@ -58,6 +59,8 @@
 #define CR_POLL_TIMEOUT 35L       /* slightly longer than TG long-poll */
 #define CR_DOWNLOAD_MAX (3L * 1024 * 1024)  /* binary download cap (small-RAM boxes) */
 #define MAX_OUTBOX_ATTEMPTS 5
+#define CR_CONN_MAX 4             /* live persistent connections per channel */
+#define CR_CONN_CONNECT_TIMEOUT 15L  /* default handshake (TCP+TLS+upgrade) cap */
 
 static volatile sig_atomic_t g_running = 1;
 ChannelCtx *g_ctx;
@@ -318,28 +321,73 @@ static size_t curl_write_save_cb(void *ptr, size_t size, size_t nmemb, void *ud)
     return bytes;
 }
 
-/* Pin channel_runner's outbound HTTP to the channel's own configured
- * base_url — a channel is semantically "talks to one external service," not
- * arbitrary web access, so unlike shell/web_fetch/js tools it gets no
- * allowlist, just this single-endpoint check. Uses curl's own URL parser
- * (not a hand-rolled host extractor) so the validated host is exactly what
- * curl will later dial. Exact-host-equality only — no suffix matching. */
+/* Pin channel_runner's outbound HTTP (and channel.conn.* URLs) to the
+ * channel's egress allowlist — a channel is semantically "talks to one
+ * external service," not arbitrary web access, so unlike shell/web_fetch/js
+ * tools it gets no general allowlist, just this pin. Uses curl's own URL
+ * parser (not a hand-rolled host extractor) so the validated host is exactly
+ * what curl will later dial.
+ *
+ * The allowlist is base_url's host PLUS any entry in an optional
+ * comma-separated `egress_hosts` config key. Matching is host_match's: exact
+ * by default, and a leading-dot entry (".discord.gg") is an opt-in suffix
+ * match at a dot boundary (matches gateway.discord.gg, never bare discord.gg
+ * or evildiscord.gg). Suffix entries are safe ONLY on provider-exclusive
+ * domains — an operator/review responsibility, not enforceable here (see
+ * specs/channel-transports.md §Egress pinning). Fail-closed: no config → no
+ * host matches → refused. */
 static int url_host_allowed(const char *url) {
-    char *base = channel_config_get(g_ctx->db, g_ctx->channel_name, "base_url");
-    if (!base || !base[0]) { free(base); return 0; }  /* fail-closed: no config → no send */
-    CURLU *bu = curl_url(), *tu = curl_url();
-    char *bh = NULL, *th = NULL;
+    CURLU *tu = curl_url();
+    if (!tu) return 0;
+    char *th = NULL;
     int ok = 0;
-    if (bu && tu &&
-        curl_url_set(bu, CURLUPART_URL, base, 0) == CURLUE_OK &&
-        curl_url_set(tu, CURLUPART_URL, url, 0) == CURLUE_OK &&
-        curl_url_get(bu, CURLUPART_HOST, &bh, 0) == CURLUE_OK &&
-        curl_url_get(tu, CURLUPART_HOST, &th, 0) == CURLUE_OK)
-        ok = (ascii_strcasecmp(bh, th) == 0);
-    curl_free(bh); curl_free(th);
-    if (bu) curl_url_cleanup(bu);
-    if (tu) curl_url_cleanup(tu);
-    free(base);
+    /* NON_SUPPORT_SCHEME: curl's URL parser rejects ws/wss by default (they are
+     * transfer schemes, not URL-API schemes). conn.open URLs are ws/wss, so we
+     * must let the parser accept them to extract the host. Harmless for the
+     * http(s) send/http paths — only the host is ever used. */
+    if (curl_url_set(tu, CURLUPART_URL, url, CURLU_NON_SUPPORT_SCHEME) == CURLUE_OK &&
+        curl_url_get(tu, CURLUPART_HOST, &th, 0) == CURLUE_OK && th) {
+        char *rules[24];
+        size_t nr = 0;
+
+        /* base_url's host is always an (exact) rule */
+        char *base = channel_config_get(g_ctx->db, g_ctx->channel_name, "base_url");
+        char *bh = NULL;
+        if (base && base[0]) {
+            CURLU *bu = curl_url();
+            if (bu) {
+                if (curl_url_set(bu, CURLUPART_URL, base, 0) == CURLUE_OK)
+                    curl_url_get(bu, CURLUPART_HOST, &bh, 0);
+                curl_url_cleanup(bu);
+            }
+        }
+        if (bh) rules[nr++] = bh;
+
+        /* egress_hosts: comma-separated bare hosts / ".suffix" entries,
+         * tokenized in place in the config copy. */
+        char *egress = channel_config_get(g_ctx->db, g_ctx->channel_name, "egress_hosts");
+        char *p = egress;
+        while (p && *p && nr < 24) {
+            while (*p == ',' || *p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            char *delim = p;
+            while (*delim && *delim != ',') delim++;
+            char *end = delim;
+            while (end > p && (end[-1] == ' ' || end[-1] == '\t')) end--;
+            char next = *delim;
+            *end = '\0';
+            if (*p) rules[nr++] = p;
+            if (next != ',') break;
+            p = delim + 1;
+        }
+
+        ok = host_match(rules, nr, th);
+        curl_free(bh);
+        free(base);
+        free(egress);
+    }
+    curl_free(th);
+    curl_url_cleanup(tu);
     return ok;
 }
 
@@ -442,6 +490,220 @@ static void send_start_next(JSContext *ctx) {
     }
     curl_multi_add_handle(g_multi, g_send_easy);
     g_send_active = r;
+}
+
+/* ── conn callbacks into JS (all optional) ─────────────────────── */
+
+static void call_on_conn_open(JSContext *ctx, int id) {
+    set_global_int(ctx, "__cr_conn_id", id);
+    JSValue r = eval_js(ctx,
+        "(typeof onConnOpen === 'function') && onConnOpen(__cr_conn_id)", "onConnOpen");
+    JS_FreeValue(ctx, r);
+}
+
+static void call_on_conn_message(JSContext *ctx, int id, const char *text) {
+    set_global_int(ctx, "__cr_conn_id", id);
+    set_global_str(ctx, "__cr_conn_msg", text);
+    JSValue r = eval_js(ctx,
+        "(typeof onConnMessage === 'function') && onConnMessage(__cr_conn_id, __cr_conn_msg)",
+        "onConnMessage");
+    JS_FreeValue(ctx, r);
+}
+
+static void call_on_conn_close(JSContext *ctx, int id, int code) {
+    set_global_int(ctx, "__cr_conn_id", id);
+    set_global_int(ctx, "__cr_conn_code", code);
+    JSValue r = eval_js(ctx,
+        "(typeof onConnClose === 'function') && onConnClose(__cr_conn_id, __cr_conn_code)",
+        "onConnClose");
+    JS_FreeValue(ctx, r);
+}
+
+static void call_on_timer(JSContext *ctx) {
+    JSValue r = eval_js(ctx,
+        "(typeof onTimer === 'function') && onTimer()", "onTimer");
+    JS_FreeValue(ctx, r);
+}
+
+/* ── channel.conn.* — persistent bidirectional connections ────────
+ * C owns the transport (WebSocket via libcurl CONNECT_ONLY); the .qjs handler
+ * owns the protocol (opcodes, heartbeats, reconnect). The CONNECT_ONLY easy
+ * handles are driven MANUALLY — never added to g_multi. Each conn's
+ * CURLINFO_ACTIVESOCKET fd rides in the loop's extra[] pollfd array; on
+ * readable we call curl_ws_recv() directly, and curl_ws_send() drains the
+ * outbound queue. See specs/channel-transports.md. */
+
+typedef struct ConnMsg {           /* one queued outbound text frame */
+    char *data;
+    size_t len;
+    struct ConnMsg *next;
+} ConnMsg;
+
+typedef struct {
+    CURL *easy;                    /* NULL = free slot */
+    curl_socket_t fd;             /* CURLINFO_ACTIVESOCKET, polled in extra[] */
+    Buf msg;                       /* inbound frame reassembly (across reads) */
+    int msg_text;                  /* the frame being reassembled is TEXT */
+    ConnMsg *out_head, *out_tail;  /* outbound backpressure queue */
+    int pending_open;              /* fire onConnOpen on next iteration */
+    int want_close;                /* reap: free + fire onConnClose */
+    int close_code;
+} Conn;
+
+static Conn g_conn[CR_CONN_MAX];
+
+static void conn_free_slot(int i) {
+    Conn *c = &g_conn[i];
+    if (c->easy) curl_easy_cleanup(c->easy);
+    ConnMsg *m = c->out_head;
+    while (m) { ConnMsg *n = m->next; free(m->data); free(m); m = n; }
+    buf_free(&c->msg);
+    memset(c, 0, sizeof(*c));
+}
+
+/* Drain the outbound queue with curl_ws_send. Backpressure (CURLE_AGAIN)
+ * stops the drain — the head retries on the next tick. Sends are atomic:
+ * realistic control/heartbeat/reply frames sit far below the socket buffer,
+ * so a non-OK-or-partial result means a broken stream — mark for close and
+ * let the loop reap it (the handler reconnects). No JS is called from here
+ * (this runs on the JS send path too), so close is deferred, never
+ * re-entrant. */
+static void conn_flush(int i) {
+    Conn *c = &g_conn[i];
+    while (c->out_head && !c->want_close) {
+        ConnMsg *m = c->out_head;
+        size_t sent = 0;
+        CURLcode res = curl_ws_send(c->easy, m->data, m->len, &sent, 0, CURLWS_TEXT);
+        if (res == CURLE_AGAIN) return;
+        if (res != CURLE_OK || sent != m->len) {
+            LOG_WARN_("channel_runner: conn %d send failed: %s (sent=%zu/%zu)",
+                      i + 1, curl_easy_strerror(res), sent, m->len);
+            c->want_close = 1;
+            return;
+        }
+        c->out_head = m->next;
+        if (!c->out_head) c->out_tail = NULL;
+        free(m->data); free(m);
+    }
+}
+
+/* Read every available frame until CURLE_AGAIN, reassembling a frame split
+ * across reads (curl_ws_frame.bytesleft) into one message before dispatch.
+ * C consumes control frames — PING/PONG are curl's business (autopong is on
+ * by default), a CLOSE becomes a deferred onConnClose. Only reassembled TEXT
+ * reaches onConnMessage (v1 is text/json; BINARY is dropped). Dispatch is
+ * per WS frame — Discord's gateway never fragments a gateway event across
+ * frames, so cross-frame CONT joining is out of scope (a stray CONT frame is
+ * dropped, not mis-joined). */
+static void conn_recv_drain(JSContext *ctx, int i) {
+    Conn *c = &g_conn[i];
+    char buf[16384];
+    for (;;) {
+        size_t rlen = 0;
+        const struct curl_ws_frame *meta = NULL;
+        CURLcode res = curl_ws_recv(c->easy, buf, sizeof(buf), &rlen, &meta);
+        if (res == CURLE_AGAIN) return;
+        if (res != CURLE_OK) { c->want_close = 1; c->close_code = 0; return; }
+        if (!meta) continue;
+        if (meta->flags & CURLWS_CLOSE) {
+            /* Close payload (if any) is a 2-byte big-endian status code. */
+            c->close_code = (rlen >= 2)
+                ? (((unsigned char)buf[0] << 8) | (unsigned char)buf[1]) : 0;
+            c->want_close = 1;
+            return;
+        }
+        if (meta->flags & (CURLWS_PING | CURLWS_PONG)) continue;
+        if (c->msg.len == 0) c->msg_text = (meta->flags & CURLWS_TEXT) != 0;
+        if (rlen) buf_append(&c->msg, buf, rlen);
+        if (meta->bytesleft == 0) {                 /* frame complete */
+            if (c->msg_text && !c->msg.oom) {
+                buf_append_char(&c->msg, '\0');      /* NUL-terminate for JS */
+                if (!c->msg.oom) call_on_conn_message(ctx, i + 1, c->msg.data);
+            }
+            buf_free(&c->msg);                       /* reset reassembly */
+        }
+    }
+}
+
+/* Open a persistent connection. framing defaults to "ws"; "raw" is a planned
+ * second framing (specs/channel-transports.md) not yet implemented. The
+ * handshake is synchronous — curl_easy_perform drives the TCP+TLS+WS upgrade
+ * and returns once connected. Returns an id >= 1, or -1 on any failure. */
+int cr_conn_open(const char *url, const char *framing,
+                 char **headers, int n_headers, long timeout) {
+    if (!url || !url[0]) return -1;
+    if (framing && framing[0] && strcmp(framing, "ws") != 0) {
+        LOG_WARN_("channel_runner: conn framing '%s' not supported (ws only)", framing);
+        return -1;
+    }
+    if (!url_host_allowed(url)) {
+        LOG_WARN_("channel_runner: conn.open host not allowed, refusing: %s", url);
+        return -1;
+    }
+    int slot = -1;
+    for (int i = 0; i < CR_CONN_MAX; i++) if (!g_conn[i].easy) { slot = i; break; }
+    if (slot < 0) { LOG_WARN_("channel_runner: conn table full (max %d)", CR_CONN_MAX); return -1; }
+
+    CURL *c = curl_easy_init();
+    if (!c) return -1;
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_CONNECT_ONLY, 2L);   /* 2 = WebSocket */
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT,
+                     timeout > 0 ? timeout : CR_CONN_CONNECT_TIMEOUT);
+    struct curl_slist *hl = NULL;
+    for (int i = 0; i < n_headers; i++) hl = curl_slist_append(hl, headers[i]);
+    if (hl) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hl);
+
+    CURLcode res = curl_easy_perform(c);             /* blocking handshake */
+    curl_slist_free_all(hl);
+    if (res != CURLE_OK) {
+        LOG_WARN_("channel_runner: conn.open handshake failed: %s", curl_easy_strerror(res));
+        curl_easy_cleanup(c);
+        return -1;
+    }
+    curl_socket_t sock = CURL_SOCKET_BAD;
+    if (curl_easy_getinfo(c, CURLINFO_ACTIVESOCKET, &sock) != CURLE_OK ||
+        sock == CURL_SOCKET_BAD) {
+        curl_easy_cleanup(c);
+        return -1;
+    }
+    Conn *cn = &g_conn[slot];
+    memset(cn, 0, sizeof(*cn));
+    cn->easy = c;
+    cn->fd = sock;
+    cn->pending_open = 1;
+    LOG_INFO_("channel_runner: conn %d open: %s", slot + 1, url);
+    return slot + 1;
+}
+
+/* Queue a text frame; drain opportunistically. Returns 0 if id is unknown or
+ * the conn is closed. */
+int cr_conn_send(int id, const char *text) {
+    int i = id - 1;
+    if (i < 0 || i >= CR_CONN_MAX || !g_conn[i].easy || g_conn[i].want_close) return 0;
+    Conn *c = &g_conn[i];
+    ConnMsg *m = calloc(1, sizeof(*m));
+    if (!m) return 0;
+    size_t len = text ? strlen(text) : 0;
+    m->data = malloc(len ? len : 1);
+    if (!m->data) { free(m); return 0; }
+    if (len) memcpy(m->data, text, len);
+    m->len = len;
+    if (c->out_tail) c->out_tail->next = m; else c->out_head = m;
+    c->out_tail = m;
+    conn_flush(i);
+    return 1;
+}
+
+/* Graceful close: best-effort CLOSE frame to the peer, then defer teardown +
+ * onConnClose to the loop (never re-entrant with the calling JS handler). */
+void cr_conn_close(int id) {
+    int i = id - 1;
+    if (i < 0 || i >= CR_CONN_MAX || !g_conn[i].easy) return;
+    size_t sent = 0;
+    curl_ws_send(g_conn[i].easy, "", 0, &sent, 0, CURLWS_CLOSE);
+    g_conn[i].want_close = 1;
+    g_conn[i].close_code = 1000;   /* normal closure */
 }
 
 /* ── JS handler call sites ─────────────────────────────────────── */
@@ -686,18 +948,31 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
         send_start_next(ctx);
         poll_start();
 
-        struct curl_waitfd extra[2];
+        struct curl_waitfd extra[2 + CR_CONN_MAX];
         int n_extra = 0;
+        int outbox_slot = -1, uds_slot = -1;
         if (outbox_fd >= 0) {
+            outbox_slot = n_extra;
             extra[n_extra].fd = outbox_fd;
             extra[n_extra].events = CURL_WAIT_POLLIN;
             extra[n_extra].revents = 0;
             n_extra++;
         }
-        int uds_slot = -1;
         if (uds_fd >= 0) {
             uds_slot = n_extra;
             extra[n_extra].fd = uds_fd;
+            extra[n_extra].events = CURL_WAIT_POLLIN;
+            extra[n_extra].revents = 0;
+            n_extra++;
+        }
+        /* Persistent conns: each drives itself (not in g_multi), so its socket
+         * must be polled here. The 1000ms timeout below is also the onTimer
+         * tick, so heartbeats fire even when every fd is idle. */
+        int conn_idx[CR_CONN_MAX], n_conn = 0;
+        for (int i = 0; i < CR_CONN_MAX; i++) {
+            if (!g_conn[i].easy) continue;
+            conn_idx[n_conn++] = i;
+            extra[n_extra].fd = g_conn[i].fd;
             extra[n_extra].events = CURL_WAIT_POLLIN;
             extra[n_extra].revents = 0;
             n_extra++;
@@ -711,7 +986,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
          * is a cheap no-op when nothing is ready. */
         drain_outbox(ctx);
 
-        if (outbox_fd >= 0 && (extra[0].revents & CURL_WAIT_POLLIN)) {
+        if (outbox_slot >= 0 && (extra[outbox_slot].revents & CURL_WAIT_POLLIN)) {
             char drain[64];
             while (read(outbox_fd, drain, sizeof(drain)) > 0) {}
             drain_outbox(ctx);
@@ -722,6 +997,36 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                 int cfd = accept(uds_fd, NULL, NULL);
                 if (cfd < 0) break;
                 uds_handle_conn(ctx, cfd);
+            }
+        }
+
+        /* Persistent conns: fire pending onConnOpen, drain readable sockets,
+         * flush outbound, tick onTimer, then reap any closed. onConnOpen
+         * before recv guarantees "open before first message"; reap last so a
+         * close raised during onTimer is handled this same iteration. */
+        for (int k = 0; k < n_conn; k++) {
+            int i = conn_idx[k];
+            if (g_conn[i].pending_open) {
+                g_conn[i].pending_open = 0;
+                call_on_conn_open(ctx, i + 1);
+            }
+        }
+        /* Drain unconditionally, not just on POLLIN: a CONNECT_ONLY handle can
+         * hold already-received frames in curl's own buffer (e.g. a HELLO that
+         * arrived during the handshake), which leaves the OS fd non-readable —
+         * gating on revents would strand them until the next inbound byte. The
+         * fd is still in extra[] so poll wakes us promptly on fresh data;
+         * curl_ws_recv returns CURLE_AGAIN cheaply when empty. */
+        for (int k = 0; k < n_conn; k++)
+            conn_recv_drain(ctx, conn_idx[k]);
+        for (int i = 0; i < CR_CONN_MAX; i++)
+            if (g_conn[i].easy) conn_flush(i);
+        call_on_timer(ctx);
+        for (int i = 0; i < CR_CONN_MAX; i++) {
+            if (g_conn[i].easy && g_conn[i].want_close) {
+                int code = g_conn[i].close_code;
+                conn_free_slot(i);              /* free first so onConnClose can reopen */
+                call_on_conn_close(ctx, i + 1, code);
             }
         }
 
@@ -827,6 +1132,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     }
 
     /* ── Cleanup ───────────────────────────────────────────────── */
+    for (int i = 0; i < CR_CONN_MAX; i++) if (g_conn[i].easy) conn_free_slot(i);
     if (g_poll.easy) { curl_multi_remove_handle(g_multi, g_poll.easy); curl_easy_cleanup(g_poll.easy); }
     curl_slist_free_all(g_poll.hdrs);
     free(g_poll.method); free(g_poll.url); free(g_poll.body);
@@ -853,6 +1159,39 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     channel_ctx_free(g_ctx);
     LOG_INFO_("channel_runner: stopped");
     return 0;
+}
+
+/* True if the runtime libcurl actually speaks WebSocket. curl-config and the
+ * dev headers advertise ws/wss even under libcurl-minimal, which strips the
+ * protocol handler — so probe the runtime protocol list, the only source of
+ * truth (see specs/channel-transports.md, and the libcurl-minimal trap). */
+static int curl_ws_available(void) {
+    curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
+    if (!v || !v->protocols) return 0;
+    for (const char *const *p = v->protocols; *p; p++)
+        if (ascii_strcasecmp(*p, "ws") == 0 || ascii_strcasecmp(*p, "wss") == 0) return 1;
+    return 0;
+}
+
+/* True if the channel's manifest declares the "persistent" transport in its
+ * advisory `channel.transports` array. SQLite JSON1 (a db handle is in reach —
+ * no jsmn). Missing/absent array → not persistent (Telegram declares nothing). */
+static int manifest_declares_persistent(sqlite3 *db, const char *store_dir) {
+    char mpath[1100];
+    snprintf(mpath, sizeof(mpath), "%s/extension.json", store_dir);
+    char *manifest = util_read_file(mpath, NULL);
+    if (!manifest) return 0;
+    int found = 0;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM json_each(COALESCE(json_extract(?1,'$.channel.transports'),'[]'))"
+            " WHERE value='persistent' LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) found = 1;
+        sqlite3_finalize(st);
+    }
+    free(manifest);
+    return found;
 }
 
 /* ── --check: static validation gate ──────────────────────────────
@@ -890,6 +1229,20 @@ int channel_runner_check(const char *db_path, const char *channel_name, char **e
         return -1;
     }
     if (extension_manifest_validate(store_dir, err_out) != 0) {
+        channel_ctx_free(g_ctx); g_ctx = NULL;
+        return -1;
+    }
+
+    /* Fail-closed on transport capability: a channel that declares the
+     * "persistent" transport needs a WS-capable libcurl. Refuse at activation
+     * with a clear message rather than letting the live runner throw at the
+     * first conn.open (which surfaces only as a JS onInit failure in the log).
+     * The URLs themselves are runtime values, so `transports` is advisory —
+     * this is the one thing C validates it for. */
+    if (manifest_declares_persistent(g_ctx->db, store_dir) && !curl_ws_available()) {
+        if (err_out) *err_out = strdup(
+            "channel declares transport 'persistent' but this libcurl has no "
+            "ws/wss support (libcurl-minimal?) — install a WS-capable libcurl");
         channel_ctx_free(g_ctx); g_ctx = NULL;
         return -1;
     }

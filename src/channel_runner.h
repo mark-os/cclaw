@@ -45,6 +45,21 @@ void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row);
 void send_req_settle(JSContext *ctx, SendReq *r, int status, const char *body,
                      const char *path, long bytes, const char *error);
 
+/* Persistent-connection primitive (channel.conn.* host functions). C owns the
+ * transport — WebSocket via libcurl CONNECT_ONLY; the .qjs handler owns the
+ * protocol. The CONNECT_ONLY easy handles are driven MANUALLY from the runner
+ * event loop (their CURLINFO_ACTIVESOCKET fd is polled in extra[]), never added
+ * to curl_multi. See specs/channel-transports.md. Called from qjs_host_channel.c.
+ *   open: framing defaults to "ws" ("raw" is planned, not yet implemented);
+ *         synchronous handshake; returns id >= 1 or -1.
+ *   send: queues a text frame (flushed opportunistically / on the tick);
+ *         returns 0 if id unknown or closed.
+ *   close: graceful close; onConnClose fires from the loop, not re-entrantly. */
+int cr_conn_open(const char *url, const char *framing,
+                 char **headers, int n_headers, long timeout);
+int cr_conn_send(int id, const char *text);
+void cr_conn_close(int id);
+
 /* Resolve a save_to name to an absolute path in this channel's media spool
  * (<db_dir>/media/<channel>/<name>), creating the directory. Rejects names
  * with '/' or leading '.'. Returns malloc'd path or NULL. */

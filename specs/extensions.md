@@ -74,7 +74,7 @@ directory.
 | `version` | Free-form version string (display / update tracking). |
 | `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), policy?}`. |
 | `hooks[]` | Each: `{event, handler (file)}`. `event` must be a *dispatched* hook event (`preAdvance`, `postAdvance`, `beforeToolCall`, `afterToolCall`) — validate rejects others, incl. the not-yet-wired `turnStart`/`turnEnd`. |
-| `channel` | At most one: `{type, handler (file)}`. The channel runs as a separate process. |
+| `channel` | At most one: `{type, handler (file), transports?}`. Runs as a separate process. `transports?` is an optional advisory array (`poll`/`webhook`/`persistent`) validated at `--check` — see [channel-transports.md](channel-transports.md). |
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
 | `skills[]` | Bundle-relative paths, each a directory containing `SKILL.md` or a bare `.md` file ([skills.md](skills.md) format). Validated at promote: path must be bundle-relative and its frontmatter must parse with a `description`. |
 | `config[]` | Each: `{key, default?, description}`. `key` is `[A-Za-z0-9_]+` (no dots — `.` is the namespace separator); `description` is required. Install upserts config-registry rows keyed `<name>.<key>`. |

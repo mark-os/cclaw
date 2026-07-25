@@ -14,6 +14,12 @@ var OP_DISPATCH = 0, OP_HEARTBEAT = 1, OP_IDENTIFY = 2, OP_RESUME = 6,
 
 var DISCORD_MAX_MSG_LEN = 2000;   // Discord's per-message content limit
 
+// Close status we send when we intend to come back on the same gateway
+// session. Discord invalidates the session on a 1000 (normal closure) and
+// keeps it resumable on anything else, so every reconnect-and-RESUME path
+// closes with this rather than relying on the transport's default.
+var CLOSE_RESUME = 4000;
+
 // Gateway intents (bitfield). Default covers guild + DM text with content.
 var INTENT_GUILDS = 1, INTENT_GUILD_MESSAGES = 512,
     INTENT_DIRECT_MESSAGES = 4096, INTENT_MESSAGE_CONTENT = 32768;
@@ -30,6 +36,11 @@ var botId = null;                  // our own user id — drives mention/self ch
 var reconnectAt = 0;               // wall-clock ms to attempt reconnect (0 = none)
 var backoff = 1000;                // reconnect backoff (ms), grows to a cap
 var stopped = false;               // fatal close: stop reconnecting
+var connFails = 0;                 // consecutive attempts that never reached a live session
+var helloBy = 0;                   // deadline for HELLO after the socket opens (0 = none)
+
+var HELLO_TIMEOUT_MS = 20000;      // handshake done but gateway silent -> drop + retry
+var RESUME_GIVEUP = 3;             // failed attempts before abandoning resume_gateway_url
 
 // Admin slash-style commands (leading "/", admin-gated). Discord's native
 // slash commands need REST registration + interaction handling; text commands
@@ -73,15 +84,33 @@ function onInit() {
 // that is unreachable at startup schedules a retry instead of throwing out of
 // onInit (which would fail --check / kill the runner).
 function connect(url) {
+    // Heartbeat state belongs to a single gateway session: it is only valid
+    // after *this* connection's HELLO. Leaving the old interval live would let
+    // onTimer beat on a socket that has not been hello'd yet.
+    hb.interval = 0; hb.next = 0; hb.awaitingAck = false;
     try {
         cid = channel.conn.open({ url: url });
-        hb.awaitingAck = false;
+        helloBy = Date.now() + HELLO_TIMEOUT_MS;
         channel.log("gateway connecting id=" + cid + " url=" + url);
     } catch (e) {
         channel.log("conn.open failed: " + e + " — will retry");
         cid = 0;
-        scheduleReconnect();
+        helloBy = 0;
+        connectFailed();
     }
+}
+
+// An attempt that never reached READY/RESUMED. Discord hands out a per-session
+// resume_gateway_url; if that host is refusing or gone we never get far enough
+// for the gateway to tell us the session is dead, so retrying it forever wedges
+// the channel. After a few failures, drop the session and use the main gateway.
+function connectFailed() {
+    connFails++;
+    if (connFails >= RESUME_GIVEUP && resumeUrl) {
+        channel.log("resume host failed " + connFails + "x — dropping session, falling back to main gateway");
+        sessionId = null; resumeUrl = null; seq = null;
+    }
+    scheduleReconnect();
 }
 
 function scheduleReconnect() {
@@ -107,7 +136,7 @@ function onConnMessage(id, text) {
         case OP_DISPATCH:      onDispatch(m); break;
         case OP_RECONNECT:                                    // server wants a reconnect
             channel.log("gateway op7 reconnect requested");
-            channel.conn.close(id);                           // onConnClose drives the RESUME
+            channel.conn.close(id, CLOSE_RESUME);             // onConnClose drives the RESUME
             break;
         case OP_INVALID_SESSION: onInvalidSession(id, m.d); break;
         default: break;
@@ -115,6 +144,7 @@ function onConnMessage(id, text) {
 }
 
 function onHello(id, d) {
+    helloBy = 0;                                       // gateway spoke — watchdog off
     hb.interval = (d && d.heartbeat_interval) || 41250;
     // First heartbeat jittered (half an interval) to avoid a thundering herd.
     hb.next = Date.now() + Math.floor(hb.interval / 2);
@@ -154,10 +184,10 @@ function onDispatch(m) {
             botId = "" + d.user.id;
             channel.setState("disc_bot_id", botId);
         }
-        backoff = 1000;   // healthy connection resets backoff
+        backoff = 1000; connFails = 0;   // healthy connection resets backoff
         channel.log("READY as " + (d.user ? d.user.username : "?") + " session=" + sessionId);
     } else if (t === "RESUMED") {
-        backoff = 1000;
+        backoff = 1000; connFails = 0;
         channel.log("RESUMED session=" + sessionId);
     } else if (t === "MESSAGE_CREATE") {
         onMessageCreate(d);
@@ -168,22 +198,29 @@ function onDispatch(m) {
 function onInvalidSession(id, resumable) {
     channel.log("INVALID_SESSION resumable=" + resumable);
     if (!resumable) { sessionId = null; resumeUrl = null; seq = null; }   // force fresh IDENTIFY
-    channel.conn.close(id);   // Discord expects a reconnect; onConnClose drives it
+    // Discord expects a reconnect; onConnClose drives it. Only ask to keep the
+    // session when the gateway said it is still resumable.
+    channel.conn.close(id, resumable ? CLOSE_RESUME : 1000);
 }
 
 function onConnClose(id, code) {
     channel.log("gateway closed id=" + id + " code=" + code);
     if (id === cid) cid = 0;
     hb.awaitingAck = false;
+    helloBy = 0;
 
     // Fatal close codes — reconnecting just fails the same way, so stop.
-    // 4004 bad token; 4013 invalid intents; 4014 disallowed intents (a
-    // privileged intent like MESSAGE CONTENT not enabled in the Developer Portal).
-    if (code === 4004 || code === 4013 || code === 4014) {
+    // 4004 bad token; 4010 invalid shard; 4011 sharding required; 4012 invalid
+    // API version; 4013 invalid intents; 4014 disallowed intents (a privileged
+    // intent like MESSAGE CONTENT not enabled in the Developer Portal).
+    if (code === 4004 || (code >= 4010 && code <= 4014)) {
         stopped = true;
         channel.log("FATAL gateway close " + code + (
             code === 4014 ? " — enable the MESSAGE CONTENT privileged intent in the Discord Developer Portal" :
-            code === 4004 ? " — bad bot_token" : " — check the intents value"));
+            code === 4004 ? " — bad bot_token" :
+            code === 4010 ? " — invalid shard in IDENTIFY" :
+            code === 4011 ? " — bot is in too many guilds and requires sharding (unsupported)" :
+            code === 4012 ? " — gateway API version rejected" : " — check the intents value"));
         return;
     }
     // Only Discord's explicit session-invalidating codes force a fresh IDENTIFY
@@ -192,7 +229,7 @@ function onConnClose(id, code) {
     // if that session is actually dead Discord replies INVALID_SESSION and we
     // re-IDENTIFY then.
     if (code === 4007 || code === 4009) { sessionId = null; resumeUrl = null; seq = null; }
-    scheduleReconnect();
+    connectFailed();
 }
 
 // ── Timer tick (~1s): heartbeats, zombie detection, reconnect ─────
@@ -207,6 +244,16 @@ function onTimer() {
         return;
     }
 
+    // HELLO watchdog. The socket is up but the gateway never spoke: hb.interval
+    // is still 0, so the zombie check below can never fire and the connection
+    // would sit dead until the process restarts.
+    if (cid !== 0 && helloBy && now >= helloBy) {
+        channel.log("no HELLO within " + HELLO_TIMEOUT_MS + "ms — dropping connection");
+        helloBy = 0;
+        channel.conn.close(cid, CLOSE_RESUME);   // onConnClose schedules the reconnect
+        return;
+    }
+
     // Heartbeat scheduling on a live, hello'd connection.
     if (cid !== 0 && hb.interval > 0 && now >= hb.next) {
         if (hb.awaitingAck) {
@@ -215,7 +262,7 @@ function onTimer() {
             // out so we don't re-close before onConnClose lands and clears cid.
             channel.log("heartbeat ACK missing — zombie connection, reconnecting");
             hb.next = now + hb.interval;
-            channel.conn.close(cid);   // onConnClose schedules the reconnect
+            channel.conn.close(cid, CLOSE_RESUME);   // onConnClose schedules the reconnect
             return;
         }
         sendHeartbeat(cid);
@@ -342,7 +389,10 @@ function sendApprovals(chatId) {
 }
 
 function postSimple(chatId, content) {
-    if (content.length > DISCORD_MAX_MSG_LEN) content = content.substring(0, DISCORD_MAX_MSG_LEN);
+    // Truncate on the same hardened boundary sendChunked uses — a raw
+    // substring() can split a surrogate pair and Discord 400s the request.
+    if (content.length > DISCORD_MAX_MSG_LEN)
+        content = content.substring(0, findSplit(content, 0, DISCORD_MAX_MSG_LEN));
     channel.http({
         method: "POST",
         url: config.base + "/api/v10/channels/" + chatId + "/messages",

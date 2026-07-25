@@ -151,14 +151,34 @@ decided by layer 3's `decide()` on every hop, including redirects, which a
 single pre-flight check could never see. See `shell-networking.md` and
 `egress-filter.md` §8.)
 
-**Don't run cclaw as root.** The namespace sandbox maps the invoking uid to
-root inside the child's user namespace (uid_map `0 <uid> 1`, `sandbox.c`).
-When the invoking uid is already 0, the child holds *real* root over any
-filesystem objects the host uid 0 owns that leak into its mount view, and
-read-only bind remounts lose much of their bite (root can often remount or
-bypass DAC where an unprivileged mapped uid cannot). Layer 2 degrades from a
-hard boundary to a soft one. Run cclaw as an unprivileged user; root is only
-appropriate for throwaway containers/VMs where the whole host is disposable.
+**Prefer running cclaw as an unprivileged user.** The namespace sandbox maps the
+invoking uid to root inside the child's user namespace (uid_map `0 <uid> 1`,
+`sandbox.c`). When the invoking uid is already 0 that map is the identity, so
+`CAP_DAC_OVERRIDE` in the child's user namespace applies to every root-owned
+file — anything reachable in the child's mount view becomes readable regardless
+of its mode. `/etc` is bind-mounted read-only in full, so `/etc/shadow` is the
+concrete example, and `test_etc_shadow_inaccessible` skips itself under uid 0
+for exactly this reason.
+
+What does **not** change under root, measured rather than assumed:
+
+- **Read-only bind remounts hold.** `sandbox_remount_ro()` re-ORs the flags the
+  kernel locked onto each mount, and a `remount,rw` is refused even with
+  `CAP_SYS_ADMIN` in the child user namespace. Writes to `/usr` fail with
+  `EROFS` whether cclaw runs as root or not.
+- **The child's capability set is identical either way.** `unshare(CLONE_NEWUSER)`
+  always makes the child root *of its own* user namespace with a full effective
+  set; running cclaw unprivileged does not reduce that. Those capabilities are
+  scoped to the child namespace, so `capable()`-gated globals stay closed in
+  both cases.
+- **Egress is unaffected** — `CLONE_NEWNET` plus the broker is a mount/netns
+  property, not a DAC one.
+
+So root costs exactly one layer: DAC as defense-in-depth over host-root-owned
+files that are mounted into the child. That is worth keeping, so prefer an
+unprivileged user (or the `cclaw` user that `cclaw install` creates). Root is
+reasonable on dedicated hardware or in a disposable container, where the host is
+the trust boundary anyway — it is a supported configuration, not a broken one.
 
 ## Sub-Agent Privilege Reduction
 

@@ -103,9 +103,18 @@ See [specs/security.md](specs/security.md) for full details and [specs/trust.md]
 | Profile | Use for |
 |-------|---------|
 | `host` | **No sandbox at all** — skips *both* the namespace and the egress proxy (traffic goes direct, unfiltered). Use when the surrounding environment already provides isolation (inside a Docker container, behind a firewall) or on hosts where unprivileged userns is unavailable. `--trust-host` forces this. |
-| `trusted` | Default agent — full env access, CWD mounted |
-| `standard` | Most agents — clean env, network via proxy, workspace rw |
-| `restricted` | Observer/audit agents — no network, workspace read-only, tight limits |
+| `trusted` | Default agent — unbounded resources, inherit+scrub env. Workspace only: no CWD mount, so it cannot see the user's files or another agent's workspace without a grant. |
+| `standard` | Most agents — clean env, network via proxy, workspace rw, generous NPROC/CPU caps |
+| `restricted` | Observer/audit agents — **no network at all**; still able to run real programs (workspace rw, bounded NPROC/CPU) |
+
+`trusted` is about *resources*, not *reach* — it has no rlimits, but it mounts no
+more than `standard` does. Widening what an agent can see is the `grants` +
+approval path, never a side effect of a looser profile. `$HOME` is set under
+every profile (the agent workspace when sandboxed, the real user home under
+`host`), `PATH` includes both system and workspace-local bin dirs, and `/tmp` is
+a RAM-percentage tmpfs — so `npm install`, `cargo build`, and `go build` work
+inside the sandbox. No profile sets `RLIMIT_AS`; see
+[specs/sandbox-profiles.md](specs/sandbox-profiles.md) for why.
 
 ### Using secrets in tool calls
 

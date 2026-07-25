@@ -184,7 +184,12 @@ static void test_env_hardened(void) {
     assert(strstr(res, "GEMINI_API_KEY") == NULL);
     assert(strstr(res, "CCLAW_DB_PATH") == NULL);
     assert(strstr(res, "CCLAW_WEB_PORT") == NULL);
-    assert(strstr(res, "\nHOME=") == NULL);
+    /* HOME is deliberately present and points at the agent workspace: without
+     * it npm/cargo/go have nowhere to cache, and pointing it at the workspace
+     * keeps user-level installs inside the one directory the agent owns. */
+    char expect_home[512];
+    snprintf(expect_home, sizeof(expect_home), "\nHOME=%s\n", workspace);
+    assert(strstr(res, expect_home) != NULL);
     free(res);
 
     unsetenv("OPENROUTER_API_KEY");

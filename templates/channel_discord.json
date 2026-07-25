@@ -1,0 +1,6 @@
+{
+  "commands": {
+    "/approvals": { "description": "Review pending approvals", "admin": true },
+    "/admin": { "description": "Get the admin dashboard link", "admin": true }
+  }
+}

@@ -861,6 +861,47 @@ static int builtin_stage_install(sqlite3 *db, const char *base,
     return rc;
 }
 
+/* Install a builtin *channel* bundle, preserving the channel's trust status
+ * across the reinstall. install's INSERT OR REPLACE deliberately lands 'draft'
+ * (the agent re-promote path); only this wrapper restores the prior status so
+ * a restart never demotes an active channel. Builtin bundles are shipped code,
+ * already past the trust gate — a fresh install is born 'active'. Whether it
+ * *runs* is the separate <ext>.enabled config key (specs/config.md). */
+static int install_channel_builtin(sqlite3 *db, const char *base, const char *name,
+                                   const BuiltinFile *files, size_t nfiles) {
+    if (builtin_row_foreign(db, name)) return 0;   /* never fight a foreign row */
+
+    sqlite3_stmt *s;
+    char *status = NULL, *prev = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT status, prev_extension_name FROM channels WHERE name=?1",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(s, 0);
+            status = strdup(v ? v : "draft");
+            v = (const char *)sqlite3_column_text(s, 1);
+            if (v) prev = strdup(v);
+        }
+        sqlite3_finalize(s);
+    }
+
+    BuiltinBundle b = { name, files, nfiles };
+    int rc = builtin_stage_install(db, base, &b);
+    if (rc == 0 && sqlite3_prepare_v2(db,
+            "UPDATE channels SET status=?1, prev_extension_name=?2 WHERE name=?3",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, status ? status : "active", -1, SQLITE_STATIC);
+        if (prev) sqlite3_bind_text(s, 2, prev, -1, SQLITE_STATIC);
+        else sqlite3_bind_null(s, 2);
+        sqlite3_bind_text(s, 3, name, -1, SQLITE_STATIC);
+        sqlite3_step(s);
+        sqlite3_finalize(s);
+    }
+    free(status); free(prev);
+    return rc;
+}
+
 int extension_install_builtin(sqlite3 *db, const char *db_path) {
     if (!db || !db_path) return -1;
 
@@ -875,6 +916,11 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
         { "telegram.json",  TPL_CHANNEL_TELEGRAM_JSON },
         { "extension.json", TPL_CHANNEL_TELEGRAM_MANIFEST_JSON },
     };
+    static const BuiltinFile discord_files[] = {
+        { "channel.qjs",    TPL_CHANNEL_DISCORD_QJS },
+        { "discord.json",   TPL_CHANNEL_DISCORD_JSON },
+        { "extension.json", TPL_CHANNEL_DISCORD_MANIFEST_JSON },
+    };
     static const BuiltinFile docs_files[] = {
         { "extension.json", TPL_DOCS_MANIFEST_JSON },
         { "skills/configuring-cclaw/SKILL.md",    TPL_DOCS_CONFIGURING_CCLAW_MD },
@@ -887,47 +933,12 @@ int extension_install_builtin(sqlite3 *db, const char *db_path) {
     };
 
     int rc = 0;
-    sqlite3_stmt *s;
 
-    /* ── telegram (channel: needs the status save/restore dance) ── */
-    if (!builtin_row_foreign(db, "telegram")) {
-        /* Capture channel status + revert target so a restart doesn't demote
-         * an active channel — install's INSERT OR REPLACE deliberately lands
-         * 'draft' for the agent re-promote path; only this wrapper restores. */
-        char *status = NULL, *prev = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT status, prev_extension_name FROM channels WHERE name='telegram'",
-                -1, &s, NULL) == SQLITE_OK) {
-            if (sqlite3_step(s) == SQLITE_ROW) {
-                const char *v = (const char *)sqlite3_column_text(s, 0);
-                status = strdup(v ? v : "draft");
-                v = (const char *)sqlite3_column_text(s, 1);
-                if (v) prev = strdup(v);
-            }
-            sqlite3_finalize(s);
-        }
-
-        BuiltinBundle tg = { "telegram", telegram_files,
-                             sizeof(telegram_files)/sizeof(*telegram_files) };
-        int trc = builtin_stage_install(db, base, &tg);
-        if (trc == 0) {
-            /* Builtin bundles are shipped code, already past the trust gate:
-             * a fresh install is born trust-'active'. Whether it *runs* is the
-             * separate telegram.enabled config key (specs/config.md) — trust
-             * says "may this code run", never "should it". A restart restores
-             * whatever status the channel had before the reinstall. */
-            if (sqlite3_prepare_v2(db,
-                    "UPDATE channels SET status=?1, prev_extension_name=?2 "
-                    "WHERE name='telegram'", -1, &s, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(s, 1, status ? status : "active", -1, SQLITE_STATIC);
-                if (prev) sqlite3_bind_text(s, 2, prev, -1, SQLITE_STATIC);
-                sqlite3_step(s);
-                sqlite3_finalize(s);
-            }
-        }
-        free(status); free(prev);
-        rc |= trc;
-    }
+    /* ── channel builtins (status save/restore across reinstall) ── */
+    rc |= install_channel_builtin(db, base, "telegram", telegram_files,
+                                  sizeof(telegram_files)/sizeof(*telegram_files));
+    rc |= install_channel_builtin(db, base, "discord", discord_files,
+                                  sizeof(discord_files)/sizeof(*discord_files));
 
     /* ── cclaw-docs (skills-only self-documentation) ── */
     if (!builtin_row_foreign(db, "cclaw-docs")) {

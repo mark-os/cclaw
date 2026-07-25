@@ -166,13 +166,61 @@ retries:
   `channel.send({method,url,body, outbox_id: item.id, final: 1})`.
 - `onRequest(req)` — handle webhook/UDS HTTP requests (verification,
   signature checks); return `{status, body}`.
+- Persistent-connection channels (Discord Gateway, IRC, …) instead use
+  `channel.conn.open({url})` in `onInit` and the callbacks `onConnOpen(id)`,
+  `onConnMessage(id, text)`, `onConnClose(id, code)`, and `onTimer()` (a ~1s
+  tick for heartbeats and reconnect timing). C owns the socket; the handler
+  owns the protocol. See specs/channel-transports.md.
 
 Host API: `channel.emit`, `channel.send`, `channel.http`,
+`channel.conn.{open,send,close}` (persistent streams),
 `channel.getConfig(key)` (registry, read-only),
 `channel.getState/setState(key, value)` (runtime scratch),
 `channel.log`, `channel.ackOutbox/failOutbox`,
 and `channel.admin.isAdmin(id)` / `channel.admin.listPendingApprovals()` /
 `channel.admin.dashboardUrl()`.
+
+## Discord
+
+Discord is a builtin channel (like telegram) reached over the real-time
+**Gateway** (a persistent WebSocket): full DMs + guild messages, not just slash
+commands. The handler owns the gateway protocol (IDENTIFY / RESUME / heartbeats
+/ reconnect); C owns only the socket.
+
+Turn it on:
+
+1. Create an application + bot at the Discord Developer Portal; copy the bot
+   token to `CCLAW_DISCORD_BOT_TOKEN` (or `save_secret discord.bot_token`).
+2. **Enable the privileged `MESSAGE CONTENT` intent** on the bot's settings
+   page. Without it the gateway closes with code 4014 and the handler logs a
+   fatal error — messages would otherwise arrive with empty `content`. (SERVER
+   MEMBERS / PRESENCE are not needed.)
+3. Invite the bot to your server with the *Send Messages* permission (and
+   *Read Message History* for reply context).
+4. `set discord.admin_ids = <your user id>` and `discord.enabled = 1`, then
+   promote/activate the channel.
+
+Config keys beyond the standard `enabled`/`bot_token`/`admin_ids`/`base_url`:
+
+- `require_mention` (default `1`) — in guild channels the bot stays silent
+  unless it is @mentioned or its message is replied to. This is the cheap,
+  deterministic gate: unmentioned chatter is dropped without spending a turn.
+  DMs always reach the agent.
+- `ambient_channels` — comma-separated channel ids (or `*`) where the bot
+  instead sees **every** message. Pair with a route in `explicit` delivery
+  mode for listen-and-decide: the agent reads the room and speaks only via
+  `channel_send`. Costs a model turn per message — enable per channel.
+- `allow_bots` (default `0`) — process messages from other bots. Off by
+  default so several cclaw bots in one server can't loop on each other.
+- `intents` — gateway intents bitfield (default `37377` = GUILDS |
+  GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT).
+- `egress_hosts` — the gateway (`gateway.discord.gg`), RESUME subdomains
+  (`.discord.gg`), and the CDN (`.discordapp.net`) beyond `base_url`.
+
+**Distinct personas = distinct bots.** A Discord application has one identity
+(name + avatar) everywhere it appears, so give each persona its own bot token
+and its own channel row — one `cclaw --channel` runner per persona — rather
+than multiplexing one bot across channels.
 
 ## Message flow
 

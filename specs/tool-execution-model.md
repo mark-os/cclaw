@@ -182,8 +182,9 @@ cross as raw bytes with no escape/unescape round-trip. The body opens with a
 tier byte (`0`=file, `1`=shell, `2`=web, `3`=js); `run_tool.c` is the canonical
 field order. Fields by tier (additive over file):
 
-- all: `tier`, `tool_name`, `env_mode`, `rlimits{nproc,as_mb,cpu_sec}`
-- file: `workspace`, `read_paths[]`, `write_paths[]`, `workspace_ro`, `mount_cwd`, `cwd_path`
+- all: `tier`, `tool_name`, `env_mode`, `rlimits{nproc,as_mb,cpu_sec}` (`as_mb` is
+  carried but no profile sets it — see [sandbox-profiles.md](sandbox-profiles.md))
+- file: `workspace`, `read_paths[]`, `write_paths[]`, `workspace_ro`, `mount_cwd`, `cwd_path`, `tmp_pct`
 - web/shell: `host_rules[]` (exact/suffix), `agent_dir` (for proxy socket; the broker partitions grants into host/CIDR rules at `proxy_bind`)
 - shell: `command` (with secrets already interpolated by the daemon parent), `timeout`, `secrets[]` (minimal name/value set for env injection)
 - file/web/js: `params[]` — the tool's arguments, pre-extracted by the parent

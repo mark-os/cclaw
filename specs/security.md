@@ -367,7 +367,9 @@ Provider API keys resolve env → system-scope secret: `config_load()` reads the
 
 **Key-protection ceiling.** The DB store is encrypted at rest, but the key sits on the *same disk* as the ciphertext. Whole-disk theft yields both → plaintext. So the built-in store protects against *exfiltration of `cclaw.db` alone* (a leaked backup, a mis-scoped file copy) — **not** against full-disk capture or the running host. Closing that gap means deriving the key from a user passphrase (KDF) or binding it to hardware (TPM / Secure Enclave) — which is exactly what a keychain storage provider gets for free (see [Storage providers](#storage-providers)). For a single-user box a chmod-600 key file is a reasonable default; it is not a substitute for a hardware-backed vault, and users who care should use the keychain provider.
 
-**The key file is masked from every sandboxed shell child.** `.cclaw_key` lives next to `cclaw.db` (`<dir of db_path>/.cclaw_key`). That directory is *not* in the workspace, so `standard`/`restricted` agents — which bind only the workspace — never see it by construction. But `trusted` binds the **CWD rw**, and in CLI mode the CWD *is* the dir holding the key and the DB, which would otherwise expose both to a shell child (key + ciphertext = full secret compromise). To close that, `sandbox_child_setup()` **bind-masks** the key and the DB family (`cclaw.db`, `-wal`, `-shm`) inside the new mount namespace: after the CWD/workspace binds and before `pivot_root`, an empty read-only file is bound over each. Files not reachable in the child's mount tree are skipped — they are already invisible by omission.
+**The key file is invisible to sandboxed shell children by omission.** `.cclaw_key` lives next to `cclaw.db` (`<dir of db_path>/.cclaw_key`). That directory is *not* the workspace, and no sandboxed profile mounts anything else by default — `trusted` stopped mounting the CWD — so the key and the DB ciphertext simply never materialize in the child's mount tree. `host` establishes no namespace and is exposed by construction; that is what picking `host` means.
+
+**Known gap: a grant-mounted path can still expose the key.** A `read_path`/`write_path` grant covering a directory that contains `cclaw.db` binds it into the child, and key + ciphertext is a full secret compromise. `sandbox_mask_state_files()` (`src/sandbox.c`) exists to bind an empty read-only file over the key and the DB family (`cclaw.db`, `-wal`, `-shm`) for exactly this case, but it is **not currently reachable**: the mask runs in the `--run-tool` broker, and `build_sandbox_cfg()` sets `db_path = NULL` because there is no DB in that process — the path is not carried on the wire (`RunToolReq`, `src/run_tool.h`). Until `db_path` is plumbed through, treat "grant a path that contains the DB" as equivalent to handing over every stored secret, and prefer grants scoped below the DB's directory.
 
 The one remaining exposure is **`host`** (`--trust-host` / no-userns dev mode): it runs with *no* sandbox, so a shell child reads the host filesystem directly, key included. That is the documented price of `host` — never run untrusted-derived work at `host` on a box whose `.cclaw_key` matters. See [Sandbox Profile Policy Bundles](#sandbox-profile-policy-bundles).
 
@@ -675,13 +677,21 @@ The `agents.sandbox_profile` column maps to a shell sandbox profile:
 | sandbox | none | namespace | namespace | namespace |
 | env | inherit + scrub | inherit + scrub | clean allowlist | clean allowlist |
 | network | direct (no proxy) | proxy | proxy | none |
-| CWD mount | n/a (host fs) | rw | no | no |
-| workspace | rw (host fs) | rw | rw | ro |
-| RLIMIT_NPROC | none | none | 64 | 8 |
-| RLIMIT_AS | none | none | 512MB | 128MB |
-| RLIMIT_CPU | none | none | 60s | 10s |
+| CWD mount | n/a (host fs) | **no** | no | no |
+| workspace | rw (host fs) | rw | rw | rw |
+| `$HOME` | user's real home | workspace | workspace | workspace |
+| `/tmp` tmpfs | host `/tmp` | 50% RAM | 50% RAM | 25% RAM |
+| RLIMIT_NPROC | none | none | 256 | 64 |
+| RLIMIT_AS | none | none | **none** | **none** |
+| RLIMIT_CPU | none | none | 1800s | 120s |
+
+`trusted` bounds no resources but sees no more than `standard`: it mounts no CWD,
+so reach comes only from the workspace plus `read_path`/`write_path` grants. No
+profile sets `RLIMIT_AS` — it caps address space rather than usage, which refuses
+to start large-VA runtimes (`go`, `node`, `rustc`) without bounding anything. See
+[specs/sandbox-profiles.md](sandbox-profiles.md) for the full rationale.
 
 - `secret_agent` (future) maps to `standard` with additional restriction: only `secret_store_write` tool grant, no shell
 - Unknown values (including any legacy values like `bootstrap`) fall through to `standard` in `sandbox_policy_from_profile()` (`src/sandbox.c`)
 - Resolved once in `agent_setup_init()` via `sandbox_profile_resolve()`, stored in `SandboxProfile`
-- **`.cclaw_key` and the DB family are bind-masked** inside every sandboxed child, so even the CWD-mounting `trusted` level can't read the secret key or DB ciphertext. Only `host` (no sandbox) is exposed. See [Secret Storage](#secret-storage).
+- **`.cclaw_key` and the DB family are outside every sandboxed profile's mount set**, so no sandboxed child can read the secret key or DB ciphertext by default. `host` (no sandbox) is exposed by construction, and a `read_path`/`write_path` grant covering the DB's directory re-exposes both — the mask meant to cover that case is not currently wired. See [Secret Storage](#secret-storage).

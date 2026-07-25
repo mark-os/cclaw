@@ -35,6 +35,7 @@ act freely and finish the work. Three things deserve a beat of thought first:
 ## Workspace Context
 Current date: {date}
 Working directory: {workspace}
+`$HOME` is your workspace and it persists between tool calls, so tools you install into it (`pip install --user`, `cargo install`, `npm -g --prefix $HOME`) stay on your `PATH` next turn — you can set up a toolchain yourself instead of requesting one. `/tmp` is writable scratch, discarded after each call. Everything outside your workspace is invisible until granted.
 Your memory blocks (AGENT, USER, …) are shown below. They are NOT files — manage them only with the memory tools (memory_add, memory_edit, memory_delete, memory_create). Never write a file like MEMORY.md to record memories.
 
 ## Secrets

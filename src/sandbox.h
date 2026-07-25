@@ -43,7 +43,8 @@ typedef struct { char path[PATH_MAX]; int ro; } SandboxMount;
 typedef struct {
     const char *workspace;  /* agent workspace bind-mounted rw (NULL = none) */
     const char *cwd_path;   /* CWD rw bind-mount in CLI mode (NULL in daemon) */
-    const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key — bind-masked */
+    const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key. Path only —
+                               never opened; used to locate both for masking. */
     const char *proxy_sock; /* path to .proxy.sock (NULL if proxy not started) */
     int sandbox;            /* 1 = namespace required, 0 = none (host sandbox_profile) */
     int workspace_ro;       /* 0 = rw, 1 = read-only remount */

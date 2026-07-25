@@ -184,7 +184,11 @@ field order. Fields by tier (additive over file):
 
 - all: `tier`, `tool_name`, `env_mode`, `rlimits{nproc,as_mb,cpu_sec}` (`as_mb` is
   carried but no profile sets it — see [sandbox-profiles.md](sandbox-profiles.md))
-- file: `workspace`, `read_paths[]`, `write_paths[]`, `workspace_ro`, `mount_cwd`, `cwd_path`, `tmp_pct`
+- file: `workspace`, `read_paths[]`, `write_paths[]`, `workspace_ro`, `mount_cwd`, `cwd_path`, `tmp_pct`, `db_path`
+  (`db_path` is a *path only* — the child never opens the DB. It is carried so
+  the child can bind-mask `.cclaw_key` and the DB family out of any granted
+  mount; see [security.md](security.md). Dropping it silently disables the
+  mask, which is why `test/test_sandbox_key_mask.c` guards it.)
 - web/shell: `host_rules[]` (exact/suffix), `agent_dir` (for proxy socket; the broker partitions grants into host/CIDR rules at `proxy_bind`)
 - shell: `command` (with secrets already interpolated by the daemon parent), `timeout`, `secrets[]` (minimal name/value set for env injection)
 - file/web/js: `params[]` — the tool's arguments, pre-extracted by the parent

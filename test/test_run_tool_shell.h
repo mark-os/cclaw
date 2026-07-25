@@ -32,7 +32,7 @@ typedef struct {
     const char *workspace;
     const char *agent_dir;      /* dir for proxy UDS (NULL = use workspace) */
     const char *cwd_path;       /* CWD rw bind-mount (NULL = none) */
-    const char *db_path;        /* not used by broker; always NULL */
+    const char *db_path;        /* cclaw.db: key + ciphertext masked in the ns */
     int timeout;
     int sandbox;
     int env_mode;               /* 1 = clean env (default), 0 = inherit */
@@ -79,6 +79,7 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
         .net_mode = r->net_mode,
         .workspace = r->workspace,
         .cwd_path = r->cwd_path,
+        .db_path = r->db_path,
         .workspace_ro = r->workspace_ro,
         .mount_cwd = r->mount_cwd,
         .read_paths = r->read_paths,
@@ -175,6 +176,7 @@ static inline char *run_tool_shell_with_hosts(const ShellToolReq *r, char **out_
         .net_mode = r->net_mode,
         .workspace = r->workspace,
         .cwd_path = r->cwd_path,
+        .db_path = r->db_path,
         .workspace_ro = r->workspace_ro,
         .mount_cwd = r->mount_cwd,
         .read_paths = r->read_paths,

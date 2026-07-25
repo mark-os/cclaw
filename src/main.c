@@ -2383,13 +2383,14 @@ static void handle_approval_park(int64_t session_id) {
             "INSERT INTO channel_outbox(channel_name, session_id, payload)"
             " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4, 'keyboard', json(?5)));";
         if (admins && admins[0]) {
-            char *save = NULL;
-            for (char *tok = strtok_r(admins, ", ", &save); tok; tok = strtok_r(NULL, ", ", &save)) {
+            char *ids[CHANNEL_ADMIN_IDS_MAX];
+            int n_ids = split_and_trim(admins, ids, CHANNEL_ADMIN_IDS_MAX);
+            for (int i = 0; i < n_ids; i++) {
                 sqlite3_stmt *ins;
                 if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
                     sqlite3_bind_text(ins, 1, ch_name, -1, SQLITE_STATIC);
                     sqlite3_bind_int64(ins, 2, session_id);
-                    sqlite3_bind_text(ins, 3, tok, -1, SQLITE_STATIC);
+                    sqlite3_bind_text(ins, 3, ids[i], -1, SQLITE_STATIC);
                     sqlite3_bind_text(ins, 4, prompt, -1, SQLITE_STATIC);
                     sqlite3_bind_text(ins, 5, keyboard, -1, SQLITE_STATIC);
                     sqlite3_step(ins); sqlite3_finalize(ins);

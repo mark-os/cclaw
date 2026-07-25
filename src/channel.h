@@ -12,6 +12,10 @@
 
 #define CHANNEL_MAX 16
 #define CHANNEL_MAX_RESTARTS 3
+
+/* Cap on a parsed admin_ids list — an operator-typed config value, not
+ * user-controlled input; sized generously above any real admin roster. */
+#define CHANNEL_ADMIN_IDS_MAX 32
 #define CHANNEL_FLAP_WINDOW 300   /* 3 crashes in 5 min = flapping */
 #define CHANNEL_MAX_BACKOFF 60
 

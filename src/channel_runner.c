@@ -365,23 +365,10 @@ static int url_host_allowed(const char *url) {
         }
         if (bh) rules[nr++] = bh;
 
-        /* egress_hosts: comma-separated bare hosts / ".suffix" entries,
-         * tokenized in place in the config copy. */
+        /* egress_hosts: comma-/space-separated bare hosts / ".suffix"
+         * entries, tokenized in place in the config copy. */
         char *egress = channel_config_get(g_ctx->db, g_ctx->channel_name, "egress_hosts");
-        char *p = egress;
-        while (p && *p && nr < 24) {
-            while (*p == ',' || *p == ' ' || *p == '\t') p++;
-            if (!*p) break;
-            char *delim = p;
-            while (*delim && *delim != ',') delim++;
-            char *end = delim;
-            while (end > p && (end[-1] == ' ' || end[-1] == '\t')) end--;
-            char next = *delim;
-            *end = '\0';
-            if (*p) rules[nr++] = p;
-            if (next != ',') break;
-            p = delim + 1;
-        }
+        nr += (size_t)split_and_trim(egress, &rules[nr], (int)(24 - nr));
 
         ok = host_match(rules, nr, th);
         curl_free(bh);

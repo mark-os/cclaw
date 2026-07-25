@@ -113,8 +113,11 @@ Persistent-conn URLs are checked against the channel's egress allowlist, exactly
 like `channel.http` (`url_host_allowed`, default-deny). A channel that legitimately
 talks to several hosts (Discord: `discord.com` for REST **and**
 `gateway.discord.gg` for the Gateway) needs more than the single `base_url` pin:
-the allowlist is `base_url`'s host plus any entry in an optional comma-separated
-`egress_hosts` config key.
+the allowlist is `base_url`'s host plus any entry in an optional
+comma-/whitespace-separated `egress_hosts` config key (`split_and_trim` in
+`util.c` — one shared tokenizer, since a hostname can never legitimately
+contain internal whitespace, using it as a delimiter alongside comma loses
+nothing).
 
 ### Exact vs. suffix matching
 

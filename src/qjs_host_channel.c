@@ -5,6 +5,7 @@
 #endif
 #include "qjs_helpers.h"
 #include "channel.h"
+#include "util.h"           /* split_and_trim */
 #include "channel_api.h"
 #include "channel_runner.h"
 #include "admin_api.h"
@@ -339,16 +340,11 @@ static JSValue js_admin_is_admin(JSContext *ctx, JSValueConst this_val,
     if (!channel_id) return JS_NewBool(ctx, 0);
     char *admins = channel_config_get(g_ctx->db, g_ctx->channel_name, "admin_ids");
     if (!admins) { JS_FreeCString(ctx, channel_id); return JS_NewBool(ctx, 0); }
-    size_t cid_len = strlen(channel_id);
+    char *ids[CHANNEL_ADMIN_IDS_MAX];
+    int n = split_and_trim(admins, ids, CHANNEL_ADMIN_IDS_MAX);
     int found = 0;
-    char *p = admins;
-    while (*p) {
-        while (*p == ',' || *p == ' ') p++;
-        if (!*p) break;
-        char *end = p;
-        while (*end && *end != ',' && *end != ' ') end++;
-        if ((size_t)(end - p) == cid_len && strncmp(p, channel_id, cid_len) == 0) { found = 1; break; }
-        p = end;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(ids[i], channel_id) == 0) { found = 1; break; }
     }
     free(admins);
     JS_FreeCString(ctx, channel_id);

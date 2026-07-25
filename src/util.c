@@ -135,6 +135,24 @@ int ascii_strncasecmp(const char *a, const char *b, size_t n) {
     return 0;
 }
 
+int split_and_trim(char *s, char **out, int max) {
+    int n = 0;
+    if (!s) return 0;
+    char *p = s;
+    while (*p && n < max) {
+        while (*p == ',' || *p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        char *end = p;
+        while (*end && *end != ',' && *end != ' ' && *end != '\t') end++;
+        char more = *end;
+        *end = '\0';
+        out[n++] = p;
+        if (!more) break;
+        p = end + 1;
+    }
+    return n;
+}
+
 int curl_ws_available(void) {
     curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
     if (!v || !v->protocols) return 0;

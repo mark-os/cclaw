@@ -59,11 +59,13 @@ int ascii_strncasecmp(const char *a, const char *b, size_t n);
  * that had drifted on whether space was a delimiter or just padding. */
 int split_and_trim(char *s, char **out, int max);
 
-/* True if the *runtime* libcurl advertises the ws/wss protocols. The
- * compile-time view lies: libcurl-minimal ships the curl_ws_* declarations and
- * symbols but strips the protocol handlers, so a ws:// transfer fails at
- * perform with "Unsupported protocol". Probing the runtime protocol list is
- * the only source of truth (see specs/channel-transports.md).
+/* True if the *runtime* libcurl can carry our WebSocket transport: it
+ * advertises ws/wss AND is >= 8.13.0. The compile-time view lies: libcurl-
+ * minimal ships the curl_ws_* declarations and symbols but strips the protocol
+ * handlers, so a ws:// transfer fails at perform with "Unsupported protocol".
+ * Probing the runtime protocol list is the only source of truth. The version
+ * floor is the fragment-reassembly contract — see curl_ws_available() and
+ * specs/channel-transports.md.
  *
  * Lives in util (a leaf) rather than channel_runner on purpose: the conn
  * integration test must skip rather than fail on a box without WS, and it

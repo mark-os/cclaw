@@ -169,6 +169,23 @@ static int ws_send_text_fragmented(int fd, const char *s, int parts) {
     return 0;
 }
 
+/* Send one text message whose opening fragment carries no payload. Legal per
+ * RFC 6455 — only the first frame carries the opcode, and its length may be 0 —
+ * and emitted by peers that flush a header before the body is ready. The type
+ * latch must key off "a message is open", not "bytes buffered so far":
+ * otherwise the typeless CONT fragment re-latches the message as binary and the
+ * whole thing is dropped. Payload stays under 126 bytes (7-bit length form). */
+static int ws_send_text_empty_first(int fd, const char *s) {
+    size_t len = strlen(s);
+    if (len >= 126) return -1;
+    unsigned char hdr[2] = { 0x01, 0x00 };          /* TEXT, FIN clear, len 0 */
+    if (write_all(fd, hdr, 2) != 0) return -1;
+    hdr[0] = 0x80;                                  /* CONT with FIN set */
+    hdr[1] = (unsigned char)len;
+    if (write_all(fd, hdr, 2) != 0) return -1;
+    return write_all(fd, s, len);
+}
+
 /* Read one client frame (masked). Returns opcode, fills payload (NUL-term).
  * -1 on error/close of the socket. */
 static int ws_read_frame(int fd, char *payload, size_t cap, size_t *out_len) {
@@ -273,6 +290,10 @@ static void *mock_ws_server(void *arg) {
             ws_send_text_fragmented(cfd,
                 "{\"op\":0,\"t\":\"MESSAGE_CREATE\","
                 "\"d\":{\"channel_id\":\"888\",\"content\":\"fragment-joined\"}}", 3);
+            /* Same again, but the opening fragment is empty. */
+            ws_send_text_empty_first(cfd,
+                "{\"op\":0,\"t\":\"MESSAGE_CREATE\","
+                "\"d\":{\"channel_id\":\"777\",\"content\":\"empty-first-joined\"}}");
         }
     }
     close(cfd);
@@ -368,8 +389,8 @@ int main(void) {
     printf("test_integration_channel_conn:\n");
 
     if (!curl_ws_available()) {
-        printf("  SKIP: runtime libcurl has no ws/wss protocol "
-               "(libcurl-minimal?) — conn.* transport untestable here\n");
+        printf("  SKIP: runtime libcurl cannot carry the WS transport "
+               "(no ws/wss, or older than 8.13.0) — conn.* untestable here\n");
         return 0;
     }
 
@@ -452,6 +473,23 @@ int main(void) {
     }
     if (!frag) FAIL("fragmented MESSAGE_CREATE was not reassembled");
     printf("  PASS: fragmented message reassembled across CONT frames\n");
+
+    /* 3c. Same, but the message opens with a zero-length TEXT fragment. Latching
+     * the message type on an empty buffer instead of on "message started" reads
+     * the type off the typeless CONT frame and drops the message as binary. */
+    int empty_first = 0;
+    for (int i = 0; i < 60 && !empty_first; i++) {
+        usleep(100000);
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT COUNT(*) FROM channel_events WHERE channel_name='discx'"
+                " AND payload LIKE '%empty-first-joined%';", -1, &st, NULL) == SQLITE_OK) {
+            if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) > 0) empty_first = 1;
+            sqlite3_finalize(st);
+        }
+    }
+    if (!empty_first) FAIL("message opening with a zero-length fragment was dropped");
+    printf("  PASS: zero-length opening fragment still dispatches as text\n");
 
     /* 4. Bidirectional proof: server saw IDENTIFY + heartbeat; handler saw ACK. */
     if (!g_identify_seen) FAIL("server never received IDENTIFY");

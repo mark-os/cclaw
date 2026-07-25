@@ -50,8 +50,20 @@ channel.conn.send(id, text) -> bool      // text frame (ws) / bytes (raw)
     Queues on CURLE_AGAIN, flushed on the next tick. false if id unknown/closed.
     Text-only in v1 (no binary ws frames).
 
-channel.conn.close(id)                   // graceful close; fires onConnClose
+channel.conn.close(id, code?)            // graceful close; fires onConnClose
+    code is the WebSocket status put on the wire; omitted (or <= 0) sends a
+    payload-less CLOSE. Protocols read this: Discord invalidates the gateway
+    session on a 1000 and leaves it resumable on anything else, so a handler
+    that means to come back should say so rather than inherit a default.
+    onConnClose still reports 1000 for a payload-less close.
 ```
+
+**Under `--check`** the conn API is stubbed, because a static validation pass
+must not depend on the provider being reachable: `conn.open` validates the spec
+(URL, framing, egress allowlist) and returns a plausible id without dialing,
+`conn.send` returns `false`, and no callback ever fires. A handler's `onInit`
+therefore must not treat a `false` from `send`, or the absence of `onConnOpen`,
+as a fatal error — `--check` only asks "would this handler load and wire up".
 
 ### Callbacks (C → JS, all optional)
 
@@ -176,11 +188,26 @@ validated, never the source of truth for endpoints** (URLs are runtime values:
              "transports": ["persistent"] }
 ```
 
-`--check` uses it to fail-closed early: a `persistent` channel on a libcurl built
-without WS/WSS is refused at activation with a clear message, rather than
-throwing at the first `conn.open`. Absent = unconstrained (Telegram declares
-nothing and is unaffected). It documents intent for the next handler author and
-lets C skip wiring conn machinery a channel will never use.
+`--check` uses it to fail-closed early: a `persistent` channel is refused at
+activation, with a clear message, on any libcurl that cannot carry the
+transport — rather than throwing at the first `conn.open`. Absent =
+unconstrained (Telegram declares nothing and is unaffected). It documents
+intent for the next handler author and lets C skip wiring conn machinery a
+channel will never use.
+
+Two things make a libcurl unusable, both checked at runtime (`curl_ws_available`)
+because the compile-time view lies:
+
+- **No WS/WSS protocol.** libcurl-minimal ships the `curl_ws_*` symbols but
+  strips the handlers, so a `ws://` transfer fails at perform.
+- **Older than 8.13.0.** Before that release libcurl derived the frame flags
+  from the opcode alone and never surfaced the FIN bit: the opening fragment of
+  a fragmented message arrived as plain `CURLWS_TEXT` (indistinguishable from a
+  whole message) and every continuation as a bare `CURLWS_CONT` carrying
+  neither the type nor any end marker. Reassembly is not awkward there, it is
+  impossible — nothing in the API says where a message ends. 8.13.0 put the
+  type on every fragment and redefined `CURLWS_CONT` as "more to come", which
+  is the contract `conn_recv_drain` reads.
 
 ## Non-goals (v1)
 

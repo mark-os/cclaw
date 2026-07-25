@@ -156,6 +156,15 @@ int split_and_trim(char *s, char **out, int max) {
 int curl_ws_available(void) {
     curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
     if (!v || !v->protocols) return 0;
+    /* Before 8.13.0 libcurl derived the frame flags from the opcode alone and
+     * never surfaced the FIN bit: the opening fragment of a fragmented message
+     * arrived as plain TEXT (indistinguishable from a whole message) and every
+     * continuation as bare CONT with no type and no end marker. Reassembly is
+     * not merely awkward there, it is impossible — nothing in the API says
+     * where a message ends. 8.13.0 made the type ride every fragment and CONT
+     * mean "more to come", which is what conn_recv_drain reads. Refuse the
+     * older contract rather than silently truncate half the traffic. */
+    if (v->version_num < 0x080D00) return 0;
     for (const char *const *p = v->protocols; *p; p++)
         if (ascii_strcasecmp(*p, "ws") == 0 || ascii_strcasecmp(*p, "wss") == 0) return 1;
     return 0;

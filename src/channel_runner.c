@@ -59,8 +59,10 @@
 #define CR_POLL_TIMEOUT 35L       /* slightly longer than TG long-poll */
 #define CR_DOWNLOAD_MAX (3L * 1024 * 1024)  /* binary download cap (small-RAM boxes) */
 #define MAX_OUTBOX_ATTEMPTS 5
+#define CR_RETRY_AFTER_MAX 3600    /* trust the server's 429 hint, but not blindly */
 #define CR_CONN_MAX 4             /* live persistent connections per channel */
 #define CR_CONN_CONNECT_TIMEOUT 15L  /* default handshake (TCP+TLS+upgrade) cap */
+#define CR_CONN_CONNECT_TIMEOUT_MAX 60L  /* ceiling a handler may raise it to */
 #define CR_CONN_MSG_MAX CR_DOWNLOAD_MAX  /* reassembled WS message cap (same as downloads) */
 
 static volatile sig_atomic_t g_running = 1;
@@ -68,19 +70,25 @@ ChannelCtx *g_ctx;
 
 static void handle_signal(int sig) { (void)sig; g_running = 0; }
 
-/* Telegram 429 bodies carry {"parameters":{"retry_after":N}}. Parse via
- * SQLite JSON (hardened against malformed input -> NULL). 0 if absent. */
+/* 429 bodies carry the server's retry hint in one of two shapes: Telegram
+ * nests an integer under {"parameters":{"retry_after":N}}, Discord puts float
+ * seconds at the top level ({"retry_after":0.75}). Parse via SQLite JSON
+ * (hardened against malformed input -> no row). 0 if absent. */
 static int outbox_retry_after(const char *body) {
     if (!body || !g_ctx || !g_ctx->db) return 0;
-    int ra = 0;
+    double ra = 0;
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(g_ctx->db,
-            "SELECT json_extract(?1,'$.parameters.retry_after')", -1, &s, NULL) == SQLITE_OK) {
+            "SELECT COALESCE(json_extract(?1,'$.parameters.retry_after'),"
+            "                json_extract(?1,'$.retry_after'))", -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_text(s, 1, body, -1, SQLITE_STATIC);
-        if (sqlite3_step(s) == SQLITE_ROW) ra = sqlite3_column_int(s, 0);
+        if (sqlite3_step(s) == SQLITE_ROW) ra = sqlite3_column_double(s, 0);
         sqlite3_finalize(s);
     }
-    return ra > 0 ? ra : 0;
+    if (ra <= 0) return 0;
+    int secs = (int)ra;
+    if (ra > secs) secs++;                     /* sub-second float waits >= 1s */
+    return secs > CR_RETRY_AFTER_MAX ? CR_RETRY_AFTER_MAX : secs;
 }
 
 /* ── QuickJS runtime for channel ───────────────────────────────── */
@@ -563,6 +571,7 @@ typedef struct {
     CURL *easy;                    /* NULL = free slot */
     curl_socket_t fd;             /* CURLINFO_ACTIVESOCKET, polled in extra[] */
     Buf msg;                       /* inbound reassembly (across reads + fragments) */
+    int msg_started;               /* a message is mid-reassembly (may still be 0 bytes) */
     int msg_text;                  /* the message being reassembled is TEXT */
     int msg_over;                  /* message blew CR_CONN_MSG_MAX — drain, don't buffer */
     ConnMsg *out_head, *out_tail;  /* outbound backpressure queue */
@@ -643,8 +652,14 @@ static void conn_recv_drain(JSContext *ctx, int i) {
             return;
         }
         if (meta->flags & (CURLWS_PING | CURLWS_PONG)) continue;
-        if (c->msg.len == 0 && !c->msg_over)
+        /* Only the *first* fragment carries the type; CURLWS_CONT fragments
+         * have none. Latch on msg_started, not msg.len — a zero-length opening
+         * fragment is legal, and keying off the buffer would re-latch on the
+         * next (typeless) fragment and drop the whole message as binary. */
+        if (!c->msg_started) {
+            c->msg_started = 1;
             c->msg_text = (meta->flags & CURLWS_TEXT) != 0;
+        }
         if (rlen) {
             if (c->msg.len + rlen > (size_t)CR_CONN_MSG_MAX) {
                 if (!c->msg_over)
@@ -668,6 +683,7 @@ static void conn_recv_drain(JSContext *ctx, int i) {
             c->msg.len = 0;
             c->msg.oom = 0;
             c->msg_over = 0;
+            c->msg_started = 0;
         }
     }
 }
@@ -704,7 +720,11 @@ int cr_conn_open(const char *url, const char *framing,
     if (!c) return -1;
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_CONNECT_ONLY, 2L);   /* 2 = WebSocket */
+    /* A handler picks the handshake cap, but it does not get to remove it: an
+     * extension asking for hours would re-open the wedge the cap exists to
+     * close (the runner is single-threaded — see below). */
     long cap = timeout > 0 ? timeout : CR_CONN_CONNECT_TIMEOUT;
+    if (cap > CR_CONN_CONNECT_TIMEOUT_MAX) cap = CR_CONN_CONNECT_TIMEOUT_MAX;
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, cap);
     /* CONNECTTIMEOUT alone is not enough: it only covers TCP+TLS, while the
      * HTTP Upgrade → 101 exchange runs in the transfer phase. A peer that
@@ -760,14 +780,22 @@ int cr_conn_send(int id, const char *text) {
 }
 
 /* Graceful close: best-effort CLOSE frame to the peer, then defer teardown +
- * onConnClose to the loop (never re-entrant with the calling JS handler). */
-void cr_conn_close(int id) {
+ * onConnClose to the loop (never re-entrant with the calling JS handler).
+ *
+ * code is the status put on the wire; <= 0 sends a payload-less CLOSE (RFC 6455
+ * "no status code present"). The difference is protocol-visible — Discord, for
+ * one, invalidates the gateway session on a 1000 and leaves it resumable on any
+ * other code — so the handler chooses rather than inheriting whatever we happen
+ * to send. onConnClose still reports 1000 for a payload-less close. */
+void cr_conn_close(int id, int code) {
     int i = id - 1;
     if (i < 0 || i >= CR_CONN_MAX || !g_conn[i].easy) return;
     size_t sent = 0;
-    curl_ws_send(g_conn[i].easy, "", 0, &sent, 0, CURLWS_CLOSE);
+    char status[2] = { (char)((code >> 8) & 0xFF), (char)(code & 0xFF) };
+    curl_ws_send(g_conn[i].easy, code > 0 ? status : "", code > 0 ? sizeof(status) : 0,
+                 &sent, 0, CURLWS_CLOSE);
     g_conn[i].want_close = 1;
-    g_conn[i].close_code = 1000;   /* normal closure */
+    g_conn[i].close_code = code > 0 ? code : 1000;   /* 1000 = normal closure */
 }
 
 /* ── JS handler call sites ─────────────────────────────────────── */
@@ -1278,8 +1306,10 @@ int channel_runner_check(const char *db_path, const char *channel_name, char **e
      * this is the one thing C validates it for. */
     if (extension_manifest_declares_persistent(g_ctx->db, store_dir) && !curl_ws_available()) {
         if (err_out) *err_out = strdup(
-            "channel declares transport 'persistent' but this libcurl has no "
-            "ws/wss support (libcurl-minimal?) — install a WS-capable libcurl");
+            "channel declares transport 'persistent' but this libcurl cannot "
+            "carry it — needs ws/wss support (libcurl-minimal strips it) and "
+            "version >= 8.13.0 (older frame flags cannot delimit a fragmented "
+            "message); install a newer WS-capable libcurl");
         channel_ctx_free(g_ctx); g_ctx = NULL;
         return -1;
     }

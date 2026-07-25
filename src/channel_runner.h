@@ -54,11 +54,13 @@ void send_req_settle(JSContext *ctx, SendReq *r, int status, const char *body,
  *         synchronous handshake; returns id >= 1 or -1.
  *   send: queues a text frame (flushed opportunistically / on the tick);
  *         returns 0 if id unknown or closed.
- *   close: graceful close; onConnClose fires from the loop, not re-entrantly. */
+ *   close: graceful close with an optional WebSocket status code (<= 0 sends a
+ *          payload-less CLOSE); onConnClose fires from the loop, not
+ *          re-entrantly. */
 int cr_conn_open(const char *url, const char *framing,
                  char **headers, int n_headers, long timeout);
 int cr_conn_send(int id, const char *text);
-void cr_conn_close(int id);
+void cr_conn_close(int id, int code);
 
 /* Resolve a save_to name to an absolute path in this channel's media spool
  * (<db_dir>/media/<channel>/<name>), creating the directory. Rejects names

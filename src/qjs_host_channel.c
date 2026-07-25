@@ -285,9 +285,11 @@ static JSValue js_ch_conn_close(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
-    int id = 0;
+    int id = 0, code = 0;   /* 0 = payload-less CLOSE */
     JS_ToInt32(ctx, &id, argv[0]);
-    cr_conn_close(id);
+    if (argc > 1 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
+        JS_ToInt32(ctx, &code, argv[1]);
+    cr_conn_close(id, code);
     return JS_UNDEFINED;
 }
 

@@ -489,19 +489,22 @@ void db_set_child_pragmas(sqlite3 *db) {
     sqlite3_exec(db, "PRAGMA cache_size=-512;", NULL, NULL, NULL);
 }
 
-/* Seed default provider/model/tool rows on first run. Call once from main().
- * Keyed on the providers table — config rows come from config_registry_sync(),
- * not seed data. */
+/* Seed default provider/model/tool rows. Call once from main(). Config rows
+ * come from config_registry_sync(), not seed data.
+ *
+ * Apply the seed catalog. Runs on every start, not just on an empty DB:
+ * TPL_SEED_SQL is entirely INSERT OR IGNORE, so existing rows always win and a
+ * DB created before a catalog entry existed picks it up instead of being stuck
+ * forever. (Gating on "providers is empty" is why DBs predating the curated
+ * catalog never saw the five extra providers — a schema patch is the wrong
+ * mechanism for seed data, which is row-shaped, not shape-shaped.)
+ *
+ * Trade-off, deliberate: a provider row an operator deleted on purpose comes
+ * back. Harmless while it has no key — routing skips keyless providers
+ * (provider_key_available) — but disabling a provider means clearing its key
+ * or setting models.status='disabled', not deleting the row. */
 int db_seed_defaults(sqlite3 *db) {
     if (!db) return -1;
-    sqlite3_stmt *cnt;
-    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM providers", -1, &cnt, NULL) != SQLITE_OK)
-        return -1;
-    int empty = 0;
-    if (sqlite3_step(cnt) == SQLITE_ROW && sqlite3_column_int(cnt, 0) == 0)
-        empty = 1;
-    sqlite3_finalize(cnt);
-    if (!empty) return 0;
 
     char *err = NULL;
     int rc = sqlite3_exec(db, TPL_SEED_SQL, NULL, NULL, &err);

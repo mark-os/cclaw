@@ -332,8 +332,9 @@ static size_t curl_write_save_cb(void *ptr, size_t size, size_t nmemb, void *ud)
  * The allowlist is base_url's host PLUS any entry in an optional
  * comma-separated `egress_hosts` config key. Matching is host_match's: exact
  * by default, and a leading-dot entry (".discord.gg") is an opt-in suffix
- * match at a dot boundary (matches gateway.discord.gg, never bare discord.gg
- * or evildiscord.gg). Suffix entries are safe ONLY on provider-exclusive
+ * match at a dot boundary — it covers gateway.discord.gg AND the bare apex
+ * discord.gg, but never evildiscord.gg (the match must land on a dot).
+ * Suffix entries are safe ONLY on provider-exclusive
  * domains — an operator/review responsibility, not enforceable here (see
  * specs/channel-transports.md §Egress pinning). Fail-closed: no config → no
  * host matches → refused. */
@@ -364,23 +365,10 @@ static int url_host_allowed(const char *url) {
         }
         if (bh) rules[nr++] = bh;
 
-        /* egress_hosts: comma-separated bare hosts / ".suffix" entries,
-         * tokenized in place in the config copy. */
+        /* egress_hosts: comma-/space-separated bare hosts / ".suffix"
+         * entries, tokenized in place in the config copy. */
         char *egress = channel_config_get(g_ctx->db, g_ctx->channel_name, "egress_hosts");
-        char *p = egress;
-        while (p && *p && nr < 24) {
-            while (*p == ',' || *p == ' ' || *p == '\t') p++;
-            if (!*p) break;
-            char *delim = p;
-            while (*delim && *delim != ',') delim++;
-            char *end = delim;
-            while (end > p && (end[-1] == ' ' || end[-1] == '\t')) end--;
-            char next = *delim;
-            *end = '\0';
-            if (*p) rules[nr++] = p;
-            if (next != ',') break;
-            p = delim + 1;
-        }
+        nr += (size_t)split_and_trim(egress, &rules[nr], (int)(24 - nr));
 
         ok = host_match(rules, nr, th);
         curl_free(bh);
@@ -520,9 +508,40 @@ static void call_on_conn_close(JSContext *ctx, int id, int code) {
     JS_FreeValue(ctx, r);
 }
 
+/* onTimer, resolved once at handler load (JS_UNDEFINED when the handler has
+ * none). The event loop calls this on every iteration, and curl_multi_poll
+ * returns on any readable fd — so under load it runs far more often than its
+ * nominal 1s tick. It used to re-parse and evaluate a probe string each time,
+ * paying a full JS_Eval even for a handler with no onTimer at all. */
+/* Guarded by a flag rather than a JS_UNDEFINED sentinel: JS_UNDEFINED is not a
+ * constant initializer here, and a zero-initialized JSValue is tag JS_TAG_INT
+ * (integer 0), not undefined. */
+static JSValue g_on_timer;
+static int g_on_timer_set;
+
+static void resolve_on_timer(JSContext *ctx) {
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue fn = JS_GetPropertyStr(ctx, global, "onTimer");
+    JS_FreeValue(ctx, global);
+    if (JS_IsFunction(ctx, fn)) {
+        g_on_timer = fn;                 /* keep the reference */
+        g_on_timer_set = 1;
+    } else {
+        JS_FreeValue(ctx, fn);
+        g_on_timer_set = 0;
+    }
+}
+
 static void call_on_timer(JSContext *ctx) {
-    JSValue r = eval_js(ctx,
-        "(typeof onTimer === 'function') && onTimer()", "onTimer");
+    if (!g_on_timer_set) return;
+    JSValue r = JS_Call(ctx, g_on_timer, JS_UNDEFINED, 0, NULL);
+    if (JS_IsException(r)) {
+        JSValue exc = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, exc);
+        LOG_WARN_("channel_runner: onTimer threw: %s", msg ? msg : "?");
+        if (msg) JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, exc);
+    }
     JS_FreeValue(ctx, r);
 }
 
@@ -642,7 +661,12 @@ static void conn_recv_drain(JSContext *ctx, int i) {
                 buf_append_char(&c->msg, '\0');      /* NUL-terminate for JS */
                 if (!c->msg.oom) call_on_conn_message(ctx, i + 1, c->msg.data);
             }
-            buf_free(&c->msg);                       /* reset reassembly */
+            /* Reset, don't free: the next message reuses this capacity. A
+             * steady stream of ~6KB events otherwise pays a full realloc ramp
+             * plus a free per message. conn_free_slot still frees it, and the
+             * over-cap branch above frees deliberately (never sit on 3MB). */
+            c->msg.len = 0;
+            c->msg.oom = 0;
             c->msg_over = 0;
         }
     }
@@ -958,6 +982,7 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     }
     JS_FreeValue(ctx, load_val);
     record_outbox_capability(ctx);
+    resolve_on_timer(ctx);
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
     g_multi = curl_multi_init();
@@ -1194,6 +1219,10 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     }
     if (outbox_fd >= 0)
         channel_outbox_fifo_close(outbox_fd, db_path, channel_name);
+    if (g_on_timer_set) {                /* held reference — release before the ctx */
+        JS_FreeValue(ctx, g_on_timer);
+        g_on_timer_set = 0;
+    }
     JS_FreeContext(ctx);
     qjs_runtime_destroy(g_qrt);
     channel_ctx_free(g_ctx);
@@ -1201,17 +1230,6 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     return 0;
 }
 
-/* True if the runtime libcurl actually speaks WebSocket. curl-config and the
- * dev headers advertise ws/wss even under libcurl-minimal, which strips the
- * protocol handler — so probe the runtime protocol list, the only source of
- * truth (see specs/channel-transports.md, and the libcurl-minimal trap). */
-static int curl_ws_available(void) {
-    curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
-    if (!v || !v->protocols) return 0;
-    for (const char *const *p = v->protocols; *p; p++)
-        if (ascii_strcasecmp(*p, "ws") == 0 || ascii_strcasecmp(*p, "wss") == 0) return 1;
-    return 0;
-}
 
 /* ── --check: static validation gate ──────────────────────────────
  * Reuses the manifest check + JS-load + onInit() sequence from

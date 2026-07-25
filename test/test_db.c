@@ -301,6 +301,60 @@ static void set_user_version(sqlite3 *db, int v) {
     sqlite3_exec(db, sql, NULL, NULL, NULL);
 }
 
+/* db_seed_defaults runs on every start, not only on an empty providers table.
+ * It used to early-return whenever any provider row existed, so a DB created
+ * before a catalog entry was added never saw it — the reason DBs predating the
+ * curated provider catalog were missing five providers with no way to get them
+ * short of deleting the DB. Seed data is row-shaped, so this is idempotent
+ * INSERT OR IGNORE, not a schema patch. */
+static void test_seed_backfills_and_preserves(void) {
+    const char *path = "/tmp/test_cclaw_seed_backfill.sqlite";
+    test_db_clean(path);
+    sqlite3 *db = test_db_open(path);
+    assert(db != NULL);
+    assert(db_seed_defaults(db) == 0);
+
+    /* Simulate a DB that predates part of the catalog. */
+    assert(sqlite3_exec(db, "DELETE FROM models WHERE provider_name='cerebras';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(sqlite3_exec(db, "DELETE FROM providers WHERE name='cerebras';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    /* ...and an operator edit that must survive re-seeding. */
+    assert(sqlite3_exec(db, "UPDATE providers SET default_model='pinned-by-operator'"
+                            " WHERE name='openrouter';", NULL, NULL, NULL) == SQLITE_OK);
+
+    assert(db_seed_defaults(db) == 0);   /* second run — no longer a no-op */
+
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM providers WHERE name='cerebras'", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 1);      /* backfilled */
+    sqlite3_finalize(s);
+
+    /* Every catalog provider is routable — a providers row with no models row
+     * could never be selected by chat routing. */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM providers p"
+        " WHERE NOT EXISTS (SELECT 1 FROM models m WHERE m.provider_name=p.name)",
+        -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_int(s, 0) == 0);
+    sqlite3_finalize(s);
+
+    /* INSERT OR IGNORE: the operator's edit won, not the seed's default. */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT default_model FROM providers WHERE name='openrouter'",
+        -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "pinned-by-operator") == 0);
+    sqlite3_finalize(s);
+
+    db_close(db);
+    test_db_clean(path);
+    printf("  PASS: test_seed_backfills_and_preserves\n");
+}
+
 static void test_schema_state(void) {
     const char *path = "/tmp/test_cclaw_schema_state.sqlite";
     test_db_clean(path);
@@ -453,6 +507,7 @@ int main(void) {
     test_prune_inbox();
     test_prune_outbox();
     test_free_mb();
+    test_seed_backfills_and_preserves();
     test_schema_state();
     test_schema_patch_application();
     test_rate_limit_and_cost();

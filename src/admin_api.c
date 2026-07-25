@@ -25,6 +25,46 @@ char *admin_key_env_name(sqlite3 *db, const char *provider) {
     return out;
 }
 
+/* Name the credential slot of a provider row that has none, and persist it.
+ * api_key_env defaults to '' in the schema and the dashboard's add-provider
+ * form leaves it that way, so "save key" had nowhere to put the value and came
+ * back as a generic 400. Naming the row also lifts it out of the blank
+ * api_key_env path in llm_proc.c, which must never borrow another provider's
+ * credential (see ModelCandidate.use_cfg_key). */
+static char *provider_key_env_adopt(sqlite3 *db, const char *provider) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM providers WHERE name=?1 AND COALESCE(api_key_env,'')=''",
+            -1, &s, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(s, 1, provider, -1, SQLITE_STATIC);
+    int unnamed = (sqlite3_step(s) == SQLITE_ROW);
+    sqlite3_finalize(s);
+    if (!unnamed) return NULL;      /* no such row, or already named */
+
+    /* <PROVIDER>_API_KEY, anything not [A-Z0-9] folded to '_' */
+    size_t plen = strlen(provider);
+    char *var = malloc(plen + 9);
+    if (!var) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < plen; i++) {
+        unsigned char ch = (unsigned char)provider[i];
+        var[j++] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 32)
+                 : ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) ? (char)ch
+                 : '_';
+    }
+    memcpy(var + j, "_API_KEY", 9);
+
+    if (sqlite3_prepare_v2(db, "UPDATE providers SET api_key_env=?1 WHERE name=?2",
+                           -1, &s, NULL) != SQLITE_OK) { free(var); return NULL; }
+    sqlite3_bind_text(s, 1, var, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, provider, -1, SQLITE_STATIC);
+    int ok = (sqlite3_step(s) == SQLITE_DONE && sqlite3_changes(db) > 0);
+    sqlite3_finalize(s);
+    if (!ok) { free(var); return NULL; }
+    return var;
+}
+
 int admin_set_key(sqlite3 *db, const char *provider, const char *value) {
     if (!db || !value) return -1;
 
@@ -43,40 +83,44 @@ int admin_set_key(sqlite3 *db, const char *provider, const char *value) {
     }
 
     char *var_name = admin_key_env_name(db, provider);
+    if (!var_name) var_name = provider_key_env_adopt(db, provider);
     if (!var_name) return -1;
     int rc = db_secret_set(db, var_name, value, "operator", "system");
     free(var_name);
     return rc;
 }
 
-int admin_set_model(sqlite3 *db, int provider_index, const char *model) {
-    if (!db || !model) return -1;
-    /* Update default_model on the provider at the given priority index */
-    const char *sql =
-        "UPDATE providers SET default_model=? WHERE name="
-        "(SELECT name FROM providers ORDER BY priority LIMIT 1 OFFSET ?);";
+/* Both setters address a provider by name, like every other provider action on
+ * the dashboard (set_key, add_provider, remove_provider, add_model).
+ *
+ * They used to take a priority *index* ("0 = primary"), which stopped being
+ * true once config_load grew its key-availability scan: the effective primary
+ * is the highest-priority provider whose key resolves, so on a box where the
+ * priority-0 row has no key, index 0 edited a provider that nothing routes to.
+ * An index also silently re-targets whenever a row is added or re-prioritised. */
+int admin_set_model(sqlite3 *db, const char *provider, const char *model) {
+    if (!db || !provider || !model) return -1;
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db,
+            "UPDATE providers SET default_model=?1 WHERE name=?2", -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(stmt, 1, model, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 2, provider_index);
+    sqlite3_bind_text(stmt, 2, provider, -1, SQLITE_STATIC);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
 }
 
-int admin_set_endpoint(sqlite3 *db, int provider_index, const char *url) {
-    if (!db || !url) return -1;
+int admin_set_endpoint(sqlite3 *db, const char *provider, const char *url) {
+    if (!db || !provider || !url) return -1;
     if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)
         return -1;
-    const char *sql =
-        "UPDATE providers SET base_url=? WHERE name="
-        "(SELECT name FROM providers ORDER BY priority LIMIT 1 OFFSET ?);";
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db,
+            "UPDATE providers SET base_url=?1 WHERE name=?2", -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(stmt, 1, url, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 2, provider_index);
+    sqlite3_bind_text(stmt, 2, provider, -1, SQLITE_STATIC);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;

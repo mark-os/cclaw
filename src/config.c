@@ -189,7 +189,14 @@ Config *config_load(sqlite3 *db) {
         /* Key-availability scan: priority order is only a convention — the
          * first provider whose key actually resolves (env or encrypted kv)
          * becomes primary. A keyless head is swapped down into the fallback
-         * list so it can still serve if a key appears via request retry. */
+         * list so it can still serve if a key appears later.
+         *
+         * This only decides cfg->provider, which chat routing reads solely for
+         * the synthetic candidate llm_req() builds when no keyed model row
+         * exists. Routing itself walks the models table and applies the same
+         * key test per candidate (provider_key_available in llm_proc.c) —
+         * that pairing, not this swap alone, is what keeps a keyless provider
+         * out of the request path. */
         if (!cfg->provider.api_key) {
             for (size_t i = 0; i < cfg->fallback_count; i++) {
                 if (cfg->fallback_providers[i].api_key) {
@@ -249,9 +256,19 @@ Config *config_load(sqlite3 *db) {
 
     /* endpoint_type env override */
     {
+        /* Both directions: the key-availability scan can leave a native-Gemini
+         * row in cfg->provider, so pointing CCLAW_PROVIDER_BASE_URL at an
+         * OpenAI-shaped endpoint (a mock, a local server) needs a way back to
+         * OpenAI framing. A one-way override silently kept the Gemini wire
+         * format and produced no diagnostic. */
         const char *v = getenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
         if (v && strcmp(v, "gemini") == 0)
             cfg->provider.endpoint_type = ENDPOINT_GEMINI;
+        else if (v && strcmp(v, "openai") == 0)
+            cfg->provider.endpoint_type = ENDPOINT_OPENAI;
+        else if (v && v[0])
+            LOG_WARN_("CCLAW_PROVIDER_ENDPOINT_TYPE='%s' is not 'openai' or "
+                      "'gemini' — ignored", v);
     }
 
     /* compaction env overrides */

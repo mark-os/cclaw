@@ -9,6 +9,7 @@
 #include "wake.h"
 #include "resolve.h"
 #include "config_registry.h"
+#include "util.h"           /* split_and_trim */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,51 +105,36 @@ char *channel_prev_extension(sqlite3 *db, const char *name) {
  * process, so the notice arrives through the channel it is about. */
 void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *text) {
     char *admins = channel_config_get(db, channel_name, "admin_ids");
-    if (!admins || !admins[0]) { free(admins); return; }
+    if (!admins) return;
+
+    char *ids[CHANNEL_ADMIN_IDS_MAX];
+    int n = split_and_trim(admins, ids, CHANNEL_ADMIN_IDS_MAX);
 
     const char *isql =
         "INSERT INTO channel_outbox(channel_name, session_id, payload)"
         " VALUES(?1, 0, json_object('chat_id', ?2, 'text', ?3));";
-    char *p = admins;
-    while (*p) {
-        while (*p == ',' || *p == ' ') p++;
-        if (!*p) break;
-        char *end = p;
-        while (*end && *end != ',' && *end != ' ') end++;
-        char saved = *end;
-        *end = '\0';
+    for (int i = 0; i < n; i++) {
         sqlite3_stmt *ins;
         if (sqlite3_prepare_v2(db, isql, -1, &ins, NULL) == SQLITE_OK) {
             sqlite3_bind_text(ins, 1, channel_name, -1, SQLITE_STATIC);
-            sqlite3_bind_text(ins, 2, p, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 2, ids[i], -1, SQLITE_STATIC);
             sqlite3_bind_text(ins, 3, text, -1, SQLITE_STATIC);
             sqlite3_step(ins);
             sqlite3_finalize(ins);
         }
-        *end = saved;
-        p = end;
     }
     free(admins);
 }
 
-/* Is this channel_id one of the channel's admin_ids? Same comma/space
- * parse as channel_notify_admins above. */
+/* Is this channel_id one of the channel's admin_ids? */
 static int channel_cid_is_admin(sqlite3 *db, const char *channel_name, const char *cid) {
     char *admins = channel_config_get(db, channel_name, "admin_ids");
-    if (!admins || !admins[0]) { free(admins); return 0; }
+    if (!admins) return 0;
+    char *ids[CHANNEL_ADMIN_IDS_MAX];
+    int n = split_and_trim(admins, ids, CHANNEL_ADMIN_IDS_MAX);
     int hit = 0;
-    size_t cid_len = strlen(cid);
-    char *p = admins;
-    while (*p) {
-        while (*p == ',' || *p == ' ') p++;
-        if (!*p) break;
-        char *end = p;
-        while (*end && *end != ',' && *end != ' ') end++;
-        if ((size_t)(end - p) == cid_len && strncmp(p, cid, cid_len) == 0) {
-            hit = 1;
-            break;
-        }
-        p = end;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(ids[i], cid) == 0) { hit = 1; break; }
     }
     free(admins);
     return hit;

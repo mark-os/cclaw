@@ -139,7 +139,13 @@ Priority (highest first):
 
 1. `CCLAW_*` env vars
 2. `~/.cclaw/cclaw.db` `config` table (registry-backed: every key ships a default + description; DB rows are overrides)
-3. `OPENROUTER_API_KEY` env var (convenience fallback)
+
+Provider API keys are resolved separately, per provider: each `providers` row
+names the variable holding its key (`api_key_env`), read from the environment
+first and then from the encrypted `secrets` table. `OPENROUTER_API_KEY` works
+out of the box because the seeded `openrouter` row names it — it is not a
+global fallback, and a provider whose key resolves nowhere is skipped by
+routing rather than being tried without credentials.
 
 ```
 ~/.cclaw/

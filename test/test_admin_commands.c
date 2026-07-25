@@ -65,18 +65,18 @@ static void test_config_reload(void) {
     db_seed_defaults(db);
 
     /* Update model via admin API */
-    assert(admin_set_model(db, 0, "new-model-v2") == 0);
+    assert(admin_set_model(db, "openrouter", "new-model-v2") == 0);
 
     /* Verify */
     sqlite3_stmt *s;
-    sqlite3_prepare_v2(db, "SELECT default_model FROM providers WHERE priority=0", -1, &s, NULL);
+    sqlite3_prepare_v2(db, "SELECT default_model FROM providers WHERE name='openrouter'", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "new-model-v2") == 0);
     sqlite3_finalize(s);
 
     /* Update endpoint */
-    assert(admin_set_endpoint(db, 0, "https://new-endpoint.ai/v1") == 0);
-    sqlite3_prepare_v2(db, "SELECT base_url FROM providers WHERE priority=0", -1, &s, NULL);
+    assert(admin_set_endpoint(db, "openrouter", "https://new-endpoint.ai/v1") == 0);
+    sqlite3_prepare_v2(db, "SELECT base_url FROM providers WHERE name='openrouter'", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "https://new-endpoint.ai/v1") == 0);
     sqlite3_finalize(s);

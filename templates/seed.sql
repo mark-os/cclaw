@@ -36,6 +36,18 @@ INSERT OR IGNORE INTO providers(name, base_url, endpoint_type, api_key_env, defa
   ('mistral',  'https://api.mistral.ai/v1',      'openai', 'MISTRAL_API_KEY',  'mistral-large-latest', 130),
   ('cerebras', 'https://api.cerebras.ai/v1',     'openai', 'CEREBRAS_API_KEY', 'gemma-4-31b',          140);
 
+-- A providers row alone is not routable: chat routing walks `models`, so a
+-- catalog provider with a key but no model row could never be selected — the
+-- key-availability scan would promote it into cfg->provider and nothing else
+-- would use it. One default model each, priority matching the provider so
+-- ordering stays "keyed and healthy, in catalog order".
+INSERT OR IGNORE INTO models(id, provider_name, model, priority) VALUES
+  ('openai/gpt-5.4',              'openai',   'gpt-5.4',              100),
+  ('deepseek/deepseek-v4-pro',    'deepseek', 'deepseek-v4-pro',      110),
+  ('groq/groq/compound',          'groq',     'groq/compound',        120),
+  ('mistral/mistral-large-latest','mistral',  'mistral-large-latest', 130),
+  ('cerebras/gemma-4-31b',        'cerebras', 'gemma-4-31b',          140);
+
 -- ═══ Built-in tools ═══
 -- Descriptions are a write-once seed: tools_sync_to_db() upserts with
 -- COALESCE(tools.description, excluded.description), so on a fresh DB these

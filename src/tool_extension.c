@@ -41,10 +41,18 @@ static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
         " || json_array_length(COALESCE(json_extract(?1,'$.scripts'),'[]')) || ' scripts, '"
         " || json_array_length(COALESCE(json_extract(?1,'$.skills'),'[]')) || ' skills, '"
         " || json_array_length(COALESCE(json_extract(?1,'$.config'),'[]')) || ' config keys'"
-        /* Name the keys, not just the count: a knob like egress_hosts decides
-         * where the extension may talk to, and 'adds 1 config keys' gives an
-         * approver nothing to judge. */
-        " || COALESCE((SELECT ' [' || group_concat(json_extract(value,'$.key'), ', ') || ']'"
+        /* Name the keys AND their defaults, not just the count: a knob like
+         * egress_hosts decides where the extension may talk to, and neither
+         * 'adds 1 config keys' nor '[egress_hosts]' tells an approver that it
+         * arrives preset to somebody else's host. Secret defaults are elided
+         * (the approval prompt is not a place to print credentials) and long
+         * ones clipped, so a manifest cannot drown the summary. */
+        " || COALESCE((SELECT ' [' || group_concat("
+        "      json_extract(value,'$.key') ||"
+        "      CASE WHEN COALESCE(json_extract(value,'$.secret'),0) THEN '=<secret>'"
+        "           WHEN COALESCE(json_extract(value,'$.default'),'') = '' THEN ''"
+        "           ELSE '=' || substr(json_extract(value,'$.default'),1,80) END,"
+        "      ', ') || ']'"
         "    FROM json_each(json_extract(?1,'$.config'))), '') || ', '"
         " || json_array_length(COALESCE(json_extract(?1,'$.agents'),'[]')) || ' agents'"
         " || COALESCE((SELECT ' (' || group_concat("

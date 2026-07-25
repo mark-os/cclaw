@@ -1,0 +1,27 @@
+{
+  "name": "discord",
+  "version": "0.1.0",
+  "channel": { "type": "discord", "handler": "channel.qjs", "transports": ["persistent"] },
+  "config": [
+    { "key": "enabled", "default": "0",
+      "description": "Run the discord channel (1 = on)" },
+    { "key": "bot_token", "secret": true, "required": true,
+      "description": "Discord bot token (sent as 'Bot <token>')" },
+    { "key": "admin_ids", "default": "",
+      "description": "Comma-separated Discord user ids with admin commands" },
+    { "key": "base_url", "default": "https://discord.com",
+      "description": "REST API base URL (egress pin source of truth)" },
+    { "key": "gateway_url", "default": "wss://gateway.discord.gg/?v=10&encoding=json",
+      "description": "Gateway WebSocket URL (initial connect)" },
+    { "key": "egress_hosts", "default": "gateway.discord.gg,.discord.gg,.discordapp.net",
+      "description": "Extra egress hosts beyond base_url: gateway + RESUME subdomains + CDN" },
+    { "key": "intents", "default": "37377",
+      "description": "Gateway intents bitfield (GUILDS|GUILD_MESSAGES|DIRECT_MESSAGES|MESSAGE_CONTENT)" },
+    { "key": "require_mention", "default": "1",
+      "description": "In guild channels, respond only when @mentioned or replied to (1 = on)" },
+    { "key": "ambient_channels", "default": "",
+      "description": "Comma-separated channel ids where the bot sees every message (or * for all) — listen-and-decide" },
+    { "key": "allow_bots", "default": "0",
+      "description": "Process messages from other bots (1 = on; default ignores bots to avoid loops)" }
+  ]
+}

@@ -1,0 +1,391 @@
+// Discord Gateway channel for channel_runner.
+// C owns the WebSocket transport (channel.conn.*); this handler owns the
+// Discord Gateway protocol: IDENTIFY / RESUME, heartbeats + zombie detection,
+// dispatch, and reconnect-with-backoff. C never learns a channel is "Discord".
+//
+// Inbound: gateway MESSAGE_CREATE -> channel.emit. Outbound replies go over
+// REST (channel.send -> POST /channels/<id>/messages) — no new C send path.
+// Admin config (keys, models, grants) lives on the web dashboard (/admin);
+// chat keeps only conversation, /approvals and /admin.
+
+// ── Gateway opcodes (Discord v10) ────────────────────────────────
+var OP_DISPATCH = 0, OP_HEARTBEAT = 1, OP_IDENTIFY = 2, OP_RESUME = 6,
+    OP_RECONNECT = 7, OP_INVALID_SESSION = 9, OP_HELLO = 10, OP_HEARTBEAT_ACK = 11;
+
+var DISCORD_MAX_MSG_LEN = 2000;   // Discord's per-message content limit
+
+// Gateway intents (bitfield). Default covers guild + DM text with content.
+var INTENT_GUILDS = 1, INTENT_GUILD_MESSAGES = 512,
+    INTENT_DIRECT_MESSAGES = 4096, INTENT_MESSAGE_CONTENT = 32768;
+var DEFAULT_INTENTS = INTENT_GUILDS | INTENT_GUILD_MESSAGES |
+                      INTENT_DIRECT_MESSAGES | INTENT_MESSAGE_CONTENT;  // 37377
+
+var config = {};
+var cid = 0;                       // current gateway conn id (0 = none)
+var hb = { interval: 0, next: 0, awaitingAck: false };
+var seq = null;                    // last dispatch sequence (for heartbeat/RESUME)
+var sessionId = null;              // Discord session id (RESUME); in-process only
+var resumeUrl = null;              // resume_gateway_url from READY
+var botId = null;                  // our own user id — drives mention/self checks
+var reconnectAt = 0;               // wall-clock ms to attempt reconnect (0 = none)
+var backoff = 1000;                // reconnect backoff (ms), grows to a cap
+var stopped = false;               // fatal close: stop reconnecting
+
+// Admin slash-style commands (leading "/", admin-gated). Discord's native
+// slash commands need REST registration + interaction handling; text commands
+// are the minimal v1 (mirrors telegram).
+var COMMANDS = {
+    approvals: { run: function(chatId) { sendApprovals(chatId); } },
+    admin:     { run: function(chatId) { sendDashboard(chatId); } }
+};
+
+function onInit() {
+    config.token = channel.getConfig("bot_token");
+    config.base = channel.getConfig("base_url") || "https://discord.com";
+    config.gateway = channel.getConfig("gateway_url") ||
+        "wss://gateway.discord.gg/?v=10&encoding=json";
+    var it = channel.getConfig("intents");
+    config.intents = it ? (parseInt(it, 10) || DEFAULT_INTENTS) : DEFAULT_INTENTS;
+    config.requireMention = (channel.getConfig("require_mention") || "1") !== "0";
+    config.ambient = parseList(channel.getConfig("ambient_channels"));
+    config.allowBots = (channel.getConfig("allow_bots") || "0") === "1";
+
+    if (!config.token) {
+        channel.log("ERROR: bot_token unresolved (set CCLAW_DISCORD_BOT_TOKEN or the encrypted secret)");
+        throw new Error("no bot_token");
+    }
+
+    // botId is restored as an optimization (mention checks work before the
+    // first READY); it is refreshed on every READY. Session/seq are NOT
+    // restored across a process restart — the gateway session is gone, so a
+    // cold start always IDENTIFYs fresh; only in-process reconnects RESUME.
+    botId = channel.getState("disc_bot_id") || null;
+
+    channel.log("discord channel ready (intents=" + config.intents +
+                ", require_mention=" + config.requireMention + ")");
+    connect(config.gateway);
+    return {};   // no poll/webhook — the gateway connection drives everything
+}
+
+// ── Connection lifecycle ─────────────────────────────────────────
+
+// conn.open is synchronous (blocking handshake). Catch failures so a gateway
+// that is unreachable at startup schedules a retry instead of throwing out of
+// onInit (which would fail --check / kill the runner).
+function connect(url) {
+    try {
+        cid = channel.conn.open({ url: url });
+        hb.awaitingAck = false;
+        channel.log("gateway connecting id=" + cid + " url=" + url);
+    } catch (e) {
+        channel.log("conn.open failed: " + e + " — will retry");
+        cid = 0;
+        scheduleReconnect();
+    }
+}
+
+function scheduleReconnect() {
+    if (stopped) return;
+    reconnectAt = Date.now() + backoff;
+    backoff = Math.min(backoff * 2, 30000);   // exponential, capped at 30s
+}
+
+function onConnOpen(id) {
+    // WebSocket up; wait for HELLO before IDENTIFY/RESUME.
+    channel.log("gateway socket open id=" + id);
+}
+
+function onConnMessage(id, text) {
+    var m;
+    try { m = JSON.parse(text); } catch (e) { channel.log("bad gateway json: " + e); return; }
+    if (m.s !== null && m.s !== undefined) seq = m.s;   // track sequence for RESUME/heartbeat
+
+    switch (m.op) {
+        case OP_HELLO:         onHello(id, m.d); break;
+        case OP_HEARTBEAT:     sendHeartbeat(id); break;      // server asked us to beat now
+        case OP_HEARTBEAT_ACK: hb.awaitingAck = false; break;
+        case OP_DISPATCH:      onDispatch(m); break;
+        case OP_RECONNECT:                                    // server wants a reconnect
+            channel.log("gateway op7 reconnect requested");
+            channel.conn.close(id);                           // onConnClose drives the RESUME
+            break;
+        case OP_INVALID_SESSION: onInvalidSession(id, m.d); break;
+        default: break;
+    }
+}
+
+function onHello(id, d) {
+    hb.interval = (d && d.heartbeat_interval) || 41250;
+    // First heartbeat jittered (half an interval) to avoid a thundering herd.
+    hb.next = Date.now() + Math.floor(hb.interval / 2);
+    hb.awaitingAck = false;
+    if (sessionId && resumeUrl) resume(id); else identify(id);
+}
+
+function identify(id) {
+    channel.conn.send(id, JSON.stringify({
+        op: OP_IDENTIFY,
+        d: {
+            token: config.token,
+            intents: config.intents,
+            properties: { os: "linux", browser: "cclaw", device: "cclaw" }
+        }
+    }));
+    channel.log("sent IDENTIFY");
+}
+
+function resume(id) {
+    channel.conn.send(id, JSON.stringify({
+        op: OP_RESUME,
+        d: { token: config.token, session_id: sessionId, seq: seq }
+    }));
+    channel.log("sent RESUME session=" + sessionId + " seq=" + seq);
+}
+
+function onDispatch(m) {
+    var t = m.t, d = m.d || {};
+    if (t === "READY") {
+        sessionId = d.session_id || null;
+        // Dial the issued resume host (honors Discord's routing); it lives
+        // under .discord.gg, covered by the egress suffix allowlist.
+        resumeUrl = d.resume_gateway_url ?
+            d.resume_gateway_url + "/?v=10&encoding=json" : null;
+        if (d.user && d.user.id) {
+            botId = "" + d.user.id;
+            channel.setState("disc_bot_id", botId);
+        }
+        backoff = 1000;   // healthy connection resets backoff
+        channel.log("READY as " + (d.user ? d.user.username : "?") + " session=" + sessionId);
+    } else if (t === "RESUMED") {
+        backoff = 1000;
+        channel.log("RESUMED session=" + sessionId);
+    } else if (t === "MESSAGE_CREATE") {
+        onMessageCreate(d);
+    }
+    // Other dispatch events are ignored.
+}
+
+function onInvalidSession(id, resumable) {
+    channel.log("INVALID_SESSION resumable=" + resumable);
+    if (!resumable) { sessionId = null; resumeUrl = null; seq = null; }   // force fresh IDENTIFY
+    channel.conn.close(id);   // Discord expects a reconnect; onConnClose drives it
+}
+
+function onConnClose(id, code) {
+    channel.log("gateway closed id=" + id + " code=" + code);
+    if (id === cid) cid = 0;
+    hb.awaitingAck = false;
+
+    // Fatal close codes — reconnecting just fails the same way, so stop.
+    // 4004 bad token; 4013 invalid intents; 4014 disallowed intents (a
+    // privileged intent like MESSAGE CONTENT not enabled in the Developer Portal).
+    if (code === 4004 || code === 4013 || code === 4014) {
+        stopped = true;
+        channel.log("FATAL gateway close " + code + (
+            code === 4014 ? " — enable the MESSAGE CONTENT privileged intent in the Discord Developer Portal" :
+            code === 4004 ? " — bad bot_token" : " — check the intents value"));
+        return;
+    }
+    // Only Discord's explicit session-invalidating codes force a fresh IDENTIFY
+    // (4007 invalid seq, 4009 session timed out). Every other non-fatal close —
+    // including a local close from op7/zombie — keeps the session and RESUMEs;
+    // if that session is actually dead Discord replies INVALID_SESSION and we
+    // re-IDENTIFY then.
+    if (code === 4007 || code === 4009) { sessionId = null; resumeUrl = null; seq = null; }
+    scheduleReconnect();
+}
+
+// ── Timer tick (~1s): heartbeats, zombie detection, reconnect ─────
+
+function onTimer() {
+    var now = Date.now();
+
+    // Reconnect when due and no live connection.
+    if (!stopped && cid === 0 && reconnectAt && now >= reconnectAt) {
+        reconnectAt = 0;
+        connect(sessionId && resumeUrl ? resumeUrl : config.gateway);
+        return;
+    }
+
+    // Heartbeat scheduling on a live, hello'd connection.
+    if (cid !== 0 && hb.interval > 0 && now >= hb.next) {
+        if (hb.awaitingAck) {
+            // Previous heartbeat never ACKed → zombie connection. Drop it and
+            // reconnect (RESUME) rather than sit on a dead socket. Push hb.next
+            // out so we don't re-close before onConnClose lands and clears cid.
+            channel.log("heartbeat ACK missing — zombie connection, reconnecting");
+            hb.next = now + hb.interval;
+            channel.conn.close(cid);   // onConnClose schedules the reconnect
+            return;
+        }
+        sendHeartbeat(cid);
+    }
+}
+
+function sendHeartbeat(id) {
+    channel.conn.send(id, JSON.stringify({ op: OP_HEARTBEAT, d: seq }));
+    hb.awaitingAck = true;
+    hb.next = Date.now() + hb.interval;
+}
+
+// ── Inbound message → envelope ───────────────────────────────────
+
+function onMessageCreate(d) {
+    if (!d || !d.id || !d.channel_id) return;
+    var author = d.author || {};
+
+    // Never react to our own messages (self-loop); ignore other bots unless
+    // explicitly allowed (loop guard — several cclaw bots may share a server).
+    if (botId && ("" + author.id) === botId) return;
+    if (author.bot && !config.allowBots) return;
+
+    var chatId = "" + d.channel_id;
+    var isDm = !d.guild_id;
+    var text = d.content || "";
+
+    var mentioned = false;
+    if (botId && d.mentions) {
+        for (var i = 0; i < d.mentions.length; i++) {
+            if (("" + d.mentions[i].id) === botId) { mentioned = true; break; }
+        }
+    }
+    var replyToMe = !!(botId && d.referenced_message && d.referenced_message.author &&
+                       ("" + d.referenced_message.author.id) === botId);
+
+    // Admin commands. Gate on the *sender* (author.id), not the channel.
+    // A non-admin's recognized command is silently dropped (not forwarded).
+    var cmd = parseCommand(text);
+    if (cmd && COMMANDS[cmd.name]) {
+        if (!channel.admin.isAdmin("" + author.id)) return;
+        COMMANDS[cmd.name].run(chatId, cmd.args);
+        return;
+    }
+
+    // Mention gate: in a guild channel, stay silent unless addressed — unless
+    // this channel is in the ambient allowlist, where the bot sees everything
+    // and the agent decides when to speak (explicit delivery mode). DMs always
+    // emit. Dropping here spends no session turn (the cheap deterministic gate).
+    if (!isDm && config.requireMention && !mentioned && !replyToMe && !ambientChannel(chatId))
+        return;
+
+    var env = {
+        chat_id: chatId,
+        text: text,
+        sender_id: "" + (author.id || ""),
+        sender_name: author.global_name || author.username || "",
+        chat_type: isDm ? "dm" : "group",
+        mentioned: mentioned,
+        reply_to_me: replyToMe
+    };
+    channel.emit("message", JSON.stringify(env), "disc_" + d.id);
+}
+
+function ambientChannel(chatId) {
+    return config.ambient.indexOf("*") !== -1 || config.ambient.indexOf(chatId) !== -1;
+}
+
+// ── Outbound delivery (outbox) ───────────────────────────────────
+
+function onOutbox(item) {
+    var payload;
+    try { payload = JSON.parse(item.payload); } catch (e) {
+        channel.failOutbox(item.id, "payload JSON parse error");
+        return;
+    }
+    var chatId = payload.chat_id, text = payload.text;
+    if (!chatId || !text) { channel.failOutbox(item.id, "missing chat_id or text"); return; }
+    sendChunked(chatId, text, item.id);
+}
+
+// Queue all chunks; the C loop sends them in order and acks the outbox row
+// when the final chunk gets a 2xx (rate-limit 429 retry lives in the loop).
+function sendChunked(chatId, text, outboxId) {
+    var total = text.length, pos = 0;
+    while (pos < total) {
+        var remaining = total - pos;
+        var chunkLen = remaining <= DISCORD_MAX_MSG_LEN ?
+            remaining : findSplit(text, pos, DISCORD_MAX_MSG_LEN);
+        var chunk = text.substring(pos, pos + chunkLen);
+        pos += chunkLen;
+        postMessage(chatId, chunk, outboxId, pos >= total);
+    }
+}
+
+function postMessage(chatId, content, outboxId, isFinal) {
+    channel.send({
+        method: "POST",
+        url: config.base + "/api/v10/channels/" + chatId + "/messages",
+        headers: ["Authorization: Bot " + config.token, "Content-Type: application/json"],
+        body: JSON.stringify({ content: content }),
+        outbox_id: outboxId,
+        final: isFinal ? 1 : 0
+    });
+}
+
+// ── Admin command replies (fire-and-forget REST, no outbox tracking) ──
+
+function sendDashboard(chatId) {
+    var url = channel.admin.dashboardUrl();
+    postSimple(chatId, url ? "Admin dashboard:\n" + url :
+        "Dashboard unavailable — no token minted yet (is the daemon's web server running?).");
+}
+
+function sendApprovals(chatId) {
+    var list = channel.admin.listPendingApprovals();
+    if (!list || list.length === 0) { postSimple(chatId, "No pending approvals."); return; }
+    var lines = ["Pending approvals (action them on the dashboard — /admin):"];
+    for (var i = 0; i < list.length; i++) {
+        var a = list[i];
+        lines.push("#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.action);
+    }
+    postSimple(chatId, lines.join("\n"));
+}
+
+function postSimple(chatId, content) {
+    if (content.length > DISCORD_MAX_MSG_LEN) content = content.substring(0, DISCORD_MAX_MSG_LEN);
+    channel.http({
+        method: "POST",
+        url: config.base + "/api/v10/channels/" + chatId + "/messages",
+        headers: ["Authorization: Bot " + config.token, "Content-Type: application/json"],
+        body: JSON.stringify({ content: content })
+    }).then(function (r) {
+        if (r.error || r.status < 200 || r.status >= 300)
+            channel.log("postSimple failed status=" + r.status + " error=" + r.error +
+                        " body=" + (r.body || "").substring(0, 200));
+    });
+}
+
+// ── Helpers ──────────────────────────────────────────────────────
+
+// "/cmd arg text" -> {name, args} (lowercased name), or null. A leading bot
+// mention ("<@id> /cmd", how a guild user addresses the bot) is stripped first.
+function parseCommand(text) {
+    var t = text;
+    if (botId) t = t.replace(new RegExp("^\\s*<@!?" + botId + ">\\s*"), "");
+    if (t.charAt(0) !== "/") return null;
+    var sp = t.indexOf(" ");
+    var name = (sp === -1 ? t.substring(1) : t.substring(1, sp)).toLowerCase();
+    var args = sp === -1 ? "" : t.substring(sp + 1).trim();
+    return { name: name, args: args };
+}
+
+function parseList(s) {
+    var out = [];
+    if (!s) return out;
+    var parts = s.split(",");
+    for (var i = 0; i < parts.length; i++) { var v = parts[i].trim(); if (v) out.push(v); }
+    return out;
+}
+
+// Find a chunk boundary <= maxLen, preferring a newline then a space. Never
+// slice through a surrogate pair (QuickJS strings are UTF-16): a lone surrogate
+// becomes invalid UTF-8 and Discord 400s.
+function findSplit(text, start, maxLen) {
+    var end = start + maxLen;
+    if (end >= text.length) return text.length - start;
+    for (var i = end; i > start; i--) if (text.charAt(i) === "\n") return i - start + 1;
+    for (var j = end; j > start; j--) if (text.charAt(j) === " ") return j - start + 1;
+    var boundary = text.charCodeAt(end);
+    if (boundary >= 0xDC00 && boundary <= 0xDFFF) return maxLen - 1;
+    return maxLen;
+}

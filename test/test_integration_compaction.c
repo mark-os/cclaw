@@ -284,6 +284,78 @@ static void test_llm_compaction_failure_skips(int port) {
     printf("  PASS test_llm_compaction_failure_skips\n");
 }
 
+/* Gemini endpoint: the request body must be Gemini-shaped
+ * (systemInstruction/contents), never OpenAI's messages array.
+ *
+ * Regression: the body was always built OpenAI-shaped while the URL and auth
+ * header followed endpoint_type. Once config_load's key-availability scan
+ * promoted a native-Gemini provider (the live production shape — keyless
+ * openrouter at priority 0, keyed gemini behind it), every compaction POSTed
+ * the wrong shape to :generateContent and 400'd. Silently: the session just
+ * kept growing until it overflowed the context window many turns later. */
+static void test_llm_compaction_gemini_shape(int port) {
+    mock_server_reset();
+    mock_server_enqueue(200,
+        "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":"
+        "\"Goal: Ship the gemini fix. Next steps: verify shape.\"}]}}]}");
+
+    sqlite3 *db = setup();
+    int64_t sid = session_create(db, "gemini_compact", "default", -1, 0);
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/v1", port);
+    setenv("CCLAW_PROVIDER_BASE_URL", url, 1);
+    setenv("CCLAW_PROVIDER_ENDPOINT_TYPE", "gemini", 1);
+    setenv("CCLAW_MODEL", "gemini-3.5-flash-lite", 1);
+    setenv("CCLAW_CONTEXT_WINDOW", "500", 1);
+    setenv("CCLAW_CONTEXT_THRESHOLD", "0.1", 1);
+    setenv("CCLAW_COMPACTION_TARGET", "0.05", 1);
+    setenv("CCLAW_COMPACTION", "1", 1);
+    setenv("CCLAW_STREAM", "0", 1);
+
+    char buf[64];
+    for (int i = 0; i < 20; i++) {
+        snprintf(buf, sizeof(buf), "message number %02d padding text here", i);
+        Message m = {.role = (i % 2 == 0) ? ROLE_USER : ROLE_ASSISTANT,
+                     .content = buf,
+                     .stop_reason = (i % 2 == 1) ? STOP_REASON_STOP : STOP_REASON_NONE};
+        entry_append_with_turn(db, sid, &m, 1);
+    }
+
+    CURL *curl = curl_easy_init();
+    assert(llm_compaction(db, curl, sid, "default") == 0);
+    curl_easy_cleanup(curl);
+
+    assert(mock_server_request_count() == 1);
+    const char *req = mock_server_last_request_body();
+    assert(req);
+    assert(strstr(req, "\"contents\""));          /* Gemini framing */
+    assert(strstr(req, "systemInstruction"));
+    assert(strstr(req, "maxOutputTokens"));
+    assert(!strstr(req, "\"messages\""));         /* ...and NOT OpenAI's */
+    assert(!strstr(req, "max_tokens"));
+    assert(strstr(req, "message number"));        /* excerpt still carried */
+    assert(strstr(req, "Summarize"));             /* system prompt still carried */
+
+    /* Endpoint-aware on both halves: the Gemini response parsed too. */
+    int count = 0;
+    Entry *branch = session_get_branch(db, sid, &count);
+    assert(branch);
+    int found = 0;
+    for (int i = 0; i < count; i++)
+        if (branch[i].message.role == ROLE_COMPACTION) {
+            found = 1;
+            assert(strstr(branch[i].message.content, "Ship the gemini fix"));
+        }
+    assert(found);
+    entry_branch_free(branch, count);
+
+    /* Must not leak into later tests in this binary. */
+    unsetenv("CCLAW_PROVIDER_ENDPOINT_TYPE");
+    teardown(db);
+    printf("  PASS test_llm_compaction_gemini_shape\n");
+}
+
 void run_tests(void) {
 }
 
@@ -295,6 +367,7 @@ int main(void) {
     test_entry_compact_basic();
     test_llm_compaction_under_threshold(port);
     test_llm_compaction_summary(port);
+    test_llm_compaction_gemini_shape(port);
     test_llm_compaction_failure_skips(port);
     mock_server_stop();
     printf("All compaction tests passed\n");

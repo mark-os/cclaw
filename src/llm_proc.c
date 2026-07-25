@@ -33,6 +33,36 @@
 
 /* ── Model candidates (loaded from DB; struct in llm_proc.h) ───── */
 
+/* True if this provider's credential can actually be resolved: none needed
+ * (blank api_key_env — a local endpoint), present in the environment, or
+ * present in the encrypted secrets table.
+ *
+ * Routing must not offer a model whose key is missing. Without this, a fresh
+ * install holding only OPENAI_API_KEY still routes turn 1 to the priority-0
+ * seeded openrouter row, sends an empty "Authorization: Bearer", takes a 401,
+ * and degrades a healthy model for 300s. It is also what finally connects
+ * config_load's key-availability scan to chat routing: when nothing here has a
+ * key, llm_req falls through to the synthetic candidate built from
+ * cfg->provider, which is the row that scan promoted.
+ *
+ * Existence only — no decrypt. getenv is why this can't be a SQL predicate. */
+static int provider_key_available(sqlite3 *db, const char *api_key_env) {
+    if (!api_key_env || !api_key_env[0]) return 1;
+    const char *v = getenv(api_key_env);
+    if (v && v[0]) return 1;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM secrets WHERE name=?1 AND scope='system' LIMIT 1",
+            -1, &s, NULL) != SQLITE_OK)
+        return 1;                    /* can't tell — don't block routing */
+    sqlite3_bind_text(s, 1, api_key_env, -1, SQLITE_STATIC);
+    int have = (sqlite3_step(s) == SQLITE_ROW);
+    sqlite3_finalize(s);
+    if (!have)
+        LOG_DEBUG_("llm: skipping candidate — no key for %s", api_key_env);
+    return have;
+}
+
 static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *out, int max) {
     if (max <= 0) return 0;
     int n = 0;
@@ -58,6 +88,7 @@ static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *
                     sqlite3_bind_text(ls, 1, _mr, -1, SQLITE_STATIC); \
                     if (sqlite3_step(ls) == SQLITE_ROW) { \
                         ModelCandidate *c = &out[n]; \
+                        memset(c, 0, sizeof(*c)); \
                         const char *v; \
                         v = (const char *)sqlite3_column_text(ls, 0); snprintf(c->id, sizeof(c->id), "%s", v ? v : ""); \
                         v = (const char *)sqlite3_column_text(ls, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : ""); \
@@ -67,7 +98,7 @@ static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *
                         c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI; \
                         c->context_window = sqlite3_column_int(ls, 5); \
                         if (c->context_window <= 0) c->context_window = 128000; \
-                        n++; \
+                        if (provider_key_available(db, c->api_key_env)) n++; \
                     } \
                     sqlite3_finalize(ls); \
                 } \
@@ -122,6 +153,7 @@ static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *
             if (dup) continue;
 
             ModelCandidate *c = &out[n];
+            memset(c, 0, sizeof(*c));
             const char *v;
             snprintf(c->id, sizeof(c->id), "%s", rid);
             v = (const char *)sqlite3_column_text(s, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : "");
@@ -131,7 +163,7 @@ static int load_candidates(sqlite3 *db, const char *agent_name, ModelCandidate *
             c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
             c->context_window = sqlite3_column_int(s, 5);
             if (c->context_window <= 0) c->context_window = 128000;
-            n++;
+            if (provider_key_available(db, c->api_key_env)) n++;
         }
         sqlite3_finalize(s);
     }
@@ -156,6 +188,7 @@ int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, 
     sqlite3_bind_text(s, 1, cap, -1, SQLITE_STATIC);
     while (n < max && sqlite3_step(s) == SQLITE_ROW) {
         ModelCandidate *c = &out[n];
+        memset(c, 0, sizeof(*c));
         const char *v;
         v = (const char *)sqlite3_column_text(s, 0); snprintf(c->id, sizeof(c->id), "%s", v ? v : "");
         v = (const char *)sqlite3_column_text(s, 1); snprintf(c->model, sizeof(c->model), "%s", v ? v : "");
@@ -165,6 +198,13 @@ int model_pick_by_capability(sqlite3 *db, const char *cap, ModelCandidate *out, 
         c->endpoint_type = (v && strcmp(v, "gemini") == 0) ? ENDPOINT_GEMINI : ENDPOINT_OPENAI;
         c->context_window = sqlite3_column_int(s, 5);
         if (c->context_window <= 0) c->context_window = 128000;
+        /* Deliberately NOT key-filtered like chat routing: this picker's
+         * contract is health (degraded/disabled/capability), and a media job
+         * has its own attempt budget and failure entry. Applying
+         * provider_key_available here would turn a 401 carrying provider
+         * detail into a bare "no capable model" — a separate call to make
+         * alongside the media_jobs failure path, not a side effect of the
+         * chat-routing fix. */
         n++;
     }
     sqlite3_finalize(s);
@@ -394,6 +434,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         snprintf(m->model, sizeof(m->model), "%s", cfg->provider.model ? cfg->provider.model : "unknown");
         snprintf(m->base_url, sizeof(m->base_url), "%s", cfg->provider.base_url ? cfg->provider.base_url : "");
         m->api_key_env[0] = '\0'; /* key already in cfg */
+        m->use_cfg_key = 1;       /* ...and this is the one row allowed to use it */
         m->endpoint_type = cfg->provider.endpoint_type;
         m->context_window = cfg->context_window;
         nmodels = 1;
@@ -421,12 +462,24 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         route_prov.model = m->model;
         route_prov.endpoint_type = m->endpoint_type;
         /* env → encrypted kv → cfg. Re-reading kv here (not mutating cfg,
-         * which worker threads share) picks up keys set after startup. */
-        const char *key = m->api_key_env[0] ? getenv(m->api_key_env) : cfg->provider.api_key;
+         * which worker threads share) picks up keys set after startup.
+         * cfg->provider.api_key is only reachable for the synthetic candidate
+         * (use_cfg_key): a providers row with a blank api_key_env — the schema
+         * default, and what the dashboard's add-provider stores — must not
+         * borrow whichever key the availability scan happened to select, or we
+         * attach one provider's credential to another's base_url. */
+        const char *key = m->api_key_env[0] ? getenv(m->api_key_env)
+                        : m->use_cfg_key    ? cfg->provider.api_key
+                        : NULL;
         char *key_buf = (key && key[0]) ? strdup(key)
                       : m->api_key_env[0] ? db_secret_get_system(db, m->api_key_env)
                       : NULL;
-        if (!key_buf) key_buf = strdup("");
+        if (!key_buf) {
+            if (!m->api_key_env[0] && !m->use_cfg_key)
+                LOG_WARN_("llm: model %s has no api_key_env — sending unauthenticated "
+                          "request to %s", m->id, m->base_url);
+            key_buf = strdup("");
+        }
         route_prov.api_key = key_buf;
         route_cfg.provider = route_prov;
 
@@ -791,14 +844,31 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
     int max_tok = (cfg->provider.max_tokens > 0 && cfg->provider.max_tokens < 1024)
         ? cfg->provider.max_tokens : 1024;
 
+    /* The body shape must follow the endpoint that llm_build_url and
+     * llm_build_auth_header below are built for. config_load's
+     * key-availability scan can make cfg->provider a native-Gemini row, and
+     * an OpenAI-shaped body POSTed to :generateContent is a 400 — compaction
+     * would then fail silently forever while the session kept growing.
+     * extract_content() is already endpoint-aware; this is the request half
+     * of the same split (same pattern as media_build_body). */
+    int gemini = (cfg->provider.endpoint_type == ENDPOINT_GEMINI);
+    /* ?1 model (OpenAI only — Gemini takes the model in the URL),
+     * ?2 max tokens, ?3 system prompt, ?4 excerpt */
+    const char *csql = gemini
+        ? "SELECT json_object("
+          "  'systemInstruction', json_object('parts',json_array(json_object('text',?3))),"
+          "  'contents', json_array(json_object('role','user',"
+          "    'parts', json_array(json_object('text',?4)))),"
+          "  'generationConfig', json_object('maxOutputTokens',?2));"
+        : "SELECT json_object('model',?1,'max_tokens',?2,'messages',json_array("
+          "json_object('role','system','content',?3),"
+          "json_object('role','user','content',?4)));";
+
     char *body = NULL;
     sqlite3_stmt *cstmt;
-    if (sqlite3_prepare_v2(db,
-        "SELECT json_object('model',?1,'max_tokens',?2,'messages',json_array("
-        "json_object('role','system','content',?3),"
-        "json_object('role','user','content',?4)));",
-        -1, &cstmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(cstmt, 1, cfg->provider.model ? cfg->provider.model : "gpt-4", -1, SQLITE_STATIC);
+    if (sqlite3_prepare_v2(db, csql, -1, &cstmt, NULL) == SQLITE_OK) {
+        if (!gemini)
+            sqlite3_bind_text(cstmt, 1, cfg->provider.model ? cfg->provider.model : "gpt-4", -1, SQLITE_STATIC);
         sqlite3_bind_int(cstmt, 2, max_tok);
         sqlite3_bind_text(cstmt, 3, sys_prompt, -1, SQLITE_STATIC);
         sqlite3_bind_text(cstmt, 4, text, (int)text_len, SQLITE_STATIC);
@@ -839,7 +909,12 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
     free(body); free(url); free(auth);
 
     if (status < 200 || status >= 300) {
-        /* LLM call failed — skip compaction */
+        /* Skip compaction. Logged, not silent: a failure here leaves the
+         * session growing unbounded, and the only symptom is an eventual
+         * context overflow many turns later. */
+        LOG_WARN_("compaction: LLM call failed status=%d session=%lld model=%s",
+                  status, (long long)session_id,
+                  cfg->provider.model ? cfg->provider.model : "?");
         http_response_free(&resp);
         context_plan_free(&plan);
         config_free(cfg);

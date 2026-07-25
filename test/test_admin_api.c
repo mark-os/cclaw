@@ -63,6 +63,46 @@ static void test_set_key_known_provider(void) {
     printf("  PASS: test_set_key_known_provider\n");
 }
 
+/* A provider row with a blank api_key_env — the schema default, and what the
+ * dashboard's add-provider form stores — used to make admin_set_key return -1,
+ * which the dashboard collapsed into a generic "action failed" 400. The row now
+ * adopts <PROVIDER>_API_KEY and the key lands there. */
+static void test_set_key_adopts_blank_env_name(void) {
+    sqlite3 *db = setup_db();
+    assert(sqlite3_exec(db,
+        "INSERT INTO providers(name, base_url, endpoint_type, api_key_env,"
+        " default_model, priority)"
+        " VALUES('my-vllm','https://vllm.example/v1','openai','','local-7b',200);",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    /* Pure lookup still reports "unnamed" — it does not mutate. */
+    assert(admin_key_env_name(db, "my-vllm") == NULL);
+
+    assert(admin_set_key(db, "my-vllm", "sk-vllm-xyz") == 0);
+
+    /* The row was named, and named deterministically. */
+    char *env = admin_key_env_name(db, "my-vllm");
+    assert(env && strcmp(env, "MY_VLLM_API_KEY") == 0);   /* '-' folds to '_' */
+    free(env);
+
+    char *val = db_secret_get_system(db, "MY_VLLM_API_KEY");
+    assert(val && strcmp(val, "sk-vllm-xyz") == 0);
+    free(val);
+
+    /* Idempotent: a second save reuses the adopted name, not a new one. */
+    assert(admin_set_key(db, "my-vllm", "sk-vllm-2") == 0);
+    val = db_secret_get_system(db, "MY_VLLM_API_KEY");
+    assert(val && strcmp(val, "sk-vllm-2") == 0);
+    free(val);
+
+    /* A provider that does not exist at all is still an error. */
+    assert(admin_set_key(db, "no-such-provider", "sk-nope") == -1);
+
+    db_close(db);
+    test_db_clean(DB_PATH);
+    printf("  PASS: test_set_key_adopts_blank_env_name\n");
+}
+
 static void test_set_key_custom(void) {
     sqlite3 *db = setup_db();
     assert(admin_set_key(db, "custom", "MY_VAR=secret") == 0);
@@ -454,6 +494,7 @@ int main(void) {
     printf("test_admin_api:\n");
     test_key_env_name();
     test_set_key_known_provider();
+    test_set_key_adopts_blank_env_name();
     test_set_key_custom();
     test_set_model_primary();
     test_set_endpoint_primary();

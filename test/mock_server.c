@@ -148,7 +148,11 @@ int mock_server_start(void) {
     if (!s_ctx) return -1;
 
     mg_set_request_handler(s_ctx, "/v1/chat/completions", handle_completions, NULL);
-    /* Gemini endpoint pattern */
+    /* Gemini endpoint pattern. Wildcard-prefixed because a real Gemini
+     * base_url carries a version segment ('/v1beta'), so the path is
+     * /v1beta/models/<model>:generateContent — a bare "/models/" prefix only
+     * matched a base_url with no path at all. */
+    mg_set_request_handler(s_ctx, "**/models/**", handle_completions, NULL);
     mg_set_request_handler(s_ctx, "/models/", handle_completions, NULL);
     /* Gemini cachedContents endpoint */
     mg_set_request_handler(s_ctx, "/cachedContents", handle_completions, NULL);

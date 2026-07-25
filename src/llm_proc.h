@@ -20,6 +20,13 @@ typedef struct {
     char api_key_env[64];
     int endpoint_type;
     int context_window;
+    /* Set only on the synthetic candidate llm_req() builds when the models
+     * table yields nothing — that one carries no api_key_env because its key
+     * is already resolved in cfg->provider. A real DB row must NEVER borrow
+     * cfg's key: config_load's availability scan may have put a different
+     * provider there, and sending its key to this row's base_url leaks the
+     * credential cross-provider. */
+    int use_cfg_key;
 } ModelCandidate;
 
 /* Core LLM request: one HTTP call, writes entry to DB.

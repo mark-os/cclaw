@@ -221,7 +221,8 @@ static int check_policies(sqlite3 *db, const char *manifest, char **err_out) {
 static int check_config(sqlite3 *db, const char *manifest, char **err_out) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
-            "SELECT json_extract(value,'$.key'), json_extract(value,'$.description') "
+            "SELECT json_extract(value,'$.key'), json_extract(value,'$.description'), "
+            "       json_extract(value,'$.default') "
             "FROM json_each(COALESCE(json_extract(?1,'$.config'),'[]'))",
             -1, &st, NULL) != SQLITE_OK)
         return -1;
@@ -230,6 +231,7 @@ static int check_config(sqlite3 *db, const char *manifest, char **err_out) {
     while (sqlite3_step(st) == SQLITE_ROW) {
         const char *k = (const char *)sqlite3_column_text(st, 0);
         const char *d = (const char *)sqlite3_column_text(st, 1);
+        const char *dv = (const char *)sqlite3_column_text(st, 2);
         if (!k || !k[0]) { xerr(err_out, "config entry missing 'key'"); rc = -1; break; }
         for (const char *p = k; *p; p++) {
             if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
@@ -242,6 +244,29 @@ static int check_config(sqlite3 *db, const char *manifest, char **err_out) {
         if (!d || !d[0]) {
             xerr(err_out, "config entry missing 'description' (self-describing knobs only)");
             rc = -1; break;
+        }
+        /* An egress_hosts default of '*' turns the channel's host pin off
+         * entirely (host_match treats a bare '*' as match-any), and the
+         * default takes effect with no operator write — so a bundle could
+         * un-pin its own egress via a knob the approval summary renders as
+         * "1 config key". Naming hosts in a default is fine; disabling the
+         * pin is an operator decision, made by setting the value. */
+        if (strcmp(k, "egress_hosts") == 0 && dv) {
+            for (const char *p = dv; *p; ) {
+                while (*p == ',' || *p == ' ' || *p == '\t') p++;
+                const char *e = p;
+                while (*e && *e != ',') e++;
+                const char *t = e;
+                while (t > p && (t[-1] == ' ' || t[-1] == '\t')) t--;
+                if (t - p == 1 && *p == '*') {
+                    xerr(err_out, "egress_hosts default may not be '*' — a manifest "
+                                  "may name hosts, but only an operator may unpin egress");
+                    rc = -1; break;
+                }
+                if (!*e) break;
+                p = e + 1;
+            }
+            if (rc != 0) break;
         }
     }
     sqlite3_finalize(st);
@@ -445,6 +470,35 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
                 }
             }
             free(chandler);
+            /* transports[] must be spelled exactly: its only consumer
+             * (manifest_declares_persistent) string-matches 'persistent', so a
+             * typo reads as "declares no persistent transport" and silently
+             * fails *open* — skipping the WS-capability gate that exists to
+             * refuse a channel libcurl cannot actually run. */
+            {
+                sqlite3_stmt *ts;
+                char *badt = NULL;
+                if (sqlite3_prepare_v2(jdb,
+                        "SELECT value FROM json_each("
+                        "  COALESCE(json_extract(?1,'$.transports'),'[]'))"
+                        " WHERE value NOT IN ('poll','webhook','persistent') LIMIT 1",
+                        -1, &ts, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(ts, 1, ch, -1, SQLITE_STATIC);
+                    if (sqlite3_step(ts) == SQLITE_ROW) {
+                        const char *v = (const char *)sqlite3_column_text(ts, 0);
+                        badt = strdup(v ? v : "(null)");
+                    }
+                    sqlite3_finalize(ts);
+                }
+                if (badt) {
+                    char m[192];
+                    snprintf(m, sizeof(m), "unknown channel transport '%s' — "
+                             "use poll, webhook, or persistent", badt);
+                    free(badt); free(ch);
+                    xerr(err_out, m);
+                    goto out;
+                }
+            }
         }
         free(ch);
     }

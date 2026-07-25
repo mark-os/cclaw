@@ -327,6 +327,39 @@ static void test_validate_rejects_bad_sections(void) {
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
     free(err); err = NULL;
 
+    /* channel.transports must be spelled exactly: its only consumer
+     * string-matches 'persistent', so a typo would read as "no persistent
+     * transport declared" and skip the WS-capability gate — failing open. */
+    write_file("/tmp/test_ext_badsec/channel.qjs", "function onInit(){return {};}\n");
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"channel\":{\"type\":\"c\",\"handler\":\"channel.qjs\","
+        "\"transports\":[\"persistant\"]}}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "unknown channel transport"));
+    free(err); err = NULL;
+    /* the three known transports pass */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"channel\":{\"type\":\"c\",\"handler\":\"channel.qjs\","
+        "\"transports\":[\"poll\",\"webhook\",\"persistent\"]}}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
+    free(err); err = NULL;
+
+    /* A manifest may name egress hosts in a default, but may not ship '*' —
+     * that is match-any, and a default applies with no operator write, so a
+     * bundle could unpin its own egress behind a "1 config key" summary. */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"config\":[{\"key\":\"egress_hosts\",\"description\":\"d\","
+        "\"default\":\"api.example.com, *\"}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "egress_hosts"));
+    free(err); err = NULL;
+    /* naming hosts (including a suffix rule) is fine */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"config\":[{\"key\":\"egress_hosts\",\"description\":\"d\","
+        "\"default\":\"gateway.discord.gg,.discord.gg\"}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
+    free(err); err = NULL;
+
     rm_rf("/tmp/test_ext_badsec");
     printf("  PASS test_validate_rejects_bad_sections\n");
 }

@@ -40,7 +40,12 @@ static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
         " || json_array_length(COALESCE(json_extract(?1,'$.hooks'),'[]')) || ' hooks, '"
         " || json_array_length(COALESCE(json_extract(?1,'$.scripts'),'[]')) || ' scripts, '"
         " || json_array_length(COALESCE(json_extract(?1,'$.skills'),'[]')) || ' skills, '"
-        " || json_array_length(COALESCE(json_extract(?1,'$.config'),'[]')) || ' config keys, '"
+        " || json_array_length(COALESCE(json_extract(?1,'$.config'),'[]')) || ' config keys'"
+        /* Name the keys, not just the count: a knob like egress_hosts decides
+         * where the extension may talk to, and 'adds 1 config keys' gives an
+         * approver nothing to judge. */
+        " || COALESCE((SELECT ' [' || group_concat(json_extract(value,'$.key'), ', ') || ']'"
+        "    FROM json_each(json_extract(?1,'$.config'))), '') || ', '"
         " || json_array_length(COALESCE(json_extract(?1,'$.agents'),'[]')) || ' agents'"
         " || COALESCE((SELECT ' (' || group_concat("
         "      json_extract(value,'$.name') || ':' ||"

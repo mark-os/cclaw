@@ -478,6 +478,22 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
             {
                 sqlite3_stmt *ts;
                 char *badt = NULL;
+                /* Shape first: a bare string ("transports": "persistent")
+                 * makes json_each error out, which reads as "no rows" — the
+                 * same fail-open this check exists to close. */
+                if (sqlite3_prepare_v2(jdb,
+                        "SELECT 1 WHERE json_type(?1,'$.transports') IS NOT NULL"
+                        " AND json_type(?1,'$.transports') <> 'array'",
+                        -1, &ts, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(ts, 1, ch, -1, SQLITE_STATIC);
+                    int bad_shape = sqlite3_step(ts) == SQLITE_ROW;
+                    sqlite3_finalize(ts);
+                    if (bad_shape) {
+                        free(ch);
+                        xerr(err_out, "channel transports must be an array");
+                        goto out;
+                    }
+                }
                 if (sqlite3_prepare_v2(jdb,
                         "SELECT value FROM json_each("
                         "  COALESCE(json_extract(?1,'$.transports'),'[]'))"
@@ -683,11 +699,17 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
             /* Always lands in 'draft', even on a re-promote of a channel that
              * was 'active' — the running process keeps going on the old code
              * until --check/--activate (or a daemon restart) picks up the
-             * new version. See templates/schema.sql's lifecycle comment. */
+             * new version. See templates/schema.sql's lifecycle comment.
+             * Upsert, not OR REPLACE: operator state on the row
+             * (default_agent, prev_extension_name, created_at) must survive
+             * a reinstall — install owns only the code-identity columns. */
             rc |= run_ingest(db,
-                "INSERT OR REPLACE INTO channels(name, extension_name, type, binary_path, status) "
+                "INSERT INTO channels(name, extension_name, type, binary_path, status) "
                 "VALUES(:name, :name, json_extract(:m,'$.channel.type'), "
-                "       :store || '/' || json_extract(:m,'$.channel.handler'), 'draft')",
+                "       :store || '/' || json_extract(:m,'$.channel.handler'), 'draft') "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "  extension_name=excluded.extension_name, type=excluded.type, "
+                "  binary_path=excluded.binary_path, status='draft'",
                 manifest, name, store, owner_agent);
             /* Every channel extension has an 'enabled' key, default off —
              * the launch gate reads it (specs/config.md). Declared keys win
@@ -916,26 +938,25 @@ static int builtin_stage_install(sqlite3 *db, const char *base,
 }
 
 /* Install a builtin *channel* bundle, preserving the channel's trust status
- * across the reinstall. install's INSERT OR REPLACE deliberately lands 'draft'
- * (the agent re-promote path); only this wrapper restores the prior status so
- * a restart never demotes an active channel. Builtin bundles are shipped code,
- * already past the trust gate — a fresh install is born 'active'. Whether it
- * *runs* is the separate <ext>.enabled config key (specs/config.md). */
+ * across the reinstall. install's channels upsert deliberately lands 'draft'
+ * (the agent re-promote path) but leaves every other column alone; only this
+ * wrapper restores the prior status so a restart never demotes an active
+ * channel. Builtin bundles are shipped code, already past the trust gate — a
+ * fresh install is born 'active'. Whether it *runs* is the separate
+ * <ext>.enabled config key (specs/config.md). */
 static int install_channel_builtin(sqlite3 *db, const char *base, const char *name,
                                    const BuiltinFile *files, size_t nfiles) {
     if (builtin_row_foreign(db, name)) return 0;   /* never fight a foreign row */
 
     sqlite3_stmt *s;
-    char *status = NULL, *prev = NULL;
+    char *status = NULL;
     if (sqlite3_prepare_v2(db,
-            "SELECT status, prev_extension_name FROM channels WHERE name=?1",
+            "SELECT status FROM channels WHERE name=?1",
             -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
         if (sqlite3_step(s) == SQLITE_ROW) {
             const char *v = (const char *)sqlite3_column_text(s, 0);
             status = strdup(v ? v : "draft");
-            v = (const char *)sqlite3_column_text(s, 1);
-            if (v) prev = strdup(v);
         }
         sqlite3_finalize(s);
     }
@@ -943,16 +964,14 @@ static int install_channel_builtin(sqlite3 *db, const char *base, const char *na
     BuiltinBundle b = { name, files, nfiles };
     int rc = builtin_stage_install(db, base, &b);
     if (rc == 0 && sqlite3_prepare_v2(db,
-            "UPDATE channels SET status=?1, prev_extension_name=?2 WHERE name=?3",
+            "UPDATE channels SET status=?1 WHERE name=?2",
             -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_text(s, 1, status ? status : "active", -1, SQLITE_STATIC);
-        if (prev) sqlite3_bind_text(s, 2, prev, -1, SQLITE_STATIC);
-        else sqlite3_bind_null(s, 2);
-        sqlite3_bind_text(s, 3, name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, name, -1, SQLITE_STATIC);
         sqlite3_step(s);
         sqlite3_finalize(s);
     }
-    free(status); free(prev);
+    free(status);
     return rc;
 }
 

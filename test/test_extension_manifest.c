@@ -337,6 +337,15 @@ static void test_validate_rejects_bad_sections(void) {
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
     assert(err && strstr(err, "unknown channel transport"));
     free(err); err = NULL;
+    /* a bare string instead of an array makes json_each error out, which
+     * reads as "no rows" in validator and consumer alike — the same
+     * fail-open by shape instead of spelling. */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"channel\":{\"type\":\"c\",\"handler\":\"channel.qjs\","
+        "\"transports\":\"persistent\"}}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "transports must be an array"));
+    free(err); err = NULL;
     /* the three known transports pass */
     write_file("/tmp/test_ext_badsec/extension.json",
         "{\"name\":\"b\",\"channel\":{\"type\":\"c\",\"handler\":\"channel.qjs\","
@@ -543,6 +552,15 @@ static void test_install_builtin(void) {
     assert(extension_install_builtin(db, TEST_DB) == 0);
     status = q1(db, "SELECT status FROM channels WHERE name='telegram'");
     assert(status && strcmp(status, "draft") == 0); free(status);
+
+    /* Operator-set routing must also survive reinstall: install owns only
+     * the code-identity columns, never default_agent (open-door routing). */
+    assert(sqlite3_exec(db, "UPDATE channels SET default_agent='OldTimer'"
+                            " WHERE name='telegram'",
+                         NULL, NULL, NULL) == SQLITE_OK);
+    assert(extension_install_builtin(db, TEST_DB) == 0);
+    char *route = q1(db, "SELECT default_agent FROM channels WHERE name='telegram'");
+    assert(route && strcmp(route, "OldTimer") == 0); free(route);
 
     /* Launch gate (specs/config.md): trust AND enabled AND required keys. */
     unsetenv("CCLAW_TELEGRAM_ENABLED");

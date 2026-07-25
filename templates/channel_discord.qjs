@@ -383,8 +383,8 @@ function parseList(s) {
 function findSplit(text, start, maxLen) {
     var end = start + maxLen;
     if (end >= text.length) return text.length - start;
-    for (var i = end; i > start; i--) if (text.charAt(i) === "\n") return i - start + 1;
-    for (var j = end; j > start; j--) if (text.charAt(j) === " ") return j - start + 1;
+    for (var i = end - 1; i > start; i--) if (text.charAt(i) === "\n") return i - start + 1;
+    for (var j = end - 1; j > start; j--) if (text.charAt(j) === " ") return j - start + 1;
     var boundary = text.charCodeAt(end);
     if (boundary >= 0xDC00 && boundary <= 0xDFFF) return maxLen - 1;
     return maxLen;

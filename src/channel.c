@@ -485,13 +485,36 @@ char *channel_config_get(sqlite3 *db, const char *channel_name, const char *key)
 int channel_should_launch(sqlite3 *db, const char *name, char *why, size_t cap) {
     if (why && cap) why[0] = '\0';
 
-    char *status = channel_get_status(db, name);
-    if (!status || strcmp(status, "active") != 0) {
-        if (why) snprintf(why, cap, "trust status %s", status ? status : "missing");
-        free(status);
+    /* Trust status and the owning extension come from the same row — one read.
+     * A query that fails outright is NOT an answer: return -1 so the caller can
+     * tell "the operator turned this off" from "the DB did not respond", and
+     * not SIGTERM a healthy channel over a transient error. */
+    char ext[128] = "";
+    char status[32] = "";
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT status, extension_name FROM channels WHERE name=?1",
+            -1, &s, NULL) != SQLITE_OK) {
+        if (why) snprintf(why, cap, "channel lookup failed: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s);
+    if (rc == SQLITE_ROW) {
+        const char *st = (const char *)sqlite3_column_text(s, 0);
+        const char *ex = (const char *)sqlite3_column_text(s, 1);
+        if (st) snprintf(status, sizeof(status), "%s", st);
+        if (ex) snprintf(ext, sizeof(ext), "%s", ex);
+    }
+    sqlite3_finalize(s);
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+        if (why) snprintf(why, cap, "channel lookup failed: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+    if (strcmp(status, "active") != 0) {
+        if (why) snprintf(why, cap, "trust status %s", status[0] ? status : "missing");
         return 0;
     }
-    free(status);
 
     char *enabled = channel_config_get(db, name, "enabled");
     int on = enabled && enabled[0] && strcmp(enabled, "0") != 0;
@@ -503,24 +526,16 @@ int channel_should_launch(sqlite3 *db, const char *name, char *why, size_t cap) 
 
     /* Every required config key must resolve non-empty. Collect keys first,
      * then resolve — config_get reads the same table. */
-    char ext[128] = "";
-    sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(db,
-            "SELECT extension_name FROM channels WHERE name=?1",
-            -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
-        if (sqlite3_step(s) == SQLITE_ROW) {
-            const char *v = (const char *)sqlite3_column_text(s, 0);
-            if (v) snprintf(ext, sizeof(ext), "%s", v);
-        }
-        sqlite3_finalize(s);
-    }
     char keys[16][192];
     int nkeys = 0;
-    if (ext[0] && sqlite3_prepare_v2(db,
-            "SELECT key FROM config WHERE required=1"
-            " AND substr(key, 1, length(?1)+1) = ?1 || '.'",
-            -1, &s, NULL) == SQLITE_OK) {
+    if (ext[0]) {
+        if (sqlite3_prepare_v2(db,
+                "SELECT key FROM config WHERE required=1"
+                " AND substr(key, 1, length(?1)+1) = ?1 || '.'",
+                -1, &s, NULL) != SQLITE_OK) {
+            if (why) snprintf(why, cap, "required-key lookup failed: %s", sqlite3_errmsg(db));
+            return -1;
+        }
         sqlite3_bind_text(s, 1, ext, -1, SQLITE_STATIC);
         while (sqlite3_step(s) == SQLITE_ROW && nkeys < 16) {
             const char *k = (const char *)sqlite3_column_text(s, 0);
@@ -546,7 +561,7 @@ int channel_launch_all(sqlite3 *db) {
     int launched = 0;
     for (int i = 0; i < n; i++) {
         char why[192];
-        if (!channel_should_launch(db, names[i], why, sizeof(why))) {
+        if (channel_should_launch(db, names[i], why, sizeof(why)) != 1) {
             LOG_INFO_("channel skipped name=%s reason=\"%s\"", names[i], why);
             continue;
         }
@@ -654,7 +669,11 @@ void channel_tick(sqlite3 *db) {
      * crashed-and-since-disabled channel back. */
     int keep = 0;
     for (int i = 0; i < nd; i++) {
-        if (!channel_should_launch(db, desired[i], NULL, 0)) continue;
+        int gate = channel_should_launch(db, desired[i], NULL, 0);
+        /* Indeterminate (-1): the gate could not be read, which is not the same
+         * as a "no". Leave a running channel where it is rather than killing it
+         * over a DB blip, but start nothing new on an answer we do not have. */
+        if (gate == 0 || (gate < 0 && !find_by_name(desired[i]))) continue;
         if (keep != i) memcpy(desired[keep], desired[i], sizeof(desired[0]));
         keep++;
     }

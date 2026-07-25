@@ -72,7 +72,9 @@ char *channel_config_get(sqlite3 *db, const char *channel_name, const char *key)
 
 /* Launch gate (specs/config.md): trust status 'active' AND <ext>.enabled
  * resolves truthy AND every required config key resolves non-empty.
- * Returns 1 to launch; 0 writes the blocking reason into why. */
+ * Returns 1 to launch, 0 for a definite no, -1 if the gate could not be read
+ * (a failed query — not a decision, so callers must not act on it as one).
+ * Both non-1 results write the reason into why. */
 int channel_should_launch(sqlite3 *db, const char *name, char *why, size_t cap);
 
 /* Reap — returns 1 if pid belonged to a channel, 0 otherwise */

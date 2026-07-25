@@ -580,6 +580,18 @@ static void test_install_builtin(void) {
     unsetenv("CCLAW_TELEGRAM_ENABLED");
     unsetenv("CCLAW_TELEGRAM_BOT_TOKEN");
 
+    /* A gate that could not be read is -1, never 0: the daemon stops a running
+     * channel on a 0, so conflating "the query failed" with "the operator
+     * turned this off" SIGTERMs a healthy channel over a DB blip. A genuinely
+     * absent channel still answers 0 — the two must not collapse. */
+    assert(channel_should_launch(db, "nosuchchannel", why, sizeof(why)) == 0);
+    assert(strstr(why, "missing"));
+    sqlite3 *schemaless = NULL;
+    assert(sqlite3_open(":memory:", &schemaless) == SQLITE_OK);
+    assert(channel_should_launch(schemaless, "telegram", why, sizeof(why)) == -1);
+    assert(strstr(why, "lookup failed"));
+    sqlite3_close(schemaless);
+
     db_close(db);
     rm_rf("/tmp/extensions/telegram");
     rm_rf("/tmp/extensions/cclaw-docs");

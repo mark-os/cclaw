@@ -32,6 +32,21 @@
  * inside the netns the preload lib and net_shim reach it here. */
 #define SANDBOX_PROXY_SOCK_PATH "/tmp/.cclaw_proxy.sock"
 
+/* Did a grant name the DB file itself, rather than merely a directory that
+ * contains it? Exact match only — a read_path on ~/.cclaw or on $HOME must not
+ * count, or the accident the mask exists to prevent comes straight back. */
+static int sandbox_db_explicitly_granted(const char *db_abs,
+                                         const SandboxConfig *cfg) {
+    if (!cfg || !cfg->extra_mounts) return 0;
+    for (size_t i = 0; i < cfg->extra_mount_count; i++) {
+        const char *p = cfg->extra_mounts[i].path;
+        if (!p || !p[0]) continue;
+        char abs[PATH_MAX];
+        if (realpath(p, abs) && strcmp(abs, db_abs) == 0) return 1;
+    }
+    return 0;
+}
+
 /* Bind-mask the secret key + DB ciphertext from the child's view.
  *
  * PROVISIONAL — this exists only because the default backend stores the key as
@@ -52,20 +67,18 @@
  *          ones and other agents'. A grant made on one agent's behalf must not
  *          confer authority over agents that never consented, so no grant can
  *          unmask it.
- *   DB   — masked too, unconditionally, but for a weaker reason: grants bind
- *          directories only (bind_dir_into mkdirs its target), so "grant the
- *          DB file itself" is not expressible today and a per-file escape
- *          hatch would be unreachable code. Nothing is lost meanwhile —
- *          db_query is the sanctioned read path and runs in the parent, so
- *          masking the file never breaks it. If file-granularity grants ever
- *          land, this is the rule to revisit: the DB is ordinary agent state
- *          and a deliberate, exact grant on it would be reasonable to honor.
- *          The key is not, and must stay unconditional either way.
+ *   DB   — masked unless a grant names the DB file itself. It is ordinary
+ *          agent state and self-inspection is legitimate, so a deliberate,
+ *          exact grant is honored; a directory grant that merely happens to
+ *          contain it is not. Nothing breaks either way: db_query is the
+ *          sanctioned read path and runs in the trusted parent, never through
+ *          this mount tree.
  *
  * Targets not reachable in the child's mount tree never materialize under
  * newroot, so the stat fails and we skip them — already invisible by omission.
  * Must run after all binds and before pivot_root. */
-static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
+static void sandbox_mask_state_files(const char *newroot, const char *db_path,
+                                     const SandboxConfig *full_cfg) {
     if (!db_path || !db_path[0]) return;
 
     char db_abs[PATH_MAX];
@@ -79,7 +92,8 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     if (efd < 0) return;
     close(efd);
 
-    /* Targets: the key file (crown jewel) and the DB family (ciphertext). */
+    /* Targets: the key file (crown jewel) always; the DB family (ciphertext)
+     * unless a grant named the DB file exactly. */
     char keyf[PATH_MAX];
     char *slash = strrchr(db_abs, '/');
     int klen = slash
@@ -91,9 +105,11 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     snprintf(dbshm, sizeof(dbshm), "%s-shm", db_abs);
     size_t nt = 0;
     if (klen > 0 && (size_t)klen < sizeof(keyf)) targets[nt++] = keyf;
-    targets[nt++] = db_abs;
-    targets[nt++] = dbwal;
-    targets[nt++] = dbshm;
+    if (!sandbox_db_explicitly_granted(db_abs, full_cfg)) {
+        targets[nt++] = db_abs;
+        targets[nt++] = dbwal;
+        targets[nt++] = dbshm;
+    }
 
     for (size_t i = 0; i < nt; i++) {
         char dst[PATH_MAX + 64];
@@ -161,15 +177,34 @@ size_t sandbox_plan_mounts(const SandboxMountReq *in, size_t n, SandboxMount *ou
     return cnt;
 }
 
-/* Bind a single directory into newroot at its absolute path.
- * Creates intermediate dirs, bind-mounts, optionally remounts ro. */
-static void bind_dir_into(const char *newroot, const char *abspath, int ro) {
+/* Bind a single path into newroot at its absolute path.
+ * Creates intermediate dirs, bind-mounts, optionally remounts ro.
+ *
+ * Handles files as well as directories: a bind mount does not care about the
+ * source type, but the target must match it, so a file source needs an empty
+ * regular file as its mount point rather than a directory. Without this a
+ * read_path/write_path grant naming a file mounted nothing at all (ENOTDIR)
+ * while every other layer — the approval, the DB row, the wire, path_under()
+ * — accepted it, so the grant silently did nothing. File granularity is also
+ * what lets an agent follow the "request the narrowest grant" instruction it
+ * is given; before this it had no choice but to ask for a whole directory.
+ *
+ * Anything that is neither (device, socket, fifo) is refused: mounting those
+ * into a sandbox is not a grant we want to honor implicitly. */
+static void bind_path_into(const char *newroot, const char *abspath, int ro) {
     struct stat st;
-    if (stat(abspath, &st) != 0 || !S_ISDIR(st.st_mode)) return;
+    if (stat(abspath, &st) != 0) return;
+    int isdir = S_ISDIR(st.st_mode);
+    if (!isdir && !S_ISREG(st.st_mode)) {
+        LOG_INFO_("sandbox grant_skip_not_file_or_dir path=%s mode=%o",
+                  abspath, (unsigned)(st.st_mode & S_IFMT));
+        return;
+    }
     char dst[PATH_MAX + 64];
     int n = snprintf(dst, sizeof(dst), "%s%s", newroot, abspath);
     if (n < 0 || (size_t)n >= sizeof(dst)) return;
-    /* mkdir -p the target under newroot */
+    /* mkdir -p the parent chain under newroot (every component up to the
+     * final one, which the loop never reaches — it fires only on '/') */
     char *p = dst + strlen(newroot) + 1;
     for (char *slash = p; *slash; slash++) {
         if (*slash == '/') {
@@ -178,8 +213,18 @@ static void bind_dir_into(const char *newroot, const char *abspath, int ro) {
             *slash = '/';
         }
     }
-    mkdir(dst, 0755);
-    if (mount(abspath, dst, NULL, MS_BIND, NULL) != 0) return;
+    /* Final component: type must match the source or mount() gives ENOTDIR. */
+    if (isdir) {
+        mkdir(dst, 0755);
+    } else {
+        int fd = open(dst, O_CREAT | O_WRONLY, 0600);
+        if (fd < 0) return;
+        close(fd);
+    }
+    if (mount(abspath, dst, NULL, MS_BIND, NULL) != 0) {
+        LOG_INFO_("sandbox grant_bind_fail path=%s errno=%d", abspath, errno);
+        return;
+    }
     if (ro) sandbox_remount_ro(dst);
 }
 
@@ -319,11 +364,11 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
 
     /* Bind-mount workspace rw */
     if (ws_resolved)
-        bind_dir_into(newroot, ws_resolved, 0);
+        bind_path_into(newroot, ws_resolved, 0);
 
     /* Bind-mount CWD rw (CLI mode) */
     if (cwd_resolved)
-        bind_dir_into(newroot, cwd_resolved, 0);
+        bind_path_into(newroot, cwd_resolved, 0);
 
     /* Layer 2: extra bind-mounts from read_path/write_path grants.
      * Canonicalize + dedup (rw wins) + sort shallow→deep so a child mount
@@ -334,14 +379,14 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         if (plan) {
             size_t pn = sandbox_plan_mounts(full_cfg->extra_mounts, n, plan);
             for (size_t i = 0; i < pn; i++)
-                bind_dir_into(newroot, plan[i].path, plan[i].ro);
+                bind_path_into(newroot, plan[i].path, plan[i].ro);
             free(plan);
         }
     }
 
     /* Mask the secret key + DB ciphertext if a bound path (CWD, workspace, or
      * a grant) would otherwise expose them. After binds, before pivot_root. */
-    sandbox_mask_state_files(newroot, db_path);
+    sandbox_mask_state_files(newroot, db_path, full_cfg);
 
     /* pivot_root into new root */
     char put_old[256];

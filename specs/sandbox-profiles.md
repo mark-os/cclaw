@@ -83,6 +83,12 @@ agent workspace instead.
   mounts on top of the bundle (`src/sandbox.c` `sandbox_apply_namespace`);
   they extend *visibility*, chosen per-agent via the approval flow
   (`request_config` → `apply_grant`), and are refreshed per dispatch batch.
+  A grant may name a **single file** or a directory (`bind_path_into` creates
+  a matching mount point for either), so an agent that needs one file can be
+  given exactly that instead of its parent. Mounts are planned shallow→deep,
+  so a file grant nested inside a granted directory correctly shadows it.
+  A grant on a path that does not exist yet cannot be mounted — to create
+  files, grant the directory.
 - Sanitizer builds skip `RLIMIT_AS` (see AGENTS.md — ASan shadow VA).
 
 ## Fail-closed rule

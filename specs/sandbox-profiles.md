@@ -18,9 +18,56 @@ web, js, file — all via the `--run-tool` broker, `src/run_tool.c`).
 | namespace sandbox       | **none**         | required         | required           | required   |
 | env                     | inherit+scrub    | inherit+scrub    | clean allowlist    | clean allowlist |
 | network                 | direct           | proxy            | proxy              | none (no proxy sock) |
-| CWD mount (CLI)         | rw (host fs)     | rw               | no                 | no         |
-| workspace mount         | rw (host fs)     | rw               | rw                 | ro         |
-| rlimits (NPROC/AS/CPU)  | none             | none             | generous           | tight      |
+| CWD mount (CLI)         | rw (host fs)     | **no**           | no                 | no         |
+| workspace mount         | rw (host fs)     | rw               | rw                 | rw         |
+| `$HOME`                 | user's real home | workspace        | workspace          | workspace  |
+| `/tmp` tmpfs            | host `/tmp`      | 50% of RAM       | 50% of RAM         | 25% of RAM |
+| rlimits NPROC / CPU     | none             | none             | 256 / 1800s        | 64 / 120s  |
+| `RLIMIT_AS`             | **never**        | **never**        | **never**          | **never**  |
+
+**Containment is about reach, not resources.** `trusted` means "spend what you
+need", never "see more" — it mounts no CWD, so a trusted agent sees its own
+workspace and whatever `read_path`/`write_path` grants add, and nothing of the
+user's files or another agent's workspace. Widening visibility is the grant
+system's job (and therefore the approval flow's), never a side effect of picking
+a looser profile. `host` is the one profile that sees the user's files, because
+it establishes no namespace at all.
+
+**`$HOME` is set under every profile.** Sandboxed profiles point it at the agent
+workspace: it is bind-mounted rw at its own absolute path and persists across
+tool calls, so `pip install --user`, `cargo install`, and `npm -g --prefix
+$HOME` land inside the one directory the agent owns and are on `PATH` next call
+— an agent can bootstrap its own toolchain without a grant. `host` reads the
+invoking user's home from the passwd database (the `--run-tool` child starts
+from an empty environ, so there is nothing to inherit). This is also why no
+sandboxed profile mounts the workspace read-only any more: `$HOME` has to be
+writable or every toolchain fails on its cache.
+
+**`PATH`** is the agent's workspace-local bin dirs (`$HOME/.local/bin`,
+`$HOME/.cargo/bin`, `$HOME/bin`) followed by the system dirs including
+`/usr/local/bin` and `/usr/local/go/bin`. It was `/bin:/usr/bin`, which made
+every real toolchain invisible — `node`, `go`, `cargo` and `rustc` all install
+outside those two directories.
+
+**`/tmp` is its own tmpfs**, not a directory on the (deliberately tiny) root
+tmpfs. Toolchains write real volume there — npm unpacking tarballs, cargo and
+rustc temporaries, `cc` intermediates, go's build cache — and a shared 1 MB root
+failed every build with ENOSPC. The size is a percentage (tmpfs's own syntax) so
+it scales from a 128 MB SoC to a 16 GB server without probing meminfo, and tmpfs
+charges only what is written, so it is a ceiling and not a reservation.
+
+**No profile sets `RLIMIT_AS`.** It caps *address space*, not resident memory,
+and every modern runtime reserves VA far beyond its footprint — Go's allocator
+arenas, V8's heap cages, LLVM. A cap loose enough to be safe bounds nothing; a
+cap tight enough to bound anything refuses to start `go`, `node`, or `rustc`
+before they do a byte of work. NPROC and CPU bound a runaway; a cgroup memory
+limit is the right tool if a real memory ceiling is ever wanted.
+
+**`host` and the CWD.** `host` runs no namespace, so nothing is mounted and no
+`chdir` is implied. In CLI mode the child inherits the user's CWD — that is the
+point of `host`, since `cclaw` invoked in a repo should operate on that repo.
+Under `--daemon` there is no meaningful user CWD, so the child starts in the
+agent workspace instead.
 
 - **Unknown or NULL values fall through to `standard`.** There is no
   `bootstrap` level — the string is treated like any other unknown value
@@ -61,8 +108,10 @@ from the level; there is no separate sandbox knob.
 
 Integration tests exercise the namespace, proxy-deny, and static-mount paths
 (`test/test_shell_namespace.c`, `test_integration_shell_proxy*.c`,
-`test_sandbox_mounts.c`). The profile→bundle mapping itself
-(`sandbox_policy_from_profile`) has no direct unit test yet.
+`test_sandbox_mounts.c`). The profile→bundle mapping is pinned field-by-field in
+`test/test_sandbox_profile.c`, which also enforces two invariants directly: no
+profile may set `RLIMIT_AS`, and every sandboxed profile must leave the
+workspace writable (because `$HOME` points at it).
 
 ## Non-goals
 

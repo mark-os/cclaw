@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <pwd.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -226,8 +227,12 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         return -1;
 
     /* Bind-mount system dirs read-only */
+    /* /opt is here because that is where real toolchains land — distro node
+     * packages, vendored JDKs, hand-unpacked SDKs. Read-only like the rest, and
+     * absent on most systems, where the stat() below skips it. */
     static const char *sys_dirs[] = {
-        "/bin", "/usr", "/lib", "/lib64", "/etc", "/proc", "/dev", "/sbin", NULL
+        "/bin", "/usr", "/lib", "/lib64", "/etc", "/proc", "/dev", "/sbin",
+        "/opt", NULL
     };
     for (int i = 0; sys_dirs[i]; i++) {
         /* File tier (skip_pid_ns): exclude /proc — no PID namespace backs it,
@@ -251,10 +256,27 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         }
     }
 
-    /* Create /tmp in new root (ephemeral tmpfs, writable for scratch) */
+    /* /tmp gets its OWN tmpfs, sized as a percentage of RAM. The root tmpfs
+     * above stays tiny because it only holds mountpoint stubs — but /tmp is
+     * where toolchains write real volume (npm unpacking tarballs, cargo and
+     * rustc temporaries, cc intermediates, go's build cache), so leaving it a
+     * directory on a 1 MB root broke every build with ENOSPC. A percentage is
+     * tmpfs's own syntax and scales across our target range without probing
+     * meminfo — ~64 MB on a 128 MB Pogoplug, ~8 GB on a 16 GB server — and
+     * tmpfs charges only what is written, so this is a ceiling and not a
+     * reservation. Failure is non-fatal: /tmp then falls back to the root
+     * tmpfs, which is small but functional. */
     char tmp_path[256];
     snprintf(tmp_path, sizeof(tmp_path), "%s/tmp", newroot);
     mkdir(tmp_path, 01777);
+    {
+        int pct = (full_cfg && full_cfg->tmp_pct > 0) ? full_cfg->tmp_pct : 50;
+        if (pct > 90) pct = 90;
+        char opts[32];
+        snprintf(opts, sizeof(opts), "size=%d%%", pct);
+        if (mount("none", tmp_path, "tmpfs", MS_NOSUID | MS_NODEV, opts) == 0)
+            chmod(tmp_path, 01777);
+    }
 
     /* Bind the broker's per-call proxy UDS (created in the agent folder, outside
      * the agent-visible workspace) onto a fixed path inside the sandbox. Keeps
@@ -340,21 +362,64 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
     return 0;
 }
 
-/* scrub the environment before exec. env_mode==1 wipes everything and
- * sets only PATH+TMPDIR; otherwise inherit minus known secret-bearing vars. */
-static void sandbox_scrub_env(int env_mode) {
+/* Resolve HOME for the tool child.
+ *
+ * Sandboxed profiles get the agent workspace: it is bind-mounted rw at its own
+ * absolute path, it is the one directory the agent owns, and it persists across
+ * tool calls. That makes the usual user-level install paths work and *stay*
+ * working — `pip install --user`, `cargo install`, `npm -g --prefix $HOME` all
+ * land under the workspace and are on PATH next call, so an agent can bootstrap
+ * its own toolchain into the one place it is allowed to write.
+ *
+ * The host profile has no namespace, so the honest answer is the invoking
+ * user's real home, read from the passwd database rather than an inherited
+ * HOME (under the --run-tool re-exec the child starts from an empty environ,
+ * so there is nothing to inherit). */
+static const char *sandbox_resolve_home(const SandboxConfig *cfg) {
+    if (cfg->sandbox) {
+        if (cfg->workspace && cfg->workspace[0]) return cfg->workspace;
+        return "/tmp";
+    }
+    struct passwd *pw = getpwuid(getuid());
+    if (pw && pw->pw_dir && pw->pw_dir[0]) return pw->pw_dir;
+    if (cfg->workspace && cfg->workspace[0]) return cfg->workspace;
+    return "/tmp";
+}
+
+/* Build PATH: the agent's own workspace-local bin dirs first (see
+ * sandbox_resolve_home), then the system dirs. The old value was
+ * "/bin:/usr/bin", which made every toolchain invisible — node, go, cargo and
+ * rustc all install outside those two directories, so `npm install` failed with
+ * "not found" before any policy question arose. */
+static void sandbox_set_path(const char *home) {
+    static const char *sys =
+        "/usr/local/sbin:/usr/local/bin:/usr/local/go/bin:"
+        "/usr/sbin:/usr/bin:/sbin:/bin";
+    char buf[PATH_MAX * 3 + 128];
+    int n = snprintf(buf, sizeof(buf), "%s/.local/bin:%s/.cargo/bin:%s/bin:%s",
+                     home, home, home, sys);
+    setenv("PATH", (n > 0 && (size_t)n < sizeof(buf)) ? buf : sys, 1);
+}
+
+/* scrub the environment before exec. env_mode==1 wipes everything and sets only
+ * PATH+TMPDIR+HOME; otherwise inherit minus known secret-bearing vars. HOME is
+ * set under both modes — toolchains treat its absence as a hard error. */
+static void sandbox_scrub_env(const SandboxConfig *cfg) {
     extern char **environ;
-    if (env_mode == 1) {
+    const char *home = sandbox_resolve_home(cfg);
+    if (cfg->env_mode == 1) {
         /* Clean allowlist: wipe entire env, set only essentials */
         if (environ) environ[0] = NULL;  /* portable clearenv */
-        setenv("PATH", "/bin:/usr/bin", 1);
+        sandbox_set_path(home);
         setenv("TMPDIR", "/tmp", 1);
+        setenv("HOME", home, 1);
         return;
     }
 
     /* Legacy trusted mode: inherit env minus known secret names */
-    setenv("PATH", "/bin:/usr/bin", 1);
-    unsetenv("HOME");
+    sandbox_set_path(home);
+    setenv("TMPDIR", "/tmp", 1);
+    setenv("HOME", home, 1);
     char *drop_keys[256];
     int nkeys = 0;
     for (int i = 0; environ[i] && nkeys < 256; i++) {
@@ -533,7 +598,17 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
         }
     }
 
-    sandbox_scrub_env(cfg->env_mode);
+    /* host has no namespace, so sandbox_apply_namespace's chdir never ran. In
+     * CLI mode cwd_path is the user's own CWD and inheriting it is the whole
+     * point of host — `cclaw` in a repo operates on that repo. Under --daemon
+     * cwd_path is NULL and the daemon's CWD is meaningless to the agent, so
+     * start in the workspace instead. */
+    if (!cfg->sandbox && !cwd && cfg->workspace && cfg->workspace[0]) {
+        if (chdir(cfg->workspace) != 0)
+            LOG_INFO_("sandbox host_chdir_fail errno=%d", errno);
+    }
+
+    sandbox_scrub_env(cfg);
 
     /* the proxy UDS is reachable at a fixed in-sandbox path (bound from the
      * broker's agent-folder socket in sandbox_apply_namespace). */
@@ -572,23 +647,44 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     return 0;
 }
 
+/* No profile sets RLIMIT_AS. It caps *address space*, not resident memory, and
+ * every modern runtime reserves VA far beyond its footprint — Go's allocator
+ * arenas, V8's heap cages, LLVM — so a cap large enough to be safe is too large
+ * to bound anything, and one small enough to bound anything refuses to start
+ * `go`, `node`, or `rustc` before they do a byte of work. NPROC and CPU are the
+ * knobs that actually bound a runaway; a cgroup memory limit is the right tool
+ * if a real memory ceiling is ever needed. */
 void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg) {
     if (sandbox_profile && strcmp(sandbox_profile, "host") == 0) {
+        /* No namespace, no proxy: the tool child runs with the invoking user's
+         * own filesystem and network. cwd_path (CLI only) keeps the user's CWD;
+         * under --daemon there is none, so the child starts in the workspace. */
         cfg->sandbox = 0;
         cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1; cfg->workspace_ro = 0;
+        cfg->tmp_pct = 0;
         cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
     } else if (sandbox_profile && strcmp(sandbox_profile, "trusted") == 0) {
+        /* Resources unbounded, visibility is not: no CWD mount, so the agent
+         * sees its own workspace and nothing of the user's files or any other
+         * agent's — additional paths arrive only as read_path/write_path
+         * grants. "Trusted" is about resources, never about reach. */
         cfg->sandbox = 1;
-        cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1; cfg->workspace_ro = 0;
+        cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
+        cfg->tmp_pct = 50;
         cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
     } else if (sandbox_profile && strcmp(sandbox_profile, "restricted") == 0) {
+        /* Bounded, but still able to run real programs: the limits are a
+         * runaway backstop, not a straitjacket. The workspace stays rw so
+         * $HOME works — what makes this restricted is no network at all. */
         cfg->sandbox = 1;
-        cfg->env_mode = 1; cfg->net_mode = 1; cfg->mount_cwd = 0; cfg->workspace_ro = 1;
-        cfg->rlimits.nproc = 8; cfg->rlimits.as_mb = 128; cfg->rlimits.cpu_sec = 10;
+        cfg->env_mode = 1; cfg->net_mode = 1; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
+        cfg->tmp_pct = 25;
+        cfg->rlimits.nproc = 64; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 120;
     } else { /* "standard", unknown, NULL */
         cfg->sandbox = 1;
         cfg->env_mode = 1; cfg->net_mode = 0; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
-        cfg->rlimits.nproc = 64; cfg->rlimits.as_mb = 512; cfg->rlimits.cpu_sec = 60;
+        cfg->tmp_pct = 50;
+        cfg->rlimits.nproc = 256; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 1800;
     }
 }
 
@@ -608,6 +704,7 @@ void sandbox_profile_resolve(const char *sandbox_profile, SandboxProfile *p) {
     p->net_mode     = c.net_mode;
     p->mount_cwd    = c.mount_cwd;
     p->workspace_ro = c.workspace_ro;
+    p->tmp_pct      = c.tmp_pct;
     p->rlimits.nproc   = c.rlimits.nproc;
     p->rlimits.as_mb   = c.rlimits.as_mb;
     p->rlimits.cpu_sec = c.rlimits.cpu_sec;

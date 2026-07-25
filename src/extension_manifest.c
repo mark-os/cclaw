@@ -121,10 +121,40 @@ static int run_ingest(sqlite3 *db, const char *sql, const char *manifest,
 
 /* ── validation ─────────────────────────────────────────────────── */
 
+/* json_each() is a table-valued function: fed anything but a JSON array (or
+ * object) it errors, and every check below is shaped "scan with json_each,
+ * reject if a bad row turns up" — which reads a query error identically to
+ * "no rows found", i.e. malformed input silently PASSES. A manifest author
+ * writing "transports": "persistent" instead of ["persistent"] found this
+ * the hard way: validation passed and the consumer's identical json_each
+ * fail-open then skipped a fail-closed capability gate. Every json_each()
+ * scan over manifest-controlled data must assert array shape first — this
+ * is that assertion, called at the top of each check_* below so a function
+ * is safe to call on its own, not just in validate()'s fixed order. */
+static int check_array_shape(sqlite3 *db, const char *json_blob, const char *path,
+                             const char *errmsg, char **err_out) {
+    char sql[128];
+    snprintf(sql, sizeof(sql),
+             "SELECT json_type(?1,%s) IS NOT NULL AND json_type(?1,%s)<>'array'",
+             path, path);
+    sqlite3_stmt *st;
+    int bad = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, json_blob, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) bad = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+    }
+    if (bad) { xerr(err_out, errmsg); return -1; }
+    return 0;
+}
+
 /* Verify every handler declared at json_each(<arrpath>) names a .qjs file that
  * exists under bundle_dir. Returns 0 if all present. */
 static int check_handlers(sqlite3 *db, const char *manifest, const char *bundle_dir,
                           const char *arrpath, char **err_out) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), "manifest %s must be an array", arrpath);
+    if (check_array_shape(db, manifest, arrpath, msg, err_out) != 0) return -1;
     char sql[160];
     snprintf(sql, sizeof(sql),
              "SELECT json_extract(value,'$.handler') "
@@ -174,6 +204,9 @@ static int check_handlers(sqlite3 *db, const char *manifest, const char *bundle_
  * bad policy must be rejected HERE, where the author can fix it — not
  * discovered as a bricked tool on its first call. */
 static int check_policies(sqlite3 *db, const char *manifest, char **err_out) {
+    if (check_array_shape(db, manifest, "'$.tools'",
+                          "manifest '$.tools' must be an array", err_out) != 0)
+        return -1;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT COALESCE(json_extract(t.value,'$.name'),'(unnamed)')"
@@ -219,6 +252,9 @@ static int check_policies(sqlite3 *db, const char *manifest, char **err_out) {
  * namespace separator) and a description. Rows land in the config table as
  * <ext>.<key>, so a bad key must not smuggle a foreign namespace. */
 static int check_config(sqlite3 *db, const char *manifest, char **err_out) {
+    if (check_array_shape(db, manifest, "'$.config'",
+                          "manifest '$.config' must be an array", err_out) != 0)
+        return -1;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT json_extract(value,'$.key'), json_extract(value,'$.description'), "
@@ -278,6 +314,9 @@ static int check_config(sqlite3 *db, const char *manifest, char **err_out) {
  * frontmatter parses with a description (the index entry). */
 static int check_skills(sqlite3 *db, const char *manifest, const char *bundle_dir,
                         char **err_out) {
+    if (check_array_shape(db, manifest, "'$.skills'",
+                          "manifest '$.skills' must be an array", err_out) != 0)
+        return -1;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT value FROM json_each(COALESCE(json_extract(?1,'$.skills'),'[]'))",
@@ -322,6 +361,9 @@ static int check_skills(sqlite3 *db, const char *manifest, const char *bundle_di
  * visibility) are enforced at install time by agent_definition_validate. */
 static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_dir,
                         char **err_out) {
+    if (check_array_shape(db, manifest, "'$.agents'",
+                          "manifest '$.agents' must be an array", err_out) != 0)
+        return -1;
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db,
             "SELECT json_extract(value,'$.name'),"
@@ -360,6 +402,114 @@ static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_di
         }
     }
     sqlite3_finalize(st);
+    return rc;
+}
+
+/* Verify every $.hooks[] entry's event is one the daemon actually dispatches
+ * — accepting turnStart/turnEnd (declared in specs/hooks.md, never wired)
+ * would register a hook that silently never fires (review-1 F13). */
+static int check_hook_events(sqlite3 *db, const char *manifest, char **err_out) {
+    if (check_array_shape(db, manifest, "'$.hooks'",
+                          "manifest '$.hooks' must be an array", err_out) != 0)
+        return -1;
+    sqlite3_stmt *st;
+    char *bad = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT json_extract(value,'$.event')"
+            " FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]'))"
+            " WHERE COALESCE(json_extract(value,'$.event'),'') NOT IN"
+            "   ('preAdvance','postAdvance','beforeToolCall','afterToolCall')"
+            " LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            bad = strdup(v ? v : "(missing)");
+        }
+        sqlite3_finalize(st);
+    }
+    if (!bad) return 0;
+    if (err_out) {
+        size_t n = strlen(bad) + 128;
+        char *m = malloc(n);
+        if (m) {
+            snprintf(m, n, "hook event '%s' is not dispatched — use "
+                     "preAdvance, postAdvance, beforeToolCall, or "
+                     "afterToolCall", bad);
+            *err_out = m;
+        }
+    }
+    free(bad);
+    return -1;
+}
+
+/* Verify the (at most one) $.channel object: its handler is a .qjs file
+ * present in the bundle, and transports[] (if declared) is an array drawn
+ * from the known set. transports is advisory — the one thing C validates it
+ * for is extension_manifest_declares_persistent's (below) fail-closed
+ * WS-capability gate, so a bad shape or a typo must not silently read as
+ * "declares nothing". */
+static int check_channel(sqlite3 *db, const char *manifest, const char *bundle_dir,
+                         char **err_out) {
+    char *ch = json_text(db, manifest, "'$.channel'");
+    if (!ch || !ch[0]) { free(ch); return 0; }
+
+    int rc = -1;
+    sqlite3_stmt *st;
+    char *chandler = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.handler')", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            if (v) chandler = strdup(v);
+        }
+        sqlite3_finalize(st);
+    }
+    if (chandler && chandler[0]) {
+        char fp[PATH_MAX];
+        snprintf(fp, sizeof(fp), "%s/%s", bundle_dir, chandler);
+        struct stat sb;
+        size_t cl = strlen(chandler);
+        if (cl < 5 || strcmp(chandler + cl - 4, ".qjs") != 0 ||
+            stat(fp, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+            free(chandler);
+            xerr(err_out, "channel handler missing or not a .qjs file");
+            goto out;
+        }
+    }
+    free(chandler);
+
+    /* Shape first: a bare string ("transports": "persistent") makes
+     * json_each error out, which the enum scan below reads identically to
+     * "no rows" — the same fail-open a typo'd value gets caught for. */
+    if (check_array_shape(db, ch, "'$.transports'",
+                          "channel transports must be an array", err_out) != 0)
+        goto out;
+    {
+        char *badt = NULL;
+        if (sqlite3_prepare_v2(db,
+                "SELECT value FROM json_each("
+                "  COALESCE(json_extract(?1,'$.transports'),'[]'))"
+                " WHERE value NOT IN ('poll','webhook','persistent') LIMIT 1",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(st, 0);
+                badt = strdup(v ? v : "(null)");
+            }
+            sqlite3_finalize(st);
+        }
+        if (badt) {
+            char m[192];
+            snprintf(m, sizeof(m), "unknown channel transport '%s' — "
+                     "use poll, webhook, or persistent", badt);
+            free(badt);
+            xerr(err_out, m);
+            goto out;
+        }
+    }
+    rc = 0;
+out:
+    free(ch);
     return rc;
 }
 
@@ -404,126 +554,42 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
 
     if (check_handlers(jdb, manifest, bundle_dir, "'$.tools'", err_out) != 0) goto out;
     if (check_handlers(jdb, manifest, bundle_dir, "'$.hooks'", err_out) != 0) goto out;
-    /* Hook events must be ones the daemon actually dispatches — accepting
-     * turnStart/turnEnd (declared in specs/hooks.md, never wired) would
-     * register a hook that silently never fires (review-1 F13). */
-    {
-        sqlite3_stmt *st;
-        char *bad = NULL;
-        if (sqlite3_prepare_v2(jdb,
-                "SELECT json_extract(value,'$.event')"
-                " FROM json_each(COALESCE(json_extract(?1,'$.hooks'),'[]'))"
-                " WHERE COALESCE(json_extract(value,'$.event'),'') NOT IN"
-                "   ('preAdvance','postAdvance','beforeToolCall','afterToolCall')"
-                " LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
-            if (sqlite3_step(st) == SQLITE_ROW) {
-                const char *v = (const char *)sqlite3_column_text(st, 0);
-                bad = strdup(v ? v : "(missing)");
-            }
-            sqlite3_finalize(st);
-        }
-        if (bad) {
-            if (err_out) {
-                size_t n = strlen(bad) + 128;
-                char *m = malloc(n);
-                if (m) {
-                    snprintf(m, n, "hook event '%s' is not dispatched — use "
-                             "preAdvance, postAdvance, beforeToolCall, or "
-                             "afterToolCall", bad);
-                    *err_out = m;
-                }
-            }
-            free(bad);
-            goto out;
-        }
-    }
+    if (check_hook_events(jdb, manifest, err_out) != 0) goto out;
     if (check_handlers(jdb, manifest, bundle_dir, "'$.scripts'", err_out) != 0) goto out;
     if (check_policies(jdb, manifest, err_out) != 0) goto out;
     if (check_config(jdb, manifest, err_out) != 0) goto out;
     if (check_skills(jdb, manifest, bundle_dir, err_out) != 0) goto out;
     if (check_agents(jdb, manifest, bundle_dir, err_out) != 0) goto out;
-    /* channel is a single object, not an array — wrap so check_handlers sees an array */
-    {
-        char *ch = json_text(jdb, manifest, "'$.channel'");
-        if (ch && ch[0]) {
-            sqlite3_stmt *st;
-            char *chandler = NULL;
-            if (sqlite3_prepare_v2(jdb, "SELECT json_extract(?1,'$.handler')", -1, &st, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
-                if (sqlite3_step(st) == SQLITE_ROW) {
-                    const char *v = (const char *)sqlite3_column_text(st, 0);
-                    if (v) chandler = strdup(v);
-                }
-                sqlite3_finalize(st);
-            }
-            if (chandler && chandler[0]) {
-                char fp[PATH_MAX];
-                snprintf(fp, sizeof(fp), "%s/%s", bundle_dir, chandler);
-                struct stat sb;
-                size_t cl = strlen(chandler);
-                if (cl < 5 || strcmp(chandler + cl - 4, ".qjs") != 0 ||
-                    stat(fp, &sb) != 0 || !S_ISREG(sb.st_mode)) {
-                    free(chandler); free(ch);
-                    xerr(err_out, "channel handler missing or not a .qjs file");
-                    goto out;
-                }
-            }
-            free(chandler);
-            /* transports[] must be spelled exactly: its only consumer
-             * (manifest_declares_persistent) string-matches 'persistent', so a
-             * typo reads as "declares no persistent transport" and silently
-             * fails *open* — skipping the WS-capability gate that exists to
-             * refuse a channel libcurl cannot actually run. */
-            {
-                sqlite3_stmt *ts;
-                char *badt = NULL;
-                /* Shape first: a bare string ("transports": "persistent")
-                 * makes json_each error out, which reads as "no rows" — the
-                 * same fail-open this check exists to close. */
-                if (sqlite3_prepare_v2(jdb,
-                        "SELECT 1 WHERE json_type(?1,'$.transports') IS NOT NULL"
-                        " AND json_type(?1,'$.transports') <> 'array'",
-                        -1, &ts, NULL) == SQLITE_OK) {
-                    sqlite3_bind_text(ts, 1, ch, -1, SQLITE_STATIC);
-                    int bad_shape = sqlite3_step(ts) == SQLITE_ROW;
-                    sqlite3_finalize(ts);
-                    if (bad_shape) {
-                        free(ch);
-                        xerr(err_out, "channel transports must be an array");
-                        goto out;
-                    }
-                }
-                if (sqlite3_prepare_v2(jdb,
-                        "SELECT value FROM json_each("
-                        "  COALESCE(json_extract(?1,'$.transports'),'[]'))"
-                        " WHERE value NOT IN ('poll','webhook','persistent') LIMIT 1",
-                        -1, &ts, NULL) == SQLITE_OK) {
-                    sqlite3_bind_text(ts, 1, ch, -1, SQLITE_STATIC);
-                    if (sqlite3_step(ts) == SQLITE_ROW) {
-                        const char *v = (const char *)sqlite3_column_text(ts, 0);
-                        badt = strdup(v ? v : "(null)");
-                    }
-                    sqlite3_finalize(ts);
-                }
-                if (badt) {
-                    char m[192];
-                    snprintf(m, sizeof(m), "unknown channel transport '%s' — "
-                             "use poll, webhook, or persistent", badt);
-                    free(badt); free(ch);
-                    xerr(err_out, m);
-                    goto out;
-                }
-            }
-        }
-        free(ch);
-    }
+    if (check_channel(jdb, manifest, bundle_dir, err_out) != 0) goto out;
 
     rc = 0;
 out:
     free(manifest);
     sqlite3_close(jdb);
     return rc;
+}
+
+/* True if the channel installed at store_dir declares the "persistent"
+ * transport in its advisory channel.transports array. Missing/absent array
+ * -> not persistent (Telegram declares nothing). Lives beside check_channel
+ * (same key, same array-shape hazard) rather than in channel_runner.c, so
+ * there is exactly one reader of $.channel.transports in the codebase. */
+int extension_manifest_declares_persistent(sqlite3 *db, const char *store_dir) {
+    char mpath[1100];
+    snprintf(mpath, sizeof(mpath), "%s/extension.json", store_dir);
+    char *manifest = util_read_file(mpath, NULL);
+    if (!manifest) return 0;
+    int found = 0;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM json_each(COALESCE(json_extract(?1,'$.channel.transports'),'[]'))"
+            " WHERE value='persistent' LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) found = 1;
+        sqlite3_finalize(st);
+    }
+    free(manifest);
+    return found;
 }
 
 /* ── install ────────────────────────────────────────────────────── */

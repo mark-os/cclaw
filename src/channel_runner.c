@@ -1213,27 +1213,6 @@ static int curl_ws_available(void) {
     return 0;
 }
 
-/* True if the channel's manifest declares the "persistent" transport in its
- * advisory `channel.transports` array. SQLite JSON1 (a db handle is in reach —
- * no jsmn). Missing/absent array → not persistent (Telegram declares nothing). */
-static int manifest_declares_persistent(sqlite3 *db, const char *store_dir) {
-    char mpath[1100];
-    snprintf(mpath, sizeof(mpath), "%s/extension.json", store_dir);
-    char *manifest = util_read_file(mpath, NULL);
-    if (!manifest) return 0;
-    int found = 0;
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db,
-            "SELECT 1 FROM json_each(COALESCE(json_extract(?1,'$.channel.transports'),'[]'))"
-            " WHERE value='persistent' LIMIT 1", -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
-        if (sqlite3_step(st) == SQLITE_ROW) found = 1;
-        sqlite3_finalize(st);
-    }
-    free(manifest);
-    return found;
-}
-
 /* ── --check: static validation gate ──────────────────────────────
  * Reuses the manifest check + JS-load + onInit() sequence from
  * channel_runner_main, but never opens the outbox FIFO / request UDS and
@@ -1279,7 +1258,7 @@ int channel_runner_check(const char *db_path, const char *channel_name, char **e
      * first conn.open (which surfaces only as a JS onInit failure in the log).
      * The URLs themselves are runtime values, so `transports` is advisory —
      * this is the one thing C validates it for. */
-    if (manifest_declares_persistent(g_ctx->db, store_dir) && !curl_ws_available()) {
+    if (extension_manifest_declares_persistent(g_ctx->db, store_dir) && !curl_ws_available()) {
         if (err_out) *err_out = strdup(
             "channel declares transport 'persistent' but this libcurl has no "
             "ws/wss support (libcurl-minimal?) — install a WS-capable libcurl");

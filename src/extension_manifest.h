@@ -17,6 +17,12 @@
  * malloc'd message the caller must free (NULL on success). */
 int extension_manifest_validate(const char *bundle_dir, char **err_out);
 
+/* True if the channel installed at store_dir (the <db_dir>/extensions/<name>
+ * shared-store path, not a source bundle_dir) declares the "persistent"
+ * transport in its advisory channel.transports array. Missing/absent array
+ * means not persistent (e.g. Telegram declares nothing). */
+int extension_manifest_declares_persistent(sqlite3 *db, const char *store_dir);
+
 /* Install a bundle into the shared store and ingest its declarations.
  *
  * Steps (daemon-side apply):

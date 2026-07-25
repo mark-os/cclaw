@@ -34,13 +34,37 @@
 
 /* Bind-mask the secret key + DB ciphertext from the child's view.
  *
- * The key lives at <dir of db_path>/.cclaw_key, next to cclaw.db. trusted (and
- * host) profiles mount the CWD rw, and in CLI mode that CWD is the dir
- * holding both files — so a child could read the key and decrypt every stored
- * secret. We bind an empty, unreadable file over each sensitive path *inside
- * the new root*. Files not reachable in the child's mount tree (the
- * standard/restricted case) never materialize under newroot, so the stat
- * fails and we skip them — they are already invisible by omission. */
+ * PROVISIONAL — this exists only because the default backend stores the key as
+ * a file co-located with cclaw.db. Grants are approved on directories, so a
+ * read_path covering the DB's directory hands over key + ciphertext together,
+ * and the approver sees "read access to a directory" with no hint that it
+ * means every stored secret. Masking closes that by path.
+ *
+ * It is a path-based defense and does not generalize: once the key can live
+ * behind a key provider (kernel keyring, libsecret, an agent UDS, a TPM), the
+ * child's inability to reach it follows from the sandbox mounting almost
+ * nothing, and this function becomes dead code for those backends. Delete the
+ * key half when the file backend is no longer the default.
+ *
+ * Two different rules, on purpose:
+ *   key  — masked unconditionally. Reading it is not access to a resource, it
+ *          is escalation to every secret in the DB, including system-scope
+ *          ones and other agents'. A grant made on one agent's behalf must not
+ *          confer authority over agents that never consented, so no grant can
+ *          unmask it.
+ *   DB   — masked too, unconditionally, but for a weaker reason: grants bind
+ *          directories only (bind_dir_into mkdirs its target), so "grant the
+ *          DB file itself" is not expressible today and a per-file escape
+ *          hatch would be unreachable code. Nothing is lost meanwhile —
+ *          db_query is the sanctioned read path and runs in the parent, so
+ *          masking the file never breaks it. If file-granularity grants ever
+ *          land, this is the rule to revisit: the DB is ordinary agent state
+ *          and a deliberate, exact grant on it would be reasonable to honor.
+ *          The key is not, and must stay unconditional either way.
+ *
+ * Targets not reachable in the child's mount tree never materialize under
+ * newroot, so the stat fails and we skip them — already invisible by omission.
+ * Must run after all binds and before pivot_root. */
 static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     if (!db_path || !db_path[0]) return;
 
@@ -55,7 +79,7 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     if (efd < 0) return;
     close(efd);
 
-    /* Targets: the DB family (ciphertext) and the key file (crown jewel). */
+    /* Targets: the key file (crown jewel) and the DB family (ciphertext). */
     char keyf[PATH_MAX];
     char *slash = strrchr(db_abs, '/');
     int klen = slash
@@ -66,10 +90,10 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     snprintf(dbwal, sizeof(dbwal), "%s-wal", db_abs);
     snprintf(dbshm, sizeof(dbshm), "%s-shm", db_abs);
     size_t nt = 0;
+    if (klen > 0 && (size_t)klen < sizeof(keyf)) targets[nt++] = keyf;
     targets[nt++] = db_abs;
     targets[nt++] = dbwal;
     targets[nt++] = dbshm;
-    if (klen > 0 && (size_t)klen < sizeof(keyf)) targets[nt++] = keyf;
 
     for (size_t i = 0; i < nt; i++) {
         char dst[PATH_MAX + 64];
@@ -315,8 +339,8 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         }
     }
 
-    /* Mask the secret key + DB ciphertext if a bound path (CWD/workspace)
-     * would otherwise expose them. Must run after binds, before pivot_root. */
+    /* Mask the secret key + DB ciphertext if a bound path (CWD, workspace, or
+     * a grant) would otherwise expose them. After binds, before pivot_root. */
     sandbox_mask_state_files(newroot, db_path);
 
     /* pivot_root into new root */

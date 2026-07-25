@@ -19,7 +19,8 @@ typedef struct {
     const char *shell_path;  /* interpreter for -c; NULL = /bin/sh (agent_setup.c resolves) */
     const char *workspace;  /* agent workspace (namespace sandbox restricts access) */
     const char *cwd_path;   /* CWD rw bind-mount in CLI mode (NULL in daemon) */
-    const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key — bind-masked inside the ns */
+    const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key — both
+                               bind-masked inside the ns (see sandbox.c) */
     char **allowed_hosts;   /* borrowed egress allowlist for the per-call proxy */
     size_t allowed_host_count;
     ShellSecret *secrets;   /* array of secrets to inject + mask */

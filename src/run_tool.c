@@ -89,6 +89,7 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     w_u32(&b, (uint32_t)req->net_mode);
     w_str(&b, req->workspace);
     w_str(&b, req->mount_cwd ? req->cwd_path : NULL);
+    w_str(&b, req->db_path);
     w_u32(&b, (uint32_t)req->workspace_ro);
     w_u32(&b, (uint32_t)req->mount_cwd);
     w_u32(&b, (uint32_t)req->tmp_pct);
@@ -200,6 +201,7 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     q->net_mode  = (int)r_u32(r);
     q->workspace = r_str(r);
     q->cwd_path  = r_str(r);
+    q->db_path   = r_str(r);
     q->workspace_ro = (int)r_u32(r);
     q->mount_cwd    = (int)r_u32(r);
     q->tmp_pct      = (int)r_u32(r);
@@ -357,7 +359,9 @@ static void build_sandbox_cfg(const RunToolParsed *q, int skip_pid_ns,
     memset(cfg, 0, sizeof(*cfg));
     cfg->workspace    = q->workspace;
     cfg->cwd_path     = q->cwd_path;
-    cfg->db_path      = NULL;  /* no DB in this process */
+    /* Path only — the child never opens the DB. Used solely to locate the key
+     * and ciphertext for masking. */
+    cfg->db_path      = q->db_path;
     cfg->proxy_sock   = proxy_sock;
     cfg->sandbox      = q->sandbox;
     cfg->workspace_ro = q->workspace_ro;

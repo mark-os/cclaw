@@ -42,15 +42,55 @@ static int path_under(const char *base, const char *path) {
     return path[blen] == '\0' || path[blen] == '/';
 }
 
+/* Does an exact-path grant name this path? Distinguished from a prefix match
+ * because the two mean different things when an open fails: under a directory
+ * grant a failure is an ordinary missing file, but an exact grant should have
+ * bind-mounted this very path, so a failure means the grant did not take. */
+static int granted_exactly(const FileReadCtx *ctx, const char *fullpath,
+                           int want_write) {
+    for (size_t i = 0; i < ctx->sb.write_path_count; i++)
+        if (ctx->sb.write_paths[i] && strcmp(ctx->sb.write_paths[i], fullpath) == 0)
+            return 1;
+    if (want_write) return 0;
+    for (size_t i = 0; i < ctx->sb.read_path_count; i++)
+        if (ctx->sb.read_paths[i] && strcmp(ctx->sb.read_paths[i], fullpath) == 0)
+            return 1;
+    return 0;
+}
+
 /* Inside the mount sandbox an ungranted path is indistinguishable from a
  * missing file. When an open fails on a path outside every mounted area,
  * tell the model which grant to request instead of a bare "cannot open".
- * suggest_parent: propose granting the containing directory (file targets)
- * rather than the path itself (directory targets). Returns malloc'd hint or
- * NULL (path is within the granted set, or no mount enforcement is active). */
+ *
+ * suggest_parent: the target is a file the caller may be *creating*, so the
+ * grant that unblocks it is the containing directory — a bind mount needs an
+ * existing source, and a file that does not exist yet cannot be mounted. For
+ * targets that must already exist, pass 0 and the hint names the path itself,
+ * which is the narrower ask and is honored since grants bind files too.
+ *
+ * Returns malloc'd hint, or NULL when the path is inside a mounted area and
+ * the failure is therefore an ordinary missing file (or no mount enforcement
+ * is active at all). */
 static char *path_grant_hint(const FileReadCtx *ctx, const char *fullpath,
                              int want_write, int suggest_parent) {
     if (!ctx->sb.sandbox) return NULL; /* host trust / direct call: nothing hidden */
+
+    /* An exact grant that still cannot be opened is a broken grant, not a
+     * missing file — say so rather than falling through to a bare error or,
+     * worse, to NULL because the path technically matched. */
+    if (granted_exactly(ctx, fullpath, want_write)) {
+        size_t cap = strlen(fullpath) + 224;
+        char *msg = malloc(cap);
+        if (!msg) return NULL;
+        snprintf(msg, cap,
+                 "error: '%s' is granted but not present in the sandbox — the "
+                 "path likely does not exist on the host, or is masked. Check "
+                 "the grant with search_config; a grant on a path that does "
+                 "not exist yet cannot be mounted (grant its directory to "
+                 "create files there).", fullpath);
+        return msg;
+    }
+
     if (path_under(ctx->workspace, fullpath) &&
         !(want_write && ctx->sb.workspace_ro))
         return NULL;
@@ -101,7 +141,7 @@ static char *file_read_run(const RunToolParsed *q, FileReadCtx *ctx) {
 
     FILE *f = fopen(fullpath, "rb");
     if (!f) {
-        char *hint = path_grant_hint(ctx, fullpath, 0, 1);
+        char *hint = path_grant_hint(ctx, fullpath, 0, 0);
         return hint ? hint : strdup("error: cannot open file");
     }
 
@@ -478,7 +518,7 @@ static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx) {
 
     FILE *f = fopen(fullpath, "rb");
     if (!f) {
-        char *hint = path_grant_hint(ctx, fullpath, 1, 1);
+        char *hint = path_grant_hint(ctx, fullpath, 1, 0);
         return hint ? hint : strdup("error: cannot open file");
     }
     fseek(f, 0, SEEK_END);
@@ -543,7 +583,7 @@ static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx) {
     f = fopen(fullpath, "wb");
     if (!f) {
         free(out);
-        char *hint = path_grant_hint(ctx, fullpath, 1, 1);
+        char *hint = path_grant_hint(ctx, fullpath, 1, 0);
         return hint ? hint : strdup("error: cannot open file for writing");
     }
     size_t written = fwrite(out, 1, w, f);

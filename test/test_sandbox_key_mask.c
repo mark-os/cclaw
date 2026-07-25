@@ -73,19 +73,28 @@ static void test_directory_grant_masks_both(void) {
     printf("PASS test_directory_grant_masks_both\n");
 }
 
-/* Naming the DB file in a grant exposes nothing either. Two independent
- * reasons, and the test is deliberately agnostic about which one fired:
- * grants bind directories only, so a file path never mounts; and the mask is
- * unconditional regardless. If file-granularity grants ever land, this test
- * is the one that should be revisited alongside the DB rule in sandbox.c. */
-static void test_db_file_grant_exposes_nothing(void) {
+/* Naming the DB file exactly is the sanctioned way to reach it — grants bind
+ * files, not just directories, so this mounts. It must not drag the key along:
+ * this is the half of the rule a mask-everything implementation would fail. */
+static void test_exact_db_grant_exposes_db_but_never_key(void) {
     setup();
     char *out = read_state_files(DB);
-    printf("  db file grant → %s\n", out);
+    printf("  exact db grant → %s\n", out);
     assert(strstr(out, KEY_MARK) == NULL);
-    assert(strstr(out, DB_MARK) == NULL);
+    assert(strstr(out, DB_MARK) != NULL);
     free(out);
-    printf("PASS test_db_file_grant_exposes_nothing\n");
+    printf("PASS test_exact_db_grant_exposes_db_but_never_key\n");
+}
+
+/* A grant naming the key file itself must still not expose it — the key is
+ * masked unconditionally, and no grant may unmask it. */
+static void test_exact_key_grant_still_masked(void) {
+    setup();
+    char *out = read_state_files(KEYF);
+    printf("  exact key grant → %s\n", out);
+    assert(strstr(out, KEY_MARK) == NULL);
+    free(out);
+    printf("PASS test_exact_key_grant_still_masked\n");
 }
 
 /* No grant at all: invisible by omission, nothing mounted to mask. */
@@ -108,7 +117,8 @@ int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     test_no_grant_exposes_nothing();
     test_directory_grant_masks_both();
-    test_db_file_grant_exposes_nothing();
+    test_exact_db_grant_exposes_db_but_never_key();
+    test_exact_key_grant_still_masked();
     system("rm -rf " ROOT);
     printf("All key-mask tests passed\n");
     return 0;

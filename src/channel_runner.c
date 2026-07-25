@@ -61,6 +61,7 @@
 #define MAX_OUTBOX_ATTEMPTS 5
 #define CR_CONN_MAX 4             /* live persistent connections per channel */
 #define CR_CONN_CONNECT_TIMEOUT 15L  /* default handshake (TCP+TLS+upgrade) cap */
+#define CR_CONN_MSG_MAX CR_DOWNLOAD_MAX  /* reassembled WS message cap (same as downloads) */
 
 static volatile sig_atomic_t g_running = 1;
 ChannelCtx *g_ctx;
@@ -542,8 +543,9 @@ typedef struct ConnMsg {           /* one queued outbound text frame */
 typedef struct {
     CURL *easy;                    /* NULL = free slot */
     curl_socket_t fd;             /* CURLINFO_ACTIVESOCKET, polled in extra[] */
-    Buf msg;                       /* inbound frame reassembly (across reads) */
-    int msg_text;                  /* the frame being reassembled is TEXT */
+    Buf msg;                       /* inbound reassembly (across reads + fragments) */
+    int msg_text;                  /* the message being reassembled is TEXT */
+    int msg_over;                  /* message blew CR_CONN_MSG_MAX — drain, don't buffer */
     ConnMsg *out_head, *out_tail;  /* outbound backpressure queue */
     int pending_open;              /* fire onConnOpen on next iteration */
     int want_close;                /* reap: free + fire onConnClose */
@@ -551,6 +553,10 @@ typedef struct {
 } Conn;
 
 static Conn g_conn[CR_CONN_MAX];
+
+/* Set only for the duration of channel_runner_check()'s onInit() call — makes
+ * conn.open validate without dialing (see cr_conn_open). */
+static int g_check_mode;
 
 static void conn_free_slot(int i) {
     Conn *c = &g_conn[i];
@@ -587,14 +593,19 @@ static void conn_flush(int i) {
     }
 }
 
-/* Read every available frame until CURLE_AGAIN, reassembling a frame split
- * across reads (curl_ws_frame.bytesleft) into one message before dispatch.
- * C consumes control frames — PING/PONG are curl's business (autopong is on
- * by default), a CLOSE becomes a deferred onConnClose. Only reassembled TEXT
- * reaches onConnMessage (v1 is text/json; BINARY is dropped). Dispatch is
- * per WS frame — Discord's gateway never fragments a gateway event across
- * frames, so cross-frame CONT joining is out of scope (a stray CONT frame is
- * dropped, not mis-joined). */
+/* Read every available frame until CURLE_AGAIN, reassembling a message before
+ * dispatch. Two separate splits both have to be joined: a single frame split
+ * across reads (curl_ws_frame.bytesleft > 0) and a message split across frames
+ * (RFC 6455 fragmentation — CURLWS_CONT means "more fragments follow"). A
+ * message is complete only when the current frame is drained AND is the final
+ * fragment. C consumes control frames — PING/PONG are curl's business (autopong
+ * is on by default), a CLOSE becomes a deferred onConnClose. Only reassembled
+ * TEXT reaches onConnMessage (v1 is text/json; BINARY is dropped).
+ *
+ * Reassembly is capped at CR_CONN_MSG_MAX: the WS length field is 64-bit and
+ * libcurl imposes no message ceiling, so an allowlisted-but-hostile peer could
+ * otherwise stream us out of RAM on a 128MB box. Over-cap messages are dropped
+ * with a warning, and the rest of the message is drained without buffering. */
 static void conn_recv_drain(JSContext *ctx, int i) {
     Conn *c = &g_conn[i];
     char buf[16384];
@@ -613,14 +624,26 @@ static void conn_recv_drain(JSContext *ctx, int i) {
             return;
         }
         if (meta->flags & (CURLWS_PING | CURLWS_PONG)) continue;
-        if (c->msg.len == 0) c->msg_text = (meta->flags & CURLWS_TEXT) != 0;
-        if (rlen) buf_append(&c->msg, buf, rlen);
-        if (meta->bytesleft == 0) {                 /* frame complete */
-            if (c->msg_text && !c->msg.oom) {
+        if (c->msg.len == 0 && !c->msg_over)
+            c->msg_text = (meta->flags & CURLWS_TEXT) != 0;
+        if (rlen) {
+            if (c->msg.len + rlen > (size_t)CR_CONN_MSG_MAX) {
+                if (!c->msg_over)
+                    LOG_WARN_("channel_runner: conn %d message exceeds %ld bytes — dropping",
+                              i + 1, CR_CONN_MSG_MAX);
+                c->msg_over = 1;
+                buf_free(&c->msg);                   /* stop holding the prefix */
+            } else if (!c->msg_over) {
+                buf_append(&c->msg, buf, rlen);
+            }
+        }
+        if (meta->bytesleft == 0 && !(meta->flags & CURLWS_CONT)) {  /* message complete */
+            if (!c->msg_over && c->msg_text && !c->msg.oom) {
                 buf_append_char(&c->msg, '\0');      /* NUL-terminate for JS */
                 if (!c->msg.oom) call_on_conn_message(ctx, i + 1, c->msg.data);
             }
             buf_free(&c->msg);                       /* reset reassembly */
+            c->msg_over = 0;
         }
     }
 }
@@ -640,6 +663,15 @@ int cr_conn_open(const char *url, const char *framing,
         LOG_WARN_("channel_runner: conn.open host not allowed, refusing: %s", url);
         return -1;
     }
+    /* --check is static validation: it runs onInit() but never enters the event
+     * loop. Dialing for real would make a health check depend on the provider
+     * being reachable (a transient outage would refuse activation) and would
+     * leave a live TLS session behind, since the check path never reaps conns.
+     * Validate the spec, report a plausible id, open nothing. */
+    if (g_check_mode) {
+        LOG_INFO_("channel_runner: --check: conn.open validated, not dialed: %s", url);
+        return 1;
+    }
     int slot = -1;
     for (int i = 0; i < CR_CONN_MAX; i++) if (!g_conn[i].easy) { slot = i; break; }
     if (slot < 0) { LOG_WARN_("channel_runner: conn table full (max %d)", CR_CONN_MAX); return -1; }
@@ -648,8 +680,15 @@ int cr_conn_open(const char *url, const char *framing,
     if (!c) return -1;
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_CONNECT_ONLY, 2L);   /* 2 = WebSocket */
-    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT,
-                     timeout > 0 ? timeout : CR_CONN_CONNECT_TIMEOUT);
+    long cap = timeout > 0 ? timeout : CR_CONN_CONNECT_TIMEOUT;
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, cap);
+    /* CONNECTTIMEOUT alone is not enough: it only covers TCP+TLS, while the
+     * HTTP Upgrade → 101 exchange runs in the transfer phase. A peer that
+     * completes TLS and then says nothing would block curl_easy_perform
+     * forever — wedging the single-threaded runner (outbox, UDS, every other
+     * conn) with only SIGKILL to end it. TIMEOUT caps the whole handshake;
+     * it is cleared below so it can never expire the long-lived stream. */
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, cap);
     struct curl_slist *hl = NULL;
     for (int i = 0; i < n_headers; i++) hl = curl_slist_append(hl, headers[i]);
     if (hl) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hl);
@@ -661,6 +700,7 @@ int cr_conn_open(const char *url, const char *framing,
         curl_easy_cleanup(c);
         return -1;
     }
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 0L);        /* handshake done — no cap on the stream */
     curl_socket_t sock = CURL_SOCKET_BAD;
     if (curl_easy_getinfo(c, CURLINFO_ACTIVESOCKET, &sock) != CURLE_OK ||
         sock == CURL_SOCKET_BAD) {
@@ -1305,7 +1345,9 @@ int channel_runner_check(const char *db_path, const char *channel_name, char **e
         record_outbox_capability(ctx);
         curl_global_init(CURL_GLOBAL_DEFAULT);
         g_multi = curl_multi_init();
+        g_check_mode = 1;
         JSValue init_ret = eval_js(ctx, "onInit()", "<check-init>");
+        g_check_mode = 0;
         if (JS_IsUndefined(init_ret)) {
             if (err_out) *err_out = strdup("onInit() failed or threw");
             rc = -1;
@@ -1313,9 +1355,12 @@ int channel_runner_check(const char *db_path, const char *channel_name, char **e
             JS_FreeValue(ctx, init_ret);
         }
         /* Never enters the event loop — drop anything onInit queued so
-         * nothing actually goes out over the network. */
+         * nothing actually goes out over the network. Conns are validated
+         * rather than dialed under g_check_mode, but reap the table anyway:
+         * curl_global_cleanup() with a live easy handle is undefined. */
         SendReq *r;
         while ((r = send_queue_pop()) != NULL) send_req_free(r);
+        for (int i = 0; i < CR_CONN_MAX; i++) if (g_conn[i].easy) conn_free_slot(i);
         curl_multi_cleanup(g_multi); g_multi = NULL;
         curl_global_cleanup();
     }

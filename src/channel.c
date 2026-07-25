@@ -659,13 +659,23 @@ void channel_tick(sqlite3 *db) {
     char desired[CHANNEL_MAX][64];
     int nd = active_channel_names(db, desired, CHANNEL_MAX);
 
+    /* Trust-'active' says the code *may* run; the launch gate (enabled key +
+     * required config) decides whether it does. Applying the gate here, to the
+     * desired set itself, rather than only at the launch site below, is what
+     * makes `<ext>.enabled=0` mean "off" for a channel that is already up:
+     * the stop loop then SIGTERMs it and untracks it, which in turn keeps the
+     * backoff-respawn loop (which only walks tracked channels) from bringing a
+     * crashed-and-since-disabled channel back. */
+    int keep = 0;
+    for (int i = 0; i < nd; i++) {
+        if (!channel_should_launch(db, desired[i], NULL, 0)) continue;
+        if (keep != i) memcpy(desired[keep], desired[i], sizeof(desired[0]));
+        keep++;
+    }
+    nd = keep;
+
     for (int i = 0; i < nd; i++) {
         if (find_by_name(desired[i])) continue;
-        /* Same gate as channel_launch_all: trust-'active' says the code may
-         * run, but the enabled key + required config decide whether it does.
-         * Without this check the reconcile loop would exec a disabled channel
-         * (e.g. telegram with no bot_token), which then crash-loops. */
-        if (!channel_should_launch(db, desired[i], NULL, 0)) continue;
         if (start_channel(db, desired[i]) == 0)
             LOG_INFO_("channel launch name=%s reason=activated", desired[i]);
     }
@@ -678,7 +688,9 @@ void channel_tick(sqlite3 *db) {
         if (wanted) { i++; continue; }
         /* Untrack before killing: channel_reap only reschedules processes it
          * finds in g_channels, so an intentional stop never respawns. */
-        LOG_INFO_("channel stop name=%s reason=deactivated", c->name);
+        /* Dropped out of the desired set: trust-deactivated, or the launch
+         * gate went false (enabled=0 / a required config key cleared). */
+        LOG_INFO_("channel stop name=%s reason=unwanted", c->name);
         if (c->pid > 0) kill(c->pid, SIGTERM);
         update_pid(db, c->name, 0);
         remove_channel(c);   /* swaps the last entry into slot i — revisit i */

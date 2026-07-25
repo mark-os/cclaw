@@ -151,6 +151,31 @@ static int ws_send_text(int fd, const char *s) {
     return write_all(fd, s, len);
 }
 
+/* Send one text message split across `parts` WS fragments (RFC 6455: first
+ * frame carries the TEXT opcode with FIN clear, the rest opcode 0, only the
+ * last has FIN). Legal on any peer; the runner must rejoin them into a single
+ * onConnMessage rather than dispatching the first fragment as a whole message.
+ * Payloads here are short, so the 7-bit length form always suffices. */
+static int ws_send_text_fragmented(int fd, const char *s, int parts) {
+    size_t len = strlen(s);
+    if (parts < 2) parts = 2;
+    size_t chunk = len / (size_t)parts;
+    if (chunk == 0) chunk = 1;
+    size_t off = 0;
+    for (int i = 0; off < len; i++) {
+        size_t n = (i == parts - 1) ? len - off : chunk;
+        if (off + n > len) n = len - off;
+        int last = (off + n >= len);
+        unsigned char hdr[2];
+        hdr[0] = (unsigned char)((last ? 0x80 : 0x00) | (i == 0 ? 0x1 : 0x0));
+        hdr[1] = (unsigned char)n;              /* n < 126 by construction */
+        if (write_all(fd, hdr, 2) != 0) return -1;
+        if (write_all(fd, s + off, n) != 0) return -1;
+        off += n;
+    }
+    return 0;
+}
+
 /* Read one client frame (masked). Returns opcode, fills payload (NUL-term).
  * -1 on error/close of the socket. */
 static int ws_read_frame(int fd, char *payload, size_t cap, size_t *out_len) {
@@ -250,6 +275,11 @@ static void *mock_ws_server(void *arg) {
             sent_message = 1;
             ws_send_text(cfd, "{\"op\":0,\"t\":\"MESSAGE_CREATE\","
                               "\"d\":{\"channel_id\":\"999\",\"content\":\"hi from gateway\"}}");
+            /* Same event, fragmented: the handler's JSON.parse only succeeds if
+             * C rejoined all three fragments before dispatching. */
+            ws_send_text_fragmented(cfd,
+                "{\"op\":0,\"t\":\"MESSAGE_CREATE\","
+                "\"d\":{\"channel_id\":\"888\",\"content\":\"fragment-joined\"}}", 3);
         }
     }
     close(cfd);
@@ -412,6 +442,23 @@ int main(void) {
     }
     if (!found) FAIL("MESSAGE_CREATE did not reach channel_events");
     printf("  PASS: HELLO->IDENTIFY->ACK->MESSAGE_CREATE->emit\n");
+
+    /* 3b. A fragmented message must arrive whole. Before the CURLWS_CONT fix
+     * the first fragment was dispatched as a complete message (truncated JSON
+     * -> JSON.parse throws) and the remainder was silently dropped. */
+    int frag = 0;
+    for (int i = 0; i < 60 && !frag; i++) {
+        usleep(100000);
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT COUNT(*) FROM channel_events WHERE channel_name='discx'"
+                " AND payload LIKE '%fragment-joined%';", -1, &st, NULL) == SQLITE_OK) {
+            if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) > 0) frag = 1;
+            sqlite3_finalize(st);
+        }
+    }
+    if (!frag) FAIL("fragmented MESSAGE_CREATE was not reassembled");
+    printf("  PASS: fragmented message reassembled across CONT frames\n");
 
     /* 4. Bidirectional proof: server saw IDENTIFY + heartbeat; handler saw ACK. */
     if (!g_identify_seen) FAIL("server never received IDENTIFY");

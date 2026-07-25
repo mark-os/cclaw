@@ -17,8 +17,10 @@
  * An unmatched HTTP request fails the scenario immediately (fail-closed —
  * nothing escapes to a real network by falling through unmatched). */
 #define _POSIX_C_SOURCE 200809L
+#include "channel.h"          /* channel_config_get */
 #include "channel_api.h"
 #include "channel_harness.h"
+#include "config_registry.h"  /* config_set */
 #include "channel_runner.h"
 #include "db.h"
 #include "jsmn_util.h"
@@ -278,6 +280,17 @@ int channel_harness_run(const char *db_path, const char *channel_name, const cha
     if (!real_db) { fprintf(stderr, "harness: cannot open %s\n", db_path); scenario_free(&sc); return 1; }
     char js_path[1024];
     int resolved = resolve_js_path(real_db, channel_name, js_path, sizeof(js_path));
+    /* Carry the egress allowlist across to the scratch DB (seeded below).
+     * url_host_allowed builds its rules from base_url + egress_hosts, and with
+     * no config at all it fail-closes — so channel.http and every conn.open
+     * were refused outright, making persistent channels untestable here.
+     *
+     * These two keys ONLY. Channel config also holds live credentials
+     * (bot_token), and the scratch DB is a world-readable file under /tmp —
+     * copying the whole section would write a bot token to disk. A handler that
+     * needs a token in the harness should read it from the environment. */
+    char *h_base = channel_config_get(real_db, channel_name, "base_url");
+    char *h_egress = channel_config_get(real_db, channel_name, "egress_hosts");
     db_close(real_db);
     if (resolved != 0) {
         fprintf(stderr, "harness: no channel '%s' registered in %s\n", channel_name, db_path);
@@ -320,7 +333,22 @@ int channel_harness_run(const char *db_path, const char *channel_name, const cha
         sqlite3_bind_text(s, 2, channel_name, -1, SQLITE_STATIC);
         sqlite3_bind_text(s, 3, js_path, -1, SQLITE_STATIC);
         sqlite3_step(s); sqlite3_finalize(s);
+
+        /* Egress keys, now that channels/extensions exist (channel_config
+         * resolves through extension_name). Key shape is "<ext>.<key>", and
+         * the harness registers extension_name == channel_name above. */
+        char ckey[192];
+        if (h_base) {
+            snprintf(ckey, sizeof(ckey), "%s.base_url", channel_name);
+            config_set(sdb, ckey, h_base);
+        }
+        if (h_egress) {
+            snprintf(ckey, sizeof(ckey), "%s.egress_hosts", channel_name);
+            config_set(sdb, ckey, h_egress);
+        }
     }
+    free(h_base);
+    free(h_egress);
     db_close(sdb);
 
     g_ctx = channel_ctx_open(scratch_path, channel_name);

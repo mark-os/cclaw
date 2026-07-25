@@ -17,11 +17,11 @@ int admin_set_key(sqlite3 *db, const char *provider, const char *value);
  * Returns a malloc'd string (caller frees), NULL if unknown/keyless. */
 char *admin_key_env_name(sqlite3 *db, const char *provider);
 
-/* Set model for provider at index (0=primary, 1+=fallback). Returns 0 on success. */
-int admin_set_model(sqlite3 *db, int provider_index, const char *model);
-
-/* Set base_url for provider at index. Returns 0 on success. */
-int admin_set_endpoint(sqlite3 *db, int provider_index, const char *url);
+/* Set default_model / base_url on a named provider. Returns 0 on success, -1 if
+ * no such provider (or, for the endpoint, a non-http(s) URL). Keyed by name,
+ * not priority index — see the note in admin_api.c. */
+int admin_set_model(sqlite3 *db, const char *provider, const char *model);
+int admin_set_endpoint(sqlite3 *db, const char *provider, const char *url);
 
 /* Grants CRUD (delegates to agent_config) — covers all kinds ("tool",
  * "host", "read_path", "write_path"), keyed by the grants table's implicit

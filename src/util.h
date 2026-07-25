@@ -43,4 +43,17 @@ char *base64_encode(const unsigned char *buf, size_t len);
 int ascii_strcasecmp(const char *a, const char *b);
 int ascii_strncasecmp(const char *a, const char *b, size_t n);
 
+/* True if the *runtime* libcurl advertises the ws/wss protocols. The
+ * compile-time view lies: libcurl-minimal ships the curl_ws_* declarations and
+ * symbols but strips the protocol handlers, so a ws:// transfer fails at
+ * perform with "Unsupported protocol". Probing the runtime protocol list is
+ * the only source of truth (see specs/channel-transports.md).
+ *
+ * Lives in util (a leaf) rather than channel_runner on purpose: the conn
+ * integration test must skip rather than fail on a box without WS, and it
+ * deliberately does not link the runner — it forks `cclaw --channel` as a
+ * subprocess. Declaring this in channel_runner.h dragged channel.o and
+ * dashboard.o into that test and broke the link on main.c's resolve_approval. */
+int curl_ws_available(void);
+
 #endif

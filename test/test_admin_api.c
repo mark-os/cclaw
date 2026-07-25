@@ -126,10 +126,12 @@ static void test_set_model_primary(void) {
         " VALUES('openrouter','https://openrouter.ai/api/v1','OPENROUTER_API_KEY','old-model',0);",
         NULL, NULL, NULL);
 
-    assert(admin_set_model(db, 0, "new-model") == 0);
+    assert(admin_set_model(db, "openrouter", "new-model") == 0);
+    /* Unknown provider is an error, not a silent no-op on whoever is first. */
+    assert(admin_set_model(db, "no-such-provider", "x") == -1);
 
     sqlite3_stmt *s;
-    sqlite3_prepare_v2(db, "SELECT default_model FROM providers WHERE priority=0", -1, &s, NULL);
+    sqlite3_prepare_v2(db, "SELECT default_model FROM providers WHERE name='openrouter'", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
     const char *val = (const char *)sqlite3_column_text(s, 0);
     assert(val && strcmp(val, "new-model") == 0);
@@ -146,17 +148,18 @@ static void test_set_endpoint_primary(void) {
         " VALUES('openrouter','https://old.api/v1','OPENROUTER_API_KEY',0);",
         NULL, NULL, NULL);
 
-    assert(admin_set_endpoint(db, 0, "https://new.api/v1") == 0);
+    assert(admin_set_endpoint(db, "openrouter", "https://new.api/v1") == 0);
 
     sqlite3_stmt *s;
-    sqlite3_prepare_v2(db, "SELECT base_url FROM providers WHERE priority=0", -1, &s, NULL);
+    sqlite3_prepare_v2(db, "SELECT base_url FROM providers WHERE name='openrouter'", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
     const char *val = (const char *)sqlite3_column_text(s, 0);
     assert(val && strcmp(val, "https://new.api/v1") == 0);
     sqlite3_finalize(s);
 
     /* Reject non-http URLs */
-    assert(admin_set_endpoint(db, 0, "ftp://bad.url") == -1);
+    assert(admin_set_endpoint(db, "openrouter", "ftp://bad.url") == -1);
+    assert(admin_set_endpoint(db, "no-such-provider", "https://ok/v1") == -1);
 
     db_close(db);
     test_db_clean(DB_PATH);
@@ -172,10 +175,13 @@ static void test_set_model_fallback(void) {
         " VALUES('fallback','https://fb.api/v1','FB_KEY','fb-old',1);",
         NULL, NULL, NULL);
 
-    assert(admin_set_model(db, 1, "fb-new") == 0);
+    assert(admin_set_model(db, "fallback", "fb-new") == 0);
+    /* Naming the target means the primary is untouched — an index could not
+     * express "this one" once priorities shift. */
+    assert(admin_set_model(db, "openrouter", "primary-kept") == 0);
 
     sqlite3_stmt *s;
-    sqlite3_prepare_v2(db, "SELECT default_model FROM providers WHERE priority=1", -1, &s, NULL);
+    sqlite3_prepare_v2(db, "SELECT default_model FROM providers WHERE name='fallback'", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
     const char *val = (const char *)sqlite3_column_text(s, 0);
     assert(val && strcmp(val, "fb-new") == 0);

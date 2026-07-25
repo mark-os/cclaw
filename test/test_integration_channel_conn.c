@@ -30,7 +30,7 @@
 #include <unistd.h>
 #include <curl/curl.h>
 #include "db.h"
-#include "util.h"          /* base64_encode */
+#include "util.h"          /* base64_encode, curl_ws_available */
 #include "test_util.h"
 
 /* The channel.conn.* WS transport needs a libcurl whose runtime protocol set
@@ -38,13 +38,6 @@
  * curl_ws_* symbols still link, but ws:// perform returns "Unsupported
  * protocol"). Skip cleanly there — the test exercises the real transport as
  * soon as a WS-capable libcurl is present. */
-static int curl_has_ws(void) {
-    curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
-    if (!v || !v->protocols) return 0;
-    for (const char *const *p = v->protocols; *p; p++)
-        if (strcasecmp(*p, "ws") == 0 || strcasecmp(*p, "wss") == 0) return 1;
-    return 0;
-}
 
 #define DB_PATH "/tmp/test_integ_conn.db"
 #define EXT_DIR "/tmp/test_integ_conn_ext"
@@ -374,7 +367,7 @@ int main(void) {
     TEST_INIT();
     printf("test_integration_channel_conn:\n");
 
-    if (!curl_has_ws()) {
+    if (!curl_ws_available()) {
         printf("  SKIP: runtime libcurl has no ws/wss protocol "
                "(libcurl-minimal?) — conn.* transport untestable here\n");
         return 0;

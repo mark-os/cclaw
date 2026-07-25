@@ -137,6 +137,48 @@ static JSValue js_ch_log(JSContext *ctx, JSValueConst this_val,
 
 /* ── cclaw.send(request) / cclaw.http(request) ─────────────────── */
 
+/* Cap on a JS-supplied header array. Note the semantics below: exceeding it
+ * drops *every* header, not just the surplus. */
+#define JS_MAX_HEADERS 32
+
+/* Pull the string array at o.headers into a fresh char* vector (caller frees
+ * each element and the vector). Shared by send()/http() and conn.open(), which
+ * carried line-for-line identical copies.
+ *
+ * Behaviour preserved deliberately, including its wart: more than
+ * JS_MAX_HEADERS means no headers are sent at all. That used to be silent —
+ * a request quietly losing its Authorization header is near-impossible to
+ * debug from the handler side — so it now warns. Whether it should instead
+ * throw, or send the first 32, is a JS API contract change for both call
+ * sites and not folded into this dedup. */
+static void js_headers_to_strv(JSContext *ctx, JSValueConst o,
+                               char ***out_v, int *out_n) {
+    *out_v = NULL;
+    *out_n = 0;
+    JSValue h = JS_GetPropertyStr(ctx, o, "headers");
+    if (!JS_IsException(h) && !JS_IsUndefined(h) && !JS_IsNull(h)) {
+        int n = get_int_prop(ctx, h, "length", 0);
+        if (n > JS_MAX_HEADERS) {
+            LOG_WARN_("channel js: %d headers exceeds the %d cap — sending none",
+                      n, JS_MAX_HEADERS);
+        } else if (n > 0) {
+            char **v = calloc((size_t)n, sizeof(char *));
+            if (v) {
+                int k = 0;
+                for (int i = 0; i < n; i++) {
+                    JSValue hv = JS_GetPropertyUint32(ctx, h, (uint32_t)i);
+                    const char *hs = JS_ToCString(ctx, hv);
+                    JS_FreeValue(ctx, hv);
+                    if (hs) { v[k++] = strdup(hs); JS_FreeCString(ctx, hs); }
+                }
+                *out_v = v;
+                *out_n = k;
+            }
+        }
+    }
+    JS_FreeValue(ctx, h);
+}
+
 /* Parse the fields common to send() and http() (url/method/body/timeout/
  * headers) into a fresh SendReq. NULL if url is missing (caller throws). */
 static SendReq *send_req_from_js(JSContext *ctx, JSValueConst o) {
@@ -148,23 +190,7 @@ static SendReq *send_req_from_js(JSContext *ctx, JSValueConst o) {
     r->method = get_str_prop(ctx, (JSValue)o, "method");
     r->body = get_str_prop(ctx, (JSValue)o, "body");
     r->timeout = get_int_prop(ctx, (JSValue)o, "timeout", 0);
-
-    JSValue h = JS_GetPropertyStr(ctx, o, "headers");
-    if (!JS_IsException(h) && !JS_IsUndefined(h) && !JS_IsNull(h)) {
-        int n = get_int_prop(ctx, h, "length", 0);
-        if (n > 0 && n <= 32) {
-            r->headers = calloc((size_t)n, sizeof(char *));
-            if (r->headers) {
-                for (int i = 0; i < n; i++) {
-                    JSValue hv = JS_GetPropertyUint32(ctx, h, (uint32_t)i);
-                    const char *hs = JS_ToCString(ctx, hv);
-                    JS_FreeValue(ctx, hv);
-                    if (hs) { r->headers[r->n_headers++] = strdup(hs); JS_FreeCString(ctx, hs); }
-                }
-            }
-        }
-    }
-    JS_FreeValue(ctx, h);
+    js_headers_to_strv(ctx, o, &r->headers, &r->n_headers);
     return r;
 }
 
@@ -230,22 +256,7 @@ static JSValue js_ch_conn_open(JSContext *ctx, JSValueConst this_val,
 
     char **headers = NULL;
     int n_headers = 0;
-    JSValue h = JS_GetPropertyStr(ctx, o, "headers");
-    if (!JS_IsException(h) && !JS_IsUndefined(h) && !JS_IsNull(h)) {
-        int n = get_int_prop(ctx, h, "length", 0);
-        if (n > 0 && n <= 32) {
-            headers = calloc((size_t)n, sizeof(char *));
-            if (headers) {
-                for (int i = 0; i < n; i++) {
-                    JSValue hv = JS_GetPropertyUint32(ctx, h, (uint32_t)i);
-                    const char *hs = JS_ToCString(ctx, hv);
-                    JS_FreeValue(ctx, hv);
-                    if (hs) { headers[n_headers++] = strdup(hs); JS_FreeCString(ctx, hs); }
-                }
-            }
-        }
-    }
-    JS_FreeValue(ctx, h);
+    js_headers_to_strv(ctx, o, &headers, &n_headers);
 
     int id = cr_conn_open(url, framing, headers, n_headers, timeout);
     free(url);

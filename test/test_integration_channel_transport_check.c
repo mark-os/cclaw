@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <curl/curl.h>
 #include "db.h"
+#include "util.h"           /* curl_ws_available */
 #include "test_util.h"
 
 #define DB_PATH "/tmp/test_transport_check.db"
@@ -28,13 +29,6 @@
 #define OUT_PATH    "/tmp/test_transport_check_out.txt"
 #define FAIL(m) do { fprintf(stderr, "FAIL: %s\n", m); return 1; } while (0)
 
-static int curl_has_ws(void) {
-    curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
-    if (!v || !v->protocols) return 0;
-    for (const char *const *p = v->protocols; *p; p++)
-        if (strcasecmp(*p, "ws") == 0 || strcasecmp(*p, "wss") == 0) return 1;
-    return 0;
-}
 
 static void write_bundle(const char *dir, const char *manifest) {
     mkdir(dir, 0755);
@@ -96,7 +90,7 @@ int main(void) {
     seed_channel(db, "tgx", PLAIN_DIR);
     db_close(db);
 
-    int have_ws = curl_has_ws();
+    int have_ws = curl_ws_available();
     printf("  runtime libcurl ws/wss: %s\n", have_ws ? "present" : "absent");
 
     char out[4096];

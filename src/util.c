@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <curl/curl.h>
 
 char *util_read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
@@ -131,5 +132,13 @@ int ascii_strncasecmp(const char *a, const char *b, size_t n) {
         int d = ascii_lower((unsigned char)*a) - ascii_lower((unsigned char)*b);
         if (d != 0 || *a == '\0') return d;
     }
+    return 0;
+}
+
+int curl_ws_available(void) {
+    curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);
+    if (!v || !v->protocols) return 0;
+    for (const char *const *p = v->protocols; *p; p++)
+        if (ascii_strcasecmp(*p, "ws") == 0 || ascii_strcasecmp(*p, "wss") == 0) return 1;
     return 0;
 }

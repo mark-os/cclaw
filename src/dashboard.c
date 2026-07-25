@@ -579,13 +579,13 @@ static int handle_act(struct mg_connection *conn) {
             mg_get_var(body, blen, "key", v2, sizeof(v2)) > 0)
             rc = admin_set_key(s_db, v1, v2);
     } else if (strcmp(action, "set_model") == 0) {
-        if (mg_get_var(body, blen, "idx", v1, sizeof(v1)) > 0 &&
+        if (mg_get_var(body, blen, "provider", v1, sizeof(v1)) > 0 &&
             mg_get_var(body, blen, "model", v2, sizeof(v2)) > 0)
-            rc = admin_set_model(s_db, atoi(v1), v2);
+            rc = admin_set_model(s_db, v1, v2);
     } else if (strcmp(action, "set_endpoint") == 0) {
-        if (mg_get_var(body, blen, "idx", v1, sizeof(v1)) > 0 &&
+        if (mg_get_var(body, blen, "provider", v1, sizeof(v1)) > 0 &&
             mg_get_var(body, blen, "url", v2, sizeof(v2)) > 0)
-            rc = admin_set_endpoint(s_db, atoi(v1), v2);
+            rc = admin_set_endpoint(s_db, v1, v2);
     } else if (strcmp(action, "switch_model") == 0) {
         if (mg_get_var(body, blen, "model_id", v1, sizeof(v1)) > 0)
             rc = admin_switch_model(s_db, v1, v2, sizeof(v2));

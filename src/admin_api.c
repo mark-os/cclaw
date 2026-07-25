@@ -90,34 +90,37 @@ int admin_set_key(sqlite3 *db, const char *provider, const char *value) {
     return rc;
 }
 
-int admin_set_model(sqlite3 *db, int provider_index, const char *model) {
-    if (!db || !model) return -1;
-    /* Update default_model on the provider at the given priority index */
-    const char *sql =
-        "UPDATE providers SET default_model=? WHERE name="
-        "(SELECT name FROM providers ORDER BY priority LIMIT 1 OFFSET ?);";
+/* Both setters address a provider by name, like every other provider action on
+ * the dashboard (set_key, add_provider, remove_provider, add_model).
+ *
+ * They used to take a priority *index* ("0 = primary"), which stopped being
+ * true once config_load grew its key-availability scan: the effective primary
+ * is the highest-priority provider whose key resolves, so on a box where the
+ * priority-0 row has no key, index 0 edited a provider that nothing routes to.
+ * An index also silently re-targets whenever a row is added or re-prioritised. */
+int admin_set_model(sqlite3 *db, const char *provider, const char *model) {
+    if (!db || !provider || !model) return -1;
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db,
+            "UPDATE providers SET default_model=?1 WHERE name=?2", -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(stmt, 1, model, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 2, provider_index);
+    sqlite3_bind_text(stmt, 2, provider, -1, SQLITE_STATIC);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;
 }
 
-int admin_set_endpoint(sqlite3 *db, int provider_index, const char *url) {
-    if (!db || !url) return -1;
+int admin_set_endpoint(sqlite3 *db, const char *provider, const char *url) {
+    if (!db || !provider || !url) return -1;
     if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)
         return -1;
-    const char *sql =
-        "UPDATE providers SET base_url=? WHERE name="
-        "(SELECT name FROM providers ORDER BY priority LIMIT 1 OFFSET ?);";
     sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    if (sqlite3_prepare_v2(db,
+            "UPDATE providers SET base_url=?1 WHERE name=?2", -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_text(stmt, 1, url, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 2, provider_index);
+    sqlite3_bind_text(stmt, 2, provider, -1, SQLITE_STATIC);
     int rc = (sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) > 0) ? 0 : -1;
     sqlite3_finalize(stmt);
     return rc;

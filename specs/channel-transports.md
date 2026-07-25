@@ -72,8 +72,11 @@ against a loopback mock without touching the real platform.
 
 ## The timer tick
 
-`onTimer()` fires once per event-loop iteration — roughly every second, set by
-the loop's existing `curl_multi_poll` 1000 ms timeout. It is the generic
+`onTimer()` fires once per event-loop iteration. The `curl_multi_poll` timeout
+is 1000 ms, so that is the *slowest* it ticks, not the rate: poll also returns
+as soon as any fd is readable, so a busy channel ticks considerably more often
+than 1 Hz. Treat it as "at least once a second", never as a clock — which is
+why the handler tracks its own deadline against wall-clock. It is the generic
 periodic primitive: the handler tracks its own deadline against wall-clock (JS
 `Date.now()`) and acts when due. Chosen over a `setTimer(ms)` scheduler because
 one unconditional tick is simpler, and handlers already need wall-clock deadline
@@ -120,7 +123,15 @@ the allowlist is `base_url`'s host plus any entry in an optional comma-separated
 proven design (OpenClaw's `isHostnameAllowedByPattern`):
 
 - `.discord.gg` matches `gateway-us-east1-d.discord.gg` (dot-boundary required),
-- never matches bare `discord.gg`, and never `evildiscord.gg` (no dot).
+- also matches the bare apex `discord.gg` — a suffix entry covers the registered
+  domain *and* its subdomains, so `.discord.gg` need not be paired with a second
+  exact entry,
+- never matches `evildiscord.gg`: the match must land on a dot boundary, so a
+  longer label ending in the same characters is refused.
+
+The apex is deliberate and shared with `grants` (`host_match` is one matcher for
+both). It means a suffix entry is *wider* than an exact one in both directions —
+which is why the trust rule below is a rule and not a suggestion.
 
 Suffix matching exists because the exact-host stance breaks on two runtime-dynamic
 patterns, and **media/CDN downloads — not the Gateway — are the primary driver**:

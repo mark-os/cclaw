@@ -125,10 +125,12 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
 
 void run_tool_req_init(RunToolReq *req, int tier, const char *tool_name,
                        const SandboxProfile *sb,
-                       const char *workspace, const char *cwd_path) {
+                       const char *workspace, const char *cwd_path,
+                       const char *db_path) {
     memset(req, 0, sizeof(*req));
     req->tier = tier;
     req->tool_name = tool_name;
+    req->db_path = db_path;
     req->env_mode = sb->env_mode;
     req->nproc   = sb->rlimits.nproc;
     req->as_mb   = sb->rlimits.as_mb;

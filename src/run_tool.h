@@ -114,10 +114,17 @@ char **run_tool_param_list(const RunToolParsed *q, const char *key, size_t *n);
 
 /* Zero req; set tier/tool_name plus all SandboxProfile-derived fields and
  * workspace/cwd_path. Callers set tier-specific fields (params, command,
- * egress rules) after. */
+ * egress rules) after.
+ *
+ * db_path is a parameter rather than a field the caller may set afterwards
+ * because forgetting it is silent and unsafe: sandbox_mask_state_files()
+ * returns immediately on NULL, so a tier that omits it ships with the key
+ * mask disabled. The file tier did exactly that. Pass the path (never the
+ * handle — the child does not open the DB); NULL only where there is no DB. */
 void run_tool_req_init(RunToolReq *req, int tier, const char *tool_name,
                        const SandboxProfile *sb,
-                       const char *workspace, const char *cwd_path);
+                       const char *workspace, const char *cwd_path,
+                       const char *db_path);
 
 /* Serialize a request into a length-prefixed blob. Returns malloc'd buffer;
  * *out_len = total size. NULL on OOM or if the blob exceeds

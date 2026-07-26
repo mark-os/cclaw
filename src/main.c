@@ -1038,7 +1038,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             size_t blob_len = 0;
             RunToolReq req;
             run_tool_req_init(&req, RUNTOOL_TIER_FILE, tc->name,
-                              &fctx->sb, fctx->workspace, fctx->cwd_path);
+                              &fctx->sb, fctx->workspace, fctx->cwd_path,
+                              fctx->db_path);
             req.params = params;
             req.param_count = param_n;
 
@@ -1145,9 +1146,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             size_t blob_len = 0;
             RunToolReq req;
             run_tool_req_init(&req, RUNTOOL_TIER_SHELL, tc->name,
-                              &sc->sb, sc->workspace, sc->cwd_path);
+                              &sc->sb, sc->workspace, sc->cwd_path,
+                              sc->db_path);
             req.agent_dir = agent_dir;
-            req.db_path = sc->db_path;
             CallEgress se;
             call_egress_build(&se, tc->arguments, bind_once,
                               sens_once ? sens_host : NULL,
@@ -1219,11 +1220,11 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         size_t blob_len = 0;
         RunToolReq req;
         run_tool_req_init(&req, RUNTOOL_TIER_WEB, tc->name,
-                          &wc->sb, wc->workspace, wc->cwd_path);
+                          &wc->sb, wc->workspace, wc->cwd_path,
+                          wc->db_path);
         req.params = params;
         req.param_count = param_n;
         req.agent_dir = agent_dir;
-        req.db_path = wc->db_path;
         CallEgress se;
         call_egress_build(&se, tc->arguments, bind_once,
                           sens_once ? sens_host : NULL,
@@ -1339,13 +1340,13 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         size_t blob_len = 0;
         RunToolReq req;
         run_tool_req_init(&req, RUNTOOL_TIER_JS, "js_eval",
-                          &jc->sb, jc->workspace, jc->cwd_path);
+                          &jc->sb, jc->workspace, jc->cwd_path,
+                          jc->db_path);
         req.params = params;
         req.param_count = param_n;
         req.read_paths = read_paths;  /* transient override: + extension store */
         req.read_count = rc_count;
         req.agent_dir = agent_dir;
-        req.db_path = jc->db_path;
         CallEgress se;
         call_egress_build(&se, tc->arguments, bind_once,
                           sens_once ? sens_host : NULL,

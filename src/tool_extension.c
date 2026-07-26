@@ -34,8 +34,11 @@ static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
     snprintf(mpath, sizeof(mpath), "%s/extension.json", bundle_dir);
     char *manifest = util_read_file(mpath, NULL);
     if (!manifest) return strdup("(unreadable manifest)");
+    /* Aggregate cap: per-value clipping alone let a many-key manifest produce
+     * a ~45KB approval doc nobody reads. The whole summary is clipped once at
+     * the end — a summary an approver cannot finish is not surfacing. */
     char *out = sql_text(db,
-        "SELECT 'adds '"
+        "WITH s(t) AS (SELECT 'adds '"
         " || json_array_length(COALESCE(json_extract(?1,'$.tools'),'[]')) || ' tools, '"
         " || json_array_length(COALESCE(json_extract(?1,'$.hooks'),'[]')) || ' hooks, '"
         " || json_array_length(COALESCE(json_extract(?1,'$.scripts'),'[]')) || ' scripts, '"
@@ -60,7 +63,24 @@ static char *extension_manifest_enumerate(sqlite3 *db, const char *bundle_dir) {
         "      COALESCE(json_extract(value,'$.sandbox_profile'),'standard'), ', ') || ')'"
         "    FROM json_each(json_extract(?1,'$.agents'))), '')"
         " || CASE WHEN json_extract(?1,'$.channel') IS NOT NULL"
-        "         THEN ', 1 channel' ELSE '' END",
+        "         THEN ', 1 channel' ELSE '' END"
+        /* Per tool: the declared hosts and the parameter schema. Hosts because
+         * a promoted declaration REPLACES the agent's grants — promotion is
+         * the only moment a human sees "this tool talks to X". The schema
+         * because narrowness lives in the parameter surface, and only a human
+         * can tell slack_post_message(channel, text) from a credential
+         * passthrough like slack_api(method, params); no validator can. */
+        " || COALESCE((SELECT char(10) || group_concat("
+        "      '  - ' || COALESCE(json_extract(tj.value,'$.name'),'(unnamed)') ||"
+        "      ' hosts=' || COALESCE((SELECT '[' || group_concat(h.value,',') || ']'"
+        "                             FROM json_each(COALESCE(json_extract(tj.value,'$.hosts'),'[]')) h),"
+        "                            '(none — runs under your host grants)') ||"
+        "      ' params=' || substr(COALESCE(json_extract(tj.value,'$.parameters'),'{}'),1,400),"
+        "      char(10))"
+        "    FROM json_each(COALESCE(json_extract(?1,'$.tools'),'[]')) tj), ''))"
+        "SELECT CASE WHEN length(t) > 4000"
+        "            THEN substr(t,1,4000) || char(10) || '… (summary clipped)'"
+        "            ELSE t END FROM s",
         manifest, NULL, NULL);
     free(manifest);
     return out ? out : strdup("(enumeration failed)");

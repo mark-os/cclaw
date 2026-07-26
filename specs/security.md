@@ -242,6 +242,26 @@ Beyond the gate, both rules have a proxy-level enforcement half (the load-bearin
 - **Sensitive targets**: labels ride every network-tier `RunToolReq` as `deny_rules`; `host_decide()` checks deny **before** allow, so no grant makes a sensitive host ambiently reachable. `resolve_approval` coerces ALWAYS→ONCE for `sensitive` approvals; an approved call gets a per-call exception (matched host allowed, its covering labels dropped from the deny list, for that one consumed call).
 - **Secret bindings**: a shell/js call carrying loaded secrets has `host_rules` replaced by the union of the secrets' bound hosts (`call_egress_build`, `src/main.c`) — unbound ⇒ empty ⇒ deny-all. ALWAYS on a url-carrying `secret_bind` park records the binding ("approve & bind"); shell/js ALWAYS coerces to ONCE. Operator pre-seeding: `cclaw sensitive add|rm|list`, `cclaw secret-bind <name> <host>|rm|list` — deliberately CLI-only, no agent tool writes these tables.
 
+### Where a call's host allowlist comes from
+
+`call_egress_build()` (`src/main.c`) assembles the `host_rules` of every
+network-tier `RunToolReq`, in this order:
+
+1. **Base list** — the tool's manifest-**declared** hosts if it is a *promoted*
+   extension tool that declared any (`tools.egress_hosts`), otherwise the
+   agent's `kind='host'` grants. Declaration **replaces** the grants: a
+   declared-hosts tool needs no agent grant, and the agent's grants cannot
+   widen it. Every builtin and every draft has no declaration and so runs
+   under the grants, unchanged. See [extensions.md](extensions.md#declared-reach-hosts).
+2. **Credential narrowing** — if the call carries loaded secrets, the base is
+   discarded for the union of those secrets' bound hosts (unbound ⇒ deny-all).
+3. **Sensitivity** — deny labels ride alongside and are checked first, minus a
+   one-call approved exception.
+
+Under `restricted` none of this reaches the wire: the child gets no proxy
+socket, so a declared-hosts tool still egresses nothing. Containment is
+kernel-enforced and beats every declaration.
+
 ### grants.approval_mode
 
 Each grant row carries an `approval_mode` column (`'silent'` | `'always'` | `'tool_decides'`), read by `agent_tool_mode()` (`src/agent_config.c:329`). This controls whether a granted tool runs freely or requires per-call human confirmation:

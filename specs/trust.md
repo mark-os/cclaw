@@ -75,7 +75,10 @@ it as a grant. Concretely:
   on a principal (host grants) — never on a profile.** A promoted tool whose
   manifest declares hosts reaches exactly those; everything else runs under the
   agent's `host` grants. Neither is a profile field, and no profile may become
-  a way to say "this agent may reach X".
+  a way to say "this agent may reach X". Mechanically: ingest writes the
+  declaration to `tools.egress_hosts` (only at promotion — a draft has no row),
+  and `call_egress_build()` uses it *instead of* the grants for that call
+  (`specs/security.md`, `specs/extensions.md`).
 - The profile is a *creation-time preset* for containment **only** — pick one
   word, get a containment bundle. It confers no authority:
   `agent_grant_defaults()` never reads `sandbox_profile`, so every new agent

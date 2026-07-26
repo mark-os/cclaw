@@ -147,15 +147,15 @@ static void test_load_extension_tools_idempotent(void) {
     /* Seed the required DB rows: extensions, agent_extensions, tools. */
     int rc = sqlite3_exec(db,
         "INSERT INTO extensions(name, path, owner_agent, published, enabled)"
-        " VALUES('weather','/tmp/ext/weather','Alice',1,1);"
+        " VALUES('weather','/tmp/extensions/weather','Alice',1,1);"
         "INSERT INTO agent_extensions(agent_name, extension_name, enabled)"
         " VALUES('Alice','weather',1);"
         "INSERT INTO tools(name, extension_name, description, parameters_json, path, enabled)"
         " VALUES('get_forecast','weather','Get forecast',"
-        "'{\"type\":\"object\",\"properties\":{\"lat\":{\"type\":\"number\"}}}','/tmp/ext/weather/forecast.qjs',1);"
+        "'{\"type\":\"object\",\"properties\":{\"lat\":{\"type\":\"number\"}}}','/tmp/extensions/weather/forecast.qjs',1);"
         "INSERT INTO tools(name, extension_name, description, parameters_json, path, enabled)"
         " VALUES('get_alerts','weather','Get alerts',"
-        "'{\"type\":\"object\"}','/tmp/ext/weather/alerts.qjs',1);",
+        "'{\"type\":\"object\"}','/tmp/extensions/weather/alerts.qjs',1);",
         NULL, NULL, NULL);
     assert(rc == SQLITE_OK);
 
@@ -175,6 +175,21 @@ static void test_load_extension_tools_idempotent(void) {
 
     /* A different agent with no attachments registers nothing. */
     tools_load_extension_tools(&reg, db, "Bob", NULL);
+    assert(reg.count == 2);
+
+    /* Copy-on-promote (Q4): a row whose handler path is an agent workspace
+     * draft — not the shared store — is skipped, so approved code can never
+     * be swapped for the agent's editable copy after the approval. The two
+     * rows above are the positive control: same query, same attachment, they
+     * load because their paths are in the store. */
+    rc = sqlite3_exec(db,
+        "INSERT INTO tools(name, extension_name, description, parameters_json, path, enabled)"
+        " VALUES('get_draft','weather','Draft','{\"type\":\"object\"}',"
+        "'/tmp/agents/Alice/workspace/extensions/weather/draft.qjs',1);",
+        NULL, NULL, NULL);
+    assert(rc == SQLITE_OK);
+    tools_load_extension_tools(&reg, db, "Alice", NULL);
+    assert(tools_lookup(&reg, "get_draft") == NULL);
     assert(reg.count == 2);
 
     tools_free(&reg);

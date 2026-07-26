@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tools.h"
 #include "tool_js.h"
+#include "extension_manifest.h"
+#include "log.h"
 #include "sqlite3.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -120,6 +122,15 @@ void tools_load_extension_tools(ToolRegistry *reg, sqlite3 *db,
         const char *path = (const char *)sqlite3_column_text(st, 3);
         const char *policy = (const char *)sqlite3_column_text(st, 4);
         if (!name || !path) continue;
+        /* Copy-on-promote (Q4): only the shared store holds promoted code. A
+         * row pointing anywhere else — a hand-edited DB, a workspace draft
+         * path — is skipped, not loaded: the approval covered the copy in the
+         * store, and nothing else. */
+        if (!extension_path_in_store(db, path)) {
+            LOG_WARN_("tool '%s': handler path outside the shared extension "
+                      "store, not loaded (%s)", name, path);
+            continue;
+        }
         /* Idempotent: dispatch re-runs this query on a lookup miss (extension
          * promoted mid-process), so skip names already materialized. */
         if (tools_lookup(reg, name)) continue;

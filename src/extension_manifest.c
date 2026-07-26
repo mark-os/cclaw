@@ -64,6 +64,20 @@ static int store_dir_for(sqlite3 *db, const char *name, char *out, size_t cap) {
     return 0;
 }
 
+int extension_path_in_store(sqlite3 *db, const char *path) {
+    if (!db || !path || !path[0]) return 0;
+    char root[PATH_MAX];
+    if (store_dir_for(db, "", root, sizeof(root)) != 0) return 0;
+    /* store_dir_for("") yields "<db_dir>/extensions/" — the prefix a real
+     * store path must start with, and one that no agent workspace
+     * (<db_dir>/agents/<name>/workspace) can satisfy. */
+    size_t rl = strlen(root);
+    if (rl == 0 || strncmp(path, root, rl) != 0) return 0;
+    if (strstr(path, "/../") || (strlen(path) >= 3 &&
+        strcmp(path + strlen(path) - 3, "/..") == 0)) return 0;
+    return path[rl] != '\0';
+}
+
 /* Minimal dotted-numeric version compare (a < b), good enough to flag a
  * re-promote downgrade. Non-numeric/missing components compare as 0. */
 static int semver_lt(const char *a, const char *b) {
@@ -243,6 +257,52 @@ static int check_policies(sqlite3 *db, const char *manifest, char **err_out) {
             }
         }
         rc = -1;
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
+/* Verify every $.tools[].hosts declaration is a list of bare hosts.
+ *
+ * A declared list REPLACES the agent's host grants for calls of that tool
+ * (specs/trust.md, Q1), so it is the one place a manifest names egress. Same
+ * rule as the egress_hosts config default: a manifest may supply a bound's
+ * value, never a value that unpins the bound — '*' is not a host list, it is
+ * the absence of one. Schemes and paths are rejected because host_match
+ * matches hosts, so "https://api.example.com/v1" would silently never match. */
+static int check_tool_hosts(sqlite3 *db, const char *manifest, char **err_out) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE(json_extract(t.value,'$.name'),'(unnamed)'),"
+            "       json_type(t.value,'$.hosts'),"
+            "       (SELECT group_concat(h.value,',') FROM json_each(t.value,'$.hosts') h"
+            "         WHERE h.type!='text' OR h.value='' OR h.value='*'"
+            "            OR h.value LIKE '%/%' OR h.value LIKE '% %')"
+            " FROM json_each(COALESCE(json_extract(?1,'$.tools'),'[]')) t"
+            " WHERE json_type(t.value,'$.hosts') IS NOT NULL", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
+    int rc = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *n = (const char *)sqlite3_column_text(st, 0);
+        const char *ty = (const char *)sqlite3_column_text(st, 1);
+        const char *bad = (const char *)sqlite3_column_text(st, 2);
+        if (!ty || strcmp(ty, "array") != 0) {
+            char m[160];
+            snprintf(m, sizeof(m), "tool '%s': 'hosts' must be an array of bare hosts",
+                     n ? n : "?");
+            xerr(err_out, m);
+            rc = -1; break;
+        }
+        if (bad) {
+            char m[256];
+            snprintf(m, sizeof(m),
+                     "tool '%s': invalid declared host '%.80s' — bare hostnames or "
+                     "'.suffix' only; '*' is not a host list, and only an operator "
+                     "may unpin egress", n ? n : "?", bad);
+            xerr(err_out, m);
+            rc = -1; break;
+        }
     }
     sqlite3_finalize(st);
     return rc;
@@ -557,6 +617,7 @@ int extension_manifest_validate(const char *bundle_dir, char **err_out) {
     if (check_hook_events(jdb, manifest, err_out) != 0) goto out;
     if (check_handlers(jdb, manifest, bundle_dir, "'$.scripts'", err_out) != 0) goto out;
     if (check_policies(jdb, manifest, err_out) != 0) goto out;
+    if (check_tool_hosts(jdb, manifest, err_out) != 0) goto out;
     if (check_config(jdb, manifest, err_out) != 0) goto out;
     if (check_skills(jdb, manifest, bundle_dir, err_out) != 0) goto out;
     if (check_agents(jdb, manifest, bundle_dir, err_out) != 0) goto out;
@@ -614,6 +675,17 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
     if (store_dir_for(db, name, store, sizeof(store)) != 0) {
         free(manifest); free(name);
         xerr(err_out, "cannot resolve shared store path");
+        return -1;
+    }
+
+    /* Copy-on-promote (Q4): extensions.path may only point into the shared
+     * store. The derived path always does — this refuses the case where it
+     * would not (a store resolved into an agent workspace, a name that
+     * escapes), rather than trusting the derivation silently. */
+    if (!extension_path_in_store(db, store)) {
+        free(manifest); free(name);
+        xerr(err_out, "refusing to register an extension path outside the shared "
+                      "store — promoted code may not live in an agent workspace");
         return -1;
     }
 
@@ -695,15 +767,21 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
         "  path=excluded.path, version=excluded.version",
         manifest, name, store, owner_agent);
 
-    /* tools: one row per $.tools[] entry; path = <store>/<handler>. */
+    /* tools: one row per $.tools[] entry; path = <store>/<handler>.
+     * egress_hosts is the manifest's $.tools[].hosts flattened to the
+     * comma-separated form host_match's rule splitter already speaks — this
+     * ingest is the moment an agent-authored declaration becomes authority,
+     * which is why it happens only here, behind the promote approval. */
     rc |= run_ingest(db,
         "INSERT INTO tools(name, extension_name, description, parameters_json, path, "
-        "                  agent_name, enabled, policy) "
-        "SELECT json_extract(value,'$.name'), :name, json_extract(value,'$.description'), "
-        "       json_extract(value,'$.parameters'), :store || '/' || json_extract(value,'$.handler'), "
-        "       NULL, 1, json_extract(value,'$.policy') "
-        "FROM json_each(COALESCE(json_extract(:m,'$.tools'),'[]')) "
-        "WHERE json_extract(value,'$.name') IS NOT NULL",
+        "                  agent_name, enabled, policy, egress_hosts) "
+        "SELECT json_extract(t.value,'$.name'), :name, json_extract(t.value,'$.description'), "
+        "       json_extract(t.value,'$.parameters'), :store || '/' || json_extract(t.value,'$.handler'), "
+        "       NULL, 1, json_extract(t.value,'$.policy'), "
+        "       (SELECT group_concat(h.value,',') "
+        "          FROM json_each(COALESCE(json_extract(t.value,'$.hosts'),'[]')) h) "
+        "FROM json_each(COALESCE(json_extract(:m,'$.tools'),'[]')) t "
+        "WHERE json_extract(t.value,'$.name') IS NOT NULL",
         manifest, name, store, owner_agent);
 
     /* hooks: one row per $.hooks[] entry. */

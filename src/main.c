@@ -536,6 +536,11 @@ static void wire_params_interpolate(ToolWireArg *params, size_t n,
  *  - deny: sensitivity labels for req.deny_rules, minus labels covering an
  *    approved sensitive host (per-call exception, label-wide for exactly one
  *    human-approved call, gone when the call ends).
+ *  - declared hosts (Q1): a *promoted* tool whose manifest declares hosts
+ *    reaches exactly those, and the declaration REPLACES the agent's host
+ *    grants for this call — no agent grant needed, and the agent's grants do
+ *    not widen it. A tool that declares none (every builtin, every draft —
+ *    drafts have no `tools` row at all) runs under the agent's grants.
  *  - credential narrowing: a call whose args carry loaded secrets talks ONLY
  *    to the union of those secrets' bound hosts. Fail-closed: an unbound
  *    secret yields an empty allow list (deny-all); the only way past is a
@@ -543,12 +548,14 @@ static void wire_params_interpolate(ToolWireArg *params, size_t n,
 typedef struct {
     char **deny; size_t deny_n;          /* owned labels for req.deny_rules */
     char **bound; size_t bound_n;        /* owned union of bound hosts */
+    char **decl; size_t decl_n;          /* owned declared hosts (promoted tool) */
     int narrowed;
     const char **ext; size_t ext_n;      /* owned array, borrowed strings */
     const char **hosts; size_t hosts_n;  /* what the req should carry */
 } CallEgress;
 
-static void call_egress_build(CallEgress *ce, const char *args, int skip_bind,
+static void call_egress_build(CallEgress *ce, const char *tool_name,
+                              const char *args, int skip_bind,
                               const char *sens_exception,
                               char **base_hosts, size_t base_n,
                               const ShellSecret *secrets, size_t secret_count) {
@@ -566,8 +573,16 @@ static void call_egress_build(CallEgress *ce, const char *args, int skip_bind,
         if (k == 0) { free(all); ce->deny = NULL; }
     }
 
-    const char **hosts = (const char **)base_hosts;
-    size_t hosts_n = base_n;
+    /* Declared hosts replace the agent's grants — not intersect them, so a
+     * declared-hosts tool needs no grant, and not union them, so a
+     * declaration could never widen what the agent already holds. */
+    int dn = 0;
+    ce->decl = db_tool_declared_hosts(g_db, tool_name, &dn);
+    ce->decl_n = (size_t)dn;
+
+    const char **hosts = ce->decl ? (const char **)ce->decl
+                                  : (const char **)base_hosts;
+    size_t hosts_n = ce->decl ? ce->decl_n : base_n;
     if (!skip_bind && args) {
         size_t un = 0;
         char **names = used_secret_names(args, secrets, secret_count, &un);
@@ -617,6 +632,8 @@ static void call_egress_free(CallEgress *ce) {
     free(ce->deny);
     for (size_t i = 0; i < ce->bound_n; i++) free(ce->bound[i]);
     free(ce->bound);
+    for (size_t i = 0; i < ce->decl_n; i++) free(ce->decl[i]);
+    free(ce->decl);
     free((void *)ce->ext);
     memset(ce, 0, sizeof(*ce));
 }
@@ -1167,7 +1184,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
             req.agent_dir = agent_dir;
             CallEgress se;
-            call_egress_build(&se, tc->arguments, bind_once,
+            call_egress_build(&se, tc->name, tc->arguments, bind_once,
                               sens_once ? sens_host : NULL,
                               sc->allowed_hosts, sc->allowed_host_count,
                               secrets, secret_count);
@@ -1245,7 +1262,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         req.param_count = param_n;
         req.agent_dir = agent_dir;
         CallEgress se;
-        call_egress_build(&se, tc->arguments, bind_once,
+        call_egress_build(&se, tc->name, tc->arguments, bind_once,
                           sens_once ? sens_host : NULL,
                           wc->allowed_hosts, wc->allowed_host_count,
                           secrets, secret_count);
@@ -1369,7 +1386,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         req.read_count = rc_count;
         req.agent_dir = agent_dir;
         CallEgress se;
-        call_egress_build(&se, tc->arguments, bind_once,
+        call_egress_build(&se, tc->name, tc->arguments, bind_once,
                           sens_once ? sens_host : NULL,
                           jc->allowed_hosts, jc->allowed_hosts_count,
                           secrets, secret_count);

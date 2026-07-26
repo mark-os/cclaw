@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v32 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v31 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-18 freeze collapsed earlier patch history into it).
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v35 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v33 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-19 freeze collapsed earlier patch history into it).
 
 ## String keys and the agent_name FKs (decided 2026-07-18)
 
@@ -514,6 +514,7 @@ Tool registry. Built-in C tools have NULL `extension_name`/`path`; JS tools poin
 | `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; owner scope; NULL = global |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `policy` | TEXT | JSON restrict-only argument policy |
+| `egress_hosts` | TEXT | comma-separated hosts declared by the manifest; non-NULL **replaces** the agent's host grants for calls of this tool. Only a promoted extension tool can carry one — see [extensions.md](extensions.md#declared-reach-hosts) |
 
 ---
 

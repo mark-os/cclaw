@@ -38,6 +38,13 @@ int extension_manifest_declares_persistent(sqlite3 *db, const char *store_dir);
 int extension_install(sqlite3 *db, const char *bundle_dir,
                       const char *owner_agent, char **err_out);
 
+/* True if `path` (absolute) lies inside the shared extension store
+ * (<db_dir>/extensions/...). Promoted code may live nowhere else: the
+ * workspace draft stays the agent's editable copy, so a promoted tool loading
+ * from a workspace path would let the agent rewrite approved code after the
+ * approval. Ingest refuses such a path and the loader skips such a row. */
+int extension_path_in_store(sqlite3 *db, const char *path);
+
 /* Install the extensions shipped in the binary (currently: the telegram
  * channel) as normal system-owned published extensions. Runs on every start:
  * stages the embedded templates, installs under the reserved owner 'system',

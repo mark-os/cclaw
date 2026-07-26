@@ -333,6 +333,11 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
      * honest about what is actually in force. */
     { 34, "UPDATE agents SET sandbox_profile='standard'"
           " WHERE sandbox_profile='trusted';", NULL },
+    /* v35: tools.egress_hosts — a promoted tool's manifest-declared hosts
+     * (Q1). Non-NULL replaces the agent's host grants for calls of that tool;
+     * NULL (every builtin, every draft) keeps today's behaviour, so the added
+     * column starts inert on a live DB and is filled by the next promote. */
+    { 35, "ALTER TABLE tools ADD COLUMN egress_hosts TEXT;", NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 33   /* schema freeze 2026-07-19 — no patches below this */
@@ -1646,6 +1651,43 @@ char **db_secret_hosts(sqlite3 *db, const char *secret_name, int *count) {
         (*count)++;
     }
     sqlite3_finalize(stmt);
+    if (*count == 0) { free(hosts); return NULL; }
+    return hosts;
+}
+
+char **db_tool_declared_hosts(sqlite3 *db, const char *tool_name, int *count) {
+    *count = 0;
+    if (!db || !tool_name) return NULL;
+    sqlite3_stmt *stmt;
+    /* extension_name IS NOT NULL is the promotion check, not decoration: a
+     * builtin's row is written with a NULL extension_name, so even a
+     * hand-set egress_hosts there stays inert. */
+    if (sqlite3_prepare_v2(db,
+            "SELECT egress_hosts FROM tools WHERE name=?1"
+            " AND extension_name IS NOT NULL AND COALESCE(egress_hosts,'') <> ''",
+            -1, &stmt, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_text(stmt, 1, tool_name, -1, SQLITE_STATIC);
+    char *list = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(stmt, 0);
+        if (v) list = strdup(v);
+    }
+    sqlite3_finalize(stmt);
+    if (!list) return NULL;
+
+    /* Same comma/space splitter the channel runner uses on egress_hosts —
+     * one vocabulary for host rules everywhere. */
+    char *tok[64];
+    int n = split_and_trim(list, tok, 64);
+    char **hosts = (n > 0) ? malloc((size_t)n * sizeof(char *)) : NULL;
+    if (!hosts) { free(list); return NULL; }
+    for (int i = 0; i < n; i++) {
+        hosts[*count] = strdup(tok[i]);
+        if (!hosts[*count]) break;
+        (*count)++;
+    }
+    free(list);
     if (*count == 0) { free(hosts); return NULL; }
     return hosts;
 }

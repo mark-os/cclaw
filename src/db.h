@@ -251,6 +251,16 @@ char **db_sensitive_hosts(sqlite3 *db, int *count);
 int db_sensitive_host_add(sqlite3 *db, const char *host);
 int db_sensitive_host_rm(sqlite3 *db, const char *host);
 
+/* Manifest-declared egress for one tool (specs/trust.md, Q1). Returns the
+ * hosts a *promoted* extension tool declared in its manifest (heap array of
+ * heap strings, NULL if none; caller frees each entry and the array). A
+ * non-NULL result REPLACES the agent's host grants for calls of that tool.
+ * NULL means "runs under the agent's grants" and is the answer for every
+ * builtin (ingested with extension_name NULL) and every draft (never
+ * ingested) — which is how promotion, and only promotion, activates a
+ * declaration. */
+char **db_tool_declared_hosts(sqlite3 *db, const char *tool_name, int *count);
+
 /* Secret-to-host bindings (specs/trust.md fail-closed credential rule).
  * db_secret_hosts returns the hosts bound to one secret name (heap array of
  * heap strings, NULL if none; caller frees). bind/unbind return 0/-1. */

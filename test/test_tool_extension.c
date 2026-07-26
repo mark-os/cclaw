@@ -88,7 +88,9 @@ static void test_promote_parks_apply_approval(void) {
     write_file(WS "/extensions/goodx/extension.json",
         "{\"name\":\"goodx\",\"version\":\"1.0.0\","
         "\"tools\":[{\"name\":\"tx\",\"description\":\"d\","
-        "\"parameters\":{\"type\":\"object\"},\"handler\":\"tx.qjs\"}]}");
+        "\"parameters\":{\"type\":\"object\",\"properties\":"
+        "{\"channel\":{\"type\":\"string\"}}},"
+        "\"hosts\":[\"api.good.test\"],\"handler\":\"tx.qjs\"}]}");
     write_file(WS "/extensions/goodx/tx.qjs", "'ok'");
 
     /* The dispatcher has the session in tool_running before dispatching a
@@ -113,6 +115,12 @@ static void test_promote_parks_apply_approval(void) {
     assert(action && strcmp(action, "extension_promote") == 0);
     assert(resolve && strcmp(resolve, "apply") == 0);
     assert(args && strstr(args, "goodx"));
+    /* ...including the two things only a human can judge: where the tool
+     * talks (a declared list REPLACES the agent's grants once promoted) and
+     * its parameter surface (slack_post_message(channel,text) vs a
+     * credential passthrough like slack_api(method,params)). */
+    assert(strstr(args, "hosts=[api.good.test]"));
+    assert(strstr(args, "params=") && strstr(args, "channel"));
     sqlite3_finalize(st);
     /* ...and the session is parked awaiting it. */
     assert(sqlite3_prepare_v2(g_db,

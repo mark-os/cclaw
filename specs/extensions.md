@@ -45,6 +45,7 @@ directory.
         "properties": { "lat": {"type":"number"}, "lon": {"type":"number"} },
         "required": ["lat","lon"] },
       "handler": "forecast.js",
+      "hosts": ["api.weather.gov"],
       "policy": null
     }
   ],
@@ -72,7 +73,7 @@ directory.
 |-------|---------|
 | `name` | Extension identity. Primary key in `extensions`. |
 | `version` | Free-form version string (display / update tracking). |
-| `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), policy?}`. |
+| `tools[]` | Each: `{name, description, parameters (JSON Schema object), handler (file), hosts?, policy?}`. `hosts?` is the tool's declared egress — see [Declared reach](#declared-reach-hosts). |
 | `hooks[]` | Each: `{event, handler (file)}`. `event` must be a *dispatched* hook event (`preAdvance`, `postAdvance`, `beforeToolCall`, `afterToolCall`) — validate rejects others, incl. the not-yet-wired `turnStart`/`turnEnd`. |
 | `channel` | At most one: `{type, handler (file), transports?}`. Runs as a separate process. `transports?` is an optional advisory array (`poll`/`webhook`/`persistent`) validated at `--check` — see [channel-transports.md](channel-transports.md). |
 | `scripts[]` | Each: `{name, handler (file), schedule? (cron expr)}`. A schedule seeds a `cron` row. |
@@ -97,6 +98,15 @@ registered key, so "no anonymous config writes" still holds. Handlers read
 their config the same way anything else does; there is no separate extension
 config mechanism.
 
+**Config is extension-scoped, never tool-scoped.** There is no config column
+on `tools` and no per-tool store: an extension's Slack token is shared by all
+its tools, channels already resolve by `extension_name`, and a second config
+store is parallel state that can drift from the first. For a genuinely
+per-tool knob, the documented *convention* is a key named
+`<ext>.<toolname>.<key>` — a naming discipline inside the one table, not a
+second mechanism. (The gap today is the accessor: `getConfig` is bound on the
+channel host object only; binding it on the tool JS surface is BACKLOG.)
+
 **A manifest may supply a bound's value, but never a value that unpins the
 bound.** Wildcards and zero-meaning-unlimited are not values of a constraint,
 they are its absence, and a bundle must not remove its own limits through a
@@ -109,6 +119,37 @@ deliberately rather than inheriting it. There is no flag for this: `secret` and
 per key. If a genuinely operator-originated key ever appears — one where *any*
 manifest-supplied value is wrong, such as a spend cap — an `operator_only` flag
 becomes worth revisiting.
+
+### Declared reach (`hosts`)
+
+A tool may declare the hosts it talks to. **Once promoted, the declaration
+REPLACES the agent's `host` grants for calls of that tool**: the tool reaches
+exactly the declared hosts, needs no agent grant to do so, and the agent's own
+grants neither widen nor gate it. A tool that declares nothing — every builtin
+(`shell_exec`, `web_fetch`, `js_eval`, the file tools) and every draft — runs
+under the agent's `host` grants, unchanged.
+
+This is the channel model (`egress_hosts` pinned by the runner) extended to
+tools: one rule everywhere. Mechanically it is a third input to
+`call_egress_build()` (`src/main.c`), the function that already narrows a call
+below the agent's standing grants for sensitivity and credential binding —
+declared hosts pick the *base* list, secret-binding still narrows it, and the
+sensitivity deny rules still apply.
+
+- **Declarations activate at promotion, never before.** Ingest writes them to
+  `tools.egress_hosts`; a draft has no `tools` row at all, so its manifest's
+  `hosts` are inert. An agent-authored declaration honored pre-approval would
+  be self-granted egress. (A builtin's row carries `extension_name NULL` and
+  is skipped by the same lookup, so a hand-set value there is inert too.)
+- **The promote approval renders them.** That is the moment a human sees "this
+  tool talks to X" — and the only moment, since no grant is involved afterwards.
+- **`*` is refused at validate.** Same rule as the `egress_hosts` config
+  default: a manifest may name hosts, never unpin the bound. Entries are bare
+  hosts or `.suffix` in `host_match`'s vocabulary — schemes and paths are
+  rejected, because they would silently never match.
+- **`restricted` still means no packets.** That profile gives the child no
+  proxy socket at all, so a declared-hosts tool egresses nothing under it.
+  Containment is kernel-enforced and beats any declaration.
 
 ### Extension skills
 
@@ -160,6 +201,13 @@ enabled=0`; **uninstall** = `DELETE FROM agent_extensions WHERE extension_name=?
 extension also deletes its `extensions`/`tools`/`hooks` rows and the shared-store
 directory.
 
+`extensions.path` and every `tools.path` may only point **into the shared
+store**. Ingest refuses anything else, and the loader
+(`tools_load_extension_tools`) skips a row whose handler path lies outside it —
+so a hand-edited row pointing back at a workspace draft loads nothing. The
+draft remains the agent's editable copy: re-editing means re-promoting, which
+is a new approval, because a code change is a trust change.
+
 Promotion is the **trust boundary** (per [security.md](security.md)): a sub-agent's
 draft must not auto-promote into a globally callable tool. Because promote copies
 the code out of the writable workspace, a tool that has been promoted is immutable
@@ -179,6 +227,23 @@ scripts need no manifest.
 
 ## Authoring an Extension
 
+**One operation per tool.** A capability is only as narrow as its parameter
+surface, and no layer below the tool can recover the distinction: egress
+filtering is host-granular while API authority is endpoint-granular, so
+"post a message" and "use this credential freely" are both POSTs to the same
+host. **A parameter that names the operation is a smell** — `slack_api(method,
+params)` is a credential passthrough wearing a tool's costume, however
+convenient it is to write. Prefer `slack_post_message(channel, text)` and its
+siblings. This is a norm, not a validator: the promote approval renders each
+tool's schema beside its declared hosts, and the approver is the one who can
+tell a legitimately generic tool from a passthrough.
+
+**Drafts get no config and no declared reach.** Nothing has been ingested, so
+there is no `extensions` row to resolve `<ext>.<key>` through and no
+`tools.egress_hosts` — mock them while drafting. Both are benefits of
+promotion, and that is also the safe default: a draft must not read another
+extension's `secret` keys by claiming its name.
+
 The workflow, from the authoring agent's point of view:
 
 1. **Draft.** Create `workspace/extensions/<name>/` with an `extension.json`
@@ -190,8 +255,10 @@ The workflow, from the authoring agent's point of view:
    before packaging it.
 3. **Promote** (`extension_promote`). Validates the whole manifest — missing
    handlers, non-`.qjs` files, path escapes, config keys with bad names or no
-   description, skills without a frontmatter description all fail here, before
-   anything registers. On success the bundle is copied to
+   description, declared `hosts` that are wildcards or URLs, skills without a
+   frontmatter description all fail here, before anything registers. The
+   approval the human sees carries, per tool, its declared hosts and its
+   parameter schema. On success the bundle is copied to
    `~/.cclaw/extensions/<name>/` and its declarations are ingested. Everything
    is still owner-only.
 4. **Iterate.** Edit the draft, re-promote. Re-install is idempotent: tools and
@@ -427,7 +494,8 @@ CREATE TABLE tools (
   path            TEXT,                 -- handler file (in the shared store)
   agent_name      TEXT,                 -- owner scope, NULL = global
   policy          TEXT,
-  enabled         INTEGER NOT NULL DEFAULT 1
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  egress_hosts    TEXT                  -- declared hosts; replaces agent grants
 );
 
 -- hooks: same provenance model as tools (replaces the __cclaw_hooks scrape)
@@ -483,6 +551,16 @@ something a promote or fork can trigger.
 - **One read-only mount.** Tool children get `~/.cclaw/extensions/` mounted
   read-only — a single mount serves every agent, instead of cross-agent workspace
   mounts that publishing-from-workspace would require.
+- **Promoted code lives only in the store.** `extensions.path`/`tools.path`
+  into an agent workspace are refused at ingest and skipped at load — the
+  approval covered the copy in the store and nothing else.
+- **Declared reach is capability-side authority.** A promoted tool's `hosts`
+  replace the agent's host grants for that tool; drafts get none. See
+  [Declared reach](#declared-reach-hosts) and [trust.md](trust.md).
+- **What the promote approval must show.** Counts alone hide the two things
+  only a human can judge: the declared hosts and each tool's parameter schema.
+  Both are rendered per tool, and the whole summary is clipped once at ~4KB —
+  a summary an approver cannot finish is not surfacing.
 - **Trust level unchanged.** Extension tools run at the same sandbox trust as the
   agent's other tools (`agents.sandbox_profile`); they get no extra privilege. Per-tool
   `policy` and `grants` gate *callability* — a statically-declared tool can still be

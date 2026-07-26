@@ -350,7 +350,13 @@ CREATE TABLE IF NOT EXISTS tools (
   agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
                                              -- owner scope, NULL = global
   enabled INTEGER NOT NULL DEFAULT 1,
-  policy TEXT
+  policy TEXT,
+  egress_hosts TEXT                          -- comma-separated hosts declared by the
+                                             -- manifest ($.tools[].hosts). Non-NULL
+                                             -- REPLACES the agent's host grants for
+                                             -- calls of this tool (Q1); NULL = the tool
+                                             -- runs under the agent's grants. Only a
+                                             -- promoted extension tool can carry one.
 );
 
 -- ═══ Hooks ═══

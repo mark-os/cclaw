@@ -21,7 +21,7 @@ web, js, file — all via the `--run-tool` broker, `src/run_tool.c`).
 | CWD mount (CLI)         | rw (host fs)     | **no**           | no                 | no         |
 | workspace mount         | rw (host fs)     | rw               | rw                 | rw         |
 | `$HOME`                 | user's real home | workspace        | workspace          | workspace  |
-| `/tmp` tmpfs            | host `/tmp`      | 50% of RAM       | 50% of RAM         | 25% of RAM |
+| `/tmp`                  | host `/tmp`      | private scratch bind | private scratch bind | private scratch bind |
 | rlimits NPROC / CPU     | none             | none             | 256 / 1800s        | 64 / 120s  |
 | `RLIMIT_AS`             | **never**        | **never**        | **never**          | **never**  |
 
@@ -49,12 +49,37 @@ writable or every toolchain fails on its cache.
 every real toolchain invisible — `node`, `go`, `cargo` and `rustc` all install
 outside those two directories.
 
-**`/tmp` is its own tmpfs**, not a directory on the (deliberately tiny) root
-tmpfs. Toolchains write real volume there — npm unpacking tarballs, cargo and
-rustc temporaries, `cc` intermediates, go's build cache — and a shared 1 MB root
-failed every build with ENOSPC. The size is a percentage (tmpfs's own syntax) so
-it scales from a 128 MB SoC to a 16 GB server without probing meminfo, and tmpfs
-charges only what is written, so it is a ceiling and not a reservation.
+**`/tmp` is a bind of the agent's own scratch directory on the host**, not a
+directory on the (deliberately tiny) root tmpfs and not a tmpfs we size
+ourselves. Toolchains write real volume there — `cc` intermediates, configure
+scripts, npm staging — and a shared 1 MB root failed every build with ENOSPC.
+
+Binding a host directory means temp storage inherits whatever the host already
+does, tmpfs or disk, plus the host's own `tmpfiles.d` cleaner — rather than this
+code inventing a size policy that cannot be right for both a 128 MB SoC and a
+16 GB server. (An earlier cut mounted a tmpfs at a percentage of RAM. That was
+backwards: it put the *most* write-heavy workload in RAM, and on a 128 MB
+Pogoplug it yielded a 64 MB `/tmp`, reintroducing the ENOSPC it was added to
+fix. Most toolchain bulk lands under `$HOME` anyway, which is the workspace.)
+
+Layout is `<tmp_root>/cclaw-<uid>/<agent>/`, created by the *parent* — `tmp_root`
+defaults to the host's `/tmp`. The uid keeps two users running cclaw on one box
+from colliding on a 0700 directory; it is not what stops squatting, since `/tmp`
+is mode 1777 and anyone can pre-create a name. That is the ownership check: every
+level is created 0700 and, if it already exists, must be a real directory owned
+by us with mode 0700 and not a symlink, or the call fails and the child simply
+gets no scratch bind. It is never the host's *shared* `/tmp` — that would hand
+the child every other process's scratch, ssh-agent and gpg-agent sockets
+included.
+
+It **persists across tool calls** on purpose: `./configure` in one call and
+`make` in the next need the same `/tmp`, package caches want to persist, and the
+tool-call boundary is invisible to the agent, so wiping it presents as "my files
+vanished" rather than anything diagnosable.
+
+The namespace root lives under the same tree (`.ns/<pid>`) so the parent can reap
+abandoned ones without tracking pids: a live one holds a mount and refuses
+`rmdir`, a dead one is empty and goes.
 
 **No profile sets `RLIMIT_AS`.** It caps *address space*, not resident memory,
 and every modern runtime reserves VA far beyond its footprint — Go's allocator

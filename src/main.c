@@ -955,6 +955,19 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
 
 }
 
+/* Resolve+create the agent's scratch dir, bound as /tmp in the child. Done in
+ * the parent so the "is this a 0700 dir we own?" check happens once in the
+ * trusted process rather than in each sandboxed child. Returns NULL (and the
+ * child then gets only the tiny root tmpfs as /tmp) rather than falling back to
+ * anything wider — notably never the host's shared /tmp. */
+static const char *dispatch_scratch_dir(const char *agent_name,
+                                        char *out, size_t cap) {
+    char *root = g_db ? config_get(g_db, "tmp_root") : NULL;
+    const char *r = scratch_dir_ensure(agent_name, root, out, cap);
+    free(root);
+    return r;
+}
+
 static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                                PendingToolCall *tc,
                                const ShellSecret *secrets, size_t secret_count) {
@@ -1040,6 +1053,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             run_tool_req_init(&req, RUNTOOL_TIER_FILE, tc->name,
                               &fctx->sb, fctx->workspace, fctx->cwd_path,
                               fctx->db_path);
+            char scratch[PATH_MAX];
+            req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
             req.params = params;
             req.param_count = param_n;
 
@@ -1148,6 +1163,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             run_tool_req_init(&req, RUNTOOL_TIER_SHELL, tc->name,
                               &sc->sb, sc->workspace, sc->cwd_path,
                               sc->db_path);
+            char scratch[PATH_MAX];
+            req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
             req.agent_dir = agent_dir;
             CallEgress se;
             call_egress_build(&se, tc->arguments, bind_once,
@@ -1222,6 +1239,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         run_tool_req_init(&req, RUNTOOL_TIER_WEB, tc->name,
                           &wc->sb, wc->workspace, wc->cwd_path,
                           wc->db_path);
+        char scratch[PATH_MAX];
+        req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
         req.params = params;
         req.param_count = param_n;
         req.agent_dir = agent_dir;
@@ -1342,6 +1361,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         run_tool_req_init(&req, RUNTOOL_TIER_JS, "js_eval",
                           &jc->sb, jc->workspace, jc->cwd_path,
                           jc->db_path);
+        char scratch[PATH_MAX];
+        req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
         req.params = params;
         req.param_count = param_n;
         req.read_paths = read_paths;  /* transient override: + extension store */

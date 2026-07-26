@@ -32,6 +32,15 @@
  * inside the netns the preload lib and net_shim reach it here. */
 #define SANDBOX_PROXY_SOCK_PATH "/tmp/.cclaw_proxy.sock"
 
+/* The egress interposer lives on the root tmpfs, not in /tmp. /tmp is now a
+ * persistent bind of the agent's own scratch directory, so anything we drop
+ * there survives the call and is the agent's to modify; the root tmpfs is
+ * rebuilt per call and holds only our plumbing. (Tampering was never an egress
+ * bypass — CLONE_NEWNET has no route out, so a disabled interposer is
+ * self-inflicted denial of service — but our machinery does not belong in the
+ * agent's scratch space.) */
+#define SANDBOX_PRELOAD_PATH "/.cclaw_net.so"
+
 /* Did a grant name the DB file itself, rather than merely a directory that
  * contains it? Exact match only — a read_path on ~/.cclaw or on $HOME must not
  * count, or the accident the mask exists to prevent comes straight back. */
@@ -288,11 +297,38 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
         return -1;
 
-    /* Create tmpfs as new root */
-    char newroot[] = "/tmp/.cclaw_ns_XXXXXX";
-    if (!mkdtemp(newroot))
-        return -1;
-    if (mount("none", newroot, "tmpfs", MS_NOSUID | MS_NODEV, "size=1m") != 0)
+    /* Create tmpfs as new root.
+     *
+     * Placed under the scratch tree's .ns/ (which the parent created) keyed by
+     * pid, so the parent can reap abandoned roots without tracking pids: a live
+     * one holds this tmpfs and refuses rmdir, a dead one is empty. The old
+     * mkdtemp in /tmp leaked one empty directory per tool call forever, because
+     * after pivot_root the child cannot reach it and the parent never knew the
+     * generated name. Falls back to mkdtemp when there is no scratch dir. */
+    /* Deliberately modest, not PATH_MAX: several buffers below concatenate onto
+     * this, and keeping it short keeps those bounded. An over-long scratch path
+     * falls back to mkdtemp rather than truncating. */
+    char newroot[192];
+    int have_root = 0;
+    if (full_cfg && full_cfg->tmp_dir && full_cfg->tmp_dir[0]) {
+        const char *slash = strrchr(full_cfg->tmp_dir, '/');
+        if (slash) {
+            int n = snprintf(newroot, sizeof(newroot), "%.*s/.ns/%d",
+                             (int)(slash - full_cfg->tmp_dir), full_cfg->tmp_dir,
+                             (int)getpid());
+            if (n > 0 && (size_t)n < sizeof(newroot) &&
+                (mkdir(newroot, 0700) == 0 || errno == EEXIST))
+                have_root = 1;
+        }
+    }
+    if (!have_root) {
+        snprintf(newroot, sizeof(newroot), "/tmp/.cclaw_ns_XXXXXX");
+        if (!mkdtemp(newroot))
+            return -1;
+    }
+    /* 4m, not 1m: this root holds mountpoint stubs *and* the ~200 KB egress
+     * interposer (SANDBOX_PRELOAD_PATH), which used to be written into /tmp. */
+    if (mount("none", newroot, "tmpfs", MS_NOSUID | MS_NODEV, "size=4m") != 0)
         return -1;
 
     /* Bind-mount system dirs read-only */
@@ -325,26 +361,31 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         }
     }
 
-    /* /tmp gets its OWN tmpfs, sized as a percentage of RAM. The root tmpfs
-     * above stays tiny because it only holds mountpoint stubs — but /tmp is
-     * where toolchains write real volume (npm unpacking tarballs, cargo and
-     * rustc temporaries, cc intermediates, go's build cache), so leaving it a
-     * directory on a 1 MB root broke every build with ENOSPC. A percentage is
-     * tmpfs's own syntax and scales across our target range without probing
-     * meminfo — ~64 MB on a 128 MB Pogoplug, ~8 GB on a 16 GB server — and
-     * tmpfs charges only what is written, so this is a ceiling and not a
-     * reservation. Failure is non-fatal: /tmp then falls back to the root
-     * tmpfs, which is small but functional. */
+    /* /tmp is a bind of the agent's own scratch directory on the host, not a
+     * tmpfs of our own. The root tmpfs above stays tiny because it only holds
+     * mountpoint stubs, and /tmp is where toolchains write real volume (cc and
+     * rustc intermediates, configure scripts, npm staging) — a directory on a
+     * 1 MB root broke every build with ENOSPC.
+     *
+     * Binding the host's own directory means /tmp inherits whatever the host
+     * does for temp storage — tmpfs or disk, and the host's tmpfiles.d cleaner
+     * — instead of this code inventing a size policy it cannot get right for
+     * both a 128 MB SoC and a 16 GB server. It is a *private* directory rather
+     * than the host's shared /tmp: that would hand the child every other
+     * process's scratch, ssh-agent and gpg-agent sockets included.
+     *
+     * It persists across calls on purpose: ./configure in one tool call and
+     * make in the next need the same /tmp, and the tool-call boundary is
+     * invisible to the agent, so wiping it presents as "my files vanished".
+     *
+     * Failure is non-fatal — /tmp stays a directory on the root tmpfs, which
+     * is functional but too small to build in. */
     char tmp_path[256];
     snprintf(tmp_path, sizeof(tmp_path), "%s/tmp", newroot);
     mkdir(tmp_path, 01777);
-    {
-        int pct = (full_cfg && full_cfg->tmp_pct > 0) ? full_cfg->tmp_pct : 50;
-        if (pct > 90) pct = 90;
-        char opts[32];
-        snprintf(opts, sizeof(opts), "size=%d%%", pct);
-        if (mount("none", tmp_path, "tmpfs", MS_NOSUID | MS_NODEV, opts) == 0)
-            chmod(tmp_path, 01777);
+    if (full_cfg && full_cfg->tmp_dir && full_cfg->tmp_dir[0]) {
+        if (mount(full_cfg->tmp_dir, tmp_path, NULL, MS_BIND | MS_REC, NULL) != 0)
+            LOG_INFO_("sandbox tmp_bind_fail errno=%d effect=small_tmp", errno);
     }
 
     /* Bind the broker's per-call proxy UDS (created in the agent folder, outside
@@ -694,11 +735,14 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
          * HTTP_PROXY path, so it is gated off. The interposer is the only egress
          * inside CLONE_NEWNET for shell, so a failed write must be loud. */
         if (!cfg->skip_pid_ns) {
-            int pfd = open("/tmp/libcclaw_net.so", O_WRONLY | O_CREAT | O_TRUNC, 0755);
+            /* O_NOFOLLOW: refuse to follow a symlink at this path rather than
+             * writing 0755 content wherever it points. */
+            int pfd = open(SANDBOX_PRELOAD_PATH,
+                           O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0755);
             ssize_t wr = pfd >= 0 ? write(pfd, preload_net_blob, (size_t)preload_net_blob_len) : -1;
             if (pfd >= 0) close(pfd);
             if (wr == (ssize_t)preload_net_blob_len)
-                setenv("LD_PRELOAD", "/tmp/libcclaw_net.so", 1);
+                setenv("LD_PRELOAD", SANDBOX_PRELOAD_PATH, 1);
             else {
                 int e = errno;  /* log call below may clobber it */
                 LOG_INFO_("sandbox preload_fail errno=%d effect=no_network", e);
@@ -730,7 +774,6 @@ void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg
          * under --daemon there is none, so the child starts in the workspace. */
         cfg->sandbox = 0;
         cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1; cfg->workspace_ro = 0;
-        cfg->tmp_pct = 0;
         cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
     } else if (sandbox_profile && strcmp(sandbox_profile, "trusted") == 0) {
         /* Resources unbounded, visibility is not: no CWD mount, so the agent
@@ -739,7 +782,6 @@ void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg
          * grants. "Trusted" is about resources, never about reach. */
         cfg->sandbox = 1;
         cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
-        cfg->tmp_pct = 50;
         cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
     } else if (sandbox_profile && strcmp(sandbox_profile, "restricted") == 0) {
         /* Bounded, but still able to run real programs: the limits are a
@@ -747,12 +789,10 @@ void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg
          * $HOME works — what makes this restricted is no network at all. */
         cfg->sandbox = 1;
         cfg->env_mode = 1; cfg->net_mode = 1; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
-        cfg->tmp_pct = 25;
         cfg->rlimits.nproc = 64; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 120;
     } else { /* "standard", unknown, NULL */
         cfg->sandbox = 1;
         cfg->env_mode = 1; cfg->net_mode = 0; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
-        cfg->tmp_pct = 50;
         cfg->rlimits.nproc = 256; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 1800;
     }
 }
@@ -773,7 +813,6 @@ void sandbox_profile_resolve(const char *sandbox_profile, SandboxProfile *p) {
     p->net_mode     = c.net_mode;
     p->mount_cwd    = c.mount_cwd;
     p->workspace_ro = c.workspace_ro;
-    p->tmp_pct      = c.tmp_pct;
     p->rlimits.nproc   = c.rlimits.nproc;
     p->rlimits.as_mb   = c.rlimits.as_mb;
     p->rlimits.cpu_sec = c.rlimits.cpu_sec;

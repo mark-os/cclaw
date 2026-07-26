@@ -112,8 +112,9 @@ more than `standard` does. Widening what an agent can see is the `grants` +
 approval path, never a side effect of a looser profile. `$HOME` is set under
 every profile (the agent workspace when sandboxed, the real user home under
 `host`), `PATH` includes both system and workspace-local bin dirs, and `/tmp` is
-a RAM-percentage tmpfs — so `npm install`, `cargo build`, and `go build` work
-inside the sandbox. No profile sets `RLIMIT_AS`; see
+a bind of a persistent per-agent scratch dir on the host (so it inherits the
+host's own temp storage and cleaner, rather than a size policy of ours) — so
+`npm install`, `cargo build`, and `go build` work inside the sandbox. No profile sets `RLIMIT_AS`; see
 [specs/sandbox-profiles.md](specs/sandbox-profiles.md) for why.
 
 ### Using secrets in tool calls

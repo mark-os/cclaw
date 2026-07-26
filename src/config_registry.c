@@ -94,6 +94,12 @@ static const ConfigDef s_defs[] = {
       "Free-space floor in MB below which the daemon refuses new LLM dispatch (0 = disabled)" },
     { "workspace",          "",
       "Workspace directory (empty = ~/.cclaw/agents/default/workspace)" },
+    { "tmp_root",           "",
+      "Parent for agent scratch dirs bind-mounted as /tmp in sandboxed tool"
+      " children (empty = the host's /tmp, so temp storage inherits whatever"
+      " the host does — tmpfs or disk — and the host's cleaner). Set this to"
+      " put scratch on a dedicated volume, or when the host's /tmp is too"
+      " small to build in. Layout: <tmp_root>/cclaw-<uid>/<agent>/" },
     { "skills_dirs",
       "[\"~/.cclaw/skills\",\"~/.agents/skills\"]",
       "Skill discovery directories (JSON array, ~ expanded; SKILL.md convention"

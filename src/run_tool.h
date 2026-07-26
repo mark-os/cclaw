@@ -58,7 +58,10 @@ typedef struct {
     /* cclaw.db path — carried so the child can mask the key + ciphertext out
      * of any bound path. The child never opens the DB. */
     const char *db_path;
-    int workspace_ro, mount_cwd, tmp_pct;
+    /* Host directory bind-mounted as /tmp in the child: the agent's persistent
+     * scratch, created and owned by the parent (scratch_dir_ensure). */
+    const char *tmp_dir;
+    int workspace_ro, mount_cwd;
     const char **read_paths;  size_t read_count;
     const char **write_paths; size_t write_count;
     /* network tiers (shell/web/js) */
@@ -86,7 +89,8 @@ typedef struct {
     int   sandbox, net_mode;
     char *workspace, *cwd_path;
     char *db_path;
-    int   workspace_ro, mount_cwd, tmp_pct;
+    char *tmp_dir;
+    int   workspace_ro, mount_cwd;
     char **read_paths;  size_t read_count;
     char **write_paths; size_t write_count;
     char *agent_dir;

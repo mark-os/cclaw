@@ -28,7 +28,6 @@ typedef struct {
     int net_mode;           /* 0 = proxy available, 1 = no network */
     int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
     int workspace_ro;       /* 0 = rw, 1 = read-only */
-    int tmp_pct;            /* /tmp tmpfs size, % of RAM (0 = profile default) */
     struct { int nproc, as_mb, cpu_sec; } rlimits; /* 0 = no limit */
     char **read_paths;  size_t read_path_count;    /* extra bind-mounts from grants */
     char **write_paths; size_t write_path_count;
@@ -46,10 +45,13 @@ typedef struct {
     const char *db_path;    /* cclaw.db path: its dir holds .cclaw_key. Path only —
                                never opened; used to locate both for masking. */
     const char *proxy_sock; /* path to .proxy.sock (NULL if proxy not started) */
+    const char *tmp_dir;    /* host dir bind-mounted as /tmp — persistent per-agent
+                             * scratch the parent created and owns. NULL = no bind;
+                             * /tmp then stays a dir on the tiny root tmpfs, which
+                             * is functional but too small to build in. */
     int sandbox;            /* 1 = namespace required, 0 = none (host sandbox_profile) */
     int workspace_ro;       /* 0 = rw, 1 = read-only remount */
     int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
-    int tmp_pct;            /* /tmp tmpfs size, % of RAM (0 = profile default) */
     int net_mode;           /* 0 = proxy available, 1 = no network */
     int skip_pid_ns;        /* 1 = omit CLONE_NEWPID (no inner fork); file tier */
     int env_mode;           /* 0 = inherit-present-env + scrub secrets, 1 = clean
@@ -71,13 +73,13 @@ typedef struct {
 int sandbox_child_setup(const SandboxConfig *cfg);
 
 /* Single source of truth: sandbox_profile string → sandbox policy fields.
- * Fills cfg->sandbox, env_mode, net_mode, mount_cwd, workspace_ro, tmp_pct,
- * rlimits. Does NOT touch workspace/db_path/proxy_sock/cwd_path (caller sets
- * those). */
+ * Fills cfg->sandbox, env_mode, net_mode, mount_cwd, workspace_ro,
+ * rlimits. Does NOT touch workspace/db_path/proxy_sock/cwd_path/tmp_dir (the
+ * caller sets those — they are paths, not profile policy). */
 void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg);
 
 /* Fill the policy half of a SandboxProfile (sandbox/env_mode/net_mode/mount_cwd/
- * workspace_ro/tmp_pct/rlimits) from sandbox_profile. The caller sets the
+ * workspace_ro/rlimits) from sandbox_profile. The caller sets the
  * grant-path fields separately (they come from AgentCaps, not the profile). */
 void sandbox_profile_resolve(const char *sandbox_profile, SandboxProfile *p);
 

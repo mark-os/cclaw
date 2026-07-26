@@ -33,6 +33,7 @@ typedef struct {
     const char *agent_dir;      /* dir for proxy UDS (NULL = use workspace) */
     const char *cwd_path;       /* CWD rw bind-mount (NULL = none) */
     const char *db_path;        /* cclaw.db: key + ciphertext masked in the ns */
+    const char *tmp_dir;        /* host dir bound as /tmp (NULL = tiny root tmpfs) */
     int timeout;
     int sandbox;
     int env_mode;               /* 1 = clean env (default), 0 = inherit */
@@ -52,7 +53,7 @@ typedef struct {
 
 #define SHELL_REQ_DEFAULTS { \
     .command = NULL, .shell_path = NULL, .workspace = NULL, .agent_dir = NULL, \
-    .cwd_path = NULL, .db_path = NULL, \
+    .cwd_path = NULL, .db_path = NULL, .tmp_dir = NULL, \
     .timeout = 5, .sandbox = 1, .env_mode = 1, \
     .workspace_ro = 0, .mount_cwd = 0, .net_mode = 0, \
     .nproc = 64, .as_mb = 512, .cpu_sec = 60, \
@@ -80,6 +81,7 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
         .workspace = r->workspace,
         .cwd_path = r->cwd_path,
         .db_path = r->db_path,
+        .tmp_dir = r->tmp_dir,
         .workspace_ro = r->workspace_ro,
         .mount_cwd = r->mount_cwd,
         .read_paths = r->read_paths,
@@ -177,6 +179,7 @@ static inline char *run_tool_shell_with_hosts(const ShellToolReq *r, char **out_
         .workspace = r->workspace,
         .cwd_path = r->cwd_path,
         .db_path = r->db_path,
+        .tmp_dir = r->tmp_dir,
         .workspace_ro = r->workspace_ro,
         .mount_cwd = r->mount_cwd,
         .read_paths = r->read_paths,

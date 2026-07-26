@@ -14,6 +14,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <libgen.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 static char *str_dup(const char *s) {
     if (!s) return NULL;
@@ -62,6 +66,70 @@ const char *agent_dir_resolve(const char *workspace, const char *db_path,
         }
     }
     snprintf(out, cap, ".cclaw/agents");
+    return out;
+}
+
+/* mkdir one level of the scratch tree, 0700, and refuse anything we don't own.
+ * /tmp is mode 1777, so an existing path proves nothing about who made it:
+ * O_NOFOLLOW+fstat is the check that matters, not the name. */
+static int scratch_mkdir_owned(const char *path) {
+    if (mkdir(path, 0700) != 0 && errno != EEXIST) return -1;
+    /* O_NOFOLLOW|O_DIRECTORY: refuse a symlink someone planted here, and fstat
+     * the object we actually opened rather than re-resolving the name (the
+     * name could change between checking it and using it). */
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY);
+    if (fd < 0) return -1;
+    struct stat st;
+    int bad = fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode) ||
+              st.st_uid != getuid() || (st.st_mode & 07777) != 0700;
+    close(fd);
+    if (bad) {
+        LOG_WARN_("scratch_dir refusing '%s': not a 0700 dir owned by uid %u",
+                  path, (unsigned)getuid());
+        return -1;
+    }
+    return 0;
+}
+
+/* Empty the abandoned namespace roots. A running child still has its tmpfs
+ * mounted on one, so rmdir returns EBUSY and we skip it; a dead child's is
+ * empty and goes. That is why nothing needs to remember child pids. */
+static void scratch_reap_ns_roots(const char *ns_root) {
+    DIR *d = opendir(ns_root);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char p[PATH_MAX];
+        int n = snprintf(p, sizeof(p), "%s/%s", ns_root, e->d_name);
+        if (n > 0 && (size_t)n < sizeof(p)) rmdir(p);
+    }
+    closedir(d);
+}
+
+/* See config.h. */
+const char *scratch_dir_ensure(const char *agent, const char *root_override,
+                               char *out, size_t cap) {
+    if (!out || cap == 0) return NULL;
+    const char *root = (root_override && root_override[0]) ? root_override : "/tmp";
+    /* An agent name reaches this from the DB, where it is PascalCase-validated,
+     * but a path component is worth checking on its own terms regardless. */
+    if (!agent || !agent[0] || strchr(agent, '/') || strcmp(agent, "..") == 0)
+        agent = "default";
+
+    char base[PATH_MAX];
+    int n = snprintf(base, sizeof(base), "%s/cclaw-%u", root, (unsigned)getuid());
+    if (n <= 0 || (size_t)n >= sizeof(base)) return NULL;
+    if (scratch_mkdir_owned(base) != 0) return NULL;
+
+    char ns_root[PATH_MAX];
+    n = snprintf(ns_root, sizeof(ns_root), "%s/.ns", base);
+    if (n > 0 && (size_t)n < sizeof(ns_root) && scratch_mkdir_owned(ns_root) == 0)
+        scratch_reap_ns_roots(ns_root);
+
+    n = snprintf(out, cap, "%s/%s", base, agent);
+    if (n <= 0 || (size_t)n >= cap) return NULL;
+    if (scratch_mkdir_owned(out) != 0) return NULL;
     return out;
 }
 

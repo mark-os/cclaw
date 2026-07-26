@@ -186,7 +186,7 @@ Agent identity and per-agent config. Name is the primary key — no integer id.
 | `max_output_tokens` | INTEGER | per-request cap |
 | `shell_timeout` | INTEGER DEFAULT 30 | seconds |
 | `shell_path` | TEXT | interpreter for shell_exec's `-c`; NULL = `/bin/sh` |
-| `sandbox_profile` | TEXT DEFAULT 'standard' | host / trusted / standard / restricted |
+| `sandbox_profile` | TEXT DEFAULT 'standard' | host / standard / restricted |
 | `created_by` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; creating agent (`update_agent` authorization); NULL = operator |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 

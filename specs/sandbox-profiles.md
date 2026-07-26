@@ -13,25 +13,43 @@ web, js, file — all via the `--run-tool` broker, `src/run_tool.c`).
 
 ## Policy bundles
 
-| Policy                  | host             | trusted          | standard (default) | restricted |
-|-------------------------|------------------|------------------|--------------------|------------|
-| namespace sandbox       | **none**         | required         | required           | required   |
-| env                     | inherit+scrub    | inherit+scrub    | clean allowlist    | clean allowlist |
-| network                 | direct           | proxy            | proxy              | none (no proxy sock) |
-| CWD mount (CLI)         | rw (host fs)     | **no**           | no                 | no         |
-| workspace mount         | rw (host fs)     | rw               | rw                 | rw         |
-| `$HOME`                 | user's real home | workspace        | workspace          | workspace  |
-| `/tmp`                  | host `/tmp`      | private scratch bind | private scratch bind | private scratch bind |
-| rlimits NPROC / CPU     | none             | none             | 256 / 1800s        | 64 / 120s  |
-| `RLIMIT_AS`             | **never**        | **never**        | **never**          | **never**  |
+Three profiles, deliberately: no sandbox, sandbox, sandbox-without-network.
+None of them is merely a tuning preset.
 
-**Containment is about reach, not resources.** `trusted` means "spend what you
-need", never "see more" — it mounts no CWD, so a trusted agent sees its own
-workspace and whatever `read_path`/`write_path` grants add, and nothing of the
-user's files or another agent's workspace. Widening visibility is the grant
-system's job (and therefore the approval flow's), never a side effect of picking
-a looser profile. `host` is the one profile that sees the user's files, because
-it establishes no namespace at all.
+| Policy                  | host             | standard (default) | restricted |
+|-------------------------|------------------|--------------------|------------|
+| namespace sandbox       | **none**         | required           | required   |
+| env                     | inherit+scrub    | clean allowlist    | clean allowlist |
+| network                 | direct           | proxy              | none (no proxy sock) |
+| CWD mount (CLI)         | rw (host fs)     | **no**             | no         |
+| workspace mount         | rw (host fs)     | rw                 | rw         |
+| `$HOME`                 | user's real home | workspace          | workspace  |
+| `/tmp`                  | host `/tmp`      | private scratch bind | private scratch bind |
+| rlimits NPROC / CPU     | none             | 256 / none         | 64 / 120s  |
+| `RLIMIT_AS`             | **never**        | **never**          | **never**  |
+
+**Containment is about reach, not resources.** `standard` mounts no CWD, so an
+agent sees its own workspace and whatever `read_path`/`write_path` grants add,
+and nothing of the user's files or another agent's workspace. Widening
+visibility is the grant system's job (and therefore the approval flow's), never
+a side effect of picking a looser profile. `host` is the one profile that sees
+the user's files, because it establishes no namespace at all.
+
+**Why `standard` has NPROC but no CPU cap.** The NPROC cap is not policy, it is
+the fork-bomb backstop: on a 128 MB target one bad generated shell line
+otherwise takes the daemon down with it. A per-process CPU cap punishes nothing
+real — legitimate builds brush it — so it is gone. (`standard` absorbed the
+former `trusted` profile, whose mount set was already identical; the merge cost
+`trusted`'s env inheritance, which was a hygiene regression acquired as a side
+effect rather than anything anyone chose.)
+
+**`restricted` means no packets, ever.** The child gets no proxy socket and an
+empty netns, so the denial is kernel-enforced rather than a `grants` row —
+not even a promoted tool with declared hosts egresses. Parent-side tools
+(memory, `db_query`, the LLM loop itself) are untouched, so a `restricted`
+note-taking agent converses, remembers, and runs local programs fine. File
+grants to a `restricted` agent remain legal: the profile constrains packets,
+not files.
 
 **`$HOME` is set under every profile.** Sandboxed profiles point it at the agent
 workspace: it is bind-mounted rw at its own absolute path and persists across
@@ -95,11 +113,14 @@ Under `--daemon` there is no meaningful user CWD, so the child starts in the
 agent workspace instead.
 
 - **Unknown or NULL values fall through to `standard`.** There is no
-  `bootstrap` level — the string is treated like any other unknown value
-  (→ standard). The seeded default agent (`Assistant`) is `trusted`.
+  `bootstrap` level, and no `trusted` level any more — both are treated like
+  any other unknown value (→ standard, which is strictly tighter than the old
+  `trusted`). A DB stamped before schema v34 has its `trusted` rows rewritten
+  to `standard` by the forward patch. The seeded default agent (`Assistant`)
+  is `standard`.
 - **clean allowlist env**: `clearenv()`, then only PATH, TMPDIR,
   `CCLAW_PROXY_SOCK`, and `CCLAW_SECRET_*` injections. Replaces the
-  blacklist scrub used by host/trusted (which is inherit-minus-blacklist:
+  blacklist scrub used by `host` (which is inherit-minus-blacklist:
   names containing API_KEY/APIKEY/TOKEN/SECRET/PASSWORD/CREDENTIALS are
   dropped, `CCLAW_SECRET_*` re-injected as the deliberate channel).
 - **network none** (`restricted`): no `CCLAW_PROXY_SOCK` in the child, no
@@ -119,8 +140,8 @@ agent workspace instead.
 ## Fail-closed rule
 
 Every level except `host` **requires** the namespace. If `unshare`/
-`pivot_root` fails (or the `restricted` read-only remount fails), the child
-prints an error and exits 126 instead of degrading — a runtime failure must
+`pivot_root` fails, the child prints an error and exits 126 instead of
+degrading — a runtime failure must
 not grant what only `host` may grant. `host` never attempts the sandbox; it
 is the explicit opt-out, per-agent via `agents.sandbox_profile` or session-wide
 via `--trust-host` (sets `CCLAW_SANDBOX_PROFILE=host`). Sandbox on/off is derived
@@ -141,8 +162,10 @@ Integration tests exercise the namespace, proxy-deny, and static-mount paths
 (`test/test_shell_namespace.c`, `test_integration_shell_proxy*.c`,
 `test_sandbox_mounts.c`). The profile→bundle mapping is pinned field-by-field in
 `test/test_sandbox_profile.c`, which also enforces two invariants directly: no
-profile may set `RLIMIT_AS`, and every sandboxed profile must leave the
-workspace writable (because `$HOME` points at it).
+profile may set `RLIMIT_AS`, and every unknown value (`trusted` and `bootstrap`
+included) falls through to `standard`. The state-file mask has its own suite,
+`test/test_sandbox_key_mask.c` — every masking assertion there is paired with a
+positive control read of a decoy file in the same granted directory.
 
 ## Non-goals
 

@@ -37,7 +37,6 @@ typedef struct {
     int timeout;
     int sandbox;
     int env_mode;               /* 1 = clean env (default), 0 = inherit */
-    int workspace_ro;
     int mount_cwd;
     int net_mode;               /* 1 = no network (no proxy), 0 = proxy */
     int nproc, as_mb, cpu_sec;
@@ -55,7 +54,7 @@ typedef struct {
     .command = NULL, .shell_path = NULL, .workspace = NULL, .agent_dir = NULL, \
     .cwd_path = NULL, .db_path = NULL, .tmp_dir = NULL, \
     .timeout = 5, .sandbox = 1, .env_mode = 1, \
-    .workspace_ro = 0, .mount_cwd = 0, .net_mode = 0, \
+    .mount_cwd = 0, .net_mode = 0, \
     .nproc = 64, .as_mb = 512, .cpu_sec = 60, \
     .host_rules = NULL, .host_count = 0, \
     .read_paths = NULL, .read_count = 0, \
@@ -82,7 +81,6 @@ static inline char *run_tool_shell(const ShellToolReq *r) {
         .cwd_path = r->cwd_path,
         .db_path = r->db_path,
         .tmp_dir = r->tmp_dir,
-        .workspace_ro = r->workspace_ro,
         .mount_cwd = r->mount_cwd,
         .read_paths = r->read_paths,
         .read_count = r->read_count,
@@ -180,7 +178,6 @@ static inline char *run_tool_shell_with_hosts(const ShellToolReq *r, char **out_
         .cwd_path = r->cwd_path,
         .db_path = r->db_path,
         .tmp_dir = r->tmp_dir,
-        .workspace_ro = r->workspace_ro,
         .mount_cwd = r->mount_cwd,
         .read_paths = r->read_paths,
         .read_count = r->read_count,

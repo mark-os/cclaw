@@ -96,20 +96,21 @@ See [specs/security.md](specs/security.md) for full details and [specs/trust.md]
 - **Secrets**: encrypted in cclaw.db (ChaCha20-Poly1305). Decrypted at runtime, injected to tool children via env, never exposed to the model or logged.
 - **Secret scanner**: AC-based DLP scans all tool results and user messages for leaked credentials before they enter the context window. See [specs/security.md](specs/security.md#secret-scanner-ac-based-content-dlp).
 - **Secret interpolation**: LLMs reference secrets via `{{SECRET:name}}` — cclaw interpolates the real value before tool execution, the context never sees it.
-- **Sandbox profiles**: `agents.sandbox_profile` controls containment only (`host`, `trusted`, `standard`, `restricted`) — authority always lives in `grants`, never on the profile. Every profile except `host` *requires* the namespace sandbox — if it can't be established, the shell refuses to run (fail-closed). See [specs/sandbox-profiles.md](specs/sandbox-profiles.md).
+- **Sandbox profiles**: `agents.sandbox_profile` controls containment only (`host`, `standard`, `restricted`) — authority always lives in `grants`, never on the profile. Every profile except `host` *requires* the namespace sandbox — if it can't be established, the shell refuses to run (fail-closed). See [specs/sandbox-profiles.md](specs/sandbox-profiles.md).
 
 ### Choosing a sandbox_profile for new agents
 
 | Profile | Use for |
 |-------|---------|
 | `host` | **No sandbox at all** — skips *both* the namespace and the egress proxy (traffic goes direct, unfiltered). Use when the surrounding environment already provides isolation (inside a Docker container, behind a firewall) or on hosts where unprivileged userns is unavailable. `--trust-host` forces this. |
-| `trusted` | Default agent — unbounded resources, inherit+scrub env. Workspace only: no CWD mount, so it cannot see the user's files or another agent's workspace without a grant. |
-| `standard` | Most agents — clean env, network via proxy, workspace rw, generous NPROC/CPU caps |
-| `restricted` | Observer/audit agents — **no network at all**; still able to run real programs (workspace rw, bounded NPROC/CPU) |
+| `standard` | **The default.** Clean env, network via proxy, workspace rw, no CWD mount — it cannot see the user's files or another agent's workspace without a grant. NPROC 256 as a fork-bomb backstop; no CPU cap. |
+| `restricted` | Observer/audit agents — **no packets, ever** (kernel-enforced: no proxy socket in the child); still able to run real programs (workspace rw, bounded NPROC/CPU). File grants remain legal. |
 
-`trusted` is about *resources*, not *reach* — it has no rlimits, but it mounts no
-more than `standard` does. Widening what an agent can see is the `grants` +
-approval path, never a side effect of a looser profile. `$HOME` is set under
+Widening what an agent can see is the `grants` + approval path, never a side
+effect of a looser profile. `cclaw.db` and `.cclaw_key` are masked
+unconditionally under every sandboxed profile and a path grant naming either
+(or a directory containing them) is refused at grant time — `db_query` is the
+sanctioned way for an agent to inspect state. `$HOME` is set under
 every profile (the agent workspace when sandboxed, the real user home under
 `host`), `PATH` includes both system and workspace-local bin dirs, and `/tmp` is
 a bind of a persistent per-agent scratch dir on the host (so it inherits the

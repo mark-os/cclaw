@@ -65,9 +65,17 @@ static void test_profile_escalation_refused(void) {
     seed_creator("Std", "standard");
     char *err = NULL;
     int rc = agent_definition_validate(g_db,
-        "{\"name\":\"Escaper\",\"sandbox_profile\":\"trusted\"}", "Std", &err);
+        "{\"name\":\"Escaper\",\"sandbox_profile\":\"host\"}", "Std", &err);
     assert(rc != 0);
     assert(err && strstr(err, "looser"));
+    free(err);
+
+    /* 'trusted' is deleted, not merely un-grantable: it is now an invalid
+     * profile name, refused before any looseness comparison. */
+    err = NULL;
+    assert(agent_definition_validate(g_db,
+        "{\"name\":\"Ghost\",\"sandbox_profile\":\"trusted\"}", "Std", &err) != 0);
+    assert(err && strstr(err, "invalid sandbox_profile"));
     free(err);
 
     /* Equal or tighter is fine. */
@@ -247,7 +255,7 @@ static void test_update_agent(void) {
         "{\"name\":\"Pupil\",\"primary_model\":\"good-model@prov\"}", "Mentor", NULL) == 0);
     err = NULL;
     assert(agent_definition_update_validate(g_db,
-        "{\"name\":\"Pupil\",\"sandbox_profile\":\"trusted\"}", "Mentor", &err) != 0);
+        "{\"name\":\"Pupil\",\"sandbox_profile\":\"host\"}", "Mentor", &err) != 0);
     assert(err && strstr(err, "looser"));
     free(err);
     err = NULL;

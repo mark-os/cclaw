@@ -153,7 +153,7 @@ When `creator` is non-NULL (agent-initiated: `create_agent`, or a manifest
 promoted by an agent), the child is capped on both axes independently:
 
 - **Containment**: child `sandbox_profile` ≤ creator's, by looseness order
-  `host > trusted > standard > restricted`. Requesting a looser profile is a
+  `host > standard > restricted`. Requesting a looser profile is a
   hard refusal, not a clamp — the definition was wrong, say so.
 - **Authority**: child grants ⊆ creator's *live* grants (exact
   subset-of-values per kind: tool, host, read_path, write_path). No fuzzy

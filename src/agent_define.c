@@ -44,11 +44,10 @@ static char *jext(sqlite3 *db, const char *json, const char *path) {
     return res;
 }
 
-/* Looseness order host > trusted > standard > restricted; -1 = unknown. */
+/* Looseness order host > standard > restricted; -1 = unknown. */
 static int profile_rank(const char *p) {
     if (!p) return -1;
-    if (strcmp(p, "host") == 0) return 3;
-    if (strcmp(p, "trusted") == 0) return 2;
+    if (strcmp(p, "host") == 0) return 2;
     if (strcmp(p, "standard") == 0) return 1;
     if (strcmp(p, "restricted") == 0) return 0;
     return -1;
@@ -171,7 +170,7 @@ static int profile_capped(sqlite3 *db, const char *profile, const char *creator,
     if (!profile) return 0;
     int r = profile_rank(profile);
     if (r < 0)
-        return failf(err, "invalid sandbox_profile '%s' (host|trusted|standard|restricted)%s",
+        return failf(err, "invalid sandbox_profile '%s' (host|standard|restricted)%s",
                      profile, "");
     if (creator) {
         char *cp = agent_profile(db, creator);

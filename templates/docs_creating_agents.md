@@ -74,7 +74,7 @@ Models accept `model` or `model@provider` (the id form pins the provider).
 
 An agent you create can never exceed you:
 
-- `sandbox_profile` ≤ yours in looseness (host > trusted > standard > restricted).
+- `sandbox_profile` ≤ yours in looseness (host > standard > restricted).
 - Every grant ⊆ your own live grants. Exact values, no fuzzy matching.
 - Extensions must be published, or owned by you.
 - `clone_from` cannot launder capabilities — the source is capped the same way.

@@ -8,8 +8,8 @@
  * extension.json agents[]. See specs/self-configuration.md.
  *
  * creator == NULL means operator (no creation caps). A non-NULL creator is
- * capped: child sandbox_profile <= creator's (host > trusted > standard >
- * restricted by looseness), child grants a subset of creator's live grants,
+ * capped: child sandbox_profile <= creator's (host > standard > restricted
+ * by looseness), child grants a subset of creator's live grants,
  * extensions published or creator-owned.
  *
  * On error returns -1 and sets *err (heap, caller frees). */

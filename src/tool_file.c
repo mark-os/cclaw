@@ -91,9 +91,7 @@ static char *path_grant_hint(const FileReadCtx *ctx, const char *fullpath,
         return msg;
     }
 
-    if (path_under(ctx->workspace, fullpath) &&
-        !(want_write && ctx->sb.workspace_ro))
-        return NULL;
+    if (path_under(ctx->workspace, fullpath)) return NULL;
     if (ctx->sb.mount_cwd && ctx->cwd_path && path_under(ctx->cwd_path, fullpath))
         return NULL;
     for (size_t i = 0; i < ctx->sb.write_path_count; i++)
@@ -173,7 +171,6 @@ static const char *FILE_WRITE_PARAMS_JSON =
     "},\"required\":[\"path\",\"content\"]}";
 
 static char *file_write_run(const RunToolParsed *q, FileReadCtx *ctx) {
-    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted sandbox profile)");
     const char *workspace = ctx->workspace;
 
     const char *req_path = run_tool_param_str(q, "path");
@@ -498,8 +495,6 @@ static void edits_free(EditOp *e, int n) {
 }
 
 static char *file_edit_run(const RunToolParsed *q, FileReadCtx *ctx) {
-    if (ctx->sb.workspace_ro) return strdup("error: workspace is read-only (restricted sandbox profile)");
-
     const char *req_path = run_tool_param_str(q, "path");
     if (!req_path || !req_path[0])
         return strdup("error: missing or invalid 'path'");
@@ -775,7 +770,6 @@ char *tool_file_tier_run(const RunToolParsed *q) {
     fctx.workspace    = q->workspace;
     fctx.cwd_path     = q->cwd_path;
     fctx.sb.sandbox      = q->sandbox;
-    fctx.sb.workspace_ro = q->workspace_ro;
     fctx.sb.mount_cwd    = q->mount_cwd;
     fctx.sb.read_paths   = q->read_paths;
     fctx.sb.read_path_count = q->read_count;

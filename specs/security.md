@@ -367,7 +367,7 @@ Provider API keys resolve env → system-scope secret: `config_load()` reads the
 
 **Key-protection ceiling.** The DB store is encrypted at rest, but the key sits on the *same disk* as the ciphertext. Whole-disk theft yields both → plaintext. So the built-in store protects against *exfiltration of `cclaw.db` alone* (a leaked backup, a mis-scoped file copy) — **not** against full-disk capture or the running host. Closing that gap means deriving the key from a user passphrase (KDF) or binding it to hardware (TPM / Secure Enclave) — which is exactly what a keychain storage provider gets for free (see [Storage providers](#storage-providers)). For a single-user box a chmod-600 key file is a reasonable default; it is not a substitute for a hardware-backed vault, and users who care should use the keychain provider.
 
-**The key file is invisible to sandboxed shell children by omission.** `.cclaw_key` lives next to `cclaw.db` (`<dir of db_path>/.cclaw_key`). That directory is *not* the workspace, and no sandboxed profile mounts anything else by default — `trusted` stopped mounting the CWD — so the key and the DB ciphertext simply never materialize in the child's mount tree. `host` establishes no namespace and is exposed by construction; that is what picking `host` means.
+**The key file is invisible to sandboxed shell children by omission.** `.cclaw_key` lives next to `cclaw.db` (`<dir of db_path>/.cclaw_key`). That directory is *not* the workspace, and no sandboxed profile mounts anything else by default — no sandboxed profile mounts the CWD — so the key and the DB ciphertext simply never materialize in the child's mount tree. `host` establishes no namespace and is exposed by construction; that is what picking `host` means.
 
 **Grant-mounted paths are masked.** A `read_path`/`write_path` grant covering a directory that contains `cclaw.db` binds that directory into the child. Without further work, key + ciphertext together is a full secret compromise, and the approver would see only "read access to a directory" — no hint that it means every stored secret. `sandbox_mask_state_files()` (`src/sandbox.c`) closes this by binding an empty read-only file over the key and the DB family (`cclaw.db`, `-wal`, `-shm`) after all binds and before `pivot_root`. Paths not reachable in the child's mount tree never materialize under the new root, so the unmounted case skips them — they are already invisible by omission.
 
@@ -678,22 +678,22 @@ Some auth fundamentally needs the raw key in the compute context — the algorit
 
 The `agents.sandbox_profile` column maps to a shell sandbox profile:
 
-| Policy | host | trusted | standard (default) | restricted |
-|--------|------|---------|-------------------|------------|
-| sandbox | none | namespace | namespace | namespace |
-| env | inherit + scrub | inherit + scrub | clean allowlist | clean allowlist |
-| network | direct (no proxy) | proxy | proxy | none |
-| CWD mount | n/a (host fs) | **no** | no | no |
-| workspace | rw (host fs) | rw | rw | rw |
-| `$HOME` | user's real home | workspace | workspace | workspace |
-| `/tmp` tmpfs | host `/tmp` | 50% RAM | 50% RAM | 25% RAM |
-| RLIMIT_NPROC | none | none | 256 | 64 |
-| RLIMIT_AS | none | none | **none** | **none** |
-| RLIMIT_CPU | none | none | 1800s | 120s |
+| Policy | host | standard (default) | restricted |
+|--------|------|-------------------|------------|
+| sandbox | none | namespace | namespace |
+| env | inherit + scrub | clean allowlist | clean allowlist |
+| network | direct (no proxy) | proxy | none |
+| CWD mount | n/a (host fs) | no | no |
+| workspace | rw (host fs) | rw | rw |
+| `$HOME` | user's real home | workspace | workspace |
+| `/tmp` | host `/tmp` | private scratch bind | private scratch bind |
+| RLIMIT_NPROC | none | 256 | 64 |
+| RLIMIT_AS | none | **none** | **none** |
+| RLIMIT_CPU | none | **none** | 120s |
 
-`trusted` bounds no resources but sees no more than `standard`: it mounts no CWD,
-so reach comes only from the workspace plus `read_path`/`write_path` grants. No
-profile sets `RLIMIT_AS` — it caps address space rather than usage, which refuses
+`standard` bounds no resources beyond a fork-bomb backstop and sees no more than
+its workspace: it mounts no CWD, so reach comes only from the workspace plus
+`read_path`/`write_path` grants. No profile sets `RLIMIT_AS` — it caps address space rather than usage, which refuses
 to start large-VA runtimes (`go`, `node`, `rustc`) without bounding anything. See
 [specs/sandbox-profiles.md](sandbox-profiles.md) for the full rationale.
 

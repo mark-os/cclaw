@@ -61,7 +61,7 @@ typedef struct {
     /* Host directory bind-mounted as /tmp in the child: the agent's persistent
      * scratch, created and owned by the parent (scratch_dir_ensure). */
     const char *tmp_dir;
-    int workspace_ro, mount_cwd;
+    int mount_cwd;
     const char **read_paths;  size_t read_count;
     const char **write_paths; size_t write_count;
     /* network tiers (shell/web/js) */
@@ -90,7 +90,7 @@ typedef struct {
     char *workspace, *cwd_path;
     char *db_path;
     char *tmp_dir;
-    int   workspace_ro, mount_cwd;
+    int   mount_cwd;
     char **read_paths;  size_t read_count;
     char **write_paths; size_t write_count;
     char *agent_dir;

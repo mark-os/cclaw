@@ -184,7 +184,7 @@ field order. Fields by tier (additive over file):
 
 - all: `tier`, `tool_name`, `env_mode`, `rlimits{nproc,as_mb,cpu_sec}` (`as_mb` is
   carried but no profile sets it — see [sandbox-profiles.md](sandbox-profiles.md))
-- file: `workspace`, `read_paths[]`, `write_paths[]`, `workspace_ro`, `mount_cwd`, `cwd_path`, `tmp_dir`, `db_path`
+- file: `workspace`, `read_paths[]`, `write_paths[]`, `mount_cwd`, `cwd_path`, `tmp_dir`, `db_path`
   (`db_path` is a *path only* — the child never opens the DB. It is carried so
   the child can bind-mask `.cclaw_key` and the DB family out of any granted
   mount; see [security.md](security.md). Dropping it silently disables the

@@ -325,6 +325,14 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
      * message. The {0} sentinel keeps the array non-empty for C11; the
      * executor skips it. */
     { 0 },
+    /* v34: the 'trusted' containment profile is deleted (three profiles now:
+     * host / standard / restricted). Its mount set already equalled
+     * standard's, so this is a merge, not a loosening — the rewritten rows get
+     * a clean env instead of inherit+scrub. Unknown values already fall
+     * through to standard at resolve time; rewriting the rows keeps the DB
+     * honest about what is actually in force. */
+    { 34, "UPDATE agents SET sandbox_profile='standard'"
+          " WHERE sandbox_profile='trusted';", NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 33   /* schema freeze 2026-07-19 — no patches below this */

@@ -90,7 +90,6 @@ char *run_tool_serialize_request(const RunToolReq *req, size_t *out_len) {
     w_str(&b, req->workspace);
     w_str(&b, req->mount_cwd ? req->cwd_path : NULL);
     w_str(&b, req->db_path);
-    w_u32(&b, (uint32_t)req->workspace_ro);
     w_u32(&b, (uint32_t)req->mount_cwd);
     w_str(&b, req->tmp_dir);
     w_str_array(&b, req->read_paths, req->read_count);
@@ -139,7 +138,6 @@ void run_tool_req_init(RunToolReq *req, int tier, const char *tool_name,
     req->net_mode = sb->net_mode;
     req->workspace = workspace;
     req->cwd_path  = cwd_path;
-    req->workspace_ro = sb->workspace_ro;
     req->mount_cwd    = sb->mount_cwd;
     req->read_paths = (const char **)sb->read_paths;
     req->read_count = sb->read_path_count;
@@ -203,7 +201,6 @@ static int parse_request(Rbuf *r, RunToolParsed *q) {
     q->workspace = r_str(r);
     q->cwd_path  = r_str(r);
     q->db_path   = r_str(r);
-    q->workspace_ro = (int)r_u32(r);
     q->mount_cwd    = (int)r_u32(r);
     q->tmp_dir      = r_str(r);
     q->read_paths  = r_str_array(r, &q->read_count);
@@ -365,7 +362,6 @@ static void build_sandbox_cfg(const RunToolParsed *q, int skip_pid_ns,
     cfg->db_path      = q->db_path;
     cfg->proxy_sock   = proxy_sock;
     cfg->sandbox      = q->sandbox;
-    cfg->workspace_ro = q->workspace_ro;
     cfg->mount_cwd    = q->mount_cwd;
     cfg->env_mode     = q->env_mode;
     cfg->net_mode     = q->net_mode;

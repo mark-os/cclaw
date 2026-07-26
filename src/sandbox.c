@@ -526,7 +526,9 @@ static void sandbox_scrub_env(const SandboxConfig *cfg) {
         return;
     }
 
-    /* Legacy trusted mode: inherit env minus known secret names */
+    /* host mode: inherit whatever env the child was given, minus known
+     * secret-bearing names. Only `host` reaches here — every sandboxed
+     * profile uses the clean allowlist above. */
     sandbox_set_path(home);
     setenv("TMPDIR", "/tmp", 1);
     setenv("HOME", home, 1);
@@ -697,17 +699,6 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
         return -1;
     }
 
-    /* Sandbox profile: remount workspace read-only after pivot_root */
-    if (cfg->sandbox && cfg->workspace_ro && ws) {
-        char ws_real[PATH_MAX];
-        if (realpath(ws, ws_real) == NULL ||
-            mount(NULL, ws_real, NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) != 0) {
-            fprintf(stderr, "error: read-only workspace remount failed "
-                    "(errno=%d); refusing to run writable\n", errno);
-            return -1;
-        }
-    }
-
     /* host has no namespace, so sandbox_apply_namespace's chdir never ran. In
      * CLI mode cwd_path is the user's own CWD and inheriting it is the whole
      * point of host — `cclaw` in a repo operates on that repo. Under --daemon
@@ -773,27 +764,28 @@ void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg
          * own filesystem and network. cwd_path (CLI only) keeps the user's CWD;
          * under --daemon there is none, so the child starts in the workspace. */
         cfg->sandbox = 0;
-        cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1; cfg->workspace_ro = 0;
-        cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
-    } else if (sandbox_profile && strcmp(sandbox_profile, "trusted") == 0) {
-        /* Resources unbounded, visibility is not: no CWD mount, so the agent
-         * sees its own workspace and nothing of the user's files or any other
-         * agent's — additional paths arrive only as read_path/write_path
-         * grants. "Trusted" is about resources, never about reach. */
-        cfg->sandbox = 1;
-        cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
+        cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1;
         cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
     } else if (sandbox_profile && strcmp(sandbox_profile, "restricted") == 0) {
         /* Bounded, but still able to run real programs: the limits are a
          * runaway backstop, not a straitjacket. The workspace stays rw so
-         * $HOME works — what makes this restricted is no network at all. */
+         * $HOME works — what makes this restricted is no packets, ever: no
+         * proxy socket reaches the child, so the empty netns is the whole
+         * story and not even a promoted declared-hosts tool egresses. */
         cfg->sandbox = 1;
-        cfg->env_mode = 1; cfg->net_mode = 1; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
+        cfg->env_mode = 1; cfg->net_mode = 1; cfg->mount_cwd = 0;
         cfg->rlimits.nproc = 64; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 120;
-    } else { /* "standard", unknown, NULL */
+    } else { /* "standard", unknown, NULL — the default */
+        /* Resources are effectively unbounded and visibility is not widened:
+         * no CWD mount, so the agent sees its own workspace and nothing of the
+         * user's files or any other agent's — additional paths arrive only as
+         * read_path/write_path grants. NPROC is kept purely as the fork-bomb
+         * backstop (on a 128MB target one bad generated shell line otherwise
+         * takes the daemon down with it); there is no per-process CPU cap,
+         * because legit builds brush it and it punishes nothing real. */
         cfg->sandbox = 1;
-        cfg->env_mode = 1; cfg->net_mode = 0; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
-        cfg->rlimits.nproc = 256; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 1800;
+        cfg->env_mode = 1; cfg->net_mode = 0; cfg->mount_cwd = 0;
+        cfg->rlimits.nproc = 256; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
     }
 }
 
@@ -812,7 +804,6 @@ void sandbox_profile_resolve(const char *sandbox_profile, SandboxProfile *p) {
     p->env_mode     = c.env_mode;
     p->net_mode     = c.net_mode;
     p->mount_cwd    = c.mount_cwd;
-    p->workspace_ro = c.workspace_ro;
     p->rlimits.nproc   = c.rlimits.nproc;
     p->rlimits.as_mb   = c.rlimits.as_mb;
     p->rlimits.cpu_sec = c.rlimits.cpu_sec;

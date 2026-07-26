@@ -24,31 +24,20 @@ static void test_host(void) {
     TEST(host_no_sandbox_no_limits);
     SandboxConfig c = cfg_for("host");
     if (c.sandbox == 0 && c.env_mode == 0 && c.net_mode == 0 &&
-        c.mount_cwd == 1 && c.workspace_ro == 0 &&
+        c.mount_cwd == 1 &&
         c.rlimits.nproc == 0 && c.rlimits.as_mb == 0 && c.rlimits.cpu_sec == 0)
         PASS();
     else FAIL("host bundle mismatch");
 }
 
-static void test_trusted(void) {
-    /* trusted = unbounded resources, NOT wider reach. mount_cwd must stay 0:
-     * the agent sees its workspace and whatever grants add, never the user's
-     * CWD or another agent's workspace. */
-    TEST(trusted_unlimited_but_workspace_only);
-    SandboxConfig c = cfg_for("trusted");
-    if (c.sandbox == 1 && c.env_mode == 0 && c.net_mode == 0 &&
-        c.mount_cwd == 0 && c.workspace_ro == 0 &&
-        c.rlimits.nproc == 0 && c.rlimits.as_mb == 0 && c.rlimits.cpu_sec == 0)
-        PASS();
-    else FAIL("trusted bundle mismatch");
-}
-
 static void test_standard(void) {
+    /* standard is the merged former 'trusted': clean env, no CWD mount, no
+     * CPU cap. NPROC stays as the fork-bomb backstop, nothing else. */
     TEST(standard_clean_env_proxy);
     SandboxConfig c = cfg_for("standard");
     if (c.sandbox == 1 && c.env_mode == 1 && c.net_mode == 0 &&
-        c.mount_cwd == 0 && c.workspace_ro == 0 &&
-        c.rlimits.nproc == 256 && c.rlimits.as_mb == 0 && c.rlimits.cpu_sec == 1800)
+        c.mount_cwd == 0 &&
+        c.rlimits.nproc == 256 && c.rlimits.as_mb == 0 && c.rlimits.cpu_sec == 0)
         PASS();
     else FAIL("standard bundle mismatch");
 }
@@ -60,16 +49,20 @@ static void test_restricted(void) {
     TEST(restricted_no_net_bounded_but_usable);
     SandboxConfig c = cfg_for("restricted");
     if (c.sandbox == 1 && c.env_mode == 1 && c.net_mode == 1 &&
-        c.mount_cwd == 0 && c.workspace_ro == 0 &&
+        c.mount_cwd == 0 &&
         c.rlimits.nproc == 64 && c.rlimits.as_mb == 0 && c.rlimits.cpu_sec == 120)
         PASS();
     else FAIL("restricted bundle mismatch");
 }
 
 static void test_fallthrough(void) {
-    /* Unknown values must land on standard — a typo'd profile (or the old
-     * 'bootstrap' string) must never yield a looser bundle than standard. */
-    const char *unknowns[] = {NULL, "", "bootstrap", "TRUSTED", "hosT", "yolo"};
+    /* Unknown values must land on standard — a typo'd profile, or a retired
+     * one ('bootstrap', 'trusted'), must never yield a looser bundle than
+     * standard. 'trusted' is deleted: a DB row still carrying it (the schema
+     * patch rewrites them, but a hand-edited row could) resolves to standard,
+     * which is strictly tighter — clean env instead of inherit+scrub. */
+    const char *unknowns[] = {NULL, "", "bootstrap", "trusted", "TRUSTED",
+                              "hosT", "yolo"};
     SandboxConfig std = cfg_for("standard");
     TEST(unknown_and_null_fall_through_to_standard);
     for (size_t i = 0; i < sizeof(unknowns)/sizeof(unknowns[0]); i++) {
@@ -86,7 +79,7 @@ static void test_fallthrough(void) {
 static void test_profile_resolve_matches_policy(void) {
     /* sandbox_profile_resolve copies the policy half field-by-field (the
      * structs differ, so no memcmp across them) — pin each field instead. */
-    static const char *profiles[] = {"host", "trusted", "standard", "restricted"};
+    static const char *profiles[] = {"host", "standard", "restricted"};
     TEST(profile_resolve_matches_policy_fields);
     for (size_t i = 0; i < sizeof(profiles)/sizeof(profiles[0]); i++) {
         SandboxConfig c = cfg_for(profiles[i]);
@@ -94,7 +87,6 @@ static void test_profile_resolve_matches_policy(void) {
         sandbox_profile_resolve(profiles[i], &p);
         if (p.sandbox != c.sandbox || p.env_mode != c.env_mode ||
             p.net_mode != c.net_mode || p.mount_cwd != c.mount_cwd ||
-            p.workspace_ro != c.workspace_ro ||
             p.rlimits.nproc != c.rlimits.nproc ||
             p.rlimits.as_mb != c.rlimits.as_mb ||
             p.rlimits.cpu_sec != c.rlimits.cpu_sec) {
@@ -114,7 +106,7 @@ static void test_profile_resolve_matches_policy(void) {
  * rustc) fail to start under any cap tight enough to bound memory. No profile
  * may reintroduce it — use a cgroup memory limit if a real ceiling is wanted. */
 static void test_no_profile_caps_address_space(void) {
-    static const char *profiles[] = {"host", "trusted", "standard", "restricted"};
+    static const char *profiles[] = {"host", "standard", "restricted"};
     TEST(no_profile_sets_rlimit_as);
     for (size_t i = 0; i < sizeof(profiles)/sizeof(profiles[0]); i++) {
         SandboxConfig c = cfg_for(profiles[i]);
@@ -126,32 +118,19 @@ static void test_no_profile_caps_address_space(void) {
     PASS();
 }
 
-/* Every sandboxed profile needs a writable workspace: HOME points there, so a
- * read-only workspace leaves npm/cargo/go with nowhere to cache.
- *
- * /tmp is deliberately NOT checked here any more: it is a bind of a host
- * directory the parent creates (scratch_dir_ensure), not a profile field, so
- * no profile can express a /tmp policy to get wrong. */
-static void test_sandboxed_profiles_have_writable_workspace(void) {
-    static const char *profiles[] = {"trusted", "standard", "restricted"};
-    TEST(sandboxed_profiles_workspace_writable);
-    for (size_t i = 0; i < sizeof(profiles)/sizeof(profiles[0]); i++) {
-        SandboxConfig c = cfg_for(profiles[i]);
-        if (c.workspace_ro != 0) { printf("FAIL: %s ro\n", profiles[i]); return; }
-    }
-    PASS();
-}
+/* The workspace is unconditionally writable now — HOME points at it, so
+ * npm/cargo/go need it, and `workspace_ro` was deleted rather than left as a
+ * field no profile sets. Nothing to assert: it is structural, not policy.
+ * /tmp is likewise a parent-created host bind, not a profile field. */
 
 int main(void) {
     TEST_INIT();
     printf("test_sandbox_profile:\n");
     test_host();
-    test_trusted();
     test_standard();
     test_restricted();
     test_fallthrough();
     test_no_profile_caps_address_space();
-    test_sandboxed_profiles_have_writable_workspace();
     test_profile_resolve_matches_policy();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

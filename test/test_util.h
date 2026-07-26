@@ -94,7 +94,6 @@ static inline char *test_run_tier(int tier, const char *tool,
         q.workspace = (char *)fctx->workspace;
         q.cwd_path  = (char *)fctx->cwd_path;
         q.sandbox      = fctx->sb.sandbox;
-        q.workspace_ro = fctx->sb.workspace_ro;
         q.mount_cwd    = fctx->sb.mount_cwd;
         q.read_paths   = fctx->sb.read_paths;
         q.read_count   = fctx->sb.read_path_count;

@@ -382,9 +382,9 @@ static int check_agents(sqlite3 *db, const char *manifest, const char *bundle_di
             xerr(err_out, "agents[] entry needs a PascalCase 'name'");
             rc = -1; break;
         }
-        if (p && strcmp(p, "host") != 0 && strcmp(p, "trusted") != 0 &&
+        if (p && strcmp(p, "host") != 0 &&
             strcmp(p, "standard") != 0 && strcmp(p, "restricted") != 0) {
-            xerr(err_out, "agents[] sandbox_profile must be host|trusted|standard|restricted");
+            xerr(err_out, "agents[] sandbox_profile must be host|standard|restricted");
             rc = -1; break;
         }
         if (f && f[0]) {

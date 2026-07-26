@@ -27,7 +27,6 @@ typedef struct {
     int env_mode;           /* 0 = inherit-present-env + scrub, 1 = clean allowlist */
     int net_mode;           /* 0 = proxy available, 1 = no network */
     int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
-    int workspace_ro;       /* 0 = rw, 1 = read-only */
     struct { int nproc, as_mb, cpu_sec; } rlimits; /* 0 = no limit */
     char **read_paths;  size_t read_path_count;    /* extra bind-mounts from grants */
     char **write_paths; size_t write_path_count;
@@ -50,7 +49,6 @@ typedef struct {
                              * /tmp then stays a dir on the tiny root tmpfs, which
                              * is functional but too small to build in. */
     int sandbox;            /* 1 = namespace required, 0 = none (host sandbox_profile) */
-    int workspace_ro;       /* 0 = rw, 1 = read-only remount */
     int mount_cwd;          /* 1 = mount CWD rw, 0 = skip */
     int net_mode;           /* 0 = proxy available, 1 = no network */
     int skip_pid_ns;        /* 1 = omit CLONE_NEWPID (no inner fork); file tier */
@@ -73,13 +71,12 @@ typedef struct {
 int sandbox_child_setup(const SandboxConfig *cfg);
 
 /* Single source of truth: sandbox_profile string → sandbox policy fields.
- * Fills cfg->sandbox, env_mode, net_mode, mount_cwd, workspace_ro,
- * rlimits. Does NOT touch workspace/db_path/proxy_sock/cwd_path/tmp_dir (the
+ * Fills cfg->sandbox, env_mode, net_mode, mount_cwd, rlimits. Does NOT touch workspace/db_path/proxy_sock/cwd_path/tmp_dir (the
  * caller sets those — they are paths, not profile policy). */
 void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg);
 
 /* Fill the policy half of a SandboxProfile (sandbox/env_mode/net_mode/mount_cwd/
- * workspace_ro/rlimits) from sandbox_profile. The caller sets the
+ * rlimits) from sandbox_profile. The caller sets the
  * grant-path fields separately (they come from AgentCaps, not the profile). */
 void sandbox_profile_resolve(const char *sandbox_profile, SandboxProfile *p);
 

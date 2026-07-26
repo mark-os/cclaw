@@ -5,8 +5,7 @@
 #include "sandbox.h"
 #include "run_tool.h"
 
-/* Context for file tools — workspace + trust-derived sandbox profile.
- * The profile's workspace_ro doubles as the write-refusal flag. */
+/* Context for file tools — workspace + trust-derived sandbox profile. */
 typedef struct {
     const char *workspace;
     const char *cwd_path;       /* CWD rw mount (CLI mode, NULL in daemon) */

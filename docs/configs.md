@@ -28,7 +28,7 @@ Agents discover it at runtime via the `search_config` tool; operators via
 There is no per-agent key/value table. Per-agent state lives in:
 
 - **`agents` table columns** — `sandbox_profile` (containment tier: `host`,
-  `trusted`, `standard`, `restricted`), model/provider overrides, system
+  `standard`, `restricted`), model/provider overrides, system
   prompt, `max_iterations`, `max_output_tokens`, `shell_timeout`, `shell_path`
   (interpreter for `shell_exec`'s `-c`; NULL = `/bin/sh`; `CCLAW_SHELL_PATH`
   env overrides both, e.g. `/bin/bash`).

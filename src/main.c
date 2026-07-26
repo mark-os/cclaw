@@ -3015,7 +3015,7 @@ static void ensure_default_agent(const char *base_dir) {
         /* Create default agent */
         const char *agent_sql =
             "INSERT OR IGNORE INTO agents(name, system_prompt, sandbox_profile)"
-            " VALUES('Assistant', ?, 'trusted');"
+            " VALUES('Assistant', ?, 'standard');"
             ;
         sqlite3_stmt *bs;
         if (sqlite3_prepare_v2(g_db, agent_sql, -1, &bs, NULL) == SQLITE_OK) {

@@ -110,6 +110,15 @@ static int grants_walk(sqlite3 *db, const char *json, const char *target,
         const char *v = (const char *)sqlite3_column_text(st, 0);
         if (!v || !v[0]) { rc = fail(err, "empty grant value"); break; }
         if (!apply) {
+            /* Refuse at validate so the definition fails whole, with the
+             * reason — never leave a half-applied agent behind. */
+            if (grant_path_hits_db(db, GRANT_KINDS[ki].kind, v)) {
+                rc = failf(err, "grant %s:%s covers cclaw.db — the database is "
+                           "never reachable from a sandboxed tool, and no grant "
+                           "can change that (use db_query)",
+                           GRANT_KINDS[ki].kind, v);
+                break;
+            }
             if (creator && !grants_contains(db, creator, GRANT_KINDS[ki].kind, v)) {
                 rc = failf(err, "grant %s:%s exceeds creator's grants — "
                            "request it for yourself first (request_config "

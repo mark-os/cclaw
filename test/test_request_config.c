@@ -801,6 +801,56 @@ static void test_add_tool_to_config(void) {
 }
 
 
+/* A path grant covering cclaw.db is refused at request time, with the reason —
+ * it never parks, so no approver is ever shown a grant that would be inert.
+ * Needs an on-disk DB: the rule resolves the handle's own filename.
+ *
+ * Positive control in the same function: an ordinary path grant still parks. */
+static void test_db_path_grant_refused(void) {
+    const char *dbp = "/tmp/cclaw_reqcfg_grantdb/cclaw.db";
+    system("rm -rf /tmp/cclaw_reqcfg_grantdb && mkdir -p /tmp/cclaw_reqcfg_grantdb");
+    sqlite3 *db = test_db_open_seeded(dbp);
+    assert(db);
+    config_registry_sync(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+
+    RequestConfigCtx ctx = {
+        .db = db, .agent_name = "test", .session_id = sid,
+        .agents_dir = NULL, .current_tool_call_id = "d1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+
+    /* Positive control: an unrelated path parks (NULL = parked, not an error). */
+    char *r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"grants\":{\"read_paths\":[\"/usr/share\"]}}}");
+    assert(r == NULL || strstr(r, "error:") == NULL);
+    free(r);
+
+    ctx.current_tool_call_id = "d2";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"grants\":{\"read_paths\":[\"/tmp/cclaw_reqcfg_grantdb/cclaw.db\"]}}}");
+    assert(r != NULL && strstr(r, "cclaw.db") != NULL);
+    free(r);
+
+    /* The containing directory is the realistic ask, and is refused too. */
+    ctx.current_tool_call_id = "d3";
+    r = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"grants\":{\"write_paths\":[\"/tmp/cclaw_reqcfg_grantdb\"]}}}");
+    assert(r != NULL && strstr(r, "cclaw.db") != NULL);
+    free(r);
+
+    tools_free(&reg);
+    db_close(db);
+    system("rm -rf /tmp/cclaw_reqcfg_grantdb");
+    printf("  PASS test_db_path_grant_refused\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_request_config:\n");
@@ -808,6 +858,7 @@ int main(void) {
     test_handler_unavailable();
     test_park_tools_grant();
     test_error_missing_changes();
+    test_db_path_grant_refused();
     test_error_config_keys();
     test_error_provider();
     test_reason_propagates();

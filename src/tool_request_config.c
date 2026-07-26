@@ -135,7 +135,29 @@ static char *validate_grants(sqlite3 *db, const char *changes) {
         free(relpath);
         return m;
     }
-    return NULL;
+    /* cclaw.db is never reachable from inside the sandbox — it is the policy
+     * store for the containment mechanism itself. Refuse here, at request
+     * time, so the agent gets the reason; agent_config_grant refuses again at
+     * insert as the structural backstop. */
+    sqlite3_stmt *ps;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 'read_path', atom FROM json_each(?1,'$.grants.read_paths')"
+            " UNION ALL"
+            " SELECT 'write_path', atom FROM json_each(?1,'$.grants.write_paths')",
+            -1, &ps, NULL) != SQLITE_OK)
+        return strdup("error: grant validation failed");
+    sqlite3_bind_text(ps, 1, changes, -1, SQLITE_STATIC);
+    char *err = NULL;
+    while (!err && sqlite3_step(ps) == SQLITE_ROW) {
+        const char *k = (const char *)sqlite3_column_text(ps, 0);
+        const char *v = (const char *)sqlite3_column_text(ps, 1);
+        if (k && v && grant_path_hits_db(db, k, v))
+            err = errf("error: path grant '%s' covers cclaw.db — the database "
+                       "is never reachable from a sandboxed tool, and no grant "
+                       "can change that. Use db_query to inspect state.", v);
+    }
+    sqlite3_finalize(ps);
+    return err;
 }
 
 static char *validate_config(sqlite3 *db, const char *changes) {

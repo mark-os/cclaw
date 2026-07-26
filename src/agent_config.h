@@ -46,7 +46,23 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name);
 /* Free AgentConfig. */
 void agent_config_free(AgentConfig *ac);
 
-/* Uniform grant/revoke API over the grants table. */
+/* Would a read_path/write_path grant of `value` expose cclaw.db to a sandboxed
+ * child? True when it names the DB file, one of its -wal/-shm siblings, or any
+ * directory containing it.
+ *
+ * The DB is the policy store for the mechanism doing the containment, so it is
+ * masked unconditionally inside the sandbox and no grant may unmask it. The
+ * check lives at *grant* time so the refusal is loud: an approved grant that
+ * silently does nothing at mount is the failure class we are avoiding. Agent
+ * self-inspection is `db_query`, which runs in the trusted parent.
+ *
+ * Returns 0 for a NULL/empty value, for non-path kinds, and when the handle has
+ * no file (`:memory:`). */
+int grant_path_hits_db(sqlite3 *db, const char *kind, const char *value);
+
+/* Uniform grant/revoke API over the grants table. Refuses (-1, nothing
+ * written) a path grant that grant_path_hits_db() rejects — the single insert
+ * chokepoint, so every grant route inherits the rule. */
 int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
                        const char *value, int64_t expires_at);
 int agent_config_revoke(sqlite3 *db, const char *agent, const char *kind,

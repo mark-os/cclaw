@@ -41,21 +41,6 @@
  * agent's scratch space.) */
 #define SANDBOX_PRELOAD_PATH "/.cclaw_net.so"
 
-/* Did a grant name the DB file itself, rather than merely a directory that
- * contains it? Exact match only — a read_path on ~/.cclaw or on $HOME must not
- * count, or the accident the mask exists to prevent comes straight back. */
-static int sandbox_db_explicitly_granted(const char *db_abs,
-                                         const SandboxConfig *cfg) {
-    if (!cfg || !cfg->extra_mounts) return 0;
-    for (size_t i = 0; i < cfg->extra_mount_count; i++) {
-        const char *p = cfg->extra_mounts[i].path;
-        if (!p || !p[0]) continue;
-        char abs[PATH_MAX];
-        if (realpath(p, abs) && strcmp(abs, db_abs) == 0) return 1;
-    }
-    return 0;
-}
-
 /* Bind-mask the secret key + DB ciphertext from the child's view.
  *
  * PROVISIONAL — this exists only because the default backend stores the key as
@@ -70,24 +55,26 @@ static int sandbox_db_explicitly_granted(const char *db_abs,
  * nothing, and this function becomes dead code for those backends. Delete the
  * key half when the file backend is no longer the default.
  *
- * Two different rules, on purpose:
- *   key  — masked unconditionally. Reading it is not access to a resource, it
- *          is escalation to every secret in the DB, including system-scope
- *          ones and other agents'. A grant made on one agent's behalf must not
- *          confer authority over agents that never consented, so no grant can
- *          unmask it.
- *   DB   — masked unless a grant names the DB file itself. It is ordinary
- *          agent state and self-inspection is legitimate, so a deliberate,
- *          exact grant is honored; a directory grant that merely happens to
- *          contain it is not. Nothing breaks either way: db_query is the
- *          sanctioned read path and runs in the trusted parent, never through
- *          this mount tree.
+ * One rule for both, on purpose — no grant can unmask either:
+ *   key  — reading it is not access to a resource, it is escalation to every
+ *          secret in the DB, including system-scope ones and other agents'. A
+ *          grant made on one agent's behalf must not confer authority over
+ *          agents that never consented.
+ *   DB   — it is the policy store for the mechanism doing the containment
+ *          (`grants`, `agents.sandbox_profile`), so reading it is
+ *          reconnaissance and writing it *is* escalation. It is also not one
+ *          agent's state: it holds every agent's sessions, entries, grants and
+ *          approvals. Nothing breaks — db_query is the sanctioned read path
+ *          and runs in the trusted parent, never through this mount tree.
+ *
+ * There is no escape hatch here by design: a grant naming the DB (or a
+ * directory containing it) is refused at *grant* time (grant_path_hits_db,
+ * src/agent_config.c), so an approved grant is never silently inert at mount.
  *
  * Targets not reachable in the child's mount tree never materialize under
  * newroot, so the stat fails and we skip them — already invisible by omission.
  * Must run after all binds and before pivot_root. */
-static void sandbox_mask_state_files(const char *newroot, const char *db_path,
-                                     const SandboxConfig *full_cfg) {
+static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     if (!db_path || !db_path[0]) return;
 
     char db_abs[PATH_MAX];
@@ -101,8 +88,8 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path,
     if (efd < 0) return;
     close(efd);
 
-    /* Targets: the key file (crown jewel) always; the DB family (ciphertext)
-     * unless a grant named the DB file exactly. */
+    /* Targets: the key file (crown jewel) and the DB family (ciphertext plus
+     * its -wal/-shm siblings) — all unconditional. */
     char keyf[PATH_MAX];
     char *slash = strrchr(db_abs, '/');
     int klen = slash
@@ -114,11 +101,9 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path,
     snprintf(dbshm, sizeof(dbshm), "%s-shm", db_abs);
     size_t nt = 0;
     if (klen > 0 && (size_t)klen < sizeof(keyf)) targets[nt++] = keyf;
-    if (!sandbox_db_explicitly_granted(db_abs, full_cfg)) {
-        targets[nt++] = db_abs;
-        targets[nt++] = dbwal;
-        targets[nt++] = dbshm;
-    }
+    targets[nt++] = db_abs;
+    targets[nt++] = dbwal;
+    targets[nt++] = dbshm;
 
     for (size_t i = 0; i < nt; i++) {
         char dst[PATH_MAX + 64];
@@ -427,7 +412,7 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
 
     /* Mask the secret key + DB ciphertext if a bound path (CWD, workspace, or
      * a grant) would otherwise expose them. After binds, before pivot_root. */
-    sandbox_mask_state_files(newroot, db_path, full_cfg);
+    sandbox_mask_state_files(newroot, db_path);
 
     /* pivot_root into new root */
     char put_old[256];

@@ -197,7 +197,16 @@ static void test_admin_grant_capability(void) {
     db_agent_upsert(db, "testagent", NULL, NULL);
 
     assert(admin_grant_capability(db, "testagent", "host", "example.com") == 0);
-    assert(admin_grant_capability(db, "testagent", "read_path", "/tmp") == 0);
+    /* Positive control: an ordinary directory grant is accepted. */
+    assert(admin_grant_capability(db, "testagent", "read_path", "/usr/share") == 0);
+
+    /* ...and the admin route inherits the cclaw.db refusal — the DB file
+     * itself, its WAL sibling, and the directory holding it. Refused, not
+     * silently masked later. */
+    assert(admin_grant_capability(db, "testagent", "read_path", DB_PATH) != 0);
+    assert(admin_grant_capability(db, "testagent", "write_path", DB_PATH) != 0);
+    assert(admin_grant_capability(db, "testagent", "read_path", DB_PATH "-wal") != 0);
+    assert(admin_grant_capability(db, "testagent", "read_path", "/tmp") != 0);
 
     AgentCaps caps;
     agent_caps_load(db, "testagent", &caps);
@@ -218,7 +227,7 @@ static void test_admin_list_grants(void) {
 
     assert(admin_grant_capability(db, "testagent", "host", "example.com") == 0);
     assert(admin_grant_capability(db, "testagent", "tool", "shell_exec") == 0);
-    assert(admin_grant_capability(db, "testagent", "read_path", "/tmp") == 0);
+    assert(admin_grant_capability(db, "testagent", "read_path", "/usr/share") == 0);
     assert(admin_grant_capability(db, "otheragent", "host", "other.example") == 0);
 
     AdminGrant *list = NULL;

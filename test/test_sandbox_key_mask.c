@@ -29,11 +29,16 @@
 #define STATEDIR ROOT "/state"
 #define DB       STATEDIR "/cclaw.db"
 #define KEYF     STATEDIR "/.cclaw_key"
+#define DECOY    STATEDIR "/notes.txt"
 #define WS       ROOT "/ws"
 
 /* Distinct markers so a leak names which file leaked. */
 #define KEY_MARK "KEYBYTES_SHOULD_NEVER_APPEAR"
 #define DB_MARK  "DBBYTES_SHOULD_NEVER_APPEAR"
+/* Positive control: an ordinary file living beside them. It must come back —
+ * otherwise an empty key/db read proves nothing (a masked file, an unmounted
+ * grant and a broken request all look identical). */
+#define DECOY_MARK "DECOYBYTES_MUST_APPEAR"
 
 static void write_file(const char *path, const char *contents, mode_t mode) {
     FILE *f = fopen(path, "w");
@@ -50,43 +55,52 @@ static void setup(void) {
     assert(mkdir(WS, 0755) == 0);
     write_file(DB, DB_MARK "\n", 0600);
     write_file(KEYF, KEY_MARK "\n", 0600);
+    write_file(DECOY, DECOY_MARK "\n", 0644);
 }
 
-/* cat both files from inside the sandbox with the given grant. */
+/* cat the key, the db and the decoy from inside the sandbox, under the given
+ * grant (plus an always-present directory grant so the decoy is reachable and
+ * the positive control means something). */
 static char *read_state_files(const char *grant_path) {
-    const char *reads[] = { grant_path };
+    const char *reads[] = { grant_path, STATEDIR };
     ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.command = "cat " KEYF " 2>&1; cat " DB " 2>&1";
+    r.command = "cat " KEYF " 2>&1; cat " DB " 2>&1; cat " DECOY " 2>&1";
     r.workspace = WS;
     r.db_path = DB;
     r.net_mode = 1;
     r.read_paths = reads;
-    r.read_count = 1;
+    r.read_count = 2;
     return run_tool_shell(&r);
 }
 
-/* A directory grant covering the state dir must not expose either file. */
+/* A directory grant covering the state dir must not expose the key or the DB —
+ * while the decoy beside them reads fine, which is what makes the two empty
+ * reads mean "masked" rather than "nothing mounted". */
 static void test_directory_grant_masks_both(void) {
     setup();
     char *out = read_state_files(STATEDIR);
     printf("  directory grant → %s\n", out);
+    assert(strstr(out, DECOY_MARK) != NULL);   /* positive control */
     assert(strstr(out, KEY_MARK) == NULL);
     assert(strstr(out, DB_MARK) == NULL);
     free(out);
     printf("PASS test_directory_grant_masks_both\n");
 }
 
-/* Naming the DB file exactly is the sanctioned way to reach it — grants bind
- * files, not just directories, so this mounts. It must not drag the key along:
- * this is the half of the rule a mask-everything implementation would fail. */
-static void test_exact_db_grant_exposes_db_but_never_key(void) {
+/* Naming the DB file exactly does NOT unmask it. Such a grant is refused at
+ * grant time (grant_path_hits_db), so it should never reach a mount plan at
+ * all — this asserts the second layer: even if one is fabricated, the child
+ * still sees nothing. The DB is the policy store for the containment
+ * mechanism; reading it is reconnaissance and writing it is escalation. */
+static void test_exact_db_grant_still_masked(void) {
     setup();
     char *out = read_state_files(DB);
     printf("  exact db grant → %s\n", out);
+    assert(strstr(out, DECOY_MARK) != NULL);   /* positive control */
     assert(strstr(out, KEY_MARK) == NULL);
-    assert(strstr(out, DB_MARK) != NULL);
+    assert(strstr(out, DB_MARK) == NULL);
     free(out);
-    printf("PASS test_exact_db_grant_exposes_db_but_never_key\n");
+    printf("PASS test_exact_db_grant_still_masked\n");
 }
 
 /* A grant naming the key file itself must still not expose it — the key is
@@ -95,6 +109,7 @@ static void test_exact_key_grant_still_masked(void) {
     setup();
     char *out = read_state_files(KEYF);
     printf("  exact key grant → %s\n", out);
+    assert(strstr(out, DECOY_MARK) != NULL);   /* positive control */
     assert(strstr(out, KEY_MARK) == NULL);
     free(out);
     printf("PASS test_exact_key_grant_still_masked\n");
@@ -180,17 +195,27 @@ static char *file_read_via_broker(const char *path, const char *grant_path) {
     return result;
 }
 
-static void test_file_tier_grant_masks_key(void) {
+static void test_file_tier_grant_masks_key_and_db(void) {
     setup();
 
     /* Positive control first, or the assertions below are worthless: an empty
-     * read is what a masked file AND a broken request both look like. Under an
-     * exact DB grant the ciphertext must come back, proving the mount landed
-     * and file_read works — so an empty key read afterwards means masked, not
-     * merely absent. */
-    char *out = file_read_via_broker(DB, DB);
+     * read is what a masked file AND a broken request both look like. The
+     * decoy sits in the same granted directory, so its content coming back
+     * proves the mount landed and file_read works — an empty key or DB read
+     * afterwards means masked, not merely absent. */
+    char *out = file_read_via_broker(DECOY, STATEDIR);
+    printf("  file_read, decoy under directory grant → %s\n", out);
+    assert(strstr(out, DECOY_MARK) != NULL);
+    free(out);
+
+    out = file_read_via_broker(DB, STATEDIR);
+    printf("  file_read, db under directory grant → %s\n", out);
+    assert(strstr(out, DB_MARK) == NULL);
+    free(out);
+
+    out = file_read_via_broker(DB, DB);
     printf("  file_read, exact db grant → %s\n", out);
-    assert(strstr(out, DB_MARK) != NULL);
+    assert(strstr(out, DB_MARK) == NULL);
     free(out);
 
     out = file_read_via_broker(KEYF, STATEDIR);
@@ -203,7 +228,7 @@ static void test_file_tier_grant_masks_key(void) {
     printf("  file_read, exact key grant → %s\n", out);
     assert(strstr(out, KEY_MARK) == NULL);
     free(out);
-    printf("PASS test_file_tier_grant_masks_key\n");
+    printf("PASS test_file_tier_grant_masks_key_and_db\n");
 }
 
 /* No grant at all: invisible by omission, nothing mounted to mask. */
@@ -226,9 +251,9 @@ int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     test_no_grant_exposes_nothing();
     test_directory_grant_masks_both();
-    test_exact_db_grant_exposes_db_but_never_key();
+    test_exact_db_grant_still_masked();
     test_exact_key_grant_still_masked();
-    test_file_tier_grant_masks_key();
+    test_file_tier_grant_masks_key_and_db();
     system("rm -rf " ROOT);
     printf("All key-mask tests passed\n");
     return 0;

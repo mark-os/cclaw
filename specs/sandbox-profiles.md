@@ -167,6 +167,15 @@ included) falls through to `standard`. The state-file mask has its own suite,
 `test/test_sandbox_key_mask.c` — every masking assertion there is paired with a
 positive control read of a decoy file in the same granted directory.
 
+`cclaw.db` and `.cclaw_key` are masked **unconditionally** in every sandboxed
+profile, and no grant can unmask either: the DB is the policy store for the
+containment mechanism itself, so read is reconnaissance and write is
+escalation. A `read_path`/`write_path` grant naming the DB, one of its
+`-wal`/`-shm` siblings, or any directory containing it is refused at *grant*
+time (`grant_path_hits_db`, `src/agent_config.c`) — never silently masked at
+mount, because an approved grant that quietly does nothing is its own class of
+bug. Agent self-inspection is `db_query`, which runs in the trusted parent.
+
 ## Non-goals
 
 - seccomp syscall filtering — maintenance tax; namespaces+proxy already cover

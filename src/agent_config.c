@@ -6,6 +6,7 @@
 #include "config_registry.h"
 #include "skills.h"
 #include "db.h"
+#include "log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -262,9 +263,57 @@ AgentConfig *agent_config_load_db(sqlite3 *db, const char *name) {
 
 /* ── Grants API ─────────────────────────────────────────────────── */
 
+/* Is `child` the same path as `parent`, or below it? Both must be canonical
+ * (no trailing slash), which realpath() guarantees. */
+static int path_is_under(const char *parent, const char *child) {
+    size_t n = strlen(parent);
+    if (n == 0) return 0;
+    if (strncmp(parent, child, n) != 0) return 0;
+    return child[n] == '\0' || child[n] == '/' || (n == 1 && parent[0] == '/');
+}
+
+int grant_path_hits_db(sqlite3 *db, const char *kind, const char *value) {
+    if (!db || !kind || !value || !value[0]) return 0;
+    if (strcmp(kind, "read_path") != 0 && strcmp(kind, "write_path") != 0)
+        return 0;
+
+    const char *dbf = sqlite3_db_filename(db, "main");
+    if (!dbf || !dbf[0]) return 0;             /* :memory: — nothing on disk */
+    char db_abs[PATH_MAX];
+    if (!realpath(dbf, db_abs)) return 0;      /* not on disk yet */
+
+    /* Canonicalize the grant. A path that does not exist yet cannot be
+     * realpath'd, so fall back to its nearest existing ancestor: a grant on a
+     * not-yet-created "~/.cclaw/sub" must still be judged against ~/.cclaw. */
+    char g_abs[PATH_MAX], tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", value);
+    while (!realpath(tmp, g_abs)) {
+        char *sl = strrchr(tmp, '/');
+        if (!sl) return 0;
+        if (sl == tmp) tmp[1] = '\0'; else *sl = '\0';
+        if (strcmp(tmp, "/") == 0 && !realpath(tmp, g_abs)) return 0;
+    }
+
+    /* The grant covers the DB itself, or a directory holding it. The -wal/-shm
+     * siblings live beside it, so a grant naming one of those is caught by the
+     * same containment test run the other way round. */
+    if (path_is_under(g_abs, db_abs)) return 1;
+    char sib[PATH_MAX + 8];
+    snprintf(sib, sizeof(sib), "%s-wal", db_abs);
+    if (strcmp(g_abs, sib) == 0) return 1;
+    snprintf(sib, sizeof(sib), "%s-shm", db_abs);
+    if (strcmp(g_abs, sib) == 0) return 1;
+    return 0;
+}
+
 int agent_config_grant(sqlite3 *db, const char *agent, const char *kind,
                        const char *value, int64_t expires_at) {
     if (!db || !agent || !kind || !value) return -1;
+    if (grant_path_hits_db(db, kind, value)) {
+        LOG_WARN_("refusing %s grant on cclaw.db path '%s' for agent %s",
+                  kind, value, agent);
+        return -1;
+    }
     /* Canonicalize path grants so stored values are absolute + symlink-resolved
      * (downstream prefix comparisons are only meaningful on canonical paths,
      * and a non-canonical grant could otherwise dodge a naive check). realpath()

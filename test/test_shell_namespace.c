@@ -253,25 +253,12 @@ static void test_no_cwd_path_blocked(void) {
     printf("  PASS test_no_cwd_path_blocked\n");
 }
 
-/* NOTE: test_key_masked_in_mounted_cwd is SKIPPED in the broker path.
- *
- * The --run-tool broker always sets db_path=NULL in build_sandbox_cfg(), which
- * means sandbox_mask_state_files() returns immediately without masking .cclaw_key
- * or cclaw.db. The masking logic requires db_path to locate the files to mask.
- *
- * In production, the daemon parent knows the db_path but does NOT pass it to the
- * child (by design — the child has no DB access). This means the bind-mask is a
- * feature of the old in-process tool_shell_handler path and is NOT available via
- * the broker. Security relies on the fact that trusted/bootstrap agents that get
- * CWD mounted should have the parent strip db_path from the child's view by other
- * means (or the agent should not be given CWD containing the key).
- *
- * TODO: If key masking via broker is needed, the parent must serialize db_path in
- * the request blob or perform the mask before fork. */
-static void test_key_masked_in_mounted_cwd(void) {
-    printf("  SKIP test_key_masked_in_mounted_cwd (broker sets db_path=NULL; mask unavailable)\n");
-}
-
+/* Key/DB masking moved out of this file. The comment that used to live here
+ * ("the broker always sets db_path=NULL, so the mask is unavailable") described
+ * a real bug, since fixed: db_path is now a required parameter of
+ * run_tool_req_init() and rides the wire on every tier. Coverage — key and DB,
+ * shell and file tiers, each with a positive control — is
+ * test/test_sandbox_key_mask.c. */
 /* sandbox=0 (host mode) — namespace NOT applied, child runs unsandboxed */
 static void test_sandbox_none_skips_namespace(void) {
     ShellToolReq r = SHELL_REQ_DEFAULTS;
@@ -312,7 +299,6 @@ int main(void) {
     test_daemon_db_path_blocked();
     test_cwd_path_rw();
     test_no_cwd_path_blocked();
-    test_key_masked_in_mounted_cwd();
     test_sandbox_none_skips_namespace();
     cleanup_workspace();
     printf("All namespace sandbox tests passed.\n");

@@ -50,6 +50,66 @@ jobs:
           name: cclaw-linux-x64
           path: dist/cclaw-linux-x64.zip
 
+  websocket-transport:
+    name: websocket transport (libcurl with ws)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev xxd
+
+      - name: Build a WS-capable libcurl
+        # No distro libcurl can carry the conn.* transport: they ship without
+        # the ws/wss handlers, and even a ws-enabled build below 8.13.0 cannot
+        # delimit a fragmented message (older frame flags never surfaced FIN —
+        # see curl_ws_available in src/util.c). On such a libcurl the gateway
+        # suites skip, which is how a broken reassembly path once sat green for
+        # months. This job exists to make them actually run.
+        run: |
+          curl -sSLo curl.tar.gz https://curl.se/download/curl-${CURL_VERSION}.tar.gz
+          tar xzf curl.tar.gz
+          cd curl-${CURL_VERSION}
+          ./configure --prefix=/opt/curlws --with-openssl --enable-websockets \
+            --disable-ldap --disable-ldaps --disable-manual --without-libpsl \
+            --without-brotli --without-zstd --without-libidn2 \
+            --without-nghttp2 --without-libssh2 >/dev/null
+          make -j"$(nproc)" >/dev/null
+          sudo make install >/dev/null
+        env:
+          CURL_VERSION: 8.21.0
+
+      - name: Allow unprivileged user namespaces
+        run: |
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Build
+        run: make all
+
+      - name: Integration tests
+        # Built against the system libcurl, run against the WS-capable one —
+        # same soname, so LD_LIBRARY_PATH is enough.
+        run: LD_LIBRARY_PATH=/opt/curlws/lib make test-integration
+
+      - name: Verify the WS suites actually ran
+        # Without this the job is self-defeating: if the libcurl above stops
+        # taking effect, both suites skip and the job still reports green —
+        # exactly the failure mode it was added to catch.
+        run: |
+          rc=0
+          for t in channel_conn channel_discord; do
+            log="/tmp/cclaw_test_integration_$t.txt"
+            if grep -q SKIP "$log"; then
+              echo "::error::test_integration_$t skipped — WS libcurl not in effect"
+              cat "$log"
+              rc=1
+            fi
+          done
+          exit $rc
+
   linux-x86:
     name: linux-x86 (i386, libcurl4)
     runs-on: ubuntu-latest
@@ -135,7 +195,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [linux-x64, linux-x86, linux-armv5te]
+    needs: [linux-x64, websocket-transport, linux-x86, linux-armv5te]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

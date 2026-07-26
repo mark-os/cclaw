@@ -97,6 +97,19 @@ registered key, so "no anonymous config writes" still holds. Handlers read
 their config the same way anything else does; there is no separate extension
 config mechanism.
 
+**A manifest may supply a bound's value, but never a value that unpins the
+bound.** Wildcards and zero-meaning-unlimited are not values of a constraint,
+they are its absence, and a bundle must not remove its own limits through a
+knob the promote approval renders as "1 config key". Such defaults are refused
+at ingest; the key stays unset and only the operator may set it (env or
+`config_set`). Today the one instance is `egress_hosts`, whose default may name
+hosts but may not be `*` — new bounded keys should apply the same rule
+deliberately rather than inheriting it. There is no flag for this: `secret` and
+`required` remain the only config declaration flags, and the refusal is stated
+per key. If a genuinely operator-originated key ever appears — one where *any*
+manifest-supplied value is wrong, such as a spend cap — an `operator_only` flag
+becomes worth revisiting.
+
 ### Extension skills
 
 `skills[]` entries are ordinary [SKILL.md skills](skills.md) that ship with the

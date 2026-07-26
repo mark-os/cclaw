@@ -199,21 +199,48 @@ static void test_env_hardened(void) {
     printf("  PASS test_env_hardened\n");
 }
 
-/* Verify cclaw binary is unreachable via PATH */
-static void test_cclaw_unreachable(void) {
+/* The child may well find a cclaw on PATH: /usr/local/bin is the documented
+ * install location and has to be on PATH for toolchains to work at all. That
+ * is inert, and asserting the binary is hidden was only ever a side effect of
+ * the old PATH=/bin:/usr/bin (T131) rather than a mechanism of its own.
+ *
+ * What containment actually rests on is that the real state is out of reach —
+ * so assert that directly. The host's ~/.cclaw is not among the bind-mounted
+ * dirs, CCLAW_DB_PATH is scrubbed, and HOME points at the workspace, so a
+ * nested cclaw resolves its DB *inside* the sandbox and finds nothing. */
+static void test_real_state_unreachable(void) {
     if (!run_tool_ns_available(workspace)) {
-        printf("  SKIP test_cclaw_unreachable (namespaces unavailable)\n");
+        printf("  SKIP test_real_state_unreachable (namespaces unavailable)\n");
         return;
     }
 
+    const char *home = getenv("HOME");
+    char real_db[512];
+    snprintf(real_db, sizeof(real_db), "%s/.cclaw", home ? home : "");
+    /* Skip rather than assert vacuously where there is no real state to hide
+     * (a fresh CI container has never run cclaw). */
+    struct stat st;
+    if (!home || !home[0] || stat(real_db, &st) != 0) {
+        printf("  SKIP test_real_state_unreachable (no host ~/.cclaw)\n");
+        return;
+    }
+
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "test -e %s && echo HOST_STATE_VISIBLE || echo host_state_hidden;"
+             "echo db=${CCLAW_DB_PATH:-unset}",
+             real_db);
+
     ShellToolReq r = SHELL_REQ_DEFAULTS;
-    r.command = "which cclaw 2>/dev/null; echo rc=$?";
+    r.command = cmd;
     r.workspace = workspace;
     char *res = run_tool_shell(&r);
     assert(res != NULL);
-    assert(strstr(res, "rc=1") != NULL);
+    assert(strstr(res, "HOST_STATE_VISIBLE") == NULL);
+    assert(strstr(res, "host_state_hidden") != NULL);
+    assert(strstr(res, "db=unset") != NULL);
     free(res);
-    printf("  PASS test_cclaw_unreachable\n");
+    printf("  PASS test_real_state_unreachable\n");
 }
 
 int main(void) {
@@ -248,7 +275,7 @@ int main(void) {
 
     /* Sandbox-specific tests (own ns detection inside) */
     test_env_hardened();
-    test_cclaw_unreachable();
+    test_real_state_unreachable();
 
     cleanup();
     printf("All shell_exec tool tests passed.\n");

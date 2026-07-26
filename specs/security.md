@@ -151,14 +151,34 @@ decided by layer 3's `decide()` on every hop, including redirects, which a
 single pre-flight check could never see. See `shell-networking.md` and
 `egress-filter.md` §8.)
 
-**Don't run cclaw as root.** The namespace sandbox maps the invoking uid to
-root inside the child's user namespace (uid_map `0 <uid> 1`, `sandbox.c`).
-When the invoking uid is already 0, the child holds *real* root over any
-filesystem objects the host uid 0 owns that leak into its mount view, and
-read-only bind remounts lose much of their bite (root can often remount or
-bypass DAC where an unprivileged mapped uid cannot). Layer 2 degrades from a
-hard boundary to a soft one. Run cclaw as an unprivileged user; root is only
-appropriate for throwaway containers/VMs where the whole host is disposable.
+**Prefer running cclaw as an unprivileged user.** The namespace sandbox maps the
+invoking uid to root inside the child's user namespace (uid_map `0 <uid> 1`,
+`sandbox.c`). When the invoking uid is already 0 that map is the identity, so
+`CAP_DAC_OVERRIDE` in the child's user namespace applies to every root-owned
+file — anything reachable in the child's mount view becomes readable regardless
+of its mode. `/etc` is bind-mounted read-only in full, so `/etc/shadow` is the
+concrete example, and `test_etc_shadow_inaccessible` skips itself under uid 0
+for exactly this reason.
+
+What does **not** change under root, measured rather than assumed:
+
+- **Read-only bind remounts hold.** `sandbox_remount_ro()` re-ORs the flags the
+  kernel locked onto each mount, and a `remount,rw` is refused even with
+  `CAP_SYS_ADMIN` in the child user namespace. Writes to `/usr` fail with
+  `EROFS` whether cclaw runs as root or not.
+- **The child's capability set is identical either way.** `unshare(CLONE_NEWUSER)`
+  always makes the child root *of its own* user namespace with a full effective
+  set; running cclaw unprivileged does not reduce that. Those capabilities are
+  scoped to the child namespace, so `capable()`-gated globals stay closed in
+  both cases.
+- **Egress is unaffected** — `CLONE_NEWNET` plus the broker is a mount/netns
+  property, not a DAC one.
+
+So root costs exactly one layer: DAC as defense-in-depth over host-root-owned
+files that are mounted into the child. That is worth keeping, so prefer an
+unprivileged user (or the `cclaw` user that `cclaw install` creates). Root is
+reasonable on dedicated hardware or in a disposable container, where the host is
+the trust boundary anyway — it is a supported configuration, not a broken one.
 
 ## Sub-Agent Privilege Reduction
 
@@ -347,7 +367,15 @@ Provider API keys resolve env → system-scope secret: `config_load()` reads the
 
 **Key-protection ceiling.** The DB store is encrypted at rest, but the key sits on the *same disk* as the ciphertext. Whole-disk theft yields both → plaintext. So the built-in store protects against *exfiltration of `cclaw.db` alone* (a leaked backup, a mis-scoped file copy) — **not** against full-disk capture or the running host. Closing that gap means deriving the key from a user passphrase (KDF) or binding it to hardware (TPM / Secure Enclave) — which is exactly what a keychain storage provider gets for free (see [Storage providers](#storage-providers)). For a single-user box a chmod-600 key file is a reasonable default; it is not a substitute for a hardware-backed vault, and users who care should use the keychain provider.
 
-**The key file is masked from every sandboxed shell child.** `.cclaw_key` lives next to `cclaw.db` (`<dir of db_path>/.cclaw_key`). That directory is *not* in the workspace, so `standard`/`restricted` agents — which bind only the workspace — never see it by construction. But `trusted` binds the **CWD rw**, and in CLI mode the CWD *is* the dir holding the key and the DB, which would otherwise expose both to a shell child (key + ciphertext = full secret compromise). To close that, `sandbox_child_setup()` **bind-masks** the key and the DB family (`cclaw.db`, `-wal`, `-shm`) inside the new mount namespace: after the CWD/workspace binds and before `pivot_root`, an empty read-only file is bound over each. Files not reachable in the child's mount tree are skipped — they are already invisible by omission.
+**The key file is invisible to sandboxed shell children by omission.** `.cclaw_key` lives next to `cclaw.db` (`<dir of db_path>/.cclaw_key`). That directory is *not* the workspace, and no sandboxed profile mounts anything else by default — `trusted` stopped mounting the CWD — so the key and the DB ciphertext simply never materialize in the child's mount tree. `host` establishes no namespace and is exposed by construction; that is what picking `host` means.
+
+**Grant-mounted paths are masked.** A `read_path`/`write_path` grant covering a directory that contains `cclaw.db` binds that directory into the child. Without further work, key + ciphertext together is a full secret compromise, and the approver would see only "read access to a directory" — no hint that it means every stored secret. `sandbox_mask_state_files()` (`src/sandbox.c`) closes this by binding an empty read-only file over the key and the DB family (`cclaw.db`, `-wal`, `-shm`) after all binds and before `pivot_root`. Paths not reachable in the child's mount tree never materialize under the new root, so the unmounted case skips them — they are already invisible by omission.
+
+The mask is **provisional and path-based**. It exists because the default key backend is a file co-located with the DB; it does not generalize to a key held in the kernel keyring, behind libsecret, on an agent UDS, or sealed to a TPM. For those backends unreachability follows from the sandbox mounting almost nothing, and the mask becomes dead code.
+
+The two files follow different rules. The **DB** is masked unless a grant names it *exactly*: it is ordinary agent state and self-inspection is legitimate, so a deliberate grant on `cclaw.db` is honored while a directory grant that merely happens to contain it is not. `db_query` is unaffected either way — it runs in the trusted parent, never through this mount tree. The **key** is masked unconditionally and no grant can unmask it: reading it is not access to a resource but escalation to every secret in the store, including system-scope entries and other agents'. A grant made on one agent's behalf must not confer authority over agents that never consented.
+
+Regression coverage is `test/test_sandbox_key_mask.c`. The load-bearing case is the *granted* one — with no grant the key is already invisible by omission, which is why the earlier breakage (the broker setting `db_path = NULL`, leaving the mask a silent no-op in every profile) went unnoticed.
 
 The one remaining exposure is **`host`** (`--trust-host` / no-userns dev mode): it runs with *no* sandbox, so a shell child reads the host filesystem directly, key included. That is the documented price of `host` — never run untrusted-derived work at `host` on a box whose `.cclaw_key` matters. See [Sandbox Profile Policy Bundles](#sandbox-profile-policy-bundles).
 
@@ -655,13 +683,21 @@ The `agents.sandbox_profile` column maps to a shell sandbox profile:
 | sandbox | none | namespace | namespace | namespace |
 | env | inherit + scrub | inherit + scrub | clean allowlist | clean allowlist |
 | network | direct (no proxy) | proxy | proxy | none |
-| CWD mount | n/a (host fs) | rw | no | no |
-| workspace | rw (host fs) | rw | rw | ro |
-| RLIMIT_NPROC | none | none | 64 | 8 |
-| RLIMIT_AS | none | none | 512MB | 128MB |
-| RLIMIT_CPU | none | none | 60s | 10s |
+| CWD mount | n/a (host fs) | **no** | no | no |
+| workspace | rw (host fs) | rw | rw | rw |
+| `$HOME` | user's real home | workspace | workspace | workspace |
+| `/tmp` tmpfs | host `/tmp` | 50% RAM | 50% RAM | 25% RAM |
+| RLIMIT_NPROC | none | none | 256 | 64 |
+| RLIMIT_AS | none | none | **none** | **none** |
+| RLIMIT_CPU | none | none | 1800s | 120s |
+
+`trusted` bounds no resources but sees no more than `standard`: it mounts no CWD,
+so reach comes only from the workspace plus `read_path`/`write_path` grants. No
+profile sets `RLIMIT_AS` — it caps address space rather than usage, which refuses
+to start large-VA runtimes (`go`, `node`, `rustc`) without bounding anything. See
+[specs/sandbox-profiles.md](sandbox-profiles.md) for the full rationale.
 
 - `secret_agent` (future) maps to `standard` with additional restriction: only `secret_store_write` tool grant, no shell
 - Unknown values (including any legacy values like `bootstrap`) fall through to `standard` in `sandbox_policy_from_profile()` (`src/sandbox.c`)
 - Resolved once in `agent_setup_init()` via `sandbox_profile_resolve()`, stored in `SandboxProfile`
-- **`.cclaw_key` and the DB family are bind-masked** inside every sandboxed child, so even the CWD-mounting `trusted` level can't read the secret key or DB ciphertext. Only `host` (no sandbox) is exposed. See [Secret Storage](#secret-storage).
+- **`.cclaw_key` and the DB family are outside every sandboxed profile's mount set**, so no sandboxed child can read the secret key or DB ciphertext by default. A `read_path`/`write_path` grant covering the DB's directory would re-expose both; `sandbox_mask_state_files()` binds an empty read-only file over them for that case. The key is masked unconditionally; the DB only when no grant names it exactly. `host` (no sandbox) is exposed by construction. See [Secret Storage](#secret-storage).

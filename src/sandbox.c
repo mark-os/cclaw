@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <pwd.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -31,16 +32,53 @@
  * inside the netns the preload lib and net_shim reach it here. */
 #define SANDBOX_PROXY_SOCK_PATH "/tmp/.cclaw_proxy.sock"
 
+/* Did a grant name the DB file itself, rather than merely a directory that
+ * contains it? Exact match only — a read_path on ~/.cclaw or on $HOME must not
+ * count, or the accident the mask exists to prevent comes straight back. */
+static int sandbox_db_explicitly_granted(const char *db_abs,
+                                         const SandboxConfig *cfg) {
+    if (!cfg || !cfg->extra_mounts) return 0;
+    for (size_t i = 0; i < cfg->extra_mount_count; i++) {
+        const char *p = cfg->extra_mounts[i].path;
+        if (!p || !p[0]) continue;
+        char abs[PATH_MAX];
+        if (realpath(p, abs) && strcmp(abs, db_abs) == 0) return 1;
+    }
+    return 0;
+}
+
 /* Bind-mask the secret key + DB ciphertext from the child's view.
  *
- * The key lives at <dir of db_path>/.cclaw_key, next to cclaw.db. trusted (and
- * host) profiles mount the CWD rw, and in CLI mode that CWD is the dir
- * holding both files — so a child could read the key and decrypt every stored
- * secret. We bind an empty, unreadable file over each sensitive path *inside
- * the new root*. Files not reachable in the child's mount tree (the
- * standard/restricted case) never materialize under newroot, so the stat
- * fails and we skip them — they are already invisible by omission. */
-static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
+ * PROVISIONAL — this exists only because the default backend stores the key as
+ * a file co-located with cclaw.db. Grants are approved on directories, so a
+ * read_path covering the DB's directory hands over key + ciphertext together,
+ * and the approver sees "read access to a directory" with no hint that it
+ * means every stored secret. Masking closes that by path.
+ *
+ * It is a path-based defense and does not generalize: once the key can live
+ * behind a key provider (kernel keyring, libsecret, an agent UDS, a TPM), the
+ * child's inability to reach it follows from the sandbox mounting almost
+ * nothing, and this function becomes dead code for those backends. Delete the
+ * key half when the file backend is no longer the default.
+ *
+ * Two different rules, on purpose:
+ *   key  — masked unconditionally. Reading it is not access to a resource, it
+ *          is escalation to every secret in the DB, including system-scope
+ *          ones and other agents'. A grant made on one agent's behalf must not
+ *          confer authority over agents that never consented, so no grant can
+ *          unmask it.
+ *   DB   — masked unless a grant names the DB file itself. It is ordinary
+ *          agent state and self-inspection is legitimate, so a deliberate,
+ *          exact grant is honored; a directory grant that merely happens to
+ *          contain it is not. Nothing breaks either way: db_query is the
+ *          sanctioned read path and runs in the trusted parent, never through
+ *          this mount tree.
+ *
+ * Targets not reachable in the child's mount tree never materialize under
+ * newroot, so the stat fails and we skip them — already invisible by omission.
+ * Must run after all binds and before pivot_root. */
+static void sandbox_mask_state_files(const char *newroot, const char *db_path,
+                                     const SandboxConfig *full_cfg) {
     if (!db_path || !db_path[0]) return;
 
     char db_abs[PATH_MAX];
@@ -54,7 +92,8 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     if (efd < 0) return;
     close(efd);
 
-    /* Targets: the DB family (ciphertext) and the key file (crown jewel). */
+    /* Targets: the key file (crown jewel) always; the DB family (ciphertext)
+     * unless a grant named the DB file exactly. */
     char keyf[PATH_MAX];
     char *slash = strrchr(db_abs, '/');
     int klen = slash
@@ -65,10 +104,12 @@ static void sandbox_mask_state_files(const char *newroot, const char *db_path) {
     snprintf(dbwal, sizeof(dbwal), "%s-wal", db_abs);
     snprintf(dbshm, sizeof(dbshm), "%s-shm", db_abs);
     size_t nt = 0;
-    targets[nt++] = db_abs;
-    targets[nt++] = dbwal;
-    targets[nt++] = dbshm;
     if (klen > 0 && (size_t)klen < sizeof(keyf)) targets[nt++] = keyf;
+    if (!sandbox_db_explicitly_granted(db_abs, full_cfg)) {
+        targets[nt++] = db_abs;
+        targets[nt++] = dbwal;
+        targets[nt++] = dbshm;
+    }
 
     for (size_t i = 0; i < nt; i++) {
         char dst[PATH_MAX + 64];
@@ -136,15 +177,34 @@ size_t sandbox_plan_mounts(const SandboxMountReq *in, size_t n, SandboxMount *ou
     return cnt;
 }
 
-/* Bind a single directory into newroot at its absolute path.
- * Creates intermediate dirs, bind-mounts, optionally remounts ro. */
-static void bind_dir_into(const char *newroot, const char *abspath, int ro) {
+/* Bind a single path into newroot at its absolute path.
+ * Creates intermediate dirs, bind-mounts, optionally remounts ro.
+ *
+ * Handles files as well as directories: a bind mount does not care about the
+ * source type, but the target must match it, so a file source needs an empty
+ * regular file as its mount point rather than a directory. Without this a
+ * read_path/write_path grant naming a file mounted nothing at all (ENOTDIR)
+ * while every other layer — the approval, the DB row, the wire, path_under()
+ * — accepted it, so the grant silently did nothing. File granularity is also
+ * what lets an agent follow the "request the narrowest grant" instruction it
+ * is given; before this it had no choice but to ask for a whole directory.
+ *
+ * Anything that is neither (device, socket, fifo) is refused: mounting those
+ * into a sandbox is not a grant we want to honor implicitly. */
+static void bind_path_into(const char *newroot, const char *abspath, int ro) {
     struct stat st;
-    if (stat(abspath, &st) != 0 || !S_ISDIR(st.st_mode)) return;
+    if (stat(abspath, &st) != 0) return;
+    int isdir = S_ISDIR(st.st_mode);
+    if (!isdir && !S_ISREG(st.st_mode)) {
+        LOG_INFO_("sandbox grant_skip_not_file_or_dir path=%s mode=%o",
+                  abspath, (unsigned)(st.st_mode & S_IFMT));
+        return;
+    }
     char dst[PATH_MAX + 64];
     int n = snprintf(dst, sizeof(dst), "%s%s", newroot, abspath);
     if (n < 0 || (size_t)n >= sizeof(dst)) return;
-    /* mkdir -p the target under newroot */
+    /* mkdir -p the parent chain under newroot (every component up to the
+     * final one, which the loop never reaches — it fires only on '/') */
     char *p = dst + strlen(newroot) + 1;
     for (char *slash = p; *slash; slash++) {
         if (*slash == '/') {
@@ -153,8 +213,18 @@ static void bind_dir_into(const char *newroot, const char *abspath, int ro) {
             *slash = '/';
         }
     }
-    mkdir(dst, 0755);
-    if (mount(abspath, dst, NULL, MS_BIND, NULL) != 0) return;
+    /* Final component: type must match the source or mount() gives ENOTDIR. */
+    if (isdir) {
+        mkdir(dst, 0755);
+    } else {
+        int fd = open(dst, O_CREAT | O_WRONLY, 0600);
+        if (fd < 0) return;
+        close(fd);
+    }
+    if (mount(abspath, dst, NULL, MS_BIND, NULL) != 0) {
+        LOG_INFO_("sandbox grant_bind_fail path=%s errno=%d", abspath, errno);
+        return;
+    }
     if (ro) sandbox_remount_ro(dst);
 }
 
@@ -226,8 +296,12 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         return -1;
 
     /* Bind-mount system dirs read-only */
+    /* /opt is here because that is where real toolchains land — distro node
+     * packages, vendored JDKs, hand-unpacked SDKs. Read-only like the rest, and
+     * absent on most systems, where the stat() below skips it. */
     static const char *sys_dirs[] = {
-        "/bin", "/usr", "/lib", "/lib64", "/etc", "/proc", "/dev", "/sbin", NULL
+        "/bin", "/usr", "/lib", "/lib64", "/etc", "/proc", "/dev", "/sbin",
+        "/opt", NULL
     };
     for (int i = 0; sys_dirs[i]; i++) {
         /* File tier (skip_pid_ns): exclude /proc — no PID namespace backs it,
@@ -251,10 +325,27 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         }
     }
 
-    /* Create /tmp in new root (ephemeral tmpfs, writable for scratch) */
+    /* /tmp gets its OWN tmpfs, sized as a percentage of RAM. The root tmpfs
+     * above stays tiny because it only holds mountpoint stubs — but /tmp is
+     * where toolchains write real volume (npm unpacking tarballs, cargo and
+     * rustc temporaries, cc intermediates, go's build cache), so leaving it a
+     * directory on a 1 MB root broke every build with ENOSPC. A percentage is
+     * tmpfs's own syntax and scales across our target range without probing
+     * meminfo — ~64 MB on a 128 MB Pogoplug, ~8 GB on a 16 GB server — and
+     * tmpfs charges only what is written, so this is a ceiling and not a
+     * reservation. Failure is non-fatal: /tmp then falls back to the root
+     * tmpfs, which is small but functional. */
     char tmp_path[256];
     snprintf(tmp_path, sizeof(tmp_path), "%s/tmp", newroot);
     mkdir(tmp_path, 01777);
+    {
+        int pct = (full_cfg && full_cfg->tmp_pct > 0) ? full_cfg->tmp_pct : 50;
+        if (pct > 90) pct = 90;
+        char opts[32];
+        snprintf(opts, sizeof(opts), "size=%d%%", pct);
+        if (mount("none", tmp_path, "tmpfs", MS_NOSUID | MS_NODEV, opts) == 0)
+            chmod(tmp_path, 01777);
+    }
 
     /* Bind the broker's per-call proxy UDS (created in the agent folder, outside
      * the agent-visible workspace) onto a fixed path inside the sandbox. Keeps
@@ -273,11 +364,11 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
 
     /* Bind-mount workspace rw */
     if (ws_resolved)
-        bind_dir_into(newroot, ws_resolved, 0);
+        bind_path_into(newroot, ws_resolved, 0);
 
     /* Bind-mount CWD rw (CLI mode) */
     if (cwd_resolved)
-        bind_dir_into(newroot, cwd_resolved, 0);
+        bind_path_into(newroot, cwd_resolved, 0);
 
     /* Layer 2: extra bind-mounts from read_path/write_path grants.
      * Canonicalize + dedup (rw wins) + sort shallow→deep so a child mount
@@ -288,14 +379,14 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         if (plan) {
             size_t pn = sandbox_plan_mounts(full_cfg->extra_mounts, n, plan);
             for (size_t i = 0; i < pn; i++)
-                bind_dir_into(newroot, plan[i].path, plan[i].ro);
+                bind_path_into(newroot, plan[i].path, plan[i].ro);
             free(plan);
         }
     }
 
-    /* Mask the secret key + DB ciphertext if a bound path (CWD/workspace)
-     * would otherwise expose them. Must run after binds, before pivot_root. */
-    sandbox_mask_state_files(newroot, db_path);
+    /* Mask the secret key + DB ciphertext if a bound path (CWD, workspace, or
+     * a grant) would otherwise expose them. After binds, before pivot_root. */
+    sandbox_mask_state_files(newroot, db_path, full_cfg);
 
     /* pivot_root into new root */
     char put_old[256];
@@ -340,21 +431,64 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
     return 0;
 }
 
-/* scrub the environment before exec. env_mode==1 wipes everything and
- * sets only PATH+TMPDIR; otherwise inherit minus known secret-bearing vars. */
-static void sandbox_scrub_env(int env_mode) {
+/* Resolve HOME for the tool child.
+ *
+ * Sandboxed profiles get the agent workspace: it is bind-mounted rw at its own
+ * absolute path, it is the one directory the agent owns, and it persists across
+ * tool calls. That makes the usual user-level install paths work and *stay*
+ * working — `pip install --user`, `cargo install`, `npm -g --prefix $HOME` all
+ * land under the workspace and are on PATH next call, so an agent can bootstrap
+ * its own toolchain into the one place it is allowed to write.
+ *
+ * The host profile has no namespace, so the honest answer is the invoking
+ * user's real home, read from the passwd database rather than an inherited
+ * HOME (under the --run-tool re-exec the child starts from an empty environ,
+ * so there is nothing to inherit). */
+static const char *sandbox_resolve_home(const SandboxConfig *cfg) {
+    if (cfg->sandbox) {
+        if (cfg->workspace && cfg->workspace[0]) return cfg->workspace;
+        return "/tmp";
+    }
+    struct passwd *pw = getpwuid(getuid());
+    if (pw && pw->pw_dir && pw->pw_dir[0]) return pw->pw_dir;
+    if (cfg->workspace && cfg->workspace[0]) return cfg->workspace;
+    return "/tmp";
+}
+
+/* Build PATH: the agent's own workspace-local bin dirs first (see
+ * sandbox_resolve_home), then the system dirs. The old value was
+ * "/bin:/usr/bin", which made every toolchain invisible — node, go, cargo and
+ * rustc all install outside those two directories, so `npm install` failed with
+ * "not found" before any policy question arose. */
+static void sandbox_set_path(const char *home) {
+    static const char *sys =
+        "/usr/local/sbin:/usr/local/bin:/usr/local/go/bin:"
+        "/usr/sbin:/usr/bin:/sbin:/bin";
+    char buf[PATH_MAX * 3 + 128];
+    int n = snprintf(buf, sizeof(buf), "%s/.local/bin:%s/.cargo/bin:%s/bin:%s",
+                     home, home, home, sys);
+    setenv("PATH", (n > 0 && (size_t)n < sizeof(buf)) ? buf : sys, 1);
+}
+
+/* scrub the environment before exec. env_mode==1 wipes everything and sets only
+ * PATH+TMPDIR+HOME; otherwise inherit minus known secret-bearing vars. HOME is
+ * set under both modes — toolchains treat its absence as a hard error. */
+static void sandbox_scrub_env(const SandboxConfig *cfg) {
     extern char **environ;
-    if (env_mode == 1) {
+    const char *home = sandbox_resolve_home(cfg);
+    if (cfg->env_mode == 1) {
         /* Clean allowlist: wipe entire env, set only essentials */
         if (environ) environ[0] = NULL;  /* portable clearenv */
-        setenv("PATH", "/bin:/usr/bin", 1);
+        sandbox_set_path(home);
         setenv("TMPDIR", "/tmp", 1);
+        setenv("HOME", home, 1);
         return;
     }
 
     /* Legacy trusted mode: inherit env minus known secret names */
-    setenv("PATH", "/bin:/usr/bin", 1);
-    unsetenv("HOME");
+    sandbox_set_path(home);
+    setenv("TMPDIR", "/tmp", 1);
+    setenv("HOME", home, 1);
     char *drop_keys[256];
     int nkeys = 0;
     for (int i = 0; environ[i] && nkeys < 256; i++) {
@@ -533,7 +667,17 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
         }
     }
 
-    sandbox_scrub_env(cfg->env_mode);
+    /* host has no namespace, so sandbox_apply_namespace's chdir never ran. In
+     * CLI mode cwd_path is the user's own CWD and inheriting it is the whole
+     * point of host — `cclaw` in a repo operates on that repo. Under --daemon
+     * cwd_path is NULL and the daemon's CWD is meaningless to the agent, so
+     * start in the workspace instead. */
+    if (!cfg->sandbox && !cwd && cfg->workspace && cfg->workspace[0]) {
+        if (chdir(cfg->workspace) != 0)
+            LOG_INFO_("sandbox host_chdir_fail errno=%d", errno);
+    }
+
+    sandbox_scrub_env(cfg);
 
     /* the proxy UDS is reachable at a fixed in-sandbox path (bound from the
      * broker's agent-folder socket in sandbox_apply_namespace). */
@@ -572,23 +716,44 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     return 0;
 }
 
+/* No profile sets RLIMIT_AS. It caps *address space*, not resident memory, and
+ * every modern runtime reserves VA far beyond its footprint — Go's allocator
+ * arenas, V8's heap cages, LLVM — so a cap large enough to be safe is too large
+ * to bound anything, and one small enough to bound anything refuses to start
+ * `go`, `node`, or `rustc` before they do a byte of work. NPROC and CPU are the
+ * knobs that actually bound a runaway; a cgroup memory limit is the right tool
+ * if a real memory ceiling is ever needed. */
 void sandbox_policy_from_profile(const char *sandbox_profile, SandboxConfig *cfg) {
     if (sandbox_profile && strcmp(sandbox_profile, "host") == 0) {
+        /* No namespace, no proxy: the tool child runs with the invoking user's
+         * own filesystem and network. cwd_path (CLI only) keeps the user's CWD;
+         * under --daemon there is none, so the child starts in the workspace. */
         cfg->sandbox = 0;
         cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1; cfg->workspace_ro = 0;
+        cfg->tmp_pct = 0;
         cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
     } else if (sandbox_profile && strcmp(sandbox_profile, "trusted") == 0) {
+        /* Resources unbounded, visibility is not: no CWD mount, so the agent
+         * sees its own workspace and nothing of the user's files or any other
+         * agent's — additional paths arrive only as read_path/write_path
+         * grants. "Trusted" is about resources, never about reach. */
         cfg->sandbox = 1;
-        cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 1; cfg->workspace_ro = 0;
+        cfg->env_mode = 0; cfg->net_mode = 0; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
+        cfg->tmp_pct = 50;
         cfg->rlimits.nproc = 0; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 0;
     } else if (sandbox_profile && strcmp(sandbox_profile, "restricted") == 0) {
+        /* Bounded, but still able to run real programs: the limits are a
+         * runaway backstop, not a straitjacket. The workspace stays rw so
+         * $HOME works — what makes this restricted is no network at all. */
         cfg->sandbox = 1;
-        cfg->env_mode = 1; cfg->net_mode = 1; cfg->mount_cwd = 0; cfg->workspace_ro = 1;
-        cfg->rlimits.nproc = 8; cfg->rlimits.as_mb = 128; cfg->rlimits.cpu_sec = 10;
+        cfg->env_mode = 1; cfg->net_mode = 1; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
+        cfg->tmp_pct = 25;
+        cfg->rlimits.nproc = 64; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 120;
     } else { /* "standard", unknown, NULL */
         cfg->sandbox = 1;
         cfg->env_mode = 1; cfg->net_mode = 0; cfg->mount_cwd = 0; cfg->workspace_ro = 0;
-        cfg->rlimits.nproc = 64; cfg->rlimits.as_mb = 512; cfg->rlimits.cpu_sec = 60;
+        cfg->tmp_pct = 50;
+        cfg->rlimits.nproc = 256; cfg->rlimits.as_mb = 0; cfg->rlimits.cpu_sec = 1800;
     }
 }
 
@@ -608,6 +773,7 @@ void sandbox_profile_resolve(const char *sandbox_profile, SandboxProfile *p) {
     p->net_mode     = c.net_mode;
     p->mount_cwd    = c.mount_cwd;
     p->workspace_ro = c.workspace_ro;
+    p->tmp_pct      = c.tmp_pct;
     p->rlimits.nproc   = c.rlimits.nproc;
     p->rlimits.as_mb   = c.rlimits.as_mb;
     p->rlimits.cpu_sec = c.rlimits.cpu_sec;

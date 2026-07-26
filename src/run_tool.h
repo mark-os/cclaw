@@ -55,7 +55,10 @@ typedef struct {
     int sandbox, net_mode;
     /* file/all */
     const char *workspace, *cwd_path;
-    int workspace_ro, mount_cwd;
+    /* cclaw.db path — carried so the child can mask the key + ciphertext out
+     * of any bound path. The child never opens the DB. */
+    const char *db_path;
+    int workspace_ro, mount_cwd, tmp_pct;
     const char **read_paths;  size_t read_count;
     const char **write_paths; size_t write_count;
     /* network tiers (shell/web/js) */
@@ -82,7 +85,8 @@ typedef struct {
     int   env_mode, nproc, as_mb, cpu_sec;
     int   sandbox, net_mode;
     char *workspace, *cwd_path;
-    int   workspace_ro, mount_cwd;
+    char *db_path;
+    int   workspace_ro, mount_cwd, tmp_pct;
     char **read_paths;  size_t read_count;
     char **write_paths; size_t write_count;
     char *agent_dir;

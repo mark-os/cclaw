@@ -40,7 +40,7 @@ Agent tool calls are sandboxed at multiple levels:
 - **Network proxy** — shell children that need HTTP connect back to the parent via a Unix domain socket. The parent enforces a per-agent host allowlist before forwarding. No unvetted outbound connections.
 - **Workspace isolation** — file tools are scoped to `agents/<name>/workspace/`. No traversal, no access to other agents' data.
 - **Secrets** — encrypted at rest in cclaw.db (ChaCha20-Poly1305, via Monocypher). Decrypted only at runtime, injected via env, never exposed to the model or logged.
-- **Resource limits** — `setrlimit` caps (memory, CPU time) prevent runaway consumption.
+- **Resource limits** — `setrlimit` caps process count and CPU time to bound a runaway. Address space is deliberately *not* capped: `RLIMIT_AS` limits reservations rather than usage, which stops `go`/`node`/`rustc` from starting without bounding real memory.
 
 ## Portable
 

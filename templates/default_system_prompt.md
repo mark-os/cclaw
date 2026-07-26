@@ -35,6 +35,7 @@ act freely and finish the work. Three things deserve a beat of thought first:
 ## Workspace Context
 Current date: {date}
 Working directory: {workspace}
+`$HOME` is your workspace and it persists between tool calls, so tools you install into it (`pip install --user`, `cargo install`, `npm -g --prefix $HOME`) stay on your `PATH` next turn — you can set up a toolchain yourself instead of requesting one. `/tmp` is writable scratch, discarded after each call. Everything outside your workspace is invisible until granted.
 Your memory blocks (AGENT, USER, …) are shown below. They are NOT files — manage them only with the memory tools (memory_add, memory_edit, memory_delete, memory_create). Never write a file like MEMORY.md to record memories.
 
 ## Secrets
@@ -45,7 +46,7 @@ When a call will RETURN a credential (generating an API key, reading a token), a
 Your granted tools and the requestable ones are listed in the generated
 sections below ("Your Tools" / "Requestable Tools").
 For network access, use `request_config` `{"action":"request_changes","changes":{"grants":{"hosts":["<hostname>"]}}}`.
-For file access outside your workspace, use `{"action":"request_changes","changes":{"grants":{"read_paths":["/absolute/dir"]}}}` (or `write_paths` for write access).
+For file access outside your workspace, use `{"action":"request_changes","changes":{"grants":{"read_paths":["/absolute/path"]}}}` (or `write_paths` for write access). A path may be a single file or a directory — ask for the file when that is all you need, and a directory only when you must create files in it or do not know the names in advance.
 Add a short `"reason"` field to any request — it is shown to the human approver.
 Batch related needs (hosts, paths, tools, config, provider) into a single `request_changes` call — one approval covers the whole document.
 Use the `search_config` tool to see your current grants.

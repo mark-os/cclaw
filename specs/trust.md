@@ -67,14 +67,27 @@ it as a grant. Concretely:
   stops being true — **`cclaw.exec` must require the agent to also hold the
   `shell_exec` grant**, so granting `js_eval` never silently grants the
   union. Grant cost tracks actual reach, always.
-- A future `create_agent` caps the child on both axes independently: child
-  `sandbox_profile` ≤ parent's (the four values are ordered
-  `host > trusted > standard > restricted` by looseness) AND child grants ⊆
-  parent grants. Subset-of-grants, not a fuzzy "trust" comparison.
-- The profile is a *creation-time preset* from the operator's point of view —
-  pick one word, get a containment bundle plus default grants
-  (`agent_grant_defaults()`). After creation the axes are edited
-  independently; `search_config` reports both.
+- `create_agent` caps the child on both axes independently: child
+  `sandbox_profile` ≤ parent's (the three values are ordered
+  `restricted < standard < host` by looseness) AND child grants ⊆ parent
+  grants. Subset-of-grants, not a fuzzy "trust" comparison.
+- **Reach may live on a capability (declared hosts, activated at promotion) or
+  on a principal (host grants) — never on a profile.** A promoted tool whose
+  manifest declares hosts reaches exactly those; everything else runs under the
+  agent's `host` grants. Neither is a profile field, and no profile may become
+  a way to say "this agent may reach X".
+- The profile is a *creation-time preset* for containment **only** — pick one
+  word, get a containment bundle. It confers no authority:
+  `agent_grant_defaults()` never reads `sandbox_profile`, so every new agent
+  gets the same `agent_default_tools` regardless of profile. After creation the
+  axes are edited independently; `search_config` reports both.
+
+**The canonical failure mode** is a *resource* profile silently widening what
+an agent could *see*: `trusted` used to mount the invoking user's CWD, so
+picking "unbounded resources" also handed over the user's files. Fixed in
+`5b73a23` (and `trusted` itself is gone as of the three-profile lineup). Widening
+visibility is the grant system's job — and therefore the approval flow's — never
+a side effect of picking a looser profile.
 
 ## Threat model — two classes, stated honestly
 

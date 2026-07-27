@@ -2421,7 +2421,14 @@ static void handle_approval_park(int64_t session_id) {
                      (long long)a->id, (long long)a->id, (long long)a->id);
         }
 
+        /* Two shapes: the admin fan-out addresses *user* ids (to_user=1, the
+         * handler resolves a DM), the fallback addresses the session's own
+         * chat id. See channel_notify_admins. */
         const char *ins_sql =
+            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+            " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4,"
+            " 'keyboard', json(?5), 'to_user', 1));";
+        const char *ins_chat_sql =
             "INSERT INTO channel_outbox(channel_name, session_id, payload)"
             " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4, 'keyboard', json(?5)));";
         if (admins && admins[0]) {
@@ -2440,7 +2447,7 @@ static void handle_approval_park(int64_t session_id) {
             }
         } else {
             sqlite3_stmt *ins;
-            if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
+            if (sqlite3_prepare_v2(g_db, ins_chat_sql, -1, &ins, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(ins, 1, ch_name, -1, SQLITE_STATIC);
                 sqlite3_bind_int64(ins, 2, session_id);
                 sqlite3_bind_text(ins, 3, ch_id, -1, SQLITE_STATIC);

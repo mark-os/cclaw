@@ -341,7 +341,42 @@ function onOutbox(item) {
     }
     var chatId = payload.chat_id, text = payload.text;
     if (!chatId || !text) { channel.failOutbox(item.id, "missing chat_id or text"); return; }
+    if (payload.to_user) { sendToUser(chatId, text, item.id); return; }
     sendChunked(chatId, text, item.id);
+}
+
+// to_user=1 means the destination is a user id (an admin_ids entry), not a
+// channel id. On Discord those are different namespaces, so we must open a DM
+// channel first. C says only "this is a user"; the REST dance is the handler's
+// business. The user->DM mapping is stable, so cache it in-process; a restart
+// just re-opens (the endpoint is idempotent, it returns the existing DM).
+var dmChannels = {};
+
+function sendToUser(userId, text, outboxId) {
+    var dm = dmChannels[userId];
+    if (dm) { sendChunked(dm, text, outboxId); return; }
+    channel.http({
+        method: "POST",
+        url: config.base + "/api/v10/users/@me/channels",
+        headers: ["Authorization: Bot " + config.token, "Content-Type: application/json"],
+        body: JSON.stringify({ recipient_id: "" + userId })
+    }).then(function (r) {
+        var id = null;
+        if (!r.error && r.status >= 200 && r.status < 300) {
+            try { id = JSON.parse(r.body || "{}").id; } catch (e) { id = null; }
+        }
+        if (!id) {
+            // Fail the row rather than retrying: an admin who has DMs closed
+            // (or an id that is not a user) would otherwise wedge the outbox
+            // behind a notice that can never be delivered.
+            channel.log("DM open failed for user " + userId + " status=" + r.status +
+                        " error=" + r.error);
+            channel.failOutbox(outboxId, "DM open failed for user " + userId);
+            return;
+        }
+        dmChannels[userId] = "" + id;
+        sendChunked("" + id, text, outboxId);
+    });
 }
 
 // Queue all chunks; the C loop sends them in order and acks the outbox row

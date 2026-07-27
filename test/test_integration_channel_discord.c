@@ -244,11 +244,61 @@ static void *mock_gateway(void *arg) {
     return NULL;
 }
 
-static void seed_db(int port) {
+/* ── Mock Discord REST (base_url) ──────────────────────────────────
+ * Serves exactly the two calls an admin-notice DM needs:
+ *   POST /api/v10/users/@me/channels   -> {"id":"dmchan9"}   (DM open)
+ *   POST /api/v10/channels/dmchan9/messages -> {}            (the message)
+ * Records what it saw so the test can prove the handler resolved the admin's
+ * *user* id to a DM channel instead of POSTing to the user id as a channel. */
+static int g_rest_fd = -1;
+static volatile int g_rest_stop = 0;
+static volatile int g_dm_open_seen = 0;
+static volatile int g_dm_msg_seen = 0;
+static volatile int g_bad_channel_post = 0;   /* POST to the raw user id */
+
+static void *mock_rest(void *arg) {
+    (void)arg;
+    while (!g_rest_stop) {
+        int cfd = accept(g_rest_fd, NULL, NULL);
+        if (cfd < 0) { if (g_rest_stop) break; continue; }
+        struct timeval tv = {5, 0};
+        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        char req[4096]; size_t rn = 0;
+        while (rn < sizeof(req) - 1) {
+            ssize_t r = read(cfd, req + rn, sizeof(req) - 1 - rn);
+            if (r <= 0) break;
+            rn += (size_t)r; req[rn] = '\0';
+            const char *hdr_end = strstr(req, "\r\n\r\n");
+            if (!hdr_end) continue;
+            const char *cl = strcasestr(req, "Content-Length:");
+            size_t want = cl ? (size_t)atoi(cl + 15) : 0;
+            if (rn >= (size_t)(hdr_end + 4 - req) + want) break;
+        }
+        const char *body = "{}";
+        if (strstr(req, "POST /api/v10/users/@me/channels")) {
+            if (strstr(req, "\"recipient_id\":\"adminuser\"")) g_dm_open_seen = 1;
+            body = "{\"id\":\"dmchan9\"}";
+        } else if (strstr(req, "POST /api/v10/channels/dmchan9/messages")) {
+            if (strstr(req, "ping the admin")) g_dm_msg_seen = 1;
+        } else if (strstr(req, "POST /api/v10/channels/adminuser/messages")) {
+            g_bad_channel_post = 1;
+        }
+        char resp[512];
+        int rl = snprintf(resp, sizeof(resp),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
+            strlen(body), body);
+        write_all(cfd, resp, (size_t)rl);
+        close(cfd);
+    }
+    return NULL;
+}
+
+static void seed_db(int port, int rest_port) {
     test_db_clean(DB_PATH);
     sqlite3 *db = test_db_open(DB_PATH);
     char base_url[64], gw_url[64];
-    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", port);
+    snprintf(base_url, sizeof(base_url), "http://127.0.0.1:%d", rest_port);
     snprintf(gw_url, sizeof(gw_url), "ws://127.0.0.1:%d/", port);
 
     sqlite3_exec(db, "INSERT OR REPLACE INTO extensions(name,path)"
@@ -264,7 +314,7 @@ static void seed_db(int port) {
         { "discord.base_url",       base_url },
         { "discord.gateway_url",    gw_url },
         { "discord.require_mention","1" },
-        { "discord.admin_ids",      "" },
+        { "discord.admin_ids",      "adminuser" },
     };
     for (size_t i = 0; i < sizeof(kv)/sizeof(*kv); i++) {
         sqlite3_bind_text(s, 1, kv[i].k, -1, SQLITE_STATIC);
@@ -273,6 +323,15 @@ static void seed_db(int port) {
     }
     sqlite3_finalize(s);
     db_close(db);
+}
+
+static int test_scalar_count_db(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return -1;
+    int c = -1;
+    if (sqlite3_step(s) == SQLITE_ROW) c = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    return c;
 }
 
 /* Count channel_events whose payload contains `needle`. */
@@ -317,8 +376,26 @@ int main(void) {
     struct timeval atv = {10, 0};
     setsockopt(g_listen_fd, SOL_SOCKET, SO_RCVTIMEO, &atv, sizeof(atv));
 
-    pthread_t th;
+    /* Second listener: the mock Discord REST API (base_url). */
+    g_rest_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (g_rest_fd < 0) { fprintf(stderr, "FAIL: rest socket\n"); return 1; }
+    setsockopt(g_rest_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in ra; memset(&ra, 0, sizeof(ra));
+    ra.sin_family = AF_INET;
+    ra.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ra.sin_port = 0;
+    if (bind(g_rest_fd, (struct sockaddr *)&ra, sizeof(ra)) != 0) { fprintf(stderr, "FAIL: rest bind\n"); return 1; }
+    if (listen(g_rest_fd, 8) != 0) { fprintf(stderr, "FAIL: rest listen\n"); return 1; }
+    socklen_t rl_ = sizeof(ra);
+    getsockname(g_rest_fd, (struct sockaddr *)&ra, &rl_);
+    int rest_port = ntohs(ra.sin_port);
+    /* Short accept timeout: the mock loops on it, so shutdown joins fast. */
+    struct timeval rtv = {1, 0};
+    setsockopt(g_rest_fd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
+
+    pthread_t th, rth;
     if (pthread_create(&th, NULL, mock_gateway, NULL) != 0) { fprintf(stderr, "FAIL: thread\n"); return 1; }
+    if (pthread_create(&rth, NULL, mock_rest, NULL) != 0) { fprintf(stderr, "FAIL: rest thread\n"); return 1; }
 
     /* Stage the SHIPPED handler (copied from templates/) as the extension. */
     mkdir(EXT_DIR, 0755);
@@ -327,7 +404,7 @@ int main(void) {
     FILE *jf = fopen(JS_PATH, "w");
     if (!jf) { fprintf(stderr, "FAIL: cannot write %s\n", JS_PATH); return 1; }
     fputs(js, jf); fclose(jf); free(js);
-    seed_db(port);
+    seed_db(port, rest_port);
 
     pid_t pid = fork();
     if (pid == 0) {
@@ -365,6 +442,40 @@ int main(void) {
     if (!g_heartbeat_seen) FAIL("server never received a heartbeat");
     printf("  PASS: heartbeat liveness\n");
 
+    /* Admin notice (to_user=1): the destination is a *user* id, so the handler
+     * must open a DM channel first and send there. */
+    if (sqlite3_exec(db,
+            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+            " VALUES('discord', 0, json_object('chat_id','adminuser',"
+            " 'text','ping the admin', 'to_user', 1));",
+            NULL, NULL, NULL) != SQLITE_OK)
+        FAIL("could not queue the admin outbox row");
+    for (int i = 0; i < 80 && !g_dm_msg_seen; i++) usleep(100000);
+    if (!g_dm_open_seen) FAIL("handler never opened a DM channel for the admin user id");
+    if (!g_dm_msg_seen) FAIL("admin notice never delivered to the opened DM channel");
+    if (g_bad_channel_post) FAIL("handler POSTed to the admin user id as if it were a channel");
+    printf("  PASS: to_user notice DM-opens then delivers\n");
+
+    /* Second notice to the same admin: served from the in-memory cache. */
+    g_dm_msg_seen = 0; g_dm_open_seen = 0;
+    if (sqlite3_exec(db,
+            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+            " VALUES('discord', 0, json_object('chat_id','adminuser',"
+            " 'text','ping the admin again', 'to_user', 1));",
+            NULL, NULL, NULL) != SQLITE_OK)
+        FAIL("could not queue the second admin outbox row");
+    for (int i = 0; i < 80; i++) {
+        usleep(100000);
+        if (test_scalar_count_db(db,
+                "SELECT COUNT(*) FROM channel_outbox WHERE status='pending';") == 0)
+            break;
+    }
+    if (test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_outbox WHERE status='pending';") != 0)
+        FAIL("admin outbox rows were not delivered");
+    if (g_dm_open_seen) FAIL("DM channel was re-opened instead of cached");
+    printf("  PASS: DM channel id is cached across notices\n");
+
     rc = 0;
 fail:
     if (rc != 0 && db) {
@@ -384,6 +495,9 @@ fail:
     if (db) db_close(db);
     close(g_listen_fd);
     pthread_join(th, NULL);
+    g_rest_stop = 1;
+    pthread_join(rth, NULL);
+    close(g_rest_fd);
 
     if (rc == 0) {
         if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {

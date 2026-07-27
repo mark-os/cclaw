@@ -99,6 +99,10 @@ char *channel_prev_extension(sqlite3 *db, const char *name) {
     return prev;
 }
 
+/* The destination of an admin notice is a *user* id, not a chat: the outbox
+ * payload says so with to_user=1 and the handler resolves it however its
+ * platform requires (Telegram: identical, a DM's chat id is the user id;
+ * Discord: open a DM channel first). C learns no platform specifics. */
 /* Queue a notice to every admin chat of a channel (channel_state admin_ids,
  * comma/space separated). Rows sit in channel_outbox until a process for the
  * channel delivers them — after an auto-revert that's the respawned, reverted
@@ -112,7 +116,7 @@ void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *te
 
     const char *isql =
         "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-        " VALUES(?1, 0, json_object('chat_id', ?2, 'text', ?3));";
+        " VALUES(?1, 0, json_object('chat_id', ?2, 'text', ?3, 'to_user', 1));";
     for (int i = 0; i < n; i++) {
         sqlite3_stmt *ins;
         if (sqlite3_prepare_v2(db, isql, -1, &ins, NULL) == SQLITE_OK) {
@@ -126,15 +130,19 @@ void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *te
     free(admins);
 }
 
-/* Is this channel_id one of the channel's admin_ids? */
-static int channel_cid_is_admin(sqlite3 *db, const char *channel_name, const char *cid) {
+/* Is this id one of the channel's admin_ids? admin_ids are *user* ids: on
+ * Telegram a DM's chat id and its sender id coincide, but on Discord a DM
+ * channel snowflake is not the user's — so every caller must pass the
+ * envelope's sender_id (see admin_id_of()). */
+int channel_id_is_admin(sqlite3 *db, const char *channel_name, const char *id) {
+    if (!id || !id[0]) return 0;
     char *admins = channel_config_get(db, channel_name, "admin_ids");
     if (!admins) return 0;
     char *ids[CHANNEL_ADMIN_IDS_MAX];
     int n = split_and_trim(admins, ids, CHANNEL_ADMIN_IDS_MAX);
     int hit = 0;
     for (int i = 0; i < n; i++) {
-        if (strcmp(ids[i], cid) == 0) { hit = 1; break; }
+        if (strcmp(ids[i], id) == 0) { hit = 1; break; }
     }
     free(admins);
     return hit;
@@ -206,9 +214,11 @@ static void channel_pin_session(sqlite3 *db, const char *channel_name,
  * actions: admin_ids senders only, handled in C before any session dispatch
  * (they must work even when the pinned session is wedged). A non-admin's
  * /new is NOT swallowed — it falls through as an ordinary message for the
- * agent to answer. Returns 1 when the event was consumed as a command. */
+ * agent to answer. Returns 1 when the event was consumed as a command.
+ * `cid` is the chat the command rebinds; `sender` is who is allowed to. */
 static int channel_chat_command(sqlite3 *db, const char *ch_name,
-                                const char *cid, const char *payload) {
+                                const char *cid, const char *sender,
+                                const char *payload) {
     char *text = NULL;
     sqlite3_stmt *js;
     if (sqlite3_prepare_v2(db, "SELECT json_extract(?1,'$.text');",
@@ -224,7 +234,7 @@ static int channel_chat_command(sqlite3 *db, const char *ch_name,
     int is_new = strcmp(text, "/new") == 0;
     int is_list = strncmp(text, "/sessions", 9) == 0 &&
                   (text[9] == '\0' || text[9] == ' ');
-    if ((!is_new && !is_list) || !channel_cid_is_admin(db, ch_name, cid)) {
+    if ((!is_new && !is_list) || !channel_id_is_admin(db, ch_name, sender)) {
         free(text);
         return 0;
     }
@@ -842,7 +852,29 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
 
-            if (channel_chat_command(db, ch_name, cid, payload)) {
+            /* Authority keys on the *sender*, never the chat: admin_ids are
+             * user ids and a Discord DM channel id is not one. Channels that
+             * emit no sender_id (custom handlers) fall back to the chat id,
+             * which is what Telegram DMs report anyway. */
+            char sender_buf[64] = {0};
+            const char *sender = cid;
+            {
+                const char *jsql = "SELECT CAST(json_extract(?, '$.sender_id') AS TEXT);";
+                sqlite3_stmt *js;
+                if (sqlite3_prepare_v2(db, jsql, -1, &js, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(js, 1, payload, -1, SQLITE_STATIC);
+                    if (sqlite3_step(js) == SQLITE_ROW) {
+                        const char *val = (const char *)sqlite3_column_text(js, 0);
+                        if (val && val[0] && strlen(val) < sizeof(sender_buf)) {
+                            memcpy(sender_buf, val, strlen(val) + 1);
+                            sender = sender_buf;
+                        }
+                    }
+                    sqlite3_finalize(js);
+                }
+            }
+
+            if (channel_chat_command(db, ch_name, cid, sender, payload)) {
                 processed++;
                 goto del;
             }
@@ -875,7 +907,7 @@ void channel_consume_events(sqlite3 *db) {
                  * open door; an admin chat falls back to the global
                  * default_agent; everyone else drops with a log line + a
                  * one-time admin notification. */
-                int is_admin = channel_cid_is_admin(db, ch_name, cid);
+                int is_admin = channel_id_is_admin(db, ch_name, sender);
                 agent = channel_default_agent(db, ch_name);
                 if (!agent && is_admin)
                     agent = config_get(db, "default_agent");

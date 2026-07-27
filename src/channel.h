@@ -65,6 +65,10 @@ char *channel_prev_extension(sqlite3 *db, const char *name);
  * <ext>.admin_ids, comma/space separated). */
 void channel_notify_admins(sqlite3 *db, const char *channel_name, const char *text);
 
+/* Is `id` in the channel's <ext>.admin_ids? admin_ids are user ids — pass the
+ * envelope's sender_id, not the chat id (they differ on Discord). */
+int channel_id_is_admin(sqlite3 *db, const char *channel_name, const char *id);
+
 
 /* Resolve a channel's registry config key <extension>.<key> through the
  * uniform resolution rule (specs/config.md). Heap or NULL; caller frees. */

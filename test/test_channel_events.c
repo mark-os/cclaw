@@ -318,6 +318,60 @@ static void test_channel_events_gate(void) {
     printf("PASS\n");
 }
 
+/* Admin authority keys on sender_id, not chat_id. Discord's DM channel
+ * snowflake is not the user's id, so a gate that matched admin_ids against
+ * chat_id both denied the real admin and (inversely) handed authority to
+ * whoever spoke in a chat that happens to be named like an admin id. */
+static void test_channel_events_admin_is_sender(void) {
+    setup();
+    sqlite3 *db = open_seeded(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    test_gate_channel_seed(db, "dsc", "u_admin");
+
+    /* Admin user in a DM channel whose id is NOT the user id → accepted. */
+    test_event_insert(db, "dsc", "message",
+        "{\"chat_id\":\"dm_1\",\"text\":\"hi\",\"sender_id\":\"u_admin\","
+        "\"sender_name\":\"Op\",\"chat_type\":\"dm\"}");
+    channel_consume_events(db);
+    int64_t sid = test_session_find(db, "dsc", "dm_1", "Assistant");
+    assert(sid > 0);
+    assert(test_inbox_count(db, sid) == 1);
+
+    /* Inverse (positive control for the denial): a stranger speaking in a
+     * chat whose id equals the admin's user id gets no authority. */
+    test_event_insert(db, "dsc", "message",
+        "{\"chat_id\":\"u_admin\",\"text\":\"let me in\",\"sender_id\":\"rando\","
+        "\"sender_name\":\"Eve\",\"chat_type\":\"group\"}");
+    channel_consume_events(db);
+    assert(test_session_find(db, "dsc", "u_admin", "Assistant") < 0);
+
+    /* /new is an authority action: the admin's rebinds the chat he spoke in. */
+    test_event_insert(db, "dsc", "message",
+        "{\"chat_id\":\"dm_1\",\"text\":\"/new\",\"sender_id\":\"u_admin\","
+        "\"sender_name\":\"Op\",\"chat_type\":\"dm\"}");
+    channel_consume_events(db);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='dsc'"
+        " AND json_extract(payload,'$.text') LIKE 'new session%';") == 1);
+
+    /* …and the stranger's is not consumed as a command (no reply, no new
+     * session — it falls through to the gate and is dropped). */
+    test_event_insert(db, "dsc", "message",
+        "{\"chat_id\":\"u_admin\",\"text\":\"/new\",\"sender_id\":\"rando\","
+        "\"sender_name\":\"Eve\",\"chat_type\":\"group\"}");
+    channel_consume_events(db);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='dsc'"
+        " AND json_extract(payload,'$.text') LIKE 'new session%';") == 1);
+    assert(test_session_find(db, "dsc", "u_admin", "Assistant") < 0);
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
 /* Route-to-session: the pin is the binding — a newer unpinned session for
  * the same chat is ignored until the pin is re-pointed; the FK refuses to
  * delete a session a route still pins. */
@@ -943,6 +997,9 @@ int main(void) {
 
     printf("  channel_events_gate... ");
     test_channel_events_gate();
+
+    printf("  channel_events_admin_is_sender... ");
+    test_channel_events_admin_is_sender();
 
     printf("  channel_events_session_pin... ");
     test_channel_events_session_pin();

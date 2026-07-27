@@ -164,6 +164,11 @@ retries:
   for each inbound item, return the next poll shape.
 - `onOutbox(item)` — deliver one outbound item: build the send with
   `channel.send({method,url,body, outbox_id: item.id, final: 1})`.
+  A payload with `to_user: 1` (admin notices, approval prompts fanned out to
+  `admin_ids`) addresses a **user** id, not a chat id. Where the platform
+  distinguishes the two the handler resolves it — Discord opens a DM channel
+  via `POST /users/@me/channels` and caches the result; Telegram needs
+  nothing, a DM's chat id *is* the user id.
 - `onRequest(req)` — handle webhook/UDS HTTP requests (verification,
   signature checks); return `{status, body}`.
 - Persistent-connection channels (Discord Gateway, IRC, …) instead use

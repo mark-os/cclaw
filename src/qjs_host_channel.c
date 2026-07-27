@@ -338,18 +338,10 @@ static JSValue js_admin_is_admin(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
     (void)this_val;
     if (argc < 1) return JS_NewBool(ctx, 0);
-    const char *channel_id = JS_ToCString(ctx, argv[0]);
-    if (!channel_id) return JS_NewBool(ctx, 0);
-    char *admins = channel_config_get(g_ctx->db, g_ctx->channel_name, "admin_ids");
-    if (!admins) { JS_FreeCString(ctx, channel_id); return JS_NewBool(ctx, 0); }
-    char *ids[CHANNEL_ADMIN_IDS_MAX];
-    int n = split_and_trim(admins, ids, CHANNEL_ADMIN_IDS_MAX);
-    int found = 0;
-    for (int i = 0; i < n; i++) {
-        if (strcmp(ids[i], channel_id) == 0) { found = 1; break; }
-    }
-    free(admins);
-    JS_FreeCString(ctx, channel_id);
+    const char *user_id = JS_ToCString(ctx, argv[0]);
+    if (!user_id) return JS_NewBool(ctx, 0);
+    int found = channel_id_is_admin(g_ctx->db, g_ctx->channel_name, user_id);
+    JS_FreeCString(ctx, user_id);
     return JS_NewBool(ctx, found);
 }
 

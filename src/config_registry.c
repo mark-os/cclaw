@@ -68,7 +68,9 @@ static const ConfigDef s_defs[] = {
       "\"memory_delete\",\"cron_set\",\"cron_list\","
       "\"create_agent\",\"update_agent\",\"extension_promote\",\"extension_publish\","
       "\"extension_attach\",\"extension_list\",\"extension_fork\",\"launch_agent\","
-      "\"check_session\",\"secret_create\"]",
+      "\"check_session\",\"secret_create\",\"channel_send\"]",
+      /* channel_send is safe as a baseline: the grant is not the authority —
+       * the route allowlist is (default-deny per target, operator-managed). */
       "Baseline tool grants seeded for a newly created agent (JSON array)" },
     { "agent_default_extensions",
       "[\"cclaw-docs\"]",

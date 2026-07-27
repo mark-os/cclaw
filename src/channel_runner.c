@@ -639,8 +639,11 @@ static void conn_recv_drain(JSContext *ctx, int i) {
     char buf[16384];
     for (;;) {
         size_t rlen = 0;
-        const struct curl_ws_frame *meta = NULL;
-        CURLcode res = curl_ws_recv(c->easy, buf, sizeof(buf), &rlen, &meta);
+        /* Older/newer libcurl disagree on the constness of this out-param
+         * (Debian 12's 7.88 wants non-const, this box's wants const) — the
+         * void* cast sidesteps the qualifier without an unsafe C-style cast. */
+        struct curl_ws_frame *meta = NULL;
+        CURLcode res = curl_ws_recv(c->easy, buf, sizeof(buf), &rlen, (void *)&meta);
         if (res == CURLE_AGAIN) return;
         if (res != CURLE_OK) { c->want_close = 1; c->close_code = 0; return; }
         if (!meta) continue;

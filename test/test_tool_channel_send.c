@@ -132,6 +132,27 @@ int main(void) {
     free(r);
     printf("PASS\n");
 
+    /* No target named → defaults to the session's own bound chat. */
+    printf("  default_own_chat... ");
+    r = call(&reg, &ctx, "Bob", 12, "{\"message\":\"speak here\"}");
+    assert(r && strstr(r, "queued, outbox id"));
+    free(r);
+    assert(qcount(db,
+        "SELECT COUNT(*) FROM channel_outbox WHERE channel_name='telegram'"
+        " AND json_extract(payload,'$.chat_id')='77'"
+        " AND json_extract(payload,'$.text')='speak here'") == 1);
+    printf("PASS\n");
+
+    /* Unbound session (no channel/chat) cannot default → error, no row. */
+    printf("  default_unbound_errors... ");
+    r = call(&reg, &ctx, "Alice", 11, "{\"message\":\"nowhere\"}");
+    assert(r && strstr(r, "error:"));
+    free(r);
+    assert(qcount(db,
+        "SELECT COUNT(*) FROM channel_outbox"
+        " WHERE json_extract(payload,'$.text')='nowhere'") == 0);
+    printf("PASS\n");
+
     /* Missing args → error. */
     printf("  missing_args... ");
     r = call(&reg, &ctx, "Alice", 11, "{\"channel\":\"telegram\"}");

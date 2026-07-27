@@ -67,9 +67,35 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
     char *channel = tool_args_str(ctx->db, arguments, "channel");
     char *chat_id = tool_args_str(ctx->db, arguments, "chat_id");
     char *message = tool_args_str(ctx->db, arguments, "message");
+
+    /* No target named → the session's own bound chat. Models don't reliably
+     * know their chat's snowflake (and hallucinate one when pressed); the
+     * common case — speak into the chat you're listening to — needs no id. */
+    if ((!channel || !chat_id) && ctx->session_id > 0) {
+        const char *bsql =
+            "SELECT channel_name, chat_id FROM sessions"
+            " WHERE id=?1 AND channel_name IS NOT NULL AND chat_id IS NOT NULL;";
+        sqlite3_stmt *bs;
+        if (sqlite3_prepare_v2(ctx->db, bsql, -1, &bs, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(bs, 1, ctx->session_id);
+            if (sqlite3_step(bs) == SQLITE_ROW) {
+                if (!channel) {
+                    const char *v = (const char *)sqlite3_column_text(bs, 0);
+                    if (v) channel = strdup(v);
+                }
+                if (!chat_id) {
+                    const char *v = (const char *)sqlite3_column_text(bs, 1);
+                    if (v) chat_id = strdup(v);
+                }
+            }
+            sqlite3_finalize(bs);
+        }
+    }
     if (!channel || !chat_id || !message || !message[0]) {
         free(channel); free(chat_id); free(message);
-        return strdup("error: channel, chat_id, and message are required");
+        return strdup("error: message is required; channel+chat_id only "
+                      "default to your own chat when the session is bound "
+                      "to one (use action='list' for other targets)");
     }
 
     /* Routes are the allowlist — default-deny. Reaching a new target is a
@@ -134,8 +160,8 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
 static const char *CHANNEL_SEND_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
     "\"action\":{\"type\":\"string\",\"description\":\"'send' (default) or 'list' reachable targets\"},"
-    "\"channel\":{\"type\":\"string\",\"description\":\"Channel name (e.g. telegram)\"},"
-    "\"chat_id\":{\"type\":\"string\",\"description\":\"Target chat id — must be routed to you\"},"
+    "\"channel\":{\"type\":\"string\",\"description\":\"Channel name (e.g. telegram); omit to target your own chat\"},"
+    "\"chat_id\":{\"type\":\"string\",\"description\":\"Target chat id — must be routed to you; omit to target your own chat. Never guess an id: omit it or take one from action='list'\"},"
     "\"message\":{\"type\":\"string\",\"description\":\"Plain text to send\"}"
     "},\"required\":[]}";
 

@@ -11,6 +11,7 @@
 #include "config_registry.h"
 #include "util.h"           /* split_and_trim */
 #include <signal.h>
+#include <sys/prctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,9 +39,18 @@ static void remove_channel(ChannelProc *c) {
 }
 
 static pid_t do_fork(const char *name) {
+    pid_t parent = getpid();
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        /* Die with the daemon. A SIGKILLed/OOM-killed daemon otherwise leaves
+         * runners holding their gateway connections, and the restarted daemon
+         * spawns duplicates (double message delivery). PDEATHSIG survives
+         * execve — the kernel clears it only across setuid/setgid execs — so
+         * setting it pre-exec is correct. Race: if the parent died between
+         * fork and prctl, the signal already fired for nobody; re-check. */
+        prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (getppid() != parent) _exit(0);
         /* Re-exec self for a clean process image; the --channel branch runs the
          * channel loop in-process (channel_runner_main), so ps shows
          * `cclaw --channel <name>`. */

@@ -170,6 +170,10 @@ CREATE TABLE IF NOT EXISTS channel_routes (
                                                -- Copied onto sessions.tool_filter at session
                                                -- creation only — frozen like sub-agent filters;
                                                -- later route edits don't retro-apply.
+  system_prompt_suffix TEXT,                   -- appended to the pinned session's system
+                                               -- prompt every turn; NULL = nothing appended.
+                                               -- Read live (unlike tool_filter): editing it
+                                               -- changes the next turn.
   PRIMARY KEY (channel_name, chat_id)
 );
 

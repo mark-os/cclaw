@@ -153,6 +153,30 @@ Admin authority comes from the explicitly routed admin channel, never
 ambiently from being in `admin_ids`. `/new` in an unrouted chat re-freezes
 the same default filter, so it can't launder the open door into full tools.
 
+## Per-route system prompt suffix
+
+`channel_routes.system_prompt_suffix` (`cclaw route add ... --prompt "<text>"`)
+is appended to the system prompt of the route's pinned session on every turn —
+room etiquette, house style, "you are in the #ops channel". It is *prompt
+text, not authority*: it can only change how the agent speaks, never what it
+may do (that stays in `grants` + `tool_filter`), which is why it is read live
+rather than frozen at session creation like the filter. Nothing is appended
+when it is NULL, and the request body is byte-identical to today's.
+
+## Ambient debounce (Discord)
+
+An ambient channel hands the agent every message in the room, so a burst of
+chatter would spend one turn per line. `debounce_ms` (0 = off) batches a burst
+into ONE envelope: the first message into a quiet chat still emits
+immediately (leading edge), the rest buffer and flush `debounce_ms` after the
+*first* buffered message — a latency cap, so a room that never falls silent
+still gets answered. An @mention or a reply flushes the whole buffer at once,
+with the mentioning message included. A batched envelope carries pre-joined
+`Name: text` lines and an empty `sender_name`, so the group formatter passes
+the already-attributed text through unchanged. DMs and mention-gated channels
+are never debounced. Buffers are runner-process memory: a crash loses at most
+one window of chatter nobody addressed to us.
+
 ## channel_send (outbound tool)
 
 Fixed schema `{channel, chat_id, message}` (+ `action: "list"` to enumerate

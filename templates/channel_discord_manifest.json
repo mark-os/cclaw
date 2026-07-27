@@ -21,6 +21,8 @@
       "description": "In guild channels, respond only when @mentioned or replied to (1 = on)" },
     { "key": "ambient_channels", "default": "",
       "description": "Comma-separated channel ids where the bot sees every message (or * for all) — listen-and-decide" },
+    { "key": "debounce_ms", "default": "0",
+      "description": "Ambient channels only: batch bursts of chatter into one envelope, flushed this many ms after the first buffered message (0 = off, emit every message)" },
     { "key": "allow_bots", "default": "0",
       "description": "Process messages from other bots (1 = on; default ignores bots to avoid loops)" }
   ]

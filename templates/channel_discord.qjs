@@ -60,6 +60,7 @@ function onInit() {
     config.requireMention = (channel.getConfig("require_mention") || "1") !== "0";
     config.ambient = parseList(channel.getConfig("ambient_channels"));
     config.allowBots = (channel.getConfig("allow_bots") || "0") === "1";
+    config.debounceMs = parseInt(channel.getConfig("debounce_ms") || "0", 10) || 0;
 
     if (!config.token) {
         channel.log("ERROR: bot_token unresolved (set CCLAW_DISCORD_BOT_TOKEN or the encrypted secret)");
@@ -237,6 +238,10 @@ function onConnClose(id, code) {
 function onTimer() {
     var now = Date.now();
 
+    // Ambient debounce flush first: the connection branches below return
+    // early, and a pending batch must not wait on a reconnect.
+    if (config.debounceMs) flushDue();
+
     // Reconnect when due and no live connection.
     if (!stopped && cid === 0 && reconnectAt && now >= reconnectAt) {
         reconnectAt = 0;
@@ -324,11 +329,101 @@ function onMessageCreate(d) {
         mentioned: mentioned,
         reply_to_me: replyToMe
     };
-    channel.emit("message", JSON.stringify(env), "disc_" + d.id);
+    deliver(env, "disc_" + d.id, isDm);
 }
 
 function ambientChannel(chatId) {
     return config.ambient.indexOf("*") !== -1 || config.ambient.indexOf(chatId) !== -1;
+}
+
+// ── Ambient debounce ─────────────────────────────────────────────
+//
+// An ambient channel hands us every message in the room, and a burst of five
+// people talking would otherwise spend five turns on what is one thought. With
+// debounce_ms > 0 a burst is batched into ONE envelope.
+//
+// Shape of the batch: C formats a group envelope as "sender_name: text" before
+// it reaches the inbox (channel.c, consume path). A batch has no single
+// sender, so we do that formatting ourselves — pre-joined "Name: text" lines —
+// and send sender_name:"" so C's formatter passes the text through untouched.
+// (The alternative, one envelope per message, is exactly what we're avoiding;
+// the envelope has no multi-message shape to use instead.) sender_id carries
+// the LAST speaker: it is the one the reply is answering, and it is what the
+// admin fallback in the gate keys on.
+//
+// Timing is a latency cap, not a pure trailing debounce: the flush fires
+// debounce_ms after the FIRST buffered message, so a room that never goes
+// quiet still gets answered. Leading edge: a first message into a quiet chat
+// emits immediately, so a one-off question is not delayed at all.
+//
+// Buffers live in this process only. A crash loses at most one window of
+// ambient chatter — acceptable for messages nobody addressed to us.
+var buffers = {};          // chatId -> { msgs: [env], firstAt, bytes }
+var lastEmitAt = {};       // chatId -> ms of the last delivery for that chat
+
+var DEBOUNCE_MAX_MSGS = 50;      // overflow guards: flush early, never drop
+var DEBOUNCE_MAX_BYTES = 8192;
+
+function deliver(env, extId, isDm) {
+    var chatId = env.chat_id;
+    // DMs and mention-gated channels are never debounced: both are direct
+    // address, where latency is the whole product.
+    if (!config.debounceMs || isDm || !ambientChannel(chatId)) {
+        emitEnv(env, extId);
+        return;
+    }
+    var buf = buffers[chatId];
+    // Addressed directly: answer now, but carry the room's context with it.
+    if (env.mentioned || env.reply_to_me) {
+        if (buf) { buf.msgs.push(env); flush(chatId); }
+        else emitEnv(env, extId);
+        return;
+    }
+    var now = Date.now();
+    if (!buf && now - (lastEmitAt[chatId] || 0) >= config.debounceMs) {
+        emitEnv(env, extId);          // leading edge — quiet chat, speak up
+        return;
+    }
+    if (!buf) buf = buffers[chatId] = { msgs: [], firstAt: now, bytes: 0 };
+    buf.msgs.push(env);
+    buf.bytes += (env.text || "").length + (env.sender_name || "").length + 2;
+    if (buf.msgs.length >= DEBOUNCE_MAX_MSGS || buf.bytes >= DEBOUNCE_MAX_BYTES)
+        flush(chatId);
+}
+
+function flush(chatId) {
+    var buf = buffers[chatId];
+    delete buffers[chatId];
+    if (!buf || buf.msgs.length === 0) return;
+    var msgs = buf.msgs;
+    if (msgs.length === 1) { emitEnv(msgs[0], "disc_b" + chatId + "_" + buf.firstAt); return; }
+
+    var lines = [], last = msgs[msgs.length - 1];
+    for (var i = 0; i < msgs.length; i++) {
+        var m = msgs[i];
+        lines.push((m.sender_name ? m.sender_name + ": " : "") + m.text);
+    }
+    emitEnv({
+        chat_id: chatId,
+        text: lines.join("\n"),
+        sender_id: last.sender_id,
+        sender_name: "",              // text already carries per-line attribution
+        chat_type: "group",
+        mentioned: last.mentioned,
+        reply_to_me: last.reply_to_me
+    }, "disc_b" + chatId + "_" + buf.firstAt);
+}
+
+function flushDue() {
+    var now = Date.now();
+    for (var chatId in buffers) {
+        if (now - buffers[chatId].firstAt >= config.debounceMs) flush(chatId);
+    }
+}
+
+function emitEnv(env, extId) {
+    lastEmitAt[env.chat_id] = Date.now();
+    channel.emit("message", JSON.stringify(env), extId);
 }
 
 // ── Outbound delivery (outbox) ───────────────────────────────────

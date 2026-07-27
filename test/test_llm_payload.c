@@ -789,6 +789,69 @@ static void test_extension_tool_grant_filtering(void) {
     printf("  PASS test_extension_tool_grant_filtering\n");
 }
 
+/* A route-pinned session gets its route's system_prompt_suffix appended to
+ * the system prompt, on both endpoint shapes; an unpinned session (positive
+ * control) sees the prompt unchanged. */
+static void test_route_prompt_suffix(void) {
+    sqlite3 *db = open_seeded();
+
+    int64_t sid, plain;
+    setup_session(db, &sid);
+    setup_session(db, &plain);
+
+    sqlite3_stmt *ins;
+    assert(sqlite3_prepare_v2(db,
+        "INSERT INTO channel_routes(channel_name, chat_id, session_id,"
+        "                           system_prompt_suffix)"
+        " VALUES('discord','chan1',?1,'House rules: keep it short.');",
+        -1, &ins, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(ins, 1, sid);
+    assert(sqlite3_step(ins) == SQLITE_DONE);
+    sqlite3_finalize(ins);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.context_window = 128000;
+
+    ContextPlan plan = {0};
+    LlmPayload payload;
+    sqlite3_stmt *s;
+
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    json_get_str(db, payload.body, "$.messages[0].content", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0),
+                  "You are helpful.\n\nHouse rules: keep it short.") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    /* Positive control: no route, no suffix, byte-identical prompt. */
+    assert(context_plan(db, plain, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, plain, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    json_get_str(db, payload.body, "$.messages[0].content", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "You are helpful.") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    /* Gemini carries the system prompt in systemInstruction. */
+    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    json_get_str(db, payload.body, "$.systemInstruction.parts[0].text", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0),
+                  "You are helpful.\n\nHouse rules: keep it short.") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_route_prompt_suffix\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_llm_payload:\n");
@@ -803,6 +866,7 @@ int main(void) {
     test_network_hosts_query_time_wrap();
     test_hook_inject_directive();
     test_extension_tool_grant_filtering();
+    test_route_prompt_suffix();
     printf("All payload tests passed.\n");
     return 0;
 }

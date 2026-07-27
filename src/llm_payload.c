@@ -137,8 +137,11 @@ static const char SQL_OPENAI_FULL[] =
     "SELECT json_patch('{}', json_object("
     "  'model', ?1,"
     "  'messages', (SELECT json_group_array(json(m)) FROM ("
-    "    SELECT 0 AS ord, 0 AS sub, json_object('role','system','content',?2) AS m"
-    "      WHERE ?2 IS NOT NULL"
+    /* ?6 = the pinned route's system_prompt_suffix (NULL for every session
+     * that isn't route-pinned) — appended here rather than assembled in C. */
+    "    SELECT 0 AS ord, 0 AS sub, json_object('role','system','content',"
+    "      COALESCE(?2,'') || COALESCE(char(10) || char(10) || ?6, '')) AS m"
+    "      WHERE ?2 IS NOT NULL OR ?6 IS NOT NULL"
     "    UNION ALL"
     /* ?3 (SQL_OPENAI_MESSAGES) already carries session context in the right
      * spot — at the turn boundary, before the newest user_message — so it
@@ -235,8 +238,11 @@ static const char SQL_GEMINI_TOOLS[] =
 
 static const char SQL_GEMINI_FULL[] =
     "SELECT json_patch('{}', json_object("
-    "  'systemInstruction', CASE WHEN ?1 IS NOT NULL AND ?1 != ''"
-    "    THEN json_object('parts',json_array(json_object('text',?1)))"
+    /* ?5 = the pinned route's system_prompt_suffix — see SQL_OPENAI_FULL. */
+    "  'systemInstruction', CASE WHEN COALESCE(?1,'') ||"
+    "      COALESCE(char(10) || char(10) || ?5, '') != ''"
+    "    THEN json_object('parts',json_array(json_object('text',"
+    "      COALESCE(?1,'') || COALESCE(char(10) || char(10) || ?5, ''))))"
     "    ELSE NULL END,"
     /* ?2 (SQL_GEMINI_CONTENTS) already carries session context in the right
      * spot — at the turn boundary, before the newest user_message. */
@@ -260,6 +266,26 @@ static char *session_tool_filter(sqlite3 *db, int64_t session_id) {
     if (sqlite3_step(s) == SQLITE_ROW) {
         const char *t = (const char *)sqlite3_column_text(s, 0);
         if (t) r = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return r;
+}
+
+/* A route-pinned session's system_prompt_suffix, or NULL. Read every turn
+ * (not frozen at session creation like tool_filter): the suffix is prompt
+ * text, not authority, so editing a route should show up on the next turn. */
+static char *route_prompt_suffix(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT system_prompt_suffix FROM channel_routes"
+            " WHERE session_id=? AND system_prompt_suffix IS NOT NULL LIMIT 1",
+            -1, &s, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(s, 1, session_id);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t && t[0]) r = strdup(t);
     }
     sqlite3_finalize(s);
     return r;
@@ -396,6 +422,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     char *agent_name = session_get_agent_name(db, session_id);
     char *allowed_tools = agent_name ? grants_json(db, agent_name, "tool") : NULL;
     char *tool_filter = session_tool_filter(db, session_id);
+    char *suffix = route_prompt_suffix(db, session_id);
     if (tool_filter) {
         if (allowed_tools) {
             char *isect = json_intersect(db, allowed_tools, tool_filter);
@@ -415,7 +442,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_stmt *full;
         if (sqlite3_prepare_v2(db, SQL_GEMINI_FULL, -1, &full, NULL) != SQLITE_OK) {
             free(contents); free(tools_json);
-            free(agent_name); free(allowed_tools);
+            free(agent_name); free(allowed_tools); free(suffix);
             return -1;
         }
         if (system_prompt && system_prompt[0])
@@ -424,6 +451,8 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_bind_text(full, 2, contents ? contents : "[]", -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(full, 3, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(full, 4, cfg->provider.max_tokens);
+        if (suffix) sqlite3_bind_text(full, 5, suffix, -1, SQLITE_TRANSIENT);
+        else sqlite3_bind_null(full, 5);
 
         free(contents); free(tools_json);
 
@@ -432,7 +461,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             out->body = (const char *)sqlite3_column_text(full, 0);
         } else {
             sqlite3_finalize(full);
-            free(agent_name); free(allowed_tools);
+            free(agent_name); free(allowed_tools); free(suffix);
             return -1;
         }
     } else {
@@ -443,7 +472,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_stmt *full;
         if (sqlite3_prepare_v2(db, SQL_OPENAI_FULL, -1, &full, NULL) != SQLITE_OK) {
             free(messages); free(tools_json);
-            free(agent_name); free(allowed_tools);
+            free(agent_name); free(allowed_tools); free(suffix);
             return -1;
         }
         sqlite3_bind_text(full, 1, cfg->provider.model ? cfg->provider.model : "unknown",
@@ -454,6 +483,8 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
         sqlite3_bind_text(full, 3, messages, -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(full, 4, cfg->provider.max_tokens);
         sqlite3_bind_text(full, 5, tools_json ? tools_json : "[]", -1, SQLITE_TRANSIENT);
+        if (suffix) sqlite3_bind_text(full, 6, suffix, -1, SQLITE_TRANSIENT);
+        else sqlite3_bind_null(full, 6);
 
         free(messages); free(tools_json);
 
@@ -462,12 +493,12 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             out->body = (const char *)sqlite3_column_text(full, 0);
         } else {
             sqlite3_finalize(full);
-            free(agent_name); free(allowed_tools);
+            free(agent_name); free(allowed_tools); free(suffix);
             return -1;
         }
     }
 
-    free(agent_name); free(allowed_tools);
+    free(agent_name); free(allowed_tools); free(suffix);
     return 0;
 }
 

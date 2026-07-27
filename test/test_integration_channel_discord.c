@@ -238,6 +238,22 @@ static void *mock_gateway(void *arg) {
                 "\"channel_id\":\"chan1\",\"guild_id\":\"g1\",\"content\":\"<@" BOT_ID
                 "> help me\",\"author\":{\"id\":\"u1\",\"username\":\"alice\"},"
                 "\"mentions\":[{\"id\":\"" BOT_ID "\"}]}}");
+            /* Ambient channel (chan2, debounce_ms=1500): a three-message
+             * burst. #1 is the leading edge (quiet chat -> immediate); #2 and
+             * #3 buffer and flush as ONE combined envelope. Without debounce
+             * this same burst is three envelopes = three turns. */
+            ws_send_text(cfd,
+                "{\"op\":0,\"s\":5,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m4\","
+                "\"channel_id\":\"chan2\",\"guild_id\":\"g1\",\"content\":\"first line\","
+                "\"author\":{\"id\":\"u1\",\"username\":\"alice\"},\"mentions\":[]}}");
+            ws_send_text(cfd,
+                "{\"op\":0,\"s\":6,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m5\","
+                "\"channel_id\":\"chan2\",\"guild_id\":\"g1\",\"content\":\"second line\","
+                "\"author\":{\"id\":\"u2\",\"username\":\"bob\"},\"mentions\":[]}}");
+            ws_send_text(cfd,
+                "{\"op\":0,\"s\":7,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m6\","
+                "\"channel_id\":\"chan2\",\"guild_id\":\"g1\",\"content\":\"third line\","
+                "\"author\":{\"id\":\"u3\",\"username\":\"carol\"},\"mentions\":[]}}");
         }
     }
     close(cfd);
@@ -315,6 +331,8 @@ static void seed_db(int port, int rest_port) {
         { "discord.gateway_url",    gw_url },
         { "discord.require_mention","1" },
         { "discord.admin_ids",      "adminuser" },
+        { "discord.ambient_channels","chan2" },
+        { "discord.debounce_ms",     "1500" },
     };
     for (size_t i = 0; i < sizeof(kv)/sizeof(*kv); i++) {
         sqlite3_bind_text(s, 1, kv[i].k, -1, SQLITE_STATIC);
@@ -475,6 +493,25 @@ int main(void) {
         FAIL("admin outbox rows were not delivered");
     if (g_dm_open_seen) FAIL("DM channel was re-opened instead of cached");
     printf("  PASS: DM channel id is cached across notices\n");
+
+    /* Ambient debounce: leading edge emits alone, the rest of the burst
+     * arrives as ONE combined envelope carrying both lines with per-line
+     * sender attribution. Pre-feature this was three separate events. */
+    int combined = 0;
+    for (int i = 0; i < 80 && !combined; i++) {
+        usleep(100000);
+        combined = test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
+            " AND payload LIKE '%bob: second line%'"
+            " AND payload LIKE '%carol: third line%';");
+    }
+    if (combined != 1) FAIL("burst was not combined into one ambient envelope");
+    if (event_count(db, "first line") != 1) FAIL("leading-edge message was not emitted alone");
+    if (test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
+            " AND payload LIKE '%chan2%';") != 2)
+        FAIL("ambient burst of 3 did not collapse to 2 envelopes");
+    printf("  PASS: ambient debounce collapses a 3-message burst to 2 envelopes\n");
 
     rc = 0;
 fail:

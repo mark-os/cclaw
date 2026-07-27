@@ -344,6 +344,7 @@ channel-wide default lives on `channels.default_agent`.
 | `session_id` | INTEGER NOT NULL | FK → `sessions(id)`; the pin IS the binding |
 | `delivery_mode` | TEXT NOT NULL DEFAULT 'auto' | `auto` = turn output auto-delivers to the origin chat; `explicit` = only `channel_send` |
 | `tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Frozen onto the pinned session at its creation (`route add --tools`); later route edits don't retro-apply |
+| `system_prompt_suffix` | TEXT | Appended to the pinned session's system prompt every turn (`route add --prompt`); NULL = nothing appended. Read live — unlike `tool_filter`, an edit takes effect on the next turn |
 | PRIMARY KEY | (channel_name, chat_id) | |
 
 ---

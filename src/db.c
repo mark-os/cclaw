@@ -343,6 +343,11 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
      * fallback). NULL keeps today's behaviour (full grant set), so the column
      * starts inert; `route add <ch> '*' <agent> --tools ...` fills it. */
     { 36, "ALTER TABLE channels ADD COLUMN default_tool_filter TEXT;", NULL },
+    /* v37: channel_routes.system_prompt_suffix — per-route addendum to the
+     * system prompt of the pinned session (room etiquette, house style).
+     * NULL = nothing appended, so the column starts inert on a live DB;
+     * `route add ... --prompt "..."` fills it. */
+    { 37, "ALTER TABLE channel_routes ADD COLUMN system_prompt_suffix TEXT;", NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 33   /* schema freeze 2026-07-19 — no patches below this */

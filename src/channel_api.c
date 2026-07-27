@@ -175,12 +175,42 @@ int channel_ack_outbox(ChannelCtx *ctx, int64_t id) {
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+/* Tell the sending session its message never made it. Called only from the
+ * status flip below, which is the single choke point for permanent failure
+ * (the C drain loop and the JS channel.failOutbox binding both land here). */
+static void notify_send_failure(ChannelCtx *ctx, int64_t id, const char *status) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(ctx->db,
+            "SELECT o.session_id, json_extract(o.payload,'$.chat_id')"
+            " FROM channel_outbox o JOIN sessions s ON s.id=o.session_id"
+            " WHERE o.id=? AND o.channel_name=? AND o.session_id>0;",
+            -1, &s, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(s, 1, id);
+    sqlite3_bind_text(s, 2, ctx->channel_name, -1, SQLITE_STATIC);
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        int64_t sid = sqlite3_column_int64(s, 0);
+        const char *chat = (const char *)sqlite3_column_text(s, 1);
+        char msg[512];
+        snprintf(msg, sizeof(msg),
+                 "channel_send to (%s, %s) failed permanently: outbox id %lld, %s",
+                 ctx->channel_name, chat ? chat : "unknown",
+                 (long long)id, status);
+        if (inbox_insert(ctx->db, sid, "system", msg) > 0)
+            wake_external(ctx->db_path);
+    }
+    sqlite3_finalize(s);
+}
+
 /* Mark failed */
 int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error) {
     if (!ctx) return -1;
+    /* The status flip is the once-only guard: a row already 'failed: ...'
+     * is not re-flipped, so the notice is written exactly once even if both
+     * the runner loop and a JS handler try to fail the same row. */
     const char *sql =
         "UPDATE channel_outbox SET status=?"
-        " WHERE id=? AND channel_name=?;";
+        " WHERE id=? AND channel_name=? AND status NOT LIKE 'failed:%';";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(ctx->db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
@@ -191,8 +221,11 @@ int channel_fail_outbox(ChannelCtx *ctx, int64_t id, const char *error) {
     sqlite3_bind_int64(stmt, 2, id);
     sqlite3_bind_text(stmt, 3, ctx->channel_name, -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
+    int flipped = sqlite3_changes(ctx->db);
     sqlite3_finalize(stmt);
-    return (rc == SQLITE_DONE) ? 0 : -1;
+    if (rc != SQLITE_DONE) return -1;
+    if (flipped > 0) notify_send_failure(ctx, id, status_buf);
+    return 0;
 }
 
 /* Reschedule a failed send for retry: bump attempt count, return to

@@ -184,6 +184,65 @@ static void test_wake_external(void) {
     close(rfd);
 }
 
+/* Permanent outbox failure must tell the sending session; a delivered row
+ * must not. */
+static int64_t count_failure_notices(sqlite3 *db, int64_t sid) {
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT count(*) FROM inbox WHERE session_id=? AND source='system'"
+        " AND payload LIKE '%failed permanently%'", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    int64_t n = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return n;
+}
+
+static void test_outbox_fail_notifies_session(void) {
+    cleanup();
+    ChannelCtx *ctx = channel_ctx_open(TEST_DB, "telegram");
+    assert(ctx);
+
+    assert(sqlite3_exec(ctx->db,
+        "INSERT INTO sessions(id, channel_name, chat_id) VALUES(7,'telegram','555');"
+        "INSERT INTO channel_outbox(id, channel_name, session_id, payload)"
+        " VALUES(1,'telegram',7,'{\"chat_id\":\"555\",\"text\":\"hi\"}');"
+        "INSERT INTO channel_outbox(id, channel_name, session_id, payload)"
+        " VALUES(2,'telegram',7,'{\"chat_id\":\"555\",\"text\":\"ok\"}');"
+        /* session_id 0 = no sender to notify */
+        "INSERT INTO channel_outbox(id, channel_name, session_id, payload)"
+        " VALUES(3,'telegram',0,'{\"chat_id\":\"555\",\"text\":\"orphan\"}');",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    /* Permanent failure → exactly one notice naming the outbox id + error */
+    assert(channel_fail_outbox(ctx, 1, "404 Unknown Channel") == 0);
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(ctx->db,
+        "SELECT payload FROM inbox WHERE session_id=7", -1, &s, NULL) == SQLITE_OK);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    const char *p = (const char *)sqlite3_column_text(s, 0);
+    assert(strstr(p, "outbox id 1"));
+    assert(strstr(p, "404 Unknown Channel"));
+    assert(strstr(p, "telegram"));
+    assert(strstr(p, "555"));
+    assert(sqlite3_step(s) != SQLITE_ROW);
+    sqlite3_finalize(s);
+
+    /* Re-failing the same row must not duplicate the notice */
+    channel_fail_outbox(ctx, 1, "404 Unknown Channel");
+    assert(count_failure_notices(ctx->db, 7) == 1);
+
+    /* Positive control: delivery is silent */
+    assert(channel_ack_outbox(ctx, 2) == 0);
+    assert(count_failure_notices(ctx->db, 7) == 1);
+
+    /* Sessionless row: no notice, and no crash */
+    assert(channel_fail_outbox(ctx, 3, "gone") == 0);
+    assert(count_failure_notices(ctx->db, 0) == 0);
+
+    channel_ctx_free(ctx);
+}
+
 int main(void) {
     TEST_INIT();
     alarm(10);
@@ -202,6 +261,10 @@ int main(void) {
 
     printf("test_channel_outbox_mode...");
     test_channel_outbox_mode();
+    printf(" OK\n");
+
+    printf("test_outbox_fail_notifies_session...");
+    test_outbox_fail_notifies_session();
     printf(" OK\n");
 
     printf("test_wake_external...");

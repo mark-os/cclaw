@@ -794,6 +794,195 @@ static void test_chat_commands(void) {
     printf("PASS\n");
 }
 
+/* Last outbox text for a channel (newest row), strdup'd. */
+static char *last_outbox_text(sqlite3 *db, const char *ch) {
+    sqlite3_stmt *s;
+    char *out = NULL;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT json_extract(payload,'$.text') FROM channel_outbox"
+        " WHERE channel_name=? ORDER BY id DESC LIMIT 1;", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_text(s, 1, ch, -1, SQLITE_STATIC);
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t) out = strdup(t);
+    }
+    sqlite3_finalize(s);
+    return out;
+}
+
+static void assert_reply_has(sqlite3 *db, const char *ch, const char *needle) {
+    char *t = last_outbox_text(db, ch);
+    assert(t);
+    if (!strstr(t, needle)) {
+        fprintf(stderr, "\nreply %s\n  does not contain: %s\n", t, needle);
+        assert(0);
+    }
+    free(t);
+}
+
+static char *approval_state_of(sqlite3 *db, int64_t aid) {
+    sqlite3_stmt *s;
+    char *out = NULL;
+    assert(sqlite3_prepare_v2(db, "SELECT state FROM approvals WHERE id=?;",
+                              -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, aid);
+    if (sqlite3_step(s) == SQLITE_ROW) out = strdup((const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+    return out;
+}
+
+static void assert_state_is(sqlite3 *db, int64_t aid, const char *want) {
+    char *st = approval_state_of(db, aid);
+    assert(st && strcmp(st, want) == 0);
+    free(st);
+}
+
+static void chat_say(sqlite3 *db, const char *ch, const char *chat, const char *text) {
+    char payload[256];
+    snprintf(payload, sizeof(payload),
+             "{\"chat_id\":\"%s\",\"text\":\"%s\"}", chat, text);
+    test_event_insert(db, ch, "message", payload);
+    channel_consume_events(db);
+}
+
+/* /approve and /deny: admin-gated chat decisions on a parked approval.
+ * Asserts the decision reaches resolve_approval (the one transition entry
+ * point — the spy stands in for main.c's real implementation, so the state
+ * change itself is that call) with the right decision and a decided_via that
+ * records WHO decided. Negative paths must leave the approval pending. */
+static void test_chat_approve_commands(void) {
+    setup();
+    sqlite3 *db = open_seeded(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    test_gate_channel_seed(db, "apch", "9");
+    test_binding_set(db, "apch", "9", "testagent");
+    int64_t sid = test_session_find(db, "apch", "9", "testagent");
+    assert(sid > 0);
+
+    int64_t aid = approval_create(db, sid, "tc1", "shell_exec", "run",
+                                  "{\"command\":\"rm -rf /tmp/x\"}", "rerun");
+    assert(aid > 0);
+    char cmd[128];
+
+    /* No id / non-numeric id / unknown id: helpful error, nothing decided. */
+    resolve_spy_reset();
+    chat_say(db, "apch", "9", "/approve");
+    assert_reply_has(db, "apch", "usage: /approve <approval id>");
+    chat_say(db, "apch", "9", "/deny banana");
+    assert_reply_has(db, "apch", "usage: /deny <approval id>");
+    chat_say(db, "apch", "9", "/approve 99999");
+    assert_reply_has(db, "apch", "no approval #99999 on this channel");
+    assert(g_resolve_calls == 0);
+    assert_state_is(db, aid, "pending");
+
+    /* Positive control: a non-admin's /approve is not a command at all —
+     * it falls through as ordinary chat text and the approval is untouched. */
+    test_binding_set(db, "apch", "55", "testagent");
+    int64_t other = test_session_find(db, "apch", "55", "testagent");
+    snprintf(cmd, sizeof(cmd), "/approve %lld", (long long)aid);
+    chat_say(db, "apch", "55", cmd);
+    assert(test_inbox_count(db, other) == 1);
+    assert(g_resolve_calls == 0);
+    assert_state_is(db, aid, "pending");
+
+    /* Cross-channel: an approval bound to another channel is invisible here. */
+    test_gate_channel_seed(db, "otherch", "9");
+    test_binding_set(db, "otherch", "9", "testagent");
+    int64_t osid = test_session_find(db, "otherch", "9", "testagent");
+    int64_t oaid = approval_create(db, osid, "tc9", "web_fetch", "fetch", "{}", "rerun");
+    snprintf(cmd, sizeof(cmd), "/approve %lld", (long long)oaid);
+    chat_say(db, "apch", "9", cmd);
+    assert_reply_has(db, "apch", "on this channel");
+    assert(g_resolve_calls == 0);
+    assert_state_is(db, oaid, "pending");
+
+    /* Admin decides: a rerun approval resolves ONCE, attributed to the sender. */
+    snprintf(cmd, sizeof(cmd), "/approve %lld", (long long)aid);
+    chat_say(db, "apch", "9", cmd);
+    assert(g_resolve_calls == 1);
+    assert(g_resolve_approval_id == aid);
+    assert(g_resolve_decision == APPROVAL_ONCE);
+    assert(strcmp(g_resolve_decided_via, "channel:apch:9") == 0);
+    assert_reply_has(db, "apch", "shell_exec run");
+
+    /* Already decided (the spy left the row pending, so settle it as main.c
+     * would): a second decision is refused with a message, not silence. */
+    {
+        sqlite3_stmt *s;
+        assert(sqlite3_prepare_v2(db, "UPDATE approvals SET state='approved',"
+                                      " decided_via='channel:apch:9' WHERE id=?;",
+                                  -1, &s, NULL) == SQLITE_OK);
+        sqlite3_bind_int64(s, 1, aid);
+        assert(sqlite3_step(s) == SQLITE_DONE);
+        sqlite3_finalize(s);
+    }
+    resolve_spy_reset();
+    snprintf(cmd, sizeof(cmd), "/deny %lld", (long long)aid);
+    chat_say(db, "apch", "9", cmd);
+    assert(g_resolve_calls == 0);
+    assert_reply_has(db, "apch", "is already approved");
+    assert_state_is(db, aid, "approved");
+
+    /* An 'apply' grant has no once semantics — /approve sends ALWAYS. */
+    int64_t gid = approval_create(db, sid, "tc2", "request_config",
+                                  "request_changes", "{}", "apply");
+    resolve_spy_reset();
+    snprintf(cmd, sizeof(cmd), "/approve %lld", (long long)gid);
+    chat_say(db, "apch", "9", cmd);
+    assert(g_resolve_calls == 1);
+    assert(g_resolve_decision == APPROVAL_ALWAYS);
+
+    /* /deny maps to APPROVAL_DENY. */
+    int64_t did = approval_create(db, sid, "tc3", "shell_exec", "run", "{}", "rerun");
+    resolve_spy_reset();
+    snprintf(cmd, sizeof(cmd), "/deny %lld", (long long)did);
+    chat_say(db, "apch", "9", cmd);
+    assert(g_resolve_calls == 1);
+    assert(g_resolve_approval_id == did);
+    assert(g_resolve_decision == APPROVAL_DENY);
+    assert_reply_has(db, "apch", "denied");
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
+/* /status: admin-gated read-only summary of the chat's pinned session. */
+static void test_chat_status_command(void) {
+    setup();
+    sqlite3 *db = open_seeded(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    test_gate_channel_seed(db, "stch", "9,42");
+    test_binding_set(db, "stch", "9", "testagent");
+    int64_t sid = test_session_find(db, "stch", "9", "testagent");
+    assert(sid > 0);
+    assert(sqlite3_exec(db, "UPDATE agents SET primary_model='some/model'"
+                            " WHERE name='testagent';", NULL, NULL, NULL) == SQLITE_OK);
+    assert(approval_create(db, sid, "tc1", "shell_exec", "run", "{}", "rerun") > 0);
+
+    chat_say(db, "stch", "9", "/status");
+    {
+        char want[64];
+        snprintf(want, sizeof(want), "session #%lld", (long long)sid);
+        assert_reply_has(db, "stch", want);
+    }
+    assert_reply_has(db, "stch", "some/model");
+    assert_reply_has(db, "stch", "pending approvals on this channel: 1");
+
+    /* Unpinned chat (admin, but no route) — /status is still a command and
+     * says so rather than falling through to the gate. */
+    chat_say(db, "stch", "42", "/status");
+    assert_reply_has(db, "stch", "no session pinned");
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
 /* channel_notify_session: outbox row lands for channel-bound sessions,
  * silently no-ops for channel-less ones (CLI, sub-agents). */
 static void test_notify_session(void) {
@@ -1073,6 +1262,12 @@ int main(void) {
 
     printf("  chat_commands... ");
     test_chat_commands();
+
+    printf("  chat_approve_commands... ");
+    test_chat_approve_commands();
+
+    printf("  chat_status_command... ");
+    test_chat_status_command();
 
     printf("  notify_session... ");
     test_notify_session();

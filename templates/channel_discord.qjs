@@ -415,12 +415,34 @@ function sendDashboard(chatId) {
 function sendApprovals(chatId) {
     var list = channel.admin.listPendingApprovals();
     if (!list || list.length === 0) { postSimple(chatId, "No pending approvals."); return; }
-    var lines = ["Pending approvals (action them on the dashboard — /admin):"];
+    var lines = ["Pending approvals — decide with /approve <id> or /deny <id> " +
+                 "(full controls on the dashboard — /admin):"];
     for (var i = 0; i < list.length; i++) {
         var a = list[i];
-        lines.push("#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.action);
+        lines.push("#" + a.id + " (" + a.agent + "): " + a.tool_name + " " + a.action +
+                   "\n    " + argsSummary(a.args_json));
     }
-    postSimple(chatId, lines.join("\n"));
+    // Many pending approvals with args easily exceed Discord's 2000-char
+    // limit; postSimple truncates, so pack whole lines into messages instead.
+    var buf = "";
+    for (var k = 0; k < lines.length; k++) {
+        var next = buf ? buf + "\n" + lines[k] : lines[k];
+        if (next.length > DISCORD_MAX_MSG_LEN && buf) { postSimple(chatId, buf); buf = lines[k]; }
+        else buf = next;
+    }
+    if (buf) postSimple(chatId, buf);
+}
+
+// One-line, length-capped view of an approval's arguments, so an admin can see
+// WHAT they are approving without opening the dashboard. Whitespace is
+// collapsed: raw args are often multi-line shell/JSON documents.
+var ARGS_SUMMARY_MAX = 200;
+function argsSummary(argsJson) {
+    var s = (argsJson || "{}").replace(/\s+/g, " ").trim();
+    if (s === "{}" || s === "") return "(no arguments)";
+    if (s.length > ARGS_SUMMARY_MAX)
+        s = s.substring(0, findSplit(s, 0, ARGS_SUMMARY_MAX)) + "…";
+    return s;
 }
 
 function postSimple(chatId, content) {

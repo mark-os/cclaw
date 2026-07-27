@@ -2394,9 +2394,15 @@ static void handle_approval_park(int64_t session_id) {
         char *agent = session_get_agent_name(g_db, session_id);
         char *summary = format_approval_summary(a);
         Buf pb = {0};
-        buf_appendf(&pb, "**Agent %s** (session %lld, channel %s):\n%s",
-                    agent ? agent : "?", (long long)session_id, ch_name,
-                    summary ? summary : "?");
+        /* The approval id is part of the prompt text, not just the button
+         * payload: a channel without inline buttons (Discord) decides with
+         * "/approve <id>", and the admin must see the id and the full summary
+         * in the same message they are deciding from. */
+        buf_appendf(&pb, "**Approval #%lld** — agent %s (session %lld, channel %s):\n%s"
+                         "\nDecide here: /approve %lld or /deny %lld",
+                    (long long)a->id, agent ? agent : "?",
+                    (long long)session_id, ch_name, summary ? summary : "?",
+                    (long long)a->id, (long long)a->id);
         free(agent);
         free(summary);
         char *prompt = buf_take(&pb);

@@ -53,6 +53,12 @@ Admin chats can also issue `/new` (re-point the chat at a fresh session)
 and `/sessions [id]` (list this chat's sessions / attach to one) — handled
 in C before dispatch, so they work even when the current session is stuck.
 
+They can also decide approvals from chat: `/approvals` lists what is parked
+(id, agent, tool, arguments), `/approve <id>` and `/deny <id>` settle one, and
+`/status` shows the chat's session, agent, model and pending count. An
+approval can only be decided from the channel it was raised on, and only while
+it is still pending; who decided is recorded in `approvals.decided_via`.
+
 Chat membership is never authority. `admin_ids` is the only admin source.
 
 ### Adding routes

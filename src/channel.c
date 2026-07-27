@@ -219,9 +219,140 @@ static void channel_pin_session(sqlite3 *db, const char *channel_name,
     }
 }
 
-/* Chat commands — /new and /sessions rebind the chat, so they are authority
- * actions: admin_ids senders only, handled in C before any session dispatch
- * (they must work even when the pinned session is wedged). A non-admin's
+/* "/cmd" or "/cmd <arg…>" — returns the (leading-space-stripped) argument
+ * tail, "" for the bare command, or NULL when text isn't this command. */
+static const char *cmd_arg(const char *text, const char *cmd) {
+    size_t n = strlen(cmd);
+    if (strncmp(text, cmd, n) != 0) return NULL;
+    if (text[n] == '\0') return text + n;
+    if (text[n] != ' ') return NULL;
+    const char *p = text + n + 1;
+    while (*p == ' ') p++;
+    return p;
+}
+
+/* /approve <id> and /deny <id> — decide a parked approval from chat, so an
+ * admin isn't forced onto the dashboard. The transition itself is NOT
+ * reimplemented here: this is a scope+state check in front of the one entry
+ * point every approver uses (resolve_approval, main.c).
+ *
+ * Strength mirrors the CLI's non-interactive approve: a "rerun" approval gets
+ * ONCE (single-use — chat is the low-ceremony surface, it should not mint
+ * standing authority), an "apply" grant gets ALWAYS because ONCE is incoherent
+ * for it. "Allow and stop asking" stays a dashboard/button decision.
+ *
+ * Who decided is recorded in approvals.decided_via ("channel:<ch>:<sender>"),
+ * the same audit column the dashboard and CLI write. */
+static int chat_cmd_decide(sqlite3 *db, const char *ch_name, const char *cid,
+                           const char *sender, const char *arg, int approve) {
+    const char *verb = approve ? "approve" : "deny";
+    char msg[320];
+    char *end = NULL;
+    long long id = (arg && *arg) ? strtoll(arg, &end, 10) : 0;
+    if (id <= 0 || (end && *end != '\0' && *end != ' ')) {
+        snprintf(msg, sizeof(msg),
+                 "usage: /%s <approval id> — see /approvals for pending ids", verb);
+        channel_chat_reply(db, ch_name, cid, msg);
+        return 1;
+    }
+
+    char state[32] = {0}, tool[64] = {0}, action[64] = {0}, resolve[16] = {0};
+    int found = 0, in_scope = 0;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT a.state, COALESCE(a.tool_name,'?'), COALESCE(a.action,'?'),"
+            "       COALESCE(a.resolve,'rerun'), s.channel_name IS ?2"
+            " FROM approvals a JOIN sessions s ON s.id = a.session_id"
+            " WHERE a.id = ?1;", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(s, 1, id);
+        sqlite3_bind_text(s, 2, ch_name, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            found = 1;
+            snprintf(state, sizeof(state), "%s", sqlite3_column_text(s, 0));
+            snprintf(tool, sizeof(tool), "%s", sqlite3_column_text(s, 1));
+            snprintf(action, sizeof(action), "%s", sqlite3_column_text(s, 2));
+            snprintf(resolve, sizeof(resolve), "%s", sqlite3_column_text(s, 3));
+            in_scope = sqlite3_column_int(s, 4);
+        }
+        sqlite3_finalize(s);
+    }
+
+    /* Out of scope reads as "doesn't exist": only the channel an approval's
+     * session is bound to may decide it (same rule as approval_decision), and
+     * a mismatch must not confirm the id exists elsewhere. */
+    if (!found || !in_scope) {
+        snprintf(msg, sizeof(msg), "no approval #%lld on this channel", id);
+        channel_chat_reply(db, ch_name, cid, msg);
+        LOG_WARN_("channel /%s out of scope ch=%s sender=%s approval=%lld",
+                  verb, ch_name, sender, id);
+        return 1;
+    }
+    if (strcmp(state, "pending") != 0) {
+        snprintf(msg, sizeof(msg),
+                 "approval #%lld is already %s — nothing to %s", id, state, verb);
+        channel_chat_reply(db, ch_name, cid, msg);
+        return 1;
+    }
+
+    ApprovalDecision d = APPROVAL_DENY;
+    if (approve)
+        d = strcmp(resolve, "apply") == 0 ? APPROVAL_ALWAYS : APPROVAL_ONCE;
+    char decided_via[128];
+    snprintf(decided_via, sizeof(decided_via), "channel:%s:%s", ch_name, sender);
+    LOG_INFO_("channel /%s ch=%s chat=%s sender=%s approval=%lld tool=%s action=%s",
+              verb, ch_name, cid, sender, id, tool, action);
+    resolve_approval(id, d, decided_via, 0);
+
+    snprintf(msg, sizeof(msg), "%s #%lld (%s %s)%s",
+             approve ? "approved" : "denied", id, tool, action,
+             (approve && d == APPROVAL_ONCE) ? " — once" : "");
+    channel_chat_reply(db, ch_name, cid, msg);
+    return 1;
+}
+
+/* /status — one read-only query: what this chat is pinned to, which agent and
+ * model answer it, and how much is outstanding/spent-ish. There is no cost
+ * ledger (llm_responses carries no price), so "today" is request count. */
+static int chat_cmd_status(sqlite3 *db, const char *ch_name, const char *cid) {
+    char msg[512];
+    sqlite3_stmt *s;
+    int have = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT s.id, s.agent_name, s.state,"
+            "       COALESCE(a.primary_model,'(provider default)'),"
+            "       (SELECT COUNT(*) FROM approvals ap"
+            "          JOIN sessions s2 ON s2.id = ap.session_id"
+            "         WHERE ap.state='pending' AND s2.channel_name = ?1),"
+            "       (SELECT COUNT(*) FROM llm_responses"
+            "         WHERE session_id = s.id"
+            "           AND created_at >= unixepoch('now','start of day'))"
+            " FROM channel_routes r JOIN sessions s ON s.id = r.session_id"
+            " LEFT JOIN agents a ON a.name = s.agent_name"
+            " WHERE r.channel_name = ?1 AND r.chat_id = ?2;",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, ch_name, -1, SQLITE_STATIC);
+        sqlite3_bind_text(s, 2, cid, -1, SQLITE_STATIC);
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            have = 1;
+            snprintf(msg, sizeof(msg),
+                     "session #%lld (%s, %s)\nmodel: %s\nLLM calls today: %d\n"
+                     "pending approvals on this channel: %d",
+                     (long long)sqlite3_column_int64(s, 0),
+                     sqlite3_column_text(s, 1), sqlite3_column_text(s, 2),
+                     sqlite3_column_text(s, 3), sqlite3_column_int(s, 5),
+                     sqlite3_column_int(s, 4));
+        }
+        sqlite3_finalize(s);
+    }
+    channel_chat_reply(db, ch_name, cid,
+                       have ? msg : "no session pinned to this chat (try /new)");
+    return 1;
+}
+
+/* Chat commands — /new and /sessions rebind the chat, /approve and /deny
+ * decide a parked approval, so they are authority actions: admin_ids senders
+ * only, handled in C before any session dispatch (they must work even when the
+ * pinned session is wedged). A non-admin's
  * /new is NOT swallowed — it falls through as an ordinary message for the
  * agent to answer. Returns 1 when the event was consumed as a command.
  * `cid` is the chat the command rebinds; `sender` is who is allowed to. */
@@ -241,11 +372,27 @@ static int channel_chat_command(sqlite3 *db, const char *ch_name,
     }
     if (!text) return 0;
     int is_new = strcmp(text, "/new") == 0;
-    int is_list = strncmp(text, "/sessions", 9) == 0 &&
-                  (text[9] == '\0' || text[9] == ' ');
-    if ((!is_new && !is_list) || !channel_id_is_admin(db, ch_name, sender)) {
+    const char *list_arg = cmd_arg(text, "/sessions");
+    const char *approve_arg = cmd_arg(text, "/approve");
+    const char *deny_arg = cmd_arg(text, "/deny");
+    const char *status_arg = cmd_arg(text, "/status");
+    int known = is_new || list_arg || approve_arg || deny_arg || status_arg;
+    if (!known || !channel_id_is_admin(db, ch_name, sender)) {
         free(text);
         return 0;
+    }
+
+    if (approve_arg || deny_arg) {
+        int r = chat_cmd_decide(db, ch_name, cid, sender,
+                                approve_arg ? approve_arg : deny_arg,
+                                approve_arg != NULL);
+        free(text);
+        return r;
+    }
+    if (status_arg) {
+        int r = chat_cmd_status(db, ch_name, cid);
+        free(text);
+        return r;
     }
 
     if (is_new) {
@@ -285,7 +432,7 @@ static int channel_chat_command(sqlite3 *db, const char *ch_name,
     }
 
     /* "/sessions <id>" re-pins; bare "/sessions" lists this chat's history. */
-    int64_t pick = text[9] == ' ' ? strtoll(text + 10, NULL, 10) : 0;
+    int64_t pick = list_arg[0] ? strtoll(list_arg, NULL, 10) : 0;
     if (pick > 0) {
         sqlite3_stmt *chk;
         int found = 0;

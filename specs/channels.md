@@ -74,9 +74,20 @@ Chat membership is never authority. `admin_ids` is the only admin source.
 
 Admin chats can issue `/new` (re-point the pin at a fresh session for the
 same agent) and `/sessions [id]` (list this chat's sessions / attach to
-one). Handled in C before any dispatch — authority actions that must work
-even when the pinned session is wedged. A non-admin's `/new` is an ordinary
-message.
+one), plus `/approve <id>` / `/deny <id>` (decide a parked approval) and
+`/status` (what this chat is pinned to). Handled in C before any dispatch —
+authority actions that must work even when the pinned session is wedged. A
+non-admin's `/new` is an ordinary message.
+
+`/approve` and `/deny` are a scope + state check in front of
+`resolve_approval()` — the same entry point the dashboard, the CLI prompt and
+the inline-button `approval_decision` event use. An approval is decidable only
+from the channel its session is bound to (a mismatch reads as "no such
+approval"), only while `state='pending'`, and the decision is attributed in
+`approvals.decided_via` as `channel:<channel>:<sender_id>`. Strength is
+deliberately minimal: a `rerun` approval resolves ONCE, an `apply` grant
+ALWAYS (once is incoherent for it) — "allow and stop asking" stays a
+dashboard/button decision.
 
 ## Session resolution
 

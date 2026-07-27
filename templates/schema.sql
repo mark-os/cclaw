@@ -139,6 +139,11 @@ CREATE TABLE IF NOT EXISTS channels (
                     -- accepted and get a new session bound to this agent;
                     -- NULL = fail-closed (unrouted chats drop + admin notify).
                     -- Grants no send authority — channel_send needs a route.
+  default_tool_filter TEXT,
+                    -- JSON array of tool names; NULL = unrestricted. Frozen onto
+                    -- every session the routing gate creates for an unrouted chat
+                    -- (open-door and admin-fallback alike — unrouted is unrouted).
+                    -- Routed chats use channel_routes.tool_filter instead.
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 

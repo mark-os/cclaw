@@ -148,16 +148,25 @@ int channel_id_is_admin(sqlite3 *db, const char *channel_name, const char *id) {
     return hit;
 }
 
-/* Channel open-door policy: channels.default_agent (NULL = fail-closed). */
-static char *channel_default_agent(sqlite3 *db, const char *channel_name) {
+/* Channel open-door policy: channels.default_agent (NULL = fail-closed).
+ * *filter_out (optional) receives channels.default_tool_filter — the tool
+ * scope for chats the gate accepts without a route. It is read independently
+ * of default_agent: the admin fallback lands on the global default agent but
+ * is still an unrouted chat, so it takes the same filter. */
+static char *channel_default_agent(sqlite3 *db, const char *channel_name,
+                                   char **filter_out) {
     sqlite3_stmt *s;
     char *agent = NULL;
-    if (sqlite3_prepare_v2(db, "SELECT default_agent FROM channels WHERE name=?;",
+    if (filter_out) *filter_out = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT default_agent, default_tool_filter"
+                               " FROM channels WHERE name=?;",
                            -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_text(s, 1, channel_name, -1, SQLITE_STATIC);
         if (sqlite3_step(s) == SQLITE_ROW) {
             const char *v = (const char *)sqlite3_column_text(s, 0);
             if (v && v[0]) agent = strdup(v);
+            const char *f = (const char *)sqlite3_column_text(s, 1);
+            if (filter_out && f && f[0]) *filter_out = strdup(f);
         }
         sqlite3_finalize(s);
     }
@@ -243,14 +252,22 @@ static int channel_chat_command(sqlite3 *db, const char *ch_name,
         /* Same agent as the current pin; open-door default, then the global
          * default_agent, when the chat has never been routed. */
         char *agent = db_channel_binding_get(db, ch_name, cid);
-        if (!agent) agent = channel_default_agent(db, ch_name);
-        if (!agent) agent = config_get(db, "default_agent");
+        /* An unrouted chat's fresh session is still an unrouted session: it
+         * takes the channel's default filter, so /new can't launder the open
+         * door into full authority. A routed chat keeps today's behaviour. */
+        char *gate_filter = NULL;
         if (!agent) {
+            agent = channel_default_agent(db, ch_name, &gate_filter);
+            if (!agent) agent = config_get(db, "default_agent");
+        }
+        if (!agent) {
+            free(gate_filter);
             channel_chat_reply(db, ch_name, cid, "no agent for this chat");
             free(text);
             return 1;
         }
-        int64_t sid = session_create_filtered(db, ch_name, agent, -1, 0, NULL);
+        int64_t sid = session_create_filtered(db, ch_name, agent, -1, 0, gate_filter);
+        free(gate_filter);
         if (sid > 0) {
             channel_pin_session(db, ch_name, cid, sid);
             char msg[96];
@@ -908,10 +925,12 @@ void channel_consume_events(sqlite3 *db) {
                  * default_agent; everyone else drops with a log line + a
                  * one-time admin notification. */
                 int is_admin = channel_id_is_admin(db, ch_name, sender);
-                agent = channel_default_agent(db, ch_name);
+                char *gate_filter = NULL;
+                agent = channel_default_agent(db, ch_name, &gate_filter);
                 if (!agent && is_admin)
                     agent = config_get(db, "default_agent");
                 if (!agent) {
+                    free(gate_filter);
                     if (is_admin) {
                         LOG_WARN_("channel admin chat but no default agent"
                                   " ch=%s chat=%s — dropping", ch_name, cid);
@@ -924,8 +943,12 @@ void channel_consume_events(sqlite3 *db) {
                 }
                 /* First contact: create the session and write the pin back,
                  * so the exact-route invariant holds from here on. Sessions
-                 * born from channel policy carry no route tool_filter. */
-                sid = session_create_filtered(db, ch_name, agent, -1, 0, NULL);
+                 * born from channel policy carry the channel's unrouted
+                 * filter (channels.default_tool_filter), not a route's —
+                 * admins included: ambient reach through the open door is
+                 * still unrouted, real admin power comes from a routed chat. */
+                sid = session_create_filtered(db, ch_name, agent, -1, 0, gate_filter);
+                free(gate_filter);
                 if (sid > 0) {
                     channel_pin_session(db, ch_name, cid, sid);
                     LOG_INFO_("channel new_session ch=%s chat=%s sid=%lld agent=%s",

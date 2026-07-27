@@ -338,6 +338,11 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
      * NULL (every builtin, every draft) keeps today's behaviour, so the added
      * column starts inert on a live DB and is filled by the next promote. */
     { 35, "ALTER TABLE tools ADD COLUMN egress_hosts TEXT;", NULL },
+    /* v36: channels.default_tool_filter — the tool filter frozen onto sessions
+     * the routing gate creates for *unrouted* chats (open-door + admin
+     * fallback). NULL keeps today's behaviour (full grant set), so the column
+     * starts inert; `route add <ch> '*' <agent> --tools ...` fills it. */
+    { 36, "ALTER TABLE channels ADD COLUMN default_tool_filter TEXT;", NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 33   /* schema freeze 2026-07-19 — no patches below this */

@@ -306,6 +306,8 @@ Channel processes managed by the daemon. The extension system writes these rows.
 | `binary_path` | TEXT NOT NULL DEFAULT '' | path to channel process |
 | `status` | TEXT NOT NULL DEFAULT 'draft' | see lifecycle below |
 | `pid` | INTEGER | daemon tracks the running process |
+| `default_agent` | TEXT | FK → `agents(name)`. Open-door policy: non-NULL = unrouted chats are accepted and get a new session for this agent; NULL = fail-closed |
+| `default_tool_filter` | TEXT | JSON array of tool names; NULL = unrestricted. Frozen onto every session the gate creates for an *unrouted* chat (open door **and** admin fallback). Set by `route add <ch> '*' <agent> --tools ...` |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 Status lifecycle: `draft` → `validated` → `active` → `broken`.

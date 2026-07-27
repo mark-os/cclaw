@@ -127,9 +127,20 @@ widen it.
 
 Frozen means frozen: editing the route's filter later does not retro-apply to
 existing sessions — a new session must be created for the change to take
-effect. Exact route beats wildcard when resolving the filter (an exact route
-with no filter deliberately overrides a filtered `'*'` route). Unrouted
-admin-accepted senders get no filter (admin = operator; no attenuation).
+effect.
+
+Chats the gate accepts **without** a route take the channel's own filter,
+`channels.default_tool_filter` (`route add <channel> '*' <agent> --tools
+...`; NULL = unrestricted, the pre-existing behaviour). This is the
+attenuated tool set for a bot that is reachable server-wide — a Discord
+@mention from any public channel — while an explicitly routed chat keeps its
+own filter, or full authority if it has none.
+
+Admins are **not** exempt: an admin reaching the default agent through an
+unrouted chat is still an unrouted chat, and gets the same default filter.
+Admin authority comes from the explicitly routed admin channel, never
+ambiently from being in `admin_ids`. `/new` in an unrouted chat re-freezes
+the same default filter, so it can't launder the open door into full tools.
 
 ## channel_send (outbound tool)
 

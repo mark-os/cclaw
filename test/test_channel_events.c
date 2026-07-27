@@ -937,6 +937,58 @@ static void test_tool_filter_admin_unrouted(void) {
     printf("PASS\n");
 }
 
+/* 3b. channels.default_tool_filter → every gate-created session (open door
+ *     and admin fallback alike) freezes that filter, while an explicitly
+ *     routed chat on the same channel keeps its own. */
+static void test_tool_filter_gate_default(void) {
+    setup();
+    sqlite3 *db = open_seeded(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    test_gate_channel_seed(db, "adm", "888");
+    assert(sqlite3_exec(db,
+        "UPDATE channels SET default_agent='Assistant',"
+        " default_tool_filter='[\"file_read\"]' WHERE name='adm';",
+        NULL, NULL, NULL) == SQLITE_OK);
+
+    /* Stranger through the open door → attenuated. */
+    test_event_insert(db, "adm", "message",
+        "{\"chat_id\":\"999\",\"text\":\"hey\",\"sender_id\":\"999\"}");
+    channel_consume_events(db);
+    int64_t sid = test_session_find(db, "adm", "999", "Assistant");
+    assert(sid > 0);
+    char *f = test_session_tool_filter(db, sid);
+    assert(f && strcmp(f, "[\"file_read\"]") == 0);
+    free(f);
+
+    /* Admin, also unrouted → same filter (ambient reach is not authority). */
+    test_event_insert(db, "adm", "message",
+        "{\"chat_id\":\"888\",\"text\":\"hi\",\"sender_id\":\"888\"}");
+    channel_consume_events(db);
+    int64_t sid_a = test_session_find(db, "adm", "888", "Assistant");
+    assert(sid_a > 0);
+    char *fa = test_session_tool_filter(db, sid_a);
+    assert(fa && strcmp(fa, "[\"file_read\"]") == 0);
+    free(fa);
+
+    /* Positive control: an explicit route on the same channel wins. */
+    assert(test_binding_set_filtered(db, "adm", "777", "testagent",
+                                     "[\"web_fetch\"]") == 0);
+    test_event_insert(db, "adm", "message",
+        "{\"chat_id\":\"777\",\"text\":\"yo\",\"sender_id\":\"777\"}");
+    channel_consume_events(db);
+    int64_t sid_r = test_session_find(db, "adm", "777", "testagent");
+    assert(sid_r > 0);
+    char *fr = test_session_tool_filter(db, sid_r);
+    assert(fr && strcmp(fr, "[\"web_fetch\"]") == 0);
+    free(fr);
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
 /* 4. Pre-existing session: changing route's tool_filter after session creation
  *    does NOT retro-apply to the existing session. */
 static void test_tool_filter_no_retro_apply(void) {
@@ -1031,6 +1083,9 @@ int main(void) {
 
     printf("  tool_filter_admin_unrouted... ");
     test_tool_filter_admin_unrouted();
+
+    printf("  tool_filter_gate_default... ");
+    test_tool_filter_gate_default();
 
     printf("  tool_filter_no_retro_apply... ");
     test_tool_filter_no_retro_apply();

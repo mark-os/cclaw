@@ -70,7 +70,8 @@ belong to the named agent. Group-shaped (negative) chat ids default to
 (see Authority attenuation below).
 
 `chat_id '*'` is not a route — it sets/clears the channel's `default_agent`
-(open-door policy above).
+(open-door policy above). `--tools` with `'*'` sets the channel's default
+filter for unrouted chats (see below); `--mode`/`--session` don't apply.
 
 ### Authority attenuation
 
@@ -85,8 +86,11 @@ granted exposes nothing: the intersection is empty.
 
 Changing a route's filter later does **not** propagate to the pinned
 session; re-run `route add` (a fresh session) to apply a new filter.
-Gate-created sessions (open-door / admin acceptance) get no filter (full
-grant set applies).
+Gate-created sessions (open-door / admin acceptance) freeze the channel's
+`default_tool_filter` — `cclaw route add <channel> '*' <agent> --tools
+name,name`. NULL (the default) means no filter, i.e. the full grant set.
+Admins are not exempt: an unrouted chat is an unrouted chat, so admin power
+comes from the explicitly routed admin channel, not from `admin_ids`.
 
 `route list` displays the active filter per route. Example:
 

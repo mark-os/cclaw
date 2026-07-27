@@ -279,12 +279,15 @@ int route_main(int argc, char *argv[]) {
             sqlite3_finalize(st);
         }
         if (sqlite3_prepare_v2(db,
-                "SELECT name, default_agent FROM channels"
+                "SELECT name, default_agent, default_tool_filter FROM channels"
                 " WHERE default_agent IS NOT NULL ORDER BY name",
                 -1, &st, NULL) == SQLITE_OK) {
             while (sqlite3_step(st) == SQLITE_ROW) {
-                printf("%s (any chat) -> new session for %s [default_agent]\n",
+                printf("%s (any chat) -> new session for %s [default_agent]",
                        sqlite3_column_text(st, 0), sqlite3_column_text(st, 1));
+                if (sqlite3_column_type(st, 2) != SQLITE_NULL)
+                    printf(" (tools %s)", sqlite3_column_text(st, 2));
+                printf("\n");
                 any = 1;
             }
             sqlite3_finalize(st);
@@ -318,34 +321,8 @@ int route_main(int argc, char *argv[]) {
             }
         }
         if (bad) { sqlite3_close(db); return 1; }
-        /* '*' = channel-wide default agent (channels.default_agent): open
-         * door + who serves new chats. Not a route — routes pin sessions. */
-        if (strcmp(cid, "*") == 0) {
-            if (mode || tools || pin_session > 0) {
-                fprintf(stderr, "error: '*' sets channels.default_agent —"
-                                " --mode/--tools/--session don't apply\n");
-                sqlite3_close(db);
-                return 1;
-            }
-            sqlite3_stmt *up;
-            rc = 1;
-            if (sqlite3_prepare_v2(db,
-                    "UPDATE channels SET default_agent=?2 WHERE name=?1",
-                    -1, &up, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(up, 1, ch, -1, SQLITE_STATIC);
-                sqlite3_bind_text(up, 2, agent, -1, SQLITE_STATIC);
-                rc = (sqlite3_step(up) == SQLITE_DONE && sqlite3_changes(db) > 0)
-                     ? 0 : 1;
-                sqlite3_finalize(up);
-            }
-            if (rc == 0)
-                printf("default agent set: %s (any chat) -> %s\n", ch, agent);
-            else
-                fprintf(stderr, "error: no such channel '%s'\n", ch);
-            sqlite3_close(db);
-            return rc;
-        }
-        /* --tools name,name,... -> JSON array for channel_routes.tool_filter.
+        /* --tools name,name,... -> JSON array for channel_routes.tool_filter
+         * (channels.default_tool_filter when chat_id is '*').
          * Built with json_group_array so quoting is SQLite's problem. */
         char *filter_json = NULL;
         if (tools) {
@@ -369,6 +346,43 @@ int route_main(int argc, char *argv[]) {
                 sqlite3_close(db);
                 return 1;
             }
+        }
+        /* '*' = channel-wide default agent (channels.default_agent): open
+         * door + who serves new chats. Not a route — routes pin sessions.
+         * --tools here is the *unrouted* filter (channels.default_tool_filter):
+         * every gate-created session on this channel freezes it, so a
+         * server-wide bot answers strangers with an attenuated tool set while
+         * an explicitly routed chat keeps its own (or full) authority. */
+        if (strcmp(cid, "*") == 0) {
+            if (mode || pin_session > 0) {
+                fprintf(stderr, "error: '*' sets channels.default_agent —"
+                                " --mode/--session don't apply\n");
+                free(filter_json);
+                sqlite3_close(db);
+                return 1;
+            }
+            sqlite3_stmt *up;
+            rc = 1;
+            if (sqlite3_prepare_v2(db,
+                    "UPDATE channels SET default_agent=?2, default_tool_filter=?3"
+                    " WHERE name=?1",
+                    -1, &up, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(up, 1, ch, -1, SQLITE_STATIC);
+                sqlite3_bind_text(up, 2, agent, -1, SQLITE_STATIC);
+                if (filter_json) sqlite3_bind_text(up, 3, filter_json, -1, SQLITE_STATIC);
+                rc = (sqlite3_step(up) == SQLITE_DONE && sqlite3_changes(db) > 0)
+                     ? 0 : 1;
+                sqlite3_finalize(up);
+            }
+            if (rc == 0) {
+                printf("default agent set: %s (any chat) -> %s", ch, agent);
+                if (filter_json) printf(" (tools %s)", filter_json);
+                printf("\n");
+            } else
+                fprintf(stderr, "error: no such channel '%s'\n", ch);
+            free(filter_json);
+            sqlite3_close(db);
+            return rc;
         }
         /* Group-shaped ids (negative — Telegram groups) default to explicit:
          * silent-by-default listen-and-decide until the operator says auto. */
@@ -491,7 +505,8 @@ int route_main(int argc, char *argv[]) {
         sqlite3_stmt *st;
         if (strcmp(cid, "*") == 0) {
             if (sqlite3_prepare_v2(db,
-                    "UPDATE channels SET default_agent=NULL WHERE name=?",
+                    "UPDATE channels SET default_agent=NULL,"
+                    " default_tool_filter=NULL WHERE name=?",
                     -1, &st, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(st, 1, ch, -1, SQLITE_STATIC);
                 rc = (sqlite3_step(st) == SQLITE_DONE) ? 0 : 1;
@@ -522,6 +537,8 @@ int route_main(int argc, char *argv[]) {
                         "  the open-door default for chats with no route\n"
                         "  (without it, unrouted chats drop unless admin)\n"
                         "  --mode default: explicit for group ids (negative), else auto\n"
+                        "  (with '*', --tools sets the default filter every\n"
+                        "   gate-created session on that channel freezes)\n"
                         "  --tools limits the created session to those tools\n"
                         "  (frozen at session creation; a route edit needs a new session)\n");
         rc = 2;

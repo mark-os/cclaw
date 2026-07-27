@@ -320,6 +320,18 @@ function onMessageCreate(d) {
     if (!isDm && config.requireMention && !mentioned && !replyToMe && !ambientChannel(chatId))
         return;
 
+    // Rewrite <@id>/<@!id> tokens to @username so the session can read them —
+    // the model has no idea which snowflake is its own, but it knows its name.
+    // After parseCommand (which strips the raw <@botId> prefix itself).
+    if (d.mentions) {
+        for (var j = 0; j < d.mentions.length; j++) {
+            var mu = d.mentions[j];
+            if (!mu || !mu.id) continue;
+            var nm = mu.global_name || mu.username || ("" + mu.id);
+            text = text.replace(new RegExp("<@!?" + mu.id + ">", "g"), "@" + nm);
+        }
+    }
+
     var env = {
         chat_id: chatId,
         text: text,

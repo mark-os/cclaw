@@ -183,6 +183,42 @@ static void test_channel_events_routing(void) {
     printf("PASS\n");
 }
 
+/* $.chat_title on the envelope is persisted onto the bound session — bots
+ * deserve to know where they are chatting. Idempotent: a later event with no
+ * title keeps the last one, a renamed chat overwrites it. */
+static void test_channel_events_chat_title(void) {
+    setup();
+    sqlite3 *db = open_seeded(DB_PATH);
+    assert(db);
+    chdir_work();
+
+    test_binding_set(db, "mychannel", "c1", "testagent");
+    test_event_insert(db, "mychannel", "message",
+        "{\"chat_id\":\"c1\",\"text\":\"hi\",\"chat_title\":\"#general @ My Server\"}");
+    channel_consume_events(db);
+    int64_t sid = test_session_find(db, "mychannel", "c1", "testagent");
+    assert(sid > 0);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM sessions WHERE chat_title='#general @ My Server';") == 1);
+
+    /* Untitled event leaves the known name alone. */
+    test_event_insert(db, "mychannel", "message", "{\"chat_id\":\"c1\",\"text\":\"again\"}");
+    channel_consume_events(db);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM sessions WHERE chat_title='#general @ My Server';") == 1);
+
+    /* Renamed chat: the new name wins. */
+    test_event_insert(db, "mychannel", "message",
+        "{\"chat_id\":\"c1\",\"text\":\"yo\",\"chat_title\":\"#lobby @ My Server\"}");
+    channel_consume_events(db);
+    assert(test_scalar_count(db,
+        "SELECT COUNT(*) FROM sessions WHERE chat_title='#lobby @ My Server';") == 1);
+
+    chdir_restore();
+    db_close(db);
+    printf("PASS\n");
+}
+
 /* Open door: no route, but channels.default_agent is set — the chat is
  * accepted, a session is created for its actual chat_id and pinned. */
 static void test_channel_events_wildcard_fallback(void) {
@@ -1229,6 +1265,9 @@ int main(void) {
 
     printf("  channel_events_routing... ");
     test_channel_events_routing();
+
+    printf("  channel_events_chat_title... ");
+    test_channel_events_chat_title();
 
     printf("  channel_events_wildcard_fallback... ");
     test_channel_events_wildcard_fallback();

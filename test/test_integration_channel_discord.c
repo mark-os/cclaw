@@ -222,19 +222,26 @@ static void *mock_gateway(void *arg) {
                 "{\"op\":0,\"s\":1,\"t\":\"READY\",\"d\":{\"session_id\":\"sess1\","
                 "\"resume_gateway_url\":\"ws://127.0.0.1\",\"user\":{\"id\":\"" BOT_ID
                 "\",\"username\":\"cclawbot\"}}}");
+            /* GUILD_CREATE teaches the handler the room's display names,
+             * so emitted envelopes can say where the bot is chatting. */
+            ws_send_text(cfd,
+                "{\"op\":0,\"s\":2,\"t\":\"GUILD_CREATE\",\"d\":{\"id\":\"g1\","
+                "\"name\":\"My Server\",\"channels\":["
+                "{\"id\":\"chan1\",\"type\":0,\"name\":\"general\"},"
+                "{\"id\":\"chan2\",\"type\":0,\"name\":\"lounge\"}]}}");
             /* guild, no mention -> dropped by require_mention */
             ws_send_text(cfd,
-                "{\"op\":0,\"s\":2,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m1\","
+                "{\"op\":0,\"s\":3,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m1\","
                 "\"channel_id\":\"chan1\",\"guild_id\":\"g1\",\"content\":\"hello world\","
                 "\"author\":{\"id\":\"u1\",\"username\":\"alice\"},\"mentions\":[]}}");
             /* DM -> emitted (bypasses the gate) */
             ws_send_text(cfd,
-                "{\"op\":0,\"s\":3,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m2\","
+                "{\"op\":0,\"s\":4,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m2\","
                 "\"channel_id\":\"dm1\",\"content\":\"hi in dm\","
                 "\"author\":{\"id\":\"u1\",\"username\":\"alice\"},\"mentions\":[]}}");
             /* guild, @mention -> emitted */
             ws_send_text(cfd,
-                "{\"op\":0,\"s\":4,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m3\","
+                "{\"op\":0,\"s\":5,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m3\","
                 "\"channel_id\":\"chan1\",\"guild_id\":\"g1\",\"content\":\"<@" BOT_ID
                 "> help me\",\"author\":{\"id\":\"u1\",\"username\":\"alice\"},"
                 "\"mentions\":[{\"id\":\"" BOT_ID "\"}]}}");
@@ -243,15 +250,15 @@ static void *mock_gateway(void *arg) {
              * #3 buffer and flush as ONE combined envelope. Without debounce
              * this same burst is three envelopes = three turns. */
             ws_send_text(cfd,
-                "{\"op\":0,\"s\":5,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m4\","
+                "{\"op\":0,\"s\":6,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m4\","
                 "\"channel_id\":\"chan2\",\"guild_id\":\"g1\",\"content\":\"first line\","
                 "\"author\":{\"id\":\"u1\",\"username\":\"alice\"},\"mentions\":[]}}");
             ws_send_text(cfd,
-                "{\"op\":0,\"s\":6,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m5\","
+                "{\"op\":0,\"s\":7,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m5\","
                 "\"channel_id\":\"chan2\",\"guild_id\":\"g1\",\"content\":\"second line\","
                 "\"author\":{\"id\":\"u2\",\"username\":\"bob\"},\"mentions\":[]}}");
             ws_send_text(cfd,
-                "{\"op\":0,\"s\":7,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m6\","
+                "{\"op\":0,\"s\":8,\"t\":\"MESSAGE_CREATE\",\"d\":{\"id\":\"m6\","
                 "\"channel_id\":\"chan2\",\"guild_id\":\"g1\",\"content\":\"third line\","
                 "\"author\":{\"id\":\"u3\",\"username\":\"carol\"},\"mentions\":[]}}");
         }
@@ -450,6 +457,20 @@ int main(void) {
 
     if (event_count(db, "hi in dm") < 1) FAIL("DM message was not emitted");
     printf("  PASS: DM bypasses the mention gate\n");
+
+    /* GUILD_CREATE names the room: the guild envelope is titled
+     * "#general @ My Server", the DM after its author. */
+    if (test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
+            " AND json_extract(payload,'$.text') LIKE '%help me%'"
+            " AND json_extract(payload,'$.chat_title')='#general @ My Server';") != 1)
+        FAIL("guild message did not carry the GUILD_CREATE-derived chat_title");
+    if (test_scalar_count_db(db,
+            "SELECT COUNT(*) FROM channel_events WHERE channel_name='discord'"
+            " AND json_extract(payload,'$.text')='hi in dm'"
+            " AND json_extract(payload,'$.chat_title')='DM with alice';") != 1)
+        FAIL("DM did not carry an author-derived chat_title");
+    printf("  PASS: chat_title names the guild channel and the DM\n");
 
     if (event_count(db, "hello world") != 0) FAIL("unmentioned guild message was NOT dropped");
     printf("  PASS: require_mention drops unmentioned guild chatter\n");

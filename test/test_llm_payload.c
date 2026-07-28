@@ -852,6 +852,64 @@ static void test_route_prompt_suffix(void) {
     printf("  PASS test_route_prompt_suffix\n");
 }
 
+/* A channel-bound session is told where it is chatting: chat_title when the
+ * runner reported one, channel+chat_id otherwise. The route suffix, if any,
+ * follows the location line. */
+static void test_chat_location_line(void) {
+    sqlite3 *db = open_seeded();
+
+    int64_t named, unnamed;
+    setup_session(db, &named);
+    setup_session(db, &unnamed);
+
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+        "UPDATE sessions SET channel_name='discord', chat_id='chan1',"
+        " chat_title='#general @ My Server' WHERE id=%lld;"
+        "UPDATE sessions SET channel_name='discord', chat_id='chan2'"
+        " WHERE id=%lld;"
+        "INSERT INTO channel_routes(channel_name, chat_id, session_id,"
+        "                           system_prompt_suffix)"
+        " VALUES('discord','chan1',%lld,'House rules: keep it short.');",
+        (long long)named, (long long)unnamed, (long long)named);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.context_window = 128000;
+
+    ContextPlan plan = {0};
+    LlmPayload payload;
+    sqlite3_stmt *s;
+
+    assert(context_plan(db, named, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, named, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    json_get_str(db, payload.body, "$.messages[0].content", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0),
+                  "You are helpful.\n\nYou are chatting in #general @ My Server"
+                  " (channel discord, chat id chan1).\n\n"
+                  "House rules: keep it short.") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    /* No observed name yet — the ids still say where we are. */
+    assert(context_plan(db, unnamed, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, unnamed, &cfg, &plan, NULL, "You are helpful.", &payload) == 0);
+    json_get_str(db, payload.body, "$.messages[0].content", &s);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0),
+                  "You are helpful.\n\nYou are chatting in chat chan2"
+                  " (channel discord, chat id chan2).") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_chat_location_line\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_llm_payload:\n");
@@ -867,6 +925,7 @@ int main(void) {
     test_hook_inject_directive();
     test_extension_tool_grant_filtering();
     test_route_prompt_suffix();
+    test_chat_location_line();
     printf("All payload tests passed.\n");
     return 0;
 }

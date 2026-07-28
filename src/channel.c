@@ -1113,6 +1113,24 @@ void channel_consume_events(sqlite3 *db) {
                 }
             }
             if (sid <= 0) { free(agent); goto del; }
+            /* Display name of the chat, as the runner observed it. Bots
+             * deserve to know where they are chatting — the model reads it in
+             * the system prompt; every send still addresses by chat_id. The
+             * IS NOT guard makes the common case (name unchanged, or absent)
+             * a no-op write. */
+            {
+                sqlite3_stmt *ts;
+                if (sqlite3_prepare_v2(db,
+                        "UPDATE sessions SET chat_title=json_extract(?2,'$.chat_title')"
+                        " WHERE id=?1 AND json_extract(?2,'$.chat_title') IS NOT NULL"
+                        "   AND chat_title IS NOT json_extract(?2,'$.chat_title')",
+                        -1, &ts, NULL) == SQLITE_OK) {
+                    sqlite3_bind_int64(ts, 1, sid);
+                    sqlite3_bind_text(ts, 2, payload, -1, SQLITE_STATIC);
+                    sqlite3_step(ts);
+                    sqlite3_finalize(ts);
+                }
+            }
             if (sid > 0) {
                 LOG_INFO_("channel event ch=%s sid=%lld type=%s",
                           ch_name, (long long)sid, etype);

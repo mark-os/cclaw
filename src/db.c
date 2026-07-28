@@ -348,6 +348,11 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
      * NULL = nothing appended, so the column starts inert on a live DB;
      * `route add ... --prompt "..."` fills it. */
     { 37, "ALTER TABLE channel_routes ADD COLUMN system_prompt_suffix TEXT;", NULL },
+    /* v38: sessions.chat_title — the human-readable name of the bound chat,
+     * as observed by the channel runner (Discord guild/channel names arrive
+     * on GUILD_CREATE). Display only: the model reads it, sends still address
+     * by chat_id. NULL until the runner sees a name, so it starts inert. */
+    { 38, "ALTER TABLE sessions ADD COLUMN chat_title TEXT;", NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 33   /* schema freeze 2026-07-19 — no patches below this */

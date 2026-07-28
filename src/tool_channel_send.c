@@ -31,6 +31,10 @@ static char *list_targets(sqlite3 *db, const char *agent) {
     const char *sql =
         "SELECT COALESCE(json_group_array(json_object("
         "  'channel', r.channel_name, 'chat_id', r.chat_id,"
+        /* 'name' is the chat's observed display title (may be NULL until a
+         * runner reports one) — for the model to pick a target by; the send
+         * still goes by chat_id. */
+        "  'name', s.chat_title,"
         "  'delivery_mode', r.delivery_mode)), '[]')"
         " FROM channel_routes r"
         " JOIN sessions s ON s.id = r.session_id"
@@ -159,7 +163,7 @@ static char *tool_channel_send_handler(const char *arguments, void *user_data) {
 
 static const char *CHANNEL_SEND_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
-    "\"action\":{\"type\":\"string\",\"description\":\"'send' (default) or 'list' reachable targets\"},"
+    "\"action\":{\"type\":\"string\",\"description\":\"'send' (default) or 'list' reachable targets (each with its chat name)\"},"
     "\"channel\":{\"type\":\"string\",\"description\":\"Channel name (e.g. telegram); omit to target your own chat\"},"
     "\"chat_id\":{\"type\":\"string\",\"description\":\"Target chat id — must be routed to you; omit to target your own chat. Never guess an id: omit it or take one from action='list'\"},"
     "\"message\":{\"type\":\"string\",\"description\":\"Plain text to send\"}"

@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v35 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v33 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-19 freeze collapsed earlier patch history into it).
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v38 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v33 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-19 freeze collapsed earlier patch history into it).
 
 ## String keys and the agent_name FKs (decided 2026-07-18)
 
@@ -358,6 +358,7 @@ channel-wide default lives on `channels.default_agent`.
 | `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; scopes session to agent |
 | `channel_name` | TEXT | originating channel |
 | `chat_id` | TEXT | originating chat id |
+| `chat_title` | TEXT | display name of the bound chat as observed by the channel runner (`#general @ My Server`, `DM with alice`); injected into the system prompt so the bot knows where it is chatting. Display only — sends always address by `chat_id`. NULL until a runner reports a name |
 | `parent_session_id` | INTEGER DEFAULT -1 | sub-agent parent (-1 = top-level) |
 | `parent_tool_call_id` | TEXT | the tool_call that spawned this sub-session |
 | `depth` | INTEGER NOT NULL DEFAULT 0 | sub-agent nesting depth |

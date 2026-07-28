@@ -39,6 +39,14 @@ var stopped = false;               // fatal close: stop reconnecting
 var connFails = 0;                 // consecutive attempts that never reached a live session
 var helloBy = 0;                   // deadline for HELLO after the socket opens (0 = none)
 
+// Display-name cache: what to call the room we are in. Guild + channel names
+// arrive on GUILD_CREATE (and change under CHANNEL_UPDATE); DMs have no name,
+// so they are titled after the author. Purely cosmetic — every send still
+// addresses a channel id.
+var chanNames = {};                // channel id -> channel name
+var chanGuild = {};                // channel id -> guild id
+var guildNames = {};               // guild id   -> guild name
+
 var HELLO_TIMEOUT_MS = 20000;      // handshake done but gateway silent -> drop + retry
 var RESUME_GIVEUP = 3;             // failed attempts before abandoning resume_gateway_url
 
@@ -192,8 +200,38 @@ function onDispatch(m) {
         channel.log("RESUMED session=" + sessionId);
     } else if (t === "MESSAGE_CREATE") {
         onMessageCreate(d);
+    } else if (t === "GUILD_CREATE") {
+        if (d.id) {
+            guildNames["" + d.id] = d.name || "";
+            var chans = d.channels || [];
+            for (var ci = 0; ci < chans.length; ci++) rememberChannel(chans[ci], d.id);
+        }
+    } else if (t === "CHANNEL_CREATE" || t === "CHANNEL_UPDATE") {
+        rememberChannel(d, d.guild_id);
     }
     // Other dispatch events are ignored.
+}
+
+// Cache one channel's display name (text-ish channels only: type 0 guild
+// text, 5 announcement, 10/11/12 threads). Anything else is not a place a
+// message arrives from with a useful name.
+var TEXTISH = { 0: 1, 5: 1, 10: 1, 11: 1, 12: 1 };
+function rememberChannel(c, guildId) {
+    if (!c || !c.id) return;
+    if (c.type !== undefined && !TEXTISH[c.type]) return;
+    chanNames["" + c.id] = c.name || "";
+    if (guildId) chanGuild["" + c.id] = "" + guildId;
+}
+
+// Human-readable name of the chat this message is in. Guild channels read
+// "#general @ My Server" (degrading to "#general", then the raw id when the
+// cache has not seen it); DMs read "DM with alice".
+function chatTitle(chatId, guildId, author, isDm) {
+    if (isDm) return "DM with " + (author.global_name || author.username || chatId);
+    var cn = chanNames[chatId];
+    if (!cn) return chatId;
+    var gn = guildNames["" + (guildId || chanGuild[chatId] || "")];
+    return gn ? "#" + cn + " @ " + gn : "#" + cn;
 }
 
 function onInvalidSession(id, resumable) {
@@ -338,6 +376,7 @@ function onMessageCreate(d) {
         sender_id: "" + (author.id || ""),
         sender_name: author.global_name || author.username || "",
         chat_type: isDm ? "dm" : "group",
+        chat_title: chatTitle(chatId, d.guild_id, author, isDm),
         mentioned: mentioned,
         reply_to_me: replyToMe
     };
@@ -421,6 +460,7 @@ function flush(chatId) {
         sender_id: last.sender_id,
         sender_name: "",              // text already carries per-line attribution
         chat_type: "group",
+        chat_title: last.chat_title,
         mentioned: last.mentioned,
         reply_to_me: last.reply_to_me
     }, "disc_b" + chatId + "_" + buf.firstAt);

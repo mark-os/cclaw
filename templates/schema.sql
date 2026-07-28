@@ -184,6 +184,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
   channel_name TEXT,
   chat_id TEXT,
+  chat_title TEXT,                          -- observed human-readable name of the bound chat
+                                            -- ("#general @ My Server", "DM with alice"). Display
+                                            -- only: sends always address by chat_id.
   parent_session_id INTEGER DEFAULT -1,
   parent_tool_call_id TEXT,
   depth INTEGER NOT NULL DEFAULT 0,

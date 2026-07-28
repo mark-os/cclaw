@@ -137,8 +137,9 @@ static const char SQL_OPENAI_FULL[] =
     "SELECT json_patch('{}', json_object("
     "  'model', ?1,"
     "  'messages', (SELECT json_group_array(json(m)) FROM ("
-    /* ?6 = the pinned route's system_prompt_suffix (NULL for every session
-     * that isn't route-pinned) — appended here rather than assembled in C. */
+    /* ?6 = this session's prompt suffix: location line + the pinned route's
+     * system_prompt_suffix (NULL when neither applies) — assembled in SQL by
+     * route_prompt_suffix(), appended here rather than glued together in C. */
     "    SELECT 0 AS ord, 0 AS sub, json_object('role','system','content',"
     "      COALESCE(?2,'') || COALESCE(char(10) || char(10) || ?6, '')) AS m"
     "      WHERE ?2 IS NOT NULL OR ?6 IS NOT NULL"
@@ -238,7 +239,7 @@ static const char SQL_GEMINI_TOOLS[] =
 
 static const char SQL_GEMINI_FULL[] =
     "SELECT json_patch('{}', json_object("
-    /* ?5 = the pinned route's system_prompt_suffix — see SQL_OPENAI_FULL. */
+    /* ?5 = this session's prompt suffix — see SQL_OPENAI_FULL. */
     "  'systemInstruction', CASE WHEN COALESCE(?1,'') ||"
     "      COALESCE(char(10) || char(10) || ?5, '') != ''"
     "    THEN json_object('parts',json_array(json_object('text',"
@@ -271,14 +272,27 @@ static char *session_tool_filter(sqlite3 *db, int64_t session_id) {
     return r;
 }
 
-/* A route-pinned session's system_prompt_suffix, or NULL. Read every turn
- * (not frozen at session creation like tool_filter): the suffix is prompt
- * text, not authority, so editing a route should show up on the next turn. */
+/* Everything appended to the system prompt for this session: the built-in
+ * location line (where the bot is chatting) followed by the pinned route's
+ * system_prompt_suffix, or NULL when neither applies. Assembled in SQL, like
+ * the rest of this file. Read every turn (not frozen at session creation like
+ * tool_filter): it is prompt text, not authority, so a renamed chat or an
+ * edited route shows up on the next turn. The location line needs both
+ * channel_name and chat_id — NULL in either propagates through the ||
+ * concatenation and COALESCE drops the whole line. */
 static char *route_prompt_suffix(sqlite3 *db, int64_t session_id) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
-            "SELECT system_prompt_suffix FROM channel_routes"
-            " WHERE session_id=? AND system_prompt_suffix IS NOT NULL LIMIT 1",
+            "SELECT COALESCE(loc || COALESCE(char(10) || char(10) || rt, ''), rt)"
+            " FROM (SELECT"
+            "   'You are chatting in '"
+            "     || COALESCE(se.chat_title, 'chat ' || se.chat_id)"
+            "     || ' (channel ' || se.channel_name"
+            "     || ', chat id ' || se.chat_id || ').' AS loc,"
+            "   (SELECT r.system_prompt_suffix FROM channel_routes r"
+            "     WHERE r.session_id=se.id AND r.system_prompt_suffix IS NOT NULL"
+            "     LIMIT 1) AS rt"
+            "  FROM sessions se WHERE se.id=?)",
             -1, &s, NULL) != SQLITE_OK)
         return NULL;
     sqlite3_bind_int64(s, 1, session_id);

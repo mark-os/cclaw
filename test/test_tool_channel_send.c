@@ -47,6 +47,8 @@ int main(void) {
         " VALUES(10,'Alice','telegram','42'),"
         "       (11,'Alice',NULL,NULL),"
         "       (12,'Bob','telegram','77');"
+        /* chat_title: display name the runner observed for chat 42 */
+        "UPDATE sessions SET chat_title='#general @ My Server' WHERE id=10;"
         /* open-door default_agent must grant NO send authority */
         "INSERT INTO channels(name, default_agent) VALUES('telegram','Alice');"
         "INSERT INTO channel_routes(channel_name, chat_id, session_id, delivery_mode)"
@@ -129,6 +131,10 @@ int main(void) {
     r = call(&reg, &ctx, "Alice", 11, "{\"action\":\"list\"}");
     assert(r && strstr(r, "\"42\"") && strstr(r, "\"-500\""));
     assert(!strstr(r, "\"77\"") && !strstr(r, "\"*\""));
+    /* Chats carry their display name so the model can pick one by name —
+     * unnamed chats still list (name: null), they just have nothing to show. */
+    assert(strstr(r, "\"name\":\"#general @ My Server\""));
+    assert(strstr(r, "\"name\":null"));
     free(r);
     printf("PASS\n");
 

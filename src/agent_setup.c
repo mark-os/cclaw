@@ -8,6 +8,7 @@
 #include "tool_request_config.h"
 #include "sandbox.h"
 #include "log.h"
+#include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +45,15 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
         snprintf(setup->shell_path_buf, sizeof(setup->shell_path_buf), "%s", ev);
         setup->shell_path_env = 1;
     }
+
+    /* Workspace root for per-agent derivation. agent_dir_resolve with a NULL
+     * workspace gives <db_dir>/agents — deliberately not derived from
+     * cfg->workspace, whose default already points *inside* the tree at
+     * agents/default/workspace. */
+    setup->workspace_pinned = cfg->workspace_explicit;
+    if (!setup->workspace_pinned)
+        agent_dir_resolve(NULL, cfg->db_path, setup->agents_dir,
+                          sizeof(setup->agents_dir));
 
     /* Shell — shell_path bound by refresh below, like the caps */
     tool_shell_register(&setup->reg, cfg->shell_timeout, cfg->workspace, NULL);
@@ -235,6 +245,37 @@ static void containment_refresh(AgentSetup *setup, sqlite3 *db, const char *agen
     }
 }
 
+/* Point every file/shell/js/web ctx at the advancing agent's own workspace.
+ * Without this one shared setup left every agent operating in the process
+ * -global cfg->workspace (agents/default/workspace), so a daemon-run agent
+ * saw an empty directory that was not its own. Created eagerly: the tools
+ * fail with "no workspace configured" rather than mkdir on demand. */
+static void workspace_refresh(AgentSetup *setup, const char *agent) {
+    if (setup->workspace_pinned || !agent || !agent[0]) return;
+    if (strchr(agent, '/') || strcmp(agent, "..") == 0) return;
+
+    int n = snprintf(setup->workspace_buf, sizeof(setup->workspace_buf),
+                     "%s/%s/workspace", setup->agents_dir, agent);
+    if (n <= 0 || (size_t)n >= sizeof(setup->workspace_buf)) {
+        setup->workspace_buf[0] = '\0';
+        return;
+    }
+    if (util_mkdir_p(setup->workspace_buf) != 0)
+        LOG_WARN_("workspace '%s' could not be created", setup->workspace_buf);
+
+    setup->file_read_ctx.workspace = setup->workspace_buf;
+    setup->js_eval_ctx.workspace = setup->workspace_buf;
+    setup->web_ctx.workspace = setup->workspace_buf;
+    /* Extension drafts live under <workspace>/extensions, so the draft →
+     * promote flow has to follow the agent too — a draft written by one agent
+     * must not become another's to promote. */
+    setup->ext_tool_ctx.workspace = setup->workspace_buf;
+
+    ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
+    if (shell_entry && shell_entry->user_data)
+        ((ShellConfig *)shell_entry->user_data)->workspace = setup->workspace_buf;
+}
+
 /* Load the agent's grants into flat arrays and bind them into every tool ctx.
  * Called by the dispatch loop before each tool batch, so the arrays are always
  * a fresh snapshot of the grants table for the *advancing* agent — never a
@@ -247,6 +288,7 @@ void agent_setup_refresh_caps(AgentSetup *setup, sqlite3 *db, const char *agent)
      * the grant-path half below is layered on top. Trust policy is a
      * per-dispatch snapshot too — no longer fixed at init. */
     containment_refresh(setup, db, agent);
+    workspace_refresh(setup, agent);
     setup->file_read_ctx.sb.read_paths = setup->caps.read_paths;
     setup->file_read_ctx.sb.read_path_count = setup->caps.read_count;
     setup->file_read_ctx.sb.write_paths = setup->caps.write_paths;

@@ -25,6 +25,7 @@
 #include "config.h"
 #include "agent_config.h"
 #include "db.h"
+#include <limits.h>
 
 /* Shared agent tool setup context — holds all tool contexts that need
  * to outlive the setup call (caller owns lifetime). */
@@ -41,6 +42,15 @@ typedef struct {
     char shell_path_buf[256];
     int sandbox_profile_env;
     int shell_path_env;
+    /* Per-agent workspace, re-derived per dispatch like the caps: one setup
+     * serves every agent in the daemon, so the tool contexts must follow the
+     * advancing agent into <agents_dir>/<agent>/workspace instead of sharing
+     * the process-global cfg->workspace. Setup-owned so ctx pointers stay
+     * valid. Empty + workspace_pinned when the operator set a workspace
+     * explicitly — then cfg->workspace stands for every agent. */
+    char agents_dir[PATH_MAX];
+    char workspace_buf[PATH_MAX];
+    int workspace_pinned;
     /* Contexts that tools reference (must stay alive across the turn loop) */
     FileReadCtx file_read_ctx;
     JsEvalCtx js_eval_ctx;

@@ -363,9 +363,10 @@ Config *config_load(sqlite3 *db) {
      * NULL workspace and fail with "no workspace configured". */
     {
         char *v = config_get(db, "workspace");
-        if (v && v[0]) cfg->workspace = v;
+        if (v && v[0]) { cfg->workspace = v; cfg->workspace_explicit = 1; }
         else { free(v); cfg->workspace = default_workspace(cfg->db_path); }
     }
+    if (getenv("CCLAW_WORKSPACE")) cfg->workspace_explicit = 1;
     env_override_str(&cfg->workspace, "CCLAW_WORKSPACE");
 
     return cfg;

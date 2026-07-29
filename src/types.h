@@ -125,6 +125,10 @@ typedef struct {
     size_t fallback_count;
     char *db_path;
     char *workspace;
+    /* Operator pinned the workspace (config key or CCLAW_WORKSPACE) rather than
+     * it coming from default_workspace(). Suppresses per-agent derivation so a
+     * CLI/test-pinned workspace keeps serving every agent. */
+    int workspace_explicit;
     char *telegram_token;
     char *system_prompt;    /* per-agent system prompt, supports {session_id} {date} */
     int web_port;

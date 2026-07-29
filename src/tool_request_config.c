@@ -541,6 +541,90 @@ out:
     return err;
 }
 
+/* ── redundancy filter ──────────────────────────────────────────────────
+ * Strip grant/route entries the agent already has (exact match only — a
+ * subdomain covered by a '.' prefix grant still parks) so the approver only
+ * decides what is actually new. Returns the filtered canonical document, or
+ * NULL on error; *fully_out = 1 when nothing is left to request at all. */
+
+/* q1_text with a second text bind (agent name). */
+static char *q2_text(sqlite3 *db, const char *sql, const char *json,
+                     const char *agent) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, agent, -1, SQLITE_STATIC); /* RANGE ok if unused */
+    char *out = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) out = strdup(v);
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+static char *filter_satisfied(sqlite3 *db, const char *agent,
+                              const char *canon, int *fully_out) {
+    *fully_out = 0;
+    char *cur = strdup(canon);
+    if (!cur) return NULL;
+
+    /* Grant arrays: drop values already granted (and not expired). */
+    for (size_t i = 0; i < GRANT_KIND_COUNT; i++) {
+        char sql[512];
+        snprintf(sql, sizeof(sql),
+            "SELECT json_set(?1,'%s',json("
+            "  (SELECT json_group_array(atom) FROM json_each(?1,'%s') j"
+            "   WHERE NOT EXISTS(SELECT 1 FROM grants g"
+            "     WHERE g.agent_name=?2 AND g.kind='%s' AND g.value=j.atom"
+            "       AND (g.expires_at IS NULL OR g.expires_at>unixepoch())))))"
+            " WHERE json_type(?1,'%s')='array'",
+            GRANT_KINDS[i].path, GRANT_KINDS[i].path,
+            GRANT_KINDS[i].kind, GRANT_KINDS[i].path);
+        char *next = q2_text(db, sql, cur, agent);
+        if (next) { free(cur); cur = next; }
+    }
+
+    /* Routes: drop routes already pinned to one of this agent's sessions
+     * (other-agent ownership was already refused by validate_routes). */
+    char *next = q2_text(db,
+        "SELECT json_set(?1,'$.routes',json("
+        "  (SELECT json_group_array(atom) FROM json_each(?1,'$.routes') j"
+        "   WHERE NOT EXISTS(SELECT 1 FROM channel_routes c"
+        "     JOIN sessions s ON s.id=c.session_id"
+        "     WHERE c.channel_name=substr(j.atom,1,instr(j.atom,':')-1)"
+        "       AND c.chat_id=substr(j.atom,instr(j.atom,':')+1)"
+        "       AND s.agent_name=?2))))"
+        " WHERE json_type(?1,'$.routes')='array'", cur, agent);
+    if (next) { free(cur); cur = next; }
+
+    /* Drop now-empty arrays, then a now-empty grants object ('$.zz' is a
+     * deliberately absent path — json_remove ignores it). */
+    next = q2_text(db,
+        "SELECT json_remove(?1,"
+        " CASE WHEN json_array_length(?1,'$.grants.tools')=0"
+        "      THEN '$.grants.tools' ELSE '$.zz' END,"
+        " CASE WHEN json_array_length(?1,'$.grants.hosts')=0"
+        "      THEN '$.grants.hosts' ELSE '$.zz' END,"
+        " CASE WHEN json_array_length(?1,'$.grants.read_paths')=0"
+        "      THEN '$.grants.read_paths' ELSE '$.zz' END,"
+        " CASE WHEN json_array_length(?1,'$.grants.write_paths')=0"
+        "      THEN '$.grants.write_paths' ELSE '$.zz' END,"
+        " CASE WHEN json_array_length(?1,'$.routes')=0"
+        "      THEN '$.routes' ELSE '$.zz' END)", cur, agent);
+    if (next) { free(cur); cur = next; }
+    next = q2_text(db,
+        "SELECT json_remove(?1,"
+        " CASE WHEN json_type(?1,'$.grants')='object'"
+        "  AND (SELECT COUNT(*) FROM json_each(?1,'$.grants'))=0"
+        " THEN '$.grants' ELSE '$.zz' END)", cur, agent);
+    if (next) { free(cur); cur = next; }
+
+    if (q1_true(db, "SELECT 1 WHERE (SELECT COUNT(*) FROM json_each(?1))=0", cur))
+        *fully_out = 1;
+    return cur;
+}
+
 /* ── park paths ───────────────────────────────────────────────────────── */
 
 /* Park a request_changes approval carrying the canonical document. Returns a
@@ -672,8 +756,20 @@ static char *handler(const char *arguments, void *user_data) {
         } else {
             char *canon = NULL;
             result = validate_changes(ctx->db, changes, ctx->agent_name, &canon);
-            if (!result)
-                result = park_changes(ctx, canon, reason);
+            if (!result) {
+                int fully = 0;
+                char *kept = filter_satisfied(ctx->db, ctx->agent_name,
+                                              canon, &fully);
+                if (!kept)
+                    result = strdup("error: failed to check existing grants");
+                else if (fully)
+                    result = strdup("already in effect: every grant/route in "
+                                    "this request is one you already have — "
+                                    "no approval needed, proceed and use it");
+                else
+                    result = park_changes(ctx, kept, reason);
+                free(kept);
+            }
             free(canon);
         }
         free(changes);

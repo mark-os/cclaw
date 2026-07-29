@@ -851,6 +851,87 @@ static void test_db_path_grant_refused(void) {
     printf("  PASS test_db_path_grant_refused\n");
 }
 
+/* Redundant requests: fully-satisfied documents return a helpful result
+ * instead of parking; partially-satisfied ones park only the remainder. */
+static void test_redundant_filtered(void) {
+    sqlite3 *db = test_db_open_seeded(":memory:");
+    assert(db);
+    config_registry_sync(db);
+    db_agent_upsert(db, "test", NULL, NULL);
+    int64_t sid = session_create(db, "t", "test", -1, 0);
+    assert(sid > 0);
+
+    assert(agent_config_grant(db, "test", "host", "api.tiingo.com", 0) == 0);
+    assert(agent_config_grant(db, "test", "tool", "js_eval", 0) == 0);
+
+    RequestConfigCtx ctx = {
+        .db = db, .agent_name = "test", .session_id = sid,
+        .agents_dir = NULL, .current_tool_call_id = "r1"
+    };
+    ToolRegistry reg;
+    tools_init(&reg);
+    tool_request_config_register(&reg, &ctx);
+    assert(session_set_state(db, sid, "tool_running") == 0);
+
+    /* Fully redundant: no approval parked, session state untouched. */
+    char *result = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"grants\":{\"hosts\":[\"api.tiingo.com\"],\"tools\":[\"js_eval\"]}}}");
+    assert(result != NULL && strstr(result, "already in effect") != NULL);
+    free(result);
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM approvals WHERE session_id=?1", -1, &s, NULL)
+        == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 0);
+    sqlite3_finalize(s);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT state FROM sessions WHERE id=?1", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "tool_running") == 0);
+    sqlite3_finalize(s);
+
+    /* Partially redundant: parked document keeps only the new host. */
+    ctx.current_tool_call_id = "r2";
+    result = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"grants\":{\"hosts\":[\"api.tiingo.com\",\"example.com\"]}}}");
+    assert(result == NULL); /* parked */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT json_extract(args_json,'$.changes.grants.hosts')"
+        " FROM approvals WHERE session_id=?1 AND state='pending'",
+        -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0),
+                  "[\"example.com\"]") == 0);
+    sqlite3_finalize(s);
+
+    /* Redundant grants alongside a live section: grants stripped, agent
+     * section still parks. */
+    ctx.current_tool_call_id = "r3";
+    result = call_handler(&reg,
+        "{\"action\":\"request_changes\",\"changes\":"
+        "{\"grants\":{\"tools\":[\"js_eval\"]},\"agent\":{\"max_iterations\":9}}}");
+    assert(result == NULL); /* parked */
+    assert(sqlite3_prepare_v2(db,
+        "SELECT json_type(args_json,'$.changes.grants'),"
+        "       json_extract(args_json,'$.changes.agent.max_iterations')"
+        " FROM approvals WHERE session_id=?1 AND state='pending'"
+        " AND tool_call_id='r3'", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(sqlite3_column_type(s, 0) == SQLITE_NULL); /* grants removed */
+    assert(sqlite3_column_int(s, 1) == 9);
+    sqlite3_finalize(s);
+
+    tools_free(&reg);
+    db_close(db);
+    printf("  PASS test_redundant_filtered\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_request_config:\n");
@@ -870,6 +951,7 @@ int main(void) {
     test_rename_agent();
     test_unknown_action();
     test_add_tool_to_config();
+    test_redundant_filtered();
     printf("\nAll request_config tests passed.\n");
     return 0;
 }

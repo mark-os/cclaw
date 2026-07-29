@@ -47,6 +47,16 @@ var chanNames = {};                // channel id -> channel name
 var chanGuild = {};                // channel id -> guild id
 var guildNames = {};               // guild id   -> guild name
 
+// Seen-user directory: unique username -> id, persisted so outbound @mentions
+// survive a restart. Usernames are Discord-unique (display names are not), so
+// the model addresses people by handle and we substitute the snowflake at the
+// boundary — an unknown handle just stays styled text (no ping, fails safe).
+var users = {};                    // username (lowercase) -> user id
+
+// Custom-emoji directory, same idea: learned from traffic, persisted. The
+// model reads/writes :name:; the boundary swaps Discord's <a?:name:id> form.
+var emojis = {};                   // name (lowercase) -> { n: name, id, a: animated }
+
 var HELLO_TIMEOUT_MS = 20000;      // handshake done but gateway silent -> drop + retry
 var RESUME_GIVEUP = 3;             // failed attempts before abandoning resume_gateway_url
 
@@ -80,6 +90,10 @@ function onInit() {
     // restored across a process restart — the gateway session is gone, so a
     // cold start always IDENTIFYs fresh; only in-process reconnects RESUME.
     botId = channel.getState("disc_bot_id") || null;
+    try { users = JSON.parse(channel.getState("disc_users") || "{}"); }
+    catch (e) { users = {}; }
+    try { emojis = JSON.parse(channel.getState("disc_emojis") || "{}"); }
+    catch (e) { emojis = {}; }
 
     channel.log("discord channel ready (intents=" + config.intents +
                 ", require_mention=" + config.requireMention + ")");
@@ -333,6 +347,10 @@ function onMessageCreate(d) {
     var isDm = !d.guild_id;
     var text = d.content || "";
 
+    noteUser(author);
+    if (d.mentions)
+        for (var mi = 0; mi < d.mentions.length; mi++) noteUser(d.mentions[mi]);
+
     var mentioned = false;
     if (botId && d.mentions) {
         for (var i = 0; i < d.mentions.length; i++) {
@@ -365,22 +383,76 @@ function onMessageCreate(d) {
         for (var j = 0; j < d.mentions.length; j++) {
             var mu = d.mentions[j];
             if (!mu || !mu.id) continue;
-            var nm = mu.global_name || mu.username || ("" + mu.id);
+            // Rewrite to the unique username — the handle the model must use
+            // to @mention back (display names are ambiguous, not addressable).
+            var nm = mu.username || ("" + mu.id);
             text = text.replace(new RegExp("<@!?" + mu.id + ">", "g"), "@" + nm);
         }
     }
+
+    // Custom emoji: record in the directory, strip to :name: so the model
+    // reads (and can parrot) them without the snowflake noise.
+    text = text.replace(/<(a?):([A-Za-z0-9_~]{2,32}):(\d+)>/g,
+        function (m, a, name, id) {
+            var key = name.toLowerCase();
+            if (!emojis[key] || emojis[key].id !== id) {
+                emojis[key] = { n: name, id: id, a: a ? 1 : 0 };
+                channel.setState("disc_emojis", JSON.stringify(emojis));
+            }
+            return ":" + name + ":";
+        });
 
     var env = {
         chat_id: chatId,
         text: text,
         sender_id: "" + (author.id || ""),
-        sender_name: author.global_name || author.username || "",
+        sender_name: displayName(author),
         chat_type: isDm ? "dm" : "group",
         chat_title: chatTitle(chatId, d.guild_id, author, isDm),
         mentioned: mentioned,
         reply_to_me: replyToMe
     };
     deliver(env, "disc_" + d.id, isDm);
+}
+
+// "Mark (parson_mark)" — display name for reading, unique handle for
+// addressing. Collapses when they match (or there is no display name).
+function displayName(u) {
+    var un = u.username || "";
+    var gn = u.global_name || "";
+    if (gn && un && gn.toLowerCase() !== un.toLowerCase())
+        return gn + " (" + un + ")";
+    return gn || un;
+}
+
+function noteUser(u) {
+    if (!u || !u.id || !u.username) return;
+    if (botId && ("" + u.id) === botId) return;
+    var key = ("" + u.username).toLowerCase();
+    if (users[key] === "" + u.id) return;
+    users[key] = "" + u.id;
+    channel.setState("disc_users", JSON.stringify(users));
+}
+
+// Outbound: @username -> <@id> for handles we have actually seen. Unknown or
+// hallucinated handles pass through as plain text — no ping, no wrong target.
+function rewriteMentions(text) {
+    // Leading-boundary check so "user@host.com" never turns into a ping.
+    return text.replace(/(^|[^a-zA-Z0-9_.])@([a-z0-9_.]{2,32})/gi,
+        function (m, pre, name) {
+            var id = users[name.toLowerCase()];
+            return id ? pre + "<@" + id + ">" : m;
+        });
+}
+
+// Outbound: :name: -> <a?:name:id> for custom emoji we have seen. Unknown
+// names stay as-is (Discord renders known unicode shortcodes like :thumbsup:
+// itself; anything else reads as plain text).
+function rewriteEmojis(text) {
+    return text.replace(/:([A-Za-z0-9_~]{2,32}):/g, function (m, name) {
+        var e = emojis[name.toLowerCase()];
+        return e ? "<" + (e.a ? "a" : "") + ":" + e.n + ":" + e.id + ">" : m;
+    });
 }
 
 function ambientChannel(chatId) {
@@ -488,6 +560,7 @@ function onOutbox(item) {
     }
     var chatId = payload.chat_id, text = payload.text;
     if (!chatId || !text) { channel.failOutbox(item.id, "missing chat_id or text"); return; }
+    text = rewriteEmojis(rewriteMentions(text));
     if (payload.to_user) { sendToUser(chatId, text, item.id); return; }
     sendChunked(chatId, text, item.id);
 }

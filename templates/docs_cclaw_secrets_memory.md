@@ -37,8 +37,8 @@ should be kept, and never try to reconstruct it.
 ## Memory blocks
 
 Memory blocks are labeled persistent notes attached to you, rendered into
-your context each session. Each block has a `label`, a `description`
-(when/why to use it), and a `value`.
+your context each session. Each block has a `label` and a `description`
+(when/why to use it); its content is a list of numbered entries.
 
 - Use blocks for durable facts: who the operator is, standing preferences,
   project state that must survive sessions.

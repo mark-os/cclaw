@@ -48,10 +48,16 @@ static void test_operator_apply(void) {
     assert(grants_contains(g_db, "Scout", "host", ".example.com"));
     assert(grants_contains(g_db, "Scout", "tool", "file_read")); /* baseline */
 
-    /* Memory block seeded. */
+    /* Memory block seeded — and its $.value seeded as entry 1, since the
+     * block itself stores no text. */
     MemoryBlock *mb = memory_block_get(g_db, "Scout", "notes");
     assert(mb != NULL);
     memory_block_free(mb);
+    int n_entries = 0;
+    MemoryEntry *entries = memory_entries_list(g_db, "Scout", "notes", &n_entries);
+    assert(n_entries == 1);
+    assert(strcmp(entries[0].text, "v") == 0);
+    memory_entries_free(entries, n_entries);
 
     /* Duplicate name refused. */
     char *err2 = NULL;

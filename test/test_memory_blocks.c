@@ -29,14 +29,13 @@ static void test_create_and_get(void) {
     sqlite3 *db = open_seeded();
 
     int64_t id = memory_block_create(db, "TestAgent", "persona",
-                                     "Agent identity", "I am helpful", 5000, NULL);
+                                     "Agent identity", 5000, NULL);
     assert(id > 0);
 
     MemoryBlock *mb = memory_block_get(db, "TestAgent", "persona");
     assert(mb);
     assert(strcmp(mb->agent_name, "TestAgent") == 0);
     assert(strcmp(mb->label, "persona") == 0);
-    assert(strcmp(mb->value, "I am helpful") == 0);
     assert(strcmp(mb->description, "Agent identity") == 0);
     assert(mb->char_limit == 5000);
     assert(mb->read_only == 0);
@@ -46,11 +45,11 @@ static void test_create_and_get(void) {
     memory_block_free(mb);
 
     /* Duplicate label fails */
-    int64_t dup = memory_block_create(db, "TestAgent", "persona", "dup", "dup", 5000, NULL);
+    int64_t dup = memory_block_create(db, "TestAgent", "persona", "dup", 5000, NULL);
     assert(dup == -1);
 
     /* Different agent same label OK */
-    int64_t id2 = memory_block_create(db, "OtherAgent", "persona", "desc", "val", 3000, NULL);
+    int64_t id2 = memory_block_create(db, "OtherAgent", "persona", "desc", 3000, NULL);
     assert(id2 > 0);
 
     db_close(db);
@@ -71,25 +70,37 @@ static void test_seed(void) {
 
     MemoryBlock *mb = memory_block_get(db, "Myagent", "persona");
     assert(mb);
-    assert(strcmp(mb->value, "I am X") == 0);
     assert(mb->char_limit == 3000);
     assert(mb->read_only == 1);
     memory_block_free(mb);
 
+    /* A manifest $.value lands as entry 1 of the block — blocks hold no
+     * scalar text, so this is the only way seeded content is ever visible. */
+    int n = 0;
+    MemoryEntry *entries = memory_entries_list(db, "Myagent", "persona", &n);
+    assert(n == 1);
+    assert(strcmp(entries[0].text, "I am X") == 0);
+    memory_entries_free(entries, n);
+
     mb = memory_block_get(db, "Myagent", "human");
     assert(mb);
-    assert(strcmp(mb->value, "") == 0);
     assert(mb->char_limit == 5000);
     assert(mb->read_only == 0);
     assert(strcmp(mb->placement, "context") == 0);  /* unspecified → context */
     memory_block_free(mb);
 
-    /* Re-seed doesn't overwrite (DB authoritative) */
-    sqlite3_exec(db, "UPDATE memory_blocks SET value='likes cats' WHERE agent_name='Myagent' AND label='human';", NULL, NULL, NULL);
+    /* No $.value → an empty container, not a blank entry. */
+    entries = memory_entries_list(db, "Myagent", "human", &n);
+    assert(n == 0 && entries == NULL);
+
+    /* Re-seed doesn't overwrite (DB authoritative): existing entries survive
+     * and the seed adds none. */
+    assert(memory_entry_add(db, "Myagent", "human", "likes cats") == 1);
     memory_blocks_seed(db, "Myagent", json);
-    mb = memory_block_get(db, "Myagent", "human");
-    assert(strcmp(mb->value, "likes cats") == 0);
-    memory_block_free(mb);
+    entries = memory_entries_list(db, "Myagent", "human", &n);
+    assert(n == 1);
+    assert(strcmp(entries[0].text, "likes cats") == 0);
+    memory_entries_free(entries, n);
 
     db_close(db);
     test_db_clean(TEST_DB);
@@ -105,8 +116,8 @@ static void test_prompt_injection(void) {
     /* Create memory blocks (containers) and add numbered entries. System
      * placement — this test covers system-prompt rendering; context-placement
      * rendering is covered in test_llm_payload. */
-    memory_block_create(db, "Testagent", "persona", "Agent identity", "", 5000, "system");
-    memory_block_create(db, "Testagent", "human", "User facts", "", 3000, "system");
+    memory_block_create(db, "Testagent", "persona", "Agent identity", 5000, "system");
+    memory_block_create(db, "Testagent", "human", "User facts", 3000, "system");
     memory_entry_add(db, "Testagent", "persona", "I am helpful"); /* 12 chars */
     memory_entry_add(db, "Testagent", "human", "Likes cats");     /* 10 chars */
 

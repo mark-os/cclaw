@@ -21,7 +21,7 @@ static sqlite3 *setup(void) {
     sqlite3_exec(db, "INSERT INTO agent_extensions(agent_name,extension_name) VALUES('OldAgent','telegram')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO channels(name,default_agent) VALUES('tg','OldAgent')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO cron_jobs(agent_name,name,cron_expr,session_id,task) VALUES('OldAgent','job1','* * * * *',1,'hi')", NULL, NULL, NULL);
-    sqlite3_exec(db, "INSERT INTO memory_blocks(agent_name,label,value) VALUES('OldAgent','AGENT','hello')", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO memory_blocks(agent_name,label) VALUES('OldAgent','AGENT')", NULL, NULL, NULL);
     sqlite3_exec(db, "INSERT INTO config(key,value) VALUES('default_agent','OldAgent')", NULL, NULL, NULL);
     return db;
 }

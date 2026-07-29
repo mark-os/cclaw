@@ -153,7 +153,7 @@ static char *tool_memory_create_handler(const char *arguments, void *user_data) 
         return strdup("error: placement must be 'system' or 'context'");
     }
 
-    int64_t id = memory_block_create(ctx->db, ctx->agent_name, label, desc, "", 5000, placement);
+    int64_t id = memory_block_create(ctx->db, ctx->agent_name, label, desc, 5000, placement);
     free(desc); free(placement);
     if (id < 0) {
         free(label);

@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v38 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v33 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-19 freeze collapsed earlier patch history into it).
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v39 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v33 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-19 freeze collapsed earlier patch history into it).
 
 ## String keys and the agent_name FKs (decided 2026-07-18)
 
@@ -556,14 +556,13 @@ Index: `idx_hook_directives_session ON hook_directives(session_id)`.
 
 ## memory_blocks
 
-Agent-scoped named memory blocks. Each block has a label, char limit, and optional read-only flag.
+Agent-scoped named memory blocks. A block is a pure **container**: it carries a label, char limit, and optional read-only flag, but no text of its own — its content is the numbered `memory_entries` rows that name it. (v39 dropped the scalar `value` column; nothing rendered it, so text stored there was invisible to the model. The migration rescued any non-empty value as entry 1 of blocks that had no entries yet.)
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE; NULL = global |
 | `label` | TEXT NOT NULL | |
-| `value` | TEXT NOT NULL DEFAULT '' | |
 | `description` | TEXT | tells agent what block is for |
 | `char_limit` | INTEGER NOT NULL DEFAULT 5000 | |
 | `read_only` | INTEGER NOT NULL DEFAULT 0 | |

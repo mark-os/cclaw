@@ -3063,10 +3063,10 @@ static void ensure_default_agent(const char *base_dir) {
          * which default to the per-turn 'context' placement. */
         memory_block_create(g_db, "Assistant", "AGENT",
             "Your identity, capabilities, and operational notes. Update as you learn about yourself.",
-            NULL, 5000, "system");
+            5000, "system");
         memory_block_create(g_db, "Assistant", "USER",
             "Information about the user: preferences, context, working style. Update as you learn.",
-            NULL, 5000, "system");
+            5000, "system");
         /* AGENT gets one functional starter entry (it drives the self-naming
          * flow). USER starts empty — its description already states the block's
          * purpose, so a placeholder entry would just be noise the model has to

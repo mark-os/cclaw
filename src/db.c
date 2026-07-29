@@ -353,6 +353,18 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
      * on GUILD_CREATE). Display only: the model reads it, sends still address
      * by chat_id. NULL until the runner sees a name, so it starts inert. */
     { 38, "ALTER TABLE sessions ADD COLUMN chat_title TEXT;", NULL },
+    /* v39: memory_blocks.value is dropped — a block is a pure container of
+     * numbered memory_entries. Nothing rendered `value` (llm_payload.c and
+     * agent_config.c aggregate entries only), so any text there was invisible
+     * to the model; the seed path was still writing it. Rescue it first as
+     * entry 1 of blocks that have no entries yet, then drop the column (no
+     * index references it, so DROP COLUMN is legal). */
+    { 39, "INSERT INTO memory_entries(agent_name, block_label, pos, text)"
+          " SELECT b.agent_name, b.label, 1, b.value FROM memory_blocks b"
+          " WHERE b.agent_name IS NOT NULL AND b.value <> ''"
+          "   AND NOT EXISTS (SELECT 1 FROM memory_entries e"
+          "                   WHERE e.agent_name=b.agent_name AND e.block_label=b.label);"
+          "ALTER TABLE memory_blocks DROP COLUMN value;", NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 33   /* schema freeze 2026-07-19 — no patches below this */
@@ -1875,7 +1887,11 @@ void memory_blocks_seed(sqlite3 *db, const char *agent_name, const char *agent_j
         int cl = sqlite3_column_type(stmt, 3) == SQLITE_INTEGER ? sqlite3_column_int(stmt, 3) : 5000;
         int ro = sqlite3_column_int(stmt, 4);
         const char *placement = (const char *)sqlite3_column_text(stmt, 5);
-        int64_t id = memory_block_create(db, agent_name, lbl, desc, val, cl, placement);
+        int64_t id = memory_block_create(db, agent_name, lbl, desc, cl, placement);
+        /* A manifest's $.value seeds entry 1 of the new block. Blocks are pure
+         * containers — entries are the only thing the render paths read — so
+         * bootstrap content has to arrive as an entry to be visible at all. */
+        if (id > 0 && val && val[0]) memory_entry_add(db, agent_name, lbl, val);
         if (id > 0 && ro) {
             const char *ro_sql = "UPDATE memory_blocks SET read_only=1 WHERE id=?;";
             sqlite3_stmt *rstmt;
@@ -2145,33 +2161,31 @@ void memory_block_free(MemoryBlock *mb) {
     if (!mb) return;
     free(mb->agent_name);
     free(mb->label);
-    free(mb->value);
     free(mb->description);
     free(mb->placement);
     free(mb);
 }
 
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
-                            const char *description, const char *value, int char_limit,
+                            const char *description, int char_limit,
                             const char *placement) {
     if (!label || !is_valid_name(label)) return -1;
-    const char *sql = "INSERT INTO memory_blocks(agent_name, label, description, value, char_limit, placement)"
-                      " VALUES(?,?,?,?,?,?);";
+    const char *sql = "INSERT INTO memory_blocks(agent_name, label, description, char_limit, placement)"
+                      " VALUES(?,?,?,?,?);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, label, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, description ? description : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, value ? value : "", -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 5, char_limit > 0 ? char_limit : 5000);
-    sqlite3_bind_text(stmt, 6, placement && placement[0] ? placement : "context", -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, char_limit > 0 ? char_limit : 5000);
+    sqlite3_bind_text(stmt, 5, placement && placement[0] ? placement : "context", -1, SQLITE_STATIC);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE ? sqlite3_last_insert_rowid(db) : -1;
 }
 
 MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *label) {
-    const char *sql = "SELECT id, agent_name, label, value, description, char_limit, read_only,"
+    const char *sql = "SELECT id, agent_name, label, description, char_limit, read_only,"
                       " placement, created_at, updated_at FROM memory_blocks WHERE agent_name=? AND label=?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return NULL;
@@ -2183,13 +2197,12 @@ MemoryBlock *memory_block_get(sqlite3 *db, const char *agent_name, const char *l
     const char *s;
     s = (const char *)sqlite3_column_text(stmt, 1); mb->agent_name = s ? strdup(s) : strdup("");
     s = (const char *)sqlite3_column_text(stmt, 2); mb->label = s ? strdup(s) : strdup("");
-    s = (const char *)sqlite3_column_text(stmt, 3); mb->value = s ? strdup(s) : strdup("");
-    s = (const char *)sqlite3_column_text(stmt, 4); mb->description = s ? strdup(s) : strdup("");
-    mb->char_limit = sqlite3_column_int(stmt, 5);
-    mb->read_only = sqlite3_column_int(stmt, 6);
-    s = (const char *)sqlite3_column_text(stmt, 7); mb->placement = s ? strdup(s) : strdup("system");
-    mb->created_at = sqlite3_column_int64(stmt, 8);
-    mb->updated_at = sqlite3_column_int64(stmt, 9);
+    s = (const char *)sqlite3_column_text(stmt, 3); mb->description = s ? strdup(s) : strdup("");
+    mb->char_limit = sqlite3_column_int(stmt, 4);
+    mb->read_only = sqlite3_column_int(stmt, 5);
+    s = (const char *)sqlite3_column_text(stmt, 6); mb->placement = s ? strdup(s) : strdup("system");
+    mb->created_at = sqlite3_column_int64(stmt, 7);
+    mb->updated_at = sqlite3_column_int64(stmt, 8);
     sqlite3_finalize(stmt);
     return mb;
 }

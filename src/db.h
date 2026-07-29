@@ -344,12 +344,12 @@ int db_tool_call_any_running(sqlite3 *db, int64_t session_id);
 /* Free PendingToolCall array. */
 void db_tool_call_free_pending(PendingToolCall *list, int count);
 
-/* memory_blocks table */
+/* memory_blocks table — a block is a pure container; its content is the
+ * numbered memory_entries rows that name it (v39 dropped the scalar value). */
 typedef struct {
     int64_t id;
     char *agent_name;
     char *label;
-    char *value;
     char *description;
     int char_limit;
     int read_only;
@@ -364,7 +364,7 @@ typedef struct {
  * pass "system" only for stable identity content worth baking into the
  * (cached, once-per-session) system prompt. */
 int64_t memory_block_create(sqlite3 *db, const char *agent_name, const char *label,
-                            const char *description, const char *value, int char_limit,
+                            const char *description, int char_limit,
                             const char *placement);
 
 /* Get a memory block by agent_name + label. Returns NULL if not found. Caller frees. */

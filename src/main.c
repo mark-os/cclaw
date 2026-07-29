@@ -251,15 +251,32 @@ static void notify_deferred(int64_t session_id, const char *text) {
     }
 }
 
+/* Should a refused dispatch (rate limit, budget) tell the user their message
+ * is queued? True when the leaf entry is an unanswered user message and no
+ * deferral notice was queued since it arrived. Inbox consumption happens in
+ * advance_session's claim, not here, so a consumed-count signal always reads
+ * zero in daemon mode — and the sweeper re-advances parked sessions every
+ * tick, so an unconditional notify would spam the channel. */
+static int should_notify_deferred(int64_t session_id) {
+    if (g_mode == 0) return 1; /* CLI: stderr, no sweeper, no spam risk */
+    return (int)db_scalar_i64(g_db,
+        "SELECT EXISTS(SELECT 1 FROM sessions s"
+        " JOIN entries e ON e.id=s.leaf_id AND e.session_id=s.id"
+        " WHERE s.id=?1 AND e.role=1 AND s.channel_name IS NOT NULL"
+        " AND NOT EXISTS(SELECT 1 FROM channel_outbox o"
+        "   WHERE o.session_id=s.id AND o.created_at>=e.created_at"
+        "     AND (json_extract(o.payload,'$.text') LIKE 'rate limited:%'"
+        "       OR json_extract(o.payload,'$.text') LIKE 'budget limit:%')))",
+        session_id, 0);
+}
+
 static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iteration) {
     if (child_has_session(session_id)) return -1;
 
-    /* Turn start: move queued inbox into entries. consumed>0 marks a fresh
-     * user message (sweep retries of a parked session consume nothing) —
-     * the dedup signal for the one-shot deferral notices below. */
-    int consumed = 0;
+    /* Turn start: move queued inbox into entries (backstop — the daemon path
+     * normally consumes inside advance_session's claim). */
     if (iteration == 0)
-        consumed = inbox_consume_into_entries(g_db, session_id, 100);
+        inbox_consume_into_entries(g_db, session_id, 100);
 
     if (!llm_worker_alive()) return -1;
 
@@ -283,7 +300,7 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
         LOG_WARN_("token_rate_limit hit, session %lld rate_limited",
                   (long long)session_id);
         session_set_state(g_db, session_id, "rate_limited");
-        if (consumed > 0)
+        if (should_notify_deferred(session_id))
             notify_deferred(session_id,
                 "rate limited: hourly token cap reached — your message is"
                 " queued and will be answered when the limit clears");
@@ -300,7 +317,7 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
                       (long long)spent, (long long)g_cfg->daily_cost_limit_nano,
                       (long long)session_id);
             session_set_state(g_db, session_id, "rate_limited");
-            if (consumed > 0)
+            if (should_notify_deferred(session_id))
                 notify_deferred(session_id,
                     "budget limit: daily cost ceiling reached — your message is"
                     " queued and will be answered when spend drops below it");

@@ -142,24 +142,50 @@ static int run_ingest(sqlite3 *db, const char *sql, const char *manifest,
  * writing "transports": "persistent" instead of ["persistent"] found this
  * the hard way: validation passed and the consumer's identical json_each
  * fail-open then skipped a fail-closed capability gate. Every json_each()
- * scan over manifest-controlled data must assert array shape first — this
- * is that assertion, called at the top of each check_* below so a function
- * is safe to call on its own, not just in validate()'s fixed order. */
-static int check_array_shape(sqlite3 *db, const char *json_blob, const char *path,
-                             const char *errmsg, char **err_out) {
+ * scan over manifest-controlled data must assert shape first — this is that
+ * assertion, called at the top of each check_* below so a function is safe to
+ * call on its own, not just in validate()'s fixed order.
+ *
+ * Absent (json_type NULL) always passes: every section is optional.
+ *
+ * The assertion itself must fail CLOSED. Its own query errors on input the
+ * manifest controls — json_type() over a blob that is not valid JSON raises
+ * rather than returning NULL — so treating "no row came back" as "shape is
+ * fine" would rebuild, one level up, exactly the fail-open it exists to
+ * close. */
+static int check_json_shape(sqlite3 *db, const char *json_blob, const char *path,
+                            const char *want, const char *errmsg, char **err_out) {
     char sql[128];
     snprintf(sql, sizeof(sql),
-             "SELECT json_type(?1,%s) IS NOT NULL AND json_type(?1,%s)<>'array'",
+             "SELECT json_type(?1,%s) IS NOT NULL AND json_type(?1,%s)<>?2",
              path, path);
     sqlite3_stmt *st;
-    int bad = 0;
+    int bad = 0, answered = 0;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text(st, 1, json_blob, -1, SQLITE_STATIC);
-        if (sqlite3_step(st) == SQLITE_ROW) bad = sqlite3_column_int(st, 0);
+        sqlite3_bind_text(st, 2, want, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) { bad = sqlite3_column_int(st, 0); answered = 1; }
         sqlite3_finalize(st);
+    }
+    if (!answered) {
+        char m[160];
+        snprintf(m, sizeof(m), "manifest %s: shape could not be evaluated "
+                 "(malformed JSON at this key?)", path);
+        xerr(err_out, m);
+        return -1;
     }
     if (bad) { xerr(err_out, errmsg); return -1; }
     return 0;
+}
+
+static int check_array_shape(sqlite3 *db, const char *json_blob, const char *path,
+                             const char *errmsg, char **err_out) {
+    return check_json_shape(db, json_blob, path, "array", errmsg, err_out);
+}
+
+static int check_object_shape(sqlite3 *db, const char *json_blob, const char *path,
+                              const char *errmsg, char **err_out) {
+    return check_json_shape(db, json_blob, path, "object", errmsg, err_out);
 }
 
 /* Verify every handler declared at json_each(<arrpath>) names a .qjs file that
@@ -510,6 +536,14 @@ static int check_hook_events(sqlite3 *db, const char *manifest, char **err_out) 
  * "declares nothing". */
 static int check_channel(sqlite3 *db, const char *manifest, const char *bundle_dir,
                          char **err_out) {
+    /* Shape first, for the same reason transports needs it below: every check
+     * here reaches into $.channel with json_extract, which answers NULL for a
+     * scalar ("channel": 3) and errors for a non-JSON string — both read as
+     * "not declared", so the whole section used to pass unexamined. */
+    if (check_object_shape(db, manifest, "'$.channel'",
+                           "manifest '$.channel' must be an object", err_out) != 0)
+        return -1;
+
     char *ch = json_text(db, manifest, "'$.channel'");
     if (!ch || !ch[0]) { free(ch); return 0; }
 

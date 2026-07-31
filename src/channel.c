@@ -753,6 +753,39 @@ char *channel_config_get(sqlite3 *db, const char *channel_name, const char *key)
     return config_get(db, full);
 }
 
+/* Did the registry actually answer for `key`?
+ *
+ * config_get() returns NULL for "no such key" AND for "the query failed" —
+ * fine for every other caller, fatal here: the gate's 0 makes channel_tick
+ * SIGTERM a running channel, so a locked/corrupt-DB moment would take down a
+ * healthy one. This mirrors config_get()'s primary read (same table, same
+ * columns, same WHERE) purely to tell the two NULLs apart: a connection that
+ * cannot answer that read is exactly the case the -1 invariant exists for.
+ * Returns 1 = the read machinery worked, 0 = it did not. */
+static int config_read_ok(sqlite3 *db, const char *key) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT COALESCE(value, default_value), COALESCE(secret,0)"
+            " FROM config WHERE key=?1", -1, &s, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(s, 1, key, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(s);
+    sqlite3_finalize(s);
+    return rc == SQLITE_ROW || rc == SQLITE_DONE;
+}
+
+/* Resolve one registry key for the gate. Returns the value (caller frees) when
+ * it resolves non-empty; otherwise NULL with *unreadable set to 1 if the DB
+ * refused to answer and 0 if the key is genuinely absent/empty. */
+static char *gate_config_get(sqlite3 *db, const char *key, int *unreadable) {
+    *unreadable = 0;
+    char *v = config_get(db, key);
+    if (v && v[0]) return v;
+    free(v);
+    if (!config_read_ok(db, key)) *unreadable = 1;
+    return NULL;
+}
+
 int channel_should_launch(sqlite3 *db, const char *name, char *why, size_t cap) {
     if (why && cap) why[0] = '\0';
 
@@ -787,8 +820,23 @@ int channel_should_launch(sqlite3 *db, const char *name, char *why, size_t cap) 
         return 0;
     }
 
-    char *enabled = channel_config_get(db, name, "enabled");
-    int on = enabled && enabled[0] && strcmp(enabled, "0") != 0;
+    if (!ext[0]) {
+        if (why) snprintf(why, cap, "no extension registered for this channel");
+        return 0;
+    }
+
+    /* <ext>.enabled — built from the extension_name already in hand rather than
+     * via channel_config_get, which would re-read the channels row (a fifth
+     * query, and one more place to fail open). */
+    char key[192];
+    snprintf(key, sizeof(key), "%s.enabled", ext);
+    int unreadable = 0;
+    char *enabled = gate_config_get(db, key, &unreadable);
+    if (unreadable) {
+        if (why) snprintf(why, cap, "enabled lookup failed: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+    int on = enabled && strcmp(enabled, "0") != 0;
     free(enabled);
     if (!on) {
         if (why) snprintf(why, cap, "not enabled (set <ext>.enabled=1)");
@@ -799,26 +847,36 @@ int channel_should_launch(sqlite3 *db, const char *name, char *why, size_t cap) 
      * then resolve — config_get reads the same table. */
     char keys[16][192];
     int nkeys = 0;
-    if (ext[0]) {
-        if (sqlite3_prepare_v2(db,
-                "SELECT key FROM config WHERE required=1"
-                " AND substr(key, 1, length(?1)+1) = ?1 || '.'",
-                -1, &s, NULL) != SQLITE_OK) {
-            if (why) snprintf(why, cap, "required-key lookup failed: %s", sqlite3_errmsg(db));
-            return -1;
-        }
-        sqlite3_bind_text(s, 1, ext, -1, SQLITE_STATIC);
-        while (sqlite3_step(s) == SQLITE_ROW && nkeys < 16) {
-            const char *k = (const char *)sqlite3_column_text(s, 0);
-            if (k) snprintf(keys[nkeys++], sizeof(keys[0]), "%s", k);
-        }
-        sqlite3_finalize(s);
+    if (sqlite3_prepare_v2(db,
+            "SELECT key FROM config WHERE required=1"
+            " AND substr(key, 1, length(?1)+1) = ?1 || '.'",
+            -1, &s, NULL) != SQLITE_OK) {
+        if (why) snprintf(why, cap, "required-key lookup failed: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+    sqlite3_bind_text(s, 1, ext, -1, SQLITE_STATIC);
+    int krc;
+    while ((krc = sqlite3_step(s)) == SQLITE_ROW && nkeys < 16) {
+        const char *k = (const char *)sqlite3_column_text(s, 0);
+        if (k) snprintf(keys[nkeys++], sizeof(keys[0]), "%s", k);
+    }
+    sqlite3_finalize(s);
+    /* A scan that died mid-walk yields a short list, and a short list reads as
+     * "nothing required" — the same fail-open the prepare above guards. */
+    if (krc != SQLITE_ROW && krc != SQLITE_DONE) {
+        if (why) snprintf(why, cap, "required-key lookup failed: %s", sqlite3_errmsg(db));
+        return -1;
     }
     for (int i = 0; i < nkeys; i++) {
-        char *v = config_get(db, keys[i]);
-        int ok = v && v[0];
+        char *v = gate_config_get(db, keys[i], &unreadable);
+        int have = (v != NULL);
         free(v);
-        if (!ok) {
+        if (unreadable) {
+            if (why) snprintf(why, cap, "config lookup failed for %s: %s",
+                              keys[i], sqlite3_errmsg(db));
+            return -1;
+        }
+        if (!have) {
             if (why) snprintf(why, cap, "required config %s unresolved", keys[i]);
             return 0;
         }
@@ -832,8 +890,15 @@ int channel_launch_all(sqlite3 *db) {
     int launched = 0;
     for (int i = 0; i < n; i++) {
         char why[192];
-        if (channel_should_launch(db, names[i], why, sizeof(why)) != 1) {
-            LOG_INFO_("channel skipped name=%s reason=\"%s\"", names[i], why);
+        int gate = channel_should_launch(db, names[i], why, sizeof(why));
+        if (gate != 1) {
+            /* A definite "no" is routine operator state; a gate that could not
+             * be read is a fault, and the channel stays down until the next
+             * tick re-asks — worth more than an INFO line. */
+            if (gate < 0)
+                LOG_WARN_("channel gate unreadable name=%s reason=\"%s\"", names[i], why);
+            else
+                LOG_INFO_("channel skipped name=%s reason=\"%s\"", names[i], why);
             continue;
         }
         if (start_channel(db, names[i]) == 0) launched++;

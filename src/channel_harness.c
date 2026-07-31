@@ -39,7 +39,10 @@
 #define HARNESS_MAX_TOKENS 4096
 #define HARNESS_MAX_FIXTURES 32
 #define HARNESS_MAX_STEPS 64
-#define HARNESS_HEAP_SIZE (2 * 1024 * 1024)
+/* The harness is a stand-in for the live runner, so it runs the handler under
+ * the runner's ceiling — a heap of its own would let a scenario pass here and
+ * OOM in production (or the reverse). */
+#define HARNESS_HEAP_SIZE CR_HEAP_SIZE
 #define HARNESS_MAX_INSTRUCTIONS 100000000
 
 typedef struct {

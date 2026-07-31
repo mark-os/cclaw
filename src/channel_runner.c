@@ -52,7 +52,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#define CR_HEAP_SIZE (2 * 1024 * 1024)
+/* CR_HEAP_SIZE and CR_CONN_MSG_MAX are one decision and live in
+ * channel_runner.h, where their relationship is asserted. */
 #define CR_MAX_INSTRUCTIONS 100000000
 #define CR_REQ_MAX (512 * 1024)   /* max proxied request envelope */
 #define CR_SEND_TIMEOUT 60L
@@ -63,7 +64,6 @@
 #define CR_CONN_MAX 4             /* live persistent connections per channel */
 #define CR_CONN_CONNECT_TIMEOUT 15L  /* default handshake (TCP+TLS+upgrade) cap */
 #define CR_CONN_CONNECT_TIMEOUT_MAX 60L  /* ceiling a handler may raise it to */
-#define CR_CONN_MSG_MAX CR_DOWNLOAD_MAX  /* reassembled WS message cap (same as downloads) */
 
 static volatile sig_atomic_t g_running = 1;
 ChannelCtx *g_ctx;
@@ -171,17 +171,56 @@ static void record_outbox_capability(JSContext *ctx) {
     JS_FreeValue(ctx, v);
 }
 
-static void set_global_str(JSContext *ctx, const char *name, const char *val) {
-    JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, name,
-                      val ? JS_NewString(ctx, val) : JS_NULL);
-    JS_FreeValue(ctx, global);
+static const char *cr_name(void) {
+    return (g_ctx && g_ctx->channel_name) ? g_ctx->channel_name : "?";
 }
 
-static void set_global_int(JSContext *ctx, const char *name, int val) {
+/* Report and clear a pending exception. JS_ToCString can itself fail on an
+ * exhausted heap — say so rather than printing "(null)", and clear the second
+ * exception it left behind so the next handler dispatch starts clean. */
+static void log_pending_exception(JSContext *ctx, const char *what) {
+    JSValue exc = JS_GetException(ctx);
+    const char *msg = JS_ToCString(ctx, exc);
+    LOG_ERROR_("channel_runner: channel=%s %s: %s", cr_name(), what,
+               msg ? msg : "(exception unreadable — heap exhausted)");
+    if (msg) JS_FreeCString(ctx, msg);
+    else JS_FreeValue(ctx, JS_GetException(ctx));
+    JS_FreeValue(ctx, exc);
+}
+
+int cr_set_global_str(JSContext *ctx, const char *name, const char *val) {
+    JSValue v = val ? JS_NewString(ctx, val) : JS_NULL;
+    if (JS_IsException(v)) {
+        log_pending_exception(ctx, "cannot create JS string");
+        return -1;
+    }
     JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, name, JS_NewInt32(ctx, val));
+    int rc = JS_SetPropertyStr(ctx, global, name, v);   /* consumes v either way */
     JS_FreeValue(ctx, global);
+    if (rc < 0) { log_pending_exception(ctx, "cannot bind global"); return -1; }
+    return 0;
+}
+
+int cr_set_global_int(JSContext *ctx, const char *name, int val) {
+    JSValue global = JS_GetGlobalObject(ctx);
+    int rc = JS_SetPropertyStr(ctx, global, name, JS_NewInt32(ctx, val));
+    JS_FreeValue(ctx, global);
+    if (rc < 0) { log_pending_exception(ctx, "cannot bind global"); return -1; }
+    return 0;
+}
+
+/* JS_NewString that degrades to null instead of an exception. For values the
+ * handler receives as an object field: an unset property reads as `undefined`,
+ * indistinguishable from "the server sent nothing", whereas an explicit null
+ * is the shape the contract already documents for a missing body. */
+static JSValue js_str_or_null(JSContext *ctx, const char *s) {
+    if (!s) return JS_NULL;
+    JSValue v = JS_NewString(ctx, s);
+    if (JS_IsException(v)) {
+        log_pending_exception(ctx, "cannot create JS string");
+        return JS_NULL;
+    }
+    return v;
 }
 
 /* ── Send queue (filled by cclaw.send, drained by the curl loop) ──
@@ -209,10 +248,10 @@ void send_req_settle(JSContext *ctx, SendReq *r, int status, const char *body,
     if (!r->js_ctx) return;
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "status", JS_NewInt32(ctx, status));
-    JS_SetPropertyStr(ctx, obj, "body", body ? JS_NewString(ctx, body) : JS_NULL);
-    JS_SetPropertyStr(ctx, obj, "path", path ? JS_NewString(ctx, path) : JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "body", js_str_or_null(ctx, body));
+    JS_SetPropertyStr(ctx, obj, "path", js_str_or_null(ctx, path));
     JS_SetPropertyStr(ctx, obj, "bytes", JS_NewInt64(ctx, bytes));
-    JS_SetPropertyStr(ctx, obj, "error", error ? JS_NewString(ctx, error) : JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "error", js_str_or_null(ctx, error));
     qjs_reset_instructions(g_qrt);
     JSValue ret = JS_Call(ctx, r->p_resolve, JS_UNDEFINED, 1, (JSValueConst *)&obj);
     JS_FreeValue(ctx, ret);
@@ -508,15 +547,26 @@ static void send_start_next(JSContext *ctx) {
 /* ── conn callbacks into JS (all optional) ─────────────────────── */
 
 static void call_on_conn_open(JSContext *ctx, int id) {
-    set_global_int(ctx, "__cr_conn_id", id);
+    if (cr_set_global_int(ctx, "__cr_conn_id", id) != 0) return;
     JSValue r = eval_js(ctx,
         "(typeof onConnOpen === 'function') && onConnOpen(__cr_conn_id)", "onConnOpen");
     JS_FreeValue(ctx, r);
 }
 
+/* Bind both globals before dispatching. A message that will not fit the JS
+ * heap yields an OOM exception instead of a string, and dispatching anyway
+ * would run the handler against the *previous* message still sitting in
+ * __cr_conn_msg — silently, and indistinguishably from a real re-delivery.
+ * Drop the event instead and say so; the transport cap (CR_CONN_MSG_MAX) is
+ * sized so this is the unreachable backstop, not the routine path. */
 static void call_on_conn_message(JSContext *ctx, int id, const char *text) {
-    set_global_int(ctx, "__cr_conn_id", id);
-    set_global_str(ctx, "__cr_conn_msg", text);
+    if (cr_set_global_int(ctx, "__cr_conn_id", id) != 0 ||
+        cr_set_global_str(ctx, "__cr_conn_msg", text) != 0) {
+        LOG_ERROR_("channel_runner: channel=%s conn %d: %zu-byte message does not fit "
+                   "the JS heap (%d bytes) — event dropped",
+                   cr_name(), id, text ? strlen(text) : (size_t)0, CR_HEAP_SIZE);
+        return;
+    }
     JSValue r = eval_js(ctx,
         "(typeof onConnMessage === 'function') && onConnMessage(__cr_conn_id, __cr_conn_msg)",
         "onConnMessage");
@@ -524,8 +574,8 @@ static void call_on_conn_message(JSContext *ctx, int id, const char *text) {
 }
 
 static void call_on_conn_close(JSContext *ctx, int id, int code) {
-    set_global_int(ctx, "__cr_conn_id", id);
-    set_global_int(ctx, "__cr_conn_code", code);
+    if (cr_set_global_int(ctx, "__cr_conn_id", id) != 0 ||
+        cr_set_global_int(ctx, "__cr_conn_code", code) != 0) return;
     JSValue r = eval_js(ctx,
         "(typeof onConnClose === 'function') && onConnClose(__cr_conn_id, __cr_conn_code)",
         "onConnClose");
@@ -685,8 +735,8 @@ static void conn_recv_drain(JSContext *ctx, int i) {
         if (rlen) {
             if (c->msg.len + rlen > (size_t)CR_CONN_MSG_MAX) {
                 if (!c->msg_over)
-                    LOG_WARN_("channel_runner: conn %d message exceeds %ld bytes — dropping",
-                              i + 1, CR_CONN_MSG_MAX);
+                    LOG_WARN_("channel_runner: channel=%s conn %d message exceeds "
+                              "%ld bytes — dropping", cr_name(), i + 1, CR_CONN_MSG_MAX);
                 c->msg_over = 1;
                 buf_free(&c->msg);                   /* stop holding the prefix */
             } else if (!c->msg_over) {
@@ -823,17 +873,35 @@ void cr_conn_close(int id, int code) {
 /* ── JS handler call sites ─────────────────────────────────────── */
 
 void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row) {
+    /* Same hazard as call_on_conn_message, with a worse failure: the row is
+     * already marked 'sending', and __cr_outbox_item would still hold the
+     * PREVIOUS item — dispatching over a failed bind re-delivers it. Fail the
+     * row instead of stranding it in 'sending' forever. */
+    JSValue payload = JS_NewString(ctx, row->payload ? row->payload : "");
+    if (JS_IsException(payload)) {
+        log_pending_exception(ctx, "cannot create outbox payload string");
+        LOG_ERROR_("channel_runner: channel=%s: outbox id=%lld payload (%zu bytes) does "
+                   "not fit the JS heap (%d bytes) — failing the row", cr_name(),
+                   (long long)row->id, row->payload ? strlen(row->payload) : (size_t)0,
+                   CR_HEAP_SIZE);
+        if (g_ctx) channel_fail_outbox(g_ctx, row->id, "payload does not fit the channel JS heap");
+        return;
+    }
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "id", JS_NewInt32(ctx, (int32_t)row->id));
     JS_SetPropertyStr(ctx, obj, "session_id", JS_NewInt32(ctx, (int32_t)row->session_id));
-    JS_SetPropertyStr(ctx, obj, "payload",
-        JS_NewString(ctx, row->payload ? row->payload : ""));
+    JS_SetPropertyStr(ctx, obj, "payload", payload);
     JS_SetPropertyStr(ctx, obj, "mode", JS_NewInt32(ctx, row->deliver_mode));
-    JS_SetPropertyStr(ctx, global, "__cr_outbox_item", obj);
+    int bound = JS_SetPropertyStr(ctx, global, "__cr_outbox_item", obj);
+    JS_FreeValue(ctx, global);
+    if (bound < 0) {
+        log_pending_exception(ctx, "cannot bind outbox item");
+        if (g_ctx) channel_fail_outbox(g_ctx, row->id, "cannot bind outbox item to the JS heap");
+        return;
+    }
     JSValue ret = eval_js(ctx, "onOutbox(__cr_outbox_item)", "onOutbox");
     JS_FreeValue(ctx, ret);
-    JS_FreeValue(ctx, global);
 }
 
 static void drain_outbox(JSContext *ctx) {
@@ -847,17 +915,28 @@ static void drain_outbox(JSContext *ctx) {
     }
 }
 
-static void call_on_poll_done(JSContext *ctx, int status, const char *body,
-                              const char *error) {
-    set_global_int(ctx, "__cr_status", status);
-    set_global_str(ctx, "__cr_body", body);
-    set_global_str(ctx, "__cr_err", error);
+/* Returns 0 if onPoll was dispatched, -1 if the response could not be handed
+ * to JS at all. The caller turns -1 into a failed poll cycle so the existing
+ * backoff applies: skipping the dispatch leaves the poll shape untouched, and
+ * without the backoff the same oversized response would be re-fetched every
+ * loop iteration forever. */
+static int call_on_poll_done(JSContext *ctx, int status, const char *body,
+                             const char *error) {
+    if (cr_set_global_int(ctx, "__cr_status", status) != 0 ||
+        cr_set_global_str(ctx, "__cr_body", body) != 0 ||
+        cr_set_global_str(ctx, "__cr_err", error) != 0) {
+        LOG_ERROR_("channel_runner: channel=%s: %zu-byte poll response does not fit "
+                   "the JS heap (%d bytes) — response dropped",
+                   cr_name(), body ? strlen(body) : (size_t)0, CR_HEAP_SIZE);
+        return -1;
+    }
     JSValue ret = eval_js(ctx,
         "(typeof onPoll === 'function')"
         " ? onPoll({status: __cr_status, body: __cr_body, error: __cr_err}) : null",
         "onPoll");
     poll_shape_update(ctx, ret);
     JS_FreeValue(ctx, ret);
+    return 0;
 }
 
 /* ── Proxied requests over UDS (from the daemon) ───────────────── */
@@ -890,6 +969,15 @@ static int uds_listen_open(const char *db_path, const char *name) {
     return fd;
 }
 
+static void uds_write_all(int fd, const char *s) {
+    size_t rlen = strlen(s), off = 0;
+    while (off < rlen) {
+        ssize_t n = write(fd, s + off, rlen - off);
+        if (n <= 0) { if (n < 0 && errno == EINTR) continue; break; }
+        off += (size_t)n;
+    }
+}
+
 /* Read the full envelope (daemon writes then shuts down its end), run
  * onRequest, write "status\nbody" back. One request per connection. */
 static void uds_handle_conn(JSContext *ctx, int cfd) {
@@ -915,7 +1003,16 @@ static void uds_handle_conn(JSContext *ctx, int cfd) {
     }
     buf[len] = '\0';
 
-    set_global_str(ctx, "__cr_req", buf);
+    /* An unbound __cr_req still holds the previous request — onRequest would
+     * answer this caller with the last caller's reply. Refuse instead. */
+    if (cr_set_global_str(ctx, "__cr_req", buf) != 0) {
+        LOG_ERROR_("channel_runner: channel=%s: %zu-byte proxied request does not fit "
+                   "the JS heap (%d bytes) — replying 500", cr_name(), len, CR_HEAP_SIZE);
+        free(buf);
+        uds_write_all(cfd, "500\nrequest does not fit the channel JS heap");
+        close(cfd);
+        return;
+    }
     free(buf);
 
     /* The wrapper builds the "status\nbody" wire reply directly. */
@@ -934,12 +1031,7 @@ static void uds_handle_conn(JSContext *ctx, int cfd) {
     const char *reply = JS_ToCString(ctx, ret);
     int reply_owned = (reply != NULL);
     if (!reply) reply = "500\n";
-    size_t rlen = strlen(reply), off = 0;
-    while (off < rlen) {
-        ssize_t n = write(cfd, reply + off, rlen - off);
-        if (n <= 0) { if (n < 0 && errno == EINTR) continue; break; }
-        off += (size_t)n;
-    }
+    uds_write_all(cfd, reply);
     if (reply_owned) JS_FreeCString(ctx, reply);
     JS_FreeValue(ctx, ret);
     close(cfd);
@@ -1164,8 +1256,11 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
 
             if (msg->easy_handle == g_poll.easy) {
                 int ok = (!cerr && status >= 200 && status < 400);
-                call_on_poll_done(ctx, (int)status,
-                                  g_poll.resp.data ? g_poll.resp.data : "", cerr);
+                /* A response JS never saw is a failed cycle, whatever the
+                 * status line said — otherwise it would be re-fetched flat out. */
+                if (call_on_poll_done(ctx, (int)status,
+                                      g_poll.resp.data ? g_poll.resp.data : "", cerr) != 0)
+                    ok = 0;
                 curl_multi_remove_handle(g_multi, g_poll.easy);
                 curl_easy_cleanup(g_poll.easy);
                 g_poll.easy = NULL;

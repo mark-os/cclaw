@@ -22,6 +22,27 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision,
     (void)approval_id; (void)decision; (void)decided_via; (void)grant_expires_at;
 }
 
+/* Make exactly one registry read fail while every other query on the same
+ * connection still works — the shape a locked/corrupt-DB moment takes from
+ * channel_should_launch's point of view, and the only way to isolate one of
+ * its four reads from the others (they all hit the config table). */
+static int deny_config_reads(void *ud, int action, const char *a1, const char *a2,
+                             const char *a3, const char *a4) {
+    (void)ud; (void)a2; (void)a3; (void)a4;
+    if (action == SQLITE_READ && a1 && strcmp(a1, "config") == 0) return SQLITE_DENY;
+    return SQLITE_OK;
+}
+
+/* Narrower: only the value column, which is what config_get() selects and the
+ * required-key list query does not. */
+static int deny_config_value(void *ud, int action, const char *a1, const char *a2,
+                             const char *a3, const char *a4) {
+    (void)ud; (void)a3; (void)a4;
+    if (action == SQLITE_READ && a1 && a2 &&
+        strcmp(a1, "config") == 0 && strcmp(a2, "value") == 0) return SQLITE_DENY;
+    return SQLITE_OK;
+}
+
 #define TEST_DB "/tmp/test_extension_manifest.sqlite"
 #define BUNDLE  "/tmp/test_ext_manifest_bundle/nws"
 #define STORE   "/tmp/extensions/nws"   /* <dirname(TEST_DB)>/extensions/nws */
@@ -353,6 +374,33 @@ static void test_validate_rejects_bad_sections(void) {
     assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
     free(err); err = NULL;
 
+    /* $.channel itself must be an object. Every check inside reaches in with
+     * json_extract, which answers NULL for a scalar — so "channel": 3 skipped
+     * the handler check, the transports enum, and the shape assert alike, and
+     * the whole section passed unexamined. */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"channel\":3}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "'$.channel' must be an object"));
+    free(err); err = NULL;
+    /* A string is worse: json_extract errors on it rather than returning NULL,
+     * which the old code read identically to "nothing declared". */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"channel\":\"channel.qjs\"}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "must be an object"));
+    free(err); err = NULL;
+    /* An array is not an object either. */
+    write_file("/tmp/test_ext_badsec/extension.json",
+        "{\"name\":\"b\",\"channel\":[{\"handler\":\"channel.qjs\"}]}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == -1);
+    assert(err && strstr(err, "must be an object"));
+    free(err); err = NULL;
+    /* A manifest with no channel at all is still fine — the section is optional. */
+    write_file("/tmp/test_ext_badsec/extension.json", "{\"name\":\"b\"}");
+    assert(extension_manifest_validate("/tmp/test_ext_badsec", &err) == 0);
+    free(err); err = NULL;
+
     /* A manifest may name egress hosts in a default, but may not ship '*' —
      * that is match-any, and a default applies with no operator write, so a
      * bundle could unpin its own egress behind a "1 config key" summary. */
@@ -591,6 +639,26 @@ static void test_install_builtin(void) {
     assert(channel_should_launch(schemaless, "telegram", why, sizeof(why)) == -1);
     assert(strstr(why, "lookup failed"));
     sqlite3_close(schemaless);
+
+    /* The invariant has to hold for ALL four reads, not just the two that
+     * prepare their own SQL. config_get() collapses "no such key" and "the
+     * query failed" into the same NULL, so an unreadable config table used to
+     * look exactly like `<ext>.enabled=0` — and channel_tick acts on that 0 by
+     * SIGTERMing a healthy channel. Read 2 (<ext>.enabled): */
+    sqlite3_set_authorizer(db, deny_config_reads, NULL);
+    assert(channel_should_launch(db, "telegram", why, sizeof(why)) == -1);
+    assert(strstr(why, "enabled lookup failed"));
+    sqlite3_set_authorizer(db, NULL, NULL);
+
+    /* Read 4 (each required key), isolated one read further in: enabled comes
+     * from the env layer without touching the DB, the required-key list reads
+     * only config.key/config.required, and only the value read is refused. */
+    setenv("CCLAW_TELEGRAM_ENABLED", "1", 1);
+    sqlite3_set_authorizer(db, deny_config_value, NULL);
+    assert(channel_should_launch(db, "telegram", why, sizeof(why)) == -1);
+    assert(strstr(why, "lookup failed") && strstr(why, "telegram.bot_token"));
+    sqlite3_set_authorizer(db, NULL, NULL);
+    unsetenv("CCLAW_TELEGRAM_ENABLED");
 
     db_close(db);
     rm_rf("/tmp/extensions/telegram");

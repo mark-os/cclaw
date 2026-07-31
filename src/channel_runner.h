@@ -5,6 +5,37 @@
 #include "qjs_helpers.h"
 #include <stdint.h>
 
+/* ── Heap / message-size policy ───────────────────────────────────
+ * These two live together because they are one decision, not two, and they
+ * live in the header because the relationship between them is asserted below
+ * and exercised by test_channel_runner_limits.
+ *
+ * CR_HEAP_SIZE is a ceiling, not a reservation: QuickJS allocates on demand,
+ * so raising it costs a runaway handler's worst case, not steady-state RSS on
+ * a 128MB box (an idle channel context is well under 1MB).
+ *
+ * CR_CONN_MSG_MAX caps a *reassembled* WebSocket message. Anything larger is
+ * refused at receipt (conn_recv_drain drops it and drains the rest without
+ * buffering) — the cap exists because the WS length field is 64-bit and
+ * libcurl imposes no message ceiling, so an allowlisted-but-hostile peer could
+ * otherwise stream us out of RAM.
+ *
+ * The cap must sit well BELOW the heap, not merely below it, because a message
+ * is charged to the JS heap more than once:
+ *   - JS_NewString copies it in, and QuickJS widens a string to UTF-16 as soon
+ *     as one character falls outside Latin-1 — an N-byte message can cost 2N;
+ *   - the handler then JSON.parses it, building an object graph that is again
+ *     a multiple of the source text.
+ * A cap above that budget produces the worst failure mode there is: a message
+ * that passes the transport check and then cannot be materialized, reaching
+ * the handler as `undefined`. Hence the 4x floor (8x as configured). */
+#define CR_HEAP_SIZE (8 * 1024 * 1024)
+#define CR_CONN_MSG_MAX (1024L * 1024L)
+
+_Static_assert(CR_CONN_MSG_MAX > 0 && CR_CONN_MSG_MAX * 4 <= CR_HEAP_SIZE,
+               "WS message cap must leave the JS heap room for the message "
+               "widened to UTF-16 plus its parsed form");
+
 /* Shared with channel_harness.c (the --harness fixture-replay path): the
  * queue cclaw.send() fills and the live runner's curl loop drains. The
  * harness drains it too, but matches fixtures instead of hitting real
@@ -35,6 +66,16 @@ void send_req_free(SendReq *r);
 /* JS-eval + callback-invocation helpers shared with the harness. */
 JSValue eval_js(JSContext *ctx, const char *code, const char *tag);
 void call_on_outbox(JSContext *ctx, ChannelOutboxRow *row);
+
+/* Bind a global for the next handler eval. Return 0, or -1 if the value could
+ * not be created or stored — JS_NewString answers with an OOM exception, not a
+ * value, when the string does not fit CR_HEAP_SIZE. Callers MUST drop the event
+ * on -1 rather than dispatch: the property is then either missing (the handler
+ * sees `undefined`) or still holding the *previous* event's value, and neither
+ * is distinguishable from a real message inside JS. The pending exception is
+ * consumed and logged here. */
+int cr_set_global_str(JSContext *ctx, const char *name, const char *val);
+int cr_set_global_int(JSContext *ctx, const char *name, int val);
 
 /* Settle a promise-backed request (channel.http): resolve with
  * {status, body, path, bytes, error} and drain the microtask queue so

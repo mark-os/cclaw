@@ -79,15 +79,17 @@ static char *path_grant_hint(const FileReadCtx *ctx, const char *fullpath,
      * missing file — say so rather than falling through to a bare error or,
      * worse, to NULL because the path technically matched. */
     if (granted_exactly(ctx, fullpath, want_write)) {
-        size_t cap = strlen(fullpath) + 224;
+        size_t cap = strlen(fullpath) + 384;
         char *msg = malloc(cap);
         if (!msg) return NULL;
         snprintf(msg, cap,
                  "error: '%s' is granted but not present in the sandbox — the "
-                 "path likely does not exist on the host, or is masked. Check "
-                 "the grant with search_config; a grant on a path that does "
-                 "not exist yet cannot be mounted (grant its directory to "
-                 "create files there).", fullpath);
+                 "path may not exist on the host, may be masked, or its mount "
+                 "point could not be created (a file grant nested inside a "
+                 "read-only directory grant cannot mount). Check the grant "
+                 "with search_config; a grant on a path that does not exist "
+                 "yet cannot be mounted (grant its directory to create files "
+                 "there).", fullpath);
         return msg;
     }
 

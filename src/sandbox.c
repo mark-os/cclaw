@@ -171,6 +171,29 @@ size_t sandbox_plan_mounts(const SandboxMountReq *in, size_t n, SandboxMount *ou
     return cnt;
 }
 
+/* Which read-only mount swallowed this mount point? Walks the target's
+ * ancestors under newroot outward and keeps the last one statvfs reports
+ * read-only — that is the root of the read-only bind (a read grant, or a
+ * system dir). Fills out with the host-side path (the newroot prefix stripped)
+ * and returns 1; returns 0 when no ancestor is read-only. */
+static int ro_mount_above(const char *newroot, const char *dst,
+                          char *out, size_t outsz) {
+    char cur[PATH_MAX + 64];
+    snprintf(cur, sizeof(cur), "%s", dst);
+    size_t rootlen = strlen(newroot);
+    int found = 0;
+    for (;;) {
+        char *slash = strrchr(cur, '/');
+        if (!slash || (size_t)(slash - cur) <= rootlen) break;
+        *slash = '\0';
+        struct statvfs vfs;
+        if (statvfs(cur, &vfs) != 0 || !(vfs.f_flag & ST_RDONLY)) break;
+        snprintf(out, outsz, "%s", cur + rootlen);
+        found = 1;
+    }
+    return found;
+}
+
 /* Bind a single path into newroot at its absolute path.
  * Creates intermediate dirs, bind-mounts, optionally remounts ro.
  *
@@ -212,7 +235,31 @@ static void bind_path_into(const char *newroot, const char *abspath, int ro) {
         mkdir(dst, 0755);
     } else {
         int fd = open(dst, O_CREAT | O_WRONLY, 0600);
-        if (fd < 0) return;
+        if (fd < 0) {
+            /* No mount point, no mount. The usual cause is a nested grant: the
+             * file sits inside a directory grant already mounted read-only, so
+             * creating its mount point is EROFS. Fail open — like every other
+             * grant-mount failure here, a grant that does not mount narrows
+             * what the child can reach and never widens it, so refusing to run
+             * would trade a lost grant for a dead tool — but say so on both
+             * channels: syslog for the operator, stderr for the agent (it is
+             * part of the tool result wherever child output is captured).
+             * Silence here is the "approved grant that does nothing" bug. */
+            int e = errno;
+            char ro_dir[PATH_MAX] = "";
+            int nested = ro_mount_above(newroot, dst, ro_dir, sizeof(ro_dir));
+            LOG_INFO_("sandbox grant_mountpoint_fail path=%s errno=%d ro_parent=%s",
+                      abspath, e, nested ? ro_dir : "-");
+            if (nested)
+                fprintf(stderr, "[cclaw] warning: file grant '%s' is inside "
+                        "read-only mount '%s' — mount skipped, that grant is "
+                        "NOT in effect\n", abspath, ro_dir);
+            else
+                fprintf(stderr, "[cclaw] warning: file grant '%s' could not be "
+                        "mounted (mount point create failed, errno=%d) — that "
+                        "grant is NOT in effect\n", abspath, e);
+            return;
+        }
         close(fd);
     }
     if (mount(abspath, dst, NULL, MS_BIND, NULL) != 0) {
@@ -457,7 +504,10 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
     return 0;
 }
 
-/* Resolve HOME for the tool child.
+/* Resolve HOME for the tool child. `workspace` is the caller's canonicalized
+ * workspace path — the same one the bind mount and the post-pivot chdir use,
+ * which is what HOME has to name: with a symlink component the raw path is not
+ * a directory inside the namespace at all.
  *
  * Sandboxed profiles get the agent workspace: it is bind-mounted rw at its own
  * absolute path, it is the one directory the agent owns, and it persists across
@@ -470,14 +520,15 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
  * user's real home, read from the passwd database rather than an inherited
  * HOME (under the --run-tool re-exec the child starts from an empty environ,
  * so there is nothing to inherit). */
-static const char *sandbox_resolve_home(const SandboxConfig *cfg) {
+static const char *sandbox_resolve_home(const SandboxConfig *cfg,
+                                        const char *workspace) {
     if (cfg->sandbox) {
-        if (cfg->workspace && cfg->workspace[0]) return cfg->workspace;
+        if (workspace && workspace[0]) return workspace;
         return "/tmp";
     }
     struct passwd *pw = getpwuid(getuid());
     if (pw && pw->pw_dir && pw->pw_dir[0]) return pw->pw_dir;
-    if (cfg->workspace && cfg->workspace[0]) return cfg->workspace;
+    if (workspace && workspace[0]) return workspace;
     return "/tmp";
 }
 
@@ -499,9 +550,9 @@ static void sandbox_set_path(const char *home) {
 /* scrub the environment before exec. env_mode==1 wipes everything and sets only
  * PATH+TMPDIR+HOME; otherwise inherit minus known secret-bearing vars. HOME is
  * set under both modes — toolchains treat its absence as a hard error. */
-static void sandbox_scrub_env(const SandboxConfig *cfg) {
+static void sandbox_scrub_env(const SandboxConfig *cfg, const char *workspace) {
     extern char **environ;
-    const char *home = sandbox_resolve_home(cfg);
+    const char *home = sandbox_resolve_home(cfg, workspace);
     if (cfg->env_mode == 1) {
         /* Clean allowlist: wipe entire env, set only essentials */
         if (environ) environ[0] = NULL;  /* portable clearenv */
@@ -674,6 +725,17 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
     if (!cfg->mount_cwd) cwd = NULL;
     if (cfg->net_mode) psock = NULL;
 
+    /* Canonicalize the workspace once, here, while the host filesystem is still
+     * reachable: the bind mount and the post-pivot chdir both use the resolved
+     * path, so HOME must too — a HOME carrying a symlink component names
+     * nothing inside the namespace, and every toolchain that writes under $HOME
+     * fails. It cannot be resolved later: sandbox_scrub_env runs after
+     * pivot_root, where the symlink itself is gone. A realpath failure leaves
+     * the raw path, which is exactly what the bind does with it — no new
+     * failure mode, and host (no namespace, no bind) is unaffected either way. */
+    char ws_abs[PATH_MAX];
+    if (ws && ws[0] && realpath(ws, ws_abs)) ws = ws_abs;
+
     /* namespace sandbox — fail closed if requested but unavailable */
     if (cfg->sandbox && sandbox_apply_namespace(ws, cwd, cfg->db_path, cfg) != 0) {
         int e = errno;  /* log call below may clobber it */
@@ -689,12 +751,12 @@ int sandbox_child_setup(const SandboxConfig *cfg) {
      * point of host — `cclaw` in a repo operates on that repo. Under --daemon
      * cwd_path is NULL and the daemon's CWD is meaningless to the agent, so
      * start in the workspace instead. */
-    if (!cfg->sandbox && !cwd && cfg->workspace && cfg->workspace[0]) {
-        if (chdir(cfg->workspace) != 0)
+    if (!cfg->sandbox && !cwd && ws && ws[0]) {
+        if (chdir(ws) != 0)
             LOG_INFO_("sandbox host_chdir_fail errno=%d", errno);
     }
 
-    sandbox_scrub_env(cfg);
+    sandbox_scrub_env(cfg, ws);
 
     /* the proxy UDS is reachable at a fixed in-sandbox path (bound from the
      * broker's agent-folder socket in sandbox_apply_namespace). */

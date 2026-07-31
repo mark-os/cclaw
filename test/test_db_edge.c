@@ -8,35 +8,35 @@
 #include <signal.h>
 #include <unistd.h>
 
-static void test_next_turn_id_empty(void) {
+static void test_next_iteration_id_empty(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
     assert(sid > 0);
-    /* Empty session → turn_id should be 1 */
-    int64_t tid = db_next_turn_id(db, sid);
+    /* Empty session → iteration_id should be 1 */
+    int64_t tid = db_next_iteration_id(db, sid);
     assert(tid == 1);
     db_close(db);
-    printf("  PASS test_next_turn_id_empty\n");
+    printf("  PASS test_next_iteration_id_empty\n");
 }
 
-static void test_next_turn_id_increments(void) {
+static void test_next_iteration_id_increments(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
     Message m = {.role = ROLE_USER, .content = "hi"};
-    int64_t tid1 = db_next_turn_id(db, sid);
-    entry_append_with_turn(db, sid, &m, tid1);
+    int64_t tid1 = db_next_iteration_id(db, sid);
+    entry_append_with_iteration(db, sid, &m, tid1);
 
-    int64_t tid2 = db_next_turn_id(db, sid);
+    int64_t tid2 = db_next_iteration_id(db, sid);
     assert(tid2 == tid1 + 1);
 
     db_close(db);
-    printf("  PASS test_next_turn_id_increments\n");
+    printf("  PASS test_next_iteration_id_increments\n");
 }
 
-static void test_entry_append_with_turn_stores_turn_id(void) {
+static void test_entry_append_stores_iteration_id(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
     int64_t sid = session_create(db, "t", NULL, -1, 0);
@@ -44,12 +44,12 @@ static void test_entry_append_with_turn_stores_turn_id(void) {
     Message m1 = {.role = ROLE_USER, .content = "hello"};
     Message m2 = {.role = ROLE_ASSISTANT, .content = "hi"};
     int64_t tid = 42;
-    entry_append_with_turn(db, sid, &m1, tid);
-    entry_append_with_turn(db, sid, &m2, tid);
+    entry_append_with_iteration(db, sid, &m1, tid);
+    entry_append_with_iteration(db, sid, &m2, tid);
 
-    /* Verify both entries share the same turn_id */
+    /* Verify both entries share the same iteration_id */
     sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db, "SELECT turn_id FROM entries WHERE session_id=? ORDER BY id", -1, &stmt, NULL);
+    sqlite3_prepare_v2(db, "SELECT iteration_id FROM entries WHERE session_id=? ORDER BY id", -1, &stmt, NULL);
     sqlite3_bind_int64(stmt, 1, sid);
     int row = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -60,7 +60,7 @@ static void test_entry_append_with_turn_stores_turn_id(void) {
     assert(row == 2);
 
     db_close(db);
-    printf("  PASS test_entry_append_with_turn_stores_turn_id\n");
+    printf("  PASS test_entry_append_stores_iteration_id\n");
 }
 
 static void test_session_get_agent_name(void) {
@@ -150,7 +150,7 @@ static void test_entry_append_stop_reason_roundtrip(void) {
 
     Message m = {.role = ROLE_ASSISTANT, .content = "done",
                  .stop_reason = STOP_REASON_LENGTH};
-    entry_append_with_turn(db, sid, &m, 1);
+    entry_append_with_iteration(db, sid, &m, 1);
 
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
@@ -168,7 +168,7 @@ static void test_entry_append_multiple_tool_calls(void) {
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
     Message m1 = {.role = ROLE_USER, .content = "go"};
-    entry_append_with_turn(db, sid, &m1, 1);
+    entry_append_with_iteration(db, sid, &m1, 1);
 
     ToolCall tcs[3] = {
         {.id = "c1", .name = "shell_exec", .arguments = "{\"cmd\":\"ls\"}"},
@@ -177,7 +177,7 @@ static void test_entry_append_multiple_tool_calls(void) {
     };
     Message m2 = {.role = ROLE_ASSISTANT, .content = NULL,
                   .tool_calls = tcs, .tool_call_count = 3};
-    entry_append_with_turn(db, sid, &m2, 1);
+    entry_append_with_iteration(db, sid, &m2, 1);
 
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
@@ -198,16 +198,16 @@ static void test_entry_append_tool_result_with_name(void) {
     int64_t sid = session_create(db, "t", NULL, -1, 0);
 
     Message m1 = {.role = ROLE_USER, .content = "go"};
-    entry_append_with_turn(db, sid, &m1, 1);
+    entry_append_with_iteration(db, sid, &m1, 1);
 
     ToolCall tc = {.id = "c1", .name = "shell_exec", .arguments = "{}"};
     Message m2 = {.role = ROLE_ASSISTANT, .tool_calls = &tc, .tool_call_count = 1};
-    entry_append_with_turn(db, sid, &m2, 1);
+    entry_append_with_iteration(db, sid, &m2, 1);
 
     ToolResult tr = {.tool_call_id = "c1", .content = "output"};
     Message m3 = {.role = ROLE_TOOL, .tool_result = &tr,
                   .tool_name = "shell_exec", .is_error = 0};
-    entry_append_with_turn(db, sid, &m3, 1);
+    entry_append_with_iteration(db, sid, &m3, 1);
 
     int count = 0;
     Entry *branch = session_get_branch(db, sid, &count);
@@ -260,9 +260,9 @@ int main(void) {
     TEST_INIT();
     alarm(10);
     printf("test_db_edge:\n");
-    test_next_turn_id_empty();
-    test_next_turn_id_increments();
-    test_entry_append_with_turn_stores_turn_id();
+    test_next_iteration_id_empty();
+    test_next_iteration_id_increments();
+    test_entry_append_stores_iteration_id();
     test_session_get_agent_name();
     test_session_get_depth();
     test_session_count_children();

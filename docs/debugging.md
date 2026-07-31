@@ -23,7 +23,7 @@ store it (usually `SQLITE_BUSY` under daemon+CLI contention) — the response is
 
 ```bash
 # The most recent failure: what we sent and what came back.
-sqlite3 "$DB" "SELECT id, session_id, turn_id, model, status,
+sqlite3 "$DB" "SELECT id, session_id, iteration_id, model, status,
   datetime(created_at,'unixepoch') AS at,
   CAST(request_body AS TEXT) AS request,
   CAST(body AS TEXT)         AS response
@@ -38,9 +38,9 @@ sqlite3 "$DB" "SELECT CAST(request_body AS TEXT), CAST(body AS TEXT)
 sqlite3 "$DB" "SELECT status, count(*) FROM llm_responses
   GROUP BY status ORDER BY 2 DESC;"
 
-# Every archived attempt for one turn (retries + fallback models share a turn_id).
+# Every archived attempt for one LLM request (retries + fallback models share an iteration_id).
 sqlite3 "$DB" "SELECT id, model, status, length(CAST(body AS TEXT)) AS blen
-  FROM llm_responses WHERE session_id = 42 AND turn_id = 7 ORDER BY id;"
+  FROM llm_responses WHERE session_id = 42 AND iteration_id = 7 ORDER BY id;"
 ```
 
 Archiving is ring-buffered by config `llm_response_archive_max` (default 500;
@@ -66,7 +66,7 @@ sqlite3 "$DB" "SELECT id, agent_name, state, datetime(updated_at,'unixepoch')
   FROM sessions ORDER BY updated_at DESC LIMIT 10;"
 
 # The conversation branch (entries) for a session.
-sqlite3 "$DB" "SELECT id, turn_id, type, substr(content,1,80)
+sqlite3 "$DB" "SELECT id, turn_id, iteration_id, type, substr(content,1,80)
   FROM entries WHERE session_id = 42 ORDER BY id;"
 
 # Tool calls + their status for a session.

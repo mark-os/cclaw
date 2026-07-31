@@ -130,17 +130,17 @@ int db_secret_key_loaded(void);
 int session_count_children(sqlite3 *db, int64_t parent_session_id);
 int session_count_active_agents(sqlite3 *db);
 
-/* Get next turn_id for a session (MAX(turn_id)+1, or 1 if none). */
-int64_t db_next_turn_id(sqlite3 *db, int64_t session_id);
+/* Get next iteration_id for a session (MAX(iteration_id)+1, or 1 if none). */
+int64_t db_next_iteration_id(sqlite3 *db, int64_t session_id);
 
-/* Append entry with explicit turn_id. Like entry_append but tags the entry. */
-int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *msg, int64_t turn_id);
+/* Append entry with explicit iteration_id. Like entry_append but tags the entry. */
+int64_t entry_append_with_iteration(sqlite3 *db, int64_t session_id, const Message *msg, int64_t iteration_id);
 
 /* Append a flat typed entry. type is one of: "system", "user_message",
  * "assistant_message", "reasoning", "tool_call", "tool_result".
  * content: text payload. tool_call_id/tool_name used for tool_call/tool_result.
  * Returns new entry id or -1. */
-int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
+int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t iteration_id,
                            const char *type, int part_index, const char *content,
                            const char *tool_call_id, const char *tool_name,
                            int is_error, StopReason stop_reason,
@@ -316,7 +316,7 @@ typedef struct {
     char *name;
     char *arguments;
     int64_t entry_id;
-    int64_t turn_id;
+    int64_t iteration_id;
 } PendingToolCall;
 
 /* Set tool_call status. resolved_by may be NULL. Returns 0 on success. */

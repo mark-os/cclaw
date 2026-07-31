@@ -41,7 +41,7 @@ static void test_insert_typed_entries(void) {
     /* Verify entries in DB */
     sqlite3_stmt *stmt;
     const char *sql = "SELECT type, part_index, content, tool_call_id, tool_name, role"
-                      " FROM entries WHERE session_id=? AND turn_id=? ORDER BY part_index;";
+                      " FROM entries WHERE session_id=? AND iteration_id=? ORDER BY part_index;";
     assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
     sqlite3_bind_int64(stmt, 1, sid);
     sqlite3_bind_int64(stmt, 2, turn);
@@ -108,7 +108,7 @@ static void test_legacy_entry_gets_type(void) {
 
     /* Use legacy entry_append — should get type derived from role */
     Message msg = {.role = ROLE_USER, .content = "hello"};
-    int64_t id = entry_append_with_turn(db, sid, &msg, 1);
+    int64_t id = entry_append_with_iteration(db, sid, &msg, 1);
     assert(id > 0);
 
     sqlite3_stmt *stmt;
@@ -122,7 +122,7 @@ static void test_legacy_entry_gets_type(void) {
 
     /* Assistant message */
     Message amsg = {.role = ROLE_ASSISTANT, .content = "hi"};
-    int64_t id2 = entry_append_with_turn(db, sid, &amsg, 1);
+    int64_t id2 = entry_append_with_iteration(db, sid, &amsg, 1);
     assert(id2 > 0);
     assert(sqlite3_prepare_v2(db, "SELECT type FROM entries WHERE id=?;",
            -1, &stmt, NULL) == SQLITE_OK);
@@ -184,7 +184,7 @@ static void test_tool_calls_result_entry_id(void) {
 static void test_ingest_typed(void) {
     sqlite3 *db = setup();
     int64_t sid = 1;
-    int64_t turn = db_next_turn_id(db, sid);
+    int64_t turn = db_next_iteration_id(db, sid);
 
     const char *body =
         "{\"choices\":[{\"message\":{\"content\":\"Here are the results.\","
@@ -208,7 +208,7 @@ static void test_ingest_typed(void) {
     /* Verify entries: should be reasoning(0) + assistant(1) + 2 tool_calls(2,3) */
     sqlite3_stmt *stmt;
     const char *sql = "SELECT type, part_index, content FROM entries"
-                      " WHERE session_id=? AND turn_id=? ORDER BY part_index;";
+                      " WHERE session_id=? AND iteration_id=? ORDER BY part_index;";
     assert(sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK);
     sqlite3_bind_int64(stmt, 1, sid);
     sqlite3_bind_int64(stmt, 2, turn);
@@ -246,12 +246,12 @@ static void test_ingest_typed(void) {
     sqlite3_finalize(stmt);
 
     /* save_reasoning=0: same body ingests without a reasoning entry */
-    int64_t turn2 = db_next_turn_id(db, sid);
+    int64_t turn2 = db_next_iteration_id(db, sid);
     st = db_ingest_response(db, sid, turn2, "gpt-4o", ENDPOINT_OPENAI,
                             body, NULL, 0, &res);
     assert(st == LLM_RESP_OK);
     const char *nr_sql = "SELECT COUNT(*) FROM entries"
-                         " WHERE session_id=? AND turn_id=? AND type='reasoning';";
+                         " WHERE session_id=? AND iteration_id=? AND type='reasoning';";
     assert(sqlite3_prepare_v2(db, nr_sql, -1, &stmt, NULL) == SQLITE_OK);
     sqlite3_bind_int64(stmt, 1, sid);
     sqlite3_bind_int64(stmt, 2, turn2);

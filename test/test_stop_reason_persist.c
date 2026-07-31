@@ -69,8 +69,8 @@ static void test_stop_reason_roundtrip(void) {
     Message msg = {.role = ROLE_ASSISTANT,
                    .content = strdup("thinking..."),
                    .stop_reason = STOP_REASON_TOOL_USE};
-    int64_t turn_id = db_next_turn_id(db, sid);
-    int64_t eid = entry_append_with_turn(db, sid, &msg, turn_id);
+    int64_t iteration_id = db_next_iteration_id(db, sid);
+    int64_t eid = entry_append_with_iteration(db, sid, &msg, iteration_id);
     free(msg.content);
     if (eid < 0) { db_close(db); test_db_clean(path); FAIL("entry_append"); }
 
@@ -107,8 +107,8 @@ static void test_stop_reason_none_not_stored(void) {
 
     /* Append user message (no stop_reason) */
     Message msg = {.role = ROLE_USER, .content = strdup("hello")};
-    int64_t turn_id = db_next_turn_id(db, sid);
-    entry_append_with_turn(db, sid, &msg, turn_id);
+    int64_t iteration_id = db_next_iteration_id(db, sid);
+    entry_append_with_iteration(db, sid, &msg, iteration_id);
     free(msg.content);
 
     int count = 0;
@@ -150,8 +150,8 @@ static void test_all_stop_reasons(void) {
         Message msg = {.role = ROLE_ASSISTANT,
                        .content = strdup("msg"),
                        .stop_reason = reasons[i]};
-        int64_t turn_id = db_next_turn_id(db, sid);
-        entry_append_with_turn(db, sid, &msg, turn_id);
+        int64_t iteration_id = db_next_iteration_id(db, sid);
+        entry_append_with_iteration(db, sid, &msg, iteration_id);
         free(msg.content);
     }
 
@@ -192,7 +192,7 @@ static void test_length_notice_rendered(void) {
     Message cut = {.role = ROLE_ASSISTANT,
                    .content = strdup("here is the first half of the ans"),
                    .stop_reason = STOP_REASON_LENGTH};
-    entry_append_with_turn(db, sid, &cut, db_next_turn_id(db, sid));
+    entry_append_with_iteration(db, sid, &cut, db_next_iteration_id(db, sid));
     free(cut.content);
 
     char *text = get_response_text(db, sid);
@@ -220,7 +220,7 @@ static void test_length_notice_rendered(void) {
     Message done = {.role = ROLE_ASSISTANT,
                     .content = strdup("all done"),
                     .stop_reason = STOP_REASON_STOP};
-    entry_append_with_turn(db, sid, &done, db_next_turn_id(db, sid));
+    entry_append_with_iteration(db, sid, &done, db_next_iteration_id(db, sid));
     free(done.content);
 
     text = get_response_text(db, sid);

@@ -143,9 +143,9 @@ static void test_fts5_search(void) {
     Message m1 = {.role = ROLE_USER, .content = "hello world from the user"};
     Message m2 = {.role = ROLE_ASSISTANT, .content = "goodbye cruel world"};
     Message m3 = {.role = ROLE_USER, .content = "unrelated message about cats"};
-    assert(entry_append_with_turn(db, sid, &m1, 1) > 0);
-    assert(entry_append_with_turn(db, sid, &m2, 1) > 0);
-    assert(entry_append_with_turn(db, sid, &m3, 1) > 0);
+    assert(entry_append_with_iteration(db, sid, &m1, 1) > 0);
+    assert(entry_append_with_iteration(db, sid, &m2, 1) > 0);
+    assert(entry_append_with_iteration(db, sid, &m3, 1) > 0);
 
     /* The entries_fts trigger indexed all three appends */
     sqlite3_stmt *st;
@@ -373,11 +373,11 @@ static void test_schema_state(void) {
     assert(db_schema_state(db, NULL) == DB_SCHEMA_FUTURE);
     assert(db_schema_compat(db) == 0);   /* refused, not "upgraded" */
 
-    set_user_version(db, 10);            /* far below the v31 floor */
+    set_user_version(db, 10);            /* far below the v40 floor */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
     assert(db_schema_compat(db) == 0);
 
-    set_user_version(db, 30);            /* one below the v31 floor — refused */
+    set_user_version(db, 39);            /* one below the v40 floor — refused */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
     assert(db_schema_compat(db) == 0);
     /* No UPGRADABLE probe: with the floor at the current version the
@@ -418,14 +418,14 @@ static void test_schema_patch_application(void) {
     const char *old_path = "/tmp/test_cclaw_schema_patch_old.sqlite";
     const char *new_path = "/tmp/test_cclaw_schema_patch_new.sqlite";
     char junk[192];
-    const char *suffixes[] = { "", "-wal", "-shm", ".v33.bak" };
+    const char *suffixes[] = { "", "-wal", "-shm", ".v40.bak" };
     for (size_t i = 0; i < 4; i++) {
         snprintf(junk, sizeof(junk), "%s%s", old_path, suffixes[i]); unlink(junk);
         snprintf(junk, sizeof(junk), "%s%s", new_path, suffixes[i]); unlink(junk);
     }
 
     size_t sql_len = 0;
-    char *fixture = util_read_file("test/fixtures/schema_v33.sql", &sql_len);
+    char *fixture = util_read_file("test/fixtures/schema_v40.sql", &sql_len);
     assert(fixture != NULL && sql_len > 0);
 
     sqlite3 *old_db = db_open(old_path);
@@ -433,7 +433,7 @@ static void test_schema_patch_application(void) {
     char *err = NULL;
     assert(sqlite3_exec(old_db, fixture, NULL, NULL, &err) == SQLITE_OK);
     free(fixture);
-    set_user_version(old_db, 33);
+    set_user_version(old_db, 40);
 
     assert(db_schema_compat(old_db) == 1);   /* floor == current: nothing pending */
     int uv = 0;
@@ -446,7 +446,7 @@ static void test_schema_patch_application(void) {
     char *old_shape = schema_shape(old_db);
     char *new_shape = schema_shape(new_db);
     if (strcmp(old_shape, new_shape) != 0) {
-        fprintf(stderr, "patched v31 shape != fresh v%d shape\n-- patched:\n%s\n-- fresh:\n%s\n",
+        fprintf(stderr, "patched v40 shape != fresh v%d shape\n-- patched:\n%s\n-- fresh:\n%s\n",
                 CCLAW_SCHEMA_VERSION, old_shape, new_shape);
         assert(0);
     }

@@ -65,9 +65,15 @@ Not yet implemented:
 ## Context Window Management
 
 - Load ≤ `context_threshold` × context_window tokens of most recent turns
-- Never cut mid-tool-call; cut at valid turn boundary
+- Never cut mid-tool-call; the cut snaps **backwards to the start of the turn it
+  lands in** (`entries.turn_id`, `plan_find_cut` in `context.c`) — not to "the
+  previous user message", which would split a turn that opened with several
+  inbox-drained user entries, and not forwards, which could drop the very turn
+  being answered. Keeping a whole turn can overshoot the budget by one turn.
 - Cutoff notice prepended when truncated
-- Compaction: summarize old entries, reparent tree
+- Compaction: summarize old entries, reparent tree. Its keep boundary
+  (`context_compaction_keep_from`) snaps the same way, so a summary never lands
+  inside a turn; a branch that is one giant turn compacts to nothing.
 
 ## Letta Patterns NOT Adopted
 

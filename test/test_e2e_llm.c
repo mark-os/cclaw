@@ -134,7 +134,7 @@ static int64_t call_llm(const Config *cfg, const Message *msgs,
     }
 
     int64_t sid = session_create(g_db, "e2e", NULL, -1, 0);
-    int64_t turn = db_next_turn_id(g_db, sid);
+    int64_t turn = db_next_iteration_id(g_db, sid);
     LlmRespStatus st = db_ingest_response(g_db, sid, turn, cfg->provider.model,
                                           ENDPOINT_OPENAI, resp.data, NULL, 1, out);
     http_response_free(&resp);

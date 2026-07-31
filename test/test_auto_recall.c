@@ -18,7 +18,7 @@ static sqlite3 *open_seeded(const char *path) {
 
 static void add_user_msg(sqlite3 *db, int64_t sid, const char *text) {
     Message m = {.role = ROLE_USER, .content = (char *)text};
-    entry_append_with_turn(db, sid, &m, 1);
+    entry_append_with_iteration(db, sid, &m, 1);
 }
 
 /* Porter stemming: "configure" must match "configured" from another session */

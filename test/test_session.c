@@ -110,15 +110,15 @@ static void test_entry_append(void) {
     int64_t sid = session_create(db, "append", NULL, -1, 0);
 
     Message m1 = { .role = ROLE_USER, .content = "hello" };
-    int64_t e1 = entry_append_with_turn(db, sid, &m1, 1);
+    int64_t e1 = entry_append_with_iteration(db, sid, &m1, 1);
     assert(e1 > 0);
 
     Message m2 = { .role = ROLE_ASSISTANT, .content = "hi" };
-    int64_t e2 = entry_append_with_turn(db, sid, &m2, 1);
+    int64_t e2 = entry_append_with_iteration(db, sid, &m2, 1);
     assert(e2 > e1);
 
     Message m3 = { .role = ROLE_USER, .content = "bye" };
-    int64_t e3 = entry_append_with_turn(db, sid, &m3, 1);
+    int64_t e3 = entry_append_with_iteration(db, sid, &m3, 1);
     assert(e3 > e2);
 
     /* Verify branch is correct chain */
@@ -142,7 +142,7 @@ static void test_entry_append(void) {
 static void test_entry_append_invalid_session(void) {
     sqlite3 *db = setup();
     Message m = { .role = ROLE_USER, .content = "nope" };
-    int64_t id = entry_append_with_turn(db, 9999, &m, 1);
+    int64_t id = entry_append_with_iteration(db, 9999, &m, 1);
     assert(id == -1);
 
     teardown(db);
@@ -156,20 +156,20 @@ static void test_entry_tool_calls_roundtrip(void) {
 
     /* Append user message */
     Message m1 = { .role = ROLE_USER, .content = "do something" };
-    int64_t e1 = entry_append_with_turn(db, sid, &m1, 1);
+    int64_t e1 = entry_append_with_iteration(db, sid, &m1, 1);
     assert(e1 > 0);
 
     /* Append assistant message with tool_calls */
     ToolCall tc = { .id = "call_123", .name = "shell_exec", .arguments = "{\"cmd\":\"ls\"}" };
     Message m2 = { .role = ROLE_ASSISTANT, .content = NULL,
                    .tool_calls = &tc, .tool_call_count = 1 };
-    int64_t e2 = entry_append_with_turn(db, sid, &m2, 1);
+    int64_t e2 = entry_append_with_iteration(db, sid, &m2, 1);
     assert(e2 > 0);
 
     /* Append tool result */
     ToolResult tr = { .tool_call_id = "call_123", .content = "file1.txt\nfile2.txt" };
     Message m3 = { .role = ROLE_TOOL, .tool_result = &tr };
-    int64_t e3 = entry_append_with_turn(db, sid, &m3, 1);
+    int64_t e3 = entry_append_with_iteration(db, sid, &m3, 1);
     assert(e3 > 0);
 
     /* Read back branch and verify deserialization */

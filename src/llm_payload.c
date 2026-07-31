@@ -65,7 +65,7 @@ static const char SQL_OPENAI_MESSAGES[] =
     "      WHEN 'assistant_message' THEN"
     "        CASE WHEN EXISTS("
     "          SELECT 1 FROM entries tc WHERE tc.session_id=e.session_id"
-    "            AND tc.turn_id=e.turn_id AND tc.type='tool_call')"
+    "            AND tc.iteration_id=e.iteration_id AND tc.type='tool_call')"
     "        THEN json_patch("
     "          json_object('role','assistant','content',e.content),"
     "          json_object('tool_calls',"
@@ -74,7 +74,7 @@ static const char SQL_OPENAI_MESSAGES[] =
     "                'function',json_object('name',tc2.tool_name,"
     "                  'arguments',COALESCE(tc2.content,'{}'))))"
     "             FROM entries tc2 WHERE tc2.session_id=e.session_id"
-    "               AND tc2.turn_id=e.turn_id AND tc2.type='tool_call'"
+    "               AND tc2.iteration_id=e.iteration_id AND tc2.type='tool_call'"
     "             ORDER BY tc2.part_index)))"
     "        ELSE json_object('role','assistant','content',e.content)"
     "        END"
@@ -179,7 +179,7 @@ static const char SQL_GEMINI_CONTENTS[] =
     "                ELSE NULL"
     "              END AS part"
     "            FROM _plan p2 JOIN entries e2 ON e2.id=p2.entry_id AND e2.session_id=?1"
-    "            WHERE e2.turn_id=e.turn_id"
+    "            WHERE e2.iteration_id=e.iteration_id"
     "              AND e2.type IN ('assistant_message','tool_call')"
     "            ORDER BY e2.part_index"
     "          ) WHERE part IS NOT NULL))"
@@ -199,13 +199,14 @@ static const char SQL_GEMINI_CONTENTS[] =
     "    END AS content_obj"
     "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
     "  WHERE e.type != 'system'"
-    /* -turn_id vs id: both are always positive, so negating turn_id puts the
-     * two group-key domains in disjoint ranges. Without this, a user_message
-     * with id=N and an assistant/tool_call/reasoning entry with turn_id=N
-     * collide into one GROUP BY bucket — silently merging unrelated messages
-     * and dropping one (hits fresh/short sessions, where id is still small). */
+    /* -iteration_id vs id: both are always positive, so negating iteration_id
+     * puts the two group-key domains in disjoint ranges. Without this, a
+     * user_message with id=N and an assistant/tool_call/reasoning entry with
+     * iteration_id=N collide into one GROUP BY bucket — silently merging
+     * unrelated messages and dropping one (hits fresh/short sessions, where
+     * id is still small). */
     "  GROUP BY CASE WHEN e.type IN ('assistant_message','tool_call','reasoning')"
-    "    THEN -e.turn_id ELSE e.id END"
+    "    THEN -e.iteration_id ELSE e.id END"
     /* Session context (recall + live state) at the turn boundary: right
      * before the newest user_message — see SQL_OPENAI_MESSAGES for
      * rationale (tail recency, functionCall/functionResponse adjacency,

@@ -64,9 +64,9 @@ static void test_llm_req_stop(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append_with_turn(db, sid, &sys, 1);
+    entry_append_with_iteration(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "Hello"};
-    entry_append_with_turn(db, sid, &user, 1);
+    entry_append_with_iteration(db, sid, &user, 1);
 
     set_test_env(db_path);
 
@@ -142,9 +142,9 @@ static void test_llm_req_skips_keyless_provider(void) {
 
     int64_t sid = session_create(db, "keyless", "Router", -1, 0);
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append_with_turn(db, sid, &sys, 1);
+    entry_append_with_iteration(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "Hello"};
-    entry_append_with_turn(db, sid, &user, 1);
+    entry_append_with_iteration(db, sid, &user, 1);
 
     set_test_env(db_path);
     setenv("CCLAW_TEST_PRESENT_KEY", "sk-present", 1);
@@ -184,9 +184,9 @@ static void test_llm_req_tool_calls(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append_with_turn(db, sid, &sys, 1);
+    entry_append_with_iteration(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "Read foo.txt"};
-    entry_append_with_turn(db, sid, &user, 1);
+    entry_append_with_iteration(db, sid, &user, 1);
 
     set_test_env(db_path);
 
@@ -226,9 +226,9 @@ static void test_llm_req_error(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append_with_turn(db, sid, &sys, 1);
+    entry_append_with_iteration(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "Hello"};
-    entry_append_with_turn(db, sid, &user, 1);
+    entry_append_with_iteration(db, sid, &user, 1);
 
     set_test_env(db_path);
 

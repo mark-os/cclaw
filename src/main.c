@@ -90,7 +90,7 @@ typedef struct {
     char tool_call_id[64];
     char tool_name[64];     /* for the §8 observer hook */
     char *tool_args;        /* strdup'd args for the observer; freed on cleanup */
-    int64_t turn_id;
+    int64_t iteration_id;
     int64_t entry_id;       /* tool_call entry id */
     int result_pipe;        /* read end of pipe for tool output */
     char *outbuf;           /* Accumulator for tool output (grows with realloc) */
@@ -172,7 +172,7 @@ static void deliver_response(int64_t session_id);
 static int dispatch_tool(int64_t session_id, const char *agent_name, PendingToolCall *tc);
 static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
                                 const char *tool_call_id, const char *tool_name,
-                                const char *tool_args, int64_t turn_id,
+                                const char *tool_args, int64_t iteration_id,
                                 int64_t entry_id, const char *blob, size_t blob_len,
                                 int timeout_sec);
 
@@ -286,7 +286,7 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
         Message msg = {.role = ROLE_ASSISTANT,
                        .content = "error: max iterations reached",
                        .stop_reason = STOP_REASON_ERROR};
-        entry_append_with_turn(g_db, session_id, &msg, 0);
+        entry_append_with_iteration(g_db, session_id, &msg, 0);
         session_set_state(g_db, session_id, "idle");
         if (g_mode == 0) {
             fprintf(stderr, "\nerror: max iterations reached\n");
@@ -484,7 +484,7 @@ static int tool_inline_error(int64_t session_id, PendingToolCall *tc,
     ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
     Message m = {.role = ROLE_TOOL, .tool_result = &tr,
                  .tool_name = tc->name, .is_error = 1};
-    entry_append_with_turn(g_db, session_id, &m, tc->turn_id);
+    entry_append_with_iteration(g_db, session_id, &m, tc->iteration_id);
     db_tool_call_set_status(g_db, session_id, tc->call_id, "done", detail);
     free(err);
     return 1;
@@ -689,7 +689,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
             ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = tc->name, .is_error = 1};
-            entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+            entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
             db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "not_granted");
             return 1;
         }
@@ -744,7 +744,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
                 Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                                .tool_name = tc->name, .is_error = 1};
-                entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+                entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
                 db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "policy:deny");
                 return 1;
             }
@@ -764,7 +764,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
                 Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                                .tool_name = tc->name, .is_error = 1};
-                entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+                entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
                 db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "hook:deny");
                 free(reason);
                 return 1;
@@ -838,7 +838,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
                 Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                                .tool_name = tc->name, .is_error = 1};
-                entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+                entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
                 db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "denied");
                 approval_free(ap);
                 return 1;
@@ -984,7 +984,7 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     int is_err = (strncmp(result, "error:", 6) == 0);
     Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                    .tool_name = tc->name, .is_error = is_err};
-    int64_t rid = entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+    int64_t rid = entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
     db_tool_call_complete_with_result(g_db, tc->entry_id, tc->call_id, rid);
     if (hook_annotate) {
         if (rid > 0) hook_entry_data_patch(g_db, rid, hook_annotate);
@@ -1040,7 +1040,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
         Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                        .tool_name = tc->name, .is_error = 1};
-        entry_append_with_turn(g_db, session_id, &msg, tc->turn_id);
+        entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
         db_tool_call_set_status(g_db, session_id, tc->call_id, "done", NULL);
         return 1; /* Signal: handled inline, check for more */
     }
@@ -1151,7 +1151,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                     "error: file tool request exceeds 32KB cap", NULL);
             int rc = spawn_run_tool_child(session_id, agent_name,
                          tc->call_id, tc->name, tc->arguments,
-                         tc->turn_id, tc->entry_id, blob, blob_len, 120);
+                         tc->iteration_id, tc->entry_id, blob, blob_len, 120);
             free(blob);
             if (rc != 0)
                 return tool_inline_error(session_id, tc,
@@ -1239,7 +1239,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
              * the sandbox child's process group — wins in the normal case. */
             int rc = spawn_run_tool_child(session_id, agent_name,
                          tc->call_id, tc->name, tc->arguments,
-                         tc->turn_id, tc->entry_id, blob, blob_len,
+                         tc->iteration_id, tc->entry_id, blob, blob_len,
                          cmd_timeout + 30);
             /* Wipe blob (carries interpolated secrets) */
             explicit_bzero(blob, blob_len);
@@ -1304,7 +1304,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 "error: web request exceeds 32KB cap", NULL);
         int rc = spawn_run_tool_child(session_id, agent_name,
                      tc->call_id, tc->name, tc->arguments,
-                     tc->turn_id, tc->entry_id, blob, blob_len, 90);
+                     tc->iteration_id, tc->entry_id, blob, blob_len, 90);
         explicit_bzero(blob, blob_len);
         free(blob);
         if (rc != 0)
@@ -1437,7 +1437,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 "error: js request exceeds 32KB cap", NULL);
         int rc = spawn_run_tool_child(session_id, agent_name,
                      tc->call_id, tc->name, tc->arguments,
-                     tc->turn_id, tc->entry_id, blob, blob_len, 150);
+                     tc->iteration_id, tc->entry_id, blob, blob_len, 150);
         explicit_bzero(blob, blob_len);
         free(blob);
         if (rc != 0)
@@ -1459,7 +1459,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 
         ToolThreadJob job = {0};
         job.session_id = session_id;
-        job.turn_id = tc->turn_id;
+        job.iteration_id = tc->iteration_id;
         job.entry_id = tc->entry_id;
         snprintf(job.tool_call_id, sizeof(job.tool_call_id), "%s", tc->call_id);
         snprintf(job.tool_name, sizeof(job.tool_name), "%s", tc->name);
@@ -1606,7 +1606,7 @@ static char g_log_level_env[32] = "CCLAW_LOG_LEVEL=info";
  * registered in g_children), -1 on failure (error result written inline). */
 static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
                                 const char *tool_call_id, const char *tool_name,
-                                const char *tool_args, int64_t turn_id,
+                                const char *tool_args, int64_t iteration_id,
                                 int64_t entry_id, const char *blob, size_t blob_len,
                                 int timeout_sec) {
     if (g_child_count >= CHILD_MAX) return -1;
@@ -1666,7 +1666,7 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
     c->pid = pid;
     c->type = CHILD_TOOL_EXEC;
     c->session_id = session_id;
-    c->turn_id = turn_id;
+    c->iteration_id = iteration_id;
     c->entry_id = entry_id;
     c->result_pipe = sp[0];
     c->outbuf = NULL;
@@ -1731,7 +1731,7 @@ static void child_sweep_deadlines(void) {
             ToolResult tr = {.tool_call_id = c->tool_call_id, .content = errbuf};
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = "", .is_error = 1};
-            entry_append_with_turn(g_db, c->session_id, &msg, c->turn_id);
+            entry_append_with_iteration(g_db, c->session_id, &msg, c->iteration_id);
             db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, -1);
         }
         c->deadline = -1; /* mark consumed so reap doesn't double-advance */
@@ -1805,7 +1805,7 @@ static void approval_unpark_block_window(int64_t approval_id) {
     ToolResult tr = { .tool_call_id = call_id, .content = buf };
     Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                     .tool_name = tool_name, .is_error = 0 };
-    if (entry_append_with_turn(g_db, session_id, &msg, 0) < 0 ||
+    if (entry_append_with_iteration(g_db, session_id, &msg, 0) < 0 ||
         db_tool_call_set_status(g_db, session_id, call_id, "done", "block_window") != 0 ||
         session_set_state(g_db, session_id, "tool_running") != 0) {
         sqlite3_exec(g_db, "ROLLBACK;", NULL, NULL, NULL);
@@ -2082,7 +2082,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                 ToolResult tr = { .tool_call_id = a->tool_call_id, .content = buf };
                 Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                                 .tool_name = a->action, .is_error = 1 };
-                entry_append_with_turn(g_db, session_id, &msg, 0);
+                entry_append_with_iteration(g_db, session_id, &msg, 0);
                 db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
             }
         } else if (decision == APPROVAL_ALWAYS && agent) {
@@ -2139,7 +2139,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
             ToolResult tr = { .tool_call_id = a->tool_call_id, .content = err };
             Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                             .tool_name = a->tool_name, .is_error = 1 };
-            entry_append_with_turn(g_db, session_id, &msg, 0);
+            entry_append_with_iteration(g_db, session_id, &msg, 0);
             db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
         }
         session_set_state(g_db, session_id, "tool_running");
@@ -2175,7 +2175,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                         .tool_name = a->tool_name,
                         .is_error = (decision == APPROVAL_DENY || rename_failed) };
-        entry_append_with_turn(g_db, session_id, &msg, 0);
+        entry_append_with_iteration(g_db, session_id, &msg, 0);
         db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
     }
 
@@ -2948,7 +2948,7 @@ static void reap_children(void) {
             int is_err = (strncmp(output, "error:", 6) == 0);
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = "", .is_error = is_err};
-            int64_t rid = entry_append_with_turn(g_db, session_id, &msg, c->turn_id);
+            int64_t rid = entry_append_with_iteration(g_db, session_id, &msg, c->iteration_id);
             if (hosts && rid > 0)
                 db_entry_set_network_hosts(g_db, rid, hosts);
             db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, rid);

@@ -217,7 +217,7 @@ static int apply_inject(sqlite3 *db, int64_t session_id, const char *cmds_json) 
         } else {
             Message m = {.role = strcmp(role, "user") == 0 ? ROLE_USER : ROLE_SYSTEM,
                          .content = (char *)content};
-            if (entry_append_with_turn(db, session_id, &m, 0) < 0) rc = -1;
+            if (entry_append_with_iteration(db, session_id, &m, 0) < 0) rc = -1;
         }
         free(masked);
     }
@@ -285,7 +285,7 @@ static const char SQL_POST_ADVANCE_INPUT[] =
     "      'id', tc.tool_call_id, 'name', tc.tool_name,"
     "      'args', COALESCE(tc.content,'{}')) ORDER BY tc.part_index)"
     "    FROM entries tc WHERE tc.session_id=e.session_id"
-    "      AND tc.turn_id=e.turn_id AND tc.type='tool_call'),"
+    "      AND tc.iteration_id=e.iteration_id AND tc.type='tool_call'),"
     "  'stop_reason', CASE e.stop_reason WHEN 1 THEN 'stop' WHEN 2 THEN 'length'"
     "    WHEN 3 THEN 'tool_use' WHEN 4 THEN 'error' WHEN 5 THEN 'aborted'"
     "    ELSE 'none' END,"

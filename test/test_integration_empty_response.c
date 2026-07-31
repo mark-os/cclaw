@@ -44,9 +44,9 @@ int main(void) {
     db_agent_upsert(db, "default", NULL, NULL);
     int64_t sid = session_create(db, "test", "default", -1, 0);
     Message sys = {.role = ROLE_SYSTEM, .content = "sys"};
-    entry_append_with_turn(db, sid, &sys, 1);
+    entry_append_with_iteration(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "hi"};
-    entry_append_with_turn(db, sid, &user, 1);
+    entry_append_with_iteration(db, sid, &user, 1);
 
     mock_server_enqueue(200, EMPTY_RESPONSE);
 
@@ -69,7 +69,7 @@ int main(void) {
      * next attempt's real answer lands. One retry sleep (1s) is expected. */
     int reqs_before = mock_server_request_count();
     Message user2 = {.role = ROLE_USER, .content = "again"};
-    entry_append_with_turn(db, sid, &user2, 1);
+    entry_append_with_iteration(db, sid, &user2, 1);
     mock_server_enqueue(200, GLITCH_RESPONSE);
     mock_server_enqueue(200, OK_RESPONSE);
 
@@ -92,7 +92,7 @@ int main(void) {
     assert(sqlite3_prepare_v2(db,
         "SELECT COUNT(*) FROM llm_responses WHERE status='empty'"
         " AND request_body IS NOT NULL"
-        " AND turn_id=(SELECT MAX(turn_id) FROM llm_responses);", -1, &st, NULL) == SQLITE_OK);
+        " AND iteration_id=(SELECT MAX(iteration_id) FROM llm_responses);", -1, &st, NULL) == SQLITE_OK);
     assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
     sqlite3_finalize(st);
 

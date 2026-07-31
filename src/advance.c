@@ -97,7 +97,7 @@ static void notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
                               .content = result_text };
             Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
                              .tool_name = "launch_agent", .is_error = is_error };
-            int64_t rid = entry_append_with_turn(db, pi.parent_session_id, &rmsg, 0);
+            int64_t rid = entry_append_with_iteration(db, pi.parent_session_id, &rmsg, 0);
             db_tool_call_complete_by_call(db, pi.parent_session_id,
                                           pi.parent_tool_call_id, rid);
             /* Unpark parent — but only from a state that permits it. A parent
@@ -340,7 +340,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             Message msg = { .role = ROLE_ASSISTANT,
                             .content = rich_msg,
                             .stop_reason = STOP_REASON_ERROR };
-            entry_append_with_turn(db, session_id, &msg, 0);
+            entry_append_with_iteration(db, session_id, &msg, 0);
             free(rich_msg);
             session_set_state(db, session_id, "idle");
             /* Max-iter is a terminal error for a sub-agent too — notify parent. */

@@ -30,11 +30,11 @@ static void setup_session(sqlite3 *db, int64_t *sid) {
 
     /* User message with special chars */
     Message user = {.role = ROLE_USER, .content = "Hello \"world\"\nLine2\ttab"};
-    entry_append_with_turn(db, *sid, &user, 1);
+    entry_append_with_iteration(db, *sid, &user, 1);
 
     /* Assistant reply */
     Message asst = {.role = ROLE_ASSISTANT, .content = "Hi there!"};
-    entry_append_with_turn(db, *sid, &asst, 1);
+    entry_append_with_iteration(db, *sid, &asst, 1);
 }
 
 /* Helper: extract string from JSON using sqlite */
@@ -512,13 +512,13 @@ static void test_compaction_entry_in_payload(void) {
     int64_t sid = session_create(db, "test", "default", -1, 0);
     assert(sid > 0);
     Message m1 = {.role = ROLE_USER, .content = "first question"};
-    int64_t e1 = entry_append_with_turn(db, sid, &m1, 1);
+    int64_t e1 = entry_append_with_iteration(db, sid, &m1, 1);
     Message m2 = {.role = ROLE_ASSISTANT, .content = "first answer"};
-    entry_append_with_turn(db, sid, &m2, 1);
+    entry_append_with_iteration(db, sid, &m2, 1);
     Message m3 = {.role = ROLE_USER, .content = "next question"};
-    entry_append_with_turn(db, sid, &m3, 2);
+    entry_append_with_iteration(db, sid, &m3, 2);
     Message m4 = {.role = ROLE_ASSISTANT, .content = "next answer"};
-    int64_t e4 = entry_append_with_turn(db, sid, &m4, 2);
+    int64_t e4 = entry_append_with_iteration(db, sid, &m4, 2);
     assert(e1 > 0 && e4 > 0);
     /* Summarize e2+e3 away; keep e1 and e4 */
     int64_t cid = entry_compact(db, sid, e1, e4,
@@ -571,19 +571,19 @@ static void test_network_hosts_query_time_wrap(void) {
     int64_t sid = session_create(db, "test", "default", -1, 0);
     assert(sid > 0);
     Message m1 = {.role = ROLE_USER, .content = "fetch something"};
-    entry_append_with_turn(db, sid, &m1, 1);
+    entry_append_with_iteration(db, sid, &m1, 1);
     Message asst = {.role = ROLE_ASSISTANT, .content = "fetching"};
-    entry_append_with_turn(db, sid, &asst, 1);
+    entry_append_with_iteration(db, sid, &asst, 1);
 
     ToolResult tr1 = {.tool_call_id = "call_net", .content = "external page body"};
     Message r1 = {.role = ROLE_TOOL, .tool_result = &tr1, .tool_name = "web_fetch"};
-    int64_t rid1 = entry_append_with_turn(db, sid, &r1, 1);
+    int64_t rid1 = entry_append_with_iteration(db, sid, &r1, 1);
     assert(rid1 > 0);
     assert(db_entry_set_network_hosts(db, rid1, "[\"example.com\"]") == 0);
 
     ToolResult tr2 = {.tool_call_id = "call_local", .content = "local file body"};
     Message r2 = {.role = ROLE_TOOL, .tool_result = &tr2, .tool_name = "file_read"};
-    int64_t rid2 = entry_append_with_turn(db, sid, &r2, 1);
+    int64_t rid2 = entry_append_with_iteration(db, sid, &r2, 1);
     assert(rid2 > 0);
 
     Config cfg = {0};

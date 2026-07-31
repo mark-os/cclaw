@@ -52,8 +52,8 @@ static void test_llm_complete_stop(void) {
     session_set_state(db, sid, "llm_running");
     Message msg = { .role = ROLE_ASSISTANT, .content = "done",
                     .stop_reason = STOP_REASON_STOP };
-    int64_t turn_id = db_next_turn_id(db, sid);
-    entry_append_with_turn(db, sid, &msg, turn_id);
+    int64_t iteration_id = db_next_iteration_id(db, sid);
+    entry_append_with_iteration(db, sid, &msg, iteration_id);
 
     AdvanceOutput out = advance_session(db, sid, 25);
     assert(out.action == ADVANCE_DONE);
@@ -127,7 +127,7 @@ static void test_idle_unanswered_user_leaf(void) {
      * is a user entry), session parked idle, inbox empty — the turn must be
      * re-dispatched, not stranded. */
     Message msg = { .role = ROLE_USER, .content = "hello" };
-    entry_append_with_turn(db, sid, &msg, db_next_turn_id(db, sid));
+    entry_append_with_iteration(db, sid, &msg, db_next_iteration_id(db, sid));
     session_set_iteration(db, sid, 5);
 
     AdvanceOutput out = advance_session(db, sid, 25);
@@ -145,11 +145,11 @@ static void test_idle_answered_leaf_noop(void) {
 
     /* Completed turn: assistant entry is the leaf — idle stays NOOP. */
     Message umsg = { .role = ROLE_USER, .content = "hello" };
-    int64_t turn_id = db_next_turn_id(db, sid);
-    entry_append_with_turn(db, sid, &umsg, turn_id);
+    int64_t iteration_id = db_next_iteration_id(db, sid);
+    entry_append_with_iteration(db, sid, &umsg, iteration_id);
     Message amsg = { .role = ROLE_ASSISTANT, .content = "hi",
                      .stop_reason = STOP_REASON_STOP };
-    entry_append_with_turn(db, sid, &amsg, turn_id);
+    entry_append_with_iteration(db, sid, &amsg, iteration_id);
 
     AdvanceOutput out = advance_session(db, sid, 25);
     assert(out.action == ADVANCE_NOOP);

@@ -79,7 +79,7 @@ static const char TC_GEMINI[] =
  * parsed JSONB blob (and we can pull the provider's $.id out of it); otherwise
  * body is NUL-terminated text that wasn't valid JSON. Best-effort: errors here
  * never affect ingest. */
-static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
+static void archive_store(sqlite3 *db, int64_t session_id, int64_t iteration_id,
                           const char *model, const char *status,
                           const void *body, int blen, int is_jsonb,
                           const char *request_body) {
@@ -100,7 +100,7 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
     if (cap == 0) return;   /* archiving disabled — skip the insert entirely */
 
     const char *sql =
-        "INSERT INTO llm_responses(session_id,turn_id,model,status,provider_id,body,request_body)"
+        "INSERT INTO llm_responses(session_id,iteration_id,model,status,provider_id,body,request_body)"
         " VALUES(?1,?2,?3,?4,"
         "  CASE WHEN ?5 THEN COALESCE(json_extract(?6,'$.id'),"
         "                             json_extract(?6,'$.responseId')) END, ?6,"
@@ -108,7 +108,7 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(s, 1, session_id);
-        sqlite3_bind_int64(s, 2, turn_id);
+        sqlite3_bind_int64(s, 2, iteration_id);
         sqlite3_bind_text(s, 3, model ? model : "", -1, SQLITE_STATIC);
         sqlite3_bind_text(s, 4, status, -1, SQLITE_STATIC);
         sqlite3_bind_int(s, 5, is_jsonb);
@@ -139,7 +139,7 @@ static void archive_store(sqlite3 *db, int64_t session_id, int64_t turn_id,
 /* Public entry: archive a raw response body (any HTTP outcome) given as text.
  * Parses to JSONB when valid, stores raw text otherwise. Used for non-2xx /
  * network errors that never reach db_ingest_response. */
-void db_archive_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
+void db_archive_response(sqlite3 *db, int64_t session_id, int64_t iteration_id,
                          const char *model, const char *status, const char *body,
                          const char *request_body) {
     if (!db || !status) return;
@@ -148,7 +148,7 @@ void db_archive_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
     if (sqlite3_prepare_v2(db, "SELECT jsonb(?1)", -1, &j, NULL) == SQLITE_OK) {
         sqlite3_bind_text(j, 1, body, -1, SQLITE_STATIC);
         if (sqlite3_step(j) == SQLITE_ROW) {
-            archive_store(db, session_id, turn_id, model, status,
+            archive_store(db, session_id, iteration_id, model, status,
                           sqlite3_column_blob(j, 0), sqlite3_column_bytes(j, 0), 1,
                           request_body);
             sqlite3_finalize(j);
@@ -156,10 +156,10 @@ void db_archive_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
         }
         sqlite3_finalize(j);
     }
-    archive_store(db, session_id, turn_id, model, status, body, -1, 0, request_body);
+    archive_store(db, session_id, iteration_id, model, status, body, -1, 0, request_body);
 }
 
-LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_id,
+LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t iteration_id,
                                  const char *model, EndpointType ep,
                                  const char *body, const char *request_body,
                                  int save_reasoning, TypedIngestResult *out) {
@@ -175,14 +175,14 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
     if (sqlite3_prepare_v2(db, "SELECT jsonb(?1)", -1, &j, NULL) != SQLITE_OK) {
         /* Our-side failure (e.g. SQLITE_BUSY), not a bad response — archive the
          * raw body so a valid reply lost to DB contention is still recoverable. */
-        archive_store(db, session_id, turn_id, model, "ingest_error", body, -1, 0, request_body);
+        archive_store(db, session_id, iteration_id, model, "ingest_error", body, -1, 0, request_body);
         return LLM_RESP_DBERR;
     }
     sqlite3_bind_text(j, 1, body, -1, SQLITE_STATIC);
     if (sqlite3_step(j) != SQLITE_ROW) {
         /* Not valid JSON at all — archive the raw text for forensics. */
         sqlite3_finalize(j);
-        archive_store(db, session_id, turn_id, model, "malformed", body, -1, 0, request_body);
+        archive_store(db, session_id, iteration_id, model, "malformed", body, -1, 0, request_body);
         return LLM_RESP_MALFORMED;
     }
     const void *blob = sqlite3_column_blob(j, 0);
@@ -193,14 +193,14 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, gemini ? SCALAR_GEMINI : SCALAR_OPENAI, -1, &s, NULL) != SQLITE_OK) {
         /* Our-side failure — archive the (valid) body for forensics + recovery. */
-        archive_store(db, session_id, turn_id, model, "ingest_error", blob, blen, 1, request_body);
+        archive_store(db, session_id, iteration_id, model, "ingest_error", blob, blen, 1, request_body);
         sqlite3_finalize(j);
         return LLM_RESP_DBERR;
     }
     sqlite3_bind_blob(s, 1, blob, blen, SQLITE_STATIC);
     if (sqlite3_step(s) != SQLITE_ROW) {
         sqlite3_finalize(s);
-        archive_store(db, session_id, turn_id, model, "malformed", blob, blen, 1, request_body);
+        archive_store(db, session_id, iteration_id, model, "malformed", blob, blen, 1, request_body);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
@@ -208,7 +208,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
     /* Shape check: choices/candidates array present and non-empty. */
     if (sqlite3_column_type(s, 7) == SQLITE_NULL || sqlite3_column_int(s, 7) == 0) {
         sqlite3_finalize(s);
-        archive_store(db, session_id, turn_id, model, "malformed", blob, blen, 1, request_body);
+        archive_store(db, session_id, iteration_id, model, "malformed", blob, blen, 1, request_body);
         sqlite3_finalize(j);
         return LLM_RESP_MALFORMED;
     }
@@ -241,13 +241,13 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
         finish && strcmp(finish, "stop") == 0) {
         sqlite3_finalize(s);
         if (tc) sqlite3_finalize(tc);
-        archive_store(db, session_id, turn_id, model, "empty", blob, blen, 1, request_body);
+        archive_store(db, session_id, iteration_id, model, "empty", blob, blen, 1, request_body);
         sqlite3_finalize(j);
         return LLM_RESP_EMPTY;
     }
 
     /* Well-formed — archive before flattening into entries. */
-    archive_store(db, session_id, turn_id, model, "ok", blob, blen, 1, NULL);
+    archive_store(db, session_id, iteration_id, model, "ok", blob, blen, 1, NULL);
 
     StopReason stop = map_stop_reason(finish);
     if (tc_count > 0 && stop != STOP_REASON_TOOL_USE)
@@ -258,10 +258,10 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
     /* Reasoning entry (scalar pointers still valid — s untouched). Stored
      * for inspection only — payload builders never replay it to the model. */
     if (save_reasoning && reasoning && reasoning[0])
-        entry_append_typed(db, session_id, turn_id, "reasoning", part++,
+        entry_append_typed(db, session_id, iteration_id, "reasoning", part++,
                            reasoning, NULL, NULL, 0, STOP_REASON_NONE, NULL, 0, 0, 0);
 
-    int64_t asst_id = entry_append_typed(db, session_id, turn_id, "assistant_message", part++,
+    int64_t asst_id = entry_append_typed(db, session_id, iteration_id, "assistant_message", part++,
                                          content, NULL, NULL, 0, stop, model,
                                          prompt_tokens, completion_tokens, cost_nano);
     sqlite3_finalize(s);   /* done with content/reasoning pointers */
@@ -308,10 +308,10 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
 
             if (!normalized) {
                 /* Invalid JSON from model — emit error tool_result directly */
-                entry_append_typed(db, session_id, turn_id, "tool_call", part++,
+                entry_append_typed(db, session_id, iteration_id, "tool_call", part++,
                                    "{}", id, name,
                                    0, STOP_REASON_NONE, NULL, 0, 0, 0);
-                entry_append_typed(db, session_id, turn_id, "tool_result", part++,
+                entry_append_typed(db, session_id, iteration_id, "tool_result", part++,
                                    "error: invalid JSON in tool call arguments",
                                    id, name, 1, STOP_REASON_NONE, NULL, 0, 0, 0);
                 if (jval) sqlite3_reset(jval);
@@ -319,7 +319,7 @@ LlmRespStatus db_ingest_response(sqlite3 *db, int64_t session_id, int64_t turn_i
                 continue;
             }
 
-            int64_t tc_entry = entry_append_typed(db, session_id, turn_id, "tool_call", part++,
+            int64_t tc_entry = entry_append_typed(db, session_id, iteration_id, "tool_call", part++,
                                                   normalized, id, name,
                                                   0, STOP_REASON_NONE, NULL, 0, 0, 0);
             if (jval) sqlite3_reset(jval);

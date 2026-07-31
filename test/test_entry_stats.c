@@ -22,7 +22,7 @@ static void test_entry_stats_populated(void) {
     Message m = {0};
     m.role = ROLE_USER;
     m.content = "Hello world";
-    int64_t eid = entry_append_with_turn(db, sid, &m, 1);
+    int64_t eid = entry_append_with_iteration(db, sid, &m, 1);
     if (eid < 0) FAIL("entry_append");
 
     /* Query stored stats */
@@ -56,13 +56,13 @@ static void test_context_plan_uses_stored_stats(void) {
     Message m = {0};
     m.role = ROLE_USER;
     m.content = "Hello";
-    entry_append_with_turn(db, sid, &m, 1);
+    entry_append_with_iteration(db, sid, &m, 1);
 
     Message m2 = {0};
     m2.role = ROLE_ASSISTANT;
     m2.content = "Hi there!";
     m2.stop_reason = STOP_REASON_STOP;
-    entry_append_with_turn(db, sid, &m2, 1);
+    entry_append_with_iteration(db, sid, &m2, 1);
 
     Config cfg = {0};
     cfg.context_window = 128000;
@@ -93,7 +93,7 @@ static void test_split_columns_written(void) {
     asst.model = "deepseek/deepseek-v4-flash";
     asst.usage_in = 100;
     asst.usage_out = 50;
-    int64_t eid = entry_append_with_turn(db, sid, &asst, 1);
+    int64_t eid = entry_append_with_iteration(db, sid, &asst, 1);
     if (eid < 0) FAIL("entry_append asst");
 
     sqlite3_stmt *stmt;
@@ -112,7 +112,7 @@ static void test_split_columns_written(void) {
     ToolResult tr = {.tool_call_id = "tc_1", .content = "error: not found"};
     Message tool_msg = {.role = ROLE_TOOL, .tool_result = &tr,
                         .tool_name = "file_read", .is_error = 1};
-    int64_t tid = entry_append_with_turn(db, sid, &tool_msg, 1);
+    int64_t tid = entry_append_with_iteration(db, sid, &tool_msg, 1);
     if (tid < 0) FAIL("entry_append tool");
 
     if (sqlite3_prepare_v2(db,

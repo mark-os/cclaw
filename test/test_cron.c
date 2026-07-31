@@ -324,7 +324,7 @@ static void test_dispatch_heartbeat_idle(void) {
     int64_t sid = session_create(db, "s", "Hb", -1, 0);
     /* Touch updated_at so the session is recent (idle by default). */
     Message um = {.role = ROLE_USER, .content = "hi"};
-    entry_append_with_turn(db, sid, &um, 1);
+    entry_append_with_iteration(db, sid, &um, 1);
     int64_t now = (int64_t)time(NULL);
 
     insert_due(db, "Hb", "heartbeat", "", 0, 1800, 0, "", now);
@@ -362,7 +362,7 @@ static void test_dispatch_heartbeat_no_stack(void) {
     assert(db && wake_init() == 0);
     int64_t sid = session_create(db, "s", "Hb", -1, 0);
     Message um = {.role = ROLE_USER, .content = "hi"};
-    entry_append_with_turn(db, sid, &um, 1);
+    entry_append_with_iteration(db, sid, &um, 1);
     int64_t now = (int64_t)time(NULL);
 
     /* Two due heartbeat rows: only one unconsumed pulse should ever land. */

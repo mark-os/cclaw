@@ -42,7 +42,7 @@ static void *writer_fn(void *arg) {
     int n = 0;
     while (!*w->stop && n < 500) {
         Message m = {.role = ROLE_USER, .content = "writer churn"};
-        entry_append_with_turn(wdb, w->sid, &m, 1);
+        entry_append_with_iteration(wdb, w->sid, &m, 1);
         n++;
     }
     db_close(wdb);
@@ -73,9 +73,9 @@ int main(void) {
     int64_t sid = session_create(db, "bk", "Backup", -1, 0);
     assert(sid > 0);
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append_with_turn(db, sid, &sys, 1);
+    entry_append_with_iteration(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "hi"};
-    entry_append_with_turn(db, sid, &user, 1);
+    entry_append_with_iteration(db, sid, &user, 1);
     mock_server_enqueue(200, MOCK_RESPONSE);
 
     Config *cfg = config_load(db);
@@ -91,7 +91,7 @@ int main(void) {
     /* (b) A mid-turn session: leave it in llm_running when the snapshot fires. */
     int64_t midsid = session_create(db, "midturn", "Backup", -1, 0);
     Message mu = {.role = ROLE_USER, .content = "in flight"};
-    entry_append_with_turn(db, midsid, &mu, 1);
+    entry_append_with_iteration(db, midsid, &mu, 1);
     assert(session_set_state(db, midsid, "llm_running") == 0);
 
     /* (a) Snapshot, then verify it opens and carries the same data. */

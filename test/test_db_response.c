@@ -41,7 +41,7 @@ static void test_ingest_response(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
 
     Message msg = {.role = ROLE_USER, .content = "do it"};
-    entry_append_with_turn(db, sid, &msg, 1);
+    entry_append_with_iteration(db, sid, &msg, 1);
 
     const char *body =
         "{\"choices\":[{\"message\":{\"content\":\"Let me list files.\","
@@ -106,10 +106,10 @@ static void test_ingest_archive(void) {
     TypedIngestResult ir;
     assert(db_ingest_response(db, sid, 7, "m", ENDPOINT_OPENAI, body, NULL, 1, &ir) == LLM_RESP_OK);
 
-    /* Row archived: status, provider id, turn_id, and a re-queryable JSONB body. */
+    /* Row archived: status, provider id, iteration_id, and a re-queryable JSONB body. */
     sqlite3_stmt *s;
     sqlite3_prepare_v2(db,
-        "SELECT status, provider_id, turn_id, typeof(body),"
+        "SELECT status, provider_id, iteration_id, typeof(body),"
         " json_extract(body,'$.choices[0].message.content')"
         " FROM llm_responses WHERE session_id=? ORDER BY id DESC LIMIT 1;", -1, &s, NULL);
     sqlite3_bind_int64(s, 1, sid);
@@ -124,7 +124,7 @@ static void test_ingest_archive(void) {
     /* Not-JSON body archives as status='malformed' with the raw text. */
     assert(db_ingest_response(db, sid, 8, "m", ENDPOINT_OPENAI, "<html>nope", NULL, 1, &ir) == LLM_RESP_MALFORMED);
     sqlite3_prepare_v2(db,
-        "SELECT status, typeof(body), body FROM llm_responses WHERE turn_id=8;", -1, &s, NULL);
+        "SELECT status, typeof(body), body FROM llm_responses WHERE iteration_id=8;", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "malformed") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "text") == 0);   /* raw text, not JSONB */
@@ -151,7 +151,7 @@ static void test_archive_retention(void) {
     sqlite3_stmt *s;
     sqlite3_prepare_v2(db,
         "SELECT status, provider_id, typeof(body),"
-        " json_extract(request_body,'$.model') FROM llm_responses WHERE turn_id=1;", -1, &s, NULL);
+        " json_extract(request_body,'$.model') FROM llm_responses WHERE iteration_id=1;", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "http_500") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "err_1") == 0);
@@ -159,7 +159,7 @@ static void test_archive_retention(void) {
     assert(strcmp((const char *)sqlite3_column_text(s, 3), "m") == 0);      /* request archived */
     sqlite3_finalize(s);
     sqlite3_prepare_v2(db,
-        "SELECT status, typeof(body) FROM llm_responses WHERE turn_id=2;", -1, &s, NULL);
+        "SELECT status, typeof(body) FROM llm_responses WHERE iteration_id=2;", -1, &s, NULL);
     assert(sqlite3_step(s) == SQLITE_ROW);
     assert(strcmp((const char *)sqlite3_column_text(s, 0), "timeout") == 0);
     assert(strcmp((const char *)sqlite3_column_text(s, 1), "text") == 0);   /* raw text */
@@ -174,13 +174,13 @@ static void test_archive_retention(void) {
         db_archive_response(db, sid, 100 + i, "m", "ok", "{\"x\":1}", NULL);
     assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE status='ok';") == 2);
     assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE status!='ok';") == 2);
-    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE turn_id IN (1,2);") == 2);
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE iteration_id IN (1,2);") == 2);
 
     /* Failures prune within their own class too: two more push out the first two. */
     db_archive_response(db, sid, 110, "m", "http_502", "oops", NULL);
     db_archive_response(db, sid, 111, "m", "network_error", NULL, NULL);
     assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE status!='ok';") == 2);
-    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE turn_id IN (1,2);") == 0);
+    assert(count_rows(db, "SELECT COUNT(*) FROM llm_responses WHERE iteration_id IN (1,2);") == 0);
 
     /* Cap = -1: pruning disabled, rows accumulate. */
     sqlite3_exec(db, "UPDATE config SET value='-1' WHERE key='llm_response_archive_max';",

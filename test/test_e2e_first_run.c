@@ -50,10 +50,10 @@ int main(void) {
     db_agent_upsert(db, "default", NULL, NULL);
     int64_t sid = session_create(db, "first-run", "default", -1, 0);
     Message sys = {.role = ROLE_SYSTEM, .content = "You are helpful."};
-    entry_append_with_turn(db, sid, &sys, 1);
+    entry_append_with_iteration(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER,
                     .content = "Reply with exactly: first run ok"};
-    entry_append_with_turn(db, sid, &user, 1);
+    entry_append_with_iteration(db, sid, &user, 1);
 
     AgentSetup setup;
     agent_setup_init(&setup, db, sid, cfg, "default");

@@ -88,7 +88,7 @@ static int fx_open(Fx *fx, const char *db_path) {
     extension_ctx_init(&fx->ext_ctx, fx->rt);
     fx->sid = session_create(fx->db, "test", NULL, -1, 0);
     Message user = {.role = ROLE_USER, .content = "hello"};
-    entry_append_with_turn(fx->db, fx->sid, &user, 1);
+    entry_append_with_iteration(fx->db, fx->sid, &user, 1);
     return 0;
 }
 
@@ -105,7 +105,7 @@ static void fx_close(Fx *fx, const char *db_path) {
 static int64_t append_entry(sqlite3 *db, int64_t sid, Role role, const char *content,
                             StopReason sr) {
     Message m = {.role = role, .content = (char *)content, .stop_reason = sr};
-    return entry_append_with_turn(db, sid, &m, 0);
+    return entry_append_with_iteration(db, sid, &m, 0);
 }
 
 /* Scalar int query helper (single ?1 = int64 bind). */

@@ -405,9 +405,9 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         fread(mock_data, 1, (size_t)flen, f); mock_data[flen] = '\0';
         fclose(f);
 
-        int64_t turn_id = db_next_turn_id(db, session_id);
+        int64_t iteration_id = db_next_iteration_id(db, session_id);
         TypedIngestResult ir;
-        LlmRespStatus st = db_ingest_response(db, session_id, turn_id,
+        LlmRespStatus st = db_ingest_response(db, session_id, iteration_id,
                                cfg->provider.model, cfg->provider.endpoint_type,
                                mock_data, NULL, cfg->save_reasoning, &ir);
         free(mock_data);
@@ -415,7 +415,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         if (st != LLM_RESP_OK) {
             Message err_msg = {.role = ROLE_ASSISTANT, .content = "error: malformed LLM response",
                                .stop_reason = STOP_REASON_ERROR, .model = cfg->provider.model};
-            entry_append_with_turn(db, session_id, &err_msg, 0);
+            entry_append_with_iteration(db, session_id, &err_msg, 0);
         }
         free(context_text); free(system_prompt); context_plan_free(&plan);
         hook_directives_clear(db, session_id);  /* "this request only" */
@@ -447,10 +447,12 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
      * ever made (payload/url build failed for every candidate). */
     const char *fail_text = "error: LLM request failed";
 
-    /* One turn id for this user-turn: every raw response archived below (the
-     * failed attempts and the final ingest) shares it. db_next_turn_id is a
-     * pure read, so it stays stable until the success path inserts entries. */
-    int64_t turn_id = db_next_turn_id(db, session_id);
+    /* One iteration id for this LLM request: every raw response archived below
+     * (the failed attempts and the final ingest) shares it. db_next_iteration_id
+     * is a pure read, so it stays stable until the success path inserts entries.
+     * The *turn* this iteration belongs to is carried by the entries themselves
+     * (entries.turn_id, filled from the parent by entries_turn_ai). */
+    int64_t iteration_id = db_next_iteration_id(db, session_id);
 
     for (int mi = 0; mi < nmodels && !llm_ok && !had_dberr; mi++) {
         ModelCandidate *m = &models[mi];
@@ -549,7 +551,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
                 if (status == -2) snprintf(lbl, sizeof(lbl), "timeout");
                 else if (status < 0) snprintf(lbl, sizeof(lbl), "network_error");
                 else snprintf(lbl, sizeof(lbl), "http_%d", status);
-                db_archive_response(db, session_id, turn_id, m->id, lbl,
+                db_archive_response(db, session_id, iteration_id, m->id, lbl,
                                     resp.data ? resp.data : resp.err_detail,
                                     req_body);
             }
@@ -620,7 +622,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
              * trail. Archive it (with the request we sent) and retry. */
             if (!resp.data || !resp.data[0]) {
                 LOG_INFO_("llm_req empty_body model=%s retry=%d", m->model, retry);
-                db_archive_response(db, session_id, turn_id, m->id, "empty",
+                db_archive_response(db, session_id, iteration_id, m->id, "empty",
                                     resp.data, req_body);
                 fail_text = "error: provider returned an empty response";
                 http_response_free(&resp);
@@ -631,7 +633,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
 
             /* ── Ingest response straight to the DB ── */
             TypedIngestResult ir;
-            LlmRespStatus st = db_ingest_response(db, session_id, turn_id,
+            LlmRespStatus st = db_ingest_response(db, session_id, iteration_id,
                                    m->id, route_cfg.provider.endpoint_type,
                                    resp.data, req_body, route_cfg.save_reasoning, &ir);
             http_response_free(&resp);
@@ -676,10 +678,10 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         int64_t resp_id = 0;
         sqlite3_stmt *rs;
         if (sqlite3_prepare_v2(db,
-                "SELECT MAX(id) FROM llm_responses WHERE session_id=?1 AND turn_id=?2",
+                "SELECT MAX(id) FROM llm_responses WHERE session_id=?1 AND iteration_id=?2",
                 -1, &rs, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(rs, 1, session_id);
-            sqlite3_bind_int64(rs, 2, turn_id);
+            sqlite3_bind_int64(rs, 2, iteration_id);
             if (sqlite3_step(rs) == SQLITE_ROW && sqlite3_column_type(rs, 0) != SQLITE_NULL)
                 resp_id = sqlite3_column_int64(rs, 0);
             sqlite3_finalize(rs);
@@ -690,7 +692,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         if (had_dberr)
             LOG_ERROR_("llm_req: response ingest failed (DB contention) "
                        "session=%lld turn=%lld resp=#%lld — response discarded",
-                       (long long)session_id, (long long)turn_id, (long long)resp_id);
+                       (long long)session_id, (long long)iteration_id, (long long)resp_id);
         char err_buf[160];
         if (resp_id > 0)
             snprintf(err_buf, sizeof(err_buf), "%s [resp #%lld]", err_text, (long long)resp_id);
@@ -698,7 +700,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
             snprintf(err_buf, sizeof(err_buf), "%s", err_text);
         Message err_msg = {.role = ROLE_ASSISTANT, .content = err_buf,
                            .stop_reason = STOP_REASON_ERROR, .model = cfg->provider.model};
-        entry_append_with_turn(db, session_id, &err_msg, 0);
+        entry_append_with_iteration(db, session_id, &err_msg, 0);
         goto err;
     }
 
@@ -768,22 +770,9 @@ int llm_compaction(sqlite3 *db, CURL *curl, int64_t session_id, const char *agen
         return -1;
     }
 
-    /* Walk backwards from tail, accumulate tokens */
-    int keep_from = 0;
-    int cumulative = 0;
-    for (int i = plan.count - 1; i >= 0; i--) {
-        cumulative += plan.entries[i].token_estimate;
-        if (cumulative > target_tokens) {
-            keep_from = i + 1;
-            break;
-        }
-    }
-
-    /* Even the newest entry alone exceeds the target: keep just the leaf */
-    if (keep_from >= plan.count)
-        keep_from = plan.count - 1;
-    if (keep_from <= 1) {
-        /* Nothing to compact */
+    int keep_from = context_compaction_keep_from(&plan, target_tokens);
+    if (keep_from == 0) {
+        /* Nothing to compact without splitting a turn */
         context_plan_free(&plan);
         config_free(cfg);
         return 0;

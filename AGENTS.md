@@ -79,14 +79,18 @@ These look odd at a glance but are deliberate. Understand them before touching t
 ## Turn Model Terminology
 
 Precise names for the execution units — use these consistently in code,
-comments, and specs (the schema misnames one; see below):
+comments, and specs:
 
 - **Turn** — inbox consumption → final assistant message + delivery. The unit
   users/channels see, bounded by `max_iterations`; the boundary where
-  `notify_parent` and compaction run.
+  `notify_parent` and compaction run. Stamped on every entry as
+  `entries.turn_id` (minted when a user entry opens a turn, inherited from the
+  parent entry thereafter — trigger `entries_turn_ai`), which is what the
+  context cut and compaction snap to so neither ever splits a turn.
 - **Iteration** — one LLM request → one assistant response → that response's
   tool calls fully resolved (the turn-join). Counted by
-  `sessions.turn_iteration`.
+  `sessions.turn_iteration`, identified by `entries.iteration_id` /
+  `llm_responses.iteration_id` (minted per request by `db_next_iteration_id`).
 - **Batch** — the tool calls of one assistant response, claimed in call order:
   inline → immediate result; serial async → blocks the rest of the batch;
   parallel-safe → dispatched concurrently.
@@ -102,9 +106,6 @@ atomicity — don't break it.
 iteration 1, `session_set_turn_context`); the head (system prompt, tools
 array, launch_agent's embedded roster) is *iteration-fresh* (rebuilt every
 request, byte-stable in practice); pull surfaces (`check_session`) are *live*.
-
-**Known misnomer**: `entries.turn_id` / `llm_responses.turn_id` are minted per
-LLM request (`db_next_turn_id`) — they identify an *iteration*, not a turn.
 
 ## Self-Augmentation (core differentiator)
 
@@ -249,7 +250,7 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 ```
 
 - **The real DB is `~/.cclaw/cclaw.db`, not `./cclaw.db`.** `resolve_db_path()` returns `$HOME/.cclaw/cclaw.db` when `$HOME` is set (override with `CCLAW_DB_PATH`). "Delete the db" means that path — and its `-wal`/`-shm` siblings.
-- **Schema changes need a forward patch.** When `templates/schema.sql` changes shape, bump `CCLAW_SCHEMA_VERSION` (`src/cclaw.h`) and append a matching entry to `schema_patches[]` (`src/db.c`) that brings a live DB from the previous version to the new one. Startup auto-applies pending patches; DBs newer than the build, or older than the floor `CCLAW_SCHEMA_MIN` (v33 — the 2026-07-19 freeze collapsed prior patch history into it), are refused with a delete-and-restart message. A schema.sql change *without* the bump + patch leaves existing DBs stamped current but shaped old — missing columns, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang.
+- **Schema changes need a forward patch.** When `templates/schema.sql` changes shape, bump `CCLAW_SCHEMA_VERSION` (`src/cclaw.h`) and append a matching entry to `schema_patches[]` (`src/db.c`) that brings a live DB from the previous version to the new one. Startup auto-applies pending patches; DBs newer than the build, or older than the floor `CCLAW_SCHEMA_MIN` (v40 — the 2026-07-31 turn_id/iteration_id rename froze a new floor and collapsed prior patch history into it), are refused with a delete-and-restart message. A schema.sql change *without* the bump + patch leaves existing DBs stamped current but shaped old — missing columns, `advance_session` returns `ADVANCE_ERROR`, and the CLI can hang.
 - **`-p` with piped/non-tty stdin auto-selects the most recent session**; `-s <id>` pins one. Useful for scripted multi-turn testing (turn 1 creates the session, reuse its id for turn 2+).
 
 ### Scripted agent testing with `-p` (what to expect)
@@ -279,7 +280,7 @@ Config resolution: `CCLAW_*` env vars > cclaw.db > `OPENROUTER_API_KEY` env.
   request we sent; `resp list [n]`).
 - **Never SELECT `llm_responses.body` with a system sqlite3 older than 3.45** — it's
   JSONB and dumps as binary garbage (that's the format, not corruption). `cclaw resp`
-  reads it with the vendored SQLite. Metadata columns (`status`, `model`, `turn_id`,
+  reads it with the vendored SQLite. Metadata columns (`status`, `model`, `iteration_id`,
   `length(body)`) are safe to query anywhere.
 - **Verbosity**: `-v` (debug: timing, retry decisions) / `-vv` (trace: full req/resp
   JSON), or `--log-level=LEVEL`.

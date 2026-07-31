@@ -50,7 +50,7 @@ static void test_compaction_job_submission(void) {
             .content = buf,
             .stop_reason = (i % 2 == 1) ? STOP_REASON_STOP : STOP_REASON_NONE
         };
-        entry_append_with_turn(db, sid, &m, 1);
+        entry_append_with_iteration(db, sid, &m, 1);
     }
 
     /* Submit compaction job */
@@ -128,7 +128,7 @@ static void test_entry_compact_basic(void) {
         char buf[64];
         snprintf(buf, sizeof(buf), "message %d", i);
         Message m = {.role = ROLE_USER, .content = buf};
-        entry_append_with_turn(db, sid, &m, 1);
+        entry_append_with_iteration(db, sid, &m, 1);
     }
 
     /* Get entry IDs */
@@ -197,7 +197,7 @@ static void test_llm_compaction_summary(int port) {
         Message m = {.role = (i % 2 == 0) ? ROLE_USER : ROLE_ASSISTANT,
                      .content = buf,
                      .stop_reason = (i % 2 == 1) ? STOP_REASON_STOP : STOP_REASON_NONE};
-        entry_append_with_turn(db, sid, &m, 1);
+        entry_append_with_iteration(db, sid, &m, 1);
     }
 
     CURL *curl = curl_easy_init();
@@ -235,7 +235,7 @@ static void test_llm_compaction_under_threshold(int port) {
     setenv("CCLAW_CONTEXT_THRESHOLD", "0.6", 1);
 
     Message m = {.role = ROLE_USER, .content = "hi", .stop_reason = STOP_REASON_NONE};
-    entry_append_with_turn(db, sid, &m, 1);
+    entry_append_with_iteration(db, sid, &m, 1);
 
     CURL *curl = curl_easy_init();
     assert(llm_compaction(db, curl, sid, "default") == 0);
@@ -267,7 +267,7 @@ static void test_llm_compaction_failure_skips(int port) {
         Message m = {.role = (i % 2 == 0) ? ROLE_USER : ROLE_ASSISTANT,
                      .content = buf,
                      .stop_reason = (i % 2 == 1) ? STOP_REASON_STOP : STOP_REASON_NONE};
-        entry_append_with_turn(db, sid, &m, 1);
+        entry_append_with_iteration(db, sid, &m, 1);
     }
 
     CURL *curl = curl_easy_init();
@@ -319,7 +319,7 @@ static void test_llm_compaction_gemini_shape(int port) {
         Message m = {.role = (i % 2 == 0) ? ROLE_USER : ROLE_ASSISTANT,
                      .content = buf,
                      .stop_reason = (i % 2 == 1) ? STOP_REASON_STOP : STOP_REASON_NONE};
-        entry_append_with_turn(db, sid, &m, 1);
+        entry_append_with_iteration(db, sid, &m, 1);
     }
 
     CURL *curl = curl_easy_init();

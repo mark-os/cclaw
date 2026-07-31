@@ -30,7 +30,7 @@ static void test_cli_session_resume(void) {
     if (db_scalar_i64(db, "SELECT COUNT(*) FROM sessions WHERE id>=?", s1, -1) != 2) { FAIL("expected 2 sessions"); db_close(db); test_db_clean(dbpath); return; }
 
     Message msg = {.role = ROLE_USER, .content = "hello"};
-    entry_append_with_turn(db, s1, &msg, 1);
+    entry_append_with_iteration(db, s1, &msg, 1);
 
     int branch_count = 0;
     Entry *branch = session_get_branch(db, s1, &branch_count);

@@ -576,7 +576,7 @@ int route_main(int argc, char *argv[]) {
 static int resp_print(sqlite3 *db, const char *where, int64_t id, const char *which) {
     char sql[512];
     snprintf(sql, sizeof(sql),
-        "SELECT id, status, model, session_id, turn_id,"
+        "SELECT id, status, model, session_id, iteration_id,"
         "       datetime(created_at,'unixepoch','localtime'), provider_id,"
         "       CASE WHEN %s IS NULL THEN NULL"
         "            WHEN json_valid(%s, 8) THEN json_pretty(%s)"
@@ -590,7 +590,7 @@ static int resp_print(sqlite3 *db, const char *where, int64_t id, const char *wh
     if (sqlite3_step(st) == SQLITE_ROW) {
         found = 1;
         const char *provider_id = (const char *)sqlite3_column_text(st, 6);
-        printf("resp #%lld status=%s model=%s session=%lld turn=%lld at %s provider_id=%s\n",
+        printf("resp #%lld status=%s model=%s session=%lld iter=%lld at %s provider_id=%s\n",
                (long long)sqlite3_column_int64(st, 0), sqlite3_column_text(st, 1),
                sqlite3_column_text(st, 2), (long long)sqlite3_column_int64(st, 3),
                (long long)sqlite3_column_int64(st, 4), sqlite3_column_text(st, 5),
@@ -686,7 +686,7 @@ int resp_main(int argc, char *argv[]) {
         if (n <= 0) n = 20;
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "SELECT id, status, model, session_id, turn_id,"
+                "SELECT id, status, model, session_id, iteration_id,"
                 "       datetime(created_at,'unixepoch','localtime'), COALESCE(length(body),0),"
                 "       provider_id"
                 " FROM llm_responses ORDER BY id DESC LIMIT ?", -1, &st, NULL) == SQLITE_OK) {
@@ -694,7 +694,7 @@ int resp_main(int argc, char *argv[]) {
             int any = 0;
             while (sqlite3_step(st) == SQLITE_ROW) {
                 const char *provider_id = (const char *)sqlite3_column_text(st, 7);
-                printf("#%-5lld %-13s %s session=%lld turn=%lld %s %d bytes provider_id=%s\n",
+                printf("#%-5lld %-13s %s session=%lld iter=%lld %s %d bytes provider_id=%s\n",
                        (long long)sqlite3_column_int64(st, 0), sqlite3_column_text(st, 1),
                        sqlite3_column_text(st, 2), (long long)sqlite3_column_int64(st, 3),
                        (long long)sqlite3_column_int64(st, 4), sqlite3_column_text(st, 5),

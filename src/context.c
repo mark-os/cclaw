@@ -38,8 +38,21 @@ static StopReason plan_int_to_stop_reason(int i) {
     return STOP_REASON_NONE;
 }
 
+/* Snap an index back to the first entry of the turn it falls inside, so a cut
+ * never splits a turn. Backwards, not forwards: a turn legitimately opens with
+ * several consecutive user entries (the inbox drain takes a channel message, a
+ * job result and a sub-agent result in one transaction), and snapping forward
+ * past the newest turn would drop the very message being answered. Keeping a
+ * whole turn can overshoot the budget, but only by that one turn. */
+static int snap_to_turn_start(const PlanEntry *entries, int i) {
+    while (i > 0 && entries[i].turn_id == entries[i - 1].turn_id)
+        i--;
+    return i;
+}
+
 /* Find the cut point in a PlanEntry array (oldest entries dropped to fit budget). */
 static int plan_find_cut(const PlanEntry *entries, int count, int budget) {
+    if (count <= 0) return 0;
     int total = 0;
     int cut = 0;
     int i = count - 1;
@@ -68,12 +81,28 @@ static int plan_find_cut(const PlanEntry *entries, int count, int budget) {
         i = group_start - 1;
     }
 
-    /* ensure cut is at valid boundary — before user/system msg */
-    while (cut < count && entries[cut].role != ROLE_USER
-           && entries[cut].role != ROLE_SYSTEM)
-        cut++;
+    if (cut >= count) cut = count - 1;   /* nothing fit — keep the newest turn */
+    return snap_to_turn_start(entries, cut);
+}
 
-    return cut;
+int context_compaction_keep_from(const ContextPlan *plan, int target_tokens) {
+    if (!plan || plan->count <= 0) return 0;
+
+    /* Walk backwards from the tail, accumulating until the target is spent. */
+    int keep_from = 0;
+    int cumulative = 0;
+    for (int i = plan->count - 1; i >= 0; i--) {
+        cumulative += plan->entries[i].token_estimate;
+        if (cumulative > target_tokens) { keep_from = i + 1; break; }
+    }
+    /* Even the newest entry alone exceeds the target: keep just the leaf. */
+    if (keep_from >= plan->count) keep_from = plan->count - 1;
+
+    keep_from = snap_to_turn_start(plan->entries, keep_from);
+    /* 0 = the whole branch fits, or the tail turn reaches back to the root —
+     * either way there is no prefix to summarize without splitting a turn.
+     * 1 leaves a single entry, which entry_compact cannot straddle. */
+    return keep_from <= 1 ? 0 : keep_from;
 }
 
 int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhead, ContextPlan *out) {
@@ -99,13 +128,13 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
      * back to entries.
      * Use level counter for path ordering (compaction entries may have higher ids). */
     const char *plan_sql =
-        "WITH RECURSIVE branch(id, parent_id, role, stop_reason, token_estimate, tool_call_count, lvl) AS ("
-        "  SELECT id, parent_id, role, stop_reason, token_estimate, tool_call_count, 0"
+        "WITH RECURSIVE branch(id, parent_id, role, stop_reason, token_estimate, tool_call_count, turn_id, lvl) AS ("
+        "  SELECT id, parent_id, role, stop_reason, token_estimate, tool_call_count, turn_id, 0"
         "    FROM entries WHERE id=? AND session_id=?"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.role, e.stop_reason, e.token_estimate, e.tool_call_count, b.lvl+1"
+        "  SELECT e.id, e.parent_id, e.role, e.stop_reason, e.token_estimate, e.tool_call_count, e.turn_id, b.lvl+1"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
-        ") SELECT id, role, stop_reason, token_estimate, tool_call_count"
+        ") SELECT id, role, stop_reason, token_estimate, tool_call_count, turn_id"
         " FROM branch ORDER BY lvl DESC;";
 
     if (sqlite3_prepare_v2(db, plan_sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -138,6 +167,7 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
             pe->token_estimate = 4;
         }
         pe->tool_call_count = sqlite3_column_int(stmt, 4);
+        pe->turn_id = sqlite3_column_int64(stmt, 5);
         raw_count++;
     }
     sqlite3_finalize(stmt);

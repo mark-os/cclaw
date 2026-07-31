@@ -20,7 +20,7 @@ static void append_msg(sqlite3 *db, int64_t sid, Role role, const char *content,
     m.stop_reason = sr;
     m.tool_calls = tcs;
     m.tool_call_count = tc_count;
-    entry_append_with_turn(db, sid, &m, 1);
+    entry_append_with_iteration(db, sid, &m, 1);
 }
 
 static void append_tool_result(sqlite3 *db, int64_t sid, const char *tc_id, const char *content) {
@@ -28,7 +28,7 @@ static void append_tool_result(sqlite3 *db, int64_t sid, const char *tc_id, cons
     m.role = ROLE_TOOL;
     ToolResult tr = { .tool_call_id = (char *)tc_id, .content = (char *)content };
     m.tool_result = &tr;
-    entry_append_with_turn(db, sid, &m, 1);
+    entry_append_with_iteration(db, sid, &m, 1);
 }
 
 static void test_basic_plan(void) {
@@ -157,6 +157,91 @@ static void test_v8_tool_call_group(void) {
     PASS();
 }
 
+/* A turn legitimately opens with several consecutive user entries — the inbox
+ * drain consumes a channel message, a job result and a sub-agent result in one
+ * transaction (advance.c idle branch). Those entries are one turn and the cut
+ * must never land between them. */
+static void test_multi_user_turn_not_split(void) {
+    TEST(multi_user_turn_not_split);
+    sqlite3 *db = test_db_open(":memory:");
+    if (!db) FAIL("db_open");
+
+    char pad[401];
+    memset(pad, 'x', sizeof(pad) - 1);
+    pad[sizeof(pad) - 1] = '\0';
+
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    /* Turn 1 — plain question/answer. */
+    append_msg(db, sid, ROLE_USER, pad, STOP_REASON_NONE, NULL, 0);
+    append_msg(db, sid, ROLE_ASSISTANT, pad, STOP_REASON_STOP, NULL, 0);
+    /* Turn 2 — opens with three inbox-drained user entries. */
+    inbox_insert(db, sid, "channel", pad);
+    inbox_insert(db, sid, "job_result", pad);
+    inbox_insert(db, sid, "agent_result", pad);
+    if (inbox_consume_into_entries(db, sid, 100) != 3) FAIL("inbox drain");
+    append_msg(db, sid, ROLE_ASSISTANT, pad, STOP_REASON_STOP, NULL, 0);
+
+    /* Budget floors at 256 tokens: the tail assistant + the last user entry fit,
+     * the one before it does not — so the raw cut lands inside the drain. */
+    Config cfg = {0};
+    cfg.max_history_tokens = 1;
+    ContextPlan plan = {0};
+    if (context_plan(db, sid, &cfg, 0, &plan) != 0) FAIL("context_plan returned error");
+    if (plan.count != 6) FAIL("wrong count");
+    if (plan.cut <= 0) FAIL("expected a cut");
+    if (plan.entries[plan.cut].role == ROLE_USER &&
+        plan.entries[plan.cut - 1].role == ROLE_USER)
+        FAIL("cut split a turn that opened with several user messages");
+    if (plan.entries[plan.cut].turn_id == plan.entries[plan.cut - 1].turn_id)
+        FAIL("cut did not land on a turn boundary");
+
+    context_plan_free(&plan);
+    db_close(db);
+    PASS();
+}
+
+/* Compaction keeps a tail that fits its target — the boundary it summarizes up
+ * to is a turn boundary, so a summary never lands inside a turn. */
+static void test_compaction_keep_from_is_turn_boundary(void) {
+    TEST(compaction_keep_from_is_turn_boundary);
+    sqlite3 *db = test_db_open(":memory:");
+    if (!db) FAIL("db_open");
+
+    char pad[401];
+    memset(pad, 'x', sizeof(pad) - 1);
+    pad[sizeof(pad) - 1] = '\0';
+
+    int64_t sid = session_create(db, "test", NULL, -1, 0);
+    /* Six turns, each opening with two drained user entries. */
+    for (int t = 0; t < 6; t++) {
+        inbox_insert(db, sid, "channel", pad);
+        inbox_insert(db, sid, "job_result", pad);
+        if (inbox_consume_into_entries(db, sid, 100) != 2) FAIL("inbox drain");
+        append_msg(db, sid, ROLE_ASSISTANT, pad, STOP_REASON_STOP, NULL, 0);
+    }
+
+    Config cfg = {0};
+    cfg.context_window = 128000;
+    ContextPlan plan = {0};
+    if (context_plan(db, sid, &cfg, 0, &plan) != 0) FAIL("context_plan returned error");
+    if (plan.count != 18) FAIL("wrong count");
+
+    /* Target fits ~2 turns' worth (each entry is 104 tokens, 3 per turn). */
+    int keep_from = context_compaction_keep_from(&plan, 700);
+    if (keep_from <= 0) FAIL("expected something to compact");
+    if (keep_from >= plan.count) FAIL("keep_from past the end");
+    if (plan.entries[keep_from].turn_id == plan.entries[keep_from - 1].turn_id)
+        FAIL("compaction boundary landed inside a turn");
+
+    /* A target big enough for the whole branch compacts nothing. */
+    if (context_compaction_keep_from(&plan, 100000) != 0)
+        FAIL("nothing should be compacted when the branch fits");
+
+    context_plan_free(&plan);
+    db_close(db);
+    PASS();
+}
+
 static void test_plan_no_content_access(void) {
     TEST(plan_no_content_or_tool_calls_access);
     sqlite3 *db = test_db_open(":memory:");
@@ -188,13 +273,13 @@ static void test_plan_no_content_access(void) {
     int64_t leaf_id = plan.entries[plan.count - 1].id;
     const char *eqp_sql =
         "EXPLAIN QUERY PLAN "
-        "WITH RECURSIVE branch(id, parent_id, role, stop_reason, token_estimate, tool_call_count) AS ("
-        "  SELECT id, parent_id, role, stop_reason, token_estimate, tool_call_count"
+        "WITH RECURSIVE branch(id, parent_id, role, stop_reason, token_estimate, tool_call_count, turn_id) AS ("
+        "  SELECT id, parent_id, role, stop_reason, token_estimate, tool_call_count, turn_id"
         "    FROM entries WHERE id=? AND session_id=?"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.role, e.stop_reason, e.token_estimate, e.tool_call_count"
+        "  SELECT e.id, e.parent_id, e.role, e.stop_reason, e.token_estimate, e.tool_call_count, e.turn_id"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
-        ") SELECT id, role, stop_reason, token_estimate, tool_call_count"
+        ") SELECT id, role, stop_reason, token_estimate, tool_call_count, turn_id"
         " FROM branch ORDER BY id;";
 
     if (sqlite3_prepare_v2(db, eqp_sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -329,6 +414,8 @@ int main(void) {
     test_v28_filtering();
     test_cut_point();
     test_v8_tool_call_group();
+    test_multi_user_turn_not_split();
+    test_compaction_keep_from_is_turn_boundary();
     test_plan_no_content_access();
     test_hook_suppress_excluded();
     test_hook_pin_overrides_cut();

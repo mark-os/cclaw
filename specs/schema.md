@@ -135,7 +135,7 @@ Raw LLM response archive for forensics and debugging. One row per HTTP response 
 |--------|------|-------|
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `session_id` | INTEGER NOT NULL | |
-| `turn_id` | INTEGER NOT NULL | joins back to entries |
+| `iteration_id` | INTEGER NOT NULL | the `entries.iteration_id` this request belongs to |
 | `model` | TEXT | |
 | `status` | TEXT NOT NULL | ok / empty / malformed / http_<code> / timeout / network_error |
 | `provider_id` | TEXT | provider's own response id (`$.id`), NULL if absent |
@@ -151,7 +151,7 @@ Read rows with `cclaw resp [<id> [req] | list [n]]` — bodies are JSONB, which
 system sqlite3 CLIs older than 3.45 (Debian bookworm ships 3.40) cannot decode;
 the vendored SQLite in the binary is the guaranteed reader.
 
-Index: `idx_llm_responses_turn ON llm_responses(session_id, turn_id)`.
+Index: `idx_llm_responses_iteration ON llm_responses(session_id, iteration_id)`.
 
 ---
 
@@ -402,7 +402,8 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `session_id` | INTEGER NOT NULL | |
 | `parent_id` | INTEGER NOT NULL DEFAULT -1 | tree structure (Pi model); -1 = root |
 | `original_parent_id` | INTEGER | set on reparent (compaction) |
-| `turn_id` | INTEGER | groups entries within a turn |
+| `turn_id` | INTEGER | the turn this entry belongs to — minted when a user entry follows a non-user one, inherited from the parent thereafter (trigger `entries_turn_ai`). The context cut and compaction snap to it so neither splits a turn. |
+| `iteration_id` | INTEGER | one LLM request/response *inside* a turn (`db_next_iteration_id`); shared by the assistant message, its tool_call parts and their tool results |
 | `type` | TEXT NOT NULL DEFAULT 'user_message' | entry type discriminator |
 | `part_index` | INTEGER NOT NULL DEFAULT 0 | ordering within multi-part entries |
 | `role` | INTEGER NOT NULL DEFAULT 1 | 0=system, 1=user, 2=assistant, 3=tool, 4=compaction |
@@ -472,7 +473,7 @@ The AFTER INSERT trigger keys on `entries.type` (not `role`): for `tool_call` an
 
 ```
 idx_entries_session    (session_id, id)                         -- per-session scans in entry order
-idx_entries_turn_type  (session_id, turn_id, type, part_index)  -- covering: payload builder's sibling-part lookup
+idx_entries_iteration_type (session_id, iteration_id, type, part_index) -- covering: payload builder's sibling-part lookup
 idx_entries_created    (created_at)                             -- budget gate time-window sums
 ```
 

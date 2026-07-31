@@ -20,7 +20,7 @@
 
 typedef struct {
     int64_t session_id;
-    int64_t turn_id;
+    int64_t iteration_id;
     int64_t entry_id;
     char    tool_call_id[128];
     char    tool_name[64];

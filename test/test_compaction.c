@@ -24,15 +24,15 @@ static void test_compaction_cte_stops(void) {
 
     /* Build chain: e1 → e2 → e3 → e4 → e5 */
     Message m = {.role = ROLE_USER, .content = "msg1"};
-    int64_t e1 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e1 = entry_append_with_iteration(db, sid, &m, 1);
     m.content = "msg2";
-    entry_append_with_turn(db, sid, &m, 1); /* e2 */
+    entry_append_with_iteration(db, sid, &m, 1); /* e2 */
     m.content = "msg3";
-    entry_append_with_turn(db, sid, &m, 1); /* e3 */
+    entry_append_with_iteration(db, sid, &m, 1); /* e3 */
     m.content = "msg4";
-    int64_t e4 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e4 = entry_append_with_iteration(db, sid, &m, 1);
     m.content = "msg5";
-    int64_t e5 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e5 = entry_append_with_iteration(db, sid, &m, 1);
     (void)e5;
 
     /* Compact: keep e1, summarize e2+e3, reparent e4 to summary */
@@ -62,11 +62,11 @@ static void test_compaction_original_parent(void) {
     int64_t sid = session_create(db, "compact_orig", NULL, -1, 0);
 
     Message m = {.role = ROLE_USER, .content = "a"};
-    int64_t e1 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e1 = entry_append_with_iteration(db, sid, &m, 1);
     m.content = "b";
-    int64_t e2 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e2 = entry_append_with_iteration(db, sid, &m, 1);
     m.content = "c";
-    int64_t e3 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e3 = entry_append_with_iteration(db, sid, &m, 1);
 
     /* Compact: keep e1, reparent e3 to summary */
     int64_t cid = entry_compact(db, sid, e1, e3, "Summary of b");
@@ -95,15 +95,15 @@ static void test_compaction_forward_walk(void) {
 
     /* Build chain: e1 → e2 → e3 → e4 → e5 */
     Message m = {.role = ROLE_USER, .content = "first"};
-    int64_t e1 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e1 = entry_append_with_iteration(db, sid, &m, 1);
     m.content = "second";
-    int64_t e2 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e2 = entry_append_with_iteration(db, sid, &m, 1);
     m.content = "third";
-    int64_t e3 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e3 = entry_append_with_iteration(db, sid, &m, 1);
     m.content = "fourth";
-    int64_t e4 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e4 = entry_append_with_iteration(db, sid, &m, 1);
     m.content = "fifth";
-    entry_append_with_turn(db, sid, &m, 1); /* e5 */
+    entry_append_with_iteration(db, sid, &m, 1); /* e5 */
 
     /* Compact: keep e1, summarize e2+e3, reparent e4 to summary */
     entry_compact(db, sid, e1, e4, "Summary of 2+3");
@@ -143,11 +143,11 @@ static void test_compaction_fts_indexes_old(void) {
     int64_t sid = session_create(db, "compact_fts", NULL, -1, 0);
 
     Message m = {.role = ROLE_USER, .content = "unique_searchable_word"};
-    int64_t e1 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e1 = entry_append_with_iteration(db, sid, &m, 1);
     m.content = "another message";
-    entry_append_with_turn(db, sid, &m, 1); /* e2 */
+    entry_append_with_iteration(db, sid, &m, 1); /* e2 */
     m.content = "final";
-    int64_t e3 = entry_append_with_turn(db, sid, &m, 1);
+    int64_t e3 = entry_append_with_iteration(db, sid, &m, 1);
 
     /* Compact: reparent e3 past e1 (e1 becomes "old") */
     entry_compact(db, sid, e1, e3, "Summary");

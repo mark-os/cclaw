@@ -14,6 +14,7 @@
  * No content loaded — just enough to determine cut point. */
 typedef struct {
     int64_t id;
+    int64_t turn_id;        /* the turn this entry belongs to — cut boundaries key on it */
     Role role;
     StopReason stop_reason;
     int token_estimate;     /* chars/4 heuristic from length(data) */
@@ -38,6 +39,12 @@ int context_plan(sqlite3 *db, int64_t session_id, const Config *cfg, int overhea
 
 /* Free a ContextPlan. */
 void context_plan_free(ContextPlan *plan);
+
+/* Index of the first entry compaction keeps: walk the tail back until
+ * target_tokens is spent, then snap to a turn boundary. Returns 0 when there is
+ * nothing to compact (the whole branch fits, or it is a single turn). Lives here
+ * next to the request cut so both boundary rules read the same way. */
+int context_compaction_keep_from(const ContextPlan *plan, int target_tokens);
 
 /* Truncate tool result at write time. If content exceeds limits, writes
  * full output to /tmp/cclaw-<session_id>/<tool_call_id>.out and returns

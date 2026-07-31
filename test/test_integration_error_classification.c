@@ -29,9 +29,9 @@ int main(void) {
     db_agent_upsert(db, "default", NULL, NULL);
     int64_t sid = session_create(db, "test", "default", -1, 0);
     Message sys = {.role = ROLE_SYSTEM, .content = "sys"};
-    entry_append_with_turn(db, sid, &sys, 1);
+    entry_append_with_iteration(db, sid, &sys, 1);
     Message user = {.role = ROLE_USER, .content = "hi"};
-    entry_append_with_turn(db, sid, &user, 1);
+    entry_append_with_iteration(db, sid, &user, 1);
 
     /* Enqueue 5 x 500 with Retry-After:1 to keep transport retries short */
     const char *hdrs[] = {"Retry-After: 1", NULL};

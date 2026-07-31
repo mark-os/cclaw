@@ -212,7 +212,14 @@ CREATE TABLE IF NOT EXISTS entries (
   session_id INTEGER NOT NULL,
   parent_id INTEGER NOT NULL DEFAULT -1,
   original_parent_id INTEGER,
-  turn_id INTEGER,
+  turn_id INTEGER,          -- the turn this entry belongs to. Minted when a user entry
+                            -- follows a non-user entry (the inbox drain's first message,
+                            -- or a directly appended user entry); every entry after it
+                            -- inherits it from its parent until the next turn opens.
+                            -- Filled by entries_turn_ai — see the trigger.
+  iteration_id INTEGER,     -- one LLM request/response *inside* a turn: minted per request
+                            -- by db_next_iteration_id, shared by the assistant message,
+                            -- its tool_call parts and their tool results.
   type TEXT NOT NULL DEFAULT 'user_message',
   part_index INTEGER NOT NULL DEFAULT 0,
   role INTEGER NOT NULL DEFAULT 1,
@@ -238,7 +245,7 @@ CREATE TABLE IF NOT EXISTS entries (
 -- walks (leaf→root CTEs) join on e.id = rowid — no parent_id index helps
 -- them; narrower filters (role, stop_reason) seek the session then read.
 CREATE INDEX IF NOT EXISTS idx_entries_session ON entries(session_id, id);
-CREATE INDEX IF NOT EXISTS idx_entries_turn_type ON entries(session_id, turn_id, type, part_index);
+CREATE INDEX IF NOT EXISTS idx_entries_iteration_type ON entries(session_id, iteration_id, type, part_index);
 CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
@@ -263,6 +270,24 @@ BEGIN
   UPDATE sessions SET leaf_id = NEW.id, updated_at = unixepoch() WHERE id = NEW.session_id;
 END;
 
+-- turn_id carry, atomic with the insert (like leaf advance above). A turn opens
+-- when a user entry follows a non-user one — the mid-turn invariant guarantees
+-- that only happens at a turn boundary, so the inbox drain's whole batch of user
+-- entries lands in one turn and every assistant/tool entry after it inherits the
+-- open turn from its parent. Deriving it from the branch (not a session column or
+-- a C variable) is what makes it restart-safe: a daemon that dies mid-turn resumes
+-- from the same leaf and keeps the same turn_id, with no state that can drift.
+-- An explicit turn_id in the INSERT wins (nothing sets one today).
+CREATE TRIGGER IF NOT EXISTS entries_turn_ai AFTER INSERT ON entries
+WHEN NEW.turn_id IS NULL
+BEGIN
+  UPDATE entries SET turn_id = COALESCE(
+      (SELECT p.turn_id FROM entries p
+        WHERE p.id = NEW.parent_id AND NOT (NEW.role = 1 AND p.role <> 1)),
+      (SELECT COALESCE(MAX(turn_id), 0) + 1 FROM entries WHERE session_id = NEW.session_id))
+    WHERE id = NEW.id;
+END;
+
 -- ═══ Tool calls (workflow state — arguments live in entries.content) ═══
 CREATE TABLE IF NOT EXISTS tool_calls (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -283,13 +308,13 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, stat
 -- 'llm_response_archive_max': >0 keeps the most recent N 'ok' rows plus the most
 -- recent N failures (cited "[resp #N]" rows outlive routine traffic), 0 disables
 -- archiving, <0 keeps all. body holds the parsed JSONB blob when the response is
--- valid JSON, or the raw text when it isn't; turn_id joins back to entries.
+-- valid JSON, or the raw text when it isn't; iteration_id joins back to entries.
 -- Read bodies with `cclaw resp <id>` — JSONB needs SQLite >= 3.45 and target
 -- boxes ship older system CLIs, so the binary that wrote it is the reader.
 CREATE TABLE IF NOT EXISTS llm_responses (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,
-  turn_id INTEGER NOT NULL,
+  iteration_id INTEGER NOT NULL, -- the entries.iteration_id this request belongs to
   model TEXT,
   status TEXT NOT NULL,          -- ok | empty | malformed | http_<code> | timeout | network_error
   provider_id TEXT,              -- provider's own response id ($.id), NULL if absent
@@ -297,7 +322,7 @@ CREATE TABLE IF NOT EXISTS llm_responses (
   request_body BLOB,             -- JSONB of the payload we sent (failures only); NULL on success
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
-CREATE INDEX IF NOT EXISTS idx_llm_responses_turn ON llm_responses(session_id, turn_id);
+CREATE INDEX IF NOT EXISTS idx_llm_responses_iteration ON llm_responses(session_id, iteration_id);
 
 -- ═══ IPC ═══
 CREATE TABLE IF NOT EXISTS channel_events (

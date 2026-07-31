@@ -30,7 +30,7 @@ static void test_leaf_tracks_last_insert(void) {
 
     for (int i = 0; i < 50; i++) {
         Message msg = { .role = ROLE_USER, .content = "hi" };
-        int64_t id = entry_append_with_turn(db, sid, &msg, 0 /* auto-turn */);
+        int64_t id = entry_append_with_iteration(db, sid, &msg, 0 /* auto-iteration */);
         assert(id > 0);
         /* leaf advanced to exactly this entry */
         assert(leaf_of(db, sid) == id);
@@ -41,10 +41,10 @@ static void test_leaf_tracks_last_insert(void) {
         prev = id;
     }
 
-    /* Auto-turn (turn_id=0) computes a strictly increasing turn per append. */
-    int64_t maxturn = db_scalar_i64(db,
-        "SELECT MAX(turn_id) FROM entries WHERE session_id=?;", sid, -1);
-    assert(maxturn == 50);
+    /* Auto-iteration (iteration_id=0) computes a strictly increasing id per append. */
+    int64_t max_iter = db_scalar_i64(db,
+        "SELECT MAX(iteration_id) FROM entries WHERE session_id=?;", sid, -1);
+    assert(max_iter == 50);
     sqlite3_close(db);
     printf("  test_leaf_tracks_last_insert OK\n");
 }
@@ -67,9 +67,9 @@ static void test_compaction_does_not_move_leaf(void) {
     int64_t sid = 1;
 
     Message m1 = { .role = ROLE_USER, .content = "first" };
-    int64_t a = entry_append_with_turn(db, sid, &m1, 0);
+    int64_t a = entry_append_with_iteration(db, sid, &m1, 0);
     Message m2 = { .role = ROLE_ASSISTANT, .content = "second" };
-    int64_t b = entry_append_with_turn(db, sid, &m2, 0);
+    int64_t b = entry_append_with_iteration(db, sid, &m2, 0);
     assert(leaf_of(db, sid) == b);
 
     /* Insert a compaction summary between a and b: leaf must stay at b. */

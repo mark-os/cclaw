@@ -107,7 +107,7 @@ static void *tool_thread_fn(void *arg) {
         int is_err = (strncmp(result, "error:", 6) == 0);
         Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                        .tool_name = job->tool_name, .is_error = is_err};
-        int64_t rid = entry_append_with_turn(db, job->session_id, &msg, job->turn_id);
+        int64_t rid = entry_append_with_iteration(db, job->session_id, &msg, job->iteration_id);
         db_tool_call_complete_with_result(db, job->entry_id, job->tool_call_id, rid);
         free(stored);
         db_close(db);

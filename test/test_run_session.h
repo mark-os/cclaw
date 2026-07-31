@@ -47,7 +47,7 @@ static inline int test_run_session(sqlite3 *db, int64_t session_id, AgentSetup *
             int is_err = (strncmp(result, "error:", 6) == 0);
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = tc->name, .is_error = is_err};
-            int64_t rid = entry_append_with_turn(db, session_id, &msg, tc->turn_id);
+            int64_t rid = entry_append_with_iteration(db, session_id, &msg, tc->iteration_id);
             db_tool_call_complete_with_result(db, tc->entry_id, tc->call_id, rid);
             free(result);
         }

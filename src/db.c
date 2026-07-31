@@ -317,57 +317,18 @@ int db_ensure_schema(sqlite3 *db) {
  * per patch. A patch may instead be a C function (fn) for shapes SQL can't
  * express idempotently — exactly one of sql/fn is set. */
 static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } schema_patches[] = {
-    /* Frozen at v33 (2026-07-19): the route-model unification (routes pin
-     * sessions, channel_id → chat_id, channels.default_agent) rebuilt
-     * channel_routes with a NOT NULL session FK — shipped as a new floor
-     * rather than migration code (Mark's call; this also absorbed the v32
-     * column drops). Pre-v33 DBs are refused with a delete-and-restart
-     * message. The {0} sentinel keeps the array non-empty for C11; the
-     * executor skips it. */
+    /* Frozen at v40 (2026-07-31, D16): entries.turn_id/llm_responses.turn_id
+     * were renamed to iteration_id (they always identified one LLM request) and
+     * a real per-turn entries.turn_id was added, filled by the entries_turn_ai
+     * trigger. Renaming a column every branch walk and the payload SQL read is
+     * not a shim-able migration — shipped as a new floor rather than migration
+     * code (Mark's call), collapsing the v34–v39 patches into it. Pre-v40 DBs
+     * are refused with a delete-and-restart message. The {0} sentinel keeps the
+     * array non-empty for C11; the executor skips it. */
     { 0 },
-    /* v34: the 'trusted' containment profile is deleted (three profiles now:
-     * host / standard / restricted). Its mount set already equalled
-     * standard's, so this is a merge, not a loosening — the rewritten rows get
-     * a clean env instead of inherit+scrub. Unknown values already fall
-     * through to standard at resolve time; rewriting the rows keeps the DB
-     * honest about what is actually in force. */
-    { 34, "UPDATE agents SET sandbox_profile='standard'"
-          " WHERE sandbox_profile='trusted';", NULL },
-    /* v35: tools.egress_hosts — a promoted tool's manifest-declared hosts
-     * (Q1). Non-NULL replaces the agent's host grants for calls of that tool;
-     * NULL (every builtin, every draft) keeps today's behaviour, so the added
-     * column starts inert on a live DB and is filled by the next promote. */
-    { 35, "ALTER TABLE tools ADD COLUMN egress_hosts TEXT;", NULL },
-    /* v36: channels.default_tool_filter — the tool filter frozen onto sessions
-     * the routing gate creates for *unrouted* chats (open-door + admin
-     * fallback). NULL keeps today's behaviour (full grant set), so the column
-     * starts inert; `route add <ch> '*' <agent> --tools ...` fills it. */
-    { 36, "ALTER TABLE channels ADD COLUMN default_tool_filter TEXT;", NULL },
-    /* v37: channel_routes.system_prompt_suffix — per-route addendum to the
-     * system prompt of the pinned session (room etiquette, house style).
-     * NULL = nothing appended, so the column starts inert on a live DB;
-     * `route add ... --prompt "..."` fills it. */
-    { 37, "ALTER TABLE channel_routes ADD COLUMN system_prompt_suffix TEXT;", NULL },
-    /* v38: sessions.chat_title — the human-readable name of the bound chat,
-     * as observed by the channel runner (Discord guild/channel names arrive
-     * on GUILD_CREATE). Display only: the model reads it, sends still address
-     * by chat_id. NULL until the runner sees a name, so it starts inert. */
-    { 38, "ALTER TABLE sessions ADD COLUMN chat_title TEXT;", NULL },
-    /* v39: memory_blocks.value is dropped — a block is a pure container of
-     * numbered memory_entries. Nothing rendered `value` (llm_payload.c and
-     * agent_config.c aggregate entries only), so any text there was invisible
-     * to the model; the seed path was still writing it. Rescue it first as
-     * entry 1 of blocks that have no entries yet, then drop the column (no
-     * index references it, so DROP COLUMN is legal). */
-    { 39, "INSERT INTO memory_entries(agent_name, block_label, pos, text)"
-          " SELECT b.agent_name, b.label, 1, b.value FROM memory_blocks b"
-          " WHERE b.agent_name IS NOT NULL AND b.value <> ''"
-          "   AND NOT EXISTS (SELECT 1 FROM memory_entries e"
-          "                   WHERE e.agent_name=b.agent_name AND e.block_label=b.label);"
-          "ALTER TABLE memory_blocks DROP COLUMN value;", NULL },
 };
 
-#define CCLAW_SCHEMA_MIN 33   /* schema freeze 2026-07-19 — no patches below this */
+#define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */
 
 DbSchemaState db_schema_state(sqlite3 *db, int *user_version) {
     int uv = 0;
@@ -1061,25 +1022,26 @@ int session_count_active_agents(sqlite3 *db) {
     return count;
 }
 
-/* next turn_id for a session */
-int64_t db_next_turn_id(sqlite3 *db, int64_t session_id) {
-    return db_scalar_i64(db, "SELECT COALESCE(MAX(turn_id), 0) + 1 FROM entries WHERE session_id=?;", session_id, 1);
+/* next iteration_id for a session */
+int64_t db_next_iteration_id(sqlite3 *db, int64_t session_id) {
+    return db_scalar_i64(db, "SELECT COALESCE(MAX(iteration_id), 0) + 1 FROM entries WHERE session_id=?;", session_id, 1);
 }
 
-/* append entry with explicit turn_id */
-int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *msg, int64_t turn_id) {
-    /* parent_id and turn_id computed as subqueries — atomic with the INSERT
-     * via the entries_leaf_ai trigger (no separate SELECT + set_leaf). */
-    const char *ins_sql = turn_id > 0
-        ? "INSERT INTO entries (parent_id, session_id, turn_id, type, part_index, role, content, tool_calls,"
+/* append entry with explicit iteration_id */
+int64_t entry_append_with_iteration(sqlite3 *db, int64_t session_id, const Message *msg, int64_t iteration_id) {
+    /* parent_id and iteration_id computed as subqueries — atomic with the INSERT
+     * via the entries_leaf_ai trigger (no separate SELECT + set_leaf). turn_id is
+     * left NULL and filled by entries_turn_ai from the parent. */
+    const char *ins_sql = iteration_id > 0
+        ? "INSERT INTO entries (parent_id, session_id, iteration_id, type, part_index, role, content, tool_calls,"
           " tool_call_id, tool_name, is_error, stop_reason, model,"
           " usage_in, usage_out, cost_nano, token_estimate, content_bytes, tool_call_count, data)"
           " VALUES ((SELECT leaf_id FROM sessions WHERE id=?1),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19);"
-        : "INSERT INTO entries (parent_id, session_id, turn_id, type, part_index, role, content, tool_calls,"
+        : "INSERT INTO entries (parent_id, session_id, iteration_id, type, part_index, role, content, tool_calls,"
           " tool_call_id, tool_name, is_error, stop_reason, model,"
           " usage_in, usage_out, cost_nano, token_estimate, content_bytes, tool_call_count, data)"
           " VALUES ((SELECT leaf_id FROM sessions WHERE id=?1),?1,"
-          "(SELECT COALESCE(MAX(turn_id),0)+1 FROM entries WHERE session_id=?1),"
+          "(SELECT COALESCE(MAX(iteration_id),0)+1 FROM entries WHERE session_id=?1),"
           "?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18);";
 
     sqlite3_stmt *stmt;
@@ -1088,8 +1050,8 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
 
     int b; /* next bind index */
     sqlite3_bind_int64(stmt, 1, session_id);
-    if (turn_id > 0) {
-        sqlite3_bind_int64(stmt, 2, turn_id);
+    if (iteration_id > 0) {
+        sqlite3_bind_int64(stmt, 2, iteration_id);
         b = 3;
     } else {
         b = 2;
@@ -1164,7 +1126,7 @@ int64_t entry_append_with_turn(sqlite3 *db, int64_t session_id, const Message *m
 }
 
 /* Append a flat typed entry — the new event-sourced API. */
-int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
+int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t iteration_id,
                            const char *type, int part_index, const char *content,
                            const char *tool_call_id, const char *tool_name,
                            int is_error, StopReason stop_reason,
@@ -1183,7 +1145,7 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
 
     /* parent_id via subquery — atomic with INSERT via entries_leaf_ai trigger */
     const char *sql =
-        "INSERT INTO entries (parent_id, session_id, turn_id, type, part_index, role,"
+        "INSERT INTO entries (parent_id, session_id, iteration_id, type, part_index, role,"
         " content, tool_call_id, tool_name, is_error, stop_reason, model,"
         " usage_in, usage_out, cost_nano, token_estimate, content_bytes)"
         " VALUES ((SELECT leaf_id FROM sessions WHERE id=?1),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16);";
@@ -1191,7 +1153,7 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
     sqlite3_bind_int64(stmt, 1, session_id);
-    sqlite3_bind_int64(stmt, 2, turn_id);
+    sqlite3_bind_int64(stmt, 2, iteration_id);
     sqlite3_bind_text(stmt, 3, type, -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 4, part_index);
     sqlite3_bind_int(stmt, 5, role);
@@ -2125,7 +2087,7 @@ int db_tool_call_any_running(sqlite3 *db, int64_t session_id) {
 PendingToolCall *db_tool_call_get_pending(sqlite3 *db, int64_t session_id, int *out_count) {
     *out_count = 0;
     const char *sql =
-        "SELECT tc.call_id, tc.name, e.content, tc.entry_id, e.turn_id"
+        "SELECT tc.call_id, tc.name, e.content, tc.entry_id, e.iteration_id"
         " FROM tool_calls tc JOIN entries e ON e.id=tc.entry_id"
         " WHERE tc.session_id=? AND tc.status='pending'"
         " ORDER BY tc.rowid;";
@@ -2150,7 +2112,7 @@ PendingToolCall *db_tool_call_get_pending(sqlite3 *db, int64_t session_id, int *
         s = (const char *)sqlite3_column_text(stmt, 2);
         list[count].arguments = s ? strdup(s) : strdup("{}");
         list[count].entry_id = sqlite3_column_int64(stmt, 3);
-        list[count].turn_id = sqlite3_column_int64(stmt, 4);
+        list[count].iteration_id = sqlite3_column_int64(stmt, 4);
         count++;
     }
     sqlite3_finalize(stmt);
@@ -2450,7 +2412,7 @@ int db_recover_stale_sessions(sqlite3 *db) {
                                     "this call exited"};
         Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                        .tool_name = rows[i].name, .is_error = 1};
-        if (entry_append_with_turn(db, rows[i].session_id, &msg, 0) < 0)
+        if (entry_append_with_iteration(db, rows[i].session_id, &msg, 0) < 0)
             goto free_rollback;
         if (db_tool_call_set_status(db, rows[i].session_id, rows[i].call_id,
                                     "done", "recovery") != 0)

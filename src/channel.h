@@ -19,6 +19,13 @@
 #define CHANNEL_FLAP_WINDOW 300   /* 3 crashes in 5 min = flapping */
 #define CHANNEL_MAX_BACKOFF 60
 
+/* Deaf-channel watchdog (specs/channels.md): a runner that is alive but whose
+ * transport has delivered nothing for this many seconds gets bounced.
+ * Generous by design — slow transports and long-poll cycles must clear it.
+ * Resolution: <ext>.deaf_timeout, then the global channel_deaf_timeout
+ * (env CCLAW_CHANNEL_DEAF_TIMEOUT), then this. Either set to 0 = off. */
+#define CHANNEL_DEAF_TIMEOUT 300
+
 typedef struct {
     pid_t pid;
     char name[64];
@@ -80,6 +87,25 @@ char *channel_config_get(sqlite3 *db, const char *channel_name, const char *key)
  * (a failed query — not a decision, so callers must not act on it as one).
  * Both non-1 results write the reason into why. */
 int channel_should_launch(sqlite3 *db, const char *name, char *why, size_t cap);
+
+/* Deaf-channel watchdog — transport liveness, kept in channel_state under
+ * 'last_activity_at'. The runner and the supervisor are separate processes, so
+ * the DB is the only place this can live.
+ *
+ * `seen` is the runner reporting *received* traffic and creates the mark;
+ * `reset` only refreshes a mark that already exists. That asymmetry is the
+ * enrolment rule: a channel with no self-driven transport (one the daemon
+ * feeds over the request UDS — a webhook) never stamps, never gets a row, and
+ * is never judged deaf. */
+void channel_activity_seen(sqlite3 *db, const char *name);
+void channel_activity_reset(sqlite3 *db, const char *name);
+
+/* Seconds since the channel's last recorded activity; -1 if never recorded
+ * (not enrolled — the watchdog has no opinion about it). */
+time_t channel_activity_age(sqlite3 *db, const char *name);
+
+/* Resolved deaf threshold in seconds for a channel; 0 = watchdog off. */
+int channel_deaf_timeout(sqlite3 *db, const char *name);
 
 /* Reap — returns 1 if pid belonged to a channel, 0 otherwise */
 int channel_reap(pid_t pid, sqlite3 *db);

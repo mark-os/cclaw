@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "doctor.h"
 #include "cclaw.h"
+#include "channel.h"
 #include "config.h"
 #include "config_registry.h"
 #include "db.h"
@@ -369,7 +370,13 @@ static void check_channels(sqlite3 *db) {
     }
 
     sqlite3_stmt *stmt;
-    const char *sql = "SELECT name, type, status, pid FROM channels";
+    /* Age of the deaf-watchdog mark comes from the same read (correlated
+     * subselect); NULL = the channel has no self-driven transport to watch. */
+    const char *sql =
+        "SELECT name, type, status, pid,"
+        " (SELECT MAX(0, unixepoch() - CAST(value AS INTEGER)) FROM channel_state"
+        "   WHERE channel_name = channels.name AND key = 'last_activity_at')"
+        " FROM channels";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
         /* Table might not exist in a fresh/empty DB */
         printf("  (no channels table or empty)\n");
@@ -382,6 +389,8 @@ static void check_channels(sqlite3 *db) {
         const char *type = (const char *)sqlite3_column_text(stmt, 1);
         const char *status = (const char *)sqlite3_column_text(stmt, 2);
         int64_t pid = sqlite3_column_int64(stmt, 3);
+        int enrolled = sqlite3_column_type(stmt, 4) != SQLITE_NULL;
+        long age = enrolled ? (long)sqlite3_column_int64(stmt, 4) : 0;
 
         const char *alive = "";
         if (pid > 0) {
@@ -393,6 +402,15 @@ static void check_channels(sqlite3 *db) {
                type ? type : "?",
                status ? status : "?",
                (long long)pid, alive);
+
+        int limit = (enrolled && name) ? channel_deaf_timeout(db, name) : 0;
+        if (!enrolled)
+            printf("    last event: none recorded (no watched transport)\n");
+        else if (limit <= 0)
+            printf("    last event: %ldm %lds ago (watchdog off)\n", age / 60, age % 60);
+        else
+            printf("    last event: %ldm %lds ago (deaf past %ds)%s\n",
+                   age / 60, age % 60, limit, age >= limit ? " — DEAF" : "");
         count++;
     }
     sqlite3_finalize(stmt);

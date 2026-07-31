@@ -630,6 +630,90 @@ static int active_channel_names(sqlite3 *db, char names[][64], int max) {
     return n;
 }
 
+/* ── Deaf-channel watchdog ──────────────────────────────────────────
+ *
+ * A runner can be alive as a process and still have stopped receiving: a
+ * wedged WebSocket, a long-poll loop that never completes again. Nothing else
+ * notices — supervision only ever hears about a channel that *exits*.
+ *
+ * The mark is transport-level, not message-level. The runner stamps it on any
+ * received frame (gateway heartbeat ACKs included — Discord's arrive every
+ * ~41s) and on every successful poll cycle, so a quiet-but-healthy channel
+ * keeps stamping while a wedged one stops within a minute or two. Keying off
+ * user-visible messages instead would condemn every idle chat.
+ *
+ * Enrolment is by first traffic (see channel.h): only `seen` creates the row.
+ */
+#define CHANNEL_ACTIVITY_KEY "last_activity_at"
+
+void channel_activity_seen(sqlite3 *db, const char *name) {
+    if (!db || !name) return;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO channel_state(channel_name, key, value)"
+            " VALUES(?1, '" CHANNEL_ACTIVITY_KEY "', unixepoch())"
+            " ON CONFLICT(channel_name, key) DO UPDATE SET value=unixepoch();",
+            -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+}
+
+void channel_activity_reset(sqlite3 *db, const char *name) {
+    if (!db || !name) return;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE channel_state SET value=unixepoch()"
+            " WHERE channel_name=?1 AND key='" CHANNEL_ACTIVITY_KEY "';",
+            -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+}
+
+/* MAX(0, …): a backward clock step must read as "just now", never as a huge
+ * silence that bounces every enrolled channel at once. */
+time_t channel_activity_age(sqlite3 *db, const char *name) {
+    if (!db || !name) return -1;
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT MAX(0, unixepoch() - CAST(value AS INTEGER))"
+            " FROM channel_state"
+            " WHERE channel_name=?1 AND key='" CHANNEL_ACTIVITY_KEY "';",
+            -1, &s, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    time_t age = -1;
+    if (sqlite3_step(s) == SQLITE_ROW && sqlite3_column_type(s, 0) != SQLITE_NULL)
+        age = (time_t)sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return age;
+}
+
+/* Ceiling keeps the narrowing to int well-defined on 32-bit targets, and a
+ * transport watchdog set past a day is indistinguishable from "off" anyway. */
+#define CHANNEL_DEAF_MAX 86400
+
+/* Consumes v. Unset or unparsable is not an answer — fall through to the next
+ * tier; a parsed value <= 0 means "watchdog off for this channel". */
+static int deaf_seconds(char *v, int *out) {
+    if (!v) return 0;
+    char *end = NULL;
+    long n = strtol(v, &end, 10);
+    int ok = v[0] != '\0' && end && *end == '\0';
+    if (ok) *out = n <= 0 ? 0 : (n > CHANNEL_DEAF_MAX ? CHANNEL_DEAF_MAX : (int)n);
+    free(v);
+    return ok;
+}
+
+int channel_deaf_timeout(sqlite3 *db, const char *name) {
+    int secs = CHANNEL_DEAF_TIMEOUT;
+    if (deaf_seconds(channel_config_get(db, name, "deaf_timeout"), &secs))
+        return secs;
+    if (deaf_seconds(config_get(db, "channel_deaf_timeout"), &secs))
+        return secs;
+    return CHANNEL_DEAF_TIMEOUT;
+}
+
 /* Fork one channel process and start tracking it. */
 static int start_channel(sqlite3 *db, const char *name) {
     if (g_count >= CHANNEL_MAX) return -1;
@@ -643,6 +727,9 @@ static int start_channel(sqlite3 *db, const char *name) {
     c->started_at = time(NULL);
     snprintf(c->name, sizeof(c->name), "%s", name);
     update_pid(db, name, pid);
+    /* Give the successor a full threshold to connect — the mark it inherits
+     * is the wedged predecessor's, and would otherwise be instantly fatal. */
+    channel_activity_reset(db, name);
     return 0;
 }
 
@@ -896,6 +983,7 @@ void channel_tick(sqlite3 *db) {
                 c->pid = pid;
                 c->started_at = now;
                 update_pid(db, c->name, pid);
+                channel_activity_reset(db, c->name);   /* grace, see start_channel */
                 LOG_INFO_("channel respawn name=%s pid=%d",
                           c->name, (int)pid);
             }
@@ -906,6 +994,24 @@ void channel_tick(sqlite3 *db) {
             c->started_at > 0 && (now - c->started_at) > CHANNEL_FLAP_WINDOW) {
             c->restart_count = 0;
             c->first_crash = 0;
+        }
+
+        /* Deaf watchdog: the process is up but its transport went silent.
+         * SIGTERM only — the reap/backoff path above is what restarts it, so a
+         * bounce here is indistinguishable from a crash to the rest of
+         * supervision (flap detection included, which is what eventually marks
+         * a channel that can never receive as broken). The mark is reset on
+         * the way out so a child that ignores SIGTERM is re-signalled once per
+         * threshold rather than once per tick. */
+        if (c->pid > 0) {
+            time_t age = channel_activity_age(db, c->name);
+            int limit = age >= 0 ? channel_deaf_timeout(db, c->name) : 0;
+            if (limit > 0 && age >= limit) {
+                LOG_ERROR_("channel deaf name=%s pid=%d silent=%lds threshold=%ds"
+                           " — restarting", c->name, (int)c->pid, (long)age, limit);
+                kill(c->pid, SIGTERM);
+                channel_activity_reset(db, c->name);
+            }
         }
     }
 }

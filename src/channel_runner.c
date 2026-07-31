@@ -70,6 +70,22 @@ ChannelCtx *g_ctx;
 
 static void handle_signal(int sig) { (void)sig; g_running = 0; }
 
+/* Transport liveness for the daemon's deaf-channel watchdog (channel.c).
+ * Stamped on *received* traffic of any kind — a gateway heartbeat ACK counts,
+ * a chat message is not required — because an idle-but-healthy channel and a
+ * wedged one are otherwise indistinguishable from the outside.
+ *
+ * Throttled because this is a DB write on a hot path: a busy guild delivers
+ * frames far faster than a watchdog measured in minutes needs to resolve. */
+#define CR_ACTIVITY_MARK_INTERVAL 5
+static void mark_activity(void) {
+    static time_t last;
+    time_t now = time(NULL);
+    if (now - last < CR_ACTIVITY_MARK_INTERVAL) return;
+    last = now;
+    if (g_ctx) channel_activity_seen(g_ctx->db, g_ctx->channel_name);
+}
+
 /* 429 bodies carry the server's retry hint in one of two shapes: Telegram
  * nests an integer under {"parameters":{"retry_after":N}}, Discord puts float
  * seconds at the top level ({"retry_after":0.75}). Parse via SQLite JSON
@@ -646,6 +662,9 @@ static void conn_recv_drain(JSContext *ctx, int i) {
         CURLcode res = curl_ws_recv(c->easy, buf, sizeof(buf), &rlen, (void *)&meta);
         if (res == CURLE_AGAIN) return;
         if (res != CURLE_OK) { c->want_close = 1; c->close_code = 0; return; }
+        /* Before any opcode filtering: PING/PONG/CLOSE are the whole point —
+         * on a chat-quiet gateway the heartbeat ACK is the only proof of life. */
+        mark_activity();
         if (!meta) continue;
         if (meta->flags & CURLWS_CLOSE) {
             /* Close payload (if any) is a 2-byte big-endian status code. */
@@ -962,6 +981,13 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
     g_ctx = channel_ctx_open(db_path, channel_name);
     if (!g_ctx) { LOG_ERROR_("channel_runner: DB open failed"); return 1; }
 
+    /* Restart the deaf watchdog's clock as early as possible: whatever mark
+     * this channel carries belongs to the incarnation we replaced, and JS
+     * load + onInit + the first handshake all happen before the first frame
+     * lands. Reset, not seen — a channel that has never received must not be
+     * enrolled by the mere fact that it started (see channel.h). */
+    channel_activity_reset(g_ctx->db, channel_name);
+
     /* Load the secret key so extension JS touching the encrypted kv works. */
     {
         uint8_t sk[32];
@@ -1145,6 +1171,12 @@ int channel_runner_main(const char *db_path, const char *channel_name) {
                 g_poll.easy = NULL;
                 g_poll.active = 0;
                 if (ok) {
+                    /* A completed long-poll cycle is received traffic even
+                     * when it carries no updates — that empty 200 is exactly
+                     * what a quiet, healthy channel looks like. Only success
+                     * counts: a poll endpoint erroring forever is a channel
+                     * the watchdog *should* eventually bounce. */
+                    mark_activity();
                     g_poll.errors = 0;
                     g_poll.next_at = 0;
                 } else {

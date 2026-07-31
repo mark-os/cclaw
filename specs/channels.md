@@ -29,6 +29,39 @@ The agent decides *when to speak* in listen-and-decide chats.
   name. The launch gate additionally requires `<ext>.enabled` truthy and all
   `required` config keys resolvable (specs/config.md).
 
+### Deaf-channel watchdog
+
+Supervision only ever hears about a runner that *exits*, but a runner can be
+alive and have silently stopped receiving — a wedged WebSocket, a long-poll
+loop that never completes again. The runner therefore stamps
+`channel_state.last_activity_at` on **received transport traffic**, not on
+user-visible messages: any inbound WebSocket frame (gateway heartbeat ACKs
+included — Discord's arrive every ~41s) and every successful poll cycle,
+throttled to one write per 5s. That distinction is the whole design — an idle
+chat must not look like a broken one, and a wedged transport stops ACKing
+within a minute or two, which is exactly the signal.
+
+`channel_tick` bounces a tracked channel whose mark is older than its
+threshold: `SIGTERM` plus a `channel deaf …` error log, then the ordinary
+reap → backoff → respawn path does the restart (so a bounce is
+indistinguishable from a crash to the rest of supervision, flap detection
+included). The mark is refreshed at every launch, respawn, and bounce, which is
+both the grace period — a fresh runner gets a full threshold to connect,
+whatever staleness it inherited — and the debounce for a child that ignores
+`SIGTERM`.
+
+Enrolment is by first traffic: only the runner's *received-traffic* stamp
+creates the row; every other write refreshes an existing one. A channel with no
+self-driven transport (a webhook, fed by the daemon over the request UDS) never
+stamps, has no row, and is never judged deaf — there is nothing there that
+could wedge.
+
+Threshold resolution: `<ext>.deaf_timeout`, then the global
+`channel_deaf_timeout` (env `CCLAW_CHANNEL_DEAF_TIMEOUT`), then the built-in
+`CHANNEL_DEAF_TIMEOUT` (300s). Either key set to `0` turns the watchdog off.
+`cclaw doctor` prints the age of each channel's mark and the threshold in
+force.
+
 ## Envelope schema (JS → C)
 
 `channel.emit` message payloads are JSON with these fields (additive-only for

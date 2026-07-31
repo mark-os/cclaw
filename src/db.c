@@ -2430,8 +2430,11 @@ int db_recover_stale_sessions(sqlite3 *db) {
 
     /* Write synthetic error results + mark done */
     for (int i = 0; i < count; i++) {
+        /* Wording is mode-neutral: the CLI reaches this path too, when a run
+         * exits with a tool call still unanswered (e.g. an unanswered park). */
         ToolResult tr = {.tool_call_id = rows[i].call_id,
-                         .content = "error: interrupted by daemon restart"};
+                         .content = "error: interrupted — the process running "
+                                    "this call exited"};
         Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                        .tool_name = rows[i].name, .is_error = 1};
         if (entry_append_with_turn(db, rows[i].session_id, &msg, 0) < 0)
@@ -2493,7 +2496,7 @@ int db_recover_stale_sessions(sqlite3 *db) {
      * db_periodic tick and the model can review the interrupted turn. */
     for (int i = 0; i < nudge_count; i++) {
         if (inbox_insert(db, nudge_ids[i], "system",
-                "daemon restarted mid-task — a tool call was interrupted;"
+                "the previous run ended mid-task — a tool call was interrupted;"
                 " review the work above and resume if needed") < 0)
             goto rollback;
     }

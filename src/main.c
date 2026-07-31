@@ -2012,7 +2012,11 @@ static void resolve_approval_post_window(const Approval *a, const char *agent,
                                          int64_t grant_expires_at) {
     int approved = (decision != APPROVAL_DENY);
     int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
-    int expired = decided_via && strncmp(decided_via, "auto:", 5) == 0;
+    /* Only the timeout sweep expires an approval. Every other automatic
+     * decision (auto:no-approver) is a real denial, and telling the model it
+     * "expired without a decision — not a denial" invites it to re-request
+     * forever. */
+    int expired = decided_via && strcmp(decided_via, "auto:expired") == 0;
     if (is_apply) {
         if (approved && decision == APPROVAL_ALWAYS) {
             int rename_failed = 0;
@@ -2164,6 +2168,43 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
     approval_free(a);
     wake_session(session_id);
     run_advance(session_id);
+}
+
+/* ── deferred auto-decisions ─────────────────────────────────────────
+ * An automatic decision (--auto-approve, or the auto-deny when there is no
+ * approver at all) is reached from inside handle_approval_park, where the
+ * parked tool_call is still CAS-claimed 'running' by the dispatch loop.
+ * Resolving there makes approval_is_post_window() read the decision as *late*:
+ * the model gets an inbox notice, the call never gets a tool result, and the
+ * loop then unclaims it back to 'pending' — an orphan that the next run
+ * re-dispatches with its original arguments. So record the decision and let
+ * the dispatch loop apply it once the claim is released. */
+static struct {
+    int64_t id;                 /* 0 = nothing deferred */
+    ApprovalDecision decision;
+    int64_t grant_expires_at;
+    char via[24];
+} g_deferred;
+
+static void approval_defer_decision(int64_t approval_id, ApprovalDecision decision,
+                                    const char *decided_via, int64_t grant_expires_at) {
+    g_deferred.id = approval_id;
+    g_deferred.decision = decision;
+    g_deferred.grant_expires_at = grant_expires_at;
+    snprintf(g_deferred.via, sizeof(g_deferred.via), "%s", decided_via);
+}
+
+static void approval_flush_deferred(void) {
+    if (!g_deferred.id) return;
+    int64_t id = g_deferred.id;
+    ApprovalDecision decision = g_deferred.decision;
+    int64_t expires = g_deferred.grant_expires_at;
+    char via[sizeof(g_deferred.via)];
+    snprintf(via, sizeof(via), "%s", g_deferred.via);
+    /* Clear before resolving: resolve_approval re-enters run_advance, which
+     * can park (and defer) again. */
+    g_deferred.id = 0;
+    resolve_approval(id, decision, via, expires);
 }
 
 /* Append `header` plus a fenced block of the rows yielded by sql (single
@@ -2337,16 +2378,16 @@ static void handle_approval_park(int64_t session_id) {
             int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
             if (is_apply) {
                 int64_t expires = time(NULL) + approval_timeout_seconds();
-                resolve_approval(a->id, APPROVAL_ALWAYS, "cli:auto-approve", expires);
+                approval_defer_decision(a->id, APPROVAL_ALWAYS, "cli:auto-approve", expires);
             } else {
-                resolve_approval(a->id, APPROVAL_ONCE, "cli:auto-approve", 0);
+                approval_defer_decision(a->id, APPROVAL_ONCE, "cli:auto-approve", 0);
             }
             approval_free(a);
             return;
         }
         if (!isatty(STDIN_FILENO)) {
             /* Non-interactive (-p mode): auto-deny */
-            resolve_approval(a->id, APPROVAL_DENY, "auto:no-approver", 0);
+            approval_defer_decision(a->id, APPROVAL_DENY, "auto:no-approver", 0);
             approval_free(a);
             return;
         }
@@ -2485,7 +2526,7 @@ static void handle_approval_park(int64_t session_id) {
     }
     if (!has_channel) {
         /* No channel binding — fail-closed: auto-deny */
-        resolve_approval(a->id, APPROVAL_DENY, "auto:no-approver", 0);
+        approval_defer_decision(a->id, APPROVAL_DENY, "auto:no-approver", 0);
     }
     approval_free(a);
 }
@@ -2635,6 +2676,10 @@ static void run_advance(int64_t session_id) {
                 break;
             }
         }
+        /* Apply any auto-decision handle_approval_park recorded — only now is
+         * the parked call unclaimed, so the decision lands inside its block
+         * window and actually answers the call. */
+        approval_flush_deferred();
         /* Only advance now if every call ran inline. If anything async is in
          * flight, its completion (reap or sub-agent finish) re-advances us. */
         if (!async_in_flight && !stop)
@@ -3586,7 +3631,13 @@ done:
     { int64_t cost = session_cost(g_db, g_cli_session);
       if (cost > 0) fprintf(stderr, "\n[session cost: $%.6f]\n", (double)cost / 1e9); }
 
-    session_set_state(g_db, g_cli_session, "idle");
+    /* A short -p run can exit before db_periodic's first tick, so parks that
+     * are already past their deadline would otherwise be left 'pending' for
+     * the next process to trip over. Sweep while the worker is still up, so a
+     * resumed turn has somewhere to go; recovery below reclaims whatever it
+     * leaves in flight. NOTE: the session is deliberately NOT forced idle here
+     * — that would hide an unanswered awaiting_approval call from recovery. */
+    approval_sweep_expired();
     /* Quiesce the worker pool before freeing anything it may still touch
      * (g_tool_setup/g_cfg/g_db). Mirrors the daemon shutdown order. */
     llm_worker_stop();

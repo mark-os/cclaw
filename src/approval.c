@@ -73,11 +73,15 @@ int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_i
     return id;
 }
 
+/* Ordered like approval_get_pending_subtree, deliberately: the park prompt
+ * (this) and the CLI's y/n reader (that) must name the same row, or the user
+ * is shown one approval and decides another. */
 Approval *approval_get_pending(sqlite3 *db, int64_t session_id) {
     const char *sql =
         "SELECT id, session_id, tool_call_id, tool_name, action,"
         " args_json, resolve, state, decided_via, requested_at, expires_at"
-        " FROM approvals WHERE session_id=? AND state='pending' LIMIT 1";
+        " FROM approvals WHERE session_id=? AND state='pending'"
+        " ORDER BY requested_at ASC, id ASC LIMIT 1";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return NULL;

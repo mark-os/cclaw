@@ -422,6 +422,34 @@ static void test_pending_subtree(void) {
     printf("  PASS: test_pending_subtree\n");
 }
 
+/* approval_get_pending drives the park prompt; approval_get_pending_subtree
+ * drives the CLI's y/n reader. With more than one park outstanding they must
+ * name the SAME row, or the user is shown one approval and decides another. */
+static void test_pending_order_matches_subtree(void) {
+    sqlite3 *db = fresh_db();
+    db_agent_upsert(db, "bot", NULL, NULL);
+    int64_t sid = session_create(db, "test", "bot", -1, 0);
+    assert(sid > 0);
+
+    int64_t first = approval_create(db, sid, "call_first", "shell_exec",
+                                    "shell_exec", "{}", "rerun");
+    int64_t second = approval_create(db, sid, "call_second", "shell_exec",
+                                     "shell_exec", "{}", "rerun");
+    assert(first > 0 && second > 0);
+
+    Approval *a = approval_get_pending(db, sid);
+    Approval *b = approval_get_pending_subtree(db, sid);
+    assert(a != NULL && b != NULL);
+    assert(a->id == first);
+    assert(a->id == b->id);
+    approval_free(a);
+    approval_free(b);
+
+    db_close(db);
+    clean_db();
+    printf("  PASS: test_pending_order_matches_subtree\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_approvals:\n");
@@ -437,6 +465,7 @@ int main(void) {
     test_get_for_tool_call();
     test_consume();
     test_pending_subtree();
+    test_pending_order_matches_subtree();
     printf("all approval tests passed\n");
     return 0;
 }

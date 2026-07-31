@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "llm_payload.h"
 #include "agent_config.h"
+#include "config_registry.h"
 #include "context.h"
 #include "config.h"
 #include "db.h"
@@ -108,13 +109,19 @@ static const char SQL_OPENAI_MESSAGES[] =
     "  FROM hook_directives hd WHERE hd.session_id = ?1 AND hd.kind = 'inject'"
     ") sub WHERE msg IS NOT NULL;";
 
-/* launch_agent's description carries a live roster of delegable agents,
- * recomputed every turn — no refresh plumbing when agents come and go. */
+/* launch_agent's description carries a live roster of delegable agents and the
+ * live default worker toolset (?3), both recomputed every request — no refresh
+ * plumbing when agents or config change. The toolset is spelled out rather
+ * than named ("the worker_tools config"): a spawned worker cannot read config
+ * from inside its sandbox, and a spawner that can't see the list has no way to
+ * know its worker will be missing a tool. */
 #define SQL_TOOL_DESCRIPTION \
     "CASE WHEN t.name='launch_agent' THEN" \
     "  t.description || COALESCE(' Available agents: ' ||" \
     "    (SELECT group_concat(a.name || ' — ' ||" \
     "       COALESCE(a.description,'(no description)'), '; ') FROM agents a), '')" \
+    "  || COALESCE(' Default worker toolset (self-spawn with no ''tools''): '" \
+    "       || ?3 || '.', '')" \
     " ELSE t.description END"
 
 static const char SQL_OPENAI_TOOLS[] =
@@ -343,14 +350,37 @@ static char *query_text(sqlite3 *db, const char *sql, int64_t session_id,
     return r;
 }
 
-static char *query_tools(sqlite3 *db, const char *sql,
-                         const char *agent_name, const char *allowed_tools) {
+/* The worker_tools config as a human-readable list, for launch_agent's
+ * description. Config-sourced, so byte-stable across a turn's iterations.
+ * A malformed value (operator typo) makes json_each error at step time and
+ * we return NULL — the sentence is dropped, the payload still builds. */
+static char *worker_tools_list(sqlite3 *db) {
+    char *raw = config_get(db, "worker_tools");
+    if (!raw || !raw[0]) { free(raw); return NULL; }
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db, "SELECT group_concat(value, ', ') FROM json_each(?1)",
+                           -1, &s, NULL) != SQLITE_OK) { free(raw); return NULL; }
+    sqlite3_bind_text(s, 1, raw, -1, SQLITE_STATIC);
+    char *r = NULL;
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *t = (const char *)sqlite3_column_text(s, 0);
+        if (t && t[0]) r = strdup(t);
+    }
+    sqlite3_finalize(s);
+    free(raw);
+    return r;
+}
+
+static char *query_tools(sqlite3 *db, const char *sql, const char *agent_name,
+                         const char *allowed_tools, const char *worker_tools) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return NULL;
     if (agent_name) sqlite3_bind_text(s, 1, agent_name, -1, SQLITE_STATIC);
     else sqlite3_bind_null(s, 1);
     if (allowed_tools) sqlite3_bind_text(s, 2, allowed_tools, -1, SQLITE_STATIC);
     else sqlite3_bind_null(s, 2);
+    if (worker_tools) sqlite3_bind_text(s, 3, worker_tools, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(s, 3);
     char *r = NULL;
     if (sqlite3_step(s) == SQLITE_ROW) {
         const char *t = (const char *)sqlite3_column_text(s, 0);
@@ -437,6 +467,7 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
     char *allowed_tools = agent_name ? grants_json(db, agent_name, "tool") : NULL;
     char *tool_filter = session_tool_filter(db, session_id);
     char *suffix = route_prompt_suffix(db, session_id);
+    char *worker_tools = worker_tools_list(db);
     if (tool_filter) {
         if (allowed_tools) {
             char *isect = json_intersect(db, allowed_tools, tool_filter);
@@ -451,12 +482,13 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
 
     if (gemini) {
         char *contents = query_text(db, SQL_GEMINI_CONTENTS, session_id, context_text);
-        char *tools_json = query_tools(db, SQL_GEMINI_TOOLS, agent_name, allowed_tools);
+        char *tools_json = query_tools(db, SQL_GEMINI_TOOLS, agent_name,
+                                       allowed_tools, worker_tools);
 
         sqlite3_stmt *full;
         if (sqlite3_prepare_v2(db, SQL_GEMINI_FULL, -1, &full, NULL) != SQLITE_OK) {
             free(contents); free(tools_json);
-            free(agent_name); free(allowed_tools); free(suffix);
+            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools);
             return -1;
         }
         if (system_prompt && system_prompt[0])
@@ -475,18 +507,19 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             out->body = (const char *)sqlite3_column_text(full, 0);
         } else {
             sqlite3_finalize(full);
-            free(agent_name); free(allowed_tools); free(suffix);
+            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools);
             return -1;
         }
     } else {
         char *messages = query_text(db, SQL_OPENAI_MESSAGES, session_id, context_text);
         if (!messages) messages = strdup("[]");
-        char *tools_json = query_tools(db, SQL_OPENAI_TOOLS, agent_name, allowed_tools);
+        char *tools_json = query_tools(db, SQL_OPENAI_TOOLS, agent_name,
+                                       allowed_tools, worker_tools);
 
         sqlite3_stmt *full;
         if (sqlite3_prepare_v2(db, SQL_OPENAI_FULL, -1, &full, NULL) != SQLITE_OK) {
             free(messages); free(tools_json);
-            free(agent_name); free(allowed_tools); free(suffix);
+            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools);
             return -1;
         }
         sqlite3_bind_text(full, 1, cfg->provider.model ? cfg->provider.model : "unknown",
@@ -507,12 +540,12 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
             out->body = (const char *)sqlite3_column_text(full, 0);
         } else {
             sqlite3_finalize(full);
-            free(agent_name); free(allowed_tools); free(suffix);
+            free(agent_name); free(allowed_tools); free(suffix); free(worker_tools);
             return -1;
         }
     }
 
-    free(agent_name); free(allowed_tools); free(suffix);
+    free(agent_name); free(allowed_tools); free(suffix); free(worker_tools);
     return 0;
 }
 

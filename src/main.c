@@ -697,9 +697,17 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
          * this session only (grants ∩ filter). Checked after grants so the
          * filter can never widen authority, only shrink it. */
         if (!session_tool_allowed(g_db, session_id, tc->name)) {
-            char err[160];
+            /* Teach the route-around, not just the wall: a filtered session is
+             * a narrowed *spawn*, not a missing grant, so the fix lives with
+             * whoever launched it. Without this the model can only infer the
+             * filter's existence from the word "filter" (observed, CharlesDow
+             * 2026-07-31). */
+            char err[288];
             snprintf(err, sizeof(err),
-                     "error: %s blocked by this session's tool filter", tc->name);
+                     "error: %s blocked by this session's tool filter"
+                     " (this session was spawned with a narrowed toolset; the"
+                     " spawner can pass tools:[...] within its own grants)",
+                     tc->name);
             return tool_inline_error(session_id, tc, err, "tool_filter");
         }
         /* Malformed arguments fail closed at the gate: the model gets an

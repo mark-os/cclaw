@@ -121,6 +121,7 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     /* Read-only config introspection — always available */
     setup->search_cfg_ctx.db = db;
     setup->search_cfg_ctx.agent_name = agent_name;
+    setup->search_cfg_ctx.session_id = session_id;
     tool_search_config_register(&setup->reg, &setup->search_cfg_ctx);
 
     /* Bootstrap tools — available in both CLI and daemon (DB config only) */

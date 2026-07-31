@@ -196,15 +196,35 @@ every turn (no cached state to drift):
 - *Payload* (`llm_build_payload`): the tool array shown to the model is
   grants ∩ filter. An agent with zero grants sees zero tools.
 - *Dispatch* (`dispatch_tool`): after the grant check, `session_tool_allowed()`
-  denies filtered tools with "blocked by this session's tool filter"
-  (fail-closed: unknown session ⇒ deny).
+  denies filtered tools with "blocked by this session's tool filter (this
+  session was spawned with a narrowed toolset; the spawner can pass tools:[...]
+  within its own grants)" (fail-closed: unknown session ⇒ deny). The suffix is
+  load-bearing: a filtered worker's only other clue is the word "filter".
 
 **Self-spawn** (`launch_agent` with no `name`): child runs as the *calling*
 agent — same grants, fresh session, task in inbox. Filter resolution:
-explicit `tools` arg → config `worker_tools` (conservative default: file tools,
-shell_exec, web_fetch, js_eval, check_session, search_config;
-no memory mutators, no config/agent/extension tools, no launch_agent) →
-unrestricted. Passing `tools` with a `name` is an error.
+explicit `tools` arg → config `worker_tools` → unrestricted (unreachable in
+practice: the registry default is never empty). The shipped `worker_tools`
+default is exactly:
+
+```
+file_read, file_write, shell_exec, web_fetch, js_eval,
+launch_agent, check_session, search_config, secret_create
+```
+
+— note *only* `file_read`/`file_write` of the file family (no list/find/grep/
+edit), and no memory mutators, no config/agent/extension tools, no
+`channel_send`. `launch_agent` + `check_session` are in by decision D15
+(2026-07-31): a worker may delegate again, and the recursion rail is
+`agent_max_depth` (2) plus `AGENT_MAX_PER_PARENT` (8) / `AGENT_MAX_TOTAL` (16),
+not a missing tool.
+
+The list is **intersection-only**: naming a tool the spawner lacks grants for
+is a no-op, and no filter ever adds authority. It
+is rendered live into `launch_agent`'s description at payload-build time
+(`llm_payload.c`) so the spawner can read what a worker will actually get, and
+into `search_config`'s grants block for the worker itself. Passing `tools`
+with a `name` is an error.
 
 **Named spawn** (launch existing agent): child runs under the target agent's
 own grants, unfiltered. The target must already exist (not created at spawn

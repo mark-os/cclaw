@@ -14,8 +14,8 @@ static const char *SPAWN_PARAMS_JSON =
     "{\"type\":\"object\",\"properties\":{"
     "\"task\":{\"type\":\"string\",\"description\":\"Task description for the sub-agent\"},"
     "\"name\":{\"type\":\"string\",\"description\":\"Agent to launch — a name from the roster; omit to spawn a copy of yourself (worker)\"},"
-    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Self-spawn only: restrict the worker to these tools (intersected with your grants; default: the worker_tools config)\"},"
-    "\"background\":{\"type\":\"boolean\",\"description\":\"Run in background (default: false, blocks until done)\"}"
+    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Self-spawn only (error if 'name' is set): restrict the worker to these tools, intersected with your own grants — it can never widen them. Omitted, the worker gets the default worker toolset named at the end of this description.\"},"
+    "\"background\":{\"type\":\"boolean\",\"description\":\"Default false: the call blocks and its result is the child's final answer. True returns session_id immediately and the result arrives in your inbox.\"}"
     "},\"required\":[\"task\"]}";
 
 int agent_max_depth(sqlite3 *db) {

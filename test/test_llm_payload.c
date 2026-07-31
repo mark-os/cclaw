@@ -3,6 +3,7 @@
 #include "hook_dispatch.h"
 #include "llm_payload.h"
 #include "config.h"
+#include "config_registry.h"
 #include "context.h"
 #include <assert.h>
 #include <stdio.h>
@@ -789,6 +790,96 @@ static void test_extension_tool_grant_filtering(void) {
     printf("  PASS test_extension_tool_grant_filtering\n");
 }
 
+/* launch_agent's description is assembled at payload-build time: the live
+ * agent roster AND the live default worker toolset. The toolset matters
+ * because the tool schema can only *name* the worker_tools config, which a
+ * sandboxed worker cannot read — the spawner has to be able to see the list
+ * to know what its worker will be missing. Other tools' descriptions are
+ * passed through untouched. */
+static void test_launch_agent_description_embeds_roster_and_worker_tools(void) {
+    sqlite3 *db = open_seeded();
+
+    int64_t sid;
+    setup_session(db, &sid);
+
+    sqlite3_exec(db,
+        "UPDATE agents SET description='Watches the feed' WHERE name='worker';"
+        "INSERT INTO tools(name,description,parameters_json) VALUES("
+        "'launch_agent','Delegate a task.','{\"type\":\"object\"}');"
+        "INSERT INTO tools(name,description,parameters_json) VALUES("
+        "'file_read','Read a file.','{\"type\":\"object\"}');"
+        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','launch_agent');"
+        "INSERT INTO grants(agent_name,kind,value) VALUES('default','tool','file_read');",
+        NULL, NULL, NULL);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.context_window = 128000;
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "SELECT json_extract(value,'$.function.description')"
+        " FROM json_each(json_extract(?1,'$.tools'))"
+        " WHERE json_extract(value,'$.function.name')=?2", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, "launch_agent", -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    const char *d = (const char *)sqlite3_column_text(s, 0);
+    assert(d && strncmp(d, "Delegate a task.", 16) == 0);
+    /* roster (pre-existing behaviour) */
+    assert(strstr(d, "Available agents:"));
+    assert(strstr(d, "worker — Watches the feed"));
+    /* worker toolset, spelled out, in registry order */
+    assert(strstr(d, "Default worker toolset (self-spawn with no 'tools'): "
+                     "file_read, file_write, shell_exec, web_fetch, js_eval, "
+                     "launch_agent, check_session, search_config, secret_create."));
+    sqlite3_finalize(s);
+
+    /* Any other tool's description is untouched — no roster, no toolset. */
+    sqlite3_prepare_v2(db,
+        "SELECT json_extract(value,'$.function.description')"
+        " FROM json_each(json_extract(?1,'$.tools'))"
+        " WHERE json_extract(value,'$.function.name')=?2", -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s, 2, "file_read", -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "Read a file.") == 0);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+
+    /* Live, not baked in: an operator override shows up on the next request. */
+    assert(config_set(db, "worker_tools", "[\"js_eval\"]") == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+    assert(strstr(payload.body, "Default worker toolset (self-spawn with no 'tools'): js_eval."));
+    llm_payload_release(&payload);
+
+    /* A malformed override drops the sentence rather than failing the build. */
+    assert(config_set(db, "worker_tools", "not json") == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+    assert(strstr(payload.body, "Available agents:"));
+    assert(!strstr(payload.body, "Default worker toolset"));
+    llm_payload_release(&payload);
+
+    /* Gemini carries the same assembled description. */
+    assert(config_set(db, "worker_tools", "[\"js_eval\"]") == 0);
+    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+    assert(strstr(payload.body, "Available agents:"));
+    assert(strstr(payload.body, "Default worker toolset (self-spawn with no 'tools'): js_eval."));
+    llm_payload_release(&payload);
+
+    context_plan_free(&plan);
+    db_close(db); test_db_clean(DB_PATH);
+    printf("  PASS test_launch_agent_description_embeds_roster_and_worker_tools\n");
+}
+
 /* A route-pinned session gets its route's system_prompt_suffix appended to
  * the system prompt, on both endpoint shapes; an unpinned session (positive
  * control) sees the prompt unchanged. */
@@ -924,6 +1015,7 @@ int main(void) {
     test_network_hosts_query_time_wrap();
     test_hook_inject_directive();
     test_extension_tool_grant_filtering();
+    test_launch_agent_description_embeds_roster_and_worker_tools();
     test_route_prompt_suffix();
     test_chat_location_line();
     printf("All payload tests passed.\n");

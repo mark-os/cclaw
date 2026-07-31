@@ -58,9 +58,16 @@ static const ConfigDef s_defs[] = {
     { "agent_max_depth",    "2",
       "Max sub-agent nesting depth for launch_agent" },
     { "worker_tools",
+      /* D15: workers may delegate too — the recursion rail is agent_max_depth
+       * (2) plus the per-parent/system caps, not a missing tool. Omitting
+       * launch_agent made the filter do rail-work invisibly, and a parent had
+       * no way to see it. The list is rendered into launch_agent's description
+       * (llm_payload.c) so a spawner can read what a worker will actually get. */
       "[\"file_read\",\"file_write\",\"shell_exec\",\"web_fetch\",\"js_eval\","
-      "\"check_session\",\"search_config\",\"secret_create\"]",
-      "Tools granted to self-spawned worker sub-agents (JSON array)" },
+      "\"launch_agent\",\"check_session\",\"search_config\",\"secret_create\"]",
+      "Tools a self-spawned worker sub-agent is filtered to when launch_agent"
+      " is called without a 'tools' array (JSON array; intersected with the"
+      " spawner's grants — it can never widen them)" },
     { "agent_default_tools",
       /* D2 widening (review-1 F12): file navigation + cron self-scheduling
        * are baseline, not escalations. */

@@ -116,8 +116,13 @@ sees old behavior only through you.
 
 ## Working with the new agent
 
-- `launch_agent {agent, prompt}` — start a session on it; returns a session id.
-- `check_session {session_id}` — poll a delegated session's state and output.
+- `launch_agent {task, name:"Watcher"}` — start a session on it. It blocks and
+  returns the agent's final answer as the tool result; `background:true`
+  returns `session_id=N` instead and delivers the result to your inbox. A
+  named agent always runs under its own grants — the `tools` filter is
+  self-spawn only.
+- `check_session {session_id}` — a delegated session's state, and its final
+  text once idle.
 - Channel access: the new agent sends only where a `channel_routes` row
   resolves to it. Routes are requested via `request_changes`
   (`routes: ["telegram:12345"]`) by the agent itself, or set by the operator.

@@ -357,6 +357,67 @@ static void test_filter_neither(void) {
     printf("  PASS test_filter_neither\n");
 }
 
+/* D15 (2026-07-31): a default worker may delegate again — launch_agent and
+ * check_session are in the shipped worker_tools list. The recursion rail is
+ * agent_max_depth + the per-parent/system caps, not a missing tool. The rest
+ * of the list is pinned too: an accidental widening (memory mutators, config
+ * or agent/extension tools, channel_send, the file navigation family) would
+ * silently hand every worker more authority than the spec documents. */
+static void test_worker_tools_default_is_the_documented_list(void) {
+    const char *def = config_default("worker_tools");
+    assert(def != NULL);
+    assert(strcmp(def,
+        "[\"file_read\",\"file_write\",\"shell_exec\",\"web_fetch\",\"js_eval\","
+        "\"launch_agent\",\"check_session\",\"search_config\",\"secret_create\"]") == 0);
+
+    /* Spelled out so a rename of the constant can't quietly drop nesting. */
+    assert(strstr(def, "\"launch_agent\"") != NULL);
+    assert(strstr(def, "\"check_session\"") != NULL);
+    /* Deliberate omissions — see specs/security.md. */
+    assert(strstr(def, "\"file_grep\"") == NULL);
+    assert(strstr(def, "\"memory_add\"") == NULL);
+    assert(strstr(def, "\"request_config\"") == NULL);
+    assert(strstr(def, "\"channel_send\"") == NULL);
+
+    printf("  PASS test_worker_tools_default_is_the_documented_list\n");
+}
+
+/* A worker spawned with the default filter can itself spawn: the tool is in
+ * the filter, and depth 1 → 2 is inside agent_max_depth. */
+static void test_default_worker_may_nest(void) {
+    sqlite3 *db = setup_db();
+    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
+    assert(parent_sid > 0);
+
+    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
+    char *r = tool_launch_agent_handler("{\"task\":\"work\",\"background\":true}", &ctx);
+    assert(r != NULL && strstr(r, "agent delegated") != NULL);
+    free(r);
+
+    /* The worker's own session carries the default filter, which now allows
+     * launch_agent — the dispatch gate would have refused it before D15. */
+    int64_t worker_sid = -1;
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT id FROM sessions WHERE parent_session_id=?1", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, parent_sid);
+    if (sqlite3_step(s) == SQLITE_ROW) worker_sid = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    assert(worker_sid > 0);
+    assert(session_tool_allowed(db, worker_sid, "launch_agent") == 1);
+    assert(session_tool_allowed(db, worker_sid, "check_session") == 1);
+    assert(session_tool_allowed(db, worker_sid, "memory_add") == 0);
+
+    /* And the nested spawn actually succeeds (depth 1 < agent_max_depth 2). */
+    AgentLaunchCtx wctx = {.db = db, .session_id = worker_sid};
+    r = tool_launch_agent_handler("{\"task\":\"deeper\",\"background\":true}", &wctx);
+    assert(r != NULL && strstr(r, "agent delegated") != NULL);
+    free(r);
+
+    db_close(db);
+    printf("  PASS test_default_worker_may_nest\n");
+}
+
 static void test_tools_with_name_rejected(void) {
     sqlite3 *db = setup_db();
     int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
@@ -421,6 +482,8 @@ int main(void) {
     test_filter_explicit_tools();
     test_filter_kv_worker_tools();
     test_filter_neither();
+    test_worker_tools_default_is_the_documented_list();
+    test_default_worker_may_nest();
     test_tools_with_name_rejected();
     test_self_spawn_inherits_agent_name();
     printf("All sub-agent tool tests passed.\n");

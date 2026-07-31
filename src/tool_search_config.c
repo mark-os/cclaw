@@ -65,6 +65,27 @@ static char *handler(const char *arguments, void *user_data) {
         }
     }
 
+    /* Session tool_filter: grants are the agent's authority, but a worker
+     * session is spawned with a narrowed toolset that intersects them. Without
+     * this line a filtered worker reads "[granted] launch_agent" and cannot
+     * tell why the call is refused (observed, CharlesDow 2026-07-31). */
+    rc = sqlite3_prepare_v2(ctx->db,
+        "SELECT (SELECT group_concat(value, ', ') FROM json_each(s.tool_filter))"
+        " FROM sessions s WHERE s.id=?1 AND s.tool_filter IS NOT NULL",
+        -1, &st, NULL);
+    if (rc == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, ctx->session_id);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            buf_appendf(&out,
+                "session tool filter: %s (THIS session only — your effective"
+                " tools are the grants above intersected with this list;"
+                " whoever spawned this session chose it)\n",
+                (v && v[0]) ? v : "(empty — no tools callable)");
+        }
+        sqlite3_finalize(st);
+    }
+
     /* Sensitivity labels (global, operator-owned): shown so the model knows
      * why calls touching these targets park regardless of grants. */
     rc = sqlite3_prepare_v2(ctx->db,
@@ -226,8 +247,8 @@ static char *handler(const char *arguments, void *user_data) {
 /* EXEC_THREAD shim: rebuild SearchConfigCtx around the thread's own db. */
 static char *search_config_thread_run(sqlite3 *db, const char *agent_name,
                                       int64_t session_id, const char *args) {
-    (void)session_id;
-    SearchConfigCtx c = {.db = db, .agent_name = agent_name};
+    SearchConfigCtx c = {.db = db, .agent_name = agent_name,
+                         .session_id = session_id};
     return handler(args, &c);
 }
 

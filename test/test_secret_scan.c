@@ -430,6 +430,99 @@ static void test_slack_variants(void) {
     PASS("slack token variants");
 }
 
+/* False-positive regression helper: the scanner must report nothing AND the
+ * redactor must leave the text byte-identical. Prints the offending rule so a
+ * failure names what fired instead of just a line number. */
+static void expect_clean(const char *label, const char *text) {
+    ScanFinding f[SCAN_MAX_FINDINGS];
+    size_t len = strlen(text);
+    int n = secret_scan(text, len, f, SCAN_MAX_FINDINGS);
+    if (n > 0 && n <= SCAN_MAX_FINDINGS)
+        for (int i = 0; i < n; i++)
+            printf("    unexpected [%s]: %s at %d in \"%s\"\n",
+                   label, f[i].rule_id, f[i].offset, text);
+    else if (n > SCAN_MAX_FINDINGS)
+        printf("    unexpected [%s]: saturated on \"%s\"\n", label, text);
+    assert(n == 0);
+
+    char buf[512];
+    assert(len + 1 <= sizeof(buf));
+    memcpy(buf, text, len + 1);
+    assert(secret_scan_redact(buf, &len, sizeof(buf)) == 0);
+    assert(strcmp(buf, text) == 0);   /* not one byte rewritten */
+}
+
+static void test_no_false_positive_keyword_substrings(void) {
+    /* The keyword rules anchor on ordinary English words ("secret", "key",
+     * "token", "access", "auth", "password"), so every one of them also
+     * occurs as the *prefix of a longer, innocent word* — the class that bit
+     * ironclaw/nullclaw, canonically "Secretary" containing "Secret". Prose
+     * carrying those substrings is not a credential and must survive intact:
+     * a keyword hit only becomes a finding when an assignment operator is
+     * followed by a long, high-entropy, charset-clean value. */
+    static const char *prose[] = {
+        "The Secretary of State signed the memo this morning.",
+        "Secretary: Jane Doe, minutes approved by the committee.",
+        "the gland resumed secretion after the procedure",
+        "Notes from the Secretariat: budget approved unanimously.",
+        "He typed his passwordless login on the keyboard.",
+        "apiary tokenizer accessibility authority monkey keyed",
+        "secret: the meeting notes are in the shared folder",
+        "password: please choose something memorable",
+        "Access to the archive: ask the librarian on duty.",
+    };
+    for (size_t i = 0; i < sizeof(prose) / sizeof(prose[0]); i++)
+        expect_clean("keyword-substring", prose[i]);
+
+    /* Positive control: the same prose word next to a real assignment still
+     * loses the credential — and only the credential. */
+    char buf[256];
+    const char *leak = "The Secretary emailed api_key=aB3kL9mXp7qR2wNv4jH8 by mistake";
+    assert(has_rule(leak, "generic-api-key"));
+    size_t len = strlen(leak);
+    memcpy(buf, leak, len + 1);
+    assert(secret_scan_redact(buf, &len, sizeof(buf)) >= 1);
+    assert(strstr(buf, "aB3kL9mXp7qR2wNv4jH8") == NULL);
+    assert(strstr(buf, "The Secretary emailed") != NULL);
+    PASS("no false positives on keyword substrings");
+}
+
+static void test_no_false_positive_timestamps_and_ids(void) {
+    /* Machine output is dense with high-entropy-looking but public shapes:
+     * ISO 8601 timestamps, epoch-millisecond ids, git SHAs, checksums. None
+     * is a credential, and a scanner that eats them makes every log tail and
+     * `git log` unreadable to the agent. */
+    static const char *machine[] = {
+        "2026-07-31T20:35:28.649Z INFO worker 3 started in 128ms",
+        "[2026-07-31T20:35:28.649Z] request id=1753994128649 duration=128ms",
+        "{\"created_at\":\"2026-07-31T20:35:28.649Z\","
+        "\"id\":1753994128649,\"status\":\"ok\"}",
+        "commit 9f2b4c1e8a7d6f503b21c4e9a8d7f605b3e1c2d4\n"
+        "Author: Mark\nDate: 2026-07-31T20:35:28.649Z",
+        "git log --oneline: 3f91a21 f701138 c976d5c 3d36c39 2896b2a",
+        "sha256 checksums:\n"
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        " file.tar.gz",
+        "build 20260731203528 finished; 1753994128649 rows scanned",
+    };
+    for (size_t i = 0; i < sizeof(machine) / sizeof(machine[0]); i++)
+        expect_clean("timestamp/id", machine[i]);
+
+    /* Positive control: a real key buried in the same noise is still caught,
+     * and the surrounding timestamps/ids survive. */
+    char buf[256];
+    const char *leak =
+        "[2026-07-31T20:35:28.649Z] leaked AKIAIOSFODNN7EXAMPLE id=1753994128649";
+    assert(has_rule(leak, "aws-access-token"));
+    size_t len = strlen(leak);
+    memcpy(buf, leak, len + 1);
+    assert(secret_scan_redact(buf, &len, sizeof(buf)) >= 1);
+    assert(strstr(buf, "AKIAIOSFODNN7EXAMPLE") == NULL);
+    assert(strstr(buf, "2026-07-31T20:35:28.649Z") != NULL);
+    assert(strstr(buf, "id=1753994128649") != NULL);
+    PASS("no false positives on timestamps, ids and SHAs");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_secret_scan:\n");
@@ -446,6 +539,8 @@ int main(void) {
     test_reject_low_entropy();
     test_reject_short_akia();
     test_no_false_positive_words();
+    test_no_false_positive_keyword_substrings();
+    test_no_false_positive_timestamps_and_ids();
     test_twilio_case_pinned();
     test_boundary_required();
     test_redact();

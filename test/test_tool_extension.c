@@ -7,6 +7,7 @@
 #include "tool_extension.h"
 #include "approval.h"
 #include "db.h"
+#include "extension_manifest.h"
 #include "test_util.h"
 #include <assert.h>
 #include <stdio.h>
@@ -17,6 +18,10 @@
 
 #define TEST_DB "/tmp/cclaw_test_tool_extension.db"
 #define WS "/tmp/cclaw_test_tool_extension_ws"
+/* A sub-agent authors in its OWN workspace, never the parent's. */
+#define SUBWS "/tmp/cclaw_test_tool_extension_subws"
+/* <dirname(TEST_DB)>/extensions/<name> — where a promoted bundle would land. */
+#define SUBSTORE "/tmp/extensions/subx"
 
 static sqlite3 *g_db;
 static ToolRegistry g_reg;
@@ -184,6 +189,108 @@ static void test_list_scopes_to_visible(void) {
     printf("  PASS test_list_scopes_to_visible\n");
 }
 
+/* Materialize `agent`'s extension tools exactly as the dispatcher does — the
+ * tools⨝agent_extensions⨝extensions join in tools.c is the only thing that
+ * decides what reaches the LLM's tools array — and report whether `tool` is
+ * in that callable set. Fresh registry per probe: the loader skips names
+ * already materialized, so a shared one would leak visibility between
+ * agents. */
+static int callable_by(const char *agent, const char *tool) {
+    ToolRegistry r;
+    tools_init(&r);
+    tools_load_extension_tools(&r, g_db, agent, NULL);
+    int found = tools_lookup(&r, tool) != NULL;
+    tools_free(&r);
+    return found;
+}
+
+static void test_subagent_draft_never_globally_callable(void) {
+    /* specs/extensions.md, "Lifecycle": "Promotion is the trust boundary
+     * (per security.md): a sub-agent's draft must not auto-promote into a
+     * globally callable tool." A sub-agent is a session with a parent
+     * (sessions.parent_session_id/depth) running under its own agent
+     * identity; nothing in the promote path inspects either, because the
+     * gate is uniform — the handler can only park an approval, and only the
+     * approved apply (main.c apply_grant -> extension_install) registers. */
+    test_seed_agent(g_db, "worker");
+    int64_t root_sid = g_ctx.session_id;
+    const char *root_agent = g_ctx.agent_name;
+    const char *root_ws = g_ctx.workspace;
+
+    int64_t sub_sid = session_create(g_db, "worker-sub", "worker", root_sid, 1);
+    assert(sub_sid > 0);
+
+    /* The draft: a valid bundle, authored entirely inside the sub-agent's
+     * own writable workspace — nothing about it is malformed, so only the
+     * trust boundary can be what stops it. */
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s %s && mkdir -p %s/extensions/subx",
+             SUBWS, SUBSTORE, SUBWS);
+    assert(system(cmd) == 0);
+    write_file(SUBWS "/extensions/subx/extension.json",
+        "{\"name\":\"subx\",\"version\":\"1.0.0\","
+        "\"tools\":[{\"name\":\"sub_backdoor\",\"description\":\"d\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":"
+        "{\"cmd\":{\"type\":\"string\"}}},"
+        "\"hosts\":[\"api.sub.test\"],\"handler\":\"sub.qjs\"}]}");
+    write_file(SUBWS "/extensions/subx/sub.qjs", "'ok'");
+
+    /* Dispatch as the sub-agent: its own identity, its own workspace, its
+     * own session (state pre-set to tool_running, the park's CAS source). */
+    g_ctx.agent_name = "worker";
+    g_ctx.workspace = SUBWS;
+    g_ctx.session_id = sub_sid;
+    assert(session_set_state(g_db, sub_sid, "tool_running") == 0);
+
+    char *r = call("extension_promote", "{\"name\":\"subx\"}");
+    assert(r == NULL);   /* parked, not applied */
+
+    /* THE INVARIANT: the draft is registered nowhere and callable by nobody. */
+    assert(scalar("SELECT COUNT(*) FROM extensions WHERE name='subx'") == 0);
+    assert(scalar("SELECT COUNT(*) FROM tools WHERE name='sub_backdoor'") == 0);
+    assert(scalar("SELECT COUNT(*) FROM agent_extensions"
+                  " WHERE extension_name='subx'") == 0);
+    assert(!callable_by("worker", "sub_backdoor"));   /* not by its author */
+    assert(!callable_by("default", "sub_backdoor"));  /* not by the parent */
+    /* Nor is the code in the shared store — promote copies only on apply. */
+    struct stat stbuf;
+    assert(stat(SUBSTORE, &stbuf) != 0);
+
+    /* The request survives as a parked approval attributed to the asking
+     * sub-agent session — that attribution is what lets an approver see who
+     * is asking for the capability. */
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(g_db,
+        "SELECT session_id, action FROM approvals"
+        " WHERE state='pending' AND args_json LIKE '%subx%';",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int64(st, 0) == sub_sid);
+    const char *action = (const char *)sqlite3_column_text(st, 1);
+    assert(action && strcmp(action, "extension_promote") == 0);
+    sqlite3_finalize(st);
+
+    /* Positive control: the legitimate path works. extension_install is what
+     * apply_grant() runs once a human resolves that approval — the draft was
+     * valid all along, so it is *registration*, not authoring, that makes a
+     * tool callable. */
+    char *err = NULL;
+    assert(extension_install(g_db, SUBWS "/extensions/subx", "worker", &err) == 0);
+    assert(err == NULL);
+    assert(scalar("SELECT COUNT(*) FROM tools WHERE name='sub_backdoor'") == 1);
+    assert(callable_by("worker", "sub_backdoor"));   /* owner sees its own */
+
+    /* ...and even then it is not GLOBAL: an installed extension is
+     * published=0, so no other agent can call it without publish+attach. */
+    assert(scalar("SELECT published FROM extensions WHERE name='subx'") == 0);
+    assert(!callable_by("default", "sub_backdoor"));
+
+    g_ctx.session_id = root_sid;
+    g_ctx.agent_name = root_agent;
+    g_ctx.workspace = root_ws;
+    printf("  PASS test_subagent_draft_never_globally_callable\n");
+}
+
 int main(void) {
     TEST_INIT();
     alarm(15);
@@ -214,11 +321,12 @@ int main(void) {
     test_publish_owner_only();
     test_attach_visibility_boundary();
     test_list_scopes_to_visible();
+    test_subagent_draft_never_globally_callable();
 
     tools_free(&g_reg);
     db_close(g_db);
     test_db_clean(TEST_DB);
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", WS);
+    snprintf(cmd, sizeof(cmd), "rm -rf %s %s %s", WS, SUBWS, SUBSTORE);
     assert(system(cmd) == 0);
     printf("All tool_extension tests passed.\n");
     return 0;

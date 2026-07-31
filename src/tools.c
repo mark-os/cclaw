@@ -140,3 +140,31 @@ void tools_load_extension_tools(ToolRegistry *reg, sqlite3 *db,
     sqlite3_finalize(st);
 }
 
+/* Mirrors channel_config_get(): the registry holds an extension's settings as
+ * <extension>.<key> rows, and the JS side sees them with the prefix stripped.
+ * secret=1 rows are excluded — a secret reaches a tool child by {{SECRET:name}}
+ * interpolation at dispatch, not by riding along with every call. The prefix
+ * match is substr(), not LIKE: an extension named foo_bar must not match
+ * fooXbar's keys. */
+char *tool_extension_config_json(sqlite3 *db, const char *tool_name) {
+    if (!db || !tool_name) return NULL;
+    static const char *sql =
+        "SELECT json_group_object(substr(c.key, length(t.extension_name) + 2),"
+        "                         COALESCE(c.value, c.default_value))"
+        " FROM tools t JOIN config c"
+        "   ON substr(c.key, 1, length(t.extension_name) + 1) ="
+        "      t.extension_name || '.'"
+        " WHERE t.name = ?1 AND COALESCE(t.extension_name, '') <> ''"
+        "   AND c.secret = 0;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(st, 1, tool_name, -1, SQLITE_STATIC);
+    char *out = NULL;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *v = (const char *)sqlite3_column_text(st, 0);
+        if (v) out = strdup(v);
+    }
+    sqlite3_finalize(st);
+    return out ? out : strdup("{}");
+}
+

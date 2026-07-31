@@ -110,8 +110,12 @@ typedef enum {
 
 /* Provider/model config */
 typedef struct {
+    char *name;             /* providers.name — NULL when running on built-in defaults */
     char *base_url;
     char *api_key;
+    /* Where api_key came from — "env:<VAR>" or "db:secrets", never any part of
+     * the value. NULL when no key resolved. Diagnostics only. */
+    char *api_key_source;
     char *model;
     int max_tokens;         /* max response tokens */
     CacheHints cache_hints; /* prompt cache control */

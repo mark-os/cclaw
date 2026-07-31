@@ -38,11 +38,12 @@ static void test_invalid_transitions(void) {
 
     /* idle → idle (no-op, rejected) */
     assert(session_set_state(db, sid, "idle") == -1);
-    /* idle → awaiting_agent (now valid for blocking sub-agent) */
-    assert(session_set_state(db, sid, "awaiting_agent") == 0);
-    assert(session_set_state(db, sid, "idle") == 0);
+    /* awaiting_agent was deleted: it is now just an unknown state name */
+    assert(session_set_state(db, sid, "awaiting_agent") == -1);
     /* idle → error (invalid) */
     assert(session_set_state(db, sid, "error") == -1);
+    /* idle → awaiting_approval (only reachable from a busy state) */
+    assert(session_set_state(db, sid, "awaiting_approval") == -1);
 
     /* busy → busy is valid: a turn moves llm_running → tool_running →
      * llm_running, and ends llm_running → compacting */
@@ -110,10 +111,16 @@ static void test_waiting_transition(void) {
     int64_t sid = session_create(db, "t", NULL, -1, 0);
     assert(sid > 0);
 
-    /* idle → llm_running → tool_running → awaiting_agent → idle */
+    /* idle → llm_running → tool_running → awaiting_approval → idle */
     assert(session_set_state(db, sid, "llm_running") == 0);
     assert(session_set_state(db, sid, "tool_running") == 0);
-    assert(session_set_state(db, sid, "awaiting_agent") == 0);
+    assert(session_set_state(db, sid, "awaiting_approval") == 0);
+    assert(session_set_state(db, sid, "idle") == 0);
+
+    /* awaiting_approval → tool_running (approval resolved, turn resumes) */
+    assert(session_set_state(db, sid, "llm_running") == 0);
+    assert(session_set_state(db, sid, "awaiting_approval") == 0);
+    assert(session_set_state(db, sid, "tool_running") == 0);
     assert(session_set_state(db, sid, "idle") == 0);
 
     db_close(db);
@@ -136,9 +143,10 @@ static void test_startup_recovery(void) {
 
     /* One session stuck in each non-idle state a crash can strand. */
     const char *stuck[] = {"llm_running","tool_running","compacting",
-                           "awaiting_agent","awaiting_approval","rate_limited"};
-    int64_t ids[6];
-    for (int i = 0; i < 6; i++) {
+                           "awaiting_approval","rate_limited"};
+    const int n_stuck = (int)(sizeof(stuck) / sizeof(stuck[0]));
+    int64_t ids[sizeof(stuck) / sizeof(stuck[0])];
+    for (int i = 0; i < n_stuck; i++) {
         ids[i] = session_create(db, "t", NULL, -1, 0);
         assert(ids[i] > 0);
         force_state(db, ids[i], stuck[i], 7 /* non-zero iteration */);
@@ -170,7 +178,7 @@ static void test_startup_recovery(void) {
     assert(db_recover_stale_sessions(db) == 0);
 
     /* Every stuck session is now idle with turn_iteration zeroed. */
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < n_stuck; i++) {
         char *st = db_scalar_text(db, "SELECT state FROM sessions WHERE id=?;", ids[i]);
         assert(st && strcmp(st, "idle") == 0);
         free(st);

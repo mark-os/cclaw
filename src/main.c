@@ -1325,10 +1325,11 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         session_set_state(g_db, session_id, "tool_running");
 
         /* Params: js_eval ships its own schema-extracted code/filename/args;
-         * an extension tool ships filename=<handler .qjs path> plus the raw
-         * call arguments as the opaque `args` blob QuickJS parses natively —
-         * no JSON wrapping/escaping round-trip. Then interpolate {{SECRET:X}}
-         * per value (args may carry a token for http_request). */
+         * an extension tool ships filename=<handler .qjs path>, the raw call
+         * arguments as the opaque `args` blob QuickJS parses natively (no JSON
+         * wrapping/escaping round-trip), and `config` — its extension's
+         * settings, resolved here because the child has no DB. Then interpolate
+         * {{SECRET:X}} per value (args or config may carry a token). */
         ToolWireArg *params = NULL;
         size_t param_n = 0;
         if (!handler_path) {
@@ -1337,7 +1338,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 return tool_inline_error(session_id, tc,
                     "error: invalid tool arguments", "bad_args");
         } else {
-            params = calloc(2, sizeof(*params));
+            char *ext_config = tool_extension_config_json(g_db, tc->name);
+            params = calloc(3, sizeof(*params));
             if (params) {
                 params[0].key = strdup("filename");
                 params[0].kind = TOOL_ARG_TEXT;
@@ -1346,10 +1348,16 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                 params[1].kind = TOOL_ARG_JSON;
                 params[1].value = strdup(tc->arguments && tc->arguments[0]
                                              ? tc->arguments : "{}");
-                param_n = 2;
+                params[2].key = strdup("config");
+                params[2].kind = TOOL_ARG_JSON;
+                params[2].value = ext_config;   /* ownership moves to params */
+                ext_config = NULL;
+                param_n = 3;
             }
+            free(ext_config);
             if (!params || !params[0].key || !params[0].value ||
-                !params[1].key || !params[1].value) {
+                !params[1].key || !params[1].value ||
+                !params[2].key || !params[2].value) {
                 tool_wire_args_free(params, param_n);
                 return tool_inline_error(session_id, tc,
                     "error: OOM building js request", NULL);
@@ -3166,6 +3174,20 @@ static int run_daemon(char *db_path) {
     g_tool_setup = &daemon_setup;
 
     printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
+    /* Resolved config, once, at default verbosity: a daemon that talks to the
+     * wrong provider or writes to the wrong workspace should say so in the log
+     * rather than in a support thread. The key is named by *source* only —
+     * never any part of its value. */
+    LOG_INFO_("daemon: config: provider=%s model=%s endpoint=%s wire=%s"
+              " workspace=%s db=%s api_key=%s",
+              g_cfg->provider.name ? g_cfg->provider.name : "(builtin)",
+              g_cfg->provider.model ? g_cfg->provider.model : "(unset)",
+              g_cfg->provider.base_url ? g_cfg->provider.base_url : "(unset)",
+              g_cfg->provider.endpoint_type == ENDPOINT_GEMINI ? "gemini" : "openai",
+              g_cfg->workspace ? g_cfg->workspace : "(unset)",
+              g_cfg->db_path ? g_cfg->db_path : "(unset)",
+              g_cfg->provider.api_key_source ? g_cfg->provider.api_key_source
+                                             : "(none)");
     web_start(g_cfg, g_db, db_path);
     /* No heartbeat thread: the pulse is a seeded cron row (kind='heartbeat')
      * fired by cron_run_due off the db_periodic tick — one scheduler. */

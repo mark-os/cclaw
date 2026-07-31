@@ -346,10 +346,49 @@ static JSValue js_console_log(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* ── getConfig(key) — the owning extension's settings ───────────── */
+
+/* Twin of channel.getConfig (qjs_host_channel.c): string on hit, null on miss.
+ * The channel runner can query the DB; this context cannot, so the object was
+ * resolved parent-side and arrives as JSON. It closes over func_data[0] rather
+ * than living on a global so extension code can't rewrite its own config. */
+static JSValue js_tool_get_config(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv,
+                                  int magic, JSValue *func_data) {
+    (void)this_val; (void)magic;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "getConfig(key)");
+    const char *key = JS_ToCString(ctx, argv[0]);
+    if (!key) return JS_NULL;
+    JSValue v = JS_GetPropertyStr(ctx, func_data[0], key);
+    JS_FreeCString(ctx, key);
+    if (JS_IsException(v)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return JS_NULL;
+    }
+    if (JS_IsUndefined(v)) { JS_FreeValue(ctx, v); return JS_NULL; }
+    return v;
+}
+
 /* ── Registration entry point ──────────────────────────────────── */
 
-void qjs_register_eval_host_functions(JSContext *ctx) {
+void qjs_register_eval_host_functions(JSContext *ctx, const char *config_json) {
     JSValue global = JS_GetGlobalObject(ctx);
+
+    /* getConfig — always bound (an empty object for js_eval and for extensions
+     * with no config) so handlers never trip over a ReferenceError. */
+    JSValue cfg = (config_json && config_json[0])
+        ? JS_ParseJSON(ctx, config_json, strlen(config_json), "<config>")
+        : JS_NewObject(ctx);
+    if (JS_IsException(cfg) || !JS_IsObject(cfg)) {
+        JS_FreeValue(ctx, cfg);
+        /* Drop the pending parse error — it must not surface as the handler's
+         * own exception on the next eval. */
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        cfg = JS_NewObject(ctx);
+    }
+    JS_SetPropertyStr(ctx, global, "getConfig",
+        JS_NewCFunctionData(ctx, js_tool_get_config, 1, 0, 1, &cfg));
+    JS_FreeValue(ctx, cfg);   /* JS_NewCFunctionData dups its data */
 
     /* http_request */
     JS_SetPropertyStr(ctx, global, "http_request",
@@ -428,7 +467,8 @@ static const char *qjs_syntax_hint(const char *code) {
     return "";
 }
 
-char *qjs_eval_run(const char *code, const char *filename, const char *args_json) {
+char *qjs_eval_run(const char *code, const char *filename, const char *args_json,
+                   const char *config_json) {
     if ((!code || !code[0]) && (!filename || !filename[0]))
         return strdup("error: must provide 'code' or 'filename'");
 
@@ -443,7 +483,7 @@ char *qjs_eval_run(const char *code, const char *filename, const char *args_json
                        .instruction_limit = QJS_EVAL_MAX_INSTRUCTIONS,
                        .allowed_hosts = NULL, .allowed_hosts_count = 0 };
     JS_SetContextOpaque(ctx, &hctx);
-    qjs_register_eval_host_functions(ctx);
+    qjs_register_eval_host_functions(ctx, config_json);
 
     JSValue pv = JS_Eval(ctx, QJS_EVAL_PRELUDE, strlen(QJS_EVAL_PRELUDE),
                          "<prelude>", JS_EVAL_TYPE_GLOBAL);

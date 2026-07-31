@@ -382,7 +382,6 @@ Index: `idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS N
 | `tool_running` | Tool execution in progress |
 | `compacting` | Context compaction running |
 | `rate_limited` | Parked waiting for rate-limit window |
-| `awaiting_agent` | Parked for a sub-agent to complete |
 | `awaiting_approval` | Parked for human approval of a tool call |
 
 Transitions are guarded by a CAS in `session_set_state()` (`src/db.c`): idle clears `owner_instance`, any busy state stamps it. `turn_iteration` resets to 0 on transition to idle.

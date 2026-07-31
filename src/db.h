@@ -78,6 +78,13 @@ int session_tool_allowed(sqlite3 *db, int64_t session_id, const char *tool_name)
  * production reads branches via inline SQL (llm_payload.c, context.c). */
 Entry *session_get_branch(sqlite3 *db, int64_t session_id, int *count);
 
+/* Appended by get_response_text() when the message it delivers was cut short by
+ * the model's output cap (STOP_REASON_LENGTH) — without it a truncated answer
+ * is indistinguishable from one that simply ended. Render-path only: the stored
+ * entry keeps the model's bytes, so the context window never sees this. */
+#define RESPONSE_TRUNCATED_NOTICE \
+    "\n\n[truncated: response hit the model's max output length]"
+
 /* Resolve deliverable response text from session branch.
  * Returns last non-empty assistant content, or NULL if none.
  * Caller frees returned string. */

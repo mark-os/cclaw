@@ -866,6 +866,9 @@ void entry_branch_free(Entry *entries, int count) {
 /* Get latest assistant response text from session branch.
  * Walks parent chain from leaf; returns first non-empty assistant content,
  * stops at user boundary. No full-branch materialization.
+ * A length-stopped answer gets RESPONSE_TRUNCATED_NOTICE appended — otherwise
+ * it reads as a reply that simply ends mid-sentence. Rendered surfaces only:
+ * the entry keeps the model's bytes verbatim, so context is unchanged.
  * Returns heap-allocated string or NULL if no deliverable content. */
 char *get_response_text(sqlite3 *db, int64_t session_id) {
     /* Get leaf_id */
@@ -880,14 +883,14 @@ char *get_response_text(sqlite3 *db, int64_t session_id) {
     if (leaf_id < 0) return NULL;
 
     const char *sql =
-        "WITH RECURSIVE branch(id, parent_id, role, content, type, lvl) AS ("
-        "  SELECT id, parent_id, role, content, type, 0"
+        "WITH RECURSIVE branch(id, parent_id, role, content, type, stop_reason, lvl) AS ("
+        "  SELECT id, parent_id, role, content, type, stop_reason, 0"
         "    FROM entries WHERE id=? AND session_id=?"
         "  UNION ALL"
-        "  SELECT e.id, e.parent_id, e.role, e.content, e.type, b.lvl+1"
+        "  SELECT e.id, e.parent_id, e.role, e.content, e.type, e.stop_reason, b.lvl+1"
         "    FROM entries e JOIN branch b ON e.id=b.parent_id"
         "    WHERE b.lvl < 10000"
-        ") SELECT role, content FROM branch"
+        ") SELECT role, content, stop_reason FROM branch"
         "  WHERE (role=2 AND content IS NOT NULL AND content != ''"
         "         AND type NOT IN ('tool_call','reasoning'))"
         "     OR role=1"
@@ -903,7 +906,18 @@ char *get_response_text(sqlite3 *db, int64_t session_id) {
         int role = sqlite3_column_int(stmt, 0);
         if (role == 2) {
             const char *c = (const char *)sqlite3_column_text(stmt, 1);
-            if (c) result = strdup(c);
+            int cut = sqlite3_column_int(stmt, 2)
+                      == stop_reason_to_int(STOP_REASON_LENGTH);
+            if (c) {
+                size_t n = strlen(c);
+                size_t extra = cut ? sizeof(RESPONSE_TRUNCATED_NOTICE) : 1;
+                result = malloc(n + extra);
+                if (result) {
+                    memcpy(result, c, n);
+                    if (cut) memcpy(result + n, RESPONSE_TRUNCATED_NOTICE, extra);
+                    else result[n] = '\0';
+                }
+            }
         }
     }
     sqlite3_finalize(stmt);
@@ -1211,7 +1225,7 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t turn_id,
 /* State transition guard. Busy states (llm_running/tool_running/compacting/
  * rate_limited) are reachable from idle or each other (a turn moves
  * llm_running → tool_running → llm_running, and ends llm_running → compacting);
- * idle is reachable from any busy state plus awaiting_agent/awaiting_approval;
+ * idle is reachable from any busy state plus awaiting_approval;
  * awaiting_approval is reachable from llm_running/tool_running;
  * tool_running is also reachable from awaiting_approval (approval resolved). */
 int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
@@ -1227,10 +1241,9 @@ int session_set_state(sqlite3 *db, int64_t session_id, const char *state) {
         " WHERE id=?3 AND ("
         "  (?1 IN ('llm_running','tool_running','compacting','rate_limited')"
         "     AND state IN ('idle','llm_running','tool_running','compacting','rate_limited','awaiting_approval')) OR"
-        "  (?1 = 'awaiting_agent' AND state IN ('idle','llm_running','tool_running')) OR"
         "  (?1 = 'awaiting_approval' AND state IN ('llm_running','tool_running')) OR"
         "  (?1 = 'idle' AND state IN"
-        "     ('llm_running','tool_running','compacting','rate_limited','awaiting_agent','awaiting_approval'))"
+        "     ('llm_running','tool_running','compacting','rate_limited','awaiting_approval'))"
         ");";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -2366,7 +2379,7 @@ int64_t db_cost_last_24h(sqlite3 *db) {
 /* Set of session states that mean "a turn was in flight" — a crash here leaves
  * the edge-triggered loop with no event to re-advance them. */
 #define RECOVER_STALE_STATES \
-    "('llm_running','tool_running','compacting','awaiting_agent','awaiting_approval','rate_limited')"
+    "('llm_running','tool_running','compacting','awaiting_approval','rate_limited')"
 
 /* Dead-owner predicate: a stale-state session whose owner is gone. owner NULL
  * (legacy/idle-races) or an owner with no live processes row both qualify; a

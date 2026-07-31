@@ -184,6 +184,9 @@ char *tool_js_tier_run(const RunToolParsed *q) {
             return strdup("error: filename must end in .qjs");
     }
     const char *args = filename ? run_tool_param_json(q, "args") : NULL;
-    char *r = qjs_eval_run(code, filename, args);
+    /* The owning extension's config, resolved parent-side (this child has no
+     * DB) — absent for a plain js_eval call, which then sees an empty one. */
+    const char *ext_config = run_tool_param_json(q, "config");
+    char *r = qjs_eval_run(code, filename, args, ext_config);
     return r ? r : strdup("error: js_eval returned null");
 }

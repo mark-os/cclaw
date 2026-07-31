@@ -98,7 +98,7 @@ static void test_global_json(void) {
 static void test_console_log_circular(void) {
     QjsRuntime *qrt = qjs_runtime_create(2 * 1024 * 1024);
     JSContext *ctx = qjs_context_create(qrt, QJS_PROFILE_EVAL);
-    qjs_register_eval_host_functions(ctx);
+    qjs_register_eval_host_functions(ctx, NULL);
 
     /* Prelude: create __console_buf */
     JS_Eval(ctx, "var __console_buf = [];", 23, "<pre>", JS_EVAL_TYPE_GLOBAL);

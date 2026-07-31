@@ -173,6 +173,68 @@ static void test_all_stop_reasons(void) {
     PASS();
 }
 
+/* A length-stopped answer must announce itself on the delivery path; every
+ * other stop reason renders the model's bytes untouched. */
+static void test_length_notice_rendered(void) {
+    TEST(length_notice_rendered);
+
+    char path[] = "/tmp/cclaw_test_sr4_XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0) FAIL("mkstemp");
+    close(fd);
+
+    sqlite3 *db = test_db_open(path);
+    if (!db) { test_db_clean(path); FAIL("db_open"); }
+
+    int64_t sid = session_create(db, "test_sr4", NULL, -1, 0);
+    if (sid < 0) { db_close(db); test_db_clean(path); FAIL("session_create"); }
+
+    Message cut = {.role = ROLE_ASSISTANT,
+                   .content = strdup("here is the first half of the ans"),
+                   .stop_reason = STOP_REASON_LENGTH};
+    entry_append_with_turn(db, sid, &cut, db_next_turn_id(db, sid));
+    free(cut.content);
+
+    char *text = get_response_text(db, sid);
+    if (!text) { db_close(db); test_db_clean(path); FAIL("no text"); }
+    if (!strstr(text, "here is the first half of the ans")) {
+        free(text); db_close(db); test_db_clean(path);
+        FAIL("model text lost");
+    }
+    if (!strstr(text, RESPONSE_TRUNCATED_NOTICE)) {
+        free(text); db_close(db); test_db_clean(path);
+        FAIL("missing truncation notice");
+    }
+    free(text);
+
+    /* The notice is render-only: the stored entry keeps the model's bytes. */
+    char *stored = db_scalar_text(db,
+        "SELECT content FROM entries WHERE session_id=? ORDER BY id DESC LIMIT 1;", sid);
+    if (!stored || strcmp(stored, "here is the first half of the ans") != 0) {
+        free(stored); db_close(db); test_db_clean(path);
+        FAIL("entry content was mutated");
+    }
+    free(stored);
+
+    /* A normal stop renders clean. */
+    Message done = {.role = ROLE_ASSISTANT,
+                    .content = strdup("all done"),
+                    .stop_reason = STOP_REASON_STOP};
+    entry_append_with_turn(db, sid, &done, db_next_turn_id(db, sid));
+    free(done.content);
+
+    text = get_response_text(db, sid);
+    if (!text || strcmp(text, "all done") != 0) {
+        free(text); db_close(db); test_db_clean(path);
+        FAIL("normal stop should render verbatim");
+    }
+    free(text);
+
+    db_close(db);
+    test_db_clean(path);
+    PASS();
+}
+
 int main(void) {
     TEST_INIT();
     printf("--- test_stop_reason_persist ---\n");
@@ -183,6 +245,7 @@ int main(void) {
     test_stop_reason_roundtrip();
     test_stop_reason_none_not_stored();
     test_all_stop_reasons();
+    test_length_notice_rendered();
     printf("%d/%d passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

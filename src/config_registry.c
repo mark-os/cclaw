@@ -22,6 +22,9 @@ static const ConfigDef s_defs[] = {
       "History token cap per request (0 = derive from context window)" },
     { "stale_lock_timeout", "300",
       "Seconds before a dead process's session locks are reclaimed" },
+    { "channel_deaf_timeout", "300",
+      "Seconds of received-traffic silence before a live channel runner is"
+      " restarted (0 = off; per-channel <ext>.deaf_timeout overrides)" },
     { "cron_min_interval_seconds", "300",
       "Minimum spacing between cron fires (floor on run_at/interval_s/recurring)" },
     { "cron_max_jobs_per_session", "10",
@@ -60,12 +63,11 @@ static const ConfigDef s_defs[] = {
       "Tools granted to self-spawned worker sub-agents (JSON array)" },
     { "agent_default_tools",
       /* D2 widening (review-1 F12): file navigation + cron self-scheduling
-       * are baseline, not escalations. cron_remove stays out — the ownership
-       * gap (any agent could remove any job) needs closing first. */
+       * are baseline, not escalations. */
       "[\"file_read\",\"file_write\",\"file_list\",\"file_find\",\"file_grep\","
       "\"file_edit\",\"js_eval\",\"request_config\","
       "\"search_config\",\"memory_create\",\"memory_add\",\"memory_edit\","
-      "\"memory_delete\",\"cron_set\",\"cron_list\","
+      "\"memory_delete\",\"cron_set\",\"cron_list\",\"cron_remove\","
       "\"create_agent\",\"update_agent\",\"extension_promote\",\"extension_publish\","
       "\"extension_attach\",\"extension_list\",\"extension_fork\",\"launch_agent\","
       "\"check_session\",\"secret_create\",\"channel_send\"]",

@@ -180,12 +180,16 @@ char *config_render_system_prompt(const Config *cfg, int64_t session_id) {
 
 void config_free(Config *cfg) {
     if (!cfg) return;
+    free(cfg->provider.name);
     free(cfg->provider.base_url);
     free(cfg->provider.api_key);
+    free(cfg->provider.api_key_source);
     free(cfg->provider.model);
     for (size_t i = 0; i < cfg->fallback_count; i++) {
+        free(cfg->fallback_providers[i].name);
         free(cfg->fallback_providers[i].base_url);
         free(cfg->fallback_providers[i].api_key);
+        free(cfg->fallback_providers[i].api_key_source);
         free(cfg->fallback_providers[i].model);
     }
     free(cfg->fallback_providers);
@@ -193,6 +197,15 @@ void config_free(Config *cfg) {
     free(cfg->workspace);
     free(cfg->system_prompt);
     free(cfg);
+}
+
+/* "env:<VAR>" — the provenance label for a key that came from the environment.
+ * The variable's *name* is safe to log; its value never is. */
+static char *key_source_env(const char *var) {
+    size_t n = strlen(var) + 5;
+    char *s = malloc(n);
+    if (s) snprintf(s, n, "env:%s", var);
+    return s;
 }
 
 /* Build Config for parent processes (CLI/daemon).
@@ -234,6 +247,8 @@ Config *config_load(sqlite3 *db) {
                     memset(p, 0, sizeof(*p));
                 }
                 const char *v;
+                v = (const char *)sqlite3_column_text(ps, 0);
+                p->name = v ? strdup(v) : NULL;
                 v = (const char *)sqlite3_column_text(ps, 1);
                 p->base_url = v ? strdup(v) : strdup(CCLAW_DEF_BASE_URL);
                 v = (const char *)sqlite3_column_text(ps, 2);
@@ -242,8 +257,13 @@ Config *config_load(sqlite3 *db) {
                 if (v && v[0]) {
                     const char *key_val = getenv(v);
                     /* env first (user's shell may source a .env), then encrypted kv */
-                    p->api_key = (key_val && key_val[0]) ? strdup(key_val)
-                                                         : db_secret_get_system(db, v);
+                    if (key_val && key_val[0]) {
+                        p->api_key = strdup(key_val);
+                        p->api_key_source = key_source_env(v);
+                    } else {
+                        p->api_key = db_secret_get_system(db, v);
+                        if (p->api_key) p->api_key_source = strdup("db:secrets");
+                    }
                 }
                 v = (const char *)sqlite3_column_text(ps, 4);
                 p->model = v ? strdup(v) : strdup(CCLAW_DEF_MODEL);
@@ -283,9 +303,14 @@ Config *config_load(sqlite3 *db) {
             cfg->provider.endpoint_type = ENDPOINT_OPENAI;
             cfg->provider.cache_hints = CACHE_HINTS_AUTO;
             const char *key = getenv("OPENROUTER_API_KEY");
-            cfg->provider.api_key = (key && key[0])
-                ? strdup(key)
-                : db_secret_get_system(db, "OPENROUTER_API_KEY");
+            if (key && key[0]) {
+                cfg->provider.api_key = strdup(key);
+                cfg->provider.api_key_source = key_source_env("OPENROUTER_API_KEY");
+            } else {
+                cfg->provider.api_key = db_secret_get_system(db, "OPENROUTER_API_KEY");
+                if (cfg->provider.api_key)
+                    cfg->provider.api_key_source = strdup("db:secrets");
+            }
         }
     }
 

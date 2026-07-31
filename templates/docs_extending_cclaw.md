@@ -63,6 +63,11 @@ result). No Node APIs, no `require`; use the provided host bridges:
   boundary (untrusted-content wrapping happens at storage time regardless).
 - `fs.readFile` / `fs.writeFile` / `fs.readdir` / `fs.stat` / `fs.cwd` —
   workspace-scoped file access.
+- `getConfig(key)` — this extension's own `config[]` value (registry key
+  `<name>.<key>`), string or `null`, read-only. The twin of `channel.getConfig`
+  on the channel surface. Values are resolved before the sandbox is entered;
+  secret keys are excluded — put `{{SECRET:NAME}}` in the config value and it
+  arrives interpolated.
 
 Keep handlers small and side-effect free where possible — network egress
 still goes through the credential proxy and host allow-list.

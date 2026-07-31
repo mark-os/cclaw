@@ -87,6 +87,13 @@ void tools_sync_to_db(ToolRegistry *reg, sqlite3 *db);
 void tools_load_extension_tools(ToolRegistry *reg, sqlite3 *db,
                                 const char *agent_name, void *ectx);
 
+/* The owning extension's config as {"key":"value",...} — what the tool JS
+ * surface's getConfig() reads. Resolved parent-side because the sandboxed
+ * --run-tool child never opens the DB; the object crosses as a wire param like
+ * every other. Returns "{}" (never NULL, except on OOM/bad args) for a built-in
+ * tool or an extension with no config rows. Caller frees. */
+char *tool_extension_config_json(sqlite3 *db, const char *tool_name);
+
 /* Free all heap strings in the registry */
 void tools_free(ToolRegistry *reg);
 

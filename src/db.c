@@ -2492,6 +2492,84 @@ rollback:
 }
 
 
+/* ── Turn-start reconciliation ────────────────────────────────────────── */
+
+/* Close this session's still-unresolved tool_calls with a synthetic error
+ * result. The caller (advance_session's idle branch) has already established
+ * that no turn is in flight, and the turn-join says a turn ends only once every
+ * call in its batch resolved — so every 'pending'/'running' row left here is a
+ * zombie no run will ever answer. Left alone it is worse than inert:
+ * db_tool_call_get_pending is session-wide and ordered by rowid, so the next
+ * batch re-dispatches it ahead of the live calls with stale arguments, and an
+ * assistant tool_call with no tool_result makes the very next request illegal
+ * for the provider.
+ *
+ * A user leaf means the turn is already open and merely undispatched (a refused
+ * dispatch parks the session idle after consuming its inbox) — nothing is
+ * superseded, and a tool_result appended there would land after the user
+ * message: wrong turn, broken adjacency, and it would steal the leaf that turn
+ * is waiting on. Leave that case alone.
+ *
+ * Returns the number of calls closed, or -1 on error. Caller owns the
+ * transaction. */
+int db_reconcile_stale_calls(sqlite3 *db, int64_t session_id) {
+    if (db_scalar_i64(db,
+            "SELECT role FROM entries"
+            " WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1) AND session_id=?1;",
+            session_id, -1) == ROLE_USER)
+        return 0;
+
+    /* Collect before writing — the append/close loop below mutates tool_calls,
+     * which this statement is reading. iteration_id comes from the call's own
+     * entry: a tool result shares the iteration of the request that made it. */
+    typedef struct { char *call_id; char *name; int64_t iteration_id; } StaleCall;
+    StaleCall *rows = NULL;
+    int n = 0, cap = 0, err = 0;
+
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT tc.call_id, tc.name, COALESCE(e.iteration_id, 0)"
+            " FROM tool_calls tc LEFT JOIN entries e ON e.id = tc.entry_id"
+            " WHERE tc.session_id=? AND tc.status IN ('pending','running')"
+            " ORDER BY tc.rowid;", -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(s, 1, session_id);
+    while (!err && sqlite3_step(s) == SQLITE_ROW) {
+        if (n == cap) {
+            int ncap = cap ? cap * 2 : 4;
+            StaleCall *tmp = realloc(rows, (size_t)ncap * sizeof *rows);
+            if (!tmp) { err = 1; break; }
+            rows = tmp;
+            cap = ncap;
+        }
+        rows[n].call_id = strdup((const char *)sqlite3_column_text(s, 0));
+        rows[n].name = strdup((const char *)sqlite3_column_text(s, 1));
+        rows[n].iteration_id = sqlite3_column_int64(s, 2);
+        if (!rows[n].call_id || !rows[n].name) err = 1;   /* freed below */
+        n++;
+    }
+    sqlite3_finalize(s);
+
+    for (int i = 0; !err && i < n; i++) {
+        ToolResult tr = { .tool_call_id = rows[i].call_id,
+                          .content = "error: superseded — this call was never "
+                                     "answered before its turn ended; a new "
+                                     "turn has started" };
+        Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
+                        .tool_name = rows[i].name, .is_error = 1 };
+        if (entry_append_with_iteration(db, session_id, &msg,
+                                        rows[i].iteration_id) < 0 ||
+            db_tool_call_set_status(db, session_id, rows[i].call_id,
+                                    "done", "stale:turn-start") != 0)
+            err = 1;
+    }
+
+    for (int i = 0; i < n; i++) { free(rows[i].call_id); free(rows[i].name); }
+    free(rows);
+    return err ? -1 : n;
+}
+
+
 /* ── Periodic pruning: inbox ──────────────────────────────────────────── */
 void db_prune_inbox(sqlite3 *db) {
     int ret = config_default_int("inbox_retention_sec");

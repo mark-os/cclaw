@@ -182,6 +182,21 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             free(agent);
             return make_output(ADVANCE_ERROR, session_id, NULL, 0);
         }
+        /* Turn-start reconciliation (D11). Idle means no turn is in flight, so
+         * any tool_call still pending/running is a zombie the turn-join says
+         * can't exist — close it before it can be re-dispatched with stale
+         * arguments ahead of this turn's own calls. Inside the turn-open
+         * transaction, and *before* the consume: the error result must parent
+         * to the assistant entry that made the call, so it stays adjacent and
+         * inside that call's turn instead of landing after the new user entry. */
+        int stale = db_reconcile_stale_calls(db, session_id);
+        if (stale < 0) {
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            free(agent);
+            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
+        }
+        if (stale > 0)
+            LOG_WARN_("advance reconciled %d stale tool_call(s) at turn start", stale);
         int consumed = inbox_consume_into_entries_locked(db, session_id, 100);
         if (consumed == 0) {
             /* Empty inbox, but the leaf may be an unanswered user entry: a

@@ -436,6 +436,14 @@ int64_t db_cost_last_24h(sqlite3 *db);
  * Returns 0 on success. */
 int db_recover_stale_sessions(sqlite3 *db);
 
+/* Turn-start reconciliation: close this session's tool_calls still 'pending' or
+ * 'running' with a synthetic error result and resolved_by='stale:turn-start'.
+ * Only sound on an idle session, where the turn-join makes such a row
+ * impossible in healthy state — see the definition and advance_session's idle
+ * branch. Runs inside the caller's transaction. Returns the number closed, or
+ * -1 on error. */
+int db_reconcile_stale_calls(sqlite3 *db, int64_t session_id);
+
 /* Prune consumed inbox rows older than config 'inbox_retention_sec'. */
 void db_prune_inbox(sqlite3 *db);
 

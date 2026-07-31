@@ -76,6 +76,36 @@ These look odd at a glance but are deliberate. Understand them before touching t
 - **Config**: loaded once from env vars at process start. Immutable for process lifetime.
 - **AgentContext**: per-turn struct referencing `{session, config}`. Passed to agent/llm functions.
 
+## Turn Model Terminology
+
+Precise names for the execution units — use these consistently in code,
+comments, and specs (the schema misnames one; see below):
+
+- **Turn** — inbox consumption → final assistant message + delivery. The unit
+  users/channels see, bounded by `max_iterations`; the boundary where
+  `notify_parent` and compaction run.
+- **Iteration** — one LLM request → one assistant response → that response's
+  tool calls fully resolved (the turn-join). Counted by
+  `sessions.turn_iteration`.
+- **Batch** — the tool calls of one assistant response, claimed in call order:
+  inline → immediate result; serial async → blocks the rest of the batch;
+  parallel-safe → dispatched concurrently.
+
+**The mid-turn invariant**: only two kinds of writes reach `entries` mid-turn —
+LLM output, and tool results answering this turn's calls. Everything else
+(channel messages, cron fires, sub-agent/background results) queues in the
+inbox and enters at a turn boundary as user entries. This one rule buys
+provider adjacency legality, a byte-stable prefix for prompt caching, and turn
+atomicity — don't break it.
+
+**Freshness tiers**: the session context block is *turn-fresh* (frozen at
+iteration 1, `session_set_turn_context`); the head (system prompt, tools
+array, launch_agent's embedded roster) is *iteration-fresh* (rebuilt every
+request, byte-stable in practice); pull surfaces (`check_session`) are *live*.
+
+**Known misnomer**: `entries.turn_id` / `llm_responses.turn_id` are minted per
+LLM request (`db_next_turn_id`) — they identify an *iteration*, not a turn.
+
 ## Self-Augmentation (core differentiator)
 
 This is what CClaw *is for*, not an add-on. Agents extend themselves at runtime via the QuickJS engine, adding **new tools, channels, and scripts**.

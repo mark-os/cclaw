@@ -70,12 +70,44 @@ static char *rich_max_iter_message(sqlite3 *db, int64_t session_id) {
     return buf;
 }
 
+/* Stamp the child as delivered. Inside the notify transaction, so the stamp and
+ * the write it records land together: a lost transaction leaves NULL, and that
+ * NULL is the durable "push never landed" fact advance_sweep_unnotified reads. */
+static void stamp_notified(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE sessions SET parent_notified_at=unixepoch() WHERE id=?",
+            -1, &st, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(st, 1, session_id);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+/* Did this session's turn end on an error? entries.stop_reason is an INTEGER
+ * column: reading it as text and comparing to "error" (as this did until
+ * 2026-08-01) never matched, so every errored child told its parent it
+ * succeeded. Shared by the llm_running terminal branch and the sweep — the
+ * sweep only looks at sessions whose leaf is this very entry. */
+static int session_stopped_with_error(sqlite3 *db, int64_t session_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT stop_reason FROM entries WHERE session_id=?"
+            " AND role=2 ORDER BY id DESC LIMIT 1", -1, &st, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(st, 1, session_id);
+    int is_error = (sqlite3_step(st) == SQLITE_ROW) &&
+                   sqlite3_column_int(st, 0) == STOP_REASON_ERROR;
+    sqlite3_finalize(st);
+    return is_error;
+}
+
 /* Notify a sub-agent's parent that the child finished. Blocking mode writes a
  * ToolResult for the parent's launch_agent call; background mode posts to the
  * parent inbox. Called on every terminal path (normal stop, error, max-iter) so
  * a parent blocked on launch_agent always gets a result and never parks forever.
  * On is_error the parent receives the error text with is_error=1. */
-static void notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
+void advance_notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
     SessionParentInfo pi = session_get_parent_info(db, session_id);
     if (pi.parent_session_id <= 0) {
         free(pi.parent_tool_call_id);
@@ -90,6 +122,10 @@ static void notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
     LOG_INFO_("advance notify_parent session=%lld parent=%lld is_error=%d", (long long)session_id, (long long)pi.parent_session_id, is_error);
 
     int txn_ok = (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
+    if (!txn_ok)
+        LOG_WARN_("advance notify_parent BEGIN failed child=%lld parent=%lld"
+                  " — parent_notified_at stays NULL, sweep will retry",
+                  (long long)session_id, (long long)pi.parent_session_id);
     if (txn_ok) {
         if (pi.parent_tool_call_id) {
             /* Blocking mode: write tool result for parent's tool call */
@@ -141,9 +177,14 @@ static void notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
             }
         }
 
+        stamp_notified(db, session_id);
+
         if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             txn_ok = 0;
+            LOG_WARN_("advance notify_parent COMMIT failed child=%lld parent=%lld"
+                      " — result rolled back, sweep will retry",
+                      (long long)session_id, (long long)pi.parent_session_id);
         }
     }
 
@@ -152,6 +193,54 @@ static void notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
 
     free(result_text);
     free(pi.parent_tool_call_id);
+}
+
+/* Bounded work per tick — the next tick takes whatever is left. */
+#define SWEEP_MAX 64
+
+int advance_sweep_unnotified(sqlite3 *db) {
+    /* A terminal child whose push never landed: idle, has a parent, no stamp,
+     * and an assistant leaf — role 2 means a turn actually ended, so a child
+     * that was spawned but never ran (role-0/1 leaf) is left alone. Collect the
+     * ids before notifying: an open SELECT pins a WAL read snapshot, and the
+     * notify below writes (see cron.c's DueJob collection for the same shape). */
+    const char *sql =
+        "SELECT s.id FROM sessions s"
+        " WHERE s.state='idle' AND s.parent_session_id > 0"
+        "   AND s.parent_notified_at IS NULL"
+        "   AND EXISTS (SELECT 1 FROM entries e"
+        "               WHERE e.id=s.leaf_id AND e.session_id=s.id AND e.role=2)"
+        " LIMIT ?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int(st, 1, SWEEP_MAX);
+    int64_t ids[SWEEP_MAX];
+    int n = 0;
+    while (n < SWEEP_MAX && sqlite3_step(st) == SQLITE_ROW)
+        ids[n++] = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+
+    for (int i = 0; i < n; i++) {
+        /* A notify that needed the sweep is a symptom, not routine. */
+        LOG_WARN_("advance sweep re-notifying child=%lld (push was lost)",
+                  (long long)ids[i]);
+        advance_notify_parent(db, ids[i], session_stopped_with_error(db, ids[i]));
+    }
+    return n;
+}
+
+/* Iterations already spent in the leaf's turn: the number of distinct LLM
+ * requests inside it. Derived, never shadowed — the bounce that stranded the
+ * turn also zeroed sessions.turn_iteration, and the entries are the truth.
+ * Entries with no request behind them (inbox-drained user messages: NULL, or 0)
+ * are not iterations and don't count. */
+static int turn_iterations_spent(sqlite3 *db, int64_t session_id) {
+    return (int)db_scalar_i64(db,
+        "SELECT COUNT(DISTINCT iteration_id) FROM entries"
+        " WHERE session_id=?1 AND iteration_id > 0 AND turn_id="
+        "  (SELECT turn_id FROM entries"
+        "    WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1));",
+        session_id, 0);
 }
 
 AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iterations) {
@@ -211,28 +300,44 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         if (stale > 0)
             LOG_WARN_("advance reconciled %d stale tool_call(s) at turn start", stale);
         int consumed = inbox_consume_into_entries_locked(db, session_id, 100);
+        int leaf_role = 0;
         if (consumed == 0) {
-            /* Empty inbox, but the leaf may be an unanswered user entry: a
-             * refused dispatch (rate limit, disk floor, full worker pool)
-             * consumes the inbox into entries first, then parks the session
-             * idle — without this check that turn is stranded forever. */
+            /* Empty inbox, but the leaf may be unanswered — role 1: a refused
+             * dispatch (rate limit, disk floor, full worker pool) consumed the
+             * inbox into entries, then parked the session idle. Role 3: a
+             * mid-turn LLM dispatch bounce reverted the session to idle, or D11
+             * closed a zombie call. Both are a turn waiting on a request nobody
+             * made; without this check they are stranded forever. Role 0/2/4
+             * leaves are legal resting places and stay put. */
             sqlite3_stmt *ls;
             if (sqlite3_prepare_v2(db,
-                    "SELECT 1 FROM entries"
+                    "SELECT role FROM entries"
                     " WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1)"
-                    "  AND session_id=?1 AND role=1",
+                    "  AND session_id=?1 AND role IN (1,3)",
                     -1, &ls, NULL) == SQLITE_OK) {
                 sqlite3_bind_int64(ls, 1, session_id);
-                if (sqlite3_step(ls) == SQLITE_ROW) consumed = 1;
+                if (sqlite3_step(ls) == SQLITE_ROW) {
+                    leaf_role = sqlite3_column_int(ls, 0);
+                    consumed = 1;
+                }
                 sqlite3_finalize(ls);
             }
             if (consumed > 0)
-                LOG_INFO_("advance state=idle next=llm_running reason=unanswered_leaf");
+                LOG_INFO_("advance state=idle next=llm_running reason=unanswered_leaf role=%d",
+                          leaf_role);
         } else if (consumed > 0) {
             LOG_INFO_("advance state=idle next=llm_running inbox=%d", consumed);
         }
+        /* A role-3 leaf continues the turn it was already in; everything else
+         * opens a new one at iteration 0. Resuming re-derives the count rather
+         * than preserving it — session_set_state(…,'idle') zeroed
+         * turn_iteration at the bounce — so the max_iterations budget stays
+         * honest and the dispatch (iteration > 0 ⇒ recall 0) reuses the frozen
+         * turn_context instead of rebuilding it mid-turn. */
+        int resume_iter = (leaf_role == ROLE_TOOL)
+                        ? turn_iterations_spent(db, session_id) : 0;
         if (consumed > 0) {
-            session_set_iteration(db, session_id, 0);
+            session_set_iteration(db, session_id, resume_iter);
             session_set_state(db, session_id, "llm_running");
         }
         if (consumed < 0) {
@@ -246,7 +351,8 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             return make_output(ADVANCE_ERROR, session_id, NULL, 0);
         }
         if (consumed > 0) {
-            AdvanceOutput out = make_output(ADVANCE_DISPATCH_LLM, session_id, agent, 0);
+            AdvanceOutput out = make_output(ADVANCE_DISPATCH_LLM, session_id, agent,
+                                            resume_iter);
             free(agent);
             return out;
         }
@@ -297,27 +403,14 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         db_tool_call_free_pending(calls, tc_count);
 
         /* Check if last assistant entry was an error */
-        int is_error = 0;
-        {   sqlite3_stmt *sr_stmt;
-            if (sqlite3_prepare_v2(db,
-                    "SELECT stop_reason FROM entries WHERE session_id=?"
-                    " AND role=2 ORDER BY id DESC LIMIT 1",
-                    -1, &sr_stmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(sr_stmt, 1, session_id);
-                if (sqlite3_step(sr_stmt) == SQLITE_ROW) {
-                    const char *sr = (const char *)sqlite3_column_text(sr_stmt, 0);
-                    if (sr && strcmp(sr, "error") == 0) is_error = 1;
-                }
-                sqlite3_finalize(sr_stmt);
-            }
-        }
+        int is_error = session_stopped_with_error(db, session_id);
 
         if (is_error) {
             session_set_state(db, session_id, "idle");
             LOG_INFO_("advance state=llm_running next=idle reason=error");
             /* Abnormal stop: still notify a waiting parent so a blocking
              * launch_agent gets an error result instead of hanging. */
-            notify_parent(db, session_id, 1);
+            advance_notify_parent(db, session_id, 1);
             AdvanceOutput out = make_output(ADVANCE_ERROR, session_id, agent, iter);
             free(agent);
             return out;
@@ -328,7 +421,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         LOG_INFO_("advance state=llm_running next=idle reason=done");
 
         /* Notify parent session if this is a sub-agent */
-        notify_parent(db, session_id, 0);
+        advance_notify_parent(db, session_id, 0);
 
         AdvanceOutput out = make_output(ADVANCE_DONE, session_id, agent, iter);
         free(agent);
@@ -372,7 +465,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             free(rich_msg);
             session_set_state(db, session_id, "idle");
             /* Max-iter is a terminal error for a sub-agent too — notify parent. */
-            notify_parent(db, session_id, 1);
+            advance_notify_parent(db, session_id, 1);
             AdvanceOutput out = make_output(ADVANCE_DONE, session_id, agent, new_iter);
             free(agent);
             return out;

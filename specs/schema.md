@@ -368,7 +368,7 @@ channel-wide default lives on `channels.default_agent`.
 | `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
 | `turn_context` | TEXT | `<RELEVANT_CONTEXT>` block, materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; always present (it carries `<current_time>` even when nothing else is live) |
 | `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
-| `parent_notified_at` | INTEGER | unixepoch when the parent learned this child's result — stamped by `notify_parent`, and by `check_session` when the parent consumes the result by poll. NULL on a terminal child = lost push, which the convergence sweep re-notifies. Dormant until that sweep lands |
+| `parent_notified_at` | INTEGER | unixepoch when the parent learned this child's result — stamped inside `advance_notify_parent`'s transaction (atomic with the tool result / inbox insert it records), and by `check_session` when the parent consumes the result by poll. NULL on a terminal child = lost push; `advance_sweep_unnotified()` re-notifies it from the daemon's `db_periodic` tick (the convergence sweep), and the stamp is what makes that idempotent |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
@@ -386,6 +386,8 @@ Index: `idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS N
 | `awaiting_approval` | Parked for human approval of a tool call |
 
 Transitions are guarded by a CAS in `session_set_state()` (`src/db.c`): idle clears `owner_instance`, any busy state stamps it. `turn_iteration` resets to 0 on transition to idle.
+
+An idle session whose leaf entry is unanswered — role 1 (dispatch refused after the inbox drain) or role 3 (a mid-turn dispatch bounce, or a zombie call closed at turn start) — is not resting: `advance_session` resumes it, and the daemon tick's `session_sweep_inbox` wakes it with the same predicate. A role-3 resume continues the *same* turn, so it re-derives `turn_iteration` from the leaf turn's distinct `iteration_id`s (the idle transition above zeroed it) and keeps the frozen `turn_context`. Role 0/2/4 leaves are legal resting places.
 
 ### sessions.tool_filter
 

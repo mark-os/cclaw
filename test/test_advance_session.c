@@ -396,6 +396,168 @@ static void test_background_result_not_truncated(void) {
     printf("  PASS test_background_result_not_truncated\n");
 }
 
+/* ── The convergence sweep: stamp on notify, sweep the lost pushes ────── */
+
+/* Finish a child's turn the way the daemon does: llm_running + an assistant
+ * leaf, then advance. Returns the advance action. */
+static AdvanceResult finish_child(sqlite3 *db, int64_t child, char *text,
+                                  StopReason sr) {
+    session_set_state(db, child, "llm_running");
+    Message done = { .role = ROLE_ASSISTANT, .content = text, .stop_reason = sr };
+    entry_append_with_iteration(db, child, &done, 1);
+    return advance_session(db, child, 25).action;
+}
+
+static int64_t stamp_of(sqlite3 *db, int64_t sid) {
+    return db_scalar_i64(db,
+        "SELECT COALESCE(parent_notified_at, 0) FROM sessions WHERE id=?", sid, 0);
+}
+
+/* Every delivered notify stamps the child inside its own transaction — the
+ * stamp is what tells the sweep this push landed. */
+static void test_notify_stamps_child(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    int64_t parent = session_create(db, "parent", "default", -1, 0);
+
+    /* Blocking: the parent's launch_agent call gets a tool result. */
+    int64_t blocking = session_create(db, "blocking", "default", parent, 1);
+    session_set_parent_tool_call_id(db, blocking, "call_b");
+    assert(finish_child(db, blocking, "blocking answer", STOP_REASON_STOP) == ADVANCE_DONE);
+    assert(stamp_of(db, blocking) > 0);
+    assert(count(db, "SELECT COUNT(*) FROM entries WHERE session_id=? AND role=3;",
+                 parent) == 1);
+
+    /* Background: the answer goes to the parent inbox instead. */
+    int64_t background = session_create(db, "background", "default", parent, 1);
+    assert(finish_child(db, background, "background answer", STOP_REASON_STOP) == ADVANCE_DONE);
+    assert(stamp_of(db, background) > 0);
+    assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
+                     " AND source='agent_result';", parent) == 1);
+
+    db_close(db);
+    printf("  PASS test_notify_stamps_child\n");
+}
+
+/* A push that never landed leaves parent_notified_at NULL — the durable fact
+ * the sweep re-derives from. It re-notifies once, then stays quiet. */
+static void test_sweep_renotifies_lost_push(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    int64_t parent = session_create(db, "parent", "default", -1, 0);
+    int64_t child = session_create(db, "child", "default", parent, 1);
+    assert(finish_child(db, child, "the answer", STOP_REASON_STOP) == ADVANCE_DONE);
+
+    /* Simulate the lost transaction: no stamp, no inbox row. */
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+             "UPDATE sessions SET parent_notified_at=NULL WHERE id=%lld;"
+             "DELETE FROM inbox WHERE session_id=%lld AND source='agent_result';",
+             (long long)child, (long long)parent);
+    assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
+
+    assert(advance_sweep_unnotified(db) == 1);
+    assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
+                     " AND source='agent_result';", parent) == 1);
+    assert(stamp_of(db, child) > 0);
+
+    /* Idempotent by the stamp: a second tick re-notifies nobody. */
+    assert(advance_sweep_unnotified(db) == 0);
+    assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
+                     " AND source='agent_result';", parent) == 1);
+
+    /* A child that never finished a turn is not a lost push: no entries at all,
+     * or a role-1 leaf waiting on its first request. Both stay unswept. */
+    int64_t fresh = session_create(db, "fresh", "default", parent, 1);
+    assert(advance_sweep_unnotified(db) == 0);
+    Message task = { .role = ROLE_USER, .content = "work on this" };
+    entry_append_with_iteration(db, fresh, &task, 1);
+    assert(advance_sweep_unnotified(db) == 0);
+    assert(stamp_of(db, fresh) == 0);
+
+    db_close(db);
+    printf("  PASS test_sweep_renotifies_lost_push\n");
+}
+
+/* An errored child must tell its parent so. entries.stop_reason is an INTEGER;
+ * comparing it as text against "error" (until 2026-08-01) never matched, so
+ * every failed sub-agent reported success. */
+static void test_error_stop_reaches_parent(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    int64_t parent = session_create(db, "parent", "default", -1, 0);
+
+    /* Blocking: the tool result carries is_error=1. */
+    int64_t blocking = session_create(db, "blocking", "default", parent, 1);
+    session_set_parent_tool_call_id(db, blocking, "call_b");
+    assert(finish_child(db, blocking, "provider exploded", STOP_REASON_ERROR) == ADVANCE_ERROR);
+    assert(count(db, "SELECT COUNT(*) FROM entries WHERE session_id=?"
+                     " AND role=3 AND is_error=1;", parent) == 1);
+
+    /* Background: the inbox notice says failed, not completed. */
+    int64_t background = session_create(db, "background", "default", parent, 1);
+    assert(finish_child(db, background, "provider exploded", STOP_REASON_ERROR) == ADVANCE_ERROR);
+    assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
+                     " AND source='agent_result'"
+                     " AND payload LIKE 'Sub-agent failed:%';", parent) == 1);
+
+    db_close(db);
+    printf("  PASS test_error_stop_reaches_parent\n");
+}
+
+/* A mid-turn dispatch bounce (worker pool full) reverts the session to idle
+ * with an unanswered tool result as the leaf. That turn must resume — and
+ * resume as the *same* turn: iteration re-derived from the entries (the bounce
+ * zeroed sessions.turn_iteration), frozen turn_context untouched, so the
+ * dispatch runs with recall=0 and reuses it. */
+static void test_idle_unanswered_tool_leaf_resumes(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+
+    /* One turn, two LLM requests. The user entry arrives by inbox drain, so it
+     * carries no iteration_id — only real requests count. */
+    inbox_insert(db, sid, "cli", NULL, "do it");
+    assert(inbox_consume_into_entries(db, sid, 10) == 1);
+    for (int64_t it = 1; it <= 2; it++) {
+        entry_append_typed(db, sid, it, "assistant_message", 0, NULL, NULL, NULL, 0,
+                           STOP_REASON_TOOL_USE, NULL, 0, 0, 0);
+        char call[16];
+        snprintf(call, sizeof(call), "call_%lld", (long long)it);
+        append_tool_call(db, sid, it, "shell_exec", call, "{\"command\":\"x\"}", 1);
+        Message res = { .role = ROLE_TOOL, .content = "output" };
+        ToolResult tr = { .tool_call_id = call, .content = "output" };
+        res.tool_result = &tr;
+        res.tool_name = "shell_exec";
+        entry_append_with_iteration(db, sid, &res, it);
+    }
+    assert(sqlite3_exec(db, "UPDATE tool_calls SET status='done';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    assert(count(db, "SELECT role FROM entries WHERE id="
+                     "(SELECT leaf_id FROM sessions WHERE id=?);", sid) == ROLE_TOOL);
+
+    /* The bounce: request #3 was refused, so main.c reverted the session to
+     * idle — which zeroed turn_iteration. turn_context stays frozen. */
+    session_set_turn_context(db, sid, "<FROZEN/>");
+    session_set_iteration(db, sid, 2);
+    session_set_state(db, sid, "llm_running");
+    session_set_state(db, sid, "idle");
+    assert(count(db, "SELECT turn_iteration FROM sessions WHERE id=?;", sid) == 0);
+
+    AdvanceOutput out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_DISPATCH_LLM);
+    /* Two requests already spent → this is iteration 2, not a fresh turn.
+     * dispatch_llm_req turns iteration>0 into recall=0 (main.c), which is what
+     * makes the request reuse the frozen context below. */
+    assert(out.iteration == 2);
+    assert(count(db, "SELECT turn_iteration FROM sessions WHERE id=?;", sid) == 2);
+    char *ctx = session_get_turn_context(db, sid);
+    assert(ctx && strcmp(ctx, "<FROZEN/>") == 0);
+    free(ctx);
+    /* Same turn, not a new one: no user entry was invented. */
+    assert(count(db, "SELECT COUNT(DISTINCT turn_id) FROM entries WHERE session_id=?;",
+                 sid) == 1);
+
+    db_close(db);
+    printf("  PASS test_idle_unanswered_tool_leaf_resumes\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_advance_session:\n");
@@ -411,6 +573,10 @@ int main(void) {
     test_open_undispatched_turn_not_stranded();
     test_parallel_subagents_never_reconciled();
     test_background_result_not_truncated();
+    test_notify_stamps_child();
+    test_sweep_renotifies_lost_push();
+    test_error_stop_reaches_parent();
+    test_idle_unanswered_tool_leaf_resumes();
     printf("All advance_session tests passed.\n");
     return 0;
 }

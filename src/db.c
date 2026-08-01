@@ -346,7 +346,13 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "DELETE FROM cron_jobs WHERE agent_name IS NOT NULL AND id NOT IN"
       " (SELECT MAX(id) FROM cron_jobs GROUP BY agent_name, name);"
       "CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name"
-      " ON cron_jobs(agent_name, name);",
+      " ON cron_jobs(agent_name, name);"
+      /* Backfill: every child that finished before the stamp existed would
+       * otherwise read as a lost push and the sweep would re-notify them all
+       * on the first tick — duplicate results appended to long-idle parents.
+       * Their pushes were delivered by the pre-sweep code; say so. */
+      "UPDATE sessions SET parent_notified_at=updated_at"
+      " WHERE parent_session_id > 0 AND parent_notified_at IS NULL;",
       NULL },
 };
 

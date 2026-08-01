@@ -214,6 +214,33 @@ static void test_check_agent_idle_with_result(void) {
     printf("  PASS test_check_agent_idle_with_result\n");
 }
 
+/* Collecting a terminal result by poll is delivery: it stamps
+ * parent_notified_at, so the convergence sweep never re-pushes what the parent
+ * already has. One column serves push and poll. */
+static void test_check_session_stamps_poll_delivery(void) {
+    sqlite3 *db = setup_db();
+    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
+    int64_t child_sid = session_create(db, "child", NULL, parent_sid, 1);
+
+    Message msg = {.role = ROLE_ASSISTANT, .content = "done"};
+    entry_append_with_iteration(db, child_sid, &msg, 1);
+    assert(db_scalar_i64(db, "SELECT parent_notified_at IS NULL FROM sessions"
+                             " WHERE id=?", child_sid, -1) == 1);
+
+    char args[64];
+    snprintf(args, sizeof(args), "{\"session_id\":%lld}", (long long)child_sid);
+    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
+    char *r = tool_check_session_handler(args, &ctx);
+    assert(strstr(r, "state: idle") != NULL);
+    free(r);
+
+    assert(db_scalar_i64(db, "SELECT COALESCE(parent_notified_at, 0) FROM sessions"
+                             " WHERE id=?", child_sid, 0) > 0);
+
+    db_close(db);
+    printf("  PASS test_check_session_stamps_poll_delivery\n");
+}
+
 static void test_session_count_children(void) {
     sqlite3 *db = setup_db();
     int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
@@ -478,6 +505,7 @@ int main(void) {
     test_unknown_agent_rejected();
     test_check_agent_not_found();
     test_check_agent_idle_with_result();
+    test_check_session_stamps_poll_delivery();
     test_session_count_children();
     test_filter_explicit_tools();
     test_filter_kv_worker_tools();

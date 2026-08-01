@@ -189,8 +189,19 @@ char *tool_check_session_handler(const char *arguments, void *user_data) {
 
     /* Plain text output */
     char *result = NULL;
-    if (strcmp(state_buf, "idle") == 0)
+    if (strcmp(state_buf, "idle") == 0) {
         result = get_response_text(ctx->db, child_sid);
+        /* Consumed by poll: one column serves push and poll, so the convergence
+         * sweep never re-pushes a result the parent already collected here. */
+        sqlite3_stmt *up;
+        if (sqlite3_prepare_v2(ctx->db,
+                "UPDATE sessions SET parent_notified_at=unixepoch() WHERE id=?",
+                -1, &up, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(up, 1, child_sid);
+            sqlite3_step(up);
+            sqlite3_finalize(up);
+        }
+    }
 
     size_t needed = 128 + (result ? strlen(result) : 0);
     char *out = malloc(needed);

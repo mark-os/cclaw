@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L   /* setenv/unsetenv/tzset under -std=c11 */
 #include "db.h"
 #include "test_util.h"
 #include "hook_dispatch.h"
@@ -9,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static const char *DB_PATH = "/tmp/test_cclaw_payload.db";
@@ -286,17 +288,28 @@ static void test_recall_in_session_context(void) {
 }
 
 /* session_context_text: pending approvals and running sub-agents surface in
- * the assembled payload; the block is entirely absent when there's nothing
- * pending/running and no recall. */
+ * the assembled payload; with nothing pending/running and no recall the block
+ * carries the wall clock alone — the zone is stated, since cron expressions
+ * evaluate in local time and the model has to translate "9am" into one. */
 static void test_session_context_live_state(void) {
     sqlite3 *db = open_seeded();
 
     int64_t sid;
     setup_session(db, &sid);
 
-    /* Absent case: nothing pending, no recall */
-    char *empty = session_context_text(db, sid, NULL);
-    assert(empty == NULL);
+    /* Quiet case: clock only, with its zone */
+    setenv("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2", 1);
+    tzset();
+    char *quiet = session_context_text(db, sid, NULL);
+    assert(quiet);
+    assert(strstr(quiet, "<current_time>"));
+    assert(strstr(quiet, "EST") || strstr(quiet, "EDT"));
+    assert(strstr(quiet, "(UTC-05") || strstr(quiet, "(UTC-04"));
+    assert(!strstr(quiet, "<recall>"));
+    assert(!strstr(quiet, "<memory_blocks>"));
+    free(quiet);
+    unsetenv("TZ");
+    tzset();
 
     /* Pending approval */
     sqlite3_stmt *ins;

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* A SQL query emits the LLM request JSON — on purpose. The entries table
  * already holds every message; json_object()/json_group_array() over it *is*
@@ -391,11 +392,12 @@ static char *query_tools(sqlite3 *db, const char *sql, const char *agent_name,
     return r;
 }
 
-/* The whole <RELEVANT_CONTEXT> block in one query: recall (?2, computed in
- * C by context_auto_recall — the only piece not natively SQL) plus three
- * live-state sections queried directly. Each section (and the outer
- * wrapper) is COALESCE'd away entirely when empty — never an empty tag,
- * never an empty block. */
+/* The whole <RELEVANT_CONTEXT> block in one query: the wall clock (?3, built
+ * in C — SQLite's strftime has no zone-name/offset format), recall (?2,
+ * computed in C by context_auto_recall — the only piece not natively SQL)
+ * plus three live-state sections queried directly. Each optional section is
+ * COALESCE'd away when empty — never an empty tag. The block itself is
+ * unconditional: the clock always has something to say. */
 static const char SQL_SESSION_CONTEXT[] =
     "WITH mb AS ("
     "  SELECT group_concat("
@@ -418,9 +420,8 @@ static const char SQL_SESSION_CONTEXT[] =
     "    '#' || a.id || ': ' || COALESCE(a.tool_name, a.action, '?'), char(10)) AS txt"
     "  FROM approvals a WHERE a.session_id=?1 AND a.state='pending'"
     ")"
-    "SELECT CASE WHEN ?2 IS NULL AND mb.txt IS NULL AND sub.txt IS NULL AND appr.txt IS NULL"
-    "  THEN NULL"
-    "  ELSE '<RELEVANT_CONTEXT>' || char(10) ||"
+    "SELECT '<RELEVANT_CONTEXT>' || char(10) ||"
+    "    '<current_time>' || ?3 || '</current_time>' || char(10) ||"
     "    COALESCE('<recall>' || char(10) || ?2 || char(10) || '</recall>' || char(10), '') ||"
     "    COALESCE('<memory_blocks>' || mb.txt || '</memory_blocks>' || char(10), '') ||"
     "    COALESCE('<running_sub_agents>' || char(10) || sub.txt || char(10) ||"
@@ -428,19 +429,33 @@ static const char SQL_SESSION_CONTEXT[] =
     "    COALESCE('<pending_approvals>' || char(10) || appr.txt || char(10) ||"
     "      '</pending_approvals>' || char(10), '') ||"
     "    '</RELEVANT_CONTEXT>'"
-    "  END"
     " FROM mb, sub, appr;";
 
 /* ── Public API ────────────────────────────────────────────────── */
+
+/* Wall clock for the context block, stated with its zone — the model can't
+ * turn "9am" into a cron_expr (which evaluates local, see cron.c) unless it
+ * knows what local means here. Volatile by nature, so it lives in the
+ * turn-boundary block, never in the cache-sensitive system prompt (F22). */
+static void local_now_text(char *buf, size_t n) {
+    time_t now = time(NULL);
+    struct tm tm;
+    if (!localtime_r(&now, &tm) ||
+        strftime(buf, n, "%Y-%m-%d %H:%M:%S %Z (UTC%z)", &tm) == 0)
+        snprintf(buf, n, "%lld (unix epoch)", (long long)now);
+}
 
 char *session_context_text(sqlite3 *db, int64_t session_id, const char *recall_text) {
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, SQL_SESSION_CONTEXT, -1, &st, NULL) != SQLITE_OK)
         return NULL;
+    char now_buf[96];
+    local_now_text(now_buf, sizeof(now_buf));
     sqlite3_bind_int64(st, 1, session_id);
     if (recall_text && recall_text[0])
         sqlite3_bind_text(st, 2, recall_text, -1, SQLITE_STATIC);
     else sqlite3_bind_null(st, 2);
+    sqlite3_bind_text(st, 3, now_buf, -1, SQLITE_STATIC);
     char *r = NULL;
     if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL) {
         const char *t = (const char *)sqlite3_column_text(st, 0);

@@ -366,7 +366,7 @@ channel-wide default lives on `channels.default_agent`.
 | `state` | TEXT NOT NULL DEFAULT 'idle' | see state machine below |
 | `owner_instance` | TEXT | FK to `processes.instance_id`; NULL ⟺ idle |
 | `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
-| `turn_context` | TEXT | `<RELEVANT_CONTEXT>` block, materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; NULL = no block |
+| `turn_context` | TEXT | `<RELEVANT_CONTEXT>` block, materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; always present (it carries `<current_time>` even when nothing else is live) |
 | `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
@@ -679,7 +679,7 @@ schedule and controls payload/targeting.
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `agent_name` | TEXT | FK → `agents(name)` ON UPDATE CASCADE |
 | `name` | TEXT NOT NULL | |
-| `cron_expr` | TEXT NOT NULL | `''` sentinel when `run_at` or `interval_s` is used instead (kept NOT NULL — SQLite can't relax it without a table rebuild) |
+| `cron_expr` | TEXT NOT NULL | Fields are matched in the **daemon's local timezone** (`localtime_r`/`mktime`), so a "9am" job follows DST; the `<current_time>` line in the turn-context block states that zone so the model can write the expression. `''` sentinel when `run_at` or `interval_s` is used instead (kept NOT NULL — SQLite can't relax it without a table rebuild) |
 | `run_at` | INTEGER | one-shot fire time; row is deleted (not rescheduled) once fired |
 | `interval_s` | INTEGER | fixed-period cadence; not exposed on the model-facing `cron_set` schema today (heartbeat rows use it internally) |
 | `kind` | TEXT NOT NULL DEFAULT 'task' | `'task'` or `'heartbeat'` |

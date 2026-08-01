@@ -39,10 +39,71 @@ static void test_cron_next_run_specific(void) {
     assert(next > base);
     struct tm tm;
     time_t t = (time_t)next;
-    gmtime_r(&t, &tm);
+    localtime_r(&t, &tm);
     assert(tm.tm_hour == 2);
     assert(tm.tm_min == 30);
     printf("  PASS: specific time\n");
+}
+
+/* Fields evaluate in the daemon's LOCAL timezone, not UTC. Pinned with a
+ * POSIX TZ string rather than "America/New_York" so the test needs no tzdata
+ * on the box and can't drift when tzdata ships new rules. */
+#define TZ_EASTERN "EST5EDT,M3.2.0/2,M11.1.0/2"
+
+static void set_tz(const char *tz) {
+    if (tz) setenv("TZ", tz, 1);
+    else unsetenv("TZ");
+    tzset();
+}
+
+static void test_cron_next_run_local_tz(void) {
+    set_tz(TZ_EASTERN);
+
+    /* 2024-01-15 12:00:00 UTC = 07:00 EST. "0 9 * * *" is 9am *local*, i.e.
+     * 14:00 UTC the same day — under the old gmtime_r it was 09:00 UTC,
+     * already past, and would have landed on the 16th. */
+    int64_t base = 1705320000;
+    int64_t next = cron_next_run("0 9 * * *", base);
+    assert(next == 1705327200);   /* 2024-01-15 14:00:00 UTC */
+
+    struct tm tm;
+    time_t t = (time_t)next;
+    localtime_r(&t, &tm);
+    assert(tm.tm_hour == 9 && tm.tm_min == 0);
+    assert(tm.tm_mday == 15);
+
+    set_tz(NULL);
+    printf("  PASS: evaluates in local timezone\n");
+}
+
+static void test_cron_next_run_dst(void) {
+    set_tz(TZ_EASTERN);
+
+    /* Spring forward: 2024-03-10 02:00 EST → 03:00 EDT. A 9am job on the 9th
+     * is 14:00 UTC; the next one is 13:00 UTC (23-hour day) — same wall
+     * clock, one hour less of elapsed time. */
+    int64_t mar9 = 1709992800;    /* 2024-03-09 14:00:00 UTC = 09:00 EST */
+    int64_t next = cron_next_run("0 9 * * *", mar9);
+    assert(next == 1710075600);   /* 2024-03-10 13:00:00 UTC = 09:00 EDT */
+    assert(next - mar9 == 23 * 3600);
+
+    /* Fall back: 2024-11-03 02:00 EDT → 01:00 EST, a 25-hour day. */
+    int64_t nov2 = 1730556000;    /* 2024-11-02 14:00:00 UTC = 10:00 EDT */
+    next = cron_next_run("0 10 * * *", nov2);
+    assert(next == 1730646000);   /* 2024-11-03 15:00:00 UTC = 10:00 EST */
+    assert(next - nov2 == 25 * 3600);
+
+    /* An hour that the spring-forward day skips entirely never fires on it:
+     * 02:30 on 2024-03-10 does not exist, so the next 02:30 is the 11th. */
+    int64_t mar10 = 1710046800;   /* 2024-03-10 05:00:00 UTC = 00:00 EST */
+    next = cron_next_run("30 2 * * *", mar10);
+    struct tm tm;
+    time_t t = (time_t)next;
+    localtime_r(&t, &tm);
+    assert(tm.tm_mday == 11 && tm.tm_hour == 2 && tm.tm_min == 30);
+
+    set_tz(NULL);
+    printf("  PASS: follows DST transitions\n");
 }
 
 static void test_cron_next_run_invalid(void) {
@@ -60,7 +121,7 @@ static void test_cron_next_run_step(void) {
     assert(next > base);
     struct tm tm;
     time_t t = (time_t)next;
-    gmtime_r(&t, &tm);
+    localtime_r(&t, &tm);
     assert(tm.tm_min % 15 == 0);
     printf("  PASS: step expression\n");
 }
@@ -386,6 +447,8 @@ int main(void) {
     test_cron_next_run_specific();
     test_cron_next_run_invalid();
     test_cron_next_run_step();
+    test_cron_next_run_local_tz();
+    test_cron_next_run_dst();
     test_cron_crud();
     test_cron_agent_isolation();
     test_cron_add_schedule_validation();

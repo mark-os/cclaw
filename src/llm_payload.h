@@ -26,13 +26,13 @@ int llm_build_payload(sqlite3 *db, int64_t session_id, const Config *cfg,
                       const ContextPlan *plan, const char *context_text,
                       const char *system_prompt, LlmPayload *out);
 
-/* Builds the full <RELEVANT_CONTEXT> block: recall_text (computed by the
- * caller via context_auto_recall — the one piece not natively SQL) plus
- * context-placement memory blocks, running sub-agents, and pending
- * approvals, each queried live. Pass recall_text (or NULL) in; the result
- * is ready to pass straight through as llm_build_payload's context_text.
- * Returns NULL when there is nothing to report at all — never an empty
- * block. Caller frees. */
+/* Builds the full <RELEVANT_CONTEXT> block: the local wall clock with its
+ * timezone, recall_text (computed by the caller via context_auto_recall —
+ * the one piece not natively SQL), plus context-placement memory blocks,
+ * running sub-agents, and pending approvals, each queried live. Pass
+ * recall_text (or NULL) in; the result is ready to pass straight through as
+ * llm_build_payload's context_text. Always non-NULL (the clock is
+ * unconditional); NULL only on a query failure. Caller frees. */
 char *session_context_text(sqlite3 *db, int64_t session_id, const char *recall_text);
 
 /* Release payload resources (finalize stmt, drop temp table). */

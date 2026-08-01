@@ -1,5 +1,4 @@
-#define _GNU_SOURCE
-#define _POSIX_C_SOURCE 200809L
+#define _POSIX_C_SOURCE 200809L   /* localtime_r/mktime; timegm (GNU) is gone */
 #include "cron.h"
 #include "config_registry.h"
 #include "db.h"
@@ -60,6 +59,17 @@ static int parse_field(const char *field, int min, int max, uint64_t *out) {
     return 0;
 }
 
+/* Local midnight of the date in tm, which may be out of range (mday 32,
+ * mon 12) — mktime normalizes it. tm_isdst=-1 makes mktime re-resolve the
+ * day's real UTC offset instead of trusting the one localtime_r left behind. */
+static time_t local_midnight(struct tm *tm) {
+    tm->tm_hour = 0;
+    tm->tm_min = 0;
+    tm->tm_sec = 0;
+    tm->tm_isdst = -1;
+    return mktime(tm);
+}
+
 int64_t cron_next_run(const char *cron_expr, int64_t after) {
     if (!cron_expr) return -1;
 
@@ -94,29 +104,32 @@ int64_t cron_next_run(const char *cron_expr, int64_t after) {
     time_t limit = t + 366 * 24 * 3600;
     struct tm tm;
 
+    /* Fields are matched in the daemon's LOCAL timezone (localtime_r/mktime,
+     * never gmtime_r/timegm), so "0 9 * * *" stays 9am across a DST shift. */
     while (t < limit) {
-        gmtime_r(&t, &tm);
+        time_t prev = t;
+        localtime_r(&t, &tm);
         if (!(months & (1ULL << (tm.tm_mon + 1)))) {
             tm.tm_mon++;
             tm.tm_mday = 1;
-            tm.tm_hour = 0;
-            tm.tm_min = 0;
-            t = timegm(&tm);
-            continue;
-        }
-        if (!(doms & (1ULL << tm.tm_mday)) || !(dows & (1ULL << tm.tm_wday))) {
-            t += 86400 - (tm.tm_hour * 3600 + tm.tm_min * 60);
-            continue;
-        }
-        if (!(hours & (1ULL << tm.tm_hour))) {
+            t = local_midnight(&tm);
+        } else if (!(doms & (1ULL << tm.tm_mday)) || !(dows & (1ULL << tm.tm_wday))) {
+            /* Next local midnight, not t+86400: a DST day is 23 or 25 hours. */
+            tm.tm_mday++;
+            t = local_midnight(&tm);
+        } else if (!(hours & (1ULL << tm.tm_hour))) {
+            /* Top of the next hour. An hour is always 3600 elapsed seconds —
+             * the local hour it lands on is re-derived at the loop top, so a
+             * spring-forward gap (02:xx never happens) is skipped naturally. */
             t += 3600 - (tm.tm_min * 60);
-            continue;
-        }
-        if (!(minutes & (1ULL << tm.tm_min))) {
+        } else if (!(minutes & (1ULL << tm.tm_min))) {
             t += 60;
-            continue;
+        } else {
+            return (int64_t)t;
         }
-        return (int64_t)t;
+        /* Every branch must move t forward; a stall would spin the daemon
+         * here. Also catches mktime failure ((time_t)-1). */
+        if (t <= prev) return -1;
     }
     return -1;
 }

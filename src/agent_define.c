@@ -421,8 +421,8 @@ int agent_definition_apply(sqlite3 *db, const char *json, const char *creator,
     if (rc == 0)
         memory_blocks_seed(db, name, json);
 
-    /* Every agent gets a disabled heartbeat pulse row it can later enable
-     * (the seeding infrastructure is the point, not the default content).
+    /* Every agent gets a disabled 'heartbeat' bare-wake job it can later
+     * enable (the seeding infrastructure is the point, not the cadence).
      * Best-effort: a seed failure must not roll back agent creation. */
     if (rc == 0)
         cron_seed_heartbeat(db, name);

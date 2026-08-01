@@ -681,15 +681,17 @@ Inbound media awaiting capability-routed preprocessing (e.g. voice → transcrip
 ## cron_jobs
 
 The one scheduler: every future wake — recurring task, one-shot commitment,
-or the agent-level heartbeat pulse — is a durable row here, fired by
+or the agent-level pulse — is a durable row here, fired by
 `run_due_jobs()` off the daemon's existing 30s `db_periodic` tick. There is
-no separate heartbeat thread; heartbeat is a seeded row with `kind='heartbeat'`.
+no separate heartbeat thread and no heartbeat *kind*: the pulse is an
+ordinary bare-wake job named `heartbeat` (no payload), so the same fire path
+serves it.
 
 A job's schedule is exactly one of `cron_expr` (recurring, 5-field),
 `run_at` (one-shot unix timestamp), or `interval_s` (fixed period in
 seconds) — the unused fields are `''` / NULL / NULL respectively
-(`cron_list()` reads the NULLs back as 0). `kind` is orthogonal to
-schedule and controls payload/targeting.
+(`cron_list()` reads the NULLs back as 0). Payload is `task` and/or
+`script`, orthogonal to schedule; both empty is a bare wake.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -698,10 +700,10 @@ schedule and controls payload/targeting.
 | `name` | TEXT NOT NULL | |
 | `cron_expr` | TEXT NOT NULL | Fields are matched in the **daemon's local timezone** (`localtime_r`/`mktime`), so a "9am" job follows DST; the `<current_time>` line in the turn-context block states that zone so the model can write the expression. `''` sentinel when `run_at` or `interval_s` is used instead (kept NOT NULL — SQLite can't relax it without a table rebuild) |
 | `run_at` | INTEGER | one-shot fire time; row is deleted (not rescheduled) once fired |
-| `interval_s` | INTEGER | fixed-period cadence; not exposed on the model-facing `cron_set` schema today (heartbeat rows use it internally) |
-| `kind` | TEXT NOT NULL DEFAULT 'task' | `'task'` or `'heartbeat'` |
-| `session_id` | INTEGER NOT NULL | meaning follows `target`: the pinned session (`'pin'`), else the fire anchor — the session that set the job, and for `'new'` the most recently fired one. `0` = resolve to the agent's most recently active session at fire time (`kind='task'`) or most recently active *idle* session (`kind='heartbeat'`, which ignores this column entirely) |
-| `task` | TEXT NOT NULL | injected message — the model-facing name is `prompt`; `''` = no prompt payload. Unused for `kind='heartbeat'` (fires the constant `HEARTBEAT_PROMPT` instead) |
+| `interval_s` | INTEGER | fixed-period cadence; not exposed on the model-facing `cron_set` schema and no longer written by anything — a legal column that only pre-v41 rows still use |
+| `kind` | TEXT NOT NULL DEFAULT 'task' | vestigial: always `'task'`. Pre-v41 DBs held `'heartbeat'` rows; the v41 patch converts them to bare-wake jobs and no writer names the column any more |
+| `session_id` | INTEGER NOT NULL | meaning follows `target`: the pinned session (`'pin'`), else the fire anchor — the session that set the job, and for `'new'` the most recently fired one. `0` = resolve to the agent's most recently active session at fire time (its state is not a filter: a fire into a busy session queues and lands at the next turn boundary) |
+| `task` | TEXT NOT NULL | injected message — the model-facing name is `prompt`; `''` = no prompt payload (with no `script` either, the fire is a bare wake) |
 | `script` | TEXT | QJS path run sandboxed at fire time under the target agent's profile+grants; composes with `task` (script first). NULL = no script payload. Workspace-relative when an agent set the job (existence checked at set time, so a typo fails then rather than unattended hours later); absolute-inside-the-shared-extension-store when `extension_promote` seeded it from a manifest `scripts[]` entry. Both shapes are re-validated at fire time, and nothing else is accepted |
 | `channel_name` | TEXT | chat stamp — the durable route identity a fire resolves through `channel_routes` at fire time, rather than binding a session id at set time. In the default target mode it is copied from the setting session's own binding (NULL for CLI/sub-agent callers); under `'new'` it is the explicit delivery target |
 | `chat_id` | TEXT | with `channel_name`, the stamped chat |
@@ -727,9 +729,7 @@ exactly one representation.
 Rescheduling (`src/cron.c`): a one-shot (`run_at`) **deletes its row** after
 firing; interval and recurring jobs advance `next_run_at` (a recurring job
 whose expression fails to parse at reschedule time is disabled, never retried
-hourly). `kind='heartbeat'` skips silently if the agent has no idle session,
-or if that session already holds an unconsumed `source='heartbeat'` inbox row
-(never stack pulses).
+hourly).
 
 ### The fire path
 
@@ -812,7 +812,7 @@ deliver; enforced in `cron_schedule_check()` fire-to-fire for `cron_expr`
 and delta-based for `in_seconds`, at the storage layer rather than only at
 the tool boundary, since `extension_promote` is a second model-reachable
 caller) and `cron_max_jobs_per_session` (default 10, enforced in the
-`cron_set` tool handler only, and only for a *new* name — manifest/heartbeat
+`cron_set` tool handler only, and only for a *new* name — manifest and seeded
 rows use `session_id=0` and are legitimately operator-shaped).
 
 Targeting another agent — a `session_id` pin on a session someone else owns,
@@ -824,11 +824,12 @@ a per-fire prompt. Same-agent targeting, including the caller's own
 sub-agent sessions, parks nothing. An explicit `channel_name`/`chat_id` is
 checked against `channel_routes` at set time (and again at fire).
 
-Every agent gets a seeded, **disabled** heartbeat row (`name='heartbeat'`,
-`interval_s=1800`) at creation — `cron_seed_heartbeat()`, called from both
-`agent_definition_apply` and the daemon's `ensure_default_agent` — and, for
-pre-existing agents, via the (since-retired) v23 schema patch. Enabling it is a deliberate
-operator/agent act — heartbeats cost an LLM call per fire.
+Every agent gets a seeded, **disabled** pulse job at creation — `name='heartbeat'`,
+`cron_expr='*/30 * * * *'`, no payload, `session_id=0` — written by
+`cron_seed_heartbeat()` from both `agent_definition_apply` and the daemon's
+`ensure_default_agent`. It is an ordinary bare-wake job in every respect; only
+the seeding is special. Enabling it is a deliberate operator/agent act — a
+pulse that finds queued work costs an LLM call per fire.
 
 ---
 

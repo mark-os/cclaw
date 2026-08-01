@@ -34,7 +34,7 @@ static const char *CRON_LIST_PARAMS =
 
 static const char *CRON_REMOVE_PARAMS =
     "{\"type\":\"object\",\"properties\":{"
-    "\"id\":{\"type\":\"integer\",\"description\":\"Job ID to remove\"}"
+    "\"id\":{\"type\":\"integer\",\"description\":\"Job id, as shown by cron_list\"}"
     "},\"required\":[\"id\"]}";
 
 /* Every floor refusal ends with this: the behaviour the floor exists to stop
@@ -465,17 +465,17 @@ char *tool_cron_list_handler(const char *arguments, void *user_data) {
     size_t pos = 0;
 
     /* Header. A blank cron_expr with a future next_run_at reads as a one-shot;
-     * kind surfaces heartbeat rows. */
+     * both payload columns blank is a bare wake. */
     pos += (size_t)snprintf(buf + pos, cap - pos,
-        "id|name|kind|cron_expr|task|enabled|next_run_at\n");
+        "id|name|cron_expr|prompt|script|enabled|next_run_at\n");
 
     for (int i = 0; i < count; i++) {
         int n = snprintf(buf + pos, cap - pos, "%lld|%s|%s|%s|%s|%s|%lld\n",
             (long long)jobs[i].id,
             jobs[i].name ? jobs[i].name : "",
-            jobs[i].kind ? jobs[i].kind : "task",
             jobs[i].cron_expr ? jobs[i].cron_expr : "",
             jobs[i].task ? jobs[i].task : "",
+            jobs[i].script ? jobs[i].script : "",
             jobs[i].enabled ? "true" : "false",
             (long long)jobs[i].next_run_at);
         if (n > 0) pos += (size_t)n;
@@ -526,13 +526,24 @@ int tool_cron_register(ToolRegistry *reg, ToolCronCtx *ctx) {
                        "fire lands in this conversation; session:\"new\" gives "
                        "each fire a fresh session, optionally under another "
                        "agent or reporting to a chat. Reusing a job's name "
-                       "updates it in place.",
+                       "updates that job in place. Schedule promises about the "
+                       "future — \"remind me Friday\", \"check the feed at "
+                       "9am\". Never schedule checks on sub-agents you have "
+                       "launched: they report back on their own.",
                        CRON_SET_PARAMS, tool_cron_set_handler, ctx) != 0)
         return -1;
-    if (tools_register(reg, "cron_list", "List cron jobs for this session",
+    if (tools_register(reg, "cron_list",
+                       "List this agent's cron jobs: id, schedule, payload "
+                       "(prompt and/or script — both blank is a bare wake), "
+                       "and whether each is enabled. A job that auto-paused "
+                       "after repeated failed fires shows enabled=false; "
+                       "cron_set the same name to re-enable it.",
                        CRON_LIST_PARAMS, tool_cron_list_handler, ctx) != 0)
         return -1;
-    if (tools_register(reg, "cron_remove", "Remove a cron job by ID",
+    if (tools_register(reg, "cron_remove",
+                       "Delete one of this agent's cron jobs by id (the id "
+                       "cron_list shows). To change a job instead of deleting "
+                       "it, cron_set the same name.",
                        CRON_REMOVE_PARAMS, tool_cron_remove_handler, ctx) != 0)
         return -1;
     tools_set_recipe(reg, "cron_set",    (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});

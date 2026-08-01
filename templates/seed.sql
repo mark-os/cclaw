@@ -65,7 +65,7 @@ INSERT OR IGNORE INTO tools(name, description) VALUES
   ('memory_delete', 'Delete notes by number (others renumber). Args: block, numbers (array of integers).'),
   ('request_config', 'Request configuration changes — one batched request_changes document per approval (requires human approval).'),
   ('search_config', 'Discover your current configuration and what you can request: your sandbox profile, granted tools and hosts, the full list of available tools, and how to request more via request_config.'),
-  ('launch_agent', 'Delegate a task to another agent'),
-  ('check_session', 'Check the status and result of a sub-agent session'),
+  ('launch_agent', 'Delegate a task to another agent — blocking, or background with the result delivered to you when the child finishes'),
+  ('check_session', 'Peek at a sub-agent session state and its final text once idle — a progress peek, not a way to wait'),
   ('secret_create', 'Mint a new random credential, stored encrypted in the DB. Returns only its {{SECRET:name}} placeholder — never the value.'),
   ('create_agent', 'Propose creation of a named agent (requires human approval). Takes an agent definition; the new agent is capped by the creator''s profile and grants.');

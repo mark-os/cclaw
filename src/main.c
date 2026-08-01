@@ -3395,7 +3395,7 @@ static void ensure_default_agent(const char *base_dir) {
         }
         /* Seed default tools as grants */
         agent_grant_defaults(g_db, "Assistant");
-        /* Disabled heartbeat pulse row — visible/enable-able in cron_list. */
+        /* Disabled 'heartbeat' bare-wake job — visible/enable-able in cron_list. */
         cron_seed_heartbeat(g_db, "Assistant");
         /* default_agent needs no write — 'Assistant' is the registry default */
         /* Seed default memory blocks. Explicitly 'system' placement: identity
@@ -3462,8 +3462,8 @@ static int run_daemon(char *db_path) {
               g_cfg->provider.api_key_source ? g_cfg->provider.api_key_source
                                              : "(none)");
     web_start(g_cfg, g_db, db_path);
-    /* No heartbeat thread: the pulse is a seeded cron row (kind='heartbeat')
-     * fired by cron_run_due off the db_periodic tick — one scheduler. */
+    /* No heartbeat thread: the pulse is a seeded bare-wake cron row fired by
+     * cron_run_due off the db_periodic tick — one scheduler. */
 
     /* Start LLM worker threads */
     if (llm_worker_start(db_path, g_llm_threads) != 0) {

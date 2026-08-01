@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 /* cron_jobs.agent_name / sessions.agent_name are enforced FKs (v31): seed
  * every agent name this file schedules for before any child rows land. */
@@ -173,7 +174,7 @@ static void test_cron_crud(void) {
     assert(strcmp(jobs[0].name, "test_job") == 0);
     assert(strcmp(jobs[0].cron_expr, "0 * * * *") == 0);
     assert(strcmp(jobs[0].task, "hello") == 0);
-    assert(strcmp(jobs[0].kind, "task") == 0);
+    assert(jobs[0].script == NULL);   /* prompt-only payload */
     assert(jobs[0].enabled == 1);
     assert(jobs[0].next_run_at > 0);
     cron_list_free(jobs, count);
@@ -314,7 +315,7 @@ static void test_cron_schedule_check_codes(void) {
 /* ── Dispatch (run_due_jobs via cron_run_due) ─────────────────────────── */
 
 /* Insert a due job with full control over schedule fields. */
-static int64_t insert_due(sqlite3 *db, const char *agent, const char *kind,
+static int64_t insert_due(sqlite3 *db, const char *agent,
                           const char *expr, int64_t run_at, int64_t interval_s,
                           int64_t session_id, const char *task, int64_t next_run_at) {
     /* Names are unique per (agent, name) since v41 — number them so a test
@@ -323,19 +324,18 @@ static int64_t insert_due(sqlite3 *db, const char *agent, const char *kind,
     char jname[16];
     snprintf(jname, sizeof(jname), "j%d", ++seq);
     const char *sql =
-        "INSERT INTO cron_jobs(agent_name,name,kind,cron_expr,run_at,interval_s,"
-        " session_id,task,enabled,next_run_at) VALUES(?,?,?,?,?,?,?,?,1,?);";
+        "INSERT INTO cron_jobs(agent_name,name,cron_expr,run_at,interval_s,"
+        " session_id,task,enabled,next_run_at) VALUES(?,?,?,?,?,?,?,1,?);";
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK);
     sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 2, jname, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 3, kind, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 4, expr, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(st, 5, run_at);
-    sqlite3_bind_int64(st, 6, interval_s);
-    sqlite3_bind_int64(st, 7, session_id);
-    sqlite3_bind_text(st, 8, task, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(st, 9, next_run_at);
+    sqlite3_bind_text(st, 3, expr, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 4, run_at);
+    sqlite3_bind_int64(st, 5, interval_s);
+    sqlite3_bind_int64(st, 6, session_id);
+    sqlite3_bind_text(st, 7, task, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 8, next_run_at);
     assert(sqlite3_step(st) == SQLITE_DONE);
     sqlite3_finalize(st);
     return sqlite3_last_insert_rowid(db);
@@ -384,7 +384,7 @@ static void test_dispatch_oneshot(void) {
     int64_t sid = session_create(db, "s", "A", -1, 0);
     int64_t now = (int64_t)time(NULL);
 
-    int64_t jid = insert_due(db, "A", "task", "", now, 0, sid, "ping", now);
+    int64_t jid = insert_due(db, "A", "", now, 0, sid, "ping", now);
     cron_run_due(db);
 
     assert(inbox_match(db, sid, "cron", "ping") == 1);
@@ -405,7 +405,7 @@ static void test_dispatch_interval(void) {
     int64_t sid = session_create(db, "s", "A", -1, 0);
     int64_t now = (int64_t)time(NULL);
 
-    int64_t jid = insert_due(db, "A", "task", "", 0, 600, sid, "tick", now - 1);
+    int64_t jid = insert_due(db, "A", "", 0, 600, sid, "tick", now - 1);
     cron_run_due(db);
 
     assert(inbox_match(db, sid, "cron", "tick") == 1);
@@ -424,7 +424,7 @@ static void test_dispatch_session_zero_resolves(void) {
     int64_t now = (int64_t)time(NULL);
 
     /* session_id=0 task resolves to the agent's most recent session. */
-    insert_due(db, "Res", "task", "", 0, 600, 0, "resolved", now - 1);
+    insert_due(db, "Res", "", 0, 600, 0, "resolved", now - 1);
     cron_run_due(db);
     assert(inbox_match(db, sid, "cron", "resolved") == 1);
 
@@ -439,7 +439,7 @@ static void test_dispatch_session_zero_no_session(void) {
     int64_t now = (int64_t)time(NULL);
 
     /* Agent with no sessions: WARN-skip, no crash, row still reschedules. */
-    int64_t jid = insert_due(db, "Ghost", "task", "", 0, 600, 0, "nowhere", now - 1);
+    int64_t jid = insert_due(db, "Ghost", "", 0, 600, 0, "nowhere", now - 1);
     cron_run_due(db);
     assert(job_count(db, jid) == 1);
     assert(job_next(db, jid) >= now + 600 - 2);
@@ -449,64 +449,114 @@ static void test_dispatch_session_zero_no_session(void) {
     printf("  PASS: session_id=0 with no session skips cleanly\n");
 }
 
-static void test_dispatch_heartbeat_idle(void) {
-    sqlite3 *db = open_seeded(":memory:");
-    assert(db && wake_init() == 0);
-    int64_t sid = session_create(db, "s", "Hb", -1, 0);
-    /* Touch updated_at so the session is recent (idle by default). */
-    Message um = {.role = ROLE_USER, .content = "hi"};
-    entry_append_with_iteration(db, sid, &um, 1);
-    int64_t now = (int64_t)time(NULL);
+/* ── The agent pulse: an ordinary bare-wake job ───────────────────────
+ * There is no kind='heartbeat' any more. The three tests below are the old
+ * pulse tests re-aimed at the generalized machinery that replaced it: a
+ * payload-less job that late-resolves its session, nudges it, and cannot
+ * stack anything. */
 
-    insert_due(db, "Hb", "heartbeat", "", 0, 1800, 0, "", now);
-    cron_run_due(db);
-
-    assert(inbox_match(db, sid, "heartbeat", "HEARTBEAT_OK") == 1);
-
-    wake_close();
-    db_close(db);
-    printf("  PASS: heartbeat fires into idle session\n");
+/* Drain the wake pipe (non-blocking, so an empty pipe returns immediately).
+ * Returns how many nudges were queued; *last gets the final session id. */
+static int wake_drain(int64_t *last) {
+    WakeMsg m;
+    int n = 0;
+    while (read(wake_fd(), &m, sizeof(m)) == (ssize_t)sizeof(m)) {
+        if (last) *last = m.session_id;
+        n++;
+    }
+    return n;
 }
 
-static void test_dispatch_heartbeat_skips_busy(void) {
+static void test_seed_heartbeat_shape(void) {
     sqlite3 *db = open_seeded(":memory:");
-    assert(db && wake_init() == 0);
-    int64_t sid = session_create(db, "s", "Hb", -1, 0);
-    char sql[128];
-    snprintf(sql, sizeof(sql),
-             "UPDATE sessions SET state='running' WHERE id=%lld", (long long)sid);
-    sqlite3_exec(db, sql, NULL, NULL, NULL);
-    int64_t now = (int64_t)time(NULL);
+    assert(db);
+    assert(cron_seed_heartbeat(db, "Hb") == 0);
+    assert(cron_seed_heartbeat(db, "Hb") == 0);   /* idempotent by name */
 
-    insert_due(db, "Hb", "heartbeat", "", 0, 1800, 0, "", now);
-    cron_run_due(db);
+    int count = 0;
+    CronJob *jobs = cron_list(db, "Hb", &count);
+    assert(count == 1);
+    assert(strcmp(jobs[0].name, "heartbeat") == 0);
+    assert(strcmp(jobs[0].cron_expr, "*/30 * * * *") == 0);
+    assert(jobs[0].task && jobs[0].task[0] == '\0');  /* no prompt  → bare wake */
+    assert(jobs[0].script == NULL);                   /* no script  → bare wake */
+    assert(jobs[0].run_at == 0 && jobs[0].interval_s == 0);
+    assert(jobs[0].session_id == 0);                  /* resolved at fire time */
+    assert(jobs[0].enabled == 0);                     /* opt-in, costs a turn */
+    cron_list_free(jobs, count);
 
-    assert(inbox_match(db, sid, "heartbeat", NULL) == 0);   /* no idle session */
-
-    wake_close();
     db_close(db);
-    printf("  PASS: heartbeat skips busy agent\n");
+    printf("  PASS: seeded heartbeat is a disabled bare-wake job\n");
 }
 
-static void test_dispatch_heartbeat_no_stack(void) {
+/* session_id=0 late-resolves to the agent's most recent session, and a bare
+ * wake adds nothing of its own — it just gets that session moving on what is
+ * already queued there. */
+static void test_fire_bare_wake_nudges_session(void) {
     sqlite3 *db = open_seeded(":memory:");
     assert(db && wake_init() == 0);
     int64_t sid = session_create(db, "s", "Hb", -1, 0);
-    Message um = {.role = ROLE_USER, .content = "hi"};
-    entry_append_with_iteration(db, sid, &um, 1);
+    inbox_insert(db, sid, "channel", NULL, "queued while asleep");
     int64_t now = (int64_t)time(NULL);
+    wake_drain(NULL);
 
-    /* Two due heartbeat rows: only one unconsumed pulse should ever land. */
-    insert_due(db, "Hb", "heartbeat", "", 0, 1800, 0, "", now);
-    insert_due(db, "Hb", "heartbeat", "", 0, 1800, 0, "", now);
-    cron_run_due(db);
+    insert_due(db, "Hb", "*/30 * * * *", 0, 0, 0, "", now - 1);
     cron_run_due(db);
 
-    assert(inbox_match(db, sid, "heartbeat", NULL) == 1);   /* never stacked */
+    int64_t woke = 0;
+    assert(wake_drain(&woke) == 1 && woke == sid);
+    assert(inbox_match(db, sid, NULL, NULL) == 1);   /* only the queued row */
 
     wake_close();
     db_close(db);
-    printf("  PASS: heartbeat never stacks pulses\n");
+    printf("  PASS: bare wake resolves session_id=0 and nudges that session\n");
+}
+
+/* The old pulse branch refused a busy agent outright (it was about to insert a
+ * prompt). A bare wake needs no such rule: it writes nothing, so the nudge is
+ * absorbed by the turn boundary — the mid-turn invariant is never at risk. */
+static void test_fire_bare_wake_busy_session(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    assert(db && wake_init() == 0);
+    int64_t sid = session_create(db, "s", "Hb", -1, 0);
+    exec_ok(db, "UPDATE sessions SET state='llm_running' WHERE id=%lld",
+            (long long)sid);
+    int64_t now = (int64_t)time(NULL);
+    wake_drain(NULL);
+
+    insert_due(db, "Hb", "*/30 * * * *", 0, 0, 0, "", now - 1);
+    cron_run_due(db);
+
+    assert(inbox_match(db, sid, NULL, NULL) == 0);   /* nothing written */
+    assert(wake_drain(NULL) == 1);                   /* just a nudge */
+
+    wake_close();
+    db_close(db);
+    printf("  PASS: bare wake into a busy session writes nothing\n");
+}
+
+/* Two rival pulses and a prompt job, fired twice: the bare wakes have no
+ * payload to stack, and the prompt job's fire coalesces on its own undrained
+ * row — together, the generalized form of "never stack a pulse". */
+static void test_fire_bare_wake_no_stack(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    assert(db && wake_init() == 0);
+    int64_t sid = session_create(db, "s", "Hb", -1, 0);
+    int64_t now = (int64_t)time(NULL);
+
+    insert_due(db, "Hb", "", 0, 600, sid, "", now - 1);
+    insert_due(db, "Hb", "", 0, 600, sid, "", now - 1);
+    insert_due(db, "Hb", "", 0, 600, sid, "pulse", now - 1);
+    cron_run_due(db);
+    exec_ok(db, "UPDATE cron_jobs SET next_run_at=%lld", (long long)(now - 1));
+    cron_run_due(db);
+
+    assert(inbox_match(db, sid, NULL, NULL) == 1);
+    assert(inbox_match(db, sid, "cron", "pulse") == 1);
+
+    wake_close();
+    db_close(db);
+    printf("  PASS: bare wakes never stack\n");
 }
 
 /* ── Fire path: target resolution, payload dispatch, guards ───────────── */
@@ -514,32 +564,31 @@ static void test_dispatch_heartbeat_no_stack(void) {
 /* Full control over every fire-relevant column, so a test can stage the exact
  * job shape the fire path has to resolve. */
 typedef struct {
-    const char *agent, *name, *kind, *expr, *task, *script;
+    const char *agent, *name, *expr, *task, *script;
     const char *target, *target_agent, *channel, *chat;
     int64_t run_at, interval_s, session_id, next_run_at;
 } JobSpec;
 
 static int64_t insert_job(sqlite3 *db, const JobSpec *j) {
     const char *sql =
-        "INSERT INTO cron_jobs(agent_name,name,kind,cron_expr,run_at,interval_s,"
+        "INSERT INTO cron_jobs(agent_name,name,cron_expr,run_at,interval_s,"
         " session_id,task,script,target,target_agent,channel_name,chat_id,"
-        " enabled,next_run_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?);";
+        " enabled,next_run_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?);";
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK);
     sqlite3_bind_text(st, 1, j->agent, -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 2, j->name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 3, j->kind ? j->kind : "task", -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 4, j->expr ? j->expr : "", -1, SQLITE_STATIC);
-    sqlite3_bind_int64(st, 5, j->run_at);
-    sqlite3_bind_int64(st, 6, j->interval_s);
-    sqlite3_bind_int64(st, 7, j->session_id);
-    sqlite3_bind_text(st, 8, j->task ? j->task : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 9, j->script, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 10, j->target, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 11, j->target_agent, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 12, j->channel, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 13, j->chat, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(st, 14, j->next_run_at);
+    sqlite3_bind_text(st, 3, j->expr ? j->expr : "", -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 4, j->run_at);
+    sqlite3_bind_int64(st, 5, j->interval_s);
+    sqlite3_bind_int64(st, 6, j->session_id);
+    sqlite3_bind_text(st, 7, j->task ? j->task : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 8, j->script, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 9, j->target, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 10, j->target_agent, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 11, j->channel, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 12, j->chat, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 13, j->next_run_at);
     assert(sqlite3_step(st) == SQLITE_DONE);
     sqlite3_finalize(st);
     return sqlite3_last_insert_rowid(db);
@@ -974,9 +1023,10 @@ int main(void) {
     test_dispatch_interval();
     test_dispatch_session_zero_resolves();
     test_dispatch_session_zero_no_session();
-    test_dispatch_heartbeat_idle();
-    test_dispatch_heartbeat_skips_busy();
-    test_dispatch_heartbeat_no_stack();
+    test_seed_heartbeat_shape();
+    test_fire_bare_wake_nudges_session();
+    test_fire_bare_wake_busy_session();
+    test_fire_bare_wake_no_stack();
     test_fire_stamps_source_ref();
     test_fire_follows_route();
     test_fire_route_gone_falls_back();

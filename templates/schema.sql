@@ -465,7 +465,8 @@ CREATE INDEX IF NOT EXISTS idx_memory_entries_block
 -- A job's schedule is exactly one of: cron_expr (recurring 5-field),
 -- run_at (one-shot unix ts), or interval_s (fixed period seconds). Non-cron
 -- jobs carry cron_expr='' (empty sentinel, never NULL — SQLite can't relax
--- the NOT NULL via ALTER). kind is orthogonal: 'task' | 'heartbeat'.
+-- the NOT NULL via ALTER). The payload is task and/or script; both empty is a
+-- bare wake (the agent pulse).
 CREATE TABLE IF NOT EXISTS cron_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_name TEXT REFERENCES agents(name) ON UPDATE CASCADE,
@@ -473,7 +474,9 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   cron_expr TEXT NOT NULL,
   run_at INTEGER,                            -- one-shot: fire once at this time
   interval_s INTEGER,                        -- fixed period: refire every N seconds
-  kind TEXT NOT NULL DEFAULT 'task',         -- 'task' | 'heartbeat'
+  kind TEXT NOT NULL DEFAULT 'task',         -- always 'task'; legacy DBs held
+                                             -- 'heartbeat' (folded into a bare
+                                             -- wake job by the v41 patch)
   session_id INTEGER NOT NULL,
   task TEXT NOT NULL,
   script TEXT,                               -- workspace-relative QJS path; runs sandboxed at

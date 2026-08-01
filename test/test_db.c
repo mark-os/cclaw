@@ -436,12 +436,33 @@ static void test_schema_patch_application(void) {
     char *err = NULL;
     assert(sqlite3_exec(old_db, fixture, NULL, NULL, &err) == SQLITE_OK);
     free(fixture);
+    /* A legacy pulse row: v41 folds kind='heartbeat' into a bare-wake job. */
+    assert(sqlite3_exec(old_db,
+        "INSERT INTO agents(name) VALUES('Pulse');"
+        "INSERT INTO cron_jobs(agent_name,name,kind,cron_expr,interval_s,"
+        " session_id,task,enabled,next_run_at)"
+        " VALUES('Pulse','heartbeat','heartbeat','',1800,0,'',1,0);",
+        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(old_db, 40);
 
     assert(db_schema_compat(old_db) == 1);   /* runs every pending patch */
     int uv = 0;
     assert(db_schema_state(old_db, &uv) == DB_SCHEMA_CURRENT);
     assert(uv == CCLAW_SCHEMA_VERSION);
+
+    /* Converted in place, enabled kept — an operator who turned the pulse on
+     * keeps it running, now as an ordinary bare-wake job. */
+    sqlite3_stmt *hb;
+    assert(sqlite3_prepare_v2(old_db,
+        "SELECT kind, task, cron_expr, interval_s, enabled FROM cron_jobs"
+        " WHERE agent_name='Pulse' AND name='heartbeat'", -1, &hb, NULL) == SQLITE_OK);
+    assert(sqlite3_step(hb) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(hb, 0), "task") == 0);
+    assert(sqlite3_column_text(hb, 1)[0] == '\0');
+    assert(strcmp((const char *)sqlite3_column_text(hb, 2), "*/30 * * * *") == 0);
+    assert(sqlite3_column_type(hb, 3) == SQLITE_NULL);
+    assert(sqlite3_column_int(hb, 4) == 1);
+    sqlite3_finalize(hb);
 
     sqlite3 *new_db = db_open(new_path);
     assert(new_db != NULL && db_ensure_schema(new_db) == 0);

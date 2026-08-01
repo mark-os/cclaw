@@ -498,8 +498,12 @@ static void check_denials(sqlite3 *db) {
 /* ── Check 9: Paused cron jobs ──────────────────────────────────── */
 
 /* A recurring job whose fires keep failing auto-pauses itself (enabled=0) and
- * then says nothing — this is where an operator finds out. Heartbeat rows ship
- * disabled on purpose, so they are not news. */
+ * then says nothing — this is where an operator finds out. A job that has
+ * never fired is filtered out rather than named: auto-pause only happens after
+ * three fires, so "disabled and last_run_at IS NULL" is a job that shipped
+ * disabled (the seeded heartbeat) or was switched off before it ever ran —
+ * neither is news. Filtering on the *name* would be wrong; nothing stops an
+ * operator from naming a real job 'heartbeat'. */
 static void check_cron(sqlite3 *db) {
     printf("\n[cron]\n");
     if (!db) {
@@ -509,7 +513,8 @@ static void check_cron(sqlite3 *db) {
     sqlite3_stmt *s;
     if (sqlite3_prepare_v2(db,
             "SELECT name, agent_name, last_run_at FROM cron_jobs"
-            " WHERE enabled=0 AND kind != 'heartbeat' ORDER BY agent_name, name",
+            " WHERE enabled=0 AND last_run_at IS NOT NULL"
+            " ORDER BY agent_name, name",
             -1, &s, NULL) != SQLITE_OK) {
         printf("  (no cron_jobs table)\n");
         return;

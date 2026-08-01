@@ -13,16 +13,17 @@
 #include "sqlite3.h"
 
 /* Cron job record. Schedule is exactly one of cron_expr (recurring), run_at
- * (one-shot), interval_s (fixed period). kind: "task" | "heartbeat". */
+ * (one-shot), interval_s (fixed period). Payload is task and/or script; both
+ * empty is a bare wake. */
 typedef struct {
     int64_t id;
     char *name;
     char *cron_expr;    /* "M H D Mo DoW" — standard 5-field cron; "" if unused */
     int64_t run_at;     /* one-shot fire time (unix ts); 0 if unused */
     int64_t interval_s; /* fixed period in seconds; 0 if unused */
-    char *kind;         /* "task" | "heartbeat" */
     int64_t session_id;
-    char *task;         /* user message to inject */
+    char *task;         /* user message to inject; "" if no prompt payload */
+    char *script;       /* workspace QJS path; NULL if no script payload */
     int enabled;
     int64_t next_run_at;
     int64_t last_run_at;
@@ -125,9 +126,10 @@ CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count);
 int cron_remove(sqlite3 *db, int64_t job_id, const char *agent_name);
 void cron_list_free(CronJob *jobs, int count);
 
-/* Seed a disabled heartbeat pulse row (kind='heartbeat', 1800s cadence) for
- * an agent, idempotent — a no-op if the agent already has one. Called at
- * agent creation so every agent has an inspectable, enable-able pulse.
+/* Seed the disabled 'heartbeat' job for an agent: an ordinary bare-wake job
+ * (no payload, every 30 minutes), idempotent by name — a no-op if the agent
+ * already has one. Called at agent creation so every agent has an
+ * inspectable, enable-able pulse.
  * Returns 0 on success (including the already-present no-op), -1 on DB error. */
 int cron_seed_heartbeat(sqlite3 *db, const char *agent_name);
 

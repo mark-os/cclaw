@@ -13,12 +13,6 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Generic pulse payload — no specific commitment. The heartbeat exists so an
- * agent is never permanently asleep; specific obligations are one-shot jobs. */
-#define HEARTBEAT_PROMPT \
-    "Read HEARTBEAT.md if present. Follow it. " \
-    "If nothing needs attention, reply HEARTBEAT_OK."
-
 /* Parse a single cron field. Supports: star, N, N-M, star/N, N-M/S, comma-separated.
  * Sets bits in out for values in [min, max]. Returns 0 on success. */
 static int parse_field(const char *field, int min, int max, uint64_t *out) {
@@ -447,9 +441,9 @@ static int64_t merged_write(sqlite3 *db, const char *agent, const char *name,
                             const CronMerged *m) {
     const char *sql =
         "INSERT INTO cron_jobs (agent_name, name, cron_expr, run_at, interval_s,"
-        "                       kind, session_id, task, script, channel_name,"
+        "                       session_id, task, script, channel_name,"
         "                       chat_id, target, target_agent, enabled, next_run_at)"
-        " VALUES (?1,?2,?3,?4,?5,'task',?6,?7,?8,?9,?10,?11,?12,1,?13)"
+        " VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,1,?13)"
         " ON CONFLICT(agent_name,name) DO UPDATE SET"
         "   cron_expr=excluded.cron_expr, run_at=excluded.run_at,"
         "   interval_s=excluded.interval_s, session_id=excluded.session_id,"
@@ -531,7 +525,7 @@ CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count) {
     *count = 0;
     const char *sql =
         "SELECT id, name, cron_expr, session_id, task, enabled, next_run_at,"
-        "       last_run_at, COALESCE(run_at,0), COALESCE(interval_s,0), kind"
+        "       last_run_at, COALESCE(run_at,0), COALESCE(interval_s,0), script"
         " FROM cron_jobs WHERE agent_name=? ORDER BY id;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -568,8 +562,8 @@ CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count) {
         j->last_run_at = sqlite3_column_int64(stmt, 7);
         j->run_at = sqlite3_column_int64(stmt, 8);
         j->interval_s = sqlite3_column_int64(stmt, 9);
-        const char *k = (const char *)sqlite3_column_text(stmt, 10);
-        j->kind = k ? strdup(k) : strdup("task");
+        const char *sc = (const char *)sqlite3_column_text(stmt, 10);
+        j->script = sc ? strdup(sc) : NULL;
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -579,15 +573,14 @@ CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count) {
 
 int cron_seed_heartbeat(sqlite3 *db, const char *agent_name) {
     if (!db || !agent_name) return -1;
-    /* Idempotent: insert only if this agent has no heartbeat row yet.
-     * Seeded disabled (enabled=0) — heartbeats cost an LLM call per fire, so
-     * turning the pulse on stays a deliberate operator/tool act. */
+    /* A plain bare-wake job: no payload, so a fire just advances the session
+     * and drains whatever is queued. Idempotent by name (OR IGNORE rides the
+     * unique index), and seeded disabled — waking an idle agent every half
+     * hour costs an LLM call per fire, so it stays a deliberate act. */
     const char *sql =
-        "INSERT INTO cron_jobs (agent_name, name, kind, cron_expr, interval_s,"
-        "                       session_id, task, enabled, next_run_at)"
-        " SELECT ?1, 'heartbeat', 'heartbeat', '', 1800, 0, '', 0, 0"
-        " WHERE NOT EXISTS (SELECT 1 FROM cron_jobs"
-        "                   WHERE agent_name=?1 AND kind='heartbeat');";
+        "INSERT OR IGNORE INTO cron_jobs (agent_name, name, cron_expr,"
+        "                                 session_id, task, enabled, next_run_at)"
+        " VALUES (?1, 'heartbeat', '*/30 * * * *', 0, '', 0, 0);";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(stmt, 1, agent_name, -1, SQLITE_STATIC);
@@ -615,19 +608,17 @@ void cron_list_free(CronJob *jobs, int count) {
         free(jobs[i].name);
         free(jobs[i].cron_expr);
         free(jobs[i].task);
-        free(jobs[i].kind);
+        free(jobs[i].script);
     }
     free(jobs);
 }
 
-/* Resolve an agent's most recently active session at fire time. idle_only
- * restricts to state='idle' (heartbeat targeting). Returns 0 if none. */
-static int64_t recent_session(sqlite3 *db, const char *agent_name, int idle_only) {
-    const char *sql = idle_only
-        ? "SELECT id FROM sessions WHERE agent_name=? AND state='idle'"
-          " ORDER BY updated_at DESC LIMIT 1;"
-        : "SELECT id FROM sessions WHERE agent_name=?"
-          " ORDER BY updated_at DESC LIMIT 1;";
+/* Resolve an agent's most recently active session at fire time. Returns 0 if
+ * none. Session state is deliberately not a filter: a fire into a busy session
+ * queues and lands at the next turn boundary. */
+static int64_t recent_session(sqlite3 *db, const char *agent_name) {
+    const char *sql = "SELECT id FROM sessions WHERE agent_name=?"
+                      " ORDER BY updated_at DESC LIMIT 1;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_text(st, 1, agent_name ? agent_name : "", -1, SQLITE_STATIC);
@@ -636,25 +627,12 @@ static int64_t recent_session(sqlite3 *db, const char *agent_name, int idle_only
     return sid;
 }
 
-/* True if the session already carries an unconsumed heartbeat pulse — never
- * stack a second one on top. */
-static int has_pending_heartbeat(sqlite3 *db, int64_t session_id) {
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db,
-            "SELECT 1 FROM inbox WHERE session_id=? AND source='heartbeat'"
-            " AND consumed=0 LIMIT 1;", -1, &st, NULL) != SQLITE_OK) return 0;
-    sqlite3_bind_int64(st, 1, session_id);
-    int found = (sqlite3_step(st) == SQLITE_ROW);
-    sqlite3_finalize(st);
-    return found;
-}
-
 /* One due row's payload, target and schedule, collected before any write (an
  * open SELECT pins a WAL read snapshot; a write that needs a snapshot upgrade
  * would get an immediate SQLITE_BUSY). */
 typedef struct {
     int64_t id, session_id, run_at, interval_s;
-    char *name, *expr, *task, *script, *agent_name, *kind;
+    char *name, *expr, *task, *script, *agent_name;
     char *target, *target_agent, *channel, *chat;
 } DueJob;
 
@@ -732,7 +710,7 @@ static void job_exec(sqlite3 *db, const char *sql, int64_t id) {
 static void fire_error(sqlite3 *db, const DueJob *j, const char *why) {
     LOG_WARN_("cron fire failed job=%lld name=%s: %s", (long long)j->id,
               j->name ? j->name : "", why);
-    int64_t owner = recent_session(db, j->agent_name, 0);
+    int64_t owner = recent_session(db, j->agent_name);
     if (owner == 0) return;
     char text[640];
     snprintf(text, sizeof(text), "cron job '%s' did not fire: %s",
@@ -825,7 +803,7 @@ static void pause_job(sqlite3 *db, const DueJob *j, const char *detail) {
     job_exec(db, "UPDATE cron_jobs SET enabled=0 WHERE id=?;", j->id);
     LOG_WARN_("cron auto-pause job=%lld name=%s after %d failed fires",
               (long long)j->id, j->name ? j->name : "", CRON_FAIL_STREAK);
-    int64_t owner = recent_session(db, j->agent_name, 0);
+    int64_t owner = recent_session(db, j->agent_name);
     if (owner == 0) return;
     char text[768];
     snprintf(text, sizeof(text),
@@ -851,7 +829,7 @@ static int64_t fresh_session(sqlite3 *db, const DueJob *j, const char *agent) {
     int64_t parent = -1;
     int depth = 0;
     if (!chat_bound) {
-        parent = recent_session(db, j->agent_name, 0);
+        parent = recent_session(db, j->agent_name);
         if (parent > 0) depth = session_get_depth(db, parent) + 1;
         else parent = -1;
     }
@@ -877,24 +855,12 @@ static CronScriptRunner g_script_runner;
 
 void cron_set_script_runner(CronScriptRunner fn) { g_script_runner = fn; }
 
-static void fire_heartbeat(sqlite3 *db, const DueJob *j) {
-    int64_t sid = recent_session(db, j->agent_name, 1);
-    if (sid == 0) return;                       /* busy/no idle session — no pulse needed */
-    if (has_pending_heartbeat(db, sid)) return; /* never stack pulses */
-    inbox_insert(db, sid, "heartbeat", NULL, HEARTBEAT_PROMPT);
-    LOG_INFO_("heartbeat fire job=%lld agent=%s session=%lld",
-              (long long)j->id, j->agent_name ? j->agent_name : "", (long long)sid);
-    wake_session(sid);
-}
-
 /* One fire: resolve the target, clear the guards, dispatch the payload.
  * Payload axis — prompt (a user entry via the inbox, which starts a turn),
  * script (a sandboxed QJS child whose output is posted back, no LLM call),
  * both (one inbox row carrying prompt and script output together), or neither
- * (a bare wake that just drains whatever is pending). */
+ * (a bare wake that just drains whatever is pending — the agent pulse). */
 static void fire_due(sqlite3 *db, const DueJob *j) {
-    if (j->kind && strcmp(j->kind, "heartbeat") == 0) { fire_heartbeat(db, j); return; }
-
     int64_t now = (int64_t)time(NULL);
     int has_prompt = (j->task && j->task[0]);
     int has_script = (j->script && j->script[0]);
@@ -958,7 +924,7 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
             sid = (auth == 1) ? routed : j->session_id;
             if (sid == 0) {
                 /* Never stamped (CLI / manifest caller): stay late-bound. */
-                sid = recent_session(db, j->agent_name, 0);
+                sid = recent_session(db, j->agent_name);
                 if (sid == 0) {
                     LOG_WARN_("cron skip job=%lld agent=%s: no session to resolve",
                               (long long)j->id, j->agent_name ? j->agent_name : "");
@@ -1056,7 +1022,6 @@ static void due_free(DueJob *due, int count) {
         free(due[i].task);
         free(due[i].script);
         free(due[i].agent_name);
-        free(due[i].kind);
         free(due[i].target);
         free(due[i].target_agent);
         free(due[i].channel);
@@ -1069,7 +1034,7 @@ static void due_free(DueJob *due, int count) {
 static void run_due_jobs(sqlite3 *db) {
     int64_t now = (int64_t)time(NULL);
     const char *sql =
-        "SELECT id, cron_expr, session_id, task, agent_name, kind,"
+        "SELECT id, cron_expr, session_id, task, agent_name,"
         "       COALESCE(run_at,0), COALESCE(interval_s,0), name, script,"
         "       target, target_agent, channel_name, chat_id FROM cron_jobs"
         " WHERE enabled=1 AND next_run_at <= ?;";
@@ -1096,16 +1061,14 @@ static void run_due_jobs(sqlite3 *db) {
         due[count].session_id = sqlite3_column_int64(stmt, 2);
         due[count].task = col_dup(stmt, 3);
         due[count].agent_name = col_dup(stmt, 4);
-        const char *k = (const char *)sqlite3_column_text(stmt, 5);
-        due[count].kind = k ? strdup(k) : strdup("task");
-        due[count].run_at = sqlite3_column_int64(stmt, 6);
-        due[count].interval_s = sqlite3_column_int64(stmt, 7);
-        due[count].name = col_dup(stmt, 8);
-        due[count].script = col_dup(stmt, 9);
-        due[count].target = col_dup(stmt, 10);
-        due[count].target_agent = col_dup(stmt, 11);
-        due[count].channel = col_dup(stmt, 12);
-        due[count].chat = col_dup(stmt, 13);
+        due[count].run_at = sqlite3_column_int64(stmt, 5);
+        due[count].interval_s = sqlite3_column_int64(stmt, 6);
+        due[count].name = col_dup(stmt, 7);
+        due[count].script = col_dup(stmt, 8);
+        due[count].target = col_dup(stmt, 9);
+        due[count].target_agent = col_dup(stmt, 10);
+        due[count].channel = col_dup(stmt, 11);
+        due[count].chat = col_dup(stmt, 12);
         count++;
     }
     sqlite3_finalize(stmt);

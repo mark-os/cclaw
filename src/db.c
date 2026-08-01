@@ -347,6 +347,13 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       " (SELECT MAX(id) FROM cron_jobs GROUP BY agent_name, name);"
       "CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name"
       " ON cron_jobs(agent_name, name);"
+      /* kind='heartbeat' is gone: the generalized fire path covers it as an
+       * ordinary bare-wake job (no payload, per-job coalescing, late-resolved
+       * session). Convert the seeded rows in place — enabled as-is, so an
+       * operator who turned the pulse on keeps it. */
+      "UPDATE cron_jobs SET kind='task', task='', cron_expr='*/30 * * * *',"
+      "                     run_at=NULL, interval_s=NULL"
+      " WHERE kind='heartbeat';"
       /* Backfill: every child that finished before the stamp existed would
        * otherwise read as a lost push and the sweep would re-notify them all
        * on the first tick — duplicate results appended to long-idle parents.

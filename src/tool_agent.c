@@ -15,7 +15,7 @@ static const char *SPAWN_PARAMS_JSON =
     "\"task\":{\"type\":\"string\",\"description\":\"Task description for the sub-agent\"},"
     "\"name\":{\"type\":\"string\",\"description\":\"Agent to launch — a name from the roster; omit to spawn a copy of yourself (worker)\"},"
     "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Self-spawn only (error if 'name' is set): restrict the worker to these tools, intersected with your own grants — it can never widen them. Omitted, the worker gets the default worker toolset named at the end of this description.\"},"
-    "\"background\":{\"type\":\"boolean\",\"description\":\"Default false: the call blocks and its result is the child's final answer. True returns session_id immediately and the result arrives in your inbox.\"}"
+    "\"background\":{\"type\":\"boolean\",\"description\":\"Default false: the call blocks and its result is the child's final answer. True returns session_id immediately and the child's result is delivered to you when it finishes — no need to check on it.\"}"
     "},\"required\":[\"task\"]}";
 
 int agent_max_depth(sqlite3 *db) {
@@ -124,10 +124,11 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     wake_session(child_sid);
 
     if (background) {
-        char buf[128];
+        char buf[192];
         snprintf(buf, sizeof(buf),
                  "agent delegated in background (session_id=%lld). "
-                 "Result will arrive in your inbox when done.",
+                 "Its result will be delivered to you when it finishes — "
+                 "no need to check on it.",
                  (long long)child_sid);
         return strdup(buf);
     }
@@ -146,7 +147,10 @@ int tool_launch_agent_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
                           "Delegate a task: start a session on a roster agent, or omit "
                           "'name' to self-spawn a worker with your identity (optionally "
                           "narrowed via 'tools'). Blocks until the child finishes unless "
-                          "background:true, which returns a session id for check_session. "
+                          "background:true, which returns a session id and delivers the "
+                          "child's result to you when it finishes — you will be notified, "
+                          "so do not poll it or schedule a check on it. check_session is a "
+                          "live progress peek, not a way to wait. "
                           "Prefer delegating to an existing specialist over doing "
                           "everything inline — the roster is in search_config.",
                           SPAWN_PARAMS_JSON, tool_launch_agent_handler, ctx);
@@ -219,7 +223,9 @@ char *tool_check_session_handler(const char *arguments, void *user_data) {
 
 int tool_check_session_register(ToolRegistry *reg, AgentLaunchCtx *ctx) {
     int rc = tools_register(reg, "check_session",
-                          "Check the status and result of a sub-agent session",
+                          "Peek at a sub-agent session's live state, plus its final text "
+                          "once it is idle. A progress peek, not a way to wait: a "
+                          "background result is delivered to you on its own.",
                           CHECK_PARAMS_JSON, tool_check_session_handler, ctx);
     if (rc == 0)
         tools_set_recipe(reg, "check_session", (ToolRecipe){EXEC_INLINE, SBX_NONE, NULL});

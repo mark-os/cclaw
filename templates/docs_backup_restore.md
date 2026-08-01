@@ -33,7 +33,9 @@ Policy — how often, how many to keep, where to copy — lives here, not in the
 binary. The pattern: a cron job runs `cclaw backup`, then prunes to the newest
 N snapshots, then (optionally) copies the freshest one off-box.
 
-Set up a daily job with `cron_set` whose shell body is roughly:
+A cron payload is a `prompt` or a workspace `.qjs` `script` — there is no shell
+payload — so set up a daily `cron_set` job whose `prompt` tells you to run
+roughly this shell:
 
 ```sh
 set -e

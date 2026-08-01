@@ -30,11 +30,13 @@ conversation.
   out by name — read it before assuming a worker can do something.
 - **`background`** — default `false`: the call **blocks** and the tool result
   *is* the child's final answer. With `background:true` it returns
-  immediately with `session_id=N` and the child's result arrives later in your
-  inbox.
+  immediately with `session_id=N` and the child's result is delivered to you
+  when it finishes.
 
-`check_session {session_id}` — a delegated session's state, plus its final
-text once it reaches `idle`. Only your own direct children are visible.
+Results push — you are notified when a child finishes, so never poll a child
+or schedule a cron check on one. `check_session {session_id}` — a delegated
+session's state, plus its final text once it reaches `idle` — is a live
+progress peek, not a way to wait. Only your own direct children are visible.
 
 Sub-agents nest: a worker can delegate again, bounded by `agent_max_depth`
 (and per-parent / system-wide caps). If a worker reports `blocked by this

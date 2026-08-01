@@ -118,15 +118,16 @@ sees old behavior only through you.
 
 - `launch_agent {task, name:"Watcher"}` — start a session on it. It blocks and
   returns the agent's final answer as the tool result; `background:true`
-  returns `session_id=N` instead and delivers the result to your inbox. A
-  named agent always runs under its own grants — the `tools` filter is
-  self-spawn only.
+  returns `session_id=N` instead and the result is delivered to you when the
+  child finishes — do not poll it or schedule a check on it. A named agent
+  always runs under its own grants — the `tools` filter is self-spawn only.
 - `check_session {session_id}` — a delegated session's state, and its final
-  text once idle.
+  text once idle. A live progress peek, not a way to wait.
 - Channel access: the new agent sends only where a `channel_routes` row
   resolves to it. Routes are requested via `request_changes`
   (`routes: ["telegram:12345"]`) by the agent itself, or set by the operator.
-- Every agent gets a disabled heartbeat cron row it can later enable.
+- Every agent gets a disabled `heartbeat` cron job (a bare wake every 30
+  minutes, no payload) it can later enable.
 
 ## Packaging agents in extensions
 

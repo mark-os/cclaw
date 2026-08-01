@@ -151,14 +151,17 @@ decided by layer 3's `decide()` on every hop, including redirects, which a
 single pre-flight check could never see. See `shell-networking.md` and
 `egress-filter.md` §8.)
 
-**Prefer running cclaw as an unprivileged user.** The namespace sandbox maps the
-invoking uid to root inside the child's user namespace (uid_map `0 <uid> 1`,
-`sandbox.c`). When the invoking uid is already 0 that map is the identity, so
-`CAP_DAC_OVERRIDE` in the child's user namespace applies to every root-owned
-file — anything reachable in the child's mount view becomes readable regardless
-of its mode. `/etc` is bind-mounted read-only in full, so `/etc/shadow` is the
-concrete example, and `test_etc_shadow_inaccessible` skips itself under uid 0
-for exactly this reason.
+**Prefer running cclaw as an unprivileged user.** The namespace sandbox
+identity-maps the invoking uid into the child's user namespace (uid_map
+`<uid> <uid> 1`, `sandbox.c`) — the payload runs as the real user, not as
+ns-root, so `whoami` tells the truth and privileged-looking behavior
+(`apt`, `sudo`, low ports, in-ns mounts) fails honestly rather than
+half-working under a fake root. When the invoking uid is 0 the payload *is*
+root, so `CAP_DAC_OVERRIDE` applies to every root-owned file — anything
+reachable in the child's mount view becomes readable regardless of its mode.
+`/etc` is bind-mounted read-only in full, so `/etc/shadow` is the concrete
+example, and `test_etc_shadow_inaccessible` skips itself under uid 0 for
+exactly this reason.
 
 What does **not** change under root, measured rather than assumed:
 
@@ -166,11 +169,14 @@ What does **not** change under root, measured rather than assumed:
   kernel locked onto each mount, and a `remount,rw` is refused even with
   `CAP_SYS_ADMIN` in the child user namespace. Writes to `/usr` fail with
   `EROFS` whether cclaw runs as root or not.
-- **The child's capability set is identical either way.** `unshare(CLONE_NEWUSER)`
-  always makes the child root *of its own* user namespace with a full effective
-  set; running cclaw unprivileged does not reduce that. Those capabilities are
-  scoped to the child namespace, so `capable()`-gated globals stay closed in
-  both cases.
+- **The setup phase's capability set is identical either way.**
+  `unshare(CLONE_NEWUSER)` always gives the namespace *creator* a full
+  effective set over the new namespace, which is what lets mount/pivot_root/lo
+  bring-up work; running cclaw unprivileged does not reduce that. Those
+  capabilities are scoped to the child namespace, so `capable()`-gated globals
+  stay closed in both cases. (The *payload* differs: at `execve` a non-zero
+  uid drops to an empty set, while a root invoker's payload keeps full caps
+  over the namespace.)
 - **Egress is unaffected** — `CLONE_NEWNET` plus the broker is a mount/netns
   property, not a DAC one.
 

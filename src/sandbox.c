@@ -300,11 +300,15 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
     if (unshare(clone_flags) != 0)
         return -1;
 
-    /* Write uid_map: map ns root (0) to our real uid */
+    /* Identity uid_map: the payload keeps the invoking user's uid, not ns
+     * root. Fake root confused models (apt/sudo attempts, npm root-mode) and
+     * granted the payload in-ns privileges it shouldn't have (low ports,
+     * mounts). Namespace setup below still works: the ns *creator* holds
+     * full caps in it regardless of the map; caps drop only at execve. */
     int fd = open("/proc/self/uid_map", O_WRONLY);
     if (fd < 0) return -1;
     char map[64];
-    int len = snprintf(map, sizeof(map), "0 %u 1\n", uid);
+    int len = snprintf(map, sizeof(map), "%u %u 1\n", uid, uid);
     int ok = (write(fd, map, (size_t)len) == len);
     close(fd);
     if (!ok) return -1;
@@ -317,10 +321,10 @@ static int sandbox_apply_namespace(const char *workspace, const char *cwd_path,
         if (!ok) return -1;
     }
 
-    /* Write gid_map */
+    /* Identity gid_map, same reasoning */
     fd = open("/proc/self/gid_map", O_WRONLY);
     if (fd < 0) return -1;
-    len = snprintf(map, sizeof(map), "0 %u 1\n", gid);
+    len = snprintf(map, sizeof(map), "%u %u 1\n", gid, gid);
     ok = (write(fd, map, (size_t)len) == len);
     close(fd);
     if (!ok) return -1;
@@ -624,7 +628,8 @@ static void sandbox_apply_rlimits(const SandboxConfig *cfg) {
 }
 
 /* Bring the loopback interface up inside the netns. `lo` exists but is DOWN in
- * a fresh CLONE_NEWNET; we hold CAP_NET_ADMIN as root of the user namespace, so
+ * a fresh CLONE_NEWNET; as creator of the user namespace we hold CAP_NET_ADMIN
+ * over it (regardless of the identity uid_map — caps drop only at execve), so
  * SIOCSIFFLAGS is permitted. Returns 0 on success, -1 otherwise. */
 static int sandbox_bring_up_lo(void) {
     int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);

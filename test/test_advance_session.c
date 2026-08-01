@@ -340,6 +340,44 @@ static void test_parallel_subagents_never_reconciled(void) {
     printf("  PASS test_parallel_subagents_never_reconciled\n");
 }
 
+/* A background child's full result must reach the parent inbox — the notice
+ * used to squeeze it through a 256-byte buffer (200-char cap), which cost a
+ * real user half their answer (smoke test, 2026-08-01). */
+static void test_background_result_not_truncated(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    int64_t parent = session_create(db, "parent", "default", -1, 0);
+    int64_t child = session_create(db, "agent", "default", parent, 1);
+    assert(child > 0);
+    /* No parent_tool_call_id: this is the background path. */
+
+    char result[512];
+    memset(result, 'x', sizeof(result));
+    memcpy(result + sizeof(result) - 9, "TAIL_END", 9);
+    session_set_state(db, child, "llm_running");
+    Message done = { .role = ROLE_ASSISTANT, .content = result,
+                     .stop_reason = STOP_REASON_STOP };
+    entry_append_with_iteration(db, child, &done, 1);
+    assert(advance_session(db, child, 25).action == ADVANCE_DONE);
+
+    char want[600];
+    snprintf(want, sizeof(want), "Sub-agent (session %lld) completed: %s",
+             (long long)child, result);
+    assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
+                     " AND source='agent_result';", parent) == 1);
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db, "SELECT payload FROM inbox WHERE session_id=?"
+                                  " AND source='agent_result';",
+                              -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, parent);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    const char *payload = (const char *)sqlite3_column_text(s, 0);
+    assert(payload && strcmp(payload, want) == 0);
+    sqlite3_finalize(s);
+
+    db_close(db);
+    printf("  PASS test_background_result_not_truncated\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_advance_session:\n");
@@ -354,6 +392,7 @@ int main(void) {
     test_stale_call_reconciled_at_turn_start();
     test_open_undispatched_turn_not_stranded();
     test_parallel_subagents_never_reconciled();
+    test_background_result_not_truncated();
     printf("All advance_session tests passed.\n");
     return 0;
 }

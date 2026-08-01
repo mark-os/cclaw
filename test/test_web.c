@@ -51,7 +51,7 @@ static void test_status_page(void) {
     int64_t sid = session_create(db, "test-session", NULL, -1, 0);
     assert(sid > 0);
     assert(session_set_state(db, sid, "llm_running") == 0);
-    assert(inbox_insert(db, sid, "test", "hello") > 0);
+    assert(inbox_insert(db, sid, "test", NULL, "hello") > 0);
 
     assert(web_start(&cfg, db, cfg.db_path) == 0);
     usleep(50000);

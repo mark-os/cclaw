@@ -323,9 +323,31 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
      * trigger. Renaming a column every branch walk and the payload SQL read is
      * not a shim-able migration — shipped as a new floor rather than migration
      * code (Mark's call), collapsing the v34–v39 patches into it. Pre-v40 DBs
-     * are refused with a delete-and-restart message. The {0} sentinel keeps the
-     * array non-empty for C11; the executor skips it. */
-    { 0 },
+     * are refused with a delete-and-restart message. */
+
+    /* v41: the Part 4 cron redesign + convergent parent notification. cron_jobs
+     * gains its payload/target columns and the upsert-by-name unique index;
+     * inbox gains source_ref (provenance owned by source); sessions gains
+     * parent_notified_at (NULL on a terminal child = lost push, swept). Only
+     * source_ref has a writer today — the rest land dormant, ahead of the cron
+     * tool and the convergence sweep, so live DBs need one patch, not three. */
+    { 41,
+      "ALTER TABLE cron_jobs ADD COLUMN script TEXT;"
+      "ALTER TABLE cron_jobs ADD COLUMN channel_name TEXT;"
+      "ALTER TABLE cron_jobs ADD COLUMN chat_id TEXT;"
+      "ALTER TABLE cron_jobs ADD COLUMN target TEXT;"
+      "ALTER TABLE cron_jobs ADD COLUMN target_agent TEXT;"
+      "ALTER TABLE inbox ADD COLUMN source_ref TEXT;"
+      "ALTER TABLE sessions ADD COLUMN parent_notified_at INTEGER;"
+      /* A pre-upsert DB may hold duplicate job names; keep the newest row so
+       * the unique index can be built. Ownerless rows are exempt — GROUP BY
+       * folds their NULLs together but the index keeps them distinct, and a
+       * startup migration must never delete a row the constraint allows. */
+      "DELETE FROM cron_jobs WHERE agent_name IS NOT NULL AND id NOT IN"
+      " (SELECT MAX(id) FROM cron_jobs GROUP BY agent_name, name);"
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name"
+      " ON cron_jobs(agent_name, name);",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */
@@ -452,7 +474,7 @@ static int db_schema_upgrade(sqlite3 *db) {
 
     int n_patches = (int)(sizeof(schema_patches) / sizeof(schema_patches[0]));
     for (int i = 0; i < n_patches; i++) {
-        if (schema_patches[i].version <= uv) continue;   /* also skips the {0} sentinel */
+        if (schema_patches[i].version <= uv) continue;
         if (schema_patches[i].version > CCLAW_SCHEMA_VERSION) break;
 
         char *err = NULL;
@@ -1315,23 +1337,27 @@ int db_entry_set_network_hosts(sqlite3 *db, int64_t entry_id, const char *hosts_
 
 /* Inbox primitives */
 
-int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const char *payload) {
+int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source,
+                     const char *source_ref, const char *payload) {
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db,
-        "INSERT INTO inbox (session_id, source, payload) VALUES (?, ?, ?)", -1, &stmt, NULL);
+        "INSERT INTO inbox (session_id, source, source_ref, payload) VALUES (?, ?, ?, ?)",
+        -1, &stmt, NULL);
     if (rc != SQLITE_OK) return -1;
     sqlite3_bind_int64(stmt, 1, session_id);
     sqlite3_bind_text(stmt, 2, source ? source : "cli", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, payload, -1, SQLITE_STATIC);
+    if (source_ref) sqlite3_bind_text(stmt, 3, source_ref, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, payload, -1, SQLITE_STATIC);
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) return -1;
     return sqlite3_last_insert_rowid(db);
 }
 
-int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source, const char *payload) {
+int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source,
+                             const char *source_ref, const char *payload) {
     if (!payload || !payload[0])
-        return inbox_insert(db, session_id, source, payload);
+        return inbox_insert(db, session_id, source, source_ref, payload);
     /* Strip invisible Unicode BEFORE the secret scan — zero-width chars would
      * otherwise split a credential across the scanner's pattern window. */
     size_t len = strlen(payload);
@@ -1346,7 +1372,7 @@ int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source
     ShellSecret *snap = secrets_snapshot(db, NULL, 0, &snap_n);
     char *masked = tool_result_postprocess(scanned, snap, snap_n);
     secrets_snapshot_free(snap, snap_n);
-    int64_t id = inbox_insert(db, session_id, source, masked ? masked : scanned);
+    int64_t id = inbox_insert(db, session_id, source, source_ref, masked ? masked : scanned);
     free(clean);
     free(masked);
     return id;
@@ -1356,7 +1382,7 @@ InboxItem *inbox_peek(sqlite3 *db, int64_t session_id, int limit, int *count) {
     *count = 0;
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db,
-        "SELECT id, session_id, source, payload, created_at FROM inbox "
+        "SELECT id, session_id, source, source_ref, payload, created_at FROM inbox "
         "WHERE session_id = ? AND consumed = 0 ORDER BY id ASC LIMIT ?",
         -1, &stmt, NULL);
     if (rc != SQLITE_OK) return NULL;
@@ -1373,9 +1399,11 @@ InboxItem *inbox_peek(sqlite3 *db, int64_t session_id, int limit, int *count) {
         it->session_id = sqlite3_column_int64(stmt, 1);
         const char *src = (const char *)sqlite3_column_text(stmt, 2);
         it->source = src ? strdup(src) : NULL;
-        const char *pay = (const char *)sqlite3_column_text(stmt, 3);
+        const char *ref = (const char *)sqlite3_column_text(stmt, 3);
+        it->source_ref = ref ? strdup(ref) : NULL;
+        const char *pay = (const char *)sqlite3_column_text(stmt, 4);
         it->payload = pay ? strdup(pay) : NULL;
-        it->created_at = sqlite3_column_int64(stmt, 4);
+        it->created_at = sqlite3_column_int64(stmt, 5);
         (*count)++;
     }
     sqlite3_finalize(stmt);
@@ -1386,6 +1414,7 @@ InboxItem *inbox_peek(sqlite3 *db, int64_t session_id, int limit, int *count) {
 void inbox_items_free(InboxItem *items, int count) {
     for (int i = 0; i < count; i++) {
         free(items[i].source);
+        free(items[i].source_ref);
         free(items[i].payload);
     }
     free(items);
@@ -1402,10 +1431,19 @@ int inbox_count(sqlite3 *db, int64_t session_id) {
  * read→write snapshot upgrade fail with an immediate SQLITE_BUSY
  * (busy_timeout does not apply; see channel_consume_events). */
 int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit) {
-    /* Peek unconsumed items */
+    /* Peek unconsumed items. source_ref is stamped onto the content as a
+     * [tag] here rather than joined at read time — the referent (a one-shot
+     * cron job, a finished child session) may be gone by the time the model
+     * reads the entry, and the reference is what it needs. */
     sqlite3_stmt *sel;
     if (sqlite3_prepare_v2(db,
-        "SELECT id, payload FROM inbox WHERE session_id = ? AND consumed = 0 ORDER BY id ASC LIMIT ?",
+        "SELECT id, CASE"
+        "   WHEN source_ref IS NULL THEN payload"
+        "   WHEN source = 'cron' THEN '[cron: ' || source_ref || '] ' || payload"
+        "   WHEN source = 'agent_result'"
+        "     THEN '[sub-agent session ' || source_ref || '] ' || payload"
+        "   ELSE '[' || source || ' ' || source_ref || '] ' || payload END"
+        " FROM inbox WHERE session_id = ? AND consumed = 0 ORDER BY id ASC LIMIT ?",
         -1, &sel, NULL) != SQLITE_OK) {
         return -1;
     }
@@ -1430,8 +1468,8 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
     int consumed = 0;
     while (sqlite3_step(sel) == SQLITE_ROW) {
         int64_t inbox_id = sqlite3_column_int64(sel, 0);
-        const char *payload = (const char *)sqlite3_column_text(sel, 1);
-        const char *content_val = payload ? payload : "";
+        const char *tagged = (const char *)sqlite3_column_text(sel, 1);
+        const char *content_val = tagged ? tagged : "";
         int content_len = (int)strlen(content_val);
 
         /* Insert entry with split columns (role=1 = user) */
@@ -2470,7 +2508,7 @@ int db_recover_stale_sessions(sqlite3 *db) {
      * inbox row so session_sweep_inbox re-dispatches it on the next
      * db_periodic tick and the model can review the interrupted turn. */
     for (int i = 0; i < nudge_count; i++) {
-        if (inbox_insert(db, nudge_ids[i], "system",
+        if (inbox_insert(db, nudge_ids[i], "system", NULL,
                 "the previous run ended mid-task — a tool call was interrupted;"
                 " review the work above and resume if needed") < 0)
             goto rollback;

@@ -196,7 +196,7 @@ static void notify_send_failure(ChannelCtx *ctx, int64_t id, const char *status)
                  "channel_send to (%s, %s) failed permanently: outbox id %lld, %s",
                  ctx->channel_name, chat ? chat : "unknown",
                  (long long)id, status);
-        if (inbox_insert(ctx->db, sid, "system", msg) > 0)
+        if (inbox_insert(ctx->db, sid, "system", NULL, msg) > 0)
             wake_external(ctx->db_path);
     }
     sqlite3_finalize(s);

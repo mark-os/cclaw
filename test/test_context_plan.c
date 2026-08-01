@@ -175,9 +175,9 @@ static void test_multi_user_turn_not_split(void) {
     append_msg(db, sid, ROLE_USER, pad, STOP_REASON_NONE, NULL, 0);
     append_msg(db, sid, ROLE_ASSISTANT, pad, STOP_REASON_STOP, NULL, 0);
     /* Turn 2 — opens with three inbox-drained user entries. */
-    inbox_insert(db, sid, "channel", pad);
-    inbox_insert(db, sid, "job_result", pad);
-    inbox_insert(db, sid, "agent_result", pad);
+    inbox_insert(db, sid, "channel", NULL, pad);
+    inbox_insert(db, sid, "job_result", NULL, pad);
+    inbox_insert(db, sid, "agent_result", NULL, pad);
     if (inbox_consume_into_entries(db, sid, 100) != 3) FAIL("inbox drain");
     append_msg(db, sid, ROLE_ASSISTANT, pad, STOP_REASON_STOP, NULL, 0);
 
@@ -214,8 +214,8 @@ static void test_compaction_keep_from_is_turn_boundary(void) {
     int64_t sid = session_create(db, "test", NULL, -1, 0);
     /* Six turns, each opening with two drained user entries. */
     for (int t = 0; t < 6; t++) {
-        inbox_insert(db, sid, "channel", pad);
-        inbox_insert(db, sid, "job_result", pad);
+        inbox_insert(db, sid, "channel", NULL, pad);
+        inbox_insert(db, sid, "job_result", NULL, pad);
         if (inbox_consume_into_entries(db, sid, 100) != 2) FAIL("inbox drain");
         append_msg(db, sid, ROLE_ASSISTANT, pad, STOP_REASON_STOP, NULL, 0);
     }

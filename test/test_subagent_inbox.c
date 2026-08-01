@@ -23,7 +23,7 @@ static void test_subagent_completion_posts_to_parent_inbox(void) {
     snprintf(payload, sizeof(payload),
              "{\"event\":\"sub_agent_done\",\"session_id\":%lld,\"status\":\"done\"}",
              (long long)child_sid);
-    int64_t inbox_id = inbox_insert(db, parent_sid, "sub_agent", payload);
+    int64_t inbox_id = inbox_insert(db, parent_sid, "sub_agent", NULL, payload);
     assert(inbox_id > 0);
 
     /* Verify parent inbox has the notification */
@@ -56,7 +56,7 @@ static void test_subagent_error_posts_to_parent_inbox(void) {
     snprintf(payload, sizeof(payload),
              "{\"event\":\"sub_agent_done\",\"session_id\":%lld,\"status\":\"error\"}",
              (long long)child_sid);
-    inbox_insert(db, parent_sid, "sub_agent", payload);
+    inbox_insert(db, parent_sid, "sub_agent", NULL, payload);
 
     int count = 0;
     InboxItem *items = inbox_peek(db, parent_sid, 10, &count);

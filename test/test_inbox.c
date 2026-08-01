@@ -13,9 +13,9 @@ static void test_inbox_insert(void) {
     int64_t sid = session_create(db, "inbox_test", NULL, -1, 0);
     assert(sid > 0);
 
-    int64_t id1 = inbox_insert(db, sid, "telegram", "{\"text\":\"hello\"}");
+    int64_t id1 = inbox_insert(db, sid, "telegram", NULL, "{\"text\":\"hello\"}");
     assert(id1 > 0);
-    int64_t id2 = inbox_insert(db, sid, "cron", "{\"job\":\"sweep\"}");
+    int64_t id2 = inbox_insert(db, sid, "cron", NULL, "{\"job\":\"sweep\"}");
     assert(id2 > id1);
 
     db_close(db);
@@ -43,9 +43,9 @@ static void test_inbox_peek_returns_unconsumed(void) {
     int64_t sid = session_create(db, "inbox_peek", NULL, -1, 0);
     assert(sid > 0);
 
-    inbox_insert(db, sid, "telegram", "msg1");
-    inbox_insert(db, sid, "telegram", "msg2");
-    inbox_insert(db, sid, "cron", "msg3");
+    inbox_insert(db, sid, "telegram", NULL, "msg1");
+    inbox_insert(db, sid, "telegram", NULL, "msg2");
+    inbox_insert(db, sid, "cron", NULL, "msg3");
 
     int count = 0;
     InboxItem *items = inbox_peek(db, sid, 10, &count);
@@ -67,9 +67,9 @@ static void test_inbox_peek_respects_limit(void) {
     int64_t sid = session_create(db, "inbox_limit", NULL, -1, 0);
     assert(sid > 0);
 
-    inbox_insert(db, sid, "src", "a");
-    inbox_insert(db, sid, "src", "b");
-    inbox_insert(db, sid, "src", "c");
+    inbox_insert(db, sid, "src", NULL, "a");
+    inbox_insert(db, sid, "src", NULL, "b");
+    inbox_insert(db, sid, "src", NULL, "c");
 
     int count = 0;
     InboxItem *items = inbox_peek(db, sid, 2, &count);
@@ -89,8 +89,8 @@ static void test_inbox_peek_session_isolation(void) {
     int64_t s1 = session_create(db, "inbox_iso1", NULL, -1, 0);
     int64_t s2 = session_create(db, "inbox_iso2", NULL, -1, 0);
 
-    inbox_insert(db, s1, "src", "for_s1");
-    inbox_insert(db, s2, "src", "for_s2");
+    inbox_insert(db, s1, "src", NULL, "for_s1");
+    inbox_insert(db, s2, "src", NULL, "for_s2");
 
     int count = 0;
     InboxItem *items = inbox_peek(db, s1, 10, &count);
@@ -114,9 +114,9 @@ static void test_inbox_consume_into_entries(void) {
     assert(sid > 0);
 
     /* Insert 3 inbox items */
-    inbox_insert(db, sid, "telegram", "hello");
-    inbox_insert(db, sid, "telegram", "world");
-    inbox_insert(db, sid, "cron", "tick");
+    inbox_insert(db, sid, "telegram", NULL, "hello");
+    inbox_insert(db, sid, "telegram", NULL, "world");
+    inbox_insert(db, sid, "cron", NULL, "tick");
 
     /* Consume all */
     int consumed = inbox_consume_into_entries(db, sid, 10);
@@ -147,6 +147,43 @@ static void test_inbox_consume_into_entries(void) {
     printf("  PASS test_inbox_consume_into_entries\n");
 }
 
+/* source_ref becomes a provenance tag on the entry at drain time — the model
+ * must see which job/child spoke without a join the referent may not survive.
+ * A NULL source_ref (every writer but agent_result today) drains verbatim. */
+static void test_inbox_consume_tags_source_ref(void) {
+    sqlite3 *db = test_db_open(DB_PATH);
+    assert(db);
+    int64_t sid = session_create(db, "inbox_source_ref", NULL, -1, 0);
+    assert(sid > 0);
+
+    assert(inbox_insert(db, sid, "cron", "jobname", "sweep the logs") > 0);
+    assert(inbox_insert(db, sid, "agent_result", "77", "Sub-agent completed: ok") > 0);
+    assert(inbox_insert(db, sid, "telegram", NULL, "plain message") > 0);
+
+    /* peek exposes the column so callers can route on it */
+    int count = 0;
+    InboxItem *items = inbox_peek(db, sid, 10, &count);
+    assert(count == 3);
+    assert(items[0].source_ref && strcmp(items[0].source_ref, "jobname") == 0);
+    assert(items[1].source_ref && strcmp(items[1].source_ref, "77") == 0);
+    assert(items[2].source_ref == NULL);
+    inbox_items_free(items, count);
+
+    assert(inbox_consume_into_entries(db, sid, 10) == 3);
+
+    int ecount = 0;
+    Entry *entries = session_get_branch(db, sid, &ecount);
+    assert(entries != NULL && ecount == 3);
+    assert(strcmp(entries[0].message.content, "[cron: jobname] sweep the logs") == 0);
+    assert(strcmp(entries[1].message.content,
+                  "[sub-agent session 77] Sub-agent completed: ok") == 0);
+    assert(strcmp(entries[2].message.content, "plain message") == 0);
+    entry_branch_free(entries, ecount);
+
+    db_close(db);
+    printf("  PASS test_inbox_consume_tags_source_ref\n");
+}
+
 static void test_inbox_consume_empty(void) {
     sqlite3 *db = test_db_open(DB_PATH);
     assert(db);
@@ -166,9 +203,9 @@ static void test_inbox_consume_respects_limit(void) {
     int64_t sid = session_create(db, "inbox_consume_limit", NULL, -1, 0);
     assert(sid > 0);
 
-    inbox_insert(db, sid, "src", "a");
-    inbox_insert(db, sid, "src", "b");
-    inbox_insert(db, sid, "src", "c");
+    inbox_insert(db, sid, "src", NULL, "a");
+    inbox_insert(db, sid, "src", NULL, "b");
+    inbox_insert(db, sid, "src", NULL, "c");
 
     /* Consume only 2 */
     int consumed = inbox_consume_into_entries(db, sid, 2);
@@ -194,8 +231,8 @@ static void test_inbox_count(void) {
     /* Empty session → 0 */
     assert(inbox_count(db, sid) == 0);
 
-    inbox_insert(db, sid, "telegram", "a");
-    inbox_insert(db, sid, "cron", "b");
+    inbox_insert(db, sid, "telegram", NULL, "a");
+    inbox_insert(db, sid, "cron", NULL, "b");
     assert(inbox_count(db, sid) == 2);
 
     /* Consume one, count drops */
@@ -216,6 +253,7 @@ int main(void) {
     test_inbox_peek_respects_limit();
     test_inbox_peek_session_isolation();
     test_inbox_consume_into_entries();
+    test_inbox_consume_tags_source_ref();
     test_inbox_consume_empty();
     test_inbox_consume_respects_limit();
     test_inbox_count();

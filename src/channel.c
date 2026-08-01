@@ -1379,7 +1379,7 @@ void channel_consume_events(sqlite3 *db) {
                         sqlite3_finalize(fs);
                     }
                 }
-                int64_t irc = inbox_insert_scanned(db, sid, ch_name,
+                int64_t irc = inbox_insert_scanned(db, sid, ch_name, NULL,
                                                    content ? content : payload);
                 free(content);
                 if (irc < 0) {

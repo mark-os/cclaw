@@ -121,14 +121,18 @@ static void notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
         } else {
             /* Background mode: notice into the parent inbox. The prefix is
              * glued on in SQL so the result arrives intact at any length —
-             * a fixed buffer here once cost a user half their answer. */
+             * a fixed buffer here once cost a user half their answer. The
+             * child session id is structural provenance (source_ref), not
+             * prose; the drain re-attaches it as a [tag] the model can read. */
+            char child_ref[24];
+            snprintf(child_ref, sizeof(child_ref), "%lld", (long long)session_id);
             sqlite3_stmt *ins;
             if (sqlite3_prepare_v2(db,
-                    "INSERT INTO inbox (session_id, source, payload) VALUES"
-                    " (?1, 'agent_result', 'Sub-agent (session ' || ?2 || ') '"
-                    " || ?3 || ': ' || ?4)", -1, &ins, NULL) == SQLITE_OK) {
+                    "INSERT INTO inbox (session_id, source, source_ref, payload)"
+                    " VALUES (?1, 'agent_result', ?2, 'Sub-agent ' || ?3 || ': ' || ?4)",
+                    -1, &ins, NULL) == SQLITE_OK) {
                 sqlite3_bind_int64(ins, 1, pi.parent_session_id);
-                sqlite3_bind_int64(ins, 2, session_id);
+                sqlite3_bind_text(ins, 2, child_ref, -1, SQLITE_STATIC);
                 sqlite3_bind_text(ins, 3, is_error ? "failed" : "completed",
                                   -1, SQLITE_STATIC);
                 sqlite3_bind_text(ins, 4, result_text, -1, SQLITE_STATIC);

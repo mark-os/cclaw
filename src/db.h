@@ -201,15 +201,21 @@ typedef struct {
     int64_t id;
     int64_t session_id;
     char *source;
+    char *source_ref;
     char *payload;
     int64_t created_at;
 } InboxItem;
 
-/* Insert a message into the inbox. Returns row id (>0) or -1 on error. */
-int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source, const char *payload);
+/* Insert a message into the inbox. Returns row id (>0) or -1 on error.
+ * source_ref (NULL-able) is provenance whose meaning belongs to source —
+ * 'cron' → job name, 'agent_result' → child session id — and the drain
+ * turns it into a [tag] on the entry content. */
+int64_t inbox_insert(sqlite3 *db, int64_t session_id, const char *source,
+                     const char *source_ref, const char *payload);
 
 /* Scan payload for secrets, redact findings, then insert. */
-int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source, const char *payload);
+int64_t inbox_insert_scanned(sqlite3 *db, int64_t session_id, const char *source,
+                             const char *source_ref, const char *payload);
 
 /* Peek at unconsumed inbox items for a session (oldest first, max `limit`).
  * Test-only (with inbox_count): non-destructive inbox assertions — production

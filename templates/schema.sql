@@ -201,6 +201,10 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- tool-loop iteration so the request prefix stays
                                             -- byte-stable for prompt caching. NULL = no block.
   leaf_id INTEGER DEFAULT -1,
+  parent_notified_at INTEGER,               -- unixepoch when the parent learned this child's
+                                            -- result (notify_parent landed, or the parent
+                                            -- consumed it by poll). NULL on a terminal child
+                                            -- = lost push; the convergence sweep re-notifies.
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
@@ -371,6 +375,10 @@ CREATE TABLE IF NOT EXISTS inbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id INTEGER NOT NULL,
   source TEXT NOT NULL DEFAULT 'cli',
+  source_ref TEXT,                           -- provenance whose semantics belong to source:
+                                             -- 'cron' → job name, 'agent_result' → child
+                                             -- session id. NULL = no reference. Drained as a
+                                             -- [tag] prefix so it survives without a join.
   payload TEXT NOT NULL,
   consumed INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -468,11 +476,22 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   kind TEXT NOT NULL DEFAULT 'task',         -- 'task' | 'heartbeat'
   session_id INTEGER NOT NULL,
   task TEXT NOT NULL,
+  script TEXT,                               -- workspace-relative QJS path; runs sandboxed at
+                                             -- fire time. NULL = no script payload
+  channel_name TEXT,                         -- chat stamp: the durable identity a fire routes
+  chat_id TEXT,                              -- through (channel_routes), resolved at fire time
+  target TEXT,                               -- NULL = follow the conversation (stamped chat,
+                                             -- else stamped session_id); 'pin' = explicit
+                                             -- session pin; 'new' = fresh session per fire
+  target_agent TEXT,                         -- agent for 'new'-mode fires; NULL = agent_name
   enabled INTEGER NOT NULL DEFAULT 1,
   next_run_at INTEGER NOT NULL DEFAULT 0,
   last_run_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+-- Job name is the logical identity (cron_set is an upsert by name; ids die
+-- with one-shot auto-removal and delete-recreate cycles).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cron_jobs_name ON cron_jobs(agent_name, name);
 
 
 -- ═══ Approvals ═══

@@ -2,7 +2,7 @@
 
 Single SQLite file `cclaw.db` (WAL mode, `busy_timeout` 5000ms). CLI and daemon are peers sharing one source of truth; per-session ownership (`sessions.owner_instance` → `processes`) makes recovery owner-scoped so a live peer's in-flight sessions are never stomped.
 
-Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v39 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v33 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-19 freeze collapsed earlier patch history into it).
+Source of truth: `templates/schema.sql` (embedded at build time as `TPL_SCHEMA_SQL`). Current schema version: v41 (`CCLAW_SCHEMA_VERSION` in `src/cclaw.h`); floor v40 (`CCLAW_SCHEMA_MIN` in `src/db.c` — the 2026-07-31 turn_id/iteration_id freeze collapsed earlier patch history into it).
 
 ## String keys and the agent_name FKs (decided 2026-07-18)
 
@@ -368,6 +368,7 @@ channel-wide default lives on `channels.default_agent`.
 | `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
 | `turn_context` | TEXT | `<RELEVANT_CONTEXT>` block, materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; always present (it carries `<current_time>` even when nothing else is live) |
 | `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
+| `parent_notified_at` | INTEGER | unixepoch when the parent learned this child's result — stamped by `notify_parent`, and by `check_session` when the parent consumes the result by poll. NULL on a terminal child = lost push, which the convergence sweep re-notifies. Dormant until that sweep lands |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
@@ -599,11 +600,18 @@ Durable inbound message queue. Survives crashes; atomic consumption via `BEGIN E
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `session_id` | INTEGER NOT NULL | |
 | `source` | TEXT NOT NULL DEFAULT 'cli' | channel origin |
+| `source_ref` | TEXT | provenance whose semantics belong to `source`: `'cron'` → job name, `'agent_result'` → child session id. Live for `agent_result` today (the id moved out of the payload prose); the cron writer arrives with the Part 4 cron tool. NULL for every other writer |
 | `payload` | TEXT NOT NULL | |
 | `consumed` | INTEGER NOT NULL DEFAULT 0 | |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 Index: `idx_inbox_pending ON inbox(session_id, consumed) WHERE consumed = 0`.
+
+`inbox_consume_into_entries` stamps a non-NULL `source_ref` onto the entry
+content as a bracket tag — `[cron: <name>] `, `[sub-agent session <id>] `, else
+`[<source> <ref>] ` — so the reference stays model-visible without a join the
+referent may not survive (a one-shot job deletes itself at fire time). A NULL
+`source_ref` drains verbatim.
 
 ---
 
@@ -685,10 +693,21 @@ schedule and controls payload/targeting.
 | `kind` | TEXT NOT NULL DEFAULT 'task' | `'task'` or `'heartbeat'` |
 | `session_id` | INTEGER NOT NULL | `0` = resolve to the agent's most recently active session at fire time (`kind='task'`) or most recently active *idle* session (`kind='heartbeat'`, which ignores this column entirely) |
 | `task` | TEXT NOT NULL | injected message; unused for `kind='heartbeat'` (fires the constant `HEARTBEAT_PROMPT` instead) |
+| `script` | TEXT | workspace-relative QJS path, run sandboxed at fire time under the target agent's profile+grants; composes with `task` (script first). NULL = no script payload |
+| `channel_name` | TEXT | chat stamp — the durable route identity a fire resolves through `channel_routes` at fire time, rather than binding a session id at set time |
+| `chat_id` | TEXT | with `channel_name`, the stamped chat |
+| `target` | TEXT | target-mode discriminator: NULL = follow the conversation (stamped chat, else the stamped `session_id`); `'pin'` = explicit session pin; `'new'` = a fresh session per fire |
+| `target_agent` | TEXT | agent that a `'new'`-mode fire runs under; NULL = `agent_name` |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `next_run_at` | INTEGER NOT NULL DEFAULT 0 | |
 | `last_run_at` | INTEGER | |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
+
+Index: `idx_cron_jobs_name ON cron_jobs(agent_name, name)` — UNIQUE. The job
+*name* is the logical identity (ids die with one-shot auto-removal and
+delete-recreate cycles), so `cron_set` is an upsert by name. `script`,
+`channel_name`, `chat_id`, `target`, and `target_agent` are written by the
+Part 4 cron tool work and are dormant until it lands.
 
 Firing rules (`src/cron.c`):
 - `kind='task'`, one-shot (`run_at`): inject `task` into the resolved session, then **delete the row**.

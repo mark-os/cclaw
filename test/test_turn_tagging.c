@@ -158,9 +158,9 @@ static void test_turn_id_changes_at_boundary(void) {
     int64_t e_a1 = entry_append_with_iteration(db, sid, &a, 0);
 
     /* Turn 2 arrives as three inbox rows drained in one transaction. */
-    inbox_insert(db, sid, "channel", "from chat");
-    inbox_insert(db, sid, "job_result", "cron fired");
-    inbox_insert(db, sid, "agent_result", "sub-agent done");
+    inbox_insert(db, sid, "channel", NULL, "from chat");
+    inbox_insert(db, sid, "job_result", NULL, "cron fired");
+    inbox_insert(db, sid, "agent_result", NULL, "sub-agent done");
     if (inbox_consume_into_entries(db, sid, 100) != 3) { FAIL("inbox drain"); db_close(db); return; }
     int64_t e_a2 = entry_append_with_iteration(db, sid, &a, 0);
 
@@ -198,7 +198,7 @@ static void test_turn_id_survives_restart(void) {
     test_seed_agent(db, "default");   /* agent_name is an enforced FK */
     int64_t sid = session_create(db, "test", "default", -1, 0);
 
-    inbox_insert(db, sid, "channel", "please do the thing");
+    inbox_insert(db, sid, "channel", NULL, "please do the thing");
     AdvanceOutput out = advance_session(db, sid, 10);
     if (out.action != ADVANCE_DISPATCH_LLM) { FAIL("turn did not open"); db_close(db); return; }
 

@@ -31,7 +31,7 @@ static void test_idle_no_inbox(void) {
 static void test_idle_with_inbox(void) {
     sqlite3 *db = open_seeded(":memory:");
     int64_t sid = session_create(db, "test", "default", -1, 0);
-    inbox_insert(db, sid, "cli", "hello");
+    inbox_insert(db, sid, "cli", NULL, "hello");
 
     AdvanceOutput out = advance_session(db, sid, 25);
     assert(out.action == ADVANCE_DISPATCH_LLM);
@@ -204,7 +204,7 @@ static void test_stale_call_reconciled_at_turn_start(void) {
     assert(turn1 > 0);
 
     /* Turn 2 opens. */
-    inbox_insert(db, sid, "cli", "turn two");
+    inbox_insert(db, sid, "cli", NULL, "turn two");
     AdvanceOutput out = advance_session(db, sid, 25);
     assert(out.action == ADVANCE_DISPATCH_LLM);
 
@@ -328,7 +328,7 @@ static void test_parallel_subagents_never_reconciled(void) {
                       .stop_reason = STOP_REASON_STOP };
     entry_append_with_iteration(db, parent, &final, 2);
     assert(advance_session(db, parent, 25).action == ADVANCE_DONE);
-    inbox_insert(db, parent, "cli", "next turn");
+    inbox_insert(db, parent, "cli", NULL, "next turn");
     assert(advance_session(db, parent, 25).action == ADVANCE_DISPATCH_LLM);
 
     assert(count(db, "SELECT COUNT(*) FROM tool_calls"
@@ -359,19 +359,37 @@ static void test_background_result_not_truncated(void) {
     entry_append_with_iteration(db, child, &done, 1);
     assert(advance_session(db, child, 25).action == ADVANCE_DONE);
 
-    char want[600];
-    snprintf(want, sizeof(want), "Sub-agent (session %lld) completed: %s",
-             (long long)child, result);
+    /* The id is structural (source_ref), not prose. */
+    char want[600], child_str[24];
+    snprintf(want, sizeof(want), "Sub-agent completed: %s", result);
+    snprintf(child_str, sizeof(child_str), "%lld", (long long)child);
     assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
                      " AND source='agent_result';", parent) == 1);
     sqlite3_stmt *s;
-    assert(sqlite3_prepare_v2(db, "SELECT payload FROM inbox WHERE session_id=?"
-                                  " AND source='agent_result';",
+    assert(sqlite3_prepare_v2(db, "SELECT payload, source_ref FROM inbox"
+                                  " WHERE session_id=? AND source='agent_result';",
                               -1, &s, NULL) == SQLITE_OK);
     sqlite3_bind_int64(s, 1, parent);
     assert(sqlite3_step(s) == SQLITE_ROW);
     const char *payload = (const char *)sqlite3_column_text(s, 0);
+    const char *ref = (const char *)sqlite3_column_text(s, 1);
     assert(payload && strcmp(payload, want) == 0);
+    assert(ref && strcmp(ref, child_str) == 0);
+    sqlite3_finalize(s);
+
+    /* Draining re-attaches the id as a tag: the parent still needs it for
+     * check_session, and the payload stays whole behind it. */
+    char tagged[768];
+    snprintf(tagged, sizeof(tagged), "[sub-agent session %s] %s", child_str, want);
+    assert(inbox_consume_into_entries(db, parent, 10) == 1);
+    assert(sqlite3_prepare_v2(db, "SELECT content, content_bytes FROM entries"
+                                  " WHERE session_id=? AND role=1 ORDER BY id DESC LIMIT 1;",
+                              -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, parent);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    const char *content = (const char *)sqlite3_column_text(s, 0);
+    assert(content && strcmp(content, tagged) == 0);
+    assert(sqlite3_column_int(s, 1) == (int)strlen(tagged));
     sqlite3_finalize(s);
 
     db_close(db);

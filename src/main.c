@@ -3095,7 +3095,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
 /* ── CLI turn trigger ───────────────────────────────────────────── */
 
 static void cli_start_turn(const char *input) {
-    inbox_insert_scanned(g_db, g_cli_session, "cli", input);
+    inbox_insert_scanned(g_db, g_cli_session, "cli", NULL, input);
     g_cli_turn_active = 1;
     cli_indicator_show();
     run_advance(g_cli_session);

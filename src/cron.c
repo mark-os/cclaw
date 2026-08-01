@@ -325,7 +325,7 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
         int64_t sid = recent_session(db, j->agent_name, 1);
         if (sid == 0) return;                       /* busy/no idle session — no pulse needed */
         if (has_pending_heartbeat(db, sid)) return; /* never stack pulses */
-        inbox_insert(db, sid, "heartbeat", HEARTBEAT_PROMPT);
+        inbox_insert(db, sid, "heartbeat", NULL, HEARTBEAT_PROMPT);
         LOG_INFO_("heartbeat fire job=%lld agent=%s session=%lld",
                   (long long)j->id, j->agent_name ? j->agent_name : "", (long long)sid);
         wake_session(sid);
@@ -342,7 +342,7 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
         }
     }
     if (!j->task) return;
-    inbox_insert_scanned(db, sid, "cron", j->task);
+    inbox_insert_scanned(db, sid, "cron", NULL, j->task);
     LOG_INFO_("cron fire job=%lld agent=%s session=%lld",
               (long long)j->id, j->agent_name ? j->agent_name : "", (long long)sid);
     wake_session(sid);

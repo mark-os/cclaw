@@ -118,7 +118,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         session_set_parent_tool_call_id(ctx->db, child_sid, ctx->current_tool_call_id);
 
     /* Insert task into child's inbox and wake it */
-    inbox_insert(ctx->db, child_sid, "spawn", task);
+    inbox_insert(ctx->db, child_sid, "spawn", NULL, task);
     free(task);
     free(agent);
     wake_session(child_sid);

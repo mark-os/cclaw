@@ -287,5 +287,5 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPost
                  (long long)a->id, what);
         break;
     }
-    return inbox_insert(db, a->session_id, "approval", buf);
+    return inbox_insert(db, a->session_id, "approval", NULL, buf);
 }

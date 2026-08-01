@@ -253,19 +253,25 @@ static void test_cron_add_floor_fire_to_fire(void) {
 static int64_t insert_due(sqlite3 *db, const char *agent, const char *kind,
                           const char *expr, int64_t run_at, int64_t interval_s,
                           int64_t session_id, const char *task, int64_t next_run_at) {
+    /* Names are unique per (agent, name) since v41 — number them so a test
+     * can still stage two rival rows for the same agent. */
+    static int seq = 0;
+    char jname[16];
+    snprintf(jname, sizeof(jname), "j%d", ++seq);
     const char *sql =
         "INSERT INTO cron_jobs(agent_name,name,kind,cron_expr,run_at,interval_s,"
-        " session_id,task,enabled,next_run_at) VALUES(?,'j',?,?,?,?,?,?,1,?);";
+        " session_id,task,enabled,next_run_at) VALUES(?,?,?,?,?,?,?,?,1,?);";
     sqlite3_stmt *st;
     assert(sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK);
     sqlite3_bind_text(st, 1, agent, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 2, kind, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 3, expr, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(st, 4, run_at);
-    sqlite3_bind_int64(st, 5, interval_s);
-    sqlite3_bind_int64(st, 6, session_id);
-    sqlite3_bind_text(st, 7, task, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(st, 8, next_run_at);
+    sqlite3_bind_text(st, 2, jname, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, kind, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, expr, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 5, run_at);
+    sqlite3_bind_int64(st, 6, interval_s);
+    sqlite3_bind_int64(st, 7, session_id);
+    sqlite3_bind_text(st, 8, task, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 9, next_run_at);
     assert(sqlite3_step(st) == SQLITE_DONE);
     sqlite3_finalize(st);
     return sqlite3_last_insert_rowid(db);

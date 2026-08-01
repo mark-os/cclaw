@@ -14,8 +14,8 @@ static void test_rollback_missing_session(void) {
     int64_t sid = session_create(db, "rollback_miss", NULL, -1, 0);
     assert(sid > 0);
 
-    inbox_insert(db, sid, "src", "msg1");
-    inbox_insert(db, sid, "src", "msg2");
+    inbox_insert(db, sid, "src", NULL, "msg1");
+    inbox_insert(db, sid, "src", NULL, "msg2");
 
     /* Delete session so leaf_id lookup fails inside consume */
     sqlite3_exec(db, "DELETE FROM sessions WHERE id = 999999", NULL, NULL, NULL);
@@ -56,7 +56,7 @@ static void test_rollback_mid_consumption(void) {
     for (int i = 0; i < 5; i++) {
         char buf[32];
         snprintf(buf, sizeof(buf), "item_%d", i);
-        inbox_insert(db, sid, "src", buf);
+        inbox_insert(db, sid, "src", NULL, buf);
     }
 
     /* Install progress handler that aborts after limited ops.
@@ -87,7 +87,7 @@ static void test_rollback_mid_consumption(void) {
             for (int i = 0; i < 5; i++) {
                 char buf[32];
                 snprintf(buf, sizeof(buf), "item_%d", i);
-                inbox_insert(db, sid, "src", buf);
+                inbox_insert(db, sid, "src", NULL, buf);
             }
         }
     }
@@ -116,7 +116,7 @@ static void test_no_double_consume_after_success(void) {
     int64_t sid = session_create(db, "no_double", NULL, -1, 0);
     assert(sid > 0);
 
-    inbox_insert(db, sid, "src", "once");
+    inbox_insert(db, sid, "src", NULL, "once");
 
     int consumed = inbox_consume_into_entries(db, sid, 10);
     assert(consumed == 1);

@@ -380,8 +380,12 @@ static void test_schema_state(void) {
     set_user_version(db, 39);            /* one below the v40 floor — refused */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
     assert(db_schema_compat(db) == 0);
-    /* No UPGRADABLE probe: with the floor at the current version the
-     * upgradable band is empty until the next schema patch lands. */
+
+    /* At the floor: inside the patchable band. Classification only — running
+     * the upgrade here would re-ALTER a DB that already has the v41 shape;
+     * test_schema_patch_application does that against a real v40 fixture. */
+    set_user_version(db, 40);
+    assert(db_schema_state(db, NULL) == DB_SCHEMA_UPGRADABLE);
 
     set_user_version(db, 0);             /* v0 but tables exist → pre-freeze */
     assert(db_schema_state(db, NULL) == DB_SCHEMA_TOO_OLD);
@@ -411,9 +415,8 @@ static char *schema_shape(sqlite3 *db) {
 
 /* Apply schema_patches[] to a floor-shaped DB (frozen fixture — never a
  * current DB with columns dropped) and require the result to match a fresh
- * current DB, table for table, column for column. With an empty patch list
- * (floor == current) this degenerates to "the frozen fixture IS the current
- * shape"; it starts exercising patches again the moment one lands. */
+ * current DB, table for table, column for column. This is what catches a
+ * schema.sql change that shipped without the matching ALTER in the patch. */
 static void test_schema_patch_application(void) {
     const char *old_path = "/tmp/test_cclaw_schema_patch_old.sqlite";
     const char *new_path = "/tmp/test_cclaw_schema_patch_new.sqlite";
@@ -435,7 +438,7 @@ static void test_schema_patch_application(void) {
     free(fixture);
     set_user_version(old_db, 40);
 
-    assert(db_schema_compat(old_db) == 1);   /* floor == current: nothing pending */
+    assert(db_schema_compat(old_db) == 1);   /* runs every pending patch */
     int uv = 0;
     assert(db_schema_state(old_db, &uv) == DB_SCHEMA_CURRENT);
     assert(uv == CCLAW_SCHEMA_VERSION);

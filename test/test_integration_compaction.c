@@ -86,10 +86,10 @@ static void test_inbox_during_compacting(void) {
     assert(session_set_state(db, sid, "compacting") == 0);
 
     /* Insert inbox items while compacting */
-    int64_t inbox_id_1 = inbox_insert(db, sid, "test_source", "message 1");
+    int64_t inbox_id_1 = inbox_insert(db, sid, "test_source", NULL, "message 1");
     assert(inbox_id_1 > 0);
 
-    int64_t inbox_id_2 = inbox_insert(db, sid, "test_source", "message 2");
+    int64_t inbox_id_2 = inbox_insert(db, sid, "test_source", NULL, "message 2");
     assert(inbox_id_2 > 0);
 
     /* Verify inbox items exist and are not consumed */

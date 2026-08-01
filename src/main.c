@@ -77,7 +77,11 @@ _Static_assert(sizeof(WakeMsg) <= PIPE_BUF,
 
 /* ── Child types and tracking ───────────────────────────────────── */
 
-typedef enum { CHILD_CHANNEL, CHILD_TOOL_EXEC } ChildType;
+/* CHILD_CRON_SCRIPT is a --run-tool child like CHILD_TOOL_EXEC — same fork,
+ * same JS tier, same result pipe — answering a cron fire instead of a model
+ * tool call, so its completion posts a cron_result (or an inbox row) rather
+ * than a tool result. */
+typedef enum { CHILD_CHANNEL, CHILD_TOOL_EXEC, CHILD_CRON_SCRIPT } ChildType;
 
 typedef struct {
     pid_t pid;
@@ -107,6 +111,10 @@ typedef struct {
     char channel_name[64];
     char binary_path[512];
     int restart_count;
+    /* CRON_SCRIPT fields */
+    char cron_job[80];      /* job name — the result's source_ref / data.job */
+    char *cron_prompt;      /* 'both' payload: rides one inbox row with the
+                             * script output; NULL for a script-only fire */
     /* Deadline: 0 = no timeout, >0 = SIGKILL after this time */
     time_t deadline;
     int timeout_sec;        /* window used for `deadline`, for the timeout message */
@@ -135,8 +143,16 @@ static void child_remove(ChildProc *c) {
     c->hosts_json = NULL;
     free(c->tool_args);
     c->tool_args = NULL;
+    free(c->cron_prompt);
+    c->cron_prompt = NULL;
     g_children[idx] = g_children[g_child_count - 1];
     g_child_count--;
+}
+
+/* Both --run-tool child kinds: forked, sandboxed, answering over a result
+ * pipe. Everything that polls or drains those pipes covers both. */
+static int child_is_run_tool(const ChildProc *c) {
+    return c->type == CHILD_TOOL_EXEC || c->type == CHILD_CRON_SCRIPT;
 }
 
 static int child_has_session(int64_t session_id) {
@@ -175,6 +191,7 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
                                 const char *tool_args, int64_t iteration_id,
                                 int64_t entry_id, const char *blob, size_t blob_len,
                                 int timeout_sec);
+static void cron_script_post(ChildProc *c, const char *output, const char *hosts);
 
 static sqlite3 *g_db;
 static Config *g_cfg;
@@ -1019,6 +1036,78 @@ static const char *dispatch_scratch_dir(const char *agent_name,
     return r;
 }
 
+/* Serialize one SBX_JS --run-tool request. Everything that makes it a JS-tier
+ * request — the agent's sandbox profile, its grant mounts, the read-only
+ * extension store, the proxy egress snapshot — is the same whether the caller
+ * is a model tool call or a scheduled cron script; only the params and the
+ * egress key differ, so those come in as arguments. `params` is consumed
+ * (wiped and freed) either way. Returns the blob (caller wipes + frees) with
+ * *out_len set, or NULL if it exceeds the wire cap. */
+static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
+                                  const char *egress_tool, const char *egress_args,
+                                  int skip_bind, const char *sens_host,
+                                  const ShellSecret *secrets, size_t secret_count,
+                                  ToolWireArg *params, size_t param_n,
+                                  size_t *out_len) {
+    char agent_dir[PATH_MAX];
+    agent_dir_resolve(jc->workspace, jc->db_path, agent_dir, sizeof(agent_dir));
+
+    /* Mount the shared extension store read-only (<db_dir>/extensions), in
+     * addition to the agent's own read grants, so promoted handler files
+     * load without an explicit grant. Build a transient read-path array. */
+    char store_dir[PATH_MAX] = {0};
+    int have_store = 0;
+    if (jc->db_path && jc->db_path[0]) {
+        char tmp[PATH_MAX - 16];
+        snprintf(tmp, sizeof(tmp), "%s", jc->db_path);
+        char *sl = strrchr(tmp, '/');
+        if (sl) {
+            *sl = '\0';
+            snprintf(store_dir, sizeof(store_dir), "%s/extensions", tmp);
+            struct stat sb;
+            if (stat(store_dir, &sb) == 0 && S_ISDIR(sb.st_mode)) have_store = 1;
+        }
+    }
+    size_t rc_count = jc->sb.read_path_count + (have_store ? 1 : 0);
+    const char **read_paths = NULL;
+    if (rc_count > 0) {
+        read_paths = malloc(rc_count * sizeof(*read_paths));
+        if (read_paths) {
+            size_t k = 0;
+            for (size_t i = 0; i < jc->sb.read_path_count; i++)
+                read_paths[k++] = jc->sb.read_paths[i];
+            if (have_store) read_paths[k++] = store_dir;
+        } else {
+            rc_count = 0;
+        }
+    }
+
+    RunToolReq req;
+    run_tool_req_init(&req, RUNTOOL_TIER_JS, "js_eval",
+                      &jc->sb, jc->workspace, jc->cwd_path, jc->db_path);
+    char scratch[PATH_MAX];
+    req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
+    req.params = params;
+    req.param_count = param_n;
+    req.read_paths = read_paths;  /* transient override: + extension store */
+    req.read_count = rc_count;
+    req.agent_dir = agent_dir;
+    CallEgress se;
+    call_egress_build(&se, egress_tool, egress_args, skip_bind, sens_host,
+                      jc->allowed_hosts, jc->allowed_hosts_count,
+                      secrets, secret_count);
+    req.host_rules = se.hosts;
+    req.host_count = se.hosts_n;
+    req.deny_rules = (const char **)se.deny;
+    req.deny_count = se.deny_n;
+    req.timeout = 120;
+    char *blob = run_tool_serialize_request(&req, out_len);
+    call_egress_free(&se);
+    free(read_paths);
+    tool_wire_args_wipe_free(params, param_n);
+    return blob;
+}
+
 static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                                PendingToolCall *tc,
                                const ShellSecret *secrets, size_t secret_count) {
@@ -1382,65 +1471,11 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         }
         wire_params_interpolate(params, param_n, secrets, secret_count);
 
-        char agent_dir[PATH_MAX];
-        agent_dir_resolve(jc->workspace, jc->db_path, agent_dir, sizeof(agent_dir));
-
-        /* Mount the shared extension store read-only (<db_dir>/extensions), in
-         * addition to the agent's own read grants, so promoted handler files
-         * load without an explicit grant. Build a transient read-path array. */
-        char store_dir[PATH_MAX] = {0};
-        int have_store = 0;
-        if (jc->db_path && jc->db_path[0]) {
-            char tmp[PATH_MAX - 16];
-            snprintf(tmp, sizeof(tmp), "%s", jc->db_path);
-            char *sl = strrchr(tmp, '/');
-            if (sl) {
-                *sl = '\0';
-                snprintf(store_dir, sizeof(store_dir), "%s/extensions", tmp);
-                struct stat sb;
-                if (stat(store_dir, &sb) == 0 && S_ISDIR(sb.st_mode)) have_store = 1;
-            }
-        }
-        size_t rc_count = jc->sb.read_path_count + (have_store ? 1 : 0);
-        const char **read_paths = NULL;
-        if (rc_count > 0) {
-            read_paths = malloc(rc_count * sizeof(*read_paths));
-            if (read_paths) {
-                size_t k = 0;
-                for (size_t i = 0; i < jc->sb.read_path_count; i++)
-                    read_paths[k++] = jc->sb.read_paths[i];
-                if (have_store) read_paths[k++] = store_dir;
-            } else {
-                rc_count = 0;
-            }
-        }
-
         size_t blob_len = 0;
-        RunToolReq req;
-        run_tool_req_init(&req, RUNTOOL_TIER_JS, "js_eval",
-                          &jc->sb, jc->workspace, jc->cwd_path,
-                          jc->db_path);
-        char scratch[PATH_MAX];
-        req.tmp_dir = dispatch_scratch_dir(agent_name, scratch, sizeof(scratch));
-        req.params = params;
-        req.param_count = param_n;
-        req.read_paths = read_paths;  /* transient override: + extension store */
-        req.read_count = rc_count;
-        req.agent_dir = agent_dir;
-        CallEgress se;
-        call_egress_build(&se, tc->name, tc->arguments, bind_once,
-                          sens_once ? sens_host : NULL,
-                          jc->allowed_hosts, jc->allowed_hosts_count,
-                          secrets, secret_count);
-        req.host_rules = se.hosts;
-        req.host_count = se.hosts_n;
-        req.deny_rules = (const char **)se.deny;
-        req.deny_count = se.deny_n;
-        req.timeout = 120;
-        char *blob = run_tool_serialize_request(&req, &blob_len);
-        call_egress_free(&se);
-        free(read_paths);
-        tool_wire_args_wipe_free(params, param_n);
+        char *blob = js_request_serialize(jc, agent_name, tc->name, tc->arguments,
+                                          bind_once, sens_once ? sens_host : NULL,
+                                          secrets, secret_count,
+                                          params, param_n, &blob_len);
         if (!blob)
             return tool_inline_error(session_id, tc,
                 "error: js request exceeds 32KB cap", NULL);
@@ -1578,7 +1613,7 @@ static void child_drain_pipe(ChildProc *c) {
 /* Append every live tool result pipe to a pollfd set being rebuilt. */
 static int add_result_pipe_fds(struct pollfd *pfds, int nfds, int max) {
     for (int i = 0; i < g_child_count && nfds < max; i++) {
-        if (g_children[i].type == CHILD_TOOL_EXEC && g_children[i].result_pipe >= 0) {
+        if (child_is_run_tool(&g_children[i]) && g_children[i].result_pipe >= 0) {
             pfds[nfds].fd = g_children[i].result_pipe;
             pfds[nfds].events = POLLIN;
             nfds++;
@@ -1592,7 +1627,7 @@ static void drain_ready_result_pipes(const struct pollfd *pfds, int base, int nf
     for (int i = base; i < nfds; i++) {
         if (!(pfds[i].revents & (POLLIN | POLLHUP))) continue;
         for (int j = 0; j < g_child_count; j++) {
-            if (g_children[j].type == CHILD_TOOL_EXEC &&
+            if (child_is_run_tool(&g_children[j]) &&
                 g_children[j].result_pipe == pfds[i].fd) {
                 child_drain_pipe(&g_children[j]);
                 break;
@@ -1610,18 +1645,17 @@ static char g_log_level_env[32] = "CCLAW_LOG_LEVEL=info";
 
 #define FD_REQUEST RUNTOOL_FD_REQUEST  /* the socketpair fd in the child */
 
-/* Spawn a sandboxed tool child via fork+execve. The request blob is sent
- * over a socketpair (fd 3 in the child). Returns 0 on success (child is
- * registered in g_children), -1 on failure (error result written inline). */
-static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
-                                const char *tool_call_id, const char *tool_name,
-                                const char *tool_args, int64_t iteration_id,
-                                int64_t entry_id, const char *blob, size_t blob_len,
-                                int timeout_sec) {
-    if (g_child_count >= CHILD_MAX) return -1;
+/* Spawn a sandboxed --run-tool child via fork+execve and register it. The
+ * request blob is sent over a socketpair (fd 3 in the child). Returns the
+ * child's slot (caller fills the kind-specific fields) or NULL if the ceiling
+ * is reached, the socketpair fails, or the fork/write fails. */
+static ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
+                                      const char *agent_name, const char *blob,
+                                      size_t blob_len, int timeout_sec) {
+    if (g_child_count >= CHILD_MAX) return NULL;
 
     int sp[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) != 0) return -1;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) != 0) return NULL;
 
     /* sp[0] = parent side, sp[1] = child side (becomes fd 3) */
     /* Set O_CLOEXEC on parent side so it doesn't leak into other children */
@@ -1631,7 +1665,7 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
     pid_t pid = fork();
     if (pid < 0) {
         close(sp[0]); close(sp[1]);
-        return -1;
+        return NULL;
     }
     if (pid == 0) {
         /* CHILD: async-signal-safe only. No malloc, no stdio, no snprintf. */
@@ -1661,7 +1695,7 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
         if (w <= 0) {
             close(sp[0]);
             waitpid(pid, NULL, 0);
-            return -1;
+            return NULL;
         }
         written += w;
     }
@@ -1673,20 +1707,113 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
     ChildProc *c = &g_children[g_child_count++];
     memset(c, 0, sizeof(*c));
     c->pid = pid;
-    c->type = CHILD_TOOL_EXEC;
+    c->type = type;
     c->session_id = session_id;
-    c->iteration_id = iteration_id;
-    c->entry_id = entry_id;
     c->result_pipe = sp[0];
-    c->outbuf = NULL;
-    c->outbuf_len = 0;
     c->timeout_sec = timeout_sec > 0 ? timeout_sec : 120;
     c->deadline = time(NULL) + c->timeout_sec;
-    snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name);
+    snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name ? agent_name : "");
+    return c;
+}
+
+/* Spawn a sandboxed tool child. Returns 0 on success (child is registered in
+ * g_children), -1 on failure (caller writes the error result inline). */
+static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
+                                const char *tool_call_id, const char *tool_name,
+                                const char *tool_args, int64_t iteration_id,
+                                int64_t entry_id, const char *blob, size_t blob_len,
+                                int timeout_sec) {
+    ChildProc *c = spawn_run_tool_blob(CHILD_TOOL_EXEC, session_id, agent_name,
+                                       blob, blob_len, timeout_sec);
+    if (!c) return -1;
+    c->iteration_id = iteration_id;
+    c->entry_id = entry_id;
     snprintf(c->tool_call_id, sizeof(c->tool_call_id), "%s", tool_call_id);
     snprintf(c->tool_name, sizeof(c->tool_name), "%s", tool_name);
     c->tool_args = tool_args ? strdup(tool_args) : NULL;
     return 0;
+}
+
+/* ── cron script fires ──────────────────────────────────────────────
+ * The daemon's half of cron.c's script dispatcher: resolve the file inside the
+ * TARGET agent's workspace, build exactly the SBX_JS request a js_eval call
+ * would, and fork it. Refreshing caps to the target agent first is what makes
+ * "runs under that agent's sandbox_profile and grants" true — the shared setup
+ * is rebound before every tool batch anyway, so borrowing it here between
+ * turns costs nothing on the single event-loop thread. {{SECRET:name}} is
+ * deliberately not interpolated: a cron script is a file on disk, not a
+ * model-written argument, so there is no argument to substitute into. */
+static CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len) {
+    if (!g_tool_setup || !g_db) {
+        snprintf(err, err_len, "the daemon cannot run scripts right now");
+        return CRON_SCRIPT_FAILED;
+    }
+    if (g_child_count >= CHILD_MAX) return CRON_SCRIPT_BUSY;
+
+    agent_setup_refresh_caps(g_tool_setup, g_db, f->agent_name);
+    JsEvalCtx *jc = &g_tool_setup->js_eval_ctx;
+    if (!jc->workspace || !jc->workspace[0]) {
+        snprintf(err, err_len, "agent '%s' has no workspace", f->agent_name);
+        return CRON_SCRIPT_FAILED;
+    }
+    /* Two legal shapes, re-validated at fire time (cron_set checked when the
+     * job was written, but the job outlives that check): a workspace-relative
+     * path — what an agent may name — or an absolute path inside the shared
+     * extension store, which is what a promoted extension's scheduled script
+     * is and which the JS child already mounts read-only. Nothing else. */
+    char full[PATH_MAX];
+    struct stat sb;
+    int n;
+    if (f->script[0] == '/') {
+        n = snprintf(full, sizeof(full), "%s", f->script);
+        if (n <= 0 || (size_t)n >= sizeof(full) ||
+            !extension_path_in_store(g_db, full)) {
+            snprintf(err, err_len, "script '%s' is outside the extension store",
+                     f->script);
+            return CRON_SCRIPT_FAILED;
+        }
+    } else {
+        n = snprintf(full, sizeof(full), "%s/%s", jc->workspace, f->script);
+        if (strstr(f->script, "..") || n <= 0 || (size_t)n >= sizeof(full)) {
+            snprintf(err, err_len, "script '%s' is not a workspace-relative path",
+                     f->script);
+            return CRON_SCRIPT_FAILED;
+        }
+    }
+    if (stat(full, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+        snprintf(err, err_len, "script '%s' is missing or not a file", full);
+        return CRON_SCRIPT_FAILED;
+    }
+
+    ToolWireArg *params = calloc(1, sizeof(*params));
+    if (params) {
+        params[0].key = strdup("filename");
+        params[0].kind = TOOL_ARG_TEXT;
+        params[0].value = strdup(full);
+    }
+    if (!params || !params[0].key || !params[0].value) {
+        tool_wire_args_free(params, params ? 1 : 0);
+        snprintf(err, err_len, "out of memory building the script request");
+        return CRON_SCRIPT_FAILED;
+    }
+
+    size_t blob_len = 0;
+    char *blob = js_request_serialize(jc, f->agent_name, "js_eval", "{}",
+                                      0, NULL, NULL, 0, params, 1, &blob_len);
+    if (!blob) {
+        snprintf(err, err_len, "the script request exceeds the 32KB wire cap");
+        return CRON_SCRIPT_FAILED;
+    }
+    ChildProc *c = spawn_run_tool_blob(CHILD_CRON_SCRIPT, f->session_id,
+                                       f->agent_name, blob, blob_len, 150);
+    explicit_bzero(blob, blob_len);
+    free(blob);
+    if (!c) return CRON_SCRIPT_BUSY;
+    snprintf(c->cron_job, sizeof(c->cron_job), "%s", f->job_name ? f->job_name : "");
+    c->cron_prompt = f->prompt ? strdup(f->prompt) : NULL;
+    LOG_INFO_("cron script fork job=%s agent=%s session=%lld",
+              c->cron_job, f->agent_name, (long long)f->session_id);
+    return CRON_SCRIPT_SPAWNED;
 }
 
 /* ── reap_children (state machine) ──────────────────────────────── */
@@ -1742,6 +1869,15 @@ static void child_sweep_deadlines(void) {
                            .tool_name = "", .is_error = 1};
             entry_append_with_iteration(g_db, c->session_id, &msg, c->iteration_id);
             db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, -1);
+        } else if (c->type == CHILD_CRON_SCRIPT) {
+            if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
+            free(c->outbuf); c->outbuf = NULL; c->outbuf_len = 0;
+            char errbuf[96];
+            snprintf(errbuf, sizeof(errbuf), "error: cron script timed out (%ds)",
+                     c->timeout_sec > 0 ? c->timeout_sec : 120);
+            /* is_error=1 keeps the failure visible in-session and countable by
+             * the job's auto-pause streak. */
+            cron_script_post(c, errbuf, NULL);
         }
         c->deadline = -1; /* mark consumed so reap doesn't double-advance */
     }
@@ -2865,6 +3001,147 @@ static void deliver_response(int64_t session_id) {
     free(chat_id);
 }
 
+/* Everything a reaped --run-tool child's output goes through before anybody
+ * decides what to *do* with it: drain the rest of the pipe, synthesize an
+ * error for a crash that said nothing, strip invisible Unicode from anything
+ * that touched the network, then explicit capture + the secret scan. Shared by
+ * the tool-result path and the cron script path — the security steps must not
+ * fork into two versions. *hosts_out borrows the child's meta (NULL when the
+ * run had no network exposure). Returns heap output the caller frees. */
+static char *child_output_finalize(ChildProc *c, int status, char **hosts_out) {
+    /* Crash detection: signal or nonzero exit → synthesize error */
+    int crashed = WIFSIGNALED(status) ||
+                  (WIFEXITED(status) && WEXITSTATUS(status) != 0);
+
+    child_drain_pipe(c);
+    if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
+
+    char *output;
+    if (crashed && (!c->outbuf || c->outbuf_len == 0)) {
+        char err[128];
+        if (WIFSIGNALED(status))
+            snprintf(err, sizeof(err), "error: tool killed by signal %d", WTERMSIG(status));
+        else
+            snprintf(err, sizeof(err), "error: tool exited %d", WEXITSTATUS(status));
+        output = strdup(err);
+    } else if (c->outbuf) {
+        output = c->outbuf;
+        c->outbuf = NULL;          /* ownership moves to the caller */
+        c->outbuf_len = 0;
+    } else {
+        output = strdup("");
+    }
+    if (!output) output = strdup("error: OOM");
+    size_t out_len = output ? strlen(output) : 0;
+
+    /* Network provenance: a non-empty hosts tag marks the result as
+     * untrusted external content. Strip invisible Unicode NOW so the
+     * query-time wrap in llm_payload can't be broken out of.
+     * Fail closed on a damaged signal: a truncated or oversized-
+     * dropped meta means we can't prove the result had no network
+     * exposure — sanitize as if it did, and record no hosts tag
+     * (never a partial one). Only an explicit zero-length meta
+     * (non-network tier / error frame) skips the strip. */
+    char *hosts = c->hosts_json;
+    int meta_damaged = c->frame_meta_len > 0 &&
+        (!c->hosts_json || c->frame_meta_read != c->frame_meta_len);
+    if (meta_damaged ||
+        (hosts && (hosts[0] == '\0' || strcmp(hosts, "[]") == 0)))
+        hosts = NULL;
+    if (hosts || meta_damaged) {
+        size_t slen = out_len;
+        char *st = unicode_strip_invisible(output, slen, &slen);
+        if (st) { free(output); output = st; }
+    }
+    /* (Forged fence markers are neutralized for ALL results —
+     * network-tagged or not — inside tool_result_postprocess.) */
+
+    /* Explicit capture first (raw result), then postprocess:
+     * deinterpolate + scan/redact. Fresh per-call snapshot (same
+     * rationale as dispatch_tool) — a secret born mid-session must
+     * be maskable in a reaped sandboxed child's output too. */
+    if (c->tool_args) {
+        char *cap = secret_capture_apply(g_db, c->tool_args, output);
+        if (cap) { free(output); output = cap; }
+    }
+    { size_t snap_n = 0;
+      ShellSecret *snap = secrets_snapshot(g_db,
+          g_tool_setup ? g_tool_setup->secrets : NULL,
+          g_tool_setup ? g_tool_setup->secret_count : 0, &snap_n);
+      char *pp = tool_result_postprocess(output, snap, snap_n);
+      secrets_snapshot_free(snap, snap_n);
+      if (pp) { free(output); output = pp; } }
+
+    *hosts_out = hosts;
+    return output;
+}
+
+static char *cron_inbox_payload(const char *prompt, const char *out) {
+    const char *head = prompt ? prompt : "";
+    const char *sep = prompt ? "\n\n" : "";
+    size_t n = strlen(head) + strlen(sep) + sizeof("script output:\n") + strlen(out);
+    char *s = malloc(n);
+    if (s) snprintf(s, n, "%s%sscript output:\n%s", head, sep, out);
+    return s;
+}
+
+/* A finished cron script's output enters the session. Two doors, and which one
+ * is legal depends on the clock: between turns the result is appended straight
+ * to the branch as a cron_result entry (a boundary is exactly where an entry
+ * may be born) and ordinary delivery carries it out; mid-turn that write would
+ * break the mid-turn invariant, so it queues as an inbox row instead and
+ * drains as an annotated user entry at the next boundary. A 'both' payload
+ * always takes the inbox door — prompt and script output must arrive as one
+ * user entry, which is what starts the turn that reads them. */
+static void cron_script_post(ChildProc *c, const char *output, const char *hosts) {
+    int64_t sid = c->session_id;
+    int is_err = (strncmp(output, "error:", 6) == 0);
+    char *clean = utf8_sanitize(output, strlen(output));
+    const char *text = clean ? clean : output;
+
+    LOG_INFO_("cron script done job=%s session=%lld is_err=%d",
+              c->cron_job, (long long)sid, is_err);
+
+    if (c->cron_prompt) {
+        char *payload = cron_inbox_payload(c->cron_prompt, text);
+        if (payload) {
+            inbox_insert_scanned(g_db, sid, "cron", c->cron_job, payload);
+            free(payload);
+        }
+        wake_session(sid);
+        free(clean);
+        return;
+    }
+
+    int idle = db_scalar_i64(g_db, "SELECT state='idle' FROM sessions WHERE id=?;",
+                             sid, 0) == 1;
+    if (!idle) {
+        char *payload = cron_inbox_payload(NULL, text);
+        if (payload) {
+            inbox_insert(g_db, sid, "cron", c->cron_job, payload);
+            free(payload);
+        }
+        wake_session(sid);
+        free(clean);
+        return;
+    }
+
+    int64_t rid = entry_append_cron_result(g_db, sid, c->cron_job, text, is_err);
+    if (rid > 0 && hosts) db_entry_set_network_hosts(g_db, rid, hosts);
+    free(clean);
+
+    /* Ordinary delivery, chosen by what the session is bound to: a chat gets
+     * the outbox row, a parented fire (scheduled launch_agent) pushes to its
+     * parent. A plain session keeps the entry and says nothing — the model
+     * reads it on its next turn. */
+    char *chan = db_scalar_text(g_db,
+        "SELECT channel_name FROM sessions WHERE id=? AND chat_id IS NOT NULL;", sid);
+    if (chan) { deliver_response(sid); free(chan); return; }
+    if (db_scalar_i64(g_db, "SELECT parent_session_id FROM sessions WHERE id=?;",
+                      sid, -1) > 0)
+        advance_notify_parent(g_db, sid, is_err);
+}
+
 static void reap_children(void) {
     int status;
     pid_t pid;
@@ -2873,6 +3150,18 @@ static void reap_children(void) {
         if (!c) {
             /* Check if it's a channel process */
             channel_reap(pid, g_db);
+            continue;
+        }
+
+        if (c->type == CHILD_CRON_SCRIPT) {
+            int64_t session_id = c->session_id;
+            if (c->deadline == -1) { child_remove(c); continue; }  /* swept */
+            char *hosts = NULL;
+            char *output = child_output_finalize(c, status, &hosts);
+            cron_script_post(c, output, hosts);
+            free(output);
+            child_remove(c);
+            run_advance(session_id);
             continue;
         }
 
@@ -2886,67 +3175,9 @@ static void reap_children(void) {
                 continue;
             }
 
-            /* Crash detection: signal or nonzero exit → synthesize error */
-            int crashed = WIFSIGNALED(status) ||
-                          (WIFEXITED(status) && WEXITSTATUS(status) != 0);
-
-            /* Drain what's left */
-            child_drain_pipe(c);
-            if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
-
-            char *output;
-            if (crashed && (!c->outbuf || c->outbuf_len == 0)) {
-                /* No output and child crashed — synthesize error */
-                char err[128];
-                if (WIFSIGNALED(status))
-                    snprintf(err, sizeof(err), "error: tool killed by signal %d", WTERMSIG(status));
-                else
-                    snprintf(err, sizeof(err), "error: tool exited %d", WEXITSTATUS(status));
-                output = strdup(err);
-            } else if (c->outbuf) {
-                output = c->outbuf;
-            } else {
-                output = strdup("");
-            }
-            size_t out_len = output ? strlen(output) : 0;
-            if (!output) output = strdup("error: OOM");
-
-            /* Network provenance: a non-empty hosts tag marks the result as
-             * untrusted external content. Strip invisible Unicode NOW so the
-             * query-time wrap in llm_payload can't be broken out of.
-             * Fail closed on a damaged signal: a truncated or oversized-
-             * dropped meta means we can't prove the result had no network
-             * exposure — sanitize as if it did, and record no hosts tag
-             * (never a partial one). Only an explicit zero-length meta
-             * (non-network tier / error frame) skips the strip. */
-            char *hosts = c->hosts_json;
-            int meta_damaged = c->frame_meta_len > 0 &&
-                (!c->hosts_json || c->frame_meta_read != c->frame_meta_len);
-            if (meta_damaged ||
-                (hosts && (hosts[0] == '\0' || strcmp(hosts, "[]") == 0)))
-                hosts = NULL;
-            if (hosts || meta_damaged) {
-                size_t slen = out_len;
-                char *st = unicode_strip_invisible(output, slen, &slen);
-                if (st) { free(output); output = st; }
-                out_len = strlen(output);
-            }
-            /* (Forged fence markers are neutralized for ALL results —
-             * network-tagged or not — inside tool_result_postprocess.) */
-
-            /* Explicit capture first (raw result), then postprocess:
-             * deinterpolate + scan/redact. Fresh per-call snapshot (same
-             * rationale as dispatch_tool) — a secret born mid-session must
-             * be maskable in a reaped sandboxed child's output too. */
-            { char *cap = secret_capture_apply(g_db, c->tool_args, output);
-              if (cap) { free(output); output = cap; out_len = strlen(output); } }
-            { size_t snap_n = 0;
-              ShellSecret *snap = secrets_snapshot(g_db,
-                  g_tool_setup ? g_tool_setup->secrets : NULL,
-                  g_tool_setup ? g_tool_setup->secret_count : 0, &snap_n);
-              char *pp = tool_result_postprocess(output, snap, snap_n);
-              secrets_snapshot_free(snap, snap_n);
-              if (pp) { free(output); output = pp; out_len = strlen(output); } }
+            char *hosts = NULL;
+            char *output = child_output_finalize(c, status, &hosts);
+            size_t out_len = strlen(output);
 
             /* afterToolCall hooks: chained result replacement, post-scanner,
              * pre-write (same contract as the inline dispatch path). The
@@ -2996,9 +3227,6 @@ static void reap_children(void) {
             }
             free(stored);
             free(output);
-            c->outbuf = NULL;
-            c->outbuf_len = 0;
-
             child_remove(c);
             run_advance(session_id);
         }
@@ -3215,6 +3443,8 @@ static int run_daemon(char *db_path) {
     daemon_setup.req_cfg_ctx.agents_dir = daemon_agents_dir;
     daemon_setup.req_cfg_ctx.agent_name = g_agent_name;
     g_tool_setup = &daemon_setup;
+    /* Scheduled scripts need the child table, which only the daemon has. */
+    cron_set_script_runner(cron_script_run);
 
     printf("cclaw %s — daemon mode\n", CCLAW_VERSION);
     /* Resolved config, once, at default verbosity: a daemon that talks to the
@@ -3352,6 +3582,7 @@ static int run_daemon(char *db_path) {
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
     wake_close(); wake_fifo_close(fifo_fd, db_path);
     process_unregister(g_db, g_instance_id);
+    cron_set_script_runner(NULL);
     g_tool_setup = NULL;
     agent_setup_destroy(&daemon_setup);
     config_free(g_cfg); db_close(g_db); free(db_path);

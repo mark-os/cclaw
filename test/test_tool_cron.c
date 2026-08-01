@@ -366,10 +366,10 @@ static void test_bad_expr_message_is_distinct(void) {
 /* ── script paths ────────────────────────────────────────────────────── */
 
 static void ws_reset(void) {
-    unlink(WS "/report.js");
+    unlink(WS "/report.qjs");
     rmdir(WS);
     assert(mkdir(WS, 0700) == 0 || 1);
-    FILE *f = fopen(WS "/report.js", "w");
+    FILE *f = fopen(WS "/report.qjs", "w");
     assert(f);
     fputs("1;\n", f);
     fclose(f);
@@ -388,17 +388,20 @@ static void test_script_paths(void) {
         "{\"name\":\"s\",\"in_seconds\":600,\"script\":\"../escape.js\"}",
         "stay inside your workspace", "escaping script path");
     expect_error(db, sid, "A",
-        "{\"name\":\"s\",\"in_seconds\":600,\"script\":\"missing.js\"}",
+        "{\"name\":\"s\",\"in_seconds\":600,\"script\":\"report.js\"}",
+        "must end in .qjs", "wrong extension refused at set time");
+    expect_error(db, sid, "A",
+        "{\"name\":\"s\",\"in_seconds\":600,\"script\":\"missing.qjs\"}",
         "does not exist", "missing script file");
     assert(job_total(db) == 0);
 
     char *r = tool_cron_set_handler(
-        "{\"name\":\"s\",\"in_seconds\":600,\"script\":\"report.js\"}", &ctx);
+        "{\"name\":\"s\",\"in_seconds\":600,\"script\":\"report.qjs\"}", &ctx);
     assert(r && strstr(r, "created"));
     assert(strstr(r, "payload: script"));
     free(r);
     char *v = job_text(db, "script", "s");
-    assert(v && strcmp(v, "report.js") == 0);   /* stored workspace-relative */
+    assert(v && strcmp(v, "report.qjs") == 0);   /* stored workspace-relative */
     free(v);
 
     /* prompt + script compose. */

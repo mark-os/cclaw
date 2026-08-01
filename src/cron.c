@@ -649,45 +649,370 @@ static int has_pending_heartbeat(sqlite3 *db, int64_t session_id) {
     return found;
 }
 
-/* One due row's payload and schedule, collected before any write (an open
- * SELECT pins a WAL read snapshot; a write that needs a snapshot upgrade
+/* One due row's payload, target and schedule, collected before any write (an
+ * open SELECT pins a WAL read snapshot; a write that needs a snapshot upgrade
  * would get an immediate SQLITE_BUSY). */
 typedef struct {
     int64_t id, session_id, run_at, interval_s;
-    char *expr, *task, *agent_name, *kind;
+    char *name, *expr, *task, *script, *agent_name, *kind;
+    char *target, *target_agent, *channel, *chat;
 } DueJob;
 
-/* Inject a due job into the resolved session and wake the daemon. Heartbeat
- * kind resolves to the agent's most recent idle session (skips silently if
- * none, or if a pulse is already pending); task kind resolves session_id=0 to
- * the most recent session (WARN-skips if the agent has none). */
+/* ── fire-time helpers ────────────────────────────────────────────────
+ * Everything below resolves at FIRE time, never set time: the durable
+ * identities are the chat and the agent, and sessions are disposable in front
+ * of both. Early binding is how a job goes quietly stale. */
+
+static int session_exists(sqlite3 *db, int64_t sid) {
+    return sid > 0 && db_scalar_i64(db, "SELECT 1 FROM sessions WHERE id=?;",
+                                    sid, 0) == 1;
+}
+
+static int session_is_idle(sqlite3 *db, int64_t sid) {
+    return db_scalar_i64(db,
+        "SELECT state='idle' FROM sessions WHERE id=?;", sid, 1) == 1;
+}
+
+/* The session a chat is routed to *right now*, plus the fire-time re-check of
+ * the authority cron_set validated at set time (grants and routes move in
+ * between). 1 = routed here and ours (*out set); 0 = the chat has no route;
+ * -1 = routed to a different agent, so this fire has lost authority. */
+static int routed_session(sqlite3 *db, const char *chan, const char *chat,
+                          const char *agent, int64_t *out) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT r.session_id, s.agent_name FROM channel_routes r"
+            " JOIN sessions s ON s.id=r.session_id"
+            " WHERE r.channel_name=?1 AND r.chat_id=?2;",
+            -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, chan, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, chat, -1, SQLITE_STATIC);
+    int rc = 0;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *owner = (const char *)sqlite3_column_text(st, 1);
+        if (owner && agent && strcmp(owner, agent) == 0) {
+            *out = sqlite3_column_int64(st, 0);
+            rc = 1;
+        } else {
+            rc = -1;
+        }
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
+/* True when this job's previous fire is still sitting undrained in the target
+ * session's inbox. One outstanding fire per job: "every 30 seconds" self-paces
+ * to the session's actual consumption rate. Rides idx_inbox_pending. */
+static int fire_pending(sqlite3 *db, int64_t sid, const char *name) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM inbox WHERE session_id=?1 AND consumed=0"
+            " AND source='cron' AND source_ref=?2 LIMIT 1;",
+            -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(st, 1, sid);
+    sqlite3_bind_text(st, 2, name ? name : "", -1, SQLITE_STATIC);
+    int found = (sqlite3_step(st) == SQLITE_ROW);
+    sqlite3_finalize(st);
+    return found;
+}
+
+static void job_exec(sqlite3 *db, const char *sql, int64_t id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(st, 1, id);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+/* A fire that cannot happen reports to the job owner's own conversation.
+ * source='cron_error' (not 'cron') so the drain tags it distinctly and the
+ * streak below counts it as a failed fire; an agent that has never run a
+ * session has nowhere to hear it, which leaves only the log line. */
+static void fire_error(sqlite3 *db, const DueJob *j, const char *why) {
+    LOG_WARN_("cron fire failed job=%lld name=%s: %s", (long long)j->id,
+              j->name ? j->name : "", why);
+    int64_t owner = recent_session(db, j->agent_name, 0);
+    if (owner == 0) return;
+    char text[640];
+    snprintf(text, sizeof(text), "cron job '%s' did not fire: %s",
+             j->name ? j->name : "?", why);
+    inbox_insert(db, owner, "cron_error", j->name, text);
+    wake_session(owner);
+}
+
+/* Fire-to-fire spacing, used only to bound the streak query's look-back. A
+ * window that is too short finds fewer fires and the job keeps running — the
+ * fail-open direction. */
+static int64_t fire_spacing(const DueJob *j, int64_t now) {
+    if (j->interval_s > 0) return j->interval_s;
+    if (j->expr && j->expr[0]) {
+        int64_t n1 = cron_next_run(j->expr, now);
+        int64_t n2 = (n1 > 0) ? cron_next_run(j->expr, n1) : -1;
+        if (n1 > 0 && n2 > n1) return n2 - n1;
+    }
+    return 3600;
+}
+
+/* The last CRON_FAIL_STREAK outcomes of this job, derived — there is no
+ * counter column, because the outcomes already live in entries and a counter
+ * could drift from them. A fire shows up three ways, one per payload kind:
+ *   script  → its own cron_result entry, is_error says how it went;
+ *   prompt  → the drained user entry (data.source='cron'), judged by the last
+ *             assistant entry of the turn it opened (stop_reason 4 = error);
+ *   refused → the cron_error notice this fire path wrote.
+ * A turn still in flight reads as not-failed, so an in-progress job is never
+ * paused on incomplete evidence. Returns 1 when every one of the last three
+ * fires failed, with *detail set to the newest error text. */
+#define CRON_FAIL_STREAK 3
+
+static int fire_streak_tripped(sqlite3 *db, const DueJob *j, int64_t now,
+                               char *detail, size_t detail_len) {
+    const char *sql =
+        "WITH fires AS ("
+        "  SELECT e.id AS id,"
+        "    CASE WHEN e.type='cron_result' THEN e.is_error"
+        "         WHEN json_extract(e.data,'$.source')='cron_error' THEN 1"
+        /* 4 = STOP_REASON_ERROR (db.c stop_reason_to_int). */
+        /* type, not just role: reasoning and tool_call parts are role 2 too,
+         * and a cron_result appended after the turn inherits its turn_id —
+         * none of those is the turn's verdict. */
+        "         ELSE COALESCE((SELECT a.stop_reason=4 FROM entries a"
+        "                         WHERE a.session_id=e.session_id"
+        "                           AND a.turn_id=e.turn_id"
+        "                           AND a.type='assistant_message'"
+        "                         ORDER BY a.id DESC LIMIT 1), 0) END AS failed,"
+        "    CASE WHEN e.type='cron_result'"
+        "           OR json_extract(e.data,'$.source')='cron_error' THEN e.content"
+        "         ELSE (SELECT a.content FROM entries a"
+        "                WHERE a.session_id=e.session_id AND a.turn_id=e.turn_id"
+        "                  AND a.type='assistant_message'"
+        "                ORDER BY a.id DESC LIMIT 1) END AS detail"
+        "  FROM entries e JOIN sessions s ON s.id=e.session_id"
+        "  WHERE e.created_at >= ?2 AND s.agent_name IN (?3, ?4)"
+        "    AND ((e.type='cron_result' AND json_extract(e.data,'$.job')=?1)"
+        "         OR (json_extract(e.data,'$.source') IN ('cron','cron_error')"
+        "             AND json_extract(e.data,'$.source_ref')=?1))"
+        "  ORDER BY e.id DESC LIMIT ?5"
+        ") SELECT COUNT(*), COALESCE(SUM(failed),0),"
+        "  (SELECT substr(COALESCE(detail,''),1,200) FROM fires"
+        "    ORDER BY id DESC LIMIT 1) FROM fires;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    const char *tagent = (j->target_agent && j->target_agent[0])
+                       ? j->target_agent : j->agent_name;
+    sqlite3_bind_text(st, 1, j->name ? j->name : "", -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, now - (CRON_FAIL_STREAK + 1) * fire_spacing(j, now) - 60);
+    sqlite3_bind_text(st, 3, j->agent_name ? j->agent_name : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, tagent ? tagent : "", -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 5, CRON_FAIL_STREAK);
+    int tripped = 0;
+    if (sqlite3_step(st) == SQLITE_ROW &&
+        sqlite3_column_int(st, 0) == CRON_FAIL_STREAK &&
+        sqlite3_column_int(st, 1) == CRON_FAIL_STREAK) {
+        const char *d = (const char *)sqlite3_column_text(st, 2);
+        snprintf(detail, detail_len, "%s", d ? d : "");
+        tripped = 1;
+    }
+    sqlite3_finalize(st);
+    return tripped;
+}
+
+/* Auto-pause. The notice goes in as plain 'system' provenance, not as a fire —
+ * it is about the job, and counting it as one would poison the streak the next
+ * time the job is enabled. */
+static void pause_job(sqlite3 *db, const DueJob *j, const char *detail) {
+    job_exec(db, "UPDATE cron_jobs SET enabled=0 WHERE id=?;", j->id);
+    LOG_WARN_("cron auto-pause job=%lld name=%s after %d failed fires",
+              (long long)j->id, j->name ? j->name : "", CRON_FAIL_STREAK);
+    int64_t owner = recent_session(db, j->agent_name, 0);
+    if (owner == 0) return;
+    char text[768];
+    snprintf(text, sizeof(text),
+             "cron job '%s' is paused: %d consecutive fires failed. Last error: %s. "
+             "Fix it and set the job again with the same name to re-enable it; "
+             "'cclaw --doctor' lists paused jobs.",
+             j->name ? j->name : "?", CRON_FAIL_STREAK,
+             (detail && detail[0]) ? detail : "(none recorded)");
+    inbox_insert(db, owner, "system", NULL, text);
+    wake_session(owner);
+}
+
+/* target 'new': one session per fire — fresh context is the point, and a job
+ * reusing one session would drag every prior fire's turns into the next one.
+ * Channel fields stamp the chat so ordinary delivery reaches it; without them
+ * the session is parented to the late-resolved owner and its result rides the
+ * existing notify_parent push. That is scheduled launch_agent(background), so
+ * no new delivery machinery exists here. The route is deliberately NOT
+ * re-pinned: a human reply to the report goes to the chat's own session (the
+ * accepted reply-context gap). */
+static int64_t fresh_session(sqlite3 *db, const DueJob *j, const char *agent) {
+    int chat_bound = (j->channel && j->channel[0] && j->chat && j->chat[0]);
+    int64_t parent = -1;
+    int depth = 0;
+    if (!chat_bound) {
+        parent = recent_session(db, j->agent_name, 0);
+        if (parent > 0) depth = session_get_depth(db, parent) + 1;
+        else parent = -1;
+    }
+    int64_t sid = session_create_filtered(db, "cron", agent, parent, depth, NULL);
+    if (sid <= 0) return -1;
+    if (chat_bound) {
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "UPDATE sessions SET channel_name=?1, chat_id=?2 WHERE id=?3;",
+                -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, j->channel, -1, SQLITE_STATIC);
+            sqlite3_bind_text(st, 2, j->chat, -1, SQLITE_STATIC);
+            sqlite3_bind_int64(st, 3, sid);
+            sqlite3_step(st);
+            sqlite3_finalize(st);
+        }
+    }
+    return sid;
+}
+
+/* The daemon's script dispatcher, or NULL outside it. */
+static CronScriptRunner g_script_runner;
+
+void cron_set_script_runner(CronScriptRunner fn) { g_script_runner = fn; }
+
+static void fire_heartbeat(sqlite3 *db, const DueJob *j) {
+    int64_t sid = recent_session(db, j->agent_name, 1);
+    if (sid == 0) return;                       /* busy/no idle session — no pulse needed */
+    if (has_pending_heartbeat(db, sid)) return; /* never stack pulses */
+    inbox_insert(db, sid, "heartbeat", NULL, HEARTBEAT_PROMPT);
+    LOG_INFO_("heartbeat fire job=%lld agent=%s session=%lld",
+              (long long)j->id, j->agent_name ? j->agent_name : "", (long long)sid);
+    wake_session(sid);
+}
+
+/* One fire: resolve the target, clear the guards, dispatch the payload.
+ * Payload axis — prompt (a user entry via the inbox, which starts a turn),
+ * script (a sandboxed QJS child whose output is posted back, no LLM call),
+ * both (one inbox row carrying prompt and script output together), or neither
+ * (a bare wake that just drains whatever is pending). */
 static void fire_due(sqlite3 *db, const DueJob *j) {
-    int heartbeat = (j->kind && strcmp(j->kind, "heartbeat") == 0);
-    if (heartbeat) {
-        int64_t sid = recent_session(db, j->agent_name, 1);
-        if (sid == 0) return;                       /* busy/no idle session — no pulse needed */
-        if (has_pending_heartbeat(db, sid)) return; /* never stack pulses */
-        inbox_insert(db, sid, "heartbeat", NULL, HEARTBEAT_PROMPT);
-        LOG_INFO_("heartbeat fire job=%lld agent=%s session=%lld",
-                  (long long)j->id, j->agent_name ? j->agent_name : "", (long long)sid);
-        wake_session(sid);
+    if (j->kind && strcmp(j->kind, "heartbeat") == 0) { fire_heartbeat(db, j); return; }
+
+    int64_t now = (int64_t)time(NULL);
+    int has_prompt = (j->task && j->task[0]);
+    int has_script = (j->script && j->script[0]);
+    int is_new = (j->target && strcmp(j->target, "new") == 0);
+    int is_pin = (j->target && strcmp(j->target, "pin") == 0);
+    int chat_bound = (j->channel && j->channel[0] && j->chat && j->chat[0]);
+    const char *tagent = (j->target_agent && j->target_agent[0])
+                       ? j->target_agent : j->agent_name;
+
+    /* A fresh session with no payload has nothing to drain and nothing to run:
+     * creating it would leave an empty session behind on every tick. */
+    if (is_new && !has_prompt && !has_script) {
+        LOG_DEBUG_("cron skip job=%lld name=%s: session:\"new\" with no payload",
+                   (long long)j->id, j->name ? j->name : "");
         return;
     }
 
-    int64_t sid = j->session_id;
-    if (sid == 0) {
-        sid = recent_session(db, j->agent_name, 0);
-        if (sid == 0) {
-            LOG_WARN_("cron skip job=%lld agent=%s: no session to resolve",
-                      (long long)j->id, j->agent_name ? j->agent_name : "");
+    /* Recurring only: a one-shot has no consecutive fires to have failed. */
+    char detail[224] = "";
+    if (j->run_at == 0 && fire_streak_tripped(db, j, now, detail, sizeof(detail))) {
+        pause_job(db, j, detail);
+        return;
+    }
+
+    /* Authority, re-checked now: a chat that has been re-routed to another
+     * agent must not still be reachable through a standing job. */
+    int64_t routed = 0;
+    int auth = 0;
+    if (chat_bound) {
+        auth = routed_session(db, j->channel, j->chat,
+                              is_new ? tagent : j->agent_name, &routed);
+        if (auth < 0 || (is_new && auth == 0)) {
+            fire_error(db, j, "that chat no longer routes to this agent");
             return;
         }
     }
-    if (!j->task) return;
-    inbox_insert_scanned(db, sid, "cron", NULL, j->task);
-    LOG_INFO_("cron fire job=%lld agent=%s session=%lld",
-              (long long)j->id, j->agent_name ? j->agent_name : "", (long long)sid);
-    wake_session(sid);
+
+    int64_t sid;
+    if (is_new) {
+        /* Skip-if-busy: 'new' is the mode inbox coalescing cannot cover (each
+         * fire targets a session that did not exist yet), so the previous
+         * fire's session is the interlock. Recurring only — a one-shot has no
+         * next fire to collide with. */
+        if (j->run_at == 0 && session_exists(db, j->session_id) &&
+            !session_is_idle(db, j->session_id)) {
+            LOG_INFO_("cron skip job=%lld name=%s: previous fire (session %lld)"
+                      " still running", (long long)j->id, j->name ? j->name : "",
+                      (long long)j->session_id);
+            return;
+        }
+        sid = fresh_session(db, j, tagent);
+        if (sid <= 0) { fire_error(db, j, "could not create a session"); return; }
+    } else {
+        if (is_pin) {
+            sid = j->session_id;
+            if (!session_exists(db, sid)) {
+                fire_error(db, j, "the pinned session no longer exists");
+                return;
+            }
+        } else {
+            sid = (auth == 1) ? routed : j->session_id;
+            if (sid == 0) {
+                /* Never stamped (CLI / manifest caller): stay late-bound. */
+                sid = recent_session(db, j->agent_name, 0);
+                if (sid == 0) {
+                    LOG_WARN_("cron skip job=%lld agent=%s: no session to resolve",
+                              (long long)j->id, j->agent_name ? j->agent_name : "");
+                    return;
+                }
+            } else if (!session_exists(db, sid)) {
+                fire_error(db, j, "the session it was following no longer exists");
+                return;
+            }
+        }
+        if ((has_prompt || has_script) && fire_pending(db, sid, j->name)) {
+            LOG_INFO_("cron skip job=%lld name=%s: previous fire still undrained",
+                      (long long)j->id, j->name ? j->name : "");
+            return;
+        }
+    }
+
+    if (has_script) {
+        CronScriptFire f = { .job_name = j->name, .script = j->script,
+                             .agent_name = tagent, .session_id = sid,
+                             .prompt = has_prompt ? j->task : NULL };
+        char err[224] = "scheduled scripts run in the daemon only";
+        CronScriptRc rc = g_script_runner ? g_script_runner(&f, err, sizeof(err))
+                                          : CRON_SCRIPT_FAILED;
+        if (rc == CRON_SCRIPT_BUSY) {
+            LOG_WARN_("cron skip job=%lld name=%s: no child slot free",
+                      (long long)j->id, j->name ? j->name : "");
+            return;   /* not a failure — the next schedule retries */
+        }
+        if (rc == CRON_SCRIPT_FAILED) { fire_error(db, j, err); return; }
+    } else if (has_prompt) {
+        inbox_insert_scanned(db, sid, "cron", j->name, j->task);
+        wake_session(sid);
+    } else {
+        wake_session(sid);   /* bare wake: drain whatever is already queued */
+    }
+    LOG_INFO_("cron fire job=%lld name=%s agent=%s session=%lld",
+              (long long)j->id, j->name ? j->name : "",
+              j->agent_name ? j->agent_name : "", (long long)sid);
+
+    /* Remember the session this fire used — what skip-if-busy reads next time.
+     * A never-stamped follow-the-conversation job keeps its 0 so it stays
+     * late-bound; stamping it here would silently convert it to an early bind,
+     * the exact failure this design exists to avoid. */
+    if (is_new || j->session_id > 0) {
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db, "UPDATE cron_jobs SET session_id=?1 WHERE id=?2;",
+                               -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(st, 1, sid);
+            sqlite3_bind_int64(st, 2, j->id);
+            sqlite3_step(st);
+            sqlite3_finalize(st);
+        }
+    }
 }
 
 /* Reschedule (or delete) a fired row. One-shot self-cleans; interval refires
@@ -696,13 +1021,7 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
  * back to firing hourly forever. */
 static void reschedule_due(sqlite3 *db, const DueJob *j, int64_t now) {
     if (j->run_at > 0) {
-        sqlite3_stmt *st;
-        if (sqlite3_prepare_v2(db, "DELETE FROM cron_jobs WHERE id=?;",
-                               -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(st, 1, j->id);
-            sqlite3_step(st);
-            sqlite3_finalize(st);
-        }
+        job_exec(db, "DELETE FROM cron_jobs WHERE id=?;", j->id);
         return;
     }
     int64_t next;
@@ -714,13 +1033,7 @@ static void reschedule_due(sqlite3 *db, const DueJob *j, int64_t now) {
             /* Unreachable for a validated recurring job; disable rather than
              * hot-loop if a malformed expr ever slips in. */
             LOG_ERROR_("cron job=%lld bad expr, disabling", (long long)j->id);
-            sqlite3_stmt *st;
-            if (sqlite3_prepare_v2(db, "UPDATE cron_jobs SET enabled=0 WHERE id=?;",
-                                   -1, &st, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(st, 1, j->id);
-                sqlite3_step(st);
-                sqlite3_finalize(st);
-            }
+            job_exec(db, "UPDATE cron_jobs SET enabled=0 WHERE id=?;", j->id);
             return;
         }
     }
@@ -738,10 +1051,16 @@ static void reschedule_due(sqlite3 *db, const DueJob *j, int64_t now) {
 
 static void due_free(DueJob *due, int count) {
     for (int i = 0; i < count; i++) {
+        free(due[i].name);
         free(due[i].expr);
         free(due[i].task);
+        free(due[i].script);
         free(due[i].agent_name);
         free(due[i].kind);
+        free(due[i].target);
+        free(due[i].target_agent);
+        free(due[i].channel);
+        free(due[i].chat);
     }
     free(due);
 }
@@ -751,7 +1070,8 @@ static void run_due_jobs(sqlite3 *db) {
     int64_t now = (int64_t)time(NULL);
     const char *sql =
         "SELECT id, cron_expr, session_id, task, agent_name, kind,"
-        "       COALESCE(run_at,0), COALESCE(interval_s,0) FROM cron_jobs"
+        "       COALESCE(run_at,0), COALESCE(interval_s,0), name, script,"
+        "       target, target_agent, channel_name, chat_id FROM cron_jobs"
         " WHERE enabled=1 AND next_run_at <= ?;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -770,18 +1090,22 @@ static void run_due_jobs(sqlite3 *db) {
             if (!tmp) { due_free(due, count); sqlite3_finalize(stmt); return; }
             due = tmp;
         }
+        memset(&due[count], 0, sizeof(DueJob));
         due[count].id = sqlite3_column_int64(stmt, 0);
-        const char *e = (const char *)sqlite3_column_text(stmt, 1);
-        due[count].expr = e ? strdup(e) : NULL;
+        due[count].expr = col_dup(stmt, 1);
         due[count].session_id = sqlite3_column_int64(stmt, 2);
-        const char *t = (const char *)sqlite3_column_text(stmt, 3);
-        due[count].task = t ? strdup(t) : NULL;
-        const char *a = (const char *)sqlite3_column_text(stmt, 4);
-        due[count].agent_name = a ? strdup(a) : NULL;
+        due[count].task = col_dup(stmt, 3);
+        due[count].agent_name = col_dup(stmt, 4);
         const char *k = (const char *)sqlite3_column_text(stmt, 5);
         due[count].kind = k ? strdup(k) : strdup("task");
         due[count].run_at = sqlite3_column_int64(stmt, 6);
         due[count].interval_s = sqlite3_column_int64(stmt, 7);
+        due[count].name = col_dup(stmt, 8);
+        due[count].script = col_dup(stmt, 9);
+        due[count].target = col_dup(stmt, 10);
+        due[count].target_agent = col_dup(stmt, 11);
+        due[count].channel = col_dup(stmt, 12);
+        due[count].chat = col_dup(stmt, 13);
         count++;
     }
     sqlite3_finalize(stmt);

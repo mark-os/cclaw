@@ -147,6 +147,15 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t iteration_id
                            const char *model, int usage_in, int usage_out,
                            int64_t cost_nano);
 
+/* Append one scheduled-script result (type='cron_result', role=assistant, no
+ * iteration). data carries {source:'cron', job:<name>} — the provenance the
+ * fire-outcome streak reads and the payload serializer labels the entry with.
+ * Only legal at a turn boundary (the mid-turn invariant); a mid-turn script
+ * completion queues an inbox row instead. Returns the entry id or -1. */
+int64_t entry_append_cron_result(sqlite3 *db, int64_t session_id,
+                                 const char *job_name, const char *content,
+                                 int is_error);
+
 /* ── Process registry + per-session liveness ──────────────────────
  * A registry row is considered dead once its pid is gone or it has missed a
  * heartbeat for longer than PROCESS_TTL_SEC. The heartbeat fires from the

@@ -53,6 +53,15 @@ static int populate_plan(sqlite3 *db, const ContextPlan *plan) {
     "  '<<<END_UNTRUSTED_EXTERNAL_CONTENT>>>'" \
     " ELSE COALESCE(e.content,'') END"
 
+/* A cron_result is a scheduled script's output posted into the session with no
+ * LLM call behind it. It rides the assistant role (so ordinary delivery finds
+ * it), which is exactly why it must be labelled here: unlabelled, the model
+ * reads a machine's stdout back as its own words. */
+#define SQL_CRON_RESULT_TEXT \
+    "'[scheduled script ' || COALESCE(json_extract(e.data,'$.job'),'?') ||" \
+    " CASE WHEN e.is_error THEN ' failed]' ELSE ' output]' END ||" \
+    " char(10) || COALESCE(e.content,'')"
+
 static const char SQL_OPENAI_MESSAGES[] =
     "SELECT json_group_array(json(msg) ORDER BY pos) FROM ("
     "  SELECT p.pos,"
@@ -82,6 +91,8 @@ static const char SQL_OPENAI_MESSAGES[] =
     "      WHEN 'tool_result' THEN"
     "        json_object('role','tool','tool_call_id',e.tool_call_id,"
     "                    'content'," SQL_WRAP_TOOL_CONTENT ")"
+    "      WHEN 'cron_result' THEN"
+    "        json_object('role','assistant','content'," SQL_CRON_RESULT_TEXT ")"
     "      ELSE NULL"
     "    END AS msg"
     "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"
@@ -196,6 +207,9 @@ static const char SQL_GEMINI_CONTENTS[] =
     "        json_object('role','user','parts',"
     "          json_array(json_object('text',"
     "            '[Summary of earlier conversation]' || char(10) || COALESCE(e.content,''))))"
+    "      WHEN e.type = 'cron_result' THEN"
+    "        json_object('role','model','parts',"
+    "          json_array(json_object('text'," SQL_CRON_RESULT_TEXT ")))"
     "      ELSE NULL"
     "    END AS content_obj"
     "  FROM _plan p JOIN entries e ON e.id = p.entry_id AND e.session_id = ?1"

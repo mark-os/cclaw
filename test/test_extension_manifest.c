@@ -177,8 +177,14 @@ static void test_install_ingests_rows(void) {
     /* agent_extensions row */
     assert(qint(db, "SELECT count(*) FROM agent_extensions WHERE agent_name='default' AND extension_name='nws'") == 1);
 
-    /* cron seeded for scheduled script */
+    /* cron seeded for scheduled script: a `script` payload pointing at the
+     * store handler — the fire runs it sandboxed, with no LLM turn (it used to
+     * seed a prompt telling the model to call js_eval). */
     assert(qint(db, "SELECT count(*) FROM cron_jobs WHERE name='morning_report'") == 1);
+    char *cscript = q1(db, "SELECT script FROM cron_jobs WHERE name='morning_report'");
+    assert(cscript && strstr(cscript, "/extensions/nws/report.qjs")); free(cscript);
+    char *ctask = q1(db, "SELECT task FROM cron_jobs WHERE name='morning_report'");
+    assert(ctask && ctask[0] == '\0'); free(ctask);
 
     /* config rows: namespaced <ext>.<key>, code-owned default + description */
     assert(qint(db, "SELECT count(*) FROM config WHERE key LIKE 'nws.%'") == 2);

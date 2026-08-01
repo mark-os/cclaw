@@ -1212,6 +1212,34 @@ int64_t entry_append_typed(sqlite3 *db, int64_t session_id, int64_t iteration_id
     return sqlite3_last_insert_rowid(db);
 }
 
+int64_t entry_append_cron_result(sqlite3 *db, int64_t session_id,
+                                 const char *job_name, const char *content,
+                                 int is_error) {
+    if (!db || !job_name) return -1;
+    /* role=2 so ordinary delivery (get_response_text) picks it up, but
+     * type='cron_result' so the payload serializer labels it as machine
+     * output — the model must not read a script's stdout as its own words.
+     * iteration_id stays 0: a script fire spends no LLM iteration. */
+    const char *sql =
+        "INSERT INTO entries (parent_id, session_id, iteration_id, type, role,"
+        " content, is_error, token_estimate, content_bytes, data)"
+        " VALUES ((SELECT leaf_id FROM sessions WHERE id=?1),?1,0,'cron_result',2,"
+        "         ?2,?3,?4,?5, json_object('source','cron','job',?6));";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    int len = content ? (int)strlen(content) : 0;
+    sqlite3_bind_int64(st, 1, session_id);
+    if (content) sqlite3_bind_text(st, 2, content, len, SQLITE_TRANSIENT);
+    else sqlite3_bind_null(st, 2);
+    sqlite3_bind_int(st, 3, is_error ? 1 : 0);
+    sqlite3_bind_int(st, 4, (len / 4) + 4);
+    sqlite3_bind_int(st, 5, len);
+    sqlite3_bind_text(st, 6, job_name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE) ? sqlite3_last_insert_rowid(db) : -1;
+}
+
 /* State transition guard. Busy states (llm_running/tool_running/compacting/
  * rate_limited) are reachable from idle or each other (a turn moves
  * llm_running → tool_running → llm_running, and ends llm_running → compacting);
@@ -1440,7 +1468,13 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
     /* Peek unconsumed items. source_ref is stamped onto the content as a
      * [tag] here rather than joined at read time — the referent (a one-shot
      * cron job, a finished child session) may be gone by the time the model
-     * reads the entry, and the reference is what it needs. */
+     * reads the entry, and the reference is what it needs.
+     *
+     * The same provenance also lands *structurally* in entries.data, so it
+     * stays queryable after the prose is compacted away: cron fire outcomes
+     * (the auto-pause streak) and the future autonomous-turn guard both key
+     * on it. json_patch('{}',…) drops the source_ref key when it is NULL
+     * (RFC 7386 merge) rather than storing a JSON null. */
     sqlite3_stmt *sel;
     if (sqlite3_prepare_v2(db,
         "SELECT id, CASE"
@@ -1448,7 +1482,8 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
         "   WHEN source = 'cron' THEN '[cron: ' || source_ref || '] ' || payload"
         "   WHEN source = 'agent_result'"
         "     THEN '[sub-agent session ' || source_ref || '] ' || payload"
-        "   ELSE '[' || source || ' ' || source_ref || '] ' || payload END"
+        "   ELSE '[' || source || ' ' || source_ref || '] ' || payload END,"
+        " json_patch('{}', json_object('source', source, 'source_ref', source_ref))"
         " FROM inbox WHERE session_id = ? AND consumed = 0 ORDER BY id ASC LIMIT ?",
         -1, &sel, NULL) != SQLITE_OK) {
         return -1;
@@ -1477,12 +1512,14 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
         const char *tagged = (const char *)sqlite3_column_text(sel, 1);
         const char *content_val = tagged ? tagged : "";
         int content_len = (int)strlen(content_val);
+        const char *data_json = (const char *)sqlite3_column_text(sel, 2);
 
         /* Insert entry with split columns (role=1 = user) */
         sqlite3_stmt *ins;
         if (sqlite3_prepare_v2(db,
-            "INSERT INTO entries (parent_id, session_id, role, content, token_estimate, content_bytes)"
-            " VALUES (?,?,1,?,?,?)",
+            "INSERT INTO entries (parent_id, session_id, role, content, token_estimate,"
+            " content_bytes, data)"
+            " VALUES (?,?,1,?,?,?,?)",
             -1, &ins, NULL) != SQLITE_OK) {
             sqlite3_finalize(sel);
             return -1;
@@ -1492,6 +1529,8 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
         sqlite3_bind_text(ins, 3, content_val, content_len, SQLITE_TRANSIENT);
         sqlite3_bind_int(ins, 4, (content_len / 4) + 4);
         sqlite3_bind_int(ins, 5, content_len);
+        if (data_json) sqlite3_bind_text(ins, 6, data_json, -1, SQLITE_TRANSIENT);
+        else sqlite3_bind_null(ins, 6);
         int rc = sqlite3_step(ins);
         sqlite3_finalize(ins);
         if (rc != SQLITE_DONE) {

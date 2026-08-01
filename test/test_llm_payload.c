@@ -575,6 +575,61 @@ static void test_compaction_entry_in_payload(void) {
     printf("  PASS test_compaction_entry_in_payload\n");
 }
 
+/* A cron_result rides the assistant role so ordinary delivery finds it, which
+ * is exactly why the serializer has to label it: unlabelled, the model reads a
+ * scheduled script's stdout back as its own words. Both endpoints — and the
+ * entry must reach the payload at all (an unknown type serializes to NULL and
+ * is dropped silently). */
+static void test_cron_result_in_payload(void) {
+    sqlite3 *db = open_seeded();
+
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+    assert(sid > 0);
+    Message m1 = {.role = ROLE_USER, .content = "hello"};
+    entry_append_with_iteration(db, sid, &m1, 1);
+    Message m2 = {.role = ROLE_ASSISTANT, .content = "hi"};
+    entry_append_with_iteration(db, sid, &m2, 1);
+    assert(entry_append_cron_result(db, sid, "disk_watch", "42% used", 0) > 0);
+    assert(entry_append_cron_result(db, sid, "net_probe", "timed out", 1) > 0);
+
+    Config cfg = {0};
+    cfg.provider.model = "test-model";
+    cfg.provider.max_tokens = 1024;
+    cfg.provider.endpoint_type = ENDPOINT_OPENAI;
+    cfg.context_window = 128000;
+
+    ContextPlan plan = {0};
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    LlmPayload payload;
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+    assert(strstr(payload.body, "[scheduled script disk_watch output]") != NULL);
+    assert(strstr(payload.body, "42% used") != NULL);
+    assert(strstr(payload.body, "[scheduled script net_probe failed]") != NULL);
+    /* assistant role, so a strict provider still sees a legal alternation */
+    sqlite3_stmt *s;
+    sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM json_each(json_extract(?1,'$.messages'))"
+        " WHERE json_extract(value,'$.role')='assistant'"
+        "   AND json_extract(value,'$.content') LIKE '%scheduled script%'",
+        -1, &s, NULL);
+    sqlite3_bind_text(s, 1, payload.body, -1, SQLITE_STATIC);
+    assert(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 2);
+    sqlite3_finalize(s);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    cfg.provider.endpoint_type = ENDPOINT_GEMINI;
+    assert(context_plan(db, sid, &cfg, 0, &plan) == 0);
+    assert(llm_build_payload(db, sid, &cfg, &plan, NULL, "sys", &payload) == 0);
+    assert(strstr(payload.body, "[scheduled script disk_watch output]") != NULL);
+    assert(strstr(payload.body, "42% used") != NULL);
+    llm_payload_release(&payload);
+    context_plan_free(&plan);
+
+    db_close(db);
+    printf("  PASS test_cron_result_in_payload\n");
+}
+
 /* A tool_result whose entry carries a network_hosts tag is wrapped in
  * UNTRUSTED_EXTERNAL_CONTENT boundaries at query time; untagged results
  * pass through bare. Both endpoints. */
@@ -1025,6 +1080,7 @@ int main(void) {
     test_session_context_tool_loop();
     test_payload_with_tools();
     test_compaction_entry_in_payload();
+    test_cron_result_in_payload();
     test_network_hosts_query_time_wrap();
     test_hook_inject_directive();
     test_extension_tool_grant_filtering();

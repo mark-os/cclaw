@@ -495,7 +495,42 @@ static void check_denials(sqlite3 *db) {
     if (!shown) printf("  recent: none\n");
 }
 
-/* ── Check 9: Syslog listener ───────────────────────────────────── */
+/* ── Check 9: Paused cron jobs ──────────────────────────────────── */
+
+/* A recurring job whose fires keep failing auto-pauses itself (enabled=0) and
+ * then says nothing — this is where an operator finds out. Heartbeat rows ship
+ * disabled on purpose, so they are not news. */
+static void check_cron(sqlite3 *db) {
+    printf("\n[cron]\n");
+    if (!db) {
+        printf("  skipped: no DB handle\n");
+        return;
+    }
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT name, agent_name, last_run_at FROM cron_jobs"
+            " WHERE enabled=0 AND kind != 'heartbeat' ORDER BY agent_name, name",
+            -1, &s, NULL) != SQLITE_OK) {
+        printf("  (no cron_jobs table)\n");
+        return;
+    }
+    int n = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        if (!n) printf("  paused jobs (set the job again to re-enable):\n");
+        time_t t = (time_t)sqlite3_column_int64(s, 2);
+        char when[32] = "never";
+        struct tm tm;
+        if (t > 0 && localtime_r(&t, &tm))
+            strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tm);
+        printf("    %s  agent=%s  last fired %s\n",
+               sqlite3_column_text(s, 0), sqlite3_column_text(s, 1), when);
+        n++;
+    }
+    sqlite3_finalize(s);
+    if (!n) print_ok("jobs", "none paused");
+}
+
+/* ── Check 10: Syslog listener ──────────────────────────────────── */
 
 static void check_syslog(void) {
     printf("\n[syslog]\n");
@@ -538,6 +573,7 @@ int doctor_main(void) {
     check_workspace(cfg);
     check_channels(db);
     check_denials(db);
+    check_cron(db);
     check_syslog();
 
     printf("\ndone.\n");

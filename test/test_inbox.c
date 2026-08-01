@@ -180,6 +180,26 @@ static void test_inbox_consume_tags_source_ref(void) {
     assert(strcmp(entries[2].message.content, "plain message") == 0);
     entry_branch_free(entries, ecount);
 
+    /* The same provenance lands structurally in entries.data, so a fire's
+     * outcome stays queryable after the prose is compacted away. A NULL
+     * source_ref leaves the key out entirely rather than storing JSON null. */
+    sqlite3_stmt *s;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT json_extract(data,'$.source'), json_extract(data,'$.source_ref'),"
+        "       json_type(data,'$.source_ref')"
+        " FROM entries WHERE session_id=? AND role=1 ORDER BY id", -1, &s, NULL) == SQLITE_OK);
+    sqlite3_bind_int64(s, 1, sid);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "cron") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "jobname") == 0);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "agent_result") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(s, 1), "77") == 0);
+    assert(sqlite3_step(s) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(s, 0), "telegram") == 0);
+    assert(sqlite3_column_type(s, 2) == SQLITE_NULL);   /* key omitted, not null */
+    sqlite3_finalize(s);
+
     db_close(db);
     printf("  PASS test_inbox_consume_tags_source_ref\n");
 }

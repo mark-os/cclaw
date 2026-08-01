@@ -911,14 +911,15 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
         char **docs = NULL;
         size_t ndocs = 0;
         sqlite3_stmt *st;
+        /* script, not a prompt telling the model to call js_eval: a scheduled
+         * script is run directly by the fire path, sandboxed, with no LLM call
+         * and no turn. The path is the store-relative handler the promote step
+         * just installed. */
         if (sqlite3_prepare_v2(db,
                 "SELECT json_object("
                 "  'name', json_extract(value,'$.name'),"
                 "  'cron_expr', json_extract(value,'$.schedule'),"
-                "  'prompt', 'Run the scheduled extension script '''"
-                "            || json_extract(value,'$.name')"
-                "            || ''': call js_eval with filename ''' || ?2 || '/'"
-                "            || json_extract(value,'$.handler') || '''.') "
+                "  'script', ?2 || '/' || json_extract(value,'$.handler')) "
                 "FROM json_each(COALESCE(json_extract(?1,'$.scripts'),'[]')) "
                 "WHERE json_extract(value,'$.schedule') IS NOT NULL "
                 "  AND json_extract(value,'$.name') IS NOT NULL "

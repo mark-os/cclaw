@@ -21,7 +21,7 @@ static const char *CRON_SET_PARAMS =
     "\"cron_expr\":{\"type\":\"string\",\"description\":\"5-field cron expression (M H D Mo DoW) for a recurring job, evaluated in the daemon's local timezone (so it follows DST) — the current local time and zone are in your context block. At most one of cron_expr / in_seconds.\"},"
     "\"in_seconds\":{\"type\":\"integer\",\"description\":\"Delay in seconds from now for a one-shot job, which fires once and is then removed. At most one of cron_expr / in_seconds.\"},"
     "\"prompt\":{\"type\":\"string\",\"description\":\"Message delivered when the job fires; it starts a turn. Pass \\\"\\\" to clear it.\"},"
-    "\"script\":{\"type\":\"string\",\"description\":\"Workspace-relative path to a JS file (it must already exist), run sandboxed at fire time with its output posted to the session — no LLM turn unless prompt is set too. Pass \\\"\\\" to clear it.\"},"
+    "\"script\":{\"type\":\"string\",\"description\":\"Workspace-relative path to a .qjs file (it must already exist), run sandboxed at fire time with its output posted to the session — no LLM turn unless prompt is set too. Pass \\\"\\\" to clear it.\"},"
     "\"session_id\":{\"type\":\"integer\",\"description\":\"Pin every fire to one existing session. Expert form — by default a fire follows this conversation.\"},"
     "\"session\":{\"type\":\"string\",\"enum\":[\"new\"],\"description\":\"\\\"new\\\" gives each fire a fresh session (fresh context). Required before agent / channel_name / chat_id.\"},"
     "\"agent\":{\"type\":\"string\",\"description\":\"Agent the fire runs as; session:\\\"new\\\" only, default yourself. Naming another agent needs human approval.\"},"
@@ -180,6 +180,10 @@ static char *check_script(const ToolCronCtx *ctx, const CronDoc *d) {
     if (strstr(d->script, ".."))
         return errf("error: script '%s' must stay inside your workspace (no "
                     "'..' path segments)", d->script);
+    size_t sl = strlen(d->script);
+    if (sl < 5 || strcmp(d->script + sl - 4, ".qjs") != 0)
+        return errf("error: script '%s' must end in .qjs — the JS tier refuses "
+                    "anything else at fire time", d->script);
     if (!ctx->workspace || !ctx->workspace[0])
         return strdup("error: no workspace configured — script jobs need one");
 

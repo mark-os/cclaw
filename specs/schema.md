@@ -423,7 +423,7 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `token_estimate` | INTEGER | chars/4 heuristic |
 | `content_bytes` | INTEGER | byte length of content + tool_calls |
 | `tool_call_count` | INTEGER NOT NULL DEFAULT 0 | denormalized for plan pass |
-| `data` | TEXT | legacy/debug (nullable) |
+| `data` | TEXT | JSON side-channel, merged not overwritten (`json_patch`), nullable. `$.pin` — a hook's durable context pin; `$.source` / `$.source_ref` — provenance stamped by the inbox drain (the cron auto-pause streak reads it); `$.job` on a `cron_result` — the job that produced it; plus whatever an `annotate` hook merges in |
 | `network_hosts` | TEXT | JSON array of hosts the tool run contacted (proxy-observed) |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
@@ -438,6 +438,7 @@ Split-column format — no JSON parsing on LLM request hot path. `llm_payload.c`
 | `tool_result` | Tool execution output (text) |
 | `reasoning` | Model reasoning/thinking text |
 | `compaction` | Compressed summary text |
+| `cron_result` | A scheduled script's output, posted with no LLM call behind it. `role=2` so ordinary delivery finds it and `iteration_id=0` because it spent no iteration; `data.job` names the job and `is_error` records how the run went. The payload serializer labels it (`[scheduled script <job> output]`) rather than passing it through bare — the model must not read a machine's stdout back as its own words |
 
 ### entries.network_hosts
 
@@ -602,7 +603,7 @@ Durable inbound message queue. Survives crashes; atomic consumption via `BEGIN E
 | `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
 | `session_id` | INTEGER NOT NULL | |
 | `source` | TEXT NOT NULL DEFAULT 'cli' | channel origin |
-| `source_ref` | TEXT | provenance whose semantics belong to `source`: `'cron'` → job name, `'agent_result'` → child session id. Live for `agent_result` today (the id moved out of the payload prose); the cron writer arrives with the Part 4 cron tool. NULL for every other writer |
+| `source_ref` | TEXT | provenance whose semantics belong to `source`: `'cron'`/`'cron_error'` → job name, `'agent_result'` → child session id. NULL for every other writer |
 | `payload` | TEXT NOT NULL | |
 | `consumed` | INTEGER NOT NULL DEFAULT 0 | |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
@@ -614,6 +615,12 @@ content as a bracket tag — `[cron: <name>] `, `[sub-agent session <id>] `, els
 `[<source> <ref>] ` — so the reference stays model-visible without a join the
 referent may not survive (a one-shot job deletes itself at fire time). A NULL
 `source_ref` drains verbatim.
+
+The same drain also writes the provenance *structurally* into
+`entries.data` — `{"source": …, "source_ref": …}`, the `source_ref` key
+omitted (never a JSON null) when there is none. Prose can be compacted away;
+this is what stays queryable, and it is what the cron auto-pause streak reads
+to tell a job's fires apart from every other user entry.
 
 ---
 
@@ -695,7 +702,7 @@ schedule and controls payload/targeting.
 | `kind` | TEXT NOT NULL DEFAULT 'task' | `'task'` or `'heartbeat'` |
 | `session_id` | INTEGER NOT NULL | meaning follows `target`: the pinned session (`'pin'`), else the fire anchor — the session that set the job, and for `'new'` the most recently fired one. `0` = resolve to the agent's most recently active session at fire time (`kind='task'`) or most recently active *idle* session (`kind='heartbeat'`, which ignores this column entirely) |
 | `task` | TEXT NOT NULL | injected message — the model-facing name is `prompt`; `''` = no prompt payload. Unused for `kind='heartbeat'` (fires the constant `HEARTBEAT_PROMPT` instead) |
-| `script` | TEXT | workspace-relative QJS path, run sandboxed at fire time under the target agent's profile+grants; composes with `task` (script first). NULL = no script payload. Existence is checked when the job is set, so a missing file fails at set time, not unattended hours later |
+| `script` | TEXT | QJS path run sandboxed at fire time under the target agent's profile+grants; composes with `task` (script first). NULL = no script payload. Workspace-relative when an agent set the job (existence checked at set time, so a typo fails then rather than unattended hours later); absolute-inside-the-shared-extension-store when `extension_promote` seeded it from a manifest `scripts[]` entry. Both shapes are re-validated at fire time, and nothing else is accepted |
 | `channel_name` | TEXT | chat stamp — the durable route identity a fire resolves through `channel_routes` at fire time, rather than binding a session id at set time. In the default target mode it is copied from the setting session's own binding (NULL for CLI/sub-agent callers); under `'new'` it is the explicit delivery target |
 | `chat_id` | TEXT | with `channel_name`, the stamped chat |
 | `target` | TEXT | target-mode discriminator: NULL = follow the conversation (stamped chat, else the stamped `session_id`); `'pin'` = explicit session pin; `'new'` = a fresh session per fire |
@@ -717,14 +724,87 @@ which takes the tool's JSON arguments as its document — the same document a
 cross-agent approval parks and the apply path replays, so a requested job has
 exactly one representation.
 
-Fire-path columns (`script`, `channel_name`, `chat_id`, `target`,
-`target_agent`) are written by `cron_set` and read by the Part 4 fire path,
-which is not landed yet.
+Rescheduling (`src/cron.c`): a one-shot (`run_at`) **deletes its row** after
+firing; interval and recurring jobs advance `next_run_at` (a recurring job
+whose expression fails to parse at reschedule time is disabled, never retried
+hourly). `kind='heartbeat'` skips silently if the agent has no idle session,
+or if that session already holds an unconsumed `source='heartbeat'` inbox row
+(never stack pulses).
 
-Firing rules (`src/cron.c`):
-- `kind='task'`, one-shot (`run_at`): inject `task` into the resolved session, then **delete the row**.
-- `kind='task'`, interval or recurring: inject `task`, reschedule `next_run_at`. A recurring job whose expression fails to parse at reschedule time is disabled, never retried hourly.
-- `kind='heartbeat'`: skip silently if the agent has no idle session, or if that session already has an unconsumed `source='heartbeat'` inbox row (never stack pulses).
+### The fire path
+
+Everything about a fire resolves at **fire time**, never set time: the durable
+identities are the chat and the agent, and sessions are disposable in front of
+both. `fire_due()` resolves the target, clears the guards, then dispatches the
+payload.
+
+**Target** (by `target`):
+
+- NULL — *follow the conversation*. With a chat stamp, the fire goes to
+  whatever session `channel_routes` sends that chat to **right now**; with no
+  route for the chat, to the stamped `session_id`; with `session_id=0` (a CLI
+  or manifest caller that never stamped one), to the agent's most recently
+  active session, re-resolved every fire.
+- `'pin'` — `session_id` directly. Stale-by-choice; if the session is gone the
+  fire errors to the owner.
+- `'new'` — a fresh session per fire, under `target_agent` (default
+  `agent_name`). With channel fields it is stamped with the chat, so ordinary
+  delivery reaches it; without them it is parented to the late-resolved owner
+  (no `parent_tool_call_id`), so its result rides the existing
+  `notify_parent` push — a scheduled background `launch_agent`, no new
+  delivery machinery. The route is deliberately not re-pinned (the accepted
+  reply-context gap).
+
+Authority is re-checked here, not just at set time: a chat-stamped job whose
+chat now routes to a **different** agent does not fire, and says so.
+
+**Payload** (any combination of `task`/`script`):
+
+- prompt only — an inbox row (`source='cron'`, `source_ref=<name>`) + wake;
+  it drains into a user entry and starts a turn.
+- script only — a sandboxed QJS child, **no LLM call**. Its output goes
+  through the same postprocess/DLP scan a tool result does, then: at a turn
+  boundary (target session idle) straight in as a `type='cron_result'` entry
+  followed by ordinary delivery; mid-turn as an inbox row instead, because an
+  entry written mid-turn would break the mid-turn invariant.
+- both — script first, then **one** inbox row carrying prompt and script
+  output together, so the turn sees them as a single user entry.
+- neither — a bare wake: drain whatever is already queued, annotate nothing.
+  (`'new'` + bare wake creates nothing — an empty session with no payload is
+  a no-op.)
+
+The script child is a `--run-tool` fork on the JS tier, identical to a
+`js_eval` call under the target agent's `sandbox_profile` and grants;
+`{{SECRET:name}}` is *not* interpolated (a cron script is a file, not a
+model-written argument). `cron.c` decides that a script must run and hands the
+decision to the daemon through the `cron_set_script_runner()` function pointer
+— the child table lives in `main.c`, and this keeps the schedule with one
+home instead of a queue table between them. Outside the daemon (CLI, tests)
+there is no runner and a script fire reports the refusal.
+
+**Guards**, per fire:
+
+- *Per-job coalescing* — an undrained `source='cron'`, `source_ref=<name>` row
+  on the target session skips the fire (rides `idx_inbox_pending`). One
+  outstanding fire per job: "every 30 seconds" self-paces to the session's
+  real consumption rate.
+- *Skip-if-busy* — recurring `'new'` jobs only, the one mode coalescing cannot
+  cover (each fire targets a session that did not exist yet). `session_id`
+  records the last fired session; still non-idle at the next fire → skip.
+- *Failure auto-pause* — three consecutive failed fires set `enabled=0` and
+  notify the owner with the last error (re-enable = `cron_set` on the same
+  name; `cclaw --doctor` lists paused jobs). The streak is **derived** at fire
+  time, not counted: a script fire's outcome is its `cron_result.is_error`, a
+  prompt fire's is the last assistant `stop_reason` of the turn its drained
+  entry opened, and a fire that could not resolve at all wrote a
+  `source='cron_error'` inbox row. Bare wakes and both kinds of skip are
+  exempt; any success resets. A turn still in flight reads as not-failed, so
+  nothing is paused on incomplete evidence.
+
+A fire that cannot happen (session gone, authority lost, script missing)
+reports to the owner — the agent's most recently active session — as a
+`source='cron_error'` inbox row; an agent that has never run a session gets
+only a log line.
 
 Guardrails, both in the `config` registry: `cron_min_interval_seconds`
 (default 30 — one daemon tick, the finest spacing the loop can actually

@@ -8,6 +8,7 @@
  * path replays, so there is exactly one representation of a requested job.
  */
 
+#include <stddef.h>
 #include <stdint.h>
 #include "sqlite3.h"
 
@@ -85,6 +86,36 @@ int cron_doc_check(sqlite3 *db, const char *agent_name, const char *doc,
 int64_t cron_upsert(sqlite3 *db, const char *agent_name,
                     int64_t caller_session_id, const char *doc,
                     int *updated_out, char **err_out);
+
+/* ── Scheduled scripts ────────────────────────────────────────────────
+ * A script payload runs sandboxed as the *target* agent, which means forking a
+ * --run-tool child — machinery the daemon owns (it holds the child table and
+ * the poll loop that reaps them). cron.c decides that a script must run and
+ * where its result goes; the daemon is handed that decision through this one
+ * function pointer, so the schedule keeps a single home and no queue table
+ * appears between them. Unregistered (CLI, unit tests) a script fire is
+ * refused with an error — cron only ticks in the daemon anyway. */
+typedef struct {
+    const char *job_name;    /* cron_jobs.name — the fire's source_ref */
+    const char *script;      /* workspace-relative path; the runner resolves it */
+    const char *agent_name;  /* whose sandbox_profile / grants / workspace it uses */
+    int64_t session_id;      /* session the result is posted to */
+    const char *prompt;      /* NULL = script-only. Non-NULL is the 'both' payload:
+                              * prompt and script output enter as ONE user entry. */
+} CronScriptFire;
+
+typedef enum {
+    CRON_SCRIPT_SPAWNED = 0, /* running — the result posts on completion */
+    CRON_SCRIPT_BUSY,        /* no child slot free: skip, next schedule retries */
+    CRON_SCRIPT_FAILED       /* cannot run at all (missing script, no workspace) */
+} CronScriptRc;
+
+typedef CronScriptRc (*CronScriptRunner)(const CronScriptFire *fire,
+                                         char *err, size_t err_len);
+
+/* Install the daemon's script dispatcher. NULL restores the refuse-everything
+ * default (what CLI mode and unit tests get). */
+void cron_set_script_runner(CronScriptRunner fn);
 
 /* Execute any due cron jobs now. Called from the main event loop (daemon). */
 void cron_run_due(sqlite3 *db);

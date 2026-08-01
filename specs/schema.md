@@ -693,13 +693,13 @@ schedule and controls payload/targeting.
 | `run_at` | INTEGER | one-shot fire time; row is deleted (not rescheduled) once fired |
 | `interval_s` | INTEGER | fixed-period cadence; not exposed on the model-facing `cron_set` schema today (heartbeat rows use it internally) |
 | `kind` | TEXT NOT NULL DEFAULT 'task' | `'task'` or `'heartbeat'` |
-| `session_id` | INTEGER NOT NULL | `0` = resolve to the agent's most recently active session at fire time (`kind='task'`) or most recently active *idle* session (`kind='heartbeat'`, which ignores this column entirely) |
-| `task` | TEXT NOT NULL | injected message; unused for `kind='heartbeat'` (fires the constant `HEARTBEAT_PROMPT` instead) |
-| `script` | TEXT | workspace-relative QJS path, run sandboxed at fire time under the target agent's profile+grants; composes with `task` (script first). NULL = no script payload |
-| `channel_name` | TEXT | chat stamp — the durable route identity a fire resolves through `channel_routes` at fire time, rather than binding a session id at set time |
+| `session_id` | INTEGER NOT NULL | meaning follows `target`: the pinned session (`'pin'`), else the fire anchor — the session that set the job, and for `'new'` the most recently fired one. `0` = resolve to the agent's most recently active session at fire time (`kind='task'`) or most recently active *idle* session (`kind='heartbeat'`, which ignores this column entirely) |
+| `task` | TEXT NOT NULL | injected message — the model-facing name is `prompt`; `''` = no prompt payload. Unused for `kind='heartbeat'` (fires the constant `HEARTBEAT_PROMPT` instead) |
+| `script` | TEXT | workspace-relative QJS path, run sandboxed at fire time under the target agent's profile+grants; composes with `task` (script first). NULL = no script payload. Existence is checked when the job is set, so a missing file fails at set time, not unattended hours later |
+| `channel_name` | TEXT | chat stamp — the durable route identity a fire resolves through `channel_routes` at fire time, rather than binding a session id at set time. In the default target mode it is copied from the setting session's own binding (NULL for CLI/sub-agent callers); under `'new'` it is the explicit delivery target |
 | `chat_id` | TEXT | with `channel_name`, the stamped chat |
 | `target` | TEXT | target-mode discriminator: NULL = follow the conversation (stamped chat, else the stamped `session_id`); `'pin'` = explicit session pin; `'new'` = a fresh session per fire |
-| `target_agent` | TEXT | agent that a `'new'`-mode fire runs under; NULL = `agent_name` |
+| `target_agent` | TEXT | agent that a `'new'`-mode fire runs under; NULL = `agent_name`. A value naming another agent is set only through an approval (see below) |
 | `enabled` | INTEGER NOT NULL DEFAULT 1 | |
 | `next_run_at` | INTEGER NOT NULL DEFAULT 0 | |
 | `last_run_at` | INTEGER | |
@@ -707,9 +707,19 @@ schedule and controls payload/targeting.
 
 Index: `idx_cron_jobs_name ON cron_jobs(agent_name, name)` — UNIQUE. The job
 *name* is the logical identity (ids die with one-shot auto-removal and
-delete-recreate cycles), so `cron_set` is an upsert by name. `script`,
-`channel_name`, `chat_id`, `target`, and `target_agent` are written by the
-Part 4 cron tool work and are dormant until it lands.
+delete-recreate cycles), so `cron_set` is an **upsert** by name: fields the
+call names replace, the rest keep their stored value (`""` on `prompt`/
+`script` clears that payload), the row is re-enabled, and validity is judged
+on the *merged* row — a partial call that would leave a job with two target
+modes or no schedule is refused. `cron_set` with no `name` generates one
+(`job-<hex>`) and returns it. The writer is `cron_upsert()` (`src/cron.c`),
+which takes the tool's JSON arguments as its document — the same document a
+cross-agent approval parks and the apply path replays, so a requested job has
+exactly one representation.
+
+Fire-path columns (`script`, `channel_name`, `chat_id`, `target`,
+`target_agent`) are written by `cron_set` and read by the Part 4 fire path,
+which is not landed yet.
 
 Firing rules (`src/cron.c`):
 - `kind='task'`, one-shot (`run_at`): inject `task` into the resolved session, then **delete the row**.
@@ -717,11 +727,22 @@ Firing rules (`src/cron.c`):
 - `kind='heartbeat'`: skip silently if the agent has no idle session, or if that session already has an unconsumed `source='heartbeat'` inbox row (never stack pulses).
 
 Guardrails, both in the `config` registry: `cron_min_interval_seconds`
-(default 300, enforced in `cron_add()` fire-to-fire — not just at the
-`cron_set` tool boundary, since `extension_promote` is a second
-model-reachable caller) and `cron_max_jobs_per_session` (default 10,
-enforced in the `cron_set` tool handler only — manifest/heartbeat rows use
-`session_id=0` and are legitimately operator-shaped).
+(default 30 — one daemon tick, the finest spacing the loop can actually
+deliver; enforced in `cron_schedule_check()` fire-to-fire for `cron_expr`
+and delta-based for `in_seconds`, at the storage layer rather than only at
+the tool boundary, since `extension_promote` is a second model-reachable
+caller) and `cron_max_jobs_per_session` (default 10, enforced in the
+`cron_set` tool handler only, and only for a *new* name — manifest/heartbeat
+rows use `session_id=0` and are legitimately operator-shaped).
+
+Targeting another agent — a `session_id` pin on a session someone else owns,
+or `agent` with `session:"new"` — is an escalation: the fire would run with
+that agent's grants and model. `cron_set` parks **one** approval at set time
+(`tool_name='cron_set'`, `resolve='apply'`, the document in `args_json`) and
+the job is written by `apply_grant()` only after a yes — a standing job, not
+a per-fire prompt. Same-agent targeting, including the caller's own
+sub-agent sessions, parks nothing. An explicit `channel_name`/`chat_id` is
+checked against `channel_routes` at set time (and again at fire).
 
 Every agent gets a seeded, **disabled** heartbeat row (`name='heartbeat'`,
 `interval_s=1800`) at creation — `cron_seed_heartbeat()`, called from both

@@ -139,10 +139,13 @@ int agent_setup_init(AgentSetup *setup, sqlite3 *db, int64_t session_id,
     setup->ext_tool_ctx.workspace = cfg->workspace;
     tool_extension_register(&setup->reg, &setup->ext_tool_ctx);
 
-    /* Cron tools — DB CRUD only; daemon fires jobs, CLI just manages them. */
+    /* Cron tools — DB CRUD only; daemon fires jobs, CLI just manages them.
+     * cron_set resolves script paths against the agent's workspace. */
     setup->cron_ctx.db = db;
     setup->cron_ctx.session_id = session_id;
-    setup->cron_ctx.agent_name = agent_name;
+    setup->cron_ctx.workspace = cfg->workspace;
+    snprintf(setup->cron_ctx.agent_name, sizeof(setup->cron_ctx.agent_name),
+             "%s", agent_name ? agent_name : "");
     tool_cron_register(&setup->reg, &setup->cron_ctx);
 
     /* secret_create — inline in parent process (needs the db handle to write
@@ -271,6 +274,9 @@ static void workspace_refresh(AgentSetup *setup, const char *agent) {
      * promote flow has to follow the agent too — a draft written by one agent
      * must not become another's to promote. */
     setup->ext_tool_ctx.workspace = setup->workspace_buf;
+    /* cron_set's script paths are workspace-relative, and the file must exist
+     * when the job is set — so it has to be the advancing agent's workspace. */
+    setup->cron_ctx.workspace = setup->workspace_buf;
 
     ToolEntry *shell_entry = tools_lookup(&setup->reg, "shell_exec");
     if (shell_entry && shell_entry->user_data)

@@ -3,8 +3,10 @@
 #include "config_registry.h"
 #include "db.h"
 #include "log.h"
+#include "tool_args.h"
 #include "wake.h"
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -134,55 +136,395 @@ int64_t cron_next_run(const char *cron_expr, int64_t after) {
     return -1;
 }
 
-int64_t cron_add(sqlite3 *db, const char *agent_name, const char *name,
-                 const char *cron_expr, int64_t run_at, int64_t interval_s,
-                 int64_t session_id, const char *task) {
+/* ── cron_set documents ───────────────────────────────────────────────
+ * A document is the tool's JSON arguments. Presence, not value, is what an
+ * upsert merges on, so every accessor below distinguishes "absent" from
+ * "empty" — passing "" is how the model clears a payload. */
+
+__attribute__((format(printf, 1, 2)))
+static char *cerrf(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    return strdup(buf);
+}
+
+/* 1 iff the document names this key (JSON null reads as absent). */
+static int doc_has(sqlite3 *db, const char *doc, const char *key) {
+    char path[64];
+    snprintf(path, sizeof(path), "$.%s", key);
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "SELECT 1 WHERE json_type(?1,?2) IS NOT NULL",
+                           -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, doc, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, path, -1, SQLITE_TRANSIENT);
+    int found = (sqlite3_step(st) == SQLITE_ROW);
+    sqlite3_finalize(st);
+    return found;
+}
+
+int cron_doc_parse(sqlite3 *db, const char *doc, CronDoc *out) {
+    memset(out, 0, sizeof(*out));
+    if (!db || !doc || !tool_args_valid_object(db, doc)) return -1;
+    out->name         = tool_args_str(db, doc, "name");
+    out->cron_expr    = tool_args_str(db, doc, "cron_expr");
+    out->prompt       = tool_args_str(db, doc, "prompt");
+    out->script       = tool_args_str(db, doc, "script");
+    out->session      = tool_args_str(db, doc, "session");
+    out->agent        = tool_args_str(db, doc, "agent");
+    out->channel_name = tool_args_str(db, doc, "channel_name");
+    out->chat_id      = tool_args_str(db, doc, "chat_id");
+    out->in_seconds   = tool_args_int(db, doc, "in_seconds", 0);
+    out->session_id   = tool_args_int(db, doc, "session_id", 0);
+    out->has_expr       = doc_has(db, doc, "cron_expr");
+    out->has_seconds    = doc_has(db, doc, "in_seconds");
+    out->has_prompt     = doc_has(db, doc, "prompt");
+    out->has_script     = doc_has(db, doc, "script");
+    out->has_session    = doc_has(db, doc, "session");
+    out->has_session_id = doc_has(db, doc, "session_id");
+    out->has_agent      = doc_has(db, doc, "agent");
+    out->has_channel    = doc_has(db, doc, "channel_name");
+    out->has_chat       = doc_has(db, doc, "chat_id");
+    return 0;
+}
+
+void cron_doc_free(CronDoc *d) {
+    if (!d) return;
+    free(d->name); free(d->cron_expr); free(d->prompt); free(d->script);
+    free(d->session); free(d->agent); free(d->channel_name); free(d->chat_id);
+    memset(d, 0, sizeof(*d));
+}
+
+CronSchedRc cron_schedule_check(sqlite3 *db, const char *cron_expr,
+                                int64_t in_seconds, int64_t *next_out,
+                                int64_t *every_out) {
+    int has_expr = (cron_expr && cron_expr[0]);
+    int has_secs = (in_seconds != 0);
+    if (has_expr && has_secs) return CRON_SCHED_BOTH;
+    if (!has_expr && !has_secs) return CRON_SCHED_NONE;
+
     int64_t now = (int64_t)time(NULL);
-    int has_expr     = (cron_expr && cron_expr[0]);
-    int has_run_at   = (run_at > 0);
-    int has_interval = (interval_s > 0);
-
-    /* Exactly one schedule type. */
-    if (has_expr + has_run_at + has_interval != 1) return -1;
-
     int64_t floor = config_get_int(db, "cron_min_interval_seconds");
-    int64_t next;
     if (has_expr) {
-        next = cron_next_run(cron_expr, now);
-        if (next < 0) return -1;
+        int64_t next = cron_next_run(cron_expr, now);
+        if (next < 0) return CRON_SCHED_BAD_EXPR;
         /* Floor measured fire-to-fire, not first-fire delta: cron_next_run
          * starts its search at after+60, so a first-fire delta is never a
          * meaningful rate signal (an hourly job created at :59 fires in ~60s
          * once, then hourly). Compare two consecutive fires. */
         int64_t n2 = cron_next_run(cron_expr, next);
-        if (n2 < 0 || n2 - next < floor) return -1;
-    } else if (has_run_at) {
-        if (run_at - now < floor) return -1;
-        next = run_at;
-    } else { /* has_interval */
-        if (interval_s < floor) return -1;
-        next = now + interval_s;
+        if (n2 < 0) return CRON_SCHED_BAD_EXPR;
+        if (every_out) *every_out = n2 - next;
+        if (n2 - next < floor) return CRON_SCHED_FLOOR;
+        if (next_out) *next_out = next;
+        return CRON_SCHED_OK;
     }
+    if (every_out) *every_out = in_seconds;
+    if (in_seconds < floor) return CRON_SCHED_FLOOR;
+    if (next_out) *next_out = now + in_seconds;
+    return CRON_SCHED_OK;
+}
 
+/* The stored job an upsert merges into. found=0 means "creating". */
+typedef struct {
+    int found;
+    int64_t id, run_at, interval_s, session_id, next_run_at;
+    char *expr, *task, *script, *target, *target_agent, *channel, *chat;
+} CronRow;
+
+static void row_free(CronRow *r) {
+    free(r->expr); free(r->task); free(r->script);
+    free(r->target); free(r->target_agent); free(r->channel); free(r->chat);
+    memset(r, 0, sizeof(*r));
+}
+
+static char *col_dup(sqlite3_stmt *st, int i) {
+    const char *v = (const char *)sqlite3_column_text(st, i);
+    return v ? strdup(v) : NULL;
+}
+
+static void row_load(sqlite3 *db, const char *agent, const char *name,
+                     CronRow *r) {
+    memset(r, 0, sizeof(*r));
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT id, cron_expr, COALESCE(run_at,0), COALESCE(interval_s,0),"
+            "       session_id, task, script, target, target_agent,"
+            "       channel_name, chat_id, next_run_at"
+            " FROM cron_jobs WHERE agent_name=?1 AND name=?2",
+            -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(st, 1, agent ? agent : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, name ? name : "", -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        r->found       = 1;
+        r->id          = sqlite3_column_int64(st, 0);
+        r->expr        = col_dup(st, 1);
+        r->run_at      = sqlite3_column_int64(st, 2);
+        r->interval_s  = sqlite3_column_int64(st, 3);
+        r->session_id  = sqlite3_column_int64(st, 4);
+        r->task        = col_dup(st, 5);
+        r->script      = col_dup(st, 6);
+        r->target      = col_dup(st, 7);
+        r->target_agent= col_dup(st, 8);
+        r->channel     = col_dup(st, 9);
+        r->chat        = col_dup(st, 10);
+        r->next_run_at = sqlite3_column_int64(st, 11);
+    }
+    sqlite3_finalize(st);
+}
+
+/* Target mode of the merged job: NULL (follow the conversation), "pin", or
+ * "new". Refuses the combinations that would leave a job with two modes —
+ * the check the upsert path owns, because only the stored row knows the
+ * mode a partial document is landing on. */
+static const char *merged_mode(const CronDoc *d, const CronRow *row,
+                               char **err_out) {
+    int was_pin = row->target && strcmp(row->target, "pin") == 0;
+    int was_new = row->target && strcmp(row->target, "new") == 0;
+    int wants_new = d->has_session;
+
+    if (d->has_session_id && was_new) {
+        *err_out = cerrf("error: job '%s' fires in a fresh session "
+                         "(session:\"new\") — it cannot also pin session_id. "
+                         "Remove the job and set it again to change modes.",
+                         d->name ? d->name : "?");
+        return NULL;
+    }
+    if (wants_new && was_pin) {
+        *err_out = cerrf("error: job '%s' is pinned to session %lld — it "
+                         "cannot also use session:\"new\". Remove the job and "
+                         "set it again to change modes.",
+                         d->name ? d->name : "?", (long long)row->session_id);
+        return NULL;
+    }
+    if (d->has_session_id) return "pin";
+    if (wants_new || was_new) return "new";
+    if (was_pin) return "pin";
+    return NULL;
+}
+
+/* Merged-row rules: a job needs a schedule, and agent/channel targeting is
+ * meaningful only for a fresh-session job. */
+static char *doc_check_merged(const CronDoc *d, const CronRow *row) {
+    char *err = NULL;
+    const char *mode = merged_mode(d, row, &err);
+    if (err) return err;
+
+    int has_schedule = d->has_expr || d->has_seconds ||
+                       (row->found && ((row->expr && row->expr[0]) ||
+                                       row->run_at > 0 || row->interval_s > 0));
+    if (!has_schedule)
+        return cerrf("error: this job has no schedule — give it cron_expr "
+                     "(recurring) or in_seconds (one-shot)");
+
+    int is_new = (mode && strcmp(mode, "new") == 0);
+    if (d->has_agent && !is_new)
+        return cerrf("error: 'agent' only applies to a fresh-session job — "
+                     "pass session:\"new\" with it");
+    if ((d->has_channel || d->has_chat) && !is_new)
+        return cerrf("error: 'channel_name'/'chat_id' only apply to a "
+                     "fresh-session job — pass session:\"new\" with them");
+    return NULL;
+}
+
+int cron_doc_check(sqlite3 *db, const char *agent_name, const char *doc,
+                   char **err_out) {
+    CronDoc d;
+    if (cron_doc_parse(db, doc, &d) != 0) {
+        if (err_out) *err_out = strdup("error: cron job document is not valid JSON");
+        return -1;
+    }
+    int rc = 0;
+    if (!d.name || !d.name[0]) {
+        if (err_out) *err_out = strdup("error: cron job needs a name");
+        rc = -1;
+    } else {
+        CronRow row;
+        row_load(db, agent_name, d.name, &row);
+        char *err = doc_check_merged(&d, &row);
+        row_free(&row);
+        if (err) {
+            if (err_out) *err_out = err; else free(err);
+            rc = -1;
+        }
+    }
+    cron_doc_free(&d);
+    return rc;
+}
+
+/* The calling session's chat binding — the follow-the-conversation stamp.
+ * Both stay NULL for CLI and sub-agent callers, which is fine: such a fire
+ * falls back to the stamped session id. */
+static void caller_chat(sqlite3 *db, int64_t sid, char **chan, char **chat) {
+    *chan = NULL; *chat = NULL;
+    if (sid <= 0) return;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT channel_name, chat_id FROM sessions WHERE id=?1",
+            -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_int64(st, 1, sid);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        *chan = col_dup(st, 0);
+        *chat = col_dup(st, 1);
+    }
+    sqlite3_finalize(st);
+}
+
+/* One merged job, ready to write. Strings borrow from the document, the
+ * stored row, or the caller stamp — all outlive the INSERT. */
+typedef struct {
+    const char *expr, *task, *script, *target, *target_agent, *chan, *chat;
+    int64_t run_at, interval_s, next_run_at, session_id;
+} CronMerged;
+
+static int merge_schedule(sqlite3 *db, const CronDoc *d, const CronRow *row,
+                          CronMerged *m, char **err_out) {
+    if (!d->has_expr && !d->has_seconds) {   /* keep what the job has */
+        m->expr        = row->expr ? row->expr : "";
+        m->run_at      = row->run_at;
+        m->interval_s  = row->interval_s;
+        m->next_run_at = row->next_run_at;
+        return 0;
+    }
+    int64_t next = 0;
+    CronSchedRc rc = cron_schedule_check(db, d->has_expr ? d->cron_expr : NULL,
+                                         d->has_seconds ? d->in_seconds : 0,
+                                         &next, NULL);
+    if (rc != CRON_SCHED_OK) {
+        /* The tool phrases these precisely before it ever gets here; this is
+         * the structural backstop (and the apply-after-approval path). */
+        if (err_out) *err_out = strdup("error: invalid schedule");
+        return -1;
+    }
+    m->expr        = d->has_expr ? d->cron_expr : "";
+    m->run_at      = d->has_seconds ? next : 0;
+    m->interval_s  = 0;
+    m->next_run_at = next;
+    return 0;
+}
+
+static void merge_target(const CronDoc *d, const CronRow *row, const char *mode,
+                         int64_t anchor, const char *cc, const char *ct,
+                         CronMerged *m) {
+    m->target = mode;
+    m->target_agent = NULL;
+    m->chan = NULL;
+    m->chat = NULL;
+    m->session_id = anchor;
+
+    if (mode && strcmp(mode, "pin") == 0) {
+        m->session_id = d->has_session_id ? d->session_id : row->session_id;
+        return;
+    }
+    if (mode && strcmp(mode, "new") == 0) {
+        m->target_agent = d->has_agent ? d->agent : row->target_agent;
+        if (m->target_agent && !m->target_agent[0]) m->target_agent = NULL;
+        if (d->has_channel || d->has_chat) {
+            m->chan = d->channel_name;
+            m->chat = d->chat_id;
+        } else {
+            m->chan = row->channel;
+            m->chat = row->chat;
+        }
+        return;
+    }
+    /* Default: follow the conversation. The chat is the durable identity, so
+     * re-stamp it from whoever is setting the job now — unless that caller
+     * has no chat (CLI, sub-agent), which must not silently strip the
+     * delivery target off a job set from a real conversation. */
+    if (cc || ct) {
+        m->chan = cc;
+        m->chat = ct;
+    } else {
+        m->chan = row->channel;
+        m->chat = row->chat;
+    }
+}
+
+static int64_t merged_write(sqlite3 *db, const char *agent, const char *name,
+                            const CronMerged *m) {
     const char *sql =
         "INSERT INTO cron_jobs (agent_name, name, cron_expr, run_at, interval_s,"
-        "                       kind, session_id, task, next_run_at)"
-        " VALUES (?,?,?,?,?,'task',?,?,?);";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        "                       kind, session_id, task, script, channel_name,"
+        "                       chat_id, target, target_agent, enabled, next_run_at)"
+        " VALUES (?1,?2,?3,?4,?5,'task',?6,?7,?8,?9,?10,?11,?12,1,?13)"
+        " ON CONFLICT(agent_name,name) DO UPDATE SET"
+        "   cron_expr=excluded.cron_expr, run_at=excluded.run_at,"
+        "   interval_s=excluded.interval_s, session_id=excluded.session_id,"
+        "   task=excluded.task, script=excluded.script,"
+        "   channel_name=excluded.channel_name, chat_id=excluded.chat_id,"
+        "   target=excluded.target, target_agent=excluded.target_agent,"
+        /* An upsert is also how a paused job comes back. */
+        "   enabled=1, next_run_at=excluded.next_run_at"
+        " RETURNING id;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, agent ? agent : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, m->expr ? m->expr : "", -1, SQLITE_STATIC);
+    if (m->run_at > 0) sqlite3_bind_int64(st, 4, m->run_at); else sqlite3_bind_null(st, 4);
+    if (m->interval_s > 0) sqlite3_bind_int64(st, 5, m->interval_s); else sqlite3_bind_null(st, 5);
+    sqlite3_bind_int64(st, 6, m->session_id);
+    sqlite3_bind_text(st, 7, m->task ? m->task : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 8, m->script, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 9, m->chan, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 10, m->chat, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 11, m->target, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 12, m->target_agent, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 13, m->next_run_at);
+    int64_t id = (sqlite3_step(st) == SQLITE_ROW) ? sqlite3_column_int64(st, 0) : -1;
+    sqlite3_finalize(st);
+    return id;
+}
+
+int64_t cron_upsert(sqlite3 *db, const char *agent_name,
+                    int64_t caller_session_id, const char *doc,
+                    int *updated_out, char **err_out) {
+    if (err_out) *err_out = NULL;
+    if (updated_out) *updated_out = 0;
+
+    CronDoc d;
+    if (cron_doc_parse(db, doc, &d) != 0) {
+        if (err_out) *err_out = strdup("error: cron job document is not valid JSON");
         return -1;
-    sqlite3_bind_text(stmt, 1, agent_name ? agent_name : "", -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, name, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, has_expr ? cron_expr : "", -1, SQLITE_STATIC);
-    if (has_run_at) sqlite3_bind_int64(stmt, 4, run_at); else sqlite3_bind_null(stmt, 4);
-    if (has_interval) sqlite3_bind_int64(stmt, 5, interval_s); else sqlite3_bind_null(stmt, 5);
-    sqlite3_bind_int64(stmt, 6, session_id);
-    sqlite3_bind_text(stmt, 7, task, -1, SQLITE_STATIC);
-    sqlite3_bind_int64(stmt, 8, next);
-    int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) return -1;
-    return sqlite3_last_insert_rowid(db);
+    }
+    if (!d.name || !d.name[0]) {
+        cron_doc_free(&d);
+        if (err_out) *err_out = strdup("error: cron job needs a name");
+        return -1;
+    }
+
+    CronRow row;
+    row_load(db, agent_name, d.name, &row);
+
+    int64_t id = -1;
+    char *err = doc_check_merged(&d, &row);
+    CronMerged m = {0};
+    if (!err && merge_schedule(db, &d, &row, &m, &err) == 0) {
+        m.task = d.has_prompt ? d.prompt : (row.task ? row.task : "");
+        m.script = d.has_script ? (d.script && d.script[0] ? d.script : NULL)
+                                : row.script;
+        char *cc = NULL, *ct = NULL;
+        caller_chat(db, caller_session_id, &cc, &ct);
+        int64_t anchor = (caller_session_id > 0) ? caller_session_id
+                                                 : row.session_id;
+        /* doc_check_merged already accepted the mode, so this cannot fail. */
+        char *ignored = NULL;
+        merge_target(&d, &row, merged_mode(&d, &row, &ignored), anchor, cc, ct, &m);
+        free(ignored);
+        id = merged_write(db, agent_name, d.name, &m);
+        free(cc); free(ct);
+        if (id < 0) err = strdup("error: could not save the cron job");
+    }
+    if (err) {
+        if (err_out) *err_out = err; else free(err);
+    }
+    if (id > 0 && updated_out) *updated_out = row.found;
+    row_free(&row);
+    cron_doc_free(&d);
+    return id;
 }
 
 CronJob *cron_list(sqlite3 *db, const char *agent_name, int *count) {

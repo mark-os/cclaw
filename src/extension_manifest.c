@@ -903,35 +903,46 @@ int extension_install(sqlite3 *db, const char *bundle_dir,
     if (sqlite3_exec(db, rc == 0 ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
         rc = -1;
 
-    /* scripts with a schedule seed cron rows (outside the txn — cron_add owns
-     * its own insert and computes next_run_at). Routing is refined in Layer 5. */
+    /* scripts with a schedule seed cron rows (outside the txn — cron_upsert
+     * owns its own write and computes next_run_at). Routing is refined in
+     * Layer 5. Documents are collected first: cron_upsert reads cron_jobs, so
+     * writing mid-iteration of `st` would nest a real-table read inside it. */
     if (rc == 0) {
+        char **docs = NULL;
+        size_t ndocs = 0;
         sqlite3_stmt *st;
         if (sqlite3_prepare_v2(db,
-                "SELECT json_extract(value,'$.name'), json_extract(value,'$.schedule'), "
-                "       json_extract(value,'$.handler') "
+                "SELECT json_object("
+                "  'name', json_extract(value,'$.name'),"
+                "  'cron_expr', json_extract(value,'$.schedule'),"
+                "  'prompt', 'Run the scheduled extension script '''"
+                "            || json_extract(value,'$.name')"
+                "            || ''': call js_eval with filename ''' || ?2 || '/'"
+                "            || json_extract(value,'$.handler') || '''.') "
                 "FROM json_each(COALESCE(json_extract(?1,'$.scripts'),'[]')) "
-                "WHERE json_extract(value,'$.schedule') IS NOT NULL",
+                "WHERE json_extract(value,'$.schedule') IS NOT NULL "
+                "  AND json_extract(value,'$.name') IS NOT NULL "
+                "  AND json_extract(value,'$.handler') IS NOT NULL",
                 -1, &st, NULL) == SQLITE_OK) {
             sqlite3_bind_text(st, 1, manifest, -1, SQLITE_STATIC);
-            /* WAL safety: this loop writes (cron_add INSERT) mid-iteration of
-             * `st`, but safe because json_each() over a bound parameter takes
-             * no read snapshot.  If this query ever JOINs a real table,
-             * restructure to collect-then-write — see channel_consume_events
-             * in src/channel.c. */
+            sqlite3_bind_text(st, 2, store, -1, SQLITE_STATIC);
             while (sqlite3_step(st) == SQLITE_ROW) {
-                const char *sname = (const char *)sqlite3_column_text(st, 0);
-                const char *sched = (const char *)sqlite3_column_text(st, 1);
-                const char *handler = (const char *)sqlite3_column_text(st, 2);
-                if (!sname || !sched || !handler) continue;
-                char task[PATH_MAX + 128];
-                snprintf(task, sizeof(task),
-                         "Run the scheduled extension script '%s': call js_eval with "
-                         "filename '%s/%s'.", sname, store, handler);
-                cron_add(db, owner_agent, sname, sched, 0, 0, 0, task);
+                const char *doc = (const char *)sqlite3_column_text(st, 0);
+                if (!doc) continue;
+                char **t = realloc(docs, (ndocs + 1) * sizeof(*docs));
+                if (!t) break;
+                docs = t;
+                docs[ndocs] = strdup(doc);
+                if (!docs[ndocs]) break;
+                ndocs++;
             }
             sqlite3_finalize(st);
         }
+        for (size_t i = 0; i < ndocs; i++) {
+            cron_upsert(db, owner_agent, 0, docs[i], NULL, NULL);
+            free(docs[i]);
+        }
+        free(docs);
     }
 
     /* agents[]: apply each definition through the shared path

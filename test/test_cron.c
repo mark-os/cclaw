@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "config_registry.h"
 #include "cron.h"
 #include "db.h"
 #include "wake.h"
@@ -126,6 +127,16 @@ static void test_cron_next_run_step(void) {
     printf("  PASS: step expression\n");
 }
 
+/* Recurring job through the storage-layer entry point the tool uses. */
+static int64_t add_recurring(sqlite3 *db, const char *agent, const char *name,
+                             const char *expr, int64_t sid, const char *prompt) {
+    char doc[512];
+    snprintf(doc, sizeof(doc),
+             "{\"name\":\"%s\",\"cron_expr\":\"%s\",\"prompt\":\"%s\"}",
+             name, expr, prompt);
+    return cron_upsert(db, agent, sid, doc, NULL, NULL);
+}
+
 static void test_cron_crud(void) {
     sqlite3 *db = open_seeded(":memory:");
     assert(db);
@@ -133,7 +144,7 @@ static void test_cron_crud(void) {
     int64_t sid = session_create(db, "cron_test", NULL, -1, 0);
     assert(sid > 0);
 
-    int64_t jid = cron_add(db, "test_agent", "test_job", "0 * * * *", 0, 0, sid, "hello");
+    int64_t jid = add_recurring(db, "test_agent", "test_job", "0 * * * *", sid, "hello");
     assert(jid > 0);
 
     int count = 0;
@@ -158,7 +169,7 @@ static void test_cron_crud(void) {
     assert(count == 0 && jobs == NULL);
 
     assert(cron_remove(db, 999, "test_agent") == -1);
-    assert(cron_add(db, "test_agent", "bad", "invalid", 0, 0, sid, "x") == -1);
+    assert(add_recurring(db, "test_agent", "bad", "invalid", sid, "x") == -1);
 
     db_close(db);
     printf("  PASS: CRUD operations\n");
@@ -185,8 +196,8 @@ static void test_cron_agent_isolation(void) {
     assert(db);
 
     int64_t sid = session_create(db, "test", NULL, -1, 0);
-    cron_add(db, "agent_a", "job_a", "0 * * * *", 0, 0, sid, "task_a");
-    cron_add(db, "agent_b", "job_b", "0 * * * *", 0, 0, sid, "task_b");
+    add_recurring(db, "agent_a", "job_a", "0 * * * *", sid, "task_a");
+    add_recurring(db, "agent_b", "job_b", "0 * * * *", sid, "task_b");
 
     int count = 0;
     CronJob *jobs = cron_list(db, "agent_a", &count);
@@ -206,45 +217,78 @@ static void test_cron_agent_isolation(void) {
     printf("  PASS: agent isolation\n");
 }
 
-/* ── Schedule validation (cron_add) ───────────────────────────────────── */
+/* ── Schedule validation (cron_upsert) ────────────────────────────────── */
 
-static void test_cron_add_schedule_validation(void) {
+/* One-shot job by delay. */
+static int64_t add_oneshot(sqlite3 *db, const char *agent, const char *name,
+                           int64_t in_seconds, int64_t sid) {
+    char doc[256];
+    snprintf(doc, sizeof(doc),
+             "{\"name\":\"%s\",\"in_seconds\":%lld,\"prompt\":\"t\"}",
+             name, (long long)in_seconds);
+    return cron_upsert(db, agent, sid, doc, NULL, NULL);
+}
+
+static void test_cron_schedule_validation(void) {
     sqlite3 *db = open_seeded(":memory:");
     assert(db);
     int64_t sid = session_create(db, "v", "A", -1, 0);
-    int64_t now = (int64_t)time(NULL);
 
-    /* Exactly one schedule type required. */
-    assert(cron_add(db, "A", "none", "", 0, 0, sid, "t") == -1);          /* zero specs */
-    assert(cron_add(db, "A", "two", "0 * * * *", now + 3600, 0, sid, "t") == -1); /* expr+run_at */
+    /* A new job must carry a schedule; two schedules is ambiguous. */
+    char *err = NULL;
+    assert(cron_upsert(db, "A", sid, "{\"name\":\"none\",\"prompt\":\"t\"}",
+                       NULL, &err) == -1);
+    assert(err && strstr(err, "no schedule"));
+    free(err);
+    assert(cron_upsert(db, "A", sid,
+        "{\"name\":\"two\",\"cron_expr\":\"0 * * * *\",\"in_seconds\":3600,"
+        "\"prompt\":\"t\"}", NULL, NULL) == -1);
 
-    /* One-shot: must be in the future by at least the floor (300). */
-    assert(cron_add(db, "A", "past", "", now - 10, 0, sid, "t") == -1);
-    assert(cron_add(db, "A", "soon", "", now + 60, 0, sid, "t") == -1);   /* under floor */
-    assert(cron_add(db, "A", "ok",   "", now + 3600, 0, sid, "t") > 0);
-
-    /* Interval: must be >= floor. */
-    assert(cron_add(db, "A", "izero", "", 0, 0, sid, "t") == -1);          /* interval 0 = unused */
-    assert(cron_add(db, "A", "ismall", "", 0, 60, sid, "t") == -1);        /* under floor */
-    assert(cron_add(db, "A", "iok",   "", 0, 600, sid, "t") > 0);
+    /* One-shot: the delay must clear the floor (default 30s). */
+    assert(add_oneshot(db, "A", "past", -10, sid) == -1);
+    assert(add_oneshot(db, "A", "soon", 20, sid) == -1);
+    assert(add_oneshot(db, "A", "ok", 3600, sid) > 0);
+    assert(add_oneshot(db, "A", "floor", 30, sid) > 0);   /* exactly the floor */
 
     db_close(db);
     printf("  PASS: schedule validation\n");
 }
 
-static void test_cron_add_floor_fire_to_fire(void) {
+static void test_cron_floor_fire_to_fire(void) {
     sqlite3 *db = open_seeded(":memory:");
     assert(db);
     int64_t sid = session_create(db, "f", "A", -1, 0);
 
     /* Hourly always passes regardless of when created — the floor is measured
      * fire-to-fire (3600s), not off the possibly-tiny first-fire delta. */
-    assert(cron_add(db, "A", "hourly", "0 * * * *", 0, 0, sid, "t") > 0);
-    /* Every-minute fails: fire-to-fire 60s < floor 300s. */
-    assert(cron_add(db, "A", "minutely", "* * * * *", 0, 0, sid, "t") == -1);
+    assert(add_recurring(db, "A", "hourly", "0 * * * *", sid, "t") > 0);
+    /* Every-minute clears the 30s default floor; raising the floor above the
+     * fire-to-fire spacing is what refuses it. */
+    assert(add_recurring(db, "A", "minutely", "* * * * *", sid, "t") > 0);
+    assert(config_set(db, "cron_min_interval_seconds", "300") == 0);
+    assert(add_recurring(db, "A", "minutely2", "* * * * *", sid, "t") == -1);
+    assert(add_recurring(db, "A", "hourly2", "0 * * * *", sid, "t") > 0);
 
     db_close(db);
     printf("  PASS: fire-to-fire floor\n");
+}
+
+/* The verdicts the tool turns into two different messages. */
+static void test_cron_schedule_check_codes(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    assert(db);
+    int64_t next = 0, every = 0;
+
+    assert(cron_schedule_check(db, NULL, 0, &next, &every) == CRON_SCHED_NONE);
+    assert(cron_schedule_check(db, "0 * * * *", 60, &next, &every) == CRON_SCHED_BOTH);
+    assert(cron_schedule_check(db, "nonsense", 0, &next, &every) == CRON_SCHED_BAD_EXPR);
+    assert(cron_schedule_check(db, NULL, 5, &next, &every) == CRON_SCHED_FLOOR);
+    assert(every == 5);   /* echoed back for the refusal message */
+    assert(cron_schedule_check(db, "0 * * * *", 0, &next, &every) == CRON_SCHED_OK);
+    assert(every == 3600 && next > (int64_t)time(NULL));
+
+    db_close(db);
+    printf("  PASS: schedule check codes\n");
 }
 
 /* ── Dispatch (run_due_jobs via cron_run_due) ─────────────────────────── */
@@ -457,8 +501,9 @@ int main(void) {
     test_cron_next_run_dst();
     test_cron_crud();
     test_cron_agent_isolation();
-    test_cron_add_schedule_validation();
-    test_cron_add_floor_fire_to_fire();
+    test_cron_schedule_validation();
+    test_cron_floor_fire_to_fire();
+    test_cron_schedule_check_codes();
     test_dispatch_oneshot();
     test_dispatch_interval();
     test_dispatch_session_zero_resolves();

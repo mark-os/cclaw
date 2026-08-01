@@ -411,6 +411,8 @@ static const ToolTraits tool_traits[] = {
     { "create_agent",      0, 0, NULL_PARK },
     { "update_agent",      0, 0, NULL_PARK },
     { "extension_promote", 0, 0, NULL_PARK },
+    /* cron_set only parks when the job would run as another agent. */
+    { "cron_set",          0, 0, NULL_PARK },
 };
 
 static const ToolTraits *tool_traits_lookup(const char *name) {
@@ -907,6 +909,13 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
         ToolExtensionCtx *ectx = (ToolExtensionCtx *)te->user_data;
         ectx->session_id = session_id;
         ectx->current_tool_call_id = tc->call_id;
+    } else if (te->user_data == &g_tool_setup->cron_ctx) {
+        ToolCronCtx *kctx = (ToolCronCtx *)te->user_data;
+        kctx->session_id = session_id;
+        kctx->current_tool_call_id = tc->call_id;
+        /* Job ownership follows the advancing agent, not setup's init agent. */
+        snprintf(kctx->agent_name, sizeof(kctx->agent_name), "%s",
+                 agent_name ? agent_name : "");
     } else if (te->user_data == &g_tool_setup->chan_send_ctx) {
         ToolChannelSendCtx *cctx = (ToolChannelSendCtx *)te->user_data;
         cctx->session_id = session_id;
@@ -1955,6 +1964,16 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
             *rename_failed = 1; /* generic apply-failed: error result, no grant */
         }
         free(cerr);
+    } else if (strcmp(a->action, "cron_set") == 0) {
+        /* Standing job: approved once here, then it fires unattended. The
+         * document is the same one cron_set validated before parking. */
+        char *cerr = NULL;
+        if (cron_upsert(g_db, agent, a->session_id, a->args_json,
+                        NULL, &cerr) < 0) {
+            LOG_WARN_("cron_set apply failed: %s", cerr ? cerr : "?");
+            *rename_failed = 1; /* generic apply-failed: error result, no job */
+        }
+        free(cerr);
     } else if (strcmp(a->action, "rename_agent") == 0) {
         char *nn = tool_args_str(g_db, a->args_json, "name");
         char *pr = tool_args_str(g_db, a->args_json, "preamble");
@@ -2293,6 +2312,12 @@ static const char *SQL_UPDATE_AGENT_LINES =
     "   FROM json_each(?1)"
     "   WHERE key NOT IN ('name','grants','reason') AND type!='object'";
 
+/* cron_set enumeration — every field the job was asked to carry. The
+ * escalation being approved is *which agent* fires it, so the agent and the
+ * chat it would report to must both be visible, never summarized away. */
+static const char *SQL_CRON_SET_LINES =
+    "SELECT format('%-13s%s',key,atom) FROM json_each(?1) WHERE key!='name'";
+
 /* Render a human-readable markdown summary of an approval — never the raw
  * args_json blob. Grant-shaped approvals enumerate every requested value in
  * fenced blocks grouped by scope; any other tool's call arguments (shape
@@ -2340,6 +2365,12 @@ static char *format_approval_summary(const Approval *a) {
         append_enum_block(&out, "Changes (grants add; fields overwrite):",
                           SQL_UPDATE_AGENT_LINES, args);
         if (f[1] && f[1][0]) buf_appendf(&out, "Reason: %s\n", f[1]);
+    } else if (a->tool_name && strcmp(a->tool_name, "cron_set") == 0) {
+        f[0] = tool_args_str(g_db, args, "name");
+        buf_appendf(&out, "wants to schedule job **%s**, running as another "
+                          "agent (its grants and model, every fire):\n",
+                    f[0] ? f[0] : "?");
+        append_enum_block(&out, "Job:", SQL_CRON_SET_LINES, args);
     } else {
         char *salient = tool_args_str(g_db, args, "command");
         if (!salient) salient = tool_args_str(g_db, args, "url");

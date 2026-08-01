@@ -25,8 +25,9 @@ static const ConfigDef s_defs[] = {
     { "channel_deaf_timeout", "300",
       "Seconds of received-traffic silence before a live channel runner is"
       " restarted (0 = off; per-channel <ext>.deaf_timeout overrides)" },
-    { "cron_min_interval_seconds", "300",
-      "Minimum spacing between cron fires (floor on run_at/interval_s/recurring)" },
+    { "cron_min_interval_seconds", "30",
+      "Minimum spacing between cron fires (floor on in_seconds/interval_s/"
+      "recurring). Default is one daemon tick — fires land within a tick of due" },
     { "cron_max_jobs_per_session", "10",
       "Max cron jobs a session may own (cron_set cap)" },
     { "sql_slow_ms",        "100",

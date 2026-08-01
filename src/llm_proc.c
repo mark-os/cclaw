@@ -665,7 +665,7 @@ int llm_req(sqlite3 *db, CURL *curl, int64_t session_id, int recall) {
         free(key_buf);
     }
 
-    free(context_text);
+    free(context_text); context_text = NULL;   /* err: frees again on !llm_ok */
     free(system_prompt); system_prompt = NULL;
     context_plan_free(&plan); memset(&plan, 0, sizeof(plan));
 
@@ -1099,7 +1099,7 @@ static int transcribe_resolve(sqlite3 *db, int64_t job_id, const char *text) {
     sqlite3_finalize(s);
     if (session_id < 0 || !payload) { free(source); free(payload); return -1; }
 
-    int64_t irc = inbox_insert_scanned(db, session_id, source, payload);
+    int64_t irc = inbox_insert_scanned(db, session_id, source, NULL, payload);
     free(source); free(payload);
     if (irc < 0) {
         LOG_ERROR_("transcribe: inbox insert failed job=%lld — keeping job",

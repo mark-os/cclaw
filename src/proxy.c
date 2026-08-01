@@ -938,8 +938,9 @@ char *proxy_denied_summary(ProxyContext *ctx) {
         pthread_mutex_unlock(&ctx->blessed_mu);
         return NULL;
     }
-    /* Build: "\ncclaw: proxy blocked host(s) not in allowlist: foo.com, bar.com\n" */
-    size_t cap = 128;
+    /* Build: "\ncclaw: proxy blocked host(s) not in allowlist: foo.com, bar.com
+     * — request access via request_config (grants.hosts) if needed\n" */
+    size_t cap = 192;
     for (int i = 0; i < ctx->denied_count; i++)
         cap += strlen(ctx->denied[i]) + 4;
     char *out = malloc(cap);
@@ -951,7 +952,8 @@ char *proxy_denied_summary(ProxyContext *ctx) {
         if (i > 0) o += (size_t)snprintf(out + o, cap - o, ", ");
         o += (size_t)snprintf(out + o, cap - o, "%s", ctx->denied[i]);
     }
-    o += (size_t)snprintf(out + o, cap - o, "\n");
+    o += (size_t)snprintf(out + o, cap - o,
+        " — request access via request_config (grants.hosts) if needed\n");
     pthread_mutex_unlock(&ctx->blessed_mu);
     return out;
 }

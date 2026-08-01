@@ -99,7 +99,7 @@ static void test_timeout(void) {
     r.workspace = workspace;
     char *res = run_tool_shell(&r);
     assert(res != NULL);
-    assert(strstr(res, "[timeout after 1s]") != NULL);
+    assert(strstr(res, "[timeout after 1s") != NULL);
     free(res);
     printf("  PASS test_timeout\n");
 }
@@ -120,7 +120,7 @@ static void test_timeout_kills_process_group(void) {
     r.workspace = workspace;
     char *res = run_tool_shell(&r);
     assert(res != NULL);
-    assert(strstr(res, "[timeout after 1s]") != NULL);
+    assert(strstr(res, "[timeout after 1s") != NULL);
     free(res);
 
     struct timespec ts = {0, 100000000};
@@ -144,7 +144,7 @@ static void test_configurable_default_timeout(void) {
     r.workspace = workspace;
     char *res = run_tool_shell(&r);
     assert(res != NULL);
-    assert(strstr(res, "[timeout after 1s]") != NULL);
+    assert(strstr(res, "[timeout after 1s") != NULL);
     free(res);
     printf("  PASS test_configurable_default_timeout\n");
 }

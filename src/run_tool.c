@@ -529,7 +529,9 @@ static char *format_tier_result(const TierDescriptor *desc, char *output,
         size_t needed = out_len + 128;
         result = malloc(needed);
         if (timed_out)
-            snprintf(result, needed, "[timeout after %ds]\n%s", timeout, output);
+            snprintf(result, needed,
+                     "[timeout after %ds — raise with the timeout parameter]\n%s",
+                     timeout, output);
         else
             snprintf(result, needed, "[exit %d]\n%s",
                      WIFEXITED(status) ? WEXITSTATUS(status) : -1, output);
@@ -537,9 +539,11 @@ static char *format_tier_result(const TierDescriptor *desc, char *output,
     } else {
         /* In-process tier: the child already produced the final result. */
         if (timed_out) {
-            size_t needed = out_len + 64;
+            size_t needed = out_len + 96;
             result = malloc(needed);
-            snprintf(result, needed, "error: tool timed out (%ds)\n%s", timeout, output);
+            snprintf(result, needed,
+                     "error: tool timed out (%ds; raise with the timeout parameter)\n%s",
+                     timeout, output);
             free(output);
         } else {
             result = output;  /* hand off ownership */
@@ -550,7 +554,7 @@ static char *format_tier_result(const TierDescriptor *desc, char *output,
 
 static void serve_network_child(const TierDescriptor *desc, RunToolParsed *q,
                                 unsigned char *body, size_t body_len) {
-    if (q->timeout <= 0) q->timeout = 30;
+    if (q->timeout <= 0) q->timeout = 60;
 
     /* Pipe for child stdout+stderr (or the in-process result for web/js). */
     int pipefd[2];

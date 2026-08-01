@@ -11,7 +11,7 @@
 #include "sandbox.h"
 #include "run_tool.h"
 
-#define TOOL_SHELL_DEFAULT_TIMEOUT 30
+#define TOOL_SHELL_DEFAULT_TIMEOUT 60
 
 /* Config passed as user_data to shell handler */
 typedef struct {

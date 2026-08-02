@@ -1479,8 +1479,8 @@ int inbox_consume_into_entries_locked(sqlite3 *db, int64_t session_id, int limit
      *
      * The same provenance also lands *structurally* in entries.data, so it
      * stays queryable after the prose is compacted away: cron fire outcomes
-     * (the auto-pause streak) and the future autonomous-turn guard both key
-     * on it. json_patch('{}',…) drops the source_ref key when it is NULL
+     * (the auto-pause streak) and the autonomous-turn guard (advance.c) both
+     * key on it. json_patch('{}',…) drops the source_ref key when it is NULL
      * (RFC 7386 merge) rather than storing a JSON null. */
     sqlite3_stmt *sel;
     if (sqlite3_prepare_v2(db,

@@ -389,6 +389,10 @@ Transitions are guarded by a CAS in `session_set_state()` (`src/db.c`): idle cle
 
 An idle session whose leaf entry is unanswered — role 1 (dispatch refused after the inbox drain) or role 3 (a mid-turn dispatch bounce, or a zombie call closed at turn start) — is not resting: `advance_session` resumes it, and the daemon tick's `session_sweep_inbox` wakes it with the same predicate. A role-3 resume continues the *same* turn, so it re-derives `turn_iteration` from the leaf turn's distinct `iteration_id`s (the idle transition above zeroed it) and keeps the frozen `turn_context`. Role 0/2/4 leaves are legal resting places.
 
+### The autonomous-turn streak (cross-turn runaway guard)
+
+`max_iterations` bounds a turn; nothing bounded turns *generating* turns with no human in the causal chain (cron chatter, sub-agent respawn ping-pong). Both turn-open branches of `advance_session` — `idle` and its twin `compacting` — check the streak **before** the drain. **Metric**: `COUNT(DISTINCT turn_id)` over the session's entries newer than the last *human* turn, where a human turn is the most recent one holding a role-1 entry whose `data.source` is not in `('cron','cron_error','agent_result','spawn','system')` — or holds no stamp at all (only the drain stamps, so unstamped means a human-adjacent writer). No human turn ever ⇒ every turn counts. The classification is autonomous-side because the human side is open-ended: `cli`, any channel name, `approval`. There is no counter column; the SQL fragments live in `src/advance.h` and are shared with `--doctor`. **Cap**: config `max_autonomous_turn_streak` (default 50, 0 = off). At or past it, a turn open whose *entire* pending inbox batch is autonomous consumes nothing and returns `ADVANCE_NOOP` — the inbox rows stay durable and the session simply goes quiet (the daemon sweep keeps waking it; each wake NOOPs at the gate for two indexed counts). An unanswered-leaf resume is never gated: the guard only fires when there is queued work. **Recovery**: a human row anywhere in the pending batch lets the turn through, and opening it resets the streak by construction. **Notices**: at ~80% of the cap an allowed turn gets one role-0 entry stamped `{"source":"streak_guard","note":"warn"}` appended to its opening batch; the first refusal of a trip writes one stamped `…"note":"tripped"` (role 0, so it neither counts toward the streak nor looks like a leaf to resume) plus a `channel_outbox` notice to the bound chat and a syslog WARN. Once-per-trip is derived from that marker being newer than the last human turn — a human turn later starts a fresh trip.
+
 ### sessions.tool_filter
 
 A JSON array of tool names frozen at sub-agent spawn time (`src/main.c`). Acts as a **positive scope** intersected with grants per turn — it can never widen authority, only shrink it. NULL means unrestricted (uses grants alone).
@@ -619,8 +623,9 @@ referent may not survive (a one-shot job deletes itself at fire time). A NULL
 The same drain also writes the provenance *structurally* into
 `entries.data` — `{"source": …, "source_ref": …}`, the `source_ref` key
 omitted (never a JSON null) when there is none. Prose can be compacted away;
-this is what stays queryable, and it is what the cron auto-pause streak reads
-to tell a job's fires apart from every other user entry.
+this is what stays queryable, and it is what the cron auto-pause streak and
+the autonomous-turn streak (see sessions) read to tell a job's fires — and a
+sub-agent's result, and a system notice — apart from a human's message.
 
 ---
 

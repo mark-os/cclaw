@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "doctor.h"
+#include "advance.h"
 #include "cclaw.h"
 #include "channel.h"
 #include "config.h"
@@ -535,7 +536,55 @@ static void check_cron(sqlite3 *db) {
     if (!n) print_ok("jobs", "none paused");
 }
 
-/* ── Check 10: Syslog listener ──────────────────────────────────── */
+/* ── Check 10: Sessions silenced by the autonomous-turn guard ───── */
+
+/* A tripped session says nothing more than its one chat notice and a syslog
+ * WARN at the moment it trips — from then on it just NOOPs every tick. This is
+ * where an operator finds the quiet ones. The predicate is the gate's own:
+ * queued work, all of it autonomous, and a streak at or past the cap. */
+static void check_streak_guard(sqlite3 *db) {
+    printf("\n[sessions]\n");
+    if (!db) {
+        printf("  skipped: no DB handle\n");
+        return;
+    }
+    int cap = config_get_int(db, "max_autonomous_turn_streak");
+    if (cap <= 0) {
+        print_ok("autonomous-turn guard", "off (max_autonomous_turn_streak=0)");
+        return;
+    }
+    char detail[64];
+    snprintf(detail, sizeof(detail), "cap=%d consecutive turns", cap);
+    print_ok("autonomous-turn guard", detail);
+
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT id, agent_name, streak, queued FROM ("
+            "  SELECT s.id AS id, s.agent_name AS agent_name,"
+            "    " CCLAW_SQL_AUTONOMOUS_STREAK("s.id") " AS streak,"
+            "    (SELECT COUNT(*) FROM inbox i"
+            "      WHERE i.session_id=s.id AND i.consumed=0) AS queued"
+            "  FROM sessions s WHERE " CCLAW_SQL_INBOX_ALL_AUTONOMOUS("s.id")
+            ") WHERE streak >= ?1 ORDER BY streak DESC", -1, &s, NULL) != SQLITE_OK) {
+        printf("  (cannot query sessions)\n");
+        return;
+    }
+    sqlite3_bind_int(s, 1, cap);
+    int n = 0;
+    while (sqlite3_step(s) == SQLITE_ROW) {
+        if (!n) printf("  tripped (paused until a human replies):\n");
+        printf("    session %lld  agent=%s  streak=%d  queued=%d\n",
+               (long long)sqlite3_column_int64(s, 0),
+               sqlite3_column_text(s, 1) ? (const char *)sqlite3_column_text(s, 1)
+                                         : "(default)",
+               sqlite3_column_int(s, 2), sqlite3_column_int(s, 3));
+        n++;
+    }
+    sqlite3_finalize(s);
+    if (!n) print_ok("tripped sessions", "none");
+}
+
+/* ── Check 11: Syslog listener ──────────────────────────────────── */
 
 static void check_syslog(void) {
     printf("\n[syslog]\n");
@@ -579,6 +628,7 @@ int doctor_main(void) {
     check_channels(db);
     check_denials(db);
     check_cron(db);
+    check_streak_guard(db);
     check_syslog();
 
     printf("\ndone.\n");

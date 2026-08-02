@@ -11,6 +11,47 @@
 #include "types.h"
 #include <stdint.h>
 
+/* ── Cross-turn runaway guard: the classification, in one place ────
+ * The incident class is turns generating turns with no human in the causal
+ * chain (cron chatter, sub-agent respawn ping-pong). The metric is the
+ * consecutive-autonomous-turn streak, derived by SQL at turn open — see
+ * advance.c for the gate and specs/schema.md for the contract.
+ *
+ * The list is *autonomous*-side because the human side is open-ended: 'cli',
+ * plus any channel name (channels are created at runtime, so no fixed list
+ * could enumerate them), plus 'approval' — a post-window approval notice
+ * normally carries a human decision, and an expiry is rare and non-recurring,
+ * so neither can sustain a loop. A role-1 entry with no data stamp is human
+ * too: the direct-append path (CLI) writes none, and every autonomous writer
+ * goes through the inbox drain, which always stamps.
+ *
+ * SID is the SQL expression naming the session ("?1" from a bound statement,
+ * "s.id" from a correlated subquery). */
+#define CCLAW_AUTONOMOUS_SOURCES \
+    "('cron','cron_error','agent_result','spawn','system')"
+
+/* The most recent turn a human opened; 0 = never, so every turn counts. */
+#define CCLAW_SQL_LAST_HUMAN_TURN(SID) \
+    "COALESCE((SELECT MAX(h.turn_id) FROM entries h" \
+    "  WHERE h.session_id=" SID " AND h.role=1" \
+    "    AND COALESCE(json_extract(h.data,'$.source'),'') NOT IN " \
+             CCLAW_AUTONOMOUS_SOURCES "), 0)"
+
+/* Consecutive autonomous turns already on record for this session. */
+#define CCLAW_SQL_AUTONOMOUS_STREAK(SID) \
+    "(SELECT COUNT(DISTINCT t.turn_id) FROM entries t" \
+    "  WHERE t.session_id=" SID \
+    "    AND t.turn_id > " CCLAW_SQL_LAST_HUMAN_TURN(SID) ")"
+
+/* Is there queued work, and is every queued row autonomous? The whole pending
+ * set, not just the batch the drain would take: a human row anywhere in the
+ * queue means this session is not running away. */
+#define CCLAW_SQL_INBOX_ALL_AUTONOMOUS(SID) \
+    "(EXISTS(SELECT 1 FROM inbox q WHERE q.session_id=" SID " AND q.consumed=0)" \
+    " AND NOT EXISTS(SELECT 1 FROM inbox q WHERE q.session_id=" SID \
+    "   AND q.consumed=0" \
+    "   AND COALESCE(q.source,'') NOT IN " CCLAW_AUTONOMOUS_SOURCES "))"
+
 /* Return values from advance_session — tells caller what to do next */
 typedef enum {
     ADVANCE_NOOP = 0,        /* nothing to do (already idle, no inbox) */

@@ -1991,7 +1991,10 @@ static void session_sweep_inbox(void) {
      * Advancing them re-runs the dispatch gates once pressure clears
      * (rate_limited flips to idle on the first advance, dispatches on the next
      * tick). Keep this predicate identical to advance_session's idle-branch
-     * resume check — a wider one here just wakes sessions that NOOP. */
+     * resume check — a wider one here just wakes sessions that NOOP.
+     * A session silenced by the autonomous-turn guard keeps matching (its
+     * inbox rows stay queued) and NOOPs at the gate every tick — two indexed
+     * counts, no LLM. Cheaper than teaching this SQL the guard's predicate. */
     const char *sql =
         "SELECT s.id FROM sessions s WHERE s.state IN ('idle','rate_limited')"
         "  AND (EXISTS (SELECT 1 FROM inbox i"

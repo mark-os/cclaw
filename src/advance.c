@@ -243,6 +243,122 @@ static int turn_iterations_spent(sqlite3 *db, int64_t session_id) {
         session_id, 0);
 }
 
+/* ── Cross-turn runaway guard ─────────────────────────────────────
+ * Turns generating turns with no human in the causal chain — cron chatter,
+ * respawn ping-pong — are the one loop max_iterations cannot bound: each turn
+ * is legal on its own. The guard lives at the turn open, the single choke
+ * point every turn passes, and refuses *before* the drain so a refusal leaves
+ * the inbox rows queued and durable: nothing is lost, the session goes quiet
+ * until a human replies. Classification and the streak SQL live in advance.h;
+ * there is no counter column — state has one home, and it is the entries. */
+typedef struct {
+    int cap;      /* max_autonomous_turn_streak; <= 0 disables the guard */
+    int streak;   /* consecutive autonomous turns already on record */
+    int refuse;   /* this turn must not open */
+    int warn;     /* open it, but teach: we are near the cap */
+} StreakGate;
+
+static StreakGate streak_gate_check(sqlite3 *db, int64_t session_id) {
+    StreakGate g = { .cap = config_get_int(db, "max_autonomous_turn_streak") };
+    if (g.cap <= 0) return g;
+    if (!db_scalar_i64(db, "SELECT " CCLAW_SQL_INBOX_ALL_AUTONOMOUS("?1") ";",
+                       session_id, 0))
+        return g;   /* nothing queued, or a human is in the batch */
+    g.streak = (int)db_scalar_i64(db,
+        "SELECT " CCLAW_SQL_AUTONOMOUS_STREAK("?1") ";", session_id, 0);
+    if (g.streak >= g.cap) g.refuse = 1;
+    /* Teach at ~80% of the cap, counting the turn about to open. Integer
+     * math: (streak + 1) / cap >= 4/5. */
+    else if ((g.streak + 1) * 5 >= g.cap * 4) g.warn = 1;
+    return g;
+}
+
+/* One role-0 system entry on the session, stamped so it stays queryable after
+ * compaction eats the prose. Role 0 is load-bearing twice over: the streak
+ * reads role 1, so this can never be mistaken for a human turn, and a role-0
+ * leaf is a legal resting place, so it never creates a turn to resume.
+ * Caller holds the turn-open transaction. */
+static void streak_note(sqlite3 *db, int64_t session_id, const char *note,
+                        const char *text) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO entries (parent_id, session_id, iteration_id, type, role,"
+            " content, token_estimate, content_bytes, data)"
+            " VALUES ((SELECT leaf_id FROM sessions WHERE id=?1),?1,0,'system',0,"
+            "         ?2,?3,?4, json_object('source','streak_guard','note',?5));",
+            -1, &st, NULL) != SQLITE_OK)
+        return;
+    int len = (int)strlen(text);
+    sqlite3_bind_int64(st, 1, session_id);
+    sqlite3_bind_text(st, 2, text, len, SQLITE_STATIC);
+    sqlite3_bind_int(st, 3, (len / 4) + 4);
+    sqlite3_bind_int(st, 4, len);
+    sqlite3_bind_text(st, 5, note, -1, SQLITE_STATIC);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+/* Refuse this turn open. The one write a refusal makes is the trip marker,
+ * and only on the *first* refusal of a trip: once-per-trip is derived, not
+ * stored — a 'tripped' entry newer than the last human turn means this trip
+ * already announced itself, and a human turn later starts a fresh one. */
+static void streak_refuse(sqlite3 *db, int64_t session_id, const StreakGate *g) {
+    /* Debug, not info: a tripped session is re-woken every daemon tick, and
+     * run_advance already logs the resulting noop. The WARN below fires once. */
+    LOG_DEBUG_("advance next=idle reason=autonomous_streak streak=%d cap=%d",
+               g->streak, g->cap);
+    if (db_scalar_i64(db,
+            "SELECT EXISTS(SELECT 1 FROM entries WHERE session_id=?1 AND role=0"
+            "  AND json_extract(data,'$.source')='streak_guard'"
+            "  AND json_extract(data,'$.note')='tripped'"
+            "  AND turn_id > " CCLAW_SQL_LAST_HUMAN_TURN("?1") ");",
+            session_id, 0))
+        return;
+
+    LOG_WARN_("advance autonomous-turn guard tripped session=%lld streak=%d"
+              " cap=%d — autonomous turns refused until a human replies",
+              (long long)session_id, g->streak, g->cap);
+    char text[256];
+    snprintf(text, sizeof(text),
+             "This agent has hit its autonomous-turn limit (%d consecutive"
+             " turns with no human input) and is paused until someone replies.",
+             g->streak);
+    streak_note(db, session_id, "tripped", text);
+
+    /* Same INSERT shape deliver_response uses; no-op for a session with no
+     * chat binding. No FIFO wake from here — advance.c has no db_path (that
+     * is main.c's g_cfg), and the channel runner re-drains its outbox on
+     * every ~1s loop iteration, which is soon enough for a once-per-trip
+     * notice. */
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+            " SELECT channel_name, id,"
+            "        json_object('chat_id', COALESCE(chat_id,'0'), 'text', ?2)"
+            "   FROM sessions WHERE id=?1 AND channel_name IS NOT NULL;",
+            -1, &st, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(st, 1, session_id);
+    sqlite3_bind_text(st, 2, text, -1, SQLITE_STATIC);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+/* Teach at the near edge: one system note inside the turn just opened. It is
+ * appended after the drain, so it is the leaf — which also means a dispatch
+ * that bounces on this very turn leaves a role-0 leaf the sweep's role-1/3
+ * resume predicate skips. Accepted: the entries are durable and the next
+ * autonomous event (this session is producing them by definition) re-opens
+ * the session with them still in context. */
+static void streak_warn(sqlite3 *db, int64_t session_id, const StreakGate *g) {
+    char text[256];
+    snprintf(text, sizeof(text),
+             "This is autonomous turn %d in a row (limit %d). No human has been"
+             " in the loop — wind down, checkpoint your state, or send your"
+             " operator a summary.", g->streak + 1, g->cap);
+    streak_note(db, session_id, "warn", text);
+}
+
 AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iterations) {
     if (max_iterations <= 0) max_iterations = config_default_int("max_iterations");
 
@@ -299,6 +415,18 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         }
         if (stale > 0)
             LOG_WARN_("advance reconciled %d stale tool_call(s) at turn start", stale);
+        /* Runaway guard, before the drain. It can only fire when there *is*
+         * queued work, so the unanswered-leaf resume below is never gated —
+         * a stranded turn resuming doesn't multiply. */
+        StreakGate gate = streak_gate_check(db, session_id);
+        if (gate.refuse) {
+            streak_refuse(db, session_id, &gate);
+            if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
+                sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, iter);
+            free(agent);
+            return out;
+        }
         int consumed = inbox_consume_into_entries_locked(db, session_id, 100);
         int leaf_role = 0;
         if (consumed == 0) {
@@ -327,6 +455,7 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
                           leaf_role);
         } else if (consumed > 0) {
             LOG_INFO_("advance state=idle next=llm_running inbox=%d", consumed);
+            if (gate.warn) streak_warn(db, session_id, &gate);
         }
         /* A role-3 leaf continues the turn it was already in; everything else
          * opens a new one at iteration 0. Resuming re-derives the count rather
@@ -504,8 +633,21 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             return make_output(ADVANCE_ERROR, session_id, NULL, 0);
         }
         session_set_state(db, session_id, "idle");
+        /* The idle branch's twin: this is the other place a turn opens off the
+         * inbox, so it takes the same guard. The session stays idle (already
+         * set above — compaction is done either way). */
+        StreakGate gate = streak_gate_check(db, session_id);
+        if (gate.refuse) {
+            streak_refuse(db, session_id, &gate);
+            if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
+                sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, 0);
+            free(agent);
+            return out;
+        }
         int consumed = inbox_consume_into_entries_locked(db, session_id, 100);
         if (consumed > 0) {
+            if (gate.warn) streak_warn(db, session_id, &gate);
             session_set_iteration(db, session_id, 0);
             session_set_state(db, session_id, "llm_running");
             LOG_INFO_("advance state=compacting next=llm_running inbox=%d", consumed);

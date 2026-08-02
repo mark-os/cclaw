@@ -58,6 +58,12 @@ static const ConfigDef s_defs[] = {
       "Seconds a foreground approval blocks before backgrounding" },
     { "agent_max_depth",    "2",
       "Max sub-agent nesting depth for launch_agent" },
+    { "max_autonomous_turn_streak", "50",
+      "Consecutive turns a session may open with no human in the causal chain"
+      " (cron fires, sub-agent results, system notices) before turn-open"
+      " refuses further autonomous work. The queued inbox rows stay durable —"
+      " the session just goes quiet; a human message both gets through and"
+      " resets the streak (0 = guard off)" },
     { "worker_tools",
       /* D15: workers may delegate too — the recursion rail is agent_max_depth
        * (2) plus the per-parent/system caps, not a missing tool. Omitting

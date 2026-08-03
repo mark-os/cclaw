@@ -44,6 +44,7 @@ CClaw follows the **principle of least surprise**: pick the boring, obvious solu
 **Lean on SQLite — it is the architecture, not just storage.**
 - Build and parse structured JSON with SQLite's JSON1 (`json_object`, `json_group_array`, `json_each`, `json_patch`), not hand-rolled C. The LLM request body is assembled this way (`src/llm_payload.c`) — a SQL query over `entries` *is* the serializer.
 - Search with FTS5. Queues and work state are tables. Concurrency is WAL. Ordering is `ORDER BY pos`. Reach for a C container only when SQLite genuinely can't express it.
+- **Transaction discipline.** Plain SELECTs run in autocommit — never wrap a read-only path in `BEGIN`. Any transaction that writes opens `BEGIN IMMEDIATE` (write lock up front, so contention is retryable BUSY absorbed by the busy handler). Never read-then-write inside a deferred `BEGIN`: the lock upgrade fails with `BUSY_SNAPSHOT`, which **bypasses the busy handler** and surfaces as a hard failure the caller must rollback-and-rerun. `BEGIN EXCLUSIVE` is reserved for startup schema/seed.
 
 **Trust the Unix system — don't reimplement it in C.**
 - Isolation: namespaces, `setrlimit`, file permissions, `fork`/`exec`. Lifecycle: signals + the event loop. Scheduling: cron. Communication: fds and the worker pipe. Let the kernel do the kernel's job.

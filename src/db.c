@@ -223,13 +223,18 @@ void db_configure_logging(void) {
 
 /* Custom busy handler: replaces PRAGMA busy_timeout so we can log contention.
  * Progressive backoff (mirrors SQLite's internal delay table), caps at 50
- * retries (~4.3s total sleep). Logs WARN on first retry and on timeout. */
+ * retries (~4.3s total sleep). Logs WARN at busy_count 1/10/20 — one line is
+ * a blip (resolved in ms, no follow-up = success), repeats mean sustained
+ * write pressure — and again on giving up. */
 static int db_busy_handler(void *arg, int count) {
     (void)arg;
-    if (count == 0)
-        LOG_WARN_("sqlite busy: lock contention, retrying");
+    int busy_count = count + 1;  /* SQLite passes prior-invocation count */
+    if (busy_count == 1 || busy_count == 10 || busy_count == 20)
+        LOG_WARN_("sqlite busy: waiting for write lock, busy_count=%d, retrying...",
+                  busy_count);
     if (count >= 50) {
-        LOG_WARN_("sqlite busy: giving up after %d retries", count);
+        LOG_WARN_("sqlite busy: giving up after %d retries (~4.3s), returning SQLITE_BUSY to caller",
+                  count);
         return 0;  /* give up → SQLITE_BUSY returned to caller */
     }
     /* Progressive backoff: 1,2,5,10,15,20,25,25,50,50,100,100,... ms */

@@ -413,6 +413,12 @@ static void merge_target(const CronDoc *d, const CronRow *row, const char *mode,
         return;
     }
     if (mode && strcmp(mode, "new") == 0) {
+        /* For 'new', session_id is skip-if-busy's interlock: the previous
+         * fire's session. Keep it only if the row was already 'new'; seeding
+         * it with the caller's chat session would skip the job's first fires
+         * whenever the human who set it is mid-conversation. */
+        m->session_id = (row->target && strcmp(row->target, "new") == 0)
+                        ? row->session_id : 0;
         m->target_agent = d->has_agent ? d->agent : row->target_agent;
         if (m->target_agent && !m->target_agent[0]) m->target_agent = NULL;
         if (d->has_channel || d->has_chat) {
@@ -829,7 +835,22 @@ static int64_t fresh_session(sqlite3 *db, const DueJob *j, const char *agent) {
     int64_t parent = -1;
     int depth = 0;
     if (!chat_bound) {
-        parent = recent_session(db, j->agent_name);
+        /* Parent = the owner's most recent session that is not itself a fire
+         * session. Parenting onto the previous fire would chain depth upward
+         * every fire (locking launch_agent out at agent_max_depth by the
+         * second one) and push the result at last night's report instead of
+         * the owner. */
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db,
+                "SELECT id FROM sessions WHERE agent_name=?1"
+                " AND COALESCE(name,'') <> 'cron'"
+                " ORDER BY updated_at DESC LIMIT 1;", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, j->agent_name ? j->agent_name : "", -1,
+                              SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW)
+                parent = sqlite3_column_int64(st, 0);
+            sqlite3_finalize(st);
+        }
         if (parent > 0) depth = session_get_depth(db, parent) + 1;
         else parent = -1;
     }

@@ -772,6 +772,65 @@ static void test_fire_new_session_parented(void) {
     printf("  PASS: session:\"new\" without a chat parents to the owner\n");
 }
 
+/* Recurring 'new' fires must not chain: each fresh session parents to the
+ * owner, not to the previous fire's session — chaining walks depth up to
+ * agent_max_depth and locks launch_agent out by the second fire. */
+static void test_fire_new_session_no_depth_chain(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    assert(db && wake_init() == 0);
+    int64_t owner = session_create(db, "own", "New", -1, 0);
+    int64_t now = (int64_t)time(NULL);
+
+    JobSpec j = {.agent = "New", .name = "daily", .interval_s = 600,
+                 .task = "report", .target = "new", .next_run_at = now - 1};
+    int64_t jid = insert_job(db, &j);
+    cron_run_due(db);
+    int64_t first = scalar(db, "SELECT id FROM sessions WHERE name='cron'");
+    assert(first > 0);
+    /* First fire done and idle; owner deliberately stays older than it. */
+    exec_ok(db, "UPDATE sessions SET updated_at=updated_at+10 WHERE id=%lld",
+            (long long)first);
+    exec_ok(db, "UPDATE cron_jobs SET next_run_at=%lld WHERE id=%lld",
+            (long long)(now - 1), (long long)jid);
+    cron_run_due(db);
+    char q[192];
+    snprintf(q, sizeof(q),
+             "SELECT parent_session_id=%lld AND depth=1 FROM sessions"
+             " WHERE name='cron' AND id<>%lld", (long long)owner, (long long)first);
+    assert(scalar(db, q) == 1);
+
+    wake_close();
+    db_close(db);
+    printf("  PASS: 'new' fires parent to the owner, never the previous fire\n");
+}
+
+/* Setting a 'new' job must not seed skip-if-busy's interlock with the
+ * caller's chat session — that would skip the first fires whenever the human
+ * who set the job is mid-conversation. */
+static void test_upsert_new_seeds_no_interlock(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    assert(db && wake_init() == 0);
+    int64_t caller = session_create(db, "chat", "New", -1, 0);
+    assert(cron_upsert(db, "New",  caller,
+        "{\"name\":\"digest\",\"cron_expr\":\"0 * * * *\",\"prompt\":\"go\","
+        "\"session\":\"new\"}", NULL, NULL) > 0);
+    assert(scalar(db, "SELECT session_id FROM cron_jobs WHERE name='digest'") == 0);
+
+    /* But re-setting an already-'new' job keeps the previous fire's stamp. */
+    exec_ok(db, "UPDATE cron_jobs SET session_id=%lld WHERE name='digest'",
+            (long long)caller);
+    assert(cron_upsert(db, "New", caller,
+        "{\"name\":\"digest\",\"prompt\":\"go faster\"}", NULL, NULL) > 0);
+    char q[128];
+    snprintf(q, sizeof(q), "SELECT session_id=%lld FROM cron_jobs"
+             " WHERE name='digest'", (long long)caller);
+    assert(scalar(db, q) == 1);
+
+    wake_close();
+    db_close(db);
+    printf("  PASS: a new-mode upsert seeds no caller interlock\n");
+}
+
 /* One outstanding fire per job: the second tick coalesces onto the first, and
  * only a drain unblocks the next one. */
 static void test_fire_coalesces(void) {
@@ -1034,6 +1093,8 @@ int main(void) {
     test_fire_pin_gone_errors();
     test_fire_new_session_chat();
     test_fire_new_session_parented();
+    test_fire_new_session_no_depth_chain();
+    test_upsert_new_seeds_no_interlock();
     test_fire_coalesces();
     test_fire_skip_if_busy();
     test_fire_bare_wake();

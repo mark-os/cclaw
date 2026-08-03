@@ -528,6 +528,7 @@ static char *format_tier_result(const TierDescriptor *desc, char *output,
         /* Shell: prefix the captured stdout/stderr with the exit status. */
         size_t needed = out_len + 128;
         result = malloc(needed);
+        if (!result) return output;   /* OOM: hand back the raw capture */
         if (timed_out)
             snprintf(result, needed,
                      "[timeout after %ds — raise with the timeout parameter]\n%s",
@@ -541,6 +542,7 @@ static char *format_tier_result(const TierDescriptor *desc, char *output,
         if (timed_out) {
             size_t needed = out_len + 96;
             result = malloc(needed);
+            if (!result) return output;   /* OOM: hand back the raw capture */
             snprintf(result, needed,
                      "error: tool timed out (%ds; raise with the timeout parameter)\n%s",
                      timeout, output);

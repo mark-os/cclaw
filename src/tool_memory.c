@@ -264,6 +264,7 @@ static char *tool_memory_edit_handler(const char *arguments, void *user_data) {
     size_t rlen = rendered ? strlen(rendered) : 0;
     size_t slen = strlen(summary);
     char *out = malloc(rlen + slen + 2);
+    if (!out) { free(rendered); return strdup(summary); }
     snprintf(out, rlen + slen + 2, "%s\n%s", summary, rendered ? rendered : "");
     free(rendered);
     return out;
@@ -320,6 +321,7 @@ static char *tool_memory_delete_handler(const char *arguments, void *user_data) 
     size_t rlen = rendered ? strlen(rendered) : 0;
     size_t slen = strlen(summary);
     char *out = malloc(rlen + slen + 2);
+    if (!out) { free(rendered); return strdup(summary); }
     snprintf(out, rlen + slen + 2, "%s\n%s", summary, rendered ? rendered : "");
     free(rendered);
     return out;

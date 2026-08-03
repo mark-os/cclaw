@@ -62,7 +62,7 @@ static void test_status_page(void) {
     char response[4096] = {0};
     curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19876/");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response);
     long http_code = 0;
     CURLcode res = curl_easy_perform(curl);
     assert(res == CURLE_OK);
@@ -85,7 +85,7 @@ static void test_status_page(void) {
     response[0] = '\0';
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response);
     res = curl_easy_perform(curl);
     assert(res == CURLE_OK);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -174,7 +174,7 @@ static void test_hook_proxy(void) {
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "{\"msg\":\"hello-hook\"}");
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response);
     CURLcode res = curl_easy_perform(curl);
     assert(res == CURLE_OK);
     long http_code = 0;
@@ -192,7 +192,7 @@ static void test_hook_proxy(void) {
     curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19877/hook/nosuch");
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "{}");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response2);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response2);
     res = curl_easy_perform(curl);
     assert(res == CURLE_OK);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -203,7 +203,7 @@ static void test_hook_proxy(void) {
     curl_easy_reset(curl);
     curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19877/hook/bad$chan");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response3);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)response3);
     res = curl_easy_perform(curl);
     assert(res == CURLE_OK);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);

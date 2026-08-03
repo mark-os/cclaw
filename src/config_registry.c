@@ -76,6 +76,11 @@ static const ConfigDef s_defs[] = {
       " refuses further autonomous work. The queued inbox rows stay durable —"
       " the session just goes quiet; a human message both gets through and"
       " resets the streak (0 = guard off)" },
+    { "agent_delivery_default", "quiescent",
+      "Delivery policy seeded on a new child's parent edge when the launcher"
+      " has no inheritable policy of its own (root sessions, children of"
+      " 'explicit' sessions): iteration | digest | turn | quiescent | explicit"
+      " (specs/delivery.md)" },
     { "worker_tools",
       /* D15: workers may delegate too — the recursion rail is agent_max_depth
        * (2) plus the per-parent/system caps, not a missing tool. Omitting

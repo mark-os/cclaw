@@ -164,8 +164,13 @@ CREATE TABLE IF NOT EXISTS channel_routes (
   channel_name TEXT NOT NULL,
   chat_id TEXT NOT NULL,
   session_id INTEGER NOT NULL REFERENCES sessions(id),
-  delivery_mode TEXT NOT NULL DEFAULT 'auto',  -- 'auto' = turn output auto-delivers to the
-                                               -- origin chat; 'explicit' = only channel_send
+  delivery_mode TEXT NOT NULL DEFAULT 'auto',  -- delivery-policy *template* for the pinned
+                                               -- session's channel edge (specs/delivery.md):
+                                               -- 'auto' (= quiescent) | iteration | digest |
+                                               -- turn | quiescent | explicit. Frozen onto the
+                                               -- session's delivery_edges row at its first
+                                               -- delivery boundary — later route edits don't
+                                               -- retro-apply (tool_filter precedent).
   tool_filter TEXT,                            -- JSON array of tool names; NULL = unrestricted.
                                                -- Copied onto sessions.tool_filter at session
                                                -- creation only — frozen like sub-agent filters;
@@ -201,14 +206,42 @@ CREATE TABLE IF NOT EXISTS sessions (
                                             -- tool-loop iteration so the request prefix stays
                                             -- byte-stable for prompt caching. NULL = no block.
   leaf_id INTEGER DEFAULT -1,
-  parent_notified_at INTEGER,               -- unixepoch when the parent learned this child's
-                                            -- result (notify_parent landed, or the parent
-                                            -- consumed it by poll). NULL on a terminal child
-                                            -- = lost push; the convergence sweep re-notifies.
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS NOT NULL;
+
+-- ═══ Delivery edges (specs/delivery.md) ═══
+-- Every outbound edge of a session is a row: the standing parent edge every
+-- child gets at creation, the channel edge a chat-bound session gets lazily at
+-- its first delivery boundary (frozen from the route template then — the
+-- tool_filter precedent), and the one-shot tool_call edge a blocking launch
+-- adds on top. policy is one shared vocabulary on every edge:
+--   'iteration' — every content-bearing assistant message, as it lands
+--   'digest'    — assistant prose since cursor, concatenated, at turn end
+--   'turn'      — final assistant message at turn end (the old standard)
+--   'quiescent' — final message at turn end iff the whole subtree is settled
+--                 (idle, no unconsumed inbox, no llm_jobs, no live tool_calls)
+--                 — the default; errors deliver regardless
+--   'explicit'  — nothing auto-ships
+-- cursor is the last entry id this edge delivered (0 = nothing yet), stamped
+-- inside the delivery transaction. Cursor behind an idle session's assistant
+-- leaf = delivery owed — the convergence sweep's re-derivation predicate,
+-- which the parent_notified_at stamp it replaced could not express for a
+-- multi-turn child's lost non-first push. A fired one-shot row is deleted.
+-- target_kind 'session' + one_shot reply edges are reserved for milestone 2's
+-- session_send/ping (expires_at arrives with it as a forward patch).
+CREATE TABLE IF NOT EXISTS delivery_edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES sessions(id),
+  target_kind TEXT NOT NULL,             -- 'parent' | 'channel' | 'session' | 'tool_call'
+  target_ref TEXT NOT NULL,              -- parent: parent session id; channel: channel name
+                                         -- (chat_id lives on the session); tool_call: call_id
+  policy TEXT NOT NULL,
+  cursor INTEGER NOT NULL DEFAULT 0,
+  one_shot INTEGER NOT NULL DEFAULT 0,   -- blocking reply edge: fires once, then deleted
+  UNIQUE(session_id, target_kind, target_ref)
+);
 
 -- ═══ Entries ═══
 CREATE TABLE IF NOT EXISTS entries (

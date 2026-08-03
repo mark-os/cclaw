@@ -229,10 +229,10 @@ static void test_trip_notice_once_per_trip(void) {
 
     inbox_insert(db, sid, "cron", NULL, "fire");
     assert(advance_session(db, sid, 25).action == ADVANCE_NOOP);
-    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1;", sid) == 1);
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1 AND payload LIKE '%autonomous-turn limit%';", sid) == 1);
     char *pay = db_scalar_text(db,
         "SELECT json_extract(payload,'$.text') FROM channel_outbox"
-        " WHERE session_id=?1;", sid);
+        " WHERE session_id=?1 AND payload LIKE '%autonomous-turn limit%';", sid);
     assert(pay && strstr(pay, "autonomous-turn limit (2 consecutive turns"));
     free(pay);
 
@@ -240,7 +240,7 @@ static void test_trip_notice_once_per_trip(void) {
     inbox_insert(db, sid, "cron", NULL, "fire again");
     assert(advance_session(db, sid, 25).action == ADVANCE_NOOP);
     assert(advance_session(db, sid, 25).action == ADVANCE_NOOP);
-    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1;", sid) == 1);
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1 AND payload LIKE '%autonomous-turn limit%';", sid) == 1);
     assert(notes(db, sid, "tripped") == 1);
 
     /* A human replies: the queue drains, the streak clears. */
@@ -256,7 +256,7 @@ static void test_trip_notice_once_per_trip(void) {
     run_turn(db, sid, "cron");
     inbox_insert(db, sid, "cron", NULL, "fire");
     assert(advance_session(db, sid, 25).action == ADVANCE_NOOP);
-    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1;", sid) == 2);
+    assert(scalar(db, "SELECT COUNT(*) FROM channel_outbox WHERE session_id=?1 AND payload LIKE '%autonomous-turn limit%';", sid) == 2);
     assert(notes(db, sid, "tripped") == 2);
 
     db_close(db);

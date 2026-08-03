@@ -3,6 +3,10 @@
 Status: shipped 2026-08-03. Design history in
 `plan/projects/session-concurrency-gates.md` (agreed spec, same date).
 
+Related: [delivery.md](delivery.md) — what a session's turn boundaries *ship*
+(per-edge delivery policy, quiescence) lives there; both contracts meet at
+`advance_session`'s choke points.
+
 The old `AGENT_MAX_TOTAL` conflated two protections: **existence** (how many
 delegation-tree sessions may be in flight — guards runaway spawning) and
 **execution** (how many turns run at once — guards the box). They are now two

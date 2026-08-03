@@ -82,17 +82,30 @@ typedef struct {
  * max_iterations: cap on turn iterations (0 = 25 default). */
 AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iterations);
 
-/* Tell a sub-agent's parent that the child finished: blocking mode writes the
- * ToolResult for the parent's launch_agent call, background mode posts to the
- * parent inbox. Stamps sessions.parent_notified_at on the child inside the same
- * transaction — a lost push leaves NULL, which is what the sweep below finds.
- * No-op for a session without a parent. */
-void advance_notify_parent(sqlite3 *db, int64_t child_session_id, int is_error);
+/* Evaluate every delivery edge of a session at a turn boundary
+ * (specs/delivery.md): the one-shot blocking reply edge first (its firing
+ * advances the standing cursor in the same transaction), then standing
+ * parent/channel edges per their policy. is_error marks an error boundary —
+ * the "failed" label, and it bypasses the quiescence hold so parked parents
+ * never hang on a subtree that can't settle. include_channel=0 suppresses
+ * channel edges (LLM-error turns never ship to chat) while still recording
+ * the boundary in their cursor. Idempotent by the cursors. Returns payloads
+ * shipped, -1 on a transaction failure (the sweep retries). */
+int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
+                             int include_channel);
 
-/* The convergence sweep: re-notify every terminal child whose push was lost
- * (state='idle', has a parent, parent_notified_at IS NULL, assistant leaf).
- * Idempotent by the stamp. Returns the number re-notified. Called from the
- * daemon's periodic tick — pushes are latency, this is the guarantee. */
-int advance_sweep_unnotified(sqlite3 *db);
+/* Mid-turn hook for 'iteration' edges: ship content-bearing assistant entries
+ * that landed since each edge's cursor. Called after an LLM completion whose
+ * turn continues (pending tool calls); the boundary evaluation covers the
+ * final message. No-op without an iteration edge. */
+void advance_deliver_iteration(sqlite3 *db, int64_t session_id);
+
+/* The convergence sweep, generalized to the cursor-lag predicate: any
+ * non-explicit edge whose cursor is behind an idle session's assistant leaf
+ * is re-evaluated — lost pushes re-derive, quiescent holds re-check their
+ * subtree, unfired one-shots fire. Idempotent by the cursors. Returns
+ * payloads shipped. Called from the daemon's periodic tick — pushes are
+ * latency, this is the guarantee. */
+int advance_sweep_undelivered(sqlite3 *db);
 
 #endif

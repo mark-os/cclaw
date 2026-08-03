@@ -211,6 +211,39 @@ SessionParentInfo session_get_parent_info(sqlite3 *db, int64_t session_id);
 /* Set parent_tool_call_id on a child session (blocking sub-agent) */
 int session_set_parent_tool_call_id(sqlite3 *db, int64_t session_id, const char *call_id);
 
+/* ── Delivery edges (specs/delivery.md) ───────────────────────────
+ * A session's outbound edges live in delivery_edges; advance.c evaluates them
+ * at turn boundaries. These are the shared primitives. */
+
+/* 1 iff the whole subtree rooted at session_id is settled: every session
+ * idle, no unconsumed inbox rows, no llm_jobs, no pending/running tool_calls.
+ * The unconsumed-inbox condition is load-bearing: after a grandchild finishes,
+ * everyone is momentarily idle while its result sits in the middle session's
+ * inbox — that state is not quiescent. Derived, never stored. 0 on query
+ * error (fail-closed toward holding delivery; the sweep retries). */
+int session_subtree_quiescent(sqlite3 *db, int64_t session_id);
+
+/* 1 iff p is one of the five policies: iteration|digest|turn|quiescent|explicit. */
+int delivery_policy_valid(const char *p);
+
+/* The policy a new child's standing parent edge inherits: the launcher's own
+ * outbound (non-one-shot) edge policy, frozen at launch — tool_filter
+ * precedent. 'explicit' does not inherit and roots have no edge; both fall
+ * back to the registry default agent_delivery_default. Returns heap, never
+ * NULL, always a valid policy. */
+char *delivery_policy_resolve(sqlite3 *db, int64_t launcher_session_id);
+
+/* Insert an edge row (INSERT OR IGNORE — idempotent on the per-session
+ * (kind, ref) key). Returns 0 on success (including already-present), -1 on
+ * error or invalid policy. */
+int delivery_edge_create(sqlite3 *db, int64_t session_id, const char *kind,
+                         const char *ref, const char *policy, int one_shot);
+
+/* Overwrite the policy of a session's non-one-shot edge of the given kind
+ * (launch_agent's explicit `delivery` override). Returns 0 on success. */
+int delivery_edge_set_policy(sqlite3 *db, int64_t session_id, const char *kind,
+                             const char *policy);
+
 /* Inbox primitives */
 typedef struct {
     int64_t id;

@@ -2073,7 +2073,7 @@ static void db_periodic(void) {
 
     if (g_mode == 1) {
         session_sweep_inbox();
-        advance_sweep_unnotified(g_db);   /* convergence sweep: lost parent pushes */
+        advance_sweep_undelivered(g_db);  /* convergence sweep: cursor-lag edges */
         cron_run_due(g_db);
     }
 }
@@ -2953,83 +2953,16 @@ static void deliver_response(int64_t session_id) {
         return;
     }
 
-    /* Daemon mode: read channel from session, write outbox */
-    const char *src_sql = "SELECT channel_name, chat_id FROM sessions WHERE id=?;";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(g_db, src_sql, -1, &stmt, NULL) != SQLITE_OK) return;
-    sqlite3_bind_int64(stmt, 1, session_id);
-    char *channel = NULL, *chat_id = NULL;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *s = (const char *)sqlite3_column_text(stmt, 0);
-        if (s) channel = strdup(s);
-        s = (const char *)sqlite3_column_text(stmt, 1);
-        if (s) chat_id = strdup(s);
-    }
-    sqlite3_finalize(stmt);
+    /* Daemon mode: the outbox rows were written by the channel edge's
+     * boundary evaluation (advance_deliver_boundary — policy, quiescence
+     * coalescing, 'explicit', ingest-only all live there). This is only the
+     * FIFO nudge advance.c can't send (no db_path there); waking with an
+     * empty outbox is a harmless no-op for the runner. */
+    char *channel = db_scalar_text(g_db,
+        "SELECT channel_name FROM sessions WHERE id=?;", session_id);
     if (!channel) return;
-
-    /* Delivery mode lives on the route (no route = auto): 'explicit' keeps
-     * turn output in the session — the agent speaks only via channel_send.
-     * Group listen-and-decide depends on this. */
-    {
-        const char *msql =
-            "SELECT delivery_mode FROM channel_routes"
-            " WHERE channel_name=?1 AND chat_id=?2;";
-        sqlite3_stmt *ms;
-        int explicit_mode = 0;
-        if (sqlite3_prepare_v2(g_db, msql, -1, &ms, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(ms, 1, channel, -1, SQLITE_STATIC);
-            sqlite3_bind_text(ms, 2, chat_id ? chat_id : "0", -1, SQLITE_STATIC);
-            if (sqlite3_step(ms) == SQLITE_ROW) {
-                const char *m = (const char *)sqlite3_column_text(ms, 0);
-                explicit_mode = m && strcmp(m, "explicit") == 0;
-            }
-            sqlite3_finalize(ms);
-        }
-        if (explicit_mode) { free(channel); free(chat_id); return; }
-    }
-
-    /* Ingestion-only channel (handler defines no onOutbox, recorded in
-     * channel_state at load time): nothing would ever drain the row. */
-    {
-        const char *osql =
-            "SELECT value FROM channel_state"
-            " WHERE channel_name=?1 AND key='has_outbox';";
-        sqlite3_stmt *os;
-        int ingest_only = 0;
-        if (sqlite3_prepare_v2(g_db, osql, -1, &os, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(os, 1, channel, -1, SQLITE_STATIC);
-            if (sqlite3_step(os) == SQLITE_ROW) {
-                const char *v = (const char *)sqlite3_column_text(os, 0);
-                ingest_only = v && strcmp(v, "0") == 0;
-            }
-            sqlite3_finalize(os);
-        }
-        if (ingest_only) { free(channel); free(chat_id); return; }
-    }
-
-    char *text = get_response_text(g_db, session_id);
-    if (!text) { free(channel); free(chat_id); return; }
-
-    /* Build outbox payload via SQLite json_object (safe escaping) */
-    const char *ins_sql =
-        "INSERT INTO channel_outbox(channel_name, session_id, payload)"
-        " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4));";
-    sqlite3_stmt *ins;
-    if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(ins, 1, channel, -1, SQLITE_STATIC);
-        sqlite3_bind_int64(ins, 2, session_id);
-        sqlite3_bind_text(ins, 3, chat_id ? chat_id : "0", -1, SQLITE_STATIC);
-        sqlite3_bind_text(ins, 4, text, -1, SQLITE_STATIC);
-        sqlite3_step(ins);
-        sqlite3_finalize(ins);
-
-        if (g_cfg && g_cfg->db_path) channel_outbox_wake(g_cfg->db_path, channel);
-    }
-
-    free(text);
+    if (g_cfg && g_cfg->db_path) channel_outbox_wake(g_cfg->db_path, channel);
     free(channel);
-    free(chat_id);
 }
 
 /* Everything a reaped --run-tool child's output goes through before anybody
@@ -3161,16 +3094,13 @@ static void cron_script_post(ChildProc *c, const char *output, const char *hosts
     if (rid > 0 && hosts) db_entry_set_network_hosts(g_db, rid, hosts);
     free(clean);
 
-    /* Ordinary delivery, chosen by what the session is bound to: a chat gets
-     * the outbox row, a parented fire (scheduled launch_agent) pushes to its
-     * parent. A plain session keeps the entry and says nothing — the model
-     * reads it on its next turn. */
-    char *chan = db_scalar_text(g_db,
-        "SELECT channel_name FROM sessions WHERE id=? AND chat_id IS NOT NULL;", sid);
-    if (chan) { deliver_response(sid); free(chan); return; }
-    if (db_scalar_i64(g_db, "SELECT parent_session_id FROM sessions WHERE id=?;",
-                      sid, -1) > 0)
-        advance_notify_parent(g_db, sid, is_err);
+    /* Ordinary delivery: the session's edges decide (specs/delivery.md) — a
+     * chat-bound fire ships via its channel edge, a parented fire via its
+     * standing parent edge. A plain session has no edges, keeps the entry and
+     * says nothing — the model reads it on its next turn. include_channel
+     * even on error: a failed script's output always reached the chat. */
+    advance_deliver_boundary(g_db, sid, is_err, 1);
+    deliver_response(sid);   /* daemon FIFO nudge for any outbox row written */
 }
 
 static void reap_children(void) {

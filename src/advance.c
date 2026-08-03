@@ -70,20 +70,6 @@ static char *rich_max_iter_message(sqlite3 *db, int64_t session_id) {
     return buf;
 }
 
-/* Stamp the child as delivered. Inside the notify transaction, so the stamp and
- * the write it records land together: a lost transaction leaves NULL, and that
- * NULL is the durable "push never landed" fact advance_sweep_unnotified reads. */
-static void stamp_notified(sqlite3 *db, int64_t session_id) {
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(db,
-            "UPDATE sessions SET parent_notified_at=unixepoch() WHERE id=?",
-            -1, &st, NULL) != SQLITE_OK)
-        return;
-    sqlite3_bind_int64(st, 1, session_id);
-    sqlite3_step(st);
-    sqlite3_finalize(st);
-}
-
 /* Did this session's turn end on an error? entries.stop_reason is an INTEGER
  * column: reading it as text and comparing to "error" (as this did until
  * 2026-08-01) never matched, so every errored child told its parent it
@@ -102,114 +88,524 @@ static int session_stopped_with_error(sqlite3 *db, int64_t session_id) {
     return is_error;
 }
 
-/* Notify a sub-agent's parent that the child finished. Blocking mode writes a
- * ToolResult for the parent's launch_agent call; background mode posts to the
- * parent inbox. Called on every terminal path (normal stop, error, max-iter) so
- * a parent blocked on launch_agent always gets a result and never parks forever.
- * On is_error the parent receives the error text with is_error=1. */
-void advance_notify_parent(sqlite3 *db, int64_t session_id, int is_error) {
-    SessionParentInfo pi = session_get_parent_info(db, session_id);
-    if (pi.parent_session_id <= 0) {
-        free(pi.parent_tool_call_id);
+/* ── Edge delivery (specs/delivery.md) ────────────────────────────
+ * A session's outbound edges are delivery_edges rows, evaluated here at its
+ * turn boundaries (and mid-turn for 'iteration'). The edge cursor, stamped
+ * inside the delivery transaction, is the only delivery state: a lost
+ * transaction leaves it behind the leaf, which is exactly the predicate
+ * advance_sweep_undelivered re-derives from. Pushes are latency, the sweep
+ * is the guarantee. */
+
+typedef struct {
+    int64_t id;
+    int64_t cursor;
+    int one_shot;
+    char kind[16];
+    char policy[16];
+    char ref[192];       /* parent session id / channel name / tool call_id */
+} DeliveryEdge;
+
+#define EDGE_MAX 8
+
+static int edges_load(sqlite3 *db, int64_t session_id, DeliveryEdge *out) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT id, cursor, one_shot, target_kind, policy, target_ref"
+            " FROM delivery_edges WHERE session_id=?"
+            " ORDER BY one_shot DESC, id;", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(st, 1, session_id);
+    int n = 0;
+    while (n < EDGE_MAX && sqlite3_step(st) == SQLITE_ROW) {
+        DeliveryEdge *e = &out[n];
+        e->id = sqlite3_column_int64(st, 0);
+        e->cursor = sqlite3_column_int64(st, 1);
+        e->one_shot = sqlite3_column_int(st, 2);
+        const char *s = (const char *)sqlite3_column_text(st, 3);
+        snprintf(e->kind, sizeof(e->kind), "%s", s ? s : "");
+        s = (const char *)sqlite3_column_text(st, 4);
+        snprintf(e->policy, sizeof(e->policy), "%s", s ? s : "");
+        s = (const char *)sqlite3_column_text(st, 5);
+        snprintf(e->ref, sizeof(e->ref), "%s", s ? s : "");
+        n++;
+    }
+    sqlite3_finalize(st);
+    return n;
+}
+
+static void edge_cursor_set(sqlite3 *db, int64_t edge_id, int64_t cursor) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE delivery_edges SET cursor=?1 WHERE id=?2;",
+            -1, &st, NULL) != SQLITE_OK)
         return;
+    sqlite3_bind_int64(st, 1, cursor);
+    sqlite3_bind_int64(st, 2, edge_id);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+/* Content-bearing assistant prose in (cursor, ∞), oldest→newest, joined with
+ * the rich_max_iter_message separator. Session-scoped by id order rather than
+ * a branch walk: mid-turn entries are linear, and a digest window spanning a
+ * compaction re-parent is not worth a CTE here. NULL if none. */
+static char *digest_since(sqlite3 *db, int64_t session_id, int64_t cursor) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT content FROM entries"
+            " WHERE session_id=?1 AND id>?2 AND role=2"
+            "   AND content IS NOT NULL AND content != ''"
+            "   AND type NOT IN ('tool_call','reasoning')"
+            " ORDER BY id;", -1, &st, NULL) != SQLITE_OK)
+        return NULL;
+    sqlite3_bind_int64(st, 1, session_id);
+    sqlite3_bind_int64(st, 2, cursor);
+    const char *sep = "\n\n---\n\n";
+    char *buf = NULL;
+    size_t len = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *c = (const char *)sqlite3_column_text(st, 0);
+        if (!c || !c[0]) continue;
+        size_t cl = strlen(c), sl = len ? strlen(sep) : 0;
+        char *nb = realloc(buf, len + sl + cl + 1);
+        if (!nb) { free(buf); sqlite3_finalize(st); return NULL; }
+        buf = nb;
+        if (sl) memcpy(buf + len, sep, sl);
+        memcpy(buf + len + sl, c, cl + 1);
+        len += sl + cl;
+    }
+    sqlite3_finalize(st);
+    return buf;
+}
+
+/* One notice into the parent inbox. The prefix is glued on in SQL so the
+ * result arrives intact at any length — a fixed buffer here once cost a user
+ * half their answer. The child session id is structural provenance
+ * (source_ref), not prose; the drain re-attaches it as a [tag]. */
+static void parent_push(sqlite3 *db, int64_t parent_sid, int64_t child_sid,
+                        const char *label, const char *text) {
+    char child_ref[24];
+    snprintf(child_ref, sizeof(child_ref), "%lld", (long long)child_sid);
+    sqlite3_stmt *ins;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO inbox (session_id, source, source_ref, payload)"
+            " VALUES (?1, 'agent_result', ?2, 'Sub-agent ' || ?3 || ': ' || ?4)",
+            -1, &ins, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(ins, 1, parent_sid);
+    sqlite3_bind_text(ins, 2, child_ref, -1, SQLITE_STATIC);
+    sqlite3_bind_text(ins, 3, label, -1, SQLITE_STATIC);
+    sqlite3_bind_text(ins, 4, text, -1, SQLITE_STATIC);
+    sqlite3_step(ins);
+    sqlite3_finalize(ins);
+}
+
+/* One outbox row toward the session's bound chat (deliver_response's shape). */
+static void channel_push(sqlite3 *db, const char *channel, int64_t session_id,
+                         const char *chat_id, const char *text) {
+    sqlite3_stmt *ins;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO channel_outbox(channel_name, session_id, payload)"
+            " VALUES(?1, ?2, json_object('chat_id', ?3, 'text', ?4));",
+            -1, &ins, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(ins, 1, channel, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(ins, 2, session_id);
+    sqlite3_bind_text(ins, 3, chat_id && chat_id[0] ? chat_id : "0", -1,
+                      SQLITE_STATIC);
+    sqlite3_bind_text(ins, 4, text, -1, SQLITE_STATIC);
+    sqlite3_step(ins);
+    sqlite3_finalize(ins);
+}
+
+/* Resolve a blocking reply edge: write the ToolResult for the parent's
+ * launch_agent call, mark it done, unpark the parent, delete the edge. The
+ * CAS on tool_calls.status makes it race-safe against recovery having
+ * answered the call already (synthetic error) — then the edge just dies here
+ * and the child's real answer ships later via its standing edge. Returns the
+ * parent session id to wake (>0) if the result landed, 0 if the edge was
+ * dropped without one. Caller holds the transaction. */
+static int64_t oneshot_resolve(sqlite3 *db, int64_t child_sid, int64_t parent_sid,
+                               const char *call_id, const char *text,
+                               int is_error) {
+    int open = 0;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT status IN ('pending','running') FROM tool_calls"
+            " WHERE session_id=?1 AND call_id=?2;", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, parent_sid);
+        sqlite3_bind_text(st, 2, call_id, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) open = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
     }
 
-    char *result_text = get_response_text(db, session_id);
-    if (!result_text)
-        result_text = strdup(is_error ? "error: sub-agent terminated abnormally"
-                                      : "(no response)");
+    int64_t woken = 0;
+    if (open && parent_sid > 0) {
+        ToolResult tr = { .tool_call_id = (char *)call_id,
+                          .content = (char *)text };
+        Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
+                         .tool_name = "launch_agent", .is_error = is_error };
+        int64_t rid = entry_append_with_iteration(db, parent_sid, &rmsg, 0);
+        db_tool_call_complete_by_call(db, parent_sid, call_id, rid);
+        /* Unpark parent — but only from a state that permits it. A parent
+         * sitting in awaiting_approval or compacting must not be stomped
+         * back to tool_running (that double-prompts / re-emits per sibling
+         * completion); the eventual wake re-advances it from its own state. */
+        char pstate[32] = {0};
+        sqlite3_stmt *ps;
+        if (sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?",
+                               -1, &ps, NULL) == SQLITE_OK) {
+            sqlite3_bind_int64(ps, 1, parent_sid);
+            if (sqlite3_step(ps) == SQLITE_ROW) {
+                const char *s = (const char *)sqlite3_column_text(ps, 0);
+                if (s) snprintf(pstate, sizeof(pstate), "%s", s);
+            }
+            sqlite3_finalize(ps);
+        }
+        if (strcmp(pstate, "awaiting_approval") != 0 &&
+            strcmp(pstate, "compacting") != 0)
+            session_set_state(db, parent_sid, "tool_running");
+        woken = parent_sid;
+    }
 
-    LOG_INFO_("advance notify_parent session=%lld parent=%lld is_error=%d", (long long)session_id, (long long)pi.parent_session_id, is_error);
+    sqlite3_stmt *del;
+    if (sqlite3_prepare_v2(db,
+            "DELETE FROM delivery_edges WHERE session_id=?1"
+            " AND target_kind='tool_call' AND target_ref=?2;",
+            -1, &del, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(del, 1, child_sid);
+        sqlite3_bind_text(del, 2, call_id, -1, SQLITE_STATIC);
+        sqlite3_step(del);
+        sqlite3_finalize(del);
+    }
+    return woken;
+}
 
-    int txn_ok = (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
-    if (!txn_ok)
-        LOG_WARN_("advance notify_parent BEGIN failed child=%lld parent=%lld"
-                  " — parent_notified_at stays NULL, sweep will retry",
-                  (long long)session_id, (long long)pi.parent_session_id);
-    if (txn_ok) {
-        if (pi.parent_tool_call_id) {
-            /* Blocking mode: write tool result for parent's tool call */
-            ToolResult tr = { .tool_call_id = pi.parent_tool_call_id,
-                              .content = result_text };
-            Message rmsg = { .role = ROLE_TOOL, .tool_result = &tr,
-                             .tool_name = "launch_agent", .is_error = is_error };
-            int64_t rid = entry_append_with_iteration(db, pi.parent_session_id, &rmsg, 0);
-            db_tool_call_complete_by_call(db, pi.parent_session_id,
-                                          pi.parent_tool_call_id, rid);
-            /* Unpark parent — but only from a state that permits it. A parent
-             * sitting in awaiting_approval or compacting must not be stomped
-             * back to tool_running (that double-prompts / re-emits per sibling
-             * completion); the eventual wake re-advances it from its own state. */
-            char pstate[32] = {0};
-            sqlite3_stmt *ps;
-            if (sqlite3_prepare_v2(db, "SELECT state FROM sessions WHERE id=?",
-                                   -1, &ps, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(ps, 1, pi.parent_session_id);
-                if (sqlite3_step(ps) == SQLITE_ROW) {
-                    const char *s = (const char *)sqlite3_column_text(ps, 0);
-                    if (s) snprintf(pstate, sizeof(pstate), "%s", s);
+/* The per-session row every evaluation starts from. */
+typedef struct {
+    int64_t leaf_id;
+    int64_t parent_sid;
+    char channel[64];
+    char chat_id[64];
+} EdgeSessionRow;
+
+static int edge_session_row(sqlite3 *db, int64_t sid, EdgeSessionRow *out) {
+    memset(out, 0, sizeof(*out));
+    out->parent_sid = -1;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT leaf_id, parent_session_id, channel_name, chat_id"
+            " FROM sessions WHERE id=?;", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(st, 1, sid);
+    int ok = -1;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        ok = 0;
+        out->leaf_id = sqlite3_column_int64(st, 0);
+        out->parent_sid = sqlite3_column_int64(st, 1);
+        const char *s = (const char *)sqlite3_column_text(st, 2);
+        if (s) snprintf(out->channel, sizeof(out->channel), "%s", s);
+        s = (const char *)sqlite3_column_text(st, 3);
+        if (s) snprintf(out->chat_id, sizeof(out->chat_id), "%s", s);
+    }
+    sqlite3_finalize(st);
+    return ok;
+}
+
+/* Lazily materialize the channel edge for a chat-bound session, frozen from
+ * the route template at this first boundary ('auto' = quiescent; no route =
+ * quiescent). tool_filter precedent: later route edits don't retro-apply.
+ * INSERT OR IGNORE, so a present row always wins. */
+static void channel_edge_ensure(sqlite3 *db, int64_t sid, const EdgeSessionRow *sr) {
+    if (!sr->channel[0]) return;
+    char *tmpl = NULL;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT delivery_mode FROM channel_routes"
+            " WHERE channel_name=?1 AND chat_id=?2;", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, sr->channel, -1, SQLITE_STATIC);
+        sqlite3_bind_text(st, 2, sr->chat_id[0] ? sr->chat_id : "0", -1,
+                          SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *m = (const char *)sqlite3_column_text(st, 0);
+            if (m) tmpl = strdup(m);
+        }
+        sqlite3_finalize(st);
+    }
+    const char *policy = "quiescent";
+    if (tmpl && delivery_policy_valid(tmpl)) policy = tmpl;
+    delivery_edge_create(db, sid, "channel", sr->channel, policy, 0);
+    free(tmpl);
+}
+
+/* Push the content-bearing assistant entries in (cursor, ∞) one by one on an
+ * iteration edge. At a boundary the last push carries the boundary label;
+ * mid-turn every push is an update. Returns the count pushed and leaves
+ * *last_id at the newest pushed entry. */
+static int iteration_push_since(sqlite3 *db, int64_t sid, const DeliveryEdge *e,
+                                const EdgeSessionRow *sr, const char *final_label,
+                                int64_t *last_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "SELECT id, content FROM entries"
+            " WHERE session_id=?1 AND id>?2 AND role=2"
+            "   AND content IS NOT NULL AND content != ''"
+            "   AND type NOT IN ('tool_call','reasoning')"
+            " ORDER BY id;", -1, &st, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_int64(st, 1, sid);
+    sqlite3_bind_int64(st, 2, e->cursor);
+    /* Collect first — the pushes below write while this statement reads. */
+    int cap = 8, n = 0;
+    struct { int64_t id; char *text; } *rows = malloc((size_t)cap * sizeof(*rows));
+    if (!rows) { sqlite3_finalize(st); return 0; }
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n >= cap) {
+            cap *= 2;
+            void *tmp = realloc(rows, (size_t)cap * sizeof(*rows));
+            if (!tmp) break;
+            rows = tmp;
+        }
+        rows[n].id = sqlite3_column_int64(st, 0);
+        const char *c = (const char *)sqlite3_column_text(st, 1);
+        rows[n].text = strdup(c ? c : "");
+        if (rows[n].text) n++;
+    }
+    sqlite3_finalize(st);
+
+    for (int i = 0; i < n; i++) {
+        const char *label = (final_label && i == n - 1) ? final_label : "update";
+        if (strcmp(e->kind, "parent") == 0)
+            parent_push(db, sr->parent_sid, sid, label, rows[i].text);
+        else if (strcmp(e->kind, "channel") == 0)
+            channel_push(db, e->ref, sid, sr->chat_id, rows[i].text);
+        if (last_id) *last_id = rows[i].id;
+        free(rows[i].text);
+    }
+    free(rows);
+    return n;
+}
+
+int advance_deliver_boundary(sqlite3 *db, int64_t session_id, int is_error,
+                             int include_channel) {
+    /* Most sessions (every CLI root, every unbound daemon session) have no
+     * edges and no chat — don't open a write transaction per turn for them. */
+    if (!db_scalar_i64(db,
+            "SELECT EXISTS(SELECT 1 FROM delivery_edges WHERE session_id=?1)"
+            " OR EXISTS(SELECT 1 FROM sessions WHERE id=?1"
+            "           AND channel_name IS NOT NULL);", session_id, 0))
+        return 0;
+
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+        LOG_WARN_("advance deliver BEGIN failed session=%lld"
+                  " — cursors stay behind, sweep will retry",
+                  (long long)session_id);
+        return -1;
+    }
+
+    /* Session row read inside the transaction: BEGIN IMMEDIATE serializes
+     * against other writers, so the leaf this boundary delivers can't move
+     * under us (a co-pointed CLI opening the next turn). */
+    EdgeSessionRow sr;
+    if (edge_session_row(db, session_id, &sr) != 0 || sr.leaf_id <= 0) {
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+        return 0;
+    }
+
+    channel_edge_ensure(db, session_id, &sr);
+
+    DeliveryEdge edges[EDGE_MAX];
+    int n = edges_load(db, session_id, edges);
+    if (n <= 0) {
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+        return n < 0 ? -1 : 0;
+    }
+
+    /* One quiescence answer serves every edge at this boundary: the hold
+     * decision for 'quiescent' and the truthful label for every push. */
+    int q = session_subtree_quiescent(db, session_id);
+    const char *label = is_error ? "failed" : (q ? "completed" : "update");
+
+    int shipped = 0;
+    int64_t wake_parent = 0;
+    for (int i = 0; i < n; i++) {
+        DeliveryEdge *e = &edges[i];
+        if (strcmp(e->policy, "explicit") == 0) continue;
+
+        if (e->one_shot && strcmp(e->kind, "tool_call") == 0) {
+            /* Errors bypass the quiescence hold: a parked parent must get an
+             * error result rather than hang on a subtree that never settles. */
+            if (!is_error && strcmp(e->policy, "quiescent") == 0 && !q)
+                continue;
+            char *text = (strcmp(e->policy, "digest") == 0)
+                           ? digest_since(db, session_id, e->cursor)
+                           : get_response_text(db, session_id);
+            if (!text)
+                text = strdup(is_error ? "error: sub-agent terminated abnormally"
+                                       : "(no response)");
+            int64_t w = oneshot_resolve(db, session_id, sr.parent_sid,
+                                        e->ref, text, is_error);
+            free(text);
+            if (w > 0) {
+                wake_parent = w;
+                shipped++;
+                /* The one-shot was the delivery of this boundary: advance the
+                 * standing edge in the same transaction so the same content
+                 * never ships twice — post-unblock turns still ship normally. */
+                for (int j = 0; j < n; j++) {
+                    if (!edges[j].one_shot &&
+                        strcmp(edges[j].kind, "parent") == 0 &&
+                        edges[j].cursor < sr.leaf_id) {
+                        edge_cursor_set(db, edges[j].id, sr.leaf_id);
+                        edges[j].cursor = sr.leaf_id;
+                    }
                 }
-                sqlite3_finalize(ps);
+                LOG_INFO_("advance deliver one-shot session=%lld parent=%lld"
+                          " policy=%s is_error=%d", (long long)session_id,
+                          (long long)sr.parent_sid, e->policy, is_error);
             }
-            if (strcmp(pstate, "awaiting_approval") != 0 &&
-                strcmp(pstate, "compacting") != 0)
-                session_set_state(db, pi.parent_session_id, "tool_running");
-        } else {
-            /* Background mode: notice into the parent inbox. The prefix is
-             * glued on in SQL so the result arrives intact at any length —
-             * a fixed buffer here once cost a user half their answer. The
-             * child session id is structural provenance (source_ref), not
-             * prose; the drain re-attaches it as a [tag] the model can read. */
-            char child_ref[24];
-            snprintf(child_ref, sizeof(child_ref), "%lld", (long long)session_id);
-            sqlite3_stmt *ins;
+            continue;
+        }
+        if (e->one_shot) continue;               /* 'session' reply edges: M2 */
+        if (e->cursor >= sr.leaf_id) continue;   /* nothing owed */
+
+        int is_parent = strcmp(e->kind, "parent") == 0;
+        int is_channel = strcmp(e->kind, "channel") == 0;
+        if (!is_parent && !is_channel) continue; /* 'session' standing: M2 */
+
+        if (is_parent && sr.parent_sid <= 0) continue;
+
+        if (is_channel && !include_channel) {
+            /* Suppressed boundary (LLM-error turn): nothing will ever ship
+             * for it, so record it as evaluated or the sweep re-picks the
+             * edge every tick forever. */
+            edge_cursor_set(db, e->id, sr.leaf_id);
+            continue;
+        }
+        if (is_channel) {
+            /* Ingestion-only channel (no onOutbox handler): nothing would
+             * ever drain the row. */
+            int ingest_only = 0;
+            sqlite3_stmt *os;
             if (sqlite3_prepare_v2(db,
-                    "INSERT INTO inbox (session_id, source, source_ref, payload)"
-                    " VALUES (?1, 'agent_result', ?2, 'Sub-agent ' || ?3 || ': ' || ?4)",
-                    -1, &ins, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(ins, 1, pi.parent_session_id);
-                sqlite3_bind_text(ins, 2, child_ref, -1, SQLITE_STATIC);
-                sqlite3_bind_text(ins, 3, is_error ? "failed" : "completed",
-                                  -1, SQLITE_STATIC);
-                sqlite3_bind_text(ins, 4, result_text, -1, SQLITE_STATIC);
-                sqlite3_step(ins);
-                sqlite3_finalize(ins);
+                    "SELECT value='0' FROM channel_state"
+                    " WHERE channel_name=?1 AND key='has_outbox';",
+                    -1, &os, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(os, 1, e->ref, -1, SQLITE_STATIC);
+                if (sqlite3_step(os) == SQLITE_ROW)
+                    ingest_only = sqlite3_column_int(os, 0);
+                sqlite3_finalize(os);
+            }
+            if (ingest_only) {
+                edge_cursor_set(db, e->id, sr.leaf_id);
+                continue;
             }
         }
 
-        stamp_notified(db, session_id);
+        if (!is_error && strcmp(e->policy, "quiescent") == 0 && !q)
+            continue;                            /* hold — delivery still owed */
 
-        if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            txn_ok = 0;
-            LOG_WARN_("advance notify_parent COMMIT failed child=%lld parent=%lld"
-                      " — result rolled back, sweep will retry",
-                      (long long)session_id, (long long)pi.parent_session_id);
+        int pushed = 0;
+        if (strcmp(e->policy, "iteration") == 0) {
+            pushed = iteration_push_since(db, session_id, e, &sr,
+                                          is_parent ? label : NULL, NULL);
+        } else if (strcmp(e->policy, "digest") == 0) {
+            char *text = digest_since(db, session_id, e->cursor);
+            if (text) {
+                if (is_parent) parent_push(db, sr.parent_sid, session_id, label, text);
+                else channel_push(db, e->ref, session_id, sr.chat_id, text);
+                free(text);
+                pushed = 1;
+            }
+        } else {                                 /* turn | quiescent */
+            char *text = get_response_text(db, session_id);
+            if (!text && is_parent)
+                text = strdup(is_error ? "error: sub-agent terminated abnormally"
+                                       : "(no response)");
+            if (text) {
+                if (is_parent) parent_push(db, sr.parent_sid, session_id, label, text);
+                else channel_push(db, e->ref, session_id, sr.chat_id, text);
+                free(text);
+                pushed = 1;
+            }
+        }
+        edge_cursor_set(db, e->id, sr.leaf_id);
+        if (pushed) {
+            shipped += pushed;
+            if (is_parent) wake_parent = sr.parent_sid;
+            LOG_INFO_("advance deliver session=%lld edge=%s policy=%s label=%s",
+                      (long long)session_id, e->kind, e->policy,
+                      is_parent ? label : "-");
         }
     }
 
-    if (txn_ok)
-        wake_session(pi.parent_session_id);
+    if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        LOG_WARN_("advance deliver COMMIT failed session=%lld"
+                  " — rolled back, sweep will retry", (long long)session_id);
+        return -1;
+    }
 
-    free(result_text);
-    free(pi.parent_tool_call_id);
+    if (wake_parent > 0)
+        wake_session(wake_parent);
+    return shipped;
+}
+
+void advance_deliver_iteration(sqlite3 *db, int64_t session_id) {
+    /* Almost every session has no iteration edge — don't open a write
+     * transaction per LLM completion for them. */
+    if (!db_scalar_i64(db,
+            "SELECT EXISTS(SELECT 1 FROM delivery_edges WHERE session_id=?"
+            " AND policy='iteration' AND one_shot=0);", session_id, 0))
+        return;
+
+    EdgeSessionRow sr;
+    if (edge_session_row(db, session_id, &sr) != 0) return;
+
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
+        return;                       /* cursor guard: the next pass catches up */
+
+    DeliveryEdge edges[EDGE_MAX];
+    int n = edges_load(db, session_id, edges);
+    int64_t wake_parent = 0;
+    for (int i = 0; i < n; i++) {
+        DeliveryEdge *e = &edges[i];
+        if (e->one_shot || strcmp(e->policy, "iteration") != 0) continue;
+        int is_parent = strcmp(e->kind, "parent") == 0;
+        if (is_parent && sr.parent_sid <= 0) continue;
+        if (!is_parent && strcmp(e->kind, "channel") != 0) continue;
+        int64_t last = e->cursor;
+        if (iteration_push_since(db, session_id, e, &sr, NULL, &last) > 0) {
+            edge_cursor_set(db, e->id, last);
+            if (is_parent) wake_parent = sr.parent_sid;
+        }
+    }
+
+    if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    else if (wake_parent > 0)
+        wake_session(wake_parent);
 }
 
 /* Bounded work per tick — the next tick takes whatever is left. */
 #define SWEEP_MAX 64
 
-int advance_sweep_unnotified(sqlite3 *db) {
-    /* A terminal child whose push never landed: idle, has a parent, no stamp,
-     * and an assistant leaf — role 2 means a turn actually ended, so a child
-     * that was spawned but never ran (role-0/1 leaf) is left alone. Collect the
-     * ids before notifying: an open SELECT pins a WAL read snapshot, and the
-     * notify below writes (see cron.c's DueJob collection for the same shape). */
+int advance_sweep_undelivered(sqlite3 *db) {
+    /* An edge whose cursor is behind an idle session's assistant leaf is owed
+     * a delivery: a lost push (transaction failed), a quiescent hold waiting
+     * for the subtree to settle, or an unfired one-shot. Role 2 means a turn
+     * actually ended — a child that was spawned but never ran (role-0/1 leaf)
+     * is left alone, and so is a streak-tripped session (role-0 note leaf).
+     * Collect ids before delivering: an open SELECT pins a WAL read snapshot,
+     * and the delivery below writes (see cron.c's DueJob collection). */
     const char *sql =
-        "SELECT s.id FROM sessions s"
-        " WHERE s.state='idle' AND s.parent_session_id > 0"
-        "   AND s.parent_notified_at IS NULL"
-        "   AND EXISTS (SELECT 1 FROM entries e"
-        "               WHERE e.id=s.leaf_id AND e.session_id=s.id AND e.role=2)"
+        "SELECT DISTINCT s.id FROM sessions s"
+        " JOIN delivery_edges e ON e.session_id = s.id"
+        " WHERE s.state='idle' AND e.policy <> 'explicit'"
+        "   AND e.cursor < s.leaf_id"
+        "   AND EXISTS (SELECT 1 FROM entries en"
+        "               WHERE en.id=s.leaf_id AND en.session_id=s.id"
+        "                 AND en.role=2)"
         " LIMIT ?;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
@@ -220,13 +616,19 @@ int advance_sweep_unnotified(sqlite3 *db) {
         ids[n++] = sqlite3_column_int64(st, 0);
     sqlite3_finalize(st);
 
+    int delivered = 0;
     for (int i = 0; i < n; i++) {
-        /* A notify that needed the sweep is a symptom, not routine. */
-        LOG_WARN_("advance sweep re-notifying child=%lld (push was lost)",
-                  (long long)ids[i]);
-        advance_notify_parent(db, ids[i], session_stopped_with_error(db, ids[i]));
+        /* A quiescent hold re-evaluating here is routine (ships 0); an actual
+         * sweep delivery means a push was lost or a subtree settled silently. */
+        int is_err = session_stopped_with_error(db, ids[i]);
+        int rc = advance_deliver_boundary(db, ids[i], is_err, !is_err);
+        if (rc > 0) {
+            delivered += rc;
+            LOG_INFO_("advance sweep delivered session=%lld payloads=%d",
+                      (long long)ids[i], rc);
+        }
     }
-    return n;
+    return delivered;
 }
 
 /* Iterations already spent in the leaf's turn: the number of distinct LLM
@@ -301,8 +703,10 @@ static void streak_note(sqlite3 *db, int64_t session_id, const char *note,
 /* Refuse this turn open. The one write a refusal makes is the trip marker,
  * and only on the *first* refusal of a trip: once-per-trip is derived, not
  * stored — a 'tripped' entry newer than the last human turn means this trip
- * already announced itself, and a human turn later starts a fresh one. */
-static void streak_refuse(sqlite3 *db, int64_t session_id, const StreakGate *g) {
+ * already announced itself, and a human turn later starts a fresh one.
+ * Returns a parent session id the caller must wake after COMMIT (a parked
+ * blocking waiter that was failure-notified), or 0. */
+static int64_t streak_refuse(sqlite3 *db, int64_t session_id, const StreakGate *g) {
     /* Debug, not info: a tripped session is re-woken every daemon tick, and
      * run_advance already logs the resulting noop. The WARN below fires once. */
     LOG_DEBUG_("advance next=idle reason=autonomous_streak streak=%d cap=%d",
@@ -313,7 +717,7 @@ static void streak_refuse(sqlite3 *db, int64_t session_id, const StreakGate *g) 
             "  AND json_extract(data,'$.note')='tripped'"
             "  AND turn_id > " CCLAW_SQL_LAST_HUMAN_TURN("?1") ");",
             session_id, 0))
-        return;
+        return 0;
 
     LOG_WARN_("advance autonomous-turn guard tripped session=%lld streak=%d"
               " cap=%d — autonomous turns refused until a human replies",
@@ -336,12 +740,42 @@ static void streak_refuse(sqlite3 *db, int64_t session_id, const StreakGate *g) 
             " SELECT channel_name, id,"
             "        json_object('chat_id', COALESCE(chat_id,'0'), 'text', ?2)"
             "   FROM sessions WHERE id=?1 AND channel_name IS NOT NULL;",
-            -1, &st, NULL) != SQLITE_OK)
-        return;
-    sqlite3_bind_int64(st, 1, session_id);
-    sqlite3_bind_text(st, 2, text, -1, SQLITE_STATIC);
-    sqlite3_step(st);
-    sqlite3_finalize(st);
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, session_id);
+        sqlite3_bind_text(st, 2, text, -1, SQLITE_STATIC);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    }
+
+    /* Pause fail-notify (specs/delivery.md): a paused session never settles,
+     * so a parent parked on a blocking launch of this session would wait
+     * forever — stale-session recovery never fires for a legitimately idle
+     * child. Resolve its one-shot reply edge with an error now, once per
+     * trip like the marker above. The standing edge is left alone: its
+     * cursor stays behind, and the real answer ships at the boundary after
+     * a human revives the session. */
+    int64_t wake = 0;
+    char oref[192] = {0};
+    if (sqlite3_prepare_v2(db,
+            "SELECT target_ref FROM delivery_edges WHERE session_id=?1"
+            " AND one_shot=1 AND target_kind='tool_call' LIMIT 1;",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, session_id);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *r = (const char *)sqlite3_column_text(st, 0);
+            if (r) snprintf(oref, sizeof(oref), "%s", r);
+        }
+        sqlite3_finalize(st);
+    }
+    if (oref[0]) {
+        int64_t parent = db_scalar_i64(db,
+            "SELECT parent_session_id FROM sessions WHERE id=?;", session_id, -1);
+        wake = oneshot_resolve(db, session_id, parent, oref,
+                               "error: sub-agent paused by autonomy guard"
+                               " (autonomous-turn limit reached); it stays"
+                               " paused until a human replies to it", 1);
+    }
+    return wake;
 }
 
 /* Teach at the near edge: one system note inside the turn just opened. It is
@@ -471,9 +905,11 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
          * a stranded turn resuming doesn't multiply. */
         StreakGate gate = streak_gate_check(db, session_id);
         if (gate.refuse) {
-            streak_refuse(db, session_id, &gate);
+            int64_t wake = streak_refuse(db, session_id, &gate);
             if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
                 sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            else if (wake > 0)
+                wake_session(wake);   /* fail-notified blocking waiter */
             AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, iter);
             free(agent);
             return out;
@@ -606,6 +1042,11 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         int tc_count = 0;
         PendingToolCall *calls = db_tool_call_get_pending(db, session_id, &tc_count);
         if (tc_count > 0) {
+            /* The turn continues: 'iteration' edges ship the tool_use-stop
+             * commentary as it lands (cursor-guarded — a give-up below just
+             * re-runs this branch without duplicates). Every other policy
+             * waits for a boundary. */
+            advance_deliver_iteration(db, session_id);
             /* Has pending tool calls */
             if (session_set_state(db, session_id, "tool_running") != 0) {
                 /* BUSY give-up mid-flip: don't dispatch against a stale state —
@@ -635,9 +1076,11 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
                 return make_output(ADVANCE_ERROR, session_id, NULL, 0);
             }
             LOG_INFO_("advance state=llm_running next=idle reason=error");
-            /* Abnormal stop: still notify a waiting parent so a blocking
-             * launch_agent gets an error result instead of hanging. */
-            advance_notify_parent(db, session_id, 1);
+            /* Abnormal stop: parent edges still deliver (errors bypass the
+             * quiescence hold) so a blocking launch_agent gets an error
+             * result instead of hanging. Channel edges stay quiet on an LLM
+             * error, as ever — their cursor just records the boundary. */
+            advance_deliver_boundary(db, session_id, 1, 0);
             AdvanceOutput out = make_output(ADVANCE_ERROR, session_id, agent, iter);
             free(agent);
             return out;
@@ -650,8 +1093,10 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         }
         LOG_INFO_("advance state=llm_running next=idle reason=done");
 
-        /* Notify parent session if this is a sub-agent */
-        advance_notify_parent(db, session_id, 0);
+        /* Turn boundary: every delivery edge evaluates (parent, one-shot,
+         * channel). The caller's ADVANCE_DONE handling wakes the channel
+         * FIFO for any outbox rows written here. */
+        advance_deliver_boundary(db, session_id, 0, 1);
 
         AdvanceOutput out = make_output(ADVANCE_DONE, session_id, agent, iter);
         free(agent);
@@ -694,8 +1139,9 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             entry_append_with_iteration(db, session_id, &msg, 0);
             free(rich_msg);
             session_set_state(db, session_id, "idle");
-            /* Max-iter is a terminal error for a sub-agent too — notify parent. */
-            advance_notify_parent(db, session_id, 1);
+            /* Max-iter is a terminal error boundary — every edge delivers,
+             * chat included (it always saw the rich max-iter message). */
+            advance_deliver_boundary(db, session_id, 1, 1);
             AdvanceOutput out = make_output(ADVANCE_DONE, session_id, agent, new_iter);
             free(agent);
             return out;
@@ -739,9 +1185,11 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
          * set above — compaction is done either way). */
         StreakGate gate = streak_gate_check(db, session_id);
         if (gate.refuse) {
-            streak_refuse(db, session_id, &gate);
+            int64_t wake = streak_refuse(db, session_id, &gate);
             if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
                 sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            else if (wake > 0)
+                wake_session(wake);   /* fail-notified blocking waiter */
             AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, 0);
             free(agent);
             return out;

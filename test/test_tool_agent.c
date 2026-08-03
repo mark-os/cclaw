@@ -218,18 +218,20 @@ static void test_check_agent_idle_with_result(void) {
     printf("  PASS test_check_agent_idle_with_result\n");
 }
 
-/* Collecting a terminal result by poll is delivery: it stamps
- * parent_notified_at, so the convergence sweep never re-pushes what the parent
- * already has. One column serves push and poll. */
+/* Collecting a terminal result by poll is delivery: it advances the standing
+ * parent edge's cursor to the child's leaf, so neither a boundary evaluation
+ * nor the convergence sweep re-pushes what the parent already has. */
 static void test_check_session_stamps_poll_delivery(void) {
     sqlite3 *db = setup_db();
     int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
     int64_t child_sid = session_create(db, "child", NULL, parent_sid, 1);
 
     Message msg = {.role = ROLE_ASSISTANT, .content = "done"};
-    entry_append_with_iteration(db, child_sid, &msg, 1);
-    assert(db_scalar_i64(db, "SELECT parent_notified_at IS NULL FROM sessions"
-                             " WHERE id=?", child_sid, -1) == 1);
+    int64_t eid = entry_append_with_iteration(db, child_sid, &msg, 1);
+    assert(eid > 0);
+    assert(db_scalar_i64(db, "SELECT cursor FROM delivery_edges"
+                             " WHERE session_id=? AND target_kind='parent'"
+                             " AND one_shot=0;", child_sid, -1) == 0);
 
     char args[64];
     snprintf(args, sizeof(args), "{\"session_id\":%lld}", (long long)child_sid);
@@ -238,8 +240,9 @@ static void test_check_session_stamps_poll_delivery(void) {
     assert(strstr(r, "state: idle") != NULL);
     free(r);
 
-    assert(db_scalar_i64(db, "SELECT COALESCE(parent_notified_at, 0) FROM sessions"
-                             " WHERE id=?", child_sid, 0) > 0);
+    assert(db_scalar_i64(db, "SELECT cursor FROM delivery_edges"
+                             " WHERE session_id=? AND target_kind='parent'"
+                             " AND one_shot=0;", child_sid, -1) == eid);
 
     db_close(db);
     printf("  PASS test_check_session_stamps_poll_delivery\n");

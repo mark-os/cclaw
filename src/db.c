@@ -366,6 +366,44 @@ static const struct { int version; const char *sql; int (*fn)(sqlite3 *); } sche
       "UPDATE sessions SET parent_notified_at=updated_at"
       " WHERE parent_session_id > 0 AND parent_notified_at IS NULL;",
       NULL },
+
+    /* v42: delivery semantics (specs/delivery.md) — one delivery_edges table
+     * replaces the parent_notified_at stamp. Every existing child gets a
+     * standing parent edge frozen at 'turn', the contract it was launched
+     * under (the quiescent default applies to new launches only); an
+     * in-flight blocking child also gets its one-shot tool_call edge. A
+     * non-NULL stamp (push landed, or the parent polled) becomes cursor at
+     * the current leaf; NULL stays cursor 0 so the sweep still re-derives the
+     * lost push. Channel edges are not migrated — they materialize lazily at
+     * the next delivery boundary from the route template ('auto' → quiescent,
+     * the one deliberate behavior change: chat delivery gains coalescing). */
+    { 42,
+      "CREATE TABLE delivery_edges ("
+      "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "  session_id INTEGER NOT NULL REFERENCES sessions(id),"
+      "  target_kind TEXT NOT NULL,"
+      "  target_ref TEXT NOT NULL,"
+      "  policy TEXT NOT NULL,"
+      "  cursor INTEGER NOT NULL DEFAULT 0,"
+      "  one_shot INTEGER NOT NULL DEFAULT 0,"
+      "  UNIQUE(session_id, target_kind, target_ref)"
+      ");"
+      "INSERT INTO delivery_edges(session_id, target_kind, target_ref, policy,"
+      "                           cursor, one_shot)"
+      " SELECT id, 'parent', CAST(parent_session_id AS TEXT), 'turn',"
+      "        CASE WHEN parent_notified_at IS NOT NULL"
+      "             THEN COALESCE(NULLIF(leaf_id, -1), 0) ELSE 0 END, 0"
+      "   FROM sessions WHERE parent_session_id > 0;"
+      "INSERT INTO delivery_edges(session_id, target_kind, target_ref, policy,"
+      "                           cursor, one_shot)"
+      " SELECT s.id, 'tool_call', s.parent_tool_call_id, 'turn', 0, 1"
+      "   FROM sessions s JOIN tool_calls tc"
+      "     ON tc.session_id = s.parent_session_id"
+      "    AND tc.call_id = s.parent_tool_call_id"
+      "  WHERE s.parent_session_id > 0 AND s.parent_tool_call_id IS NOT NULL"
+      "    AND tc.status IN ('pending','running');"
+      "ALTER TABLE sessions DROP COLUMN parent_notified_at;",
+      NULL },
 };
 
 #define CCLAW_SCHEMA_MIN 40   /* schema freeze 2026-07-31 — no patches below this */
@@ -609,6 +647,29 @@ int64_t session_create_filtered(sqlite3 *db, const char *name, const char *agent
     }
     int64_t id = sqlite3_last_insert_rowid(db);
     sqlite3_finalize(stmt);
+
+    /* Every child gets a standing parent edge at creation, policy inherited
+     * from its launcher (specs/delivery.md) — here, the one choke point every
+     * parented session passes (launch_agent, cron 'new' fires, tests). A
+     * child without an edge would be mute forever, so a failed edge insert
+     * fails the create. */
+    if (parent_session_id > 0) {
+        char ref[24];
+        snprintf(ref, sizeof(ref), "%lld", (long long)parent_session_id);
+        char *policy = delivery_policy_resolve(db, parent_session_id);
+        int rc = delivery_edge_create(db, id, "parent", ref, policy, 0);
+        free(policy);
+        if (rc != 0) {
+            sqlite3_stmt *del;
+            if (sqlite3_prepare_v2(db, "DELETE FROM sessions WHERE id=?;",
+                                   -1, &del, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(del, 1, id);
+                sqlite3_step(del);
+                sqlite3_finalize(del);
+            }
+            return -1;
+        }
+    }
     return id;
 }
 
@@ -1386,6 +1447,85 @@ int session_set_parent_tool_call_id(sqlite3 *db, int64_t session_id, const char 
     sqlite3_bind_int64(stmt, 2, session_id);
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+/* ── Delivery edges (specs/delivery.md) ─────────────────────────── */
+
+int session_subtree_quiescent(sqlite3 *db, int64_t session_id) {
+    /* UNION (not ALL): parent links cannot cycle today (a child is created
+     * after its parent and the link is immutable), but a corrupt row must
+     * degrade to a wrong answer, not an unbounded recursion. */
+    const char *sql =
+        "WITH RECURSIVE sub(id) AS ("
+        "  SELECT ?1"
+        "  UNION"
+        "  SELECT s.id FROM sessions s JOIN sub ON s.parent_session_id = sub.id"
+        ")"
+        "SELECT NOT EXISTS(SELECT 1 FROM sessions s JOIN sub ON s.id = sub.id"
+        "                  WHERE s.state <> 'idle')"
+        "   AND NOT EXISTS(SELECT 1 FROM inbox i JOIN sub ON i.session_id = sub.id"
+        "                  WHERE i.consumed = 0)"
+        "   AND NOT EXISTS(SELECT 1 FROM llm_jobs j JOIN sub ON j.session_id = sub.id)"
+        "   AND NOT EXISTS(SELECT 1 FROM tool_calls t JOIN sub ON t.session_id = sub.id"
+        "                  WHERE t.status IN ('pending','running'));";
+    return (int)db_scalar_i64(db, sql, session_id, 0);
+}
+
+int delivery_policy_valid(const char *p) {
+    return p && (strcmp(p, "iteration") == 0 || strcmp(p, "digest") == 0 ||
+                 strcmp(p, "turn") == 0 || strcmp(p, "quiescent") == 0 ||
+                 strcmp(p, "explicit") == 0);
+}
+
+char *delivery_policy_resolve(sqlite3 *db, int64_t launcher_session_id) {
+    char *p = db_scalar_text(db,
+        "SELECT policy FROM delivery_edges"
+        " WHERE session_id=?1 AND one_shot=0"
+        "   AND target_kind IN ('parent','channel') AND policy <> 'explicit'"
+        " ORDER BY CASE target_kind WHEN 'parent' THEN 0 ELSE 1 END LIMIT 1;",
+        launcher_session_id);
+    if (p && delivery_policy_valid(p)) return p;
+    free(p);
+    p = config_get(db, "agent_delivery_default");
+    if (p && delivery_policy_valid(p)) return p;
+    free(p);
+    return strdup("quiescent");
+}
+
+int delivery_edge_create(sqlite3 *db, int64_t session_id, const char *kind,
+                         const char *ref, const char *policy, int one_shot) {
+    if (!delivery_policy_valid(policy) || !kind || !ref) return -1;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR IGNORE INTO delivery_edges"
+            " (session_id, target_kind, target_ref, policy, cursor, one_shot)"
+            " VALUES (?1, ?2, ?3, ?4, 0, ?5);", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int64(st, 1, session_id);
+    sqlite3_bind_text(st, 2, kind, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, ref, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, policy, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 5, one_shot ? 1 : 0);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int delivery_edge_set_policy(sqlite3 *db, int64_t session_id, const char *kind,
+                             const char *policy) {
+    if (!delivery_policy_valid(policy)) return -1;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE delivery_edges SET policy=?1"
+            " WHERE session_id=?2 AND target_kind=?3 AND one_shot=0;",
+            -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, policy, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, session_id);
+    sqlite3_bind_text(st, 3, kind, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
@@ -2474,6 +2614,27 @@ int64_t db_cost_last_24h(sqlite3 *db) {
  * idle. Reconcile-before-reset matters: every step keys on the dead-owner
  * predicate, which includes the stale state, so the reset must run last or it
  * would clear the state the earlier steps select on. Returns 0, -1 on error. */
+/* A synthetically answered launch_agent call leaves the blocking child's
+ * one-shot reply edge pointing at a call that is already done. oneshot_resolve
+ * (advance.c) would CAS-miss and drop it at the next evaluation anyway, but
+ * clearing it with the answer keeps the sweep from re-picking the child until
+ * then. The child's real answer still ships via its standing edge. */
+static void drop_oneshot_edges_for_call(sqlite3 *db, int64_t caller_sid,
+                                        const char *call_id) {
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db,
+            "DELETE FROM delivery_edges WHERE one_shot=1"
+            " AND target_kind='tool_call' AND target_ref=?1"
+            " AND session_id IN (SELECT id FROM sessions"
+            "                    WHERE parent_session_id=?2);",
+            -1, &st, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_text(st, 1, call_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, caller_sid);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
 int db_recover_stale_sessions(sqlite3 *db) {
     if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
         return -1;
@@ -2532,6 +2693,7 @@ int db_recover_stale_sessions(sqlite3 *db) {
         if (db_tool_call_set_status(db, rows[i].session_id, rows[i].call_id,
                                     "done", "recovery") != 0)
             goto free_rollback;
+        drop_oneshot_edges_for_call(db, rows[i].session_id, rows[i].call_id);
     }
 
     /* Distinct sessions that were provably mid-work (had a reconciled tool
@@ -2677,6 +2839,8 @@ int db_reconcile_stale_calls(sqlite3 *db, int64_t session_id) {
             db_tool_call_set_status(db, session_id, rows[i].call_id,
                                     "done", "stale:turn-start") != 0)
             err = 1;
+        else
+            drop_oneshot_edges_for_call(db, session_id, rows[i].call_id);
     }
 
     for (int i = 0; i < n; i++) { free(rows[i].call_id); free(rows[i].name); }

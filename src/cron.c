@@ -826,10 +826,10 @@ static void pause_job(sqlite3 *db, const DueJob *j, const char *detail) {
  * reusing one session would drag every prior fire's turns into the next one.
  * Channel fields stamp the chat so ordinary delivery reaches it; without them
  * the session is parented to the late-resolved owner and its result rides the
- * existing notify_parent push. That is scheduled launch_agent(background), so
- * no new delivery machinery exists here. The route is deliberately NOT
- * re-pinned: a human reply to the report goes to the chat's own session (the
- * accepted reply-context gap). */
+ * standing parent edge session_create_filtered gave it (specs/delivery.md).
+ * That is scheduled launch_agent(background), so no new delivery machinery
+ * exists here. The route is deliberately NOT re-pinned: a human reply to the
+ * report goes to the chat's own session (the accepted reply-context gap). */
 static int64_t fresh_session(sqlite3 *db, const DueJob *j, const char *agent) {
     int chat_bound = (j->channel && j->channel[0] && j->chat && j->chat[0]);
     int64_t parent = -1;

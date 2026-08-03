@@ -370,11 +370,32 @@ channel-wide default lives on `channels.default_agent`.
 | `turn_iteration` | INTEGER NOT NULL DEFAULT 0 | iteration within current turn |
 | `turn_context` | TEXT | `<RELEVANT_CONTEXT>` block, materialized once at turn start (`llm_proc.c`) and reused verbatim by every tool-loop iteration so the request prefix stays byte-stable for prompt caching; always present (it carries `<current_time>` even when nothing else is live) |
 | `leaf_id` | INTEGER DEFAULT -1 | current branch tip entry |
-| `parent_notified_at` | INTEGER | unixepoch when the parent learned this child's result — stamped inside `advance_notify_parent`'s transaction (atomic with the tool result / inbox insert it records), and by `check_session` when the parent consumes the result by poll. NULL on a terminal child = lost push; `advance_sweep_unnotified()` re-notifies it from the daemon's `db_periodic` tick (the convergence sweep), and the stamp is what makes that idempotent |
 | `created_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 | `updated_at` | INTEGER NOT NULL DEFAULT (unixepoch()) | |
 
 Index: `idx_sessions_owner ON sessions(owner_instance) WHERE owner_instance IS NOT NULL`.
+
+### delivery_edges
+
+The delivery contract lives in [delivery.md](delivery.md); this is the shape.
+One row per outbound edge of a session: the standing parent edge every child
+gets at creation (v42 replaced `sessions.parent_notified_at` with this
+table), the channel edge a chat-bound session freezes from its route template
+at its first delivery boundary, and the one-shot `tool_call` edge a blocking
+launch adds (deleted when it fires). `target_kind='session'` + one-shot reply
+edges are reserved for milestone 2's `session_send`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | INTEGER PRIMARY KEY AUTOINCREMENT | |
+| `session_id` | INTEGER NOT NULL | FK → `sessions(id)`; the session whose output this edge carries |
+| `target_kind` | TEXT NOT NULL | `'parent'` \| `'channel'` \| `'session'` \| `'tool_call'` |
+| `target_ref` | TEXT NOT NULL | parent: parent session id; channel: channel name (chat_id lives on the session); tool_call: call_id |
+| `policy` | TEXT NOT NULL | `iteration` \| `digest` \| `turn` \| `quiescent` \| `explicit` |
+| `cursor` | INTEGER NOT NULL DEFAULT 0 | last entry id this edge delivered; stamped inside the delivery transaction. Cursor behind an idle session's assistant leaf = delivery owed — `advance_sweep_undelivered()`'s re-derivation predicate (the convergence sweep, `db_periodic`) |
+| `one_shot` | INTEGER NOT NULL DEFAULT 0 | blocking reply edge: fires once, then the row is deleted |
+
+Unique: `(session_id, target_kind, target_ref)`.
 
 ### sessions.state values
 
@@ -767,10 +788,10 @@ payload.
 - `'new'` — a fresh session per fire, under `target_agent` (default
   `agent_name`). With channel fields it is stamped with the chat, so ordinary
   delivery reaches it; without them it is parented to the late-resolved owner
-  (no `parent_tool_call_id`), so its result rides the existing
-  `notify_parent` push — a scheduled background `launch_agent`, no new
-  delivery machinery. The route is deliberately not re-pinned (the accepted
-  reply-context gap).
+  (no `parent_tool_call_id`), so its result rides its standing parent edge
+  ([delivery.md](delivery.md)) — a scheduled background `launch_agent`, no
+  new delivery machinery. The route is deliberately not re-pinned (the
+  accepted reply-context gap).
 
 Authority is re-checked here, not just at set time: a chat-stamped job whose
 chat now routes to a **different** agent does not fire, and says so.

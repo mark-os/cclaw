@@ -443,6 +443,19 @@ static void test_schema_patch_application(void) {
         " session_id,task,enabled,next_run_at)"
         " VALUES('Pulse','heartbeat','heartbeat','',1800,0,'',1,0);",
         NULL, NULL, NULL) == SQLITE_OK);
+    /* Delivery-edge migration inputs (v42): a finished background child —
+     * the v41 backfill stamps it delivered, so its cursor lands at the leaf —
+     * and an in-flight blocking child whose call is still running, which
+     * gets its one-shot reply edge. */
+    assert(sqlite3_exec(old_db,
+        "INSERT INTO sessions(id, name, agent_name, parent_session_id, depth)"
+        " VALUES (100,'p','Pulse',-1,0), (101,'c','Pulse',100,1),"
+        "        (102,'b','Pulse',100,1);"
+        "UPDATE sessions SET parent_tool_call_id='call_m' WHERE id=102;"
+        "INSERT INTO entries(id, session_id, role, content) VALUES(500,101,2,'done');"
+        "INSERT INTO tool_calls(session_id, entry_id, call_id, name, status)"
+        " VALUES(100, 1, 'call_m', 'launch_agent', 'running');",
+        NULL, NULL, NULL) == SQLITE_OK);
     set_user_version(old_db, 40);
 
     assert(db_schema_compat(old_db) == 1);   /* runs every pending patch */
@@ -463,6 +476,37 @@ static void test_schema_patch_application(void) {
     assert(sqlite3_column_type(hb, 3) == SQLITE_NULL);
     assert(sqlite3_column_int(hb, 4) == 1);
     sqlite3_finalize(hb);
+
+    /* v42: every pre-existing child got a standing parent edge at 'turn' (the
+     * contract it was launched under); the delivered child's cursor sits at
+     * its leaf, the blocking child also carries its one-shot reply edge, and
+     * the stamp column is gone. */
+    sqlite3_stmt *de;
+    assert(sqlite3_prepare_v2(old_db,
+        "SELECT session_id, target_kind, target_ref, policy, cursor, one_shot"
+        " FROM delivery_edges ORDER BY session_id, one_shot;", -1, &de, NULL)
+        == SQLITE_OK);
+    assert(sqlite3_step(de) == SQLITE_ROW);   /* 101 parent, delivered */
+    assert(sqlite3_column_int64(de, 0) == 101);
+    assert(strcmp((const char *)sqlite3_column_text(de, 1), "parent") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(de, 2), "100") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(de, 3), "turn") == 0);
+    assert(sqlite3_column_int64(de, 4) == 500);
+    assert(sqlite3_column_int(de, 5) == 0);
+    assert(sqlite3_step(de) == SQLITE_ROW);   /* 102 parent, nothing yet */
+    assert(sqlite3_column_int64(de, 0) == 102);
+    assert(sqlite3_column_int64(de, 4) == 0);
+    assert(sqlite3_column_int(de, 5) == 0);
+    assert(sqlite3_step(de) == SQLITE_ROW);   /* 102 one-shot reply edge */
+    assert(sqlite3_column_int64(de, 0) == 102);
+    assert(strcmp((const char *)sqlite3_column_text(de, 1), "tool_call") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(de, 2), "call_m") == 0);
+    assert(sqlite3_column_int(de, 5) == 1);
+    assert(sqlite3_step(de) == SQLITE_DONE);
+    sqlite3_finalize(de);
+    assert(db_scalar_i64(old_db,
+        "SELECT COUNT(*) FROM pragma_table_info('sessions')"
+        " WHERE name='parent_notified_at';", 0, -1) == 0);
 
     sqlite3 *new_db = db_open(new_path);
     assert(new_db != NULL && db_ensure_schema(new_db) == 0);

@@ -15,7 +15,8 @@ static const char *SPAWN_PARAMS_JSON =
     "\"task\":{\"type\":\"string\",\"description\":\"Task description for the sub-agent\"},"
     "\"name\":{\"type\":\"string\",\"description\":\"Agent to launch — a name from the roster; omit to spawn a copy of yourself (worker)\"},"
     "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Self-spawn only (error if 'name' is set): restrict the worker to these tools, intersected with your own grants — it can never widen them. Omitted, the worker gets the default worker toolset named at the end of this description.\"},"
-    "\"background\":{\"type\":\"boolean\",\"description\":\"Default false: the call blocks and its result is the child's final answer. True returns session_id immediately and the child's result is delivered to you when it finishes — no need to check on it.\"}"
+    "\"background\":{\"type\":\"boolean\",\"description\":\"Default false: the call blocks and its result is the child's final answer. True returns session_id immediately and the child's result is delivered to you when it finishes — no need to check on it.\"},"
+    "\"delivery\":{\"type\":\"string\",\"enum\":[\"iteration\",\"digest\",\"turn\",\"quiescent\",\"explicit\"],\"description\":\"When the child's output reaches you. Omitted: inherits your own policy (default quiescent — exactly one message, the real answer, once the child and everything it launched has settled). turn = final message at every turn end; digest = its prose since the last delivery, at turn end; iteration = every assistant message as it lands (costs you a turn per message); explicit = nothing auto-ships (check_session is your window). Blocking launches accept only quiescent/turn/digest.\"}"
     "},\"required\":[\"task\"]}";
 
 int agent_max_depth(sqlite3 *db) {
@@ -66,14 +67,34 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     int self_spawn = (!agent || !agent[0]);
     int background = tool_args_bool(ctx->db, arguments, "background", 0);
 
+    /* Delivery policy override (specs/delivery.md). Only an explicit arg is
+     * validated here — inheritance is resolved at session creation and is
+     * always blocking-legal. A blocking launch is a one-shot edge and must
+     * resolve with exactly one payload, so 'explicit' and 'iteration' are
+     * refused with feedback, launch-gate style. */
+    char *delivery = tool_args_str(ctx->db, arguments, "delivery");
+    if (delivery && !delivery[0]) { free(delivery); delivery = NULL; }
+    if (delivery && !delivery_policy_valid(delivery)) {
+        free(task); free(agent); free(delivery);
+        return strdup("error: unknown delivery policy — use one of"
+                      " iteration|digest|turn|quiescent|explicit");
+    }
+    if (delivery && !background && (strcmp(delivery, "explicit") == 0 ||
+                                    strcmp(delivery, "iteration") == 0)) {
+        free(task); free(agent); free(delivery);
+        return strdup("error: blocking launch requires a single-report delivery"
+                      " policy — use quiescent, turn, or digest, or launch in"
+                      " background");
+    }
+
     char *tools_json = tool_args_json(ctx->db, arguments, "tools");
     if (tools_json) {
         if (!self_spawn) {
-            free(task); free(agent); free(tools_json);
+            free(task); free(agent); free(tools_json); free(delivery);
             return strdup("error: 'tools' filter is only valid for self-spawn (omit 'name')");
         }
         if (tools_json[0] != '[') {
-            free(task); free(agent); free(tools_json);
+            free(task); free(agent); free(tools_json); free(delivery);
             return strdup("error: 'tools' must be a JSON array of tool names");
         }
     }
@@ -82,7 +103,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     if (self_spawn) {
         self_name = session_get_agent_name(ctx->db, ctx->session_id);
         if (!self_name) {
-            free(task); free(agent); free(tools_json);
+            free(task); free(agent); free(tools_json); free(delivery);
             return strdup("error: cannot self-spawn — calling session has no agent");
         }
         free(agent);
@@ -94,7 +115,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
     if (!row) {
         char err[128];
         snprintf(err, sizeof(err), "error: unknown agent '%.64s'", agent);
-        free(task); free(agent); free(tools_json);
+        free(task); free(agent); free(tools_json); free(delivery);
         return strdup(err);
     }
     agent_row_free(row);
@@ -116,17 +137,49 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
                                                 filter);
     free(filter);
     if (child_sid < 0) {
-        free(task); free(agent);
+        free(task); free(agent); free(delivery);
         return strdup("error: failed to create child session");
     }
+
+    /* The create inherited the launcher's policy onto the child's standing
+     * parent edge; an explicit arg overrides it, frozen from here on. */
+    if (delivery)
+        delivery_edge_set_policy(ctx->db, child_sid, "parent", delivery);
 
     /* If blocking: record which of the parent's tool_calls this child answers.
      * The parent stays in tool_running with that call marked 'running' (by the
      * dispatcher) — it is NOT parked on a single child, so multiple sub-agents
-     * can be outstanding at once. On completion advance_session writes the tool
-     * result keyed by this id and flips the call to 'done' (see advance.c). */
-    if (!background && ctx->current_tool_call_id)
+     * can be outstanding at once. On completion advance_session resolves the
+     * one-shot reply edge created here — result keyed by this call id, call
+     * flipped 'done' (see advance.c oneshot_resolve). */
+    if (!background && ctx->current_tool_call_id) {
         session_set_parent_tool_call_id(ctx->db, child_sid, ctx->current_tool_call_id);
+        /* The one-shot rides the standing edge's policy. An *inherited*
+         * 'iteration' can't fit a one-shot (multiple payloads) — both edges
+         * degrade to the registry default; only an explicit override refuses
+         * (above). 'quiescent' is the backstop if the registry default is
+         * itself blocking-illegal. */
+        char *pol = delivery ? strdup(delivery)
+                             : db_scalar_text(ctx->db,
+                                   "SELECT policy FROM delivery_edges"
+                                   " WHERE session_id=? AND target_kind='parent'"
+                                   " AND one_shot=0;", child_sid);
+        if (!pol || !delivery_policy_valid(pol) ||
+            strcmp(pol, "iteration") == 0 || strcmp(pol, "explicit") == 0) {
+            free(pol);
+            pol = config_get(ctx->db, "agent_delivery_default");
+            if (!pol || !delivery_policy_valid(pol) ||
+                strcmp(pol, "iteration") == 0 || strcmp(pol, "explicit") == 0) {
+                free(pol);
+                pol = strdup("quiescent");
+            }
+            delivery_edge_set_policy(ctx->db, child_sid, "parent", pol);
+        }
+        delivery_edge_create(ctx->db, child_sid, "tool_call",
+                             ctx->current_tool_call_id, pol, 1);
+        free(pol);
+    }
+    free(delivery);
 
     /* Insert task into child's inbox and wake it */
     inbox_insert(ctx->db, child_sid, "spawn", NULL, task);
@@ -206,11 +259,14 @@ char *tool_check_session_handler(const char *arguments, void *user_data) {
     char *result = NULL;
     if (strcmp(state_buf, "idle") == 0) {
         result = get_response_text(ctx->db, child_sid);
-        /* Consumed by poll: one column serves push and poll, so the convergence
-         * sweep never re-pushes a result the parent already collected here. */
+        /* Consumed by poll: advance the standing parent edge to the child's
+         * leaf, so neither a boundary evaluation nor the convergence sweep
+         * re-pushes what the parent already collected here. */
         sqlite3_stmt *up;
         if (sqlite3_prepare_v2(ctx->db,
-                "UPDATE sessions SET parent_notified_at=unixepoch() WHERE id=?",
+                "UPDATE delivery_edges SET cursor="
+                "  (SELECT max(leaf_id, 0) FROM sessions WHERE id=?1)"
+                " WHERE session_id=?1 AND target_kind='parent' AND one_shot=0",
                 -1, &up, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(up, 1, child_sid);
             sqlite3_step(up);

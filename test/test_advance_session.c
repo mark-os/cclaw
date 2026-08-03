@@ -309,6 +309,9 @@ static void test_parallel_subagents_never_reconciled(void) {
     assert(kid[0] > 0 && kid[1] > 0);
 
     for (int i = 0; i < 2; i++) {
+        /* Consume the spawn task first, as a real child's turn does — an
+         * unconsumed inbox row correctly holds a quiescent one-shot. */
+        assert(inbox_consume_into_entries(db, kid[i], 10) == 1);
         session_set_state(db, kid[i], "llm_running");
         Message done = { .role = ROLE_ASSISTANT, .content = "child result",
                          .stop_reason = STOP_REASON_STOP };
@@ -396,7 +399,7 @@ static void test_background_result_not_truncated(void) {
     printf("  PASS test_background_result_not_truncated\n");
 }
 
-/* ── The convergence sweep: stamp on notify, sweep the lost pushes ────── */
+/* ── The convergence sweep: cursor on delivery, sweep the lagging edges ── */
 
 /* Finish a child's turn the way the daemon does: llm_running + an assistant
  * leaf, then advance. Returns the advance action. */
@@ -408,73 +411,96 @@ static AdvanceResult finish_child(sqlite3 *db, int64_t child, char *text,
     return advance_session(db, child, 25).action;
 }
 
-static int64_t stamp_of(sqlite3 *db, int64_t sid) {
+/* The standing parent edge's cursor; 0 = nothing delivered yet. */
+static int64_t cursor_of(sqlite3 *db, int64_t sid) {
     return db_scalar_i64(db,
-        "SELECT COALESCE(parent_notified_at, 0) FROM sessions WHERE id=?", sid, 0);
+        "SELECT cursor FROM delivery_edges WHERE session_id=?"
+        " AND target_kind='parent' AND one_shot=0;", sid, -1);
 }
 
-/* Every delivered notify stamps the child inside its own transaction — the
- * stamp is what tells the sweep this push landed. */
-static void test_notify_stamps_child(void) {
+/* Wire up a blocking launch the way the real handler does: the parent's
+ * tool_calls row plus the child's one-shot reply edge. */
+static void make_blocking(sqlite3 *db, int64_t parent, int64_t child,
+                          const char *call_id) {
+    char ins[256];
+    snprintf(ins, sizeof(ins),
+        "INSERT INTO tool_calls(session_id, entry_id, call_id, name, status)"
+        " VALUES(%lld, 1, '%s', 'launch_agent', 'running');",
+        (long long)parent, call_id);
+    assert(sqlite3_exec(db, ins, NULL, NULL, NULL) == SQLITE_OK);
+    session_set_parent_tool_call_id(db, child, call_id);
+    assert(delivery_edge_create(db, child, "tool_call", call_id,
+                                "quiescent", 1) == 0);
+}
+
+/* Every delivery stamps the edge cursor inside its own transaction — the
+ * cursor at the leaf is what tells the sweep this push landed. */
+static void test_delivery_stamps_cursor(void) {
     sqlite3 *db = open_seeded(":memory:");
     int64_t parent = session_create(db, "parent", "default", -1, 0);
 
-    /* Blocking: the parent's launch_agent call gets a tool result. */
+    /* Blocking: the parent's launch_agent call gets a tool result and the
+     * one-shot edge dies with the firing; the standing cursor advances in
+     * the same transaction so nothing ships twice. */
     int64_t blocking = session_create(db, "blocking", "default", parent, 1);
-    session_set_parent_tool_call_id(db, blocking, "call_b");
+    make_blocking(db, parent, blocking, "call_b");
     assert(finish_child(db, blocking, "blocking answer", STOP_REASON_STOP) == ADVANCE_DONE);
-    assert(stamp_of(db, blocking) > 0);
+    assert(cursor_of(db, blocking) > 0);
+    assert(count(db, "SELECT COUNT(*) FROM delivery_edges WHERE session_id=?"
+                     " AND one_shot=1;", blocking) == 0);
     assert(count(db, "SELECT COUNT(*) FROM entries WHERE session_id=? AND role=3;",
                  parent) == 1);
+    assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
+                     " AND source='agent_result';", parent) == 0);
 
     /* Background: the answer goes to the parent inbox instead. */
     int64_t background = session_create(db, "background", "default", parent, 1);
     assert(finish_child(db, background, "background answer", STOP_REASON_STOP) == ADVANCE_DONE);
-    assert(stamp_of(db, background) > 0);
+    assert(cursor_of(db, background) > 0);
     assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
                      " AND source='agent_result';", parent) == 1);
 
     db_close(db);
-    printf("  PASS test_notify_stamps_child\n");
+    printf("  PASS test_delivery_stamps_cursor\n");
 }
 
-/* A push that never landed leaves parent_notified_at NULL — the durable fact
- * the sweep re-derives from. It re-notifies once, then stays quiet. */
-static void test_sweep_renotifies_lost_push(void) {
+/* A push that never landed leaves the cursor behind the leaf — the durable
+ * fact the sweep re-derives from. It re-delivers once, then stays quiet. */
+static void test_sweep_redelivers_lost_push(void) {
     sqlite3 *db = open_seeded(":memory:");
     int64_t parent = session_create(db, "parent", "default", -1, 0);
     int64_t child = session_create(db, "child", "default", parent, 1);
     assert(finish_child(db, child, "the answer", STOP_REASON_STOP) == ADVANCE_DONE);
 
-    /* Simulate the lost transaction: no stamp, no inbox row. */
+    /* Simulate the lost transaction: cursor back to 0, no inbox row. */
     char sql[256];
     snprintf(sql, sizeof(sql),
-             "UPDATE sessions SET parent_notified_at=NULL WHERE id=%lld;"
+             "UPDATE delivery_edges SET cursor=0 WHERE session_id=%lld;"
              "DELETE FROM inbox WHERE session_id=%lld AND source='agent_result';",
              (long long)child, (long long)parent);
     assert(sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK);
 
-    assert(advance_sweep_unnotified(db) == 1);
+    assert(advance_sweep_undelivered(db) == 1);
     assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
                      " AND source='agent_result';", parent) == 1);
-    assert(stamp_of(db, child) > 0);
+    assert(cursor_of(db, child) > 0);
 
-    /* Idempotent by the stamp: a second tick re-notifies nobody. */
-    assert(advance_sweep_unnotified(db) == 0);
+    /* Idempotent by the cursor: a second tick re-delivers nobody. */
+    assert(advance_sweep_undelivered(db) == 0);
     assert(count(db, "SELECT COUNT(*) FROM inbox WHERE session_id=?"
                      " AND source='agent_result';", parent) == 1);
 
     /* A child that never finished a turn is not a lost push: no entries at all,
      * or a role-1 leaf waiting on its first request. Both stay unswept. */
     int64_t fresh = session_create(db, "fresh", "default", parent, 1);
-    assert(advance_sweep_unnotified(db) == 0);
+    assert(advance_sweep_undelivered(db) == 0);
     Message task = { .role = ROLE_USER, .content = "work on this" };
     entry_append_with_iteration(db, fresh, &task, 1);
-    assert(advance_sweep_unnotified(db) == 0);
-    assert(stamp_of(db, fresh) == 0);
+    assert(advance_sweep_undelivered(db) == 0);
+    assert(cursor_of(db, fresh) == 0);
 
     db_close(db);
-    printf("  PASS test_sweep_renotifies_lost_push\n");
+    printf("  PASS test_sweep_redelivers_lost_push\n");
 }
 
 /* An errored child must tell its parent so. entries.stop_reason is an INTEGER;
@@ -486,7 +512,7 @@ static void test_error_stop_reaches_parent(void) {
 
     /* Blocking: the tool result carries is_error=1. */
     int64_t blocking = session_create(db, "blocking", "default", parent, 1);
-    session_set_parent_tool_call_id(db, blocking, "call_b");
+    make_blocking(db, parent, blocking, "call_b");
     assert(finish_child(db, blocking, "provider exploded", STOP_REASON_ERROR) == ADVANCE_ERROR);
     assert(count(db, "SELECT COUNT(*) FROM entries WHERE session_id=?"
                      " AND role=3 AND is_error=1;", parent) == 1);
@@ -604,8 +630,8 @@ int main(void) {
     test_open_undispatched_turn_not_stranded();
     test_parallel_subagents_never_reconciled();
     test_background_result_not_truncated();
-    test_notify_stamps_child();
-    test_sweep_renotifies_lost_push();
+    test_delivery_stamps_cursor();
+    test_sweep_redelivers_lost_push();
     test_error_stop_reaches_parent();
     test_idle_unanswered_tool_leaf_resumes();
     test_lost_submit_reparks_idle();

@@ -66,7 +66,7 @@ E2E_BIN   := $(patsubst test/%.c,$(BUILDDIR)/%,$(E2E_SRC))
 
 # Curated fast unit subset — no network, no fork. Target: a few seconds.
 SMOKE := test_db test_config test_advance_session test_streak_guard \
-         test_concurrency_gate \
+         test_delivery test_concurrency_gate \
          test_llm_payload test_tools \
          test_session_state test_tool_file test_context_plan test_secret_scan \
          test_agent_setup test_processes test_recovery_scoping test_sandbox_profile \

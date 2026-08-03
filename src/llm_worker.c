@@ -115,6 +115,20 @@ static int pool_pop(WorkItem *out) {
     return 0;
 }
 
+/* Delete a persisted llm_jobs row. Every row must die exactly here or in a
+ * crash-recovery sweep: a stale row reads as an in-flight request to
+ * advance_session's job_in_flight checks — the session parks in WAITING
+ * forever — and inflates the concurrency gate's resource-holder count. */
+static void job_delete(sqlite3 *db, int64_t job_id) {
+    sqlite3_stmt *del;
+    if (sqlite3_prepare_v2(db, "DELETE FROM llm_jobs WHERE id=?",
+                           -1, &del, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(del, 1, job_id);
+    sqlite3_step(del);
+    sqlite3_finalize(del);
+}
+
 /* ── Worker thread ─────────────────────────────────────────────── */
 
 static void *worker_fn(void *arg) {
@@ -181,13 +195,7 @@ static void *worker_fn(void *arg) {
         cclaw_log_clear_ctx();
 
         /* Clean up job record */
-        sqlite3_stmt *del;
-        if (sqlite3_prepare_v2(db, "DELETE FROM llm_jobs WHERE id=?",
-                               -1, &del, NULL) == SQLITE_OK) {
-            sqlite3_bind_int64(del, 1, item.job_id);
-            sqlite3_step(del);
-            sqlite3_finalize(del);
-        }
+        job_delete(db, item.job_id);
 
         /* Notify parent poll loop */
         (void)write(g_pool.notify_fd, &item.session_id, sizeof(item.session_id));
@@ -271,7 +279,14 @@ int llm_worker_submit(sqlite3 *db, int64_t session_id,
     };
     snprintf(item.agent_name, sizeof(item.agent_name), "%s",
              agent_name ? agent_name : "Assistant");
-    return pool_push(&item);
+    if (pool_push(&item) != 0) {
+        /* Queue full — no worker will ever run or delete this row, so take it
+         * back out. Leaving it would park the session in WAITING forever once
+         * the caller's next advance sees a job "in flight". */
+        job_delete(db, job_id);
+        return -1;
+    }
+    return 0;
 }
 
 int llm_worker_fd(void) {
@@ -327,7 +342,13 @@ int llm_worker_submit_compact(sqlite3 *db, int64_t session_id, const char *agent
     };
     snprintf(item.agent_name, sizeof(item.agent_name), "%s",
              agent_name ? agent_name : "Assistant");
-    return pool_push(&item);
+    if (pool_push(&item) != 0) {
+        /* Same leak as llm_worker_submit: a stale compaction row wedges the
+         * 'compacting' state's in-flight check the same way. */
+        job_delete(db, job_id);
+        return -1;
+    }
+    return 0;
 }
 
 int llm_worker_submit_transcribe(sqlite3 *db, int64_t media_job_id,

@@ -558,6 +558,37 @@ static void test_idle_unanswered_tool_leaf_resumes(void) {
     printf("  PASS test_idle_unanswered_tool_leaf_resumes\n");
 }
 
+/* llm_running with no job row and a non-assistant leaf = the submit was lost
+ * (pool-full revert dropped its idle write on a BUSY give-up). The old
+ * behavior misread the *previous* turn's assistant entry as this turn's
+ * completion — ADVANCE_DONE, stale delivery, premature parent notify. Must
+ * re-park idle instead; the sweep's unanswered-leaf arm then resumes. */
+static void test_lost_submit_reparks_idle(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    int64_t sid = session_create(db, "test", "default", -1, 0);
+
+    /* Turn 1 completed normally: assistant answer on the branch. */
+    Message a1 = { .role = ROLE_ASSISTANT, .content = "turn one answer",
+                   .stop_reason = STOP_REASON_STOP };
+    entry_append_with_iteration(db, sid, &a1, db_next_iteration_id(db, sid));
+    /* Turn 2 opened (inbox consumed into a user entry) but never submitted. */
+    Message u2 = { .role = ROLE_USER, .content = "turn two question" };
+    entry_append_with_iteration(db, sid, &u2, db_next_iteration_id(db, sid));
+    session_set_state(db, sid, "llm_running");
+
+    AdvanceOutput out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_NOOP);
+    assert(db_scalar_i64(db,
+        "SELECT count(*) FROM sessions WHERE id=? AND state='idle'", sid, 0) == 1);
+
+    /* The unanswered-leaf resume now owns the retry: turn 2 dispatches. */
+    out = advance_session(db, sid, 25);
+    assert(out.action == ADVANCE_DISPATCH_LLM);
+
+    db_close(db);
+    printf("  PASS test_lost_submit_reparks_idle\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_advance_session:\n");
@@ -577,6 +608,7 @@ int main(void) {
     test_sweep_renotifies_lost_push();
     test_error_stop_reaches_parent();
     test_idle_unanswered_tool_leaf_resumes();
+    test_lost_submit_reparks_idle();
     printf("All advance_session tests passed.\n");
     return 0;
 }

@@ -1996,17 +1996,33 @@ static void session_sweep_inbox(void) {
      * resume check — a wider one here just wakes sessions that NOOP.
      * A session silenced by the autonomous-turn guard keeps matching (its
      * inbox rows stay queued) and NOOPs at the gate every tick — two indexed
-     * counts, no LLM. Cheaper than teaching this SQL the guard's predicate. */
+     * counts, no LLM. Cheaper than teaching this SQL the guard's predicate.
+     *
+     * Stuck-completion arm: a session this instance owns, parked in
+     * llm_running/compacting with no llm_jobs row, has nothing in flight —
+     * its completion advance lost a write to a BUSY give-up (state flip or
+     * pool-full revert; a failed worker job_delete leaves a row and is NOT
+     * this shape). advance_session is idempotent there (redundant-wake
+     * guard), so re-advancing finishes the completion or re-parks idle.
+     * Owner scoping keeps this daemon out of a live CLI session's submit
+     * window (state committed, job row not yet inserted — a cross-process
+     * gap); dead-owner strands stay db_recover_stale_sessions' job. */
     const char *sql =
-        "SELECT s.id FROM sessions s WHERE s.state IN ('idle','rate_limited')"
-        "  AND (EXISTS (SELECT 1 FROM inbox i"
-        "               WHERE i.session_id=s.id AND i.consumed=0)"
-        "    OR EXISTS (SELECT 1 FROM entries e"
-        "               WHERE e.id=s.leaf_id AND e.session_id=s.id"
-        "                 AND e.role IN (1,3)))"
+        "SELECT s.id FROM sessions s WHERE"
+        "  (s.state IN ('idle','rate_limited')"
+        "   AND (EXISTS (SELECT 1 FROM inbox i"
+        "                WHERE i.session_id=s.id AND i.consumed=0)"
+        "     OR EXISTS (SELECT 1 FROM entries e"
+        "                WHERE e.id=s.leaf_id AND e.session_id=s.id"
+        "                  AND e.role IN (1,3))))"
+        "  OR (s.state IN ('llm_running','compacting')"
+        "      AND s.owner_instance = ?1"
+        "      AND NOT EXISTS (SELECT 1 FROM llm_jobs j"
+        "                      WHERE j.session_id = s.id))"
         " LIMIT 64;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(st, 1, g_instance_id, -1, SQLITE_STATIC);
     int cap = 0, n = 0;
     int64_t *ids = NULL;
     while (sqlite3_step(st) == SQLITE_ROW) {

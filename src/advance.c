@@ -579,12 +579,41 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             return out;
         }
 
+        /* Job gone but the leaf is not an assistant entry: the request was
+         * never submitted — a pool-full revert (or rate-limit bounce) lost its
+         * idle write to a BUSY give-up. There is no completion to process;
+         * without this guard the logic below reads the *previous* turn's
+         * assistant entry as this turn's answer (stale delivery, premature
+         * parent notify). Re-park idle so the sweep's unanswered-leaf arm
+         * resumes the turn; if the re-park write fails too, the
+         * stuck-completion sweep lands here again next tick. */
+        {
+            int64_t leaf_role = db_scalar_i64(db,
+                "SELECT role FROM entries"
+                " WHERE id=(SELECT leaf_id FROM sessions WHERE id=?1)",
+                session_id, 2);
+            if (leaf_role == 1 || leaf_role == 3) {
+                LOG_WARN_("advance state=llm_running job=gone leaf_role=%d"
+                          " — lost submit, reparking idle", (int)leaf_role);
+                session_set_state(db, session_id, "idle");
+                AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, iter);
+                free(agent);
+                return out;
+            }
+        }
+
         /* LLM finished — check what to do next */
         int tc_count = 0;
         PendingToolCall *calls = db_tool_call_get_pending(db, session_id, &tc_count);
         if (tc_count > 0) {
             /* Has pending tool calls */
-            session_set_state(db, session_id, "tool_running");
+            if (session_set_state(db, session_id, "tool_running") != 0) {
+                /* BUSY give-up mid-flip: don't dispatch against a stale state —
+                 * the stuck-completion sweep re-runs this branch. */
+                db_tool_call_free_pending(calls, tc_count);
+                free(agent);
+                return make_output(ADVANCE_ERROR, session_id, NULL, 0);
+            }
             LOG_INFO_("advance state=llm_running next=tool_running tools=%d", tc_count);
             AdvanceOutput out = make_output(ADVANCE_DISPATCH_TOOLS, session_id, agent, iter);
             out.tc_count = tc_count;
@@ -598,7 +627,13 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         int is_error = session_stopped_with_error(db, session_id);
 
         if (is_error) {
-            session_set_state(db, session_id, "idle");
+            if (session_set_state(db, session_id, "idle") != 0) {
+                /* Give-up on the flip: return without notifying — a premature
+                 * notify hands the parent a result for a turn still marked
+                 * running. The stuck-completion sweep retries the whole stop. */
+                free(agent);
+                return make_output(ADVANCE_ERROR, session_id, NULL, 0);
+            }
             LOG_INFO_("advance state=llm_running next=idle reason=error");
             /* Abnormal stop: still notify a waiting parent so a blocking
              * launch_agent gets an error result instead of hanging. */
@@ -609,7 +644,10 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
         }
 
         /* Normal stop — turn complete */
-        session_set_state(db, session_id, "idle");
+        if (session_set_state(db, session_id, "idle") != 0) {
+            free(agent);
+            return make_output(ADVANCE_ERROR, session_id, NULL, 0);
+        }
         LOG_INFO_("advance state=llm_running next=idle reason=done");
 
         /* Notify parent session if this is a sub-agent */

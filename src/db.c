@@ -1057,6 +1057,26 @@ int session_count_active_agents(sqlite3 *db) {
     return count;
 }
 
+/* Sessions holding a resource right now: an llm_jobs row (a worker thread is
+ * running or queued for it — turn or compaction alike) or a running tool
+ * child. Deliberately NOT "non-idle sessions": a parent blocked on a blocking
+ * launch_agent sits in tool_running consuming nothing, and counting it would
+ * deadlock nested delegation — the drain gate would hold back the very
+ * children the parent is waiting on. Its 'running' launch_agent call is a
+ * wait on another session, so that one tool name is excluded; the child, if
+ * it is actually working, counts on its own. The session asking is excluded
+ * too — a stale row of its own must never wedge it out of a slot. */
+int session_count_resource_holders(sqlite3 *db, int64_t exclude_session_id) {
+    return (int)db_scalar_i64(db,
+        "SELECT COUNT(*) FROM ("
+        " SELECT session_id FROM llm_jobs WHERE session_id != ?1"
+        " UNION"
+        " SELECT session_id FROM tool_calls"
+        "  WHERE status='running' AND name != 'launch_agent'"
+        "    AND session_id != ?1);",
+        exclude_session_id, 0);
+}
+
 /* next iteration_id for a session */
 int64_t db_next_iteration_id(sqlite3 *db, int64_t session_id) {
     return db_scalar_i64(db, "SELECT COALESCE(MAX(iteration_id), 0) + 1 FROM entries WHERE session_id=?;", session_id, 1);

@@ -58,6 +58,18 @@ static const ConfigDef s_defs[] = {
       "Seconds a foreground approval blocks before backgrounding" },
     { "agent_max_depth",    "2",
       "Max sub-agent nesting depth for launch_agent" },
+    { "agent_max_per_parent", "8",
+      "Sub-agents one parent may have in flight at once — launch_agent refuses"
+      " past it (fairness: one parent can't monopolize the fleet; 0 = unlimited)" },
+    { "session_max_active", "20",
+      "System-wide in-flight sub-agent sessions — the existence half of the old"
+      " AGENT_MAX_TOTAL. launch_agent refuses and session-creating cron fires"
+      " skip past it (0 = unlimited)" },
+    { "session_max_concurrent", "10",
+      "Sessions doing work at once — holding an in-flight LLM request or a"
+      " running tool child; parents blocked on sub-agents hold nothing. Past it,"
+      " autonomous turn opens defer (inbox rows stay queued); batches with a"
+      " human in them always open (0 = unlimited)" },
     { "max_autonomous_turn_streak", "50",
       "Consecutive turns a session may open with no human in the causal chain"
       " (cron fires, sub-agent results, system notices) before turn-open"

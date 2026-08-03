@@ -163,14 +163,16 @@ static int child_has_session(int64_t session_id) {
     return 0;
 }
 
-/* Sessions whose tool dispatch hit the CHILD_MAX ceiling (dispatch_tool
- * returned -1). They sit in tool_running with pending, un-forked tool_calls —
- * nothing was forked, so no reap re-advances them and they'd hang until owner-
- * death recovery. When a tool slot frees (reap), re-advance them: advance_session
- * re-reads the still-'pending' calls and re-dispatches (idempotent — dispatch_
- * tool_inner bails at the ceiling check before touching call state). Ephemeral
- * scheduling hint, never a source of truth; db_recover_stale_sessions is the
- * durable backstop across a daemon restart. */
+/* Sessions parked on a capacity ceiling, re-advanced when capacity frees.
+ * Two feeders: tool dispatch that hit CHILD_MAX (dispatch_tool returned -1 —
+ * the session sits in tool_running with pending, un-forked tool_calls, and no
+ * reap would ever re-advance it) and turn opens deferred by the
+ * session_max_concurrent drain gate (advance_session returned NOOP+deferred —
+ * the inbox rows stay queued). Draining on reap / worker / tool-thread
+ * completion re-runs advance_session, which is idempotent: still over a
+ * ceiling → the session just re-enters the list. Ephemeral scheduling hint,
+ * never a source of truth; session_sweep_inbox and db_recover_stale_sessions
+ * are the durable backstops (overflow here just means sweep-tick latency). */
 static int64_t g_stalled[CHILD_MAX];
 static int g_stalled_count;
 
@@ -2766,6 +2768,10 @@ static void event_step_worker(int worker_fd) {
         maybe_dispatch_post_advance(completed_sid);
         run_advance(completed_sid);
     }
+    /* The job row this completion deleted was a concurrency-gate resource —
+     * re-advance anything deferred on the cap. After the completions above,
+     * so in-flight turns keep their momentum before queued opens compete. */
+    stalled_drain();
 }
 
 /* Drain tool-thread completion notifications: a finished EXEC_THREAD tool wrote
@@ -2777,6 +2783,7 @@ static void event_step_tool_thread(void) {
         if (completed_sid == -1) continue;
         run_advance(completed_sid);
     }
+    stalled_drain();   /* a running tool_call resolved — a gate slot freed */
 }
 
 static void event_step_chld(void) {
@@ -2892,6 +2899,11 @@ static void run_advance(int64_t session_id) {
         break;
     case ADVANCE_WAITING:
     case ADVANCE_NOOP:
+        /* Deferred by the concurrency gate: note the session so a freed
+         * resource (reap, worker/tool-thread completion) re-advances it
+         * without waiting out a sweep tick — the CLI has no sweep at all. */
+        if (out.deferred)
+            stalled_add(session_id);
         /* Root turn stays active while its own async work (forked tools or
          * sub-agents) is in flight; awaiting_approval has neither, so the prompt
          * is released for the user's y/n. Sub-agents never touch the root flag. */

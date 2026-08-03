@@ -359,6 +359,57 @@ static void streak_warn(sqlite3 *db, int64_t session_id, const StreakGate *g) {
     streak_note(db, session_id, "warn", text);
 }
 
+/* ── Drain-side concurrency gate ──────────────────────────────────
+ * The execution half of the old AGENT_MAX_TOTAL, moved from the launch site
+ * to the turn open and from refusal to deferral: by drain time nobody is
+ * present to hear a refusal, so over the cap the turn simply doesn't open —
+ * the inbox rows stay queued (streak-guard shape) and the sweep or a
+ * resource-free edge wake retries. Three exemptions, each load-bearing:
+ *   human batch  — a human anywhere in the pending set opens even over cap
+ *                  (the priority bit; refusal is for autonomous chatter);
+ *   role-3 leaf  — a half-spent turn resuming; gating it strands paid-for
+ *                  work, and it holds no new resource until dispatch anyway;
+ *   blocked parents — not exempted here but in the *counting rule*
+ *                  (session_count_resource_holders): a parent waiting on
+ *                  blocking sub-agents holds nothing, else nested delegation
+ *                  at the cap deadlocks — parents hold every slot, children
+ *                  can never start, parents never finish. */
+typedef struct {
+    int cap;      /* session_max_concurrent; <= 0 disables the gate */
+    int defer;    /* this turn must not open now */
+} ConcGate;
+
+static ConcGate conc_gate_check(sqlite3 *db, int64_t session_id) {
+    ConcGate g = { .cap = config_get_int(db, "session_max_concurrent") };
+    if (g.cap <= 0) return g;
+    int gated;
+    if (db_scalar_i64(db,
+            "SELECT EXISTS(SELECT 1 FROM inbox q"
+            " WHERE q.session_id=?1 AND q.consumed=0);", session_id, 0)) {
+        gated = (int)db_scalar_i64(db,
+            "SELECT " CCLAW_SQL_INBOX_ALL_AUTONOMOUS("?1") ";", session_id, 0);
+    } else {
+        /* Empty inbox: the only other opener is the unanswered-leaf resume.
+         * Role 3 is the half-spent turn — exempt. Role 1 is a turn that never
+         * dispatched (refused-dispatch repark); gate it only when the entry is
+         * stamped autonomous — no stamp means human, same rule as the streak. */
+        gated = (int)db_scalar_i64(db,
+            "SELECT EXISTS(SELECT 1 FROM entries e"
+            " WHERE e.id=(SELECT leaf_id FROM sessions WHERE id=?1)"
+            "   AND e.session_id=?1 AND e.role=1"
+            "   AND COALESCE(json_extract(e.data,'$.source'),'')"
+            "       IN " CCLAW_AUTONOMOUS_SOURCES ");", session_id, 0);
+    }
+    if (!gated) return g;
+    if (session_count_resource_holders(db, session_id) >= g.cap) {
+        /* Debug, not info: the sweep re-advances a deferred session every
+         * tick until a slot frees, and each pass lands here again. */
+        LOG_DEBUG_("advance defer reason=session_max_concurrent cap=%d", g.cap);
+        g.defer = 1;
+    }
+    return g;
+}
+
 AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iterations) {
     if (max_iterations <= 0) max_iterations = config_default_int("max_iterations");
 
@@ -424,6 +475,18 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
                 sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, iter);
+            free(agent);
+            return out;
+        }
+        /* Concurrency gate, also before the drain: a deferral must leave the
+         * inbox rows queued and durable. COMMIT, not ROLLBACK — the D11
+         * reconcile above is real work that stands regardless. */
+        ConcGate cgate = conc_gate_check(db, session_id);
+        if (cgate.defer) {
+            if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
+                sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, iter);
+            out.deferred = 1;
             free(agent);
             return out;
         }
@@ -642,6 +705,17 @@ AdvanceOutput advance_session(sqlite3 *db, int64_t session_id, int max_iteration
             if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
                 sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, 0);
+            free(agent);
+            return out;
+        }
+        /* The idle branch's concurrency twin. The idle flip above stands
+         * (compaction is done either way); only the drain is deferred. */
+        ConcGate cgate = conc_gate_check(db, session_id);
+        if (cgate.defer) {
+            if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
+                sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+            AdvanceOutput out = make_output(ADVANCE_NOOP, session_id, agent, 0);
+            out.deferred = 1;
             free(agent);
             return out;
         }

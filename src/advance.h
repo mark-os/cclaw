@@ -70,6 +70,10 @@ typedef struct {
     int iteration;           /* current iteration for LLM dispatch */
     int tc_count;            /* number of pending tool calls */
     PendingToolCall *calls;  /* caller must free with db_tool_call_free_pending */
+    int deferred;            /* NOOP because session_max_concurrent is reached —
+                              * retry when a resource frees (caller may note the
+                              * session for an edge wake; the inbox sweep is the
+                              * backstop either way) */
 } AdvanceOutput;
 
 /* Single idempotent session transition function.

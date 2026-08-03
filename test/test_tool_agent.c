@@ -59,8 +59,9 @@ static void test_per_parent_limit(void) {
     int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
     assert(parent_sid > 0);
 
-    /* Create 3 running child sessions for this parent */
-    for (int i = 0; i < AGENT_MAX_PER_PARENT; i++) {
+    /* Fill the per-parent in-flight ceiling with running children */
+    int per_parent = config_default_int("agent_max_per_parent");
+    for (int i = 0; i < per_parent; i++) {
         int64_t child_sid = session_create(db, "child", NULL, parent_sid, 1);
         assert(child_sid > 0);
         /* Mark as running */
@@ -71,6 +72,7 @@ static void test_per_parent_limit(void) {
     char *r = tool_launch_agent_handler("{\"task\":\"one more\"}", &ctx);
     assert(r != NULL);
     assert(strstr(r, "max sub-agents per parent") != NULL);
+    assert(strstr(r, "agent_max_per_parent") != NULL);   /* names its knob */
     free(r);
     db_close(db);
     printf("  PASS test_per_parent_limit\n");
@@ -79,8 +81,9 @@ static void test_per_parent_limit(void) {
 static void test_system_wide_limit(void) {
     sqlite3 *db = setup_db();
 
-    /* Create 10 running child sessions across different parents */
-    for (int i = 0; i < AGENT_MAX_TOTAL; i++) {
+    /* Fill the system-wide existence cap across different parents */
+    int max_active = config_default_int("session_max_active");
+    for (int i = 0; i < max_active; i++) {
         int64_t psid = session_create(db, "p", NULL, -1, 0);
         int64_t csid = session_create(db, "c", NULL, psid, 1);
         session_set_state(db, csid, "llm_running");
@@ -91,6 +94,7 @@ static void test_system_wide_limit(void) {
     char *r = tool_launch_agent_handler("{\"task\":\"overflow\"}", &ctx);
     assert(r != NULL);
     assert(strstr(r, "max system-wide") != NULL);
+    assert(strstr(r, "session_max_active") != NULL);   /* names its knob */
     free(r);
     db_close(db);
     printf("  PASS test_system_wide_limit\n");

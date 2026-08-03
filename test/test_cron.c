@@ -889,6 +889,47 @@ static void test_fire_skip_if_busy(void) {
     printf("  PASS: skip-if-busy holds a fresh-session job to one live fire\n");
 }
 
+/* The launch gate (rule 1): a 'new' fire is a producer creating a session, so
+ * over session_max_active it skips + logs — no session, no cron_error (a skip
+ * must not feed the 3-strike auto-pause) — and the next schedule retries. */
+static void test_fire_new_skips_over_session_max_active(void) {
+    sqlite3 *db = open_seeded(":memory:");
+    assert(db && wake_init() == 0);
+    assert(config_set(db, "session_max_active", "1") == 0);
+    int64_t now = (int64_t)time(NULL);
+
+    /* The fleet is full: one in-flight sub-agent session at cap 1. */
+    int64_t parent = session_create(db, "own", "New", -1, 0);
+    int64_t sub = session_create(db, "worker", "New", parent, 1);
+    exec_ok(db, "UPDATE sessions SET state='llm_running' WHERE id=%lld",
+            (long long)sub);
+
+    JobSpec j = {.agent = "New", .name = "report", .interval_s = 600,
+                 .task = "daily digest", .target = "new",
+                 .next_run_at = now - 1};
+    int64_t jid = insert_job(db, &j);
+    cron_run_due(db);
+    assert(scalar(db, "SELECT COUNT(*) FROM sessions WHERE name='cron'") == 0);
+    assert(scalar(db, "SELECT COUNT(*) FROM inbox") == 0);   /* no cron_error */
+    char q[128];
+    snprintf(q, sizeof(q), "SELECT enabled FROM cron_jobs WHERE id=%lld",
+             (long long)jid);
+    assert(scalar(db, q) == 1);                              /* not paused */
+    snprintf(q, sizeof(q), "SELECT next_run_at FROM cron_jobs WHERE id=%lld",
+             (long long)jid);
+    assert(scalar(db, q) >= now + 600 - 2);                  /* rescheduled */
+
+    /* A slot frees: the next due fire creates its session as usual. */
+    exec_ok(db, "UPDATE sessions SET state='idle' WHERE id=%lld", (long long)sub);
+    exec_ok(db, "UPDATE cron_jobs SET next_run_at=%lld", (long long)(now - 1));
+    cron_run_due(db);
+    assert(scalar(db, "SELECT COUNT(*) FROM sessions WHERE name='cron'") == 1);
+
+    wake_close();
+    db_close(db);
+    printf("  PASS: 'new' fire skips over session_max_active, retries next due\n");
+}
+
 /* Neither prompt nor script: advance the session, annotate nothing. */
 static void test_fire_bare_wake(void) {
     sqlite3 *db = open_seeded(":memory:");
@@ -1097,6 +1138,7 @@ int main(void) {
     test_upsert_new_seeds_no_interlock();
     test_fire_coalesces();
     test_fire_skip_if_busy();
+    test_fire_new_skips_over_session_max_active();
     test_fire_bare_wake();
     test_fire_failure_auto_pause();
     test_fire_script_handoff();

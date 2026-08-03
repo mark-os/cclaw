@@ -130,6 +130,12 @@ int db_secret_key_loaded(void);
 int session_count_children(sqlite3 *db, int64_t parent_session_id);
 int session_count_active_agents(sqlite3 *db);
 
+/* Sessions holding a resource (in-flight llm_job or running tool child,
+ * blocking launch_agent excluded), minus exclude_session_id. The counting
+ * rule of the session_max_concurrent drain gate — see the definition for why
+ * "non-idle" would deadlock. */
+int session_count_resource_holders(sqlite3 *db, int64_t exclude_session_id);
+
 /* Get next iteration_id for a session (MAX(iteration_id)+1, or 1 if none). */
 int64_t db_next_iteration_id(sqlite3 *db, int64_t session_id);
 

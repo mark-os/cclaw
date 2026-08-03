@@ -33,18 +33,29 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         return strdup("error: missing or empty 'task' field");
     }
 
-    /* Depth + concurrency checks */
+    /* The launch gate: depth + per-parent + system-wide existence caps.
+     * Refusal is right here — a synchronous caller (the model) is present to
+     * hear it — and each error names its knob so the model can report it. */
     int depth = session_get_depth(ctx->db, ctx->session_id);
     if (depth >= agent_max_depth(ctx->db)) {
         free(task); return strdup("error: max agent depth reached");
     }
+    char err[128];
+    int per_parent = config_get_int(ctx->db, "agent_max_per_parent");
     int children = session_count_children(ctx->db, ctx->session_id);
-    if (children >= AGENT_MAX_PER_PARENT) {
-        free(task); return strdup("error: max sub-agents per parent reached");
+    if (per_parent > 0 && children >= per_parent) {
+        free(task);
+        snprintf(err, sizeof(err), "error: max sub-agents per parent reached"
+                 " (agent_max_per_parent=%d)", per_parent);
+        return strdup(err);
     }
+    int max_active = config_get_int(ctx->db, "session_max_active");
     int total = session_count_active_agents(ctx->db);
-    if (total >= AGENT_MAX_TOTAL) {
-        free(task); return strdup("error: max system-wide agents reached");
+    if (max_active > 0 && total >= max_active) {
+        free(task);
+        snprintf(err, sizeof(err), "error: max system-wide agents reached"
+                 " (session_max_active=%d)", max_active);
+        return strdup(err);
     }
 
     /* Create child session. Omitted name = self-spawn: a worker running as

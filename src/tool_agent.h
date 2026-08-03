@@ -1,20 +1,16 @@
 #ifndef CCLAW_TOOL_AGENT_H
 #define CCLAW_TOOL_AGENT_H
 
-/* The launch_agent tool: spawns sub-agents under hard depth/concurrency
- * rails (agent_max_depth, per-parent in-flight ceiling). No queue — calls
- * past the ceiling are rejected.
- */
+/* The launch_agent tool: spawns sub-agents under launch-gate rails — all
+ * config-registry keys: agent_max_depth, agent_max_per_parent (in-flight
+ * ceiling per parent), session_max_active (system-wide existence cap). No
+ * queue at this gate — a synchronous caller is present, so calls past a
+ * ceiling are refused with the knob named in the error. The execution half
+ * (how many sessions *work* at once) is session_max_concurrent, enforced by
+ * advance_session's drain gate, which defers instead of refusing. */
 
 #include "tools.h"
 #include "db.h"
-
-/* Agent launch hard rails (depth is a registry config key, "agent_max_depth").
- * PER_PARENT bounds how many sub-agents one parent may have in flight at once;
- * with parallel dispatch a single assistant turn can launch several, so this is
- * also the concurrency ceiling per parent (no queue — calls past it are rejected). */
-#define AGENT_MAX_PER_PARENT 8
-#define AGENT_MAX_TOTAL 16
 
 /* Effective agent_max_depth from the config registry. */
 int agent_max_depth(sqlite3 *db);

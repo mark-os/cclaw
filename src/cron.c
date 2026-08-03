@@ -921,6 +921,17 @@ static void fire_due(sqlite3 *db, const DueJob *j) {
 
     int64_t sid;
     if (is_new) {
+        /* The launch gate (rule 1): cron is a producer with a synchronous
+         * caller of sorts — this tick — so a fire that would create a session
+         * past the existence cap skips + logs and the next schedule retries.
+         * A skip, not a failure: it must not feed the 3-strike auto-pause. */
+        int max_active = config_get_int(db, "session_max_active");
+        if (max_active > 0 && session_count_active_agents(db) >= max_active) {
+            LOG_INFO_("cron skip job=%lld name=%s: session_max_active (%d)"
+                      " reached", (long long)j->id, j->name ? j->name : "",
+                      max_active);
+            return;
+        }
         /* Skip-if-busy: 'new' is the mode inbox coalescing cannot cover (each
          * fire targets a session that did not exist yet), so the previous
          * fire's session is the interlock. Recurring only — a one-shot has no

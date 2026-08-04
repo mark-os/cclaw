@@ -66,6 +66,36 @@ static void test_registry_sync_and_revert(void) {
     printf("  PASS: test_registry_sync_and_revert\n");
 }
 
+/* Sync owns non-namespaced keys: a row whose key left the C registry is
+ * dropped (no dead knobs in search_config), while extension rows
+ * (<ext>.<key>) are never touched. */
+static void test_registry_sync_drops_orphans(void) {
+    sqlite3 *db = fresh_db();
+    assert(db);
+    db_seed_defaults(db);
+    assert(sqlite3_exec(db,
+        "INSERT INTO config(key, default_value, description) VALUES"
+        " ('agent_max_per_parent', '8', 'removed 2026-08-04'),"
+        " ('myext.poll_secs', '60', 'extension-owned');",
+        NULL, NULL, NULL) == SQLITE_OK);
+    assert(config_registry_sync(db) == 0);
+    sqlite3_stmt *st;
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM config WHERE key='agent_max_per_parent'",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 0);
+    sqlite3_finalize(st);
+    assert(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM config WHERE key='myext.poll_secs'",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+    db_close(db);
+    printf("  PASS: test_registry_sync_drops_orphans\n");
+}
+
 static void test_kv_values(void) {
     unsetenv("OPENROUTER_API_KEY");
     unsetenv("CCLAW_PROVIDER");
@@ -297,6 +327,7 @@ int main(void) {
     test_resolution_rule();
     test_defaults();
     test_registry_sync_and_revert();
+    test_registry_sync_drops_orphans();
     test_kv_values();
     test_env_overrides_kv();
     test_kv_secret_fallback();

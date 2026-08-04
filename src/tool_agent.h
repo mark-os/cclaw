@@ -2,12 +2,12 @@
 #define CCLAW_TOOL_AGENT_H
 
 /* The launch_agent tool: spawns sub-agents under launch-gate rails — all
- * config-registry keys: agent_max_depth, agent_max_per_parent (in-flight
- * ceiling per parent), session_max_active (system-wide existence cap). No
- * queue at this gate — a synchronous caller is present, so calls past a
- * ceiling are refused with the knob named in the error. The execution half
- * (how many sessions *work* at once) is session_max_concurrent, enforced by
- * advance_session's drain gate, which defers instead of refusing. */
+ * config-registry keys: agent_max_depth, session_max_active (system-wide
+ * existence cap). No queue at this gate — a synchronous caller is present,
+ * so calls past a ceiling are refused with the knob named in the error. The
+ * execution half (how many sessions *work* at once) is
+ * session_max_concurrent, enforced by advance_session's drain gate, which
+ * defers instead of refusing. */
 
 #include "tools.h"
 #include "db.h"

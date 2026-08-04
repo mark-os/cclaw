@@ -222,9 +222,8 @@ launch_agent, check_session, search_config, secret_create
 edit), and no memory mutators, no config/agent/extension tools, no
 `channel_send`. `launch_agent` + `check_session` are in by decision D15
 (2026-07-31): a worker may delegate again, and the recursion rail is
-`agent_max_depth` (2) plus the `agent_max_per_parent` (8) /
-`session_max_active` (20) launch gates ([specs/scheduling.md](scheduling.md)),
-not a missing tool.
+`agent_max_depth` (2) plus the `session_max_active` (20) launch gate
+([specs/scheduling.md](scheduling.md)), not a missing tool.
 
 The list is **intersection-only**: naming a tool the spawner lacks grants for
 is a no-op, and no filter ever adds authority. It

@@ -58,9 +58,6 @@ static const ConfigDef s_defs[] = {
       "Seconds a foreground approval blocks before backgrounding" },
     { "agent_max_depth",    "2",
       "Max sub-agent nesting depth for launch_agent" },
-    { "agent_max_per_parent", "8",
-      "Sub-agents one parent may have in flight at once — launch_agent refuses"
-      " past it (fairness: one parent can't monopolize the fleet; 0 = unlimited)" },
     { "session_max_active", "20",
       "System-wide in-flight sub-agent sessions — the existence half of the old"
       " AGENT_MAX_TOTAL. launch_agent refuses and session-creating cron fires"
@@ -161,6 +158,32 @@ int config_default_int(const char *key) {
 
 int config_registry_sync(sqlite3 *db) {
     if (!db) return -1;
+    /* The C registry owns every non-namespaced key (extension keys are
+     * always <ext>.<key>): a key removed from the registry leaves the table
+     * on next sync — same drop-first contract as extension_install, so no
+     * dead knobs linger in search_config. */
+    char keys[4096];
+    size_t n = 0;
+    keys[n++] = '[';
+    for (size_t i = 0; i < sizeof(s_defs) / sizeof(s_defs[0]); i++) {
+        int w = snprintf(keys + n, sizeof(keys) - n, "%s\"%s\"",
+                         i ? "," : "", s_defs[i].key);
+        if (w < 0 || (size_t)w >= sizeof(keys) - n) return -1;
+        n += (size_t)w;
+    }
+    if (n + 2 > sizeof(keys)) return -1;
+    keys[n++] = ']';
+    keys[n] = '\0';
+    sqlite3_stmt *del;
+    if (sqlite3_prepare_v2(db,
+            "DELETE FROM config WHERE instr(key, '.') = 0 "
+            "AND key NOT IN (SELECT value FROM json_each(?1))",
+            -1, &del, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(del, 1, keys, -1, SQLITE_STATIC);
+    int drc = sqlite3_step(del);
+    sqlite3_finalize(del);
+    if (drc != SQLITE_DONE) return -1;
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db,
             "INSERT INTO config(key, default_value, description) VALUES(?1, ?2, ?3) "

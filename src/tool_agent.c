@@ -34,7 +34,7 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         return strdup("error: missing or empty 'task' field");
     }
 
-    /* The launch gate: depth + per-parent + system-wide existence caps.
+    /* The launch gate: depth + system-wide existence cap.
      * Refusal is right here — a synchronous caller (the model) is present to
      * hear it — and each error names its knob so the model can report it. */
     int depth = session_get_depth(ctx->db, ctx->session_id);
@@ -42,21 +42,11 @@ char *tool_launch_agent_handler(const char *arguments, void *user_data) {
         free(task); return strdup("error: max agent depth reached");
     }
     /* Capacity refusals are per-call, in call order (specs/scheduling.md):
-     * the counters see this batch's own earlier launches (queued children
+     * the counter sees this batch's own earlier launches (queued children
      * count), so a burst admits exactly up to the cap and refuses the rest —
      * partial admission is the contract, and the message tells the model how
      * to proceed with the children it already has. */
     char err[192];
-    int per_parent = config_get_int(ctx->db, "agent_max_per_parent");
-    int children = session_count_children(ctx->db, ctx->session_id);
-    if (per_parent > 0 && children >= per_parent) {
-        free(task);
-        snprintf(err, sizeof(err), "error: %d of your sub-agents already in"
-                 " flight or queued (agent_max_per_parent=%d) — not launched;"
-                 " wait for some to report back before launching more",
-                 children, per_parent);
-        return strdup(err);
-    }
     int max_active = config_get_int(ctx->db, "session_max_active");
     int total = session_count_active_agents(ctx->db);
     if (max_active > 0 && total >= max_active) {

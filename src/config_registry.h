@@ -7,8 +7,10 @@
 /* Config registry — the single source of truth for every global config key:
  * its name, default value, and description live in one static table in C.
  * config_registry_sync() mirrors defaults+descriptions into the config table
- * at startup (code-owned columns always win); the `value` column is the
- * operator/agent override and is never touched by sync. Effective value is
+ * at startup (code-owned columns always win) and drops non-namespaced keys
+ * that left the registry — extension keys (<ext>.<key>) are untouched; the
+ * `value` column is the operator/agent override and is never touched by
+ * sync. Effective value is
  * COALESCE(value, default_value), so losing seed data breaks nothing, and
  * `SELECT key, value, default_value, description FROM config` gives an agent
  * the complete, self-describing knob inventory. */

@@ -1102,25 +1102,16 @@ char *db_channel_binding_get(sqlite3 *db, const char *channel_name, const char *
 }
 
 
-/* sub-agent limits — count active child sessions */
-
-/* "In flight" for the launch-gate existence caps = non-idle OR idle with an
- * unconsumed inbox row. The inbox arm is what makes the caps batch-aware: a
+/* "In flight" for the session_max_active launch gate = non-idle OR idle with
+ * an unconsumed inbox row. The inbox arm is what makes the cap batch-aware: a
  * just-launched child is idle with its spawn task queued until the event loop
  * gets around to it, and every launch in one assistant batch dispatches
  * before that happens — counting state alone, a single 30-launch batch would
- * sail past every cap the same calls spread over iterations are refused by.
+ * sail past the cap the same calls spread over iterations are refused by.
  * A finished child (idle, drained inbox) frees its slot either way. */
 #define SESSION_IN_FLIGHT \
     "(s.state != 'idle' OR EXISTS(SELECT 1 FROM inbox i" \
     "  WHERE i.session_id = s.id AND i.consumed = 0))"
-
-int session_count_children(sqlite3 *db, int64_t parent_session_id) {
-    return (int)db_scalar_i64(db,
-        "SELECT COUNT(*) FROM sessions s WHERE s.parent_session_id=?"
-        " AND " SESSION_IN_FLIGHT ";",
-        parent_session_id, -1);
-}
 
 int session_count_active_agents(sqlite3 *db) {
     const char *sql =

@@ -126,8 +126,8 @@ void db_wipe_secret_key(void);
 /* Returns 1 if the master secret key is loaded in this process, 0 otherwise. */
 int db_secret_key_loaded(void);
 
-/* Sub-agent limits — count active child sessions */
-int session_count_children(sqlite3 *db, int64_t parent_session_id);
+/* System-wide in-flight sub-agent sessions (non-idle or spawn still queued)
+ * — the session_max_active launch gate's counter. */
 int session_count_active_agents(sqlite3 *db);
 
 /* Sessions holding a resource (in-flight llm_job or running tool child,

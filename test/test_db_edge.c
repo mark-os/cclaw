@@ -95,37 +95,6 @@ static void test_session_get_depth(void) {
     printf("  PASS test_session_get_depth\n");
 }
 
-static void test_session_count_children(void) {
-    sqlite3 *db = test_db_open(":memory:");
-    assert(db);
-    int64_t parent = session_create(db, "parent", NULL, -1, 0);
-    assert(session_count_children(db, parent) == 0);
-
-    /* Idle with a drained (or empty) inbox — a finished child, not counted */
-    int64_t c1 = session_create(db, "c1", NULL, parent, 1);
-    int64_t c2 = session_create(db, "c2", NULL, parent, 1);
-    assert(session_count_children(db, parent) == 0);
-
-    /* Set children to running — now counted */
-    session_set_state(db, c1, "llm_running");
-    assert(session_count_children(db, parent) == 1);
-    session_set_state(db, c2, "llm_running");
-    assert(session_count_children(db, parent) == 2);
-
-    /* Idle with a queued task = just launched, not yet advanced — counted,
-     * so a batch of launches counts against its own cap. Consuming the row
-     * (a finished child) frees the slot. */
-    int64_t c3 = session_create(db, "c3", NULL, parent, 1);
-    inbox_insert(db, c3, "spawn", NULL, "task");
-    assert(session_count_children(db, parent) == 3);
-    assert(sqlite3_exec(db, "UPDATE inbox SET consumed=1;", NULL, NULL, NULL)
-           == SQLITE_OK);
-    assert(session_count_children(db, parent) == 2);
-
-    db_close(db);
-    printf("  PASS test_session_count_children\n");
-}
-
 static void test_session_count_active_agents(void) {
     sqlite3 *db = test_db_open(":memory:");
     assert(db);
@@ -147,6 +116,16 @@ static void test_session_count_active_agents(void) {
 
     /* Back to idle */
     session_set_state(db, s1, "idle");
+    assert(session_count_active_agents(db) == 1);
+
+    /* Idle with a queued task = just launched, not yet advanced — counted,
+     * so a batch of launches counts against its own cap. Consuming the row
+     * (a finished child) frees the slot. */
+    int64_t s4 = session_create(db, "d", NULL, parent, 1);
+    inbox_insert(db, s4, "spawn", NULL, "task");
+    assert(session_count_active_agents(db) == 2);
+    assert(sqlite3_exec(db, "UPDATE inbox SET consumed=1;", NULL, NULL, NULL)
+           == SQLITE_OK);
     assert(session_count_active_agents(db) == 1);
 
     db_close(db);
@@ -275,7 +254,6 @@ int main(void) {
     test_entry_append_stores_iteration_id();
     test_session_get_agent_name();
     test_session_get_depth();
-    test_session_count_children();
     test_session_count_active_agents();
     test_entry_append_stop_reason_roundtrip();
     test_entry_append_multiple_tool_calls();

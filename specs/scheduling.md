@@ -37,9 +37,20 @@ rule: forgetting it must *degrade*, never corrupt.
 
 | Key | Default | Gate | Over the cap |
 |-----|---------|------|--------------|
-| `agent_max_per_parent` | 8 | launch | `launch_agent` refuses (fairness — one parent can't monopolize the fleet) |
-| `session_max_active` | 20 | launch | `launch_agent` refuses; cron `target:"new"` fires skip + log. Counts non-idle sub-agent sessions (`session_count_active_agents`) — the existence half |
+| `session_max_active` | 20 | launch | `launch_agent` refuses; cron `target:"new"` fires skip + log. Counts in-flight sub-agent sessions (`session_count_active_agents`) — the existence half |
 | `session_max_concurrent` | 10 | drain | autonomous turn opens defer — **all** sessions, not just sub-agents (a cron storm and a fan-out storm load the box identically) |
+
+Two knobs, one per back-pressure flavor: existence over `session_max_active`
+is **refused** while a synchronous caller can hear it; execution over
+`session_max_concurrent` **queues** (the inbox holds the work, the sweep
+retries). Read together: 10 may execute, the other 10 are the allowed queue
+depth. There is deliberately no per-parent fairness cap — one parent
+monopolizing the fleet is not a current concern, and a third knob on the same
+gate was the main source of confusion (removed 2026-08-04; it was
+`agent_max_per_parent`). If domination becomes real, the right arm for a
+per-parent counter is subtree non-quiescence (delegation *trees* in flight,
+`session_subtree_quiescent`), not child state — an idle child waiting on its
+own grandchildren has not finished.
 
 ## Batch semantics — refuse choices, defer weather
 
@@ -47,15 +58,15 @@ One assistant response's tool calls are persisted from the response and
 dispatched strictly in call order; when a limit fires mid-batch, which of the
 three possible behaviors applies is a rule, not an accident:
 
-- **Capacity the model can choose differently** (the launch-gate existence
-  caps) refuses **per call, in call order, with feedback** — admit up to the
-  cap, refuse the rest. Partial admission is the contract: the model gets N
-  individual results at the turn-join and reconciles, exactly as it does for
-  any other partially failing batch. The counters are batch-aware: "in
+- **Capacity the model can choose differently** (the `session_max_active`
+  launch gate) refuses **per call, in call order, with feedback** — admit up
+  to the cap, refuse the rest. Partial admission is the contract: the model
+  gets N individual results at the turn-join and reconciles, exactly as it
+  does for any other partially failing batch. The counter is batch-aware: "in
   flight" includes an idle child with an unconsumed inbox row
   (`SESSION_IN_FLIGHT`, db.c), because every launch in a batch dispatches
   before the event loop advances any of the children it created — counting
-  state alone, one big batch would bypass caps that the same calls spread
+  state alone, one big batch would bypass the cap that the same calls spread
   over iterations are refused by. All-or-nothing was rejected: it needs a
   batch-level pre-scan that doesn't exist (calls dispatch one at a time),
   punishes the legal prefix, and tells the model less than N results do.

@@ -54,61 +54,37 @@ static void test_depth_limit(void) {
     printf("  PASS test_depth_limit\n");
 }
 
-static void test_per_parent_limit(void) {
-    sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
-    assert(parent_sid > 0);
-
-    /* Fill the per-parent in-flight ceiling with running children */
-    int per_parent = config_default_int("agent_max_per_parent");
-    for (int i = 0; i < per_parent; i++) {
-        int64_t child_sid = session_create(db, "child", NULL, parent_sid, 1);
-        assert(child_sid > 0);
-        /* Mark as running */
-        session_set_state(db, child_sid, "llm_running");
-    }
-
-    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    char *r = tool_launch_agent_handler("{\"task\":\"one more\"}", &ctx);
-    assert(r != NULL);
-    assert(strstr(r, "in flight or queued") != NULL);
-    assert(strstr(r, "agent_max_per_parent") != NULL);   /* names its knob */
-    free(r);
-    db_close(db);
-    printf("  PASS test_per_parent_limit\n");
-}
-
 /* A single batch of launches counts against itself: freshly launched children
  * are idle with their spawn task queued (nothing advances them while the
- * dispatch loop is still running the batch), and the existence caps must see
+ * dispatch loop is still running the batch), and the existence cap must see
  * them anyway — per-call refusal in call order, admit up to the cap, refuse
- * the rest. Before the queued arm in session_count_children, a one-batch
- * burst of any size sailed past every cap. */
-static void test_per_parent_limit_batch_aware(void) {
+ * the rest. Before the queued arm in SESSION_IN_FLIGHT, a one-batch burst of
+ * any size sailed past the cap. */
+static void test_system_wide_limit_batch_aware(void) {
     sqlite3 *db = setup_db();
     int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
-    int per_parent = config_default_int("agent_max_per_parent");
+    int max_active = config_default_int("session_max_active");
 
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
-    for (int i = 0; i < per_parent + 3; i++) {
+    for (int i = 0; i < max_active + 3; i++) {
         char *r = tool_launch_agent_handler(
             "{\"task\":\"burst\",\"background\":true}", &ctx);
         assert(r != NULL);
-        if (i < per_parent)
+        if (i < max_active)
             assert(strncmp(r, "error:", 6) != 0);   /* admitted */
         else {
-            assert(strstr(r, "in flight or queued") != NULL);
-            assert(strstr(r, "agent_max_per_parent") != NULL);
+            assert(strstr(r, "in flight or queued system-wide") != NULL);
+            assert(strstr(r, "session_max_active") != NULL);
         }
         free(r);
     }
     /* Exactly the cap was admitted; the overflow created nothing. */
     assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sessions"
                              " WHERE parent_session_id=?", parent_sid, -1)
-           == per_parent);
+           == max_active);
 
     db_close(db);
-    printf("  PASS test_per_parent_limit_batch_aware\n");
+    printf("  PASS test_system_wide_limit_batch_aware\n");
 }
 
 static void test_system_wide_limit(void) {
@@ -279,31 +255,6 @@ static void test_check_session_stamps_poll_delivery(void) {
 
     db_close(db);
     printf("  PASS test_check_session_stamps_poll_delivery\n");
-}
-
-static void test_session_count_children(void) {
-    sqlite3 *db = setup_db();
-    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
-
-    /* No children yet */
-    assert(session_count_children(db, parent_sid) == 0);
-
-    /* Create child, mark running */
-    int64_t c1 = session_create(db, "c1", NULL, parent_sid, 1);
-    session_set_state(db, c1, "llm_running");
-    assert(session_count_children(db, parent_sid) == 1);
-
-    /* Create another, mark running */
-    int64_t c2 = session_create(db, "c2", NULL, parent_sid, 1);
-    session_set_state(db, c2, "llm_running");
-    assert(session_count_children(db, parent_sid) == 2);
-
-    /* Release one — should drop count */
-    session_set_state(db, c1, "idle");
-    assert(session_count_children(db, parent_sid) == 1);
-
-    db_close(db);
-    printf("  PASS test_session_count_children\n");
 }
 
 /* --- Filter resolution tests for launch_agent --- */
@@ -537,9 +488,8 @@ int main(void) {
     test_invalid_json();
     test_missing_task();
     test_depth_limit();
-    test_per_parent_limit();
-    test_per_parent_limit_batch_aware();
     test_system_wide_limit();
+    test_system_wide_limit_batch_aware();
     test_spawn_background();
     test_spawn_blocking();
     test_register();
@@ -547,7 +497,6 @@ int main(void) {
     test_check_agent_not_found();
     test_check_agent_idle_with_result();
     test_check_session_stamps_poll_delivery();
-    test_session_count_children();
     test_filter_explicit_tools();
     test_filter_kv_worker_tools();
     test_filter_neither();

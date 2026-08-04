@@ -101,7 +101,7 @@ static void test_session_count_children(void) {
     int64_t parent = session_create(db, "parent", NULL, -1, 0);
     assert(session_count_children(db, parent) == 0);
 
-    /* Children start idle — not counted as active */
+    /* Idle with a drained (or empty) inbox — a finished child, not counted */
     int64_t c1 = session_create(db, "c1", NULL, parent, 1);
     int64_t c2 = session_create(db, "c2", NULL, parent, 1);
     assert(session_count_children(db, parent) == 0);
@@ -110,6 +110,16 @@ static void test_session_count_children(void) {
     session_set_state(db, c1, "llm_running");
     assert(session_count_children(db, parent) == 1);
     session_set_state(db, c2, "llm_running");
+    assert(session_count_children(db, parent) == 2);
+
+    /* Idle with a queued task = just launched, not yet advanced — counted,
+     * so a batch of launches counts against its own cap. Consuming the row
+     * (a finished child) frees the slot. */
+    int64_t c3 = session_create(db, "c3", NULL, parent, 1);
+    inbox_insert(db, c3, "spawn", NULL, "task");
+    assert(session_count_children(db, parent) == 3);
+    assert(sqlite3_exec(db, "UPDATE inbox SET consumed=1;", NULL, NULL, NULL)
+           == SQLITE_OK);
     assert(session_count_children(db, parent) == 2);
 
     db_close(db);

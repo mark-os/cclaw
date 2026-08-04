@@ -41,6 +41,33 @@ rule: forgetting it must *degrade*, never corrupt.
 | `session_max_active` | 20 | launch | `launch_agent` refuses; cron `target:"new"` fires skip + log. Counts non-idle sub-agent sessions (`session_count_active_agents`) — the existence half |
 | `session_max_concurrent` | 10 | drain | autonomous turn opens defer — **all** sessions, not just sub-agents (a cron storm and a fan-out storm load the box identically) |
 
+## Batch semantics — refuse choices, defer weather
+
+One assistant response's tool calls are persisted from the response and
+dispatched strictly in call order; when a limit fires mid-batch, which of the
+three possible behaviors applies is a rule, not an accident:
+
+- **Capacity the model can choose differently** (the launch-gate existence
+  caps) refuses **per call, in call order, with feedback** — admit up to the
+  cap, refuse the rest. Partial admission is the contract: the model gets N
+  individual results at the turn-join and reconciles, exactly as it does for
+  any other partially failing batch. The counters are batch-aware: "in
+  flight" includes an idle child with an unconsumed inbox row
+  (`SESSION_IN_FLIGHT`, db.c), because every launch in a batch dispatches
+  before the event loop advances any of the children it created — counting
+  state alone, one big batch would bypass caps that the same calls spread
+  over iterations are refused by. All-or-nothing was rejected: it needs a
+  batch-level pre-scan that doesn't exist (calls dispatch one at a time),
+  punishes the legal prefix, and tells the model less than N results do.
+- **Capacity only time fixes** (the fork child ceiling, the LLM worker pool,
+  rate limit, disk floor) **defers silently, never refuses** — an error
+  result would just make the model retry into the same wall. The fork
+  ceiling unclaims the call and stops the rest of the batch
+  (`stalled_add` + freed-slot re-advance); dispatch-level budgets re-park
+  the whole turn. Accepted cost: head-of-line blocking for the batch tail.
+- **Turn-open limits** (drain gate, streak guard) act before a batch exists
+  and always cover the whole pending set.
+
 ## The counting rule (the deadlock trap)
 
 The drain gate counts sessions **holding a resource**

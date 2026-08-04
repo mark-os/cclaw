@@ -71,11 +71,44 @@ static void test_per_parent_limit(void) {
     AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
     char *r = tool_launch_agent_handler("{\"task\":\"one more\"}", &ctx);
     assert(r != NULL);
-    assert(strstr(r, "max sub-agents per parent") != NULL);
+    assert(strstr(r, "in flight or queued") != NULL);
     assert(strstr(r, "agent_max_per_parent") != NULL);   /* names its knob */
     free(r);
     db_close(db);
     printf("  PASS test_per_parent_limit\n");
+}
+
+/* A single batch of launches counts against itself: freshly launched children
+ * are idle with their spawn task queued (nothing advances them while the
+ * dispatch loop is still running the batch), and the existence caps must see
+ * them anyway — per-call refusal in call order, admit up to the cap, refuse
+ * the rest. Before the queued arm in session_count_children, a one-batch
+ * burst of any size sailed past every cap. */
+static void test_per_parent_limit_batch_aware(void) {
+    sqlite3 *db = setup_db();
+    int64_t parent_sid = session_create(db, "parent", "default", -1, 0);
+    int per_parent = config_default_int("agent_max_per_parent");
+
+    AgentLaunchCtx ctx = {.db = db, .session_id = parent_sid};
+    for (int i = 0; i < per_parent + 3; i++) {
+        char *r = tool_launch_agent_handler(
+            "{\"task\":\"burst\",\"background\":true}", &ctx);
+        assert(r != NULL);
+        if (i < per_parent)
+            assert(strncmp(r, "error:", 6) != 0);   /* admitted */
+        else {
+            assert(strstr(r, "in flight or queued") != NULL);
+            assert(strstr(r, "agent_max_per_parent") != NULL);
+        }
+        free(r);
+    }
+    /* Exactly the cap was admitted; the overflow created nothing. */
+    assert(db_scalar_i64(db, "SELECT COUNT(*) FROM sessions"
+                             " WHERE parent_session_id=?", parent_sid, -1)
+           == per_parent);
+
+    db_close(db);
+    printf("  PASS test_per_parent_limit_batch_aware\n");
 }
 
 static void test_system_wide_limit(void) {
@@ -93,7 +126,7 @@ static void test_system_wide_limit(void) {
     AgentLaunchCtx ctx = {.db = db, .session_id = my_sid};
     char *r = tool_launch_agent_handler("{\"task\":\"overflow\"}", &ctx);
     assert(r != NULL);
-    assert(strstr(r, "max system-wide") != NULL);
+    assert(strstr(r, "in flight or queued system-wide") != NULL);
     assert(strstr(r, "session_max_active") != NULL);   /* names its knob */
     free(r);
     db_close(db);
@@ -505,6 +538,7 @@ int main(void) {
     test_missing_task();
     test_depth_limit();
     test_per_parent_limit();
+    test_per_parent_limit_batch_aware();
     test_system_wide_limit();
     test_spawn_background();
     test_spawn_blocking();

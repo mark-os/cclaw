@@ -65,6 +65,7 @@
 #include "resolve.h"
 #include "web.h"
 #include "cron.h"
+#include "proc.h"
 #include "util.h"
 
 _Static_assert(sizeof(WakeMsg) <= PIPE_BUF,
@@ -195,16 +196,8 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
                                 int timeout_sec);
 static void cron_script_post(ChildProc *c, const char *output, const char *hosts);
 
-static sqlite3 *g_db;
-static Config *g_cfg;
-static int g_mode;  /* 0=cli, 1=daemon */
-static char g_instance_id[40];  /* this process's registry instance id ("" until registered) */
 static int g_llm_threads = 4;     /* worker thread pool size */
-static int64_t g_cli_session;
-static char g_agent_name[64];
-static int g_cli_turn_active;   /* 1 while CLI is waiting for a turn to finish */
 static int g_cli_done;          /* 1 = exit after turn completes (for -p mode) */
-static int g_auto_approve;      /* 1 = --auto-approve: answer parks without prompting (CLI only) */
 
 /* SIGCHLD self-pipe */
 static int g_chld_pipe[2] = {-1, -1};
@@ -217,18 +210,16 @@ static void sigchld_handler(int sig) {
 
 /* ── dispatch_llm_req ────────────────────────────────────────────── */
 
-static AgentSetup *g_tool_setup;  /* Initialized once for tool dispatch */
-
 /* Dispatch LLM request via worker thread pool */
 /* Effective iteration cap for a session: agents.max_iterations (if > 0)
  * overrides global config. run_advance and the dispatch_llm_req fallback must
  * resolve this identically — a global-only fallback caps a raised per-agent
  * limit and kills the turn early. */
 static int session_max_iter(int64_t session_id) {
-    int max_iter = g_cfg->max_iterations > 0 ? g_cfg->max_iterations
+    int max_iter = proc_cfg()->max_iterations > 0 ? proc_cfg()->max_iterations
                                               : config_default_int("max_iterations");
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(g_db,
+    if (sqlite3_prepare_v2(proc_db(),
             "SELECT a.max_iterations FROM agents a"
             " JOIN sessions s ON s.agent_name = a.name"
             " WHERE s.id = ?", -1, &s, NULL) == SQLITE_OK) {
@@ -247,13 +238,13 @@ static int session_max_iter(int64_t session_id) {
  * session_sweep_inbox keeps retrying until the window clears. Daemon mode
  * posts to the session's channel; CLI prints and releases the prompt. */
 static void notify_deferred(int64_t session_id, const char *text) {
-    if (g_mode == 0) {
+    if (!proc_is_daemon()) {
         fprintf(stderr, "\n%s\n", text);
-        if (session_id == g_cli_session) g_cli_turn_active = 0;
+        if (session_id == proc_cli_session()) proc_set_cli_turn_active(0);
         return;
     }
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(g_db,
+    if (sqlite3_prepare_v2(proc_db(),
             "INSERT INTO channel_outbox(channel_name, session_id, payload)"
             " SELECT channel_name, id,"
             "        json_object('chat_id', COALESCE(chat_id,'0'), 'text', ?2)"
@@ -263,10 +254,10 @@ static void notify_deferred(int64_t session_id, const char *text) {
     sqlite3_bind_text(s, 2, text, -1, SQLITE_STATIC);
     sqlite3_step(s);
     sqlite3_finalize(s);
-    if (sqlite3_changes(g_db) > 0 && g_cfg && g_cfg->db_path) {
-        char *ch = db_scalar_text(g_db,
+    if (sqlite3_changes(proc_db()) > 0 && proc_cfg() && proc_cfg()->db_path) {
+        char *ch = db_scalar_text(proc_db(),
             "SELECT channel_name FROM sessions WHERE id=?1;", session_id);
-        if (ch) { channel_outbox_wake(g_cfg->db_path, ch); free(ch); }
+        if (ch) { channel_outbox_wake(proc_cfg()->db_path, ch); free(ch); }
     }
 }
 
@@ -277,8 +268,8 @@ static void notify_deferred(int64_t session_id, const char *text) {
  * zero in daemon mode — and the sweeper re-advances parked sessions every
  * tick, so an unconditional notify would spam the channel. */
 static int should_notify_deferred(int64_t session_id) {
-    if (g_mode == 0) return 1; /* CLI: stderr, no sweeper, no spam risk */
-    return (int)db_scalar_i64(g_db,
+    if (!proc_is_daemon()) return 1; /* CLI: stderr, no sweeper, no spam risk */
+    return (int)db_scalar_i64(proc_db(),
         "SELECT EXISTS(SELECT 1 FROM sessions s"
         " JOIN entries e ON e.id=s.leaf_id AND e.session_id=s.id"
         " WHERE s.id=?1 AND e.role=1 AND s.channel_name IS NOT NULL"
@@ -295,7 +286,7 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
     /* Turn start: move queued inbox into entries (backstop — the daemon path
      * normally consumes inside advance_session's claim). */
     if (iteration == 0)
-        inbox_consume_into_entries(g_db, session_id, 100);
+        inbox_consume_into_entries(proc_db(), session_id, 100);
 
     if (!llm_worker_alive()) return -1;
 
@@ -305,20 +296,20 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
         Message msg = {.role = ROLE_ASSISTANT,
                        .content = "error: max iterations reached",
                        .stop_reason = STOP_REASON_ERROR};
-        entry_append_with_iteration(g_db, session_id, &msg, 0);
-        session_set_state(g_db, session_id, "idle");
-        if (g_mode == 0) {
+        entry_append_with_iteration(proc_db(), session_id, &msg, 0);
+        session_set_state(proc_db(), session_id, "idle");
+        if (!proc_is_daemon()) {
             fprintf(stderr, "\nerror: max iterations reached\n");
-            g_cli_turn_active = 0;
+            proc_set_cli_turn_active(0);
         }
         return -1;
     }
 
     /* Rate limit check */
-    if (!rate_limit_check(g_db, g_cfg->token_rate_limit)) {
+    if (!rate_limit_check(proc_db(), proc_cfg()->token_rate_limit)) {
         LOG_WARN_("token_rate_limit hit, session %lld rate_limited",
                   (long long)session_id);
-        session_set_state(g_db, session_id, "rate_limited");
+        session_set_state(proc_db(), session_id, "rate_limited");
         if (should_notify_deferred(session_id))
             notify_deferred(session_id,
                 "rate limited: hourly token cap reached — your message is"
@@ -328,14 +319,14 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
 
     /* Daily cost ceiling — rolling 24h. Unpriced models record cost 0, so the
      * token cap above stays the always-available brake. */
-    if (g_cfg->daily_cost_limit_nano > 0) {
-        int64_t spent = db_cost_last_24h(g_db);
-        if (spent >= g_cfg->daily_cost_limit_nano) {
+    if (proc_cfg()->daily_cost_limit_nano > 0) {
+        int64_t spent = db_cost_last_24h(proc_db());
+        if (spent >= proc_cfg()->daily_cost_limit_nano) {
             LOG_WARN_("daily_cost_limit hit spent_nano=%lld limit_nano=%lld,"
                       " session %lld rate_limited",
-                      (long long)spent, (long long)g_cfg->daily_cost_limit_nano,
+                      (long long)spent, (long long)proc_cfg()->daily_cost_limit_nano,
                       (long long)session_id);
-            session_set_state(g_db, session_id, "rate_limited");
+            session_set_state(proc_db(), session_id, "rate_limited");
             if (should_notify_deferred(session_id))
                 notify_deferred(session_id,
                     "budget limit: daily cost ceiling reached — your message is"
@@ -350,11 +341,11 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
      * rejected worker-submit — a later poke retries once space frees. */
     int disk_floor_mb = config_default_int("disk_min_free_mb");
     if (disk_floor_mb > 0) {
-        long free_mb = db_free_mb(g_db);
+        long free_mb = db_free_mb(proc_db());
         if (free_mb >= 0 && free_mb < disk_floor_mb) {
             LOG_WARN_("disk_low free_mb=%ld floor_mb=%d deferring llm dispatch",
                       free_mb, disk_floor_mb);
-            session_set_state(g_db, session_id, "idle");
+            session_set_state(proc_db(), session_id, "idle");
             return -1;
         }
     }
@@ -364,20 +355,20 @@ static int dispatch_llm_req(int64_t session_id, const char *agent_name, int iter
      * worker's payload build as DB state (hook_directives / entries.data). A
      * worker-submit failure below leaves directives behind for the retried
      * request — acceptable, llm_req clears them on every exit. */
-    if (g_tool_setup) {
-        char *cmds = hook_dispatch_pre_advance(&g_tool_setup->ext_ctx, g_db, session_id);
+    if (proc_tool_setup()) {
+        char *cmds = hook_dispatch_pre_advance(&proc_tool_setup()->ext_ctx, proc_db(), session_id);
         if (cmds) {
-            hook_apply_pre_advance(g_db, session_id, cmds);
+            hook_apply_pre_advance(proc_db(), session_id, cmds);
             free(cmds);
         }
     }
 
-    session_set_state(g_db, session_id, "llm_running");
-    int rc = llm_worker_submit(g_db, session_id, agent_name, iteration == 0 ? 1 : 0);
+    session_set_state(proc_db(), session_id, "llm_running");
+    int rc = llm_worker_submit(proc_db(), session_id, agent_name, iteration == 0 ? 1 : 0);
     if (rc < 0) {
         /* No worker accepted the job — don't strand the session in llm_running
          * (no completion will ever fire to move it off). Revert to idle. */
-        session_set_state(g_db, session_id, "idle");
+        session_set_state(proc_db(), session_id, "idle");
     }
     return rc;
 }
@@ -505,8 +496,8 @@ static int tool_inline_error(int64_t session_id, PendingToolCall *tc,
     ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
     Message m = {.role = ROLE_TOOL, .tool_result = &tr,
                  .tool_name = tc->name, .is_error = 1};
-    entry_append_with_iteration(g_db, session_id, &m, tc->iteration_id);
-    db_tool_call_set_status(g_db, session_id, tc->call_id, "done", detail);
+    entry_append_with_iteration(proc_db(), session_id, &m, tc->iteration_id);
+    db_tool_call_set_status(proc_db(), session_id, tc->call_id, "done", detail);
     free(err);
     return 1;
 }
@@ -535,7 +526,7 @@ static char **used_secret_names(const char *args, const ShellSecret *secrets,
 /* Host of a call's "url" argument: scheme-strip + authority slice, mirroring
  * what the proxy/http layer accepts — deliberately not a full URL parser. */
 static int web_args_url_host(const char *args, char *out, size_t cap) {
-    char *url = tool_args_str(g_db, args, "url");
+    char *url = tool_args_str(proc_db(), args, "url");
     int ok = 0;
     if (url) {
         const char *p = strstr(url, "://");
@@ -599,7 +590,7 @@ static void call_egress_build(CallEgress *ce, const char *tool_name,
                               const ShellSecret *secrets, size_t secret_count) {
     memset(ce, 0, sizeof(*ce));
     int n = 0;
-    char **all = db_sensitive_hosts(g_db, &n);
+    char **all = db_sensitive_hosts(proc_db(), &n);
     if (all) {
         size_t k = 0;
         for (int i = 0; i < n; i++) {
@@ -615,7 +606,7 @@ static void call_egress_build(CallEgress *ce, const char *tool_name,
      * declared-hosts tool needs no grant, and not union them, so a
      * declaration could never widen what the agent already holds. */
     int dn = 0;
-    ce->decl = db_tool_declared_hosts(g_db, tool_name, &dn);
+    ce->decl = db_tool_declared_hosts(proc_db(), tool_name, &dn);
     ce->decl_n = (size_t)dn;
 
     const char **hosts = ce->decl ? (const char **)ce->decl
@@ -628,7 +619,7 @@ static void call_egress_build(CallEgress *ce, const char *tool_name,
             char **u = NULL; size_t uc = 0, ucap = 0;
             for (size_t i = 0; i < un; i++) {
                 int bn = 0;
-                char **bh = db_secret_hosts(g_db, names[i], &bn);
+                char **bh = db_secret_hosts(proc_db(), names[i], &bn);
                 for (int j = 0; j < bn; j++) {
                     int dup = 0;
                     for (size_t d = 0; d < uc; d++)
@@ -702,7 +693,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
          * granted tool is gated, not *whether* the tool is authorized — so the
          * grant must be checked first or an ungranted tool would slip through
          * as SILENT→ALLOW. */
-        if (!grants_contains(g_db, agent_name, "tool", tc->name)) {
+        if (!grants_contains(proc_db(), agent_name, "tool", tc->name)) {
             char err[160];
             snprintf(err, sizeof(err),
                      "error: %s not granted — request it with request_config",
@@ -710,14 +701,14 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
             ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = tc->name, .is_error = 1};
-            entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
-            db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "not_granted");
+            entry_append_with_iteration(proc_db(), session_id, &msg, tc->iteration_id);
+            db_tool_call_set_status(proc_db(), session_id, tc->call_id, "done", "not_granted");
             return 1;
         }
         /* Session scope: a spawn-frozen tool_filter narrows the grant set for
          * this session only (grants ∩ filter). Checked after grants so the
          * filter can never widen authority, only shrink it. */
-        if (!session_tool_allowed(g_db, session_id, tc->name)) {
+        if (!session_tool_allowed(proc_db(), session_id, tc->name)) {
             /* Teach the route-around, not just the wall: a filtered session is
              * a narrowed *spawn*, not a missing grant, so the fix lives with
              * whoever launched it. Without this the model can only infer the
@@ -735,19 +726,19 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
          * error tool-result and can retry. Nothing downstream (policy, hooks,
          * handlers, the child wire) ever sees invalid JSON, so no code path
          * can substitute an empty param set for unparseable args. */
-        if (!tool_args_valid_object(g_db, tc->arguments)) {
+        if (!tool_args_valid_object(proc_db(), tc->arguments)) {
             char err[160];
             snprintf(err, sizeof(err),
                      "error: %s: arguments are not a valid JSON object — "
                      "retry the call with well-formed JSON", tc->name);
             return tool_inline_error(session_id, tc, err, "bad_args");
         }
-        ToolApprovalMode mode = agent_tool_mode(g_db, agent_name, tc->name);
+        ToolApprovalMode mode = agent_tool_mode(proc_db(), agent_name, tc->name);
         HookGate gate = (mode == TOOL_MODE_SILENT) ? HOOK_GATE_ALLOW : HOOK_GATE_ASK;
 
         /* Per-argument policy pre-filter (restrict-only, before hooks) */
         if (te->policy_json) {
-            PolicyEffect pe = policy_eval(g_db, tc->arguments, te->policy_json);
+            PolicyEffect pe = policy_eval(proc_db(), tc->arguments, te->policy_json);
             if (pe == POLICY_ERROR) {
                 /* Unparseable policy (args were gate-validated above): the
                  * call is blocked — never allowed past a policy we can't
@@ -765,17 +756,17 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
                 Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                                .tool_name = tc->name, .is_error = 1};
-                entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
-                db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "policy:deny");
+                entry_append_with_iteration(proc_db(), session_id, &msg, tc->iteration_id);
+                db_tool_call_set_status(proc_db(), session_id, tc->call_id, "done", "policy:deny");
                 return 1;
             }
             if (pe == POLICY_ASK && gate < HOOK_GATE_ASK)
                 gate = HOOK_GATE_ASK;
         }
 
-        if (g_tool_setup) {
+        if (proc_tool_setup()) {
             char *reason = NULL;
-            HookGate h = hook_dispatch_gate_tool_call(&g_tool_setup->ext_ctx, g_db,
+            HookGate h = hook_dispatch_gate_tool_call(&proc_tool_setup()->ext_ctx, proc_db(),
                                                       tc->name, tc->arguments, &reason);
             if (h > gate) gate = h;  /* restrict-only: most restrictive wins */
             if (gate == HOOK_GATE_DENY) {
@@ -785,8 +776,8 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
                 Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                                .tool_name = tc->name, .is_error = 1};
-                entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
-                db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "hook:deny");
+                entry_append_with_iteration(proc_db(), session_id, &msg, tc->iteration_id);
+                db_tool_call_set_status(proc_db(), session_id, tc->call_id, "done", "hook:deny");
                 free(reason);
                 return 1;
             }
@@ -797,7 +788,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
          * SQLite is the single home for it, no cached copy to drift. */
         {
             int sn = 0;
-            char **sens = db_sensitive_hosts(g_db, &sn);
+            char **sens = db_sensitive_hosts(proc_db(), &sn);
             if (sens) {
                 sens_hit = host_in_text(sens, (size_t)sn, tc->arguments,
                                         sens_host, sens_host_cap);
@@ -834,7 +825,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                     web_args_url_host(tc->arguments, url_host, sizeof(url_host));
                 for (size_t i = 0; i < un && !bind_hit; i++) {
                     int bn = 0;
-                    char **bh = db_secret_hosts(g_db, names[i], &bn);
+                    char **bh = db_secret_hosts(proc_db(), names[i], &bn);
                     if (!bh) {
                         bind_hit = 1;   /* first use: no bindings yet */
                     } else {
@@ -849,7 +840,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
             if (bind_hit && gate < HOOK_GATE_ASK) gate = HOOK_GATE_ASK;
         }
         if (gate == HOOK_GATE_ASK) {
-            Approval *ap = approval_get_for_tool_call(g_db, session_id, tc->call_id);
+            Approval *ap = approval_get_for_tool_call(proc_db(), session_id, tc->call_id);
             int approved = ap && ap->state && strcmp(ap->state, "approved") == 0;
             int denied   = ap && ap->state && strcmp(ap->state, "denied") == 0;
             int pending  = ap && ap->state && strcmp(ap->state, "pending") == 0;
@@ -859,8 +850,8 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                 ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
                 Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                                .tool_name = tc->name, .is_error = 1};
-                entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
-                db_tool_call_set_status(g_db, session_id, tc->call_id, "done", "denied");
+                entry_append_with_iteration(proc_db(), session_id, &msg, tc->iteration_id);
+                db_tool_call_set_status(proc_db(), session_id, tc->call_id, "done", "denied");
                 approval_free(ap);
                 return 1;
             }
@@ -869,11 +860,11 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                  * A sensitivity hit is recorded as action='sensitive' so the
                  * resolve path can refuse to mint anything standing from it. */
                 if (!pending)
-                    approval_create(g_db, session_id, tc->call_id, tc->name,
+                    approval_create(proc_db(), session_id, tc->call_id, tc->name,
                                     sens_hit ? "sensitive"
                                              : (bind_hit ? "secret_bind" : tc->name),
                                     tc->arguments, "rerun");
-                session_set_state(g_db, session_id, "awaiting_approval");
+                session_set_state(proc_db(), session_id, "awaiting_approval");
                 approval_free(ap);
                 handle_approval_park(session_id);
                 return 2; /* parked */
@@ -886,7 +877,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
              * per-call exception for the matched host (network tiers below). */
             *sens_once = sens_hit;
             *bind_once = bind_hit;
-            approval_consume(g_db, ap->id);
+            approval_consume(proc_db(), ap->id);
             approval_free(ap);
         }
     }
@@ -904,7 +895,7 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     if (tool_needs_interpolation(tc->name) && secret_count > 0)
         interp_args = secret_interpolate(tc->arguments, secrets, secret_count);
     /* Thread the live session + tool_call_id into the per-tool context.
-     * g_tool_setup is a single shared instance, so the session_id captured
+     * proc_tool_setup() is a single shared instance, so the session_id captured
      * at agent_setup_init time is stale (0 in CLI) — the dispatching session
      * varies per call (root or any sub-agent). Keyed on ctx *pointer
      * identity*, not on an enumerated tool-name list: launch_agent and
@@ -912,30 +903,30 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
      * Any future tool registered against these same shared ctx structs
      * is covered automatically; a tool needing its own fresh ctx should
      * get its own struct, not reuse one of these without adding it here. */
-    if (te->user_data == &g_tool_setup->launch_ctx) {
+    if (te->user_data == &proc_tool_setup()->launch_ctx) {
         AgentLaunchCtx *lc = (AgentLaunchCtx *)te->user_data;
         lc->session_id = session_id;
         lc->current_tool_call_id = tc->call_id;
-    } else if (te->user_data == &g_tool_setup->req_cfg_ctx) {
+    } else if (te->user_data == &proc_tool_setup()->req_cfg_ctx) {
         RequestConfigCtx *rctx = (RequestConfigCtx *)te->user_data;
         rctx->session_id = session_id;
         rctx->current_tool_call_id = tc->call_id;
-    } else if (te->user_data == &g_tool_setup->bootstrap_ctx) {
+    } else if (te->user_data == &proc_tool_setup()->bootstrap_ctx) {
         ToolBootstrapCtx *bctx = (ToolBootstrapCtx *)te->user_data;
         bctx->session_id = session_id;
         bctx->current_tool_call_id = tc->call_id;
-    } else if (te->user_data == &g_tool_setup->ext_tool_ctx) {
+    } else if (te->user_data == &proc_tool_setup()->ext_tool_ctx) {
         ToolExtensionCtx *ectx = (ToolExtensionCtx *)te->user_data;
         ectx->session_id = session_id;
         ectx->current_tool_call_id = tc->call_id;
-    } else if (te->user_data == &g_tool_setup->cron_ctx) {
+    } else if (te->user_data == &proc_tool_setup()->cron_ctx) {
         ToolCronCtx *kctx = (ToolCronCtx *)te->user_data;
         kctx->session_id = session_id;
         kctx->current_tool_call_id = tc->call_id;
         /* Job ownership follows the advancing agent, not setup's init agent. */
         snprintf(kctx->agent_name, sizeof(kctx->agent_name), "%s",
                  agent_name ? agent_name : "");
-    } else if (te->user_data == &g_tool_setup->chan_send_ctx) {
+    } else if (te->user_data == &proc_tool_setup()->chan_send_ctx) {
         ToolChannelSendCtx *cctx = (ToolChannelSendCtx *)te->user_data;
         cctx->session_id = session_id;
         /* Route allowlist must key on the advancing agent, not the
@@ -975,7 +966,7 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     /* Explicit capture first (needs the RAW result), then postprocess:
      * deinterpolate + secret scan/redact (scan runs even with no secrets
      * loaded — inline js_eval output can carry leaked credentials). */
-    { char *cap = secret_capture_apply(g_db, tc->arguments, result);
+    { char *cap = secret_capture_apply(proc_db(), tc->arguments, result);
       if (cap) { free(result); result = cap; } }
     { char *pp = tool_result_postprocess(result, secrets, secret_count);
       if (pp) { free(result); result = pp; } }
@@ -985,14 +976,14 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
      * the replacement is what the context sees. The replacement comes back
      * already marker-sanitized (hook_dispatch owns that invariant). */
     char *hook_annotate = NULL;
-    if (g_tool_setup) {
-        char *rep = hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx,
-                        g_db, tc->name, tc->arguments, result, &hook_annotate);
+    if (proc_tool_setup()) {
+        char *rep = hook_dispatch_observe_tool_call(&proc_tool_setup()->ext_ctx,
+                        proc_db(), tc->name, tc->arguments, result, &hook_annotate);
         if (rep) { free(result); result = rep; }
     }
 
     /* CLI progress */
-    if (g_mode == 0) {
+    if (!proc_is_daemon()) {
         cli_print_tool_call(tc->name, tc->arguments);
         size_t rlen = strlen(result);
         if (rlen <= 80)
@@ -1012,10 +1003,10 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
     int is_err = (strncmp(result, "error:", 6) == 0);
     Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                    .tool_name = tc->name, .is_error = is_err};
-    int64_t rid = entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
-    db_tool_call_complete_with_result(g_db, tc->entry_id, tc->call_id, rid);
+    int64_t rid = entry_append_with_iteration(proc_db(), session_id, &msg, tc->iteration_id);
+    db_tool_call_complete_with_result(proc_db(), tc->entry_id, tc->call_id, rid);
     if (hook_annotate) {
-        if (rid > 0) hook_entry_data_patch(g_db, rid, hook_annotate);
+        if (rid > 0) hook_entry_data_patch(proc_db(), rid, hook_annotate);
         free(hook_annotate);
     }
     free(stored);
@@ -1032,7 +1023,7 @@ static int dispatch_inline(int64_t session_id, const char *agent_name,
  * anything wider — notably never the host's shared /tmp. */
 static const char *dispatch_scratch_dir(const char *agent_name,
                                         char *out, size_t cap) {
-    char *root = g_db ? config_get(g_db, "tmp_root") : NULL;
+    char *root = proc_db() ? config_get(proc_db(), "tmp_root") : NULL;
     const char *r = scratch_dir_ensure(agent_name, root, out, cap);
     free(root);
     return r;
@@ -1115,8 +1106,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                                const ShellSecret *secrets, size_t secret_count) {
     if (g_child_count >= CHILD_MAX) return -1;
 
-    ToolEntry *te = g_tool_setup ? tools_lookup(&g_tool_setup->reg, tc->name) : NULL;
-    if (!te && g_tool_setup) {
+    ToolEntry *te = proc_tool_setup() ? tools_lookup(&proc_tool_setup()->reg, tc->name) : NULL;
+    if (!te && proc_tool_setup()) {
         /* Registry is a cache of the extension-tool query; a miss may just
          * mean an extension was promoted/attached after startup, or that this
          * is a non-default agent whose tools were never materialized. Refresh
@@ -1124,9 +1115,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
          * only touched on the event-loop thread. On TOOLS_MAX overflow the
          * register fails, the second lookup misses, and we fall through to the
          * unknown-tool error instead of corrupting the registry. */
-        tools_load_extension_tools(&g_tool_setup->reg, g_db, agent_name,
-                                   &g_tool_setup->js_eval_ctx);
-        te = tools_lookup(&g_tool_setup->reg, tc->name);
+        tools_load_extension_tools(&proc_tool_setup()->reg, proc_db(), agent_name,
+                                   &proc_tool_setup()->js_eval_ctx);
+        te = tools_lookup(&proc_tool_setup()->reg, tc->name);
         if (!te)
             LOG_WARN_("tool '%s' not registered after extension reload (agent=%s)",
                       tc->name, agent_name);
@@ -1140,8 +1131,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         ToolResult tr = {.tool_call_id = tc->call_id, .content = err};
         Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                        .tool_name = tc->name, .is_error = 1};
-        entry_append_with_iteration(g_db, session_id, &msg, tc->iteration_id);
-        db_tool_call_set_status(g_db, session_id, tc->call_id, "done", NULL);
+        entry_append_with_iteration(proc_db(), session_id, &msg, tc->iteration_id);
+        db_tool_call_set_status(proc_db(), session_id, tc->call_id, "done", NULL);
         return 1; /* Signal: handled inline, check for more */
     }
 
@@ -1174,9 +1165,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         FileReadCtx *fctx = (FileReadCtx *)te->user_data;
         if (fctx->workspace) {
             /* CLI progress */
-            if (g_mode == 0)
+            if (!proc_is_daemon())
                 cli_print_tool_call(tc->name, tc->arguments);
-            session_set_state(g_db, session_id, "tool_running");
+            session_set_state(proc_db(), session_id, "tool_running");
 
             /* Host mode (sandbox=0) rides the SAME broker path: the child sets
              * up no namespace and run_file_tier runs the handler in-process,
@@ -1185,7 +1176,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
              * child receives pre-extracted params and parses no JSON. */
             ToolWireArg *params = NULL;
             size_t param_n = 0;
-            if (tool_args_extract(g_db, tc->name, te->parameters_json,
+            if (tool_args_extract(proc_db(), tc->name, te->parameters_json,
                                   tc->arguments, &params, &param_n) != 0)
                 return tool_inline_error(session_id, tc,
                     "error: invalid tool arguments", "bad_args");
@@ -1207,15 +1198,15 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
              * extensions' declared skills live there. */
             size_t skd_n = 0;
             char agents_dir_buf[PATH_MAX];
-            agent_dir_resolve(fctx->workspace, g_cfg ? g_cfg->db_path : NULL,
+            agent_dir_resolve(fctx->workspace, proc_cfg() ? proc_cfg()->db_path : NULL,
                               agents_dir_buf, sizeof(agents_dir_buf));
-            char **skill_dirs = skills_dirs_resolve(g_db, agents_dir_buf,
+            char **skill_dirs = skills_dirs_resolve(proc_db(), agents_dir_buf,
                                                     agent_name, &skd_n);
             char store_dir[PATH_MAX] = {0};
             int have_store = 0;
-            if (g_cfg && g_cfg->db_path && g_cfg->db_path[0]) {
+            if (proc_cfg() && proc_cfg()->db_path && proc_cfg()->db_path[0]) {
                 char tmp[PATH_MAX - 16];
-                snprintf(tmp, sizeof(tmp), "%s", g_cfg->db_path);
+                snprintf(tmp, sizeof(tmp), "%s", proc_cfg()->db_path);
                 char *sl = strrchr(tmp, '/');
                 if (sl) {
                     *sl = '\0';
@@ -1274,15 +1265,15 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             /* Host mode (sandbox=0) rides the SAME broker path: the child execs
              * /bin/sh with no namespace (sandbox is threaded into SandboxConfig),
              * replacing the deleted host-mode fork-only branch. */
-            if (g_mode == 0)
+            if (!proc_is_daemon())
                 cli_print_tool_call(tc->name, tc->arguments);
-            session_set_state(g_db, session_id, "tool_running");
+            session_set_state(proc_db(), session_id, "tool_running");
 
-            char *command = tool_args_str(g_db, tc->arguments, "command");
+            char *command = tool_args_str(proc_db(), tc->arguments, "command");
             if (!command)
                 return tool_inline_error(session_id, tc,
                     "error: shell_exec requires a 'command' string argument", NULL);
-            int cmd_timeout = tool_args_int(g_db, tc->arguments, "timeout", sc->timeout);
+            int cmd_timeout = tool_args_int(proc_db(), tc->arguments, "timeout", sc->timeout);
             if (cmd_timeout <= 0) cmd_timeout = sc->timeout;
 
             /* Parent-side secret interpolation (daemon holds the key) */
@@ -1359,15 +1350,15 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
     if (te->recipe.vehicle == EXEC_SANDBOX && te->recipe.tier == SBX_WEB &&
         te->user_data) {
         WebFetchCtx *wc = (WebFetchCtx *)te->user_data;
-        if (g_mode == 0)
+        if (!proc_is_daemon())
             cli_print_tool_call(tc->name, tc->arguments);
-        session_set_state(g_db, session_id, "tool_running");
+        session_set_state(proc_db(), session_id, "tool_running");
 
         /* Decompose arguments in the parent, then interpolate {{SECRET:X}}
          * per extracted value (a URL may carry a token). */
         ToolWireArg *params = NULL;
         size_t param_n = 0;
-        if (tool_args_extract(g_db, tc->name, te->parameters_json,
+        if (tool_args_extract(proc_db(), tc->name, te->parameters_json,
                               tc->arguments, &params, &param_n) != 0)
             return tool_inline_error(session_id, tc,
                 "error: invalid tool arguments", "bad_args");
@@ -1428,9 +1419,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
             return tool_inline_error(session_id, tc,
                 "error: js tool request resolution failed", NULL);
 
-        if (g_mode == 0)
+        if (!proc_is_daemon())
             cli_print_tool_call(tc->name, tc->arguments);
-        session_set_state(g_db, session_id, "tool_running");
+        session_set_state(proc_db(), session_id, "tool_running");
 
         /* Params: js_eval ships its own schema-extracted code/filename/args;
          * an extension tool ships filename=<handler .qjs path>, the raw call
@@ -1441,12 +1432,12 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         ToolWireArg *params = NULL;
         size_t param_n = 0;
         if (!handler_path) {
-            if (tool_args_extract(g_db, tc->name, te->parameters_json,
+            if (tool_args_extract(proc_db(), tc->name, te->parameters_json,
                                   tc->arguments, &params, &param_n) != 0)
                 return tool_inline_error(session_id, tc,
                     "error: invalid tool arguments", "bad_args");
         } else {
-            char *ext_config = tool_extension_config_json(g_db, tc->name);
+            char *ext_config = tool_extension_config_json(proc_db(), tc->name);
             params = calloc(3, sizeof(*params));
             if (params) {
                 params[0].key = strdup("filename");
@@ -1499,9 +1490,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
      * writes the result + completes the call, then wakes the poll loop via the
      * tool-notify pipe → run_advance. The poll loop never blocks on tool logic. */
     if (te->recipe.vehicle == EXEC_THREAD && te->recipe.thread_run) {
-        if (g_mode == 0)
+        if (!proc_is_daemon())
             cli_print_tool_call(tc->name, tc->arguments);
-        session_set_state(g_db, session_id, "tool_running");
+        session_set_state(proc_db(), session_id, "tool_running");
 
         ToolThreadJob job = {0};
         job.session_id = session_id;
@@ -1514,8 +1505,8 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         job.run = te->recipe.thread_run;
         /* No THREAD (DB) tool references {{SECRET}} — interpolation is a
          * sandbox-tier concern. The thread still postprocesses (DLP scan). */
-        job.secrets = g_tool_setup ? g_tool_setup->secrets : NULL;
-        job.secret_count = g_tool_setup ? g_tool_setup->secret_count : 0;
+        job.secrets = proc_tool_setup() ? proc_tool_setup()->secrets : NULL;
+        job.secret_count = proc_tool_setup() ? proc_tool_setup()->secret_count : 0;
 
         /* Already 'running' (claimed at dispatch) so a re-advance landing
          * while the thread runs can't double-dispatch; the thread flips it
@@ -1532,7 +1523,7 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
         "error: tool has no execution recipe", NULL);
 }
 
-/* Per-call secret snapshot wrapper: env base (g_tool_setup->secrets, immutable
+/* Per-call secret snapshot wrapper: env base (proc_tool_setup()->secrets, immutable
  * for the process lifetime) merged with a fresh read of the DB-backed secret
  * store, so a secret born mid-session (operator `secret set`, secret_create)
  * is visible on its very next dispatch. Scoped to this one call — never
@@ -1541,9 +1532,9 @@ static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
 static int dispatch_tool(int64_t session_id, const char *agent_name,
                          PendingToolCall *tc) {
     size_t snap_n = 0;
-    ShellSecret *snap = secrets_snapshot(g_db,
-        g_tool_setup ? g_tool_setup->secrets : NULL,
-        g_tool_setup ? g_tool_setup->secret_count : 0, &snap_n);
+    ShellSecret *snap = secrets_snapshot(proc_db(),
+        proc_tool_setup() ? proc_tool_setup()->secrets : NULL,
+        proc_tool_setup() ? proc_tool_setup()->secret_count : 0, &snap_n);
     int rc = dispatch_tool_inner(session_id, agent_name, tc, snap, snap_n);
     secrets_snapshot_free(snap, snap_n);
     return rc;
@@ -1640,11 +1631,6 @@ static void drain_ready_result_pipes(const struct pollfd *pfds, int base, int nf
 
 /* ── spawn_run_tool_child: fork+exec a --run-tool child ──────────── */
 
-/* The --run-tool child gets a minimal env: just the log level, so its
- * syslog output (proxy denials, sandbox failures) honors the configured
- * verbosity. Prebuilt at startup — the fork child is async-signal-safe. */
-static char g_log_level_env[32] = "CCLAW_LOG_LEVEL=info";
-
 #define FD_REQUEST RUNTOOL_FD_REQUEST  /* the socketpair fd in the child */
 
 /* Spawn a sandboxed --run-tool child via fork+execve and register it. The
@@ -1679,7 +1665,7 @@ static ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
         }
         /* execve self as --run-tool. Minimal env (inherits nothing sensitive). */
         char *const argv[] = {"cclaw", "--run-tool", NULL};
-        char *const envp[] = {g_log_level_env, NULL};
+        char *const envp[] = {proc_log_level_env(), NULL};
         execve("/proc/self/exe", argv, envp);
         /* execve failed — write a framed static error (4-byte zero meta_len
          * header, then the message) to fd 3 and die */
@@ -1746,14 +1732,14 @@ static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
  * deliberately not interpolated: a cron script is a file on disk, not a
  * model-written argument, so there is no argument to substitute into. */
 static CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len) {
-    if (!g_tool_setup || !g_db) {
+    if (!proc_tool_setup() || !proc_db()) {
         snprintf(err, err_len, "the daemon cannot run scripts right now");
         return CRON_SCRIPT_FAILED;
     }
     if (g_child_count >= CHILD_MAX) return CRON_SCRIPT_BUSY;
 
-    agent_setup_refresh_caps(g_tool_setup, g_db, f->agent_name);
-    JsEvalCtx *jc = &g_tool_setup->js_eval_ctx;
+    agent_setup_refresh_caps(proc_tool_setup(), proc_db(), f->agent_name);
+    JsEvalCtx *jc = &proc_tool_setup()->js_eval_ctx;
     if (!jc->workspace || !jc->workspace[0]) {
         snprintf(err, err_len, "agent '%s' has no workspace", f->agent_name);
         return CRON_SCRIPT_FAILED;
@@ -1769,7 +1755,7 @@ static CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t e
     if (f->script[0] == '/') {
         n = snprintf(full, sizeof(full), "%s", f->script);
         if (n <= 0 || (size_t)n >= sizeof(full) ||
-            !extension_path_in_store(g_db, full)) {
+            !extension_path_in_store(proc_db(), full)) {
             snprintf(err, err_len, "script '%s' is outside the extension store",
                      f->script);
             return CRON_SCRIPT_FAILED;
@@ -1837,7 +1823,7 @@ static int compute_timeout_ms(void) {
         if (d > 0 && d < nearest)
             nearest = d;
     }
-    if (g_mode == 1) {
+    if (proc_is_daemon()) {
         time_t cd = channel_next_deadline();
         if (cd > 0 && cd < nearest)
             nearest = cd;
@@ -1869,8 +1855,8 @@ static void child_sweep_deadlines(void) {
             ToolResult tr = {.tool_call_id = c->tool_call_id, .content = errbuf};
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = "", .is_error = 1};
-            entry_append_with_iteration(g_db, c->session_id, &msg, c->iteration_id);
-            db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, -1);
+            entry_append_with_iteration(proc_db(), c->session_id, &msg, c->iteration_id);
+            db_tool_call_complete_with_result(proc_db(), c->entry_id, c->tool_call_id, -1);
         } else if (c->type == CHILD_CRON_SCRIPT) {
             if (c->result_pipe >= 0) { close(c->result_pipe); c->result_pipe = -1; }
             free(c->outbuf); c->outbuf = NULL; c->outbuf_len = 0;
@@ -1889,7 +1875,7 @@ static void child_sweep_deadlines(void) {
 
 static void approval_sweep_expired(void) {
     int n = 0;
-    int64_t *ids = approval_list_expired(g_db, g_instance_id, &n);
+    int64_t *ids = approval_list_expired(proc_db(), proc_instance_id(), &n);
     for (int i = 0; i < n; i++)
         resolve_approval(ids[i], APPROVAL_DENY, "auto:expired", 0);
     free(ids);
@@ -1898,14 +1884,14 @@ static void approval_sweep_expired(void) {
 /* approval_timeout_sec — the same deadline approval.c uses to park-expire;
  * reused by --auto-approve to bound its self-expiring grants. */
 static int approval_timeout_seconds(void) {
-    int timeout = config_get_int(g_db, "approval_timeout_sec");
+    int timeout = config_get_int(proc_db(), "approval_timeout_sec");
     return timeout > 0 ? timeout : config_default_int("approval_timeout_sec");
 }
 
 /* approval_block_sec, clamped to approval_timeout_sec so the short block
  * never outlasts the final expiry deadline. */
 static int approval_block_seconds(void) {
-    int block = config_get_int(g_db, "approval_block_sec");
+    int block = config_get_int(proc_db(), "approval_block_sec");
     if (block <= 0) block = config_default_int("approval_block_sec");
     int timeout = approval_timeout_seconds();
     if (block > timeout) block = timeout;
@@ -1918,7 +1904,7 @@ static int approval_block_seconds(void) {
  * BEGIN IMMEDIATE because db_tool_call_set_status is not itself a CAS — re-check
  * the parked invariant before mutating so a concurrent resolve can't double-act. */
 static void approval_unpark_block_window(int64_t approval_id) {
-    if (sqlite3_exec(g_db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
+    if (sqlite3_exec(proc_db(), "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
         return;
 
     int64_t session_id = -1;
@@ -1931,7 +1917,7 @@ static void approval_unpark_block_window(int64_t approval_id) {
         " JOIN tool_calls t ON t.session_id = a.session_id AND t.call_id = a.tool_call_id"
         " WHERE a.id=? AND a.state='pending' AND s.state='awaiting_approval'"
         "   AND t.status='pending';";
-    if (sqlite3_prepare_v2(g_db, sel, -1, &s, NULL) == SQLITE_OK) {
+    if (sqlite3_prepare_v2(proc_db(), sel, -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(s, 1, approval_id);
         if (sqlite3_step(s) == SQLITE_ROW) {
             session_id = sqlite3_column_int64(s, 0);
@@ -1943,7 +1929,7 @@ static void approval_unpark_block_window(int64_t approval_id) {
         }
         sqlite3_finalize(s);
     }
-    if (!ok) { sqlite3_exec(g_db, "ROLLBACK;", NULL, NULL, NULL); return; }
+    if (!ok) { sqlite3_exec(proc_db(), "ROLLBACK;", NULL, NULL, NULL); return; }
 
     char buf[256];
     snprintf(buf, sizeof(buf),
@@ -1952,13 +1938,13 @@ static void approval_unpark_block_window(int64_t approval_id) {
     ToolResult tr = { .tool_call_id = call_id, .content = buf };
     Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                     .tool_name = tool_name, .is_error = 0 };
-    if (entry_append_with_iteration(g_db, session_id, &msg, 0) < 0 ||
-        db_tool_call_set_status(g_db, session_id, call_id, "done", "block_window") != 0 ||
-        session_set_state(g_db, session_id, "tool_running") != 0) {
-        sqlite3_exec(g_db, "ROLLBACK;", NULL, NULL, NULL);
+    if (entry_append_with_iteration(proc_db(), session_id, &msg, 0) < 0 ||
+        db_tool_call_set_status(proc_db(), session_id, call_id, "done", "block_window") != 0 ||
+        session_set_state(proc_db(), session_id, "tool_running") != 0) {
+        sqlite3_exec(proc_db(), "ROLLBACK;", NULL, NULL, NULL);
         return;
     }
-    if (sqlite3_exec(g_db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
+    if (sqlite3_exec(proc_db(), "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
         return;
 
     wake_session(session_id);
@@ -1970,7 +1956,7 @@ static void approval_unpark_block_window(int64_t approval_id) {
 static void approval_sweep_block_window(void) {
     int block = approval_block_seconds();
     int n = 0;
-    int64_t *ids = approval_list_block_due(g_db, block, g_instance_id, &n);
+    int64_t *ids = approval_list_block_due(proc_db(), block, proc_instance_id(), &n);
     for (int i = 0; i < n; i++)
         approval_unpark_block_window(ids[i]);
     free(ids);
@@ -2021,8 +2007,8 @@ static void session_sweep_inbox(void) {
         "                      WHERE j.session_id = s.id))"
         " LIMIT 64;";
     sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK) return;
-    sqlite3_bind_text(st, 1, g_instance_id, -1, SQLITE_STATIC);
+    if (sqlite3_prepare_v2(proc_db(), sql, -1, &st, NULL) != SQLITE_OK) return;
+    sqlite3_bind_text(st, 1, proc_instance_id(), -1, SQLITE_STATIC);
     int cap = 0, n = 0;
     int64_t *ids = NULL;
     while (sqlite3_step(st) == SQLITE_ROW) {
@@ -2045,21 +2031,21 @@ static void session_sweep_inbox(void) {
  * can both keep the shared DB consistent. ── */
 
 static void db_periodic(void) {
-    process_heartbeat(g_db, g_instance_id);
-    process_gc_dead(g_db, PROCESS_TTL_SEC);
-    db_recover_stale_sessions(g_db);   /* owner-scoped, safe to repeat */
+    process_heartbeat(proc_db(), proc_instance_id());
+    process_gc_dead(proc_db(), PROCESS_TTL_SEC);
+    db_recover_stale_sessions(proc_db());   /* owner-scoped, safe to repeat */
     approval_sweep_block_window();
     approval_sweep_expired();
-    db_prune_inbox(g_db);
-    db_prune_outbox(g_db);
-    db_wal_checkpoint(g_db);   /* truncate WAL — passive checkpoint can stall on a long reader */
+    db_prune_inbox(proc_db());
+    db_prune_outbox(proc_db());
+    db_wal_checkpoint(proc_db());   /* truncate WAL — passive checkpoint can stall on a long reader */
 
     /* Disk floor monitoring: log loudly on crossing the threshold (edge-
      * triggered so it doesn't spam every poll). The dispatch_llm gate does the
      * actual refusing; this makes the low-disk state visible in the journal. */
     static int disk_low = 0;
     int disk_floor_mb = config_default_int("disk_min_free_mb");
-    long free_mb = db_free_mb(g_db);
+    long free_mb = db_free_mb(proc_db());
     if (free_mb >= 0 && disk_floor_mb > 0) {
         if (free_mb < disk_floor_mb && !disk_low) {
             LOG_WARN_("disk_low free_mb=%ld floor_mb=%d refusing new llm dispatch",
@@ -2071,10 +2057,10 @@ static void db_periodic(void) {
         }
     }
 
-    if (g_mode == 1) {
+    if (proc_is_daemon()) {
         session_sweep_inbox();
-        advance_sweep_undelivered(g_db);  /* convergence sweep: cursor-lag edges */
-        cron_run_due(g_db);
+        advance_sweep_undelivered(proc_db());  /* convergence sweep: cursor-lag edges */
+        cron_run_due(proc_db());
     }
 }
 
@@ -2092,15 +2078,15 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         /* One savepoint applies the whole document — grants, config values,
          * provider upsert (tool_request_config.c). Failure rolls everything
          * back and surfaces as apply-denied, never a partial grant set. */
-        if (request_config_changes_apply(g_db, agent, a->args_json,
+        if (request_config_changes_apply(proc_db(), agent, a->args_json,
                                          grant_expires_at) != 0) {
             LOG_WARN_("request_changes apply failed");
             *rename_failed = 1; /* generic apply-failed: error result, no grant */
         }
     } else if (strcmp(a->action, "extension_promote") == 0) {
-        char *bundle = tool_args_str(g_db, a->args_json, "bundle");
+        char *bundle = tool_args_str(proc_db(), a->args_json, "bundle");
         char *ierr = NULL;
-        if (!bundle || extension_install(g_db, bundle, agent, &ierr) != 0) {
+        if (!bundle || extension_install(proc_db(), bundle, agent, &ierr) != 0) {
             LOG_WARN_("extension_promote apply failed: %s", ierr ? ierr : "no bundle");
             *rename_failed = 1;
         }
@@ -2108,15 +2094,15 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         free(bundle);
     } else if (strcmp(a->action, "create_agent") == 0) {
         char *cerr = NULL;
-        const char *adir = g_tool_setup ? g_tool_setup->req_cfg_ctx.agents_dir : NULL;
-        if (agent_definition_apply(g_db, a->args_json, agent, adir, &cerr) != 0) {
+        const char *adir = proc_tool_setup() ? proc_tool_setup()->req_cfg_ctx.agents_dir : NULL;
+        if (agent_definition_apply(proc_db(), a->args_json, agent, adir, &cerr) != 0) {
             LOG_WARN_("create_agent apply failed: %s", cerr ? cerr : "?");
             *rename_failed = 1; /* generic apply-failed: error result, no grant */
         }
         free(cerr);
     } else if (strcmp(a->action, "update_agent") == 0) {
         char *cerr = NULL;
-        if (agent_definition_update_apply(g_db, a->args_json, agent, &cerr) != 0) {
+        if (agent_definition_update_apply(proc_db(), a->args_json, agent, &cerr) != 0) {
             LOG_WARN_("update_agent apply failed: %s", cerr ? cerr : "?");
             *rename_failed = 1; /* generic apply-failed: error result, no grant */
         }
@@ -2125,20 +2111,20 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
         /* Standing job: approved once here, then it fires unattended. The
          * document is the same one cron_set validated before parking. */
         char *cerr = NULL;
-        if (cron_upsert(g_db, agent, a->session_id, a->args_json,
+        if (cron_upsert(proc_db(), agent, a->session_id, a->args_json,
                         NULL, &cerr) < 0) {
             LOG_WARN_("cron_set apply failed: %s", cerr ? cerr : "?");
             *rename_failed = 1; /* generic apply-failed: error result, no job */
         }
         free(cerr);
     } else if (strcmp(a->action, "rename_agent") == 0) {
-        char *nn = tool_args_str(g_db, a->args_json, "name");
-        char *pr = tool_args_str(g_db, a->args_json, "preamble");
+        char *nn = tool_args_str(proc_db(), a->args_json, "name");
+        char *pr = tool_args_str(proc_db(), a->args_json, "preamble");
         if (nn) {
-            int rc = agent_rename(g_db, agent, nn, a->session_id);
-            if (rc == 0 && g_tool_setup) {
+            int rc = agent_rename(proc_db(), agent, nn, a->session_id);
+            if (rc == 0 && proc_tool_setup()) {
                 /* Disk rename */
-                RequestConfigCtx *rctx = &g_tool_setup->req_cfg_ctx;
+                RequestConfigCtx *rctx = &proc_tool_setup()->req_cfg_ctx;
                 if (rctx->agents_dir) {
                     char old_path[512], new_path[512];
                     snprintf(old_path, sizeof(old_path), "%s/%s", rctx->agents_dir, agent);
@@ -2147,7 +2133,7 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
                     if (stat(old_path, &st) == 0) {
                         if (rename(old_path, new_path) != 0) {
                             /* Rollback DB rename on disk failure */
-                            agent_rename(g_db, nn, agent, a->session_id);
+                            agent_rename(proc_db(), nn, agent, a->session_id);
                             *rename_failed = 1;
                             goto rename_done;
                         }
@@ -2157,7 +2143,7 @@ static void apply_grant(const Approval *a, const char *agent, int *rename_failed
                 if (pr && pr[0]) {
                     const char *sql = "UPDATE agents SET system_prompt=? WHERE name=?";
                     sqlite3_stmt *s;
-                    if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) == SQLITE_OK) {
+                    if (sqlite3_prepare_v2(proc_db(), sql, -1, &s, NULL) == SQLITE_OK) {
                         sqlite3_bind_text(s, 1, pr, -1, SQLITE_STATIC);
                         sqlite3_bind_text(s, 2, nn, -1, SQLITE_STATIC);
                         sqlite3_step(s); sqlite3_finalize(s);
@@ -2185,7 +2171,7 @@ static int approval_is_post_window(int64_t session_id, const char *tool_call_id)
         "SELECT (SELECT status FROM tool_calls WHERE session_id=?1 AND call_id=?2"
         "        ORDER BY id DESC LIMIT 1),"
         "       (SELECT state FROM sessions WHERE id=?1);";
-    if (sqlite3_prepare_v2(g_db, sql, -1, &s, NULL) == SQLITE_OK) {
+    if (sqlite3_prepare_v2(proc_db(), sql, -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(s, 1, session_id);
         if (tool_call_id) sqlite3_bind_text(s, 2, tool_call_id, -1, SQLITE_STATIC);
         else sqlite3_bind_null(s, 2);
@@ -2217,17 +2203,17 @@ static void resolve_approval_post_window(const Approval *a, const char *agent,
         if (approved && decision == APPROVAL_ALWAYS) {
             int rename_failed = 0;
             apply_grant(a, agent, &rename_failed, grant_expires_at);
-            approval_deliver_postwindow(g_db, a,
+            approval_deliver_postwindow(proc_db(), a,
                 rename_failed ? APPROVAL_PW_APPLY_DENIED : APPROVAL_PW_APPLY_GRANTED);
         } else {
-            approval_deliver_postwindow(g_db, a,
+            approval_deliver_postwindow(proc_db(), a,
                 expired ? APPROVAL_PW_EXPIRED : APPROVAL_PW_APPLY_DENIED);
         }
     } else {
         if (approved)
-            approval_deliver_postwindow(g_db, a, APPROVAL_PW_RERUN_APPROVED);
+            approval_deliver_postwindow(proc_db(), a, APPROVAL_PW_RERUN_APPROVED);
         else
-            approval_deliver_postwindow(g_db, a,
+            approval_deliver_postwindow(proc_db(), a,
                 expired ? APPROVAL_PW_EXPIRED : APPROVAL_PW_RERUN_DENIED);
     }
 }
@@ -2237,11 +2223,11 @@ static void resolve_approval_post_window(const Approval *a, const char *agent,
 void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via,
                       int64_t grant_expires_at) {
     int approved = (decision != APPROVAL_DENY);
-    Approval *a = approval_resolve(g_db, approval_id, approved, decided_via);
+    Approval *a = approval_resolve(proc_db(), approval_id, approved, decided_via);
     if (!a) return;
 
     int64_t session_id = a->session_id;
-    const char *agent = session_get_agent_name(g_db, session_id);
+    const char *agent = session_get_agent_name(proc_db(), session_id);
 
     /* Block window already lapsed → deliver async, leave the turn untouched. */
     if (approval_is_post_window(session_id, a->tool_call_id)) {
@@ -2262,8 +2248,8 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                 ToolResult tr = { .tool_call_id = a->tool_call_id, .content = buf };
                 Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                                 .tool_name = a->action, .is_error = 1 };
-                entry_append_with_iteration(g_db, session_id, &msg, 0);
-                db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
+                entry_append_with_iteration(proc_db(), session_id, &msg, 0);
+                db_tool_call_set_status(proc_db(), session_id, a->tool_call_id, "done", decided_via);
             }
         } else if (decision == APPROVAL_ALWAYS && agent) {
             if (a->action && strcmp(a->action, "sensitive") == 0) {
@@ -2285,7 +2271,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                     size_t un = 0;
                     char **names = secret_placeholder_names(a->args_json, &un);
                     for (size_t i = 0; i < un; i++) {
-                        if (db_secret_host_bind(g_db, names[i], host) == 0)
+                        if (db_secret_host_bind(proc_db(), names[i], host) == 0)
                             LOG_INFO_("secret binding recorded name=%s host=%s via=approval",
                                       names[i], host);
                     }
@@ -2296,10 +2282,10 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                 }
             } else {
                 /* "Allow and stop asking" — flip the standing mode to silent. */
-                agent_config_set_tool_mode(g_db, agent, a->action, "silent");
+                agent_config_set_tool_mode(proc_db(), agent, a->action, "silent");
             }
         }
-        session_set_state(g_db, session_id, "tool_running");
+        session_set_state(proc_db(), session_id, "tool_running");
         free((char *)agent);
         approval_free(a);
         wake_session(session_id);
@@ -2319,10 +2305,10 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
             ToolResult tr = { .tool_call_id = a->tool_call_id, .content = err };
             Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                             .tool_name = a->tool_name, .is_error = 1 };
-            entry_append_with_iteration(g_db, session_id, &msg, 0);
-            db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
+            entry_append_with_iteration(proc_db(), session_id, &msg, 0);
+            db_tool_call_set_status(proc_db(), session_id, a->tool_call_id, "done", decided_via);
         }
-        session_set_state(g_db, session_id, "tool_running");
+        session_set_state(proc_db(), session_id, "tool_running");
         free((char *)agent);
         approval_free(a);
         wake_session(session_id);
@@ -2355,11 +2341,11 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
         Message msg = { .role = ROLE_TOOL, .tool_result = &tr,
                         .tool_name = a->tool_name,
                         .is_error = (decision == APPROVAL_DENY || rename_failed) };
-        entry_append_with_iteration(g_db, session_id, &msg, 0);
-        db_tool_call_set_status(g_db, session_id, a->tool_call_id, "done", decided_via);
+        entry_append_with_iteration(proc_db(), session_id, &msg, 0);
+        db_tool_call_set_status(proc_db(), session_id, a->tool_call_id, "done", decided_via);
     }
 
-    session_set_state(g_db, session_id, "tool_running");
+    session_set_state(proc_db(), session_id, "tool_running");
     free((char *)agent);
     approval_free(a);
     wake_session(session_id);
@@ -2410,7 +2396,7 @@ static void approval_flush_deferred(void) {
 static void append_enum_block(Buf *out, const char *header, const char *sql,
                               const char *bind) {
     sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK) return;
+    if (sqlite3_prepare_v2(proc_db(), sql, -1, &st, NULL) != SQLITE_OK) return;
     sqlite3_bind_text(st, 1, bind, -1, SQLITE_STATIC);
     int n = 0;
     while (sqlite3_step(st) == SQLITE_ROW) {
@@ -2491,47 +2477,47 @@ static char *format_approval_summary(const Approval *a) {
         append_enum_block(&out, "Agent-scoped (this agent only):",
                           SQL_CHANGES_AGENT_SCOPED, args);
         append_enum_block(&out, "System-wide:", SQL_CHANGES_SYSTEM_WIDE, args);
-        f[0] = tool_args_str(g_db, args, "reason");
+        f[0] = tool_args_str(proc_db(), args, "reason");
         if (f[0] && f[0][0]) buf_appendf(&out, "Reason: %s\n", f[0]);
     } else if (a->tool_name && strcmp(a->tool_name, "request_config") == 0 &&
                a->action && strcmp(a->action, "rename_agent") == 0) {
-        f[0] = tool_args_str(g_db, args, "name");
-        f[1] = tool_args_str(g_db, args, "reason");
+        f[0] = tool_args_str(proc_db(), args, "name");
+        f[1] = tool_args_str(proc_db(), args, "reason");
         buf_appendf(&out, "rename_agent: %s", f[0] ? f[0] : "?");
         if (f[1] && f[1][0]) buf_appendf(&out, "\nReason: %s", f[1]);
     } else if (a->tool_name && strcmp(a->tool_name, "request_config") == 0) {
         buf_append_str(&out, a->action ? a->action : "?");
     } else if (a->tool_name && strcmp(a->tool_name, "extension_promote") == 0) {
-        f[0] = tool_args_str(g_db, args, "name");
-        f[1] = tool_args_str(g_db, args, "summary");
+        f[0] = tool_args_str(proc_db(), args, "name");
+        f[1] = tool_args_str(proc_db(), args, "summary");
         buf_appendf(&out, "promote '%s': %s", f[0] ? f[0] : "?",
                     f[1] ? f[1] : "(no summary)");
     } else if (a->tool_name && strcmp(a->tool_name, "create_agent") == 0) {
-        f[0] = tool_args_str(g_db, args, "name");
-        f[1] = tool_args_str(g_db, args, "sandbox_profile");
-        f[2] = tool_args_str(g_db, args, "clone_from");
+        f[0] = tool_args_str(proc_db(), args, "name");
+        f[1] = tool_args_str(proc_db(), args, "sandbox_profile");
+        f[2] = tool_args_str(proc_db(), args, "clone_from");
         buf_appendf(&out, "wants to create agent **%s** (profile %s%s%s):\n",
                     f[0] ? f[0] : "?", f[1] ? f[1] : "default",
                     f[2] ? ", clone of " : "", f[2] ? f[2] : "");
         append_enum_block(&out, "Capabilities (all within the creator's own):",
                           SQL_CREATE_AGENT_LINES, args);
     } else if (a->tool_name && strcmp(a->tool_name, "update_agent") == 0) {
-        f[0] = tool_args_str(g_db, args, "name");
-        f[1] = tool_args_str(g_db, args, "reason");
+        f[0] = tool_args_str(proc_db(), args, "name");
+        f[1] = tool_args_str(proc_db(), args, "reason");
         buf_appendf(&out, "wants to update agent **%s**:\n", f[0] ? f[0] : "?");
         append_enum_block(&out, "Changes (grants add; fields overwrite):",
                           SQL_UPDATE_AGENT_LINES, args);
         if (f[1] && f[1][0]) buf_appendf(&out, "Reason: %s\n", f[1]);
     } else if (a->tool_name && strcmp(a->tool_name, "cron_set") == 0) {
-        f[0] = tool_args_str(g_db, args, "name");
+        f[0] = tool_args_str(proc_db(), args, "name");
         buf_appendf(&out, "wants to schedule job **%s**, running as another "
                           "agent (its grants and model, every fire):\n",
                     f[0] ? f[0] : "?");
         append_enum_block(&out, "Job:", SQL_CRON_SET_LINES, args);
     } else {
-        char *salient = tool_args_str(g_db, args, "command");
-        if (!salient) salient = tool_args_str(g_db, args, "url");
-        if (!salient) salient = tool_args_str(g_db, args, "path");
+        char *salient = tool_args_str(proc_db(), args, "command");
+        if (!salient) salient = tool_args_str(proc_db(), args, "url");
+        if (!salient) salient = tool_args_str(proc_db(), args, "path");
         f[0] = salient;
         if (salient)
             buf_appendf(&out, "%s: %s", a->tool_name ? a->tool_name : "?", salient);
@@ -2571,12 +2557,12 @@ static char *format_approval_summary(const Approval *a) {
 /* ── handle_approval_park: prompt the approver ────────────────── */
 
 static void handle_approval_park(int64_t session_id) {
-    Approval *a = approval_get_pending(g_db, session_id);
+    Approval *a = approval_get_pending(proc_db(), session_id);
     if (!a) return;
 
-    if (g_mode == 0) {
+    if (!proc_is_daemon()) {
         /* CLI mode */
-        if (g_auto_approve) {
+        if (proc_auto_approve()) {
             /* --auto-approve: answer immediately, never prompt. "rerun"
              * approvals get a single-use ONCE; "apply" grants (ambient
              * capabilities have no once semantics — see resolve_approval)
@@ -2600,11 +2586,11 @@ static void handle_approval_park(int64_t session_id) {
             return;
         }
         /* Interactive: prompt user. Name the asking session when it's a
-         * sub-agent (session_id != g_cli_session) — otherwise a launch_agent
+         * sub-agent (session_id != proc_cli_session()) — otherwise a launch_agent
          * child's approval request is indistinguishable from the root's. */
         fprintf(stdout, "\n\033[1mApproval required\033[0m");
-        if (session_id != g_cli_session) {
-            char *sub_agent = session_get_agent_name(g_db, session_id);
+        if (session_id != proc_cli_session()) {
+            char *sub_agent = session_get_agent_name(proc_db(), session_id);
             fprintf(stdout, " (sub-agent %s, session %lld)",
                     sub_agent ? sub_agent : "?", (long long)session_id);
             free(sub_agent);
@@ -2619,7 +2605,7 @@ static void handle_approval_park(int64_t session_id) {
         else
             fprintf(stdout, "\nApprove? (y=always / o=once / n=no): ");
         fflush(stdout);
-        g_cli_turn_active = 0;  /* unblock input loop for the y/n read */
+        proc_set_cli_turn_active(0);  /* unblock input loop for the y/n read */
         /* The actual y/n is read back in the main CLI input loop. */
         approval_free(a);
         return;
@@ -2634,7 +2620,7 @@ static void handle_approval_park(int64_t session_id) {
     int has_channel = 0;
     char ch_name[64] = {0};
     char ch_id[64] = {0};
-    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+    if (sqlite3_prepare_v2(proc_db(), sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(stmt, 1, session_id);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *ch = (const char *)sqlite3_column_text(stmt, 0);
@@ -2654,10 +2640,10 @@ static void handle_approval_park(int64_t session_id) {
          * decide grants (e.g. a sub-agent surfaced on a groupchat). Falls
          * back to the session's own chat_id when no admin_ids are
          * configured, so the common 1:1 setup needs no extra config. */
-        char *admins = channel_config_get(g_db, ch_name, "admin_ids");
+        char *admins = channel_config_get(proc_db(), ch_name, "admin_ids");
         if (admins && !admins[0]) { free(admins); admins = NULL; }
 
-        char *agent = session_get_agent_name(g_db, session_id);
+        char *agent = session_get_agent_name(proc_db(), session_id);
         char *summary = format_approval_summary(a);
         Buf pb = {0};
         /* The approval id is part of the prompt text, not just the button
@@ -2708,7 +2694,7 @@ static void handle_approval_park(int64_t session_id) {
             int n_ids = split_and_trim(admins, ids, CHANNEL_ADMIN_IDS_MAX);
             for (int i = 0; i < n_ids; i++) {
                 sqlite3_stmt *ins;
-                if (sqlite3_prepare_v2(g_db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
+                if (sqlite3_prepare_v2(proc_db(), ins_sql, -1, &ins, NULL) == SQLITE_OK) {
                     sqlite3_bind_text(ins, 1, ch_name, -1, SQLITE_STATIC);
                     sqlite3_bind_int64(ins, 2, session_id);
                     sqlite3_bind_text(ins, 3, ids[i], -1, SQLITE_STATIC);
@@ -2719,7 +2705,7 @@ static void handle_approval_park(int64_t session_id) {
             }
         } else {
             sqlite3_stmt *ins;
-            if (sqlite3_prepare_v2(g_db, ins_chat_sql, -1, &ins, NULL) == SQLITE_OK) {
+            if (sqlite3_prepare_v2(proc_db(), ins_chat_sql, -1, &ins, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(ins, 1, ch_name, -1, SQLITE_STATIC);
                 sqlite3_bind_int64(ins, 2, session_id);
                 sqlite3_bind_text(ins, 3, ch_id, -1, SQLITE_STATIC);
@@ -2730,7 +2716,7 @@ static void handle_approval_park(int64_t session_id) {
         }
         free(admins);
         free(prompt);
-        if (g_cfg && g_cfg->db_path) channel_outbox_wake(g_cfg->db_path, ch_name);
+        if (proc_cfg() && proc_cfg()->db_path) channel_outbox_wake(proc_cfg()->db_path, ch_name);
     }
     if (!has_channel) {
         /* No channel binding — fail-closed: auto-deny */
@@ -2748,13 +2734,13 @@ static void reap_children(void);
  * completions riding the same pipe; error entries are skipped (nothing for a
  * redact/annotate hook to act on, and error filtering drops them from context anyway). */
 static void maybe_dispatch_post_advance(int64_t session_id) {
-    if (!g_tool_setup ||
-        g_tool_setup->ext_ctx.hooks[HOOK_POST_ADVANCE].count == 0)
+    if (!proc_tool_setup() ||
+        proc_tool_setup()->ext_ctx.hooks[HOOK_POST_ADVANCE].count == 0)
         return;
 
     int64_t entry_id = -1;
     sqlite3_stmt *s;
-    if (sqlite3_prepare_v2(g_db,
+    if (sqlite3_prepare_v2(proc_db(),
             "SELECT e.id FROM entries e"
             " WHERE e.id = (SELECT MAX(id) FROM entries"
             "                WHERE session_id=?1 AND type='assistant_message')"
@@ -2768,10 +2754,10 @@ static void maybe_dispatch_post_advance(int64_t session_id) {
     sqlite3_finalize(s);
     if (entry_id < 0) return;
 
-    char *cmds = hook_dispatch_post_advance(&g_tool_setup->ext_ctx, g_db,
+    char *cmds = hook_dispatch_post_advance(&proc_tool_setup()->ext_ctx, proc_db(),
                                             session_id, entry_id);
     if (cmds) {
-        hook_apply_post_advance(g_db, session_id, entry_id, cmds);
+        hook_apply_post_advance(proc_db(), session_id, entry_id, cmds);
         free(cmds);
     }
 }
@@ -2829,7 +2815,7 @@ static void run_advance(int64_t session_id) {
      * thread — with the advancing session (and, once known, agent), so
      * support logs tie back to the conversation and its llm_responses rows. */
     cclaw_log_set_ctx(session_id, -1, NULL);
-    AdvanceOutput out = advance_session(g_db, session_id, max_iter);
+    AdvanceOutput out = advance_session(proc_db(), session_id, max_iter);
     LOG_INFO_("advance action=%s iter=%d",
               advance_action_name(out.action), out.iteration);
     cclaw_log_set_ctx(session_id, -1, out.agent_name);
@@ -2839,7 +2825,7 @@ static void run_advance(int64_t session_id) {
         if (dispatch_llm_req(session_id, out.agent_name, out.iteration) < 0) {
             /* Only the root CLI session drives the prompt; sub-agents advance
              * silently in the background. */
-            if (g_mode == 0 && session_id == g_cli_session) g_cli_turn_active = 0;
+            if (!proc_is_daemon() && session_id == proc_cli_session()) proc_set_cli_turn_active(0);
         }
         break;
     case ADVANCE_DISPATCH_TOOLS: {
@@ -2854,8 +2840,8 @@ static void run_advance(int64_t session_id) {
          * advancing agent's grants, sandbox_profile, and shell_path from the
          * DB, so the in-memory snapshot can never go stale (expiry, revoke,
          * rename, update_agent, agent switch). */
-        if (g_tool_setup)
-            agent_setup_refresh_caps(g_tool_setup, g_db, out.agent_name);
+        if (proc_tool_setup())
+            agent_setup_refresh_caps(proc_tool_setup(), proc_db(), out.agent_name);
         int async_in_flight = 0;
         int stop = 0;
         for (int i = 0; i < out.tc_count && !stop; i++) {
@@ -2865,7 +2851,7 @@ static void run_advance(int64_t session_id) {
              * owns the call's lifecycle. Paths that don't dispatch after all
              * (approval park, child ceiling) unclaim below so the approval /
              * freed-slot re-advance can re-dispatch. */
-            int claim = db_tool_call_claim(g_db, session_id, out.calls[i].call_id);
+            int claim = db_tool_call_claim(proc_db(), session_id, out.calls[i].call_id);
             if (claim == 0) {
                 LOG_INFO_("tool claim lost tool=%s (co-pointed dispatcher)",
                           out.calls[i].name);
@@ -2880,7 +2866,7 @@ static void run_advance(int64_t session_id) {
             default:                                    /* parked (2) or failure */
                 /* The call didn't dispatch: release the claim (a path that
                  * already wrote a result + 'done' is left alone — CAS). */
-                db_tool_call_unclaim(g_db, session_id, out.calls[i].call_id);
+                db_tool_call_unclaim(proc_db(), session_id, out.calls[i].call_id);
                 /* -1 = child ceiling hit: the call is back to 'pending' and un-
                  * forked. Remember the session so a freed slot (reap) re-advances
                  * it instead of leaving it stuck in tool_running forever. */
@@ -2903,14 +2889,14 @@ static void run_advance(int64_t session_id) {
     case ADVANCE_DONE:
         deliver_response(session_id);
         /* Attempt compaction if configured */
-        if (g_cfg->compaction && llm_worker_alive() &&
-            session_needs_compaction(g_db, session_id, g_cfg)) {
-            session_set_state(g_db, session_id, "compacting");
-            if (llm_worker_submit_compact(g_db, session_id, out.agent_name) != 0)
-                session_set_state(g_db, session_id, "idle");
+        if (proc_cfg()->compaction && llm_worker_alive() &&
+            session_needs_compaction(proc_db(), session_id, proc_cfg())) {
+            session_set_state(proc_db(), session_id, "compacting");
+            if (llm_worker_submit_compact(proc_db(), session_id, out.agent_name) != 0)
+                session_set_state(proc_db(), session_id, "idle");
         }
-        if (g_mode == 0 && session_id == g_cli_session) {
-            g_cli_turn_active = 0;
+        if (!proc_is_daemon() && session_id == proc_cli_session()) {
+            proc_set_cli_turn_active(0);
         }
         break;
     case ADVANCE_WAITING:
@@ -2923,18 +2909,18 @@ static void run_advance(int64_t session_id) {
         /* Root turn stays active while its own async work (forked tools or
          * sub-agents) is in flight; awaiting_approval has neither, so the prompt
          * is released for the user's y/n. Sub-agents never touch the root flag. */
-        if (g_mode == 0 && session_id == g_cli_session
+        if (!proc_is_daemon() && session_id == proc_cli_session()
             && !child_has_session(session_id)
-            && !db_tool_call_any_running(g_db, session_id))
-            g_cli_turn_active = 0;
+            && !db_tool_call_any_running(proc_db(), session_id))
+            proc_set_cli_turn_active(0);
         break;
     case ADVANCE_ERROR:
         /* In daemon mode this used to vanish silently — log it so a stuck
          * session leaves a trail the user can send. */
         LOG_ERROR_("advance_session failed");
-        if (g_mode == 0) {
+        if (!proc_is_daemon()) {
             fprintf(stderr, "error: session advance failed\n");
-            if (session_id == g_cli_session) g_cli_turn_active = 0;
+            if (session_id == proc_cli_session()) proc_set_cli_turn_active(0);
         }
         break;
     }
@@ -2942,14 +2928,14 @@ static void run_advance(int64_t session_id) {
 }
 
 static void deliver_response(int64_t session_id) {
-    if (g_mode == 0) {
+    if (!proc_is_daemon()) {
         /* CLI stdout belongs to the root session's turn. A sub-agent finishing
          * routes its result to the parent's tool_call (advance.c), not stdout. */
-        if (session_id != g_cli_session) return;
+        if (session_id != proc_cli_session()) return;
         cli_indicator_clear();
-        char *text = get_response_text(g_db, session_id);
+        char *text = get_response_text(proc_db(), session_id);
         if (text) { printf("%s\n", text); free(text); }
-        g_cli_turn_active = 0;
+        proc_set_cli_turn_active(0);
         return;
     }
 
@@ -2958,10 +2944,10 @@ static void deliver_response(int64_t session_id) {
      * coalescing, 'explicit', ingest-only all live there). This is only the
      * FIFO nudge advance.c can't send (no db_path there); waking with an
      * empty outbox is a harmless no-op for the runner. */
-    char *channel = db_scalar_text(g_db,
+    char *channel = db_scalar_text(proc_db(),
         "SELECT channel_name FROM sessions WHERE id=?;", session_id);
     if (!channel) return;
-    if (g_cfg && g_cfg->db_path) channel_outbox_wake(g_cfg->db_path, channel);
+    if (proc_cfg() && proc_cfg()->db_path) channel_outbox_wake(proc_cfg()->db_path, channel);
     free(channel);
 }
 
@@ -3025,13 +3011,13 @@ static char *child_output_finalize(ChildProc *c, int status, char **hosts_out) {
      * rationale as dispatch_tool) — a secret born mid-session must
      * be maskable in a reaped sandboxed child's output too. */
     if (c->tool_args) {
-        char *cap = secret_capture_apply(g_db, c->tool_args, output);
+        char *cap = secret_capture_apply(proc_db(), c->tool_args, output);
         if (cap) { free(output); output = cap; }
     }
     { size_t snap_n = 0;
-      ShellSecret *snap = secrets_snapshot(g_db,
-          g_tool_setup ? g_tool_setup->secrets : NULL,
-          g_tool_setup ? g_tool_setup->secret_count : 0, &snap_n);
+      ShellSecret *snap = secrets_snapshot(proc_db(),
+          proc_tool_setup() ? proc_tool_setup()->secrets : NULL,
+          proc_tool_setup() ? proc_tool_setup()->secret_count : 0, &snap_n);
       char *pp = tool_result_postprocess(output, snap, snap_n);
       secrets_snapshot_free(snap, snap_n);
       if (pp) { free(output); output = pp; } }
@@ -3069,7 +3055,7 @@ static void cron_script_post(ChildProc *c, const char *output, const char *hosts
     if (c->cron_prompt) {
         char *payload = cron_inbox_payload(c->cron_prompt, text);
         if (payload) {
-            inbox_insert_scanned(g_db, sid, "cron", c->cron_job, payload);
+            inbox_insert_scanned(proc_db(), sid, "cron", c->cron_job, payload);
             free(payload);
         }
         wake_session(sid);
@@ -3077,12 +3063,12 @@ static void cron_script_post(ChildProc *c, const char *output, const char *hosts
         return;
     }
 
-    int idle = db_scalar_i64(g_db, "SELECT state='idle' FROM sessions WHERE id=?;",
+    int idle = db_scalar_i64(proc_db(), "SELECT state='idle' FROM sessions WHERE id=?;",
                              sid, 0) == 1;
     if (!idle) {
         char *payload = cron_inbox_payload(NULL, text);
         if (payload) {
-            inbox_insert(g_db, sid, "cron", c->cron_job, payload);
+            inbox_insert(proc_db(), sid, "cron", c->cron_job, payload);
             free(payload);
         }
         wake_session(sid);
@@ -3090,8 +3076,8 @@ static void cron_script_post(ChildProc *c, const char *output, const char *hosts
         return;
     }
 
-    int64_t rid = entry_append_cron_result(g_db, sid, c->cron_job, text, is_err);
-    if (rid > 0 && hosts) db_entry_set_network_hosts(g_db, rid, hosts);
+    int64_t rid = entry_append_cron_result(proc_db(), sid, c->cron_job, text, is_err);
+    if (rid > 0 && hosts) db_entry_set_network_hosts(proc_db(), rid, hosts);
     free(clean);
 
     /* Ordinary delivery: the session's edges decide (specs/delivery.md) — a
@@ -3099,7 +3085,7 @@ static void cron_script_post(ChildProc *c, const char *output, const char *hosts
      * standing parent edge. A plain session has no edges, keeps the entry and
      * says nothing — the model reads it on its next turn. include_channel
      * even on error: a failed script's output always reached the chat. */
-    advance_deliver_boundary(g_db, sid, is_err, 1);
+    advance_deliver_boundary(proc_db(), sid, is_err, 1);
     deliver_response(sid);   /* daemon FIFO nudge for any outbox row written */
 }
 
@@ -3110,7 +3096,7 @@ static void reap_children(void) {
         ChildProc *c = child_find(pid);
         if (!c) {
             /* Check if it's a channel process */
-            channel_reap(pid, g_db);
+            channel_reap(pid, proc_db());
             continue;
         }
 
@@ -3147,15 +3133,15 @@ static void reap_children(void) {
              * network_hosts-tagged results, so a transform hook must not be
              * able to smuggle a forged fence past storage-time sanitization. */
             char *hook_annotate = NULL;
-            if (g_tool_setup) {
-                char *rep = hook_dispatch_observe_tool_call(&g_tool_setup->ext_ctx,
-                                g_db, c->tool_name, c->tool_args, output,
+            if (proc_tool_setup()) {
+                char *rep = hook_dispatch_observe_tool_call(&proc_tool_setup()->ext_ctx,
+                                proc_db(), c->tool_name, c->tool_args, output,
                                 &hook_annotate);
                 if (rep) { free(output); output = rep; out_len = strlen(output); }
             }
 
             /* CLI progress */
-            if (g_mode == 0) {
+            if (!proc_is_daemon()) {
                 if (out_len <= 80)
                     fprintf(stdout, "\033[2m→ %s\033[0m\n", output);
                 else
@@ -3175,15 +3161,15 @@ static void reap_children(void) {
             int is_err = (strncmp(output, "error:", 6) == 0);
             Message msg = {.role = ROLE_TOOL, .tool_result = &tr,
                            .tool_name = "", .is_error = is_err};
-            int64_t rid = entry_append_with_iteration(g_db, session_id, &msg, c->iteration_id);
+            int64_t rid = entry_append_with_iteration(proc_db(), session_id, &msg, c->iteration_id);
             if (hosts && rid > 0)
-                db_entry_set_network_hosts(g_db, rid, hosts);
-            db_tool_call_complete_with_result(g_db, c->entry_id, c->tool_call_id, rid);
+                db_entry_set_network_hosts(proc_db(), rid, hosts);
+            db_tool_call_complete_with_result(proc_db(), c->entry_id, c->tool_call_id, rid);
             LOG_INFO_("tool done tool=%s is_err=%d", c->tool_name, is_err);
             LOG_TRACE_("tool result tool=%s len=%zu content=%s",
                        c->tool_name, out_len, output);
             if (hook_annotate) {
-                if (rid > 0) hook_entry_data_patch(g_db, rid, hook_annotate);
+                if (rid > 0) hook_entry_data_patch(proc_db(), rid, hook_annotate);
                 free(hook_annotate);
             }
             free(stored);
@@ -3265,7 +3251,7 @@ static void print_usage(void) {
 
 /* Session picker (preserved from old main.c) */
 static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_session) {
-    if (new_session) return session_create(db, "cli", g_agent_name, -1, 0);
+    if (new_session) return session_create(db, "cli", proc_agent_name(), -1, 0);
     if (requested_id > 0) return requested_id;
 
     const char *sql =
@@ -3275,7 +3261,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
         " FROM sessions s ORDER BY s.updated_at DESC;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return session_create(db, "cli", g_agent_name, -1, 0);
+        return session_create(db, "cli", proc_agent_name(), -1, 0);
 
     typedef struct { int64_t id; time_t created; char first[52]; char last[52]; } Row;
     int cap = 8, count = 0;
@@ -3294,7 +3280,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
     }
     sqlite3_finalize(stmt);
 
-    if (count == 0) { free(rows); return session_create(db, "cli", g_agent_name, -1, 0); }
+    if (count == 0) { free(rows); return session_create(db, "cli", proc_agent_name(), -1, 0); }
     if (!isatty(STDIN_FILENO)) { int64_t r = rows[0].id; free(rows); return r; }
 
     printf("sessions:\n");
@@ -3310,7 +3296,7 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
     char buf[32];
     if (!fgets(buf, sizeof(buf), stdin)) { free(rows); return -1; }
     int64_t result;
-    if (buf[0] == 'n' || buf[0] == 'N') result = session_create(db, "cli", g_agent_name, -1, 0);
+    if (buf[0] == 'n' || buf[0] == 'N') result = session_create(db, "cli", proc_agent_name(), -1, 0);
     else { int ch = atoi(buf); result = (ch >= 1 && ch <= count) ? rows[ch-1].id : -1; }
     free(rows);
     return result;
@@ -3319,10 +3305,10 @@ static int64_t cli_select_session(sqlite3 *db, int64_t requested_id, int new_ses
 /* ── CLI turn trigger ───────────────────────────────────────────── */
 
 static void cli_start_turn(const char *input) {
-    inbox_insert_scanned(g_db, g_cli_session, "cli", NULL, input);
-    g_cli_turn_active = 1;
+    inbox_insert_scanned(proc_db(), proc_cli_session(), "cli", NULL, input);
+    proc_set_cli_turn_active(1);
     cli_indicator_show();
-    run_advance(g_cli_session);
+    run_advance(proc_cli_session());
 }
 
 /* ── main ───────────────────────────────────────────────────────── */
@@ -3340,7 +3326,7 @@ static void cli_start_turn(const char *input) {
  * a headless install (daemon-only, e.g. a channel-driven deploy) must not
  * depend on someone having run the CLI once to get a routable agent. */
 static void ensure_default_agent(const char *base_dir) {
-    int ac = 0; char **al = db_agent_list(g_db, &ac);
+    int ac = 0; char **al = db_agent_list(proc_db(), &ac);
     if (!al || ac == 0) {
         char ws[PATH_MAX]; snprintf(ws, sizeof(ws), "%s/agents/Assistant/workspace/.keep", base_dir);
         util_ensure_parent_dir(ws);
@@ -3350,60 +3336,60 @@ static void ensure_default_agent(const char *base_dir) {
             " VALUES('Assistant', ?, 'standard');"
             ;
         sqlite3_stmt *bs;
-        if (sqlite3_prepare_v2(g_db, agent_sql, -1, &bs, NULL) == SQLITE_OK) {
+        if (sqlite3_prepare_v2(proc_db(), agent_sql, -1, &bs, NULL) == SQLITE_OK) {
             sqlite3_bind_text(bs, 1, TPL_DEFAULT_SYSTEM_PROMPT_MD, -1, SQLITE_STATIC);
             sqlite3_step(bs); sqlite3_finalize(bs);
         }
         /* Seed default tools as grants */
-        agent_grant_defaults(g_db, "Assistant");
+        agent_grant_defaults(proc_db(), "Assistant");
         /* Disabled 'heartbeat' bare-wake job — visible/enable-able in cron_list. */
-        cron_seed_heartbeat(g_db, "Assistant");
+        cron_seed_heartbeat(proc_db(), "Assistant");
         /* default_agent needs no write — 'Assistant' is the registry default */
         /* Seed default memory blocks. Explicitly 'system' placement: identity
          * (who am I / who is the user) belongs in the system prompt, where it
          * changes rarely and stays in the cached prefix — unlike new blocks,
          * which default to the per-turn 'context' placement. */
-        memory_block_create(g_db, "Assistant", "AGENT",
+        memory_block_create(proc_db(), "Assistant", "AGENT",
             "Your identity, capabilities, and operational notes. Update as you learn about yourself.",
             5000, "system");
-        memory_block_create(g_db, "Assistant", "USER",
+        memory_block_create(proc_db(), "Assistant", "USER",
             "Information about the user: preferences, context, working style. Update as you learn.",
             5000, "system");
         /* AGENT gets one functional starter entry (it drives the self-naming
          * flow). USER starts empty — its description already states the block's
          * purpose, so a placeholder entry would just be noise the model has to
          * carry until it edits it away. */
-        memory_entry_add(g_db, "Assistant", "AGENT",
+        memory_entry_add(proc_db(), "Assistant", "AGENT",
             "You are CClaw. You do not have a name yet — ask the user what they would like to call you, then save it here with memory_edit.");
     }
     if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
 }
 
 static int run_daemon(char *db_path) {
-    g_mode = 1;
+    proc_set_daemon(1);
     g_next_db_poll = time(NULL);  /* run DB checks immediately on first iter */
-    workspace_init(g_cfg);
+    workspace_init(proc_cfg());
 
-    /* Tool dispatch setup. Without this g_tool_setup is NULL and every forkable
+    /* Tool dispatch setup. Without this proc_tool_setup() is NULL and every forkable
      * tool resolves to "unknown tool" in daemon mode. The daemon serves many
      * agents through this one shared setup; caps are re-bound to the advancing
      * session's agent before each dispatch (run_advance). The init agent name
      * just seeds the caps/contexts; agents_dir backs rename support. */
     char daemon_agent[64];
-    { char *def = config_get(g_db, "default_agent");
+    { char *def = config_get(proc_db(), "default_agent");
       snprintf(daemon_agent, sizeof(daemon_agent), "%s", def ? def : "Assistant");
       free(def); }
-    snprintf(g_agent_name, sizeof(g_agent_name), "%s", daemon_agent);
+    proc_set_agent_name(daemon_agent);
     char daemon_agents_dir[PATH_MAX];
     { char base[PATH_MAX]; snprintf(base, sizeof(base), "%s", db_path);
       char *sl = strrchr(base, '/'); if (sl) *sl = '\0'; else snprintf(base, sizeof(base), ".");
       snprintf(daemon_agents_dir, sizeof(daemon_agents_dir), "%s/agents", base);
       ensure_default_agent(base); }
     AgentSetup daemon_setup;
-    agent_setup_init(&daemon_setup, g_db, 0, g_cfg, g_agent_name);
+    agent_setup_init(&daemon_setup, proc_db(), 0, proc_cfg(), proc_agent_name());
     daemon_setup.req_cfg_ctx.agents_dir = daemon_agents_dir;
-    daemon_setup.req_cfg_ctx.agent_name = g_agent_name;
-    g_tool_setup = &daemon_setup;
+    daemon_setup.req_cfg_ctx.agent_name = proc_agent_name();
+    proc_set_tool_setup(&daemon_setup);
     /* Scheduled scripts need the child table, which only the daemon has. */
     cron_set_script_runner(cron_script_run);
 
@@ -3414,22 +3400,22 @@ static int run_daemon(char *db_path) {
      * never any part of its value. */
     LOG_INFO_("daemon: config: provider=%s model=%s endpoint=%s wire=%s"
               " workspace=%s db=%s api_key=%s",
-              g_cfg->provider.name ? g_cfg->provider.name : "(builtin)",
-              g_cfg->provider.model ? g_cfg->provider.model : "(unset)",
-              g_cfg->provider.base_url ? g_cfg->provider.base_url : "(unset)",
-              g_cfg->provider.endpoint_type == ENDPOINT_GEMINI ? "gemini" : "openai",
-              g_cfg->workspace ? g_cfg->workspace : "(unset)",
-              g_cfg->db_path ? g_cfg->db_path : "(unset)",
-              g_cfg->provider.api_key_source ? g_cfg->provider.api_key_source
+              proc_cfg()->provider.name ? proc_cfg()->provider.name : "(builtin)",
+              proc_cfg()->provider.model ? proc_cfg()->provider.model : "(unset)",
+              proc_cfg()->provider.base_url ? proc_cfg()->provider.base_url : "(unset)",
+              proc_cfg()->provider.endpoint_type == ENDPOINT_GEMINI ? "gemini" : "openai",
+              proc_cfg()->workspace ? proc_cfg()->workspace : "(unset)",
+              proc_cfg()->db_path ? proc_cfg()->db_path : "(unset)",
+              proc_cfg()->provider.api_key_source ? proc_cfg()->provider.api_key_source
                                              : "(none)");
-    web_start(g_cfg, g_db, db_path);
+    web_start(proc_cfg(), proc_db(), db_path);
     /* No heartbeat thread: the pulse is a seeded bare-wake cron row fired by
      * cron_run_due off the db_periodic tick — one scheduler. */
 
     /* Start LLM worker threads */
     if (llm_worker_start(db_path, g_llm_threads) != 0) {
         LOG_ERROR_("daemon: failed to start LLM worker");
-        config_free(g_cfg); db_close(g_db); free(db_path); return 1;
+        config_free(proc_cfg()); db_close(proc_db()); free(db_path); return 1;
     }
     int daemon_worker_fd = llm_worker_fd();
     util_set_nonblock(daemon_worker_fd);
@@ -3437,13 +3423,13 @@ static int run_daemon(char *db_path) {
     /* Re-run media jobs (voice transcriptions) a crashed run left behind —
      * same crash-recovery idea as llm_jobs, except these rows are re-runnable
      * (input is in the row), so resubmit instead of delete. */
-    llm_worker_resubmit_media(g_db);
+    llm_worker_resubmit_media(proc_db());
 
     /* Fire-and-forget tool threads (EXEC_THREAD vehicle) */
     if (tool_thread_start(db_path, 0) != 0) {
         LOG_ERROR_("daemon: failed to start tool threads");
         llm_worker_stop();
-        config_free(g_cfg); db_close(g_db); free(db_path); return 1;
+        config_free(proc_cfg()); db_close(proc_db()); free(db_path); return 1;
     }
     int daemon_tool_fd = tool_thread_fd();
 
@@ -3461,12 +3447,12 @@ static int run_daemon(char *db_path) {
       sigaction(SIGCHLD, &sa, NULL); }
 
     /* Launch channel processes */
-    channel_launch_all(g_db);
+    channel_launch_all(proc_db());
 
     /* Sweep events parked from a previous life. Consume is otherwise only
      * triggered by a FIFO wake, so anything left in channel_events at crash
      * or restart would wait for the *next* inbound message to be replayed. */
-    channel_consume_events(g_db);
+    channel_consume_events(proc_db());
 
     /* poll() setup — sized for fixed fds + all children with result pipes */
     int max_pfds = 6 + CHILD_MAX;  /* chld, wake, fifo, worker, tool-thread, result pipes */
@@ -3475,9 +3461,11 @@ static int run_daemon(char *db_path) {
 
     /* Register in the liveness table so this daemon's in-flight sessions are
      * owner-stamped and never reclaimed by a peer's recovery. */
-    if (process_register(g_db, "daemon", getpid(), g_instance_id, sizeof(g_instance_id)) != 0)
+    char inst[PROC_INSTANCE_ID_MAX] = {0};
+    if (process_register(proc_db(), "daemon", getpid(), inst, sizeof inst) != 0)
         LOG_ERROR_("daemon: process registration failed");
-    db_set_instance_id(g_instance_id);
+    proc_set_instance_id(inst);
+    db_set_instance_id(proc_instance_id());
 
     /* Daemon event loop */
     while (!shutdown_requested()) {
@@ -3512,7 +3500,7 @@ static int run_daemon(char *db_path) {
         if (fifo_idx >= 0 && (pfds[fifo_idx].revents & POLLIN)) {
             char drain[64];
             while (read(fifo_fd, drain, sizeof(drain)) > 0) {}
-            channel_consume_events(g_db);
+            channel_consume_events(proc_db());
         }
         if (pfds[d_worker_idx].revents & POLLIN)
             event_step_worker(daemon_worker_fd);
@@ -3520,7 +3508,7 @@ static int run_daemon(char *db_path) {
             event_step_tool_thread();
 
         child_sweep_deadlines();
-        channel_tick(g_db);
+        channel_tick(proc_db());
 
         /* DB periodic work — gated on interval */
         time_t now = time(NULL);
@@ -3542,24 +3530,24 @@ static int run_daemon(char *db_path) {
     signal(SIGCHLD, SIG_DFL);
     close(g_chld_pipe[0]); close(g_chld_pipe[1]);
     wake_close(); wake_fifo_close(fifo_fd, db_path);
-    process_unregister(g_db, g_instance_id);
+    process_unregister(proc_db(), proc_instance_id());
     cron_set_script_runner(NULL);
-    g_tool_setup = NULL;
+    proc_set_tool_setup(NULL);
     agent_setup_destroy(&daemon_setup);
-    config_free(g_cfg); db_close(g_db); free(db_path);
+    config_free(proc_cfg()); db_close(proc_db()); free(db_path);
     return 0;
 }
 
 static int run_cli(char *db_path, const char *prompt,
                    int64_t session_id, int new_session, int host_mode, int auto_approve) {
     /* ── CLI mode ────────────────────────────────────────────────── */
-    g_mode = 0;
-    g_auto_approve = auto_approve;
+    proc_set_daemon(0);
+    proc_set_auto_approve(auto_approve);
     g_next_db_poll = time(NULL);
 
-    if (!g_cfg->provider.api_key || !g_cfg->provider.api_key[0]) {
+    if (!proc_cfg()->provider.api_key || !proc_cfg()->provider.api_key[0]) {
         fprintf(stderr, "error: no API key (set OPENROUTER_API_KEY)\n");
-        config_free(g_cfg); db_close(g_db); free(db_path); return 1;
+        config_free(proc_cfg()); db_close(proc_db()); free(db_path); return 1;
     }
 
     /* Derive base_dir for workspace */
@@ -3571,10 +3559,10 @@ static int run_cli(char *db_path, const char *prompt,
     /* Agent selection */
     char *agent_sel = NULL;
     if (prompt || !isatty(STDIN_FILENO)) {
-        char *def = config_get(g_db, "default_agent");
+        char *def = config_get(proc_db(), "default_agent");
         agent_sel = def ? def : strdup("Assistant");
     } else {
-        int ac = 0; char **al = db_agent_list(g_db, &ac);
+        int ac = 0; char **al = db_agent_list(proc_db(), &ac);
         if (ac == 1) { agent_sel = strdup(al[0]); }
         else if (ac > 1) {
             printf("agents:\n");
@@ -3587,15 +3575,15 @@ static int run_cli(char *db_path, const char *prompt,
         }
         if (al) { for (int i = 0; i < ac; i++) free(al[i]); free(al); }
     }
-    if (!agent_sel) { fprintf(stderr, "no agent selected\n"); free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path); return 1; }
-    snprintf(g_agent_name, sizeof(g_agent_name), "%s", agent_sel);
-    setenv("CCLAW_AGENT_NAME", g_agent_name, 1);
+    if (!agent_sel) { fprintf(stderr, "no agent selected\n"); free(base_dir); config_free(proc_cfg()); db_close(proc_db()); free(db_path); return 1; }
+    proc_set_agent_name(agent_sel);
+    setenv("CCLAW_AGENT_NAME", proc_agent_name(), 1);
     free(agent_sel);
 
     /* Inject agent config env vars (for forked children). -y skips kernel
      * isolation only — the agent's tool allowlist still applies. */
     {
-        AgentConfig *ac = agent_config_load_db(g_db, g_agent_name);
+        AgentConfig *ac = agent_config_load_db(proc_db(), proc_agent_name());
         if (ac) {
             if (ac->tool_count > 0) {
                 size_t len = 0; for (size_t i = 0; i < ac->tool_count; i++) len += strlen(ac->tools[i]) + 1;
@@ -3608,36 +3596,38 @@ static int run_cli(char *db_path, const char *prompt,
     }
     if (host_mode) setenv("CCLAW_SANDBOX_PROFILE", "host", 1);
     setenv("CCLAW_MODE", "cli", 1);
-    workspace_init(g_cfg);
+    workspace_init(proc_cfg());
     /* Make the workspace the process cwd so relative paths, shell children, and
      * fs.* all operate in the agent's workspace by default. (CLI only — the
      * daemon serves multiple agents and its tool children chdir per-agent.) */
-    if (g_cfg->workspace && chdir(g_cfg->workspace) != 0)
+    if (proc_cfg()->workspace && chdir(proc_cfg()->workspace) != 0)
         fprintf(stderr, "warning: chdir to workspace %s failed: %s\n",
-                g_cfg->workspace, strerror(errno));
+                proc_cfg()->workspace, strerror(errno));
     { char cwd[PATH_MAX]; if (getcwd(cwd, sizeof(cwd))) setenv("CCLAW_PATH", cwd, 1); }
 
     /* Set up tool schemas env for LLM proc children */
     AgentSetup setup;
-    agent_setup_init(&setup, g_db, 0, g_cfg, g_agent_name);
-    g_tool_setup = &setup;
-    /* Set agents_dir for rename support; point agent_name at g_agent_name for live update */
+    agent_setup_init(&setup, proc_db(), 0, proc_cfg(), proc_agent_name());
+    proc_set_tool_setup(&setup);
+    /* Set agents_dir for rename support; point agent_name at proc_agent_name() for live update */
     char agents_dir[PATH_MAX];
     snprintf(agents_dir, sizeof(agents_dir), "%s/agents", base_dir);
     setup.req_cfg_ctx.agents_dir = agents_dir;
-    setup.req_cfg_ctx.agent_name = g_agent_name;
+    setup.req_cfg_ctx.agent_name = proc_agent_name();
 
     /* Session selection */
-    session_id = cli_select_session(g_db, session_id, new_session);
-    if (session_id < 0) { agent_setup_destroy(&setup); free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path); return 1; }
-    g_cli_session = session_id;
+    session_id = cli_select_session(proc_db(), session_id, new_session);
+    if (session_id < 0) { agent_setup_destroy(&setup); free(base_dir); config_free(proc_cfg()); db_close(proc_db()); free(db_path); return 1; }
+    proc_set_cli_session(session_id);
     setup.req_cfg_ctx.session_id = session_id;
 
     /* Register in the liveness table before touching session state, so our
      * transitions stamp owner_instance and recovery won't reclaim them. */
-    if (process_register(g_db, "cli", getpid(), g_instance_id, sizeof(g_instance_id)) != 0)
+    char inst[PROC_INSTANCE_ID_MAX] = {0};
+    if (process_register(proc_db(), "cli", getpid(), inst, sizeof inst) != 0)
         LOG_WARN_("process registration failed kind=cli");
-    db_set_instance_id(g_instance_id);
+    proc_set_instance_id(inst);
+    db_set_instance_id(proc_instance_id());
 
     /* Refuse to drive a session another live process is mid-turn on — two
      * writers would corrupt its branch. Idle (owner NULL) or dead-owned
@@ -3645,7 +3635,7 @@ static int run_cli(char *db_path, const char *prompt,
     {
         char st[32] = {0}, owner[40] = {0};
         sqlite3_stmt *gs;
-        if (sqlite3_prepare_v2(g_db,
+        if (sqlite3_prepare_v2(proc_db(),
                 "SELECT state, COALESCE(owner_instance,'') FROM sessions WHERE id=?;",
                 -1, &gs, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(gs, 1, session_id);
@@ -3656,11 +3646,11 @@ static int run_cli(char *db_path, const char *prompt,
             sqlite3_finalize(gs);
         }
         int transient = strcmp(st, "idle") != 0 && st[0];
-        if (transient && owner[0] && strcmp(owner, g_instance_id) != 0 &&
-            process_is_live(g_db, owner, PROCESS_TTL_SEC)) {
+        if (transient && owner[0] && strcmp(owner, proc_instance_id()) != 0 &&
+            process_is_live(proc_db(), owner, PROCESS_TTL_SEC)) {
             char omode[16] = "cclaw"; int opid = 0;
             sqlite3_stmt *ps;
-            if (sqlite3_prepare_v2(g_db,
+            if (sqlite3_prepare_v2(proc_db(),
                     "SELECT mode, pid FROM processes WHERE instance_id=?;",
                     -1, &ps, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(ps, 1, owner, -1, SQLITE_STATIC);
@@ -3674,9 +3664,9 @@ static int run_cli(char *db_path, const char *prompt,
             fprintf(stderr,
                     "error: session %lld is being driven by %s pid %d\n",
                     (long long)session_id, omode, opid);
-            process_unregister(g_db, g_instance_id);
+            process_unregister(proc_db(), proc_instance_id());
             agent_setup_destroy(&setup); free(base_dir);
-            config_free(g_cfg); db_close(g_db); free(db_path);
+            config_free(proc_cfg()); db_close(proc_db()); free(db_path);
             return 1;
         }
     }
@@ -3705,7 +3695,7 @@ static int run_cli(char *db_path, const char *prompt,
         util_set_nonblock(worker_fd);
     } else {
         LOG_ERROR_("llm worker start failed");
-        agent_setup_destroy(&setup); free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path); return 1;
+        agent_setup_destroy(&setup); free(base_dir); config_free(proc_cfg()); db_close(proc_db()); free(db_path); return 1;
     }
 
     /* Fire-and-forget tool threads (EXEC_THREAD vehicle); cli_mode=1 prints the
@@ -3780,7 +3770,7 @@ static int run_cli(char *db_path, const char *prompt,
         if (cli_pfds[chld_idx].revents & POLLIN) {
             event_step_chld();
 
-            if (g_mode == 0 && !g_cli_turn_active) {
+            if (!proc_is_daemon() && !proc_cli_turn_active()) {
                 if (g_cli_done) goto done;
                 cli_prompt();
             }
@@ -3788,7 +3778,7 @@ static int run_cli(char *db_path, const char *prompt,
         if (worker_idx >= 0 && (cli_pfds[worker_idx].revents & POLLIN)) {
             event_step_worker(worker_fd);
 
-            if (g_mode == 0 && !g_cli_turn_active) {
+            if (!proc_is_daemon() && !proc_cli_turn_active()) {
                 if (g_cli_done) goto done;
                 cli_prompt();
             }
@@ -3800,14 +3790,14 @@ static int run_cli(char *db_path, const char *prompt,
                 if (child_has_session(msg.session_id)) continue;
                 run_advance(msg.session_id);
             }
-            if (g_mode == 0 && !g_cli_turn_active) {
+            if (!proc_is_daemon() && !proc_cli_turn_active()) {
                 if (g_cli_done) goto done;
                 cli_prompt();
             }
         }
         if (tool_idx >= 0 && (cli_pfds[tool_idx].revents & POLLIN)) {
             event_step_tool_thread();
-            if (g_mode == 0 && !g_cli_turn_active) {
+            if (!proc_is_daemon() && !proc_cli_turn_active()) {
                 if (g_cli_done) goto done;
                 cli_prompt();
             }
@@ -3819,7 +3809,7 @@ static int run_cli(char *db_path, const char *prompt,
             goto done;
         }
         if (stdin_idx >= 0 && (cli_pfds[stdin_idx].revents & POLLIN)) {
-            if (g_cli_turn_active) {
+            if (proc_cli_turn_active()) {
                 LOG_DEBUG_("stdin: POLLIN but turn active, skipping");
                 continue;
             }
@@ -3843,7 +3833,7 @@ static int run_cli(char *db_path, const char *prompt,
              * the CLI's session subtree, not just the root (a sub-agent's
              * request_config parks the same way and needs the same y/n). */
             {
-                Approval *pa = approval_get_pending_subtree(g_db, g_cli_session);
+                Approval *pa = approval_get_pending_subtree(proc_db(), proc_cli_session());
                 if (pa) {
                     ApprovalDecision d;
                     if (strcasecmp(linebuf, "once") == 0 || strcasecmp(linebuf, "o") == 0)
@@ -3885,7 +3875,7 @@ static int run_cli(char *db_path, const char *prompt,
 
 done:
     /* Print session cost */
-    { int64_t cost = session_cost(g_db, g_cli_session);
+    { int64_t cost = session_cost(proc_db(), proc_cli_session());
       if (cost > 0) fprintf(stderr, "\n[session cost: $%.6f]\n", (double)cost / 1e9); }
 
     /* A short -p run can exit before db_periodic's first tick, so parks that
@@ -3896,7 +3886,7 @@ done:
      * — that would hide an unanswered awaiting_approval call from recovery. */
     approval_sweep_expired();
     /* Quiesce the worker pool before freeing anything it may still touch
-     * (g_tool_setup/g_cfg/g_db). Mirrors the daemon shutdown order. */
+     * (proc_tool_setup()/proc_cfg()/proc_db()). Mirrors the daemon shutdown order. */
     llm_worker_stop();
     tool_thread_stop();  /* drain in-flight tool threads before freeing state */
     agent_setup_destroy(&setup);
@@ -3909,9 +3899,9 @@ done:
     /* Drop our registry row, then run recovery: any still-transient sessions we
      * owned (e.g. -p exiting with background sub-agents in flight, or a turn cut
      * short) are now dead-owned and get reclaimed instead of orphaned. */
-    process_unregister(g_db, g_instance_id);
-    db_recover_stale_sessions(g_db);
-    free(base_dir); config_free(g_cfg); db_close(g_db); free(db_path);
+    process_unregister(proc_db(), proc_instance_id());
+    db_recover_stale_sessions(proc_db());
+    free(base_dir); config_free(proc_cfg()); db_close(proc_db()); free(db_path);
     return rc;
 }
 
@@ -4021,78 +4011,77 @@ int main(int argc, char *argv[]) {
     db_configure_logging();   /* before the first db_open (sqlite3_initialize) */
     char *db_path = util_resolve_db_path();
     util_ensure_parent_dir(db_path);
-    g_db = db_open(db_path);
-    if (!g_db) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
+    proc_set_db(db_open(db_path));
+    if (!proc_db()) { fprintf(stderr, "cannot open DB: %s\n", db_path); free(db_path); return 1; }
 
-    if (!db_schema_compat(g_db)) {
+    if (!db_schema_compat(proc_db())) {
         fprintf(stderr,
             "error: %s cannot be upgraded to schema v%d.\n"
             "The DB may be from a future build or too old. Delete it and restart:\n"
             "  rm %s %s-wal %s-shm\n",
             db_path, CCLAW_SCHEMA_VERSION, db_path, db_path, db_path);
-        db_close(g_db); free(db_path); return 1;
+        db_close(proc_db()); free(db_path); return 1;
     }
 
     /* Schema + seed in one exclusive transaction. When multiple processes
      * start concurrently (daemon + CLI), the first grabs the write lock and
      * does all DDL + seeding atomically; the others wait (busy handler) then
      * find everything already done (IF NOT EXISTS / COUNT>0 checks). */
-    sqlite3_exec(g_db, "BEGIN EXCLUSIVE", NULL, NULL, NULL);
-    if (db_ensure_schema(g_db) != 0) {
-        sqlite3_exec(g_db, "ROLLBACK", NULL, NULL, NULL);
-        db_close(g_db); free(db_path); return 1;
+    sqlite3_exec(proc_db(), "BEGIN EXCLUSIVE", NULL, NULL, NULL);
+    if (db_ensure_schema(proc_db()) != 0) {
+        sqlite3_exec(proc_db(), "ROLLBACK", NULL, NULL, NULL);
+        db_close(proc_db()); free(db_path); return 1;
     }
-    db_seed_defaults(g_db);
-    config_registry_sync(g_db);
-    sqlite3_exec(g_db, "COMMIT", NULL, NULL, NULL);
+    db_seed_defaults(proc_db());
+    config_registry_sync(proc_db());
+    sqlite3_exec(proc_db(), "COMMIT", NULL, NULL, NULL);
 
     { uint8_t sk[32]; if (secret_key_load_or_create(db_path, sk) == 0) db_set_secret_key(sk); }
 
     /* Reinstalls the shipped bundles on every start (files are a cache of
      * the binary's templates); idempotent against a current DB. */
-    extension_install_builtin(g_db, db_path);
+    extension_install_builtin(proc_db(), db_path);
 
-    g_cfg = config_load(g_db);
-    if (!g_cfg) { fprintf(stderr, "config load failed\n"); db_close(g_db); return 1; }
+    proc_set_cfg(config_load(proc_db()));
+    if (!proc_cfg()) { fprintf(stderr, "config load failed\n"); db_close(proc_db()); return 1; }
     if (log_level_set) {
-        g_cfg->log_level = log_level_override;
+        proc_cfg()->log_level = log_level_override;
         setenv("CCLAW_LOG_LEVEL", log_level_name(log_level_override), 1);
     } else if (cli_tty && !getenv("CCLAW_LOG_LEVEL")) {
         /* Interactive CLI defaults to errors-only on the tty so logs don't
          * clutter the conversation; -v/-vv or CCLAW_LOG_LEVEL opt back in.
          * (The daemon keeps the info default.) */
-        g_cfg->log_level = LOG_LEVEL_ERROR;
+        proc_cfg()->log_level = LOG_LEVEL_ERROR;
     }
-    cclaw_log_set_level(g_cfg->log_level);
-    snprintf(g_log_level_env, sizeof g_log_level_env, "CCLAW_LOG_LEVEL=%s",
-             log_level_name(g_cfg->log_level));
+    cclaw_log_set_level(proc_cfg()->log_level);
+    proc_set_log_level_env(log_level_name(proc_cfg()->log_level));
 
     /* Enable SQLite query profiling at debug level and above */
-    db_set_slow_query_ms(config_get_int(g_db, "sql_slow_ms"));
-    if (g_cfg->log_level >= LOG_LEVEL_DEBUG)
-        db_enable_trace(g_db);
+    db_set_slow_query_ms(config_get_int(proc_db(), "sql_slow_ms"));
+    if (proc_cfg()->log_level >= LOG_LEVEL_DEBUG)
+        db_enable_trace(proc_db());
 
     /* ── Channel lifecycle gate ──────────────────────────────────────
      * --activate (validated→active) is a pure DB transition, no JS touched —
-     * reuses the already-open g_db. --check runs the same JS-load + onInit()
+     * reuses the already-open proc_db(). --check runs the same JS-load + onInit()
      * sequence the live runner does (via channel_runner_check), then this
      * process (not the runner) applies the draft/broken→validated transition
      * on success — keeping "did it pass" and "did we record that" separate. */
     if (channel_mode && channel_activate_flag) {
-        int rc = channel_activate(g_db, channel_mode);
+        int rc = channel_activate(proc_db(), channel_mode);
         if (rc == 0) {
             printf("channel '%s': validated -> active\n", channel_mode);
         } else {
-            char *cur = channel_get_status(g_db, channel_mode);
+            char *cur = channel_get_status(proc_db(), channel_mode);
             fprintf(stderr, "error: cannot activate '%s' (status=%s, need 'validated')\n",
                     channel_mode, cur ? cur : "unknown/missing");
             free(cur);
         }
-        config_free(g_cfg); db_close(g_db); free(db_path);
+        config_free(proc_cfg()); db_close(proc_db()); free(db_path);
         return rc == 0 ? 0 : 1;
     }
     if (channel_mode && channel_check) {
-        config_free(g_cfg); db_close(g_db);
+        config_free(proc_cfg()); db_close(proc_db());
         char *err = NULL;
         int rc = channel_runner_check(db_path, channel_mode, &err);
         if (rc == 0) {
@@ -4112,7 +4101,7 @@ int main(int argc, char *argv[]) {
         return rc == 0 ? 0 : 1;
     }
     if (channel_mode && channel_harness_scenario) {
-        config_free(g_cfg); db_close(g_db);
+        config_free(proc_cfg()); db_close(proc_db());
         int rc = channel_harness_run(db_path, channel_mode, channel_harness_scenario);
         free(db_path);
         return rc;
@@ -4124,7 +4113,7 @@ int main(int argc, char *argv[]) {
      * channel_runner binary, so ps shows `cclaw --channel <name>`. The runner
      * opens its own DB ctx, so drop ours first. */
     if (channel_mode) {
-        config_free(g_cfg); db_close(g_db);
+        config_free(proc_cfg()); db_close(proc_db());
         int rc = channel_runner_main(db_path, channel_mode);
         free(db_path);
         return rc;
@@ -4135,8 +4124,8 @@ int main(int argc, char *argv[]) {
      * making their sessions dead-owned and thus reclaimable. This process is not
      * yet registered, so it owns nothing — a live peer's row spares its own
      * sessions. Owner-scoped, so it's also safe on the periodic path. ── */
-    process_gc_dead(g_db, PROCESS_TTL_SEC);
-    if (db_recover_stale_sessions(g_db) != 0)
+    process_gc_dead(proc_db(), PROCESS_TTL_SEC);
+    if (db_recover_stale_sessions(proc_db()) != 0)
         LOG_WARN_("startup recovery failed");
 
     if (daemon_mode) return run_daemon(db_path);

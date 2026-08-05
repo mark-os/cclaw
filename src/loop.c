@@ -7,6 +7,7 @@
 #include "advance.h"
 #include "agent_setup.h"
 #include "channel_api.h"
+#include "child.h"
 #include "cli.h"
 #include "config_registry.h"
 #include "context.h"

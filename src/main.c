@@ -65,6 +65,7 @@
 #include "resolve.h"
 #include "web.h"
 #include "cron.h"
+#include "child.h"
 #include "cli.h"
 #include "loop.h"
 #include "proc.h"
@@ -72,99 +73,6 @@
 
 _Static_assert(sizeof(WakeMsg) <= PIPE_BUF,
     "WakeMsg must fit in PIPE_BUF so wake-pipe writes stay atomic");
-
-/* ── Constants ──────────────────────────────────────────────────── */
-
-#define CHILD_MAX 48
-#define TOOL_MAX_OUTPUT (60 * 1024)  /* 60KB — fits in pipe buffer */
-
-/* ── Child types and tracking ───────────────────────────────────── */
-
-/* CHILD_CRON_SCRIPT is a --run-tool child like CHILD_TOOL_EXEC — same fork,
- * same JS tier, same result pipe — answering a cron fire instead of a model
- * tool call, so its completion posts a cron_result (or an inbox row) rather
- * than a tool result. */
-typedef enum { CHILD_CHANNEL, CHILD_TOOL_EXEC, CHILD_CRON_SCRIPT } ChildType;
-
-typedef struct {
-    pid_t pid;
-    ChildType type;
-    int64_t session_id;
-    char agent_name[64];
-    /* LLM_REQ fields */
-    int iteration;
-    /* TOOL_EXEC fields */
-    char tool_call_id[64];
-    char tool_name[64];     /* for the §8 observer hook */
-    char *tool_args;        /* strdup'd args for the observer; freed on cleanup */
-    int64_t iteration_id;
-    int64_t entry_id;       /* tool_call entry id */
-    int result_pipe;        /* read end of pipe for tool output */
-    char *outbuf;           /* Accumulator for tool output (grows with realloc) */
-    size_t outbuf_len;      /* Bytes currently in outbuf */
-    /* fd-3 frame parse state: [4-byte meta_len (network order)][hosts JSON]
-     * [result to EOF]. The pipe is non-blocking and poll-driven, so header
-     * and meta can arrive fragmented across drains. */
-    size_t frame_hdr_read;      /* bytes of the 4-byte header consumed */
-    unsigned char frame_hdr[4];
-    size_t frame_meta_len;      /* parsed meta length (valid once hdr_read==4) */
-    size_t frame_meta_read;     /* meta bytes consumed so far */
-    char *hosts_json;           /* meta payload; NULL if absent/oversized */
-    /* Channel fields */
-    char channel_name[64];
-    char binary_path[512];
-    int restart_count;
-    /* CRON_SCRIPT fields */
-    char cron_job[80];      /* job name — the result's source_ref / data.job */
-    char *cron_prompt;      /* 'both' payload: rides one inbox row with the
-                             * script output; NULL for a script-only fire */
-    /* Deadline: 0 = no timeout, >0 = SIGKILL after this time */
-    time_t deadline;
-    int timeout_sec;        /* window used for `deadline`, for the timeout message */
-} ChildProc;
-
-static ChildProc g_children[CHILD_MAX];
-static int g_child_count;
-
-static ChildProc *child_find(pid_t pid) {
-    for (int i = 0; i < g_child_count; i++)
-        if (g_children[i].pid == pid) return &g_children[i];
-    return NULL;
-}
-
-static void child_remove(ChildProc *c) {
-    int idx = (int)(c - g_children);
-    if (idx < 0 || idx >= g_child_count) return;
-    if (c->result_pipe >= 0) {
-        close(c->result_pipe);
-        c->result_pipe = -1;
-    }
-    free(c->outbuf);
-    c->outbuf = NULL;
-    c->outbuf_len = 0;
-    free(c->hosts_json);
-    c->hosts_json = NULL;
-    free(c->tool_args);
-    c->tool_args = NULL;
-    free(c->cron_prompt);
-    c->cron_prompt = NULL;
-    g_children[idx] = g_children[g_child_count - 1];
-    g_child_count--;
-}
-
-/* Both --run-tool child kinds: forked, sandboxed, answering over a result
- * pipe. Everything that polls or drains those pipes covers both. */
-static int child_is_run_tool(const ChildProc *c) {
-    return c->type == CHILD_TOOL_EXEC || c->type == CHILD_CRON_SCRIPT;
-}
-
-int child_has_session(int64_t session_id) {
-    for (int i = 0; i < g_child_count; i++)
-        if (g_children[i].type == CHILD_TOOL_EXEC
-            && g_children[i].session_id == session_id)
-            return 1;
-    return 0;
-}
 
 /* Sessions parked on a capacity ceiling, re-advanced when capacity frees.
  * Two feeders: tool dispatch that hit CHILD_MAX (dispatch_tool returned -1 —
@@ -189,24 +97,10 @@ void stalled_add(int64_t session_id) {
 /* ── Globals ────────────────────────────────────────────────────── */
 
 /* Forward declarations */
-static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
-                                const char *tool_call_id, const char *tool_name,
-                                const char *tool_args, int64_t iteration_id,
-                                int64_t entry_id, const char *blob, size_t blob_len,
-                                int timeout_sec);
 static void cron_script_post(ChildProc *c, const char *output, const char *hosts);
 
 static int g_llm_threads = 4;     /* worker thread pool size */
 static int g_cli_done;          /* 1 = exit after turn completes (for -p mode) */
-
-/* SIGCHLD self-pipe */
-static int g_chld_pipe[2] = {-1, -1};
-
-static void sigchld_handler(int sig) {
-    (void)sig;
-    char c = 1;
-    (void)write(g_chld_pipe[1], &c, 1);
-}
 
 /* ── dispatch_llm_req ────────────────────────────────────────────── */
 
@@ -990,7 +884,7 @@ static char *js_request_serialize(JsEvalCtx *jc, const char *agent_name,
 static int dispatch_tool_inner(int64_t session_id, const char *agent_name,
                                PendingToolCall *tc,
                                const ShellSecret *secrets, size_t secret_count) {
-    if (g_child_count >= CHILD_MAX) return -1;
+    if (child_count() >= CHILD_MAX) return -1;
 
     ToolEntry *te = proc_tool_setup() ? tools_lookup(&proc_tool_setup()->reg, tc->name) : NULL;
     if (!te && proc_tool_setup()) {
@@ -1426,188 +1320,6 @@ int dispatch_tool(int64_t session_id, const char *agent_name,
     return rc;
 }
 
-/* ── Pipe draining helpers ─────────────────────────────────────── */
-
-/* Largest hosts-JSON meta accepted from a child; larger metas are drained and
- * discarded (hosts_json stays NULL) so a misbehaving child can't balloon us. */
-#define FRAME_META_MAX (64 * 1024)
-
-/* Drain a tool child's result pipe (nonblocking): parse the frame header +
- * hosts meta, then accumulate the result body into c->outbuf, kept
- * NUL-terminated. Body bytes beyond TOOL_MAX_OUTPUT are read and discarded so
- * the child never blocks on a full pipe. Closes the fd on EOF or error;
- * leaves it open on EAGAIN (more data may come). */
-static void child_drain_pipe(ChildProc *c) {
-    if (c->result_pipe < 0) return;
-
-    char buf[4096];
-    ssize_t n;
-    while ((n = read(c->result_pipe, buf, sizeof(buf))) > 0) {
-        size_t off = 0;
-
-        /* Frame header: 4-byte network-order meta length, may arrive split. */
-        while (c->frame_hdr_read < 4 && off < (size_t)n)
-            c->frame_hdr[c->frame_hdr_read++] = (unsigned char)buf[off++];
-        if (c->frame_hdr_read == 4 && c->frame_meta_read == 0 && !c->hosts_json) {
-            c->frame_meta_len = ((size_t)c->frame_hdr[0] << 24) |
-                                ((size_t)c->frame_hdr[1] << 16) |
-                                ((size_t)c->frame_hdr[2] << 8)  |
-                                 (size_t)c->frame_hdr[3];
-            if (c->frame_meta_len > 0 && c->frame_meta_len <= FRAME_META_MAX &&
-                !c->hosts_json)
-                c->hosts_json = calloc(1, c->frame_meta_len + 1);
-        }
-        if (c->frame_hdr_read < 4) continue;
-
-        /* Meta bytes (hosts JSON); oversized meta is consumed but dropped. */
-        while (c->frame_meta_read < c->frame_meta_len && off < (size_t)n) {
-            size_t want = c->frame_meta_len - c->frame_meta_read;
-            size_t avail = (size_t)n - off;
-            size_t take = want < avail ? want : avail;
-            if (c->hosts_json)
-                memcpy(c->hosts_json + c->frame_meta_read, buf + off, take);
-            c->frame_meta_read += take;
-            off += take;
-        }
-        if (off >= (size_t)n) continue;
-
-        /* Result body. */
-        size_t to_copy = (size_t)n - off;
-        if (c->outbuf_len + to_copy > TOOL_MAX_OUTPUT)
-            to_copy = TOOL_MAX_OUTPUT - c->outbuf_len;
-        if (to_copy == 0) continue; /* at cap: keep draining, discard */
-        char *tmp = realloc(c->outbuf, c->outbuf_len + to_copy + 1);
-        if (!tmp) continue; /* OOM: drop chunk, keep child unblocked */
-        memcpy(tmp + c->outbuf_len, buf + off, to_copy);
-        c->outbuf = tmp;
-        c->outbuf_len += to_copy;
-        c->outbuf[c->outbuf_len] = '\0';
-    }
-    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-        close(c->result_pipe);
-        c->result_pipe = -1;
-    }
-}
-
-/* Append every live tool result pipe to a pollfd set being rebuilt. */
-static int add_result_pipe_fds(struct pollfd *pfds, int nfds, int max) {
-    for (int i = 0; i < g_child_count && nfds < max; i++) {
-        if (child_is_run_tool(&g_children[i]) && g_children[i].result_pipe >= 0) {
-            pfds[nfds].fd = g_children[i].result_pipe;
-            pfds[nfds].events = POLLIN;
-            nfds++;
-        }
-    }
-    return nfds;
-}
-
-/* Drain whichever result pipes poll() reported readable. */
-static void drain_ready_result_pipes(const struct pollfd *pfds, int base, int nfds) {
-    for (int i = base; i < nfds; i++) {
-        if (!(pfds[i].revents & (POLLIN | POLLHUP))) continue;
-        for (int j = 0; j < g_child_count; j++) {
-            if (child_is_run_tool(&g_children[j]) &&
-                g_children[j].result_pipe == pfds[i].fd) {
-                child_drain_pipe(&g_children[j]);
-                break;
-            }
-        }
-    }
-}
-
-/* ── spawn_run_tool_child: fork+exec a --run-tool child ──────────── */
-
-#define FD_REQUEST RUNTOOL_FD_REQUEST  /* the socketpair fd in the child */
-
-/* Spawn a sandboxed --run-tool child via fork+execve and register it. The
- * request blob is sent over a socketpair (fd 3 in the child). Returns the
- * child's slot (caller fills the kind-specific fields) or NULL if the ceiling
- * is reached, the socketpair fails, or the fork/write fails. */
-static ChildProc *spawn_run_tool_blob(ChildType type, int64_t session_id,
-                                      const char *agent_name, const char *blob,
-                                      size_t blob_len, int timeout_sec) {
-    if (g_child_count >= CHILD_MAX) return NULL;
-
-    int sp[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sp) != 0) return NULL;
-
-    /* sp[0] = parent side, sp[1] = child side (becomes fd 3) */
-    /* Set O_CLOEXEC on parent side so it doesn't leak into other children */
-    fcntl(sp[0], F_SETFD, FD_CLOEXEC);
-    /* Child side must NOT have CLOEXEC (it becomes fd 3 post-dup2) */
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(sp[0]); close(sp[1]);
-        return NULL;
-    }
-    if (pid == 0) {
-        /* CHILD: async-signal-safe only. No malloc, no stdio, no snprintf. */
-        close(sp[0]);
-        /* dup2 child socket to fd 3 */
-        if (sp[1] != FD_REQUEST) {
-            dup2(sp[1], FD_REQUEST);
-            close(sp[1]);
-        }
-        /* execve self as --run-tool. Minimal env (inherits nothing sensitive). */
-        char *const argv[] = {"cclaw", "--run-tool", NULL};
-        char *const envp[] = {proc_log_level_env(), NULL};
-        execve("/proc/self/exe", argv, envp);
-        /* execve failed — write a framed static error (4-byte zero meta_len
-         * header, then the message) to fd 3 and die */
-        (void)write(FD_REQUEST, "\0\0\0\0error: execve failed", 24);
-        _exit(127);
-    }
-
-    /* PARENT: close child end, write request blob (blocking, safe because
-     * blob is capped at RUNTOOL_REQUEST_MAX < kernel socket buffer) */
-    close(sp[1]);
-    ssize_t written = 0;
-    size_t total = blob_len;
-    while ((size_t)written < total) {
-        ssize_t w = write(sp[0], blob + written, total - (size_t)written);
-        if (w <= 0) {
-            close(sp[0]);
-            waitpid(pid, NULL, 0);
-            return NULL;
-        }
-        written += w;
-    }
-
-    /* Switch to nonblocking for result reads in poll loop */
-    util_set_nonblock(sp[0]);
-
-    /* Register child — mirrors dispatch_tool bookkeeping */
-    ChildProc *c = &g_children[g_child_count++];
-    memset(c, 0, sizeof(*c));
-    c->pid = pid;
-    c->type = type;
-    c->session_id = session_id;
-    c->result_pipe = sp[0];
-    c->timeout_sec = timeout_sec > 0 ? timeout_sec : 120;
-    c->deadline = time(NULL) + c->timeout_sec;
-    snprintf(c->agent_name, sizeof(c->agent_name), "%s", agent_name ? agent_name : "");
-    return c;
-}
-
-/* Spawn a sandboxed tool child. Returns 0 on success (child is registered in
- * g_children), -1 on failure (caller writes the error result inline). */
-static int spawn_run_tool_child(int64_t session_id, const char *agent_name,
-                                const char *tool_call_id, const char *tool_name,
-                                const char *tool_args, int64_t iteration_id,
-                                int64_t entry_id, const char *blob, size_t blob_len,
-                                int timeout_sec) {
-    ChildProc *c = spawn_run_tool_blob(CHILD_TOOL_EXEC, session_id, agent_name,
-                                       blob, blob_len, timeout_sec);
-    if (!c) return -1;
-    c->iteration_id = iteration_id;
-    c->entry_id = entry_id;
-    snprintf(c->tool_call_id, sizeof(c->tool_call_id), "%s", tool_call_id);
-    snprintf(c->tool_name, sizeof(c->tool_name), "%s", tool_name);
-    c->tool_args = tool_args ? strdup(tool_args) : NULL;
-    return 0;
-}
-
 /* ── cron script fires ──────────────────────────────────────────────
  * The daemon's half of cron.c's script dispatcher: resolve the file inside the
  * TARGET agent's workspace, build exactly the SBX_JS request a js_eval call
@@ -1622,7 +1334,7 @@ static CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t e
         snprintf(err, err_len, "the daemon cannot run scripts right now");
         return CRON_SCRIPT_FAILED;
     }
-    if (g_child_count >= CHILD_MAX) return CRON_SCRIPT_BUSY;
+    if (child_count() >= CHILD_MAX) return CRON_SCRIPT_BUSY;
 
     agent_setup_refresh_caps(proc_tool_setup(), proc_db(), f->agent_name);
     JsEvalCtx *jc = &proc_tool_setup()->js_eval_ctx;
@@ -1704,8 +1416,8 @@ static int compute_timeout_ms(void) {
     time_t nearest = now + POLL_MAX_SLEEP;
 
     /* Tier 1: in-memory deadlines (precise) */
-    for (int i = 0; i < g_child_count; i++) {
-        time_t d = g_children[i].deadline;
+    for (int i = 0; i < child_count(); i++) {
+        time_t d = child_at(i)->deadline;
         if (d > 0 && d < nearest)
             nearest = d;
     }
@@ -1727,8 +1439,8 @@ static int compute_timeout_ms(void) {
 
 static void child_sweep_deadlines(void) {
     time_t now = time(NULL);
-    for (int i = 0; i < g_child_count; i++) {
-        ChildProc *c = &g_children[i];
+    for (int i = 0; i < child_count(); i++) {
+        ChildProc *c = child_at(i);
         if (c->deadline == 0 || c->pid <= 0 || now < c->deadline)
             continue;
         kill(c->pid, SIGKILL);
@@ -2676,7 +2388,7 @@ static void event_step_tool_thread(void) {
 
 static void event_step_chld(void) {
     char buf[64];
-    while (read(g_chld_pipe[0], buf, sizeof(buf)) > 0) {}
+    while (read(child_sigchld_fd(), buf, sizeof(buf)) > 0) {}
     reap_children();
 }
 
@@ -3038,13 +2750,7 @@ static int run_daemon(char *db_path) {
     int fifo_fd = wake_fifo_open(db_path);
 
     /* SIGCHLD self-pipe */
-    if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
-    fcntl(g_chld_pipe[0], F_SETFD, FD_CLOEXEC);
-    fcntl(g_chld_pipe[1], F_SETFD, FD_CLOEXEC);
-    util_set_nonblock(g_chld_pipe[0]); util_set_nonblock(g_chld_pipe[1]);
-    { struct sigaction sa = {0}; sa.sa_handler = sigchld_handler;
-      sigemptyset(&sa.sa_mask); sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-      sigaction(SIGCHLD, &sa, NULL); }
+    if (child_sigchld_init() != 0) return 1;
 
     /* Launch channel processes */
     channel_launch_all(proc_db());
@@ -3071,7 +2777,7 @@ static int run_daemon(char *db_path) {
     while (!shutdown_requested()) {
         /* Rebuild pollfd set each iteration to include active result pipes */
         int nfds = 0;
-        pfds[nfds].fd = g_chld_pipe[0]; pfds[nfds].events = POLLIN; nfds++;
+        pfds[nfds].fd = child_sigchld_fd(); pfds[nfds].events = POLLIN; nfds++;
         pfds[nfds].fd = wake_fd(); pfds[nfds].events = POLLIN; nfds++;
         int fifo_idx = -1;
         if (fifo_fd >= 0) { fifo_idx = nfds; pfds[nfds].fd = fifo_fd; pfds[nfds].events = POLLIN; nfds++; }
@@ -3125,10 +2831,7 @@ static int run_daemon(char *db_path) {
     tool_thread_stop();  /* drain in-flight tool threads before freeing state */
     channel_shutdown_all();
     web_stop();
-    /* Disarm SIGCHLD before closing the self-pipe: a child reaped after the
-     * close would otherwise have the handler write into a reused fd. */
-    signal(SIGCHLD, SIG_DFL);
-    close(g_chld_pipe[0]); close(g_chld_pipe[1]);
+    child_sigchld_teardown();
     wake_close(); wake_fifo_close(fifo_fd, db_path);
     process_unregister(proc_db(), proc_instance_id());
     cron_set_script_runner(NULL);
@@ -3272,14 +2975,7 @@ static int run_cli(char *db_path, const char *prompt,
     }
 
     /* ── SIGCHLD self-pipe ───────────────────────────────────────── */
-    if (pipe(g_chld_pipe) != 0) { perror("pipe"); return 1; }
-    fcntl(g_chld_pipe[0], F_SETFD, FD_CLOEXEC);
-    fcntl(g_chld_pipe[1], F_SETFD, FD_CLOEXEC);
-    util_set_nonblock(g_chld_pipe[0]);
-    util_set_nonblock(g_chld_pipe[1]);
-    { struct sigaction sa = {0}; sa.sa_handler = sigchld_handler;
-      sigemptyset(&sa.sa_mask); sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-      sigaction(SIGCHLD, &sa, NULL); }
+    if (child_sigchld_init() != 0) return 1;
 
     /* ── poll() setup ──────────────────────────────────────────────── */
     /* Allocate for fixed fds + all children with result pipes */
@@ -3346,7 +3042,7 @@ static int run_cli(char *db_path, const char *prompt,
             cli_pfds[cli_nfds].fd = STDIN_FILENO; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
         }
         int chld_idx = cli_nfds;
-        cli_pfds[cli_nfds].fd = g_chld_pipe[0]; cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
+        cli_pfds[cli_nfds].fd = child_sigchld_fd(); cli_pfds[cli_nfds].events = POLLIN; cli_nfds++;
 
         int wake_idx = -1;
         if (wake_pipe_fd >= 0) {
@@ -3490,10 +3186,7 @@ done:
     llm_worker_stop();
     tool_thread_stop();  /* drain in-flight tool threads before freeing state */
     agent_setup_destroy(&setup);
-    /* Disarm SIGCHLD before closing the self-pipe: a child reaped after the
-     * close would otherwise have the handler write into a reused fd. */
-    signal(SIGCHLD, SIG_DFL);
-    close(g_chld_pipe[0]); close(g_chld_pipe[1]);
+    child_sigchld_teardown();
     wake_close();
     free(cli_pfds);
     /* Drop our registry row, then run recovery: any still-transient sessions we

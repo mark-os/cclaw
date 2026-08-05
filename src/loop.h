@@ -41,7 +41,6 @@ int  dispatch_llm_req(int64_t session_id, const char *agent_name,
                       int iteration);               /* → dispatch.c (step 6) */
 void stalled_add(int64_t session_id);               /* → dispatch.c (step 6) */
 int  child_has_session(int64_t session_id);         /* → child.c    (step 5) */
-void cli_indicator_clear(void);                     /* → cli.c      (step 4) */
 void approval_flush_deferred(void);                 /* → approval.c (step 8) */
 
 #endif

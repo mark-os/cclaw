@@ -437,171 +437,6 @@ void approval_flush_deferred(void) {
     resolve_approval(id, decision, via, expires);
 }
 
-/* Append `header` plus a fenced block of the rows yielded by sql (single
- * text column, one text bind) — or nothing when the query yields no rows.
- * The fence renders as monospace <pre> on chat channels so columns stay
- * aligned; in a terminal it reads fine as-is. */
-static void append_enum_block(Buf *out, const char *header, const char *sql,
-                              const char *bind) {
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(proc_db(), sql, -1, &st, NULL) != SQLITE_OK) return;
-    sqlite3_bind_text(st, 1, bind, -1, SQLITE_STATIC);
-    int n = 0;
-    while (sqlite3_step(st) == SQLITE_ROW) {
-        const char *v = (const char *)sqlite3_column_text(st, 0);
-        if (!v) continue;
-        if (n++ == 0) buf_appendf(out, "%s\n```\n", header);
-        buf_appendf(out, "%s\n", v);
-    }
-    if (n) buf_append_str(out, "```\n");
-    sqlite3_finalize(st);
-}
-
-/* request_changes enumerations, grouped by scope: the approver must see
- * whether a line changes only the asking agent or the whole system. Every
- * requested VALUE is listed (which hosts, which paths) — never counts. */
-static const char *SQL_CHANGES_AGENT_SCOPED =
-    "SELECT format('%-7s%s','tool',atom) FROM json_each(?1,'$.changes.grants.tools')"
-    " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.changes.grants.hosts')"
-    " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.changes.grants.read_paths')"
-    " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.changes.grants.write_paths')"
-    " UNION ALL SELECT format('%-7s%s','route',atom) FROM json_each(?1,'$.changes.routes')"
-    " UNION ALL SELECT format('%s = %s',key,atom) FROM json_each(?1,'$.changes.agent')";
-
-static const char *SQL_CHANGES_SYSTEM_WIDE =
-    "SELECT format('%s = %s',key,atom) FROM json_each(?1,'$.changes.config')"
-    " UNION ALL SELECT format('provider %s -> %s (key from secret %s)',"
-    "   json_extract(?1,'$.changes.provider.provider'),"
-    "   json_extract(?1,'$.changes.provider.base_url'),"
-    "   json_extract(?1,'$.changes.provider.api_key_env'))"
-    " WHERE json_extract(?1,'$.changes.provider.provider') IS NOT NULL";
-
-/* create_agent enumeration over the parked definition — values, not counts:
- * this is the approval that mints a new autonomous actor, so it must be the
- * most transparent one, not the least. */
-static const char *SQL_CREATE_AGENT_LINES =
-    "SELECT format('%-7s%s','tool',atom) FROM json_each(?1,'$.grants.tools')"
-    " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.grants.hosts')"
-    " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.grants.read_paths')"
-    " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.grants.write_paths')"
-    " UNION ALL SELECT format('%-7s%s','ext',atom) FROM json_each(?1,'$.extensions')"
-    " UNION ALL SELECT format('%-7s%s','model',json_extract(?1,'$.primary_model'))"
-    "   WHERE json_extract(?1,'$.primary_model') IS NOT NULL"
-    " UNION ALL SELECT format('%-7s%d block(s)','memory',json_array_length(?1,'$.memory_blocks'))"
-    "   WHERE json_array_length(?1,'$.memory_blocks') > 0";
-
-/* update_agent enumeration — grants add, scalar fields overwrite; long text
- * (system_prompt) is clipped per line, the whole-summary truncation below is
- * the backstop. */
-static const char *SQL_UPDATE_AGENT_LINES =
-    "SELECT format('%-7s%s','tool',atom) FROM json_each(?1,'$.grants.tools')"
-    " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.grants.hosts')"
-    " UNION ALL SELECT format('%-7s%s','read',atom) FROM json_each(?1,'$.grants.read_paths')"
-    " UNION ALL SELECT format('%-7s%s','write',atom) FROM json_each(?1,'$.grants.write_paths')"
-    " UNION ALL SELECT format('%s = %s', key,"
-    "     CASE WHEN length(atom) > 200 THEN substr(atom,1,200)||'...' ELSE atom END)"
-    "   FROM json_each(?1)"
-    "   WHERE key NOT IN ('name','grants','reason') AND type!='object'";
-
-/* cron_set enumeration — every field the job was asked to carry. The
- * escalation being approved is *which agent* fires it, so the agent and the
- * chat it would report to must both be visible, never summarized away. */
-static const char *SQL_CRON_SET_LINES =
-    "SELECT format('%-13s%s',key,atom) FROM json_each(?1) WHERE key!='name'";
-
-/* Render a human-readable markdown summary of an approval — never the raw
- * args_json blob. Grant-shaped approvals enumerate every requested value in
- * fenced blocks grouped by scope; any other tool's call arguments (shape
- * unknown in general) surface their most common salient field. Returns a
- * heap string, caller frees. */
-static char *format_approval_summary(const Approval *a) {
-    const char *args = a->args_json ? a->args_json : "{}";
-    Buf out = {0};
-    /* Collected extracted fields — freed in one sweep at the end. */
-    char *f[3] = {0};
-    if (a->tool_name && strcmp(a->tool_name, "request_config") == 0 &&
-        a->action && strcmp(a->action, "request_changes") == 0) {
-        buf_append_str(&out, "requests these changes:\n");
-        append_enum_block(&out, "Agent-scoped (this agent only):",
-                          SQL_CHANGES_AGENT_SCOPED, args);
-        append_enum_block(&out, "System-wide:", SQL_CHANGES_SYSTEM_WIDE, args);
-        f[0] = tool_args_str(proc_db(), args, "reason");
-        if (f[0] && f[0][0]) buf_appendf(&out, "Reason: %s\n", f[0]);
-    } else if (a->tool_name && strcmp(a->tool_name, "request_config") == 0 &&
-               a->action && strcmp(a->action, "rename_agent") == 0) {
-        f[0] = tool_args_str(proc_db(), args, "name");
-        f[1] = tool_args_str(proc_db(), args, "reason");
-        buf_appendf(&out, "rename_agent: %s", f[0] ? f[0] : "?");
-        if (f[1] && f[1][0]) buf_appendf(&out, "\nReason: %s", f[1]);
-    } else if (a->tool_name && strcmp(a->tool_name, "request_config") == 0) {
-        buf_append_str(&out, a->action ? a->action : "?");
-    } else if (a->tool_name && strcmp(a->tool_name, "extension_promote") == 0) {
-        f[0] = tool_args_str(proc_db(), args, "name");
-        f[1] = tool_args_str(proc_db(), args, "summary");
-        buf_appendf(&out, "promote '%s': %s", f[0] ? f[0] : "?",
-                    f[1] ? f[1] : "(no summary)");
-    } else if (a->tool_name && strcmp(a->tool_name, "create_agent") == 0) {
-        f[0] = tool_args_str(proc_db(), args, "name");
-        f[1] = tool_args_str(proc_db(), args, "sandbox_profile");
-        f[2] = tool_args_str(proc_db(), args, "clone_from");
-        buf_appendf(&out, "wants to create agent **%s** (profile %s%s%s):\n",
-                    f[0] ? f[0] : "?", f[1] ? f[1] : "default",
-                    f[2] ? ", clone of " : "", f[2] ? f[2] : "");
-        append_enum_block(&out, "Capabilities (all within the creator's own):",
-                          SQL_CREATE_AGENT_LINES, args);
-    } else if (a->tool_name && strcmp(a->tool_name, "update_agent") == 0) {
-        f[0] = tool_args_str(proc_db(), args, "name");
-        f[1] = tool_args_str(proc_db(), args, "reason");
-        buf_appendf(&out, "wants to update agent **%s**:\n", f[0] ? f[0] : "?");
-        append_enum_block(&out, "Changes (grants add; fields overwrite):",
-                          SQL_UPDATE_AGENT_LINES, args);
-        if (f[1] && f[1][0]) buf_appendf(&out, "Reason: %s\n", f[1]);
-    } else if (a->tool_name && strcmp(a->tool_name, "cron_set") == 0) {
-        f[0] = tool_args_str(proc_db(), args, "name");
-        buf_appendf(&out, "wants to schedule job **%s**, running as another "
-                          "agent (its grants and model, every fire):\n",
-                    f[0] ? f[0] : "?");
-        append_enum_block(&out, "Job:", SQL_CRON_SET_LINES, args);
-    } else {
-        char *salient = tool_args_str(proc_db(), args, "command");
-        if (!salient) salient = tool_args_str(proc_db(), args, "url");
-        if (!salient) salient = tool_args_str(proc_db(), args, "path");
-        f[0] = salient;
-        if (salient)
-            buf_appendf(&out, "%s: %s", a->tool_name ? a->tool_name : "?", salient);
-        else
-            buf_appendf(&out, "%s (%s)", a->tool_name ? a->tool_name : "?",
-                        a->action ? a->action : "?");
-    }
-    for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) free(f[i]);
-
-    char *s = buf_take(&out);
-    if (!s) return strdup("?");
-    /* Telegram counts parsed text against its 4096 limit and buttoned
-     * prompts are never chunked — truncate a huge document at a line break.
-     * The appended fence closes a cut-open block; if the cut landed outside
-     * a block the stray fence stays literal (unbalanced markers pass
-     * through the renderer untouched), which is safe. */
-    if (strlen(s) > 3500) {
-        size_t cut = 3400;
-        while (cut > 0 && s[cut] != '\n') cut--;
-        if (cut == 0) {
-            /* No line break at all (e.g. one huge single-line field) — hard
-             * cut rather than emptying the summary; keep UTF-8 sequences
-             * whole so the platform doesn't reject the text. */
-            cut = 3400;
-            while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80) cut--;
-        }
-        s[cut] = '\0';
-        Buf t = {0};
-        buf_appendf(&t, "%s\n```\n... (truncated)", s);
-        free(s);
-        s = buf_take(&t);
-        if (!s) return strdup("?");
-    }
-    return s;
-}
-
 /* ── handle_approval_park: prompt the approver ────────────────── */
 
 void handle_approval_park(int64_t session_id) {
@@ -644,7 +479,7 @@ void handle_approval_park(int64_t session_id) {
             free(sub_agent);
         }
         {
-            char *summary = format_approval_summary(a);
+            char *summary = approval_format_summary(proc_db(), a);
             fprintf(stdout, ": %s", summary ? summary : "?");
             free(summary);
         }
@@ -692,7 +527,7 @@ void handle_approval_park(int64_t session_id) {
         if (admins && !admins[0]) { free(admins); admins = NULL; }
 
         char *agent = session_get_agent_name(proc_db(), session_id);
-        char *summary = format_approval_summary(a);
+        char *summary = approval_format_summary(proc_db(), a);
         Buf pb = {0};
         /* The approval id is part of the prompt text, not just the button
          * payload: a channel without inline buttons (Discord) decides with

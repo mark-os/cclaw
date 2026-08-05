@@ -91,6 +91,10 @@ typedef enum {
  * grants (the caller does that). Returns the inbox row id (>0) or -1. */
 int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPostWindow outcome);
 
+/* Render a human-readable markdown summary of an approval for the approver's
+ * prompt — never the raw args_json blob. Returns a heap string, caller frees. */
+char *approval_format_summary(sqlite3 *db, const Approval *a);
+
 /* Free an Approval struct. */
 void approval_free(Approval *a);
 

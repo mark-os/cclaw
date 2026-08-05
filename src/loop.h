@@ -28,13 +28,4 @@ void run_advance(int64_t session_id);
  * nudge for whatever advance_deliver_boundary already wrote to the outbox. */
 void deliver_response(int64_t session_id);
 
-/* ── INTERIM: main.c-resident callee of the above ───────────────────
- * Still a static-turned-extern in main.c; loop.o carries an undefined
- * reference to it that only resolves at the final cclaw link. It moves to a
- * real module later in PROJECT:main-c-reorg — when it does, delete this
- * declaration and include that module's header instead. Nothing else should
- * declare or call it.
- */
-void approval_flush_deferred(void);                 /* → approval.c (step 8) */
-
 #endif

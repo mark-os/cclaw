@@ -15,9 +15,9 @@
 #include "resolve.h"
 #include "test_util.h"
 
-/* dashboard.o (pulled in via web.o) references resolve_approval, normally
- * defined in main.c — stub it and capture the call, same pattern as
- * test_channel_events.c. */
+/* dashboard.o (pulled in via web.o) references resolve_approval — the spy
+ * pre-satisfies it so resolve.o stays out of the link, and captures the
+ * call. Same pattern as test_channel_events.c. */
 static int64_t g_ra_id = -1;
 static ApprovalDecision g_ra_decision;
 static char g_ra_via[32];

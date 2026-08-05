@@ -16,6 +16,7 @@
 #include "llm_worker.h"
 #include "log.h"
 #include "proc.h"
+#include "resolve.h"
 #include "types.h"
 
 /* Effective iteration cap for a session: agents.max_iterations (if > 0)

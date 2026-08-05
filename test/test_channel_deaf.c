@@ -24,8 +24,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* channel.o references resolve_approval (defined in main.c, which isn't in
- * libcclaw.a) — same linker stub as test_channel_lifecycle.c. */
+/* channel.o references resolve_approval — stub keeps resolve.o out of the
+ * link, same as test_channel_lifecycle.c. */
 void resolve_approval(int64_t approval_id, ApprovalDecision decision,
                       const char *decided_via, int64_t grant_expires_at) {
     (void)approval_id; (void)decision; (void)decided_via; (void)grant_expires_at;

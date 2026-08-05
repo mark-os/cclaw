@@ -59,13 +59,4 @@ void child_sweep_deadlines(void);
  * js_eval tool call would get. */
 CronScriptRc cron_script_run(const CronScriptFire *f, char *err, size_t err_len);
 
-/* ── INTERIM: main.c-resident callee of the above ───────────────────
- * Still a static-turned-extern in main.c; dispatch.o carries an undefined
- * reference to it that only resolves at the final cclaw link. It moves to a
- * real module later in PROJECT:main-c-reorg — when it does, delete this
- * declaration and include that module's header instead. Nothing else should
- * declare or call it.
- */
-void handle_approval_park(int64_t session_id);      /* → approval.c (step 8) */
-
 #endif

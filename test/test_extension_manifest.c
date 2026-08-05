@@ -14,8 +14,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* channel.o (channel_should_launch) references resolve_approval, defined in
- * main.c which isn't in libcclaw.a — stub it so the link closes. */
+/* channel.o (channel_should_launch) references resolve_approval — the stub
+ * keeps resolve.o (and the dispatch/loop tree behind it) out of the link. */
 #include "resolve.h"
 void resolve_approval(int64_t approval_id, ApprovalDecision decision,
                       const char *decided_via, int64_t grant_expires_at) {

@@ -20,9 +20,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* channel.o references resolve_approval (normally defined in main.c, which
- * isn't linked into libcclaw.a) — see test_channel_events.c for the same
- * pattern. Unused here beyond satisfying the linker. */
+/* channel.o references resolve_approval; this stub pre-satisfies it so
+ * resolve.o (and the dispatch/loop tree behind it) stays out of the link —
+ * see test_channel_events.c for the pattern. Unused beyond that. */
 void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via,
                       int64_t grant_expires_at) {
     (void)approval_id; (void)decision; (void)decided_via; (void)grant_expires_at;

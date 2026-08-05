@@ -21,9 +21,11 @@
 #include "db.h"
 #include "test_util.h"
 
-/* channel.o references resolve_approval (normally defined in main.c, which
- * isn't linked into libcclaw.a). Provide a spy here so channel_consume_events()
- * links and we can assert on how approval decisions were routed. */
+/* channel.o references resolve_approval. The real one (resolve.o, in the
+ * archive) would drag the whole dispatch/loop tree into this binary and run
+ * the full lifecycle; this spy pre-satisfies the reference so resolve.o is
+ * never pulled, and records how decisions were routed. Safe only while this
+ * binary links nothing else from resolve.o. */
 static int64_t g_resolve_approval_id;
 static ApprovalDecision g_resolve_decision;
 static char g_resolve_decided_via[128];

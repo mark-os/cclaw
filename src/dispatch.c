@@ -31,6 +31,7 @@
 #include "log.h"
 #include "loop.h"
 #include "proc.h"
+#include "resolve.h"
 #include "run_tool.h"
 #include "sandbox.h"
 #include "secret.h"

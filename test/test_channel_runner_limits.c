@@ -22,8 +22,8 @@
 #include <string.h>
 
 /* channel_runner.o pulls in channel.o, which references resolve_approval —
- * defined in main.c, which isn't in libcclaw.a. Same stub as the other
- * channel tests. */
+ * the stub keeps resolve.o out of the link, same as the other channel
+ * tests. */
 void resolve_approval(int64_t approval_id, ApprovalDecision decision,
                       const char *decided_via, int64_t grant_expires_at) {
     (void)approval_id; (void)decision; (void)decided_via; (void)grant_expires_at;

@@ -18,7 +18,8 @@
 #include <unistd.h>
 
 /* channel.o (linked in for db_ensure_schema's caller chain via libcclaw)
- * references resolve_approval — same stub pattern as test_channel_events.c. */
+ * references resolve_approval — stub keeps resolve.o out of the link, same
+ * pattern as test_channel_events.c. */
 void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char *decided_via,
                       int64_t grant_expires_at) {
     (void)approval_id; (void)decision; (void)decided_via; (void)grant_expires_at;

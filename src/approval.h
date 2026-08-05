@@ -25,6 +25,13 @@ typedef struct {
     int64_t expires_at;
 } Approval;
 
+/* The two deadline knobs, read from the config registry (falling back to the
+ * registry default). approval_timeout_seconds is the park expiry approval_create
+ * stamps; approval_block_seconds is the short window a turn blocks before the
+ * sweep unparks it, clamped to the timeout so it can never outlast it. */
+int approval_timeout_seconds(sqlite3 *db);
+int approval_block_seconds(sqlite3 *db);
+
 /* Insert a pending approval.
  * resolve is "rerun" (re-execute frozen call) or "apply" (invoke tool's apply handler).
  * Returns the new row id (>0) or -1 on error. */

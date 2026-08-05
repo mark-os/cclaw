@@ -41,15 +41,30 @@ void approval_free(Approval *a) {
     free(a);
 }
 
+/* approval_timeout_sec — the same deadline approval.c uses to park-expire;
+ * reused by --auto-approve to bound its self-expiring grants. */
+int approval_timeout_seconds(sqlite3 *db) {
+    int timeout = config_get_int(db, "approval_timeout_sec");
+    return timeout > 0 ? timeout : config_default_int("approval_timeout_sec");
+}
+
+/* approval_block_sec, clamped to approval_timeout_sec so the short block
+ * never outlasts the final expiry deadline. */
+int approval_block_seconds(sqlite3 *db) {
+    int block = config_get_int(db, "approval_block_sec");
+    if (block <= 0) block = config_default_int("approval_block_sec");
+    int timeout = approval_timeout_seconds(db);
+    if (block > timeout) block = timeout;
+    return block;
+}
+
 int64_t approval_create(sqlite3 *db, int64_t session_id, const char *tool_call_id,
                         const char *tool_name, const char *action,
                         const char *args_json, const char *resolve) {
     if (!resolve) resolve = "rerun";
 
     /* Deadline: approval_timeout_sec from the config registry */
-    int64_t timeout = config_get_int(db, "approval_timeout_sec");
-    if (timeout <= 0) timeout = config_default_int("approval_timeout_sec");
-    int64_t expires_at = (int64_t)time(NULL) + timeout;
+    int64_t expires_at = (int64_t)time(NULL) + approval_timeout_seconds(db);
 
     const char *sql =
         "INSERT INTO approvals(session_id, tool_call_id, tool_name, action, args_json, resolve, expires_at)"

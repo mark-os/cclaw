@@ -37,6 +37,13 @@ int tool_args_bool(sqlite3 *db, const char *args, const char *key, int def);
  * For variable-shape sub-blobs (e.g. file_edit's edits array). */
 char *tool_args_json(sqlite3 *db, const char *args, const char *key);
 
+/* Host of a call's "url" argument: scheme-strip + authority slice, mirroring
+ * what the proxy/http layer accepts — deliberately not a full URL parser.
+ * Writes at most cap bytes (NUL-terminated) to out and returns 1; returns 0
+ * and leaves out untouched when there's no usable url. Shared by the dispatch
+ * gate and the approval bind path. */
+int web_args_url_host(sqlite3 *db, const char *args, char *out, size_t cap);
+
 /* ── Wire extraction for sandboxed --run-tool children ──────────────────
  * The child has no db handle and parses no JSON: the parent extracts every
  * parameter the tool's schema declares and ships (key, kind, value) over

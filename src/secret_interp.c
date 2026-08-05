@@ -96,6 +96,27 @@ void secret_names_free(char **names, size_t count) {
     free(names);
 }
 
+/* Placeholder names in args that reference a LOADED secret. Unknown names
+ * interpolate to nothing (nothing is submitted) — not checked or narrowed. */
+char **used_secret_names(const char *args, const ShellSecret *secrets,
+                         size_t secret_count, size_t *out_n) {
+    *out_n = 0;
+    if (secret_count == 0) return NULL;
+    size_t all_n = 0;
+    char **all = secret_placeholder_names(args, &all_n);
+    if (!all) return NULL;
+    size_t k = 0;
+    for (size_t i = 0; i < all_n; i++) {
+        int loaded = 0;
+        for (size_t j = 0; j < secret_count; j++)
+            if (strcmp(all[i], secrets[j].name) == 0) { loaded = 1; break; }
+        if (loaded) all[k++] = all[i]; else free(all[i]);
+    }
+    *out_n = k;
+    if (k == 0) { free(all); return NULL; }
+    return all;
+}
+
 static const ShellSecret *s_deinterp_secrets; /* qsort context */
 
 static int cmp_secret_len_desc(const void *a, const void *b) {

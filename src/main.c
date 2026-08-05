@@ -479,52 +479,6 @@ static int tool_inline_error(int64_t session_id, PendingToolCall *tc,
     return 1;
 }
 
-/* Placeholder names in args that reference a LOADED secret. Unknown names
- * interpolate to nothing (nothing is submitted) — not checked or narrowed. */
-static char **used_secret_names(const char *args, const ShellSecret *secrets,
-                                size_t secret_count, size_t *out_n) {
-    *out_n = 0;
-    if (secret_count == 0) return NULL;
-    size_t all_n = 0;
-    char **all = secret_placeholder_names(args, &all_n);
-    if (!all) return NULL;
-    size_t k = 0;
-    for (size_t i = 0; i < all_n; i++) {
-        int loaded = 0;
-        for (size_t j = 0; j < secret_count; j++)
-            if (strcmp(all[i], secrets[j].name) == 0) { loaded = 1; break; }
-        if (loaded) all[k++] = all[i]; else free(all[i]);
-    }
-    *out_n = k;
-    if (k == 0) { free(all); return NULL; }
-    return all;
-}
-
-/* Host of a call's "url" argument: scheme-strip + authority slice, mirroring
- * what the proxy/http layer accepts — deliberately not a full URL parser. */
-static int web_args_url_host(const char *args, char *out, size_t cap) {
-    char *url = tool_args_str(proc_db(), args, "url");
-    int ok = 0;
-    if (url) {
-        const char *p = strstr(url, "://");
-        p = p ? p + 3 : url;
-        const char *end = p + strcspn(p, "/?#");
-        const char *at = memchr(p, '@', (size_t)(end - p));
-        if (at) p = at + 1;
-        if (*p == '[') {  /* v6 literal: [::1]:port */
-            const char *rb = memchr(p, ']', (size_t)(end - p));
-            if (rb) { p++; end = rb; }
-        } else {
-            const char *colon = memchr(p, ':', (size_t)(end - p));
-            if (colon) end = colon;
-        }
-        size_t len = (size_t)(end - p);
-        if (len > 0 && len < cap) { memcpy(out, p, len); out[len] = '\0'; ok = 1; }
-    }
-    free(url);
-    return ok;
-}
-
 /* Interpolate {{SECRET:name}} into extracted wire-param values (TEXT/JSON
  * kinds; LIST params are file_edit's — never secret-bearing). After this the
  * array carries plaintext: free with tool_wire_args_wipe_free. */
@@ -775,7 +729,7 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
                  * escalation (r2 F11). */
                 if (!sens_hit) {
                     char uh[254];
-                    if (web_args_url_host(tc->arguments, uh, sizeof(uh))) {
+                    if (web_args_url_host(proc_db(), tc->arguments, uh, sizeof(uh))) {
                         url_host_normalize(uh, sizeof(uh));
                         if (host_covered(sens, (size_t)sn, uh)) {
                             sens_hit = 1;
@@ -799,7 +753,8 @@ static int dispatch_gate(int64_t session_id, const char *agent_name,
             if (names) {
                 char url_host[254] = "";
                 int have_url = (te->recipe.tier == SBX_WEB) &&
-                    web_args_url_host(tc->arguments, url_host, sizeof(url_host));
+                    web_args_url_host(proc_db(), tc->arguments, url_host,
+                                      sizeof(url_host));
                 for (size_t i = 0; i < un && !bind_hit; i++) {
                     int bn = 0;
                     char **bh = db_secret_hosts(proc_db(), names[i], &bn);
@@ -2244,7 +2199,7 @@ void resolve_approval(int64_t approval_id, ApprovalDecision decision, const char
                 char host[254];
                 if (a->tool_name && strcmp(a->tool_name, "web_fetch") == 0 &&
                     a->args_json &&
-                    web_args_url_host(a->args_json, host, sizeof(host))) {
+                    web_args_url_host(proc_db(), a->args_json, host, sizeof(host))) {
                     size_t un = 0;
                     char **names = secret_placeholder_names(a->args_json, &un);
                     for (size_t i = 0; i < un; i++) {

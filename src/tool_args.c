@@ -206,3 +206,26 @@ int tool_args_extract(sqlite3 *db, const char *tool_name,
     *out_n = n;
     return 0;
 }
+
+int web_args_url_host(sqlite3 *db, const char *args, char *out, size_t cap) {
+    char *url = tool_args_str(db, args, "url");
+    int ok = 0;
+    if (url) {
+        const char *p = strstr(url, "://");
+        p = p ? p + 3 : url;
+        const char *end = p + strcspn(p, "/?#");
+        const char *at = memchr(p, '@', (size_t)(end - p));
+        if (at) p = at + 1;
+        if (*p == '[') {  /* v6 literal: [::1]:port */
+            const char *rb = memchr(p, ']', (size_t)(end - p));
+            if (rb) { p++; end = rb; }
+        } else {
+            const char *colon = memchr(p, ':', (size_t)(end - p));
+            if (colon) end = colon;
+        }
+        size_t len = (size_t)(end - p);
+        if (len > 0 && len < cap) { memcpy(out, p, len); out[len] = '\0'; ok = 1; }
+    }
+    free(url);
+    return ok;
+}

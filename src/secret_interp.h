@@ -30,4 +30,11 @@ char *tool_result_postprocess(const char *result, const ShellSecret *secrets, si
 char **secret_placeholder_names(const char *text, size_t *out_count);
 void secret_names_free(char **names, size_t count);
 
+/* As secret_placeholder_names, narrowed to names that reference a LOADED
+ * secret — unknown names interpolate to nothing (nothing is submitted), so
+ * they are neither checked nor narrowed against. Returns NULL (*out_n 0) when
+ * nothing matches. Free with secret_names_free(). */
+char **used_secret_names(const char *args, const ShellSecret *secrets,
+                         size_t secret_count, size_t *out_n);
+
 #endif /* CCLAW_SECRET_INTERP_H */

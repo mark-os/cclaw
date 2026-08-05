@@ -3,7 +3,9 @@
 #include "buf.h"
 #include "config_registry.h"
 #include "db.h"
+#include "host_match.h"
 #include "log.h"
+#include "secret_interp.h"
 #include "tool_args.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -307,10 +309,30 @@ int64_t approval_deliver_postwindow(sqlite3 *db, const Approval *a, ApprovalPost
     return inbox_insert(db, a->session_id, "approval", NULL, buf);
 }
 
+/* Append s, breaking any run of 3+ backticks with a space after each pair.
+ * Inside a fenced block nothing can be escaped — the only way to keep a
+ * crafted ``` in model-authored text from closing our fence (and forging
+ * trailing prompt content, e.g. a fake "Decide here" line) is to never emit
+ * one. A space is visible, so the approver can see the content was altered
+ * (R1, plan/projects/approval-summary-two-axis.md). */
+static void append_fence_escaped(Buf *out, const char *s) {
+    int run = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p == '`') {
+            if (run == 2) { buf_append_char(out, ' '); run = 0; }
+            run++;
+        } else {
+            run = 0;
+        }
+        buf_append_char(out, *p);
+    }
+}
+
 /* Append `header` plus a fenced block of the rows yielded by sql (single
  * text column, one text bind) — or nothing when the query yields no rows.
  * The fence renders as monospace <pre> on chat channels so columns stay
- * aligned; in a terminal it reads fine as-is. */
+ * aligned; in a terminal it reads fine as-is. Values are model-authored,
+ * so they get the fence escape. */
 static void append_enum_block(sqlite3 *db, Buf *out, const char *header,
                               const char *sql, const char *bind) {
     sqlite3_stmt *st;
@@ -321,7 +343,8 @@ static void append_enum_block(sqlite3 *db, Buf *out, const char *header,
         const char *v = (const char *)sqlite3_column_text(st, 0);
         if (!v) continue;
         if (n++ == 0) buf_appendf(out, "%s\n```\n", header);
-        buf_appendf(out, "%s\n", v);
+        append_fence_escaped(out, v);
+        buf_append_char(out, '\n');
     }
     if (n) buf_append_str(out, "```\n");
     sqlite3_finalize(st);
@@ -388,7 +411,151 @@ static const char *SQL_CRON_SET_LINES =
 static const char *SQL_ARGS_LINES =
     "SELECT format('%s: %s', key,"
     "     CASE WHEN length(atom) > 200 THEN substr(atom,1,200)||'...' ELSE atom END)"
-    " FROM json_each(?1) WHERE type NOT IN ('object','array')";
+    " FROM json_each(?1)"
+    " WHERE type NOT IN ('object','array') AND key NOT IN ('code','command')";
+
+/* A placeholder is "loaded" iff a scope='agent' secret with that name exists —
+ * system-scoped secrets never enter the agent-facing snapshot, so for this
+ * call they interpolate to nothing exactly like a typo would. */
+static int secret_is_loaded(sqlite3 *db, const char *name) {
+    sqlite3_stmt *s;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM secrets WHERE name=?1 AND scope='agent'",
+            -1, &s, NULL) != SQLITE_OK)
+        return 0;
+    sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+    int found = sqlite3_step(s) == SQLITE_ROW;
+    sqlite3_finalize(s);
+    return found;
+}
+
+/* Axis-2 overlay for a sensitivity park: re-derive the matched target the
+ * same way the gate did (raw-args scan, then the decoded url host second
+ * chance) — the approval row records only the reason, and the label list has
+ * one home (sensitive_targets), so there is no cached match to drift. */
+static void overlay_sensitive(sqlite3 *db, Buf *out, const char *args) {
+    char host[254] = "";
+    int n = 0;
+    char **sens = db_sensitive_hosts(db, &n);
+    if (sens) {
+        if (!host_in_text(sens, (size_t)n, args, host, sizeof(host))) {
+            char uh[254];
+            if (web_args_url_host(db, args, uh, sizeof(uh))) {
+                url_host_normalize(uh, sizeof(uh));
+                if (host_covered(sens, (size_t)n, uh))
+                    snprintf(host, sizeof(host), "%s", uh);
+            }
+        }
+        for (int i = 0; i < n; i++) free(sens[i]);
+        free(sens);
+    }
+    buf_appendf(out, "Sensitive target: %s\n"
+                     "No standing grant covers a sensitive target — 'always' "
+                     "still passes only this one call.\n",
+                host[0] ? host : "(no label matches now — list changed since park?)");
+}
+
+/* Axis-2 overlay for a secret_bind park: name every placeholder the args
+ * carry, its current bindings, and the egress bound the child would run
+ * under if approved. Placeholders are matched text-only
+ * (secret_placeholder_names) and then resolved against the DB, so a name
+ * that references no loaded secret renders visibly instead of being
+ * filtered out. */
+static void overlay_secret_bind(sqlite3 *db, Buf *out, const Approval *a) {
+    const char *args = a->args_json ? a->args_json : "";
+    size_t un = 0;
+    char **names = secret_placeholder_names(args, &un);
+    if (un) {
+        buf_append_str(out, "Secrets used:\n```\n");
+        for (size_t i = 0; i < un; i++) {
+            /* The name is model-authored: secret_placeholder_names takes
+             * whatever sits between the delimiters, so a crafted ``` would
+             * close this block and mangle the egress facts below it. */
+            append_fence_escaped(out, names[i]);
+            buf_append_str(out, " — ");
+            if (!secret_is_loaded(db, names[i])) {
+                buf_append_str(out, "not a loaded secret (interpolates to nothing)\n");
+                continue;
+            }
+            int bn = 0;
+            char **bh = db_secret_hosts(db, names[i], &bn);
+            if (!bh || bn == 0) {
+                buf_append_str(out, "unbound, first use\n");
+            } else {
+                buf_append_str(out, "bound to:");
+                for (int j = 0; j < bn; j++) buf_appendf(out, " %s", bh[j]);
+                buf_append_char(out, '\n');
+            }
+            if (bh) { for (int j = 0; j < bn; j++) free(bh[j]); free(bh); }
+        }
+        buf_append_str(out, "```\n");
+    }
+    secret_names_free(names, un);
+
+    /* The effective egress bound. Declared hosts REPLACE agent grants and
+     * grants never widen them (call_egress_build) — the DM must mirror that
+     * precedence or it lies about what approval authorizes. */
+    int dn = 0;
+    char **decl = db_tool_declared_hosts(db, a->tool_name ? a->tool_name : "", &dn);
+    if (decl && dn > 0) {
+        buf_append_str(out, "Egress if approved — the tool's declared hosts "
+                            "(agent grants don't apply):\n```\n");
+        for (int i = 0; i < dn; i++) buf_appendf(out, "%s\n", decl[i]);
+        buf_append_str(out, "```\n");
+    } else {
+        /* Approval waives the secret-host narrowing for exactly this call
+         * (skip_bind), leaving the agent's base host grants. Render them from
+         * the grants table — the single source of truth — not the in-memory
+         * caps snapshot. */
+        char *agent = session_get_agent_name(db, a->session_id);
+        int n = 0;
+        sqlite3_stmt *s;
+        if (agent && sqlite3_prepare_v2(db,
+                "SELECT value FROM grants WHERE agent_name=?1 AND kind='host'"
+                " AND (expires_at IS NULL OR expires_at > unixepoch())"
+                " ORDER BY value", -1, &s, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(s, 1, agent, -1, SQLITE_STATIC);
+            while (sqlite3_step(s) == SQLITE_ROW) {
+                const char *v = (const char *)sqlite3_column_text(s, 0);
+                if (!v) continue;
+                if (n++ == 0)
+                    buf_append_str(out,
+                        "Egress if approved — every host granted to this agent "
+                        "(the secret-host binding is waived for this one call):\n```\n");
+                buf_appendf(out, "%s\n", v);
+            }
+            if (n) buf_append_str(out, "```\n");
+            sqlite3_finalize(s);
+        }
+        if (n == 0)
+            buf_append_str(out, "Egress if approved: none — the agent holds no "
+                                "host grants, the call can reach nothing.\n");
+        free(agent);
+    }
+    if (decl) { for (int i = 0; i < dn; i++) free(decl[i]); free(decl); }
+}
+
+/* The full command/code the frozen call would run, fenced, LAST in the
+ * summary: model-authored bulk is the untrusted part, so the bottom-up
+ * truncation backstop eats it before the DB-derived facts above it (R1).
+ *
+ * Both keys render when both are present: SQL_ARGS_LINES excludes the pair
+ * unconditionally, so first-match-wins would drop the loser from the summary
+ * entirely — invisible on a self-augmented tool, whose param names are
+ * whatever its manifest author chose. */
+static void append_body_block(sqlite3 *db, Buf *out, const char *args) {
+    static const struct { const char *key, *label; } bodies[] = {
+        { "command", "Command:" }, { "code", "Code:" },
+    };
+    for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+        char *body = tool_args_str(db, args, bodies[i].key);
+        if (!body) continue;
+        buf_appendf(out, "%s\n```\n", bodies[i].label);
+        append_fence_escaped(out, body);
+        buf_append_str(out, "\n```\n");
+        free(body);
+    }
+}
 
 /* Render a human-readable markdown summary of an approval — never the raw
  * args_json blob. Grant-shaped approvals enumerate every requested value in
@@ -444,17 +611,28 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
                     f[0] ? f[0] : "?");
         append_enum_block(db, &out, "Job:", SQL_CRON_SET_LINES, args);
     } else {
-        /* Generic tail — two-axis: the tool + its args (axis 1), and the
-         * action when it differs (axis 2, the gate reason). No guessed
-         * salient field: every scalar arg is enumerated, so a tool the
-         * probes never anticipated (js_eval's `code`) can't degrade to a
-         * blind "tool (action)" line. */
+        /* Generic tail — two-axis: the tool + its args (axis 1), and why the
+         * gate parked it (axis 2, rendered as an overlay). No guessed salient
+         * field: every scalar arg is enumerated, so a tool the probes never
+         * anticipated (js_eval's `code`) can't degrade to a blind
+         * "tool (action)" line. Ordering is load-bearing (R1): DB-derived
+         * facts first, model-authored args and code last, so the bottom-up
+         * truncation backstop eats the code before the facts. */
         const char *tn = a->tool_name ? a->tool_name : "?";
-        if (a->action && strcmp(a->action, tn) != 0)
+        int is_sens = a->action && strcmp(a->action, "sensitive") == 0;
+        int is_bind = a->action && strcmp(a->action, "secret_bind") == 0;
+        if (is_sens)
+            buf_appendf(&out, "%s — parked: targets a sensitive-labeled host\n", tn);
+        else if (is_bind)
+            buf_appendf(&out, "%s — parked: the call carries a stored secret\n", tn);
+        else if (a->action && strcmp(a->action, tn) != 0)
             buf_appendf(&out, "%s (%s)\n", tn, a->action);
         else
             buf_appendf(&out, "%s\n", tn);
+        if (is_sens) overlay_sensitive(db, &out, args);
+        if (is_bind) overlay_secret_bind(db, &out, a);
         append_enum_block(db, &out, "Args:", SQL_ARGS_LINES, args);
+        append_body_block(db, &out, args);
     }
     for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) free(f[i]);
 

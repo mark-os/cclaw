@@ -543,22 +543,40 @@ void handle_approval_park(int64_t session_id) {
         char *prompt = buf_take(&pb);
         if (!prompt) prompt = strdup("approval requested");
 
-        /* "apply" approvals (request_config grants) have no once semantics —
-         * resolve_approval rejects APPROVAL_ONCE for them outright (see the
-         * apply-branch check above) — so don't offer a button that always
-         * dead-ends in an error. Plain tool-call ("rerun") approvals keep it. */
-        char keyboard[256];
+        /* Buttons are labeled with their EFFECT, and a decision that cannot
+         * happen is not offered: "apply" approvals have no once semantics
+         * (resolve_approval rejects APPROVAL_ONCE outright), and ALWAYS is
+         * coerced to ONCE for sensitivity parks and for secret_bind parks
+         * with no static target (shell/js) — mirror resolve_approval's
+         * coercion conditions exactly, or the button lies. */
+        char keyboard[320];
         int is_apply = a->resolve && strcmp(a->resolve, "apply") == 0;
+        int coerced = 0, can_bind = 0;
+        if (a->action && strcmp(a->action, "sensitive") == 0) {
+            coerced = 1;
+        } else if (a->action && strcmp(a->action, "secret_bind") == 0) {
+            char bh[254];
+            can_bind = a->tool_name && strcmp(a->tool_name, "web_fetch") == 0 &&
+                       a->args_json &&
+                       web_args_url_host(proc_db(), a->args_json, bh, sizeof(bh));
+            coerced = !can_bind;
+        }
         if (is_apply) {
             snprintf(keyboard, sizeof(keyboard),
                      "[[{\"text\":\"Grant\",\"callback_data\":\"appr:%lld:yes\"},"
                      "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
                      (long long)a->id, (long long)a->id);
+        } else if (coerced) {
+            snprintf(keyboard, sizeof(keyboard),
+                     "[[{\"text\":\"Allow once\",\"callback_data\":\"appr:%lld:once\"},"
+                     "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
+                     (long long)a->id, (long long)a->id);
         } else {
             snprintf(keyboard, sizeof(keyboard),
-                     "[[{\"text\":\"Approve\",\"callback_data\":\"appr:%lld:yes\"},"
+                     "[[{\"text\":\"%s\",\"callback_data\":\"appr:%lld:yes\"},"
                      "{\"text\":\"Once\",\"callback_data\":\"appr:%lld:once\"},"
                      "{\"text\":\"Deny\",\"callback_data\":\"appr:%lld:no\"}]]",
+                     can_bind ? "Approve & bind host" : "Always allow",
                      (long long)a->id, (long long)a->id, (long long)a->id);
         }
 

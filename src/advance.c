@@ -731,7 +731,7 @@ static int64_t streak_refuse(sqlite3 *db, int64_t session_id, const StreakGate *
 
     /* Same INSERT shape deliver_response uses; no-op for a session with no
      * chat binding. No FIFO wake from here — advance.c has no db_path (that
-     * is main.c's g_cfg), and the channel runner re-drains its outbox on
+     * is proc.c's proc_cfg()), and the channel runner re-drains its outbox on
      * every ~1s loop iteration, which is soon enough for a once-per-trip
      * notice. */
     sqlite3_stmt *st;

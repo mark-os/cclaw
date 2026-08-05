@@ -379,6 +379,17 @@ static const char *SQL_UPDATE_AGENT_LINES =
 static const char *SQL_CRON_SET_LINES =
     "SELECT format('%-13s%s',key,atom) FROM json_each(?1) WHERE key!='name'";
 
+/* Generic argument enumeration for every tool without a bespoke branch —
+ * all scalar args, per-value clipped like SQL_UPDATE_AGENT_LINES; the
+ * whole-summary truncation is the backstop. Objects/arrays are skipped,
+ * not flattened: a tool whose nested payload matters that much deserves a
+ * bespoke branch. Declared salience (a summary_fields list) was considered
+ * and deferred — D10. */
+static const char *SQL_ARGS_LINES =
+    "SELECT format('%s: %s', key,"
+    "     CASE WHEN length(atom) > 200 THEN substr(atom,1,200)||'...' ELSE atom END)"
+    " FROM json_each(?1) WHERE type NOT IN ('object','array')";
+
 /* Render a human-readable markdown summary of an approval — never the raw
  * args_json blob. Grant-shaped approvals enumerate every requested value in
  * fenced blocks grouped by scope; any other tool's call arguments (shape
@@ -433,15 +444,17 @@ char *approval_format_summary(sqlite3 *db, const Approval *a) {
                     f[0] ? f[0] : "?");
         append_enum_block(db, &out, "Job:", SQL_CRON_SET_LINES, args);
     } else {
-        char *salient = tool_args_str(db, args, "command");
-        if (!salient) salient = tool_args_str(db, args, "url");
-        if (!salient) salient = tool_args_str(db, args, "path");
-        f[0] = salient;
-        if (salient)
-            buf_appendf(&out, "%s: %s", a->tool_name ? a->tool_name : "?", salient);
+        /* Generic tail — two-axis: the tool + its args (axis 1), and the
+         * action when it differs (axis 2, the gate reason). No guessed
+         * salient field: every scalar arg is enumerated, so a tool the
+         * probes never anticipated (js_eval's `code`) can't degrade to a
+         * blind "tool (action)" line. */
+        const char *tn = a->tool_name ? a->tool_name : "?";
+        if (a->action && strcmp(a->action, tn) != 0)
+            buf_appendf(&out, "%s (%s)\n", tn, a->action);
         else
-            buf_appendf(&out, "%s (%s)", a->tool_name ? a->tool_name : "?",
-                        a->action ? a->action : "?");
+            buf_appendf(&out, "%s\n", tn);
+        append_enum_block(db, &out, "Args:", SQL_ARGS_LINES, args);
     }
     for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) free(f[i]);
 

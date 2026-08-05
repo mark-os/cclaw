@@ -12,6 +12,7 @@
 #include "config_registry.h"
 #include "context.h"
 #include "db.h"
+#include "dispatch.h"
 #include "llm_worker.h"
 #include "log.h"
 #include "proc.h"

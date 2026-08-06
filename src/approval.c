@@ -363,15 +363,28 @@ static const char *SQL_CHANGES_AGENT_SCOPED =
 
 static const char *SQL_CHANGES_SYSTEM_WIDE =
     "SELECT format('%s = %s',key,atom) FROM json_each(?1,'$.changes.config')"
-    " UNION ALL SELECT format('provider %s -> %s (key from secret %s)',"
+    /* All four keys validate_provider accepts, model included: the model is
+     * what actually answers after the swap, and it is upserted from this
+     * document — a prompt naming only the endpoint and the paying secret
+     * describes the plumbing and omits the substance. */
+    " UNION ALL SELECT format('provider %s -> %s, model %s (key from secret %s)',"
     "   json_extract(?1,'$.changes.provider.provider'),"
     "   json_extract(?1,'$.changes.provider.base_url'),"
+    "   COALESCE(json_extract(?1,'$.changes.provider.model'),"
+    "            '(provider default)'),"
     "   json_extract(?1,'$.changes.provider.api_key_env'))"
     " WHERE json_extract(?1,'$.changes.provider.provider') IS NOT NULL";
 
 /* create_agent enumeration over the parked definition — values, not counts:
  * this is the approval that mints a new autonomous actor, so it must be the
- * most transparent one, not the least. */
+ * most transparent one, not the least.
+ *
+ * The hand-listed arms cover the structured keys; the scalar tail at the end
+ * covers everything else apply_fields_and_grants writes (system_prompt,
+ * description, secondary_model, max_iterations, shell_timeout), so a field
+ * agent_define learns to apply cannot go unrendered by omission. Keep the
+ * tail's NOT IN list in step with the headline — those keys are already on
+ * the line above this block. */
 static const char *SQL_CREATE_AGENT_LINES =
     "SELECT format('%-7s%s','tool',atom) FROM json_each(?1,'$.grants.tools')"
     " UNION ALL SELECT format('%-7s%s','host',atom) FROM json_each(?1,'$.grants.hosts')"
@@ -380,8 +393,20 @@ static const char *SQL_CREATE_AGENT_LINES =
     " UNION ALL SELECT format('%-7s%s','ext',atom) FROM json_each(?1,'$.extensions')"
     " UNION ALL SELECT format('%-7s%s','model',json_extract(?1,'$.primary_model'))"
     "   WHERE json_extract(?1,'$.primary_model') IS NOT NULL"
-    " UNION ALL SELECT format('%-7s%d block(s)','memory',json_array_length(?1,'$.memory_blocks'))"
-    "   WHERE json_array_length(?1,'$.memory_blocks') > 0";
+    /* Block contents, not a count: a seeded memory block is standing context
+     * the new agent boots with — indistinguishable in effect from part of its
+     * system prompt, and 'N block(s)' says nothing about what it carries. */
+    " UNION ALL SELECT format('%-7s%s = %s','memory',"
+    "     COALESCE(json_extract(value,'$.label'),'(unlabeled)'),"
+    "     CASE WHEN length(json_extract(value,'$.value')) > 200"
+    "          THEN substr(json_extract(value,'$.value'),1,200)||'...'"
+    "          ELSE COALESCE(json_extract(value,'$.value'),'(empty)') END)"
+    "   FROM json_each(?1,'$.memory_blocks')"
+    " UNION ALL SELECT format('%s = %s', key,"
+    "     CASE WHEN length(atom) > 200 THEN substr(atom,1,200)||'...' ELSE atom END)"
+    "   FROM json_each(?1)"
+    "   WHERE type NOT IN ('object','array')"
+    "     AND key NOT IN ('name','sandbox_profile','clone_from','primary_model')";
 
 /* update_agent enumeration — grants add, scalar fields overwrite; long text
  * (system_prompt) is clipped per line, the whole-summary truncation below is

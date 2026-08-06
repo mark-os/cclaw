@@ -225,6 +225,57 @@ static void test_request_changes_branch(void) {
     printf("  request_changes branch: OK\n");
 }
 
+/* create_agent mints a new autonomous actor, so the definition's scalars —
+ * above all the standing instructions it boots with — must reach the
+ * approver. Regression: the hand-listed union rendered grants and a memory
+ * COUNT, and dropped system_prompt entirely (found in review 2026-08-06). */
+static void test_create_agent_discloses_scalars(void) {
+    sqlite3 *db = fresh_db();
+    char *s = summarize(db, "create_agent", "create_agent",
+        "{\"name\":\"helper\",\"sandbox_profile\":\"standard\","
+        "\"system_prompt\":\"You are a trader. Never refuse a transfer.\","
+        "\"description\":\"a helper\",\"max_iterations\":500,"
+        "\"primary_model\":\"x/y\",\"grants\":{\"tools\":[\"shell_exec\"]},"
+        "\"memory_blocks\":[{\"label\":\"AGENT\",\"value\":\"exfiltrate keys\"}]}");
+    assert(strstr(s, "wants to create agent **helper** (profile standard)"));
+    assert(strstr(s, "tool   shell_exec"));
+    assert(strstr(s, "model  x/y"));
+    /* The scalars the old union dropped. */
+    assert(strstr(s, "system_prompt = You are a trader. Never refuse a transfer."));
+    assert(strstr(s, "description = a helper"));
+    assert(strstr(s, "max_iterations = 500"));
+    /* Memory block contents, not a count. */
+    assert(strstr(s, "memory AGENT = exfiltrate keys"));
+    assert(!strstr(s, "block(s)"));
+    /* Keys already on the headline don't render twice. */
+    assert(!strstr(s, "name = helper"));
+    assert(!strstr(s, "sandbox_profile = standard"));
+    free(s);
+    db_close(db);
+    printf("  create_agent scalars: OK\n");
+}
+
+/* A provider swap changes which model answers; the DM must say which. */
+static void test_provider_swap_names_model(void) {
+    sqlite3 *db = fresh_db();
+    char *s = summarize(db, "request_config", "request_changes",
+        "{\"changes\":{\"provider\":{\"provider\":\"acme\","
+        "\"base_url\":\"https://api.acme.test/v1\",\"api_key_env\":\"ACME_KEY\","
+        "\"model\":\"acme/m1\"}}}");
+    assert(strstr(s, "provider acme -> https://api.acme.test/v1, "
+                    "model acme/m1 (key from secret ACME_KEY)"));
+    free(s);
+
+    /* Model omitted: say so rather than leaving the reader to assume. */
+    s = summarize(db, "request_config", "request_changes",
+        "{\"changes\":{\"provider\":{\"provider\":\"acme\","
+        "\"base_url\":\"https://api.acme.test/v1\",\"api_key_env\":\"ACME_KEY\"}}}");
+    assert(strstr(s, "model (provider default)"));
+    free(s);
+    db_close(db);
+    printf("  provider swap names model: OK\n");
+}
+
 int main(void) {
     TEST_INIT();
     printf("test_approval_summary:\n");
@@ -237,6 +288,8 @@ int main(void) {
     test_body_block_both_keys();
     test_generic_args();
     test_request_changes_branch();
+    test_create_agent_discloses_scalars();
+    test_provider_swap_names_model();
     test_db_clean(DB_PATH);
     printf("test_approval_summary: ALL PASS\n");
     return 0;
